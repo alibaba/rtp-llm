@@ -19,7 +19,7 @@ def _remap_to_local_ids_kernel(
     mask = offsets < N
 
     ids = tl.load(ids_ptr + offsets, mask=mask, other=0)
-    weights = tl.load(weights_ptr + offsets, mask=mask, other=0.0)
+    weights = tl.load(weights_ptr + offsets, mask=mask, other=0.0).to(tl.float32)
 
     is_local = (ids >= local_start) & (ids < local_end)
     local_ids = tl.where(is_local, ids - local_start, 0)
@@ -76,7 +76,7 @@ def remap_to_local_ids(
 
     _remap_to_local_ids_kernel[grid](
         dispatch_ids.view(-1),
-        dispatch_weights.to(torch.float32).view(-1),
+        dispatch_weights.view(-1),
         local_ids.view(-1),
         local_weights.view(-1),
         local_start,

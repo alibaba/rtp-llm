@@ -196,12 +196,14 @@ class MMProfiler:
         concurrent or follow-up end_profile/start_profile cannot make it write
         traces into the wrong directory.
         """
+        session_id: Optional[int] = None
+        output_path: Optional[str] = None
+        request_idx: Optional[int] = None
         with self._lock:
             want_profile = self._armed and self._profiled_count < self._target_count
             if want_profile:
                 session_id = self._session_id
                 output_path = self._session_output_path
-                request_idx = self._profiled_count
 
         if not want_profile:
             yield
@@ -214,11 +216,21 @@ class MMProfiler:
             # have changed while we were waiting.  Decide bail vs. profile under _lock,
             # then drop _lock before doing any long work (yield / profiler setup).
             with self._lock:
-                bail_out = not (self._armed and self._session_id == session_id)
+                bail_out = not (
+                    self._armed
+                    and self._session_id == session_id
+                    and self._profiled_count < self._target_count
+                )
+                if not bail_out:
+                    request_idx = self._profiled_count
+                    self._profiled_count += 1
 
             if bail_out:
                 yield
                 return
+
+            assert output_path is not None
+            assert request_idx is not None
 
             activities = [torch.profiler.ProfilerActivity.CPU]
             if torch.cuda.is_available():
@@ -259,7 +271,6 @@ class MMProfiler:
 
                     with self._lock:
                         if self._armed and self._session_id == session_id:
-                            self._profiled_count += 1
                             logging.info(
                                 f"MMProfiler: profiled {self._profiled_count}/{self._target_count}"
                             )

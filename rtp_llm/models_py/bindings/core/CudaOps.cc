@@ -285,15 +285,20 @@ void runtimeBatchCopy(const BatchCopyParams& params) {
                 check_cuda_value(
                     cudaMemcpyAsync(sizes, buffers.sizes.data(), org_sizes_bytes, cudaMemcpyHostToDevice, stream));
 
-                cudaEvent_t copy_params_done;
-                check_cuda_value(cudaEventCreate(&copy_params_done));
-                check_cuda_value(cudaEventRecord(copy_params_done, stream));
+                // Record the event AFTER invokeBatchCopy so that synchronizing
+                // it waits for the actual copy kernel to finish.  The workspace
+                // tensor must stay alive until the kernel is done; previously
+                // the event was recorded before the kernel and only waited for
+                // the H2D parameter uploads.
+                cudaEvent_t copy_done;
+                check_cuda_value(cudaEventCreate(&copy_done));
 
                 auto config = kernels::getBatchCopyConfig(buffers.sizes.data(), copy_batch_size);
                 kernels::invokeBatchCopy(dst_ptrs, src_ptrs, sizes, copy_batch_size, config, stream);
 
-                check_cuda_value(cudaEventSynchronize(copy_params_done));
-                check_cuda_value(cudaEventDestroy(copy_params_done));
+                check_cuda_value(cudaEventRecord(copy_done, stream));
+                check_cuda_value(cudaEventSynchronize(copy_done));
+                check_cuda_value(cudaEventDestroy(copy_done));
 
                 check_cuda_error();
             } break;

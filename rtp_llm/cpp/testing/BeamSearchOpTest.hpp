@@ -151,6 +151,13 @@ public:
                 }
             }
         }
+        // Always exercise the large-beam boundary once in default CI with a
+        // small batch/seq to catch OOM/shape issues on the wide beam path.
+        if (!run_large) {
+            std::cout << "batch_size: 1, beam_width: 2500, vocab_size: " << vocab_size
+                      << ", seq_len: 10 (large-beam boundary)" << std::endl;
+            simpleTest(1, 2500, vocab_size, 10);
+        }
     }
 
     void runVariableBeamWidthTests() {

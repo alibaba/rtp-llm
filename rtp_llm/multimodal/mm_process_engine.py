@@ -459,6 +459,13 @@ class MMProcessEngine:
         mm_preprocess_configs: List[Any],
     ) -> MMEmbeddingRes:
         """Process multimodal inputs from C++ interface."""
+        lengths = [len(urls), len(types), len(tensors), len(mm_preprocess_configs)]
+        if len(set(lengths)) != 1:
+            raise ValueError(
+                f"Multimodal C++ input list lengths must match: "
+                f"urls={lengths[0]}, types={lengths[1]}, tensors={lengths[2]}, "
+                f"mm_preprocess_configs={lengths[3]}"
+            )
         mm_inputs = [
             MultimodalInput(
                 url, MMUrlType(url_type), tensor, MMPreprocessConfig(*config)
@@ -571,8 +578,22 @@ class MMProcessEngine:
                         )
             kmonitor.report(GaugeMetrics.VIT_EMBEDDING_RT_METRIC, route_timer.cost_ms())
 
-            if batch_outputs is not None:
-                for (idx, work_item), result in zip(pending_items, batch_outputs):
+            if batch_outputs is None:
+                raise ValueError(
+                    f"batched_embedding returned None for {len(pending_items)} pending items"
+                )
+            if len(batch_outputs) != len(pending_items):
+                raise ValueError(
+                    f"batched_embedding returned {len(batch_outputs)} results, "
+                    f"expected {len(pending_items)}"
+                )
+            for result in batch_outputs:
+                if result is None or len(result) < 2:
+                    raise ValueError(
+                        f"batched_embedding result missing embedding/position: {result}"
+                    )
+
+            for (idx, work_item), result in zip(pending_items, batch_outputs):
                     work_item.embedding_result = result
                     if work_item.need_check_cache:
                         vit_emb_cache_.insert_cache(work_item.cache_key, result)

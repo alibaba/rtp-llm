@@ -66,18 +66,25 @@ class MultimodalEmbeddingInjector(nn.Module):
         if not multimodal_features:
             return embeddings
 
-        if multimodal_locs.numel() != len(multimodal_features):
-            raise ValueError(
-                f"multimodal_locs has {multimodal_locs.numel()} entries "
-                f"but {len(multimodal_features)} features were provided"
-            )
+        if isinstance(multimodal_locs, torch.Tensor):
+            if multimodal_locs.numel() != len(multimodal_features):
+                raise ValueError(
+                    f"multimodal_locs has {multimodal_locs.numel()} entries "
+                    f"but {len(multimodal_features)} features were provided"
+                )
+            locs = multimodal_locs.to(device="cpu", dtype=torch.long).view(-1).tolist()
+        else:
+            if len(multimodal_locs) != len(multimodal_features):
+                raise ValueError(
+                    f"multimodal_locs has {len(multimodal_locs)} entries "
+                    f"but {len(multimodal_features)} features were provided"
+                )
+            locs = list(multimodal_locs)
 
         if embeddings.dim() != 2:
             raise ValueError(
-                "embeddings must be a 2D tensor of shape [tokens, hidden_size]"
+                "embeddings must be a 2D tensor of [tokens, hidden_size]"
             )
-
-        locs = multimodal_locs.to(device="cpu", dtype=torch.long).view(-1).tolist()
 
         hidden_size = embeddings.size(-1)
         for idx, (feature, loc) in enumerate(zip(multimodal_features, locs)):

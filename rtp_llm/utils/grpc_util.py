@@ -48,11 +48,24 @@ def trans_tensor(t: TensorPB):
 
 
 def trans_from_tensor(t: torch.Tensor):
-    if t is None or t.numel() == 0:
+    if t is None:
         return TensorPB()
     res = TensorPB()
-    t = t.cpu()
     res.shape.extend(list(t.shape))
+    if t.numel() == 0:
+        # Preserve shape and dtype for empty tensors; the payload stays empty.
+        if t.dtype == torch.float32:
+            res.data_type = TensorPB.DataType.FP32
+        elif t.dtype == torch.int32:
+            res.data_type = TensorPB.DataType.INT32
+        elif t.dtype == torch.float16:
+            res.data_type = TensorPB.DataType.FP16
+        elif t.dtype == torch.bfloat16:
+            res.data_type = TensorPB.DataType.BF16
+        else:
+            raise Exception("unknown tensor data type")
+        return res
+    t = t.cpu()
     if t.dtype == torch.float32:
         res.data_type = TensorPB.DataType.FP32
         res.fp32_data = t.numpy().tobytes()

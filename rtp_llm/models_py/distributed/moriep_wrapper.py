@@ -89,6 +89,19 @@ class MoriEPWrapperConfig:
                 f"got expert_num={model_config.expert_num}, "
                 f"ep_size={parallelism_config.ep_size}"
             )
+        gpu_per_node = parallelism_config.local_world_size
+        if parallelism_config.ep_size % gpu_per_node != 0:
+            raise ValueError(
+                f"MoriEP ep_size must be divisible by local_world_size, "
+                f"got ep_size={parallelism_config.ep_size}, "
+                f"local_world_size={gpu_per_node}"
+            )
+        if parallelism_config.world_size % gpu_per_node != 0:
+            raise ValueError(
+                f"MoriEP world_size must be divisible by local_world_size, "
+                f"got world_size={parallelism_config.world_size}, "
+                f"local_world_size={gpu_per_node}"
+            )
         return cls(
             data_type=torch_dtype,
             rank=parallelism_config.ep_rank,
@@ -102,7 +115,7 @@ class MoriEPWrapperConfig:
             num_experts_per_token=model_config.moe_k,
             use_external_inp_buf=True,
             kernel_type=mori_kernel_type,
-            gpu_per_node=min(8, parallelism_config.ep_size),
+            gpu_per_node=gpu_per_node,
             rdma_block_num=rdma_block_num,
             warp_num_per_block=warp_num_per_block,
             block_num=block_num,

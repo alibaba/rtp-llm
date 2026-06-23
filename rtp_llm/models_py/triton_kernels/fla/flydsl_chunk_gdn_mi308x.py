@@ -16,6 +16,7 @@ Architecture: 8 waves (512 threads), single-buffer LDS under the CDNA3 64KB limi
 Target: MI300X (gfx942), DK=DV=128, BT=64, block_DV=64, LDS ≈ 62.8KB
 """
 import importlib
+from typing import Dict, Tuple
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
@@ -47,6 +48,19 @@ Hg_SIZE = 8
 BLOCK_DV = 64  # V43: reduce DV-block duplication for large T
 BLOCK_SIZE = 512  # V2a: 4 compute waves + 4 producer waves
 SPLIT_TAIL_MIN_PREFIX = 4096
+
+_sentinel_cache: Dict[Tuple[torch.device, torch.dtype], torch.Tensor] = {}
+
+
+def _get_zero_sentinel(device: torch.device, dtype: torch.dtype) -> torch.Tensor:
+    """Return a cached 0-size tensor for the given device/dtype pair."""
+    key = (device, dtype)
+    sentinel = _sentinel_cache.get(key)
+    if sentinel is None:
+        sentinel = torch.empty(0, device=device, dtype=dtype)
+        _sentinel_cache[key] = sentinel
+    return sentinel
+
 
 # LDS strides (element count per row, including padding)
 STRIDE_KT = 140  # [BT, K]: K+12; GEMM3 B reads K-contiguous vectors
@@ -1124,8 +1138,8 @@ def _launch_tail_safe_into(
         else None
     )
 
-    dummy = torch.empty(0, device=q.device, dtype=torch.float32)
-    dummy_i32 = torch.empty(0, device=q.device, dtype=torch.int32)
+    dummy = _get_zero_sentinel(q.device, torch.float32)
+    dummy_i32 = _get_zero_sentinel(q.device, torch.int32)
     h0_arg = initial_state if initial_state is not None else dummy
     ht_arg = ht if ht is not None else dummy
     cu_arg = cu_seqlens if cu_seqlens is not None else dummy.to(torch.int64)
@@ -1239,8 +1253,8 @@ def _launch_fast_into(
         else None
     )
 
-    dummy = torch.empty(0, device=q.device, dtype=torch.float32)
-    dummy_i32 = torch.empty(0, device=q.device, dtype=torch.int32)
+    dummy = _get_zero_sentinel(q.device, torch.float32)
+    dummy_i32 = _get_zero_sentinel(q.device, torch.int32)
     h0_arg = initial_state if initial_state is not None else dummy
     ht_arg = ht if ht is not None else dummy
     cu_arg = cu_seqlens if cu_seqlens is not None else dummy.to(torch.int64)

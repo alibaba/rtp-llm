@@ -187,11 +187,12 @@ public:
                 break;
             }
         }
-        // 凑到batch_size_个stream再统一入队。  如果候选不够 batch_size_
-        // 但总 waiting 数已 >= batch_size_，说明不兼容模式的 stream 阻止了
-        // 凑满全批——此时降级为部分 batch 以避免永久阻塞。
-        bool should_schedule = new_streams.size() >= batch_size_
-            || (new_streams.size() > 0 && waiting_streams_.size() >= batch_size_);
+        // Schedule any non-empty compatible group.  Waiting for a full batch
+        // would strand smaller groups (e.g., mixed DEFAULT/ORIGINAL all-probs
+        // modes) when the total never reaches batch_size_.  The caller wakes
+        // up at most every kFlushTimeoutMs to batch as much as possible while
+        // still flushing partial groups promptly.
+        bool should_schedule = !new_streams.empty();
         if (should_schedule) {
             for (auto& stream : new_streams) {
                 stream->reportEvent(StreamEvents::CanRun);
@@ -206,6 +207,7 @@ public:
             // 从waiting_streams_中移除已调度的stream
             // Use a set + single remove_if to avoid O(batch_size * waiting_size)
             std::unordered_set<GenerateStream*> scheduled_ptrs;
+            scheduled_ptrs.reserve(new_streams.size());
             for (auto& stream : new_streams) {
                 scheduled_ptrs.insert(stream.get());
             }
@@ -233,9 +235,14 @@ public:
         }
     }
 
+    // Maximum time a compatible group of waiting streams may sit before being
+    // scheduled as a partial batch.  Prevents mixed ReturnAllProbsMode groups
+    // (or low-traffic periods) from waiting forever for a full batch_size_.
+    static constexpr std::chrono::milliseconds kFlushTimeoutMs{100};
+
     absl::StatusOr<std::list<GenerateStreamPtr>> schedule() override {
         std::unique_lock<std::mutex> lock(lock_);
-        cond_.wait_for(lock, std::chrono::seconds(30), [this] {
+        cond_.wait_for(lock, kFlushTimeoutMs, [this] {
             return waiting_streams_.size() >= batch_size_ || running_streams_.size() > 0
                    || !loading_cache_streams_.empty();
         });

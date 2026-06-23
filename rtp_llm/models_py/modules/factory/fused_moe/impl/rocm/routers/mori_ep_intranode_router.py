@@ -222,8 +222,10 @@ class MoriEpIntranodeRouter(FusedMoeDataRouter):
         apply_router_weight_on_input: bool,
         extra_finalize_args: Optional[Dict[str, Any]],
     ) -> torch.Tensor:
-        logging.info(
-            f"[MoriEpIntranodeRouter] finalize called, ep_rank={self.ep_rank}, chunked={self._is_chunked}"
+        logging.debug(
+            "[MoriEpIntranodeRouter] finalize called, ep_rank=%s, chunked=%s",
+            self.ep_rank,
+            self._is_chunked,
         )
         fused_out = payload.fused_expert_output
 

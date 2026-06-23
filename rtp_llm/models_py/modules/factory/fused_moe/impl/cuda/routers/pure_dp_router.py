@@ -94,11 +94,13 @@ class PureDpRouterBase(FusedMoeDataRouter):
         super().__init__(config, quant_config)
 
         self.tp_size = config.tp_size
+        self.dp_size = config.dp_size
         self.ep_size = config.ep_size
         self.ep_rank = config.ep_rank
         self.expert_num = config.expert_num
         self.expert_num_per_rank = self.expert_num // self.ep_size
         self.expert_start_id = self.ep_rank * self.expert_num_per_rank
+        self._reduce_scatter_output: Optional[torch.Tensor] = None
 
     @abstractmethod
     def _do_quant(
@@ -182,7 +184,28 @@ class PureDpRouterBase(FusedMoeDataRouter):
         ), "PureDpRouter.finalize requires extra_finalize_args['original_num_tokens']"
         local_batch_size: int = extra_finalize_args["original_num_tokens"]
 
-        output = reduce_scatter(payload.fused_expert_output, group=Group.DP_AND_TP)
+        input_tensor = payload.fused_expert_output
+        world_size = self.dp_size * self.tp_size
+        expected_shape = [input_tensor.shape[0] // world_size] + list(
+            input_tensor.shape[1:]
+        )
+        if (
+            self._reduce_scatter_output is None
+            or tuple(self._reduce_scatter_output.shape) != tuple(expected_shape)
+            or self._reduce_scatter_output.dtype != input_tensor.dtype
+            or self._reduce_scatter_output.device != input_tensor.device
+        ):
+            self._reduce_scatter_output = torch.empty(
+                expected_shape,
+                device=input_tensor.device,
+                dtype=input_tensor.dtype,
+            )
+
+        output = reduce_scatter(
+            input_tensor,
+            group=Group.DP_AND_TP,
+            output_tensor=self._reduce_scatter_output,
+        )
         if output.shape[0] > local_batch_size:
             output = output[:local_batch_size]
         return output

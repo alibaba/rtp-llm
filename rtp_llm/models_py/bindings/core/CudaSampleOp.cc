@@ -439,17 +439,6 @@ GreedyOutput sampleGreedy(const GreedyParams& params) {
     auto probs_t = torch::softmax(params.logits, -1);
     params.logits.copy_(probs_t);
 
-    // 5. Prepare sampling parameters
-    constexpr bool deterministic = true;
-    auto           seed_h        = torch::empty({(int64_t)batch_size}, torch::TensorOptions().dtype(torch::kInt64));
-    auto           offset_h      = torch::empty({(int64_t)batch_size}, torch::TensorOptions().dtype(torch::kInt64));
-    for (int64_t i = 0; i < (int64_t)batch_size; i++) {
-        auto [sd, ofst] = get_seed_and_offset(
-            batch_size * 32, params.generator[i].defined() ? std::make_optional(params.generator[i]) : std::nullopt);
-        seed_h.data_ptr<int64_t>()[i]   = static_cast<int64_t>(sd);
-        offset_h.data_ptr<int64_t>()[i] = static_cast<int64_t>(ofst);
-    }
-
     auto samples_t = transposed_tokens.slice(0, transposed_tokens.size(0) - 1, transposed_tokens.size(0)).flatten();
     auto top_k_t   = params.top_k;
     auto top_p_t   = params.top_p;
@@ -470,8 +459,9 @@ GreedyOutput sampleGreedy(const GreedyParams& params) {
     // top_k==1 fast path it is just probs_t (softmaxed logits); in the filtered
     // sampling path it is top_k/top_p filtered and renormalized.  It is declared
     // outside the branches so the cum_log_probs update below can use it.
-    torch::Tensor filtered_probs = probs_t;
+    torch::Tensor filtered_probs;
     if (std::all_of(top_k_ptr, top_k_ptr + batch_size, [&](auto t) { return t == 1; })) {
+        filtered_probs              = probs_t;
         torch::Tensor selected_tokens = torch::argmax(probs_t, -1, /*keepdim=*/false);
         samples_t.copy_(selected_tokens);
         if (need_renorm_probs) {
@@ -484,8 +474,13 @@ GreedyOutput sampleGreedy(const GreedyParams& params) {
         // with GPU memory access faults in multi-GPU (TP>1) configurations.
         // torch::multinomial is well-tested and handles all cases correctly.
         //
+        // Clone before any in-place top_k/top_p filtering so the ORIGINAL
+        // all-probs output can be generated from the untouched softmax
+        // distribution in return_original_all_probs below.
+        filtered_probs = probs_t.clone();
+
         // Apply top_k filtering if needed
-        bool has_top_k      = !std::all_of(top_k_ptr, top_k_ptr + batch_size, [](auto t) { return t <= 0; });
+        bool has_top_k = !std::all_of(top_k_ptr, top_k_ptr + batch_size, [](auto t) { return t <= 0; });
         if (has_top_k) {
             for (int64_t b = 0; b < (int64_t)batch_size; b++) {
                 int k = top_k_ptr[b] <= 0 ? vocab_size_padded : top_k_ptr[b];
@@ -516,8 +511,31 @@ GreedyOutput sampleGreedy(const GreedyParams& params) {
         // Re-normalize and sample
         auto row_sums  = filtered_probs.sum(-1, /*keepdim=*/true);
         filtered_probs = filtered_probs / row_sums.clamp_min(1e-10);
-        auto selected  = torch::multinomial(filtered_probs, 1, /*replacement=*/false).squeeze(-1);
-        samples_t.copy_(selected);
+
+        // Honor request-level random_seed: when generators differ across the
+        // batch, sample each row independently with its own generator.
+        bool has_any_generator = false;
+        for (int64_t i = 0; i < (int64_t)batch_size; i++) {
+            if (params.generator[i].defined()) {
+                has_any_generator = true;
+                break;
+            }
+        }
+        if (!has_any_generator) {
+            auto selected = torch::multinomial(filtered_probs, 1, /*replacement=*/false).squeeze(-1);
+            samples_t.copy_(selected);
+        } else {
+            for (int64_t i = 0; i < (int64_t)batch_size; i++) {
+                auto row_dist = filtered_probs[i].unsqueeze(0);
+                if (params.generator[i].defined()) {
+                    auto row_sample = torch::multinomial(row_dist, 1, /*replacement=*/false, params.generator[i]).squeeze(-1);
+                    samples_t[i].copy_(row_sample);
+                } else {
+                    auto row_sample = torch::multinomial(row_dist, 1, /*replacement=*/false).squeeze(-1);
+                    samples_t[i].copy_(row_sample);
+                }
+            }
+        }
         if (need_renorm_probs) {
             output_all_probs_t.copy_(filtered_probs);
         }
@@ -532,9 +550,8 @@ GreedyOutput sampleGreedy(const GreedyParams& params) {
     // (top_k/top_p filtered and renormalized); do not log_softmax it again.
     if (params.cum_log_probs.has_value()) {
         auto cum_log_probs_t = params.cum_log_probs.value();
-        auto log_probs      = filtered_probs.log();
-        auto gathered = log_probs.gather(-1, samples_t.unsqueeze(-1).to(torch::kLong)).squeeze(-1);
-        cum_log_probs_t.add_(gathered.to(cum_log_probs_t.device()));
+        auto gathered = filtered_probs.gather(-1, samples_t.unsqueeze(-1).to(torch::kLong)).squeeze(-1);
+        cum_log_probs_t.add_(gathered.log().to(cum_log_probs_t.device()));
     }
 
     // 8. Copy results back

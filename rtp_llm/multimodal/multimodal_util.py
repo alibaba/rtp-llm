@@ -6,7 +6,7 @@ import threading
 from dataclasses import dataclass
 from enum import IntEnum
 from io import BytesIO
-from typing import Optional
+from typing import Dict, Optional
 
 import torch
 
@@ -165,6 +165,32 @@ def get_json_result_from_url(url: str, download_headers: str = ""):
     return res
 
 
+def _download_url_bytes(url: str, download_headers: str = "") -> bytes:
+    """Download raw bytes for *url* (HTTP/HTTPS, OSS, base64, or local path)."""
+    headers = _get_http_heads(download_headers)
+    try:
+        if url.startswith("http") or url.startswith("https"):
+            response = request_get(url, headers)
+            if response.status_code == 200:
+                return response.content
+            else:
+                raise Exception(f"download failed, error code: {response.status_code}")
+        elif url.startswith("oss"):
+            return get_bytes_io_from_oss_path(url).getvalue()
+        elif get_base64_prefix(url) > 0:
+            return base64.b64decode(url[get_base64_prefix(url) :])
+        else:
+            # treat url as local path
+            with open(url, "rb") as fh:
+                return fh.read()
+    except Exception as e:
+        raise Exception(f"download and load {url} error, exception {e}")
+
+
+_url_singleflight_lock = threading.Lock()
+_url_singleflight_events: Dict[str, threading.Event] = {}
+
+
 def get_bytes_io_from_url(url: str, download_headers: str = ""):
     """Get BytesIO from URL.
 
@@ -173,32 +199,43 @@ def get_bytes_io_from_url(url: str, download_headers: str = ""):
         download_headers: JSON string containing HTTP headers. If empty, uses default headers.
 
     The cache stores immutable bytes instead of a shared BytesIO so concurrent
-    callers cannot race on a mutable cursor.
+    callers cannot race on a mutable cursor. A per-URL singleflight prevents
+    multiple concurrent misses from downloading the same image repeatedly.
     """
 
     cached_bytes = url_data_cache_.check_cache(url)
-    if cached_bytes is None:
-        headers = _get_http_heads(download_headers)
-        try:
-            if url.startswith("http") or url.startswith("https"):
-                response = request_get(url, headers)
-                if response.status_code == 200:
-                    cached_bytes = response.content
-                else:
-                    raise Exception(
-                        f"download failed, error code: {response.status_code}"
-                    )
-            elif url.startswith("oss"):
-                cached_bytes = get_bytes_io_from_oss_path(url).getvalue()
-            elif get_base64_prefix(url) > 0:
-                cached_bytes = base64.b64decode(url[get_base64_prefix(url) :])
-            else:
-                # treat url as local path
-                with open(url, "rb") as fh:
-                    cached_bytes = fh.read()
-        except Exception as e:
-            raise Exception(f"download and load {url} error, exception {e}")
+    if cached_bytes is not None:
+        return BytesIO(cached_bytes)
+
+    with _url_singleflight_lock:
+        cached_bytes = url_data_cache_.check_cache(url)
+        if cached_bytes is not None:
+            return BytesIO(cached_bytes)
+        if url in _url_singleflight_events:
+            event = _url_singleflight_events[url]
+            is_downloader = False
+        else:
+            event = threading.Event()
+            _url_singleflight_events[url] = event
+            is_downloader = True
+
+    if not is_downloader:
+        event.wait()
+        cached_bytes = url_data_cache_.check_cache(url)
+        if cached_bytes is not None:
+            return BytesIO(cached_bytes)
+        # Cache disabled or downloader failed without inserting; fall back.
+        cached_bytes = _download_url_bytes(url, download_headers)
+        return BytesIO(cached_bytes)
+
+    try:
+        cached_bytes = _download_url_bytes(url, download_headers)
         url_data_cache_.insert_cache(url, cached_bytes)
+    finally:
+        with _url_singleflight_lock:
+            _url_singleflight_events.pop(url, None)
+        event.set()
+
     return BytesIO(cached_bytes)
 
 

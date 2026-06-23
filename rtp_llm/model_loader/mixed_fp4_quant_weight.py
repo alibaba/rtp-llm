@@ -1,6 +1,6 @@
 import functools
 import copy
-from typing import Any, List, Dict, Union
+from typing import Any, Callable, List, Dict, Tuple, Union
 import torch
 
 from rtp_llm.config.quant_config import ModelOptFp4Config, MXFp4QuarkQuantConfig, QuantizationConfig
@@ -237,6 +237,33 @@ class MixedFp4Weight(CompositeWeight, QuantWeight):
 
     def _get_moe_scale_dtype(self) -> torch.dtype:
         return torch.uint8 if self._is_quark_fp4 else torch.float8_e4m3fn
+
+    def _get_moe_quant_ckpt_infos(
+        self,
+        src_weight_info: MoeAtomicWeight,
+        suffix: str,
+        stack_fn: Callable,
+    ) -> Tuple[List[CkptWeightInfo], Callable]:
+        """Build CkptWeightInfo list and choose the stacking function for MoE quant weights.
+
+        Per-expert HF checkpoints end with '.weight'; we strip it and add the
+        requested quant suffix (e.g. '.weight_scale').  Already-stacked Quark
+        keys do not end with '.weight'; keep the kernel name as-is or append
+        the suffix for scales, and use identity merge because no per-expert
+        stacking is required.
+        """
+        ckpt_infos: List[CkptWeightInfo] = []
+        is_stacked = False
+        for w in src_weight_info.weights:
+            if w.name.endswith(W_SUFFIX):
+                ckpt_infos.append(CkptWeightInfo(w.name[: -len(W_SUFFIX)] + suffix, w.merge_fun))
+            else:
+                is_stacked = True
+                if suffix == QW_SUFFIX:
+                    ckpt_infos.append(CkptWeightInfo(w.name, w.merge_fun))
+                else:
+                    ckpt_infos.append(CkptWeightInfo(w.name + suffix, w.merge_fun))
+        return ckpt_infos, (identity if is_stacked else stack_fn)
 
     def _get_qkv_weight(self, src_weight_info: AttnAtomicWeight):
         assert src_weight_info.name == W.attn_qkv_w
@@ -551,37 +578,40 @@ class MixedFp4Weight(CompositeWeight, QuantWeight):
 
     def _get_moe_w2_quant_weight(self, src_weight_info: MoeAtomicWeight):
         assert src_weight_info.name in [W.moe_w2]
-        w_name = src_weight_info.weights[0].name[: -len(W_SUFFIX)]
         scale_dtype = self._get_moe_scale_dtype()
+        kernel_infos, stack_fn = self._get_moe_quant_ckpt_infos(src_weight_info, QW_SUFFIX, stack_)
+        scale_infos, _ = self._get_moe_quant_ckpt_infos(src_weight_info, QS_SUFFIX, stack_)
+        scale_2_infos, _ = self._get_moe_quant_ckpt_infos(src_weight_info, QS_2_SUFFIX, stack_)
+        input_scale_infos, _ = self._get_moe_quant_ckpt_infos(src_weight_info, ACT_S_SUFFIX, stack_)
         kernel = create_mixed_fp4_per_group_weight(
             src_weight_info,
             W.moe_w2,
-            [CkptWeightInfo(w_name + QW_SUFFIX, identity)],
-            stack_,
+            kernel_infos,
+            stack_fn,
             data_type=torch.uint8,
             config=src_weight_info.config,
         )
         scale = create_mixed_fp4_per_group_weight(
             src_weight_info,
             W.moe_s2,
-            [CkptWeightInfo(w_name + QS_SUFFIX, identity)],
-            stack_,
+            scale_infos,
+            stack_fn,
             data_type=scale_dtype,
             config=src_weight_info.config,
         )
         scale_2 = create_mixed_fp4_per_group_weight(
             src_weight_info,
             W.moe_w2_s2,
-            [CkptWeightInfo(w_name + QS_2_SUFFIX, identity)],
-            stack_,
+            scale_2_infos,
+            stack_fn,
             data_type=torch.float32,
             config=src_weight_info.config,
         )
         input_scale = create_mixed_fp4_per_group_weight(
             src_weight_info,
             W.moe_w2_i_s,
-            [CkptWeightInfo(w_name + ACT_S_SUFFIX, identity)],
-            stack_,
+            input_scale_infos,
+            stack_fn,
             data_type=torch.float32,
             config=src_weight_info.config,
         )
@@ -590,47 +620,39 @@ class MixedFp4Weight(CompositeWeight, QuantWeight):
     def _get_moe_w1_quant_weight(self, src_weight_info: MoeAtomicWeight):
         assert src_weight_info.name in [W.moe_w1]
         scale_dtype = self._get_moe_scale_dtype()
+        kernel_infos, kernel_stack_fn = self._get_moe_quant_ckpt_infos(src_weight_info, QW_SUFFIX, stack_moe_w1)
+        scale_infos, _ = self._get_moe_quant_ckpt_infos(src_weight_info, QS_SUFFIX, stack_moe_w1)
+        scale_2_infos, scale_2_stack_fn = self._get_moe_quant_ckpt_infos(src_weight_info, QS_2_SUFFIX, stack_moe_w1_s2)
+        input_scale_infos, _ = self._get_moe_quant_ckpt_infos(src_weight_info, ACT_S_SUFFIX, stack_moe_w1_s2)
         kernel = create_mixed_fp4_per_group_weight(
             src_weight_info,
             W.moe_w1,
-            [
-                CkptWeightInfo(w.name[: -len(W_SUFFIX)] + QW_SUFFIX, identity)
-                for w in src_weight_info.weights
-            ],
-            stack_moe_w1,
+            kernel_infos,
+            kernel_stack_fn,
             data_type=torch.uint8,
             config=src_weight_info.config,
         )
         scale = create_mixed_fp4_per_group_weight(
             src_weight_info,
             W.moe_s1,
-            [
-                CkptWeightInfo(w.name[: -len(W_SUFFIX)] + QS_SUFFIX, identity)
-                for w in src_weight_info.weights
-            ],
-            stack_moe_w1,
+            scale_infos,
+            kernel_stack_fn,
             data_type=scale_dtype,
             config=src_weight_info.config,
         )
         scale_2 = create_mixed_fp4_per_group_weight(
             src_weight_info,
             W.moe_w1_s2,
-            [
-                CkptWeightInfo(w.name[: -len(W_SUFFIX)] + QS_2_SUFFIX, identity)
-                for w in src_weight_info.weights
-            ],
-            stack_moe_w1_s2,
+            scale_2_infos,
+            scale_2_stack_fn,
             data_type=torch.float32,
             config=src_weight_info.config,
         )
         input_scale = create_mixed_fp4_per_group_weight(
             src_weight_info,
             W.moe_w1_i_s,
-            [
-                CkptWeightInfo(w.name[: -len(W_SUFFIX)] + ACT_S_SUFFIX, identity)
-                for w in src_weight_info.weights
-            ],
-            stack_moe_w1_s2,
+            input_scale_infos,
+            scale_2_stack_fn,
             data_type=torch.float32,
             config=src_weight_info.config,
         )

@@ -94,6 +94,14 @@ class Conversation:
                             assert content_part.image_url != None
                             images.append(content_part.image_url.url)
                             mm_types.append(MMUrlType.IMAGE)
+                            if content_part.preprocess_config:
+                                preprocess_configs.append(
+                                    get_preprocess_config(content_part.preprocess_config)
+                                )
+                            else:
+                                preprocess_configs.append(
+                                    MMPreprocessConfig(-1, -1, -1, -1, -1, -1, -1, [], 30000)
+                                )
                             now_prompt = f"<image>\n" + now_prompt
                     chat_template_messages.append({"role": role, "content": now_prompt})
 
@@ -103,6 +111,7 @@ class Conversation:
                 ),
                 images,
                 mm_types,
+                preprocess_configs,
             )
 
         if messages[0].role != RoleEnum.system:

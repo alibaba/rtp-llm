@@ -263,6 +263,12 @@ ErrorResult<MultimodalOutput> QueryConverter::transMMOutput(const MultimodalOutp
     if (contain_extra_input) {
         // Each extra-input is an opaque flat 1-D tensor (one per image), reshaped by the
         // model-specific consumer; no split needed here.
+        if (output_pb->multimodal_extra_input_size() != static_cast<int>(split_sizes.size())) {
+            return ErrorInfo(
+                ErrorCode::MM_PROCESS_ERROR,
+                "extra_input count=" + std::to_string(output_pb->multimodal_extra_input_size())
+                    + " does not match split_sizes count=" + std::to_string(split_sizes.size()));
+        }
         std::vector<torch::Tensor> extra_inputs;
         extra_inputs.reserve(output_pb->multimodal_extra_input_size());
         for (const auto& extra_input_pb : output_pb->multimodal_extra_input()) {
