@@ -15,6 +15,7 @@ from rtp_llm.models_py.modules import (
     EmbeddingBert,
     FMHAImplBase,
     LayerNorm,
+    MultimodalEmbeddingInjector,
 )
 from rtp_llm.models_py.modules.factory.attention.block_mask import (
     build_flashinfer_block_mask,
@@ -121,6 +122,7 @@ class BertModel(GptModelBase):
             beta=weights.get_global_weight(W.pre_decoder_ln_beta),
             eps=config.layernorm_eps,
         )
+        self.multimodal_embedding_injector = MultimodalEmbeddingInjector()
         self.layers = nn.ModuleList(
             [
                 BertDecoderLayer(
@@ -190,6 +192,12 @@ class BertModel(GptModelBase):
             bert_embedding_inputs.input_embedding_scalar,
         )
         hidden_states = self.pre_decoder_layernorm(inputs_embeds)
+        hidden_states = self.multimodal_embedding_injector(
+            hidden_states,
+            bert_embedding_inputs.multimodal_features,
+            bert_embedding_inputs.mm_features_locs,
+        )
+
         if fmha_impl is None:
             fmha_impl = self.prepare_fmha_impl(inputs)
         for i, decoder_layer in enumerate(self.layers[: self.layer_num]):
