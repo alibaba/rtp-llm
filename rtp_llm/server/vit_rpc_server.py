@@ -13,8 +13,10 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     CacheVersionPB,
     EmptyPB,
     MMPreprocessConfigPB,
+    MMRdmaDescPB,
     MultimodalInputsPB,
     MultimodalOutputPB,
+    ReleaseEmbeddingPB,
     StatusVersionPB,
     WorkerStatusPB,
 )
@@ -26,7 +28,7 @@ from rtp_llm.distribute.distributed_server import get_world_info
 from rtp_llm.model_factory import ModelFactory
 from rtp_llm.multimodal.mm_process_engine import MMEmbeddingRes, MMProcessEngine
 from rtp_llm.multimodal.multimodal_util import trans_mm_input
-from rtp_llm.ops import MMPreprocessConfig, MultimodalInput
+from rtp_llm.ops import MMPreprocessConfig, MMRdmaEncoderOp, MultimodalInput
 from rtp_llm.server.server_args.server_args import setup_args
 from rtp_llm.utils.grpc_util import trans_from_tensor, trans_tensor
 
@@ -64,8 +66,58 @@ def merge_embedding_results(results: list[MMEmbeddingRes]) -> MMEmbeddingRes:
 
 
 class MultimodalRpcServer(MultimodalRpcServiceServicer):
-    def __init__(self, mm_process_engine: MMProcessEngine):
+    def __init__(self, mm_process_engine: MMProcessEngine, vit_config=None):
         self.engine = mm_process_engine
+        self._rdma = None
+        self._rdma_min_bytes = 0
+        if vit_config is not None and getattr(vit_config, "mm_rdma_enable", False):
+            try:
+                rdma = MMRdmaEncoderOp(vit_config)
+                if rdma.enabled():
+                    self._rdma = rdma
+                    self._rdma_min_bytes = int(getattr(vit_config, "mm_rdma_min_bytes", 256 * 1024))
+                    logging.info("[VIT] mm rdma encoder enabled, min_bytes=%d", self._rdma_min_bytes)
+                else:
+                    logging.warning("[VIT] mm rdma requested but unavailable, fall back to bytes")
+            except Exception as e:  # noqa: BLE001 - never let rdma init break the bytes path
+                logging.warning("[VIT] init mm rdma encoder failed: %s, fall back to bytes", e)
+
+    def _trans_output_rdma(self, res: MMEmbeddingRes):
+        """Export the whole output of one request (embedding + pos_id + every extra_input)
+        through a single RDMA slot and return a descriptor-bearing MultimodalOutputPB. Only
+        split_size stays inline. Returns None to signal fallback to the inline-bytes path."""
+        if self._rdma is None or not res.embeddings:
+            return None
+        emb = torch.concat(res.embeddings).contiguous()
+        if not emb.is_cuda:
+            return None
+
+        pos = None
+        if res.position_ids is not None and len(res.position_ids) > 0:
+            pos = torch.concat(res.position_ids).contiguous()
+        extras = []
+        if res.extra_input is not None and len(res.extra_input) > 0:
+            extras = [e.contiguous() for e in res.extra_input]
+
+        # Threshold on the TOTAL payload (embedding + pos_id + extra_input): extra_input
+        # (deepstack) is often the larger share, so it must count toward the decision.
+        nbytes = emb.numel() * emb.element_size()
+        if pos is not None:
+            nbytes += pos.numel() * pos.element_size()
+        for extra in extras:
+            nbytes += extra.numel() * extra.element_size()
+        if nbytes < self._rdma_min_bytes:
+            return None
+
+        desc_bytes = self._rdma.export_embedding(emb, pos, extras)
+        if not desc_bytes:
+            return None
+        desc = MMRdmaDescPB()
+        desc.ParseFromString(desc_bytes)
+
+        output_pb = MultimodalOutputPB(split_size=[e.shape[0] for e in res.embeddings])
+        output_pb.output_rdma.CopyFrom(desc)
+        return output_pb
 
     def AsyncSubmitEmbedding(self, multimodal_inputs: MultimodalInputsPB, context):
         converted_inputs = trans_mm_input(multimodal_inputs)
@@ -76,7 +128,16 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
         converted_inputs = trans_mm_input(multimodal_inputs)
         results = self.engine.get_embedding_result(converted_inputs)
         merged = merge_embedding_results(results)
+        if getattr(multimodal_inputs, "support_rdma", False) and self._rdma is not None:
+            rdma_out = self._trans_output_rdma(merged)
+            if rdma_out is not None:
+                return rdma_out
         return trans_output(merged)
+
+    def ReleaseMultimodalEmbedding(self, request: ReleaseEmbeddingPB, context):
+        if self._rdma is not None and len(request.handle) > 0:
+            self._rdma.release(list(request.handle))
+        return EmptyPB()
 
     def GetWorkerStatus(self, request: StatusVersionPB, context):
         worker_status = WorkerStatusPB()

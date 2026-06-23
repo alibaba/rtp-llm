@@ -281,18 +281,23 @@ def _register_builtin_lazy_models() -> None:
     register_lazy_model("qwen_vl", "rtp_llm.models.qwen_vl", ["QWenMLMHeadModel"])
     register_lazy_model(
         "qwen2_vl",
-        "rtp_llm.models.qwen2_vl.qwen2_vl",
+        "rtp_llm.models.qwen2_vl",
         ["Qwen2VLForConditionalGeneration"],
     )
     register_lazy_model(
         "qwen2_5_vl",
-        "rtp_llm.models.qwen2_5_vl.qwen2_5_vl",
+        "rtp_llm.models.qwen2_vl",
         ["Qwen2_5_VLForConditionalGeneration"],
     )
     register_lazy_model(
+        "qwen3_vl",
+        "rtp_llm.models.qwen3_vl",
+        ["Qwen3VLForConditionalGeneration"],
+    )
+    register_lazy_model(
         "qwen3_vl_moe",
-        "rtp_llm.models.qwen3_vl_moe.qwen3_vl_moe",
-        ["Qwen3_VL_MOEForConditionalGeneration"],
+        "rtp_llm.models.qwen3_vl_moe",
+        ["Qwen3VLMoeForConditionalGeneration"],
     )
     register_lazy_model("qwen_v2_audio", "rtp_llm.models.qwen_v2_audio.qwen_v2_audio")
     register_lazy_model("internvl", "rtp_llm.models.internvl", ["InternVLChatModel"])
