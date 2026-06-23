@@ -158,6 +158,33 @@ class BertModel(GptModelBase):
             bert_embedding_inputs.input_embedding_scalar,
         )
         hidden_states = self.pre_decoder_layernorm(inputs_embeds)
+
+        # Splice multimodal (vision) embeddings into hidden states. The C++ engine
+        # places placeholder token IDs at vision positions; without this splice
+        # those positions would carry garbage from the embedding lookup. Each feature
+        # tensor is [seq_len_i, hidden_size] and overrides a contiguous range starting
+        # at mm_features_locs[i].
+        mm_features = getattr(bert_embedding_inputs, "multimodal_features", None)
+        mm_locs = getattr(bert_embedding_inputs, "mm_features_locs", None)
+        if (
+            mm_features is not None
+            and len(mm_features) > 0
+            and mm_locs is not None
+            and mm_locs.numel() > 0
+        ):
+            locs_cpu = mm_locs.detach().to(torch.int64).cpu().tolist()
+            for i, feat in enumerate(mm_features):
+                if feat is None:
+                    continue
+                start = int(locs_cpu[i])
+                feat_dev = feat.to(
+                    device=hidden_states.device,
+                    dtype=hidden_states.dtype,
+                    non_blocking=True,
+                )
+                length = feat_dev.shape[0]
+                hidden_states[start : start + length] = feat_dev
+
         if fmha_impl is None:
             fmha_impl = self.prepare_fmha_impl(inputs)
         for i, decoder_layer in enumerate(self.layers[: self.layer_num]):
