@@ -16,7 +16,7 @@ int32_t firstTokenOrInvalid(const std::vector<int>& token_ids) {
     return token_ids.front();
 }
 
-void maskToken(const torch::Tensor& new_tokens_logits, size_t vocab_size, int64_t token_id) {
+void maskToken(const torch::Tensor& new_tokens_logits, size_t vocab_size, int32_t token_id) {
     if (token_id < 0 || static_cast<size_t>(token_id) >= vocab_size) {
         return;
     }
@@ -73,7 +73,7 @@ void maskThinkBoundaryTokens(const torch::Tensor& new_tokens_logits, size_t voca
     maskToken(new_tokens_logits, vocab_size, firstTokenOrInvalid(info.end_think_token_ids));
 }
 
-void clearTokenFromBitmask(int32_t* row, size_t words, int64_t token_id) {
+void clearTokenFromBitmask(int32_t* row, size_t words, int32_t token_id) {
     if (token_id < 0 || static_cast<size_t>(token_id / 32) >= words) {
         return;
     }
@@ -137,7 +137,6 @@ void applyThinkSpecRowMask(int32_t* row, size_t words, StreamThinkInfo& info) {
                 break;
             }
             clearTokenFromBitmask(row, words, firstTokenOrInvalid(info.begin_think_token_ids));
-            clearTokenFromBitmask(row, words, info.eos_token_id);
             break;
         }
         case ThinkProcessState::CLOSING_THINK: {
@@ -150,7 +149,6 @@ void applyThinkSpecRowMask(int32_t* row, size_t words, StreamThinkInfo& info) {
                 clearTokenFromBitmask(row, words, firstTokenOrInvalid(info.begin_think_token_ids));
                 clearTokenFromBitmask(row, words, firstTokenOrInvalid(info.end_think_token_ids));
             }
-            clearTokenFromBitmask(row, words, info.eos_token_id);
             break;
         }
     }
@@ -222,7 +220,6 @@ void ThinkModeLogitsProcessor::process(const SamplerInputs& inputs, size_t start
                 }
 
                 maskToken(inputs.logits[batch_idx], inputs.vocab_size, firstTokenOrInvalid(info.begin_think_token_ids));
-                maskToken(inputs.logits[batch_idx], inputs.vocab_size, info.eos_token_id);
                 break;
             }
             case ThinkProcessState::CLOSING_THINK: {
@@ -234,7 +231,6 @@ void ThinkModeLogitsProcessor::process(const SamplerInputs& inputs, size_t start
                 if (!forceThinkEndToken(inputs.logits[batch_idx], info, inputs.vocab_size)) {
                     maskThinkBoundaryTokens(inputs.logits[batch_idx], inputs.vocab_size, info);
                 }
-                maskToken(inputs.logits[batch_idx], inputs.vocab_size, info.eos_token_id);
                 break;
             }
         }
@@ -385,8 +381,7 @@ int ThinkModeLogitsProcessor::tryAcceptAndFillBitmask(const SpecLogitsProcessorR
 }
 
 ThinkModeLogitsProcessorPtr ThinkModeLogitsProcessor::fromGenerateInput(std::shared_ptr<GenerateInput> generate_input,
-                                                                        int32_t                        num,
-                                                                        int64_t                        eos_token_id) {
+                                                                        int32_t                        num) {
     auto generate_config         = generate_input->generate_config;
     auto end_think_token_ids     = generate_config->end_think_token_ids;
     bool has_think_boundary_mask = !generate_config->begin_think_token_ids.empty() || !end_think_token_ids.empty();
@@ -409,8 +404,7 @@ ThinkModeLogitsProcessorPtr ThinkModeLogitsProcessor::fromGenerateInput(std::sha
                                    generate_input->inputLength(),
                                    0,
                                    generate_config->hasNumBeams() || generate_config->num_return_sequences > 1,
-                                   dfa_ptr,
-                                   eos_token_id);
+                                   dfa_ptr);
         std::vector<StreamThinkInfo> think_infos = {think_info};
         auto                         ptr         = std::make_shared<ThinkModeLogitsProcessor>(think_infos);
 
