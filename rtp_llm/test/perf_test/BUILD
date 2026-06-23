@@ -363,7 +363,6 @@ py_test(
         "--enable_cuda_graph", "1",
         "--reserver_runtime_mem_mb", "32768",
         "--max_context_batch_size", "1",
-        "--dsv4_hca_state_pool_blocks", "512",
     ],
     env = {
         "WORLD_SIZE": "4",
@@ -388,7 +387,7 @@ py_test(
 # = 512 total requests distributed 128/rank across 4 DP ranks.  server.py:63
 # also overrides --concurrency_limit to max(batch_size_list)=128 at engine
 # startup, so the BUILD --concurrency_limit below is effectively ignored.
-# DSV4 HCA_STATE can be sized independently by --dsv4_hca_state_pool_blocks.
+# DSV4 HCA_STATE pool sizing is described by the model KV cache spec desc.
 # Other DSV4 state/SWA pools follow the global block count.
 # Keep one frontend per DP rank for this smoke: the test readiness check probes a
 # shared rank port once, and multiple SO_REUSEPORT frontends can otherwise route
@@ -430,7 +429,6 @@ py_test(
         "--reserver_runtime_mem_mb", "32768",
         "--reserve_block_ratio", "0",
         "--max_context_batch_size", "256",
-        "--dsv4_hca_state_pool_blocks", "512",
     ],
     env = {
         "WORLD_SIZE": "4",
@@ -487,7 +485,6 @@ py_test(
         "--reserver_runtime_mem_mb", "32768",
         "--reserve_block_ratio", "0",
         "--max_context_batch_size", "256",
-        "--dsv4_hca_state_pool_blocks", "512",
     ],
     env = {
         "WORLD_SIZE": "4",
@@ -650,7 +647,6 @@ py_test(
         "--sp_checkpoint_path", "/mnt/nas1/hf/DeepSeek-V4-Flash",
         "--sp_act_type", "bf16",
         "--warm_up", "0",
-        "--dsv4_hca_state_pool_blocks", "1024"
     ],
     env = {
         "WORLD_SIZE": "4",

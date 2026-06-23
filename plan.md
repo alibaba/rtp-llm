@@ -84,15 +84,11 @@ cache 层只消费这些通用配置，不理解 DSV4 的具体语义。
 
    DSV4 KV 和 state region 都可以用这个通用物理 layout 表达。
 
-5. 将 DSV4 cache plan 构建逻辑移动到模型侧。
+5. 将 DSV4 cache layout 声明移动到模型侧。
 
-   把 `DSV4CacheConfigHelper` 从 `rtp_llm/cpp/cache` 移出，例如移动到：
-
-   ```text
-   rtp_llm/cpp/models/dsv4/Dsv4CachePlanBuilder.cc
-   ```
-
-   这个 builder 负责生成通用 `CacheConfig` / `CacheGroupSpec`，供 cache 模块消费。
+   DSV4 不再保留 `rtp_llm/cpp/models/dsv4` 下的专用 builder。模型侧通过
+   `KVCacheSpecDesc` 声明 group order、ring/slack、CP slicing 和显式 pool
+   block 数，cache 模块只消费通用 desc。
 
 6. 用通用 region identity 替换 DSV4 region enum。
 

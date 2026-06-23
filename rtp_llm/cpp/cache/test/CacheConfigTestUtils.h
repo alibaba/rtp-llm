@@ -4,11 +4,11 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <numeric>
 #include <string>
 #include <vector>
 
 #include "rtp_llm/cpp/cache/CacheConfig.h"
-#include "rtp_llm/cpp/models/dsv4/Dsv4CacheLayout.h"
 #include "rtp_llm/cpp/cache/LinearKVCacheSpec.h"
 #include "rtp_llm/cpp/cache/MHAKVCacheSpec.h"
 #include "rtp_llm/cpp/cache/MLAKVCacheSpec.h"
@@ -18,6 +18,15 @@
 
 namespace rtp_llm::test {
 
+inline constexpr uint32_t DSV4_FP8_KV_ENTRY_BYTES            = 584;
+inline constexpr uint32_t DSV4_FP8_INDEXER_ENTRY_BYTES       = 132;
+inline constexpr size_t   DSV4_FP8_MLA_BLOCK_ALIGNMENT_BYTES = 576;
+inline constexpr uint32_t DSV4_SWA_WINDOW_ENTRIES            = 128;
+
+inline size_t alignDsv4Fp8KvBlockBytes(size_t natural, size_t extra_multiple = 1) {
+    const size_t align = std::lcm(DSV4_FP8_MLA_BLOCK_ALIGNMENT_BYTES, std::max<size_t>(extra_multiple, 1));
+    return ((natural + align - 1) / align) * align;
+}
 
 inline KVCacheSpecPtr makeDsv4Spec(const std::string& tag,
                                     const std::string& kind,
@@ -40,6 +49,96 @@ inline KVCacheSpecPtr makeDsv4Spec(const std::string& tag,
     spec->tag                = tag;
     spec->dtype              = dtype;
     return spec;
+}
+
+inline uint32_t dsv4GroupOrder(const std::string& tag) {
+    if (tag == "csa_kv") {
+        return 0;
+    }
+    if (tag == "hca_kv") {
+        return 1;
+    }
+    if (tag == "indexer_kv") {
+        return 2;
+    }
+    if (tag == "indexer_state") {
+        return 3;
+    }
+    if (tag == "csa_state") {
+        return 4;
+    }
+    if (tag == "hca_state") {
+        return 5;
+    }
+    if (tag == "swa_kv") {
+        return 6;
+    }
+    RTP_LLM_FAIL("unknown DSV4 test tag=%s", tag.c_str());
+    return 0;
+}
+
+inline KVCacheSpecDesc dsv4DescForSpec(const KVCacheSpecPtr& spec) {
+    RTP_LLM_CHECK_WITH_INFO(spec != nullptr, "dsv4DescForSpec got null spec");
+    KVCacheSpecDesc desc;
+    desc.tag             = spec->tag;
+    desc.has_group_order = true;
+    desc.group_order     = dsv4GroupOrder(spec->tag);
+    desc.dtype           = spec->dtype;
+    if (auto* compressed = dynamic_cast<CompressedKVCacheSpec*>(spec.get())) {
+        desc.cache_type                 = CacheType::COMPRESSED_KV;
+        desc.is_state_cache             = false;
+        desc.entry_elems                = compressed->entry_elems;
+        desc.compression_ratio          = compressed->compression_ratio;
+        desc.store_dtype                = compressed->store_dtype;
+        desc.block_size_bytes_alignment = compressed->block_size_bytes_alignment;
+        desc.extra.derive_entries_from_kernel_block = true;
+        if (desc.block_size_bytes_alignment == 0 && desc.entry_elems == DSV4_FP8_KV_ENTRY_BYTES) {
+            desc.block_size_bytes_alignment = DSV4_FP8_MLA_BLOCK_ALIGNMENT_BYTES;
+        }
+        return desc;
+    }
+
+    auto* fixed = dynamic_cast<FixedStateCacheSpec*>(spec.get());
+    RTP_LLM_CHECK_WITH_INFO(fixed != nullptr, "DSV4 test spec tag=%s must be opaque", spec->tag.c_str());
+    desc.cache_type                       = CacheType::FIXED_STATE;
+    desc.entry_elems                      = fixed->entry_elems;
+    desc.store_dtype                      = fixed->store_dtype;
+    desc.block_size_bytes_override        = fixed->block_size_bytes_override;
+    desc.block_size_bytes_alignment       = fixed->block_size_bytes_alignment;
+    desc.block_size_alignment_min_entries = fixed->block_size_alignment_min_entries;
+    if (desc.tag == "indexer_state" || desc.tag == "csa_state") {
+        desc.extra.state_ring_compression_ratio = 4;
+        desc.extra.state_ring_overlap           = 1;
+        desc.extra.cp_align_entries             = true;
+        desc.extra.cp_slice_entries             = true;
+    } else if (desc.tag == "hca_state") {
+        desc.extra.state_ring_compression_ratio = 128;
+        desc.extra.cp_align_entries             = true;
+        desc.extra.cp_slice_entries             = true;
+        desc.extra.explicit_block_num           = 256;
+        desc.skip_prefix_reuse                  = true;
+        desc.has_reuse_policy                   = true;
+        desc.reuse_policy                       = CacheReusePolicy::NON_REUSABLE;
+        desc.has_active_tail_blocks             = true;
+        desc.active_tail_blocks                 = 1;
+        desc.has_validate_tail_blocks           = true;
+        desc.validate_tail_blocks               = false;
+    } else if (desc.tag == "swa_kv") {
+        desc.extra.state_ring_compression_ratio = DSV4_SWA_WINDOW_ENTRIES;
+        desc.extra.cp_align_entries             = true;
+        desc.extra.cp_prefill_slice_block_bytes = true;
+        if (desc.block_size_bytes_alignment == 0 && desc.entry_elems == DSV4_FP8_KV_ENTRY_BYTES) {
+            desc.block_size_bytes_alignment = DSV4_FP8_MLA_BLOCK_ALIGNMENT_BYTES;
+        }
+    }
+    desc.extra.state_ring_add_gen_num_per_cycle = true;
+    desc.extra.use_fixed_region_cp_tokens       = true;
+    desc.block_size_alignment_min_entries =
+        desc.block_size_alignment_min_entries == 0 ? DSV4_SWA_WINDOW_ENTRIES : desc.block_size_alignment_min_entries;
+    desc.is_state_cache     = true;
+    desc.has_evict_policy   = true;
+    desc.evict_policy       = CacheEvictPolicy::INDEPENDENT;
+    return desc;
 }
 
 inline void setDefaultKvCacheSpec(ModelConfig& model_config) {
@@ -129,6 +228,7 @@ inline void setDsv4KvCacheSpecs(ModelConfig& model_config) {
     auto swa_kv = makeDsv4Spec("swa_kv", "sliding_window_kv", kv_entry_elems, DataType::TYPE_UINT8);
 
     model_config.kv_cache_specs.clear();
+    model_config.kv_cache_spec_descs.clear();
     for (int i = 0; i < layer_num; ++i) {
         const int ratio = i < static_cast<int>(model_config.attn_config.layer_compress_ratios.size()) ?
                               model_config.attn_config.layer_compress_ratios[static_cast<size_t>(i)] :
@@ -139,6 +239,31 @@ inline void setDsv4KvCacheSpecs(ModelConfig& model_config) {
             model_config.kv_cache_specs[i] = {hca_kv, hca_state, swa_kv};
         } else {
             model_config.kv_cache_specs[i] = {swa_kv};
+        }
+        auto& descs = model_config.kv_cache_spec_descs[i];
+        descs.reserve(model_config.kv_cache_specs[i].size());
+        for (const auto& spec : model_config.kv_cache_specs[i]) {
+            descs.push_back(dsv4DescForSpec(spec));
+        }
+    }
+}
+
+inline void refreshDsv4KvCacheSpecDescs(ModelConfig&             model_config,
+                                        const ParallelismConfig& parallelism_config,
+                                        const KVCacheConfig&     kv_cache_config,
+                                        int                      gen_num_per_cycle = 0) {
+    (void)parallelism_config;
+    (void)kv_cache_config;
+    (void)gen_num_per_cycle;
+    setDsv4KvCacheSpecs(model_config);
+}
+
+inline void setDsv4ExplicitPoolBlocks(ModelConfig& model_config, const std::string& tag, uint32_t block_num) {
+    for (auto& [_, descs] : model_config.kv_cache_spec_descs) {
+        for (auto& desc : descs) {
+            if (desc.tag == tag) {
+                desc.extra.explicit_block_num = block_num;
+            }
         }
     }
 }

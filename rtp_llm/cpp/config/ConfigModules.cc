@@ -145,8 +145,7 @@ std::string KVCacheConfig::to_string() const {
         << "prefix_tree_memory_state_swa_pool_ratio: " << prefix_tree_memory_state_swa_pool_ratio << "\n"
         << "enable_independent_group_eviction: " << enable_independent_group_eviction << "\n"
         << "device_cache_min_free_blocks: " << device_cache_min_free_blocks << "\n"
-        << "load_cache_retry_times: " << load_cache_retry_times << "\n"
-        << "dsv4_hca_state_pool_blocks: " << dsv4_hca_state_pool_blocks << "\n";
+        << "load_cache_retry_times: " << load_cache_retry_times << "\n";
     return oss.str();
 }
 

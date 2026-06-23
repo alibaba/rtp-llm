@@ -144,8 +144,9 @@ static CacheConfig makeCompactDSV4ManagerConfig(uint32_t block_num = 16) {
     ParallelismConfig pc;
     KVCacheConfig     kv_cache_config;
     kv_cache_config.seq_size_per_block     = 128;
-    kv_cache_config.dsv4_hca_state_pool_blocks = 0;
-    auto              config = HybridPoolConfigCreator::createConfig(makeDSV4ManagerFlashModelConfig(), pc, kv_cache_config, false, 0);
+    auto              mc = makeDSV4ManagerFlashModelConfig();
+    setDsv4ExplicitPoolBlocks(mc, "hca_state", 0);
+    auto              config = HybridPoolConfigCreator::createConfig(mc, pc, kv_cache_config, false, 0);
     config.block_num         = block_num;
     setGroupBlockNumsForTest(config, std::vector<uint32_t>(static_cast<size_t>(config.groupNums()), block_num));
     return config;
@@ -187,8 +188,9 @@ static CacheConfig makeDSV4ConfigWithConcurrencyPool(uint32_t full_block_num, ui
     ParallelismConfig pc;
     KVCacheConfig     kv_cache_config;
     kv_cache_config.seq_size_per_block     = 128;
-    kv_cache_config.dsv4_hca_state_pool_blocks = 0;
-    auto              config = HybridPoolConfigCreator::createConfig(makeDSV4ManagerFlashModelConfig(), pc, kv_cache_config, false, 0);
+    auto              mc = makeDSV4ManagerFlashModelConfig();
+    setDsv4ExplicitPoolBlocks(mc, "hca_state", 0);
+    auto              config = HybridPoolConfigCreator::createConfig(mc, pc, kv_cache_config, false, 0);
     config.block_num         = full_block_num;
     std::vector<uint32_t> block_nums(static_cast<size_t>(config.groupNums()), full_block_num);
     for (int gid = 0; gid < config.groupNums(); ++gid) {
@@ -205,10 +207,11 @@ makeProductionDSV4Config(uint32_t full_block_num, uint32_t max_concurrency, uint
     KVCacheConfig     kv_cache_config;
     kv_cache_config.seq_size_per_block                         = 128;
     kv_cache_config.test_block_num                              = full_block_num;
-    kv_cache_config.dsv4_hca_state_pool_blocks                  = hca_state_pool_blocks;
+    auto              mc = makeDSV4ManagerFlashModelConfig();
+    setDsv4ExplicitPoolBlocks(mc, "hca_state", hca_state_pool_blocks);
     runtime_config.max_generate_batch_size                      = max_concurrency;
     runtime_config.fifo_scheduler_config.max_context_batch_size = max_concurrency;
-    return CacheConfigCreator::createConfig(makeDSV4ManagerFlashModelConfig(), pc, runtime_config, kv_cache_config);
+    return CacheConfigCreator::createConfig(mc, pc, runtime_config, kv_cache_config);
 }
 
 static BatchKVCacheResourcePtr makeDSV4BatchResource(const CacheConfig& config) {

@@ -17,9 +17,25 @@ enum class CacheType : int8_t {
     FIXED_STATE   = 4,
 };
 
+struct KVCacheSpecDescExtra {
+    uint32_t explicit_block_num        = 0;
+    bool     reserve_from_paged_budget = false;
+
+    bool     derive_entries_from_kernel_block = false;
+    uint32_t state_ring_compression_ratio     = 0;
+    uint32_t state_ring_overlap               = 0;
+    bool     state_ring_add_gen_num_per_cycle = false;
+    bool     cp_align_entries                 = false;
+    bool     cp_slice_entries                 = false;
+    bool     cp_prefill_slice_block_bytes     = false;
+    bool     use_fixed_region_cp_tokens       = false;
+};
+
 struct KVCacheSpecDesc {
     std::string tag;
     CacheType   cache_type = CacheType::MHA;
+    bool        has_group_order = false;
+    uint32_t    group_order     = 0;
 
     uint32_t local_head_num_kv  = 0;
     uint32_t seq_size_per_block = 0;
@@ -55,8 +71,7 @@ struct KVCacheSpecDesc {
     int              active_tail_blocks        = 0;
     bool             has_validate_tail_blocks  = false;
     bool             validate_tail_blocks      = true;
-    uint32_t         explicit_block_num        = 0;
-    bool             reserve_from_paged_budget = false;
+    KVCacheSpecDescExtra extra;
     bool             has_prefix_reusable       = false;
     bool             prefix_reusable           = true;
     bool             uses_pinned_cpu_backing   = false;
@@ -70,6 +85,7 @@ struct KVCacheSpecDesc {
     bool             cp_compact_tail_blocks     = false;
     bool             has_is_reservable          = false;
     bool             is_reservable              = true;
+
 };
 
 }  // namespace rtp_llm

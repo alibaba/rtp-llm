@@ -4,7 +4,7 @@ import typing
 
 import torch
 
-__all__: list[str] = ['ALLTOALL', 'ALL_GATHER', 'ALL_GATHER_WITH_OVERLAP', 'ActivationType', 'ArpcConfig', 'AttentionConfigs', 'BatchDecodeSchedulerConfig', 'CPRotateMethod', 'CacheStoreConfig', 'CompressedKVCacheSpec', 'ConcurrencyConfig', 'DISABLED', 'DataType', 'DeviceResourceConfig', 'EPLBConfig', 'EplbMode', 'FIFOSchedulerConfig', 'FMHAConfig', 'FMHAType', 'FfnDisAggregateConfig', 'FixedStateCacheSpec', 'GrammarConfig', 'GrpcConfig', 'HWKernelConfig', 'HybridAttentionConfig', 'HybridAttentionType', 'KVCacheConfig', 'KVCacheSpec', 'KVCacheSpecType', 'KvCacheDataType', 'LayerNormType', 'LinearAttentionConfig', 'MMModelConfig', 'MiscellaneousConfig', 'MlaOpsType', 'MHAKVCacheSpec', 'MLAKVCacheSpec', 'LinearKVCacheSpec', 'ModelConfig', 'ModelSpecificConfig', 'MoeConfig', 'NcclCommConfig', 'NormType', 'PDSepConfig', 'PREFILL_CP', 'ParallelismConfig', 'PrefillCPConfig', 'ProfilingDebugLoggingConfig', 'QuantAlgo', 'QuantMethod', 'RoleSpecialTokens', 'RoleType', 'RopeCache', 'RopeConfig', 'RopeStyle', 'RuntimeConfig', 'SpecialTokens', 'SpeculativeExecutionConfig', 'SpeculativeType', 'TaskType', 'UNKNOWN', 'VitConfig', 'VitSeparation', 'check_rope_cache', 'get_block_cache_keys', 'get_rope_cache', 'get_rope_cache_once']
+__all__: list[str] = ['ALLTOALL', 'ALL_GATHER', 'ALL_GATHER_WITH_OVERLAP', 'ActivationType', 'ArpcConfig', 'AttentionConfigs', 'BatchDecodeSchedulerConfig', 'CPRotateMethod', 'CacheEvictPolicy', 'CacheGroupType', 'CacheReusePolicy', 'CacheStoreConfig', 'CacheType', 'ConcurrencyConfig', 'DISABLED', 'DataType', 'DeviceResourceConfig', 'EPLBConfig', 'EplbMode', 'FIFOSchedulerConfig', 'FMHAConfig', 'FMHAType', 'FfnDisAggregateConfig', 'GrammarConfig', 'GrpcConfig', 'HWKernelConfig', 'HybridAttentionConfig', 'HybridAttentionType', 'KVCacheConfig', 'KVCacheSpecDesc', 'KVCacheSpecDescExtra', 'KvCacheDataType', 'LayerNormType', 'LinearAttentionConfig', 'MMModelConfig', 'MiscellaneousConfig', 'MlaOpsType', 'ModelConfig', 'ModelSpecificConfig', 'MoeConfig', 'NcclCommConfig', 'NormType', 'PDSepConfig', 'PREFILL_CP', 'ParallelismConfig', 'PrefillCPConfig', 'ProfilingDebugLoggingConfig', 'QuantAlgo', 'QuantMethod', 'RoleSpecialTokens', 'RoleType', 'RopeCache', 'RopeConfig', 'RopeStyle', 'RuntimeConfig', 'SpecialTokens', 'SpeculativeExecutionConfig', 'SpeculativeType', 'TaskType', 'UNKNOWN', 'VitConfig', 'VitSeparation', 'check_rope_cache', 'get_block_cache_keys', 'get_rope_cache', 'get_rope_cache_once']
 
 
 class ActivationType:
@@ -826,7 +826,6 @@ class KVCacheConfig:
     prefix_tree_memory_state_swa_pool_ratio: int
     enable_independent_group_eviction: bool
     enable_remote_cache: bool
-    dsv4_hca_state_pool_blocks: int
     fp8_kv_cache: int
     int8_kv_cache: int
     kv_cache_mem_mb: int
@@ -1073,12 +1072,12 @@ class MlaOpsType:
         ...
 
 
-class KVCacheSpecType:
-    MultiHeadAttention: typing.ClassVar[KVCacheSpecType]
-    MultiHeadLatentAttention: typing.ClassVar[KVCacheSpecType]
-    LinearAttention: typing.ClassVar[KVCacheSpecType]
-    OpaqueKV: typing.ClassVar[KVCacheSpecType]
-    OpaqueState: typing.ClassVar[KVCacheSpecType]
+class CacheType:
+    MHA: typing.ClassVar[CacheType]
+    MLA: typing.ClassVar[CacheType]
+    LINEAR: typing.ClassVar[CacheType]
+    COMPRESSED_KV: typing.ClassVar[CacheType]
+    FIXED_STATE: typing.ClassVar[CacheType]
 
     @property
     def name(self) -> str:
@@ -1089,30 +1088,73 @@ class KVCacheSpecType:
         ...
 
 
-class KVCacheSpec:
+class CacheGroupType:
+    LINEAR: typing.ClassVar[CacheGroupType]
+    FULL: typing.ClassVar[CacheGroupType]
+    SWA: typing.ClassVar[CacheGroupType]
+
+    @property
+    def name(self) -> str:
+        ...
+
+    @property
+    def value(self) -> int:
+        ...
+
+
+class CacheReusePolicy:
+    REUSABLE: typing.ClassVar[CacheReusePolicy]
+    NON_REUSABLE: typing.ClassVar[CacheReusePolicy]
+
+    @property
+    def name(self) -> str:
+        ...
+
+    @property
+    def value(self) -> int:
+        ...
+
+
+class CacheEvictPolicy:
+    CHAIN: typing.ClassVar[CacheEvictPolicy]
+    INDEPENDENT: typing.ClassVar[CacheEvictPolicy]
+
+    @property
+    def name(self) -> str:
+        ...
+
+    @property
+    def value(self) -> int:
+        ...
+
+
+class KVCacheSpecDescExtra:
+    explicit_block_num: int
+    reserve_from_paged_budget: bool
+    derive_entries_from_kernel_block: bool
+    state_ring_compression_ratio: int
+    state_ring_overlap: int
+    state_ring_add_gen_num_per_cycle: bool
+    cp_align_entries: bool
+    cp_slice_entries: bool
+    cp_prefill_slice_block_bytes: bool
+    use_fixed_region_cp_tokens: bool
+
+    def __init__(self) -> None:
+        ...
+
+
+class KVCacheSpecDesc:
     tag: str
+    cache_type: CacheType
+    has_group_order: bool
+    group_order: int
     local_head_num_kv: int
     seq_size_per_block: int
-    type: KVCacheSpecType
     dtype: DataType
-
-
-class MHAKVCacheSpec(KVCacheSpec):
     size_per_head: int
-
-    def __init__(self) -> None:
-        ...
-
-
-class MLAKVCacheSpec(KVCacheSpec):
     kv_lora_rank: int
     rope_head_dim: int
-
-    def __init__(self) -> None:
-        ...
-
-
-class LinearKVCacheSpec(KVCacheSpec):
     local_num_k_heads: int
     local_num_v_heads: int
     head_k_dim: int
@@ -1120,29 +1162,37 @@ class LinearKVCacheSpec(KVCacheSpec):
     conv_kernel_dim: int
     ssm_state_dtype: DataType
     conv_state_dtype: DataType
-
-    def __init__(self) -> None:
-        ...
-
-
-class CompressedKVCacheSpec(KVCacheSpec):
+    is_state_cache: bool
     entry_elems: int
     entries_per_block: int
     compression_ratio: int
     store_dtype: DataType
-    block_size_bytes_alignment: int
-
-    def __init__(self) -> None:
-        ...
-
-
-class FixedStateCacheSpec(KVCacheSpec):
-    state_dim: int
-    entries_per_block: int
-    store_dtype: DataType
     block_size_bytes_override: int
     block_size_bytes_alignment: int
     block_size_alignment_min_entries: int
+    has_sparse_slots: bool
+    sparse_slots: bool
+    skip_prefix_reuse: bool
+    extra: KVCacheSpecDescExtra
+    has_evict_policy: bool
+    evict_policy: CacheEvictPolicy
+    has_reuse_policy: bool
+    reuse_policy: CacheReusePolicy
+    has_active_tail_blocks: bool
+    active_tail_blocks: int
+    has_validate_tail_blocks: bool
+    validate_tail_blocks: bool
+    has_prefix_reusable: bool
+    prefix_reusable: bool
+    uses_pinned_cpu_backing: bool
+    has_is_cp_shardable: bool
+    is_cp_shardable: bool
+    has_kernel_block_subdiv: bool
+    kernel_block_subdiv: bool
+    has_cp_compact_tail_blocks: bool
+    cp_compact_tail_blocks: bool
+    has_is_reservable: bool
+    is_reservable: bool
 
     def __init__(self) -> None:
         ...
@@ -1165,7 +1215,7 @@ class ModelConfig:
     has_pre_decoder_layernorm: bool
     hidden_size: int
     hybrid_attention_config: HybridAttentionConfig
-    kv_cache_specs: dict[int, list[KVCacheSpec]]
+    kv_cache_spec_descs: dict[int, list[KVCacheSpecDesc]]
     input_embedding_scalar: float
     input_vocab_size: int
     layernorm_eps: float

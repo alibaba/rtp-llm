@@ -11,7 +11,6 @@
 #include "rtp_llm/cpp/config/ModelConfig.h"
 #include "rtp_llm/cpp/config/EplbConfig.h"
 #include "rtp_llm/cpp/cache/KVCacheSpecDesc.h"
-#include "rtp_llm/cpp/cache/KVCacheSpec.h"
 #include "rtp_llm/cpp/model_utils/RopeCache.h"
 #include "pybind11/pybind11.h"
 #include "pybind11/cast.h"
@@ -42,13 +41,6 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .value("STATS", EplbMode::STATS)
         .value("EPLB", EplbMode::EPLB)
         .value("ALL", EplbMode::ALL);
-
-    py::enum_<KVCacheSpecType>(m, "KVCacheSpecType")
-        .value("MultiHeadAttention", KVCacheSpecType::MultiHeadAttention)
-        .value("MultiHeadLatentAttention", KVCacheSpecType::MultiHeadLatentAttention)
-        .value("LinearAttention", KVCacheSpecType::LinearAttention)
-        .value("OpaqueKV", KVCacheSpecType::OpaqueKV)
-        .value("OpaqueState", KVCacheSpecType::OpaqueState);
 
     py::enum_<CacheType>(m, "CacheType")
         .value("MHA", CacheType::MHA)
@@ -403,7 +395,6 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("enable_independent_group_eviction", &KVCacheConfig::enable_independent_group_eviction)
         .def_readwrite("device_cache_min_free_blocks", &KVCacheConfig::device_cache_min_free_blocks)
         .def_readwrite("load_cache_retry_times", &KVCacheConfig::load_cache_retry_times)
-        .def_readwrite("dsv4_hca_state_pool_blocks", &KVCacheConfig::dsv4_hca_state_pool_blocks)
         // Remote connector configuration fields
         .def_readwrite("reco_enable_vipserver", &KVCacheConfig::reco_enable_vipserver)
         .def_readwrite("reco_vipserver_domain", &KVCacheConfig::reco_vipserver_domain)
@@ -478,7 +469,6 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.reco_put_broadcast_timeout,
                                       self.reco_client_config,
                                       self.ssm_state_dtype,
-                                      self.dsv4_hca_state_pool_blocks,
                                       self.enable_gpu_prefix_tree,
                                       self.enable_prefix_tree_memory_cache,
                                       self.enable_legacy_memory_connector_fallback,
@@ -488,8 +478,9 @@ PYBIND11_MODULE(libth_transformer_config, m) {
             [](py::tuple t) {
                 const bool has_disk_fields =
                     t.size() >= 50 && py::isinstance<py::str>(t[9]);
-                const size_t expected_size = has_disk_fields ? 55u : 50u;
-                if (t.size() != expected_size) {
+                const size_t min_size = has_disk_fields ? 54u : 49u;
+                const size_t max_size = has_disk_fields ? 56u : 51u;
+                if (t.size() < min_size || t.size() > max_size) {
                     throw std::runtime_error("Invalid state!");
                 }
                 KVCacheConfig c;
@@ -546,14 +537,19 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     c.reco_get_broadcast_timeout           = t[40 + offset].cast<int>();
                     c.reco_put_broadcast_timeout           = t[41 + offset].cast<int>();
                     c.reco_client_config                   = t[42 + offset].cast<std::string>();
-                    c.ssm_state_dtype                      = t[43 + offset].cast<std::string>();
-                    const size_t extra_start                  = 44 + offset;
-                    c.dsv4_hca_state_pool_blocks              = t[extra_start].cast<uint32_t>();
-                    c.enable_gpu_prefix_tree                  = t[extra_start + 1].cast<bool>();
-                    c.enable_prefix_tree_memory_cache         = t[extra_start + 2].cast<bool>();
-                    c.enable_legacy_memory_connector_fallback = t[extra_start + 3].cast<bool>();
-                    c.prefix_tree_memory_state_swa_pool_ratio = t[extra_start + 4].cast<int64_t>();
-                    c.enable_independent_group_eviction = t[extra_start + 5].cast<bool>();
+                    c.ssm_state_dtype = t[43 + offset].cast<std::string>();
+                    size_t extra_idx  = 44 + offset;
+                    if (!py::isinstance<py::bool_>(t[extra_idx])) {
+                        (void)t[extra_idx++].cast<uint32_t>();
+                    }
+                    c.enable_gpu_prefix_tree                  = t[extra_idx++].cast<bool>();
+                    c.enable_prefix_tree_memory_cache         = t[extra_idx++].cast<bool>();
+                    c.enable_legacy_memory_connector_fallback = t[extra_idx++].cast<bool>();
+                    c.prefix_tree_memory_state_swa_pool_ratio = t[extra_idx++].cast<int64_t>();
+                    c.enable_independent_group_eviction       = t[extra_idx++].cast<bool>();
+                    if (t.size() > extra_idx) {
+                        (void)t[extra_idx].cast<std::map<std::string, uint32_t>>();
+                    }
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("KVCacheConfig unpickle error: ") + e.what());
                 }
@@ -1564,60 +1560,55 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("include_sep_tokens", &MMModelConfig::include_sep_tokens)
         .def_readwrite("mm_position_ids_style", &MMModelConfig::mm_position_ids_style);
 
-    // Register KV cache specs used by declarative model-side cache layout.
-    py::class_<KVCacheSpec, KVCacheSpecPtr>(m, "KVCacheSpec")
-        .def_readwrite("tag", &KVCacheSpec::tag)
-        .def_readwrite("local_head_num_kv", &KVCacheSpec::local_head_num_kv)
-        .def_readwrite("seq_size_per_block", &KVCacheSpec::seq_size_per_block)
-        .def_readwrite("type", &KVCacheSpec::type)
-        .def_readwrite("dtype", &KVCacheSpec::dtype)
-        .def_readwrite("is_state_cache", &KVCacheSpec::is_state_cache)
-        .def_readwrite("skip_prefix_reuse", &KVCacheSpec::skip_prefix_reuse)
-        .def_readwrite("lifecycle", &KVCacheSpec::lifecycle);
-
-    py::class_<MHAKVCacheSpec, KVCacheSpec, std::shared_ptr<MHAKVCacheSpec>>(m, "MHAKVCacheSpec")
+    py::class_<KVCacheSpecDescExtra>(m, "KVCacheSpecDescExtra")
         .def(py::init<>())
-        .def_readwrite("size_per_head", &MHAKVCacheSpec::size_per_head);
-
-    py::class_<MLAKVCacheSpec, KVCacheSpec, std::shared_ptr<MLAKVCacheSpec>>(m, "MLAKVCacheSpec")
-        .def(py::init<>())
-        .def_readwrite("kv_lora_rank", &MLAKVCacheSpec::kv_lora_rank)
-        .def_readwrite("rope_head_dim", &MLAKVCacheSpec::rope_head_dim);
-
-    py::class_<LinearKVCacheSpec, KVCacheSpec, std::shared_ptr<LinearKVCacheSpec>>(m, "LinearKVCacheSpec")
-        .def(py::init<>())
-        .def_readwrite("local_num_k_heads", &LinearKVCacheSpec::local_num_k_heads)
-        .def_readwrite("local_num_v_heads", &LinearKVCacheSpec::local_num_v_heads)
-        .def_readwrite("head_k_dim", &LinearKVCacheSpec::head_k_dim)
-        .def_readwrite("head_v_dim", &LinearKVCacheSpec::head_v_dim)
-        .def_readwrite("conv_kernel_dim", &LinearKVCacheSpec::conv_kernel_dim)
-        .def_readwrite("ssm_state_dtype", &LinearKVCacheSpec::ssm_state_dtype)
-        .def_readwrite("conv_state_dtype", &LinearKVCacheSpec::conv_state_dtype);
-
-    py::class_<CompressedKVCacheSpec, KVCacheSpec, std::shared_ptr<CompressedKVCacheSpec>>(
-        m, "CompressedKVCacheSpec")
-        .def(py::init<>())
-        .def_readwrite("entry_elems", &CompressedKVCacheSpec::entry_elems)
-        .def_readwrite("entries_per_block", &CompressedKVCacheSpec::entries_per_block)
-        .def_readwrite("compression_ratio", &CompressedKVCacheSpec::compression_ratio)
-        .def_readwrite("store_dtype", &CompressedKVCacheSpec::store_dtype)
-        .def_readwrite("block_size_bytes_alignment", &CompressedKVCacheSpec::block_size_bytes_alignment);
-
-    py::class_<FixedStateCacheSpec, KVCacheSpec, std::shared_ptr<FixedStateCacheSpec>>(m, "FixedStateCacheSpec")
-        .def(py::init<>())
-        .def_property("state_dim",
-                      [](const FixedStateCacheSpec& spec) { return spec.state_dim; },
-                      [](FixedStateCacheSpec& spec, uint32_t value) { spec.state_dim = value; })
-        .def_readwrite("entries_per_block", &FixedStateCacheSpec::entries_per_block)
-        .def_readwrite("store_dtype", &FixedStateCacheSpec::store_dtype)
-        .def_readwrite("block_size_bytes_override", &FixedStateCacheSpec::block_size_bytes_override)
-        .def_readwrite("block_size_bytes_alignment", &FixedStateCacheSpec::block_size_bytes_alignment)
-        .def_readwrite("block_size_alignment_min_entries", &FixedStateCacheSpec::block_size_alignment_min_entries);
+        .def_readwrite("explicit_block_num", &KVCacheSpecDescExtra::explicit_block_num)
+        .def_readwrite("reserve_from_paged_budget", &KVCacheSpecDescExtra::reserve_from_paged_budget)
+        .def_readwrite("derive_entries_from_kernel_block", &KVCacheSpecDescExtra::derive_entries_from_kernel_block)
+        .def_readwrite("state_ring_compression_ratio", &KVCacheSpecDescExtra::state_ring_compression_ratio)
+        .def_readwrite("state_ring_overlap", &KVCacheSpecDescExtra::state_ring_overlap)
+        .def_readwrite("state_ring_add_gen_num_per_cycle", &KVCacheSpecDescExtra::state_ring_add_gen_num_per_cycle)
+        .def_readwrite("cp_align_entries", &KVCacheSpecDescExtra::cp_align_entries)
+        .def_readwrite("cp_slice_entries", &KVCacheSpecDescExtra::cp_slice_entries)
+        .def_readwrite("cp_prefill_slice_block_bytes", &KVCacheSpecDescExtra::cp_prefill_slice_block_bytes)
+        .def_readwrite("use_fixed_region_cp_tokens", &KVCacheSpecDescExtra::use_fixed_region_cp_tokens)
+        .def(py::pickle(
+            [](const KVCacheSpecDescExtra& self) {
+                return py::make_tuple(self.explicit_block_num,
+                                      self.reserve_from_paged_budget,
+                                      self.derive_entries_from_kernel_block,
+                                      self.state_ring_compression_ratio,
+                                      self.state_ring_overlap,
+                                      self.state_ring_add_gen_num_per_cycle,
+                                      self.cp_align_entries,
+                                      self.cp_slice_entries,
+                                      self.cp_prefill_slice_block_bytes,
+                                      self.use_fixed_region_cp_tokens);
+            },
+            [](py::tuple t) {
+                if (t.size() != 10) {
+                    throw std::runtime_error("Invalid state!");
+                }
+                KVCacheSpecDescExtra c;
+                c.explicit_block_num                = t[0].cast<uint32_t>();
+                c.reserve_from_paged_budget         = t[1].cast<bool>();
+                c.derive_entries_from_kernel_block  = t[2].cast<bool>();
+                c.state_ring_compression_ratio      = t[3].cast<uint32_t>();
+                c.state_ring_overlap                = t[4].cast<uint32_t>();
+                c.state_ring_add_gen_num_per_cycle  = t[5].cast<bool>();
+                c.cp_align_entries                  = t[6].cast<bool>();
+                c.cp_slice_entries                  = t[7].cast<bool>();
+                c.cp_prefill_slice_block_bytes      = t[8].cast<bool>();
+                c.use_fixed_region_cp_tokens        = t[9].cast<bool>();
+                return c;
+            }));
 
     py::class_<KVCacheSpecDesc>(m, "KVCacheSpecDesc")
         .def(py::init<>())
         .def_readwrite("tag", &KVCacheSpecDesc::tag)
         .def_readwrite("cache_type", &KVCacheSpecDesc::cache_type)
+        .def_readwrite("has_group_order", &KVCacheSpecDesc::has_group_order)
+        .def_readwrite("group_order", &KVCacheSpecDesc::group_order)
         .def_readwrite("local_head_num_kv", &KVCacheSpecDesc::local_head_num_kv)
         .def_readwrite("seq_size_per_block", &KVCacheSpecDesc::seq_size_per_block)
         .def_readwrite("dtype", &KVCacheSpecDesc::dtype)
@@ -1648,8 +1639,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("active_tail_blocks", &KVCacheSpecDesc::active_tail_blocks)
         .def_readwrite("has_validate_tail_blocks", &KVCacheSpecDesc::has_validate_tail_blocks)
         .def_readwrite("validate_tail_blocks", &KVCacheSpecDesc::validate_tail_blocks)
-        .def_readwrite("explicit_block_num", &KVCacheSpecDesc::explicit_block_num)
-        .def_readwrite("reserve_from_paged_budget", &KVCacheSpecDesc::reserve_from_paged_budget)
+        .def_readwrite("extra", &KVCacheSpecDesc::extra)
         .def_readwrite("has_prefix_reusable", &KVCacheSpecDesc::has_prefix_reusable)
         .def_readwrite("prefix_reusable", &KVCacheSpecDesc::prefix_reusable)
         .def_readwrite("uses_pinned_cpu_backing", &KVCacheSpecDesc::uses_pinned_cpu_backing)
@@ -1662,7 +1652,113 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("has_cp_compact_tail_blocks", &KVCacheSpecDesc::has_cp_compact_tail_blocks)
         .def_readwrite("cp_compact_tail_blocks", &KVCacheSpecDesc::cp_compact_tail_blocks)
         .def_readwrite("has_is_reservable", &KVCacheSpecDesc::has_is_reservable)
-        .def_readwrite("is_reservable", &KVCacheSpecDesc::is_reservable);
+        .def_readwrite("is_reservable", &KVCacheSpecDesc::is_reservable)
+        .def(py::pickle(
+            [](const KVCacheSpecDesc& self) {
+                return py::make_tuple(self.tag,
+                                      self.cache_type,
+                                      self.has_group_order,
+                                      self.group_order,
+                                      self.local_head_num_kv,
+                                      self.seq_size_per_block,
+                                      self.dtype,
+                                      self.size_per_head,
+                                      self.kv_lora_rank,
+                                      self.rope_head_dim,
+                                      self.local_num_k_heads,
+                                      self.local_num_v_heads,
+                                      self.head_k_dim,
+                                      self.head_v_dim,
+                                      self.conv_kernel_dim,
+                                      self.ssm_state_dtype,
+                                      self.conv_state_dtype,
+                                      self.is_state_cache,
+                                      self.entry_elems,
+                                      self.entries_per_block,
+                                      self.compression_ratio,
+                                      self.store_dtype,
+                                      self.block_size_bytes_override,
+                                      self.block_size_bytes_alignment,
+                                      self.block_size_alignment_min_entries,
+                                      self.has_sparse_slots,
+                                      self.sparse_slots,
+                                      self.skip_prefix_reuse,
+                                      self.extra,
+                                      self.has_evict_policy,
+                                      self.evict_policy,
+                                      self.has_reuse_policy,
+                                      self.reuse_policy,
+                                      self.has_active_tail_blocks,
+                                      self.active_tail_blocks,
+                                      self.has_validate_tail_blocks,
+                                      self.validate_tail_blocks,
+                                      self.has_prefix_reusable,
+                                      self.prefix_reusable,
+                                      self.uses_pinned_cpu_backing,
+                                      self.has_is_cp_shardable,
+                                      self.is_cp_shardable,
+                                      self.has_kernel_block_subdiv,
+                                      self.kernel_block_subdiv,
+                                      self.has_cp_compact_tail_blocks,
+                                      self.cp_compact_tail_blocks,
+                                      self.has_is_reservable,
+                                      self.is_reservable);
+            },
+            [](py::tuple t) {
+                if (t.size() != 48) {
+                    throw std::runtime_error("Invalid state!");
+                }
+                KVCacheSpecDesc c;
+                c.tag                              = t[0].cast<std::string>();
+                c.cache_type                       = t[1].cast<CacheType>();
+                c.has_group_order                  = t[2].cast<bool>();
+                c.group_order                      = t[3].cast<uint32_t>();
+                c.local_head_num_kv                = t[4].cast<uint32_t>();
+                c.seq_size_per_block               = t[5].cast<uint32_t>();
+                c.dtype                            = t[6].cast<DataType>();
+                c.size_per_head                    = t[7].cast<uint32_t>();
+                c.kv_lora_rank                     = t[8].cast<uint32_t>();
+                c.rope_head_dim                    = t[9].cast<uint32_t>();
+                c.local_num_k_heads                = t[10].cast<uint32_t>();
+                c.local_num_v_heads                = t[11].cast<uint32_t>();
+                c.head_k_dim                       = t[12].cast<uint32_t>();
+                c.head_v_dim                       = t[13].cast<uint32_t>();
+                c.conv_kernel_dim                  = t[14].cast<uint32_t>();
+                c.ssm_state_dtype                  = t[15].cast<DataType>();
+                c.conv_state_dtype                 = t[16].cast<DataType>();
+                c.is_state_cache                   = t[17].cast<bool>();
+                c.entry_elems                      = t[18].cast<uint32_t>();
+                c.entries_per_block                = t[19].cast<uint32_t>();
+                c.compression_ratio                = t[20].cast<uint32_t>();
+                c.store_dtype                      = t[21].cast<DataType>();
+                c.block_size_bytes_override        = t[22].cast<size_t>();
+                c.block_size_bytes_alignment       = t[23].cast<size_t>();
+                c.block_size_alignment_min_entries = t[24].cast<uint32_t>();
+                c.has_sparse_slots                 = t[25].cast<bool>();
+                c.sparse_slots                     = t[26].cast<bool>();
+                c.skip_prefix_reuse                = t[27].cast<bool>();
+                c.extra                            = t[28].cast<KVCacheSpecDescExtra>();
+                c.has_evict_policy                 = t[29].cast<bool>();
+                c.evict_policy                     = t[30].cast<CacheEvictPolicy>();
+                c.has_reuse_policy                 = t[31].cast<bool>();
+                c.reuse_policy                     = t[32].cast<CacheReusePolicy>();
+                c.has_active_tail_blocks           = t[33].cast<bool>();
+                c.active_tail_blocks               = t[34].cast<int>();
+                c.has_validate_tail_blocks         = t[35].cast<bool>();
+                c.validate_tail_blocks             = t[36].cast<bool>();
+                c.has_prefix_reusable              = t[37].cast<bool>();
+                c.prefix_reusable                  = t[38].cast<bool>();
+                c.uses_pinned_cpu_backing          = t[39].cast<bool>();
+                c.has_is_cp_shardable              = t[40].cast<bool>();
+                c.is_cp_shardable                  = t[41].cast<bool>();
+                c.has_kernel_block_subdiv          = t[42].cast<bool>();
+                c.kernel_block_subdiv              = t[43].cast<bool>();
+                c.has_cp_compact_tail_blocks       = t[44].cast<bool>();
+                c.cp_compact_tail_blocks           = t[45].cast<bool>();
+                c.has_is_reservable                = t[46].cast<bool>();
+                c.is_reservable                    = t[47].cast<bool>();
+                return c;
+            }));
 
     // Register ModelConfig
     py::class_<ModelConfig>(m, "ModelConfig")
@@ -1678,7 +1774,6 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("special_tokens", &ModelConfig::special_tokens)
         .def_readwrite("quant_algo", &ModelConfig::quant_algo)
         .def_readwrite("eplb_config", &ModelConfig::eplb_config)
-        .def_readwrite("kv_cache_specs", &ModelConfig::kv_cache_specs)
         .def_readwrite("kv_cache_spec_descs", &ModelConfig::kv_cache_spec_descs)
         // task_type is defined as property below
         .def_readwrite("ckpt_path", &ModelConfig::ckpt_path)

@@ -187,10 +187,6 @@ struct KVCacheConfig {
     int64_t device_cache_min_free_blocks                 = 0;
     int     load_cache_retry_times = 1;  // Maximum retry attempts for load cache transfer failures
 
-    // Optional DSV4 HCA_STATE pool block count override. 0 means HCA_STATE
-    // follows the normal linear-step-derived block count.
-    uint32_t dsv4_hca_state_pool_blocks = 256;
-
     // Remote connector configuration fields
     bool        reco_enable_vipserver                = false;
     std::string reco_vipserver_domain                = "";

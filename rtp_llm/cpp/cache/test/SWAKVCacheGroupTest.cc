@@ -5,7 +5,6 @@
 #include <string>
 #include <vector>
 
-#include "rtp_llm/cpp/models/dsv4/Dsv4CacheLayout.h"
 #include "rtp_llm/cpp/cache/OpaqueKVCacheSpec.h"
 #include "rtp_llm/cpp/cache/SWAKVCacheGroup.h"
 #include "rtp_llm/cpp/cache/SharedBlockCache.h"

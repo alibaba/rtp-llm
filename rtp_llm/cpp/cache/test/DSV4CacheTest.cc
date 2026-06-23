@@ -7,7 +7,6 @@
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
 #include "rtp_llm/cpp/cache/BlockPoolConfigHelper.h"
 #include "rtp_llm/cpp/cache/CPSlotMapper.h"
-#include "rtp_llm/cpp/models/dsv4/Dsv4CacheLayout.h"
 #include "rtp_llm/cpp/cache/HybridPoolConfigCreator.h"
 #include "rtp_llm/cpp/cache/HybridPoolKVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/HybridTypeKVCacheAllocator.h"
@@ -208,8 +207,8 @@ TEST(HybridPoolConfigCreatorTest, MtpSwaOnlyLayerIsNotStripped) {
 
 TEST(HybridPoolConfigCreatorTest, Dsv4SpecOrderDoesNotAffectFixedGroupOrder) {
     auto mc = makeFlashModelConfig();
-    for (auto& layer_specs : mc.kv_cache_specs) {
-        std::reverse(layer_specs.second.begin(), layer_specs.second.end());
+    for (auto& layer_descs : mc.kv_cache_spec_descs) {
+        std::reverse(layer_descs.second.begin(), layer_descs.second.end());
     }
 
     ParallelismConfig pc;
@@ -361,8 +360,8 @@ TEST(CacheConfigTest, FromLayerDescsBuildsDeclarativeSpecsAndPolicies) {
     fixed.entries_per_block        = 2;
     fixed.store_dtype              = DataType::TYPE_UINT8;
     fixed.skip_prefix_reuse        = true;
-    fixed.explicit_block_num       = 7;
-    fixed.reserve_from_paged_budget = true;
+    fixed.extra.explicit_block_num        = 7;
+    fixed.extra.reserve_from_paged_budget = true;
     fixed.uses_pinned_cpu_backing  = true;
     fixed.has_is_cp_shardable      = true;
     fixed.is_cp_shardable          = false;
@@ -462,10 +461,10 @@ TEST(CacheConfigTest, FromLayerDescsRejectsInconsistentTagPolicy) {
     first.entry_elems        = 4;
     first.entries_per_block  = 2;
     first.store_dtype        = DataType::TYPE_UINT8;
-    first.explicit_block_num = 7;
+    first.extra.explicit_block_num = 7;
 
     KVCacheSpecDesc second = first;
-    second.explicit_block_num = 8;
+    second.extra.explicit_block_num = 8;
 
     std::map<int64_t, std::vector<KVCacheSpecDesc>> descs;
     descs[0] = {first};
@@ -475,17 +474,13 @@ TEST(CacheConfigTest, FromLayerDescsRejectsInconsistentTagPolicy) {
 
 TEST(HybridPoolConfigCreatorTest, Dsv4ModelProvidedAlignmentPropagatesToCacheSpecs) {
     auto mc = makeFlashModelConfig();
-    for (auto& layer_specs : mc.kv_cache_specs) {
-        for (auto& spec : layer_specs.second) {
-            if (spec->tag == "csa_kv") {
-                auto* kv_spec = dynamic_cast<CompressedKVCacheSpec*>(spec.get());
-                ASSERT_NE(kv_spec, nullptr);
-                kv_spec->block_size_bytes_alignment = 1024;
-            } else if (spec->tag == "swa_kv") {
-                auto* state_spec = dynamic_cast<FixedStateCacheSpec*>(spec.get());
-                ASSERT_NE(state_spec, nullptr);
-                state_spec->block_size_bytes_alignment        = 2048;
-                state_spec->block_size_alignment_min_entries = 256;
+    for (auto& layer_descs : mc.kv_cache_spec_descs) {
+        for (auto& desc : layer_descs.second) {
+            if (desc.tag == "csa_kv") {
+                desc.block_size_bytes_alignment = 1024;
+            } else if (desc.tag == "swa_kv") {
+                desc.block_size_bytes_alignment        = 2048;
+                desc.block_size_alignment_min_entries = 256;
             }
         }
     }
@@ -553,11 +548,14 @@ TEST(HybridPoolConfigCreatorTest, Dsv4GroupPoliciesMatchLegacyBehavior) {
     expect_policy("hca_state", CacheReusePolicy::NON_REUSABLE, CacheEvictPolicy::INDEPENDENT, 1);
     expect_policy("swa_kv", CacheReusePolicy::REUSABLE, CacheEvictPolicy::INDEPENDENT, 2);
     expect_policy("csa_state", CacheReusePolicy::REUSABLE, CacheEvictPolicy::INDEPENDENT, 2);
+    expect_policy("csa_kv", CacheReusePolicy::REUSABLE, CacheEvictPolicy::CHAIN, 0);
+    expect_policy("hca_kv", CacheReusePolicy::REUSABLE, CacheEvictPolicy::CHAIN, 0);
+    expect_policy("indexer_kv", CacheReusePolicy::REUSABLE, CacheEvictPolicy::CHAIN, 0);
 }
 
 TEST(HybridPoolConfigCreatorTest, Dsv4SpecsMissingFailsFastWithoutRatioFallback) {
     auto mc = makeFlashModelConfig();
-    mc.kv_cache_specs.clear();
+    mc.kv_cache_spec_descs.clear();
 
     ParallelismConfig pc;
     EXPECT_THROW((void)HybridPoolConfigCreator::createConfig(mc, pc, makeDsv4KvCacheConfig(), false, 0),
@@ -1060,7 +1058,7 @@ TEST(HybridPoolConfigCreatorTest, DSV4StateSwaPoolsFollowGlobalBlocks) {
     KVCacheConfig     kv_cache_config;
     kv_cache_config.seq_size_per_block                          = 128;
     kv_cache_config.test_block_num                              = 100;
-    kv_cache_config.dsv4_hca_state_pool_blocks                  = 0;
+    setDsv4ExplicitPoolBlocks(mc, "hca_state", 0);
     runtime_config.max_generate_batch_size                      = 5;
     runtime_config.fifo_scheduler_config.max_context_batch_size = 3;
 
@@ -1080,7 +1078,7 @@ TEST(HybridPoolConfigCreatorTest, DSV4HcaStatePoolBlocksOverridesOnlyHcaState) {
     KVCacheConfig     kv_cache_config;
     kv_cache_config.seq_size_per_block                          = 128;
     kv_cache_config.test_block_num                              = 100;
-    kv_cache_config.dsv4_hca_state_pool_blocks                  = 350;
+    setDsv4ExplicitPoolBlocks(mc, "hca_state", 350);
     runtime_config.max_generate_batch_size                      = 5;
     runtime_config.fifo_scheduler_config.max_context_batch_size = 3;
 
@@ -1159,7 +1157,7 @@ TEST(HybridPoolConfigCreatorTest, DSV4HcaStatePoolBlocksIndependentOfMaxConcurre
         KVCacheConfig     kv_cache_config;
         kv_cache_config.seq_size_per_block                          = 128;
         kv_cache_config.test_block_num                              = 100;
-        kv_cache_config.dsv4_hca_state_pool_blocks                  = 256;
+        setDsv4ExplicitPoolBlocks(mc, "hca_state", 256);
         runtime_config.max_generate_batch_size                      = max_concurrency;
         runtime_config.fifo_scheduler_config.max_context_batch_size = 1;
 
@@ -1181,7 +1179,7 @@ TEST(HybridPoolConfigCreatorTest, DSV4HcaStatePoolBlocksCanBeOverriddenByConfig)
     KVCacheConfig     kv_cache_config;
     kv_cache_config.seq_size_per_block                          = 128;
     kv_cache_config.test_block_num                              = 100;
-    kv_cache_config.dsv4_hca_state_pool_blocks                  = 6;
+    setDsv4ExplicitPoolBlocks(mc, "hca_state", 6);
     runtime_config.max_generate_batch_size                      = 2;
     runtime_config.fifo_scheduler_config.max_context_batch_size = 1;
 
@@ -1279,13 +1277,13 @@ TEST(CacheConfigTest, HcaStateReserveDeductedFromPagedBudget) {
     KVCacheConfig kv_cache_config_with;
     kv_cache_config_with.seq_size_per_block         = 128;
     kv_cache_config_with.kv_cache_mem_mb            = 65536;
-    kv_cache_config_with.dsv4_hca_state_pool_blocks = small_hca_state_pool;
+    setDsv4ExplicitPoolBlocks(mc, "hca_state", small_hca_state_pool);
     auto config_with = CacheConfigCreator::createConfig(mc, pc, runtime_config, kv_cache_config_with);
 
     KVCacheConfig kv_cache_config_without;
     kv_cache_config_without.seq_size_per_block         = 128;
     kv_cache_config_without.kv_cache_mem_mb            = 65536;
-    kv_cache_config_without.dsv4_hca_state_pool_blocks = large_hca_state_pool;
+    setDsv4ExplicitPoolBlocks(mc, "hca_state", large_hca_state_pool);
     auto config_without = CacheConfigCreator::createConfig(mc, pc, runtime_config, kv_cache_config_without);
 
     // More HCA_STATE blocks reserve more HBM and leave fewer blocks for the global pools.
@@ -1306,7 +1304,6 @@ TEST(CacheConfigTest, DSV4ExplicitHcaStatePoolBlocksIgnoreLinearStep) {
 
     ParallelismConfig pc;
     KVCacheConfig     kv_cache_config = makeDsv4KvCacheConfig();
-    kv_cache_config.dsv4_hca_state_pool_blocks = 256;
     auto config = HybridPoolConfigCreator::createConfig(makeProModelConfig(), pc, kv_cache_config, false, 0);
     config.linear_step = 4;
     config.finalizeBlockNums(100, runtime_config);
@@ -1333,9 +1330,10 @@ TEST(CacheConfigTest, DSV4StateSwaPoolsWithoutExplicitBlocksUseGlobalBlocks) {
     kv_cache_config.seq_size_per_block = 128;
     kv_cache_config.test_block_num     = 100;
     kv_cache_config.linear_step        = 4;
-    kv_cache_config.dsv4_hca_state_pool_blocks = 0;
+    auto mc = makeProModelConfig();
+    setDsv4ExplicitPoolBlocks(mc, "hca_state", 0);
 
-    auto config = CacheConfigCreator::createConfig(makeProModelConfig(), pc, runtime_config, kv_cache_config);
+    auto config = CacheConfigCreator::createConfig(mc, pc, runtime_config, kv_cache_config);
 
     ASSERT_EQ(config.groupBlockNumsSnapshot().size(), static_cast<size_t>(kDsv4PoolNum));
     for (int gid = 0; gid < kDsv4PoolNum; ++gid) {
@@ -2383,7 +2381,7 @@ TEST_F(DSV4AllocatorTest, HybridPoolReserveBlocksDoNotReduceExplicitHcaStateCapa
     auto              mc = makeFlashModelConfig();
     ParallelismConfig pc;
     auto              kv_config = makeDsv4KvCacheConfig();
-    kv_config.dsv4_hca_state_pool_blocks = 11;
+    setDsv4ExplicitPoolBlocks(mc, "hca_state", 11);
     auto              config    = HybridPoolConfigCreator::createConfig(mc, pc, kv_config, false, 0);
     config.block_num            = 40;
     std::vector<uint32_t> block_nums(static_cast<size_t>(config.groupNums()), config.block_num);

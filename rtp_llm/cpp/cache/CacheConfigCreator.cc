@@ -45,9 +45,8 @@ size_t effectivePagedBlockBytes(const CacheConfig& config, int step) {
 void setupKernelSeqSize(CacheConfig& config, const KVCacheConfig& kv_cache_config, const char* config_name) {
     if (kv_cache_config.kernel_seq_size_per_block > 0) {
         const auto kernel_seq_size_per_block = static_cast<size_t>(kv_cache_config.kernel_seq_size_per_block);
-        // Generic divisibility check. Sub-creators that need stricter alignment
-        // (e.g. Dsv4CachePlanBuilder requires 128-token alignment) validate
-        // their own constraints during createBasicConfig().
+        // Generic divisibility check. Desc-based hybrid pool layouts validate
+        // their own stricter alignment during createBasicConfig().
         RTP_LLM_CHECK_WITH_INFO(config.seq_size_per_block % kernel_seq_size_per_block == 0,
                                 "%s seq_size_per_block(%zu) must be divisible by kernel_seq_size_per_block(%zu)",
                                 config_name,
@@ -107,9 +106,9 @@ CacheConfig CacheConfigCreator::createBasicConfig(const ModelConfig&       model
     //   2. enable_hybrid_attention=true             → HybridType  (shared BlockPool across groups)
     //   3. else                                     → Single       (standard MHA/MLA path)
     if (model_config.hybrid_attention_config.enable_independent_kv_cache_pools) {
-        RTP_LLM_CHECK_WITH_INFO(!model_config.kv_cache_specs.empty(),
-                                "enable_independent_kv_cache_pools=true requires model_config.kv_cache_specs "
-                                "to be populated; call build_kv_cache_specs() before initializing cache");
+        RTP_LLM_CHECK_WITH_INFO(!model_config.kv_cache_spec_descs.empty() || !model_config.kv_cache_specs.empty(),
+                                "enable_independent_kv_cache_pools=true requires kv_cache_spec_descs or "
+                                "kv_cache_specs to be populated before initializing cache");
         return HybridPoolConfigCreator::createConfig(
             model_config, parallelism_config, kv_cache_config, is_mtp, gen_num_per_cycle);
     } else if (model_config.hybrid_attention_config.enable_hybrid_attention) {

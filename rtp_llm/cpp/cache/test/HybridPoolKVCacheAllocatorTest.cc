@@ -1139,7 +1139,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4StateSwaPoolsWithoutExplicitBlocksUse
     ParallelismConfig pc;
     KVCacheConfig     kv_cache_config;
     kv_cache_config.seq_size_per_block = 128;
-    kv_cache_config.dsv4_hca_state_pool_blocks = 0;
+    setDsv4ExplicitPoolBlocks(mc, "hca_state", 0);
     auto config                        = HybridPoolConfigCreator::createConfig(mc, pc, kv_cache_config, false, 0);
     config.linear_step                 = 4;
 

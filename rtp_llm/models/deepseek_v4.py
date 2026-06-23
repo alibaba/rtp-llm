@@ -33,11 +33,10 @@ import torch
 
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.ops import (
+    CacheEvictPolicy,
+    CacheReusePolicy,
     CacheType,
-    CompressedKVCacheSpec,
     DataType,
-    FixedStateCacheSpec,
-    KVCacheSpec,
     KVCacheSpecDesc,
     KvCacheDataType,
 )
@@ -66,177 +65,124 @@ from rtp_llm.utils.model_weight import (
 SCORING_FUNC_SOFTMAX = 0
 SCORING_FUNC_SIGMOID = 1
 SCORING_FUNC_SQRT_SOFTPLUS = 2  # DeepSeek-V4
+DSV4_FP8_KV_ENTRY_BYTES = 584
+DSV4_FP8_INDEXER_ENTRY_BYTES = 132
+DSV4_FP8_MLA_BLOCK_ALIGNMENT_BYTES = 576
+DSV4_SWA_WINDOW_ENTRIES = 128
+DSV4_GROUP_ORDER = {
+    "csa_kv": 0,
+    "hca_kv": 1,
+    "indexer_kv": 2,
+    "indexer_state": 3,
+    "csa_state": 4,
+    "hca_state": 5,
+    "swa_kv": 6,
+}
 
-def _make_kv_cache_spec(
+
+def _dsv4_kv_cache_desc_for_tag(
     tag: str,
-    kind: str,
-    entry_elems: int,
-    dtype: DataType,
-    compression_ratio: int = 1,
-) -> KVCacheSpec:
-    if kind == "compressed_kv":
-        spec = CompressedKVCacheSpec()
-        spec.entry_elems = int(entry_elems)
-        spec.compression_ratio = int(compression_ratio)
-        spec.store_dtype = dtype
-    else:
-        spec = FixedStateCacheSpec()
-        spec.state_dim = int(entry_elems)
-        spec.store_dtype = dtype
-    spec.tag = tag
-    spec.dtype = dtype
-    return spec
-
-
-def _build_dsv4_kv_cache_specs(config: ModelConfig) -> Dict[int, List[KVCacheSpec]]:
-    ratios = list(config.attn_config.layer_compress_ratios)
-
+    config: ModelConfig,
+) -> KVCacheSpecDesc:
+    fp8_kv = config.attn_config.kv_cache_dtype == KvCacheDataType.FP8
     head_dim = int(config.attn_config.size_per_head)
     indexer_head_dim = int(config.attn_config.indexer_head_dim)
-    # These defaults match BASE/BF16 cache. DeepSeekV4._post_build_model_config
-    # refreshes entry sizes after kv_cache_config/quantization finalizes kv_cache_dtype.
-    kv_entry_elems = head_dim * 2
-    indexer_entry_elems = indexer_head_dim * 2
-
-    csa_kv_spec = _make_kv_cache_spec(
-        "csa_kv", "compressed_kv", kv_entry_elems, DataType.TYPE_UINT8, 4
-    )
-    hca_kv_spec = _make_kv_cache_spec(
-        "hca_kv", "compressed_kv", kv_entry_elems, DataType.TYPE_UINT8, 128
-    )
-    indexer_kv_spec = _make_kv_cache_spec(
-        "indexer_kv", "compressed_kv", indexer_entry_elems, DataType.TYPE_UINT8, 4
-    )
-    indexer_state_spec = _make_kv_cache_spec(
-        "indexer_state", "fixed_state", 4 * indexer_head_dim, DataType.TYPE_FP32
-    )
-    csa_state_spec = _make_kv_cache_spec(
-        "csa_state", "fixed_state", 4 * head_dim, DataType.TYPE_FP32
-    )
-    hca_state_spec = _make_kv_cache_spec(
-        "hca_state", "fixed_state", 2 * head_dim, DataType.TYPE_FP32
-    )
-    swa_kv_spec = _make_kv_cache_spec(
-        "swa_kv", "sliding_window_kv", kv_entry_elems, DataType.TYPE_UINT8
+    kv_entry_elems = DSV4_FP8_KV_ENTRY_BYTES if fp8_kv else head_dim * 2
+    indexer_entry_elems = (
+        DSV4_FP8_INDEXER_ENTRY_BYTES if fp8_kv else indexer_head_dim * 2
     )
 
-    layer_specs: Dict[int, List[KVCacheSpec]] = {}
-    for layer_id in range(config.num_layers):
-        ratio = int(ratios[layer_id]) if layer_id < len(ratios) else 0
-        if ratio == 4:
-            layer_specs[layer_id] = [
-                csa_kv_spec,
-                indexer_kv_spec,
-                indexer_state_spec,
-                csa_state_spec,
-                swa_kv_spec,
-            ]
-        elif ratio == 128:
-            layer_specs[layer_id] = [hca_kv_spec, hca_state_spec, swa_kv_spec]
-        else:
-            layer_specs[layer_id] = [swa_kv_spec]
-    return layer_specs
-
-
-def _kv_cache_spec_to_desc(spec: KVCacheSpec) -> KVCacheSpecDesc:
     desc = KVCacheSpecDesc()
-    desc.tag = spec.tag
-    desc.seq_size_per_block = int(spec.seq_size_per_block)
-    desc.dtype = spec.dtype
-    if hasattr(spec, "compression_ratio"):
+    desc.tag = tag
+    desc.has_group_order = True
+    desc.group_order = DSV4_GROUP_ORDER[tag]
+
+    if tag in ("csa_kv", "hca_kv", "indexer_kv"):
+        desc.dtype = DataType.TYPE_UINT8
         desc.cache_type = CacheType.COMPRESSED_KV
-        desc.entry_elems = int(spec.entry_elems)
-        desc.compression_ratio = int(spec.compression_ratio)
-        desc.store_dtype = spec.store_dtype
-        desc.block_size_bytes_alignment = int(spec.block_size_bytes_alignment)
+        desc.is_state_cache = False
+        desc.entry_elems = indexer_entry_elems if tag == "indexer_kv" else kv_entry_elems
+        desc.compression_ratio = 128 if tag == "hca_kv" else 4
+        desc.store_dtype = DataType.TYPE_UINT8
+        desc.extra.derive_entries_from_kernel_block = True
+        if desc.block_size_bytes_alignment == 0 and desc.entry_elems == DSV4_FP8_KV_ENTRY_BYTES:
+            desc.block_size_bytes_alignment = DSV4_FP8_MLA_BLOCK_ALIGNMENT_BYTES
     else:
+        desc.dtype = DataType.TYPE_UINT8 if tag == "swa_kv" else DataType.TYPE_FP32
         desc.cache_type = CacheType.FIXED_STATE
-        desc.entry_elems = int(spec.state_dim)
-        desc.entries_per_block = int(spec.entries_per_block)
-        desc.store_dtype = spec.store_dtype
-        desc.block_size_bytes_override = int(spec.block_size_bytes_override)
-        desc.block_size_bytes_alignment = int(spec.block_size_bytes_alignment)
-        desc.block_size_alignment_min_entries = int(
-            spec.block_size_alignment_min_entries
+        desc.store_dtype = DataType.TYPE_UINT8 if tag == "swa_kv" else DataType.TYPE_FP32
+        if tag == "indexer_state":
+            desc.entry_elems = 4 * indexer_head_dim
+            desc.extra.state_ring_compression_ratio = 4
+            desc.extra.state_ring_overlap = 1
+            desc.extra.cp_align_entries = True
+            desc.extra.cp_slice_entries = True
+        elif tag == "csa_state":
+            desc.entry_elems = 4 * head_dim
+            desc.extra.state_ring_compression_ratio = 4
+            desc.extra.state_ring_overlap = 1
+            desc.extra.cp_align_entries = True
+            desc.extra.cp_slice_entries = True
+        elif tag == "hca_state":
+            desc.entry_elems = 2 * head_dim
+            desc.extra.state_ring_compression_ratio = 128
+            desc.extra.cp_align_entries = True
+            desc.extra.cp_slice_entries = True
+            desc.extra.explicit_block_num = 256
+            desc.skip_prefix_reuse = True
+            desc.has_reuse_policy = True
+            desc.reuse_policy = CacheReusePolicy.NON_REUSABLE
+            desc.has_active_tail_blocks = True
+            desc.active_tail_blocks = 1
+            desc.has_validate_tail_blocks = True
+            desc.validate_tail_blocks = False
+        elif tag == "swa_kv":
+            desc.entry_elems = kv_entry_elems
+            desc.extra.state_ring_compression_ratio = DSV4_SWA_WINDOW_ENTRIES
+            desc.extra.cp_align_entries = True
+            desc.extra.cp_prefill_slice_block_bytes = True
+            if desc.block_size_bytes_alignment == 0 and desc.entry_elems == DSV4_FP8_KV_ENTRY_BYTES:
+                desc.block_size_bytes_alignment = DSV4_FP8_MLA_BLOCK_ALIGNMENT_BYTES
+        desc.extra.state_ring_add_gen_num_per_cycle = True
+        desc.extra.use_fixed_region_cp_tokens = True
+        desc.block_size_alignment_min_entries = (
+            desc.block_size_alignment_min_entries or DSV4_SWA_WINDOW_ENTRIES
         )
-        desc.is_state_cache = spec.tag != "swa_kv"
-        desc.skip_prefix_reuse = bool(spec.skip_prefix_reuse)
+        desc.is_state_cache = True
+        if desc.skip_prefix_reuse:
+            desc.has_reuse_policy = True
+            desc.reuse_policy = CacheReusePolicy.NON_REUSABLE
+            desc.has_active_tail_blocks = True
+            desc.active_tail_blocks = 1
+            desc.has_validate_tail_blocks = True
+            desc.validate_tail_blocks = False
+        desc.has_evict_policy = True
+        desc.evict_policy = CacheEvictPolicy.INDEPENDENT
     return desc
 
 
 def _build_dsv4_kv_cache_spec_descs(
-    layer_specs: Dict[int, List[KVCacheSpec]]
+    config: ModelConfig,
 ) -> Dict[int, List[KVCacheSpecDesc]]:
-    return {
-        layer_id: [_kv_cache_spec_to_desc(spec) for spec in specs]
-        for layer_id, specs in layer_specs.items()
-    }
+    layer_descs: Dict[int, List[KVCacheSpecDesc]] = {}
+    ratios = list(config.attn_config.layer_compress_ratios)
+    for layer_id in range(config.num_layers):
+        ratio = int(ratios[layer_id]) if layer_id < len(ratios) else 0
+        if ratio == 4:
+            tags = ["csa_kv", "indexer_kv", "indexer_state", "csa_state", "swa_kv"]
+        elif ratio == 128:
+            tags = ["hca_kv", "hca_state", "swa_kv"]
+        else:
+            tags = ["swa_kv"]
+        layer_descs[layer_id] = [
+            _dsv4_kv_cache_desc_for_tag(tag, config)
+            for tag in tags
+        ]
+    return layer_descs
 
 
-def _refresh_dsv4_kv_cache_specs(config: ModelConfig) -> None:
-    expected_tags = [
-        "csa_kv",
-        "hca_kv",
-        "indexer_kv",
-        "indexer_state",
-        "csa_state",
-        "hca_state",
-        "swa_kv",
-    ]
-    expected_tag_set = set(expected_tags)
-
-    specs_by_tag = {}
-    for layer_id, layer_specs in config.kv_cache_specs.items():
-        seen_layer_tags = set()
-        for spec in layer_specs:
-            if not spec.tag:
-                raise ValueError("DeepSeek-V4 kv_cache spec tag must not be empty")
-            if spec.tag not in expected_tag_set:
-                raise ValueError(f"Unknown DeepSeek-V4 kv_cache spec tag: {spec.tag}")
-            if spec.tag in seen_layer_tags:
-                raise ValueError(
-                    f"DeepSeek-V4 kv_cache spec tag duplicated in layer {layer_id}: {spec.tag}"
-                )
-            seen_layer_tags.add(spec.tag)
-            specs_by_tag.setdefault(spec.tag, spec)
-
-    fp8_kv = config.attn_config.kv_cache_dtype == KvCacheDataType.FP8
-    head_dim = int(config.attn_config.size_per_head)
-    indexer_head_dim = int(config.attn_config.indexer_head_dim)
-    kv_entry_elems = 584 if fp8_kv else head_dim * 2
-    indexer_entry_elems = 132 if fp8_kv else indexer_head_dim * 2
-
-    for tag in expected_tags:
-        spec = specs_by_tag.get(tag)
-        if spec is None:
-            continue
-        if tag in ("csa_kv", "hca_kv", "swa_kv"):
-            if hasattr(spec, "entry_elems"):
-                spec.entry_elems = kv_entry_elems
-            else:
-                spec.state_dim = kv_entry_elems
-            spec.store_dtype = DataType.TYPE_UINT8
-            spec.dtype = DataType.TYPE_UINT8
-        elif tag == "indexer_kv":
-            spec.entry_elems = indexer_entry_elems
-            spec.store_dtype = DataType.TYPE_UINT8
-            spec.dtype = DataType.TYPE_UINT8
-        elif tag == "indexer_state":
-            spec.state_dim = 4 * indexer_head_dim
-            spec.store_dtype = DataType.TYPE_FP32
-            spec.dtype = DataType.TYPE_FP32
-        elif tag == "csa_state":
-            spec.state_dim = 4 * head_dim
-            spec.store_dtype = DataType.TYPE_FP32
-            spec.dtype = DataType.TYPE_FP32
-        elif tag == "hca_state":
-            spec.state_dim = 2 * head_dim
-            spec.store_dtype = DataType.TYPE_FP32
-            spec.dtype = DataType.TYPE_FP32
-
-    config.kv_cache_spec_descs = _build_dsv4_kv_cache_spec_descs(
-        config.kv_cache_specs
-    )
+def _refresh_dsv4_kv_cache_spec_descs(config: ModelConfig) -> None:
+    config.kv_cache_spec_descs = _build_dsv4_kv_cache_spec_descs(config)
 
 
 
@@ -671,6 +617,10 @@ class DeepSeekV4(DeepSeekV2):
     `_create_python_model` until M2 lands the HCA-only forward path.
     """
 
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        _refresh_dsv4_kv_cache_spec_descs(self.model_config)
+
     @classmethod
     def _create_config(cls, ckpt_path: str):
         config = ModelConfig()
@@ -690,7 +640,7 @@ class DeepSeekV4(DeepSeekV2):
 
     @classmethod
     def _post_build_model_config(cls, model_config: ModelConfig) -> None:
-        _refresh_dsv4_kv_cache_specs(model_config)
+        _refresh_dsv4_kv_cache_spec_descs(model_config)
         # DSV4 uses 7 independent BlockPools (one per cache group). Declare this
         # explicitly so CacheConfigCreator routes to HybridPoolConfigCreator
         # without inspecting internal spec tags or layer_compress_ratios.
@@ -800,10 +750,7 @@ class DeepSeekV4(DeepSeekV2):
         config.attn_config.indexer_head_dim = int(config_json["index_head_dim"])
         config.attn_config.indexer_head_num = int(config_json["index_n_heads"])
         config.attn_config.indexer_topk = int(config_json["index_topk"])
-        config.kv_cache_specs = _build_dsv4_kv_cache_specs(config)
-        config.kv_cache_spec_descs = _build_dsv4_kv_cache_spec_descs(
-            config.kv_cache_specs
-        )
+        _refresh_dsv4_kv_cache_spec_descs(config)
 
         # ---- MoE ----
         scoring_func = config_json.get("scoring_func", "softmax")
@@ -986,10 +933,7 @@ class DeepSeekV4Mtp(DeepSeekV4, DeepSeekV3Mtp):
         config = super()._create_config(ckpt_path)
         config.num_layers = 1
         config.attn_config.layer_compress_ratios = [0]
-        config.kv_cache_specs = _build_dsv4_kv_cache_specs(config)
-        config.kv_cache_spec_descs = _build_dsv4_kv_cache_spec_descs(
-            config.kv_cache_specs
-        )
+        _refresh_dsv4_kv_cache_spec_descs(config)
         config.moe_layer_index = list(range(config.num_layers))
         config.reverse_e_h_norm = True
         config.is_mtp = True

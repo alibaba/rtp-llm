@@ -6,7 +6,6 @@
 
 #include "rtp_llm/cpp/cache/KVCacheSpec.h"
 #include "rtp_llm/cpp/cache/MemoryEvaluationHelper.h"
-#include "rtp_llm/cpp/models/dsv4/Dsv4CachePlanBuilder.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 
 namespace rtp_llm {
@@ -98,6 +97,161 @@ ModelConfig modelConfigWithDescSpecs(const ModelConfig& model_config, rtp_llm::D
     auto model_copy = model_config;
     model_copy.kv_cache_specs = layerSpecsFromDescs(model_config, dtype);
     return model_copy;
+}
+
+uint32_t alignUpToMultiple(uint32_t value, uint32_t multiple) {
+    RTP_LLM_CHECK_WITH_INFO(multiple > 0, "align multiple must be > 0");
+    return ((value + multiple - 1) / multiple) * multiple;
+}
+
+uint32_t fixedRegionCpSize(const ParallelismConfig& parallelism_config) {
+    if (!parallelism_config.prefill_cp_config.kv_cache_sharded) {
+        return 1;
+    }
+    if (parallelism_config.role_type == RoleType::PREFILL && parallelism_config.tp_size > 1) {
+        return static_cast<uint32_t>(parallelism_config.tp_size);
+    }
+    if (parallelism_config.role_type == RoleType::DECODE && parallelism_config.prefill_cp_config.is_prefill_enabled()) {
+        RTP_LLM_CHECK_WITH_INFO(
+            parallelism_config.prefill_cp_config.prefill_cp_size > 1,
+            "fixed/SWA CP sharding decode requires explicit prefill_cp_size when PREFILL_CP and kv_cache_sharded are enabled");
+        return static_cast<uint32_t>(parallelism_config.prefill_cp_config.prefill_cp_size);
+    }
+    return 1;
+}
+
+bool isPrefillCpSliced(const ParallelismConfig& parallelism_config) {
+    return parallelism_config.role_type == RoleType::PREFILL && fixedRegionCpSize(parallelism_config) > 1;
+}
+
+uint32_t computeStateRingEntries(const KVCacheSpecDesc& desc, int gen_num_per_cycle) {
+    RTP_LLM_CHECK_WITH_INFO(desc.extra.state_ring_compression_ratio > 0,
+                            "state ring desc tag=%s requires positive state_ring_compression_ratio",
+                            desc.tag.c_str());
+    RTP_LLM_CHECK_WITH_INFO(gen_num_per_cycle >= 0,
+                            "state ring desc tag=%s requires non-negative gen_num_per_cycle, got %d",
+                            desc.tag.c_str(),
+                            gen_num_per_cycle);
+    const uint32_t window =
+        (1 + desc.extra.state_ring_overlap) * desc.extra.state_ring_compression_ratio;
+    const uint32_t raw =
+        window + (desc.extra.state_ring_add_gen_num_per_cycle ? static_cast<uint32_t>(gen_num_per_cycle) : 0);
+    return (raw + 1) & ~1U;
+}
+
+size_t cpPrefillSliceBlockBytes(const KVCacheSpecDesc&  desc,
+                                uint32_t                entries_per_block,
+                                const ParallelismConfig& parallelism_config) {
+    const auto cp_size = fixedRegionCpSize(parallelism_config);
+    if (cp_size <= 1 || !isPrefillCpSliced(parallelism_config) || !desc.extra.cp_prefill_slice_block_bytes) {
+        return desc.block_size_bytes_override;
+    }
+    const size_t natural_bytes = static_cast<size_t>(entries_per_block) * desc.entry_elems * getTypeSize(desc.store_dtype);
+    const size_t align =
+        desc.block_size_bytes_alignment > 0 ?
+            std::lcm(desc.block_size_bytes_alignment, static_cast<size_t>(cp_size)) :
+            static_cast<size_t>(cp_size);
+    const size_t full_stride_bytes = ((natural_bytes + align - 1) / align) * align;
+    RTP_LLM_CHECK_WITH_INFO(full_stride_bytes % cp_size == 0,
+                            "CP prefill byte slicing tag=%s full stride %zu must be divisible by cp_size %u",
+                            desc.tag.c_str(),
+                            full_stride_bytes,
+                            cp_size);
+    return full_stride_bytes / cp_size;
+}
+
+uint32_t localKvHeads(const ModelConfig& model_config, const ParallelismConfig& parallelism_config) {
+    return static_cast<uint32_t>(
+        (model_config.attn_config.kv_head_num % parallelism_config.get_attn_tp_size() == 0) ?
+            model_config.attn_config.kv_head_num / parallelism_config.get_attn_tp_size() :
+            model_config.attn_config.kv_head_num
+                / std::gcd(model_config.attn_config.kv_head_num, parallelism_config.get_attn_tp_size()));
+}
+
+LayerKVCacheSpecDescs prepareHybridPoolDescs(const ModelConfig&       model_config,
+                                             const ParallelismConfig& parallelism_config,
+                                             rtp_llm::DataType        dtype,
+                                             uint32_t                 physical_tokens_per_block,
+                                             uint32_t                 kernel_tokens_per_block,
+                                             int                      gen_num_per_cycle) {
+    RTP_LLM_CHECK_WITH_INFO(model_config.kv_cache_spec_descs.size() == static_cast<size_t>(model_config.num_layers),
+                            "hybrid-pool desc config requires layer-wise kv_cache_spec_descs for every layer, got %zu/%ld",
+                            model_config.kv_cache_spec_descs.size(),
+                            model_config.num_layers);
+    const auto cp_size        = fixedRegionCpSize(parallelism_config);
+    const bool prefill_sliced = isPrefillCpSliced(parallelism_config);
+
+    auto descs = model_config.kv_cache_spec_descs;
+    for (int64_t layer_id = 0; layer_id < model_config.num_layers; ++layer_id) {
+        auto it = descs.find(layer_id);
+        RTP_LLM_CHECK_WITH_INFO(it != descs.end(),
+                                "hybrid-pool desc config missing kv_cache_spec_descs for layer %ld",
+                                layer_id);
+        RTP_LLM_CHECK_WITH_INFO(!it->second.empty(),
+                                "hybrid-pool desc config layer %ld has no descs",
+                                layer_id);
+        for (auto& desc : it->second) {
+            desc.dtype = desc.dtype == DataType::TYPE_INVALID ? dtype : desc.dtype;
+            if (desc.cache_type == CacheType::MHA && desc.local_head_num_kv == 0) {
+                desc.local_head_num_kv = localKvHeads(model_config, parallelism_config);
+            } else if (desc.cache_type == CacheType::MLA && desc.local_head_num_kv == 0) {
+                desc.local_head_num_kv = 1;
+            } else if (desc.cache_type == CacheType::LINEAR) {
+                const auto& linear_config = model_config.linear_attention_config;
+                const int tp = std::max(1, static_cast<int>(parallelism_config.get_attn_tp_size()));
+                if (desc.local_num_k_heads == 0) {
+                    desc.local_num_k_heads = static_cast<uint32_t>(linear_config.linear_num_key_heads / tp);
+                }
+                if (desc.local_num_v_heads == 0) {
+                    desc.local_num_v_heads = static_cast<uint32_t>(linear_config.linear_num_value_heads / tp);
+                }
+                if (desc.local_head_num_kv == 0) {
+                    desc.local_head_num_kv = static_cast<uint32_t>(std::max(
+                        1,
+                        (linear_config.linear_num_value_heads > 1) ?
+                            static_cast<int>(linear_config.linear_num_value_heads / parallelism_config.get_attn_tp_size()) :
+                            static_cast<int>(linear_config.linear_num_value_heads)));
+                }
+            }
+
+            if (desc.extra.derive_entries_from_kernel_block) {
+                RTP_LLM_CHECK_WITH_INFO(desc.compression_ratio > 0,
+                                        "desc tag=%s derives entries from kernel block but has invalid compression_ratio=%u",
+                                        desc.tag.c_str(),
+                                        desc.compression_ratio);
+                RTP_LLM_CHECK_WITH_INFO(kernel_tokens_per_block % desc.compression_ratio == 0,
+                                        "desc tag=%s compression_ratio=%u must divide kernel block %u",
+                                        desc.tag.c_str(),
+                                        desc.compression_ratio,
+                                        kernel_tokens_per_block);
+                desc.entries_per_block = kernel_tokens_per_block / desc.compression_ratio;
+            }
+
+            if (desc.extra.state_ring_compression_ratio > 0) {
+                uint32_t entries = computeStateRingEntries(desc, gen_num_per_cycle);
+                if (cp_size > 1 && (desc.extra.cp_align_entries || desc.extra.cp_slice_entries)) {
+                    entries = alignUpToMultiple(entries, cp_size);
+                    if (desc.extra.cp_slice_entries && prefill_sliced) {
+                        entries /= cp_size;
+                    }
+                }
+                desc.entries_per_block = entries;
+                desc.block_size_bytes_override = cpPrefillSliceBlockBytes(desc, entries, parallelism_config);
+            }
+
+            if (desc.extra.use_fixed_region_cp_tokens && cp_size > 1) {
+                desc.seq_size_per_block = physical_tokens_per_block * cp_size;
+            } else {
+                desc.seq_size_per_block =
+                    desc.seq_size_per_block == 0 ? physical_tokens_per_block : desc.seq_size_per_block;
+            }
+
+            if (desc.cache_type == CacheType::COMPRESSED_KV) {
+                desc.has_sparse_slots   = true;
+            }
+        }
+    }
+    return descs;
 }
 
 void prepareFullAttentionSpec(KVCacheSpecPtr            spec,
@@ -292,31 +446,61 @@ CacheConfig createHybridAttentionPoolConfig(const ModelConfig&       model_confi
                                             bool                     is_mtp,
                                             int                      gen_num_per_cycle) {
     const auto dtype = MemoryEvaluationHelper::getDataTypeForCache(model_config);
-    const auto spec_model_config = modelConfigWithDescSpecs(model_config, dtype);
+    const auto physical_tokens_per_block =
+        kv_cache_config.seq_size_per_block > 0 ? static_cast<uint32_t>(kv_cache_config.seq_size_per_block) :
+                                                 static_cast<uint32_t>(model_config.attn_config.tokens_per_block);
+    const auto kernel_tokens_per_block =
+        kv_cache_config.kernel_seq_size_per_block > 0 ? static_cast<uint32_t>(kv_cache_config.kernel_seq_size_per_block) :
+                                                        physical_tokens_per_block;
+    RTP_LLM_CHECK_WITH_INFO(physical_tokens_per_block > 0, "hybrid-pool seq_size_per_block must be > 0");
+    RTP_LLM_CHECK_WITH_INFO(kernel_tokens_per_block > 0, "hybrid-pool kernel_seq_size_per_block must be > 0");
+    RTP_LLM_CHECK_WITH_INFO(physical_tokens_per_block >= kernel_tokens_per_block
+                                && physical_tokens_per_block % kernel_tokens_per_block == 0,
+                            "hybrid-pool seq_size_per_block=%u must be >= kernel_seq_size_per_block=%u and divisible by it",
+                            physical_tokens_per_block,
+                            kernel_tokens_per_block);
 
     CacheConfig config;
     config.layer_num          = static_cast<uint32_t>(model_config.num_layers);
     config.layer_all_num      = config.layer_num;
     config.block_num          = 0;
-    config.seq_size_per_block = static_cast<uint32_t>(model_config.attn_config.tokens_per_block);
+    config.seq_size_per_block = physical_tokens_per_block;
+    config.kernel_seq_size_per_block = kernel_tokens_per_block;
     config.use_mla            = model_config.attn_config.use_mla;
     config.dtype              = dtype;
     config.linear_step        = 1;
     config.is_sparse          = model_config.attn_config.is_sparse;
 
-    // Route between DSV4 typed-pool plan and generic hybrid-attention groups.
-    // layer_compress_ratios is the model-declared indicator: DSV4 sets it,
-    // Qwen3-Next does not.  Dsv4CachePlanBuilder internally validates that
-    // kv_cache_specs are present and well-formed.
-    const bool use_dsv4_cache_plan = !model_config.attn_config.layer_compress_ratios.empty();
-    if (use_dsv4_cache_plan) {
-        RTP_LLM_CHECK_WITH_INFO(!spec_model_config.kv_cache_specs.empty(),
-                                "DSV4 cache config requires model_config.kv_cache_spec_descs or kv_cache_specs");
-        Dsv4CachePlanBuilder::applyConfig(
-            config, spec_model_config, parallelism_config, kv_cache_config, gen_num_per_cycle);
+    if (!model_config.kv_cache_spec_descs.empty()) {
+        auto descs = prepareHybridPoolDescs(
+            model_config, parallelism_config, dtype, physical_tokens_per_block, kernel_tokens_per_block, gen_num_per_cycle);
+        SpecBuildContext ctx;
+        ctx.dtype              = dtype;
+        ctx.seq_size_per_block = physical_tokens_per_block;
+        config.fromLayerDescs(descs, ctx);
+        config.group_seq_size_per_block.resize(static_cast<size_t>(config.groupNums()), config.seq_size_per_block);
+        for (size_t gid = 0; gid < static_cast<size_t>(config.groupNums()); ++gid) {
+            const auto& spec = config.specForGroup(gid);
+            RTP_LLM_CHECK_WITH_INFO(spec != nullptr, "hybrid-pool desc config produced null spec gid=%zu", gid);
+            config.group_seq_size_per_block[gid] = spec->seq_size_per_block;
+            config.use_typed_cache_regions =
+                config.use_typed_cache_regions || spec->type == KVCacheSpecType::OpaqueKV
+                || spec->type == KVCacheSpecType::OpaqueState;
+            config.use_opaque_kv_cache_store =
+                config.use_opaque_kv_cache_store || spec->type == KVCacheSpecType::OpaqueKV
+                || spec->type == KVCacheSpecType::OpaqueState;
+        }
+        for (const auto& [_, layer_descs] : descs) {
+            for (const auto& desc : layer_descs) {
+                config.is_sparse = config.is_sparse || desc.cache_type == CacheType::COMPRESSED_KV;
+            }
+        }
+        config.disable_decode_first_malloc_device_reuse =
+            config.disable_decode_first_malloc_device_reuse || config.use_opaque_kv_cache_store;
     } else {
         RTP_LLM_CHECK_WITH_INFO(model_config.hybrid_attention_config.enable_hybrid_attention,
-                                "HybridPoolConfigCreator requires DSV4 kv_cache_specs or hybrid attention");
+                                "HybridPoolConfigCreator requires kv_cache_spec_descs or hybrid attention");
+        const auto spec_model_config = modelConfigWithDescSpecs(model_config, dtype);
         populateHybridAttentionGroups(config, spec_model_config, parallelism_config);
     }
 

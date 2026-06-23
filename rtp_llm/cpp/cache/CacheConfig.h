@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>
+#include <cstdint>
 #include <map>
 #include <memory>
 #include <set>
@@ -416,8 +417,14 @@ struct CacheConfig {
         std::vector<std::vector<int>> sub_global_layer_ids(propose_group_num);
 
         for (size_t gid = 0; gid < propose_group_num; ++gid) {
-            const auto target_gid = gid < target_group_num ? gid : fallback_full_gid;
-            const auto tag        = gid < propose_group_num ? propose_config.tagForGroup(gid) : tagForGroup(target_gid);
+            const auto tag = propose_config.tagForGroup(gid);
+            auto       target_gid = gid < target_group_num ? gid : fallback_full_gid;
+            for (size_t candidate_gid = 0; candidate_gid < target_group_num; ++candidate_gid) {
+                if (tagForGroup(candidate_gid) == tag) {
+                    target_gid = candidate_gid;
+                    break;
+                }
+            }
             const auto group_stride_bytes =
                 propose_config.kvBlockStrideBytesForGroup(gid) + propose_config.kvScaleStrideBytesForGroup(gid);
 
@@ -515,8 +522,8 @@ struct CacheConfig {
         if (desc.has_validate_tail_blocks) {
             policy.validate_tail_blocks = desc.validate_tail_blocks;
         }
-        policy.explicit_block_num        = desc.explicit_block_num;
-        policy.reserve_from_paged_budget = desc.reserve_from_paged_budget;
+        policy.explicit_block_num        = desc.extra.explicit_block_num;
+        policy.reserve_from_paged_budget = desc.extra.reserve_from_paged_budget;
         if (desc.has_prefix_reusable) {
             policy.prefix_reusable = desc.prefix_reusable;
         }
@@ -730,8 +737,19 @@ struct CacheConfig {
                                 layer_descs.size(),
                                 layer_num);
 
-        std::map<int64_t, std::vector<KVCacheSpecPtr>> layer_specs;
-        std::map<std::string, CacheGroupPolicy>        policy_by_tag;
+        struct GroupBuildState {
+            KVCacheSpecPtr    spec;
+            std::string       fingerprint;
+            CacheGroupType    type;
+            CacheGroupPolicy  policy;
+            std::vector<int>  layers;
+            uint64_t          order = 0;
+        };
+        std::map<std::string, GroupBuildState> group_by_tag;
+        std::map<uint64_t, std::string>        explicit_order_to_tag;
+        uint64_t next_first_seen_order = 0;
+        bool     has_explicit_group_order = false;
+        uint64_t max_explicit_group_order = 0;
 
         for (uint32_t layer = 0; layer < layer_num; ++layer) {
             const auto it = layer_descs.find(static_cast<int64_t>(layer));
@@ -741,8 +759,6 @@ struct CacheConfig {
             RTP_LLM_CHECK_WITH_INFO(!it->second.empty(),
                                     "CacheConfig::fromLayerDescs layer %u has no descs",
                                     layer);
-            auto& specs_for_layer = layer_specs[static_cast<int64_t>(layer)];
-            specs_for_layer.reserve(it->second.size());
             std::set<std::string> layer_tags;
             for (const auto& desc : it->second) {
                 auto spec = SpecBuilder::build(desc, ctx);
@@ -751,29 +767,96 @@ struct CacheConfig {
                                         layer,
                                         spec->tag.c_str());
                 const auto policy = cacheGroupPolicyForDesc(desc, spec);
-                const auto policy_it = policy_by_tag.find(spec->tag);
-                if (policy_it == policy_by_tag.end()) {
-                    policy_by_tag.emplace(spec->tag, policy);
+                const auto type = inferGroupType(spec);
+                auto       group_it = group_by_tag.find(spec->tag);
+                if (group_it == group_by_tag.end()) {
+                    GroupBuildState state;
+                    state.spec        = spec;
+                    state.fingerprint = spec->fingerprint();
+                    state.type        = type;
+                    state.policy      = policy;
+                    state.order       = desc.has_group_order ? desc.group_order : (UINT64_C(1) << 32) + next_first_seen_order++;
+                    if (desc.has_group_order) {
+                        has_explicit_group_order = true;
+                        max_explicit_group_order = std::max<uint64_t>(max_explicit_group_order, desc.group_order);
+                        const auto [order_it, inserted] = explicit_order_to_tag.emplace(desc.group_order, spec->tag);
+                        RTP_LLM_CHECK_WITH_INFO(inserted || order_it->second == spec->tag,
+                                                "CacheConfig::fromLayerDescs group order %u maps to both tag=%s and tag=%s",
+                                                desc.group_order,
+                                                order_it->second.c_str(),
+                                                spec->tag.c_str());
+                    }
+                    group_it          = group_by_tag.emplace(spec->tag, std::move(state)).first;
                 } else {
-                    RTP_LLM_CHECK_WITH_INFO(samePolicy(policy_it->second, policy),
+                    RTP_LLM_CHECK_WITH_INFO(group_it->second.fingerprint == spec->fingerprint(),
+                                            "CacheConfig::fromLayerDescs tag=%s has multiple physical prototypes",
+                                            spec->tag.c_str());
+                    RTP_LLM_CHECK_WITH_INFO(group_it->second.type == type,
+                                            "CacheConfig::fromLayerDescs tag=%s has inconsistent group type",
+                                            spec->tag.c_str());
+                    RTP_LLM_CHECK_WITH_INFO(samePolicy(group_it->second.policy, policy),
                                             "CacheConfig::fromLayerDescs tag=%s has inconsistent policy",
                                             spec->tag.c_str());
+                    if (desc.has_group_order) {
+                        RTP_LLM_CHECK_WITH_INFO(group_it->second.order == desc.group_order,
+                                                "CacheConfig::fromLayerDescs tag=%s has inconsistent group order",
+                                                spec->tag.c_str());
+                    }
                 }
-                specs_for_layer.push_back(std::move(spec));
+                group_it->second.layers.push_back(static_cast<int>(layer));
             }
         }
 
-        fromLayerSpecs(layer_specs);
-
-        std::vector<CacheGroupPolicy> policies;
-        policies.reserve(groups.tags_.size());
-        for (const auto& tag : groups.tags_) {
-            const auto it = policy_by_tag.find(tag);
-            RTP_LLM_CHECK_WITH_INFO(it != policy_by_tag.end(),
-                                    "CacheConfig::fromLayerDescs missing policy for tag=%s",
-                                    tag.c_str());
-            policies.push_back(it->second);
+        if (has_explicit_group_order) {
+            for (uint64_t order = 0; order <= max_explicit_group_order; ++order) {
+                if (explicit_order_to_tag.find(order) != explicit_order_to_tag.end()) {
+                    continue;
+                }
+                KVCacheSpecDesc placeholder;
+                placeholder.tag                = "__empty_group_order_" + std::to_string(order);
+                placeholder.cache_type         = CacheType::FIXED_STATE;
+                placeholder.seq_size_per_block = ctx.seq_size_per_block == 0 ? 1 : ctx.seq_size_per_block;
+                placeholder.dtype              = DataType::TYPE_UINT8;
+                placeholder.entry_elems        = 1;
+                placeholder.entries_per_block  = 1;
+                placeholder.store_dtype        = DataType::TYPE_UINT8;
+                auto spec                      = SpecBuilder::build(placeholder, ctx);
+                GroupBuildState state;
+                state.spec        = spec;
+                state.fingerprint = spec->fingerprint();
+                state.type        = inferGroupType(spec);
+                state.policy      = cacheGroupPolicyForDesc(placeholder, spec);
+                state.order       = order;
+                group_by_tag.emplace(spec->tag, std::move(state));
+            }
         }
+
+        std::vector<std::string> ordered_tags;
+        ordered_tags.reserve(group_by_tag.size());
+        for (const auto& [tag, _] : group_by_tag) {
+            ordered_tags.push_back(tag);
+        }
+        std::sort(ordered_tags.begin(), ordered_tags.end(), [&](const std::string& lhs, const std::string& rhs) {
+            const auto lhs_order = group_by_tag.at(lhs).order;
+            const auto rhs_order = group_by_tag.at(rhs).order;
+            return lhs_order == rhs_order ? lhs < rhs : lhs_order < rhs_order;
+        });
+        std::vector<KVCacheSpecPtr>    specs;
+        std::vector<std::vector<int>>  layers_by_group;
+        std::vector<CacheGroupType>    types;
+        std::vector<CacheGroupPolicy> policies;
+        specs.reserve(ordered_tags.size());
+        layers_by_group.reserve(ordered_tags.size());
+        types.reserve(ordered_tags.size());
+        policies.reserve(ordered_tags.size());
+        for (const auto& tag : ordered_tags) {
+            const auto& state = group_by_tag.at(tag);
+            specs.push_back(state.spec);
+            layers_by_group.push_back(state.layers);
+            types.push_back(state.type);
+            policies.push_back(state.policy);
+        }
+        fromGroupedSpecs(specs, layers_by_group, types, ordered_tags);
         setGroupPolicies(policies);
     }
 
