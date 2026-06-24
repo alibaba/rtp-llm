@@ -640,7 +640,7 @@ bool GenerateStream::prepare() {
     auto result = streamCacheResource().initKVBlock(reserveStep());
     if (!result.ok()) {
         generate_status_->reportEvent(
-            StreamEvents::Error, ErrorCode::MALLOC_FAILED, "initKVBlock failed: " + result.status().message());
+            StreamEvents::Error, ErrorCode::MALLOC_FAILED, "initKVBlock failed: " + result.message());
         finish_internal();
         return false;
     }
@@ -667,9 +667,8 @@ void GenerateStream::activate() {
     }
     auto result = streamCacheResource().incrKVBlock(reserveStep());
     if (!result.ok()) {
-        generate_status_->reportEvent(StreamEvents::Error,
-                                      ErrorCode::MALLOC_FAILED,
-                                      "incrKVBlock(activate) failed: " + result.status().message());
+        generate_status_->reportEvent(
+            StreamEvents::Error, ErrorCode::MALLOC_FAILED, "incrKVBlock(activate) failed: " + result.message());
         finish_internal();
         return;
     }
@@ -707,7 +706,7 @@ void GenerateStream::advance() {
     auto result = streamCacheResource().incrKVBlock(reserveStep(), seq_len_override);
     if (!result.ok()) {
         generate_status_->reportEvent(
-            StreamEvents::Error, ErrorCode::MALLOC_FAILED, "incrKVBlock(advance) failed: " + result.status().message());
+            StreamEvents::Error, ErrorCode::MALLOC_FAILED, "incrKVBlock(advance) failed: " + result.message());
         finish_internal();
         return;
     }
