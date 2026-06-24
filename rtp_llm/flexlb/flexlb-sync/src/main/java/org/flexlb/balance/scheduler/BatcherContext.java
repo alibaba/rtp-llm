@@ -113,7 +113,7 @@ public class BatcherContext {
      */
     void dispatch(List<BatchItem> items, DispatchMeta meta) {
         for (BatchItem item : items) {
-            queue.remove(item);
+            remove(item);
         }
         handler.onBatchReady(items, meta);
     }
@@ -124,7 +124,7 @@ public class BatcherContext {
      * Caller is responsible for algorithm-specific logging and state cleanup.
      */
     void dropHead(BatchItem head) {
-        queue.remove(head);
+        remove(head);
         handler.onExpired(head);
     }
 }

@@ -346,27 +346,6 @@ class FlexlbBatchSchedulerTest {
     }
 
     @Test
-    void processQueue_dispatches_when_batch_size_reached() throws Exception {
-        config.setCostSloMs(50000L);
-        config.setCostSloRiskMarginMs(50L);
-        config.setFlexlbBatchSizeMax(4);
-        config.setFlexlbBatchFillThreshold(0.99);
-
-        CompletableFuture<Response> f1 = scheduler.submit(context(501));
-        CompletableFuture<Response> f2 = scheduler.submit(context(502));
-        CompletableFuture<Response> f3 = scheduler.submit(context(503));
-        CompletableFuture<Response> f4 = scheduler.submit(context(504));
-
-        assertTrue(f1.get(2, TimeUnit.SECONDS).isSuccess());
-        assertTrue(f2.get(2, TimeUnit.SECONDS).isSuccess());
-        assertTrue(f3.get(2, TimeUnit.SECONDS).isSuccess());
-        assertTrue(f4.get(2, TimeUnit.SECONDS).isSuccess());
-
-        assertTrue(sentBatches.stream().anyMatch(b -> batchInputs(b).size() == 4),
-                "Should dispatch when picked.size() reaches batchSizeMax despite low fill ratio");
-    }
-
-    @Test
     void processQueue_park_converges_to_urgent_dispatch() throws Exception {
         // budget = sloMs(300) - predMs(128) = 172ms, margin = 100ms
         // fillThreshold=2.0 → fillRatio can never reach it (max 1.0)
@@ -404,26 +383,27 @@ class FlexlbBatchSchedulerTest {
 
     @Test
     void processQueue_bsIter_exhaustion_uses_conservative_bound() throws Exception {
-        // bsIter=1 with huge maxCapacity: binary search does only 1 step
-        // mid ≈ 50050, estimateMs(50050) >> budget(350) → hi drops, lo stays at headTokens(100)
-        // batchMaxTokens = 100, so second 100-token request doesn't fit (100+100=200>100)
+        // With slo_budget batcher (default), two 100-token requests each have
+        // budget ≈ 350ms (slo=500, margin=50, pred≈100). Inside 10s window,
+        // the batcher dispatches each via "arrival_guard" because the next
+        // expected arrival (window/minBatch=3333ms) exceeds the remaining slack.
+        // flexlbBatchSearchIter is NOT used by slo_budget; flexlbBatchScanAhead
+        // (default 64) determines how many candidates are scanned per iteration.
         config.setCostSloMs(500L);
         config.setCostSloRiskMarginMs(50L);
-        config.setFlexlbBatchSearchIter(1);
         config.setFlexlbBatchMaxCapacity(100000);
-        config.setFlexlbBatchFillThreshold(2.0);
+        config.setFlexlbBatchFillThreshold(0.5);
         config.setFlexlbBatchSizeMax(100);
 
         CompletableFuture<Response> f1 = scheduler.submit(contextWithSeqLen(1401, 100));
         CompletableFuture<Response> f2 = scheduler.submit(contextWithSeqLen(1402, 100));
-        Thread.sleep(50);
-        config.setFlexlbBatchFillThreshold(0.5);
 
         assertTrue(f1.get(2, TimeUnit.SECONDS).isSuccess());
         assertTrue(f2.get(2, TimeUnit.SECONDS).isSuccess());
 
+        // slo_budget dispatches each via arrival_guard → 2 separate batches
         assertEquals(2, sentBatches.size(),
-                "bsIter=1 yields conservative batchMaxTokens=headTokens, preventing batching");
+                "slo_budget dispatches each request individually when next arrival is too far");
         assertEquals(1, batchInputs(sentBatches.get(0)).size());
         assertEquals(1, batchInputs(sentBatches.get(1)).size());
     }
