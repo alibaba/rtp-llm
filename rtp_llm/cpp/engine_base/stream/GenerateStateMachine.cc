@@ -73,10 +73,16 @@ void GenerateStateMachine::handleWaiting() {
         // 设置 LoadInitiated 标志，表示已尝试asyncLoadCache. 当前实现即便asyncLoadCache失败也不再重试
         reportEvent(StreamEvents::LoadInitiated);
         if (ret) {
+            if (stream != nullptr) {
+                stream->recordLoadingCacheStartTime();
+            }
             status.store(StreamState::LOADING_CACHE, std::memory_order_release);
         } else if (stream_cache_resource_->resourceContext().role_type != RoleType::DECODE) {
             // Loading cache 失败或不需要loading，直接触发重计算
             // 当前decodeRpcServer会调用moveToNext，判断role type避免decodeRpcServer在enqueue前提早走到running状态
+            if (stream != nullptr) {
+                stream->recordRunningTime();
+            }
             status.store(StreamState::RUNNING, std::memory_order_release);
         }
         return;
@@ -89,6 +95,10 @@ void GenerateStateMachine::handleWaiting() {
     // exactly like a decode stream.
     if (stream_cache_resource_->resourceContext().role_type == RoleType::PREFILL
         && stream_cache_resource_->isContextStream()) {
+        auto stream = stream_cache_resource_->stream();
+        if (stream != nullptr) {
+            stream->recordRunningTime();
+        }
         status.store(StreamState::RUNNING, std::memory_order_release);
         return;
     }
@@ -102,12 +112,20 @@ void GenerateStateMachine::handleWaiting() {
         releaseResource();
         return;
     }
+    auto stream = stream_cache_resource_->stream();
+    if (stream != nullptr) {
+        stream->recordRunningTime();
+    }
     status.store(StreamState::RUNNING, std::memory_order_release);
     return;
 }
 
 void GenerateStateMachine::handleLoading() {
     if (stream_cache_resource_->loadCacheDone()) {
+        auto stream = stream_cache_resource_->stream();
+        if (stream != nullptr) {
+            stream->recordLoadingCacheDoneTime();
+        }
         status.store(StreamState::WAITING, std::memory_order_release);
     }
 }

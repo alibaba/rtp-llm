@@ -73,6 +73,10 @@ void DecodeGenerateContext::reportTime() {
     collector.allocate_resource_rt_us        = stat_info.allocate_resource_rt_us;
     collector.load_cache_from_prefill_rt_us  = stat_info.load_cache_from_prefill_rt_us;
     collector.local_generate_rt_us           = stat_info.local_generate_rt_us;
+    collector.decode_allocate_async_load_wait_us = stat_info.decode_allocate_async_load_wait_us;
+    collector.decode_load_request_read_wait_us   = stat_info.decode_load_request_read_wait_us;
+    collector.decode_load_response_write_us      = stat_info.decode_load_response_write_us;
+    collector.decode_generate_request_read_wait_us = stat_info.decode_generate_request_read_wait_us;
 
     // for tp
     collector.load_cache_min_rt_us       = stat_info.load_cache_min_rt_us;

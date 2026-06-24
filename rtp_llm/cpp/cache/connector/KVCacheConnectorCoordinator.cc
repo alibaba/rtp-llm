@@ -4,8 +4,10 @@
 #include <vector>
 
 #include "rtp_llm/cpp/cache/KVCacheAllocator.h"
+#include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
+#include "rtp_llm/cpp/utils/TimeUtil.h"
 #include "rtp_llm/cpp/cache/connector/KVCacheConnectorReadWriteContext.h"
 #include "rtp_llm/cpp/cache/connector/memory/KVCacheMemoryConnector.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnector.h"
@@ -260,9 +262,21 @@ KVCacheConnectorCoordinator::asyncRead(const std::shared_ptr<KVCacheConnectorRea
     auto fused_match_context = std::make_shared<FusedAsyncContext>(std::move(match_contexts));
     auto fused_read_context =
         std::make_shared<FusedAsyncReadContext>(fused_match_context, resource, connector_context->meta());
+    size_t read_inflight_num  = 0;
+    size_t write_inflight_num = 0;
     {
         std::lock_guard<std::mutex> lock(update_mutex_);
         fused_async_read_context_list_.push_back(fused_read_context);
+        read_inflight_num  = fused_async_read_context_list_.size();
+        write_inflight_num = fused_async_write_context_list_.size();
+    }
+    if (metrics_reporter_) {
+        RtpLLMCacheConnectorMetricsCollector collector;
+        collector.read_qps           = true;
+        collector.read_inflight_num  = read_inflight_num;
+        collector.write_inflight_num = write_inflight_num;
+        metrics_reporter_->report<RtpLLMCacheConnectorMetrics, RtpLLMCacheConnectorMetricsCollector>(nullptr,
+                                                                                                     &collector);
     }
     return fused_read_context;
 }
@@ -309,9 +323,21 @@ KVCacheConnectorCoordinator::asyncWrite(const std::shared_ptr<KVCacheConnectorRe
     }
 
     auto fused_write_context = std::make_shared<FusedAsyncContext>(std::move(write_contexts));
+    size_t read_inflight_num  = 0;
+    size_t write_inflight_num = 0;
     {
         std::lock_guard<std::mutex> lock(update_mutex_);
         fused_async_write_context_list_.push_back(fused_write_context);
+        read_inflight_num  = fused_async_read_context_list_.size();
+        write_inflight_num = fused_async_write_context_list_.size();
+    }
+    if (metrics_reporter_) {
+        RtpLLMCacheConnectorMetricsCollector collector;
+        collector.write_qps          = true;
+        collector.read_inflight_num  = read_inflight_num;
+        collector.write_inflight_num = write_inflight_num;
+        metrics_reporter_->report<RtpLLMCacheConnectorMetrics, RtpLLMCacheConnectorMetricsCollector>(nullptr,
+                                                                                                     &collector);
     }
     return fused_write_context;
 }
@@ -452,6 +478,14 @@ void KVCacheConnectorCoordinator::asyncReadAfterMatch(std::shared_ptr<FusedAsync
             connector_read_contexts.emplace_back(connector_read_context);
             already_reuse_num = matched_num;
         }
+    }
+    if (metrics_reporter_) {
+        RtpLLMCacheConnectorMetricsCollector collector;
+        collector.noop_read_qps         = connector_read_contexts.empty();
+        collector.read_queue_latency_us = currentTimeUs() - fused_read_context->createTimeUs();
+        collector.read_context_count    = connector_read_contexts.size();
+        metrics_reporter_->report<RtpLLMCacheConnectorMetrics, RtpLLMCacheConnectorMetricsCollector>(nullptr,
+                                                                                                     &collector);
     }
     fused_read_context->setFusedReadContext(std::make_shared<FusedAsyncContext>(connector_read_contexts));
 }

@@ -1,5 +1,6 @@
 #pragma once
 
+#include "autil/TimeUtility.h"
 #include "autil/legacy/jsonizable.h"
 #include "rtp_llm/cpp/engine_base/schedulers/SchedulerBase.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
@@ -40,6 +41,7 @@ public:
     absl::Status enqueue(const GenerateStreamPtr& stream) override {
         {
             std::lock_guard<std::mutex> lock(lock_);
+            stream->recordSchedulerEnqueueTime(autil::TimeUtility::currentTimeInMicroSeconds());
             waiting_streams_.emplace_back(stream);
             if (waiting_streams_.size() % 16 == 0) {
                 RTP_LLM_LOG_DEBUG("BatchDecodeScheduler::enqueue: waiting_streams_.size() = %d",

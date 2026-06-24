@@ -190,6 +190,7 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
     GptModelInputs  model_input;
     GptModelOutputs model_output;
     SamplerOutput   sampler_output;
+    int64_t         model_forward_end_time_us = 0;
     RTP_LLM_PROFILE_FUNCTION();
     // Cap outstanding stream-async bookkeeping to one step unless DROP_BROAD_SYNC is on.
     // Still sync when gatherModelInput lacks NormalAsyncDeviceState; host
@@ -197,7 +198,10 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
     bool worker_synced = false;
     if (useStreamAsync() && !useDropBroadSync()) {
         RTP_LLM_PROFILE_SCOPE_DYNAMIC("executor.wait_prev_dispatch(stream_count=%zu)", streams.size());
+        const int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
         dispatch_runner_.sync(cuda_graph::graphGetCurrentStream());
+        executor_collector.wait_prev_dispatch_us +=
+            autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
         worker_synced = true;
     }
 
@@ -206,7 +210,10 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
 
     if (useStreamAsync() && useDropBroadSync() && !gatherCanUseDeviceState(stream_groups)) {
         RTP_LLM_PROFILE_SCOPE_DYNAMIC("executor.wait_prev_dispatch(stream_count=%zu)", streams.size());
+        const int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
         dispatch_runner_.sync(cuda_graph::graphGetCurrentStream());
+        executor_collector.wait_prev_dispatch_us +=
+            autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
         worker_synced = true;
         // Rebuild StreamGroups after waiting: cached maxSeqLen/batch sizes can
         // be stale while the previous worker mutates GenerateStream host state.
@@ -259,7 +266,9 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
         // update kv cache
         if (model_input.kv_cache_update_mapping.defined()) {
             RTP_LLM_PROFILE_SCOPE("executor.kv_cache_update");
+            int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
             cache_manager_->blockBatchCopy(model_input.kv_cache_update_mapping);
+            executor_collector.kv_cache_update_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
         }
     }
     {
@@ -274,9 +283,12 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
                                       stream_groups.totalDecodeBatchSize(),
                                       stream_groups.modelExecuteTokenSize(),
                                       stream_groups.maxSeqLen());
+        executor_collector.process_to_forward_start_us =
+            autil::TimeUtility::currentTimeInMicroSeconds() - process_start_time_us;
         int64_t start_time_us               = autil::TimeUtility::currentTimeInMicroSeconds();
         model_output                        = std::move(model_->forward(model_input));
         executor_collector.model_forward_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
+        model_forward_end_time_us           = autil::TimeUtility::currentTimeInMicroSeconds();
     }
     if (expert_balancer_) {
         int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
@@ -302,7 +314,10 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
         // earlier host-fallback gather already waited.
         if (useStreamAsync() && useDropBroadSync() && !worker_synced) {
             RTP_LLM_PROFILE_SCOPE_DYNAMIC("executor.wait_prev_dispatch_pre_sampler(stream_count=%zu)", streams.size());
+            const int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
             dispatch_runner_.sync(cuda_graph::graphGetCurrentStream());
+            executor_collector.wait_prev_dispatch_us +=
+                autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
             worker_synced = true;
             // Rebuild after waiting so sampler buffers use the current seqLength
             // instead of appending one column behind.
@@ -333,6 +348,13 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
         // Metrics and KV release stay on the main thread; dispatch_output_us
         // measures only async launch/enqueue overhead.
         executor_collector.dispatch_output_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
+        if (model_forward_end_time_us > 0) {
+            executor_collector.forward_end_to_dispatch_done_us =
+                autil::TimeUtility::currentTimeInMicroSeconds() - model_forward_end_time_us;
+        }
+        executor_collector.process_non_forward_us =
+            autil::TimeUtility::currentTimeInMicroSeconds() - process_start_time_us
+            - executor_collector.model_forward_us;
         int64_t tps_execute_time_us           = autil::TimeUtility::currentTimeInMicroSeconds() - schedule_time_us;
         if (tps_execute_time_us <= 0) {
             tps_execute_time_us = autil::TimeUtility::currentTimeInMicroSeconds() - process_start_time_us;
@@ -353,6 +375,13 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
         publishNormalDeviceState(stream_groups, merge_outputs.sampler_output);
         auto result                           = batch_stream_processor_->dispatch(stream_groups, merge_outputs);
         executor_collector.dispatch_output_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
+        if (model_forward_end_time_us > 0) {
+            executor_collector.forward_end_to_dispatch_done_us =
+                autil::TimeUtility::currentTimeInMicroSeconds() - model_forward_end_time_us;
+        }
+        executor_collector.process_non_forward_us =
+            autil::TimeUtility::currentTimeInMicroSeconds() - process_start_time_us
+            - executor_collector.model_forward_us;
         int64_t tps_execute_time_us           = autil::TimeUtility::currentTimeInMicroSeconds() - schedule_time_us;
         if (tps_execute_time_us <= 0) {
             tps_execute_time_us = autil::TimeUtility::currentTimeInMicroSeconds() - process_start_time_us;

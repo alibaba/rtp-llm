@@ -119,6 +119,7 @@ absl::Status FIFOScheduler::enqueue(const GenerateStreamPtr& stream) {
     }
     {
         std::lock_guard<std::mutex> lock(lock_);
+        stream->recordSchedulerEnqueueTime(autil::TimeUtility::currentTimeInMicroSeconds());
         waiting_streams_.emplace_back(stream);
         schedule_trigger_ = true;
     }
@@ -136,6 +137,10 @@ std::vector<std::shared_ptr<GenerateStream>> FIFOScheduler::batchEnqueue(const v
     }
     {
         std::lock_guard<std::mutex> lock(lock_);
+        const auto enqueue_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
+        for (auto& stream : stream_enqueued) {
+            stream->recordSchedulerEnqueueTime(enqueue_time_us);
+        }
         waiting_streams_.insert(waiting_streams_.end(), stream_enqueued.begin(), stream_enqueued.end());
         schedule_trigger_ = true;
     }
@@ -224,6 +229,19 @@ void FIFOScheduler::evaluateWaitingStreams(list<GenerateStreamPtr>& waiting_stre
     RTP_LLM_PROFILE_FUNCTION();
     list<GenerateStreamPtr>             admitted_streams;
     std::unordered_set<GenerateStream*> admitted_stream_ptrs;
+    last_admitted_context_batch_size_ = 0;
+    last_admitted_context_token_size_ = 0;
+    last_waiting_oldest_age_us_       = 0;
+    if (!waiting_streams.empty()) {
+        auto oldest_enqueue_time_us = (*std::min_element(waiting_streams.begin(),
+                                                         waiting_streams.end(),
+                                                         [](const auto& lhs, const auto& rhs) {
+                                                             return lhs->enqueueTime() < rhs->enqueueTime();
+                                                         }))
+                                          ->enqueueTime();
+        last_waiting_oldest_age_us_ =
+            std::max<int64_t>(0, autil::TimeUtility::currentTimeInMicroSeconds() - oldest_enqueue_time_us);
+    }
     const size_t inited_kv_streams =
         max_inited_kv_cache_streams_ > 0 ? countInitedKVCacheStreams() : 0;
     size_t                              admitted_new_init_streams = 0;
@@ -321,6 +339,13 @@ void FIFOScheduler::evaluateWaitingStreams(list<GenerateStreamPtr>& waiting_stre
             }
         }
         it++;
+    }
+
+    for (const auto& stream : admitted_streams) {
+        if (stream->isContextStream()) {
+            ++last_admitted_context_batch_size_;
+            last_admitted_context_token_size_ += stream->contextLength();
+        }
     }
 
     for (auto it = waiting_streams.begin(); it != waiting_streams.end();) {
@@ -445,6 +470,9 @@ void FIFOScheduler::reportMetrics() {
         collector.wait_stream_size          = waiting_streams_.size();
         collector.running_stream_size       = running_streams_.size();
         collector.loading_cache_stream_size = loading_cache_streams_.size();
+        collector.admitted_context_batch_size = last_admitted_context_batch_size_;
+        collector.admitted_context_token_size = last_admitted_context_token_size_;
+        collector.waiting_oldest_age_us       = last_waiting_oldest_age_us_;
         metrics_reporter_->report<RtpLLMSchedulerMetrics, RtpLLMSchedulerMetricsCollector>(nullptr, &collector);
     }
     return;

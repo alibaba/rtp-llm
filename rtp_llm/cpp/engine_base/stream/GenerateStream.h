@@ -236,6 +236,11 @@ public:
     int64_t getTimeoutMs() const;
     void    checkTimeout();
     void    recordWaitLatency();
+    void    recordSchedulerEnqueueTime(int64_t time_us);
+    void    recordCanRunTime();
+    void    recordLoadingCacheStartTime();
+    void    recordLoadingCacheDoneTime();
+    void    recordRunningTime();
 
     void reportEvent(StreamEvents::EventType event,
                      ErrorCode               error_code = ErrorCode::NONE_ERROR,
@@ -698,6 +703,13 @@ protected:
     int64_t                               begin_time_us_;
     int64_t                               wait_time_us_ = 0;
     bool                                  metrics_reported_ = false;
+    int64_t                               scheduler_enqueue_time_us_ = 0;
+    int64_t                               can_run_time_us_ = 0;
+    int64_t                               loading_cache_start_time_us_ = 0;
+    int64_t                               loading_cache_done_time_us_ = 0;
+    int64_t                               first_running_time_us_ = 0;
+    int64_t                               loading_cache_latency_us_ = 0;
+    int64_t                               load_done_to_running_us_ = 0;
     std::shared_ptr<StreamCacheResource>  stream_cache_resource_;
     std::shared_ptr<bool>                 is_context_stream_;
     size_t                                iter_count_           = 0;

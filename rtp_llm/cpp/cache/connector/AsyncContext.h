@@ -73,6 +73,9 @@ public:
     const std::shared_ptr<FusedAsyncContext>& fusedMatchContext() const;
     const std::shared_ptr<KVCacheResource>&   resource() const;
     const std::shared_ptr<Meta>&              meta() const;
+    int64_t                                   createTimeUs() const {
+        return create_time_us_;
+    }
 
 private:
     std::shared_ptr<FusedAsyncContext> fused_match_context_;
@@ -85,6 +88,7 @@ private:
 
     std::mutex              done_mutex_;
     std::condition_variable done_cv_;
+    int64_t                 create_time_us_ = 0;
 };
 
 }  // namespace rtp_llm

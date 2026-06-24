@@ -24,6 +24,10 @@ struct DecodeStatInfo {
     int64_t      allocate_resource_rt_us        = 0;
     int64_t      load_cache_from_prefill_rt_us  = 0;
     int64_t      local_generate_rt_us           = 0;
+    int64_t      decode_allocate_async_load_wait_us = 0;
+    int64_t      decode_load_request_read_wait_us   = 0;
+    int64_t      decode_load_response_write_us      = 0;
+    int64_t      decode_generate_request_read_wait_us = 0;
     int64_t      load_cache_min_rt_us           = 0;
     int64_t      load_cache_max_rt_us           = 0;
     int64_t      load_cache_polling_cost_us     = 0;

@@ -586,10 +586,50 @@ void GenerateStream::recordWaitLatency() {
     wait_time_us_ = autil::TimeUtility::currentTimeInMicroSeconds() - begin_time_us_;
 }
 
+void GenerateStream::recordSchedulerEnqueueTime(int64_t time_us) {
+    if (scheduler_enqueue_time_us_ == 0) {
+        scheduler_enqueue_time_us_ = time_us;
+    }
+}
+
+void GenerateStream::recordCanRunTime() {
+    if (can_run_time_us_ == 0) {
+        can_run_time_us_ = autil::TimeUtility::currentTimeInMicroSeconds();
+    }
+}
+
+void GenerateStream::recordLoadingCacheStartTime() {
+    if (loading_cache_start_time_us_ == 0) {
+        loading_cache_start_time_us_ = autil::TimeUtility::currentTimeInMicroSeconds();
+    }
+}
+
+void GenerateStream::recordLoadingCacheDoneTime() {
+    if (loading_cache_done_time_us_ == 0) {
+        loading_cache_done_time_us_ = autil::TimeUtility::currentTimeInMicroSeconds();
+        if (loading_cache_start_time_us_ > 0) {
+            loading_cache_latency_us_ = loading_cache_done_time_us_ - loading_cache_start_time_us_;
+        }
+    }
+}
+
+void GenerateStream::recordRunningTime() {
+    if (first_running_time_us_ != 0) {
+        return;
+    }
+    first_running_time_us_ = autil::TimeUtility::currentTimeInMicroSeconds();
+    if (loading_cache_done_time_us_ > 0) {
+        load_done_to_running_us_ = first_running_time_us_ - loading_cache_done_time_us_;
+    }
+}
+
 // 统一的事件上报接口，替代原先所有 reportXX 方法。
 // 外部线程调用时自动加锁保护 error_info 和 events_ 的一致性。
 void GenerateStream::reportEvent(StreamEvents::EventType event, ErrorCode error_code, const std::string& error_msg) {
     std::lock_guard<std::mutex> lock(*mutex_);
+    if (event == StreamEvents::CanRun) {
+        recordCanRunTime();
+    }
     generate_status_->reportEvent(event, error_code, error_msg);
 }
 
@@ -597,6 +637,9 @@ void GenerateStream::reportEvent(StreamEvents::EventType event, ErrorCode error_
 void GenerateStream::reportEventWithoutLock(StreamEvents::EventType event,
                                             ErrorCode               error_code,
                                             const std::string&      error_msg) {
+    if (event == StreamEvents::CanRun) {
+        recordCanRunTime();
+    }
     generate_status_->reportEvent(event, error_code, error_msg);
 }
 
@@ -1137,6 +1180,7 @@ void GenerateStream::reportStreamMetrics() {
         if (getStatus() == StreamState::FINISHED || cancelled || timeout) {
             collector.reuse_length           = initial_reuse_length_;
             collector.input_token_length     = inputLength();
+            collector.effective_context_length = std::max<int64_t>(0, collector.input_token_length - initial_reuse_length_);
             collector.output_token_length    = outputTokenLen();
             collector.iterate_count          = iter_count_;
             collector.query_batch_size       = maxBatchSize();
@@ -1145,6 +1189,14 @@ void GenerateStream::reportStreamMetrics() {
             RTP_LLM_LOG_DEBUG(
                 "stream [%s] report first latency us = %ld", streamLogTag().c_str(), collector.first_token_latency_us);
             collector.wait_latency_us          = wait_time_us_;
+            if (scheduler_enqueue_time_us_ > 0 && can_run_time_us_ > scheduler_enqueue_time_us_) {
+                collector.enqueue_to_canrun_us = can_run_time_us_ - scheduler_enqueue_time_us_;
+            }
+            if (can_run_time_us_ > 0 && first_running_time_us_ > can_run_time_us_) {
+                collector.canrun_to_running_us = first_running_time_us_ - can_run_time_us_;
+            }
+            collector.loading_cache_latency_us = loading_cache_latency_us_;
+            collector.load_done_to_running_us  = load_done_to_running_us_;
             collector.batch_with_prefill_times = batch_with_prefill_times_;
             collector.batch_with_prefill_len   = batch_with_prefill_len_;
             collector.malloc_failed_times      = stream_cache_resource_->mallocFailedTimes();

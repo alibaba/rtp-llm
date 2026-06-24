@@ -143,8 +143,18 @@ void DecodeRpcServer::allocateResource(DecodeGenerateContext& decode_context) {
     // WAITING -> LOADING_CACHE -> WAITING, 直到load cache完成并移动到 WAITING 状态
     // NOTE: 此处的 busy-wait 是安全的，因为 stream 尚未 enqueue 到 scheduler，
     // 不会与其他线程并发调用 moveToNext()。gRPC 线程独占驱动状态机直到 WAITING。
-    while (!generate_stream->hasError() && generate_stream->moveToNext() == StreamState::LOADING_CACHE) {
+    const int64_t async_load_wait_begin_us = currentTimeUs();
+    bool          entered_loading_cache    = false;
+    while (!generate_stream->hasError()) {
+        auto state = generate_stream->moveToNext();
+        if (state != StreamState::LOADING_CACHE) {
+            break;
+        }
+        entered_loading_cache = true;
         this_thread::sleep_for(chrono::milliseconds(1));
+    }
+    if (entered_loading_cache) {
+        decode_context.stat_info.decode_allocate_async_load_wait_us = currentTimeUs() - async_load_wait_begin_us;
     }
     if (generate_stream->hasError()) {
         auto   stream_error = generate_stream->statusInfo();
@@ -172,8 +182,10 @@ void DecodeRpcServer::loadCacheFromPrefill(DecodeGenerateContext& decode_context
     AtomicGuard       request_guard(loading_cache_requests_);
     auto&             grpc_stream = decode_context.rpc_context.grpc_stream;
     GenerateRequestPB load_request;
+    int64_t read_begin_time_us = currentTimeUs();
     GRPC_RET_IF_ERROR(
         decode_context, grpc_stream->Read(&load_request), grpc::StatusCode::INTERNAL, "failed to get loadReqeust");
+    decode_context.stat_info.decode_load_request_read_wait_us = currentTimeUs() - read_begin_time_us;
     decode_context.time_info.updateLoadBeginTime();
     auto error_info = loadCacheForAllRank(decode_context);
     decode_context.time_info.updateLoadEndTime();
@@ -186,8 +198,10 @@ void DecodeRpcServer::loadCacheFromPrefill(DecodeGenerateContext& decode_context
 
     GenerateOutputsPB load_response;
     load_response.mutable_error_info()->set_error_code(transErrorCodeToRPC(error_info.code()));
+    int64_t write_begin_time_us = currentTimeUs();
     GRPC_RET_IF_ERROR(
         decode_context, grpc_stream->Write(load_response), grpc::StatusCode::INTERNAL, "send load response failed");
+    decode_context.stat_info.decode_load_response_write_us = currentTimeUs() - write_begin_time_us;
     if (!error_info.ok()) {
         decode_context.error_info = error_info;
     }
@@ -201,10 +215,12 @@ void DecodeRpcServer::localGenerate(DecodeGenerateContext& decode_context) {
     auto&             grpc_stream     = decode_context.rpc_context.grpc_stream;
     auto&             generate_stream = decode_context.getStream();
     GenerateRequestPB generate_request;
+    int64_t read_begin_time_us = currentTimeUs();
     GRPC_RET_IF_ERROR(decode_context,
                       grpc_stream->Read(&generate_request),
                       grpc::StatusCode::INTERNAL,
                       "poll generate request failed");
+    decode_context.stat_info.decode_generate_request_read_wait_us = currentTimeUs() - read_begin_time_us;
     GRPC_RET_IF_ERROR(decode_context,
                       generate_request.stage() == RemoteStage::GENERATE,
                       grpc::StatusCode::INTERNAL,
