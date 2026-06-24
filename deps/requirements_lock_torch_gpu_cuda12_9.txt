@@ -3,7 +3,6 @@
 --index-url https://mirrors.aliyun.com/pypi/simple/
 --extra-index-url https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/simple/
 --extra-index-url https://download.pytorch.org/whl/cu129/
---extra-index-url https://download.pytorch.org/whl/rocm7.2/
 
 accelerate==0.25.0 \
     --hash=sha256:c7bb817eb974bba0ff3ea1ba0f24d55afb86d50e3d4fe98d6922dc69cf2ccff1 \

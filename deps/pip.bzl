@@ -35,6 +35,8 @@ PIP_ROCM_EXTRA_ARGS = PIP_BASE_ARGS + [
 ]
 
 # Backwards-compatible alias for callers that do not yet care about config.
+# NOTE: This alias implies the CUDA context. ROCm callers MUST use
+# PIP_ROCM_EXTRA_ARGS explicitly; do not rely on this default.
 PIP_EXTRA_ARGS = PIP_CUDA_EXTRA_ARGS
 
 def pip_deps():
@@ -46,9 +48,12 @@ def pip_deps():
     # real PPU lockfile. Opensource-only builds don't apply that override, so
     # we must declare `pip_ppu_torch` here or WORKSPACE load fails with
     # "Failed to load Starlark extension '@pip_ppu_torch//:requirements.bzl'".
-    # The lockfile is a stub alias of cuda12_9: pip_parse is lazy, so no PPU
-    # wheel is downloaded unless a target actually depends on `@pip_ppu_torch`
-    # — and no opensource target does.
+    #
+    # The lockfile intentionally aliases the cuda12_9 lockfile. pip_parse is
+    # lazy: no PPU wheel is downloaded unless a target depends on
+    # `@pip_ppu_torch`, and no opensource target does. The Starlark parse
+    # overhead of reading the same lockfile twice is negligible compared to the
+    # actual wheel fetch during a real build.
     pip_parse(
         name = "pip_ppu_torch",
         requirements_lock = "@rtp_deps//:requirements_lock_torch_gpu_cuda12_9.txt",

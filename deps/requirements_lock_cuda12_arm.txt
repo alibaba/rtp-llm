@@ -3,7 +3,6 @@
 --index-url https://mirrors.aliyun.com/pypi/simple/
 --extra-index-url https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/simple/
 --extra-index-url https://download.pytorch.org/whl/cu129/
---extra-index-url https://download.pytorch.org/whl/rocm7.2/
 
 aiohappyeyeballs==2.6.1 \
     --hash=sha256:c3f9d0113123803ccadfdf3f0faa505bc78e6a72d1cc4806cbd719826e943558 \

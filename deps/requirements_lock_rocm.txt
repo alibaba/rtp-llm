@@ -2,7 +2,6 @@
 #    bazel run //deps:requirements_rocm.update
 --index-url https://mirrors.aliyun.com/pypi/simple/
 --extra-index-url https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/simple/
---extra-index-url https://download.pytorch.org/whl/cu129/
 --extra-index-url https://download.pytorch.org/whl/rocm7.2/
 
 aiohappyeyeballs==2.4.0 \

@@ -108,7 +108,7 @@ build_config:
   git_repo_url: "git@gitlab.alibaba-inc.com:foundation_models/RTP-LLM.git"
   git_checkout_ref: "origin/feature/yiyin_fork_rtp_llm"
   # open_source_url: "git@github.com:alibaba/rtp-llm.git"
-  open_source_ref: "origin/feature/yiyin_multi_benchmark"
+  open_source_ref: "origin/main"  # change to the branch you want to benchmark
   ft_sub_dir: "rtp_llm_perf_test"
   bazel_build_args: '" --jobs 64 --verbose_failures --config=cuda12_9 "'
 ```

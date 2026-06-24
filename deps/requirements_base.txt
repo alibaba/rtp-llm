@@ -48,6 +48,9 @@ sympy
 thrift
 tiktoken==0.7.0
 timm==0.9.12
+# Intentionally pinned to 4.51.2 to stay in sync with the existing lockfiles.
+# Upgrading to 4.57.1 requires regenerating all three lockfiles on a Linux x86_64
+# + Python 3.10 host (macOS cannot build the Linux-only tensorrt-cu12 sdist).
 transformers==4.51.2
 typing-extensions
 uvicorn==0.30.0

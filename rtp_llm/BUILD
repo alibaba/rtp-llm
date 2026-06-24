@@ -560,6 +560,8 @@ whl_reqs = [
     "sympy",
     "typing-extensions",
     "importlib_metadata",
+    # Pinned to 4.51.2 to match requirements_base.txt and the regenerated
+    # lockfiles. Bump only after regenerating lockfiles on Linux x86_64 + py3.10.
     "transformers==4.51.2",
     "sentencepiece==0.2.0",
     "fastapi==0.115.6",

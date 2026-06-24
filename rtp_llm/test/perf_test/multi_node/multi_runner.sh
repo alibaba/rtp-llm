@@ -19,17 +19,24 @@ multi_build_script() {
   # Run build script on each ip with environment variables
   (
     trap 'kill 0' SIGINT;
+    PIDS=()
     for IP in "${IP_ARRAY[@]}"
     do
       (
-        scp -P ${SSH_PORT} multi_local_executor.sh ${RUN_USER}@${IP}:/tmp/multi_local_executor.sh;
+        set -e
+        scp -P ${SSH_PORT} multi_local_executor.sh ${RUN_USER}@${IP}:/tmp/multi_local_executor.sh
         # Concat all environment variables
-        ENV_STR=$(printenv | paste -sd " ");
-        echo "Environment variables: $ENV_STR";
-        ssh ${RUN_USER}@${IP} -p ${SSH_PORT} "$ENV_STR bash /tmp/multi_local_executor.sh";
+        ENV_STR=$(printenv | paste -sd " ")
+        echo "Environment variables: $ENV_STR"
+        ssh ${RUN_USER}@${IP} -p ${SSH_PORT} "$ENV_STR bash /tmp/multi_local_executor.sh"
       ) &
+      PIDS+=("$!")
     done;
-    wait;
+    EXIT_CODE=0
+    for PID in "${PIDS[@]}"; do
+      wait "$PID" || EXIT_CODE=$?
+    done;
+    exit $EXIT_CODE
   )
 }
 
@@ -178,10 +185,10 @@ multi_test_script() {
     do
       (
         set -e
-        scp -P ${SSH_PORT} multi_local_executor.sh ${RUN_USER}@${IP}:/tmp/multi_local_executor.sh && \
-        ENV_STR=$(printenv | paste -sd " "); \
-        echo "Environment variables: $ENV_STR"; \
-        ssh ${RUN_USER}@${IP} -p ${SSH_PORT} "$ENV_STR bash /tmp/multi_local_executor.sh";
+        scp -P ${SSH_PORT} multi_local_executor.sh ${RUN_USER}@${IP}:/tmp/multi_local_executor.sh
+        ENV_STR=$(printenv | paste -sd " ")
+        echo "Environment variables: $ENV_STR"
+        ssh ${RUN_USER}@${IP} -p ${SSH_PORT} "$ENV_STR bash /tmp/multi_local_executor.sh"
       ) &
       PIDS+=("$!")
       export WORLD_RANK=$((WORLD_RANK + LOCAL_WORLD_SIZE));
