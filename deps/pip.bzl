@@ -72,6 +72,18 @@ def pip_deps():
         quiet = False,
     )
 
+    # TODO(pip_unify): Backwards-compatible alias for internal source that still
+    # references @pip_gpu_cuda12_torch. Points to the same cuda12_9 lockfile.
+    # Remove once internal overlays are migrated to @pip_gpu_cuda12_9_torch.
+    pip_parse(
+        name = "pip_gpu_cuda12_torch",
+        requirements_lock = "@rtp_deps//:requirements_lock_torch_gpu_cuda12_9.txt",
+        python_interpreter = "/opt/conda310/bin/python3",
+        extra_pip_args = PIP_CUDA_EXTRA_ARGS,
+        timeout = 3600,
+        quiet = False,
+    )
+
     pip_parse(
         name = "pip_cuda12_arm_torch",
         requirements_lock = "@rtp_deps//:requirements_lock_cuda12_arm.txt",

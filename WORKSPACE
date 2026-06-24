@@ -52,6 +52,11 @@ pip_ppu_torch_install_deps()
 load("@pip_gpu_cuda12_9_torch//:requirements.bzl", pip_gpu_cuda12_9_torch_install_deps = "install_deps")
 pip_gpu_cuda12_9_torch_install_deps()
 
+# TODO(pip_unify): Backwards-compatible install for internal source that still
+# references @pip_gpu_cuda12_torch. Remove once internal overlays are migrated.
+load("@pip_gpu_cuda12_torch//:requirements.bzl", pip_gpu_cuda12_torch_install_deps = "install_deps")
+pip_gpu_cuda12_torch_install_deps()
+
 load("@pip_cuda12_arm_torch//:requirements.bzl", pip_cuda12_arm_torch_install_deps = "install_deps")
 pip_cuda12_arm_torch_install_deps()
 
