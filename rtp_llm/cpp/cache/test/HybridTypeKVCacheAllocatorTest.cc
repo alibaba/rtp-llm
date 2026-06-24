@@ -93,6 +93,25 @@ static ModelConfig makeTinyModelConfig(uint32_t num_layers) {
     return cfg;
 }
 
+static ModelConfig makeHybridConfigWithLinearStrideLargerThanFull() {
+    auto cfg                         = makeTinyModelConfig(/*num_layers=*/4);
+    cfg.attn_config.head_num         = 1;
+    cfg.attn_config.kv_head_num      = 1;
+    cfg.attn_config.size_per_head    = 8;
+    cfg.attn_config.tokens_per_block = 4;
+
+    cfg.hybrid_attention_config.enable_hybrid_attention = true;
+    cfg.hybrid_attention_config.hybrid_attention_types  = {
+        HybridAttentionType::LINEAR, HybridAttentionType::LINEAR, HybridAttentionType::NONE, HybridAttentionType::NONE};
+
+    cfg.linear_attention_config.linear_conv_kernel_dim = 4;
+    cfg.linear_attention_config.linear_key_head_dim    = 8;
+    cfg.linear_attention_config.linear_value_head_dim  = 8;
+    cfg.linear_attention_config.linear_num_key_heads   = 2;
+    cfg.linear_attention_config.linear_num_value_heads = 2;
+    return cfg;
+}
+
 static CacheConfig makeTinyHybridMtpConfigByCreateSpConfig() {
     auto score_model_cfg   = makeTinyModelConfig(/*num_layers=*/4);
     auto propose_model_cfg = makeTinyModelConfig(/*num_layers=*/1);
@@ -216,6 +235,48 @@ protected:
         createDevice();
     }
 };
+
+TEST_F(HybridTypeKVCacheAllocatorTest, CreateConfigPadsHybridPhysicalStrideWhenLinearLiveStrideIsLarger) {
+    auto model_cfg = makeHybridConfigWithLinearStrideLargerThanFull();
+
+    ParallelismConfig parallelism_cfg;
+    parallelism_cfg.tp_size = 1;
+
+    RuntimeConfig runtime_cfg;
+    KVCacheConfig kv_cache_cfg;
+    kv_cache_cfg.seq_size_per_block        = 4;
+    kv_cache_cfg.kernel_seq_size_per_block = 2;
+    kv_cache_cfg.test_block_num            = 8;
+
+    const auto config =
+        CacheConfigCreator::createConfig(model_cfg, parallelism_cfg, runtime_cfg, kv_cache_cfg, std::nullopt);
+
+    ASSERT_EQ(config.kernelBlocksPerKvBlock(), 2u);
+    ASSERT_EQ(config.full_group_num, 1);
+    ASSERT_EQ(config.linear_group_num, 1);
+
+    const auto& full_spec   = config.cache_specs[0];
+    const auto& linear_spec = config.cache_specs[1];
+    ASSERT_EQ(config.group_types[0], CacheGroupType::FULL);
+    ASSERT_EQ(config.group_types[1], CacheGroupType::LINEAR);
+
+    const size_t full_live_kv_stride   = full_spec->block_size_bytes();
+    const size_t linear_live_kv_stride = linear_spec->block_size_bytes();
+    ASSERT_GT(linear_live_kv_stride, full_live_kv_stride);
+    ASSERT_EQ(full_live_kv_stride % config.kernelBlocksPerKvBlock(), 0u);
+
+    const size_t full_kernel_pair_bytes = full_live_kv_stride / config.kernelBlocksPerKvBlock();
+    const size_t expected_stride_kernel_blocks =
+        (linear_live_kv_stride + full_kernel_pair_bytes - 1) / full_kernel_pair_bytes;
+
+    EXPECT_EQ(config.kv_block_stride_kernel_blocks, expected_stride_kernel_blocks);
+    EXPECT_GT(config.kv_block_stride_kernel_blocks, config.kernelBlocksPerKvBlock());
+    EXPECT_EQ(config.kv_block_stride_bytes, expected_stride_kernel_blocks * full_kernel_pair_bytes);
+    EXPECT_GE(config.kv_block_stride_bytes, full_live_kv_stride);
+    EXPECT_GE(config.kv_block_stride_bytes, linear_live_kv_stride);
+    EXPECT_EQ(config.kv_block_size_bytes, static_cast<size_t>(config.group_layer_num) * config.kv_block_stride_bytes);
+    EXPECT_EQ(config.block_size_bytes, config.kv_block_size_bytes + config.kv_scale_size_bytes);
+}
 
 TEST_F(HybridTypeKVCacheAllocatorTest, InitAndAddressLookupSmoke) {
     auto config    = makeTinyHybridConfig();

@@ -55,6 +55,17 @@ TEST(BlockIdsTest, Full_ExpandsKernelBlocks) {
     ASSERT_EQ(ids.kernelBlocks(), (BlockIndicesType{NULL_BLOCK_IDX, NULL_BLOCK_IDX, 4, 5}));
 }
 
+TEST(BlockIdsTest, Full_UsesPaddedPhysicalKernelStride) {
+    BlockIds ids(/*active_kernel_blocks_per_kv_block=*/4, /*kv_block_stride_kernel_blocks=*/8);
+
+    ids.add(BlockIndicesType{10, 11});
+    ASSERT_EQ(ids.blocks(), (BlockIndicesType{10, 11}));
+    ASSERT_EQ(ids.kernelBlocks(), (BlockIndicesType{80, 81, 82, 83, 88, 89, 90, 91}));
+
+    ids.setAt(1, 3);
+    ASSERT_EQ(ids.kernelBlocks(), (BlockIndicesType{80, 81, 82, 83, 24, 25, 26, 27}));
+}
+
 TEST(KVCacheResourceTest, InitGroups_RespectsGroupTypesAndBlocksPerKvBlock) {
     KVCacheResource resource;
     resource.initGroups(/*group_num=*/2,
@@ -82,8 +93,26 @@ TEST(KVCacheResourceTest, InitGroups_RespectsGroupTypesAndBlocksPerKvBlock) {
     ASSERT_EQ(resource.kernelBlocks(1), (BlockIndicesType{1}));
 }
 
+TEST(KVCacheResourceTest, InitGroups_UsesPaddedPhysicalStrideForFullGroupsOnly) {
+    KVCacheResource resource;
+    resource.initGroups(/*group_num=*/2,
+                        /*layer_num=*/3,
+                        /*layer_to_group_id=*/{0, 1, 0},
+                        /*active_kernel_blocks_per_kv_block=*/4,
+                        /*kv_block_stride_kernel_blocks=*/8,
+                        /*group_types=*/{CacheGroupType::FULL, CacheGroupType::LINEAR});
+
+    resource.mutableBlockIds(0).add(BlockIndicesType{2});
+    resource.mutableBlockIds(1).add(BlockIndicesType{2});
+
+    ASSERT_EQ(resource.kernelBlocks(0), (BlockIndicesType{16, 17, 18, 19}));
+    ASSERT_EQ(resource.kernelBlocks(1), (BlockIndicesType{2}));
+}
+
 TEST(CacheConfigTest, KernelBlocksPerKvBlockSafeByDefault) {
     CacheConfig config;
+    ASSERT_EQ(config.kv_block_stride_kernel_blocks, 1u);
+
     config.seq_size_per_block        = 1;
     config.kernel_seq_size_per_block = 0;
     ASSERT_EQ(config.kernelBlocksPerKvBlock(), 1u);
