@@ -37,6 +37,7 @@ from rtp_llm.dash_sc.access_log import (
     init_dash_sc_grpc_access_logger,
 )
 from rtp_llm.dash_sc.access_record import GrpcAccessRecord
+from rtp_llm.dash_sc.codec import LLMFinishReason
 from rtp_llm.dash_sc.proto import predict_v2_pb2
 from rtp_llm.dash_sc.repetition_monitor import ToolCallLoopResult
 from rtp_llm.dash_sc.status import classify_error_message, classify_rpc_exception
@@ -132,6 +133,15 @@ def _make_stream_response(
         out.datatype = "INT32"
         out.shape.append(1)
         infer.raw_output_contents.append(struct.pack("<i", prompt_cached_token_num))
+    return resp
+
+
+def _make_dash_error_response(
+    *,
+    error_no: int = 8,
+) -> predict_v2_pb2.ModelStreamInferResponse:
+    resp = predict_v2_pb2.ModelStreamInferResponse()
+    resp.infer_response.parameters["error_no"].int64_param = error_no
     return resp
 
 
@@ -280,6 +290,64 @@ class ResolveStatusTest(TestCase):
         self.assertEqual(rec.status, "BACKEND_EMPTY_OUTPUTS")
         self.assertEqual(rec.status_detail, "empty outputs_list from backend")
 
+    def test_inner_dash_error_routes_to_dash_error_bucket(self) -> None:
+        rec = _make_record()
+        rec.record_response_chunk(_make_dash_error_response(error_no=5))
+        rec.resolve_status(_FakeContext(code=grpc.StatusCode.OK), None)
+
+        self.assertEqual(rec.status, "DASH_ERROR_5")
+        self.assertIsNone(rec.status_detail)
+        self.assertTrue(rec.terminal_seen)
+
+    def test_missing_inner_dash_error_does_not_mutate_success_frame(self) -> None:
+        rec = _make_record()
+        resp = _make_stream_response(generated_ids=[1])
+        self.assertNotIn("error_no", resp.infer_response.parameters)
+
+        rec.record_response_chunk(resp)
+        rec.resolve_status(_FakeContext(code=grpc.StatusCode.OK), None)
+
+        self.assertNotIn("error_no", resp.infer_response.parameters)
+        self.assertEqual(rec.status, "OK")
+
+    def test_zero_inner_dash_error_is_ignored(self) -> None:
+        rec = _make_record()
+        resp = predict_v2_pb2.ModelStreamInferResponse()
+        resp.infer_response.parameters["error_no"].int64_param = 0
+
+        rec.record_response_chunk(resp)
+        rec.resolve_status(_FakeContext(code=grpc.StatusCode.OK), None)
+
+        self.assertEqual(rec.status, "OK")
+
+    def test_outer_error_message_short_circuits_inner_dash_error(self) -> None:
+        rec = _make_record()
+        resp = _make_dash_error_response(error_no=5)
+        resp.error_message = "empty outputs_list from backend"
+
+        rec.record_response_chunk(resp)
+        rec.resolve_status(_FakeContext(code=grpc.StatusCode.OK), None)
+
+        self.assertEqual(rec.status, "BACKEND_EMPTY_OUTPUTS")
+        self.assertEqual(rec.status_detail, "empty outputs_list from backend")
+
+    def test_inner_dash_error_does_not_parse_error_msg_for_access_detail(self) -> None:
+        rec = _make_record()
+        resp = predict_v2_pb2.ModelStreamInferResponse()
+        resp.infer_response.parameters["error_no"].int64_param = 19
+        payload = {
+            "status_code": 500,
+            "status_name": "InternalError",
+            "status_message": "x" * 5000,
+        }
+        resp.infer_response.parameters["error_msg"].string_param = json.dumps(payload)
+
+        rec.record_response_chunk(resp)
+        rec.resolve_status(_FakeContext(code=grpc.StatusCode.OK), None)
+
+        self.assertEqual(rec.status, "DASH_ERROR_19")
+        self.assertIsNone(rec.status_detail)
+
     def test_backend_error_code_overrides_error_message(self) -> None:
         rec = _make_record(
             error_message="FtRuntimeException: no worker",
@@ -413,7 +481,7 @@ class BuildRecordTest(TestCase):
         self.assertEqual(payload["token_frame_count"], 3)
         self.assertEqual(payload["multi_token_frame_count"], 1)
         self.assertEqual(payload["max_tokens_per_frame"], 2)
-        self.assertEqual(payload["finish_reason"], 0)
+        self.assertEqual(payload["finish_reason"], LLMFinishReason.STOP)
         self.assertEqual(payload["prompt_cached_token_num"], 8)
         self.assertEqual(payload["generate_config"]["max_new_tokens"], 32)
         self.assertEqual(payload["server_id"], 1)
@@ -572,7 +640,9 @@ class BuildRecordTest(TestCase):
         for resp in (
             _make_stream_response(generated_ids=[10], prompt_token_num=3),
             _make_stream_response(
-                generated_ids=[20, 30], finish_reason=0, finished=True
+                generated_ids=[20, 30],
+                finish_reason=LLMFinishReason.STOP,
+                finished=True,
             ),
         ):
             rec.capture_backend_response_chunk(resp)
@@ -786,6 +856,37 @@ class GrpcMetricsTest(TestCase):
         self.assertEqual(
             self._for(AccMetrics.ERROR_QPS_METRIC)[0][2]["error_code"],
             "8400_MASTER_NO_AVAILABLE_WORKER",
+        )
+
+    def test_done_error_uses_status_for_inner_dash_error(self) -> None:
+        rec = _make_record(status="DASH_ERROR_5")
+        grpc_metrics.report_frontend_rpc_done(
+            rec,
+            rank_id=self.rank_id,
+            server_id=self.server_id,
+            status=rec.status,
+        )
+        self.assertEqual(len(self._for(AccMetrics.SUCCESS_QPS_METRIC)), 0)
+        self.assertEqual(
+            self._for(AccMetrics.ERROR_QPS_METRIC)[0][2]["error_code"],
+            "DASH_ERROR_5",
+        )
+
+    def test_outer_error_status_is_used_for_metrics(self) -> None:
+        rec = _make_record(
+            error_message="empty outputs_list from backend",
+            status="BACKEND_EMPTY_OUTPUTS",
+            backend_error_code="BACKEND_EMPTY_OUTPUTS",
+        )
+        grpc_metrics.report_frontend_rpc_done(
+            rec,
+            rank_id=self.rank_id,
+            server_id=self.server_id,
+            status="BACKEND_EMPTY_OUTPUTS",
+        )
+        self.assertEqual(
+            self._for(AccMetrics.ERROR_QPS_METRIC)[0][2]["error_code"],
+            "BACKEND_EMPTY_OUTPUTS",
         )
 
     def test_done_without_input_len_omits_input_gauge(self) -> None:

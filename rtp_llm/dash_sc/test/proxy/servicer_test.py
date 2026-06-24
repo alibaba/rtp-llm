@@ -67,6 +67,14 @@ def _make_finished_response() -> predict_v2_pb2.ModelStreamInferResponse:
     return resp
 
 
+def _dash_error_payload(resp) -> tuple[int, dict]:
+    infer = resp.infer_response
+    return (
+        infer.parameters["error_no"].int64_param,
+        json.loads(infer.parameters["error_msg"].string_param),
+    )
+
+
 class _AsyncIter:
     """Minimal async iterator over a prebuilt list."""
 
@@ -326,14 +334,10 @@ class ParameterValidationTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(responses), 1)
         self.assertFalse(responses[0].error_message)
         infer = responses[0].infer_response
-        self.assertEqual(infer.parameters["status_code"].int64_param, 400)
-        self.assertEqual(
-            infer.parameters["status_name"].string_param,
-            "InvalidParameter",
-        )
-        payload = json.loads(infer.parameters["__messages__"].string_param)
-        self.assertEqual(payload["header"]["status_code"], 400)
-        self.assertEqual(payload["header"]["status_name"], "InvalidParameter")
+        self.assertEqual(infer.parameters["error_no"].int64_param, 8)
+        payload = json.loads(infer.parameters["error_msg"].string_param)
+        self.assertEqual(payload["status_code"], 400)
+        self.assertEqual(payload["status_name"], "InvalidParameter")
 
     async def test_max_completion_tokens_non_positive_rejected_without_forward(
         self,
@@ -899,7 +903,7 @@ class ChannelPoolTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(second.http_target, "10.0.0.2:8096")
         self.assertEqual(second.grpc_target, "10.0.0.2:8104")
 
-    async def test_closed_pool_aborts_with_unavailable(self) -> None:
+    async def test_closed_pool_returns_dash_503_error_frame(self) -> None:
         with patch(
             "rtp_llm.utils.grpc_host_channel_pool.aio.insecure_channel",
             side_effect=lambda addr, **_kwargs: _FakeChannel(addr),
@@ -910,21 +914,32 @@ class ChannelPoolTest(unittest.IsolatedAsyncioTestCase):
 
         ctx = MagicMock()
 
-        async def _abort(*_args, **_kwargs):
-            raise grpc.RpcError("UNAVAILABLE")
-
-        ctx.abort.side_effect = _abort
-
-        with self.assertRaises(grpc.RpcError):
-            await _drain(
-                servicer.ModelStreamInfer(_request_gen(_make_request("req1")), ctx)
-            )
-        ctx.abort.assert_called_once()
-        self.assertEqual(ctx.abort.call_args[0][0], grpc.StatusCode.UNAVAILABLE)
-        self.assertEqual(
-            ctx.abort.call_args[0][1],
-            "forward channel pool unavailable for backend 10.0.0.1:8104",
+        responses = await _drain(
+            servicer.ModelStreamInfer(_request_gen(_make_request("req1")), ctx)
         )
+        ctx.abort.assert_not_called()
+        self.assertEqual(len(responses), 1)
+        error_no, payload = _dash_error_payload(responses[0])
+        self.assertEqual(error_no, 5)
+        self.assertEqual(payload["status_code"], 503)
+        self.assertEqual(payload["status_name"], "ServiceUnavailable")
+        self.assertEqual(payload["status_message"], "forward backend unavailable")
+
+    async def test_discovery_none_returns_dash_503_error_frame(self) -> None:
+        servicer = _make_servicer(["10.0.0.1:8096"])
+        servicer._discovery.resolve = MagicMock(return_value=None)
+        ctx = MagicMock()
+
+        responses = await _drain(
+            servicer.ModelStreamInfer(_request_gen(_make_request("req1")), ctx)
+        )
+
+        ctx.abort.assert_not_called()
+        self.assertEqual(len(responses), 1)
+        error_no, payload = _dash_error_payload(responses[0])
+        self.assertEqual(error_no, 5)
+        self.assertEqual(payload["status_code"], 503)
+        await servicer.close()
 
 
 class StreamCloseTimingTest(unittest.IsolatedAsyncioTestCase):

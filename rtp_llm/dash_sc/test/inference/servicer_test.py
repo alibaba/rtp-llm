@@ -21,9 +21,23 @@ from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.generate_config import RoleAddr
 from rtp_llm.dash_sc.access_log import DASH_SC_GRPC_ACCESS_LOGGER_NAME
 from rtp_llm.dash_sc.access_record import GrpcAccessRecord
-from rtp_llm.dash_sc.codec import DashScParameterError, OtherParams, SamplingParams
+from rtp_llm.dash_sc.codec import (
+    DASH_ERROR_ABORT,
+    DASH_ERROR_BAD_REQUEST,
+    DASH_ERROR_CAPACITY,
+    DASH_ERROR_INTERNAL,
+    DASH_ERROR_INVALID_OUTPUT,
+    DASH_ERROR_TIMEOUT,
+    DASH_ERROR_TOO_LONG,
+    DASH_ERROR_UNSUPPORTED,
+    DashScParameterError,
+    LLMFinishReason,
+    OtherParams,
+    SamplingParams,
+)
 from rtp_llm.dash_sc.inference.servicer import (
     DashScInferenceServicer,
+    _dash_error_spec_for_ft_exception,
     build_think_runtime,
     iter_real_model_stream_infer,
 )
@@ -107,6 +121,35 @@ class _MultiStreamVisitor:
         return self._streams[self.enqueue_called - 1]
 
 
+class DashErrorSpecForFtExceptionTest(unittest.TestCase):
+    def test_non_default_exception_groups(self) -> None:
+        cases = (
+            (ExceptionType.INVALID_PARAMS, DASH_ERROR_BAD_REQUEST),
+            (ExceptionType.LONG_PROMPT_ERROR, DASH_ERROR_TOO_LONG),
+            (ExceptionType.UNSUPPORTED_OPERATION, DASH_ERROR_UNSUPPORTED),
+            (ExceptionType.MASTER_NO_AVAILABLE_WORKER, DASH_ERROR_CAPACITY),
+            (ExceptionType.GENERATE_TIMEOUT, DASH_ERROR_TIMEOUT),
+            (ExceptionType.OUT_OF_VOCAB_RANGE, DASH_ERROR_INVALID_OUTPUT),
+            (ExceptionType.CANCELLED_ERROR, DASH_ERROR_ABORT),
+        )
+        for exception_type, expected in cases:
+            with self.subTest(exception_type=exception_type):
+                self.assertEqual(
+                    _dash_error_spec_for_ft_exception(
+                        FtRuntimeException(exception_type, "boom")
+                    ),
+                    expected,
+                )
+
+    def test_internal_exception_maps_to_internal(self) -> None:
+        self.assertEqual(
+            _dash_error_spec_for_ft_exception(
+                FtRuntimeException(ExceptionType.CONNECT_FAILED, "boom")
+            ),
+            DASH_ERROR_INTERNAL,
+        )
+
+
 class _FakeTokenizer:
     eos_token_id = 2
     vocab_size = 200000
@@ -162,30 +205,28 @@ def _finish_reason(chunk) -> int | None:
     return None
 
 
+def _dash_error_payload(chunk) -> tuple[int, dict]:
+    infer = chunk.infer_response
+    return (
+        infer.parameters["error_no"].int64_param,
+        json.loads(infer.parameters["error_msg"].string_param),
+    )
+
+
 def _assert_parameter_error_response(
     testcase, resp, expected_message_part: str
 ) -> None:
     testcase.assertFalse(resp.error_message)
     infer = resp.infer_response
-    testcase.assertEqual(infer.parameters["status_code"].int64_param, 400)
-    testcase.assertEqual(
-        infer.parameters["status_name"].string_param,
-        "InvalidParameter",
-    )
+    testcase.assertEqual(infer.parameters["error_no"].int64_param, 8)
+    payload = json.loads(infer.parameters["error_msg"].string_param)
+    testcase.assertEqual(payload["status_code"], 400)
+    testcase.assertEqual(payload["status_name"], "InvalidParameter")
     testcase.assertIn(
         expected_message_part,
-        infer.parameters["status_message"].string_param,
+        payload["status_message"],
     )
-    payload = json.loads(infer.parameters["__messages__"].string_param)
-    header = payload["header"]
-    testcase.assertEqual(header["status_code"], 400)
-    testcase.assertEqual(header["status_name"], "InvalidParameter")
-    testcase.assertEqual(
-        header["status_message"],
-        infer.parameters["status_message"].string_param,
-    )
-    testcase.assertTrue(header["finished"])
-    testcase.assertEqual(_finish_reason(resp), 1000)
+    testcase.assertEqual(_finish_reason(resp), LLMFinishReason.STOP_ENGINE_PARAM)
     testcase.assertEqual(_gen_ids(resp), [])
 
 
@@ -282,7 +323,7 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(len(chunks), 1)
         self.assertEqual(_gen_ids(chunks[0]), [7, 8, 9])
-        self.assertEqual(_finish_reason(chunks[0]), 1)
+        self.assertEqual(_finish_reason(chunks[0]), LLMFinishReason.LENGTH)
 
     async def test_empty_list_yields_error_response(self) -> None:
         req = self._minimal_request()
@@ -299,7 +340,12 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
             )
         )
         self.assertEqual(len(chunks), 1)
-        self.assertIn("empty outputs_list", chunks[0].error_message)
+        self.assertFalse(chunks[0].error_message)
+        error_no, payload = _dash_error_payload(chunks[0])
+        self.assertEqual(error_no, 19)
+        self.assertEqual(payload["status_code"], 500)
+        self.assertIn("empty outputs_list", payload["status_message"])
+        self.assertEqual(_finish_reason(chunks[0]), LLMFinishReason.INNER_ENGINE_ERROR)
 
     async def test_enqueue_exception_yields_error_message(self) -> None:
         req = self._minimal_request()
@@ -319,16 +365,22 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
             )
         )
         self.assertEqual(len(chunks), 1)
-        self.assertIn("backend down", chunks[0].error_message)
+        self.assertFalse(chunks[0].error_message)
+        error_no, payload = _dash_error_payload(chunks[0])
+        self.assertEqual(error_no, 19)
+        self.assertEqual(payload["status_code"], 500)
+        self.assertIn("backend down", payload["status_message"])
+        self.assertEqual(_finish_reason(chunks[0]), LLMFinishReason.INNER_ENGINE_ERROR)
 
     async def test_ft_exception_sets_access_backend_error_code(self) -> None:
         req = self._minimal_request()
 
         class _BoomVisitor:
             async def enqueue(self, _gi):
-                e = FtRuntimeException(ExceptionType.ROUTE_ERROR, "route failed")
-                e.rtp_error_code = int(ExceptionType.MASTER_NO_AVAILABLE_WORKER)
-                raise e
+                raise FtRuntimeException(
+                    ExceptionType.ROUTE_ERROR,
+                    "route failed",
+                )
 
         access_agg = GrpcAccessRecord(
             method="ModelStreamInfer",
@@ -350,9 +402,14 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(len(chunks), 1)
-        self.assertIn("route failed", chunks[0].error_message)
+        self.assertFalse(chunks[0].error_message)
+        error_no, payload = _dash_error_payload(chunks[0])
+        self.assertEqual(error_no, 5)
+        self.assertEqual(payload["status_code"], 503)
+        self.assertIn("route failed", payload["status_message"])
+        self.assertEqual(_finish_reason(chunks[0]), LLMFinishReason.TASK_LIST_FULL)
         self.assertEqual(
-            access_agg.backend_error_code, "8400_MASTER_NO_AVAILABLE_WORKER"
+            access_agg.backend_error_code, "8500_ROUTE_ERROR"
         )
 
     async def test_stream_exception_yields_error_message(self) -> None:
@@ -370,7 +427,11 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
             )
         )
         self.assertEqual(len(chunks), 1)
-        self.assertIn("backend down", chunks[0].error_message)
+        self.assertFalse(chunks[0].error_message)
+        error_no, payload = _dash_error_payload(chunks[0])
+        self.assertEqual(error_no, 19)
+        self.assertEqual(payload["status_code"], 500)
+        self.assertIn("backend down", payload["status_message"])
 
     async def test_no_thinking_budget_zero_sets_sampler_mask_config_without_filtering(
         self,
@@ -694,7 +755,7 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(visitor.generate_inputs[1].generate_config.max_new_tokens, 2)
         self.assertEqual(len(phase2_chunks), 1)
         self.assertEqual(_gen_ids(phase2_chunks[0]), [20, 21])
-        self.assertEqual(_finish_reason(phase2_chunks[0]), 1)
+        self.assertEqual(_finish_reason(phase2_chunks[0]), LLMFinishReason.LENGTH)
 
     async def test_phase2_completion_alias_respects_max_tokens_total_cap(
         self,
@@ -791,7 +852,7 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(visitor.enqueue_called, 1)
         self.assertFalse(any(c.error_message for c in chunks))
         self.assertEqual(_gen_ids(chunks[-1]), [128822, 271])
-        self.assertEqual(_finish_reason(chunks[-1]), 1)
+        self.assertEqual(_finish_reason(chunks[-1]), LLMFinishReason.LENGTH)
 
     async def test_token1_phase2_closes_phase1_stream_before_phase2_enqueue(
         self,
@@ -1745,7 +1806,7 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
     async def test_max_new_tokens_negative_rejected_before_enqueue_repro_p3(
         self,
     ) -> None:
-        """max_new_tokens=-1 returns 400 through __messages__ and error_message."""
+        """max_new_tokens=-1 returns Dash-compatible 400 before enqueue."""
         visitor = _FakeVisitor(_FakeAsyncStream([]))
         servicer = DashScInferenceServicer(backend_visitor=visitor)
         req = self._valid_infer_request()
@@ -1777,6 +1838,20 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(visitor.enqueue_called, 0)
         self.assertEqual(len(responses), 1)
         _assert_parameter_error_response(self, responses[0], "tool_call_structural_tag")
+
+    async def test_bad_response_format_json_returns_parameter_error(self) -> None:
+        visitor = _FakeVisitor(_FakeAsyncStream([]))
+        servicer = DashScInferenceServicer(backend_visitor=visitor)
+        req = self._valid_infer_request()
+        req.parameters["response_format"].string_param = "not-json"
+
+        responses = await _drain(
+            servicer.ModelStreamInfer(_areq_iter([req]), MagicMock())
+        )
+
+        self.assertEqual(visitor.enqueue_called, 0)
+        self.assertEqual(len(responses), 1)
+        _assert_parameter_error_response(self, responses[0], "response_format")
 
     async def test_parser_type_error_is_not_masked_as_parameter_error(
         self,

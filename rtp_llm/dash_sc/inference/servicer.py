@@ -21,22 +21,26 @@ from typing import Any, AsyncIterator, Callable, Iterator, Optional
 
 import torch
 
-from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
+from rtp_llm.config.exceptions import ExceptionCategory, ExceptionType, FtRuntimeException
 from rtp_llm.config.generate_config import GenerateConfig
 from rtp_llm.dash_sc.access_log import emit_access_log, emit_query_log
 from rtp_llm.dash_sc.access_record import GrpcAccessRecord, to_optional_int
 from rtp_llm.dash_sc.codec import (
-    FINISH_REASON_ABORT,
-    FINISH_REASON_LENGTH,
-    FINISH_REASON_STOP_ENGINE_PARAM,
-    FINISH_REASON_STOP_TIMEOUT,
-    FINISH_REASON_USE_PARAMETER_STATUS,
+    DASH_ERROR_ABORT,
+    DASH_ERROR_BAD_REQUEST,
+    DASH_ERROR_CAPACITY,
+    DASH_ERROR_INTERNAL,
+    DASH_ERROR_INVALID_OUTPUT,
+    DASH_ERROR_TIMEOUT,
+    DASH_ERROR_TOO_LONG,
+    DASH_ERROR_UNSUPPORTED,
+    DashErrorSpec,
     DashScParameterError,
+    LLMFinishReason,
     OtherParams,
     SamplingParams,
     _token_ids_list_from_generate_output,
-    build_finish_reason_done_response,
-    build_parameter_error_response,
+    build_dash_error_response,
     build_stream_response_from_generate_outputs,
     iter_fake_model_stream_infer,
     parse_dash_sc_grpc_request,
@@ -71,7 +75,6 @@ _EMPTY_THINK_BODY = "\n"
 # for production; this constant exists so unit tests don't have to repeat it).
 _DEFAULT_TERMINATE_TOKEN_ID = 1
 _INT32_MAX = 2_147_483_647
-_FINISH_REASON_NOT_FINISHED = 2
 _PARTIAL_RESPONSE_METADATA = (("x-dashscope-partialresponse", "true"),)
 
 
@@ -86,15 +89,25 @@ def _exception_metric_code(error_code: Any) -> str:
 def _set_access_backend_error_code(access_agg: Any, e: BaseException) -> None:
     if access_agg is None:
         return
-    raw_code = getattr(e, "rtp_error_code", None)
-    if raw_code is None and isinstance(e, FtRuntimeException):
-        raw_code = int(e.exception_type)
-    if raw_code is None:
+    if not isinstance(e, FtRuntimeException):
         return
-    try:
-        access_agg.backend_error_code = _exception_metric_code(raw_code)
-    except (TypeError, ValueError):
-        access_agg.backend_error_code = str(raw_code)
+    access_agg.backend_error_code = _exception_metric_code(int(e.exception_type))
+
+
+def _dash_error_spec_for_ft_exception(exc: FtRuntimeException) -> DashErrorSpec:
+    return _DASH_ERROR_SPEC_BY_EXCEPTION_CATEGORY[exc.exception_type.category]
+
+
+_DASH_ERROR_SPEC_BY_EXCEPTION_CATEGORY = {
+    ExceptionCategory.BAD_REQUEST: DASH_ERROR_BAD_REQUEST,
+    ExceptionCategory.TOO_LONG: DASH_ERROR_TOO_LONG,
+    ExceptionCategory.UNSUPPORTED: DASH_ERROR_UNSUPPORTED,
+    ExceptionCategory.CAPACITY: DASH_ERROR_CAPACITY,
+    ExceptionCategory.TIMEOUT: DASH_ERROR_TIMEOUT,
+    ExceptionCategory.INVALID_OUTPUT: DASH_ERROR_INVALID_OUTPUT,
+    ExceptionCategory.CANCELLED: DASH_ERROR_ABORT,
+    ExceptionCategory.INTERNAL: DASH_ERROR_INTERNAL,
+}
 
 
 def stream_log_tag(
@@ -642,7 +655,7 @@ async def iter_real_model_stream_infer(
                 stats = (
                     0,
                     False,
-                    _FINISH_REASON_NOT_FINISHED,
+                    LLMFinishReason.STREAMING,
                     prompt_token_num,
                     prompt_cached_token_num,
                     (),
@@ -730,7 +743,7 @@ async def iter_real_model_stream_infer(
                     stats = (
                         len(ids_for_accounting),
                         False,
-                        _FINISH_REASON_NOT_FINISHED,
+                        LLMFinishReason.STREAMING,
                         prompt_token_num,
                         prompt_cached_token_num,
                         ids_for_accounting,
@@ -751,7 +764,7 @@ async def iter_real_model_stream_infer(
                         max_token_id=max_id,
                         generate_think_token_num=generate_think_token_num,
                         finish_reason_override=(
-                            FINISH_REASON_LENGTH if not will_do_phase2 else None
+                            LLMFinishReason.LENGTH if not will_do_phase2 else None
                         ),
                         _request_shape=request_shape,
                         stream_finished=not will_do_phase2,
@@ -759,9 +772,9 @@ async def iter_real_model_stream_infer(
                     )
                     eos_finished = not will_do_phase2
                     eos_finish_reason = (
-                        FINISH_REASON_LENGTH
+                        LLMFinishReason.LENGTH
                         if eos_finished
-                        else _FINISH_REASON_NOT_FINISHED
+                        else LLMFinishReason.STREAMING
                     )
                     stats = (
                         len(runtime.eos_tokens),
@@ -783,7 +796,7 @@ async def iter_real_model_stream_infer(
                 and max_new_tokens > 0
                 and len(cumulative_sent_ids) >= max_new_tokens
             ):
-                finish_reason_override = FINISH_REASON_LENGTH
+                finish_reason_override = LLMFinishReason.LENGTH
             response = build_stream_response_from_generate_outputs(
                 dash_sc_request_id=request.id,
                 model_name=request.model_name,
@@ -808,7 +821,11 @@ async def iter_real_model_stream_infer(
             response_finish_reason = (
                 finish_reason_override
                 if finish_reason_override is not None
-                else (0 if response_finished else _FINISH_REASON_NOT_FINISHED)
+                else (
+                    LLMFinishReason.STOP
+                    if response_finished
+                    else LLMFinishReason.STREAMING
+                )
             )
             stats = (
                 len(ids_for_accounting),
@@ -829,10 +846,14 @@ async def iter_real_model_stream_infer(
             )
         if chunk_idx == 0:
             logging.warning("[DashScGrpc] [%s] empty outputs_list", tag)
-            response = predict_v2_pb2.ModelStreamInferResponse(
-                error_message="empty outputs_list from backend",
+            error_spec = DASH_ERROR_INTERNAL
+            response = build_dash_error_response(
+                str(request.id),
+                request.model_name,
+                error_spec=error_spec,
+                status_message="empty outputs_list from backend",
             )
-            stats = (0, None, None, len(input_ids_list), 0, ())
+            stats = (0, True, error_spec.finish_reason, len(input_ids_list), 0, ())
             yield (response, stats) if yield_access_stats else response
             return
         # No implicit natural-finish phase-2 trigger here. DashLLM-aligned
@@ -922,12 +943,16 @@ async def iter_real_model_stream_infer(
                     and phase2_max_new_tokens > 0
                     and len(phase2_cumulative_sent_ids) >= phase2_max_new_tokens
                 ):
-                    finish_reason_override = FINISH_REASON_LENGTH
+                    finish_reason_override = LLMFinishReason.LENGTH
                 response_finished = bool(resp_out.finished)
                 response_finish_reason = (
                     finish_reason_override
                     if finish_reason_override is not None
-                    else (0 if response_finished else _FINISH_REASON_NOT_FINISHED)
+                    else (
+                        LLMFinishReason.STOP
+                        if response_finished
+                        else LLMFinishReason.STREAMING
+                    )
                 )
                 aux_info = getattr(resp_out, "aux_info", None)
                 prompt_token_num = (
@@ -1073,68 +1098,33 @@ async def iter_real_model_stream_infer(
                     phase2_pending = []
                     phase2_seen_close = True
     except FtRuntimeException as e:
-        if e.exception_type == ExceptionType.GENERATE_TIMEOUT:
-            logging.warning("[DashScGrpc] [%s] generate timeout: %s", tag, e)
-            response = build_finish_reason_done_response(
-                str(request.id),
-                request.model_name,
-                FINISH_REASON_STOP_TIMEOUT,
-            )
-            stats = (
-                0,
-                True,
-                FINISH_REASON_STOP_TIMEOUT,
-                len(input_ids_list),
-                0,
-                (),
-            )
-            yield (response, stats) if yield_access_stats else response
-        elif e.exception_type in (
-            ExceptionType.ERROR_INPUT_FORMAT_ERROR,
-            ExceptionType.NO_PROMPT_ERROR,
-            ExceptionType.EMPTY_PROMPT_ERROR,
-            ExceptionType.INVALID_PARAMS,
-        ):
-            logging.warning("[DashScGrpc] [%s] parameter error: %s", tag, e)
-            response = build_finish_reason_done_response(
-                str(request.id),
-                request.model_name,
-                FINISH_REASON_STOP_ENGINE_PARAM,
-            )
-            stats = (
-                0,
-                True,
-                FINISH_REASON_STOP_ENGINE_PARAM,
-                len(input_ids_list),
-                0,
-                (),
-            )
-            yield (response, stats) if yield_access_stats else response
-        elif e.exception_type == ExceptionType.CANCELLED_ERROR:
-            logging.info("[DashScGrpc] [%s] engine cancelled: %s", tag, e)
-            response = build_finish_reason_done_response(
-                str(request.id),
-                request.model_name,
-                FINISH_REASON_ABORT,
-            )
-            stats = (0, True, FINISH_REASON_ABORT, len(input_ids_list), 0, ())
-            yield (response, stats) if yield_access_stats else response
-        else:
-            _set_access_backend_error_code(access_agg, e)
+        _set_access_backend_error_code(access_agg, e)
+        error_spec = _dash_error_spec_for_ft_exception(e)
+        status_message = str(e)
+        if error_spec.status_code == 500:
             logging.exception("[DashScGrpc] [%s] engine error: %s", tag, e)
-            response = predict_v2_pb2.ModelStreamInferResponse(
-                error_message=f"{type(e).__name__}: {e}"
-            )
-            stats = (0, None, None, len(input_ids_list), 0, ())
-            yield (response, stats) if yield_access_stats else response
+        elif error_spec.status_code == 499:
+            logging.info("[DashScGrpc] [%s] engine cancelled: %s", tag, e)
+        else:
+            logging.warning("[DashScGrpc] [%s] engine rejected request: %s", tag, e)
+        response = build_dash_error_response(
+            str(request.id),
+            request.model_name,
+            error_spec=error_spec,
+            status_message=status_message,
+        )
+        stats = (0, True, error_spec.finish_reason, len(input_ids_list), 0, ())
+        yield (response, stats) if yield_access_stats else response
     except Exception as e:
         logging.exception("[DashScGrpc] [%s] enqueue failed: %s", tag, e)
-        # Prefix with exception class name so status.classify_error_message
-        # maps it to a bounded error_code tag (e.g. BACKEND_RuntimeError).
-        response = predict_v2_pb2.ModelStreamInferResponse(
-            error_message=f"{type(e).__name__}: {e}"
+        error_spec = DASH_ERROR_INTERNAL
+        response = build_dash_error_response(
+            str(request.id),
+            request.model_name,
+            error_spec=error_spec,
+            status_message=f"{type(e).__name__}: {e}",
         )
-        stats = (0, None, None, len(input_ids_list), 0, ())
+        stats = (0, True, error_spec.finish_reason, len(input_ids_list), 0, ())
         yield (response, stats) if yield_access_stats else response
 
 
@@ -1238,7 +1228,7 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
             else:
                 record.empty_frame_count += 1
         is_terminal = finished is True or (
-            finish_reason is not None and finish_reason != _FINISH_REASON_NOT_FINISHED
+            finish_reason is not None and finish_reason != LLMFinishReason.STREAMING
         )
         if is_terminal and not record.terminal_seen:
             record.terminal_seen = True
@@ -1303,13 +1293,19 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
                         record.record_request_frame(request)
                         record.mark_request_done("eof")
                         first_request = False
-                    resp = build_parameter_error_response(str(request.id), str(e))
+                    error_spec = DASH_ERROR_BAD_REQUEST
+                    resp = build_dash_error_response(
+                        str(request.id),
+                        request.model_name,
+                        error_spec=error_spec,
+                        status_message=str(e),
+                    )
                     self._record_and_report_chunk(
                         record,
                         resp,
                         delta_len=0,
                         finished=True,
-                        finish_reason=FINISH_REASON_USE_PARAMETER_STATUS,
+                        finish_reason=error_spec.finish_reason,
                     )
                     yield resp
                     return
@@ -1318,16 +1314,19 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
                         record.record_request_frame(request)
                         record.mark_request_done("eof")
                         first_request = False
-                    resp = build_parameter_error_response(
+                    error_spec = DASH_ERROR_BAD_REQUEST
+                    resp = build_dash_error_response(
                         str(request.id),
-                        "input_ids not found or raw_input_contents mismatch",
+                        request.model_name,
+                        error_spec=error_spec,
+                        status_message="input_ids not found or raw_input_contents mismatch",
                     )
                     self._record_and_report_chunk(
                         record,
                         resp,
                         delta_len=0,
                         finished=True,
-                        finish_reason=FINISH_REASON_USE_PARAMETER_STATUS,
+                        finish_reason=error_spec.finish_reason,
                     )
                     yield resp
                     return
@@ -1359,16 +1358,19 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
                         )
                         else "max_new_tokens"
                     )
-                    resp = build_parameter_error_response(
+                    error_spec = DASH_ERROR_BAD_REQUEST
+                    resp = build_dash_error_response(
                         str(request.id),
-                        f"invalid {param_name}: {sampling.max_new_tokens}; must be greater than 0",
+                        request.model_name,
+                        error_spec=error_spec,
+                        status_message=f"invalid {param_name}: {sampling.max_new_tokens}; must be greater than 0",
                     )
                     self._record_and_report_chunk(
                         record,
                         resp,
                         delta_len=0,
                         finished=True,
-                        finish_reason=FINISH_REASON_USE_PARAMETER_STATUS,
+                        finish_reason=error_spec.finish_reason,
                     )
                     yield resp
                     return
@@ -1384,7 +1386,7 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
                             resp,
                             delta_len=len(fake_generated_ids),
                             finished=True,
-                            finish_reason=0,
+                            finish_reason=LLMFinishReason.STOP,
                         )
                         yield resp
                     return

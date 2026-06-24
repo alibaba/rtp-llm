@@ -15,7 +15,9 @@ import grpc
 from rtp_llm.dash_sc.access_log import emit_access_log, emit_query_log
 from rtp_llm.dash_sc.access_record import GrpcAccessRecord, to_optional_int
 from rtp_llm.dash_sc.codec import (
-    build_parameter_error_response,
+    DASH_ERROR_BAD_REQUEST,
+    DASH_ERROR_CAPACITY,
+    build_dash_error_response,
     parse_max_new_tokens_for_proxy,
 )
 from rtp_llm.dash_sc.grpc_metrics import (
@@ -53,6 +55,21 @@ def _invalid_max_new_tokens_message(request) -> str | None:
         return None
     param_name = "max_completion_tokens" if from_completion_alias else "max_new_tokens"
     return f"invalid {param_name}: {max_new_tokens}; " "must be greater than 0"
+
+
+async def _close_request_iterator_quietly(request_iter) -> None:
+    try:
+        await request_iter.aclose()
+    except AttributeError:
+        return
+    except Exception:
+        pass
+
+
+async def _abort_with_downstream_grpc_error(context, exc: grpc.aio.AioRpcError) -> None:
+    code = exc.code() or grpc.StatusCode.UNKNOWN
+    details = exc.details() or code.name
+    await context.abort(code, details)
 
 
 class DashScProxyServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
@@ -137,14 +154,13 @@ class DashScProxyServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
                 logging.warning(
                     "[DashScGrpc] proxy parameter error: %s", invalid_message
                 )
-                try:
-                    aclose = getattr(request_iter, "aclose", None)
-                    if aclose is not None:
-                        await aclose()
-                except Exception:
-                    pass
-                resp = build_parameter_error_response(
-                    str(first_request.id), invalid_message
+                await _close_request_iterator_quietly(request_iter)
+                error_spec = DASH_ERROR_BAD_REQUEST
+                resp = build_dash_error_response(
+                    str(first_request.id),
+                    first_request.model_name,
+                    error_spec=error_spec,
+                    status_message=invalid_message,
                 )
                 self._record_and_report_chunk(record, resp)
                 yield resp
@@ -166,9 +182,18 @@ class DashScProxyServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
             route_addr = self._discovery.resolve()
             if route_addr is None:
                 record.mark_request_done("eof")
-                msg = "service discovery returned no forward backend"
+                msg = "forward backend unavailable"
                 logging.warning("[DashScGrpc] proxy discovery unavailable: %s", msg)
-                await context.abort(grpc.StatusCode.UNAVAILABLE, msg)
+                await _close_request_iterator_quietly(request_iter)
+                error_spec = DASH_ERROR_CAPACITY
+                resp = build_dash_error_response(
+                    str(first_request.id),
+                    first_request.model_name,
+                    error_spec=error_spec,
+                    status_message=msg,
+                )
+                self._record_and_report_chunk(record, resp)
+                yield resp
                 return
 
             grpc_target = route_addr.grpc_target
@@ -176,11 +201,22 @@ class DashScProxyServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
                 channel = await self._channel_pool.get(grpc_target)
             except RuntimeError as e:
                 record.mark_request_done("eof")
-                msg = f"forward channel pool unavailable for backend {grpc_target}"
+                msg = "forward backend unavailable"
                 logging.warning(
-                    "[DashScGrpc] proxy channel unavailable: %s: %s", msg, e
+                    "[DashScGrpc] proxy channel unavailable: backend=%s error=%s",
+                    grpc_target,
+                    e,
                 )
-                await context.abort(grpc.StatusCode.UNAVAILABLE, msg)
+                await _close_request_iterator_quietly(request_iter)
+                error_spec = DASH_ERROR_CAPACITY
+                resp = build_dash_error_response(
+                    str(first_request.id),
+                    first_request.model_name,
+                    error_spec=error_spec,
+                    status_message=msg,
+                )
+                self._record_and_report_chunk(record, resp)
+                yield resp
                 return
 
             stub = predict_v2_pb2_grpc.GRPCInferenceServiceStub(channel)
@@ -231,6 +267,11 @@ class DashScProxyServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
 
         try:
             upstream_iter = stub.ModelStreamInfer(request_iterator, metadata=md)
+        except grpc.aio.AioRpcError as e:
+            access_record.mark_backend_error(e)
+            access_record.mark_backend_done()
+            await _abort_with_downstream_grpc_error(context, e)
+            return
         except BaseException as e:
             access_record.mark_backend_error(e)
             access_record.mark_backend_done()
@@ -289,6 +330,8 @@ class DashScProxyServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
                     await buffered.aclose()
                 except Exception:
                     pass
+        except grpc.aio.AioRpcError as e:
+            await _abort_with_downstream_grpc_error(context, e)
         finally:
             # Safety net. ``_close_downstream`` is also exposed as a public-ish
             # static method so any future code path that wants to tear down

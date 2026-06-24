@@ -595,6 +595,17 @@ class GrpcAccessRecord:
             self.error_message = resp.error_message
         if resp.error_message:
             self.mark_terminal(now=now)
+            return
+        params = resp.infer_response.parameters
+        error_no_param = params.get("error_no")
+        if error_no_param is None or not error_no_param.HasField("int64_param"):
+            return
+        error_no = int(error_no_param.int64_param)
+        if error_no == 0:
+            return
+
+        self.status = f"DASH_ERROR_{error_no}"
+        self.mark_terminal(now=now)
 
     def mark_terminal(self, *, now: Optional[float] = None) -> None:
         if self.terminal_seen:
@@ -708,18 +719,18 @@ class GrpcAccessRecord:
             self.status_detail = self.error_message
         elif exc is not None:
             if self.terminal_seen:
-                self.status = "OK"
-                self.status_detail = None
+                if self.status == "OK":
+                    self.status_detail = None
             else:
                 self.status, self.status_detail = classify_rpc_exception(
                     exc, req_count=self.req_count
                 )
         elif code is None or code == grpc.StatusCode.OK:
-            self.status = "OK"
-            self.status_detail = None
+            if self.status == "OK":
+                self.status_detail = None
         elif self.terminal_seen:
-            self.status = "OK"
-            self.status_detail = None
+            if self.status == "OK":
+                self.status_detail = None
         else:
             self.status = code.name
             try:
