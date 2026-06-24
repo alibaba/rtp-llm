@@ -14,12 +14,23 @@ filegroup(
     visibility = ["//visibility:public"],
 )
 
+py_library(
+    name = "jit_cache_manager_test_lib",
+    srcs = ["jit_cache_manager_test.py"],
+    deps = [
+        "//rtp_llm:config",
+        "//rtp_llm:jit_cache_manager_lib",
+        "//rtp_llm/metrics",
+    ],
+)
+
 py_test(
     name = "jit_cache_manager_test",
     srcs = [
         "jit_cache_manager_test.py",
     ],
     deps = [
+        "//rtp_llm:config",
         "//rtp_llm:jit_cache_manager_lib",
         "//rtp_llm/metrics",
     ],
@@ -44,6 +55,7 @@ py_test(
         "open_skip",
     ],
     deps = [
+        ":jit_cache_manager_test_lib",
         ":packaging",
         "//rtp_llm:apache-tvm-ffi",
         "//rtp_llm:deep_gemm",

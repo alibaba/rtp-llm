@@ -170,6 +170,7 @@ py_library(
         "utils/module_util.py",
     ],
     deps = [
+        ":config",
         ":filelock",
         ":orjson",
         ":watchdog",

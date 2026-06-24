@@ -1,57 +1,36 @@
 import os
 import sys
-import tarfile
 import tempfile
+import threading
+import time
 import unittest
+from collections import defaultdict
 from pathlib import Path
 
-import torch
+REPO_ROOT = Path(__file__).resolve().parents[3]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
+import torch
+from watchdog.events import FileSystemEventHandler
+from watchdog.observers import Observer
+
+from rtp_llm.config.py_config_modules import JITConfig
 from rtp_llm.models_py.triton_kernels.autotune_cache.export import (
     write_default_config_json,
 )
 from rtp_llm.utils import jit_cache_manager as jit_cache_module
 from rtp_llm.utils.jit_cache_manager import (
+    COMPONENT_BY_NAME,
     COMPONENT_SPECS,
     SNAPSHOT_NAME,
     JitCacheManager,
 )
-
-
-class Config:
-    def __init__(self, local_root: Path, remote_root: Path):
-        self.local_jit_cache_dir = str(local_root)
-        self.remote_jit_dir = str(remote_root)
-        self.jit_prepare_timeout_s = 120
-        self.jit_sync_workers = 8
-
-
-def iter_component_files(root: Path, component):
-    if not root.is_dir():
-        return
-    for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = [dirname for dirname in dirnames if dirname != "__pycache__"]
-        current = Path(dirpath)
-        for filename in filenames:
-            path = current / filename
-            try:
-                stat = path.stat(follow_symlinks=False)
-            except OSError:
-                continue
-            rel = path.relative_to(root)
-            if stat.st_size <= 0 or not jit_cache_module.is_cache_file_static(
-                component, rel
-            ):
-                continue
-            yield path, rel, jit_cache_module.FileMeta(
-                size=stat.st_size, mtime_ns=stat.st_mtime_ns
-            )
-
-
-def add_path_to_tracker(tracker, component, path: Path, root: Path) -> None:
-    rel = path.relative_to(root)
-    if jit_cache_module.is_cache_file_static(component, rel):
-        tracker.add_key(component.name, rel.as_posix())
+from rtp_llm.utils.test.jit_cache_manager_test import (
+    add_path_to_tracker,
+    iter_component_files,
+    write_snapshot,
+)
 
 
 class RemoteJitIntegrationTest(unittest.TestCase):
@@ -119,32 +98,16 @@ class RemoteJitIntegrationTest(unittest.TestCase):
 
     def make_manager(self, local_root: Path, remote_root: Path) -> JitCacheManager:
         remote_root.mkdir(parents=True, exist_ok=True)
-        manager = JitCacheManager(Config(local_root, remote_root))
-        manager.bootstrap_env()
+        config = JITConfig()
+        config.local_jit_cache_dir = str(local_root)
+        config.remote_jit_dir = str(remote_root)
+        config.jit_remote_timeout_s = 120
+        manager = JitCacheManager(config)
+        manager.bootstrap()
         return manager
 
     def write_snapshot(self, remote_root: Path) -> Path:
-        snapshot = remote_root / SNAPSHOT_NAME
-        cctx = jit_cache_module.zstd.ZstdCompressor()
-        with snapshot.open("wb") as raw:
-            with cctx.stream_writer(raw) as compressed:
-                with tarfile.open(fileobj=compressed, mode="w|") as tar:
-                    for component in COMPONENT_SPECS:
-                        component_root = remote_root / component.name
-                        for path, rel, meta in iter_component_files(
-                            component_root, component
-                        ):
-                            info = tar.gettarinfo(
-                                str(path),
-                                arcname=f"{component.name}/{rel.as_posix()}",
-                            )
-                            info.pax_headers = dict(info.pax_headers)
-                            info.pax_headers[jit_cache_module.PAX_MTIME_NS] = str(
-                                meta.mtime_ns
-                            )
-                            with path.open("rb") as source:
-                                tar.addfile(info, source)
-        return snapshot
+        return write_snapshot(remote_root)
 
     def test_single_gpu_reuses_same_remote_jit_for_all_components(self):
         remote_root = self.root / "remote"
@@ -155,14 +118,14 @@ class RemoteJitIntegrationTest(unittest.TestCase):
 
             self.run_all_jit_workloads()
             first.dirty_tracker = jit_cache_module.JitDirtyTracker(
-                first.layouts, first.enqueue_upload
+                first.component_dirs, first.enqueue_upload
             )
             uploaded = self.enqueue_and_sync(first)
             self.assertEqual(uploaded["result"], "success")
 
             self.write_snapshot(remote_root)
             self.assertTrue((remote_root / SNAPSHOT_NAME).exists())
-            self.assert_components_have_remote_files(remote_root)
+            self.assert_components_have_files(remote_root)
         finally:
             first.stop()
 
@@ -171,7 +134,7 @@ class RemoteJitIntegrationTest(unittest.TestCase):
             prepare = second.prepare()
             self.assertEqual(prepare["cache_state"], "snapshot_hit")
             self.assertEqual(prepare["result"], "success")
-            self.assert_components_have_local_files(second.config.local_root)
+            self.assert_components_have_files(second.config.local_root)
         finally:
             second.stop()
 
@@ -294,7 +257,7 @@ class RemoteJitIntegrationTest(unittest.TestCase):
         assert manager.dirty_tracker is not None
         missing = []
         for component in COMPONENT_SPECS:
-            local_dir, _ = manager.layouts[component.name]
+            local_dir, _ = manager.component_dirs[component.name]
             files = list(iter_component_files(local_dir, component))
             if not files:
                 missing.append(component.name)
@@ -304,12 +267,6 @@ class RemoteJitIntegrationTest(unittest.TestCase):
             self.fail(f"workload did not produce JIT cache files for: {missing}")
         return manager.sync_once("single_gpu_jit_workload")
 
-    def assert_components_have_remote_files(self, remote_root: Path) -> None:
-        self.assert_components_have_files(remote_root)
-
-    def assert_components_have_local_files(self, local_root: Path) -> None:
-        self.assert_components_have_files(local_root)
-
     def assert_components_have_files(self, root: Path) -> None:
         missing = []
         for component in COMPONENT_SPECS:
@@ -318,6 +275,260 @@ class RemoteJitIntegrationTest(unittest.TestCase):
                 missing.append(component.name)
         if missing:
             self.fail(f"missing JIT cache files for components: {missing}")
+
+
+class EventRecord:
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.events: dict[str, list[tuple[str, str]]] = defaultdict(list)
+
+    def record(self, component_name: str, event_type: str, path: str):
+        with self.lock:
+            self.events[component_name].append((event_type, path))
+
+    def get_events(self, component_name: str) -> list[tuple[str, str]]:
+        with self.lock:
+            return list(self.events[component_name])
+
+    def get_event_types_for_syncable(self, component_name: str) -> set[str]:
+        component = COMPONENT_BY_NAME[component_name]
+        with self.lock:
+            return {
+                etype
+                for etype, path in self.events[component_name]
+                if path.endswith(component.sync_suffixes)
+                and not jit_cache_module.is_tmp_jit_path(path)
+            }
+
+
+class JitEventSignalVerificationTest(unittest.TestCase):
+    """Verify that each JIT component produces the expected filesystem events."""
+
+    def setUp(self):
+        if not torch.cuda.is_available():
+            self.skipTest("CUDA is not available")
+        cap = torch.cuda.get_device_capability(0)
+        if cap[0] < 9:
+            self.skipTest(f"SM90+ required, got {cap}")
+
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.old_env = os.environ.copy()
+        self.old_modules = {
+            name: sys.modules.get(name)
+            for name in ("flashinfer.jit.env", "flashinfer.jit.core")
+        }
+        self.old_flashinfer_env_attrs = None
+        env_module = sys.modules.get("flashinfer.jit.env")
+        if env_module is not None:
+            self.old_flashinfer_env_attrs = {
+                attr: getattr(env_module, attr)
+                for attr in (
+                    "FLASHINFER_BASE_DIR",
+                    "FLASHINFER_CACHE_DIR",
+                    "FLASHINFER_WORKSPACE_DIR",
+                    "FLASHINFER_JIT_DIR",
+                    "FLASHINFER_GEN_SRC_DIR",
+                    "FLASHINFER_AOT_DIR",
+                )
+            }
+        for env_name in (
+            "FLASHINFER_WORKSPACE_BASE",
+            "TRITON_CACHE_DIR",
+            "TRITON_AUTOTUNE_CONFIG_DIR",
+            "DG_JIT_CACHE_DIR",
+            "TORCH_EXTENSIONS_DIR",
+        ):
+            os.environ.pop(env_name, None)
+        os.environ["FLASHINFER_DISABLE_VERSION_CHECK"] = "1"
+        torch.cuda.set_device(0)
+
+    def tearDown(self):
+        os.environ.clear()
+        os.environ.update(self.old_env)
+        env_module = sys.modules.get("flashinfer.jit.env")
+        if env_module is not None and self.old_flashinfer_env_attrs is not None:
+            for attr, value in self.old_flashinfer_env_attrs.items():
+                setattr(env_module, attr, value)
+        for name, module in self.old_modules.items():
+            if module is None:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = module
+        self.tmp.cleanup()
+
+    def test_jit_components_produce_expected_filesystem_events(self):
+        local_root = self.root / "local"
+        local_root.mkdir(parents=True)
+        for component in COMPONENT_SPECS:
+            d = jit_cache_module.component_cache_dir(local_root, component)
+            d.mkdir(parents=True, exist_ok=True)
+        jit_cache_module.apply_jit_cache_env(local_root)
+
+        recorder = EventRecord()
+        observer = Observer()
+        for component in COMPONENT_SPECS:
+            comp_dir = jit_cache_module.component_cache_dir(local_root, component)
+            prefix = str(comp_dir) + os.sep
+            comp_name = component.name
+
+            class Handler(FileSystemEventHandler):
+                _prefix = prefix
+                _name = comp_name
+                _recorder = recorder
+
+                def on_any_event(self, event):
+                    if event.is_directory:
+                        return
+                    src = (
+                        event.dest_path
+                        if event.event_type == "moved"
+                        else event.src_path
+                    )
+                    if not src.startswith(self._prefix):
+                        return
+                    rel = src[len(self._prefix) :]
+                    self._recorder.record(self._name, event.event_type, rel)
+
+            observer.schedule(Handler(), str(comp_dir), recursive=True)
+
+        observer.start()
+        try:
+            time.sleep(0.1)
+
+            workloads = (
+                self._run_flashinfer,
+                self._run_triton,
+                self._run_triton_autotune,
+                self._run_deep_gemm,
+                self._run_torch_extensions,
+            )
+            for runner in workloads:
+                runner()
+
+            torch.cuda.synchronize()
+            time.sleep(1.0)
+        finally:
+            observer.stop()
+            observer.join(timeout=5)
+
+        print("\n=== JIT Cache Filesystem Event Verification ===\n")
+        all_ok = True
+        for component in COMPONENT_SPECS:
+            expected = component.upload_events
+            actual_types = recorder.get_event_types_for_syncable(component.name)
+            hit = expected & actual_types
+            missed = expected - actual_types
+            unexpected = actual_types - expected
+
+            status = "OK" if hit and not missed else "FAIL"
+            if status == "FAIL":
+                all_ok = False
+
+            print(f"[{status}] {component.name}:")
+            print(f"  configured upload_events: {sorted(expected)}")
+            print(f"  actual syncable events:   {sorted(actual_types)}")
+            if hit:
+                print(f"  matched:    {sorted(hit)}")
+            if missed:
+                print(f"  MISSING:    {sorted(missed)}")
+            if unexpected:
+                print(f"  extra (ok): {sorted(unexpected)}")
+
+            raw = recorder.get_events(component.name)
+            syncable_events = [
+                (t, p)
+                for t, p in raw
+                if p.endswith(component.sync_suffixes)
+                and not jit_cache_module.is_tmp_jit_path(p)
+            ]
+            if syncable_events:
+                print(f"  sample events ({len(syncable_events)} total):")
+                for etype, path in syncable_events[:5]:
+                    print(f"    {etype:10s} {path}")
+            print()
+
+        self.assertTrue(
+            all_ok,
+            "Some components did not produce their expected upload events. "
+            "Check output above for details.",
+        )
+
+    def _run_flashinfer(self):
+        from flashinfer.jit import env as jit_env
+        from flashinfer.jit import gen_batch_mla_module
+
+        workspace_base = Path(os.environ["FLASHINFER_WORKSPACE_BASE"])
+        version_dir = jit_env.FLASHINFER_WORKSPACE_DIR.parent.name
+        arch_dir = jit_env.FLASHINFER_WORKSPACE_DIR.name
+        workspace_dir = (
+            workspace_base / ".cache" / "flashinfer" / version_dir / arch_dir
+        )
+        jit_env.FLASHINFER_BASE_DIR = workspace_base
+        jit_env.FLASHINFER_CACHE_DIR = workspace_base / ".cache" / "flashinfer"
+        jit_env.FLASHINFER_WORKSPACE_DIR = workspace_dir
+        jit_env.FLASHINFER_JIT_DIR = workspace_dir / "cached_ops"
+        jit_env.FLASHINFER_GEN_SRC_DIR = workspace_dir / "generated"
+        jit_env.FLASHINFER_AOT_DIR = workspace_base / ".no_aot"
+        spec = gen_batch_mla_module(
+            "fa2",
+            torch.bfloat16,
+            torch.bfloat16,
+            torch.bfloat16,
+            torch.int32,
+            512,
+            64,
+            False,
+        )
+        spec.build_and_load()
+
+    def _run_triton(self):
+        import triton
+        import triton.language as tl
+
+        @triton.jit
+        def add_kernel(x, y, n: tl.constexpr, block: tl.constexpr):
+            offsets = tl.program_id(0) * block + tl.arange(0, block)
+            mask = offsets < n
+            values = tl.load(x + offsets, mask=mask)
+            tl.store(y + offsets, values + 1.0, mask=mask)
+
+        x = torch.arange(256, device="cuda", dtype=torch.float32)
+        y = torch.empty_like(x)
+        add_kernel[(triton.cdiv(x.numel(), 128),)](x, y, x.numel(), block=128)
+
+    def _run_triton_autotune(self):
+        autotune_dir = Path(os.environ["TRITON_AUTOTUNE_CONFIG_DIR"])
+        autotune_dir.mkdir(parents=True, exist_ok=True)
+        write_default_config_json(
+            autotune_dir / "test_autotune_signal.json",
+            "test_autotune_signal",
+            {"kwargs": {"block": 128}, "num_warps": 4, "num_stages": 3},
+        )
+
+    def _run_deep_gemm(self):
+        import deep_gemm
+
+        a = torch.randn((16, 16), device="cuda", dtype=torch.bfloat16)
+        b = torch.randn((16, 16), device="cuda", dtype=torch.bfloat16)
+        d = torch.empty((16, 16), device="cuda", dtype=torch.bfloat16)
+        deep_gemm.bf16_gemm_nt(a, b, d, None)
+
+    def _run_torch_extensions(self):
+        from torch.utils.cpp_extension import load_inline
+
+        name = f"rtp_jit_signal_test_{os.getpid()}"
+        load_inline(
+            name=name,
+            cpp_sources=[
+                "#include <torch/extension.h>\n"
+                "int signal_test(int v) { return v + 1; }\n"
+            ],
+            functions=["signal_test"],
+            extra_cflags=["-O0"],
+            with_cuda=False,
+            verbose=False,
+        )
 
 
 if __name__ == "__main__":

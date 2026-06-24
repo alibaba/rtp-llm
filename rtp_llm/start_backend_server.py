@@ -1,6 +1,5 @@
 import glob
 import logging
-import logging.config
 import multiprocessing
 import os
 import signal
@@ -26,15 +25,15 @@ from rtp_llm.utils.concurrency_controller import (
     ConcurrencyController,
     set_global_controller,
 )
-from rtp_llm.utils.jit_cache_manager import JitCacheManager, ensure_jit_cache_run_id
+from rtp_llm.utils.jit_cache_manager import JitCacheManager, new_jit_cache_run_id
 from rtp_llm.utils.process_manager import ProcessManager
 
 setup_logging()
 
 
-def prepare_jit_cache(py_env_configs: PyEnvConfigs):
-    manager = JitCacheManager(py_env_configs.jit_config)
-    manager.bootstrap_env()
+def prepare_jit_cache(py_env_configs: PyEnvConfigs, run_id: str):
+    manager = JitCacheManager(py_env_configs.jit_config, run_id=run_id)
+    manager.bootstrap()
     manager.prepare()
     manager.start_background_sync()
     return manager
@@ -45,6 +44,7 @@ def local_rank_start(
     py_env_configs: PyEnvConfigs,
     world_rank: int = 0,
     pipe_writer=None,
+    jit_cache_run_id: Optional[str] = None,
 ):
     """Start local rank with proper signal handling for graceful shutdown"""
     backend_manager = None
@@ -96,7 +96,9 @@ def local_rank_start(
         if py_env_configs.parallelism_config.world_size > 1:
             setproctitle(f"rtp_llm_rank-{local_rank}")
         set_global_controller(global_controller)
-        jit_cache_manager = prepare_jit_cache(py_env_configs)
+        jit_cache_manager = prepare_jit_cache(
+            py_env_configs, jit_cache_run_id or new_jit_cache_run_id()
+        )
         start_time = time.time()
         from rtp_llm.server.backend_manager import BackendManager
 
@@ -183,6 +185,7 @@ def _validate_dp_configuration(py_env_configs: PyEnvConfigs):
 def _create_rank_processes(
     global_controller: ConcurrencyController,
     py_env_configs: PyEnvConfigs,
+    jit_cache_run_id: str,
 ):
     """Create and start rank processes, returns (processes, rank_pipe_readers)"""
     pc = py_env_configs.parallelism_config
@@ -202,7 +205,13 @@ def _create_rank_processes(
 
         proc = Process(
             target=local_rank_start,
-            args=(global_controller, py_env_configs, world_rank, writer),
+            args=(
+                global_controller,
+                py_env_configs,
+                world_rank,
+                writer,
+                jit_cache_run_id,
+            ),
             name=f"rank-{world_rank}",
         )
         proc.start()
@@ -302,6 +311,7 @@ def _wait_for_ranks_startup(
 def multi_rank_start(
     global_controller: ConcurrencyController,
     py_env_configs: PyEnvConfigs,
+    jit_cache_run_id: str,
     pipe_writer=None,
 ):
     """Start multi-rank backend server with proper process management"""
@@ -312,7 +322,7 @@ def multi_rank_start(
 
     # Create processes and get pipe readers
     processes, rank_pipe_readers = _create_rank_processes(
-        global_controller, py_env_configs
+        global_controller, py_env_configs, jit_cache_run_id
     )
     local_world_size = len(processes)
 
@@ -453,12 +463,16 @@ def start_backend_server(
     os.makedirs("logs", exist_ok=True)
     load_gpu_nic_affinity()
 
-    ensure_jit_cache_run_id()
+    jit_cache_run_id = new_jit_cache_run_id()
 
     clear_jit_filelock()
 
     if not torch.cuda.is_available():
-        return local_rank_start(global_controller, py_env_configs)
+        return local_rank_start(
+            global_controller,
+            py_env_configs,
+            jit_cache_run_id=jit_cache_run_id,
+        )
 
     pc = py_env_configs.parallelism_config
     if (
@@ -471,9 +485,17 @@ def start_backend_server(
         )
 
     if torch.cuda.device_count() > 1 and pc.world_size > 1:
-        return multi_rank_start(global_controller, py_env_configs, pipe_writer)
+        return multi_rank_start(
+            global_controller, py_env_configs, jit_cache_run_id, pipe_writer
+        )
     else:
-        return local_rank_start(global_controller, py_env_configs, 0, pipe_writer)
+        return local_rank_start(
+            global_controller,
+            py_env_configs,
+            0,
+            pipe_writer,
+            jit_cache_run_id,
+        )
 
 
 def main():
