@@ -3,8 +3,40 @@
 
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
+#include <cctype>
+#include <cstdint>
 
 namespace rtp_llm {
+
+namespace {
+
+int64_t parseTrailingIntegerAfterMarker(const std::string& text, const std::string& marker) {
+    const auto marker_pos = text.rfind(marker);
+    if (marker_pos == std::string::npos) {
+        return -1;
+    }
+    auto pos = marker_pos + marker.size();
+    if (pos >= text.size() || !std::isdigit(static_cast<unsigned char>(text[pos]))) {
+        return -1;
+    }
+    int64_t value = 0;
+    while (pos < text.size() && std::isdigit(static_cast<unsigned char>(text[pos]))) {
+        value = value * 10 + (text[pos] - '0');
+        ++pos;
+    }
+    return value;
+}
+
+int64_t parseLayerIdFromBlockKey(const std::string& block_key) {
+    return parseTrailingIntegerAfterMarker(block_key, "_layer_id_");
+}
+
+int64_t parseRegionIdFromBlockKey(const std::string& block_key) {
+    const auto region_id = parseTrailingIntegerAfterMarker(block_key, "_region_");
+    return region_id >= 0 ? region_id : 0;
+}
+
+}  // namespace
 
 CacheStoreServiceImplContext::CacheStoreServiceImplContext(
     const CacheLoadRequest*                                      request,
@@ -39,14 +71,14 @@ std::shared_ptr<BlockBufferInfo> CacheStoreServiceImplContext::getAndEraseUnLoad
         return nullptr;
     }
     if (unloaded_blocks_.size() == total_block_count_) {
-        collector_->markFirstBlockReady();
+        collector_->markFirstBlockReady(parseLayerIdFromBlockKey(block_key), parseRegionIdFromBlockKey(block_key));
     }
 
     auto block_info = it->second;
     unloaded_blocks_.erase(it);
 
     if (unloaded_blocks_.empty()) {
-        collector_->markAllBlocksReady();
+        collector_->markAllBlocksReady(parseLayerIdFromBlockKey(block_key), parseRegionIdFromBlockKey(block_key));
     }
     return block_info;
 }

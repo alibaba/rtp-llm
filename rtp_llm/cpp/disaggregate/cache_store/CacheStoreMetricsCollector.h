@@ -4,6 +4,7 @@
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include <memory>
+#include <cstdint>
 
 namespace rtp_llm {
 
@@ -79,11 +80,15 @@ public:
     ~CacheStoreServerLoadMetricsCollector();
 
 public:
-    void markFirstBlockReady() {
+    void markFirstBlockReady(int64_t layer_id = -1, int64_t region_id = -1) {
         first_block_ready_time_us_ = currentTimeUs();
+        collector_.first_block_layer_id  = layer_id;
+        collector_.first_block_region_id = region_id;
     }
-    void markAllBlocksReady() {
+    void markAllBlocksReady(int64_t layer_id = -1, int64_t region_id = -1) {
         all_block_ready_time_us_ = currentTimeUs();
+        collector_.all_block_layer_id  = layer_id;
+        collector_.all_block_region_id = region_id;
     }
     void setWriteInfo(int64_t block_count, int64_t block_size, int64_t latency_us);
     void markEnd(bool success = true) {

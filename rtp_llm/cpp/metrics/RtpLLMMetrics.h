@@ -1093,6 +1093,10 @@ public:
     int64_t first_block_ready_latency_us = 0;  // 等待第一block可以传输的耗时
     int64_t all_block_ready_latency_us   = 0;  // 从接收到请求到最后一个block ready 可以传输的时间.
     int64_t transfer_gap_latency_us      = 0;  // 从最后一个block ready 可以传输 到 最后一个 block 传输完成的时间差.
+    int64_t first_block_layer_id         = -1;
+    int64_t first_block_region_id        = -1;
+    int64_t all_block_layer_id           = -1;
+    int64_t all_block_region_id          = -1;
 
     std::vector<int64_t> write_block_count;       // 调用write的block数量
     std::vector<int64_t> write_total_block_size;  //  调用write的block size
@@ -1156,6 +1160,10 @@ public:
     kmonitor::MutableMetric* load_server_first_block_ready_latency_us_metric = nullptr;
     kmonitor::MutableMetric* load_server_all_block_ready_latency_us_metric   = nullptr;
     kmonitor::MutableMetric* load_server_transfer_gap_latency_us_metric      = nullptr;
+    kmonitor::MutableMetric* load_server_first_block_layer_id_metric         = nullptr;
+    kmonitor::MutableMetric* load_server_first_block_region_id_metric        = nullptr;
+    kmonitor::MutableMetric* load_server_all_block_layer_id_metric           = nullptr;
+    kmonitor::MutableMetric* load_server_all_block_region_id_metric          = nullptr;
     kmonitor::MutableMetric* load_server_write_block_count_metric            = nullptr;
     kmonitor::MutableMetric* load_server_write_total_block_size              = nullptr;
     kmonitor::MutableMetric* load_server_write_latency_us_metric             = nullptr;

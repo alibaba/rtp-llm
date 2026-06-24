@@ -669,6 +669,14 @@ bool RtpLLMCacheStoreMetrics::init(kmonitor::MetricsGroupManager* manager) {
                                   "rtp_llm.cache_store.load.server.all_block_ready_latency_us");
     REGISTER_GAUGE_MUTABLE_METRIC(load_server_transfer_gap_latency_us_metric,
                                   "rtp_llm.cache_store.load.server.transfer_gap_latency_us");
+    REGISTER_GAUGE_MUTABLE_METRIC(load_server_first_block_layer_id_metric,
+                                  "rtp_llm.cache_store.load.server.first_block_layer_id");
+    REGISTER_GAUGE_MUTABLE_METRIC(load_server_first_block_region_id_metric,
+                                  "rtp_llm.cache_store.load.server.first_block_region_id");
+    REGISTER_GAUGE_MUTABLE_METRIC(load_server_all_block_layer_id_metric,
+                                  "rtp_llm.cache_store.load.server.all_block_layer_id");
+    REGISTER_GAUGE_MUTABLE_METRIC(load_server_all_block_region_id_metric,
+                                  "rtp_llm.cache_store.load.server.all_block_region_id");
     REGISTER_GAUGE_MUTABLE_METRIC(load_server_write_block_count_metric,
                                   "rtp_llm.cache_store.load.server.write.block_count");
     REGISTER_GAUGE_MUTABLE_METRIC(load_server_write_total_block_size,
@@ -742,6 +750,18 @@ void RtpLLMCacheStoreMetrics::report(const kmonitor::MetricsTags*               
     REPORT_NON_ZERO_MUTABLE_METRIC(load_server_all_block_ready_latency_us_metric,
                                    collector->all_block_ready_latency_us);
     REPORT_NON_ZERO_MUTABLE_METRIC(load_server_transfer_gap_latency_us_metric, collector->transfer_gap_latency_us);
+    if (collector->first_block_layer_id >= 0) {
+        REPORT_MUTABLE_METRIC(load_server_first_block_layer_id_metric, collector->first_block_layer_id);
+    }
+    if (collector->first_block_region_id >= 0) {
+        REPORT_MUTABLE_METRIC(load_server_first_block_region_id_metric, collector->first_block_region_id);
+    }
+    if (collector->all_block_layer_id >= 0) {
+        REPORT_MUTABLE_METRIC(load_server_all_block_layer_id_metric, collector->all_block_layer_id);
+    }
+    if (collector->all_block_region_id >= 0) {
+        REPORT_MUTABLE_METRIC(load_server_all_block_region_id_metric, collector->all_block_region_id);
+    }
     for (int i = 0; i < collector->write_block_count.size(); ++i) {
         REPORT_NON_ZERO_MUTABLE_METRIC(load_server_write_block_count_metric, collector->write_block_count[i]);
         REPORT_NON_ZERO_MUTABLE_METRIC(load_server_write_total_block_size, collector->write_total_block_size[i]);
