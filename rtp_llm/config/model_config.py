@@ -136,6 +136,7 @@ class ModelConfig(CppModelConfig):
         "has_moe_norm",
         "prefix_projection",
         "reverse_e_h_norm",
+        "kv_cache_specs",
     }
 
     def __setattr__(self, name: str, value: Any) -> None:

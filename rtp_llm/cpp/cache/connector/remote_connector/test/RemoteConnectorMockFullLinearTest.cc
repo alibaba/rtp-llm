@@ -103,7 +103,6 @@ private:
         int unique_layer_id            = 0;
 
         auto full_spec                = std::make_shared<MHAKVCacheSpec>();
-        full_spec->layer_num          = layer_num;
         full_spec->local_head_num_kv  = 8;
         full_spec->size_per_head      = 128;
         full_spec->seq_size_per_block = seq_size_per_block;
@@ -113,7 +112,6 @@ private:
         auto linear_spec                = std::make_shared<LinearKVCacheSpec>();
         linear_spec->type               = KVCacheSpecType::LinearAttention;
         linear_spec->dtype              = rtp_llm::DataType::TYPE_FP16;
-        linear_spec->layer_num          = layer_num;
         linear_spec->local_num_k_heads  = 1;
         linear_spec->local_num_v_heads  = 1;
         linear_spec->head_k_dim         = 1;

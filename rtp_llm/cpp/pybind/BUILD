@@ -37,6 +37,10 @@ cc_library(
         "//rtp_llm/cpp/multimodal_processor:multimodal_input_class",
         "//rtp_llm/cpp/config:config_modules",
         "//rtp_llm/cpp/config:model_config",  # Add ModelConfig implementation
+        "//rtp_llm/cpp/cache:kv_cache_specs",
+        "//rtp_llm/cpp/engine_base/stream:complete_token_ids",
+        "//rtp_llm/cpp/engine_base/stream:generate_config",
+        "//rtp_llm/cpp/engine_base/stream:generate_types",
         "//rtp_llm/cpp/model_utils:model_utils",
         "//rtp_llm/cpp/config:eplb_config",
         "//rtp_llm/cpp/utils:core_utils",

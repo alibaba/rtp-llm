@@ -98,7 +98,6 @@ private:
         cache_config_.seq_size_per_block = seq_size_per_block;
 
         auto mha_spec                = std::make_shared<MHAKVCacheSpec>();
-        mha_spec->layer_num          = layer_num;
         mha_spec->local_head_num_kv  = 8;
         mha_spec->size_per_head      = 128;
         mha_spec->seq_size_per_block = seq_size_per_block;
