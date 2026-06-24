@@ -215,6 +215,7 @@ CacheLayerLayout SingleTypeKVCacheAllocator::allLayerCacheBase() const {
     auto             layer_tensors = full_kv_cache_group_->allLayerCacheBase();
     auto             scale_tensors = full_kv_cache_group_->allLayerScaleCacheBase();
 
+    layout.kv_block_stride_kernel_blocks = static_cast<int>(config_.kv_block_stride_kernel_blocks);
     layout.layers_to_kv_buffer_ptrs.resize(config_.layer_all_num);
     layout.layers_to_scale_buffer_ptrs.resize(config_.layer_all_num);
 

@@ -342,7 +342,10 @@ CacheLayerLayout HybridTypeKVCacheAllocator::allLayerCacheBase() const {
     const auto       layer_tensors = block_pool_->allLayerCacheBase();
     const auto       scale_tensors = block_pool_->allLayerScaleCacheBase();
 
-    layout.layer_to_groups = layer_to_group_id_;
+    layout.layer_to_groups               = layer_to_group_id_;
+    layout.group_types                   = config_.group_types;
+    layout.layer_attn_types              = config_.layer_attn_types;
+    layout.kv_block_stride_kernel_blocks = static_cast<int>(config_.kv_block_stride_kernel_blocks);
     layout.layers_to_kv_buffer_ptrs.resize(config_.layer_all_num);
     layout.layers_to_scale_buffer_ptrs.resize(config_.layer_all_num);
 

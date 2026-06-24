@@ -252,6 +252,7 @@ CacheLayerLayout KVCacheManager::getMainModelCacheLayerLayout() const {
     auto& all_layer_tensors = all_layout.layers_to_kv_buffer_ptrs;
     auto& all_scale_tensors = all_layout.layers_to_scale_buffer_ptrs;
 
+    layout.kv_block_stride_kernel_blocks = static_cast<int>(config_.kv_block_stride_kernel_blocks);
     layout.layers_to_kv_buffer_ptrs.resize(config_.layer_num);
     if (!all_scale_tensors.empty()) {
         layout.layers_to_scale_buffer_ptrs.resize(config_.layer_num);
@@ -313,6 +314,7 @@ CacheLayerLayout KVCacheManager::getMTPModuleCacheLayerLayout(int mtp_module_id)
     auto& all_layer_tensors = all_layout.layers_to_kv_buffer_ptrs;
     auto& all_scale_tensors = all_layout.layers_to_scale_buffer_ptrs;
 
+    layout.kv_block_stride_kernel_blocks = static_cast<int>(mtp_sub_config->kv_block_stride_kernel_blocks);
     layout.layer_to_groups.resize(mtp_layer_num);
     layout.layers_to_kv_buffer_ptrs.resize(mtp_layer_num);
     if (!all_scale_tensors.empty()) {

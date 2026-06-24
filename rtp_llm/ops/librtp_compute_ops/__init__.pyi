@@ -151,6 +151,7 @@ class KVCache:
     kv_scale_base_by_layer: list[torch.Tensor]
     seq_size_per_block: int
     kernel_seq_size_per_block: int
+    kv_block_stride_kernel_blocks: int
     num_kv_heads: int
     head_dim: int
     use_mla: bool

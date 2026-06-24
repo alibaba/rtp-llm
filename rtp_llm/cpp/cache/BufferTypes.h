@@ -18,6 +18,7 @@ struct CacheLayerLayout {
     std::vector<CacheGroupType> layer_attn_types;
     std::vector<torch::Tensor>  layers_to_kv_buffer_ptrs;
     std::vector<torch::Tensor>  layers_to_scale_buffer_ptrs;
+    int                         kv_block_stride_kernel_blocks = 1;
 };
 
 struct KVCacheBuffer {

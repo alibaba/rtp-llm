@@ -20,25 +20,24 @@ def reshape_paged_kv_cache(
     tokens_per_block: int,
     head_dim: int,
 ) -> torch.Tensor:
-    """Reshape a raw 2D packed per-layer KV cache buffer into the 5D paged format.
+    """Reshape a raw 2D per-layer KV cache buffer into the 5D paged format.
 
-    In hybrid cache mode the per-layer tensor arrives as a raw 2D buffer
-    [block_num, kv_block_stride_elems].  The hybrid stride is
-    max(full_attn, linear_attn), so we slice the prefix used by full-attention
-    layers and reshape to [block_num, 2, num_kv_heads, tokens_per_block, head_dim].
-    If the tensor is already multi-dimensional it is returned as-is.
+    The first dimension of the returned tensor follows the physical block ID
+    domain represented by the input storage.  For padded hybrid full-attention
+    cache views, the 2D input has already been exposed with padding slots in
+    the first dimension, so this helper must not slice the live prefix and
+    compact the address space.
     """
     if paged_kv_cache.dim() != 2:
         return paged_kv_cache
-    block_num = paged_kv_cache.shape[0]
-    expected_elems_per_block = 2 * num_kv_heads * tokens_per_block * head_dim
-    if paged_kv_cache.shape[1] < expected_elems_per_block:
+    expected_elems_per_kernel_block = 2 * num_kv_heads * tokens_per_block * head_dim
+    if paged_kv_cache.shape[1] != expected_elems_per_kernel_block:
         raise ValueError(
-            f"packed kv_cache_base has insufficient stride: "
-            f"got stride={paged_kv_cache.shape[1]} elems, need={expected_elems_per_block} elems"
+            f"packed kv_cache_base has unexpected kernel-block width: "
+            f"got width={paged_kv_cache.shape[1]} elems, need={expected_elems_per_kernel_block} elems"
         )
-    return paged_kv_cache[:, :expected_elems_per_block].reshape(
-        block_num, 2, num_kv_heads, tokens_per_block, head_dim
+    return paged_kv_cache.reshape(
+        paged_kv_cache.shape[0], 2, num_kv_heads, tokens_per_block, head_dim
     )
 
 

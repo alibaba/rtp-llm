@@ -15,16 +15,123 @@ import unittest
 
 import torch
 
+from rtp_llm.models_py.modules.factory.attention.common import reshape_paged_kv_cache
 from rtp_llm.models_py.modules.factory.attention.rocm_impl._attn_utils import (
     reshape_kv_cache_vectorized,
     split_qkv_fp8,
     split_raw_qkv,
     unpad_kv_vectorized,
 )
+from rtp_llm.ops.compute_ops import CacheGroupType, KVCache
 
 # ---------------------------------------------------------------------------
 # unpad_kv_vectorized
 # ---------------------------------------------------------------------------
+
+
+class TestReshapePagedKvCache(unittest.TestCase):
+    def test_preserves_padded_kernel_block_domain(self):
+        num_kv_heads = 1
+        tokens_per_block = 2
+        head_dim = 2
+        padded_kernel_blocks = 6
+        packed = torch.arange(
+            padded_kernel_blocks * 2 * num_kv_heads * tokens_per_block * head_dim,
+            dtype=torch.float32,
+        ).reshape(padded_kernel_blocks, 2 * num_kv_heads * tokens_per_block * head_dim)
+
+        reshaped = reshape_paged_kv_cache(
+            packed, num_kv_heads, tokens_per_block, head_dim
+        )
+
+        self.assertEqual(
+            reshaped.shape,
+            (padded_kernel_blocks, 2, num_kv_heads, tokens_per_block, head_dim),
+        )
+        self.assertEqual(reshaped.data_ptr(), packed.data_ptr())
+
+    def test_rejects_non_kernel_block_width(self):
+        packed = torch.zeros((3, 9), dtype=torch.float32)
+
+        with self.assertRaisesRegex(ValueError, "unexpected kernel-block width"):
+            reshape_paged_kv_cache(
+                packed, num_kv_heads=1, tokens_per_block=2, head_dim=2
+            )
+
+
+class TestKVCacheLayerScaleReshape(unittest.TestCase):
+    def _make_cache(self, use_mla=False):
+        cache = KVCache()
+        cache.seq_size_per_block = 4
+        cache.kernel_seq_size_per_block = 2
+        cache.kv_block_stride_kernel_blocks = 2
+        cache.num_kv_heads = 1
+        cache.head_dim = 1
+        cache.use_mla = use_mla
+        cache.kv_lora_rank = 1
+        cache.rope_head_dim = 1
+        cache.layer_attn_types = [CacheGroupType.FULL]
+        cache.kv_cache_base_by_layer = [
+            torch.arange(8, dtype=torch.float32).reshape(1, 8)
+        ]
+        return cache
+
+    def test_non_mla_scale_with_nondivisible_width_is_left_raw(self):
+        cache = self._make_cache(use_mla=False)
+        scale = torch.arange(3, dtype=torch.float32).reshape(1, 3)
+        cache.kv_scale_base_by_layer = [scale]
+
+        layer_cache = cache.get_layer_cache(0)
+
+        self.assertEqual(layer_cache.kv_scale_base.shape, scale.shape)
+        self.assertEqual(layer_cache.kv_scale_base.data_ptr(), scale.data_ptr())
+
+    def test_mla_scale_without_rank_three_is_left_raw(self):
+        cache = self._make_cache(use_mla=True)
+        scale = torch.arange(4, dtype=torch.float32).reshape(1, 4)
+        cache.kv_scale_base_by_layer = [scale]
+
+        layer_cache = cache.get_layer_cache(0)
+
+        self.assertEqual(layer_cache.kv_scale_base.shape, scale.shape)
+        self.assertEqual(layer_cache.kv_scale_base.data_ptr(), scale.data_ptr())
+
+    def test_non_mla_rank_three_scale_is_left_raw(self):
+        cache = self._make_cache(use_mla=False)
+        scale = torch.arange(4, dtype=torch.float32).reshape(1, 4, 1)
+        cache.kv_scale_base_by_layer = [scale]
+
+        layer_cache = cache.get_layer_cache(0)
+
+        self.assertEqual(layer_cache.kv_scale_base.shape, scale.shape)
+        self.assertEqual(layer_cache.kv_scale_base.data_ptr(), scale.data_ptr())
+
+    def test_mla_rank_four_scale_is_left_raw(self):
+        cache = self._make_cache(use_mla=True)
+        scale = torch.arange(4, dtype=torch.float32).reshape(1, 2, 1, 2)
+        cache.kv_scale_base_by_layer = [scale]
+
+        layer_cache = cache.get_layer_cache(0)
+
+        self.assertEqual(layer_cache.kv_scale_base.shape, scale.shape)
+        self.assertEqual(layer_cache.kv_scale_base.data_ptr(), scale.data_ptr())
+
+
+class TestKVCacheLayerDefaultStride(unittest.TestCase):
+    def test_default_stride_uses_active_kernel_block_count(self):
+        cache = KVCache()
+        cache.seq_size_per_block = 4
+        cache.kernel_seq_size_per_block = 2
+        cache.num_kv_heads = 1
+        cache.head_dim = 1
+        cache.layer_attn_types = [CacheGroupType.FULL]
+        cache.kv_cache_base_by_layer = [
+            torch.arange(8, dtype=torch.float32).reshape(1, 8)
+        ]
+
+        layer_cache = cache.get_layer_cache(0)
+
+        self.assertEqual(layer_cache.kv_cache_base.shape, (2, 2, 1, 2, 1))
 
 
 def _unpad_kv_loop(k_padded, v_padded, cu_seqlens_k):

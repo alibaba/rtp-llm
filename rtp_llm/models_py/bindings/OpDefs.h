@@ -1,5 +1,7 @@
 #pragma once
 
+#include <algorithm>
+
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 #include <pybind11/embed.h>
@@ -35,13 +37,14 @@ struct KVCache {
     // Per-layer views
     std::vector<torch::Tensor> kv_cache_base_by_layer;
     std::vector<torch::Tensor> kv_scale_base_by_layer;
-    int                        seq_size_per_block        = 0;
-    int                        kernel_seq_size_per_block = 0;
-    int                        num_kv_heads              = 0;
-    int                        head_dim                  = 0;
-    bool                       use_mla                   = false;
-    int                        kv_lora_rank              = 0;
-    int                        rope_head_dim             = 0;
+    int                        seq_size_per_block            = 0;
+    int                        kernel_seq_size_per_block     = 0;
+    int                        kv_block_stride_kernel_blocks = 1;
+    int                        num_kv_heads                  = 0;
+    int                        head_dim                      = 0;
+    bool                       use_mla                       = false;
+    int                        kv_lora_rank                  = 0;
+    int                        rope_head_dim                 = 0;
 
     // Per-layer attention type (CacheGroupType::FULL or LINEAR).
     std::vector<rtp_llm::CacheGroupType> layer_attn_types;
@@ -70,13 +73,18 @@ struct KVCache {
         } else {
             layer_cache.seq_size_per_block =
                 kernel_seq_size_per_block > 0 ? kernel_seq_size_per_block : seq_size_per_block;
-            const int64_t kernel_blocks_per_kv_block =
+            const int64_t active_kernel_blocks_per_kv_block =
                 kernel_seq_size_per_block > 0 ? (int64_t)seq_size_per_block / (int64_t)kernel_seq_size_per_block : 1;
+            const int64_t configured_physical_kernel_blocks_per_kv_block = kv_block_stride_kernel_blocks > 0 ?
+                                                                               (int64_t)kv_block_stride_kernel_blocks :
+                                                                               active_kernel_blocks_per_kv_block;
+            const int64_t physical_kernel_blocks_per_kv_block =
+                std::max<int64_t>(configured_physical_kernel_blocks_per_kv_block, active_kernel_blocks_per_kv_block);
 
             // [block_num, kv_block_stride_elems] shared by all layer types.
             if (base.defined() && base.dim() == 2) {
                 const int64_t physical_block_num = base.size(0);
-                const int64_t kernel_block_num   = physical_block_num * kernel_blocks_per_kv_block;
+                const int64_t kernel_block_num   = physical_block_num * physical_kernel_blocks_per_kv_block;
                 if (use_mla && kv_lora_rank > 0 && rope_head_dim > 0) {
                     // MLA layout: [kernel_block_num, kernel_seq_size_per_block, kv_lora_rank + rope_head_dim]
                     layer_cache.kv_cache_base = base.reshape({kernel_block_num,
@@ -97,16 +105,29 @@ struct KVCache {
             }
 
             if (scale.defined()) {
+                layer_cache.kv_scale_base = scale;
+            }
+            if (base.defined() && base.dim() == 2 && scale.defined() && scale.numel() > 0) {
                 // Keep kv_scale_base aligned with kernel-block view of kv_cache_base.
                 const int64_t physical_block_num = base.size(0);
-                const int64_t kernel_block_num   = physical_block_num * kernel_blocks_per_kv_block;
+                const int64_t kernel_block_num   = physical_block_num * physical_kernel_blocks_per_kv_block;
 
                 if (use_mla) {
-                    layer_cache.kv_scale_base =
-                        scale.reshape({kernel_block_num, (int64_t)kernel_seq_size_per_block, scale.size(2)});
+                    if (scale.dim() == 3) {
+                        const int64_t target_numel =
+                            kernel_block_num * (int64_t)kernel_seq_size_per_block * scale.size(2);
+                        if (scale.numel() == target_numel) {
+                            layer_cache.kv_scale_base =
+                                scale.reshape({kernel_block_num, (int64_t)kernel_seq_size_per_block, scale.size(2)});
+                        }
+                    }
                 } else {
-                    layer_cache.kv_scale_base =
-                        scale.reshape({kernel_block_num, scale.size(1) / kernel_blocks_per_kv_block});
+                    if (scale.dim() == 2 && scale.size(1) % physical_kernel_blocks_per_kv_block == 0) {
+                        const int64_t target_width = scale.size(1) / physical_kernel_blocks_per_kv_block;
+                        if (scale.numel() == kernel_block_num * target_width) {
+                            layer_cache.kv_scale_base = scale.reshape({kernel_block_num, target_width});
+                        }
+                    }
                 }
             }
         }

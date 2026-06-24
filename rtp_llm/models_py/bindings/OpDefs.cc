@@ -23,6 +23,9 @@ void registerPyOpDefs(pybind11::module& m) {
         .def_readwrite("kernel_seq_size_per_block",
                        &KVCache::kernel_seq_size_per_block,
                        "Kernel block size (0 = same as seq_size_per_block)")
+        .def_readwrite("kv_block_stride_kernel_blocks",
+                       &KVCache::kv_block_stride_kernel_blocks,
+                       "Physical KV block stride in full-attention kernel-block units")
         .def_readwrite("num_kv_heads", &KVCache::num_kv_heads, "Number of KV heads per TP rank")
         .def_readwrite("head_dim", &KVCache::head_dim, "Head dimension")
         .def_readwrite("use_mla", &KVCache::use_mla, "Whether MLA cache layout is used")

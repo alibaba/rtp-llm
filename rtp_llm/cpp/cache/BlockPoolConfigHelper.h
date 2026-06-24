@@ -51,10 +51,10 @@ public:
             // mtp block size is not same with main model block size
             MemoryLayoutConfig mtp_layout = createMemoryLayoutConfig(false,
                                                                      mtp_layer_num,
-                                                                     mtp_spec->block_size_bytes(),
-                                                                     mtp_spec->scale_block_size_bytes(),
+                                                                     mtp_sub_config->kv_block_stride_bytes,
+                                                                     mtp_sub_config->kv_scale_stride_bytes,
                                                                      mtp_spec,
-                                                                     cache_config);
+                                                                     *mtp_sub_config);
 
             mtp_layout.kv_cache_offset_bytes = current_offset;
             RTP_LLM_LOG_INFO("mtp_layout.kv_block_pool_size_bytes = %ld", mtp_layout.kv_block_pool_size_bytes);

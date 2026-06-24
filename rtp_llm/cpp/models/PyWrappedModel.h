@@ -146,9 +146,10 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
 
     if (params.kv_cache_layer_layout.has_value()) {
         torch_ext::KVCache kv_cache;
-        kv_cache.seq_size_per_block        = params.description.attention_conf.tokens_per_block;
-        kv_cache.kernel_seq_size_per_block = params.description.attention_conf.kernel_tokens_per_block;
-        const auto& layout                 = params.kv_cache_layer_layout.value();
+        kv_cache.seq_size_per_block            = params.description.attention_conf.tokens_per_block;
+        kv_cache.kernel_seq_size_per_block     = params.description.attention_conf.kernel_tokens_per_block;
+        const auto& layout                     = params.kv_cache_layer_layout.value();
+        kv_cache.kv_block_stride_kernel_blocks = layout.kv_block_stride_kernel_blocks;
         kv_cache.kv_cache_base_by_layer.reserve(layout.layers_to_kv_buffer_ptrs.size());
         kv_cache.num_kv_heads  = params.description.attention_conf.kv_head_num;
         kv_cache.head_dim      = params.description.attention_conf.size_per_head;
