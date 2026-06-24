@@ -162,7 +162,8 @@ void registerBasicCudaOps(py::module& rtp_ops_m) {
                   py::arg("position_encoding"),
                   py::arg("combo_tokens_type_ids"),
                   py::arg("token_type_embedding"),
-                  py::arg("input_embedding_scalar") = 1.0f);
+                  py::arg("input_embedding_scalar") = 1.0f,
+                  py::arg("text_tokens_mask")       = py::none());
 
     rtp_ops_m.def("reuse_kv_cache_indexed_batched",
                   &rtp_llm::ReuseKVCacheIndexedBatched,

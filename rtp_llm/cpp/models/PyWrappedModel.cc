@@ -537,7 +537,8 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             RTP_LLM_LOG_DEBUG("[PyWrappedModel] using normal forward, is_target_verify=%d, is_prefill=%d",
                               py_model_inputs.attention_inputs.is_target_verify,
                               py_model_inputs.attention_inputs.is_prefill);
-            held_attn_pyobj_      = py_model_.attr("prepare_fmha_impl")(py_model_inputs, false);
+            held_attn_pyobj_ =
+                dense_attention_mask ? py::none() : py_model_.attr("prepare_fmha_impl")(py_model_inputs, false);
             auto py_model_forward = py_model_.attr("forward");
             auto outputs          = py_model_forward(py_model_inputs, held_attn_pyobj_);
             py_model_outputs      = outputs.cast<PyModelOutputs>();

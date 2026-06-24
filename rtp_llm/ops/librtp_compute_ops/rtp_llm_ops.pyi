@@ -269,7 +269,7 @@ def embedding(output: torch.Tensor, input: torch.Tensor, weight: torch.Tensor, p
     """
     Embedding lookup kernel
     """
-def embedding_bert(output: torch.Tensor, input: torch.Tensor, weight: torch.Tensor, combo_position_ids: torch.Tensor, position_encoding: torch.Tensor, combo_tokens_type_ids: torch.Tensor, token_type_embedding: torch.Tensor, input_embedding_scalar: float = 1.0) -> None:
+def embedding_bert(output: torch.Tensor, input: torch.Tensor, weight: torch.Tensor, combo_position_ids: torch.Tensor, position_encoding: torch.Tensor, combo_tokens_type_ids: torch.Tensor, token_type_embedding: torch.Tensor, input_embedding_scalar: float = 1.0, text_tokens_mask: torch.Tensor | None = None) -> None:
     """
     EmbeddingBert lookup kernel
     """
@@ -427,4 +427,3 @@ class TrtllmArFusionHandle:
         """
         AllReduce kernel
         """
-

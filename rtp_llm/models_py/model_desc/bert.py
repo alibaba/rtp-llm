@@ -5,8 +5,8 @@ from torch import nn
 
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
-from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
+from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.modules import (
     AddBiasResLayerNorm,
     AttnImplFactory,
@@ -16,6 +16,7 @@ from rtp_llm.models_py.modules import (
     FMHAImplBase,
     FusedQKRMSNorm,
     LayerNorm,
+    MultimodalEmbeddingInjector,
 )
 from rtp_llm.models_py.modules.factory import LinearFactory
 from rtp_llm.ops import HWKernelConfig, ParallelismConfig
@@ -36,8 +37,8 @@ def pad_flat_hidden_states(
     hidden = hidden_states.size(-1)
     padded = hidden_states.new_zeros((batch, max_len, hidden))
     positions = torch.arange(max_len, device=hidden_states.device).unsqueeze(0)
-    valid_tokens = (
-        positions < input_lengths.to(device=hidden_states.device).unsqueeze(1)
+    valid_tokens = positions < input_lengths.to(device=hidden_states.device).unsqueeze(
+        1
     )
     padded[valid_tokens] = hidden_states
     return padded
@@ -48,9 +49,9 @@ def unpad_padded_hidden_states(
 ) -> torch.Tensor:
     max_len = padded_hidden_states.size(1)
     positions = torch.arange(max_len, device=padded_hidden_states.device).unsqueeze(0)
-    valid_tokens = (
-        positions < input_lengths.to(device=padded_hidden_states.device).unsqueeze(1)
-    )
+    valid_tokens = positions < input_lengths.to(
+        device=padded_hidden_states.device
+    ).unsqueeze(1)
     return padded_hidden_states[valid_tokens]
 
 
@@ -149,9 +150,9 @@ class BertDenseMaskedSelfAttention(nn.Module):
             self.size_per_head,
         )
         q = qkv[:, :, : self.head_num].permute(0, 2, 1, 3)
-        k = qkv[
-            :, :, self.head_num : self.head_num + self.kv_head_num
-        ].permute(0, 2, 1, 3)
+        k = qkv[:, :, self.head_num : self.head_num + self.kv_head_num].permute(
+            0, 2, 1, 3
+        )
         v = qkv[:, :, self.head_num + self.kv_head_num :].permute(0, 2, 1, 3)
         if self.kv_head_num != self.head_num:
             repeat_factor = self.head_num // self.kv_head_num
@@ -163,8 +164,8 @@ class BertDenseMaskedSelfAttention(nn.Module):
         attn_out = torch.nn.functional.scaled_dot_product_attention(
             q, k, v, attn_mask=mask
         )
-        attn_out = attn_out.transpose(1, 2).contiguous().view(
-            batch, max_len, self.q_size
+        attn_out = (
+            attn_out.transpose(1, 2).contiguous().view(batch, max_len, self.q_size)
         )
         attn_out = self.o_proj(attn_out)
         if self.tp_size > 1:
@@ -294,6 +295,7 @@ class BertModel(GptModelBase):
         self.embed_tokens = EmbeddingBert(
             config, parallelism_config, weights.get_global_weight(W.embedding)
         )
+        self.multimodal_embedding_injector = MultimodalEmbeddingInjector()
         self.pre_decoder_layernorm = LayerNorm(
             weight=weights.get_global_weight(W.pre_decoder_ln_gamma),
             beta=weights.get_global_weight(W.pre_decoder_ln_beta),
@@ -324,12 +326,18 @@ class BertModel(GptModelBase):
             bert_embedding_inputs.combo_tokens_type_ids,
             bert_embedding_inputs.token_type_embedding,
             bert_embedding_inputs.input_embedding_scalar,
+            inputs.embedding_inputs.text_tokens_mask,
         )
         hidden_states = self.pre_decoder_layernorm(inputs_embeds)
-        if fmha_impl is None:
-            fmha_impl = self.prepare_fmha_impl(inputs)
+        hidden_states = self.multimodal_embedding_injector(
+            hidden_states,
+            inputs.multimodal_inputs.multimodal_features,
+            inputs.multimodal_inputs.mm_features_locs,
+        )
         attention_mask = inputs.attention_inputs.attention_mask
         use_dense_mask = attention_mask is not None and attention_mask.numel() > 0
+        if fmha_impl is None and not use_dense_mask:
+            fmha_impl = self.prepare_fmha_impl(inputs)
         input_lengths = inputs.attention_inputs.input_lengths
         if use_dense_mask:
             hidden_states = pad_flat_hidden_states(hidden_states, input_lengths)
@@ -346,4 +354,6 @@ class BertModel(GptModelBase):
             )
         if use_dense_mask:
             hidden_states = unpad_padded_hidden_states(hidden_states, input_lengths)
+        if use_dense_mask:
+            return PyModelOutputs(hidden_states)
         return PyModelOutputs(hidden_states, fmha_impl.fmha_params)

@@ -225,7 +225,7 @@ EmbeddingExecutor::gatherModelInput(const std::list<EmbeddingStreamPtr>& streams
                     padded_attention_masks.emplace_back(padded);
                 }
             } else {
-                auto padded = torch::zeros({stream_batch, (int64_t)max_seq_len, (int64_t)max_seq_len},
+                auto padded         = torch::zeros({stream_batch, (int64_t)max_seq_len, (int64_t)max_seq_len},
                                            torch::TensorOptions(torch::kInt32).pinned_memory(true));
                 auto stream_lengths = embedding_input->input_lengths.cpu();
                 for (int i = 0; i < stream_batch; ++i) {
@@ -235,7 +235,7 @@ EmbeddingExecutor::gatherModelInput(const std::list<EmbeddingStreamPtr>& streams
                 padded_attention_masks.emplace_back(padded);
             }
         }
-        model_input.attention_mask = torch::cat(padded_attention_masks, 0).contiguous();
+        model_input.attention_mask = torch::cat(padded_attention_masks, 0).contiguous().pin_memory();
     }
     torch::Tensor cls_uqi_pos;
     if (has_attention_mask || has_cls_uqi_pos) {
@@ -255,7 +255,7 @@ EmbeddingExecutor::gatherModelInput(const std::list<EmbeddingStreamPtr>& streams
                     torch::full({stream_batch}, -1, torch::TensorOptions(torch::kInt32).pinned_memory(true)));
             }
         }
-        cls_uqi_pos = torch::cat(gathered_cls_uqi_pos, 0).contiguous();
+        cls_uqi_pos = torch::cat(gathered_cls_uqi_pos, 0).contiguous().pin_memory();
     }
     if (HandlerArgs::has_arg(handler_args_, HandlerArgs::Arg::MOE_GATING)) {
         model_input.need_moe_gating = true;

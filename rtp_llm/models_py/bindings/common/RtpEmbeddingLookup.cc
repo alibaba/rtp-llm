@@ -69,14 +69,15 @@ void embedding(at::Tensor&               output,
     });
 }
 
-void embeddingBert(at::Tensor& output,
-                   at::Tensor& input,
-                   at::Tensor& weight,
-                   at::Tensor  combo_position_ids,
-                   at::Tensor  position_encoding,
-                   at::Tensor  combo_tokens_type_ids,
-                   at::Tensor  token_type_embedding,
-                   float       input_embedding_scalar) {
+void embeddingBert(at::Tensor&               output,
+                   at::Tensor&               input,
+                   at::Tensor&               weight,
+                   at::Tensor                combo_position_ids,
+                   at::Tensor                position_encoding,
+                   at::Tensor                combo_tokens_type_ids,
+                   at::Tensor                token_type_embedding,
+                   float                     input_embedding_scalar,
+                   std::optional<at::Tensor> text_tokens_mask) {
     CHECK_INPUT(input);
     CHECK_INPUT(weight);
     CHECK_INPUT(combo_position_ids);
@@ -96,6 +97,13 @@ void embeddingBert(at::Tensor& output,
     const int hidden_size = weight.size(1);
     CHECK_EQ(output.size(0), tokens);
     CHECK_EQ(output.size(1), hidden_size);
+    const int* mask_ptr = nullptr;
+    if (text_tokens_mask.has_value() && text_tokens_mask.value().defined() && text_tokens_mask.value().numel() > 0) {
+        CHECK_INPUT(text_tokens_mask.value());
+        CHECK_DIM(1, text_tokens_mask.value());
+        CHECK_EQ(text_tokens_mask.value().size(0), tokens);
+        mask_ptr = text_tokens_mask.value().data_ptr<int>();
+    }
     StreamType stream = GET_CURRENT_STREAM();
 
     DISPATCH_PYTORCH_DTYPE_TO_CTYPE_FP16(weight.scalar_type(), c_type, [&] {
@@ -107,7 +115,7 @@ void embeddingBert(at::Tensor& output,
                               static_cast<const int*>(input.data_ptr()),
                               static_cast<const int*>(combo_position_ids.data_ptr()),     // position_ids
                               static_cast<const int*>(combo_tokens_type_ids.data_ptr()),  // token_types
-                              static_cast<const int*>(nullptr),                           // mask
+                              static_cast<const int*>(mask_ptr),                          // mask
                               tokens,
                               hidden_size,
                               stream);
