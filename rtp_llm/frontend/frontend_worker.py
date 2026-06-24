@@ -23,6 +23,7 @@ from rtp_llm.distribute.distributed_server import (
     get_dp_addrs_from_world_info,
     get_world_info,
 )
+from rtp_llm.frontend.glm5_prompt import maybe_wrap_glm5_raw_prompt
 from rtp_llm.frontend.tokenizer_factory.tokenizer_factory import TokenizerFactory
 from rtp_llm.ops import ParallelismConfig, SpecialTokens, VitSeparation
 from rtp_llm.pipeline.pipeline import Pipeline
@@ -69,6 +70,7 @@ class FrontendWorker:
         special_tokens,
     ) -> None:
         logging.info("starting frontend worker")
+        self.model_type = model_config.model_type
 
         self.tokenizer = TokenizerFactory.create(
             model_config.ckpt_path, model_config.tokenizer_path, model_config.model_type
@@ -161,19 +163,27 @@ class FrontendWorker:
         )
 
     def _inference(self, request: Request, **kwargs: Any):
+        input_texts = [
+            maybe_wrap_glm5_raw_prompt(
+                self.model_type, text, generate_config.request_format
+            )
+            for text, generate_config in zip(
+                request.input_texts, request.generate_configs
+            )
+        ]
         if (
-            len(request.input_texts) > 1
+            len(input_texts) > 1
             or request.batch_infer
             or request.num_return_sequences > 0
         ):
             num_return_sequences = request.generate_configs[0].num_return_sequences
             generators: List[AsyncGenerator[Dict[str, Any], None]] = []
             # TODO temp fix sp with batch infer, will change request_id to str later
-            batch_group_size = len(request.input_texts)
+            batch_group_size = len(input_texts)
             # Use request.request_id as batch_group_id for all streams in the same batch
             batch_group_id = request.request_id
             for i, (text, urls, generate_config) in enumerate(
-                zip(request.input_texts, request.input_urls, request.generate_configs)
+                zip(input_texts, request.input_urls, request.generate_configs)
             ):
                 generators.append(
                     self._yield_generate(
@@ -194,7 +204,7 @@ class FrontendWorker:
         else:
             return self._yield_generate(
                 request.request_id,
-                request.input_texts[0],
+                input_texts[0],
                 request.input_urls[0],
                 generate_config=request.generate_configs[0],
                 **kwargs,
