@@ -27,6 +27,16 @@ config_setting(
     },
 )
 
+# TODO(pip_unify): Legacy alias kept for internal source that still references
+# //:cuda_pre_12_9. Remove once internal selects are migrated to using_cuda12_9_x86.
+config_setting(
+    name = "cuda_pre_12_9",
+    define_values = {
+        "using_cuda12_9_x86": "false",
+        "using_cuda12_arm": "false",
+    },
+)
+
 config_setting(
     name = "using_cuda12_arm",
     values = {"define": "using_cuda12_arm=true"},
