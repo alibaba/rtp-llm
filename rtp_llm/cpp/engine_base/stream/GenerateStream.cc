@@ -639,8 +639,10 @@ bool GenerateStream::prepare() {
     generate_status_->reportEvent(StreamEvents::CanRun);
     auto result = streamCacheResource().initKVBlock(reserveStep());
     if (!result.ok()) {
-        generate_status_->reportEvent(
-            StreamEvents::Error, ErrorCode::MALLOC_FAILED, "initKVBlock failed: " + result.message());
+        generate_status_->reportEvent(StreamEvents::Error,
+                                      ErrorCode::MALLOC_FAILED,
+                                      std::string("initKVBlock failed: ")
+                                          + std::string(result.message().data(), result.message().size()));
         finish_internal();
         return false;
     }
@@ -667,8 +669,10 @@ void GenerateStream::activate() {
     }
     auto result = streamCacheResource().incrKVBlock(reserveStep());
     if (!result.ok()) {
-        generate_status_->reportEvent(
-            StreamEvents::Error, ErrorCode::MALLOC_FAILED, "incrKVBlock(activate) failed: " + result.message());
+        generate_status_->reportEvent(StreamEvents::Error,
+                                      ErrorCode::MALLOC_FAILED,
+                                      std::string("incrKVBlock(activate) failed: ")
+                                          + std::string(result.message().data(), result.message().size()));
         finish_internal();
         return;
     }
@@ -705,8 +709,10 @@ void GenerateStream::advance() {
     }
     auto result = streamCacheResource().incrKVBlock(reserveStep(), seq_len_override);
     if (!result.ok()) {
-        generate_status_->reportEvent(
-            StreamEvents::Error, ErrorCode::MALLOC_FAILED, "incrKVBlock(advance) failed: " + result.message());
+        generate_status_->reportEvent(StreamEvents::Error,
+                                      ErrorCode::MALLOC_FAILED,
+                                      std::string("incrKVBlock(advance) failed: ")
+                                          + std::string(result.message().data(), result.message().size()));
         finish_internal();
         return;
     }
