@@ -184,23 +184,6 @@ def mxfp8_grouped_gemm(
     return out
 
 
-def _mxfp8_quant_act_tma(
-    x: torch.Tensor, masked_m: Optional[torch.Tensor] = None
-) -> Tuple[torch.Tensor, torch.Tensor]:
-    assert x.dim() >= 2, f"expected at least 2D activation, got {x.shape}"
-    K = x.shape[-1]
-    assert K % MX_BLOCK == 0, f"K={K} must be a multiple of {MX_BLOCK}"
-    assert x.is_contiguous(), "input must be contiguous"
-    return sgl_per_token_group_quant_fp8(
-        x,
-        group_size=MX_BLOCK,
-        scale_ue8m0=True,
-        column_major_scales=True,
-        scale_tma_aligned=True,
-        masked_m=masked_m,
-    )
-
-
 def mxfp8_grouped_gemm_masked(
     x: torch.Tensor,
     weight_e4m3: torch.Tensor,

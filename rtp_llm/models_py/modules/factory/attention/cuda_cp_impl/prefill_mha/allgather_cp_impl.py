@@ -1,7 +1,10 @@
 import logging
+import os
 from typing import Optional
 
 import torch
+import triton
+import triton.language as tl
 
 from rtp_llm.models_py.distributed.collective_torch import Group, all_gather
 from rtp_llm.ops import AttentionConfigs, KvCacheDataType, ParallelismConfig
@@ -14,12 +17,23 @@ from rtp_llm.ops.compute_ops import (
 
 logger = logging.getLogger(__name__)
 
+_cp_trt_workspace_buffer: Optional[torch.Tensor] = None
+
+
+def get_cp_trt_workspace_buffer() -> torch.Tensor:
+    global _cp_trt_workspace_buffer
+    if _cp_trt_workspace_buffer is None:
+        _cp_trt_workspace_buffer = get_trt_workspace_buffer()
+    return _cp_trt_workspace_buffer
+
+
 from flashinfer import (
     BatchPrefillWithPagedKVCacheWrapper,
     BatchPrefillWithRaggedKVCacheWrapper,
 )
 from flashinfer.cascade import merge_state
 from flashinfer.page import append_paged_kv_cache
+from flashinfer.prefill import trtllm_batch_context_with_kv_cache
 
 from rtp_llm.models_py.modules.factory.attention.cuda_cp_impl.prefill_mha.cp_utils import (
     cast_kv_for_cache_append,
@@ -31,6 +45,65 @@ from rtp_llm.models_py.modules.factory.attention.cuda_cp_impl.prefill_mha.cp_uti
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha import (
     get_py_flashinfer_workspace_buffer,
 )
+from rtp_llm.models_py.modules.factory.attention.cuda_impl.trtllm_gen import (
+    get_trt_workspace_buffer,
+)
+
+
+@triton.jit
+def _fused_restore_packed_kv_kernel(
+    packed_ptr,
+    unpad_ptr,
+    k_ptr,
+    v_ptr,
+    TOTAL: tl.constexpr,
+    NK: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    offs = pid * BLOCK + tl.arange(0, BLOCK)
+    mask = offs < TOTAL
+    per_token = 2 * NK
+    token = offs // per_token
+    field = offs - token * per_token
+    src_token = tl.load(unpad_ptr + token, mask=mask, other=0).to(tl.int64)
+    vals = tl.load(packed_ptr + src_token * per_token + field, mask=mask, other=0.0)
+
+    is_k = field < NK
+    tl.store(k_ptr + token * NK + field, vals, mask=mask & is_k)
+    tl.store(v_ptr + token * NK + (field - NK), vals, mask=mask & ~is_k)
+
+
+def _fused_restore_packed_kv(
+    packed_kv: torch.Tensor,
+    unpad_indices: torch.Tensor,
+    num_kv_heads: int,
+    head_dim: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    token_count = int(unpad_indices.numel())
+    restore_k = torch.empty(
+        token_count,
+        num_kv_heads,
+        head_dim,
+        device=packed_kv.device,
+        dtype=packed_kv.dtype,
+    )
+    restore_v = torch.empty_like(restore_k)
+    if token_count == 0:
+        return restore_k, restore_v
+
+    nk = num_kv_heads * head_dim
+    total = token_count * 2 * nk
+    _fused_restore_packed_kv_kernel[(triton.cdiv(total, 256),)](
+        packed_kv,
+        unpad_indices,
+        restore_k,
+        restore_v,
+        TOTAL=total,
+        NK=nk,
+        BLOCK=256,
+    )
+    return restore_k, restore_v
 
 
 class PCPAllGatherAttnOp:
@@ -111,6 +184,39 @@ class PCPAllGatherAttnOp:
                 ),
             },
         }
+        self._can_use_trtllm_paged_context = self._can_use_trtllm_paged_context()
+
+    def _should_use_forward_opt(self) -> bool:
+        value = os.environ.get("RTP_LLM_CP_PREFILL_FORWARD_OPT", "1").strip()
+        if value.lower() in ("0", "false", "no", "off"):
+            return False
+        if not self._can_use_trtllm_paged_context:
+            return False
+        if (
+            self.has_prefix
+            or self._kv_sharded
+            or self.attn_configs.kv_cache_dtype == KvCacheDataType.FP8
+        ):
+            return False
+
+        return True
+
+    def _can_use_trtllm_paged_context(self) -> bool:
+        if torch.cuda.get_device_capability()[0] != 10:
+            return False
+        try:
+            from flashinfer.artifacts import ArtifactPath, CheckSumHash
+            from flashinfer.jit.attention.modules import get_artifact
+
+            return bool(
+                get_artifact(
+                    f"{ArtifactPath.TRTLLM_GEN_FMHA}/checksums.txt",
+                    CheckSumHash.TRTLLM_GEN_FMHA,
+                )
+            )
+        except Exception as e:
+            logger.warning("Disable CP prefill TRTLLM paged context: %s", e)
+            return False
 
     def _physical_block_table(self) -> torch.Tensor:
         """Physical paged-cache block table (per-rank, CP-RR compact under
@@ -149,7 +255,10 @@ class PCPAllGatherAttnOp:
         kv_block_id_host = self.attn_inputs.kv_cache_kernel_block_id_host
         if kv_block_id_host is None:
             kv_block_id_host = self.attn_inputs.kv_cache_block_id_host
-        tokens_per_block = self.attn_configs.kernel_tokens_per_block or self.attn_configs.tokens_per_block
+        tokens_per_block = (
+            self.attn_configs.kernel_tokens_per_block
+            or self.attn_configs.tokens_per_block
+        )
 
         params = fill_mla_params(
             self.attn_inputs.prefix_lengths,
@@ -160,7 +269,20 @@ class PCPAllGatherAttnOp:
         )
 
         self._plan_ragged(qo_indptr)
+        q_lens = qo_indptr[1:] - qo_indptr[:-1]
+        self._trtllm_max_q_len = int(q_lens.max().item())
+        (
+            self._trtllm_seq_lens_part0,
+            self._trtllm_cu_kv_pages_part0,
+            self._trtllm_max_kv_len_part0,
+        ) = self._build_trtllm_paged_context_metadata(self.kv_indptr_part0)
+        (
+            self._trtllm_seq_lens_part1,
+            self._trtllm_cu_kv_pages_part1,
+            self._trtllm_max_kv_len_part1,
+        ) = self._build_trtllm_paged_context_metadata(self.kv_indptr_part1)
         self.has_prefix = self.attn_inputs.prefix_lengths.any().item()
+        self._use_forward_opt = self._should_use_forward_opt()
         if self.has_prefix:
             plan_prefix_paged_attention(
                 self.prefill_wrappers["paged"]["prefix"],
@@ -181,8 +303,11 @@ class PCPAllGatherAttnOp:
         return params
 
     def _plan_ragged(self, qo_indptr: torch.Tensor) -> None:
+        self.qo_indptr = qo_indptr
         kv_indptr_part0 = qo_indptr * (self.prefill_cp_rank + 1)
         kv_indptr_part1 = qo_indptr * (2 * self.prefill_cp_size - self.prefill_cp_rank)
+        self.kv_indptr_part0 = kv_indptr_part0
+        self.kv_indptr_part1 = kv_indptr_part1
         common_params = {
             "num_qo_heads": self.num_qo_heads,
             "num_kv_heads": self.num_kv_heads,
@@ -201,12 +326,127 @@ class PCPAllGatherAttnOp:
             **common_params,
         )
 
+    def _build_trtllm_paged_context_metadata(
+        self, kv_indptr: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, int]:
+        seq_lens = (kv_indptr[1:] - kv_indptr[:-1]).to(
+            device=self.device, dtype=torch.int32
+        )
+        pages_per_seq = (
+            seq_lens + self.seq_size_per_block - 1
+        ) // self.seq_size_per_block
+        cu_kv_pages = torch.empty(
+            seq_lens.numel() + 1, device=self.device, dtype=torch.int32
+        )
+        cu_kv_pages[0] = 0
+        torch.cumsum(pages_per_seq, dim=0, out=cu_kv_pages[1:])
+        return seq_lens, cu_kv_pages, int(seq_lens.max().item())
+
+    def _run_trtllm_paged_context(
+        self,
+        q: torch.Tensor,
+        kv_cache_tensor: torch.Tensor,
+        seq_lens: torch.Tensor,
+        cu_kv_pages: torch.Tensor,
+        max_kv_len: int,
+        block_tables: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        if block_tables is None:
+            block_tables = self._physical_block_table()
+        out = trtllm_batch_context_with_kv_cache(
+            query=q,
+            kv_cache=kv_cache_tensor,
+            workspace_buffer=get_cp_trt_workspace_buffer(),
+            block_tables=block_tables,
+            seq_lens=seq_lens,
+            max_q_len=self._trtllm_max_q_len,
+            max_kv_len=max_kv_len,
+            bmm1_scale=self.head_dim**-0.5,
+            bmm2_scale=1.0,
+            batch_size=seq_lens.numel(),
+            cum_seq_lens_q=self.qo_indptr,
+            cum_seq_lens_kv=cu_kv_pages,
+            window_left=-1,
+            sinks=None,
+            out_dtype=q.dtype,
+        )
+        return out
+
+    def _forward_opt(
+        self,
+        qkv: torch.Tensor,
+        kv_cache: Optional[KVCache] = None,
+        params: ParamsBase = None,
+    ) -> Optional[torch.Tensor]:
+        qkv = qkv.reshape(qkv.shape[0], -1)
+        q_size = self.head_dim * self.num_qo_heads
+        packed_kv_size = 2 * self.head_dim * self.num_kv_heads
+        q = qkv[:, :q_size]
+        packed_kv = qkv[:, q_size : q_size + packed_kv_size].contiguous()
+
+        all_packed_kv = all_gather(packed_kv, group=Group.TP).reshape(
+            packed_kv.shape[0] * self.prefill_cp_size,
+            2,
+            self.num_kv_heads,
+            self.head_dim,
+        )
+        q_reshaped = q.reshape(-1, self.num_qo_heads, self.head_dim)
+
+        restore_k, restore_v = _fused_restore_packed_kv(
+            all_packed_kv,
+            self.kv_restore_unpad_indices,
+            self.num_kv_heads,
+            self.head_dim,
+        )
+        restore_token_count = restore_k.size(0)
+        batch_indices = params.batch_indice_d.narrow(0, 0, restore_token_count)
+        positions = params.positions_d.narrow(0, 0, restore_token_count)
+        kv_cache_tensor = kv_cache.kv_cache_base.view(
+            -1, 2, self.num_kv_heads, self.seq_size_per_block, self.head_dim
+        )
+        append_paged_kv_cache(
+            append_key=restore_k,
+            append_value=restore_v,
+            batch_indices=batch_indices,
+            positions=positions,
+            paged_kv_cache=kv_cache_tensor,
+            kv_indices=params.page_indice_d,
+            kv_indptr=params.decode_page_indptr_d,
+            kv_last_page_len=params.paged_kv_last_page_len_d,
+            kv_layout="HND",
+        )
+
+        q0 = torch.index_select(q_reshaped, 0, self.q0_idx).contiguous()
+        q1 = torch.index_select(q_reshaped, 0, self.q1_idx).contiguous()
+
+        output = torch.empty_like(q_reshaped)
+        output[self.q0_idx] = self._run_trtllm_paged_context(
+            q0,
+            kv_cache_tensor,
+            self._trtllm_seq_lens_part0,
+            self._trtllm_cu_kv_pages_part0,
+            self._trtllm_max_kv_len_part0,
+        )
+        output[self.q1_idx] = self._run_trtllm_paged_context(
+            q1,
+            kv_cache_tensor,
+            self._trtllm_seq_lens_part1,
+            self._trtllm_cu_kv_pages_part1,
+            self._trtllm_max_kv_len_part1,
+        )
+        return output
+
     def forward(
         self,
         qkv: torch.Tensor,
         kv_cache: Optional[KVCache] = None,
         params: ParamsBase = None,
     ) -> torch.Tensor:
+        if self._use_forward_opt:
+            output = self._forward_opt(qkv, kv_cache, params)
+            if output is not None:
+                return output
+
         qkv = qkv.reshape(qkv.shape[0], -1)
         q, k, v = torch.split(
             qkv,
@@ -260,7 +500,7 @@ class PCPAllGatherAttnOp:
                 batch_indices.to(torch.int64),
                 self.seq_size_per_block,  # tokens_per_block
                 self.seq_size_per_block,  # kv_eb (entries per block, ratio=1)
-                1,                        # ratio (uncompressed MHA/GQA K/V)
+                1,  # ratio (uncompressed MHA/GQA K/V)
                 self._cp_size,
                 self._cp_rank,
                 owner_tokens_per_block=self.seq_size_per_block,
