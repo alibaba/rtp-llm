@@ -164,6 +164,22 @@ cc_library(
 )
 
 cc_library(
+    name = "kernels_speculative_sampling",
+    srcs = glob(["speculative_sampling/*.cu"]),
+    hdrs = glob([
+        "speculative_sampling/*.h",
+        "speculative_sampling/*.cuh",
+    ]),
+    deps = cuda_deps + [
+        "//rtp_llm/cpp/utils:core_utils",
+        "//rtp_llm/models_py/bindings/cuda:launch_utils",
+    ],
+    copts = any_cuda_copts(),
+    include_prefix = "src",
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "kernels_mla",
     srcs = glob(["mla_kernels/*.cu"]),
     hdrs = glob([
