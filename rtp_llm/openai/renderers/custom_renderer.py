@@ -442,13 +442,6 @@ class CustomChatRenderer:
         async for response in self.render_response_stream(
             output_generator, request, generate_config
         ):
-            # Fallback: 若 render_response_stream 未设置 request_id，用 Python 层 request_id 兜底
-            if (
-                generate_config.return_request_id
-                and response.aux_info
-                and response.aux_info.request_id == 0
-            ):
-                response.aux_info.request_id = request_id
             yield response
 
     async def _merge_non_streaming_outputs(
@@ -522,10 +515,7 @@ class CustomChatRenderer:
 
             merged_generate_outputs.append(merged_output)
 
-        return GenerateOutputs(
-            generate_outputs=merged_generate_outputs,
-            request_id=final_outputs.request_id,
-        )
+        return GenerateOutputs(generate_outputs=merged_generate_outputs)
 
     async def _create_empty_delta(self, aux_info: AuxInfo):
         return OutputDelta(
@@ -1004,10 +994,8 @@ class CustomChatRenderer:
             )
             for _ in range(nums_output)
         ]
-        engine_request_id = 0
         async for outputs in output_generator:
             if index == 0:
-                engine_request_id = outputs.request_id
                 yield await self._generate_first(nums_output)
             index += 1
             if len(outputs.generate_outputs) != nums_output:
@@ -1048,8 +1036,6 @@ class CustomChatRenderer:
             final_response = await self._generate_final(
                 status_list, request, think_status_list
             )
-            if generate_config.return_request_id and final_response.aux_info:
-                final_response.aux_info.request_id = engine_request_id
             if self._should_yield_stream_response(final_response, is_final=True):
                 yield final_response
 

@@ -98,7 +98,6 @@ class AuxInfo:
 
     role_addrs: List[RoleAddr] = field(default_factory=list)
     aux_string: str = ""
-    request_id: int = 0
 
 
 @dataclass
@@ -120,7 +119,6 @@ class GenerateOutput:
 @dataclass
 class GenerateOutputs:
     generate_outputs: List[GenerateOutput] = field(default_factory=list)
-    request_id: int = 0
 
 
 @dataclass

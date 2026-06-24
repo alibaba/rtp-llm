@@ -64,9 +64,7 @@ class OpenaiEndpoint(object):
         vit_config: VitConfig,
         tokenizer: BaseTokenizer,
         backend_rpc_server_visitor: BackendRPCServerVisitor,
-        server_config=None,
     ):
-        self.server_config = server_config
         # Get values from model_config
         self.generate_env_config = model_config.generate_env_config
         self.max_seq_len = model_config.max_seq_len
@@ -301,13 +299,6 @@ class OpenaiEndpoint(object):
             config.max_new_tokens = request.max_tokens
         if request.debug_info:
             config.return_output_ids = True
-        # Global gate: return_request_id is for internal debugging only.
-        # Per-request flag is ignored unless the server-level switch is on.
-        if (
-            self.server_config is None
-            or not self.server_config.enable_return_request_id
-        ):
-            config.return_request_id = False
         return config
 
     @staticmethod

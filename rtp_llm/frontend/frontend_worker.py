@@ -205,7 +205,6 @@ class FrontendWorker:
         self,
         gen_responses: GenerateResponse,
         generate_config: GenerateConfig,
-        request_id: int = 0,
     ) -> Dict[str, Any]:
         generate_texts = gen_responses.generate_texts
         finished = gen_responses.generate_outputs.generate_outputs[0].finished
@@ -213,8 +212,6 @@ class FrontendWorker:
             aux_info = gen_responses.generate_outputs.generate_outputs[0].aux_info
             if generate_config.has_num_beams():
                 aux_info.beam_responses = generate_texts
-            if generate_config.return_request_id:
-                aux_info.request_id = request_id
         hidden_states = gen_responses.generate_outputs.generate_outputs[0].hidden_states
         output_ids = gen_responses.generate_outputs.generate_outputs[0].output_ids
         input_ids = gen_responses.generate_outputs.generate_outputs[0].input_ids
@@ -258,7 +255,6 @@ class FrontendWorker:
         self,
         gen_responses: GenerateResponse,
         generate_config: GenerateConfig,
-        request_id: int = 0,
     ) -> Dict[str, Any]:
         generate_texts = gen_responses.generate_texts
         if generate_config.num_return_sequences > 0:
@@ -267,8 +263,6 @@ class FrontendWorker:
                 aux_info = []
                 for seq in gen_responses.generate_outputs.generate_outputs:
                     info = asdict(seq.aux_info)
-                    if generate_config.return_request_id:
-                        info["request_id"] = request_id
                     aux_info.append(info)
             sequences_pipeline_response = MultiSequencesPipelineResponse(
                 response=generate_texts,
@@ -282,7 +276,7 @@ class FrontendWorker:
             )
             return sequences_pipeline_response
         else:
-            return self._format_response(gen_responses, generate_config, request_id)
+            return self._format_response(gen_responses, generate_config)
 
     async def _yield_generate(
         self,
@@ -294,8 +288,6 @@ class FrontendWorker:
         group_id: int = -1,
         **kwargs: Any,
     ) -> AsyncGenerator[Dict[str, Any], None]:
-        if not self.server_config.enable_return_request_id:
-            generate_config.return_request_id = False
         stream = self.pipeline.pipeline_async(
             prompt=text,
             request_id=request_id,
@@ -307,9 +299,7 @@ class FrontendWorker:
             **kwargs,
         )
         async for generate_response in stream:
-            yield self._format_response_new(
-                generate_response, generate_config, request_id
-            )
+            yield self._format_response_new(generate_response, generate_config)
 
     def is_streaming(self, req: Dict[str, Any]):
         return RequestExtractor.is_streaming(req) or req.get("stream", False)

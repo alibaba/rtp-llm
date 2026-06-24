@@ -117,7 +117,6 @@ class FrontendServer(object):
                 vit_config=self.py_env_configs.vit_config,
                 tokenizer=self._frontend_worker.tokenizer,
                 backend_rpc_server_visitor=self._frontend_worker.backend_rpc_server_visitor,
-                server_config=self.py_env_configs.server_config,
             )
         else:
             from rtp_llm.embedding.embedding_endpoint import EmbeddingEndpoint

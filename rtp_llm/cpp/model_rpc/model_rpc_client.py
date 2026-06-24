@@ -307,7 +307,6 @@ def trans_output(
     )
 
     outputs_py = GenerateOutputs()
-    outputs_py.request_id = outputs_pb.request_id
     input_token_ids = input_py.token_ids.reshape(1, -1)
 
     # 遍历每个 beam/output
