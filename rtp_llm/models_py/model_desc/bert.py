@@ -1,4 +1,5 @@
-from typing import Dict, Optional
+import os
+from typing import Any, Dict, Optional
 
 import torch
 from torch import nn
@@ -14,6 +15,10 @@ from rtp_llm.models_py.modules import (
     EmbeddingBert,
     FMHAImplBase,
     LayerNorm,
+)
+from rtp_llm.models_py.modules.factory.attention.block_mask import (
+    build_flashinfer_block_mask,
+    derive_segment_ab,
 )
 from rtp_llm.ops import HWKernelConfig, ParallelismConfig
 from rtp_llm.ops.compute_ops import (
@@ -128,6 +133,48 @@ class BertModel(GptModelBase):
                 for idx in range(self.layer_num)
             ]
         )
+        # 用户画像分支: 显式 opt-in, 默认关 -> 普通 BERT 老路逐字节不变。
+        # 开启后 A 段(Q+I)看不到 B 段(User), B 段从 CLS_UQI(token id) 起。
+        self.use_user_profile_mask = (
+            os.environ.get("USE_USER_PROFILE_BLOCK_MASK", "0") == "1"
+        )
+        self.cls_uqi_token_id = int(os.environ.get("CLS_UQI_TOKEN_ID", "2"))
+
+    def prepare_fmha_impl(
+        self, inputs: PyModelInputs, is_cuda_graph: bool = False
+    ) -> Any:
+        # 关闭(默认)或非分块场景 -> 走原 factory 选择, 老路逐字节不变。
+        if self.use_user_profile_mask and not is_cuda_graph:
+            attn_inputs = inputs.attention_inputs
+            if attn_inputs.is_prefill:
+                # 单次 D2H: cu_seqlens 很小, 两个纯-CPU helper 共用一份拷贝即可。
+                cu_seqlens_cpu = attn_inputs.cu_seqlens.cpu()
+                seg = derive_segment_ab(
+                    inputs.input_ids.cpu(),
+                    cu_seqlens_cpu,
+                    self.cls_uqi_token_id,
+                )
+                if int(seg.max()) > 0:  # 真有 B 段才接 block mask
+                    attn_configs = self.config.getAttentionConfigs(
+                        self.parallelism_config.get_attn_tp_size()
+                    )
+                    # FlashInfer custom_mask: 喂逻辑布尔 mask, 库内部按架构 swizzle/打包,
+                    # 硬件可移植 + fused-快 + 已 GPU 对拍 eager oracle 验证
+                    # (test_py_flashinfer_ragged_mha_prefill.test_block_mask_matches_eager_oracle)。
+                    from rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha import (
+                        PyFlashinferPrefillImpl,
+                    )
+
+                    custom_mask = build_flashinfer_block_mask(
+                        seg, cu_seqlens_cpu
+                    ).to(inputs.input_ids.device)
+                    return PyFlashinferPrefillImpl(
+                        attn_configs,
+                        attn_inputs,
+                        self.parallelism_config,
+                        custom_mask=custom_mask,
+                    )
+        return super().prepare_fmha_impl(inputs, is_cuda_graph)
 
     def forward(
         self, inputs: PyModelInputs, fmha_impl: FMHAImplBase = None

@@ -322,6 +322,7 @@ class PyFlashinferPrefillAttnOp(object):
         self,
         attn_configs: AttentionConfigs,
         backend: str = "auto",
+        custom_mask: Optional[torch.Tensor] = None,
     ) -> None:
         self.g_workspace_buffer = get_py_flashinfer_workspace_buffer()
         # attn_configs.head_num and kv_head_num are already divided by tp_size in ModelConfig::getAttentionConfigs
@@ -337,6 +338,11 @@ class PyFlashinferPrefillAttnOp(object):
         )
         self.datatype = attn_configs.dtype
         self.is_causal = attn_configs.is_causal
+        # user-profile block mask: a logical (row-major [q,kv], per-req flattened+concatenated)
+        # boolean mask. FlashInfer does the tensor-core swizzle/packbits internally — caller
+        # passes the logical mask only. None -> fall back to the is_causal path (default,
+        # byte-identical to today).
+        self.custom_mask = custom_mask
         self.fmha_params = rtp_llm_ops.FlashInferMlaAttnParams()
 
     def __del__(self):
@@ -370,6 +376,8 @@ class PyFlashinferPrefillAttnOp(object):
             self.page_size,
         )
 
+        # With a block mask: custom_mask + causal=False; FlashInfer packs internally.
+        # Without: fall back to the configured is_causal (BERT encoder -> non-causal).
         self.prefill_wrapper.plan(
             cu_seqlens,
             cu_seqlens,
@@ -377,7 +385,8 @@ class PyFlashinferPrefillAttnOp(object):
             self.local_kv_head_num,
             self.head_dim_qk,
             self.head_dim_vo,
-            causal=self.is_causal,
+            causal=(self.is_causal if self.custom_mask is None else False),
+            custom_mask=self.custom_mask,
             q_data_type=get_scalar_type(attn_inputs.dtype),
         )
         return self.fmha_params
@@ -581,11 +590,24 @@ class PyFlashinferPagedPrefillImpl(PyFlashinferPrefillImplBase):
 class PyFlashinferPrefillImpl(PyFlashinferPrefillImplBase):
     """FlashInfer prefill implementation with ragged KV cache layout using MhaRotaryEmbeddingOp."""
 
+    def __init__(
+        self,
+        attn_configs: AttentionConfigs,
+        attn_inputs: PyAttentionInputs,
+        parallelism_config: Optional[ParallelismConfig] = None,
+        custom_mask: Optional[torch.Tensor] = None,
+    ) -> None:
+        # Stash before super().__init__: the base ctor calls _create_fmha_impl(), which
+        # needs the mask. None -> plain causal path (factory default, unchanged).
+        self._custom_mask = custom_mask
+        super().__init__(attn_configs, attn_inputs, parallelism_config)
+
     def _create_fmha_impl(
         self, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
     ) -> Any:
         """Create ragged FMHA implementation."""
-        return PyFlashinferPrefillAttnOp(attn_configs)
+        # _custom_mask is always set in __init__ before super().__init__() reaches here.
+        return PyFlashinferPrefillAttnOp(attn_configs, custom_mask=self._custom_mask)
 
     def _create_rope_impl(self, attn_configs: AttentionConfigs) -> Any:
         """Create RoPE implementation for ragged layout."""
