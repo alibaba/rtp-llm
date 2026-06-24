@@ -78,7 +78,10 @@ class ServerStatus(BaseModel):
         elif isinstance(role, RoleType):
             pass  # already correct
         elif isinstance(role, str):
-            values["role"] = getattr(RoleType, role)
+            try:
+                values["role"] = getattr(RoleType, role.upper())
+            except AttributeError:
+                raise ValueError(f"Invalid role: {role}") from None
         else:
             raise ValueError(f"Invalid role: {role}, expected int, str, or RoleType")
         return values
