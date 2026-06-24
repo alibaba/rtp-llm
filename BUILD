@@ -74,6 +74,18 @@ config_setting(
     values = {"define": "xft_use_icx=true"},
 )
 
+# TODO(pip_unify): Legacy aliases kept for internal source that still references
+# //:using_arm and //:using_cpu. Remove once internal selects are migrated.
+config_setting(
+    name = "using_arm",
+    values = {"define": "using_arm=true"},
+)
+
+config_setting(
+    name = "using_cpu",
+    values = {"define": "using_cpu=true"},
+)
+
 config_setting(
     name = "using_ppu",
     define_values = {"use_ppu": "true"},
