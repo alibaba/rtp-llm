@@ -89,10 +89,8 @@ def _try_register_mainse_comparers() -> None:
     internal comparer first.
     """
     try:
-        from rtp_llm.test.smoke.mainse.mainse_comparer import (
-            MainseDecodeArpcComparer,
-            MainseEmbeddingArpcComparer,
-        )
+        from rtp_llm.test.smoke.mainse.mainse_decode_arpc_comparer import MainseDecodeArpcComparer
+        from rtp_llm.test.smoke.mainse.mainse_embedding_arpc_comparer import MainseEmbeddingArpcComparer
 
         register_comparer(
             lambda q_r, ep: q_r.get("mainse_module", False)

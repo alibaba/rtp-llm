@@ -89,6 +89,8 @@ class PdSeperationCaseRunner(CaseRunner):
         prefill_port = MagaServerManager.get_free_port()
         decode_port = MagaServerManager.get_free_port()
         gpu_ids = [str(x) for x in get_gpu_ids()]
+        assert decode_gpu_size + prefill_gpu_size <= len(gpu_ids), \
+            f"需要 {decode_gpu_size + prefill_gpu_size} 块 GPU，但只有 {len(gpu_ids)} 块可用"
 
         decode_endpoint = EndPoint(
             type="Vipserver",
@@ -248,6 +250,8 @@ class DpSeperationCaseRunner(CaseRunner):
         prefill_port = MagaServerManager.get_free_port()
         decode_port = MagaServerManager.get_free_port()
         gpu_ids = [str(x) for x in get_gpu_ids()]
+        assert decode_gpu_size + prefill_gpu_size <= len(gpu_ids), \
+            f"需要 {decode_gpu_size + prefill_gpu_size} 块 GPU，但只有 {len(gpu_ids)} 块可用"
 
         # 提前选择机器，直接指定具体的机器地址而不是使用负载均衡
         decode_endpoint = EndPoint(

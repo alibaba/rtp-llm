@@ -26,6 +26,8 @@ def get_preprocess_config(config):
         crop_positions = [float(x) for x in config.crop_positions.split(":")]
         if len(crop_positions) == 6:
             # input format: "w1:h1:w2:h2:h:w"
+            if crop_positions[4] == 0 or crop_positions[5] == 0:
+                raise ValueError("crop_positions h/w dimensions must be non-zero")
             crop_positions = [
                 crop_positions[0] / crop_positions[5],
                 crop_positions[1] / crop_positions[4],

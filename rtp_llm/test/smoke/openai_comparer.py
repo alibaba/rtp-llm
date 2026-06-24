@@ -32,7 +32,7 @@ class OpenaiComparer(BaseComparer):
             path = result_json["extra_outputs"].get("all_hidden_states", None)
             if path is not None and isinstance(path, str):
                 result_json["extra_outputs"]["all_hidden_states"] = (
-                    torch.load(os.path.join(REL_PATH, path)).numpy().tolist()
+                    torch.load(os.path.join(REL_PATH, path), weights_only=False).numpy().tolist()
                 )
         if self.is_stream:
             return ChatCompletionStreamResponse(**result_json)
