@@ -120,6 +120,7 @@ void CudaGraphRunner::prepareInputs(const PyModelInputs& inputs, CudaGraphState&
 
     // clear kv_cache_kernel_block_id_device, otherwise it will cause the cache block pollution
     py_model_inputs_.attention_inputs.kv_cache_kernel_block_id_device.fill_(0);
+    py_model_inputs_.attention_inputs.kv_cache_kernel_block_id_host.fill_(0);
 
     // NOTE: kv_cache_block_id_{host,device} are physical block IDs dedicated for cache store
     // (see OpDefs.h). They are NOT consumed by any GPU attention kernel during CUDA graph replay;

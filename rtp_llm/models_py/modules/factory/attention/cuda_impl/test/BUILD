@@ -201,3 +201,16 @@ py_test(
     },
 )
 
+# FA3 heterogeneous-batch regression suites for target verify + draft prefill.
+py_test(
+    name = "test_fa3_heterogeneous",
+    srcs = [
+        "test_fa3_heterogeneous.py",
+        "base_attention_test.py",
+    ],
+    deps = py_test_deps,
+    tags = ["H20"],
+    exec_properties = {
+        'gpu': 'H20',
+    },
+)
