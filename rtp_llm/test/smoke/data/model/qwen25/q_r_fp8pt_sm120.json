@@ -14,7 +14,7 @@
                 "yield_generator": true
             },
             "result": {
-                "response": " Flask is a lightweight web framework for Python, and",
+                "response": " Flask is a micro web framework that is lightweight and",
                 "iter_count": 10,
                 "finished": true
             }
@@ -37,7 +37,7 @@
                         "response": " Flask is a lightweight web framework for Python,"
                     },
                     {
-                        "response": "\n\nI am trying to use the screen manager"
+                        "response": "\n\nI am trying to use the screen\\_"
                     }
                 ],
                 "iter_count": 10,
@@ -57,8 +57,8 @@
             },
             "result": {
                 "response": [
-                    " Flask is a lightweight web framework for Python, and",
-                    " Flask is a lightweight web framework for Python, and"
+                    " Flask is a micro web framework that is lightweight and",
+                    " Flask is a micro web framework that is lightweight and"
                 ],
                 "iter_count": 10,
                 "finished": true
@@ -78,7 +78,7 @@
                 "yield_generator": true
             },
             "result": {
-                "response": " Flask is a lightweight web framework for Python, and",
+                "response": " Flask is a micro web framework that is lightweight and",
                 "iter_count": 10,
                 "finished": true
             }
@@ -97,7 +97,7 @@
                 "yield_generator": false
             },
             "result": {
-                "response": " Flask is a lightweight web framework for Python, and",
+                "response": " Flask is a micro web framework that is lightweight and",
                 "iter_count": 10,
                 "finished": true
             }
@@ -117,7 +117,7 @@
                 "yield_generator": true
             },
             "result": {
-                "response": " Flask is a lightweight web framework for Python, and",
+                "response": " Flask is a micro web framework that is lightweight and",
                 "iter_count": 10,
                 "finished": true
             }
