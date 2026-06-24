@@ -164,12 +164,26 @@ def _cp_sharded_slot_mapping(
     tokens_per_block: int,
     cp_size: int,
     cp_rank: int,
+    owner_tokens_per_block: Optional[int] = None,
 ) -> torch.Tensor:
     """Build local slot mapping for RR-sharded paged KV.
 
-    Logical block ``g`` is owned by ``g % cp_size`` and appears at local
-    compact block ``g // cp_size`` on that owner rank. Non-owned tokens get
-    ``-1`` so writer kernels skip them.
+    Ownership is decided at the *owner* (physical KV-block) granularity, not
+    the kernel block granularity. Each owner block contains
+    ``bpk = owner_tokens_per_block / tokens_per_block`` consecutive kernel
+    sub-blocks that all live on the same rank.
+
+    Logical owner block ``g_owner`` is owned by rank ``g_owner % cp_size`` and
+    appears at local compact owner column ``g_owner // cp_size``; that
+    compact owner column maps to ``bpk`` consecutive kernel columns
+    ``[col_owner*bpk, col_owner*bpk + bpk - 1]`` in ``block_table_local``
+    (the kernel block table). Non-owned tokens get ``-1`` so writer kernels
+    skip them.
+
+    When ``owner_tokens_per_block`` is ``None`` or equals ``tokens_per_block``
+    (i.e. bpk == 1, kernel and physical block sizes coincide), the formula
+    degenerates to the legacy ``(g % cp_size, g // cp_size)`` ownership at
+    kernel granularity.
     """
     if positions.numel() == 0:
         return torch.empty(0, dtype=torch.int64, device=positions.device)
@@ -178,18 +192,39 @@ def _cp_sharded_slot_mapping(
             (positions.numel(),), -1, dtype=torch.int64, device=positions.device
         )
 
+    kernel_tpb = int(tokens_per_block)
+    owner_tpb = (
+        int(owner_tokens_per_block)
+        if owner_tokens_per_block is not None
+        else kernel_tpb
+    )
+    if owner_tpb <= 0 or kernel_tpb <= 0 or owner_tpb % kernel_tpb != 0:
+        raise ValueError(
+            f"owner_tokens_per_block ({owner_tpb}) must be a positive multiple "
+            f"of tokens_per_block ({kernel_tpb})"
+        )
+    bpk = owner_tpb // kernel_tpb
+
     pos = positions.to(torch.int64)
     bid = batch_indice.to(torch.int64)
     bt = block_table_local.to(torch.int64)
-    global_block = pos // int(tokens_per_block)
-    local_block = global_block // int(cp_size)
-    owned = (global_block % int(cp_size)) == int(cp_rank)
-    in_capacity = local_block < int(bt.shape[1])
+    # Owner block decides which rank holds this token (matches C++ CPSlotMapper
+    # which RR-shards at owner_tpb granularity).
+    owner_block = pos // owner_tpb
+    owned = (owner_block % int(cp_size)) == int(cp_rank)
+    local_owner_block = owner_block // int(cp_size)
+    # Kernel sub-block index inside the owner block, in [0, bpk).
+    kernel_in_owner = (pos % owner_tpb) // kernel_tpb
+    # Compact kernel column on this rank: bpk consecutive kernel ids per owner.
+    local_kernel_col = local_owner_block * int(bpk) + kernel_in_owner
+    in_capacity = local_kernel_col < int(bt.shape[1])
     valid = owned & in_capacity
-    safe_local_block = torch.where(valid, local_block, torch.zeros_like(local_block))
-    block_id = bt[bid, safe_local_block]
+    safe_local_col = torch.where(
+        valid, local_kernel_col, torch.zeros_like(local_kernel_col)
+    )
+    block_id = bt[bid, safe_local_col]
     valid = valid & (block_id > 0)
-    slot = block_id * int(tokens_per_block) + (pos % int(tokens_per_block))
+    slot = block_id * kernel_tpb + (pos % kernel_tpb)
     return torch.where(valid, slot, torch.full_like(slot, -1)).contiguous()
 
 
@@ -197,14 +232,25 @@ def _safe_expand_cp_sharded_block_table(
     attn_inputs: PyAttentionInputs,
     tokens_per_block: int,
     cp_size: int,
+    owner_tokens_per_block: Optional[int] = None,
 ) -> PyAttentionInputs:
     """Return an attention input copy whose host block table has full width.
 
     SparseMlaParams.fill_params builds generic page/slot metadata before the
     CP op can override sharded writes. That generic code indexes by global
-    logical block id, so a compact page-RR block table can go out of bounds.
-    The expanded table is only a bounds-safe placeholder; real sharded reads
-    and writes use the original compact block table.
+    logical (kernel) block id, so a compact page-RR block table can go out of
+    bounds. The expanded table is only a bounds-safe placeholder; real
+    sharded reads and writes use the original compact block table.
+
+    Page-RR ownership is decided at the *owner* (physical KV-block) granularity:
+    ``bpk = owner_tokens_per_block / tokens_per_block`` consecutive kernel
+    sub-blocks share one owner block, and all live on the same rank. So the
+    expansion needs to map global kernel column ``k_global`` to the compact
+    kernel column on its owner's local table, namely
+    ``(k_global // bpk // cp_size) * bpk + (k_global % bpk)``.
+
+    When ``owner_tokens_per_block`` is ``None`` or equals ``tokens_per_block``
+    (bpk == 1), this degenerates to the legacy ``k_global // cp_size`` mapping.
     """
     compact_host = getattr(attn_inputs, "kv_cache_kernel_block_id_host", None)
     if not isinstance(compact_host, torch.Tensor) or compact_host.numel() == 0:
@@ -224,19 +270,39 @@ def _safe_expand_cp_sharded_block_table(
     total_lens = total_lens + prefix_lengths.detach().cpu().to(torch.int64).reshape(-1)
     if total_lens.numel() == 0:
         return attn_inputs
-    max_global_blocks = int(
-        (
-            (int(total_lens.max().item()) + int(tokens_per_block) - 1)
-            // int(tokens_per_block)
+
+    kernel_tpb = int(tokens_per_block)
+    owner_tpb = (
+        int(owner_tokens_per_block)
+        if owner_tokens_per_block is not None
+        else kernel_tpb
+    )
+    if owner_tpb <= 0 or kernel_tpb <= 0 or owner_tpb % kernel_tpb != 0:
+        raise ValueError(
+            f"owner_tokens_per_block ({owner_tpb}) must be a positive multiple "
+            f"of tokens_per_block ({kernel_tpb})"
         )
+    bpk = owner_tpb // kernel_tpb
+
+    max_global_blocks = int(
+        ((int(total_lens.max().item()) + kernel_tpb - 1) // kernel_tpb)
     )
     if max_global_blocks <= 0:
         return attn_inputs
 
-    local_cols = (
-        torch.arange(max_global_blocks, dtype=torch.long, device=compact_host.device)
-        // int(cp_size)
-    ).clamp_max(int(compact_host.shape[1]) - 1)
+    # Expand at kernel granularity: every global kernel column k maps to
+    # compact owner column (k // bpk // cp_size), then to local kernel column
+    # owner_col * bpk + (k % bpk). Clamp guards against ranks that hold no
+    # owner block (compact width = 0 already early-returned).
+    k_global = torch.arange(
+        max_global_blocks, dtype=torch.long, device=compact_host.device
+    )
+    owner_global = k_global // int(bpk)
+    owner_local = owner_global // int(cp_size)
+    kernel_in_owner = k_global % int(bpk)
+    local_cols = (owner_local * int(bpk) + kernel_in_owner).clamp_max(
+        int(compact_host.shape[1]) - 1
+    )
     safe_host = compact_host.index_select(1, local_cols).contiguous()
 
     expanded = copy.copy(attn_inputs)
@@ -285,6 +351,11 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
         self.prefill_cp_rank = int(getattr(parallelism_config, "tp_rank", 0))
         self.prefill_cp_size = int(getattr(parallelism_config, "tp_size", 1))
         self.device = torch.cuda.current_device()
+        # Default to kernel granularity (bpk == 1). SparseMlaCpImpl overrides
+        # this with attn_configs.tokens_per_block right after construction so
+        # page-RR sharding uses the same owner granularity as the C++
+        # CPSlotMapper.
+        self.kv_owner_tokens_per_block = int(page_size)
         cp_cfg = getattr(parallelism_config, "prefill_cp_config", None)
         self.kv_cache_sharded = bool(
             cp_cfg is not None
@@ -410,6 +481,7 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
         self.total_kv_len = mla_params.cp_total_kv_len
 
         if self.kv_cache_sharded:
+            owner_tpb = int(self.kv_owner_tokens_per_block)
             new_slot_mapping = _cp_sharded_slot_mapping(
                 mla_params.positions_d,
                 block_table,
@@ -417,6 +489,7 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
                 self.token_per_block,
                 self.prefill_cp_size,
                 self.prefill_cp_rank,
+                owner_tokens_per_block=owner_tpb,
             )
             self.sharded_slot_mapping = _copy_or_replace_graph_tensor(
                 self.sharded_slot_mapping,
@@ -428,10 +501,15 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
                 self.cu_kv_seqlens_global[1:].to(torch.int64)
                 - self.cu_kv_seqlens_global[:-1].to(torch.int64)
             ).contiguous()
+            # padded local KV lengths and the gather-restore index map must be
+            # computed at OWNER granularity to match the C++ CPSlotMapper, not
+            # at kernel granularity. With bpk > 1 the kernel-granularity
+            # version would straddle physical block boundaries inconsistently
+            # with what the C++ writer actually placed in each rank's cache.
             local_lens = cp_padded_local_kv_lens(
                 per_req_total_kv_lens,
                 self.prefill_cp_size,
-                self.token_per_block,
+                owner_tpb,
             ).to(torch.int32)
             workspace_starts = torch.zeros(
                 int(local_lens.numel()), dtype=torch.int32, device=local_lens.device
@@ -443,7 +521,7 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
             restore_indices = build_kv_allgather_restore_indices(
                 per_req_total_kv_lens,
                 self.prefill_cp_size,
-                self.token_per_block,
+                owner_tpb,
                 block_table.device,
             )
             self.sharded_local_kv_lens = _copy_or_replace_graph_tensor(
@@ -799,6 +877,18 @@ class SparseMlaCpImpl(SparseMlaImpl):
             and getattr(cp_cfg, "kv_cache_sharded", False)
             and self._cp_size > 1
         )
+        # Owner (physical) block size used by the C++ KVCacheAllocator /
+        # CPSlotMapper to decide RR ownership. May be larger than the kernel
+        # block size (bpk = owner_tpb / kernel_tpb >= 1). All page-RR sharding
+        # logic must use this granularity to stay consistent with the C++
+        # allocator; the kernel block size is only used for slot offset math.
+        # Must be set BEFORE super().__init__() because the base class may
+        # invoke self.prepare() during construction, which reads this attribute.
+        self._kv_owner_tokens_per_block = int(
+            getattr(
+                attn_configs, "tokens_per_block", attn_configs.kernel_tokens_per_block
+            )
+        )
         # ContextParallelProcessor leaves per-chunk lengths on shared attn_inputs;
         # sparse fill_params / cache_store need per-request actual lengths. Use a
         # shallow copy here so we don't mutate the caller's attn_inputs.
@@ -821,6 +911,7 @@ class SparseMlaCpImpl(SparseMlaImpl):
         )
         self.fmha_impl.kv_cache_write_op = self.kv_cache_write_op
         self.fmha_impl.write_cache_store_impl = self.write_cache_store_impl
+        self.fmha_impl.kv_owner_tokens_per_block = self._kv_owner_tokens_per_block
 
     def prepare(
         self, attn_inputs: PyAttentionInputs, forbid_realloc: bool = False
@@ -834,6 +925,7 @@ class SparseMlaCpImpl(SparseMlaImpl):
                 attn_for_prepare,
                 self.seq_size_per_block,
                 self._cp_size,
+                owner_tokens_per_block=self._kv_owner_tokens_per_block,
             )
             self.fmha_params.fill_params(
                 safe_attn_for_fill, self.seq_size_per_block, forbid_realloc
