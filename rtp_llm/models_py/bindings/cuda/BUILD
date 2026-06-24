@@ -192,11 +192,13 @@ cc_library(
     name = "cuda_bindings_base",
     hdrs = [
         "RegisterBaseBindings.hpp",
+        "FusedLayerNormFP8QuantOp.h",
     ],
     copts = copts(),
     deps = [
         "//rtp_llm/models_py/bindings:register_ops_hdr",
         "//rtp_llm/models_py/bindings/cuda/kernels:mla_quant_kernel",
+        "//rtp_llm/models_py/bindings/cuda/kernels:cuda_fused_layernorm_fp8_group_quant",
         ":cuda_bindings",
     ],
     visibility = ["//visibility:public"],

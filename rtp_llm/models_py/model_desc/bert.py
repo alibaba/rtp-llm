@@ -15,6 +15,7 @@ from rtp_llm.models_py.modules import (
     FMHAImplBase,
     LayerNorm,
 )
+from rtp_llm.models_py.modules.base.cuda.norm import FusedAddBiasResLayerNormFP8Quant
 from rtp_llm.ops import HWKernelConfig, ParallelismConfig
 from rtp_llm.ops.compute_ops import (
     LayerKVCache,
@@ -52,11 +53,21 @@ class BertDecoderLayer(nn.Module):
             quant_config,
             hw_kernel_config,
         )
-        self.input_layernorm = AddBiasResLayerNorm(
-            weights[W.post_ln_gamma],
-            beta=weights[W.post_ln_beta],
-            eps=config.layernorm_eps,
-        )
+        self.use_fused_ln_fp8 = hasattr(self.mlp.up_proj, 'forward_fp8')
+
+        if self.use_fused_ln_fp8:
+            self.input_layernorm = FusedAddBiasResLayerNormFP8Quant(
+                weights[W.post_ln_gamma],
+                beta=weights[W.post_ln_beta],
+                eps=config.layernorm_eps,
+                group_size=128,
+            )
+        else:
+            self.input_layernorm = AddBiasResLayerNorm(
+                weights[W.post_ln_gamma],
+                beta=weights[W.post_ln_beta],
+                eps=config.layernorm_eps,
+            )
         self.post_attention_layernorm = AddBiasResLayerNorm(
             weights[W.post_ffn_ln_gamma],
             beta=weights[W.post_ffn_ln_beta],
@@ -76,11 +87,18 @@ class BertDecoderLayer(nn.Module):
             fmha_impl=fmha_impl,
             kv_cache=kv_cache,
         )
-        hidden_states = self.input_layernorm(hidden_states, residual, torch.empty(0))
 
-        # Fully Connected
-        residual = hidden_states
-        hidden_states = self.mlp(hidden_states)
+        if self.use_fused_ln_fp8:
+            # Fused: LayerNorm + FP8 quant in one kernel
+            # After call: hidden_states = normed BF16 (in-place), residual = pre-norm (in-place)
+            fp8_out, scales = self.input_layernorm(hidden_states, residual, torch.empty(0))
+            residual = hidden_states  # normed output as residual for post_attn_ln
+            hidden_states = self.mlp.forward_prequant(fp8_out, scales)
+        else:
+            hidden_states = self.input_layernorm(hidden_states, residual, torch.empty(0))
+            residual = hidden_states
+            hidden_states = self.mlp(hidden_states)
+
         hidden_states = self.post_attention_layernorm(
             hidden_states, residual, torch.empty(0)
         )

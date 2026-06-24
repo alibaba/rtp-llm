@@ -102,3 +102,16 @@ class DenseMLP(nn.Module):
         if not skip_allreduce and self.parallelism_config.get_ffn_tp_size() > 1:
             output = all_reduce(output, group=Group.TP)
         return output
+
+    def forward_prequant(self, x_fp8: torch.Tensor, x_scales: torch.Tensor,
+                         skip_allreduce: bool = False) -> torch.Tensor:
+        """Forward with pre-quantized FP8 input for up_proj (from fused LN+quant)."""
+        if hasattr(self.up_proj, 'forward_fp8'):
+            up = self.up_proj.forward_fp8(x_fp8, x_scales)
+        else:
+            up = self.up_proj(x_fp8.to(torch.bfloat16))
+        activated = up if self.activation_fused else self.act_fn(up)
+        output = self.down_proj(activated)
+        if not skip_allreduce and self.parallelism_config.get_ffn_tp_size() > 1:
+            output = all_reduce(output, group=Group.TP)
+        return output

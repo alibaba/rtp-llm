@@ -162,3 +162,21 @@ class CudaFp8VllmBlockwiseLinear(LinearBase):
             self.use_gelu,
         )
         return output
+
+    def forward_fp8(self, input_fp8: torch.Tensor, input_scales: torch.Tensor) -> torch.Tensor:
+        """Accept pre-quantized FP8 input, skip internal quantization."""
+        M = input_fp8.shape[0]
+        output = torch.empty(M, self.N, dtype=torch.bfloat16, device=input_fp8.device)
+        bias = None
+        if self.bias is not None:
+            bias = self.bias.reshape(-1).to(dtype=output.dtype, device=output.device)
+        cutlass_scaled_mm_blockwise_sm120_fp8(
+            output,
+            input_fp8,
+            self.weight,
+            input_scales,
+            self.weight_scales,
+            bias,
+            self.use_gelu,
+        )
+        return output

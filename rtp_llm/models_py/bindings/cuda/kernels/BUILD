@@ -115,6 +115,18 @@ cc_library(
 )
 
 cc_library(
+    name = "cuda_fused_layernorm_fp8_group_quant",
+    srcs = ["fused_layernorm_fp8_group_quant.cu"],
+    hdrs = ["fused_layernorm_fp8_group_quant.h"],
+    deps = [
+        "//rtp_llm/models_py/bindings/cuda:cuda_host_utils",
+        "//rtp_llm/models_py/bindings/cuda:cuda_utils_cu",
+        "//rtp_llm/cpp/utils:core_utils",
+    ] + torch_deps(),
+    copts = cuda_copts(),
+)
+
+cc_library(
     name = "fast_topk",
     srcs = ["fast_topk.cu"],
     hdrs = ["fast_topk.h"],

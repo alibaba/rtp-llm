@@ -19,6 +19,7 @@
 #include "rtp_llm/models_py/bindings/cuda/DebugKernelOp.h"
 #include "rtp_llm/models_py/bindings/cuda/UserBuffersOp.h"
 #include "rtp_llm/models_py/bindings/cuda/FakeBalanceExpertOp.h"
+#include "rtp_llm/models_py/bindings/cuda/FusedLayerNormFP8QuantOp.h"
 
 #include "rtp_llm/models_py/bindings/cuda/kernels/mla_quant_kernel.h"
 
@@ -103,6 +104,17 @@ void registerBasicCudaOps(py::module& rtp_ops_m) {
                   py::arg("weight"),
                   py::arg("beta"),
                   py::arg("eps"));
+
+    rtp_ops_m.def("fused_add_layernorm_fp8_group_quant",
+                  &fused_add_layernorm_fp8_group_quant,
+                  "Fused AddBiasRes + LayerNorm + FP8 Per-Group Quantization",
+                  py::arg("input"),
+                  py::arg("residual"),
+                  py::arg("bias"),
+                  py::arg("weight"),
+                  py::arg("beta"),
+                  py::arg("eps"),
+                  py::arg("group_size"));
 
     rtp_ops_m.def("per_token_group_quant_int8",
                   &per_token_group_quant_int8,

@@ -135,3 +135,33 @@ class AddBiasResLayerNorm(BaseAddBiasResLayerNorm):
             self.variance_epsilon,
         )
         return hidden_states
+
+
+class FusedAddBiasResLayerNormFP8Quant(BaseAddBiasResLayerNorm):
+    """Fused AddBiasRes + LayerNorm + FP8 Per-Group Quantization.
+
+    Combines LayerNorm and FP8 quantization into a single kernel,
+    eliminating the intermediate BF16 global memory round-trip.
+
+    Returns (fp8_output, group_scales) instead of BF16 hidden_states.
+    The residual tensor is updated in-place with the pre-norm value.
+    """
+
+    def __init__(self, weight: torch.Tensor, beta: torch.Tensor, eps: float = 1e-6,
+                 group_size: int = 128):
+        super().__init__(weight, beta, eps)
+        self.group_size = group_size
+
+    def forward(
+        self, hidden_states: torch.Tensor, residual: torch.Tensor, bias: torch.Tensor
+    ):
+        fp8_output, group_scales = rtp_llm_ops.fused_add_layernorm_fp8_group_quant(
+            hidden_states,
+            residual,
+            bias,
+            self.weight.data,
+            self.beta,
+            self.variance_epsilon,
+            self.group_size,
+        )
+        return fp8_output, group_scales
