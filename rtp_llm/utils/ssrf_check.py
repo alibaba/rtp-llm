@@ -142,7 +142,7 @@ class _SSRFAdapter(HTTPAdapter):
                 validated_ip = _resolve_and_validate_host(original_host)
                 self._pin_connection(conn, validated_ip, original_host, parsed.scheme)
             except ValueError:
-                pass
+                raise
         return conn
 
     def send(

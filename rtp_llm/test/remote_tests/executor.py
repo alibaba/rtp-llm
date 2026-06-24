@@ -643,9 +643,11 @@ class RemoteExecutor:
         then stays idle. After completion we have full stdout/stderr in the response.
         """
         if stdout_file is not None:
-            stdout_file.write_bytes(result.stdout_raw or b"")
+            if not started_byte_stream_stdout or len(result.stdout_raw or b"") > (stdout_file.stat().st_size if stdout_file.exists() else 0):
+                stdout_file.write_bytes(result.stdout_raw or b"")
         if stderr_file is not None:
-            stderr_file.write_bytes(result.stderr_raw or b"")
+            if not started_byte_stream_stderr or len(result.stderr_raw or b"") > (stderr_file.stat().st_size if stderr_file.exists() else 0):
+                stderr_file.write_bytes(result.stderr_raw or b"")
         if stdout_file is None and stderr_file is None:
             return
         if not started_byte_stream_stdout and not started_byte_stream_stderr:

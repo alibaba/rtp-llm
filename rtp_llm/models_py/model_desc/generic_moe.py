@@ -108,6 +108,13 @@ class GenericMoeLayer(nn.Module):
 
         # for group topk
         self.correction_bias = weights.get(W.e_score_correction_b, None)
+        if self.correction_bias is not None:
+            self.group_topk = GroupTopK()
+            self.renormalize = self.config.has_moe_norm
+            self.num_expert_group = self.config.moe_n_group
+            self.topk_group = self.config.moe_topk_group
+            self.n_routed_experts = self.config.expert_num
+            self.routed_scaling_factor = self.config.routed_scaling_factor
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, _ = hidden_states.shape
@@ -128,13 +135,6 @@ class GenericMoeLayer(nn.Module):
         )
 
         if self.correction_bias is not None:
-            self.group_topk = GroupTopK()
-            self.renormalize = self.config.has_moe_norm
-            self.num_expert_group = self.config.moe_n_group
-
-            self.topk_group = self.config.moe_topk_group
-            self.n_routed_experts = self.config.expert_num  # config.n_routed_experts
-            self.routed_scaling_factor = self.config.routed_scaling_factor
             self.group_topk(
                 topk_weights=topk_weights,
                 topk_ids=topk_ids,

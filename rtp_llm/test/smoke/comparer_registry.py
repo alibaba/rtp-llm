@@ -89,19 +89,19 @@ def _try_register_mainse_comparers() -> None:
     internal comparer first.
     """
     try:
-        from rtp_llm.test.smoke.mainse_comparer import (
-            MainseArpcComparer,
-            MainseComparer,
+        from rtp_llm.test.smoke.mainse.mainse_comparer import (
+            MainseDecodeArpcComparer,
+            MainseEmbeddingArpcComparer,
         )
 
         register_comparer(
             lambda q_r, ep: q_r.get("mainse_module", False)
             or q_r.get("mainse", False),
-            MainseComparer,
+            MainseDecodeArpcComparer,
         )
         register_comparer(
             lambda q_r, ep: q_r.get("mainse_arpc", False),
-            MainseArpcComparer,
+            MainseEmbeddingArpcComparer,
         )
     except (ImportError, ModuleNotFoundError):
         # OSS-only checkouts legitimately lack internal mainse comparers.
