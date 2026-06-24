@@ -219,7 +219,12 @@ BatchKVCacheResourcePtr KVCacheAllocator::popBlocksFromCache(size_t min_blocks_t
 
     auto batch_resource = std::make_shared<BatchKVCacheResource>();
     batch_resource->resetBatchSize(1);
-    batch_resource->initGroups(config_.groupNums(), static_cast<int>(config_.layer_all_num), config_.layer_to_group_id);
+    batch_resource->initGroups(config_.groupNums(),
+                               static_cast<int>(config_.layer_all_num),
+                               config_.layer_to_group_id,
+                               config_.kernelBlocksPerKvBlock(),
+                               config_.kv_block_stride_kernel_blocks,
+                               config_.group_types);
     batch_resource->setLastBlockAligned(true);
 
     for (int gid = 0; gid < config_.groupNums(); ++gid) {

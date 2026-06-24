@@ -25,8 +25,17 @@ using BlockIndicesType = std::vector<BlockIdxType>;
 
 class BlockIds {
 public:
-    explicit BlockIds(size_t kernel_blocks_per_kv_block = 1):
-        kernel_blocks_per_kv_block_(kernel_blocks_per_kv_block > 0 ? kernel_blocks_per_kv_block : 1) {}
+    explicit BlockIds(size_t active_kernel_blocks_per_kv_block = 1, size_t kv_block_stride_kernel_blocks = 0) {
+        active_kernel_blocks_per_kv_block_ =
+            active_kernel_blocks_per_kv_block > 0 ? active_kernel_blocks_per_kv_block : 1;
+        kv_block_stride_kernel_blocks_ =
+            kv_block_stride_kernel_blocks > 0 ? kv_block_stride_kernel_blocks : active_kernel_blocks_per_kv_block_;
+        RTP_LLM_CHECK_WITH_INFO(kv_block_stride_kernel_blocks_ >= active_kernel_blocks_per_kv_block_,
+                                "BlockIds: kv_block_stride_kernel_blocks (%zu) must be >= "
+                                "active_kernel_blocks_per_kv_block (%zu)",
+                                kv_block_stride_kernel_blocks_,
+                                active_kernel_blocks_per_kv_block_);
+    }
 
     size_t blocksNum() const;
 
@@ -61,10 +70,11 @@ private:
 
     BlockIndicesType block_indices;
     // Kernel-granularity block IDs, always maintained.
-    // Size is always block_indices.size() * kernel_blocks_per_kv_block_.
-    // When kernel_blocks_per_kv_block_ == 1, kernel_block_indices_ mirrors block_indices.
+    // Size is always block_indices.size() * active_kernel_blocks_per_kv_block_.
+    // When active_kernel_blocks_per_kv_block_ == 1, kernel_block_indices_ mirrors block_indices.
     BlockIndicesType kernel_block_indices_;
-    size_t           kernel_blocks_per_kv_block_ = 1;
+    size_t           active_kernel_blocks_per_kv_block_ = 1;
+    size_t           kv_block_stride_kernel_blocks_     = 1;
 };
 
 using GroupBlockIds = std::vector<std::shared_ptr<BlockIds>>;
@@ -74,9 +84,18 @@ class KVCacheResource {
 public:
     void initGroups(int                                group_num,
                     int                                layer_num,
-                    const std::vector<int>&            layer_to_group_id          = {},
-                    size_t                             kernel_blocks_per_kv_block = 1,
-                    const std::vector<CacheGroupType>& group_types                = {});
+                    const std::vector<int>&            layer_to_group_id                 = {},
+                    size_t                             active_kernel_blocks_per_kv_block = 1,
+                    size_t                             kv_block_stride_kernel_blocks     = 0,
+                    const std::vector<CacheGroupType>& group_types                       = {});
+
+    void initGroups(int                                group_num,
+                    int                                layer_num,
+                    const std::vector<int>&            layer_to_group_id,
+                    size_t                             active_kernel_blocks_per_kv_block,
+                    const std::vector<CacheGroupType>& group_types) {
+        initGroups(group_num, layer_num, layer_to_group_id, active_kernel_blocks_per_kv_block, 0, group_types);
+    }
     void resizeBlocks(int reserver_blocks, int value = 0);
 
     int                     blocksNum(int group_id = 0) const;

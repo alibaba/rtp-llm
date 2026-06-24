@@ -423,6 +423,7 @@ std::shared_ptr<KVCacheResource> HybridTypeKVCacheAllocator::incrKVCacheRef(cons
                                   static_cast<int>(config_.layer_all_num),
                                   config_.layer_to_group_id,
                                   config_.kernelBlocksPerKvBlock(),
+                                  config_.kv_block_stride_kernel_blocks,
                                   config_.group_types);
 
     CacheKeysType&                selected_keys = selected_resource->cacheKeys();

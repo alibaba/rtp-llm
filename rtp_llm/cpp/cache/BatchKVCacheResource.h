@@ -23,12 +23,26 @@ public:
 
     void initGroups(int                                group_nums,
                     int                                layer_num,
-                    const std::vector<int>&            layer_to_group_id          = {},
-                    size_t                             kernel_blocks_per_kv_block = 1,
-                    const std::vector<CacheGroupType>& group_types                = {}) {
+                    const std::vector<int>&            layer_to_group_id                 = {},
+                    size_t                             active_kernel_blocks_per_kv_block = 1,
+                    size_t                             kv_block_stride_kernel_blocks     = 0,
+                    const std::vector<CacheGroupType>& group_types                       = {}) {
         for (auto& batch : batch_resource) {
-            batch.initGroups(group_nums, layer_num, layer_to_group_id, kernel_blocks_per_kv_block, group_types);
+            batch.initGroups(group_nums,
+                             layer_num,
+                             layer_to_group_id,
+                             active_kernel_blocks_per_kv_block,
+                             kv_block_stride_kernel_blocks,
+                             group_types);
         }
+    }
+
+    void initGroups(int                                group_nums,
+                    int                                layer_num,
+                    const std::vector<int>&            layer_to_group_id,
+                    size_t                             active_kernel_blocks_per_kv_block,
+                    const std::vector<CacheGroupType>& group_types) {
+        initGroups(group_nums, layer_num, layer_to_group_id, active_kernel_blocks_per_kv_block, 0, group_types);
     }
 
     int groupNums() const {
@@ -131,12 +145,27 @@ public:
     void initBatchGroups(int                                batch_id,
                          int                                group_nums,
                          int                                layer_num,
-                         const std::vector<int>&            layer_to_group_id          = {},
-                         size_t                             kernel_blocks_per_kv_block = 1,
-                         const std::vector<CacheGroupType>& group_types                = {}) {
+                         const std::vector<int>&            layer_to_group_id                 = {},
+                         size_t                             active_kernel_blocks_per_kv_block = 1,
+                         size_t                             kv_block_stride_kernel_blocks     = 0,
+                         const std::vector<CacheGroupType>& group_types                       = {}) {
         RTP_LLM_CHECK(batch_id >= 0 && static_cast<size_t>(batch_id) < batch_resource.size());
-        batch_resource[batch_id].initGroups(
-            group_nums, layer_num, layer_to_group_id, kernel_blocks_per_kv_block, group_types);
+        batch_resource[batch_id].initGroups(group_nums,
+                                            layer_num,
+                                            layer_to_group_id,
+                                            active_kernel_blocks_per_kv_block,
+                                            kv_block_stride_kernel_blocks,
+                                            group_types);
+    }
+
+    void initBatchGroups(int                                batch_id,
+                         int                                group_nums,
+                         int                                layer_num,
+                         const std::vector<int>&            layer_to_group_id,
+                         size_t                             active_kernel_blocks_per_kv_block,
+                         const std::vector<CacheGroupType>& group_types) {
+        initBatchGroups(
+            batch_id, group_nums, layer_num, layer_to_group_id, active_kernel_blocks_per_kv_block, 0, group_types);
     }
 
     void setBatchBlocks(int batch_id, int group_id, const BlockIndicesType& blocks) {
