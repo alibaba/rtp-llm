@@ -183,6 +183,11 @@ class BertModel(GptModelBase):
     ) -> PyModelOutputs:
         input_ids: torch.Tensor = inputs.input_ids
         bert_embedding_inputs = inputs.bert_embedding_inputs
+        if bert_embedding_inputs.multimodal_features:
+            # Vision positions carry out-of-vocab placeholder/hash ids that would index
+            # past the embedding table (illegal CUDA access). Clamp to a valid row; the
+            # multimodal injector below overwrites these rows with the real features.
+            input_ids = input_ids.clamp(0, self.embed_tokens.weight.size(0) - 1)
         inputs_embeds = self.embed_tokens(
             input_ids,
             bert_embedding_inputs.combo_position_ids,
