@@ -380,6 +380,7 @@ class FlashInferTRTLLMPrefillOp(object):
         kv_cache: Optional[LayerKVCache],
         fmha_params: FlashInferTRTLLMParams,
     ) -> torch.Tensor:
+        assert kv_cache is not None, "kv_cache is required for FlashInferTRTLLMPrefillOp.forward()"
         dtype = kv_cache.kv_cache_base.dtype
         q_type = q.dtype
         q = q.to(dtype)

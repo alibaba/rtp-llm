@@ -5,6 +5,7 @@
 #include <cassert>
 #include <functional>
 #include <mutex>
+#include <shared_mutex>
 #include <type_traits>
 #include <unordered_map>
 
@@ -602,10 +603,10 @@ void calc_launch_parameter_by_occupancy(IdxT k, int* block_size, int* min_grid_s
     // and the result only depends on k for a given template instantiation.
     // Protected by a mutex because this function can be called concurrently from
     // multiple host threads.
-    static std::mutex cache_mutex;
+    static std::shared_mutex cache_mutex;
     static std::unordered_map<IdxT, std::pair<int, int>> occupancy_cache;
     {
-        std::lock_guard<std::mutex> lock(cache_mutex);
+        std::shared_lock<std::shared_mutex> lock(cache_mutex);
         auto it = occupancy_cache.find(k);
         if (it != occupancy_cache.end()) {
             *block_size    = it->second.first;
@@ -620,7 +621,7 @@ void calc_launch_parameter_by_occupancy(IdxT k, int* block_size, int* min_grid_s
     };
     HIP_CHECK(hipOccupancyMaxPotentialBlockSizeVariableSMem(min_grid_size, block_size, func, calc_smem));
     {
-        std::lock_guard<std::mutex> lock(cache_mutex);
+        std::unique_lock<std::shared_mutex> lock(cache_mutex);
         occupancy_cache.emplace(k, std::make_pair(*block_size, *min_grid_size));
     }
 }

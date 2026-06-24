@@ -211,13 +211,13 @@ class DpSeperationCaseRunner(CaseRunner):
         super().__init__(task_info, env_args, gpu_card, smoke_args, **kwargs)
         self.remote_kvcm_server = None
         if not isinstance(env_args, dict):
-            raise Exception("env_args in PdSeperationCaseRunner should be dict")
+            raise Exception("env_args in DpSeperationCaseRunner should be dict")
         if (
             len(env_args) < 2
             or PREFILL_ROLE_NAME not in env_args
             or DECODE_ROLE_NAME not in env_args
         ):
-            raise Exception("env_args in PdSeperationCaseRunner should not empty")
+            raise Exception("env_args in DpSeperationCaseRunner should not empty")
 
     # override
     def run(self):

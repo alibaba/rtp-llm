@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import re
 import socket
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
@@ -86,6 +87,7 @@ class ExecutorEndpointPool:
         self.spec = EndpointSpec(uri)
         self.fallback_spec = EndpointSpec(fallback_uri) if fallback_uri else None
         self.refresh_seconds = max(0, int(refresh_seconds))
+        self._lock = threading.RLock()
         self._hosts: List[str] = []
         self._active_spec = self.spec
         self._index = 0
@@ -101,105 +103,108 @@ class ExecutorEndpointPool:
         return self._active_spec.uri
 
     def refresh(self, *, force: bool = False) -> None:
-        now = time.time()
-        if (
-            not force
-            and self._hosts
-            and self.refresh_seconds > 0
-            and now - self._last_refresh < self.refresh_seconds
-        ):
-            return
+        with self._lock:
+            now = time.time()
+            if (
+                not force
+                and self._hosts
+                and self.refresh_seconds > 0
+                and now - self._last_refresh < self.refresh_seconds
+            ):
+                return
 
-        active_spec = self.spec
-        if self.spec.is_literal_ip:
-            resolved = [self.spec.host]
-        else:
-            resolved: List[str] = []
-            sample_count = _FORCED_RESOLVE_SAMPLES if force else 1
-            for sample_idx in range(sample_count):
-                for ip in resolve_ipv4_addresses(self.spec.host, self.spec.port):
-                    if ip not in resolved:
-                        resolved.append(ip)
-                if len(resolved) > 1 or sample_idx == sample_count - 1:
-                    break
-                time.sleep(_FORCED_RESOLVE_SLEEP_SECONDS)
-            if not resolved and self.fallback_spec is not None:
-                active_spec = self.fallback_spec
-                if active_spec.is_literal_ip:
-                    resolved = [active_spec.host]
-                else:
-                    for sample_idx in range(sample_count):
-                        for ip in resolve_ipv4_addresses(active_spec.host, active_spec.port):
-                            if ip not in resolved:
-                                resolved.append(ip)
-                        if len(resolved) > 1 or sample_idx == sample_count - 1:
-                            break
-                        time.sleep(_FORCED_RESOLVE_SLEEP_SECONDS)
-                log.warning(
-                    "[EXECUTOR_POOL] primary host %s:%d unresolved; "
-                    "falling back to %s:%d",
-                    self.spec.host,
-                    self.spec.port,
-                    active_spec.host,
-                    active_spec.port,
-                )
-            elif resolved and self.fallback_spec is not None:
-                fallback_hosts: List[str] = []
-                if self.fallback_spec.is_literal_ip:
-                    fallback_hosts = [self.fallback_spec.host]
-                elif self.fallback_spec.port == active_spec.port:
-                    for sample_idx in range(sample_count):
-                        for ip in resolve_ipv4_addresses(
-                            self.fallback_spec.host, self.fallback_spec.port
-                        ):
-                            if ip not in fallback_hosts:
-                                fallback_hosts.append(ip)
-                        if len(fallback_hosts) > 1 or sample_idx == sample_count - 1:
-                            break
-                        time.sleep(_FORCED_RESOLVE_SLEEP_SECONDS)
-                for ip in fallback_hosts:
-                    if ip not in resolved:
-                        resolved.append(ip)
-            if not resolved:
-                # Let gRPC attempt hostname resolution so local/dev setups still
-                # get a useful error when service discovery is unavailable.
-                resolved = [active_spec.host]
-
-        if force and resolved and active_spec == self._active_spec:
-            for host in self._hosts:
-                if host not in resolved:
-                    resolved.append(host)
-
-        if resolved != self._hosts or active_spec != self._active_spec:
-            previous = self.current_endpoint() if self._hosts else None
-            self._hosts = resolved
-            self._active_spec = active_spec
-            self._index = 0
-            if previous:
-                for i, host in enumerate(self._hosts):
-                    if self._active_spec.uri_for_host(host) == previous:
-                        self._index = i
+            active_spec = self.spec
+            if self.spec.is_literal_ip:
+                resolved = [self.spec.host]
+            else:
+                resolved: List[str] = []
+                sample_count = _FORCED_RESOLVE_SAMPLES if force else 1
+                for sample_idx in range(sample_count):
+                    for ip in resolve_ipv4_addresses(self.spec.host, self.spec.port):
+                        if ip not in resolved:
+                            resolved.append(ip)
+                    if len(resolved) > 1 or sample_idx == sample_count - 1:
                         break
-        self._last_refresh = now
-        log.info(
-            "[EXECUTOR_POOL] active_host=%s port=%d endpoints=[%s] source=%s primary=%s",
-            self._active_spec.host,
-            self._active_spec.port,
-            ",".join(self._active_spec.uri_for_host(h) for h in self._hosts),
-            self.active_source_uri,
-            self.source_uri,
-        )
+                    time.sleep(_FORCED_RESOLVE_SLEEP_SECONDS)
+                if not resolved and self.fallback_spec is not None:
+                    active_spec = self.fallback_spec
+                    if active_spec.is_literal_ip:
+                        resolved = [active_spec.host]
+                    else:
+                        for sample_idx in range(sample_count):
+                            for ip in resolve_ipv4_addresses(active_spec.host, active_spec.port):
+                                if ip not in resolved:
+                                    resolved.append(ip)
+                            if len(resolved) > 1 or sample_idx == sample_count - 1:
+                                break
+                            time.sleep(_FORCED_RESOLVE_SLEEP_SECONDS)
+                    log.warning(
+                        "[EXECUTOR_POOL] primary host %s:%d unresolved; "
+                        "falling back to %s:%d",
+                        self.spec.host,
+                        self.spec.port,
+                        active_spec.host,
+                        active_spec.port,
+                    )
+                elif resolved and self.fallback_spec is not None:
+                    fallback_hosts: List[str] = []
+                    if self.fallback_spec.is_literal_ip:
+                        fallback_hosts = [self.fallback_spec.host]
+                    elif self.fallback_spec.port == active_spec.port:
+                        for sample_idx in range(sample_count):
+                            for ip in resolve_ipv4_addresses(
+                                self.fallback_spec.host, self.fallback_spec.port
+                            ):
+                                if ip not in fallback_hosts:
+                                    fallback_hosts.append(ip)
+                            if len(fallback_hosts) > 1 or sample_idx == sample_count - 1:
+                                break
+                            time.sleep(_FORCED_RESOLVE_SLEEP_SECONDS)
+                    for ip in fallback_hosts:
+                        if ip not in resolved:
+                            resolved.append(ip)
+                if not resolved:
+                    # Let gRPC attempt hostname resolution so local/dev setups still
+                    # get a useful error when service discovery is unavailable.
+                    resolved = [active_spec.host]
+
+            if force and resolved and active_spec == self._active_spec:
+                for host in self._hosts:
+                    if host not in resolved:
+                        resolved.append(host)
+
+            if resolved != self._hosts or active_spec != self._active_spec:
+                previous = self.current_endpoint() if self._hosts else None
+                self._hosts = resolved
+                self._active_spec = active_spec
+                self._index = 0
+                if previous:
+                    for i, host in enumerate(self._hosts):
+                        if self._active_spec.uri_for_host(host) == previous:
+                            self._index = i
+                            break
+            self._last_refresh = now
+            log.info(
+                "[EXECUTOR_POOL] active_host=%s port=%d endpoints=[%s] source=%s primary=%s",
+                self._active_spec.host,
+                self._active_spec.port,
+                ",".join(self._active_spec.uri_for_host(h) for h in self._hosts),
+                self.active_source_uri,
+                self.source_uri,
+            )
 
     def current_endpoint(self) -> str:
-        if not self._hosts:
-            self.refresh(force=True)
-        return self._active_spec.uri_for_host(self._hosts[self._index])
+        with self._lock:
+            if not self._hosts:
+                self.refresh(force=True)
+            return self._active_spec.uri_for_host(self._hosts[self._index])
 
     def advance(self, *, refresh: bool = False) -> str:
-        self.refresh(force=refresh)
-        if len(self._hosts) > 1:
-            self._index = (self._index + 1) % len(self._hosts)
-        return self.current_endpoint()
+        with self._lock:
+            self.refresh(force=refresh)
+            if len(self._hosts) > 1:
+                self._index = (self._index + 1) % len(self._hosts)
+            return self.current_endpoint()
 
     def endpoints(self) -> List[str]:
         self.refresh()

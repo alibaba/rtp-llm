@@ -80,6 +80,7 @@ def _build_env_args(
             role_envs.extend(envs_dict.get(role, []))
             ws = _parse_world_size(args_str)
             role_envs.append(f"WORLD_SIZE={ws}")
+            role_envs.append("ENABLE_STABLE_SCATTER_ADD=ON")
             role_envs.append("DETERMINISTIC_GEMM=1")
             env_args[role] = role_envs
         return env_args

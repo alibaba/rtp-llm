@@ -180,13 +180,15 @@ class GenericMoeLayer(nn.Module):
                 # EP mode: routed expert output is already complete
                 # (EP combine via all_to_all / all_gather aggregated across ranks).
                 # Only the shared expert output is TP-partial and needs all_reduce.
+                shared_expert_output = all_reduce(shared_expert_output, group=Group.TP)
                 if self.shared_expert_gate is not None:
                     gate_output = self.shared_expert_gate(hidden_states)  # [T, 1]
-                    shared_expert_output = (
-                        torch.sigmoid(gate_output) * shared_expert_output
+                    # Fused: experts_output += sigmoid(gate_output) * shared_expert_output
+                    self.sigmoid_gate_scale_add(
+                        gate_output, shared_expert_output, experts_output
                     )
-                shared_expert_output = all_reduce(shared_expert_output, group=Group.TP)
-                experts_output = experts_output + shared_expert_output
+                else:
+                    experts_output = experts_output + shared_expert_output
             else:
                 # TP-only mode: same as main - each component does its own allreduce.
                 if self.shared_expert_gate is not None:

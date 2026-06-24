@@ -25,17 +25,13 @@ ErrorInfo MultimodalProcessor::getFeatureHash(int32_t* token_ids, const torch::T
     const int64_t num_tokens = mm_emb.size(0);
 
     // D2H the entire embedding (contiguous) so we can hash each row's raw bytes.
-    auto mm_emb_cpu = mm_emb.contiguous().to(torch::kCPU);
+    auto mm_emb_cpu = mm_emb.to(torch::kCPU).contiguous();
     const int64_t row_bytes = mm_emb_cpu.nbytes() / num_tokens;
     const auto* base_ptr    = static_cast<const char*>(mm_emb_cpu.data_ptr());
 
     for (int64_t i = 0; i < num_tokens; ++i) {
         const auto* row_ptr = base_ptr + i * row_bytes;
-        uint64_t h = 0xcbf29ce484222325ULL;  // FNV-1a 64-bit offset basis
-        for (int64_t b = 0; b < row_bytes; ++b) {
-            h ^= static_cast<uint8_t>(row_ptr[b]);
-            h *= 0x100000001b3ULL;           // FNV-1a 64-bit prime
-        }
+        size_t h = std::hash<std::string_view>{}(std::string_view(row_ptr, row_bytes));
         token_ids[i] = static_cast<int32_t>(h % std::numeric_limits<int32_t>::max());
     }
     return ErrorInfo::OkStatus();

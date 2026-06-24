@@ -247,7 +247,7 @@ public:
         // Use a longer timeout when idle to avoid CPU spinning (enqueue() will notify on new requests)
         auto timeout = waiting_streams_.empty() ? std::chrono::seconds(5) : kFlushTimeoutMs;
         bool woken = cond_.wait_for(lock, timeout, [this] {
-            return waiting_streams_.size() >= batch_size_ || running_streams_.size() > 0
+            return !waiting_streams_.empty() || running_streams_.size() > 0
                    || !loading_cache_streams_.empty();
         });
 

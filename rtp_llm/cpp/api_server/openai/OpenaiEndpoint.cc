@@ -85,6 +85,7 @@ std::shared_ptr<GenerateConfig> OpenaiEndpoint::extract_generation_config(const 
     }
     if (req.logprobs.has_value()) {
         if (!req.logprobs.value()) {
+            // logprobs=false explicitly disables probability return regardless of extra_configs
             config.return_all_probs = ReturnAllProbsMode::NONE;
         } else if (config.return_all_probs == ReturnAllProbsMode::NONE) {
             // Align with Python endpoint: only override the default NONE mode;

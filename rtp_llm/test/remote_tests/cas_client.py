@@ -314,8 +314,8 @@ class CASClient:
             for r in resp.responses:
                 if r.status.code == 0:
                     return r.data
-        except grpc.RpcError:
-            pass
+        except grpc.RpcError as e:
+            log.warning("BatchReadBlobs failed for %s: %s", digest.hash[:12], e)
         return b""
 
     def _bytestream_read(self, digest: re_pb2.Digest) -> bytes:
@@ -403,7 +403,12 @@ class CASClient:
                         finish_write=True,
                     )
 
-        stub.Write(_chunks(), metadata=self.metadata)
+        resp = stub.Write(_chunks(), metadata=self.metadata)
+        if resp.committed_size != digest.size_bytes:
+            raise RuntimeError(
+                f"ByteStream Write committed size mismatch for {digest.hash[:12]}: "
+                f"expected {digest.size_bytes}, got {resp.committed_size}"
+            )
 
     def _bytestream_write(self, digest: re_pb2.Digest, data: bytes):
         """Upload in-memory data via ByteStream Write RPC."""

@@ -777,6 +777,8 @@ class RemoteREAPIPlugin:
         return False
 
     def _execute_with_retry(self, **kwargs) -> ExecutionResult:
+        if MAX_RETRIES < 0:
+            raise ValueError(f"MAX_RETRIES must be >= 0, got {MAX_RETRIES}")
         self._ensure_remote_clients()
         last_result = None
         for attempt in range(MAX_RETRIES + 1):

@@ -177,12 +177,11 @@ def safe_request_get(url: str, headers: Dict[str, str], timeout: int = 10):
     Connections are pinned to the validated IP to close the DNS-rebinding window
     between URL validation and the actual TCP connect.
     """
+    current_url = _validate_url(url)
+    response = None
     session = requests.Session()
     session.mount("http://", _SSRFAdapter())
     session.mount("https://", _SSRFAdapter())
-
-    current_url = _validate_url(url)
-    response = None
     with session:
         for _ in range(_MAX_REDIRECTS):
             response = session.get(
