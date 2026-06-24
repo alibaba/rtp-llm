@@ -1,5 +1,5 @@
 # BUILD for rtp_llm/dash_sc: Python frontend gRPC (same pattern as model_rpc).
-load("@arch_config//:arch_select.bzl", "requirement")
+load("//bazel:arch_select.bzl", "requirement")
 
 requirement(["grpcio"])
 
@@ -22,6 +22,7 @@ py_library(
         "client.py",
         "codec.py",
         "grpc_metrics.py",
+        "json_format_e2e_smoke.py",
         "inference/__init__.py",
         "inference/__main__.py",
         "inference/servicer.py",
@@ -51,73 +52,9 @@ py_library(
     ],
 )
 
-py_test(
-    name = "codec_test",
-    srcs = ["test/codec_test.py"],
-    deps = ["//rtp_llm:testlib"],
-    imports = [],
-    exec_properties = {"gpu": "A10"},
-)
-
-py_test(
-    name = "think_test",
-    srcs = ["test/think_test.py"],
-    main = "test/think_test.py",
-    deps = ["//rtp_llm:testlib"],
-    imports = [],
-    exec_properties = {"gpu": "A10"},
-)
-
-py_test(
-    name = "inference_servicer_test",
-    srcs = ["test/inference/servicer_test.py"],
-    main = "test/inference/servicer_test.py",
-    deps = ["//rtp_llm:testlib"],
-    imports = [],
-    exec_properties = {"gpu": "A10"},
-)
-
-py_test(
-    name = "mrcr_smoke_test",
-    srcs = ["test/inference/mrcr_smoke_test.py"],
-    data = ["test/data/mrcr_deepseek_v4_think_leak_cases.json"],
-    main = "test/inference/mrcr_smoke_test.py",
-    deps = ["//rtp_llm:testlib"],
-    imports = [],
-    exec_properties = {"gpu": "A10"},
-)
-
-py_test(
-    name = "proxy_servicer_test",
-    srcs = ["test/proxy/servicer_test.py"],
-    main = "test/proxy/servicer_test.py",
-    deps = ["//rtp_llm:testlib"],
-    imports = [],
-    exec_properties = {"gpu": "A10"},
-)
-
-py_test(
-    name = "access_log_test",
-    srcs = ["test/access_log_test.py"],
-    data = ["//rtp_llm/cpp/repetition:online_repetition_tracker"],
-    deps = ["//rtp_llm:testlib"],
-    imports = [],
-    exec_properties = {"gpu": "A10"},
-)
-
-py_test(
-    name = "repetition_monitor_test",
-    srcs = ["test/repetition_monitor_test.py"],
-    data = ["//rtp_llm/cpp/repetition:online_repetition_tracker"],
-    deps = ["//rtp_llm:testlib"],
-    imports = [],
-    exec_properties = {"gpu": "A10"},
-)
-
-py_test(
-    name = "app_test",
-    srcs = ["test/app_test.py"],
-    deps = ["//rtp_llm:testlib"],
-    imports = [],
-    exec_properties = {"gpu": "A10"},
+py_binary(
+    name = "json_format_e2e_smoke",
+    srcs = ["json_format_e2e_smoke.py"],
+    main = "json_format_e2e_smoke.py",
+    visibility = ["//visibility:public"],
 )

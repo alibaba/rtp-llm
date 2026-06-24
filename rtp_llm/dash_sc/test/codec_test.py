@@ -10,11 +10,12 @@ import torch
 
 from rtp_llm.dash_sc.client import build_model_infer_request
 from rtp_llm.dash_sc.codec import (
-    FINISH_REASON_USE_PARAMETER_STATUS,
+    DashErrorSpec,
     DashScParameterError,
+    LLMFinishReason,
     OtherParams,
     SamplingParams,
-    build_error_response,
+    build_dash_error_response,
     build_stream_response_from_generate_outputs,
     parse_dash_sc_grpc_request,
     parse_input_ids_from_request,
@@ -266,6 +267,19 @@ class DashScGrpcRequestTest(TestCase):
                 self.assertEqual(
                     json.loads(sp.response_format), {"type": "json_object"}
                 )
+
+    def test_parse_sampling_bad_response_format_json_is_rejected(self) -> None:
+        cases = [
+            "not-json",
+            json.dumps(["not-json"], ensure_ascii=False),
+        ]
+        for payload in cases:
+            with self.subTest(payload=payload):
+                req = predict_v2_pb2.ModelInferRequest()
+                req.parameters["response_format"].string_param = payload
+
+                with self.assertRaisesRegex(DashScParameterError, "response_format"):
+                    parse_sampling_params(req)
 
     def _assert_guided_json_response_format(self, response_format, schema) -> None:
         self.assertEqual(
@@ -881,7 +895,10 @@ class BuildStreamResponseFromGenerateOutputsTest(TestCase):
         }
         self.assertEqual(_unpack_int32_le(by_name["generated_ids"]), [7, 8, 9])
         self.assertEqual(list(infer.outputs[0].shape), [1, 3])
-        self.assertEqual(_unpack_int64_le(by_name["finish_reason"]), [0])
+        self.assertEqual(
+            _unpack_int64_le(by_name["finish_reason"]),
+            [LLMFinishReason.STOP],
+        )
         self.assertEqual(_unpack_int32_le(by_name["prompt_token_num"]), [10])
         self.assertEqual(_unpack_int32_le(by_name["prompt_cached_token_num"]), [4])
         self.assertIn("prompt_token_num", infer.parameters)
@@ -896,43 +913,60 @@ class BuildStreamResponseFromGenerateOutputsTest(TestCase):
         )
         self.assertEqual(infer.parameters["prompt_token_num"].int64_param, 10)
 
-    def test_error_response_uses_business_status_frame(self) -> None:
-        resp = build_error_response(
+    def test_dash_error_response_uses_inner_error_fields(self) -> None:
+        resp = build_dash_error_response(
             "req-error",
-            "invalid max_new_tokens: 0; must be greater than 0",
-            status_code=400,
-            status_name="InvalidParameter",
+            "glm",
+            error_spec=DashErrorSpec(
+                error_no=8,
+                finish_reason=LLMFinishReason.STOP_ENGINE_PARAM,
+                status_code=400,
+                status_name="InvalidParameter",
+            ),
+            status_message="invalid\nmax_new_tokens",
         )
 
         self.assertFalse(resp.error_message)
         infer = resp.infer_response
         self.assertEqual(infer.id, "req-error")
-        self.assertEqual(infer.parameters["status_code"].int64_param, 400)
-        self.assertEqual(
-            infer.parameters["status_name"].string_param,
-            "InvalidParameter",
-        )
-        self.assertIn(
-            "max_new_tokens",
-            infer.parameters["status_message"].string_param,
-        )
-        payload = json.loads(infer.parameters["__messages__"].string_param)
-        self.assertEqual(payload["header"]["status_code"], 400)
-        self.assertEqual(payload["header"]["status_name"], "InvalidParameter")
-        self.assertTrue(payload["header"]["finished"])
+        self.assertEqual(infer.model_name, "glm")
+        self.assertEqual(infer.parameters["error_no"].int64_param, 8)
+        payload = json.loads(infer.parameters["error_msg"].string_param)
+        self.assertEqual(payload["status_code"], 400)
+        self.assertIsInstance(payload["status_code"], int)
+        self.assertEqual(payload["status_name"], "InvalidParameter")
+        self.assertIn("max_new_tokens", payload["status_message"])
         by_name = {
             infer.outputs[i].name: infer.raw_output_contents[i]
             for i in range(len(infer.outputs))
         }
-        generated = next(out for out in infer.outputs if out.name == "generated_ids")
-        self.assertEqual(list(generated.shape), [1, 0])
-        # Empty INT32 tensors carry one filler element to keep raw_output_contents
-        # aligned; consumers must trust the declared shape.
-        self.assertEqual(_unpack_int32_le(by_name["generated_ids"]), [0])
         self.assertEqual(
             _unpack_int64_le(by_name["finish_reason"]),
-            [FINISH_REASON_USE_PARAMETER_STATUS],
+            [LLMFinishReason.STOP_ENGINE_PARAM],
         )
+        self.assertEqual(by_name["finished"], b"\x01")
+        self.assertNotIn("generated_ids", by_name)
+        self.assertNotIn("token_ids", by_name)
+
+    def test_dash_error_status_code_is_json_number(self) -> None:
+        for status_code in (400, 413, 422, 500, 503, 504):
+            with self.subTest(status_code=status_code):
+                resp = build_dash_error_response(
+                    "req-error",
+                    "glm",
+                    error_spec=DashErrorSpec(
+                        error_no=8,
+                        finish_reason=LLMFinishReason.STOP_ENGINE_PARAM,
+                        status_code=status_code,
+                        status_name="InvalidParameter",
+                    ),
+                    status_message="invalid max_new_tokens",
+                )
+                error_msg = resp.infer_response.parameters["error_msg"].string_param
+
+                self.assertIn(f'"status_code":{status_code}', error_msg)
+                self.assertNotIn(f'"status_code":"{status_code}"', error_msg)
+                self.assertEqual(json.loads(error_msg)["status_code"], status_code)
 
     def test_finish_reason_length_override_repro_p1(self) -> None:
         """P1 repro: when generation finishes because ``max_new_tokens`` was
@@ -940,12 +974,10 @@ class BuildStreamResponseFromGenerateOutputsTest(TestCase):
         ``finished=True`` always maps to 0 (stop), so dashscope-serving
         collapses every cutoff into ``finish_reason='stop'``.
 
-        Expected fix: codec exposes ``FINISH_REASON_LENGTH = 1`` and
+        Expected fix: codec exposes ``LLMFinishReason.LENGTH = 1`` and
         ``build_stream_response_from_generate_outputs`` takes a
         ``finish_reason_override`` argument the caller can set when the
         cumulative output reaches the per-request budget."""
-        from rtp_llm.dash_sc.codec import FINISH_REASON_LENGTH
-
         out = GenerateOutput(
             output_ids=torch.tensor([1, 2, 3], dtype=torch.int32),
             finished=True,
@@ -956,14 +988,17 @@ class BuildStreamResponseFromGenerateOutputsTest(TestCase):
             model_name="m",
             go=GenerateOutputs(generate_outputs=[out]),
             request_log_tag=stream_log_tag(request_id_numeric=1, trace_id="r"),
-            finish_reason_override=FINISH_REASON_LENGTH,
+            finish_reason_override=LLMFinishReason.LENGTH,
         )
         infer = resp.infer_response
         by_name = {
             infer.outputs[i].name: infer.raw_output_contents[i]
             for i in range(len(infer.outputs))
         }
-        self.assertEqual(_unpack_int64_le(by_name["finish_reason"]), [1])
+        self.assertEqual(
+            _unpack_int64_le(by_name["finish_reason"]),
+            [LLMFinishReason.LENGTH],
+        )
 
     def test_not_finished_finish_reason_two(self) -> None:
         out = GenerateOutput(
@@ -983,7 +1018,10 @@ class BuildStreamResponseFromGenerateOutputsTest(TestCase):
             infer.outputs[i].name: infer.raw_output_contents[i]
             for i in range(len(infer.outputs))
         }
-        self.assertEqual(_unpack_int64_le(by_name["finish_reason"]), [2])
+        self.assertEqual(
+            _unpack_int64_le(by_name["finish_reason"]),
+            [LLMFinishReason.STREAMING],
+        )
         self.assertEqual(_unpack_int32_le(by_name["prompt_token_num"]), [0])
         self.assertEqual(_unpack_int32_le(by_name["prompt_cached_token_num"]), [0])
         self.assertEqual(infer.parameters["prompt_token_num"].int64_param, 0)
