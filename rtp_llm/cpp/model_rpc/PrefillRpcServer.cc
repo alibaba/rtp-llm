@@ -1,6 +1,7 @@
 #include "autil/TimeUtility.h"
 #include "rtp_llm/cpp/model_rpc/QueryConverter.h"
 #include "rtp_llm/cpp/model_rpc/PrefillRpcServer.h"
+#include "rtp_llm/cpp/cache/PrefillCacheHitMetricsReporter.h"
 #include "rtp_llm/cpp/utils/DebugUtils.h"
 #include "rtp_llm/cpp/utils/HashUtil.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
@@ -619,12 +620,6 @@ void fillPrefillTheoryHitMetricsCollector(PrefillRecentCacheKeyMetricsCollector&
     collector.theory_all_hit_count   = snapshot.all_hit_count;
     collector.theory_all_total_count = snapshot.all_total_count;
     collector.theory_all_hit_ratio   = snapshot.all_hit_ratio;
-    collector.theory_10m_hit_count   = snapshot.window_10m.hit_count;
-    collector.theory_10m_total_count = snapshot.window_10m.total_count;
-    collector.theory_10m_hit_ratio   = snapshot.window_10m.hit_ratio;
-    collector.theory_15m_hit_count   = snapshot.window_15m.hit_count;
-    collector.theory_15m_total_count = snapshot.window_15m.total_count;
-    collector.theory_15m_hit_ratio   = snapshot.window_15m.hit_ratio;
 }
 
 }  // namespace
@@ -788,7 +783,7 @@ grpc::Status PrefillRpcServer::init(const EngineInitParams&                     
         return ret;
     }
     initThreadPools();
-    if (prefillCacheHitMetricEnabled()) {
+    if (PrefillCacheHitMetricsReporter::enabled()) {
         prefill_recent_cache_key_window_ = std::make_unique<RecentCacheKeyWindow>();
     } else {
         RTP_LLM_LOG_INFO("prefill recent-cache-key metrics disabled by PREFILL_CACHE_HIT_METRIC_ENABLE");
@@ -1217,7 +1212,7 @@ void PrefillRpcServer::reportPrefillRecentCacheKeyMetricsOnce(PrefillGenerateCon
     if (prefill_context.recent_cache_key_metric_reported) {
         return;
     }
-    if (!prefillCacheHitMetricEnabled()) {
+    if (!PrefillCacheHitMetricsReporter::enabled()) {
         return;
     }
     if (!prefill_recent_cache_key_window_) {
