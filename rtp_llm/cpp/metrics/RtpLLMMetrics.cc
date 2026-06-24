@@ -737,6 +737,8 @@ void RtpLLMCacheStoreMetrics::report(const kmonitor::MetricsTags*               
     REPORT_NON_ZERO_MUTABLE_METRIC(load_server_total_block_size_metric, collector->total_block_size);
     REPORT_NON_ZERO_MUTABLE_METRIC(load_server_latency_us_metric, collector->latency_us);
     REPORT_NON_ZERO_MUTABLE_METRIC(load_server_request_send_cost_us_metric, collector->request_send_cost_us);
+    REPORT_NON_ZERO_MUTABLE_METRIC(load_server_first_block_ready_latency_us_metric,
+                                   collector->first_block_ready_latency_us);
     REPORT_NON_ZERO_MUTABLE_METRIC(load_server_all_block_ready_latency_us_metric,
                                    collector->all_block_ready_latency_us);
     REPORT_NON_ZERO_MUTABLE_METRIC(load_server_transfer_gap_latency_us_metric, collector->transfer_gap_latency_us);
