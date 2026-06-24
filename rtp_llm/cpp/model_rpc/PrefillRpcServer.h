@@ -9,7 +9,7 @@
 #include "rtp_llm/cpp/model_rpc/RpcServerRuntimeMeta.h"
 #include "rtp_llm/cpp/model_rpc/RemoteRpcServer.h"
 #include "rtp_llm/cpp/model_rpc/PrefillGenerateContext.h"
-#include "rtp_llm/cpp/model_rpc/RecentCacheKeyWindow.h"
+#include "rtp_llm/cpp/cache/RecentCacheKeyWindow.h"
 #include "rtp_llm/cpp/model_rpc/ResponseBuffer.h"
 
 namespace rtp_llm {
