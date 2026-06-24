@@ -132,8 +132,11 @@ struct FMHAConfig {
     bool        enable_xqa                    = true;
     bool        use_aiter_pa                  = true;
     bool        use_asm_pa                    = true;
-    bool        use_triton_pa                 = true;
-    int64_t     absorb_opt_len                = 1024;
+    // Default off: Triton PA on ROCm regressed vs ASM PA after the rocm_impl
+    // refactor; ASM/NonAsm now own the default decode path. Set to true to opt
+    // back into the Triton kernel.
+    bool        use_triton_pa  = false;
+    int64_t     absorb_opt_len = 1024;
     std::string to_string() const;
 };
 
@@ -247,6 +250,7 @@ struct MoeConfig {
     bool        use_deepep_internode       = false;
     bool        use_deepep_low_latency     = true;
     bool        use_deepep_p2p_low_latency = false;
+    bool        use_mori_ep                = false;
     bool        fake_balance_expert        = false;
     bool        hack_moe_expert            = false;
     int         deep_ep_num_sm             = 0;

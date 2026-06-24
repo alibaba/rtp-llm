@@ -276,16 +276,16 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                 return c;
             }));
 
-    pybind11::class_<BailianGrpcConfig>(m, "BailianGrpcConfig")
+    pybind11::class_<DashScGrpcConfig>(m, "DashScGrpcConfig")
         .def(pybind11::init<>())
         .def(pybind11::init<const std::string&>(), pybind11::arg("json_str"))
-        .def_readwrite("max_server_workers", &BailianGrpcConfig::max_server_workers)
-        .def("to_string", &BailianGrpcConfig::to_string)
-        .def("from_json", &BailianGrpcConfig::from_json)
-        .def("get_client_config", &BailianGrpcConfig::get_client_config)
-        .def("get_server_config", &BailianGrpcConfig::get_server_config)
+        .def_readwrite("max_server_workers", &DashScGrpcConfig::max_server_workers)
+        .def("to_string", &DashScGrpcConfig::to_string)
+        .def("from_json", &DashScGrpcConfig::from_json)
+        .def("get_client_config", &DashScGrpcConfig::get_client_config)
+        .def("get_server_config", &DashScGrpcConfig::get_server_config)
         .def(py::pickle(
-            [](const BailianGrpcConfig& self) {
+            [](const DashScGrpcConfig& self) {
                 py::dict client_dict;
                 py::dict server_dict;
                 for (const auto& pair : self.get_client_config()) {
@@ -298,8 +298,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
             },
             [](py::tuple t) {
                 if (t.size() != 2 && t.size() != 3)
-                    throw std::runtime_error("Invalid BailianGrpcConfig state!");
-                BailianGrpcConfig c;
+                    throw std::runtime_error("Invalid DashScGrpcConfig state!");
+                DashScGrpcConfig c;
                 try {
                     py::dict           client_dict = t[0].cast<py::dict>();
                     py::dict           server_dict = t[1].cast<py::dict>();
@@ -324,7 +324,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     oss << "}, \"max_server_workers\": " << (mw > 0 ? mw : 4) << "}";
                     c.from_json(oss.str());
                 } catch (const std::exception& e) {
-                    throw std::runtime_error(std::string("BailianGrpcConfig unpickle error: ") + e.what());
+                    throw std::runtime_error(std::string("DashScGrpcConfig unpickle error: ") + e.what());
                 }
                 return c;
             }));
