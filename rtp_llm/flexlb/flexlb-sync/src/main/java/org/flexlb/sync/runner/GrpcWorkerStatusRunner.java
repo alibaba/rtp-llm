@@ -40,6 +40,8 @@ public class GrpcWorkerStatusRunner implements Runnable {
     private final long createTimeUs = System.nanoTime() / 1000;
     private final String id = IdUtils.fastUuid();
     private final long syncRequestTimeoutMs;
+    private final AtomicLong consecutiveFailures = new AtomicLong(0);
+    private static final int MAX_CONSECUTIVE_FAILURES = 3;
     private final EndpointRegistry endpointRegistry;
 
     public GrpcWorkerStatusRunner(String modelName, String ipPort, String site, RoleType roleType, String group,
@@ -86,7 +88,13 @@ public class GrpcWorkerStatusRunner implements Runnable {
             return EngineStatusConverter.convertToWorkerStatusResponse(workerStatusPB);
         } catch (Throwable throwable) {
             handleException(throwable);
-            workerStatus.setAlive(false);
+            long failures = consecutiveFailures.incrementAndGet();
+            logger.error("gRPC status check failed, consecutiveFailures={}/{}, msg={}",
+                    failures, MAX_CONSECUTIVE_FAILURES, throwable.getMessage());
+            if (failures >= MAX_CONSECUTIVE_FAILURES) {
+                workerStatus.setAlive(false);
+                logger.error("worker {} marked dead after {} consecutive gRPC failures", ipPort, failures);
+            }
             return null;
         }
     }
@@ -100,6 +108,9 @@ public class GrpcWorkerStatusRunner implements Runnable {
             }
 
             engineHealthReporter.reportStatusCheckRemoteInfo(modelName, ipPort, newWorkerStatus.getRole().name(), startTime);
+
+            // Reset consecutive failure counter on successful response
+            consecutiveFailures.set(0);
 
             Long responseVersion = newWorkerStatus.getStatusVersion();
             if (responseVersion == 0L) {
