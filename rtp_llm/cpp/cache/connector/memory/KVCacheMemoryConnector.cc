@@ -970,29 +970,8 @@ std::shared_ptr<AsyncContext> KVCacheMemoryConnector::asyncRead(const std::share
         }
         if (success) {
             resource->setMemoryReuseBlockNum(read_block_num);
-            for (const auto& copy_info : copy_plan->copy_infos) {
-                if (copy_info.kind == CacheBlockKind::COMPRESSED_KV || copy_info.kind == CacheBlockKind::STATE_SWA_KV) {
-                    const auto removed_item = prefix_block_cache_->detachIfMatch(copy_info.cache_key,
-                                                                                 copy_info.kind,
-                                                                                 copy_info.backing_type,
-                                                                                 copy_info.mem_block,
-                                                                                 copy_info.disk_slot,
-                                                                                 copy_info.generation);
-                    if (removed_item.has_value()) {
-                        releasePrefixCacheBacking(*removed_item);
-                    }
-                } else {
-                    const auto removed_item = block_cache_->removeIfMatch(
-                        copy_info.cache_key, copy_info.backing_type, copy_info.mem_block, copy_info.disk_slot);
-                    if (!removed_item.has_value()) {
-                        continue;
-                    }
-                    releaseCacheBacking(*removed_item);
-                }
-            }
-            RTP_LLM_LOG_INFO("memory cache read success: read_blocks=%d released_blocks=%zu total_blocks=%zu",
+            RTP_LLM_LOG_INFO("memory cache read success: read_blocks=%d total_blocks=%zu",
                              read_block_num,
-                             copy_plan->copy_infos.size(),
                              total_block_num);
         }
         // reset ptr to release memory block refs
@@ -1502,12 +1481,41 @@ bool KVCacheMemoryConnector::startCopyAsync(const std::shared_ptr<MemoryAsyncCon
     if (stop_.load()) {
         return false;
     }
-    auto task_copy_plan = copy_plan;
-    auto code           = wait_done_thread_pool_->pushTask([this, context, task_copy_plan]() mutable {
+    auto   task_copy_plan = copy_plan;
+    auto   enqueue_time_us = currentTimeUs();
+    auto   direction       = copy_plan->direction;
+    size_t copy_item_num   = copy_plan->copy_infos.size();
+    size_t disk_item_num   = 0;
+    for (const auto& copy_info : copy_plan->copy_infos) {
+        if (copy_info.backing_type == CacheBackingType::DISK || copy_info.src_backing_type == CacheBackingType::DISK
+            || copy_info.disk_slot >= 0 || copy_info.src_disk_slot >= 0) {
+            ++disk_item_num;
+        }
+    }
+    auto code = wait_done_thread_pool_->pushTask([this,
+                                                  context,
+                                                  task_copy_plan,
+                                                  enqueue_time_us,
+                                                  direction,
+                                                  copy_item_num,
+                                                  disk_item_num]() mutable {
+        const auto task_start_us = currentTimeUs();
+        const auto send_start_us = currentTimeUs();
         auto send_result = sendCopyPlan(task_copy_plan);
+        const auto send_done_us = currentTimeUs();
         context->setBroadcastResult(send_result);
         task_copy_plan.reset();
+        const auto wait_start_us = currentTimeUs();
         context->waitDone();
+        const auto wait_done_us = currentTimeUs();
+        reportCopyTaskMetrics(context->success(),
+                              wait_done_us - task_start_us,
+                              task_start_us - enqueue_time_us,
+                              send_done_us - send_start_us,
+                              wait_done_us - wait_start_us,
+                              static_cast<int64_t>(copy_item_num),
+                              static_cast<int64_t>(disk_item_num),
+                              direction);
     });
     if (code != autil::ThreadPoolBase::ERROR_NONE) {
         RTP_LLM_LOG_WARNING("start copy plan async failed, push send+wait task failed, code=%d", code);
@@ -2529,6 +2537,55 @@ bool KVCacheMemoryConnector::allocateOnePrefixBacking(CopyInfoPerKey& copy_info)
     }
 
     int32_t disk_slot = -1;
+    auto evict_memory_items = [&]() {
+        std::vector<PrefixTreeMemoryBlockCache::CacheItem> evicted_items;
+        if (kv_cache_config_.enable_dsv4_state_block_independent_eviction
+            && copy_info.kind == CacheBlockKind::STATE_SWA_KV) {
+            evicted_items = prefix_block_cache_->popOldestStateOrChainEvictable(CacheBackingType::MEMORY);
+        } else {
+            auto evicted = prefix_block_cache_->popOldestEvictable(copy_info.kind, CacheBackingType::MEMORY);
+            if (evicted.has_value()) {
+                evicted_items.push_back(*evicted);
+            }
+        }
+        return evicted_items;
+    };
+    auto evict_disk_items = [&]() {
+        std::vector<PrefixTreeMemoryBlockCache::CacheItem> evicted_items;
+        if (kv_cache_config_.enable_dsv4_state_block_independent_eviction
+            && copy_info.kind == CacheBlockKind::STATE_SWA_KV) {
+            evicted_items = prefix_block_cache_->popOldestStateOrChainEvictable(CacheBackingType::DISK);
+        } else {
+            auto evicted = prefix_block_cache_->popOldestEvictable(copy_info.kind, CacheBackingType::DISK);
+            if (evicted.has_value()) {
+                evicted_items.push_back(*evicted);
+            }
+        }
+        return evicted_items;
+    };
+    auto release_evicted_items = [&](const std::vector<PrefixTreeMemoryBlockCache::CacheItem>& evicted_items) {
+        for (const auto& evicted : evicted_items) {
+            reportEvictionLifetime(evicted.kind, evicted.backing_type, evicted.created_time_us);
+            releasePrefixCacheBacking(evicted);
+        }
+    };
+
+    // Prefer keeping prefix cache in host memory. Disk is a capacity fallback,
+    // not a replacement for evictable memory blocks on the TTFT-critical path.
+    while (true) {
+        auto evicted_items = evict_memory_items();
+        if (evicted_items.empty()) {
+            break;
+        }
+        release_evicted_items(evicted_items);
+        if (tryMallocMemoryBlock(copy_info.kind, mem_block)) {
+            copy_info.backing_type = CacheBackingType::MEMORY;
+            copy_info.mem_block    = mem_block;
+            copy_info.disk_slot    = -1;
+            return true;
+        }
+    }
+
     if (diskCacheEnabled() && tryMallocDiskSlot(copy_info.kind, disk_slot)) {
         copy_info.backing_type = CacheBackingType::DISK;
         copy_info.mem_block    = NULL_BLOCK_IDX;
@@ -2536,33 +2593,12 @@ bool KVCacheMemoryConnector::allocateOnePrefixBacking(CopyInfoPerKey& copy_info)
         return true;
     }
 
-    while (true) {
-        std::vector<PrefixTreeMemoryBlockCache::CacheItem> evicted_items;
-        if (kv_cache_config_.enable_dsv4_state_block_independent_eviction
-            && copy_info.kind == CacheBlockKind::STATE_SWA_KV) {
-            evicted_items = prefix_block_cache_->popOldestStateOrChainEvictable(CacheBackingType::MEMORY);
-            if (evicted_items.empty() && diskCacheEnabled()) {
-                evicted_items = prefix_block_cache_->popOldestStateOrChainEvictable(CacheBackingType::DISK);
-            }
-        } else {
-            auto evicted = prefix_block_cache_->popOldestEvictable(copy_info.kind);
-            if (evicted.has_value()) {
-                evicted_items.push_back(*evicted);
-            }
-        }
+    while (diskCacheEnabled()) {
+        auto evicted_items = evict_disk_items();
         if (evicted_items.empty()) {
             return false;
         }
-        for (const auto& evicted : evicted_items) {
-            reportEvictionLifetime(evicted.kind, evicted.backing_type, evicted.created_time_us);
-            releasePrefixCacheBacking(evicted);
-        }
-        if (tryMallocMemoryBlock(copy_info.kind, mem_block)) {
-            copy_info.backing_type = CacheBackingType::MEMORY;
-            copy_info.mem_block    = mem_block;
-            copy_info.disk_slot    = -1;
-            return true;
-        }
+        release_evicted_items(evicted_items);
         if (diskCacheEnabled() && tryMallocDiskSlot(copy_info.kind, disk_slot)) {
             copy_info.backing_type = CacheBackingType::DISK;
             copy_info.mem_block    = NULL_BLOCK_IDX;
@@ -2570,6 +2606,7 @@ bool KVCacheMemoryConnector::allocateOnePrefixBacking(CopyInfoPerKey& copy_info)
             return true;
         }
     }
+    return false;
 }
 
 bool KVCacheMemoryConnector::allocateOneBacking(CopyInfoPerKey& copy_info) {
@@ -3259,6 +3296,32 @@ void KVCacheMemoryConnector::reportCopyMetrics(bool success, int64_t latency_us,
     collector.from_gpu   = direction == CopyDirection::D2H;
 
     metrics_reporter_->report<RtpLLMMemoryCacheMetrics, RtpLLMMemoryCacheCopyMetricsCollector>(nullptr, &collector);
+}
+
+void KVCacheMemoryConnector::reportCopyTaskMetrics(bool          success,
+                                                   int64_t       latency_us,
+                                                   int64_t       queue_wait_us,
+                                                   int64_t       broadcast_setup_us,
+                                                   int64_t       wait_done_us,
+                                                   int64_t       copy_item_num,
+                                                   int64_t       disk_item_num,
+                                                   CopyDirection direction) {
+    if (!metrics_reporter_) {
+        return;
+    }
+
+    RtpLLMMemoryCacheCopyTaskMetricsCollector collector;
+    collector.failed             = !success;
+    collector.latency_us         = latency_us;
+    collector.queue_wait_us      = queue_wait_us;
+    collector.broadcast_setup_us = broadcast_setup_us;
+    collector.wait_done_us       = wait_done_us;
+    collector.copy_item_num      = copy_item_num;
+    collector.disk_item_num      = disk_item_num;
+    collector.from_gpu           = direction == CopyDirection::D2H;
+
+    metrics_reporter_->report<RtpLLMMemoryCacheMetrics, RtpLLMMemoryCacheCopyTaskMetricsCollector>(nullptr,
+                                                                                                   &collector);
 }
 
 void KVCacheMemoryConnector::reportDiskMatchMetrics(bool    success,

@@ -76,6 +76,7 @@ protected:
     size_t                          max_batch_tokens_size_        = 0;
     size_t                          max_generate_batch_size_      = 1;
     size_t                          max_inited_kv_cache_streams_  = 0;
+    size_t                          tp_size_                      = 1;
     const bool                      need_fill_fake_stream_        = false;
     // Optional guard for Context-Parallel prefill: when enabled, force prefill
     // to one stream per round. This remains the conservative default while

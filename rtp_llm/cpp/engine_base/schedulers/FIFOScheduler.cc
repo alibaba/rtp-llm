@@ -30,6 +30,7 @@ FIFOScheduler::FIFOScheduler(const RuntimeConfig&                   runtime_conf
     max_generate_batch_size_(runtime_config.max_generate_batch_size),
     max_inited_kv_cache_streams_(
         std::max<int64_t>(runtime_config.fifo_scheduler_config.max_inited_kv_cache_streams, 0)),
+    tp_size_(std::max<int64_t>(parallelism_config.tp_size, 1)),
     need_fill_fake_stream_(parallelism_config.dp_size > 1 && parallelism_config.tp_rank == 0),
     cp_force_single_prefill_(parallelism_config.prefill_cp_config.is_enabled()
                              && runtime_config.fifo_scheduler_config.cp_force_single_prefill),
@@ -387,38 +388,49 @@ void FIFOScheduler::addStreamToNewState(const GenerateStreamPtr& stream, StreamS
 
 absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule() {
     unique_lock<mutex> lock(lock_);
-    if (need_fill_fake_stream_) {
-        cond_.wait_for(lock, std::chrono::milliseconds(10), [this] { return waitPredicate(); });
-    } else {
-        cond_.wait(lock, [this] { return waitPredicate(); });
+    while (true) {
+        if (need_fill_fake_stream_) {
+            cond_.wait_for(lock, std::chrono::milliseconds(10), [this] { return waitPredicate(); });
+        } else {
+            cond_.wait(lock, [this] { return waitPredicate(); });
+        }
+
+        schedule_trigger_ = false;
+
+        // LOADING_CACHE -> DONE/WAITING: error / load cache done
+        evaluateAndUpdateStreams(loading_cache_streams_);
+        // RUNNING -> DONE: error / finished
+        evaluateAndUpdateStreams(running_streams_);
+
+        // WAITING -> RUNNING: can run
+        // WAITING -> LOADING_CACHE: load cache ok
+        //
+        // WAITING streams are advanced only after FIFO admits them in this scheduling round.
+        // This matters for PD decode: DecodeRpcServer may pre-set CanRun before enqueue to
+        // allocate KV blocks, so a permanent CanRun bit alone must not bypass capacity checks.
+        size_t prev_waiting_size = waiting_streams_.size();
+        evaluateWaitingStreams(waiting_streams_);
+        running_streams_.insert(running_streams_.end(), new_streams_.begin(), new_streams_.end());
+        new_streams_.clear();
+
+        // If streams were scheduled, trigger next scheduling round
+        if (waiting_streams_.size() < prev_waiting_size) {
+            schedule_trigger_ = true;
+        }
+
+        reportMetrics();
+        last_schedule_time_ = autil::TimeUtility::currentTimeInMilliSeconds();
+
+        // In TP>1 prefill, returning an empty batch while the only runnable work is
+        // still LOADING_CACHE makes every rank run an empty tpSyncModelInputs round.
+        // That empty round can delay the next loadCacheDone observation by hundreds
+        // of milliseconds. Stay inside the scheduler and poll briefly instead; new
+        // enqueues still wake us through schedule_trigger_.
+        if (!running_streams_.empty() || loading_cache_streams_.empty() || stop_ || tp_size_ <= 1) {
+            return running_streams_;
+        }
+        cond_.wait_for(lock, std::chrono::milliseconds(1), [this] { return stop_ || schedule_trigger_; });
     }
-
-    schedule_trigger_ = false;
-
-    // LOADING_CACHE -> DONE/WAITING: error / load cache done
-    evaluateAndUpdateStreams(loading_cache_streams_);
-    // RUNNING -> DONE: error / finished
-    evaluateAndUpdateStreams(running_streams_);
-
-    // WAITING -> RUNNING: can run
-    // WAITING -> LOADING_CACHE: load cache ok
-    //
-    // WAITING streams are advanced only after FIFO admits them in this scheduling round.
-    // This matters for PD decode: DecodeRpcServer may pre-set CanRun before enqueue to
-    // allocate KV blocks, so a permanent CanRun bit alone must not bypass capacity checks.
-    size_t prev_waiting_size = waiting_streams_.size();
-    evaluateWaitingStreams(waiting_streams_);
-    running_streams_.insert(running_streams_.end(), new_streams_.begin(), new_streams_.end());
-    new_streams_.clear();
-
-    // If streams were scheduled, trigger next scheduling round
-    if (waiting_streams_.size() < prev_waiting_size) {
-        schedule_trigger_ = true;
-    }
-
-    reportMetrics();
-    last_schedule_time_ = autil::TimeUtility::currentTimeInMilliSeconds();
-    return running_streams_;
 }
 
 int64_t FIFOScheduler::waitingStreamsSize() {

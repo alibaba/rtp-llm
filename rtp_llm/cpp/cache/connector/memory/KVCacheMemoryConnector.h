@@ -258,6 +258,14 @@ private:
     void reportReadMetrics(bool success, int64_t latency_us, int64_t input_block_num, int64_t read_block_num);
     void reportWriteMetrics(bool success, int64_t latency_us, int64_t input_block_num, int64_t write_block_num);
     void reportCopyMetrics(bool success, int64_t latency_us, CopyDirection direction);
+    void reportCopyTaskMetrics(bool          success,
+                               int64_t       latency_us,
+                               int64_t       queue_wait_us,
+                               int64_t       broadcast_setup_us,
+                               int64_t       wait_done_us,
+                               int64_t       copy_item_num,
+                               int64_t       disk_item_num,
+                               CopyDirection direction);
     void reportDiskMatchMetrics(bool success, int64_t latency_us, int64_t input_block_num, int64_t matched_block_num);
     void reportDiskReadMetrics(bool success, int64_t latency_us, int64_t input_block_num, int64_t read_block_num);
     void reportDiskWriteMetrics(bool success, int64_t latency_us, int64_t input_block_num, int64_t write_block_num);

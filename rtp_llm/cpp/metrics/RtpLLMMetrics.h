@@ -1296,6 +1296,18 @@ public:
     bool    from_gpu   = false;
 };
 
+class RtpLLMMemoryCacheCopyTaskMetricsCollector final {
+public:
+    bool    failed             = false;
+    int64_t latency_us         = 0;
+    int64_t queue_wait_us      = 0;
+    int64_t broadcast_setup_us = 0;
+    int64_t wait_done_us       = 0;
+    int64_t copy_item_num      = 0;
+    int64_t disk_item_num      = 0;
+    bool    from_gpu           = false;
+};
+
 class RtpLLMMemoryCacheStatusMetricsCollector final {
 public:
     int64_t total_block_num     = 0;
@@ -1311,6 +1323,7 @@ public:
     void report(const kmonitor::MetricsTags* tags, RtpLLMMemoryCacheReadMetricsCollector* collector);
     void report(const kmonitor::MetricsTags* tags, RtpLLMMemoryCacheWriteMetricsCollector* collector);
     void report(const kmonitor::MetricsTags* tags, RtpLLMMemoryCacheCopyMetricsCollector* collector);
+    void report(const kmonitor::MetricsTags* tags, RtpLLMMemoryCacheCopyTaskMetricsCollector* collector);
     void report(const kmonitor::MetricsTags* tags, RtpLLMMemoryCacheStatusMetricsCollector* collector);
 
 public:
@@ -1338,6 +1351,15 @@ public:
     kmonitor::MutableMetric* kv_cache_memory_cache_copy_qps_metric        = nullptr;
     kmonitor::MutableMetric* kv_cache_memory_cache_copy_failed_qps_metric = nullptr;
     kmonitor::MutableMetric* kv_cache_memory_cache_copy_latency_metric    = nullptr;
+
+    kmonitor::MutableMetric* kv_cache_memory_cache_copy_task_qps_metric             = nullptr;
+    kmonitor::MutableMetric* kv_cache_memory_cache_copy_task_failed_qps_metric      = nullptr;
+    kmonitor::MutableMetric* kv_cache_memory_cache_copy_task_latency_metric         = nullptr;
+    kmonitor::MutableMetric* kv_cache_memory_cache_copy_task_queue_wait_metric      = nullptr;
+    kmonitor::MutableMetric* kv_cache_memory_cache_copy_task_broadcast_setup_metric = nullptr;
+    kmonitor::MutableMetric* kv_cache_memory_cache_copy_task_wait_done_metric       = nullptr;
+    kmonitor::MutableMetric* kv_cache_memory_cache_copy_task_item_num_metric        = nullptr;
+    kmonitor::MutableMetric* kv_cache_memory_cache_copy_task_disk_item_num_metric   = nullptr;
 
     kmonitor::MutableMetric* kv_cache_memory_cache_status_total_block_num_metric     = nullptr;
     kmonitor::MutableMetric* kv_cache_memory_cache_status_allocated_block_num_metric = nullptr;

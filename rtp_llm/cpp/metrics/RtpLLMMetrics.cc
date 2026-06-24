@@ -924,6 +924,22 @@ bool RtpLLMMemoryCacheMetrics::init(kmonitor::MetricsGroupManager* manager) {
                                 "rtp_llm_kv_cache_memory_cache_copy_failed_qps");
     REGISTER_GAUGE_MUTABLE_METRIC(kv_cache_memory_cache_copy_latency_metric,
                                   "rtp_llm_kv_cache_memory_cache_copy_latency_us");
+    REGISTER_QPS_MUTABLE_METRIC(kv_cache_memory_cache_copy_task_qps_metric,
+                                "rtp_llm_kv_cache_memory_cache_copy_task_qps");
+    REGISTER_QPS_MUTABLE_METRIC(kv_cache_memory_cache_copy_task_failed_qps_metric,
+                                "rtp_llm_kv_cache_memory_cache_copy_task_failed_qps");
+    REGISTER_GAUGE_MUTABLE_METRIC(kv_cache_memory_cache_copy_task_latency_metric,
+                                  "rtp_llm_kv_cache_memory_cache_copy_task_latency_us");
+    REGISTER_GAUGE_MUTABLE_METRIC(kv_cache_memory_cache_copy_task_queue_wait_metric,
+                                  "rtp_llm_kv_cache_memory_cache_copy_task_queue_wait_us");
+    REGISTER_GAUGE_MUTABLE_METRIC(kv_cache_memory_cache_copy_task_broadcast_setup_metric,
+                                  "rtp_llm_kv_cache_memory_cache_copy_task_broadcast_setup_us");
+    REGISTER_GAUGE_MUTABLE_METRIC(kv_cache_memory_cache_copy_task_wait_done_metric,
+                                  "rtp_llm_kv_cache_memory_cache_copy_task_wait_done_us");
+    REGISTER_GAUGE_MUTABLE_METRIC(kv_cache_memory_cache_copy_task_item_num_metric,
+                                  "rtp_llm_kv_cache_memory_cache_copy_task_item_num");
+    REGISTER_GAUGE_MUTABLE_METRIC(kv_cache_memory_cache_copy_task_disk_item_num_metric,
+                                  "rtp_llm_kv_cache_memory_cache_copy_task_disk_item_num");
 
     // Status 相关指标
     REGISTER_GAUGE_MUTABLE_METRIC(kv_cache_memory_cache_status_total_block_num_metric,
@@ -999,6 +1015,23 @@ void RtpLLMMemoryCacheMetrics::report(const kmonitor::MetricsTags*           tag
     // 如果失败，上报失败 QPS
     if (collector->failed) {
         kv_cache_memory_cache_copy_failed_qps_metric->Report(&copy_tag, 1);
+    }
+}
+
+void RtpLLMMemoryCacheMetrics::report(const kmonitor::MetricsTags*               tags,
+                                      RtpLLMMemoryCacheCopyTaskMetricsCollector* collector) {
+    kmonitor::MetricsTags copy_tag("copy_direction", collector->from_gpu ? "FROM_GPU" : "TO_GPU");
+
+    kv_cache_memory_cache_copy_task_qps_metric->Report(&copy_tag, 1);
+    kv_cache_memory_cache_copy_task_latency_metric->Report(&copy_tag, collector->latency_us);
+    kv_cache_memory_cache_copy_task_queue_wait_metric->Report(&copy_tag, collector->queue_wait_us);
+    kv_cache_memory_cache_copy_task_broadcast_setup_metric->Report(&copy_tag, collector->broadcast_setup_us);
+    kv_cache_memory_cache_copy_task_wait_done_metric->Report(&copy_tag, collector->wait_done_us);
+    kv_cache_memory_cache_copy_task_item_num_metric->Report(&copy_tag, collector->copy_item_num);
+    kv_cache_memory_cache_copy_task_disk_item_num_metric->Report(&copy_tag, collector->disk_item_num);
+
+    if (collector->failed) {
+        kv_cache_memory_cache_copy_task_failed_qps_metric->Report(&copy_tag, 1);
     }
 }
 

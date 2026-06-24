@@ -1662,6 +1662,69 @@ TEST_F(KVCacheMemoryConnectorTest, buildPrefixCopyPlanForWrite_ProtectsDiskParti
     }
 }
 
+TEST_F(KVCacheMemoryConnectorTest, AllocateOnePrefixBackingPrefersEvictingMemoryBeforeDisk) {
+    auto cfg = createDsv4TypedConnectorConfig();
+    DiskTempDir disk0;
+    auto kv_cfg = makeDiskKvConfig({disk0.path()}, /*disk_size_mb=*/1);
+    kv_cfg.memory_cache_size_mb            = 1;
+    kv_cfg.memory_cache_sync_timeout_ms    = 1000;
+    kv_cfg.enable_prefix_tree_memory_cache = true;
+    kv_cfg.enable_memory_cache_disk        = true;
+
+    auto conn = std::make_shared<KVCacheMemoryConnector>(
+        cfg, kv_cfg, makeParallelismConfig(), allocator_, server_addrs_, nullptr);
+    ASSERT_TRUE(conn->init());
+
+    constexpr auto kind = CacheBlockKind::COMPRESSED_KV;
+    auto memory_pool = conn->memoryPoolFor(kind);
+    auto disk_pool   = conn->diskPoolFor(kind);
+    ASSERT_NE(memory_pool, nullptr);
+    ASSERT_NE(disk_pool, nullptr);
+
+    auto slots = conn->layerRegionSlots();
+    std::vector<uint8_t> mask(slots.size(), 0);
+    for (size_t i = 0; i < slots.size(); ++i) {
+        if (conn->kindForSlot(slots[i]) == kind) {
+            mask[i] = 1;
+        }
+    }
+    ASSERT_TRUE(std::any_of(mask.begin(), mask.end(), [](uint8_t valid) { return valid != 0; }));
+
+    const auto total_memory_blocks = memory_pool->totalBlocksNum();
+    ASSERT_GT(total_memory_blocks, 0u);
+    for (size_t i = 0; i < total_memory_blocks; ++i) {
+        auto blocks = memory_pool->malloc(1);
+        ASSERT_EQ(blocks.size(), 1u);
+        PrefixTreeMemoryBlockCache::CacheItem item;
+        item.cache_key       = 93000 + static_cast<CacheKeyType>(i);
+        item.kind            = kind;
+        item.backing_type    = CacheBackingType::MEMORY;
+        item.block_index     = blocks[0];
+        item.disk_slot       = -1;
+        item.block_size      = conn->prefixKindBlockSize(kind, slots);
+        item.is_resident     = false;
+        item.slot_valid_mask = mask;
+        BlockDependency dep;
+        ASSERT_TRUE(conn->prefix_block_cache_->putCommitted(item.cache_key, dep, item).first);
+        conn->referencePrefixCacheBacking(item);
+        memory_pool->requestFree({blocks[0]});
+    }
+    ASSERT_EQ(memory_pool->freeBlocksNum(), 0u);
+    ASSERT_EQ(disk_pool->freeSlots(), disk_pool->totalSlots());
+
+    KVCacheMemoryConnector::CopyInfoPerKey copy_info;
+    copy_info.kind       = kind;
+    copy_info.cache_key  = 94000;
+    copy_info.block_size = conn->prefixKindBlockSize(kind, slots);
+    ASSERT_TRUE(conn->allocateOnePrefixBacking(copy_info));
+    EXPECT_EQ(copy_info.backing_type, CacheBackingType::MEMORY);
+    EXPECT_FALSE(isNullBlockIdx(copy_info.mem_block));
+    EXPECT_EQ(copy_info.disk_slot, -1);
+    EXPECT_EQ(disk_pool->freeSlots(), disk_pool->totalSlots());
+
+    conn->releasePrefixRequestBacking(copy_info);
+}
+
 TEST_F(KVCacheMemoryConnectorTest, asyncMatchPrefixStopsWhenRequiredStateSwaMisses) {
     auto cfg    = createDsv4TypedConnectorConfig();
     auto kv_cfg = kv_cache_config_;
@@ -2130,7 +2193,7 @@ TEST_F(KVCacheMemoryConnectorTest, asyncRead_Success_IncrementsReuseLen_ByMatche
     EXPECT_EQ(res->reuseBlockNum(), 2u);  // last cache key will not be read
 }
 
-TEST_F(KVCacheMemoryConnectorTest, asyncRead_Success_RemovesLoadedBlocksFromMemoryCache) {
+TEST_F(KVCacheMemoryConnectorTest, asyncRead_Success_KeepsLoadedBlocksInMemoryCache) {
     CacheKeysType cache_keys{41001, 41002, 41003};
 
     const size_t mem_size = memoryCacheBlockBytes();
@@ -2161,8 +2224,8 @@ TEST_F(KVCacheMemoryConnectorTest, asyncRead_Success_RemovesLoadedBlocksFromMemo
     ASSERT_TRUE(waitUntilDone(ctx));
     ASSERT_TRUE(ctx->success());
 
-    EXPECT_FALSE(connector_->block_cache_->contains(cache_keys[1]));
-    EXPECT_EQ(pool->freeBlocksNum(), free_before - (block_indices.size() - static_cast<size_t>(read_num)));
+    EXPECT_TRUE(connector_->block_cache_->contains(cache_keys[1]));
+    EXPECT_EQ(pool->freeBlocksNum(), free_before - block_indices.size());
 }
 
 TEST_F(KVCacheMemoryConnectorTest, asyncRead_Success_DoesNotRemoveUpgradedBlock) {
