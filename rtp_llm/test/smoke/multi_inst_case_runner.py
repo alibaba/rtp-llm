@@ -1,3 +1,4 @@
+import logging
 from typing import Any, Dict, List, Optional, Union
 
 from rtp_llm.server.host_service import EndPoint, GroupEndPoint, ServiceRoute
@@ -14,8 +15,12 @@ PD_FUNSION_ROLE_NAME = "pd_fusion"
 
 def _stop_server_safe(manager: Any) -> None:
     """Stop *manager* if it is not None; tolerates already-stopped servers."""
-    if manager is not None:
+    if manager is None:
+        return
+    try:
         manager.stop_server()
+    except Exception as e:
+        logging.warning("Failed to stop server: %s", e)
 
 
 def _cleanup_servers(
@@ -25,8 +30,14 @@ def _cleanup_servers(
     for mgr in reversed(started_managers):
         _stop_server_safe(mgr)
     if remote_kvcm_server is not None:
-        remote_kvcm_server.stop_server()
-        remote_kvcm_server.copy_logs()
+        try:
+            remote_kvcm_server.stop_server()
+        except Exception as e:
+            logging.warning("Failed to stop remote KVCM server: %s", e)
+        try:
+            remote_kvcm_server.copy_logs()
+        except Exception as e:
+            logging.warning("Failed to copy remote KVCM logs: %s", e)
 
 
 class PdSeperationCaseRunner(CaseRunner):
@@ -39,6 +50,7 @@ class PdSeperationCaseRunner(CaseRunner):
         **kwargs,
     ):
         super().__init__(task_info, env_args, gpu_card, smoke_args, **kwargs)
+        self.remote_kvcm_server = None
         if not isinstance(env_args, dict):
             raise Exception("env_args in PdSeperationCaseRunner should be dict")
         if (
@@ -197,6 +209,7 @@ class DpSeperationCaseRunner(CaseRunner):
         **kwargs,
     ):
         super().__init__(task_info, env_args, gpu_card, smoke_args, **kwargs)
+        self.remote_kvcm_server = None
         if not isinstance(env_args, dict):
             raise Exception("env_args in PdSeperationCaseRunner should be dict")
         if (

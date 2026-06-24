@@ -107,6 +107,7 @@ if _xdist_worker:
     
     def _close_fault_file():
         try:
+            _fh.disable()
             _fault_file.flush()
             _fault_file.close()
         except Exception:

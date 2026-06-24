@@ -234,7 +234,7 @@ class EnvArgumentParser(argparse.ArgumentParser):
         else:
             full_env_name = effective_env_name
 
-        EnvArgumentParser._env_mappings[action.dest] = full_env_name
+        self._env_mappings[action.dest] = full_env_name
 
     def parse_args(
         self,
@@ -395,14 +395,14 @@ class EnvArgumentParser(argparse.ArgumentParser):
             if group_name in self._groups:
                 group = self._groups[group_name]._group
                 for action in group._group_actions:
-                    if action.dest in EnvArgumentParser._env_mappings:
+                    if action.dest in self._env_mappings:
                         logging.info(
-                            f"{action.dest:<20} -> {EnvArgumentParser._env_mappings[action.dest]}"
+                            f"{action.dest:<20} -> {self._env_mappings[action.dest]}"
                         )
             else:
                 logging.info(f"Group '{group_name}' not found.")
         else:
-            for dest, env_name in EnvArgumentParser._env_mappings.items():
+            for dest, env_name in self._env_mappings.items():
                 logging.info(f"{dest:<20} -> {env_name}")
 
         logging.info("-" * 50)
@@ -412,11 +412,11 @@ class EnvArgumentParser(argparse.ArgumentParser):
             group = self._groups[group_name]._group
             mappings = {}
             for action in group._group_actions:
-                if action.dest in EnvArgumentParser._env_mappings:
-                    mappings[action.dest] = EnvArgumentParser._env_mappings[action.dest]
+                if action.dest in self._env_mappings:
+                    mappings[action.dest] = self._env_mappings[action.dest]
             return mappings
         else:
-            return EnvArgumentParser._env_mappings.copy()
+            return self._env_mappings.copy()
 
 
 def init_all_group_args(

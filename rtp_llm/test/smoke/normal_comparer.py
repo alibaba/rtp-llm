@@ -134,7 +134,7 @@ class NormalComparer(BaseComparer):
             if query_info.generate_config.return_incremental:
                 chunks = [json.loads(chunk.decode("utf-8")[5:]) for chunk in res[:-1]]
                 if not chunks:
-                    raise SmokeException("Streaming response chunks are empty but return_incremental is True")
+                    raise SmokeException(QueryStatus.VISIT_FAILED, "Streaming response chunks are empty but return_incremental is True")
                 res = {
                     "response": "".join(chunk["response"] for chunk in chunks),
                     "aux_info": chunks[-1]["aux_info"],

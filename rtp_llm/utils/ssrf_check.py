@@ -182,23 +182,25 @@ def safe_request_get(url: str, headers: Dict[str, str], timeout: int = 10):
     session.mount("https://", _SSRFAdapter())
 
     current_url = _validate_url(url)
-    for _ in range(_MAX_REDIRECTS):
-        response = session.get(
-            current_url,
-            stream=True,
-            headers=headers,
-            timeout=timeout,
-            allow_redirects=False,
-        )
-        if response.is_redirect:
-            location = response.headers.get("Location", "")
-            response.close()
-            if not location:
-                break
-            next_url = urljoin(current_url, location)
-            current_url = _validate_url(next_url)
-            continue
-        return response
-    if 'response' in locals() and response is not None:
+    response = None
+    with session:
+        for _ in range(_MAX_REDIRECTS):
+            response = session.get(
+                current_url,
+                stream=True,
+                headers=headers,
+                timeout=timeout,
+                allow_redirects=False,
+            )
+            if response.is_redirect:
+                location = response.headers.get("Location", "")
+                response.close()
+                if not location:
+                    break
+                next_url = urljoin(current_url, location)
+                current_url = _validate_url(next_url)
+                continue
+            return response
+    if response is not None:
         response.close()
     raise ValueError(f"Exceeded maximum redirects ({_MAX_REDIRECTS}) for {url}")

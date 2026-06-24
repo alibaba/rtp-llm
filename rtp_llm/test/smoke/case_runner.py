@@ -92,7 +92,7 @@ _EMBEDDING_ENDPOINTS = {
     "/v1/embeddings/colbert",
 }
 register_comparer(lambda q_r, ep: q_r.get("tau2_bench", False), Tau2BenchComparer)
-register_comparer(lambda q_r, ep: "messages" in q_r.get("query", {}), OpenaiComparer)
+register_comparer(lambda q_r, ep: isinstance(q_r.get("query"), dict) and "messages" in q_r["query"], OpenaiComparer)
 register_comparer(lambda q_r, ep: ep in _EMBEDDING_ENDPOINTS, EmbeddingComparer)
 register_comparer(
     lambda q_r, ep: ep.startswith("/rtp_llm/worker_status"), WorkerStatusComparer
@@ -319,6 +319,9 @@ class CaseRunner(object):
                             task_states.err_msg = (
                                 f"concurrency results differ: {result} vs {results[0]}"
                             )
+                            break
+                    if task_states.ret:
+                        task_states = results[0]
         else:
             task_states = self._curl_server_impl(server_manager, self.task_info)
         return task_states

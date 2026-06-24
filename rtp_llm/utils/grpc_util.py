@@ -62,8 +62,9 @@ def trans_from_tensor(t: torch.Tensor):
         elif t.dtype == torch.bfloat16:
             res.data_type = TensorPB.DataType.BF16
         else:
-            # Graceful degradation for unsupported empty tensor dtypes
-            return TensorPB()
+            # Unsupported dtype: preserve shape, default to FP32
+            res.data_type = TensorPB.DataType.FP32
+            return res
         return res
     t = t.cpu()
     if t.dtype == torch.float32:

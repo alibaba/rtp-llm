@@ -135,8 +135,10 @@ public:
     }
 
     void evaluateWaitingStreams() {
-        // 清理 waiting_streams_ 中有错误的 stream
-        waiting_streams_.remove_if([](const auto& s) { return s->hasError(); });
+        // 清理 waiting_streams_ 中有错误或已结束的 stream
+        waiting_streams_.remove_if([](const auto& s) {
+            return s->hasError() || s->getStatus() == StreamState::FINISHED;
+        });
 
         // Group streams by ReturnAllProbsMode to avoid mixing DEFAULT and ORIGINAL
         // in one batch.  NONE streams are wildcards and can join either group.
@@ -242,7 +244,9 @@ public:
 
     absl::StatusOr<std::list<GenerateStreamPtr>> schedule() override {
         std::unique_lock<std::mutex> lock(lock_);
-        bool woken = cond_.wait_for(lock, kFlushTimeoutMs, [this] {
+        // Use a longer timeout when idle to avoid CPU spinning (enqueue() will notify on new requests)
+        auto timeout = waiting_streams_.empty() ? std::chrono::seconds(5) : kFlushTimeoutMs;
+        bool woken = cond_.wait_for(lock, timeout, [this] {
             return waiting_streams_.size() >= batch_size_ || running_streams_.size() > 0
                    || !loading_cache_streams_.empty();
         });
