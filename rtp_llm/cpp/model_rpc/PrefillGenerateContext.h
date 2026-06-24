@@ -32,6 +32,8 @@ struct PrefillStatInfo {
     int64_t      remote_allocate_resource_rt_us = 0;
     int64_t      enqueue_request_rt_us          = 0;
     int64_t      remote_load_cache_start_rt_us  = 0;
+    int64_t      remote_load_cache_wait_stream_rt_us = 0;
+    int64_t      remote_load_cache_write_request_rt_us = 0;
     int64_t      poll_local_output_rt_us        = 0;
     int64_t      remote_load_cache_end_rt_us    = 0;
     int64_t      remote_generate_rt_us          = 0;

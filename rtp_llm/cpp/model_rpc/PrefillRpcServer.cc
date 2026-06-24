@@ -335,7 +335,9 @@ void PrefillRpcServer::enqueueRequest(PrefillGenerateContext& prefill_context) {
 void PrefillRpcServer::remoteLoadCacheStart(PrefillGenerateContext& prefill_context) {
     RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_LOG_DEBUG("request [%ld] remote load cache", prefill_context.request_id);
+    auto start_time_us = currentTimeUs();
     prefill_context.error_info = waitStreamBeforeRun(prefill_context.getStream());
+    prefill_context.stat_info.remote_load_cache_wait_stream_rt_us += currentTimeUs() - start_time_us;
     if (prefill_context.error_info.hasError()) {
         prefill_context.error_status =
             serializeErrorMsg(prefill_context.request_key, prefill_context.request_info, prefill_context.error_info);
@@ -347,8 +349,10 @@ void PrefillRpcServer::remoteLoadCacheStart(PrefillGenerateContext& prefill_cont
     load_request.set_client_id(process_id_);
     load_request.set_request_id(prefill_context.request_id);
     load_request.set_start_time(currentTimeUs());
+    start_time_us = currentTimeUs();
     CLIENT_GRPC_RET_IF_ERROR(
         prefill_context, prefill_context.client_stream->Write(load_request), ErrorCode::REMOTE_LOAD_KV_CACHE_FAILED);
+    prefill_context.stat_info.remote_load_cache_write_request_rt_us += currentTimeUs() - start_time_us;
 }
 
 void PrefillRpcServer::pollLocalOutput(PrefillGenerateContext& prefill_context) {
