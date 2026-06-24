@@ -154,7 +154,10 @@ class Block(nn.Module):
             return
         if os.environ.get("DSV4_CP_SYNC_AFTER_ATTN_ONCE", "1") == "0":
             return
-        if getattr(getattr(self.ffn, "_strategy", None), "name", "") != "mega":
+        if getattr(getattr(self.ffn, "_strategy", None), "name", "") not in (
+            "mega",
+            "mega_fused",
+        ):
             return
         if getattr(self.attn, "_cp_ctx", None) is None:
             return
