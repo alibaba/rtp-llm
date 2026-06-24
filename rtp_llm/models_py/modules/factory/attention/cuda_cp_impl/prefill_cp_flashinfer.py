@@ -189,10 +189,15 @@ class CPFlashInferImpl(FMHAImplBase):
         self,
         qkv: torch.Tensor,
         kv_cache: Optional[KVCache],
-        need_rope_kv_cache: bool = True,
+        layer_idx: int = 0,
     ) -> torch.Tensor:
         assert self.rope_kvcache_impl is not None and self.rope_params is not None
-        if need_rope_kv_cache:
+        # RoPE is gated on the model config (need_rope_kv_cache), matching the
+        # non-CP impls (PyFlashinfer*/TrtllmGen*/Trt*). The 3rd positional arg
+        # from CausalAttention.forward is the layer index, NOT a rope toggle;
+        # treating it as one skipped RoPE on layer 0 (layer_idx=0 -> falsy),
+        # corrupting CP-prefill positions and compounding through all layers.
+        if self.need_rope_kv_cache:
             fmha_input = self.rope_kvcache_impl.forward(qkv, None, self.rope_params)
         else:
             fmha_input = qkv

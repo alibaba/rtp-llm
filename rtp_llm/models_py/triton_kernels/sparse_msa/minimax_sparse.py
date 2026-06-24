@@ -245,6 +245,7 @@ def minimax_sparse_decode(
         and sink is None
         and batch <= 1
         and not _cuda_graph_forward_active()
+        and k_cache is not None  # zero-copy decode: k_cache None -> use legacy paged path
     )
     if use_trtllm:
         sm_scale_v = sm_scale if sm_scale is not None else q.shape[-1] ** -0.5

@@ -358,7 +358,7 @@ def flash_prefill_with_trtllm_gen(
         out = trtllm_batch_decode_with_kv_cache(
             query=q_packed, kv_cache=(k_paged, v_paged),
             workspace_buffer=workspace,
-            block_tables=bt, seq_lens=sl, max_seq_len=max_seqlen_q,
+            block_tables=bt, seq_lens=sl, max_seq_len=max_seqlen_k,
             bmm1_scale=sm_scale, bmm2_scale=1.0, backend="trtllm-gen",
             out_dtype=torch.bfloat16,
         )
@@ -370,7 +370,7 @@ def flash_prefill_with_trtllm_gen(
                 query=q_packed[start:end], kv_cache=(k_paged, v_paged),
                 workspace_buffer=workspace,
                 block_tables=bt[start:end], seq_lens=sl[start:end],
-                max_seq_len=max_seqlen_q,
+                max_seq_len=max_seqlen_k,
                 bmm1_scale=sm_scale, bmm2_scale=1.0, backend="trtllm-gen",
                 out_dtype=torch.bfloat16,
             ))
