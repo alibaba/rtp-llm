@@ -59,7 +59,12 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
     final Map<Long, InflightEntry> inflight = new ConcurrentHashMap<>();
     final AtomicLong batchIdGenerator = new AtomicLong(0);
     private final InflightEvictor<Long, InflightEntry> inflightEvictor
-            = new InflightEvictor<>(inflight, null);
+            = new InflightEvictor<>(inflight, entry -> {
+                synchronized (entry) {
+                    rollbackOnce(entry);
+                    completeCancelled(entry);
+                }
+            });
 
     public FlexlbBatchScheduler(ConfigService configService,
                                 @Lazy Router router,
@@ -157,9 +162,10 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
             entry.cancelled.set(true);
             if (!entry.ackFinished) {
                 completeCancelled(entry);
-            } else {
+            } else if (!entry.item.future().isDone()) {
                 rollbackOnce(entry);
             }
+            // If ackFinished and future already done (success), skip rollback
         }
         cancelPrefill(entry);
     }

@@ -212,6 +212,16 @@ void FIFOScheduler::admitWaitingUnits() {
     size_t  admitted_total_tokens = 0;
     size_t  running_count         = countStreams(running_);
     int64_t admitted_group_id     = -1;
+
+    // Remove units with pre-existing errors to avoid zombie entries
+    for (auto it = waiting_.begin(); it != waiting_.end();) {
+        if (it->hasError()) {
+            it = waiting_.erase(it);
+        } else {
+            ++it;
+        }
+    }
+
     for (auto it = waiting_.begin(); it != waiting_.end();) {
         auto& unit = *it;
         if (admitted_count > 0) {

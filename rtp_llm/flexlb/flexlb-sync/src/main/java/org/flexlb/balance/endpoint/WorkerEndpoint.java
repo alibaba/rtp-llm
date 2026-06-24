@@ -14,7 +14,7 @@ import org.flexlb.dao.master.WorkerStatusResponse;
 public abstract class WorkerEndpoint {
 
     // ---- the sole mutable holding ----
-    protected WorkerStatus status;
+    protected volatile WorkerStatus status;
 
     protected WorkerEndpoint(WorkerStatus status) {
         this.status = status;

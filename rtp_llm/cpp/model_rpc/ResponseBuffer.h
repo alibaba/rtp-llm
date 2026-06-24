@@ -18,11 +18,13 @@
 namespace rtp_llm {
 
 struct ResponseBufferEntry {
+    static constexpr size_t kMaxQueueSize = 1000;
+
     std::deque<GenerateOutputsPB> queue;
     std::atomic<bool>             done{false};
     std::atomic<bool>             cancelled{false};
     std::optional<grpc::Status>   error_status;
-    std::function<void()>          cancel_producer;
+    std::function<void()>         cancel_producer;
     std::mutex                    mu;
     std::condition_variable       cv;
     int64_t                       last_activity_us{0};

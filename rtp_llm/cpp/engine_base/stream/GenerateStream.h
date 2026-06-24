@@ -235,6 +235,7 @@ public:
 
     int64_t getTimeoutMs() const;
     void    checkTimeout();
+    void    checkTimeoutWithoutLock();
 
     void reportEvent(StreamEvents::EventType event,
                      ErrorCode               error_code = ErrorCode::NONE_ERROR,

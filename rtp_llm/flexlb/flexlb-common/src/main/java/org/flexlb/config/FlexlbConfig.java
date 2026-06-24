@@ -280,6 +280,11 @@ public class FlexlbConfig {
 
     private transient volatile List<long[]> parsedSloBuckets;
 
+    public void setCostSloBuckets(String costSloBuckets) {
+        this.costSloBuckets = costSloBuckets;
+        this.parsedSloBuckets = null;
+    }
+
     private double costHotspotMultiplier = 3.0;
 
     private double costImbalanceMultiplier = 3.0;
@@ -302,19 +307,23 @@ public class FlexlbConfig {
             return;
         }
         String[] parts = csv.split(",");
-        if (parts.length >= 3) {
-            costAlpha0 = Double.parseDouble(parts[0].trim());
-            costAlpha1 = Double.parseDouble(parts[1].trim());
-            costAlpha2 = Double.parseDouble(parts[2].trim());
-        }
-        if (parts.length >= 6) {
-            costAlpha3 = Double.parseDouble(parts[3].trim());
-            costAlpha4 = Double.parseDouble(parts[4].trim());
-            costAlpha5 = Double.parseDouble(parts[5].trim());
-        } else if (parts.length >= 3) {
-            costAlpha3 = 0;
-            costAlpha4 = 0;
-            costAlpha5 = 0;
+        try {
+            if (parts.length >= 3) {
+                costAlpha0 = Double.parseDouble(parts[0].trim());
+                costAlpha1 = Double.parseDouble(parts[1].trim());
+                costAlpha2 = Double.parseDouble(parts[2].trim());
+            }
+            if (parts.length >= 6) {
+                costAlpha3 = Double.parseDouble(parts[3].trim());
+                costAlpha4 = Double.parseDouble(parts[4].trim());
+                costAlpha5 = Double.parseDouble(parts[5].trim());
+            } else if (parts.length >= 3) {
+                costAlpha3 = 0;
+                costAlpha4 = 0;
+                costAlpha5 = 0;
+            }
+        } catch (NumberFormatException e) {
+            // Keep existing default values on parse failure.
         }
     }
 

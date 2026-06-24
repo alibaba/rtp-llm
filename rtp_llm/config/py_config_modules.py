@@ -54,6 +54,9 @@ class ServerConfig:
         self.worker_info_port_num: int = MIN_WORKER_INFO_PORT_NUM
         self.shutdown_timeout: int = 600  # graceful drain budget (seconds)
         self.monitor_interval: int = 1  # Monitor interval in seconds
+        self.enable_return_request_id: bool = (
+            False  # global gate for per-request return_request_id
+        )
 
     def _server_base(self) -> int:
         return self.start_port + self.rank_id * self.worker_info_port_num

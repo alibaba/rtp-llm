@@ -76,6 +76,13 @@ public class FixedWindowBatcherAlgorithm implements BatcherAlgorithm {
         // 1. Fixed window timeout → must dispatch
         if (elapsedMs >= fixedWaitMs) {
             List<BatchItem> picked = pickUpTo(ctx, batchMaxCount, batchMaxTokens);
+            if (picked.isEmpty() && !ctx.isEmpty()) {
+                // All items exceed maxTokens — force-dispatch the head to avoid busy-wait
+                BatchItem forced = ctx.peek();
+                if (forced != null) {
+                    picked = List.of(forced);
+                }
+            }
             if (!picked.isEmpty()) {
                 dispatch(ctx, picked, "fixed_window_timeout");
             }

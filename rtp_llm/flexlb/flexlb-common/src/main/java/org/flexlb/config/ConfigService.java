@@ -35,7 +35,12 @@ public class ConfigService {
         log.warn("FLEXLB_CONFIG = {}", lbConfigStr);
         FlexlbConfig config;
         if (lbConfigStr != null) {
-            config = JsonUtils.toObject(lbConfigStr, FlexlbConfig.class);
+            try {
+                config = JsonUtils.toObject(lbConfigStr, FlexlbConfig.class);
+            } catch (Exception e) {
+                log.error("Failed to parse FLEXLB_CONFIG, use default config", e);
+                config = new FlexlbConfig();
+            }
         } else {
             config = new FlexlbConfig();
         }

@@ -582,6 +582,17 @@ void GenerateStream::checkTimeout() {
     }
 }
 
+void GenerateStream::checkTimeoutWithoutLock() {
+    auto running_time_ms = (autil::TimeUtility::currentTimeInMicroSeconds() - begin_time_us_) / 1000;
+    auto timeout_ms      = getTimeoutMs();
+    if (timeout_ms > 0 && timeout_ms < running_time_ms) {
+        generate_status_->reportEvent(StreamEvents::Error,
+                                      ErrorCode::GENERATE_TIMEOUT,
+                                      "query has been running " + std::to_string(running_time_ms) + " ms, "
+                                          + "timeout_ms = " + std::to_string(timeout_ms) + ", it's timeout");
+    }
+}
+
 // 统一的事件上报接口，替代原先所有 reportXX 方法。
 // 外部线程调用时自动加锁保护 error_info 和 events_ 的一致性。
 void GenerateStream::reportEvent(StreamEvents::EventType event, ErrorCode error_code, const std::string& error_msg) {
@@ -628,6 +639,8 @@ bool GenerateStream::prepare() {
     generate_status_->reportEvent(StreamEvents::CanRun);
     auto result = streamCacheResource().initKVBlock(reserveStep());
     if (!result.ok()) {
+        generate_status_->reportEvent(
+            StreamEvents::Error, ErrorCode::MALLOC_FAILED, "initKVBlock failed: " + result.status().message());
         finish_internal();
         return false;
     }
@@ -654,6 +667,9 @@ void GenerateStream::activate() {
     }
     auto result = streamCacheResource().incrKVBlock(reserveStep());
     if (!result.ok()) {
+        generate_status_->reportEvent(StreamEvents::Error,
+                                      ErrorCode::MALLOC_FAILED,
+                                      "incrKVBlock(activate) failed: " + result.status().message());
         finish_internal();
         return;
     }
@@ -662,6 +678,7 @@ void GenerateStream::activate() {
 
 void GenerateStream::advance() {
     std::lock_guard<std::mutex> lock(*mutex_);
+    checkTimeoutWithoutLock();
     if (generate_status_->hasEvent(StreamEvents::Error)) {
         finish_internal();
         return;
@@ -689,6 +706,8 @@ void GenerateStream::advance() {
     }
     auto result = streamCacheResource().incrKVBlock(reserveStep(), seq_len_override);
     if (!result.ok()) {
+        generate_status_->reportEvent(
+            StreamEvents::Error, ErrorCode::MALLOC_FAILED, "incrKVBlock(advance) failed: " + result.status().message());
         finish_internal();
         return;
     }

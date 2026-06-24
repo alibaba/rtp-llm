@@ -59,6 +59,15 @@ struct ScheduleUnit {
         return !streams.empty();
     }
 
+    bool hasError() const {
+        for (const auto& s : streams) {
+            if (s->hasError()) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     bool isGroup() const {
         return group_id != -1;
     }

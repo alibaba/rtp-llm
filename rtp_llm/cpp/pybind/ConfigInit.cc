@@ -1302,7 +1302,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.specify_gpu_arch);
             },
             [](py::tuple t) {
-                if (t.size() != 14)
+                if (t.size() < 14)
                     throw std::runtime_error("Invalid state!");
                 RuntimeConfig c;
                 try {
@@ -1747,7 +1747,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.batch_load_timeout_ms);
             },
             [](py::tuple t) {
-                if (t.size() != 23)
+                if (t.size() < 23)
                     throw std::runtime_error("Invalid state!");
                 PDSepConfig c;
                 try {

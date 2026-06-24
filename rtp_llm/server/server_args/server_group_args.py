@@ -1,5 +1,7 @@
 import os
 
+from rtp_llm.server.server_args.util import str2bool
+
 
 def init_server_group_args(parser, server_config):
     ##############################################################################################################
@@ -61,4 +63,14 @@ def init_server_group_args(parser, server_config):
         type=int,
         default=1,
         help="Process manager monitor interval in seconds",
+    )
+    server_group.add_argument(
+        "--enable_return_request_id",
+        env_name="ENABLE_RETURN_REQUEST_ID",
+        bind_to=(server_config, "enable_return_request_id"),
+        type=str2bool,
+        default=False,
+        help="Global gate for returning engine request_id in aux_info. "
+        "Must be enabled for per-request return_request_id to take effect. "
+        "For internal debugging only.",
     )

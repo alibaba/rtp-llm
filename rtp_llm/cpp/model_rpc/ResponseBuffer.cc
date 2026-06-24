@@ -86,7 +86,7 @@ size_t ResponseBufferRegistry::gc(std::chrono::microseconds ttl) {
 
     std::lock_guard<std::mutex> lock(mu_);
     for (auto it = map_.begin(); it != map_.end();) {
-        const auto& entry = it->second;
+        const auto& entry    = it->second;
         bool        terminal = false;
         bool        idle     = false;
         {
@@ -121,6 +121,9 @@ bool ResponseBufferWriter::Write(const GenerateOutputsPB& outputs, grpc::WriteOp
         std::lock_guard<std::mutex> lock(entry_->mu);
         if (entry_->cancelled.load()) {
             return false;
+        }
+        if (entry_->queue.size() >= ResponseBufferEntry::kMaxQueueSize) {
+            entry_->queue.pop_front();
         }
         entry_->queue.push_back(outputs);
         entry_->last_activity_us = autil::TimeUtility::currentTimeInMicroSeconds();
