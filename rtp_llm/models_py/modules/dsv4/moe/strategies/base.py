@@ -84,7 +84,15 @@ class RoutedExpertsStrategy(nn.Module):
     define ``setup_weights`` + ``can_handle``.
     """
 
-    name: ClassVar[str]  # "mega" / "grouped_fp4" / "local_loop" / "deepep"
+    name: ClassVar[
+        str
+    ]  # "mega" / "mega_fused" / "grouped_fp4" / "local_loop" / "deepep"
+
+    # True when ``forward`` already returns ``routed + shared`` (the strategy
+    # fuses the shared expert internally). The ``MoE`` layer then skips its own
+    # shared-expert executor and the ``combine_routed_and_shared`` add. Only
+    # ``MegaMoEFusedStrategy`` sets this True.
+    routed_includes_shared: ClassVar[bool] = False
 
     def __init__(self, cfg: MoeCfg):
         super().__init__()
@@ -103,10 +111,10 @@ class RoutedExpertsStrategy(nn.Module):
 
     def forward(  # type: ignore[override]
         self,
-        x: torch.Tensor,        # [N, D] BF16
+        x: torch.Tensor,  # [N, D] BF16
         weights: torch.Tensor,  # [N, topk] FP32
         indices: torch.Tensor,  # [N, topk] int64 GLOBAL expert id
-    ) -> torch.Tensor:          # [N, D] FP32
+    ) -> torch.Tensor:  # [N, D] FP32
         """Route + compute. Returns per-token routed-expert sum in fp32."""
         raise NotImplementedError
 
@@ -199,11 +207,24 @@ def select_strategy(
     ``DSV4_MOE_STRATEGY``), fail loudly if ``forced`` can't handle cfg.
     When False (legacy env toggle), fall through silently to auto-pick.
     """
+    # ``DSV4_USE_MEGA_MOE_FUSED=1`` opts the EP routed path into the fused
+    # Mega kernel. It is a Mega variant, so it only kicks in where the
+    # non-fused Mega would (ep_size > 1) and replaces an unspecified/"mega"
+    # selection. Strict so an unavailable fused kernel fails loudly rather
+    # than silently downgrading to non-fused (which would invalidate tests).
+    if cfg.ep_size > 1 and forced in (None, "mega"):
+        from rtp_llm.models_py.modules.dsv4.moe.mega_fused_buf import (
+            mega_moe_fused_requested,
+        )
+
+        if mega_moe_fused_requested():
+            forced, strict = "mega_fused", True
+
     if forced is not None:
         for cls in _STRATEGY_PRIORITY:
             if cls.name == forced:
                 if cls.can_handle(cfg):
-                    if cfg.ep_size > 1 and cls.name != "mega":
+                    if cfg.ep_size > 1 and cls.name not in ("mega", "mega_fused"):
                         raise RuntimeError(
                             "DSV4 EP MoE requires MegaMoEStrategy. "
                             f"Requested strategy {forced!r} would bypass Mega "
@@ -220,9 +241,7 @@ def select_strategy(
                 break
         else:
             names = [c.name for c in _STRATEGY_PRIORITY]
-            raise RuntimeError(
-                f"Unknown MoE strategy {forced!r}. Available: {names}"
-            )
+            raise RuntimeError(f"Unknown MoE strategy {forced!r}. Available: {names}")
 
     if cfg.ep_size > 1:
         mega_cls = next((c for c in _STRATEGY_PRIORITY if c.name == "mega"), None)
