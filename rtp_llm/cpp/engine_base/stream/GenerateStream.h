@@ -109,7 +109,7 @@ public:
                    size_t                                extra_reserve_token_num = 0,
                    bool                                  pert_test               = false);
     virtual ~GenerateStream() {
-        reportMetric();
+        reportMetricOnce();
         releaseResource();
         stream_magic_ = 0;
     }
@@ -235,6 +235,7 @@ public:
 
     int64_t getTimeoutMs() const;
     void    checkTimeout();
+    void    recordWaitLatency();
 
     void reportEvent(StreamEvents::EventType event,
                      ErrorCode               error_code = ErrorCode::NONE_ERROR,
@@ -684,6 +685,7 @@ protected:
 
     void reportStreamMetrics();
     void reportCacheReuseMetrics() const;
+    void reportMetricOnce();
 
 protected:
     uint64_t                              stream_magic_ = STREAM_MAGIC;
@@ -695,6 +697,7 @@ protected:
     std::shared_ptr<CompleteTokenIds>     complete_token_ids_;
     int64_t                               begin_time_us_;
     int64_t                               wait_time_us_ = 0;
+    bool                                  metrics_reported_ = false;
     std::shared_ptr<StreamCacheResource>  stream_cache_resource_;
     std::shared_ptr<bool>                 is_context_stream_;
     size_t                                iter_count_           = 0;

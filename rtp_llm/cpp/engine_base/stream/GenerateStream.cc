@@ -134,7 +134,7 @@ absl::Status GenerateStream::initKVBlock() {
     RTP_LLM_PROFILE_FUNCTION();
     std::lock_guard<std::mutex> lock(*mutex_);
     if (generate_status_->status == StreamState::WAITING) {
-        wait_time_us_ = autil::TimeUtility::currentTimeInMicroSeconds() - begin_time_us_;
+        recordWaitLatency();
     }
     auto ret = stream_cache_resource_->initKVBlock(reserve_step_);
     if (!ret.ok()) {
@@ -582,6 +582,10 @@ void GenerateStream::checkTimeout() {
     }
 }
 
+void GenerateStream::recordWaitLatency() {
+    wait_time_us_ = autil::TimeUtility::currentTimeInMicroSeconds() - begin_time_us_;
+}
+
 // 统一的事件上报接口，替代原先所有 reportXX 方法。
 // 外部线程调用时自动加锁保护 error_info 和 events_ 的一致性。
 void GenerateStream::reportEvent(StreamEvents::EventType event, ErrorCode error_code, const std::string& error_msg) {
@@ -625,11 +629,20 @@ void GenerateStream::setReserveStep(size_t reserve_step) {
 
 StreamState GenerateStream::moveToNext() {
     checkTimeout();
-    std::lock_guard<std::mutex> lock(*mutex_);
-    StreamState                 state = generate_status_->moveToNext();
+    StreamState state;
+    bool        should_report_metric = false;
+    {
+        std::lock_guard<std::mutex> lock(*mutex_);
+        auto                        old_state = generate_status_->getStatus();
+        state                                 = generate_status_->moveToNext();
+        should_report_metric                  = old_state != StreamState::FINISHED && state == StreamState::FINISHED;
+    }
 
     // notify one thread waiting for stream completion
-    if (getStatus() == StreamState::FINISHED) {
+    if (state == StreamState::FINISHED) {
+        if (should_report_metric) {
+            reportMetricOnce();
+        }
         cv_->notify_one();
     }
     return state;
@@ -1095,6 +1108,14 @@ torch::Tensor GenerateStream::getSoftmaxProbs() {
 
 void GenerateStream::setMetricsReporter(kmonitor::MetricsReporterPtr metrics_reporter) {
     metrics_reporter_ = metrics_reporter;
+}
+
+void GenerateStream::reportMetricOnce() {
+    if (metrics_reported_) {
+        return;
+    }
+    metrics_reported_ = true;
+    reportMetric();
 }
 
 void GenerateStream::reportMetric() {
