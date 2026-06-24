@@ -60,6 +60,22 @@ _USE_V2_CP_PREFILL = os.environ.get("M3_MSA_USE_V2_CP_PREFILL", "1") != "0"
 # Fused CP paged write removes the unpack tensors plus mha_kv_write_cache
 # for cold/sharded v2 prefill. Set to 0 to fall back to the two-kernel path.
 _USE_FUSED_CP_PAGED_WRITE = os.environ.get("M3_MSA_FUSED_CP_PAGED_WRITE", "1") != "0"
+# Zero-copy MSA: read the persistent paged K/V pool directly via the physical
+# block table in step3 instead of materializing a token-major gather scratch.
+# Requires page_size == sparse block_size (both 128, set via --seq_size_per_block
+# 128 + --kernel_seq_size_per_block 128). Decode (DP4) reads the replicated pool;
+# prefill (fmha_sm100, single-segment) skips the _to_paged repack. Opt-in while
+# under PD validation; falls back to the scratch path when the layout precondition
+# is not met (e.g. CP page-RR sharded, page != block).
+_M3_MSA_ZEROCOPY = os.environ.get("M3_MSA_ZEROCOPY", "0") == "1"
+# Decode zero-copy defaults ON: the runtime guard below only engages it when its
+# preconditions hold (decode, non-sharded, page_size == block_size) and otherwise
+# falls back to the scratch gather, and the paged decode kernel reads
+# framework-provided static block tables so it is CUDA-graph safe. Prefill stays
+# gated by M3_MSA_ZEROCOPY. Set M3_MSA_ZEROCOPY_DECODE=0 to force the old copy.
+_M3_MSA_ZEROCOPY_DECODE = (
+    _M3_MSA_ZEROCOPY or os.environ.get("M3_MSA_ZEROCOPY_DECODE", "1") == "1"
+)
 
 import torch.nn as nn
 import torch.nn.functional as F
@@ -1307,6 +1323,21 @@ class MSAAttention(nn.Module):
             k.contiguous(), v.contiguous(), base, slot_mapping
         )
 
+        # Zero-copy decode: the full replicated history now lives in the paged
+        # pool, and the step3 paged kernel reads it directly via the physical
+        # block table (page_size == block_size), so skip materializing the
+        # token-major gather scratch. Only the non-sharded decode path qualifies
+        # (sharded CP holds 1/cp_size locally; prefill uses the fmha path).
+        if (
+            _M3_MSA_ZEROCOPY_DECODE
+            and (not attn_inputs.is_prefill)
+            and (not self._kv_sharded)
+            and int(self.page_size) == int(self.block_size)
+        ):
+            self._scratch_k = None
+            self._scratch_v = None
+            return
+
         # 2) build the transient gather scratch the MSA kernel reads.
         scratch_slots = int(self._scratch_slots)
         scratch_k, scratch_v = _MAIN_KV_SCRATCH.acquire(
@@ -1407,6 +1438,20 @@ class MSAAttention(nn.Module):
         else:
             valid = slot_mapping >= 0
             scale_flat[slot_mapping[valid]] = idx_flat[valid]
+
+        # Zero-copy decode (P3a): the full replicated idx history now lives in
+        # the paged scale region, and the indexer's paged score kernel reads it
+        # directly via the physical block table (page_size == block_size), so
+        # skip materializing the token-major idx gather+scatter scratch. Same
+        # gate as the main K/V zero-copy skip in _source_main_kv_from_paged.
+        if (
+            _M3_MSA_ZEROCOPY_DECODE
+            and (not attn_inputs.is_prefill)
+            and (not self._kv_sharded)
+            and int(self.page_size) == int(self.block_size)
+        ):
+            self._scratch_idx_k = None
+            return
 
         # 2) build the transient scratch the MSA kernel reads.
         scratch_slots = int(self._scratch_slots)
@@ -2319,6 +2364,25 @@ class MSAAttention(nn.Module):
                 )
                 torch.cuda.synchronize(device)
                 _t0 = time.perf_counter()
+            # Zero-copy decode: hand the step3 kernel the persistent paged K/V
+            # pool views + physical block table so it reads the replicated
+            # history directly (main_k/main_v are None here — the scratch gather
+            # was skipped in _source_main_kv_from_paged).
+            paged_main_k = paged_main_v = phys_block_table = paged_idx_k = None
+            if (
+                _M3_MSA_ZEROCOPY_DECODE
+                and kv_cache is not None
+                and (not self._kv_sharded)
+                and int(self.page_size) == int(self.block_size)
+            ):
+                base = kv_cache.kv_cache_base
+                # [block, head, page, dim] strided views of [block,2,head,page,dim]
+                paged_main_k = base[:, 0]
+                paged_main_v = base[:, 1]
+                phys_block_table = self._physical_block_table(attn_inputs)
+                # idx_K paged scale-region view [block, page, idx_dim] for the
+                # zero-copy indexer (P3a); shares the same physical block table.
+                paged_idx_k = self._idx_k_paged_view(kv_cache)
             _idx_o, o = minimax_sparse_decode(
                 q=q,
                 sink=None,
@@ -2342,6 +2406,10 @@ class MSAAttention(nn.Module):
                 workspace=self._maybe_trtllm_workspace(device),
                 cu_seqlens=decode_cu_seqlens,
                 prefix_lens=prefix_lens.to(torch.int32),
+                paged_main_k=paged_main_k,
+                paged_main_v=paged_main_v,
+                phys_block_table=phys_block_table,
+                paged_idx_k=paged_idx_k,
             )
             if _dbg:
                 torch.cuda.synchronize(device)

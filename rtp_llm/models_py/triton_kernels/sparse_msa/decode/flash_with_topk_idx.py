@@ -183,6 +183,154 @@ def _decode_score_kernel(
         s_ptrs = tl.advance(s_ptrs, (0, BLOCKS_PER_K_BLOCK))
 
 
+_HEUR_decode_score_paged_kernel = {
+        "BLOCK_SIZE_H": lambda args: max(
+            16, triton.next_power_of_2(args["gqa_group_size"])
+        ),
+        "BLOCK_SIZE_D": lambda args: triton.next_power_of_2(args["head_dim"]),
+        "BATCH_SIZE_BUCKET": lambda args: triton.next_power_of_2(args["batch_size"]),
+    }
+
+
+@triton.heuristics(_HEUR_decode_score_paged_kernel)
+@triton.autotune(
+    configs=[
+        triton.Config({}, num_warps=nw, num_stages=ns)
+        for nw in [4, 8, 16]
+        for ns in [1, 2, 3]
+    ],
+    key=[
+        "BATCH_SIZE_BUCKET",
+        "gqa_group_size",
+        "head_dim",
+        "block_size",
+        "SCORE_TYPE",
+    ],
+)
+@triton.jit
+def _decode_score_kernel_paged(
+    q_ptr,  # Q: b x qh x d
+    k_paged_ptr,  # idx K paged: block x page x d (single shared idx head)
+    block_table_ptr,  # physical block table: b x max_blocks (logical blk -> phys page)
+    score_ptr,  # Score: qh x b x max_seqblock
+    seq_lens,
+    # shape
+    batch_size,
+    gqa_group_size,
+    head_dim,
+    num_phys_blocks,
+    # block size (== page size == BLOCK_SIZE_N, one logical block per iteration)
+    block_size: tl.constexpr,
+    # sm_scale
+    sm_scale,
+    # init and local blocks
+    init_blocks,
+    local_blocks,
+    # stride
+    stride_q_b,
+    stride_q_h,
+    stride_q_d,
+    stride_k_blk,
+    stride_k_p,
+    stride_k_d,
+    stride_bt_b,
+    stride_bt_blk,
+    stride_s_h,
+    stride_s_b,
+    stride_s_n,
+    # META parameters
+    BATCH_SIZE_BUCKET: tl.constexpr,
+    BLOCK_SIZE_H: tl.constexpr,
+    BLOCK_SIZE_D: tl.constexpr,
+    NUM_KV_CHUNKS: tl.constexpr,
+    SCORE_TYPE: tl.constexpr,
+):
+    """Zero-copy variant of ``_decode_score_kernel`` (disable_index_value path).
+
+    Reads the idx_K paged scale-region view ([block, page, idx_head_dim], a
+    single shared idx head) directly via the physical block table instead of a
+    token-major gather scratch. Requires ``BLOCK_SIZE_N == page_size ==
+    block_size`` so each logical block ``blk`` is exactly physical page
+    ``block_table[b, blk]`` at within-page offsets ``0 .. block_size-1``. This
+    removes the per-step idx_K gather+scatter scratch under PD / CP-replicated
+    decode (the scale region already holds the full replicated idx history)."""
+    tl.static_assert(SCORE_TYPE == "max" or SCORE_TYPE == "lse")
+    sm_scale_log2e = sm_scale * 1.4426950409
+    BLOCK_SIZE_N: tl.constexpr = block_size
+    pid_bc, pid_kh = tl.program_id(0), tl.program_id(1)
+    pid_b = pid_bc % batch_size
+    pid_c = pid_bc // batch_size
+    pid_h = pid_kh * gqa_group_size  # single idx head -> pid_kh == 0
+    seq_len = tl.load(seq_lens + pid_b).to(tl.int32)
+    num_blocks = (seq_len + block_size - 1) // block_size
+    chunk_size_blocks = tl.cdiv(num_blocks, NUM_KV_CHUNKS)
+    chunk_start_block = pid_c * chunk_size_blocks
+    chunk_end_block = tl.minimum(chunk_start_block + chunk_size_blocks, num_blocks)
+    if chunk_start_block >= chunk_end_block:
+        return
+    q_ptrs = tl.make_block_ptr(
+        base=q_ptr + pid_b * stride_q_b + pid_h * stride_q_h,
+        shape=(gqa_group_size, head_dim),
+        strides=(stride_q_h, stride_q_d),
+        offsets=(0, 0),
+        block_shape=(BLOCK_SIZE_H, BLOCK_SIZE_D),
+        order=(1, 0),
+    )
+    q = tl.load(q_ptrs, boundary_check=(0, 1), padding_option="zero")
+    off_h = tl.arange(0, BLOCK_SIZE_H)
+    off_n = tl.arange(0, BLOCK_SIZE_N)
+    off_d = tl.arange(0, BLOCK_SIZE_D)
+    dim_mask = off_d < head_dim
+    local_start = tl.maximum(0, num_blocks - local_blocks)
+    bt_row = block_table_ptr + pid_b * stride_bt_b
+    for blk in range(chunk_start_block, chunk_end_block):
+        # logical block id -> physical page via the block table; within-page
+        # offset is off_n because page_size == block_size == BLOCK_SIZE_N.
+        page = tl.load(bt_row + blk * stride_bt_blk).to(tl.int64)
+        page = (page + num_phys_blocks) % num_phys_blocks  # guard negatives
+        base_pos = blk * block_size
+        pos_mask = (base_pos + off_n) < seq_len
+        # load K as (head_dim, BLOCK_SIZE_N)
+        k_off = (
+            page * stride_k_blk
+            + off_n[None, :] * stride_k_p
+            + off_d[:, None] * stride_k_d
+        )
+        k = tl.load(
+            k_paged_ptr + k_off,
+            mask=dim_mask[:, None] & pos_mask[None, :],
+            other=0.0,
+        )
+        # compute qk
+        qk = tl.zeros((BLOCK_SIZE_H, BLOCK_SIZE_N), dtype=tl.float32)
+        qk += tl.where(off_n[None, :] < seq_len - base_pos, 0, float("-inf"))
+        qk += tl.dot(q, k) * sm_scale_log2e
+        # block score: one column per (single) logical block
+        sub_max = tl.max(qk, axis=1)
+        if SCORE_TYPE == "max":
+            score = sub_max
+        else:  # "lse"
+            score = sub_max + tl.log2(
+                tl.sum(tl.exp2(qk - sub_max[:, None]), axis=1)
+            )
+            score = tl.where(score != score, float("-inf"), score)
+        # apply init_blocks / local_blocks (local > init > original)
+        is_init = blk < init_blocks
+        is_local = (blk >= local_start) & (blk < num_blocks)
+        score = tl.where(is_local, 1e29, tl.where(is_init, 1e30, score))
+        s_col = (
+            score_ptr
+            + pid_b * stride_s_b
+            + (pid_h + off_h) * stride_s_h
+            + blk * stride_s_n
+        )
+        tl.store(
+            s_col,
+            score.to(score_ptr.dtype.element_ty),
+            mask=off_h < gqa_group_size,
+        )
+
+
 _HEUR_decode_score_attn_kernel = {
         "BLOCK_SIZE_H": lambda args: max(
             16, triton.next_power_of_2(args["gqa_group_size"])
@@ -803,24 +951,43 @@ def flash_decode_with_topk_idx(
     use_tma: bool = True,
     score_type: str = "max",
     disable_index_value: bool = False,
+    k_paged: Optional[torch.Tensor] = None,  # [block, page, idx_dim] scale view
+    block_table: Optional[torch.Tensor] = None,  # [batch, max_blocks] phys pages
 ) -> torch.Tensor:
     assert score_type in ("max", "lse"), (
         f"score_type must be 'max' or 'lse', got {score_type!r}"
     )
     triton.set_allocator(robust_allocator)
+    # Zero-copy paged idx scoring: read idx_K straight from the paged scale
+    # region via the physical block table instead of the token-major gather
+    # scratch. Only the disable_index_value (score-only) path supports it; the
+    # value path keeps the scratch flow. Requires page_size == block_size.
+    use_paged_score = (
+        disable_index_value
+        and k_paged is not None
+        and block_table is not None
+        and int(k_paged.shape[1]) == int(block_size)
+    )
     # dtype check
     assert (
         q.dtype == torch.bfloat16
         or q.dtype == torch.float16
-        and k_cache.dtype == q.dtype
+        and (k_cache is None or k_cache.dtype == q.dtype)
     )
     if not disable_index_value:
         assert v_cache is not None
     # shape
     batch_size, num_q_heads, head_dim = q.shape
-    max_slots, num_kv_heads, _ = k_cache.shape
-    max_kv_len = req_to_token.shape[1]
-    assert slot_ids.shape[0] == batch_size and seq_lens.shape[0] == batch_size
+    if use_paged_score:
+        num_phys_blocks, page_size, _ = k_paged.shape
+        num_kv_heads = 1  # idx_K is a single shared head
+        max_kv_len = int(block_table.shape[1]) * page_size
+    else:
+        max_slots, num_kv_heads, _ = k_cache.shape
+        max_kv_len = req_to_token.shape[1]
+    assert seq_lens.shape[0] == batch_size
+    if not use_paged_score:
+        assert slot_ids.shape[0] == batch_size
     # gqa
     assert num_q_heads % num_kv_heads == 0
     gqa_group_size = num_q_heads // num_kv_heads
@@ -850,7 +1017,36 @@ def flash_decode_with_topk_idx(
     )
 
     grid = (batch_size * NUM_KV_CHUNKS, num_kv_heads)
-    if disable_index_value:
+    if use_paged_score:
+        _decode_score_kernel_paged[grid](
+            q,
+            k_paged,
+            block_table,
+            score,
+            seq_lens,
+            batch_size,
+            gqa_group_size,
+            head_dim,
+            num_phys_blocks,
+            block_size,
+            sm_scale,
+            init_blocks,
+            local_blocks,
+            q.stride(0),
+            q.stride(1),
+            q.stride(2),
+            k_paged.stride(0),
+            k_paged.stride(1),
+            k_paged.stride(2),
+            block_table.stride(0),
+            block_table.stride(1),
+            score.stride(0),
+            score.stride(1),
+            score.stride(2),
+            NUM_KV_CHUNKS=NUM_KV_CHUNKS,
+            SCORE_TYPE=score_type,
+        )
+    elif disable_index_value:
         _decode_score_kernel[grid](
             q,
             k_cache,

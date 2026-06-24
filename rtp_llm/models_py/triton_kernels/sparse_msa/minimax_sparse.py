@@ -1,5 +1,6 @@
 # Copyright 2025 XunhaoLai. All rights reserved.
 
+import os
 from typing import Optional
 
 import torch
@@ -24,7 +25,10 @@ def _cuda_graph_forward_active() -> bool:
 
 from .common.index import topk_index_reduce
 from .decode.flash_with_topk_idx import flash_decode_with_topk_idx
-from .decode.topk_sparse import flash_decode_with_gqa_share_sparse
+from .decode.topk_sparse import (
+    flash_decode_with_gqa_share_sparse,
+    flash_decode_with_gqa_share_sparse_paged,
+)
 from .prefill.flash_with_topk_idx import flash_prefill_with_topk_index
 from .prefill.topk_bt_fused import (
     flash_prefill_with_fused_topk_index,
@@ -210,9 +214,18 @@ def minimax_sparse_decode(
     workspace: Optional[torch.Tensor] = None,
     cu_seqlens: Optional[torch.Tensor] = None,
     prefix_lens: Optional[torch.Tensor] = None,
+    paged_main_k: Optional[torch.Tensor] = None,  # [block, kh, page, dim] base[:,0]
+    paged_main_v: Optional[torch.Tensor] = None,  # [block, kh, page, dim] base[:,1]
+    phys_block_table: Optional[torch.Tensor] = None,  # [batch, max_blocks] phys pages
+    paged_idx_k: Optional[torch.Tensor] = None,  # [block, page, idx_dim] scale view
 ):
     num_idx_heads = idx_q.shape[1]
-    num_kv_heads = k_cache.shape[1]
+    # k_cache is None on the zero-copy decode path (the gather scratch was
+    # skipped); fall back to the paged pool view for the head count.
+    if k_cache is not None:
+        num_kv_heads = k_cache.shape[1]
+    else:
+        num_kv_heads = paged_main_k.shape[1]
     idx_group_size = num_idx_heads // num_kv_heads
     batch = q.shape[0]
 
@@ -258,7 +271,18 @@ def minimax_sparse_decode(
         )
         return None, o
 
-    # Step 1: Flash decode with topk index (using index head)
+    # Step 1: Flash decode with topk index (using index head).
+    # Zero-copy paged idx scoring (M3_MSA_ZEROCOPY): when the caller supplies the
+    # paged scale-region idx view + physical block table (and page==block), the
+    # indexer reads idx_K straight from the paged pool, dropping the per-step
+    # idx_K gather+scatter scratch. Falls back to the token-major scratch path
+    # when these are not provided.
+    use_paged_idx = (
+        disable_index_value
+        and paged_idx_k is not None
+        and phys_block_table is not None
+        and int(paged_idx_k.shape[1]) == int(block_size_k)
+    )
     idx_o, topk_idx = flash_decode_with_topk_idx(
         q=idx_q,
         sink=idx_sink,
@@ -275,26 +299,53 @@ def minimax_sparse_decode(
         sm_scale=idx_sm_scale,
         score_type=score_type,
         disable_index_value=disable_index_value,
+        k_paged=paged_idx_k if use_paged_idx else None,
+        block_table=phys_block_table if use_paged_idx else None,
     )
     # Step 2: Reduce topk idx if num_idx_heads > num_kv_heads
     num_idx_heads = idx_q.shape[1]
-    num_kv_heads = k_cache.shape[1]
+    if k_cache is not None:
+        num_kv_heads = k_cache.shape[1]
+    else:
+        num_kv_heads = paged_main_k.shape[1]
     idx_group_size = num_idx_heads // num_kv_heads
     if idx_group_size > 1:
         topk_idx = topk_index_reduce(
             topk_idx.view(num_kv_heads, idx_group_size, -1, topk), dim=1
         )
-    # Step 3: Sparse attention using topk index (main head)
-    o = flash_decode_with_gqa_share_sparse(
-        q=q,
-        sink=sink,
-        k_cache=k_cache,
-        v_cache=v_cache,
-        req_to_token=req_to_token,
-        seq_lens=seq_lens,
-        slot_ids=slot_ids,
-        block_size=block_size_k,
-        topk_idx=topk_idx,
-        sm_scale=sm_scale,
-    )
+    # Step 3: Sparse attention using topk index (main head).
+    # Zero-copy paged path (M3_MSA_ZEROCOPY): when the caller supplies the
+    # persistent paged K/V pool views + physical block table (and page==block),
+    # read the pool directly instead of the token-major gather scratch. This
+    # removes the per-step main K/V gather under PD / CP-replicated decode.
+    if (
+        paged_main_k is not None
+        and paged_main_v is not None
+        and phys_block_table is not None
+        and int(paged_main_k.shape[2]) == int(block_size_k)
+    ):
+        o = flash_decode_with_gqa_share_sparse_paged(
+            q=q,
+            sink=sink,
+            k_paged=paged_main_k,
+            v_paged=paged_main_v,
+            block_table=phys_block_table,
+            seq_lens=seq_lens,
+            block_size=block_size_k,
+            topk_idx=topk_idx,
+            sm_scale=sm_scale,
+        )
+    else:
+        o = flash_decode_with_gqa_share_sparse(
+            q=q,
+            sink=sink,
+            k_cache=k_cache,
+            v_cache=v_cache,
+            req_to_token=req_to_token,
+            seq_lens=seq_lens,
+            slot_ids=slot_ids,
+            block_size=block_size_k,
+            topk_idx=topk_idx,
+            sm_scale=sm_scale,
+        )
     return idx_o, o
