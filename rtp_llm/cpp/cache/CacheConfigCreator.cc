@@ -10,6 +10,56 @@
 
 namespace rtp_llm {
 
+namespace {
+
+void finalizeKernelBlockConfig(CacheConfig& config, const KVCacheConfig& kv_cache_config) {
+    if (kv_cache_config.kernel_seq_size_per_block > 0) {
+        const size_t kernel_seq_size_per_block = static_cast<size_t>(kv_cache_config.kernel_seq_size_per_block);
+        RTP_LLM_CHECK_WITH_INFO(config.seq_size_per_block % kernel_seq_size_per_block == 0,
+                                "seq_size_per_block(%zu) must be divisible by kernel_seq_size_per_block(%zu)",
+                                config.seq_size_per_block,
+                                kernel_seq_size_per_block);
+        config.kernel_seq_size_per_block = kernel_seq_size_per_block;
+    } else {
+        config.kernel_seq_size_per_block = config.seq_size_per_block;
+    }
+}
+
+void finalizePhysicalStrides(CacheConfig& config) {
+    RTP_LLM_CHECK_WITH_INFO(config.group_types.size() == config.cache_specs.size(),
+                            "group_types size(%zu) must match cache_specs size(%zu)",
+                            config.group_types.size(),
+                            config.cache_specs.size());
+
+    KVCacheSpecPtr full_spec;
+    KVCacheSpecPtr linear_spec;
+    KVCacheSpecPtr active_spec;
+    for (size_t gid = 0; gid < config.group_types.size(); ++gid) {
+        const auto& spec = config.cache_specs[gid];
+        RTP_LLM_CHECK_WITH_INFO(spec != nullptr, "cache_specs[%zu] is null", gid);
+        if (!active_spec) {
+            active_spec = spec;
+        }
+        if (config.group_types[gid] == CacheGroupType::FULL && !full_spec) {
+            full_spec = spec;
+        } else if (config.group_types[gid] == CacheGroupType::LINEAR && !linear_spec) {
+            linear_spec = spec;
+        }
+    }
+
+    if (full_spec && linear_spec) {
+        HybridConfigCreator::setupPhysicalSizes(config, full_spec, linear_spec);
+    } else {
+        HybridConfigCreator::setupCompactPhysicalSizes(config, active_spec, config.is_sparse);
+    }
+
+    const size_t per_layer_stride_bytes = config.kv_block_stride_bytes + config.kv_scale_stride_bytes;
+    config.layer_to_block_stride_bytes.assign(static_cast<size_t>(config.layer_all_num),
+                                              static_cast<int>(per_layer_stride_bytes));
+}
+
+}  // namespace
+
 CacheConfig CacheConfigCreator::createBasicConfig(const ModelConfig&       model_config,
                                                   const ParallelismConfig& parallelism_config,
                                                   bool                     is_mtp) {
@@ -30,16 +80,8 @@ CacheConfig CacheConfigCreator::createConfig(const ModelConfig&                 
     uint32_t    block_num = 0;
 
     config.linear_step = kv_cache_config.linear_step;
-    if (kv_cache_config.kernel_seq_size_per_block > 0) {
-        RTP_LLM_CHECK_WITH_INFO(kv_cache_config.seq_size_per_block % kv_cache_config.kernel_seq_size_per_block == 0,
-                                "seq_size_per_block(%d) must be divisible by kernel_seq_size_per_block(%d)",
-                                kv_cache_config.seq_size_per_block,
-                                kv_cache_config.kernel_seq_size_per_block);
-        config.kernel_seq_size_per_block = static_cast<size_t>(kv_cache_config.kernel_seq_size_per_block);
-    } else {
-        // Default: kernel block size == physical block size (no split).
-        config.kernel_seq_size_per_block = config.seq_size_per_block;
-    }
+    finalizeKernelBlockConfig(config, kv_cache_config);
+    finalizePhysicalStrides(config);
 
     if (kv_cache_config.test_block_num > 0) {
         RTP_LLM_LOG_INFO("KVCacheConfig explicitly specified kv cache block num %d", kv_cache_config.test_block_num);
@@ -80,23 +122,10 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
     CacheConfig propose_config =
         CacheConfigCreator::createBasicConfig(propose_model_config, parallelism_config, is_mtp);
 
-    if (kv_cache_config.kernel_seq_size_per_block > 0) {
-        const size_t kernel_seq_size_per_block = static_cast<size_t>(kv_cache_config.kernel_seq_size_per_block);
-        RTP_LLM_CHECK_WITH_INFO(score_config.seq_size_per_block % kernel_seq_size_per_block == 0,
-                                "score seq_size_per_block(%zu) must be divisible by kernel_seq_size_per_block(%zu)",
-                                score_config.seq_size_per_block,
-                                kernel_seq_size_per_block);
-        RTP_LLM_CHECK_WITH_INFO(propose_config.seq_size_per_block % kernel_seq_size_per_block == 0,
-                                "propose seq_size_per_block(%zu) must be divisible by kernel_seq_size_per_block(%zu)",
-                                propose_config.seq_size_per_block,
-                                kernel_seq_size_per_block);
-        score_config.kernel_seq_size_per_block   = kernel_seq_size_per_block;
-        propose_config.kernel_seq_size_per_block = kernel_seq_size_per_block;
-    } else {
-        // Default: kernel block size == physical block size (no split).
-        score_config.kernel_seq_size_per_block   = score_config.seq_size_per_block;
-        propose_config.kernel_seq_size_per_block = propose_config.seq_size_per_block;
-    }
+    finalizeKernelBlockConfig(score_config, kv_cache_config);
+    finalizeKernelBlockConfig(propose_config, kv_cache_config);
+    finalizePhysicalStrides(score_config);
+    finalizePhysicalStrides(propose_config);
 
     int num_mtp_modules = 1;
     if (is_mtp) {

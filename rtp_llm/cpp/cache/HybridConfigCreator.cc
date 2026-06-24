@@ -7,6 +7,15 @@
 
 namespace rtp_llm {
 
+namespace {
+
+size_t ceilDiv(size_t numerator, size_t denominator) {
+    RTP_LLM_CHECK(denominator > 0);
+    return numerator / denominator + (numerator % denominator != 0);
+}
+
+}  // namespace
+
 std::vector<std::vector<int>> HybridConfigCreator::splitIntoGroups(const std::vector<int>& ids, int group_layer_num) {
     std::vector<std::vector<int>> groups;
     if (ids.empty()) {
@@ -74,13 +83,14 @@ CacheConfig HybridConfigCreator::initializeConfig(const ModelConfig&      model_
     int64_t layer_num = model_config.num_layers;
 
     CacheConfig config;
-    config.layer_num          = static_cast<uint32_t>(layer_num);
-    config.layer_all_num      = static_cast<uint32_t>(layer_num);
-    config.block_num          = 0;
-    config.seq_size_per_block = static_cast<uint32_t>(model_config.attn_config.tokens_per_block);
-    config.use_mla            = model_config.attn_config.use_mla;
-    config.dtype              = dtype;
-    config.linear_step        = 1;
+    config.layer_num                 = static_cast<uint32_t>(layer_num);
+    config.layer_all_num             = static_cast<uint32_t>(layer_num);
+    config.block_num                 = 0;
+    config.seq_size_per_block        = static_cast<uint32_t>(model_config.attn_config.tokens_per_block);
+    config.kernel_seq_size_per_block = config.seq_size_per_block;
+    config.use_mla                   = model_config.attn_config.use_mla;
+    config.dtype                     = dtype;
+    config.linear_step               = 1;
 
     config.global_layer_ids.push_back(linear_layers);
     config.global_layer_ids.push_back(full_layers);
@@ -154,19 +164,53 @@ void HybridConfigCreator::setupCacheConfigSpecs(CacheConfig&                    
 void HybridConfigCreator::setupPhysicalSizes(CacheConfig&          config,
                                              const KVCacheSpecPtr& full_spec,
                                              const KVCacheSpecPtr& linear_spec) {
-    // Decide the physical KV block/scale sizes by taking max between full and linear specs.
-    const size_t full_kv_block_stride_bytes   = full_spec->block_size_bytes();
-    const size_t linear_kv_block_stride_bytes = linear_spec->block_size_bytes();
+    RTP_LLM_CHECK_WITH_INFO(full_spec != nullptr, "full_spec is null");
+    RTP_LLM_CHECK_WITH_INFO(linear_spec != nullptr, "linear_spec is null");
 
-    // now we only support that linear attention block have padding
-    RTP_LLM_CHECK_WITH_INFO(full_kv_block_stride_bytes >= linear_kv_block_stride_bytes,
-                            "not support full attention with padding now");
+    const size_t active_kernel_blocks = config.kernelBlocksPerKvBlock();
+    RTP_LLM_CHECK(active_kernel_blocks > 0);
 
-    config.kv_block_stride_bytes = full_kv_block_stride_bytes;
-    config.kv_block_size_bytes   = static_cast<size_t>(config.group_layer_num) * config.kv_block_stride_bytes;
-    config.kv_scale_stride_bytes = full_spec->scale_block_size_bytes();
-    config.kv_scale_size_bytes   = static_cast<size_t>(config.group_layer_num) * config.kv_scale_stride_bytes;
-    config.block_size_bytes      = config.kv_block_size_bytes + config.kv_scale_size_bytes;
+    const size_t full_live_kv_stride   = full_spec->block_size_bytes();
+    const size_t linear_live_kv_stride = linear_spec->block_size_bytes();
+    RTP_LLM_CHECK(full_live_kv_stride % active_kernel_blocks == 0);
+
+    const size_t full_kernel_pair_bytes = full_live_kv_stride / active_kernel_blocks;
+    RTP_LLM_CHECK(full_kernel_pair_bytes > 0);
+
+    config.kv_block_stride_kernel_blocks =
+        ceilDiv(std::max(full_live_kv_stride, linear_live_kv_stride), full_kernel_pair_bytes);
+    config.kv_block_stride_bytes = config.kv_block_stride_kernel_blocks * full_kernel_pair_bytes;
+    RTP_LLM_CHECK(config.kv_block_stride_bytes >= full_live_kv_stride);
+    RTP_LLM_CHECK(config.kv_block_stride_bytes >= linear_live_kv_stride);
+
+    config.kv_block_size_bytes = static_cast<size_t>(config.group_layer_num) * config.kv_block_stride_bytes;
+
+    const size_t full_live_scale_stride = full_spec->scale_block_size_bytes();
+    if (full_live_scale_stride > 0) {
+        RTP_LLM_CHECK(full_live_scale_stride % active_kernel_blocks == 0);
+        const size_t scale_kernel_pair_bytes = full_live_scale_stride / active_kernel_blocks;
+        config.kv_scale_stride_bytes         = config.kv_block_stride_kernel_blocks * scale_kernel_pair_bytes;
+    } else {
+        config.kv_scale_stride_bytes = 0;
+    }
+    config.kv_scale_size_bytes = static_cast<size_t>(config.group_layer_num) * config.kv_scale_stride_bytes;
+    config.block_size_bytes    = config.kv_block_size_bytes + config.kv_scale_size_bytes;
+}
+
+void HybridConfigCreator::setupCompactPhysicalSizes(CacheConfig&          config,
+                                                    const KVCacheSpecPtr& active_spec,
+                                                    bool                  preserve_existing_scale_stride) {
+    RTP_LLM_CHECK_WITH_INFO(active_spec != nullptr, "active_spec is null");
+
+    config.kv_block_stride_kernel_blocks = config.kernelBlocksPerKvBlock();
+    config.kv_block_stride_bytes         = active_spec->block_size_bytes();
+    config.kv_block_size_bytes           = static_cast<size_t>(config.group_layer_num) * config.kv_block_stride_bytes;
+
+    if (!preserve_existing_scale_stride) {
+        config.kv_scale_stride_bytes = active_spec->scale_block_size_bytes();
+    }
+    config.kv_scale_size_bytes = static_cast<size_t>(config.group_layer_num) * config.kv_scale_stride_bytes;
+    config.block_size_bytes    = config.kv_block_size_bytes + config.kv_scale_size_bytes;
 }
 
 void HybridConfigCreator::setupLayerToGroupMapping(CacheConfig& config) {
@@ -213,7 +257,15 @@ CacheConfig HybridConfigCreator::createHybridConfig(const ModelConfig&       mod
         config.full_group_num);
 
     // Setup physical sizes
-    HybridConfigCreator::setupPhysicalSizes(config, full_spec, linear_spec);
+    if (!full_groups.empty() && !linear_groups.empty()) {
+        HybridConfigCreator::setupPhysicalSizes(config, full_spec, linear_spec);
+    } else if (!full_groups.empty()) {
+        HybridConfigCreator::setupCompactPhysicalSizes(config, full_spec);
+    } else if (!linear_groups.empty()) {
+        HybridConfigCreator::setupCompactPhysicalSizes(config, linear_spec);
+    } else {
+        RTP_LLM_CHECK_WITH_INFO(false, "hybrid config has no cache groups");
+    }
 
     // Setup layer to group mapping
     HybridConfigCreator::setupLayerToGroupMapping(config);

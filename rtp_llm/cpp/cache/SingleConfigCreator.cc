@@ -19,10 +19,11 @@ CacheConfig SingleConfigCreator::createSingleConfig(const ModelConfig&       mod
     }
 
     CacheConfig config;
-    config.layer_num          = static_cast<uint32_t>(layer_num);
-    config.layer_all_num      = static_cast<uint32_t>(layer_num);
-    config.block_num          = 0;
-    config.seq_size_per_block = static_cast<uint32_t>(model_config.attn_config.tokens_per_block);
+    config.layer_num                 = static_cast<uint32_t>(layer_num);
+    config.layer_all_num             = static_cast<uint32_t>(layer_num);
+    config.block_num                 = 0;
+    config.seq_size_per_block        = static_cast<uint32_t>(model_config.attn_config.tokens_per_block);
+    config.kernel_seq_size_per_block = config.seq_size_per_block;
 
     config.use_mla   = model_config.attn_config.use_mla;
     config.dtype     = dtype;
@@ -52,8 +53,9 @@ CacheConfig SingleConfigCreator::createSingleConfig(const ModelConfig&       mod
         config.kv_scale_size_bytes   = static_cast<size_t>(config.layer_num) * config.kv_scale_stride_bytes;
     }
 
-    config.block_size_bytes = config.kv_block_size_bytes + config.kv_scale_size_bytes;
-    config.group_layer_num  = layer_num;  // only 1 group for SingleConfig
+    config.kv_block_stride_kernel_blocks = config.kernelBlocksPerKvBlock();
+    config.block_size_bytes              = config.kv_block_size_bytes + config.kv_scale_size_bytes;
+    config.group_layer_num               = layer_num;  // only 1 group for SingleConfig
 
     // Per-layer block stride (kv + scale).
     const size_t per_layer_stride_bytes = config.kv_block_stride_bytes + config.kv_scale_stride_bytes;

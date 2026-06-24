@@ -51,8 +51,9 @@ struct CacheConfig {
     size_t block_size_bytes    = 0;  // (kv + scales together)
 
     // ---- Per-block strides (one layer) ----
-    size_t kv_block_stride_bytes = 0;
-    size_t kv_scale_stride_bytes = 0;
+    size_t kv_block_stride_bytes         = 0;
+    size_t kv_scale_stride_bytes         = 0;
+    size_t kv_block_stride_kernel_blocks = 1;
 
     // Attention-specific configuration
     int linear_step      = 1;  // For Linear attention: keep one cache block every `linear_step` blocks
@@ -105,6 +106,7 @@ struct CacheConfig {
         OUTPUT_FIELD(block_size_bytes);
         OUTPUT_FIELD(kv_block_stride_bytes);
         OUTPUT_FIELD(kv_scale_stride_bytes);
+        OUTPUT_FIELD(kv_block_stride_kernel_blocks);
         os << "\n";
 
         // Attention-specific configuration section

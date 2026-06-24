@@ -17,6 +17,11 @@ public:
 
     // Calculate the number of layers per group based on linear and full layers count
     static int calculateGroupLayerNum(int linear_layer_count, int full_layer_count);
+    static void
+    setupPhysicalSizes(CacheConfig& config, const KVCacheSpecPtr& full_spec, const KVCacheSpecPtr& linear_spec);
+    static void setupCompactPhysicalSizes(CacheConfig&          config,
+                                          const KVCacheSpecPtr& active_spec,
+                                          bool                  preserve_existing_scale_stride = false);
 
 private:
     // Helper functions for creating hybrid config in the order they appear in the main flow
@@ -38,8 +43,6 @@ private:
                                       const std::vector<std::vector<int>>& full_groups,
                                       const KVCacheSpecPtr&                linear_spec,
                                       const KVCacheSpecPtr&                full_spec);
-    static void
-    setupPhysicalSizes(CacheConfig& config, const KVCacheSpecPtr& full_spec, const KVCacheSpecPtr& linear_spec);
     static void setupLayerToGroupMapping(CacheConfig& config);
 };
 
