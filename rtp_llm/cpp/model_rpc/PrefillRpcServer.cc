@@ -2,6 +2,7 @@
 #include "rtp_llm/cpp/model_rpc/QueryConverter.h"
 #include "rtp_llm/cpp/model_rpc/PrefillRpcServer.h"
 #include "rtp_llm/cpp/utils/DebugUtils.h"
+#include "rtp_llm/cpp/utils/HashUtil.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/engine_base/Host.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
@@ -59,6 +60,12 @@ bool envValueIsTrue(const char* value) {
     return value != nullptr
            && (strcmp(value, "1") == 0 || strcasecmp(value, "true") == 0 || strcasecmp(value, "on") == 0
                || strcasecmp(value, "yes") == 0);
+}
+
+bool envValueIsFalse(const char* value) {
+    return value != nullptr
+           && (strcmp(value, "0") == 0 || strcasecmp(value, "false") == 0 || strcasecmp(value, "off") == 0
+               || strcasecmp(value, "no") == 0);
 }
 
 bool prefillTraceLogEnabled() {
@@ -612,12 +619,6 @@ void fillPrefillTheoryHitMetricsCollector(PrefillRecentCacheKeyMetricsCollector&
     collector.theory_all_hit_count   = snapshot.all_hit_count;
     collector.theory_all_total_count = snapshot.all_total_count;
     collector.theory_all_hit_ratio   = snapshot.all_hit_ratio;
-    collector.theory_1m_hit_count    = snapshot.window_1m.hit_count;
-    collector.theory_1m_total_count  = snapshot.window_1m.total_count;
-    collector.theory_1m_hit_ratio    = snapshot.window_1m.hit_ratio;
-    collector.theory_5m_hit_count    = snapshot.window_5m.hit_count;
-    collector.theory_5m_total_count  = snapshot.window_5m.total_count;
-    collector.theory_5m_hit_ratio    = snapshot.window_5m.hit_ratio;
     collector.theory_10m_hit_count   = snapshot.window_10m.hit_count;
     collector.theory_10m_total_count = snapshot.window_10m.total_count;
     collector.theory_10m_hit_ratio   = snapshot.window_10m.hit_ratio;
