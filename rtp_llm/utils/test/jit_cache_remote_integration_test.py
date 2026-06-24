@@ -1,11 +1,15 @@
 import os
 import sys
+import tarfile
 import tempfile
 import threading
 import time
+import traceback
 import unittest
 from collections import defaultdict
+from multiprocessing import get_context
 from pathlib import Path
+from unittest import mock
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 if str(REPO_ROOT) not in sys.path:
@@ -31,6 +35,138 @@ from rtp_llm.utils.test.jit_cache_manager_test import (
     iter_component_files,
     write_snapshot,
 )
+
+
+def _wait_for_snapshot_publish(manager: JitCacheManager, timeout_s: float = 10) -> None:
+    deadline = time.time() + timeout_s
+    while True:
+        publish_thread = manager._snapshot_publish_thread
+        if publish_thread is None:
+            return
+        remaining = deadline - time.time()
+        if remaining <= 0:
+            raise TimeoutError("timed out waiting for snapshot publish")
+        publish_thread.join(timeout=remaining)
+        if not publish_thread.is_alive():
+            return
+
+
+def _make_jit_manager(
+    local_root: Path, remote_root: Path, run_id: str
+) -> JitCacheManager:
+    remote_root.mkdir(parents=True, exist_ok=True)
+    config = JITConfig()
+    config.local_jit_cache_dir = str(local_root)
+    config.remote_jit_dir = str(remote_root)
+    config.jit_remote_timeout_s = 30
+    manager = JitCacheManager(config, run_id=run_id)
+    manager.bootstrap()
+    return manager
+
+
+def _run_triton_rank_jit(rank: int) -> None:
+    import triton
+    import triton.language as tl
+
+    @triton.jit
+    def rank_add_kernel(x, y, n: tl.constexpr, block: tl.constexpr):
+        offsets = tl.program_id(0) * block + tl.arange(0, block)
+        mask = offsets < n
+        values = tl.load(x + offsets, mask=mask)
+        tl.store(y + offsets, values + 1.0, mask=mask)
+
+    x = torch.arange(256, device="cuda", dtype=torch.float32) + rank
+    y = torch.empty_like(x)
+    rank_add_kernel[(triton.cdiv(x.numel(), 128),)](x, y, x.numel(), block=128)
+    torch.cuda.synchronize()
+    if not torch.allclose(y, x + 1.0):
+        raise AssertionError(f"rank {rank} Triton JIT result mismatch")
+
+
+def _two_rank_snapshot_publish_worker(
+    rank: int,
+    world_size: int,
+    root: str,
+    remote_root: str,
+    barrier,
+    result_queue,
+) -> None:
+    manager = None
+    try:
+        os.environ["RANK"] = str(rank)
+        os.environ["WORLD_SIZE"] = str(world_size)
+        os.environ["TRITON_AUTOTUNE_GPU_NAME"] = "NVIDIA_H20"
+        jit_cache_module.get_gpu_scope.cache_clear()
+
+        if not torch.cuda.is_available():
+            raise RuntimeError("CUDA is not available")
+        torch.cuda.set_device(rank % torch.cuda.device_count())
+
+        root_path = Path(root)
+        remote_path = Path(remote_root)
+        manager = _make_jit_manager(
+            root_path / f"local_rank_{rank}",
+            remote_path,
+            f"rank-{rank}",
+        )
+        prepare = manager.prepare()
+        _run_triton_rank_jit(rank)
+
+        component = COMPONENT_BY_NAME["triton"]
+        local_dir, _ = manager.component_dirs[component.name]
+        generated_files = list(iter_component_files(local_dir, component))
+        if not generated_files:
+            raise RuntimeError(f"rank {rank} Triton JIT produced no syncable files")
+
+        marker_rel = f"rank_markers/rank_{rank}.json"
+        marker_path = local_dir / marker_rel
+        marker_path.parent.mkdir(parents=True, exist_ok=True)
+        marker_path.write_text(f'{{"rank": {rank}}}', encoding="utf-8")
+
+        enqueued = 0
+        for path, rel, _ in iter_component_files(local_dir, component):
+            if manager.enqueue_upload(component, rel):
+                enqueued += 1
+
+        publish_attempted = False
+        original_publish_snapshot = manager._publish_snapshot
+
+        def wrapped_publish_snapshot():
+            nonlocal publish_attempted
+            publish_attempted = True
+            return original_publish_snapshot()
+
+        barrier.wait(timeout=30)
+        with mock.patch.object(
+            manager, "_publish_snapshot", side_effect=wrapped_publish_snapshot
+        ):
+            with mock.patch.object(jit_cache_module.time, "time", return_value=1200.0):
+                summary = manager.sync_once(f"rank_{rank}_publish")
+            _wait_for_snapshot_publish(manager)
+
+        result_queue.put(
+            {
+                "rank": rank,
+                "prepare": prepare,
+                "summary": summary,
+                "publish_attempted": publish_attempted,
+                "enqueued": enqueued,
+                "generated_files": len(generated_files),
+                "marker_member": f"triton/{marker_rel}",
+            }
+        )
+    except Exception:
+        result_queue.put(
+            {
+                "rank": rank,
+                "error": traceback.format_exc(),
+            }
+        )
+    finally:
+        if manager is not None:
+            manager.remote_cache_available = False
+            manager.stop()
+        jit_cache_module.get_gpu_scope.cache_clear()
 
 
 class RemoteJitIntegrationTest(unittest.TestCase):
@@ -275,6 +411,176 @@ class RemoteJitIntegrationTest(unittest.TestCase):
                 missing.append(component.name)
         if missing:
             self.fail(f"missing JIT cache files for components: {missing}")
+
+
+class RemoteSnapshotCompressionDesignTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.old_env = os.environ.copy()
+        os.environ["TRITON_AUTOTUNE_GPU_NAME"] = "NVIDIA_H20"
+        jit_cache_module.get_gpu_scope.cache_clear()
+
+    def tearDown(self):
+        os.environ.clear()
+        os.environ.update(self.old_env)
+        jit_cache_module.get_gpu_scope.cache_clear()
+        self.tmp.cleanup()
+
+    def make_manager(
+        self,
+        local_root: Path,
+        remote_root: Path,
+        run_id: str,
+    ) -> JitCacheManager:
+        remote_root.mkdir(parents=True, exist_ok=True)
+        config = JITConfig()
+        config.local_jit_cache_dir = str(local_root)
+        config.remote_jit_dir = str(remote_root)
+        config.jit_remote_timeout_s = 10
+        manager = JitCacheManager(config, run_id=run_id)
+        manager.bootstrap()
+        return manager
+
+    def wait_for_snapshot_publish(self, manager: JitCacheManager) -> None:
+        deadline = time.time() + 5
+        while True:
+            publish_thread = manager._snapshot_publish_thread
+            if publish_thread is None:
+                return
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                self.fail("timed out waiting for snapshot publish")
+            publish_thread.join(timeout=remaining)
+            if not publish_thread.is_alive():
+                return
+
+    def snapshot_member_names(self, snapshot_path: Path) -> set[str]:
+        dctx = jit_cache_module.zstd.ZstdDecompressor()
+        with snapshot_path.open("rb") as compressed:
+            with dctx.stream_reader(compressed) as reader:
+                with tarfile.open(fileobj=reader, mode="r|") as tar:
+                    return {member.name for member in tar}
+
+    def test_sync_once_publishes_compressed_remote_snapshot_for_next_bootstrap(self):
+        remote_root = self.root / "remote"
+        first = self.make_manager(self.root / "local_first", remote_root, "publisher")
+        try:
+            prepare = first.prepare()
+            self.assertEqual(prepare["cache_state"], "snapshot_miss")
+
+            expected_members = set()
+            for component in COMPONENT_SPECS:
+                local_root, _ = first.component_dirs[component.name]
+                filename = f"kernel/{component.name}{component.sync_suffixes[0]}"
+                local_file = local_root / filename
+                local_file.parent.mkdir(parents=True, exist_ok=True)
+                local_file.write_text(component.name, encoding="utf-8")
+                self.assertTrue(first.enqueue_upload(component, filename))
+                if component.gpu_scoped:
+                    expected_members.add(
+                        f"{component.name}/{jit_cache_module.get_gpu_scope()}/{filename}"
+                    )
+                else:
+                    expected_members.add(f"{component.name}/{filename}")
+
+            with mock.patch.object(
+                jit_cache_module.time,
+                "time",
+                return_value=1200.0,
+            ):
+                summary = first.sync_once("integration_publish")
+            self.wait_for_snapshot_publish(first)
+
+            snapshot_path = remote_root / SNAPSHOT_NAME
+            self.assertEqual(summary["result"], "success")
+            self.assertTrue(snapshot_path.is_file())
+            self.assertEqual(
+                self.snapshot_member_names(snapshot_path), expected_members
+            )
+            self.assertTrue((remote_root / ".jit_snapshot_publish_lease.1").is_dir())
+        finally:
+            first.stop()
+
+        second = self.make_manager(self.root / "local_second", remote_root, "consumer")
+        try:
+            prepare = second.prepare()
+            self.assertEqual(prepare["cache_state"], "snapshot_hit")
+            self.assertEqual(prepare["result"], "success")
+            self.assertEqual(prepare["extracted_files"], len(COMPONENT_SPECS))
+
+            for component in COMPONENT_SPECS:
+                local_root, _ = second.component_dirs[component.name]
+                filename = f"kernel/{component.name}{component.sync_suffixes[0]}"
+                self.assertEqual(
+                    (local_root / filename).read_text(encoding="utf-8"),
+                    component.name,
+                )
+        finally:
+            second.stop()
+
+    def test_two_gpu_rank_processes_compete_for_single_snapshot_publish_lease(self):
+        if not torch.cuda.is_available():
+            self.skipTest("CUDA is not available")
+        if torch.cuda.device_count() < 2:
+            self.skipTest("two CUDA devices are required for 2-rank concurrency")
+
+        world_size = 2
+        remote_root = self.root / "remote_two_rank"
+        ctx = get_context("spawn")
+        barrier = ctx.Barrier(world_size)
+        result_queue = ctx.Queue()
+        processes = [
+            ctx.Process(
+                target=_two_rank_snapshot_publish_worker,
+                args=(
+                    rank,
+                    world_size,
+                    str(self.root),
+                    str(remote_root),
+                    barrier,
+                    result_queue,
+                ),
+            )
+            for rank in range(world_size)
+        ]
+
+        for process in processes:
+            process.start()
+        for process in processes:
+            process.join(timeout=120)
+
+        for process in processes:
+            if process.is_alive():
+                process.terminate()
+                process.join(timeout=5)
+                self.fail(f"rank process {process.pid} timed out")
+            self.assertEqual(process.exitcode, 0)
+
+        results = [result_queue.get(timeout=5) for _ in range(world_size)]
+        errors = [result for result in results if "error" in result]
+        if errors:
+            self.fail("\n".join(error["error"] for error in errors))
+
+        publishers = [result for result in results if result["publish_attempted"]]
+        self.assertEqual(
+            len(publishers),
+            1,
+            f"expected one snapshot publisher, got results={results}",
+        )
+        for result in results:
+            self.assertEqual(result["summary"]["result"], "success")
+            self.assertGreater(result["generated_files"], 0)
+            self.assertGreater(result["enqueued"], 0)
+
+        lease_dirs = list(remote_root.glob(".jit_snapshot_publish_lease.*"))
+        self.assertEqual(len(lease_dirs), 1)
+        self.assertEqual(lease_dirs[0].name, ".jit_snapshot_publish_lease.1")
+
+        snapshot_path = remote_root / SNAPSHOT_NAME
+        self.assertTrue(snapshot_path.is_file())
+        members = self.snapshot_member_names(snapshot_path)
+        self.assertIn(publishers[0]["marker_member"], members)
 
 
 class EventRecord:
