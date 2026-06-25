@@ -47,7 +47,7 @@ means that prefix stays exactly aligned with the old model.
 
 ### 3.2 Sequence assembly (exact, validated against the training code)
 
-| Field | Tokens | token_type | segment_ab |
+| Field | Tokens | token_type | qi_uqi_segment_ids |
 |-------|--------|-----------|------------|
 | query | `query_token_ids` (`101 … 102`) | 0 | A (0) |
 | item  | `enrich_title_token_ids` (non-pad, `… 102`) | 1 | A (0) |
@@ -133,19 +133,19 @@ the model forward. So the actual attention runs through the open-source
 
 | Layer | Change | Repo |
 |-------|--------|------|
-| Engine / attention | block mask (derive `segment_ab`, build the FlashInfer custom mask) | **open-source** (this change) |
+| Engine / attention | block mask (derive `qi_uqi_segment_ids`, build the FlashInfer custom mask) | **open-source** (this change) |
 | Downstream / business | dual head (`w_out_uqi` → 8 floats), renderer inserting `[CLS_UQI user SEP]` | internal `mainse` |
 
 ### 5.1 Open-source changes (this commit)
 
 - **`models_py/modules/factory/attention/block_mask.py`** (new) — production helpers:
-  - `derive_segment_ab(input_ids, cu_seqlens, b_start_token_id=2, sep_token_id=102)`:
+  - `derive_bert_uqi_segment_ids(input_ids, cu_seqlens, b_start_token_id=2, sep_token_id=102)`:
     derive the A/B (0/1) tag from combo token ids; the B span is exactly `[CLS_UQI .. SEP]`
     so vision (after user) stays segment A.
-  - `build_flashinfer_block_mask(segment_ab, cu_seqlens)`: build the ragged logical boolean
+  - `build_bert_uqi_flashinfer_mask(qi_uqi_segment_ids, cu_seqlens)`: build the ragged logical boolean
     mask for FlashInfer (`True` = visible), per-request `[q, kv]` flattened.
 - **`models_py/model_desc/bert.py`** — `BertModel.prepare_fmha_impl`: when
-  `USE_USER_PROFILE_BLOCK_MASK=1`, prefill, and a B segment exists, derive `segment_ab`,
+  `USE_VISION_BERT_UQI_BLOCK_MASK=1`, prefill, and a B segment exists, derive `qi_uqi_segment_ids`,
   build the mask, and route to `PyFlashinferPrefillImpl` with the custom mask. Default off
   → unchanged factory path.
 - **`models_py/modules/factory/attention/cuda_impl/py_flashinfer_mha.py`** —
@@ -164,7 +164,7 @@ the model forward. So the actual attention runs through the open-source
 
 ### 5.3 Flag gating
 
-`USE_USER_PROFILE_BLOCK_MASK` (default `0`) gates the whole path. Off → the original
+`USE_VISION_BERT_UQI_BLOCK_MASK` (default `0`) gates the whole path. Off → the original
 factory attention impl is selected and the reranker is byte-identical to before.
 
 ## 6. Online deployment (reference)
@@ -183,7 +183,7 @@ Validated against 20 real golden samples (token_ids + vision_emb + `score_qi` /
 1. **Reference reproduces golden** — the original training code on the 20 samples
    reproduces `score_qi` **20/20** and `score_uqi` **20/20** within fp32 tiling tolerance,
    confirming the §3.2 assembly.
-2. **Mask equivalence** — `build_flashinfer_block_mask` is **bit-identical** to the
+2. **Mask equivalence** — `build_bert_uqi_flashinfer_mask` is **bit-identical** to the
    training code's `build_block_attention_mask` on all 20 samples (0 mismatched cells).
 3. **Kernel equivalence** — the FlashInfer `custom_mask` op output matches the pure-torch
    eager reference on GPU, and an all-visible mask reproduces full attention.

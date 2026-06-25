@@ -18,8 +18,8 @@ from rtp_llm.models_py.modules import (
     MultimodalEmbeddingInjector,
 )
 from rtp_llm.models_py.modules.factory.attention.block_mask import (
-    build_flashinfer_block_mask,
-    derive_segment_ab,
+    build_bert_uqi_flashinfer_mask,
+    derive_bert_uqi_segment_ids,
 )
 from rtp_llm.ops import HWKernelConfig, ParallelismConfig
 from rtp_llm.ops.compute_ops import (
@@ -138,9 +138,11 @@ class BertModel(GptModelBase):
         # 用户画像分支: 显式 opt-in, 默认关 -> 普通 BERT 老路逐字节不变。
         # 开启后 A 段(Q+I)看不到 B 段(User), B 段从 CLS_UQI(token id) 起。
         self.use_user_profile_mask = (
-            os.environ.get("USE_USER_PROFILE_BLOCK_MASK", "0") == "1"
+            os.environ.get("USE_VISION_BERT_UQI_BLOCK_MASK", "0") == "1"
         )
-        self.cls_uqi_token_id = int(os.environ.get("CLS_UQI_TOKEN_ID", "2"))
+        self.cls_uqi_token_id = int(
+            os.environ.get("VISION_BERT_CLS_UQI_TOKEN_ID", "2")
+        )
 
     def prepare_fmha_impl(
         self, inputs: PyModelInputs, is_cuda_graph: bool = False
@@ -151,12 +153,12 @@ class BertModel(GptModelBase):
             if attn_inputs.is_prefill:
                 # 单次 D2H: cu_seqlens 很小, 两个纯-CPU helper 共用一份拷贝即可。
                 cu_seqlens_cpu = attn_inputs.cu_seqlens.cpu()
-                seg = derive_segment_ab(
+                uqi_segment_ids = derive_bert_uqi_segment_ids(
                     inputs.input_ids.cpu(),
                     cu_seqlens_cpu,
                     self.cls_uqi_token_id,
                 )
-                if int(seg.max()) > 0:  # 真有 B 段才接 block mask
+                if int(uqi_segment_ids.max()) > 0:  # 真有 B 段才接 block mask
                     attn_configs = self.config.getAttentionConfigs(
                         self.parallelism_config.get_attn_tp_size()
                     )
@@ -167,8 +169,8 @@ class BertModel(GptModelBase):
                         PyFlashinferPrefillImpl,
                     )
 
-                    custom_mask = build_flashinfer_block_mask(
-                        seg, cu_seqlens_cpu
+                    custom_mask = build_bert_uqi_flashinfer_mask(
+                        uqi_segment_ids, cu_seqlens_cpu
                     ).to(inputs.input_ids.device)
                     return PyFlashinferPrefillImpl(
                         attn_configs,
