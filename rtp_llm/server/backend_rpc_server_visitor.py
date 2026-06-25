@@ -297,27 +297,26 @@ class BackendRPCServerVisitor:
         missing_roles = [
             role for role in self.backend_role_list if role not in specified_roles
         ]
-        # COMMENTED OUT: Direct connection to prefill/decode bypasses FlexLB
-        # role_addrs: List[RoleAddr] = self.host_service.get_backend_role_addrs(
-        #     missing_roles
-        # )
-        # if role_addrs:
-        #     input.generate_config.role_addrs.extend(role_addrs)
-        #     route_logger.warning(
-        #         "fallback to host service, request_id=%s, addrs=%s",
-        #         input.request_id,
-        #         role_addrs,
-        #     )
-        #     kmonitor.report(
-        #         AccMetrics.DOMAIN_ROUTE_QPS_METRIC,
-        #         1,
-        #     )
-        # else:
-        #     route_logger.error(
-        #         "host service failed, request_id=%s, missing_roles=%s",
-        #         input.request_id,
-        #         missing_roles,
-        #     )
+        role_addrs: List[RoleAddr] = self.host_service.get_backend_role_addrs(
+            missing_roles
+        )
+        if role_addrs:
+            input.generate_config.role_addrs.extend(role_addrs)
+            route_logger.warning(
+                "fallback to host service, request_id=%s, addrs=%s",
+                input.request_id,
+                role_addrs,
+            )
+            kmonitor.report(
+                AccMetrics.DOMAIN_ROUTE_QPS_METRIC,
+                1,
+            )
+        else:
+            route_logger.error(
+                "host service failed, request_id=%s, missing_roles=%s",
+                input.request_id,
+                missing_roles,
+            )
 
     async def route_ips(self, input: GenerateInput):
         # proactive rejection: check cached queue length before making request to master
