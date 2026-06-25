@@ -47,7 +47,7 @@ class Bert(BaseModel):
 
     def support_cuda_graph(self) -> bool:
         # eager 分块 mask 路径不支持 cuda graph capture; 开启用户画像分支时关闭。
-        if os.environ.get("USE_USER_PROFILE_BLOCK_MASK", "0") == "1":
+        if os.environ.get("USE_VISION_BERT_UQI_BLOCK_MASK", "0") == "1":
             return False
         return True
 
