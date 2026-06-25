@@ -194,16 +194,13 @@ void setGroupBlockNumsForTest(CacheConfig& config, uint32_t block_num) {
     std::vector<uint32_t> block_nums(group_num, block_num);
     std::vector<size_t>   kv_strides;
     std::vector<size_t>   scale_strides;
-    std::vector<size_t>   block_sizes;
     kv_strides.reserve(group_num);
     scale_strides.reserve(group_num);
-    block_sizes.reserve(group_num);
     for (size_t gid = 0; gid < group_num; ++gid) {
         kv_strides.push_back(config.kvBlockStrideBytesForGroup(gid));
         scale_strides.push_back(config.kvScaleStrideBytesForGroup(gid));
-        block_sizes.push_back(config.blockSizeBytesForGroup(gid));
     }
-    config.setGroupBlockLayout(block_nums, kv_strides, scale_strides, block_sizes);
+    config.setGroupBlockLayout(block_nums, kv_strides, scale_strides);
 }
 
 std::vector<size_t> dsv4BlockPositionsForCacheTransfer(const CacheConfig& config,

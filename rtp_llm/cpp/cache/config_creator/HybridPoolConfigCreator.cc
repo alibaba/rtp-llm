@@ -354,7 +354,6 @@ void setupIndependentPoolSizes(CacheConfig& config, bool is_mtp) {
     config.group_seq_size_per_block.resize(group_num, config.seq_size_per_block);
     std::vector<size_t> group_kv_block_stride_bytes(group_num, 0);
     std::vector<size_t> group_kv_scale_stride_bytes(group_num, 0);
-    std::vector<size_t> group_block_size_bytes(group_num, 0);
 
     size_t   max_kv_stride           = 0;
     size_t   max_scale_stride        = 0;
@@ -374,7 +373,6 @@ void setupIndependentPoolSizes(CacheConfig& config, bool is_mtp) {
         const size_t scale_stride               = kernel_scale * group_bpk;
         group_kv_block_stride_bytes[gid]        = kv_stride;
         group_kv_scale_stride_bytes[gid]        = scale_stride;
-        group_block_size_bytes[gid]             = static_cast<size_t>(layer_count) * (kv_stride + scale_stride);
         const auto type     = config.typeForGroup(gid);
         const bool is_state = spec->is_state_cache;
         if (!is_state && type == CacheGroupType::FULL) {
@@ -407,8 +405,7 @@ void setupIndependentPoolSizes(CacheConfig& config, bool is_mtp) {
         config.block_size_bytes = paged_block_bytes;
     }
     config.explicitly_sized_pool_reserve_bytes = 0;
-    config.setGroupBlockLayout(
-        group_block_nums, group_kv_block_stride_bytes, group_kv_scale_stride_bytes, group_block_size_bytes);
+    config.setGroupBlockLayout(group_block_nums, group_kv_block_stride_bytes, group_kv_scale_stride_bytes);
 }
 
 void populateHybridAttentionGroups(CacheConfig&             config,

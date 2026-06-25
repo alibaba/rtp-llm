@@ -132,13 +132,7 @@ void setGroupStridesForConfig(CacheConfig& config,
     if (block_nums.empty()) {
         block_nums.assign(static_cast<size_t>(config.groupNums()), config.block_num);
     }
-    std::vector<size_t> block_size_bytes;
-    block_size_bytes.reserve(kv_block_stride_bytes.size());
-    for (size_t gid = 0; gid < kv_block_stride_bytes.size(); ++gid) {
-        block_size_bytes.push_back(
-            (kv_block_stride_bytes[gid] + kv_scale_stride_bytes[gid]) * config.layerIdsForGroup(gid).size());
-    }
-    config.setGroupBlockLayout(block_nums, kv_block_stride_bytes, kv_scale_stride_bytes, block_size_bytes);
+    config.setGroupBlockLayout(block_nums, kv_block_stride_bytes, kv_scale_stride_bytes);
 }
 
 void makeConfigUseZeroStrideSpec(CacheConfig& config) {
@@ -207,7 +201,6 @@ CacheConfig createDsv4TypedConnectorConfig() {
     add_tag(1, "swa_kv", 6);
 
     std::vector<KVCacheSpecPtr> specs(kDsv4PoolNum);
-    std::vector<size_t>         group_block_size_bytes(kDsv4PoolNum, 0);
     for (size_t gid = 0; gid < kDsv4PoolNum; ++gid) {
         if (group_types[gid] == CacheGroupType::FULL) {
             auto spec                = std::make_shared<CompressedKVCacheSpec>();
@@ -230,14 +223,12 @@ CacheConfig createDsv4TypedConnectorConfig() {
             spec->seq_size_per_block = static_cast<uint32_t>(config.seq_size_per_block);
             specs[gid]               = spec;
         }
-        group_block_size_bytes[gid] = group_kv_block_stride_bytes[gid] * layers_by_group[gid].size();
     }
     config.fromGroupedSpecs(specs, layers_by_group, group_types, group_tags);
     config.setGroupPolicies(group_policies);
     config.setGroupBlockLayout(std::vector<uint32_t>(kDsv4PoolNum, config.block_num),
                                group_kv_block_stride_bytes,
-                               group_kv_scale_stride_bytes,
-                               group_block_size_bytes);
+                               group_kv_scale_stride_bytes);
 
     return config;
 }

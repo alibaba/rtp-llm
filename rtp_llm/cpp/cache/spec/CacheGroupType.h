@@ -39,6 +39,7 @@ struct CacheGroupPolicy {
     bool             has_kernel_block_subdiv   = true;
     bool             cp_compact_tail_blocks    = false;
     bool             is_reservable             = true;
+    CacheGroupType   group_type                = CacheGroupType::FULL;
 };
 
 inline const char* cacheGroupTypeName(CacheGroupType group_type) {
@@ -67,6 +68,7 @@ inline const char* cacheEvictPolicyName(CacheEvictPolicy evict_policy) {
 
 inline CacheGroupPolicy defaultCacheGroupPolicy(CacheGroupType group_type) {
     CacheGroupPolicy policy;
+    policy.group_type         = group_type;
     policy.active_tail_blocks = group_type == CacheGroupType::LINEAR ? 1 : (group_type == CacheGroupType::SWA ? 2 : 0);
     policy.prefix_reusable = group_type == CacheGroupType::FULL;
     policy.is_cp_shardable = group_type == CacheGroupType::FULL;

@@ -128,16 +128,13 @@ static ModelConfig makeDSV4ManagerFlashModelConfig() {
 static void setGroupBlockNumsForTest(CacheConfig& config, const std::vector<uint32_t>& block_nums) {
     std::vector<size_t> kv_strides;
     std::vector<size_t> scale_strides;
-    std::vector<size_t> block_sizes;
     kv_strides.reserve(static_cast<size_t>(config.groupNums()));
     scale_strides.reserve(static_cast<size_t>(config.groupNums()));
-    block_sizes.reserve(static_cast<size_t>(config.groupNums()));
     for (size_t gid = 0; gid < static_cast<size_t>(config.groupNums()); ++gid) {
         kv_strides.push_back(config.kvBlockStrideBytesForGroup(gid));
         scale_strides.push_back(config.kvScaleStrideBytesForGroup(gid));
-        block_sizes.push_back(config.blockSizeBytesForGroup(gid));
     }
-    config.setGroupBlockLayout(block_nums, kv_strides, scale_strides, block_sizes);
+    config.setGroupBlockLayout(block_nums, kv_strides, scale_strides);
 }
 
 static CacheConfig makeCompactDSV4ManagerConfig(uint32_t block_num = 16) {

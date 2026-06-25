@@ -131,12 +131,7 @@ CacheConfig makeTinyTypedHybridPoolConfig() {
     const std::vector<size_t> group_kv_block_stride_bytes = {csa_spec->block_size_bytes(), swa_spec->block_size_bytes()};
     const std::vector<size_t> group_kv_scale_stride_bytes = {csa_spec->scale_block_size_bytes(),
                                                              swa_spec->scale_block_size_bytes()};
-    const std::vector<size_t> group_block_size_bytes = {
-        group_kv_block_stride_bytes[0] * 2, group_kv_block_stride_bytes[1] * 2};
-    config.setGroupBlockLayout(group_block_nums,
-                               group_kv_block_stride_bytes,
-                               group_kv_scale_stride_bytes,
-                               group_block_size_bytes);
+    config.setGroupBlockLayout(group_block_nums, group_kv_block_stride_bytes, group_kv_scale_stride_bytes);
     config.kv_block_stride_bytes       = swa_spec->block_size_bytes();
     config.kv_scale_stride_bytes       = 0;
     config.kv_block_size_bytes         = static_cast<size_t>(config.layer_all_num) * config.kv_block_stride_bytes;
@@ -235,18 +230,12 @@ CacheConfig makeCompactDsv4TypedMemoryCopyConfig(bool use_flash) {
 
     std::vector<KVCacheSpecPtr> specs;
     specs.reserve(kDsv4PoolNum);
-    std::vector<size_t> group_block_size_bytes;
-    group_block_size_bytes.reserve(kDsv4PoolNum);
     for (size_t gid = 0; gid < kDsv4PoolNum; ++gid) {
         specs.push_back(make_spec(gid));
-        group_block_size_bytes.push_back(group_kv_block_stride_bytes[gid] * layers_by_group[gid].size());
     }
     config.fromGroupedSpecs(specs, layers_by_group, group_types, group_tags);
     config.setGroupPolicies(group_policies);
-    config.setGroupBlockLayout(group_block_nums,
-                               group_kv_block_stride_bytes,
-                               group_kv_scale_stride_bytes,
-                               group_block_size_bytes);
+    config.setGroupBlockLayout(group_block_nums, group_kv_block_stride_bytes, group_kv_scale_stride_bytes);
     return config;
 }
 
@@ -280,13 +269,7 @@ void setGroupStridesForConfig(CacheConfig& config,
     if (block_nums.empty()) {
         block_nums.assign(static_cast<size_t>(config.groupNums()), config.block_num);
     }
-    std::vector<size_t> block_size_bytes;
-    block_size_bytes.reserve(kv_block_stride_bytes.size());
-    for (size_t gid = 0; gid < kv_block_stride_bytes.size(); ++gid) {
-        block_size_bytes.push_back(
-            (kv_block_stride_bytes[gid] + kv_scale_stride_bytes[gid]) * config.layerIdsForGroup(gid).size());
-    }
-    config.setGroupBlockLayout(block_nums, kv_block_stride_bytes, kv_scale_stride_bytes, block_size_bytes);
+    config.setGroupBlockLayout(block_nums, kv_block_stride_bytes, kv_scale_stride_bytes);
 }
 
 void setBlockBytes(const BlockInfo& b, size_t byte_offset, size_t byte_len, char c) {
