@@ -32,6 +32,7 @@ import torch
 from rtp_llm.models_py.kernels.cuda.mxfp8_ops import (
     mxfp8_grouped_gemm,
     mxfp8_grouped_gemm_masked,
+    mxfp8_grouped_gemm_masked_prequantized,
     pack_mxfp8_scale,
 )
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
@@ -366,25 +367,48 @@ class Mxfp8LowLatencyExecutor(Mxfp8DeepepExecutor):
         )
         inter = self.N // 2
         if alpha is not None and limit is not None:
-            act = swiglu_oai_torch(upgate, alpha, limit, gate_first=False).contiguous()
+            from rtp_llm.models_py.triton_kernels.moe.mxfp8_kernels import (
+                mxfp8_swiglu_oai_quant_active_row_packed_triton,
+            )
+
+            act_q, act_s_packed = mxfp8_swiglu_oai_quant_active_row_packed_triton(
+                upgate,
+                masked_m,
+                alpha,
+                limit,
+                active_row_experts,
+                active_row_tokens,
+                active_row_count,
+                max_active_rows=quant_max_active_rows,
+            )
+            del upgate
+            down = mxfp8_grouped_gemm_masked_prequantized(
+                act_q,
+                act_s_packed,
+                self.w2,
+                w2_sp,
+                masked_m,
+                expected_m,
+            )
+            del act_q, act_s_packed
         else:
             act = torch.empty(E * M, inter, device=upgate.device, dtype=torch.bfloat16)
             silu_and_mul(act, upgate.reshape(E * M, self.N).contiguous())
             act = act.reshape(E, M, inter)
-        del upgate
-        down = mxfp8_grouped_gemm_masked(
-            act.contiguous(),
-            self.w2,
-            w2_sp,
-            masked_m,
-            expected_m,
-            quant_max_m=quant_max_m,
-            active_row_experts=active_row_experts,
-            active_row_tokens=active_row_tokens,
-            active_row_count=active_row_count,
-            quant_max_active_rows=quant_max_active_rows,
-        )
-        del act
+            del upgate
+            down = mxfp8_grouped_gemm_masked(
+                act.contiguous(),
+                self.w2,
+                w2_sp,
+                masked_m,
+                expected_m,
+                quant_max_m=quant_max_m,
+                active_row_experts=active_row_experts,
+                active_row_tokens=active_row_tokens,
+                active_row_count=active_row_count,
+                quant_max_active_rows=quant_max_active_rows,
+            )
+            del act
         # DeepEP low_latency_combine consumes only routed slots from the dispatch
         # handle. Keep padded rows untouched; zeroing the full [E, M, H] buffer
         # costs hundreds of microseconds in decode profiles.

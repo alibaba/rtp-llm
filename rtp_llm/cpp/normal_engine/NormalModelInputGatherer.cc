@@ -499,10 +499,10 @@ absl::Status NormalModelInputGatherer::processDecodeStreams(GptModelInputs&     
         }
     }
     std::vector<torch::Tensor> normal_combo_tokens_gpu;
-    std::vector<torch::Tensor> normal_sequence_lengths_gpu;
+    std::vector<torch::Tensor> normal_next_seq_lens_gpu;
     if (use_normal_device_state) {
         normal_combo_tokens_gpu.reserve(stream_groups.totalDecodeBatchSize());
-        normal_sequence_lengths_gpu.reserve(stream_groups.totalDecodeBatchSize());
+        normal_next_seq_lens_gpu.reserve(stream_groups.totalDecodeBatchSize());
     }
     const bool pd_debug_enabled     = pdDebugEnabled();
     bool       pd_debug_long_decode = false;
@@ -538,7 +538,7 @@ absl::Status NormalModelInputGatherer::processDecodeStreams(GptModelInputs&     
                                         ctx.batch_idx);
                 }
                 normal_combo_tokens_gpu.push_back(state.last_sample_token_gpu.reshape({1}));
-                normal_sequence_lengths_gpu.push_back((state.next_seq_len_gpu - 1).to(torch::kInt32).reshape({1}));
+                normal_next_seq_lens_gpu.push_back(state.next_seq_len_gpu.reshape({1}));
                 ctx.input_lengths[ctx.batch_idx] = stream->inputLength();
             } else {
                 auto currentTokens = stream->currentExecuteTokens(i);
@@ -566,7 +566,7 @@ absl::Status NormalModelInputGatherer::processDecodeStreams(GptModelInputs&     
 
     if (use_normal_device_state) {
         model_input.combo_tokens     = torch::cat(normal_combo_tokens_gpu, 0).to(runtimeCudaI32Options());
-        model_input.sequence_lengths = torch::cat(normal_sequence_lengths_gpu, 0).to(runtimeCudaI32Options());
+        model_input.sequence_lengths = (torch::cat(normal_next_seq_lens_gpu, 0) - 1).to(runtimeCudaI32Options());
     }
     if (pd_debug_enabled && pd_debug_long_decode) {
         static std::atomic<int> debug_log_budget{256};

@@ -242,3 +242,36 @@ def mxfp8_grouped_gemm_masked(
             disable_ue8m0_cast=True,
         )
     return out
+
+
+def mxfp8_grouped_gemm_masked_prequantized(
+    a_q: torch.Tensor,
+    a_s_packed: torch.Tensor,
+    weight_e4m3: torch.Tensor,
+    weight_scale_packed: torch.Tensor,
+    masked_m: torch.Tensor,
+    expected_m: int,
+    out_dtype: torch.dtype = torch.bfloat16,
+) -> torch.Tensor:
+    """Masked DeepGEMM with activations already quantized to MXFP8.
+
+    This is used by fused activation+quant decode paths to avoid materializing
+    a BF16 intermediate only to immediately read it again for MXFP8 quant.
+    """
+    assert a_q.dim() == 3, f"expected [E, M, K], got {tuple(a_q.shape)}"
+    E, M, _ = a_q.shape
+    assert E == weight_e4m3.shape[0]
+    N = weight_e4m3.shape[1]
+    out = torch.empty(E, M, N, device=a_q.device, dtype=out_dtype)
+    with torch.cuda.device(a_q.device):
+        m_grouped_fp8_fp4_gemm_nt_masked(
+            (a_q, a_s_packed),
+            (weight_e4m3, weight_scale_packed),
+            out,
+            masked_m,
+            expected_m,
+            recipe_a=(1, MX_BLOCK),
+            recipe_b=(1, MX_BLOCK),
+            disable_ue8m0_cast=True,
+        )
+    return out

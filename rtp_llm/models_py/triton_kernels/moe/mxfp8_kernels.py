@@ -318,6 +318,84 @@ def _mxfp8_quant_act_active_row_kernel(
     )
 
 
+@triton.jit
+def _mxfp8_swiglu_oai_quant_active_row_kernel(
+    x_ptr,
+    q_ptr,
+    s_ptr,
+    row_expert_ptr,
+    row_token_ptr,
+    row_count_ptr,
+    masked_m_ptr,
+    x_stride_e,
+    x_stride_m,
+    x_stride_k,
+    q_stride_e,
+    q_stride_m,
+    q_stride_k,
+    s_stride_e,
+    s_stride_m,
+    s_stride_g,
+    K2: tl.constexpr,
+    ALPHA: tl.constexpr,
+    LIMIT: tl.constexpr,
+    FP8_MAX: tl.constexpr,
+    GROUP: tl.constexpr,
+):
+    row_slot = tl.program_id(0)
+    packed_group = tl.program_id(1)
+    if row_slot >= tl.load(row_count_ptr):
+        return
+    expert = tl.load(row_expert_ptr + row_slot).to(tl.int64)
+    token = tl.load(row_token_ptr + row_slot).to(tl.int64)
+    if token >= tl.load(masked_m_ptr + expert):
+        return
+
+    offs = tl.arange(0, GROUP)
+    base_group = packed_group * 4
+    packed_scale: tl.int32 = 0
+    half_k: tl.constexpr = K2 // 2
+
+    for g in tl.static_range(4):
+        group = base_group + g
+        cols = group * GROUP + offs
+        mask = cols < half_k
+        up = tl.load(
+            x_ptr + expert * x_stride_e + token * x_stride_m + cols * x_stride_k,
+            mask=mask,
+            other=0.0,
+        ).to(tl.float32)
+        gate = tl.load(
+            x_ptr
+            + expert * x_stride_e
+            + token * x_stride_m
+            + (cols + half_k) * x_stride_k,
+            mask=mask,
+            other=0.0,
+        ).to(tl.float32)
+        gate = tl.minimum(gate, LIMIT)
+        up = tl.minimum(tl.maximum(up, -LIMIT), LIMIT)
+        vals = gate * tl.sigmoid(gate * ALPHA) * (up + 1.0)
+        # Match the previous path, which materializes the activation as BF16
+        # before MXFP8 quantization.
+        vals = vals.to(tl.bfloat16).to(tl.float32)
+        amax = tl.maximum(tl.max(tl.abs(vals), axis=0), 1e-20)
+        scale, exp_bits = _ue8m0_pow2_round(amax / FP8_MAX)
+        q_vals = vals / scale
+        q_vals = tl.minimum(tl.maximum(q_vals, -FP8_MAX), FP8_MAX)
+        tl.store(
+            q_ptr + expert * q_stride_e + token * q_stride_m + cols * q_stride_k,
+            q_vals.to(q_ptr.dtype.element_ty),
+            mask=mask,
+        )
+        packed_scale = packed_scale | (exp_bits.to(tl.int32) << (g * 8))
+
+    tl.store(
+        s_ptr + expert * s_stride_e + token * s_stride_m + packed_group * s_stride_g,
+        packed_scale,
+    )
+
+
 def mxfp8_build_active_experts(masked_m: torch.Tensor, E: int):
     active_experts = torch.empty((E,), device=masked_m.device, dtype=torch.int32)
     active_count = torch.empty((1,), device=masked_m.device, dtype=torch.int32)
@@ -464,4 +542,63 @@ def mxfp8_quant_act_masked_packed_triton(
             GROUP=MX_BLOCK,
             num_warps=1,
         )
+    return q, s_packed
+
+
+def mxfp8_swiglu_oai_quant_active_row_packed_triton(
+    x: torch.Tensor,
+    masked_m: torch.Tensor,
+    alpha: float,
+    limit: float,
+    active_row_experts: torch.Tensor,
+    active_row_tokens: torch.Tensor,
+    active_row_count: torch.Tensor,
+    max_active_rows: int | None = None,
+):
+    """Fuse MiniMax-M3 SwiGLU-OAI activation with MXFP8 active-row quant.
+
+    ``x`` is the first MoE GEMM output in [up | gate] layout. The result is
+    directly consumable by DeepGEMM masked MXFP8 GEMM.
+    """
+    assert x.dim() == 3, f"expected [E, M, 2K], got {tuple(x.shape)}"
+    E, M, K2 = x.shape
+    assert K2 % 2 == 0
+    K = K2 // 2
+    assert K % (MX_BLOCK * 4) == 0, f"K={K} must be a multiple of {MX_BLOCK * 4}"
+    assert masked_m.numel() == E
+    q = torch.empty((E, M, K), device=x.device, dtype=torch.float8_e4m3fn)
+    scale_storage = torch.empty(
+        (E, K // (MX_BLOCK * 4), M), device=x.device, dtype=torch.int32
+    )
+    s_packed = scale_storage.transpose(1, 2)
+    active_rows = (
+        E * M if max_active_rows is None else max(0, min(E * M, int(max_active_rows)))
+    )
+    if E == 0 or M == 0 or active_rows == 0:
+        return q, s_packed
+    grid = (active_rows, K // (MX_BLOCK * 4))
+    _mxfp8_swiglu_oai_quant_active_row_kernel[grid](
+        x,
+        q,
+        s_packed,
+        active_row_experts,
+        active_row_tokens,
+        active_row_count,
+        masked_m,
+        x.stride(0),
+        x.stride(1),
+        x.stride(2),
+        q.stride(0),
+        q.stride(1),
+        q.stride(2),
+        s_packed.stride(0),
+        s_packed.stride(1),
+        s_packed.stride(2),
+        K2=K2,
+        ALPHA=float(alpha),
+        LIMIT=float(limit),
+        FP8_MAX=float(_FP8_E4M3_MAX),
+        GROUP=MX_BLOCK,
+        num_warps=1,
+    )
     return q, s_packed
