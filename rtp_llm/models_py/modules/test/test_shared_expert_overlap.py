@@ -151,6 +151,22 @@ class TestTokenThreshold(unittest.TestCase):
                     expected = _dummy_shared_expert(x)
                     torch.testing.assert_close(output, expected)
 
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
+    def test_cuda_graph_capture_falls_back_to_sequential(self):
+        with _env("MOE_SHARED_EXPERT_OVERLAP", "1"):
+            with _env("MOEDBG", "0"):
+                executor = SharedExpertOverlapExecutor()
+                x = torch.randn(16, 64, device="cuda")
+                original = torch.cuda.is_current_stream_capturing
+                try:
+                    torch.cuda.is_current_stream_capturing = lambda: True
+                    executor.start(_dummy_shared_expert, x)
+                    output = executor.finish()
+                finally:
+                    torch.cuda.is_current_stream_capturing = original
+                self.assertIsNone(executor._shared_expert_stream)
+                torch.testing.assert_close(output, _dummy_shared_expert(x))
+
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
 class TestOverlapCorrectness(unittest.TestCase):

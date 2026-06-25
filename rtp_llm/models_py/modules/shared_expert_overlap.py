@@ -13,10 +13,10 @@ Design notes (aligned with ``dsv4/moe/shared_expert.py:OverlapSharedExpertExecut
   - Token-count threshold (``MOE_SHARED_EXPERT_OVERLAP_TOKEN_THRESHOLD``,
     default 4096): large batches make the shared expert heavy enough that
     overlap adds stream-switching cost without hiding it behind dispatch.
-  - CUDA graph capture: ``prepare()`` pre-creates the auxiliary stream
-    *before* capture so ``start()`` can still dispatch to it during
-    capture.  ``record_stream`` is skipped during capture because the
-    graph-replay allocator manages tensor lifetimes on its own.
+  - CUDA graph capture: overlap is disabled while capture is in progress.
+    Capturing the auxiliary stream once per graph/layer creates a large
+    multi-stream replay topology; the sequential fallback keeps decode graph
+    capture compact and matches the DSV4 shared expert policy.
 """
 
 from __future__ import annotations
@@ -118,12 +118,10 @@ class SharedExpertOverlapExecutor:
         synchronously on the current stream and the result is stored
         for :meth:`finish`.
 
-        During CUDA graph capture the function still dispatches to the
-        pre-created auxiliary stream (the graph records the multi-stream
-        topology), but ``record_stream`` is skipped because the
-        graph-replay allocator manages tensor lifetimes independently.
+        During CUDA graph capture the function falls back to synchronous
+        execution on the current stream. This avoids recording one auxiliary
+        stream lane per captured shared-expert call.
         """
-        capturing = torch.cuda.is_current_stream_capturing()
         if not self._can_overlap(args):
             self._shared_expert_stream = None
             self._shared_expert_output = fn(*args, **kwargs)
@@ -133,16 +131,12 @@ class SharedExpertOverlapExecutor:
         device = hidden_states.device
         stream = _get_or_create_shared_expert_stream(device)
 
-        # During CUDA graph capture the replay allocator tracks tensor
-        # lifetimes on its own; calling record_stream inside capture can
-        # corrupt allocator state.
-        if not capturing:
-            for arg in args:
-                if isinstance(arg, torch.Tensor) and arg.is_cuda:
-                    arg.record_stream(stream)
-            for v in kwargs.values():
-                if isinstance(v, torch.Tensor) and v.is_cuda:
-                    v.record_stream(stream)
+        for arg in args:
+            if isinstance(arg, torch.Tensor) and arg.is_cuda:
+                arg.record_stream(stream)
+        for v in kwargs.values():
+            if isinstance(v, torch.Tensor) and v.is_cuda:
+                v.record_stream(stream)
 
         # Synchronise: aux stream waits for main-stream producers.
         stream.wait_stream(torch.cuda.current_stream(device))
@@ -184,6 +178,11 @@ class SharedExpertOverlapExecutor:
         # CUDA graph warmup runs a single forward pass to prime kernel caches;
         # overlap would add unnecessary stream synchronisation overhead there.
         if _is_cuda_graph_warmup():
+            return False
+        # Do not capture the auxiliary shared-expert stream into decode CUDA
+        # graphs. This keeps graph replay on the main stream and avoids dozens
+        # of per-layer stream lanes when overlap is enabled globally.
+        if torch.cuda.is_current_stream_capturing():
             return False
         # Token-count threshold: large batches make the shared expert itself
         # expensive enough that it no longer hides behind dispatch/combine.
