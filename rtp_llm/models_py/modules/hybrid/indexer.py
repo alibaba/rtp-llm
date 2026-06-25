@@ -61,6 +61,17 @@ class Indexer(nn.Module):
         self.softmax_scale = self.index_head_dim**-0.5
         self.weights_scale = self.index_n_heads**-0.5
         self.blocksize = attn_config.kernel_tokens_per_block  # page size, typically 64
+        # Owner (physical) block size used by the C++ KVCacheAllocator / CPSlotMapper
+        # to decide page-RR ownership. bpk = owner_tpb / kernel_tpb >= 1. Mirrors the
+        # DSV4 indexer's _kv_owner_tokens_per_block contract; threaded into
+        # _get_topk_ragged_cp so build_indexer_cp_chunk_plan computes per-rank padded
+        # local KV lens and restore indices at the owner granularity that matches
+        # how prefill writes were laid out via cp_params.sharded_slot_mapping.
+        kernel_tpb = int(attn_config.kernel_tokens_per_block)
+        owner_tpb = int(getattr(attn_config, "tokens_per_block", kernel_tpb))
+        if owner_tpb <= 0 or kernel_tpb <= 0 or owner_tpb % kernel_tpb != 0:
+            owner_tpb = kernel_tpb
+        self._kv_owner_tokens_per_block = owner_tpb
         self.indexer_size = self.index_head_dim / 2 + self.index_head_dim / 128 * 2
         self.is_neox_style = attn_config.rope_config.indexer_is_neox_style
         self.parallelism_config = parallelism_config
@@ -291,6 +302,7 @@ class Indexer(nn.Module):
                 bool(getattr(cp_params, "kv_cache_sharded", False)),
                 int(getattr(cp_params, "cp_size", 1)),
                 int(getattr(cp_params, "cp_rank", 0)),
+                kv_owner_tokens_per_block=self._kv_owner_tokens_per_block,
             )
         return self.indexer_op._get_topk_ragged(
             q_fp8, weights, kv_cache, fmha_params, attention_inputs
