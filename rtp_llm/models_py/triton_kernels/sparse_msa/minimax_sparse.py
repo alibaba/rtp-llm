@@ -24,7 +24,10 @@ def _cuda_graph_forward_active() -> bool:
 
 
 from .common.index import topk_index_reduce
-from .decode.flash_with_topk_idx import flash_decode_with_topk_idx
+from .decode.flash_with_topk_idx import (
+    flash_decode_with_topk_idx,
+    flash_decode_with_topk_idx_paged,
+)
 from .decode.topk_sparse import (
     flash_decode_with_gqa_share_sparse,
     flash_decode_with_gqa_share_sparse_paged,
@@ -196,6 +199,84 @@ def minimax_sparse_prefill(
     return idx_o, o
 
 
+def minimax_paged_sparse_decode(
+    q: torch.Tensor,  # [batch_size, num_q_heads, qk_head_dim]
+    sink: Optional[torch.Tensor],
+    idx_q: torch.Tensor,  # [batch_size, num_idx_heads, idx_head_dim]
+    idx_sink: Optional[torch.Tensor],
+    seq_lens: torch.Tensor,  # [batch_size]
+    max_seqlen: int,
+    block_size_k: int,
+    topk: int,
+    init_blocks: int,
+    local_blocks: int,
+    paged_main_k: torch.Tensor,  # [block, kh, page, dim]
+    paged_main_v: torch.Tensor,  # [block, kh, page, dim]
+    phys_block_table: torch.Tensor,  # [batch, max_blocks]
+    paged_idx_k: torch.Tensor,  # [block, page, idx_dim]
+    sm_scale: Optional[float] = None,
+    idx_sm_scale: Optional[float] = None,
+    score_type: str = "max",
+    disable_index_value: bool = False,
+):
+    """Paged-only sparse decode that never consumes token-major scratch caches."""
+    if not disable_index_value:
+        raise RuntimeError(
+            "minimax_paged_sparse_decode requires disable_index_value=True; "
+            "idx value decode still uses the token-major scratch path."
+        )
+    if paged_main_k is None or paged_main_v is None or paged_idx_k is None:
+        raise RuntimeError("paged sparse decode requires paged main K/V and idx_K")
+    if phys_block_table is None:
+        raise RuntimeError("paged sparse decode requires a physical block table")
+    if int(paged_main_k.shape[2]) != int(block_size_k):
+        raise RuntimeError(
+            f"paged main K/V page_size={int(paged_main_k.shape[2])} "
+            f"must equal block_size_k={block_size_k}"
+        )
+    if int(paged_idx_k.shape[1]) != int(block_size_k):
+        raise RuntimeError(
+            f"paged idx_K page_size={int(paged_idx_k.shape[1])} "
+            f"must equal block_size_k={block_size_k}"
+        )
+
+    num_idx_heads = idx_q.shape[1]
+    num_kv_heads = paged_main_k.shape[1]
+    idx_group_size = num_idx_heads // num_kv_heads
+
+    idx_o, topk_idx = flash_decode_with_topk_idx_paged(
+        q=idx_q,
+        sink=idx_sink,
+        k_paged=paged_idx_k,
+        block_table=phys_block_table,
+        seq_lens=seq_lens,
+        max_seqlen=max_seqlen,
+        block_size=block_size_k,
+        topk=topk,
+        init_blocks=init_blocks,
+        local_blocks=local_blocks,
+        sm_scale=idx_sm_scale,
+        score_type=score_type,
+    )
+    if idx_group_size > 1:
+        topk_idx = topk_index_reduce(
+            topk_idx.view(num_kv_heads, idx_group_size, -1, topk), dim=1
+        )
+
+    o = flash_decode_with_gqa_share_sparse_paged(
+        q=q,
+        sink=sink,
+        k_paged=paged_main_k,
+        v_paged=paged_main_v,
+        block_table=phys_block_table,
+        seq_lens=seq_lens,
+        block_size=block_size_k,
+        topk_idx=topk_idx,
+        sm_scale=sm_scale,
+    )
+    return idx_o, o
+
+
 def minimax_sparse_decode(
     q: torch.Tensor,  # [batch_size, num_q_heads, qk_head_dim]
     sink: Optional[torch.Tensor],  # [num_q_heads, qk_head_dim]
@@ -254,7 +335,8 @@ def minimax_sparse_decode(
         and sink is None
         and batch <= 1
         and not _cuda_graph_forward_active()
-        and k_cache is not None  # zero-copy decode: k_cache None -> use legacy paged path
+        and k_cache
+        is not None  # zero-copy decode: k_cache None -> use legacy paged path
     )
     if use_trtllm:
         sm_scale_v = sm_scale if sm_scale is not None else q.shape[-1] ** -0.5

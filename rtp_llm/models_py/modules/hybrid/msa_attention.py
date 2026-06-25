@@ -14,15 +14,14 @@ Design (paged-only store):
   BF16). Both are addressed by the same block table and therefore travel
   together under PD separation.
 
-* The MSA Triton kernels still consume flat *token-slot* tensors
+* Prefill MSA kernels consume flat *token-slot* tensors
   ``[max_slots, num_kv_heads, head_dim]`` addressed by a
   ``req_to_token [max_reqs, max_kv_len]`` map plus ``slot_ids [batch]``. Since
-  that layout differs from the paged pool, each forward gathers the active
-  sequence out of the paged pool into a process-wide *transient* scratch
-  (``_MainKVScratch`` / ``_IdxKScratch``) that the kernel reads. The scratch is
-  grown-on-demand and shared across all sparse layers (sparse layers run
-  sequentially), so it is O(1) buffers, not O(num_sparse_layers) caches; it
-  holds no state across steps.
+  that layout differs from the paged pool, prefill gathers the active sequence
+  out of the paged pool into a process-wide *transient* scratch
+  (``_MainKVScratch`` / ``_IdxKScratch``) that the prefill kernel reads.
+  The opt-in paged decode path writes only the current K/V/idx_K token into the
+  persistent paged pool and reads history directly via the physical block table.
 
 * In the normal non-CP path the physical slot for ``(request b, token
   position p)`` is the paged block table::
@@ -40,7 +39,6 @@ The index branch (``index_q_proj`` / ``index_k_proj`` + per-head Gemma RMSNorm
 """
 
 import os
-import time
 from typing import Any, Dict, Optional
 
 import numpy as np
@@ -48,34 +46,15 @@ import torch
 import triton
 import triton.language as tl
 
-# Gated decode-path instrumentation (M3_MSA_DEBUG=1). Logs per-layer sparse
-# decode block counts / lens / wall-clock so a block-count explosion vs pure
-# eager-mode latency can be told apart without guessing.
-_MSA_DEBUG = os.environ.get("M3_MSA_DEBUG", "0") == "1"
-_MSA_DEBUG_MAX_STEPS = int(os.environ.get("M3_MSA_DEBUG_MAX_STEPS", "3"))
-_MSA_DEBUG_STEP = {}
 # Optimized CP prefill path for the paged-cache implementation. Default-on;
 # set M3_MSA_USE_V2_CP_PREFILL=0 to fall back to the simpler reference path.
 _USE_V2_CP_PREFILL = os.environ.get("M3_MSA_USE_V2_CP_PREFILL", "1") != "0"
 # Fused CP paged write removes the unpack tensors plus mha_kv_write_cache
 # for cold/sharded v2 prefill. Set to 0 to fall back to the two-kernel path.
 _USE_FUSED_CP_PAGED_WRITE = os.environ.get("M3_MSA_FUSED_CP_PAGED_WRITE", "1") != "0"
-# Zero-copy MSA: read the persistent paged K/V pool directly via the physical
-# block table in step3 instead of materializing a token-major gather scratch.
-# Requires page_size == sparse block_size (both 128, set via --seq_size_per_block
-# 128 + --kernel_seq_size_per_block 128). Decode (DP4) reads the replicated pool;
-# prefill (fmha_sm100, single-segment) skips the _to_paged repack. Opt-in while
-# under PD validation; falls back to the scratch path when the layout precondition
-# is not met (e.g. CP page-RR sharded, page != block).
-_M3_MSA_ZEROCOPY = os.environ.get("M3_MSA_ZEROCOPY", "0") == "1"
-# Decode zero-copy defaults ON: the runtime guard below only engages it when its
-# preconditions hold (decode, non-sharded, page_size == block_size) and otherwise
-# falls back to the scratch gather, and the paged decode kernel reads
-# framework-provided static block tables so it is CUDA-graph safe. Prefill stays
-# gated by M3_MSA_ZEROCOPY. Set M3_MSA_ZEROCOPY_DECODE=0 to force the old copy.
-_M3_MSA_ZEROCOPY_DECODE = (
-    _M3_MSA_ZEROCOPY or os.environ.get("M3_MSA_ZEROCOPY_DECODE", "1") == "1"
-)
+# Opt-in direct-paged sparse decode. If any layout precondition is not met,
+# forward keeps the original scratch-backed decode path.
+_USE_PAGED_DECODE = os.environ.get("M3_MSA_PAGED_DECODE", "0") == "1"
 
 import torch.nn as nn
 import torch.nn.functional as F
@@ -456,6 +435,119 @@ def _fused_scatter_cp_gathered(
 
 
 @triton.jit
+def _write_decode_kv_idx_kernel(
+    k_ptr,
+    v_ptr,
+    idx_ptr,
+    seq_lens_ptr,
+    block_table_ptr,
+    base_ptr,
+    scale_flat_ptr,
+    TOKEN_COUNT: tl.constexpr,
+    NUM_KV_HEADS: tl.constexpr,
+    HEAD_DIM: tl.constexpr,
+    IDX_DIM: tl.constexpr,
+    PAGE_SIZE: tl.constexpr,
+    BT_STRIDE_B: tl.constexpr,
+    BT_STRIDE_BLK: tl.constexpr,
+    BASE_S0: tl.constexpr,
+    BASE_S1: tl.constexpr,
+    BASE_S2: tl.constexpr,
+    BASE_S3: tl.constexpr,
+    BASE_S4: tl.constexpr,
+    BLOCK_KV: tl.constexpr,
+    BLOCK_IDX: tl.constexpr,
+):
+    token = tl.program_id(0)
+    seq_len = tl.load(seq_lens_ptr + token, mask=token < TOKEN_COUNT, other=0).to(
+        tl.int64
+    )
+    prefix = seq_len - 1
+    block_idx = prefix // PAGE_SIZE
+    block_off = prefix - block_idx * PAGE_SIZE
+    physical_block = tl.load(
+        block_table_ptr + token * BT_STRIDE_B + block_idx * BT_STRIDE_BLK,
+        mask=(token < TOKEN_COUNT) & (seq_len > 0),
+        other=-1,
+    ).to(tl.int64)
+    physical_slot = physical_block * PAGE_SIZE + block_off
+
+    offs = tl.arange(0, BLOCK_KV)
+    head = offs // HEAD_DIM
+    dim = offs - head * HEAD_DIM
+    kv_mask = (
+        (token < TOKEN_COUNT) & (physical_block >= 0) & (offs < NUM_KV_HEADS * HEAD_DIM)
+    )
+    k_vals = tl.load(
+        k_ptr + token * NUM_KV_HEADS * HEAD_DIM + offs,
+        mask=kv_mask,
+        other=0.0,
+    )
+    v_vals = tl.load(
+        v_ptr + token * NUM_KV_HEADS * HEAD_DIM + offs,
+        mask=kv_mask,
+        other=0.0,
+    )
+    base_k = (
+        physical_block * BASE_S0 + head * BASE_S2 + block_off * BASE_S3 + dim * BASE_S4
+    )
+    tl.store(base_ptr + base_k, k_vals, mask=kv_mask)
+    tl.store(base_ptr + base_k + BASE_S1, v_vals, mask=kv_mask)
+
+    idx_offs = tl.arange(0, BLOCK_IDX)
+    idx_mask = (token < TOKEN_COUNT) & (physical_slot >= 0) & (idx_offs < IDX_DIM)
+    idx_vals = tl.load(
+        idx_ptr + token * IDX_DIM + idx_offs,
+        mask=idx_mask,
+        other=0.0,
+    )
+    tl.store(
+        scale_flat_ptr + physical_slot * IDX_DIM + idx_offs,
+        idx_vals,
+        mask=idx_mask,
+    )
+
+
+def _write_decode_kv_idx_to_paged(
+    k: torch.Tensor,
+    v: torch.Tensor,
+    idx_k: torch.Tensor,
+    seq_lens: torch.Tensor,
+    block_table: torch.Tensor,
+    base: torch.Tensor,
+    scale_flat: torch.Tensor,
+    page_size: int,
+    idx_dim: int,
+) -> None:
+    token_count = int(k.shape[0])
+    if token_count == 0:
+        return
+    _write_decode_kv_idx_kernel[(token_count,)](
+        k.reshape(token_count, -1),
+        v.reshape(token_count, -1),
+        idx_k.reshape(token_count, idx_dim),
+        seq_lens,
+        block_table,
+        base,
+        scale_flat,
+        TOKEN_COUNT=token_count,
+        NUM_KV_HEADS=int(k.shape[1]),
+        HEAD_DIM=int(k.shape[2]),
+        IDX_DIM=idx_dim,
+        PAGE_SIZE=page_size,
+        BT_STRIDE_B=int(block_table.stride(0)),
+        BT_STRIDE_BLK=int(block_table.stride(1)),
+        BASE_S0=int(base.stride(0)),
+        BASE_S1=int(base.stride(1)),
+        BASE_S2=int(base.stride(2)),
+        BASE_S3=int(base.stride(3)),
+        BASE_S4=int(base.stride(4)),
+        BLOCK_KV=triton.next_power_of_2(int(k.shape[1]) * int(k.shape[2])),
+        BLOCK_IDX=triton.next_power_of_2(idx_dim),
+    )
+
+
+@triton.jit
 def _fused_cp_paged_write_kernel(
     packed_ptr,
     unpad_ptr,
@@ -676,6 +768,7 @@ class MSAAttention(nn.Module):
     # the first prefill that takes the trtllm-gen fast path.
     _trtllm_workspace: Dict[torch.device, torch.Tensor] = {}
     _cp_shared_meta: Optional[Dict[str, Any]] = None
+    _paged_decode_shared_meta: Optional[Dict[str, Any]] = None
 
     @classmethod
     def _get_trtllm_workspace(cls, device: torch.device):
@@ -851,13 +944,100 @@ class MSAAttention(nn.Module):
         self._scratch_batch_size = 0
         self._scratch_seq_len = 0
 
-        # Views into the process-wide shared gather scratch, refreshed each
-        # forward by _source_main_kv_from_paged / _source_idx_k_from_paged.
+        # Views into the process-wide shared gather scratch, refreshed by
+        # the original scratch-backed prefill/decode helpers.
         self._scratch_k: Optional[torch.Tensor] = None
         self._scratch_v: Optional[torch.Tensor] = None
         self._scratch_idx_k: Optional[torch.Tensor] = None
         # Allocated kernel slot span (anchors scratch sizing).
         self._scratch_slots = 0
+        self._paged_decode_static_ok: Optional[bool] = None
+
+    def _check_paged_decode_static(self, kv_cache: LayerKVCache) -> bool:
+        if (
+            (not _USE_PAGED_DECODE)
+            or self._kv_sharded
+            or int(self.page_size) != int(self.block_size)
+            or (not self.disable_index_value)
+        ):
+            return False
+
+        base = kv_cache.kv_cache_base
+        scale = kv_cache.kv_scale_base
+        if (
+            base is None
+            or base.dim() != 5
+            or int(base.shape[2]) != int(self.kv_head_num)
+            or int(base.shape[3]) != int(self.page_size)
+            or int(base.shape[4]) != int(self.head_dim)
+            or scale is None
+            or scale.dim() != 2
+            or scale.stride(-1) != 1
+        ):
+            return False
+
+        bf16_elems_per_block = (
+            int(scale.shape[1])
+            * scale.element_size()
+            // torch.empty((), dtype=torch.bfloat16).element_size()
+        )
+        return bf16_elems_per_block == int(self.page_size) * int(self.idx_head_dim)
+
+    def _use_paged_decode_path(
+        self, attn_inputs: PyAttentionInputs, kv_cache: LayerKVCache
+    ) -> bool:
+        if attn_inputs.is_prefill:
+            return False
+        if self._paged_decode_static_ok is None:
+            self._paged_decode_static_ok = self._check_paged_decode_static(kv_cache)
+        return self._paged_decode_static_ok
+
+    def _paged_decode_addressing(
+        self, attn_inputs: PyAttentionInputs, device: torch.device
+    ):
+        seq = attn_inputs.sequence_lengths
+        phys_block_table = self._physical_block_table(attn_inputs)
+        cache_key = (
+            id(attn_inputs),
+            int(seq.data_ptr()),
+            tuple(seq.shape),
+            str(seq.device),
+            int(phys_block_table.data_ptr()),
+            tuple(phys_block_table.shape),
+            str(phys_block_table.device),
+            int(self.page_size),
+        )
+
+        # Sparse layers execute in increasing layer order within one decode step.
+        # Reuse metadata only for later sparse layers of the same attn_inputs and
+        # block-table snapshot; the key prevents cross-request or stale-step reuse.
+        cache = MSAAttention._paged_decode_shared_meta
+        if (
+            cache is not None
+            and cache.get("key") == cache_key
+            and cache.get("layer_idx", -1) < self.layer_idx
+        ):
+            cache["layer_idx"] = self.layer_idx
+            return (
+                cache["kv_lens"],
+                cache["seq_lens"],
+                cache["positions"],
+                cache["phys_block_table"],
+            )
+
+        prefix_i64 = seq.to(device=device, dtype=torch.int64)
+        kv_lens = prefix_i64 + 1
+        seq_lens = kv_lens.to(torch.int32)
+        positions = prefix_i64.to(torch.int32)
+        MSAAttention._paged_decode_shared_meta = {
+            "key": cache_key,
+            "layer_idx": self.layer_idx,
+            "kv_lens": kv_lens,
+            "seq_lens": seq_lens,
+            "positions": positions,
+            "phys_block_table": phys_block_table,
+        }
+        return kv_lens, seq_lens, positions, phys_block_table
 
     @staticmethod
     def _cuda_graph_forward_active() -> bool:
@@ -1296,12 +1476,10 @@ class MSAAttention(nn.Module):
         the tokens; non-owned tokens get a -1 slot and are skipped).
 
         Scratch sourcing depends on sharding:
-        * sharded (CP prefill): the local pool holds only 1/cp_size of the
-          tokens, so the scratch is filled directly from the already-all-gathered
+        * sharded CP prefill fills scratch directly from the already-all-gathered
           full sequence (``k``/``v`` are the full sequence in CP prefill).
-        * not sharded (non-CP prefill, or decode): the full active history is
-          read back from the persistent (full) paged pool, exactly as before —
-          required for decode where the current step only carries one token."""
+        * not sharded (non-CP prefill, or the original decode path): the full
+          active history is read back from the persistent paged pool."""
         base = kv_cache.kv_cache_base
         if base is None or base.dim() != 5:
             raise RuntimeError(
@@ -1324,22 +1502,7 @@ class MSAAttention(nn.Module):
             k.contiguous(), v.contiguous(), base, slot_mapping
         )
 
-        # Zero-copy decode: the full replicated history now lives in the paged
-        # pool, and the step3 paged kernel reads it directly via the physical
-        # block table (page_size == block_size), so skip materializing the
-        # token-major gather scratch. Only the non-sharded decode path qualifies
-        # (sharded CP holds 1/cp_size locally; prefill uses the fmha path).
-        if (
-            _M3_MSA_ZEROCOPY_DECODE
-            and (not attn_inputs.is_prefill)
-            and (not self._kv_sharded)
-            and int(self.page_size) == int(self.block_size)
-        ):
-            self._scratch_k = None
-            self._scratch_v = None
-            return
-
-        # 2) build the transient gather scratch the MSA kernel reads.
+        # 2) build the transient gather scratch the prefill MSA kernel reads.
         scratch_slots = int(self._scratch_slots)
         scratch_k, scratch_v = _MAIN_KV_SCRATCH.acquire(
             scratch_slots, self.kv_head_num, self.head_dim, k.dtype, device
@@ -1440,20 +1603,6 @@ class MSAAttention(nn.Module):
             valid = slot_mapping >= 0
             scale_flat[slot_mapping[valid]] = idx_flat[valid]
 
-        # Zero-copy decode (P3a): the full replicated idx history now lives in
-        # the paged scale region, and the indexer's paged score kernel reads it
-        # directly via the physical block table (page_size == block_size), so
-        # skip materializing the token-major idx gather+scatter scratch. Same
-        # gate as the main K/V zero-copy skip in _source_main_kv_from_paged.
-        if (
-            _M3_MSA_ZEROCOPY_DECODE
-            and (not attn_inputs.is_prefill)
-            and (not self._kv_sharded)
-            and int(self.page_size) == int(self.block_size)
-        ):
-            self._scratch_idx_k = None
-            return
-
         # 2) build the transient scratch the MSA kernel reads.
         scratch_slots = int(self._scratch_slots)
         idx_scratch = _IDX_K_SCRATCH.acquire(
@@ -1474,6 +1623,45 @@ class MSAAttention(nn.Module):
             gf = self._kernel_slots_to_paged(dst_full, attn_inputs)
             idx_scratch[dst_full, 0] = scale_flat[gf]
         self._scratch_idx_k = idx_scratch
+
+    def _write_kv_cache_and_idx_k_for_decode(
+        self,
+        kv_cache: LayerKVCache,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        idx_k: torch.Tensor,
+        seq_lens: torch.Tensor,
+        phys_block_table: torch.Tensor,
+    ):
+        """Persist the current decode token and return paged decode views."""
+        # Caller contract: this helper is only entered after
+        # _check_paged_decode_static() has accepted the paged cache layout. Keep
+        # the hot path to dynamic dtype checks; layout mismatches should fall back
+        # before _forward_paged_decode() is selected.
+        base = kv_cache.kv_cache_base
+        scale = kv_cache.kv_scale_base
+        if base.dtype != k.dtype:
+            return None
+
+        idx_view = scale.view(torch.bfloat16).view(
+            int(scale.shape[0]), int(self.page_size), int(self.idx_head_dim)
+        )
+        if idx_view.dtype != idx_k.dtype:
+            return None
+
+        _write_decode_kv_idx_to_paged(
+            k.contiguous(),
+            v.contiguous(),
+            idx_k.reshape(-1, self.idx_head_dim).contiguous(),
+            seq_lens,
+            phys_block_table,
+            base,
+            idx_view.reshape(-1, self.idx_head_dim),
+            int(self.page_size),
+            int(self.idx_head_dim),
+        )
+
+        return base[:, 0], base[:, 1], phys_block_table, idx_view
 
     # ------------------------------------------------------------------
     def _forward_cp_prefill(
@@ -2191,6 +2379,92 @@ class MSAAttention(nn.Module):
         return self.o_proj(o.reshape(local_tokens, -1).contiguous())
 
     # ------------------------------------------------------------------
+    def _forward_paged_decode(
+        self,
+        hidden_states: torch.Tensor,
+        attn_inputs: PyAttentionInputs,
+        kv_cache: LayerKVCache,
+        x_fp8: Optional[torch.Tensor] = None,
+        x_scale: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        from rtp_llm.models_py.triton_kernels.sparse_msa.minimax_sparse import (
+            minimax_paged_sparse_decode,
+        )
+
+        input_shape = hidden_states.shape[:-1]
+        total_tokens = hidden_states.shape[0]
+        device = hidden_states.device
+
+        if x_fp8 is not None and x_scale is not None:
+            qkv = self.qkv_proj(x_fp8, input_scales=x_scale)
+        else:
+            qkv = self.qkv_proj(hidden_states)
+        if self.qk_fuse_norm is not None:
+            qkv = self.qk_fuse_norm(qkv)
+        q, k, v = torch.split(qkv, [self.q_size, self.kv_size, self.kv_size], dim=-1)
+        q = q.reshape(total_tokens, self.head_num, self.head_dim)
+        k = k.reshape(total_tokens, self.kv_head_num, self.head_dim)
+        v = v.reshape(total_tokens, self.kv_head_num, self.head_dim)
+
+        idx_q = F.linear(hidden_states, self.idx_q_w)
+        idx_k = F.linear(hidden_states, self.idx_k_w)
+        idx_q = idx_q.reshape(total_tokens, self.num_idx_heads, self.idx_head_dim)
+        idx_k = idx_k.reshape(total_tokens, 1, self.idx_head_dim)
+        idx_q = _gemma_rmsnorm_per_head(idx_q, self.idx_q_norm_w, self.layernorm_eps)
+        idx_k = _gemma_rmsnorm_per_head(idx_k, self.idx_k_norm_w, self.layernorm_eps)
+
+        kv_lens, seq_lens, positions, phys_block_table = self._paged_decode_addressing(
+            attn_inputs, device
+        )
+
+        q = q.contiguous()
+        k = k.contiguous()
+        self._apply_rope(q, k, positions)
+        idx_q = idx_q.contiguous()
+        idx_k = idx_k.contiguous()
+        self._apply_rope(idx_q, idx_k, positions)
+
+        paged_decode_views = self._write_kv_cache_and_idx_k_for_decode(
+            kv_cache, k, v, idx_k, seq_lens, phys_block_table
+        )
+        if paged_decode_views is None:
+            raise RuntimeError(
+                "M3_MSA_PAGED_DECODE requires a BF16 5-D paged KV cache and "
+                "a BF16-compatible idx_K scale region. Disable M3_MSA_PAGED_DECODE "
+                "to use the original forward decode path."
+            )
+        paged_main_k, paged_main_v, phys_block_table, paged_idx_k = paged_decode_views
+
+        if self._cuda_graph_forward_active():
+            max_seqlen_k = self._cuda_graph_max_kv(attn_inputs)
+        else:
+            max_seqlen_k = int(kv_lens.max().item())
+        _idx_o, o = minimax_paged_sparse_decode(
+            q=q,
+            sink=None,
+            idx_q=idx_q,
+            idx_sink=None,
+            seq_lens=seq_lens,
+            max_seqlen=max_seqlen_k,
+            block_size_k=self.block_size,
+            topk=self.topk_blocks,
+            init_blocks=self.init_blocks,
+            local_blocks=self.local_blocks,
+            score_type=self.score_type,
+            disable_index_value=self.disable_index_value,
+            paged_main_k=paged_main_k,
+            paged_main_v=paged_main_v,
+            phys_block_table=phys_block_table,
+            paged_idx_k=paged_idx_k,
+        )
+
+        attn_output = o.reshape(*input_shape, -1).contiguous()
+        output = self.o_proj(attn_output)
+        if self.tp_size > 1:
+            output = all_reduce(output, group=Group.TP)
+        return output
+
+    # ------------------------------------------------------------------
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -2208,6 +2482,15 @@ class MSAAttention(nn.Module):
         assert (
             attn_inputs.kv_cache_kernel_block_id_device is not None
         ), "MSAAttention requires a block table"
+
+        if self._use_paged_decode_path(attn_inputs, kv_cache):
+            return self._forward_paged_decode(
+                hidden_states,
+                attn_inputs,
+                kv_cache,
+                x_fp8=x_fp8,
+                x_scale=x_scale,
+            )
 
         if (
             self.cp_enabled
@@ -2379,50 +2662,6 @@ class MSAAttention(nn.Module):
             decode_cu_seqlens = torch.arange(
                 decode_bsz + 1, device=device, dtype=torch.int32
             )
-            _dbg = (
-                _MSA_DEBUG
-                and _MSA_DEBUG_STEP.get(self.layer_idx, 0) < _MSA_DEBUG_MAX_STEPS
-            )
-            if _dbg:
-                _MSA_DEBUG_STEP[self.layer_idx] = (
-                    _MSA_DEBUG_STEP.get(self.layer_idx, 0) + 1
-                )
-                _bk = int(self.block_size)
-                _nblk = (max_seqlen_k + _bk - 1) // max(_bk, 1)
-                _kvl = kv_lens.detach().cpu().tolist()
-                _r2t = tuple(req_to_token.shape)
-                _mk = main_k.shape[0] if main_k is not None else -1
-                _ik = idx_kc.shape[0] if idx_kc is not None else -1
-                print(
-                    f"[M3_MSA_DEBUG][decode] L{self.layer_idx} bsz={decode_bsz} "
-                    f"kv_lens={_kvl} max_seqlen_k={max_seqlen_k} block_size_k={_bk} "
-                    f"num_kv_blocks={_nblk} topk={self.topk_blocks} "
-                    f"req_to_token={_r2t} scratch_k_slots={_mk} idx_scratch_slots={_ik} "
-                    f"cp={self.cp_enabled} kv_sharded={self._kv_sharded} "
-                    f"side_seq_len={self._scratch_seq_len}",
-                    flush=True,
-                )
-                torch.cuda.synchronize(device)
-                _t0 = time.perf_counter()
-            # Zero-copy decode: hand the step3 kernel the persistent paged K/V
-            # pool views + physical block table so it reads the replicated
-            # history directly (main_k/main_v are None here — the scratch gather
-            # was skipped in _source_main_kv_from_paged).
-            paged_main_k = paged_main_v = phys_block_table = paged_idx_k = None
-            if (
-                _M3_MSA_ZEROCOPY_DECODE
-                and kv_cache is not None
-                and (not self._kv_sharded)
-                and int(self.page_size) == int(self.block_size)
-            ):
-                base = kv_cache.kv_cache_base
-                # [block, head, page, dim] strided views of [block,2,head,page,dim]
-                paged_main_k = base[:, 0]
-                paged_main_v = base[:, 1]
-                phys_block_table = self._physical_block_table(attn_inputs)
-                # idx_K paged scale-region view [block, page, idx_dim] for the
-                # zero-copy indexer (P3a); shares the same physical block table.
-                paged_idx_k = self._idx_k_paged_view(kv_cache)
             _idx_o, o = minimax_sparse_decode(
                 q=q,
                 sink=None,
@@ -2446,18 +2685,7 @@ class MSAAttention(nn.Module):
                 workspace=self._maybe_trtllm_workspace(device),
                 cu_seqlens=decode_cu_seqlens,
                 prefix_lens=prefix_lens.to(torch.int32),
-                paged_main_k=paged_main_k,
-                paged_main_v=paged_main_v,
-                phys_block_table=phys_block_table,
-                paged_idx_k=paged_idx_k,
             )
-            if _dbg:
-                torch.cuda.synchronize(device)
-                print(
-                    f"[M3_MSA_DEBUG][decode] L{self.layer_idx} "
-                    f"sparse_decode_ms={(time.perf_counter() - _t0) * 1e3:.2f}",
-                    flush=True,
-                )
 
         attn_output = o.reshape(*input_shape, -1).contiguous()
         output = self.o_proj(attn_output)
