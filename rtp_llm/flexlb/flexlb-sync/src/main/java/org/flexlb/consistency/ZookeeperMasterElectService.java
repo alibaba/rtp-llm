@@ -23,6 +23,7 @@ import org.flexlb.transport.GeneralHttpNettyService;
 import org.flexlb.util.JsonUtils;
 import org.flexlb.util.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.core.env.Environment;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 import reactor.core.publisher.Mono;
@@ -50,6 +51,7 @@ public class ZookeeperMasterElectService implements LeaderSelectorListener {
     private LBConsistencyConfig lbConsistencyConfig;
     private final GeneralHttpNettyService generalHttpNettyService;
     private final EngineHealthReporter engineHealthReporter;
+    private final Environment environment;
     @Setter
     private String roleId;
     @Setter
@@ -69,12 +71,14 @@ public class ZookeeperMasterElectService implements LeaderSelectorListener {
     private final AtomicReference<CountDownLatch> leaderCloseLatchRef = new AtomicReference<>();
 
     public ZookeeperMasterElectService(GeneralHttpNettyService generalHttpNettyService,
-                                       EngineHealthReporter engineHealthReporter) {
+                                       EngineHealthReporter engineHealthReporter,
+                                       Environment environment) {
 
         Logger.warn("Initializing ZookeeperMasterElectService...");
 
         this.generalHttpNettyService = generalHttpNettyService;
         this.engineHealthReporter = engineHealthReporter;
+        this.environment = environment;
 
         init();
     }
@@ -105,7 +109,13 @@ public class ZookeeperMasterElectService implements LeaderSelectorListener {
         } catch (UnknownHostException e) {
             throw new RuntimeException("Failed to retrieve local host address", e);
         }
-        port = Integer.parseInt(System.getProperty("server.port", "7001"));
+        // Read from Spring Environment to respect --server.port= CLI args;
+        // fall back to JVM system property.
+        String portStr = environment.getProperty("server.port");
+        if (portStr == null) {
+            portStr = System.getProperty("server.port", "7001");
+        }
+        port = Integer.parseInt(portStr);
     }
 
     private void initializeLBConsistencyConfig() {

@@ -11,6 +11,8 @@
 
 namespace rtp_llm {
 
+struct AsyncProducerCancelState;
+
 struct PrefillStatInfo {
     enum ExecuteStage {
         start                  = 0,
@@ -48,8 +50,8 @@ struct RPCContext {
         return request->request_id();
     }
 
-    const GenerateInputPB*                 request;
-    grpc::ServerWriter<GenerateOutputsPB>* writer;
+    const GenerateInputPB*                              request;
+    grpc::internal::WriterInterface<GenerateOutputsPB>* writer;
 };
 
 class PrefillGenerateContext: public GenerateContext {
@@ -79,19 +81,21 @@ private:
 public:
     typedef grpc::ClientReaderWriter<GenerateRequestPB, GenerateOutputsPB> ClientStream;
 
-    RemoteServerResource*                resource;
-    RPCContext                           rpc_context;
-    std::shared_ptr<GenerateInput>       generate_input;
-    std::string                          decode_addr;
-    std::vector<std::string>             prefill_worker_cache_store_addrs;
-    GrpcConnection                       grpc_connection;
-    std::shared_ptr<RpcService::Stub>    stub;
-    std::shared_ptr<grpc::ClientContext> client_context;
-    std::shared_ptr<ClientStream>        client_stream;
-    bool                                 grpc_stream_closed             = false;
-    grpc::Status                         last_grpc_stream_closed_status = grpc::Status::OK;
-    PrefillStatInfo                      stat_info;
-    int64_t                              loading_cache_requests = 0;
+    RemoteServerResource*                     resource;
+    RPCContext                                rpc_context;
+    std::shared_ptr<GenerateInput>            generate_input;
+    std::string                               decode_addr;
+    std::vector<std::string>                  prefill_worker_cache_store_addrs;
+    GrpcConnection                            grpc_connection;
+    std::shared_ptr<RpcService::Stub>         stub;
+    std::shared_ptr<grpc::ClientContext>      client_context;
+    std::shared_ptr<ClientStream>             client_stream;
+    std::shared_ptr<AsyncProducerCancelState> cancel_state;
+    bool                                      grpc_stream_closed             = false;
+    grpc::Status                              last_grpc_stream_closed_status = grpc::Status::OK;
+    PrefillStatInfo                           stat_info;
+    int64_t                                   loading_cache_requests           = 0;
+    bool                                      recent_cache_key_metric_reported = false;
 };
 
 }  // namespace rtp_llm

@@ -13,6 +13,7 @@
 #include "rtp_llm/cpp/models/Sampler.h"
 #include "rtp_llm/cpp/config/ModelConfig.h"
 #include "rtp_llm/cpp/models/logits_processor/LogitsProcessorFactory.h"
+#include "rtp_llm/cpp/distribute/RpcCpuTpBroadcaster.h"
 
 using namespace std;
 
@@ -25,6 +26,19 @@ bool readEnvFlagOnce(const char* env_name, const char* log_tag, const char* labe
     const bool  on  = (env != nullptr && std::string(env) == "1");
     RTP_LLM_LOG_INFO("[%s] %s=%s -> %s=%d", log_tag, env_name, env ? env : "(unset)", label, static_cast<int>(on));
     return on;
+}
+
+int readEnvIntOnce(const char* env_name, int default_value, const char* log_tag) {
+    const char* env   = std::getenv(env_name);
+    int         value = default_value;
+    if (env != nullptr) {
+        value = std::atoi(env);
+        if (value <= 0) {
+            value = default_value;
+        }
+    }
+    RTP_LLM_LOG_INFO("[%s] %s=%s -> %d", log_tag, env_name, env ? env : "(unset)", value);
+    return value;
 }
 
 void holdSamplerInputHostBuffers(TensorHolder& holder, const SamplerInputs& inputs) {
@@ -87,6 +101,19 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
             std::make_shared<ModelInputsLogger>(params.parallelism_config.world_rank,
                                                 params.profiling_debug_logging_config.log_file_backup_count,
                                                 metrics_reporter_);
+    }
+
+    const bool enable_cross_node_cpu_tp_broadcast =
+        readEnvFlagOnce("RTP_LLM_CROSS_NODE_CPU_TP_BROADCAST", "NormalExecutor", "cross_node_cpu_tp_broadcast");
+    if (enable_cross_node_cpu_tp_broadcast && params.parallelism_config.tp_size > 1
+        && params.parallelism_config.tp_size > params.parallelism_config.local_world_size) {
+        const int timeout_ms = readEnvIntOnce("RTP_LLM_CPU_TP_BROADCAST_TIMEOUT_MS", 30000, "NormalExecutor");
+        RpcCpuTpBroadcaster::instance().initialize(static_cast<int>(params.parallelism_config.tp_rank),
+                                                   static_cast<int>(params.parallelism_config.tp_size),
+                                                   static_cast<int>(params.parallelism_config.dp_rank),
+                                                   static_cast<int>(params.parallelism_config.world_size),
+                                                   params.runtime_config.worker_grpc_addrs,
+                                                   timeout_ms);
     }
 
     if (params.eplb_config.enable_eplb() && params.model_config_.moe_style != 0) {
@@ -274,9 +301,40 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
                                       stream_groups.totalDecodeBatchSize(),
                                       stream_groups.modelExecuteTokenSize(),
                                       stream_groups.maxSeqLen());
+        if (tp_rank_ == 0 && stream_groups.totalContextBatchSize() > 0) {
+            std::string details;
+            for (auto& s : stream_groups.contextStreams()) {
+                char buf[256];
+                snprintf(buf,
+                         sizeof(buf),
+                         "{id=%ld input=%d prefix=%d reuse=%d ctx=%d grp=%ld/%d tokens=%d} ",
+                         s->streamId(),
+                         s->inputLength(),
+                         s->prefixLength(),
+                         s->reuseLength(),
+                         s->contextLength(),
+                         s->groupId(),
+                         s->groupSize(),
+                         s->currentExecuteTokenSize());
+                details += buf;
+            }
+            RTP_LLM_LOG_INFO(
+                "prefill_batch_begin: ctx_batch=%zu gen_batch=%zu total_tokens=%zu max_seq=%zu streams=[%s]",
+                stream_groups.totalContextBatchSize(),
+                stream_groups.totalDecodeBatchSize(),
+                stream_groups.modelExecuteTokenSize(),
+                stream_groups.maxSeqLen(),
+                details.c_str());
+        }
         int64_t start_time_us               = autil::TimeUtility::currentTimeInMicroSeconds();
         model_output                        = std::move(model_->forward(model_input));
         executor_collector.model_forward_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
+        if (tp_rank_ == 0 && stream_groups.totalContextBatchSize() > 0) {
+            RTP_LLM_LOG_INFO("prefill_batch_end: ctx_batch=%zu total_tokens=%zu forward_us=%ld",
+                             stream_groups.totalContextBatchSize(),
+                             stream_groups.modelExecuteTokenSize(),
+                             executor_collector.model_forward_us);
+        }
     }
     if (expert_balancer_) {
         int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();

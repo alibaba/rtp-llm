@@ -14,7 +14,7 @@ EngineBase::EngineBase(const EngineInitParams& params) {
 
 EngineBase::~EngineBase() {}
 
-std::vector<GenerateStreamPtr> EngineBase::batchEnqueue(const std::vector<std::shared_ptr<GenerateInput>>& inputs) {
+std::vector<GenerateStreamPtr> EngineBase::enqueueMultiple(const std::vector<std::shared_ptr<GenerateInput>>& inputs) {
     throw std::runtime_error("not implemeted");
 }
 
@@ -28,7 +28,8 @@ void EngineBase::initRuntime(const EngineInitParams& params) {
     Logger::getEngineLogger().setRank(rank);
     Logger::getEngineLogger().flush();
     size_t device_id = params.parallelism_config.world_rank % params.parallelism_config.local_world_size;
-    mla_ops_type_    = rtp_llm::initRuntime(device_id,
+    device_id += autil::EnvUtil::getEnv("RTP_LLM_LOCAL_DEVICE_OFFSET", 0);
+    mla_ops_type_ = rtp_llm::initRuntime(device_id,
                                          params.profiling_debug_logging_config.trace_memory,
                                          params.device_resource_config.enable_comm_overlap,
                                          params.model_config_.mla_ops_type);

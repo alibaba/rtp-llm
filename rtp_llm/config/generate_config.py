@@ -51,15 +51,13 @@ class RoleAddr(BaseModel):
     @field_validator("role", mode="before")
     @classmethod
     def validate_role(cls, v):
-        """Convert string to RoleType enum for deserialization."""
-        if isinstance(v, str):
-            return getattr(RoleType, v)
+        """Convert proto enum (int) to RoleType enum for deserialization."""
+        if isinstance(v, int):
+            return RoleType(v)
         elif isinstance(v, RoleType):
             return v
         else:
-            raise ValueError(
-                f"RoleType must be a string or RoleType enum, got {type(v)}"
-            )
+            raise ValueError(f"RoleType must be an int or RoleType enum, got {type(v)}")
 
     @field_serializer("role")
     def serialize_role(self, role: RoleType, _info) -> str:
@@ -174,9 +172,7 @@ class GenerateConfig(BaseModel):
     enable_memory_cache: bool = True
 
     enable_remote_cache: bool = True
-    # 是否强制相同 request_id 的 stream 在一批中调度
-    force_batch: bool = False
-    batch_group_timeout: Optional[int] = None  # ms
+    group_timeout: Optional[int] = None  # ms
 
     unique_key: str = ""
 

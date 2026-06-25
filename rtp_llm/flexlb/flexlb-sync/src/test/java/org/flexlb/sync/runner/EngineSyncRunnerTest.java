@@ -71,7 +71,9 @@ class EngineSyncRunnerTest {
                 localKvCacheAwareManager,
                 syncRequestTimeoutMs,
                 syncCount,
-                syncEngineStatusInterval
+                syncEngineStatusInterval,
+                null,
+                null
         );
     }
 
@@ -98,7 +100,9 @@ class EngineSyncRunnerTest {
                 localKvCacheAwareManager,
                 syncRequestTimeoutMs,
                 syncCount,
-                syncEngineStatusInterval
+                syncEngineStatusInterval,
+                null,
+                null
         );
 
         // Execute

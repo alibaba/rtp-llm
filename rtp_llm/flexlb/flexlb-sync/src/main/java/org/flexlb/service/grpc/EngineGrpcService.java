@@ -86,7 +86,7 @@ public class EngineGrpcService {
             throw new RuntimeException("EngineGrpcService not initialized");
         }
         // Only need cacheKeys for Prefill nodes in PD-separated mode and non PD-separated mode
-        boolean needCacheKeys = RoleType.PREFILL.matches(workerStatus.getRole()) || RoleType.PDFUSION.matches(workerStatus.getRole());
+        boolean needCacheKeys = workerStatus.getRole() == RoleType.PREFILL || workerStatus.getRole() == RoleType.PDFUSION;
         EngineRpcService.CacheVersionPB request = EngineRpcService.CacheVersionPB.newBuilder()
                 .setLatestCacheVersion((int) cacheVersion)
                 .setNeedCacheKeys(needCacheKeys)
@@ -111,7 +111,7 @@ public class EngineGrpcService {
         if (engineGrpcClient == null) {
             throw new RuntimeException("EngineGrpcService not initialized");
         }
-        boolean needCacheKeys = RoleType.PREFILL.matches(workerStatus.getRole()) || RoleType.PDFUSION.matches(workerStatus.getRole());
+        boolean needCacheKeys = workerStatus.getRole() == RoleType.PREFILL || workerStatus.getRole() == RoleType.PDFUSION;
         EngineRpcService.CacheVersionPB request = EngineRpcService.CacheVersionPB.newBuilder()
                 .setLatestCacheVersion((int) cacheVersion)
                 .setNeedCacheKeys(needCacheKeys)

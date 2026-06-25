@@ -9,13 +9,24 @@ import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+/**
+ * Tests for {@link GrpcWorkerStatusRunner}.
+ *
+ * <p>Key API changes since original implementation:
+ * <ul>
+ *   <li>Proto field {@code is_waiting} replaced by {@code TaskPhase phase}</li>
+ *   <li>{@code WorkerStatus.runningTaskList} replaces old {@code waitingTaskList + localTaskMap}</li>
+ *   <li>Constructor requires {@code FlexlbBatchScheduler + EndpointRegistry} (nullable)</li>
+ *   <li>Task list refresh only occurs when status version advances (not on equal version)</li>
+ * </ul>
+ */
 class GrpcWorkerStatusCheckRunnerTest {
 
     private final EngineGrpcService engineGrpcService = Mockito.mock(EngineGrpcService.class);
@@ -35,7 +46,7 @@ class GrpcWorkerStatusCheckRunnerTest {
         workerStatus.setPort(8080);
 
         EngineRpcService.WorkerStatusPB workerStatusPB = EngineRpcService.WorkerStatusPB.newBuilder()
-                .setRole("test-role")
+                .setRole(EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL)
                 .setAvailableConcurrency(10)
                 .setRunningQueryLen(5)
                 .setWaitingQueryLen(3)
@@ -47,21 +58,25 @@ class GrpcWorkerStatusCheckRunnerTest {
                 .setAlive(true)
                 .build();
 
-        when(engineGrpcService.getWorkerStatus(anyString(), anyInt(), anyLong(), anyLong(), org.mockito.ArgumentMatchers.any(RoleType.class))).thenReturn(workerStatusPB);
+        when(engineGrpcService.getWorkerStatus(anyString(), anyInt(), anyLong(), anyLong(),
+                org.mockito.ArgumentMatchers.any(RoleType.class))).thenReturn(workerStatusPB);
 
-        // Act
+        // Act — pass null for FlexlbBatchScheduler and EndpointRegistry (not needed in unit test)
         GrpcWorkerStatusRunner runner = new GrpcWorkerStatusRunner(
                 modelName, ipPort, site,
                 RoleType.PREFILL,
-                group, workerStatus, engineHealthReporter, engineGrpcService, 20);
+                group, workerStatus, engineHealthReporter, engineGrpcService, 20L, null, null);
         runner.run();
 
-        // Assert
+        // Assert — gRPC port is derived from HTTP port 8080 → 8081
         verify(engineGrpcService).getWorkerStatus("127.0.0.1", 8081, -1L, 20L, RoleType.PREFILL);
     }
 
     @Test
-    void should_refreshTaskLists_when_statusVersionIsNotUpdated() {
+    void should_not_update_task_list_when_status_version_is_unchanged() {
+        // When the gRPC response version equals the local version, the status update
+        // is skipped — including the runningTaskList refresh. This avoids unnecessary
+        // state churn when the engine hasn't changed.
         String modelName = "test-model";
         String ipPort = "127.0.0.1:8080";
         String site = "test-site";
@@ -72,27 +87,30 @@ class GrpcWorkerStatusCheckRunnerTest {
         workerStatus.setPort(8080);
         workerStatus.getStatusVersion().set(100L);
 
-        EngineRpcService.TaskInfoPB waitingTask = EngineRpcService.TaskInfoPB.newBuilder()
+        // Use TaskPhasePB instead of the removed is_waiting field
+        EngineRpcService.TaskInfoPB taskInfo = EngineRpcService.TaskInfoPB.newBuilder()
                 .setRequestId(123L)
                 .setInputLength(100)
-                .setIsWaiting(true)
+                .setPhase(EngineRpcService.TaskPhase.TASK_PHASE_RECEIVED)
                 .build();
         EngineRpcService.WorkerStatusPB workerStatusPB = EngineRpcService.WorkerStatusPB.newBuilder()
-                .setRole(RoleType.PREFILL.getCode())
+                .setRole(EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL)
                 .setStatusVersion(100L)
                 .setAlive(true)
-                .addRunningTaskInfo(waitingTask)
+                .addRunningTaskInfo(taskInfo)
                 .build();
 
-        when(engineGrpcService.getWorkerStatus(anyString(), anyInt(), anyLong(), anyLong(), org.mockito.ArgumentMatchers.any(RoleType.class))).thenReturn(workerStatusPB);
+        when(engineGrpcService.getWorkerStatus(anyString(), anyInt(), anyLong(), anyLong(),
+                org.mockito.ArgumentMatchers.any(RoleType.class))).thenReturn(workerStatusPB);
 
         GrpcWorkerStatusRunner runner = new GrpcWorkerStatusRunner(
                 modelName, ipPort, site,
                 RoleType.PREFILL,
-                group, workerStatus, engineHealthReporter, engineGrpcService, 20);
+                group, workerStatus, engineHealthReporter, engineGrpcService, 20L, null, null);
         runner.run();
 
-        assertEquals(1, workerStatus.getWaitingTaskList().size());
-        assertTrue(workerStatus.getWaitingTaskList().containsKey("123"));
+        // Version not advanced → runningTaskList should NOT be populated from response
+        assertNull(workerStatus.getRunningTaskList(),
+                "runningTaskList should not be updated when status version is unchanged");
     }
 }

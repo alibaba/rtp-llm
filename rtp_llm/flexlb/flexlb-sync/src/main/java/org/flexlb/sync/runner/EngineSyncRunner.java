@@ -1,10 +1,14 @@
 package org.flexlb.sync.runner;
 
+import org.flexlb.balance.endpoint.EndpointRegistry;
+import org.flexlb.balance.endpoint.WorkerEndpoint;
+import org.flexlb.balance.scheduler.FlexlbBatchScheduler;
 import org.flexlb.cache.service.CacheAwareService;
 import org.flexlb.dao.master.WorkerHost;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.BalanceStatusEnum;
+import org.flexlb.util.CommonUtils;
 import org.flexlb.service.address.WorkerAddressService;
 import org.flexlb.service.grpc.EngineGrpcService;
 import org.flexlb.service.monitor.EngineHealthReporter;
@@ -45,6 +49,10 @@ public class EngineSyncRunner implements Runnable {
 
     private final Long syncEngineStatusInterval;
 
+    private final FlexlbBatchScheduler batchScheduler;
+
+    private final EndpointRegistry endpointRegistry;
+
     public EngineSyncRunner(String modelName,
                             Map<String, WorkerStatus> workerStatusMap,
                             WorkerAddressService workerAddressService,
@@ -55,7 +63,9 @@ public class EngineSyncRunner implements Runnable {
                             CacheAwareService localKvCacheAwareManager,
                             long syncRequestTimeoutMs,
                             LongAdder syncCount,
-                            Long syncEngineStatusInterval) {
+                            Long syncEngineStatusInterval,
+                            FlexlbBatchScheduler batchScheduler,
+                            EndpointRegistry endpointRegistry) {
 
         this.modelName = modelName;
         this.workerAddressService = workerAddressService;
@@ -68,6 +78,8 @@ public class EngineSyncRunner implements Runnable {
         this.syncRequestTimeoutMs = syncRequestTimeoutMs;
         this.syncCount = syncCount;
         this.syncEngineStatusInterval = syncEngineStatusInterval;
+        this.batchScheduler = batchScheduler;
+        this.endpointRegistry = endpointRegistry;
     }
 
     @Override
@@ -127,7 +139,7 @@ public class EngineSyncRunner implements Runnable {
                     GrpcWorkerStatusRunner grpcWorkerStatusRunner
                             = new GrpcWorkerStatusRunner(modelName, workerIpPort, site, roleType, host.getGroup(),
                             workerStatus, engineHealthReporter, engineGrpcService,
-                            syncRequestTimeoutMs);
+                            syncRequestTimeoutMs, batchScheduler, endpointRegistry);
                     statusCheckExecutor.submit(grpcWorkerStatusRunner);
                 } else {
                     logger.info("Skip status check for worker: {}, previous request in progress", workerIpPort);
@@ -157,25 +169,29 @@ public class EngineSyncRunner implements Runnable {
 
             if (size >= 2) {
                 double sumStepLatency = 0.0;
-                double sumRunningQueryTime = 0.0;
-                for (WorkerStatus workerStatus : workerStatusMap.values()) {
+                double sumRunningLoad = 0.0;
+                for (Map.Entry<String, WorkerStatus> entry : workerStatusMap.entrySet()) {
+                    WorkerStatus workerStatus = entry.getValue();
                     sumStepLatency += workerStatus.getStepLatencyMs();
-                    sumRunningQueryTime += workerStatus.getRunningQueueTime().get();
+                    WorkerEndpoint ep = endpointRegistry != null ? endpointRegistry.get(entry.getKey()) : null;
+                    sumRunningLoad += ep != null ? ep.getLoadMetric() : 0;
                 }
                 double meanStepLatency = sumStepLatency / size;
-                double meanRunningQueryLen = sumRunningQueryTime / size;
+                double meanRunningLoad = sumRunningLoad / size;
 
                 // Calculate variance (sample variance using Bessel correction)
                 double sumStepLatencyOfSquaredDiffs = 0.0;
-                double sumRunningQueryLenOfSquaredDiffs = 0.0;
-                for (WorkerStatus workerStatus : workerStatusMap.values()) {
+                double sumRunningLoadOfSquaredDiffs = 0.0;
+                for (Map.Entry<String, WorkerStatus> entry : workerStatusMap.entrySet()) {
+                    WorkerStatus workerStatus = entry.getValue();
                     double diff = workerStatus.getStepLatencyMs() - meanStepLatency;
-                    double diff2 = workerStatus.getRunningQueueTime().get() - meanRunningQueryLen;
+                    WorkerEndpoint ep = endpointRegistry != null ? endpointRegistry.get(entry.getKey()) : null;
+                    double diff2 = (ep != null ? ep.getLoadMetric() : 0) - meanRunningLoad;
                     sumStepLatencyOfSquaredDiffs += diff * diff;
-                    sumRunningQueryLenOfSquaredDiffs += diff2 * diff2;
+                    sumRunningLoadOfSquaredDiffs += diff2 * diff2;
                 }
                 double variance = sumStepLatencyOfSquaredDiffs / (size - 1); // Sample variance
-                double variance2 = sumRunningQueryLenOfSquaredDiffs / (size - 1);
+                double variance2 = sumRunningLoadOfSquaredDiffs / (size - 1);
 
                 engineHealthReporter.reportLatencyMetric(modelName, this.roleType.toString(), variance, variance2);
                 logger.info("EngineSyncRunner finished for model: {}, role: {}", modelName, roleType);
@@ -195,6 +211,32 @@ public class EngineSyncRunner implements Runnable {
             workerStatuses.put(workerIpPort, workerStatus);
             logger.info("Created new WorkerStatus for worker: {}", workerIpPort);
         }
+        if (endpointRegistry != null) {
+            ensureEndpoint(workerIpPort, workerStatus);
+        }
         return workerStatus;
+    }
+
+    private void ensureEndpoint(String ipPort, WorkerStatus workerStatus) {
+        String ip = workerStatus.getIp();
+        int httpPort = workerStatus.getPort();
+        int grpcPort = CommonUtils.toGrpcPort(httpPort);
+        workerStatus.setGrpcPort(grpcPort);
+
+        if (roleType == RoleType.PREFILL) {
+            long dpSize = workerStatus.getDpSize();
+            if (dpSize > 1) {
+                String message = String.format(
+                        "Prefill DP group endpoint not yet supported: model=%s, ipPort=%s, dp_size=%d",
+                        modelName, ipPort, dpSize);
+                logger.error(message);
+                throw new UnsupportedOperationException(message);
+            }
+            endpointRegistry.ensurePrefillEndpoint(ipPort, workerStatus);
+        } else if (roleType == RoleType.DECODE) {
+            endpointRegistry.ensureDecodeEndpoint(ipPort, workerStatus);
+        } else {
+            throw new IllegalArgumentException("Unsupported role type: " + roleType);
+        }
     }
 }
