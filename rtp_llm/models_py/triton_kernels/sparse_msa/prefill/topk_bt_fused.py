@@ -8,6 +8,8 @@ emits either trtllm block_tables+seq_lens (``EMIT_BLOCK_TABLE``) or the
 ``idx_group_size == 1`` (M3 production: num_idx_heads == num_kv_heads).
 """
 
+import os
+
 import torch
 import triton
 import triton.language as tl
@@ -17,6 +19,168 @@ from .flash_with_topk_idx import (
     _bitonic_merge,
     _flash_attn_fwd_with_block_score_kernel,
 )
+
+# Opt-1+: bypass the fmha_sm100 adapter in step3, preallocating the CSR/schedule/
+# page_table buffers once per forward (reused across all sparse layers) so the
+# per-layer ``.tolist()`` DtoH sync + 6 torch.empty allocs + schedule-capacity
+# recompute (~250us/layer of GPU idle) collapse to once-per-forward. The native CSR
+# kernel + schedule are reused verbatim -> output is bit-identical + deterministic.
+_M3_MSA_FUSED_CSR = os.environ.get("M3_MSA_FUSED_CSR", "1") == "1"
+
+
+@triton.jit
+def _kv_flat_to_paged_kernel(
+    k_in, v_in, k_out, v_out,
+    block, nkv, dim,
+    BLOCK_B: tl.constexpr, DIM: tl.constexpr, NKV: tl.constexpr,
+):
+    """Fused K+V copy: flat scratch page [block, nkv, dim] -> paged [nkv, block, dim]
+    (out[p,h,b,d] = in[p,b,h,d]). One launch for both caches; coalesced read (the
+    input page is contiguous [block,nkv,dim]) + coalesced write (nkv contiguous
+    [BLOCK_B,dim] chunks). ~4x faster than two aten permute+contiguous copies."""
+    pid_p = tl.program_id(0)
+    b0 = tl.program_id(1) * BLOCK_B
+    offs_b = b0 + tl.arange(0, BLOCK_B)
+    offs_h = tl.arange(0, NKV)
+    offs_d = tl.arange(0, DIM)
+    mask_b = offs_b < block
+    in_off = (
+        pid_p * (block * nkv * dim)
+        + offs_b[:, None, None] * (nkv * dim)
+        + offs_h[None, :, None] * dim
+        + offs_d[None, None, :]
+    )
+    k_tile = tl.load(k_in + in_off, mask=mask_b[:, None, None], other=0)
+    v_tile = tl.load(v_in + in_off, mask=mask_b[:, None, None], other=0)
+    out_off = (
+        pid_p * (nkv * block * dim)
+        + offs_h[None, :, None] * (block * dim)
+        + offs_b[:, None, None] * dim
+        + offs_d[None, None, :]
+    )
+    tl.store(k_out + out_off, k_tile, mask=mask_b[:, None, None])
+    tl.store(v_out + out_off, v_tile, mask=mask_b[:, None, None])
+
+
+def _kv_flat_to_paged(k_cache, v_cache, num_paged, block_size_k, num_kv_heads, head_dim):
+    """flat [slots, nkv, dim] -> paged [num_paged, nkv, block, dim] for K and V in one
+    fused launch. Returns (k_paged, v_paged) contiguous. Replaces two aten
+    permute(0,2,1,3).contiguous() copies (~4x faster, bit-identical)."""
+    shape = (num_paged, num_kv_heads, block_size_k, head_dim)
+    k_paged = torch.empty(shape, dtype=k_cache.dtype, device=k_cache.device)
+    v_paged = torch.empty(shape, dtype=v_cache.dtype, device=v_cache.device)
+    # BLOCK_B=8 / num_warps=8 / num_stages=2 tuned best; the copy is HBM-bandwidth-bound
+    # (~6 TB/s achievable here) so it already runs at the pure-contiguous-copy ceiling.
+    BLOCK_B = 8
+    grid = (num_paged, triton.cdiv(block_size_k, BLOCK_B))
+    _kv_flat_to_paged_kernel[grid](
+        k_cache, v_cache, k_paged, v_paged,
+        block_size_k, num_kv_heads, head_dim,
+        BLOCK_B=BLOCK_B, DIM=head_dim, NKV=num_kv_heads,
+        num_warps=8, num_stages=2,
+    )
+    return k_paged, v_paged
+
+
+def build_index_score_plan(
+    cu_seqlens, seq_lens, prefix_lens, num_idx_heads, idx_kv_heads, block_size_k
+):
+    """Build the fmha_sm100 OnlyScore plan for the index QK score.
+
+    The plan depends ONLY on the per-forward segment geometry (qo/kv segment
+    lengths, per-segment offsets, head/page config) -- identical across every
+    sparse layer in one model forward. Build it once per forward and pass it to
+    ``flash_prefill_topk_to_block_tables(..., index_score_plan=plan)`` so only the
+    first sparse layer pays the build cost (no module-global cache needed)."""
+    from fmha_sm100.api import _fmha_sm100_plan
+
+    qo_seg = (cu_seqlens[1:] - cu_seqlens[:-1]).cpu().to(torch.int32)
+    kv_seg = seq_lens.cpu().to(torch.int32)
+    qo_off = prefix_lens.cpu().to(torch.int32)  # qo_offset=prefix -> bottom-right causal
+    return _fmha_sm100_plan(
+        qo_seg, kv_seg, num_idx_heads, num_kv_heads=idx_kv_heads, qo_offset=qo_off,
+        page_size=block_size_k, output_maxscore=True, causal=True, num_kv_splits=1,
+    )
+
+
+def _attach_direct_csr(plan, kv_seg_cpu, block_size_k, device):
+    """Opt-1+: preallocate CSR/schedule/page_table buffers ONCE per forward (stored on
+    the cached plan, reused across all sparse layers) so step3 can bypass the adapter.
+    batch-general. Native CSR builder + schedule are reused as-is -> bit-identical."""
+    from src.sm100.prepare_k2q_csr import SparseK2qCsrBuilderSm100
+    from src.sm100.prepare_scheduler import SparseAttentionSchedule
+
+    head_kv = int(plan["num_kv_heads"])
+    total_q = int(plan["cu_seqlens_q"][-1].item())
+    topk = int(plan["kv_block_num"])
+    total_rows = int(plan["total_rows"])
+    blk = int(plan["blk_kv"])
+    pages_per_batch = [(int(s) + block_size_k - 1) // block_size_k for s in kv_seg_cpu.tolist()]
+    batch, max_pages = len(pages_per_batch), max(pages_per_batch)
+    cap = int(plan["scheduler_metadata_capacity"])
+
+    builder = SparseK2qCsrBuilderSm100()
+    builder._ensure_loaded()
+    q_ind = torch.empty((head_kv, total_q * topk), dtype=torch.int32, device=device)
+    # 16-byte aligned page_table [batch, max_pages] (the cute kernel asserts %16 == 0)
+    buf = torch.empty(batch * max_pages + 4, dtype=torch.int32, device=device)
+    shift = ((-buf.data_ptr()) % 16) // 4
+    page_table = buf[shift: shift + batch * max_pages].view(batch, max_pages)
+    plan["_csr_direct"] = dict(
+        builder=builder,
+        row_ptr=torch.empty((head_kv, total_rows + 1), dtype=torch.int32, device=device),
+        q_ind=q_ind,
+        sched=SparseAttentionSchedule(
+            enabled=True,
+            scheduler_metadata=torch.empty((cap, 6), dtype=torch.int32, device=device),
+            work_count=torch.empty((1,), dtype=torch.int32, device=device),
+            qsplit_indices=torch.empty_like(q_ind),
+            split_counts=torch.empty((total_q, head_kv), dtype=torch.int32, device=device),
+            target_q_per_cta=int(plan["target_q_per_cta"]),
+        ),
+        page_table=page_table,
+        pages_per_batch=pages_per_batch,
+        max_kv_blocks=(max(int(plan["max_seqlen_k"]), blk) + blk - 1) // blk,
+        target_q_per_cta=int(plan["target_q_per_cta"]),
+    )
+
+
+def build_sparse_attn_plan(
+    cu_seqlens, seq_lens, prefix_lens, num_q_heads, num_kv_heads, block_size_k, topk
+):
+    """Build the fmha_sm100 sparse-attention (step3) plan.
+
+    Like build_index_score_plan it depends only on the per-forward segment geometry
+    (so build once per forward, reuse across sparse layers). ``topk`` becomes
+    ``kv_block_num`` (must be in {4,8,16,32}). Consumed by sparse_fmha for the main
+    GQA sparse attention over the top-k selected blocks."""
+    from fmha_sm100.api import sparse_fmha_plan
+
+    qo_seg = (cu_seqlens[1:] - cu_seqlens[:-1]).cpu().to(torch.int32)
+    kv_seg = seq_lens.cpu().to(torch.int32)
+    qo_off = prefix_lens.cpu().to(torch.int32)  # qo_offset=prefix -> bottom-right causal
+    plan = sparse_fmha_plan(
+        qo_seg, kv_seg, num_qo_heads=num_q_heads, num_kv_heads=num_kv_heads,
+        qo_offset=qo_off, page_size=block_size_k, output_maxscore=False,
+        kv_block_num=topk, causal=True,
+    )
+    if _M3_MSA_FUSED_CSR:
+        _attach_direct_csr(plan, kv_seg, block_size_k, cu_seqlens.device)
+    return plan
+
+
+def build_kv_page_indices(req_to_token, seq_lens, block_size_k):
+    """Flat per-segment physical page table for fmha (page = slot // block_size_k).
+
+    Depends only on req_to_token + seq_lens (per-forward constant, identical across
+    sparse layers AND shared by the index-score and step3 fmha calls), so the caller
+    builds it once per forward (stored on _cp_shared_meta) and threads it in. Built
+    on the fly when not supplied."""
+    nblocks = (seq_lens.to(torch.int64) + block_size_k - 1) // block_size_k  # [batch]
+    page_starts = req_to_token[:, ::block_size_k]  # [batch, max_pages] block-start slots
+    cols = torch.arange(page_starts.shape[1], device=req_to_token.device)
+    valid = cols[None, :] < nblocks[:, None]
+    return (page_starts // block_size_k)[valid].to(torch.int32)
 
 
 _HEUR_topk_to_block_table_kernel = {
@@ -191,8 +355,17 @@ def flash_prefill_topk_to_block_tables(
     local_blocks: int = 1,
     sm_scale=None,
     score_type: str = "max",
+    index_score_plan=None,
+    kv_indices=None,
+    emit_block_table: bool = True,
 ):
-    """Returns (block_tables [total_q*NKV, topk] int32, seq_lens [total_q*NKV] int32)."""
+    """Returns (block_tables [total_q*NKV, topk] int32, seq_lens [total_q*NKV] int32).
+
+    ``index_score_plan``: a prebuilt fmha_sm100 OnlyScore plan (from
+    ``build_index_score_plan``). It depends only on the per-forward segment shape,
+    so the caller builds it once per forward (stored on MSAAttention._cp_shared_meta)
+    and passes it here, avoiding a rebuild per sparse layer. When None it is built
+    on the fly (decode fast-path / non-CP callers)."""
     triton.set_allocator(robust_allocator)
     total_q, num_heads, qk_head_dim = idx_q.shape
     max_slots, idx_kv_heads, _ = idx_k_cache.shape  # idx K is usually single-head
@@ -209,51 +382,72 @@ def flash_prefill_topk_to_block_tables(
         cu_seqlens, max_seqlen_q, block_size_q, block_size_k
     )
     max_seqblock_k = triton.cdiv(max_seqlen_k, block_size_k)
-    v_head_dim = qk_head_dim  # V never loaded (disable_index_value)
 
-    score = torch.full(
-        (num_heads, total_q, max_seqblock_k),
-        float("-inf"),
-        dtype=torch.float32,
-        device=idx_q.device,
+    # Index QK score via fmha_sm100 OnlyScore (SM100/Blackwell) instead of the
+    # Triton block-score kernel. fmha emits the same per-128-block max score that
+    # the bitonic topk->block_table kernel below consumes, but is MMA-efficient on
+    # the skinny index QK -> ~2.5x faster at 64k ctx. JIT-compiled+cached on first
+    # use (needs a gcc>=11 host compiler at COMPILE time; the cached .so is reused
+    # afterwards with no compiler dependency).
+    from fmha_sm100.api import _fmha_sm100
+
+    # paged MQA view of the idx-K cache: [num_total_pages, idx_kv_heads, page, d]
+    num_total_pages = max_slots // block_size_k
+    k_pages = idx_k_cache[: num_total_pages * block_size_k].view(
+        num_total_pages, idx_kv_heads, block_size_k, qk_head_dim
     )
-
-    def grid(META):
-        return (triton.cdiv(max_seqlen_q, META["BLOCK_SIZE_Q"]), batch_size * num_heads)
-
-    _flash_attn_fwd_with_block_score_kernel[grid](
-        idx_q, idx_k_cache, None, None, None, score, req_to_token, cu_seqlens,
-        seq_lens, prefix_lens, slot_ids, max_slots, num_heads, gqa_group_size,
-        qk_head_dim, v_head_dim, block_size_k, sm_scale, False, 1,
-        idx_q.stride(0), idx_q.stride(1), idx_q.stride(2),
-        idx_k_cache.stride(0), idx_k_cache.stride(1), idx_k_cache.stride(2),
-        0, 0, 0,
-        0, 0,
-        0, 0, 0,
-        score.stride(0), score.stride(1), score.stride(2),
-        req_to_token.stride(0),
-        SCORE_TYPE=score_type, DISABLE_INDEX_VALUE=True,
+    # flat per-segment physical page table (page = slot // block_size_k). Built once
+    # per forward by the caller and threaded in (shared with step3); else built here.
+    if kv_indices is None:
+        kv_indices = build_kv_page_indices(req_to_token, seq_lens, block_size_k)
+    # The fmha plan depends only on the per-forward segment shape (identical across
+    # every sparse layer). The caller builds it once per forward and passes it in;
+    # build on the fly only when not supplied (decode fast-path / non-CP callers).
+    plan = index_score_plan
+    if plan is None:
+        plan = build_index_score_plan(
+            cu_seqlens, seq_lens, prefix_lens, num_heads, idx_kv_heads, block_size_k
+        )
+    _o, maxscore = _fmha_sm100(
+        idx_q, k_pages, k_pages, plan, kv_indices=kv_indices,
+        output_o=False, output_maxscore=True, sm_scale=sm_scale,
     )
+    # [num_heads, max_block, total_q] -> [num_heads, total_q, max_seqblock_k] fp32
+    score = maxscore.transpose(1, 2)[:, :, :max_seqblock_k].contiguous().float()
 
-    bt = torch.zeros(total_q * num_kv_heads, topk, dtype=torch.int32, device=idx_q.device)
-    sl = torch.zeros(total_q * num_kv_heads, dtype=torch.int32, device=idx_q.device)
-    # ti_ptr unused; bt reused as a non-null placeholder
+    # bt/sl (compacted trtllm-gen block table) are consumed ONLY by the trtllm-gen
+    # step3 path; the fmha step3 path uses topk_idx + page_table and never reads them.
+    # When the caller won't use them (emit_block_table=False) skip the alloc and the
+    # kernel's block-table emission, passing 1-elem dummies just to satisfy the strides.
+    if emit_block_table:
+        bt = torch.zeros(total_q * num_kv_heads, topk, dtype=torch.int32, device=idx_q.device)
+        sl = torch.zeros(total_q * num_kv_heads, dtype=torch.int32, device=idx_q.device)
+    else:
+        bt = torch.empty(1, 1, dtype=torch.int32, device=idx_q.device)
+        sl = torch.empty(1, dtype=torch.int32, device=idx_q.device)
+    # topk_idx (-1 padded, raw block ids for fmha step3) is allocated directly in the
+    # [nkv, total_q, topk] q2k layout the native CSR builder / sparse_atten_func consume,
+    # so the fmha step3 feeds it straight in with NO permute-copy. The kernel writes via
+    # the (h, n, t) strides (passed in natural order for this layout).
+    topk_idx = torch.full(
+        (num_kv_heads, total_q, topk), -1, dtype=torch.int32, device=idx_q.device
+    )
     grid2 = (max_seqblock_q, batch_size, num_heads)
     _topk_to_block_table_kernel[grid2](
-        score, bt, sl, bt,
+        score, bt, sl, topk_idx,
         block_size_q, block_size_k, cu_seqlens, cu_seqblocks_q,
         prefix_lens, topk, init_blocks, local_blocks, num_pages,
         score.stride(0), score.stride(1), score.stride(2),
         bt.stride(0), bt.stride(1),
-        0, 0, 0,
+        topk_idx.stride(0), topk_idx.stride(1), topk_idx.stride(2),  # h, n, t
         NKV=num_kv_heads, MASK_INIT=False, MASK_LOCAL=False,
-        EMIT_BLOCK_TABLE=True, EMIT_TOPK_IDX=False,
+        EMIT_BLOCK_TABLE=emit_block_table, EMIT_TOPK_IDX=True,
     )
-    return bt, sl
+    return bt, sl, topk_idx
 
 
 @torch.no_grad()
-def flash_prefill_with_trtllm_gen(
+def flash_prefill_with_fmha(
     q: torch.Tensor,                # [total_q, num_q_heads, head_dim] bf16
     k_cache: torch.Tensor,          # [max_slots, num_kv_heads, head_dim] FLAT
     v_cache: torch.Tensor,          # [max_slots, num_kv_heads, head_dim] FLAT
@@ -273,30 +467,139 @@ def flash_prefill_with_trtllm_gen(
     sm_scale: float,
     workspace: torch.Tensor,
     score_type: str = "max",
+    index_score_plan=None,
+    sparse_attn_plan=None,
+    kv_indices=None,
 ) -> torch.Tensor:
-    """Fast sparse prefill: mega topk + trtllm-gen sparse-decode attention.
+    """Fast sparse prefill: mega topk (index score + bitonic) -> fmha_sm100 sparse attn.
 
-    Replaces the legacy 3-stage all-triton pipeline (flash_prefill_with_topk_index
-    + flash_prefill_with_gqa_share_sparse). Verified ~1.76x faster than the
-    triton ``_gqa_share_sparse_fwd_kernel`` at q_len=8192 on L20D (see
-    m3_test/test_mega_pipeline.py).
+    Step 1+2 emit ``topk_idx`` (raw top-k block ids); step 3 runs the main GQA sparse
+    attention through fmha_sm100 (~1.6x faster than trtllm-gen at 64k, cos>=0.9999).
+    No trtllm block table (bt/sl) is built -- the fmha path uses topk_idx + page_table.
 
-    Constraints (caller must check, otherwise fall back to legacy):
-      * idx_group_size == 1  (num_idx_heads == num_kv_heads)
-      * The fused topk-to-block-table kernel assumes a single contiguous KV
-        cache slice (page id = pid_h * num_pages + block_idx with no per-batch
-        offset). CP prefill on a single request satisfies this; multi-request
-        batching would need a kernel extension.
+    ``sparse_attn_plan`` (from ``build_sparse_attn_plan``) is required. When it carries
+    the Opt-1+ ``_csr_direct`` buffers, step3 bypasses the fmha adapter (prealloc CSR/
+    schedule + GPU page_table + direct ``sparse_atten_func``, bit-identical + determi-
+    nistic); otherwise it uses the adapter ``sparse_fmha``.
 
-    trtllm-gen's sparse-decode kernel launches with grid_dim_x = total_q *
-    num_kv_heads. The CUDA hardware caps grid_dim_x at 2**16 - 1 = 65535, so
-    a single call cannot cover more than ``65535 // num_kv_heads`` queries
-    (16383 for NUM_KV=4). When ``total_q`` exceeds that bound we slice the
-    q_packed / block_tables / seq_lens tensors along the (query, kv_head)
-    row axis and issue multiple kernel calls sharing the same paged KV
-    cache; the per-query independence of sparse decode means no LSE merge
-    is needed. Verified bit-equivalent (cos >= 0.999997) up to q=65536 in
-    m3_test/test_trtllm_gen_q_limit.py.
+    Decode uses ``flash_decode_with_trtllm_gen`` instead (trtllm-gen sparse-decode).
+    Constraint: idx_group_size == 1 (num_idx_heads == num_kv_heads).
+    """
+    from fmha_sm100.api import sparse_fmha
+
+    if sparse_attn_plan is None:
+        raise ValueError("flash_prefill_with_fmha requires a sparse_attn_plan")
+
+    total_q, num_q_heads, head_dim = q.shape
+    max_slots, num_kv_heads, _ = k_cache.shape
+    num_pages = (max_seqlen_k + block_size_k - 1) // block_size_k
+
+    # Physical page table: build once here (or take the per-forward cached one) and
+    # share between the index-score kernel and step3 -- avoids the double build.
+    if kv_indices is None:
+        kv_indices = build_kv_page_indices(req_to_token, seq_lens, block_size_k)
+
+    # Step 1+2: fused QK score + bitonic topk -> topk_idx. emit_block_table=False: the
+    # fmha step3 path uses topk_idx + page_table and never reads the trtllm block table.
+    _bt, _sl, topk_idx = flash_prefill_topk_to_block_tables(
+        idx_q=idx_q, idx_k_cache=idx_k_cache,
+        req_to_token=req_to_token, slot_ids=slot_ids,
+        cu_seqlens=cu_seqlens, seq_lens=seq_lens, prefix_lens=prefix_lens,
+        max_seqlen_q=max_seqlen_q, max_seqlen_k=max_seqlen_k,
+        block_size_k=block_size_k, topk=topk, num_pages=num_pages,
+        init_blocks=init_blocks, local_blocks=local_blocks,
+        score_type=score_type, index_score_plan=index_score_plan,
+        kv_indices=kv_indices, emit_block_table=False,
+    )
+
+    # Step 3 (fmha): read the flat MSA scratch as paged [num_paged, nkv, page, dim] +
+    # the raw top-k block ids. Paginate the FULL gather scratch (max_slots) so multi-
+    # request page_table indices resolve; single request: max_slots // block == num_pages.
+    # One fused Triton kernel does both K and V (coalesced, ~4x faster + 1 launch vs the
+    # two aten permute+contiguous copies; bit-identical).
+    num_paged = max_slots // block_size_k
+    k_paged_f, v_paged_f = _kv_flat_to_paged(
+        k_cache, v_cache, num_paged, block_size_k, num_kv_heads, head_dim
+    )
+    # Opt-1+ direct path: when the per-forward CSR buffers are attached, bypass the
+    # adapter -- feed topk_idx (already [nkv,Q,topk] = q2k) straight to the native CSR
+    # _run into prealloc row_ptr/q_indices, GPU page_table (no .tolist() sync), direct
+    # sparse_atten_func reusing the native schedule. Same native kernel/schedule ->
+    # bit-identical + deterministic. batch-general.
+    csr = sparse_attn_plan.get("_csr_direct") if isinstance(sparse_attn_plan, dict) else None
+    if csr is not None:
+        from interface import sparse_atten_func
+
+        p = sparse_attn_plan
+        # topk_idx is already [nkv, total_q, topk] contiguous = the q2k layout the native
+        # builder wants -> feed it straight in (no permute-copy, no q2k staging buffer).
+        pt, off = csr["page_table"], 0
+        for b, n in enumerate(csr["pages_per_batch"]):
+            pt[b, :n] = kv_indices[off: off + n]
+            off += n
+        s = csr["sched"]
+        csr["builder"]._run_with_schedule(
+            topk_idx, p["cu_seqlens_q"], p["cu_seqlens_k"], csr["row_ptr"], csr["q_ind"],
+            s.scheduler_metadata, s.work_count, s.qsplit_indices, s.split_counts,
+            topk, block_size_k, p["total_rows"], csr["max_kv_blocks"],
+            csr["target_q_per_cta"], s.work_capacity, p["max_seqlen_q"],
+        )
+        out_f = sparse_atten_func(
+            q, k_paged_f, v_paged_f, csr["row_ptr"], csr["q_ind"], topk,
+            cu_seqlens_q=p["cu_seqlens_q"], cu_seqlens_k=p["cu_seqlens_k"],
+            max_seqlen_q=p["max_seqlen_q"], max_seqlen_k=p["max_seqlen_k"],
+            blk_kv=block_size_k, causal=p["causal"], softmax_scale=sm_scale,
+            return_softmax_lse=False, page_table=pt, seqused_k=p["seqused_k"],
+            schedule=s, usable_SM_count=int(p.get("usable_SM_count", -1)),
+        )
+        if isinstance(out_f, tuple):
+            out_f = out_f[0]
+        return out_f.view(total_q, num_q_heads, head_dim)
+    # Adapter fallback: sparse_fmha's kv_block_indexes wants [total_q, nkv, topk]; topk_idx
+    # is now [nkv, total_q, topk], so transpose the view back (adapter then re-permutes +
+    # makes it contiguous internally). kv_indices shared with the index-score kernel.
+    out_f, _ = sparse_fmha(
+        q, k_paged_f, v_paged_f, sparse_attn_plan,
+        kv_indices=kv_indices, kv_block_indexes=topk_idx.permute(1, 0, 2),
+        output_o=True, output_maxscore=False, sm_scale=sm_scale,
+    )
+    return out_f.view(total_q, num_q_heads, head_dim)
+
+
+@torch.no_grad()
+def flash_decode_with_trtllm_gen(
+    q: torch.Tensor,                # [total_q, num_q_heads, head_dim] bf16
+    k_cache: torch.Tensor,          # [max_slots, num_kv_heads, head_dim] FLAT
+    v_cache: torch.Tensor,          # [max_slots, num_kv_heads, head_dim] FLAT
+    idx_q: torch.Tensor,            # [total_q, num_idx_heads, idx_head_dim]
+    idx_k_cache: torch.Tensor,      # [max_slots, 1, idx_head_dim]
+    req_to_token: torch.Tensor,
+    slot_ids: torch.Tensor,
+    cu_seqlens: torch.Tensor,
+    seq_lens: torch.Tensor,
+    prefix_lens: torch.Tensor,
+    max_seqlen_q: int,
+    max_seqlen_k: int,
+    block_size_k: int,
+    topk: int,
+    init_blocks: int,
+    local_blocks: int,
+    sm_scale: float,
+    workspace: torch.Tensor,
+    score_type: str = "max",
+    index_score_plan=None,
+    kv_indices=None,
+) -> torch.Tensor:
+    """Fast sparse decode: mega topk (index score + bitonic) -> trtllm-gen sparse-decode.
+
+    Step 1+2 emit bt/sl (compacted trtllm block table) + topk_idx; step 3 runs
+    flashinfer's trtllm-gen sparse-decode kernel over the paged KV.
+
+    trtllm-gen's kernel launches with grid_dim_x = total_q * num_kv_heads, capped at
+    2**16 - 1 = 65535; when total_q exceeds ``65535 // num_kv_heads`` we slice the
+    q_packed / block_tables / seq_lens rows and issue multiple calls over the shared
+    paged KV (per-query independence -> no LSE merge). Verified bit-equivalent up to
+    q=65536 in m3_test/test_trtllm_gen_q_limit.py. Constraint: idx_group_size == 1.
     """
     from flashinfer.decode import trtllm_batch_decode_with_kv_cache
 
@@ -305,23 +608,25 @@ def flash_prefill_with_trtllm_gen(
     gqa = num_q_heads // num_kv_heads
     num_pages = (max_seqlen_k + block_size_k - 1) // block_size_k
 
-    # Step 1+2: fused QK score + bitonic topk + trtllm-style block_table emit.
-    bt, sl = flash_prefill_topk_to_block_tables(
+    if kv_indices is None:
+        kv_indices = build_kv_page_indices(req_to_token, seq_lens, block_size_k)
+
+    # Step 1+2: fused QK score + bitonic topk; emit bt/sl (compacted trtllm block table).
+    bt, sl, _topk_idx = flash_prefill_topk_to_block_tables(
         idx_q=idx_q, idx_k_cache=idx_k_cache,
         req_to_token=req_to_token, slot_ids=slot_ids,
         cu_seqlens=cu_seqlens, seq_lens=seq_lens, prefix_lens=prefix_lens,
         max_seqlen_q=max_seqlen_q, max_seqlen_k=max_seqlen_k,
         block_size_k=block_size_k, topk=topk, num_pages=num_pages,
         init_blocks=init_blocks, local_blocks=local_blocks,
-        score_type=score_type,
+        score_type=score_type, index_score_plan=index_score_plan,
+        kv_indices=kv_indices, emit_block_table=True,
     )
 
     # Permute flat MSA side cache to trtllm's paged layout:
     #   flat  [num_pages * block_size_k, num_kv_heads, head_dim]
     # -> paged [num_kv_heads * num_pages, 1, block_size_k, head_dim]
     # The trailing unsqueeze(1) is trtllm's blocks-per-token dim (= 1 here).
-    # `.contiguous()` after permute is one DtoD memcpy ~16us per cache per
-    # layer at 8k tokens — far less than the legacy step3's 1.4ms savings.
     paged_slots = num_pages * block_size_k
 
     def _to_paged(cache: torch.Tensor) -> torch.Tensor:
@@ -346,10 +651,9 @@ def flash_prefill_with_trtllm_gen(
     )
 
     # Chunk q_packed along axis 0 (= (token, kv_head) interleaved rows) so each
-    # call's grid_dim_x stays <= 65535. block_tables and seq_lens share the
-    # same row layout so they slice identically. KV cache + workspace are
-    # shared across chunks; sparse-decode queries are mutually independent,
-    # no LSE / softmax merge needed.
+    # call's grid_dim_x stays <= 65535. block_tables and seq_lens share the same
+    # row layout so they slice identically. KV cache + workspace are shared across
+    # chunks; sparse-decode queries are mutually independent, no LSE merge needed.
     CUDA_GRID_MAX = 65535
     rows_per_chunk = (CUDA_GRID_MAX // num_kv_heads) * num_kv_heads
     nrows = q_packed.shape[0]

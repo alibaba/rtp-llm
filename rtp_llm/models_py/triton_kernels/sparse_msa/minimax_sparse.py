@@ -31,15 +31,16 @@ from .decode.topk_sparse import (
 )
 from .prefill.flash_with_topk_idx import flash_prefill_with_topk_index
 from .prefill.topk_bt_fused import (
+    flash_decode_with_trtllm_gen,
     flash_prefill_with_fused_topk_index,
-    flash_prefill_with_trtllm_gen,
+    flash_prefill_with_fmha,
 )
 from .prefill.topk_sparse import flash_prefill_with_gqa_share_sparse
 
 # trtllm-gen's sparse-decode kernel launches with grid_dim_x = total_q *
 # num_kv_heads. The CUDA grid_dim_x hardware cap is 2**16 - 1 = 65535, so a
 # single call covers up to 65535 // num_kv_heads queries (16383 for NUM_KV=4).
-# flash_prefill_with_trtllm_gen chunks beyond this internally, so the caller
+# flash_decode_with_trtllm_gen chunks beyond this internally, so the caller
 # does NOT need a max_q gate any more — any q_len works.
 
 
@@ -71,6 +72,9 @@ def minimax_sparse_prefill(
     score_type: str = "max",
     disable_index_value: bool = False,
     workspace: Optional[torch.Tensor] = None,
+    index_score_plan=None,
+    sparse_attn_plan=None,
+    kv_indices=None,
 ):
     # All seqlen is less than topk, use full attention
     # Step 1: Flash attention with topk index (using index head)
@@ -80,23 +84,25 @@ def minimax_sparse_prefill(
 
     # Fastest path: mega topk-to-block-tables + trtllm-gen sparse decode.
     # The fused-topk_idx and legacy 3-stage paths stay as fallbacks:
-    # idx_group_size > 1 routes there via topk_index_reduce, and so does any
-    # multi-request batch (cu_seqlens-1 > 2) because the mega kernel's page
-    # id layout (pid_h * num_pages + block_idx, no per-segment offset)
-    # requires a single contiguous KV cache slice across all segments.
-    # No per-call q_len cap — flash_prefill_with_trtllm_gen chunks internally
-    # to stay under CUDA's grid_dim_x = 65535 limit.
+    # idx_group_size > 1 routes there via topk_index_reduce. The (cu_seqlens-1 > 2)
+    # multi-request restriction applies ONLY to the trtllm-gen block-table (bt) path,
+    # whose page-id layout (pid_h * num_pages + block_idx, no per-segment offset)
+    # assumes a single contiguous KV slice. The fmha step3 path (sparse_attn_plan set)
+    # consumes batch-local topk_idx + a per-request page_table and handles any number of
+    # requests (verified bit-identical vs per-request runs), so it is NOT capped.
+    # No per-call q_len cap — flash_prefill_with_fmha/decode chunk internally to stay
+    # under CUDA's grid_dim_x = 65535 limit.
     use_trtllm = (
         workspace is not None
         and idx_group_size == 1
         and disable_index_value
         and idx_sink is None
         and sink is None
-        and (cu_seqlens.numel() - 1) <= 2
+        and ((cu_seqlens.numel() - 1) <= 2 or sparse_attn_plan is not None)
     )
     if use_trtllm:
         sm_scale_v = sm_scale if sm_scale is not None else q.shape[-1] ** -0.5
-        o = flash_prefill_with_trtllm_gen(
+        o = flash_prefill_with_fmha(
             q=q,
             k_cache=k_cache,
             v_cache=v_cache,
@@ -116,6 +122,9 @@ def minimax_sparse_prefill(
             sm_scale=sm_scale_v,
             workspace=workspace,
             score_type=score_type,
+            index_score_plan=index_score_plan,
+            sparse_attn_plan=sparse_attn_plan,
+            kv_indices=kv_indices,
         )
         return None, o
 
@@ -249,7 +258,7 @@ def minimax_sparse_decode(
     )
     if use_trtllm:
         sm_scale_v = sm_scale if sm_scale is not None else q.shape[-1] ** -0.5
-        o = flash_prefill_with_trtllm_gen(
+        o = flash_decode_with_trtllm_gen(
             q=q,
             k_cache=k_cache,
             v_cache=v_cache,

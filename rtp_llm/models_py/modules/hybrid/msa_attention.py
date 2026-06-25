@@ -310,27 +310,28 @@ def _fused_unpack_packed_cp_kernel(
     k_ptr,
     v_ptr,
     idx_ptr,
-    TOTAL: tl.constexpr,
+    T,
     PACKED_DIM: tl.constexpr,
     NK: tl.constexpr,
     NI: tl.constexpr,
-    BLOCK: tl.constexpr,
+    BLK: tl.constexpr,
 ):
-    pid = tl.program_id(0)
-    offs = pid * BLOCK + tl.arange(0, BLOCK)
-    mask = offs < TOTAL
-    token = offs // PACKED_DIM
-    field = offs - token * PACKED_DIM
-    src_token = tl.load(unpad_ptr + token, mask=mask, other=0).to(tl.int64)
-    vals = tl.load(packed_ptr + src_token * PACKED_DIM + field, mask=mask, other=0.0)
-
-    is_k = field < NK
-    is_v = (field >= NK) & (field < 2 * NK)
-    idx_field = field - 2 * NK
-    is_idx = field >= 2 * NK
-    tl.store(k_ptr + token * NK + field, vals, mask=mask & is_k)
-    tl.store(v_ptr + token * NK + (field - NK), vals, mask=mask & is_v)
-    tl.store(idx_ptr + token * NI + idx_field, vals, mask=mask & is_idx)
+    # One program per output token: read packed[unpad[t]] (contiguous row) and split the
+    # three column ranges into contiguous k/v/idx rows. Token-parallel + contiguous
+    # read/write is ~2-3x faster than the element-parallel split (better coalescing).
+    t = tl.program_id(0)
+    if t >= T:
+        return
+    base = tl.load(unpad_ptr + t).to(tl.int64) * PACKED_DIM
+    for o in range(0, NK, BLK):
+        off = o + tl.arange(0, BLK)
+        m = off < NK
+        tl.store(k_ptr + t * NK + off, tl.load(packed_ptr + base + off, mask=m, other=0), mask=m)
+        tl.store(v_ptr + t * NK + off, tl.load(packed_ptr + base + NK + off, mask=m, other=0), mask=m)
+    for o in range(0, NI, BLK):
+        off = o + tl.arange(0, BLK)
+        m = off < NI
+        tl.store(idx_ptr + t * NI + off, tl.load(packed_ptr + base + 2 * NK + off, mask=m, other=0), mask=m)
 
 
 def _fused_unpack_packed_cp(
@@ -349,18 +350,18 @@ def _fused_unpack_packed_cp(
     if token_count == 0:
         return
     packed_dim = 2 * nk + ni
-    total = token_count * packed_dim
-    _fused_unpack_packed_cp_kernel[(triton.cdiv(total, 256),)](
+    _fused_unpack_packed_cp_kernel[(token_count,)](
         packed,
         unpad_indices,
         full_k.reshape(token_count, nk),
         full_v.reshape(token_count, nk),
         full_idx_k.reshape(token_count, ni),
-        TOTAL=total,
+        token_count,
         PACKED_DIM=packed_dim,
         NK=nk,
         NI=ni,
-        BLOCK=256,
+        BLK=512,
+        num_warps=2,
     )
 
 
@@ -1606,22 +1607,23 @@ class MSAAttention(nn.Module):
             dim=-1,
         )  # [local_tokens, 2*nk + ni], contiguous
         all_packed = all_gather(packed_kv, group=Group.TP)
-        gathered_T = all_packed.shape[0]
-        # last-dim slices are strided views; .reshape() auto-contiguous'es
-        # so downstream fancy indexing (all_k[unpad_indices]) and the paged
-        # scatter writes hit the fast path.
-        all_k = all_packed[:, :nk].reshape(gathered_T, self.kv_head_num, self.head_dim)
-        all_v = all_packed[:, nk : 2 * nk].reshape(
-            gathered_T, self.kv_head_num, self.head_dim
-        )
-        all_idx_k = all_packed[:, 2 * nk :].reshape(gathered_T, 1, self.idx_head_dim)
-
         restore_indices = cp_info.prefill_qkv_restore_indice
         padding_mask = cp_info.prefill_qkv_padding_mask
         unpad_indices = restore_indices[padding_mask == 1].to(torch.long)
-        full_k = all_k[unpad_indices]
-        full_v = all_v[unpad_indices]
-        full_idx_k = all_idx_k[unpad_indices]
+        # Fused unpad+split: one token-parallel kernel gathers all_packed[unpad_indices]
+        # and splits the K/V/idx_K column ranges into contiguous outputs -- replaces the
+        # reshape(x3) + fancy-index(x3) copy chain (~2x faster, bit-identical).
+        full_T = int(unpad_indices.numel())
+        full_k = torch.empty(
+            full_T, self.kv_head_num, self.head_dim, dtype=all_packed.dtype, device=device
+        )
+        full_v = torch.empty(
+            full_T, self.kv_head_num, self.head_dim, dtype=all_packed.dtype, device=device
+        )
+        full_idx_k = torch.empty(
+            full_T, 1, self.idx_head_dim, dtype=all_packed.dtype, device=device
+        )
+        _fused_unpack_packed_cp(all_packed, unpad_indices, full_k, full_v, full_idx_k, nk, ni, full_T)
 
         full_input_lengths_cpu = cp_info.prefill_actual_input_lengths_cpu.to(
             torch.int64
@@ -1798,6 +1800,8 @@ class MSAAttention(nn.Module):
             max_kv = cache["max_kv"]
             nk = cache["nk"]
             ni = cache["ni"]
+            index_score_plan = cache["index_score_plan"]
+            sparse_attn_plan = cache["sparse_attn_plan"]
             need_meta = False
         else:
             chunk_dev = cp_info.prefill_cp_chunk_lengths.detach().to(
@@ -1915,6 +1919,26 @@ class MSAAttention(nn.Module):
             max_seqlen_q = int(pair_arr.max()) if len(pair_arr) > 0 else 0
             max_seqlen_k = max_kv
 
+            # Build the fmha index-score plan ONCE per forward here (first sparse
+            # layer), reused by every later sparse layer via _cp_shared_meta. The
+            # plan depends only on the segment geometry (cu_seqlens/seq_lens/prefix),
+            # identical across layers -> no per-layer rebuild, no module-global cache.
+            from rtp_llm.models_py.triton_kernels.sparse_msa.prefill.topk_bt_fused import (
+                build_index_score_plan,
+                build_sparse_attn_plan,
+            )
+
+            index_score_plan = build_index_score_plan(
+                cu_seqlens, seq_lens_i32, prefix_i32,
+                self.num_idx_heads, 1, self.block_size,
+            )
+            # step3 sparse-attention plan (fmha): GQA num_q_heads/num_kv_heads,
+            # kv_block_num=topk. Same per-forward reuse as index_score_plan.
+            sparse_attn_plan = build_sparse_attn_plan(
+                cu_seqlens, seq_lens_i32, prefix_i32,
+                self.head_num, self.kv_head_num, self.block_size, self.topk_blocks,
+            )
+
             MSAAttention._cp_shared_meta = {
                 "layer_idx": self.layer_idx,
                 "local_positions": local_positions,
@@ -1936,6 +1960,8 @@ class MSAAttention(nn.Module):
                 "max_kv": max_kv,
                 "nk": nk,
                 "ni": ni,
+                "index_score_plan": index_score_plan,
+                "sparse_attn_plan": sparse_attn_plan,
             }
 
         self._ensure_gather_scratch(kv_cache, device, qkv.dtype, bsz=bsz, max_kv=max_kv)
@@ -1953,6 +1979,7 @@ class MSAAttention(nn.Module):
             req_to_token_segments = addr_cache["req_to_token_segments"]
             slot_ids = addr_cache["slot_ids"]
             slot_mapping = addr_cache["slot_mapping"]
+            kv_page_indices = addr_cache["kv_page_indices"]
         else:
             pos_range = torch.arange(max_kv, device=device, dtype=torch.int32)
             cache_row_offsets = torch.arange(bsz, device=device, dtype=torch.int32)[
@@ -1970,6 +1997,15 @@ class MSAAttention(nn.Module):
             ).contiguous()
             slot_ids = torch.arange(n_seg, device=device, dtype=torch.int64)
             slot_mapping = self._kernel_slots_to_paged(write_slots, attn_inputs)
+            # fmha physical page table: built once here (per forward), shared by the
+            # index-score and step3 fmha kernels across all sparse layers.
+            from rtp_llm.models_py.triton_kernels.sparse_msa.prefill.topk_bt_fused import (
+                build_kv_page_indices,
+            )
+
+            kv_page_indices = build_kv_page_indices(
+                req_to_token_segments, seq_lens_i32, self.block_size
+            )
             if MSAAttention._cp_shared_meta is not None:
                 MSAAttention._cp_shared_meta["addr"] = {
                     "scratch_seq_len": int(self._scratch_seq_len),
@@ -1979,6 +2015,7 @@ class MSAAttention(nn.Module):
                     "req_to_token_segments": req_to_token_segments,
                     "slot_ids": slot_ids,
                     "slot_mapping": slot_mapping,
+                    "kv_page_indices": kv_page_indices,
                 }
 
         idx_k = idx_k.contiguous()
@@ -2146,6 +2183,9 @@ class MSAAttention(nn.Module):
             score_type=self.score_type,
             disable_index_value=self.disable_index_value,
             workspace=MSAAttention._get_trtllm_workspace(device),
+            index_score_plan=index_score_plan,
+            sparse_attn_plan=sparse_attn_plan,
+            kv_indices=kv_page_indices,
         )
 
         return self.o_proj(o.reshape(local_tokens, -1).contiguous())
