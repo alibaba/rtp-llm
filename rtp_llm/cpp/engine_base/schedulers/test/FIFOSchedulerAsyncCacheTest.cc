@@ -64,6 +64,21 @@ protected:
             runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager_);
     }
 
+    std::shared_ptr<FIFOScheduler> createPrefillTpScheduler() {
+        ModelConfig model_config;
+        model_config.max_seq_len = 8192;
+        RuntimeConfig runtime_config;
+        runtime_config.max_generate_batch_size                     = 100;
+        runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8192;
+        PDSepConfig pd_sep_config;
+        pd_sep_config.role_type = RoleType::PREFILL;
+        ParallelismConfig parallelism_config;
+        parallelism_config.tp_size = 2;
+        ModelSpecificConfig model_specific_config;
+        return std::make_shared<FIFOScheduler>(
+            runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager_);
+    }
+
     GenerateStreamPtr createStream(const std::vector<int>& input_tokens        = {1, 2, 3},
                                    bool                    reuse_cache         = false,
                                    bool                    enable_memory_cache = false) {
@@ -389,6 +404,32 @@ TEST_F(FIFOSchedulerAsyncCacheTest, testMixedAsyncAndDirectStreams) {
     ASSERT_EQ(scheduler->loading_cache_streams_.size(), 1);
     ASSERT_EQ(scheduler->waitingStreamsSize(), 0);
     ASSERT_EQ(scheduler->runningStreamsSize(), 1);
+}
+
+TEST_F(FIFOSchedulerAsyncCacheTest, testPrefillTpWaitsBrieflyForLoadingCacheBeforeRun) {
+    setupMockCoordinator();
+
+    auto mock_ctx = std::make_shared<NiceMock<MockAsyncContext>>();
+    EXPECT_CALL(*mock_ctx, done()).WillOnce(Return(false)).WillRepeatedly(Return(true));
+    ON_CALL(*mock_ctx, success()).WillByDefault(Return(true));
+    ON_CALL(*mock_ctx, waitDone()).WillByDefault(Return());
+    EXPECT_CALL(*mock_coord_, asyncRead(_)).WillOnce(Return(std::static_pointer_cast<AsyncContext>(mock_ctx)));
+
+    auto scheduler = createPrefillTpScheduler();
+
+    auto loading_stream = createStream({1, 2}, /*reuse_cache=*/true, /*enable_memory_cache=*/true);
+    auto direct_stream  = createStream({3, 4}, /*reuse_cache=*/false);
+
+    ASSERT_TRUE(scheduler->enqueue(loading_stream).ok());
+    ASSERT_TRUE(scheduler->enqueue(direct_stream).ok());
+
+    auto result = scheduler->schedule();
+    ASSERT_TRUE(result.ok());
+    ASSERT_EQ(result.value().size(), 2);
+    ASSERT_TRUE(loading_stream->getStatus() == StreamState::RUNNING);
+    ASSERT_TRUE(direct_stream->getStatus() == StreamState::RUNNING);
+    ASSERT_EQ(scheduler->loading_cache_streams_.size(), 0);
+    ASSERT_EQ(scheduler->waitingStreamsSize(), 0);
 }
 
 // ============================================================================

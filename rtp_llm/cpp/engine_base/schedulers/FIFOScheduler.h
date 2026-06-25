@@ -56,7 +56,11 @@ private:
     void accountBatchMetrics(const GenerateStreamPtr& new_stream);
     bool waitPredicate();
     void addStreamToNewState(const GenerateStreamPtr& stream, StreamState new_state);
-    void evaluateWaitingStreams(std::list<GenerateStreamPtr>& streams);
+    void evaluateWaitingStreams(std::list<GenerateStreamPtr>&       streams,
+                                const std::list<GenerateStreamPtr>& base_streams = {},
+                                bool                                reset_metrics = true);
+    bool shouldWaitLoadingCacheBeforeRun() const;
+    void waitLoadingCacheBeforeRun(std::unique_lock<std::mutex>& lock);
     void cancelStreams(std::list<GenerateStreamPtr>& streams);
     bool checkInputLength(const GenerateStreamPtr& stream);
 

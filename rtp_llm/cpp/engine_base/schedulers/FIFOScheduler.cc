@@ -14,6 +14,12 @@
 using namespace std;
 namespace rtp_llm {
 
+namespace {
+
+constexpr int64_t kPrefillLoadingCacheGraceWaitMs = 80;
+
+}
+
 FIFOScheduler::FIFOScheduler(const RuntimeConfig&                   runtime_config,
                              const ModelConfig&                     model_config,
                              const PDSepConfig&                     pd_sep_config,
@@ -226,14 +232,18 @@ void FIFOScheduler::evaluateAndUpdateStreams(list<GenerateStreamPtr>& streams) {
     }
 }
 
-void FIFOScheduler::evaluateWaitingStreams(list<GenerateStreamPtr>& waiting_streams) {
+void FIFOScheduler::evaluateWaitingStreams(list<GenerateStreamPtr>&       waiting_streams,
+                                           const list<GenerateStreamPtr>& base_streams,
+                                           bool                           reset_metrics) {
     RTP_LLM_PROFILE_FUNCTION();
-    list<GenerateStreamPtr>             admitted_streams;
+    list<GenerateStreamPtr>             admitted_streams(base_streams.begin(), base_streams.end());
     std::unordered_set<GenerateStream*> admitted_stream_ptrs;
-    last_admitted_context_batch_size_ = 0;
-    last_admitted_context_token_size_ = 0;
-    last_waiting_oldest_age_us_       = 0;
-    if (!waiting_streams.empty()) {
+    if (reset_metrics) {
+        last_admitted_context_batch_size_ = 0;
+        last_admitted_context_token_size_ = 0;
+        last_waiting_oldest_age_us_       = 0;
+    }
+    if (reset_metrics && !waiting_streams.empty()) {
         auto oldest_enqueue_time_us = (*std::min_element(waiting_streams.begin(),
                                                          waiting_streams.end(),
                                                          [](const auto& lhs, const auto& rhs) {
@@ -330,6 +340,10 @@ void FIFOScheduler::evaluateWaitingStreams(list<GenerateStreamPtr>& waiting_stre
             }
             admitted_streams.push_back(stream);
             admitted_stream_ptrs.insert(stream.get());
+            if (stream->isContextStream()) {
+                ++last_admitted_context_batch_size_;
+                last_admitted_context_token_size_ += stream->contextLength();
+            }
             if (max_inited_kv_cache_streams_ > 0 && !already_inited_kv) {
                 ++admitted_new_init_streams;
             }
@@ -340,13 +354,6 @@ void FIFOScheduler::evaluateWaitingStreams(list<GenerateStreamPtr>& waiting_stre
             }
         }
         it++;
-    }
-
-    for (const auto& stream : admitted_streams) {
-        if (stream->isContextStream()) {
-            ++last_admitted_context_batch_size_;
-            last_admitted_context_token_size_ += stream->contextLength();
-        }
     }
 
     for (auto it = waiting_streams.begin(); it != waiting_streams.end();) {
@@ -362,6 +369,27 @@ void FIFOScheduler::evaluateWaitingStreams(list<GenerateStreamPtr>& waiting_stre
             it = waiting_streams.erase(it);
         } else {
             it++;
+        }
+    }
+}
+
+bool FIFOScheduler::shouldWaitLoadingCacheBeforeRun() const {
+    return tp_size_ > 1 && pd_sep_config_.role_type == RoleType::PREFILL && !new_streams_.empty()
+           && !loading_cache_streams_.empty() && !stop_;
+}
+
+void FIFOScheduler::waitLoadingCacheBeforeRun(unique_lock<mutex>& lock) {
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(kPrefillLoadingCacheGraceWaitMs);
+    while (shouldWaitLoadingCacheBeforeRun() && std::chrono::steady_clock::now() < deadline) {
+        cond_.wait_for(lock, std::chrono::milliseconds(1));
+        if (stop_) {
+            return;
+        }
+        const auto prev_waiting_size = waiting_streams_.size();
+        evaluateAndUpdateStreams(loading_cache_streams_);
+        evaluateWaitingStreams(waiting_streams_, new_streams_, false);
+        if (waiting_streams_.size() < prev_waiting_size) {
+            schedule_trigger_ = true;
         }
     }
 }
@@ -410,13 +438,16 @@ absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule() {
         // allocate KV blocks, so a permanent CanRun bit alone must not bypass capacity checks.
         size_t prev_waiting_size = waiting_streams_.size();
         evaluateWaitingStreams(waiting_streams_);
-        running_streams_.insert(running_streams_.end(), new_streams_.begin(), new_streams_.end());
-        new_streams_.clear();
 
         // If streams were scheduled, trigger next scheduling round
         if (waiting_streams_.size() < prev_waiting_size) {
             schedule_trigger_ = true;
         }
+
+        waitLoadingCacheBeforeRun(lock);
+
+        running_streams_.insert(running_streams_.end(), new_streams_.begin(), new_streams_.end());
+        new_streams_.clear();
 
         reportMetrics();
         last_schedule_time_ = autil::TimeUtility::currentTimeInMilliSeconds();
