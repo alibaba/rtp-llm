@@ -29,6 +29,9 @@ py_test(
     srcs = [
         "jit_cache_manager_test.py",
     ],
+    data = [
+        "//:th_transformer_config",
+    ],
     deps = [
         "//rtp_llm:config_ops",
         "//rtp_llm:jit_cache_manager_lib",
