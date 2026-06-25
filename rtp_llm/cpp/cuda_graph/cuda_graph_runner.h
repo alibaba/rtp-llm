@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <unordered_map>
 #include <vector>
 #include <pybind11/embed.h>
@@ -75,6 +76,11 @@ public:
     void           captureDecodeOneBatchSize(int bs);
     void           capturePrefillOneSeqLen(int seq_len);
     void           prepareInputs(const PyModelInputs& inputs, CudaGraphState& state);
+    void           prepareInputData(const PyModelInputs& inputs, CudaGraphState& state);
+    void           prepareAttentionInputs(const PyModelInputs& inputs,
+                                          CudaGraphState&      state,
+                                          bool                 skip_forward_event_sync = false) override;
+    void           updateKVCacheKernelBlockId(const PyModelInputs& inputs, CudaGraphState& state) override;
     bool           canRun(const PyModelInputs& inputs, CudaGraphState& state) override;
     void           replayGraph(int key);
     void           replayDecode(int bs);
@@ -112,9 +118,9 @@ private:
 private:
     std::vector<int> getDecodeBatchSizesToCapture();
     std::vector<int> getPrefillSequenceLengthsToCapture();
-    /// Select graph key for decode; false if no captured graph can serve current_batch_size (e.g. lower_bound hit end).
+    /// Select graph key for decode. Exceeding the configured capture range is a config error, not a fallback case.
     bool tryGetRealGraphDecodeBatchSize(const PyModelInputs& inputs, CudaGraphState& state);
-    /// Select graph key for prefill; false if capture_range_ empty or seq_len above max captured (lower_bound hit end).
+    /// Select graph key for prefill. Exceeding the configured capture range is a config error, not a fallback case.
     bool                    tryGetRealGraphPrefillSeqLen(const PyModelInputs& inputs, CudaGraphState& state);
     void                    initCaptureAttentionInputs(PyModelInputs& inputs, int max_bs, int num_tokens_per_bs);
     void                    initCaptureBertEmbeddingInputs(PyModelInputs& inputs, int max_bs, int max_num_token);
@@ -156,6 +162,8 @@ private:
 
     // event to record forward done
     torch::Event forward_event_ = cuda_graph::makeGraphEvent();
+
+    std::atomic<bool> prepared_attention_inputs_ = false;
 };
 
 }  // namespace rtp_llm

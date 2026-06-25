@@ -147,7 +147,6 @@ def print_attn_inputs_detail(attn_inputs: PyAttentionInputs, qkv: torch.Tensor =
     print(f"  tensor: {attn_inputs.cu_kv_seqlens}", flush=True)
     print(f"  values: {attn_inputs.cu_kv_seqlens.cpu().tolist()}", flush=True)
 
-    print(f"context_total_kv_length: {attn_inputs.context_total_kv_length}", flush=True)
     print(f"total_tokens: {attn_inputs.total_tokens}", flush=True)
 
     print(

@@ -125,6 +125,55 @@ cc_library(
 )
 
 cc_library(
+    name = "attention_input_metadata",
+    srcs = ["attention_input_metadata.cu"],
+    hdrs = ["attention_input_metadata.h"],
+    deps = select({
+        "@//:using_cuda": [
+            "@local_config_cuda//cuda:cuda_headers",
+            "@local_config_cuda//cuda:cudart",
+        ],
+        "@//:using_rocm": [
+            "@local_config_rocm//rocm:rocm_headers",
+            "@local_config_rocm//rocm:hip",
+        ],
+        "//conditions:default": [],
+    }) + torch_deps(),
+    copts = any_cuda_copts(),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "cuda_graph_prepare",
+    srcs = ["cuda_graph_prepare.cu"],
+    hdrs = ["cuda_graph_prepare.h"],
+    deps = [
+        "@local_config_cuda//cuda:cuda_headers",
+        "@local_config_cuda//cuda:cudart",
+    ] + torch_deps(),
+    copts = cuda_copts(),
+    visibility = ["//visibility:public"],
+)
+
+alias(
+    name = "mtp_target_verify_prepare",
+    actual = "//rtp_llm/models_py/bindings/common/kernels:mtp_target_verify_prepare",
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "mha_paged_attn_plan",
+    srcs = ["mha_paged_attn_plan.cu"],
+    hdrs = ["mha_paged_attn_plan.h"],
+    deps = [
+        "@local_config_cuda//cuda:cuda_headers",
+        "@local_config_cuda//cuda:cudart",
+    ] + torch_deps(),
+    copts = cuda_copts(),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "mla_quant_kernel",
     srcs = ["mla_quant_kernel.cu"],
     hdrs = ["mla_quant_kernel.h"],

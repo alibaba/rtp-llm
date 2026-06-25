@@ -105,19 +105,34 @@ class XQAImpl(FMHAImplBase):
         return self.fmha_impl.forward(fmha_input, kv_cache, self.fmha_params)
 
     def prepare_cuda_graph(self, attn_inputs: PyAttentionInputs):
-        common.update_trt_params(
-            self.fmha_impl,
-            self.rope_kvcache_impl,
-            self.fmha_params,
-            self.rope_params,
-            attn_inputs,
-        )
-        # update_trt_params only copies kv_cache_offset. The TRT XQA kernel also
-        # reads sequence_lengths via the captured data_ptr(), so we must update
-        # the data in-place at the address recorded during CUDA graph capture.
         new_seq_lens = attn_inputs.sequence_lengths
         n = min(self._captured_seq_lens.numel(), new_seq_lens.numel())
         self._captured_seq_lens[:n].copy_(new_seq_lens[:n], non_blocking=True)
+
+        update_params = getattr(self.fmha_impl, "update", None)
+        if not callable(update_params):
+            common.update_trt_params(
+                self.fmha_impl,
+                self.rope_kvcache_impl,
+                self.fmha_params,
+                self.rope_params,
+                attn_inputs,
+            )
+            return
+
+        update_params(self.fmha_params, attn_inputs)
+        update_offset = getattr(self.fmha_impl, "update_kv_cache_offset", None)
+        if callable(update_offset):
+            update_offset(
+                self.rope_params.kv_cache_offset,
+                attn_inputs.kv_cache_kernel_block_id_device,
+            )
+        else:
+            new_rope_params = self.rope_kvcache_impl.prepare(attn_inputs)
+            common.copy_kv_cache_offset(
+                self.rope_params.kv_cache_offset, new_rope_params.kv_cache_offset
+            )
+        self.rope_params.sequence_lengths = attn_inputs.sequence_lengths
 
 
 class XQADecodeImpl(FMHAImplBase):

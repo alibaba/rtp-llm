@@ -317,7 +317,6 @@ def print_py_model_inputs_full(
     print(
         f"  attention_inputs (scalars): is_prefill={a.is_prefill} is_s_padded={a.is_s_padded} "
         f"is_cuda_graph={getattr(a, 'is_cuda_graph', 'N/A')} "
-        f"context_total_kv_length={getattr(a, 'context_total_kv_length', 0)} "
         f"total_tokens={getattr(a, 'total_tokens', 0)}"
     )
     print_tensor_int("input_lengths", getattr(a, "input_lengths", None), 32)
@@ -335,11 +334,9 @@ def print_py_model_inputs_full(
     print(
         f"  attention_inputs.kv_cache_block_id_device: defined={a.kv_cache_block_id_device is not None} sizes=[{sizes(a.kv_cache_block_id_device)}]"
     )
-    print_tensor_int("prefix_lengths_d", getattr(a, "prefix_lengths_d", None), 32)
     print_tensor_int(
         "sequence_lengths_plus_1_d", getattr(a, "sequence_lengths_plus_1_d", None), 32
     )
-    print_tensor_int("input_lengths_d", getattr(a, "input_lengths_d", None), 32)
     print_tensor_int("decode_cu_seqlens_d", getattr(a, "decode_cu_seqlens_d", None), 32)
     dtype_obj = getattr(a, "dtype", None)
     if dtype_obj is not None:

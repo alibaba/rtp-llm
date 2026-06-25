@@ -16,8 +16,13 @@ void CudaGraphRunner::capturePrefill() {
         PyModelInputs inputs;
         // for attention, it always run the max_bs, so when we run `forward`, the real batch size is not sure
         // we will transfer a `batch size tensor(int)` for `copy kernel`.
+        const bool mtp_draft_prefill = isMtpDraftPrefillCudaGraph();
+        const int  capture_bs = mtp_draft_prefill ? (seq_len + num_tokens_per_bs_ - 1) / num_tokens_per_bs_ : max_bs_;
+        const int  capture_token_count =
+            mtp_draft_prefill ? capture_bs * num_tokens_per_bs_ : max_bs_ * num_tokens_per_bs_;
+
         // Prepare common inputs using shared function
-        prepareCaptureInputs(inputs, max_bs_, seq_len);
+        prepareCaptureInputs(inputs, capture_bs, seq_len);
         // Prefill-specific settings, one the first seq is valid, the post ones are all empty
         if (isEmbeddingStylePrefillCudaGraph()) {
             // embedding model, without kv cache
@@ -29,13 +34,11 @@ void CudaGraphRunner::capturePrefill() {
             inputs.attention_inputs.cu_seqlens.copy_(inputs.attention_inputs.cu_seqlens_host, false);
             inputs.attention_inputs.input_lengths[0] = seq_len;
         } else {
-            // Draft model prefill: distribute seq_len tokens across batches (max num_tokens_per_bs_ each).
-            // All max_bs_ batches get prefix to ensure buffer allocation covers worst-case replay.
-            int active_bs  = (seq_len + num_tokens_per_bs_ - 1) / num_tokens_per_bs_;
+            // Draft model prefill: capture the concrete graph batch count for this seq_len.
+            int active_bs  = capture_bs;
             int prefix_len = max_seq_len_;
 
-            // All batches get prefix_len to maximize buffer allocation during capture.
-            // Active batches get real input tokens, inactive batches get 0 input tokens.
+            // Every captured batch gets prefix_len; there are no zero-length dummy requests.
             inputs.attention_inputs.input_lengths.fill_(0);
             inputs.attention_inputs.prefix_lengths.fill_(prefix_len);
             auto& input_lengths = inputs.attention_inputs.input_lengths;
@@ -51,7 +54,7 @@ void CudaGraphRunner::capturePrefill() {
 
             cu_seqlens_host[0]    = 0;
             cu_kv_seqlens_host[0] = 0;
-            for (int b = 0; b < max_bs_; b++) {
+            for (int b = 0; b < active_bs; b++) {
                 cu_seqlens_host[b + 1] = cu_seqlens_host[b].item<int>() + input_lengths[b].item<int>();
                 cu_kv_seqlens_host[b + 1] =
                     cu_kv_seqlens_host[b].item<int>() + input_lengths[b].item<int>() + prefix_lengths[b].item<int>();
@@ -61,16 +64,20 @@ void CudaGraphRunner::capturePrefill() {
             inputs.attention_inputs.cu_kv_seqlens.copy_(cu_kv_seqlens_host);
         }
 
-        inputs.attention_inputs.context_total_kv_length = seq_len;
         inputs.attention_inputs.prefill_cuda_graph_copy_params =
             capture_mem_hold_.py_model_inputs_.attention_inputs.prefill_cuda_graph_copy_params;
+        if (inputs.attention_inputs.prefill_cuda_graph_copy_params) {
+            auto* batch_size_ptr =
+                inputs.attention_inputs.prefill_cuda_graph_copy_params->cuda_graph_prefill_batch_size.data_ptr<int>();
+            *batch_size_ptr = capture_bs;
+        }
         if (inputs.bert_embedding_inputs.position_encoding.numel() > 0) {
             inputs.bert_embedding_inputs.combo_position_ids =
                 inputs.bert_embedding_inputs.combo_position_ids.slice(0, 0, seq_len);
             inputs.bert_embedding_inputs.combo_tokens_type_ids =
                 inputs.bert_embedding_inputs.combo_tokens_type_ids.slice(0, 0, seq_len);
         }
-        graph_instances_[seq_len].mem_hold_ = createCaptureMemoryHold(inputs, max_bs_ * num_tokens_per_bs_);
+        graph_instances_[seq_len].mem_hold_ = createCaptureMemoryHold(inputs, capture_token_count);
         graph_instances_[seq_len].mem_hold_.attn_pyobj_ =
             py_attn_pyobj_method_(graph_instances_[seq_len].mem_hold_.py_model_inputs_, true);
         graph_instances_[seq_len].mem_hold_.decoder_layer_hidden_states_ =

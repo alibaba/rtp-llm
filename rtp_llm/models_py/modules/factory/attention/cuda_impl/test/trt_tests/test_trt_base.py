@@ -196,7 +196,6 @@ class TRTAttnTestBase(BaseAttentionTest):
         )
 
         attn_inputs.total_tokens = cu_seqlens[-1]
-        attn_inputs.context_total_kv_length = cu_kv_seqlens[-1]
 
         return attn_inputs, prefix_lens
 

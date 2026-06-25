@@ -65,7 +65,6 @@ enum GptModelInputIndex : size_t {
     kvCacheGroupTypesLen,
     kvCacheUpdateCopyNum,
     lmOutputIndexes,
-    lmOutputLengthes,
     comboPositionIds,
     textTokensMask,
     mmFeaturesLocs,
@@ -80,7 +79,20 @@ enum GptModelInputIndex : size_t {
     skipRun,
     gptModelRequestLength,  // length of request id & pd_separation
     isFakeStream,
+    // Per-tensor device hint bitmap from root so non-root ranks allocate
+    // matching GPU buffers and keep tpSync broadcast lanes consistent.
+    tensorDeviceMap,
     gptModelInputLength,
+};
+
+// Bit positions for `tensorDeviceMap`. Only fields that participate in the
+// MTP/Eagle decode-prepare GPU path need a bit; other fields stay CPU.
+enum GptModelInputDeviceBit : uint32_t {
+    kDeviceBitComboTokens     = 1u << 0,
+    kDeviceBitInputLengths    = 1u << 1,
+    kDeviceBitSequenceLengths = 1u << 2,
+    kDeviceBitPrefixLengths   = 1u << 3,
+    kDeviceBitLmOutputIndexes = 1u << 4,
 };
 
 void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallelism_config);
@@ -100,8 +112,9 @@ struct TokenSliceInfo {
     size_t count  = 0;
 };
 
-struct ModelBufferHolder {
+struct TensorHolder {
     std::vector<torch::Tensor> tensors;
+    std::vector<torch::Tensor> clear_tensors;
 
     void hold_host(const torch::Tensor& tensor) {
         if (tensor.defined() && tensor.device().is_cpu()) {
@@ -116,6 +129,10 @@ struct ModelBufferHolder {
     }
 
     void release() {
+        // Move the current hold set into clear_tensors, releasing the previous
+        // clear_tensors set. This keeps async H2D/D2H source tensors alive for
+        // one extra release point without each caller owning a custom holder.
+        clear_tensors = std::move(tensors);
         tensors.clear();
     }
 };
@@ -125,6 +142,12 @@ public:
     virtual ~ModelBase()                                          = default;
     virtual GptModelOutputs forward(const GptModelInputs& inputs) = 0;
     virtual void            releaseBuffers() {}
+    virtual void            prepareAttentionInputs(const GptModelInputs& inputs) {}
+
+    // Refresh only kv_cache_kernel_block_id-dependent state on a previously-
+    // prepared attention_inputs_ (e.g., after an MTP propose+verify re-gather).
+    // No-op when no attention inputs have been prepared yet.
+    virtual void updateKVCacheKernelBlockId(const GptModelInputs& inputs) {}
 
     rtp_llm::Weights            weights_;
     rtp_llm::OverallExpertStats overall_expert_stats_;

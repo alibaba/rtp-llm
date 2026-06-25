@@ -101,8 +101,6 @@ void registerPyOpDefs(pybind11::module& m) {
         .def_readwrite("kv_cache_kernel_block_id_device", &PyAttentionInputs::kv_cache_kernel_block_id_device)
         .def_readwrite("kv_cache_block_id_host", &PyAttentionInputs::kv_cache_block_id_host)
         .def_readwrite("kv_cache_block_id_device", &PyAttentionInputs::kv_cache_block_id_device)
-        .def_readwrite("kv_cache_kernel_block_id_host_by_group",
-                       &PyAttentionInputs::kv_cache_kernel_block_id_host_by_group)
         .def_readwrite("kv_cache_kernel_block_id_device_by_group",
                        &PyAttentionInputs::kv_cache_kernel_block_id_device_by_group)
         .def_readwrite("kv_cache_layer_to_group", &PyAttentionInputs::kv_cache_layer_to_group)
@@ -110,13 +108,10 @@ void registerPyOpDefs(pybind11::module& m) {
         .def_readwrite("cu_seqlens", &PyAttentionInputs::cu_seqlens)
         .def_readwrite("cu_seqlens_host", &PyAttentionInputs::cu_seqlens_host)
         .def_readwrite("cu_kv_seqlens", &PyAttentionInputs::cu_kv_seqlens)
-        .def_readwrite("context_total_kv_length", &PyAttentionInputs::context_total_kv_length)
         .def_readwrite("total_tokens", &PyAttentionInputs::total_tokens)
         .def_readwrite("padding_offset", &PyAttentionInputs::padding_offset)
         .def_readwrite("is_s_padded", &PyAttentionInputs::is_s_padded)
-        .def_readonly("prefix_lengths_d", &PyAttentionInputs::prefix_lengths_d)
         .def_readwrite("sequence_lengths_plus_1_d", &PyAttentionInputs::sequence_lengths_plus_1_d)
-        .def_readonly("input_lengths_d", &PyAttentionInputs::input_lengths_d)
         .def_readwrite("decode_cu_seqlens_d", &PyAttentionInputs::decode_cu_seqlens_d)
         .def_readwrite("decode_cu_seqlens_host", &PyAttentionInputs::decode_cu_seqlens_host)
         .def_readwrite("cache_store_inputs", &PyAttentionInputs::cache_store_inputs)

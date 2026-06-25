@@ -146,7 +146,6 @@ class TestCudaGraphDecodePadding(unittest.TestCase):
         attention_inputs.cu_seqlens = cu_seqlens
         attention_inputs.cu_kv_seqlens = cu_seqlens.clone()
         # For decode mode: each batch has 1 token, so total = batch_size
-        attention_inputs.context_total_kv_length = batch_size * num_tokens_per_bs
         attention_inputs.total_tokens = batch_size * num_tokens_per_bs
         inputs.attention_inputs = attention_inputs
         return inputs

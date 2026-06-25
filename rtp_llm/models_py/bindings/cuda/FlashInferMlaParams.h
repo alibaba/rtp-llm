@@ -68,6 +68,20 @@ public:
                     int           seq_size_per_block,
                     bool          forbid_realloc = false);
 
+    void fillDecodeCudaGraphParams(torch::Tensor sequence_lengths_plus_1_d,
+                                   torch::Tensor kv_cache_block_id_device,
+                                   int           seq_size_per_block);
+
+    // Device-only fast path for MHA paged attention. Fills paged-KV metadata
+    // plus batch_indice_d/positions_d, reusing fillParams buffers so existing
+    // FlashInfer aliases stay valid. MLA-only/reuse fields are not filled.
+    void fillParamsMhaDevice(torch::Tensor t_prefix_lengths,
+                             torch::Tensor t_sequence_lengths,
+                             torch::Tensor t_input_lengths,
+                             torch::Tensor t_kv_cache_block_id_device,
+                             int           seq_size_per_block,
+                             bool          forbid_realloc = false);
+
     // Tensor views into buf_h and buf_d
     torch::Tensor batch_indice_h;
     torch::Tensor page_indice_h;

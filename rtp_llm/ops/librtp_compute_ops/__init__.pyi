@@ -180,7 +180,6 @@ class PyAttentionInputs:
     cache_store_inputs: PyCacheStoreInputs | None
     combo_position_ids: torch.Tensor
     context_parallel_info: PyContextParallelParams | None
-    context_total_kv_length: int
     cu_kv_seqlens: torch.Tensor
     cu_seqlens: torch.Tensor
     decode_cu_seqlens_d: torch.Tensor
@@ -193,7 +192,6 @@ class PyAttentionInputs:
     kv_cache_block_id_device: torch.Tensor
     kv_cache_kernel_block_id_device_by_group: list[torch.Tensor]
     kv_cache_block_id_host: torch.Tensor
-    kv_cache_kernel_block_id_host_by_group: list[torch.Tensor]
     kv_cache_kernel_block_id_device: torch.Tensor
     kv_cache_kernel_block_id_host: torch.Tensor
     kv_cache_block_id_host_by_group: list[torch.Tensor]
@@ -210,9 +208,7 @@ class PyAttentionInputs:
     def __copy__(self) -> PyAttentionInputs: ...
     decode_cu_seqlens_host: torch.Tensor
     @property
-    def input_lengths_d(self) -> torch.Tensor: ...
-    @property
-    def prefix_lengths_d(self) -> torch.Tensor: ...
+    def decode_cu_seqlens_host(self) -> torch.Tensor: ...
 
 class PyCacheStoreInputs:
     def __init__(self) -> None: ...
