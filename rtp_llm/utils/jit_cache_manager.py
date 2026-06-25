@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import os
 import stat
+import sys
 import tarfile
 import threading
 import time
@@ -165,6 +166,20 @@ def component_cache_dir(root: Path, component: ComponentSpec) -> Path:
 
 
 def apply_jit_cache_env(local_root: Path | str) -> None:
+    """Must be called BEFORE importing deep_gemm/flashinfer.
+
+    deep_gemm reads DG_JIT_CACHE_DIR once in C++ init() at import time.
+    flashinfer resolves FLASHINFER_WORKSPACE_BASE into a module-level Path at import time.
+    torch_extensions, triton, and triton_autotune read their env vars dynamically at
+    each compilation/invocation, so they are safe to call after import.
+    """
+    for mod in ("deep_gemm", "flashinfer"):
+        if mod in sys.modules:
+            logging.warning(
+                "%s already imported before apply_jit_cache_env, "
+                "cache dir env var may not take effect",
+                mod,
+            )
     root = Path(local_root).expanduser().absolute()
     for component in COMPONENT_SPECS:
         os.environ[component.env_name] = str(component_cache_dir(root, component))
@@ -579,19 +594,17 @@ class JitCacheManager:
             snapshot_found = snapshot_path.exists()
         except OSError:
             snapshot_found = False
-        if not snapshot_found:
-            self.snapshot_complete_path.touch()
-            return self._make_summary(
-                "snapshot_download", "skipped", start_s, cache_state="snapshot_miss"
-            )
-        snapshot_bytes = 0
         try:
+            if not snapshot_found:
+                return self._make_summary(
+                    "snapshot_download", "skipped", start_s, cache_state="snapshot_miss"
+                )
+            snapshot_bytes = 0
             try:
                 snapshot_bytes = snapshot_path.stat().st_size
             except OSError:
                 pass
             ext_bytes, ext_files = self._extract_snapshot(snapshot_path, deadline_s)
-            self.snapshot_complete_path.touch()
             return self._make_summary(
                 "snapshot_download",
                 "success",
@@ -619,6 +632,8 @@ class JitCacheManager:
                 cache_state="snapshot_error",
                 message=str(e),
             )
+        finally:
+            self.snapshot_complete_path.touch()
 
     def _extract_snapshot(self, archive: Path, deadline_s: float) -> tuple[int, int]:
         extracted_bytes = 0
@@ -1017,8 +1032,10 @@ class JitCacheManager:
             self.dirty_tracker = None
         self._stop_periodic_sync()
         if self.enabled and self.owns_startup_lock and self.remote_cache_available:
-            with suppress(Exception):
+            try:
                 self.sync_once("periodic_flush")
+            except Exception:
+                logging.warning("final sync_once failed during stop", exc_info=True)
         self.sync_executor.shutdown(wait=True, cancel_futures=True)
         with self._lock:
             self._snapshot_publishing = False

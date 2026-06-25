@@ -437,63 +437,6 @@ class RemoteSnapshotCompressionDesignTest(unittest.TestCase):
                 with tarfile.open(fileobj=reader, mode="r|") as tar:
                     return {member.name for member in tar}
 
-    def test_sync_once_publishes_compressed_remote_snapshot_for_next_bootstrap(self):
-        remote_root = self.root / "remote"
-        first = self.make_manager(self.root / "local_first", remote_root, "publisher")
-        try:
-            prepare = first.prepare()
-            self.assertEqual(prepare["cache_state"], "snapshot_miss")
-
-            expected_members = set()
-            for component in COMPONENT_SPECS:
-                local_root, _ = first.component_dirs[component.name]
-                filename = f"kernel/{component.name}{component.sync_suffixes[0]}"
-                local_file = local_root / filename
-                local_file.parent.mkdir(parents=True, exist_ok=True)
-                local_file.write_text(component.name, encoding="utf-8")
-                self.assertTrue(first.enqueue_upload(component, filename))
-                if component.gpu_scoped:
-                    expected_members.add(
-                        f"{component.name}/{jit_cache_module.get_gpu_scope()}/{filename}"
-                    )
-                else:
-                    expected_members.add(f"{component.name}/{filename}")
-
-            with mock.patch.object(
-                jit_cache_module.time,
-                "time",
-                return_value=1200.0,
-            ):
-                summary = first.sync_once("integration_publish")
-            _wait_for_snapshot_publish(first)
-
-            snapshot_path = remote_root / SNAPSHOT_NAME
-            self.assertEqual(summary["result"], "success")
-            self.assertTrue(snapshot_path.is_file())
-            self.assertEqual(
-                self.snapshot_member_names(snapshot_path), expected_members
-            )
-            self.assertTrue((remote_root / ".jit_snapshot_publish_lease.1").is_dir())
-        finally:
-            first.stop()
-
-        second = self.make_manager(self.root / "local_second", remote_root, "consumer")
-        try:
-            prepare = second.prepare()
-            self.assertEqual(prepare["cache_state"], "snapshot_hit")
-            self.assertEqual(prepare["result"], "success")
-            self.assertEqual(prepare["extracted_files"], len(COMPONENT_SPECS))
-
-            for component in COMPONENT_SPECS:
-                local_root, _ = second.component_dirs[component.name]
-                filename = f"kernel/{component.name}{component.sync_suffixes[0]}"
-                self.assertEqual(
-                    (local_root / filename).read_text(encoding="utf-8"),
-                    component.name,
-                )
-        finally:
-            second.stop()
-
     def test_two_gpu_rank_processes_compete_for_single_snapshot_publish_lease(self):
         if not torch.cuda.is_available():
             self.skipTest("CUDA is not available")
