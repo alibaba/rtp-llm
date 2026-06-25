@@ -42,6 +42,11 @@ py_test(
     srcs = [
         "jit_cache_remote_integration_test.py",
     ],
+    args = [
+        "RemoteJitIntegrationTest",
+        "RemoteSnapshotCompressionDesignTest.test_sync_once_publishes_compressed_remote_snapshot_for_next_bootstrap",
+        "JitEventSignalVerificationTest",
+    ],
     env = {
         "FLASHINFER_DISABLE_VERSION_CHECK": "1",
         "GPU_COUNT": "1",
@@ -49,6 +54,40 @@ py_test(
     exec_properties = {
         "gpu": "H20",
         "gpu_count": "1",
+    },
+    tags = [
+        "H20",
+        "open_skip",
+    ],
+    deps = [
+        ":jit_cache_manager_test_lib",
+        ":packaging",
+        "//rtp_llm:apache-tvm-ffi",
+        "//rtp_llm:deep_gemm",
+        "//rtp_llm:flashinfer-python",
+        "//rtp_llm:jit_cache_manager_lib",
+        "//rtp_llm:torch",
+        "//rtp_llm:triton",
+        "//rtp_llm/models_py/triton_kernels/autotune_cache",
+    ],
+)
+
+py_test(
+    name = "jit_cache_remote_2rank_test",
+    timeout = "long",
+    srcs = [
+        "jit_cache_remote_integration_test.py",
+    ],
+    args = [
+        "RemoteSnapshotCompressionDesignTest.test_two_gpu_rank_processes_compete_for_single_snapshot_publish_lease",
+    ],
+    env = {
+        "FLASHINFER_DISABLE_VERSION_CHECK": "1",
+        "GPU_COUNT": "2",
+    },
+    exec_properties = {
+        "gpu": "H20",
+        "gpu_count": "2",
     },
     tags = [
         "H20",

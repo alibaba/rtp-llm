@@ -929,7 +929,7 @@ class JitCacheManager:
         start_s = time.monotonic()
         deadline_s = start_s + max(self.config.remote_timeout_s, 0.0)
         try:
-            files, bytes_ = self._create_snapshot_archive(local_tmp)
+            files, bytes_ = self._create_snapshot_archive(local_tmp, deadline_s)
             if files <= 0:
                 logging.info("skip publishing empty JIT cache snapshot")
                 return False
@@ -950,7 +950,9 @@ class JitCacheManager:
             with suppress(OSError):
                 remote_tmp.unlink()
 
-    def _create_snapshot_archive(self, archive: Path) -> tuple[int, int]:
+    def _create_snapshot_archive(
+        self, archive: Path, deadline_s: float = float("inf")
+    ) -> tuple[int, int]:
         archive.parent.mkdir(parents=True, exist_ok=True)
         files = 0
         bytes_ = 0
@@ -959,6 +961,12 @@ class JitCacheManager:
             with cctx.stream_writer(raw) as compressed:
                 with tarfile.open(fileobj=compressed, mode="w|") as tar:
                     for component, path, rel in self._iter_remote_snapshot_files():
+                        if time.monotonic() >= deadline_s:
+                            logging.warning(
+                                "snapshot archive creation exceeded deadline after %d files",
+                                files,
+                            )
+                            break
                         try:
                             with path.open("rb") as source:
                                 source_stat = os.fstat(source.fileno())
@@ -1011,7 +1019,7 @@ class JitCacheManager:
         if self.enabled and self.owns_startup_lock and self.remote_cache_available:
             with suppress(Exception):
                 self.sync_once("periodic_flush")
-        self.sync_executor.shutdown(wait=True)
+        self.sync_executor.shutdown(wait=False, cancel_futures=True)
         self.release_startup_lock()
 
     def release_startup_lock(self) -> None:
