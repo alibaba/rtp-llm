@@ -36,32 +36,76 @@ from rtp_llm.utils.test.jit_cache_manager_test import (
     write_snapshot,
 )
 
+_FLASHINFER_ENV_ATTRS = (
+    "FLASHINFER_BASE_DIR",
+    "FLASHINFER_CACHE_DIR",
+    "FLASHINFER_WORKSPACE_DIR",
+    "FLASHINFER_JIT_DIR",
+    "FLASHINFER_GEN_SRC_DIR",
+    "FLASHINFER_AOT_DIR",
+)
+
+_JIT_ENV_NAMES = (
+    "FLASHINFER_WORKSPACE_BASE",
+    "TRITON_CACHE_DIR",
+    "TRITON_AUTOTUNE_CONFIG_DIR",
+    "DG_JIT_CACHE_DIR",
+    "TORCH_EXTENSIONS_DIR",
+    "REMOTE_JIT_DIR",
+    "LOCAL_JIT_CACHE_DIR",
+    "RTP_JIT_CACHE_RUN_ID",
+)
+
 
 def _wait_for_snapshot_publish(manager: JitCacheManager, timeout_s: float = 10) -> None:
     deadline = time.time() + timeout_s
-    while True:
-        publish_thread = manager._snapshot_publish_thread
-        if publish_thread is None:
-            return
-        remaining = deadline - time.time()
-        if remaining <= 0:
+    while manager._snapshot_publishing:
+        if time.time() >= deadline:
             raise TimeoutError("timed out waiting for snapshot publish")
-        publish_thread.join(timeout=remaining)
-        if not publish_thread.is_alive():
-            return
+        time.sleep(0.05)
 
 
 def _make_jit_manager(
-    local_root: Path, remote_root: Path, run_id: str
+    local_root: Path,
+    remote_root: Path,
+    run_id: str,
+    timeout_s: float = 30,
 ) -> JitCacheManager:
     remote_root.mkdir(parents=True, exist_ok=True)
     config = JITConfig()
     config.local_jit_cache_dir = str(local_root)
     config.remote_jit_dir = str(remote_root)
-    config.jit_remote_timeout_s = 30
+    config.jit_remote_timeout_s = timeout_s
     manager = JitCacheManager(config, run_id=run_id)
     manager.bootstrap()
     return manager
+
+
+def _setup_flashinfer_workspace_and_build():
+    from flashinfer.jit import env as jit_env
+    from flashinfer.jit import gen_batch_mla_module
+
+    workspace_base = Path(os.environ["FLASHINFER_WORKSPACE_BASE"])
+    version_dir = jit_env.FLASHINFER_WORKSPACE_DIR.parent.name
+    arch_dir = jit_env.FLASHINFER_WORKSPACE_DIR.name
+    workspace_dir = workspace_base / ".cache" / "flashinfer" / version_dir / arch_dir
+    jit_env.FLASHINFER_BASE_DIR = workspace_base
+    jit_env.FLASHINFER_CACHE_DIR = workspace_base / ".cache" / "flashinfer"
+    jit_env.FLASHINFER_WORKSPACE_DIR = workspace_dir
+    jit_env.FLASHINFER_JIT_DIR = workspace_dir / "cached_ops"
+    jit_env.FLASHINFER_GEN_SRC_DIR = workspace_dir / "generated"
+    jit_env.FLASHINFER_AOT_DIR = workspace_base / ".no_aot"
+    spec = gen_batch_mla_module(
+        "fa2",
+        torch.bfloat16,
+        torch.bfloat16,
+        torch.bfloat16,
+        torch.int32,
+        512,
+        64,
+        False,
+    )
+    spec.build_and_load()
 
 
 def _run_triton_rank_jit(rank: int) -> None:
@@ -124,7 +168,7 @@ def _two_rank_snapshot_publish_worker(
         marker_path.write_text(f'{{"rank": {rank}}}', encoding="utf-8")
 
         enqueued = 0
-        for path, rel, _ in iter_component_files(local_dir, component):
+        for path, rel in iter_component_files(local_dir, component):
             if manager.enqueue_upload(component, rel):
                 enqueued += 1
 
@@ -156,12 +200,7 @@ def _two_rank_snapshot_publish_worker(
             }
         )
     except Exception:
-        result_queue.put(
-            {
-                "rank": rank,
-                "error": traceback.format_exc(),
-            }
-        )
+        result_queue.put({"rank": rank, "error": traceback.format_exc()})
     finally:
         if manager is not None:
             manager.remote_cache_available = False
@@ -169,51 +208,30 @@ def _two_rank_snapshot_publish_worker(
         jit_cache_module.get_gpu_scope.cache_clear()
 
 
-class RemoteJitIntegrationTest(unittest.TestCase):
+class _GpuJitTestBase(unittest.TestCase):
+    """Base class for GPU JIT tests: CUDA/SM90+ gate, env & flashinfer state save/restore."""
+
     def setUp(self):
         if not torch.cuda.is_available():
             self.skipTest("CUDA is not available")
-        device_capability = torch.cuda.get_device_capability(0)
-        if device_capability[0] < 9:
-            self.skipTest(
-                f"SM90 or newer GPU is required, got capability {device_capability}"
-            )
+        cap = torch.cuda.get_device_capability(0)
+        if cap[0] < 9:
+            self.skipTest(f"SM90+ required, got {cap}")
 
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
         self.old_env = os.environ.copy()
         self.old_modules = {
             name: sys.modules.get(name)
-            for name in (
-                "flashinfer.jit.env",
-                "flashinfer.jit.core",
-            )
+            for name in ("flashinfer.jit.env", "flashinfer.jit.core")
         }
         self.old_flashinfer_env_attrs = None
         env_module = sys.modules.get("flashinfer.jit.env")
         if env_module is not None:
             self.old_flashinfer_env_attrs = {
-                attr: getattr(env_module, attr)
-                for attr in (
-                    "FLASHINFER_BASE_DIR",
-                    "FLASHINFER_CACHE_DIR",
-                    "FLASHINFER_WORKSPACE_DIR",
-                    "FLASHINFER_JIT_DIR",
-                    "FLASHINFER_GEN_SRC_DIR",
-                    "FLASHINFER_AOT_DIR",
-                )
+                attr: getattr(env_module, attr) for attr in _FLASHINFER_ENV_ATTRS
             }
-
-        for env_name in (
-            "FLASHINFER_WORKSPACE_BASE",
-            "TRITON_CACHE_DIR",
-            "TRITON_AUTOTUNE_CONFIG_DIR",
-            "DG_JIT_CACHE_DIR",
-            "TORCH_EXTENSIONS_DIR",
-            "REMOTE_JIT_DIR",
-            "LOCAL_JIT_CACHE_DIR",
-            "RTP_JIT_CACHE_RUN_ID",
-        ):
+        for env_name in _JIT_ENV_NAMES:
             os.environ.pop(env_name, None)
         os.environ["FLASHINFER_DISABLE_VERSION_CHECK"] = "1"
         torch.cuda.set_device(0)
@@ -232,18 +250,11 @@ class RemoteJitIntegrationTest(unittest.TestCase):
                 sys.modules[name] = module
         self.tmp.cleanup()
 
-    def make_manager(self, local_root: Path, remote_root: Path) -> JitCacheManager:
-        remote_root.mkdir(parents=True, exist_ok=True)
-        config = JITConfig()
-        config.local_jit_cache_dir = str(local_root)
-        config.remote_jit_dir = str(remote_root)
-        config.jit_remote_timeout_s = 120
-        manager = JitCacheManager(config)
-        manager.bootstrap()
-        return manager
 
-    def write_snapshot(self, remote_root: Path) -> Path:
-        return write_snapshot(remote_root)
+class RemoteJitIntegrationTest(_GpuJitTestBase):
+
+    def make_manager(self, local_root: Path, remote_root: Path) -> JitCacheManager:
+        return _make_jit_manager(local_root, remote_root, run_id="", timeout_s=120)
 
     def test_single_gpu_reuses_same_remote_jit_for_all_components(self):
         remote_root = self.root / "remote"
@@ -259,7 +270,7 @@ class RemoteJitIntegrationTest(unittest.TestCase):
             uploaded = self.enqueue_and_sync(first)
             self.assertEqual(uploaded["result"], "success")
 
-            self.write_snapshot(remote_root)
+            write_snapshot(remote_root)
             self.assertTrue((remote_root / SNAPSHOT_NAME).exists())
             self.assert_components_have_files(remote_root)
         finally:
@@ -283,35 +294,9 @@ class RemoteJitIntegrationTest(unittest.TestCase):
 
     def run_flashinfer_jit(self) -> None:
         try:
-            from flashinfer.jit import env as jit_env
-            from flashinfer.jit import gen_batch_mla_module
+            _setup_flashinfer_workspace_and_build()
         except ImportError as e:
             self.skipTest(f"flashinfer is not available: {e}")
-
-        workspace_base = Path(os.environ["FLASHINFER_WORKSPACE_BASE"])
-        version_dir = jit_env.FLASHINFER_WORKSPACE_DIR.parent.name
-        arch_dir = jit_env.FLASHINFER_WORKSPACE_DIR.name
-        workspace_dir = (
-            workspace_base / ".cache" / "flashinfer" / version_dir / arch_dir
-        )
-        jit_env.FLASHINFER_BASE_DIR = workspace_base
-        jit_env.FLASHINFER_CACHE_DIR = workspace_base / ".cache" / "flashinfer"
-        jit_env.FLASHINFER_WORKSPACE_DIR = workspace_dir
-        jit_env.FLASHINFER_JIT_DIR = workspace_dir / "cached_ops"
-        jit_env.FLASHINFER_GEN_SRC_DIR = workspace_dir / "generated"
-        # Force a real JIT build instead of loading the prebuilt AOT wheel.
-        jit_env.FLASHINFER_AOT_DIR = workspace_base / ".no_aot"
-        spec = gen_batch_mla_module(
-            "fa2",
-            torch.bfloat16,
-            torch.bfloat16,
-            torch.bfloat16,
-            torch.int32,
-            512,
-            64,
-            False,
-        )
-        spec.build_and_load()
 
     def run_triton_and_autotune_jit(self) -> None:
         import triton
@@ -397,18 +382,18 @@ class RemoteJitIntegrationTest(unittest.TestCase):
             files = list(iter_component_files(local_dir, component))
             if not files:
                 missing.append(component.name)
-            for path, _, _ in files:
+            for path, _ in files:
                 add_path_to_tracker(manager.dirty_tracker, component, path, local_dir)
         if missing:
             self.fail(f"workload did not produce JIT cache files for: {missing}")
         return manager.sync_once("single_gpu_jit_workload")
 
     def assert_components_have_files(self, root: Path) -> None:
-        missing = []
-        for component in COMPONENT_SPECS:
-            files = list(iter_component_files(root / component.name, component))
-            if not files:
-                missing.append(component.name)
+        missing = [
+            c.name
+            for c in COMPONENT_SPECS
+            if not list(iter_component_files(root / c.name, c))
+        ]
         if missing:
             self.fail(f"missing JIT cache files for components: {missing}")
 
@@ -433,27 +418,7 @@ class RemoteSnapshotCompressionDesignTest(unittest.TestCase):
         remote_root: Path,
         run_id: str,
     ) -> JitCacheManager:
-        remote_root.mkdir(parents=True, exist_ok=True)
-        config = JITConfig()
-        config.local_jit_cache_dir = str(local_root)
-        config.remote_jit_dir = str(remote_root)
-        config.jit_remote_timeout_s = 10
-        manager = JitCacheManager(config, run_id=run_id)
-        manager.bootstrap()
-        return manager
-
-    def wait_for_snapshot_publish(self, manager: JitCacheManager) -> None:
-        deadline = time.time() + 5
-        while True:
-            publish_thread = manager._snapshot_publish_thread
-            if publish_thread is None:
-                return
-            remaining = deadline - time.time()
-            if remaining <= 0:
-                self.fail("timed out waiting for snapshot publish")
-            publish_thread.join(timeout=remaining)
-            if not publish_thread.is_alive():
-                return
+        return _make_jit_manager(local_root, remote_root, run_id, timeout_s=10)
 
     def snapshot_member_names(self, snapshot_path: Path) -> set[str]:
         dctx = jit_cache_module.zstd.ZstdDecompressor()
@@ -490,7 +455,7 @@ class RemoteSnapshotCompressionDesignTest(unittest.TestCase):
                 return_value=1200.0,
             ):
                 summary = first.sync_once("integration_publish")
-            self.wait_for_snapshot_publish(first)
+            _wait_for_snapshot_publish(first)
 
             snapshot_path = remote_root / SNAPSHOT_NAME
             self.assertEqual(summary["result"], "success")
@@ -558,11 +523,11 @@ class RemoteSnapshotCompressionDesignTest(unittest.TestCase):
             self.assertEqual(process.exitcode, 0)
 
         results = [result_queue.get(timeout=5) for _ in range(world_size)]
-        errors = [result for result in results if "error" in result]
+        errors = [r for r in results if "error" in r]
         if errors:
-            self.fail("\n".join(error["error"] for error in errors))
+            self.fail("\n".join(e["error"] for e in errors))
 
-        publishers = [result for result in results if result["publish_attempted"]]
+        publishers = [r for r in results if r["publish_attempted"]]
         self.assertEqual(
             len(publishers),
             1,
@@ -592,83 +557,36 @@ class EventRecord:
         with self.lock:
             self.events[component_name].append((event_type, path))
 
-    def get_events(self, component_name: str) -> list[tuple[str, str]]:
-        with self.lock:
-            return list(self.events[component_name])
-
     def get_event_types_for_syncable(self, component_name: str) -> set[str]:
         component = COMPONENT_BY_NAME[component_name]
         with self.lock:
             return {
                 etype
                 for etype, path in self.events[component_name]
-                if path.endswith(component.sync_suffixes)
-                and not jit_cache_module.is_tmp_jit_path(path)
+                if jit_cache_module.should_sync_file(component, path)
             }
 
+    def get_syncable_events(self, component_name: str) -> list[tuple[str, str]]:
+        component = COMPONENT_BY_NAME[component_name]
+        with self.lock:
+            return [
+                (t, p)
+                for t, p in self.events[component_name]
+                if jit_cache_module.should_sync_file(component, p)
+            ]
 
-class JitEventSignalVerificationTest(unittest.TestCase):
+
+class JitEventSignalVerificationTest(_GpuJitTestBase):
     """Verify that each JIT component produces the expected filesystem events."""
-
-    def setUp(self):
-        if not torch.cuda.is_available():
-            self.skipTest("CUDA is not available")
-        cap = torch.cuda.get_device_capability(0)
-        if cap[0] < 9:
-            self.skipTest(f"SM90+ required, got {cap}")
-
-        self.tmp = tempfile.TemporaryDirectory()
-        self.root = Path(self.tmp.name)
-        self.old_env = os.environ.copy()
-        self.old_modules = {
-            name: sys.modules.get(name)
-            for name in ("flashinfer.jit.env", "flashinfer.jit.core")
-        }
-        self.old_flashinfer_env_attrs = None
-        env_module = sys.modules.get("flashinfer.jit.env")
-        if env_module is not None:
-            self.old_flashinfer_env_attrs = {
-                attr: getattr(env_module, attr)
-                for attr in (
-                    "FLASHINFER_BASE_DIR",
-                    "FLASHINFER_CACHE_DIR",
-                    "FLASHINFER_WORKSPACE_DIR",
-                    "FLASHINFER_JIT_DIR",
-                    "FLASHINFER_GEN_SRC_DIR",
-                    "FLASHINFER_AOT_DIR",
-                )
-            }
-        for env_name in (
-            "FLASHINFER_WORKSPACE_BASE",
-            "TRITON_CACHE_DIR",
-            "TRITON_AUTOTUNE_CONFIG_DIR",
-            "DG_JIT_CACHE_DIR",
-            "TORCH_EXTENSIONS_DIR",
-        ):
-            os.environ.pop(env_name, None)
-        os.environ["FLASHINFER_DISABLE_VERSION_CHECK"] = "1"
-        torch.cuda.set_device(0)
-
-    def tearDown(self):
-        os.environ.clear()
-        os.environ.update(self.old_env)
-        env_module = sys.modules.get("flashinfer.jit.env")
-        if env_module is not None and self.old_flashinfer_env_attrs is not None:
-            for attr, value in self.old_flashinfer_env_attrs.items():
-                setattr(env_module, attr, value)
-        for name, module in self.old_modules.items():
-            if module is None:
-                sys.modules.pop(name, None)
-            else:
-                sys.modules[name] = module
-        self.tmp.cleanup()
 
     def test_jit_components_produce_expected_filesystem_events(self):
         local_root = self.root / "local"
         local_root.mkdir(parents=True)
         for component in COMPONENT_SPECS:
-            d = jit_cache_module.component_cache_dir(local_root, component)
-            d.mkdir(parents=True, exist_ok=True)
+            jit_cache_module.component_cache_dir(local_root, component).mkdir(
+                parents=True,
+                exist_ok=True,
+            )
         jit_cache_module.apply_jit_cache_env(local_root)
 
         recorder = EventRecord()
@@ -693,25 +611,16 @@ class JitEventSignalVerificationTest(unittest.TestCase):
                     )
                     if not src.startswith(self._prefix):
                         return
-                    rel = src[len(self._prefix) :]
-                    self._recorder.record(self._name, event.event_type, rel)
+                    self._recorder.record(
+                        self._name, event.event_type, src[len(self._prefix) :]
+                    )
 
             observer.schedule(Handler(), str(comp_dir), recursive=True)
 
         observer.start()
         try:
             time.sleep(0.1)
-
-            workloads = (
-                self._run_flashinfer,
-                self._run_triton,
-                self._run_triton_autotune,
-                self._run_deep_gemm,
-                self._run_torch_extensions,
-            )
-            for runner in workloads:
-                runner()
-
+            self._run_all_workloads()
             torch.cuda.synchronize()
             time.sleep(1.0)
         finally:
@@ -725,7 +634,6 @@ class JitEventSignalVerificationTest(unittest.TestCase):
             actual_types = recorder.get_event_types_for_syncable(component.name)
             hit = expected & actual_types
             missed = expected - actual_types
-            unexpected = actual_types - expected
 
             status = "OK" if hit and not missed else "FAIL"
             if status == "FAIL":
@@ -734,23 +642,13 @@ class JitEventSignalVerificationTest(unittest.TestCase):
             print(f"[{status}] {component.name}:")
             print(f"  configured upload_events: {sorted(expected)}")
             print(f"  actual syncable events:   {sorted(actual_types)}")
-            if hit:
-                print(f"  matched:    {sorted(hit)}")
             if missed:
                 print(f"  MISSING:    {sorted(missed)}")
-            if unexpected:
-                print(f"  extra (ok): {sorted(unexpected)}")
 
-            raw = recorder.get_events(component.name)
-            syncable_events = [
-                (t, p)
-                for t, p in raw
-                if p.endswith(component.sync_suffixes)
-                and not jit_cache_module.is_tmp_jit_path(p)
-            ]
-            if syncable_events:
-                print(f"  sample events ({len(syncable_events)} total):")
-                for etype, path in syncable_events[:5]:
+            syncable = recorder.get_syncable_events(component.name)
+            if syncable:
+                print(f"  sample events ({len(syncable)} total):")
+                for etype, path in syncable[:5]:
                     print(f"    {etype:10s} {path}")
             print()
 
@@ -760,33 +658,12 @@ class JitEventSignalVerificationTest(unittest.TestCase):
             "Check output above for details.",
         )
 
-    def _run_flashinfer(self):
-        from flashinfer.jit import env as jit_env
-        from flashinfer.jit import gen_batch_mla_module
-
-        workspace_base = Path(os.environ["FLASHINFER_WORKSPACE_BASE"])
-        version_dir = jit_env.FLASHINFER_WORKSPACE_DIR.parent.name
-        arch_dir = jit_env.FLASHINFER_WORKSPACE_DIR.name
-        workspace_dir = (
-            workspace_base / ".cache" / "flashinfer" / version_dir / arch_dir
-        )
-        jit_env.FLASHINFER_BASE_DIR = workspace_base
-        jit_env.FLASHINFER_CACHE_DIR = workspace_base / ".cache" / "flashinfer"
-        jit_env.FLASHINFER_WORKSPACE_DIR = workspace_dir
-        jit_env.FLASHINFER_JIT_DIR = workspace_dir / "cached_ops"
-        jit_env.FLASHINFER_GEN_SRC_DIR = workspace_dir / "generated"
-        jit_env.FLASHINFER_AOT_DIR = workspace_base / ".no_aot"
-        spec = gen_batch_mla_module(
-            "fa2",
-            torch.bfloat16,
-            torch.bfloat16,
-            torch.bfloat16,
-            torch.int32,
-            512,
-            64,
-            False,
-        )
-        spec.build_and_load()
+    def _run_all_workloads(self):
+        _setup_flashinfer_workspace_and_build()
+        self._run_triton()
+        self._run_triton_autotune()
+        self._run_deep_gemm()
+        self._run_torch_extensions()
 
     def _run_triton(self):
         import triton

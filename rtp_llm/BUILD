@@ -148,6 +148,7 @@ py_library(
         "utils/**/*.py",
     ], exclude = [
         "utils/jit_cache_manager.py",
+        "utils/module_util.py",
         "utils/test/*.py",
         "utils/test/**/*.py",
     ]),
@@ -173,8 +174,11 @@ py_library(
         ":config",
         ":filelock",
         ":orjson",
+        ":utils",
         ":watchdog",
         ":zstandard",
+        "//rtp_llm/metrics:metrics",
+        "//rtp_llm/models_py/triton_kernels:autotune_cache",
     ],
     visibility = ["//visibility:public"],
 )

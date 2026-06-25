@@ -38,15 +38,13 @@ def iter_component_files(root: Path, component):
             except OSError:
                 continue
             rel = path.relative_to(root).as_posix()
-            if stat.st_size > 0 and jit_cache_module.is_syncable_file(component, rel):
-                yield path, rel, jit_cache_module.FileMeta(
-                    size=stat.st_size, mtime_ns=stat.st_mtime_ns
-                )
+            if stat.st_size > 0 and jit_cache_module.should_sync_file(component, rel):
+                yield path, rel
 
 
 def add_path_to_tracker(tracker, component, path: Path, root: Path) -> None:
     rel = path.relative_to(root).as_posix()
-    if jit_cache_module.is_syncable_file(component, rel):
+    if jit_cache_module.should_sync_file(component, rel):
         tracker.enqueue_upload(component, rel)
 
 
@@ -59,7 +57,7 @@ def write_snapshot(remote: Path) -> Path:
             with tarfile.open(fileobj=compressed, mode="w|") as tar:
                 for component in COMPONENT_SPECS:
                     component_root = remote / component.name
-                    for path, rel, _ in iter_component_files(component_root, component):
+                    for path, rel in iter_component_files(component_root, component):
                         info = tar.gettarinfo(
                             str(path),
                             arcname=f"{component.name}/{rel}",
@@ -144,26 +142,15 @@ class JitCacheManagerTest(unittest.TestCase):
         return path
 
     def wait_for_pending_empty(self, manager: JitCacheManager):
-        deadline = time.time() + 5
-        with manager._lock:
-            while manager.pending_uploads:
-                remaining = deadline - time.time()
-                if remaining <= 0:
-                    self.fail("timed out waiting for pending uploads to drain")
-                manager._lock.wait(timeout=remaining)
+        if not manager._pending_empty.wait(timeout=5):
+            self.fail("timed out waiting for pending uploads to drain")
 
     def wait_for_snapshot_publish(self, manager: JitCacheManager):
         deadline = time.time() + 5
-        while True:
-            publish_thread = manager._snapshot_publish_thread
-            if publish_thread is None:
-                return
-            remaining = deadline - time.time()
-            if remaining <= 0:
+        while manager._snapshot_publishing:
+            if time.time() >= deadline:
                 self.fail("timed out waiting for snapshot publish to finish")
-            publish_thread.join(timeout=remaining)
-            if not publish_thread.is_alive():
-                return
+            time.sleep(0.05)
 
     def test_run_id_generation_and_override(self):
         config = JITConfig()
@@ -228,6 +215,29 @@ class JitCacheManagerTest(unittest.TestCase):
         )
         self.assertEqual(os.environ["TRITON_AUTOTUNE_CACHE_MODE"], "cached")
 
+    def test_bootstrap_clears_configured_startup_files(self):
+        local_root = self.root / "local"
+        deep_gemm_dir = local_root / "deep_gemm"
+        stale_lock = deep_gemm_dir / "cache" / "kernel_lock"
+        nested_lock = deep_gemm_dir / "cache" / "nested" / "build_lock"
+        keep_file = deep_gemm_dir / "cache" / "kernel.cubin"
+        legacy_lock = self.root / "deep_gemm_runtime" / "legacy_lock"
+        triton_lock = local_root / "triton" / "cache" / "kernel_lock"
+        lock_dir = deep_gemm_dir / "cache" / "dir_lock"
+        for path in (stale_lock, nested_lock, keep_file, legacy_lock, triton_lock):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("data", encoding="utf-8")
+        lock_dir.mkdir()
+
+        self.make_manager(local_root=local_root)
+
+        self.assertFalse(stale_lock.exists())
+        self.assertFalse(nested_lock.exists())
+        self.assertTrue(keep_file.exists())
+        self.assertTrue(legacy_lock.exists())
+        self.assertTrue(triton_lock.exists())
+        self.assertTrue(lock_dir.exists())
+
     def test_prepare_without_remote_returns_disabled_summary(self):
         manager = self.make_manager()
 
@@ -281,13 +291,6 @@ class JitCacheManagerTest(unittest.TestCase):
         self.assertFalse(manager.enabled)
         self.assertEqual(manager.component_dirs, {})
 
-    def test_file_meta_requires_exact_metadata_match(self):
-        left = jit_cache_module.FileMeta(size=16, mtime_ns=10_000)
-
-        self.assertNotEqual(left, jit_cache_module.FileMeta(size=16, mtime_ns=10_999))
-        self.assertNotEqual(left, jit_cache_module.FileMeta(size=17, mtime_ns=10_000))
-        self.assertEqual(left, left)
-
     def test_prepare_snapshot_miss_does_not_scan_remote_files(self):
         remote = self.root / "remote"
         remote_kernel = remote / "triton" / "kernel"
@@ -338,10 +341,7 @@ class JitCacheManagerTest(unittest.TestCase):
         self.assertEqual(summary["result"], "success")
         self.assertEqual(summary["extracted_files"], 1)
         self.assertTrue((self.root / "local" / "triton" / "kernel" / "a.so").exists())
-        marker = json.loads(manager.snapshot_complete_path.read_text(encoding="utf-8"))
-        self.assertEqual(marker["event"], "jit_cache_snapshot_complete")
-        self.assertEqual(marker["run_id"], manager.run_id)
-        self.assertEqual(marker["extracted_files"], 1)
+        self.assertTrue(manager.snapshot_complete_path.exists())
         self.assertEqual(sync["uploaded_files"], 0)
         self.assertEqual(sync["components"], {})
 
@@ -414,8 +414,8 @@ class JitCacheManagerTest(unittest.TestCase):
 
         self.assertEqual(summary["cache_state"], "snapshot_hit")
         self.assertEqual(summary["result"], "success")
-        self.assertEqual(summary["extracted_files"], 0)
-        self.assertEqual(summary["extracted_bytes"], 0)
+        self.assertEqual(summary.get("extracted_files", 0), 0)
+        self.assertEqual(summary.get("extracted_bytes", 0), 0)
         self.assertFalse(
             (self.root / "local" / "legacy_component" / "kernel" / "a.so").exists()
         )
@@ -470,31 +470,6 @@ class JitCacheManagerTest(unittest.TestCase):
                 / "drop.json"
             ).exists()
         )
-
-    def test_apply_extract_renames_extracted_tree_into_local_cache(self):
-        remote = self.root / "remote"
-        manager = self.make_manager(str(remote))
-        extract_root = self.root / "extract"
-        new_file = extract_root / "new_component" / "kernel" / "a.so"
-        new_file.parent.mkdir(parents=True)
-        new_file.write_text("so", encoding="utf-8")
-        existing_file = self.root / "local" / "triton" / "kernel" / "old.so"
-        existing_file.parent.mkdir(parents=True)
-        existing_file.write_text("old", encoding="utf-8")
-        replacement = extract_root / "triton" / "kernel" / "old.so"
-        replacement.parent.mkdir(parents=True)
-        replacement.write_text("new", encoding="utf-8")
-
-        manager._apply_extract(extract_root)
-
-        self.assertFalse(list(extract_root.rglob("*.*")))
-        self.assertEqual(
-            (self.root / "local" / "new_component" / "kernel" / "a.so").read_text(
-                encoding="utf-8"
-            ),
-            "so",
-        )
-        self.assertEqual(existing_file.read_text(encoding="utf-8"), "new")
 
     def test_upload_queue_reuploads_same_size_file_without_remote_stat(self):
         remote = self.root / "remote"
@@ -568,10 +543,8 @@ class JitCacheManagerTest(unittest.TestCase):
         self.write_snapshot(remote)
         manager = self.make_manager(str(remote))
 
-        tracker = manager.usage_tracker
-
         manager.prepare()
-        usage = tracker.to_summary_dict()
+        usage = manager._usage_summary()
         self.assertEqual(usage["local_cache"]["components"]["triton"]["files"], 1)
         self.assertGreater(usage["local_cache"]["components"]["triton"]["bytes"], 0)
 
@@ -581,7 +554,7 @@ class JitCacheManagerTest(unittest.TestCase):
         ) as report:
             summary = manager.sync_once("periodic_flush")
 
-        usage = tracker.to_summary_dict()
+        usage = manager._usage_summary()
         self.assertEqual(usage["remote_cache"]["components"]["triton"]["files"], 1)
         self.assertIn("remote_cache", summary)
         self.assertGreater(summary["remote_cache"]["files"], 0)
@@ -592,19 +565,17 @@ class JitCacheManagerTest(unittest.TestCase):
         first = self.make_manager(str(self.root / "remote1"))
         second = self.make_manager(str(self.root / "remote2"))
 
-        first.usage_tracker.add("remote", "triton", 4)
+        first._add_usage("remote", "triton", 4)
 
-        self.assertEqual(
-            first.usage_tracker.to_summary_dict()["remote_cache"]["files"], 1
-        )
-        self.assertEqual(second.usage_tracker.to_summary_dict(), {})
+        self.assertEqual(first._usage_summary()["remote_cache"]["files"], 1)
+        self.assertEqual(second._usage_summary(), {})
 
     def test_sync_once_ignores_kmonitor_report_errors(self):
         from rtp_llm.metrics import kmonitor
 
         remote = self.root / "remote"
         manager = self.make_manager(str(remote))
-        manager.usage_tracker.add("remote", "triton", 4)
+        manager._add_usage("remote", "triton", 4)
 
         with mock.patch.object(kmonitor, "_inited", True), mock.patch.object(
             kmonitor, "report", side_effect=RuntimeError("kmonitor unavailable")
@@ -615,46 +586,6 @@ class JitCacheManagerTest(unittest.TestCase):
         self.assertEqual(summary["remote_cache"]["files"], 1)
         self.assertIn(
             "failed to report JIT cache usage metrics", "\n".join(logs.output)
-        )
-
-    def test_upload_retries_when_file_changes_during_copy(self):
-        remote = self.root / "remote"
-        manager = self.make_manager(str(remote))
-        call_count = 0
-        original_file_meta = jit_cache_module.file_meta
-        component = self.component("triton")
-        key = "kernel/a.cubin"
-        local_file = self.root / "local" / component.name / key
-        local_file.parent.mkdir(parents=True)
-        local_file.write_text(component.name, encoding="utf-8")
-
-        def mutating_stat(path, **kwargs):
-            nonlocal call_count
-            meta = original_file_meta(path, **kwargs)
-            call_count += 1
-            if call_count == 2:
-                local_file.write_text("mutated-mid-upload", encoding="utf-8")
-            return original_file_meta(path, **kwargs) if call_count == 2 else meta
-
-        with mock.patch.object(
-            jit_cache_module, "file_meta", side_effect=mutating_stat
-        ):
-            manager.pending_uploads.add((component.name, key))
-            with mock.patch.object(
-                manager,
-                "_submit_upload_task",
-                side_effect=lambda task: manager._process_upload_task(task) or True,
-            ):
-                manager._process_upload_task(
-                    jit_cache_module.UploadTask(component, key)
-                )
-            first = manager.sync_once()
-
-        self.assertEqual(first["components"]["triton"]["retried_files"], 1)
-        self.assertEqual(first["components"]["triton"]["uploaded_files"], 1)
-        self.assertEqual(
-            (remote / "triton" / "kernel" / "a.cubin").read_text(encoding="utf-8"),
-            "mutated-mid-upload",
         )
 
     def test_upload_skips_empty_files(self):
@@ -672,7 +603,7 @@ class JitCacheManagerTest(unittest.TestCase):
         self.assertEqual(summary["components"]["triton"]["skipped_files"], 1)
         self.assertFalse((remote / component.name / key).exists())
 
-    def test__copy_verified_preserves_existing_file_when_copy_fails(self):
+    def test__copy_atomic_preserves_existing_file_when_copy_fails(self):
         remote = self.root / "remote"
         manager = self.make_manager(str(remote))
         src = self.root / "local" / "triton" / "kernel" / "a.cubin"
@@ -682,20 +613,20 @@ class JitCacheManagerTest(unittest.TestCase):
         dst.parent.mkdir(parents=True)
         dst.write_text("old", encoding="utf-8")
 
-        def failing_copy(src_path, dst_path):
+        def failing_copy(src_path, dst_path, deadline_s):
             Path(dst_path).write_text("partial", encoding="utf-8")
             raise OSError("copy failed")
 
         with mock.patch.object(
-            jit_cache_module.shutil, "copyfile", side_effect=failing_copy
+            jit_cache_module, "_copy_with_deadline", side_effect=failing_copy
         ):
             with self.assertRaises(OSError):
-                manager._copy_verified(src, dst, jit_cache_module.file_meta(src))
+                manager._copy_atomic(src, dst, time.monotonic() + 5)
 
         self.assertEqual(dst.read_text(encoding="utf-8"), "old")
         self.assertEqual(list(dst.parent.glob(f".{dst.name}.*.tmp")), [])
 
-    def test__copy_verified_preserves_source_mtime(self):
+    def test__copy_atomic_preserves_source_mtime(self):
         remote = self.root / "remote"
         manager = self.make_manager(str(remote))
         src = self.root / "local" / "triton" / "kernel" / "a.cubin"
@@ -705,36 +636,10 @@ class JitCacheManagerTest(unittest.TestCase):
         os.utime(src, ns=(mtime_ns, mtime_ns))
         dst = remote / "triton" / "kernel" / "a.cubin"
 
-        manager._copy_verified(src, dst, jit_cache_module.file_meta(src))
+        manager._copy_atomic(src, dst, time.monotonic() + 5)
 
         self.assertEqual(dst.read_text(encoding="utf-8"), "new")
         self.assertEqual(dst.stat().st_mtime_ns, mtime_ns)
-
-    def test__copy_verified_rejects_source_changed_during_copy(self):
-        remote = self.root / "remote"
-        manager = self.make_manager(str(remote))
-        src = self.root / "local" / "triton" / "kernel" / "a.cubin"
-        src.parent.mkdir(parents=True)
-        src.write_text("old", encoding="utf-8")
-        dst = remote / "triton" / "kernel" / "a.cubin"
-        dst.parent.mkdir(parents=True)
-        dst.write_text("remote-old", encoding="utf-8")
-        src_meta = jit_cache_module.file_meta(src)
-        original_copyfile = jit_cache_module.shutil.copyfile
-
-        def mutating_copy(src_path, dst_path):
-            result = original_copyfile(src_path, dst_path)
-            Path(src_path).write_text("changed-after-copy", encoding="utf-8")
-            return result
-
-        with mock.patch.object(
-            jit_cache_module.shutil, "copyfile", side_effect=mutating_copy
-        ):
-            with self.assertRaisesRegex(RuntimeError, "source changed during upload"):
-                manager._copy_verified(src, dst, src_meta)
-
-        self.assertEqual(dst.read_text(encoding="utf-8"), "remote-old")
-        self.assertEqual(list(dst.parent.glob(f".{dst.name}.*.tmp")), [])
 
     def test_watcher_enqueue_filters_events(self):
         remote = self.root / "remote"
@@ -748,8 +653,7 @@ class JitCacheManagerTest(unittest.TestCase):
         valid_file = kernel / "a.cubin"
         valid_file.write_text("cubin", encoding="utf-8")
 
-        with mock.patch.object(manager, "_process_upload_task"):
-            add_path_to_tracker(tracker, self.component("triton"), valid_file, root)
+        with mock.patch.object(manager, "_upload_task"):
             add_path_to_tracker(tracker, self.component("triton"), valid_file, root)
             for name in ("a.cubin.tmp", "a.o", "a.cu", "compile.log", "build.ninja"):
                 skipped_file = kernel / name
@@ -758,8 +662,7 @@ class JitCacheManagerTest(unittest.TestCase):
                     tracker, self.component("triton"), skipped_file, root
                 )
 
-            self.assertEqual(len(manager.pending_uploads), 1)
-            self.assertIn(("triton", "kernel/a.cubin"), manager.pending_uploads)
+            self.assertEqual(manager._pending_count, 1)
 
     def test_watcher_filters_paths_and_only_enqueues_completed_events(self):
         remote = self.root / "remote"
@@ -772,7 +675,7 @@ class JitCacheManagerTest(unittest.TestCase):
         kernel.mkdir(parents=True)
         handler = tracker._make_handler(self.component("triton"), root)
 
-        with mock.patch.object(manager, "_process_upload_task"):
+        with mock.patch.object(manager, "_upload_task"):
             handler.on_any_event(
                 FakeFileEvent(
                     "moved",
@@ -780,38 +683,37 @@ class JitCacheManagerTest(unittest.TestCase):
                     str(self.root / "outside" / "moved_out.so"),
                 )
             )
-            self.assertEqual(len(manager.pending_uploads), 0)
+            self.assertEqual(manager._pending_count, 0)
 
             ignored_file = kernel / "ignored.so"
             ignored_file.write_text("ignored", encoding="utf-8")
             for event_type in ("opened", "deleted", "modified"):
                 handler.on_any_event(FakeFileEvent(event_type, str(ignored_file)))
-            self.assertEqual(len(manager.pending_uploads), 0)
+            self.assertEqual(manager._pending_count, 0)
 
             tmp_file = root / "hash" / "tmp.pid_1_abc" / "tmp.cubin"
             tmp_file.parent.mkdir(parents=True)
             tmp_file.write_text("tmp", encoding="utf-8")
             handler.on_any_event(FakeFileEvent("closed", str(tmp_file)))
             handler.on_any_event(FakeFileEvent("created", str(tmp_file)))
-            self.assertEqual(len(manager.pending_uploads), 0)
+            self.assertEqual(manager._pending_count, 0)
 
             created_file = kernel / "created.so"
             created_file.write_text("so", encoding="utf-8")
             handler.on_any_event(FakeFileEvent("created", str(created_file)))
-            self.assertEqual(len(manager.pending_uploads), 0)
+            self.assertEqual(manager._pending_count, 0)
 
             closed_file = kernel / "closed.so"
             closed_file.write_text("so", encoding="utf-8")
             handler.on_any_event(FakeFileEvent("closed", str(closed_file)))
-            self.assertEqual(len(manager.pending_uploads), 0)
+            self.assertEqual(manager._pending_count, 0)
 
             moved_file = kernel / "moved.so"
             moved_file.write_text("so", encoding="utf-8")
             handler.on_any_event(
                 FakeFileEvent("moved", str(kernel / "tmp.so"), str(moved_file))
             )
-            self.assertIn(("triton", "kernel/moved.so"), manager.pending_uploads)
-            self.assertEqual(len(manager.pending_uploads), 1)
+            self.assertEqual(manager._pending_count, 1)
 
     def test_watcher_uses_component_specific_completion_events(self):
         remote = self.root / "remote"
@@ -831,49 +733,52 @@ class JitCacheManagerTest(unittest.TestCase):
         cases = (
             ("flashinfer", "kernel.so", "created", "closed", "so"),
             ("torch_extensions", "extension.so", "moved", "closed", "so"),
+            ("triton", "kernel/a.so", "closed", "moved", "so"),
             ("triton_autotune", "kernel.json", "created", "closed", "{}"),
             ("deep_gemm", "cache/kernel.cubin", "closed", "created", "cubin"),
         )
-        with mock.patch.object(manager, "_process_upload_task"):
+        with mock.patch.object(manager, "_upload_task"):
             for component_name, key, ignored_event, upload_event, content in cases:
                 with self.subTest(component=component_name):
                     handler, root = handler_for(component_name)
                     path = root / key
                     path.parent.mkdir(parents=True, exist_ok=True)
                     path.write_text(content, encoding="utf-8")
-                    before = len(manager.pending_uploads)
+                    before = manager._pending_count
 
                     handler.on_any_event(FakeFileEvent(ignored_event, str(path)))
-                    self.assertEqual(len(manager.pending_uploads), before)
+                    self.assertEqual(manager._pending_count, before)
 
-                    handler.on_any_event(FakeFileEvent(upload_event, str(path)))
-                    self.assertIn((component_name, key), manager.pending_uploads)
+                    if upload_event == "moved":
+                        event = FakeFileEvent(
+                            "moved", str(path.with_suffix(".tmp")), str(path)
+                        )
+                    else:
+                        event = FakeFileEvent(upload_event, str(path))
+                    handler.on_any_event(event)
+                    self.assertEqual(manager._pending_count, before + 1)
 
-    def test_upload_failure_retries_then_releases_pending_candidate(self):
+    def test_upload_failure_releases_pending_candidate(self):
         remote = self.root / "remote"
         manager = self.make_manager(str(remote))
-        original_copy = manager._copy_verified
+        original_copy = manager._copy_atomic
         failures = 0
 
-        def raise_copy(src, dst, src_meta):
+        def raise_copy(src, dst, deadline_s=None):
             nonlocal failures
             failures += 1
             raise OSError("remote write failed")
 
-        manager._copy_verified = raise_copy
-        self.enqueue_file(manager, "triton", "kernel/a.cubin")
+        manager._copy_atomic = raise_copy
         with self.assertLogs(level="WARNING"):
+            self.enqueue_file(manager, "triton", "kernel/a.cubin")
             first = manager.sync_once()
         self.assertEqual(first["result"], "failed")
         self.assertEqual(first["components"]["triton"]["failed_files"], 1)
-        self.assertEqual(
-            first["components"]["triton"]["retried_files"],
-            jit_cache_module.MAX_UPLOAD_ATTEMPTS - 1,
-        )
-        self.assertEqual(failures, jit_cache_module.MAX_UPLOAD_ATTEMPTS)
-        self.assertEqual(len(manager.pending_uploads), 0)
+        self.assertEqual(failures, 1)
+        self.assertTrue(manager._pending_empty.is_set())
 
-        manager._copy_verified = original_copy
+        manager._copy_atomic = original_copy
         self.enqueue_file(manager, "triton", "kernel/a.cubin")
         second = manager.sync_once()
 
@@ -893,29 +798,25 @@ class JitCacheManagerTest(unittest.TestCase):
         ):
             self.assertFalse(manager.enqueue_upload(component, "kernel/a.so"))
 
-        self.assertEqual(manager.pending_uploads, set())
+        self.assertEqual(manager._pending_count, 0)
+        self.assertTrue(manager._pending_empty.is_set())
 
-    def test_process_upload_task_releases_pending_when_retry_submit_fails(self):
+    def test_upload_task_releases_pending_after_failure(self):
         remote = self.root / "remote"
         manager = self.make_manager(str(remote))
         component = self.component("triton")
-        pending_key = (component.name, "kernel/a.so")
-        manager.pending_uploads.add(pending_key)
-        manager._try_upload = lambda *a, **kw: jit_cache_module.SyncResult(
-            "retry", reason="remote write failed"
-        )
+        manager._pending_count = 1
+        manager._pending_empty.clear()
+        manager._do_upload = mock.Mock(side_effect=OSError("remote write failed"))
 
-        with mock.patch.object(
-            manager, "_submit_upload_task", return_value=False
-        ), self.assertLogs(level="WARNING"):
-            manager._process_upload_task(
-                jit_cache_module.UploadTask(component, "kernel/a.so")
-            )
+        with self.assertLogs(level="WARNING"):
+            manager._upload_task(component, "kernel/a.so")
 
-        self.assertEqual(manager.pending_uploads, set())
+        self.assertEqual(manager._pending_count, 0)
+        self.assertTrue(manager._pending_empty.is_set())
         self.assertEqual(manager.sync_stats[component.name].failed_files, 1)
 
-    def test_background_worker_retries_transient_upload_failure(self):
+    def test_background_worker_records_upload_failure(self):
         remote = self.root / "remote"
         manager = self.make_manager(str(remote))
         manager.prepare()
@@ -923,31 +824,26 @@ class JitCacheManagerTest(unittest.TestCase):
         local_file = self.root / "local" / "triton" / "kernel" / "a.so"
         local_file.parent.mkdir(parents=True)
         local_file.write_text("so", encoding="utf-8")
-        original_copy = manager._copy_verified
         attempts = 0
 
-        def flaky_copy(src, dst, src_meta):
+        def failing_copy(src, dst, deadline_s=None):
             nonlocal attempts
             attempts += 1
-            if attempts == 1:
-                raise OSError("transient remote write failed")
-            return original_copy(src, dst, src_meta)
+            raise OSError("remote write failed")
 
-        manager._copy_verified = flaky_copy
-        add_path_to_tracker(
-            manager.dirty_tracker,
-            self.component("triton"),
-            local_file,
-            self.root / "local" / "triton",
-        )
-        self.wait_for_pending_empty(manager)
+        manager._copy_atomic = failing_copy
+        with self.assertLogs(level="WARNING"):
+            add_path_to_tracker(
+                manager.dirty_tracker,
+                self.component("triton"),
+                local_file,
+                self.root / "local" / "triton",
+            )
+            self.wait_for_pending_empty(manager)
         manager.stop()
 
-        self.assertEqual(attempts, 2)
-        self.assertEqual(
-            (remote / "triton" / "kernel" / "a.so").read_text(encoding="utf-8"),
-            "so",
-        )
+        self.assertEqual(attempts, 1)
+        self.assertFalse((remote / "triton" / "kernel" / "a.so").exists())
 
     def test_sync_drains_pending_uploads(self):
         remote = self.root / "remote"
@@ -967,10 +863,12 @@ class JitCacheManagerTest(unittest.TestCase):
         manager = self.make_manager(str(remote))
         component = self.component("triton")
         block = threading.Event()
-        manager._try_upload = lambda *a, **kw: (
-            block.wait(),
-            jit_cache_module.SyncResult("skipped"),
-        )[1]
+
+        def blocking_upload(*a, **kw):
+            block.wait()
+            return 0
+
+        manager._do_upload = blocking_upload
         manager.enqueue_upload(component, "kernel/a.so")
 
         manager.config.remote_timeout_s = 0.01
@@ -979,7 +877,7 @@ class JitCacheManagerTest(unittest.TestCase):
 
         block.set()
         self.assertEqual(summary["result"], "failed")
-        self.assertEqual(summary["components"]["triton"]["drain_timed_out"], 1)
+        self.assertTrue(summary.get("drain_timed_out", False))
         self.assertIn("drain timed out", "\n".join(logs.output))
 
     def test_sync_once_marks_failed_when_drain_raises(self):
@@ -992,7 +890,7 @@ class JitCacheManagerTest(unittest.TestCase):
             summary = manager.sync_once()
 
         self.assertEqual(summary["result"], "failed")
-        self.assertEqual(summary["drain_timed_out"], len(manager.component_dirs))
+        self.assertTrue(summary.get("drain_timed_out", False))
         self.assertIn("failed to sync remote JIT cache", "\n".join(logs.output))
 
     def test_sync_once_schedules_snapshot_publish_as_best_effort(self):
@@ -1014,9 +912,7 @@ class JitCacheManagerTest(unittest.TestCase):
                 summary = manager.sync_once()
             self.assertEqual(summary["result"], "success")
             self.assertTrue(started.wait(timeout=1))
-            publish_thread = manager._snapshot_publish_thread
-            self.assertIsNotNone(publish_thread)
-            self.assertTrue(publish_thread.is_alive())
+            self.assertTrue(manager._snapshot_publishing)
             release.set()
             self.wait_for_snapshot_publish(manager)
 
@@ -1218,30 +1114,50 @@ class JitCacheManagerTest(unittest.TestCase):
         stored = self.read_summary()
         self.assertEqual(stored["mode"], "periodic_flush")
 
+    def test_background_sync_runs_periodic_flush(self):
+        remote = self.root / "remote"
+        manager = self.make_manager(str(remote))
+        manager.prepare()
+        called = threading.Event()
+        original_sync_once = manager.sync_once
+
+        def wrapped_sync_once(mode="manual_sync"):
+            if mode == "periodic_flush":
+                called.set()
+            return original_sync_once(mode)
+
+        manager.sync_once = wrapped_sync_once
+        with mock.patch.object(jit_cache_module, "PERIODIC_SYNC_INTERVAL_S", 0.01):
+            manager.start_background_sync()
+            self.assertTrue(called.wait(timeout=1))
+
+        manager.stop()
+        self.assertIsNone(manager._periodic_sync_thread)
+
     def test_stop_freezes_watcher_before_final_flush(self):
         remote = self.root / "remote"
         manager = self.make_manager(str(remote))
         manager.prepare()
         manager.start_background_sync()
         order = []
-        original_stop_dirty_tracker = manager.stop_dirty_tracker
+        original_tracker_stop = manager.dirty_tracker.stop
         original_sync_once = manager.sync_once
 
-        def wrapped_stop_dirty_tracker():
-            order.append("stop_dirty_tracker")
-            original_stop_dirty_tracker()
+        def wrapped_tracker_stop():
+            order.append("tracker_stop")
+            original_tracker_stop()
 
         def wrapped_sync_once(mode="manual_sync"):
             order.append(f"sync_once:{mode}")
             self.assertIsNone(manager.dirty_tracker)
             return original_sync_once(mode)
 
-        manager.stop_dirty_tracker = wrapped_stop_dirty_tracker
+        manager.dirty_tracker.stop = wrapped_tracker_stop
         manager.sync_once = wrapped_sync_once
 
         manager.stop()
 
-        self.assertEqual(order, ["stop_dirty_tracker", "sync_once:periodic_flush"])
+        self.assertEqual(order, ["tracker_stop", "sync_once:periodic_flush"])
         self.assertFalse(manager.owns_startup_lock)
 
     def test_non_owner_takes_over_after_owner_lock_is_released(self):
