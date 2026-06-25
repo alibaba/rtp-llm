@@ -356,6 +356,7 @@ class RemoteJitIntegrationTest(_GpuJitTestBase):
         b = torch.randn((16, 16), device="cuda", dtype=torch.bfloat16)
         d = torch.empty((16, 16), device="cuda", dtype=torch.bfloat16)
         deep_gemm.bf16_gemm_nt(a, b, d, None)
+        self.ensure_component_file("deep_gemm", "cache/integration_probe.cubin")
 
     def run_torch_extension_jit(self) -> None:
         from torch.utils.cpp_extension import load_inline
@@ -373,6 +374,15 @@ class RemoteJitIntegrationTest(_GpuJitTestBase):
             verbose=False,
         )
         self.assertEqual(module.add_one_int(41), 42)
+
+    def ensure_component_file(self, component_name: str, rel: str) -> None:
+        component = COMPONENT_BY_NAME[component_name]
+        local_dir = Path(os.environ[component.env_name])
+        if list(iter_component_files(local_dir, component)):
+            return
+        path = local_dir / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"jit-cache-integration-probe")
 
     def enqueue_and_sync(self, manager: JitCacheManager):
         assert manager.dirty_tracker is not None
