@@ -3,6 +3,8 @@ load("//:def.bzl", "copts")
 load("@arch_config//:arch_select.bzl", "torch_deps")
 load("//bazel:device_defs.bzl", "device_impl_target", "device_test_envs")
 
+CUDA_TEST_TAGS = ["cuda"]
+
 test_copts = [
     "-fno-access-control",
 ] + copts()
@@ -15,6 +17,7 @@ cc_test(
     ],
     copts = test_copts,
     exec_properties = {'gpu':'H20'},
+    tags = CUDA_TEST_TAGS,
     deps = [
         "//rtp_llm/cpp/cache/connector/p2p/transfer/tcp:tcp_task_context",
         "//rtp_llm/cpp/cache/connector/p2p/transfer:basic_types",
@@ -35,6 +38,7 @@ cc_test(
     ],
     copts = test_copts,
     exec_properties = {'gpu':'H20'},
+    tags = CUDA_TEST_TAGS,
     deps = [
         "//rtp_llm/cpp/cache/connector/p2p/transfer/tcp:tcp_transfer_service",
         "//rtp_llm/cpp/cache/connector/p2p/transfer:basic_types",
@@ -55,6 +59,7 @@ cc_test(
     ],
     copts = test_copts,
     exec_properties = {'gpu':'H20'},
+    tags = CUDA_TEST_TAGS,
     deps = [
         "//rtp_llm/cpp/cache/connector/p2p/transfer/tcp:tcp_backend",
         "//rtp_llm/cpp/cache/connector/p2p/transfer:basic_types",

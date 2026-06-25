@@ -5,7 +5,11 @@
 #include <optional>
 #include <torch/torch.h>
 #include "rtp_llm/cpp/utils/Logger.h"
+
+#define private public
 #include "rtp_llm/cpp/cache/SingleTypeKVCacheAllocator.h"
+#undef private
+
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"

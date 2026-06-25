@@ -1,5 +1,6 @@
 load("//:def.bzl", "cc_test_wrapper", "copts")
 load("@arch_config//:arch_select.bzl", "torch_deps")
+load("//bazel:device_defs.bzl", "device_impl_target")
 
 cc_test = cc_test_wrapper
 
@@ -8,7 +9,6 @@ test_copts = [
 ] + copts()
 
 test_deps = [
-    "//rtp_llm/models_py/bindings/cuda/ops:cuda_impl",
     "//rtp_llm/models_py/bindings/core:exec_ops_test_lib",
     "//rtp_llm/cpp/config:config_modules",
     "//rtp_llm/cpp/config:model_config",
@@ -17,21 +17,24 @@ test_deps = [
     ":cache_config_test_utils",
     "@com_google_googletest//:gtest",
     "@com_google_googletest//:gtest_main",
-    "@local_config_cuda//cuda:cuda_headers",
-    "@local_config_cuda//cuda:cudart",
-] + torch_deps()
+] + torch_deps() + device_impl_target() + select({
+    "@//:using_cuda": [
+        "@local_config_cuda//cuda:cuda_headers",
+        "@local_config_cuda//cuda:cudart",
+    ],
+    "@//:using_rocm": [
+        "//rtp_llm/models_py/bindings/core:exec_ctx_ops",
+        "@local_config_rocm//rocm:rocm_headers",
+        "@local_config_rocm//rocm:rocm",
+    ],
+    "//conditions:default": [],
+})
 
 block_cache_test_deps = [
-    "//rtp_llm/cpp/testing:device_test_utils",
-    "//rtp_llm/models_py/bindings/cuda/ops:cuda_impl",
-    "//rtp_llm/cpp/config:config_modules",
-    "//rtp_llm/cpp/config:model_config",
     "//rtp_llm/cpp/cache",
     "@com_google_googletest//:gtest",
     "@com_google_googletest//:gtest_main",
-    "@local_config_cuda//cuda:cuda_headers",
-    "@local_config_cuda//cuda:cudart",
-] + torch_deps()
+]
 
 
 cc_library(

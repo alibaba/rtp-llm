@@ -1,6 +1,8 @@
 load("//:def.bzl", "copts")
 load("@arch_config//:arch_select.bzl", "torch_deps")
 
+CUDA_TEST_TAGS = ["cuda"]
+
 test_copts = [
     "-fno-access-control",
 ] + copts()
@@ -26,7 +28,7 @@ cc_test(
     ],
     copts = test_copts,
     exec_properties = {"gpu": "H20"},
-    # tags = ["H20"],
+    tags = CUDA_TEST_TAGS,
     deps = test_deps + [
         "//rtp_llm/cpp/cache/connector/remote_connector",
     ],
@@ -39,7 +41,7 @@ cc_test(
     ],
     copts = test_copts,
     exec_properties = {"gpu": "H20"},
-    # tags = ["H20"],
+    tags = CUDA_TEST_TAGS,
     deps = test_deps + [
         "//rtp_llm/cpp/cache/connector/remote_connector",
     ],
@@ -52,7 +54,7 @@ cc_test(
     ],
     copts = test_copts,
     exec_properties = {"gpu": "H20"},
-    # tags = ["H20"],
+    tags = CUDA_TEST_TAGS,
     deps = [
         ":remote_connector_mock_base",
     ],
@@ -65,7 +67,7 @@ cc_test(
     ],
     copts = test_copts,
     exec_properties = {"gpu": "H20"},
-    # tags = ["H20"],
+    tags = CUDA_TEST_TAGS,
     deps = [
         ":remote_connector_mock_base",
     ],
@@ -78,7 +80,7 @@ cc_test(
     ],
     copts = test_copts,
     exec_properties = {"gpu": "H20"},
-    # tags = ["H20"],
+    tags = CUDA_TEST_TAGS,
     deps = test_deps + [
         ":mock",
     ],

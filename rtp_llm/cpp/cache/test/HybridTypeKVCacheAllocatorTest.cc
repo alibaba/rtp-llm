@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <limits>
 #include <memory>
 #include <optional>
@@ -7,7 +8,11 @@
 
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
 #include "rtp_llm/cpp/cache/BlockCache.h"
+
+#define private public
 #include "rtp_llm/cpp/cache/HybridTypeKVCacheAllocator.h"
+#undef private
+
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
 #include "rtp_llm/cpp/cache/test/BlockPoolTestHelper.h"
 #include "rtp_llm/cpp/config/ModelConfig.h"
@@ -58,8 +63,15 @@ static CacheConfig makeTinyHybridConfig() {
     config.linear_group_num = 1;
     config.full_group_num   = 1;
 
-    // Physical block strides: take max between full and linear.
-    config.kv_block_stride_bytes = std::max(full_spec->block_size_bytes(), linear_spec->block_size_bytes());
+    // Physical block strides: take max between full and linear, then express it
+    // in full-attention kernel blocks like HybridConfigCreator does.
+    config.kv_block_stride_bytes      = std::max(full_spec->block_size_bytes(), linear_spec->block_size_bytes());
+    const size_t active_kernel_blocks = config.kernelBlocksPerKvBlock();
+    RTP_LLM_CHECK(full_spec->block_size_bytes() % active_kernel_blocks == 0);
+    const size_t full_kernel_pair_bytes = full_spec->block_size_bytes() / active_kernel_blocks;
+    config.kv_block_stride_kernel_blocks =
+        (config.kv_block_stride_bytes + full_kernel_pair_bytes - 1) / full_kernel_pair_bytes;
+    config.kv_block_stride_bytes = config.kv_block_stride_kernel_blocks * full_kernel_pair_bytes;
     config.kv_block_size_bytes   = static_cast<size_t>(config.group_layer_num) * config.kv_block_stride_bytes;
 
     // No kv scale for fp16.
@@ -110,6 +122,39 @@ static ModelConfig makeHybridConfigWithLinearStrideLargerThanFull() {
     cfg.linear_attention_config.linear_num_key_heads   = 2;
     cfg.linear_attention_config.linear_num_value_heads = 2;
     return cfg;
+}
+
+static ModelConfig makeHybridConfigWithFullStrideAtLeastLinear() {
+    auto cfg                         = makeTinyModelConfig(/*num_layers=*/4);
+    cfg.attn_config.head_num         = 2;
+    cfg.attn_config.kv_head_num      = 2;
+    cfg.attn_config.size_per_head    = 16;
+    cfg.attn_config.tokens_per_block = 4;
+
+    cfg.hybrid_attention_config.enable_hybrid_attention = true;
+    cfg.hybrid_attention_config.hybrid_attention_types  = {
+        HybridAttentionType::LINEAR, HybridAttentionType::LINEAR, HybridAttentionType::NONE, HybridAttentionType::NONE};
+
+    cfg.linear_attention_config.linear_conv_kernel_dim = 2;
+    cfg.linear_attention_config.linear_key_head_dim    = 2;
+    cfg.linear_attention_config.linear_value_head_dim  = 2;
+    cfg.linear_attention_config.linear_num_key_heads   = 1;
+    cfg.linear_attention_config.linear_num_value_heads = 1;
+    return cfg;
+}
+
+static CacheConfig makeHybridCacheConfigByCreateConfig(const ModelConfig& model_cfg) {
+    ParallelismConfig parallelism_cfg;
+    parallelism_cfg.tp_size = 1;
+
+    RuntimeConfig runtime_cfg;
+    KVCacheConfig kv_cache_cfg;
+    kv_cache_cfg.seq_size_per_block        = 4;
+    kv_cache_cfg.kernel_seq_size_per_block = 2;
+    kv_cache_cfg.linear_step               = 2;
+    kv_cache_cfg.test_block_num            = 20;
+
+    return CacheConfigCreator::createConfig(model_cfg, parallelism_cfg, runtime_cfg, kv_cache_cfg, std::nullopt);
 }
 
 static CacheConfig makeTinyHybridMtpConfigByCreateSpConfig() {
@@ -173,6 +218,22 @@ static BatchKVCacheResourcePtr makeBatchResource(
     return res;
 }
 
+static BatchKVCacheResourcePtr
+makeBatchResourceByConfig(int batch_size, const CacheConfig& config, CacheKeysType keys) {
+    auto res = std::make_shared<BatchKVCacheResource>();
+    res->resetBatchSize(batch_size);
+    res->initGroups(config.groupNums(),
+                    static_cast<int>(config.layer_all_num),
+                    config.layer_to_group_id,
+                    config.kernelBlocksPerKvBlock(),
+                    config.kv_block_stride_kernel_blocks,
+                    config.group_types);
+    for (int b = 0; b < batch_size; ++b) {
+        res->setBatchCacheKeys(b, keys);
+    }
+    return res;
+}
+
 static std::vector<BlockIdxType> allocateAndCache(BlockPoolPtr         block_pool,
                                                   BlockCachePtr        block_cache,
                                                   int                  group_id,
@@ -228,6 +289,119 @@ static size_t countValidBlocks(const BlockIndicesType& blocks) {
     return n;
 }
 
+static int findSingleGroupIdByType(const CacheConfig& config, CacheGroupType type) {
+    int found = -1;
+    for (size_t gid = 0; gid < config.group_types.size(); ++gid) {
+        if (config.group_types[gid] != type) {
+            continue;
+        }
+        RTP_LLM_CHECK_WITH_INFO(found < 0, "expected one group of requested type, found another at gid=%zu", gid);
+        found = static_cast<int>(gid);
+    }
+    RTP_LLM_CHECK_WITH_INFO(found >= 0, "requested cache group type was not found");
+    return found;
+}
+
+static std::vector<int> blockValidity(const BlockIndicesType& blocks) {
+    std::vector<int> validity;
+    validity.reserve(blocks.size());
+    for (auto block : blocks) {
+        validity.push_back(isNullBlockIdx(block) ? 0 : 1);
+    }
+    return validity;
+}
+
+static std::vector<int> normalizedFullKernelSlots(const BlockIndicesType& blocks,
+                                                  const BlockIndicesType& kernel_blocks,
+                                                  size_t                  active_kernel_blocks,
+                                                  size_t                  kv_block_stride_kernel_blocks) {
+    EXPECT_EQ(kernel_blocks.size(), blocks.size() * active_kernel_blocks);
+
+    std::vector<int> normalized;
+    normalized.reserve(kernel_blocks.size());
+    for (size_t i = 0; i < blocks.size(); ++i) {
+        const auto block = blocks[i];
+        for (size_t j = 0; j < active_kernel_blocks; ++j) {
+            const size_t pos = i * active_kernel_blocks + j;
+            if (isNullBlockIdx(block)) {
+                EXPECT_EQ(kernel_blocks[pos], NULL_BLOCK_IDX);
+                normalized.push_back(-1);
+                continue;
+            }
+
+            const auto expected =
+                static_cast<BlockIdxType>(static_cast<size_t>(block) * kv_block_stride_kernel_blocks + j);
+            EXPECT_EQ(kernel_blocks[pos], expected);
+            normalized.push_back(static_cast<int>(j));
+        }
+    }
+    return normalized;
+}
+
+struct HybridReuseScenarioResult {
+    int              reuse_len                     = 0;
+    size_t           active_kernel_blocks          = 0;
+    size_t           kv_block_stride_kernel_blocks = 0;
+    std::vector<int> full_validity;
+    std::vector<int> linear_validity;
+    std::vector<int> full_kernel_slots;
+    BlockIndicesType linear_kernel_blocks;
+};
+
+static void runHybridJointReuseScenario(const CacheConfig& config, HybridReuseScenarioResult& scenario_result) {
+    auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::HOST);
+    ASSERT_TRUE(allocator->init());
+
+    auto block_pool  = allocator->getBlockPool();
+    auto block_cache = block_pool->blockCache();
+    ASSERT_NE(block_pool, nullptr);
+    ASSERT_NE(block_cache, nullptr);
+
+    const int gid_full   = findSingleGroupIdByType(config, CacheGroupType::FULL);
+    const int gid_linear = findSingleGroupIdByType(config, CacheGroupType::LINEAR);
+
+    const auto full_blocks = allocateAndCache(block_pool, block_cache, gid_full, CacheKeysType{100, 101, 102});
+    ASSERT_EQ(full_blocks.size(), 3u);
+
+    const auto linear_blocks = allocateAndCache(block_pool, block_cache, gid_linear, CacheKeysType{101});
+    ASSERT_EQ(linear_blocks.size(), 1u);
+
+    auto batch_res = makeBatchResourceByConfig(/*batch_size=*/1, config, CacheKeysType{100, 101, 102, 103});
+    auto token_ids = makeCompleteTokenIds(
+        /*batch_size=*/1, /*seq_length=*/12, /*seq_size_per_block=*/static_cast<int>(config.seq_size_per_block));
+
+    MallocInfo info{batch_res, token_ids};
+    info.enable_device_cache = true;
+    info.reuse_cache         = true;
+
+    auto result = allocator->malloc(info);
+    ASSERT_TRUE(result.success);
+
+    const auto& full_out = batch_res->blocks(0, gid_full);
+    ASSERT_EQ(full_out.size(), 3u);
+    EXPECT_EQ(full_out[0], full_blocks[0]);
+    EXPECT_EQ(full_out[1], full_blocks[1]);
+    EXPECT_FALSE(isNullBlockIdx(full_out[2]));
+
+    const auto& linear_out = batch_res->blocks(0, gid_linear);
+    ASSERT_EQ(linear_out.size(), 3u);
+    EXPECT_TRUE(isNullBlockIdx(linear_out[0]));
+    EXPECT_EQ(linear_out[1], linear_blocks[0]);
+    EXPECT_FALSE(isNullBlockIdx(linear_out[2]));
+
+    scenario_result.reuse_len                     = result.reuse_len;
+    scenario_result.active_kernel_blocks          = config.kernelBlocksPerKvBlock();
+    scenario_result.kv_block_stride_kernel_blocks = config.kv_block_stride_kernel_blocks;
+    scenario_result.full_validity                 = blockValidity(full_out);
+    scenario_result.linear_validity               = blockValidity(linear_out);
+    scenario_result.full_kernel_slots             = normalizedFullKernelSlots(full_out,
+                                                                  batch_res->kernelBlocks(0, gid_full),
+                                                                  config.kernelBlocksPerKvBlock(),
+                                                                  config.kv_block_stride_kernel_blocks);
+    scenario_result.linear_kernel_blocks          = batch_res->kernelBlocks(0, gid_linear);
+    EXPECT_EQ(scenario_result.linear_kernel_blocks, linear_out);
+}
+
 class HybridTypeKVCacheAllocatorTest: public ::testing::Test {
 protected:
     void SetUp() override {
@@ -276,6 +450,39 @@ TEST_F(HybridTypeKVCacheAllocatorTest, CreateConfigPadsHybridPhysicalStrideWhenL
     EXPECT_GE(config.kv_block_stride_bytes, linear_live_kv_stride);
     EXPECT_EQ(config.kv_block_size_bytes, static_cast<size_t>(config.group_layer_num) * config.kv_block_stride_bytes);
     EXPECT_EQ(config.block_size_bytes, config.kv_block_size_bytes + config.kv_scale_size_bytes);
+}
+
+TEST_F(HybridTypeKVCacheAllocatorTest, JointReuseMatchesForCompactAndPaddedHybridPhysicalStrides) {
+    const auto compact_config = makeHybridCacheConfigByCreateConfig(makeHybridConfigWithFullStrideAtLeastLinear());
+    const auto padded_config  = makeHybridCacheConfigByCreateConfig(makeHybridConfigWithLinearStrideLargerThanFull());
+
+    const int compact_full_gid   = findSingleGroupIdByType(compact_config, CacheGroupType::FULL);
+    const int compact_linear_gid = findSingleGroupIdByType(compact_config, CacheGroupType::LINEAR);
+    const int padded_full_gid    = findSingleGroupIdByType(padded_config, CacheGroupType::FULL);
+    const int padded_linear_gid  = findSingleGroupIdByType(padded_config, CacheGroupType::LINEAR);
+
+    ASSERT_GE(compact_config.cache_specs[compact_full_gid]->block_size_bytes(),
+              compact_config.cache_specs[compact_linear_gid]->block_size_bytes());
+    ASSERT_EQ(compact_config.kv_block_stride_kernel_blocks, compact_config.kernelBlocksPerKvBlock());
+    ASSERT_LT(padded_config.cache_specs[padded_full_gid]->block_size_bytes(),
+              padded_config.cache_specs[padded_linear_gid]->block_size_bytes());
+    ASSERT_GT(padded_config.kv_block_stride_kernel_blocks, padded_config.kernelBlocksPerKvBlock());
+
+    HybridReuseScenarioResult compact_result;
+    HybridReuseScenarioResult padded_result;
+    runHybridJointReuseScenario(compact_config, compact_result);
+    runHybridJointReuseScenario(padded_config, padded_result);
+
+    EXPECT_EQ(compact_result.reuse_len, 8);
+    EXPECT_EQ(padded_result.reuse_len, compact_result.reuse_len);
+    EXPECT_EQ(padded_result.active_kernel_blocks, compact_result.active_kernel_blocks);
+    EXPECT_GT(padded_result.kv_block_stride_kernel_blocks, compact_result.kv_block_stride_kernel_blocks);
+    EXPECT_EQ(compact_result.full_validity, (std::vector<int>{1, 1, 1}));
+    EXPECT_EQ(compact_result.linear_validity, (std::vector<int>{0, 1, 1}));
+    EXPECT_EQ(padded_result.full_validity, compact_result.full_validity);
+    EXPECT_EQ(padded_result.linear_validity, compact_result.linear_validity);
+    EXPECT_EQ(padded_result.full_kernel_slots, compact_result.full_kernel_slots);
+    EXPECT_EQ(padded_result.linear_kernel_blocks.size(), compact_result.linear_kernel_blocks.size());
 }
 
 TEST_F(HybridTypeKVCacheAllocatorTest, InitAndAddressLookupSmoke) {
@@ -693,10 +900,10 @@ TEST_F(HybridTypeKVCacheAllocatorTest, PrefillInitSkipsSparseCleanupAndPreserves
     auto token_ids = makeCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/20, /*seq_size_per_block=*/4);
 
     MallocInfo info{batch_res, token_ids};
-    info.enable_device_cache   = true;
-    info.reuse_cache           = true;
+    info.enable_device_cache          = true;
+    info.reuse_cache                  = true;
     info.enable_remove_skipped_blocks = false;  // prefill init path
-    auto result                = allocator->malloc(info);
+    auto result                       = allocator->malloc(info);
     ASSERT_TRUE(result.success);
 
     const auto& linear_out = batch_res->blocks(0, gid_linear);
@@ -742,10 +949,10 @@ TEST_F(HybridTypeKVCacheAllocatorTest, DecodeIncrMallocAppliesSparseCleanupOnLin
     auto token_ids = makeCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/24, /*seq_size_per_block=*/4);
 
     MallocInfo info{batch_res, token_ids};
-    info.enable_device_cache   = false;
-    info.reuse_cache           = true;
+    info.enable_device_cache          = false;
+    info.reuse_cache                  = true;
     info.enable_remove_skipped_blocks = true;  // decode path
-    auto result                = allocator->malloc(info);
+    auto result                       = allocator->malloc(info);
     ASSERT_TRUE(result.success);
 
     // For step=2 and size=6: keep pos 1, 3 (step hits) and last two (4, 5); null pos 0, 2.

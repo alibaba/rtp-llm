@@ -2,6 +2,8 @@ load("//:def.bzl", "copts")
 
 load("//bazel:device_defs.bzl", "device_impl_target", "device_test_envs")
 
+CUDA_TEST_TAGS = ["cuda"]
+
 test_copts = [
     "-fno-access-control",
 ] + copts()
@@ -52,6 +54,7 @@ cc_test(
         "//rtp_llm/cpp/testing:device_test_utils",
     ] + device_impl_target(),
     copts = test_copts,
+    tags = CUDA_TEST_TAGS,
     exec_properties = {'gpu':'A10'},
 )
 
@@ -71,6 +74,7 @@ cc_test(
         "//rtp_llm/cpp/testing:device_test_utils",
     ] + device_impl_target(),
     copts = test_copts,
+    tags = CUDA_TEST_TAGS,
     exec_properties = {'gpu':'A10'},
 )
 
@@ -89,6 +93,7 @@ cc_test(
         "//rtp_llm/cpp/testing:device_test_utils",
     ] + device_impl_target(),
     copts = test_copts,
+    tags = CUDA_TEST_TAGS,
     exec_properties = {'gpu':'A10'},
 )
 
@@ -105,5 +110,6 @@ cc_test(
         "//rtp_llm/cpp/testing:device_test_utils",
     ] + device_impl_target(),
     copts = test_copts,
+    tags = CUDA_TEST_TAGS,
     exec_properties = {'gpu':'A10'},
 )

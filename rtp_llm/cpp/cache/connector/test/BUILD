@@ -3,6 +3,8 @@ load("@arch_config//:arch_select.bzl", "torch_deps")
 
 cc_test = cc_test_wrapper
 
+CUDA_TEST_TAGS = ["cuda"]
+
 test_copts = [
     "-fno-access-control",
 ] + copts()
@@ -33,6 +35,7 @@ cc_test(
         "//rtp_llm/models_py/bindings/core:exec_ops_test_lib",
     ],
     env = {},
+    tags = CUDA_TEST_TAGS,
     exec_properties = {'gpu':'H20'},
 )
 
@@ -48,5 +51,6 @@ cc_test(
         "//rtp_llm/cpp/cache/connector/test/mock:connector_mock_files_lib",
     ],
     env = {},
+    tags = CUDA_TEST_TAGS,
     exec_properties = {'gpu':'H20'},
 )
