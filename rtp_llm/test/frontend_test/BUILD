@@ -29,3 +29,15 @@ py_test(
     },
     tags = ["frontend"],
 )
+
+py_test(
+    name = "frontend_package_import_test",
+    srcs = [
+        "frontend_package_import_test.py",
+    ],
+    main = "frontend_package_import_test.py",
+    deps = [
+        "//rtp_llm:rtp_llm_frontend_lib",
+    ],
+    tags = ["frontend"],
+)

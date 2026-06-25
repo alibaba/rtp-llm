@@ -2,8 +2,8 @@ from typing import Any, Dict, List, Tuple
 
 import numpy as np
 
-from rtp_llm.async_decoder_engine.embedding.interface import EngineInputs, EngineOutputs
 from rtp_llm.config.model_config import ModelConfig
+from rtp_llm.embedding.interface import EngineInputs, EngineOutputs
 from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
 from rtp_llm.models.downstream_modules.classifier.bert_classifier import (
     BertClassifierHandler,

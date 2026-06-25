@@ -4,8 +4,8 @@ import torch
 from pydantic import BaseModel
 from torch.nn.utils.rnn import pad_sequence
 
-from rtp_llm.async_decoder_engine.embedding.interface import EngineInputs, EngineOutputs
 from rtp_llm.config.model_config import ModelConfig
+from rtp_llm.embedding.interface import EngineInputs, EngineOutputs
 from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
 from rtp_llm.models.downstream_modules.common_input_generator import (
     CommonInputGenerator,

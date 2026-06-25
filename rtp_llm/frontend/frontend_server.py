@@ -16,14 +16,10 @@ from rtp_llm.config.model_config import (
     update_stop_words_from_env,
     update_tokenizer_special_tokens,
 )
-from rtp_llm.embedding.embedding_endpoint import EmbeddingEndpoint
 from rtp_llm.frontend.frontend_worker import FrontendWorker, TokenizerEncodeResponse
 from rtp_llm.frontend.request_id_generator import generate_request_id
 from rtp_llm.metrics import AccMetrics, GaugeMetrics, kmonitor
-from rtp_llm.model_factory import ModelFactory
-from rtp_llm.model_factory_register import _model_factory
 from rtp_llm.openai.api_datatype import ChatCompletionRequest
-from rtp_llm.openai.openai_endpoint import OpenaiEndpoint
 from rtp_llm.ops import SpecialTokens, TaskType
 from rtp_llm.server.misc import format_exception
 from rtp_llm.structure.request_extractor import request_id_field_name
@@ -74,6 +70,8 @@ class FrontendServer(object):
             self._frontend_worker = None
             return
 
+        from rtp_llm.model_factory import ModelFactory
+
         model_config = ModelFactory.create_model_config(
             model_args=self.py_env_configs.model_args,
             lora_config=self.py_env_configs.lora_config,
@@ -105,6 +103,8 @@ class FrontendServer(object):
 
         # Only initialize OpenaiEndpoint for LANGUAGE_MODEL task type
         if model_config.task_type == TaskType.LANGUAGE_MODEL:
+            from rtp_llm.openai.openai_endpoint import OpenaiEndpoint
+
             # Update model_config with the latest values
             model_config.special_tokens = special_tokens
             model_config.generate_env_config = self.py_env_configs.generate_env_config
@@ -120,6 +120,8 @@ class FrontendServer(object):
                 backend_rpc_server_visitor=self._frontend_worker.backend_rpc_server_visitor,
             )
         else:
+            from rtp_llm.embedding.embedding_endpoint import EmbeddingEndpoint
+
             self._embedding_endpoint = EmbeddingEndpoint(
                 model_config=model_config,
                 grpc_config=self.py_env_configs.grpc_config,
