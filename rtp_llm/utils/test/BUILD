@@ -89,6 +89,7 @@ py_test(
         "gpu": "H20",
         "gpu_count": "2",
     },
+    main = "jit_cache_remote_integration_test.py",
     tags = [
         "H20",
         "open_skip",
