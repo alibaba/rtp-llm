@@ -182,7 +182,8 @@ def apply_jit_cache_env(local_root: Path | str) -> None:
             )
     root = Path(local_root).expanduser().absolute()
     for component in COMPONENT_SPECS:
-        os.environ[component.env_name] = str(component_cache_dir(root, component))
+        if component.env_name not in os.environ:
+            os.environ[component.env_name] = str(component_cache_dir(root, component))
     os.environ["TRITON_AUTOTUNE_CACHE_MODE"] = "cached"
 
 

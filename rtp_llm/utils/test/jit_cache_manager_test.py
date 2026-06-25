@@ -207,6 +207,8 @@ class JitCacheManagerTest(unittest.TestCase):
                 str(manager.component_dirs["triton_autotune"][0]),
             )
 
+            for c in COMPONENT_SPECS:
+                os.environ.pop(c.env_name, None)
             jit_cache_module.apply_jit_cache_env(self.root / "local_env")
 
         self.assertEqual(
