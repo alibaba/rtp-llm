@@ -24,10 +24,17 @@ def _get_or_build_cos_sin_cache(
     cache = _COS_SIN_CACHE.get(key)
     if cache is not None:
         return cache
-    inv_freq = 1.0 / (base ** (torch.arange(0, dim, 2, dtype=dtype) / dim))
-    t = torch.arange(max_pos, dtype=dtype)
+    # Build the position table in fp32, never in the activation dtype. bf16 has a
+    # 7-bit mantissa and cannot represent integers past 256 exactly (step becomes
+    # 2 at 256, 4 at 512, ...), so `t = arange(max_pos, dtype=bf16)` aliases
+    # adjacent positions and RoPE can no longer distinguish them -- attention then
+    # degenerates into repetition a few hundred tokens in. Compute t / inv_freq /
+    # freqs in fp32; only cast the final cos/sin (range [-1, 1], lossless in bf16)
+    # to the kernel dtype.
+    inv_freq = 1.0 / (base ** (torch.arange(0, dim, 2, dtype=torch.float32) / dim))
+    t = torch.arange(max_pos, dtype=torch.float32)
     freqs = torch.einsum("i,j -> ij", t, inv_freq)
-    cache = torch.cat((freqs.cos(), freqs.sin()), dim=-1).cuda()
+    cache = torch.cat((freqs.cos(), freqs.sin()), dim=-1).to(dtype).cuda()
     _COS_SIN_CACHE[key] = cache
     return cache
 
@@ -45,25 +52,25 @@ class FusedRopeKVCachePrefillOp:
         )
 
     def _compute_inv_freq(self, base: float) -> torch.Tensor:
-        """Compute the inverse frequency."""
+        """Compute the inverse frequency (fp32; see _get_or_build_cos_sin_cache)."""
         inv_freq = 1.0 / (
             base
             ** (
-                torch.arange(0, self.attn_configs.rope_config.dim, 2, dtype=self.attn_configs.dtype) / self.attn_configs.rope_config.dim
+                torch.arange(0, self.attn_configs.rope_config.dim, 2, dtype=torch.float32) / self.attn_configs.rope_config.dim
             )
         )
         return inv_freq
 
     def _compute_cos_sin_cache(self) -> torch.Tensor:
-        """Compute the cos and sin cache."""
+        """Compute the cos and sin cache (fp32 math, cast result to act dtype)."""
         inv_freq = self._compute_inv_freq(self.attn_configs.rope_config.base)
-        t = torch.arange(self.attn_configs.rope_config.max_pos, dtype=self.attn_configs.dtype)
+        t = torch.arange(self.attn_configs.rope_config.max_pos, dtype=torch.float32)
 
         freqs = torch.einsum("i,j -> ij", t, inv_freq)
         cos = freqs.cos()
         sin = freqs.sin()
         cache = torch.cat((cos, sin), dim=-1)
-        cache = cache.cuda()
+        cache = cache.to(self.attn_configs.dtype).cuda()
         return cache
 
     def prepare(self, attn_inputs: PyAttentionInputs):
@@ -154,21 +161,24 @@ class FusedRopeKVCacheDecodeOp:
         self._v_scale: Optional[torch.Tensor] = None
 
     def _compute_inv_freq(self, base: float) -> torch.Tensor:
+        # fp32: integer positions/angles must not be quantized in bf16 (bf16 cannot
+        # represent integers > 256 exactly, corrupting RoPE past a few hundred tokens).
         inv_freq = 1.0 / (
             base
             ** (
-                torch.arange(0, self.attn_configs.rope_config.dim, 2, dtype=self.attn_configs.dtype) / self.attn_configs.rope_config.dim
+                torch.arange(0, self.attn_configs.rope_config.dim, 2, dtype=torch.float32) / self.attn_configs.rope_config.dim
             )
         )
         return inv_freq
 
     def _compute_cos_sin_cache(self) -> torch.Tensor:
         inv_freq = self._compute_inv_freq(self.attn_configs.rope_config.base)
-        t = torch.arange(self.attn_configs.rope_config.max_pos, dtype=self.attn_configs.dtype)
+        t = torch.arange(self.attn_configs.rope_config.max_pos, dtype=torch.float32)
         freqs = torch.einsum("i,j -> ij", t, inv_freq)
         cos = freqs.cos()
         sin = freqs.sin()
-        cache = torch.cat((cos, sin), dim=-1)
+        # Build in fp32, store as the model dtype (cos/sin in [-1,1] are lossless in bf16).
+        cache = torch.cat((cos, sin), dim=-1).to(self.attn_configs.dtype)
         cache = cache.cuda()
         return cache
 
