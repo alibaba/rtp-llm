@@ -1,5 +1,8 @@
 #pragma once
 
+#include <cstdint>
+#include <vector>
+
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateConfig.h"
@@ -23,6 +26,8 @@ public:
     void init(GenerateStreamPtr input, const std::shared_ptr<EngineBase>& engine);
 
     virtual std::pair<MultiSeqsResponse, bool> generateResponse();
+
+    std::vector<std::vector<int32_t>> outputTokenIdsForLog() const;
 
 private:
     // static for ease of UT

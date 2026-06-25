@@ -22,6 +22,20 @@ void GenerateStreamWrapper::init(GenerateStreamPtr stream, const std::shared_ptr
     stream_          = stream;
 }
 
+std::vector<std::vector<int32_t>> GenerateStreamWrapper::outputTokenIdsForLog() const {
+    std::vector<std::vector<int32_t>> output_token_ids;
+    output_token_ids.reserve(outputs_cache_.generate_outputs.size());
+    for (const auto& generate_output : outputs_cache_.generate_outputs) {
+        if (!generate_output.output_ids.defined()) {
+            continue;
+        }
+        auto ids_cpu = generate_output.output_ids.to(torch::kCPU).to(torch::kInt32).contiguous();
+        auto ids_ptr = ids_cpu.data_ptr<int32_t>();
+        output_token_ids.emplace_back(ids_ptr, ids_ptr + ids_cpu.numel());
+    }
+    return output_token_ids;
+}
+
 std::pair<MultiSeqsResponse, bool> GenerateStreamWrapper::generateResponse() {
     // 需要检查 !hasError(): 之前 finished() 表示完成且无错，现在 FINISHED 状态可能包含错误
     // 如果流有错误，不应该返回"正常完成"的响应，应该让后续逻辑处理错误

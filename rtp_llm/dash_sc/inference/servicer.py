@@ -1341,6 +1341,13 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
                         sampling=sampling,
                         other=other,
                     )
+                    emit_query_log(
+                        record,
+                        rank_id=self._rank_id,
+                        server_id=self._server_id,
+                        event="request_parsed",
+                        include_request_payload=True,
+                    )
                     record.mark_request_done("eof")
                     first_request = False
                 if (

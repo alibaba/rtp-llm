@@ -1,5 +1,5 @@
 import logging
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from rtp_llm.access_logger.json_util import dump_json
 from rtp_llm.access_logger.log_utils import get_handler
@@ -72,16 +72,25 @@ class AccessLogger:
     def is_private_request(request: Dict[str, Any]):
         return request.get("private_request", False)
 
-    def log_access(self, request: Dict[str, Any], response: ResponseLog) -> None:
-        request_log = RequestLog.from_request(request)
+    def log_access(
+        self,
+        request: Dict[str, Any],
+        response: ResponseLog,
+        input_ids: Optional[List[List[int]]] = None,
+    ) -> None:
+        request_log = RequestLog.from_request(request, input_ids=input_ids)
         access_log = PyAccessLog(
             request=request_log, response=response, id=request[request_id_field_name]
         )
         self.logger.info(dump_json(access_log))
 
-    def log_query_access(self, request: Dict[str, Any]) -> None:
+    def log_query_access(
+        self,
+        request: Dict[str, Any],
+        input_ids: Optional[List[List[int]]] = None,
+    ) -> None:
         if not self.is_private_request(request):
-            request_log = RequestLog.from_request(request)
+            request_log = RequestLog.from_request(request, input_ids=input_ids)
             response_log = ResponseLog()
             access_log = PyAccessLog(
                 request=request_log,
@@ -90,24 +99,31 @@ class AccessLogger:
             )
             self.query_logger.info(dump_json(access_log))
 
-    def log_success_access(self, request: Dict[str, Any], response: Any) -> None:
+    def log_success_access(
+        self,
+        request: Dict[str, Any],
+        response: Any,
+        input_ids: Optional[List[List[int]]] = None,
+        output_ids: Optional[List[List[int]]] = None,
+    ) -> None:
         if not self.is_private_request(request):
-            response_log = ResponseLog()
+            response_log = ResponseLog(output_ids=output_ids)
             response_log.add_response(response)
-            self.log_access(request, response_log)
+            self.log_access(request, response_log, input_ids=input_ids)
 
     def log_exception_access(
         self,
         request: Dict[str, Any],
         exception: BaseException,
         response: Optional[Dict[str, Any]] = None,
+        input_ids: Optional[List[List[int]]] = None,
     ) -> None:
         response_log = ResponseLog()
         if response is not None:
             response_log.add_response(response)
         response_log.add_exception(exception)
         if not self.is_private_request(request):
-            self.log_access(request, response_log)
+            self.log_access(request, response_log, input_ids=input_ids)
         else:
             self.log_access(
                 {request_id_field_name: request[request_id_field_name]}, response_log

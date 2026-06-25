@@ -3,7 +3,7 @@ import json
 import logging
 import threading
 import time
-from typing import Any, Callable, Dict, Union
+from typing import Any, Callable, Dict, List, Optional, Union
 
 from fastapi import Request
 from fastapi import Request as RawRequest
@@ -194,6 +194,7 @@ class FrontendServer(object):
         self,
         request: Dict[str, Any],
         response: CompleteResponseAsyncGenerator,
+        input_ids_for_log: Optional[List[List[int]]] = None,
     ):
         is_openai_response = request.get("stream", False)
         response_data_prefix = "data: " if is_openai_response else "data:"
@@ -205,7 +206,7 @@ class FrontendServer(object):
             if not is_openai_response:
                 yield f"data:[done]\r\n\r\n"
             await self._collect_complete_response_and_record_access_log(
-                request, response
+                request, response, input_ids_for_log
             )
         except asyncio.CancelledError as e:
             try:
@@ -215,7 +216,9 @@ class FrontendServer(object):
                     "close streaming response after cancellation failed: %s",
                     close_error,
                 )
-            self._access_logger.log_exception_access(request, e)
+            self._access_logger.log_exception_access(
+                request, e, input_ids=input_ids_for_log
+            )
             kmonitor.report(
                 AccMetrics.CANCEL_QPS_METRIC,
                 1,
@@ -229,7 +232,9 @@ class FrontendServer(object):
         except BaseException as e:
             # 捕获非Cancel以外所有的异常,所以使用BaseException
             format_e = format_exception(e)
-            self._access_logger.log_exception_access(request, e, format_e)
+            self._access_logger.log_exception_access(
+                request, e, format_e, input_ids=input_ids_for_log
+            )
             kmonitor.report(
                 AccMetrics.ERROR_QPS_METRIC,
                 1,
@@ -430,7 +435,10 @@ class FrontendServer(object):
         )
 
     async def _collect_complete_response_and_record_access_log(
-        self, req: Dict[Any, Any], res: Any
+        self,
+        req: Dict[Any, Any],
+        res: Any,
+        input_ids_for_log: Optional[List[List[int]]] = None,
     ):
         complete_response = await res.gen_complete_response_once()
         complete_response = (
@@ -438,9 +446,98 @@ class FrontendServer(object):
             if isinstance(complete_response, BaseModel)
             else complete_response
         )
-        self._access_logger.log_success_access(req, complete_response)
+        self._access_logger.log_success_access(
+            req,
+            complete_response,
+            input_ids=input_ids_for_log,
+            output_ids=self._extract_output_token_ids_for_log(complete_response),
+        )
 
         return complete_response
+
+    @staticmethod
+    def _normalize_token_ids_for_log(token_ids: Any) -> Optional[List[List[int]]]:
+        if token_ids is None:
+            return None
+        if hasattr(token_ids, "tolist"):
+            token_ids = token_ids.tolist()
+        if isinstance(token_ids, tuple):
+            token_ids = list(token_ids)
+        if not isinstance(token_ids, list):
+            return None
+        if len(token_ids) == 0:
+            return []
+        if all(not isinstance(item, (list, tuple)) for item in token_ids):
+            return [[int(item) for item in token_ids]]
+
+        normalized: List[List[int]] = []
+        for item in token_ids:
+            if hasattr(item, "tolist"):
+                item = item.tolist()
+            if isinstance(item, tuple):
+                item = list(item)
+            if isinstance(item, list):
+                normalized.append([int(token_id) for token_id in item])
+        return normalized
+
+    @classmethod
+    def _extract_output_token_ids_for_log(
+        cls, response: Any
+    ) -> Optional[List[List[int]]]:
+        if not isinstance(response, dict):
+            return None
+        output_ids = response.get("output_ids")
+        if output_ids is not None:
+            return cls._normalize_token_ids_for_log(output_ids)
+
+        extra_outputs = response.get("extra_outputs")
+        if (
+            isinstance(extra_outputs, dict)
+            and extra_outputs.get("output_ids") is not None
+        ):
+            return cls._normalize_token_ids_for_log(extra_outputs.get("output_ids"))
+
+        response_batch = response.get("response_batch")
+        if isinstance(response_batch, list):
+            batch_output_ids: List[List[int]] = []
+            for batch_response in response_batch:
+                normalized = cls._extract_output_token_ids_for_log(batch_response)
+                if normalized:
+                    batch_output_ids.extend(normalized)
+            return batch_output_ids or None
+        return None
+
+    def _get_request_input_token_ids_for_log(
+        self, req: Dict[Any, Any]
+    ) -> Optional[List[List[int]]]:
+        try:
+            if ChatCompletionRequest.is_openai_request(req):
+                if self._openai_endpoint is None:
+                    return None
+                chat_request = ChatCompletionRequest(**req)
+                rendered_input = self._openai_endpoint.render_chat(chat_request)
+                return self._normalize_token_ids_for_log(rendered_input.input_ids)
+
+            assert self._frontend_worker is not None
+            prompt_batch = req.get("prompt_batch")
+            if prompt_batch is not None:
+                prompts = prompt_batch
+            else:
+                prompt = req.get("prompt", req.get("text"))
+                prompts = [prompt] if isinstance(prompt, str) else prompt
+            if not isinstance(prompts, list):
+                return None
+
+            input_ids: List[List[int]] = []
+            for prompt in prompts:
+                if not isinstance(prompt, str):
+                    return None
+                token_ids = self._frontend_worker.pipeline.encode(prompt)
+                input_ids.append([int(token_id) for token_id in token_ids])
+            return input_ids
+        except Exception as e:
+            logging.warning("collect request token ids for access log failed: %s", e)
+            return None
 
     async def _infer_impl(
         self,
@@ -458,7 +555,8 @@ class FrontendServer(object):
                 "source": req.get("source", "unkown"),
             },
         )
-        self._access_logger.log_query_access(req)
+        input_ids_for_log = self._get_request_input_token_ids_for_log(req)
+        self._access_logger.log_query_access(req, input_ids=input_ids_for_log)
         is_streaming = self._frontend_worker.is_streaming(req)
         if await raw_request.is_disconnected():
             raise asyncio.CancelledError("client disconnects")
@@ -466,7 +564,8 @@ class FrontendServer(object):
 
         if is_streaming:
             return StreamingResponse(
-                self.stream_response(req, res), media_type="text/event-stream"
+                self.stream_response(req, res, input_ids_for_log),
+                media_type="text/event-stream",
             )
         async for x in res:
             if await raw_request.is_disconnected():
@@ -475,7 +574,7 @@ class FrontendServer(object):
                 raise asyncio.CancelledError("client disconnects")
 
         complete_response = await self._collect_complete_response_and_record_access_log(
-            req, res
+            req, res, input_ids_for_log
         )
         return ORJSONResponse(content=complete_response)
 

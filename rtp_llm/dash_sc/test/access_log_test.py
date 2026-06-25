@@ -650,11 +650,44 @@ class EmitLogTest(TestCase):
         line = info.call_args.args[0]
         self.assertNotIn("\n", line)
         q = json.loads(line)
+        self.assertEqual(q["event"], "rpc_arrived")
         self.assertIsInstance(q["arrival_ts_epoch_ms"], int)
         self.assertEqual(q["upstream_request_id"], "corr-xyz")
         # Proto-body fields belong in the completion log, not the breadcrumb.
-        for field in ("request_id", "model_name", "input_token_len", "capture_mode"):
+        for field in (
+            "request_id",
+            "model_name",
+            "input_token_len",
+            "capture_mode",
+            "input_ids",
+        ):
             self.assertNotIn(field, q)
+
+    def test_query_log_request_parsed_can_include_input_ids(self) -> None:
+        rec = _make_record()
+        rec.capture_structured_request(
+            _make_infer_request(input_ids=[10, 20], sampling={"max_new_tokens": 32})
+        )
+
+        with patch.object(
+            logging.getLogger(DASH_SC_GRPC_QUERY_LOGGER_NAME), "info"
+        ) as info:
+            emit_query_log(
+                rec,
+                rank_id=0,
+                server_id=1,
+                event="request_parsed",
+                include_request_payload=True,
+            )
+
+        self.assertEqual(info.call_count, 1)
+        q = json.loads(info.call_args.args[0])
+        self.assertEqual(q["event"], "request_parsed")
+        self.assertEqual(q["capture_mode"], "struct")
+        self.assertEqual(q["request_id"], "trace-123")
+        self.assertEqual(q["model_name"], "qwen3-8b")
+        self.assertEqual(q["input_token_len"], 2)
+        self.assertEqual(q["input_ids"], [10, 20])
 
     def test_access_log_single_compact_line(self) -> None:
         rec = _make_record()

@@ -16,6 +16,44 @@ using namespace autil::legacy::json;
 
 namespace rtp_llm {
 
+namespace {
+
+std::vector<int32_t> tensorToTokenIds(const torch::Tensor& tensor) {
+    if (!tensor.defined()) {
+        return {};
+    }
+    auto ids_cpu = tensor.to(torch::kCPU).to(torch::kInt32).contiguous();
+    auto ids_ptr = ids_cpu.data_ptr<int32_t>();
+    return std::vector<int32_t>(ids_ptr, ids_ptr + ids_cpu.numel());
+}
+
+std::vector<std::vector<int32_t>> collectInputTokenIds(const std::vector<std::shared_ptr<GenerateInput>>& inputs) {
+    std::vector<std::vector<int32_t>> input_token_ids;
+    input_token_ids.reserve(inputs.size());
+    for (const auto& input : inputs) {
+        if (input == nullptr) {
+            continue;
+        }
+        input_token_ids.emplace_back(tensorToTokenIds(input->input_ids));
+    }
+    return input_token_ids;
+}
+
+std::vector<std::vector<int32_t>>
+collectOutputTokenIds(const std::vector<std::shared_ptr<GenerateStreamWrapper>>& streams) {
+    std::vector<std::vector<int32_t>> output_token_ids;
+    for (const auto& stream : streams) {
+        if (stream == nullptr) {
+            continue;
+        }
+        auto stream_output_token_ids = stream->outputTokenIdsForLog();
+        output_token_ids.insert(output_token_ids.end(), stream_output_token_ids.begin(), stream_output_token_ids.end());
+    }
+    return output_token_ids;
+}
+
+}  // namespace
+
 void InferenceParsedRequest::extractRequestTexts(const RawRequest& req, InferenceParsedRequest& pr) {
     if (req.prompt_batch.has_value()) {
         pr.input_texts = req.prompt_batch.value();
@@ -167,7 +205,6 @@ void InferenceService::inferResponse(int64_t                                    
     if (metric_reporter_) {
         metric_reporter_->reportQpsMetric(req.source);
     }
-    AccessLogWrapper::logQueryAccess(body, request_id, req.private_request);
 
     ConcurrencyControllerGuard controller_guard(controller_);
     if (controller_guard.isPassed() == false) {
@@ -186,6 +223,9 @@ void InferenceService::inferResponse(int64_t                                    
         auto input = fillGenerateInput(request_id, req.input_texts[i], req.input_urls[i], req.generate_configs[i]);
         inputs.push_back(input);
     }
+    auto input_token_ids = collectInputTokenIds(inputs);
+    AccessLogWrapper::logQueryAccess(body, request_id, input_token_ids, req.private_request);
+
     auto                                                ori_streams = engine_->batchEnqueue(inputs);
     std::vector<std::shared_ptr<GenerateStreamWrapper>> streams;
     streams.reserve(ori_streams.size());
@@ -198,7 +238,8 @@ void InferenceService::inferResponse(int64_t                                    
     auto [iterate_count, complete_response] = iterateStreams(streams, writer, req, iterate_stage_timer);
 
     writer->WriteDone();
-    AccessLogWrapper::logSuccessAccess(body, request_id, complete_response, req.private_request);
+    AccessLogWrapper::logSuccessAccess(
+        body, request_id, complete_response, input_token_ids, collectOutputTokenIds(streams), req.private_request);
     if (metric_reporter_) {
         metric_reporter_->reportSuccessQpsMetric(req.source);
         metric_reporter_->reportResponseIterateCountMetric(iterate_count);

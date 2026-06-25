@@ -12,10 +12,12 @@ Two log channels, both flat one-JSON-line-per-event:
 - **access log** — one ``rpc_completed`` record per RPC, written at completion
   (``emit_access_log``). On a long streaming RPC this can be minutes after the
   request arrived.
-- **query log** — one arrival breadcrumb per RPC, written at handler entry
+- **query log** — an arrival breadcrumb per RPC, written at handler entry
   (``emit_query_log``), so ``tail -f`` shows arrivals immediately and link
-  latency (forwarder arrival → frontend arrival) is debuggable. Mirrors the HTTP
-  frontend convention (``access.log`` vs ``query_access.log`` in
+  latency (forwarder arrival → frontend arrival) is debuggable. The frontend
+  structured path may emit a second ``request_parsed`` event after the first
+  request frame is decoded, carrying request-body fields such as ``input_ids``.
+  Mirrors the HTTP frontend convention (``access.log`` vs ``query_access.log`` in
   ``rtp_llm/access_logger/access_logger.py``).
 
 File: ``<log_path>/dash_sc_grpc_access_r{rank}_s{server}.log`` (per-process via
@@ -29,6 +31,7 @@ Queue full → drop, never block. So disk latency never affects RPC latency.
 from __future__ import annotations
 
 import logging
+import time
 from typing import Optional
 
 import orjson
@@ -98,18 +101,30 @@ def emit_query_log(
     *,
     rank_id: Optional[int],
     server_id: Optional[int],
+    event: str = "rpc_arrived",
+    include_request_payload: bool = False,
+    event_ts: Optional[float] = None,
 ) -> None:
-    """Write one arrival breadcrumb to the query log — called at handler entry.
+    """Write one query-log event.
 
-    Fires exactly once per RPC, before any inbound body read or backend work, so
-    the line hits disk at arrival. No proto-derived fields (``request_id`` /
-    ``model_name`` / ``input_len`` / payload details) — those stay in the
-    completion access log; the query line shape never depends on first-frame
-    content.
+    The default call writes an arrival breadcrumb at handler entry, before any
+    inbound body read or backend work, so the line hits disk at arrival. The
+    frontend structured path can call this again after parsing the first request
+    frame with ``event="request_parsed"`` and ``include_request_payload=True`` to
+    persist token ids in the query log. Raw proxy mode must not include payload
+    token ids.
     """
+    if event_ts is None:
+        event_ts = (
+            record.start_ts
+            if event == "rpc_arrived"
+            else (record.first_request_ts or time.time())
+        )
     payload = {
-        "ts": format_access_log_ts(record.start_ts),
+        "ts": format_access_log_ts(event_ts),
+        "ts_epoch_ms": int(event_ts * 1000),
         "arrival_ts_epoch_ms": int(record.start_ts * 1000),
+        "event": event,
         "server_id": server_id,
         "rank_id": rank_id,
         "method": record.method,
@@ -118,6 +133,22 @@ def emit_query_log(
         "upstream_request_id": record.upstream_request_id,
         "upstream_request_id_key": record.upstream_request_id_key,
     }
+    if include_request_payload:
+        payload.update(
+            {
+                "capture_mode": "forward_summary" if record.raw_mode else "struct",
+                "request_id": record.request_id,
+                "model_name": record.model_name,
+                "first_request_ts_epoch_ms": (
+                    int(record.first_request_ts * 1000)
+                    if record.first_request_ts is not None
+                    else None
+                ),
+                "input_token_len": record.input_len,
+            }
+        )
+        if not record.raw_mode:
+            payload["input_ids"] = record.input_ids
     logger = logging.getLogger(DASH_SC_GRPC_QUERY_LOGGER_NAME)
     try:
         logger.info(orjson.dumps(payload).decode("utf-8"))

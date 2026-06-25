@@ -8,6 +8,17 @@ using namespace autil::legacy;
 
 namespace rtp_llm {
 
+using TokenIdsList = std::vector<std::vector<int32_t>>;
+
+std::vector<int64_t> inputTokenLens(const TokenIdsList& input_token_ids) {
+    std::vector<int64_t> token_lens;
+    token_lens.reserve(input_token_ids.size());
+    for (const auto& token_ids : input_token_ids) {
+        token_lens.push_back(token_ids.size());
+    }
+    return token_lens;
+}
+
 std::string logFormatTimeInMilliseconds(const int64_t& now_time_us) {
     auto               now_time = autil::TimeUtility::usFormat(now_time_us, "%Y-%m-%d %H:%M:%S");
     auto               ms_part  = now_time_us / 1000 % 1000;
@@ -18,25 +29,45 @@ std::string logFormatTimeInMilliseconds(const int64_t& now_time_us) {
 
 class RequestLogInfo: public autil::legacy::Jsonizable {
 public:
-    RequestLogInfo(const std::string& request): request_(request) {}
+    RequestLogInfo(const std::string& request, const TokenIdsList& input_token_ids = {}):
+        request_(request), input_token_ids_(input_token_ids), input_token_lens_(inputTokenLens(input_token_ids)) {}
 
 public:
     void Jsonize(autil::legacy::Jsonizable::JsonWrapper& json) override {
         json.Jsonize("request_json", request_, request_);
+        if (!input_token_ids_.empty()) {
+            if (input_token_ids_.size() == 1) {
+                json.Jsonize("input_ids", input_token_ids_[0], input_token_ids_[0]);
+                json.Jsonize("input_token_len", input_token_lens_[0], input_token_lens_[0]);
+            } else {
+                json.Jsonize("input_ids", input_token_ids_, input_token_ids_);
+                json.Jsonize("input_token_len", input_token_lens_, input_token_lens_);
+            }
+        }
     }
 
     void clearRequest() {
         request_.clear();
+        input_token_ids_.clear();
+        input_token_lens_.clear();
     }
 
 private:
-    std::string request_;
+    std::string          request_;
+    TokenIdsList         input_token_ids_;
+    std::vector<int64_t> input_token_lens_;
 };
 
 class ResponseLogInfo: public autil::legacy::Jsonizable {
 public:
+    ResponseLogInfo(const TokenIdsList& output_token_ids = {}): output_token_ids_(output_token_ids) {}
+
+public:
     void Jsonize(autil::legacy::Jsonizable::JsonWrapper& json) override {
         json.Jsonize("responses", response_list_, response_list_);
+        if (!output_token_ids_.empty()) {
+            json.Jsonize("output_ids", output_token_ids_, output_token_ids_);
+        }
         json.Jsonize("exception_traceback", exception_traceback_, exception_traceback_);
     }
 
@@ -55,6 +86,7 @@ public:
 private:
     std::vector<std::string> response_list_;
     std::string              exception_traceback_;
+    TokenIdsList             output_token_ids_;
 };
 
 class AccessLogInfoEmbedding: public autil::legacy::Jsonizable {
@@ -74,6 +106,7 @@ public:
         json.Jsonize("request", request_, request_);
         json.Jsonize("response", response_, response_);
         json.Jsonize("id", request_id_, request_id_);
+        json.Jsonize("request_id", request_id_, request_id_);
         json.Jsonize("log_time", log_time_, log_time_);
         json.Jsonize("query_time", query_time_, query_time_);
     }
@@ -99,6 +132,7 @@ public:
         json.Jsonize("request", request_, request_);
         json.Jsonize("response", response_, response_);
         json.Jsonize("id", request_id_, request_id_);
+        json.Jsonize("request_id", request_id_, request_id_);
         json.Jsonize("log_time", log_time_, log_time_);
     }
 
@@ -110,11 +144,18 @@ private:
 };
 
 void AccessLogWrapper::logQueryAccess(const std::string& raw_request, int64_t request_id, bool private_request) {
+    logQueryAccess(raw_request, request_id, {}, private_request);
+}
+
+void AccessLogWrapper::logQueryAccess(const std::string&                       raw_request,
+                                      int64_t                                  request_id,
+                                      const std::vector<std::vector<int32_t>>& input_token_ids,
+                                      bool                                     private_request) {
     if (private_request) {
         return;
     }
 
-    RequestLogInfo  request(raw_request);
+    RequestLogInfo  request(raw_request, input_token_ids);
     ResponseLogInfo response;
     AccessLogInfo   access_log_info(request, response, request_id);
 
@@ -220,12 +261,21 @@ void AccessLogWrapper::logSuccessAccess(const std::string&              raw_requ
                                         int64_t                         request_id,
                                         const std::vector<std::string>& complete_response,
                                         bool                            private_request) {
+    logSuccessAccess(raw_request, request_id, complete_response, {}, {}, private_request);
+}
+
+void AccessLogWrapper::logSuccessAccess(const std::string&                       raw_request,
+                                        int64_t                                  request_id,
+                                        const std::vector<std::string>&          complete_response,
+                                        const std::vector<std::vector<int32_t>>& input_token_ids,
+                                        const std::vector<std::vector<int32_t>>& output_token_ids,
+                                        bool                                     private_request) {
     if (private_request) {
         return;
     }
 
-    RequestLogInfo  request(raw_request);
-    ResponseLogInfo response;
+    RequestLogInfo  request(raw_request, input_token_ids);
+    ResponseLogInfo response(output_token_ids);
     response.setResponseList(complete_response);
     AccessLogInfo access_log_info(request, response, request_id);
 

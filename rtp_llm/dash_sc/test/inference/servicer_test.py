@@ -19,7 +19,10 @@ import torch
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.generate_config import RoleAddr
-from rtp_llm.dash_sc.access_log import DASH_SC_GRPC_ACCESS_LOGGER_NAME
+from rtp_llm.dash_sc.access_log import (
+    DASH_SC_GRPC_ACCESS_LOGGER_NAME,
+    DASH_SC_GRPC_QUERY_LOGGER_NAME,
+)
 from rtp_llm.dash_sc.access_record import GrpcAccessRecord
 from rtp_llm.dash_sc.codec import DashScParameterError, OtherParams, SamplingParams
 from rtp_llm.dash_sc.inference.servicer import (
@@ -1581,6 +1584,37 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["backend_input_token_len"], 1)
         self.assertEqual(payload["output_token_len"], 1)
         self.assertEqual(payload["prompt_cached_token_num"], 2)
+
+    async def test_query_log_records_input_ids_after_parse(self) -> None:
+        out = GenerateOutput(
+            output_ids=torch.tensor([9], dtype=torch.int32),
+            finished=True,
+            aux_info=AuxInfo(input_len=1, reuse_len=0),
+        )
+        visitor = _FakeVisitor(
+            _FakeAsyncStream([GenerateOutputs(generate_outputs=[out])])
+        )
+        servicer = DashScInferenceServicer(backend_visitor=visitor)
+
+        with patch.object(
+            logging.getLogger(DASH_SC_GRPC_QUERY_LOGGER_NAME), "info"
+        ) as info:
+            await _drain(
+                servicer.ModelStreamInfer(
+                    _areq_iter([self._valid_infer_request()]), _FakeGrpcContext()
+                )
+            )
+
+        payloads = [json.loads(call.args[0]) for call in info.call_args_list]
+        self.assertEqual(
+            [p["event"] for p in payloads],
+            ["rpc_arrived", "request_parsed"],
+        )
+        self.assertNotIn("input_ids", payloads[0])
+        self.assertEqual(payloads[1]["request_id"], "srv-1")
+        self.assertEqual(payloads[1]["model_name"], "default")
+        self.assertEqual(payloads[1]["input_token_len"], 1)
+        self.assertEqual(payloads[1]["input_ids"], [42])
 
     async def test_access_log_records_generate_config_role_addrs(self) -> None:
         role_addrs = [

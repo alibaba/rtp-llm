@@ -1,5 +1,8 @@
 #include "rtp_llm/cpp/api_server/ChatService.h"
 
+#include <cstdint>
+#include <vector>
+
 #include "rtp_llm/cpp/api_server/http_server/http_server/HttpResponseWriter.h"
 #include "rtp_llm/cpp/api_server/http_server/http_server/HttpRequest.h"
 #include "rtp_llm/cpp/api_server/AccessLogWrapper.h"
@@ -9,6 +12,28 @@ using namespace autil::legacy;
 using namespace autil::legacy::json;
 
 namespace rtp_llm {
+
+namespace {
+
+std::vector<std::vector<int32_t>> inputTokenIdsForLog(const std::vector<int>& input_ids) {
+    return {std::vector<int32_t>(input_ids.begin(), input_ids.end())};
+}
+
+std::vector<std::vector<int32_t>> outputTokenIdsForLog(const GenerateOutputs& outputs) {
+    std::vector<std::vector<int32_t>> output_token_ids;
+    output_token_ids.reserve(outputs.generate_outputs.size());
+    for (const auto& output : outputs.generate_outputs) {
+        if (!output.output_ids.defined()) {
+            continue;
+        }
+        auto ids_cpu = output.output_ids.to(torch::kCPU).to(torch::kInt32).contiguous();
+        auto ids_ptr = ids_cpu.data_ptr<int32_t>();
+        output_token_ids.emplace_back(ids_ptr, ids_ptr + ids_cpu.numel());
+    }
+    return output_token_ids;
+}
+
+}  // namespace
 
 // ChatService::ChatService() {}
 
@@ -100,7 +125,12 @@ void ChatService::generateResponse(const std::shared_ptr<GenerateConfig>&       
     metric_reporter_->reportFTOutputTokenLengthMetric(token_counter);
     metric_reporter_->reportResponseLatencyMs(autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us);
 
-    AccessLogWrapper::logSuccessAccess(body, request_id, complete_response, chat_request.private_request);
+    AccessLogWrapper::logSuccessAccess(body,
+                                       request_id,
+                                       complete_response,
+                                       inputTokenIdsForLog(rendered_input.input_ids),
+                                       outputTokenIdsForLog(outputs),
+                                       chat_request.private_request);
 }
 
 void ChatService::generateStreamingResponse(const std::shared_ptr<GenerateConfig>&                  config,
@@ -171,7 +201,12 @@ void ChatService::generateStreamingResponse(const std::shared_ptr<GenerateConfig
     metric_reporter_->reportFTIterateCountMetric(iterate_counter);
     metric_reporter_->reportFTOutputTokenLengthMetric(token_counter);
     metric_reporter_->reportResponseLatencyMs(autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us);
-    AccessLogWrapper::logSuccessAccess(body, request_id, complete_response, chat_request.private_request);
+    AccessLogWrapper::logSuccessAccess(body,
+                                       request_id,
+                                       complete_response,
+                                       inputTokenIdsForLog(rendered_input.input_ids),
+                                       outputTokenIdsForLog(outputs),
+                                       chat_request.private_request);
 }
 
 void ChatService::chatCompletions(const std::unique_ptr<http_server::HttpResponseWriter>& writer,
@@ -184,10 +219,10 @@ void ChatService::chatCompletions(const std::unique_ptr<http_server::HttpRespons
     ChatCompletionRequest chat_request;
     FromJsonString(chat_request, body);
 
-    AccessLogWrapper::logQueryAccess(body, request_id, chat_request.private_request);
-
     auto       chat_render    = openai_endpoint_->getChatRender();
     const auto rendered_input = chat_render->render_chat_request(body);
+    AccessLogWrapper::logQueryAccess(
+        body, request_id, inputTokenIdsForLog(rendered_input.input_ids), chat_request.private_request);
 
     auto input  = fillGenerateInput(request_id, chat_request, rendered_input);
     auto stream = engine_->enqueue(input);
