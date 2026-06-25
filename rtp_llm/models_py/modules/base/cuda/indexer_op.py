@@ -653,6 +653,12 @@ class IndexerOp(nn.Module):
         """
         Compute TopK indices for paged attention (decode phase).
 
+        Decode reads kv_cache_kernel_block_id at kernel granularity (block_size =
+        self.blocksize = kernel_tokens_per_block) by design: the decode role runs
+        tp_size=1 so KVCacheManager builds no CPSlotMapper and the block table is
+        the full (non-sharded) kernel block table for the request. The owner-grain
+        RR machinery only applies on the prefill side where the cache is sharded.
+
         Args:
             q_fp8: Quantized query [num_tokens, index_n_heads, index_head_dim]
             weights: Weights tensor [num_tokens, index_n_heads, 1]
@@ -927,6 +933,7 @@ class IndexerOp(nn.Module):
         kv_cache_sharded: bool = False,
         cp_size: int = 1,
         cp_rank: int = 0,
+        kv_owner_tokens_per_block: int = 0,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Compute TopK indices for ragged attention (prefill phase) with context parallel
@@ -1021,12 +1028,17 @@ class IndexerOp(nn.Module):
                 - cu_kv_seqlens_global[:-1].to(torch.int64)
             ).contiguous()
             cp_ctx = SimpleNamespace(cp_size=int(cp_size), cp_rank=int(cp_rank))
+            owner_bs = (
+                int(kv_owner_tokens_per_block)
+                if kv_owner_tokens_per_block > 0
+                else self.blocksize
+            )
             plan = asm.build_indexer_cp_chunk_plan(
                 cp_ctx=cp_ctx,
                 per_req_total_kv_lens=per_req_total_kv_lens,
                 block_size=self.blocksize,
                 device=device,
-                owner_block_size=self.blocksize,
+                owner_block_size=owner_bs,
             )
             local_k = torch.zeros(
                 (plan.total_local_T, self.index_head_dim),

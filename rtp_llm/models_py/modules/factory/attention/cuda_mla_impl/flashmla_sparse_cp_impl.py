@@ -26,6 +26,7 @@ except (ImportError, AttributeError, ValueError) as _e:
 from rtp_llm.models_py.distributed.collective_torch import Group, all_gather
 from rtp_llm.models_py.modules.dsv4.cp import (
     build_kv_allgather_restore_indices,
+    cp_actual_owned_kv_lens,
     cp_padded_local_kv_lens,
 )
 from rtp_llm.models_py.modules.factory.attention import common
@@ -320,6 +321,60 @@ def _safe_expand_cp_sharded_block_table(
     return expanded
 
 
+def _scatter_actual_to_padded(
+    *,
+    actual: torch.Tensor,
+    padded: torch.Tensor,
+    per_req_actual_local_kv_lens: torch.Tensor,
+    per_req_padded_local_kv_lens: torch.Tensor,
+) -> None:
+    """Scatter packed actual-len rows into the per-request padded local layout.
+
+    Mirrors ``_indexer_cp_assembler.copy_actual_indexer_k_to_padded`` (see
+    rtp_llm/models_py/modules/dsv4/fp8/_indexer_cp_assembler.py:129-196) but
+    takes a single tensor instead of a (k_quant, k_scale) pair: MLA's
+    ``local_fused`` is one ``[T_padded, fused_dim]`` buffer that fuses kv_nope
+    + rope into a single all_gather payload. ``dst_idx`` computation, the B==1
+    fast path, and dtype handling are kept verbatim with the indexer helper so
+    future refactors can swap in a shared scatter API without re-deriving the
+    math.
+
+    Caller responsibility: ``padded`` must be zero-initialized (not torch.empty)
+    so that the padding rows participate in all_gather as clean zeros — exactly
+    matching the indexer flow where ``local_k = torch.zeros(...)`` is used. The
+    gather kernel only fills the actual region; padding rows must stay 0 to
+    avoid polluting any restore_indices that land on the padded tail (multi-req
+    batches, last-block-partial rows, or workspace reuse across layers).
+    """
+    total_actual = int(actual.shape[0])
+    if total_actual == 0:
+        return
+    if int(per_req_actual_local_kv_lens.numel()) == 1:
+        padded[:total_actual].copy_(actual)
+        return
+
+    device = padded.device
+    actual_lens = per_req_actual_local_kv_lens.to(device=device, dtype=torch.int64)
+    padded_lens = per_req_padded_local_kv_lens.to(device=device, dtype=torch.int64)
+    B = int(actual_lens.shape[0])
+
+    req_ids = torch.repeat_interleave(
+        torch.arange(B, device=device, dtype=torch.int64),
+        actual_lens,
+        output_size=total_actual,
+    )
+    actual_cu = torch.zeros(B, dtype=torch.int64, device=device)
+    padded_cu = torch.zeros(B, dtype=torch.int64, device=device)
+    if B > 1:
+        actual_cu[1:] = torch.cumsum(actual_lens[:-1], dim=0)
+        padded_cu[1:] = torch.cumsum(padded_lens[:-1], dim=0)
+    in_req_pos = torch.arange(
+        total_actual, device=device, dtype=torch.int64
+    ) - actual_cu.index_select(0, req_ids)
+    dst_idx = padded_cu.index_select(0, req_ids) + in_req_pos
+    padded.index_copy_(0, dst_idx, actual)
+
+
 class SparseMlaFp8CPOp(SparseMlaFp8Op):
     """Context-parallel sparse MLA prefill: all-gather KV, restore to global order,
     write to paged cache, then run attention only on q tokens this rank owns."""
@@ -377,6 +432,19 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
         self.sharded_workspace_starts: Optional[torch.Tensor] = None
         self.sharded_kv_restore_indices: Optional[torch.Tensor] = None
         self.sharded_total_local_kv_len: int = 0
+        # Capture-stable buffers for the actual-len gather path used by
+        # _gather_sharded_kv_cache. Mirror sharded_local_kv_lens /
+        # sharded_workspace_starts / sharded_total_local_kv_len but at *actual
+        # owned* granularity (cp_actual_owned_kv_lens) instead of padded. The
+        # gather kernel walks the compact kernel block_table linearly, so
+        # feeding it padded lengths reads past the end of the per-rank table
+        # (page_idx in [local_owner_blocks*bpk, padded/kernel_tpb) is OOB).
+        # Indexer's _get_topk_ragged_cp already uses this actual/padded split
+        # via build_indexer_cp_chunk_plan; these fields bring the MLA dense
+        # gather into the same shape.
+        self.sharded_actual_local_kv_lens: Optional[torch.Tensor] = None
+        self.sharded_actual_workspace_starts: Optional[torch.Tensor] = None
+        self.sharded_actual_total_local_kv_len: int = 0
         self._fp8_kernel_metadata_q0: Optional[SparseMlaFp8DecodeParams] = None
         self._fp8_kernel_metadata_q0_key = None
         # Wired up by SparseMlaCpImpl post-construction
@@ -543,12 +611,48 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
                 self.use_cuda_graph,
             )
             self.sharded_total_local_kv_len = int(local_lens.sum().item())
+            # Actual owned local KV lens per request (= cp_actual_owned_kv_lens
+            # at owner granularity). Used by _gather_sharded_kv_cache to drive
+            # the gather kernel only across rows the compact kernel block_table
+            # can actually resolve. Mirrors the indexer side's
+            # per_req_actual_local_kv_lens in build_indexer_cp_chunk_plan.
+            actual_local_lens = cp_actual_owned_kv_lens(
+                per_req_total_kv_lens,
+                self.prefill_cp_size,
+                owner_tpb,
+                self.prefill_cp_rank,
+            ).to(torch.int32)
+            actual_workspace_starts = torch.zeros(
+                int(actual_local_lens.numel()),
+                dtype=torch.int32,
+                device=actual_local_lens.device,
+            )
+            if int(actual_local_lens.numel()) > 1:
+                actual_workspace_starts[1:] = torch.cumsum(
+                    actual_local_lens[:-1], dim=0
+                ).to(torch.int32)
+            self.sharded_actual_local_kv_lens = _copy_or_replace_graph_tensor(
+                self.sharded_actual_local_kv_lens,
+                actual_local_lens.contiguous(),
+                "CP sparse MLA sharded_actual_local_kv_lens",
+                self.use_cuda_graph,
+            )
+            self.sharded_actual_workspace_starts = _copy_or_replace_graph_tensor(
+                self.sharded_actual_workspace_starts,
+                actual_workspace_starts.contiguous(),
+                "CP sparse MLA sharded_actual_workspace_starts",
+                self.use_cuda_graph,
+            )
+            self.sharded_actual_total_local_kv_len = int(actual_local_lens.sum().item())
         else:
             self.sharded_slot_mapping = None
             self.sharded_local_kv_lens = None
             self.sharded_workspace_starts = None
             self.sharded_kv_restore_indices = None
             self.sharded_total_local_kv_len = 0
+            self.sharded_actual_local_kv_lens = None
+            self.sharded_actual_workspace_starts = None
+            self.sharded_actual_total_local_kv_len = 0
 
         n_q = self.total_global_ids.size(0)
         self._refresh_fp8_kernel_metadata(n_q)
@@ -749,28 +853,74 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
         return out
 
     def _gather_sharded_kv_cache(self, kv_cache) -> None:
+        """Mirror indexer's sharded gather flow (indexer_op.py:1017-1078):
+
+          1) Drive the GPU gather kernel with *actual* owned lengths so
+             ``page_idx = local_idx / kernel_tpb`` never walks past the rank's
+             compact kernel block_table tail. Feeding it
+             ``sharded_local_kv_lens`` (padded, owner-grain) reads
+             ``block_table[bid, page_idx]`` past the end of valid columns —
+             that OOB int32 then gets used as a block_id and the kernel
+             happily reads K bytes from an unrelated physical block, polluting
+             ``local_fused`` padding rows.
+          2) Scatter the packed actual rows into a zero-initialized padded
+             ``local_fused`` via ``_scatter_actual_to_padded``. Padding rows
+             stay clean zero, matching the indexer's
+             ``copy_actual_indexer_k_to_padded`` contract.
+          3) all_gather the padded local buffer.
+          4) ``gathered[sharded_kv_restore_indices]`` restores logical KV.
+
+        ``sharded_local_kv_lens`` / ``sharded_workspace_starts`` /
+        ``sharded_kv_restore_indices`` (padded, owner-grain) are unchanged —
+        they only drive the all_gather layout and restore index map, not the
+        per-rank read kernel. The new ``sharded_actual_*`` fields are
+        gather-only.
+        """
         ws = self._gather
         assert ws is not None
         assert self.sharded_local_kv_lens is not None
-        assert self.sharded_workspace_starts is not None
         assert self.sharded_kv_restore_indices is not None
+        assert self.sharded_actual_local_kv_lens is not None
+        assert self.sharded_actual_workspace_starts is not None
+
         src = _as_uint8(kv_cache.kv_cache_base)
         if src.ndim == 4:
             src = src.squeeze(2)
-        local_fused = torch.empty(
+
+        # Padded buffer MUST be torch.zeros (not torch.empty): padding rows
+        # participate in NCCL all_gather and must stay clean 0. Otherwise a
+        # restore_indices value that lands on a padding row (multi-request
+        # batches with differing per-req actual/padded, last-block-partial,
+        # or workspace reuse across layers) propagates uninitialized memory
+        # into ws.fused_kv → garbled attention output.
+        local_fused = torch.zeros(
             (self.sharded_total_local_kv_len, ws.fused_kv.size(1)),
             dtype=ws.fused_kv.dtype,
             device=ws.fused_kv.device,
         )
-        rtp_llm_ops.cp_gather_and_upconvert_fp8_kv_cache_v2(
-            src,
-            local_fused,
-            self.block_table.to(torch.int32),
-            self.sharded_local_kv_lens,
-            self.sharded_workspace_starts,
-            ws.batch_size,
-            self.sharded_total_local_kv_len,
-        )
+
+        if self.sharded_actual_total_local_kv_len > 0:
+            actual_fused = torch.empty(
+                (self.sharded_actual_total_local_kv_len, ws.fused_kv.size(1)),
+                dtype=ws.fused_kv.dtype,
+                device=ws.fused_kv.device,
+            )
+            rtp_llm_ops.cp_gather_and_upconvert_fp8_kv_cache_v2(
+                src,
+                actual_fused,
+                self.block_table.to(torch.int32),
+                self.sharded_actual_local_kv_lens,
+                self.sharded_actual_workspace_starts,
+                ws.batch_size,
+                self.sharded_actual_total_local_kv_len,
+            )
+            _scatter_actual_to_padded(
+                actual=actual_fused,
+                padded=local_fused,
+                per_req_actual_local_kv_lens=self.sharded_actual_local_kv_lens,
+                per_req_padded_local_kv_lens=self.sharded_local_kv_lens,
+            )
+
         gathered = all_gather(local_fused.contiguous(), group=Group.TP).reshape(
             -1, local_fused.size(-1)
         )
@@ -911,6 +1061,9 @@ class SparseMlaCpImpl(SparseMlaImpl):
         )
         self.fmha_impl.kv_cache_write_op = self.kv_cache_write_op
         self.fmha_impl.write_cache_store_impl = self.write_cache_store_impl
+        # Defensive: create_params (called from super().__init__()) already set
+        # this before the first plan(). Re-assign here so any post-construction
+        # code that swaps fmha_impl still sees the owner granularity.
         self.fmha_impl.kv_owner_tokens_per_block = self._kv_owner_tokens_per_block
 
     def prepare(
@@ -962,6 +1115,13 @@ class SparseMlaCpImpl(SparseMlaImpl):
         # through the compact `_pick()` helper. Keep the compact base form.
         self.fmha_params = rtp_llm_ops.SparseMlaParams()
         self.rope_params = self.fmha_params
+        # Owner-grain RR contract: plan() reads self.fmha_impl.kv_owner_tokens_per_block
+        # to build _cp_sharded_slot_mapping / cp_padded_local_kv_lens /
+        # build_kv_allgather_restore_indices. SparseMlaFp8CPOp.__init__ defaults this
+        # to kernel granularity; we must override before the first plan() so the
+        # very first prefill sees the right bpk and the slot_mapping matches the
+        # C++ CPSlotMapper (which shards at seq_size_per_block).
+        self.fmha_impl.kv_owner_tokens_per_block = self._kv_owner_tokens_per_block
         self.prepare(attn_inputs)
 
     def _refresh_cp_params(self, use_cuda_graph: bool = False):
