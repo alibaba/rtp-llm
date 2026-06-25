@@ -594,17 +594,19 @@ class JitCacheManager:
             snapshot_found = snapshot_path.exists()
         except OSError:
             snapshot_found = False
+        snapshot_bytes = 0
         try:
             if not snapshot_found:
+                self.snapshot_complete_path.touch()
                 return self._make_summary(
                     "snapshot_download", "skipped", start_s, cache_state="snapshot_miss"
                 )
-            snapshot_bytes = 0
             try:
                 snapshot_bytes = snapshot_path.stat().st_size
             except OSError:
                 pass
             ext_bytes, ext_files = self._extract_snapshot(snapshot_path, deadline_s)
+            self.snapshot_complete_path.touch()
             return self._make_summary(
                 "snapshot_download",
                 "success",
@@ -615,6 +617,7 @@ class JitCacheManager:
                 extracted_bytes=ext_bytes,
             )
         except TimeoutError as e:
+            self.snapshot_complete_path.touch()
             return self._make_summary(
                 "snapshot_download",
                 "timeout",
@@ -632,8 +635,6 @@ class JitCacheManager:
                 cache_state="snapshot_error",
                 message=str(e),
             )
-        finally:
-            self.snapshot_complete_path.touch()
 
     def _extract_snapshot(self, archive: Path, deadline_s: float) -> tuple[int, int]:
         extracted_bytes = 0
