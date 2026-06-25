@@ -384,7 +384,8 @@ std::string GrammarConfig::to_string() const {
         << "constrained_json_disable_any_whitespace: " << constrained_json_disable_any_whitespace << "\n"
         << "num_workers: " << num_workers << "\n"
         << "tokenizer_info_json_size: " << tokenizer_info_json.size() << "\n"
-        << "override_stop_tokens_size: " << override_stop_tokens.size();
+        << "override_stop_tokens_size: " << override_stop_tokens.size() << "\n"
+        << "excluded_token_ids_size: " << excluded_token_ids.size();
     return oss.str();
 }
 

@@ -25,6 +25,7 @@ public:
                                     int                                max_thinking_tokens,
                                     std::vector<int>                   begin_think_token_ids,
                                     std::vector<int>                   end_think_token_ids,
+                                    std::vector<int>                   excluded_token_ids,
                                     int32_t                            input_length,
                                     ErrorReporter                      error_reporter = nullptr);
     ~ReasoningGrammarLogitsProcessor() override = default;
@@ -36,6 +37,8 @@ public:
                             const std::vector<int32_t>& draft_prefix) override;
     void updateMultiSeqStatus(const std::vector<int>& src_batch_indices) override;
     void updateStatus(const torch::Tensor& new_tokens, int32_t num_new_tokens) override;
+    void rewriteOutputTokens(const torch::Tensor& new_tokens, int32_t num_new_tokens, bool precommit_state) override;
+    bool mayRewriteOutputTokens() const override;
     bool isSpecVerifyEligible() const override;
     int  tryAcceptAndFillBitmask(const SpecLogitsProcessorRequest& request) override;
     bool isStateful() const override {

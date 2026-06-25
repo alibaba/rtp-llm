@@ -71,6 +71,46 @@ bool consumePendingForcedThinkEndToken(StreamThinkInfo& info, int32_t current_to
     return true;
 }
 
+bool isThinkInterceptToken(const StreamThinkInfo& info, int32_t token_id) {
+    return std::find(info.excluded_token_ids.begin(), info.excluded_token_ids.end(), token_id)
+           != info.excluded_token_ids.end();
+}
+
+bool canRewriteThinkInterceptToken(const StreamThinkInfo& info) {
+    return info.process_state == ThinkProcessState::IN_THINK && !info.end_think_token_ids.empty();
+}
+
+void precommitRewrittenThinkEndToken(StreamThinkInfo& info, int32_t token_id) {
+    if (!info.dfa_ptr) {
+        return;
+    }
+    info.dfa_ptr->next(token_id);
+    info.pending_forced_think_end_token_ids.push_back(token_id);
+    info.current_output_length += 1;
+    info.process_state = info.dfa_ptr->isFinished() ? ThinkProcessState::AFTER_THINK : ThinkProcessState::CLOSING_THINK;
+}
+
+bool rewriteCpuTokenIfNeeded(StreamThinkInfo& info, int32_t& token_id, bool precommit_state) {
+    if (!canRewriteThinkInterceptToken(info) || !isThinkInterceptToken(info, token_id)) {
+        return false;
+    }
+    token_id = info.end_think_token_ids.front();
+    if (precommit_state) {
+        precommitRewrittenThinkEndToken(info, token_id);
+    }
+    return true;
+}
+
+void rewriteTensorTokenIfNeeded(const torch::Tensor& token, const StreamThinkInfo& info) {
+    if (!canRewriteThinkInterceptToken(info) || !token.defined()) {
+        return;
+    }
+    const int32_t replacement_token_id = info.end_think_token_ids.front();
+    for (int excluded_token_id : info.excluded_token_ids) {
+        token.masked_fill_(token.eq(excluded_token_id), replacement_token_id);
+    }
+}
+
 DLTensor makeSingleRowBitmaskView(int32_t* data, int32_t words) {
     DLTensor dl;
     dl.data   = data;
@@ -192,6 +232,7 @@ ReasoningGrammarLogitsProcessor::ReasoningGrammarLogitsProcessor(std::shared_ptr
                                                                  int                                max_thinking_tokens,
                                                                  std::vector<int> begin_think_token_ids,
                                                                  std::vector<int> end_think_token_ids,
+                                                                 std::vector<int> excluded_token_ids,
                                                                  int32_t          input_length,
                                                                  ErrorReporter    error_reporter):
     matcher_(std::move(matcher)), eos_token_id_(eos_token_id), error_reporter_(std::move(error_reporter)) {
@@ -199,6 +240,7 @@ ReasoningGrammarLogitsProcessor::ReasoningGrammarLogitsProcessor(std::shared_ptr
     think_info_.max_thinking_tokens   = max_thinking_tokens;
     think_info_.begin_think_token_ids = std::move(begin_think_token_ids);
     think_info_.end_think_token_ids   = end_think_token_ids;
+    think_info_.excluded_token_ids    = std::move(excluded_token_ids);
     think_info_.input_length          = input_length;
     think_info_.current_output_length = 0;
     think_info_.is_beam_search        = false;
@@ -296,6 +338,40 @@ void ReasoningGrammarLogitsProcessor::updateStatus(const torch::Tensor& new_toke
     }
 }
 
+void ReasoningGrammarLogitsProcessor::rewriteOutputTokens(const torch::Tensor& new_tokens,
+                                                          int32_t              num_new_tokens,
+                                                          bool                 precommit_state) {
+    if (!new_tokens.defined() || num_new_tokens <= 0) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!matcher_ || matcher_->finished() || !canRewriteThinkInterceptToken(think_info_)) {
+        return;
+    }
+
+    if (new_tokens.is_cuda()) {
+        auto flat = new_tokens.reshape({-1});
+        for (int32_t j = 0; j < num_new_tokens && j < flat.size(0); ++j) {
+            rewriteTensorTokenIfNeeded(flat.narrow(0, j, 1), think_info_);
+        }
+        return;
+    }
+
+    auto*   token_ptr = new_tokens.data_ptr<int32_t>();
+    int64_t stride    = new_tokens.size(1);
+    for (int32_t j = 0; j < num_new_tokens && j < stride; ++j) {
+        if (rewriteCpuTokenIfNeeded(think_info_, token_ptr[j], precommit_state)) {
+            RTP_LLM_LOG_INFO("strict reasoning grammar rewrote intercepted token to think end token");
+        }
+    }
+}
+
+bool ReasoningGrammarLogitsProcessor::mayRewriteOutputTokens() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return matcher_ && !matcher_->finished() && canRewriteThinkInterceptToken(think_info_)
+           && !think_info_.excluded_token_ids.empty();
+}
+
 bool ReasoningGrammarLogitsProcessor::isSpecVerifyEligible() const {
     return matcher_ != nullptr && !reported_error_.load(std::memory_order_relaxed);
 }
@@ -352,6 +428,10 @@ int ReasoningGrammarLogitsProcessor::tryAcceptAndFillBitmask(const SpecLogitsPro
         }
 
         const int32_t draft_token = request.draft_tokens[offset];
+        if (canRewriteThinkInterceptToken(think_state) && isThinkInterceptToken(think_state, draft_token)) {
+            cap = offset;
+            break;
+        }
         if (draft_token < 0 || static_cast<size_t>(draft_token) >= request.vocab_size
             || !bitmaskAllowsToken(row, W, draft_token)) {
             cap = offset;

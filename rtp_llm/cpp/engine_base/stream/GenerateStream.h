@@ -249,8 +249,8 @@ public:
     ErrorInfo    statusInfo();
     std::string  stopReason();
 
-    void        setReserveStep(size_t reserve_step);
-    size_t      reserveStep() const {
+    void   setReserveStep(size_t reserve_step);
+    size_t reserveStep() const {
         return reserve_step_;
     }
     StreamState moveToNext();
@@ -459,6 +459,9 @@ public:
     std::vector<BaseLogitsProcessorPtr> getAllLogitsProcessorPtr() const {
         return logits_processor_list_;
     }
+
+    void
+    rewriteLogitProcessorOutputTokens(const torch::Tensor& new_tokens, int32_t num_new_tokens, bool precommit_state);
 
     bool    hasStatefulLogitsProcessor() const;
     int64_t processorAcceptedTokenLen() const;
@@ -777,10 +780,10 @@ protected:
     // Stream-async device-resident state for the next decode step's prepare.
     // These structs stay default-constructed (epoch=0, undefined tensors) until
     // their corresponding async/sync publisher installs a usable state.
-    MtpAsyncDeviceState    mtp_async_state_;
-    uint64_t               mtp_async_epoch_counter_ = 0;
-    NormalAsyncDeviceState normal_async_state_;
-    uint64_t               normal_async_epoch_counter_ = 0;
+    MtpAsyncDeviceState                mtp_async_state_;
+    uint64_t                           mtp_async_epoch_counter_ = 0;
+    NormalAsyncDeviceState             normal_async_state_;
+    uint64_t                           normal_async_epoch_counter_       = 0;
     std::shared_ptr<std::atomic<bool>> grpc_normal_device_state_pending_ = std::make_shared<std::atomic<bool>>(false);
 
     bool return_all_hidden_states_ = false;

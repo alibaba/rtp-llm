@@ -272,6 +272,10 @@ class GenerateEnvConfig:
         self.stop_words_str: Optional[str] = None
         self.think_start_tag: str = "<think>\n"
         self.think_terminate_token_id: int = 1
+        # 服务启动开关:一个服务只加载一个模型,该开关决定这个模型要不要 strict
+        # thinking(thinking 阶段采到模型声明的工具调用起始 token 时改写为 think end)。
+        # 默认关;开启后对该模型 get_think_excluded_token_strs() 声明的 token 生效。
+        self.enable_strict_thinking: bool = False
         self.generation_config_path: Optional[str] = None
 
     def to_string(self):
@@ -284,6 +288,7 @@ class GenerateEnvConfig:
             f"stop_words_str: {self.stop_words_str}\n"
             f"think_start_tag: {self.think_start_tag}\n"
             f"think_terminate_token_id: {self.think_terminate_token_id}\n"
+            f"enable_strict_thinking: {self.enable_strict_thinking}\n"
             f"generation_config_path: {self.generation_config_path}"
         )
 

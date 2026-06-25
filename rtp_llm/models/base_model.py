@@ -1,7 +1,7 @@
 import json
 import logging
 import os
-from typing import Any, Optional, Protocol, Type, Union, cast, runtime_checkable
+from typing import Any, List, Optional, Protocol, Type, Union, cast, runtime_checkable
 
 import torch
 
@@ -311,6 +311,15 @@ class BaseModel(object):
         self.tokenizer = TokenizerFactory.create(ckpt_path, tokenizer_path, model_type)
         if self.tokenizer.eos_token_id:
             self.model_config.special_tokens.eos_token_id = self.tokenizer.eos_token_id
+
+    def get_think_excluded_token_strs(self) -> List[str]:
+        """thinking 阶段采到后要改写为 think end 的 special token(字符串形式),per-model 声明。
+
+        由模型类自己声明它在 reasoning 阶段不允许生成的 token(如 DSV4 的工具调用起始
+        标记)。默认空=不启用;startup 时由 bootstrap 用 tokenizer 编码成 token id
+        (见 xgrammar_bootstrap),并受服务启动开关 enable_strict_thinking 控制。
+        """
+        return []
 
     def is_multimodal(self) -> bool:
         return self._as_multimodal_model() is not None

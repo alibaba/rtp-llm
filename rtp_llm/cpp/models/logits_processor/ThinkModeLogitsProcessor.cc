@@ -68,6 +68,46 @@ bool consumePendingForcedThinkEndToken(StreamThinkInfo& info, int32_t current_to
     return true;
 }
 
+bool isThinkInterceptToken(const StreamThinkInfo& info, int32_t token_id) {
+    return std::find(info.excluded_token_ids.begin(), info.excluded_token_ids.end(), token_id)
+           != info.excluded_token_ids.end();
+}
+
+bool canRewriteThinkInterceptToken(const StreamThinkInfo& info) {
+    return info.process_state == ThinkProcessState::IN_THINK && !info.end_think_token_ids.empty();
+}
+
+void precommitRewrittenThinkEndToken(StreamThinkInfo& info, int32_t token_id) {
+    if (!info.dfa_ptr) {
+        return;
+    }
+    info.dfa_ptr->next(token_id);
+    info.pending_forced_think_end_token_ids.push_back(token_id);
+    info.current_output_length += 1;
+    info.process_state = info.dfa_ptr->isFinished() ? ThinkProcessState::AFTER_THINK : ThinkProcessState::CLOSING_THINK;
+}
+
+bool rewriteCpuTokenIfNeeded(StreamThinkInfo& info, int32_t& token_id, bool precommit_state) {
+    if (!canRewriteThinkInterceptToken(info) || !isThinkInterceptToken(info, token_id)) {
+        return false;
+    }
+    token_id = info.end_think_token_ids.front();
+    if (precommit_state) {
+        precommitRewrittenThinkEndToken(info, token_id);
+    }
+    return true;
+}
+
+void rewriteTensorTokenIfNeeded(const torch::Tensor& token, const StreamThinkInfo& info) {
+    if (!canRewriteThinkInterceptToken(info) || !token.defined()) {
+        return;
+    }
+    const int32_t replacement_token_id = info.end_think_token_ids.front();
+    for (int excluded_token_id : info.excluded_token_ids) {
+        token.masked_fill_(token.eq(excluded_token_id), replacement_token_id);
+    }
+}
+
 void maskThinkBoundaryTokens(const torch::Tensor& new_tokens_logits, size_t vocab_size, const StreamThinkInfo& info) {
     maskToken(new_tokens_logits, vocab_size, firstTokenOrInvalid(info.begin_think_token_ids));
     maskToken(new_tokens_logits, vocab_size, firstTokenOrInvalid(info.end_think_token_ids));
@@ -238,6 +278,60 @@ void ThinkModeLogitsProcessor::process(const SamplerInputs& inputs, size_t start
     publishSpecSnapshotLocked();
 }
 
+void ThinkModeLogitsProcessor::rewriteOutputTokens(const torch::Tensor& new_tokens,
+                                                   int32_t              num_new_tokens,
+                                                   bool                 precommit_state) {
+    if (!new_tokens.defined() || num_new_tokens <= 0) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (think_infos_.size() != static_cast<size_t>(new_tokens.size(0))) {
+        return;
+    }
+
+    if (new_tokens.is_cuda()) {
+        for (size_t i = 0; i < think_infos_.size(); ++i) {
+            auto& info = think_infos_[i];
+            if (!canRewriteThinkInterceptToken(info)) {
+                continue;
+            }
+            for (int32_t j = 0; j < num_new_tokens; ++j) {
+                const int64_t offset = info.is_beam_search ? (info.current_output_length + info.input_length + j) : j;
+                if (offset < 0 || offset >= new_tokens.size(1)) {
+                    continue;
+                }
+                rewriteTensorTokenIfNeeded(new_tokens[i].narrow(0, offset, 1), info);
+            }
+        }
+        publishSpecSnapshotLocked();
+        return;
+    }
+
+    auto*   token_ptr = new_tokens.data_ptr<int32_t>();
+    int64_t stride    = new_tokens.size(1);
+    for (size_t i = 0; i < think_infos_.size(); ++i) {
+        auto& info = think_infos_[i];
+        for (int32_t j = 0; j < num_new_tokens; ++j) {
+            const int64_t offset = info.is_beam_search ? (info.current_output_length + info.input_length + j) : j;
+            if (offset < 0 || offset >= stride) {
+                continue;
+            }
+            auto& token_id = token_ptr[i * stride + offset];
+            if (rewriteCpuTokenIfNeeded(info, token_id, precommit_state)) {
+                RTP_LLM_LOG_INFO("strict thinking rewrote intercepted token to think end token");
+            }
+        }
+    }
+    publishSpecSnapshotLocked();
+}
+
+bool ThinkModeLogitsProcessor::mayRewriteOutputTokens() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return std::any_of(think_infos_.begin(), think_infos_.end(), [](const StreamThinkInfo& info) {
+        return canRewriteThinkInterceptToken(info) && !info.excluded_token_ids.empty();
+    });
+}
+
 bool ThinkModeLogitsProcessor::forceThinkEndToken(const torch::Tensor& new_tokens_logits,
                                                   StreamThinkInfo&     info,
                                                   size_t               vocab_size) {
@@ -371,6 +465,10 @@ int ThinkModeLogitsProcessor::tryAcceptAndFillBitmask(const SpecLogitsProcessorR
         }
 
         const int32_t draft_token = request.draft_tokens[offset];
+        if (canRewriteThinkInterceptToken(state) && isThinkInterceptToken(state, draft_token)) {
+            cap = offset;
+            break;
+        }
         if (!bitmaskAllowsToken(row, W, draft_token)) {
             cap = offset;
             break;
@@ -381,7 +479,8 @@ int ThinkModeLogitsProcessor::tryAcceptAndFillBitmask(const SpecLogitsProcessorR
 }
 
 ThinkModeLogitsProcessorPtr ThinkModeLogitsProcessor::fromGenerateInput(std::shared_ptr<GenerateInput> generate_input,
-                                                                        int32_t                        num) {
+                                                                        int32_t                        num,
+                                                                        const std::vector<int>& excluded_token_ids) {
     auto generate_config         = generate_input->generate_config;
     auto end_think_token_ids     = generate_config->end_think_token_ids;
     bool has_think_boundary_mask = !generate_config->begin_think_token_ids.empty() || !end_think_token_ids.empty();
@@ -397,7 +496,7 @@ ThinkModeLogitsProcessorPtr ThinkModeLogitsProcessor::fromGenerateInput(std::sha
         if (has_think_budget) {
             dfa_ptr = std::make_shared<StringContainDFA<size_t, int>>(end_think_token_ids);
         }
-        StreamThinkInfo              think_info(generate_config->in_think_mode,
+        StreamThinkInfo think_info(generate_config->in_think_mode,
                                    generate_config->max_thinking_tokens,
                                    generate_config->begin_think_token_ids,
                                    end_think_token_ids,
@@ -405,6 +504,7 @@ ThinkModeLogitsProcessorPtr ThinkModeLogitsProcessor::fromGenerateInput(std::sha
                                    0,
                                    generate_config->hasNumBeams() || generate_config->num_return_sequences > 1,
                                    dfa_ptr);
+        think_info.excluded_token_ids            = excluded_token_ids;
         std::vector<StreamThinkInfo> think_infos = {think_info};
         auto                         ptr         = std::make_shared<ThinkModeLogitsProcessor>(think_infos);
 

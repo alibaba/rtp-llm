@@ -490,6 +490,11 @@ class DeepSeekV4(DeepSeekV2):
     `_create_python_model` until M2 lands the HCA-only forward path.
     """
 
+    def get_think_excluded_token_strs(self) -> List[str]:
+        # DSV4 工具调用起始的专用 special token。thinking 阶段采到它时改写为
+        # </think> 起始 token,让 tool call 在 reasoning 外重新生成。
+        return ["｜DSML｜"]
+
     @classmethod
     def _create_config(cls, ckpt_path: str):
         config = ModelConfig()

@@ -17,10 +17,13 @@ enum class ThinkProcessState {
 };
 
 struct StreamThinkInfo {
-    bool                                           in_think_mode;
-    int                                            max_thinking_tokens;
-    std::vector<int>                               begin_think_token_ids;
-    std::vector<int>                               end_think_token_ids;
+    bool             in_think_mode;
+    int              max_thinking_tokens;
+    std::vector<int> begin_think_token_ids;
+    std::vector<int> end_think_token_ids;
+    // per-model: thinking(IN_THINK) 阶段采到这些 token 时改写为 think-end 起始 token
+    // (如 DSV4 DSML 工具调用起始 special token -> </think>)。
+    std::vector<int>                               excluded_token_ids;
     int32_t                                        input_length;
     int32_t                                        current_output_length;
     bool                                           is_beam_search;
@@ -57,6 +60,7 @@ struct StreamThinkInfo {
         think_info.max_thinking_tokens                = max_thinking_tokens;
         think_info.begin_think_token_ids              = begin_think_token_ids;
         think_info.end_think_token_ids                = end_think_token_ids;
+        think_info.excluded_token_ids                 = excluded_token_ids;
         think_info.input_length                       = input_length;
         think_info.current_output_length              = current_output_length;
         think_info.is_beam_search                     = is_beam_search;
@@ -83,15 +87,18 @@ public:
 
 public:
     static std::shared_ptr<ThinkModeLogitsProcessor> fromGenerateInput(std::shared_ptr<GenerateInput> generate_input,
-                                                                       int32_t                        num);
+                                                                       int32_t                        num,
+                                                                       const std::vector<int>& excluded_token_ids = {});
 
 public:
-    void process(const SamplerInputs& inputs, size_t start_idx, size_t finish_idx) override;
-    void updateMultiSeqStatus(const std::vector<int>& src_batch_indices) override;
-    void updateStatus(const torch::Tensor& new_tokens, int32_t num_new_tokens) override;
-    bool isSpecVerifyEligible() const override;
-    int  tryAcceptAndFillBitmask(const SpecLogitsProcessorRequest& request) override;
-    bool isStateful() const override;
+    void    process(const SamplerInputs& inputs, size_t start_idx, size_t finish_idx) override;
+    void    updateMultiSeqStatus(const std::vector<int>& src_batch_indices) override;
+    void    updateStatus(const torch::Tensor& new_tokens, int32_t num_new_tokens) override;
+    void    rewriteOutputTokens(const torch::Tensor& new_tokens, int32_t num_new_tokens, bool precommit_state) override;
+    bool    mayRewriteOutputTokens() const override;
+    bool    isSpecVerifyEligible() const override;
+    int     tryAcceptAndFillBitmask(const SpecLogitsProcessorRequest& request) override;
+    bool    isStateful() const override;
     int64_t acceptedTokenLen() const override;
 
 private:

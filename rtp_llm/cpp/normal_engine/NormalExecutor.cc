@@ -626,6 +626,7 @@ void NormalExecutor::publishNormalDeviceState(const StreamGroups& stream_groups,
             last_sample_token_gpu =
                 token_ids_gpu.narrow(0, batch_idx_out, 1).select(-1, last_col).reshape({1}).to(torch::kInt32);
         }
+        stream->rewriteLogitProcessorOutputTokens(last_sample_token_gpu.reshape({1, 1}), 1, /*precommit_state=*/false);
 
         // Mirror next_seq_len_gpu on host for the next iter's scheduler.
         // Fall back to live seqLength only on first publish (no prior worker).

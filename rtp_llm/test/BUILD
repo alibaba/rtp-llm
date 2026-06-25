@@ -14,6 +14,20 @@ py_test(
 )
 
 py_test(
+    name = "xgrammar_bootstrap_test",
+    srcs = [
+        "xgrammar_bootstrap_test.py",
+    ],
+    data = [
+        "//rtp_llm:sdk"
+    ],
+    deps = [
+        "//rtp_llm:testlib",
+    ],
+    exec_properties = {'gpu':'H20'},
+)
+
+py_test(
     name = "slice_stop_word_list_test",
     srcs = [
         "slice_stop_word_list_test.py",

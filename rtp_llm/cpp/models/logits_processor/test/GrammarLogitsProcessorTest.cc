@@ -417,6 +417,7 @@ TEST(ReasoningGrammarLogitsProcessorTest, JsonObjectConstrainsOnlyAfterThinkEnd)
                                               /*max_thinking_tokens=*/32,
                                               {static_cast<int>('<')},
                                               {static_cast<int>('x'), static_cast<int>('y')},
+                                              {},
                                               /*input_length=*/0);
 
     SamplerInputs inputs;
@@ -463,6 +464,7 @@ TEST(ReasoningGrammarLogitsProcessorTest, NaturalCloseForcesTrailingPadBeforeGra
                                               /*max_thinking_tokens=*/32,
                                               {static_cast<int>('<')},
                                               {static_cast<int>('y'), kPadToken},
+                                              {},
                                               /*input_length=*/0);
 
     processor.updateStatus(torch::tensor({{static_cast<int32_t>('y')}}, torch::kInt32), 1);
@@ -499,6 +501,7 @@ TEST(ReasoningGrammarLogitsProcessorTest, SpecTryAcceptPassthroughThenGrammar) {
                                               /*max_thinking_tokens=*/32,
                                               {static_cast<int>('<')},
                                               {static_cast<int>('x'), static_cast<int>('y')},
+                                              {},
                                               /*input_length=*/0);
 
     const int            P     = 4;
@@ -540,6 +543,7 @@ TEST(ReasoningGrammarLogitsProcessorTest, BudgetForceCloseThenGrammar) {
                                               /*max_thinking_tokens=*/1,
                                               {7},
                                               {8, 9},
+                                              {},
                                               /*input_length=*/0);
 
     processor.updateStatus(torch::tensor({{5}}, torch::kInt32), 1);
@@ -573,10 +577,44 @@ TEST(ReasoningGrammarLogitsProcessorTest, BudgetForceCloseThenGrammar) {
     EXPECT_EQ(processor.acceptedTokenLen(), 3);
 }
 
+TEST(ReasoningGrammarLogitsProcessorTest, RewritesToolCallTokenToThinkEndBeforeGrammar) {
+    auto backend  = makeBackend();
+    auto compiled = backend.compileNow({"regex", "a"}).compiled;
+    ASSERT_TRUE(compiled);
+
+    auto matcher = backend.createMatcher(compiled, /*require_reasoning=*/false, std::nullopt);
+    ReasoningGrammarLogitsProcessor processor(matcher,
+                                              /*eos_token_id=*/0,
+                                              /*max_thinking_tokens=*/32,
+                                              {7},
+                                              {8, 9},
+                                              {5},
+                                              /*input_length=*/0);
+
+    auto sampled = torch::tensor({{5}}, torch::kInt32);
+    processor.rewriteOutputTokens(sampled, 1, /*precommit_state=*/true);
+    EXPECT_EQ(sampled[0][0].item<int32_t>(), 8);
+    EXPECT_EQ(processor.acceptedTokenLen(), 1);
+
+    processor.updateStatus(sampled, 1);
+
+    SamplerInputs inputs;
+    inputs.logits           = torch::zeros({1, 128}, torch::kFloat32);
+    inputs.finished_mask    = torch::zeros({1}, torch::kBool);
+    inputs.input_lengths    = torch::tensor({0}, torch::kInt32);
+    inputs.sequence_lengths = torch::tensor({1}, torch::kInt32);
+    inputs.vocab_size       = 128;
+    processor.process(inputs, 0, 1);
+
+    EXPECT_EQ(inputs.logits[0][8].item<float>(), BaseLogitsProcessor::neg_inf);
+    EXPECT_EQ(inputs.logits[0][9].item<float>(), 1.0f);
+}
+
 TEST(LogitsProcessorFactoryTest, GrammarThinkingCreatesReasoningGrammarAndSkipsThinkMode) {
     GrammarConfig grammar_config;
     grammar_config.grammar_backend     = "xgrammar";
     grammar_config.tokenizer_info_json = makeTokenizerInfoJson();
+    grammar_config.excluded_token_ids  = {static_cast<int>('z')};
     LogitsProcessorFactory::init("", "", grammar_config);
 
     auto generate_input                                    = std::make_shared<GenerateInput>();
@@ -592,9 +630,14 @@ TEST(LogitsProcessorFactoryTest, GrammarThinkingCreatesReasoningGrammarAndSkipsT
         generate_input, /*init_batch_size=*/1, /*max_batch_size=*/1, /*eos_token_id=*/0);
 
     ASSERT_EQ(processors.size(), 1);
-    EXPECT_NE(std::dynamic_pointer_cast<ReasoningGrammarLogitsProcessor>(processors[0]), nullptr);
+    auto reasoning_processor = std::dynamic_pointer_cast<ReasoningGrammarLogitsProcessor>(processors[0]);
+    ASSERT_NE(reasoning_processor, nullptr);
     EXPECT_EQ(std::dynamic_pointer_cast<GrammarLogitsProcessor>(processors[0]), nullptr);
     EXPECT_EQ(std::dynamic_pointer_cast<ThinkModeLogitsProcessor>(processors[0]), nullptr);
+
+    auto sampled = torch::tensor({{static_cast<int32_t>('z')}}, torch::kInt32);
+    reasoning_processor->rewriteOutputTokens(sampled, 1, /*precommit_state=*/true);
+    EXPECT_EQ(sampled[0][0].item<int32_t>(), static_cast<int32_t>('x'));
 }
 
 TEST(LogitsProcessorFactoryTest, GrammarThinkingWithoutEndIdsReportsInvalidParams) {

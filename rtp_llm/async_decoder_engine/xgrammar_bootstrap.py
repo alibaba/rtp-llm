@@ -16,8 +16,59 @@ def _collect_stop_token_ids(model: Any) -> List[int]:
     return sorted(ids)
 
 
+def _resolve_excluded_token_ids(model: Any) -> List[int]:
+    """per-model: 把模型声明的 thinking 期拦截 token(字符串)编码成 token id。
+
+    只收编码成**单个 token** 的(否则无法做单 token rewrite),其余告警跳过。marker 多为
+    全角 special token,直接原文 encode。
+    """
+    get_strs = getattr(model, "get_think_excluded_token_strs", None)
+    if not callable(get_strs):
+        return []
+    strs = get_strs() or []
+    if not strs:
+        return []
+    tokenizer = getattr(getattr(model, "tokenizer", None), "tokenizer", None)
+    if tokenizer is None:
+        return []
+    ids: List[int] = []
+    for s in strs:
+        try:
+            encoded = tokenizer.encode(s, add_special_tokens=False)
+        except Exception as e:
+            logging.warning("excluded token %r encode failed (%s); skipped", s, e)
+            continue
+        if len(encoded) == 1:
+            ids.append(int(encoded[0]))
+        else:
+            logging.warning(
+                "excluded token %r did not encode to a single token (got %s); skipped",
+                s,
+                encoded,
+            )
+    return ids
+
+
+def _strict_thinking_enabled(model: Any) -> bool:
+    """服务启动开关:GenerateEnvConfig.enable_strict_thinking。一个服务只加载一个模型,
+    该开关决定这个模型要不要 strict thinking。"""
+    env_cfg = getattr(getattr(model, "model_config", None), "generate_env_config", None)
+    return bool(getattr(env_cfg, "enable_strict_thinking", False))
+
+
 def bootstrap_grammar_config(engine_config: Any, model: Any) -> None:
     grammar_config = engine_config.grammar_config
+    # thinking 期 intercepted token 由服务启动开关 enable_strict_thinking 控制,与 grammar
+    # 后端独立(后端关掉也生效);默认关 → 空 → 不 rewrite。
+    strict_thinking = _strict_thinking_enabled(model)
+    grammar_config.excluded_token_ids = (
+        _resolve_excluded_token_ids(model) if strict_thinking else []
+    )
+    logging.info(
+        "strict_thinking=%s excluded_token_ids=%s",
+        strict_thinking,
+        list(grammar_config.excluded_token_ids),
+    )
     if (grammar_config.grammar_backend or "").strip().lower() in ("", "none"):
         grammar_config.tokenizer_info_json = ""
         return

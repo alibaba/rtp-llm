@@ -24,6 +24,14 @@ public:
     }
     virtual void updateMultiSeqStatus(const std::vector<int>& src_batch_indices)       = 0;
     virtual void updateStatus(const torch::Tensor& new_tokens, int32_t num_new_tokens) = 0;
+    virtual void rewriteOutputTokens(const torch::Tensor& new_tokens, int32_t num_new_tokens, bool precommit_state) {
+        (void)new_tokens;
+        (void)num_new_tokens;
+        (void)precommit_state;
+    }
+    virtual bool mayRewriteOutputTokens() const {
+        return false;
+    }
     virtual bool isStateful() const {
         return false;
     }

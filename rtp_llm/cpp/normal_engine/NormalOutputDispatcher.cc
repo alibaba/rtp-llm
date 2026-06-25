@@ -185,6 +185,7 @@ void NormalOutputDispatcher::dispatchSingleStream(GenerateStreamPtr    stream,
         new_tokens.data_ptr<int32_t>()[i] =
             new_all_token_ids.data_ptr<int32_t>()[(batch_idx_out + i) * token_stride + token_stride - 1];
     }
+    stream->rewriteLogitProcessorOutputTokens(new_tokens, 1, /*precommit_state=*/false);
 
     torch::Tensor current_softmax_result;
     if (stream->calculateSoftmaxProbs()) {

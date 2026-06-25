@@ -71,6 +71,14 @@ def init_generate_group_args(parser, generate_env_config):
         help="思考阶段被特殊 token 立刻终止时的 token id(DSV4 默认为 1);<=0 表示禁用该路径",
     )
     generate_group.add_argument(
+        "--enable_strict_thinking",
+        env_name="ENABLE_STRICT_THINKING",
+        bind_to=(generate_env_config, "enable_strict_thinking"),
+        type=str2bool,
+        default=False,
+        help="服务启动开关:对本服务加载的模型启用 strict thinking(thinking 阶段采到模型声明的工具调用起始 token 时改写为 think end,让 tool call 落在 reasoning 外)",
+    )
+    generate_group.add_argument(
         "--generation_config_path",
         env_name="GENERATION_CONFIG_PATH",
         bind_to=(generate_env_config, "generation_config_path"),

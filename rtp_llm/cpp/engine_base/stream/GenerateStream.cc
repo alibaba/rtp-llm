@@ -812,6 +812,8 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
     auto      num_new_tokens = update_info.num_new_tokens;
     int       cur_cached_len = seqLength() - 1;
 
+    rewriteLogitProcessorOutputTokens(new_tokens, num_new_tokens, /*precommit_state=*/true);
+
     int error_token_id = 0;
     if (!complete_token_ids_->update(new_tokens,
                                      begin_time_us_,
@@ -913,7 +915,9 @@ void GenerateStream::update(const StreamUpdateInfo& update_info) {
     auto        num_new_tokens = update_info.num_new_tokens;
 
     const int old_seq_length = seqLength();
-    int       error_token_id = 0;
+    rewriteLogitProcessorOutputTokens(new_tokens, num_new_tokens, /*precommit_state=*/true);
+
+    int error_token_id = 0;
     if (!complete_token_ids_->update(new_tokens,
                                      begin_time_us_,
                                      num_new_tokens,
@@ -1024,6 +1028,20 @@ void GenerateStream::updateLogitProcessorStatus(const StreamUpdateInfo& update_i
                                update_info.num_new_tokens,
                                update_info.src_batch_indices,
                                /*stateful_only=*/false);
+}
+
+void GenerateStream::rewriteLogitProcessorOutputTokens(const torch::Tensor& new_tokens,
+                                                       int32_t              num_new_tokens,
+                                                       bool                 precommit_state) {
+    RTP_LLM_PROFILE_FUNCTION();
+    if (!new_tokens.defined() || num_new_tokens <= 0) {
+        return;
+    }
+    for (auto logit_processor_ptr : getAllLogitsProcessorPtr()) {
+        if (logit_processor_ptr != nullptr) {
+            logit_processor_ptr->rewriteOutputTokens(new_tokens, num_new_tokens, precommit_state);
+        }
+    }
 }
 
 void GenerateStream::updateLogitProcessorStatus(const torch::Tensor& new_tokens,

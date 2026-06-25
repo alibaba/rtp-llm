@@ -192,6 +192,56 @@ void applySpecLogitsAcceptLenCap(const SamplerInputs&                   sampler_
     }
 }
 
+bool streamMayRewriteOutputTokens(const GenerateStreamPtr& stream) {
+    for (const auto& processor : stream->getAllLogitsProcessorPtr()) {
+        if (processor != nullptr && processor->mayRewriteOutputTokens()) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void rewriteSpeculativeAcceptTokensForThinking(const StreamGroups&                    stream_groups,
+                                               speculative::SpeculativeSamplerOutput& output) {
+    if (!output.accept_tokens.defined() || output.accept_tokens.numel() == 0) {
+        return;
+    }
+    auto all_streams = stream_groups.allStreams();
+    if (all_streams.empty()) {
+        return;
+    }
+
+    RTP_LLM_CHECK_WITH_INFO(output.accept_tokens.dim() == 2,
+                            "MTP accept_tokens rewrite expects [batch, propose_step + 1], got dim=%ld",
+                            output.accept_tokens.dim());
+    const int64_t rows                     = output.accept_tokens.size(0);
+    const int64_t width                    = output.accept_tokens.size(1);
+    bool          rewrote_candidate_stream = false;
+
+    int64_t idx = 0;
+    for (auto& stream : all_streams) {
+        if (idx >= rows) {
+            break;
+        }
+        if (streamMayRewriteOutputTokens(stream)) {
+            auto row = output.accept_tokens.narrow(0, idx, 1);
+            stream->rewriteLogitProcessorOutputTokens(row, static_cast<int32_t>(width), /*precommit_state=*/false);
+            rewrote_candidate_stream = true;
+        }
+        ++idx;
+    }
+
+    if (!rewrote_candidate_stream) {
+        return;
+    }
+
+    output.accept_tokens_cpu = output.accept_tokens.to(torch::kCPU, /*non_blocking=*/true);
+    if (output.accept_len.defined()) {
+        output.accept_len_cpu = output.accept_len.to(torch::kCPU, /*non_blocking=*/true);
+    }
+    output.transfer_done_event->record(cuda_graph::graphGetCurrentStream());
+}
+
 }  // namespace
 
 bool MtpExecutor::isTpRank0() const {
@@ -1091,6 +1141,13 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     bool                          spec_logits_async_launched              = false;
     bool                          spec_logits_processor_present           = false;
 
+    if (useStreamAsync() && !useDropBroadSync()) {
+        RTP_LLM_PROFILE_SCOPE_DYNAMIC("executor.mtp.decode_step(wait_prev_bookkeeping,stream_count=%zu)",
+                                      streams.size());
+        spec_bookkeeping_runner_.sync(cuda_graph::graphGetCurrentStream());
+        stream_groups = StreamGroups(streams);
+    }
+
     prepareGrpcMtpDeviceState(streams, buffer_holder_);
 
     {
@@ -1287,6 +1344,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
             speculative_sampler_output = speculative_sampler_->forward(streams, draft_sampler_output, sampler_output);
             applySpecLogitsAcceptLenCap(
                 sampler_input, sampler_output, speculative_sampler_output, batch_size, propose_step_);
+            rewriteSpeculativeAcceptTokensForThinking(stream_groups, speculative_sampler_output);
         }
 
         batch_stream_processor_->updateDecodePostDraftModelInput(

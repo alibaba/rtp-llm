@@ -513,6 +513,7 @@ class FIFOSchedulerConfig:
 
 class GrammarConfig:
     constrained_json_disable_any_whitespace: bool
+    excluded_token_ids: list[int]
     grammar_backend: str
     num_workers: int
     override_stop_tokens: list[int]

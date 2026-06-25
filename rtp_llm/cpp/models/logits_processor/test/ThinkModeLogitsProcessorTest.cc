@@ -357,6 +357,91 @@ TEST_F(SamplerTest, testThinkingMasksThinkBoundaryTokensAfterThinkEnd) {
     EXPECT_EQ(0, sampler_inputs.logits[0][271].item<float>());
 }
 
+TEST_F(SamplerTest, testThinkingRewritesToolCallTokenToThinkEnd) {
+    // per-model: thinking(IN_THINK) 阶段如果采到模型级注入的 intercepted token
+    // (DSV4 DSML 工具调用起始 special token 128825)，提交前改写为 </think> 起始 token。
+    SamplerDataBuilder builder;
+
+    auto generate_input                                    = std::make_shared<GenerateInput>();
+    generate_input->generate_config                        = std::make_shared<GenerateConfig>();
+    generate_input->generate_config->in_think_mode         = true;
+    generate_input->generate_config->max_thinking_tokens   = 32;
+    generate_input->generate_config->begin_think_token_ids = {128821, 201};
+    generate_input->generate_config->end_think_token_ids   = {128822, 271};
+    generate_input->input_ids                              = torch::tensor({1, 2, 3}, torch::kInt32);
+
+    auto processor = ThinkModeLogitsProcessor::fromGenerateInput(generate_input, 1, {128825});
+    ASSERT_NE(processor, nullptr);
+
+    SamplerInputs sampler_inputs    = builder.allocate({1, 128900, 8}, {processor}, {1});
+    sampler_inputs.input_lengths    = torch::tensor({3}, torch::kInt32);
+    sampler_inputs.sequence_lengths = torch::tensor({3}, torch::kInt32);
+    processor->process(sampler_inputs, 0, 1);
+
+    EXPECT_EQ(0, sampler_inputs.logits[0][128825].item<float>());  // 不再做 logits mask
+    EXPECT_EQ(0, sampler_inputs.logits[0][300].item<float>());     // 普通 token 不受影响
+    EXPECT_EQ(0, sampler_inputs.logits[0][128822].item<float>());  // 自然 </think> 仍允许
+
+    auto sampled = torch::tensor({{128825}}, torch::kInt32);
+    processor->rewriteOutputTokens(sampled, 1, /*precommit_state=*/true);
+    EXPECT_EQ(128822, sampled[0][0].item<int32_t>());
+    EXPECT_EQ(1, processor->thinkEndTokensStatus()[0]);
+
+    processor->updateStatus(sampled, 1);
+    EXPECT_EQ(1, processor->thinkEndTokensStatus()[0]);
+}
+
+TEST_F(SamplerTest, testThinkingRewritesToolCallTokenInsideMtpAcceptWindowOnDevice) {
+    auto generate_input                                    = std::make_shared<GenerateInput>();
+    generate_input->generate_config                        = std::make_shared<GenerateConfig>();
+    generate_input->generate_config->in_think_mode         = true;
+    generate_input->generate_config->max_thinking_tokens   = 32;
+    generate_input->generate_config->begin_think_token_ids = {128821, 201};
+    generate_input->generate_config->end_think_token_ids   = {128822, 271};
+    generate_input->input_ids                              = torch::tensor({1, 2, 3}, torch::kInt32);
+
+    auto processor = ThinkModeLogitsProcessor::fromGenerateInput(generate_input, 1, {128825});
+    ASSERT_NE(processor, nullptr);
+    ASSERT_TRUE(processor->mayRewriteOutputTokens());
+
+    auto accept_window = torch::tensor({{300, 128825, 301}}, torch::kInt32).to(torch::kCUDA);
+    processor->rewriteOutputTokens(accept_window, 3, /*precommit_state=*/false);
+
+    auto accept_window_cpu = accept_window.cpu();
+    EXPECT_EQ(300, accept_window_cpu[0][0].item<int32_t>());
+    EXPECT_EQ(128822, accept_window_cpu[0][1].item<int32_t>());
+    EXPECT_EQ(301, accept_window_cpu[0][2].item<int32_t>());
+    EXPECT_EQ(0, processor->thinkEndTokensStatus()[0]);
+}
+
+TEST_F(SamplerTest, testAfterThinkEndAllowsToolCallToken) {
+    // per-model: think 结束后(AFTER_THINK)不再改写 intercepted token，工具调用可正常生成。
+    SamplerDataBuilder builder;
+
+    auto generate_input                                    = std::make_shared<GenerateInput>();
+    generate_input->generate_config                        = std::make_shared<GenerateConfig>();
+    generate_input->generate_config->in_think_mode         = true;
+    generate_input->generate_config->max_thinking_tokens   = 32;
+    generate_input->generate_config->begin_think_token_ids = {128821, 201};
+    generate_input->generate_config->end_think_token_ids   = {128822, 271};
+    generate_input->input_ids                              = torch::tensor({1, 2, 3}, torch::kInt32);
+
+    auto processor = ThinkModeLogitsProcessor::fromGenerateInput(generate_input, 1, {128825});
+    ASSERT_NE(processor, nullptr);
+    processor->updateStatus(torch::tensor({{128822, 271}}, torch::kInt32), 2);  // 走完 </think> → AFTER_THINK
+
+    SamplerInputs sampler_inputs    = builder.allocate({1, 128900, 8}, {processor}, {1});
+    sampler_inputs.input_lengths    = torch::tensor({3}, torch::kInt32);
+    sampler_inputs.sequence_lengths = torch::tensor({5}, torch::kInt32);
+    processor->process(sampler_inputs, 0, 1);
+
+    EXPECT_EQ(0, sampler_inputs.logits[0][128825].item<float>());  // think 结束后不再拦截
+
+    auto sampled = torch::tensor({{128825}}, torch::kInt32);
+    processor->rewriteOutputTokens(sampled, 1, /*precommit_state=*/true);
+    EXPECT_EQ(128825, sampled[0][0].item<int32_t>());
+}
+
 TEST_F(SamplerTest, testDsv4TrailingNewlineThinkEndForcesPadAfterSemanticToken) {
     // think_end_tag = "</think>\n\n" tokenizes to [128822, 271]. The trailing
     // pad stays in the DFA pattern: after the model emits the semantic
@@ -631,6 +716,57 @@ TEST_F(SamplerTest, testUpdateStatusAllowsPartialCommitWindow) {
 
     EXPECT_EQ(processor.acceptedTokenLen(), 1);
     EXPECT_EQ(processor.thinkEndTokensStatus()[0], 1);
+}
+
+TEST_F(SamplerTest, testSpecRejectsExcludedTokenInThink) {
+    // MTP spec verify:IN_THINK 阶段 draft 提议 excluded token → 被拒(cap 截到该位),
+    // 避免一次接受基于 rewrite 前 token 继续生成的 draft 后缀;普通 token 不受影响。
+    std::vector<int> end_think_token_ids = {8, 9};
+    auto             make_info           = [&]() {
+        StreamThinkInfo info(/*think_mode=*/true,
+                             /*max_thinking_tokens=*/8,
+                             /*begin_think=*/{7},
+                             end_think_token_ids,
+                             /*input_length=*/0,
+                             /*output_length=*/1,
+                             /*is_beam_search=*/false,
+                             std::make_shared<StringContainDFA<size_t, int>>(end_think_token_ids));
+        info.excluded_token_ids = {5};  // per-model excluded token
+        return info;
+    };
+    const int    P = 1;
+    const size_t W = SpecLogitsProcessor::bitmaskWordCount(16);
+
+    // draft[0] = 5(excluded)→ spec verify 阶段被 clear → 拒绝 → cap = 0
+    {
+        std::vector<StreamThinkInfo> infos = {make_info()};
+        ThinkModeLogitsProcessor     processor(infos);
+        std::vector<int32_t>         draft = {5};
+        std::vector<int32_t>         bitmask((P + 1) * W, SpecLogitsProcessor::kBitmaskAllowAll);
+        SpecLogitsProcessorRequest   request;
+        request.draft_tokens       = draft.data();
+        request.propose_step       = P;
+        request.bitmask_cpu_out    = bitmask.data();
+        request.bitmask_size_int32 = W;
+        request.vocab_size         = 16;
+        ASSERT_TRUE(processor.isSpecVerifyEligible());
+        EXPECT_EQ(processor.tryAcceptAndFillBitmask(request), 0);
+    }
+
+    // draft[0] = 6(普通 token,非 excluded/非 think 边界)→ 允许 → cap = 1
+    {
+        std::vector<StreamThinkInfo> infos = {make_info()};
+        ThinkModeLogitsProcessor     processor(infos);
+        std::vector<int32_t>         draft = {6};
+        std::vector<int32_t>         bitmask((P + 1) * W, SpecLogitsProcessor::kBitmaskAllowAll);
+        SpecLogitsProcessorRequest   request;
+        request.draft_tokens       = draft.data();
+        request.propose_step       = P;
+        request.bitmask_cpu_out    = bitmask.data();
+        request.bitmask_size_int32 = W;
+        request.vocab_size         = 16;
+        EXPECT_EQ(processor.tryAcceptAndFillBitmask(request), 1);
+    }
 }
 
 #undef EXPECT_SIMILAR
