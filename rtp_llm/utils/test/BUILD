@@ -18,7 +18,7 @@ py_library(
     name = "jit_cache_manager_test_lib",
     srcs = ["jit_cache_manager_test.py"],
     deps = [
-        "//rtp_llm:config",
+        "//rtp_llm:config_ops",
         "//rtp_llm:jit_cache_manager_lib",
         "//rtp_llm/metrics",
     ],
@@ -30,7 +30,7 @@ py_test(
         "jit_cache_manager_test.py",
     ],
     deps = [
-        "//rtp_llm:config",
+        "//rtp_llm:config_ops",
         "//rtp_llm:jit_cache_manager_lib",
         "//rtp_llm/metrics",
     ],
