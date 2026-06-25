@@ -395,7 +395,7 @@ def h20_oss_suites():
                 task_info="data/model/kimi_linear/q_r_bf16_tp2_pd_sep.json",
                 smoke_args= {
                     "prefill": "--seq_size_per_block 2048 --act_type BF16 --role_type PREFILL --cache_store_rdma_mode 0 --use_local 1 --tp_size 2 --ssm_state_dtype fp32 --reserver_runtime_mem_mb 8192",
-                    "decode": "--seq_size_per_block 2048 --act_type BF16 --role_type DECODE --cache_store_rdma_mode 0 --use_local 1 --tp_size 2 --ssm_state_dtype fp32 --reserver_runtime_mem_mb 8192"
+                    "decode": "--load_cache_timeout_ms 120000 --seq_size_per_block 2048 --act_type BF16 --role_type DECODE --cache_store_rdma_mode 0 --use_local 1 --tp_size 2 --ssm_state_dtype fp32 --reserver_runtime_mem_mb 8192"
                 },
                 envs={
                     "prefill": ["TRITON_AUTOTUNE_CACHE_MODE=cached"],
@@ -495,4 +495,3 @@ def h20_oss_suites():
             ),
         ],
     )
-
