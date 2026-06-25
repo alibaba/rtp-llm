@@ -16,6 +16,7 @@
 #include "rtp_llm/cpp/models/logits_processor/LogitsProcessorFactory.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include "autil/TimeUtility.h"
+#include <algorithm>
 #include <memory>
 #include <thread>
 #include <random>
@@ -157,7 +158,9 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
                                              params.eplb_config);
     }
 
-    sampler_.reset(new Sampler(SamplerInitParams{}));
+    const auto max_sampler_batch_size = (propose_params->gen_num_per_circle + 1)
+                                        * static_cast<size_t>(std::max(1, params.concurrency_config.concurrency_limit));
+    sampler_.reset(new Sampler(SamplerInitParams{max_sampler_batch_size}));
 
     // Optional per-layer cache buffers from KVCacheManager::allLayerCacheBase().
     std::optional<CacheLayerLayout> kv_cache_layer_layout = std::nullopt;

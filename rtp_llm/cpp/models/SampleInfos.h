@@ -10,7 +10,9 @@ namespace rtp_llm {
 class LogitsProcessorStates;
 typedef std::shared_ptr<LogitsProcessorStates> LogitsProcessorStatesPtr;
 
-struct SamplerInitParams {};
+struct SamplerInitParams {
+    size_t max_batch_size = 0;
+};
 
 struct SamplerInputs {
 public:
