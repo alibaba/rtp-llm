@@ -104,7 +104,8 @@ bool supportXqa(DataType input_type,
                    && (kv_cache_type == DataType::TYPE_BF16 || kv_cache_type == DataType::TYPE_FP16
                        || kv_cache_type == DataType::TYPE_FP8_E4M3)
                    && (group_size <= 16) && (head_dim == 64 || head_dim == 128 || head_dim == 256)
-                   && (page_size == 16 || page_size == 32 || page_size == 64 || page_size == 128);
+                   && (page_size == 16 || page_size == 32 || page_size == 64 || page_size == 128
+                       || (head_dim == 256 && group_size == 4 && page_size == 1024));
     if (!support) {
         std::call_once(xqa_info_flag, [&]() {
             RTP_LLM_LOG_WARNING(
@@ -136,16 +137,20 @@ void runXqa(void*     input,
             bool      is_kv_cache_fp8,
             uint32_t* sequence_lengths,
             float*    rcp_out_scale,
+            float*    k_scale_cache,
+            float*    v_scale_cache,
             size_t    max_q_len,
             void*     q_cu_seqlens,
             size_t    max_batch_size,
             float     q_scale,
             uint32_t  beam_width) {
+    size_t group_size = kv_head_num == 0 ? 0 : static_cast<size_t>(head_num / kv_head_num);
     if (!input || !output || !head_num || !kv_head_num || (head_num / kv_head_num > 16)
         || (head_dim != 64 && head_dim != 128 && head_dim != 256) || !batch_size || batch_size > max_batch_size
         || !max_blocks_per_seq || !max_seq_len
-        || (page_size != 16 && page_size != 32 && page_size != 64 && page_size != 128) || !kv_cache_pool
-        || !kv_cache_page_list || !sequence_lengths) {
+        || (page_size != 16 && page_size != 32 && page_size != 64 && page_size != 128
+            && !(head_dim == 256 && group_size == 4 && page_size == 1024))
+        || !kv_cache_pool || !kv_cache_page_list || !sequence_lengths) {
         RTP_LLM_LOG_ERROR(
             "xqa params error: input = %p, is_input_bf16 = %d, output = %p, head_num = %zu, kv_head_num = %zu, "
             "head_dim = %zu, batch_size = %zu, max_blocks_per_seq = %zu, max_seq_len = %zu, page_size = %zu, "
@@ -177,13 +182,13 @@ void runXqa(void*     input,
 
     bool is_spec = (max_q_len > 0 && q_cu_seqlens);
 
-    size_t group_size = static_cast<size_t>(head_num / kv_head_num);
-
     size_t max_seq_len_round = round_up<size_t>(max_seq_len, page_size);
 
     static torch::Tensor kv_cache_scale = getKVCacheScale();
 
     static torch::Tensor semaphores = getSemaphores(kv_head_num, group_size, max_q_len, max_batch_size);
+    check_cuda_value(
+        cudaMemsetAsync(semaphores.data_ptr(), 0, semaphores.numel() * semaphores.element_size(), getCurrentStream()));
 
     static void* scratch = getScratch(group_size, beam_width);
 
@@ -210,6 +215,8 @@ void runXqa(void*     input,
                  sequence_lengths,
                  static_cast<uint32_t>(batch_size),
                  kv_cache_scale.data_ptr<float>(),
+                 k_scale_cache,
+                 v_scale_cache,
                  semaphores.data_ptr<uint32_t>(),
                  scratch,
                  getCurrentStream(),

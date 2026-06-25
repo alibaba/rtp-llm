@@ -14,7 +14,7 @@
                 "_prompt_source": "$prompt:x6 (char_len 19437; input length must be >1024 tokens for seq_size_per_block=1024 reuse coverage)"
             },
             "result": {
-                "response": "跻身全国百强城市行列",
+                "response": "\r\n\r\n核务 advancedlander",
                 "finished": true,
                 "aux_info": {
                     "input_len": 10913,
@@ -36,7 +36,7 @@
                 "_prompt_source": "$prompt:x6 (char_len 19437; input length must be >1024 tokens for seq_size_per_block=1024 reuse coverage)"
             },
             "result": {
-                "response": "跻身全国百强城市行列",
+                "response": "\r\n\r\n irres差枢元",
                 "finished": true,
                 "aux_info": {
                     "input_len": 10913,

@@ -1475,9 +1475,13 @@ CUBIN_EXPORT __global__
 #endif
         uint32_t const batchSize,
         float const* __restrict__ kvCacheScale, // Device memory scalar. Same scale for K and V cache. Used only for
-                                                // int8/fp8 KV cache.
+                                                // int8/fp8 KV cache when scale cache is null.
+        float const* __restrict__ kScaleCache,
+        float const* __restrict__ vScaleCache,
         uint32_t* __restrict__ semaphores = nullptr, void* __restrict__ scratch = nullptr)
 {
+    (void)kScaleCache;
+    (void)vScaleCache;
     assert(allowMultiBlockMode || gridDim.x == 1);
     bool const isMultiBlock = allowMultiBlockMode && (gridDim.x != 1);
     uint32_t const nbSubSeqPerSeq = allowMultiBlockMode ? gridDim.x : 1;
@@ -2648,7 +2652,9 @@ CUBIN_EXPORT __global__ __launch_bounds__(256, nbCtaPerSM) void kernel_mha(
 #endif
     uint32_t const batchSize,
     float const* __restrict__ kvCacheScale, // Device memory scalar. Same scale for K and V cache. Used only for
-                                            // int8/fp8 KV cache.
+                                            // int8/fp8 KV cache when scale cache is null.
+    float const* __restrict__ kScaleCache,
+    float const* __restrict__ vScaleCache,
     uint32_t* __restrict__ semaphores = nullptr, void* __restrict__ scratch = nullptr)
 {
 #if SPEC_DEC
@@ -2671,7 +2677,7 @@ CUBIN_EXPORT __global__ __launch_bounds__(256, nbCtaPerSM) void kernel_mha(
 #if BEAM_WIDTH > 1
         beamSearchParams,
 #endif
-        batchSize, kvCacheScale, semaphores, scratch);
+        batchSize, kvCacheScale, kScaleCache, vScaleCache, semaphores, scratch);
 }
 #else
 static constexpr auto kernel_mha = kernel_mha_impl;
@@ -2707,7 +2713,9 @@ void launchMHA(cudaDeviceProp const& prop, uint32_t nbKHeads,
 #endif
     uint32_t batchSize,
     float const* __restrict__ kvCacheScale, // Device memory scalar. Same scale for K and V cache. Used only for
-                                            // int8/fp8 KV cache.
+                                            // int8/fp8 KV cache when scale cache is null.
+    float const* __restrict__ kScaleCache,
+    float const* __restrict__ vScaleCache,
 #if SPEC_DEC
     SpecDecParams const& specDecParams,
 #endif
@@ -2783,7 +2791,7 @@ void launchMHA(cudaDeviceProp const& prop, uint32_t nbKHeads,
 #if BEAM_WIDTH > 1
         beamSearchParams,
 #endif
-        batchSize, kvCacheScale, semaphores, scratch);
+        batchSize, kvCacheScale, kScaleCache, vScaleCache, semaphores, scratch);
 #else
     KVCacheList<false> const cacheList{kvCacheData, seqLen, maxSeqLen};
 #ifndef NDEBUG
@@ -2811,7 +2819,7 @@ void launchMHA(cudaDeviceProp const& prop, uint32_t nbKHeads,
 #if BEAM_WIDTH > 1
         beamSearchParams,
 #endif
-        batchSize, kvCacheScale, semaphores, scratch);
+        batchSize, kvCacheScale, kScaleCache, vScaleCache, semaphores, scratch);
 #endif
     checkCuda(cudaPeekAtLastError());
 #endif // USE_INPUT_KV

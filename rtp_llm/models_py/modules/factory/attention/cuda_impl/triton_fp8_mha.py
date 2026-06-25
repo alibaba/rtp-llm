@@ -131,8 +131,13 @@ class TritonFp8PagedMHAOp:
         block_table = attn_inputs.kv_cache_kernel_block_id_device
         out = torch.empty_like(q)
         head_size_padded = triton.next_power_of_2(self.head_size)
-        block_n = 64
-        split_size = int(os.environ.get("RTP_LLM_FP8_PTH_SPLIT_SIZE", "256"))
+        block_n = int(os.environ.get("RTP_LLM_FP8_PTH_BLOCK_N", "128"))
+        split_size = int(os.environ.get("RTP_LLM_FP8_PTH_SPLIT_SIZE", "512"))
+        scale_contiguous = (
+            k_scale_cache.stride(0) == v_scale_cache.stride(0)
+            and k_scale_cache.stride(1) == v_scale_cache.stride(1)
+            and k_scale_cache.stride(2) == v_scale_cache.stride(2)
+        )
         use_split_decode = (
             not attn_inputs.is_prefill
             and split_size > 0
@@ -222,6 +227,13 @@ class TritonFp8PagedMHAOp:
                 BLOCK_N=block_n,
                 SPLIT_SIZE=split_size,
                 HEAD_SIZE_PADDED=head_size_padded,
+                DECODE_ONE_TOKEN=True,
+                SPLIT_BLOCK_ALIGNED=(
+                    block_n == self.block_size and split_size % self.block_size == 0
+                ),
+                SCALE_CONTIGUOUS=scale_contiguous,
+                num_warps=2,
+                num_stages=2,
             )
             _triton_fp8_paged_mha_split_combine_kernel[(q.shape[0], self.num_heads)](
                 partial_acc,
@@ -284,6 +296,10 @@ class TritonFp8PagedMHAOp:
             softmax_scale=self.softmax_scale,
             BLOCK_N=block_n,
             HEAD_SIZE_PADDED=head_size_padded,
+            BLOCK_ALIGNED=block_n == self.block_size,
+            SCALE_CONTIGUOUS=scale_contiguous,
+            num_warps=2,
+            num_stages=2,
         )
         return out
 

@@ -53,11 +53,19 @@ torch::Tensor XQAAttnOp::forward(const torch::Tensor&                   input,
     torch::Tensor output = torch::empty({batch_size, local_head_num * size_per_head}, options);
 
     KVBlockArray kv_block_array;
+    float*       k_scale_cache = nullptr;
+    float*       v_scale_cache = nullptr;
     if (kv_cache.has_value()) {
         kv_block_array                 = params->kv_block_array;
         kv_block_array.mPrimaryPoolPtr = kv_cache.value().kv_cache_base.data_ptr();
         if (kv_cache.value().kv_scale_base.defined() && kv_cache.value().kv_scale_base.numel() > 0) {
             kv_block_array.scale = kv_cache.value().kv_scale_base.data_ptr();
+            if (attn_configs_.kv_cache_dtype == KvCacheDataType::FP8
+                && attn_configs_.fp8_kv_cache_scale_mode == "per_token_head") {
+                auto scale_base = reinterpret_cast<float*>(kv_cache.value().kv_scale_base.data_ptr());
+                k_scale_cache   = scale_base;
+                v_scale_cache   = scale_base + local_head_num_kv * attn_configs_.kernel_tokens_per_block;
+            }
         }
     }
 
@@ -76,7 +84,10 @@ torch::Tensor XQAAttnOp::forward(const torch::Tensor&                   input,
            kv_cache.value().kv_cache_base.data_ptr(),  // params->kv_block_array.mPrimaryPoolPtr,
            reinterpret_cast<int32_t*>((KVCacheIndex*)(params->kv_cache_offset.data_ptr())),
            kv_block_array.cache_type == KvCacheDataType::FP8,
-           reinterpret_cast<uint32_t*>(params->sequence_lengths.data_ptr()));
+           reinterpret_cast<uint32_t*>(params->sequence_lengths.data_ptr()),
+           nullptr,
+           k_scale_cache,
+           v_scale_cache);
     return output;
 }
 

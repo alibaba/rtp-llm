@@ -19,6 +19,8 @@
         seqLen,                                                                                                        \
         batchSize,                                                                                                     \
         kvCacheScale,                                                                                                  \
+        kScaleCache,                                                                                                   \
+        vScaleCache,                                                                                                   \
         specDecParams,                                                                                                 \
         semaphores,                                                                                                    \
         scratch,                                                                                                       \
@@ -39,6 +41,8 @@
         seqLen,                                                                                                        \
         batchSize,                                                                                                     \
         kvCacheScale,                                                                                                  \
+        kScaleCache,                                                                                                   \
+        vScaleCache,                                                                                                   \
         specDecParams,                                                                                                 \
         semaphores,                                                                                                    \
         scratch,                                                                                                       \
@@ -58,6 +62,8 @@
         seqLen,                                                                                                        \
         batchSize,                                                                                                     \
         kvCacheScale,                                                                                                  \
+        kScaleCache,                                                                                                   \
+        vScaleCache,                                                                                                   \
         semaphores,                                                                                                    \
         scratch,                                                                                                       \
         stream)
@@ -77,6 +83,8 @@
         seqLen,                                                                                                        \
         batchSize,                                                                                                     \
         kvCacheScale,                                                                                                  \
+        kScaleCache,                                                                                                   \
+        vScaleCache,                                                                                                   \
         semaphores,                                                                                                    \
         scratch,                                                                                                       \
         stream)
@@ -165,6 +173,12 @@
     XQA_DISPATCH_PAGE_SIZE_SM90(hd, 64)                                                                                \
     XQA_DISPATCH_PAGE_SIZE_SM90(hd, 128)
 
+#define XQA_DISPATCH_QWEN35_DENSE_PAGE_SIZE_SM90()                                                                    \
+    if (head_dim == 256 && page_size == 1024 && group_size == 4) {                                                     \
+        constexpr static uint32_t c_head_dim = 256;                                                                    \
+        XQA_DISPATCH_TYPE_SM90(256, 1024, 4);                                                                          \
+    }
+
 void run_xqa_sm90(
     uint32_t              head_dim,
     uint32_t              page_size,
@@ -193,7 +207,9 @@ void run_xqa_sm90(
 #endif
     uint32_t batchSize,
     float const* __restrict__ kvCacheScale,  // Device memory scalar. Same scale for K and V cache. Used only for
-                                             // int8/fp8 KV cache.
+                                             // int8/fp8 KV cache when per-token scale cache is null.
+    float const* __restrict__ kScaleCache,
+    float const* __restrict__ vScaleCache,
     uint32_t*    semaphores,
     void*        scratch,
     cudaStream_t stream,
@@ -203,6 +219,7 @@ void run_xqa_sm90(
     XQA_DISPATCH_HEAD_DIM_SM90(64)
     XQA_DISPATCH_HEAD_DIM_SM90(128)
     XQA_DISPATCH_HEAD_DIM_SM90(256)
+    XQA_DISPATCH_QWEN35_DENSE_PAGE_SIZE_SM90()
     std::cerr << "xqa unsupported dispatch: head_dim = " << head_dim << ", page_size = " << page_size
               << ", group_size = " << group_size << std::endl;
 }

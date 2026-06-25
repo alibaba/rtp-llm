@@ -100,7 +100,9 @@ void launchMHA(cudaDeviceProp const& prop, uint32_t const nbKHeads,
 #endif
     uint32_t batchSize,
     float const* __restrict__ kvCacheScale, // Device memory scalar. Same scale for K and V cache. Used only for
-                                            // int8/fp8 KV cache.
+                                            // int8/fp8 KV cache when per-token scale cache is null.
+    float const* __restrict__ kScaleCache,  // Optional per-token/head K scale cache for fp8 KV cache.
+    float const* __restrict__ vScaleCache,  // Optional per-token/head V scale cache for fp8 KV cache.
 #if SPEC_DEC
     SpecDecParams const& specDecParams,
 #endif
@@ -126,7 +128,9 @@ void run_xqa_sm90(uint32_t head_dim, uint32_t page_size, uint32_t group_size, bo
 #endif
     uint32_t batchSize,
     float const* __restrict__ kvCacheScale, // Device memory scalar. Same scale for K and V cache. Used only for
-                                            // int8/fp8 KV cache.
+                                            // int8/fp8 KV cache when per-token scale cache is null.
+    float const* __restrict__ kScaleCache,  // Optional per-token/head K scale cache for fp8 KV cache.
+    float const* __restrict__ vScaleCache,  // Optional per-token/head V scale cache for fp8 KV cache.
     uint32_t* semaphores, void* scratch, cudaStream_t stream,
     void const* input = nullptr, float const* rcpOutScale = nullptr, void* specDecParams = nullptr);
 

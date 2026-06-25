@@ -23,6 +23,7 @@ PREFILL_MLA_IMPS: List[type[MlaImplBase]] = []
 DECODE_MLA_IMPS: List[type[MlaImplBase]] = []
 
 FP8_PER_TOKEN_HEAD_MHA_IMPS = {
+    "XQAImpl",
     "TritonFp8PagedPrefillImpl",
     "TritonFp8PagedDecodeImpl",
 }
@@ -154,15 +155,19 @@ def get_fmha_impl(
     attn_inputs.is_cuda_graph = is_cuda_graph
 
     mha_impls = PREFILL_MHA_IMPS if attn_inputs.is_prefill else DECODE_MHA_IMPS
+    fp8_per_token_head = (
+        attn_configs.kv_cache_dtype == KvCacheDataType.FP8
+        and getattr(attn_configs, "fp8_kv_cache_scale_mode", "per_tensor")
+        == "per_token_head"
+    )
+    if fp8_per_token_head and not attn_inputs.is_prefill:
+        xqa_impls = [impl for impl in mha_impls if impl.__name__ == "XQAImpl"]
+        other_impls = [impl for impl in mha_impls if impl.__name__ != "XQAImpl"]
+        mha_impls = xqa_impls + other_impls
 
     for impl in mha_impls:
         # Check if this FMHA implementation is disabled before creating instance
         impl_class_name = impl.__name__
-        fp8_per_token_head = (
-            attn_configs.kv_cache_dtype == KvCacheDataType.FP8
-            and getattr(attn_configs, "fp8_kv_cache_scale_mode", "per_tensor")
-            == "per_token_head"
-        )
         if fp8_per_token_head and impl_class_name not in FP8_PER_TOKEN_HEAD_MHA_IMPS:
             continue
 

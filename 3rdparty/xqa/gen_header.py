@@ -37,7 +37,9 @@ void {func_name}(cudaDeviceProp const& prop, uint32_t nbKHeads,
     uint32_t maxSeqLen, uint32_t const* seqLen,
     uint32_t batchSize,
     float const* __restrict__ kvCacheScale, // Device memory scalar. Same scale for K and V cache. Used only for
-                                            // int8/fp8 KV cache.
+                                            // int8/fp8 KV cache when scale cache is null.
+    float const* __restrict__ kScaleCache,
+    float const* __restrict__ vScaleCache,
 '''
 
     if is_spec:
@@ -60,8 +62,10 @@ if __name__ == "__main__":
     with open(args.output, 'w') as f:
         f.write(gen_inc())
         for head_dim in [64, 128, 256]:
-            for page_size in [16, 32, 64, 128]:
+            for page_size in [16, 32, 64, 128, 1024]:
                 for group_size in [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]:
+                    if page_size == 1024 and not (head_dim == 256 and group_size == 4):
+                        continue
                     for input_type in ["__nv_bfloat16", "half"]:
                         for kv_cache_type in [input_type, "__nv_fp8_e4m3"]:
                             for output_type in [input_type, "__nv_fp8_e4m3"]:

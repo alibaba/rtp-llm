@@ -67,6 +67,18 @@ py_test(
     },
 )
 
+py_test(
+    name = "test_triton_fp8_mha",
+    srcs = [
+        "test_triton_fp8_mha.py",
+    ],
+    deps = py_test_deps,
+    tags = ["H20"],
+    exec_properties = {
+        'gpu': 'H20',
+    },
+)
+
 # TRT attention tests - organized in trt_tests/ subdirectory
 py_test(
     name = "test_trt_nonpadded",
@@ -200,4 +212,3 @@ py_test(
         'gpu': 'H20',
     },
 )
-

@@ -5,6 +5,12 @@ from typing import Any, Optional, Type
 import torch
 
 from rtp_llm.models_py.modules.factory.attention import common
+from rtp_llm.models_py.modules.factory.attention.cuda_impl.flashinfer_rotary_emb import (
+    MhaRotaryEmbeddingOp,
+)
+from rtp_llm.models_py.modules.factory.attention.cuda_impl.kv_cache_write_op import (
+    KVCacheWriteOp,
+)
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import FMHAImplBase
 from rtp_llm.models_py.utils.arch import get_num_device_sms
 from rtp_llm.ops import (
@@ -13,12 +19,14 @@ from rtp_llm.ops import (
     FMHAType,
     KvCacheDataType,
     ParallelismConfig,
+    RopeStyle,
 )
 from rtp_llm.ops.compute_ops import (
     FusedRopeKVCacheDecodeOp,
     LayerKVCache,
     PyAttentionInputs,
     XQAAttnOp,
+    rtp_llm_ops,
 )
 
 # Constants
@@ -68,13 +76,49 @@ class XQAImpl(FMHAImplBase):
         parallelism_config: Optional[ParallelismConfig] = None,
     ) -> None:
         self.need_rope_kv_cache = attn_configs.need_rope_kv_cache
+        self.attn_configs = attn_configs
+        self.use_fp8_per_token_head = (
+            attn_configs.kv_cache_dtype == KvCacheDataType.FP8
+            and getattr(attn_configs, "fp8_kv_cache_scale_mode", "per_tensor")
+            == "per_token_head"
+        )
         self.fmha_impl = XQAAttnOp(attn_configs)
-        self.rope_kvcache_impl = FusedRopeKVCacheDecodeOp(attn_configs)
+        if self.use_fp8_per_token_head:
+            self.rope_kvcache_impl = None
+            self.rope_impl = (
+                None
+                if attn_configs.rope_config.style == RopeStyle.No
+                else MhaRotaryEmbeddingOp(attn_configs)
+            )
+            self.kv_cache_write_op = KVCacheWriteOp(
+                num_kv_heads=attn_configs.kv_head_num,
+                head_size=attn_configs.size_per_head,
+                token_per_block=attn_configs.kernel_tokens_per_block,
+                fp8_kv_cache_scale_mode="per_token_head",
+                kv_cache_dtype=attn_configs.kv_cache_dtype,
+            )
+        else:
+            self.rope_kvcache_impl = FusedRopeKVCacheDecodeOp(attn_configs)
+            self.rope_impl = None
+            self.kv_cache_write_op = None
 
         self.attn_inputs = attn_inputs
 
         self.fmha_params = self.fmha_impl.prepare(attn_inputs)
-        self.rope_params = self.rope_kvcache_impl.prepare(attn_inputs)
+        if self.use_fp8_per_token_head:
+            self.rope_params = rtp_llm_ops.FlashInferMlaAttnParams()
+            self.rope_params.fill_params(
+                attn_inputs.prefix_lengths,
+                attn_inputs.sequence_lengths,
+                attn_inputs.input_lengths,
+                attn_inputs.kv_cache_kernel_block_id_host,
+                attn_configs.kernel_tokens_per_block,
+            )
+            if self.rope_impl is not None:
+                self.rope_impl.set_params(self.rope_params)
+            self.kv_cache_write_op.set_params(self.rope_params)
+        else:
+            self.rope_params = self.rope_kvcache_impl.prepare(attn_inputs)
         self.write_cache_store_impl = common.create_write_cache_store_impl(attn_inputs)
         # C++ XQAParams.sequence_lengths shares storage with this tensor.
         # Keep a reference so prepare_cuda_graph can update it in-place.
@@ -87,13 +131,42 @@ class XQAImpl(FMHAImplBase):
         fmha_impl = XQAAttnOp(attn_configs)
         return fmha_impl.support(attn_inputs)
 
+    def _split_qkv(
+        self, qkv: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        head_dim = self.attn_configs.size_per_head
+        q, k, v = torch.split(
+            qkv.reshape(qkv.shape[0], -1),
+            [
+                head_dim * self.attn_configs.head_num,
+                head_dim * self.attn_configs.kv_head_num,
+                head_dim * self.attn_configs.kv_head_num,
+            ],
+            dim=-1,
+        )
+        q = q.reshape(q.shape[0], self.attn_configs.head_num, head_dim)
+        k = k.reshape(q.shape[0], self.attn_configs.kv_head_num, head_dim)
+        v = v.reshape(q.shape[0], self.attn_configs.kv_head_num, head_dim)
+        return q, k, v
+
     def forward(
         self,
         qkv: torch.Tensor,
         kv_cache: Optional[LayerKVCache],
         layer_idx: int = 0,
     ) -> torch.Tensor:
-        if self.need_rope_kv_cache:
+        if self.use_fp8_per_token_head:
+            assert (
+                kv_cache is not None
+            ), "kv_cache is required for FP8 per-token-head XQA"
+            if self.need_rope_kv_cache and self.rope_impl is not None:
+                q, k, v = self.rope_impl.forward(qkv)
+            else:
+                q, k, v = self._split_qkv(qkv)
+            assert self.kv_cache_write_op is not None
+            self.kv_cache_write_op.forward(k, v, kv_cache)
+            fmha_input = q
+        elif self.need_rope_kv_cache:
             fmha_input = self.rope_kvcache_impl.forward(qkv, kv_cache, self.rope_params)
         else:
             fmha_input = qkv
@@ -105,13 +178,28 @@ class XQAImpl(FMHAImplBase):
         return self.fmha_impl.forward(fmha_input, kv_cache, self.fmha_params)
 
     def prepare_cuda_graph(self, attn_inputs: PyAttentionInputs):
-        common.update_trt_params(
-            self.fmha_impl,
-            self.rope_kvcache_impl,
-            self.fmha_params,
-            self.rope_params,
-            attn_inputs,
-        )
+        if self.use_fp8_per_token_head:
+            self.rope_params.fill_params(
+                attn_inputs.prefix_lengths,
+                attn_inputs.sequence_lengths,
+                attn_inputs.input_lengths,
+                attn_inputs.kv_cache_kernel_block_id_host,
+                self.attn_configs.kernel_tokens_per_block,
+                True,
+            )
+            new_fmha_params = self.fmha_impl.prepare(attn_inputs)
+            common.copy_kv_cache_offset(
+                self.fmha_params.kv_cache_offset,
+                new_fmha_params.kv_cache_offset,
+            )
+        else:
+            common.update_trt_params(
+                self.fmha_impl,
+                self.rope_kvcache_impl,
+                self.fmha_params,
+                self.rope_params,
+                attn_inputs,
+            )
         # update_trt_params only copies kv_cache_offset. The TRT XQA kernel also
         # reads sequence_lengths via the captured data_ptr(), so we must update
         # the data in-place at the address recorded during CUDA graph capture.

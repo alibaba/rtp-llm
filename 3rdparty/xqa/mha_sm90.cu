@@ -389,11 +389,21 @@ warpGrpApplyMask(Gemm0Acc& acc, SpecDec const& specDec, uint32_t cacheSeqLen, ui
 __device__ RegColWiseVec computeWarpGrpColMax_sync(CtaBarrier&     warpGrpBar,
                                                    ShmQWiseVec&    smemColMax,
                                                    Gemm0Acc const& src);
-__device__ void          warpGrpApplyMask(uint32_t warpRank, Gemm0Acc& acc, uint32_t validRowBeg, uint32_t validRowEnd);
-__device__ void          warpGrpOnlineSoftmax(Gemm0Acc& acc, RegColWiseVec const& colMax);
-__device__ RegColWiseVec computeWarpColSum(Gemm0Acc& src);
-__device__ void          storeGemm0AccToShm(
-             uint32_t warpRank, uint32_t lane, SharedMem::XBuffer& smemX, CtaBarrier& barConsumed, Gemm0Acc const& acc);
+	__device__ void          warpGrpApplyMask(uint32_t warpRank, Gemm0Acc& acc, uint32_t validRowBeg, uint32_t validRowEnd);
+	__device__ void          warpGrpOnlineSoftmax(Gemm0Acc& acc, RegColWiseVec const& colMax);
+	__device__ RegColWiseVec computeWarpColSum(Gemm0Acc& src);
+#if USE_PAGED_KV_CACHE
+	__device__ void          applyPagedKVScaleToGemm0Acc(
+	             uint32_t                                                   warpRank,
+	             Gemm0Acc&                                                  acc,
+	             float const* __restrict__                                  scaleCache,
+	             Vec<KVCachePageIndex, SharedMem::nbPagesPerTile> const&    pages,
+	             uint32_t                                                   idxTile,
+	             uint32_t                                                   idxHeadGrp,
+	             uint32_t                                                   nbKHeads);
+#endif
+	__device__ void          storeGemm0AccToShm(
+	             uint32_t warpRank, uint32_t lane, SharedMem::XBuffer& smemX, CtaBarrier& barConsumed, Gemm0Acc const& acc);
 __device__ RegColWiseVec loadShmColWiseVecWithDup(ShmQWiseVec const& smemVec);
 #else
 __device__ RegRowWiseVec computeWarpGrpRowMax_sync(uint32_t warpRank, ShmQWiseVec& smemColMax, Gemm0Acc const& src);
@@ -622,7 +632,9 @@ __launch_bounds__(128 * 3, 1)
 #endif
                          uint32_t const batchSize,
                          float const* __restrict__ const kvCacheScale,  // Device memory scalar. Same scale for K and V
-                                                                        // cache. Used only for int8/fp8 KV cache.
+                                                                        // cache when per-token scale cache is null.
+                         float const* __restrict__ const kScaleCache,
+                         float const* __restrict__ const vScaleCache,
                          __grid_constant__ CUtensorMap const tensorMap,
 #if SPEC_DEC
                          SpecDecParams const specDecParams,
@@ -761,7 +773,8 @@ __launch_bounds__(128 * 3, 1)
             unused(b.consumed.arrive());
         }
 
-        float const qkScale = qScale * (isKVCacheQuantized ? kvCacheScale[0] : 1.f)
+        bool const  hasPerTokenScale = isKVCacheQuantized && kScaleCache != nullptr && vScaleCache != nullptr;
+        float const qkScale = qScale * (isKVCacheQuantized && !hasPerTokenScale ? kvCacheScale[0] : 1.f)
                               * rsqrtf(validElemsPerHead);  // qkScale is applied onto Q*K.T before softmax.
         uint32_t const warpRank = warpIdx.x;
 
@@ -851,6 +864,11 @@ __launch_bounds__(128 * 3, 1)
 #endif
             // apply qkScale
             acc = acc * qkScale;
+            if (hasPerTokenScale) {
+#if SWAP_AB && USE_PAGED_KV_CACHE
+                applyPagedKVScaleToGemm0Acc(warpRank, acc, kScaleCache, smem.pages[0], idxKTile, idxHeadGrp, nbKHeads);
+#endif
+            }
 
             // apply mask
 #if SPEC_DEC
@@ -888,6 +906,11 @@ __launch_bounds__(128 * 3, 1)
             RegRowWiseVec const rowSum = computeWarpRowSum(acc);
 #endif
 
+            if (hasPerTokenScale) {
+#if SWAP_AB && USE_PAGED_KV_CACHE
+                applyPagedKVScaleToGemm0Acc(warpRank, acc, vScaleCache, smem.pages[0], idxKTile, idxHeadGrp, nbKHeads);
+#endif
+            }
             // map 1 to fp8_max before conversion to fp8
             acc = acc * kE4M3_MAX;
 
@@ -954,7 +977,8 @@ __launch_bounds__(128 * 3, 1)
 #else
         constexpr float oScale = 1.F;
 #endif
-        float const xvoScale = xScale * (isKVCacheQuantized ? kvCacheScale[0] : 1.f) * oScale;
+        bool const  hasPerTokenScale = isKVCacheQuantized && kScaleCache != nullptr && vScaleCache != nullptr;
+        float const xvoScale = xScale * (isKVCacheQuantized && !hasPerTokenScale ? kvCacheScale[0] : 1.f) * oScale;
 
         Gemm1Acc acc{};  // init to zeros to avoid runtime checking for first gmma instruction.
         gmma::fence();
@@ -1857,6 +1881,60 @@ __device__ inline void warpGrpOnlineSoftmax(Gemm0Acc& acc, RegColWiseVec const& 
         }
     }
 }
+
+#if USE_PAGED_KV_CACHE
+__device__ inline float loadPagedKVScale(float const* __restrict__                               scaleCache,
+                                         Vec<KVCachePageIndex, SharedMem::nbPagesPerTile> const& pages,
+                                         uint32_t                                                idxTile,
+                                         uint32_t                                                tokenInTile,
+                                         uint32_t                                                idxHeadGrp,
+                                         uint32_t                                                nbKHeads) {
+    if (scaleCache == nullptr) {
+        return 1.f;
+    }
+    uint32_t page;
+    uint32_t slot;
+    if constexpr (gemm0CtaTileNbTokens < tokensPerPage) {
+        page = pages[0];
+        slot = (gemm0CtaTileNbTokens * idxTile + tokenInTile) % tokensPerPage;
+    } else {
+        uint32_t const pageOffset = tokenInTile / tokensPerPage;
+        if constexpr (SharedMem::nbPagesPerTile == 1) {
+            page = pages[0];
+        } else {
+            page = pages[pageOffset];
+        }
+        slot = tokenInTile % tokensPerPage;
+    }
+    return scaleCache[page * 2 * nbKHeads * tokensPerPage + idxHeadGrp * tokensPerPage + slot];
+}
+
+__device__ inline void applyPagedKVScaleToGemm0Acc(
+    uint32_t                                                   warpRank,
+    Gemm0Acc&                                                  acc,
+    float const* __restrict__                                  scaleCache,
+    Vec<KVCachePageIndex, SharedMem::nbPagesPerTile> const&    pages,
+    uint32_t                                                   idxTile,
+    uint32_t                                                   idxHeadGrp,
+    uint32_t                                                   nbKHeads) {
+    uint32_t const idxQuad = laneId() / 4;
+#pragma unroll
+    for (uint32_t m = 0; m < acc.rows; m++) {
+#pragma unroll
+        for (uint32_t i = 0; i < GmmaAccCoreMat::rows; i++) {
+            uint32_t const tokenInTile = 64 * m + 16 * warpRank + 8 * i + idxQuad;
+            float const scale = loadPagedKVScale(scaleCache, pages, idxTile, tokenInTile, idxHeadGrp, nbKHeads);
+#pragma unroll
+            for (uint32_t n = 0; n < acc.cols; n++) {
+#pragma unroll
+                for (uint32_t j = 0; j < GmmaAccCoreMat::cols; j++) {
+                    acc(m, n)(i, j) *= scale;
+                }
+            }
+        }
+    }
+}
+#endif
 
 __device__ inline RegColWiseVec computeWarpColSum(Gemm0Acc& src) {
     auto colSum = RegColWiseVec::filled(Vec<float, GmmaAccCoreMat::cols>::filled(0));
@@ -2938,7 +3016,9 @@ void XQA_FUNC_SM90(cudaDeviceProp const& prop,
 #endif
                    uint32_t batchSize,
                    float const* __restrict__ kvCacheScale,  // Device memory scalar. Same scale for K and V cache. Used
-                                                            // only for int8/fp8 KV cache.
+                                                            // only for int8/fp8 KV cache when scale cache is null.
+                   float const* __restrict__ kScaleCache,
+                   float const* __restrict__ vScaleCache,
 #if SPEC_DEC
                    void* specDecParamsPtr,
 #endif
@@ -3033,6 +3113,8 @@ void XQA_FUNC_SM90(cudaDeviceProp const& prop,
 #endif
                                                batchSize,
                                                kvCacheScale,
+                                               kScaleCache,
+                                               vScaleCache,
                                                tensorMap,
 #if SPEC_DEC
                                                specDecParams,
@@ -3076,6 +3158,8 @@ void XQA_FUNC_SM90(cudaDeviceProp const& prop,
 #endif
                        batchSize,
                        kvCacheScale,
+                       kScaleCache,
+                       vScaleCache,
                        tensorMap,
                        semaphores,
                        scratch);

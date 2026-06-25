@@ -277,10 +277,12 @@ class AttentionOutputStaticQuantReciprocalTest(unittest.TestCase):
             )
         ]
         weight_info = ModelWeightInfo(weights=[], layer_weights=[layer_weights])
-
-        ModelDeployWeightInfo()._add_attention_output_static_quant_reciprocal(
-            weight_info
+        deploy_weight_info = RecordingDeployWeightInfo(
+            make_database([]),
+            ModelWeightInfo(weights=[], layer_weights=[]),
         )
+
+        deploy_weight_info._add_attention_output_static_quant_reciprocal(weight_info)
 
         self.assertEqual(layer_weights, weight_info.layer_weights[0])
         self.assertEqual(len(layer_weights), 1)
@@ -293,10 +295,12 @@ class AttentionOutputStaticQuantReciprocalTest(unittest.TestCase):
             )
         ]
         weight_info = ModelWeightInfo(weights=[], layer_weights=[layer_weights])
-
-        ModelDeployWeightInfo()._add_attention_output_static_quant_reciprocal(
-            weight_info
+        deploy_weight_info = RecordingDeployWeightInfo(
+            make_database([]),
+            ModelWeightInfo(weights=[], layer_weights=[]),
         )
+
+        deploy_weight_info._add_attention_output_static_quant_reciprocal(weight_info)
 
         self.assertEqual(len(layer_weights), 2)
         self.assertEqual(

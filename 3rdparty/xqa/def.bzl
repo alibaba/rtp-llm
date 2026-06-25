@@ -46,8 +46,10 @@ def build_lib(head_dim, page_size, group_size, xqa_name, xqa_kernel_name, input_
 def compile_xqa_libs():
     xqa_libs = []
     for head_dim in [64, 128, 256]:
-        for page_size in [16, 32, 64, 128]:
+        for page_size in [16, 32, 64, 128, 1024]:
             for group_size in [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]:
+                if page_size == 1024 and not (head_dim == 256 and group_size == 4):
+                    continue
                 for input_type in ["__nv_bfloat16", "half"]:
                     for kv_cache_type in [input_type, "__nv_fp8_e4m3"]:
                         for output_type in [input_type, "__nv_fp8_e4m3"]:
