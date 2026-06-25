@@ -943,7 +943,7 @@ class JitCacheManagerTest(unittest.TestCase):
         manager.prepare()
         archive_paths = []
 
-        def write_local_archive(archive: Path):
+        def write_local_archive(archive: Path, deadline_s: float = 0.0):
             archive_paths.append(archive)
             self.assertEqual(archive.parent, manager.config.local_root)
             archive.write_bytes(b"local snapshot bytes")

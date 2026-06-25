@@ -1019,7 +1019,9 @@ class JitCacheManager:
         if self.enabled and self.owns_startup_lock and self.remote_cache_available:
             with suppress(Exception):
                 self.sync_once("periodic_flush")
-        self.sync_executor.shutdown(wait=False, cancel_futures=True)
+        self.sync_executor.shutdown(wait=True, cancel_futures=True)
+        with self._lock:
+            self._snapshot_publishing = False
         self.release_startup_lock()
 
     def release_startup_lock(self) -> None:
