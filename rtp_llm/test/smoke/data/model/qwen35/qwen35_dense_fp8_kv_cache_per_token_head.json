@@ -1,7 +1,7 @@
 {
-    "_comment": "Qwen3-5-Dense-4B FP8 KV-cache per-token-head reuse smoke. The prompt is longer than seq_size_per_block=1024 and expected device-cache reuse length is aligned to 10 blocks.",
+    "_comment": "Qwen3.5-Dense-4B FP8 KV-cache per-token-head reuse smoke. The prompt is longer than seq_size_per_block=1024 and expected device-cache reuse length is aligned to 10 blocks.",
     "model_type": "qwen35_dense",
-    "model_path": "/mnt/nas1/hf/Qwen3-5-Dense-4B",
+    "model_path": "/mnt/nas1/hf/Qwen3.5-Dense-4B",
     "query_result": [
         {
             "query": {

@@ -1,24 +1,27 @@
 import copy
 import json
-from typing import Any, Dict, List, Optional, Union
 import os
+from typing import Any, Dict, List, Optional, Set, Union
+
 import torch
 from pydantic import BaseModel
 from smoke.base_comparer import BaseComparer
-from smoke.common_def import QueryStatus, SmokeException, REL_PATH
+from smoke.common_def import REL_PATH, QueryStatus, SmokeException
 from smoke.utils import create_temporary_copy
-from rtp_llm.utils.base_model_datatypes import AuxInfo
+
 from rtp_llm.openai.api_datatype import (
     ChatCompletionRequest,
     ChatCompletionResponse,
     ChatCompletionStreamResponse,
 )
+from rtp_llm.utils.base_model_datatypes import AuxInfo
 
 
 class OpenaiComparer(BaseComparer):
     def __init__(self, *args: Any, **kwargs: Any):
         super().__init__(*args, **kwargs)
         self.is_stream = self.qr_info["query"].get("stream", False)
+        self._expect_aux_info_fields: Optional[Set[str]] = None
 
     def format_query(self, query_json: Dict[str, Any]) -> BaseModel:
         query_info = ChatCompletionRequest(**query_json)
@@ -26,10 +29,17 @@ class OpenaiComparer(BaseComparer):
         return query_info
 
     def format_result(self, result_json: Dict[str, Any]) -> BaseModel:
-        if result_json.get('extra_outputs', None) is not None:
-            path = result_json['extra_outputs'].get('all_hidden_states', None)
+        if result_json is self.qr_info.get("result"):
+            aux_info = result_json.get("aux_info")
+            self._expect_aux_info_fields = (
+                set(aux_info.keys()) if isinstance(aux_info, dict) else None
+            )
+        if result_json.get("extra_outputs", None) is not None:
+            path = result_json["extra_outputs"].get("all_hidden_states", None)
             if path is not None and isinstance(path, str):
-                result_json['extra_outputs']['all_hidden_states'] = torch.load(os.path.join(REL_PATH, path)).numpy().tolist()
+                result_json["extra_outputs"]["all_hidden_states"] = (
+                    torch.load(os.path.join(REL_PATH, path)).numpy().tolist()
+                )
         if self.is_stream:
             return ChatCompletionStreamResponse(**result_json)
         else:
@@ -408,13 +418,15 @@ class OpenaiComparer(BaseComparer):
             return
 
         obj1, obj2 = expect_aux, actual_aux
-        ignore_fields = set([
-            "cost_time",
-            "wait_time",
-            "first_token_cost_time",
-            "role_addrs.http_port",
-            "role_addrs.grpc_port",
-        ])
+        ignore_fields = set(
+            [
+                "cost_time",
+                "wait_time",
+                "first_token_cost_time",
+                "role_addrs.http_port",
+                "role_addrs.grpc_port",
+            ]
+        )
         top_level_ignore = set()
         nested_ignore: Dict[str, set] = {}
         for field in ignore_fields:
@@ -427,7 +439,7 @@ class OpenaiComparer(BaseComparer):
             else:
                 top_level_ignore.add(field)
 
-        all_fields = set(obj1.__annotations__.keys())
+        all_fields = self._expect_aux_info_fields or set(obj1.__annotations__.keys())
         fields_to_compare = all_fields - top_level_ignore
 
         for field in fields_to_compare:
