@@ -164,6 +164,14 @@ class OpenaiEndpoint(object):
             f"use stop_words_str_list [{self.stop_words_str_list}], "
             f"stop_words_id_list [{self.stop_words_id_list}]"
         )
+        set_frontend_stop_word_ids = getattr(
+            self.backend_rpc_server_visitor, "set_frontend_stop_word_ids", None
+        )
+        if callable(set_frontend_stop_word_ids):
+            set_frontend_stop_word_ids(
+                eos_token_id=self.eos_token_id,
+                stop_word_ids_list=self.stop_words_id_list,
+            )
 
     async def list_models(self):
         model_card = ModelCard(id=self.model_name)

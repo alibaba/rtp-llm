@@ -1,6 +1,7 @@
 import logging
+import os
 import time
-from typing import TYPE_CHECKING, AsyncGenerator, List, Optional
+from typing import TYPE_CHECKING, Any, AsyncGenerator, List, Optional
 
 import torch
 
@@ -31,6 +32,76 @@ if TYPE_CHECKING:
     from rtp_llm.config.py_config_modules import PyEnvConfigs
 
 route_logger = logging.getLogger("route_logger")
+_STRIP_FRONTEND_STOP_TOKEN_IDS = "RTP_LLM_STRIP_FRONTEND_STOP_TOKEN_IDS"
+_TRUE_VALUES = {"1", "true", "t", "yes", "y", "on"}
+
+
+def _strip_frontend_stop_token_ids_enabled() -> bool:
+    value = os.environ.get(_STRIP_FRONTEND_STOP_TOKEN_IDS)
+    return value is not None and value.strip().lower() in _TRUE_VALUES
+
+
+def _iter_ints(value: Any):
+    if value is None or isinstance(value, bool):
+        return
+    if isinstance(value, int):
+        yield value
+        return
+    if isinstance(value, str):
+        text = value.strip()
+        if text and text.lstrip("-").isdigit():
+            yield int(text)
+        return
+    if isinstance(value, (list, tuple, set)):
+        for item in value:
+            yield from _iter_ints(item)
+
+
+def _normalize_stop_ids(eos_token_id=None, stop_word_ids_list=None) -> List[List[int]]:
+    stop_ids = [[token_id] for token_id in _iter_ints(eos_token_id)]
+    for ids in stop_word_ids_list or []:
+        seq = [int(token_id) for token_id in _iter_ints(ids)]
+        if seq:
+            stop_ids.append(seq)
+    seen = set()
+    result = []
+    for seq in stop_ids:
+        key = tuple(seq)
+        if key not in seen:
+            seen.add(key)
+            result.append(seq)
+    return result
+
+
+def _first_stop_index(token_ids: List[int], stop_ids: List[List[int]]) -> int:
+    first = len(token_ids)
+    for seq in stop_ids:
+        for i in range(len(token_ids) - len(seq) + 1):
+            if token_ids[i : i + len(seq)] == seq:
+                first = min(first, i)
+                break
+    return first
+
+
+def _pending_stop_prefix_len(token_ids: List[int], stop_ids: List[List[int]]) -> int:
+    max_len = max((len(seq) for seq in stop_ids), default=1) - 1
+    for suffix_len in range(min(max_len, len(token_ids)), 0, -1):
+        suffix = token_ids[-suffix_len:]
+        if any(
+            len(seq) > suffix_len and seq[:suffix_len] == suffix for seq in stop_ids
+        ):
+            return suffix_len
+    return 0
+
+
+def _to_output_ids_tensor(token_ids: List[int], like: torch.Tensor) -> torch.Tensor:
+    shape = list(like.shape) or [0]
+    shape[-1] = len(token_ids)
+    if token_ids:
+        return torch.tensor(token_ids, dtype=like.dtype, device=like.device).reshape(
+            shape
+        )
+    return torch.empty(shape, dtype=like.dtype, device=like.device)
 
 
 class BackendRPCServerVisitor:
@@ -70,6 +141,7 @@ class BackendRPCServerVisitor:
         self.pd_sep_config = pd_sep_config
         self.sp_config = sp_config
         self.source_role = source_role
+        self.frontend_stop_word_ids_list: List[List[int]] = []
         self.source_ip = str(getattr(server_config, "ip", "") or "")
         assert self.max_seq_len > 0
 
@@ -401,6 +473,38 @@ class BackendRPCServerVisitor:
                 or str(input.request_id)
             )
 
+    def set_frontend_stop_word_ids(
+        self, eos_token_id=None, stop_word_ids_list=None
+    ) -> None:
+        self.frontend_stop_word_ids_list = _normalize_stop_ids(
+            eos_token_id=eos_token_id,
+            stop_word_ids_list=stop_word_ids_list,
+        )
+
+    @staticmethod
+    def strip_frontend_stop_word_ids(
+        outputs: GenerateOutputs,
+        stop_word_ids_list: List[List[int]],
+        pending: dict[int, List[int]],
+    ) -> GenerateOutputs:
+        for index, output in enumerate(outputs.generate_outputs):
+            if output.output_ids is None:
+                continue
+            token_ids = pending.pop(index, [])
+            token_ids.extend(
+                output.output_ids.detach().cpu().reshape(-1).int().tolist()
+            )
+            stop_index = _first_stop_index(token_ids, stop_word_ids_list)
+            if output.finished or stop_index < len(token_ids):
+                token_ids = token_ids[:stop_index]
+            else:
+                pending_len = _pending_stop_prefix_len(token_ids, stop_word_ids_list)
+                if pending_len:
+                    pending[index] = token_ids[-pending_len:]
+                    token_ids = token_ids[:-pending_len]
+            output.output_ids = _to_output_ids_tensor(token_ids, output.output_ids)
+        return outputs
+
     @torch.inference_mode()
     async def enqueue(
         self, input: GenerateInput
@@ -458,7 +562,23 @@ class BackendRPCServerVisitor:
 
         async def stream_with_aux_info():
             try:
+                strip_stop_ids: List[List[int]] = []
+                if _strip_frontend_stop_token_ids_enabled():
+                    request_stop_ids = getattr(
+                        input.generate_config, "stop_words_list", None
+                    )
+                    strip_stop_ids = _normalize_stop_ids(
+                        stop_word_ids_list=(
+                            self.frontend_stop_word_ids_list
+                            + list(request_stop_ids or [])
+                        )
+                    )
+                pending_stop_prefix: dict[int, List[int]] = {}
                 async for output in stream:
+                    if strip_stop_ids:
+                        output = self.strip_frontend_stop_word_ids(
+                            output, strip_stop_ids, pending_stop_prefix
+                        )
                     yield output
             except BaseException as e:
                 set_aux_info(e)
