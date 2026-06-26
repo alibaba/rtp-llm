@@ -307,8 +307,9 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
                 char buf[256];
                 snprintf(buf,
                          sizeof(buf),
-                         "{id=%ld input=%d prefix=%d reuse=%d ctx=%d grp=%ld/%d tokens=%d} ",
+                         "{id=%ld trace_id=%s input=%d prefix=%d reuse=%d ctx=%d grp=%ld/%d tokens=%d} ",
                          s->streamId(),
+                         s->traceId().empty() ? "-" : s->traceId().c_str(),
                          s->inputLength(),
                          s->prefixLength(),
                          s->reuseLength(),
@@ -334,6 +335,19 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
                              stream_groups.totalContextBatchSize(),
                              stream_groups.modelExecuteTokenSize(),
                              executor_collector.model_forward_us);
+        }
+        if (tp_rank_ == 0 && stream_groups.totalDecodeBatchSize() > 0) {
+            std::string details;
+            for (auto& s : stream_groups.decodeStreams()) {
+                char buf[256];
+                snprintf(buf, sizeof(buf), "{id=%ld trace_id=%s seq=%d tokens=%d} ",
+                         s->streamId(), s->traceId().empty() ? "-" : s->traceId().c_str(),
+                         s->seqLength(), s->currentExecuteTokenSize());
+                details += buf;
+            }
+            RTP_LLM_ACCESS_LOG_INFO("decode_step_begin: gen_batch=%zu total_tokens=%zu streams=[%s]",
+                                    stream_groups.totalDecodeBatchSize(),
+                                    stream_groups.modelExecuteTokenSize(), details.c_str());
         }
     }
     if (expert_balancer_) {

@@ -255,6 +255,13 @@ void FIFOScheduler::admitWaitingUnits() {
             unit.activate();
             if (unit.alive()) {
                 for (auto& s : unit.streams) {
+                    if (s->isContextStream()) {
+                        RTP_LLM_ACCESS_LOG_INFO("request_activated: %s role=prefill input_len=%d",
+                                                s->streamLogTag().c_str(), s->inputLength());
+                    } else {
+                        RTP_LLM_ACCESS_LOG_INFO("request_activated: %s role=decode seq_len=%d",
+                                                s->streamLogTag().c_str(), s->seqLength());
+                    }
                     accountBatchMetrics(s);
                 }
                 running_.splice(running_.end(), waiting_, it++);
@@ -278,6 +285,11 @@ absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule() {
     for (auto it = running_.begin(); it != running_.end();) {
         it->advance();
         if (!it->alive()) {
+            for (auto& s : it->streams) {
+                RTP_LLM_ACCESS_LOG_INFO("request_finished: %s output_len=%ld iter_count=%ld",
+                                        s->streamLogTag().c_str(),
+                                        s->outputTokenLen(), s->iterCount());
+            }
             it = running_.erase(it);
         } else {
             ++it;
@@ -305,6 +317,13 @@ absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule() {
             if (it->alive()) {
                 activated_count += it->size();
                 for (auto& s : it->streams) {
+                    if (s->isContextStream()) {
+                        RTP_LLM_ACCESS_LOG_INFO("request_activated: %s role=prefill input_len=%d",
+                                                s->streamLogTag().c_str(), s->inputLength());
+                    } else {
+                        RTP_LLM_ACCESS_LOG_INFO("request_activated: %s role=decode seq_len=%d",
+                                                s->streamLogTag().c_str(), s->seqLength());
+                    }
                     admitted_total_tokens += s->contextLength();
                     accountBatchMetrics(s);
                 }

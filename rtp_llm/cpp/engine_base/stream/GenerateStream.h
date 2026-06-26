@@ -462,7 +462,14 @@ public:
     }
 
     /// Log-friendly stream id: numeric ``streamId()`` (``request_id`` / ``inter_request_id``) + ``trace_id`` string.
-    std::string streamLogTag() const;
+    std::string streamLogTag() const {
+        char buf[256];
+        std::string tid = traceId();
+        snprintf(buf, sizeof(buf), "trace_id=%s req_id=%ld",
+                 tid.empty() ? "-" : tid.c_str(),
+                 streamId());
+        return std::string(buf);
+    }
 
     std::vector<BaseLogitsProcessorPtr> getAllLogitsProcessorPtr() const {
         return logits_processor_list_;
