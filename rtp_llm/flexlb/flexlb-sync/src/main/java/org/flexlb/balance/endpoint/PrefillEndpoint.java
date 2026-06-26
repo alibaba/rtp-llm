@@ -55,18 +55,6 @@ public class PrefillEndpoint extends WorkerEndpoint {
         batcher.shutdown();
     }
 
-    public int getBatcherQueueSize() {
-        return batcher.queueSize();
-    }
-
-    public long getBatcherHeadSortKey() {
-        return batcher.headSortKey();
-    }
-
-    public long getBatcherHeadWaitMs() {
-        return batcher.headWaitMs();
-    }
-
     public long batcherWaitMs() {
         return batcher.queueWaitMs();
     }
