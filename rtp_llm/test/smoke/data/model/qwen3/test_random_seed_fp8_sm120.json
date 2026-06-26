@@ -1,0 +1,50 @@
+{
+    "model_type": "qwen_3",
+    "model_path": "/mnt/nas1/hf/models--Qwen--Qwen3-1.7B/snapshots/0060bc56d46589041c1048efd1a397421b1142b5",
+    "tokenizer_path": "/mnt/nas1/hf/models--Qwen--Qwen3-1.7B/snapshots/0060bc56d46589041c1048efd1a397421b1142b5",
+    "query_result": [
+        {
+            "query": {
+                "prompt_batch": [
+                    "$prompt:s5",
+                    "$prompt:s5"
+                ],
+                "generate_config": {
+                    "max_new_tokens": 10,
+                    "top_k": 100,
+                    "random_seed": 46
+                }
+            },
+            "result": {
+                "response_batch": [
+                    {
+                        "response": " I've been exploring Flask and am interested in a"
+                    },
+                    {
+                        "response": " I've been exploring Flask and am interested in a"
+                    }
+                ]
+            }
+        },
+        {
+            "query": {
+                "prompt": "$prompt:s5",
+                "generate_config": {
+                    "num_return_sequences": 2,
+                    "max_new_tokens": 10,
+                    "top_k": 100,
+                    "random_seed": 46
+                },
+                "yield_generator": true
+            },
+            "result": {
+                "response": [
+                    " I know that Django North is a database migration tool",
+                    " Can anyone provide the one with the cleanest code"
+                ],
+                "iter_count": 10,
+                "finished": true
+            }
+        }
+    ]
+}
