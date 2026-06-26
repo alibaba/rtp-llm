@@ -196,11 +196,11 @@ void HybridConfigCreator::setupCacheConfigSpecs(CacheConfig&                    
                                                 const std::vector<std::vector<int>>& full_groups,
                                                 const KVCacheSpecPtr&                linear_spec,
                                                 const KVCacheSpecPtr&                full_spec) {
-    std::vector<GroupBase> groups;
-    std::vector<LayerBase> layers(static_cast<size_t>(config.layer_num));
+    std::vector<GroupInfo> groups;
+    std::vector<LayerInfo> layers(static_cast<size_t>(config.layer_num));
 
     auto append_group = [&](const KVCacheSpecPtr& spec, CacheGroupType type, const std::vector<int>& layer_ids) {
-        GroupBase group;
+        GroupInfo group;
         group.spec      = spec;
         group.policy    = defaultCacheGroupPolicy(type);
         group.layer_ids = layer_ids;

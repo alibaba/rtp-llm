@@ -233,8 +233,8 @@ TEST(HybridPoolConfigCreatorTest, Dsv4SpecOrderControlsFirstSeenGroupOrder) {
     EXPECT_EQ(config.groupIdForLayerTag(0, "swa_kv"), config.groupIdForTag("swa_kv"));
 }
 
-static GroupBase makeTestGroup(const KVCacheSpecPtr& spec, CacheGroupType type, std::vector<int> layer_ids) {
-    GroupBase group;
+static GroupInfo makeTestGroup(const KVCacheSpecPtr& spec, CacheGroupType type, std::vector<int> layer_ids) {
+    GroupInfo group;
     group.spec      = spec;
     group.policy    = defaultCacheGroupPolicy(type);
     group.layer_ids = std::move(layer_ids);
@@ -260,7 +260,7 @@ TEST(CacheConfigTest, SetTopologyInstallsTagAndGroupTopology) {
     csa_spec->store_dtype = DataType::TYPE_UINT8;
     csa_spec->dtype = DataType::TYPE_UINT8;
 
-    std::vector<LayerBase> layers(3);
+    std::vector<LayerInfo> layers(3);
     layers[0].group_ids = {0};
     layers[0].tag_to_gid["swa"] = 0;
     layers[1].group_ids = {0, 1};
@@ -287,7 +287,7 @@ TEST(CacheConfigTest, SetTopologyRejectsMissingLayer) {
 
     auto spec = std::make_shared<MHAKVCacheSpec>();
     spec->tag = "default";
-    std::vector<LayerBase> layers(2);
+    std::vector<LayerInfo> layers(2);
     layers[0].group_ids = {0};
     layers[0].tag_to_gid["default"] = 0;
     EXPECT_THROW(config.setTopology({makeTestGroup(spec, CacheGroupType::FULL, {0})}, std::move(layers)),
@@ -300,7 +300,7 @@ TEST(CacheConfigTest, SetTopologyRejectsEmptyTag) {
     config.layer_all_num = 1;
 
     auto spec = std::make_shared<MHAKVCacheSpec>();
-    std::vector<LayerBase> layers(1);
+    std::vector<LayerInfo> layers(1);
     layers[0].group_ids = {0};
     EXPECT_THROW(config.setTopology({makeTestGroup(spec, CacheGroupType::FULL, {0})}, std::move(layers)),
                  std::exception);
@@ -316,7 +316,7 @@ TEST(CacheConfigTest, SetTopologyAllowsDifferentLayerTags) {
     auto spec1 = std::make_shared<MHAKVCacheSpec>();
     spec1->tag = "linear";
 
-    std::vector<LayerBase> layers(1);
+    std::vector<LayerInfo> layers(1);
     layers[0].group_ids = {0, 1};
     layers[0].tag_to_gid["full"] = 0;
     layers[0].tag_to_gid["linear"] = 1;
@@ -503,13 +503,14 @@ TEST(HybridPoolConfigCreatorTest, DecoupledPhysicalAndKernelBlockSizeUsesPerGrou
     auto config = CacheConfigCreator::createBasicConfig(mc, pc, kv_cache_config, false, 0);
 
     ASSERT_EQ(static_cast<size_t>(config.groupNums()), 7u);
-    ASSERT_EQ(config.group_seq_size_per_block.size(), 7u);
+    const auto group_seq_size_per_block = config.groupSeqSizePerBlockSnapshot();
+    ASSERT_EQ(group_seq_size_per_block.size(), 7u);
 
     EXPECT_EQ(config.seq_size_per_block, 16384u);
     EXPECT_EQ(config.kernel_seq_size_per_block, 128u);
     EXPECT_EQ(config.kernelBlocksPerKvBlock(), 128u);
-    for (size_t gid = 0; gid < config.group_seq_size_per_block.size(); ++gid) {
-        EXPECT_EQ(config.group_seq_size_per_block[gid], 16384u);
+    for (size_t gid = 0; gid < group_seq_size_per_block.size(); ++gid) {
+        EXPECT_EQ(group_seq_size_per_block[gid], 16384u);
     }
 
     auto* csa_kv = dynamic_cast<CompressedKVCacheSpec*>(config.specForGroup(gidForTag(config, "csa_kv")).get());
@@ -572,7 +573,7 @@ TEST(HybridPoolConfigCreatorTest, PrefillCpShardedSlicesFixedAndSwaPhysicalBlock
     for (const auto& tag : {"indexer_state", "csa_state", "hca_state", "swa_kv"}) {
         const auto gid = gidForTag(config, tag);
         EXPECT_EQ(config.kvBlockStrideBytesForGroup(gid), config.specForGroup(gid)->block_size_bytes());
-        EXPECT_EQ(config.group_seq_size_per_block[gid], kDsv4TokensPerBlock * 4u) << "tag=" << tag;
+        EXPECT_EQ(config.groupSeqSizePerBlockForGroup(gid), kDsv4TokensPerBlock * 4u) << "tag=" << tag;
     }
 
     pc.role_type       = RoleType::DECODE;
@@ -880,7 +881,7 @@ TEST(HybridPoolConfigCreatorTest, PagedPoolsShareTokensPerBlock) {
         auto              config =
             CacheConfigCreator::createBasicConfig(makeProModelConfig(), pc, makeDsv4KvCacheConfig(), false, 0);
         for (const auto& tag : {"csa_kv", "hca_kv", "indexer_kv", "swa_kv"}) {
-            EXPECT_EQ(config.group_seq_size_per_block[gidForTag(config, tag)], kDsv4TokensPerBlock) << tag;
+            EXPECT_EQ(config.groupSeqSizePerBlockForGroup(gidForTag(config, tag)), kDsv4TokensPerBlock) << tag;
         }
     }
     // Flash config
@@ -889,7 +890,7 @@ TEST(HybridPoolConfigCreatorTest, PagedPoolsShareTokensPerBlock) {
         auto              config =
             CacheConfigCreator::createBasicConfig(makeFlashModelConfig(), pc, makeDsv4KvCacheConfig(), false, 0);
         for (const auto& tag : {"csa_kv", "hca_kv", "indexer_kv"}) {
-            EXPECT_EQ(config.group_seq_size_per_block[gidForTag(config, tag)], kDsv4TokensPerBlock) << tag;
+            EXPECT_EQ(config.groupSeqSizePerBlockForGroup(gidForTag(config, tag)), kDsv4TokensPerBlock) << tag;
         }
     }
 }
@@ -1435,8 +1436,8 @@ TEST(HybridPoolConfigCreatorTest, DecodePrefillCp8MtpGenNum2ExpandsFixedAndSwaSl
     for (const auto& tag : {"indexer_state", "csa_state", "hca_state", "swa_kv"}) {
         const auto prefill_gid = gidForTag(prefill_config, tag);
         const auto decode_gid  = gidForTag(decode_config, tag);
-        EXPECT_EQ(prefill_config.group_seq_size_per_block[prefill_gid], kDsv4TokensPerBlock * cp_size) << tag;
-        EXPECT_EQ(decode_config.group_seq_size_per_block[decode_gid], kDsv4TokensPerBlock * cp_size) << tag;
+        EXPECT_EQ(prefill_config.groupSeqSizePerBlockForGroup(prefill_gid), kDsv4TokensPerBlock * cp_size) << tag;
+        EXPECT_EQ(decode_config.groupSeqSizePerBlockForGroup(decode_gid), kDsv4TokensPerBlock * cp_size) << tag;
     }
 }
 
@@ -1470,8 +1471,8 @@ TEST(HybridPoolConfigCreatorTest, DecodeExplicitPrefillCpSizeHandlesDp16) {
         ASSERT_NE(decode_spec, nullptr) << tag;
         const auto expected_entries = prefill_spec->entries_per_block * cp_size;
         EXPECT_EQ(decode_spec->entries_per_block, expected_entries) << tag;
-        EXPECT_EQ(prefill_config.group_seq_size_per_block[prefill_gid], kDsv4TokensPerBlock * cp_size) << tag;
-        EXPECT_EQ(decode_config.group_seq_size_per_block[decode_gid], kDsv4TokensPerBlock * cp_size) << tag;
+        EXPECT_EQ(prefill_config.groupSeqSizePerBlockForGroup(prefill_gid), kDsv4TokensPerBlock * cp_size) << tag;
+        EXPECT_EQ(decode_config.groupSeqSizePerBlockForGroup(decode_gid), kDsv4TokensPerBlock * cp_size) << tag;
     }
     auto* prefill_swa = dynamic_cast<FixedStateCacheSpec*>(
         prefill_config.specForGroup(gidForTag(prefill_config, "swa_kv")).get());
@@ -1481,9 +1482,9 @@ TEST(HybridPoolConfigCreatorTest, DecodeExplicitPrefillCpSizeHandlesDp16) {
     ASSERT_NE(decode_swa, nullptr);
     EXPECT_EQ(prefill_swa->entries_per_block, 136u);
     EXPECT_EQ(decode_swa->entries_per_block, prefill_swa->entries_per_block);
-    EXPECT_EQ(prefill_config.group_seq_size_per_block[gidForTag(prefill_config, "swa_kv")],
+    EXPECT_EQ(prefill_config.groupSeqSizePerBlockForGroup(gidForTag(prefill_config, "swa_kv")),
               kDsv4TokensPerBlock * cp_size);
-    EXPECT_EQ(decode_config.group_seq_size_per_block[gidForTag(decode_config, "swa_kv")],
+    EXPECT_EQ(decode_config.groupSeqSizePerBlockForGroup(gidForTag(decode_config, "swa_kv")),
               kDsv4TokensPerBlock * cp_size);
 }
 

@@ -386,9 +386,7 @@ size_t KVCacheAllocator::logicalSeqSizePerBlockForCapacity(size_t gid) const {
     if (cpShardThisGroupForCapacity(gid)) {
         return static_cast<size_t>(cp_slot_mapper_->virtualBlockSize());
     }
-    return (gid < config_.group_seq_size_per_block.size() && config_.group_seq_size_per_block[gid] > 0) ?
-               config_.group_seq_size_per_block[gid] :
-               config_.seq_size_per_block;
+    return config_.groupSeqSizePerBlockForGroup(gid);
 }
 
 int KVCacheAllocator::cpEffectiveSeqLenForAlloc(size_t gid, int seq_len) const {

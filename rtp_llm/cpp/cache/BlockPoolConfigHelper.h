@@ -125,10 +125,7 @@ public:
 
         CacheConfig group_cache_config = cache_config;
         group_cache_config.block_num   = config.block_num;
-        if (group_id < cache_config.group_seq_size_per_block.size()
-            && cache_config.group_seq_size_per_block[group_id] > 0) {
-            group_cache_config.seq_size_per_block = cache_config.group_seq_size_per_block[group_id];
-        }
+        group_cache_config.seq_size_per_block = cache_config.groupSeqSizePerBlockForGroup(group_id);
 
         MemoryLayoutConfig layout =
             createMemoryLayoutConfig(false, layer_num, kv_stride, scale_stride, spec, group_cache_config);

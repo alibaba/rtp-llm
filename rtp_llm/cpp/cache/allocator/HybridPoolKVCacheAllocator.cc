@@ -190,7 +190,7 @@ CacheLayerLayout HybridPoolKVCacheAllocator::allLayerCacheBase() const {
     layout.group_types              = config_.groupTypesSnapshot();
     layout.group_tags               = config_.groupTagsSnapshot();
     layout.layer_tag_to_group_id    = config_.layerTagToGroupIdSnapshot();
-    layout.group_seq_size_per_block = config_.group_seq_size_per_block;
+    layout.group_seq_size_per_block = config_.groupSeqSizePerBlockSnapshot();
     layout.layer_group_types.resize(config_.layer_all_num, CacheGroupType::FULL);
     for (size_t layer_id = 0; layer_id < layer_group_ids.size() && layer_id < layout.layer_group_types.size();
         ++layer_id) {
@@ -548,6 +548,7 @@ size_t HybridPoolKVCacheAllocator::maxAvailableTokensNum() const {
 }
 
 KVCacheTokenCapacity HybridPoolKVCacheAllocator::tokenCapacity(size_t default_seq_size_per_block) const {
+    (void)default_seq_size_per_block;
     if (group_block_pools_.empty()) {
         return {};
     }
@@ -559,10 +560,7 @@ KVCacheTokenCapacity HybridPoolKVCacheAllocator::tokenCapacity(size_t default_se
         if (!pool) {
             continue;
         }
-        const size_t seq_size =
-            (gid < config_.group_seq_size_per_block.size() && config_.group_seq_size_per_block[gid] > 0) ?
-                config_.group_seq_size_per_block[gid] :
-                default_seq_size_per_block;
+        const size_t seq_size = config_.groupSeqSizePerBlockForGroup(gid);
         total_tokens     = std::min(total_tokens, pool->totalBlocksNum() * seq_size);
         available_tokens = std::min(available_tokens, pool->availableBlocksNum() * seq_size);
         has_pool         = true;

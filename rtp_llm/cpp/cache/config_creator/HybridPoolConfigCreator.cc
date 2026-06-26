@@ -199,12 +199,12 @@ void populateGroupsFromLayerSpecs(CacheConfig&                  config,
         }
     }
 
-    std::vector<GroupBase> groups;
-    std::vector<LayerBase> layers(static_cast<size_t>(config.layer_num));
+    std::vector<GroupInfo> groups;
+    std::vector<LayerInfo> layers(static_cast<size_t>(config.layer_num));
     groups.reserve(ordered_tags.size());
     for (const auto& tag : ordered_tags) {
         const auto& state = group_by_tag.at(tag);
-        GroupBase   group;
+        GroupInfo   group;
         group.spec      = state.spec;
         group.policy    = state.policy;
         group.layer_ids = state.layers;
@@ -228,7 +228,6 @@ void setupIndependentPoolSizes(CacheConfig& config, bool is_mtp) {
     config.use_independent_block_pools = true;
     const auto group_num               = static_cast<size_t>(config.groupNums());
     std::vector<uint32_t> group_block_nums(group_num, 0);
-    config.group_seq_size_per_block.resize(group_num, config.seq_size_per_block);
     std::vector<size_t> group_kv_block_stride_bytes(group_num, 0);
     std::vector<size_t> group_kv_scale_stride_bytes(group_num, 0);
 
@@ -242,6 +241,7 @@ void setupIndependentPoolSizes(CacheConfig& config, bool is_mtp) {
     for (size_t gid = 0; gid < group_num; ++gid) {
         const auto& spec = config.specForGroup(gid);
         RTP_LLM_CHECK_WITH_INFO(spec != nullptr, "cache_specs[%zu] is null", gid);
+        config.setGroupSeqSizePerBlock(gid, spec->seq_size_per_block);
         const auto   layer_count                = static_cast<uint32_t>(config.layerIdsForGroup(gid).size());
         const size_t kernel_kv_stride           = spec->block_size_bytes();
         const auto   kernel_scale               = spec->scale_block_size_bytes();
@@ -329,11 +329,10 @@ CacheConfig createHybridAttentionPoolConfig(const ModelConfig&       model_confi
         auto refreshed_specs = CacheConfigCreator::buildLayerSpecsFromDescs(
             model_config.kv_cache_spec_descs, ctx, model_config.num_layers);
         populateGroupsFromLayerSpecs(config, model_config.kv_cache_spec_descs, refreshed_specs);
-        config.group_seq_size_per_block.resize(static_cast<size_t>(config.groupNums()), config.seq_size_per_block);
         for (size_t gid = 0; gid < static_cast<size_t>(config.groupNums()); ++gid) {
             const auto& spec = config.specForGroup(gid);
             RTP_LLM_CHECK_WITH_INFO(spec != nullptr, "hybrid-pool desc config produced null spec gid=%zu", gid);
-            config.group_seq_size_per_block[gid] = spec->seq_size_per_block;
+            config.setGroupSeqSizePerBlock(gid, spec->seq_size_per_block);
             config.use_typed_cache_regions =
                 config.use_typed_cache_regions || spec->type == KVCacheSpecType::OpaqueKV
                 || spec->type == KVCacheSpecType::OpaqueState;

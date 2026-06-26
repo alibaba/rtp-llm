@@ -759,10 +759,10 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
     };
     auto isCompactFixedBlockTable = [&](const CacheConfig& cfg, size_t gid) {
         if (!is_page_level_rr || !supportsCpSlice(cfg, gid) || load_context.prefill_cp_size <= 1
-            || gid >= cfg.group_seq_size_per_block.size()) {
+            || gid >= static_cast<size_t>(cfg.groupNums())) {
             return false;
         }
-        const auto group_tokens = cfg.group_seq_size_per_block[gid];
+        const auto group_tokens = cfg.groupSeqSizePerBlockForGroup(gid);
         return group_tokens > 0
                && group_tokens == cfg.seq_size_per_block * static_cast<size_t>(load_context.prefill_cp_size);
     };

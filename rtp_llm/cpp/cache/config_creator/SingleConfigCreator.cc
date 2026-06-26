@@ -89,12 +89,12 @@ CacheConfig SingleConfigCreator::createSingleConfig(const ModelConfig&       mod
 
     std::vector<int> layer_ids(static_cast<size_t>(layer_num));
     std::iota(layer_ids.begin(), layer_ids.end(), 0);
-    GroupBase group;
+    GroupInfo group;
     group.spec      = spec;
     group.policy    = defaultCacheGroupPolicy(CacheGroupType::FULL);
     group.layer_ids = layer_ids;
 
-    std::vector<LayerBase> layers(static_cast<size_t>(layer_num));
+    std::vector<LayerInfo> layers(static_cast<size_t>(layer_num));
     for (int64_t layer_id = 0; layer_id < layer_num; ++layer_id) {
         auto& layer                  = layers[static_cast<size_t>(layer_id)];
         layer.group_ids              = {0};

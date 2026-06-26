@@ -18,28 +18,28 @@
 
 namespace rtp_llm {
 
-struct GroupBase {
+struct GroupInfo {
     KVCacheSpecPtr   spec;
     CacheGroupPolicy policy;
     std::vector<int> layer_ids;
     uint32_t         block_num             = 0;
+    size_t           seq_size_per_block    = 0;
     size_t           kv_block_stride_bytes = 0;
     size_t           kv_scale_stride_bytes = 0;
 };
 
-struct LayerBase {
+struct LayerInfo {
     std::vector<int>           group_ids;
     std::map<std::string, int> tag_to_gid;
 };
 
 struct CacheConfig {
-    std::vector<GroupBase>          groups;
-    std::vector<LayerBase>          layers;
+    std::vector<GroupInfo>          groups;
+    std::vector<LayerInfo>          layers;
     std::unordered_map<std::string, int> tag_to_gid;
 
     // Cache specification and layer mapping are owned by groups/layers above.
     std::vector<int>               layer_to_block_stride_bytes;
-    std::vector<size_t>            group_seq_size_per_block;
     bool                           group_block_layout_initialized          = false;
     bool                           use_independent_block_pools              = false;
     bool                           use_typed_cache_regions                  = false;
@@ -148,6 +148,15 @@ struct CacheConfig {
         return policies;
     }
 
+    std::vector<size_t> groupSeqSizePerBlockSnapshot() const {
+        std::vector<size_t> seq_sizes;
+        seq_sizes.reserve(groups.size());
+        for (size_t gid = 0; gid < groups.size(); ++gid) {
+            seq_sizes.push_back(groupSeqSizePerBlockForGroup(gid));
+        }
+        return seq_sizes;
+    }
+
     std::vector<uint32_t> groupBlockNumsSnapshot() const {
         if (!group_block_layout_initialized) {
             return {};
@@ -219,6 +228,14 @@ struct CacheConfig {
         return block_num;
     }
 
+    size_t groupSeqSizePerBlockForGroup(size_t gid) const {
+        RTP_LLM_CHECK_WITH_INFO(gid < groups.size(),
+                                "CacheConfig::groupSeqSizePerBlockForGroup invalid gid=%zu size=%zu",
+                                gid,
+                                groups.size());
+        return groups[gid].seq_size_per_block > 0 ? groups[gid].seq_size_per_block : seq_size_per_block;
+    }
+
     size_t kvBlockStrideBytesForGroup(size_t gid) const {
         RTP_LLM_CHECK_WITH_INFO(gid < groups.size(), "CacheConfig::kvBlockStrideBytesForGroup invalid gid=%zu size=%zu", gid, groups.size());
         if (group_block_layout_initialized) {
@@ -246,6 +263,24 @@ struct CacheConfig {
                                 groups.size());
         for (size_t gid = 0; gid < policies.size(); ++gid) {
             groups[gid].policy = policies[gid];
+        }
+    }
+
+    void setGroupSeqSizePerBlock(size_t gid, size_t group_seq_size_per_block) {
+        RTP_LLM_CHECK_WITH_INFO(gid < groups.size(),
+                                "CacheConfig::setGroupSeqSizePerBlock invalid gid=%zu size=%zu",
+                                gid,
+                                groups.size());
+        groups[gid].seq_size_per_block = group_seq_size_per_block;
+    }
+
+    void setGroupSeqSizesPerBlock(const std::vector<size_t>& group_seq_sizes) {
+        RTP_LLM_CHECK_WITH_INFO(group_seq_sizes.size() == groups.size(),
+                                "CacheConfig::setGroupSeqSizesPerBlock size %zu != group size %zu",
+                                group_seq_sizes.size(),
+                                groups.size());
+        for (size_t gid = 0; gid < group_seq_sizes.size(); ++gid) {
+            groups[gid].seq_size_per_block = group_seq_sizes[gid];
         }
     }
 
@@ -497,7 +532,7 @@ struct CacheConfig {
                && lhs.group_type == rhs.group_type;
     }
 
-    void setTopology(std::vector<GroupBase> new_groups, std::vector<LayerBase> new_layers) {
+    void setTopology(std::vector<GroupInfo> new_groups, std::vector<LayerInfo> new_layers) {
         RTP_LLM_CHECK_WITH_INFO(!new_groups.empty(), "CacheConfig::setTopology requires at least one cache group");
         RTP_LLM_CHECK_WITH_INFO(layer_num > 0, "CacheConfig::setTopology requires positive layer_num");
         RTP_LLM_CHECK_WITH_INFO(new_layers.size() == static_cast<size_t>(layer_num),
@@ -515,6 +550,9 @@ struct CacheConfig {
             new_tag_to_gid.emplace(group.spec->tag, static_cast<int>(gid));
             group.spec         = group.spec->clone();
             group.spec->layers = group.layer_ids;
+            if (group.seq_size_per_block == 0) {
+                group.seq_size_per_block = group.spec->seq_size_per_block;
+            }
         }
 
         std::vector<std::vector<bool>> group_has_layer(
@@ -603,8 +641,8 @@ struct CacheConfig {
                                 group_num);
         RTP_LLM_CHECK_WITH_INFO(layer_num > 0, "CacheConfig::fromGroupedSpecs requires positive layer_num");
 
-        std::vector<GroupBase> new_groups;
-        std::vector<LayerBase> new_layers(static_cast<size_t>(layer_num));
+        std::vector<GroupInfo> new_groups;
+        std::vector<LayerInfo> new_layers(static_cast<size_t>(layer_num));
         new_groups.reserve(group_num);
 
         for (size_t gid = 0; gid < group_num; ++gid) {
@@ -620,10 +658,11 @@ struct CacheConfig {
             auto stored_spec = spec->clone();
             stored_spec->tag = tag;
 
-            GroupBase group;
-            group.spec      = stored_spec;
-            group.policy    = cacheGroupPolicyForSpec(stored_spec, types[gid]);
-            group.layer_ids = layers_by_group[gid];
+            GroupInfo group;
+            group.spec               = stored_spec;
+            group.policy             = cacheGroupPolicyForSpec(stored_spec, types[gid]);
+            group.layer_ids          = layers_by_group[gid];
+            group.seq_size_per_block = stored_spec->seq_size_per_block;
             new_groups.push_back(group);
 
             for (int layer_id : layers_by_group[gid]) {
@@ -707,6 +746,7 @@ struct CacheConfig {
         os << "\n";
 
         const auto group_policies      = groupPoliciesSnapshot();
+        const auto group_seq_sizes     = groupSeqSizePerBlockSnapshot();
         const auto group_block_nums    = groupBlockNumsSnapshot();
         const auto group_layer_ids     = layerGroupIdsSnapshot();
         const auto group_tags          = groupTagsSnapshot();
@@ -733,6 +773,7 @@ struct CacheConfig {
         OUTPUT_FIELD(use_typed_cache_regions);
         OUTPUT_FIELD(use_opaque_kv_cache_store);
         OUTPUT_FIELD(disable_decode_first_malloc_device_reuse);
+        os << indent1 << "group_seq_size_per_block=" << rtp_llm::vectorToString(group_seq_sizes) << "\n";
         os << indent1 << "group_block_nums=" << rtp_llm::vectorToString(group_block_nums) << "\n";
         os << "\n";
 

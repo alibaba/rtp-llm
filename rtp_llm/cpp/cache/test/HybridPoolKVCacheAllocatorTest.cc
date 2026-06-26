@@ -76,7 +76,7 @@ static CacheConfig makeTinyMultiPoolHybridConfig(uint32_t       linear_block_num
                             {"linear", second_type == CacheGroupType::SWA ? "swa" : "full"});
 
     // Same tokens per block for both groups.
-    config.group_seq_size_per_block = {config.seq_size_per_block, config.seq_size_per_block};
+    config.setGroupSeqSizesPerBlock({config.seq_size_per_block, config.seq_size_per_block});
 
     config.kv_block_stride_bytes = std::max(full_spec->block_size_bytes(), linear_spec->block_size_bytes());
     config.kv_block_size_bytes   = static_cast<size_t>(config.group_layer_num) * config.kv_block_stride_bytes;
@@ -449,7 +449,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, TokenAggregatorsUseDifferentCapacityScope
     auto config = makeTinyMultiPoolHybridConfig(/*linear_block_num=*/6, /*full_block_num=*/8);
     // Group 0 (LINEAR): seq_size_per_block=2 -> 5 blocks * 2 = 10
     // Group 1 (FULL):   seq_size_per_block=4 -> 7 blocks * 4 = 28
-    config.group_seq_size_per_block = {2, 4};
+    config.setGroupSeqSizesPerBlock({2, 4});
     auto allocator                  = makeAllocator(config);
     ASSERT_TRUE(allocator->init());
 
@@ -460,7 +460,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, TokenAggregatorsUseDifferentCapacityScope
 
 TEST_F(HybridPoolKVCacheAllocatorTest, TokenAggregatorsUseCPVirtualBlockSizeForFullGroups) {
     auto config                     = makeTinyMultiPoolHybridConfig(/*linear_block_num=*/6, /*full_block_num=*/8);
-    config.group_seq_size_per_block = {100, 4};
+    config.setGroupSeqSizesPerBlock({100, 4});
     auto allocator                  = makeAllocator(config);
     ASSERT_TRUE(allocator->init());
 
@@ -475,7 +475,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, TokenAggregatorsUseCPVirtualBlockSizeForF
 
 TEST_F(HybridPoolKVCacheAllocatorTest, TokenAggregatorsFallBackToGlobalSeqSize) {
     auto config = makeTinyMultiPoolHybridConfig(/*linear_block_num=*/6, /*full_block_num=*/6);
-    config.group_seq_size_per_block.clear();  // fall back to config.seq_size_per_block
+    config.setGroupSeqSizesPerBlock({0, 0});  // fall back to config.seq_size_per_block
     config.seq_size_per_block = 4;
     auto allocator            = makeAllocator(config);
     ASSERT_TRUE(allocator->init());
@@ -1055,7 +1055,8 @@ TEST_F(HybridPoolKVCacheAllocatorTest, TokenAggregatorsIgnoreSmallHCAStatePool) 
     ASSERT_GT(allocator->groupBlockPools().size(), static_cast<size_t>(hca_state_gid));
 
     const auto hca_state_tokens =
-        allocator->groupBlockPools()[hca_state_gid]->totalBlocksNum() * config.group_seq_size_per_block[hca_state_gid];
+        allocator->groupBlockPools()[hca_state_gid]->totalBlocksNum()
+        * config.groupSeqSizePerBlockForGroup(hca_state_gid);
     EXPECT_LT(hca_state_tokens, allocator->totalTokensNum());
     EXPECT_EQ(allocator->availableTokensNum(), allocator->maxAvailableTokensNum());
     EXPECT_EQ(allocator->totalTokensNum(), allocator->maxAvailableTokensNum());

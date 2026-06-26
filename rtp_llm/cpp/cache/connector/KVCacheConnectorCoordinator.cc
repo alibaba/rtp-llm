@@ -25,15 +25,14 @@ CacheGroupType groupTypeForConnector(const CacheConfig& cache_config, int group_
 }
 
 bool isCpCompactSliceGroup(const CacheConfig& cache_config, int group_id, int cp_size) {
-    if (cp_size <= 1 || group_id < 0 || group_id >= cache_config.groupNums()
-        || static_cast<size_t>(group_id) >= cache_config.group_seq_size_per_block.size()) {
+    if (cp_size <= 1 || group_id < 0 || group_id >= cache_config.groupNums()) {
         return false;
     }
     const auto& spec = cache_config.specForGroup(static_cast<size_t>(group_id));
     if (!spec || !spec->supportsCpSlice()) {
         return false;
     }
-    const auto row_tokens = cache_config.group_seq_size_per_block[static_cast<size_t>(group_id)];
+    const auto row_tokens = cache_config.groupSeqSizePerBlockForGroup(static_cast<size_t>(group_id));
     return row_tokens > 0 && row_tokens == cache_config.seq_size_per_block * static_cast<size_t>(cp_size);
 }
 

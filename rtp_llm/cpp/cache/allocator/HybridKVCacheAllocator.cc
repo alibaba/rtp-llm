@@ -56,10 +56,7 @@ inline int cpVirtualBlockSizeForGroup(const std::shared_ptr<CPSlotMapper>& mappe
 }
 
 inline size_t groupSeqSize(const CacheConfig& config, int gid, size_t fallback) {
-    return (gid >= 0 && static_cast<size_t>(gid) < config.group_seq_size_per_block.size()
-            && config.group_seq_size_per_block[static_cast<size_t>(gid)] > 0) ?
-               config.group_seq_size_per_block[static_cast<size_t>(gid)] :
-               fallback;
+    return gid >= 0 && gid < config.groupNums() ? config.groupSeqSizePerBlockForGroup(static_cast<size_t>(gid)) : fallback;
 }
 
 BlockIndicesType validBlocksAfter(const BlockIndicesType& blocks, size_t begin) {

@@ -127,7 +127,7 @@ CacheConfig makeTinyTypedHybridPoolConfig() {
                             {{0, 1}, {0, 1}},
                             {CacheGroupType::FULL, CacheGroupType::FULL},
                             {"csa_kv", "swa_kv"});
-    config.group_seq_size_per_block = {config.seq_size_per_block, config.seq_size_per_block};
+    config.setGroupSeqSizesPerBlock({config.seq_size_per_block, config.seq_size_per_block});
     const std::vector<uint32_t> group_block_nums = {config.block_num, config.block_num};
     const std::vector<size_t> group_kv_block_stride_bytes = {csa_spec->block_size_bytes(), swa_spec->block_size_bytes()};
     const std::vector<size_t> group_kv_scale_stride_bytes = {csa_spec->scale_block_size_bytes(),
@@ -181,7 +181,6 @@ CacheConfig makeCompactDsv4TypedMemoryCopyConfig(bool use_flash) {
     }
     const std::vector<size_t> group_kv_block_stride_bytes = {64, 16, 32, 48, 80, 40, 96};
     const std::vector<size_t> group_kv_scale_stride_bytes(kDsv4PoolNum, 0);
-    config.group_seq_size_per_block    = std::vector<size_t>(kDsv4PoolNum, config.seq_size_per_block);
     const std::vector<uint32_t> group_block_nums(kDsv4PoolNum, config.block_num);
     std::vector<std::vector<int>> layers_by_group(kDsv4PoolNum);
     config.layer_to_block_stride_bytes = std::vector<int>(config.layer_all_num, 0);
@@ -235,6 +234,7 @@ CacheConfig makeCompactDsv4TypedMemoryCopyConfig(bool use_flash) {
         specs.push_back(make_spec(gid));
     }
     config.fromGroupedSpecs(specs, layers_by_group, group_types, group_tags);
+    config.setGroupSeqSizesPerBlock(std::vector<size_t>(kDsv4PoolNum, config.seq_size_per_block));
     config.setGroupPolicies(group_policies);
     config.setGroupBlockLayout(group_block_nums, group_kv_block_stride_bytes, group_kv_scale_stride_bytes);
     return config;

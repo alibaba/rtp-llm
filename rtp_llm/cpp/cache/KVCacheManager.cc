@@ -348,7 +348,7 @@ CacheLayerLayout KVCacheManager::getMainModelCacheLayerLayout() const {
     layout.group_types              = config_.groupTypesSnapshot();
     layout.group_tags               = config_.groupTagsSnapshot();
     layout.layer_tag_to_group_id.resize(config_.layer_num);
-    layout.group_seq_size_per_block = config_.group_seq_size_per_block;
+    layout.group_seq_size_per_block = config_.groupSeqSizePerBlockSnapshot();
     layout.layer_group_types.resize(config_.layer_num, CacheGroupType::FULL);
     layout.layers_to_kv_buffer_ptrs_by_group.resize(config_.layer_num);
     if (!all_layout.layers_to_scale_buffer_ptrs_by_group.empty()) {
@@ -441,8 +441,14 @@ CacheLayerLayout KVCacheManager::getMTPModuleCacheLayerLayout(int mtp_module_id)
     layout.layer_group_types.resize(mtp_layer_num, CacheGroupType::FULL);
     layout.group_tags               = mtp_sub_config->groupTagsSnapshot();
     layout.group_types              = mtp_sub_config->groupTypesSnapshot();
-    layout.group_seq_size_per_block = mtp_sub_config->group_seq_size_per_block;
-
+    layout.group_seq_size_per_block = mtp_sub_config->groupSeqSizePerBlockSnapshot();
+    // Typed-pool views are indexed by LOCAL layer id from the MTP model's
+    // attention modules (self.layer_id ∈ [0, mtp_layer_num)).  The full
+    // layout's by_group arrays are indexed by GLOBAL layer id (main + MTP
+    // appended), so we MUST remap from global → local — copying the full
+    // arrays verbatim makes local index 0 return main layer 0's typed
+    // buffers, which causes the draft to write into the main model's KV
+    // pool and corrupts target verify (0% acceptance regression).
     const size_t group_count = layout.group_tags.size();
     layout.layers_to_kv_buffer_ptrs_by_group.assign(mtp_layer_num, std::vector<torch::Tensor>(group_count));
     layout.layers_to_scale_buffer_ptrs_by_group.assign(mtp_layer_num, std::vector<torch::Tensor>(group_count));

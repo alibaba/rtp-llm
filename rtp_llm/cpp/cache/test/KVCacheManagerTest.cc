@@ -552,7 +552,7 @@ TEST_F(KVCacheManagerTest, DSV4MallocIncrFreeExposesSevenTypedRegions) {
     auto layout = manager->getMainModelCacheLayerLayout();
     ASSERT_EQ(layout.group_tags.size(), static_cast<size_t>(kDsv4PoolNum));
     EXPECT_EQ(layout.group_tags, kDsv4Tags);
-    ASSERT_EQ(layout.group_seq_size_per_block, manager_config.group_seq_size_per_block);
+    ASSERT_EQ(layout.group_seq_size_per_block, manager_config.groupSeqSizePerBlockSnapshot());
     EXPECT_EQ(layout.layers_to_kv_buffer_ptrs_by_group.size(), static_cast<size_t>(manager_config.layer_num));
 
     const int swa_gid           = manager_config.groupIdForTag("swa_kv");
@@ -1073,10 +1073,7 @@ TEST_F(KVCacheManagerTest, GetKVCacheInfo_UsesSmallestHybridPoolTokenCapacity) {
 
     for (size_t gid = 0; gid < pools.size(); ++gid) {
         ASSERT_NE(pools[gid], nullptr);
-        const size_t seq_size =
-            (gid < cache_config.group_seq_size_per_block.size() && cache_config.group_seq_size_per_block[gid] > 0) ?
-                cache_config.group_seq_size_per_block[gid] :
-                cache_config.seq_size_per_block;
+        const size_t seq_size = cache_config.groupSeqSizePerBlockForGroup(gid);
         expected_total_tokens     = std::min(expected_total_tokens, pools[gid]->totalBlocksNum() * seq_size);
         expected_available_tokens = std::min(expected_available_tokens, pools[gid]->availableBlocksNum() * seq_size);
     }

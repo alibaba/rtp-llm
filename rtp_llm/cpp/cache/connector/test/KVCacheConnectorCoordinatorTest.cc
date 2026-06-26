@@ -709,7 +709,7 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncWrite_CPShardedKeepsCompactFixedGro
     cp_cache_config.layer_all_num                  = 2;
     cp_cache_config.seq_size_per_block             = 128;
     initTwoGroupCpConfig(cp_cache_config);
-    cp_cache_config.group_seq_size_per_block = {128, 256};
+    cp_cache_config.setGroupSeqSizesPerBlock({128, 256});
 
     ParallelismConfig parallelism_config;
     parallelism_config.tp_size                            = 2;
@@ -769,7 +769,7 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncWrite_DecodePrefillCpRemapsFullAndC
     cp_cache_config.layer_all_num                  = 2;
     cp_cache_config.seq_size_per_block             = 128;
     initTwoGroupCpConfig(cp_cache_config);
-    cp_cache_config.group_seq_size_per_block       = {128, 256};
+    cp_cache_config.setGroupSeqSizesPerBlock({128, 256});
 
     ParallelismConfig parallelism_config;
     parallelism_config.role_type                          = RoleType::DECODE;
