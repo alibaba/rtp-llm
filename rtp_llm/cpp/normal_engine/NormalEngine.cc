@@ -484,6 +484,13 @@ absl::Status NormalEngine::step() {
     if (parallelism_config.tp_rank == 0) {
         RTP_LLM_PROFILE_SCOPE("engine.normal.report_metrics_work");
         auto step_latency = autil::TimeUtility::currentTimeInMicroSeconds() - step_begin_time_us;
+        // Each stream in this step's batch ran for step_latency wall-time. Held-back streams are
+        // not in `streams`, so their active-run-time stays flat and their gap_latency grows.
+        for (const auto& s : streams) {
+            if (s && !s->isFakeStream()) {
+                s->addActiveRunTime(step_latency);
+            }
+        }
         reportMetrics({step_latency});
     }
 

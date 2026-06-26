@@ -97,6 +97,7 @@ public:
         }
         json.Jsonize("local_reuse_len", local_reuse_len, local_reuse_len);
         json.Jsonize("remote_reuse_len", remote_reuse_len, remote_reuse_len);
+        json.Jsonize("gap_latency", gap_latency_ms, gap_latency_ms);
     }
     AuxInfoAdapter() {
         AuxInfo();
@@ -113,10 +114,13 @@ public:
         cum_log_probs    = base.cum_log_probs;
         local_reuse_len  = base.local_reuse_len;
         remote_reuse_len = base.remote_reuse_len;
+        gap_latency_us   = base.gap_latency_us;
 
-        cost_time_ms = cost_time_us / 1000.0;
+        cost_time_ms   = cost_time_us / 1000.0;
+        gap_latency_ms = gap_latency_us / 1000.0;
     }
-    float                    cost_time_ms;
+    float                    cost_time_ms   = 0.0;
+    float                    gap_latency_ms = 0.0;
     std::vector<std::string> beam_responses;
 };
 

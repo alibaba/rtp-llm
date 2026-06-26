@@ -97,8 +97,10 @@ GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateIn
             generate_output.aux_info.cost_time_us = autil::TimeUtility::currentTimeInMicroSeconds() - begin_time_us_;
             generate_output.aux_info.first_token_cost_time_us = complete_token_ids_->firstTokenLatencyUs();
             generate_output.aux_info.wait_time_us             = wait_time_us_;
-            generate_output.aux_info.input_len                = generate_input_->promptLength();
-            generate_output.aux_info.prefix_len               = generate_input_->prefix_length;
+            generate_output.aux_info.gap_latency_us           = computeGapLatencyUs(
+                generate_output.aux_info.cost_time_us, generate_output.aux_info.wait_time_us, active_run_time_us_);
+            generate_output.aux_info.input_len  = generate_input_->promptLength();
+            generate_output.aux_info.prefix_len = generate_input_->prefix_length;
             // TODO(xinfei.sxf) 提前结束的query，output len要设置正确
             generate_output.aux_info.output_len       = seqLength() - generate_input_->inputLength();
             generate_output.aux_info.step_output_len  = output_len;
