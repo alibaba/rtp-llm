@@ -30,6 +30,13 @@ except Exception as e:
 _PD_DEBUG_INDEXER_LOG_COUNTS: Dict[str, int] = {}
 _persistent_topk_workspace: Dict[torch.device, torch.Tensor] = {}
 
+# FP4 indexer constants (Blackwell only).
+# Q/K granularity is 32 elements (fp8_fp4_*mqa_logits convention), while UE8M0
+# scales are bit-packed 4-per-int32. For index_head_dim=128 this yields
+# 64 bytes of FP4 data + 4 bytes of packed scale = 68 bytes/token in cache.
+_FP4_GRAN_K = 32
+_FP4_SCALES_PACK_FACTOR = 4  # pack_ue8m0_to_int packs 4 ue8m0 → 1 int32
+
 
 def _get_topk_workspace(device: torch.device) -> torch.Tensor:
     ws = _persistent_topk_workspace.get(device)
@@ -254,6 +261,7 @@ class IndexerOp(nn.Module):
         block_size: int = 128,
         scale_fmt: str = "ue8m0",
         is_neox_style: bool = True,
+        quant_dtype: str = "fp8",
     ):
         """
         Initialize IndexerOp.
@@ -267,6 +275,9 @@ class IndexerOp(nn.Module):
             blocksize: Page size (default: 64)
             block_size: Quantization block size (default: 128)
             scale_fmt: FP8 quantization format (default: "ue8m0")
+            quant_dtype: Quantization dtype for Q/K, "fp8" (default) or "fp4".
+                FP4 uses deep_gemm.fp8_fp4_*mqa_logits with gran_k=32, packed
+                UE8M0 scales. Blackwell-only.
         """
         super().__init__()
         self.index_n_heads = index_n_heads
@@ -278,9 +289,131 @@ class IndexerOp(nn.Module):
         self.block_size = block_size
         self.scale_fmt = scale_fmt
         self.is_neox_style = is_neox_style
+        assert quant_dtype in (
+            "fp8",
+            "fp4",
+        ), f"IndexerOp: quant_dtype must be 'fp8' or 'fp4', got {quant_dtype!r}"
+        self.quant_dtype = quant_dtype
+        if quant_dtype == "fp4":
+            assert index_head_dim % _FP4_GRAN_K == 0, (
+                f"FP4 indexer requires index_head_dim ({index_head_dim}) "
+                f"divisible by gran_k={_FP4_GRAN_K}"
+            )
+            assert (index_head_dim // _FP4_GRAN_K) % _FP4_SCALES_PACK_FACTOR == 0, (
+                f"FP4 indexer requires index_head_dim/gran_k "
+                f"({index_head_dim // _FP4_GRAN_K}) divisible by "
+                f"pack_factor={_FP4_SCALES_PACK_FACTOR}"
+            )
+            # Pre-allocate the FP4 e2m1 boundary table on GPU once. The
+            # reference `deep_gemm.utils.per_token_cast_to_fp4` allocates this
+            # via `torch.tensor([...], device=x.device)` per call, which does
+            # a CPU→GPU copy and is incompatible with CUDA Graph capture.
+            # Registering it as a buffer materializes one copy at init and
+            # reuses the same device storage forever after. Force the device
+            # to cos_sin_cache's (already on GPU) — `register_buffer` without
+            # an explicit device leaves the tensor on CPU even when the
+            # surrounding module ends up on GPU via `.to(cuda)` (because the
+            # caller never wraps IndexerOp in a `.cuda()` call; see
+            # rtp_llm/models_py/modules/hybrid/indexer.py which simply
+            # constructs and uses it directly).
+            # Order matches deep_gemm.utils._quantize_to_fp4_e2m1.
+            assert cos_sin_cache is not None and cos_sin_cache.is_cuda, (
+                "FP4 indexer requires cos_sin_cache to be on a CUDA device "
+                "(used to derive boundary-table device)"
+            )
+            self.register_buffer(
+                "_fp4_boundaries",
+                torch.tensor(
+                    [0.25, 0.75, 1.25, 1.75, 2.5, 3.5, 5.0],
+                    dtype=torch.float32,
+                    device=cos_sin_cache.device,
+                ),
+                persistent=False,
+            )
+
+    def _is_fp4(self) -> bool:
+        return self.quant_dtype == "fp4"
 
     def _head_dim_with_sf(self) -> int:
+        if self._is_fp4():
+            # FP4: head_dim/2 bytes data + head_dim/gran_k bytes scale (ue8m0 1B each).
+            # For HD=128: 64 + 4 = 68 bytes/token.
+            return self.index_head_dim // 2 + self.index_head_dim // _FP4_GRAN_K
         return self.index_head_dim + self.index_head_dim // self.block_size * 4
+
+    def _fp4_scale_int32_per_token(self) -> int:
+        """Number of int32 slots per token's packed UE8M0 scale (FP4 only)."""
+        return self.index_head_dim // _FP4_GRAN_K // _FP4_SCALES_PACK_FACTOR
+
+    def _fp4_quant_q(self, query: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Quantize BF16 Q to packed FP4 + packed UE8M0 scale.
+
+        Inlined / CUDA-graph-safe equivalent of
+        ``deep_gemm.utils.per_token_cast_to_fp4(use_ue8m0=True, gran_k=32,
+        use_packed_ue8m0=True)`` — the reference impl allocates its boundary
+        table via ``torch.tensor([...], device=x.device)`` on every call,
+        which triggers a CPU→GPU copy that CUDA Graph capture rejects. Here
+        we reuse ``self._fp4_boundaries`` (registered as a buffer at init).
+
+        Args:
+            query: [num_tokens, index_n_heads, index_head_dim] BF16/FP16
+
+        Returns:
+            (q_fp4, q_scale) where
+              q_fp4: int8 [num_tokens, index_n_heads, index_head_dim // 2]
+              q_scale: int32 [num_tokens, index_n_heads]   (1 int32 = 4 packed UE8M0)
+        """
+        n_in = self.index_head_dim
+        gran_k = _FP4_GRAN_K
+        assert n_in % gran_k == 0
+
+        x = query.view(-1, n_in)  # [N*nh, HD]
+        x_view = x.view(x.size(0), -1, gran_k)  # [N*nh, HD/gran_k, gran_k]
+
+        # ---- per-group amax → UE8M0 scale (ceil-to-power-of-2) ----
+        x_amax = x_view.abs().float().amax(dim=2).clamp_min(1e-4)  # [N*nh, HD/gran_k]
+        sf = x_amax / 6.0
+        # ceil_to_ue8m0: bump exponent if mantissa non-zero, then clamp [1,254].
+        bits = sf.view(torch.int32)
+        exp = ((bits >> 23) & 0xFF) + ((bits & 0x7FFFFF) != 0).to(torch.int32)
+        exp = exp.clamp(1, 254)
+        sf = (exp << 23).view(torch.float32)
+
+        # ---- scale-normalize and FP4 e2m1 encode ----
+        # Compute in fp32 so torch.bucketize matches the pre-allocated fp32
+        # boundary buffer without per-call dtype materialization.
+        x_scaled = x_view.float() * (1.0 / sf.unsqueeze(2))  # [N*nh, HD/gran_k, gran_k]
+        ax = x_scaled.abs().clamp(max=6.0)
+        boundaries: torch.Tensor = self._fp4_boundaries  # type: ignore[assignment]
+        idx = torch.bucketize(ax, boundaries)
+        code = idx.to(torch.uint8)
+        sign = (x_scaled < 0) & (idx != 0)
+        code = code | (sign.to(torch.uint8) << 3)  # [N*nh, HD/gran_k, gran_k] uint8
+
+        # ---- pack 2 elements per byte (low nibble = even, high nibble = odd) ----
+        codes = code.view(x.size(0), n_in)
+        codes2 = codes.view(x.size(0), n_in // 2, 2)
+        packed = ((codes2[..., 0] & 0x0F) | ((codes2[..., 1] & 0x0F) << 4)).contiguous()
+        q_fp4 = packed.view(torch.int8).view(
+            -1, self.index_n_heads, self.index_head_dim // 2
+        )
+
+        # ---- pack 4 UE8M0 exponents into one int32 per scale slot ----
+        # sf: float32 [N*nh, HD/gran_k]. Extract exponent byte, pack 4 to int32.
+        sf_bits = (sf.view(torch.int32) >> 23) & 0xFF  # int32 [..., HD/gran_k]
+        scale_per_tok = self._fp4_scale_int32_per_token()
+        sf_grouped = sf_bits.view(x.size(0), scale_per_tok, _FP4_SCALES_PACK_FACTOR)
+        packed_scale = (
+            (sf_grouped[..., 0] & 0xFF)
+            | ((sf_grouped[..., 1] & 0xFF) << 8)
+            | ((sf_grouped[..., 2] & 0xFF) << 16)
+            | ((sf_grouped[..., 3] & 0xFF) << 24)
+        ).to(torch.int32)
+        if scale_per_tok == 1:
+            q_scale = packed_scale.view(-1, self.index_n_heads)
+        else:
+            q_scale = packed_scale.view(-1, self.index_n_heads, scale_per_tok)
+        return q_fp4, q_scale
 
     def _kv_cache_blocks(self, kv_cache: KVCache) -> torch.Tensor:
         return _indexer_cache_blocks(
@@ -444,6 +577,14 @@ class IndexerOp(nn.Module):
             slot_mapping: Physical slot indices [num_tokens]
         """
         assert kv_cache is not None, "kv_cache is required"
+        if self._is_fp4():
+            rtp_llm_ops.indexer_k_quant_and_cache_fp4(
+                key,
+                self._kv_cache_blocks(kv_cache),
+                slot_mapping,
+                _FP4_GRAN_K,
+            )
+            return
         rtp_llm_ops.indexer_k_quant_and_cache(
             key,  # Original key in BF16/FP16 [num_tokens, index_head_dim]
             self._kv_cache_blocks(kv_cache),  # [num_blocks, block_size, cache_stride]
@@ -469,10 +610,21 @@ class IndexerOp(nn.Module):
             slot_mapping: Physical slot indices [num_tokens]
 
         Returns:
-            Tuple of (q_fp8, q_scale) where:
-            - q_fp8: Quantized query [num_tokens, index_n_heads, index_head_dim]
-            - q_scale: Query scale [num_tokens, index_n_heads, 1]
+            Tuple of (q_quant, q_scale) — shapes depend on quant_dtype:
+              FP8: (float8_e4m3fn [N, n_heads, HD], float32 [N, n_heads, 1])
+              FP4: (int8 [N, n_heads, HD//2], int32 [N, n_heads] or [N, n_heads, S])
         """
+        assert kv_cache is not None, "kv_cache is required"
+        if self._is_fp4():
+            q_fp4, q_scale = self._fp4_quant_q(query)
+            rtp_llm_ops.indexer_k_quant_and_cache_fp4(
+                key,
+                self._kv_cache_blocks(kv_cache),
+                slot_mapping,
+                _FP4_GRAN_K,
+            )
+            return q_fp4, q_scale
+
         # Quantize query
         query_flat = query.view(-1, self.index_head_dim)
         q_fp8, q_scale = sgl_per_token_group_quant_fp8(
@@ -490,7 +642,6 @@ class IndexerOp(nn.Module):
         q_scale = q_scale.view(-1, self.index_n_heads, 1)
 
         # Cache key
-        assert kv_cache is not None, "kv_cache is required"
         rtp_llm_ops.indexer_k_quant_and_cache(
             key,  # Original key in BF16/FP16 [num_tokens, index_head_dim]
             self._kv_cache_blocks(kv_cache),  # [num_blocks, block_size, cache_stride]
@@ -506,6 +657,8 @@ class IndexerOp(nn.Module):
         query: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Quantize query only (no key caching). Used by dual-stream path."""
+        if self._is_fp4():
+            return self._fp4_quant_q(query)
         query_flat = query.view(-1, self.index_head_dim)
         q_fp8, q_scale = sgl_per_token_group_quant_fp8(
             query_flat,
@@ -620,6 +773,15 @@ class IndexerOp(nn.Module):
         gathered_key = gathered_key.reshape(-1, key.size(-1))
         restored_key = gathered_key[kv_restore_unpad_indices]  # element wise
 
+        if self._is_fp4():
+            rtp_llm_ops.indexer_k_quant_and_cache_fp4(
+                restored_key,
+                self._kv_cache_blocks(kv_cache),
+                slot_mapping,
+                _FP4_GRAN_K,
+            )
+            return self._fp4_quant_q(query)
+
         rtp_llm_ops.indexer_k_quant_and_cache(
             restored_key,
             self._kv_cache_blocks(kv_cache),
@@ -649,6 +811,7 @@ class IndexerOp(nn.Module):
         kv_cache: KVCache,
         fmha_params: Any,
         attention_inputs: Any,
+        q_scale_fp4: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """
         Compute TopK indices for paged attention (decode phase).
@@ -660,11 +823,16 @@ class IndexerOp(nn.Module):
         RR machinery only applies on the prefill side where the cache is sharded.
 
         Args:
-            q_fp8: Quantized query [num_tokens, index_n_heads, index_head_dim]
-            weights: Weights tensor [num_tokens, index_n_heads, 1]
+            q_fp8: Quantized query — FP8 mode: float8_e4m3fn [N, n_heads, HD];
+                FP4 mode: packed int8 [N, n_heads, HD//2].
+            weights: Weights tensor [N, n_heads]; q_scale already absorbed in
+                FP8 mode, NOT in FP4 mode (deep_gemm handles q_scale internally).
             kv_cache: KV cache object
             fmha_params: FMHA parameters with expanded_seq_lens, etc.
-            attention_inputs: Attention inputs with decode_cu_seqlens_d, kv_cache_kernel_block_id_device
+            attention_inputs: Attention inputs with decode_cu_seqlens_d,
+                kv_cache_kernel_block_id_device
+            q_scale_fp4: Required in FP4 mode — packed UE8M0 scale int32
+                [N, n_heads]. Ignored in FP8 mode.
 
         Returns:
             TopK indices tensor
@@ -724,17 +892,36 @@ class IndexerOp(nn.Module):
                 self.blocksize,
                 deep_gemm.get_num_sms(),
             )
+        assert isinstance(schedule_metadata, torch.Tensor)
 
-        logits = deep_gemm.fp8_paged_mqa_logits(
-            q_fp8.unsqueeze(1),
-            kv_cache_fp8.view(dtype=torch.uint8),
-            weights,
-            kvlen_2d,
-            block_table,
-            schedule_metadata,
-            max_seq_len,
-            clean_logits=False,
-        )
+        if self._is_fp4():
+            # q_fp8 is packed FP4 int8 [N, n_heads, HD//2]; q_scale_fp4
+            # is packed UE8M0 int32 [N, n_heads]. deep_gemm wants both with
+            # a leading next_n=1 dim → [N, 1, n_heads, HD//2] / [N, 1, n_heads].
+            assert (
+                q_scale_fp4 is not None
+            ), "FP4 paged path requires q_scale_fp4 from quant_q_*"
+            logits = deep_gemm.fp8_fp4_paged_mqa_logits(
+                (q_fp8.unsqueeze(1), q_scale_fp4.unsqueeze(1)),
+                kv_cache_fp8.view(dtype=torch.uint8),
+                weights,
+                kvlen_2d,
+                block_table,
+                schedule_metadata,
+                max_seq_len,
+                clean_logits=False,
+            )
+        else:
+            logits = deep_gemm.fp8_paged_mqa_logits(
+                q_fp8.unsqueeze(1),
+                kv_cache_fp8.view(dtype=torch.uint8),
+                weights,
+                kvlen_2d,
+                block_table,
+                schedule_metadata,
+                max_seq_len,
+                clean_logits=False,
+            )
 
         assert (
             fmha_params.expanded_seq_lens.device == logits.device
@@ -786,20 +973,16 @@ class IndexerOp(nn.Module):
         kv_cache: KVCache,
         fmha_params: Any,
         attention_inputs: Any,
+        q_scale_fp4: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """
         Compute TopK indices for ragged attention (prefill phase).
         This method handles gathering quantized keys from cache and computing TopK.
 
-        Args:
-            q_fp8: Quantized query [num_tokens, index_n_heads, index_head_dim]
-            weights: Weights tensor [num_tokens, index_n_heads, 1]
-            kv_cache: KV cache object
-            fmha_params: FMHA parameters with ks, ke, expanded_seq_lens, topk_indices_offset
-            attention_inputs: Attention inputs with kv_cache_kernel_block_id_device, cu_kv_seqlens
-
-        Returns:
-            TopK indices tensor
+        Args (see _get_topk_paged for FP4 vs FP8 semantics):
+            q_fp8: FP8 float8_e4m3fn [N, n_heads, HD] or FP4 int8 [N, n_heads, HD//2]
+            weights: [N, n_heads, 1] (FP8: q_scale absorbed) or [N, n_heads] (FP4)
+            q_scale_fp4: FP4-only packed scale int32 [N, n_heads]
         """
         assert not bool(getattr(attention_inputs, "is_target_verify", False)), (
             "target verify must use paged DSA topk; ragged fp8_mqa_logits is "
@@ -813,16 +996,28 @@ class IndexerOp(nn.Module):
         # Using q_fp8.shape[0] (= sum(input_lengths)) is wrong when
         # prefix_lengths > 0 (e.g. target-verify in speculative decoding).
         total_kv_tokens = fmha_params.prefill_total_kv_tokens
-        k_fp8 = torch.empty(
-            (total_kv_tokens, self.index_head_dim),
-            dtype=torch.float8_e4m3fn,
-            device=q_fp8.device,
-        )
-        k_scale = torch.empty(
-            (total_kv_tokens, self.index_head_dim // self.block_size * 4),
-            dtype=torch.uint8,
-            device=q_fp8.device,
-        )
+        if self._is_fp4():
+            k_fp8 = torch.empty(
+                (total_kv_tokens, self.index_head_dim // 2),
+                dtype=torch.int8,
+                device=q_fp8.device,
+            )
+            k_scale = torch.empty(
+                (total_kv_tokens, self._fp4_scale_int32_per_token()),
+                dtype=torch.int32,
+                device=q_fp8.device,
+            )
+        else:
+            k_fp8 = torch.empty(
+                (total_kv_tokens, self.index_head_dim),
+                dtype=torch.float8_e4m3fn,
+                device=q_fp8.device,
+            )
+            k_scale = torch.empty(
+                (total_kv_tokens, self.index_head_dim // self.block_size * 4),
+                dtype=torch.uint8,
+                device=q_fp8.device,
+            )
 
         block_table = _prefill_physical_block_table(attention_inputs)
         if _pd_debug_enabled():
@@ -841,17 +1036,42 @@ class IndexerOp(nn.Module):
                     _tensor_summary(attention_inputs.cu_kv_seqlens),
                 )
 
-        rtp_llm_ops.cp_gather_indexer_k_quant_cache(
-            self._kv_cache_blocks(kv_cache),  # [num_blocks, block_size, cache_stride]
-            k_fp8,  # output [num_tokens, index_head_dim]
-            k_scale,  # output [num_tokens, scale_size]
-            block_table,  # [batch_size, physical_blocks]
-            attention_inputs.cu_kv_seqlens,
-        )
+        if self._is_fp4():
+            rtp_llm_ops.cp_gather_indexer_k_quant_cache_fp4(
+                self._kv_cache_blocks(kv_cache),
+                k_fp8,
+                k_scale,
+                block_table,
+                attention_inputs.cu_kv_seqlens,
+            )
+        else:
+            rtp_llm_ops.cp_gather_indexer_k_quant_cache(
+                self._kv_cache_blocks(
+                    kv_cache
+                ),  # [num_blocks, block_size, cache_stride]
+                k_fp8,  # output [num_tokens, index_head_dim]
+                k_scale,  # output [num_tokens, scale_size]
+                block_table,  # [batch_size, physical_blocks]
+                attention_inputs.cu_kv_seqlens,
+            )
 
         # Compute logits
-        weights = weights.squeeze(-1)
-        kv_fp8 = (k_fp8, k_scale.view(torch.float32).squeeze(-1))
+        if self._is_fp4():
+            # FP4 kv tuple: (packed int8 [T, HD//2], packed scale int32 [T]).
+            # Caller already passes weights without q_scale absorption — they are
+            # shape [N, n_heads, 1]; squeeze to [N, n_heads] for the kernel.
+            weights = weights.squeeze(-1) if weights.dim() == 3 else weights
+            kv_fp8 = (
+                k_fp8,
+                (
+                    k_scale.squeeze(-1)
+                    if k_scale.dim() == 2 and k_scale.size(-1) == 1
+                    else k_scale.view(-1)
+                ),
+            )
+        else:
+            weights = weights.squeeze(-1)
+            kv_fp8 = (k_fp8, k_scale.view(torch.float32).squeeze(-1))
 
         assert (
             fmha_params.ks is not None and fmha_params.ke is not None
@@ -869,14 +1089,30 @@ class IndexerOp(nn.Module):
         while row_start < num_rows:
             row_end = min(row_start + chunk_rows, num_rows)
             try:
-                logits = deep_gemm.fp8_mqa_logits(
-                    q_fp8[row_start:row_end],
-                    kv_fp8,
-                    weights[row_start:row_end],
-                    fmha_params.ks[row_start:row_end],
-                    fmha_params.ke[row_start:row_end],
-                    clean_logits=False,
-                )
+                if self._is_fp4():
+                    assert (
+                        q_scale_fp4 is not None
+                    ), "FP4 ragged path requires q_scale_fp4 from quant_q_*"
+                    logits = deep_gemm.fp8_fp4_mqa_logits(
+                        (
+                            q_fp8[row_start:row_end],
+                            q_scale_fp4[row_start:row_end],
+                        ),
+                        kv_fp8,
+                        weights[row_start:row_end],
+                        fmha_params.ks[row_start:row_end],
+                        fmha_params.ke[row_start:row_end],
+                        clean_logits=False,
+                    )
+                else:
+                    logits = deep_gemm.fp8_mqa_logits(
+                        q_fp8[row_start:row_end],
+                        kv_fp8,
+                        weights[row_start:row_end],
+                        fmha_params.ks[row_start:row_end],
+                        fmha_params.ke[row_start:row_end],
+                        clean_logits=False,
+                    )
             except torch.OutOfMemoryError:
                 next_chunk_rows = _halve_chunk_rows(chunk_rows)
                 if next_chunk_rows == chunk_rows:
@@ -934,6 +1170,7 @@ class IndexerOp(nn.Module):
         cp_size: int = 1,
         cp_rank: int = 0,
         kv_owner_tokens_per_block: int = 0,
+        q_scale_fp4: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Compute TopK indices for ragged attention (prefill phase) with context parallel
@@ -973,26 +1210,50 @@ class IndexerOp(nn.Module):
         total_kv_tokens = num_kv_tokens
         assert total_kv_tokens > 0, "num_kv_tokens must be positive"
 
-        weights_sq = weights.squeeze(-1)
+        weights_sq = weights.squeeze(-1) if weights.dim() == 3 else weights
 
         if has_local_ids:
             q0 = q_fp8[total_local_ids].contiguous()
             weights_sq0 = weights_sq[total_local_ids].contiguous()
+            if self._is_fp4():
+                assert (
+                    q_scale_fp4 is not None
+                ), "FP4 ragged CP path requires q_scale_fp4 from quant_q_*"
+                q_scale0 = q_scale_fp4[total_local_ids].contiguous()
+            else:
+                q_scale0 = None
         else:
             q0 = q_fp8[:0].contiguous()
             weights_sq0 = weights_sq[:0].contiguous()
+            q_scale0 = (
+                q_scale_fp4[:0].contiguous()
+                if (self._is_fp4() and q_scale_fp4 is not None)
+                else None
+            )
 
         # Full KV from cache (KV not split).
-        k_fp8 = torch.empty(
-            (total_kv_tokens, self.index_head_dim),
-            dtype=torch.float8_e4m3fn,
-            device=device,
-        )
-        k_scale = torch.empty(
-            (total_kv_tokens, self.index_head_dim // self.block_size * 4),
-            dtype=torch.uint8,
-            device=device,
-        )
+        if self._is_fp4():
+            k_fp8 = torch.empty(
+                (total_kv_tokens, self.index_head_dim // 2),
+                dtype=torch.int8,
+                device=device,
+            )
+            k_scale = torch.empty(
+                (total_kv_tokens, self._fp4_scale_int32_per_token()),
+                dtype=torch.int32,
+                device=device,
+            )
+        else:
+            k_fp8 = torch.empty(
+                (total_kv_tokens, self.index_head_dim),
+                dtype=torch.float8_e4m3fn,
+                device=device,
+            )
+            k_scale = torch.empty(
+                (total_kv_tokens, self.index_head_dim // self.block_size * 4),
+                dtype=torch.uint8,
+                device=device,
+            )
         block_table = _prefill_physical_block_table(attention_inputs)
         if _pd_debug_enabled():
             if _pd_debug_take(f"ragged_cp_block_table:{self.index_topk}", 16):
@@ -1041,7 +1302,7 @@ class IndexerOp(nn.Module):
                 owner_block_size=owner_bs,
             )
             local_k = torch.zeros(
-                (plan.total_local_T, self.index_head_dim),
+                (plan.total_local_T, k_fp8.shape[-1]),
                 dtype=k_fp8.dtype,
                 device=device,
             )
@@ -1052,7 +1313,7 @@ class IndexerOp(nn.Module):
             )
             if plan.total_actual_local_T > 0:
                 actual_k = torch.empty(
-                    (plan.total_actual_local_T, self.index_head_dim),
+                    (plan.total_actual_local_T, k_fp8.shape[-1]),
                     dtype=k_fp8.dtype,
                     device=device,
                 )
@@ -1061,13 +1322,22 @@ class IndexerOp(nn.Module):
                     dtype=k_scale.dtype,
                     device=device,
                 )
-                rtp_llm_ops.cp_gather_indexer_k_quant_cache(
-                    self._kv_cache_blocks(kv_cache),
-                    actual_k,
-                    actual_s,
-                    block_table,
-                    asm.build_actual_local_cu_kv_seqlens(plan),
-                )
+                if self._is_fp4():
+                    rtp_llm_ops.cp_gather_indexer_k_quant_cache_fp4(
+                        self._kv_cache_blocks(kv_cache),
+                        actual_k,
+                        actual_s,
+                        block_table,
+                        asm.build_actual_local_cu_kv_seqlens(plan),
+                    )
+                else:
+                    rtp_llm_ops.cp_gather_indexer_k_quant_cache(
+                        self._kv_cache_blocks(kv_cache),
+                        actual_k,
+                        actual_s,
+                        block_table,
+                        asm.build_actual_local_cu_kv_seqlens(plan),
+                    )
                 asm.copy_actual_indexer_k_to_padded(
                     plan=plan,
                     actual_k_quant=actual_k,
@@ -1083,16 +1353,34 @@ class IndexerOp(nn.Module):
                 out_k_scale=k_scale,
             )
         else:
-            rtp_llm_ops.cp_gather_indexer_k_quant_cache(
-                self._kv_cache_blocks(kv_cache),
-                k_fp8,
-                k_scale,
-                block_table,
-                cu_kv_seqlens_global,
-            )
+            if self._is_fp4():
+                rtp_llm_ops.cp_gather_indexer_k_quant_cache_fp4(
+                    self._kv_cache_blocks(kv_cache),
+                    k_fp8,
+                    k_scale,
+                    block_table,
+                    cu_kv_seqlens_global,
+                )
+            else:
+                rtp_llm_ops.cp_gather_indexer_k_quant_cache(
+                    self._kv_cache_blocks(kv_cache),
+                    k_fp8,
+                    k_scale,
+                    block_table,
+                    cu_kv_seqlens_global,
+                )
         if not has_local_ids:
             return torch.empty((0, self.index_topk), dtype=torch.int32, device=device)
-        kv_fp8_full = (k_fp8, k_scale.view(torch.float32).squeeze(-1))
+        if self._is_fp4():
+            # FP4 kv tuple: (packed int8 [T, HD//2], packed scale int32 [T])
+            k_scale_view = (
+                k_scale.squeeze(-1)
+                if k_scale.dim() == 2 and k_scale.size(-1) == 1
+                else k_scale.view(-1)
+            )
+            kv_fp8_full = (k_fp8, k_scale_view)
+        else:
+            kv_fp8_full = (k_fp8, k_scale.view(torch.float32).squeeze(-1))
 
         def run_part_logits_topk(
             q_part: torch.Tensor,
@@ -1100,6 +1388,7 @@ class IndexerOp(nn.Module):
             ks: torch.Tensor,
             ke: torch.Tensor,
             topk_off: torch.Tensor,
+            q_scale_part: Optional[torch.Tensor] = None,
         ) -> torch.Tensor:
             nr = q_part.shape[0]
             topk_result = torch.empty(
@@ -1113,14 +1402,30 @@ class IndexerOp(nn.Module):
             while row_start < nr:
                 row_end = min(row_start + chunk_rows, nr)
                 try:
-                    logits_p = deep_gemm.fp8_mqa_logits(
-                        q_part[row_start:row_end],
-                        kv_fp8_full,
-                        weights_part[row_start:row_end],
-                        ks[row_start:row_end],
-                        ke[row_start:row_end],
-                        clean_logits=False,
-                    )
+                    if self._is_fp4():
+                        assert (
+                            q_scale_part is not None
+                        ), "FP4 ragged CP path requires q_scale_part"
+                        logits_p = deep_gemm.fp8_fp4_mqa_logits(
+                            (
+                                q_part[row_start:row_end],
+                                q_scale_part[row_start:row_end],
+                            ),
+                            kv_fp8_full,
+                            weights_part[row_start:row_end],
+                            ks[row_start:row_end],
+                            ke[row_start:row_end],
+                            clean_logits=False,
+                        )
+                    else:
+                        logits_p = deep_gemm.fp8_mqa_logits(
+                            q_part[row_start:row_end],
+                            kv_fp8_full,
+                            weights_part[row_start:row_end],
+                            ks[row_start:row_end],
+                            ke[row_start:row_end],
+                            clean_logits=False,
+                        )
                 except torch.OutOfMemoryError:
                     next_chunk_rows = _halve_chunk_rows(chunk_rows)
                     if next_chunk_rows == chunk_rows:
@@ -1164,4 +1469,5 @@ class IndexerOp(nn.Module):
             precomputed_ks,
             precomputed_ke,
             precomputed_topk_off,
+            q_scale_part=q_scale0,
         )

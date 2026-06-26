@@ -271,6 +271,218 @@ void indexer_k_quant_and_cache(torch::Tensor&     k,                 // [num_tok
     }
 }
 
+// ============================================================================
+// Indexer K FP4 quantization and cache kernels (Blackwell-only).
+// ============================================================================
+//
+// Layout per token (head_dim=128, gran_k=32 → 4 groups, packed UE8M0):
+//   data:  head_dim / 2 = 64 bytes (FP4 e2m1, 2 elements per byte; low nibble
+//          = even index, high nibble = odd index).
+//   scale: head_dim / gran_k = 4 bytes (one UE8M0 byte per group).
+// cache_stride must therefore be >= 64 + 4 = 68 for HD=128.
+// Block layout: [block_size × (head_dim/2) bytes of data, then
+// block_size × (head_dim/gran_k) bytes of scale].
+//
+// Matches deep_gemm.utils.per_token_cast_to_fp4(use_ue8m0=True,
+// gran_k=32, use_packed_ue8m0=True), which is what
+// deep_gemm.fp8_fp4_*mqa_logits expects.
+
+__inline__ __device__ float ceil_to_ue8m0_scale(float x) {
+    // Round x's exponent up so the result is a power-of-2 >= x (matches
+    // deep_gemm.utils.ceil_to_ue8m0 on float32).
+    uint32_t bits     = __float_as_uint(fabsf(x));
+    uint32_t exp_bits = (bits >> 23) & 0xFFu;
+    uint32_t mant     = bits & 0x7FFFFFu;
+    uint32_t exp_up   = exp_bits + (mant != 0u ? 1u : 0u);
+    exp_up            = max(1u, min(254u, exp_up));
+    return __uint_as_float(exp_up << 23);
+}
+
+__inline__ __device__ uint8_t ue8m0_byte_from_scale(float scale) {
+    return static_cast<uint8_t>((__float_as_uint(scale) >> 23) & 0xFFu);
+}
+
+__inline__ __device__ uint8_t quantize_fp4_e2m1_signed(float x_scaled) {
+    // FP4 levels (positive): {0, 0.5, 1, 1.5, 2, 3, 4, 6}
+    // boundaries (midpoints): 0.25, 0.75, 1.25, 1.75, 2.5, 3.5, 5.0
+    // (matches deep_gemm.utils._quantize_to_fp4_e2m1)
+    float   ax   = fminf(fabsf(x_scaled), 6.0f);
+    uint8_t code = 0;
+    if (ax >= 0.25f)
+        code = 1;
+    if (ax >= 0.75f)
+        code = 2;
+    if (ax >= 1.25f)
+        code = 3;
+    if (ax >= 1.75f)
+        code = 4;
+    if (ax >= 2.5f)
+        code = 5;
+    if (ax >= 3.5f)
+        code = 6;
+    if (ax >= 5.0f)
+        code = 7;
+    if (x_scaled < 0.0f && code != 0) {
+        code |= 0x08u;  // sign bit
+    }
+    return code;
+}
+
+// Kernel: one warp per token, one thread per element (head_dim=128 → 32
+// threads × 4 elems = 128 not used here; use 1 warp = 32 threads, each handles
+// 4 elements via vectorized float2 load — same as FP8 kernel).
+//
+// Threading: 32 threads, each loads 4 bf16 (= 8 bytes = 1 float2). Threads
+// 0-7 cover group 0 (elems 0-31), threads 8-15 cover group 1, ..., 24-31
+// cover group 3 (8 threads × 4 elems = 32 elems per group).
+template<typename scalar_t>
+__global__ void
+indexer_k_quant_and_cache_fp4_kernel(const scalar_t* __restrict__ k,  // [num_tokens, head_dim] bf16/fp16
+                                     uint8_t* __restrict__ kv_cache,  // [num_blocks, block_size, cache_stride]
+                                     const int64_t* __restrict__ slot_mapping,  // [num_tokens]
+                                     const int head_dim,                        // 128
+                                     const int gran_k,                          // 32
+                                     const int cache_block_size,                // tokens per cache block (e.g., 64)
+                                     const int cache_stride                     // bytes per token in cache
+) {
+    constexpr int VEC_SIZE         = 4;  // elements per thread
+    constexpr int GROUP_WARP_SLICE = 8;  // 8 threads × 4 elems = 32 elems / group
+
+    const int64_t token_idx = blockIdx.x;
+    const int64_t slot_idx  = slot_mapping[token_idx];
+    if (slot_idx < 0) {
+        return;
+    }
+
+    const int lane          = threadIdx.x;              // 0..31
+    const int group_idx     = lane / GROUP_WARP_SLICE;  // 0..3
+    const int lane_in_group = lane % GROUP_WARP_SLICE;  // 0..7
+    const int elem_base     = lane * VEC_SIZE;          // first elem this lane owns
+    if (elem_base >= head_dim) {
+        return;
+    }
+
+    // ---- Load 4 bf16 values (vectorized as float2) ----
+    float2    k_val = reinterpret_cast<const float2*>(k)[(token_idx * head_dim + elem_base) / VEC_SIZE];
+    scalar_t* vals  = reinterpret_cast<scalar_t*>(&k_val);
+    float     x[VEC_SIZE];
+    float     amax_local = 0.0f;
+    for (int i = 0; i < VEC_SIZE; ++i) {
+        x[i]       = static_cast<float>(vals[i]);
+        amax_local = fmaxf(amax_local, fabsf(x[i]));
+    }
+
+    // ---- Per-group amax reduction across the 8-thread slice ----
+    // Mask 0xff over the 8 threads in this lane's group; offsets 4, 2, 1.
+    constexpr unsigned GROUP_MASK = 0xFFu;  // 8 threads
+    for (int off = 4; off > 0; off /= 2) {
+        amax_local = fmaxf(amax_local, __shfl_xor_sync(0xFFFFFFFFu, amax_local, off, GROUP_WARP_SLICE));
+    }
+    // amax_local now == group amax for all 8 threads in this group.
+
+    // ---- Scale: amax / 6.0, ceil to UE8M0 power-of-2, clamp ----
+    float scale     = fmaxf(amax_local, 1e-4f) / 6.0f;
+    scale           = ceil_to_ue8m0_scale(scale);
+    float inv_scale = 1.0f / scale;
+
+    // ---- Quantize each element, pack two-per-byte ----
+    uint8_t codes[VEC_SIZE];
+    for (int i = 0; i < VEC_SIZE; ++i) {
+        codes[i] = quantize_fp4_e2m1_signed(x[i] * inv_scale);
+    }
+    // Pack into 2 bytes: even-index → low nibble, odd → high nibble.
+    uint8_t packed[VEC_SIZE / 2];
+    packed[0] = static_cast<uint8_t>((codes[0] & 0x0F) | ((codes[1] & 0x0F) << 4));
+    packed[1] = static_cast<uint8_t>((codes[2] & 0x0F) | ((codes[3] & 0x0F) << 4));
+
+    // ---- Write data: per-token data section = head_dim/2 bytes ----
+    const int64_t block_idx    = slot_idx / cache_block_size;
+    const int64_t block_offset = slot_idx % cache_block_size;
+    const int64_t data_per_tok = head_dim / 2;
+    const int64_t block_base   = block_idx * cache_block_size * cache_stride;
+    const int64_t data_offset  = block_base + block_offset * data_per_tok + elem_base / 2;
+    kv_cache[data_offset + 0]  = packed[0];
+    kv_cache[data_offset + 1]  = packed[1];
+
+    // ---- Write scale: lane 0 of each group writes 1 UE8M0 byte ----
+    if (lane_in_group == 0) {
+        const int64_t scale_section_off   = cache_block_size * data_per_tok;
+        const int     scale_bytes_per_tok = head_dim / gran_k;  // 4 for HD=128
+        const int64_t scale_offset = block_base + scale_section_off + block_offset * scale_bytes_per_tok + group_idx;
+        kv_cache[scale_offset]     = ue8m0_byte_from_scale(scale);
+    }
+}
+
+#define CALL_INDEXER_K_QUANT_AND_CACHE_FP4(KV_T)                                                                       \
+    indexer_k_quant_and_cache_fp4_kernel<KV_T>                                                                         \
+        <<<grid, block, 0, stream>>>(reinterpret_cast<const KV_T*>(k.data_ptr()),                                      \
+                                     reinterpret_cast<uint8_t*>(kv_cache.data_ptr()),                                  \
+                                     slot_mapping.data_ptr<int64_t>(),                                                 \
+                                     head_dim,                                                                         \
+                                     static_cast<int>(gran_k),                                                         \
+                                     cache_block_size,                                                                 \
+                                     cache_stride);
+
+void indexer_k_quant_and_cache_fp4(torch::Tensor& k,             // [num_tokens, head_dim] bf16
+                                   torch::Tensor& kv_cache,      // [num_blocks, block_size, cache_stride]
+                                   torch::Tensor& slot_mapping,  // [num_tokens] int64
+                                   int64_t        gran_k         // FP4 quant group size (32)
+) {
+    TORCH_CHECK(k.dim() == 2, "indexer_k_quant_and_cache_fp4: k must be 2-D, got dim ", k.dim());
+    TORCH_CHECK(k.is_contiguous(), "indexer_k_quant_and_cache_fp4: k must be contiguous");
+    TORCH_CHECK(kv_cache.dim() == 3, "indexer_k_quant_and_cache_fp4: kv_cache must be 3-D, got dim ", kv_cache.dim());
+    TORCH_CHECK(kv_cache.is_contiguous(), "indexer_k_quant_and_cache_fp4: kv_cache must be contiguous");
+    TORCH_CHECK(slot_mapping.dim() == 1,
+                "indexer_k_quant_and_cache_fp4: slot_mapping must be 1-D, got dim ",
+                slot_mapping.dim());
+    TORCH_CHECK(slot_mapping.scalar_type() == torch::kInt64,
+                "indexer_k_quant_and_cache_fp4: slot_mapping must be int64");
+    TORCH_CHECK(slot_mapping.is_contiguous(), "indexer_k_quant_and_cache_fp4: slot_mapping must be contiguous");
+    TORCH_CHECK(gran_k > 0 && (gran_k & (gran_k - 1)) == 0,
+                "indexer_k_quant_and_cache_fp4: gran_k must be a positive power of 2");
+
+    int num_tokens       = k.size(0);
+    int head_dim         = k.size(1);
+    int cache_block_size = kv_cache.size(1);
+    int cache_stride     = kv_cache.size(2);
+
+    TORCH_CHECK(k.device() == kv_cache.device(), "k and kv_cache must be on the same device");
+    TORCH_CHECK(k.device() == slot_mapping.device(), "k and slot_mapping must be on the same device");
+    TORCH_CHECK(k.scalar_type() == torch::kBFloat16, "indexer_k_quant_and_cache_fp4: k must be bfloat16");
+    TORCH_CHECK(kv_cache.scalar_type() == torch::kUInt8, "indexer_k_quant_and_cache_fp4: kv_cache must be uint8");
+    TORCH_CHECK(head_dim % gran_k == 0,
+                "indexer_k_quant_and_cache_fp4: head_dim ",
+                head_dim,
+                " must be divisible by gran_k ",
+                gran_k);
+    TORCH_CHECK(head_dim % 8 == 0,
+                "indexer_k_quant_and_cache_fp4: head_dim must be divisible by 8 for vectorized load");
+    TORCH_CHECK(head_dim == 128, "indexer_k_quant_and_cache_fp4: head_dim must be 128 (v1 only); got ", head_dim);
+    TORCH_CHECK(cache_stride >= head_dim / 2 + head_dim / gran_k,
+                "indexer_k_quant_and_cache_fp4: cache_stride ",
+                cache_stride,
+                " too small for head_dim ",
+                head_dim,
+                " and gran_k ",
+                gran_k);
+    TORCH_CHECK(slot_mapping.size(0) >= num_tokens, "indexer_k_quant_and_cache_fp4: slot_mapping size mismatch");
+    if (num_tokens == 0) {
+        return;
+    }
+
+    const c10::cuda::CUDAGuard device_guard(k.device());
+    const cudaStream_t         stream = c10::cuda::getCurrentCUDAStream();
+
+    dim3 grid(num_tokens);
+    dim3 block(32);  // 1 warp/token; 4 elems/lane → covers head_dim=128.
+
+    if (k.scalar_type() == torch::kBFloat16) {
+        CALL_INDEXER_K_QUANT_AND_CACHE_FP4(__nv_bfloat16);
+    } else {
+        TORCH_CHECK(false, "Unsupported data type for indexer_k_quant_and_cache_fp4");
+    }
+}
+
 // Macro to dispatch gather kernel based on block size
 #define CALL_CP_GATHER_INDEXER_K_QUANT_CACHE(BLOCK_Y_SIZE)                                                             \
     cp_gather_indexer_k_quant_cache_kernel<BLOCK_Y_SIZE>                                                               \
@@ -336,6 +548,195 @@ void cp_gather_indexer_k_quant_cache(const torch::Tensor& kv_cache,     // [num_
         CALL_CP_GATHER_INDEXER_K_QUANT_CACHE(16);
     } else {
         CALL_CP_GATHER_INDEXER_K_QUANT_CACHE(32);
+    }
+}
+
+// ============================================================================
+// FP4 indexer K gather (Blackwell-only)
+// ============================================================================
+//
+// Source layout (per cache block):
+//   bytes [0, block_size * data_bytes_per_tok):
+//       FP4 data, per-token data_bytes_per_tok = head_dim/2 bytes
+//   bytes [block_size * data_bytes_per_tok, block_size * cache_stride):
+//       UE8M0 scales, per-token scale_bytes_per_tok = head_dim/gran_k bytes
+// Output:
+//   dst_k     [num_tokens, data_bytes_per_tok] int8
+//   dst_scale [num_tokens, scale_bytes_per_tok / 4] int32
+//             (4 packed UE8M0 bytes per int32 — caller passes int32 to match
+//             deep_gemm.fp8_fp4_*mqa_logits expectations)
+
+template<int BLOCK_Y_SIZE>
+__global__ void cp_gather_indexer_k_quant_cache_fp4_kernel(
+    const uint8_t* __restrict__ kv_cache,  // [num_blocks, block_size, cache_stride]
+    uint8_t* __restrict__ dst_k,           // [num_tokens, data_bytes_per_tok]
+    uint8_t* __restrict__ dst_scale,       // [num_tokens, scale_bytes_per_tok] (viewed as bytes)
+    const int* __restrict__ block_table,   // [batch_size, num_blocks]
+    const int* __restrict__ cu_seq_lens,   // [batch_size + 1]
+    const int     batch_size,
+    const int64_t dst_k_token_stride,      // bytes per row of dst_k
+    const int64_t dst_scale_token_stride,  // bytes per row of dst_scale
+    const int64_t data_bytes_per_tok,      // head_dim/2
+    const int64_t scale_bytes_per_tok,     // head_dim/gran_k
+    const int64_t block_stride,            // bytes per cache block
+    const int64_t cache_token_stride,      // cache_stride bytes
+    const int64_t cache_block_size,        // tokens per cache block
+    const int     num_blocks_per_seq,      // block_table.size(1)
+    const int     num_tokens) {
+    // Each thread copies up to vec_size data bytes. 1 lane (lane 0) of each
+    // warp slice also copies the scale section (small, just memcpy).
+    constexpr int VEC_SIZE = sizeof(float4) / sizeof(uint8_t);  // 16
+
+    const int token_idx = blockIdx.x * blockDim.y + threadIdx.y;
+    const int byte_idx  = (blockIdx.y * blockDim.x + threadIdx.x) * VEC_SIZE;
+
+    __shared__ int batch_idx_shm[BLOCK_Y_SIZE];
+    batch_idx_shm[threadIdx.y] = -1;
+    for (int iter = 0; iter < (batch_size + (int)blockDim.x - 1) / (int)blockDim.x; ++iter) {
+        int tid = iter * blockDim.x + threadIdx.x;
+        if (tid < batch_size) {
+            const int seq_start = cu_seq_lens[tid];
+            const int seq_end   = cu_seq_lens[tid + 1];
+            if (token_idx >= seq_start && token_idx < seq_end) {
+                batch_idx_shm[threadIdx.y] = tid;
+            }
+        }
+    }
+    __syncwarp();
+
+    if (token_idx >= num_tokens || batch_idx_shm[threadIdx.y] < 0) {
+        return;
+    }
+    if (byte_idx >= data_bytes_per_tok) {
+        // Only scale lane (lane 0) still needs to work.
+        if (threadIdx.x == 0) {
+            const int inbatch_idx = token_idx - cu_seq_lens[batch_idx_shm[threadIdx.y]];
+            const int blk_id =
+                block_table[batch_idx_shm[threadIdx.y] * num_blocks_per_seq + inbatch_idx / cache_block_size];
+            const int64_t src_blk_off   = blk_id * block_stride;
+            const int64_t src_scale_off = src_blk_off + cache_block_size * data_bytes_per_tok
+                                          + (inbatch_idx % cache_block_size) * scale_bytes_per_tok;
+            const int64_t dst_scale_off = token_idx * dst_scale_token_stride;
+            for (int i = 0; i < scale_bytes_per_tok; ++i) {
+                dst_scale[dst_scale_off + i] = kv_cache[src_scale_off + i];
+            }
+        }
+        return;
+    }
+
+    const int inbatch_idx = token_idx - cu_seq_lens[batch_idx_shm[threadIdx.y]];
+    const int blk_id = block_table[batch_idx_shm[threadIdx.y] * num_blocks_per_seq + inbatch_idx / cache_block_size];
+    const int64_t src_blk_off     = blk_id * block_stride;
+    const int64_t cache_inblk_off = (inbatch_idx % cache_block_size) * data_bytes_per_tok + byte_idx;
+    const int64_t src_off         = src_blk_off + cache_inblk_off;
+    const int64_t dst_off         = token_idx * dst_k_token_stride + byte_idx;
+
+    // Data: vectorized float4 copy when possible, else byte loop.
+    int remaining = static_cast<int>(data_bytes_per_tok) - byte_idx;
+    if (remaining >= VEC_SIZE) {
+        reinterpret_cast<float4*>(dst_k)[dst_off / VEC_SIZE] =
+            reinterpret_cast<const float4*>(kv_cache)[src_off / VEC_SIZE];
+    } else {
+        for (int i = 0; i < remaining; ++i) {
+            dst_k[dst_off + i] = kv_cache[src_off + i];
+        }
+    }
+
+    // Scale: one lane per token copies the full scale section.
+    if (threadIdx.x == 0) {
+        const int64_t src_scale_off = src_blk_off + cache_block_size * data_bytes_per_tok
+                                      + (inbatch_idx % cache_block_size) * scale_bytes_per_tok;
+        const int64_t dst_scale_off = token_idx * dst_scale_token_stride;
+        for (int i = 0; i < scale_bytes_per_tok; ++i) {
+            dst_scale[dst_scale_off + i] = kv_cache[src_scale_off + i];
+        }
+    }
+}
+
+#define CALL_CP_GATHER_INDEXER_K_QUANT_CACHE_FP4(BLOCK_Y_SIZE)                                                         \
+    cp_gather_indexer_k_quant_cache_fp4_kernel<BLOCK_Y_SIZE>                                                           \
+        <<<dim3((num_tokens + BLOCK_Y_SIZE - 1) / BLOCK_Y_SIZE,                                                        \
+                (data_bytes_per_tok + 8 * vec_size - 1) / (8 * vec_size)),                                             \
+           dim3(8, BLOCK_Y_SIZE),                                                                                      \
+           0,                                                                                                          \
+           stream>>>(reinterpret_cast<const uint8_t*>(kv_cache.data_ptr()),                                            \
+                     reinterpret_cast<uint8_t*>(dst_k.data_ptr()),                                                     \
+                     reinterpret_cast<uint8_t*>(dst_scale.data_ptr()),                                                 \
+                     block_table.data_ptr<int32_t>(),                                                                  \
+                     cu_seq_lens.data_ptr<int32_t>(),                                                                  \
+                     batch_size,                                                                                       \
+                     dst_k.stride(0),                                                                                  \
+                     dst_scale_token_stride_bytes,                                                                     \
+                     data_bytes_per_tok,                                                                               \
+                     scale_bytes_per_tok,                                                                              \
+                     kv_cache.stride(0),                                                                               \
+                     kv_cache.stride(1),                                                                               \
+                     kv_cache.size(1),                                                                                 \
+                     block_table.size(1),                                                                              \
+                     num_tokens);
+
+void cp_gather_indexer_k_quant_cache_fp4(const torch::Tensor& kv_cache,     // [num_blocks, block_size, cache_stride]
+                                         torch::Tensor&       dst_k,        // [num_tokens, head_dim/2] int8
+                                         torch::Tensor&       dst_scale,    // [num_tokens, head_dim/gran_k/4] int32
+                                         const torch::Tensor& block_table,  // [batch_size, num_blocks]
+                                         const torch::Tensor& cu_seq_lens   // [batch_size + 1]
+) {
+    TORCH_CHECK(kv_cache.dim() == 3, "cp_gather_indexer_k_quant_cache_fp4: kv_cache must be 3-D");
+    TORCH_CHECK(kv_cache.dtype() == torch::kUInt8, "cp_gather_indexer_k_quant_cache_fp4: kv_cache must be uint8");
+    TORCH_CHECK(dst_k.dim() == 2, "cp_gather_indexer_k_quant_cache_fp4: dst_k must be 2-D");
+    TORCH_CHECK(dst_k.dtype() == torch::kInt8 || dst_k.dtype() == torch::kUInt8,
+                "cp_gather_indexer_k_quant_cache_fp4: dst_k must be int8/uint8");
+    TORCH_CHECK(dst_scale.dim() == 2, "cp_gather_indexer_k_quant_cache_fp4: dst_scale must be 2-D");
+    TORCH_CHECK(dst_scale.dtype() == torch::kInt32 || dst_scale.dtype() == torch::kUInt8,
+                "cp_gather_indexer_k_quant_cache_fp4: dst_scale must be int32/uint8");
+    TORCH_CHECK(block_table.dtype() == torch::kInt32, "block_table must be int32");
+    TORCH_CHECK(cu_seq_lens.dtype() == torch::kInt32, "cu_seq_lens must be int32");
+
+    TORCH_CHECK(kv_cache.device() == dst_k.device(), "kv_cache and dst_k must be on the same device");
+    TORCH_CHECK(kv_cache.device() == dst_scale.device(), "kv_cache and dst_scale must be on the same device");
+    TORCH_CHECK(kv_cache.device() == block_table.device(), "kv_cache and block_table must be on the same device");
+    TORCH_CHECK(kv_cache.device() == cu_seq_lens.device(), "kv_cache and cu_seq_lens must be on the same device");
+
+    int batch_size = block_table.size(0);
+    int num_tokens = dst_k.size(0);
+    TORCH_CHECK(dst_k.size(0) == dst_scale.size(0),
+                "cp_gather_indexer_k_quant_cache_fp4: dst_k and dst_scale token-dim mismatch");
+    TORCH_CHECK(cu_seq_lens.size(0) == batch_size + 1, "cu_seq_lens length mismatch");
+
+    int64_t data_bytes_per_tok = dst_k.size(1);
+    // dst_scale storage is uint8 underneath (4 bytes/int32). When the caller
+    // hands us int32 [num_tokens, N], its byte-row stride is 4*N.
+    int64_t dst_scale_token_stride_bytes = dst_scale.stride(0) * static_cast<int64_t>(dst_scale.element_size());
+    int64_t scale_bytes_per_tok          = dst_scale.size(1) * static_cast<int64_t>(dst_scale.element_size());
+
+    TORCH_CHECK(kv_cache.size(2) >= data_bytes_per_tok + scale_bytes_per_tok,
+                "cp_gather_indexer_k_quant_cache_fp4: kv_cache stride ",
+                kv_cache.size(2),
+                " too small for data_bytes_per_tok=",
+                data_bytes_per_tok,
+                " + scale_bytes_per_tok=",
+                scale_bytes_per_tok);
+
+    constexpr int              vec_size = 16;
+    const c10::cuda::CUDAGuard device_guard(kv_cache.device());
+    const cudaStream_t         stream = c10::cuda::getCurrentCUDAStream();
+
+    if (num_tokens == 0) {
+        return;
+    }
+
+    if (num_tokens < 32) {
+        CALL_CP_GATHER_INDEXER_K_QUANT_CACHE_FP4(1);
+    } else if (num_tokens < 64) {
+        CALL_CP_GATHER_INDEXER_K_QUANT_CACHE_FP4(2);
+    } else if (num_tokens < 128) {
+        CALL_CP_GATHER_INDEXER_K_QUANT_CACHE_FP4(4);
+    } else if (num_tokens < 256) {
+        CALL_CP_GATHER_INDEXER_K_QUANT_CACHE_FP4(8);
+    } else if (num_tokens < 512) {
+        CALL_CP_GATHER_INDEXER_K_QUANT_CACHE_FP4(16);
+    } else {
+        CALL_CP_GATHER_INDEXER_K_QUANT_CACHE_FP4(32);
     }
 }
 

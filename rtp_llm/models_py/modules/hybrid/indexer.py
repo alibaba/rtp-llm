@@ -1,3 +1,4 @@
+import os
 from typing import Any, Dict, Optional, Tuple
 
 import torch
@@ -9,6 +10,32 @@ from rtp_llm.models_py.modules.factory import LinearFactory
 from rtp_llm.ops import AttentionConfigs, HWKernelConfig, ParallelismConfig
 from rtp_llm.ops.compute_ops import KVCache
 from rtp_llm.utils.model_weight import W
+
+_INDEXER_QUANT_DTYPE_ENV = "RTP_LLM_INDEXER_QUANT_DTYPE"
+_SUPPORTED_INDEXER_QUANT_DTYPES = ("fp8", "fp4")
+_BLACKWELL_MIN_CC = (10, 0)
+
+
+def _resolve_indexer_quant_dtype() -> str:
+    raw = os.environ.get(_INDEXER_QUANT_DTYPE_ENV, "fp8").strip().lower()
+    if raw not in _SUPPORTED_INDEXER_QUANT_DTYPES:
+        raise ValueError(
+            f"{_INDEXER_QUANT_DTYPE_ENV}={raw!r} not supported; "
+            f"expected one of {_SUPPORTED_INDEXER_QUANT_DTYPES}"
+        )
+    if raw == "fp4":
+        if not torch.cuda.is_available():
+            raise RuntimeError(
+                f"{_INDEXER_QUANT_DTYPE_ENV}=fp4 requires CUDA; no CUDA device available"
+            )
+        cc = torch.cuda.get_device_capability()
+        if cc < _BLACKWELL_MIN_CC:
+            raise RuntimeError(
+                f"{_INDEXER_QUANT_DTYPE_ENV}=fp4 requires Blackwell (SM>=10.0); "
+                f"current device capability {cc}"
+            )
+    return raw
+
 
 _DEVICE_TYPE = get_device_type()
 if _DEVICE_TYPE == DeviceType.Cuda:
@@ -45,8 +72,13 @@ class Indexer(nn.Module):
         # ``ENABLE_FUSE_KERNELS``) → ``self._fuse_logits_head_gate``. Keep it
         # out of the forward path so it's free at decode (no env / config
         # lookup per token).
+        self._quant_dtype = _resolve_indexer_quant_dtype()
+
+        # Fused FP8 RoPE+Hadamard+Q-quant and fused-logits-head-gate paths are
+        # FP8-only in v1 — disable them when FP4 indexer is selected.
         self._fuse_logits_head_gate = (
-            fuse_kernels_enabled(hw_kernel_config)
+            self._quant_dtype == "fp8"
+            and fuse_kernels_enabled(hw_kernel_config)
             and fused_logits_head_gate is not None
         )
 
@@ -134,6 +166,7 @@ class Indexer(nn.Module):
             block_size=self.block_size,
             scale_fmt=self.scale_fmt,
             is_neox_style=self.is_neox_style,
+            quant_dtype=self._quant_dtype,
         )
 
     def _prefill_cp_enabled(self) -> bool:
@@ -145,13 +178,13 @@ class Indexer(nn.Module):
         return bool(attention_inputs.is_prefill) and self._prefill_cp_enabled()
 
     def _get_logits_head_gate(
-        self, x: torch.Tensor, q_scale: torch.Tensor
+        self, x: torch.Tensor, q_scale: Optional[torch.Tensor]
     ) -> torch.Tensor:
         # F3: fused (cast + GEMV + 2 elementwise muls) into one Triton kernel.
         # ``self._fuse_logits_head_gate`` is resolved at __init__ from
-        # ``HWKernelConfig.enable_fuse_kernels``.
+        # ``HWKernelConfig.enable_fuse_kernels`` and FP8 mode.
         scale = self.softmax_scale * self.weights_scale
-        if self._fuse_logits_head_gate and x.is_contiguous():
+        if self._fuse_logits_head_gate and x.is_contiguous() and q_scale is not None:
             return fused_logits_head_gate(
                 x,
                 q_scale,
@@ -162,7 +195,13 @@ class Indexer(nn.Module):
         x = x.float()
         weights = self.weights_proj(x)
         weights = weights.float()
-        weights = weights.unsqueeze(-1) * q_scale * scale
+        if q_scale is None:
+            # FP4 path: per-token/per-group Q scales are consumed inside
+            # deep_gemm.fp8_fp4_*mqa_logits via the q tuple, so do not fold
+            # them into ``weights`` here.
+            weights = weights * scale
+        else:
+            weights = weights.unsqueeze(-1) * q_scale * scale
         return weights
 
     def _fused_forward_decode(
@@ -277,12 +316,18 @@ class Indexer(nn.Module):
         fmha_params: Any,
         attention_inputs: Any,
         cp_params: Optional[Any],
+        q_scale_fp4: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         if not attention_inputs.is_prefill or bool(
             getattr(attention_inputs, "is_target_verify", False)
         ):
             return self.indexer_op._get_topk_paged(
-                q_fp8, weights, kv_cache, fmha_params, attention_inputs
+                q_fp8,
+                weights,
+                kv_cache,
+                fmha_params,
+                attention_inputs,
+                q_scale_fp4=q_scale_fp4,
             )
         if self._prefill_cp_enabled():
             assert cp_params is not None
@@ -303,9 +348,15 @@ class Indexer(nn.Module):
                 int(getattr(cp_params, "cp_size", 1)),
                 int(getattr(cp_params, "cp_rank", 0)),
                 kv_owner_tokens_per_block=self._kv_owner_tokens_per_block,
+                q_scale_fp4=q_scale_fp4,
             )
         return self.indexer_op._get_topk_ragged(
-            q_fp8, weights, kv_cache, fmha_params, attention_inputs
+            q_fp8,
+            weights,
+            kv_cache,
+            fmha_params,
+            attention_inputs,
+            q_scale_fp4=q_scale_fp4,
         )
 
     def forward(
@@ -332,6 +383,7 @@ class Indexer(nn.Module):
 
         # Fused Q-RoPE-Hadamard-Quant path: single Triton kernel does
         # RoPE + 128-pt Hadamard + ue8m0 FP8 quant for Q (decode only).
+        # FP4 indexer disables this fast path (see __init__).
         if (
             self._fuse_logits_head_gate
             and not attention_inputs.is_prefill
@@ -362,6 +414,21 @@ class Indexer(nn.Module):
                 query, key, kv_cache, fmha_params, attention_inputs, cp_params
             )
 
+        # FP4 mode: q_scale is packed UE8M0 int32 [N, n_heads] for the
+        # deep_gemm fp8_fp4_*mqa_logits q tuple; weights are computed without
+        # q_scale absorption. FP8 mode: q_scale is float32 [N, n_heads, 1]
+        # and is folded into weights via the gate.
+        if self._quant_dtype == "fp4":
+            weights = self._get_logits_head_gate(hidden_states, None)
+            return self._compute_topk(
+                q_fp8,
+                weights,
+                kv_cache,
+                fmha_params,
+                attention_inputs,
+                cp_params,
+                q_scale_fp4=q_scale,
+            )
         weights = self._get_logits_head_gate(hidden_states, q_scale)
         return self._compute_topk(
             q_fp8, weights, kv_cache, fmha_params, attention_inputs, cp_params

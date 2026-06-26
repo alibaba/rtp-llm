@@ -300,6 +300,23 @@ void registerBasicCudaOps(py::module& rtp_ops_m) {
                   py::arg("block_table"),
                   py::arg("cu_seq_lens"));
 
+    rtp_ops_m.def("indexer_k_quant_and_cache_fp4",
+                  &rtp_llm::indexer_k_quant_and_cache_fp4,
+                  "Indexer K FP4 quantization and cache (Blackwell-only)",
+                  py::arg("k"),
+                  py::arg("kv_cache"),
+                  py::arg("slot_mapping"),
+                  py::arg("gran_k"));
+
+    rtp_ops_m.def("cp_gather_indexer_k_quant_cache_fp4",
+                  &rtp_llm::cp_gather_indexer_k_quant_cache_fp4,
+                  "Gather indexer K FP4 quantized cache (Blackwell-only)",
+                  py::arg("kv_cache"),
+                  py::arg("dst_k"),
+                  py::arg("dst_scale"),
+                  py::arg("block_table"),
+                  py::arg("cu_seq_lens"));
+
     rtp_ops_m.def("cp_gather_and_upconvert_fp8_kv_cache",
                   &rtp_llm::cp_gather_and_upconvert_fp8_kv_cache,
                   "Gather and upconvert FP8 KV cache to BF16 workspace (MLA DeepSeek V3 layout)",

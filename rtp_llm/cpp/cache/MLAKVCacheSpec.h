@@ -22,20 +22,22 @@ struct MLAKVCacheSpec: public KVCacheSpec {
     // BlockPoolConfigHelper allocate the indexer scale buffer without needing
     // a special override at the helper. Mirrors SingleConfigCreator's existing
     // override on the main pool's ``kv_scale_stride_bytes`` (SingleConfigCreator.cc:49-53).
-    bool     is_sparse        = false;
-    uint32_t indexer_head_dim = 0;
+    bool        is_sparse           = false;
+    uint32_t    indexer_head_dim    = 0;
+    std::string indexer_quant_dtype = "fp8";  // "fp8" (default) or "fp4" (Blackwell)
 
     MLAKVCacheSpec() = default;
 
     MLAKVCacheSpec(const AttentionConfigs& attn_config, const ParallelismConfig& parallelism_config) {
-        type               = KVCacheSpecType::MultiHeadLatentAttention;
-        layer_num          = 1;  // Will be set by caller
-        local_head_num_kv  = 1;  // mla set local_head_num_kv to 1
-        seq_size_per_block = static_cast<uint32_t>(attn_config.tokens_per_block);
-        kv_lora_rank       = static_cast<uint32_t>(attn_config.kv_lora_rank);
-        rope_head_dim      = static_cast<uint32_t>(attn_config.rope_head_dim);
-        is_sparse          = attn_config.is_sparse;
-        indexer_head_dim   = static_cast<uint32_t>(attn_config.indexer_head_dim);
+        type                = KVCacheSpecType::MultiHeadLatentAttention;
+        layer_num           = 1;  // Will be set by caller
+        local_head_num_kv   = 1;  // mla set local_head_num_kv to 1
+        seq_size_per_block  = static_cast<uint32_t>(attn_config.tokens_per_block);
+        kv_lora_rank        = static_cast<uint32_t>(attn_config.kv_lora_rank);
+        rope_head_dim       = static_cast<uint32_t>(attn_config.rope_head_dim);
+        is_sparse           = attn_config.is_sparse;
+        indexer_head_dim    = static_cast<uint32_t>(attn_config.indexer_head_dim);
+        indexer_quant_dtype = attn_config.indexer_quant_dtype;
     }
 
     size_t block_size() const override {
@@ -67,15 +69,23 @@ struct MLAKVCacheSpec: public KVCacheSpec {
         return v_block_size() * rtp_llm::getTypeSize(dtype);
     }
 
-    // DSA indexer K cache: 128 bytes FP8 + 4 bytes FP32 scale per 128-elem
-    // quant block (`indexer_head_dim/128 * 4`), per token, times
-    // seq_size_per_block tokens per cache block. Returns 0 when DSA is off.
+    // DSA indexer K cache bytes per cache block. FP8 layout: 128B FP8 K +
+    // 4B FP32 scale per 128-elem block (= 132B/token on HD=128). FP4 layout
+    // (Blackwell only): 64B FP4 K (HD/2) + 4B packed UE8M0 scale (HD/gran_k
+    // with gran_k=32) = 68B/token on HD=128. Multiplied by seq_size_per_block.
+    // Must match SingleConfigCreator::kv_scale_stride_bytes and the Python
+    // IndexerOp._head_dim_with_sf view. Returns 0 when DSA is off.
     size_t scale_block_size_bytes() const override {
         if (!is_sparse || indexer_head_dim == 0) {
             return 0;
         }
-        return static_cast<size_t>(indexer_head_dim + indexer_head_dim / 128 * 4)
-               * static_cast<size_t>(seq_size_per_block);
+        size_t per_token_bytes;
+        if (indexer_quant_dtype == "fp4") {
+            per_token_bytes = static_cast<size_t>(indexer_head_dim / 2 + indexer_head_dim / 32);
+        } else {
+            per_token_bytes = static_cast<size_t>(indexer_head_dim + indexer_head_dim / 128 * 4);
+        }
+        return per_token_bytes * static_cast<size_t>(seq_size_per_block);
     }
 
     // Static helper function for MLA - no head partitioning

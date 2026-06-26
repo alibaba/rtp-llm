@@ -23,6 +23,26 @@ void cp_gather_indexer_k_quant_cache(const torch::Tensor& kv_cache,     // [num_
                                      const torch::Tensor& cu_seq_lens   // [batch_size + 1]
 );
 
+// Indexer K FP4 quantization and cache (Blackwell-only).
+// Packs BF16 K into FP4 e2m1 + UE8M0 scales matching
+// deep_gemm.utils.per_token_cast_to_fp4(use_ue8m0=True, gran_k=32,
+// use_packed_ue8m0=True). cache_stride must be >= head_dim/2 + head_dim/gran_k.
+void indexer_k_quant_and_cache_fp4(torch::Tensor& k,             // [num_tokens, head_dim] bf16
+                                   torch::Tensor& kv_cache,      // [num_blocks, block_size, cache_stride]
+                                   torch::Tensor& slot_mapping,  // [num_tokens] int64
+                                   int64_t        gran_k         // FP4 quant group size (32)
+);
+
+// Gather FP4 indexer K from paged cache into contiguous (dst_k, dst_scale)
+// buffers. dst_k: int8 [num_tokens, head_dim/2]. dst_scale: int32
+// [num_tokens, head_dim/gran_k/4] holding packed UE8M0 (4 bytes per int32).
+void cp_gather_indexer_k_quant_cache_fp4(const torch::Tensor& kv_cache,     // [num_blocks, block_size, cache_stride]
+                                         torch::Tensor&       dst_k,        // [num_tokens, head_dim/2] int8
+                                         torch::Tensor&       dst_scale,    // [num_tokens, head_dim/gran_k/4] int32
+                                         const torch::Tensor& block_table,  // [batch_size, num_blocks]
+                                         const torch::Tensor& cu_seq_lens   // [batch_size + 1]
+);
+
 // Concat and cache MLA (Multi-Head Latent Attention)
 // Concatenates kv_c and k_pe and stores in paged KV cache
 void concat_and_cache_mla(torch::Tensor&     kv_c,          // [num_tokens, kv_lora_rank]

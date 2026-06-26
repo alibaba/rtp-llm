@@ -47,8 +47,19 @@ CacheConfig SingleConfigCreator::createSingleConfig(const ModelConfig&       mod
     config.kv_scale_size_bytes   = static_cast<size_t>(config.layer_num) * config.kv_scale_stride_bytes;
 
     if (config.is_sparse) {
-        auto indexer_dim             = model_config.attn_config.indexer_head_dim;
-        config.kv_scale_stride_bytes = (indexer_dim + indexer_dim / 128 * 4) * spec->seq_size_per_block;
+        auto indexer_dim = model_config.attn_config.indexer_head_dim;
+        // Indexer KV cache stride: FP8 = head_dim + head_dim/128*4 bytes/token
+        // (128B FP8 K + 4B FP32 scale); FP4 = head_dim/2 + head_dim/32 bytes/token
+        // (64B FP4 K + 4B packed UE8M0 scale on HD=128). Keep in sync with
+        // MLAKVCacheSpec::scale_block_size_bytes and the Python view in
+        // IndexerOp._head_dim_with_sf.
+        size_t per_token_bytes;
+        if (model_config.attn_config.indexer_quant_dtype == "fp4") {
+            per_token_bytes = static_cast<size_t>(indexer_dim / 2 + indexer_dim / 32);
+        } else {
+            per_token_bytes = static_cast<size_t>(indexer_dim + indexer_dim / 128 * 4);
+        }
+        config.kv_scale_stride_bytes = per_token_bytes * spec->seq_size_per_block;
         config.kv_scale_size_bytes   = static_cast<size_t>(config.layer_num) * config.kv_scale_stride_bytes;
     }
 
