@@ -1,6 +1,5 @@
 package org.flexlb.config;
 
-import org.flexlb.dao.loadbalance.Request;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -26,8 +25,7 @@ class ConfigServiceTest {
 
         assertEquals("standalone-group", configService.loadBalanceConfig()
                 .getTrafficPolicy()
-                .resolveTargetGroup(request())
-                .orElseThrow());
+                .getDefaultGroup());
     }
 
     @Test
@@ -48,8 +46,7 @@ class ConfigServiceTest {
 
         assertEquals("standalone-group", configService.loadBalanceConfig()
                 .getTrafficPolicy()
-                .resolveTargetGroup(request())
-                .orElseThrow());
+                .getDefaultGroup());
     }
 
     @Test
@@ -66,8 +63,7 @@ class ConfigServiceTest {
 
         assertEquals("file-group", configService.loadBalanceConfig()
                 .getTrafficPolicy()
-                .resolveTargetGroup(request())
-                .orElseThrow());
+                .getDefaultGroup());
     }
 
     @Test
@@ -106,12 +102,5 @@ class ConfigServiceTest {
         assertFalse(configService.loadBalanceConfig().isCacheHitMetricReportEnabled());
         assertTrue(configService.loadBalanceConfig().isCacheHitTraceLogEnabled());
         assertFalse(configService.loadBalanceConfig().isCacheHitTheoryLogEnabled());
-    }
-
-    private Request request() {
-        Request request = new Request();
-        request.setRequestId(12345L);
-        request.setSeqLen(128L);
-        return request;
     }
 }
