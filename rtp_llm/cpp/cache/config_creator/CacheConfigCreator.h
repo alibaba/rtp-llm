@@ -6,6 +6,7 @@
 #include "absl/status/statusor.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/WarmUpResult.h"
+#include "rtp_llm/cpp/cache/spec/KVCacheSpecDesc.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/config/ModelConfig.h"
 
@@ -33,6 +34,12 @@ public:
                                       const std::optional<WarmUpResult>& warm_up_result,
                                       bool                               is_mtp,
                                       bool                               is_eagle);
+
+    // Unified desc->spec conversion. Callers provide the runtime build context;
+    // descs remain read-only.
+    static LayerKVCacheSpecs buildLayerSpecsFromDescs(const LayerKVCacheSpecDescs& layer_descs,
+                                                      const SpecBuildContext&      ctx,
+                                                      int64_t                      expected_layer_num);
 
 private:
     // Removed functions moved to MemoryEvaluationHelper:

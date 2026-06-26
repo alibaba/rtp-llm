@@ -226,17 +226,18 @@ class BaseModel(object):
             desc.cache_type = CacheType.MLA
             desc.kv_lora_rank = int(model_config.attn_config.kv_lora_rank)
             desc.rope_head_dim = int(model_config.attn_config.rope_head_dim)
-            desc.local_head_num_kv = 1
+            desc.num_kv_heads = 1  # MLA does not split heads across TP
         else:
             desc = KVCacheSpecDesc()
             desc.cache_type = CacheType.MHA
             desc.size_per_head = int(model_config.attn_config.size_per_head)
+            desc.num_kv_heads = int(model_config.attn_config.kv_head_num)
 
         desc.tag = "default"
         desc.seq_size_per_block = int(model_config.attn_config.tokens_per_block)
-        model_config.kv_cache_spec_descs = {
-            layer_id: [desc] for layer_id in range(model_config.num_layers)
-        }
+        model_config.kv_cache_spec_descs = [
+            [desc] for _ in range(model_config.num_layers)
+        ]
 
     @classmethod
     def from_config(

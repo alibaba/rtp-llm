@@ -1609,14 +1609,14 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("cache_type", &KVCacheSpecDesc::cache_type)
         .def_readwrite("has_group_order", &KVCacheSpecDesc::has_group_order)
         .def_readwrite("group_order", &KVCacheSpecDesc::group_order)
-        .def_readwrite("local_head_num_kv", &KVCacheSpecDesc::local_head_num_kv)
+        .def_readwrite("num_kv_heads",  &KVCacheSpecDesc::num_kv_heads)
         .def_readwrite("seq_size_per_block", &KVCacheSpecDesc::seq_size_per_block)
         .def_readwrite("dtype", &KVCacheSpecDesc::dtype)
         .def_readwrite("size_per_head", &KVCacheSpecDesc::size_per_head)
         .def_readwrite("kv_lora_rank", &KVCacheSpecDesc::kv_lora_rank)
         .def_readwrite("rope_head_dim", &KVCacheSpecDesc::rope_head_dim)
-        .def_readwrite("local_num_k_heads", &KVCacheSpecDesc::local_num_k_heads)
-        .def_readwrite("local_num_v_heads", &KVCacheSpecDesc::local_num_v_heads)
+        .def_readwrite("num_k_heads",   &KVCacheSpecDesc::num_k_heads)
+        .def_readwrite("num_v_heads",   &KVCacheSpecDesc::num_v_heads)
         .def_readwrite("head_k_dim", &KVCacheSpecDesc::head_k_dim)
         .def_readwrite("head_v_dim", &KVCacheSpecDesc::head_v_dim)
         .def_readwrite("conv_kernel_dim", &KVCacheSpecDesc::conv_kernel_dim)
@@ -1659,14 +1659,14 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.cache_type,
                                       self.has_group_order,
                                       self.group_order,
-                                      self.local_head_num_kv,
+                                      self.num_kv_heads,
                                       self.seq_size_per_block,
                                       self.dtype,
                                       self.size_per_head,
                                       self.kv_lora_rank,
                                       self.rope_head_dim,
-                                      self.local_num_k_heads,
-                                      self.local_num_v_heads,
+                                      self.num_k_heads,
+                                      self.num_v_heads,
                                       self.head_k_dim,
                                       self.head_v_dim,
                                       self.conv_kernel_dim,
@@ -1713,14 +1713,14 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                 c.cache_type                       = t[1].cast<CacheType>();
                 c.has_group_order                  = t[2].cast<bool>();
                 c.group_order                      = t[3].cast<uint32_t>();
-                c.local_head_num_kv                = t[4].cast<uint32_t>();
+                c.num_kv_heads                 = t[4].cast<uint32_t>();
                 c.seq_size_per_block               = t[5].cast<uint32_t>();
                 c.dtype                            = t[6].cast<DataType>();
                 c.size_per_head                    = t[7].cast<uint32_t>();
                 c.kv_lora_rank                     = t[8].cast<uint32_t>();
                 c.rope_head_dim                    = t[9].cast<uint32_t>();
-                c.local_num_k_heads                = t[10].cast<uint32_t>();
-                c.local_num_v_heads                = t[11].cast<uint32_t>();
+                c.num_k_heads                  = t[10].cast<uint32_t>();
+                c.num_v_heads                  = t[11].cast<uint32_t>();
                 c.head_k_dim                       = t[12].cast<uint32_t>();
                 c.head_v_dim                       = t[13].cast<uint32_t>();
                 c.conv_kernel_dim                  = t[14].cast<uint32_t>();

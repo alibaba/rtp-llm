@@ -15,6 +15,7 @@
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/spec/CacheGroupType.h"
 #include "rtp_llm/cpp/cache/CPSlotMapper.h"
+#include "rtp_llm/cpp/cache/config_creator/CacheConfigCreator.h"
 #include "rtp_llm/cpp/cache/config_creator/HybridPoolConfigCreator.h"
 #include "rtp_llm/cpp/cache/allocator/HybridPoolKVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/spec/LinearKVCacheSpec.h"
@@ -145,7 +146,7 @@ static CacheConfig makeDSV4HybridPoolConfig(uint32_t block_num = 200) {
     ParallelismConfig pc;
     KVCacheConfig     kv_cache_config;
     kv_cache_config.seq_size_per_block = 128;
-    auto config                        = HybridPoolConfigCreator::createConfig(mc, pc, kv_cache_config, false, 0);
+    auto config                        = CacheConfigCreator::createBasicConfig(mc, pc, kv_cache_config, false, 0);
     config.block_num                   = block_num;
     return config;
 }
@@ -1060,7 +1061,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4ConfigUsesOnlyPagedGroupsForBlockSize
     ParallelismConfig pc;
     KVCacheConfig     kv_cache_config;
     kv_cache_config.seq_size_per_block = 128;
-    auto config                        = HybridPoolConfigCreator::createConfig(mc, pc, kv_cache_config, false, 0);
+    auto config                        = CacheConfigCreator::createBasicConfig(mc, pc, kv_cache_config, false, 0);
 
     ASSERT_EQ(config.groupNums(), 7);
     ASSERT_EQ(config.groupNums(), 7);
@@ -1134,7 +1135,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4StateSwaPoolsWithoutExplicitBlocksUse
     KVCacheConfig     kv_cache_config;
     kv_cache_config.seq_size_per_block = 128;
     setDsv4ExplicitPoolBlocks(mc, "hca_state", 0);
-    auto config                        = HybridPoolConfigCreator::createConfig(mc, pc, kv_cache_config, false, 0);
+    auto config                        = CacheConfigCreator::createBasicConfig(mc, pc, kv_cache_config, false, 0);
     config.linear_step                 = 4;
 
     RuntimeConfig rt;

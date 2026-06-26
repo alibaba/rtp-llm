@@ -162,15 +162,17 @@ class Qwen3NextBase(BaseModel):
         linear_desc.conv_kernel_dim = int(linear_config.linear_conv_kernel_dim)
         linear_desc.ssm_state_dtype = linear_config.ssm_state_dtype
         linear_desc.conv_state_dtype = linear_config.conv_state_dtype
+        linear_desc.num_k_heads = int(linear_config.linear_num_key_heads)
+        linear_desc.num_v_heads = int(linear_config.linear_num_value_heads)
 
-        layer_descs = {}
-        for layer_id, attn_type in enumerate(
+        layer_descs = []
+        for _, attn_type in enumerate(
             model_config.hybrid_attention_config.hybrid_attention_types
         ):
             if attn_type == HybridAttentionType.LINEAR:
-                layer_descs[layer_id] = [linear_desc]
+                layer_descs.append([linear_desc])
             else:
-                layer_descs[layer_id] = [full_desc]
+                layer_descs.append([full_desc])
         model_config.kv_cache_spec_descs = layer_descs
 
 

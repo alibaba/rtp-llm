@@ -169,7 +169,7 @@ static ModelConfig makeHybridAttentionModelConfig(bool independent_pool) {
 
 TEST(HybridPoolConfigCreatorTest, ProLayerClassification) {
     ParallelismConfig pc;
-    auto config = HybridPoolConfigCreator::createConfig(makeProModelConfig(), pc, makeDsv4KvCacheConfig(), false, 0);
+    auto config = CacheConfigCreator::createBasicConfig(makeProModelConfig(), pc, makeDsv4KvCacheConfig(), false, 0);
     EXPECT_EQ(config.layer_num, 61u);
     EXPECT_EQ(config.layerIdsForGroup(0).size(), 30u);
     EXPECT_EQ(config.layerIdsForGroup(1).size(), 31u);
@@ -178,7 +178,7 @@ TEST(HybridPoolConfigCreatorTest, ProLayerClassification) {
 
 TEST(HybridPoolConfigCreatorTest, FlashLayerClassification) {
     ParallelismConfig pc;
-    auto config = HybridPoolConfigCreator::createConfig(makeFlashModelConfig(), pc, makeDsv4KvCacheConfig(), false, 0);
+    auto config = CacheConfigCreator::createBasicConfig(makeFlashModelConfig(), pc, makeDsv4KvCacheConfig(), false, 0);
     EXPECT_EQ(config.layer_num, 43u);
     EXPECT_EQ(config.layerIdsForGroup(0).size(), 21u);
     EXPECT_EQ(config.layerIdsForGroup(1).size(), 20u);
@@ -188,7 +188,7 @@ TEST(HybridPoolConfigCreatorTest, FlashLayerClassification) {
 TEST(HybridPoolConfigCreatorTest, MtpSwaOnlyLayerIsNotStripped) {
     ParallelismConfig pc;
     auto              config =
-        HybridPoolConfigCreator::createConfig(makeFlashMtpModelConfig(), pc, makeDsv4KvCacheConfig(), true, 0);
+        CacheConfigCreator::createBasicConfig(makeFlashMtpModelConfig(), pc, makeDsv4KvCacheConfig(), true, 0);
 
     EXPECT_EQ(config.layer_num, 1u);
     EXPECT_EQ(config.block_size_bytes, 1u);
@@ -205,11 +205,11 @@ TEST(HybridPoolConfigCreatorTest, MtpSwaOnlyLayerIsNotStripped) {
 TEST(HybridPoolConfigCreatorTest, Dsv4SpecOrderDoesNotAffectFixedGroupOrder) {
     auto mc = makeFlashModelConfig();
     for (auto& layer_descs : mc.kv_cache_spec_descs) {
-        std::reverse(layer_descs.second.begin(), layer_descs.second.end());
+        std::reverse(layer_descs.begin(), layer_descs.end());
     }
 
     ParallelismConfig pc;
-    auto config = HybridPoolConfigCreator::createConfig(mc, pc, makeDsv4KvCacheConfig(), false, 0);
+    auto config = CacheConfigCreator::createBasicConfig(mc, pc, makeDsv4KvCacheConfig(), false, 0);
 
     const auto& expected_tags = kDsv4Tags;
     EXPECT_EQ(config.groupTagsSnapshot(), expected_tags);
@@ -227,7 +227,15 @@ TEST(HybridPoolConfigCreatorTest, Dsv4SpecOrderDoesNotAffectFixedGroupOrder) {
     EXPECT_EQ(config.groupIdForLayerTag(0, "swa_kv"), 6);
 }
 
-TEST(CacheConfigTest, FromLayerSpecsBuildsTagAndGroupTopology) {
+static GroupBase makeTestGroup(const KVCacheSpecPtr& spec, CacheGroupType type, std::vector<int> layer_ids) {
+    GroupBase group;
+    group.spec      = spec;
+    group.policy    = defaultCacheGroupPolicy(type);
+    group.layer_ids = std::move(layer_ids);
+    return group;
+}
+
+TEST(CacheConfigTest, SetTopologyInstallsTagAndGroupTopology) {
     CacheConfig config;
     config.layer_num     = 3;
     config.layer_all_num = 3;
@@ -246,11 +254,18 @@ TEST(CacheConfigTest, FromLayerSpecsBuildsTagAndGroupTopology) {
     csa_spec->store_dtype = DataType::TYPE_UINT8;
     csa_spec->dtype = DataType::TYPE_UINT8;
 
-    LayerKVCacheSpecs layer_specs;
-    layer_specs[0] = {swa_spec};
-    layer_specs[1] = {swa_spec, csa_spec};
-    layer_specs[2] = {swa_spec};
-    config.fromLayerSpecs(layer_specs);
+    std::vector<LayerBase> layers(3);
+    layers[0].group_ids = {0};
+    layers[0].tag_to_gid["swa"] = 0;
+    layers[1].group_ids = {0, 1};
+    layers[1].tag_to_gid["swa"] = 0;
+    layers[1].tag_to_gid["csa"] = 1;
+    layers[2].group_ids = {0};
+    layers[2].tag_to_gid["swa"] = 0;
+
+    config.setTopology({makeTestGroup(swa_spec, CacheGroupType::SWA, {0, 1, 2}),
+                        makeTestGroup(csa_spec, CacheGroupType::FULL, {1})},
+                       std::move(layers));
 
     EXPECT_EQ(config.groupTagsSnapshot(), std::vector<std::string>({"swa", "csa"}));
     EXPECT_EQ(config.groupIdForLayerTag(1, "swa"), 0);
@@ -260,67 +275,33 @@ TEST(CacheConfigTest, FromLayerSpecsBuildsTagAndGroupTopology) {
     EXPECT_EQ(config.layerGroupIdsSnapshot()[1], std::vector<int>({0, 1}));
 }
 
-TEST(CacheConfigTest, FromLayerSpecsRejectsSameTagWithDifferentPhysicalSignature) {
-    CacheConfig config;
-    config.layer_num     = 2;
-    config.layer_all_num = 2;
-
-    auto spec0 = std::make_shared<MHAKVCacheSpec>();
-    spec0->tag = "dup";
-    spec0->size_per_head = 16;
-    spec0->dtype = DataType::TYPE_FP16;
-    auto spec1 = std::make_shared<MHAKVCacheSpec>();
-    spec1->tag = "dup";
-    spec1->size_per_head = 32;
-    spec1->dtype = DataType::TYPE_FP16;
-
-    LayerKVCacheSpecs layer_specs;
-    layer_specs[0] = {spec0};
-    layer_specs[1] = {spec1};
-    EXPECT_THROW(config.fromLayerSpecs(layer_specs), std::exception);
-}
-
-TEST(CacheConfigTest, FromLayerSpecsRejectsDuplicateLayerTag) {
-    CacheConfig config;
-    config.layer_num     = 1;
-    config.layer_all_num = 1;
-
-    auto spec0 = std::make_shared<MHAKVCacheSpec>();
-    spec0->tag = "dup";
-    auto spec1 = std::make_shared<MHAKVCacheSpec>();
-    spec1->tag = "dup";
-
-    LayerKVCacheSpecs layer_specs;
-    layer_specs[0] = {spec0, spec1};
-    EXPECT_THROW(config.fromLayerSpecs(layer_specs), std::exception);
-}
-
-TEST(CacheConfigTest, FromLayerSpecsRejectsMissingLayer) {
+TEST(CacheConfigTest, SetTopologyRejectsMissingLayer) {
     CacheConfig config;
     config.layer_num     = 2;
     config.layer_all_num = 2;
 
     auto spec = std::make_shared<MHAKVCacheSpec>();
     spec->tag = "default";
-    LayerKVCacheSpecs layer_specs;
-    layer_specs[0] = {spec};
-    EXPECT_THROW(config.fromLayerSpecs(layer_specs), std::exception);
+    std::vector<LayerBase> layers(2);
+    layers[0].group_ids = {0};
+    layers[0].tag_to_gid["default"] = 0;
+    EXPECT_THROW(config.setTopology({makeTestGroup(spec, CacheGroupType::FULL, {0})}, std::move(layers)),
+                 std::exception);
 }
 
-TEST(CacheConfigTest, FromLayerSpecsRejectsEmptyTag) {
+TEST(CacheConfigTest, SetTopologyRejectsEmptyTag) {
     CacheConfig config;
     config.layer_num     = 1;
     config.layer_all_num = 1;
 
-    auto spec0 = std::make_shared<MHAKVCacheSpec>();
-    auto spec1 = std::make_shared<MHAKVCacheSpec>();
-    spec1->tag = "other";
-    LayerKVCacheSpecs layer_specs;
-    layer_specs[0] = {spec0, spec1};
-    EXPECT_THROW(config.fromLayerSpecs(layer_specs), std::exception);
+    auto spec = std::make_shared<MHAKVCacheSpec>();
+    std::vector<LayerBase> layers(1);
+    layers[0].group_ids = {0};
+    EXPECT_THROW(config.setTopology({makeTestGroup(spec, CacheGroupType::FULL, {0})}, std::move(layers)),
+                 std::exception);
 }
 
-TEST(CacheConfigTest, FromLayerSpecsAllowsDifferentLayerTags) {
+TEST(CacheConfigTest, SetTopologyAllowsDifferentLayerTags) {
     CacheConfig config;
     config.layer_num     = 1;
     config.layer_all_num = 1;
@@ -330,149 +311,20 @@ TEST(CacheConfigTest, FromLayerSpecsAllowsDifferentLayerTags) {
     auto spec1 = std::make_shared<MHAKVCacheSpec>();
     spec1->tag = "linear";
 
-    LayerKVCacheSpecs layer_specs;
-    layer_specs[0] = {spec0, spec1};
-    EXPECT_NO_THROW(config.fromLayerSpecs(layer_specs));
+    std::vector<LayerBase> layers(1);
+    layers[0].group_ids = {0, 1};
+    layers[0].tag_to_gid["full"] = 0;
+    layers[0].tag_to_gid["linear"] = 1;
+    EXPECT_NO_THROW(config.setTopology({makeTestGroup(spec0, CacheGroupType::FULL, {0}),
+                                        makeTestGroup(spec1, CacheGroupType::LINEAR, {0})},
+                                       std::move(layers)));
     EXPECT_EQ(config.layerGroupIdsSnapshot()[0].size(), 2u);
-}
-
-TEST(CacheConfigTest, FromLayerDescsBuildsDeclarativeSpecsAndPolicies) {
-    CacheConfig config;
-    config.layer_num     = 2;
-    config.layer_all_num = 2;
-
-    KVCacheSpecDesc mha;
-    mha.tag                = "default";
-    mha.cache_type         = CacheType::MHA;
-    mha.local_head_num_kv  = 2;
-    mha.seq_size_per_block = 8;
-    mha.dtype              = DataType::TYPE_FP16;
-    mha.size_per_head      = 16;
-
-    KVCacheSpecDesc fixed;
-    fixed.tag                      = "state";
-    fixed.cache_type               = CacheType::FIXED_STATE;
-    fixed.seq_size_per_block       = 8;
-    fixed.entry_elems              = 4;
-    fixed.entries_per_block        = 2;
-    fixed.store_dtype              = DataType::TYPE_UINT8;
-    fixed.skip_prefix_reuse        = true;
-    fixed.extra.explicit_block_num        = 7;
-    fixed.extra.reserve_from_paged_budget = true;
-    fixed.uses_pinned_cpu_backing  = true;
-    fixed.has_is_cp_shardable      = true;
-    fixed.is_cp_shardable          = false;
-    fixed.has_sparse_slots         = true;
-    fixed.sparse_slots             = true;
-    fixed.has_kernel_block_subdiv  = true;
-    fixed.kernel_block_subdiv      = false;
-
-    KVCacheSpecDesc linear;
-    linear.tag               = "linear";
-    linear.cache_type        = CacheType::LINEAR;
-    linear.local_head_num_kv = 1;
-    linear.seq_size_per_block = 8;
-    linear.dtype             = DataType::TYPE_BF16;
-    linear.local_num_k_heads = 1;
-    linear.local_num_v_heads = 1;
-    linear.head_k_dim        = 4;
-    linear.head_v_dim        = 4;
-    linear.conv_kernel_dim   = 3;
-    linear.ssm_state_dtype   = DataType::TYPE_BF16;
-    linear.conv_state_dtype  = DataType::TYPE_BF16;
-
-    std::map<int64_t, std::vector<KVCacheSpecDesc>> descs;
-    descs[0] = {mha, fixed};
-    descs[1] = {mha, linear};
-    config.fromLayerDescs(descs, SpecBuildContext{});
-
-    EXPECT_EQ(config.groupTagsSnapshot(), std::vector<std::string>({"default", "state", "linear"}));
-    EXPECT_EQ(config.groupTypesSnapshot(),
-              std::vector<CacheGroupType>({CacheGroupType::FULL, CacheGroupType::SWA, CacheGroupType::LINEAR}));
-    EXPECT_EQ(config.groupIdForLayerTag(0, "default"), 0);
-    EXPECT_EQ(config.groupIdForLayerTag(0, "state"), 1);
-    EXPECT_EQ(config.groupIdForLayerTag(1, "default"), 0);
-    EXPECT_EQ(config.groupIdForLayerTag(1, "linear"), 2);
-
-    ASSERT_NE(dynamic_cast<MHAKVCacheSpec*>(config.specForGroup(0).get()), nullptr);
-    ASSERT_NE(dynamic_cast<FixedStateCacheSpec*>(config.specForGroup(1).get()), nullptr);
-    ASSERT_NE(dynamic_cast<LinearKVCacheSpec*>(config.specForGroup(2).get()), nullptr);
-    EXPECT_EQ(config.policyForGroup(1).reuse_policy, CacheReusePolicy::NON_REUSABLE);
-    EXPECT_EQ(config.policyForGroup(1).evict_policy, CacheEvictPolicy::INDEPENDENT);
-    EXPECT_EQ(config.policyForGroup(1).active_tail_blocks, 1);
-    EXPECT_FALSE(config.policyForGroup(1).validate_tail_blocks);
-    EXPECT_EQ(config.policyForGroup(1).explicit_block_num, 7u);
-    EXPECT_TRUE(config.policyForGroup(1).reserve_from_paged_budget);
-    EXPECT_TRUE(config.policyForGroup(1).uses_pinned_cpu_backing);
-    EXPECT_FALSE(config.policyForGroup(1).is_cp_shardable);
-    EXPECT_TRUE(config.policyForGroup(1).has_sparse_slots);
-    EXPECT_FALSE(config.policyForGroup(1).has_kernel_block_subdiv);
-    EXPECT_TRUE(config.policyForGroup(0).is_cp_shardable);
-    EXPECT_FALSE(config.policyForGroup(0).has_sparse_slots);
-    EXPECT_TRUE(config.policyForGroup(0).has_kernel_block_subdiv);
-}
-
-TEST(CacheConfigTest, FromLayerDescsBuildsMlaAndCompressedKvSpecs) {
-    CacheConfig config;
-    config.layer_num     = 1;
-    config.layer_all_num = 1;
-
-    KVCacheSpecDesc mla;
-    mla.tag                = "mla";
-    mla.cache_type         = CacheType::MLA;
-    mla.seq_size_per_block = 16;
-    mla.dtype              = DataType::TYPE_BF16;
-    mla.kv_lora_rank       = 8;
-    mla.rope_head_dim      = 4;
-
-    KVCacheSpecDesc compressed;
-    compressed.tag                        = "compressed";
-    compressed.cache_type                 = CacheType::COMPRESSED_KV;
-    compressed.seq_size_per_block         = 16;
-    compressed.entry_elems                = 3;
-    compressed.entries_per_block          = 5;
-    compressed.store_dtype                = DataType::TYPE_UINT8;
-    compressed.compression_ratio          = 2;
-    compressed.block_size_bytes_alignment = 16;
-
-    std::map<int64_t, std::vector<KVCacheSpecDesc>> descs;
-    descs[0] = {mla, compressed};
-    config.fromLayerDescs(descs, SpecBuildContext{});
-
-    ASSERT_NE(dynamic_cast<MLAKVCacheSpec*>(config.specForGroup(0).get()), nullptr);
-    auto* compressed_spec = dynamic_cast<CompressedKVCacheSpec*>(config.specForGroup(1).get());
-    ASSERT_NE(compressed_spec, nullptr);
-    EXPECT_EQ(compressed_spec->compression_ratio, 2u);
-    EXPECT_EQ(compressed_spec->block_size_bytes(), 16u);
-}
-
-TEST(CacheConfigTest, FromLayerDescsRejectsInconsistentTagPolicy) {
-    CacheConfig config;
-    config.layer_num     = 2;
-    config.layer_all_num = 2;
-
-    KVCacheSpecDesc first;
-    first.tag                = "state";
-    first.cache_type         = CacheType::FIXED_STATE;
-    first.seq_size_per_block = 8;
-    first.entry_elems        = 4;
-    first.entries_per_block  = 2;
-    first.store_dtype        = DataType::TYPE_UINT8;
-    first.extra.explicit_block_num = 7;
-
-    KVCacheSpecDesc second = first;
-    second.extra.explicit_block_num = 8;
-
-    std::map<int64_t, std::vector<KVCacheSpecDesc>> descs;
-    descs[0] = {first};
-    descs[1] = {second};
-    EXPECT_THROW(config.fromLayerDescs(descs, SpecBuildContext{}), std::exception);
 }
 
 TEST(HybridPoolConfigCreatorTest, Dsv4ModelProvidedAlignmentPropagatesToCacheSpecs) {
     auto mc = makeFlashModelConfig();
     for (auto& layer_descs : mc.kv_cache_spec_descs) {
-        for (auto& desc : layer_descs.second) {
+        for (auto& desc : layer_descs) {
             if (desc.tag == "csa_kv") {
                 desc.block_size_bytes_alignment = 1024;
             } else if (desc.tag == "swa_kv") {
@@ -483,7 +335,7 @@ TEST(HybridPoolConfigCreatorTest, Dsv4ModelProvidedAlignmentPropagatesToCacheSpe
     }
 
     ParallelismConfig pc;
-    auto config = HybridPoolConfigCreator::createConfig(mc, pc, makeDsv4KvCacheConfig(), false, 0);
+    auto config = CacheConfigCreator::createBasicConfig(mc, pc, makeDsv4KvCacheConfig(), false, 0);
 
     auto* csa_kv = dynamic_cast<CompressedKVCacheSpec*>(config.specForGroup(0).get());
     auto* swa_kv = dynamic_cast<FixedStateCacheSpec*>(config.specForGroup(6).get());
@@ -497,7 +349,7 @@ TEST(HybridPoolConfigCreatorTest, Dsv4ModelProvidedAlignmentPropagatesToCacheSpe
 TEST(HybridPoolConfigCreatorTest, Dsv4TagRoutesAreConsistent) {
     ParallelismConfig pc;
     auto              config =
-        HybridPoolConfigCreator::createConfig(makeFlashModelConfig(), pc, makeDsv4KvCacheConfig(), false, 0);
+        CacheConfigCreator::createBasicConfig(makeFlashModelConfig(), pc, makeDsv4KvCacheConfig(), false, 0);
 
     auto expect_route = [&](int layer_id, const std::string& tag, int expected_gid) {
         EXPECT_EQ(config.groupIdForLayerTag(layer_id, tag), expected_gid) << "layer=" << layer_id << " tag=" << tag;
@@ -519,14 +371,14 @@ TEST(HybridPoolConfigCreatorTest, Dsv4TagRoutesAreConsistent) {
     EXPECT_THROW(config.groupIdForLayerTag(0, "hca_kv"), std::exception);
 
     auto mtp_config =
-        HybridPoolConfigCreator::createConfig(makeFlashMtpModelConfig(), pc, makeDsv4KvCacheConfig(), true, 0);
+        CacheConfigCreator::createBasicConfig(makeFlashMtpModelConfig(), pc, makeDsv4KvCacheConfig(), true, 0);
     ASSERT_EQ(mtp_config.groupIdForLayerTag(0, "swa_kv"), 6);
 }
 
 TEST(HybridPoolConfigCreatorTest, Dsv4GroupPoliciesMatchLegacyBehavior) {
     ParallelismConfig pc;
     auto              config =
-        HybridPoolConfigCreator::createConfig(makeFlashModelConfig(), pc, makeDsv4KvCacheConfig(), false, 0);
+        CacheConfigCreator::createBasicConfig(makeFlashModelConfig(), pc, makeDsv4KvCacheConfig(), false, 0);
 
     ASSERT_EQ(config.groupPoliciesSnapshot().size(), static_cast<size_t>(config.groupNums()));
     auto expect_policy = [&](const std::string& tag,
@@ -555,7 +407,7 @@ TEST(HybridPoolConfigCreatorTest, Dsv4SpecsMissingFailsFastWithoutRatioFallback)
     mc.kv_cache_spec_descs.clear();
 
     ParallelismConfig pc;
-    EXPECT_THROW((void)HybridPoolConfigCreator::createConfig(mc, pc, makeDsv4KvCacheConfig(), false, 0),
+    EXPECT_THROW((void)CacheConfigCreator::createBasicConfig(mc, pc, makeDsv4KvCacheConfig(), false, 0),
                  std::exception);
 }
 
@@ -565,7 +417,7 @@ TEST(HybridPoolConfigCreatorTest, Dsv4SpecsMissingFailsFastWithoutRatioFallback)
 
 TEST(HybridPoolConfigCreatorTest, ProPoolSpecs) {
     ParallelismConfig pc;
-    auto config = HybridPoolConfigCreator::createConfig(makeProModelConfig(), pc, makeDsv4KvCacheConfig(), false, 0);
+    auto config = CacheConfigCreator::createBasicConfig(makeProModelConfig(), pc, makeDsv4KvCacheConfig(), false, 0);
 
     EXPECT_EQ(config.layerIdsForGroup(0).size(), 30u);
     EXPECT_EQ(config.specForGroup(0)->block_size_bytes(), 32u * kDsv4KvEntryBytes);
@@ -592,7 +444,7 @@ TEST(HybridPoolConfigCreatorTest, ProPoolSpecs) {
 
 TEST(HybridPoolConfigCreatorTest, FlashPoolSpecs) {
     ParallelismConfig pc;
-    auto config = HybridPoolConfigCreator::createConfig(makeFlashModelConfig(), pc, makeDsv4KvCacheConfig(), false, 0);
+    auto config = CacheConfigCreator::createBasicConfig(makeFlashModelConfig(), pc, makeDsv4KvCacheConfig(), false, 0);
     EXPECT_EQ(config.layerIdsForGroup(0).size(), 21u);
     EXPECT_EQ(config.layerIdsForGroup(1).size(), 20u);
     EXPECT_EQ(config.layerIdsForGroup(6).size(), 43u);
@@ -604,7 +456,7 @@ TEST(HybridPoolConfigCreatorTest, FlashPoolSpecs) {
 
 TEST(HybridPoolConfigCreatorTest, BlockSizeBytes) {
     ParallelismConfig pc;
-    auto config = HybridPoolConfigCreator::createConfig(makeProModelConfig(), pc, makeDsv4KvCacheConfig(), false, 0);
+    auto config = CacheConfigCreator::createBasicConfig(makeProModelConfig(), pc, makeDsv4KvCacheConfig(), false, 0);
     EXPECT_EQ(config.specForGroup(0)->block_size_bytes(), 32u * kDsv4KvEntryBytes);
     EXPECT_EQ(config.specForGroup(1)->block_size_bytes(), 1u * kDsv4KvEntryBytes);
     EXPECT_EQ(config.specForGroup(2)->block_size_bytes(), 32u * kDsv4IndexerEntryBytes);
@@ -619,7 +471,7 @@ TEST(HybridPoolConfigCreatorTest, Fp8BlockSizeBytesUsePaddedPhysicalStride) {
     auto              mc          = makeProModelConfig();
     mc.attn_config.kv_cache_dtype = KvCacheDataType::FP8;
     setDsv4KvCacheSpecs(mc);
-    auto config                   = HybridPoolConfigCreator::createConfig(mc, pc, makeDsv4KvCacheConfig(), false, 0);
+    auto config                   = CacheConfigCreator::createBasicConfig(mc, pc, makeDsv4KvCacheConfig(), false, 0);
 
     ASSERT_EQ(static_cast<size_t>(config.groupNums()), 7u);
     ASSERT_EQ(config.groupKvBlockStrideBytesSnapshot().size(), 7u);
@@ -640,7 +492,7 @@ TEST(HybridPoolConfigCreatorTest, DecoupledPhysicalAndKernelBlockSizeUsesPerGrou
     KVCacheConfig     kv_cache_config;
     kv_cache_config.seq_size_per_block        = 16384;
     kv_cache_config.kernel_seq_size_per_block = 128;
-    auto config = HybridPoolConfigCreator::createConfig(mc, pc, kv_cache_config, false, 0);
+    auto config = CacheConfigCreator::createBasicConfig(mc, pc, kv_cache_config, false, 0);
 
     ASSERT_EQ(static_cast<size_t>(config.groupNums()), 7u);
     ASSERT_EQ(config.group_seq_size_per_block.size(), 7u);
@@ -690,7 +542,7 @@ TEST(HybridPoolConfigCreatorTest, PrefillCpShardedSlicesFixedAndSwaPhysicalBlock
     auto mc                       = makeProModelConfig();
     mc.attn_config.kv_cache_dtype = KvCacheDataType::FP8;
     setDsv4KvCacheSpecs(mc);
-    auto config                   = HybridPoolConfigCreator::createConfig(mc, pc, makeDsv4KvCacheConfig(), false, 0);
+    auto config                   = CacheConfigCreator::createBasicConfig(mc, pc, makeDsv4KvCacheConfig(), false, 0);
 
     ASSERT_EQ(static_cast<size_t>(config.groupNums()), 7u);
     ASSERT_EQ(config.groupKvBlockStrideBytesSnapshot().size(), 7u);
@@ -714,7 +566,7 @@ TEST(HybridPoolConfigCreatorTest, PrefillCpShardedSlicesFixedAndSwaPhysicalBlock
     }
 
     pc.role_type       = RoleType::DECODE;
-    auto decode_config = HybridPoolConfigCreator::createConfig(mc, pc, makeDsv4KvCacheConfig(), false, 0);
+    auto decode_config = CacheConfigCreator::createBasicConfig(mc, pc, makeDsv4KvCacheConfig(), false, 0);
     EXPECT_EQ(decode_config.specForGroup(3)->block_size_bytes(), 8u * 512u * 4u);
     EXPECT_EQ(decode_config.specForGroup(4)->block_size_bytes(), 8u * 2048u * 4u);
     EXPECT_EQ(decode_config.specForGroup(5)->block_size_bytes(), 128u * 1024u * 4u);
@@ -769,7 +621,7 @@ TEST(KVCacheTransferPlannerTest, CpCompactSwaKeepsPartialTailRows) {
 TEST(HybridPoolConfigCreatorTest, CreateCacheConfig) {
     auto              mc = makeProModelConfig();
     ParallelismConfig pc;
-    auto              config = HybridPoolConfigCreator::createConfig(mc, pc, makeDsv4KvCacheConfig(), false, 0);
+    auto              config = CacheConfigCreator::createBasicConfig(mc, pc, makeDsv4KvCacheConfig(), false, 0);
 
     // 7 groups -> groupNums() > 1 -> HybridTypeKVCacheAllocator path
     EXPECT_EQ(config.groupNums(), 7);
@@ -784,7 +636,7 @@ TEST(HybridPoolConfigCreatorTest, CreateCacheConfig) {
 TEST(HybridPoolConfigCreatorTest, FlashCacheConfig) {
     auto              mc = makeFlashModelConfig();
     ParallelismConfig pc;
-    auto              config = HybridPoolConfigCreator::createConfig(mc, pc, makeDsv4KvCacheConfig(), false, 0);
+    auto              config = CacheConfigCreator::createBasicConfig(mc, pc, makeDsv4KvCacheConfig(), false, 0);
 
     EXPECT_EQ(config.groupNums(), 7);
     EXPECT_EQ(config.layer_num, 43u);
@@ -1017,7 +869,7 @@ TEST(HybridPoolConfigCreatorTest, PagedPoolsShareTokensPerBlock) {
     {
         ParallelismConfig pc;
         auto              config =
-            HybridPoolConfigCreator::createConfig(makeProModelConfig(), pc, makeDsv4KvCacheConfig(), false, 0);
+            CacheConfigCreator::createBasicConfig(makeProModelConfig(), pc, makeDsv4KvCacheConfig(), false, 0);
         EXPECT_EQ(config.group_seq_size_per_block[0], kDsv4TokensPerBlock);
         EXPECT_EQ(config.group_seq_size_per_block[1], kDsv4TokensPerBlock);
         EXPECT_EQ(config.group_seq_size_per_block[2], kDsv4TokensPerBlock);
@@ -1027,7 +879,7 @@ TEST(HybridPoolConfigCreatorTest, PagedPoolsShareTokensPerBlock) {
     {
         ParallelismConfig pc;
         auto              config =
-            HybridPoolConfigCreator::createConfig(makeFlashModelConfig(), pc, makeDsv4KvCacheConfig(), false, 0);
+            CacheConfigCreator::createBasicConfig(makeFlashModelConfig(), pc, makeDsv4KvCacheConfig(), false, 0);
         EXPECT_EQ(config.group_seq_size_per_block[0], kDsv4TokensPerBlock);
         EXPECT_EQ(config.group_seq_size_per_block[1], kDsv4TokensPerBlock);
         EXPECT_EQ(config.group_seq_size_per_block[2], kDsv4TokensPerBlock);
@@ -1037,7 +889,7 @@ TEST(HybridPoolConfigCreatorTest, PagedPoolsShareTokensPerBlock) {
 TEST(HybridPoolConfigCreatorTest, AllPagedPoolsShareBlockNum) {
     auto              mc = makeProModelConfig();
     ParallelismConfig pc;
-    auto              config = HybridPoolConfigCreator::createConfig(mc, pc, makeDsv4KvCacheConfig(), false, 0);
+    auto              config = CacheConfigCreator::createBasicConfig(mc, pc, makeDsv4KvCacheConfig(), false, 0);
     config.block_num         = 100;
 
     // Paged groups derive their block count from the global block_num; explicit
@@ -1214,9 +1066,60 @@ TEST(CacheConfigTest, ModelSpecCloneKeepsExistingConfigStable) {
     EXPECT_EQ(config_tp2.specForGroup(0)->local_head_num_kv, 2u);
 
     EXPECT_EQ(config_tp1.specForGroup(0)->local_head_num_kv, 4u);
-    EXPECT_NE(config_tp1.specForGroup(0).get(), model_config.kv_cache_specs[0][0].get());
-    EXPECT_NE(config_tp2.specForGroup(0).get(), model_config.kv_cache_specs[0][0].get());
     EXPECT_NE(config_tp1.specForGroup(0).get(), config_tp2.specForGroup(0).get());
+}
+
+TEST(CacheConfigTest, SpecBuilderDerivesHybridPoolRuntimeFieldsFromContext) {
+    SpecBuildContext ctx;
+    ctx.dtype                   = DataType::TYPE_BF16;
+    ctx.seq_size_per_block      = 128;
+    ctx.attn_tp_size            = 1;
+    ctx.kernel_tokens_per_block = 128;
+    ctx.gen_num_per_cycle       = 3;
+    ctx.cp_size                 = 2;
+    ctx.cp_prefill_sliced       = true;
+
+    KVCacheSpecDesc compressed_desc;
+    compressed_desc.tag                                      = "compressed";
+    compressed_desc.cache_type                               = CacheType::COMPRESSED_KV;
+    compressed_desc.entry_elems                              = 16;
+    compressed_desc.compression_ratio                        = 4;
+    compressed_desc.store_dtype                              = DataType::TYPE_UINT8;
+    compressed_desc.extra.derive_entries_from_kernel_block   = true;
+    compressed_desc.extra.use_fixed_region_cp_tokens         = true;
+
+    auto compressed = std::dynamic_pointer_cast<CompressedKVCacheSpec>(SpecBuilder::build(compressed_desc, ctx));
+    ASSERT_NE(compressed, nullptr);
+    EXPECT_EQ(compressed->entries_per_block, 32u);
+    EXPECT_EQ(compressed->seq_size_per_block, 256u);
+    EXPECT_EQ(compressed->dtype, DataType::TYPE_BF16);
+
+    KVCacheSpecDesc state_desc;
+    state_desc.tag                                          = "state";
+    state_desc.cache_type                                   = CacheType::FIXED_STATE;
+    state_desc.entry_elems                                  = 32;
+    state_desc.store_dtype                                  = DataType::TYPE_FP32;
+    state_desc.block_size_bytes_alignment                   = 64;
+    state_desc.extra.state_ring_compression_ratio           = 4;
+    state_desc.extra.state_ring_overlap                     = 1;
+    state_desc.extra.state_ring_add_gen_num_per_cycle       = true;
+    state_desc.extra.cp_align_entries                       = true;
+    state_desc.extra.cp_slice_entries                       = true;
+    state_desc.extra.cp_prefill_slice_block_bytes           = true;
+    state_desc.extra.use_fixed_region_cp_tokens             = true;
+
+    auto prefill_state = std::dynamic_pointer_cast<FixedStateCacheSpec>(SpecBuilder::build(state_desc, ctx));
+    ASSERT_NE(prefill_state, nullptr);
+    EXPECT_EQ(prefill_state->entries_per_block, 6u);
+    EXPECT_EQ(prefill_state->block_size_bytes_override, 384u);
+    EXPECT_EQ(prefill_state->seq_size_per_block, 256u);
+
+    ctx.cp_prefill_sliced = false;
+    auto decode_state = std::dynamic_pointer_cast<FixedStateCacheSpec>(SpecBuilder::build(state_desc, ctx));
+    ASSERT_NE(decode_state, nullptr);
+    EXPECT_EQ(decode_state->entries_per_block, 12u);
+    EXPECT_EQ(decode_state->block_size_bytes_override, 0u);
+    EXPECT_EQ(decode_state->seq_size_per_block, 256u);
 }
 
 TEST(CacheConfigTest, FinalizeBlockNumsIsNoopForSingleAndSharedHybridConfig) {
@@ -1250,7 +1153,7 @@ TEST(CacheConfigTest, FinalizeBlockNumsAppliesToIndependentPools) {
     runtime_config.fifo_scheduler_config.max_context_batch_size = 3;
 
     ParallelismConfig pc;
-    auto config = HybridPoolConfigCreator::createConfig(makeProModelConfig(), pc, makeDsv4KvCacheConfig(), false, 0);
+    auto config = CacheConfigCreator::createBasicConfig(makeProModelConfig(), pc, makeDsv4KvCacheConfig(), false, 0);
     config.finalizeBlockNums(100, runtime_config);
 
     ASSERT_EQ(config.groupBlockNumsSnapshot().size(), static_cast<size_t>(kDsv4PoolNum));
@@ -1301,7 +1204,7 @@ TEST(CacheConfigTest, DSV4ExplicitHcaStatePoolBlocksIgnoreLinearStep) {
 
     ParallelismConfig pc;
     KVCacheConfig     kv_cache_config = makeDsv4KvCacheConfig();
-    auto config = HybridPoolConfigCreator::createConfig(makeProModelConfig(), pc, kv_cache_config, false, 0);
+    auto config = CacheConfigCreator::createBasicConfig(makeProModelConfig(), pc, kv_cache_config, false, 0);
     config.linear_step = 4;
     config.finalizeBlockNums(100, runtime_config);
 
@@ -1401,7 +1304,7 @@ TEST(HybridPoolConfigCreatorTest, MtpGenNum2RingEntriesMatch) {
     auto              mc = makeFlashModelConfig();
     ParallelismConfig pc;
     auto              config =
-        HybridPoolConfigCreator::createConfig(mc, pc, makeDsv4KvCacheConfig(), false, /*gen_num_per_cycle=*/2);
+        CacheConfigCreator::createBasicConfig(mc, pc, makeDsv4KvCacheConfig(), false, /*gen_num_per_cycle=*/2);
 
     ASSERT_EQ(static_cast<size_t>(config.groupNums()), 7u);
     // Pool 3: INDEXER_STATE (ratio=4, overlap=1) → R=10
@@ -1430,7 +1333,7 @@ TEST(HybridPoolConfigCreatorTest, PrefillCp8MtpGenNum2PadsStateRingBeforeSlicing
     pc.tp_size                            = 8;
     pc.prefill_cp_config.kv_cache_sharded = true;
 
-    auto config = HybridPoolConfigCreator::createConfig(mc, pc, makeDsv4KvCacheConfig(), false, 2);
+    auto config = CacheConfigCreator::createBasicConfig(mc, pc, makeDsv4KvCacheConfig(), false, 2);
 
     ASSERT_EQ(static_cast<size_t>(config.groupNums()), 7u);
     auto* indexer_state = dynamic_cast<FixedStateCacheSpec*>(config.specForGroup(3).get());
@@ -1469,8 +1372,8 @@ TEST(HybridPoolConfigCreatorTest, DecodePrefillCp8MtpGenNum2ExpandsFixedAndSwaSl
     decode_pc.prefill_cp_config.kv_cache_sharded = true;
     decode_pc.prefill_cp_config.prefill_cp_size  = cp_size;
 
-    auto prefill_config = HybridPoolConfigCreator::createConfig(mc, prefill_pc, makeDsv4KvCacheConfig(), false, 2);
-    auto decode_config  = HybridPoolConfigCreator::createConfig(mc, decode_pc, makeDsv4KvCacheConfig(), false, 2);
+    auto prefill_config = CacheConfigCreator::createBasicConfig(mc, prefill_pc, makeDsv4KvCacheConfig(), false, 2);
+    auto decode_config  = CacheConfigCreator::createBasicConfig(mc, decode_pc, makeDsv4KvCacheConfig(), false, 2);
 
     ASSERT_EQ(static_cast<size_t>(prefill_config.groupNums()), 7u);
     ASSERT_EQ(static_cast<size_t>(decode_config.groupNums()), 7u);
@@ -1528,8 +1431,8 @@ TEST(HybridPoolConfigCreatorTest, DecodeExplicitPrefillCpSizeHandlesDp16) {
     decode_pc.prefill_cp_config.kv_cache_sharded = true;
     decode_pc.prefill_cp_config.prefill_cp_size  = cp_size;
 
-    auto prefill_config = HybridPoolConfigCreator::createConfig(mc, prefill_pc, makeDsv4KvCacheConfig(), false, 2);
-    auto decode_config  = HybridPoolConfigCreator::createConfig(mc, decode_pc, makeDsv4KvCacheConfig(), false, 2);
+    auto prefill_config = CacheConfigCreator::createBasicConfig(mc, prefill_pc, makeDsv4KvCacheConfig(), false, 2);
+    auto decode_config  = CacheConfigCreator::createBasicConfig(mc, decode_pc, makeDsv4KvCacheConfig(), false, 2);
 
     for (size_t gid : {3u, 4u, 5u}) {
         auto* prefill_spec = dynamic_cast<FixedStateCacheSpec*>(prefill_config.specForGroup(gid).get());
@@ -1578,7 +1481,7 @@ TEST(HybridPoolConfigCreatorTest, BlockIdConsistencyAcrossGroups) {
     // correct group by tag.
     auto              mc = makeProModelConfig();
     ParallelismConfig pc;
-    auto              config = HybridPoolConfigCreator::createConfig(mc, pc, makeDsv4KvCacheConfig(), false, 0);
+    auto              config = CacheConfigCreator::createBasicConfig(mc, pc, makeDsv4KvCacheConfig(), false, 0);
 
     // Verify primary layer route snapshot: single-tag layers keep their gid,
     // multi-tag layers are explicitly ambiguous.
@@ -1606,7 +1509,7 @@ TEST(HybridPoolConfigCreatorTest, BlockIdConsistencyAcrossGroups) {
 static CacheConfig makeDSV4AllocatorConfig(bool use_flash = false) {
     auto              mc = use_flash ? makeFlashModelConfig() : makeProModelConfig();
     ParallelismConfig pc;
-    auto              config = HybridPoolConfigCreator::createConfig(mc, pc, makeDsv4KvCacheConfig(), false, 0);
+    auto              config = CacheConfigCreator::createBasicConfig(mc, pc, makeDsv4KvCacheConfig(), false, 0);
     // Set enough blocks for tests (7 groups × N blocks each)
     config.block_num = 200;
     return config;
@@ -1618,7 +1521,7 @@ static CacheConfig makeDSV4CpAllocatorConfig(uint32_t cp_size) {
     pc.role_type                          = RoleType::PREFILL;
     pc.tp_size                            = cp_size;
     pc.prefill_cp_config.kv_cache_sharded = true;
-    auto config      = HybridPoolConfigCreator::createConfig(mc, pc, makeDsv4KvCacheConfig(), false, 0);
+    auto config      = CacheConfigCreator::createBasicConfig(mc, pc, makeDsv4KvCacheConfig(), false, 0);
     config.block_num = 200;
     setGroupBlockNumsForTest(config, std::vector<uint32_t>(static_cast<size_t>(config.groupNums()), config.block_num));
     return config;
@@ -2379,7 +2282,7 @@ TEST_F(DSV4AllocatorTest, HybridPoolReserveBlocksDoNotReduceExplicitHcaStateCapa
     ParallelismConfig pc;
     auto              kv_config = makeDsv4KvCacheConfig();
     setDsv4ExplicitPoolBlocks(mc, "hca_state", 11);
-    auto              config    = HybridPoolConfigCreator::createConfig(mc, pc, kv_config, false, 0);
+    auto              config    = CacheConfigCreator::createBasicConfig(mc, pc, kv_config, false, 0);
     config.block_num            = 40;
     std::vector<uint32_t> block_nums(static_cast<size_t>(config.groupNums()), config.block_num);
     for (size_t gid = 0; gid < static_cast<size_t>(config.groupNums()); ++gid) {

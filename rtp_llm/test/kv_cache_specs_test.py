@@ -9,7 +9,7 @@ from rtp_llm.ops import CacheType, DataType, HybridAttentionType, KvCacheDataTyp
 
 def _by_tag(layer_descs):
     result = {}
-    for descs in layer_descs.values():
+    for descs in layer_descs:
         for desc in descs:
             result.setdefault(desc.tag, desc)
     return result
@@ -30,7 +30,7 @@ class KVCacheSpecsTest(TestCase):
 
         BaseModel._post_build_model_config(config)
 
-        self.assertEqual(sorted(config.kv_cache_spec_descs.keys()), [0, 1, 2])
+        self.assertEqual(len(config.kv_cache_spec_descs), 3)
         for layer_id in range(3):
             self.assertEqual(len(config.kv_cache_spec_descs[layer_id]), 1)
             desc = config.kv_cache_spec_descs[layer_id][0]
@@ -54,7 +54,7 @@ class KVCacheSpecsTest(TestCase):
 
         Qwen3NextBase._post_build_model_config(config)
 
-        self.assertEqual(sorted(config.kv_cache_spec_descs.keys()), [0, 1, 2, 3])
+        self.assertEqual(len(config.kv_cache_spec_descs), 4)
         self.assertEqual(
             [config.kv_cache_spec_descs[i][0].tag for i in range(4)],
             ["linear", "full", "linear", "full"],
@@ -78,7 +78,7 @@ class KVCacheSpecsTest(TestCase):
 
         _refresh_dsv4_kv_cache_spec_descs(config)
 
-        self.assertEqual(sorted(config.kv_cache_spec_descs.keys()), [0, 1, 2, 3, 4])
+        self.assertEqual(len(config.kv_cache_spec_descs), 5)
         self.assertEqual(
             [desc.tag for desc in config.kv_cache_spec_descs[0]],
             ["csa_kv", "indexer_kv", "indexer_state", "csa_state", "swa_kv"],

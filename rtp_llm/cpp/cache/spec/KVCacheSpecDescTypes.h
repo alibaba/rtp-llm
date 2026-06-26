@@ -37,7 +37,7 @@ struct KVCacheSpecDesc {
     bool        has_group_order = false;
     uint32_t    group_order     = 0;
 
-    uint32_t local_head_num_kv  = 0;
+    uint32_t num_kv_heads      = 0;  // global model KV head count (MHA: kv_head_num; MLA: 1)
     uint32_t seq_size_per_block = 0;
     DataType dtype              = DataType::TYPE_INVALID;
 
@@ -45,8 +45,8 @@ struct KVCacheSpecDesc {
     uint32_t kv_lora_rank  = 0;
     uint32_t rope_head_dim = 0;
 
-    uint32_t local_num_k_heads = 0;
-    uint32_t local_num_v_heads = 0;
+    uint32_t num_k_heads       = 0;  // Linear Attention: global key head count
+    uint32_t num_v_heads       = 0;  // Linear Attention: global value head count
     uint32_t head_k_dim        = 0;
     uint32_t head_v_dim        = 0;
     uint32_t conv_kernel_dim   = 0;

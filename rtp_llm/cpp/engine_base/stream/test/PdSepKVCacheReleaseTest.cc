@@ -5,6 +5,7 @@
 #define protected public
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
+#include "rtp_llm/cpp/cache/config_creator/CacheConfigCreator.h"
 #include "rtp_llm/cpp/cache/config_creator/HybridPoolConfigCreator.h"
 #include "rtp_llm/cpp/cache/KVCacheTransferPlanner.h"
 #include "rtp_llm/cpp/cache/KVCacheResource.h"
@@ -337,7 +338,7 @@ protected:
         KVCacheConfig     kv_config;
         kv_config.seq_size_per_block        = seq_size_per_block;
         kv_config.kernel_seq_size_per_block = kernel_seq_size_per_blk;
-        auto config                         = HybridPoolConfigCreator::createConfig(mc, pc, kv_config, false, 0);
+        auto config                         = CacheConfigCreator::createBasicConfig(mc, pc, kv_config, false, 0);
         config.block_num                    = block_num;
         setGroupBlockNumsForTest(config, block_num);
         return config;

@@ -27,7 +27,7 @@ import functools
 import json
 import logging
 import os
-from typing import Dict, List
+from typing import List
 
 import torch
 
@@ -163,8 +163,8 @@ def _dsv4_kv_cache_desc_for_tag(
 
 def _build_dsv4_kv_cache_spec_descs(
     config: ModelConfig,
-) -> Dict[int, List[KVCacheSpecDesc]]:
-    layer_descs: Dict[int, List[KVCacheSpecDesc]] = {}
+) -> List[List[KVCacheSpecDesc]]:
+    layer_descs: List[List[KVCacheSpecDesc]] = []
     ratios = list(config.attn_config.layer_compress_ratios)
     for layer_id in range(config.num_layers):
         ratio = int(ratios[layer_id]) if layer_id < len(ratios) else 0
@@ -174,10 +174,10 @@ def _build_dsv4_kv_cache_spec_descs(
             tags = ["hca_kv", "hca_state", "swa_kv"]
         else:
             tags = ["swa_kv"]
-        layer_descs[layer_id] = [
+        layer_descs.append([
             _dsv4_kv_cache_desc_for_tag(tag, config)
             for tag in tags
-        ]
+        ])
     return layer_descs
 
 

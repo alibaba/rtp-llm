@@ -3,40 +3,10 @@
 #include <numeric>
 
 #include "rtp_llm/cpp/cache/spec/KVCacheSpec.h"
+#include "rtp_llm/cpp/cache/config_creator/CacheConfigCreator.h"
 #include "rtp_llm/cpp/cache/config_creator/MemoryEvaluationHelper.h"
 
 namespace rtp_llm {
-
-namespace {
-
-LayerKVCacheSpecs layerSpecsFromDescs(const ModelConfig& model_config, rtp_llm::DataType dtype) {
-    SpecBuildContext ctx;
-    ctx.dtype = dtype;
-    ctx.seq_size_per_block = static_cast<uint32_t>(model_config.attn_config.tokens_per_block);
-
-    LayerKVCacheSpecs layer_specs;
-    for (const auto& [layer_id, layer_descs] : model_config.kv_cache_spec_descs) {
-        auto& specs = layer_specs[layer_id];
-        specs.reserve(layer_descs.size());
-        for (auto desc : layer_descs) {
-            desc.dtype = desc.dtype == DataType::TYPE_INVALID ? dtype : desc.dtype;
-            desc.seq_size_per_block = desc.seq_size_per_block == 0 ? ctx.seq_size_per_block : desc.seq_size_per_block;
-            specs.push_back(SpecBuilder::build(desc, ctx));
-        }
-    }
-    return layer_specs;
-}
-
-ModelConfig modelConfigWithDescSpecs(const ModelConfig& model_config, rtp_llm::DataType dtype) {
-    if (model_config.kv_cache_spec_descs.empty()) {
-        return model_config;
-    }
-    auto model_copy = model_config;
-    model_copy.kv_cache_specs = layerSpecsFromDescs(model_config, dtype);
-    return model_copy;
-}
-
-}  // namespace
 
 std::vector<std::vector<int>> HybridConfigCreator::splitIntoGroups(const std::vector<int>& ids, int group_layer_num) {
     std::vector<std::vector<int>> groups;
@@ -108,23 +78,23 @@ CacheConfig HybridConfigCreator::initializeConfig(const ModelConfig&      model_
     return config;
 }
 
-KVCacheSpecPtr HybridConfigCreator::getSpecFromLayers(const ModelConfig&      model_config,
-                                                      const std::vector<int>& layer_ids,
+KVCacheSpecPtr HybridConfigCreator::getSpecFromLayers(const LayerKVCacheSpecs& runtime_specs,
+                                                      const std::vector<int>&  layer_ids,
                                                       const char*              spec_role) {
     KVCacheSpecPtr result;
     std::string    fingerprint;
     for (int layer_id : layer_ids) {
-        const auto it = model_config.kv_cache_specs.find(layer_id);
-        RTP_LLM_CHECK_WITH_INFO(it != model_config.kv_cache_specs.end() && !it->second.empty(),
-                                "missing kv_cache_specs for %s layer %d",
+        RTP_LLM_CHECK_WITH_INFO(static_cast<size_t>(layer_id) < runtime_specs.size()
+                                    && !runtime_specs[static_cast<size_t>(layer_id)].empty(),
+                                "missing runtime kv_cache specs for %s layer %d",
                                 spec_role,
                                 layer_id);
-        RTP_LLM_CHECK_WITH_INFO(it->second.size() == 1,
-                                "%s layer %d must have exactly one kv_cache spec, got %zu",
+        RTP_LLM_CHECK_WITH_INFO(runtime_specs[static_cast<size_t>(layer_id)].size() == 1,
+                                "%s layer %d must have exactly one runtime kv_cache spec, got %zu",
                                 spec_role,
                                 layer_id,
-                                it->second.size());
-        const auto& spec = it->second[0];
+                                runtime_specs[static_cast<size_t>(layer_id)].size());
+        const auto& spec = runtime_specs[static_cast<size_t>(layer_id)][0];
         RTP_LLM_CHECK_WITH_INFO(spec != nullptr, "%s layer %d has null kv_cache spec", spec_role, layer_id);
         if (result == nullptr) {
             result      = spec;
@@ -226,22 +196,31 @@ void HybridConfigCreator::setupCacheConfigSpecs(CacheConfig&                    
                                                 const std::vector<std::vector<int>>& full_groups,
                                                 const KVCacheSpecPtr&                linear_spec,
                                                 const KVCacheSpecPtr&                full_spec) {
-    std::vector<KVCacheSpecPtr>    specs;
-    std::vector<std::vector<int>> layers_by_group;
-    std::vector<CacheGroupType>   types;
+    std::vector<GroupBase> groups;
+    std::vector<LayerBase> layers(static_cast<size_t>(config.layer_num));
+
+    auto append_group = [&](const KVCacheSpecPtr& spec, CacheGroupType type, const std::vector<int>& layer_ids) {
+        GroupBase group;
+        group.spec      = spec;
+        group.policy    = defaultCacheGroupPolicy(type);
+        group.layer_ids = layer_ids;
+        const int gid   = static_cast<int>(groups.size());
+        groups.push_back(group);
+        for (int layer_id : layer_ids) {
+            auto& layer = layers[static_cast<size_t>(layer_id)];
+            layer.group_ids.push_back(gid);
+            layer.tag_to_gid[spec->tag] = gid;
+        }
+    };
 
     // Keep order: all full groups first, then linear groups.
     for (const auto& g : full_groups) {
-        specs.push_back(full_spec);
-        layers_by_group.push_back(g);
-        types.push_back(CacheGroupType::FULL);
+        append_group(full_spec, CacheGroupType::FULL, g);
     }
     for (const auto& g : linear_groups) {
-        specs.push_back(linear_spec);
-        layers_by_group.push_back(g);
-        types.push_back(CacheGroupType::LINEAR);
+        append_group(linear_spec, CacheGroupType::LINEAR, g);
     }
-    config.fromGroupedSpecs(specs, layers_by_group, types);
+    config.setTopology(std::move(groups), std::move(layers));
 }
 
 void HybridConfigCreator::setupPhysicalSizes(CacheConfig&          config,
@@ -265,8 +244,14 @@ void HybridConfigCreator::setupPhysicalSizes(CacheConfig&          config,
 CacheConfig HybridConfigCreator::createHybridConfig(const ModelConfig&       model_config,
                                                     const ParallelismConfig& parallelism_config,
                                                     bool                     is_mtp) {
+    (void)is_mtp;
     auto dtype = MemoryEvaluationHelper::getDataTypeForCache(model_config);
-    auto spec_model_config = modelConfigWithDescSpecs(model_config, dtype);
+    SpecBuildContext ctx;
+    ctx.dtype              = dtype;
+    ctx.seq_size_per_block = static_cast<uint32_t>(model_config.attn_config.tokens_per_block);
+    ctx.attn_tp_size       = static_cast<uint32_t>(parallelism_config.get_attn_tp_size());
+    const auto runtime_specs =
+        CacheConfigCreator::buildLayerSpecsFromDescs(model_config.kv_cache_spec_descs, ctx, model_config.num_layers);
 
     // Split layers by attention type
     auto [linear_layers, full_layers] = HybridConfigCreator::splitLayersByAttentionType(model_config);
@@ -274,8 +259,8 @@ CacheConfig HybridConfigCreator::createHybridConfig(const ModelConfig&       mod
     // Initialize config
     CacheConfig config = HybridConfigCreator::initializeConfig(model_config, linear_layers, full_layers, dtype);
 
-    auto full_spec   = HybridConfigCreator::getSpecFromLayers(spec_model_config, full_layers, "full attention");
-    auto linear_spec = HybridConfigCreator::getSpecFromLayers(spec_model_config, linear_layers, "linear attention");
+    auto full_spec   = HybridConfigCreator::getSpecFromLayers(runtime_specs, full_layers, "full attention");
+    auto linear_spec = HybridConfigCreator::getSpecFromLayers(runtime_specs, linear_layers, "linear attention");
 
     // Create layer groups and calculate group layer number
     int group_layer_num = 0;
@@ -293,8 +278,6 @@ CacheConfig HybridConfigCreator::createHybridConfig(const ModelConfig&       mod
 
     // Setup physical sizes
     HybridConfigCreator::setupPhysicalSizes(config, full_spec, linear_spec);
-
-    // fromGroupedSpecs populated layer/group mappings from the existing hybrid grouping policy.
 
     // Per-layer block stride (kv + scale).
     // For hybrid attention, the physical per-layer stride follows the selected physical layout stride.

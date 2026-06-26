@@ -1,108 +1,19 @@
 #include "rtp_llm/cpp/cache/config_creator/HybridPoolConfigCreator.h"
 
 #include <algorithm>
-#include <numeric>
+#include <map>
+#include <set>
 #include <utility>
 
 #include "rtp_llm/cpp/cache/spec/KVCacheSpec.h"
+#include "rtp_llm/cpp/cache/spec/KVCacheSpecDesc.h"
+#include "rtp_llm/cpp/cache/config_creator/CacheConfigCreator.h"
 #include "rtp_llm/cpp/cache/config_creator/MemoryEvaluationHelper.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 
 namespace rtp_llm {
 
 namespace {
-
-struct HybridPoolLayers {
-    std::vector<int> full_layers;
-    std::vector<int> linear_layers;
-    std::vector<int> swa_layers;
-};
-
-HybridPoolLayers splitHybridPoolLayers(const ModelConfig& model_config) {
-    const auto layer_num = model_config.num_layers;
-    RTP_LLM_CHECK_WITH_INFO(layer_num > 0, "invalid model_config.num_layers=%ld", layer_num);
-    RTP_LLM_CHECK_WITH_INFO(model_config.hybrid_attention_config.hybrid_attention_types.size()
-                                == static_cast<size_t>(layer_num),
-                            "hybrid_attention_types size %zu != num_layers %ld",
-                            model_config.hybrid_attention_config.hybrid_attention_types.size(),
-                            layer_num);
-
-    HybridPoolLayers layers;
-    layers.full_layers.reserve(static_cast<size_t>(layer_num));
-    layers.linear_layers.reserve(static_cast<size_t>(layer_num));
-    layers.swa_layers.reserve(static_cast<size_t>(layer_num));
-    for (int i = 0; i < static_cast<int>(layer_num); ++i) {
-        switch (model_config.hybrid_attention_config.hybrid_attention_types[static_cast<size_t>(i)]) {
-            case HybridAttentionType::LINEAR:
-                layers.linear_layers.push_back(i);
-                break;
-            case HybridAttentionType::SLIDING_WINDOW:
-                layers.swa_layers.push_back(i);
-                break;
-            case HybridAttentionType::NONE:
-            default:
-                layers.full_layers.push_back(i);
-                break;
-        }
-    }
-    return layers;
-}
-
-KVCacheSpecPtr getHybridSpecByTag(const ModelConfig& model_config, const std::string& tag) {
-    KVCacheSpecPtr result;
-    std::string    fingerprint;
-    for (const auto& layer_specs : model_config.kv_cache_specs) {
-        for (const auto& spec : layer_specs.second) {
-            RTP_LLM_CHECK_WITH_INFO(spec != nullptr, "hybrid-pool kv_cache_specs must not contain null specs");
-            RTP_LLM_CHECK_WITH_INFO(!spec->tag.empty(), "hybrid-pool kv_cache_specs must not contain empty tags");
-            if (spec->tag == tag) {
-                const auto current_fingerprint = spec->fingerprint();
-                if (result == nullptr) {
-                    result      = spec;
-                    fingerprint = current_fingerprint;
-                } else {
-                    RTP_LLM_CHECK_WITH_INFO(fingerprint == current_fingerprint,
-                                            "duplicate hybrid-pool kv_cache spec tag=%s has different prototype",
-                                            tag.c_str());
-                }
-            }
-        }
-    }
-    RTP_LLM_CHECK_WITH_INFO(result != nullptr, "missing hybrid-pool kv_cache spec tag=%s", tag.c_str());
-    return result->clone();
-}
-
-LayerKVCacheSpecs layerSpecsFromDescs(const ModelConfig& model_config, rtp_llm::DataType dtype) {
-    SpecBuildContext ctx;
-    ctx.dtype = dtype;
-    ctx.seq_size_per_block = static_cast<uint32_t>(model_config.attn_config.tokens_per_block);
-
-    LayerKVCacheSpecs layer_specs;
-    for (const auto& [layer_id, layer_descs] : model_config.kv_cache_spec_descs) {
-        auto& specs = layer_specs[layer_id];
-        specs.reserve(layer_descs.size());
-        for (auto desc : layer_descs) {
-            desc.dtype = desc.dtype == DataType::TYPE_INVALID ? dtype : desc.dtype;
-            desc.seq_size_per_block = desc.seq_size_per_block == 0 ? ctx.seq_size_per_block : desc.seq_size_per_block;
-            specs.push_back(SpecBuilder::build(desc, ctx));
-        }
-    }
-    return layer_specs;
-}
-
-ModelConfig modelConfigWithDescSpecs(const ModelConfig& model_config, rtp_llm::DataType dtype) {
-    if (model_config.kv_cache_spec_descs.empty()) {
-        return model_config;
-    }
-    auto model_copy = model_config;
-    model_copy.kv_cache_specs = layerSpecsFromDescs(model_config, dtype);
-    return model_copy;
-}
-
-uint32_t alignUpToMultiple(uint32_t value, uint32_t multiple) {
-    RTP_LLM_CHECK_WITH_INFO(multiple > 0, "align multiple must be > 0");
-    return ((value + multiple - 1) / multiple) * multiple;
-}
 
 uint32_t fixedRegionCpSize(const ParallelismConfig& parallelism_config) {
     if (!parallelism_config.prefill_cp_config.kv_cache_sharded) {
@@ -124,222 +35,245 @@ bool isPrefillCpSliced(const ParallelismConfig& parallelism_config) {
     return parallelism_config.role_type == RoleType::PREFILL && fixedRegionCpSize(parallelism_config) > 1;
 }
 
-uint32_t computeStateRingEntries(const KVCacheSpecDesc& desc, int gen_num_per_cycle) {
-    RTP_LLM_CHECK_WITH_INFO(desc.extra.state_ring_compression_ratio > 0,
-                            "state ring desc tag=%s requires positive state_ring_compression_ratio",
-                            desc.tag.c_str());
-    RTP_LLM_CHECK_WITH_INFO(gen_num_per_cycle >= 0,
-                            "state ring desc tag=%s requires non-negative gen_num_per_cycle, got %d",
-                            desc.tag.c_str(),
-                            gen_num_per_cycle);
-    const uint32_t window =
-        (1 + desc.extra.state_ring_overlap) * desc.extra.state_ring_compression_ratio;
-    const uint32_t raw =
-        window + (desc.extra.state_ring_add_gen_num_per_cycle ? static_cast<uint32_t>(gen_num_per_cycle) : 0);
-    return (raw + 1) & ~1U;
-}
-
-size_t cpPrefillSliceBlockBytes(const KVCacheSpecDesc&  desc,
-                                uint32_t                entries_per_block,
-                                const ParallelismConfig& parallelism_config) {
-    const auto cp_size = fixedRegionCpSize(parallelism_config);
-    if (cp_size <= 1 || !isPrefillCpSliced(parallelism_config) || !desc.extra.cp_prefill_slice_block_bytes) {
-        return desc.block_size_bytes_override;
+CacheGroupPolicy policyFromSpecDesc(const KVCacheSpecDesc& desc) {
+    CacheGroupPolicy policy = defaultCacheGroupPolicy(SpecBuilder::groupType(desc));
+    if (desc.is_state_cache) {
+        policy.evict_policy = CacheEvictPolicy::INDEPENDENT;
     }
-    const size_t natural_bytes = static_cast<size_t>(entries_per_block) * desc.entry_elems * getTypeSize(desc.store_dtype);
-    const size_t align =
-        desc.block_size_bytes_alignment > 0 ?
-            std::lcm(desc.block_size_bytes_alignment, static_cast<size_t>(cp_size)) :
-            static_cast<size_t>(cp_size);
-    const size_t full_stride_bytes = ((natural_bytes + align - 1) / align) * align;
-    RTP_LLM_CHECK_WITH_INFO(full_stride_bytes % cp_size == 0,
-                            "CP prefill byte slicing tag=%s full stride %zu must be divisible by cp_size %u",
-                            desc.tag.c_str(),
-                            full_stride_bytes,
-                            cp_size);
-    return full_stride_bytes / cp_size;
+    if (desc.skip_prefix_reuse) {
+        policy.reuse_policy         = CacheReusePolicy::NON_REUSABLE;
+        policy.active_tail_blocks   = 1;
+        policy.validate_tail_blocks = false;
+    }
+    if (desc.has_reuse_policy) {
+        policy.reuse_policy = desc.reuse_policy;
+    }
+    if (desc.has_evict_policy) {
+        policy.evict_policy = desc.evict_policy;
+    }
+    if (desc.has_active_tail_blocks) {
+        policy.active_tail_blocks = desc.active_tail_blocks;
+    }
+    if (desc.has_validate_tail_blocks) {
+        policy.validate_tail_blocks = desc.validate_tail_blocks;
+    }
+    policy.explicit_block_num        = desc.extra.explicit_block_num;
+    policy.reserve_from_paged_budget = desc.extra.reserve_from_paged_budget;
+    if (desc.has_prefix_reusable) {
+        policy.prefix_reusable = desc.prefix_reusable;
+    }
+    policy.uses_pinned_cpu_backing = desc.uses_pinned_cpu_backing;
+    if (desc.has_is_cp_shardable) {
+        policy.is_cp_shardable = desc.is_cp_shardable;
+    }
+    if (desc.cache_type == CacheType::COMPRESSED_KV) {
+        policy.has_sparse_slots = true;
+    }
+    if (desc.has_sparse_slots) {
+        policy.has_sparse_slots = desc.sparse_slots;
+    }
+    if (desc.has_kernel_block_subdiv) {
+        policy.has_kernel_block_subdiv = desc.kernel_block_subdiv;
+    }
+    if (desc.has_cp_compact_tail_blocks) {
+        policy.cp_compact_tail_blocks = desc.cp_compact_tail_blocks;
+    }
+    if (desc.has_is_reservable) {
+        policy.is_reservable = desc.is_reservable;
+    }
+    return policy;
 }
 
-uint32_t localKvHeads(const ModelConfig& model_config, const ParallelismConfig& parallelism_config) {
-    return static_cast<uint32_t>(
-        (model_config.attn_config.kv_head_num % parallelism_config.get_attn_tp_size() == 0) ?
-            model_config.attn_config.kv_head_num / parallelism_config.get_attn_tp_size() :
-            model_config.attn_config.kv_head_num
-                / std::gcd(model_config.attn_config.kv_head_num, parallelism_config.get_attn_tp_size()));
-}
-
-LayerKVCacheSpecDescs prepareHybridPoolDescs(const ModelConfig&       model_config,
-                                             const ParallelismConfig& parallelism_config,
-                                             rtp_llm::DataType        dtype,
-                                             uint32_t                 physical_tokens_per_block,
-                                             uint32_t                 kernel_tokens_per_block,
-                                             int                      gen_num_per_cycle) {
+void validateHybridPoolDescs(const ModelConfig& model_config,
+                             uint32_t           kernel_tokens_per_block,
+                             int                gen_num_per_cycle) {
     RTP_LLM_CHECK_WITH_INFO(model_config.kv_cache_spec_descs.size() == static_cast<size_t>(model_config.num_layers),
                             "hybrid-pool desc config requires layer-wise kv_cache_spec_descs for every layer, got %zu/%ld",
                             model_config.kv_cache_spec_descs.size(),
                             model_config.num_layers);
-    const auto cp_size        = fixedRegionCpSize(parallelism_config);
-    const bool prefill_sliced = isPrefillCpSliced(parallelism_config);
+    RTP_LLM_CHECK_WITH_INFO(gen_num_per_cycle >= 0,
+                            "hybrid-pool desc config requires non-negative gen_num_per_cycle, got %d",
+                            gen_num_per_cycle);
 
-    auto descs = model_config.kv_cache_spec_descs;
     for (int64_t layer_id = 0; layer_id < model_config.num_layers; ++layer_id) {
-        auto it = descs.find(layer_id);
-        RTP_LLM_CHECK_WITH_INFO(it != descs.end(),
-                                "hybrid-pool desc config missing kv_cache_spec_descs for layer %ld",
-                                layer_id);
-        RTP_LLM_CHECK_WITH_INFO(!it->second.empty(),
+        const auto& layer_descs = model_config.kv_cache_spec_descs[static_cast<size_t>(layer_id)];
+        RTP_LLM_CHECK_WITH_INFO(!layer_descs.empty(),
                                 "hybrid-pool desc config layer %ld has no descs",
                                 layer_id);
-        for (auto& desc : it->second) {
-            desc.dtype = desc.dtype == DataType::TYPE_INVALID ? dtype : desc.dtype;
-            if (desc.cache_type == CacheType::MHA && desc.local_head_num_kv == 0) {
-                desc.local_head_num_kv = localKvHeads(model_config, parallelism_config);
-            } else if (desc.cache_type == CacheType::MLA && desc.local_head_num_kv == 0) {
-                desc.local_head_num_kv = 1;
-            } else if (desc.cache_type == CacheType::LINEAR) {
-                const auto& linear_config = model_config.linear_attention_config;
-                const int tp = std::max(1, static_cast<int>(parallelism_config.get_attn_tp_size()));
-                if (desc.local_num_k_heads == 0) {
-                    desc.local_num_k_heads = static_cast<uint32_t>(linear_config.linear_num_key_heads / tp);
-                }
-                if (desc.local_num_v_heads == 0) {
-                    desc.local_num_v_heads = static_cast<uint32_t>(linear_config.linear_num_value_heads / tp);
-                }
-                if (desc.local_head_num_kv == 0) {
-                    desc.local_head_num_kv = static_cast<uint32_t>(std::max(
-                        1,
-                        (linear_config.linear_num_value_heads > 1) ?
-                            static_cast<int>(linear_config.linear_num_value_heads / parallelism_config.get_attn_tp_size()) :
-                            static_cast<int>(linear_config.linear_num_value_heads)));
-                }
-            }
-
+        for (const auto& desc : layer_descs) {
+            RTP_LLM_CHECK_WITH_INFO(
+                desc.cache_type != CacheType::MHA || desc.num_kv_heads > 0,
+                "hybrid-pool MHA desc tag=%s missing num_kv_heads (must be set by Python model)",
+                desc.tag.c_str());
+            RTP_LLM_CHECK_WITH_INFO(
+                desc.cache_type != CacheType::LINEAR || (desc.num_k_heads > 0 && desc.num_v_heads > 0),
+                "hybrid-pool LINEAR desc tag=%s missing num_k_heads/num_v_heads (must be set by Python model)",
+                desc.tag.c_str());
             if (desc.extra.derive_entries_from_kernel_block) {
                 RTP_LLM_CHECK_WITH_INFO(desc.compression_ratio > 0,
                                         "desc tag=%s derives entries from kernel block but has invalid compression_ratio=%u",
                                         desc.tag.c_str(),
                                         desc.compression_ratio);
+                RTP_LLM_CHECK_WITH_INFO(kernel_tokens_per_block > 0,
+                                        "desc tag=%s derives entries from kernel block but kernel_tokens_per_block is 0",
+                                        desc.tag.c_str());
                 RTP_LLM_CHECK_WITH_INFO(kernel_tokens_per_block % desc.compression_ratio == 0,
                                         "desc tag=%s compression_ratio=%u must divide kernel block %u",
                                         desc.tag.c_str(),
                                         desc.compression_ratio,
                                         kernel_tokens_per_block);
-                desc.entries_per_block = kernel_tokens_per_block / desc.compression_ratio;
             }
-
             if (desc.extra.state_ring_compression_ratio > 0) {
-                uint32_t entries = computeStateRingEntries(desc, gen_num_per_cycle);
-                if (cp_size > 1 && (desc.extra.cp_align_entries || desc.extra.cp_slice_entries)) {
-                    entries = alignUpToMultiple(entries, cp_size);
-                    if (desc.extra.cp_slice_entries && prefill_sliced) {
-                        entries /= cp_size;
-                    }
-                }
-                desc.entries_per_block = entries;
-                desc.block_size_bytes_override = cpPrefillSliceBlockBytes(desc, entries, parallelism_config);
-            }
-
-            if (desc.extra.use_fixed_region_cp_tokens && cp_size > 1) {
-                desc.seq_size_per_block = physical_tokens_per_block * cp_size;
-            } else {
-                desc.seq_size_per_block =
-                    desc.seq_size_per_block == 0 ? physical_tokens_per_block : desc.seq_size_per_block;
-            }
-
-            if (desc.cache_type == CacheType::COMPRESSED_KV) {
-                desc.has_sparse_slots   = true;
+                RTP_LLM_CHECK_WITH_INFO(desc.extra.state_ring_compression_ratio > 0,
+                                        "state ring desc tag=%s requires positive state_ring_compression_ratio",
+                                        desc.tag.c_str());
             }
         }
     }
-    return descs;
 }
 
-void prepareFullAttentionSpec(KVCacheSpecPtr            spec,
-                              const ModelConfig&       model_config,
-                              const ParallelismConfig& parallelism_config,
-                              rtp_llm::DataType        dtype) {
-    if (model_config.attn_config.use_mla && model_config.mla_ops_type != rtp_llm::MlaOpsType::MHA) {
-        auto* mla_spec = dynamic_cast<MLAKVCacheSpec*>(spec.get());
-        RTP_LLM_CHECK_WITH_INFO(mla_spec != nullptr && spec->type == KVCacheSpecType::MultiHeadLatentAttention,
-                                "full kv_cache spec must be MLAKVCacheSpec for MLA model");
-        // local_head_num_kv is already set to 1 by Python-side MLAKVCacheSpec default.
-        // kv_lora_rank, rope_head_dim, seq_size_per_block are already populated by Python.
-    } else {
-        auto* mha_spec = dynamic_cast<MHAKVCacheSpec*>(spec.get());
-        RTP_LLM_CHECK_WITH_INFO(mha_spec != nullptr && spec->type == KVCacheSpecType::MultiHeadAttention,
-                                "full kv_cache spec must be MHAKVCacheSpec for MHA/GQA model");
-        // local_head_num_kv depends on TP and cannot be provided by Python-side spec.
-        spec->local_head_num_kv = static_cast<uint32_t>(
-            (model_config.attn_config.kv_head_num % parallelism_config.get_attn_tp_size() == 0) ?
-                model_config.attn_config.kv_head_num / parallelism_config.get_attn_tp_size() :
-                model_config.attn_config.kv_head_num
-                    / std::gcd(model_config.attn_config.kv_head_num, parallelism_config.get_attn_tp_size()));
-        // size_per_head, seq_size_per_block are already populated by Python.
-    }
-    // dtype depends on runtime quantization config and cannot be provided by Python-side spec.
-    spec->dtype = dtype;
-}
+void populateGroupsFromLayerSpecs(CacheConfig&                  config,
+                                  const LayerKVCacheSpecDescs& layer_descs,
+                                  const LayerKVCacheSpecs&     layer_specs) {
+    RTP_LLM_CHECK_WITH_INFO(layer_descs.size() == static_cast<size_t>(config.layer_num),
+                            "hybrid-pool layer desc count %zu != layer_num %u",
+                            layer_descs.size(),
+                            config.layer_num);
+    RTP_LLM_CHECK_WITH_INFO(layer_specs.size() == static_cast<size_t>(config.layer_num),
+                            "hybrid-pool layer spec count %zu != layer_num %u",
+                            layer_specs.size(),
+                            config.layer_num);
 
-void prepareLinearAttentionSpec(KVCacheSpecPtr            spec,
-                                const ModelConfig&       model_config,
-                                const ParallelismConfig& parallelism_config,
-                                rtp_llm::DataType        dtype) {
-    auto* linear_spec = dynamic_cast<LinearKVCacheSpec*>(spec.get());
-    RTP_LLM_CHECK_WITH_INFO(linear_spec != nullptr && spec->type == KVCacheSpecType::LinearAttention,
-                            "linear kv_cache spec must be LinearKVCacheSpec");
-    const auto& linear_config = model_config.linear_attention_config;
-    RTP_LLM_CHECK_WITH_INFO(linear_config.linear_key_head_dim > 0 && linear_config.linear_value_head_dim > 0,
-                            "invalid linear head dim");
-    RTP_LLM_CHECK_WITH_INFO(linear_config.linear_conv_kernel_dim > 1,
-                            "invalid linear_conv_kernel_dim=%d",
-                            linear_config.linear_conv_kernel_dim);
-    RTP_LLM_CHECK_WITH_INFO(linear_config.linear_num_key_heads > 0 && linear_config.linear_num_value_heads > 0,
-                            "invalid linear heads");
-    RTP_LLM_CHECK_WITH_INFO(linear_config.linear_key_head_dim == linear_config.linear_value_head_dim,
-                            "linear head dims must match (current impl): k=%d v=%d",
-                            linear_config.linear_key_head_dim,
-                            linear_config.linear_value_head_dim);
-    // local_num_k_heads, local_num_v_heads, and local_head_num_kv depend on TP
-    // and cannot be provided by Python-side spec.
-    const int tp = std::max(1, static_cast<int>(parallelism_config.get_attn_tp_size()));
-    linear_spec->local_num_k_heads = static_cast<uint32_t>(linear_config.linear_num_key_heads / tp);
-    linear_spec->local_num_v_heads = static_cast<uint32_t>(linear_config.linear_num_value_heads / tp);
-    RTP_LLM_CHECK_WITH_INFO(linear_spec->local_num_k_heads > 0 && linear_spec->local_num_v_heads > 0,
-                            "invalid local heads for linear attention: k=%d v=%d tp=%d",
-                            linear_spec->local_num_k_heads,
-                            linear_spec->local_num_v_heads,
-                            tp);
-    spec->local_head_num_kv = static_cast<uint32_t>(std::max(
-        1,
-        (linear_config.linear_num_value_heads > 1) ?
-            static_cast<int>(linear_config.linear_num_value_heads / parallelism_config.get_attn_tp_size()) :
-            static_cast<int>(linear_config.linear_num_value_heads)));
-    // dtype depends on runtime quantization config and cannot be provided by Python-side spec.
-    spec->dtype = dtype;
-    // seq_size_per_block, head_k_dim, head_v_dim, conv_kernel_dim,
-    // ssm_state_dtype, conv_state_dtype are already populated by Python.
-}
+    struct GroupBuildState {
+        KVCacheSpecPtr   spec;
+        std::string      fingerprint;
+        CacheGroupType   type;
+        CacheGroupPolicy policy;
+        std::vector<int> layers;
+        uint64_t         order = 0;
+    };
 
-void appendGroup(std::vector<KVCacheSpecPtr>&    specs,
-                 std::vector<std::vector<int>>&  layers_by_group,
-                 std::vector<CacheGroupType>&    types,
-                 std::vector<CacheGroupPolicy>&  policies,
-                 std::vector<std::string>&       tags,
-                 const std::vector<int>&         layer_ids,
-                 CacheGroupType                  group_type,
-                 KVCacheSpecPtr                  spec,
-                 std::string                     tag = "") {
-    if (layer_ids.empty()) {
-        return;
+    std::map<std::string, GroupBuildState> group_by_tag;
+    std::map<uint64_t, std::string>        explicit_order_to_tag;
+    uint64_t next_first_seen_order = 0;
+    bool     has_explicit_group_order = false;
+    uint64_t max_explicit_group_order = 0;
+
+    for (uint32_t layer = 0; layer < config.layer_num; ++layer) {
+        const auto& descs = layer_descs[layer];
+        const auto& specs = layer_specs[layer];
+        RTP_LLM_CHECK_WITH_INFO(!descs.empty(), "hybrid-pool layer %u has no descs", layer);
+        RTP_LLM_CHECK_WITH_INFO(descs.size() == specs.size(),
+                                "hybrid-pool layer %u desc count %zu != spec count %zu",
+                                layer,
+                                descs.size(),
+                                specs.size());
+        std::set<std::string> layer_tags;
+        for (size_t idx = 0; idx < descs.size(); ++idx) {
+            const auto& desc = descs[idx];
+            const auto& spec = specs[idx];
+            RTP_LLM_CHECK_WITH_INFO(spec != nullptr, "hybrid-pool layer %u has null spec", layer);
+            RTP_LLM_CHECK_WITH_INFO(layer_tags.insert(spec->tag).second,
+                                    "hybrid-pool layer %u has duplicate tag=%s",
+                                    layer,
+                                    spec->tag.c_str());
+            const auto policy = policyFromSpecDesc(desc);
+            const auto type   = SpecBuilder::groupType(desc);
+            auto       group_it = group_by_tag.find(spec->tag);
+            if (group_it == group_by_tag.end()) {
+                GroupBuildState state;
+                state.spec        = spec;
+                state.fingerprint = spec->fingerprint();
+                state.type        = type;
+                state.policy      = policy;
+                state.order       = desc.has_group_order ? desc.group_order : (UINT64_C(1) << 32) + next_first_seen_order++;
+                if (desc.has_group_order) {
+                    has_explicit_group_order = true;
+                    max_explicit_group_order = std::max<uint64_t>(max_explicit_group_order, desc.group_order);
+                    const auto [order_it, inserted] = explicit_order_to_tag.emplace(desc.group_order, spec->tag);
+                    RTP_LLM_CHECK_WITH_INFO(inserted || order_it->second == spec->tag,
+                                            "hybrid-pool group order %u maps to both tag=%s and tag=%s",
+                                            desc.group_order,
+                                            order_it->second.c_str(),
+                                            spec->tag.c_str());
+                }
+                group_it = group_by_tag.emplace(spec->tag, std::move(state)).first;
+            } else {
+                RTP_LLM_CHECK_WITH_INFO(group_it->second.fingerprint == spec->fingerprint(),
+                                        "hybrid-pool tag=%s has multiple physical prototypes",
+                                        spec->tag.c_str());
+                RTP_LLM_CHECK_WITH_INFO(group_it->second.type == type,
+                                        "hybrid-pool tag=%s has inconsistent group type",
+                                        spec->tag.c_str());
+                RTP_LLM_CHECK_WITH_INFO(CacheConfig::samePolicy(group_it->second.policy, policy),
+                                        "hybrid-pool tag=%s has inconsistent policy",
+                                        spec->tag.c_str());
+                if (desc.has_group_order) {
+                    RTP_LLM_CHECK_WITH_INFO(group_it->second.order == desc.group_order,
+                                            "hybrid-pool tag=%s has inconsistent group order",
+                                            spec->tag.c_str());
+                }
+            }
+            group_it->second.layers.push_back(static_cast<int>(layer));
+        }
     }
-    if (tag.empty() && spec != nullptr) {
-        tag = spec->tag;
+
+    if (has_explicit_group_order) {
+        SpecBuildContext placeholder_ctx;
+        placeholder_ctx.dtype              = DataType::TYPE_UINT8;
+        placeholder_ctx.seq_size_per_block = config.seq_size_per_block == 0 ? 1 : config.seq_size_per_block;
+        for (uint64_t order = 0; order <= max_explicit_group_order; ++order) {
+            if (explicit_order_to_tag.find(order) != explicit_order_to_tag.end()) {
+                continue;
+            }
+            KVCacheSpecDesc placeholder;
+            placeholder.tag                = "__empty_group_order_" + std::to_string(order);
+            placeholder.cache_type         = CacheType::FIXED_STATE;
+            placeholder.seq_size_per_block = placeholder_ctx.seq_size_per_block;
+            placeholder.dtype              = DataType::TYPE_UINT8;
+            placeholder.entry_elems        = 1;
+            placeholder.entries_per_block  = 1;
+            placeholder.store_dtype        = DataType::TYPE_UINT8;
+            auto spec                      = SpecBuilder::build(placeholder, placeholder_ctx);
+            GroupBuildState state;
+            state.spec        = spec;
+            state.fingerprint = spec->fingerprint();
+            state.type        = SpecBuilder::groupType(placeholder);
+            state.policy      = policyFromSpecDesc(placeholder);
+            state.order       = order;
+            group_by_tag.emplace(spec->tag, std::move(state));
+        }
     }
-    specs.push_back(spec);
-    layers_by_group.push_back(layer_ids);
-    types.push_back(group_type);
-    policies.push_back(CacheConfig::cacheGroupPolicyForSpec(spec, group_type));
-    tags.push_back(std::move(tag));
+
+    std::vector<std::string> ordered_tags;
+    ordered_tags.reserve(group_by_tag.size());
+    for (const auto& [tag, _] : group_by_tag) {
+        ordered_tags.push_back(tag);
+    }
+    std::sort(ordered_tags.begin(), ordered_tags.end(), [&](const std::string& lhs, const std::string& rhs) {
+        const auto lhs_order = group_by_tag.at(lhs).order;
+        const auto rhs_order = group_by_tag.at(rhs).order;
+        return lhs_order == rhs_order ? lhs < rhs : lhs_order < rhs_order;
+    });
+
+    std::vector<GroupBase> groups;
+    std::vector<LayerBase> layers(static_cast<size_t>(config.layer_num));
+    groups.reserve(ordered_tags.size());
+    for (const auto& tag : ordered_tags) {
+        const auto& state = group_by_tag.at(tag);
+        GroupBase   group;
+        group.spec      = state.spec;
+        group.policy    = state.policy;
+        group.layer_ids = state.layers;
+        const int gid   = static_cast<int>(groups.size());
+        groups.push_back(group);
+        for (int layer_id : state.layers) {
+            auto& layer = layers[static_cast<size_t>(layer_id)];
+            layer.group_ids.push_back(gid);
+            layer.tag_to_gid[tag] = gid;
+        }
+    }
+    config.setTopology(std::move(groups), std::move(layers));
 }
 
 size_t kernelBlocksPerKvBlockForGroup(const CacheConfig& config, size_t group_id) {
@@ -408,35 +342,6 @@ void setupIndependentPoolSizes(CacheConfig& config, bool is_mtp) {
     config.setGroupBlockLayout(group_block_nums, group_kv_block_stride_bytes, group_kv_scale_stride_bytes);
 }
 
-void populateHybridAttentionGroups(CacheConfig&             config,
-                                   const ModelConfig&       model_config,
-                                   const ParallelismConfig& parallelism_config) {
-    const auto dtype  = MemoryEvaluationHelper::getDataTypeForCache(model_config);
-    const auto layers = splitHybridPoolLayers(model_config);
-
-    auto full_spec   = getHybridSpecByTag(model_config, "full");
-    auto swa_spec    = full_spec->clone();
-    auto linear_spec = getHybridSpecByTag(model_config, "linear");
-    swa_spec->tag    = "swa";
-    prepareFullAttentionSpec(full_spec, model_config, parallelism_config, dtype);
-    prepareFullAttentionSpec(swa_spec, model_config, parallelism_config, dtype);
-    prepareLinearAttentionSpec(linear_spec, model_config, parallelism_config, dtype);
-
-    std::vector<KVCacheSpecPtr>    specs;
-    std::vector<std::vector<int>>  layers_by_group;
-    std::vector<CacheGroupType>    types;
-    std::vector<CacheGroupPolicy>  policies;
-    std::vector<std::string>       tags;
-
-    appendGroup(specs, layers_by_group, types, policies, tags, layers.full_layers, CacheGroupType::FULL, full_spec);
-    appendGroup(specs, layers_by_group, types, policies, tags, layers.swa_layers, CacheGroupType::SWA, swa_spec);
-    appendGroup(
-        specs, layers_by_group, types, policies, tags, layers.linear_layers, CacheGroupType::LINEAR, linear_spec);
-
-    config.fromGroupedSpecs(specs, layers_by_group, types, tags);
-    config.setGroupPolicies(policies);
-}
-
 CacheConfig createHybridAttentionPoolConfig(const ModelConfig&       model_config,
                                             const ParallelismConfig& parallelism_config,
                                             const KVCacheConfig&     kv_cache_config,
@@ -469,12 +374,18 @@ CacheConfig createHybridAttentionPoolConfig(const ModelConfig&       model_confi
     config.is_sparse          = model_config.attn_config.is_sparse;
 
     if (!model_config.kv_cache_spec_descs.empty()) {
-        auto descs = prepareHybridPoolDescs(
-            model_config, parallelism_config, dtype, physical_tokens_per_block, kernel_tokens_per_block, gen_num_per_cycle);
+        validateHybridPoolDescs(model_config, kernel_tokens_per_block, gen_num_per_cycle);
         SpecBuildContext ctx;
-        ctx.dtype              = dtype;
-        ctx.seq_size_per_block = physical_tokens_per_block;
-        config.fromLayerDescs(descs, ctx);
+        ctx.dtype                   = dtype;
+        ctx.seq_size_per_block      = physical_tokens_per_block;
+        ctx.attn_tp_size            = static_cast<uint32_t>(parallelism_config.get_attn_tp_size());
+        ctx.kernel_tokens_per_block = kernel_tokens_per_block;
+        ctx.gen_num_per_cycle       = static_cast<uint32_t>(gen_num_per_cycle);
+        ctx.cp_size                 = fixedRegionCpSize(parallelism_config);
+        ctx.cp_prefill_sliced       = isPrefillCpSliced(parallelism_config);
+        auto refreshed_specs = CacheConfigCreator::buildLayerSpecsFromDescs(
+            model_config.kv_cache_spec_descs, ctx, model_config.num_layers);
+        populateGroupsFromLayerSpecs(config, model_config.kv_cache_spec_descs, refreshed_specs);
         config.group_seq_size_per_block.resize(static_cast<size_t>(config.groupNums()), config.seq_size_per_block);
         for (size_t gid = 0; gid < static_cast<size_t>(config.groupNums()); ++gid) {
             const auto& spec = config.specForGroup(gid);
@@ -487,7 +398,7 @@ CacheConfig createHybridAttentionPoolConfig(const ModelConfig&       model_confi
                 config.use_opaque_kv_cache_store || spec->type == KVCacheSpecType::OpaqueKV
                 || spec->type == KVCacheSpecType::OpaqueState;
         }
-        for (const auto& [_, layer_descs] : descs) {
+        for (const auto& layer_descs : model_config.kv_cache_spec_descs) {
             for (const auto& desc : layer_descs) {
                 config.is_sparse = config.is_sparse || desc.cache_type == CacheType::COMPRESSED_KV;
             }
@@ -495,10 +406,7 @@ CacheConfig createHybridAttentionPoolConfig(const ModelConfig&       model_confi
         config.disable_decode_first_malloc_device_reuse =
             config.disable_decode_first_malloc_device_reuse || config.use_opaque_kv_cache_store;
     } else {
-        RTP_LLM_CHECK_WITH_INFO(model_config.hybrid_attention_config.enable_hybrid_attention,
-                                "HybridPoolConfigCreator requires kv_cache_spec_descs or hybrid attention");
-        const auto spec_model_config = modelConfigWithDescSpecs(model_config, dtype);
-        populateHybridAttentionGroups(config, spec_model_config, parallelism_config);
+        RTP_LLM_CHECK_WITH_INFO(false, "HybridPoolConfigCreator requires kv_cache_spec_descs");
     }
 
     RTP_LLM_CHECK_WITH_INFO(config.groupNums() > 0, "hybrid-pool config produced no cache specs");
@@ -513,8 +421,7 @@ CacheConfig HybridPoolConfigCreator::createConfig(const ModelConfig&       model
                                                   const KVCacheConfig&     kv_cache_config,
                                                   bool                     is_mtp,
                                                   int                      gen_num_per_cycle) {
-    return createHybridAttentionPoolConfig(
-        model_config, parallelism_config, kv_cache_config, is_mtp, gen_num_per_cycle);
+    return createHybridAttentionPoolConfig(model_config, parallelism_config, kv_cache_config, is_mtp, gen_num_per_cycle);
 }
 
 }  // namespace rtp_llm

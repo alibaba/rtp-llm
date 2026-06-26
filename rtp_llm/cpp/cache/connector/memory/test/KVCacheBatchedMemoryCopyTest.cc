@@ -12,6 +12,7 @@
 #include "gtest/gtest.h"
 
 #include "rtp_llm/cpp/cache/BlockPool.h"
+#include "rtp_llm/cpp/cache/config_creator/CacheConfigCreator.h"
 #include "rtp_llm/cpp/cache/config_creator/HybridPoolConfigCreator.h"
 #include "rtp_llm/cpp/cache/allocator/KVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/spec/MHAKVCacheSpec.h"
@@ -95,7 +96,7 @@ CacheConfig makeRealDsv4TypedMemoryCopyConfig(bool use_flash) {
     KVCacheConfig     kv_config;
     kv_config.seq_size_per_block        = 128;
     kv_config.kernel_seq_size_per_block = 128;
-    auto config                         = HybridPoolConfigCreator::createConfig(mc, pc, kv_config, false, 0);
+    auto config                         = CacheConfigCreator::createBasicConfig(mc, pc, kv_config, false, 0);
     config.block_num                    = 512;
     return config;
 }

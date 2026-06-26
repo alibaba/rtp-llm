@@ -1,6 +1,7 @@
 #pragma once
 
 #include <memory>
+#include <vector>
 #include <map>
 #include <sstream>
 #include <string>
@@ -70,6 +71,7 @@ inline const char* KVCacheSpecTypeToString(KVCacheSpecType t) {
 
 struct KVCacheSpec;
 using KVCacheSpecPtr = std::shared_ptr<KVCacheSpec>;
+using LayerKVCacheSpecs = std::vector<std::vector<KVCacheSpecPtr>>;
 
 struct KVCacheSpec {
     std::string tag;

@@ -142,35 +142,25 @@ inline KVCacheSpecDesc dsv4DescForSpec(const KVCacheSpecPtr& spec) {
 }
 
 inline void setDefaultKvCacheSpec(ModelConfig& model_config) {
-    std::vector<int> layers;
-    layers.reserve(static_cast<size_t>(model_config.num_layers));
-    for (int i = 0; i < static_cast<int>(model_config.num_layers); ++i) {
-        layers.push_back(i);
-    }
-
-    KVCacheSpecPtr spec;
+    KVCacheSpecDesc desc;
+    desc.tag                = "default";
+    desc.seq_size_per_block = static_cast<uint32_t>(model_config.attn_config.tokens_per_block);
     if (model_config.attn_config.use_mla && model_config.mla_ops_type != rtp_llm::MlaOpsType::MHA) {
-        auto mla_spec           = std::make_shared<MLAKVCacheSpec>();
-        mla_spec->type          = KVCacheSpecType::MultiHeadLatentAttention;
-        mla_spec->kv_lora_rank  = static_cast<uint32_t>(model_config.attn_config.kv_lora_rank);
-        mla_spec->rope_head_dim = static_cast<uint32_t>(model_config.attn_config.rope_head_dim);
-        spec                    = mla_spec;
+        desc.cache_type    = CacheType::MLA;
+        desc.kv_lora_rank  = static_cast<uint32_t>(model_config.attn_config.kv_lora_rank);
+        desc.rope_head_dim = static_cast<uint32_t>(model_config.attn_config.rope_head_dim);
+        desc.num_kv_heads  = 1;
     } else {
-        auto mha_spec            = std::make_shared<MHAKVCacheSpec>();
-        mha_spec->type           = KVCacheSpecType::MultiHeadAttention;
-        mha_spec->size_per_head  = static_cast<uint32_t>(model_config.attn_config.size_per_head);
-        spec                     = mha_spec;
+        desc.cache_type    = CacheType::MHA;
+        desc.size_per_head = static_cast<uint32_t>(model_config.attn_config.size_per_head);
+        desc.num_kv_heads  = static_cast<uint32_t>(model_config.attn_config.kv_head_num);
     }
-    spec->tag                = "default";
-    spec->seq_size_per_block = static_cast<uint32_t>(model_config.attn_config.tokens_per_block);
-    model_config.kv_cache_specs.clear();
-    for (int layer_id : layers) {
-        model_config.kv_cache_specs[static_cast<int64_t>(layer_id)] = {spec};
-    }
+    model_config.kv_cache_spec_descs.assign(static_cast<size_t>(model_config.num_layers), {desc});
 }
 
 inline void setHybridAttentionKvCacheSpecs(ModelConfig& model_config) {
     std::vector<int> full_layers;
+    std::vector<int> swa_layers;
     std::vector<int> linear_layers;
     const auto&      types = model_config.hybrid_attention_config.hybrid_attention_types;
     RTP_LLM_CHECK_WITH_INFO(types.size() == static_cast<size_t>(model_config.num_layers),
@@ -178,35 +168,73 @@ inline void setHybridAttentionKvCacheSpecs(ModelConfig& model_config) {
                             types.size(),
                             model_config.num_layers);
     for (int i = 0; i < static_cast<int>(model_config.num_layers); ++i) {
-        if (types[static_cast<size_t>(i)] == HybridAttentionType::LINEAR) {
-            linear_layers.push_back(i);
-        } else {
-            full_layers.push_back(i);
+        switch (types[static_cast<size_t>(i)]) {
+            case HybridAttentionType::LINEAR:
+                linear_layers.push_back(i);
+                break;
+            case HybridAttentionType::SLIDING_WINDOW:
+                swa_layers.push_back(i);
+                break;
+            case HybridAttentionType::NONE:
+            default:
+                full_layers.push_back(i);
+                break;
         }
     }
 
-    auto full_spec                = std::make_shared<MHAKVCacheSpec>();
-    full_spec->tag                = "full";
-    full_spec->type               = KVCacheSpecType::MultiHeadAttention;
-    full_spec->seq_size_per_block = static_cast<uint32_t>(model_config.attn_config.tokens_per_block);
-    full_spec->size_per_head      = static_cast<uint32_t>(model_config.attn_config.size_per_head);
+    KVCacheSpecDesc full_desc;
+    full_desc.tag                = "full";
+    full_desc.cache_type         = CacheType::MHA;
+    full_desc.seq_size_per_block = static_cast<uint32_t>(model_config.attn_config.tokens_per_block);
+    full_desc.size_per_head      = static_cast<uint32_t>(model_config.attn_config.size_per_head);
+    full_desc.num_kv_heads       = static_cast<uint32_t>(model_config.attn_config.kv_head_num);
+
+    KVCacheSpecDesc swa_desc = full_desc;
+    swa_desc.tag             = "swa";
+    swa_desc.cache_type      = CacheType::FIXED_STATE;
+    swa_desc.entry_elems     = static_cast<uint32_t>(model_config.attn_config.size_per_head)
+                           * static_cast<uint32_t>(model_config.attn_config.kv_head_num) * 2;
+    swa_desc.entries_per_block = static_cast<uint32_t>(model_config.attn_config.sliding_window > 0 ?
+                                                           model_config.attn_config.sliding_window :
+                                                           model_config.attn_config.tokens_per_block);
+    swa_desc.store_dtype       = DataType::TYPE_FP16;
 
     const auto& linear_config           = model_config.linear_attention_config;
-    auto        linear_spec             = std::make_shared<LinearKVCacheSpec>();
-    linear_spec->tag                    = "linear";
-    linear_spec->type                   = KVCacheSpecType::LinearAttention;
-    linear_spec->seq_size_per_block     = static_cast<uint32_t>(model_config.attn_config.tokens_per_block);
-    linear_spec->head_k_dim             = static_cast<uint32_t>(linear_config.linear_key_head_dim);
-    linear_spec->head_v_dim             = static_cast<uint32_t>(linear_config.linear_value_head_dim);
-    linear_spec->conv_kernel_dim        = static_cast<uint32_t>(linear_config.linear_conv_kernel_dim);
-    linear_spec->ssm_state_dtype        = linear_config.ssm_state_dtype;
-    linear_spec->conv_state_dtype       = linear_config.conv_state_dtype;
-    model_config.kv_cache_specs.clear();
+    KVCacheSpecDesc linear_desc;
+    linear_desc.tag                    = "linear";
+    linear_desc.cache_type             = CacheType::LINEAR;
+    linear_desc.seq_size_per_block     = static_cast<uint32_t>(model_config.attn_config.tokens_per_block);
+    linear_desc.num_k_heads            = static_cast<uint32_t>(linear_config.linear_num_key_heads);
+    linear_desc.num_v_heads            = static_cast<uint32_t>(linear_config.linear_num_value_heads);
+    linear_desc.head_k_dim             = static_cast<uint32_t>(linear_config.linear_key_head_dim);
+    linear_desc.head_v_dim             = static_cast<uint32_t>(linear_config.linear_value_head_dim);
+    linear_desc.conv_kernel_dim        = static_cast<uint32_t>(linear_config.linear_conv_kernel_dim);
+    linear_desc.ssm_state_dtype        = linear_config.ssm_state_dtype;
+    linear_desc.conv_state_dtype       = linear_config.conv_state_dtype;
+
+    uint32_t group_order = 0;
+    if (!full_layers.empty()) {
+        full_desc.has_group_order = true;
+        full_desc.group_order     = group_order++;
+    }
+    if (!swa_layers.empty()) {
+        swa_desc.has_group_order = true;
+        swa_desc.group_order     = group_order++;
+    }
+    if (!linear_layers.empty()) {
+        linear_desc.has_group_order = true;
+        linear_desc.group_order     = group_order++;
+    }
+
+    model_config.kv_cache_spec_descs.assign(static_cast<size_t>(model_config.num_layers), {});
     for (int layer_id : full_layers) {
-        model_config.kv_cache_specs[static_cast<int64_t>(layer_id)] = {full_spec};
+        model_config.kv_cache_spec_descs[static_cast<size_t>(layer_id)] = {full_desc};
+    }
+    for (int layer_id : swa_layers) {
+        model_config.kv_cache_spec_descs[static_cast<size_t>(layer_id)] = {swa_desc};
     }
     for (int layer_id : linear_layers) {
-        model_config.kv_cache_specs[static_cast<int64_t>(layer_id)] = {linear_spec};
+        model_config.kv_cache_spec_descs[static_cast<size_t>(layer_id)] = {linear_desc};
     }
 }
 
@@ -227,22 +255,23 @@ inline void setDsv4KvCacheSpecs(ModelConfig& model_config) {
     auto hca_state = makeDsv4Spec("hca_state", "fixed_state", 2 * head_dim, DataType::TYPE_FP32);
     auto swa_kv = makeDsv4Spec("swa_kv", "sliding_window_kv", kv_entry_elems, DataType::TYPE_UINT8);
 
-    model_config.kv_cache_specs.clear();
     model_config.kv_cache_spec_descs.clear();
+    model_config.kv_cache_spec_descs.resize(layer_num);
     for (int i = 0; i < layer_num; ++i) {
         const int ratio = i < static_cast<int>(model_config.attn_config.layer_compress_ratios.size()) ?
                               model_config.attn_config.layer_compress_ratios[static_cast<size_t>(i)] :
                               0;
+        std::vector<KVCacheSpecPtr> specs;
         if (ratio == 4) {
-            model_config.kv_cache_specs[i] = {csa_kv, indexer_kv, indexer_state, csa_state, swa_kv};
+            specs = {csa_kv, indexer_kv, indexer_state, csa_state, swa_kv};
         } else if (ratio == 128) {
-            model_config.kv_cache_specs[i] = {hca_kv, hca_state, swa_kv};
+            specs = {hca_kv, hca_state, swa_kv};
         } else {
-            model_config.kv_cache_specs[i] = {swa_kv};
+            specs = {swa_kv};
         }
-        auto& descs = model_config.kv_cache_spec_descs[i];
-        descs.reserve(model_config.kv_cache_specs[i].size());
-        for (const auto& spec : model_config.kv_cache_specs[i]) {
+        auto& descs = model_config.kv_cache_spec_descs[static_cast<size_t>(i)];
+        descs.reserve(specs.size());
+        for (const auto& spec : specs) {
             descs.push_back(dsv4DescForSpec(spec));
         }
     }
@@ -259,7 +288,7 @@ inline void refreshDsv4KvCacheSpecDescs(ModelConfig&             model_config,
 }
 
 inline void setDsv4ExplicitPoolBlocks(ModelConfig& model_config, const std::string& tag, uint32_t block_num) {
-    for (auto& [_, descs] : model_config.kv_cache_spec_descs) {
+    for (auto& descs : model_config.kv_cache_spec_descs) {
         for (auto& desc : descs) {
             if (desc.tag == tag) {
                 desc.extra.explicit_block_num = block_num;

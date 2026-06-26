@@ -26,9 +26,9 @@ private:
                                                                           const std::vector<int>& linear_layers,
                                                                           const std::vector<int>& full_layers,
                                                                           rtp_llm::DataType       dtype);
-    static KVCacheSpecPtr getSpecFromLayers(const ModelConfig&      model_config,
-                                           const std::vector<int>& layer_ids,
-                                           const char*              spec_role);
+    static KVCacheSpecPtr getSpecFromLayers(const LayerKVCacheSpecs& runtime_specs,
+                                            const std::vector<int>&  layer_ids,
+                                            const char*              spec_role);
     static void           prepareFullAttentionSpec(KVCacheSpecPtr            spec,
                                                    const ModelConfig&       model_config,
                                                    const ParallelismConfig& parallelism_config,

@@ -1,6 +1,7 @@
 #include "rtp_llm/cpp/cache/config_creator/SingleConfigCreator.h"
 
 #include "rtp_llm/cpp/cache/spec/KVCacheSpec.h"
+#include "rtp_llm/cpp/cache/config_creator/CacheConfigCreator.h"
 #include "rtp_llm/cpp/cache/config_creator/MemoryEvaluationHelper.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
@@ -10,100 +11,39 @@ namespace rtp_llm {
 
 namespace {
 
-uint32_t localKvHeads(const ModelConfig& model_config, const ParallelismConfig& parallelism_config) {
-    return static_cast<uint32_t>(
-        (model_config.attn_config.kv_head_num % parallelism_config.get_attn_tp_size() == 0) ?
-            model_config.attn_config.kv_head_num / parallelism_config.get_attn_tp_size() :
-            model_config.attn_config.kv_head_num
-                / std::gcd(model_config.attn_config.kv_head_num, parallelism_config.get_attn_tp_size()));
-}
-
-LayerKVCacheSpecDescs preparedSingleDescs(const ModelConfig&       model_config,
-                                          const ParallelismConfig& parallelism_config,
-                                          rtp_llm::DataType        dtype) {
-    RTP_LLM_CHECK_WITH_INFO(model_config.kv_cache_spec_descs.size() == static_cast<size_t>(model_config.num_layers),
-                            "single cache config requires layer-wise kv_cache_spec_descs for every layer, got %zu/%ld",
-                            model_config.kv_cache_spec_descs.size(),
+KVCacheSpecPtr getDefaultSpecFromRuntimeSpecs(const ModelConfig&        model_config,
+                                              const LayerKVCacheSpecs& runtime_specs) {
+    RTP_LLM_CHECK_WITH_INFO(runtime_specs.size() == static_cast<size_t>(model_config.num_layers),
+                            "single cache config requires layer-wise runtime specs for every layer, got %zu/%ld",
+                            runtime_specs.size(),
                             model_config.num_layers);
-    auto descs = model_config.kv_cache_spec_descs;
-    for (int64_t layer_id = 0; layer_id < model_config.num_layers; ++layer_id) {
-        auto it = descs.find(layer_id);
-        RTP_LLM_CHECK_WITH_INFO(it != descs.end(),
-                                "single cache config missing kv_cache_spec_descs for layer %ld",
-                                layer_id);
-        RTP_LLM_CHECK_WITH_INFO(it->second.size() == 1,
-                                "single cache config requires exactly one desc for layer %ld, got %zu",
-                                layer_id,
-                                it->second.size());
-        auto& desc = it->second[0];
-        RTP_LLM_CHECK_WITH_INFO(desc.tag == "default",
-                                "single cache config requires desc tag=default for layer %ld, got=%s",
-                                layer_id,
-                                desc.tag.c_str());
-        desc.dtype              = dtype;
-        desc.seq_size_per_block = desc.seq_size_per_block == 0 ?
-                                      static_cast<uint32_t>(model_config.attn_config.tokens_per_block) :
-                                      desc.seq_size_per_block;
-        if (desc.cache_type == CacheType::MHA && desc.local_head_num_kv == 0) {
-            desc.local_head_num_kv = localKvHeads(model_config, parallelism_config);
-        } else if (desc.cache_type == CacheType::MLA && desc.local_head_num_kv == 0) {
-            desc.local_head_num_kv = 1;
-        }
-    }
-    return descs;
-}
-
-KVCacheSpecPtr getLayerDefaultSpec(const ModelConfig& model_config, int64_t layer_id) {
-    const auto it = model_config.kv_cache_specs.find(layer_id);
-    RTP_LLM_CHECK_WITH_INFO(it != model_config.kv_cache_specs.end(),
-                            "single cache config missing kv_cache_specs for layer %ld",
-                            layer_id);
-    RTP_LLM_CHECK_WITH_INFO(it->second.size() == 1,
-                            "single cache config requires exactly one spec for layer %ld, got %zu",
-                            layer_id,
-                            it->second.size());
-    auto spec = it->second[0];
-    RTP_LLM_CHECK_WITH_INFO(spec != nullptr, "single cache config got null kv_cache spec for layer %ld", layer_id);
+    RTP_LLM_CHECK_WITH_INFO(!runtime_specs.empty(), "single cache config requires at least one runtime spec");
+    RTP_LLM_CHECK_WITH_INFO(runtime_specs[0].size() == 1,
+                            "single cache config requires exactly one spec for layer 0, got %zu",
+                            runtime_specs[0].size());
+    auto spec = runtime_specs[0][0];
+    RTP_LLM_CHECK_WITH_INFO(spec != nullptr, "single cache config got null runtime spec for layer 0");
     RTP_LLM_CHECK_WITH_INFO(spec->tag == "default",
-                            "single cache config requires tag=default for layer %ld, got=%s",
-                            layer_id,
+                            "single cache config requires tag=default for layer 0, got=%s",
                             spec->tag.c_str());
-    return spec;
-}
-
-KVCacheSpecPtr getDefaultSpecFromModel(const ModelConfig&       model_config,
-                                       const ParallelismConfig& parallelism_config,
-                                       rtp_llm::DataType        dtype) {
-    RTP_LLM_CHECK_WITH_INFO(model_config.kv_cache_specs.size() == static_cast<size_t>(model_config.num_layers),
-                            "single cache config requires layer-wise kv_cache_specs for every layer, got %zu/%ld",
-                            model_config.kv_cache_specs.size(),
-                            model_config.num_layers);
-    auto spec = getLayerDefaultSpec(model_config, 0)->clone();
-
+    const auto fingerprint = spec->fingerprint();
     for (int64_t layer_id = 1; layer_id < model_config.num_layers; ++layer_id) {
-        auto layer_spec = getLayerDefaultSpec(model_config, layer_id);
-        RTP_LLM_CHECK_WITH_INFO(layer_spec->fingerprint() == spec->fingerprint(),
+        const auto layer = static_cast<size_t>(layer_id);
+        RTP_LLM_CHECK_WITH_INFO(runtime_specs[layer].size() == 1,
+                                "single cache config requires exactly one spec for layer %ld, got %zu",
+                                layer_id,
+                                runtime_specs[layer].size());
+        const auto& layer_spec = runtime_specs[layer][0];
+        RTP_LLM_CHECK_WITH_INFO(layer_spec != nullptr, "single cache config got null runtime spec for layer %ld", layer_id);
+        RTP_LLM_CHECK_WITH_INFO(layer_spec->tag == "default",
+                                "single cache config requires tag=default for layer %ld, got=%s",
+                                layer_id,
+                                layer_spec->tag.c_str());
+        RTP_LLM_CHECK_WITH_INFO(layer_spec->fingerprint() == fingerprint,
                                 "single cache config default spec differs at layer %ld",
                                 layer_id);
     }
-
-    if (model_config.attn_config.use_mla && model_config.mla_ops_type != rtp_llm::MlaOpsType::MHA) {
-        auto* mla_spec = dynamic_cast<MLAKVCacheSpec*>(spec.get());
-        RTP_LLM_CHECK_WITH_INFO(mla_spec != nullptr && spec->type == KVCacheSpecType::MultiHeadLatentAttention,
-                                "default kv_cache spec must be MLAKVCacheSpec for MLA model");
-        // local_head_num_kv is already set to 1 by Python-side MLAKVCacheSpec default.
-        // kv_lora_rank and rope_head_dim are already populated by Python.
-    } else {
-        auto* mha_spec = dynamic_cast<MHAKVCacheSpec*>(spec.get());
-        RTP_LLM_CHECK_WITH_INFO(mha_spec != nullptr && spec->type == KVCacheSpecType::MultiHeadAttention,
-                                "default kv_cache spec must be MHAKVCacheSpec for MHA/GQA model");
-        // local_head_num_kv depends on TP and cannot be provided by Python-side spec.
-        spec->local_head_num_kv = localKvHeads(model_config, parallelism_config);
-        // size_per_head is already populated by Python.
-    }
-    // dtype depends on runtime quantization config and cannot be provided by Python-side spec.
-    spec->dtype = dtype;
-    return spec;
+    return spec->clone();
 }
 
 }  // namespace
@@ -111,14 +51,16 @@ KVCacheSpecPtr getDefaultSpecFromModel(const ModelConfig&       model_config,
 CacheConfig SingleConfigCreator::createSingleConfig(const ModelConfig&       model_config,
                                                     const ParallelismConfig& parallelism_config,
                                                     bool                     is_mtp) {
+    (void)is_mtp;
     auto dtype = MemoryEvaluationHelper::getDataTypeForCache(model_config);
+    SpecBuildContext ctx;
+    ctx.dtype              = dtype;
+    ctx.seq_size_per_block = static_cast<uint32_t>(model_config.attn_config.tokens_per_block);
+    ctx.attn_tp_size       = static_cast<uint32_t>(parallelism_config.get_attn_tp_size());
+    const auto runtime_specs =
+        CacheConfigCreator::buildLayerSpecsFromDescs(model_config.kv_cache_spec_descs, ctx, model_config.num_layers);
 
     auto layer_num = model_config.num_layers;
-
-    std::vector<int> all_layer_ids(layer_num);
-    for (int i = 0; i < layer_num; ++i) {
-        all_layer_ids[i] = i;
-    }
 
     CacheConfig config;
     config.layer_num          = static_cast<uint32_t>(layer_num);
@@ -130,18 +72,24 @@ CacheConfig SingleConfigCreator::createSingleConfig(const ModelConfig&       mod
     config.dtype     = dtype;
     config.is_sparse = model_config.attn_config.is_sparse;
 
-    KVCacheSpecPtr spec;
-    if (!model_config.kv_cache_spec_descs.empty()) {
-        const auto descs = preparedSingleDescs(model_config, parallelism_config, dtype);
-        SpecBuildContext ctx;
-        ctx.dtype              = dtype;
-        ctx.seq_size_per_block = config.seq_size_per_block;
-        config.fromLayerDescs(descs, ctx);
-        RTP_LLM_CHECK_WITH_INFO(config.groupNums() == 1, "single desc config expected one cache group");
-        spec = config.specForGroup(0);
-    } else {
-        spec = getDefaultSpecFromModel(model_config, parallelism_config, dtype);
+    auto spec = getDefaultSpecFromRuntimeSpecs(model_config, runtime_specs);
+
+    std::vector<int> layer_ids(static_cast<size_t>(layer_num));
+    std::iota(layer_ids.begin(), layer_ids.end(), 0);
+    GroupBase group;
+    group.spec      = spec;
+    group.policy    = defaultCacheGroupPolicy(CacheGroupType::FULL);
+    group.layer_ids = layer_ids;
+
+    std::vector<LayerBase> layers(static_cast<size_t>(layer_num));
+    for (int64_t layer_id = 0; layer_id < layer_num; ++layer_id) {
+        auto& layer                  = layers[static_cast<size_t>(layer_id)];
+        layer.group_ids              = {0};
+        layer.tag_to_gid[spec->tag]  = 0;
+        layer.legacy_single_group_id = 0;
     }
+    config.setTopology({group}, std::move(layers));
+    RTP_LLM_CHECK_WITH_INFO(config.groupNums() == 1, "single config expected one cache group");
 
     // Using spec interface for block size and scale
     config.kv_block_stride_bytes = spec->block_size_bytes();
@@ -165,13 +113,6 @@ CacheConfig SingleConfigCreator::createSingleConfig(const ModelConfig&       mod
     config.layer_to_block_stride_bytes.assign(static_cast<size_t>(config.layer_all_num),
                                               static_cast<int>(per_layer_stride_bytes));
 
-    if (model_config.kv_cache_spec_descs.empty()) {
-        LayerKVCacheSpecs layer_specs;
-        for (int layer_id : all_layer_ids) {
-            layer_specs[static_cast<int64_t>(layer_id)] = {spec};
-        }
-        config.fromLayerSpecs(layer_specs);
-    }
     return config;
 }
 

@@ -7,6 +7,7 @@
 #include "rtp_llm/cpp/cache/config_creator/HybridConfigCreator.h"
 #include "rtp_llm/cpp/cache/config_creator/MemoryEvaluationHelper.h"
 #include "rtp_llm/cpp/cache/config_creator/SingleConfigCreator.h"
+#include "rtp_llm/cpp/cache/spec/KVCacheSpecDesc.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 
@@ -96,6 +97,26 @@ uint32_t computeBlockNum(CacheConfig&                                     config
 
 }  // namespace
 
+LayerKVCacheSpecs CacheConfigCreator::buildLayerSpecsFromDescs(const LayerKVCacheSpecDescs& layer_descs,
+                                                               const SpecBuildContext&      ctx,
+                                                               int64_t                      expected_layer_num) {
+    RTP_LLM_CHECK_WITH_INFO(layer_descs.size() == static_cast<size_t>(expected_layer_num),
+                            "kv_cache_spec_descs size %zu != num_layers %ld",
+                            layer_descs.size(),
+                            expected_layer_num);
+    LayerKVCacheSpecs layer_specs(layer_descs.size());
+    for (size_t layer_id = 0; layer_id < layer_descs.size(); ++layer_id) {
+        const auto& descs = layer_descs[layer_id];
+        RTP_LLM_CHECK_WITH_INFO(!descs.empty(), "kv_cache_spec_descs layer %zu has no descs", layer_id);
+        auto& specs = layer_specs[layer_id];
+        specs.reserve(descs.size());
+        for (const auto& desc : descs) {
+            specs.push_back(SpecBuilder::build(desc, ctx));
+        }
+    }
+    return layer_specs;
+}
+
 CacheConfig CacheConfigCreator::createBasicConfig(const ModelConfig&       model_config,
                                                   const ParallelismConfig& parallelism_config,
                                                   const KVCacheConfig&     kv_cache_config,
@@ -106,9 +127,6 @@ CacheConfig CacheConfigCreator::createBasicConfig(const ModelConfig&       model
     //   2. enable_hybrid_attention=true             → HybridType  (shared BlockPool across groups)
     //   3. else                                     → Single       (standard MHA/MLA path)
     if (model_config.hybrid_attention_config.enable_independent_kv_cache_pools) {
-        RTP_LLM_CHECK_WITH_INFO(!model_config.kv_cache_spec_descs.empty() || !model_config.kv_cache_specs.empty(),
-                                "enable_independent_kv_cache_pools=true requires kv_cache_spec_descs or "
-                                "kv_cache_specs to be populated before initializing cache");
         return HybridPoolConfigCreator::createConfig(
             model_config, parallelism_config, kv_cache_config, is_mtp, gen_num_per_cycle);
     } else if (model_config.hybrid_attention_config.enable_hybrid_attention) {
