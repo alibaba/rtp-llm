@@ -23,7 +23,8 @@ multi_build_script() {
     for IP in "${IP_ARRAY[@]}"
     do
       (
-        scp -P ${SSH_PORT} multi_local_executor.sh ${RUN_USER}@${IP}:/tmp/multi_local_executor.sh;
+        # Fail fast so a failed scp propagates to this host's exit code.
+        scp -P ${SSH_PORT} multi_local_executor.sh ${RUN_USER}@${IP}:/tmp/multi_local_executor.sh || exit $?;
         # Concat all environment variables
         ENV_STR=$(printenv | paste -sd " ");
         echo "Environment variables: $ENV_STR";
@@ -54,7 +55,9 @@ multi_kill_script() {
     for IP in "${IP_ARRAY[@]}"
     do
       (
-        scp -P ${SSH_PORT} multi_local_executor.sh ${RUN_USER}@${IP}:/tmp/multi_local_executor.sh;
+        # Fail fast so a failed scp propagates to this host's exit code
+        # (otherwise the trailing ssh would mask it and EXIT_CODE stays 0).
+        scp -P ${SSH_PORT} multi_local_executor.sh ${RUN_USER}@${IP}:/tmp/multi_local_executor.sh || exit $?;
         # Concat all environment variables
         ENV_STR=$(printenv | paste -sd " ");
         echo "Environment variables: $ENV_STR";
@@ -93,13 +96,20 @@ multi_copy_script() {
         # Concat all environment variables
         ENV_STR=$(printenv | paste -sd " ");
         echo "Environment variables: $ENV_STR";
-        TEST_OUTPUT_PATH=$(ssh ${RUN_USER}@${IP} -p ${SSH_PORT} "$ENV_STR bash /tmp/multi_local_executor.sh");
+        # Propagate remote execution failure: command substitution masks the
+        # ssh exit code, so check it explicitly before using the output.
+        TEST_OUTPUT_PATH=$(ssh ${RUN_USER}@${IP} -p ${SSH_PORT} "$ENV_STR bash /tmp/multi_local_executor.sh") || exit $?;
         echo "TEST_OUTPUT_PATH=${TEST_OUTPUT_PATH}";
+        if [ -z "$TEST_OUTPUT_PATH" ]; then
+          echo "Empty TEST_OUTPUT_PATH from ${IP}" >&2;
+          exit 1;
+        fi
         TEST_OUTPUT_NAME=$(basename "$TEST_OUTPUT_PATH")
-        scp -P ${SSH_PORT} ${RUN_USER}@${IP}:${TEST_OUTPUT_PATH}/main_logs/process.log ${TASK_OUTPUT_DIR}/process_logs/process_${TEST_OUTPUT_NAME}.log;
-        scp -P ${SSH_PORT} ${RUN_USER}@${IP}:${TEST_OUTPUT_PATH}/normal_* ${TASK_OUTPUT_DIR}/trace_files/;
+        scp -P ${SSH_PORT} ${RUN_USER}@${IP}:${TEST_OUTPUT_PATH}/main_logs/process.log ${TASK_OUTPUT_DIR}/process_logs/process_${TEST_OUTPUT_NAME}.log || exit $?;
+        # Trace files are best-effort: missing normal_* must not fail the host.
+        scp -P ${SSH_PORT} ${RUN_USER}@${IP}:${TEST_OUTPUT_PATH}/normal_* ${TASK_OUTPUT_DIR}/trace_files/ || true;
         if [ $WORLD_RANK -eq 0 ]; then
-          scp -P ${SSH_PORT} ${RUN_USER}@${IP}:${TEST_OUTPUT_PATH}/*Result.json ${TASK_OUTPUT_DIR}/;
+          scp -P ${SSH_PORT} ${RUN_USER}@${IP}:${TEST_OUTPUT_PATH}/*Result.json ${TASK_OUTPUT_DIR}/ || exit $?;
         fi
       ) &
       PIDS+=($!)
@@ -128,7 +138,8 @@ multi_clean_script() {
     for IP in "${IP_ARRAY[@]}"
     do
       (
-        scp -P ${SSH_PORT} multi_local_executor.sh ${RUN_USER}@${IP}:/tmp/multi_local_executor.sh;
+        # Fail fast so a failed scp propagates to this host's exit code.
+        scp -P ${SSH_PORT} multi_local_executor.sh ${RUN_USER}@${IP}:/tmp/multi_local_executor.sh || exit $?;
         # Concat all environment variables
         ENV_STR=$(printenv | paste -sd " ");
         echo "Environment variables: $ENV_STR";
@@ -201,7 +212,8 @@ multi_test_script() {
     for IP in "${IP_ARRAY[@]}"
     do
       (
-        scp -P ${SSH_PORT} multi_local_executor.sh ${RUN_USER}@${IP}:/tmp/multi_local_executor.sh;
+        # Fail fast so a failed scp propagates to this host's exit code.
+        scp -P ${SSH_PORT} multi_local_executor.sh ${RUN_USER}@${IP}:/tmp/multi_local_executor.sh || exit $?;
         # Concat all environment variables
         ENV_STR=$(printenv | paste -sd " ");
         echo "Environment variables: $ENV_STR";
