@@ -596,6 +596,17 @@ async def iter_real_model_stream_infer(
         )
         is_streaming = bool(getattr(generate_config, "is_streaming", True))
         logging.debug("[DashScGrpc] [%s] generate_input: %s", tag, generate_input)
+        logging.info(
+            "[DashScGrpc] [%s] ENTRY input_ids_len=%d head=%s tail=%s "
+            "model_name=%s is_streaming=%s phase2_enabled=%s",
+            tag,
+            len(input_ids_list),
+            input_ids_list[:8],
+            input_ids_list[-4:] if len(input_ids_list) > 8 else None,
+            getattr(request, "model_name", None),
+            is_streaming,
+            phase2_enabled,
+        )
         request_shape = list(request.inputs[0].shape) if request.inputs else None
         chunk_idx = 0
         phase2_needed = False

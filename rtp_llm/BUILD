@@ -2,8 +2,7 @@ package(default_visibility = ["//visibility:public"])
 load("@rules_python//python:packaging.bzl", "py_package", "py_wheel")
 # make different torch for different device when in compiling
 load("//bazel:defs.bzl", "upload_pkg", "copy_target_to", "upload_wheel", "rename_wheel", "rename_wheel_aarch64")
-load("//bazel:arch_select.bzl", "requirement", "whl_deps", "internal_deps", "jit_deps", "triton_deps")
-load("//open_source/bazel:arch_select.bzl", "platform_deps")
+load("@arch_config//:arch_select.bzl", "requirement", "whl_deps", "internal_deps", "jit_deps", "triton_deps", "platform_deps")
 load("//bazel:bundle.bzl", "bundle_files", "bundle_tar")
 
 load("@release_version//:defs.bzl", "RELEASE_VERSION")
@@ -63,13 +62,13 @@ xft_dep = select({
 arch_dep = select({
     "@//:using_arm": [],
     "@//:using_cuda12_arm": [],
-    "//conditions:default": [":decord"],
+    "//conditions:default": [":decord", ":av"],
 })
 
 arch_with_version_dep = select({
     "@//:using_arm": [],
     "@//:using_cuda12_arm": [],
-    "//conditions:default": ["decord==0.6.0"],
+    "//conditions:default": ["decord==0.6.0", "av==16.1.0"],
 })
 
 requirement([
@@ -106,6 +105,7 @@ requirement([
     "xfastertransformer_devel",
     "xfastertransformer_devel_icx",
     "decord",
+    "av",
     # add qwen agent package
     "pydantic",
     "json5",
@@ -153,7 +153,7 @@ py_library(
         ":prettytable",
         ":psutil",
         "//rtp_llm/aios/kmonitor:kmonitor_py",
-    ] + arch_dep + internal_deps()
+    ] + internal_deps()
 )
 
 py_library(
@@ -210,6 +210,31 @@ py_library(
 )
 
 py_library(
+    name = "multimodal",
+    srcs = glob([
+        "multimodal/*.py",
+        "multimodal/**/*.py",
+    ]),
+    deps = [
+        ":utils",
+        ":Pillow",
+        ":pillow-heif",
+        ":pillow-avif-plugin",
+        ":nest_asyncio",
+        ":matplotlib",
+        ":torchvision",
+        ":protobuf",
+        ":pyOpenSSL",
+    ] + select({
+        "@//:using_arm": [],
+	    "@//:using_rocm": ["pyrsmi", "amdsmi"],
+        "@//:using_cpu": [],
+        "@//:using_cuda12_arm": [],
+        "//conditions:default": ["flash_attn"]
+    }) + arch_dep,
+)
+
+py_library(
     name = "models",
     srcs = glob([
         "models/*.py",
@@ -223,46 +248,31 @@ py_library(
         ":pynvml",
         ":tiktoken",
         ":protobuf",
-        ":Pillow",
-        ":pillow-heif",
-        ":pillow-avif-plugin",
         ":torch",
-        ":torchvision",
         ":triton",
-        ":pyOpenSSL",
         ":einops",
         ":utils",
         ":ops",
         ":timm",
         ":onnx",
         #":decord",
-        ":nest_asyncio",
-        ":matplotlib",
         "//rtp_llm/model_loader:loader",
         "//rtp_llm/models_py:models",
-    ] + arch_dep + select({
-        # cuda13 lock omits deep_ep pending rebuild → only deep_gemm here.
-        "@//:using_cuda13_x86": ["deep_gemm"],
+        ":multimodal",
+    ] + select({
         "@//:using_cuda": deep,
         "//conditions:default": []
     }) + select({
-        # cuda13 lock currently only ships flash-mla (no flashinfer / tilelang /
-        # fast-hadamard yet); rebuilds for those tracked separately.
-        "@//:using_cuda13_x86": ["flash-mla"],
         "@//:using_cuda12_9_x86": flashinfer_with_cache + flashmla,
         "@//:using_cuda12_arm": flashinfer_with_cache + ["flash-mla", "fast-hadamard-transform"],
         "@//:cuda_pre_12_9": flashinfer,
         "//conditions:default": []
     }) + select({
-        # rtp_kernel built from gitlab cuda_extension main against torch 2.11+cu130.
-        "@//:using_cuda13_x86": rtp_kernel,
         "@//:using_cuda12_9_x86": rtp_kernel,
         "@//:using_cuda12_arm": rtp_kernel,
         "@//:cuda_pre_12_9": [],
         "//conditions:default": []
     }) + select({
-        # flash_attn / flash_attn_3 not yet rebuilt for torch 2.11 → cuda13 empty.
-        "@//:using_cuda13_x86": [],
         "@//:using_cuda12_9_x86": flashattn,
         "@//:using_cuda12_arm": flashattn,
         "@//:cuda_pre_12_9": [],
@@ -311,7 +321,8 @@ py_library(
         "config/**/*.py",
     ]),
     deps = [
-        "//rtp_llm/distribute:distribute"
+        "//rtp_llm/distribute:distribute",
+        ":multimodal"
     ],
     data = [":alog_config"]
 )
@@ -562,7 +573,7 @@ whl_reqs = [
     "sympy",
     "typing-extensions",
     "importlib_metadata",
-    "transformers==4.51.2",
+    "transformers==4.57.1",
     "sentencepiece==0.2.0",
     "fastapi==0.115.6",
     "grpcio-tools==1.57.0",
@@ -621,7 +632,7 @@ py_wheel(
     version = RELEASE_VERSION,
     deps = [
         ":rtp_llm_frontend_package",
-        "//deps:extension_package_frontend"
+        "@rtp_deps//:extension_package_frontend"
     ],
     requires = whl_reqs,
 )
@@ -689,7 +700,7 @@ py_wheel(
     },
     deps = [
         ":rtp_llm_package",
-        "//deps:extension_package"
+        "@rtp_deps//:extension_package"
     ],
     requires = whl_reqs,
 )
@@ -702,7 +713,7 @@ py_wheel(
     version = RELEASE_VERSION,
     deps = [
         ":rtp_llm_package",
-        "//deps:extension_package",
+        "@rtp_deps//:extension_package",
     ],
     requires = whl_reqs + [
         "kserve",
@@ -760,7 +771,7 @@ py_library(
     deps = [
         ":rtp_llm_lib",
         "//rtp_llm/test/utils:test_util",
-        "//deps:extension_lib",
+        "@rtp_deps//:extension_lib",
         ":aiohttp",
     ]
 )

@@ -41,16 +41,6 @@ class BackendStartupInterrupted(Exception):
     pass
 
 
-def _install_hot_hook_runtime(role: str) -> None:
-    try:
-        from rtp_llm.utils.hot_hook_runtime import install_if_enabled
-
-        if install_if_enabled():
-            logging.info("RTP hot hook runtime installed for %s", role)
-    except Exception as e:
-        logging.error("failed to install RTP hot hook runtime for %s: %s", role, e)
-
-
 def local_rank_start(
     global_controller: ConcurrencyController,
     py_env_configs: PyEnvConfigs,
@@ -58,7 +48,6 @@ def local_rank_start(
     pipe_writer=None,
 ):
     """Start local rank with proper signal handling for graceful shutdown"""
-    _install_hot_hook_runtime(f"backend_rank_{world_rank}")
     backend_manager = None
     logging.info(f"[PROCESS_START]Start local rank process")
     start_time = time.time()
@@ -66,6 +55,19 @@ def local_rank_start(
     defer_first_sigterm = (
         os.environ.get(DEFER_FIRST_SIGTERM_ENV) == DEFER_FIRST_SIGTERM_VALUE
     )
+    # Three flags coordinate the deferred-SIGTERM handshake. They look racy
+    # but aren't:
+    #   - deferred_sigterm_seen / deferred_sigterm_timer: written ONLY in the
+    #     signal handler. Python delivers signals between bytecodes on the
+    #     main thread, so the handler never preempts main-thread Python that
+    #     also touches these. No cross-thread reads exist.
+    #   - shutdown_pending: written by the main thread and by the Timer
+    #     thread's deferred_sigterm_timeout. Worst case is two
+    #     request_shutdown() calls; that path lands on
+    #     threading.Event.set(), which is idempotent.
+    # threading.Timer.cancel() is also a no-op once the timer has fired, so
+    # the signal-handler/Timer race is benign. A Lock around these would put
+    # blocking I/O inside the signal handler and create a real deadlock risk.
     deferred_sigterm_seen = False
     deferred_sigterm_timer = None
     shutdown_pending = False
@@ -539,7 +541,6 @@ def start_backend_server(
     py_env_configs: PyEnvConfigs,
     pipe_writer=None,
 ):
-    _install_hot_hook_runtime("backend_manager")
     logging.info(f"[PROCESS_START]Start backend server process")
     setproctitle("rtp_llm_backend_server")
     os.makedirs("logs", exist_ok=True)

@@ -209,10 +209,9 @@ class DashScProxyInferenceE2ESmokeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(last["finished"][1], b"\x01")
         self.assertIn("finish_reason", last)
         fr_out, fr_raw = last["finish_reason"]
-        # Natural finish without max_new_tokens hit -> STOP (1). LENGTH (2)
-        # would only appear if cumulative_sent_ids >= max_new_tokens, which
-        # 4 tokens vs max_new_tokens=16 won't trigger.
-        self.assertEqual(decode_finish_reason(fr_out, fr_raw), 1)
+        # Wire protocol: 0=stop (natural finish), 1=length (max_new_tokens hit),
+        # 2=not finished. 4 tokens vs max_new_tokens=16 -> stop (0).
+        self.assertEqual(decode_finish_reason(fr_out, fr_raw), 0)
 
         # ---- intermediate frames stream content ---------------------------
         first_outputs = {
@@ -222,10 +221,10 @@ class DashScProxyInferenceE2ESmokeTest(unittest.IsolatedAsyncioTestCase):
                 responses[0].infer_response.raw_output_contents,
             )
         }
-        self.assertIn("output_ids", first_outputs)
+        self.assertIn("generated_ids", first_outputs)
         first_ids = list(struct.unpack(
-            "<%di" % (len(first_outputs["output_ids"][1]) // 4),
-            first_outputs["output_ids"][1],
+            "<%di" % (len(first_outputs["generated_ids"][1]) // 4),
+            first_outputs["generated_ids"][1],
         ))
         self.assertEqual(first_ids, [100, 101])
 

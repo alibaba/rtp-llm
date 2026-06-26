@@ -21,16 +21,6 @@ from rtp_llm.utils.concurrency_controller import (
 setup_logging()
 
 
-def _install_hot_hook_runtime(role: str) -> None:
-    try:
-        from rtp_llm.utils.hot_hook_runtime import install_if_enabled
-
-        if install_if_enabled():
-            logging.info("RTP hot hook runtime installed for %s", role)
-    except Exception as e:
-        logging.error("failed to install RTP hot hook runtime for %s: %s", role, e)
-
-
 def start_dash_sc_server(
     rank_id: int,
     server_id: int,
@@ -38,7 +28,6 @@ def start_dash_sc_server(
     py_env_configs: PyEnvConfigs,
     pipe_writer=None,
 ):
-    _install_hot_hook_runtime(f"dash_sc_rank_{rank_id}_server_{server_id}")
     logging.info(
         f"[PROCESS_START]Start dash_sc server process rank_{rank_id}_server_{server_id}"
     )

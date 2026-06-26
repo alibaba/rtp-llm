@@ -7,7 +7,10 @@ import traceback
 
 import requests
 
-from rtp_llm.distribute.distributed_server import get_world_info
+from rtp_llm.distribute.distributed_server import (
+    get_dp_addrs_from_world_info,
+    get_world_info,
+)
 from rtp_llm.utils.time_util import timer_wrapper
 
 CUR_PATH = os.path.dirname(os.path.abspath(__file__))
@@ -27,16 +30,6 @@ from rtp_llm.utils.process_manager import (
 )
 
 setup_logging()
-
-
-def _install_hot_hook_runtime(role: str) -> None:
-    try:
-        from rtp_llm.utils.hot_hook_runtime import install_if_enabled
-
-        if install_if_enabled():
-            logging.info("RTP hot hook runtime installed for %s", role)
-    except Exception as e:
-        logging.error("failed to install RTP hot hook runtime for %s: %s", role, e)
 
 
 STARTUP_WARMUP_HEALTH_GATE_FILE_ENV = "RTP_LLM_STARTUP_WARMUP_HEALTH_GATE_FILE"
@@ -424,7 +417,6 @@ def _mark_startup_warmup_health_gate_ready(gate_file):
 
 
 def main():
-    _install_hot_hook_runtime("main")
     py_env_configs: PyEnvConfigs = setup_args()
     setup_and_configure_server(py_env_configs)
     start_server(py_env_configs)

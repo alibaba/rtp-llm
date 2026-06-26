@@ -14,7 +14,15 @@ from rtp_llm.ops import SpeculativeExecutionConfig, VitSeparation, get_block_cac
 from rtp_llm.server.host_service import HostService, HostServiceArgs
 from rtp_llm.server.master_client import FlexlbResponse, MasterClient
 from rtp_llm.server.misc import format_exception
-from rtp_llm.utils.base_model_datatypes import GenerateInput, GenerateOutputs
+from rtp_llm.server.request_headers import (
+    extract_correlation_request_id,
+    extract_trace_id,
+)
+from rtp_llm.utils.base_model_datatypes import (
+    GenerateInput,
+    GenerateOutputs,
+    RequestInfo,
+)
 from rtp_llm.utils.time_util import Timer
 
 if TYPE_CHECKING:
@@ -35,6 +43,7 @@ class BackendRPCServerVisitor:
         vit_separation: Optional[VitSeparation] = None,  # Optional VitSeparation
         server_config=None,
         master_config=None,
+        source_role: str = "frontend",
     ) -> None:
         """Initialize BackendRPCServerVisitor.
 
@@ -48,11 +57,14 @@ class BackendRPCServerVisitor:
             vit_separation: Optional VitSeparation for multimodal models
             server_config: Optional ServerConfig for master configuration
             master_config: Optional MasterConfig for master client configuration
+            source_role: Caller role used for request-info correlation fields.
         """
         self.max_seq_len = max_seq_len
         self.seq_size_per_block = seq_size_per_block
         self.pd_sep_config = pd_sep_config
         self.sp_config = sp_config
+        self.source_role = source_role
+        self.source_ip = str(getattr(server_config, "ip", "") or "")
         assert self.max_seq_len > 0
 
         # Get max_rpc_timeout_ms and decode_entrance from pd_sep_config
@@ -302,6 +314,68 @@ class BackendRPCServerVisitor:
                 "speculative decoding does not support return_all_probs",
             )
 
+    def fill_request_info(self, input: GenerateInput) -> None:
+        if getattr(input, "request_info", None) is None:
+            input.request_info = RequestInfo()
+
+        request_info = input.request_info
+        if not request_info.source_role:
+            request_info.source_role = self.source_role
+
+        source_role = (request_info.source_role or self.source_role).lower()
+        if source_role == "dash":
+            if not request_info.dash_ip:
+                request_info.dash_ip = self.source_ip
+        elif not request_info.frontend_ip:
+            request_info.frontend_ip = self.source_ip
+
+        trace_id = str(
+            getattr(input.generate_config, "trace_id", "")
+            or extract_trace_id(getattr(input, "headers", None))
+            or ""
+        )
+        if not request_info.trace_id:
+            request_info.trace_id = trace_id
+        if not getattr(input.generate_config, "trace_id", "") and request_info.trace_id:
+            input.generate_config.trace_id = request_info.trace_id
+
+        if not request_info.request_id:
+            request_info.request_id = (
+                extract_correlation_request_id(getattr(input, "headers", None))
+                or request_info.trace_id
+                or str(input.request_id)
+            )
+
+        input_ids = getattr(input, "input_ids", None)
+        ids_preview = None
+        ids_len = None
+        if input_ids is not None:
+            try:
+                flat = (
+                    input_ids.tolist()
+                    if hasattr(input_ids, "tolist")
+                    else list(input_ids)
+                )
+                if flat and isinstance(flat[0], list):
+                    flat = flat[0]
+                ids_len = len(flat)
+                ids_preview = flat[:8]
+            except Exception:
+                ids_preview = "<unprintable>"
+        logging.info(
+            "[REQUEST_INFO] backend visitor self.source_role=%s "
+            "request_info.source_role=%s dash_ip=%s frontend_ip=%s "
+            "trace_id=%s request_id=%s input_ids_len=%s input_ids_head=%s",
+            self.source_role,
+            request_info.source_role,
+            request_info.dash_ip,
+            request_info.frontend_ip,
+            request_info.trace_id,
+            request_info.request_id,
+            ids_len,
+            ids_preview,
+        )
+
     def _validate_input(self, input: GenerateInput) -> None:
         if input.prompt_length <= 0:
             raise FtRuntimeException(
@@ -319,21 +393,59 @@ class BackendRPCServerVisitor:
                 f"request length is {input.prompt_length}, max_new_tokens is {max_new_tokens}",
             )
 
+    @staticmethod
+    def _set_aux_info_on_exception(
+        input: GenerateInput, e: BaseException
+    ) -> None:
+        if getattr(e, "aux_info", None):
+            return
+        aux_info = {
+            "input_len": input.prompt_length,
+            "output_len": 0,
+            "step_output_len": 0,
+            "reuse_len": 0,
+        }
+        role_addrs = input.generate_config.role_addrs or []
+        if role_addrs:
+            aux_info["role_addrs"] = [
+                role_addr.model_dump(mode="json") for role_addr in role_addrs
+            ]
+            roles = {
+                str(getattr(role_addr.role, "name", role_addr.role))
+                for role_addr in role_addrs
+            }
+            aux_info["pd_sep"] = {"PREFILL", "DECODE"}.issubset(roles)
+        e.aux_info = aux_info
+
     @torch.inference_mode()
     async def enqueue(
         self, input: GenerateInput
     ) -> AsyncGenerator[GenerateOutputs, None]:
-        self._validate_input(input)
-        self.check_sp_supported(input)
+        try:
+            self.fill_request_info(input)
+            self._validate_input(input)
+            self.check_sp_supported(input)
 
-        if self.host_service.service_available:
-            await self.route_ips(input)
+            if self.host_service.service_available:
+                await self.route_ips(input)
+        except BaseException as e:
+            self._set_aux_info_on_exception(input, e)
+            raise
 
-        return self.model_rpc_client.enqueue(input)
+        async def stream_with_aux_info():
+            try:
+                async for output in self.model_rpc_client.enqueue(input):
+                    yield output
+            except BaseException as e:
+                self._set_aux_info_on_exception(input, e)
+                raise
+
+        return stream_with_aux_info()
 
     @torch.inference_mode()
     async def batch_enqueue(self, inputs: list[GenerateInput]) -> list[GenerateOutputs]:
         for input in inputs:
+            self.fill_request_info(input)
             self._validate_input(input)
             self.check_sp_supported(input)
 
@@ -359,6 +471,7 @@ class BackendRPCServerVisitor:
 def create_backend_rpc_server_visitor(
     py_env_configs: "PyEnvConfigs",
     model_config,
+    source_role: str = "frontend",
 ) -> "BackendRPCServerVisitor":
     """Build a `BackendRPCServerVisitor` from `PyEnvConfigs` + a lightweight `ModelConfig`.
 
@@ -397,4 +510,5 @@ def create_backend_rpc_server_visitor(
         vit_separation=vit_separation,
         server_config=py_env_configs.server_config,
         master_config=py_env_configs.master_config,
+        source_role=source_role,
     )

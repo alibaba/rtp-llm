@@ -22,6 +22,7 @@ from typing import Any, Dict, List, Optional, Tuple, Type, Union
 
 from smoke.cache_status_comparer import CacheStatusComparer
 from smoke.classifier_comparer import ClassifierComparer
+from smoke.dash_grpc_comparer import DASH_ENDPOINT, DashGrpcComparer
 from smoke.common_def import QueryStatus, SmokeException, Tracer
 from smoke.gpu_diagnostics import (
     ExceptionType,
@@ -204,6 +205,8 @@ class CaseRunner(object):
 
     @staticmethod
     def _get_comparer_cls(q_r: Dict[str, Any], request_endpoint: str) -> Type:
+        if request_endpoint == DASH_ENDPOINT:
+            return DashGrpcComparer
         if q_r.get("tau2_bench", False):
             return Tau2BenchComparer
         if "messages" in q_r["query"]:
@@ -317,6 +320,10 @@ class CaseRunner(object):
         for q_idx, q_r in enumerate(qr_array):
             q_r["_taskinfo_rel_path"] = task_info.taskinfo_rel_path
             q_r["_query_idx"] = q_idx
+            # DashGrpcComparer needs to load a tokenizer client-side; the HTTP
+            # comparers never see these fields so this is a no-op for them.
+            q_r["_model_path"] = task_info.tokenizer_path or task_info.model_path
+            q_r["_model_type"] = task_info.model_type
             tracer = Tracer()
             request_endpoint = self._resolve_endpoint(q_r, task_endpoint)
             try:

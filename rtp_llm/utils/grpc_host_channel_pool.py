@@ -47,12 +47,41 @@ class GrpcHostChannelPool:
         except Exception as e:
             logging.warning("Failed to cleanup GrpcHostChannelPool in __del__: %s", e)
 
+    async def close(self):
+        cleanup_task = None
+        to_close: List[GrpcHostChannel] = []
+        try:
+            async with self._lock:
+                if self._stopped:
+                    return
+                self._stopped = True
+                cleanup_task = self._cleanup_task
+                self._cleanup_task = None
+                to_close = list(self._channels.values()) + list(self._closed_channels)
+                self._channels.clear()
+                self._closed_channels.clear()
+
+            if cleanup_task:
+                cleanup_task.cancel()
+                try:
+                    await cleanup_task
+                except asyncio.CancelledError:
+                    pass
+                except Exception as e:
+                    logging.warning("Failed to stop grpc channel cleanup task: %s", e)
+
+            await self._close_entries(to_close)
+        except Exception as e:
+            logging.warning("Failed to close GrpcHostChannelPool: %s", e)
+
     async def get(self, target: str) -> aio.Channel:
         """
         Get or create a channel for `target`.
         """
         # Ensure cleanup task is started (with lock to prevent race condition)
         async with self._lock:
+            if self._stopped:
+                raise RuntimeError(f"GrpcHostChannelPool is closed, target={target}")
             if self._cleanup_task is None and not self._stopped:
                 loop = asyncio.get_running_loop()
                 self._cleanup_task = loop.create_task(self._cleanup_loop())
@@ -133,10 +162,18 @@ class GrpcHostChannelPool:
             # Log error but don't re-raise to prevent cleanup loop from stopping
             logging.error(f"Error in _cleanup_closed: {e}", exc_info=True)
 
+        await self._close_entries(to_close)
+
+    async def _close_entries(self, entries: List[GrpcHostChannel]):
         # Close outside lock
         closed_count = 0
         failed_count = 0
-        for entry in to_close:
+        seen = set()
+        for entry in entries:
+            entry_id = id(entry)
+            if entry_id in seen:
+                continue
+            seen.add(entry_id)
             try:
                 await asyncio.wait_for(entry.channel.close(), timeout=2.0)
                 closed_count += 1
@@ -148,7 +185,7 @@ class GrpcHostChannelPool:
                 failed_count += 1
                 logging.warning(f"Error closing channel for {entry.host}: {e}")
 
-        if to_close:
+        if entries:
             logging.info(
                 f"Channel cleanup completed: {closed_count} channels closed successfully, {failed_count} failed"
             )
