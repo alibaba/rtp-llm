@@ -52,9 +52,9 @@ _USE_V2_CP_PREFILL = os.environ.get("M3_MSA_USE_V2_CP_PREFILL", "1") != "0"
 # Fused CP paged write removes the unpack tensors plus mha_kv_write_cache
 # for cold/sharded v2 prefill. Set to 0 to fall back to the two-kernel path.
 _USE_FUSED_CP_PAGED_WRITE = os.environ.get("M3_MSA_FUSED_CP_PAGED_WRITE", "1") != "0"
-# Opt-in direct-paged sparse decode. If any layout precondition is not met,
-# forward keeps the original scratch-backed decode path.
-_USE_PAGED_DECODE = os.environ.get("M3_MSA_PAGED_DECODE", "0") == "1"
+# Default-on direct-paged sparse decode. Set M3_MSA_PAGED_DECODE=0 to
+# fall back to the original scratch-backed decode path.
+_USE_PAGED_DECODE = os.environ.get("M3_MSA_PAGED_DECODE", "1") == "1"
 
 import torch.nn as nn
 import torch.nn.functional as F
@@ -283,6 +283,195 @@ def _fused_split_rope_pack(
 
 
 @triton.jit
+def _fused_qk_norm_rope_split_decode_kernel(
+    qkv_ptr,  # [T, QKV_DIM] bf16, contiguous
+    q_weight_ptr,  # [HEAD_DIM]
+    k_weight_ptr,  # [HEAD_DIM]
+    cos_sin_ptr,  # [max_pos, rotary_dim]
+    pos_ids_ptr,  # [T]
+    q_ptr,  # [T, NUM_Q_HEADS, HEAD_DIM]
+    k_ptr,  # [T, NUM_KV_HEADS, HEAD_DIM]
+    qkv_row_stride,
+    cos_sin_row_stride,
+    HEAD_DIM: tl.constexpr,
+    ROTARY_DIM: tl.constexpr,
+    HALF_ROT: tl.constexpr,
+    NUM_Q_HEADS: tl.constexpr,
+    NUM_KV_HEADS: tl.constexpr,
+    EPS: tl.constexpr,
+    BLOCK_HEAD: tl.constexpr,
+    BLOCK_HALF: tl.constexpr,
+    REM: tl.constexpr,
+    BLOCK_REM: tl.constexpr,
+):
+    token = tl.program_id(0).to(tl.int64)
+    group = tl.program_id(1)
+    is_q = group < NUM_Q_HEADS
+    k_head = group - NUM_Q_HEADS
+
+    qkv_row = token * qkv_row_stride
+    src_base = qkv_row + group * HEAD_DIM
+    q_out_base = token * NUM_Q_HEADS * HEAD_DIM + group * HEAD_DIM
+    k_out_base = token * NUM_KV_HEADS * HEAD_DIM + k_head * HEAD_DIM
+
+    head_off = tl.arange(0, BLOCK_HEAD)
+    head_mask = head_off < HEAD_DIM
+    x = tl.load(qkv_ptr + src_base + head_off, mask=head_mask, other=0.0).to(tl.float32)
+    q_w = tl.load(q_weight_ptr + head_off, mask=head_mask, other=0.0).to(tl.float32)
+    k_w = tl.load(k_weight_ptr + head_off, mask=head_mask, other=0.0).to(tl.float32)
+    w = tl.where(is_q, q_w, k_w)
+    var = tl.sum(x * x) / HEAD_DIM
+    rrms = tl.rsqrt(var + EPS)
+
+    pos = tl.load(pos_ids_ptr + token).to(tl.int64)
+    rot_off = tl.arange(0, BLOCK_HALF)
+    rot_mask = rot_off < HALF_ROT
+    cos = tl.load(
+        cos_sin_ptr + pos * cos_sin_row_stride + rot_off,
+        mask=rot_mask,
+        other=0.0,
+    ).to(tl.float32)
+    sin = tl.load(
+        cos_sin_ptr + pos * cos_sin_row_stride + HALF_ROT + rot_off,
+        mask=rot_mask,
+        other=0.0,
+    ).to(tl.float32)
+
+    first = tl.load(qkv_ptr + src_base + rot_off, mask=rot_mask, other=0.0).to(
+        tl.float32
+    )
+    second = tl.load(
+        qkv_ptr + src_base + HALF_ROT + rot_off,
+        mask=rot_mask,
+        other=0.0,
+    ).to(tl.float32)
+    q_w_first = tl.load(q_weight_ptr + rot_off, mask=rot_mask, other=0.0).to(tl.float32)
+    q_w_second = tl.load(
+        q_weight_ptr + HALF_ROT + rot_off,
+        mask=rot_mask,
+        other=0.0,
+    ).to(tl.float32)
+    k_w_first = tl.load(k_weight_ptr + rot_off, mask=rot_mask, other=0.0).to(tl.float32)
+    k_w_second = tl.load(
+        k_weight_ptr + HALF_ROT + rot_off,
+        mask=rot_mask,
+        other=0.0,
+    ).to(tl.float32)
+    w_first = tl.where(is_q, q_w_first, k_w_first)
+    w_second = tl.where(is_q, q_w_second, k_w_second)
+    # Match the original path: flashinfer.rmsnorm materializes BF16 q/k before
+    # flashinfer RoPE reads them. Keeping FP32 normalized values here changes
+    # q/k by up to one BF16 bucket after rotation.
+    first = (first * rrms * w_first).to(tl.bfloat16).to(tl.float32)
+    second = (second * rrms * w_second).to(tl.bfloat16).to(tl.float32)
+    rot_first = first * cos - second * sin
+    rot_second = second * cos + first * sin
+
+    tl.store(
+        q_ptr + q_out_base + rot_off,
+        rot_first.to(q_ptr.dtype.element_ty),
+        mask=rot_mask & is_q,
+    )
+    tl.store(
+        q_ptr + q_out_base + HALF_ROT + rot_off,
+        rot_second.to(q_ptr.dtype.element_ty),
+        mask=rot_mask & is_q,
+    )
+    tl.store(
+        k_ptr + k_out_base + rot_off,
+        rot_first.to(k_ptr.dtype.element_ty),
+        mask=rot_mask & (~is_q),
+    )
+    tl.store(
+        k_ptr + k_out_base + HALF_ROT + rot_off,
+        rot_second.to(k_ptr.dtype.element_ty),
+        mask=rot_mask & (~is_q),
+    )
+
+    rem_off = tl.arange(0, BLOCK_REM)
+    rem_mask = rem_off < REM
+    if REM > 0:
+        q_w_rem = tl.load(
+            q_weight_ptr + ROTARY_DIM + rem_off,
+            mask=rem_mask,
+            other=0.0,
+        ).to(tl.float32)
+        k_w_rem = tl.load(
+            k_weight_ptr + ROTARY_DIM + rem_off,
+            mask=rem_mask,
+            other=0.0,
+        ).to(tl.float32)
+        rem = (
+            tl.load(
+                qkv_ptr + src_base + ROTARY_DIM + rem_off,
+                mask=rem_mask,
+                other=0.0,
+            ).to(tl.float32)
+            * rrms
+            * tl.where(is_q, q_w_rem, k_w_rem)
+        )
+        tl.store(
+            q_ptr + q_out_base + ROTARY_DIM + rem_off,
+            rem.to(q_ptr.dtype.element_ty),
+            mask=rem_mask & is_q,
+        )
+        tl.store(
+            k_ptr + k_out_base + ROTARY_DIM + rem_off,
+            rem.to(k_ptr.dtype.element_ty),
+            mask=rem_mask & (~is_q),
+        )
+
+
+def _fused_qk_norm_rope_split_decode(
+    qkv: torch.Tensor,
+    q_weight: torch.Tensor,
+    k_weight: torch.Tensor,
+    cos_sin_cache: torch.Tensor,
+    pos_ids: torch.Tensor,
+    q: torch.Tensor,
+    k: torch.Tensor,
+    head_dim: int,
+    rotary_dim: int,
+    num_q_heads: int,
+    num_kv_heads: int,
+    eps: float,
+) -> None:
+    """Fused QK RMSNorm + Q/K split + NeoX RoPE for paged decode."""
+    T = qkv.shape[0]
+    if T == 0:
+        return
+    half_rot = rotary_dim // 2
+    rem = head_dim - rotary_dim
+    block_head = triton.next_power_of_2(head_dim)
+    block_half = triton.next_power_of_2(half_rot)
+    block_rem = max(triton.next_power_of_2(rem), 1) if rem > 0 else 1
+    if pos_ids.dtype != torch.int32:
+        pos_ids = pos_ids.to(torch.int32)
+
+    _fused_qk_norm_rope_split_decode_kernel[(T, num_q_heads + num_kv_heads)](
+        qkv,
+        q_weight,
+        k_weight,
+        cos_sin_cache,
+        pos_ids,
+        q,
+        k,
+        qkv.stride(0),
+        cos_sin_cache.stride(0),
+        HEAD_DIM=head_dim,
+        ROTARY_DIM=rotary_dim,
+        HALF_ROT=half_rot,
+        NUM_Q_HEADS=num_q_heads,
+        NUM_KV_HEADS=num_kv_heads,
+        EPS=eps,
+        BLOCK_HEAD=block_head,
+        BLOCK_HALF=block_half,
+        REM=rem,
+        BLOCK_REM=block_rem,
+    )
+
+
+@triton.jit
 def _fused_unpack_packed_cp_kernel(
     packed_ptr,
     unpad_ptr,
@@ -305,12 +494,24 @@ def _fused_unpack_packed_cp_kernel(
     for o in range(0, NK, BLK):
         off = o + tl.arange(0, BLK)
         m = off < NK
-        tl.store(k_ptr + t * NK + off, tl.load(packed_ptr + base + off, mask=m, other=0), mask=m)
-        tl.store(v_ptr + t * NK + off, tl.load(packed_ptr + base + NK + off, mask=m, other=0), mask=m)
+        tl.store(
+            k_ptr + t * NK + off,
+            tl.load(packed_ptr + base + off, mask=m, other=0),
+            mask=m,
+        )
+        tl.store(
+            v_ptr + t * NK + off,
+            tl.load(packed_ptr + base + NK + off, mask=m, other=0),
+            mask=m,
+        )
     for o in range(0, NI, BLK):
         off = o + tl.arange(0, BLK)
         m = off < NI
-        tl.store(idx_ptr + t * NI + off, tl.load(packed_ptr + base + 2 * NK + off, mask=m, other=0), mask=m)
+        tl.store(
+            idx_ptr + t * NI + off,
+            tl.load(packed_ptr + base + 2 * NK + off, mask=m, other=0),
+            mask=m,
+        )
 
 
 def _fused_unpack_packed_cp(
@@ -1803,15 +2004,25 @@ class MSAAttention(nn.Module):
         # reshape(x3) + fancy-index(x3) copy chain (~2x faster, bit-identical).
         full_T = int(unpad_indices.numel())
         full_k = torch.empty(
-            full_T, self.kv_head_num, self.head_dim, dtype=all_packed.dtype, device=device
+            full_T,
+            self.kv_head_num,
+            self.head_dim,
+            dtype=all_packed.dtype,
+            device=device,
         )
         full_v = torch.empty(
-            full_T, self.kv_head_num, self.head_dim, dtype=all_packed.dtype, device=device
+            full_T,
+            self.kv_head_num,
+            self.head_dim,
+            dtype=all_packed.dtype,
+            device=device,
         )
         full_idx_k = torch.empty(
             full_T, 1, self.idx_head_dim, dtype=all_packed.dtype, device=device
         )
-        _fused_unpack_packed_cp(all_packed, unpad_indices, full_k, full_v, full_idx_k, nk, ni, full_T)
+        _fused_unpack_packed_cp(
+            all_packed, unpad_indices, full_k, full_v, full_idx_k, nk, ni, full_T
+        )
 
         full_input_lengths_cpu = cp_info.prefill_actual_input_lengths_cpu.to(
             torch.int64
@@ -2117,14 +2328,23 @@ class MSAAttention(nn.Module):
             )
 
             index_score_plan = build_index_score_plan(
-                cu_seqlens, seq_lens_i32, prefix_i32,
-                self.num_idx_heads, 1, self.block_size,
+                cu_seqlens,
+                seq_lens_i32,
+                prefix_i32,
+                self.num_idx_heads,
+                1,
+                self.block_size,
             )
             # step3 sparse-attention plan (fmha): GQA num_q_heads/num_kv_heads,
             # kv_block_num=topk. Same per-forward reuse as index_score_plan.
             sparse_attn_plan = build_sparse_attn_plan(
-                cu_seqlens, seq_lens_i32, prefix_i32,
-                self.head_num, self.kv_head_num, self.block_size, self.topk_blocks,
+                cu_seqlens,
+                seq_lens_i32,
+                prefix_i32,
+                self.head_num,
+                self.kv_head_num,
+                self.block_size,
+                self.topk_blocks,
             )
 
             MSAAttention._cp_shared_meta = {
@@ -2399,12 +2619,38 @@ class MSAAttention(nn.Module):
             qkv = self.qkv_proj(x_fp8, input_scales=x_scale)
         else:
             qkv = self.qkv_proj(hidden_states)
-        if self.qk_fuse_norm is not None:
-            qkv = self.qk_fuse_norm(qkv)
-        q, k, v = torch.split(qkv, [self.q_size, self.kv_size, self.kv_size], dim=-1)
-        q = q.reshape(total_tokens, self.head_num, self.head_dim)
-        k = k.reshape(total_tokens, self.kv_head_num, self.head_dim)
-        v = v.reshape(total_tokens, self.kv_head_num, self.head_dim)
+        can_fuse_qk = (
+            self.qk_fuse_norm is not None
+            and self.cos_sin_cache is not None
+            and not self._rope_interleave
+        )
+        if can_fuse_qk:
+            q = torch.empty(
+                total_tokens,
+                self.head_num,
+                self.head_dim,
+                dtype=qkv.dtype,
+                device=device,
+            )
+            k = torch.empty(
+                total_tokens,
+                self.kv_head_num,
+                self.head_dim,
+                dtype=qkv.dtype,
+                device=device,
+            )
+            v = qkv[:, self.q_size + self.kv_size :].reshape(
+                total_tokens, self.kv_head_num, self.head_dim
+            )
+        else:
+            if self.qk_fuse_norm is not None:
+                qkv = self.qk_fuse_norm(qkv)
+            q, k, v = torch.split(
+                qkv, [self.q_size, self.kv_size, self.kv_size], dim=-1
+            )
+            q = q.reshape(total_tokens, self.head_num, self.head_dim)
+            k = k.reshape(total_tokens, self.kv_head_num, self.head_dim)
+            v = v.reshape(total_tokens, self.kv_head_num, self.head_dim)
 
         idx_q = F.linear(hidden_states, self.idx_q_w)
         idx_k = F.linear(hidden_states, self.idx_k_w)
@@ -2417,9 +2663,25 @@ class MSAAttention(nn.Module):
             attn_inputs, device
         )
 
-        q = q.contiguous()
-        k = k.contiguous()
-        self._apply_rope(q, k, positions)
+        if can_fuse_qk:
+            _fused_qk_norm_rope_split_decode(
+                qkv,
+                self.qk_fuse_norm.q_weight,
+                self.qk_fuse_norm.k_weight,
+                self.cos_sin_cache,
+                positions,
+                q,
+                k,
+                self.head_dim,
+                self.rotary_dim,
+                self.head_num,
+                self.kv_head_num,
+                self.qk_fuse_norm.eps,
+            )
+        else:
+            q = q.contiguous()
+            k = k.contiguous()
+            self._apply_rope(q, k, positions)
         idx_q = idx_q.contiguous()
         idx_k = idx_k.contiguous()
         self._apply_rope(idx_q, idx_k, positions)

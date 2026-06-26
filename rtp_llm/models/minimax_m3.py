@@ -607,6 +607,11 @@ class MiniMaxM3(DeepSeekV2):
         config.has_pre_decoder_layernorm = False
         config.has_post_decoder_layernorm = True
         config.norm_type = "rmsnorm"
+        # MiniMax-M3 checkpoints store lm_head in BF16. Keeping the framework
+        # default would upcast it to FP32 at load time and dispatch a slow FP32
+        # SIMT full-vocab GEMM in decode; keep the checkpoint half precision so
+        # PyWrappedModel uses the BF16 tensor-core lm_head path.
+        config.enable_fp32_lm_head = False
 
         cls._from_hf(config, ckpt_path)
         assert (
