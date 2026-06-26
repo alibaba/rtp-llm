@@ -86,6 +86,9 @@ protected:
     std::mutex                      lock_;
     std::condition_variable         cond_;
     kmonitor::MetricsReporterPtr    metrics_reporter_ = nullptr;
+    int64_t                         last_admitted_context_batch_size_ = 0;
+    int64_t                         last_admitted_context_token_size_ = 0;
+    int64_t                         last_waiting_oldest_age_us_       = 0;
 
     std::vector<EngineScheduleInfo::TaskInfo> waiting_task_list_;
     std::vector<EngineScheduleInfo::TaskInfo> running_task_list_;

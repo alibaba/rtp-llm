@@ -166,6 +166,8 @@ void PrefillGenerateContext::reportTime() {
     collector.multimodal_process_rt_us       = stat_info.multimodal_process_rt_us;
     collector.enqueue_request_rt_us          = stat_info.enqueue_request_rt_us;
     collector.remote_load_cache_start_rt_us  = stat_info.remote_load_cache_start_rt_us;
+    collector.remote_load_cache_wait_stream_rt_us = stat_info.remote_load_cache_wait_stream_rt_us;
+    collector.remote_load_cache_write_request_rt_us = stat_info.remote_load_cache_write_request_rt_us;
     collector.poll_local_output_rt_us        = stat_info.poll_local_output_rt_us;
     collector.remote_load_cache_end_rt_us    = stat_info.remote_load_cache_end_rt_us;
     collector.remote_generate_rt_us          = stat_info.remote_generate_rt_us;

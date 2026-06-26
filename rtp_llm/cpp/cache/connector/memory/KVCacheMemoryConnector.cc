@@ -1502,12 +1502,41 @@ bool KVCacheMemoryConnector::startCopyAsync(const std::shared_ptr<MemoryAsyncCon
     if (stop_.load()) {
         return false;
     }
-    auto task_copy_plan = copy_plan;
-    auto code           = wait_done_thread_pool_->pushTask([this, context, task_copy_plan]() mutable {
+    auto   task_copy_plan = copy_plan;
+    auto   enqueue_time_us = currentTimeUs();
+    auto   direction       = copy_plan->direction;
+    size_t copy_item_num   = copy_plan->copy_infos.size();
+    size_t disk_item_num   = 0;
+    for (const auto& copy_info : copy_plan->copy_infos) {
+        if (copy_info.backing_type == CacheBackingType::DISK || copy_info.src_backing_type == CacheBackingType::DISK
+            || copy_info.disk_slot >= 0 || copy_info.src_disk_slot >= 0) {
+            ++disk_item_num;
+        }
+    }
+    auto code = wait_done_thread_pool_->pushTask([this,
+                                                  context,
+                                                  task_copy_plan,
+                                                  enqueue_time_us,
+                                                  direction,
+                                                  copy_item_num,
+                                                  disk_item_num]() mutable {
+        const auto task_start_us = currentTimeUs();
+        const auto send_start_us = currentTimeUs();
         auto send_result = sendCopyPlan(task_copy_plan);
+        const auto send_done_us = currentTimeUs();
         context->setBroadcastResult(send_result);
         task_copy_plan.reset();
+        const auto wait_start_us = currentTimeUs();
         context->waitDone();
+        const auto wait_done_us = currentTimeUs();
+        reportCopyTaskMetrics(context->success(),
+                              wait_done_us - task_start_us,
+                              task_start_us - enqueue_time_us,
+                              send_done_us - send_start_us,
+                              wait_done_us - wait_start_us,
+                              static_cast<int64_t>(copy_item_num),
+                              static_cast<int64_t>(disk_item_num),
+                              direction);
     });
     if (code != autil::ThreadPoolBase::ERROR_NONE) {
         RTP_LLM_LOG_WARNING("start copy plan async failed, push send+wait task failed, code=%d", code);
@@ -3259,6 +3288,32 @@ void KVCacheMemoryConnector::reportCopyMetrics(bool success, int64_t latency_us,
     collector.from_gpu   = direction == CopyDirection::D2H;
 
     metrics_reporter_->report<RtpLLMMemoryCacheMetrics, RtpLLMMemoryCacheCopyMetricsCollector>(nullptr, &collector);
+}
+
+void KVCacheMemoryConnector::reportCopyTaskMetrics(bool          success,
+                                                   int64_t       latency_us,
+                                                   int64_t       queue_wait_us,
+                                                   int64_t       broadcast_setup_us,
+                                                   int64_t       wait_done_us,
+                                                   int64_t       copy_item_num,
+                                                   int64_t       disk_item_num,
+                                                   CopyDirection direction) {
+    if (!metrics_reporter_) {
+        return;
+    }
+
+    RtpLLMMemoryCacheCopyTaskMetricsCollector collector;
+    collector.failed             = !success;
+    collector.latency_us         = latency_us;
+    collector.queue_wait_us      = queue_wait_us;
+    collector.broadcast_setup_us = broadcast_setup_us;
+    collector.wait_done_us       = wait_done_us;
+    collector.copy_item_num      = copy_item_num;
+    collector.disk_item_num      = disk_item_num;
+    collector.from_gpu           = direction == CopyDirection::D2H;
+
+    metrics_reporter_->report<RtpLLMMemoryCacheMetrics, RtpLLMMemoryCacheCopyTaskMetricsCollector>(nullptr,
+                                                                                                   &collector);
 }
 
 void KVCacheMemoryConnector::reportDiskMatchMetrics(bool    success,

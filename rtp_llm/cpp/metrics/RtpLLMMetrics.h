@@ -37,6 +37,8 @@ public:
     int64_t remote_allocate_resource_rt_us = 0;
     int64_t enqueue_request_rt_us          = 0;
     int64_t remote_load_cache_start_rt_us  = 0;
+    int64_t remote_load_cache_wait_stream_rt_us = 0;
+    int64_t remote_load_cache_write_request_rt_us = 0;
     int64_t poll_local_output_rt_us        = 0;
     int64_t remote_load_cache_end_rt_us    = 0;
     int64_t remote_generate_rt_us          = 0;
@@ -82,6 +84,8 @@ public:
     kmonitor::MutableMetric* remote_allocate_resource_rt_us_metric = nullptr;
     kmonitor::MutableMetric* enqueue_request_rt_us_metric          = nullptr;
     kmonitor::MutableMetric* remote_load_cache_start_rt_us_metric  = nullptr;
+    kmonitor::MutableMetric* remote_load_cache_wait_stream_rt_us_metric = nullptr;
+    kmonitor::MutableMetric* remote_load_cache_write_request_rt_us_metric = nullptr;
     kmonitor::MutableMetric* poll_local_output_rt_us_metric        = nullptr;
     kmonitor::MutableMetric* remote_load_cache_end_rt_us_metric    = nullptr;
     kmonitor::MutableMetric* remote_generate_rt_us_metric          = nullptr;
@@ -196,9 +200,14 @@ public:
     int64_t total_latency_us       = 0;
     int64_t first_token_latency_us = 0;
     int64_t wait_latency_us        = 0;
+    int64_t enqueue_to_canrun_us   = 0;
+    int64_t canrun_to_running_us   = 0;
+    int64_t loading_cache_latency_us = 0;
+    int64_t load_done_to_running_us  = 0;
     int64_t pause_latency_us       = 0;
     int64_t iterate_count          = 0;
     int64_t reuse_length           = 0;
+    int64_t effective_context_length = 0;
     int64_t input_token_length     = 0;
     int64_t output_token_length    = 0;
     // for timeout
@@ -226,9 +235,14 @@ public:
     kmonitor::MutableMetric* total_latency_us_metric       = nullptr;
     kmonitor::MutableMetric* first_token_latency_us_metric = nullptr;
     kmonitor::MutableMetric* wait_latency_us_metric        = nullptr;
+    kmonitor::MutableMetric* enqueue_to_canrun_us_metric   = nullptr;
+    kmonitor::MutableMetric* canrun_to_running_us_metric   = nullptr;
+    kmonitor::MutableMetric* loading_cache_latency_us_metric = nullptr;
+    kmonitor::MutableMetric* load_done_to_running_us_metric  = nullptr;
     kmonitor::MutableMetric* pause_latency_us_metric       = nullptr;
     kmonitor::MutableMetric* iterate_count_metric          = nullptr;
     kmonitor::MutableMetric* reuse_length_metric           = nullptr;
+    kmonitor::MutableMetric* effective_context_length_metric = nullptr;
     kmonitor::MutableMetric* input_token_length_metric     = nullptr;
     kmonitor::MutableMetric* output_token_length_metric    = nullptr;
     kmonitor::MutableMetric* query_batch_size_metric       = nullptr;
@@ -292,6 +306,9 @@ public:
     int64_t running_stream_size        = 0;
     int64_t remote_running_stream_size = 0;
     int64_t loading_cache_stream_size  = 0;
+    int64_t admitted_context_batch_size = 0;
+    int64_t admitted_context_token_size = 0;
+    int64_t waiting_oldest_age_us       = 0;
 };
 
 class RtpLLMSchedulerMetrics: public kmonitor::MetricsGroup {
@@ -304,6 +321,9 @@ public:
     kmonitor::MutableMetric* running_stream_size_metric        = nullptr;
     kmonitor::MutableMetric* remote_running_stream_size_metric = nullptr;
     kmonitor::MutableMetric* loading_cache_stream_size_metric  = nullptr;
+    kmonitor::MutableMetric* admitted_context_batch_size_metric = nullptr;
+    kmonitor::MutableMetric* admitted_context_token_size_metric = nullptr;
+    kmonitor::MutableMetric* waiting_oldest_age_us_metric       = nullptr;
 
 private:
     AUTIL_LOG_DECLARE();
@@ -1219,6 +1239,18 @@ public:
     bool    from_gpu   = false;
 };
 
+class RtpLLMMemoryCacheCopyTaskMetricsCollector final {
+public:
+    bool    failed             = false;
+    int64_t latency_us         = 0;
+    int64_t queue_wait_us      = 0;
+    int64_t broadcast_setup_us = 0;
+    int64_t wait_done_us       = 0;
+    int64_t copy_item_num      = 0;
+    int64_t disk_item_num      = 0;
+    bool    from_gpu           = false;
+};
+
 class RtpLLMMemoryCacheStatusMetricsCollector final {
 public:
     int64_t total_block_num     = 0;
@@ -1234,6 +1266,7 @@ public:
     void report(const kmonitor::MetricsTags* tags, RtpLLMMemoryCacheReadMetricsCollector* collector);
     void report(const kmonitor::MetricsTags* tags, RtpLLMMemoryCacheWriteMetricsCollector* collector);
     void report(const kmonitor::MetricsTags* tags, RtpLLMMemoryCacheCopyMetricsCollector* collector);
+    void report(const kmonitor::MetricsTags* tags, RtpLLMMemoryCacheCopyTaskMetricsCollector* collector);
     void report(const kmonitor::MetricsTags* tags, RtpLLMMemoryCacheStatusMetricsCollector* collector);
 
 public:
@@ -1261,6 +1294,15 @@ public:
     kmonitor::MutableMetric* kv_cache_memory_cache_copy_qps_metric        = nullptr;
     kmonitor::MutableMetric* kv_cache_memory_cache_copy_failed_qps_metric = nullptr;
     kmonitor::MutableMetric* kv_cache_memory_cache_copy_latency_metric    = nullptr;
+
+    kmonitor::MutableMetric* kv_cache_memory_cache_copy_task_qps_metric             = nullptr;
+    kmonitor::MutableMetric* kv_cache_memory_cache_copy_task_failed_qps_metric      = nullptr;
+    kmonitor::MutableMetric* kv_cache_memory_cache_copy_task_latency_metric         = nullptr;
+    kmonitor::MutableMetric* kv_cache_memory_cache_copy_task_queue_wait_metric      = nullptr;
+    kmonitor::MutableMetric* kv_cache_memory_cache_copy_task_broadcast_setup_metric = nullptr;
+    kmonitor::MutableMetric* kv_cache_memory_cache_copy_task_wait_done_metric       = nullptr;
+    kmonitor::MutableMetric* kv_cache_memory_cache_copy_task_item_num_metric        = nullptr;
+    kmonitor::MutableMetric* kv_cache_memory_cache_copy_task_disk_item_num_metric   = nullptr;
 
     kmonitor::MutableMetric* kv_cache_memory_cache_status_total_block_num_metric     = nullptr;
     kmonitor::MutableMetric* kv_cache_memory_cache_status_allocated_block_num_metric = nullptr;
