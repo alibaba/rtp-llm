@@ -598,7 +598,10 @@ std::string PDSepConfig::to_string() const {
         << "decode_entrance: " << decode_entrance << "\n"
         << "batch_dispatch_timeout_ms: " << batch_dispatch_timeout_ms << "\n"
         << "batch_prepare_timeout_ms: " << batch_prepare_timeout_ms << "\n"
-        << "batch_load_timeout_ms: " << batch_load_timeout_ms;
+        << "batch_load_timeout_ms: " << batch_load_timeout_ms << "\n"
+        << "prefill_enqueue_pool_size: " << prefill_enqueue_pool_size << "\n"
+        << "prefill_worker_lambda_pool_size: " << prefill_worker_lambda_pool_size << "\n"
+        << "prefill_slot_pool_size: " << prefill_slot_pool_size;
     return oss.str();
 }
 

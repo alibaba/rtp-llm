@@ -345,7 +345,7 @@ public class FlexlbConfig {
      * Maximum queue depth per WorkerBatcher. Requests beyond this limit are
      * rejected with QUEUE_FULL.
      */
-    private int flexlbBatchQueueMaxSize = 64;
+    private int flexlbBatchQueueMaxSize = 1024;
 
     /**
      * Maximum total in-flight requests across all batchers. Acts as a global

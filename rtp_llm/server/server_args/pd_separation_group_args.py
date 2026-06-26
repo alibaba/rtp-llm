@@ -81,6 +81,33 @@ def init_pd_separation_group_args(parser, pd_separation_config):
     )
 
     pd_separation_group.add_argument(
+        "--prefill_enqueue_pool_size",
+        env_name="PREFILL_ENQUEUE_POOL_SIZE",
+        bind_to=(pd_separation_config, "prefill_enqueue_pool_size"),
+        type=int,
+        default=0,
+        help="Prefill L1 enqueue 线程池大小，0 表示使用公式默认值",
+    )
+
+    pd_separation_group.add_argument(
+        "--prefill_worker_lambda_pool_size",
+        env_name="PREFILL_WORKER_LAMBDA_POOL_SIZE",
+        bind_to=(pd_separation_config, "prefill_worker_lambda_pool_size"),
+        type=int,
+        default=0,
+        help="Prefill worker lambda 线程池大小，0 表示使用公式默认值",
+    )
+
+    pd_separation_group.add_argument(
+        "--prefill_slot_pool_size",
+        env_name="PREFILL_SLOT_POOL_SIZE",
+        bind_to=(pd_separation_config, "prefill_slot_pool_size"),
+        type=int,
+        default=0,
+        help="Prefill slot 线程池大小，0 表示使用公式默认值",
+    )
+
+    pd_separation_group.add_argument(
         "--decode_retry_times",
         env_name="DECODE_RETRY_TIMES",
         bind_to=(pd_separation_config, "decode_retry_times"),

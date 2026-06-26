@@ -1719,6 +1719,9 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("batch_dispatch_timeout_ms", &PDSepConfig::batch_dispatch_timeout_ms)
         .def_readwrite("batch_prepare_timeout_ms", &PDSepConfig::batch_prepare_timeout_ms)
         .def_readwrite("batch_load_timeout_ms", &PDSepConfig::batch_load_timeout_ms)
+        .def_readwrite("prefill_enqueue_pool_size", &PDSepConfig::prefill_enqueue_pool_size)
+        .def_readwrite("prefill_worker_lambda_pool_size", &PDSepConfig::prefill_worker_lambda_pool_size)
+        .def_readwrite("prefill_slot_pool_size", &PDSepConfig::prefill_slot_pool_size)
         .def("to_string", &PDSepConfig::to_string)
         .def(py::pickle(
             [](const PDSepConfig& self) {
@@ -1744,10 +1747,13 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.decode_entrance,
                                       self.batch_dispatch_timeout_ms,
                                       self.batch_prepare_timeout_ms,
-                                      self.batch_load_timeout_ms);
+                                      self.batch_load_timeout_ms,
+                                      self.prefill_enqueue_pool_size,
+                                      self.prefill_worker_lambda_pool_size,
+                                      self.prefill_slot_pool_size);
             },
             [](py::tuple t) {
-                if (t.size() < 23)
+                if (t.size() < 26)
                     throw std::runtime_error("Invalid state!");
                 PDSepConfig c;
                 try {
@@ -1774,6 +1780,9 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     c.batch_dispatch_timeout_ms       = t[20].cast<int64_t>();
                     c.batch_prepare_timeout_ms        = t[21].cast<int64_t>();
                     c.batch_load_timeout_ms           = t[22].cast<int64_t>();
+                    c.prefill_enqueue_pool_size       = t[23].cast<int64_t>();
+                    c.prefill_worker_lambda_pool_size = t[24].cast<int64_t>();
+                    c.prefill_slot_pool_size          = t[25].cast<int64_t>();
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("PDSepConfig unpickle error: ") + e.what());
                 }

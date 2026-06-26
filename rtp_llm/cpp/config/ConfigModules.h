@@ -438,6 +438,14 @@ struct PDSepConfig {
     int64_t  batch_prepare_timeout_ms        = 10000;  // 10s, prepareAllocateResource
     int64_t  batch_load_timeout_ms           = 10000;  // 10s, remoteLoadCacheStart
 
+    // ========== Prefill Thread Pool Configuration ==========
+    // enqueue pool size (L1 DP dispatch, fast ms-level). 0 = use formula default.
+    int64_t prefill_enqueue_pool_size = 0;
+    // worker lambda pool size (heavy EnqueueGroup coordination, I/O-bound). 0 = use formula default.
+    int64_t prefill_worker_lambda_pool_size = 0;
+    // slot pool size (L2 Prepare + L3 Load + L4 Finish). 0 = use formula default.
+    int64_t prefill_slot_pool_size = 0;
+
     std::string to_string() const;
 };
 

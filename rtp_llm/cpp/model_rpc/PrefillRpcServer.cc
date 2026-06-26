@@ -799,13 +799,16 @@ grpc::Status PrefillRpcServer::init(const EngineInitParams&                     
 void PrefillRpcServer::initThreadPools() {
     const auto& parallelism_config = maga_init_params_.parallelism_config;
     const auto& scheduler_config   = maga_init_params_.runtime_config.fifo_scheduler_config;
+    const auto& pd_sep_config      = maga_init_params_.pd_sep_config;
     const int   dp_size            = std::max(1, static_cast<int>(parallelism_config.dp_size));
     const int   max_context_batch  = std::max(1, static_cast<int>(scheduler_config.max_context_batch_size));
 
     // enqueue pool: L1 DP dispatch only (fast, ms-level, must never block)
-    // Pool size: max(4, dp_size × (dp_size ≤ 4 ? 4 : 2))
-    const int enqueue_threads = std::max(4, dp_size * (dp_size <= 4 ? 4 : 2));
-    const int enqueue_queue   = dp_size * 10;
+    // Configurable via pd_sep_config.prefill_enqueue_pool_size (0 = use formula default)
+    const int enqueue_threads = pd_sep_config.prefill_enqueue_pool_size > 0 ?
+                                    static_cast<int>(pd_sep_config.prefill_enqueue_pool_size) :
+                                    std::max(4, dp_size * (dp_size <= 4 ? 4 : 2));
+    const int enqueue_queue   = enqueue_threads * 2;
 
     enqueue_worker_pool_ =
         std::make_shared<autil::LockFreeThreadPool>(enqueue_threads, enqueue_queue, nullptr, "PrefillEnqueuePool");
@@ -813,8 +816,10 @@ void PrefillRpcServer::initThreadPools() {
     RTP_LLM_LOG_INFO("PrefillRpcServer enqueue pool started: threads=%d queue=%d", enqueue_threads, enqueue_queue);
 
     // worker lambda pool: heavy EnqueueGroup coordination (I/O-bound, ~12s per batch)
-    // Pool size: max(4, dp_size × max_context_batch × 4)
-    const int worker_lambda_threads = std::max(4, dp_size * max_context_batch * 4);
+    // Configurable via pd_sep_config.prefill_worker_lambda_pool_size (0 = use formula default)
+    const int worker_lambda_threads = pd_sep_config.prefill_worker_lambda_pool_size > 0 ?
+                                          static_cast<int>(pd_sep_config.prefill_worker_lambda_pool_size) :
+                                          std::max(4, dp_size * max_context_batch * 4);
     const int worker_lambda_queue   = worker_lambda_threads * 4;
 
     worker_lambda_pool_ = std::make_shared<autil::LockFreeThreadPool>(
@@ -828,8 +833,10 @@ void PrefillRpcServer::initThreadPools() {
         max_context_batch);
 
     // slot pool: L2 Prepare + L3 Load + L4 Finish
-    // Pool size: max(16, min(max_context_batch_size × 16, 128))
-    const int slot_threads = std::max(16, std::min(max_context_batch * 16, 128));
+    // Configurable via pd_sep_config.prefill_slot_pool_size (0 = use formula default)
+    const int slot_threads = pd_sep_config.prefill_slot_pool_size > 0 ?
+                                 static_cast<int>(pd_sep_config.prefill_slot_pool_size) :
+                                 std::max(16, std::min(max_context_batch * 16, 128));
     const int slot_queue   = slot_threads * 8;
 
     slot_worker_pool_ =
