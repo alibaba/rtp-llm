@@ -135,18 +135,21 @@ public:
         mha_spec->seq_size_per_block = 8;
         mha_spec->dtype              = rtp_llm::DataType::TYPE_FP16;
         mha_spec->type               = KVCacheSpecType::MultiHeadAttention;
-        cache_config_.block_num      = 8;
-        byte_size_per_block_           = static_cast<size_t>(mha_spec->block_size_bytes() * layer_num_);
-        cache_config_.block_size_bytes = byte_size_per_block_;
-        cache_config_.dtype            = rtp_llm::DataType::TYPE_FP16;
-        cache_config_.layer_num        = layer_num_;
-        cache_config_.layer_all_num    = layer_num_;
+        byte_size_per_block_         = static_cast<size_t>(mha_spec->block_size_bytes() * layer_num_);
+        cache_config_.dtype          = rtp_llm::DataType::TYPE_FP16;
+        cache_config_.layer_num      = layer_num_;
+        cache_config_.layer_all_num  = layer_num_;
         std::vector<int> layers(layer_num_);
         std::iota(layers.begin(), layers.end(), 0);
         cache_config_.fromGroupedSpecs({mha_spec, mha_spec, mha_spec},
                                        {layers, layers, layers},
                                        {CacheGroupType::FULL, CacheGroupType::LINEAR, CacheGroupType::LINEAR},
                                        {"F0", "L1", "L2"});
+        cache_config_.setGroupBlockLayout({8, 8, 8},
+                                          {mha_spec->block_size_bytes(),
+                                           mha_spec->block_size_bytes(),
+                                           mha_spec->block_size_bytes()},
+                                          {0, 0, 0});
     }
 
     void TearDown() override {}

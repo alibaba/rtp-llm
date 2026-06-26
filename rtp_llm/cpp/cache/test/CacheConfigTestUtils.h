@@ -270,7 +270,6 @@ inline CacheConfig makeSimpleMhaCacheConfig(int               layer_num,
     config.dtype                     = dtype;
     config.layer_num                 = static_cast<uint32_t>(layer_num);
     config.layer_all_num             = static_cast<uint32_t>(layer_num);
-    config.block_num                 = static_cast<uint32_t>(block_num);
     config.seq_size_per_block        = tokens_per_block;
     config.kernel_seq_size_per_block = tokens_per_block;
 
@@ -286,22 +285,14 @@ inline CacheConfig makeSimpleMhaCacheConfig(int               layer_num,
     }
     config.fromGroupedSpecs({spec}, {layer_ids}, {CacheGroupType::FULL}, {"default"});
 
-    config.kv_block_stride_bytes = spec->block_size_bytes();
-    config.kv_block_size_bytes   = static_cast<size_t>(layer_num) * spec->block_size_bytes();
-
+    size_t kv_scale_stride_bytes = 0;
     if (dtype == rtp_llm::TYPE_INT8 || dtype == rtp_llm::TYPE_FP8_E4M3) {
         const size_t kv_scale_kv_stride       = static_cast<size_t>(spec->local_head_num_kv) * tokens_per_block;
         const size_t kv_scale_kv_stride_bytes = kv_scale_kv_stride * sizeof(float);
-        config.kv_scale_stride_bytes          = 2 * kv_scale_kv_stride_bytes;
-        config.kv_scale_size_bytes            = static_cast<size_t>(layer_num) * config.kv_scale_stride_bytes;
+        kv_scale_stride_bytes                 = 2 * kv_scale_kv_stride_bytes;
     }
 
-    config.block_size_bytes = config.kv_block_size_bytes + config.kv_scale_size_bytes;
-
-    // Per-layer block stride (kv + scale).
-    const size_t per_layer_stride_bytes = config.kv_block_stride_bytes + config.kv_scale_stride_bytes;
-    config.layer_to_block_stride_bytes.assign(static_cast<size_t>(config.layer_all_num),
-                                              static_cast<int>(per_layer_stride_bytes));
+    config.setGroupBlockLayout({static_cast<uint32_t>(block_num)}, {spec->block_size_bytes()}, {kv_scale_stride_bytes});
 
     return config;
 }
@@ -325,20 +316,20 @@ inline CacheConfig makeSimpleHybridMhaCacheConfig(int               layer_num,
     config.dtype              = dtype;
     config.layer_num          = static_cast<uint32_t>(layer_num);
     config.layer_all_num      = static_cast<uint32_t>(layer_num);
-    config.block_num          = static_cast<uint32_t>(block_num);
     config.seq_size_per_block = tokens_per_block;
-    config.group_layer_num    = std::max(group_layer_num, 1);
     config.linear_step        = 2;
+    const int physical_group_layer_num = std::max(group_layer_num, 1);
 
     // If the split is not even or cannot form >=2 groups, fall back to a single-group MHA config (keeps config valid).
     // Tests that need `groupNums()>1` should pass `layer_num % group_layer_num == 0` and
     // `layer_num/group_layer_num>=2`.
-    if (layer_num <= 0 || (layer_num % config.group_layer_num) != 0 || (layer_num / config.group_layer_num) < 2) {
+    if (layer_num <= 0 || (layer_num % physical_group_layer_num) != 0
+        || (layer_num / physical_group_layer_num) < 2) {
         return makeSimpleMhaCacheConfig(
             layer_num, block_num, tokens_per_block, dtype, local_head_num_kv, size_per_head);
     }
 
-    const int group_cnt     = layer_num / config.group_layer_num;
+    const int group_cnt     = layer_num / physical_group_layer_num;
 
     // Specs.
     auto linear_spec                = std::make_shared<LinearKVCacheSpec>();
@@ -371,9 +362,9 @@ inline CacheConfig makeSimpleHybridMhaCacheConfig(int               layer_num,
     // Build groups: gid=0 linear, gid>=1 full.
     for (int gid = 0; gid < group_cnt; ++gid) {
         std::vector<int> group_layers;
-        group_layers.reserve(static_cast<size_t>(config.group_layer_num));
-        for (int local = 0; local < config.group_layer_num; ++local) {
-            const int layer_id = gid * config.group_layer_num + local;
+        group_layers.reserve(static_cast<size_t>(physical_group_layer_num));
+        for (int local = 0; local < physical_group_layer_num; ++local) {
+            const int layer_id = gid * physical_group_layer_num + local;
             group_layers.push_back(layer_id);
         }
         layers_by_group.push_back(group_layers);
@@ -389,17 +380,12 @@ inline CacheConfig makeSimpleHybridMhaCacheConfig(int               layer_num,
     }
     config.fromGroupedSpecs(specs, layers_by_group, types, tags);
 
-    // Physical sizes for hybrid memory layout: one group (group_layer_num) worth of layers.
-    config.kv_block_stride_bytes = std::max(full_spec->block_size_bytes(), linear_spec->block_size_bytes());
-    config.kv_block_size_bytes   = static_cast<size_t>(config.group_layer_num) * config.kv_block_stride_bytes;
-    config.kv_scale_stride_bytes = full_spec->scale_block_size_bytes();
-    config.kv_scale_size_bytes   = static_cast<size_t>(config.group_layer_num) * config.kv_scale_stride_bytes;
-    config.block_size_bytes      = config.kv_block_size_bytes + config.kv_scale_size_bytes;
-
-    // Per-layer block stride (kv + scale).
-    const size_t per_layer_stride_bytes = config.kv_block_stride_bytes + config.kv_scale_stride_bytes;
-    config.layer_to_block_stride_bytes.assign(static_cast<size_t>(config.layer_all_num),
-                                              static_cast<int>(per_layer_stride_bytes));
+    // Physical sizes for hybrid memory layout: one group worth of layers.
+    const size_t kv_block_stride_bytes = std::max(full_spec->block_size_bytes(), linear_spec->block_size_bytes());
+    const size_t kv_scale_stride_bytes = full_spec->scale_block_size_bytes();
+    config.setGroupBlockLayout(std::vector<uint32_t>(static_cast<size_t>(group_cnt), static_cast<uint32_t>(block_num)),
+                               std::vector<size_t>(static_cast<size_t>(group_cnt), kv_block_stride_bytes),
+                               std::vector<size_t>(static_cast<size_t>(group_cnt), kv_scale_stride_bytes));
     return config;
 }
 

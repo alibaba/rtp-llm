@@ -77,7 +77,6 @@ CacheConfig SingleConfigCreator::createSingleConfig(const ModelConfig&       mod
     CacheConfig config;
     config.layer_num          = static_cast<uint32_t>(layer_num);
     config.layer_all_num      = static_cast<uint32_t>(layer_num);
-    config.block_num          = 0;
     config.seq_size_per_block        = physical_tokens_per_block;
     config.kernel_seq_size_per_block = kernel_tokens_per_block;
 
@@ -104,26 +103,17 @@ CacheConfig SingleConfigCreator::createSingleConfig(const ModelConfig&       mod
     RTP_LLM_CHECK_WITH_INFO(config.groupNums() == 1, "single config expected one cache group");
 
     // Using spec interface for block size and scale
-    config.kv_block_stride_bytes = spec->block_size_bytes();
-    config.kv_block_size_bytes   = static_cast<size_t>(config.layer_num) * config.kv_block_stride_bytes;
+    size_t kv_block_stride_bytes = spec->block_size_bytes();
 
     // Scale handling - no need to check dtype as scale_block_size_bytes() returns 0 if no scale support
-    config.kv_scale_stride_bytes = spec->scale_block_size_bytes();
-    config.kv_scale_size_bytes   = static_cast<size_t>(config.layer_num) * config.kv_scale_stride_bytes;
+    size_t kv_scale_stride_bytes = spec->scale_block_size_bytes();
 
     if (config.is_sparse) {
-        auto indexer_dim             = model_config.attn_config.indexer_head_dim;
-        config.kv_scale_stride_bytes = (indexer_dim + indexer_dim / 128 * 4) * spec->seq_size_per_block;
-        config.kv_scale_size_bytes   = static_cast<size_t>(config.layer_num) * config.kv_scale_stride_bytes;
+        auto indexer_dim        = model_config.attn_config.indexer_head_dim;
+        kv_scale_stride_bytes   = (indexer_dim + indexer_dim / 128 * 4) * spec->seq_size_per_block;
     }
 
-    config.block_size_bytes = config.kv_block_size_bytes + config.kv_scale_size_bytes;
-    config.group_layer_num  = layer_num;  // only 1 group for SingleConfig
-
-    // Per-layer block stride (kv + scale).
-    const size_t per_layer_stride_bytes = config.kv_block_stride_bytes + config.kv_scale_stride_bytes;
-    config.layer_to_block_stride_bytes.assign(static_cast<size_t>(config.layer_all_num),
-                                              static_cast<int>(per_layer_stride_bytes));
+    config.setGroupBlockLayout({0}, {kv_block_stride_bytes}, {kv_scale_stride_bytes});
 
     return config;
 }

@@ -53,6 +53,7 @@ ModelConfig makeDsv4ProModelConfig() {
     mc.attn_config.o_groups         = 16;
     mc.attn_config.o_lora_rank      = 1024;
     mc.attn_config.kv_cache_dtype   = KvCacheDataType::FP8;
+    mc.hybrid_attention_config.enable_independent_kv_cache_pools = true;
 
     std::vector<int> ratios;
     ratios.push_back(128);
@@ -80,6 +81,7 @@ ModelConfig makeDsv4FlashModelConfig() {
     mc.attn_config.o_groups         = 8;
     mc.attn_config.o_lora_rank      = 1024;
     mc.attn_config.kv_cache_dtype   = KvCacheDataType::FP8;
+    mc.hybrid_attention_config.enable_independent_kv_cache_pools = true;
 
     std::vector<int> ratios = {0, 0};
     for (int i = 2; i < mc.num_layers; ++i) {
@@ -97,7 +99,8 @@ CacheConfig makeRealDsv4TypedMemoryCopyConfig(bool use_flash) {
     kv_config.seq_size_per_block        = 128;
     kv_config.kernel_seq_size_per_block = 128;
     auto config                         = CacheConfigCreator::createBasicConfig(mc, pc, kv_config, false, 0);
-    config.block_num                    = 512;
+    RuntimeConfig runtime_config;
+    config.finalizeBlockNums(/*global_block_num=*/512, runtime_config);
     return config;
 }
 
@@ -106,7 +109,6 @@ CacheConfig makeTinyTypedHybridPoolConfig() {
     config.dtype                       = rtp_llm::DataType::TYPE_FP16;
     config.layer_num                   = 2;
     config.layer_all_num               = 2;
-    config.block_num                   = 16;
     config.seq_size_per_block          = 4;
     config.kernel_seq_size_per_block   = 4;
     config.use_independent_block_pools = true;
@@ -128,20 +130,12 @@ CacheConfig makeTinyTypedHybridPoolConfig() {
                             {CacheGroupType::FULL, CacheGroupType::FULL},
                             {"csa_kv", "swa_kv"});
     config.setGroupSeqSizesPerBlock({config.seq_size_per_block, config.seq_size_per_block});
-    const std::vector<uint32_t> group_block_nums = {config.block_num, config.block_num};
+    constexpr uint32_t          block_num        = 16;
+    const std::vector<uint32_t> group_block_nums = {block_num, block_num};
     const std::vector<size_t> group_kv_block_stride_bytes = {csa_spec->block_size_bytes(), swa_spec->block_size_bytes()};
     const std::vector<size_t> group_kv_scale_stride_bytes = {csa_spec->scale_block_size_bytes(),
                                                              swa_spec->scale_block_size_bytes()};
     config.setGroupBlockLayout(group_block_nums, group_kv_block_stride_bytes, group_kv_scale_stride_bytes);
-    config.kv_block_stride_bytes       = swa_spec->block_size_bytes();
-    config.kv_scale_stride_bytes       = 0;
-    config.kv_block_size_bytes         = static_cast<size_t>(config.layer_all_num) * config.kv_block_stride_bytes;
-    config.kv_scale_size_bytes         = 0;
-    config.block_size_bytes            = config.kv_block_size_bytes;
-
-    const size_t csa_stride = csa_spec->block_size_bytes() + csa_spec->scale_block_size_bytes();
-    const size_t swa_stride = swa_spec->block_size_bytes() + swa_spec->scale_block_size_bytes();
-    config.layer_to_block_stride_bytes.assign(config.layer_all_num, static_cast<int>(csa_stride + swa_stride));
     return config;
 }
 
@@ -150,7 +144,6 @@ CacheConfig makeCompactDsv4TypedMemoryCopyConfig(bool use_flash) {
     config.dtype                       = rtp_llm::DataType::TYPE_UINT8;
     config.layer_num                   = use_flash ? 43 : 61;
     config.layer_all_num               = config.layer_num;
-    config.block_num                   = 512;
     config.seq_size_per_block          = 256;
     config.kernel_seq_size_per_block   = 256;
     config.use_independent_block_pools = true;
@@ -181,9 +174,9 @@ CacheConfig makeCompactDsv4TypedMemoryCopyConfig(bool use_flash) {
     }
     const std::vector<size_t> group_kv_block_stride_bytes = {64, 16, 32, 48, 80, 40, 96};
     const std::vector<size_t> group_kv_scale_stride_bytes(kDsv4PoolNum, 0);
-    const std::vector<uint32_t> group_block_nums(kDsv4PoolNum, config.block_num);
+    constexpr uint32_t          block_num = 512;
+    const std::vector<uint32_t> group_block_nums(kDsv4PoolNum, block_num);
     std::vector<std::vector<int>> layers_by_group(kDsv4PoolNum);
-    config.layer_to_block_stride_bytes = std::vector<int>(config.layer_all_num, 0);
 
     auto make_spec = [&](size_t gid) -> KVCacheSpecPtr {
         if (group_types[gid] == CacheGroupType::FULL) {
@@ -266,9 +259,7 @@ void setGroupStridesForConfig(CacheConfig& config,
                               const std::vector<size_t>& kv_block_stride_bytes,
                               const std::vector<size_t>& kv_scale_stride_bytes) {
     std::vector<uint32_t> block_nums = config.groupBlockNumsSnapshot();
-    if (block_nums.empty()) {
-        block_nums.assign(static_cast<size_t>(config.groupNums()), config.block_num);
-    }
+    RTP_LLM_CHECK_WITH_INFO(!block_nums.empty(), "setGroupStridesForConfig requires initialized group block layout");
     config.setGroupBlockLayout(block_nums, kv_block_stride_bytes, kv_scale_stride_bytes);
 }
 
@@ -354,8 +345,10 @@ public:
                     continue;
                 }
                 const bool host_group = host_groups_.count(gid) > 0;
-                auto       tensor = torch::empty({static_cast<int64_t>(config.block_num), static_cast<int64_t>(stride)},
-                                           host_group ? host_options : cuda_options);
+                auto       tensor = torch::empty(
+                    {static_cast<int64_t>(config.blockNumForGroup(static_cast<size_t>(gid))),
+                     static_cast<int64_t>(stride)},
+                    host_group ? host_options : cuda_options);
                 if (host_group) {
                     tensor = tensor.pin_memory();
                 }
@@ -391,7 +384,7 @@ public:
         const auto tensor_it = tensors_.find(k);
         const auto stride_it = strides_.find(k);
         if (tensor_it == tensors_.end() || stride_it == strides_.end() || block_id < 0
-            || static_cast<uint32_t>(block_id) >= config_.block_num) {
+            || static_cast<uint32_t>(block_id) >= config_.blockNumForGroup(static_cast<size_t>(group_id))) {
             return {};
         }
         const auto& tensor       = tensor_it->second;
@@ -558,7 +551,7 @@ void runDsv4TypedStagedCopyRoundTrip(const std::set<int>& host_groups) {
             gpu_block = next_gpu_block++;
         }
     }
-    ASSERT_LT(next_gpu_block, static_cast<BlockIdxType>(config.block_num));
+    ASSERT_LT(next_gpu_block, static_cast<BlockIdxType>(config.pagedBlockNum()));
     ASSERT_EQ(gpu_block_sets.size(), request_mem_blocks.size());
     for (size_t block_idx = 0; block_idx < request_mem_blocks.size(); ++block_idx) {
         auto* item = req.add_copy_items();

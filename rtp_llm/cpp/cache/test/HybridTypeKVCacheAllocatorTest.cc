@@ -25,11 +25,9 @@ static CacheConfig makeTinyHybridConfig() {
     config.dtype                     = rtp_llm::DataType::TYPE_FP16;
     config.layer_num                 = 4;
     config.layer_all_num             = 4;
-    config.block_num                 = 10;
     config.seq_size_per_block        = 4;
     config.kernel_seq_size_per_block = 2;
     config.linear_step               = 2;
-    config.group_layer_num           = 2;
 
     // Linear spec (small but valid).
     auto linear_spec                = std::make_shared<LinearKVCacheSpec>();
@@ -58,14 +56,11 @@ static CacheConfig makeTinyHybridConfig() {
                             {"linear", "full"});
 
     // Physical block strides: take max between full and linear.
-    config.kv_block_stride_bytes = std::max(full_spec->block_size_bytes(), linear_spec->block_size_bytes());
-    config.kv_block_size_bytes   = static_cast<size_t>(config.group_layer_num) * config.kv_block_stride_bytes;
-
-    // No kv scale for fp16.
-    config.kv_scale_stride_bytes = 0;
-    config.kv_scale_size_bytes   = 0;
-
-    config.block_size_bytes = config.kv_block_size_bytes + config.kv_scale_size_bytes;
+    const uint32_t block_num             = 10;
+    const size_t   kv_block_stride_bytes = std::max(full_spec->block_size_bytes(), linear_spec->block_size_bytes());
+    config.setGroupBlockLayout({block_num, block_num},
+                               {kv_block_stride_bytes, kv_block_stride_bytes},
+                               {0, 0});
 
     return config;
 }
@@ -100,6 +95,8 @@ static CacheConfig makeTinyHybridMtpConfigByCreateSpConfig() {
     score_model_cfg.linear_attention_config.linear_num_value_heads = 2;
     setHybridAttentionKvCacheSpecs(score_model_cfg);
     setDefaultKvCacheSpec(propose_model_cfg);
+    propose_model_cfg.kv_cache_spec_descs[0][0].tag = "full";
+    propose_model_cfg.hybrid_attention_config.enable_independent_kv_cache_pools = true;
 
     ParallelismConfig parallelism_cfg;
     parallelism_cfg.tp_size = 1;
@@ -214,8 +211,8 @@ TEST_F(HybridTypeKVCacheAllocatorTest, InitAndAddressLookupSmoke) {
     ASSERT_TRUE(allocator->init());
 
     EXPECT_EQ(allocator->seqSizePerBlock(), 4);
-    EXPECT_EQ(allocator->totalBlocksNum(), config.block_num - 1);
-    EXPECT_EQ(allocator->freeBlocksNum(), config.block_num - 1);
+    EXPECT_EQ(allocator->totalBlocksNum(), config.pagedBlockNum() - 1);
+    EXPECT_EQ(allocator->freeBlocksNum(), config.pagedBlockNum() - 1);
 
     // Should be able to fetch address for any global layer and non-zero block id.
     auto addr0 = allocator->convertIndexToAddr(/*layer_id=*/0, /*block_id=*/1);
@@ -565,7 +562,9 @@ TEST_F(HybridTypeKVCacheAllocatorTest, ConvertIndexToBufferAndAllLayerCacheBaseS
 
 TEST_F(HybridTypeKVCacheAllocatorTest, IncrMallocRollbackFreesPartiallyAllocatedBlocks) {
     auto config      = makeTinyHybridConfig();
-    config.block_num = 6;  // free=5
+    config.setGroupBlockLayout({6, 6},
+                               config.groupKvBlockStrideBytesSnapshot(),
+                               config.groupKvScaleStrideBytesSnapshot());  // free=5
     auto allocator   = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
     allocator->setSharedBlockCache(std::make_shared<SharedBlockCache>());
     ASSERT_TRUE(allocator->init());

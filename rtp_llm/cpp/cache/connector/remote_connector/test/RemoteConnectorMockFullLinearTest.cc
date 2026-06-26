@@ -97,7 +97,6 @@ private:
         size_t all_group_num           = other_group_ids_.size() + full_group_ids_.size();
         cache_config_.layer_num        = all_group_num * layer_num;
         cache_config_.layer_all_num    = all_group_num * layer_num;
-        cache_config_.group_layer_num  = layer_num;
         int unique_layer_id            = 0;
 
         auto full_spec                = std::make_shared<MHAKVCacheSpec>();
@@ -145,7 +144,6 @@ private:
             }
         }
 
-        cache_config_.block_num          = block_num;
         cache_config_.seq_size_per_block = seq_size_per_block;
         cache_config_.dtype              = rtp_llm::DataType::TYPE_FP16;
         cache_config_.fromGroupedSpecs(specs, layers_by_group, types, tags);
@@ -153,16 +151,10 @@ private:
         const size_t full_kv_block_stride_bytes   = full_spec->block_size_bytes();
         const size_t linear_kv_block_stride_bytes = linear_spec->block_size_bytes();
         ASSERT_GE(full_kv_block_stride_bytes, linear_kv_block_stride_bytes);
-        cache_config_.kv_block_stride_bytes = full_kv_block_stride_bytes;
-        cache_config_.kv_block_size_bytes =
-            static_cast<size_t>(cache_config_.group_layer_num) * cache_config_.kv_block_stride_bytes;
-        cache_config_.kv_scale_stride_bytes = full_spec->scale_block_size_bytes();
-        cache_config_.kv_scale_size_bytes =
-            static_cast<size_t>(cache_config_.group_layer_num) * cache_config_.kv_scale_stride_bytes;
-        cache_config_.block_size_bytes      = cache_config_.kv_block_size_bytes + cache_config_.kv_scale_size_bytes;
-        const size_t per_layer_stride_bytes = cache_config_.kv_block_stride_bytes + cache_config_.kv_scale_stride_bytes;
-        cache_config_.layer_to_block_stride_bytes.assign(static_cast<size_t>(cache_config_.layer_all_num),
-                                                         static_cast<int>(per_layer_stride_bytes));
+        std::vector<uint32_t> group_block_nums(all_group_num, static_cast<uint32_t>(block_num));
+        std::vector<size_t>   kv_block_strides(all_group_num, full_kv_block_stride_bytes);
+        std::vector<size_t>   kv_scale_strides(all_group_num, full_spec->scale_block_size_bytes());
+        cache_config_.setGroupBlockLayout(group_block_nums, kv_block_strides, kv_scale_strides);
     }
 };
 
@@ -195,7 +187,7 @@ TEST_F(RemoteConnectorMockFullLinearTest, test_async_match_and_async_read_with_g
     // read
     {
         UriStrVec                expected_uris        = genUris({1, 2, 3}, {2});
-        BlockBuffersExpect       block_buffers_expect = {5, kFakeLayerNum, cache_config_.kv_block_stride_bytes};
+        BlockBuffersExpect       block_buffers_expect = {5, kFakeLayerNum, cache_config_.kvBlockStrideBytesForGroup(0)};
         std::vector<std::string> expect_block_ids({"1", "2", "3", "13", "23"});
         EXPECT_CALL(*transfer_client_,
                     LoadKvCaches(Eq(expected_uris),
@@ -217,7 +209,7 @@ TEST_F(RemoteConnectorMockFullLinearTest, test_async_match_and_async_read_with_g
     }
     {
         UriStrVec                expected_uris        = genUris({2, 3}, {1});
-        BlockBuffersExpect       block_buffers_expect = {4, kFakeLayerNum, cache_config_.kv_block_stride_bytes};
+        BlockBuffersExpect       block_buffers_expect = {4, kFakeLayerNum, cache_config_.kvBlockStrideBytesForGroup(0)};
         std::vector<std::string> expect_block_ids({"2", "3", "13", "23"});
         EXPECT_CALL(*transfer_client_,
                     LoadKvCaches(Eq(expected_uris),
@@ -277,7 +269,7 @@ TEST_F(RemoteConnectorMockFullLinearTest, test_async_match_and_async_read_with_g
     ASSERT_EQ(match_context->matchedBlockCount(), 3);
     {
         UriStrVec                expected_uris        = genUris({2, 3}, {1});
-        BlockBuffersExpect       block_buffers_expect = {4, kFakeLayerNum, cache_config_.kv_block_stride_bytes};
+        BlockBuffersExpect       block_buffers_expect = {4, kFakeLayerNum, cache_config_.kvBlockStrideBytesForGroup(0)};
         std::vector<std::string> expect_block_ids({"2", "3", "13", "23"});
         EXPECT_CALL(*transfer_client_,
                     LoadKvCaches(Eq(expected_uris),
@@ -298,7 +290,7 @@ TEST_F(RemoteConnectorMockFullLinearTest, test_async_match_and_async_read_with_g
     }
     {
         UriStrVec                expected_uris        = genUris({3}, {0});
-        BlockBuffersExpect       block_buffers_expect = {3, kFakeLayerNum, cache_config_.kv_block_stride_bytes};
+        BlockBuffersExpect       block_buffers_expect = {3, kFakeLayerNum, cache_config_.kvBlockStrideBytesForGroup(0)};
         std::vector<std::string> expect_block_ids({"3", "13", "23"});
         EXPECT_CALL(*transfer_client_,
                     LoadKvCaches(Eq(expected_uris),
@@ -353,7 +345,7 @@ TEST_F(RemoteConnectorMockFullLinearTest, test_read_success_broadcast_success_wi
         .WillOnce(Return(MatchLocationReturnType({ClientErrorCode::ER_OK, expected_locations})));
 
     UriStrVec                expected_uris        = genUris({2, 3}, {1});
-    BlockBuffersExpect       block_buffers_expect = {4, kFakeLayerNum, cache_config_.kv_block_stride_bytes};
+    BlockBuffersExpect       block_buffers_expect = {4, kFakeLayerNum, cache_config_.kvBlockStrideBytesForGroup(0)};
     std::vector<std::string> expect_block_ids({"2", "3", "13", "23"});
     EXPECT_CALL(*transfer_client_,
                 LoadKvCaches(Eq(expected_uris),
@@ -438,7 +430,7 @@ TEST_F(RemoteConnectorMockFullLinearTest, test_write_success_broadcast_success_a
     UriStrVec expected_uris = genUris({1, 2, 3}, {0, 1, 2});
     UriStrVec actual_uris   = genUris({1, 2, 3}, {0, 1, 2}, "actual_");
 
-    BlockBuffersExpect       block_buffers_expect = {9, kFakeLayerNum, cache_config_.kv_block_stride_bytes};
+    BlockBuffersExpect       block_buffers_expect = {9, kFakeLayerNum, cache_config_.kvBlockStrideBytesForGroup(0)};
     std::vector<std::string> expect_block_ids({"1", "11", "21", "2", "12", "22", "3", "13", "23"});
     EXPECT_CALL(*transfer_client_,
                 SaveKvCaches(Eq(expected_uris),
@@ -486,7 +478,7 @@ TEST_F(RemoteConnectorMockFullLinearTest,
     UriStrVec expected_uris = genUris({2, 3}, {0, 1});
     UriStrVec actual_uris   = genUris({2, 3}, {0, 1}, "actual_");
 
-    BlockBuffersExpect       block_buffers_expect = {6, kFakeLayerNum, cache_config_.kv_block_stride_bytes};
+    BlockBuffersExpect       block_buffers_expect = {6, kFakeLayerNum, cache_config_.kvBlockStrideBytesForGroup(0)};
     std::vector<std::string> expect_block_ids({"2", "12", "22", "3", "13", "23"});
     EXPECT_CALL(*transfer_client_,
                 SaveKvCaches(Eq(expected_uris),
@@ -533,7 +525,7 @@ TEST_F(RemoteConnectorMockFullLinearTest, test_write_last_block_not_aligned) {
     UriStrVec expected_uris = genUris({2}, {0});
     UriStrVec actual_uris   = genUris({2}, {0}, "actual_");
 
-    BlockBuffersExpect       block_buffers_expect = {3, kFakeLayerNum, cache_config_.kv_block_stride_bytes};
+    BlockBuffersExpect       block_buffers_expect = {3, kFakeLayerNum, cache_config_.kvBlockStrideBytesForGroup(0)};
     std::vector<std::string> expect_block_ids({"2", "12", "22"});
     EXPECT_CALL(*transfer_client_,
                 SaveKvCaches(Eq(expected_uris),
@@ -612,7 +604,7 @@ TEST_F(RemoteConnectorMockFullLinearTest, test_write_success_broadcast_success_w
     UriStrVec expected_uris = genUris({2, 3, 4}, {1, 2});
     UriStrVec actual_uris   = genUris({2, 3, 4}, {1, 2}, "actual_");
 
-    BlockBuffersExpect       block_buffers_expect = {7, kFakeLayerNum, cache_config_.kv_block_stride_bytes};
+    BlockBuffersExpect       block_buffers_expect = {7, kFakeLayerNum, cache_config_.kvBlockStrideBytesForGroup(0)};
     std::vector<std::string> expect_block_ids({"2", "3", "13", "23", "4", "14", "24"});
     EXPECT_CALL(*transfer_client_,
                 SaveKvCaches(Eq(expected_uris),
@@ -660,7 +652,7 @@ TEST_F(RemoteConnectorMockFullLinearTest, test_write_success_broadcast_success_w
     UriStrVec expected_uris = genUris({2, 3, 4}, {});
     UriStrVec actual_uris   = genUris({2, 3, 4}, {}, "actual_");
 
-    BlockBuffersExpect       block_buffers_expect = {3, kFakeLayerNum, cache_config_.kv_block_stride_bytes};
+    BlockBuffersExpect       block_buffers_expect = {3, kFakeLayerNum, cache_config_.kvBlockStrideBytesForGroup(0)};
     std::vector<std::string> expect_block_ids({"2", "3", "4"});
     EXPECT_CALL(*transfer_client_,
                 SaveKvCaches(Eq(expected_uris),
@@ -705,7 +697,7 @@ TEST_F(RemoteConnectorMockFullLinearTest, test_write_success_broadcast_success_a
 
     UriStrVec expected_uris = genUris({1, 2, 3}, {0, 1, 2});
 
-    BlockBuffersExpect       block_buffers_expect = {9, kFakeLayerNum, cache_config_.kv_block_stride_bytes};
+    BlockBuffersExpect       block_buffers_expect = {9, kFakeLayerNum, cache_config_.kvBlockStrideBytesForGroup(0)};
     std::vector<std::string> expect_block_ids({"1", "11", "21", "2", "12", "22", "3", "13", "23"});
     EXPECT_CALL(*transfer_client_,
                 SaveKvCaches(Eq(expected_uris),
@@ -775,7 +767,7 @@ TEST_F(RemoteConnectorMockFullLinearTest, test_match_success_load_fail) {
                               ))
         .WillOnce(Return(MatchLocationReturnType({ClientErrorCode::ER_OK, expected_locations})));
     UriStrVec                expected_uris        = genUris({1, 2, 3}, {2});
-    BlockBuffersExpect       block_buffers_expect = {5, kFakeLayerNum, cache_config_.kv_block_stride_bytes};
+    BlockBuffersExpect       block_buffers_expect = {5, kFakeLayerNum, cache_config_.kvBlockStrideBytesForGroup(0)};
     std::vector<std::string> expect_block_ids({"1", "2", "3", "13", "23"});
     EXPECT_CALL(*transfer_client_,
                 LoadKvCaches(Eq(expected_uris),
@@ -915,7 +907,7 @@ TEST_F(RemoteConnectorMockFullLinearTest, test_start_write_success_broadcast_suc
         .WillOnce(Return(StartWriteReturnType({ClientErrorCode::ER_OK, write_location})));
 
     UriStrVec                expected_uris        = genUris({1, 2, 3}, {0, 1, 2});
-    BlockBuffersExpect       block_buffers_expect = {9, kFakeLayerNum, cache_config_.kv_block_stride_bytes};
+    BlockBuffersExpect       block_buffers_expect = {9, kFakeLayerNum, cache_config_.kvBlockStrideBytesForGroup(0)};
     std::vector<std::string> expect_block_ids({"1", "11", "21", "2", "12", "22", "3", "13", "23"});
     EXPECT_CALL(*transfer_client_,
                 SaveKvCaches(Eq(expected_uris),
@@ -961,7 +953,7 @@ TEST_F(RemoteConnectorMockFullLinearTest, test_start_write_success_broadcast_suc
         .WillOnce(Return(StartWriteReturnType({ClientErrorCode::ER_OK, write_location})));
 
     UriStrVec                expected_uris        = genUris({1, 2, 3}, {0, 1, 2});
-    BlockBuffersExpect       block_buffers_expect = {9, kFakeLayerNum, cache_config_.kv_block_stride_bytes};
+    BlockBuffersExpect       block_buffers_expect = {9, kFakeLayerNum, cache_config_.kvBlockStrideBytesForGroup(0)};
     std::vector<std::string> expect_block_ids({"1", "11", "21", "2", "12", "22", "3", "13", "23"});
     EXPECT_CALL(*transfer_client_,
                 SaveKvCaches(Eq(expected_uris),

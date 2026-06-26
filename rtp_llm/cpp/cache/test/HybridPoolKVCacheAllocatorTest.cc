@@ -45,11 +45,9 @@ static CacheConfig makeTinyMultiPoolHybridConfig(uint32_t       linear_block_num
     config.dtype                     = rtp_llm::DataType::TYPE_FP16;
     config.layer_num                 = 4;
     config.layer_all_num             = 4;
-    config.block_num                 = std::max(linear_block_num, full_block_num);
     config.seq_size_per_block        = 4;
     config.kernel_seq_size_per_block = 4;
     config.linear_step               = 2;
-    config.group_layer_num           = 2;
 
     auto linear_spec                = std::make_shared<LinearKVCacheSpec>();
     linear_spec->type               = KVCacheSpecType::LinearAttention;
@@ -78,13 +76,6 @@ static CacheConfig makeTinyMultiPoolHybridConfig(uint32_t       linear_block_num
     // Same tokens per block for both groups.
     config.setGroupSeqSizesPerBlock({config.seq_size_per_block, config.seq_size_per_block});
 
-    config.kv_block_stride_bytes = std::max(full_spec->block_size_bytes(), linear_spec->block_size_bytes());
-    config.kv_block_size_bytes   = static_cast<size_t>(config.group_layer_num) * config.kv_block_stride_bytes;
-    config.kv_scale_stride_bytes = 0;
-    config.kv_scale_size_bytes   = 0;
-    config.block_size_bytes      = config.kv_block_size_bytes + config.kv_scale_size_bytes;
-    config.layer_to_block_stride_bytes.assign(static_cast<size_t>(config.layer_all_num),
-                                              static_cast<int>(config.kv_block_stride_bytes));
     const auto linear_stride = linear_spec->block_size_bytes();
     const auto full_stride   = full_spec->block_size_bytes();
     config.setGroupBlockLayout({linear_block_num, full_block_num}, {linear_stride, full_stride}, {0, 0});
@@ -152,7 +143,8 @@ static CacheConfig makeDSV4HybridPoolConfig(uint32_t block_num = 200) {
     kv_cache_config.seq_size_per_block        = 128;
     kv_cache_config.kernel_seq_size_per_block = 128;
     auto config                               = CacheConfigCreator::createBasicConfig(mc, pc, kv_cache_config, false, 0);
-    config.block_num                   = block_num;
+    RuntimeConfig rt;
+    config.finalizeBlockNums(block_num, rt);
     return config;
 }
 
@@ -471,17 +463,6 @@ TEST_F(HybridPoolKVCacheAllocatorTest, TokenAggregatorsUseCPVirtualBlockSizeForF
 
     EXPECT_EQ(allocator->maxAvailableTokensNum(), 7u * 8u);
     EXPECT_EQ(allocator->availableTokensNum(), 7u * 8u);
-}
-
-TEST_F(HybridPoolKVCacheAllocatorTest, TokenAggregatorsFallBackToGlobalSeqSize) {
-    auto config = makeTinyMultiPoolHybridConfig(/*linear_block_num=*/6, /*full_block_num=*/6);
-    config.setGroupSeqSizesPerBlock({0, 0});  // fall back to config.seq_size_per_block
-    config.seq_size_per_block = 4;
-    auto allocator            = makeAllocator(config);
-    ASSERT_TRUE(allocator->init());
-
-    EXPECT_EQ(allocator->maxAvailableTokensNum(), 5u * 4u);
-    EXPECT_EQ(allocator->availableTokensNum(), 5u * 4u);
 }
 
 TEST_F(HybridPoolKVCacheAllocatorTest, RequestAndConnectorRefAggregateAcrossGroups) {
@@ -1014,7 +995,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4HCAStateReuseEnabledAllocatesTailOnly
     auto allocator     = makeAllocator(config);
     ASSERT_TRUE(allocator->init());
 
-    constexpr int hca_state_gid = 5;
+    const int hca_state_gid = config.groupIdForTag("hca_state");
     ASSERT_GT(config.groupNums(), hca_state_gid);
     ASSERT_EQ(config.tagForGroup(hca_state_gid), "hca_state");
     ASSERT_GT(allocator->groupBlockPools().size(), static_cast<size_t>(hca_state_gid));
@@ -1043,7 +1024,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4HCAStateReuseEnabledAllocatesTailOnly
 TEST_F(HybridPoolKVCacheAllocatorTest, TokenAggregatorsIgnoreSmallHCAStatePool) {
     auto config = makeDSV4HybridPoolConfig(/*block_num=*/50);
 
-    constexpr int hca_state_gid = 5;
+    const int hca_state_gid = config.groupIdForTag("hca_state");
     ASSERT_GT(config.groupNums(), hca_state_gid);
     ASSERT_EQ(config.tagForGroup(hca_state_gid), "hca_state");
     auto block_nums = groupBlockNumsSnapshot(config);
@@ -1073,21 +1054,20 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4ConfigUsesOnlyPagedGroupsForBlockSize
     ASSERT_EQ(config.groupNums(), 7);
     ASSERT_EQ(config.groupNums(), 7);
 
-    size_t expected_non_full_bytes = 0;
-    size_t expected_full_bytes     = 0;
+    size_t expected_explicit_bytes = 0;
+    size_t expected_paged_bytes    = 0;
     for (size_t gid = 0; gid < static_cast<size_t>(config.groupNums()); ++gid) {
-        const auto type = config.typeForGroup(gid);
-        if (type == CacheGroupType::FULL) {
-            expected_full_bytes += config.blockSizeBytesForGroup(gid);
+        if (config.usesExplicitIndependentBlocks(gid)) {
+            expected_explicit_bytes += config.blockSizeBytesForGroup(gid);
         } else {
-            expected_non_full_bytes += config.blockSizeBytesForGroup(gid);
+            expected_paged_bytes += config.blockSizeBytesForGroup(gid);
         }
     }
 
-    EXPECT_GT(expected_non_full_bytes, 0u);
-    EXPECT_GT(expected_full_bytes, 0u);
+    EXPECT_GT(expected_explicit_bytes, 0u);
+    EXPECT_GT(expected_paged_bytes, 0u);
 
-    EXPECT_EQ(config.block_size_bytes, expected_full_bytes);
+    EXPECT_EQ(config.pagedBlockSizeBytes(), expected_paged_bytes);
 }
 
 TEST_F(HybridPoolKVCacheAllocatorTest, DSV4FinalizeBlockNumsUsesHcaStatePoolBlocks) {
@@ -1220,10 +1200,11 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4AllLayerCacheBaseHasPerGroupTensors) 
     ASSERT_EQ(layout.layers_to_kv_buffer_ptrs.size(), static_cast<size_t>(config.layer_all_num));
     ASSERT_EQ(layout.layers_to_kv_buffer_ptrs_by_group.size(), static_cast<size_t>(config.layer_all_num));
 
+    const int swa_gid = config.groupIdForTag("swa_kv");
     for (size_t l = 0; l < static_cast<size_t>(config.layer_all_num); ++l) {
         EXPECT_FALSE(layout.layers_to_kv_buffer_ptrs[l].defined())
             << "multi-tag DSV4 layer should not publish a legacy single-group tensor";
-        const auto& swa_t = layout.layers_to_kv_buffer_ptrs_by_group[l][6];
+        const auto& swa_t = layout.layers_to_kv_buffer_ptrs_by_group[l][static_cast<size_t>(swa_gid)];
         EXPECT_TRUE(swa_t.defined()) << "layer " << l << " missing SWA_KV tensor";
     }
     EXPECT_EQ(layout.group_tags.size(), 7u);

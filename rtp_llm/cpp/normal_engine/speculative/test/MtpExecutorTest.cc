@@ -400,7 +400,8 @@ public:
                                                          rtp_llm::TYPE_INT8,
                                                          /*local_head_num_kv=*/128,
                                                          /*size_per_head=*/256);
-        cache_config.mtp_sub_configs.push_back(std::make_shared<CacheConfig>(mtp_config));
+        auto mtp_sub_config = cache_config.mergeMTPModule(mtp_config, /*module_index=*/0, cache_config.layer_num);
+        cache_config.mtp_sub_configs.push_back(mtp_sub_config);
 
         EngineInitParams params = createEngineInitParams(config, model_config, runtime_config, kv_cache_config);
         params.sp_config        = sp_config;

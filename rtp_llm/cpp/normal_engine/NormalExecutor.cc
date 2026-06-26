@@ -74,7 +74,8 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
                                MlaOpsType                             mla_ops_type,
                                int32_t                                kv_cache_group_num,
                                std::function<void()>                  profile_step_start,
-                               std::function<void()>                  profile_step_finish):
+                               std::function<void()>                  profile_step_finish,
+                               std::optional<CacheConfig>             warmup_cache_config):
     Executor(),
     cache_manager_(cache_manager),
     role_type_(params.pd_sep_config.role_type),
@@ -138,17 +139,17 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
     // kernel_tokens_per_block. DSV4 promotes seq_size_per_block to a 256-token
     // physical block while attn_config still reflects the 64-token CLI flag, so
     // sourcing from attn_config makes the fused compressor index the state
-    // block_table with the wrong stride. During warmup the cache_manager is
-    // null — use zero-initialized block geometry so PyWrappedModel's >0
-    // check catches mis-propagation (CacheConfig default is 1, not 0).
-    // when warmup, cache manager maybe nullptr
-    CacheConfig warmup_sentinel;
-    warmup_sentinel.seq_size_per_block        = 0;
-    warmup_sentinel.kernel_seq_size_per_block = 0;
-    const auto& cache_config                  = cache_manager ?
-                                                    (is_propose_ ? cache_manager->getMTPModuleCacheConfig(propose_model_index_) :
-                                                                   cache_manager->cacheConfig()) :
-                                                    warmup_sentinel;
+    // block_table with the wrong stride.
+    const CacheConfig* cache_config_ptr = nullptr;
+    if (cache_manager) {
+        cache_config_ptr = is_propose_ ? &cache_manager->getMTPModuleCacheConfig(propose_model_index_) :
+                                         &cache_manager->cacheConfig();
+    } else {
+        RTP_LLM_CHECK_WITH_INFO(warmup_cache_config.has_value(),
+                                "NormalExecutor without KVCacheManager requires initialized warmup CacheConfig");
+        cache_config_ptr = &warmup_cache_config.value();
+    }
+    const auto& cache_config = *cache_config_ptr;
 
     GptModelInitParams model_init_params(
         {params.gpt_weights,

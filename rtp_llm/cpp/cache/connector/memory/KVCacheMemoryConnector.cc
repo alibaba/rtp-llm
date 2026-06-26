@@ -24,8 +24,8 @@ static void applySplitKvMultiCopyFieldsIfEligible(bool enable_sm_copy, const Cac
         return;
     }
     out.split_kv_layer_num          = static_cast<int>(cfg.layer_all_num);
-    out.split_kv_cache_stride_bytes = cfg.kv_block_stride_bytes;
-    out.split_kv_scale_stride_bytes = cfg.kv_scale_stride_bytes;
+    out.split_kv_cache_stride_bytes = cfg.maxKvBlockStrideBytes();
+    out.split_kv_scale_stride_bytes = cfg.maxKvScaleStrideBytes();
 }
 
 static void
@@ -477,7 +477,7 @@ std::vector<KVCacheMemoryConnector::LayerTagSlot> KVCacheMemoryConnector::layerT
     std::vector<LayerTagSlot> slots;
     const size_t                 layer_num = cache_config_.layer_all_num;
 
-    auto group_stride = [this](int gid, int layer_id) -> size_t {
+    auto group_stride = [this](int gid) -> size_t {
         if (gid >= 0 && gid < cache_config_.groupNums()) {
             const size_t kv_stride    = cache_config_.kvBlockStrideBytesForGroup(static_cast<size_t>(gid));
             const size_t scale_stride = cache_config_.kvScaleStrideBytesForGroup(static_cast<size_t>(gid));
@@ -485,10 +485,7 @@ std::vector<KVCacheMemoryConnector::LayerTagSlot> KVCacheMemoryConnector::layerT
                 return kv_stride + scale_stride;
             }
         }
-        if (layer_id >= 0 && static_cast<size_t>(layer_id) < cache_config_.layer_to_block_stride_bytes.size()) {
-            return static_cast<size_t>(cache_config_.layer_to_block_stride_bytes[static_cast<size_t>(layer_id)]);
-        }
-        return cache_config_.kv_block_stride_bytes + cache_config_.kv_scale_stride_bytes;
+        return size_t{0};
     };
 
     const auto layer_group_ids = cache_config_.layerGroupIdsSnapshot();
@@ -508,7 +505,7 @@ std::vector<KVCacheMemoryConnector::LayerTagSlot> KVCacheMemoryConnector::layerT
                 slots.push_back(LayerTagSlot{static_cast<int>(layer),
                                                 tag,
                                                 gid,
-                                                group_stride(gid, static_cast<int>(layer))});
+                                                group_stride(gid)});
             }
         }
     }

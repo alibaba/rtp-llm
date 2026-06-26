@@ -217,7 +217,7 @@ RemoteConnector::genLocationSpecInfoMapAndGroups(int64_t tp_size) {
     assert(group_size > 0);
     auto location_spec_info_map_ptr = std::make_shared<RemoteConnectorConfig::LocationSpecInfoMap>();
     // TODO : support different byte_size_per_block (transfer client not support now)
-    size_t                   byte_size_per_block = init_params_->cache_config.block_size_bytes;
+    size_t                   byte_size_per_block = init_params_->cache_config.pagedBlockSizeBytes();
     std::vector<std::string> all_group_names;
     std::vector<uint64_t>    all_group_name_bithashs;
     all_group_names.reserve(group_size);

@@ -127,8 +127,8 @@ TEST_F(SingleTypeKVCacheAllocatorTest, ConstructorAndInit) {
     bool init_result = allocator_->init();
     EXPECT_TRUE(init_result);
 
-    EXPECT_EQ(allocator_->totalBlocksNum(), config.block_num - 1);
-    EXPECT_EQ(allocator_->freeBlocksNum(), config.block_num - 1);  // reserve 1 block
+    EXPECT_EQ(allocator_->totalBlocksNum(), config.pagedBlockNum() - 1);
+    EXPECT_EQ(allocator_->freeBlocksNum(), config.pagedBlockNum() - 1);  // reserve 1 block
 }
 
 TEST_F(SingleTypeKVCacheAllocatorTest, InitWithDifferentLayerNum) {
@@ -173,7 +173,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, MallocSingleBatch) {
 
     EXPECT_TRUE(result.success);
     EXPECT_EQ(batch_resource->blocksNum(0, 0), 2);
-    EXPECT_LT(allocator_->freeBlocksNum(), config.block_num);
+    EXPECT_LT(allocator_->freeBlocksNum(), config.pagedBlockNum());
 
     seq_length         = 160;
     complete_token_ids = createCompleteTokenIds(1, seq_length);
@@ -300,7 +300,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, MallocMultipleBatches) {
     for (int i = 0; i < batch_size; ++i) {
         EXPECT_EQ(batch_resource->blocksNum(i, 0), 3);
     }
-    EXPECT_EQ(allocator_->freeBlocksNum(), config.block_num - 6);  // 2 shared + 3 batches * 1 blocks + 1 reserved
+    EXPECT_EQ(allocator_->freeBlocksNum(), config.pagedBlockNum() - 6);  // 2 shared + 3 batches * 1 blocks + 1 reserved
 }
 
 // TEST_F(SingleTypeKVCacheAllocatorTest, MallocWithInsufficientBlocks) {
@@ -354,7 +354,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, FreeMultipleBatches) {
 
     FreeInfo free_info{batch_resource, complete_token_ids};
     allocator_->free(free_info);
-    EXPECT_EQ(allocator_->freeBlocksNum(), config.block_num - 1);  // reserve 1 block
+    EXPECT_EQ(allocator_->freeBlocksNum(), config.pagedBlockNum() - 1);  // reserve 1 block
 }
 
 // Test malloc free cycle
@@ -375,7 +375,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, MallocFreeCycle) {
         FreeInfo free_info{batch_resource, complete_token_ids};
         allocator_->free(free_info);
 
-        EXPECT_EQ(allocator_->freeBlocksNum(), config.block_num - 1);  // reserve 1 block
+        EXPECT_EQ(allocator_->freeBlocksNum(), config.pagedBlockNum() - 1);  // reserve 1 block
     }
 }
 
@@ -719,7 +719,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, FreeBlocksNums) {
     allocator_  = std::make_shared<SingleTypeKVCacheAllocator>(config);
     allocator_->init();
 
-    EXPECT_EQ(allocator_->freeBlocksNum(), config.block_num - 1);  // reserve 1 block
+    EXPECT_EQ(allocator_->freeBlocksNum(), config.pagedBlockNum() - 1);  // reserve 1 block
 }
 
 TEST_F(SingleTypeKVCacheAllocatorTest, AvailableBlocksNums) {
@@ -727,7 +727,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, AvailableBlocksNums) {
     allocator_  = std::make_shared<SingleTypeKVCacheAllocator>(config);
     allocator_->init();
 
-    EXPECT_EQ(allocator_->availableBlocksNum(), config.block_num - 1);  // reserve 1 block
+    EXPECT_EQ(allocator_->availableBlocksNum(), config.pagedBlockNum() - 1);  // reserve 1 block
 }
 
 TEST_F(SingleTypeKVCacheAllocatorTest, IncrKVCacheRefReferencesMatchedBlocksOnly) {

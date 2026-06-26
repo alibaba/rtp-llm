@@ -271,14 +271,13 @@ WarmUpResult NormalEngine::prefillWarmUp(const EngineInitParams& params) {
     // constructing the warmup NormalExecutor — see decodeWarmUp comment.
     // Without this, CudaGraphRunner inside the warmup executor sees
     // kv_cache_group_num_=0 and skips per-group block_table setup.
-    {
-        const int cache_gen_num_per_cycle =
-            sp_config.type != SP_TYPE_NONE ? static_cast<int>(sp_config.gen_num_per_cycle) : 0;
-        auto cfg = CacheConfigCreator::createBasicConfig(
-            model_config_, parallelism_config, kv_cache_config, false, cache_gen_num_per_cycle);
-        kv_cache_group_num_ = cfg.groupNums();
-    }
-    executor_.reset(new NormalExecutor(params, nullptr, true, false, 0, mla_ops_type_, kv_cache_group_num_));
+    const int cache_gen_num_per_cycle =
+        sp_config.type != SP_TYPE_NONE ? static_cast<int>(sp_config.gen_num_per_cycle) : 0;
+    auto cache_config = CacheConfigCreator::createBasicConfig(
+        model_config_, parallelism_config, kv_cache_config, false, cache_gen_num_per_cycle);
+    kv_cache_group_num_ = cache_config.groupNums();
+    executor_.reset(new NormalExecutor(
+        params, nullptr, true, false, 0, mla_ops_type_, kv_cache_group_num_, nullptr, nullptr, cache_config));
     THROW_IF_STATUSOR_ERROR(preRun(fake_input, preRunMode::prefill_warm_up));
     const auto max_consumed = getGpuExecStatus().device_memory_status.max_consumed_bytes;
     rtp_llm::setTraceMemory(false);
@@ -310,7 +309,6 @@ WarmUpResult NormalEngine::decodeWarmUp(const EngineInitParams& params) {
     // 256-token physical block for DSV4 (via DSV4CacheConfigHelper). Forcing
     // it back to attn_config.tokens_per_block would clobber DSV4's promoted
     // value when the user passed --seq_size_per_block < 256.
-    cache_config.block_num = 5;
     // Snapshot hybrid-cache group count from the warmup cache_config so that the
     // NormalExecutor -> PyWrappedModel -> CudaGraphRunner created below builds
     // per-group block tables during CUDA graph capture.
@@ -405,9 +403,9 @@ void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) 
         auto result = CacheConfigCreator::createConfig(
             model_config_, parallelism_config, runtime_config, kv_cache_config, warm_up_result, sp_config);
         RTP_LLM_LOG_INFO("create cache manager with config %s", result.debugString().c_str());
-        RTP_LLM_LOG_INFO("create cache manager with block nums %d, block size %ld KB",
-                         result.block_num,
-                         result.block_size_bytes / 1024);
+        RTP_LLM_LOG_INFO("create cache manager with paged block nums %u, paged block size %zu KB",
+                         result.pagedBlockNum(),
+                         result.pagedBlockSizeBytes() / 1024);
         RTP_LLM_LOG_INFO("create cache manager with linear step %d", result.linear_step);
         resource_context_.cache_manager = make_shared<KVCacheManager>(result,
                                                                       false,

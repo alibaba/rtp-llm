@@ -800,8 +800,8 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         maybePrintModelInput(model_input, "prefill post draft model");
         int64_t     start_time_us           = autil::TimeUtility::currentTimeInMicroSeconds();
         const auto& mtp_cache_cfg           = cache_manager_->getMTPModuleCacheConfig(0);
-        model_input.kv_block_stride_bytes   = mtp_cache_cfg.kv_block_stride_bytes;
-        model_input.kv_scale_stride_bytes   = mtp_cache_cfg.kv_scale_stride_bytes;
+        model_input.kv_block_stride_bytes   = mtp_cache_cfg.maxKvBlockStrideBytes();
+        model_input.kv_scale_stride_bytes   = mtp_cache_cfg.maxKvScaleStrideBytes();
         // Source = main (just ran prefill; its pre-hc buffer is current).
         maybeOverrideLastHiddenWithMtpBuffer(model_input, *model_, cp_enabled);
         draft_model_output = std::move(draft_model_->forward(model_input));
@@ -1322,8 +1322,8 @@ void MtpExecutor::launchTargetVerifyPrepareAsync(const GptModelInputs& model_inp
     const auto& cache_cfg = cache_manager_->cacheConfig();
     // NOTE: combo_tokens never used in prepare stage, so it is safe to use shallow copy
     auto model_input_copy                    = model_input;
-    model_input_copy.kv_block_stride_bytes   = cache_cfg.kv_block_stride_bytes;
-    model_input_copy.kv_scale_stride_bytes   = cache_cfg.kv_scale_stride_bytes;
+    model_input_copy.kv_block_stride_bytes   = cache_cfg.maxKvBlockStrideBytes();
+    model_input_copy.kv_scale_stride_bytes   = cache_cfg.maxKvScaleStrideBytes();
     {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(prepare_target_verify_input)");
         const auto cuda_i32 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
@@ -1406,8 +1406,8 @@ void MtpExecutor::launchDraftPrefillPrepareAsync(const GptModelInputs& model_inp
     // main-stream mutations cannot affect draft prefill prepare.
     auto* prefill_model    = sp_prefill_draft_model_ ? sp_prefill_draft_model_.get() : draft_model_.get();
     auto  model_input_copy = model_input;
-    model_input_copy.kv_block_stride_bytes   = mtp_cache_cfg.kv_block_stride_bytes;
-    model_input_copy.kv_scale_stride_bytes   = mtp_cache_cfg.kv_scale_stride_bytes;
+    model_input_copy.kv_block_stride_bytes   = mtp_cache_cfg.maxKvBlockStrideBytes();
+    model_input_copy.kv_scale_stride_bytes   = mtp_cache_cfg.maxKvScaleStrideBytes();
     ensureModelInputsOnCuda(model_input_copy, "decode.draft_prefill_prepare");
     auto input_ready_event = std::make_shared<torch::Event>(cuda_graph::makeGraphEvent());
     input_ready_event->record(cuda_graph::graphGetCurrentStream());
@@ -1615,8 +1615,8 @@ void MtpExecutor::broadcastPostRejectionInputs(GptModelInputs& model_input) {
         execBroadcast({{model_input.last_hidden_states}, 0});
         execBroadcast({{model_input.lm_output_indexes}, 0});
     }
-    model_input.kv_block_stride_bytes = mtp_cache_cfg.kv_block_stride_bytes;
-    model_input.kv_scale_stride_bytes = mtp_cache_cfg.kv_scale_stride_bytes;
+    model_input.kv_block_stride_bytes = mtp_cache_cfg.maxKvBlockStrideBytes();
+    model_input.kv_scale_stride_bytes = mtp_cache_cfg.maxKvScaleStrideBytes();
 }
 
 GptModelOutputs MtpExecutor::runDraftPrefillForward(GptModelInputs& model_input) {
@@ -1811,8 +1811,8 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
     RTP_LLM_PROFILE_SCOPE_DYNAMIC("executor.mtp.draft_model_decode(batch_size=%zu)", model_input.combo_tokens.size(0));
 
     const auto& mtp_cache_cfg         = cache_manager_->getMTPModuleCacheConfig(0);
-    model_input.kv_block_stride_bytes = mtp_cache_cfg.kv_block_stride_bytes;
-    model_input.kv_scale_stride_bytes = mtp_cache_cfg.kv_scale_stride_bytes;
+    model_input.kv_block_stride_bytes = mtp_cache_cfg.maxKvBlockStrideBytes();
+    model_input.kv_scale_stride_bytes = mtp_cache_cfg.maxKvScaleStrideBytes();
 
     GptModelOutputs            draft_decode_model_output;
     std::vector<torch::Tensor> draft_token_columns;
@@ -1986,8 +1986,8 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
         }
 
         const auto& cache_cfg             = cache_manager_->cacheConfig();
-        model_input.kv_block_stride_bytes = cache_cfg.kv_block_stride_bytes;
-        model_input.kv_scale_stride_bytes = cache_cfg.kv_scale_stride_bytes;
+        model_input.kv_block_stride_bytes = cache_cfg.maxKvBlockStrideBytes();
+        model_input.kv_scale_stride_bytes = cache_cfg.maxKvScaleStrideBytes();
     }
 }
 

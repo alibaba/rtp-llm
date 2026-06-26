@@ -69,7 +69,6 @@ CacheConfig HybridConfigCreator::initializeConfig(const ModelConfig&      model_
     CacheConfig config;
     config.layer_num          = static_cast<uint32_t>(layer_num);
     config.layer_all_num      = static_cast<uint32_t>(layer_num);
-    config.block_num          = 0;
     config.seq_size_per_block = static_cast<uint32_t>(model_config.attn_config.tokens_per_block);
     config.use_mla            = model_config.attn_config.use_mla;
     config.dtype              = dtype;
@@ -234,11 +233,11 @@ void HybridConfigCreator::setupPhysicalSizes(CacheConfig&          config,
     RTP_LLM_CHECK_WITH_INFO(full_kv_block_stride_bytes >= linear_kv_block_stride_bytes,
                             "not support full attention with padding now");
 
-    config.kv_block_stride_bytes = full_kv_block_stride_bytes;
-    config.kv_block_size_bytes   = static_cast<size_t>(config.group_layer_num) * config.kv_block_stride_bytes;
-    config.kv_scale_stride_bytes = full_spec->scale_block_size_bytes();
-    config.kv_scale_size_bytes   = static_cast<size_t>(config.group_layer_num) * config.kv_scale_stride_bytes;
-    config.block_size_bytes      = config.kv_block_size_bytes + config.kv_scale_size_bytes;
+    const size_t physical_kv_scale_stride_bytes = full_spec->scale_block_size_bytes();
+    std::vector<uint32_t> block_nums(static_cast<size_t>(config.groupNums()), 0);
+    std::vector<size_t>   kv_block_stride_bytes(static_cast<size_t>(config.groupNums()), full_kv_block_stride_bytes);
+    std::vector<size_t>   kv_scale_stride_bytes(static_cast<size_t>(config.groupNums()), physical_kv_scale_stride_bytes);
+    config.setGroupBlockLayout(block_nums, kv_block_stride_bytes, kv_scale_stride_bytes);
 }
 
 CacheConfig HybridConfigCreator::createHybridConfig(const ModelConfig&       model_config,
@@ -280,7 +279,7 @@ CacheConfig HybridConfigCreator::createHybridConfig(const ModelConfig&       mod
     int group_layer_num = 0;
     auto [linear_groups, full_groups] =
         HybridConfigCreator::createLayerGroups(linear_layers, full_layers, group_layer_num);
-    config.group_layer_num = group_layer_num;
+    (void)group_layer_num;
 
     HybridConfigCreator::prepareFullAttentionSpec(
         full_spec, model_config, parallelism_config, dtype, static_cast<uint32_t>(full_layers.size()));
@@ -292,12 +291,6 @@ CacheConfig HybridConfigCreator::createHybridConfig(const ModelConfig&       mod
 
     // Setup physical sizes
     HybridConfigCreator::setupPhysicalSizes(config, full_spec, linear_spec);
-
-    // Per-layer block stride (kv + scale).
-    // For hybrid attention, the physical per-layer stride follows the selected physical layout stride.
-    const size_t per_layer_stride_bytes = config.kv_block_stride_bytes + config.kv_scale_stride_bytes;
-    config.layer_to_block_stride_bytes.assign(static_cast<size_t>(config.layer_all_num),
-                                              static_cast<int>(per_layer_stride_bytes));
 
     return config;
 }

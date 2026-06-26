@@ -26,7 +26,7 @@ namespace test {
 
 namespace {
 
-void initSingleGroupConfig(CacheConfig& config) {
+void initSingleGroupConfig(CacheConfig& config, uint32_t block_num = 1, size_t block_stride_bytes = 1) {
     auto spec                = std::make_shared<MHAKVCacheSpec>();
     spec->type               = KVCacheSpecType::MultiHeadAttention;
     spec->dtype              = config.dtype;
@@ -36,6 +36,7 @@ void initSingleGroupConfig(CacheConfig& config) {
     std::vector<int> layers(static_cast<size_t>(config.layer_num));
     std::iota(layers.begin(), layers.end(), 0);
     config.fromGroupedSpecs({spec}, {layers}, {CacheGroupType::FULL}, {"default"});
+    config.setGroupBlockLayout({block_num}, {block_stride_bytes}, {0});
 }
 
 void initTwoGroupCpConfig(CacheConfig& config) {
@@ -91,10 +92,8 @@ protected:
 
         cache_config_.layer_num        = 1;
         cache_config_.layer_all_num    = 1;
-        cache_config_.block_num        = 10;
-        cache_config_.block_size_bytes = 1024;
         cache_config_.dtype            = rtp_llm::TYPE_FP16;
-        initSingleGroupConfig(cache_config_);
+        initSingleGroupConfig(cache_config_, 10, 1024);
 
         kv_cache_config_.memory_cache_size_mb         = 100;
         kv_cache_config_.memory_cache_sync_timeout_ms = 1000;
@@ -106,10 +105,8 @@ protected:
         // minimal BlockPool here to avoid crashes/hangs in tests that exercise coordinator paths.
         {
             // NOTE: use the 4-arg overload because the mock allocator only needs physical block layout here.
-            const size_t block_stride_bytes =
-                cache_config_.block_size_bytes / static_cast<size_t>(std::max(1u, cache_config_.layer_all_num));
             auto pool_config = BlockPoolConfigHelper::createConfig(
-                cache_config_.layer_all_num, cache_config_.block_num, block_stride_bytes, cache_config_.dtype);
+                cache_config_.layer_all_num, cache_config_.pagedBlockNum(), cache_config_.blockSizeBytesForGroup(0), cache_config_.dtype);
             auto pool = std::make_shared<BlockPool>(pool_config, AllocationType::HOST);
             RTP_LLM_CHECK(pool->init());
             allocator_->block_pool_ = pool;
@@ -237,8 +234,6 @@ TEST_F(KVCacheConnectorCoordinatorTest, Init_ReturnFalse_WhenMemoryConfigInvalid
     RuntimeConfig runtime_config;
     cache_config.layer_num        = 1;
     cache_config.layer_all_num    = 1;
-    cache_config.block_num        = 1;
-    cache_config.block_size_bytes = 1;
     initSingleGroupConfig(cache_config);
 
     kv_cache_config.enable_memory_cache = true;
@@ -259,8 +254,6 @@ TEST_F(KVCacheConnectorCoordinatorTest, Init_ReturnTrue_WhenMemorySkipped_AndSto
     RuntimeConfig runtime_config;
     cache_config.layer_num        = 1;
     cache_config.layer_all_num    = 1;
-    cache_config.block_num        = 1;
-    cache_config.block_size_bytes = 1;
     initSingleGroupConfig(cache_config);
 
     kv_cache_config.enable_memory_cache = false;  // skip memory connector in init
@@ -280,8 +273,6 @@ TEST_F(KVCacheConnectorCoordinatorTest, Init_ReturnFalse_WhenMemoryEnabledButSiz
     RuntimeConfig runtime_config;
     cache_config.layer_num        = 1;
     cache_config.layer_all_num    = 1;
-    cache_config.block_num        = 1;
-    cache_config.block_size_bytes = 1;
     initSingleGroupConfig(cache_config);
 
     kv_cache_config.enable_memory_cache          = true;
@@ -304,14 +295,9 @@ TEST_F(KVCacheConnectorCoordinatorTest, Init_ReturnTrue_WhenMemoryEnabled_HappyP
     RuntimeConfig runtime_config;
     cache_config.layer_num     = 1;
     cache_config.layer_all_num = 1;
-    cache_config.block_num     = 1;
     // Keep block size reasonably large so block_num doesn't explode in createBlockPool().
-    cache_config.block_size_bytes = 1024;
     cache_config.dtype            = rtp_llm::TYPE_FP16;
-    initSingleGroupConfig(cache_config);
-    // Memory connector requires per-layer block stride bytes.
-    cache_config.layer_to_block_stride_bytes.assign(static_cast<size_t>(cache_config.layer_num),
-                                                    cache_config.block_size_bytes);
+    initSingleGroupConfig(cache_config, 1, 1024);
 
     kv_cache_config.enable_memory_cache          = true;
     kv_cache_config.reuse_cache                  = true;
@@ -322,10 +308,8 @@ TEST_F(KVCacheConnectorCoordinatorTest, Init_ReturnTrue_WhenMemoryEnabled_HappyP
     auto allocator = std::make_shared<MockKVCacheAllocator>(cache_config);
     // KVCacheConnectorCoordinator::init logs free/available blocks via KVCacheAllocator. Ensure block_pool_ is valid.
     {
-        const size_t block_stride_bytes =
-            cache_config.block_size_bytes / static_cast<size_t>(std::max(1u, cache_config.layer_all_num));
         auto pool_config = BlockPoolConfigHelper::createConfig(
-            cache_config.layer_all_num, cache_config.block_num, block_stride_bytes, cache_config.dtype);
+            cache_config.layer_all_num, cache_config.pagedBlockNum(), cache_config.blockSizeBytesForGroup(0), cache_config.dtype);
         auto pool = std::make_shared<BlockPool>(pool_config, AllocationType::HOST);
         ASSERT_TRUE(pool->init());
         allocator->block_pool_ = pool;
@@ -346,8 +330,6 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncRead_ReturnNull_WhenStop) {
     CacheConfig cache_config;
     cache_config.layer_num        = 1;
     cache_config.layer_all_num    = 1;
-    cache_config.block_num        = 1;
-    cache_config.block_size_bytes = 1;
     initSingleGroupConfig(cache_config);
 
     auto allocator   = std::make_shared<testing::NiceMock<MockKVCacheAllocator>>(cache_config);
@@ -406,7 +388,7 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncRead_ReturnNull_WhenIncrKVCacheRefR
     {
         auto pool_config = BlockPoolConfigHelper::createConfig(cache_config_.layer_all_num,
                                                                /*block_num=*/1,
-                                                               /*block_stride_bytes=*/cache_config_.block_size_bytes,
+                                                               /*block_stride_bytes=*/cache_config_.blockSizeBytesForGroup(0),
                                                                /*dtype=*/cache_config_.dtype);
         auto pool        = std::make_shared<BlockPool>(pool_config, AllocationType::HOST);
         ASSERT_TRUE(pool->init());
@@ -523,8 +505,6 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncWrite_ReturnNull_WhenStop) {
     CacheConfig cache_config;
     cache_config.layer_num        = 1;
     cache_config.layer_all_num    = 1;
-    cache_config.block_num        = 1;
-    cache_config.block_size_bytes = 1;
     initSingleGroupConfig(cache_config);
 
     auto allocator   = std::make_shared<testing::NiceMock<MockKVCacheAllocator>>(cache_config);

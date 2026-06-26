@@ -1,6 +1,5 @@
 #include "rtp_llm/cpp/cache/config_creator/CacheConfigCreator.h"
 
-#include <numeric>
 #include <algorithm>
 
 #include "rtp_llm/cpp/cache/config_creator/HybridPoolConfigCreator.h"
@@ -14,34 +13,6 @@
 namespace rtp_llm {
 
 namespace {
-
-size_t steppedBytes(size_t bytes, int step) {
-    return (bytes > 0 && step > 1) ? bytes / static_cast<size_t>(step) : bytes;
-}
-
-size_t nonExplicitFixedPoolHbmBytes(const CacheConfig& config) {
-    // Only independent-pool configs use per-group HBM accounting; SingleConfig
-    // and HybridConfig leave use_independent_block_pools false.
-    if (!config.use_independent_block_pools) {
-        return 0;
-    }
-
-    size_t bytes = 0;
-    for (size_t gid = 0; gid < static_cast<size_t>(config.groupNums()); ++gid) {
-        const auto& spec = config.specForGroup(gid);
-        if (spec == nullptr || !spec->isFixedCache()) {
-            continue;
-        }
-        if (!config.usesExplicitIndependentBlocks(gid)) {
-            bytes += config.blockSizeBytesForGroup(gid);
-        }
-    }
-    return bytes;
-}
-
-size_t effectivePagedBlockBytes(const CacheConfig& config, int step) {
-    return config.block_size_bytes + steppedBytes(nonExplicitFixedPoolHbmBytes(config), step);
-}
 
 void setupKernelSeqSize(CacheConfig& config, const KVCacheConfig& kv_cache_config, const char* config_name) {
     if (kv_cache_config.kernel_seq_size_per_block > 0) {
@@ -91,8 +62,7 @@ uint32_t computeBlockNum(CacheConfig&                                     config
                          config.explicitly_sized_pool_reserve_bytes / 1024 / 1024,
                          paged_budget / 1024 / 1024);
     }
-    const int joint_step = std::max(1, config.linear_step);
-    return static_cast<uint32_t>(paged_budget / effectivePagedBlockBytes(config, joint_step));
+    return static_cast<uint32_t>(paged_budget / config.pagedBlockSizeBytes());
 }
 
 }  // namespace
@@ -155,10 +125,9 @@ CacheConfig CacheConfigCreator::createConfig(const ModelConfig&                 
     RTP_LLM_CHECK_WITH_INFO(block_num > 0,
                             "kv cache needs at least 1 block but %ld, each block needs %ld MiB memory",
                             block_num,
-                            static_cast<long>(config.block_size_bytes / 1024 / 1024));
+                            static_cast<long>(config.pagedBlockSizeBytes() / 1024 / 1024));
 
     const auto kv_cache_seq_len = static_cast<size_t>(block_num) * config.seq_size_per_block;
-    config.block_num            = static_cast<int>(block_num);
     config.finalizeBlockNums(block_num, runtime_config);
     RTP_LLM_LOG_INFO("kv cache block nums is %u, allows storing %ld tokens", block_num, kv_cache_seq_len);
     if (kv_cache_seq_len < model_config.max_seq_len) {
@@ -207,9 +176,9 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
         total_layer_num += propose_config.layer_num;
     }
 
-    size_t total_block_size_bytes = score_config.block_size_bytes;
+    size_t total_block_size_bytes = score_config.pagedBlockSizeBytes();
     for (int i = 0; i < num_mtp_modules; ++i) {
-        total_block_size_bytes += propose_config.block_size_bytes;
+        total_block_size_bytes += propose_config.pagedBlockSizeBytes();
     }
 
     const size_t explicit_pool_reserve =
@@ -241,13 +210,10 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
                 paged_budget / 1024 / 1024);
         }
 
-        const int joint_step     = std::max(1, kv_cache_config.linear_step);
-        auto      effective_size = [&](const CacheConfig& cfg) -> size_t {
-            return effectivePagedBlockBytes(cfg, joint_step);
-        };
         block_num =
             paged_budget
-            / (effective_size(score_config) + effective_size(propose_config) * static_cast<size_t>(num_mtp_modules));
+            / (score_config.pagedBlockSizeBytes()
+               + propose_config.pagedBlockSizeBytes() * static_cast<size_t>(num_mtp_modules));
     }
 
     RTP_LLM_CHECK_WITH_INFO(block_num > 0, "kv cache needs at least 1 block but %zu", block_num);
@@ -255,36 +221,16 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
     CacheConfig config      = score_config;
     config.linear_step      = std::max(1, kv_cache_config.linear_step);
     config.layer_all_num    = total_layer_num;
-    config.block_size_bytes = total_block_size_bytes;
-    // config.block_size       = config.block_size_bytes / rtp_llm::getTypeSize(config.dtype);
-    config.block_num                = block_num;
     config.explicitly_sized_pool_reserve_bytes = explicit_pool_reserve;
 
     const uint32_t main_layer_num = score_config.layer_num;
-    const uint32_t mtp_layer_num  = propose_config.layer_num;
 
     // Each sub-model needs an independent CacheConfig because global_layer_ids differs per module.
     config.mtp_sub_configs.clear();
     config.mtp_sub_configs.reserve(num_mtp_modules);
     config.resizeLayerRoutes(static_cast<size_t>(total_layer_num));
-    config.layer_to_block_stride_bytes.assign(static_cast<size_t>(total_layer_num), 0);
-
-    // Main(score) model per-layer stride (kv + scale).
-    // This is expected to be fully populated by createBasicConfig() (Single/Hybrid creators).
-    const size_t score_layers = static_cast<size_t>(main_layer_num);
-    RTP_LLM_CHECK_WITH_INFO(score_config.layer_to_block_stride_bytes.size() == score_layers,
-                            "score_config.layer_to_block_stride_bytes size mismatch, got=%zu need=%zu",
-                            score_config.layer_to_block_stride_bytes.size(),
-                            score_layers);
-    for (size_t l = 0; l < score_layers; ++l) {
-        config.layer_to_block_stride_bytes[l] = score_config.layer_to_block_stride_bytes[l];
-    }
 
     for (int m = 0; m < num_mtp_modules; ++m) {
-        RTP_LLM_CHECK_WITH_INFO(propose_config.layer_to_block_stride_bytes.size() == static_cast<size_t>(mtp_layer_num),
-                                "sub_cfg.layer_to_block_stride_bytes size mismatch, got=%zu need=%u",
-                                propose_config.layer_to_block_stride_bytes.size(),
-                                mtp_layer_num);
         auto sub_cfg = config.mergeMTPModule(propose_config, m, main_layer_num);
         sub_cfg->finalizeBlockNums(static_cast<uint32_t>(block_num), runtime_config);
         config.mtp_sub_configs.push_back(sub_cfg);
@@ -302,9 +248,9 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
                      block_num,
                      kv_cache_seq_len,
                      total_block_size_bytes,
-                     score_config.block_size_bytes,
+                     score_config.pagedBlockSizeBytes(),
                      num_mtp_modules,
-                     propose_config.block_size_bytes);
+                     propose_config.pagedBlockSizeBytes());
 
     RTP_LLM_LOG_INFO("CacheConfig debugString(main_score_model):\n%s", score_config.debugString().c_str());
     for (size_t i = 0; i < config.mtp_sub_configs.size(); ++i) {

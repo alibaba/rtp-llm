@@ -27,7 +27,17 @@ static torch::Tensor hostIntBuffer(std::vector<int32_t> data) {
     return torch::tensor(data, torch::kInt32);
 }
 
-class NormalBatchStreamProcessorTest: public DeviceTestBase {};
+class NormalBatchStreamProcessorTest: public DeviceTestBase {
+protected:
+    static CacheConfig makeProcessorCacheConfig(uint layer_num = 3, DataType dtype = DataType::TYPE_FP16) {
+        return makeMhaCacheConfig(layer_num,
+                                  /*block_num=*/8,
+                                  /*local_head_num_kv=*/1,
+                                  /*size_per_head=*/8,
+                                  /*tokens_per_block=*/4,
+                                  dtype);
+    }
+};
 
 class TestStatefulLogitsProcessor: public BaseLogitsProcessor {
 public:
@@ -74,7 +84,7 @@ TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
     model_config.attn_config.kv_cache_dtype = KvCacheDataType::INT8;
     PDSepConfig                 pd_sep_config;
     ProfilingDebugLoggingConfig profiling_debug_logging_config;
-    CacheConfig                 cache_config;
+    auto                        cache_config = makeProcessorCacheConfig(/*layer_num=*/3, DataType::TYPE_INT8);
 
     RuntimeConfig              runtime_config;
     NormalBatchStreamProcessor processor(
@@ -207,7 +217,8 @@ TEST_F(NormalBatchStreamProcessorTest, testDeviceStateFastPathWaitsForBlockingLo
     EngineInitParams params;
     params.model_config_ = model_config;
     params.py_model      = py::none();
-    NormalExecutor executor(params, nullptr, true);
+    auto cache_config = makeProcessorCacheConfig(/*layer_num=*/1);
+    NormalExecutor executor(params, nullptr, true, false, 0, MlaOpsType::AUTO, 1, nullptr, nullptr, cache_config);
 
     EXPECT_TRUE(executor.gatherCanUseDeviceState(stream_groups));
     stream->logits_processor_list_.push_back(std::make_shared<TestStatefulLogitsProcessor>(false));
@@ -247,7 +258,8 @@ TEST_F(NormalBatchStreamProcessorTest, testDeviceStateFastPathAllowsAsyncLogitsP
     EngineInitParams params;
     params.model_config_ = model_config;
     params.py_model      = py::none();
-    NormalExecutor executor(params, nullptr, true);
+    auto cache_config = makeProcessorCacheConfig(/*layer_num=*/1);
+    NormalExecutor executor(params, nullptr, true, false, 0, MlaOpsType::AUTO, 1, nullptr, nullptr, cache_config);
 
     stream->incPendingAsyncBookkeeping();
     EXPECT_TRUE(executor.gatherCanUseDeviceState(stream_groups));
@@ -263,7 +275,7 @@ TEST_F(NormalBatchStreamProcessorTest, testSoftmaxProbs) {
 
     PDSepConfig                    pd_sep_config;
     ProfilingDebugLoggingConfig    profiling_debug_logging_config;
-    CacheConfig                 cache_config;
+    auto                           cache_config = makeProcessorCacheConfig(/*layer_num=*/3);
     RuntimeConfig                  runtime_config;
     std::shared_ptr<GenerateInput> query1         = make_shared<GenerateInput>();
     query1->input_ids                             = hostIntBuffer({1});
@@ -316,7 +328,7 @@ TEST_F(NormalBatchStreamProcessorTest, testLoss) {
     model_config.num_layers  = 2;
     PDSepConfig                    pd_sep_config;
     ProfilingDebugLoggingConfig    profiling_debug_logging_config;
-    CacheConfig                 cache_config;
+    auto                           cache_config = makeProcessorCacheConfig(/*layer_num=*/3);
     RuntimeConfig                  runtime_config;
     std::shared_ptr<GenerateInput> query1   = make_shared<GenerateInput>();
     query1->input_ids                       = hostIntBuffer({1});
@@ -408,7 +420,7 @@ TEST_F(NormalBatchStreamProcessorTest, testMultimodalGatherBatch) {
     model_config.mm_model_config.is_multimodal = true;
     PDSepConfig                 pd_sep_config;
     ProfilingDebugLoggingConfig profiling_debug_logging_config;
-    CacheConfig                 cache_config;
+    auto                        cache_config = makeProcessorCacheConfig(/*layer_num=*/3, DataType::TYPE_INT8);
     RuntimeConfig              runtime_config;
     NormalBatchStreamProcessor processor(
         model_config, pd_sep_config, profiling_debug_logging_config, cache_config, false);

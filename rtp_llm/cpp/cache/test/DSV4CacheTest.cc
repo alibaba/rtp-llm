@@ -67,7 +67,7 @@ static KVCacheConfig makeDsv4KvCacheConfig() {
     return config;
 }
 
-static void setGroupBlockNumsForTest(CacheConfig& config, const std::vector<uint32_t>& block_nums) {
+[[maybe_unused]] static void setGroupBlockNumsForTest(CacheConfig& config, const std::vector<uint32_t>& block_nums) {
     std::vector<size_t> kv_strides;
     std::vector<size_t> scale_strides;
     kv_strides.reserve(static_cast<size_t>(config.groupNums()));
@@ -198,7 +198,7 @@ TEST(HybridPoolConfigCreatorTest, MtpSwaOnlyLayerIsNotStripped) {
         CacheConfigCreator::createBasicConfig(makeFlashMtpModelConfig(), pc, makeDsv4KvCacheConfig(), true, 0);
 
     EXPECT_EQ(config.layer_num, 1u);
-    EXPECT_EQ(config.block_size_bytes, 1u);
+    EXPECT_GT(config.pagedBlockSizeBytes(), 0u);
     ASSERT_EQ(static_cast<size_t>(config.groupNums()), 1u);
     ASSERT_EQ(config.layerIdsForGroup(gidForTag(config, "swa_kv")), std::vector<int>({0}));
     ASSERT_EQ(config.layerGroupIdsSnapshot().size(), 1u);
@@ -538,6 +538,8 @@ TEST(HybridPoolConfigCreatorTest, DecoupledPhysicalAndKernelBlockSizeUsesPerGrou
     EXPECT_EQ(config.kvBlockStrideBytesForGroup(gidForTag(config, "swa_kv")),
               config.specForGroup(gidForTag(config, "swa_kv"))->block_size_bytes());
 
+    RuntimeConfig runtime_config;
+    config.finalizeBlockNums(100, runtime_config);
     auto full_pool = BlockPoolConfigHelper::createConfigForGroup(config, gidForTag(config, "csa_kv"));
     auto swa_pool  = BlockPoolConfigHelper::createConfigForGroup(config, gidForTag(config, "swa_kv"));
     ASSERT_EQ(full_pool.memory_layouts.size(), 1u);
@@ -706,7 +708,7 @@ TEST(HybridPoolConfigCreatorTest, HybridAttentionWithoutIndependentPoolKeepsShar
 
     EXPECT_FALSE(config.use_independent_block_pools);
     ASSERT_EQ(config.groupNums(), 2);
-    EXPECT_TRUE(config.groupBlockNumsSnapshot().empty());
+    EXPECT_EQ(config.groupBlockNumsSnapshot(), std::vector<uint32_t>({0u, 0u}));
 }
 
 TEST(HybridConfigCreatorTest, HybridAttentionTypesMustCoverAllLayers) {
@@ -899,7 +901,8 @@ TEST(HybridPoolConfigCreatorTest, AllPagedPoolsShareBlockNum) {
     auto              mc = makeProModelConfig();
     ParallelismConfig pc;
     auto              config = CacheConfigCreator::createBasicConfig(mc, pc, makeDsv4KvCacheConfig(), false, 0);
-    config.block_num         = 100;
+    RuntimeConfig     runtime_config;
+    config.finalizeBlockNums(100, runtime_config);
 
     // Paged groups derive their block count from the global block_num; explicit
     // independent groups may override it with per-group fixed block counts.
@@ -1141,14 +1144,14 @@ TEST(CacheConfigTest, FinalizeBlockNumsIsNoopForSingleAndSharedHybridConfig) {
     setDefaultKvCacheSpec(single_model_config);
     auto single_config = CacheConfigCreator::createBasicConfig(single_model_config, pc, KVCacheConfig{}, false, 0);
     single_config.finalizeBlockNums(123, runtime_config);
-    EXPECT_TRUE(single_config.groupBlockNumsSnapshot().empty());
+    EXPECT_EQ(single_config.groupBlockNumsSnapshot(), std::vector<uint32_t>({123u}));
     EXPECT_EQ(single_config.explicitly_sized_pool_reserve_bytes, 0u);
 
     auto hybrid_config =
         CacheConfigCreator::createBasicConfig(makeHybridAttentionModelConfig(false), pc, KVCacheConfig{}, false, 0);
     hybrid_config.finalizeBlockNums(123, runtime_config);
     EXPECT_FALSE(hybrid_config.use_independent_block_pools);
-    EXPECT_TRUE(hybrid_config.groupBlockNumsSnapshot().empty());
+    EXPECT_EQ(hybrid_config.groupBlockNumsSnapshot(), std::vector<uint32_t>({123u, 123u}));
     EXPECT_EQ(hybrid_config.explicitly_sized_pool_reserve_bytes, 0u);
 }
 
@@ -1193,11 +1196,11 @@ TEST(CacheConfigTest, HcaStateReserveDeductedFromPagedBudget) {
     auto config_without = CacheConfigCreator::createConfig(mc, pc, runtime_config, kv_cache_config_without);
 
     // More HCA_STATE blocks reserve more HBM and leave fewer blocks for the global pools.
-    EXPECT_GT(config_with.block_num, config_without.block_num);
+    EXPECT_GT(config_with.pagedBlockNum(), config_without.pagedBlockNum());
     EXPECT_EQ(config_with.blockNumForGroup(gidForTag(config_with, "hca_kv")),
-              static_cast<uint32_t>(config_with.block_num));
+              config_with.pagedBlockNum());
     EXPECT_EQ(config_without.blockNumForGroup(gidForTag(config_without, "hca_kv")),
-              static_cast<uint32_t>(config_without.block_num));
+              config_without.pagedBlockNum());
     EXPECT_EQ(config_with.blockNumForGroup(gidForTag(config_with, "hca_state")), small_hca_state_pool);
     EXPECT_EQ(config_without.blockNumForGroup(gidForTag(config_without, "hca_state")), large_hca_state_pool);
     const size_t expected_reserve =
@@ -1543,8 +1546,9 @@ static CacheConfig makeDSV4AllocatorConfig(bool use_flash = false) {
     auto              mc = use_flash ? makeFlashModelConfig() : makeProModelConfig();
     ParallelismConfig pc;
     auto              config = CacheConfigCreator::createBasicConfig(mc, pc, makeDsv4KvCacheConfig(), false, 0);
-    // Set enough blocks for tests (7 groups × N blocks each)
-    config.block_num = 200;
+    // Set enough blocks for tests.
+    RuntimeConfig runtime_config;
+    config.finalizeBlockNums(200, runtime_config);
     return config;
 }
 
@@ -1554,9 +1558,9 @@ static CacheConfig makeDSV4CpAllocatorConfig(uint32_t cp_size) {
     pc.role_type                          = RoleType::PREFILL;
     pc.tp_size                            = cp_size;
     pc.prefill_cp_config.kv_cache_sharded = true;
-    auto config      = CacheConfigCreator::createBasicConfig(mc, pc, makeDsv4KvCacheConfig(), false, 0);
-    config.block_num = 200;
-    setGroupBlockNumsForTest(config, std::vector<uint32_t>(static_cast<size_t>(config.groupNums()), config.block_num));
+    auto          config = CacheConfigCreator::createBasicConfig(mc, pc, makeDsv4KvCacheConfig(), false, 0);
+    RuntimeConfig runtime_config;
+    config.finalizeBlockNums(200, runtime_config);
     return config;
 }
 
@@ -1580,8 +1584,8 @@ TEST_F(DSV4AllocatorTest, InitAndBasicProperties) {
     // 7 groups → HybridTypeKVCacheAllocator path
     EXPECT_EQ(config.groupNums(), 7);
     EXPECT_EQ(allocator->seqSizePerBlock(), static_cast<int>(config.seq_size_per_block));
-    EXPECT_EQ(allocator->totalBlocksNum(), config.block_num - 1);
-    EXPECT_EQ(allocator->freeBlocksNum(), config.block_num - 1);
+    EXPECT_EQ(allocator->totalBlocksNum(), config.pagedBlockNum() - 1);
+    EXPECT_EQ(allocator->freeBlocksNum(), config.pagedBlockNum() - 1);
 }
 
 TEST_F(DSV4AllocatorTest, CpPageRrFixedAndSwaAllocateOneBlockPerVirtualBlock) {
@@ -1626,7 +1630,7 @@ TEST_F(DSV4AllocatorTest, FlashInitAndBasicProperties) {
 
     EXPECT_EQ(config.groupNums(), 7);
     EXPECT_EQ(config.layer_num, 43u);
-    EXPECT_EQ(allocator->totalBlocksNum(), config.block_num - 1);
+    EXPECT_EQ(allocator->totalBlocksNum(), config.pagedBlockNum() - 1);
 }
 
 TEST_F(DSV4AllocatorTest, AddressLookupAllGroups) {
@@ -1737,7 +1741,7 @@ TEST_F(DSV4AllocatorTest, KVBlockStrideIsMaxAcrossGroups) {
     for (int i = 0; i < kDsv4PoolNum; i++) {
         expected_max = std::max(expected_max, config.specForGroup(i)->block_size_bytes());
     }
-    EXPECT_EQ(config.kv_block_stride_bytes, expected_max);
+    EXPECT_EQ(config.maxKvBlockStrideBytes(), expected_max);
     // HCA_STATE has the largest per-block bytes (128 entries * 1024 * 4)
     EXPECT_EQ(expected_max, config.specForGroup(gidForTag(config, "hca_state"))->block_size_bytes());
 }
@@ -2254,7 +2258,6 @@ TEST_F(DSV4AllocatorTest, FlashPrefixCacheReusePagedGroupsOnly) {
 
 TEST_F(DSV4AllocatorTest, HybridPoolReserveBlocksAreDistributedAcrossGroups) {
     auto config      = makeDSV4AllocatorConfig(/*use_flash=*/true);
-    config.block_num = 200;
     auto allocator   = std::make_shared<HybridPoolKVCacheAllocator>(
         config, AllocationType::DEVICE, nullptr, /*reserve_block_ratio=*/10);
     ASSERT_TRUE(allocator->init());
@@ -2288,14 +2291,8 @@ TEST_F(DSV4AllocatorTest, HybridPoolReserveBlocksDoNotReduceExplicitHcaStateCapa
     auto              kv_config = makeDsv4KvCacheConfig();
     setDsv4ExplicitPoolBlocks(mc, "hca_state", 11);
     auto              config    = CacheConfigCreator::createBasicConfig(mc, pc, kv_config, false, 0);
-    config.block_num            = 40;
-    std::vector<uint32_t> block_nums(static_cast<size_t>(config.groupNums()), config.block_num);
-    for (size_t gid = 0; gid < static_cast<size_t>(config.groupNums()); ++gid) {
-        if (config.tagForGroup(gid) == "hca_state") {
-            block_nums[gid] = 11;
-        }
-    }
-    setGroupBlockNumsForTest(config, block_nums);
+    RuntimeConfig     runtime_config;
+    config.finalizeBlockNums(40, runtime_config);
 
     auto allocator = std::make_shared<HybridPoolKVCacheAllocator>(
         config, AllocationType::DEVICE, nullptr, /*reserve_block_ratio=*/50);
@@ -2330,7 +2327,8 @@ TEST_F(DSV4AllocatorTest, HybridPoolReserveBlocksDoNotReduceExplicitHcaStateCapa
 
 TEST_F(DSV4AllocatorTest, SWAGroupParticipatesInPrefixCacheReuse) {
     auto config       = makeDSV4AllocatorConfig();
-    config.block_num  = 100;
+    RuntimeConfig runtime_config;
+    config.finalizeBlockNums(100, runtime_config);
     auto allocator    = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
     auto shared_cache = std::make_shared<SharedBlockCache>();
     allocator->setSharedBlockCache(shared_cache);

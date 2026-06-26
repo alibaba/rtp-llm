@@ -30,11 +30,9 @@ CacheConfig makeCPHybridConfig() {
     config.dtype                     = rtp_llm::DataType::TYPE_FP16;
     config.layer_num                 = 4;
     config.layer_all_num             = 4;
-    config.block_num                 = 32;  // headroom for cp_size=2 expansion
     config.seq_size_per_block        = 4;
     config.kernel_seq_size_per_block = 2;
     config.linear_step               = 2;
-    config.group_layer_num           = 2;
 
     auto linear_spec                = std::make_shared<LinearKVCacheSpec>();
     linear_spec->type               = KVCacheSpecType::LinearAttention;
@@ -59,11 +57,11 @@ CacheConfig makeCPHybridConfig() {
                             {CacheGroupType::LINEAR, CacheGroupType::FULL},
                             {"linear", "full"});
 
-    config.kv_block_stride_bytes = std::max(full_spec->block_size_bytes(), linear_spec->block_size_bytes());
-    config.kv_block_size_bytes   = static_cast<size_t>(config.group_layer_num) * config.kv_block_stride_bytes;
-    config.kv_scale_stride_bytes = 0;
-    config.kv_scale_size_bytes   = 0;
-    config.block_size_bytes      = config.kv_block_size_bytes + config.kv_scale_size_bytes;
+    const uint32_t block_num             = 32;  // headroom for cp_size=2 expansion
+    const size_t   kv_block_stride_bytes = std::max(full_spec->block_size_bytes(), linear_spec->block_size_bytes());
+    config.setGroupBlockLayout({block_num, block_num},
+                               {kv_block_stride_bytes, kv_block_stride_bytes},
+                               {0, 0});
 
     return config;
 }
