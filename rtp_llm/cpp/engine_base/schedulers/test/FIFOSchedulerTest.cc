@@ -798,4 +798,412 @@ TEST_F(FIFOSchedulerTest, testTwoForceBatchGroupsIsolation) {
     ASSERT_EQ(scheduler.runningStreamsSize(), 2);
 }
 
+// ---------------------------------------------------------------------------
+// Helper used by the prefill-first cadence / KV-gate tests (Tasks 5–7)
+// ---------------------------------------------------------------------------
+
+static std::shared_ptr<GenerateStream> makeStream(const std::vector<int>& ids,
+                                                  const ModelConfig&      model_config,
+                                                  const RuntimeConfig&    runtime_config,
+                                                  const ResourceContext&  resource_context) {
+    auto query             = std::make_shared<GenerateInput>();
+    query->input_ids       = torch::tensor(ids, torch::kInt32);
+    query->generate_config = std::make_shared<GenerateConfig>();
+    return std::make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
+}
+
+// ---------------------------------------------------------------------------
+// Task 5: cadence tests (strict alternation S=1, decode-heavy S=3, prefill-heavy S=-3)
+// ---------------------------------------------------------------------------
+
+TEST_F(FIFOSchedulerTest, testPrefillFirstAlternation) {
+    CacheConfig cache_config  = makeMhaCacheConfig(1, 64, 1, 4, 8, rtp_llm::DataType::TYPE_FP16);
+    auto        cache_manager = std::make_shared<KVCacheManager>(cache_config);
+    ASSERT_TRUE(cache_manager->init());
+    ResourceContext resource_context;
+    resource_context.cache_manager = cache_manager;
+    ModelConfig model_config;
+    model_config.max_seq_len = 8192;
+    RuntimeConfig runtime_config;
+    runtime_config.max_generate_batch_size                     = 100;
+    runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8192;
+    runtime_config.fifo_scheduler_config.decode_prefill_ratio  = "1";  // strict alternation
+    PDSepConfig         pd_sep_config;
+    ParallelismConfig   parallelism_config;
+    ModelSpecificConfig model_specific_config;
+    FIFOScheduler       scheduler(
+        runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager);
+
+    auto s1 = makeStream({1, 2}, model_config, runtime_config, resource_context);
+    ASSERT_TRUE(scheduler.enqueue(s1).ok());
+
+    // R1: seed PREFILL (running+pending empty). Admits s1 -> pending; not yet running.
+    auto r1 = scheduler.schedule();
+    ASSERT_TRUE(r1.ok());
+    ASSERT_EQ(r1.value().size(), 1);
+    ASSERT_EQ(scheduler.runningStreamsSize(), 0);
+    ASSERT_EQ(scheduler.pendingDecodeStreamsSize(), 1);
+    s1->setSeqLength(s1->seqLength() + 1);  // simulate prefill forward
+
+    // Enqueue s2 AFTER the seed so it stays waiting (proves cadence, not just "no work").
+    auto s2 = makeStream({3, 4}, model_config, runtime_config, resource_context);
+    ASSERT_TRUE(scheduler.enqueue(s2).ok());
+
+    // R2: DECODE (decode_since_prefill_=0 < 1). Promotes s1 into running; s2 stays waiting.
+    auto r2 = scheduler.schedule();
+    ASSERT_TRUE(r2.ok());
+    ASSERT_EQ(scheduler.runningStreamsSize(), 1);
+    ASSERT_EQ(scheduler.pendingDecodeStreamsSize(), 0);
+    ASSERT_EQ(scheduler.waitingStreamsSize(), 1);
+    ASSERT_EQ(r2.value().size(), 1);  // pure-decode batch (s1)
+    s1->setSeqLength(s1->seqLength() + 1);
+
+    // R3: PREFILL (decode_since_prefill_=1 >= 1). Admits s2 (pure context); s1 held back in running.
+    auto r3 = scheduler.schedule();
+    ASSERT_TRUE(r3.ok());
+    ASSERT_EQ(r3.value().size(), 1);                     // pure-context batch (s2 only)
+    ASSERT_EQ(scheduler.runningStreamsSize(), 1);        // s1 still running, held back
+    ASSERT_EQ(scheduler.pendingDecodeStreamsSize(), 1);  // s2 pending
+    ASSERT_EQ(scheduler.waitingStreamsSize(), 0);
+}
+
+TEST_F(FIFOSchedulerTest, testDecodeHeavyCadence) {
+    CacheConfig cache_config  = makeMhaCacheConfig(1, 64, 1, 4, 8, rtp_llm::DataType::TYPE_FP16);
+    auto        cache_manager = std::make_shared<KVCacheManager>(cache_config);
+    ASSERT_TRUE(cache_manager->init());
+    ResourceContext resource_context;
+    resource_context.cache_manager = cache_manager;
+    ModelConfig model_config;
+    model_config.max_seq_len = 8192;
+    RuntimeConfig runtime_config;
+    runtime_config.max_generate_batch_size                     = 100;
+    runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8192;
+    runtime_config.fifo_scheduler_config.decode_prefill_ratio  = "3";  // 1 prefill : 3 decode
+    PDSepConfig         pd_sep_config;
+    ParallelismConfig   parallelism_config;
+    ModelSpecificConfig model_specific_config;
+    FIFOScheduler       scheduler(
+        runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager);
+
+    auto s1 = makeStream({1, 2}, model_config, runtime_config, resource_context);
+    ASSERT_TRUE(scheduler.enqueue(s1).ok());
+
+    // R1: seed PREFILL s1.
+    auto r1 = scheduler.schedule();
+    ASSERT_TRUE(r1.ok());
+    ASSERT_EQ(r1.value().size(), 1);
+    s1->setSeqLength(s1->seqLength() + 1);
+
+    // Keep s2 waiting throughout to prove the 3 decode rounds are cadence-forced (not "no work").
+    auto s2 = makeStream({3, 4}, model_config, runtime_config, resource_context);
+    ASSERT_TRUE(scheduler.enqueue(s2).ok());
+
+    // R2,R3,R4: DECODE (decode_since_prefill_ = 0,1,2 < 3). s2 must stay waiting each round.
+    for (int i = 0; i < 3; ++i) {
+        auto r = scheduler.schedule();
+        ASSERT_TRUE(r.ok());
+        ASSERT_EQ(scheduler.waitingStreamsSize(), 1) << "decode round " << i << " must not admit s2";
+        s1->setSeqLength(s1->seqLength() + 1);
+    }
+
+    // R5: PREFILL (decode_since_prefill_ == 3 >= 3) -> admits s2.
+    auto r5 = scheduler.schedule();
+    ASSERT_TRUE(r5.ok());
+    ASSERT_EQ(r5.value().size(), 1);  // pure-context (s2)
+    ASSERT_EQ(scheduler.waitingStreamsSize(), 0);
+}
+
+TEST_F(FIFOSchedulerTest, testPrefillHeavyCadence) {
+    CacheConfig cache_config  = makeMhaCacheConfig(1, 64, 1, 4, 8, rtp_llm::DataType::TYPE_FP16);
+    auto        cache_manager = std::make_shared<KVCacheManager>(cache_config);
+    ASSERT_TRUE(cache_manager->init());
+    ResourceContext resource_context;
+    resource_context.cache_manager = cache_manager;
+    ModelConfig model_config;
+    model_config.max_seq_len = 8192;
+    RuntimeConfig runtime_config;
+    runtime_config.max_generate_batch_size                     = 100;
+    runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8192;
+    runtime_config.fifo_scheduler_config.decode_prefill_ratio  = "1/3";  // 3 prefill : 1 decode
+    PDSepConfig         pd_sep_config;
+    ParallelismConfig   parallelism_config;
+    ModelSpecificConfig model_specific_config;
+    FIFOScheduler       scheduler(
+        runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager);
+
+    // Enqueue ONE stream right before each of the 3 prefill rounds so each admits exactly one,
+    // accumulating in the pending pool (multi-admit would otherwise grab all at once).
+    auto s1 = makeStream({1, 2}, model_config, runtime_config, resource_context);
+    ASSERT_TRUE(scheduler.enqueue(s1).ok());
+    auto r1 = scheduler.schedule();  // seed PREFILL s1
+    ASSERT_TRUE(r1.ok());
+    ASSERT_EQ(r1.value().size(), 1);
+    s1->setSeqLength(s1->seqLength() + 1);
+
+    auto s2 = makeStream({3, 4}, model_config, runtime_config, resource_context);
+    ASSERT_TRUE(scheduler.enqueue(s2).ok());
+    auto r2 = scheduler.schedule();  // PREFILL (prefill_since_decode_=1 < 3) -> s2
+    ASSERT_TRUE(r2.ok());
+    ASSERT_EQ(r2.value().size(), 1);
+    s2->setSeqLength(s2->seqLength() + 1);
+
+    auto s3 = makeStream({5, 6}, model_config, runtime_config, resource_context);
+    ASSERT_TRUE(scheduler.enqueue(s3).ok());
+    auto r3 = scheduler.schedule();  // PREFILL (prefill_since_decode_=2 < 3) -> s3
+    ASSERT_TRUE(r3.ok());
+    ASSERT_EQ(r3.value().size(), 1);
+    s3->setSeqLength(s3->seqLength() + 1);
+
+    ASSERT_EQ(scheduler.pendingDecodeStreamsSize(), 3);  // s1,s2,s3 all pending
+    ASSERT_EQ(scheduler.runningStreamsSize(), 0);
+
+    // Keep s4 waiting to prove the 4th round is cadence-forced DECODE (not "no work").
+    auto s4 = makeStream({7, 8}, model_config, runtime_config, resource_context);
+    ASSERT_TRUE(scheduler.enqueue(s4).ok());
+
+    // R4: DECODE (prefill_since_decode_ == 3, not < 3) -> promotes s1,s2,s3; s4 stays waiting.
+    auto r4 = scheduler.schedule();
+    ASSERT_TRUE(r4.ok());
+    ASSERT_EQ(scheduler.runningStreamsSize(), 3);
+    ASSERT_EQ(scheduler.pendingDecodeStreamsSize(), 0);
+    ASSERT_EQ(scheduler.waitingStreamsSize(), 1);  // s4 not admitted: cadence forced decode
+}
+
+// ---------------------------------------------------------------------------
+// Task 6: legacy-via-large-N, concurrency cap counts pending
+// ---------------------------------------------------------------------------
+
+TEST_F(FIFOSchedulerTest, testLargeStepDecodeFirst) {
+    CacheConfig cache_config  = makeMhaCacheConfig(1, 64, 1, 4, 8, rtp_llm::DataType::TYPE_FP16);
+    auto        cache_manager = std::make_shared<KVCacheManager>(cache_config);
+    ASSERT_TRUE(cache_manager->init());
+    ResourceContext resource_context;
+    resource_context.cache_manager = cache_manager;
+    ModelConfig model_config;
+    model_config.max_seq_len = 8192;
+    RuntimeConfig runtime_config;
+    runtime_config.max_generate_batch_size                     = 100;
+    runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8192;
+    runtime_config.fifo_scheduler_config.decode_prefill_ratio  = "20000";  // legacy decode-drain
+    PDSepConfig         pd_sep_config;
+    ParallelismConfig   parallelism_config;
+    ModelSpecificConfig model_specific_config;
+    FIFOScheduler       scheduler(
+        runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager);
+
+    auto s1 = makeStream({1, 2}, model_config, runtime_config, resource_context);
+    ASSERT_TRUE(scheduler.enqueue(s1).ok());
+    auto r1 = scheduler.schedule();  // seed PREFILL s1
+    ASSERT_TRUE(r1.ok());
+    ASSERT_EQ(r1.value().size(), 1);
+    s1->setSeqLength(s1->seqLength() + 1);
+
+    // s2 queued but must NOT be admitted while s1 decodes (huge step => always decode).
+    auto s2 = makeStream({3, 4}, model_config, runtime_config, resource_context);
+    ASSERT_TRUE(scheduler.enqueue(s2).ok());
+
+    for (int i = 0; i < 3; ++i) {
+        auto r = scheduler.schedule();  // DECODE rounds (decode_since_prefill_ << 20000)
+        ASSERT_TRUE(r.ok());
+        ASSERT_EQ(scheduler.waitingStreamsSize(), 1) << "s2 must stay waiting during decode-drain";
+        s1->setSeqLength(s1->seqLength() + 1);
+    }
+
+    // Finish s1; once running+pending drain, the seed branch admits s2.
+    s1->reportEvent(StreamEvents::GenerateDone);
+    auto r_after = scheduler.schedule();  // reaps s1 (running empty), then seed PREFILL s2
+    ASSERT_TRUE(r_after.ok());
+    ASSERT_EQ(scheduler.waitingStreamsSize(), 0);  // s2 finally admitted
+}
+
+TEST_F(FIFOSchedulerTest, testConcurrencyCapCountsPending) {
+    CacheConfig cache_config  = makeMhaCacheConfig(1, 64, 1, 4, 8, rtp_llm::DataType::TYPE_FP16);
+    auto        cache_manager = std::make_shared<KVCacheManager>(cache_config);
+    ASSERT_TRUE(cache_manager->init());
+    ResourceContext resource_context;
+    resource_context.cache_manager = cache_manager;
+    ModelConfig model_config;
+    model_config.max_seq_len = 8192;
+    RuntimeConfig runtime_config;
+    runtime_config.max_generate_batch_size                     = 2;  // cap = 2 in-flight
+    runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8192;
+    runtime_config.fifo_scheduler_config.decode_prefill_ratio  = "1/100";  // very prefill-heavy
+    PDSepConfig         pd_sep_config;
+    ParallelismConfig   parallelism_config;
+    ModelSpecificConfig model_specific_config;
+    FIFOScheduler       scheduler(
+        runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager);
+
+    std::vector<std::shared_ptr<GenerateStream>> streams;
+    for (int i = 0; i < 4; ++i) {
+        auto s = makeStream({1, 2}, model_config, runtime_config, resource_context);
+        streams.push_back(s);
+        ASSERT_TRUE(scheduler.enqueue(s).ok());
+    }
+
+    // R1: seed PREFILL. Cap = running(0)+pending(0)+streams+1 > 2 => admits exactly 2, rejects 2.
+    auto r1 = scheduler.schedule();
+    ASSERT_TRUE(r1.ok());
+    ASSERT_EQ(r1.value().size(), 2);
+    ASSERT_EQ(scheduler.pendingDecodeStreamsSize(), 2);
+    ASSERT_EQ(scheduler.waitingStreamsSize(), 2);
+    streams[0]->setSeqLength(streams[0]->seqLength() + 1);
+    streams[1]->setSeqLength(streams[1]->seqLength() + 1);
+
+    // R2: cadence says PREFILL but cap is full (pending=2) => admits nothing => degrades to DECODE,
+    // promoting the 2 pending into running. running+pending stays at the cap; the other 2 stay waiting.
+    auto r2 = scheduler.schedule();
+    ASSERT_TRUE(r2.ok());
+    ASSERT_EQ(scheduler.runningStreamsSize() + scheduler.pendingDecodeStreamsSize(), 2);
+    ASSERT_EQ(scheduler.waitingStreamsSize(), 2);
+}
+
+// ---------------------------------------------------------------------------
+// Task 7: KV-gated admission, deferred promotion, no incrKVBlock on prefill rounds
+// ---------------------------------------------------------------------------
+
+TEST_F(FIFOSchedulerTest, testKvGatedAdmission) {
+    // Only 1 free KV block: a prefill round can admit just one 2-token (1-block) stream;
+    // the second is gated out and stays WAITING (never errored).
+    CacheConfig cache_config  = makeMhaCacheConfig(1, 2, 1, 4, 2, rtp_llm::DataType::TYPE_FP16);
+    auto        cache_manager = std::make_shared<KVCacheManager>(cache_config);
+    ASSERT_TRUE(cache_manager->init());
+    ASSERT_EQ(cache_manager->freeBlocksNum(), 1);
+    ResourceContext resource_context;
+    resource_context.cache_manager = cache_manager;
+    ModelConfig model_config;
+    model_config.max_seq_len = 8192;
+    RuntimeConfig runtime_config;
+    runtime_config.max_generate_batch_size                     = 100;
+    runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8192;
+    runtime_config.fifo_scheduler_config.decode_prefill_ratio  = "1/100";  // prefill-heavy
+    PDSepConfig         pd_sep_config;
+    ParallelismConfig   parallelism_config;
+    ModelSpecificConfig model_specific_config;
+    FIFOScheduler       scheduler(
+        runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager);
+
+    auto s1 = makeStream({1, 2}, model_config, runtime_config, resource_context);
+    auto s2 = makeStream({3, 4}, model_config, runtime_config, resource_context);
+    ASSERT_TRUE(scheduler.enqueue(s1).ok());
+    ASSERT_TRUE(scheduler.enqueue(s2).ok());
+
+    auto r1 = scheduler.schedule();  // seed PREFILL: KV admits exactly one
+    ASSERT_TRUE(r1.ok());
+    ASSERT_EQ(r1.value().size(), 1);  // only one admitted
+    ASSERT_EQ(scheduler.pendingDecodeStreamsSize(), 1);
+    ASSERT_EQ(scheduler.waitingStreamsSize(), 1);  // the other gated out, still waiting
+    ASSERT_FALSE(s1->hasError());
+    ASSERT_FALSE(s2->hasError());  // gating never errors a stream
+}
+
+TEST_F(FIFOSchedulerTest, testDeferredPromotion) {
+    // 4 free blocks. Two prompts each take 1 block at prefill. We push one prefilled stream's
+    // seq so its promotion needs more blocks than available -> it defers (not errored);
+    // after the other stream finishes and frees its blocks, it promotes.
+    CacheConfig cache_config  = makeMhaCacheConfig(1, 5, 1, 4, 2, rtp_llm::DataType::TYPE_FP16);
+    auto        cache_manager = std::make_shared<KVCacheManager>(cache_config);
+    ASSERT_TRUE(cache_manager->init());
+    ASSERT_EQ(cache_manager->freeBlocksNum(), 4);
+    ResourceContext resource_context;
+    resource_context.cache_manager = cache_manager;
+    ModelConfig model_config;
+    model_config.max_seq_len = 8192;
+    RuntimeConfig runtime_config;
+    runtime_config.max_generate_batch_size                     = 100;
+    runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8192;
+    runtime_config.fifo_scheduler_config.decode_prefill_ratio  = "1";
+    PDSepConfig         pd_sep_config;
+    ParallelismConfig   parallelism_config;
+    ModelSpecificConfig model_specific_config;
+    FIFOScheduler       scheduler(
+        runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager);
+
+    // Seed-prefill s1 (1 block), promote it to running on the next decode round.
+    auto s1 = makeStream({1, 2}, model_config, runtime_config, resource_context);
+    ASSERT_TRUE(scheduler.enqueue(s1).ok());
+    auto r1 = scheduler.schedule();  // PREFILL s1
+    ASSERT_EQ(r1.value().size(), 1);
+    s1->setSeqLength(s1->seqLength() + 1);
+    auto r2 = scheduler.schedule();  // DECODE: promote s1 into running
+    ASSERT_EQ(scheduler.runningStreamsSize(), 1);
+    ASSERT_EQ(scheduler.pendingDecodeStreamsSize(), 0);
+
+    // Now prefill s2, and push its seq so promoting it needs more blocks than currently free.
+    auto s2 = makeStream({5, 6}, model_config, runtime_config, resource_context);
+    ASSERT_TRUE(scheduler.enqueue(s2).ok());
+    s1->setSeqLength(s1->seqLength() + 1);
+    auto r3 = scheduler.schedule();  // PREFILL s2 (held in pending)
+    ASSERT_EQ(r3.value().size(), 1);
+    // Make s2's next-step block need exceed free blocks so promotion must defer.
+    // With 4 total free blocks: s1 uses 2 after promotion, s2's prefill uses 1, leaving 1 free.
+    // s1 then consumes the last free block via incrKVBlock (seqLength=5 needs 3 total, has 2).
+    // After that, freeBlocksNum=0 < nextNeedBlockNums(0)=32 for s2 -> deferred.
+    s2->setSeqLength(64);
+    s1->setSeqLength(s1->seqLength() + 1);
+
+    auto r4 = scheduler.schedule();  // DECODE: s2 cannot promote (KV tight) -> stays pending, NOT errored
+    ASSERT_FALSE(s2->hasError());
+    ASSERT_EQ(scheduler.pendingDecodeStreamsSize(), 1);  // deferred
+    ASSERT_GE(cache_manager->freeBlocksNum(), 0);
+
+    // Free up blocks: finish s1 so its blocks are released; then s2 can promote on a later decode round.
+    s2->setSeqLength(2);  // make s2's need small again
+    s1->reportEvent(StreamEvents::GenerateDone);
+    auto r5 = scheduler.schedule();  // reaps s1 (frees blocks); decode round promotes s2
+    ASSERT_FALSE(s2->hasError());
+    ASSERT_EQ(scheduler.pendingDecodeStreamsSize(), 0);  // s2 finally promoted
+    ASSERT_EQ(scheduler.runningStreamsSize(), 1);
+}
+
+TEST_F(FIFOSchedulerTest, testNoIncrKvBlockOnPrefillRounds) {
+    CacheConfig cache_config  = makeMhaCacheConfig(1, 64, 1, 4, 8, rtp_llm::DataType::TYPE_FP16);
+    auto        cache_manager = std::make_shared<KVCacheManager>(cache_config);
+    ASSERT_TRUE(cache_manager->init());
+    ResourceContext resource_context;
+    resource_context.cache_manager = cache_manager;
+    ModelConfig model_config;
+    model_config.max_seq_len = 8192;
+    RuntimeConfig runtime_config;
+    runtime_config.max_generate_batch_size                     = 100;
+    runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8192;
+    runtime_config.fifo_scheduler_config.decode_prefill_ratio  = "1/3";  // P P P D
+    PDSepConfig         pd_sep_config;
+    ParallelismConfig   parallelism_config;
+    ModelSpecificConfig model_specific_config;
+    FIFOScheduler       scheduler(
+        runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager);
+
+    // One long-running decode stream that will be held back during the prefill burst.
+    auto held = makeStream({1, 2, 3, 4, 5, 6, 7, 8},
+                           model_config,
+                           runtime_config,
+                           resource_context);  // fills a block boundary
+    ASSERT_TRUE(scheduler.enqueue(held).ok());
+    auto r0 = scheduler.schedule();  // seed PREFILL held
+    held->setSeqLength(held->seqLength() + 1);
+    auto r1 = scheduler.schedule();  // DECODE: promote held into running
+    ASSERT_EQ(scheduler.runningStreamsSize(), 1);
+
+    // Now queue more work to trigger prefill rounds while `held` is in running (held back).
+    for (int i = 0; i < 3; ++i) {
+        ASSERT_TRUE(scheduler.enqueue(makeStream({1, 2}, model_config, runtime_config, resource_context)).ok());
+    }
+    // Drive a prefill round. `held` is at a block boundary, so a wrongful incrKVBlock on it would
+    // consume an extra free block. The prefill round must NOT advance running, so the only block(s)
+    // consumed are the admitted prefill prompt's — never a decode block for `held`.
+    const size_t blocks_before = cache_manager->freeBlocksNum();
+    auto         rp            = scheduler.schedule();
+    ASSERT_TRUE(rp.ok());
+    const size_t blocks_after = cache_manager->freeBlocksNum();
+
+    // `held` is not in the returned (pure-context) batch ...
+    for (const auto& s : rp.value()) {
+        ASSERT_NE(s.get(), held.get());
+    }
+    // ... and the prefill consumed at most the admitted prompts' blocks. With a 2-token prompt and
+    // block_size 8, one admitted prefill needs exactly 1 block; `held` (held back) must add 0.
+    ASSERT_LE(blocks_before - blocks_after, static_cast<size_t>(rp.value().size()));
+}
+
 }  // namespace rtp_llm

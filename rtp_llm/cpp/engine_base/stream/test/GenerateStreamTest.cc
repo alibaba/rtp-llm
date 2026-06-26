@@ -109,4 +109,11 @@ TEST_F(GenerateStreamTest, testGenerateStreamReuseCacheMethod) {
     ASSERT_TRUE(stream->reuseCache());
 }
 
+TEST(GapLatencyTest, computeGapLatencyUs) {
+    EXPECT_EQ(GenerateStream::computeGapLatencyUs(/*cost*/ 1000, /*wait*/ 100, /*active*/ 300), 600);
+    EXPECT_EQ(GenerateStream::computeGapLatencyUs(1000, 100, 900), 0);
+    EXPECT_EQ(GenerateStream::computeGapLatencyUs(1000, 100, 5000), 0);  // clamp >=0
+    EXPECT_EQ(GenerateStream::computeGapLatencyUs(1000, 0, 250), 750);
+}
+
 }  // namespace rtp_llm
