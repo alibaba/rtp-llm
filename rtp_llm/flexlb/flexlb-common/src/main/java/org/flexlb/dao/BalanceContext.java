@@ -5,6 +5,7 @@ import lombok.ToString;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
+import org.flexlb.enums.ScheduleModeEnum;
 
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -26,6 +27,11 @@ public class BalanceContext {
     private Request request;
 
     private Response response;
+
+    @ToString.Exclude
+    private byte[] generateInputPbBytes;
+
+    private ScheduleModeEnum scheduleMode = ScheduleModeEnum.AUTO;
 
     //======================== Queue ========================//
 

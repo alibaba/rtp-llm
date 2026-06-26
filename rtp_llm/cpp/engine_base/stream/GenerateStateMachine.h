@@ -12,12 +12,12 @@ namespace rtp_llm {
 
 class StreamCacheResource;  // forward declaration
 
-// Stream 生命周期状态机，将原先分散在 FIFOScheduler 中的状态转移逻辑集中管理。
-// 状态转移路径: WAITING -> LOADING_CACHE -> WAITING -> RUNNING -> FINISHED
-// 每次调度轮调用 moveToNext() 驱动状态转移，由 FIFOScheduler::evaluateAndUpdateStreams 统一调用。
-// 外部通过 reportEvent() 投递事件（替代原先分散的 reportXX 接口），moveToNext() 消费累积事件后决策转移。
-// 线程安全说明：GenerateStateMachine 本身不提供同步机制，外部调用者需保证 reportEvent() 和 moveToNext()
-// 的调用串行化（通常通过 GenerateStream::mutex_ 保护）。
+// Stream lifecycle state holder. Lifecycle transitions (WAITING -> RUNNING ->
+// FINISHED, cache loading, error handling) are now driven directly by
+// GenerateStream's lifecycle methods (prepare/isReady/activate/advance/finish).
+// This struct retains event accumulation, status storage, and error reporting.
+// Thread safety: callers must serialise reportEvent() and status writes
+// (typically via GenerateStream::mutex_).
 struct GenerateStateMachine {
 public:
     GenerateStateMachine(std::shared_ptr<StreamCacheResource> stream_cache_resource):
@@ -39,8 +39,6 @@ public:
         return events_.has(event);
     }
 
-    StreamState moveToNext();
-
     StreamState getStatus() const {
         return status.load(std::memory_order_acquire);
     }
@@ -50,16 +48,11 @@ public:
     }
 
     // 公开的状态和错误信息，GenerateStream 等外部代码直接访问
-    // status 使用 atomic 保证线程安全：moveToNext() 在 mutex_ 下写入，getStatus() 无锁读取
+    // status 使用 atomic 保证线程安全：lifecycle methods 在 mutex_ 下写入，getStatus() 无锁读取
     std::atomic<StreamState> status = StreamState::WAITING;
     ErrorInfo                error_info;
 
 private:
-    void handleWaiting();
-    void handleLoading();
-    void handleRunning();
-    void releaseResource();
-
     StreamEvents events_;
 
     std::shared_ptr<StreamCacheResource> stream_cache_resource_ = nullptr;

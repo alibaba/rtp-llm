@@ -2443,11 +2443,9 @@ class AttentionFP8(nn.Module):
     ) -> torch.Tensor:
         """Prefill entry point.
 
-        ``x``: flat ``[T, dim]`` (single-request, B==1 — enforced by
-        the FIFO scheduler's ``max_context_batch_size=1`` setting and
-        ``DeepSeekV4Model.forward``). ``positions``: ``[T]`` int64 of
-        absolute token positions; ``positions[0]`` is the prefill
-        start position. We don't read it eagerly — under broadcast
+        ``x``: flat ``[T, dim]`` where T is the total token count
+        across all requests in the batch (ragged via ``cu_seqlens``).
+        ``positions``: ``[T]`` int64 of absolute token positions. We don't read it eagerly — under broadcast
         meta the sp_int is already on ``self._prefill_meta_shared``
         (synced once in ``forward.py`` for all layers); standalone
         path syncs once inside ``_build_shared_prefill_meta``.

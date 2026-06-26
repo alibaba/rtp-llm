@@ -417,6 +417,13 @@ std::string RuntimeConfig::to_string() const {
             oss << ", ";
     }
     oss << "]\n"
+        << "all_worker_grpc_addrs: [";
+    for (size_t i = 0; i < all_worker_grpc_addrs.size(); ++i) {
+        oss << all_worker_grpc_addrs[i];
+        if (i < all_worker_grpc_addrs.size() - 1)
+            oss << ", ";
+    }
+    oss << "]\n"
         << "specify_gpu_arch: " << specify_gpu_arch;
     return oss.str();
 }
@@ -588,7 +595,10 @@ std::string PDSepConfig::to_string() const {
         << "load_cache_timeout_ms: " << load_cache_timeout_ms << "\n"
         << "max_rpc_timeout_ms: " << max_rpc_timeout_ms << "\n"
         << "worker_port_offset: " << worker_port_offset << "\n"
-        << "decode_entrance: " << decode_entrance;
+        << "decode_entrance: " << decode_entrance << "\n"
+        << "batch_dispatch_timeout_ms: " << batch_dispatch_timeout_ms << "\n"
+        << "batch_prepare_timeout_ms: " << batch_prepare_timeout_ms << "\n"
+        << "batch_load_timeout_ms: " << batch_load_timeout_ms;
     return oss.str();
 }
 

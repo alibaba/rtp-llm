@@ -29,7 +29,7 @@ import java.util.Map;
 import static org.flexlb.dao.loadbalance.StrategyErrorType.NO_AVAILABLE_WORKER;
 
 @Component
-@DependsOn({"randomStrategy", "weightedCacheStrategy", "shortestTTFTStrategy"})
+@DependsOn({"randomStrategy", "costBasedDecodeStrategy", "costBasedPrefillStrategy"})
 public class DefaultRouter implements Router {
 
     private final Map<RoleType, LoadBalancer> loadBalancerMap;
@@ -69,6 +69,7 @@ public class DefaultRouter implements Router {
         ModelWorkerStatus workerStatus = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS;
         List<RoleType> roleTypeList = workerStatus.getRoleTypeList();
         if (CollectionUtils.isEmpty(roleTypeList)) {
+            Logger.warn("No worker roles registered yet (total workers: {})", workerStatus.getWorkerTotalCount());
             return Response.error(NO_AVAILABLE_WORKER);
         }
 

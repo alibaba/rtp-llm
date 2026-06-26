@@ -4,12 +4,17 @@ import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
 
 import org.flexlb.balance.scheduler.DefaultRouter;
+import org.flexlb.balance.scheduler.FlexlbBatchScheduler;
 import org.flexlb.balance.scheduler.QueueManager;
 import org.flexlb.balance.scheduler.Router;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
+import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
+import org.flexlb.enums.ScheduleModeEnum;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.context.annotation.Lazy;
 import org.springframework.stereotype.Component;
 import reactor.core.publisher.Mono;
 
@@ -19,15 +24,18 @@ public class RouteService {
     private final ConfigService configService;
     private final Router router;
     private final QueueManager queueManager;
+    private final FlexlbBatchScheduler flexlbBatchScheduler;
     private final RecentCacheKeyTraceReporter recentCacheKeyTraceReporter;
 
     public RouteService(ConfigService configService,
                         DefaultRouter defaultScheduler,
                         QueueManager queueManager,
+                        @Lazy @Autowired(required = false) FlexlbBatchScheduler flexlbBatchScheduler,
                         RecentCacheKeyTraceReporter recentCacheKeyTraceReporter) {
         this.configService = configService;
         this.router = defaultScheduler;
         this.queueManager = queueManager;
+        this.flexlbBatchScheduler = flexlbBatchScheduler;
         this.recentCacheKeyTraceReporter = recentCacheKeyTraceReporter;
     }
 
@@ -41,7 +49,11 @@ public class RouteService {
         balanceContext.setConfig(flexlbConfig);
 
         Mono<Response> resultMono;
-        if (flexlbConfig.isEnableQueueing()) {
+        if (shouldUseFlexlbBatch(balanceContext, flexlbConfig)) {
+            CompletableFuture<Response> future = flexlbBatchScheduler.submit(balanceContext);
+            balanceContext.setFuture(future);
+            resultMono = Mono.fromFuture(future);
+        } else if (flexlbConfig.isEnableQueueing()) {
             resultMono = queueManager.tryRouteAsync(balanceContext);  // Use async queuing mechanism
         } else {
             resultMono = Mono.fromCallable(() -> router.route(balanceContext));  // Direct routing without queuing
@@ -61,14 +73,47 @@ public class RouteService {
      */
     public void cancel(BalanceContext balanceContext) {
         FlexlbConfig flexlbConfig = configService.loadBalanceConfig();
+        balanceContext.cancel();
         if (flexlbConfig.isEnableQueueing()) {
-            balanceContext.cancel();
             CompletableFuture<Response> future = balanceContext.getFuture();
             if (future != null) {
                 future.completeExceptionally(new CancellationException("Request cancelled by client"));
             }
         }
+        if (flexlbBatchScheduler != null && balanceContext.getRequest() != null) {
+            flexlbBatchScheduler.cancel(balanceContext.getRequest().getRequestId());
+        }
         balanceContext.setSuccess(false);
         balanceContext.setErrorMessage("request cancelled");
+    }
+
+    public void cancelByRequestId(long requestId) {
+        if (flexlbBatchScheduler != null) {
+            flexlbBatchScheduler.cancel(requestId);
+        }
+    }
+
+    boolean shouldUseFlexlbBatch(BalanceContext ctx, FlexlbConfig config) {
+        if (flexlbBatchScheduler == null || config == null) {
+            return false;
+        }
+        ScheduleModeEnum mode = ctx.getScheduleMode();
+        if (mode == ScheduleModeEnum.BATCH) {
+            return true;
+        }
+        if (mode == ScheduleModeEnum.DIRECT) {
+            return false;
+        }
+        // AUTO: use batch when config enables it and request characteristics match
+        if (!config.isFlexlbBatchEnabled()) {
+            return false;
+        }
+        Request request = ctx.getRequest();
+        return request != null
+                && request.getMaxNewTokens() > 1
+                && request.getNumBeams() <= 1
+                && !request.isForceDisableSpRun()
+                && ctx.getGenerateInputPbBytes() != null
+                && ctx.getGenerateInputPbBytes().length > 0;
     }
 }

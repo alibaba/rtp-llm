@@ -6,9 +6,13 @@ import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.LoadBalanceStrategyEnum;
 import org.flexlb.enums.ResourceMeasureIndicatorEnum;
 
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.List;
+
+import static org.flexlb.enums.LoadBalanceStrategyEnum.COST_BASED_DECODE;
+import static org.flexlb.enums.LoadBalanceStrategyEnum.COST_BASED_PREFILL;
 import static org.flexlb.enums.LoadBalanceStrategyEnum.RANDOM;
-import static org.flexlb.enums.LoadBalanceStrategyEnum.SHORTEST_TTFT;
-import static org.flexlb.enums.LoadBalanceStrategyEnum.WEIGHTED_CACHE;
 import static org.flexlb.enums.ResourceMeasureIndicatorEnum.REMAINING_KV_CACHE;
 import static org.flexlb.enums.ResourceMeasureIndicatorEnum.WAIT_TIME;
 
@@ -24,12 +28,12 @@ public class FlexlbConfig {
     /**
      * Load balancing strategy
      */
-    private LoadBalanceStrategyEnum loadBalanceStrategy = LoadBalanceStrategyEnum.SHORTEST_TTFT;
+    private LoadBalanceStrategyEnum loadBalanceStrategy = LoadBalanceStrategyEnum.COST_BASED_PREFILL;
 
     /**
      * Load balancing strategy for DECODE role
      */
-    private LoadBalanceStrategyEnum decodeLoadBalanceStrategy = LoadBalanceStrategyEnum.WEIGHTED_CACHE;
+    private LoadBalanceStrategyEnum decodeLoadBalanceStrategy = LoadBalanceStrategyEnum.COST_BASED_DECODE;
 
     /**
      * Load balancing strategy for VIT role
@@ -101,7 +105,7 @@ public class FlexlbConfig {
      * Prefill role queuing threshold
      * When below this threshold, the Worker is considered available
      */
-    private long prefillQueueSizeThreshold = 3;
+    private long prefillQueueSizeThreshold = 64;
 
     /**
      * KV cache available threshold for DECODE role (percentage)
@@ -176,6 +180,223 @@ public class FlexlbConfig {
      */
     private volatile TrafficPolicyConfig trafficPolicy = new TrafficPolicyConfig();
 
+    // ========== FlexLB Batch Configuration ==========
+
+    /**
+     * Enables master-side request coalescing. Requests carrying a full
+     * GenerateInputPB are routed once, grouped by Prefill worker,
+     * and submitted through EnqueueBatch.
+     */
+    private boolean flexlbBatchEnabled = true;
+
+    /**
+     * Maximum real requests in one EnqueueBatch request.
+     */
+    private int flexlbBatchSizeMax = 8;
+
+    /**
+     * Remaining-budget window in milliseconds. Outside this window the batcher
+     * keeps collecting unless the batch reaches flexlbBatchSizeMax. Inside this
+     * window it can dispatch once the batch has enough requests and another
+     * arrival is unlikely before the latest safe dispatch point.
+     */
+    private long flexlbBatchWindowMs = 300;
+
+    /**
+     * Minimum useful batch size. This is not a hard immediate-dispatch trigger:
+     * the batcher may keep waiting if the remaining SLO slack can likely buy
+     * one more request.
+     */
+    private int flexlbBatchMinSize = 3;
+
+    /**
+     * Upper bound for deadline-protection dispatch. The effective guard is
+     * min(flexlbBatchEmergencyBudgetMs, incrementalBatchCost + flexlbBatchDispatchGuardMs).
+     */
+    private long flexlbBatchEmergencyBudgetMs = 150;
+
+    /**
+     * Safety guard left before the computed SLO deadline when dispatching a batch.
+     * Covers master loop jitter, gRPC enqueue overhead, and predictor error.
+     */
+    private long flexlbBatchDispatchGuardMs = 40;
+
+    /**
+     * EMA alpha used to estimate per-worker request inter-arrival time for batching.
+     */
+    private double flexlbBatchArrivalEmaAlpha = 0.2;
+
+    /**
+     * Extra slack that must remain after the next expected request arrival before
+     * the latest safe dispatch point. Larger values dispatch earlier and reduce
+     * deadline pressure; smaller values favor bigger batches.
+     */
+    private long flexlbBatchArrivalWaitGuardMs = 20;
+
+    /**
+     * Maximum in-flight prefill batches allowed per worker before the batcher
+     * stops dispatching new batches and keeps requests in the master-side queue.
+     * Values <= 0 disable this backpressure gate.
+     */
+    private int flexlbBatchMaxInflightBatchesPerWorker = 2;
+
+    /**
+     * Deadline in milliseconds for EnqueueBatch.
+     */
+    private long flexlbBatchEnqueueDeadlineMs = 5000;
+
+    /**
+     * TTL for inflight entries before eviction (used by all routing paths).
+     * Only a safety net — calibrate() cleans up normally.  This catches stale
+     * entries left by engine crashes, lost status reports, or bugs.
+     * 5 min is generous for network/engine-report jitter but short enough
+     * that stale inflight won't distort realWaitTimeMs for long.
+     */
+    private long flexlbInflightTtlMs = 300_000L;
+
+    /**
+     * Maximum threads in the batch dispatch executor pool.
+     */
+    private int flexlbBatchDispatchPoolSize = 64;
+
+    /**
+     * Maximum pending tasks in the batch dispatch executor queue.
+     * Tasks submitted when both the pool and queue are full are rejected
+     * and fail immediately with QUEUE_FULL.
+     */
+    private int flexlbBatchDispatchQueueSize = 256;
+
+    // ========== CostBasedPrefill Strategy Configuration ==========
+
+    /**
+     * Whether to enable SLO time-budget hard filter during prefill worker selection.
+     * When enabled, workers whose (waitMs + predictedPrefillMs) exceeds
+     * (SLO - riskMargin) are excluded. Default false because the filter is
+     * too aggressive in practice.
+     */
+    private boolean costSloFilterEnabled = false;
+
+    private long costSloMs = 500;
+
+    private long costSloRiskMarginMs = 100;
+
+    private String costSloBuckets = "";
+
+    private transient volatile List<long[]> parsedSloBuckets;
+
+    public void setCostSloBuckets(String costSloBuckets) {
+        this.costSloBuckets = costSloBuckets;
+        this.parsedSloBuckets = null;
+    }
+
+    private double costHotspotMultiplier = 3.0;
+
+    private double costImbalanceMultiplier = 3.0;
+
+    private double costAlpha0 = 0;
+    private double costAlpha1 = 1.0;
+    private double costAlpha2 = 0;
+    private double costAlpha3 = 0;
+    private double costAlpha4 = 0.3;
+    private double costAlpha5 = 0;
+
+    /**
+     * Comma-separated shorthand for the 6 predictor coefficients.
+     * Accepts 3 values (α₀,α₁,α₂) or 6 values (α₀–α₅).
+     * Overrides the individual costAlpha* fields when set.
+     * Example: "290,0.0116,1.21e-8" or "290,0.0116,1.21e-8,1.21e-8,0,0"
+     */
+    public void setPrefillCoefficients(String csv) {
+        if (csv == null || csv.isBlank()) {
+            return;
+        }
+        String[] parts = csv.split(",");
+        try {
+            if (parts.length >= 3) {
+                costAlpha0 = Double.parseDouble(parts[0].trim());
+                costAlpha1 = Double.parseDouble(parts[1].trim());
+                costAlpha2 = Double.parseDouble(parts[2].trim());
+            }
+            if (parts.length >= 6) {
+                costAlpha3 = Double.parseDouble(parts[3].trim());
+                costAlpha4 = Double.parseDouble(parts[4].trim());
+                costAlpha5 = Double.parseDouble(parts[5].trim());
+            } else if (parts.length >= 3) {
+                costAlpha3 = 0;
+                costAlpha4 = 0;
+                costAlpha5 = 0;
+            }
+        } catch (NumberFormatException e) {
+            // Keep existing default values on parse failure.
+        }
+    }
+
+    // ========== SLO-Budget Batcher Configuration ==========
+
+    private double flexlbBatchFillThreshold = 0.5;
+
+    private int flexlbBatchMaxCapacity = 1048576;
+
+    private int flexlbBatchSearchIter = 10;
+
+    private int flexlbBatchScanAhead = 64;
+
+    /**
+     * Maximum queue depth per WorkerBatcher. Requests beyond this limit are
+     * rejected with QUEUE_FULL.
+     */
+    private int flexlbBatchQueueMaxSize = 64;
+
+    /**
+     * Maximum total in-flight requests across all batchers. Acts as a global
+     * admission control gate at the FlexlbBatchScheduler entry.
+     */
+    private int flexlbBatchMaxInflight = 100000;
+
+    // ========== Batcher Algorithm Selection ==========
+
+    /**
+     * Batcher algorithm name. Supported values:
+     * <ul>
+     *   <li>{@code fixed_window} — Fixed time window batching with optional
+     *       predictor-based early dispatch. No SLO deadline tracking, no EMA,
+     *       no request dropping (default).</li>
+     *   <li>{@code slo_budget} — SLO-deadline-aware batching with EMA arrival
+     *       rate estimation, budget-based greedy fill, and deadline-gated dispatch.</li>
+     * </ul>
+     */
+    private String flexlbBatchAlgorithm = "fixed_window";
+
+    /**
+     * Fixed wait time in milliseconds for the {@code fixed_window} batcher
+     * algorithm. After a request has waited this long, the batcher dispatches
+     * whatever has accumulated regardless of batch size.
+     *
+     * <p>Only used when {@link #flexlbBatchAlgorithm} is {@code fixed_window}.
+     */
+    private long flexlbBatchFixedWaitMs = 300;
+
+    /**
+     * Predicted batch execution time threshold in milliseconds for the
+     * {@code fixed_window} batcher algorithm. If the predictor estimates
+     * the accumulated batch will take at least this long, the batcher
+     * dispatches immediately rather than waiting for {@link #flexlbBatchFixedWaitMs}.
+     *
+     * <p>Set to 0 to disable predictor-based early dispatch (default).
+     * Only used when {@link #flexlbBatchAlgorithm} is {@code fixed_window}.
+     */
+    private long flexlbBatchPredictThresholdMs = 0;
+
+    // ========== gRPC Configuration ==========
+
+    private long prefillLbTimeoutMs = 5000;
+
+    // ========== Decode Load Balance Hard Filter Configuration ==========
+
+    private double decodeHotspotMultiplier = 3.0;
+
+    private double decodeImbalanceMultiplier = 3.0;
+
     /**
      * Get load balancing strategy for a role type
      * This method handles the logic of selecting the appropriate strategy based on role type and configuration
@@ -186,13 +407,13 @@ public class FlexlbConfig {
     public LoadBalanceStrategyEnum getStrategyForRoleType(RoleType roleType) {
         switch (roleType) {
             case PDFUSION -> {
-                return this.loadBalanceStrategy != null ? loadBalanceStrategy : SHORTEST_TTFT;
+                return this.loadBalanceStrategy != null ? loadBalanceStrategy : COST_BASED_PREFILL;
             }
             case PREFILL -> {
-                return this.loadBalanceStrategy != null ? loadBalanceStrategy : SHORTEST_TTFT;
+                return this.loadBalanceStrategy != null ? loadBalanceStrategy : COST_BASED_PREFILL;
             }
             case DECODE -> {
-                return this.decodeLoadBalanceStrategy != null ? decodeLoadBalanceStrategy : WEIGHTED_CACHE;
+                return this.decodeLoadBalanceStrategy != null ? decodeLoadBalanceStrategy : COST_BASED_DECODE;
             }
             case VIT -> {
                 return this.vitLoadBalanceStrategy != null ? vitLoadBalanceStrategy : RANDOM;
@@ -228,5 +449,40 @@ public class FlexlbConfig {
                 return null;
             }
         }
+    }
+
+    public long resolveSloMs(long seqLen) {
+        List<long[]> buckets = getParsedSloBuckets();
+        if (buckets == null || buckets.isEmpty()) {
+            return costSloMs;
+        }
+        for (long[] bucket : buckets) {
+            if (seqLen <= bucket[0]) {
+                return bucket[1];
+            }
+        }
+        return buckets.get(buckets.size() - 1)[1];
+    }
+
+    private List<long[]> getParsedSloBuckets() {
+        if (parsedSloBuckets != null) {
+            return parsedSloBuckets;
+        }
+        if (costSloBuckets == null || costSloBuckets.isBlank()) {
+            return null;
+        }
+        List<long[]> result = new ArrayList<>();
+        for (String entry : costSloBuckets.split(",")) {
+            String[] kv = entry.trim().split(":");
+            if (kv.length == 2) {
+                try {
+                    result.add(new long[]{Long.parseLong(kv[0].trim()), Long.parseLong(kv[1].trim())});
+                } catch (NumberFormatException ignored) {
+                }
+            }
+        }
+        result.sort(Comparator.comparingLong(a -> a[0]));
+        parsedSloBuckets = result;
+        return result;
     }
 }

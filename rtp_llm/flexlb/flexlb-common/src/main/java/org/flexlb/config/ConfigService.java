@@ -19,12 +19,11 @@ import java.util.Map;
 public class ConfigService {
 
     private static final String FLEXLB_CONFIG_ENV = "FLEXLB_CONFIG";
-    private static final String STRATEGY_CONFIGS_ENV = "STRATEGY_CONFIGS";
+    private static final String PREFILL_COEFFICIENTS_ENV = "PREFILL_COEFFICIENTS";
     private static final String TRAFFIC_POLICY_CONFIG_ENV = "TRAFFIC_POLICY_CONFIG";
     private static final String TRAFFIC_POLICY_CONFIG_FILE_ENV = "TRAFFIC_POLICY_CONFIG_FILE";
 
     private final FlexlbConfig flexlbConfig;
-    private final StrategyConfigs strategyConfigs;
 
     public ConfigService() {
         this(System.getenv());
@@ -35,7 +34,12 @@ public class ConfigService {
         log.warn("FLEXLB_CONFIG = {}", lbConfigStr);
         FlexlbConfig config;
         if (lbConfigStr != null) {
-            config = JsonUtils.toObject(lbConfigStr, FlexlbConfig.class);
+            try {
+                config = JsonUtils.toObject(lbConfigStr, FlexlbConfig.class);
+            } catch (Exception e) {
+                log.error("Failed to parse FLEXLB_CONFIG, use default config", e);
+                config = new FlexlbConfig();
+            }
         } else {
             config = new FlexlbConfig();
         }
@@ -43,33 +47,13 @@ public class ConfigService {
         // If corresponding advanced environment variables exist, override and update
         applyEnvironmentOverrides(config, environment);
         applyTrafficPolicyOverride(config, environment);
+        applyPrefillCoefficientsOverride(config, environment);
 
         this.flexlbConfig = config;
-        this.strategyConfigs = loadStrategyConfigs(environment);
     }
 
     public FlexlbConfig loadBalanceConfig() {
         return flexlbConfig;
-    }
-
-    private StrategyConfigs loadStrategyConfigs(Map<String, String> environment) {
-        String strategyConfigsStr = environment.get(STRATEGY_CONFIGS_ENV);
-
-        StrategyConfigs configs;
-        if (StringUtils.isNotBlank(strategyConfigsStr)) {
-            log.warn("STRATEGY_CONFIGS = {}", strategyConfigsStr);
-            configs = JsonUtils.toObjectOrNull(strategyConfigsStr, StrategyConfigs.class);
-            if (configs == null) {
-                log.warn("Failed to parse STRATEGY_CONFIGS, use default strategy configs");
-                configs = new StrategyConfigs();
-            }
-        } else {
-            log.debug("STRATEGY_CONFIGS is not set, use default strategy configs");
-            configs = new StrategyConfigs();
-        }
-
-        configs.normalize();
-        return configs;
     }
 
     public synchronized void updateTrafficPolicy(TrafficPolicyConfig trafficPolicy) {
@@ -141,6 +125,15 @@ public class ConfigService {
         log.warn("Traffic policy loaded from standalone config: {}", JsonUtils.toStringOrEmpty(trafficPolicy));
     }
 
+    private void applyPrefillCoefficientsOverride(FlexlbConfig config, Map<String, String> environment) {
+        String csv = environment.get(PREFILL_COEFFICIENTS_ENV);
+        if (StringUtils.isBlank(csv)) {
+            return;
+        }
+        config.setPrefillCoefficients(csv);
+        log.warn("Prefill coefficients loaded from {}: {}", PREFILL_COEFFICIENTS_ENV, csv);
+    }
+
     private String readConfigFile(String filePath) {
         try {
             return Files.readString(Path.of(filePath), StandardCharsets.UTF_8);
@@ -161,6 +154,7 @@ public class ConfigService {
                 || type == Double.class
                 || type == boolean.class
                 || type == Boolean.class
+                || type == String.class
                 || type.isEnum();
     }
 
@@ -185,7 +179,9 @@ public class ConfigService {
      */
     @SuppressWarnings({"unchecked", "rawtypes"})
     private Object parseValue(String value, Class<?> targetType) {
-        if (targetType == int.class || targetType == Integer.class) {
+        if (targetType == String.class) {
+            return value;
+        } else if (targetType == int.class || targetType == Integer.class) {
             return Integer.parseInt(value);
         } else if (targetType == long.class || targetType == Long.class) {
             return Long.parseLong(value);
@@ -194,7 +190,7 @@ public class ConfigService {
         } else if (targetType == boolean.class || targetType == Boolean.class) {
             return Boolean.parseBoolean(value);
         } else if (targetType.isEnum()) {
-            return Enum.valueOf((Class<Enum>) targetType, value);
+            return JsonUtils.toObject("\"" + value + "\"", targetType);
         }
         throw new IllegalArgumentException("Unsupported type: " + targetType);
     }

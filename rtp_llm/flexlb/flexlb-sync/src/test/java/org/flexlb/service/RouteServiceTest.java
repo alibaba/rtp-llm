@@ -35,6 +35,9 @@ class RouteServiceTest {
     private QueueManager queueManager;
 
     @Mock
+    private org.flexlb.balance.scheduler.FlexlbBatchScheduler flexlbBatchScheduler;
+
+    @Mock
     private RecentCacheKeyTraceReporter recentCacheKeyTraceReporter;
 
     @Mock
@@ -45,7 +48,8 @@ class RouteServiceTest {
     @BeforeEach
     void setUp() {
         when(configService.loadBalanceConfig()).thenReturn(flexlbConfig);
-        routeService = new RouteService(configService, defaultRouter, queueManager, recentCacheKeyTraceReporter);
+        routeService = new RouteService(configService, defaultRouter, queueManager,
+                flexlbBatchScheduler, recentCacheKeyTraceReporter);
     }
 
     @Test

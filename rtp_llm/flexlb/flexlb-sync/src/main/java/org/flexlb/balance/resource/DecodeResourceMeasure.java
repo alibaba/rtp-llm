@@ -1,15 +1,15 @@
 package org.flexlb.balance.resource;
 
 import org.apache.commons.collections4.MapUtils;
+import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.enums.ResourceMeasureIndicatorEnum;
+import org.flexlb.util.Logger;
 import org.springframework.stereotype.Component;
 
-import java.util.HashSet;
 import java.util.Map;
-import java.util.Set;
 
 /**
  * Decode role resource measure
@@ -35,27 +35,29 @@ public class DecodeResourceMeasure implements ResourceMeasure {
         this.concurrencyLimit = config.getDecodeConcurrencyLimit();
     }
 
-    @Override
-    public boolean isResourceAvailable(WorkerStatus workerStatus) {
-        if (workerStatus == null || !workerStatus.isAlive()) {
+    public boolean isResourceAvailable(DecodeEndpoint endpoint) {
+        if (endpoint == null || !endpoint.getStatus().isAlive()) {
             return false;
         }
-
-        if (isConcurrencyLimitReached(workerStatus)) {
+        long concurrency = calculateDecodeConcurrency(endpoint.getStatus());
+        if (concurrencyLimit > 0 && concurrency >= concurrencyLimit) {
+            Logger.warn("Decode worker {} resource unavailable: concurrency={}, limit={}",
+                    endpoint.getIp(), concurrency, concurrencyLimit);
             return false;
         }
-
-        long used = workerStatus.getUsedKvCacheTokens().get();
-        long available = workerStatus.getAvailableKvCacheTokens().get();
-        long total = used + available;
-
+        long used = endpoint.realKvUsed();
+        long total = endpoint.realKvTotal();
         if (total == 0) {
-            workerStatus.getResourceAvailable().set(true);
+            endpoint.getStatus().getResourceAvailable().set(true);
             return true;
         }
-
         long usagePercentage = (long) ((used * 100.0) / total);
-        return workerStatus.updateResourceAvailabilityWithHysteresis(usagePercentage, availableThreshold, hysteresisBiasPercent);
+        boolean available = endpoint.getStatus().updateResourceAvailabilityWithHysteresis(usagePercentage, availableThreshold, hysteresisBiasPercent);
+        if (!available) {
+            Logger.warn("Decode worker {} resource unavailable: kvUsage={}%, threshold={}%, used={}, total={}",
+                    endpoint.getIp(), usagePercentage, availableThreshold, used, total);
+        }
+        return available;
     }
 
     @Override
@@ -90,9 +92,9 @@ public class DecodeResourceMeasure implements ResourceMeasure {
     }
 
     private double calculateKvCacheWaterLevel(WorkerStatus workerStatus) {
-        long used = workerStatus.getUsedKvCacheTokens().get();
+        long total = workerStatus.getTotalKvCacheTokens().get();
         long available = workerStatus.getAvailableKvCacheTokens().get();
-        long total = used + available;
+        long used = total - available;
 
         if (total == 0) {
             return 0.0;
@@ -122,23 +124,10 @@ public class DecodeResourceMeasure implements ResourceMeasure {
         return Math.min(100.0, currentConcurrency * 100.0 / concurrencyLimit);
     }
 
-    private boolean isConcurrencyLimitReached(WorkerStatus workerStatus) {
-        return concurrencyLimit > 0 && calculateDecodeConcurrency(workerStatus) >= concurrencyLimit;
-    }
-
     private long calculateDecodeConcurrency(WorkerStatus workerStatus) {
-        Set<String> requestIds = new HashSet<>();
-        if (MapUtils.isNotEmpty(workerStatus.getWaitingTaskList())) {
-            requestIds.addAll(workerStatus.getWaitingTaskList().keySet());
-        }
         if (MapUtils.isNotEmpty(workerStatus.getRunningTaskList())) {
-            requestIds.addAll(workerStatus.getRunningTaskList().keySet());
+            return workerStatus.getRunningTaskList().size();
         }
-        if (MapUtils.isNotEmpty(workerStatus.getLocalTaskMap())) {
-            workerStatus.getLocalTaskMap().keySet().stream()
-                    .map(String::valueOf)
-                    .forEach(requestIds::add);
-        }
-        return requestIds.size();
+        return 0;
     }
 }

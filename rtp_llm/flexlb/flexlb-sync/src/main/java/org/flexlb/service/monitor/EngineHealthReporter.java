@@ -5,6 +5,7 @@ import io.netty.util.concurrent.EventExecutor;
 import io.netty.util.concurrent.SingleThreadEventExecutor;
 import lombok.Data;
 import org.apache.commons.collections4.CollectionUtils;
+import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.cache.monitor.CacheMetricsReporter;
 import org.flexlb.constant.ZkMasterEvent;
 import org.flexlb.dao.BalanceContext;
@@ -219,6 +220,7 @@ public class EngineHealthReporter {
 
     public void reportStatusCheckerSuccess(String modelName,
                                            WorkerStatus workerStatus,
+                                           WorkerEndpoint ep,
                                            int runningTaskInfoSize,
                                            int finishedTaskListSize) {
 
@@ -226,7 +228,7 @@ public class EngineHealthReporter {
                 "model", modelName,
                 "code", "0",
                 "engineIp", workerStatus.getIp(),
-                "role", workerStatus.getRole());
+                "role", workerStatus.getRole().name());
 
         Long availableConcurrency = workerStatus.getAvailableConcurrency();
         if (availableConcurrency != null) {
@@ -236,15 +238,14 @@ public class EngineHealthReporter {
         if (lastUpdateTime > 0) {
             monitor.report(ENGINE_STATUS_CHECK_SUCCESS_PERIOD, metricTags, (double) System.nanoTime() / 1000 - lastUpdateTime);
         }
-        monitor.report(ENGINE_RUNNING_QUEUE_TIME, metricTags, workerStatus.getRunningQueueTime().get());
+        monitor.report(ENGINE_RUNNING_QUEUE_TIME, metricTags, ep != null ? ep.getLoadMetric() : 0);
 
         // Report local task cache size
-        int localTaskMapSize = workerStatus.getLocalTaskMap() != null ? workerStatus.getLocalTaskMap().size() : 0;
-        monitor.report(ENGINE_LOCAL_TASK_MAP_SIZE, metricTags, localTaskMapSize);
+        monitor.report(ENGINE_LOCAL_TASK_MAP_SIZE, metricTags, ep != null ? ep.getLocalTaskCount() : 0);
 
         metricTags = FlexMetricTags.of(
                 "engineIp", workerStatus.getIp(),
-                "role", workerStatus.getRole());
+                "role", workerStatus.getRole().name());
 
         monitor.report(ENGINE_FINISHED_TASK_LIST_SIZE, metricTags, finishedTaskListSize);
         monitor.report(ENGINE_RUNNING_TASK_INFO_SIZE, metricTags, runningTaskInfoSize);
@@ -257,7 +258,7 @@ public class EngineHealthReporter {
                     "model", modelName,
                     "code", "0",
                     "engineIp", workerStatus.getIp(),
-                    "role", workerStatus.getRole());
+                    "role", workerStatus.getRole().name());
             monitor.report(CACHE_STATUS_CHECK_SUCCESS_PERIOD, metricTags, (double) System.nanoTime() / 1000 - cacheLastUpdateTime);
         }
         if (workerStatus.getCacheStatus() != null) {
@@ -266,19 +267,19 @@ public class EngineHealthReporter {
             FlexMetricTags metricTags = FlexMetricTags.of(
                     "model", modelName,
                     "engineIp", workerStatus.getIp(),
-                    "role", workerStatus.getRole());
+                    "role", workerStatus.getRole().name());
             monitor.report(CACHE_BLOCK_SIZE, metricTags, blockSize);
             monitor.report(CACHE_KEY_SIZE, metricTags, cacheKeySize);
         }
 
-        long usedKvCacheTokens = workerStatus.getUsedKvCacheTokens().get();
+        long totalKvCacheTokens = workerStatus.getTotalKvCacheTokens().get();
         long availableKvCacheTokens = workerStatus.getAvailableKvCacheTokens().get();
-        long totalKvCacheTokens = usedKvCacheTokens + availableKvCacheTokens;
+        long usedKvCacheTokens = totalKvCacheTokens - availableKvCacheTokens;
 
         FlexMetricTags kvCacheMetricTags = FlexMetricTags.of(
                 "model", modelName,
                 "engineIp", workerStatus.getIp(),
-                "role", workerStatus.getRole());
+                "role", workerStatus.getRole().name());
 
         monitor.report(CACHE_USED_KV_CACHE_TOKENS, kvCacheMetricTags, usedKvCacheTokens);
         monitor.report(CACHE_AVAILABLE_KV_CACHE_TOKENS, kvCacheMetricTags, availableKvCacheTokens);

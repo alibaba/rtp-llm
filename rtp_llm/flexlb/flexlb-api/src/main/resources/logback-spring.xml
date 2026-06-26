@@ -4,7 +4,7 @@
     <include resource="org/springframework/boot/logging/logback/defaults.xml" />
 
     <property name="APP_NAME" value="ai-whale" />
-    <property name="LOG_PATH" value="${user.home}/${APP_NAME}/logs" />
+    <springProperty scope="context" name="LOG_PATH" source="flexlb.log.path" defaultValue="${user.home}/ai-whale/logs" />
     <property name="LOG_FILE" value="${LOG_PATH}/application.log" />
     <property name="PV_LOG_FILE" value="${LOG_PATH}/pv.log" />
     <property name="SYNC_LOG_FILE" value="${LOG_PATH}/sync.log" />
@@ -141,6 +141,7 @@
     </logger>
 
     <logger name="flexlbLogger" level="INFO" additivity="false">
+        <appender-ref ref="APPLICATION-async"/>
         <appender-ref ref="FLEXLB-async"/>
     </logger>
 

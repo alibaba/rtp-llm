@@ -54,6 +54,33 @@ def init_pd_separation_group_args(parser, pd_separation_config):
     )
 
     pd_separation_group.add_argument(
+        "--batch_dispatch_timeout_ms",
+        env_name="BATCH_DISPATCH_TIMEOUT_MS",
+        bind_to=(pd_separation_config, "batch_dispatch_timeout_ms"),
+        type=int,
+        default=60000,
+        help="EnqueueBatch 跨 DP 分发超时（毫秒），防止远端 DP 卡死阻塞整个 batch",
+    )
+
+    pd_separation_group.add_argument(
+        "--batch_prepare_timeout_ms",
+        env_name="BATCH_PREPARE_TIMEOUT_MS",
+        bind_to=(pd_separation_config, "batch_prepare_timeout_ms"),
+        type=int,
+        default=10000,
+        help="EnqueueGroup 内部 prepareAllocateResource 超时（毫秒）",
+    )
+
+    pd_separation_group.add_argument(
+        "--batch_load_timeout_ms",
+        env_name="BATCH_LOAD_TIMEOUT_MS",
+        bind_to=(pd_separation_config, "batch_load_timeout_ms"),
+        type=int,
+        default=10000,
+        help="EnqueueGroup 内部 remoteLoadCacheStart 超时（毫秒）",
+    )
+
+    pd_separation_group.add_argument(
         "--decode_retry_times",
         env_name="DECODE_RETRY_TIMES",
         bind_to=(pd_separation_config, "decode_retry_times"),

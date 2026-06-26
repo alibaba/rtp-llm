@@ -34,9 +34,10 @@ _stub_package(
     os.path.join(_REPO, "rtp_llm", "models_py", "modules", "dsv4"),
 )
 
+import rtp_llm.models_py.modules.dsv4.dsv4_kernel_jit_warmup as warmup_module
 from rtp_llm.models_py.modules.dsv4.dsv4_kernel_jit_warmup import (
-    _collect_dsv4_branch_kernel_configs,
     _collect_dsv4_batched_fp8_einsum_shapes,
+    _collect_dsv4_branch_kernel_configs,
     _collect_dsv4_dense_gemm_shapes,
     _collect_dsv4_fp8_mqa_logits_shapes,
     _collect_dsv4_mhc_head_fused_shapes,
@@ -55,7 +56,6 @@ from rtp_llm.models_py.modules.dsv4.dsv4_kernel_jit_warmup import (
     _warmup_fused_kv_compress_norm_rope_insert,
     resolve_dense_gemm_warmup_max_m,
 )
-import rtp_llm.models_py.modules.dsv4.dsv4_kernel_jit_warmup as warmup_module
 
 
 def _module_type(name, attrs):
@@ -149,7 +149,7 @@ class Dsv4KernelJitWarmupTest(unittest.TestCase):
             resolve_dense_gemm_warmup_max_m(
                 max_seq_len=1048576,
                 max_batch_size=1024,
-                role_type_name="RoleType.DECODE",
+                role_type_name="DECODE",
                 is_speculative=True,
                 gen_num_per_cycle=4,
             ),
@@ -758,9 +758,7 @@ class Dsv4KernelJitWarmupTest(unittest.TestCase):
             old_enabled = mhc_tilelang.tk_mhc_head_fused_enabled
             mhc_tilelang.tk_mhc_head_fused_enabled = lambda: True
             self.addCleanup(
-                lambda: setattr(
-                    mhc_tilelang, "tk_mhc_head_fused_enabled", old_enabled
-                )
+                lambda: setattr(mhc_tilelang, "tk_mhc_head_fused_enabled", old_enabled)
             )
 
             warmup_module._MHC_HEAD_FUSED_JIT_WARMED_KEYS.clear()
@@ -937,9 +935,11 @@ class Dsv4KernelJitWarmupTest(unittest.TestCase):
         )
 
     def test_jit_kernel_specialization_contracts(self):
-        from rtp_llm.models_py.modules.dsv4.fp8 import _compressor_vllm_triton
-        from rtp_llm.models_py.modules.dsv4.fp8 import _swa_dequant_triton
-        from rtp_llm.models_py.modules.dsv4.fp8 import _swa_kv_insert_triton
+        from rtp_llm.models_py.modules.dsv4.fp8 import (
+            _compressor_vllm_triton,
+            _swa_dequant_triton,
+            _swa_kv_insert_triton,
+        )
 
         compress_src = inspect.getsource(
             _compressor_vllm_triton._fused_kv_compress_norm_rope_insert_sparse_attn.fn
@@ -1025,7 +1025,7 @@ class Dsv4KernelJitWarmupTest(unittest.TestCase):
             calls.append(None)
             if len(calls) == 1:
                 raise RuntimeError(
-                    'Catastrophic error: cannot open source file '
+                    "Catastrophic error: cannot open source file "
                     '"/tmp/tmpxft_000011ba_00000000-7_tvm_kernels.cpp1.ii"'
                 )
 
@@ -1045,7 +1045,7 @@ class Dsv4KernelJitWarmupTest(unittest.TestCase):
             calls.append(None)
             if len(calls) == 1:
                 cause = RuntimeError(
-                    'Catastrophic error: cannot open source file '
+                    "Catastrophic error: cannot open source file "
                     '"/tmp/tmpxft_000011ba_00000000-7_tvm_kernels.cpp1.ii"'
                 )
                 raise RuntimeError("TileLang mhc_pre failed: shape=(1, 2)") from cause
