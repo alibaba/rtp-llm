@@ -8,9 +8,40 @@
 #include <chrono>
 #include <memory>
 #include <mutex>
+#include <string>
 
 using namespace std;
 namespace rtp_llm {
+
+namespace {
+// Parse the decode_prefill_ratio string into the internal signed cadence step.
+//   "N"   (N>=1) -> N    (1 prefill : N decode)
+//   "1/X" (X>=1) -> -X   (X prefill : 1 decode)
+//   invalid      -> 1    (alternation), with a warning
+int64_t parseDecodePrefillRatio(const std::string& ratio) {
+    try {
+        auto slash = ratio.find('/');
+        if (slash == std::string::npos) {
+            size_t  pos = 0;
+            int64_t n   = std::stoll(ratio, &pos);
+            if (pos == ratio.size() && n >= 1) {
+                return n;
+            }
+        } else if (ratio.substr(0, slash) == "1") {
+            const std::string den = ratio.substr(slash + 1);
+            size_t            pos = 0;
+            int64_t           x   = std::stoll(den, &pos);
+            if (pos == den.size() && x >= 1) {
+                return -x;
+            }
+        }
+    } catch (const std::exception&) {
+        // fall through to warning + default
+    }
+    RTP_LLM_LOG_WARNING("invalid decode_prefill_ratio '%s', falling back to '1' (alternation)", ratio.c_str());
+    return 1;
+}
+}  // namespace
 
 FIFOScheduler::FIFOScheduler(const RuntimeConfig&                   runtime_config,
                              const ModelConfig&                     model_config,
@@ -26,6 +57,7 @@ FIFOScheduler::FIFOScheduler(const RuntimeConfig&                   runtime_conf
     max_seq_len_(model_config.max_seq_len),
     max_batch_tokens_size_(runtime_config.fifo_scheduler_config.max_batch_tokens_size),
     max_generate_batch_size_(runtime_config.max_generate_batch_size),
+    decode_prefill_step_(parseDecodePrefillRatio(runtime_config.fifo_scheduler_config.decode_prefill_ratio)),
     need_fill_fake_stream_(parallelism_config.dp_size > 1 && parallelism_config.tp_rank == 0),
     metrics_reporter_(metrics_reporter) {
     RTP_LLM_LOG_INFO("max_generate_batch_size is [%d], max_batch_tokens_size is [%d]",
@@ -40,7 +72,8 @@ FIFOScheduler::~FIFOScheduler() {
 
 bool FIFOScheduler::empty() {
     lock_guard<mutex> lock(lock_);
-    return waiting_streams_.empty() && loading_cache_streams_.empty() && running_streams_.empty();
+    return waiting_streams_.empty() && loading_cache_streams_.empty() && running_streams_.empty()
+           && pending_decode_streams_.empty() && new_streams_.empty();
 }
 
 void FIFOScheduler::cancelStreams(std::list<GenerateStreamPtr>& streams) {
@@ -59,6 +92,8 @@ absl::Status FIFOScheduler::stop() {
         cancelStreams(waiting_streams_);
         cancelStreams(loading_cache_streams_);
         cancelStreams(running_streams_);
+        cancelStreams(pending_decode_streams_);
+        cancelStreams(new_streams_);
     }
     cond_.notify_all();
     return absl::OkStatus();
@@ -120,6 +155,35 @@ std::vector<std::shared_ptr<GenerateStream>> FIFOScheduler::batchEnqueue(const v
 bool FIFOScheduler::evaluateRunningMemory(const list<GenerateStreamPtr>& streams,
                                           const GenerateStreamPtr&       new_stream) const {
     RTP_LLM_PROFILE_FUNCTION();
+    if (pd_sep_config_.role_type == RoleType::PDFUSION) {
+        // Concurrency cap over the WHOLE in-flight pipeline (running + pending + admitted-this-round + 1).
+        if (running_streams_.size() + pending_decode_streams_.size() + streams.size() + 1 > max_generate_batch_size_) {
+            return false;
+        }
+        // KV-availability gate: prefilling new_stream must leave the in-flight pipeline able to step.
+        // Reserve 1 block of near-term decode headroom per in-flight stream (running + pending).
+        size_t need = static_cast<size_t>(new_stream->nextNeedBlockNums(0));
+        for (auto& s : streams) {
+            need += static_cast<size_t>(s->nextNeedBlockNums(0));
+        }
+        const size_t headroom = running_streams_.size() + pending_decode_streams_.size();
+        if (cache_manager_->freeBlocksNum() < need + headroom) {
+            return false;
+        }
+        // token-batch cap (unchanged form)
+        int max_token_size = new_stream->contextLength();
+        // A single stream that fits within max_seq_len is always admissible (mirrors the legacy
+        // path); this also prevents a hang when max_batch_tokens_size_ is 0.
+        if (streams.empty() && max_token_size + running_streams_.size() < int(max_seq_len_)) {
+            return true;
+        }
+        for (auto& stream : streams) {
+            max_token_size = std::max(max_token_size, stream->contextLength());
+        }
+        return max_token_size * (streams.size() + 1) + running_streams_.size() < int(max_batch_tokens_size_);
+    }
+
+    // ---- legacy path (DECODE / PREFILL roles), unchanged ----
     if (pd_sep_config_.role_type == RoleType::DECODE) {
         if (running_streams_.size() + streams.size() + 1 < max_generate_batch_size_) {
             return true;
@@ -155,7 +219,7 @@ void FIFOScheduler::accountBatchMetrics(const GenerateStreamPtr& new_stream) {
 bool FIFOScheduler::waitPredicate() {
     // Check streams directly without calling empty() which acquires lock_ (already held by schedule())
     return stop_ || schedule_trigger_ || !waiting_streams_.empty() || !loading_cache_streams_.empty()
-           || !running_streams_.empty();
+           || !running_streams_.empty() || !pending_decode_streams_.empty();
 }
 
 // 通过 GenerateStateMachine 驱动每个 stream 的状态转移，状态变化的 stream 移入对应队列
@@ -286,6 +350,19 @@ absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule() {
 
     schedule_trigger_ = false;
 
+    list<GenerateStreamPtr> batch;
+    if (pd_sep_config_.role_type == RoleType::PDFUSION) {
+        batch = schedulePrefillFirst();
+    } else {
+        batch = scheduleLegacy();
+    }
+
+    reportMetrics();
+    last_schedule_time_ = autil::TimeUtility::currentTimeInMilliSeconds();
+    return batch;
+}
+
+list<GenerateStreamPtr> FIFOScheduler::scheduleLegacy() {
     // LOADING_CACHE -> DONE/WAITING: error / load cache done
     evaluateAndUpdateStreams(loading_cache_streams_);
     // RUNNING -> DONE: error / finished
@@ -311,10 +388,99 @@ absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule() {
     if (waiting_streams_.size() < prev_waiting_size) {
         schedule_trigger_ = true;
     }
-
-    reportMetrics();
-    last_schedule_time_ = autil::TimeUtility::currentTimeInMilliSeconds();
     return running_streams_;
+}
+
+list<GenerateStreamPtr> FIFOScheduler::schedulePrefillFirst() {
+    // 1. advance async cache loads: a completed LOADING_CACHE stream returns to waiting_streams_
+    //    (handleLoading -> WAITING) and is admitted on a later prefill round; errored ones are dropped.
+    evaluateAndUpdateStreams(loading_cache_streams_);
+
+    // 2. retire finished streams every round (no incrKVBlock) to release KV promptly
+    reapFinished(running_streams_);
+    reapFinished(pending_decode_streams_);
+
+    // 3. decide round type (pure cadence + seed)
+    const RoundType round = chooseRound();
+
+    if (round == RoundType::PREFILL) {
+        const size_t prev_waiting_size = waiting_streams_.size();
+        evaluateWaitingStreams(waiting_streams_);    // mark CanRun (gated by evaluateRunningMemory)
+        evaluateAndUpdateStreams(waiting_streams_);  // CanRun -> RUNNING into new_streams_
+        if (!new_streams_.empty()) {
+            list<GenerateStreamPtr> prefill_batch(new_streams_.begin(), new_streams_.end());
+            pending_decode_streams_.insert(pending_decode_streams_.end(), new_streams_.begin(), new_streams_.end());
+            new_streams_.clear();
+            decode_since_prefill_ = 0;
+            prefill_since_decode_ += 1;
+            prefill_round_count_ += 1;
+            if (waiting_streams_.size() < prev_waiting_size) {
+                schedule_trigger_ = true;
+            }
+            return prefill_batch;  // PURE-CONTEXT batch
+        }
+        // nothing admittable (caps/KV) -> degrade to decode
+        degraded_prefill_count_ += 1;
+    }
+
+    // DECODE path (cadence decode, or degraded prefill)
+    evaluateAndUpdateStreams(running_streams_);  // incrKVBlock-prep survivors for THIS decode (only here)
+    promotePendingDecodeStreams();
+    decode_since_prefill_ += 1;
+    prefill_since_decode_ = 0;
+    decode_round_count_ += 1;
+    if (!pending_decode_streams_.empty() || !waiting_streams_.empty()) {
+        schedule_trigger_ = true;  // more work pending; keep the loop moving
+    }
+    return running_streams_;  // PURE-DECODE batch
+}
+
+FIFOScheduler::RoundType FIFOScheduler::chooseRound() {
+    if (waiting_streams_.empty()) {
+        return RoundType::DECODE;  // nothing to prefill
+    }
+    if (running_streams_.empty() && pending_decode_streams_.empty()) {
+        return RoundType::PREFILL;  // nothing to decode -> must seed
+    }
+    if (decode_prefill_step_ >= 1) {  // 1 prefill : N decode (N==1 => strict alternation)
+        return decode_since_prefill_ >= decode_prefill_step_ ? RoundType::PREFILL : RoundType::DECODE;
+    }
+    const int64_t m = -decode_prefill_step_;  // prefill-heavy: M prefill : 1 decode
+    return prefill_since_decode_ < m ? RoundType::PREFILL : RoundType::DECODE;
+}
+
+// Retire streams that finished/errored on their last forward. moveToNext() short-circuits to
+// FINISHED before incrKVBlock for these, so this allocates nothing and frees their KV promptly.
+void FIFOScheduler::reapFinished(std::list<GenerateStreamPtr>& streams) {
+    for (auto it = streams.begin(); it != streams.end();) {
+        auto& stream = *it;
+        if (stream->hasError() || stream->hasEvent(StreamEvents::GenerateDone)) {
+            stream->moveToNext();  // -> FINISHED, releases resources
+            it = streams.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
+// Decode-path only: move prefilled streams into the decode pool as KV allows. A stream that
+// can't get its next decode block stays pending and retries on a later decode round (never errored).
+// NOTE: FIFOScheduler has no reserve_step_ member (reserve is set per-stream via setReserveStep and
+// applied inside incrKVBlock). Pass 0 for the scheduler-side estimate.
+void FIFOScheduler::promotePendingDecodeStreams() {
+    for (auto it = pending_decode_streams_.begin(); it != pending_decode_streams_.end();) {
+        auto&        stream = *it;
+        const size_t need   = static_cast<size_t>(stream->nextNeedBlockNums(0));
+        if (cache_manager_->freeBlocksNum() >= need) {
+            auto new_state = stream->moveToNext();  // incrKVBlock -> RUNNING (decode); or FINISHED on error
+            if (new_state == StreamState::RUNNING) {
+                running_streams_.push_back(stream);
+            }
+            it = pending_decode_streams_.erase(it);
+        } else {
+            ++it;  // KV tight: keep pending
+        }
+    }
 }
 
 int64_t FIFOScheduler::waitingStreamsSize() {
@@ -327,9 +493,15 @@ int64_t FIFOScheduler::runningStreamsSize() {
     return running_streams_.size();
 }
 
+int64_t FIFOScheduler::pendingDecodeStreamsSize() {
+    std::lock_guard<mutex> lock(lock_);
+    return pending_decode_streams_.size();
+}
+
 int64_t FIFOScheduler::onflightStreams() {
     std::lock_guard<mutex> lock(lock_);
-    return waiting_streams_.size() + loading_cache_streams_.size() + running_streams_.size();
+    return waiting_streams_.size() + loading_cache_streams_.size() + running_streams_.size()
+           + pending_decode_streams_.size();
 }
 
 std::vector<EngineScheduleInfo::TaskInfo> FIFOScheduler::waitingTaskList() {
@@ -363,9 +535,15 @@ std::vector<EngineScheduleInfo::TaskInfo> FIFOScheduler::runningTaskList() {
 void FIFOScheduler::reportMetrics() {
     if (metrics_reporter_) {
         RtpLLMSchedulerMetricsCollector collector;
-        collector.wait_stream_size          = waiting_streams_.size();
-        collector.running_stream_size       = running_streams_.size();
-        collector.loading_cache_stream_size = loading_cache_streams_.size();
+        collector.wait_stream_size           = waiting_streams_.size();
+        collector.running_stream_size        = running_streams_.size();
+        collector.loading_cache_stream_size  = loading_cache_streams_.size();
+        collector.pending_decode_stream_size = pending_decode_streams_.size();
+        collector.prefill_round_count        = prefill_round_count_;
+        collector.decode_round_count         = decode_round_count_;
+        collector.degraded_prefill_count     = degraded_prefill_count_;
+        collector.decode_since_prefill =
+            decode_since_prefill_ == std::numeric_limits<int64_t>::max() ? 0 : decode_since_prefill_;
         metrics_reporter_->report<RtpLLMSchedulerMetrics, RtpLLMSchedulerMetricsCollector>(nullptr, &collector);
     }
     return;

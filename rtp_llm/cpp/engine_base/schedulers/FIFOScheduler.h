@@ -1,5 +1,6 @@
 #pragma once
 
+#include <limits>
 #include <queue>
 #include <tuple>
 #include <vector>
@@ -46,6 +47,7 @@ public:
     // for test
     int64_t                                   waitingStreamsSize();
     int64_t                                   runningStreamsSize();
+    int64_t                                   pendingDecodeStreamsSize();
     std::vector<EngineScheduleInfo::TaskInfo> waitingTaskList();
     std::vector<EngineScheduleInfo::TaskInfo> runningTaskList();
     int64_t                                   onflightStreams() override;
@@ -60,6 +62,18 @@ private:
     void cancelStreams(std::list<GenerateStreamPtr>& streams);
     bool checkInputLength(const GenerateStreamPtr& stream);
 
+    enum class RoundType {
+        PREFILL,
+        DECODE
+    };
+
+    // PDFUSION prefill-first scheduling
+    std::list<GenerateStreamPtr> schedulePrefillFirst();
+    std::list<GenerateStreamPtr> scheduleLegacy();
+    RoundType                    chooseRound();
+    void                         reapFinished(std::list<GenerateStreamPtr>& streams);
+    void                         promotePendingDecodeStreams();
+
 protected:
     void evaluateAndUpdateStreams(std::list<GenerateStreamPtr>& streams);
 
@@ -70,17 +84,25 @@ protected:
     std::list<GenerateStreamPtr>    loading_cache_streams_;
     std::list<GenerateStreamPtr>    running_streams_;
     std::list<GenerateStreamPtr>    new_streams_;
+    std::list<GenerateStreamPtr>    pending_decode_streams_;  // prefilled, awaiting KV-gated promotion to decode
     std::shared_ptr<KVCacheManager> cache_manager_;
     std::atomic<int64_t>            last_schedule_time_      = autil::TimeUtility::currentTimeInMilliSeconds();
     size_t                          max_seq_len_             = 0;
     size_t                          max_batch_tokens_size_   = 0;
     size_t                          max_generate_batch_size_ = 1;
-    const bool                      need_fill_fake_stream_   = false;
-    std::atomic<bool>               stop_                    = false;
-    bool                            schedule_trigger_        = false;
-    std::mutex                      lock_;
-    std::condition_variable         cond_;
-    kmonitor::MetricsReporterPtr    metrics_reporter_ = nullptr;
+    int64_t                         decode_prefill_step_     = 1;
+    int64_t                         decode_since_prefill_ =
+        std::numeric_limits<int64_t>::max();  // sentinel: allow prefill on first eligible round
+    int64_t                      prefill_since_decode_   = 0;
+    int64_t                      prefill_round_count_    = 0;
+    int64_t                      decode_round_count_     = 0;
+    int64_t                      degraded_prefill_count_ = 0;
+    const bool                   need_fill_fake_stream_  = false;
+    std::atomic<bool>            stop_                   = false;
+    bool                         schedule_trigger_       = false;
+    std::mutex                   lock_;
+    std::condition_variable      cond_;
+    kmonitor::MetricsReporterPtr metrics_reporter_ = nullptr;
 
     std::vector<EngineScheduleInfo::TaskInfo> waiting_task_list_;
     std::vector<EngineScheduleInfo::TaskInfo> running_task_list_;
