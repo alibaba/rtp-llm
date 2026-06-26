@@ -230,14 +230,6 @@ size_t expectedDsv4StoredBlocks(const CacheConfig& config, int layer_num, int bl
     return expected;
 }
 
-torch::Tensor layerToGroupTensorForConfig(const CacheConfig& config) {
-    const auto layer_to_group = config.layerGroupIdsSnapshot();
-    return torch::from_blob(const_cast<int*>(layer_to_group.data()),
-                            {static_cast<int64_t>(layer_to_group.size())},
-                            torch::TensorOptions(torch::kInt32))
-        .clone();
-}
-
 torch::Tensor groupTypesTensorForConfig(const CacheConfig& config) {
     std::vector<int32_t> group_types;
     for (auto group_type : config.groupTypesSnapshot()) {
@@ -331,7 +323,9 @@ protected:
             ratios.push_back((i % 2 == 0) ? 4 : 128);
         }
         ratios.push_back(0);  // MTP tail marker.
-        mc.attn_config.layer_compress_ratios = ratios;
+        mc.attn_config.layer_compress_ratios                       = ratios;
+        mc.hybrid_attention_config.enable_hybrid_attention           = true;
+        mc.hybrid_attention_config.enable_independent_kv_cache_pools = true;
         setDsv4KvCacheSpecs(mc);
 
         ParallelismConfig pc;
@@ -684,7 +678,7 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4PDSepPrefillReleaseInsertsSevenGroupDevi
     for (int gid = 0; gid < kDsv4PoolNum; ++gid) {
         ASSERT_EQ(resource.kvCache().blocksNum(0, gid), 4) << "group " << gid;
         const auto& blocks = resource.kvCache().blocks(0, gid);
-        if (gid < 3) {
+        if (config.typeForGroup(static_cast<size_t>(gid)) == CacheGroupType::FULL) {
             EXPECT_FALSE(isNullBlockIdx(blocks[0])) << "paged group " << gid;
         } else {
             const int active_tail_blocks = config.policyForGroup(static_cast<size_t>(gid)).active_tail_blocks;
@@ -851,8 +845,7 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4CacheStorePDSepTransfersAllLayerRegions)
     }
     runtimeSyncAndCheck();
 
-    auto layer_to_group_tensor = layerToGroupTensorForConfig(config);
-    auto group_types_tensor    = groupTypesTensorForConfig(config);
+    auto group_types_tensor = groupTypesTensorForConfig(config);
 
     auto cache_store = std::make_shared<MemoryBackedCacheStore>();
     auto layout      = prefill_manager->getMainModelCacheLayerLayout();
@@ -1001,8 +994,7 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4DecoupledCacheStoreTransfersPhysicalBloc
     }
     runtimeSyncAndCheck();
 
-    auto layer_to_group_tensor = layerToGroupTensorForConfig(config);
-    auto group_types_tensor    = groupTypesTensorForConfig(config);
+    auto group_types_tensor = groupTypesTensorForConfig(config);
 
     auto cache_store = std::make_shared<MemoryBackedCacheStore>();
     auto layout      = prefill_manager->getMainModelCacheLayerLayout();
@@ -1051,7 +1043,7 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4DecoupledCacheStoreTransfersPhysicalBloc
     const auto first_csa_key = "kv_" + makeCacheKey(model_id, cache_key_strings[0], /*layer_id=*/2, "csa_kv");
     ASSERT_NE(cache_store->stored_blocks_.find(first_csa_key), cache_store->stored_blocks_.end());
     EXPECT_EQ(cache_store->stored_blocks_[first_csa_key].size(),
-              config.kvBlockStrideBytesForGroup(static_cast<size_t>(0)));
+              config.kvBlockStrideBytesForGroup(static_cast<size_t>(config.groupIdForTag("csa_kv"))));
 
     EngineInitParams params;
     params.model_id                 = model_id;
@@ -1158,8 +1150,7 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4CacheStorePDSepTransfersAllLayerRegionsW
     }
     runtimeSyncAndCheck();
 
-    auto layer_to_group_tensor = layerToGroupTensorForConfig(config);
-    auto group_types_tensor    = groupTypesTensorForConfig(config);
+    auto group_types_tensor = groupTypesTensorForConfig(config);
 
     auto cache_store = std::make_shared<MemoryBackedCacheStore>();
     auto layout      = prefill_manager->getMainModelCacheLayerLayout();

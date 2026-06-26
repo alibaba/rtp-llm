@@ -337,44 +337,84 @@ struct CacheConfig {
             layer_to_block_stride_bytes.resize(total_layers, 0);
         }
 
-        const auto fallback_full_gid = fullGroupId();
-        const auto target_group_num  = static_cast<size_t>(groupNums());
-        const auto propose_group_num = static_cast<size_t>(propose_config.groupNums());
-        std::vector<std::vector<int>> sub_global_layer_ids(propose_group_num);
-
-        for (size_t gid = 0; gid < propose_group_num; ++gid) {
-            const auto tag = propose_config.tagForGroup(gid);
-            auto       target_gid = gid < target_group_num ? gid : fallback_full_gid;
-            for (size_t candidate_gid = 0; candidate_gid < target_group_num; ++candidate_gid) {
-                if (tagForGroup(candidate_gid) == tag) {
-                    target_gid = candidate_gid;
-                    break;
-                }
-            }
-            for (int local_layer_id : propose_config.layerIdsForGroup(gid)) {
-                if (local_layer_id < 0 || local_layer_id >= static_cast<int>(mtp_layer_num)) {
-                    continue;
-                }
-                const auto global_layer_id = static_cast<int>(main_layer_num)
-                                             + module_index * static_cast<int>(mtp_layer_num) + local_layer_id;
-                const auto global_layer    = static_cast<size_t>(global_layer_id);
-                sub_global_layer_ids[gid].push_back(global_layer_id);
-
-                appendLayerToGroup(target_gid, global_layer_id, tag);
-
-                RTP_LLM_CHECK_WITH_INFO(static_cast<size_t>(local_layer_id)
-                                            < sub_cfg->layer_to_block_stride_bytes.size(),
-                                        "CacheConfig::mergeMTPModule local layer stride missing layer=%d size=%zu",
-                                        local_layer_id,
-                                        sub_cfg->layer_to_block_stride_bytes.size());
-                layer_to_block_stride_bytes[global_layer] =
-                    sub_cfg->layer_to_block_stride_bytes[static_cast<size_t>(local_layer_id)];
-            }
+        // MTP currently relies on target and draft models sharing the same group-index
+        // namespace: model inputs, CUDA graph metadata, and Python attention inputs pass
+        // block tables by gid without a draft-local remap.  Therefore the sub-config
+        // keeps every target group in first-seen order. Groups not used by the propose
+        // model are placeholders with an empty layer list.
+        const auto target_group_num = static_cast<size_t>(groupNums());
+        std::unordered_map<std::string, size_t> propose_gid_by_tag;
+        for (size_t gid = 0; gid < static_cast<size_t>(propose_config.groupNums()); ++gid) {
+            propose_gid_by_tag.emplace(propose_config.tagForGroup(gid), gid);
         }
 
-        for (size_t gid = 0; gid < propose_group_num; ++gid) {
-            sub_cfg->setLayerIdsForGroup(gid, sub_global_layer_ids[gid]);
+        std::vector<GroupBase> sub_groups;
+        std::vector<LayerBase> sub_layers(static_cast<size_t>(mtp_layer_num));
+        std::vector<size_t>    sub_group_seq_size_per_block;
+        sub_groups.reserve(target_group_num);
+        sub_group_seq_size_per_block.reserve(target_group_num);
+
+        for (size_t target_gid = 0; target_gid < target_group_num; ++target_gid) {
+            const auto& tag = tagForGroup(target_gid);
+            const auto  propose_it = propose_gid_by_tag.find(tag);
+            const bool  has_propose_group = propose_it != propose_gid_by_tag.end();
+            const size_t source_gid = has_propose_group ? propose_it->second : target_gid;
+            const auto&  source_config = has_propose_group ? propose_config : *this;
+            const auto&  source_group  = source_config.groups[source_gid];
+
+            GroupBase sub_group;
+            sub_group.spec                  = source_group.spec->clone();
+            sub_group.policy                = source_group.policy;
+            sub_group.block_num             = source_group.block_num;
+            sub_group.kv_block_stride_bytes = source_group.kv_block_stride_bytes;
+            sub_group.kv_scale_stride_bytes = source_group.kv_scale_stride_bytes;
+
+            if (has_propose_group) {
+                for (int local_layer_id : propose_config.layerIdsForGroup(source_gid)) {
+                    if (local_layer_id < 0 || local_layer_id >= static_cast<int>(mtp_layer_num)) {
+                        continue;
+                    }
+                    const auto global_layer_id = static_cast<int>(main_layer_num)
+                                                 + module_index * static_cast<int>(mtp_layer_num) + local_layer_id;
+                    const auto global_layer    = static_cast<size_t>(global_layer_id);
+
+                    sub_group.layer_ids.push_back(global_layer_id);
+                    auto& sub_layer = sub_layers[static_cast<size_t>(local_layer_id)];
+                    sub_layer.group_ids.push_back(static_cast<int>(target_gid));
+                    sub_layer.tag_to_gid[tag] = static_cast<int>(target_gid);
+
+                    appendLayerToGroup(target_gid, global_layer_id, tag);
+
+                    RTP_LLM_CHECK_WITH_INFO(static_cast<size_t>(local_layer_id)
+                                                < sub_cfg->layer_to_block_stride_bytes.size(),
+                                            "CacheConfig::mergeMTPModule local layer stride missing layer=%d size=%zu",
+                                            local_layer_id,
+                                            sub_cfg->layer_to_block_stride_bytes.size());
+                    layer_to_block_stride_bytes[global_layer] =
+                        sub_cfg->layer_to_block_stride_bytes[static_cast<size_t>(local_layer_id)];
+                }
+            }
+            sub_group.spec->layers = sub_group.layer_ids;
+            sub_groups.push_back(std::move(sub_group));
+
+            const auto& source_seq = source_config.group_seq_size_per_block;
+            sub_group_seq_size_per_block.push_back(source_gid < source_seq.size() ? source_seq[source_gid] : 0);
         }
+
+        for (size_t layer_id = 0; layer_id < sub_layers.size(); ++layer_id) {
+            RTP_LLM_CHECK_WITH_INFO(!sub_layers[layer_id].group_ids.empty(),
+                                    "CacheConfig::mergeMTPModule missing group mapping for sub layer %zu",
+                                    layer_id);
+        }
+
+        sub_cfg->groups                         = std::move(sub_groups);
+        sub_cfg->layers                         = std::move(sub_layers);
+        sub_cfg->tag_to_gid.clear();
+        for (size_t gid = 0; gid < sub_cfg->groups.size(); ++gid) {
+            sub_cfg->tag_to_gid.emplace(sub_cfg->groups[gid].spec->tag, static_cast<int>(gid));
+        }
+        sub_cfg->group_seq_size_per_block       = std::move(sub_group_seq_size_per_block);
+        sub_cfg->group_block_layout_initialized = group_block_layout_initialized;
         return sub_cfg;
     }
 

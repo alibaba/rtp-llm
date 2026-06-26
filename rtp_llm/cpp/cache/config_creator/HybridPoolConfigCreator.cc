@@ -150,14 +150,10 @@ void populateGroupsFromLayerSpecs(CacheConfig&                  config,
         CacheGroupType   type;
         CacheGroupPolicy policy;
         std::vector<int> layers;
-        uint64_t         order = 0;
     };
 
     std::map<std::string, GroupBuildState> group_by_tag;
-    std::map<uint64_t, std::string>        explicit_order_to_tag;
-    uint64_t next_first_seen_order = 0;
-    bool     has_explicit_group_order = false;
-    uint64_t max_explicit_group_order = 0;
+    std::vector<std::string>               ordered_tags;
 
     for (uint32_t layer = 0; layer < config.layer_num; ++layer) {
         const auto& descs = layer_descs[layer];
@@ -177,8 +173,8 @@ void populateGroupsFromLayerSpecs(CacheConfig&                  config,
                                     "hybrid-pool layer %u has duplicate tag=%s",
                                     layer,
                                     spec->tag.c_str());
-            const auto policy = policyFromSpecDesc(desc);
-            const auto type   = SpecBuilder::groupType(desc);
+            const auto policy   = policyFromSpecDesc(desc);
+            const auto type     = SpecBuilder::groupType(desc);
             auto       group_it = group_by_tag.find(spec->tag);
             if (group_it == group_by_tag.end()) {
                 GroupBuildState state;
@@ -186,18 +182,8 @@ void populateGroupsFromLayerSpecs(CacheConfig&                  config,
                 state.fingerprint = spec->fingerprint();
                 state.type        = type;
                 state.policy      = policy;
-                state.order       = desc.has_group_order ? desc.group_order : (UINT64_C(1) << 32) + next_first_seen_order++;
-                if (desc.has_group_order) {
-                    has_explicit_group_order = true;
-                    max_explicit_group_order = std::max<uint64_t>(max_explicit_group_order, desc.group_order);
-                    const auto [order_it, inserted] = explicit_order_to_tag.emplace(desc.group_order, spec->tag);
-                    RTP_LLM_CHECK_WITH_INFO(inserted || order_it->second == spec->tag,
-                                            "hybrid-pool group order %u maps to both tag=%s and tag=%s",
-                                            desc.group_order,
-                                            order_it->second.c_str(),
-                                            spec->tag.c_str());
-                }
-                group_it = group_by_tag.emplace(spec->tag, std::move(state)).first;
+                group_it          = group_by_tag.emplace(spec->tag, std::move(state)).first;
+                ordered_tags.push_back(spec->tag);
             } else {
                 RTP_LLM_CHECK_WITH_INFO(group_it->second.fingerprint == spec->fingerprint(),
                                         "hybrid-pool tag=%s has multiple physical prototypes",
@@ -208,53 +194,10 @@ void populateGroupsFromLayerSpecs(CacheConfig&                  config,
                 RTP_LLM_CHECK_WITH_INFO(CacheConfig::samePolicy(group_it->second.policy, policy),
                                         "hybrid-pool tag=%s has inconsistent policy",
                                         spec->tag.c_str());
-                if (desc.has_group_order) {
-                    RTP_LLM_CHECK_WITH_INFO(group_it->second.order == desc.group_order,
-                                            "hybrid-pool tag=%s has inconsistent group order",
-                                            spec->tag.c_str());
-                }
             }
             group_it->second.layers.push_back(static_cast<int>(layer));
         }
     }
-
-    if (has_explicit_group_order) {
-        SpecBuildContext placeholder_ctx;
-        placeholder_ctx.dtype              = DataType::TYPE_UINT8;
-        placeholder_ctx.seq_size_per_block = config.seq_size_per_block == 0 ? 1 : config.seq_size_per_block;
-        for (uint64_t order = 0; order <= max_explicit_group_order; ++order) {
-            if (explicit_order_to_tag.find(order) != explicit_order_to_tag.end()) {
-                continue;
-            }
-            KVCacheSpecDesc placeholder;
-            placeholder.tag                = "__empty_group_order_" + std::to_string(order);
-            placeholder.cache_type         = CacheType::FIXED_STATE;
-            placeholder.seq_size_per_block = placeholder_ctx.seq_size_per_block;
-            placeholder.dtype              = DataType::TYPE_UINT8;
-            placeholder.entry_elems        = 1;
-            placeholder.entries_per_block  = 1;
-            placeholder.store_dtype        = DataType::TYPE_UINT8;
-            auto spec                      = SpecBuilder::build(placeholder, placeholder_ctx);
-            GroupBuildState state;
-            state.spec        = spec;
-            state.fingerprint = spec->fingerprint();
-            state.type        = SpecBuilder::groupType(placeholder);
-            state.policy      = policyFromSpecDesc(placeholder);
-            state.order       = order;
-            group_by_tag.emplace(spec->tag, std::move(state));
-        }
-    }
-
-    std::vector<std::string> ordered_tags;
-    ordered_tags.reserve(group_by_tag.size());
-    for (const auto& [tag, _] : group_by_tag) {
-        ordered_tags.push_back(tag);
-    }
-    std::sort(ordered_tags.begin(), ordered_tags.end(), [&](const std::string& lhs, const std::string& rhs) {
-        const auto lhs_order = group_by_tag.at(lhs).order;
-        const auto rhs_order = group_by_tag.at(rhs).order;
-        return lhs_order == rhs_order ? lhs < rhs : lhs_order < rhs_order;
-    });
 
     std::vector<GroupBase> groups;
     std::vector<LayerBase> layers(static_cast<size_t>(config.layer_num));

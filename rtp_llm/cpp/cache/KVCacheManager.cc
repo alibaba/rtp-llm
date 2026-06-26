@@ -407,20 +407,28 @@ CacheLayerLayout KVCacheManager::getMTPModuleCacheLayerLayout(int mtp_module_id)
 
     const auto& mtp_sub_config = config_.mtp_sub_configs[mtp_module_id];
     RTP_LLM_CHECK_WITH_INFO(mtp_sub_config != nullptr, "mtp_sub_configs[%d] is null", mtp_module_id);
-    // Flatten across all groups: SWA-only DSV4 propose configs put the
-    // single MTP layer in the SWA group (gid=6), not FULL[0], so reading
-    // group 0 alone would be empty.  Walk every group and collect any
-    // group-layer ids it contributed so this layout is independent of
-    // which pool the propose layer lives in.
-    std::vector<int> mtp_global_layer_ids;
-    for (size_t gid = 0; gid < static_cast<size_t>(mtp_sub_config->groupNums()); ++gid) {
-        for (int lid : mtp_sub_config->layerIdsForGroup(gid)) {
-            mtp_global_layer_ids.push_back(lid);
+    const uint32_t mtp_layer_num = mtp_sub_config->layer_num;
+    const int      mtp_global_layer_base = static_cast<int>(config_.layer_num)
+                                      + mtp_module_id * static_cast<int>(mtp_layer_num);
+    std::vector<int> global_layer_for_local(mtp_layer_num, -1);
+    for (size_t local_gid = 0; local_gid < static_cast<size_t>(mtp_sub_config->groupNums()); ++local_gid) {
+        for (int global_layer_id : mtp_sub_config->layerIdsForGroup(local_gid)) {
+            const int local_layer_id = global_layer_id - mtp_global_layer_base;
+            RTP_LLM_CHECK_WITH_INFO(local_layer_id >= 0 && local_layer_id < static_cast<int>(mtp_layer_num),
+                                    "mtp_sub_configs[%d] global layer %d is outside local range [%d, %d)",
+                                    mtp_module_id,
+                                    global_layer_id,
+                                    mtp_global_layer_base,
+                                    mtp_global_layer_base + static_cast<int>(mtp_layer_num));
+            global_layer_for_local[static_cast<size_t>(local_layer_id)] = global_layer_id;
         }
     }
-    RTP_LLM_CHECK_WITH_INFO(
-        !mtp_global_layer_ids.empty(), "mtp_sub_configs[%d] has no layers across any group", mtp_module_id);
-    const uint32_t mtp_layer_num = mtp_sub_config->layer_num;
+    for (uint32_t local_layer_id = 0; local_layer_id < mtp_layer_num; ++local_layer_id) {
+        RTP_LLM_CHECK_WITH_INFO(global_layer_for_local[local_layer_id] >= 0,
+                                "mtp_sub_configs[%d] has no global layer for local layer %u",
+                                mtp_module_id,
+                                local_layer_id);
+    }
 
     auto  all_layout        = allocator_->allLayerCacheBase();
     auto& all_layer_tensors = all_layout.layers_to_kv_buffer_ptrs;
@@ -431,22 +439,10 @@ CacheLayerLayout KVCacheManager::getMTPModuleCacheLayerLayout(int mtp_module_id)
         layout.layers_to_scale_buffer_ptrs.resize(mtp_layer_num);
     }
     layout.layer_group_types.resize(mtp_layer_num, CacheGroupType::FULL);
-    // Propagate the propose's group identity / typed-pool views so the
-    // Python decode path can build per-tag paged metadata.
-    // Mirrors what ``getCacheLayerLayout()`` does for the main model;
-    // without these, ``build_metadata_eager`` finds an empty
-    // ``group_tags`` and emits zero ``paged_block_tables``,
-    // which trips Attention.forward_decode's "no paged metadata" gate.
     layout.group_tags               = mtp_sub_config->groupTagsSnapshot();
     layout.group_types              = mtp_sub_config->groupTypesSnapshot();
     layout.group_seq_size_per_block = mtp_sub_config->group_seq_size_per_block;
-    // Typed-pool views are indexed by LOCAL layer id from the MTP model's
-    // attention modules (self.layer_id ∈ [0, mtp_layer_num)).  The full
-    // layout's by_group arrays are indexed by GLOBAL layer id (main + MTP
-    // appended), so we MUST remap from global → local — copying the full
-    // arrays verbatim makes local index 0 return main layer 0's typed
-    // buffers, which causes the draft to write into the main model's KV
-    // pool and corrupts target verify (0% acceptance regression).
+
     const size_t group_count = layout.group_tags.size();
     layout.layers_to_kv_buffer_ptrs_by_group.assign(mtp_layer_num, std::vector<torch::Tensor>(group_count));
     layout.layers_to_scale_buffer_ptrs_by_group.assign(mtp_layer_num, std::vector<torch::Tensor>(group_count));
@@ -454,53 +450,49 @@ CacheLayerLayout KVCacheManager::getMTPModuleCacheLayerLayout(int mtp_module_id)
     layout.layer_tag_to_group_id.resize(mtp_layer_num);
 
     for (uint32_t local_layer_id = 0; local_layer_id < mtp_layer_num; ++local_layer_id) {
-        if (local_layer_id < mtp_global_layer_ids.size()) {
-            const int global_layer_id = mtp_global_layer_ids[local_layer_id];
+        const int global_layer_id = global_layer_for_local[local_layer_id];
 
-            if (global_layer_id >= 0 && static_cast<size_t>(global_layer_id) < all_layer_tensors.size()) {
-                layout.layers_to_kv_buffer_ptrs[local_layer_id] = all_layer_tensors[global_layer_id];
+        if (global_layer_id >= 0 && static_cast<size_t>(global_layer_id) < all_layer_tensors.size()) {
+            layout.layers_to_kv_buffer_ptrs[local_layer_id] = all_layer_tensors[global_layer_id];
+        } else {
+            RTP_LLM_CHECK(false);
+        }
+
+        if (!all_scale_tensors.empty()) {
+            if (global_layer_id >= 0 && static_cast<size_t>(global_layer_id) < all_scale_tensors.size()) {
+                layout.layers_to_scale_buffer_ptrs[local_layer_id] = all_scale_tensors[global_layer_id];
             } else {
                 RTP_LLM_CHECK(false);
             }
+        }
 
-            if (!all_scale_tensors.empty()) {
-                if (global_layer_id >= 0 && static_cast<size_t>(global_layer_id) < all_scale_tensors.size()) {
-                    layout.layers_to_scale_buffer_ptrs[local_layer_id] = all_scale_tensors[global_layer_id];
-                } else {
-                    RTP_LLM_CHECK(false);
+        for (size_t local_gid = 0; local_gid < group_count; ++local_gid) {
+            const auto& tag        = mtp_sub_config->tagForGroup(local_gid);
+            const int   global_gid = config_.groupIdForTag(tag);
+            const auto& group_layers = mtp_sub_config->layerIdsForGroup(local_gid);
+            if (std::find(group_layers.begin(), group_layers.end(), global_layer_id) == group_layers.end()) {
+                continue;
+            }
+
+            layout.layer_to_group_ids[local_layer_id].push_back(static_cast<int>(local_gid));
+            layout.layer_tag_to_group_id[local_layer_id][tag] = static_cast<int>(local_gid);
+            layout.layer_group_types[local_layer_id]          = mtp_sub_config->typeForGroup(local_gid);
+
+            if (static_cast<size_t>(global_layer_id) < all_layout.layers_to_kv_buffer_ptrs_by_group.size()) {
+                const auto& src_kv = all_layout.layers_to_kv_buffer_ptrs_by_group[static_cast<size_t>(global_layer_id)];
+                if (global_gid >= 0 && static_cast<size_t>(global_gid) < src_kv.size()) {
+                    layout.layers_to_kv_buffer_ptrs_by_group[local_layer_id][local_gid] =
+                        src_kv[static_cast<size_t>(global_gid)];
                 }
             }
-            // Remap typed-pool buffers from GLOBAL layer id row to the MTP
-            // model's LOCAL layer id row. Each group slot is copied as-is
-            // (it points at the per-group BlockPool's per-layer slice that
-            // KVCacheGroup::init bound for global_layer_id), so the draft's
-            // SWA write for local id 0 lands in the SWA pool slot that was
-            // created for the appended MTP global layer — NOT main layer 0.
-            const size_t gid = static_cast<size_t>(global_layer_id);
-            if (gid < all_layout.layers_to_kv_buffer_ptrs_by_group.size()) {
-                const auto& src_kv = all_layout.layers_to_kv_buffer_ptrs_by_group[gid];
-                for (size_t a = 0; a < group_count && a < src_kv.size(); ++a) {
-                    layout.layers_to_kv_buffer_ptrs_by_group[local_layer_id][a] = src_kv[a];
+            if (static_cast<size_t>(global_layer_id) < all_layout.layers_to_scale_buffer_ptrs_by_group.size()) {
+                const auto& src_scale =
+                    all_layout.layers_to_scale_buffer_ptrs_by_group[static_cast<size_t>(global_layer_id)];
+                if (global_gid >= 0 && static_cast<size_t>(global_gid) < src_scale.size()) {
+                    layout.layers_to_scale_buffer_ptrs_by_group[local_layer_id][local_gid] =
+                        src_scale[static_cast<size_t>(global_gid)];
                 }
             }
-            if (gid < all_layout.layers_to_scale_buffer_ptrs_by_group.size()) {
-                const auto& src_scale = all_layout.layers_to_scale_buffer_ptrs_by_group[gid];
-                for (size_t a = 0; a < group_count && a < src_scale.size(); ++a) {
-                    layout.layers_to_scale_buffer_ptrs_by_group[local_layer_id][a] = src_scale[a];
-                }
-            }
-            if (gid < all_layout.layer_to_group_ids.size()) {
-                layout.layer_to_group_ids[local_layer_id] = all_layout.layer_to_group_ids[gid];
-                if (!layout.layer_to_group_ids[local_layer_id].empty()) {
-                    layout.layer_group_types[local_layer_id] = mtp_sub_config->typeForGroup(
-                        static_cast<size_t>(layout.layer_to_group_ids[local_layer_id].front()));
-                }
-            }
-            if (gid < all_layout.layer_tag_to_group_id.size()) {
-                layout.layer_tag_to_group_id[local_layer_id] = all_layout.layer_tag_to_group_id[gid];
-            }
-        } else {
-            RTP_LLM_CHECK(false);
         }
     }
 

@@ -34,9 +34,6 @@ struct KVCacheSpecDescExtra {
 struct KVCacheSpecDesc {
     std::string tag;
     CacheType   cache_type = CacheType::MHA;
-    bool        has_group_order = false;
-    uint32_t    group_order     = 0;
-
     uint32_t num_kv_heads      = 0;  // global model KV head count (MHA: kv_head_num; MLA: 1)
     uint32_t seq_size_per_block = 0;
     DataType dtype              = DataType::TYPE_INVALID;

@@ -1607,8 +1607,6 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def(py::init<>())
         .def_readwrite("tag", &KVCacheSpecDesc::tag)
         .def_readwrite("cache_type", &KVCacheSpecDesc::cache_type)
-        .def_readwrite("has_group_order", &KVCacheSpecDesc::has_group_order)
-        .def_readwrite("group_order", &KVCacheSpecDesc::group_order)
         .def_readwrite("num_kv_heads",  &KVCacheSpecDesc::num_kv_heads)
         .def_readwrite("seq_size_per_block", &KVCacheSpecDesc::seq_size_per_block)
         .def_readwrite("dtype", &KVCacheSpecDesc::dtype)
@@ -1657,8 +1655,6 @@ PYBIND11_MODULE(libth_transformer_config, m) {
             [](const KVCacheSpecDesc& self) {
                 return py::make_tuple(self.tag,
                                       self.cache_type,
-                                      self.has_group_order,
-                                      self.group_order,
                                       self.num_kv_heads,
                                       self.seq_size_per_block,
                                       self.dtype,
@@ -1705,58 +1701,56 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.is_reservable);
             },
             [](py::tuple t) {
-                if (t.size() != 48) {
+                if (t.size() != 46) {
                     throw std::runtime_error("Invalid state!");
                 }
                 KVCacheSpecDesc c;
                 c.tag                              = t[0].cast<std::string>();
                 c.cache_type                       = t[1].cast<CacheType>();
-                c.has_group_order                  = t[2].cast<bool>();
-                c.group_order                      = t[3].cast<uint32_t>();
-                c.num_kv_heads                 = t[4].cast<uint32_t>();
-                c.seq_size_per_block               = t[5].cast<uint32_t>();
-                c.dtype                            = t[6].cast<DataType>();
-                c.size_per_head                    = t[7].cast<uint32_t>();
-                c.kv_lora_rank                     = t[8].cast<uint32_t>();
-                c.rope_head_dim                    = t[9].cast<uint32_t>();
-                c.num_k_heads                  = t[10].cast<uint32_t>();
-                c.num_v_heads                  = t[11].cast<uint32_t>();
-                c.head_k_dim                       = t[12].cast<uint32_t>();
-                c.head_v_dim                       = t[13].cast<uint32_t>();
-                c.conv_kernel_dim                  = t[14].cast<uint32_t>();
-                c.ssm_state_dtype                  = t[15].cast<DataType>();
-                c.conv_state_dtype                 = t[16].cast<DataType>();
-                c.is_state_cache                   = t[17].cast<bool>();
-                c.entry_elems                      = t[18].cast<uint32_t>();
-                c.entries_per_block                = t[19].cast<uint32_t>();
-                c.compression_ratio                = t[20].cast<uint32_t>();
-                c.store_dtype                      = t[21].cast<DataType>();
-                c.block_size_bytes_override        = t[22].cast<size_t>();
-                c.block_size_bytes_alignment       = t[23].cast<size_t>();
-                c.block_size_alignment_min_entries = t[24].cast<uint32_t>();
-                c.has_sparse_slots                 = t[25].cast<bool>();
-                c.sparse_slots                     = t[26].cast<bool>();
-                c.skip_prefix_reuse                = t[27].cast<bool>();
-                c.extra                            = t[28].cast<KVCacheSpecDescExtra>();
-                c.has_evict_policy                 = t[29].cast<bool>();
-                c.evict_policy                     = t[30].cast<CacheEvictPolicy>();
-                c.has_reuse_policy                 = t[31].cast<bool>();
-                c.reuse_policy                     = t[32].cast<CacheReusePolicy>();
-                c.has_active_tail_blocks           = t[33].cast<bool>();
-                c.active_tail_blocks               = t[34].cast<int>();
-                c.has_validate_tail_blocks         = t[35].cast<bool>();
-                c.validate_tail_blocks             = t[36].cast<bool>();
-                c.has_prefix_reusable              = t[37].cast<bool>();
-                c.prefix_reusable                  = t[38].cast<bool>();
-                c.uses_pinned_cpu_backing          = t[39].cast<bool>();
-                c.has_is_cp_shardable              = t[40].cast<bool>();
-                c.is_cp_shardable                  = t[41].cast<bool>();
-                c.has_kernel_block_subdiv          = t[42].cast<bool>();
-                c.kernel_block_subdiv              = t[43].cast<bool>();
-                c.has_cp_compact_tail_blocks       = t[44].cast<bool>();
-                c.cp_compact_tail_blocks           = t[45].cast<bool>();
-                c.has_is_reservable                = t[46].cast<bool>();
-                c.is_reservable                    = t[47].cast<bool>();
+                c.num_kv_heads                     = t[2].cast<uint32_t>();
+                c.seq_size_per_block               = t[3].cast<uint32_t>();
+                c.dtype                            = t[4].cast<DataType>();
+                c.size_per_head                    = t[5].cast<uint32_t>();
+                c.kv_lora_rank                     = t[6].cast<uint32_t>();
+                c.rope_head_dim                    = t[7].cast<uint32_t>();
+                c.num_k_heads                      = t[8].cast<uint32_t>();
+                c.num_v_heads                      = t[9].cast<uint32_t>();
+                c.head_k_dim                       = t[10].cast<uint32_t>();
+                c.head_v_dim                       = t[11].cast<uint32_t>();
+                c.conv_kernel_dim                  = t[12].cast<uint32_t>();
+                c.ssm_state_dtype                  = t[13].cast<DataType>();
+                c.conv_state_dtype                 = t[14].cast<DataType>();
+                c.is_state_cache                   = t[15].cast<bool>();
+                c.entry_elems                      = t[16].cast<uint32_t>();
+                c.entries_per_block                = t[17].cast<uint32_t>();
+                c.compression_ratio                = t[18].cast<uint32_t>();
+                c.store_dtype                      = t[19].cast<DataType>();
+                c.block_size_bytes_override        = t[20].cast<size_t>();
+                c.block_size_bytes_alignment       = t[21].cast<size_t>();
+                c.block_size_alignment_min_entries = t[22].cast<uint32_t>();
+                c.has_sparse_slots                 = t[23].cast<bool>();
+                c.sparse_slots                     = t[24].cast<bool>();
+                c.skip_prefix_reuse                = t[25].cast<bool>();
+                c.extra                            = t[26].cast<KVCacheSpecDescExtra>();
+                c.has_evict_policy                 = t[27].cast<bool>();
+                c.evict_policy                     = t[28].cast<CacheEvictPolicy>();
+                c.has_reuse_policy                 = t[29].cast<bool>();
+                c.reuse_policy                     = t[30].cast<CacheReusePolicy>();
+                c.has_active_tail_blocks           = t[31].cast<bool>();
+                c.active_tail_blocks               = t[32].cast<int>();
+                c.has_validate_tail_blocks         = t[33].cast<bool>();
+                c.validate_tail_blocks             = t[34].cast<bool>();
+                c.has_prefix_reusable              = t[35].cast<bool>();
+                c.prefix_reusable                  = t[36].cast<bool>();
+                c.uses_pinned_cpu_backing          = t[37].cast<bool>();
+                c.has_is_cp_shardable              = t[38].cast<bool>();
+                c.is_cp_shardable                  = t[39].cast<bool>();
+                c.has_kernel_block_subdiv          = t[40].cast<bool>();
+                c.kernel_block_subdiv              = t[41].cast<bool>();
+                c.has_cp_compact_tail_blocks       = t[42].cast<bool>();
+                c.cp_compact_tail_blocks           = t[43].cast<bool>();
+                c.has_is_reservable                = t[44].cast<bool>();
+                c.is_reservable                    = t[45].cast<bool>();
                 return c;
             }));
 

@@ -69,17 +69,6 @@ DSV4_FP8_KV_ENTRY_BYTES = 584
 DSV4_FP8_INDEXER_ENTRY_BYTES = 132
 DSV4_FP8_MLA_BLOCK_ALIGNMENT_BYTES = 576
 DSV4_SWA_WINDOW_ENTRIES = 128
-DSV4_GROUP_ORDER = {
-    "csa_kv": 0,
-    "hca_kv": 1,
-    "indexer_kv": 2,
-    "indexer_state": 3,
-    "csa_state": 4,
-    "hca_state": 5,
-    "swa_kv": 6,
-}
-
-
 def _dsv4_kv_cache_desc_for_tag(
     tag: str,
     config: ModelConfig,
@@ -94,9 +83,6 @@ def _dsv4_kv_cache_desc_for_tag(
 
     desc = KVCacheSpecDesc()
     desc.tag = tag
-    desc.has_group_order = True
-    desc.group_order = DSV4_GROUP_ORDER[tag]
-
     if tag in ("csa_kv", "hca_kv", "indexer_kv"):
         desc.dtype = DataType.TYPE_UINT8
         desc.cache_type = CacheType.COMPRESSED_KV

@@ -51,8 +51,17 @@ public:
 
             const auto mtp_layer_num = mtp_sub_config->layer_num;
 
-            const auto& mtp_spec = mtp_sub_config->specForGroup(0);
-            // mtp block size is not same with main model block size
+            size_t real_mtp_gid = 0;
+            for (size_t gid = 0; gid < static_cast<size_t>(mtp_sub_config->groupNums()); ++gid) {
+                if (!mtp_sub_config->layerIdsForGroup(gid).empty()) {
+                    real_mtp_gid = gid;
+                    break;
+                }
+            }
+            const auto& mtp_spec = mtp_sub_config->specForGroup(real_mtp_gid);
+            // mtp block size is not same with main model block size.  MTP
+            // sub-configs may keep target-aligned placeholder groups, so use
+            // the first group that owns a real MTP layer instead of gid 0.
             MemoryLayoutConfig mtp_layout = createMemoryLayoutConfig(false,
                                                                      mtp_layer_num,
                                                                      mtp_spec->block_size_bytes(),

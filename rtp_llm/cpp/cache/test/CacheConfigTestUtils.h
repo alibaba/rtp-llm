@@ -51,38 +51,10 @@ inline KVCacheSpecPtr makeDsv4Spec(const std::string& tag,
     return spec;
 }
 
-inline uint32_t dsv4GroupOrder(const std::string& tag) {
-    if (tag == "csa_kv") {
-        return 0;
-    }
-    if (tag == "hca_kv") {
-        return 1;
-    }
-    if (tag == "indexer_kv") {
-        return 2;
-    }
-    if (tag == "indexer_state") {
-        return 3;
-    }
-    if (tag == "csa_state") {
-        return 4;
-    }
-    if (tag == "hca_state") {
-        return 5;
-    }
-    if (tag == "swa_kv") {
-        return 6;
-    }
-    RTP_LLM_FAIL("unknown DSV4 test tag=%s", tag.c_str());
-    return 0;
-}
-
 inline KVCacheSpecDesc dsv4DescForSpec(const KVCacheSpecPtr& spec) {
     RTP_LLM_CHECK_WITH_INFO(spec != nullptr, "dsv4DescForSpec got null spec");
     KVCacheSpecDesc desc;
     desc.tag             = spec->tag;
-    desc.has_group_order = true;
-    desc.group_order     = dsv4GroupOrder(spec->tag);
     desc.dtype           = spec->dtype;
     if (auto* compressed = dynamic_cast<CompressedKVCacheSpec*>(spec.get())) {
         desc.cache_type                 = CacheType::COMPRESSED_KV;
@@ -211,20 +183,6 @@ inline void setHybridAttentionKvCacheSpecs(ModelConfig& model_config) {
     linear_desc.conv_kernel_dim        = static_cast<uint32_t>(linear_config.linear_conv_kernel_dim);
     linear_desc.ssm_state_dtype        = linear_config.ssm_state_dtype;
     linear_desc.conv_state_dtype       = linear_config.conv_state_dtype;
-
-    uint32_t group_order = 0;
-    if (!full_layers.empty()) {
-        full_desc.has_group_order = true;
-        full_desc.group_order     = group_order++;
-    }
-    if (!swa_layers.empty()) {
-        swa_desc.has_group_order = true;
-        swa_desc.group_order     = group_order++;
-    }
-    if (!linear_layers.empty()) {
-        linear_desc.has_group_order = true;
-        linear_desc.group_order     = group_order++;
-    }
 
     model_config.kv_cache_spec_descs.assign(static_cast<size_t>(model_config.num_layers), {});
     for (int layer_id : full_layers) {

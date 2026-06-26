@@ -1147,8 +1147,6 @@ class KVCacheSpecDescExtra:
 class KVCacheSpecDesc:
     tag: str
     cache_type: CacheType
-    has_group_order: bool
-    group_order: int
     local_head_num_kv: int
     seq_size_per_block: int
     dtype: DataType
