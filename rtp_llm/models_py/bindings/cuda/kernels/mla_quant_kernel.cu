@@ -305,22 +305,24 @@ __inline__ __device__ uint8_t ue8m0_byte_from_scale(float scale) {
 __inline__ __device__ uint8_t quantize_fp4_e2m1_signed(float x_scaled) {
     // FP4 levels (positive): {0, 0.5, 1, 1.5, 2, 3, 4, 6}
     // boundaries (midpoints): 0.25, 0.75, 1.25, 1.75, 2.5, 3.5, 5.0
-    // (matches deep_gemm.utils._quantize_to_fp4_e2m1)
+    // Use strict ``>`` so values exactly at a midpoint go to the LOWER
+    // level — matches ``torch.bucketize(ax, boundaries, right=False)`` used
+    // inside ``deep_gemm.utils._quantize_to_fp4_e2m1``.
     float   ax   = fminf(fabsf(x_scaled), 6.0f);
     uint8_t code = 0;
-    if (ax >= 0.25f)
+    if (ax > 0.25f)
         code = 1;
-    if (ax >= 0.75f)
+    if (ax > 0.75f)
         code = 2;
-    if (ax >= 1.25f)
+    if (ax > 1.25f)
         code = 3;
-    if (ax >= 1.75f)
+    if (ax > 1.75f)
         code = 4;
-    if (ax >= 2.5f)
+    if (ax > 2.5f)
         code = 5;
-    if (ax >= 3.5f)
+    if (ax > 3.5f)
         code = 6;
-    if (ax >= 5.0f)
+    if (ax > 5.0f)
         code = 7;
     if (x_scaled < 0.0f && code != 0) {
         code |= 0x08u;  // sign bit

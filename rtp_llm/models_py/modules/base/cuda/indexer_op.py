@@ -707,6 +707,44 @@ class IndexerOp(nn.Module):
             is_neox_style=self.is_neox_style,
         )
 
+    def fused_rope_quant_q_fp4(
+        self,
+        q: torch.Tensor,
+        positions: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Fused RoPE + Hadamard + FP4 e2m1 (UE8M0 per-group) quantization for Q.
+
+        Blackwell-only FP4 sibling of ``fused_rope_quant_q``. Replaces the
+        unfused FP4 path (``apply_rope_and_rotate_q_k`` + ``_fp4_quant_q``)
+        with a single Triton kernel. Output is byte-for-byte equivalent to
+        ``_fp4_quant_q`` when applied to the same RoPE+Hadamard'd input,
+        verified by ``test_fused_q_rope_fp4_quant.py``.
+
+        Args:
+            q: Pre-RoPE query [num_tokens, index_n_heads, index_head_dim] bf16
+            positions: Position IDs [num_tokens] int64
+
+        Returns:
+            (q_fp4, q_scale) matching ``_fp4_quant_q`` shape contract:
+                q_fp4:   int8  [num_tokens, index_n_heads, index_head_dim//2]
+                q_scale: int32 [num_tokens, index_n_heads]  (4 packed UE8M0)
+        """
+        assert self._is_fp4(), "fused_rope_quant_q_fp4 requires quant_dtype='fp4'"
+        from rtp_llm.models_py.triton_kernels.sparse_mla.fused_q_rope_fp4_quant import (
+            fused_q_rope_fp4_quant,
+        )
+
+        actual_rot_dim = self.index_head_dim - self.rope_head_dim
+        return fused_q_rope_fp4_quant(
+            q,
+            positions,
+            self.cos_sin_cache,
+            self.index_n_heads,
+            self.index_head_dim,
+            actual_rot_dim,
+            is_neox_style=self.is_neox_style,
+        )
+
     def fused_rope_quant_qk(
         self,
         q: torch.Tensor,
@@ -732,6 +770,46 @@ class IndexerOp(nn.Module):
 
         actual_rot_dim = self.index_head_dim - self.rope_head_dim
         return fused_qk_rope_quant(
+            q,
+            k,
+            positions,
+            self.cos_sin_cache,
+            self.index_n_heads,
+            self.index_head_dim,
+            actual_rot_dim,
+            is_neox_style=self.is_neox_style,
+        )
+
+    def fused_rope_quant_qk_fp4(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        positions: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Fused QK: K(RoPE+Hadamard→bf16) + Q(RoPE+Hadamard+FP4) in one kernel.
+
+        Blackwell-only FP4 sibling of ``fused_rope_quant_qk``. K output is
+        identical to the FP8 path (still bf16); Q is FP4 e2m1 + UE8M0/32
+        scale, matching ``fused_rope_quant_q_fp4``'s shape contract.
+
+        Args:
+            q: Pre-RoPE query [num_tokens, index_n_heads, index_head_dim] bf16
+            k: Pre-RoPE key [num_tokens, index_head_dim] (after k_norm)
+            positions: Position IDs [num_tokens]
+
+        Returns:
+            (q_fp4, q_scale, k_out):
+                q_fp4:   int8  [num_tokens, index_n_heads, index_head_dim // 2]
+                q_scale: int32 [num_tokens, index_n_heads]  (4 packed UE8M0)
+                k_out:   bf16  [num_tokens, index_head_dim]
+        """
+        assert self._is_fp4(), "fused_rope_quant_qk_fp4 requires quant_dtype='fp4'"
+        from rtp_llm.models_py.triton_kernels.sparse_mla.fused_q_rope_fp4_quant import (
+            fused_qk_rope_fp4_quant,
+        )
+
+        actual_rot_dim = self.index_head_dim - self.rope_head_dim
+        return fused_qk_rope_fp4_quant(
             q,
             k,
             positions,
@@ -894,34 +972,27 @@ class IndexerOp(nn.Module):
             )
         assert isinstance(schedule_metadata, torch.Tensor)
 
+        # Unified deep_gemm entry: ``fp8_fp4_paged_mqa_logits`` dispatches on
+        # the inner dtype of the q tuple. FP4: q_scale carries packed UE8M0;
+        # FP8: q_scale is None (weights already absorbed q_scale via the head
+        # gate). Both expect a leading next_n=1 dim on q (and on q_scale).
         if self._is_fp4():
-            # q_fp8 is packed FP4 int8 [N, n_heads, HD//2]; q_scale_fp4
-            # is packed UE8M0 int32 [N, n_heads]. deep_gemm wants both with
-            # a leading next_n=1 dim → [N, 1, n_heads, HD//2] / [N, 1, n_heads].
             assert (
                 q_scale_fp4 is not None
             ), "FP4 paged path requires q_scale_fp4 from quant_q_*"
-            logits = deep_gemm.fp8_fp4_paged_mqa_logits(
-                (q_fp8.unsqueeze(1), q_scale_fp4.unsqueeze(1)),
-                kv_cache_fp8.view(dtype=torch.uint8),
-                weights,
-                kvlen_2d,
-                block_table,
-                schedule_metadata,
-                max_seq_len,
-                clean_logits=False,
-            )
+            q_arg = (q_fp8.unsqueeze(1), q_scale_fp4.unsqueeze(1))
         else:
-            logits = deep_gemm.fp8_paged_mqa_logits(
-                q_fp8.unsqueeze(1),
-                kv_cache_fp8.view(dtype=torch.uint8),
-                weights,
-                kvlen_2d,
-                block_table,
-                schedule_metadata,
-                max_seq_len,
-                clean_logits=False,
-            )
+            q_arg = (q_fp8.unsqueeze(1), None)
+        logits = deep_gemm.fp8_fp4_paged_mqa_logits(
+            q_arg,
+            kv_cache_fp8.view(dtype=torch.uint8),
+            weights,
+            kvlen_2d,
+            block_table,
+            schedule_metadata,
+            max_seq_len,
+            clean_logits=False,
+        )
 
         assert (
             fmha_params.expanded_seq_lens.device == logits.device
@@ -1089,30 +1160,27 @@ class IndexerOp(nn.Module):
         while row_start < num_rows:
             row_end = min(row_start + chunk_rows, num_rows)
             try:
+                # Unified deep_gemm entry: ``fp8_fp4_mqa_logits`` dispatches
+                # on inner dtype. FP4: q_scale carries packed UE8M0; FP8:
+                # q_scale is None (already folded into weights).
                 if self._is_fp4():
                     assert (
                         q_scale_fp4 is not None
                     ), "FP4 ragged path requires q_scale_fp4 from quant_q_*"
-                    logits = deep_gemm.fp8_fp4_mqa_logits(
-                        (
-                            q_fp8[row_start:row_end],
-                            q_scale_fp4[row_start:row_end],
-                        ),
-                        kv_fp8,
-                        weights[row_start:row_end],
-                        fmha_params.ks[row_start:row_end],
-                        fmha_params.ke[row_start:row_end],
-                        clean_logits=False,
+                    q_arg = (
+                        q_fp8[row_start:row_end],
+                        q_scale_fp4[row_start:row_end],
                     )
                 else:
-                    logits = deep_gemm.fp8_mqa_logits(
-                        q_fp8[row_start:row_end],
-                        kv_fp8,
-                        weights[row_start:row_end],
-                        fmha_params.ks[row_start:row_end],
-                        fmha_params.ke[row_start:row_end],
-                        clean_logits=False,
-                    )
+                    q_arg = (q_fp8[row_start:row_end], None)
+                logits = deep_gemm.fp8_fp4_mqa_logits(
+                    q_arg,
+                    kv_fp8,
+                    weights[row_start:row_end],
+                    fmha_params.ks[row_start:row_end],
+                    fmha_params.ke[row_start:row_end],
+                    clean_logits=False,
+                )
             except torch.OutOfMemoryError:
                 next_chunk_rows = _halve_chunk_rows(chunk_rows)
                 if next_chunk_rows == chunk_rows:
@@ -1402,30 +1470,25 @@ class IndexerOp(nn.Module):
             while row_start < nr:
                 row_end = min(row_start + chunk_rows, nr)
                 try:
+                    # Same unified-entry pattern as the non-CP ragged path.
                     if self._is_fp4():
                         assert (
                             q_scale_part is not None
                         ), "FP4 ragged CP path requires q_scale_part"
-                        logits_p = deep_gemm.fp8_fp4_mqa_logits(
-                            (
-                                q_part[row_start:row_end],
-                                q_scale_part[row_start:row_end],
-                            ),
-                            kv_fp8_full,
-                            weights_part[row_start:row_end],
-                            ks[row_start:row_end],
-                            ke[row_start:row_end],
-                            clean_logits=False,
+                        q_arg = (
+                            q_part[row_start:row_end],
+                            q_scale_part[row_start:row_end],
                         )
                     else:
-                        logits_p = deep_gemm.fp8_mqa_logits(
-                            q_part[row_start:row_end],
-                            kv_fp8_full,
-                            weights_part[row_start:row_end],
-                            ks[row_start:row_end],
-                            ke[row_start:row_end],
-                            clean_logits=False,
-                        )
+                        q_arg = (q_part[row_start:row_end], None)
+                    logits_p = deep_gemm.fp8_fp4_mqa_logits(
+                        q_arg,
+                        kv_fp8_full,
+                        weights_part[row_start:row_end],
+                        ks[row_start:row_end],
+                        ke[row_start:row_end],
+                        clean_logits=False,
+                    )
                 except torch.OutOfMemoryError:
                     next_chunk_rows = _halve_chunk_rows(chunk_rows)
                     if next_chunk_rows == chunk_rows:

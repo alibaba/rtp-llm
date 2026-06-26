@@ -21,6 +21,28 @@ py_test(
 )
 
 py_test(
+    name = "test_fused_q_rope_fp4_quant",
+    srcs = ["test_fused_q_rope_fp4_quant.py"],
+    deps = [
+        "//rtp_llm/models_py/standalone:py_standalone_testlib",
+    ],
+    env = {"GPU_COUNT": "1"},
+    tags = ["SM100"],
+    exec_properties = {'gpu': 'SM100_X86', 'gpu_count': '1'},
+)
+
+py_test(
+    name = "test_fused_qk_rope_fp4_quant",
+    srcs = ["test_fused_qk_rope_fp4_quant.py"],
+    deps = [
+        "//rtp_llm/models_py/standalone:py_standalone_testlib",
+    ],
+    env = {"GPU_COUNT": "1"},
+    tags = ["SM100"],
+    exec_properties = {'gpu': 'SM100_X86', 'gpu_count': '1'},
+)
+
+py_test(
     name = "test_fused_qk_rope_cat_cache_mla",
     srcs = ["test_fused_qk_rope_cat_cache_mla.py"],
     deps = [

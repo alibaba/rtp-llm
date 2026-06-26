@@ -85,3 +85,25 @@ py_test (
     tags = ["open_skip", "H20"],
     exec_properties = {'gpu':'H20'},
 )
+
+py_test (
+    name = "indexer_k_quant_and_cache_fp4_test",
+    srcs = ["indexer_k_quant_and_cache_fp4_test.py"],
+    deps = py_test_deps,
+    tags = ["open_skip", "SM100"],
+    exec_properties = {'gpu':'SM100_X86'},
+)
+
+py_test (
+    name = "deep_gemm_fp8_fp4_unified_api_test",
+    srcs = ["deep_gemm_fp8_fp4_unified_api_test.py"],
+    deps = py_test_deps,
+    # deep_gemm's JIT compiler writes its cache to ``.deep_gemm/tmp/`` in cwd
+    # by default; the bazel sandbox cwd is read-only and that breaks NVCC.
+    # Redirect to /tmp so the JIT compile can land its kernel.cu file.
+    env = {
+        "DG_JIT_CACHE_DIR": "/tmp/.deep_gemm_jit_cache",
+    },
+    tags = ["open_skip", "SM100"],
+    exec_properties = {'gpu':'SM100_X86'},
+)

@@ -61,6 +61,21 @@ CacheConfig SingleConfigCreator::createSingleConfig(const ModelConfig&       mod
         }
         config.kv_scale_stride_bytes = per_token_bytes * spec->seq_size_per_block;
         config.kv_scale_size_bytes   = static_cast<size_t>(config.layer_num) * config.kv_scale_stride_bytes;
+
+        // PD-consistency banner. Until GetPeerInfo (model_rpc_service.proto)
+        // carries indexer_quant_dtype for a real handshake check, log the
+        // resolved stride at startup so an operator can grep both prefill
+        // and decode logs to catch env-var mismatches that would silently
+        // corrupt RDMA-transferred KV blocks
+        // (`grep INDEXER_QUANT_BANNER prefill.log decode.log`).
+        RTP_LLM_LOG_INFO("INDEXER_QUANT_BANNER indexer_quant_dtype=%s indexer_head_dim=%d "
+                         "seq_size_per_block=%u bytes_per_token=%zu kv_scale_stride_bytes=%zu "
+                         "(must match peer in PD pair)",
+                         model_config.attn_config.indexer_quant_dtype.c_str(),
+                         indexer_dim,
+                         spec->seq_size_per_block,
+                         per_token_bytes,
+                         config.kv_scale_stride_bytes);
     }
 
     config.block_size_bytes = config.kv_block_size_bytes + config.kv_scale_size_bytes;
