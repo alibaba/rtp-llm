@@ -5,6 +5,7 @@ import grpc
 import torch
 
 from rtp_llm.config.engine_config import EngineConfig
+from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.log_config import setup_logging
 from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.config.server_config_setup import setup_and_configure_server
@@ -12,6 +13,7 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     CacheStatusPB,
     CacheVersionPB,
     EmptyPB,
+    ErrorDetailsPB,
     MMPreprocessConfigPB,
     MultimodalInputsPB,
     MultimodalOutputPB,
@@ -70,6 +72,30 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
     def AsyncSubmitEmbedding(self, multimodal_inputs: MultimodalInputsPB, context):
         converted_inputs = trans_mm_input(multimodal_inputs)
         self.engine.async_submit(converted_inputs)
+        return EmptyPB()
+
+    def WaitGreenNetVerdict(self, multimodal_inputs: MultimodalInputsPB, context):
+        """Block until greennet decides for all inputs (kicked earlier by
+        AsyncSubmitEmbedding). On a violation, fail the RPC with an
+        ErrorDetailsPB(error_code=UNSAFE_INPUT_CONTENT) trailer so the LLM
+        client reconstructs the exact FtRuntimeException."""
+        converted_inputs = trans_mm_input(multimodal_inputs)
+        verdict = self.engine.wait_greennet_verdict(converted_inputs)
+        if not verdict.passed:
+            error_code = (
+                ExceptionType.UNSAFE_INPUT_CONTENT
+                if verdict.code == 2
+                else ExceptionType.MM_PROCESS_ERROR
+            )
+            details = ErrorDetailsPB(
+                error_code=int(error_code),
+                error_message=verdict.message or "data inspection failed",
+            )
+            context.set_trailing_metadata(
+                (("grpc-status-details-bin", details.SerializeToString()),)
+            )
+            context.set_code(grpc.StatusCode.PERMISSION_DENIED)
+            context.set_details(verdict.message or "data inspection failed")
         return EmptyPB()
 
     def RemoteMultimodalEmbedding(self, multimodal_inputs: MultimodalInputsPB, context):

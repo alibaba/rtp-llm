@@ -73,6 +73,21 @@ private:
                 return mm_embedding_res;
             } catch (py::error_already_set& e) {
                 std::string error_msg = e.what();
+                // Generic error-code passthrough: any Python exception carrying an
+                // ``exception_type`` attribute (i.e. FtRuntimeException) keeps its
+                // code instead of collapsing to MM_PROCESS_ERROR. This lets the
+                // engine-side greennet gate surface UNSAFE_INPUT_CONTENT (907)
+                // intact — without C++ knowing anything about content safety.
+                try {
+                    py::gil_scoped_acquire gil;
+                    py::object             exc = py::reinterpret_borrow<py::object>(e.value());
+                    if (exc && py::hasattr(exc, "exception_type")) {
+                        int code = exc.attr("exception_type").cast<int>();
+                        return ErrorInfo(static_cast<ErrorCode>(code), error_msg);
+                    }
+                } catch (...) {
+                    // fall through to the legacy substring / default handling
+                }
                 if (error_msg.find("download failed") != std::string::npos) {
                     return ErrorInfo(ErrorCode::MM_DOWNLOAD_FAILED, error_msg);
                 }

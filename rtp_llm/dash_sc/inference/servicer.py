@@ -57,6 +57,7 @@ from rtp_llm.dash_sc.codec import (
     build_stream_response_from_generate_outputs,
     iter_fake_model_stream_infer,
     parse_dash_sc_grpc_request,
+    parse_multimodal_parts_from_request,
     prepend_to_generated_ids_tensor,
     unpack_int_tensor_flat,
 )
@@ -96,6 +97,55 @@ _EMPTY_THINK_BODY = "\n"
 _DEFAULT_TERMINATE_TOKEN_ID = 1
 _FINISH_REASON_NOT_FINISHED = 2
 _PARTIAL_RESPONSE_METADATA = (("x-dashscope-partialresponse", "true"),)
+
+
+_DEFAULT_MM_TIMEOUT_MS = 30000
+
+
+def _build_mm_inputs_from_request(request: Any) -> list:
+    """Build ``MultimodalInput`` list from a dash_sc gRPC request.
+
+    Pulls :class:`~rtp_llm.dash_sc.codec.MultimodalPart` records via
+    :func:`parse_multimodal_parts_from_request` and wraps each in a
+    ``MultimodalInput`` whose ``MMPreprocessConfig`` carries the per-part
+    overrides (``min_pixels`` / ``max_pixels`` / ``fps`` / ``max_frames`` /
+    ``min_frames``). Fields unset by the upstream stay ``-1`` so the engine
+    falls back to model defaults — same as the original "all -1" behavior.
+
+    ``mm_timeout_ms`` is fixed at 30 s for all parts (no per-part override on
+    the wire today; matches the previous default).
+
+    Returns ``[]`` for text-only requests so the downstream path is
+    byte-identical to the pre-multimodal behavior. The ``MultimodalInput`` /
+    ``MMPreprocessConfig`` import is lazy so this module stays importable in
+    environments without the C++ binding (e.g. lightweight codec unit tests).
+    """
+    mm_parts = parse_multimodal_parts_from_request(request)
+    if not mm_parts:
+        return []
+    import torch  # noqa: PLC0415  (lazy; only needed when mm parts present)
+
+    from rtp_llm.ops import MMPreprocessConfig, MultimodalInput  # noqa: PLC0415
+
+    return [
+        MultimodalInput(
+            part.url,
+            part.mm_type,
+            torch.empty(0),
+            MMPreprocessConfig(
+                -1,  # width (no upstream control today)
+                -1,  # height
+                part.fps,
+                part.min_pixels,
+                part.max_pixels,
+                part.min_frames,
+                part.max_frames,
+                [],  # crop_positions (no upstream control today)
+                _DEFAULT_MM_TIMEOUT_MS,
+            ),
+        )
+        for part in mm_parts
+    ]
 
 
 def _exception_metric_code(error_code: Any) -> str:
@@ -740,6 +790,7 @@ def _make_generate_input(
     request_headers: Optional[dict[str, str]] = None,
     frontend_metric_tags: Optional[dict[str, str]] = None,
     frontend_metric_observer: Optional[Callable[[Any, int], None]] = None,
+    mm_inputs: Optional[list] = None,
 ) -> GenerateInput:
     headers = dict(request_headers or {})
     headers.update(_headers_from_invocation_metadata(invocation_metadata))
@@ -755,7 +806,7 @@ def _make_generate_input(
     return GenerateInput(
         request_id=request_id,
         token_ids=torch.tensor(input_ids_list, dtype=torch.int),
-        mm_inputs=[],
+        mm_inputs=list(mm_inputs) if mm_inputs else [],
         generate_config=backend_generate_config,
         headers=headers,
         frontend_metric_tags=dict(frontend_metric_tags or {}),
@@ -923,6 +974,7 @@ async def iter_real_model_stream_infer(
     access_agg: Any = None,
     yield_access_stats: bool = False,
     frontend_metric_tags: Optional[dict[str, str]] = None,
+    mm_inputs: Optional[list] = None,
 ) -> AsyncIterator[predict_v2_pb2.ModelStreamInferResponse]:
     """Run enqueue on ``backend_visitor`` and yield one proto per chunk as the backend streams.
 
@@ -1041,6 +1093,7 @@ async def iter_real_model_stream_infer(
                 generate_config,
                 0,
             ),
+            mm_inputs=mm_inputs,
         )
         is_streaming = bool(getattr(generate_config, "is_streaming", True))
         logging.debug("[DashScGrpc] [%s] generate_input: %s", tag, generate_input)
@@ -1487,6 +1540,7 @@ async def iter_real_model_stream_infer(
                     phase2_config,
                     1,
                 ),
+                mm_inputs=mm_inputs,
             )
             logging.debug(
                 "[DashScGrpc] [%s] phase-2 generate_input: %s",
@@ -2132,6 +2186,7 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
                         access_agg=record,
                         yield_access_stats=True,
                         frontend_metric_tags=self._frontend_metric_tags(),
+                        mm_inputs=_build_mm_inputs_from_request(request),
                     ):
                         (
                             delta_len,
