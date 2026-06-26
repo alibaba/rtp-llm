@@ -923,11 +923,27 @@ void CudaGraphRunner::initCaptureAttentionInputs(PyModelInputs& inputs, int max_
 
     // prefix_lengths [batch_size, int32] is only meaningful for prefill and target-verify.
     // Plain decode must leave it undefined.
+    //
+    // Draft prefill must use the same prefix length capturePrefill() will set
+    // (max_seq_len_ - num_tokens_per_bs_); the initCapture warmup forward that
+    // follows is what creates the attn_pyobj used for output-dtype/probe and
+    // primes the Python plan caches.  If we leave prefix=0 here, that warmup
+    // sees cu_kv_seqlens.max() == num_tokens_per_bs * batch (tiny), so
+    // get_mla_impl() picks the dense fast path while every subsequent capture
+    // (which has prefix == max_seq_len - num_tokens_per_bs) picks the sparse
+    // path — the warmup wires up the wrong fmha_impl and exercises a kernel
+    // that capture never runs (FlashInfer ragged dense BatchPrefill at
+    // head_dim=256, seen crashing on Blackwell).
+    //
+    // Embedding prefill (num_tokens_per_bs == max_seq_len) has no KV cache, so
+    // its capture path also uses prefix=0 — keep that.
     if (is_target_verify_) {
         inputs.attention_inputs.prefix_lengths =
             torch::full({int(max_bs_)}, max_seq_len_ - num_tokens_per_bs_, options_cuda_int32_);
     } else if (is_prefill_cuda_graph_mode_) {
-        inputs.attention_inputs.prefix_lengths = torch::zeros({int(max_bs_)}, options_cuda_int32_);
+        const bool is_draft_prefill = num_tokens_per_bs_ != max_seq_len_ && max_seq_len_ > num_tokens_per_bs_;
+        const int  prefix_len       = is_draft_prefill ? (max_seq_len_ - num_tokens_per_bs_) : 0;
+        inputs.attention_inputs.prefix_lengths = torch::full({int(max_bs_)}, prefix_len, options_cuda_int32_);
     }
     // padding_offset [max_num_token_, int32] (for attention padding)
     inputs.attention_inputs.padding_offset            = torch::zeros({int(max_seq_len_ * max_bs_)}, options_cpu_int32_);
@@ -1057,9 +1073,17 @@ void CudaGraphRunner::initCapture() {
 
         if (is_prefill_cuda_graph_mode_) {
             RTP_LLM_LOG_INFO("initCapture forward post check start for prefill");
+            // cu_kv_seqlens must include prefix so this post-check forward sees the
+            // same per-request KV length capturePrefill() will see. Otherwise
+            // get_mla_impl() chooses use_fast_path=True (dense) here while every
+            // captured graph picks sparse — same kind of mismatch as the warmup
+            // (see initCaptureAttentionInputs note). Keep prefix=0 path (embedding
+            // prefill) unchanged.
+            const bool is_draft_prefill_post = num_tokens_per_bs_ != max_seq_len_ && max_seq_len_ > num_tokens_per_bs_;
+            const int  post_prefix_len       = is_draft_prefill_post ? (max_seq_len_ - num_tokens_per_bs_) : 0;
             capture_mem_hold_.py_model_inputs_.attention_inputs.cu_seqlens_host[1] = max_num_token_;
             capture_mem_hold_.py_model_inputs_.attention_inputs.cu_seqlens[1]      = max_num_token_;
-            capture_mem_hold_.py_model_inputs_.attention_inputs.cu_kv_seqlens[1]   = max_num_token_;
+            capture_mem_hold_.py_model_inputs_.attention_inputs.cu_kv_seqlens[1]   = max_num_token_ + post_prefix_len;
             capture_mem_hold_.py_model_inputs_.attention_inputs.input_lengths[0]   = max_num_token_;
 
             PyModelInputs inputs = capture_mem_hold_.py_model_inputs_;
