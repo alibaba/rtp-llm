@@ -151,14 +151,14 @@ class BertModel(GptModelBase):
         if self.use_user_profile_mask and not is_cuda_graph:
             attn_inputs = inputs.attention_inputs
             if attn_inputs.is_prefill:
-                # 单次 D2H: cu_seqlens 很小, 两个纯-CPU helper 共用一份拷贝即可。
-                cu_seqlens_cpu = attn_inputs.cu_seqlens.cpu()
+                # 段标记与 mask 全在 GPU 上向量化构建(无全量 input_ids D2H / mask H2D
+                # 往返); 仅 .any() 一次标量同步决定是否真有 B 段。
                 uqi_segment_ids = derive_bert_uqi_segment_ids(
-                    inputs.input_ids.cpu(),
-                    cu_seqlens_cpu,
+                    inputs.input_ids,
+                    attn_inputs.cu_seqlens,
                     self.cls_uqi_token_id,
                 )
-                if int(uqi_segment_ids.max()) > 0:  # 真有 B 段才接 block mask
+                if bool(uqi_segment_ids.any()):  # 真有 B 段才接 block mask
                     attn_configs = self.config.getAttentionConfigs(
                         self.parallelism_config.get_attn_tp_size()
                     )
@@ -170,8 +170,8 @@ class BertModel(GptModelBase):
                     )
 
                     custom_mask = build_bert_uqi_flashinfer_mask(
-                        uqi_segment_ids, cu_seqlens_cpu
-                    ).to(inputs.input_ids.device)
+                        uqi_segment_ids, attn_inputs.cu_seqlens
+                    )
                     return PyFlashinferPrefillImpl(
                         attn_configs,
                         attn_inputs,

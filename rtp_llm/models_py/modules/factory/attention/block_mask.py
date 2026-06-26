@@ -39,19 +39,43 @@ def derive_bert_uqi_segment_ids(
     Returns:
         [total_tokens] int32, 0/1。
     """
-    uqi_segment_ids = torch.zeros(input_ids.shape[0], dtype=torch.int32)
-    for b in range(cu_seqlens.numel() - 1):
-        s, e = int(cu_seqlens[b]), int(cu_seqlens[b + 1])
-        seq = input_ids[s:e]
-        hits = (seq == b_start_token_id).nonzero(as_tuple=False)
-        if hits.numel() == 0:
-            continue
-        b_start = int(hits[0])
-        # B 段结束 = b_start 之后第一个 SEP (闭区间); 找不到则到序列尾。
-        sep_hits = (seq[b_start:] == sep_token_id).nonzero(as_tuple=False)
-        b_end = b_start + int(sep_hits[0]) + 1 if sep_hits.numel() > 0 else e - s
-        uqi_segment_ids[s + b_start : s + b_end] = 1
-    return uqi_segment_ids
+    # 全向量化: 无 Python 循环 / 无 nonzero / 无 D2H, 设备跟随 input_ids。
+    # ragged "每条序列首个匹配" 用 scatter_reduce(amin) 表达; 与上面逐字节等价
+    # (eager_block_mask_core_test + block_mask_vectorized_parity 逐位对拍)。
+    device = input_ids.device
+    total = int(input_ids.shape[0])
+    out = torch.zeros(total, dtype=torch.int32, device=device)
+    num_seq = cu_seqlens.numel() - 1
+    if total == 0 or num_seq <= 0:
+        return out
+    cu = cu_seqlens.to(device=device, dtype=torch.long)
+    lengths = cu[1:] - cu[:-1]  # [num_seq] 各序列长度
+    seq_of_tok = torch.repeat_interleave(
+        torch.arange(num_seq, device=device), lengths
+    )  # [total] 每 token 属于哪条序列
+    local_pos = torch.arange(total, device=device) - cu[seq_of_tok]  # 序列内位置
+    BIG = total + 1
+    big = torch.full((total,), BIG, dtype=torch.long, device=device)
+    # 每条序列首个 CLS_UQI 的序列内位置 (无则保持 BIG)
+    cls_src = torch.where(input_ids == b_start_token_id, local_pos, big)
+    first_cls = torch.full(
+        (num_seq,), BIG, dtype=torch.long, device=device
+    ).scatter_reduce(0, seq_of_tok, cls_src, reduce="amin", include_self=True)
+    first_cls_tok = first_cls[seq_of_tok]  # [total]
+    # 每条首个 "在 CLS_UQI 之后(含)" 的 SEP 的序列内位置 (无则 BIG)
+    sep_after = (input_ids == sep_token_id) & (local_pos >= first_cls_tok)
+    sep_src = torch.where(sep_after, local_pos, big)
+    first_sep = torch.full(
+        (num_seq,), BIG, dtype=torch.long, device=device
+    ).scatter_reduce(0, seq_of_tok, sep_src, reduce="amin", include_self=True)
+    first_sep_tok = first_sep[seq_of_tok]  # [total]
+    # B 段闭区间 [first_cls, b_end): 有 SEP -> first_sep+1; 无 SEP -> 序列尾(length)。
+    # 无 CLS_UQI 时 first_cls_tok==BIG -> in_b 全 False -> 整条 A 段。
+    has_sep = first_sep_tok < BIG
+    b_end_tok = torch.where(has_sep, first_sep_tok + 1, lengths[seq_of_tok])
+    in_b = (local_pos >= first_cls_tok) & (local_pos < b_end_tok)
+    out[in_b] = 1
+    return out
 
 
 def build_bert_uqi_flashinfer_mask(
@@ -66,13 +90,27 @@ def build_bert_uqi_flashinfer_mask(
     (A看A、A不看B、B看全部)。自注意力 q_len==kv_len, 返回 dtype=torch.bool,
     长度 = sum_b (n_b * n_b), 设备跟随 qi_uqi_segment_ids。
     """
-    parts = []
-    for b in range(cu_seqlens.numel() - 1):
-        s, e = int(cu_seqlens[b]), int(cu_seqlens[b + 1])
-        uqi_segment_ids = qi_uqi_segment_ids[s:e]
-        n = e - s
-        vis = (uqi_segment_ids.view(n, 1) == 1) | (uqi_segment_ids.view(1, n) == 0)  # [n, n] bool
-        parts.append(vis.reshape(-1))
-    if not parts:
-        return torch.empty(0, dtype=torch.bool, device=qi_uqi_segment_ids.device)
-    return torch.cat(parts)
+    # 全向量化(无 Python 循环): 为每个输出位置算出 (序列, 行 i, 列 j), 再施可见性规则。
+    # 输出顺序与逐序列 cat 完全一致 (按序列、块内 row-major [i,j])。
+    device = qi_uqi_segment_ids.device
+    num_seq = cu_seqlens.numel() - 1
+    if num_seq <= 0:
+        return torch.empty(0, dtype=torch.bool, device=device)
+    cu = cu_seqlens.to(device=device, dtype=torch.long)
+    lengths = cu[1:] - cu[:-1]  # [num_seq]
+    sizes = lengths * lengths  # 每条 ragged mask 的元素数 n_b^2
+    total_mask = int(sizes.sum())
+    if total_mask == 0:
+        return torch.empty(0, dtype=torch.bool, device=device)
+    seq_of_pos = torch.repeat_interleave(
+        torch.arange(num_seq, device=device), sizes
+    )  # [total_mask] 每个 mask 元素属于哪条序列
+    block_start = torch.cumsum(sizes, 0) - sizes  # 各序列 mask 块在输出里的起点
+    within = torch.arange(total_mask, device=device) - block_start[seq_of_pos]  # 块内 0..n^2-1
+    n = lengths[seq_of_pos]
+    qi = torch.div(within, n, rounding_mode="floor")  # 行(序列内 query)
+    kj = within - qi * n  # 列(序列内 key)
+    base = cu[seq_of_pos]
+    seg_i = qi_uqi_segment_ids[base + qi]
+    seg_j = qi_uqi_segment_ids[base + kj]
+    return (seg_i == 1) | (seg_j == 0)  # [total_mask] bool, row-major [q,kv] per-req 拼接
