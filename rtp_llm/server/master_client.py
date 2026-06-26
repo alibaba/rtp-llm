@@ -1,28 +1,34 @@
-"""FlexLB schedule client: request role addrs from master/slave and parse response."""
+"""FlexLB schedule client: request role addrs from master/slave via gRPC."""
 
-import json
 import logging
 import time
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
-import aiohttp
-from aiohttp import ClientTimeout
+import grpc
+import grpc.aio
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.generate_config import RoleAddr, RoleType
+from rtp_llm.config.py_config_modules import MasterConfig
+from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
+    FlexlbScheduleRequestPB,
+    GenerateInputPB,
+)
+from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2_grpc import FlexlbServiceStub
+from rtp_llm.metrics import kmonitor
+from rtp_llm.metrics.kmonitor_metric_reporter import AccMetrics
 from rtp_llm.server.host_service import HostService
-from rtp_llm.server.worker_status import ScheduleMeta
 from rtp_llm.utils.base_model_datatypes import GenerateInput
 
 route_logger = logging.getLogger("route_logger")
 
-SCHEDULE_PATH = "/rtp_llm/schedule"
-DEFAULT_REQUEST_TIMEOUT_SEC = 0.5
 SUCCESS_CODE = 200
 DEFAULT_REQUEST_PRIORITY = 100
-CONNECTOR_LIMIT_PER_HOST = 30
-CONNECTOR_KEEPALIVE_TIMEOUT_SEC = 30
+# gRPC = HTTP + 2 for FlexLB's own servers (consistent with FlexlbGrpcServer.FLEXLB_GRPC_PORT_OFFSET).
+# This is NOT the same as the backend engine offset (HTTP+1)—see CommonConstants.GRPC_PORT_OFFSET.
+FLEXLB_GRPC_PORT_OFFSET = 2
+BEARER_PREFIX = "Bearer "
 
 
 @dataclass
@@ -39,7 +45,8 @@ class FlexlbResponse:
     connection_failed: bool = False
     error_code: Optional[int] = None
     error_message: Optional[str] = None
-    result: Optional[Dict[str, Any]] = None  # internal: raw JSON from scheduler
+    result: Optional[Dict[str, Any]] = None
+    enqueued_by_master: bool = False
 
     @property
     def is_ok(self) -> bool:
@@ -54,10 +61,13 @@ class FlexlbResponse:
             error_code=None,
             error_message=None,
             result=result,
+            enqueued_by_master=False,
         )
 
     @classmethod
-    def ok(cls, role_addrs: List[RoleAddr]) -> "FlexlbResponse":
+    def ok(
+        cls, role_addrs: List[RoleAddr], enqueued_by_master: bool = False
+    ) -> "FlexlbResponse":
         """Business success: parsed role addrs."""
         return cls(
             role_addrs=role_addrs,
@@ -65,6 +75,7 @@ class FlexlbResponse:
             error_code=None,
             error_message=None,
             result=None,
+            enqueued_by_master=enqueued_by_master,
         )
 
     @classmethod
@@ -80,58 +91,67 @@ class FlexlbResponse:
             error_code=error_code,
             error_message=error_message,
             result=None,
+            enqueued_by_master=False,
         )
 
     @classmethod
     def connection_failed_response(cls) -> "FlexlbResponse":
-        """No HTTP response (connection/timeout). Triggers slave retry and domain fallback."""
+        """No response (connection/timeout). Triggers slave retry and domain fallback."""
         return cls(
             role_addrs=None,
             connection_failed=True,
             error_code=None,
             error_message=None,
             result=None,
+            enqueued_by_master=False,
         )
 
 
 class MasterClient:
-    """Client for FlexLB schedule API (master and optional slave)."""
+    """Client for FlexLB schedule gRPC API (master and optional slave)."""
 
     def __init__(self, host_service=None, server_config=None, master_config=None):
-        self.master_config = master_config
-        self.host_service: Optional[HostService] = host_service
-        self.max_connect_pool_size = (
-            master_config.master_max_connect_pool_size if master_config else 1000
+        self.master_config = (
+            master_config if master_config is not None else MasterConfig()
         )
-        self._session: Optional[aiohttp.ClientSession] = None
+        self.host_service: Optional[HostService] = host_service
+        self._channels: Dict[str, grpc.aio.Channel] = {}
         self.latest_queue_length: int = 0
-        self.session_timeout_s = self._get_session_timeout_s()
 
-    def _get_session_timeout_s(self) -> float:
-        # Session-level timeout is a safety net for the connection pool lifetime,
-        # not for individual requests. Per-request timeout in _send_schedule_request
-        # always takes precedence (aiohttp per-request timeout overrides session timeout).
-        if self.master_config and self.master_config.master_session_timeout_s >= 0:
-            return float(self.master_config.master_session_timeout_s)
-        if self.host_service and self.host_service.master_vip.domain:
-            return 3600.0
-        return DEFAULT_REQUEST_TIMEOUT_SEC
+    def _get_grpc_target(self, addr: str) -> str:
+        """Resolve gRPC target from service discovery address (ip:HTTP_PORT).
 
-    async def _get_session(self) -> aiohttp.ClientSession:
-        if self._session is None or self._session.closed:
-            timeout = ClientTimeout(total=self.session_timeout_s)
-            connector = aiohttp.TCPConnector(
-                limit=self.max_connect_pool_size,
-                limit_per_host=CONNECTOR_LIMIT_PER_HOST,
-                keepalive_timeout=CONNECTOR_KEEPALIVE_TIMEOUT_SEC,
-                enable_cleanup_closed=True,
+        gRPC port is always derived as HTTP port + FLEXLB_GRPC_PORT_OFFSET.
+        """
+        ip = addr.split(":")[0]
+        try:
+            http_port = int(addr.split(":")[1])
+            return f"{ip}:{http_port + FLEXLB_GRPC_PORT_OFFSET}"
+        except (IndexError, ValueError):
+            return f"{ip}:{7001 + FLEXLB_GRPC_PORT_OFFSET}"
+
+    def _get_channel(self, target: str) -> grpc.aio.Channel:
+        if target not in self._channels:
+            self._channels[target] = grpc.aio.insecure_channel(
+                target,
+                options=[
+                    ("grpc.max_receive_message_length", 16 * 1024 * 1024),
+                    ("grpc.max_send_message_length", 16 * 1024 * 1024),
+                    ("grpc.keepalive_time_ms", 30000),
+                    ("grpc.keepalive_timeout_ms", 10000),
+                ],
             )
-            self._session = aiohttp.ClientSession(timeout=timeout, connector=connector)
-        return self._session
+        return self._channels[target]
+
+    async def _close_channel(self, target: str) -> None:
+        channel = self._channels.pop(target, None)
+        if channel is not None:
+            await channel.close()
 
     async def close(self) -> None:
-        if self._session and not self._session.closed:
-            await self._session.close()
+        for channel in self._channels.values():
+            await channel.close()
+        self._channels.clear()
 
     def get_latest_queue_length(self) -> int:
         return self.latest_queue_length
@@ -139,84 +159,48 @@ class MasterClient:
     async def _send_schedule_request(
         self,
         addr: str,
-        payload: Dict[str, Any],
-        generate_timeout_ms: int,
+        request_pb: "FlexlbScheduleRequestPB",
+        timeout_s: Optional[float],
         request_id: int,
-    ) -> FlexlbResponse:
-        """
-        Send one schedule request to the given host (master or slave).
-        Returns FlexlbResponse: ok_with_result on HTTP success, error_response on
-        non-200 body, connection_failed_response when no response received.
-        """
-        url = f"http://{addr}{SCHEDULE_PATH}"
-        headers = {"Content-Type": "application/json"}
-        timeout_sec = (
-            (generate_timeout_ms / 1000.0)
-            if generate_timeout_ms > 0
-            else DEFAULT_REQUEST_TIMEOUT_SEC
-        )
+    ):
+        """Send gRPC schedule request. Returns proto response on success, None on transport failure."""
+        target = self._get_grpc_target(addr)
         start = time.time()
-
         try:
-            session = await self._get_session()
-            request_timeout = ClientTimeout(total=timeout_sec)
-            async with session.post(
-                url,
-                data=json.dumps(payload),
-                headers=headers,
-                timeout=request_timeout,
-            ) as response:
-                if response.status != SUCCESS_CODE:
-                    error_code = int(ExceptionType.MASTER_NO_AVAILABLE_WORKER)
-                    error_message = None
-                    try:
-                        raw = await response.json()
-                        if isinstance(raw, dict):
-                            raw_code = raw.get("code")
-                            if raw_code is not None:
-                                try:
-                                    error_code = int(raw_code)
-                                except (TypeError, ValueError):
-                                    pass
-                            error_message = raw.get("error_message")
-                    except (json.JSONDecodeError, aiohttp.ClientError):
-                        pass
-                    route_logger.error(
-                        "FlexLB schedule failed, request_id=%s, error_code=%s, error_message=%s",
-                        request_id,
-                        error_code,
-                        error_message or "",
-                    )
-                    return FlexlbResponse.error_response(error_code, error_message)
-
-                result = await response.json()
-                return FlexlbResponse.ok_with_result(result)
-
-        except (aiohttp.ClientError, TimeoutError, ConnectionError, OSError) as e:
+            channel = self._get_channel(target)
+            stub = FlexlbServiceStub(channel)
+            response = await stub.Schedule(request_pb, timeout=timeout_s)
+            return response
+        except grpc.aio.AioRpcError as e:
             elapsed = time.time() - start
             route_logger.error(
-                "Schedule request failed, addr=%s, request_id=%s, error=%s, elapsed=%.3fs",
+                "gRPC schedule failed, addr=%s, request_id=%s, status=%s, detail=%s, elapsed=%.3fs",
                 addr,
                 request_id,
-                e,
+                e.code(),
+                e.details(),
                 elapsed,
             )
-            return FlexlbResponse.connection_failed_response()
+            await self._close_channel(target)
+            return None
         except Exception as e:
             elapsed = time.time() - start
             route_logger.exception(
-                "Unexpected error in schedule request, addr=%s, request_id=%s, elapsed=%.3fs",
+                "Unexpected gRPC error, addr=%s, request_id=%s, elapsed=%.3fs",
                 addr,
                 request_id,
                 elapsed,
             )
-            return FlexlbResponse.connection_failed_response()
+            await self._close_channel(target)
+            return None
 
     async def get_backend_role_addrs(
         self,
         block_cache_keys: list[int],
+        cache_key_block_size: int,
         input: GenerateInput,
         request_id: int,
+        input_pb: Optional["GenerateInputPB"] = None,
     ) -> FlexlbResponse:
         """
         Resolve backend role addrs from FlexLB scheduler (master, then slave on connection failure).
@@ -235,80 +219,91 @@ class MasterClient:
         ttft_timeout_ms = getattr(
             input.generate_config, "ttft_timeout_ms", None
         ) or getattr(input.generate_config, "timeout_ms", None)
-        if not ttft_timeout_ms or ttft_timeout_ms <= 0:
-            ttft_timeout_ms = (
-                self.master_config.master_default_timeout_ms
-                if self.master_config
-                else 3600000
-            )
-        request_priority = getattr(
-            input.generate_config,
-            "traffic_reject_priority",
-            DEFAULT_REQUEST_PRIORITY,
+        if ttft_timeout_ms is None or ttft_timeout_ms <= 0:
+            ttft_timeout_ms = self.master_config.master_default_timeout_ms
+        timeout_s = ttft_timeout_ms / 1000.0 if ttft_timeout_ms > 0 else None
+
+        gc = input.generate_config
+        api_key = self._extract_api_key(input)
+        request_pb = FlexlbScheduleRequestPB(
+            request_id=request_id,
+            block_cache_keys=block_cache_keys,
+            seq_len=input.prompt_length,
+            generate_timeout=ttft_timeout_ms,
+            request_time_ms=int(time.time() * 1000),
+            max_new_tokens=gc.max_new_tokens,
+            num_beams=gc.num_beams,
+            force_disable_sp_run=gc.force_disable_sp_run,
+            model="engine_service",
+            api_key=api_key,
         )
-        start = time.time()
+        if input_pb is not None:
+            request_pb.generate_input.CopyFrom(input_pb)
 
-        payload: Dict[str, Any] = {
-            "model": "engine_service",
-            "block_cache_keys": block_cache_keys,
-            "seq_len": input.prompt_length,
-            "debug": False,
-            "request_priority": request_priority,
-            "generate_timeout": ttft_timeout_ms,
-            "request_id": request_id,
-            "request_time_ms": int(start * 1000),
-        }
-
-        resp = await self._send_schedule_request(
-            master_addr, payload, ttft_timeout_ms, request_id
+        response = await self._send_schedule_request(
+            master_addr, request_pb, timeout_s, request_id
         )
 
-        if resp.connection_failed and slave_addr:
+        if response is None and slave_addr:
             route_logger.info(
                 "Master connection failed, retrying slave, slave=%s, request_id=%s",
                 slave_addr,
                 request_id,
             )
-            resp = await self._send_schedule_request(
-                slave_addr, payload, ttft_timeout_ms, request_id
+            response = await self._send_schedule_request(
+                slave_addr, request_pb, timeout_s, request_id
             )
 
-        if resp.result is None:
-            return FlexlbResponse(
-                role_addrs=None,
-                connection_failed=resp.connection_failed,
-                error_code=resp.error_code,
-                error_message=resp.error_message,
-                result=None,
-            )
+        if response is None:
+            return FlexlbResponse.connection_failed_response()
 
-        if resp.result.get("code", SUCCESS_CODE) != SUCCESS_CODE:
-            raw_code = resp.result.get("code", SUCCESS_CODE)
+        self.latest_queue_length = response.queue_length
+
+        if response.code != SUCCESS_CODE:
             try:
-                code = int(raw_code)
-            except (TypeError, ValueError):
-                code = int(ExceptionType.MASTER_NO_AVAILABLE_WORKER)
-            try:
-                exception_type = ExceptionType(code)
+                exception_type = ExceptionType(response.code)
             except ValueError:
                 exception_type = ExceptionType.MASTER_NO_AVAILABLE_WORKER
-            message = resp.result.get("error_message") or "master schedule error"
+            message = response.error_message or "master schedule error"
             route_logger.error(
-                "Master schedule error, request_id=%s, error_code=%s, error_message=%s",
+                "Master schedule error, request_id=%s, error_code=%s, "
+                "error_message=%s",
                 request_id,
-                code,
+                response.code,
                 message,
             )
-            raise FtRuntimeException(exception_type=exception_type, message=message)
+            kmonitor.report(
+                AccMetrics.MASTER_ROUTE_ERROR_QPS_METRIC,
+                1,
+                {"error_code": str(response.code)},
+            )
+            raise FtRuntimeException(
+                exception_type=exception_type,
+                message=message,
+            )
 
-        schedule_meta = ScheduleMeta.model_validate(resp.result)
         role_addrs = [
             RoleAddr(
-                role=RoleType(s.role),  # type: ignore[arg-type]
+                role=RoleType(s.role),
                 ip=s.server_ip,
                 http_port=s.http_port,
                 grpc_port=s.grpc_port,
             )
-            for s in schedule_meta.server_status
+            for s in response.server_status
         ]
-        return FlexlbResponse.ok(role_addrs)
+        return FlexlbResponse.ok(
+            role_addrs, enqueued_by_master=response.enqueued_by_master
+        )
+
+    @staticmethod
+    def _extract_api_key(input: GenerateInput) -> str:
+        headers = getattr(input, "headers", None)
+        if not headers:
+            return ""
+        api_key = headers.get("x-api-key") or headers.get("api-key")
+        if api_key:
+            return api_key
+        auth = headers.get("authorization", "")
+        if auth.startswith(BEARER_PREFIX):
+            return auth[len(BEARER_PREFIX) :].strip()
+        return ""

@@ -9,6 +9,7 @@ import org.flexlb.domain.consistency.MasterChangeNotifyResp;
 import org.flexlb.domain.consistency.SyncLBStatusResp;
 import org.flexlb.util.JsonUtils;
 import org.flexlb.util.Logger;
+import org.springframework.core.env.Environment;
 import org.springframework.stereotype.Component;
 
 import java.net.InetAddress;
@@ -30,12 +31,15 @@ public class LBStatusConsistencyService implements MasterElectService {
     );
 
     private final ZookeeperMasterElectService zookeeperMasterElectService;
+    private final Environment environment;
     private LBConsistencyConfig lbConsistencyConfig;
     private String serverPort;
     private String roleId;
 
-    public LBStatusConsistencyService(ZookeeperMasterElectService zookeeperMasterElectService) {
+    public LBStatusConsistencyService(ZookeeperMasterElectService zookeeperMasterElectService,
+                                      Environment environment) {
         this.zookeeperMasterElectService = zookeeperMasterElectService;
+        this.environment = environment;
         this.init();
     }
 
@@ -47,7 +51,12 @@ public class LBStatusConsistencyService implements MasterElectService {
         } catch (UnknownHostException e) {
             throw new RuntimeException(e);
         }
-        serverPort = System.getProperty("server.port", "7001");
+        // Read from Spring Environment to respect --server.port= CLI args;
+        // fall back to JVM system property.
+        serverPort = environment.getProperty("server.port");
+        if (serverPort == null) {
+            serverPort = System.getProperty("server.port", "7001");
+        }
         log.info("hostIp:{}, serverPort:{}.", hostIp, serverPort);
         roleId = System.getenv("HIPPO_ROLE");
         if (StringUtils.isBlank(roleId)) {

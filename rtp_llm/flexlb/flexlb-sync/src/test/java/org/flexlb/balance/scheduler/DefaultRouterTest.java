@@ -73,21 +73,21 @@ class DefaultRouterTest {
 
         // Mock config service
         when(configService.loadBalanceConfig()).thenReturn(loadBalanceConfig);
-        lenient().when(loadBalanceConfig.getLoadBalanceStrategy()).thenReturn(LoadBalanceStrategyEnum.SHORTEST_TTFT);
+        lenient().when(loadBalanceConfig.getLoadBalanceStrategy()).thenReturn(LoadBalanceStrategyEnum.COST_BASED_PREFILL);
         when(loadBalanceConfig.getStrategyForRoleType(any(RoleType.class))).thenAnswer(inv -> {
             RoleType roleType = inv.getArgument(0);
             if (roleType == RoleType.DECODE) {
-                return LoadBalanceStrategyEnum.WEIGHTED_CACHE;
+                return LoadBalanceStrategyEnum.COST_BASED_DECODE;
             }
             if (roleType == RoleType.PDFUSION) {
                 return LoadBalanceStrategyEnum.RANDOM;
             }
-            return LoadBalanceStrategyEnum.SHORTEST_TTFT;
+            return LoadBalanceStrategyEnum.COST_BASED_PREFILL;
         });
 
-        LoadBalanceStrategyFactory.register(LoadBalanceStrategyEnum.SHORTEST_TTFT, prefillLoadBalancer);
-        LoadBalanceStrategyFactory.register(LoadBalanceStrategyEnum.WEIGHTED_CACHE, decodeLoadBalancer);
-        LoadBalanceStrategyFactory.register(LoadBalanceStrategyEnum.SHORTEST_TTFT, vitLoadBalancer);
+        LoadBalanceStrategyFactory.register(LoadBalanceStrategyEnum.COST_BASED_PREFILL, prefillLoadBalancer);
+        LoadBalanceStrategyFactory.register(LoadBalanceStrategyEnum.COST_BASED_DECODE, decodeLoadBalancer);
+        LoadBalanceStrategyFactory.register(LoadBalanceStrategyEnum.COST_BASED_PREFILL, vitLoadBalancer);
         LoadBalanceStrategyFactory.register(LoadBalanceStrategyEnum.RANDOM, fusionLoadBalancer);
 
         // Create scheduler instance

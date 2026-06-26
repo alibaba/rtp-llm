@@ -9,8 +9,6 @@
 
 namespace rtp_llm {
 
-const int64_t MAX_GRPC_TIMEOUT_MS = 3600 * 1000;
-
 class GenerateContext {
 public:
     GenerateContext(int64_t                               request_id,
@@ -49,6 +47,7 @@ public:
     int64_t                               request_begin_time_us = 0;
     ErrorInfo                             error_info;
     grpc::Status                          error_status = grpc::Status::OK;
+    RequestInfo                           request_info;
     grpc::ServerContext*                  server_context;
     kmonitor::MetricsReporterPtr          metrics_reporter;
     std::shared_ptr<RpcServerRuntimeMeta> meta;
@@ -77,16 +76,17 @@ protected:
                 ErrorCode::GENERATE_TIMEOUT,                                                                           \
                 "request cost time is " + std::to_string(request_cost_time_ms) + " ms" + ", request timeout is "       \
                     + std::to_string(generate_context.request_timeout_ms) + " ms");                                    \
-            generate_context.error_status =                                                                            \
-                serializeErrorMsg(generate_context.request_key, generate_context.error_info);                          \
+            generate_context.error_status = serializeErrorMsg(                                                         \
+                generate_context.request_key, generate_context.request_info, generate_context.error_info);             \
             return generate_context.error_status;                                                                      \
         }                                                                                                              \
     }
 
 #define CHECK_REQUEST_CANCELLED(generate_context)                                                                      \
-    if (generate_context.server_context->IsCancelled()) {                                                              \
+    if (generate_context.server_context && generate_context.server_context->IsCancelled()) {                           \
         generate_context.error_info   = ErrorInfo(ErrorCode::CANCELLED, "request is cancelled");                       \
-        generate_context.error_status = serializeErrorMsg(generate_context.request_key, generate_context.error_info);  \
+        generate_context.error_status = serializeErrorMsg(                                                             \
+            generate_context.request_key, generate_context.request_info, generate_context.error_info);                 \
         return generate_context.error_status;                                                                          \
     }
 

@@ -1,0 +1,88 @@
+package org.flexlb.balance.endpoint;
+
+import org.flexlb.dao.master.WorkerStatus;
+import org.flexlb.dao.master.WorkerStatusResponse;
+
+/**
+ * Primary abstraction for a remote inference worker.
+ * Holds only a mutable {@link WorkerStatus} reference — all state
+ * (identity, engine metrics, topology) is carried by the status object.
+ *
+ * <p>Callers read dynamic engine state via {@link #getStatus()} and
+ * operate on it directly.
+ */
+public abstract class WorkerEndpoint {
+
+    // ---- the sole mutable holding ----
+    protected volatile WorkerStatus status;
+
+    protected WorkerEndpoint(WorkerStatus status) {
+        this.status = status;
+    }
+
+    // ==================== identity (delegated to status) ====================
+
+    public String ipPort() {
+        return status.getIpPort();
+    }
+
+    public String getIp() {
+        return status.getIp();
+    }
+
+    public int getHttpPort() {
+        return status.getPort();
+    }
+
+    public int getGrpcPort() {
+        return status.getGrpcPort();
+    }
+
+    // ==================== status ====================
+
+    /**
+     * Returns the underlying {@link WorkerStatus} reference.
+     * Callers read dynamic engine state from it; sync logic mutates
+     * it in-place via {@link WorkerStatus#updateFromResponse}.
+     */
+    public WorkerStatus getStatus() {
+        return status;
+    }
+
+    // ==================== gRPC sync entry point ====================
+
+    /**
+     * Replaces the endpoint's internal {@link #status} reference with
+     * the one already updated by
+     * {@link WorkerStatus#updateFromResponse(WorkerStatusResponse)}.
+     * Triggers role-specific calibration (inflight reconciliation) via
+     * subclass overrides.
+     *
+     * <p>Topology labels ({@code site}, {@code group}) are already
+     * part of the incoming status — they belong to
+     * {@link WorkerStatus}, not to {@link WorkerEndpoint}.
+     *
+     * @param ws   the updated status (replaces {@link #status})
+     * @param resp the raw gRPC response (used by subclasses for task info)
+     */
+    public void onWorkerStatusUpdate(WorkerStatus ws, WorkerStatusResponse resp) {
+        this.status = ws;
+    }
+
+    public void close() {
+    }
+
+    // ==================== monitoring (EP-authoritative) ====================
+
+    /**
+     * Role-specific load metric for monitoring.
+     * <p>Prefill: estimated queue wait time (ms).
+     * <p>Decode: total active task count (confirmed running + inflight).
+     */
+    public abstract long getLoadMetric();
+
+    /**
+     * EP-authoritative local task count, replacing raw gRPC fields.
+     */
+    public abstract int getLocalTaskCount();
+}

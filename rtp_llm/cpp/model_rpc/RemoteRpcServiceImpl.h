@@ -36,6 +36,48 @@ public:
         return prefill_server_->RemoteFinish(context, request, response);
     }
 
+    grpc::Status EnqueueBatch(grpc::ServerContext*         context,
+                              const EnqueueBatchRequestPB* request,
+                              EnqueueBatchResponsePB*      response) override {
+        if (!prefill_server_) {
+            auto error_msg = "server not implement EnqueueBatch";
+            RTP_LLM_LOG_ERROR(error_msg);
+            return grpc::Status(grpc::StatusCode::UNIMPLEMENTED, error_msg);
+        }
+        return prefill_server_->EnqueueBatch(context, request, response);
+    }
+
+    grpc::Status EnqueueGroup(grpc::ServerContext*         context,
+                              const EnqueueGroupRequestPB* request,
+                              EnqueueBatchResponsePB*      response) override {
+        if (!prefill_server_) {
+            auto error_msg = "server not implement EnqueueGroup";
+            RTP_LLM_LOG_ERROR(error_msg);
+            return grpc::Status(grpc::StatusCode::UNIMPLEMENTED, error_msg);
+        }
+        return prefill_server_->EnqueueGroup(context, request, response);
+    }
+
+    grpc::Status FetchResponse(grpc::ServerContext*                   context,
+                               const FetchRequestPB*                  request,
+                               grpc::ServerWriter<GenerateOutputsPB>* writer) override {
+        if (!prefill_server_) {
+            auto error_msg = "server not implement FetchResponse";
+            RTP_LLM_LOG_ERROR(error_msg);
+            return grpc::Status(grpc::StatusCode::UNIMPLEMENTED, error_msg);
+        }
+        return prefill_server_->FetchResponse(context, request, writer);
+    }
+
+    grpc::Status Cancel(grpc::ServerContext* context, const CancelRequestPB* request, EmptyPB* response) override {
+        if (!prefill_server_) {
+            auto error_msg = "server not implement Cancel";
+            RTP_LLM_LOG_ERROR(error_msg);
+            return grpc::Status(grpc::StatusCode::UNIMPLEMENTED, error_msg);
+        }
+        return prefill_server_->Cancel(context, request, response);
+    }
+
     grpc::Status RemoteLoad(grpc::ServerContext*          context,
                             const BroadcastLoadRequestPB* request,
                             BroadcastLoadResponsePB*      response) override {

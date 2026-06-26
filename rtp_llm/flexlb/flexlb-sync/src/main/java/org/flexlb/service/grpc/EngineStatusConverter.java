@@ -2,8 +2,10 @@ package org.flexlb.service.grpc;
 
 import org.flexlb.dao.master.CacheStatus;
 import org.flexlb.dao.master.TaskInfo;
-import org.flexlb.domain.worker.WorkerStatusResponse;
+import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.engine.grpc.EngineRpcService;
+import org.flexlb.engine.grpc.RoleTypeProtoConverter;
+import org.flexlb.enums.TaskPhase;
 
 import java.util.HashMap;
 import java.util.List;
@@ -21,8 +23,8 @@ public class EngineStatusConverter {
     public static WorkerStatusResponse convertToWorkerStatusResponse(EngineRpcService.WorkerStatusPB workerStatusPB) {
         WorkerStatusResponse response = new WorkerStatusResponse();
 
-        // Set role directly as string
-        response.setRole(workerStatusPB.getRole());
+        // Convert proto enum to RoleType
+        response.setRole(RoleTypeProtoConverter.fromProto(workerStatusPB.getRole()));
         response.setAvailableConcurrency(workerStatusPB.getAvailableConcurrency());
         response.setRunningQueryLen(workerStatusPB.getRunningQueryLen());
         response.setWaitingQueryLen(workerStatusPB.getWaitingQueryLen());
@@ -30,19 +32,14 @@ public class EngineStatusConverter {
         response.setIterateCount(workerStatusPB.getIterateCount());
         response.setDpSize(workerStatusPB.getDpSize());
         response.setTpSize(workerStatusPB.getTpSize());
+        response.setDpRank(workerStatusPB.getDpRank());
         response.setStatusVersion(workerStatusPB.getStatusVersion());
         response.setLatestFinishedVersion(workerStatusPB.getLatestFinishedVersion());
         response.setAlive(workerStatusPB.getAlive());
+        response.setAvailableKvCacheTokens(workerStatusPB.getAvailableKvCache());
+        response.setTotalKvCacheTokens(workerStatusPB.getTotalKvCache());
 
-        List<EngineRpcService.TaskInfoPB> srcRunningTaskInfoList = workerStatusPB.getRunningTaskInfoList();
-        List<EngineRpcService.TaskInfoPB> waitingTaskInfoList = srcRunningTaskInfoList.stream().filter(taskInfoPB -> taskInfoPB.getIsWaiting()).toList();
-        List<EngineRpcService.TaskInfoPB> runningTaskInfoList = srcRunningTaskInfoList.stream().filter(taskInfoPB -> !taskInfoPB.getIsWaiting()).toList();
-
-        // Convert waiting task info
-        response.setWaitingTaskInfo(convertToTaskInfoList(waitingTaskInfoList));
-
-        // Convert running task info
-        response.setRunningTaskInfo(convertToTaskInfoList(runningTaskInfoList));
+        response.setRunningTaskInfo(convertToTaskInfoList(workerStatusPB.getRunningTaskInfoList()));
 
         // Convert finished task list
         response.setFinishedTaskInfo(convertToTaskInfoList(workerStatusPB.getFinishedTaskListList()));
@@ -85,10 +82,29 @@ public class EngineStatusConverter {
             taskInfo.setIterateCount(taskInfoPB.getIterateCount());
             taskInfo.setEndTimeMs(taskInfoPB.getEndTimeMs());
             taskInfo.setDpRank(taskInfoPB.getDpRank());
+            taskInfo.setBatchId(taskInfoPB.getBatchId());
+            taskInfo.setPhase(convertPhase(taskInfoPB.getPhase()));
+            if (taskInfoPB.hasErrorInfo() && taskInfoPB.getErrorInfo().getErrorCode() != 0L) {
+                taskInfo.setErrorCode(taskInfoPB.getErrorInfo().getErrorCode());
+                taskInfo.setErrorMessage(taskInfoPB.getErrorInfo().getErrorMessage());
+            }
 
             taskInfoMap.put(String.valueOf(taskInfoPB.getRequestId()), taskInfo);
         }
 
         return taskInfoMap;
+    }
+
+    private static TaskPhase convertPhase(EngineRpcService.TaskPhase protoPhase) {
+        switch (protoPhase) {
+            case TASK_PHASE_RECEIVED:
+                return TaskPhase.RECEIVED;
+            case TASK_PHASE_KV_ALLOCATED:
+                return TaskPhase.KV_ALLOCATED;
+            case TASK_PHASE_RUNNING:
+                return TaskPhase.RUNNING;
+            default:
+                return TaskPhase.PENDING;
+        }
     }
 }

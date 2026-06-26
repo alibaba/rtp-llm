@@ -20,12 +20,6 @@ namespace rtp_llm {
 //       For the second part, different samplers should be created for different params.
 //       So they can not be batched together for now.
 
-enum class ReturnAllProbsMode {
-    NONE     = 0,
-    DEFAULT  = 1,
-    ORIGINAL = 2
-};
-
 class GenerateConfig: public autil::legacy::Jsonizable {
 public:
     int global_request_id  = -1;
@@ -48,6 +42,11 @@ public:
     std::optional<float>       top_p_min;
     std::optional<int>         top_p_reset_ids;
     std::optional<std::string> task_id;
+    std::optional<std::string> json_schema;
+    std::optional<std::string> regex;
+    std::optional<std::string> ebnf;
+    std::optional<std::string> structural_tag;
+    std::optional<std::string> response_format;
     std::string                adapter_name = "";
     std::vector<std::string>   adapter_names;
 
@@ -68,7 +67,7 @@ public:
     bool                          sp_edit                  = false;
     bool                          force_disable_sp_run     = false;
     bool                          force_sp_accept          = false;
-    ReturnAllProbsMode            return_all_probs         = ReturnAllProbsMode::NONE;
+    bool                          return_all_probs         = false;
     bool                          return_softmax_probs     = false;
     bool                          aux_info                 = true;
     std::vector<std::vector<int>> stop_words_list;
@@ -83,6 +82,7 @@ public:
 
     bool               in_think_mode       = false;
     int                max_thinking_tokens = 0;
+    std::vector<int>   begin_think_token_ids;
     std::vector<int>   end_think_token_ids;
     bool               gen_timeline = false;
     int                profile_step = 3;
@@ -93,15 +93,8 @@ public:
     bool               enable_memory_cache = true;
     bool               enable_remote_cache = true;
     std::string        trace_id;
-    bool               force_batch = false;  // If true, streams with same batch_group_id must be scheduled together
-    std::optional<int> batch_group_timeout;
+    std::optional<int> group_timeout;
     std::string        unique_key;
-
-    // 生成式推荐：组合 token 粒度去重与曝光过滤
-    // combo_token_size 表示一个商品由多少个连续 token 组成（0 表示关闭该功能）
-    int combo_token_size = 0;
-    // banned_combo_token_ids 是禁止生成的商品 token 组合列表，每项长度应等于 combo_token_size
-    std::vector<std::vector<int>> banned_combo_token_ids;
 
     bool top1() {
         return top_k == 1;
@@ -147,18 +140,22 @@ public:
                      << ", return_output_ids:" << return_output_ids << ", return_input_ids:" << return_input_ids
                      << ", is_streaming:" << is_streaming << ", timeout_ms:" << timeout_ms << ", top_k:" << top_k
                      << ", top_p:" << top_p << ", force_disable_sp_run: " << force_disable_sp_run
-                     << ", force_sp_accept: " << force_sp_accept
-                     << ", return_all_probs: " << static_cast<int>(return_all_probs)
+                     << ", force_sp_accept: " << force_sp_accept << ", return_all_probs: " << return_all_probs
                      << ", stop_words_list:" << vectorsToString(stop_words_list)
+                     << ", json_schema: " << (json_schema.has_value() ? std::to_string(json_schema->size()) : "none")
+                     << ", regex: " << (regex.has_value() ? std::to_string(regex->size()) : "none")
+                     << ", ebnf: " << (ebnf.has_value() ? std::to_string(ebnf->size()) : "none") << ", structural_tag: "
+                     << (structural_tag.has_value() ? std::to_string(structural_tag->size()) : "none")
+                     << ", response_format: "
+                     << (response_format.has_value() ? std::to_string(response_format->size()) : "none")
                      << ", can_use_pd_separation: " << can_use_pd_separation << ", pd_separation: " << pd_separation
                      << ", in_think_mode: " << in_think_mode << ", max_thinking_tokens: " << max_thinking_tokens
+                     << ", begin_think_token_ids: " << vectorToString(begin_think_token_ids)
                      << ", end_think_token_ids: " << vectorToString(end_think_token_ids)
                      << ", gen_timeline: " << gen_timeline << ", profile_step: " << profile_step
                      << ", reuse_cache: " << reuse_cache << ", enable_device_cache: " << enable_device_cache
                      << ", enable_memory_cache: " << enable_memory_cache
-                     << ", enable_remote_cache: " << enable_remote_cache << ", force_batch: " << force_batch
-                     << ", unique_key: " << unique_key << ", combo_token_size: " << combo_token_size
-                     << ", banned_combo_token_ids_size: " << banned_combo_token_ids.size() << "}";
+                     << ", enable_remote_cache: " << enable_remote_cache << ", unique_key: " << unique_key << "}";
         return debug_string.str();
     }
 
@@ -193,6 +190,11 @@ public:
         JSONIZE_OPTIONAL(top_p_min);
         JSONIZE_OPTIONAL(top_p_reset_ids);
         JSONIZE_OPTIONAL(task_id);
+        JSONIZE_OPTIONAL(json_schema);
+        JSONIZE_OPTIONAL(regex);
+        JSONIZE_OPTIONAL(ebnf);
+        JSONIZE_OPTIONAL(structural_tag);
+        JSONIZE_OPTIONAL(response_format);
         try {
             std::string adapter_name_;
             json.Jsonize("adapter_name", adapter_name_);
@@ -225,35 +227,12 @@ public:
         JSONIZE(sp_edit);
         JSONIZE(force_disable_sp_run);
         JSONIZE(force_sp_accept);
-        // autil JSONIZE doesn't handle enum class; round-trip through int.
-        // Back-compat: old SDK clients send return_all_probs as a JSON bool. Try int
-        // first (new wire format); on parse failure, fall back to bool: true→DEFAULT,
-        // false→NONE. Without this fallback an old bool payload raises
-        // autil::legacy::ExceptionBase and the surrounding catch nulls the entire
-        // generate_config (see ApiDataType.cc).
-        int return_all_probs_int = static_cast<int>(return_all_probs);
-        try {
-            json.Jsonize("return_all_probs", return_all_probs_int, return_all_probs_int);
-            // Validate enum range before casting — a malformed payload could send
-            // an out-of-range int that would otherwise produce an undefined enum value.
-            if (return_all_probs_int < static_cast<int>(ReturnAllProbsMode::NONE)
-                || return_all_probs_int > static_cast<int>(ReturnAllProbsMode::ORIGINAL)) {
-                return_all_probs_int = static_cast<int>(ReturnAllProbsMode::NONE);
-            }
-            return_all_probs = static_cast<ReturnAllProbsMode>(return_all_probs_int);
-        } catch (autil::legacy::ExceptionBase& e) {
-            try {
-                bool return_all_probs_bool = (return_all_probs != ReturnAllProbsMode::NONE);
-                json.Jsonize("return_all_probs", return_all_probs_bool, return_all_probs_bool);
-                return_all_probs = return_all_probs_bool ? ReturnAllProbsMode::DEFAULT : ReturnAllProbsMode::NONE;
-            } catch (autil::legacy::ExceptionBase& e2) {
-                // field absent or other parse error — keep prior value
-            }
-        }
+        JSONIZE(return_all_probs);
         JSONIZE(sp_advice_prompt);
         JSONIZE(sp_advice_prompt_token_ids);
         JSONIZE(in_think_mode);
         JSONIZE(max_thinking_tokens);
+        JSONIZE(begin_think_token_ids);
         JSONIZE(end_think_token_ids);
         JSONIZE(gen_timeline);
         JSONIZE(profile_step);
@@ -262,12 +241,9 @@ public:
         JSONIZE(enable_device_cache);
         JSONIZE(enable_memory_cache);
         JSONIZE(enable_remote_cache);
-        JSONIZE(force_batch);
         JSONIZE(aux_info);
-        JSONIZE_OPTIONAL(batch_group_timeout);
+        JSONIZE_OPTIONAL(group_timeout);
         JSONIZE(unique_key);
-        JSONIZE(combo_token_size);
-        JSONIZE(banned_combo_token_ids);
 #undef JSONIZE
 #undef JSONIZE_OPTIONAL
     }

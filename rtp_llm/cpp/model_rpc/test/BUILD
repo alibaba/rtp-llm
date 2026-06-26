@@ -1,5 +1,5 @@
 load("//:def.bzl", "cc_test_wrapper", "copts")
-load("@arch_config//:arch_select.bzl", "torch_deps")
+load("//bazel:arch_select.bzl", "torch_deps")
 load("//bazel:device_defs.bzl",
     "device_impl_target", "device_test_envs")
 
@@ -76,5 +76,44 @@ cc_test(
         "@havenask//aios/autil:net",
     ],
     env = {},
+    exec_properties = {'gpu':'H20'},
+)
+
+cc_test(
+    name = "recent_cache_key_window_test",
+    srcs = [
+        "RecentCacheKeyWindowTest.cc",
+    ],
+    copts = test_copts,
+    deps = [
+        "//rtp_llm/cpp/cache:recent_cache_key_window",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "response_buffer_test",
+    srcs = [
+        "ResponseBufferTest.cc",
+    ],
+    copts = test_copts,
+    deps = test_deps,
+    env = {
+        "TEST_USING_DEVICE": "CUDA",
+    },
+    exec_properties = {'gpu':'H20'},
+)
+
+cc_test(
+    name = "rpc_server_runtime_meta_test",
+    srcs = [
+        "RpcServerRuntimeMetaTest.cc",
+    ],
+    copts = test_copts,
+    deps = test_deps,
+    env = {
+        "TEST_USING_DEVICE": "CUDA",
+    },
     exec_properties = {'gpu':'H20'},
 )

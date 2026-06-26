@@ -8,6 +8,7 @@
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
 #include "rtp_llm/cpp/engine_base/schedulers/SchedulerBase.h"
+#include "rtp_llm/cpp/engine_base/schedulers/ScheduleUnit.h"
 #include "kmonitor/client/MetricsReporter.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/engine_base/schedulers/EngineScheduleInfo.h"
@@ -26,16 +27,8 @@ public:
 
     ~FIFOScheduler() override;
 
-    // Enqueue a single stream. Returns OkStatus on success, InvalidArgumentError if checkInputLength fails.
-    // On failure, the stream's error is reported via reportError() but the stream is NOT queued.
-    // Caller must check the return status to know whether the stream was actually enqueued.
-    absl::Status enqueue(const GenerateStreamPtr& stream) override;
-
-    // Enqueue multiple streams. Returns the input vector unchanged so callers can index 1:1 with
-    // their original input list. Streams that fail checkInputLength are NOT added to the waiting
-    // queue, but their errors are reported via reportError() and they are still returned in the
-    // output vector — collectStreamOutput / pollStreamOutput will surface the error per-stream.
-    std::vector<std::shared_ptr<GenerateStream>> batchEnqueue(const std::vector<GenerateStreamPtr>& streams) override;
+    absl::Status                                 enqueue(const GenerateStreamPtr& stream) override;
+    std::vector<std::shared_ptr<GenerateStream>> enqueueGroup(const std::vector<GenerateStreamPtr>& streams) override;
     absl::StatusOr<std::list<GenerateStreamPtr>> schedule() override;
     absl::Status                                 stop() override;
     bool                                         empty() override;
@@ -51,25 +44,25 @@ public:
     int64_t                                   onflightStreams() override;
 
 private:
-    int64_t lastScheduleTime() override;
-    bool evaluateRunningMemory(const std::list<GenerateStreamPtr>& streams, const GenerateStreamPtr& new_stream) const;
-    void accountBatchMetrics(const GenerateStreamPtr& new_stream);
-    bool waitPredicate();
-    void addStreamToNewState(const GenerateStreamPtr& stream, StreamState new_state);
-    void evaluateWaitingStreams(std::list<GenerateStreamPtr>& streams);
-    void cancelStreams(std::list<GenerateStreamPtr>& streams);
-    bool checkInputLength(const GenerateStreamPtr& stream);
-
-protected:
-    void evaluateAndUpdateStreams(std::list<GenerateStreamPtr>& streams);
+    int64_t                      lastScheduleTime() override;
+    void                         accountBatchMetrics(const GenerateStreamPtr& new_stream);
+    bool                         waitPredicate();
+    bool                         checkInputLength(const GenerateStreamPtr& stream);
+    void                         admitWaitingUnits();
+    bool                         canAdmitUnit(size_t              admitted_count,
+                                              size_t              admitted_total_tokens,
+                                              size_t              running_count,
+                                              const ScheduleUnit& unit) const;
+    std::list<GenerateStreamPtr> flattenRunning() const;
+    size_t                       countStreams(const std::list<ScheduleUnit>& queue) const;
+    void                         cancelUnits(std::list<ScheduleUnit>& units);
 
 protected:
     PDSepConfig                     pd_sep_config_;
     ModelSpecificConfig             model_specific_config_;
-    std::list<GenerateStreamPtr>    waiting_streams_;
-    std::list<GenerateStreamPtr>    loading_cache_streams_;
-    std::list<GenerateStreamPtr>    running_streams_;
-    std::list<GenerateStreamPtr>    new_streams_;
+    std::list<ScheduleUnit>         waiting_;
+    std::list<ScheduleUnit>         loading_;
+    std::list<ScheduleUnit>         running_;
     std::shared_ptr<KVCacheManager> cache_manager_;
     std::atomic<int64_t>            last_schedule_time_      = autil::TimeUtility::currentTimeInMilliSeconds();
     size_t                          max_seq_len_             = 0;
@@ -84,8 +77,6 @@ protected:
 
     std::vector<EngineScheduleInfo::TaskInfo> waiting_task_list_;
     std::vector<EngineScheduleInfo::TaskInfo> running_task_list_;
-
-    // TODO @wangyin support different beams run togather
 };
 
 }  // namespace rtp_llm

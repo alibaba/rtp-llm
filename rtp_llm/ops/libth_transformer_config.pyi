@@ -1062,6 +1062,9 @@ class NormType:
     def value(self) -> int:
         ...
 class PDSepConfig:
+    batch_dispatch_timeout_ms: int
+    batch_load_timeout_ms: int
+    batch_prepare_timeout_ms: int
     cache_store_connect_port: int
     cache_store_listen_port: int
     cache_store_rdma_connect_port: int
@@ -1423,6 +1426,7 @@ class RuntimeConfig:
     use_batch_decode_scheduler: bool
     warm_up: bool
     warm_up_with_loss: bool
+    all_worker_grpc_addrs: list[str]
     worker_addrs: list[str]
     worker_grpc_addrs: list[str]
     def __getstate__(self) -> tuple:

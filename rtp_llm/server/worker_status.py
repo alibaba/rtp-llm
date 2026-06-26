@@ -73,10 +73,17 @@ class ServerStatus(BaseModel):
     @model_validator(mode="before")
     def validate_role(cls, values: Dict[str, Any]):
         role = values.get("role")
-        if isinstance(role, str):
-            values["role"] = getattr(RoleType, role)
+        if isinstance(role, int):
+            values["role"] = RoleType(role)
+        elif isinstance(role, RoleType):
+            pass  # already correct
+        elif isinstance(role, str):
+            try:
+                values["role"] = getattr(RoleType, role.upper())
+            except AttributeError:
+                raise ValueError(f"Invalid role: {role}") from None
         else:
-            raise ValueError(f"Invalid role: {role}, expected str")
+            raise ValueError(f"Invalid role: {role}, expected int, str, or RoleType")
         return values
 
 
@@ -87,3 +94,4 @@ class ScheduleMeta(BaseModel):
     error_message: Optional[str] = None
     success: Optional[bool] = True
     real_master_host: Optional[str] = None
+    enqueued_by_master: bool = False

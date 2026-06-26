@@ -352,6 +352,31 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
     model_->releaseBuffers();
     draft_model_->releaseBuffers();
 
+    if (isTpRank0() && stream_groups.totalContextBatchSize() > 0) {
+        std::string details;
+        for (auto& s : stream_groups.contextStreams()) {
+            char buf[256];
+            snprintf(buf,
+                     sizeof(buf),
+                     "{id=%ld input=%d prefix=%d reuse=%d ctx=%d grp=%ld/%d tokens=%d} ",
+                     s->streamId(),
+                     s->inputLength(),
+                     s->prefixLength(),
+                     s->reuseLength(),
+                     s->contextLength(),
+                     s->groupId(),
+                     s->groupSize(),
+                     s->currentExecuteTokenSize());
+            details += buf;
+        }
+        RTP_LLM_LOG_INFO("prefill_batch_begin: ctx_batch=%zu gen_batch=%zu total_tokens=%zu max_seq=%zu streams=[%s]",
+                         stream_groups.totalContextBatchSize(),
+                         stream_groups.totalDecodeBatchSize(),
+                         stream_groups.modelExecuteTokenSize(),
+                         stream_groups.maxSeqLen(),
+                         details.c_str());
+    }
+
     // target model prefill
     {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.prefill_step(target_model_forward)");
@@ -391,6 +416,13 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         model_input.kv_scale_stride_bytes   = mtp_cache_cfg.kv_scale_stride_bytes;
         model_input.kv_cache_layer_to_group = draft_kv_cache_layer_to_group;
         draft_model_output                  = std::move(draft_model_->forward(model_input));
+    }
+
+    if (isTpRank0() && stream_groups.totalContextBatchSize() > 0) {
+        RTP_LLM_LOG_INFO("prefill_batch_end: ctx_batch=%zu total_tokens=%zu forward_us=%ld",
+                         stream_groups.totalContextBatchSize(),
+                         stream_groups.modelExecuteTokenSize(),
+                         model_forward_us);
     }
 
     if (!isTpRank0() || warm_up_ || streams.size() == 0 || model_input.is_fake_stream) {

@@ -25,15 +25,16 @@ message IntMatrix {
     repeated IntVector rows = 1;
 }
 
+enum RoleTypePB {
+    ROLE_TYPE_PDFUSION = 0;
+    ROLE_TYPE_PREFILL = 1;
+    ROLE_TYPE_DECODE = 2;
+    ROLE_TYPE_VIT = 3;
+    ROLE_TYPE_FRONTEND = 4;
+}
+
 message RoleAddrPB {
-    enum RoleType {
-        PDFUSION = 0;
-        PREFILL = 1;
-        DECODE = 2;
-        VIT = 3;
-        FRONTEND = 4;
-    }
-    RoleType role = 1;
+    RoleTypePB role = 1;
     string ip = 2;
     int32 http_port = 3;
     int32 grpc_port = 4;
@@ -67,7 +68,6 @@ message GenerateConfigPB {
     bool sp_edit = 24;
     repeated int32 sp_advice_prompt_token_ids = 25;
     bool force_disable_sp_run = 26;
-    // legacy compat: false=NONE, true=DEFAULT/ORIGINAL (cannot distinguish across versions)
     bool return_all_probs = 27;
     bool sp_input_lookup = 28;
     bool can_use_pd_separation = 29;
@@ -97,14 +97,15 @@ message GenerateConfigPB {
     bool enable_device_cache = 52;
     bool enable_remote_cache = 53;
     string unique_key = 54;
-    google.protobuf.Int32Value force_batch = 55;
-    google.protobuf.Int32Value batch_group_timeout = 56;
+    reserved 55;
+    google.protobuf.Int32Value group_timeout = 56;
     string profile_trace_name = 57;
-    // 生成式推荐：组合 token 粒度去重与曝光过滤
-    int32 combo_token_size = 58;
-    IntMatrix banned_combo_token_ids = 59;
-    // 0=unset(fallback to bool return_all_probs), 1=NONE, 2=DEFAULT, 3=ORIGINAL
-    int32 return_all_probs_mode = 60;
+    repeated int32 begin_think_token_ids = 58;
+    google.protobuf.StringValue json_schema = 59;
+    google.protobuf.StringValue regex = 60;
+    google.protobuf.StringValue ebnf = 61;
+    google.protobuf.StringValue structural_tag = 62;
+    google.protobuf.StringValue response_format = 63;
 }
 
 message MMPreprocessConfigPB {
@@ -115,8 +116,6 @@ message MMPreprocessConfigPB {
     int32 fps = 5;
     int32 min_frames = 6;
     int32 max_frames = 7;
-    repeated float crop_positions = 8;
-    int32 mm_timeout_ms = 9;
 }
 
 message MultimodalInputPB {
@@ -133,8 +132,18 @@ message MultimodalInputsPB {
 message MultimodalOutputPB {
     TensorPB multimodal_embedding = 1;
     TensorPB multimodal_pos_id = 2;
-    repeated TensorPB multimodal_extra_input = 3;
-    repeated int32 split_size = 4;
+}
+
+message MultimodalOutputsPB {
+    repeated MultimodalOutputPB multimodal_outputs = 1;
+}
+
+message RequestInfoPB {
+    string frontend_ip = 1;
+    string dash_ip = 2;
+    string trace_id = 3;
+    string request_id = 4;
+    string source_role = 5;
 }
 
 message GenerateInputPB {
@@ -144,8 +153,9 @@ message GenerateInputPB {
     GenerateConfigPB generate_config = 4;
     string client_id = 5;
     int64 start_time = 6;
-    int32 batch_group_size = 7;
-    google.protobuf.Int64Value batch_group_id = 8;
+    int32 group_size = 7;
+    google.protobuf.Int64Value group_id = 8;
+    RequestInfoPB request_info = 9;
 }
 
 message AuxInfoPB {
@@ -174,7 +184,6 @@ message AuxInfoPB {
     int32 memory_reuse_len = 24;
     int32 prefill_memory_reuse_len = 25;
     int32 decode_memory_reuse_len = 26;
-    map<int32, int32> multimodal_lengths = 27;
 }
 
 message FlattenOutputPB {
@@ -261,6 +270,10 @@ message GenerateRequestPB {
     repeated int32 position_ids = 9;
     TensorPB propose_probs = 10;
     TensorPB propose_hidden = 11;
+    // CP size used by prefill node; > 1 means kv cache is page-RR sharded across
+    // cp_size physical blocks per virtual block. Default 0 keeps backward
+    // compatibility (treated as 1 by decode side).
+    int32 prefill_cp_size = 13;
 }
 
 // in tp case, decode master broadcast to decode worker
@@ -277,7 +290,7 @@ message BroadcastLoadRequestPB {
     int32 partition_count = 10;
     int32 partition_id = 11;
     repeated IntVector group_block_ids = 12;
-
+    int32 prefill_cp_size = 13;
 }
 
 message BroadcastLoadResponsePB {
@@ -383,6 +396,13 @@ message UpdateEplbConfigRequestPB {
     int32 update_time = 2;
 }
 
+enum TaskPhase {
+    TASK_PHASE_PENDING = 0;
+    TASK_PHASE_RECEIVED = 1;
+    TASK_PHASE_KV_ALLOCATED = 2;
+    TASK_PHASE_RUNNING = 3;
+}
+
 message TaskInfoPB {
     int64 request_id = 1;
     reserved 2;
@@ -393,7 +413,11 @@ message TaskInfoPB {
     int64 iterate_count = 6;
     int64 end_time_ms = 7;
     int64 dp_rank = 8;
-    bool is_waiting = 9;
+    reserved 9;
+    reserved "is_waiting";
+    ErrorDetailsPB error_info = 10;
+    int64 batch_id = 11;
+    TaskPhase phase = 12;
 }
 
 message UpdateWeightsRequestPB {
@@ -403,7 +427,7 @@ message UpdateWeightsRequestPB {
 }
 
 message WorkerStatusPB {
-    string role = 1;
+    RoleTypePB role = 1;
     int32 available_concurrency = 2;
     repeated TaskInfoPB running_task_info = 3;
     repeated TaskInfoPB finished_task_list = 4;
@@ -417,6 +441,9 @@ message WorkerStatusPB {
     bool alive = 13;
     string precision = 14;
     int64 latest_finished_version = 15;
+    int64 dp_rank = 16;
+    int64 available_kv_cache = 17;
+    int64 total_kv_cache = 18;
 }
 
 message EmbeddingInputPB {
@@ -425,7 +452,6 @@ message EmbeddingInputPB {
     repeated int32 input_lengths = 3;
     int64 request_id = 4;
     repeated MultimodalInputPB multimodal_features = 5;
-    string vit_role_addr = 6;
 }
 
 message EmbeddingHealthRequestPB {
@@ -451,10 +477,34 @@ message MemoryOperationRequestPB {
     message CopyItem {
         int32 mem_block = 1;
         repeated int32 gpu_blocks = 2;
+        bool is_complete = 3;
+        BackingType backing_type = 4;
+        oneof disk_slot_presence {
+            int32 disk_slot = 5;
+        }
+        CacheBlockKind cache_block_kind = 6;
+        oneof src_mem_block_presence {
+            int32 src_mem_block = 7;
+        }
+        repeated uint32 slot_valid_mask = 8;
+        BackingType src_backing_type = 9;
+        oneof src_disk_slot_presence {
+            int32 src_disk_slot = 10;
+        }
     }
     enum CopyDirection {
         H2D = 0;
         D2H = 1;
+    }
+    enum BackingType {
+        MEMORY = 0;
+        DISK = 1;
+    }
+    enum CacheBlockKind {
+        LEGACY_COMPLETE = 0;
+        LEGACY_INCOMPLETE = 1;
+        COMPRESSED_KV = 2;
+        STATE_SWA_KV = 3;
     }
     repeated CopyItem copy_items = 1;
     CopyDirection copy_direction = 2;
@@ -588,24 +638,72 @@ message FunctionResponsePB {
     }
 }
 
-message BatchGenerateInputPB {
-    repeated GenerateInputPB inputs = 1;
+message CpuTpBroadcastRequestPB {
+    string group_key = 1;
+    uint64 seq = 2;
+    int32 root = 3;
+    int32 src_tp_rank = 4;
+    int32 dst_tp_rank = 5;
+    uint64 nbytes = 6;
+    bytes payload = 7;
 }
 
-message BatchGenerateResultPB {
-    GenerateOutputsPB final_output = 1;
-    RpcErrorPB error_info = 2;
+message CpuTpBroadcastResponsePB {
+    bool success = 1;
+    string error_message = 2;
 }
 
-message BatchGenerateOutputsPB {
-    repeated BatchGenerateResultPB results = 1;
+message EnqueueBatchExternalInputPB {
+    GenerateInputPB input = 1;
+}
+
+message EnqueueBatchDpSlotPB {
+    int32 dp_rank = 1;
+    repeated EnqueueBatchExternalInputPB requests = 2;
+}
+
+message EnqueueBatchRequestPB {
+    int64 batch_id = 1;
+    repeated EnqueueBatchDpSlotPB dp_slots = 2;
+}
+
+message EnqueueGroupInputPB {
+    GenerateInputPB input = 1;
+}
+
+message EnqueueGroupRequestPB {
+    int64 batch_id = 1;
+    int32 dp_rank = 2;
+    repeated EnqueueGroupInputPB requests = 3;
+}
+
+message EnqueueBatchSuccessPB {
+    int64 request_id = 1;
+}
+
+message EnqueueBatchErrorPB {
+    int64 request_id = 1;
+    ErrorDetailsPB error_info = 2;
+}
+
+message EnqueueBatchResponsePB {
+    int64 batch_id = 1;
+    repeated EnqueueBatchSuccessPB successes = 2;
+    repeated EnqueueBatchErrorPB errors = 3;
+}
+
+message FetchRequestPB {
+    int64 request_id = 1;
+}
+
+message CancelRequestPB {
+    int64 request_id = 1;
 }
 
 service RpcService {
     rpc GetWorkerStatus(StatusVersionPB) returns (WorkerStatusPB);
     rpc GetCacheStatus(CacheVersionPB) returns (CacheStatusPB);
     rpc GenerateStreamCall(GenerateInputPB) returns (stream GenerateOutputsPB);
-    rpc BatchGenerateCall(BatchGenerateInputPB) returns (BatchGenerateOutputsPB);
     rpc RemoteLoad(BroadcastLoadRequestPB) returns (BroadcastLoadResponsePB);
     rpc RemoteGenerate(stream GenerateRequestPB) returns (stream GenerateOutputsPB);
     rpc RemoteFinish(RemoteFinishRequestPB) returns (EmptyPB);
@@ -625,14 +723,60 @@ service RpcService {
     rpc RemoteStore(RemoteStoreRequestPB) returns (RemoteStoreResponsePB);
 
     rpc ExecuteFunction(FunctionRequestPB) returns (FunctionResponsePB);
+    rpc CpuTpBroadcast(CpuTpBroadcastRequestPB) returns (CpuTpBroadcastResponsePB);
     rpc StartLoad(P2PConnectorStartLoadRequestPB) returns (P2PConnectorStartLoadResponsePB);
     rpc GetPeerInfo(GetPeerInfoRequestPB) returns (GetPeerInfoResponsePB);
+    rpc EnqueueBatch(EnqueueBatchRequestPB) returns (EnqueueBatchResponsePB);
+    rpc EnqueueGroup(EnqueueGroupRequestPB) returns (EnqueueBatchResponsePB);
+    rpc FetchResponse(FetchRequestPB) returns (stream GenerateOutputsPB);
+    rpc Cancel(CancelRequestPB) returns (EmptyPB);
 }
 
-// Response type intentionally changed as part of multimodal refactoring — not a rolling-upgrade concern
-// because VIT proxy and LLM backend are always deployed together in this service.
 service MultimodalRpcService {
+    rpc RemoteMultimodalEmbedding(MultimodalInputsPB) returns (MultimodalOutputsPB);
     rpc GetWorkerStatus(StatusVersionPB) returns (WorkerStatusPB);
     rpc GetCacheStatus(CacheVersionPB) returns (CacheStatusPB);
-    rpc RemoteMultimodalEmbedding(MultimodalInputsPB) returns (MultimodalOutputPB);
+}
+
+enum FlexlbScheduleModePB {
+    FLEXLB_SCHEDULE_AUTO = 0;
+    FLEXLB_SCHEDULE_BATCH = 1;
+    FLEXLB_SCHEDULE_DIRECT = 2;
+}
+
+message FlexlbScheduleRequestPB {
+    int64 request_id = 1;
+    GenerateInputPB generate_input = 2;
+    repeated int64 block_cache_keys = 3;
+    int64 seq_len = 4;
+    int64 generate_timeout = 5;
+    int64 request_time_ms = 6;
+    int32 max_new_tokens = 7;
+    int32 num_beams = 8;
+    bool force_disable_sp_run = 9;
+    string model = 10;
+    string api_key = 11;
+    FlexlbScheduleModePB schedule_mode = 12;
+}
+
+message FlexlbServerStatusPB {
+    RoleTypePB role = 1;
+    string server_ip = 2;
+    int32 http_port = 3;
+    int32 grpc_port = 4;
+}
+
+message FlexlbScheduleResponsePB {
+    bool success = 1;
+    int32 code = 2;
+    string error_message = 3;
+    repeated FlexlbServerStatusPB server_status = 4;
+    string real_master_host = 5;
+    int32 queue_length = 6;
+    bool enqueued_by_master = 7;
+}
+
+service FlexlbService {
+    rpc Schedule(FlexlbScheduleRequestPB) returns (FlexlbScheduleResponsePB);
+    rpc Cancel(CancelRequestPB) returns (EmptyPB);
 }

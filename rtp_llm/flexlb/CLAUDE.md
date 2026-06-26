@@ -169,8 +169,8 @@ The `DefaultRouter` orchestrates routing across these stages. If a later stage f
 Three strategies are available (registered with `LoadBalanceStrategyFactory`):
 
 - **RANDOM**: Random worker selection
-- **SHORTEST_TTFT**: Select worker with shortest Time-To-First-Token
-- **WEIGHTED_CACHE**: Cache-aware selection prioritizing workers with matching KV cache blocks
+- **COST_BASED_PREFILL**: Select worker with lowest cost for prefill requests
+- **COST_BASED_DECODE**: Select worker with lowest cost for decode requests
 
 Each `RoleType` can use a different strategy. See `LoadBalanceStrategyEnum` in flexlb-common.
 

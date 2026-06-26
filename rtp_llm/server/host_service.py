@@ -123,9 +123,15 @@ class VipServerWrapper:
 
 
 class EndPoint(BaseModel):
+    """Service discovery endpoint.
+
+    address MUST carry the HTTP port (e.g. "10.0.0.1:7001").
+    Health check probes HTTP on this port. gRPC is derived as HTTP + FLEXLB_GRPC_PORT_OFFSET.
+    """
+
     type: str
-    address: str
-    protocol: str
+    address: str  # "ip:HTTP_PORT"
+    protocol: str  # protocol of the port in address (typically "http")
     path: str
 
 
