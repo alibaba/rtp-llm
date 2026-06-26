@@ -106,6 +106,7 @@ cc_library(
         "//rtp_llm/models_py/bindings/core/ops:torch_beam_search_op_impl",
         "//rtp_llm/models_py/bindings/cuda/kernels/sampling:sampling",
         "//rtp_llm/models_py/bindings/cuda/kernels:scaled_fp8_quant",
+        "//rtp_llm/models_py/bindings/cuda/kernels:kernels_speculative_sampling",
         "//rtp_llm/cpp/utils:debug_utils",
         ":flashinfer",
         "//3rdparty/flashinfer:flashinfer",
