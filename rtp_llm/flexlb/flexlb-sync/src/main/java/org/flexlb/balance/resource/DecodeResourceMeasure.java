@@ -2,6 +2,7 @@ package org.flexlb.balance.resource;
 
 import org.apache.commons.collections4.MapUtils;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
+import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.master.WorkerStatus;
@@ -33,6 +34,14 @@ public class DecodeResourceMeasure implements ResourceMeasure {
         this.fullSpeedThreshold = config.getDecodeFullSpeedThreshold();
         this.stopThreshold = config.getDecodeStopThreshold();
         this.concurrencyLimit = config.getDecodeConcurrencyLimit();
+    }
+
+    @Override
+    public boolean isResourceAvailable(WorkerEndpoint endpoint) {
+        if (endpoint instanceof DecodeEndpoint) {
+            return isResourceAvailable((DecodeEndpoint) endpoint);
+        }
+        return ResourceMeasure.super.isResourceAvailable(endpoint);
     }
 
     public boolean isResourceAvailable(DecodeEndpoint endpoint) {

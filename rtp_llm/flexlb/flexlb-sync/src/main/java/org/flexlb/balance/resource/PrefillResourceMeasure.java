@@ -2,6 +2,7 @@ package org.flexlb.balance.resource;
 
 import org.apache.commons.collections4.MapUtils;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
+import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.master.WorkerStatus;
@@ -31,6 +32,14 @@ public class PrefillResourceMeasure implements ResourceMeasure {
         this.queueSizeThreshold = config.getPrefillQueueSizeThreshold();
         this.hysteresisBiasPercent = config.getHysteresisBiasPercent();
         this.maxQueueSize = config.getMaxPrefillQueueSize();
+    }
+
+    @Override
+    public boolean isResourceAvailable(WorkerEndpoint endpoint) {
+        if (endpoint instanceof PrefillEndpoint) {
+            return isResourceAvailable((PrefillEndpoint) endpoint);
+        }
+        return ResourceMeasure.super.isResourceAvailable(endpoint);
     }
 
     public boolean isResourceAvailable(PrefillEndpoint endpoint) {

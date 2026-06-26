@@ -213,7 +213,8 @@ public class ZookeeperMasterElectService implements LeaderSelectorListener {
         LOGGER.warn("ZKMasterElector roleId:{} currentHost:{} waiting for leadership transfer to complete.", roleId, localIp);
 
         int waitCount = 0;
-        while (true) {
+        final int MAX_WAIT_COUNT = 30;  // 30 seconds max
+        while (waitCount < MAX_WAIT_COUNT) {
             try {
                 if (!isStillMaster()) {
                     LOGGER.warn("ZKMasterElector roleId:{} currentHost:{} leadership transferred to {}, waitCount: {}.",
@@ -241,6 +242,8 @@ public class ZookeeperMasterElectService implements LeaderSelectorListener {
                 }
             }
         }
+        LOGGER.warn("ZKMasterElector roleId:{} currentHost:{} leadership transfer timeout after {} seconds, forcing exit.",
+                roleId, localIp, MAX_WAIT_COUNT);
     }
 
     private boolean isStillMaster() {
@@ -368,7 +371,7 @@ public class ZookeeperMasterElectService implements LeaderSelectorListener {
             Collection<Participant> participants = leaderSelector.getParticipants();
             for (Participant participant : participants) {
                 // Only notify non-master participants
-                if (!participant.isLeader() && localIp.equals(participant.getId())) {
+                if (!participant.isLeader() && !localIp.equals(participant.getId())) {
                     notifyParticipant(participant.getId());
                 }
             }

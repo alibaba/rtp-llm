@@ -12,6 +12,8 @@ import org.flexlb.util.Logger;
 import org.springframework.core.env.Environment;
 import org.springframework.stereotype.Component;
 
+import javax.annotation.PreDestroy;
+
 import java.net.InetAddress;
 import java.net.UnknownHostException;
 import java.util.concurrent.ScheduledExecutorService;
@@ -169,5 +171,19 @@ public class LBStatusConsistencyService implements MasterElectService {
      */
     private void syncLBStatusFromMaster() {
         // TODO Get master status
+    }
+
+    @PreDestroy
+    public void shutdown() {
+        log.info("Shutting down LBStatusConsistencyService executor.");
+        SCHEDULED_EXECUTOR_SERVICE.shutdown();
+        try {
+            if (!SCHEDULED_EXECUTOR_SERVICE.awaitTermination(5, TimeUnit.SECONDS)) {
+                SCHEDULED_EXECUTOR_SERVICE.shutdownNow();
+            }
+        } catch (InterruptedException e) {
+            SCHEDULED_EXECUTOR_SERVICE.shutdownNow();
+            Thread.currentThread().interrupt();
+        }
     }
 }

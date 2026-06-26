@@ -120,9 +120,13 @@ public class ConfigService {
             return;
         }
 
-        TrafficPolicyConfig trafficPolicy = JsonUtils.toObject(trafficPolicyConfig, TrafficPolicyConfig.class);
-        config.setTrafficPolicy(trafficPolicy);
-        log.warn("Traffic policy loaded from standalone config: {}", JsonUtils.toStringOrEmpty(trafficPolicy));
+        try {
+            TrafficPolicyConfig trafficPolicy = JsonUtils.toObject(trafficPolicyConfig, TrafficPolicyConfig.class);
+            config.setTrafficPolicy(trafficPolicy);
+            log.warn("Traffic policy loaded from standalone config: {}", JsonUtils.toStringOrEmpty(trafficPolicy));
+        } catch (Exception e) {
+            log.error("Failed to parse traffic policy config, skipping.", e);
+        }
     }
 
     private void applyPrefillCoefficientsOverride(FlexlbConfig config, Map<String, String> environment) {
