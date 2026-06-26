@@ -764,6 +764,289 @@ def parse_dash_sc_grpc_request(
 
 
 # ----------------------------------------------------------------------------
+# Multimodal parsing: OpenAI messages embedded in gRPC ``parameters``.
+#
+# Two upstream conventions coexist:
+#
+#   * ``parameters['payload']`` — what gpt3_serving's ``adapt_inbound.build_payload``
+#     emits when routing to the engine. Content parts are OpenAI-shaped
+#     (``{"type":"image_url","image_url":{"url":...}}``).
+#   * ``parameters['__messages__']`` — what multimodal_serving's
+#     ``dserv_stream_worker_for_vl`` consumes on the inbound side. Content
+#     parts are dashscope-native shape (``{"image":"..."}`` — no ``type`` field,
+#     per-part controls inline alongside the URL).
+#
+# Top-level body has three observed wrappings, all tolerated:
+#   1. ``{"input": {"messages": [...]}}``   (build_payload output)
+#   2. ``{"messages": [...]}``               (hand-built clients)
+#   3. ``{"header": {...}, "payload": {"input": {"messages": [...]}}}``
+#      (the canonical dashscope HTTP body shape; see ocr/request_for_general.json)
+# ----------------------------------------------------------------------------
+
+# OpenAI content-part ``type`` -> (inner-field-name carrying the URL, MMUrlType attr).
+# The inner field is either ``{"url": "..."}`` (canonical) or a plain string.
+_OPENAI_MULTIMODAL_PART_TYPES: dict[str, tuple[str, str]] = {
+    "image_url": ("image_url", "IMAGE"),
+    "video_url": ("video_url", "VIDEO"),
+    "audio_url": ("audio_url", "AUDIO"),
+}
+
+# Dashscope-native content-part key -> MMUrlType attr. Used when the part has
+# no ``type`` field (the ``{"image": "..."}`` shape in MMGPT3Item and the
+# ocr/request_for_*.json samples).
+_DASHSCOPE_NATIVE_MULTIMODAL_KEYS: dict[str, str] = {
+    "image": "IMAGE",
+    "video": "VIDEO",
+    "audio": "AUDIO",
+}
+
+# gRPC parameter keys we read the multimodal JSON from, in priority order.
+# ``payload`` is gpt3_serving's outbound convention; ``__messages__`` is
+# multimodal_serving's inbound convention. First non-empty hit wins.
+_MULTIMODAL_PARAMETER_KEYS: tuple[str, ...] = ("payload", "__messages__")
+
+# Per-part control knobs that map directly onto ``MMPreprocessConfig`` fields.
+# Extracted from the part dict (works for both OpenAI inline and native forms).
+_PER_PART_CONFIG_INT_KEYS: tuple[str, ...] = (
+    "min_pixels",
+    "max_pixels",
+    "fps",
+    "max_frames",
+    "min_frames",
+)
+
+
+@dataclass(frozen=True)
+class MultimodalPart:
+    """One parsed multimodal content part from a dash_sc gRPC request.
+
+    ``mm_type`` is intentionally typed ``Any`` because ``MMUrlType`` is a pure-
+    Python ``IntEnum`` imported lazily inside the parser — keeping ``codec.py``
+    importable in environments without the full ``rtp_llm.ops`` C++ binding
+    (e.g. lightweight unit tests).
+
+    Unset config fields default to ``-1`` so consumers can build
+    ``MMPreprocessConfig`` directly with no extra branching.
+    """
+
+    url: str
+    mm_type: Any
+    min_pixels: int = -1
+    max_pixels: int = -1
+    fps: int = -1
+    max_frames: int = -1
+    min_frames: int = -1
+
+
+def _extract_openai_url(part: dict, inner_field: str) -> str | None:
+    """Pull the URL string out of an OpenAI content part.
+
+    Tolerates ``{"url": "..."}`` dict form (canonical) and plain string form
+    (some hand-built clients per OpenAI spec).
+    """
+    value = part.get(inner_field)
+    if isinstance(value, dict):
+        url = value.get("url")
+        if isinstance(url, str) and url:
+            return url
+        return None
+    if isinstance(value, str) and value:
+        return value
+    return None
+
+
+def _extract_per_part_config(part: dict) -> dict[str, int]:
+    """Pull per-part numeric overrides (min_pixels, max_pixels, fps, ...).
+
+    Supports two layouts in one pass:
+      * inline alongside the URL (dashscope native — see
+        ocr/request_for_general.json's ``{"image":..., "min_pixels":3136, ...}``);
+      * nested under ``preprocess_config`` (RTP-LLM's OpenAI
+        ``MMPreprocessConfigPart``, in case clients use that shape).
+
+    Inline values win over nested when both present. Non-numeric / negative
+    values are silently dropped (engine default -1 will fill in).
+    """
+    out: dict[str, int] = {}
+    nested = part.get("preprocess_config")
+    if isinstance(nested, dict):
+        for key in _PER_PART_CONFIG_INT_KEYS:
+            value = nested.get(key)
+            if isinstance(value, (int, float)) and value > 0:
+                out[key] = int(value)
+    for key in _PER_PART_CONFIG_INT_KEYS:
+        value = part.get(key)
+        if isinstance(value, (int, float)) and value > 0:
+            out[key] = int(value)
+    return out
+
+
+def _iter_native_video_urls(value: Any) -> Iterator[str]:
+    """Yield URL strings from a native ``video`` field value.
+
+    The kimi_k2_5/video_query.json sample uses a single string, but
+    multimodal_serving's ``MMGPT3Item.video`` is typed ``str | List[str]`` and
+    dashscope-serving's preprocessor builds ``VideoImagesData`` from list form
+    (one URL per frame). Flatten lists here so each frame becomes its own
+    ``MultimodalPart`` with type=VIDEO — the engine sees N frame URLs instead
+    of dropping the list silently.
+    """
+    if isinstance(value, str) and value:
+        yield value
+        return
+    if isinstance(value, list):
+        for item in value:
+            if isinstance(item, str) and item:
+                yield item
+
+
+def _parts_from_openai_content(
+    part: dict, mm_url_type_cls: Any
+) -> Iterator[MultimodalPart]:
+    """Emit MultimodalPart(s) when ``part['type']`` is an OpenAI multimodal type."""
+    part_type = part.get("type")
+    mapping = _OPENAI_MULTIMODAL_PART_TYPES.get(part_type)
+    if mapping is None:
+        return
+    inner_field, mm_type_name = mapping
+    url = _extract_openai_url(part, inner_field)
+    if url is None:
+        return
+    cfg = _extract_per_part_config(part)
+    yield MultimodalPart(url=url, mm_type=getattr(mm_url_type_cls, mm_type_name), **cfg)
+
+
+def _parts_from_dashscope_native(
+    part: dict, mm_url_type_cls: Any
+) -> Iterator[MultimodalPart]:
+    """Emit MultimodalPart(s) when ``part`` carries dashscope-native keys.
+
+    Detection: a part with no ``type`` field (or with ``type`` matching one of
+    the native keys) that contains exactly one of ``image``/``video``/``audio``.
+    """
+    cfg = _extract_per_part_config(part)
+    for key, mm_type_name in _DASHSCOPE_NATIVE_MULTIMODAL_KEYS.items():
+        value = part.get(key)
+        if value is None:
+            continue
+        mm_type = getattr(mm_url_type_cls, mm_type_name)
+        if key == "video":
+            for url in _iter_native_video_urls(value):
+                yield MultimodalPart(url=url, mm_type=mm_type, **cfg)
+        elif isinstance(value, str) and value:
+            yield MultimodalPart(url=value, mm_type=mm_type, **cfg)
+
+
+def _iter_messages_from_payload(obj: Any) -> Iterator[Any]:
+    """Yield messages from any of three observed top-level wrappings.
+
+    Priority order (first hit wins):
+      1. ``{'payload': {'input': {'messages': [...]}}}`` — full dashscope HTTP body
+         (header sibling, payload wrapper); seen in ocr/request_for_general.json.
+      2. ``{'input': {'messages': [...]}}`` — gpt3_serving build_payload output.
+      3. ``{'messages': [...]}`` — hand-built clients / direct OpenAI shape.
+    """
+    if not isinstance(obj, dict):
+        return
+    payload = obj.get("payload")
+    if isinstance(payload, dict):
+        inner = payload.get("input")
+        if isinstance(inner, dict) and isinstance(inner.get("messages"), list):
+            yield from inner["messages"]
+            return
+    inner = obj.get("input")
+    if isinstance(inner, dict) and isinstance(inner.get("messages"), list):
+        yield from inner["messages"]
+        return
+    messages = obj.get("messages")
+    if isinstance(messages, list):
+        yield from messages
+
+
+def _load_multimodal_payload(request) -> Any:
+    """Return the json-decoded body from the first non-empty multimodal param key.
+
+    Tries ``parameters['payload']`` then ``parameters['__messages__']``. Returns
+    ``None`` when neither is present / both are empty / JSON decoding fails.
+    Fail-open on JSON errors — caller will treat ``None`` as "no multimodal".
+    """
+    for key in _MULTIMODAL_PARAMETER_KEYS:
+        if key not in request.parameters:
+            continue
+        param = request.parameters[key]
+        if not param.HasField("string_param") or not param.string_param:
+            continue
+        try:
+            return json.loads(param.string_param)
+        except (TypeError, ValueError) as e:
+            logging.warning(
+                "failed to parse multimodal payload JSON from parameters[%r]: %s",
+                key,
+                e,
+            )
+            return None
+    return None
+
+
+def parse_multimodal_parts_from_request(request) -> list[MultimodalPart]:
+    """Extract ``MultimodalPart`` records from a dash_sc gRPC request.
+
+    Walks the OpenAI messages JSON embedded in either
+    ``request.parameters['payload']`` (gpt3_serving's adapt_inbound convention)
+    or ``request.parameters['__messages__']`` (multimodal_serving's
+    dserv_stream_worker_for_vl convention), then per content part:
+
+      * OpenAI shape (``{"type":"image_url","image_url":{...}}``) — handled by
+        :func:`_parts_from_openai_content`. Built by gpt3_serving's
+        ``build_oai_text_content``.
+      * Dashscope-native shape (``{"image":"...", "min_pixels":...}``) — handled
+        by :func:`_parts_from_dashscope_native`. The canonical inline shape in
+        ``MMGPT3Item`` / ``MultiModalItem`` and the ocr/request_for_*.json
+        samples.
+
+    Per-part overrides (``min_pixels``, ``max_pixels``, ``fps``, ``max_frames``,
+    ``min_frames``) are extracted from both inline keys and nested
+    ``preprocess_config`` and stamped onto the returned ``MultimodalPart``;
+    consumers feed them into ``MMPreprocessConfig``.
+
+    Text parts and unknown types are skipped (text tokens are already in
+    ``request.inputs[name=input_ids]``). Video URL lists are flattened into one
+    ``MultimodalPart`` per frame URL so all frames reach the engine.
+
+    Fail-open: missing key, empty string, malformed JSON, or unexpected shape
+    all return ``[]`` — text-only requests stay byte-identical to the
+    pre-multimodal path.
+    """
+    obj = _load_multimodal_payload(request)
+    if obj is None:
+        return []
+
+    # Lazy import keeps codec.py importable in environments without the
+    # full ops binding. ``MMUrlType`` itself is pure Python.
+    from rtp_llm.utils.base_model_datatypes import MMUrlType
+
+    out: list[MultimodalPart] = []
+    for msg in _iter_messages_from_payload(obj):
+        if not isinstance(msg, dict):
+            continue
+        content = msg.get("content")
+        if not isinstance(content, list):
+            continue
+        for part in content:
+            if not isinstance(part, dict):
+                continue
+            # OpenAI shape takes priority — if ``type`` matches an OpenAI
+            # multimodal type, the OpenAI extractor handles it (including its
+            # specific ``{"url":...}`` nesting). Otherwise fall back to the
+            # dashscope native key sniff.
+            if part.get("type") in _OPENAI_MULTIMODAL_PART_TYPES:
+                out.extend(_parts_from_openai_content(part, MMUrlType))
+            else:
+                out.extend(_parts_from_dashscope_native(part, MMUrlType))
+    return out
+
+
+# ----------------------------------------------------------------------------
 # Response builders (real backend + fake / mock)
 # ----------------------------------------------------------------------------
 

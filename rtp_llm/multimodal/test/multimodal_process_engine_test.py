@@ -1,3 +1,4 @@
+import asyncio
 import concurrent.futures
 import os
 import threading
@@ -11,6 +12,7 @@ import pillow_heif
 import torch
 from PIL import Image, ImageFile
 
+from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.config.py_config_modules import (
     ProfilingDebugLoggingConfig,
@@ -20,6 +22,11 @@ from rtp_llm.config.py_config_modules import (
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     MultimodalInputPB,
     MultimodalInputsPB,
+)
+from rtp_llm.multimodal.greennet_hook import (
+    GreenNetHandle,
+    GreenNetProvider,
+    GreenNetVerdict,
 )
 from rtp_llm.multimodal.mm_process_engine import (
     MMEmbeddingAsyncCache,
@@ -524,6 +531,201 @@ class AsyncSubmitGetEmbeddingTest(TestCase):
             engine.async_submit([inp])
         with self.assertRaises(ValueError):
             engine.get_embedding_result([inp])
+        engine.stop()
+
+
+# ----------------------------------------------------------------------------
+# GreenNet (content safety) integration
+# ----------------------------------------------------------------------------
+
+
+class _StubGreenNetHandle(GreenNetHandle):
+    def __init__(self, rewritten_inputs, verdict, delay=0.0):
+        self.rewritten_inputs = rewritten_inputs
+        self._verdict = verdict
+        self._delay = delay
+        self.cancelled = False
+
+    async def wait_result(self) -> GreenNetVerdict:
+        if self._delay:
+            await asyncio.sleep(self._delay)
+        return self._verdict
+
+    def cancel(self) -> None:
+        self.cancelled = True
+
+
+class _StubGreenNetProvider(GreenNetProvider):
+    """Records inputs and returns a programmable verdict. Optionally rewrites
+    each input's url so we can assert the rewritten inputs reach ViT."""
+
+    def __init__(self, verdict, rewrite_suffix=None, delay=0.0):
+        self._verdict = verdict
+        self._rewrite_suffix = rewrite_suffix
+        self._delay = delay
+        self.calls = 0
+        self.last_handle = None
+
+    def is_enabled(self) -> bool:
+        return True
+
+    async def preprocess_and_submit(self, request, mm_inputs):
+        self.calls += 1
+        if self._rewrite_suffix is not None:
+            rewritten = [
+                MultimodalInput(
+                    mi.url + self._rewrite_suffix,
+                    mi.mm_type,
+                    torch.empty(0),
+                    mi.mm_preprocess_config,
+                )
+                for mi in mm_inputs
+            ]
+        else:
+            rewritten = list(mm_inputs)
+        handle = _StubGreenNetHandle(rewritten, self._verdict, self._delay)
+        self.last_handle = handle
+        return handle
+
+
+class _UrlRecordingEmbedding(FakeMultiModalEmbeddingInterface):
+    """Records the urls preprocess_input actually received (to verify the
+    greennet-rewritten inputs are what ViT consumes)."""
+
+    seen_urls: List[str] = []
+
+    @staticmethod
+    def preprocess_input(mm_inputs, vit_config, **kwargs):
+        _UrlRecordingEmbedding.seen_urls.extend(mi.url for mi in mm_inputs)
+        return mm_inputs, kwargs
+
+
+class MMProcessEngineGreenNetTest(TestCase):
+    def _make_engine(self, mm_part=None):
+        model = FakeModel(mm_part or FakeMultiModalEmbeddingInterface())
+        vit_config = VitConfig()
+        vit_config.use_local_preprocess = True
+        return MMProcessEngine(
+            model.mm_part,
+            model.model_config,
+            vit_config,
+            ProfilingDebugLoggingConfig(),
+        )
+
+    def _make_input(self, url):
+        return MultimodalInput(
+            url,
+            MMUrlType.IMAGE,
+            torch.empty(0),
+            MMPreprocessConfig(-1, -1, -1, -1, -1, -1, -1, [], 30000),
+        )
+
+    def test_default_provider_is_noop(self):
+        # No internal_source in the open-source test env → no-op provider,
+        # so greennet is disabled and the engine behaves exactly as before.
+        engine = self._make_engine()
+        self.assertFalse(engine._greennet_enabled())
+        verdict = engine.wait_greennet_verdict(
+            [self._make_input("./rtp_llm/multimodal/test/testdata/qwen2_vl/1.jpg")]
+        )
+        self.assertTrue(verdict.passed)
+        engine.stop()
+
+    def test_local_path_passes_when_verdict_passes(self):
+        engine = self._make_engine()
+        engine._greennet_provider = _StubGreenNetProvider(
+            GreenNetVerdict(passed=True, code=1)
+        )
+        res = engine.mm_embedding_cpp(
+            ["./rtp_llm/multimodal/test/testdata/qwen2_vl/1.jpg?gn_pass"],
+            [MMUrlType.IMAGE],
+            [torch.empty(0)],
+            [[-1, -1, -1, -1, -1, -1, -1, [], 30000]],
+        )
+        self.assertEqual(res.embeddings, [torch.tensor(0)])
+        engine.stop()
+
+    def test_local_path_raises_when_verdict_fails(self):
+        engine = self._make_engine()
+        engine._greennet_provider = _StubGreenNetProvider(
+            GreenNetVerdict(passed=False, code=2, message="blocked")
+        )
+        with self.assertRaises(FtRuntimeException) as ctx:
+            engine.mm_embedding_cpp(
+                ["./rtp_llm/multimodal/test/testdata/qwen2_vl/1.jpg?gn_fail"],
+                [MMUrlType.IMAGE],
+                [torch.empty(0)],
+                [[-1, -1, -1, -1, -1, -1, -1, [], 30000]],
+            )
+        self.assertEqual(
+            ctx.exception.exception_type, ExceptionType.UNSAFE_INPUT_CONTENT
+        )
+        self.assertIn("blocked", ctx.exception.message)
+        engine.stop()
+
+    def test_rewritten_inputs_reach_vit(self):
+        _UrlRecordingEmbedding.seen_urls = []
+        engine = self._make_engine(_UrlRecordingEmbedding())
+        engine._greennet_provider = _StubGreenNetProvider(
+            GreenNetVerdict(passed=True, code=1), rewrite_suffix="#rewritten"
+        )
+        engine.mm_embedding_cpp(
+            ["./rtp_llm/multimodal/test/testdata/qwen2_vl/1.jpg?gn_rw"],
+            [MMUrlType.IMAGE],
+            [torch.empty(0)],
+            [[-1, -1, -1, -1, -1, -1, -1, [], 30000]],
+        )
+        self.assertTrue(
+            any(u.endswith("#rewritten") for u in _UrlRecordingEmbedding.seen_urls),
+            f"ViT did not see rewritten url: {_UrlRecordingEmbedding.seen_urls}",
+        )
+        engine.stop()
+
+    def test_wait_verdict_pass_after_async_submit(self):
+        engine = self._make_engine()
+        engine._greennet_provider = _StubGreenNetProvider(
+            GreenNetVerdict(passed=True, code=1)
+        )
+        inp = self._make_input(
+            "./rtp_llm/multimodal/test/testdata/qwen2_vl/1.jpg?gn_wait_pass"
+        )
+        engine.async_submit([inp])
+        verdict = engine.wait_greennet_verdict([inp])
+        self.assertTrue(verdict.passed)
+        engine.stop()
+
+    def test_wait_verdict_fail_after_async_submit(self):
+        engine = self._make_engine()
+        engine._greennet_provider = _StubGreenNetProvider(
+            GreenNetVerdict(passed=False, code=2, message="nsfw")
+        )
+        inp = self._make_input(
+            "./rtp_llm/multimodal/test/testdata/qwen2_vl/1.jpg?gn_wait_fail"
+        )
+        engine.async_submit([inp])
+        verdict = engine.wait_greennet_verdict([inp])
+        self.assertFalse(verdict.passed)
+        self.assertEqual(verdict.code, 2)
+        # The embedding entry must also surface the violation.
+        with self.assertRaises(FtRuntimeException) as ctx:
+            engine.get_embedding_result([inp])
+        self.assertEqual(
+            ctx.exception.exception_type, ExceptionType.UNSAFE_INPUT_CONTENT
+        )
+        engine.stop()
+
+    def test_wait_verdict_kicks_compute_on_miss(self):
+        # wait_greennet_verdict called without a prior async_submit must still
+        # produce a verdict (kick compute itself).
+        engine = self._make_engine()
+        engine._greennet_provider = _StubGreenNetProvider(
+            GreenNetVerdict(passed=False, code=2, message="bad")
+        )
+        inp = self._make_input(
+            "./rtp_llm/multimodal/test/testdata/qwen2_vl/1.jpg?gn_miss"
+        )
+        verdict = engine.wait_greennet_verdict([inp])
+        self.assertFalse(verdict.passed)
         engine.stop()
 
 

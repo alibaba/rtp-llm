@@ -4,7 +4,7 @@
 MiniMax VL family HuggingFace-compatible Processor, ImageProcessor, VideoProcessor.
 """
 import math
-from typing import List, Tuple
+from typing import List, Optional, Tuple, Union
 
 import torch
 from torchvision.transforms import InterpolationMode
@@ -58,6 +58,117 @@ def smart_resize(
     return h_bar, w_bar
 
 
+def get_hw_multiple_of(
+    image_size: Tuple[int, int],
+    multiple: int,
+    max_size: Union[None, int, Tuple[int, int]] = None,
+) -> Tuple[int, int]:
+    """Calculate target size aligned to *multiple*, optionally capped by *max_size*.
+
+    Used for video frame resize (dimension-based ceil-align), as opposed to
+    :func:`smart_resize` which is area-based.
+
+    Args:
+        image_size: ``(width, height)`` of the source frame.
+        multiple: Alignment factor (``patch_size * spatial_merge_size``).
+        max_size: ``None`` (no cap), ``int`` (cap longest edge), or
+            ``(max_w, max_h)`` tuple.
+
+    Returns:
+        ``(new_width, new_height)``, both divisible by *multiple*.
+    """
+    w, h = image_size
+
+    if isinstance(max_size, int):
+        ratio = 1.0
+        max_dim = max(w, h)
+        if max_dim > max_size:
+            ratio = max_size / max_dim
+        new_w = round(w * ratio)
+        new_h = round(h * ratio)
+        new_w = (
+            new_w if new_w % multiple == 0 else new_w + (multiple - new_w % multiple)
+        )
+        new_h = (
+            new_h if new_h % multiple == 0 else new_h + (multiple - new_h % multiple)
+        )
+        return new_w, new_h
+
+    new_w = w if w % multiple == 0 else w + (multiple - w % multiple)
+    new_h = h if h % multiple == 0 else h + (multiple - h % multiple)
+
+    if max_size is not None:
+        assert isinstance(max_size, (list, tuple)) and len(max_size) == 2
+        max_w, max_h = max_size
+        assert max_w % multiple == 0 and max_h % multiple == 0
+        if new_w > max_w or new_h > max_h:
+            new_w_ = min((new_w * max_w) // new_w, (new_w * max_h) // new_h)
+            new_h_ = min((new_h * max_w) // new_w, (new_h * max_h) // new_h)
+            new_w = new_w_
+            new_h = new_h_
+            new_w = (
+                new_w
+                if new_w % multiple == 0
+                else new_w + (multiple - new_w % multiple)
+            )
+            new_h = (
+                new_h
+                if new_h % multiple == 0
+                else new_h + (multiple - new_h % multiple)
+            )
+        assert new_w <= max_w and new_h <= max_h
+
+    return new_w, new_h
+
+
+def compute_sampled_frame_indices(
+    total_frames: int,
+    video_fps: float,
+    fps: float,
+    max_frames: Optional[int] = None,
+) -> List[int]:
+    """Pick frame indices matching sglang's constant-mode behavior.
+
+    Greedily selects frames whose timestamp is at least ``1/fps`` seconds
+    after the previously kept frame; always appends the last frame if it
+    adds temporal information.  When the result exceeds *max_frames*, it is
+    uniformly sub-sampled while preserving the first and last frame.
+    """
+    if total_frames <= 0 or video_fps <= 0 or fps <= 0:
+        return [0] if total_frames > 0 else []
+
+    read_time_interval = 1.0 / fps
+    eps = 1e-4
+
+    indices: List[int] = []
+    prev_kept_ts = -float("inf")
+    while True:
+        if not indices:
+            target_frame = 0
+        else:
+            target_ts = prev_kept_ts + read_time_interval - eps
+            target_frame = math.ceil(target_ts * video_fps)
+            target_frame = max(target_frame, indices[-1] + 1)
+        if target_frame >= total_frames:
+            break
+        indices.append(target_frame)
+        prev_kept_ts = target_frame / video_fps
+
+    last_frame_idx = total_frames - 1
+    last_ts = last_frame_idx / video_fps
+    if indices and indices[-1] != last_frame_idx and last_ts - prev_kept_ts > eps:
+        indices.append(last_frame_idx)
+
+    if not indices:
+        indices = [0]
+    if max_frames is not None and len(indices) > max_frames > 0:
+        last = indices[-1]
+        step = len(indices) / (max_frames - 1)
+        indices = [indices[int(i * step)] for i in range(max_frames - 1)]
+        indices.append(last)
+    return indices
+
+
 # ==============================================================================
 # MiniMax M3 VL Image Processor Fast (Fast Mode - Torch based)
 # ==============================================================================
@@ -67,6 +178,7 @@ class MiniMaxM3VLImageProcessorKwargs(ImagesKwargs, total=False):
     patch_size: int
     temporal_patch_size: int
     merge_size: int
+    min_pixels: int
     max_pixels: int
 
 
@@ -87,6 +199,7 @@ class MiniMaxM3VLImageProcessor(BaseImageProcessorFast):
     patch_size = 14
     temporal_patch_size = 2
     merge_size = 2
+    min_pixels = 4 * 28 * 28  # 3136, matches smart_resize default lower bound
     max_pixels = 451584  # 672*672
     valid_kwargs = MiniMaxM3VLImageProcessorKwargs
     model_input_names = ["pixel_values", "image_grid_thw"]
@@ -116,6 +229,7 @@ class MiniMaxM3VLImageProcessor(BaseImageProcessorFast):
         max_pixels: int,
         disable_grouping: bool | None,
         return_tensors: str | TensorType | None,
+        min_pixels: int = 4 * 28 * 28,
         **kwargs,
     ) -> BatchFeature:
         grouped_images, grouped_images_index = group_images_by_shape(
@@ -130,6 +244,7 @@ class MiniMaxM3VLImageProcessor(BaseImageProcessorFast):
                     height,
                     width,
                     factor=factor,
+                    min_pixels=min_pixels,
                     max_pixels=max_pixels,
                 )
                 stacked_images = self.resize(

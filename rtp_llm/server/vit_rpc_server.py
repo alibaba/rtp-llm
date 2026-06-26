@@ -5,6 +5,7 @@ import grpc
 import torch
 
 from rtp_llm.config.engine_config import EngineConfig
+from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.log_config import setup_logging
 from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.config.server_config_setup import setup_and_configure_server
@@ -12,6 +13,7 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     CacheStatusPB,
     CacheVersionPB,
     EmptyPB,
+    ErrorDetailsPB,
     MMPreprocessConfigPB,
     MMRdmaDescPB,
     MultimodalInputsPB,
@@ -75,17 +77,29 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
                 rdma = MMRdmaEncoderOp(vit_config)
                 if rdma.enabled():
                     self._rdma = rdma
-                    self._rdma_min_bytes = int(getattr(vit_config, "mm_rdma_min_bytes", 256 * 1024))
-                    logging.info("[VIT] mm rdma encoder enabled, min_bytes=%d", self._rdma_min_bytes)
+                    self._rdma_min_bytes = int(
+                        getattr(vit_config, "mm_rdma_min_bytes", 256 * 1024)
+                    )
+                    logging.info(
+                        "[VIT] mm rdma encoder enabled, min_bytes=%d",
+                        self._rdma_min_bytes,
+                    )
                 else:
-                    logging.warning("[VIT] mm rdma requested but unavailable, fall back to bytes")
-            except Exception as e:  # noqa: BLE001 - never let rdma init break the bytes path
-                logging.warning("[VIT] init mm rdma encoder failed: %s, fall back to bytes", e)
+                    logging.warning(
+                        "[VIT] mm rdma requested but unavailable, fall back to bytes"
+                    )
+            except (
+                Exception
+            ) as e:  # noqa: BLE001 - never let rdma init break the bytes path
+                logging.warning(
+                    "[VIT] init mm rdma encoder failed: %s, fall back to bytes", e
+                )
 
     def _trans_output_rdma(self, res: MMEmbeddingRes):
         """Export the whole output of one request (embedding + pos_id + every extra_input)
         through a single RDMA slot and return a descriptor-bearing MultimodalOutputPB. Only
-        split_size stays inline. Returns None to signal fallback to the inline-bytes path."""
+        split_size stays inline. Returns None to signal fallback to the inline-bytes path.
+        """
         if self._rdma is None or not res.embeddings:
             return None
         emb = torch.concat(res.embeddings).contiguous()
@@ -122,6 +136,30 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
     def AsyncSubmitEmbedding(self, multimodal_inputs: MultimodalInputsPB, context):
         converted_inputs = trans_mm_input(multimodal_inputs)
         self.engine.async_submit(converted_inputs)
+        return EmptyPB()
+
+    def WaitGreenNetVerdict(self, multimodal_inputs: MultimodalInputsPB, context):
+        """Block until greennet decides for all inputs (kicked earlier by
+        AsyncSubmitEmbedding). On a violation, fail the RPC with an
+        ErrorDetailsPB(error_code=UNSAFE_INPUT_CONTENT) trailer so the LLM
+        client reconstructs the exact FtRuntimeException."""
+        converted_inputs = trans_mm_input(multimodal_inputs)
+        verdict = self.engine.wait_greennet_verdict(converted_inputs)
+        if not verdict.passed:
+            error_code = (
+                ExceptionType.UNSAFE_INPUT_CONTENT
+                if verdict.code == 2
+                else ExceptionType.MM_PROCESS_ERROR
+            )
+            details = ErrorDetailsPB(
+                error_code=int(error_code),
+                error_message=verdict.message or "data inspection failed",
+            )
+            context.set_trailing_metadata(
+                (("grpc-status-details-bin", details.SerializeToString()),)
+            )
+            context.set_code(grpc.StatusCode.PERMISSION_DENIED)
+            context.set_details(verdict.message or "data inspection failed")
         return EmptyPB()
 
     def RemoteMultimodalEmbedding(self, multimodal_inputs: MultimodalInputsPB, context):

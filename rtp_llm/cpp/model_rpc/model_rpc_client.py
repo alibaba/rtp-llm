@@ -510,6 +510,11 @@ class ModelRpcClient(object):
 
         if input_pb.multimodal_inputs:
             await self._try_async_submit_vit(input_py, input_pb)
+            # GreenNet content-safety gate: block before prefill until the VIT
+            # encoder's inspection verdict lands. A violation raises
+            # FtRuntimeException(UNSAFE_INPUT_CONTENT) here, short-circuiting the
+            # request before any LLM compute.
+            await self._wait_greennet_verdict(input_py, input_pb)
 
         try:
             # Select target address
@@ -578,3 +583,63 @@ class ModelRpcClient(object):
                         f"request: [{input_py.request_id}] async vit submit to {vit_addr} failed: {e}"
                     )
                 break
+
+    async def _wait_greennet_verdict(
+        self, input_py: GenerateInput, input_pb: GenerateInputPB
+    ) -> None:
+        """Block until the VIT encoder's greennet inspection verdict lands.
+
+        Raises FtRuntimeException(UNSAFE_INPUT_CONTENT) on a violation — the
+        server signals it via an ErrorDetailsPB in the grpc-status-details-bin
+        trailer (same scheme as GenerateStreamCall). When no VIT role is routed
+        (in-process embedding), this is a no-op: the LOCAL path enforces greennet
+        inline inside mm_process_engine and surfaces the same exception through
+        the normal generate stream.
+
+        When greennet is disabled (open-source build or ENABLE_SAFETY_INSPECTION
+        off), this returns immediately WITHOUT any RPC — so the disabled path is
+        byte-identical to the pre-greennet behavior (no extra round-trip).
+        """
+        from rtp_llm.multimodal.greennet_hook import greennet_enabled
+
+        if not greennet_enabled():
+            return
+        for role_addr in input_py.generate_config.role_addrs:
+            if role_addr.role != RoleType.VIT:
+                continue
+            vit_addr = f"{role_addr.ip}:{role_addr.grpc_port}"
+            mm_inputs_pb = MultimodalInputsPB()
+            mm_inputs_pb.multimodal_inputs.extend(input_pb.multimodal_inputs)
+            channel = await self._channel_pool.get(vit_addr)
+            stub = MultimodalRpcServiceStub(channel)
+            try:
+                await stub.WaitGreenNetVerdict(mm_inputs_pb, timeout=120.0)
+            except grpc.RpcError as e:
+                error_details = ErrorDetailsPB()
+                metadata = e.trailing_metadata()
+                if (
+                    "grpc-status-details-bin" in metadata
+                    and error_details.ParseFromString(
+                        metadata["grpc-status-details-bin"]
+                    )
+                ):
+                    logging.warning(
+                        f"request: [{input_py.request_id}] greennet rejected: "
+                        f"{ExceptionType.from_value(error_details.error_code)}, "
+                        f"{error_details.error_message}"
+                    )
+                    raise FtRuntimeException(
+                        ExceptionType(error_details.error_code),
+                        error_details.error_message,
+                    )
+                # No structured detail: greennet infra error (timeout / VIT down).
+                # Fail closed — never let an uninspected request through.
+                logging.error(
+                    f"request: [{input_py.request_id}] greennet verdict rpc to "
+                    f"{vit_addr} failed: {e.code()}, {e.details()}"
+                )
+                raise FtRuntimeException(
+                    ExceptionType.UNSAFE_INPUT_CONTENT,
+                    f"greennet verdict unavailable: {e.details()}",
+                )
+            break

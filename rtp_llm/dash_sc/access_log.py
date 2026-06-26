@@ -555,6 +555,41 @@ class DashScGrpcAccessLogInterceptor(grpc.ServerInterceptor):
     ) -> None:
         """Capture first request content for the end-of-RPC access log."""
         access_record.capture_request(request)
+        self._emit_query_content_log(access_record, request)
+
+    def _emit_query_content_log(
+        self, access_record: ForwardAccessRecord, request
+    ) -> None:
+        """Write a supplementary query log line with messages content.
+
+        Fires from :meth:`_capture_first_request` once the first request
+        frame is available (may be slightly after the arrival breadcrumb
+        from :meth:`_emit_query_log` for streaming RPCs).
+        """
+        messages = None
+        try:
+            for key in ("payload", "__messages__"):
+                if key not in request.parameters:
+                    continue
+                param = request.parameters[key]
+                if param.HasField("string_param") and param.string_param:
+                    messages = param.string_param
+                    break
+        except Exception:
+            pass
+        record = {
+            "ts": format_access_log_ts(time.time()),
+            "type": "query_content",
+            "request_id": access_record.request_id,
+            "model_name": access_record.model_name,
+            "input_len": access_record.input_len,
+            "messages": messages,
+            "upstream_request_id": access_record.upstream_request_id,
+        }
+        try:
+            self._query_logger.info(orjson.dumps(record).decode("utf-8"))
+        except Exception as e:
+            logging.warning("[DashScGrpc] query content log emit failed: %s", e)
 
     def _wrap_unary_unary(self, inner, method, stream_type):
         def behavior(request, context):

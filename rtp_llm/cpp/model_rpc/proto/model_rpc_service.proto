@@ -729,6 +729,13 @@ service MultimodalRpcService {
     rpc GetCacheStatus(CacheVersionPB) returns (CacheStatusPB);
     rpc RemoteMultimodalEmbedding(MultimodalInputsPB) returns (MultimodalOutputPB);
     rpc AsyncSubmitEmbedding(MultimodalInputsPB) returns (EmptyPB);
+    // GreenNet content-safety gate. Called by the LLM client AFTER
+    // AsyncSubmitEmbedding (which kicked the async preprocess + inspect) and
+    // BEFORE prefill. Returns EmptyPB when all inputs pass; on a violation the
+    // server aborts with PERMISSION_DENIED and an ErrorDetailsPB
+    // (error_code=UNSAFE_INPUT_CONTENT) in the grpc-status-details-bin trailer,
+    // which the client converts back to FtRuntimeException.
+    rpc WaitGreenNetVerdict(MultimodalInputsPB) returns (EmptyPB);
     // RDMA path: LLM notifies encoder it has finished READ-ing so the slot can be
     // returned to the free list (MR kept registered). Best-effort; encoder also has
     // a timeout GC as a backstop against LLM crash / READ failure.
