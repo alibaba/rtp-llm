@@ -5,7 +5,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Module Overview
 
 flexlb-sync is the core load balancing module of FlexLB. It handles:
-- Load balancing strategy execution (RandomStrategy, WeightedCacheLoadBalancer, ShortestTTFTStrategy)
+- Load balancing strategy execution (RandomStrategy, CostBasedPrefillStrategy, CostBasedDecodeStrategy)
 - Worker node status synchronization via gRPC
 - Master election using ZooKeeper
 - Request routing across different role types (PREFILL, DECODE, PDFUSION, VIT)
@@ -84,8 +84,8 @@ flexlb-sync/
 │   └── strategy/
 │       ├── LoadBalancer.java        # Load balancing interface
 │       ├── RandomStrategy.java      # Random selection strategy
-│       ├── ShortestTTFTStrategy.java   # TTFT-based strategy
-│       └── WeightedCacheLoadBalancer.java  # Cache-aware strategy
+│       ├── CostBasedPrefillStrategy.java  # Prefill cost-based strategy
+│       └── CostBasedDecodeStrategy.java  # Decode cache-based strategy
 ├── consistency/
 │   ├── MasterElectService.java      # Master election interface
 │   └── ZookeeperMasterElectService.java  # ZK implementation

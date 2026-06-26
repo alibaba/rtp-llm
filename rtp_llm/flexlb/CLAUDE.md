@@ -52,7 +52,7 @@ Core load balancing logic, scheduling strategies, and worker status synchronizat
 
 Key concepts:
 - **Router pattern**: `Router` interface + `DefaultRouter` implementation for multi-role request routing
-- **LoadBalancer pattern**: Strategy interface for worker selection (Random, WeightedCache, ShortestTTFT)
+- **LoadBalancer pattern**: Strategy interface for worker selection (Random, CostBasedPrefill, CostBasedDecode)
 - **Queue-based scheduling**: `QueueManager` + `RequestScheduler` for async request processing
 - **Dynamic resource management**: `DynamicWorkerManager` for adaptive capacity control
 - **Worker synchronization**: Periodic gRPC-based status sync (`GrpcWorkerStatusRunner`)

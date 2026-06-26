@@ -76,7 +76,7 @@ FlexLB requires some environment variables to be set:
 # Load balancing configuration
 export WHALE_MASTER_CONFIG='{
     "deploy":"DISAGGREGATED",
-    "loadBalanceStrategy":"ROUND_ROBIN_LOWEST_CONCURRENCY",
+    "loadBalanceStrategy":"COST_BASED_PREFILL",
     "prefillBatchWaitTimeMs":100,
     "kvCache":"LOCAL_STATIC",
     "staticCacheBlockSize":500,
