@@ -19,7 +19,6 @@ import org.slf4j.LoggerFactory;
 
 import java.util.Map;
 import java.util.Optional;
-import java.util.concurrent.atomic.AtomicLong;
 
 import static org.flexlb.constant.CommonConstants.DEADLINE_EXCEEDED_MESSAGE;
 
@@ -41,7 +40,6 @@ public class GrpcWorkerStatusRunner implements Runnable {
     private final long createTimeUs = System.nanoTime() / 1000;
     private final String id = IdUtils.fastUuid();
     private final long syncRequestTimeoutMs;
-    private final AtomicLong consecutiveFailures = new AtomicLong(0);
     private static final int MAX_CONSECUTIVE_FAILURES = 3;
     private final EndpointRegistry endpointRegistry;
 
@@ -89,7 +87,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
             return EngineStatusConverter.convertToWorkerStatusResponse(workerStatusPB);
         } catch (Throwable throwable) {
             handleException(throwable);
-            long failures = consecutiveFailures.incrementAndGet();
+            long failures = workerStatus.getConsecutiveFailures().incrementAndGet();
             logger.error("gRPC status check failed, consecutiveFailures={}/{}, msg={}",
                     failures, MAX_CONSECUTIVE_FAILURES, throwable.getMessage());
             if (failures >= MAX_CONSECUTIVE_FAILURES) {
@@ -108,10 +106,10 @@ public class GrpcWorkerStatusRunner implements Runnable {
                 return;
             }
 
-            engineHealthReporter.reportStatusCheckRemoteInfo(modelName, ipPort, newWorkerStatus.getRole().name(), startTime);
+            engineHealthReporter.reportStatusCheckRemoteInfo(modelName, ipPort, newWorkerStatus.getRole() != null ? newWorkerStatus.getRole().name() : "UNKNOWN", startTime);
 
             // Reset consecutive failure counter on successful response
-            consecutiveFailures.set(0);
+            workerStatus.getConsecutiveFailures().set(0);
 
             Long responseVersion = newWorkerStatus.getStatusVersion();
             if (responseVersion == 0L) {

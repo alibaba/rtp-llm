@@ -56,8 +56,12 @@ class RoleAddr(BaseModel):
             return RoleType(v)
         elif isinstance(v, RoleType):
             return v
+        elif isinstance(v, str):
+            return getattr(RoleType, v.upper())
         else:
-            raise ValueError(f"RoleType must be an int or RoleType enum, got {type(v)}")
+            raise ValueError(
+                f"RoleType must be an int, str, or RoleType enum, got {type(v)}"
+            )
 
     @field_serializer("role")
     def serialize_role(self, role: RoleType, _info) -> str:

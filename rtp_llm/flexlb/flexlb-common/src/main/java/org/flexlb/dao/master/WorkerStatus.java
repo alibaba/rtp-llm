@@ -44,6 +44,7 @@ public class WorkerStatus {
     private AtomicBoolean statusCheckInProgress = new AtomicBoolean(false);
     private AtomicBoolean cacheCheckInProgress = new AtomicBoolean(false);
     private AtomicLong statusVersion = new AtomicLong(-1L);
+    private AtomicLong consecutiveFailures = new AtomicLong(0);
 
     /**
      * Absorb all dynamic engine fields from a gRPC status response.

@@ -273,6 +273,6 @@ public class CostBasedPrefillStrategy implements LoadBalancer {
      */
     private static boolean isNonBatchPath(FlexlbConfig config, BalanceContext ctx) {
         return !config.isFlexlbBatchEnabled()
-                || ctx.getScheduleMode() == ScheduleModeEnum.DIRECT;
+                || ctx.getScheduleMode() != ScheduleModeEnum.BATCH;
     }
 }
