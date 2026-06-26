@@ -13,6 +13,7 @@ import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.TaskPhase;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -50,6 +51,13 @@ class PrefillEndpointTest {
         config.setCostAlpha5(5);
 
         endpoint = new PrefillEndpoint(status, config, noopHandler());
+    }
+
+    @AfterEach
+    void tearDown() {
+        if (endpoint != null) {
+            endpoint.close();
+        }
     }
 
     // ---- batch commit / release ----
@@ -166,8 +174,8 @@ class PrefillEndpointTest {
 
         Map<String, TaskInfo> finished = new HashMap<>();
         TaskInfo badTask = new TaskInfo();
-        badTask.setRequestId(1L);
-        badTask.setBatchId(-1); // invalid batch id
+        badTask.setRequestId(999L); // non-overlapping with batchId=1
+        badTask.setBatchId(-1); // invalid batch id (non-batch request)
         badTask.setErrorCode(0);
         finished.put("1", badTask);
 
