@@ -22,6 +22,7 @@ import org.mockito.Mockito;
 
 import java.util.HashMap;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -45,6 +46,11 @@ class ForceChatStickyRoutingIntegrationTest {
     void shouldRouteRepeatedPrefillChatThroughForceChatStickyStrategy() {
         WorkerStatus stickyWorker = addWorker("10.0.0.1", 8080, "group-a", 0);
         addWorker("10.0.0.2", 8080, "group-a", 1);
+        WorkerStatus otherChatWorker = addWorker("10.0.0.3", 8080, "group-a", 2);
+        addWorker("10.0.0.4", 8080, "group-a", 3);
+        addWorker("10.0.0.5", 8080, "group-a", 4);
+        addWorker("10.0.0.6", 8080, "group-a", 5);
+        addWorker("10.0.0.7", 8080, "group-a", 6);
 
         FlexlbConfig config = new FlexlbConfig();
         config.setLoadBalanceStrategy(LoadBalanceStrategyEnum.FORCE_CHAT_STICKY);
@@ -56,16 +62,33 @@ class ForceChatStickyRoutingIntegrationTest {
         Mockito.when(resourceMeasure.isResourceAvailable(Mockito.any())).thenReturn(true);
 
         registerUnusedStrategies();
-        new ForceChatStickyStrategy(engineWorkerStatus, resourceMeasureFactory, nowMs::get, bound -> 0);
+        AtomicInteger fallbackSelections = new AtomicInteger();
+        new ForceChatStickyStrategy(
+                engineWorkerStatus,
+                resourceMeasureFactory,
+                nowMs::get,
+                bound -> fallbackSelections.getAndIncrement());
         DefaultRouter router = new DefaultRouter(configService);
 
         Response first = router.route(context(config, 1L, "chat-a"));
-        Response second = router.route(context(config, 2L, "chat-a"));
 
         assertTrue(first.isSuccess());
-        assertTrue(second.isSuccess());
         assertEquals(stickyWorker.getIp(), first.getServerStatus().getFirst().getServerIp());
-        assertEquals(stickyWorker.getIp(), second.getServerStatus().getFirst().getServerIp());
+
+        for (long requestId = 2L; requestId <= 13L; requestId++) {
+            Response repeated = router.route(context(config, requestId, "chat-a"));
+            assertTrue(repeated.isSuccess());
+            assertEquals(stickyWorker.getIp(), repeated.getServerStatus().getFirst().getServerIp());
+        }
+
+        Response otherChat = router.route(context(config, 100L, "chat-b"));
+        assertTrue(otherChat.isSuccess());
+        assertEquals(otherChatWorker.getIp(), otherChat.getServerStatus().getFirst().getServerIp());
+
+        Response afterOtherChat = router.route(context(config, 101L, "chat-a"));
+        assertTrue(afterOtherChat.isSuccess());
+        assertEquals(stickyWorker.getIp(), afterOtherChat.getServerStatus().getFirst().getServerIp());
+        assertEquals(2, fallbackSelections.get());
     }
 
     private void registerUnusedStrategies() {

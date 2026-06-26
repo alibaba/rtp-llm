@@ -16,6 +16,7 @@ from rtp_llm.config.model_config import (
     update_stop_words_from_env,
     update_tokenizer_special_tokens,
 )
+from rtp_llm.frontend.frontend_model_config import create_frontend_model_config
 from rtp_llm.frontend.frontend_worker import FrontendWorker, TokenizerEncodeResponse
 from rtp_llm.frontend.request_id_generator import generate_request_id
 from rtp_llm.metrics import AccMetrics, GaugeMetrics, kmonitor
@@ -70,9 +71,7 @@ class FrontendServer(object):
             self._frontend_worker = None
             return
 
-        from rtp_llm.model_factory import ModelFactory
-
-        model_config = ModelFactory.create_model_config(
+        model_config = create_frontend_model_config(
             model_args=self.py_env_configs.model_args,
             lora_config=self.py_env_configs.lora_config,
             kv_cache_config=self.py_env_configs.kv_cache_config,

@@ -16,6 +16,7 @@ import org.flexlb.enums.ResourceMeasureIndicatorEnum;
 import org.flexlb.sync.status.EngineWorkerStatus;
 import org.flexlb.util.CommonUtils;
 import org.flexlb.util.Logger;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 import java.util.Comparator;
@@ -38,6 +39,7 @@ public class ForceChatStickyStrategy implements LoadBalancer {
     private final IntUnaryOperator randomIndexProvider;
     private final Map<StickyKey, StickyEntry> prefillStickyMap = new ConcurrentHashMap<>();
 
+    @Autowired
     public ForceChatStickyStrategy(EngineWorkerStatus engineWorkerStatus,
                                    ResourceMeasureFactory resourceMeasureFactory) {
         this(
