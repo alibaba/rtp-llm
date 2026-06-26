@@ -118,7 +118,6 @@ std::string KVCacheConfig::to_string() const {
         << "memory_cache_size_mb: " << memory_cache_size_mb << "\n"
         << "memory_cache_sync_timeout_ms: " << memory_cache_sync_timeout_ms << "\n"
         << "linear_step: " << linear_step << "\n"
-        << "int8_kv_cache: " << int8_kv_cache << "\n"
         << "fp8_kv_cache: " << fp8_kv_cache << "\n"
         << "fp8_kv_cache_scale_mode: " << fp8_kv_cache_scale_mode << "\n"
         << "ssm_state_dtype: " << ssm_state_dtype << "\n"

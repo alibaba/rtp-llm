@@ -9,7 +9,7 @@ namespace rtp_llm {
 XQAAttnOp::XQAAttnOp(const AttentionConfigs& attn_configs): attn_configs_(attn_configs) {}
 
 bool XQAAttnOp::support(torch_ext::PyAttentionInputs attn_inputs) {
-    return attn_configs_.kv_cache_dtype != KvCacheDataType::INT8 && get_sm() >= tensorrt_llm::kernels::kSM_90
+    return get_sm() >= tensorrt_llm::kernels::kSM_90
            && supportXqa(DataType::TYPE_BF16,
                          DataType::TYPE_BF16,
                          DataType::TYPE_FP8_E4M3,

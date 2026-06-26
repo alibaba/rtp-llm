@@ -147,7 +147,7 @@ class XQAImpl(FMHAImplBase):
         q = q.reshape(q.shape[0], self.attn_configs.head_num, head_dim)
         k = k.reshape(q.shape[0], self.attn_configs.kv_head_num, head_dim)
         v = v.reshape(q.shape[0], self.attn_configs.kv_head_num, head_dim)
-        return q, k, v
+        return q.contiguous(), k.contiguous(), v.contiguous()
 
     def forward(
         self,
@@ -161,6 +161,9 @@ class XQAImpl(FMHAImplBase):
             ), "kv_cache is required for FP8 per-token-head XQA"
             if self.need_rope_kv_cache and self.rope_impl is not None:
                 q, k, v = self.rope_impl.forward(qkv)
+                q = q.contiguous()
+                k = k.contiguous()
+                v = v.contiguous()
             else:
                 q, k, v = self._split_qkv(qkv)
             assert self.kv_cache_write_op is not None
@@ -231,8 +234,6 @@ class XQADecodeImpl(FMHAImplBase):
         cls, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
     ) -> bool:
         if attn_inputs.is_prefill:
-            return False
-        if attn_configs.kv_cache_dtype == KvCacheDataType.INT8:
             return False
         if torch.cuda.get_device_capability()[0] not in [9, 10, 12]:
             return False

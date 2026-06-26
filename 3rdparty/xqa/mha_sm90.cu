@@ -908,7 +908,7 @@ __launch_bounds__(128 * 3, 1)
 
             if (hasPerTokenScale) {
 #if SWAP_AB && USE_PAGED_KV_CACHE
-                applyPagedKVScaleToGemm0Acc(warpRank, acc, vScaleCache, smem.pages[0], idxKTile, idxHeadGrp, nbKHeads);
+                applyPagedKVScaleToGemm0Acc(warpRank, acc, vScaleCache, smem.pages[1], idxKTile, idxHeadGrp, nbKHeads);
 #endif
             }
             // map 1 to fp8_max before conversion to fp8
@@ -1906,7 +1906,8 @@ __device__ inline float loadPagedKVScale(float const* __restrict__              
         }
         slot = tokenInTile % tokensPerPage;
     }
-    return scaleCache[page * 2 * nbKHeads * tokensPerPage + idxHeadGrp * tokensPerPage + slot];
+    uint32_t const scalePage = page / 2;
+    return scaleCache[scalePage * 2 * nbKHeads * tokensPerPage + idxHeadGrp * tokensPerPage + slot];
 }
 
 __device__ inline void applyPagedKVScaleToGemm0Acc(

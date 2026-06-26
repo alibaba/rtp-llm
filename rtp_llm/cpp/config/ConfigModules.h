@@ -151,7 +151,6 @@ struct KVCacheConfig {
     int64_t                                 memory_cache_sync_timeout_ms = 10000;
     int                                     linear_step                  = 1;  // for linear attention cache reuse
     // Fields merged from PyKvCacheConfig
-    int         int8_kv_cache             = 0;
     int         fp8_kv_cache              = 0;
     std::string fp8_kv_cache_scale_mode   = "per_tensor";
     std::string ssm_state_dtype           = "bf16";

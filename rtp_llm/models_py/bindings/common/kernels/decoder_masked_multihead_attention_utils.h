@@ -2883,14 +2883,9 @@ inline __device__ void convert_from_8bit_kv_cache(Vec_out* vec_o, const Vec_in& 
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-template<typename T, bool INT8_KV_CACHE>
+template<typename T, bool>
 struct kv_cache_type_t {
     using Type = T;
-};
-
-template<typename T>
-struct kv_cache_type_t<T, true> {
-    using Type = int8_t;
 };
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -3498,14 +3493,9 @@ inline __device__ void convert_from_8bit_kv_cache(Vec_out* vec_o, const Vec_in& 
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-template<typename T, bool INT8_KV_CACHE>
+template<typename T, bool>
 struct kv_cache_type_t {
     using Type = T;
-};
-
-template<typename T>
-struct kv_cache_type_t<T, true> {
-    using Type = int8_t;
 };
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////

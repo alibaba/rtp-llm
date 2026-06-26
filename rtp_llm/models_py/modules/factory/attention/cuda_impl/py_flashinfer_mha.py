@@ -82,9 +82,7 @@ class PyFlashinferPrefillPagedAttnOp(object):
         self.page_size = attn_configs.kernel_tokens_per_block
         self.datatype = attn_configs.dtype
         self.kv_cache_dtype = attn_configs.kv_cache_dtype
-        if self.kv_cache_dtype == KvCacheDataType.INT8:
-            self.kv_datatype = torch.int8
-        elif self.kv_cache_dtype == KvCacheDataType.FP8:
+        if self.kv_cache_dtype == KvCacheDataType.FP8:
             self.kv_datatype = torch.float8_e4m3fn
         else:
             self.kv_datatype = self.datatype
@@ -674,8 +672,6 @@ class PyFlashinferDecodeAttnOp(object):
         self.fmha_params = params
 
     def _get_kv_data_type(self, attn_inputs: PyAttentionInputs) -> torch.dtype:
-        if self.kv_cache_dtype == KvCacheDataType.INT8:
-            return torch.int8
         if self.kv_cache_dtype == KvCacheDataType.FP8:
             return torch.float8_e4m3fn
         return get_scalar_type(attn_inputs.dtype)

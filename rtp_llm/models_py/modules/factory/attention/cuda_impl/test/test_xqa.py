@@ -401,6 +401,86 @@ class TestXQAAttnOp(BaseAttentionTest):
             flush=True,
         )
 
+    def test_fp8_per_token_head_qwen25_group7_head64_correctness(self):
+        """Verify Qwen2.5-style GQA shape: group_size=7, head_dim=64."""
+        batch_size = 2
+        sequence_lengths = [65, 127]
+        head_num = 14
+        head_num_kv = 2
+        size_per_head = 64
+        seq_size_per_block = 64
+
+        config = self._create_config(
+            head_num=head_num,
+            head_num_kv=head_num_kv,
+            size_per_head=size_per_head,
+            seq_size_per_block=seq_size_per_block,
+            data_type="bf16",
+        )
+        config.attn_configs.kv_cache_dtype = KvCacheDataType.FP8
+
+        attn_inputs = self._create_attention_inputs(
+            batch_size, sequence_lengths, config.seq_size_per_block
+        )
+        attn_op = XQAAttnOp(config.attn_configs)
+        self.assertTrue(attn_op.support(attn_inputs))
+        params_base = attn_op.prepare(attn_inputs)
+        params = XQAParams() if not isinstance(params_base, XQAParams) else params_base
+
+        q = self._create_query_tensor(
+            batch_size, head_num, size_per_head, dtype=torch.bfloat16
+        )
+        total_blocks = self._calculate_total_blocks(
+            sequence_lengths, config.seq_size_per_block
+        )
+        kv_cache = LayerKVCache()
+        kv_cache_combined = torch.randn(
+            total_blocks,
+            2,
+            head_num_kv,
+            config.seq_size_per_block,
+            size_per_head,
+            dtype=torch.float16,
+            device=self.device,
+        ).to(torch.float8_e4m3fn)
+        kv_cache.kv_cache_base = kv_cache_combined
+        k_cache = kv_cache_combined[:, 0, :, :, :]
+        v_cache = kv_cache_combined[:, 1, :, :, :]
+        scale = (
+            torch.rand(
+                total_blocks,
+                2 * head_num_kv * seq_size_per_block,
+                dtype=torch.float32,
+                device=self.device,
+            )
+            * 0.03
+            + 0.01
+        )
+        kv_cache.kv_scale_base = scale
+
+        output = attn_op.forward(q, kv_cache, params).reshape(
+            batch_size, head_num, size_per_head
+        )
+        block_id_list = self._generate_block_id_list(
+            attn_inputs, sequence_lengths, config.seq_size_per_block
+        )
+        ref = self._compute_fp8_per_token_head_reference(
+            q,
+            k_cache,
+            v_cache,
+            scale,
+            sequence_lengths,
+            block_id_list,
+            config.seq_size_per_block,
+        )
+        compare_tensors(
+            output,
+            ref,
+            rtol=3e-2,
+            atol=3e-2,
+            name="XQA FP8 per-token-head qwen25 group7 head64 decode output",
+        )
+
     def test_fp8_per_token_head_xqa_impl_no_rope_writes_cache(self):
         """Verify XQAImpl writes FP8 per-token-head KV cache without RoPE."""
         batch_size = 2
@@ -532,6 +612,102 @@ class TestXQAAttnOp(BaseAttentionTest):
                 atol=8e-2,
                 name="XQAImpl no-RoPE written V cache",
             )
+
+    def test_fp8_per_token_head_xqa_impl_group7_head64_correctness(self):
+        """Verify XQAImpl full FP8 write+decode path for group_size=7."""
+        batch_size = 2
+        sequence_lengths = [65, 127]
+        head_num = 14
+        head_num_kv = 2
+        size_per_head = 64
+        seq_size_per_block = 64
+
+        config = self._create_config(
+            head_num=head_num,
+            head_num_kv=head_num_kv,
+            size_per_head=size_per_head,
+            seq_size_per_block=seq_size_per_block,
+            data_type="bf16",
+        )
+        config.attn_configs.need_rope_kv_cache = False
+        config.attn_configs.kv_cache_dtype = KvCacheDataType.FP8
+
+        attn_inputs = self._create_attention_inputs(
+            batch_size, sequence_lengths, config.seq_size_per_block
+        )
+        impl = XQAImpl(config.attn_configs, attn_inputs)
+        self.assertTrue(impl.support(config.attn_configs, attn_inputs))
+
+        q = self._create_query_tensor(
+            batch_size, head_num, size_per_head, dtype=torch.bfloat16
+        )
+        k = torch.randn(
+            batch_size,
+            head_num_kv,
+            size_per_head,
+            dtype=torch.bfloat16,
+            device=self.device,
+        )
+        v = torch.randn_like(k)
+        qkv = torch.cat(
+            [
+                q.reshape(batch_size, -1),
+                k.reshape(batch_size, -1),
+                v.reshape(batch_size, -1),
+            ],
+            dim=-1,
+        )
+
+        total_blocks = self._calculate_total_blocks(
+            sequence_lengths, config.seq_size_per_block
+        )
+        kv_cache = LayerKVCache()
+        kv_cache_combined = torch.randn(
+            total_blocks,
+            2,
+            head_num_kv,
+            config.seq_size_per_block,
+            size_per_head,
+            dtype=torch.float16,
+            device=self.device,
+        ).to(torch.float8_e4m3fn)
+        kv_cache.kv_cache_base = kv_cache_combined
+        scale = (
+            torch.rand(
+                total_blocks,
+                2 * head_num_kv * seq_size_per_block,
+                dtype=torch.float32,
+                device=self.device,
+            )
+            * 0.03
+            + 0.01
+        )
+        kv_cache.kv_scale_base = scale
+
+        output = impl.forward(qkv, kv_cache).reshape(
+            batch_size, head_num, size_per_head
+        )
+        block_id_list = self._generate_block_id_list(
+            attn_inputs, sequence_lengths, config.seq_size_per_block
+        )
+        ref = self._compute_fp8_per_token_head_reference(
+            q,
+            kv_cache.kv_cache_base[:, 0, :, :, :],
+            kv_cache.kv_cache_base[:, 1, :, :, :],
+            kv_cache.kv_scale_base,
+            sequence_lengths,
+            block_id_list,
+            config.seq_size_per_block,
+        )
+        self.assertFalse(torch.isnan(output).any(), "XQAImpl output contains NaN")
+        self.assertFalse(torch.isnan(ref).any(), "XQAImpl reference contains NaN")
+        compare_tensors(
+            output,
+            ref,
+            rtol=3e-2,
+            atol=3e-2,
+            name="XQAImpl FP8 per-token-head group7 head64 output",
+        )
 
     def test_support(self):
         """Test XQAAttnOp support function comprehensively

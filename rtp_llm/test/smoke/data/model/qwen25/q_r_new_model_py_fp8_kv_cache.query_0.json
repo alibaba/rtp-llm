@@ -1,14 +1,14 @@
 {
   "id": "chat-",
   "object": "chat.completion",
-  "created": 1776963729,
+  "created": 1782455785,
   "model": "",
   "choices": [
     {
       "index": 0,
       "message": {
         "role": "assistant",
-        "content": "当然可以！英语听力方法是一个非常重要的技能",
+        "content": "当然可以！以下是一些英语听力方法的",
         "reasoning_content": null,
         "function_call": null,
         "tool_calls": null,
@@ -28,13 +28,13 @@
   },
   "debug_info": null,
   "aux_info": {
-    "cost_time": 214.26,
+    "cost_time": 174.381,
     "iter_count": 10,
     "prefix_len": 0,
     "input_len": 37,
     "output_len": 10,
     "step_output_len": 10,
-    "first_token_cost_time": 197.564,
+    "first_token_cost_time": 144.943,
     "wait_time": 0.0,
     "pd_sep": false,
     "cum_log_probs": [],

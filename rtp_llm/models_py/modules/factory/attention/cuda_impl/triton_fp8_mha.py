@@ -12,6 +12,9 @@ from rtp_llm.models_py.modules.factory.attention.cuda_impl.flashinfer_rotary_emb
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.kv_cache_write_op import (
     KVCacheWriteOp,
 )
+from rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha import (
+    PyFlashinferPrefillAttnOp,
+)
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.triton_fp8_mha_kernels import (
     _triton_fp8_paged_mha_kernel,
     _triton_fp8_paged_mha_split_combine_kernel,
@@ -315,6 +318,7 @@ class TritonFp8PagedPrefillImpl(FMHAImplBase):
         self.attn_configs = attn_configs
         self.attn_inputs = attn_inputs
         self.fmha_impl = TritonFp8PagedMHAOp(attn_configs)
+        self.flashinfer_prefill_impl = PyFlashinferPrefillAttnOp(attn_configs)
         self.rope_impl = (
             None
             if attn_configs.rope_config.style == RopeStyle.No
@@ -339,6 +343,8 @@ class TritonFp8PagedPrefillImpl(FMHAImplBase):
         if self.rope_impl is not None:
             self.rope_impl.set_params(self.params)
         self.kv_cache_write_op.set_params(self.params)
+        self.flashinfer_prefill_impl.set_params(self.params)
+        self.flashinfer_prefill_impl.prepare(attn_inputs)
         self.write_cache_store_impl = common.create_write_cache_store_impl(attn_inputs)
 
     def _split_qkv(
@@ -359,6 +365,30 @@ class TritonFp8PagedPrefillImpl(FMHAImplBase):
         v = v.reshape(q.shape[0], self.attn_configs.kv_head_num, head_dim)
         return q, k, v
 
+    def _flashinfer_prefill_attention(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+    ) -> torch.Tensor:
+        qkv = torch.cat(
+            [
+                q.reshape(q.shape[0], -1),
+                k.reshape(k.shape[0], -1),
+                v.reshape(v.shape[0], -1),
+            ],
+            dim=-1,
+        )
+        return self.flashinfer_prefill_impl.forward(qkv, None)
+
+    def _use_flashinfer_no_prefix_prefill(self) -> bool:
+        if not self.need_rope_kv_cache:
+            return False
+        prefix_lengths = self.attn_inputs.prefix_lengths
+        if prefix_lengths is None or prefix_lengths.numel() == 0:
+            return False
+        return not torch.any(prefix_lengths).item()
+
     @classmethod
     def support(
         cls, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
@@ -370,6 +400,7 @@ class TritonFp8PagedPrefillImpl(FMHAImplBase):
         )
 
     def prepare_cuda_graph(self, attn_inputs: PyAttentionInputs) -> None:
+        self.attn_inputs = attn_inputs
         self.params.fill_params(
             attn_inputs.prefix_lengths,
             attn_inputs.sequence_lengths,
@@ -378,6 +409,7 @@ class TritonFp8PagedPrefillImpl(FMHAImplBase):
             self.attn_configs.kernel_tokens_per_block,
             True,
         )
+        self.flashinfer_prefill_impl.prepare(attn_inputs)
 
     def forward(
         self,
@@ -406,6 +438,10 @@ class TritonFp8PagedPrefillImpl(FMHAImplBase):
         common.apply_write_cache_store(
             self.write_cache_store_impl, self.attn_inputs, kv_cache
         )
+        if self._use_flashinfer_no_prefix_prefill():
+            output = self._flashinfer_prefill_attention(q, k, v)
+            _debug_sync("prefill_flashinfer_mha")
+            return output
         output = self.fmha_impl.forward(q, kv_cache, self.attn_inputs)
         _debug_sync("prefill_triton_mha")
         return output
