@@ -133,12 +133,8 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
 void NormalEngine::initExecutor(const EngineInitParams&                        params,
                                 std::unique_ptr<ProposeModelEngineInitParams>& propose_params) {
     if (propose_params_) {
-        executor_.reset(new MtpExecutor(params,
-                                        propose_params,
-                                        resource_context_.cache_manager,
-                                        mla_ops_type_,
-                                        kv_cache_group_num_,
-                                        kv_cache_layer_to_group_));
+        executor_.reset(
+            new MtpExecutor(params, propose_params, resource_context_.cache_manager, mla_ops_type_, kv_cache_group_num_));
     } else {
         executor_.reset(new NormalExecutor(
             params,
@@ -148,7 +144,6 @@ void NormalEngine::initExecutor(const EngineInitParams&                        p
             0,
             mla_ops_type_,
             kv_cache_group_num_,
-            kv_cache_layer_to_group_,
             [this]() { step_profiler_.startStep(); },
             [this]() { step_profiler_.finishStep(); }));
     }
@@ -281,11 +276,9 @@ WarmUpResult NormalEngine::prefillWarmUp(const EngineInitParams& params) {
             sp_config.type != SP_TYPE_NONE ? static_cast<int>(sp_config.gen_num_per_cycle) : 0;
         auto cfg = CacheConfigCreator::createBasicConfig(
             model_config_, parallelism_config, kv_cache_config, false, cache_gen_num_per_cycle);
-        kv_cache_group_num_      = cfg.groupNums();
-        kv_cache_layer_to_group_ = cfg.primaryLayerGroupIdsSnapshot();
+        kv_cache_group_num_ = cfg.groupNums();
     }
-    executor_.reset(new NormalExecutor(
-        params, nullptr, true, false, 0, mla_ops_type_, kv_cache_group_num_, kv_cache_layer_to_group_));
+    executor_.reset(new NormalExecutor(params, nullptr, true, false, 0, mla_ops_type_, kv_cache_group_num_));
     THROW_IF_STATUSOR_ERROR(preRun(fake_input, preRunMode::prefill_warm_up));
     const auto max_consumed = getGpuExecStatus().device_memory_status.max_consumed_bytes;
     rtp_llm::setTraceMemory(false);
@@ -318,17 +311,10 @@ WarmUpResult NormalEngine::decodeWarmUp(const EngineInitParams& params) {
     // it back to attn_config.tokens_per_block would clobber DSV4's promoted
     // value when the user passed --seq_size_per_block < 256.
     cache_config.block_num = 5;
-    // Snapshot hybrid-cache group info from the warmup cache_config so that the
-    // NormalExecutor → PyWrappedModel → CudaGraphRunner created below sees the
-    // real kv_cache_group_num_ / kv_cache_layer_to_group_.  Without this the
-    // members are still default-0 (real values get set in initCacheManager
-    // AFTER warmUp returns — see line 331/348), which makes CudaGraphRunner
-    // skip per-group block_table construction in initCaptureAttentionInputs
-    // (the `if (kv_cache_group_num_ > 1)` branch), and the DSv4 FP8 decode
-    // path then asserts on pool_block_tables=None during the dtype-check
-    // forward inside initCapture.
-    kv_cache_group_num_      = cache_config.groupNums();
-    kv_cache_layer_to_group_ = cache_config.primaryLayerGroupIdsSnapshot();
+    // Snapshot hybrid-cache group count from the warmup cache_config so that the
+    // NormalExecutor -> PyWrappedModel -> CudaGraphRunner created below builds
+    // per-group block tables during CUDA graph capture.
+    kv_cache_group_num_ = cache_config.groupNums();
     ParallelismConfig temp_parallelism_config;
     RuntimeConfig     temp_runtime_config;
     auto              cache_manager = make_shared<KVCacheManager>(
@@ -337,7 +323,7 @@ WarmUpResult NormalEngine::decodeWarmUp(const EngineInitParams& params) {
         RTP_LLM_FAIL("init kv cache manager failed in decodeWarmUp");
     }
     executor_.reset(new NormalExecutor(
-        params, cache_manager, true, false, 0, mla_ops_type_, kv_cache_group_num_, kv_cache_layer_to_group_));
+        params, cache_manager, true, false, 0, mla_ops_type_, kv_cache_group_num_));
     THROW_IF_STATUSOR_ERROR(preRun(fake_input, preRunMode::decode_warm_up));
     const auto max_consumed = getGpuExecStatus().device_memory_status.max_consumed_bytes;
     rtp_llm::setTraceMemory(false);
@@ -414,8 +400,7 @@ void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) 
         }
 
         const auto& cache_cfg    = resource_context_.cache_manager->cacheConfig();
-        kv_cache_group_num_      = cache_cfg.groupNums();
-        kv_cache_layer_to_group_ = cache_cfg.primaryLayerGroupIdsSnapshot();
+        kv_cache_group_num_ = cache_cfg.groupNums();
     } else {
         auto result = CacheConfigCreator::createConfig(
             model_config_, parallelism_config, runtime_config, kv_cache_config, warm_up_result, sp_config);
@@ -439,8 +424,7 @@ void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) 
             RTP_LLM_FAIL("init kv cache manager failed");
         }
         const auto& cache_cfg    = resource_context_.cache_manager->cacheConfig();
-        kv_cache_group_num_      = cache_cfg.groupNums();
-        kv_cache_layer_to_group_ = cache_cfg.primaryLayerGroupIdsSnapshot();
+        kv_cache_group_num_ = cache_cfg.groupNums();
     }
 }
 

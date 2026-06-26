@@ -277,10 +277,9 @@ BatchKVCacheResourcePtr KVCacheAllocator::popBlocksFromCache(size_t min_blocks_t
     batch_resource->resetBatchSize(1);
     batch_resource->initGroups(config_.groupNums(),
                                static_cast<int>(config_.layer_all_num),
-                               config_.primaryLayerGroupIdsSnapshot(),
+                               config_.layerGroupIdsSnapshot(),
                                config_.kernelBlocksPerKvBlock(),
-                               config_.groupTypesSnapshot(),
-                               config_.layerGroupIdsSnapshot());
+                               config_.groupTypesSnapshot());
     batch_resource->setLastBlockAligned(true);
 
     for (int gid = 0; gid < config_.groupNums(); ++gid) {

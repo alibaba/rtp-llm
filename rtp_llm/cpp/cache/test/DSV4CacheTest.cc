@@ -76,10 +76,9 @@ static void setGroupBlockNumsForTest(CacheConfig& config, const std::vector<uint
 static void initDsv4BatchGroups(BatchKVCacheResource& batch_res, const CacheConfig& config) {
     batch_res.initGroups(config.groupNums(),
                          static_cast<int>(config.layer_all_num),
-                         config.primaryLayerGroupIdsSnapshot(),
+                         config.layerGroupIdsSnapshot(),
                          config.kernelBlocksPerKvBlock(),
-                         config.groupTypesSnapshot(),
-                         config.layerGroupIdsSnapshot());
+                         config.groupTypesSnapshot());
 }
 
 static ModelConfig makeProModelConfig() {
@@ -195,8 +194,8 @@ TEST(HybridPoolConfigCreatorTest, MtpSwaOnlyLayerIsNotStripped) {
     EXPECT_TRUE(config.layerIdsForGroup(0).empty());
     EXPECT_TRUE(config.layerIdsForGroup(1).empty());
     ASSERT_EQ(config.layerIdsForGroup(6), std::vector<int>({0}));
-    ASSERT_EQ(config.primaryLayerGroupIdsSnapshot().size(), 1u);
-    EXPECT_EQ(config.primaryLayerGroupIdsSnapshot()[0], 6);
+    ASSERT_EQ(config.layerGroupIdsSnapshot().size(), 1u);
+    EXPECT_EQ(config.layerGroupIdsSnapshot()[0], std::vector<int>({6}));
     ASSERT_EQ(static_cast<size_t>(config.groupNums()), 7u);
     EXPECT_EQ(config.tagForGroup(6), "swa_kv");
     EXPECT_EQ(config.groupIdForLayerTag(0, "swa_kv"), 6);
@@ -271,7 +270,6 @@ TEST(CacheConfigTest, SetTopologyInstallsTagAndGroupTopology) {
     EXPECT_EQ(config.groupIdForLayerTag(1, "swa"), 0);
     EXPECT_EQ(config.groupIdForLayerTag(1, "csa"), 1);
     EXPECT_THROW((void)config.groupIdFor(1), std::exception);
-    EXPECT_EQ(config.primaryLayerGroupIdsSnapshot()[1], -1);
     EXPECT_EQ(config.layerGroupIdsSnapshot()[1], std::vector<int>({0, 1}));
 }
 
@@ -1278,8 +1276,8 @@ TEST(CacheConfigTest, DSV4MtpKeepsProposeLayerInSwaPool) {
     ASSERT_NE(config.mtp_sub_configs[0], nullptr);
     ASSERT_NE(config.mtp_sub_configs[1], nullptr);
 
-    EXPECT_EQ(config.primaryLayerGroupIdsSnapshot()[43], 6);
-    EXPECT_EQ(config.primaryLayerGroupIdsSnapshot()[44], 6);
+    EXPECT_EQ(config.layerGroupIdsSnapshot()[43], std::vector<int>({6}));
+    EXPECT_EQ(config.layerGroupIdsSnapshot()[44], std::vector<int>({6}));
     EXPECT_EQ(config.groupIdForLayerTag(43, "swa_kv"), 6);
     EXPECT_EQ(config.groupIdForLayerTag(44, "swa_kv"), 6);
 
@@ -1483,12 +1481,11 @@ TEST(HybridPoolConfigCreatorTest, BlockIdConsistencyAcrossGroups) {
     ParallelismConfig pc;
     auto              config = CacheConfigCreator::createBasicConfig(mc, pc, makeDsv4KvCacheConfig(), false, 0);
 
-    // Verify primary layer route snapshot: single-tag layers keep their gid,
-    // multi-tag layers are explicitly ambiguous.
-    EXPECT_EQ(config.primaryLayerGroupIdsSnapshot().size(), 61u);
-    for (size_t i = 0; i < config.primaryLayerGroupIdsSnapshot().size(); i++) {
-        const int expected_gid = config.layerGroupIdsSnapshot()[i].size() == 1 ? config.layerGroupIdsSnapshot()[i].front() : -1;
-        EXPECT_EQ(config.primaryLayerGroupIdsSnapshot()[i], expected_gid) << "layer " << i;
+    // Verify every layer exposes its complete group ids directly.
+    const auto layer_group_ids = config.layerGroupIdsSnapshot();
+    EXPECT_EQ(layer_group_ids.size(), 61u);
+    for (size_t i = 0; i < layer_group_ids.size(); i++) {
+        EXPECT_FALSE(layer_group_ids[i].empty()) << "layer " << i;
     }
 
     // Verify group layer ids: each group has the correct layer list

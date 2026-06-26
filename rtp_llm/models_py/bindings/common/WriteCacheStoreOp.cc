@@ -88,7 +88,6 @@ void WriteCacheStoreOp(const torch::Tensor&                         input_length
         CacheStoreInputs inputs{captured_input_lengths,
                                 captured_prefix_lengths,
                                 captured_kv_cache_block_id_host,
-                                captured_cache_store.kv_cache_layer_to_group,
                                 captured_cache_store.kv_cache_group_types,
                                 captured_cache_store.context_batch_size,
                                 captured_cache_store.decoder_batch_size,

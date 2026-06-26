@@ -243,13 +243,25 @@ void HybridConfigCreator::setupPhysicalSizes(CacheConfig&          config,
 
 CacheConfig HybridConfigCreator::createHybridConfig(const ModelConfig&       model_config,
                                                     const ParallelismConfig& parallelism_config,
-                                                    bool                     is_mtp) {
+                                                    const KVCacheConfig&     kv_cache_config,
+                                                    bool                     is_mtp,
+                                                    int                      gen_num_per_cycle) {
     (void)is_mtp;
     auto dtype = MemoryEvaluationHelper::getDataTypeForCache(model_config);
+    const auto physical_tokens_per_block =
+        kv_cache_config.seq_size_per_block > 0 ? static_cast<uint32_t>(kv_cache_config.seq_size_per_block) :
+                                                 static_cast<uint32_t>(model_config.attn_config.tokens_per_block);
+    const auto kernel_tokens_per_block =
+        kv_cache_config.kernel_seq_size_per_block > 0 ? static_cast<uint32_t>(kv_cache_config.kernel_seq_size_per_block) :
+                                                        physical_tokens_per_block;
+    RTP_LLM_CHECK_WITH_INFO(physical_tokens_per_block > 0, "hybrid seq_size_per_block must be > 0");
+    RTP_LLM_CHECK_WITH_INFO(kernel_tokens_per_block > 0, "hybrid kernel_seq_size_per_block must be > 0");
     SpecBuildContext ctx;
-    ctx.dtype              = dtype;
-    ctx.seq_size_per_block = static_cast<uint32_t>(model_config.attn_config.tokens_per_block);
-    ctx.attn_tp_size       = static_cast<uint32_t>(parallelism_config.get_attn_tp_size());
+    ctx.dtype                   = dtype;
+    ctx.seq_size_per_block      = physical_tokens_per_block;
+    ctx.attn_tp_size            = static_cast<uint32_t>(parallelism_config.get_attn_tp_size());
+    ctx.kernel_tokens_per_block = kernel_tokens_per_block;
+    ctx.gen_num_per_cycle       = static_cast<uint32_t>(gen_num_per_cycle);
     const auto runtime_specs =
         CacheConfigCreator::buildLayerSpecsFromDescs(model_config.kv_cache_spec_descs, ctx, model_config.num_layers);
 
@@ -258,6 +270,8 @@ CacheConfig HybridConfigCreator::createHybridConfig(const ModelConfig&       mod
 
     // Initialize config
     CacheConfig config = HybridConfigCreator::initializeConfig(model_config, linear_layers, full_layers, dtype);
+    config.seq_size_per_block        = physical_tokens_per_block;
+    config.kernel_seq_size_per_block = kernel_tokens_per_block;
 
     auto full_spec   = HybridConfigCreator::getSpecFromLayers(runtime_specs, full_layers, "full attention");
     auto linear_spec = HybridConfigCreator::getSpecFromLayers(runtime_specs, linear_layers, "linear attention");

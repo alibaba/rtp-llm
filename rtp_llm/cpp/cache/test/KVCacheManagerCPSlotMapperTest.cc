@@ -39,8 +39,8 @@ static CompleteTokenIdsPtr makeTokenIds(int batch_size, int seq_len, int block_s
 static BatchKVCacheResourcePtr makeResource(int batch_size, int layer_num) {
     auto res = std::make_shared<BatchKVCacheResource>();
     res->resetBatchSize(batch_size);
-    std::vector<int> layer_to_group_id(layer_num, 0);
-    res->initGroups(/*group_nums=*/1, layer_num, layer_to_group_id);
+    std::vector<std::vector<int>> layer_group_ids(static_cast<size_t>(layer_num), std::vector<int>{0});
+    res->initGroups(/*group_nums=*/1, layer_num, layer_group_ids);
     return res;
 }
 

@@ -223,7 +223,6 @@ class PyAttentionInputs:
     kv_cache_block_id_host: torch.Tensor
     kv_cache_kernel_block_id_device: torch.Tensor
     kv_cache_kernel_block_id_host: torch.Tensor
-    kv_cache_layer_to_group: torch.Tensor
     padding_offset: torch.Tensor
     position_ids: torch.Tensor
     prefill_cuda_graph_copy_params: PyPrefillCudaGaphCopyParams | None

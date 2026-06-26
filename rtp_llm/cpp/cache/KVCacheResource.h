@@ -83,10 +83,9 @@ class KVCacheResource {
 public:
     void initGroups(int                                  group_num,
                     int                                  layer_num,
-                    const std::vector<int>&              layer_to_group_id          = {},
+                    const std::vector<std::vector<int>>& layer_group_ids            = {},
                     size_t                               kernel_blocks_per_kv_block = 1,
-                    const std::vector<CacheGroupType>&   group_types                = {},
-                    const std::vector<std::vector<int>>& layer_to_group_ids         = {});
+                    const std::vector<CacheGroupType>&   group_types                = {});
     void resizeBlocks(int reserver_blocks, int value = 0);
 
     int                     blocksNum(int group_id = 0) const;

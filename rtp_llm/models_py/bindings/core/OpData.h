@@ -55,7 +55,6 @@ struct GptModelInputs {
     torch::Tensor kv_cache_block_id;
     torch::Tensor kv_cache_kernel_block_id;  // [group, batch, kernel_blocks], int32
 
-    torch::Tensor kv_cache_layer_to_group;  // [layer_num], int32
     torch::Tensor kv_cache_group_types;     // [group_num], int32, Convention: 0 -> LINEAR, 1 -> FULL.
     torch::Tensor kv_cache_update_mapping;  // [block_copy_num, 2] kv cache update mapping
 
@@ -178,7 +177,6 @@ struct CacheStoreInputs {
     torch::Tensor prefix_lengths_host;
     torch::Tensor host_kv_cache_offset;
 
-    torch::Tensor kv_cache_layer_to_group_host;
     torch::Tensor kv_cache_group_types_host;  // 0 -> LINEAR, 1 -> FULL.
 
     size_t context_batch_size = 0;
@@ -221,11 +219,6 @@ struct AttentionCommonInputs {
 
     std::optional<KvCacheInfo>      kv_cache;
     std::optional<CacheStoreInputs> cache_store_inputs;
-
-    // Hybrid cache helper: layer_id -> kv cache group id (host-side).
-    // When kv_cache->kv_cache_block_ids_by_group is non-empty, model will select the right group per layer
-    // and set kv_cache->kv_cache_block_id before calling attention ops.
-    std::vector<int32_t> kv_cache_layer_to_group_id;
 
     torch::Tensor cu_seqlens;
     torch::Tensor cu_kv_seqlens;

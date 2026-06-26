@@ -50,7 +50,6 @@ struct GptModelInitParams {
     size_t                                tokens_per_block        = 0;
     size_t                                kernel_tokens_per_block = 0;
     int32_t                               kv_cache_group_num      = 1;
-    std::vector<int32_t>                  kv_cache_layer_to_group;
     std::shared_ptr<KVCacheManager>       cache_manager;
     // DSv4 head-channel residual multiplier. Default 1 (no expansion).
     // When >1, the model's pre-output residual ([T, hc_mult*hidden_size])

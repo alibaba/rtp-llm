@@ -177,26 +177,14 @@ void runtimeWriteCacheStore(const CacheStoreInputs&     cache_store_inputs,
     const size_t group_num = param.kv_cache_group_types_host.defined() ? param.kv_cache_group_types_host.size(0) : 1;
     const bool   use_group_cache_transfer_policy = group_num > 1;
 
-    int  gid             = param.group_id;
-    auto mapped_group_id = [&param, group_num, gid]() -> int {
-        if (gid >= 0) {
-            return gid;
-        }
-        if (param.kv_cache_layer_to_group_host.defined() && param.layer_id >= 0
-            && static_cast<size_t>(param.layer_id) < static_cast<size_t>(param.kv_cache_layer_to_group_host.numel())) {
-            return param.kv_cache_layer_to_group_host.data_ptr<int32_t>()[param.layer_id];
-        }
-        return group_num > 0 ? 0 : -1;
-    };
+    int gid = param.group_id >= 0 ? param.group_id : 0;
     if (param.host_kv_cache_offset.dim() == 3) {
-        gid = mapped_group_id();
         RTP_LLM_CHECK_WITH_INFO(
             gid >= 0 && gid < static_cast<int32_t>(group_num), "invalid kv cache group id [%d]", gid);
         const auto group_offset_view = param.host_kv_cache_offset[static_cast<int64_t>(gid)];
         max_blocks_per_batch         = group_offset_view.size(1);
         offset_addr                  = group_offset_view.data_ptr<int32_t>();
     } else {
-        gid = mapped_group_id();
         RTP_LLM_CHECK_WITH_INFO(
             gid >= 0 && gid < static_cast<int32_t>(group_num), "invalid kv cache group id [%d]", gid);
         max_blocks_per_batch = param.host_kv_cache_offset.size(1);

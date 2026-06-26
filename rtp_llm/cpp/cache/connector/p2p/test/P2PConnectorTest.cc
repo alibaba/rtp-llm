@@ -79,11 +79,11 @@ protected:
     // 创建有效的 KVCacheResource（使用 initGroups + groupBlocks/blocks/cacheKeys 公开 API）
     KVCacheResourcePtr createValidKVCacheResource(int num_layers = 2, int blocks_per_layer = 2) {
         auto             resource = std::make_shared<KVCacheResource>();
-        std::vector<int> layer_to_group(num_layers);
+        std::vector<std::vector<int>> layer_group_ids(num_layers);
         for (int i = 0; i < num_layers; ++i) {
-            layer_to_group[i] = i;
+            layer_group_ids[i] = {i};
         }
-        resource->initGroups(num_layers, num_layers, layer_to_group);
+        resource->initGroups(num_layers, num_layers, layer_group_ids);
 
         for (int layer_id = 0; layer_id < num_layers; ++layer_id) {
             for (int i = 0; i < blocks_per_layer; ++i) {

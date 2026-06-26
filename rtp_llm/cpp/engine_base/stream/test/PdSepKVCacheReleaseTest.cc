@@ -231,7 +231,7 @@ size_t expectedDsv4StoredBlocks(const CacheConfig& config, int layer_num, int bl
 }
 
 torch::Tensor layerToGroupTensorForConfig(const CacheConfig& config) {
-    const auto layer_to_group = config.primaryLayerGroupIdsSnapshot();
+    const auto layer_to_group = config.layerGroupIdsSnapshot();
     return torch::from_blob(const_cast<int*>(layer_to_group.data()),
                             {static_cast<int64_t>(layer_to_group.size())},
                             torch::TensorOptions(torch::kInt32))
@@ -799,10 +799,9 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4CacheStorePDSepTransfersAllLayerRegions)
         resource->resetBatchSize(1);
         resource->initGroups(config.groupNums(),
                              static_cast<int>(config.layer_all_num),
-                             config.primaryLayerGroupIdsSnapshot(),
+                             config.layerGroupIdsSnapshot(),
                              config.kernelBlocksPerKvBlock(),
-                             config.groupTypesSnapshot(),
-                             config.layerGroupIdsSnapshot());
+                             config.groupTypesSnapshot());
         return resource;
     };
     auto makeCompleteTokens = [spb, block_num](int max_seq_len) {
@@ -868,7 +867,6 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4CacheStorePDSepTransfersAllLayerRegions)
             inputs.input_lengths_host                  = torch::tensor({block_num * spb}, torch::kInt32);
             inputs.prefix_lengths_host                 = torch::tensor({0}, torch::kInt32);
             inputs.host_kv_cache_offset                = blockIdsTensor(prefill_resource, gid);
-            inputs.kv_cache_layer_to_group_host        = layer_to_group_tensor;
             inputs.kv_cache_group_types_host           = group_types_tensor;
             inputs.context_batch_size                  = 1;
             inputs.decoder_batch_size                  = 0;
@@ -951,10 +949,9 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4DecoupledCacheStoreTransfersPhysicalBloc
         resource->resetBatchSize(1);
         resource->initGroups(config.groupNums(),
                              static_cast<int>(config.layer_all_num),
-                             config.primaryLayerGroupIdsSnapshot(),
+                             config.layerGroupIdsSnapshot(),
                              config.kernelBlocksPerKvBlock(),
-                             config.groupTypesSnapshot(),
-                             config.layerGroupIdsSnapshot());
+                             config.groupTypesSnapshot());
         return resource;
     };
     auto makeCompleteTokens = [spb, block_num](int max_seq_len) {
@@ -1021,7 +1018,6 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4DecoupledCacheStoreTransfersPhysicalBloc
             inputs.decoder_batch_size             = 0;
             inputs.request_id                     = torch::tensor({request_id}, torch::kInt64);
             inputs.request_pd_separation          = torch::tensor({true}, torch::kBool);
-            inputs.kv_cache_layer_to_group        = layer_to_group_tensor;
             inputs.kv_cache_group_types           = group_types_tensor;
             inputs.cache_keys                     = cache_key_strings;
             inputs.input_lengths_host             = torch::tensor({block_num * spb}, torch::kInt32);
@@ -1110,10 +1106,9 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4CacheStorePDSepTransfersAllLayerRegionsW
         resource->resetBatchSize(1);
         resource->initGroups(config.groupNums(),
                              static_cast<int>(config.layer_all_num),
-                             config.primaryLayerGroupIdsSnapshot(),
+                             config.layerGroupIdsSnapshot(),
                              config.kernelBlocksPerKvBlock(),
-                             config.groupTypesSnapshot(),
-                             config.layerGroupIdsSnapshot());
+                             config.groupTypesSnapshot());
         return resource;
     };
     auto makeCompleteTokens = [spb, block_num](int max_seq_len) {
@@ -1179,7 +1174,6 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4CacheStorePDSepTransfersAllLayerRegionsW
             inputs.input_lengths_host                  = torch::tensor({(block_num - reuse_num) * spb}, torch::kInt32);
             inputs.prefix_lengths_host                 = torch::tensor({reuse_num * spb}, torch::kInt32);
             inputs.host_kv_cache_offset                = blockIdsTensor(prefill_resource, gid);
-            inputs.kv_cache_layer_to_group_host        = layer_to_group_tensor;
             inputs.kv_cache_group_types_host           = group_types_tensor;
             inputs.context_batch_size                  = 1;
             inputs.decoder_batch_size                  = 0;
@@ -1271,10 +1265,9 @@ TEST_F(PdSepKVCacheReleaseTest, testWriteCacheStoreWithPinnedHostMetadataAndEven
     resource->resetBatchSize(1);
     resource->initGroups(config.groupNums(),
                          static_cast<int>(config.layer_all_num),
-                         config.primaryLayerGroupIdsSnapshot(),
+                         config.layerGroupIdsSnapshot(),
                          config.kernelBlocksPerKvBlock(),
-                         config.groupTypesSnapshot(),
-                         config.layerGroupIdsSnapshot());
+                         config.groupTypesSnapshot());
 
     auto input              = std::make_shared<GenerateInput>();
     input->input_ids        = torch::arange(input_length, torch::kInt32);

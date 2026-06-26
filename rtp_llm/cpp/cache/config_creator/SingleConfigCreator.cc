@@ -50,13 +50,25 @@ KVCacheSpecPtr getDefaultSpecFromRuntimeSpecs(const ModelConfig&        model_co
 
 CacheConfig SingleConfigCreator::createSingleConfig(const ModelConfig&       model_config,
                                                     const ParallelismConfig& parallelism_config,
-                                                    bool                     is_mtp) {
+                                                    const KVCacheConfig&     kv_cache_config,
+                                                    bool                     is_mtp,
+                                                    int                      gen_num_per_cycle) {
     (void)is_mtp;
     auto dtype = MemoryEvaluationHelper::getDataTypeForCache(model_config);
+    const auto physical_tokens_per_block =
+        kv_cache_config.seq_size_per_block > 0 ? static_cast<uint32_t>(kv_cache_config.seq_size_per_block) :
+                                                 static_cast<uint32_t>(model_config.attn_config.tokens_per_block);
+    const auto kernel_tokens_per_block =
+        kv_cache_config.kernel_seq_size_per_block > 0 ? static_cast<uint32_t>(kv_cache_config.kernel_seq_size_per_block) :
+                                                        physical_tokens_per_block;
+    RTP_LLM_CHECK_WITH_INFO(physical_tokens_per_block > 0, "single seq_size_per_block must be > 0");
+    RTP_LLM_CHECK_WITH_INFO(kernel_tokens_per_block > 0, "single kernel_seq_size_per_block must be > 0");
     SpecBuildContext ctx;
-    ctx.dtype              = dtype;
-    ctx.seq_size_per_block = static_cast<uint32_t>(model_config.attn_config.tokens_per_block);
-    ctx.attn_tp_size       = static_cast<uint32_t>(parallelism_config.get_attn_tp_size());
+    ctx.dtype                   = dtype;
+    ctx.seq_size_per_block      = physical_tokens_per_block;
+    ctx.attn_tp_size            = static_cast<uint32_t>(parallelism_config.get_attn_tp_size());
+    ctx.kernel_tokens_per_block = kernel_tokens_per_block;
+    ctx.gen_num_per_cycle       = static_cast<uint32_t>(gen_num_per_cycle);
     const auto runtime_specs =
         CacheConfigCreator::buildLayerSpecsFromDescs(model_config.kv_cache_spec_descs, ctx, model_config.num_layers);
 
@@ -66,7 +78,8 @@ CacheConfig SingleConfigCreator::createSingleConfig(const ModelConfig&       mod
     config.layer_num          = static_cast<uint32_t>(layer_num);
     config.layer_all_num      = static_cast<uint32_t>(layer_num);
     config.block_num          = 0;
-    config.seq_size_per_block = static_cast<uint32_t>(model_config.attn_config.tokens_per_block);
+    config.seq_size_per_block        = physical_tokens_per_block;
+    config.kernel_seq_size_per_block = kernel_tokens_per_block;
 
     config.use_mla   = model_config.attn_config.use_mla;
     config.dtype     = dtype;
@@ -86,7 +99,6 @@ CacheConfig SingleConfigCreator::createSingleConfig(const ModelConfig&       mod
         auto& layer                  = layers[static_cast<size_t>(layer_id)];
         layer.group_ids              = {0};
         layer.tag_to_gid[spec->tag]  = 0;
-        layer.legacy_single_group_id = 0;
     }
     config.setTopology({group}, std::move(layers));
     RTP_LLM_CHECK_WITH_INFO(config.groupNums() == 1, "single config expected one cache group");

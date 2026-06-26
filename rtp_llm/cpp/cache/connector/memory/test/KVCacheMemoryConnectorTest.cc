@@ -119,10 +119,9 @@ std::string joinPaths(const std::vector<std::string>& paths) {
 void initResourceGroupsForConfig(KVCacheResource& resource, const CacheConfig& config) {
     resource.initGroups(config.groupNums(),
                         static_cast<int>(config.layer_all_num),
-                        config.primaryLayerGroupIdsSnapshot(),
+                        config.layerGroupIdsSnapshot(),
                         /*kernel_blocks_per_kv_block=*/1,
-                        config.groupTypesSnapshot(),
-                        config.layerGroupIdsSnapshot());
+                        config.groupTypesSnapshot());
 }
 
 void setGroupStridesForConfig(CacheConfig& config,
@@ -599,10 +598,9 @@ private:
         auto res                  = std::make_shared<KVCacheResource>();
         res->initGroups(1,
                         static_cast<int>(cache_config_.layer_num),
-                        std::vector<int>(cache_config_.layer_num, 0),
+                        std::vector<std::vector<int>>(cache_config_.layer_num, std::vector<int>{0}),
                         /*kernel_blocks_per_kv_block=*/1,
-                        {},
-                        std::vector<std::vector<int>>(cache_config_.layer_num, std::vector<int>{0}));
+                        {});
         res->cache_keys = cache_keys;
         res->layer_block_ids = makeLayerBlockIds(per_layer_block_indices, cache_keys.size());
         res->layer_group_block_ids.assign(cache_config_.layer_num, std::vector<std::shared_ptr<BlockIds>>(1, nullptr));

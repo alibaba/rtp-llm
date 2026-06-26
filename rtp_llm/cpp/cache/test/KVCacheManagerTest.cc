@@ -216,10 +216,9 @@ static BatchKVCacheResourcePtr makeDSV4BatchResource(const CacheConfig& config) 
     res->resetBatchSize(1);
     res->initGroups(config.groupNums(),
                     static_cast<int>(config.layer_all_num),
-                    config.primaryLayerGroupIdsSnapshot(),
+                    config.layerGroupIdsSnapshot(),
                     config.kernelBlocksPerKvBlock(),
-                    config.groupTypesSnapshot(),
-                    config.layerGroupIdsSnapshot());
+                    config.groupTypesSnapshot());
     return res;
 }
 

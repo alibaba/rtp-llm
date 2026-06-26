@@ -87,7 +87,7 @@ BatchKVCacheResourcePtr makeBatchRes(int batch_size, const CacheConfig& config, 
     res->resetBatchSize(batch_size);
     res->initGroups(config.groupNums(),
                     static_cast<int>(config.layer_all_num),
-                    config.primaryLayerGroupIdsSnapshot());
+                    config.layerGroupIdsSnapshot());
     for (int b = 0; b < batch_size; ++b) {
         res->setBatchCacheKeys(b, keys);
     }

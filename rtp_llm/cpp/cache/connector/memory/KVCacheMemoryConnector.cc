@@ -492,9 +492,7 @@ std::vector<KVCacheMemoryConnector::LayerTagSlot> KVCacheMemoryConnector::layerT
     };
 
     const auto layer_group_ids = cache_config_.layerGroupIdsSnapshot();
-    const auto primary_gids    = cache_config_.primaryLayerGroupIdsSnapshot();
     for (size_t layer = 0; layer < layer_num; ++layer) {
-        bool has_typed_slot = false;
         if (layer < layer_group_ids.size()) {
             for (int gid : layer_group_ids[layer]) {
                 if (gid < 0) {
@@ -502,7 +500,6 @@ std::vector<KVCacheMemoryConnector::LayerTagSlot> KVCacheMemoryConnector::layerT
                 }
                 const auto policy = cache_config_.policyForGroup(static_cast<size_t>(gid));
                 if (policy.reuse_policy == CacheReusePolicy::NON_REUSABLE) {
-                    has_typed_slot = true;
                     continue;
                 }
                 const std::string tag = gid < cache_config_.groupNums() ?
@@ -512,18 +509,7 @@ std::vector<KVCacheMemoryConnector::LayerTagSlot> KVCacheMemoryConnector::layerT
                                                 tag,
                                                 gid,
                                                 group_stride(gid, static_cast<int>(layer))});
-                has_typed_slot = true;
             }
-        }
-        if (!has_typed_slot) {
-            int gid = 0;
-            if (layer < primary_gids.size() && primary_gids[layer] >= 0) {
-                gid = primary_gids[layer];
-            }
-            const std::string tag = gid < cache_config_.groupNums() ? cache_config_.tagForGroup(static_cast<size_t>(gid)) :
-                                                                      "default";
-            slots.push_back(
-                LayerTagSlot{static_cast<int>(layer), tag, gid, group_stride(gid, static_cast<int>(layer))});
         }
     }
     return slots;
@@ -1611,7 +1597,7 @@ bool KVCacheMemoryConnector::copyCache(const MemoryOperationRequestPB& request, 
         return true;
     }
     if (cache_config_.use_typed_cache_regions && cache_config_.use_opaque_kv_cache_store) {
-        RTP_LLM_LOG_WARNING("typed opaque memory copy failed and legacy fallback is disabled for typed layout");
+        RTP_LLM_LOG_WARNING("typed opaque memory copy failed for typed layout");
         response.set_success(false);
         reportCopyMetrics(false, timer.done_us(), copy_direction);
         return false;
@@ -2337,27 +2323,7 @@ LayerAttnBlockIds KVCacheMemoryConnector::resourceLayerRegionBlocks(const KVCach
         return resource.layerGroupBlocks();
     }
 
-    const auto& legacy_layer_blocks = resource.layerBlocks();
-    if (legacy_layer_blocks.empty()) {
-        return {};
-    }
-
-    LayerAttnBlockIds layer_region_blocks;
-    layer_region_blocks.resize(static_cast<size_t>(cache_config_.layer_all_num));
-    const size_t group_count = std::max<size_t>(1, static_cast<size_t>(cache_config_.groupNums()));
-    for (auto& groups : layer_region_blocks) {
-        groups.resize(group_count);
-    }
-
-    for (const auto& slot : slots) {
-        const auto layer = static_cast<size_t>(slot.layer_id);
-        const auto attn  = static_cast<size_t>(slot.group_id);
-        if (layer >= legacy_layer_blocks.size() || legacy_layer_blocks[layer] == nullptr) {
-            return {};
-        }
-        layer_region_blocks[layer][attn] = legacy_layer_blocks[layer];
-    }
-    return layer_region_blocks;
+    return {};
 }
 
 bool KVCacheMemoryConnector::checkLayerRegionBlocks(const LayerAttnBlockIds&            layer_attn_block_ids,

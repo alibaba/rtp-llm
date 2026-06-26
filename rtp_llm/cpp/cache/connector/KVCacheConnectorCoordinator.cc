@@ -69,10 +69,9 @@ KVCacheResource makeCpShardedConnectorResource(const KVCacheResource& source,
     KVCacheResource selected = source;
     selected.initGroups(source.groupNums(),
                         static_cast<int>(cache_config.layer_all_num),
-                        cache_config.primaryLayerGroupIdsSnapshot(),
+                        cache_config.layerGroupIdsSnapshot(),
                         cache_config.kernelBlocksPerKvBlock(),
-                        group_types,
-                        cache_config.layerGroupIdsSnapshot());
+                        group_types);
     selected.setCacheKeys(selected_keys);
     const bool selected_aligned = selectedLastRankKeysAreAligned(source, cp_size);
     selected.setLastBlockAligned(selected_aligned);

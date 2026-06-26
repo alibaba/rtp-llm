@@ -2,9 +2,11 @@
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/cpp/utils/DebugUtils.h"
+#include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/utils.h"
 #include "rtp_llm/cpp/model_utils/AttentionConfig.h"
 #include <cstdint>
+#include <atomic>
 #include <stdexcept>
 #include <mutex>
 #include <vector>
@@ -185,10 +187,6 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
         RTP_LLM_PROFILE_SCOPE("py_model.buildPyAttentionInputs(kv_block_host)");
         py_attn_inputs.kv_cache_block_id_host = pinned_host_i32(inputs.kv_cache_block_id);
     }
-    if (inputs.kv_cache_layer_to_group.defined()) {
-        py_attn_inputs.kv_cache_layer_to_group = inputs.kv_cache_layer_to_group;
-    }
-
     // Calculate cu_seqlens
     int    batch_size               = py_attn_inputs.input_lengths.size(0);
     size_t context_batch_size       = py_attn_inputs.prefix_lengths.size(0);
@@ -413,8 +411,6 @@ std::optional<PyCacheStoreInputs> PyWrappedModel::prepareWriteCacheParams(const 
         auto input_lengths_host  = async_to_pinned_host(inputs.input_lengths);
         auto prefix_lengths_host = async_to_pinned_host(inputs.prefix_lengths);
 
-        torch::Tensor kv_cache_layer_to_group =
-            inputs.kv_cache_layer_to_group.defined() ? inputs.kv_cache_layer_to_group : torch::Tensor();
         torch::Tensor kv_cache_group_types =
             inputs.kv_cache_group_types.defined() ? inputs.kv_cache_group_types : torch::Tensor();
         PyCacheStoreInputs cache_store_inputs{
@@ -422,7 +418,6 @@ std::optional<PyCacheStoreInputs> PyWrappedModel::prepareWriteCacheParams(const 
             decoder_batch_size,
             inputs.request_id,
             inputs.request_pd_separation,
-            kv_cache_layer_to_group,
             kv_cache_group_types,
             transVectorToString(cache_keys_vec),
             input_lengths_host,
@@ -1247,7 +1242,6 @@ void PyWrappedModel::holdInputsHostBuffers(const GptModelInputs& inputs) {
 
     buffer_holder_.hold_host(inputs.attention_mask);
     buffer_holder_.hold_host(inputs.kv_cache_block_id);
-    buffer_holder_.hold_host(inputs.kv_cache_layer_to_group);
     buffer_holder_.hold_host(inputs.kv_cache_group_types);
     buffer_holder_.hold_host(inputs.kv_cache_update_mapping);
 

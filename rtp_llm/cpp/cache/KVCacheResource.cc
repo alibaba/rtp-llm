@@ -2,6 +2,7 @@
 
 #include <algorithm>
 
+
 namespace rtp_llm {
 
 size_t BlockIds::blocksNum() const {
@@ -123,10 +124,9 @@ void BlockIds::syncKernelBlocks() {
 
 void KVCacheResource::initGroups(int                                  group_num,
                                  int                                  layer_num,
-                                 const std::vector<int>&              layer_to_group_id,
+                                 const std::vector<std::vector<int>>& layer_group_ids,
                                  size_t                               kernel_blocks_per_kv_block,
-                                 const std::vector<CacheGroupType>&   group_types,
-                                 const std::vector<std::vector<int>>& layer_to_group_ids) {
+                                 const std::vector<CacheGroupType>&   group_types) {
     group_block_ids.clear();
     layer_block_ids.clear();
     layer_group_block_ids.clear();
@@ -147,55 +147,28 @@ void KVCacheResource::initGroups(int                                  group_num,
     }
 
     if (!group_block_ids.empty()) {
-        RTP_LLM_CHECK_WITH_INFO(layer_to_group_id.empty() || layer_to_group_id.size() >= static_cast<size_t>(layer_num),
-                                "KVCacheResource::initGroups: layer_to_group_id size %zu < layer_num %d",
-                                layer_to_group_id.size(),
+        RTP_LLM_CHECK_WITH_INFO(layer_group_ids.size() >= static_cast<size_t>(layer_num),
+                                "KVCacheResource::initGroups: layer_group_ids size %zu < layer_num %d",
+                                layer_group_ids.size(),
                                 layer_num);
-        layer_block_ids.resize(layer_num);
-        for (int i = 0; i < layer_num; ++i) {
-            int gid = layer_to_group_id.empty() ? 0 : layer_to_group_id[i];
-            if (gid < 0 && !layer_to_group_ids.empty()) {
-                RTP_LLM_CHECK_WITH_INFO(layer_to_group_ids.size() >= static_cast<size_t>(layer_num),
-                                        "KVCacheResource::initGroups: layer_to_group_ids size %zu < layer_num %d",
-                                        layer_to_group_ids.size(),
-                                        layer_num);
-                const auto& dense_groups = layer_to_group_ids[static_cast<size_t>(i)];
-                if (dense_groups.size() != 1) {
-                    continue;
-                }
-                gid = dense_groups.front();
-            }
-            RTP_LLM_CHECK_WITH_INFO(gid >= 0 && gid < group_num,
-                                    "KVCacheResource::initGroups: invalid group id %d for layer %d (group_num=%d)",
-                                    gid,
-                                    i,
-                                    group_num);
-            layer_block_ids[i] = group_block_ids[gid];
-        }
-
+        layer_block_ids.resize(static_cast<size_t>(layer_num));
         layer_group_block_ids.resize(static_cast<size_t>(layer_num));
         for (int layer = 0; layer < layer_num; ++layer) {
             auto& group_blocks = layer_group_block_ids[static_cast<size_t>(layer)];
             group_blocks.assign(static_cast<size_t>(group_num), nullptr);
 
-            if (!layer_to_group_ids.empty()) {
-                RTP_LLM_CHECK_WITH_INFO(layer_to_group_ids.size() >= static_cast<size_t>(layer_num),
-                                        "KVCacheResource::initGroups: layer_to_group_ids size %zu < layer_num %d",
-                                        layer_to_group_ids.size(),
-                                        layer_num);
-                const auto& dense_groups = layer_to_group_ids[static_cast<size_t>(layer)];
-                for (int gid : dense_groups) {
-                    RTP_LLM_CHECK_WITH_INFO(
-                        gid >= 0 && gid < group_num,
-                        "KVCacheResource::initGroups: invalid group id %d for layer %d (group_num=%d)",
-                        gid,
-                        layer,
-                        group_num);
-                    group_blocks[static_cast<size_t>(gid)] = group_block_ids[static_cast<size_t>(gid)];
-                }
-            } else {
-                const int gid = layer_to_group_id.empty() ? 0 : layer_to_group_id[static_cast<size_t>(layer)];
-                group_blocks[static_cast<size_t>(gid)] = layer_block_ids[static_cast<size_t>(layer)];
+            const auto& gids = layer_group_ids[static_cast<size_t>(layer)];
+            for (int gid : gids) {
+                RTP_LLM_CHECK_WITH_INFO(
+                    gid >= 0 && gid < group_num,
+                    "KVCacheResource::initGroups: invalid group id %d for layer %d (group_num=%d)",
+                    gid,
+                    layer,
+                    group_num);
+                group_blocks[static_cast<size_t>(gid)] = group_block_ids[static_cast<size_t>(gid)];
+            }
+            if (gids.size() == 1) {
+                layer_block_ids[static_cast<size_t>(layer)] = group_block_ids[static_cast<size_t>(gids.front())];
             }
         }
     }

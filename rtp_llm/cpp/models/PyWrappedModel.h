@@ -50,8 +50,7 @@ public:
     PyWrappedModel(const GptModelInitParams& params,
                    py::object                py_instance,
                    bool                      is_prefill_cuda_graph_mode = false,
-                   bool                      use_spec_decoding          = false,
-                   const std::vector<int>&   kv_cache_layer_to_group    = {});
+                   bool                      use_spec_decoding          = false);
     ~PyWrappedModel();
 
     GptModelOutputs forward(const GptModelInputs& inputs) override;
@@ -138,8 +137,7 @@ private:
 inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
                                       py::object                py_instance,
                                       bool                      is_prefill_cuda_graph_mode,
-                                      bool                      use_spec_decoding,
-                                      const std::vector<int>&   kv_cache_layer_to_group):
+                                      bool                      use_spec_decoding):
     device_props_(buildExecProperties(params.parallelism_config, params.device_resource_config)),
     mla_ops_type_(params.mla_ops_type),
     layer_num_(params.weights.layers.size()),
@@ -274,12 +272,6 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         graph_params.prefill_capture_seq_lens     = params.hw_kernel_config.prefill_capture_seq_lens;
         graph_params.decode_capture_batch_sizes   = params.hw_kernel_config.decode_capture_batch_sizes;
         graph_params.kv_cache_group_num           = params.kv_cache_group_num;
-
-        if (kv_cache_layer_to_group.size() > 0) {
-            graph_params.kv_cache_layer_to_group = kv_cache_layer_to_group;
-        } else {
-            graph_params.kv_cache_layer_to_group = params.kv_cache_layer_to_group;
-        }
 
         // clang-format off
         // Decision table for num_tokens_per_bs:

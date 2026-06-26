@@ -257,10 +257,9 @@ size_t sumBlockInfosBytes(const std::vector<BlockInfo>& infos) {
 void initResourceGroupsForConfig(KVCacheResource& resource, const CacheConfig& config) {
     resource.initGroups(config.groupNums(),
                         static_cast<int>(config.layer_all_num),
-                        config.primaryLayerGroupIdsSnapshot(),
+                        config.layerGroupIdsSnapshot(),
                         /*kernel_blocks_per_kv_block=*/1,
-                        config.groupTypesSnapshot(),
-                        config.layerGroupIdsSnapshot());
+                        config.groupTypesSnapshot());
 }
 
 void setGroupStridesForConfig(CacheConfig& config,

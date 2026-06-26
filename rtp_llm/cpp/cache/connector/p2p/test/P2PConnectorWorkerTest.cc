@@ -279,11 +279,11 @@ protected:
     KVCacheResourcePtr createKVCacheResource(int layer_id, int num_blocks = 2) {
         auto             resource  = std::make_shared<KVCacheResource>();
         int              layer_num = static_cast<int>(worker_config_.layer_all_num);
-        std::vector<int> layer_to_group(layer_num);
+        std::vector<std::vector<int>> layer_group_ids(layer_num);
         for (int i = 0; i < layer_num; ++i) {
-            layer_to_group[i] = i;
+            layer_group_ids[i] = {i};
         }
-        resource->initGroups(layer_num, layer_num, layer_to_group);
+        resource->initGroups(layer_num, layer_num, layer_group_ids);
 
         for (int i = 0; i < layer_num; ++i) {
             if (i == layer_id) {
@@ -1006,11 +1006,11 @@ class LayerCacheBufferUtilTest: public ::testing::Test {
 protected:
     KVCacheResourcePtr createResource(int num_layers, int blocks_per_layer) {
         auto             resource = std::make_shared<KVCacheResource>();
-        std::vector<int> layer_to_group(num_layers);
+        std::vector<std::vector<int>> layer_group_ids(num_layers);
         for (int i = 0; i < num_layers; ++i) {
-            layer_to_group[i] = i;
+            layer_group_ids[i] = {i};
         }
-        resource->initGroups(num_layers, num_layers, layer_to_group);
+        resource->initGroups(num_layers, num_layers, layer_group_ids);
         for (int layer = 0; layer < num_layers; ++layer) {
             for (int i = 0; i < blocks_per_layer; ++i) {
                 resource->mutableBlockIds(layer).add({i});

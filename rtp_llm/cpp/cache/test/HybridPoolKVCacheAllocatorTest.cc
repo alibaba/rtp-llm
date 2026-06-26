@@ -108,8 +108,10 @@ static ModelConfig makeTinyDSV4ModelConfig() {
     mc.attn_config.indexer_head_num      = 2;
     mc.attn_config.indexer_topk          = 16;
     mc.attn_config.o_groups              = 2;
-    mc.attn_config.o_lora_rank           = 16;
-    mc.attn_config.layer_compress_ratios = {4, 128, 4, 128, 0};
+    mc.attn_config.o_lora_rank                                   = 16;
+    mc.attn_config.layer_compress_ratios                         = {4, 128, 4, 128, 0};
+    mc.hybrid_attention_config.enable_hybrid_attention           = true;
+    mc.hybrid_attention_config.enable_independent_kv_cache_pools = true;
     setDsv4KvCacheSpecs(mc);
     return mc;
 }
@@ -143,10 +145,13 @@ static ModelConfig makeProModelConfig() {
 // Build a DSV4 7-pool CacheConfig (uses use_independent_block_pools=true).
 static CacheConfig makeDSV4HybridPoolConfig(uint32_t block_num = 200) {
     auto              mc = makeProModelConfig();
+    mc.hybrid_attention_config.enable_hybrid_attention           = true;
+    mc.hybrid_attention_config.enable_independent_kv_cache_pools = true;
     ParallelismConfig pc;
     KVCacheConfig     kv_cache_config;
-    kv_cache_config.seq_size_per_block = 128;
-    auto config                        = CacheConfigCreator::createBasicConfig(mc, pc, kv_cache_config, false, 0);
+    kv_cache_config.seq_size_per_block        = 128;
+    kv_cache_config.kernel_seq_size_per_block = 128;
+    auto config                               = CacheConfigCreator::createBasicConfig(mc, pc, kv_cache_config, false, 0);
     config.block_num                   = block_num;
     return config;
 }
@@ -192,10 +197,9 @@ static BatchKVCacheResourcePtr makeBatchResource(int batch_size, const CacheConf
     res->resetBatchSize(batch_size);
     res->initGroups(config.groupNums(),
                     static_cast<int>(config.layer_all_num),
-                    config.primaryLayerGroupIdsSnapshot(),
+                    config.layerGroupIdsSnapshot(),
                     config.kernelBlocksPerKvBlock(),
-                    config.groupTypesSnapshot(),
-                    config.layerGroupIdsSnapshot());
+                    config.groupTypesSnapshot());
     return res;
 }
 
@@ -600,7 +604,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, AllLayerCacheBaseExposesPerLayerAndPerGro
     for (size_t i = 0; i < layout.layers_to_kv_buffer_ptrs.size(); ++i) {
         EXPECT_TRUE(layout.layers_to_kv_buffer_ptrs[i].defined()) << "layer " << i << " missing kv buffer";
     }
-    EXPECT_EQ(layout.layer_to_groups, config.primaryLayerGroupIdsSnapshot());
+    EXPECT_EQ(layout.layer_to_group_ids, config.layerGroupIdsSnapshot());
     EXPECT_EQ(layout.group_types, config.groupTypesSnapshot());
 
     ASSERT_EQ(layout.layers_to_kv_buffer_ptrs_by_group.size(), static_cast<size_t>(config.layer_all_num));
@@ -609,7 +613,8 @@ TEST_F(HybridPoolKVCacheAllocatorTest, AllLayerCacheBaseExposesPerLayerAndPerGro
     }
 
     for (size_t i = 0; i < static_cast<size_t>(config.layer_all_num); ++i) {
-        const auto gid        = static_cast<size_t>(config.primaryLayerGroupIdsSnapshot()[i]);
+        ASSERT_FALSE(layout.layer_to_group_ids[i].empty());
+        const auto gid        = static_cast<size_t>(layout.layer_to_group_ids[i].front());
         const auto& by_default = layout.layers_to_kv_buffer_ptrs_by_group[i][gid];
         EXPECT_TRUE(by_default.defined()) << "layer " << i << " primary group tensor undefined";
         EXPECT_EQ(by_default.data_ptr(), layout.layers_to_kv_buffer_ptrs[i].data_ptr());
@@ -735,7 +740,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, BlockCacheFreeIgnoresDuplicateAndNullBloc
 
     auto batch = std::make_shared<BatchKVCacheResource>();
     batch->resetBatchSize(1);
-    batch->initGroups(config.groupNums(), static_cast<int>(config.layer_all_num), config.primaryLayerGroupIdsSnapshot());
+    batch->initGroups(config.groupNums(), static_cast<int>(config.layer_all_num), config.layerGroupIdsSnapshot());
     // Same block listed twice in the same group should only be released once;
     // NULL_BLOCK_IDX entries should be skipped.
     batch->mutableBlockIds(0, /*gid=*/1).assign(BlockIndicesType{seeded, seeded, NULL_BLOCK_IDX});
@@ -1060,8 +1065,9 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4ConfigUsesOnlyPagedGroupsForBlockSize
     auto              mc = makeTinyDSV4ModelConfig();
     ParallelismConfig pc;
     KVCacheConfig     kv_cache_config;
-    kv_cache_config.seq_size_per_block = 128;
-    auto config                        = CacheConfigCreator::createBasicConfig(mc, pc, kv_cache_config, false, 0);
+    kv_cache_config.seq_size_per_block        = 128;
+    kv_cache_config.kernel_seq_size_per_block = 128;
+    auto config                               = CacheConfigCreator::createBasicConfig(mc, pc, kv_cache_config, false, 0);
 
     ASSERT_EQ(config.groupNums(), 7);
     ASSERT_EQ(config.groupNums(), 7);
@@ -1131,11 +1137,14 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4GpuHcaStatePoolIncludesFixedReserve) 
 
 TEST_F(HybridPoolKVCacheAllocatorTest, DSV4StateSwaPoolsWithoutExplicitBlocksUseGlobalBlocks) {
     auto              mc = makeProModelConfig();
+    mc.hybrid_attention_config.enable_hybrid_attention           = true;
+    mc.hybrid_attention_config.enable_independent_kv_cache_pools = true;
     ParallelismConfig pc;
     KVCacheConfig     kv_cache_config;
-    kv_cache_config.seq_size_per_block = 128;
+    kv_cache_config.seq_size_per_block        = 128;
+    kv_cache_config.kernel_seq_size_per_block = 128;
     setDsv4ExplicitPoolBlocks(mc, "hca_state", 0);
-    auto config                        = CacheConfigCreator::createBasicConfig(mc, pc, kv_cache_config, false, 0);
+    auto config                               = CacheConfigCreator::createBasicConfig(mc, pc, kv_cache_config, false, 0);
     config.linear_step                 = 4;
 
     RuntimeConfig rt;

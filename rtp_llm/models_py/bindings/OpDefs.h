@@ -239,7 +239,6 @@ struct PyCacheStoreInputs {
     size_t                   decoder_batch_size = 0;
     torch::Tensor            request_id;
     torch::Tensor            request_pd_separation;
-    torch::Tensor            kv_cache_layer_to_group;
     torch::Tensor            kv_cache_group_types;
     std::vector<std::string> cache_keys;  // [context_batch_size]
     // Pinned-host mirrors of device length tensors for cache store consumption.
@@ -298,10 +297,7 @@ struct PyAttentionInputs {
     torch::Tensor kv_cache_block_id_host;
     torch::Tensor kv_cache_block_id_device;
     // Hybrid cache support: per-group CUDA kernel block tables.
-    // Legacy CPU consumers still use singular kv_cache_kernel_block_id_host,
-    // which aliases group 0.
     std::vector<torch::Tensor> kv_cache_kernel_block_id_device_by_group;
-    torch::Tensor              kv_cache_layer_to_group;
     caffe2::TypeMeta           dtype;
     // Cumulative sequence lengths for attention kernels (e.g. FusedRopeKVCacheDecodeOp).
     // cu_seqlens lives on CUDA device; cu_seqlens_host is its pinned-memory CPU mirror

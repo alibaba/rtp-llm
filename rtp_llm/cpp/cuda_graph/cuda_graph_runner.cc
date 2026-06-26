@@ -1,11 +1,13 @@
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_runner.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cstdlib>
 #include <cstring>
 #include <string>
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
+#include "rtp_llm/cpp/utils/Logger.h"
 #include "torch/csrc/autograd/generated/variable_factories.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #if USING_CUDA
@@ -391,10 +393,6 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
         copyStridedHost(inputs.attention_inputs.kv_cache_kernel_block_id_host,
                         py_model_inputs_.attention_inputs.kv_cache_kernel_block_id_host);
 
-        optimizedCopyAsync(inputs.attention_inputs.kv_cache_layer_to_group,
-                           py_model_inputs_.attention_inputs.kv_cache_layer_to_group,
-                           inputs.attention_inputs.kv_cache_layer_to_group.numel() * sizeof(int32_t));
-
         if (!is_prefill_cuda_graph_mode_) {
             optimizedCopyAsync(inputs.attention_inputs.sequence_lengths,
                                py_model_inputs_.attention_inputs.sequence_lengths,
@@ -659,19 +657,6 @@ void CudaGraphRunner::initCaptureAttentionInputs(PyModelInputs& inputs, int max_
 
     inputs.attention_inputs.kv_cache_kernel_block_id_host =
         torch::zeros({int(max_bs_), max_blocks}, options_cpu_int32_).pin_memory();
-
-    auto layer_num = kv_cache_layer_to_group_.size();
-    if (layer_num > 0) {
-        auto kv_cache_layer_to_group_capture_ =
-            torch::empty({static_cast<int64_t>(layer_num)}, options_cpu_int32_).pin_memory();
-        auto* dst = kv_cache_layer_to_group_capture_.data_ptr<int32_t>();
-        for (size_t i = 0; i < layer_num; ++i) {
-            dst[i] = static_cast<int32_t>(kv_cache_layer_to_group_[i]);
-        }
-
-        // [layer_num] int32, pinned host tensor. Keep empty when not provided.
-        inputs.attention_inputs.kv_cache_layer_to_group = kv_cache_layer_to_group_capture_;
-    }
 
     // Hybrid cache: per-group device block tables (host counterpart removed).
     inputs.attention_inputs.kv_cache_kernel_block_id_device_by_group.clear();
@@ -1009,8 +994,6 @@ void CudaGraphRunner::prepareCaptureInputs(PyModelInputs& inputs, int batch_size
 
     // Common direct assignments (no slice needed)
     inputs.attention_inputs.dtype = capture_mem_hold_.py_model_inputs_.attention_inputs.dtype;
-    inputs.attention_inputs.kv_cache_layer_to_group =
-        capture_mem_hold_.py_model_inputs_.attention_inputs.kv_cache_layer_to_group;
     inputs.bert_embedding_inputs        = capture_mem_hold_.py_model_inputs_.bert_embedding_inputs;
     inputs.attention_inputs.is_s_padded = true;
 }

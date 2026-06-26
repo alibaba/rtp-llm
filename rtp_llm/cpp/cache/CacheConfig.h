@@ -30,7 +30,6 @@ struct GroupBase {
 struct LayerBase {
     std::vector<int>           group_ids;
     std::map<std::string, int> tag_to_gid;
-    int                        legacy_single_group_id = -1;
 };
 
 struct CacheConfig {
@@ -212,15 +211,6 @@ struct CacheConfig {
         return result;
     }
 
-    std::vector<int> primaryLayerGroupIdsSnapshot() const {
-        std::vector<int> legacy_route;
-        legacy_route.reserve(layers.size());
-        for (const auto& layer : layers) {
-            legacy_route.push_back(layer.legacy_single_group_id);
-        }
-        return legacy_route;
-    }
-
     uint32_t blockNumForGroup(size_t gid) const {
         RTP_LLM_CHECK_WITH_INFO(gid < groups.size(), "CacheConfig::blockNumForGroup invalid gid=%zu size=%zu", gid, groups.size());
         if (group_block_layout_initialized && groups[gid].block_num > 0) {
@@ -285,9 +275,6 @@ struct CacheConfig {
 
     void resizeLayerRoutes(size_t layer_count) {
         layers.resize(layer_count);
-        for (auto& layer : layers) {
-            layer.legacy_single_group_id = layer.group_ids.size() == 1 ? layer.group_ids.front() : -1;
-        }
     }
 
     void setLayerIdsForGroup(size_t gid, const std::vector<int>& layer_ids) {
@@ -316,7 +303,6 @@ struct CacheConfig {
             groups[gid].spec->layers = groups[gid].layer_ids;
         }
         layers[layer].group_ids.push_back(static_cast<int>(gid));
-        layers[layer].legacy_single_group_id = layers[layer].group_ids.size() == 1 ? layers[layer].group_ids.front() : -1;
         if (!tag.empty()) {
             layers[layer].tag_to_gid[tag] = static_cast<int>(gid);
         }
@@ -549,8 +535,6 @@ struct CacheConfig {
                                         tag.c_str(),
                                         gid);
             }
-
-            layer.legacy_single_group_id = layer.group_ids.size() == 1 ? layer.group_ids.front() : -1;
         }
 
         groups                         = std::move(new_groups);

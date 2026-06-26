@@ -186,7 +186,6 @@ void HybridPoolKVCacheAllocator::freeBlocksInGroup(int gid, const BlockIndicesTy
 CacheLayerLayout HybridPoolKVCacheAllocator::allLayerCacheBase() const {
     CacheLayerLayout layout;
     const auto layer_group_ids      = config_.layerGroupIdsSnapshot();
-    layout.layer_to_groups          = config_.primaryLayerGroupIdsSnapshot();
     layout.layer_to_group_ids       = layer_group_ids;
     layout.group_types              = config_.groupTypesSnapshot();
     layout.group_tags               = config_.groupTagsSnapshot();
@@ -397,10 +396,9 @@ BatchKVCacheResourcePtr HybridPoolKVCacheAllocator::popBlocksFromCache(size_t mi
     batch_resource->resetBatchSize(1);
     batch_resource->initGroups(config_.groupNums(),
                                static_cast<int>(config_.layer_all_num),
-                               config_.primaryLayerGroupIdsSnapshot(),
+                               config_.layerGroupIdsSnapshot(),
                                config_.kernelBlocksPerKvBlock(),
-                               config_.groupTypesSnapshot(),
-                               config_.layerGroupIdsSnapshot());
+                               config_.groupTypesSnapshot());
     batch_resource->setLastBlockAligned(true);
 
     for (int gid = 0; gid < config_.groupNums(); ++gid) {

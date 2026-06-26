@@ -15,7 +15,6 @@ struct BlockBufferPtrInfo {
 };
 
 struct CacheLayerLayout {
-    std::vector<int>              layer_to_groups;
     std::vector<std::vector<int>> layer_to_group_ids;
     std::vector<CacheGroupType>   group_types;
     std::vector<std::string>        group_tags;

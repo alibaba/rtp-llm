@@ -33,8 +33,6 @@ private:
     int defaultGroupIdForLayer(int layer_id) const;
     int validateGroupIdForLayer(int layer_id, int group_id) const;
 
-    // global layer id -> group id
-    std::vector<int> layer_to_group_id_;
     // global layer id -> local layer id
     std::vector<int> global_layer_to_local_id_;
 };

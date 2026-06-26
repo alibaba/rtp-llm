@@ -88,7 +88,7 @@ TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
     query1->input_ids = hostIntBuffer({1});
     BatchKVCacheResource addr1;
     addr1.resetBatchSize(1);
-    addr1.initGroups(1, 3, {0, 0, 0});
+    addr1.initGroups(1, 3, {{0}, {0}, {0}});
     addr1.setBatchBlocks(0, 0, {1, 2, 3, 4});
     stream1->setKVCache(addr1);
     stream1->setIsContextStream(false);
@@ -101,7 +101,7 @@ TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
     query2->input_ids = hostIntBuffer({1, 2});
     BatchKVCacheResource addr2;
     addr2.resetBatchSize(1);
-    addr2.initGroups(1, 3, {0, 0, 0});
+    addr2.initGroups(1, 3, {{0}, {0}, {0}});
     addr2.setBatchBlocks(0, 0, {5, 6, 7, 8});
     stream2->setKVCache(addr2);
     stream2->setIsContextStream(false);
@@ -113,7 +113,7 @@ TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
         make_shared<NormalGenerateStream>(query3, model_config, runtime_config, resource_context, nullptr);
     BatchKVCacheResource addr3;
     addr3.resetBatchSize(1);
-    addr3.initGroups(1, 3, {0, 0, 0});
+    addr3.initGroups(1, 3, {{0}, {0}, {0}});
     addr3.setBatchBlocks(0, 0, {9, 10});
     stream3->setKVCache(addr3);
 
@@ -124,7 +124,7 @@ TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
         make_shared<NormalGenerateStream>(query4, model_config, runtime_config, resource_context, nullptr);
     BatchKVCacheResource addr4;
     addr4.resetBatchSize(1);
-    addr4.initGroups(1, 3, {0, 0, 0});
+    addr4.initGroups(1, 3, {{0}, {0}, {0}});
     addr4.setBatchBlocks(0, 0, {11, 12, 13, 14});
     stream4->setKVCache(addr4);
     stream4->setReuseLength(1);
@@ -273,7 +273,7 @@ TEST_F(NormalBatchStreamProcessorTest, testSoftmaxProbs) {
         make_shared<NormalGenerateStream>(query1, model_config, runtime_config, resource_context, nullptr);
     BatchKVCacheResource addr1;
     addr1.resetBatchSize(1);
-    addr1.initGroups(1, 3, {0, 0, 0});
+    addr1.initGroups(1, 3, {{0}, {0}, {0}});
     addr1.setBatchBlocks(0, 0, {1});
     stream1->setKVCache(addr1);
 
@@ -326,7 +326,7 @@ TEST_F(NormalBatchStreamProcessorTest, testLoss) {
         make_shared<NormalGenerateStream>(query1, model_config, runtime_config, resource_context, nullptr);
     BatchKVCacheResource addr1;
     addr1.resetBatchSize(1);
-    addr1.initGroups(1, 3, {0, 0, 0});
+    addr1.initGroups(1, 3, {{0}, {0}, {0}});
     addr1.setBatchBlocks(0, 0, {1});
     stream1->setKVCache(addr1);
 
@@ -338,7 +338,7 @@ TEST_F(NormalBatchStreamProcessorTest, testLoss) {
         make_shared<NormalGenerateStream>(query3, model_config, runtime_config, resource_context, nullptr);
     BatchKVCacheResource addr3;
     addr3.resetBatchSize(1);
-    addr3.initGroups(1, 3, {0, 0, 0});
+    addr3.initGroups(1, 3, {{0}, {0}, {0}});
     addr3.setBatchBlocks(0, 0, {9});
     stream3->setKVCache(addr3);
 
@@ -350,7 +350,7 @@ TEST_F(NormalBatchStreamProcessorTest, testLoss) {
         make_shared<NormalGenerateStream>(query4, model_config, runtime_config, resource_context, nullptr);
     BatchKVCacheResource addr4;
     addr4.resetBatchSize(1);
-    addr4.initGroups(1, 3, {0, 0, 0});
+    addr4.initGroups(1, 3, {{0}, {0}, {0}});
     addr4.setBatchBlocks(0, 0, {11, 12});
     stream4->setKVCache(addr4);
 

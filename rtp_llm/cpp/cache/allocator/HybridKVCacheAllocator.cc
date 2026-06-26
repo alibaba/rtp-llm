@@ -524,10 +524,9 @@ std::shared_ptr<KVCacheResource> HybridKVCacheAllocator::incrKVCacheRef(const KV
     std::shared_ptr<KVCacheResource> selected_resource(selected_resource_ptr, deleter);
     selected_resource->initGroups(kvcache_resource.groupNums(),
                                   static_cast<int>(config_.layer_all_num),
-                                  config_.primaryLayerGroupIdsSnapshot(),
+                                  config_.layerGroupIdsSnapshot(),
                                   config_.kernelBlocksPerKvBlock(),
-                                  config_.groupTypesSnapshot(),
-                                  config_.layerGroupIdsSnapshot());
+                                  config_.groupTypesSnapshot());
 
     CacheKeysType                 selected_keys;
     BlockDependenciesType         selected_dependencies;

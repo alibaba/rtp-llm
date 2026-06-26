@@ -5,6 +5,7 @@
 #include <utility>
 #include <string>
 #include "rtp_llm/cpp/cache/CacheConfig.h"
+#include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/config/ModelConfig.h"
 
 namespace rtp_llm {
@@ -13,7 +14,9 @@ class HybridConfigCreator {
 public:
     static CacheConfig                   createHybridConfig(const ModelConfig&       model_config,
                                                             const ParallelismConfig& parallelism_config,
-                                                            bool                     is_mtp = false);
+                                                            const KVCacheConfig&     kv_cache_config,
+                                                            bool                     is_mtp = false,
+                                                            int                      gen_num_per_cycle = 0);
     static std::vector<std::vector<int>> splitIntoGroups(const std::vector<int>& ids, int group_layer_num);
 
     // Calculate the number of layers per group based on linear and full layers count

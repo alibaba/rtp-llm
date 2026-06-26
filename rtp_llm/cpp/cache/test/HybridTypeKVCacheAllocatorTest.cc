@@ -143,7 +143,7 @@ static BatchKVCacheResourcePtr makeBatchResource(int batch_size, const CacheConf
     res->resetBatchSize(batch_size);
     res->initGroups(config.groupNums(),
                     static_cast<int>(config.layer_all_num),
-                    config.primaryLayerGroupIdsSnapshot());
+                    config.layerGroupIdsSnapshot());
     for (int b = 0; b < batch_size; ++b) {
         res->setBatchCacheKeys(b, keys);
     }
@@ -439,7 +439,7 @@ TEST_F(HybridTypeKVCacheAllocatorTest, IncrDecrKVCacheRefReferencesOnlyMatchedVa
     std::vector<CacheGroupType> group_types = {CacheGroupType::LINEAR, CacheGroupType::FULL};
     resource.initGroups(/*group_nums=*/2,
                         /*layer_num=*/static_cast<int>(config.layer_all_num),
-                        /*layer_to_group_id=*/config.primaryLayerGroupIdsSnapshot(),
+                        /*layer_group_ids=*/config.layerGroupIdsSnapshot(),
                         /*kernel_blocks_per_kv_block=*/config.kernelBlocksPerKvBlock(),
                         /*group_types=*/group_types);
     resource.cacheKeys() = CacheKeysType{100, 101, 102};
@@ -478,7 +478,7 @@ TEST_F(HybridTypeKVCacheAllocatorTest, IncrKVCacheRefPreservesConnectorDummyTail
     KVCacheResource resource;
     resource.initGroups(/*group_nums=*/2,
                         /*layer_num=*/static_cast<int>(config.layer_all_num),
-                        /*layer_to_group_id=*/config.primaryLayerGroupIdsSnapshot());
+                        /*layer_group_ids=*/config.layerGroupIdsSnapshot());
     resource.cacheKeys() = CacheKeysType{101, 103, 999};
     resource.rebuildLinearBlockDependencies();
     resource.setLastBlockAligned(false);

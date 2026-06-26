@@ -73,7 +73,6 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
                                int                                    propose_model_index,
                                MlaOpsType                             mla_ops_type,
                                int32_t                                kv_cache_group_num,
-                               const std::vector<int32_t>&            kv_cache_layer_to_group,
                                std::function<void()>                  profile_step_start,
                                std::function<void()>                  profile_step_finish):
     Executor(),
@@ -172,7 +171,6 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
          static_cast<size_t>(cache_config.seq_size_per_block),
          static_cast<size_t>(cache_config.kernel_seq_size_per_block),
          kv_cache_group_num,
-         kv_cache_layer_to_group,
          cache_manager,
          params.model_config_.hc_mult});
 

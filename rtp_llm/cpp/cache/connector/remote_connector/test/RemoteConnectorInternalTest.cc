@@ -31,12 +31,12 @@ public:
         KVCacheAllocator(config) {
         for (int32_t full_group_id : full_group_ids) {
             for (int i = 0; i < per_group_layer_num; i++) {
-                fake_layout_.layer_to_groups.push_back(full_group_id);
+                fake_layout_.layer_to_group_ids.push_back({full_group_id});
             }
         }
         for (int32_t other_group_id : other_group_ids) {
             for (int i = 0; i < per_group_layer_num; i++) {
-                fake_layout_.layer_to_groups.push_back(other_group_id);
+                fake_layout_.layer_to_group_ids.push_back({other_group_id});
             }
         }
     }

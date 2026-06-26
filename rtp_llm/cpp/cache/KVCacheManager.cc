@@ -337,7 +337,6 @@ CacheLayerLayout KVCacheManager::getMainModelCacheLayerLayout() const {
     auto& all_layer_tensors = all_layout.layers_to_kv_buffer_ptrs;
     auto& all_scale_tensors = all_layout.layers_to_scale_buffer_ptrs;
 
-    layout.layer_to_groups.resize(config_.layer_num);
     layout.layer_to_group_ids.resize(config_.layer_num);
     layout.layers_to_kv_buffer_ptrs.resize(config_.layer_num);
     if (!all_scale_tensors.empty()) {
@@ -363,7 +362,6 @@ CacheLayerLayout KVCacheManager::getMainModelCacheLayerLayout() const {
 
     for (int layer_id = 0; layer_id < static_cast<int>(config_.layer_num); ++layer_id) {
         if (static_cast<size_t>(layer_id) < all_layer_tensors.size()) {
-            layout.layer_to_groups[layer_id]          = all_layout.layer_to_groups[layer_id];
             layout.layers_to_kv_buffer_ptrs[layer_id] = all_layer_tensors[layer_id];
         } else {
             RTP_LLM_CHECK(false);
@@ -428,7 +426,6 @@ CacheLayerLayout KVCacheManager::getMTPModuleCacheLayerLayout(int mtp_module_id)
     auto& all_layer_tensors = all_layout.layers_to_kv_buffer_ptrs;
     auto& all_scale_tensors = all_layout.layers_to_scale_buffer_ptrs;
 
-    layout.layer_to_groups.resize(mtp_layer_num);
     layout.layers_to_kv_buffer_ptrs.resize(mtp_layer_num);
     if (!all_scale_tensors.empty()) {
         layout.layers_to_scale_buffer_ptrs.resize(mtp_layer_num);
@@ -461,7 +458,6 @@ CacheLayerLayout KVCacheManager::getMTPModuleCacheLayerLayout(int mtp_module_id)
             const int global_layer_id = mtp_global_layer_ids[local_layer_id];
 
             if (global_layer_id >= 0 && static_cast<size_t>(global_layer_id) < all_layer_tensors.size()) {
-                layout.layer_to_groups[local_layer_id]          = all_layout.layer_to_groups[global_layer_id];
                 layout.layers_to_kv_buffer_ptrs[local_layer_id] = all_layer_tensors[global_layer_id];
             } else {
                 RTP_LLM_CHECK(false);

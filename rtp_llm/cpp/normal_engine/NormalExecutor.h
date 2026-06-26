@@ -30,7 +30,6 @@ public:
                             int                                    propose_model_index     = 0,
                             MlaOpsType                             mla_ops_type            = MlaOpsType::AUTO,
                             int32_t                                kv_cache_group_num      = 1,
-                            const std::vector<int32_t>&            kv_cache_layer_to_group = {},
                             std::function<void()>                  profile_step_start      = nullptr,
                             std::function<void()>                  profile_step_finish     = nullptr);
     ~NormalExecutor();

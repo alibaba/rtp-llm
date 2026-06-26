@@ -36,7 +36,6 @@ public:
         py_model_inputs_.attention_inputs.kv_cache_block_id_host   = inputs.attention_inputs.kv_cache_block_id_host;
         py_model_inputs_.attention_inputs.kv_cache_kernel_block_id_device_by_group =
             inputs.attention_inputs.kv_cache_kernel_block_id_device_by_group;
-        py_model_inputs_.attention_inputs.kv_cache_layer_to_group = inputs.attention_inputs.kv_cache_layer_to_group;
         py_model_inputs_.attention_inputs.prefix_lengths          = inputs.attention_inputs.prefix_lengths;
         py_model_inputs_.input_ids                                = inputs.input_ids;
 

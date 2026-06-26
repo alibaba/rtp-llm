@@ -130,9 +130,11 @@ CacheConfig CacheConfigCreator::createBasicConfig(const ModelConfig&       model
         return HybridPoolConfigCreator::createConfig(
             model_config, parallelism_config, kv_cache_config, is_mtp, gen_num_per_cycle);
     } else if (model_config.hybrid_attention_config.enable_hybrid_attention) {
-        return HybridConfigCreator::createHybridConfig(model_config, parallelism_config, is_mtp);
+        return HybridConfigCreator::createHybridConfig(
+            model_config, parallelism_config, kv_cache_config, is_mtp, gen_num_per_cycle);
     } else {
-        return SingleConfigCreator::createSingleConfig(model_config, parallelism_config, is_mtp);
+        return SingleConfigCreator::createSingleConfig(
+            model_config, parallelism_config, kv_cache_config, is_mtp, gen_num_per_cycle);
     }
 }
 

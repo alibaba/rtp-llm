@@ -30,10 +30,9 @@ struct GraphParams {
     size_t               max_context_batch_size = 128;
     std::size_t          hidden_size            = 0;
     c10::ScalarType      model_data_type        = c10::ScalarType::Float;
-    std::vector<int>     prefill_capture_seq_lens;
-    std::vector<int>     decode_capture_batch_sizes;
-    std::vector<int32_t> kv_cache_layer_to_group;  // layer index -> group id for hybrid kv cache
-    int32_t              kv_cache_group_num = 0;   // number of kv cache groups
+    std::vector<int> prefill_capture_seq_lens;
+    std::vector<int> decode_capture_batch_sizes;
+    int32_t          kv_cache_group_num = 0;  // number of kv cache groups
     // DSv4 head-channel residual multiplier (default 1, no expansion).
     // CudaGraphRunner allocates input_hiddens with hidden_size * hc_mult so
     // the DSv4 MTP draft graph captures with the [T, hc*dim] residual shape

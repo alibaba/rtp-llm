@@ -19,6 +19,7 @@
 #include "rtp_llm/cpp/models/logits_processor/TreeLogitsProcessor.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include <sstream>
+#include <algorithm>
 #if USING_CUDA
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDACachingAllocator.h>
@@ -463,7 +464,6 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
                          const std::shared_ptr<KVCacheManager>&         cache_manager,
                          MlaOpsType                                     mla_ops_type,
                          int32_t                                        kv_cache_group_num,
-                         const std::vector<int32_t>&                    kv_cache_layer_to_group,
                          bool                                           warm_up):
     Executor(),
     cache_manager_(cache_manager),
@@ -536,7 +536,6 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
         target_cache_layer_layout = cache_manager->getMainModelCacheLayerLayout();
         draft_cache_layer_layout  = cache_manager->getMTPModuleCacheLayerLayout(0);
     }
-
     // CacheConfig is the single source of truth for tokens_per_block /
     // kernel_tokens_per_block (DSV4 promotes physical to 256 while
     // attn_config still reflects the 64-token CLI flag). Zero-init the
@@ -566,7 +565,6 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
          static_cast<size_t>(target_cache_config.seq_size_per_block),
          static_cast<size_t>(target_cache_config.kernel_seq_size_per_block),
          kv_cache_group_num,
-         kv_cache_layer_to_group,
          cache_manager,
          params.model_config_.hc_mult});
 
@@ -577,8 +575,7 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
 
     if (!params.py_model.is_none()) {
         RTP_LLM_LOG_INFO("init executor with python model");
-        model_.reset(new PyWrappedModel(
-            model_init_params, params.py_model, false, true, target_cache_layer_layout.layer_to_groups));
+        model_.reset(new PyWrappedModel(model_init_params, params.py_model, false, true));
     }
 
     const auto target_group_types = target_cache_config.groupTypesSnapshot();
@@ -618,13 +615,11 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
                                 static_cast<size_t>(draft_cache_config.seq_size_per_block),
                                 static_cast<size_t>(draft_cache_config.kernel_seq_size_per_block),
                                 kv_cache_group_num,
-                                kv_cache_layer_to_group,
                                 cache_manager,
                                 mtp_params->model_config_.hc_mult});
         if (!params.py_sp_model.is_none()) {
             RTP_LLM_LOG_INFO("[speculative decoding] using py model");
-            draft_model_.reset(new PyWrappedModel(
-                model_params, params.py_sp_model, false, false, draft_cache_layer_layout.layer_to_groups));
+            draft_model_.reset(new PyWrappedModel(model_params, params.py_sp_model, false, false));
             // Create separate model for speculative prefill with CUDA graph if enabled (from params)
             const bool enable_cuda_graph = params.hw_kernel_config.enable_cuda_graph;
             RTP_LLM_LOG_INFO(
@@ -633,24 +628,11 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
             if (enable_cuda_graph) {
                 RTP_LLM_LOG_INFO(
                     "[speculative decoding] creating separate prefill draft model with CUDA graph support");
-                sp_prefill_draft_model_.reset(new PyWrappedModel(
-                    model_params, params.py_sp_model, true, false, draft_cache_layer_layout.layer_to_groups));
+                sp_prefill_draft_model_.reset(new PyWrappedModel(model_params, params.py_sp_model, true, false));
             }
         }
         break;  // NOTE: only support one mtp model now
     }
-
-    target_kv_cache_layer_to_group =
-        torch::empty({(int64_t)target_cache_layer_layout.layers_to_kv_buffer_ptrs.size()}, torch::kInt32).pin_memory();
-    draft_kv_cache_layer_to_group =
-        torch::empty({(int64_t)draft_cache_layer_layout.layers_to_kv_buffer_ptrs.size()}, torch::kInt32).pin_memory();
-
-    memcpy(target_kv_cache_layer_to_group.data_ptr<int>(),
-           target_cache_layer_layout.layer_to_groups.data(),
-           target_cache_layer_layout.layer_to_groups.size() * sizeof(int));
-    memcpy(draft_kv_cache_layer_to_group.data_ptr<int>(),
-           draft_cache_layer_layout.layer_to_groups.data(),
-           draft_cache_layer_layout.layer_to_groups.size() * sizeof(int));
 
     const auto& draft_weights = propose_params->getEngineInitParams().gpt_weights;
     d2t_map_                  = draft_model_ ? draft_model_->weights_.d2t_map : draft_weights.d2t_map;
@@ -767,7 +749,6 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         RTP_LLM_PROFILE_SCOPE("executor.mtp.prefill_step(target_model_forward)");
         maybePrintModelInput(model_input, "prefill target model");
         int64_t start_time_us               = autil::TimeUtility::currentTimeInMicroSeconds();
-        model_input.kv_cache_layer_to_group = target_kv_cache_layer_to_group;
         model_output                        = std::move(model_->forward(model_input));
         model_forward_us += autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
@@ -821,7 +802,6 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         const auto& mtp_cache_cfg           = cache_manager_->getMTPModuleCacheConfig(0);
         model_input.kv_block_stride_bytes   = mtp_cache_cfg.kv_block_stride_bytes;
         model_input.kv_scale_stride_bytes   = mtp_cache_cfg.kv_scale_stride_bytes;
-        model_input.kv_cache_layer_to_group = draft_kv_cache_layer_to_group;
         // Source = main (just ran prefill; its pre-hc buffer is current).
         maybeOverrideLastHiddenWithMtpBuffer(model_input, *model_, cp_enabled);
         draft_model_output = std::move(draft_model_->forward(model_input));
@@ -1131,7 +1111,6 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     launchTargetVerifyPrepareAsync(model_input, batch_size);
 
     if (propose_step_ > 1) {
-        model_input.kv_cache_layer_to_group = draft_kv_cache_layer_to_group;
         RTP_LLM_LOG_DEBUG("[MTP decode] draftModelDecode start");
         draftModelDecode(model_input, stream_groups, draft_probs_list, draft_token_ids_t, model_forward_us);
         RTP_LLM_LOG_DEBUG("[MTP decode] draftModelDecode end");
@@ -1345,7 +1324,6 @@ void MtpExecutor::launchTargetVerifyPrepareAsync(const GptModelInputs& model_inp
     auto model_input_copy                    = model_input;
     model_input_copy.kv_block_stride_bytes   = cache_cfg.kv_block_stride_bytes;
     model_input_copy.kv_scale_stride_bytes   = cache_cfg.kv_scale_stride_bytes;
-    model_input_copy.kv_cache_layer_to_group = target_kv_cache_layer_to_group;
     {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(prepare_target_verify_input)");
         const auto cuda_i32 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
@@ -1430,7 +1408,6 @@ void MtpExecutor::launchDraftPrefillPrepareAsync(const GptModelInputs& model_inp
     auto  model_input_copy = model_input;
     model_input_copy.kv_block_stride_bytes   = mtp_cache_cfg.kv_block_stride_bytes;
     model_input_copy.kv_scale_stride_bytes   = mtp_cache_cfg.kv_scale_stride_bytes;
-    model_input_copy.kv_cache_layer_to_group = draft_kv_cache_layer_to_group;
     ensureModelInputsOnCuda(model_input_copy, "decode.draft_prefill_prepare");
     auto input_ready_event = std::make_shared<torch::Event>(cuda_graph::makeGraphEvent());
     input_ready_event->record(cuda_graph::graphGetCurrentStream());
@@ -1446,8 +1423,7 @@ void MtpExecutor::launchDraftPrefillPrepareAsync(const GptModelInputs& model_inp
 GptModelOutputs MtpExecutor::runTargetVerifyForward(GptModelInputs& model_input, const StreamGroups& stream_groups) {
     RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(target_model_verify)");
     maybePrintModelInput(model_input, "decode target model");
-    model_input.is_target_verify        = true;
-    model_input.kv_cache_layer_to_group = target_kv_cache_layer_to_group;
+    model_input.is_target_verify = true;
     RTP_LLM_LOG_DEBUG(
         "[MTP decode] target model verify forward start, input_lengths_size=%ld, prefix_lengths_size=%ld, seq_lengths_size=%ld",
         model_input.input_lengths.size(0),
@@ -1639,9 +1615,8 @@ void MtpExecutor::broadcastPostRejectionInputs(GptModelInputs& model_input) {
         execBroadcast({{model_input.last_hidden_states}, 0});
         execBroadcast({{model_input.lm_output_indexes}, 0});
     }
-    model_input.kv_block_stride_bytes   = mtp_cache_cfg.kv_block_stride_bytes;
-    model_input.kv_scale_stride_bytes   = mtp_cache_cfg.kv_scale_stride_bytes;
-    model_input.kv_cache_layer_to_group = draft_kv_cache_layer_to_group;
+    model_input.kv_block_stride_bytes = mtp_cache_cfg.kv_block_stride_bytes;
+    model_input.kv_scale_stride_bytes = mtp_cache_cfg.kv_scale_stride_bytes;
 }
 
 GptModelOutputs MtpExecutor::runDraftPrefillForward(GptModelInputs& model_input) {

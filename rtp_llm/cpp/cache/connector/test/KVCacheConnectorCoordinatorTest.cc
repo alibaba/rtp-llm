@@ -379,7 +379,7 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncRead_ReturnNull_WhenCacheKeysEmpty)
     coordinator_->allocator_  = allocator_;
 
     KVCacheResource resource;
-    resource.initGroups(1, cache_config_.layer_all_num, cache_config_.primaryLayerGroupIdsSnapshot());
+    resource.initGroups(1, cache_config_.layer_all_num, cache_config_.layerGroupIdsSnapshot());
     // leave cacheKeys empty to hit the early return
     auto                  rw_ctx = std::make_shared<testing::NiceMock<MockKVCacheConnectorReadWriteContext>>();
     std::shared_ptr<Meta> meta =
@@ -414,7 +414,7 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncRead_ReturnNull_WhenIncrKVCacheRefR
     }
 
     KVCacheResource resource;
-    resource.initGroups(1, cache_config_.layer_all_num, cache_config_.primaryLayerGroupIdsSnapshot());
+    resource.initGroups(1, cache_config_.layer_all_num, cache_config_.layerGroupIdsSnapshot());
     resource.cacheKeys() = CacheKeysType{1, 2, 3};
 
     auto                  rw_ctx = std::make_shared<testing::NiceMock<MockKVCacheConnectorReadWriteContext>>();
@@ -444,7 +444,7 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncRead_ReturnNull_WhenNoMatchContexts
     // and will be processed/cleaned up by the coordinator update loop if enabled.
     // Use a plain shared_ptr here to avoid custom-deleter side effects in this no-connector path.
     auto resource = std::make_shared<KVCacheResource>();
-    resource->initGroups(1, cache_config_.layer_all_num, cache_config_.primaryLayerGroupIdsSnapshot());
+    resource->initGroups(1, cache_config_.layer_all_num, cache_config_.layerGroupIdsSnapshot());
     // Don't let gmock keep a ref to `resource` until program exit.
     // gmock actions are stored as const; use a shared holder to release the ref after first call.
     auto resource_holder = std::make_shared<std::shared_ptr<KVCacheResource>>(resource);
@@ -556,7 +556,7 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncWrite_ReturnNull_WhenCacheKeysEmpty
     coordinator_->allocator_  = allocator_;
 
     KVCacheResource resource;
-    resource.initGroups(1, cache_config_.layer_all_num, cache_config_.primaryLayerGroupIdsSnapshot());
+    resource.initGroups(1, cache_config_.layer_all_num, cache_config_.layerGroupIdsSnapshot());
     // leave cacheKeys empty
     auto                  rw_ctx = std::make_shared<testing::NiceMock<MockKVCacheConnectorReadWriteContext>>();
     std::shared_ptr<Meta> meta =
@@ -592,7 +592,7 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncWrite_CPShardedKeepsNonFullGroupsIn
     KVCacheResource resource;
     resource.initGroups(/*group_num=*/2,
                         /*layer_num=*/static_cast<int>(cp_cache_config.layer_all_num),
-                        cp_cache_config.primaryLayerGroupIdsSnapshot(),
+                        cp_cache_config.layerGroupIdsSnapshot(),
                         cp_cache_config.kernelBlocksPerKvBlock(),
                         cp_cache_config.groupTypesSnapshot());
     resource.cacheKeys() = CacheKeysType{10, 11, 12, 13};
@@ -650,7 +650,7 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncWrite_CPShardedSkipsRemapForCanonic
     KVCacheResource resource;
     resource.initGroups(/*group_num=*/2,
                         /*layer_num=*/static_cast<int>(cp_cache_config.layer_all_num),
-                        cp_cache_config.primaryLayerGroupIdsSnapshot(),
+                        cp_cache_config.layerGroupIdsSnapshot(),
                         cp_cache_config.kernelBlocksPerKvBlock(),
                         cp_cache_config.groupTypesSnapshot());
     resource.setCacheKeys(CacheKeysType{11, 13});
@@ -726,7 +726,7 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncWrite_CPShardedKeepsCompactFixedGro
     KVCacheResource resource;
     resource.initGroups(/*group_num=*/2,
                         /*layer_num=*/static_cast<int>(cp_cache_config.layer_all_num),
-                        cp_cache_config.primaryLayerGroupIdsSnapshot(),
+                        cp_cache_config.layerGroupIdsSnapshot(),
                         cp_cache_config.kernelBlocksPerKvBlock(),
                         cp_cache_config.groupTypesSnapshot());
     resource.cacheKeys() = CacheKeysType{10, 11, 12, 13};
@@ -789,7 +789,7 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncWrite_DecodePrefillCpRemapsFullAndC
     KVCacheResource resource;
     resource.initGroups(/*group_num=*/2,
                         /*layer_num=*/static_cast<int>(cp_cache_config.layer_all_num),
-                        cp_cache_config.primaryLayerGroupIdsSnapshot(),
+                        cp_cache_config.layerGroupIdsSnapshot(),
                         cp_cache_config.kernelBlocksPerKvBlock(),
                         cp_cache_config.groupTypesSnapshot());
     resource.cacheKeys() = CacheKeysType{10, 11, 12, 13, 14};
@@ -847,7 +847,7 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncWrite_CPShardedAppendsDummyTailWhen
     KVCacheResource resource;
     resource.initGroups(/*group_num=*/2,
                         /*layer_num=*/static_cast<int>(cp_cache_config.layer_all_num),
-                        cp_cache_config.primaryLayerGroupIdsSnapshot(),
+                        cp_cache_config.layerGroupIdsSnapshot(),
                         cp_cache_config.kernelBlocksPerKvBlock(),
                         cp_cache_config.groupTypesSnapshot());
     resource.cacheKeys() = CacheKeysType{10, 11, 12, 13, 14};
@@ -891,7 +891,7 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncWrite_ReturnNull_WhenIncrKVCacheRef
 
     // Build a connector context with non-empty cache keys.
     auto ctx_resource = std::make_shared<KVCacheResource>();
-    ctx_resource->initGroups(1, cache_config_.layer_all_num, cache_config_.primaryLayerGroupIdsSnapshot());
+    ctx_resource->initGroups(1, cache_config_.layer_all_num, cache_config_.layerGroupIdsSnapshot());
     ctx_resource->cacheKeys()    = CacheKeysType{1, 2, 3};
     auto                  rw_ctx = std::make_shared<testing::NiceMock<MockKVCacheConnectorReadWriteContext>>();
     std::shared_ptr<Meta> meta =
@@ -916,7 +916,7 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncWrite_ReturnFusedContext_WhenMemory
     coordinator_->allocator_  = allocator_;
 
     KVCacheResource resource;
-    resource.initGroups(1, cache_config_.layer_all_num, cache_config_.primaryLayerGroupIdsSnapshot());
+    resource.initGroups(1, cache_config_.layer_all_num, cache_config_.layerGroupIdsSnapshot());
     resource.cacheKeys() = CacheKeysType{1, 2, 3};
 
     auto selected_resource        = makeResourceWithAutoDecr();
@@ -955,7 +955,7 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncWrite_ReturnFusedContext_WhenConnec
     coordinator_->allocator_  = allocator_;
 
     KVCacheResource resource;
-    resource.initGroups(1, cache_config_.layer_all_num, cache_config_.primaryLayerGroupIdsSnapshot());
+    resource.initGroups(1, cache_config_.layer_all_num, cache_config_.layerGroupIdsSnapshot());
     resource.cacheKeys() = CacheKeysType{1, 2, 3};
 
     auto selected_resource        = makeResourceWithAutoDecr();
@@ -995,7 +995,7 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncWrite_ReturnFusedContext_WhenNoConn
     coordinator_->allocator_ = allocator_;
 
     KVCacheResource resource;
-    resource.initGroups(1, cache_config_.layer_all_num, cache_config_.primaryLayerGroupIdsSnapshot());
+    resource.initGroups(1, cache_config_.layer_all_num, cache_config_.layerGroupIdsSnapshot());
     resource.cacheKeys() = CacheKeysType{1, 2, 3};
 
     auto selected_resource        = makeResourceWithAutoDecr();
