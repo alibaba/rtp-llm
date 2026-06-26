@@ -129,6 +129,34 @@ cc_library(
 )
 
 cc_library(
+    name = "kv_cache_transfer_planner",
+    srcs = [
+        "KVCacheTransferPlanner.cc",
+    ],
+    hdrs = [
+        "KVCacheTransferPlanner.h",
+    ],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+    deps = [
+        ":cache_group_type",
+    ],
+)
+
+cc_library(
+    name = "recent_cache_key_window",
+    srcs = ["RecentCacheKeyWindow.cc"],
+    hdrs = ["RecentCacheKeyWindow.h"],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+    deps = [
+        ":cache_types",
+        "//rtp_llm/cpp/utils:core_utils",
+        "//rtp_llm/cpp/utils:time_util",
+    ],
+)
+
+cc_library(
     name = "cache_core",
     srcs = [
         "CacheConfigCreator.cc",
