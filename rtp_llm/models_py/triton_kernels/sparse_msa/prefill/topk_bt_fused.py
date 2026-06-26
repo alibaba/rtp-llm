@@ -9,16 +9,14 @@ emits either trtllm block_tables+seq_lens (``EMIT_BLOCK_TABLE``) or the
 """
 
 import os
+import subprocess
 
 import torch
 import triton
 import triton.language as tl
 
 from ..common.utils import get_cu_seqblocks, robust_allocator
-from .flash_with_topk_idx import (
-    _bitonic_merge,
-    _flash_attn_fwd_with_block_score_kernel,
-)
+from .flash_with_topk_idx import _bitonic_merge, _flash_attn_fwd_with_block_score_kernel
 
 # Opt-1+: bypass the fmha_sm100 adapter in step3, preallocating the CSR/schedule/
 # page_table buffers once per forward (reused across all sparse layers) so the
@@ -28,11 +26,43 @@ from .flash_with_topk_idx import (
 _M3_MSA_FUSED_CSR = os.environ.get("M3_MSA_FUSED_CSR", "1") == "1"
 
 
+def _patch_fmha_sm100_cxx_standard():
+    """GCC < 11 crashes (ICE) on CUDA 13's libcudacxx C++20 templates.
+    The fmha_sm100 JIT kernels compile fine with C++17; patch the flag."""
+    try:
+        ver = subprocess.check_output(["g++", "-dumpversion"], text=True).strip()
+        if int(ver.split(".")[0]) >= 11:
+            return
+    except Exception:
+        return
+    try:
+        import fmha_sm100.jit as _jit
+
+        _orig = _jit._get_nvcc_flags
+
+        def _patched(cache_dir, fmha=True):
+            return _orig(cache_dir, fmha).replace("-std=c++20", "-std=c++17")
+
+        _jit._get_nvcc_flags = _patched
+    except Exception:
+        pass
+
+
+_patch_fmha_sm100_cxx_standard()
+
+
 @triton.jit
 def _kv_flat_to_paged_kernel(
-    k_in, v_in, k_out, v_out,
-    block, nkv, dim,
-    BLOCK_B: tl.constexpr, DIM: tl.constexpr, NKV: tl.constexpr,
+    k_in,
+    v_in,
+    k_out,
+    v_out,
+    block,
+    nkv,
+    dim,
+    BLOCK_B: tl.constexpr,
+    DIM: tl.constexpr,
+    NKV: tl.constexpr,
 ):
     """Fused K+V copy: flat scratch page [block, nkv, dim] -> paged [nkv, block, dim]
     (out[p,h,b,d] = in[p,b,h,d]). One launch for both caches; coalesced read (the
@@ -62,7 +92,9 @@ def _kv_flat_to_paged_kernel(
     tl.store(v_out + out_off, v_tile, mask=mask_b[:, None, None])
 
 
-def _kv_flat_to_paged(k_cache, v_cache, num_paged, block_size_k, num_kv_heads, head_dim):
+def _kv_flat_to_paged(
+    k_cache, v_cache, num_paged, block_size_k, num_kv_heads, head_dim
+):
     """flat [slots, nkv, dim] -> paged [num_paged, nkv, block, dim] for K and V in one
     fused launch. Returns (k_paged, v_paged) contiguous. Replaces two aten
     permute(0,2,1,3).contiguous() copies (~4x faster, bit-identical)."""
@@ -74,10 +106,18 @@ def _kv_flat_to_paged(k_cache, v_cache, num_paged, block_size_k, num_kv_heads, h
     BLOCK_B = 8
     grid = (num_paged, triton.cdiv(block_size_k, BLOCK_B))
     _kv_flat_to_paged_kernel[grid](
-        k_cache, v_cache, k_paged, v_paged,
-        block_size_k, num_kv_heads, head_dim,
-        BLOCK_B=BLOCK_B, DIM=head_dim, NKV=num_kv_heads,
-        num_warps=8, num_stages=2,
+        k_cache,
+        v_cache,
+        k_paged,
+        v_paged,
+        block_size_k,
+        num_kv_heads,
+        head_dim,
+        BLOCK_B=BLOCK_B,
+        DIM=head_dim,
+        NKV=num_kv_heads,
+        num_warps=8,
+        num_stages=2,
     )
     return k_paged, v_paged
 
@@ -96,10 +136,19 @@ def build_index_score_plan(
 
     qo_seg = (cu_seqlens[1:] - cu_seqlens[:-1]).cpu().to(torch.int32)
     kv_seg = seq_lens.cpu().to(torch.int32)
-    qo_off = prefix_lens.cpu().to(torch.int32)  # qo_offset=prefix -> bottom-right causal
+    qo_off = prefix_lens.cpu().to(
+        torch.int32
+    )  # qo_offset=prefix -> bottom-right causal
     return _fmha_sm100_plan(
-        qo_seg, kv_seg, num_idx_heads, num_kv_heads=idx_kv_heads, qo_offset=qo_off,
-        page_size=block_size_k, output_maxscore=True, causal=True, num_kv_splits=1,
+        qo_seg,
+        kv_seg,
+        num_idx_heads,
+        num_kv_heads=idx_kv_heads,
+        qo_offset=qo_off,
+        page_size=block_size_k,
+        output_maxscore=True,
+        causal=True,
+        num_kv_splits=1,
     )
 
 
@@ -115,7 +164,9 @@ def _attach_direct_csr(plan, kv_seg_cpu, block_size_k, device):
     topk = int(plan["kv_block_num"])
     total_rows = int(plan["total_rows"])
     blk = int(plan["blk_kv"])
-    pages_per_batch = [(int(s) + block_size_k - 1) // block_size_k for s in kv_seg_cpu.tolist()]
+    pages_per_batch = [
+        (int(s) + block_size_k - 1) // block_size_k for s in kv_seg_cpu.tolist()
+    ]
     batch, max_pages = len(pages_per_batch), max(pages_per_batch)
     cap = int(plan["scheduler_metadata_capacity"])
 
@@ -125,17 +176,21 @@ def _attach_direct_csr(plan, kv_seg_cpu, block_size_k, device):
     # 16-byte aligned page_table [batch, max_pages] (the cute kernel asserts %16 == 0)
     buf = torch.empty(batch * max_pages + 4, dtype=torch.int32, device=device)
     shift = ((-buf.data_ptr()) % 16) // 4
-    page_table = buf[shift: shift + batch * max_pages].view(batch, max_pages)
+    page_table = buf[shift : shift + batch * max_pages].view(batch, max_pages)
     plan["_csr_direct"] = dict(
         builder=builder,
-        row_ptr=torch.empty((head_kv, total_rows + 1), dtype=torch.int32, device=device),
+        row_ptr=torch.empty(
+            (head_kv, total_rows + 1), dtype=torch.int32, device=device
+        ),
         q_ind=q_ind,
         sched=SparseAttentionSchedule(
             enabled=True,
             scheduler_metadata=torch.empty((cap, 6), dtype=torch.int32, device=device),
             work_count=torch.empty((1,), dtype=torch.int32, device=device),
             qsplit_indices=torch.empty_like(q_ind),
-            split_counts=torch.empty((total_q, head_kv), dtype=torch.int32, device=device),
+            split_counts=torch.empty(
+                (total_q, head_kv), dtype=torch.int32, device=device
+            ),
             target_q_per_cta=int(plan["target_q_per_cta"]),
         ),
         page_table=page_table,
@@ -158,11 +213,19 @@ def build_sparse_attn_plan(
 
     qo_seg = (cu_seqlens[1:] - cu_seqlens[:-1]).cpu().to(torch.int32)
     kv_seg = seq_lens.cpu().to(torch.int32)
-    qo_off = prefix_lens.cpu().to(torch.int32)  # qo_offset=prefix -> bottom-right causal
+    qo_off = prefix_lens.cpu().to(
+        torch.int32
+    )  # qo_offset=prefix -> bottom-right causal
     plan = sparse_fmha_plan(
-        qo_seg, kv_seg, num_qo_heads=num_q_heads, num_kv_heads=num_kv_heads,
-        qo_offset=qo_off, page_size=block_size_k, output_maxscore=False,
-        kv_block_num=topk, causal=True,
+        qo_seg,
+        kv_seg,
+        num_qo_heads=num_q_heads,
+        num_kv_heads=num_kv_heads,
+        qo_offset=qo_off,
+        page_size=block_size_k,
+        output_maxscore=False,
+        kv_block_num=topk,
+        causal=True,
     )
     if _M3_MSA_FUSED_CSR:
         _attach_direct_csr(plan, kv_seg, block_size_k, cu_seqlens.device)
@@ -177,7 +240,9 @@ def build_kv_page_indices(req_to_token, seq_lens, block_size_k):
     builds it once per forward (stored on _cp_shared_meta) and threads it in. Built
     on the fly when not supplied."""
     nblocks = (seq_lens.to(torch.int64) + block_size_k - 1) // block_size_k  # [batch]
-    page_starts = req_to_token[:, ::block_size_k]  # [batch, max_pages] block-start slots
+    page_starts = req_to_token[
+        :, ::block_size_k
+    ]  # [batch, max_pages] block-start slots
     cols = torch.arange(page_starts.shape[1], device=req_to_token.device)
     valid = cols[None, :] < nblocks[:, None]
     return (page_starts // block_size_k)[valid].to(torch.int32)
@@ -409,8 +474,14 @@ def flash_prefill_topk_to_block_tables(
             cu_seqlens, seq_lens, prefix_lens, num_heads, idx_kv_heads, block_size_k
         )
     _o, maxscore = _fmha_sm100(
-        idx_q, k_pages, k_pages, plan, kv_indices=kv_indices,
-        output_o=False, output_maxscore=True, sm_scale=sm_scale,
+        idx_q,
+        k_pages,
+        k_pages,
+        plan,
+        kv_indices=kv_indices,
+        output_o=False,
+        output_maxscore=True,
+        sm_scale=sm_scale,
     )
     # [num_heads, max_block, total_q] -> [num_heads, total_q, max_seqblock_k] fp32
     score = maxscore.transpose(1, 2)[:, :, :max_seqblock_k].contiguous().float()
@@ -420,7 +491,9 @@ def flash_prefill_topk_to_block_tables(
     # When the caller won't use them (emit_block_table=False) skip the alloc and the
     # kernel's block-table emission, passing 1-elem dummies just to satisfy the strides.
     if emit_block_table:
-        bt = torch.zeros(total_q * num_kv_heads, topk, dtype=torch.int32, device=idx_q.device)
+        bt = torch.zeros(
+            total_q * num_kv_heads, topk, dtype=torch.int32, device=idx_q.device
+        )
         sl = torch.zeros(total_q * num_kv_heads, dtype=torch.int32, device=idx_q.device)
     else:
         bt = torch.empty(1, 1, dtype=torch.int32, device=idx_q.device)
@@ -434,25 +507,43 @@ def flash_prefill_topk_to_block_tables(
     )
     grid2 = (max_seqblock_q, batch_size, num_heads)
     _topk_to_block_table_kernel[grid2](
-        score, bt, sl, topk_idx,
-        block_size_q, block_size_k, cu_seqlens, cu_seqblocks_q,
-        prefix_lens, topk, init_blocks, local_blocks, num_pages,
-        score.stride(0), score.stride(1), score.stride(2),
-        bt.stride(0), bt.stride(1),
-        topk_idx.stride(0), topk_idx.stride(1), topk_idx.stride(2),  # h, n, t
-        NKV=num_kv_heads, MASK_INIT=False, MASK_LOCAL=False,
-        EMIT_BLOCK_TABLE=emit_block_table, EMIT_TOPK_IDX=True,
+        score,
+        bt,
+        sl,
+        topk_idx,
+        block_size_q,
+        block_size_k,
+        cu_seqlens,
+        cu_seqblocks_q,
+        prefix_lens,
+        topk,
+        init_blocks,
+        local_blocks,
+        num_pages,
+        score.stride(0),
+        score.stride(1),
+        score.stride(2),
+        bt.stride(0),
+        bt.stride(1),
+        topk_idx.stride(0),
+        topk_idx.stride(1),
+        topk_idx.stride(2),  # h, n, t
+        NKV=num_kv_heads,
+        MASK_INIT=False,
+        MASK_LOCAL=False,
+        EMIT_BLOCK_TABLE=emit_block_table,
+        EMIT_TOPK_IDX=True,
     )
     return bt, sl, topk_idx
 
 
 @torch.no_grad()
 def flash_prefill_with_fmha(
-    q: torch.Tensor,                # [total_q, num_q_heads, head_dim] bf16
-    k_cache: torch.Tensor,          # [max_slots, num_kv_heads, head_dim] FLAT
-    v_cache: torch.Tensor,          # [max_slots, num_kv_heads, head_dim] FLAT
-    idx_q: torch.Tensor,            # [total_q, num_idx_heads, idx_head_dim]
-    idx_k_cache: torch.Tensor,      # [max_slots, 1, idx_head_dim]
+    q: torch.Tensor,  # [total_q, num_q_heads, head_dim] bf16
+    k_cache: torch.Tensor,  # [max_slots, num_kv_heads, head_dim] FLAT
+    v_cache: torch.Tensor,  # [max_slots, num_kv_heads, head_dim] FLAT
+    idx_q: torch.Tensor,  # [total_q, num_idx_heads, idx_head_dim]
+    idx_k_cache: torch.Tensor,  # [max_slots, 1, idx_head_dim]
     req_to_token: torch.Tensor,
     slot_ids: torch.Tensor,
     cu_seqlens: torch.Tensor,
@@ -502,14 +593,24 @@ def flash_prefill_with_fmha(
     # Step 1+2: fused QK score + bitonic topk -> topk_idx. emit_block_table=False: the
     # fmha step3 path uses topk_idx + page_table and never reads the trtllm block table.
     _bt, _sl, topk_idx = flash_prefill_topk_to_block_tables(
-        idx_q=idx_q, idx_k_cache=idx_k_cache,
-        req_to_token=req_to_token, slot_ids=slot_ids,
-        cu_seqlens=cu_seqlens, seq_lens=seq_lens, prefix_lens=prefix_lens,
-        max_seqlen_q=max_seqlen_q, max_seqlen_k=max_seqlen_k,
-        block_size_k=block_size_k, topk=topk, num_pages=num_pages,
-        init_blocks=init_blocks, local_blocks=local_blocks,
-        score_type=score_type, index_score_plan=index_score_plan,
-        kv_indices=kv_indices, emit_block_table=False,
+        idx_q=idx_q,
+        idx_k_cache=idx_k_cache,
+        req_to_token=req_to_token,
+        slot_ids=slot_ids,
+        cu_seqlens=cu_seqlens,
+        seq_lens=seq_lens,
+        prefix_lens=prefix_lens,
+        max_seqlen_q=max_seqlen_q,
+        max_seqlen_k=max_seqlen_k,
+        block_size_k=block_size_k,
+        topk=topk,
+        num_pages=num_pages,
+        init_blocks=init_blocks,
+        local_blocks=local_blocks,
+        score_type=score_type,
+        index_score_plan=index_score_plan,
+        kv_indices=kv_indices,
+        emit_block_table=False,
     )
 
     # Step 3 (fmha): read the flat MSA scratch as paged [num_paged, nkv, page, dim] +
@@ -526,7 +627,11 @@ def flash_prefill_with_fmha(
     # _run into prealloc row_ptr/q_indices, GPU page_table (no .tolist() sync), direct
     # sparse_atten_func reusing the native schedule. Same native kernel/schedule ->
     # bit-identical + deterministic. batch-general.
-    csr = sparse_attn_plan.get("_csr_direct") if isinstance(sparse_attn_plan, dict) else None
+    csr = (
+        sparse_attn_plan.get("_csr_direct")
+        if isinstance(sparse_attn_plan, dict)
+        else None
+    )
     if csr is not None:
         from interface import sparse_atten_func
 
@@ -535,22 +640,46 @@ def flash_prefill_with_fmha(
         # builder wants -> feed it straight in (no permute-copy, no q2k staging buffer).
         pt, off = csr["page_table"], 0
         for b, n in enumerate(csr["pages_per_batch"]):
-            pt[b, :n] = kv_indices[off: off + n]
+            pt[b, :n] = kv_indices[off : off + n]
             off += n
         s = csr["sched"]
         csr["builder"]._run_with_schedule(
-            topk_idx, p["cu_seqlens_q"], p["cu_seqlens_k"], csr["row_ptr"], csr["q_ind"],
-            s.scheduler_metadata, s.work_count, s.qsplit_indices, s.split_counts,
-            topk, block_size_k, p["total_rows"], csr["max_kv_blocks"],
-            csr["target_q_per_cta"], s.work_capacity, p["max_seqlen_q"],
+            topk_idx,
+            p["cu_seqlens_q"],
+            p["cu_seqlens_k"],
+            csr["row_ptr"],
+            csr["q_ind"],
+            s.scheduler_metadata,
+            s.work_count,
+            s.qsplit_indices,
+            s.split_counts,
+            topk,
+            block_size_k,
+            p["total_rows"],
+            csr["max_kv_blocks"],
+            csr["target_q_per_cta"],
+            s.work_capacity,
+            p["max_seqlen_q"],
         )
         out_f = sparse_atten_func(
-            q, k_paged_f, v_paged_f, csr["row_ptr"], csr["q_ind"], topk,
-            cu_seqlens_q=p["cu_seqlens_q"], cu_seqlens_k=p["cu_seqlens_k"],
-            max_seqlen_q=p["max_seqlen_q"], max_seqlen_k=p["max_seqlen_k"],
-            blk_kv=block_size_k, causal=p["causal"], softmax_scale=sm_scale,
-            return_softmax_lse=False, page_table=pt, seqused_k=p["seqused_k"],
-            schedule=s, usable_SM_count=int(p.get("usable_SM_count", -1)),
+            q,
+            k_paged_f,
+            v_paged_f,
+            csr["row_ptr"],
+            csr["q_ind"],
+            topk,
+            cu_seqlens_q=p["cu_seqlens_q"],
+            cu_seqlens_k=p["cu_seqlens_k"],
+            max_seqlen_q=p["max_seqlen_q"],
+            max_seqlen_k=p["max_seqlen_k"],
+            blk_kv=block_size_k,
+            causal=p["causal"],
+            softmax_scale=sm_scale,
+            return_softmax_lse=False,
+            page_table=pt,
+            seqused_k=p["seqused_k"],
+            schedule=s,
+            usable_SM_count=int(p.get("usable_SM_count", -1)),
         )
         if isinstance(out_f, tuple):
             out_f = out_f[0]
@@ -559,20 +688,26 @@ def flash_prefill_with_fmha(
     # is now [nkv, total_q, topk], so transpose the view back (adapter then re-permutes +
     # makes it contiguous internally). kv_indices shared with the index-score kernel.
     out_f, _ = sparse_fmha(
-        q, k_paged_f, v_paged_f, sparse_attn_plan,
-        kv_indices=kv_indices, kv_block_indexes=topk_idx.permute(1, 0, 2),
-        output_o=True, output_maxscore=False, sm_scale=sm_scale,
+        q,
+        k_paged_f,
+        v_paged_f,
+        sparse_attn_plan,
+        kv_indices=kv_indices,
+        kv_block_indexes=topk_idx.permute(1, 0, 2),
+        output_o=True,
+        output_maxscore=False,
+        sm_scale=sm_scale,
     )
     return out_f.view(total_q, num_q_heads, head_dim)
 
 
 @torch.no_grad()
 def flash_decode_with_trtllm_gen(
-    q: torch.Tensor,                # [total_q, num_q_heads, head_dim] bf16
-    k_cache: torch.Tensor,          # [max_slots, num_kv_heads, head_dim] FLAT
-    v_cache: torch.Tensor,          # [max_slots, num_kv_heads, head_dim] FLAT
-    idx_q: torch.Tensor,            # [total_q, num_idx_heads, idx_head_dim]
-    idx_k_cache: torch.Tensor,      # [max_slots, 1, idx_head_dim]
+    q: torch.Tensor,  # [total_q, num_q_heads, head_dim] bf16
+    k_cache: torch.Tensor,  # [max_slots, num_kv_heads, head_dim] FLAT
+    v_cache: torch.Tensor,  # [max_slots, num_kv_heads, head_dim] FLAT
+    idx_q: torch.Tensor,  # [total_q, num_idx_heads, idx_head_dim]
+    idx_k_cache: torch.Tensor,  # [max_slots, 1, idx_head_dim]
     req_to_token: torch.Tensor,
     slot_ids: torch.Tensor,
     cu_seqlens: torch.Tensor,
@@ -613,14 +748,24 @@ def flash_decode_with_trtllm_gen(
 
     # Step 1+2: fused QK score + bitonic topk; emit bt/sl (compacted trtllm block table).
     bt, sl, _topk_idx = flash_prefill_topk_to_block_tables(
-        idx_q=idx_q, idx_k_cache=idx_k_cache,
-        req_to_token=req_to_token, slot_ids=slot_ids,
-        cu_seqlens=cu_seqlens, seq_lens=seq_lens, prefix_lens=prefix_lens,
-        max_seqlen_q=max_seqlen_q, max_seqlen_k=max_seqlen_k,
-        block_size_k=block_size_k, topk=topk, num_pages=num_pages,
-        init_blocks=init_blocks, local_blocks=local_blocks,
-        score_type=score_type, index_score_plan=index_score_plan,
-        kv_indices=kv_indices, emit_block_table=True,
+        idx_q=idx_q,
+        idx_k_cache=idx_k_cache,
+        req_to_token=req_to_token,
+        slot_ids=slot_ids,
+        cu_seqlens=cu_seqlens,
+        seq_lens=seq_lens,
+        prefix_lens=prefix_lens,
+        max_seqlen_q=max_seqlen_q,
+        max_seqlen_k=max_seqlen_k,
+        block_size_k=block_size_k,
+        topk=topk,
+        num_pages=num_pages,
+        init_blocks=init_blocks,
+        local_blocks=local_blocks,
+        score_type=score_type,
+        index_score_plan=index_score_plan,
+        kv_indices=kv_indices,
+        emit_block_table=True,
     )
 
     # Permute flat MSA side cache to trtllm's paged layout:
@@ -660,29 +805,39 @@ def flash_decode_with_trtllm_gen(
 
     if nrows <= rows_per_chunk:
         out = trtllm_batch_decode_with_kv_cache(
-            query=q_packed, kv_cache=(k_paged, v_paged),
+            query=q_packed,
+            kv_cache=(k_paged, v_paged),
             workspace_buffer=workspace,
-            block_tables=bt, seq_lens=sl, max_seq_len=max_seqlen_k,
-            bmm1_scale=sm_scale, bmm2_scale=1.0, backend="trtllm-gen",
+            block_tables=bt,
+            seq_lens=sl,
+            max_seq_len=max_seqlen_k,
+            bmm1_scale=sm_scale,
+            bmm2_scale=1.0,
+            backend="trtllm-gen",
             out_dtype=torch.bfloat16,
         )
     else:
         out_chunks = []
         for start in range(0, nrows, rows_per_chunk):
             end = min(start + rows_per_chunk, nrows)
-            out_chunks.append(trtllm_batch_decode_with_kv_cache(
-                query=q_packed[start:end], kv_cache=(k_paged, v_paged),
-                workspace_buffer=workspace,
-                block_tables=bt[start:end], seq_lens=sl[start:end],
-                max_seq_len=max_seqlen_k,
-                bmm1_scale=sm_scale, bmm2_scale=1.0, backend="trtllm-gen",
-                out_dtype=torch.bfloat16,
-            ))
+            out_chunks.append(
+                trtllm_batch_decode_with_kv_cache(
+                    query=q_packed[start:end],
+                    kv_cache=(k_paged, v_paged),
+                    workspace_buffer=workspace,
+                    block_tables=bt[start:end],
+                    seq_lens=sl[start:end],
+                    max_seq_len=max_seqlen_k,
+                    bmm1_scale=sm_scale,
+                    bmm2_scale=1.0,
+                    backend="trtllm-gen",
+                    out_dtype=torch.bfloat16,
+                )
+            )
         out = torch.cat(out_chunks, dim=0)
 
-    return (
-        out.view(total_q, num_kv_heads, gqa, head_dim)
-        .reshape(total_q, num_q_heads, head_dim)
+    return out.view(total_q, num_kv_heads, gqa, head_dim).reshape(
+        total_q, num_q_heads, head_dim
     )
 
 
@@ -734,17 +889,46 @@ def flash_prefill_with_fused_topk_index(
         return (triton.cdiv(max_seqlen_q, META["BLOCK_SIZE_Q"]), batch_size * num_heads)
 
     _flash_attn_fwd_with_block_score_kernel[grid](
-        idx_q, idx_k_cache, None, None, None, score, req_to_token, cu_seqlens,
-        seq_lens, prefix_lens, slot_ids, max_slots, num_heads, gqa_group_size,
-        qk_head_dim, v_head_dim, block_size_k, sm_scale, False, 1,
-        idx_q.stride(0), idx_q.stride(1), idx_q.stride(2),
-        idx_k_cache.stride(0), idx_k_cache.stride(1), idx_k_cache.stride(2),
-        0, 0, 0,
-        0, 0,
-        0, 0, 0,
-        score.stride(0), score.stride(1), score.stride(2),
+        idx_q,
+        idx_k_cache,
+        None,
+        None,
+        None,
+        score,
+        req_to_token,
+        cu_seqlens,
+        seq_lens,
+        prefix_lens,
+        slot_ids,
+        max_slots,
+        num_heads,
+        gqa_group_size,
+        qk_head_dim,
+        v_head_dim,
+        block_size_k,
+        sm_scale,
+        False,
+        1,
+        idx_q.stride(0),
+        idx_q.stride(1),
+        idx_q.stride(2),
+        idx_k_cache.stride(0),
+        idx_k_cache.stride(1),
+        idx_k_cache.stride(2),
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        score.stride(0),
+        score.stride(1),
+        score.stride(2),
         req_to_token.stride(0),
-        SCORE_TYPE=score_type, DISABLE_INDEX_VALUE=True,
+        SCORE_TYPE=score_type,
+        DISABLE_INDEX_VALUE=True,
     )
 
     topk_idx = torch.full(
@@ -758,13 +942,31 @@ def flash_prefill_with_fused_topk_index(
     sl_dummy = torch.empty(1, dtype=torch.int32, device=idx_q.device)
     grid2 = (max_seqblock_q, batch_size, num_heads)
     _topk_to_block_table_kernel[grid2](
-        score, bt_dummy, sl_dummy, topk_idx,
-        block_size_q, block_size_k, cu_seqlens, cu_seqblocks_q,
-        prefix_lens, topk, init_blocks, local_blocks, 0,
-        score.stride(0), score.stride(1), score.stride(2),
-        bt_dummy.stride(0), bt_dummy.stride(1),
-        topk_idx.stride(0), topk_idx.stride(1), topk_idx.stride(2),
-        NKV=num_heads, MASK_INIT=False, MASK_LOCAL=False,
-        EMIT_BLOCK_TABLE=False, EMIT_TOPK_IDX=True,
+        score,
+        bt_dummy,
+        sl_dummy,
+        topk_idx,
+        block_size_q,
+        block_size_k,
+        cu_seqlens,
+        cu_seqblocks_q,
+        prefix_lens,
+        topk,
+        init_blocks,
+        local_blocks,
+        0,
+        score.stride(0),
+        score.stride(1),
+        score.stride(2),
+        bt_dummy.stride(0),
+        bt_dummy.stride(1),
+        topk_idx.stride(0),
+        topk_idx.stride(1),
+        topk_idx.stride(2),
+        NKV=num_heads,
+        MASK_INIT=False,
+        MASK_LOCAL=False,
+        EMIT_BLOCK_TABLE=False,
+        EMIT_TOPK_IDX=True,
     )
     return None, topk_idx
