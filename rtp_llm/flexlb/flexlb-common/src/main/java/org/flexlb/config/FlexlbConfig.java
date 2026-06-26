@@ -238,7 +238,18 @@ public class FlexlbConfig {
      * stops dispatching new batches and keeps requests in the master-side queue.
      * Values <= 0 disable this backpressure gate.
      */
-    private int flexlbBatchMaxInflightBatchesPerWorker = 2;
+    private int flexlbBatchSloMaxInflightBatches = 2;
+
+    /**
+     * Maximum in-flight prefill batches per worker for the fixed_window batcher.
+     * When the engine already has this many batches inflight, the batcher parks
+     * instead of dispatching new batches.  Default 0 disables backpressure —
+     * the fixed_window batcher dispatches regardless of engine load.
+     *
+     * <p>Set to a small value (e.g. 2–3) to prevent engine overload when
+     * using fixed_window; set to 0 to keep the original always-dispatch behavior.
+     */
+    private int flexlbBatchFixedMaxInflightBatches = 0;
 
     /**
      * Deadline in milliseconds for EnqueueBatch.

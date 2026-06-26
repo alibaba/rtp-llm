@@ -73,6 +73,15 @@ public class FixedWindowBatcherAlgorithm implements BatcherAlgorithm {
         long batchMaxTokens = ctx.cfg().getFlexlbBatchMaxCapacity();
         long predictThresholdMs = ctx.cfg().getFlexlbBatchPredictThresholdMs();
 
+        // 0. Engine backpressure: park if the prefill worker already has too
+        //    many batches inflight, to prevent overloading the engine.
+        //    Default 0 disables this gate — the batcher always dispatches.
+        int maxInflightBatches = ctx.cfg().getFlexlbBatchFixedMaxInflightBatches();
+        if (maxInflightBatches > 0 && ctx.prefillEp().getInflightBatchCount() >= maxInflightBatches) {
+            TimeUnit.MILLISECONDS.sleep(1);
+            return;
+        }
+
         // 1. Fixed window timeout → must dispatch
         if (elapsedMs >= fixedWaitMs) {
             List<BatchItem> picked = pickUpTo(ctx, batchMaxCount, batchMaxTokens);

@@ -63,7 +63,7 @@ public class SloBudgetBatcherAlgorithm implements BatcherAlgorithm {
             return;
         }
 
-        int maxInflightBatches = ctx.cfg().getFlexlbBatchMaxInflightBatchesPerWorker();
+        int maxInflightBatches = ctx.cfg().getFlexlbBatchSloMaxInflightBatches();
         if (maxInflightBatches > 0 && ctx.prefillEp().getInflightBatchCount() >= maxInflightBatches) {
             long inflightGuardMs = dispatchGuardMs(ctx, emergencyBudgetMs);
             if (budgetMs <= inflightGuardMs) {
