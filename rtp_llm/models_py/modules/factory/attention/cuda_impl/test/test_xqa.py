@@ -57,10 +57,12 @@ class TestXQAAttnOp(BaseAttentionTest):
         logging.info(f"XQAAttnOp support check: {is_supported}")
 
         if not is_supported:
-            logging.warning(
-                f"XQAAttnOp does not support this configuration, skipping correctness test"
+            self.skipTest(
+                f"XQAAttnOp does not support this configuration "
+                f"(head_num={config.head_num}, head_num_kv={config.head_num_kv}, "
+                f"size_per_head={config.size_per_head}, "
+                f"seq_size_per_block={config.seq_size_per_block})"
             )
-            return
 
         # Prepare parameters
         params_base = attn_op.prepare(attn_inputs)
@@ -195,6 +197,12 @@ class TestXQAAttnOp(BaseAttentionTest):
                 logging.warning(f"    ⚠️  Expected SUPPORTED but got NOT SUPPORTED")
 
         logging.info(f"\nSupported cases: {supported_count}/{len(supported_cases)}")
+        self.assertEqual(
+            supported_count,
+            len(supported_cases),
+            f"Expected all {len(supported_cases)} configs to be supported, "
+            f"but only {supported_count} were",
+        )
 
         # Test UNSUPPORTED configurations
         logging.info("\n--- Testing UNSUPPORTED configurations ---")
@@ -259,6 +267,12 @@ class TestXQAAttnOp(BaseAttentionTest):
         logging.info(
             f"\nUnsupported cases correctly rejected: {unsupported_count}/{len(unsupported_cases)}"
         )
+        self.assertEqual(
+            unsupported_count,
+            len(unsupported_cases),
+            f"Expected all {len(unsupported_cases)} configs to be rejected, "
+            f"but only {unsupported_count} were",
+        )
 
         # Test boundary cases
         logging.info("\n--- Testing BOUNDARY cases ---")
@@ -319,6 +333,14 @@ class TestXQAAttnOp(BaseAttentionTest):
                 f"    head_num={head_num}, head_num_kv={head_num_kv}, group_size={group_size}\n"
                 f"    head_dim={size_per_head}, page_size={seq_size_per_block}\n"
                 f"    → Support: {is_supported}"
+            )
+
+            expected_supported = "UNSUPPORTED" not in desc
+            self.assertEqual(
+                is_supported,
+                expected_supported,
+                f"Boundary case '{desc}': expected support={expected_supported}, "
+                f"got {is_supported}",
             )
 
         logging.info("\n=== XQAAttnOp support() testing completed ===")
