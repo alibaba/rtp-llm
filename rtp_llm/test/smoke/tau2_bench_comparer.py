@@ -149,7 +149,7 @@ class Tau2BenchComparer(BaseComparer):
             urllib.request.urlretrieve(TAU2_TARBALL_URL, tarball_path)
             logging.info(f"[TAU2] extracting to {dest_dir}")
             with tarfile.open(tarball_path, "r:gz") as tar:
-                tar.extractall(path=dest_dir)
+                tar.extractall(path=dest_dir, filter="data")
         finally:
             try:
                 os.remove(tarball_path)

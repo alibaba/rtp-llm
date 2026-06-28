@@ -36,7 +36,7 @@ class EmbedingTest(TestCase):
         
         embeding = Embedding(model_config, parallelism_config, w)
         embeding_torch = EmbeddingTorch(w)
-        x = torch.randint(0, hidden_size, (num_tokens,), dtype=torch.int32)
+        x = torch.randint(0, w.shape[0], (num_tokens,), dtype=torch.int32)
         # with profile(activities=[ProfilerActivity.CUDA], record_shapes=True) as prof:
         #     for _ in range(10):
         #         out = embeding(x)
