@@ -47,15 +47,12 @@ from rtp_llm.models_py.modules.dsv4._profiler import record_function_range
 from rtp_llm.models_py.modules.dsv4.chunk_env import dsv4_chunk_tokens_from_env
 from rtp_llm.models_py.modules.dsv4.cp import (
     _CP_ROLE_MAIN,
-    _CP_ROLE_SWA_KV_FULL,
     CPContext,
     build_cp_full_prefill_positions,
     cp_actual_owned_kv_lens,
-    cp_all_gather_full_async,
     cp_all_gather_full_varlen,
     cp_freqs_cis_local,
     cp_padded_local_kv_lens,
-    cp_wait_gather_full,
 )
 from rtp_llm.models_py.modules.dsv4.fp8._cp_attention_merge import merge_lse_output
 from rtp_llm.models_py.modules.dsv4.fp8._cp_attention_shard import (
@@ -163,9 +160,12 @@ def _prefill_cp_overlap_enabled() -> bool:
     return os.environ.get("DSV4_PREFILL_CP_OVERLAP", "0") == "1"
 
 
+def _prefill_cp_async_workspace_reads_enabled() -> bool:
+    return os.environ.get("DSV4_PREFILL_CP_ASYNC_WORKSPACE_READS", "1") != "0"
+
+
 _CP_POST_GATHER_STREAMS: Dict[int, torch.cuda.Stream] = {}
 _CP_GATHER_STREAMS: Dict[int, torch.cuda.Stream] = {}
-_SWA_CP_GATHER_STREAMS: Dict[int, torch.cuda.Stream] = {}
 _CP_STREAM_CACHE_LOCK = threading.Lock()
 
 
@@ -193,11 +193,6 @@ def _get_process_cuda_stream(
 def _get_cp_comm_stream(device: torch.device) -> torch.cuda.Stream:
     """Serialized CP communication stream shared by all layers on one device."""
     return _get_process_cuda_stream(_CP_GATHER_STREAMS, device)
-
-
-def _get_swa_cp_comm_stream(device: torch.device) -> torch.cuda.Stream:
-    """SWA kv_full CP stream shared by all layers on one device."""
-    return _get_process_cuda_stream(_SWA_CP_GATHER_STREAMS, device)
 
 
 def _get_cp_post_gather_stream(
@@ -806,8 +801,9 @@ class PrefillQKV(NamedTuple):
 
     ``qr`` is fed to the indexer (CSA layers); ``q`` is the dense Q.
     ``kv_full`` is the all-gathered KV under CP; equals ``kv`` otherwise.
-    Under the overlap path it may be deferred behind ``kv_full_gather_handle``
-    until the first consumer. The CP-aware sequence length lives on
+    Current-layer SWA KV all-gather intentionally stays synchronous: it is not
+    part of the prefill overlap feature because the resulting tensor remains
+    live across Q materialization. The CP-aware sequence length lives on
     ``PrefillMeta.seqlen_full``.
 
     ``q`` starts ``None``: its ``q_lora_b`` + RoPE are DEFERRED to
@@ -819,9 +815,7 @@ class PrefillQKV(NamedTuple):
 
     qr: torch.Tensor
     q: Optional[torch.Tensor]
-    kv_full: Optional[torch.Tensor]
-    kv_full_gather_handle: Optional[Any] = None
-    kv_full_trailing_shape: Optional[Tuple[int, ...]] = None
+    kv_full: torch.Tensor
 
 
 class AttentionFP8(nn.Module):
@@ -2517,25 +2511,6 @@ class AttentionFP8(nn.Module):
             return False
         return True
 
-    def _should_overlap_swa_kv_gather_for_prefill(self, common: PrefillMeta) -> bool:
-        """Whether to issue the shared SWA ``kv_full`` CP gather asynchronously.
-
-        This shares the same production feature gate as compressor gather
-        overlap so a single opt-in flag enables the whole prefill CP overlap
-        orchestration. SWA kv_full keeps its own stream because it is launched
-        early from qkv compute and otherwise sits in front of compressor
-        collectives; delayed cache-prefix gathers use the serialized CP stream.
-        """
-        if not _prefill_cp_overlap_enabled():
-            return False
-        if not common.cp_on or common.cp_ctx is None or common.cp_ctx.cp_size <= 1:
-            return False
-        if common.device.type != "cuda":
-            return False
-        if torch.cuda.is_available() and torch.cuda.is_current_stream_capturing():
-            return False
-        return True
-
     def _cp_kv_cache_sharded(self, common: Optional[PrefillMeta] = None) -> bool:
         cp_ctx = getattr(self, "_cp_ctx", None) or getattr(common, "cp_ctx", None)
         return bool(getattr(cp_ctx, "kv_cache_sharded", False))
@@ -2548,6 +2523,8 @@ class AttentionFP8(nn.Module):
         workspace reads keep the original synchronous gather/restore/write
         ordering even when ``--prefill_cp_kv_cache_sharded=1`` is set.
         """
+        if not _prefill_cp_async_workspace_reads_enabled():
+            return False
         return self._should_overlap_cp_for_prefill(
             common
         ) and self._cp_kv_cache_sharded(common)
@@ -2560,10 +2537,6 @@ class AttentionFP8(nn.Module):
         explicit and avoids a per-layer stream fan-out in profiler traces.
         """
         return _get_cp_comm_stream(device)
-
-    def _get_swa_cp_gather_stream(self, device: torch.device) -> torch.cuda.Stream:
-        """Return the SWA ``kv_full`` CP communication stream."""
-        return _get_swa_cp_comm_stream(device)
 
     def _cleanup_pending_prefill_gather(
         self, compressor: Any, pending: Optional[Any]
@@ -4992,7 +4965,6 @@ class AttentionFP8(nn.Module):
         """
         x_3d = x.unsqueeze(0)
         rd = common.rd
-        overlap_swa_gather = self._should_overlap_swa_kv_gather_for_prefill(common)
 
         def compute_qr() -> torch.Tensor:
             # q_lora_a + norm only — small ``[1, T, q_lora_rank]`` (fed to the
@@ -5011,59 +4983,30 @@ class AttentionFP8(nn.Module):
                     kv_in, self.kv_norm, common.freqs_cis, rd, eps=self.eps
                 )
 
-        if overlap_swa_gather:
-            kv = compute_kv()
-            assert common.cp_ctx is not None
-            kv_flat = kv.reshape(kv.size(0) * kv.size(1), *kv.shape[2:])
-            trailing = tuple(int(s) for s in kv_flat.shape[1:])
-            local_2d = kv_flat.reshape(common.cp_ctx.chunk_length, -1).contiguous()
-            cp_stream = self._get_swa_cp_gather_stream(x.device)
-            with record_function_range("dsv4.fp8.attn.swa_kv_full.cp_gather_start"):
-                kv_full_gather_handle = cp_all_gather_full_async(
-                    local_2d,
-                    common.cp_ctx,
-                    stream=cp_stream,
-                    profile_name=f"dsv4.cp.all_gather.L{self.layer_id:02d}.swa_kv_full",
-                    workspace=common.workspace,
-                    cp_role=_CP_ROLE_SWA_KV_FULL,
-                )
-            try:
-                qr = compute_qr()
-            except Exception:
-                with suppress(Exception):
-                    cp_wait_gather_full(kv_full_gather_handle)
-                raise
-            kv_full = None
-            kv_full_trailing_shape = trailing
+        qr = compute_qr()
+        kv = compute_kv()
+        if common.cp_on:
+            with record_function_range("dsv4.fp8.attn.qkv.cp_gather_varlen"):
+                with record_function_range(
+                    "dsv4.fp8.attn.swa_kv_full.cp_gather_varlen"
+                ):
+                    kv_flat = kv.reshape(kv.size(0) * kv.size(1), *kv.shape[2:])
+                    kv_full_flat = cp_all_gather_full_varlen(
+                        kv_flat,
+                        common.cp_ctx,
+                        profile_name=(
+                            f"dsv4.cp.all_gather.L{self.layer_id:02d}."
+                            "swa_kv_full.varlen"
+                        ),
+                    )
+                    kv_full = kv_full_flat.unsqueeze(0)
         else:
-            qr = compute_qr()
-            kv = compute_kv()
-            kv_full_gather_handle = None
-            kv_full_trailing_shape = None
-            if common.cp_on:
-                with record_function_range("dsv4.fp8.attn.qkv.cp_gather_varlen"):
-                    with record_function_range(
-                        "dsv4.fp8.attn.swa_kv_full.cp_gather_varlen"
-                    ):
-                        kv_flat = kv.reshape(kv.size(0) * kv.size(1), *kv.shape[2:])
-                        kv_full_flat = cp_all_gather_full_varlen(
-                            kv_flat,
-                            common.cp_ctx,
-                            profile_name=(
-                                f"dsv4.cp.all_gather.L{self.layer_id:02d}."
-                                "swa_kv_full.varlen"
-                            ),
-                        )
-                        kv_full = kv_full_flat.unsqueeze(0)
-            else:
-                kv_full = kv
+            kv_full = kv
 
         return PrefillQKV(
             qr=qr.squeeze(0),
-            q=None,  # deferred to _materialize_prefill_q (union-buffer reuse)
-            kv_full=kv_full.squeeze(0) if kv_full is not None else None,
-            kv_full_gather_handle=kv_full_gather_handle,
-            kv_full_trailing_shape=kv_full_trailing_shape,
+            q=None,  # deferred to _materialize_prefill_q
+            kv_full=kv_full.squeeze(0),
         )
 
     def _materialize_prefill_q(
@@ -5099,22 +5042,8 @@ class AttentionFP8(nn.Module):
     def _ensure_prefill_kv_full(
         self, qkv: PrefillQKV, common: PrefillMeta
     ) -> PrefillQKV:
-        if qkv.kv_full is not None:
-            return qkv
-        assert (
-            qkv.kv_full_gather_handle is not None
-        ), "PrefillQKV has no kv_full and no pending CP gather handle"
-        assert qkv.kv_full_trailing_shape is not None
-        with record_function_range("dsv4.fp8.attn.swa_kv_full.cp_wait_gather"):
-            kv_full_flat_2d = cp_wait_gather_full(qkv.kv_full_gather_handle)
-        kv_full = kv_full_flat_2d.view(
-            (int(common.seqlen_full),) + qkv.kv_full_trailing_shape
-        )
-        return qkv._replace(
-            kv_full=kv_full,
-            kv_full_gather_handle=None,
-            kv_full_trailing_shape=None,
-        )
+        assert qkv.kv_full is not None, "PrefillQKV must carry materialized kv_full"
+        return qkv
 
     # ------------------------------------------------------------------
     # FP8 SWA-only fast path: paged write + concat-from-cache

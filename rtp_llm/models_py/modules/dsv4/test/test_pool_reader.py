@@ -145,7 +145,7 @@ def _rank_major_packed_payload(
     """Build rank-major all_gather payload with logical-token tags."""
     entry_bytes = PR.ENTRY_BYTES
     gathered = torch.zeros((cp_size * total_local, entry_bytes), dtype=torch.uint8)
-    local_lens = PR._compute_local_seq_lens(per_req, cp_size, block_size).tolist()
+    local_lens = PR.cp_padded_local_kv_lens(per_req, cp_size, block_size).tolist()
     local_offsets = [0]
     for local_len in local_lens:
         local_offsets.append(local_offsets[-1] + int(local_len))
@@ -264,7 +264,7 @@ def test_factory_missing_args_raises():
 
 # ---------- Helpers ----------
 def test_compute_local_seq_lens_basic():
-    out = PR._compute_local_seq_lens(torch.tensor([16, 17, 0]), cp_size=2, block_size=4)
+    out = PR.cp_padded_local_kv_lens(torch.tensor([16, 17, 0]), cp_size=2, block_size=4)
     # vb=8. T=16→2vb→8; T=17→3vb→12; T=0→0.
     assert torch.equal(out, torch.tensor([8, 12, 0]))
 
@@ -365,7 +365,7 @@ def test_cp_sharded_fill_dataflow_cp2_batched_partial_blocks():
     restore_idx = cp_mod.build_kv_allgather_restore_indices(
         per_req, cp_size, block_size, torch.device("cpu")
     )
-    local_lens = PR._compute_local_seq_lens(per_req, cp_size, block_size)
+    local_lens = PR.cp_padded_local_kv_lens(per_req, cp_size, block_size)
     total_local = int(local_lens.sum().item())
     gathered = _rank_major_packed_payload(per_req, cp_size, block_size, total_local, D)
 
@@ -423,8 +423,8 @@ def test_cp_sharded_fill_uses_owner_block_size_for_restore_but_pool_block_for_ga
     restore_idx = cp_mod.build_kv_allgather_restore_indices(
         per_req, cp_size, owner_block_size, torch.device("cpu")
     )
-    local_lens = PR._compute_local_seq_lens(per_req, cp_size, owner_block_size)
-    actual_lens = PR._compute_local_owned_kv_lens(
+    local_lens = PR.cp_padded_local_kv_lens(per_req, cp_size, owner_block_size)
+    actual_lens = PR.cp_actual_owned_kv_lens(
         per_req, cp_size, owner_block_size, cp_ctx.cp_rank
     ).to(torch.int32)
     total_local = int(local_lens.sum().item())

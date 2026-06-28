@@ -45,21 +45,16 @@ if TYPE_CHECKING:
 _DEFAULT_CP_PROFILE_NAME = "dsv4.cp.all_gather"
 
 
-# CP gather roles — which workspace buffer backs a given gather. All three
-# roles are workspace-backed (sub-region per role; sizes pre-computed from
+# CP gather roles — which workspace buffer backs a given compressor gather.
+# Both roles are workspace-backed (sub-region per role; sizes pre-computed from
 # ``V4Args`` so no fresh allocation is needed in the hot path):
 #   * ``main``        — the CSA/HCA compressor's fused ``[kv|score]`` gather.
 #                       fp32, on the serialized CP communication stream.
 #   * ``indexer``     — the nested indexer compressor's gather (distinct buffer
 #                       so it can be in flight alongside ``main`` under overlap).
 #                       fp32, same serialized CP stream as ``main``.
-#   * ``swa_kv_full`` — the SWA ``kv_full`` gather. bf16, on its own stream so
-#                       it can overlap q-side compute. Width is fixed at
-#                       ``args.head_dim``; rows == ``seq_len_full`` like the
-#                       others.
 _CP_ROLE_MAIN = "main"
 _CP_ROLE_INDEXER = "indexer"
-_CP_ROLE_SWA_KV_FULL = "swa_kv_full"
 
 
 @dataclass
@@ -208,7 +203,6 @@ class CudaAsyncCPGatherImpl:
         assert cp_role in (
             _CP_ROLE_MAIN,
             _CP_ROLE_INDEXER,
-            _CP_ROLE_SWA_KV_FULL,
         ), f"unknown cp_role {cp_role!r}"
         profile_name = profile_name or f"{_DEFAULT_CP_PROFILE_NAME}.async"
         local_2d = _cp_gather_2d(local_2d, cp_ctx)
@@ -227,21 +221,16 @@ class CudaAsyncCPGatherImpl:
             )
 
         gather_rows = world_size * local_2d.size(0)
-        # All three roles draw from the per-forward workspace (a dedicated pair
-        # each, reused across layers). Main / indexer share the compressor side
-        # stream; SWA kv_full uses its own early stream. Distinct sub-regions
-        # guarantee the roles never alias.
+        # Both compressor roles draw from the per-forward workspace (a dedicated
+        # pair each, reused across layers) and share the serialized compressor
+        # side stream. Distinct sub-regions guarantee the roles never alias.
         with record_function_range(f"{profile_name}.alloc"):
             if cp_role == _CP_ROLE_MAIN:
                 gathered = workspace.cp_gather_main(
                     gather_rows, local_2d.size(1), local_2d.dtype
                 )
-            elif cp_role == _CP_ROLE_INDEXER:
+            else:
                 gathered = workspace.cp_gather_idx(
-                    gather_rows, local_2d.size(1), local_2d.dtype
-                )
-            else:  # _CP_ROLE_SWA_KV_FULL
-                gathered = workspace.cp_gather_swa(
                     gather_rows, local_2d.size(1), local_2d.dtype
                 )
 
@@ -310,15 +299,13 @@ class CudaAsyncCPGatherImpl:
             dtype = handle.gathered.dtype
             if handle.cp_role == _CP_ROLE_MAIN:
                 out_buf = handle.workspace.cp_restore_main(rows, dim, dtype)
-            elif handle.cp_role == _CP_ROLE_INDEXER:
+            else:
                 out_buf = handle.workspace.cp_restore_idx(rows, dim, dtype)
-            else:  # _CP_ROLE_SWA_KV_FULL
-                out_buf = handle.workspace.cp_restore_swa(rows, dim, dtype)
         with record_function_range(f"{handle.profile_name}.restore"):
             full = _cp_restore_gathered_full_2d(
                 handle.gathered, handle.cp_ctx, out=out_buf
             )
-        # All three roles' gather/restore buffers come from the per-forward
+        # Compressor gather/restore buffers come from the per-forward
         # ``PrefillWorkspace`` union — they are reused across layers (never
         # freed mid-forward) and cross-layer reuse is serialized by the
         # ``gather_stream.wait_stream(current_stream)`` edge in ``start``. No
@@ -629,10 +616,10 @@ def cp_all_gather_full_async(
     used so helper fallback paths do not allocate profiler-visible streams.
 
     ``workspace`` is the per-forward :class:`PrefillWorkspace` (required, never
-    None) that backs the gather AND restore scratch for every role.
+    None) that backs the gather AND restore scratch for every compressor role.
 
     ``cp_role`` selects which workspace buffer pair backs this gather:
-    ``_CP_ROLE_MAIN`` / ``_CP_ROLE_INDEXER`` / ``_CP_ROLE_SWA_KV_FULL``.
+    ``_CP_ROLE_MAIN`` / ``_CP_ROLE_INDEXER``.
     """
     return CudaAsyncCPGatherImpl().start(
         local_2d,

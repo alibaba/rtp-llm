@@ -237,13 +237,11 @@ class V4Transformer(nn.Module):
         self._prefill_ws_q_rows = 0
         self._prefill_ws_q_dim = 0
         self._prefill_ws_full_rows = 0
-        # Separate CP gather widths for the three concurrent gathers — each
+        # Separate CP gather widths for the concurrent compressor gathers — each
         # backs a dedicated workspace buffer pair:
-        #   main / indexer — back-to-back on the compressor side stream;
-        #   swa            — on its own side stream (overlaps ``compute_qr``).
+        #   main / indexer — back-to-back on the compressor side stream.
         self._prefill_ws_main_w = 0
         self._prefill_ws_idx_w = 0
-        self._prefill_ws_swa_w = 0
 
     def _bind_runtime_buffers(
         self,
@@ -258,7 +256,6 @@ class V4Transformer(nn.Module):
         full_rows: int,
         main_w: int,
         idx_w: int,
-        swa_w: int,
     ) -> None:
         """Stash the max-sized per-forward prefill workspace dimensions.
 
@@ -273,7 +270,6 @@ class V4Transformer(nn.Module):
         self._prefill_ws_full_rows = int(full_rows)
         self._prefill_ws_main_w = int(main_w)
         self._prefill_ws_idx_w = int(idx_w)
-        self._prefill_ws_swa_w = int(swa_w)
 
     def _allocate_mtp_last_hidden_buffer(
         self,
