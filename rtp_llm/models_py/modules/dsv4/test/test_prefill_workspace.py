@@ -1,14 +1,13 @@
 """UT: ``PrefillWorkspace`` — the per-forward prefill scratch (union buffer).
 
 CPU-only. ``PrefillWorkspace`` is now ONE ``uint8`` union tensor time-multiplexed
-between the Q projection output and the six CP gather/restore buffers
-((main/idx/swa) × (gather/restore)), each owned by a concurrent CP gather role
-within a single layer. These tests lock the byte-offset layout and the per-role
-getter contracts the prefill path relies on: eager union allocation sized to
-``max(q_bytes, 2*main + 2*idx + 2*swa)``, fit-asserts (no silent growth / no
-fallback alloc), stable storage across repeated gets, the ``reserve_cp=False``
-guard on the CP region, the SEPARATE main / indexer / swa byte sub-regions (so
-all three gather lifetimes can be concurrently live within one layer), and the dtype
+between the Q projection output and the compressor CP gather/restore buffers
+((main/idx) × (gather/restore)), each owned by a concurrent CP gather role within
+a single layer. These tests lock the byte-offset layout and the per-role getter
+contracts the prefill path relies on: eager union allocation sized to
+``max(q_bytes, 2*main + 2*idx)``, fit-asserts (no silent growth / no fallback
+alloc), stable storage across repeated gets, the ``reserve_cp=False`` guard on
+the CP region, the SEPARATE main / indexer byte sub-regions, and the dtype
 reinterpretation that lets one byte region back both an fp32 and a bf16 gather.
 
 NOTE: Q (``[0, q_bytes)``) INTENTIONALLY overlaps the front of the compressor
@@ -73,15 +72,12 @@ def test_cp_region_not_reserved_when_reserve_cp_false():
     )
     assert ws._has_main is False
     assert ws._has_idx is False
-    assert ws._has_swa is False
 
     for getter, name in (
         (ws.cp_gather_main, "cp_gather_main"),
         (ws.cp_restore_main, "cp_restore_main"),
         (ws.cp_gather_idx, "cp_gather_idx"),
         (ws.cp_restore_idx, "cp_restore_idx"),
-        (ws.cp_gather_swa, "cp_gather_swa"),
-        (ws.cp_restore_swa, "cp_restore_swa"),
     ):
         _assert_raises(
             lambda g=getter: g(1, 1, torch.float32),
@@ -90,10 +86,9 @@ def test_cp_region_not_reserved_when_reserve_cp_false():
         )
 
 
-def test_cp_main_idx_swa_are_separately_sized_and_distinct():
+def test_cp_main_idx_are_separately_sized_and_distinct():
     # main sub-region: cp_rows*main_w*4 B (fp32);
-    # idx  sub-region: cp_rows*idx_w *4 B (fp32);
-    # swa  sub-region: cp_rows*swa_w *2 B (bf16 — swa's only dtype).
+    # idx  sub-region: cp_rows*idx_w *4 B (fp32).
     ws = PrefillWorkspace(
         torch.device("cpu"),
         q_rows=2,
@@ -102,43 +97,34 @@ def test_cp_main_idx_swa_are_separately_sized_and_distinct():
         cp_rows=4,
         main_w=6,
         idx_w=3,
-        swa_w=5,
         align_bytes=1,
     )
     assert ws._main_bytes == 4 * 6 * 4
     assert ws._idx_bytes == 4 * 3 * 4
-    assert ws._swa_bytes == 4 * 5 * 2
 
     gm = ws.cp_gather_main(4, 6, torch.float32)
     rm = ws.cp_restore_main(4, 6, torch.float32)
     gi = ws.cp_gather_idx(4, 3, torch.float32)
     ri = ws.cp_restore_idx(4, 3, torch.float32)
-    gs = ws.cp_gather_swa(4, 5, torch.bfloat16)
-    rs = ws.cp_restore_swa(4, 5, torch.bfloat16)
     assert tuple(gm.shape) == (4, 6) and gm.dtype == torch.float32
     assert tuple(gi.shape) == (4, 3) and gi.dtype == torch.float32
-    assert tuple(gs.shape) == (4, 5) and gs.dtype == torch.bfloat16
-    # All six CP role buffers occupy distinct byte offsets within the union (no
-    # mutual aliasing — required because main, indexer, and swa can all be
-    # concurrently live within one layer.
+    # All four compressor role buffers occupy distinct byte offsets within the
+    # union (no mutual aliasing).
     ptrs = {
         gm.data_ptr(),
         rm.data_ptr(),
         gi.data_ptr(),
         ri.data_ptr(),
-        gs.data_ptr(),
-        rs.data_ptr(),
     }
-    assert len(ptrs) == 6
+    assert len(ptrs) == 4
     # Repeated gets are stable views over the same storage.
     assert ws.cp_gather_main(2, 6, torch.float32).data_ptr() == gm.data_ptr()
     assert ws.cp_gather_idx(2, 3, torch.float32).data_ptr() == gi.data_ptr()
-    assert ws.cp_gather_swa(2, 5, torch.bfloat16).data_ptr() == gs.data_ptr()
 
 
 def test_cp_idx_region_skipped_when_idx_width_zero():
     # An HCA-only / no-indexer model has idx_w==0 → no idx region reserved,
-    # while the main+swa regions are still present (swa runs on every CP layer).
+    # while the main region is still present.
     ws = PrefillWorkspace(
         torch.device("cpu"),
         q_rows=1,
@@ -147,45 +133,14 @@ def test_cp_idx_region_skipped_when_idx_width_zero():
         cp_rows=4,
         main_w=6,
         idx_w=0,
-        swa_w=5,
         align_bytes=1,
     )
     assert ws._has_main is True
     assert ws._has_idx is False
-    assert ws._has_swa is True
     _assert_raises(
         lambda: ws.cp_gather_idx(1, 1, torch.float32),
         AssertionError,
         "cp_gather_idx region not reserved (reserve_cp=False)",
-    )
-
-
-def test_cp_swa_region_skipped_when_swa_width_zero():
-    # A no-SWA / no-CP-prefill config (or a CP-disabled forward) has swa_w==0
-    # → no swa region reserved. main/idx unaffected.
-    ws = PrefillWorkspace(
-        torch.device("cpu"),
-        q_rows=1,
-        q_dim=1,
-        reserve_cp=True,
-        cp_rows=4,
-        main_w=6,
-        idx_w=3,
-        swa_w=0,
-        align_bytes=1,
-    )
-    assert ws._has_main is True
-    assert ws._has_idx is True
-    assert ws._has_swa is False
-    _assert_raises(
-        lambda: ws.cp_gather_swa(1, 1, torch.bfloat16),
-        AssertionError,
-        "cp_gather_swa region not reserved (reserve_cp=False)",
-    )
-    _assert_raises(
-        lambda: ws.cp_restore_swa(1, 1, torch.bfloat16),
-        AssertionError,
-        "cp_restore_swa region not reserved (reserve_cp=False)",
     )
 
 
@@ -228,9 +183,9 @@ def test_union_rounds_up_to_align_bytes():
     )
     assert ws_exact._union.numel() == 64
 
-    # cp_region_sum dominates: 2*main + 2*idx + 2*swa
-    #   = 2*(4*6*4) + 2*(4*3*4) + 2*(4*5*2) = 192 + 96 + 80 = 368;
-    # q_bytes = 2*2*2 = 8; max = 368; align 256 -> round up to 512.
+    # cp_region_sum dominates: 2*main + 2*idx
+    #   = 2*(4*6*4) + 2*(4*3*4) = 192 + 96 = 288;
+    # q_bytes = 2*2*2 = 8; max = 288; align 256 -> round up to 512.
     ws_cp = PrefillWorkspace(
         torch.device("cpu"),
         q_rows=2,
@@ -239,10 +194,9 @@ def test_union_rounds_up_to_align_bytes():
         cp_rows=4,
         main_w=6,
         idx_w=3,
-        swa_w=5,
         align_bytes=256,
     )
-    assert 2 * ws_cp._main_bytes + 2 * ws_cp._idx_bytes + 2 * ws_cp._swa_bytes == 368
+    assert 2 * ws_cp._main_bytes + 2 * ws_cp._idx_bytes == 288
     assert ws_cp._union.numel() == 512
 
 
@@ -258,7 +212,7 @@ def test_default_align_bytes_is_one_gib():
 
 def test_cp_role_byte_offsets_match_documented_layout():
     # #6: lock the exact byte-offset layout the CP gather/restore path depends
-    # on (PrefillWorkspace docstring): main g|r, then idx g|r, then swa g|r.
+    # on (PrefillWorkspace docstring): main g|r, then idx g|r.
     ws = PrefillWorkspace(
         torch.device("cpu"),
         q_rows=2,
@@ -267,26 +221,20 @@ def test_cp_role_byte_offsets_match_documented_layout():
         cp_rows=4,
         main_w=6,
         idx_w=3,
-        swa_w=5,
         align_bytes=1,
     )
     assert ws._off_gather_main == 0
     assert ws._off_restore_main == ws._main_bytes
     assert ws._off_gather_idx == 2 * ws._main_bytes
     assert ws._off_restore_idx == 2 * ws._main_bytes + ws._idx_bytes
-    assert ws._off_gather_swa == 2 * ws._main_bytes + 2 * ws._idx_bytes
-    assert ws._off_restore_swa == (
-        2 * ws._main_bytes + 2 * ws._idx_bytes + ws._swa_bytes
-    )
 
 
 def test_cp_restore_region_does_not_alias_gather_region():
     # #6: the WHOLE reason restore is a separate sub-region (not reusing the
-    # gather buffer) is that within one layer THREE gathers can be in flight at
-    # once — main+indexer on the compressor side stream, swa on its own side
-    # stream — and a restore that aliased its gather (or another role's
-    # buffer) would clobber an un-drained gather. Assert pairwise disjointness
-    # across all six role byte ranges.
+    # gather buffer) is that within one CSA layer both main+indexer gathers can
+    # be in flight. A restore that aliased its gather (or another role's buffer)
+    # would clobber an un-drained gather. Assert pairwise disjointness across all
+    # four compressor role byte ranges.
     ws = PrefillWorkspace(
         torch.device("cpu"),
         q_rows=2,
@@ -295,7 +243,6 @@ def test_cp_restore_region_does_not_alias_gather_region():
         cp_rows=4,
         main_w=6,
         idx_w=3,
-        swa_w=5,
         align_bytes=1,
     )
 
@@ -307,8 +254,6 @@ def test_cp_restore_region_does_not_alias_gather_region():
         "rm": _range(ws._off_restore_main, ws._main_bytes),
         "gi": _range(ws._off_gather_idx, ws._idx_bytes),
         "ri": _range(ws._off_restore_idx, ws._idx_bytes),
-        "gs": _range(ws._off_gather_swa, ws._swa_bytes),
-        "rs": _range(ws._off_restore_swa, ws._swa_bytes),
     }
 
     def _disjoint(a, b):
@@ -329,7 +274,6 @@ def test_cp_gather_restore_overflow():
         cp_rows=4,
         main_w=6,
         idx_w=3,
-        swa_w=5,
         align_bytes=1,
     )
     # 5*6 fp32 == 120 B > 96 B reserved (main).
@@ -354,17 +298,6 @@ def test_cp_gather_restore_overflow():
         AssertionError,
         "cp_restore_idx overflow",
     )
-    # 5*5 bf16 == 50 B > 40 B reserved (swa).
-    _assert_raises(
-        lambda: ws.cp_gather_swa(5, 5, torch.bfloat16),
-        AssertionError,
-        "cp_gather_swa overflow",
-    )
-    _assert_raises(
-        lambda: ws.cp_restore_swa(5, 5, torch.bfloat16),
-        AssertionError,
-        "cp_restore_swa overflow",
-    )
 
 
 if __name__ == "__main__":
@@ -376,12 +309,10 @@ if __name__ == "__main__":
     print("PASS test_prefill_q_storage_is_stable_across_gets")
     test_cp_region_not_reserved_when_reserve_cp_false()
     print("PASS test_cp_region_not_reserved_when_reserve_cp_false")
-    test_cp_main_idx_swa_are_separately_sized_and_distinct()
-    print("PASS test_cp_main_idx_swa_are_separately_sized_and_distinct")
+    test_cp_main_idx_are_separately_sized_and_distinct()
+    print("PASS test_cp_main_idx_are_separately_sized_and_distinct")
     test_cp_idx_region_skipped_when_idx_width_zero()
     print("PASS test_cp_idx_region_skipped_when_idx_width_zero")
-    test_cp_swa_region_skipped_when_swa_width_zero()
-    print("PASS test_cp_swa_region_skipped_when_swa_width_zero")
     test_cp_buffer_reinterprets_dtype_from_same_base()
     print("PASS test_cp_buffer_reinterprets_dtype_from_same_base")
     test_union_rounds_up_to_align_bytes()

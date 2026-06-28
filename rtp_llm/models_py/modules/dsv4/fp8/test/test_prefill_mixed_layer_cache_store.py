@@ -133,7 +133,6 @@ class _FakeV4:
         self._prefill_ws_full_rows = 4
         self._prefill_ws_main_w = 1
         self._prefill_ws_idx_w = 1
-        self._prefill_ws_swa_w = 1
 
     def _propagate_cp_ctx(self, cp_ctx) -> None:
         self.events.append(("propagate_cp", cp_ctx))

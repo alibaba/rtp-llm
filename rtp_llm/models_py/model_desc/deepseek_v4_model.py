@@ -487,14 +487,11 @@ class DeepSeekV4Model(GptModelBase):
     def _resolve_mtp_last_hidden_token_capacity(self) -> Optional[int]:
         return None
 
-    def _resolve_prefill_ws_gather_widths(self) -> Tuple[int, int, int]:
-        """Per-row element counts for the three concurrent CP gather roles —
-        main CSA/HCA compressor, nested indexer compressor, SWA ``kv_full`` —
-        sized off ``V4Args`` STATIC dims, NOT the runtime layer compositions.
+    def _resolve_prefill_ws_gather_widths(self) -> Tuple[int, int]:
+        """Per-row element counts for the concurrent compressor CP gather roles.
 
-        Under the overlap orchestrator + the SWA side stream, up to three
-        gathers can be in flight concurrently within one layer, so each role
-        owns a dedicated workspace sub-region (a shared one would alias).
+        Main CSA/HCA compressor and nested indexer compressor widths are sized
+        off ``V4Args`` STATIC dims, NOT the runtime layer compositions.
 
         Widths are the protocol-level UPPER BOUND for each role, independent
         of how many CSA/HCA layers the current model happens to instantiate:
@@ -504,25 +501,21 @@ class DeepSeekV4Model(GptModelBase):
             (compressor uses fp32 fused gather).
           * indexer: ``2 * 2 * args.index_head_dim`` (nested indexer
             compressor is CSA-only → ``coff=2``). fp32 elements.
-          * swa: ``args.head_dim`` (the KV per-head dim seen after
-            ``fused_rmsnorm_rope``; see ``kv_full.reshape(-1, self.head_dim)``
-            in ``AttentionFP8``). bf16 elements (SWA's only gather dtype).
 
         Whether a model actually USES a role on some layer is irrelevant for
-        sizing — the union buffer is ``max(q_bytes, 2*main+2*idx+2*swa)`` and
-        q dominates in practice, so over-reserving costs nothing while keeping
-        the union BYTE-IDENTICAL across the main forward and the MTP draft
-        forward. That identity is what lets the caching allocator hand the
-        same block back to the draft at the main→draft boundary — the whole
-        reason the per-forward workspace exists. Doing it any other way would
-        re-introduce the allocator fragmentation we built this to avoid.
+        sizing — the union buffer is ``max(q_bytes, 2*main+2*idx)`` and q
+        dominates in practice, so over-reserving costs nothing while keeping the
+        union BYTE-IDENTICAL across the main forward and the MTP draft forward.
+        That identity is what lets the caching allocator hand the same block
+        back to the draft at the main→draft boundary — the whole reason the
+        per-forward workspace exists. Doing it any other way would re-introduce
+        the allocator fragmentation we built this to avoid.
         """
         head_dim = int(self._v4_args.head_dim)
         index_head_dim = int(self._v4_args.index_head_dim)
         main_w = 2 * 2 * head_dim
         idx_w = 2 * 2 * index_head_dim
-        swa_w = head_dim
-        return main_w, idx_w, swa_w
+        return main_w, idx_w
 
     def _bind_runtime_buffers(self, device: torch.device) -> None:
         assert self.v4 is not None
@@ -547,15 +540,12 @@ class DeepSeekV4Model(GptModelBase):
         q_dim = int(self._v4_args.n_heads) * int(self._v4_args.head_dim)
         if cp_size > 1:
             full_rows = q_rows * cp_size
-            main_w, idx_w, swa_w = self._resolve_prefill_ws_gather_widths()
+            main_w, idx_w = self._resolve_prefill_ws_gather_widths()
         else:
             full_rows = 0
             main_w = 0
             idx_w = 0
-            swa_w = 0
-        self.v4._bind_prefill_workspace_dims(
-            q_rows, q_dim, full_rows, main_w, idx_w, swa_w
-        )
+        self.v4._bind_prefill_workspace_dims(q_rows, q_dim, full_rows, main_w, idx_w)
 
         self._shared_runtime_buffers = Dsv4SharedRuntimeBufferStore.get_or_create(
             device=device,

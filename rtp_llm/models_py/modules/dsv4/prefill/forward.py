@@ -374,21 +374,20 @@ def forward_layers(
         # top of the forward, freed when ``forward_layers`` returns (so the
         # MTP draft forward, which runs right after on a near-full card, can
         # borrow it). Holds the prefill-Q output (eager) and — whenever CP is
-        # active — the main + indexer + SWA CP gather/restore scratch
+        # active — the main + indexer compressor CP gather/restore scratch
         # (dedicated buffer pairs per role, used by BOTH the serial and
         # overlap paths for the workspace-backed roles). Sizing is MAX
         # (capacity-bound, runtime-length-independent) so every forward
         # allocates the same-sized block → zero allocator fragmentation,
         # IDENTICAL across main and MTP-draft forwards (the draft overrides
         # ``_resolve_prefill_ws_gather_widths`` to size off the main model's
-        # ratios — see ``deepseek_v4_mtp_model``). All three CP roles
-        # (main / indexer / swa) are workspace-backed.
+        # ratios — see ``deepseek_v4_mtp_model``). Current-layer SWA ``kv_full``
+        # all-gather is intentionally not workspace-backed.
         #
         # ``reserve_cp`` gates the CP region; we cannot derive it from
-        # ``compress_ratio != 0`` on the layers because the SWA gather runs
-        # on EVERY attention layer (including the draft's single SWA layer).
-        # The bound ``_prefill_ws_full_rows>0`` is the canonical signal that
-        # CP is active at workspace bind time.
+        # ``compress_ratio != 0`` on the layers because the workspace is bound
+        # once for the whole prefill forward. The bound ``_prefill_ws_full_rows>0``
+        # is the canonical signal that CP is active at workspace bind time.
         reserve_cp = (cp_ctx is not None) and int(v4._prefill_ws_full_rows) > 0
         ws = PrefillWorkspace(
             input_ids.device,
@@ -398,7 +397,6 @@ def forward_layers(
             cp_rows=v4._prefill_ws_full_rows,
             main_w=v4._prefill_ws_main_w,
             idx_w=v4._prefill_ws_idx_w,
-            swa_w=v4._prefill_ws_swa_w,
         )
         build_and_propagate_prefill_meta_fp8(
             v4,

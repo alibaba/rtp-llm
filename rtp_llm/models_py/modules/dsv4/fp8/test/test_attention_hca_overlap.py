@@ -22,7 +22,7 @@ without spinning up a real DSV4 layer (no DeepGEMM / no real KV pool):
     invoke ``self.compressor`` — the orchestrator already drained it.
 
   * Process-wide CP streams are cached + reused: serialized compressor/cache
-    communication, SWA kv_full communication, and post-gather local work.
+    communication and post-gather local work.
 """
 
 from __future__ import annotations
@@ -188,14 +188,6 @@ class HCAOverlapGateTest(unittest.TestCase):
         with self._with_env("1"):
             self.assertTrue(layer._should_overlap_cp_for_prefill(common))
 
-    def test_swa_kv_overlap_is_gated_by_master_flag(self) -> None:
-        layer = _make_attention_stub(compress_ratio=0, has_compressor=False)
-        common = _make_common(cp_on=True, device=torch.device("cuda"))
-        with self._with_env("0"):
-            self.assertFalse(layer._should_overlap_swa_kv_gather_for_prefill(common))
-        with self._with_env("1"):
-            self.assertTrue(layer._should_overlap_swa_kv_gather_for_prefill(common))
-
     def test_workspace_read_async_requires_overlap_env_and_page_rr(self) -> None:
         layer = _make_attention_stub(compress_ratio=128)
         common = _make_common(cp_on=True, device=torch.device("cuda"))
@@ -216,20 +208,13 @@ class HCAOverlapGateTest(unittest.TestCase):
 
 @unittest.skipUnless(torch.cuda.is_available(), "stream allocation requires CUDA")
 class HCAOverlapStreamCacheTest(unittest.TestCase):
-    """Process-wide stream reuse and SWA/compressor stream separation."""
+    """Process-wide compressor stream reuse."""
 
     def setUp(self) -> None:
         self._cp_streams_patch = patch.object(attention_mod, "_CP_GATHER_STREAMS", {})
-        self._swa_streams_patch = patch.object(
-            attention_mod,
-            "_SWA_CP_GATHER_STREAMS",
-            {},
-        )
         self._cp_streams_patch.start()
-        self._swa_streams_patch.start()
 
     def tearDown(self) -> None:
-        self._swa_streams_patch.stop()
         self._cp_streams_patch.stop()
 
     def test_returns_same_stream_on_repeated_calls(self) -> None:
@@ -249,19 +234,6 @@ class HCAOverlapStreamCacheTest(unittest.TestCase):
             layer1._get_cp_gather_stream(device),
             layer2._get_cp_gather_stream(device),
         )
-
-    def test_swa_stream_is_shared_but_separate_from_compressor_stream(self) -> None:
-        layer = _make_attention_stub(compress_ratio=128)
-        other_layer = _make_attention_stub(compress_ratio=4)
-        device = torch.device("cuda")
-        compressor_stream = layer._get_cp_gather_stream(device)
-        swa_stream_1 = layer._get_swa_cp_gather_stream(device)
-        swa_stream_2 = layer._get_swa_cp_gather_stream(device)
-
-        self.assertIs(swa_stream_1, swa_stream_2)
-        self.assertIs(swa_stream_1, other_layer._get_swa_cp_gather_stream(device))
-        self.assertIsInstance(swa_stream_1, torch.cuda.Stream)
-        self.assertIsNot(swa_stream_1, compressor_stream)
 
 
 class HCAOverlapOrchestratorTest(unittest.TestCase):

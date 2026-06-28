@@ -8,8 +8,8 @@ orchestrator contracts that decide which CUDA-heavy path would run:
 * CSA/HCA layers use the overlapped orchestrators only when the feature gate
   says CP+CUDA+env are active; otherwise they follow the baseline path after
   the SWA pool write.
-* Deferred SWA ``kv_full`` gathers are always waited before use, and failed
-  Q-side compute drains the already-launched gather.
+* Current-layer SWA ``kv_full`` is not part of the overlap feature; it stays on
+  the synchronous gather path so the returned tensor cannot alias deferred Q.
 """
 
 from __future__ import annotations
@@ -70,14 +70,11 @@ def _make_common(
     )
 
 
-def _make_qkv(*, with_pending: bool = False) -> PrefillQKV:
-    kv_full = None if with_pending else torch.zeros(3, 2, dtype=torch.bfloat16)
+def _make_qkv() -> PrefillQKV:
     return PrefillQKV(
         qr=torch.zeros(3, 4, dtype=torch.bfloat16),
         q=torch.zeros(3, 1, 4, dtype=torch.bfloat16),
-        kv_full=kv_full,
-        kv_full_gather_handle=object() if with_pending else None,
-        kv_full_trailing_shape=(2,) if with_pending else None,
+        kv_full=torch.zeros(3, 2, dtype=torch.bfloat16),
     )
 
 
@@ -90,11 +87,10 @@ def _make_dispatch_layer(compress_ratio: int, seq: list) -> AttentionFP8:
         side_effect=lambda x, p: seq.append("common") or None
     )
     layer._prefill_compute_qkv = MagicMock(  # type: ignore[assignment]
-        side_effect=lambda x, c: seq.append("qkv") or _make_qkv(with_pending=True)
+        side_effect=lambda x, c: seq.append("qkv") or _make_qkv()
     )
     layer._ensure_prefill_kv_full = MagicMock(  # type: ignore[assignment]
-        side_effect=lambda qkv, c: seq.append("ensure")
-        or qkv._replace(kv_full=torch.zeros(3, 2, dtype=torch.bfloat16))
+        side_effect=lambda qkv, c: seq.append("ensure") or qkv
     )
     layer._prefill_write_swa_fp8_paged = MagicMock(  # type: ignore[assignment]
         side_effect=lambda c, kv: seq.append("swa_write")
@@ -201,49 +197,16 @@ class AttentionCPPrefillDispatchTest(unittest.TestCase):
 
 
 class AttentionSwaAsyncGatherTest(unittest.TestCase):
-    def test_ensure_prefill_kv_full_waits_pending_handle_once(self) -> None:
-        layer = AttentionFP8.__new__(AttentionFP8)
-        torch.nn.Module.__init__(layer)
-        common = _make_common(cp_on=True, device=torch.device("cuda"))
-        handle = object()
-        qkv = PrefillQKV(
-            qr=torch.zeros(3, 4, dtype=torch.bfloat16),
-            q=torch.zeros(3, 1, 4, dtype=torch.bfloat16),
-            kv_full=None,
-            kv_full_gather_handle=handle,
-            kv_full_trailing_shape=(2, 3),
-        )
-        gathered = torch.arange(36, dtype=torch.float32).view(6, 6)
-
-        with patch.object(
-            attention_mod,
-            "cp_wait_gather_full",
-            return_value=gathered,
-        ) as wait:
-            out = layer._ensure_prefill_kv_full(qkv, common)
-
-        wait.assert_called_once_with(handle)
-        self.assertEqual(tuple(out.kv_full.shape), (6, 2, 3))
-        self.assertIsNone(out.kv_full_gather_handle)
-        self.assertIsNone(out.kv_full_trailing_shape)
-
-    def test_prefill_compute_qkv_starts_swa_gather_before_q_compute(self) -> None:
+    def test_prefill_compute_qkv_uses_sync_current_swa_kv_full(self) -> None:
         seq: list = []
         layer = self._make_qkv_layer(seq)
         common = _make_common(cp_on=True, device=torch.device("cuda"))
-        handle = object()
-        stream = object()
-        layer._get_swa_cp_gather_stream = MagicMock(  # type: ignore[assignment]
-            return_value=stream
-        )
-
-        def fake_gather(local_2d, cp_ctx, stream=None, **kwargs):
-            seq.append(("gather_start", tuple(local_2d.shape), stream))
-            return handle
 
         with (
             patch.dict(os.environ, {"DSV4_PREFILL_CP_OVERLAP": "1"}),
-            patch.object(attention_mod, "cp_all_gather_full_async", fake_gather),
+            patch.object(
+                attention_mod, "cp_all_gather_full_varlen", lambda t, *a, **k: t
+            ),
             patch.object(attention_mod, "fused_rmsnorm_rope", lambda t, *a, **k: t),
         ):
             qkv = layer._prefill_compute_qkv(
@@ -251,49 +214,11 @@ class AttentionSwaAsyncGatherTest(unittest.TestCase):
                 common,
             )
 
-        self.assertEqual(seq[0], "lin_wkv")
-        self.assertEqual(seq[1], ("gather_start", (3, 6), stream))
-        self.assertEqual(seq[2], "lin_wq_a")
-        # q_lora_b + RoPE are deferred to _materialize_prefill_q so the big Q
-        # buffer can reuse the union workspace storage; not run here.
+        self.assertEqual(seq, ["lin_wq_a", "lin_wkv"])
+        # q_lora_b + RoPE are deferred to _materialize_prefill_q; not run here.
         self.assertNotIn("lin_wq_b", seq)
         self.assertIsNone(qkv.q)
-        self.assertIs(qkv.kv_full_gather_handle, handle)
-        self.assertIsNone(qkv.kv_full)
-        self.assertEqual(qkv.kv_full_trailing_shape, (2, 3))
-
-    def test_prefill_compute_qkv_waits_swa_gather_if_q_compute_raises(self) -> None:
-        seq: list = []
-        layer = self._make_qkv_layer(seq, fail_q=True)
-        common = _make_common(cp_on=True, device=torch.device("cuda"))
-        handle = object()
-        layer._get_swa_cp_gather_stream = MagicMock(  # type: ignore[assignment]
-            return_value=object()
-        )
-
-        with (
-            patch.dict(os.environ, {"DSV4_PREFILL_CP_OVERLAP": "1"}),
-            patch.object(
-                attention_mod,
-                "cp_all_gather_full_async",
-                lambda *a, **k: seq.append("gather_start") or handle,
-            ),
-            patch.object(
-                attention_mod,
-                "cp_wait_gather_full",
-                lambda h: seq.append(("wait", h))
-                or torch.zeros(6, 6, dtype=torch.bfloat16),
-            ),
-            patch.object(attention_mod, "fused_rmsnorm_rope", lambda t, *a, **k: t),
-        ):
-            with self.assertRaisesRegex(RuntimeError, "q failed"):
-                layer._prefill_compute_qkv(
-                    torch.zeros(3, 4, dtype=torch.bfloat16),
-                    common,
-                )
-
-        self.assertIn("gather_start", seq)
-        self.assertIn(("wait", handle), seq)
+        self.assertIsNotNone(qkv.kv_full)
 
     def test_materialize_prefill_q_reuses_wq_b_output_for_rope(self) -> None:
         # The deferred q_lora_b + RoPE now live in _materialize_prefill_q, which
