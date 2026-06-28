@@ -60,7 +60,10 @@ class QWenV2Weight(ModelDeployWeightInfo):
             self.weight_style = WeightStyle.TRT_ENGINE
         if self._exist(weight_keys, "layers.0.input_layernorm.weight"):
             self.model_prefix = ""
-        self.transformer_prefix = self.model_prefix + self.prefix
+        # HF nests the text tower as <outer_prefix>model.* (e.g. multimodal
+        # checkpoints use "language_model.model."), so the outer prefix must
+        # come first. model_prefix + prefix would yield "model.language_model.".
+        self.transformer_prefix = self.prefix + self.model_prefix
         logging.info(f"weight_style: {self.weight_style}")
 
     def _get_weight_info(self):

@@ -34,7 +34,14 @@ _DEFAULT_VIDEO_PLACEHOLDER = "<|kimi_k25_video_placeholder|>"
 def _read_top_config(ckpt_path: str) -> Dict[str, Any]:
     config_path = os.path.join(ckpt_path, "config.json")
     if not os.path.exists(config_path):
-        return {}
+        # Returning {} here silently produced a misconfigured model (missing
+        # text/quantization config) instead of failing fast on a bad path.
+        raise FileNotFoundError(
+            "KimiK25._read_top_config: config.json not found at "
+            + config_path + " (ckpt_path=" + repr(ckpt_path) + "). "
+            "Verify CHECKPOINT_PATH env / model_path arg is correct "
+            "and the model dir is mounted on this host."
+        )
     with open(config_path, "r") as f:
         return json.load(f)
 

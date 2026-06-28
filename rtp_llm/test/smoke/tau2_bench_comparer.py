@@ -149,7 +149,13 @@ class Tau2BenchComparer(BaseComparer):
             urllib.request.urlretrieve(TAU2_TARBALL_URL, tarball_path)
             logging.info(f"[TAU2] extracting to {dest_dir}")
             with tarfile.open(tarball_path, "r:gz") as tar:
-                tar.extractall(path=dest_dir)
+                # filter="data" rejects unsafe members (absolute paths, ".."
+                # traversal, device/link files). Available in 3.12 and backported
+                # to 3.9.17+/3.10.12+/3.11.4+; fall back on older interpreters.
+                try:
+                    tar.extractall(path=dest_dir, filter="data")
+                except TypeError:
+                    tar.extractall(path=dest_dir)
         finally:
             try:
                 os.remove(tarball_path)

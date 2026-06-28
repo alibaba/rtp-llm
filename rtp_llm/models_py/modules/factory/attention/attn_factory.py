@@ -95,15 +95,24 @@ def _get_effective_backends(fmha_config: FMHAConfig, is_prefill: bool) -> List[s
     return [s.strip() for s in raw.split(",") if s.strip()]
 
 
+def _expand_flashinfer_alias(names: set) -> set:
+    """Expand the flashinfer alias in both directions so that the public alias
+    "flashinfer" and the canonical NAME "py_flashinfer" are treated
+    interchangeably in blocklists / known-name sets. Returns a new set."""
+    expanded = set(names)
+    if "flashinfer" in expanded:
+        expanded.add("py_flashinfer")
+    if "py_flashinfer" in expanded:
+        expanded.add("flashinfer")
+    return expanded
+
+
 def _get_blocked_backends(fmha_config: FMHAConfig) -> set:
     if not fmha_config.disable_attn_backends:
         return set()
     blocked = {s.strip() for s in fmha_config.disable_attn_backends.split(",") if s.strip()}
-    # Expand alias: "flashinfer" → also block "py_flashinfer" (the canonical NAME).
-    # This ensures the blocklist works in both auto and explicit backend modes.
-    if "flashinfer" in blocked:
-        blocked.add("py_flashinfer")
-    return blocked
+    # Expand alias so the blocklist works in both auto and explicit backend modes.
+    return _expand_flashinfer_alias(blocked)
 
 
 def _is_fmha_impl_disabled_legacy(impl_class: type, fmha_config: FMHAConfig) -> bool:
@@ -196,8 +205,7 @@ def get_fmha_impl(
             name_to_impls.get("py_flashinfer", [])
         )
     # Also expand the alias in the blocked set so auto mode honors it.
-    if "py_flashinfer" in blocked:
-        blocked.add("flashinfer")
+    blocked = _expand_flashinfer_alias(blocked)
     # Rebuild known_names after alias expansion.
     known_names = registered_names | {"auto", "none", "flashinfer"}
     for backend_name in backends:

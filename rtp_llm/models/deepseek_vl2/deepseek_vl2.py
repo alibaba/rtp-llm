@@ -20,7 +20,14 @@ class DeepSeekVLV2(BaseModel):
         config.activation_type = "gated-silu"
         config_path = os.path.join(ckpt_path, "config.json")
         if not os.path.exists(config_path):
-            return
+            # Surface the missing path explicitly instead of returning None,
+            # which would defer the failure to an opaque assert downstream.
+            raise FileNotFoundError(
+                "DeepSeekVLV2._create_config: config.json not found at "
+                + config_path + " (ckpt_path=" + repr(ckpt_path) + "). "
+                "Verify CHECKPOINT_PATH env / model_path arg is correct "
+                "and the model dir is mounted on this host."
+            )
         with open(config_path) as reader:
             content = reader.read()
             top_config_json = json.loads(content)

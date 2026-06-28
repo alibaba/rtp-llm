@@ -131,7 +131,9 @@ def _lazy_init_deep_gemm(symbols: List[str]) -> None:
     if any(symbol not in _deep_gemm_impl_new_map for symbol in symbols):
         raise ValueError(f"Invalid symbols: {symbols}")
     if all(
-        getattr(globals(), symbol_impl, None) is not None
+        # globals() is a dict: use .get(), not getattr() (which inspects dict
+        # attributes and would always return None, defeating this guard).
+        globals().get(symbol_impl) is not None
         for symbol_impl in symbol_impls
     ):
         # already initialized
