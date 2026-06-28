@@ -15,13 +15,18 @@ coroutine automatically.
 from __future__ import annotations
 
 import inspect
+import json
 import logging
 from dataclasses import dataclass
 from typing import Any, AsyncIterator, Callable, Iterator, Optional
 
 import torch
 
-from rtp_llm.config.exceptions import ExceptionCategory, ExceptionType, FtRuntimeException
+from rtp_llm.config.exceptions import (
+    ExceptionCategory,
+    ExceptionType,
+    FtRuntimeException,
+)
 from rtp_llm.config.generate_config import GenerateConfig
 from rtp_llm.dash_sc.access_log import emit_access_log, emit_query_log
 from rtp_llm.dash_sc.access_record import GrpcAccessRecord, to_optional_int
@@ -61,6 +66,7 @@ from rtp_llm.server.request_headers import (
     extract_trace_id,
 )
 from rtp_llm.utils.base_model_datatypes import GenerateInput, RequestInfo
+from rtp_llm.utils.deepseekv4_constants import DSML_PREFIX, DSML_TOOL_CALLS_MARKER
 from rtp_llm.utils.util import AtomicCounter
 
 # Phase-2 dash_sc_request_id (response infer.id) suffix; keeps client able to tell
@@ -186,8 +192,33 @@ def _encode_tag(tokenizer: Any, text: str) -> list[int]:
     return list(hf_tok.encode(text, add_special_tokens=False))
 
 
+def _decode_token_ids(tokenizer: Any, ids: list[int]) -> str:
+    hf_tok = _hf_tokenizer(tokenizer)
+    if hf_tok is None or not ids:
+        return ""
+    decode = getattr(hf_tok, "decode", None)
+    if decode is None:
+        return ""
+    # ``clean_up_tokenization_spaces`` MUST stay off: the DSML marker detection
+    # maps decoded *character* offsets back to token offsets via
+    # ``_token_offset_for_decoded_char``, which assumes ``decode(ids[:k])`` is a
+    # length-monotonic prefix of ``decode(ids)``. Space cleanup rewrites spacing
+    # non-locally and breaks that invariant, shifting the reasoning boundary.
+    try:
+        return str(decode(list(ids), clean_up_tokenization_spaces=False))
+    except TypeError:
+        # Some tokenizer shims don't accept the kwarg; fall back to plain decode.
+        try:
+            return str(decode(list(ids)))
+        except Exception:
+            return ""
+    except Exception:
+        return ""
+
+
 def _is_deepseek_v4(model_type: Optional[str]) -> bool:
-    return str(model_type or "").replace("-", "_").lower() == "deepseek_v4"
+    normalized = str(model_type or "").replace("-", "_").lower()
+    return normalized == "deepseek_v4" or normalized.startswith("deepseek_v4_")
 
 
 def _matched_echo_prefix_ids(
@@ -228,6 +259,11 @@ class _ThinkRuntime:
                              is intentionally *not* part of this gate — even with the
                              token-terminate branch off, dsv4 still needs the
                              phase-2-on-close machinery.
+      ``tool_calls_marker``  text marker that implicitly ends reasoning when DSV4
+                             starts tool-call markup before emitting ``</think>``.
+                             This is intentionally text-level rather than
+                             token-level: DSV4 tokenizers may merge ``<`` with the
+                             previous character and ``>`` with the following one.
       ``eos_token_id``       tokenizer.eos_token_id; written to dashllm
                              ``stop_token_id`` response param
       ``max_token_id``       ``len(tokenizer) - 1``; written to dashllm
@@ -240,6 +276,7 @@ class _ThinkRuntime:
     close_token_id: Optional[int] = None
     terminate_token_id: Optional[int] = None
     phase2_enabled: bool = False
+    tool_calls_marker: str = ""
     eos_token_id: Optional[int] = None
     max_token_id: Optional[int] = None
 
@@ -293,7 +330,9 @@ def build_think_runtime(
         _encode_tag(tokenizer, think_start_tag + _EMPTY_THINK_BODY + think_end_tag)
     )
     close_token_id = int(eos_tokens[0]) if eos_tokens else None
-    phase2_enabled = _is_deepseek_v4(model_type) and bool(empty_tokens)
+    is_dsv4 = _is_deepseek_v4(model_type)
+    phase2_enabled = is_dsv4 and bool(empty_tokens)
+    tool_calls_marker = DSML_TOOL_CALLS_MARKER if is_dsv4 else ""
     return _ThinkRuntime(
         bos_tokens=bos_tokens,
         eos_tokens=eos_tokens,
@@ -301,6 +340,7 @@ def build_think_runtime(
         close_token_id=close_token_id,
         terminate_token_id=term_id,
         phase2_enabled=phase2_enabled,
+        tool_calls_marker=tool_calls_marker,
         eos_token_id=eos_tid,
         max_token_id=max_tid,
     )
@@ -357,6 +397,174 @@ def _split_on_first_close(
                     tail_start += len(rest)
             return i, list(generated_ids[tail_start:])
     return None, list(generated_ids)
+
+
+def _longest_suffix_prefix_text_len(text: str, prefix: str) -> int:
+    max_len = min(len(text), max(0, len(prefix) - 1))
+    for n in range(max_len, 0, -1):
+        if text[-n:] == prefix[:n]:
+            return n
+    return 0
+
+
+def _token_offset_for_decoded_char(
+    ids: list[int], tokenizer: Any, char_offset: int
+) -> int:
+    if char_offset <= 0:
+        return 0
+    if not ids:
+        return 0
+    decoded_len_cache: dict[int, int] = {0: 0}
+
+    def decoded_prefix_len(token_count: int) -> int:
+        if token_count not in decoded_len_cache:
+            decoded_len_cache[token_count] = len(
+                _decode_token_ids(tokenizer, ids[:token_count])
+            )
+        return decoded_len_cache[token_count]
+
+    total_len = decoded_prefix_len(len(ids))
+    if char_offset >= total_len:
+        return len(ids)
+
+    lo, hi = 1, len(ids)
+    while lo < hi:
+        mid = (lo + hi) // 2
+        if decoded_prefix_len(mid) >= char_offset:
+            hi = mid
+        else:
+            lo = mid + 1
+    boundary = lo
+    if decoded_prefix_len(boundary) == char_offset:
+        return boundary
+    return max(0, boundary - 1)
+
+
+def _find_dsv4_tool_call_marker_offset(
+    ids: list[int], marker: str, tokenizer: Any, text: Optional[str] = None
+) -> Optional[int]:
+    if not ids or not marker:
+        return None
+    try:
+        if text is None:
+            text = _decode_token_ids(tokenizer, ids)
+        marker_char_offset = text.find(marker)
+        if marker_char_offset < 0:
+            return None
+        return _token_offset_for_decoded_char(ids, tokenizer, marker_char_offset)
+    except Exception:
+        return None
+
+
+def _dsv4_tool_call_marker_pending_token_len(
+    ids: list[int], marker: str, tokenizer: Any, text: Optional[str] = None
+) -> int:
+    if not ids or not marker:
+        return 0
+    try:
+        if text is None:
+            text = _decode_token_ids(tokenizer, ids)
+        hold_chars = _longest_suffix_prefix_text_len(text, marker)
+        if hold_chars <= 0:
+            return 0
+        suffix_char_offset = len(text) - hold_chars
+        suffix_token_offset = _token_offset_for_decoded_char(
+            ids, tokenizer, suffix_char_offset
+        )
+        return max(0, len(ids) - suffix_token_offset)
+    except Exception:
+        return 0
+
+
+def _first_token_offset(ids: list[int], token_id: Optional[int]) -> Optional[int]:
+    if token_id is None:
+        return None
+    try:
+        return ids.index(token_id)
+    except ValueError:
+        return None
+
+
+def _earliest_boundary(
+    *items: tuple[str, Optional[int]],
+) -> tuple[Optional[str], Optional[int]]:
+    candidates = [(name, offset) for name, offset in items if offset is not None]
+    if not candidates:
+        return None, None
+    return min(candidates, key=lambda item: item[1])
+
+
+def _is_dsv4_dsml_begin(text: Any) -> bool:
+    """True if ``text`` opens a DSV4 DSML grammar.
+
+    Matches the ``<｜DSML｜`` prefix rather than only ``<｜DSML｜tool_calls>`` so
+    grammars expressed via the inner ``invoke`` trigger (which legitimately
+    follows the tool-call marker) are recognized too. Non-DSV4 grammars
+    (``json_object``/``regex``/other tool formats like ``<tool_call>``) never
+    start with ``<｜DSML｜``, so this stays a precise DSV4 signal.
+    """
+    return isinstance(text, str) and text.startswith(DSML_PREFIX)
+
+
+def _format_marks_dsv4_tool_call(fmt: Any) -> bool:
+    if not isinstance(fmt, dict):
+        return False
+    fmt_type = fmt.get("type")
+    if fmt_type == "tag":
+        return _is_dsv4_dsml_begin(fmt.get("begin"))
+    if fmt_type == "sequence":
+        elements = fmt.get("elements")
+        if not isinstance(elements, list) or not elements:
+            return False
+        first = elements[0]
+        return (
+            isinstance(first, dict)
+            and first.get("type") == "const_string"
+            and _is_dsv4_dsml_begin(first.get("value"))
+        )
+    if fmt_type == "triggered_tags":
+        triggers = fmt.get("triggers")
+        if isinstance(triggers, list) and any(_is_dsv4_dsml_begin(t) for t in triggers):
+            return True
+        tags = fmt.get("tags")
+        if isinstance(tags, list) and any(
+            isinstance(tag, dict) and _is_dsv4_dsml_begin(tag.get("begin"))
+            for tag in tags
+        ):
+            return True
+    return False
+
+
+def _legacy_structural_tag_marks_dsv4_tool_call(value: dict) -> bool:
+    """Detect DSV4 tool-call grammar in the legacy ``structures``/``triggers``
+    schema (the non-``format`` shape that ``validate_structural_tag_shape``
+    still accepts)."""
+    triggers = value.get("triggers")
+    if isinstance(triggers, list) and any(_is_dsv4_dsml_begin(t) for t in triggers):
+        return True
+    structures = value.get("structures")
+    if isinstance(structures, list):
+        for st in structures:
+            if isinstance(st, dict) and _is_dsv4_dsml_begin(st.get("begin")):
+                return True
+    return False
+
+
+def _has_dsv4_tool_call_structural_tag(generate_config: Any) -> bool:
+    value = getattr(generate_config, "structural_tag", None)
+    if not value:
+        return False
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except Exception:
+            return False
+    if not isinstance(value, dict):
+        return False
+    fmt = value.get("format")
+    if isinstance(fmt, dict):
+        return _format_marks_dsv4_tool_call(fmt)
+    return _legacy_structural_tag_marks_dsv4_tool_call(value)
 
 
 def _make_generate_input(
@@ -595,11 +803,19 @@ async def iter_real_model_stream_infer(
         # ``runtime.phase2_enabled`` is the init-time gate (model_type + empty_tokens
         # availability). ``in_think_mode`` is per-request — ``add_thinking_params``
         # sets it from generate_config and a request can override it.
-        phase2_enabled = runtime.phase2_enabled and bool(
-            getattr(generate_config, "in_think_mode", False)
-        )
+        in_think_mode = bool(getattr(generate_config, "in_think_mode", False))
+        phase2_enabled = runtime.phase2_enabled and in_think_mode
         cumulative_sent_ids: list[int] = []
         generate_think_token_num: Optional[int] = None
+        tool_call_marker = runtime.tool_calls_marker
+        # The DSML tool-call marker only implies an *implicit reasoning boundary*,
+        # so it is only meaningful while thinking. With ``in_think_mode=False``
+        # there is no reasoning to split: the tool call is generated directly
+        # (grammar applied by the backend via ``structural_tag``), and fabricating
+        # a ``generate_think_token_num`` here would wrongly tag leading content as
+        # reasoning. Gate it on ``in_think_mode`` to mirror ``phase2_enabled``.
+        tool_call_marker_active = bool(tool_call_marker) and in_think_mode
+        pending_tool_call_marker_ids: list[int] = []
         generate_input = _make_generate_input(
             request_id=rtp_llm_request_id,
             input_ids_list=input_ids_list,
@@ -662,6 +878,78 @@ async def iter_real_model_stream_infer(
                 )
                 yield (response, stats) if yield_access_stats else response
                 continue
+            force_phase2_boundary: Optional[int] = None
+            if generate_think_token_num is None and tool_call_marker_active:
+                combined_ids = pending_tool_call_marker_ids + generated_ids
+                # Decode the small window once and reuse it for both the
+                # full-marker search and the partial-prefix hold check, so the
+                # reasoning hot path pays at most one decode per chunk.
+                combined_text = _decode_token_ids(tokenizer, combined_ids)
+                marker_offset = _find_dsv4_tool_call_marker_offset(
+                    combined_ids, tool_call_marker, tokenizer, text=combined_text
+                )
+                close_candidate = _first_token_offset(
+                    combined_ids, think_close_token_id
+                )
+                term_candidate = (
+                    _first_token_offset(combined_ids, term_id)
+                    if phase2_enabled and not phase2_triggered
+                    else None
+                )
+                boundary_kind, boundary_offset = _earliest_boundary(
+                    ("close", close_candidate),
+                    ("term", term_candidate),
+                    ("tool_call_marker", marker_offset),
+                )
+                if boundary_kind == "tool_call_marker" and boundary_offset is not None:
+                    pending_tool_call_marker_ids = []
+                    generated_ids = combined_ids
+                    tool_call_marker_active = False
+                    if phase2_enabled and _has_dsv4_tool_call_structural_tag(
+                        generate_config
+                    ):
+                        force_phase2_boundary = boundary_offset
+                        logging.info(
+                            "[DashScGrpc] [%s] DSV4 tool-call marker ended thinking; "
+                            "switch to phase-2 structural_tag grammar",
+                            tag,
+                        )
+                    else:
+                        echo_len = (
+                            len(matched_echo_ids)
+                            if should_echo and not echoed and generated_ids
+                            else 0
+                        )
+                        generate_think_token_num = (
+                            len(cumulative_sent_ids) + echo_len + boundary_offset
+                        )
+                        logging.info(
+                            "[DashScGrpc] [%s] DSV4 tool-call marker ended thinking; "
+                            "continue same stream for downstream tool parser",
+                            tag,
+                        )
+                elif boundary_kind is not None:
+                    pending_tool_call_marker_ids = []
+                    generated_ids = combined_ids
+                else:
+                    hold_len = (
+                        0
+                        if out_py.finished
+                        else _dsv4_tool_call_marker_pending_token_len(
+                            combined_ids,
+                            tool_call_marker,
+                            tokenizer,
+                            text=combined_text,
+                        )
+                    )
+                    if hold_len:
+                        generated_ids = combined_ids[:-hold_len]
+                        pending_tool_call_marker_ids = combined_ids[-hold_len:]
+                    else:
+                        generated_ids = combined_ids
+                        pending_tool_call_marker_ids = []
+                    if not generated_ids and not out_py.finished:
+                        continue
             ids_for_accounting = generated_ids
             if should_echo and not echoed and generated_ids:
                 ids_for_accounting = matched_echo_ids + generated_ids
@@ -690,18 +978,25 @@ async def iter_real_model_stream_infer(
                         len(cumulative_sent_ids) + close_offset + 1
                     )
                     # Natural ``</think>`` close keeps the stream single-phase
-                    # (DashLLM-aligned). Phase-2 is exclusively triggered by
-                    # the terminate-token-id (DSV4 token 1) path below — see
-                    # the comment block near ``phase2_triggered`` init.
+                    # (DashLLM-aligned). Phase-2 is reserved for explicit
+                    # think-abort boundaries: DSV4 token 1, or a DSV4 tool-call
+                    # marker when a matching structural_tag grammar is active.
             if (
                 phase2_enabled
                 and not phase2_triggered
-                and term_id is not None
                 and generate_think_token_num is None
                 and generated_ids
-                and term_id in generated_ids
+                and (
+                    force_phase2_boundary is not None
+                    or (term_id is not None and term_id in generated_ids)
+                )
             ):
-                generated_ids = generated_ids[: generated_ids.index(term_id)]
+                phase2_cut_idx = (
+                    force_phase2_boundary
+                    if force_phase2_boundary is not None
+                    else generated_ids.index(term_id)
+                )
+                generated_ids = generated_ids[:phase2_cut_idx]
                 ids_for_accounting = generated_ids
                 if should_echo and not echoed and generated_ids:
                     ids_for_accounting = matched_echo_ids + generated_ids
@@ -811,6 +1106,7 @@ async def iter_real_model_stream_infer(
                 generate_think_token_num=generate_think_token_num,
                 finish_reason_override=finish_reason_override,
                 _request_shape=request_shape,
+                token_ids=generated_ids,
             )
             if should_echo and not echoed and generated_ids:
                 if prepend_to_generated_ids_tensor(
@@ -857,10 +1153,10 @@ async def iter_real_model_stream_infer(
             yield (response, stats) if yield_access_stats else response
             return
         # No implicit natural-finish phase-2 trigger here. DashLLM-aligned
-        # policy: phase-2 is exclusively initiated by terminate_token_id
-        # (DSV4 token 1) in the think phase. If phase-1 reaches stream end
-        # without ever emitting close or term token, treat the whole stream
-        # as reasoning content — do NOT silently restart with empty-think.
+        # policy: phase-2 is initiated only by explicit think-abort boundaries
+        # (DSV4 token 1, or tool-call marker + matching structural_tag grammar).
+        # If phase-1 reaches stream end without such a boundary, do NOT silently
+        # restart with empty-think.
         if phase2_needed:
             await _close_async_stream_if_possible(stream, tag)
         if phase2_needed and not phase2_triggered:

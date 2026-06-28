@@ -36,6 +36,7 @@ from rtp_llm.openai.renderers.sglang_helpers.function_call.deepseekv4_detector i
 )
 from rtp_llm.openai.renderers.sglang_helpers.reasoning_parser import ReasoningParser
 from rtp_llm.utils.base_model_datatypes import GenerateOutput
+from rtp_llm.utils.deepseekv4_constants import DSML_PREFIX, DSML_TOOL_CALLS_MARKER
 
 _GRAMMAR_RESPONSE_FORMAT_TYPES = {
     "json_object",
@@ -43,8 +44,6 @@ _GRAMMAR_RESPONSE_FORMAT_TYPES = {
     "regex",
     "ebnf",
 }
-DSML_PREFIX = "<｜DSML｜"
-DSML_TOOL_CALLS_MARKER = f"{DSML_PREFIX}tool_calls>"
 
 
 def _dsv4_renderer_debug_enabled() -> bool:

@@ -17,6 +17,7 @@ from rtp_llm.openai.renderers.sglang_helpers.function_call.core_types import (
 from rtp_llm.openai.renderers.sglang_helpers.function_call.utils import (
     _find_common_prefix,
 )
+from rtp_llm.utils.deepseekv4_constants import DSML_TOOL_CALLS_MARKER
 
 logger = logging.getLogger(__name__)
 
@@ -92,7 +93,7 @@ class DeepSeekV4Detector(BaseFormatDetector):
 
     def __init__(self, encoding_module=None, thinking_mode: str = "chat"):
         super().__init__()
-        self.bot_token = "<｜DSML｜tool_calls>"
+        self.bot_token = DSML_TOOL_CALLS_MARKER
         self.eot_token = "</｜DSML｜tool_calls>"
         self.invoke_end_token = "</｜DSML｜invoke>"
         self.parameter_regex = r'<｜DSML｜parameter\s+name="([^"]+)"\s+string="([^"]+)"\s*>(.*?)</｜DSML｜parameter>'

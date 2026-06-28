@@ -13,6 +13,8 @@ import json
 import logging
 import struct
 import unittest
+from dataclasses import replace
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import torch
@@ -38,12 +40,31 @@ from rtp_llm.dash_sc.codec import (
 from rtp_llm.dash_sc.inference.servicer import (
     DashScInferenceServicer,
     _dash_error_spec_for_ft_exception,
+    _has_dsv4_tool_call_structural_tag,
     build_think_runtime,
     iter_real_model_stream_infer,
 )
 from rtp_llm.dash_sc.proto import predict_v2_pb2
 from rtp_llm.ops import RoleType
 from rtp_llm.utils.base_model_datatypes import AuxInfo, GenerateOutput, GenerateOutputs
+from rtp_llm.utils.deepseekv4_constants import DSML_TOOL_CALLS_MARKER
+
+_DSML_TOOL_CALL_MARKER_IDS = [30, 128825, 72461, 4941, 12548, 32]
+_DSML_TOOL_CALL_PREFIX_IDS = [30, 128825, 72461, 4941, 12548]
+_DSML_TOOL_CALL_MARKER_NEWLINE_IDS = [30, 128825, 72461, 4941, 12548, 1018]
+_DSML_TOOL_CALL_MARKER_JSON_IDS = [30, 128825, 72461, 4941, 12548, 31923]
+_DSML_TOOL_CALL_MARKER_INVOKE_IDS = [
+    30,
+    128825,
+    72461,
+    4941,
+    12548,
+    5451,
+    128825,
+    40148,
+    5406,
+]
+_DSML_TOOL_CALL_LEFT_SPACE_IDS = [818, 128825, 72461, 4941, 12548, 32]
 
 
 def _add_input_tensor(
@@ -156,10 +177,38 @@ class _FakeTokenizer:
 
     def __init__(self, mapping: dict[str, list[int]]):
         self._mapping = mapping
+        self._decode_mapping = {tuple(v): k for k, v in mapping.items()}
+        self._token_decode_mapping: dict[int, str] = {}
+        for text, ids in mapping.items():
+            if len(ids) == 1:
+                self._token_decode_mapping[int(ids[0])] = text
         self.encode_calls: list[tuple[str, bool]] = []
 
     def encode(self, text, add_special_tokens=True):
         self.encode_calls.append((text, add_special_tokens))
+        return list(self._mapping[text])
+
+    def decode(self, ids):
+        key = tuple(int(i) for i in ids)
+        if key in self._decode_mapping:
+            return self._decode_mapping[key]
+        return "".join(
+            self._token_decode_mapping.get(int(i), f"¤{int(i)}¤") for i in ids
+        )
+
+
+class _EncodeOnlyTokenizer:
+    eos_token_id = 2
+    vocab_size = 200000
+
+    def __init__(self, mapping: dict[str, list[int]]):
+        self._mapping = mapping
+
+    def __len__(self) -> int:
+        return self.vocab_size
+
+    def encode(self, text, add_special_tokens=True):
+        del add_special_tokens
         return list(self._mapping[text])
 
 
@@ -177,8 +226,151 @@ def _dsv4_tokenizer() -> _FakeTokenizer:
             "</think>\n\n": [128822, 271],
             "<think>\n\n</think>\n\n": [128821, 271, 128822, 271],
             "</think>": [128822],
+            "<": [30],
+            "｜DSML｜": [128825],
+            "tool": [72461],
+            "_c": [4941],
+            "alls": [12548],
+            ">": [32],
+            ">\n": [1018],
+            ">{": [31923],
+            "><": [5451],
+            "invoke": [5406],
+            " <": [818],
+            DSML_TOOL_CALLS_MARKER[:-1]: _DSML_TOOL_CALL_PREFIX_IDS,
+            DSML_TOOL_CALLS_MARKER: _DSML_TOOL_CALL_MARKER_IDS,
+            f"{DSML_TOOL_CALLS_MARKER}\n": _DSML_TOOL_CALL_MARKER_NEWLINE_IDS,
+            f"{DSML_TOOL_CALLS_MARKER}{{": _DSML_TOOL_CALL_MARKER_JSON_IDS,
+            f"{DSML_TOOL_CALLS_MARKER}<｜DSML｜invoke": (
+                _DSML_TOOL_CALL_MARKER_INVOKE_IDS
+            ),
+            f" {DSML_TOOL_CALLS_MARKER}": _DSML_TOOL_CALL_LEFT_SPACE_IDS,
         }
     )
+
+
+class BuildThinkRuntimeTest(unittest.TestCase):
+    def test_deepseek_v4_variant_model_types_enable_tool_call_marker(self) -> None:
+        for model_type in (
+            "deepseek_v4",
+            "deepseek-v4-pro",
+            "deepseek_v4_flash",
+            "deepseek_v4_mtp",
+        ):
+            with self.subTest(model_type=model_type):
+                runtime = build_think_runtime(
+                    _dsv4_tokenizer(), _GenerateEnvCfg(), model_type
+                )
+                self.assertTrue(runtime.phase2_enabled)
+                self.assertEqual(runtime.tool_calls_marker, DSML_TOOL_CALLS_MARKER)
+
+    def test_deepseek_v4_marker_detection_does_not_encode_marker(
+        self,
+    ) -> None:
+        tok = _FakeTokenizer(
+            {
+                "<think>\n": [128821, 198],
+                "</think>\n\n": [128822, 271],
+                "<think>\n\n</think>\n\n": [128821, 271, 128822, 271],
+            }
+        )
+
+        runtime = build_think_runtime(tok, _GenerateEnvCfg(), "deepseek_v4")
+
+        self.assertEqual(runtime.tool_calls_marker, DSML_TOOL_CALLS_MARKER)
+        self.assertNotIn((DSML_TOOL_CALLS_MARKER, False), tok.encode_calls)
+        self.assertNotIn((DSML_TOOL_CALLS_MARKER[:-1], False), tok.encode_calls)
+
+
+class HasDsv4ToolCallStructuralTagTest(unittest.TestCase):
+    """Covers ``_has_dsv4_tool_call_structural_tag`` across every structural_tag
+    shape accepted by ``validate_structural_tag_shape`` (modern ``format`` with
+    ``tag``/``sequence``/``triggered_tags`` and the legacy
+    ``structures``/``triggers``)."""
+
+    @staticmethod
+    def _detect(structural_tag) -> bool:
+        return _has_dsv4_tool_call_structural_tag(
+            SimpleNamespace(structural_tag=structural_tag)
+        )
+
+    def test_format_tag_begin(self) -> None:
+        tag = {
+            "format": {
+                "type": "tag",
+                "begin": f"{DSML_TOOL_CALLS_MARKER}\n",
+                "content": {"type": "json_schema", "json_schema": {"type": "object"}},
+                "end": "\n</｜DSML｜tool_calls>",
+            }
+        }
+        self.assertTrue(self._detect(tag))
+        # Same payload as a JSON string (the on-the-wire form).
+        self.assertTrue(self._detect(json.dumps(tag, ensure_ascii=False)))
+
+    def test_format_sequence_first_const_string(self) -> None:
+        tag = {
+            "format": {
+                "type": "sequence",
+                "elements": [
+                    {"type": "const_string", "value": f"{DSML_TOOL_CALLS_MARKER}\n"},
+                    {"type": "tags_with_separator"},
+                    {"type": "const_string", "value": "\n</｜DSML｜tool_calls>"},
+                ],
+            }
+        }
+        self.assertTrue(self._detect(tag))
+
+    def test_format_triggered_tags_trigger_matches_dsml_prefix(self) -> None:
+        # The inner invoke grammar legitimately triggers on ``<｜DSML｜invoke``
+        # (which follows the tool-call marker), so the DSML prefix must count.
+        tag = {
+            "format": {
+                "type": "triggered_tags",
+                "triggers": ["<｜DSML｜invoke"],
+                "tags": [
+                    {
+                        "type": "tag",
+                        "begin": '<｜DSML｜invoke name="get_weather">',
+                        "end": "</｜DSML｜invoke>",
+                    }
+                ],
+            }
+        }
+        self.assertTrue(self._detect(tag))
+
+    def test_legacy_structures_and_triggers(self) -> None:
+        tag = {
+            "structures": [
+                {
+                    "begin": f"{DSML_TOOL_CALLS_MARKER}\n",
+                    "end": "\n</｜DSML｜tool_calls>",
+                }
+            ],
+            "triggers": [DSML_TOOL_CALLS_MARKER],
+        }
+        self.assertTrue(self._detect(tag))
+        self.assertTrue(self._detect(json.dumps(tag, ensure_ascii=False)))
+
+    def test_legacy_trigger_only(self) -> None:
+        tag = {"structures": [{"begin": "<other>"}], "triggers": ["<｜DSML｜invoke"]}
+        self.assertTrue(self._detect(tag))
+
+    def test_non_dsv4_grammar_is_not_detected(self) -> None:
+        tag = {
+            "format": {
+                "type": "tag",
+                "begin": "<tool_call>",
+                "end": "</tool_call>",
+            }
+        }
+        self.assertFalse(self._detect(tag))
+
+    def test_missing_or_malformed_structural_tag(self) -> None:
+        self.assertFalse(self._detect(None))
+        self.assertFalse(self._detect(""))
+        self.assertFalse(self._detect("not-json"))
+        self.assertFalse(self._detect({"format": {"type": "tag"}}))
+        self.assertFalse(self._detect({"format": {"type": "sequence", "elements": []}}))
 
 
 async def _drain(aiter):
@@ -408,9 +600,7 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["status_code"], 503)
         self.assertIn("route failed", payload["status_message"])
         self.assertEqual(_finish_reason(chunks[0]), LLMFinishReason.TASK_LIST_FULL)
-        self.assertEqual(
-            access_agg.backend_error_code, "8500_ROUTE_ERROR"
-        )
+        self.assertEqual(access_agg.backend_error_code, "8500_ROUTE_ERROR")
 
     async def test_stream_exception_yields_error_message(self) -> None:
         req = self._minimal_request()
@@ -704,6 +894,788 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
             chunks[1].infer_response.parameters["generate_think_token_num"].int64_param,
             3,
         )
+
+    async def test_deepseek_v4_token1_phase2_survives_tokenizer_without_decode(
+        self,
+    ) -> None:
+        req = self._minimal_request()
+        phase1 = GenerateOutputs(
+            generate_outputs=[
+                GenerateOutput(
+                    output_ids=torch.tensor([10, 1, 99], dtype=torch.int32),
+                    finished=False,
+                    aux_info=AuxInfo(input_len=4, reuse_len=0),
+                )
+            ]
+        )
+        phase2 = GenerateOutputs(
+            generate_outputs=[
+                GenerateOutput(
+                    output_ids=torch.tensor([20], dtype=torch.int32),
+                    finished=True,
+                    aux_info=AuxInfo(input_len=4, reuse_len=0),
+                )
+            ]
+        )
+        visitor = _MultiStreamVisitor(
+            [_FakeAsyncStream([phase1]), _FakeAsyncStream([phase2])]
+        )
+        tok = _EncodeOnlyTokenizer(
+            {
+                "<think>\n": [128821, 198],
+                "</think>\n\n": [128822, 271],
+                "<think>\n\n</think>\n\n": [128821, 271, 128822, 271],
+                "</think>": [128822],
+            }
+        )
+        env_cfg = _GenerateEnvCfg()
+
+        chunks = await _drain(
+            iter_real_model_stream_infer(
+                req,
+                [7, 8, 128821],
+                SamplingParams(),
+                OtherParams(enable_thinking=True),
+                visitor,
+                rtp_llm_request_id=100,
+                echo_prefix_ids=[128821, 198],
+                tokenizer=tok,
+                generate_env_config=env_cfg,
+                think_runtime=build_think_runtime(tok, env_cfg, "deepseek_v4"),
+                phase2_request_id_factory=lambda: 200,
+            )
+        )
+
+        self.assertEqual(visitor.enqueue_called, 2)
+        self.assertEqual(_gen_ids(chunks[0]), [128821, 10])
+        self.assertEqual(_gen_ids(chunks[1]), [128822, 271])
+        self.assertEqual(_gen_ids(chunks[2]), [20])
+        self.assertEqual(chunks[2].infer_response.id, "trace-real-2")
+        self.assertEqual(
+            chunks[1].infer_response.parameters["generate_think_token_num"].int64_param,
+            2,
+        )
+
+    async def test_deepseek_v4_tool_call_marker_sets_think_boundary_same_stream(
+        self,
+    ) -> None:
+        req = self._minimal_request()
+        marker = _DSML_TOOL_CALL_MARKER_IDS
+        phase1_a = GenerateOutputs(
+            generate_outputs=[
+                GenerateOutput(
+                    output_ids=torch.tensor([10] + marker[:2], dtype=torch.int32),
+                    finished=False,
+                    aux_info=AuxInfo(input_len=4, reuse_len=0),
+                )
+            ]
+        )
+        phase1_b = GenerateOutputs(
+            generate_outputs=[
+                GenerateOutput(
+                    output_ids=torch.tensor(marker[2:] + [20], dtype=torch.int32),
+                    finished=True,
+                    aux_info=AuxInfo(input_len=4, reuse_len=0),
+                )
+            ]
+        )
+        visitor = _MultiStreamVisitor([_FakeAsyncStream([phase1_a, phase1_b])])
+        tok = _dsv4_tokenizer()
+        env_cfg = _GenerateEnvCfg()
+
+        chunks = await _drain(
+            iter_real_model_stream_infer(
+                req,
+                [7, 8, 128821],
+                SamplingParams(),
+                OtherParams(enable_thinking=True),
+                visitor,
+                rtp_llm_request_id=100,
+                echo_prefix_ids=[128821, 198],
+                tokenizer=tok,
+                generate_env_config=env_cfg,
+                think_runtime=build_think_runtime(tok, env_cfg, "deepseek_v4"),
+                phase2_request_id_factory=lambda: 200,
+            )
+        )
+
+        self.assertEqual(visitor.enqueue_called, 1)
+        self.assertEqual(_gen_ids(chunks[0]), [128821, 10])
+        self.assertNotIn(
+            "generate_think_token_num", chunks[0].infer_response.parameters
+        )
+        self.assertEqual(_gen_ids(chunks[1]), marker + [20])
+        self.assertEqual(
+            chunks[1].infer_response.parameters["generate_think_token_num"].int64_param,
+            2,
+        )
+        self.assertEqual(_finish_reason(chunks[1]), LLMFinishReason.STOP)
+
+    async def test_deepseek_v4_tool_call_marker_sets_boundary_when_phase2_disabled(
+        self,
+    ) -> None:
+        req = self._minimal_request()
+        marker = _DSML_TOOL_CALL_MARKER_IDS
+        phase1_a = GenerateOutputs(
+            generate_outputs=[
+                GenerateOutput(
+                    output_ids=torch.tensor([10] + marker[:2], dtype=torch.int32),
+                    finished=False,
+                    aux_info=AuxInfo(input_len=4, reuse_len=0),
+                )
+            ]
+        )
+        phase1_b = GenerateOutputs(
+            generate_outputs=[
+                GenerateOutput(
+                    output_ids=torch.tensor(marker[2:] + [20], dtype=torch.int32),
+                    finished=True,
+                    aux_info=AuxInfo(input_len=4, reuse_len=0),
+                )
+            ]
+        )
+        structural_tag = {
+            "format": {
+                "type": "tag",
+                "begin": f"{DSML_TOOL_CALLS_MARKER}\n",
+                "content": {"type": "json_schema", "json_schema": {"type": "object"}},
+                "end": "\n</｜DSML｜tool_calls>",
+            }
+        }
+        visitor = _MultiStreamVisitor([_FakeAsyncStream([phase1_a, phase1_b])])
+        tok = _dsv4_tokenizer()
+        env_cfg = _GenerateEnvCfg()
+        runtime = replace(
+            build_think_runtime(tok, env_cfg, "deepseek_v4"),
+            phase2_enabled=False,
+        )
+
+        chunks = await _drain(
+            iter_real_model_stream_infer(
+                req,
+                [7, 8, 128821],
+                SamplingParams(
+                    structural_tag=json.dumps(structural_tag, ensure_ascii=False),
+                ),
+                OtherParams(enable_thinking=True),
+                visitor,
+                rtp_llm_request_id=100,
+                echo_prefix_ids=[128821, 198],
+                tokenizer=tok,
+                generate_env_config=env_cfg,
+                think_runtime=runtime,
+                phase2_request_id_factory=lambda: 200,
+            )
+        )
+
+        self.assertEqual(visitor.enqueue_called, 1)
+        self.assertEqual(_gen_ids(chunks[0]), [128821, 10])
+        self.assertEqual(_gen_ids(chunks[1]), marker + [20])
+        self.assertEqual(
+            chunks[1].infer_response.parameters["generate_think_token_num"].int64_param,
+            2,
+        )
+        self.assertEqual(_finish_reason(chunks[1]), LLMFinishReason.STOP)
+
+    async def test_deepseek_v4_tool_call_marker_with_newline_sets_think_boundary(
+        self,
+    ) -> None:
+        req = self._minimal_request()
+        marker = _DSML_TOOL_CALL_MARKER_NEWLINE_IDS
+        phase1_a = GenerateOutputs(
+            generate_outputs=[
+                GenerateOutput(
+                    output_ids=torch.tensor([10] + marker[:2], dtype=torch.int32),
+                    finished=False,
+                    aux_info=AuxInfo(input_len=4, reuse_len=0),
+                )
+            ]
+        )
+        phase1_b = GenerateOutputs(
+            generate_outputs=[
+                GenerateOutput(
+                    output_ids=torch.tensor(marker[2:] + [20], dtype=torch.int32),
+                    finished=True,
+                    aux_info=AuxInfo(input_len=4, reuse_len=0),
+                )
+            ]
+        )
+        visitor = _MultiStreamVisitor([_FakeAsyncStream([phase1_a, phase1_b])])
+        tok = _dsv4_tokenizer()
+        env_cfg = _GenerateEnvCfg()
+
+        chunks = await _drain(
+            iter_real_model_stream_infer(
+                req,
+                [7, 8, 128821],
+                SamplingParams(),
+                OtherParams(enable_thinking=True),
+                visitor,
+                rtp_llm_request_id=100,
+                echo_prefix_ids=[128821, 198],
+                tokenizer=tok,
+                generate_env_config=env_cfg,
+                think_runtime=build_think_runtime(tok, env_cfg, "deepseek_v4"),
+                phase2_request_id_factory=lambda: 200,
+            )
+        )
+
+        self.assertEqual(visitor.enqueue_called, 1)
+        self.assertEqual(_gen_ids(chunks[0]), [128821, 10])
+        self.assertEqual(_gen_ids(chunks[1]), marker + [20])
+        self.assertEqual(
+            chunks[1].infer_response.parameters["generate_think_token_num"].int64_param,
+            2,
+        )
+        self.assertEqual(_finish_reason(chunks[1]), LLMFinishReason.STOP)
+
+    async def test_deepseek_v4_tool_call_marker_with_right_merged_token_sets_boundary(
+        self,
+    ) -> None:
+        for marker in (
+            _DSML_TOOL_CALL_MARKER_JSON_IDS,
+            _DSML_TOOL_CALL_MARKER_INVOKE_IDS,
+        ):
+            with self.subTest(marker=marker):
+                req = self._minimal_request()
+                phase1_a = GenerateOutputs(
+                    generate_outputs=[
+                        GenerateOutput(
+                            output_ids=torch.tensor(
+                                [10] + marker[:2], dtype=torch.int32
+                            ),
+                            finished=False,
+                            aux_info=AuxInfo(input_len=4, reuse_len=0),
+                        )
+                    ]
+                )
+                phase1_b = GenerateOutputs(
+                    generate_outputs=[
+                        GenerateOutput(
+                            output_ids=torch.tensor(
+                                marker[2:] + [20], dtype=torch.int32
+                            ),
+                            finished=True,
+                            aux_info=AuxInfo(input_len=4, reuse_len=0),
+                        )
+                    ]
+                )
+                visitor = _MultiStreamVisitor([_FakeAsyncStream([phase1_a, phase1_b])])
+                tok = _dsv4_tokenizer()
+                env_cfg = _GenerateEnvCfg()
+
+                chunks = await _drain(
+                    iter_real_model_stream_infer(
+                        req,
+                        [7, 8, 128821],
+                        SamplingParams(),
+                        OtherParams(enable_thinking=True),
+                        visitor,
+                        rtp_llm_request_id=100,
+                        echo_prefix_ids=[128821, 198],
+                        tokenizer=tok,
+                        generate_env_config=env_cfg,
+                        think_runtime=build_think_runtime(tok, env_cfg, "deepseek_v4"),
+                        phase2_request_id_factory=lambda: 200,
+                    )
+                )
+
+                self.assertEqual(visitor.enqueue_called, 1)
+                self.assertEqual(_gen_ids(chunks[0]), [128821, 10])
+                self.assertEqual(_gen_ids(chunks[1]), marker + [20])
+                self.assertEqual(
+                    chunks[1]
+                    .infer_response.parameters["generate_think_token_num"]
+                    .int64_param,
+                    2,
+                )
+                self.assertEqual(_finish_reason(chunks[1]), LLMFinishReason.STOP)
+
+    async def test_deepseek_v4_tool_call_marker_with_left_merged_token_sets_boundary(
+        self,
+    ) -> None:
+        req = self._minimal_request()
+        marker = _DSML_TOOL_CALL_LEFT_SPACE_IDS
+        phase1_a = GenerateOutputs(
+            generate_outputs=[
+                GenerateOutput(
+                    output_ids=torch.tensor([10] + marker[:1], dtype=torch.int32),
+                    finished=False,
+                    aux_info=AuxInfo(input_len=4, reuse_len=0),
+                )
+            ]
+        )
+        phase1_b = GenerateOutputs(
+            generate_outputs=[
+                GenerateOutput(
+                    output_ids=torch.tensor(marker[1:] + [20], dtype=torch.int32),
+                    finished=True,
+                    aux_info=AuxInfo(input_len=4, reuse_len=0),
+                )
+            ]
+        )
+        visitor = _MultiStreamVisitor([_FakeAsyncStream([phase1_a, phase1_b])])
+        tok = _dsv4_tokenizer()
+        env_cfg = _GenerateEnvCfg()
+
+        chunks = await _drain(
+            iter_real_model_stream_infer(
+                req,
+                [7, 8, 128821],
+                SamplingParams(),
+                OtherParams(enable_thinking=True),
+                visitor,
+                rtp_llm_request_id=100,
+                echo_prefix_ids=[128821, 198],
+                tokenizer=tok,
+                generate_env_config=env_cfg,
+                think_runtime=build_think_runtime(tok, env_cfg, "deepseek_v4"),
+                phase2_request_id_factory=lambda: 200,
+            )
+        )
+
+        self.assertEqual(visitor.enqueue_called, 1)
+        self.assertEqual(_gen_ids(chunks[0]), [128821, 10])
+        self.assertEqual(_gen_ids(chunks[1]), marker + [20])
+        self.assertEqual(
+            chunks[1].infer_response.parameters["generate_think_token_num"].int64_param,
+            2,
+        )
+        self.assertEqual(_finish_reason(chunks[1]), LLMFinishReason.STOP)
+
+    async def test_deepseek_v4_tool_call_marker_with_structural_tag_enters_phase2_grammar(
+        self,
+    ) -> None:
+        req = self._minimal_request()
+        marker = _DSML_TOOL_CALL_MARKER_IDS
+        phase1_a = GenerateOutputs(
+            generate_outputs=[
+                GenerateOutput(
+                    output_ids=torch.tensor([10] + marker[:2], dtype=torch.int32),
+                    finished=False,
+                    aux_info=AuxInfo(input_len=4, reuse_len=0),
+                )
+            ]
+        )
+        phase1_b = GenerateOutputs(
+            generate_outputs=[
+                GenerateOutput(
+                    output_ids=torch.tensor(marker[2:] + [99], dtype=torch.int32),
+                    finished=False,
+                    aux_info=AuxInfo(input_len=4, reuse_len=0),
+                )
+            ]
+        )
+        phase2 = GenerateOutputs(
+            generate_outputs=[
+                GenerateOutput(
+                    output_ids=torch.tensor([200, 201], dtype=torch.int32),
+                    finished=True,
+                    aux_info=AuxInfo(input_len=6, reuse_len=0),
+                )
+            ]
+        )
+        phase1_stream = _FakeAsyncStream([phase1_a, phase1_b])
+        structural_tag = {
+            "format": {
+                "type": "tag",
+                "begin": f"{DSML_TOOL_CALLS_MARKER}\n",
+                "content": {"type": "json_schema", "json_schema": {"type": "object"}},
+                "end": "\n</｜DSML｜tool_calls>",
+            }
+        }
+        visitor = _MultiStreamVisitor([phase1_stream, _FakeAsyncStream([phase2])])
+        tok = _dsv4_tokenizer()
+        env_cfg = _GenerateEnvCfg()
+
+        chunks = await _drain(
+            iter_real_model_stream_infer(
+                req,
+                [7, 8, 128821],
+                SamplingParams(
+                    structural_tag=json.dumps(structural_tag, ensure_ascii=False),
+                ),
+                OtherParams(enable_thinking=True),
+                visitor,
+                rtp_llm_request_id=100,
+                echo_prefix_ids=[128821, 198],
+                tokenizer=tok,
+                generate_env_config=env_cfg,
+                think_runtime=build_think_runtime(tok, env_cfg, "deepseek_v4"),
+                phase2_request_id_factory=lambda: 200,
+            )
+        )
+
+        self.assertEqual(visitor.enqueue_called, 2)
+        self.assertTrue(phase1_stream.aclose_called)
+        self.assertEqual(_gen_ids(chunks[0]), [128821, 10])
+        self.assertEqual(_gen_ids(chunks[1]), [128822, 271])
+        self.assertEqual(_gen_ids(chunks[2]), [200, 201])
+        self.assertEqual(chunks[2].infer_response.id, "trace-real-2")
+        self.assertEqual(
+            chunks[1].infer_response.parameters["generate_think_token_num"].int64_param,
+            2,
+        )
+        phase2_config = visitor.generate_inputs[1].generate_config
+        self.assertFalse(phase2_config.in_think_mode)
+        self.assertEqual(json.loads(phase2_config.structural_tag), structural_tag)
+        phase2_input_ids = visitor.generate_inputs[1].token_ids.cpu().int().tolist()
+        self.assertEqual(phase2_input_ids, [7, 8, 128821, 271, 128822, 271])
+
+    async def test_deepseek_v4_dsml_prefix_in_reasoning_released_as_content(
+        self,
+    ) -> None:
+        """A bare ``<`` (marker-prefix) held across a chunk boundary must be
+        released as reasoning content once the next chunk disproves the marker —
+        no token loss, no think boundary set."""
+        req = self._minimal_request()
+        # chunk0 ends with ``<`` (token 30) -> held as a possible marker start.
+        phase1_a = GenerateOutputs(
+            generate_outputs=[
+                GenerateOutput(
+                    output_ids=torch.tensor([10, 30], dtype=torch.int32),
+                    finished=False,
+                    aux_info=AuxInfo(input_len=4, reuse_len=0),
+                )
+            ]
+        )
+        # chunk1 is ``>`` + content -> ``<>`` is NOT the marker, release the hold.
+        phase1_b = GenerateOutputs(
+            generate_outputs=[
+                GenerateOutput(
+                    output_ids=torch.tensor([32, 20], dtype=torch.int32),
+                    finished=True,
+                    aux_info=AuxInfo(input_len=4, reuse_len=0),
+                )
+            ]
+        )
+        visitor = _MultiStreamVisitor([_FakeAsyncStream([phase1_a, phase1_b])])
+        tok = _dsv4_tokenizer()
+        env_cfg = _GenerateEnvCfg()
+
+        chunks = await _drain(
+            iter_real_model_stream_infer(
+                req,
+                [7, 8, 128821],
+                SamplingParams(),
+                OtherParams(enable_thinking=True),
+                visitor,
+                rtp_llm_request_id=100,
+                echo_prefix_ids=[128821, 198],
+                tokenizer=tok,
+                generate_env_config=env_cfg,
+                think_runtime=build_think_runtime(tok, env_cfg, "deepseek_v4"),
+                phase2_request_id_factory=lambda: 200,
+            )
+        )
+
+        self.assertEqual(visitor.enqueue_called, 1)
+        self.assertEqual(_gen_ids(chunks[0]), [128821, 10])
+        # The held ``<`` (30) is flushed together with the next chunk; nothing
+        # is dropped and no implicit reasoning boundary is created.
+        self.assertEqual(_gen_ids(chunks[1]), [30, 32, 20])
+        for chunk in chunks:
+            self.assertNotIn(
+                "generate_think_token_num", chunk.infer_response.parameters
+            )
+        self.assertEqual(_finish_reason(chunks[1]), LLMFinishReason.STOP)
+
+    async def test_deepseek_v4_held_marker_prefix_flushed_at_stream_end(
+        self,
+    ) -> None:
+        """A partial ``<｜DSML｜`` prefix still pending when the stream finishes
+        must be flushed (not swallowed)."""
+        req = self._minimal_request()
+        marker = _DSML_TOOL_CALL_MARKER_IDS
+        phase1_a = GenerateOutputs(
+            generate_outputs=[
+                GenerateOutput(
+                    output_ids=torch.tensor([10] + marker[:2], dtype=torch.int32),
+                    finished=False,
+                    aux_info=AuxInfo(input_len=4, reuse_len=0),
+                )
+            ]
+        )
+        # Stream ends with the marker still incomplete (only the prefix arrived).
+        phase1_b = GenerateOutputs(
+            generate_outputs=[
+                GenerateOutput(
+                    output_ids=torch.tensor([40], dtype=torch.int32),
+                    finished=True,
+                    aux_info=AuxInfo(input_len=4, reuse_len=0),
+                )
+            ]
+        )
+        visitor = _MultiStreamVisitor([_FakeAsyncStream([phase1_a, phase1_b])])
+        tok = _dsv4_tokenizer()
+        env_cfg = _GenerateEnvCfg()
+
+        chunks = await _drain(
+            iter_real_model_stream_infer(
+                req,
+                [7, 8, 128821],
+                SamplingParams(),
+                OtherParams(enable_thinking=True),
+                visitor,
+                rtp_llm_request_id=100,
+                echo_prefix_ids=[128821, 198],
+                tokenizer=tok,
+                generate_env_config=env_cfg,
+                think_runtime=build_think_runtime(tok, env_cfg, "deepseek_v4"),
+                phase2_request_id_factory=lambda: 200,
+            )
+        )
+
+        self.assertEqual(visitor.enqueue_called, 1)
+        self.assertEqual(_gen_ids(chunks[0]), [128821, 10])
+        self.assertEqual(_gen_ids(chunks[1]), marker[:2] + [40])
+        for chunk in chunks:
+            self.assertNotIn(
+                "generate_think_token_num", chunk.infer_response.parameters
+            )
+        self.assertEqual(_finish_reason(chunks[1]), LLMFinishReason.STOP)
+
+    async def test_deepseek_v4_natural_think_close_before_marker_keeps_single_stream(
+        self,
+    ) -> None:
+        """When ``</think>`` precedes a (partial) DSML marker in the same window,
+        the natural close wins and the stream stays single-phase."""
+        req = self._minimal_request()
+        # ``</think>`` (128822) at offset 1, then a partial DSML marker prefix.
+        phase1 = GenerateOutputs(
+            generate_outputs=[
+                GenerateOutput(
+                    output_ids=torch.tensor(
+                        [10, 128822, 30, 128825], dtype=torch.int32
+                    ),
+                    finished=True,
+                    aux_info=AuxInfo(input_len=4, reuse_len=0),
+                )
+            ]
+        )
+        visitor = _MultiStreamVisitor([_FakeAsyncStream([phase1])])
+        tok = _dsv4_tokenizer()
+        env_cfg = _GenerateEnvCfg()
+
+        chunks = await _drain(
+            iter_real_model_stream_infer(
+                req,
+                [7, 8, 128821],
+                SamplingParams(),
+                OtherParams(enable_thinking=True),
+                visitor,
+                rtp_llm_request_id=100,
+                echo_prefix_ids=[128821, 198],
+                tokenizer=tok,
+                generate_env_config=env_cfg,
+                think_runtime=build_think_runtime(tok, env_cfg, "deepseek_v4"),
+                phase2_request_id_factory=lambda: 200,
+            )
+        )
+
+        self.assertEqual(visitor.enqueue_called, 1)
+        self.assertEqual(_gen_ids(chunks[0]), [128821, 10, 128822, 30, 128825])
+        # reasoning = echo(128821) + content(10) + </think>(128822) = 3 tokens.
+        self.assertEqual(
+            chunks[0].infer_response.parameters["generate_think_token_num"].int64_param,
+            3,
+        )
+        self.assertEqual(_finish_reason(chunks[0]), LLMFinishReason.STOP)
+
+    async def test_deepseek_v4_legacy_structural_tag_enters_phase2_grammar(
+        self,
+    ) -> None:
+        """The legacy ``structures``/``triggers`` structural_tag schema must also
+        trigger phase-2 (parity with the modern ``format`` schema)."""
+        req = self._minimal_request()
+        marker = _DSML_TOOL_CALL_MARKER_IDS
+        phase1_a = GenerateOutputs(
+            generate_outputs=[
+                GenerateOutput(
+                    output_ids=torch.tensor([10] + marker[:2], dtype=torch.int32),
+                    finished=False,
+                    aux_info=AuxInfo(input_len=4, reuse_len=0),
+                )
+            ]
+        )
+        phase1_b = GenerateOutputs(
+            generate_outputs=[
+                GenerateOutput(
+                    output_ids=torch.tensor(marker[2:] + [99], dtype=torch.int32),
+                    finished=False,
+                    aux_info=AuxInfo(input_len=4, reuse_len=0),
+                )
+            ]
+        )
+        phase2 = GenerateOutputs(
+            generate_outputs=[
+                GenerateOutput(
+                    output_ids=torch.tensor([200, 201], dtype=torch.int32),
+                    finished=True,
+                    aux_info=AuxInfo(input_len=6, reuse_len=0),
+                )
+            ]
+        )
+        phase1_stream = _FakeAsyncStream([phase1_a, phase1_b])
+        structural_tag = {
+            "structures": [
+                {
+                    "begin": f"{DSML_TOOL_CALLS_MARKER}\n",
+                    "end": "\n</｜DSML｜tool_calls>",
+                }
+            ],
+            "triggers": [DSML_TOOL_CALLS_MARKER],
+        }
+        visitor = _MultiStreamVisitor([phase1_stream, _FakeAsyncStream([phase2])])
+        tok = _dsv4_tokenizer()
+        env_cfg = _GenerateEnvCfg()
+
+        chunks = await _drain(
+            iter_real_model_stream_infer(
+                req,
+                [7, 8, 128821],
+                SamplingParams(
+                    structural_tag=json.dumps(structural_tag, ensure_ascii=False),
+                ),
+                OtherParams(enable_thinking=True),
+                visitor,
+                rtp_llm_request_id=100,
+                echo_prefix_ids=[128821, 198],
+                tokenizer=tok,
+                generate_env_config=env_cfg,
+                think_runtime=build_think_runtime(tok, env_cfg, "deepseek_v4"),
+                phase2_request_id_factory=lambda: 200,
+            )
+        )
+
+        self.assertEqual(visitor.enqueue_called, 2)
+        self.assertTrue(phase1_stream.aclose_called)
+        self.assertEqual(_gen_ids(chunks[0]), [128821, 10])
+        self.assertEqual(_gen_ids(chunks[1]), [128822, 271])
+        self.assertEqual(_gen_ids(chunks[2]), [200, 201])
+        self.assertEqual(
+            chunks[1].infer_response.parameters["generate_think_token_num"].int64_param,
+            2,
+        )
+        phase2_config = visitor.generate_inputs[1].generate_config
+        self.assertFalse(phase2_config.in_think_mode)
+        self.assertEqual(json.loads(phase2_config.structural_tag), structural_tag)
+
+    async def test_deepseek_v4_non_think_mode_skips_marker_split(self) -> None:
+        """With ``in_think_mode=False`` there is no reasoning to split: the DSML
+        marker must NOT create a ``generate_think_token_num`` and the stream stays
+        single-phase, letting the backend grammar (``structural_tag``) constrain
+        the tool call directly."""
+        req = self._minimal_request()
+        marker = _DSML_TOOL_CALL_MARKER_IDS
+        # Leading content before the marker would be wrongly tagged as reasoning
+        # if the marker split fired in non-think mode.
+        phase1 = GenerateOutputs(
+            generate_outputs=[
+                GenerateOutput(
+                    output_ids=torch.tensor([10] + marker + [20], dtype=torch.int32),
+                    finished=True,
+                    aux_info=AuxInfo(input_len=2, reuse_len=0),
+                )
+            ]
+        )
+        structural_tag = {
+            "format": {
+                "type": "tag",
+                "begin": f"{DSML_TOOL_CALLS_MARKER}\n",
+                "content": {"type": "json_schema", "json_schema": {"type": "object"}},
+                "end": "\n</｜DSML｜tool_calls>",
+            }
+        }
+        visitor = _MultiStreamVisitor([_FakeAsyncStream([phase1])])
+        tok = _dsv4_tokenizer()
+        env_cfg = _GenerateEnvCfg()
+
+        chunks = await _drain(
+            iter_real_model_stream_infer(
+                req,
+                [7, 8],
+                SamplingParams(
+                    structural_tag=json.dumps(structural_tag, ensure_ascii=False),
+                ),
+                OtherParams(enable_thinking=False),
+                visitor,
+                rtp_llm_request_id=100,
+                tokenizer=tok,
+                generate_env_config=env_cfg,
+                think_runtime=build_think_runtime(tok, env_cfg, "deepseek_v4"),
+                phase2_request_id_factory=lambda: 200,
+            )
+        )
+
+        # Single stream, no frontend phase-2, marker flows through untouched.
+        self.assertEqual(visitor.enqueue_called, 1)
+        self.assertEqual(_gen_ids(chunks[0]), [10] + marker + [20])
+        for chunk in chunks:
+            self.assertNotIn(
+                "generate_think_token_num", chunk.infer_response.parameters
+            )
+        self.assertEqual(_finish_reason(chunks[0]), LLMFinishReason.STOP)
+        # The grammar is still handed to the backend for the single-phase stream.
+        phase1_config = visitor.generate_inputs[0].generate_config
+        self.assertFalse(phase1_config.in_think_mode)
+        self.assertEqual(json.loads(phase1_config.structural_tag), structural_tag)
+
+    async def test_deepseek_v4_closed_tool_call_before_late_think_close_marker_wins(
+        self,
+    ) -> None:
+        """The model writes a *closed* DSML tool call entirely inside ``<think>``
+        and only then emits the real ``</think>`` before EOS (thinking mode).
+
+        The marker (offset 1) precedes ``</think>`` (128822, offset 8) in the same
+        window, so ``_earliest_boundary`` must pick the marker. Otherwise the
+        close-driven path would set ``generate_think_token_num`` at ``</think>``,
+        trapping the entire tool call in ``reasoning_content``
+        (finish=stop, tool_calls=[])."""
+        req = self._minimal_request()
+        marker = _DSML_TOOL_CALL_MARKER_IDS
+        # [10]=reasoning, marker=tool-call open, [50]=tool body, 128822=</think>.
+        phase1 = GenerateOutputs(
+            generate_outputs=[
+                GenerateOutput(
+                    output_ids=torch.tensor(
+                        [10] + marker + [50, 128822], dtype=torch.int32
+                    ),
+                    finished=True,
+                    aux_info=AuxInfo(input_len=2, reuse_len=0),
+                )
+            ]
+        )
+        visitor = _MultiStreamVisitor([_FakeAsyncStream([phase1])])
+        tok = _dsv4_tokenizer()
+        env_cfg = _GenerateEnvCfg()
+
+        chunks = await _drain(
+            iter_real_model_stream_infer(
+                req,
+                [7, 8],
+                SamplingParams(),
+                OtherParams(enable_thinking=True),
+                visitor,
+                rtp_llm_request_id=100,
+                tokenizer=tok,
+                generate_env_config=env_cfg,
+                think_runtime=build_think_runtime(tok, env_cfg, "deepseek_v4"),
+                phase2_request_id_factory=lambda: 200,
+            )
+        )
+
+        self.assertEqual(visitor.enqueue_called, 1)
+        self.assertEqual(_gen_ids(chunks[0]), [10] + marker + [50, 128822])
+        # Boundary at the marker (offset 1), NOT at the later </think> (offset 8).
+        think_num = (
+            chunks[0].infer_response.parameters["generate_think_token_num"].int64_param
+        )
+        self.assertEqual(think_num, 1)
+        # Everything from the marker onwards (incl. the trailing </think>) is the
+        # content channel where the tool-call parser can still find the DSML.
+        self.assertEqual(_gen_ids(chunks[0])[think_num:], marker + [50, 128822])
+        self.assertEqual(_finish_reason(chunks[0]), LLMFinishReason.STOP)
 
     async def test_phase2_finished_at_max_new_tokens_reports_length(self) -> None:
         req = self._minimal_request()
