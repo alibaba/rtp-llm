@@ -205,6 +205,20 @@ def _finish_reason(chunk) -> int | None:
     return None
 
 
+def _generate_outputs(
+    output_ids: list[int], *, finished: bool = False, input_len: int = 4
+):
+    return GenerateOutputs(
+        generate_outputs=[
+            GenerateOutput(
+                output_ids=torch.tensor(output_ids, dtype=torch.int32),
+                finished=finished,
+                aux_info=AuxInfo(input_len=input_len, reuse_len=0),
+            )
+        ]
+    )
+
+
 def _dash_error_payload(chunk) -> tuple[int, dict]:
     infer = chunk.infer_response
     return (
@@ -1280,10 +1294,8 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(value, 1)
         self.assertEqual(tags["protocol"], "dash_sc_grpc")
 
-    async def test_phase2_strips_leading_thinking_then_close(self) -> None:
-        """Phase-2 model occasionally emits accidental thinking followed by
-        ``</think>`` before the real answer. The leading reasoning + close
-        sequence must be stripped so only post-close tokens reach the client."""
+    async def test_phase2_directly_yields_leading_thinking_then_close(self) -> None:
+        """Phase-2 is content-only and must not run a think-state parser."""
         req = self._minimal_request()
         phase1 = GenerateOutputs(
             generate_outputs=[
@@ -1344,18 +1356,13 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
             )
         )
 
-        # Phase-1 emits two chunks (truncated content then synthesised eos).
-        # Phase-2 sees [55, 56] (accidental thinking, buffered then dropped),
-        # then [128822, 271, 20, 21] (close + tail content). Client only sees
-        # [20, 21] from phase-2.
         phase2_chunks = [c for c in chunks if c.infer_response.id.endswith("-2")]
-        self.assertEqual(len(phase2_chunks), 1)
-        self.assertEqual(_gen_ids(phase2_chunks[0]), [20, 21])
+        self.assertEqual(len(phase2_chunks), 2)
+        self.assertEqual(_gen_ids(phase2_chunks[0]), [55, 56])
+        self.assertEqual(_gen_ids(phase2_chunks[1]), [128822, 271, 20, 21])
 
-    async def test_phase2_strips_trailing_eos_artifact(self) -> None:
-        """Phase-2 ends with a structural ``</think>\\n\\n`` closing-tag
-        artifact mirroring the empty-think prompt body. That trailing
-        sequence must not leak into ``content``."""
+    async def test_phase2_directly_yields_trailing_eos_artifact(self) -> None:
+        """Phase-2 forwards backend chunks without end-tag state handling."""
         req = self._minimal_request()
         phase1 = GenerateOutputs(
             generate_outputs=[
@@ -1408,8 +1415,84 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
 
         phase2_chunks = [c for c in chunks if c.infer_response.id.endswith("-2")]
         self.assertEqual(len(phase2_chunks), 1)
-        # Trailing [128822, 271] is stripped; only the real answer ids survive.
-        self.assertEqual(_gen_ids(phase2_chunks[0]), [30, 31, 32])
+        self.assertEqual(_gen_ids(phase2_chunks[0]), [30, 31, 32, 128822, 271])
+
+    async def test_phase2_directly_yields_split_close_tokens(self) -> None:
+        """A split close marker in phase-2 must not recreate pending behavior."""
+        req = self._minimal_request()
+        phase1 = _generate_outputs([10, 1], finished=False)
+        phase2_a = _generate_outputs([128822], finished=False)
+        phase2_b = _generate_outputs([271, 20], finished=True)
+        visitor = _MultiStreamVisitor(
+            [_FakeAsyncStream([phase1]), _FakeAsyncStream([phase2_a, phase2_b])]
+        )
+        tok = _dsv4_tokenizer()
+        env_cfg = _GenerateEnvCfg()
+
+        chunks = await _drain(
+            iter_real_model_stream_infer(
+                req,
+                [7, 8, 128821],
+                SamplingParams(),
+                OtherParams(enable_thinking=True),
+                visitor,
+                rtp_llm_request_id=100,
+                echo_prefix_ids=[128821, 198],
+                tokenizer=tok,
+                generate_env_config=env_cfg,
+                think_runtime=build_think_runtime(tok, env_cfg, "deepseek_v4"),
+                phase2_request_id_factory=lambda: 200,
+            )
+        )
+
+        phase2_chunks = [c for c in chunks if c.infer_response.id.endswith("-2")]
+        self.assertEqual(len(phase2_chunks), 2)
+        self.assertEqual(_gen_ids(phase2_chunks[0]), [128822])
+        self.assertEqual(_gen_ids(phase2_chunks[1]), [271, 20])
+
+    async def test_phase2_yields_no_close_unfinished_chunk(self) -> None:
+        """Phase-2 forwards ordinary chunks without waiting for close or finish."""
+        req = self._minimal_request()
+        phase1 = _generate_outputs([10, 1], finished=False)
+        phase2 = _generate_outputs([20], finished=False)
+        visitor = _MultiStreamVisitor(
+            [_FakeAsyncStream([phase1]), _FakeAsyncStream([phase2])]
+        )
+        tok = _dsv4_tokenizer()
+        env_cfg = _GenerateEnvCfg()
+
+        chunks = await _drain(
+            iter_real_model_stream_infer(
+                req,
+                [7, 8, 128821],
+                SamplingParams(max_new_tokens=32000, top_p=1.0),
+                OtherParams(
+                    enable_thinking=True,
+                    max_new_think_tokens=393216,
+                    timeout_ms=3600000,
+                ),
+                visitor,
+                rtp_llm_request_id=100,
+                echo_prefix_ids=[128821, 198],
+                tokenizer=tok,
+                generate_env_config=env_cfg,
+                think_runtime=build_think_runtime(tok, env_cfg, "deepseek_v4"),
+                phase2_request_id_factory=lambda: 200,
+            )
+        )
+
+        self.assertEqual(visitor.enqueue_called, 2)
+        self.assertTrue(visitor.generate_inputs[1].generate_config.is_streaming)
+        phase2_chunks = [c for c in chunks if c.infer_response.id.endswith("-2")]
+        self.assertEqual(len(phase2_chunks), 1)
+        self.assertEqual(_gen_ids(phase2_chunks[0]), [20])
+        self.assertEqual(
+            phase2_chunks[0].infer_response.parameters[
+                "incremental_output"
+            ].int64_param,
+            1,
+        )
+        self.assertEqual(_finish_reason(phase2_chunks[0]), LLMFinishReason.STREAMING)
 
 
 class IterRealModelStreamInferEchoTest(unittest.IsolatedAsyncioTestCase):
