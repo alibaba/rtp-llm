@@ -46,35 +46,28 @@ class _FakeTokenizer:
         return list(self._ids)
 
 
-class _BaseTok:
-    def __init__(self, tok):
-        self.tokenizer = tok
-
-
 class DeriveEchoPrefixIdsTest(TestCase):
     def test_encodes_think_start_tag(self) -> None:
         tok = _FakeTokenizer(ids=[154841])
-        ids = _derive_echo_prefix_ids(_EnvCfg(), _BaseTok(tok))
+        ids = _derive_echo_prefix_ids(_EnvCfg(), tok)
         self.assertEqual(ids, [154841])
         # Must encode without special tokens so only the tag bytes become ids.
         self.assertEqual(tok.encode_calls, [("<think>\n", False)])
 
     def test_disabled_when_think_mode_off(self) -> None:
         tok = _FakeTokenizer(ids=[154841])
-        ids = _derive_echo_prefix_ids(_EnvCfg(think_mode=0), _BaseTok(tok))
+        ids = _derive_echo_prefix_ids(_EnvCfg(think_mode=0), tok)
         self.assertEqual(ids, [])
         self.assertEqual(tok.encode_calls, [])
 
     def test_disabled_when_tag_empty(self) -> None:
         tok = _FakeTokenizer(ids=[154841])
-        ids = _derive_echo_prefix_ids(_EnvCfg(think_start_tag=""), _BaseTok(tok))
+        ids = _derive_echo_prefix_ids(_EnvCfg(think_start_tag=""), tok)
         self.assertEqual(ids, [])
         self.assertEqual(tok.encode_calls, [])
 
     def test_fail_open_on_tokenizer_error(self) -> None:
-        ids = _derive_echo_prefix_ids(
-            _EnvCfg(), _BaseTok(_FakeTokenizer(raise_exc=True))
-        )
+        ids = _derive_echo_prefix_ids(_EnvCfg(), _FakeTokenizer(raise_exc=True))
         self.assertEqual(ids, [])
 
 
@@ -554,22 +547,53 @@ class DashScShutdownManagerTest(TestCase):
         self.assertEqual(manager.active_request_count(), 0)
 
 
-class CloseServicerOnLoopTest(TestCase):
-    def test_closes_servicer_on_enqueue_loop(self) -> None:
+class DashScAppStartFailureCleanupTest(TestCase):
+    def test_start_failure_closes_created_servicer_on_owner_loop(self) -> None:
         app = bg_app.DashScApp.__new__(bg_app.DashScApp)
-        loop = app._start_enqueue_loop()
-        closed_loops = []
+        app.server_config = SimpleNamespace(
+            dash_sc_grpc_server_port=12345,
+            rank_id=3,
+            frontend_server_id="7",
+        )
+        app._enqueue_loop = None
+        app._enqueue_loop_thread = None
+        app._shutdown_manager = DashScShutdownManager()
+        app.py_env_configs = SimpleNamespace(
+            profiling_debug_logging_config=SimpleNamespace(log_file_backup_count=1)
+        )
+        app._grpc_server = Mock()
+        app._grpc_server.start_on_loop.side_effect = RuntimeError("bind failed")
 
-        class _Closable:
-            async def close(self):
-                closed_loops.append(asyncio.get_running_loop())
+        class _ClosableServicer:
+            def __init__(self) -> None:
+                self.close_count = 0
+                self.close_loops = []
 
-        try:
-            app._close_servicer_on_loop(_Closable())
-        finally:
-            app._stop_enqueue_loop()
+            async def close(self) -> None:
+                self.close_count += 1
+                self.close_loops.append(asyncio.get_running_loop())
 
-        self.assertEqual(closed_loops, [loop])
+        servicer = _ClosableServicer()
+
+        async def fake_create_proxy_servicer_on_loop(**kwargs):
+            return servicer
+
+        with (
+            patch.dict(os.environ, {"DASH_SC_GRPC_PROXY_MODE": "1"}, clear=True),
+            patch.object(
+                bg_app,
+                "_create_proxy_servicer_on_loop",
+                side_effect=fake_create_proxy_servicer_on_loop,
+            ),
+            patch.object(bg_app.kmonitor, "init"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "bind failed"):
+                app.start()
+
+        self.assertEqual(servicer.close_count, 1)
+        self.assertEqual(len(servicer.close_loops), 1)
+        self.assertIsNone(app._enqueue_loop)
+        self.assertIsNone(app._enqueue_loop_thread)
 
 
 if __name__ == "__main__":

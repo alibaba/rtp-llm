@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 from enum import IntEnum
 from typing import Any, NamedTuple
 
+from rtp_llm.config.generate_config import GenerateConfig
 from rtp_llm.dash_sc.proto import predict_v2_pb2
 from rtp_llm.dash_sc.structural_tag import (
     DashScStructuralTagError,
@@ -24,7 +25,7 @@ from rtp_llm.dash_sc.structural_tag import (
     structural_tag_from_response_format,
     validate_structural_tag_shape,
 )
-from rtp_llm.utils.base_model_datatypes import GenerateOutputs
+from rtp_llm.utils.base_model_datatypes import GenerateOutput, GenerateOutputs
 
 _INT32_MAX = 2_147_483_647
 _DEFAULT_MAX_NEW_TOKENS = 32000
@@ -952,7 +953,7 @@ def parse_dash_sc_grpc_request(
 # ----------------------------------------------------------------------------
 
 
-def _token_ids_list_from_generate_output(out_py: Any) -> list[int]:
+def _token_ids_list_from_generate_output(out_py: GenerateOutput) -> list[int]:
     ids: list[int] = []
     if out_py.output_ids is not None:
         t = out_py.output_ids
@@ -1074,7 +1075,7 @@ def _append_finished_output(
 def _append_dashllm_limit_parameters(
     infer: predict_v2_pb2.ModelInferResponse,
     *,
-    generate_config: Any = None,
+    generate_config: GenerateConfig | None = None,
     eos_token_id: int | None = None,
     max_token_id: int | None = None,
     generate_think_token_num: int | None = None,
@@ -1082,9 +1083,9 @@ def _append_dashllm_limit_parameters(
     """Mirror dashllm response parameters consumed by dashscope-serving."""
     if generate_config is not None:
         infer.parameters["max_new_tokens"].int64_param = int(
-            getattr(generate_config, "max_new_tokens", 0) or 0
+            generate_config.max_new_tokens or 0
         )
-        max_think = int(getattr(generate_config, "max_thinking_tokens", 0) or 0)
+        max_think = int(generate_config.max_thinking_tokens or 0)
         if max_think > 0:
             infer.parameters["max_new_think_tokens"].int64_param = max_think
 
@@ -1128,11 +1129,11 @@ def _append_prompt_cache_usage_parameters(
 
 def _append_aux_info_metrics_outputs(
     infer: predict_v2_pb2.ModelInferResponse,
-    out_py: Any,
+    out_py: GenerateOutput,
     prompt_token_fallback: int = 0,
 ) -> None:
     """``prompt_token_num`` = AuxInfo.input_len; ``prompt_cached_token_num`` = AuxInfo.reuse_len."""
-    ax = getattr(out_py, "aux_info", None)
+    ax = out_py.aux_info
     input_len = int(ax.input_len) if ax is not None else int(prompt_token_fallback)
     reuse_len = int(ax.reuse_len) if ax is not None else 0
     _append_int32_scalar_output(infer, "prompt_token_num", input_len)
@@ -1148,7 +1149,7 @@ def build_stream_response_from_generate_outputs(
     request_input_ids: list[int] | None = None,
     return_input_ids: bool = False,
     is_streaming: bool = True,
-    generate_config: Any = None,
+    generate_config: GenerateConfig | None = None,
     eos_token_id: int | None = None,
     max_token_id: int | None = None,
     generate_think_token_num: int | None = None,

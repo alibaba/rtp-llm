@@ -72,6 +72,7 @@ class _FakeAsyncStream:
         self._raise_after = raise_after
         self._emitted = 0
         self.aclose_called = False
+        self.aclose_count = 0
 
     def __aiter__(self):
         return self
@@ -87,6 +88,7 @@ class _FakeAsyncStream:
 
     async def aclose(self):
         self.aclose_called = True
+        self.aclose_count += 1
 
 
 class _FakeVisitor:
@@ -158,6 +160,9 @@ class _FakeTokenizer:
         self._mapping = mapping
         self.encode_calls: list[tuple[str, bool]] = []
 
+    def __len__(self) -> int:
+        return self.vocab_size
+
     def encode(self, text, add_special_tokens=True):
         self.encode_calls.append((text, add_special_tokens))
         return list(self._mapping[text])
@@ -202,6 +207,14 @@ def _finish_reason(chunk) -> int | None:
     for i, out in enumerate(infer.outputs):
         if out.name == "finish_reason":
             return int(struct.unpack("<q", infer.raw_output_contents[i])[0])
+    return None
+
+
+def _finished(chunk) -> bool | None:
+    infer = chunk.infer_response
+    for i, out in enumerate(infer.outputs):
+        if out.name == "finished":
+            return infer.raw_output_contents[i] != b"\x00"
     return None
 
 
@@ -422,9 +435,7 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["status_code"], 503)
         self.assertIn("route failed", payload["status_message"])
         self.assertEqual(_finish_reason(chunks[0]), LLMFinishReason.TASK_LIST_FULL)
-        self.assertEqual(
-            access_agg.backend_error_code, "8500_ROUTE_ERROR"
-        )
+        self.assertEqual(access_agg.backend_error_code, "8500_ROUTE_ERROR")
 
     async def test_stream_exception_yields_error_message(self) -> None:
         req = self._minimal_request()
@@ -629,7 +640,7 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
                 GenerateOutput(
                     output_ids=torch.tensor([20, 21, 22], dtype=torch.int32),
                     finished=True,
-                    aux_info=AuxInfo(input_len=4, reuse_len=0),
+                    aux_info=AuxInfo(input_len=6, reuse_len=6),
                 )
             ]
         )
@@ -701,6 +712,14 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         )
         phase2_input_ids = visitor.generate_inputs[1].token_ids.cpu().int().tolist()
         self.assertEqual(phase2_input_ids, [7, 8, 128821, 271, 128822, 271])
+        self.assertEqual(
+            chunks[2].infer_response.parameters["prompt_token_num"].int64_param,
+            3,
+        )
+        self.assertEqual(
+            chunks[2].infer_response.parameters["prompt_cached_token_num"].int64_param,
+            3,
+        )
         self.assertEqual(
             json.loads(visitor.generate_inputs[0].generate_config.response_format),
             {"type": "json_object"},
@@ -840,7 +859,8 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
                 )
             ]
         )
-        visitor = _MultiStreamVisitor([_FakeAsyncStream([phase1])])
+        phase1_stream = _FakeAsyncStream([phase1])
+        visitor = _MultiStreamVisitor([phase1_stream])
         tok = _dsv4_tokenizer()
         env_cfg = _GenerateEnvCfg()
 
@@ -863,6 +883,7 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
             )
         )
 
+        self.assertEqual(phase1_stream.aclose_count, 1)
         self.assertEqual(visitor.enqueue_called, 1)
         self.assertFalse(any(c.error_message for c in chunks))
         self.assertEqual(_gen_ids(chunks[-1]), [128822, 271])
@@ -911,8 +932,66 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
             )
         )
 
+        self.assertEqual(phase1_stream.aclose_count, 1)
         self.assertEqual(visitor.enqueue_called, 2)
         self.assertTrue(phase1_stream.aclose_called)
+
+    async def test_cancel_closes_phase1_backend_stream(self) -> None:
+        req = self._minimal_request()
+        phase1_a = _generate_outputs([30], finished=False)
+        phase1_b = _generate_outputs([31], finished=False)
+        phase1_stream = _FakeAsyncStream([phase1_a, phase1_b])
+        visitor = _FakeVisitor(phase1_stream)
+
+        stream = iter_real_model_stream_infer(
+            req,
+            [7, 8, 9],
+            SamplingParams(),
+            OtherParams(),
+            visitor,
+            rtp_llm_request_id=100,
+        )
+        first = await stream.__anext__()
+        self.assertEqual(_gen_ids(first), [30])
+
+        await stream.aclose()
+
+        self.assertTrue(phase1_stream.aclose_called)
+
+    async def test_cancel_closes_phase2_backend_stream(self) -> None:
+        req = self._minimal_request()
+        phase1 = _generate_outputs([10, 1], finished=False)
+        phase2_a = _generate_outputs([20], finished=False)
+        phase2_b = _generate_outputs([21], finished=False)
+        phase1_stream = _FakeAsyncStream([phase1])
+        phase2_stream = _FakeAsyncStream([phase2_a, phase2_b])
+        visitor = _MultiStreamVisitor([phase1_stream, phase2_stream])
+        tok = _dsv4_tokenizer()
+        env_cfg = _GenerateEnvCfg()
+
+        stream = iter_real_model_stream_infer(
+            req,
+            [7, 8, 128821],
+            SamplingParams(),
+            OtherParams(enable_thinking=True),
+            visitor,
+            rtp_llm_request_id=100,
+            echo_prefix_ids=[128821, 198],
+            tokenizer=tok,
+            generate_env_config=env_cfg,
+            think_runtime=build_think_runtime(tok, env_cfg, "deepseek_v4"),
+            phase2_request_id_factory=lambda: 200,
+        )
+        while True:
+            chunk = await stream.__anext__()
+            if chunk.infer_response.id.endswith("-2"):
+                self.assertEqual(_gen_ids(chunk), [20])
+                break
+
+        await stream.aclose()
+
+        self.assertTrue(phase1_stream.aclose_called)
+        self.assertTrue(phase2_stream.aclose_called)
 
     async def test_request_disable_thinking_prevents_token1_phase2(self) -> None:
         req = self._minimal_request()
@@ -1450,7 +1529,111 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(_gen_ids(phase2_chunks[0]), [128822])
         self.assertEqual(_gen_ids(phase2_chunks[1]), [271, 20])
 
-    async def test_phase2_yields_no_close_unfinished_chunk(self) -> None:
+    async def test_phase2_terminal_chunk_ends_phase2_without_reading_more(
+        self,
+    ) -> None:
+        req = self._minimal_request()
+        phase1 = _generate_outputs([10, 1], finished=False)
+        phase2 = _generate_outputs([20], finished=True)
+        phase2_stream = _FakeAsyncStream([phase2], raise_after=1)
+        visitor = _MultiStreamVisitor([_FakeAsyncStream([phase1]), phase2_stream])
+        tok = _dsv4_tokenizer()
+        env_cfg = _GenerateEnvCfg()
+
+        chunks = await _drain(
+            iter_real_model_stream_infer(
+                req,
+                [7, 8, 128821],
+                SamplingParams(),
+                OtherParams(enable_thinking=True),
+                visitor,
+                rtp_llm_request_id=100,
+                echo_prefix_ids=[128821, 198],
+                tokenizer=tok,
+                generate_env_config=env_cfg,
+                think_runtime=build_think_runtime(tok, env_cfg, "deepseek_v4"),
+                phase2_request_id_factory=lambda: 200,
+            )
+        )
+
+        self.assertEqual(len(chunks), 3)
+        self.assertFalse(any("error_no" in c.infer_response.parameters for c in chunks))
+        phase2_chunks = [c for c in chunks if c.infer_response.id.endswith("-2")]
+        self.assertEqual(len(phase2_chunks), 1)
+        self.assertEqual(_gen_ids(phase2_chunks[0]), [20])
+        self.assertTrue(_finished(phase2_chunks[0]))
+        self.assertEqual(phase2_stream.aclose_count, 1)
+
+    async def test_phase2_empty_stream_yields_terminal_backend_error(self) -> None:
+        req = self._minimal_request()
+        phase1 = _generate_outputs([10, 1], finished=False)
+        visitor = _MultiStreamVisitor(
+            [_FakeAsyncStream([phase1]), _FakeAsyncStream([])]
+        )
+        tok = _dsv4_tokenizer()
+        env_cfg = _GenerateEnvCfg()
+
+        chunks = await _drain(
+            iter_real_model_stream_infer(
+                req,
+                [7, 8, 128821],
+                SamplingParams(),
+                OtherParams(enable_thinking=True),
+                visitor,
+                rtp_llm_request_id=100,
+                echo_prefix_ids=[128821, 198],
+                tokenizer=tok,
+                generate_env_config=env_cfg,
+                think_runtime=build_think_runtime(tok, env_cfg, "deepseek_v4"),
+                phase2_request_id_factory=lambda: 200,
+            )
+        )
+
+        self.assertEqual(visitor.enqueue_called, 2)
+        self.assertTrue(_finished(chunks[-1]))
+        self.assertEqual(_finish_reason(chunks[-1]), LLMFinishReason.INNER_ENGINE_ERROR)
+        error_no, payload = _dash_error_payload(chunks[-1])
+        self.assertEqual(error_no, 19)
+        self.assertEqual(payload["status_code"], 500)
+
+    async def test_phase2_empty_unfinished_chunks_yield_terminal_backend_error(
+        self,
+    ) -> None:
+        req = self._minimal_request()
+        phase1 = _generate_outputs([10, 1], finished=False)
+        phase2_empty = _generate_outputs([], finished=False)
+        visitor = _MultiStreamVisitor(
+            [_FakeAsyncStream([phase1]), _FakeAsyncStream([phase2_empty])]
+        )
+        tok = _dsv4_tokenizer()
+        env_cfg = _GenerateEnvCfg()
+
+        chunks = await _drain(
+            iter_real_model_stream_infer(
+                req,
+                [7, 8, 128821],
+                SamplingParams(),
+                OtherParams(enable_thinking=True),
+                visitor,
+                rtp_llm_request_id=100,
+                echo_prefix_ids=[128821, 198],
+                tokenizer=tok,
+                generate_env_config=env_cfg,
+                think_runtime=build_think_runtime(tok, env_cfg, "deepseek_v4"),
+                phase2_request_id_factory=lambda: 200,
+            )
+        )
+
+        self.assertEqual(visitor.enqueue_called, 2)
+        self.assertTrue(_finished(chunks[-1]))
+        self.assertEqual(_finish_reason(chunks[-1]), LLMFinishReason.INNER_ENGINE_ERROR)
+        error_no, payload = _dash_error_payload(chunks[-1])
+        self.assertEqual(error_no, 19)
+        self.assertEqual(payload["status_code"], 500)
+
+    async def test_phase2_yields_unfinished_chunk_then_terminal_error_on_eof(
+        self,
+    ) -> None:
         """Phase-2 forwards ordinary chunks without waiting for close or finish."""
         req = self._minimal_request()
         phase1 = _generate_outputs([10, 1], finished=False)
@@ -1484,15 +1667,21 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(visitor.enqueue_called, 2)
         self.assertTrue(visitor.generate_inputs[1].generate_config.is_streaming)
         phase2_chunks = [c for c in chunks if c.infer_response.id.endswith("-2")]
-        self.assertEqual(len(phase2_chunks), 1)
+        self.assertEqual(len(phase2_chunks), 2)
         self.assertEqual(_gen_ids(phase2_chunks[0]), [20])
         self.assertEqual(
-            phase2_chunks[0].infer_response.parameters[
-                "incremental_output"
-            ].int64_param,
+            phase2_chunks[0]
+            .infer_response.parameters["incremental_output"]
+            .int64_param,
             1,
         )
         self.assertEqual(_finish_reason(phase2_chunks[0]), LLMFinishReason.STREAMING)
+
+        self.assertTrue(_finished(phase2_chunks[1]))
+        self.assertEqual(
+            _finish_reason(phase2_chunks[1]), LLMFinishReason.INNER_ENGINE_ERROR
+        )
+        self.assertEqual(_gen_ids(phase2_chunks[1]), [])
 
 
 class IterRealModelStreamInferEchoTest(unittest.IsolatedAsyncioTestCase):
@@ -1725,6 +1914,69 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["backend_input_token_len"], 1)
         self.assertEqual(payload["output_token_len"], 1)
         self.assertEqual(payload["prompt_cached_token_num"], 2)
+
+    async def test_access_log_keeps_phase2_prompt_cache_after_fallback_zero(
+        self,
+    ) -> None:
+        req = predict_v2_pb2.ModelInferRequest()
+        req.id = "phase2-cache"
+        req.model_name = "default"
+        _add_input_tensor(
+            req,
+            "input_ids",
+            "INT32",
+            [3],
+            struct.pack("<3i", 7, 8, 128821),
+        )
+        req.parameters["enable_thinking"].bool_param = True
+        phase1 = GenerateOutputs(
+            generate_outputs=[
+                GenerateOutput(
+                    output_ids=torch.tensor([10, 1], dtype=torch.int32),
+                    finished=False,
+                    aux_info=AuxInfo(input_len=3, reuse_len=0),
+                )
+            ]
+        )
+        phase2 = GenerateOutputs(
+            generate_outputs=[
+                GenerateOutput(
+                    output_ids=torch.tensor([20], dtype=torch.int32),
+                    finished=False,
+                    aux_info=AuxInfo(input_len=6, reuse_len=3),
+                )
+            ]
+        )
+        visitor = _MultiStreamVisitor(
+            [_FakeAsyncStream([phase1]), _FakeAsyncStream([phase2])]
+        )
+        tok = _dsv4_tokenizer()
+        env_cfg = _GenerateEnvCfg()
+        servicer = DashScInferenceServicer(
+            backend_visitor=visitor,
+            echo_prefix_ids=[128821, 198],
+            tokenizer=tok,
+            generate_env_config=env_cfg,
+            think_runtime=build_think_runtime(tok, env_cfg, "deepseek_v4"),
+        )
+
+        with patch.object(
+            logging.getLogger(DASH_SC_GRPC_ACCESS_LOGGER_NAME), "info"
+        ) as info:
+            responses = await _drain(
+                servicer.ModelStreamInfer(_areq_iter([req]), _FakeGrpcContext())
+            )
+
+        phase2_chunks = [r for r in responses if r.infer_response.id.endswith("-2")]
+        self.assertEqual(_gen_ids(phase2_chunks[0]), [20])
+        self.assertEqual(
+            phase2_chunks[0]
+            .infer_response.parameters["prompt_cached_token_num"]
+            .int64_param,
+            3,
+        )
+        payload = json.loads(info.call_args.args[0])
+        self.assertEqual(payload["prompt_cached_token_num"], 3)
 
     async def test_access_log_records_generate_config_role_addrs(self) -> None:
         role_addrs = [
