@@ -29,6 +29,7 @@ Queue full → drop, never block. So disk latency never affects RPC latency.
 from __future__ import annotations
 
 import logging
+import time
 from typing import Optional
 
 import orjson
@@ -98,18 +99,30 @@ def emit_query_log(
     *,
     rank_id: Optional[int],
     server_id: Optional[int],
+    event: str = "rpc_arrived",
+    include_request_payload: bool = False,
+    event_ts: Optional[float] = None,
 ) -> None:
-    """Write one arrival breadcrumb to the query log — called at handler entry.
+    """Write one query-log event.
 
-    Fires exactly once per RPC, before any inbound body read or backend work, so
-    the line hits disk at arrival. No proto-derived fields (``request_id`` /
-    ``model_name`` / ``input_len`` / payload details) — those stay in the
-    completion access log; the query line shape never depends on first-frame
-    content.
+    The default call writes an arrival breadcrumb at handler entry, before any
+    inbound body read or backend work. The frontend structured path may call
+    this again after parsing the first request frame with
+    ``event="request_parsed"`` and ``include_request_payload=True`` so online
+    debugging can inspect request token ids before the completion access log is
+    emitted.
     """
+    if event_ts is None:
+        event_ts = (
+            record.start_ts
+            if event == "rpc_arrived"
+            else (record.first_request_ts or time.time())
+        )
     payload = {
-        "ts": format_access_log_ts(record.start_ts),
+        "ts": format_access_log_ts(event_ts),
+        "ts_epoch_ms": int(event_ts * 1000),
         "arrival_ts_epoch_ms": int(record.start_ts * 1000),
+        "event": event,
         "server_id": server_id,
         "rank_id": rank_id,
         "method": record.method,
@@ -118,6 +131,22 @@ def emit_query_log(
         "upstream_request_id": record.upstream_request_id,
         "upstream_request_id_key": record.upstream_request_id_key,
     }
+    if include_request_payload:
+        payload.update(
+            {
+                "capture_mode": "forward_summary" if record.raw_mode else "struct",
+                "request_id": record.request_id,
+                "model_name": record.model_name,
+                "first_request_ts_epoch_ms": (
+                    int(record.first_request_ts * 1000)
+                    if record.first_request_ts is not None
+                    else None
+                ),
+                "input_token_len": record.input_len,
+            }
+        )
+        if not record.raw_mode:
+            payload["input_ids"] = record.input_ids
     logger = logging.getLogger(DASH_SC_GRPC_QUERY_LOGGER_NAME)
     try:
         logger.info(orjson.dumps(payload).decode("utf-8"))

@@ -162,6 +162,49 @@ decoded text delta
 RTP_LLM_DSV4_RENDERER_DEBUG=1
 ```
 
+## dash_sc 线上验证日志
+
+dash_sc 的 Python 主日志受全局环境变量 `LOG_LEVEL` 控制，默认是 `INFO`，`TRACE` 会被映射成 `DEBUG`。但不建议为了这个问题在线上打开全局 `LOG_LEVEL=DEBUG`，因为会带出大量无关日志。
+
+当前 DSV4 marker 诊断日志使用单独开关：
+
+```text
+RTP_LLM_DSV4_DASH_SC_DEBUG=1
+```
+
+为了方便和 normal renderer 对齐，也兼容已有 renderer 开关：
+
+```text
+RTP_LLM_DSV4_RENDERER_DEBUG=1
+```
+
+任一开关打开后，dash_sc 会在主日志里输出 DSV4 marker 相关诊断，主日志通常是 `<LOG_PATH>/main_{WORLD_RANK}.log`；不开启时这些日志不会输出，生产代码不需要删除。日志不会打印 decoded 文本，只打印 token ids 和长度，便于排查 BPE 合并和跨 chunk 前缀暂存。
+
+可以 grep 这些关键字确认修复是否在线上触发：
+
+```text
+dsv4_tool_call_marker_partial
+dsv4_tool_call_marker_boundary action=same_stream
+dsv4_tool_call_marker_boundary action=phase2
+dsv4_tool_call_marker_phase2_enqueue
+```
+
+含义：
+
+- `dsv4_tool_call_marker_partial`：当前 chunk 末尾像 DSML marker 的前缀，dash_sc 暂存了尾部 token，等待下一段补齐。
+- `dsv4_tool_call_marker_boundary action=same_stream`：已检测到 `<｜DSML｜tool_calls>`，没有切 phase-2，同流继续，并设置 `generate_think_token_num`，后续交给 tool parser。
+- `dsv4_tool_call_marker_boundary action=phase2`：已检测到 marker，且命中 DSV4 `structural_tag` grammar，phase-1 会在 marker 前截断。
+- `dsv4_tool_call_marker_phase2_enqueue`：已经构造 phase-2 prompt，并将请求重新 enqueue 给 backend，用 xgrammar 重新生成 tool call。
+
+另外 dash_sc 的 query/access log 会记录请求和完成态 token ids：
+
+```text
+dash_sc_grpc_query_r{rank}_s{server}.log
+dash_sc_grpc_access_r{rank}_s{server}.log
+```
+
+其中 `request_parsed` 事件可以看到入参 `input_ids`，最终 `rpc_completed` 记录可以看到 `input_ids` 和 `generated_ids`。
+
 ## 探索过但不成立的方案
 
 这些方案不可行，根因都和两个事实有关：

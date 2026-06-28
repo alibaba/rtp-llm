@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import struct
 import unittest
 from dataclasses import replace
@@ -21,7 +22,10 @@ import torch
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.generate_config import RoleAddr
-from rtp_llm.dash_sc.access_log import DASH_SC_GRPC_ACCESS_LOGGER_NAME
+from rtp_llm.dash_sc.access_log import (
+    DASH_SC_GRPC_ACCESS_LOGGER_NAME,
+    DASH_SC_GRPC_QUERY_LOGGER_NAME,
+)
 from rtp_llm.dash_sc.access_record import GrpcAccessRecord
 from rtp_llm.dash_sc.codec import (
     DASH_ERROR_ABORT,
@@ -983,21 +987,30 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         tok = _dsv4_tokenizer()
         env_cfg = _GenerateEnvCfg()
 
-        chunks = await _drain(
-            iter_real_model_stream_infer(
-                req,
-                [7, 8, 128821],
-                SamplingParams(),
-                OtherParams(enable_thinking=True),
-                visitor,
-                rtp_llm_request_id=100,
-                echo_prefix_ids=[128821, 198],
-                tokenizer=tok,
-                generate_env_config=env_cfg,
-                think_runtime=build_think_runtime(tok, env_cfg, "deepseek_v4"),
-                phase2_request_id_factory=lambda: 200,
-            )
-        )
+        with patch.dict(os.environ, {"RTP_LLM_DSV4_DASH_SC_DEBUG": "1"}):
+            with self.assertLogs(level="INFO") as logs:
+                chunks = await _drain(
+                    iter_real_model_stream_infer(
+                        req,
+                        [7, 8, 128821],
+                        SamplingParams(),
+                        OtherParams(enable_thinking=True),
+                        visitor,
+                        rtp_llm_request_id=100,
+                        echo_prefix_ids=[128821, 198],
+                        tokenizer=tok,
+                        generate_env_config=env_cfg,
+                        think_runtime=build_think_runtime(tok, env_cfg, "deepseek_v4"),
+                        phase2_request_id_factory=lambda: 200,
+                    )
+                )
+
+        log_text = "\n".join(logs.output)
+        self.assertIn("dsv4_tool_call_marker_partial", log_text)
+        self.assertIn("dsv4_tool_call_marker_boundary action=same_stream", log_text)
+        self.assertIn("pending_ids=[30, 128825]", log_text)
+        self.assertIn("combined_ids=[30, 128825, 72461, 4941, 12548, 32, 20]", log_text)
+        self.assertIn("generate_think_token_num=2", log_text)
 
         self.assertEqual(visitor.enqueue_called, 1)
         self.assertEqual(_gen_ids(chunks[0]), [128821, 10])
@@ -1288,23 +1301,32 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         tok = _dsv4_tokenizer()
         env_cfg = _GenerateEnvCfg()
 
-        chunks = await _drain(
-            iter_real_model_stream_infer(
-                req,
-                [7, 8, 128821],
-                SamplingParams(
-                    structural_tag=json.dumps(structural_tag, ensure_ascii=False),
-                ),
-                OtherParams(enable_thinking=True),
-                visitor,
-                rtp_llm_request_id=100,
-                echo_prefix_ids=[128821, 198],
-                tokenizer=tok,
-                generate_env_config=env_cfg,
-                think_runtime=build_think_runtime(tok, env_cfg, "deepseek_v4"),
-                phase2_request_id_factory=lambda: 200,
-            )
-        )
+        with patch.dict(os.environ, {"RTP_LLM_DSV4_DASH_SC_DEBUG": "1"}):
+            with self.assertLogs(level="INFO") as logs:
+                chunks = await _drain(
+                    iter_real_model_stream_infer(
+                        req,
+                        [7, 8, 128821],
+                        SamplingParams(
+                            structural_tag=json.dumps(
+                                structural_tag, ensure_ascii=False
+                            ),
+                        ),
+                        OtherParams(enable_thinking=True),
+                        visitor,
+                        rtp_llm_request_id=100,
+                        echo_prefix_ids=[128821, 198],
+                        tokenizer=tok,
+                        generate_env_config=env_cfg,
+                        think_runtime=build_think_runtime(tok, env_cfg, "deepseek_v4"),
+                        phase2_request_id_factory=lambda: 200,
+                    )
+                )
+
+        log_text = "\n".join(logs.output)
+        self.assertIn("dsv4_tool_call_marker_boundary action=phase2", log_text)
+        self.assertIn("dsv4_tool_call_marker_phase2_enqueue", log_text)
+        self.assertIn("phase2_input_ids=[7, 8, 128821, 271, 128822, 271]", log_text)
 
         self.assertEqual(visitor.enqueue_called, 2)
         self.assertTrue(phase1_stream.aclose_called)
@@ -2614,6 +2636,37 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["backend_input_token_len"], 1)
         self.assertEqual(payload["output_token_len"], 1)
         self.assertEqual(payload["prompt_cached_token_num"], 2)
+
+    async def test_query_log_records_input_ids_after_parse(self) -> None:
+        out = GenerateOutput(
+            output_ids=torch.tensor([9], dtype=torch.int32),
+            finished=True,
+            aux_info=AuxInfo(input_len=1, reuse_len=0),
+        )
+        visitor = _FakeVisitor(
+            _FakeAsyncStream([GenerateOutputs(generate_outputs=[out])])
+        )
+        servicer = DashScInferenceServicer(backend_visitor=visitor)
+
+        with patch.object(
+            logging.getLogger(DASH_SC_GRPC_QUERY_LOGGER_NAME), "info"
+        ) as info:
+            await _drain(
+                servicer.ModelStreamInfer(
+                    _areq_iter([self._valid_infer_request()]), _FakeGrpcContext()
+                )
+            )
+
+        payloads = [json.loads(call.args[0]) for call in info.call_args_list]
+        self.assertEqual(
+            [p["event"] for p in payloads],
+            ["rpc_arrived", "request_parsed"],
+        )
+        self.assertNotIn("input_ids", payloads[0])
+        self.assertEqual(payloads[1]["request_id"], "srv-1")
+        self.assertEqual(payloads[1]["model_name"], "default")
+        self.assertEqual(payloads[1]["input_token_len"], 1)
+        self.assertEqual(payloads[1]["input_ids"], [42])
 
     async def test_access_log_records_generate_config_role_addrs(self) -> None:
         role_addrs = [

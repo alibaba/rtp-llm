@@ -17,6 +17,7 @@ from __future__ import annotations
 import inspect
 import json
 import logging
+import os
 from dataclasses import dataclass
 from typing import Any, AsyncIterator, Callable, Iterator, Optional
 
@@ -82,6 +83,17 @@ _EMPTY_THINK_BODY = "\n"
 _DEFAULT_TERMINATE_TOKEN_ID = 1
 _INT32_MAX = 2_147_483_647
 _PARTIAL_RESPONSE_METADATA = (("x-dashscope-partialresponse", "true"),)
+_ENV_TRUE_VALUES = {"1", "true", "yes", "on"}
+
+
+def _env_flag_enabled(name: str) -> bool:
+    return os.environ.get(name, "").lower() in _ENV_TRUE_VALUES
+
+
+def _dsv4_dash_sc_debug_enabled() -> bool:
+    return _env_flag_enabled("RTP_LLM_DSV4_DASH_SC_DEBUG") or _env_flag_enabled(
+        "RTP_LLM_DSV4_RENDERER_DEBUG"
+    )
 
 
 def _exception_metric_code(error_code: Any) -> str:
@@ -815,6 +827,7 @@ async def iter_real_model_stream_infer(
         # a ``generate_think_token_num`` here would wrongly tag leading content as
         # reasoning. Gate it on ``in_think_mode`` to mirror ``phase2_enabled``.
         tool_call_marker_active = bool(tool_call_marker) and in_think_mode
+        dsv4_dash_sc_debug = _dsv4_dash_sc_debug_enabled()
         pending_tool_call_marker_ids: list[int] = []
         generate_input = _make_generate_input(
             request_id=rtp_llm_request_id,
@@ -902,18 +915,34 @@ async def iter_real_model_stream_infer(
                     ("tool_call_marker", marker_offset),
                 )
                 if boundary_kind == "tool_call_marker" and boundary_offset is not None:
+                    marker_log_pending_ids = list(pending_tool_call_marker_ids)
+                    marker_log_chunk_ids = list(generated_ids)
+                    marker_structural_tag = _has_dsv4_tool_call_structural_tag(
+                        generate_config
+                    )
                     pending_tool_call_marker_ids = []
                     generated_ids = combined_ids
                     tool_call_marker_active = False
-                    if phase2_enabled and _has_dsv4_tool_call_structural_tag(
-                        generate_config
-                    ):
+                    if phase2_enabled and marker_structural_tag:
                         force_phase2_boundary = boundary_offset
-                        logging.info(
-                            "[DashScGrpc] [%s] DSV4 tool-call marker ended thinking; "
-                            "switch to phase-2 structural_tag grammar",
-                            tag,
-                        )
+                        if dsv4_dash_sc_debug:
+                            logging.info(
+                                "[DashScGrpc] [%s] DSV4 dsv4_tool_call_marker_boundary "
+                                "action=phase2 chunk_idx=%s boundary_offset=%s "
+                                "marker_offset=%s phase2_enabled=%s "
+                                "structural_tag=%s pending_ids=%s chunk_ids=%s "
+                                "combined_ids=%s combined_text_len=%s",
+                                tag,
+                                chunk_idx,
+                                boundary_offset,
+                                marker_offset,
+                                phase2_enabled,
+                                marker_structural_tag,
+                                marker_log_pending_ids,
+                                marker_log_chunk_ids,
+                                combined_ids,
+                                len(combined_text),
+                            )
                     else:
                         echo_len = (
                             len(matched_echo_ids)
@@ -923,11 +952,27 @@ async def iter_real_model_stream_infer(
                         generate_think_token_num = (
                             len(cumulative_sent_ids) + echo_len + boundary_offset
                         )
-                        logging.info(
-                            "[DashScGrpc] [%s] DSV4 tool-call marker ended thinking; "
-                            "continue same stream for downstream tool parser",
-                            tag,
-                        )
+                        if dsv4_dash_sc_debug:
+                            logging.info(
+                                "[DashScGrpc] [%s] DSV4 dsv4_tool_call_marker_boundary "
+                                "action=same_stream chunk_idx=%s boundary_offset=%s "
+                                "marker_offset=%s generate_think_token_num=%s "
+                                "echo_len=%s phase2_enabled=%s structural_tag=%s "
+                                "pending_ids=%s chunk_ids=%s combined_ids=%s "
+                                "combined_text_len=%s",
+                                tag,
+                                chunk_idx,
+                                boundary_offset,
+                                marker_offset,
+                                generate_think_token_num,
+                                echo_len,
+                                phase2_enabled,
+                                marker_structural_tag,
+                                marker_log_pending_ids,
+                                marker_log_chunk_ids,
+                                combined_ids,
+                                len(combined_text),
+                            )
                 elif boundary_kind is not None:
                     pending_tool_call_marker_ids = []
                     generated_ids = combined_ids
@@ -945,6 +990,19 @@ async def iter_real_model_stream_infer(
                     if hold_len:
                         generated_ids = combined_ids[:-hold_len]
                         pending_tool_call_marker_ids = combined_ids[-hold_len:]
+                        if dsv4_dash_sc_debug:
+                            logging.info(
+                                "[DashScGrpc] [%s] DSV4 dsv4_tool_call_marker_partial "
+                                "chunk_idx=%s hold_len=%s emitted_ids=%s "
+                                "pending_ids=%s combined_ids=%s combined_text_len=%s",
+                                tag,
+                                chunk_idx,
+                                hold_len,
+                                generated_ids,
+                                pending_tool_call_marker_ids,
+                                combined_ids,
+                                len(combined_text),
+                            )
                     else:
                         generated_ids = combined_ids
                         pending_tool_call_marker_ids = []
@@ -1216,6 +1274,17 @@ async def iter_real_model_stream_infer(
                 invocation_metadata=invocation_metadata,
                 request_headers=other.request_headers,
             )
+            if dsv4_dash_sc_debug:
+                logging.info(
+                    "[DashScGrpc] [%s] DSV4 dsv4_tool_call_marker_phase2_enqueue "
+                    "phase2_input_ids=%s generate_think_token_num=%s "
+                    "max_new_tokens=%s structural_tag=%s",
+                    phase2_tag,
+                    phase2_input_ids,
+                    generate_think_token_num,
+                    getattr(phase2_config, "max_new_tokens", None),
+                    bool(getattr(phase2_config, "structural_tag", None)),
+                )
             logging.debug(
                 "[DashScGrpc] [%s] phase-2 generate_input: %s",
                 phase2_tag,
@@ -1635,6 +1704,13 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
                         input_ids=input_ids_list,
                         sampling=sampling,
                         other=other,
+                    )
+                    emit_query_log(
+                        record,
+                        rank_id=self._rank_id,
+                        server_id=self._server_id,
+                        event="request_parsed",
+                        include_request_payload=True,
                     )
                     record.mark_request_done("eof")
                     first_request = False
