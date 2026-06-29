@@ -35,12 +35,17 @@ public:
                    py::object                py_instance,
                    bool                      is_prefill_cuda_graph_mode = false,
                    bool                      use_spec_decoding          = false,
-                   const std::vector<int>&   kv_cache_layer_to_group    = {});
+                   const std::vector<int>&   kv_cache_layer_to_group    = {},
+                   bool                      defer_capture              = false);
     ~PyWrappedModel();
 
     GptModelOutputs forward(const GptModelInputs& inputs) override;
     GptModelOutputs forwardMicroBatched(const GptModelInputs& inputs);
     void            releaseBuffers() override;
+    // Run the CUDA graph capture that was skipped in the constructor when
+    // defer_capture was set. Idempotent and safe to call when capture is not
+    // deferred / CUDA graph is disabled (then it is a no-op).
+    void            triggerInitCapture() override;
 
 private:
     std::optional<PyCacheStoreInputs> prepareWriteCacheParams(const GptModelInputs& inputs);
@@ -93,6 +98,11 @@ private:
     bool       use_spec_decoding_{false};
     bool       enable_device_perf_{false};
     bool       check_nan_{false};
+    // When true, the constructor skips graph_runner_->initCapture() and leaves it
+    // for an explicit triggerInitCapture() call. capture_done_ guards against
+    // double capture (whether done eagerly in ctor or later via trigger).
+    bool       defer_capture_{false};
+    bool       capture_done_{false};
 
     std::unique_ptr<IContextParallelProcessor> context_parallel_processor_{nullptr};
     std::unique_ptr<CacheStoreAsyncWriter>     cache_store_async_writer_;
@@ -110,7 +120,8 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
                                       py::object                py_instance,
                                       bool                      is_prefill_cuda_graph_mode,
                                       bool                      use_spec_decoding,
-                                      const std::vector<int>&   kv_cache_layer_to_group):
+                                      const std::vector<int>&   kv_cache_layer_to_group,
+                                      bool                      defer_capture):
     device_props_(buildExecProperties(params.parallelism_config, params.device_resource_config)),
     mla_ops_type_(params.mla_ops_type),
     layer_num_(params.weights.layers.size()),
@@ -120,7 +131,8 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
     is_prefill_cuda_graph_mode_(is_prefill_cuda_graph_mode),
     use_spec_decoding_(use_spec_decoding),
     enable_device_perf_(params.profile_debug_logging_config.enable_device_perf),
-    check_nan_(params.profile_debug_logging_config.check_nan) {
+    check_nan_(params.profile_debug_logging_config.check_nan),
+    defer_capture_(defer_capture) {
 
     c10::InferenceMode inference_guard(true);
 
@@ -264,7 +276,15 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         RTP_LLM_CHECK_WITH_INFO(graph_runner_ != nullptr, "graph_runner_ can't be null");
         auto py_initialize_method = py_instance.attr("initialize");
         py_init_result            = py_initialize_method(init_resources);
-        graph_runner_->initCapture();
+        if (defer_capture_) {
+            // Capture is deferred: leave graph_runner_ created-but-not-captured.
+            // The owner must call triggerInitCapture() later (e.g. after the
+            // accuracy gate / backend selection) before the graph is used.
+            RTP_LLM_LOG_INFO("PyWrappedModel: CUDA graph capture deferred, awaiting triggerInitCapture()");
+        } else {
+            graph_runner_->initCapture();
+            capture_done_ = true;
+        }
     }
 
     auto py_init_success = py_init_result.cast<bool>();
