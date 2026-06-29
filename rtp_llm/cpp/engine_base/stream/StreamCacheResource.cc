@@ -468,8 +468,7 @@ bool StreamCacheResource::loadCacheDone() {
                 RTP_LLM_LOG_WARNING("load cache failed after %d retries (transfer error), stream: [%ld]",
                                     load_cache_retry_count_,
                                     stream_->streamId());
-                stream_->reportEventWithoutLock(StreamEvents::Error,
-                                                ErrorCode::LOAD_CACHE_TIMEOUT,
+                stream_->reportErrorWithoutLock(ErrorCode::LOAD_CACHE_TIMEOUT,
                                                 "load cache failed after " + std::to_string(max_retry)
                                                     + " retries (transfer error)");
                 releaseResource();
