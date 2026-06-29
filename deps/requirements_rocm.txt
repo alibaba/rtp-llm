@@ -1,5 +1,9 @@
 -r requirements_base.txt
 aiter==0.1.13.dev14+gfa35072d0.d20260402
+# Pinned explicitly: flydsl is a ROCm-only dep consumed by
+# //rtp_llm/models_py/triton_kernels:fla. It used to be pulled in transitively
+# via aiter; pin it directly so the lockfile keeps it regardless of aiter metadata.
+flydsl==0.1.8
 amdsmi @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/simple/amd-smi/amd_smi.tar ; platform_machine == "x86_64"
 fast-safetensors==0.7.3+torch2.1.2.rocm ; platform_machine == "x86_64"
 fastsafetensors==0.1.19rc5+ali ; platform_machine == "x86_64"
