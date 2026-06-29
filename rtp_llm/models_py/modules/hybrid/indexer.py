@@ -303,6 +303,15 @@ class Indexer(nn.Module):
                 int(getattr(cp_params, "cp_size", 1)),
                 int(getattr(cp_params, "cp_rank", 0)),
                 kv_owner_tokens_per_block=self._kv_owner_tokens_per_block,
+                indexer_cp_plan=getattr(cp_params, "indexer_cp_plan", None),
+                indexer_cp_local_cu=getattr(cp_params, "indexer_cp_local_cu", None),
+                indexer_copy_dst_idx=getattr(cp_params, "indexer_copy_dst_idx", None),
+                indexer_src_for_padded=getattr(
+                    cp_params, "indexer_src_for_padded", None
+                ),
+                total_local_ids_is_identity=bool(
+                    getattr(cp_params, "total_local_ids_is_identity", False)
+                ),
             )
         return self.indexer_op._get_topk_ragged(
             q_fp8, weights, kv_cache, fmha_params, attention_inputs

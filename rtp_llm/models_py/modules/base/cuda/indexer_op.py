@@ -934,6 +934,11 @@ class IndexerOp(nn.Module):
         cp_size: int = 1,
         cp_rank: int = 0,
         kv_owner_tokens_per_block: int = 0,
+        indexer_cp_plan: Optional[Any] = None,
+        indexer_cp_local_cu: Optional[torch.Tensor] = None,
+        indexer_copy_dst_idx: Optional[torch.Tensor] = None,
+        indexer_src_for_padded: Optional[torch.Tensor] = None,
+        total_local_ids_is_identity: bool = False,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Compute TopK indices for ragged attention (prefill phase) with context parallel
@@ -976,11 +981,16 @@ class IndexerOp(nn.Module):
         weights_sq = weights.squeeze(-1)
 
         if has_local_ids:
-            q0 = q_fp8[total_local_ids].contiguous()
-            weights_sq0 = weights_sq[total_local_ids].contiguous()
+            if total_local_ids_is_identity:
+                n_local = int(total_local_ids.numel())
+                q0 = q_fp8[:n_local]
+                weights_sq0 = weights_sq[:n_local]
+            else:
+                q0 = q_fp8[total_local_ids].contiguous()
+                weights_sq0 = weights_sq[total_local_ids].contiguous()
         else:
-            q0 = q_fp8[:0].contiguous()
-            weights_sq0 = weights_sq[:0].contiguous()
+            q0 = q_fp8[:0]
+            weights_sq0 = weights_sq[:0]
 
         # Full KV from cache (KV not split).
         k_fp8 = torch.empty(
@@ -1021,35 +1031,16 @@ class IndexerOp(nn.Module):
                 )
 
         if sharded_cp_kv:
-            from rtp_llm.models_py.modules.dsv4.fp8 import _indexer_cp_assembler as asm
+            from rtp_llm.models_py.triton_kernels.sparse_mla.fused_indexer_cp_assemble import (
+                fused_copy_and_assemble_indexer_k,
+            )
 
-            per_req_total_kv_lens = (
-                cu_kv_seqlens_global[1:].to(torch.int64)
-                - cu_kv_seqlens_global[:-1].to(torch.int64)
-            ).contiguous()
-            cp_ctx = SimpleNamespace(cp_size=int(cp_size), cp_rank=int(cp_rank))
-            owner_bs = (
-                int(kv_owner_tokens_per_block)
-                if kv_owner_tokens_per_block > 0
-                else self.blocksize
-            )
-            plan = asm.build_indexer_cp_chunk_plan(
-                cp_ctx=cp_ctx,
-                per_req_total_kv_lens=per_req_total_kv_lens,
-                block_size=self.blocksize,
-                device=device,
-                owner_block_size=owner_bs,
-            )
-            local_k = torch.zeros(
-                (plan.total_local_T, self.index_head_dim),
-                dtype=k_fp8.dtype,
-                device=device,
-            )
-            local_s = torch.zeros(
-                (plan.total_local_T, k_scale.shape[-1]),
-                dtype=k_scale.dtype,
-                device=device,
-            )
+            assert (
+                indexer_cp_plan is not None
+            ), "sharded_cp_kv requires indexer_cp_plan precomputed in prepare()"
+            assert indexer_cp_local_cu is not None
+            plan = indexer_cp_plan
+            actual_cu = indexer_cp_local_cu
             if plan.total_actual_local_T > 0:
                 actual_k = torch.empty(
                     (plan.total_actual_local_T, self.index_head_dim),
@@ -1066,21 +1057,23 @@ class IndexerOp(nn.Module):
                     actual_k,
                     actual_s,
                     block_table,
-                    asm.build_actual_local_cu_kv_seqlens(plan),
+                    actual_cu,
                 )
-                asm.copy_actual_indexer_k_to_padded(
-                    plan=plan,
-                    actual_k_quant=actual_k,
-                    actual_k_scale=actual_s,
-                    padded_k_quant=local_k,
-                    padded_k_scale=local_s,
+            else:
+                actual_k = torch.empty(
+                    (0, self.index_head_dim), dtype=k_fp8.dtype, device=device
                 )
-            asm.assemble_indexer_k(
+                actual_s = torch.empty(
+                    (0, k_scale.shape[-1]), dtype=k_scale.dtype, device=device
+                )
+            fused_copy_and_assemble_indexer_k(
                 plan=plan,
-                local_k_quant=local_k,
-                local_k_scale=local_s,
+                actual_k_quant=actual_k,
+                actual_k_scale=actual_s,
                 out_k_quant=k_fp8,
                 out_k_scale=k_scale,
+                copy_dst_idx=indexer_copy_dst_idx,
+                src_for_padded=indexer_src_for_padded,
             )
         else:
             rtp_llm_ops.cp_gather_indexer_k_quant_cache(
