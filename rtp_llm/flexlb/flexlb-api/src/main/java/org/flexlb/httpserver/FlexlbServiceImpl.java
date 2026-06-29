@@ -13,6 +13,8 @@ import org.flexlb.enums.ScheduleModeEnum;
 import org.flexlb.service.RouteService;
 import org.flexlb.service.grace.ActiveRequestCounter;
 import org.flexlb.service.monitor.EngineHealthReporter;
+import org.flexlb.config.ConfigService;
+import org.flexlb.config.FlexlbConfig;
 import org.flexlb.util.Logger;
 import org.springframework.stereotype.Component;
 
@@ -24,17 +26,20 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
     private final EngineHealthReporter engineHealthReporter;
     private final ActiveRequestCounter activeRequestCounter;
     private final FlexlbGrpcForwarder grpcForwarder;
+    private final ConfigService configService;
 
     public FlexlbServiceImpl(RouteService routeService,
                              LBStatusConsistencyService lbStatusConsistencyService,
                              EngineHealthReporter engineHealthReporter,
                              ActiveRequestCounter activeRequestCounter,
-                             FlexlbGrpcForwarder grpcForwarder) {
+                             FlexlbGrpcForwarder grpcForwarder,
+                             ConfigService configService) {
         this.routeService = routeService;
         this.lbStatusConsistencyService = lbStatusConsistencyService;
         this.engineHealthReporter = engineHealthReporter;
         this.activeRequestCounter = activeRequestCounter;
         this.grpcForwarder = grpcForwarder;
+        this.configService = configService;
     }
 
     @Override
@@ -116,15 +121,16 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
             ctx.setGenerateInputPbBytes(pb.getGenerateInput().toByteArray());
         }
 
-        ctx.setScheduleMode(toScheduleMode(pb.getScheduleMode()));
+        ctx.setScheduleMode(resolveScheduleMode(pb.getScheduleMode(), configService.loadBalanceConfig()));
         return ctx;
     }
 
-    private static ScheduleModeEnum toScheduleMode(EngineRpcService.FlexlbScheduleModePB mode) {
+    private static ScheduleModeEnum resolveScheduleMode(EngineRpcService.FlexlbScheduleModePB mode,
+                                                        FlexlbConfig config) {
         return switch (mode) {
             case FLEXLB_SCHEDULE_BATCH -> ScheduleModeEnum.BATCH;
             case FLEXLB_SCHEDULE_DIRECT -> ScheduleModeEnum.DIRECT;
-            default -> ScheduleModeEnum.AUTO;
+            default -> config.getDefaultScheduleModeEnum();
         };
     }
 

@@ -5,6 +5,7 @@ import lombok.Setter;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.LoadBalanceStrategyEnum;
 import org.flexlb.enums.ResourceMeasureIndicatorEnum;
+import org.flexlb.enums.ScheduleModeEnum;
 
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -188,6 +189,12 @@ public class FlexlbConfig {
      * and submitted through EnqueueBatch.
      */
     private boolean flexlbBatchEnabled = true;
+
+    /**
+     * Default schedule mode when the frontend doesn't specify one in the gRPC request.
+     * Environment variable: DEFAULT_SCHEDULE_MODE (values: AUTO, BATCH, DIRECT).
+     */
+    private String defaultScheduleMode = "AUTO";
 
     /**
      * Maximum real requests in one EnqueueBatch request.
@@ -495,5 +502,16 @@ public class FlexlbConfig {
         result.sort(Comparator.comparingLong(a -> a[0]));
         parsedSloBuckets = result;
         return result;
+    }
+
+    /**
+     * Returns the configured default schedule mode as an enum.
+     */
+    public ScheduleModeEnum getDefaultScheduleModeEnum() {
+        try {
+            return ScheduleModeEnum.valueOf(defaultScheduleMode.toUpperCase());
+        } catch (IllegalArgumentException e) {
+            return ScheduleModeEnum.AUTO;
+        }
     }
 }

@@ -15,7 +15,7 @@ import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.LoadBalanceStrategyEnum;
 import org.flexlb.enums.ResourceMeasureIndicatorEnum;
-import org.flexlb.enums.ScheduleModeEnum;
+
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.sync.status.EngineWorkerStatus;
 import org.flexlb.util.CommonUtils;
@@ -267,12 +267,11 @@ public class CostBasedPrefillStrategy implements LoadBalancer {
     }
 
     /**
-     * Whether the current scheduling path is non-batch.
-     * <p>Batch path goes through {@code FlexlbBatchScheduler} and never reaches
-     * {@code CostBasedPrefillStrategy}; this check is a defensive gate for inflight reservation.
+     * Whether batch dispatching is globally disabled.
+     * <p>When batch is enabled, FlexlbBatchScheduler handles all inflight tracking;
+     * placeholders are only needed when batch is fully off ({@code flexlbBatchEnabled=false}).
      */
     private static boolean isNonBatchPath(FlexlbConfig config, BalanceContext ctx) {
-        return !config.isFlexlbBatchEnabled()
-                || ctx.getScheduleMode() != ScheduleModeEnum.BATCH;
+        return !config.isFlexlbBatchEnabled();
     }
 }
