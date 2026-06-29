@@ -11,7 +11,6 @@ Standalone fake: ``python -m rtp_llm.dash_sc.server [--port PORT]``.
 from __future__ import annotations
 
 import asyncio
-import concurrent.futures
 import logging
 from typing import Any, Optional
 
@@ -43,7 +42,6 @@ def dash_sc_grpc_server_channel_options(dash_sc_grpc_config) -> list[tuple[str, 
 
 # Max time for grpc.aio.Server.start() + bind before start_on_loop returns.
 _DEFAULT_DASH_SC_GRPC_STARTUP_TIMEOUT_S = 30.0
-_DEFAULT_DASH_SC_GRPC_STOP_TIMEOUT_S = 60.0
 
 # HTTP/2 keepalive permissions for the dash_sc gRPC server side. The upstream
 # (whoever calls us: dash_sc forwarder, client SDK, …) needs to be able to
@@ -285,23 +283,8 @@ class DashScGrpcServer:
                             exc_info=True,
                         )
 
-        # grpc.aio.Server.stop(grace) is contracted to return within `grace`
-        # once new RPCs are rejected; if `grace` is None it falls back to a
-        # fixed ceiling so this thread cannot hang forever on a wedged loop.
-        stop_timeout_s = (
-            float(grace) if grace is not None else _DEFAULT_DASH_SC_GRPC_STOP_TIMEOUT_S
-        )
         try:
-            asyncio.run_coroutine_threadsafe(_do_stop(), loop).result(
-                timeout=stop_timeout_s
-            )
-        except concurrent.futures.TimeoutError:
-            logging.warning(
-                "[DashScGrpc] server.stop timed out after %.1fs (grace=%r); "
-                "abandoning grpc.aio.Server and clearing state",
-                stop_timeout_s,
-                grace,
-            )
+            asyncio.run_coroutine_threadsafe(_do_stop(), loop).result()
         except Exception as e:
             logging.warning(
                 "[DashScGrpc] stop scheduling failed: %s",
