@@ -135,6 +135,61 @@ def _save_partial_states_kernel(
     tl.store(base_ptr + STATE_WIDTH + block, score + ape, mask=mask)
 
 
+@triton.jit
+def _save_partial_states_from_gathered_kernel(
+    fused_ptr,
+    fused_stride,
+    score_offset,
+    restore_indices_ptr,
+    ape_ptr,
+    ape_stride,
+    positions_ptr,
+    state_cache_ptr,
+    state_cache_stride0,
+    state_cache_stride1,
+    slot_mapping_ptr,
+    block_size,
+    num_state_blocks: tl.constexpr,
+    HEAD_SIZE: tl.constexpr,
+    TRITON_BLOCK_SIZE: tl.constexpr,
+    STATE_WIDTH: tl.constexpr,
+    COMPRESS_RATIO: tl.constexpr,
+    TRAP_INVALID_KV_ACCESS: tl.constexpr,
+):
+    token_idx = tl.program_id(0).to(tl.int64)
+    slot_id = tl.load(slot_mapping_ptr + token_idx)
+    if slot_id < 0:
+        return
+
+    block_idx = (slot_id // block_size).to(tl.int64)
+    pos_in_block = slot_id % block_size
+    if block_idx < 0:
+        _trap_invalid_kv_access(TRAP_INVALID_KV_ACCESS)
+    if block_idx >= num_state_blocks:
+        _trap_invalid_kv_access(TRAP_INVALID_KV_ACCESS)
+
+    gathered_idx = tl.load(restore_indices_ptr + token_idx).to(tl.int64)
+    base_ptr = (
+        state_cache_ptr
+        + block_idx * state_cache_stride0
+        + pos_in_block * state_cache_stride1
+    )
+
+    block = tl.arange(0, TRITON_BLOCK_SIZE)
+    mask = block < HEAD_SIZE
+
+    kv = tl.load(fused_ptr + gathered_idx * fused_stride + block, mask=mask)
+    tl.store(base_ptr + block, kv, mask=mask)
+
+    position = tl.load(positions_ptr + token_idx)
+    ape_row = position % COMPRESS_RATIO
+    ape = tl.load(ape_ptr + ape_row * ape_stride + block, mask=mask)
+    score = tl.load(
+        fused_ptr + gathered_idx * fused_stride + score_offset + block, mask=mask
+    )
+    tl.store(base_ptr + STATE_WIDTH + block, score + ape, mask=mask)
+
+
 # =============================================================================
 # DeepseekV4 attention path: head_dim=512 (CSA / HCA), 584B per slot
 # =============================================================================
@@ -173,6 +228,8 @@ def _fused_kv_compress_norm_rope_insert_sparse_attn(
     ape_stride,
     seq_start,
     n_raw,
+    raw_restore_indices_ptr,
+    raw_score_offset,
     # Phase-3a part 4c — varlen raw path. When ``BATCHED=True`` these
     # arrays carry per-request data so the kernel can compute the flat
     # ``kv_raw`` offset for each request independently:
@@ -203,6 +260,7 @@ def _fused_kv_compress_norm_rope_insert_sparse_attn(
     NUM_STATE_BLOCKS,
     NUM_KV_BLOCKS,
     BATCHED: tl.constexpr,
+    RAW_RESTORE: tl.constexpr,
     TRAP_INVALID_KV_ACCESS: tl.constexpr,
     STATE_RING_ENTRIES: tl.constexpr,
 ):
@@ -243,11 +301,17 @@ def _fused_kv_compress_norm_rope_insert_sparse_attn(
         flat_idx = pos - seq_start
         use_raw = mask_pos & (flat_idx >= 0) & (flat_idx < n_raw)
     flat_idx_safe = tl.where(use_raw, flat_idx, 0)
+    if RAW_RESTORE:
+        raw_row = tl.load(raw_restore_indices_ptr + flat_idx_safe, mask=use_raw, other=0).to(
+            tl.int64
+        )
+    else:
+        raw_row = flat_idx_safe
 
     raw_mask = use_raw[:, None] & mask[None, :]
     kv_from_raw = tl.load(
         kv_raw_ptr
-        + flat_idx_safe[:, None] * kv_raw_stride
+        + raw_row[:, None] * kv_raw_stride
         + head_offset[:, None]
         + block[None, :],
         mask=raw_mask,
@@ -255,7 +319,8 @@ def _fused_kv_compress_norm_rope_insert_sparse_attn(
     )
     score_from_raw = tl.load(
         score_raw_ptr
-        + flat_idx_safe[:, None] * score_raw_stride
+        + raw_row[:, None] * score_raw_stride
+        + raw_score_offset
         + head_offset[:, None]
         + block[None, :],
         mask=raw_mask,
@@ -447,6 +512,8 @@ def _fused_kv_compress_norm_rope_insert_indexer_attn(
     ape_stride,
     seq_start,
     n_raw,
+    raw_restore_indices_ptr,
+    raw_score_offset,
     # Phase-3a part 4c — varlen raw path. When ``BATCHED=True`` these
     # arrays carry per-request data so the kernel can compute the flat
     # ``kv_raw`` offset for each request independently:
@@ -477,6 +544,7 @@ def _fused_kv_compress_norm_rope_insert_indexer_attn(
     NUM_STATE_BLOCKS,
     NUM_KV_BLOCKS,
     BATCHED: tl.constexpr,
+    RAW_RESTORE: tl.constexpr,
     TRAP_INVALID_KV_ACCESS: tl.constexpr,
     STATE_RING_ENTRIES: tl.constexpr,
 ):
@@ -514,11 +582,17 @@ def _fused_kv_compress_norm_rope_insert_indexer_attn(
         flat_idx = pos - seq_start
         use_raw = mask_pos & (flat_idx >= 0) & (flat_idx < n_raw)
     flat_idx_safe = tl.where(use_raw, flat_idx, 0)
+    if RAW_RESTORE:
+        raw_row = tl.load(raw_restore_indices_ptr + flat_idx_safe, mask=use_raw, other=0).to(
+            tl.int64
+        )
+    else:
+        raw_row = flat_idx_safe
 
     raw_mask = use_raw[:, None] & mask[None, :]
     kv_from_raw = tl.load(
         kv_raw_ptr
-        + flat_idx_safe[:, None] * kv_raw_stride
+        + raw_row[:, None] * kv_raw_stride
         + head_offset[:, None]
         + block[None, :],
         mask=raw_mask,
@@ -526,7 +600,8 @@ def _fused_kv_compress_norm_rope_insert_indexer_attn(
     )
     score_from_raw = tl.load(
         score_raw_ptr
-        + flat_idx_safe[:, None] * score_raw_stride
+        + raw_row[:, None] * score_raw_stride
+        + raw_score_offset
         + head_offset[:, None]
         + block[None, :],
         mask=raw_mask,
@@ -807,6 +882,52 @@ def run_save_partial_states(
     )
 
 
+def run_save_partial_states_from_gathered(
+    fused: torch.Tensor,  # [T_padded, 2*coff*head_dim] fp32, rank-major
+    restore_indices: torch.Tensor,  # [N] int64: logical token -> gathered row
+    out_dim: int,
+    ape: torch.Tensor,  # [compress_ratio, coff*head_dim] fp32
+    positions: torch.Tensor,  # [N] int64
+    state_cache: torch.Tensor,  # [num_blocks, block_size, 2*coff*head_dim] fp32
+    slot_mapping: torch.Tensor,  # [N] int64; -1 = skip
+    compress_ratio: int,
+) -> None:
+    """Save partial states directly from rank-major CP gathered rows."""
+    N = int(slot_mapping.shape[0])
+    if N == 0:
+        return
+    head_size = int(out_dim)
+    state_width = int(state_cache.shape[-1] // 2)
+    block_size = int(state_cache.shape[1])
+    validate_slot_mapping(
+        "compressor.save_partial_states_from_gathered.state_slot_mapping",
+        slot_mapping,
+        block_size=block_size,
+        num_blocks=int(state_cache.shape[0]),
+        negative_mode="skip_any",
+    )
+    _save_partial_states_from_gathered_kernel[(N,)](
+        fused,
+        fused.stride(0),
+        out_dim,
+        restore_indices,
+        ape,
+        ape.stride(0),
+        positions,
+        state_cache,
+        state_cache.stride(0),
+        state_cache.stride(1),
+        slot_mapping,
+        block_size,
+        num_state_blocks=int(state_cache.shape[0]),
+        HEAD_SIZE=head_size,
+        TRITON_BLOCK_SIZE=triton.next_power_of_2(head_size),
+        STATE_WIDTH=state_width,
+        COMPRESS_RATIO=compress_ratio,
+        TRAP_INVALID_KV_ACCESS=trap_invalid_kv_access_enabled(),
+    )
+
+
 def run_fused_compress_kv_write(
     state_cache: torch.Tensor,  # [num_blocks, block_size, 2*coff*head_dim] fp32
     token_to_req_indices: torch.Tensor,  # [N] int32
@@ -842,6 +963,8 @@ def run_fused_compress_kv_write(
     seq_start_per_req: Optional[torch.Tensor] = None,  # [B] int32/int64
     cu_seq_per_req: Optional[torch.Tensor] = None,  # [B+1] int32/int64
     state_tokens_per_block: int,
+    raw_restore_indices: Optional[torch.Tensor] = None,
+    raw_score_offset: int = 0,
 ) -> None:
     """Boundary-token compress→norm→rope→fp8 quant→KV-pool store.
 
@@ -888,6 +1011,9 @@ def run_fused_compress_kv_write(
         # valid CUDA address to bind.
         seq_start_per_req = positions
         cu_seq_per_req = positions
+    raw_restore = raw_restore_indices is not None
+    if raw_restore_indices is None:
+        raw_restore_indices = positions
 
     validate_slot_mapping(
         "compressor.fused_compress.kv_slot_mapping",
@@ -936,6 +1062,8 @@ def run_fused_compress_kv_write(
         ape.stride(0),
         seq_start,
         n_raw,
+        raw_restore_indices,
+        int(raw_score_offset),
         seq_start_per_req,
         cu_seq_per_req,
         rms_norm_weight,
@@ -959,6 +1087,7 @@ def run_fused_compress_kv_write(
         NUM_STATE_BLOCKS=int(state_cache.shape[0]),
         NUM_KV_BLOCKS=int(kv_cache.shape[0]),
         BATCHED=batched,
+        RAW_RESTORE=raw_restore,
         TRAP_INVALID_KV_ACCESS=trap_invalid_kv_access_enabled(),
         STATE_RING_ENTRIES=state_ring_entries,
         num_warps=_fused_num_warps(head_dim, compress_ratio, cfg),

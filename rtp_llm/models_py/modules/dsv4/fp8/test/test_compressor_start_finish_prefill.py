@@ -19,6 +19,7 @@ locks the split's externally observable behaviour against the existing
 
 from __future__ import annotations
 
+from dataclasses import replace
 import unittest
 from unittest.mock import patch
 
@@ -331,6 +332,238 @@ class CompressorFP8StartFinishPrefillTest(unittest.TestCase):
         self.assertTrue(torch.equal(score_flat, self.gathered_fused[:, self.out_dim :]))
         self.assertIs(actual_meta, self.meta)
         self.assertIsNone(seq_start)
+
+    def test_direct_gathered_wait_prefill_gather_keeps_handle_for_finish(self):
+        cmp = _build_compressor(
+            dim=self.dim,
+            head_dim=self.head_dim,
+            compress_ratio=self.compress_ratio,
+            device=self.device,
+        )
+        cmp.set_cp_ctx(self.cp_ctx)
+        handle = object()
+        rank_major_wait_calls = []
+        full_wait_calls = []
+
+        def fake_start(
+            local_2d,
+            ctx,
+            stream=None,
+            restored_buf=None,
+            profile_name=None,
+            workspace=None,
+            cp_role=None,
+        ):
+            del local_2d, ctx, stream, restored_buf, profile_name, workspace, cp_role
+            return handle
+
+        def fake_rank_major_wait(actual_handle):
+            rank_major_wait_calls.append(actual_handle)
+            return self.gathered_fused, self.cp_ctx
+
+        def fake_full_wait(actual_handle):
+            full_wait_calls.append(actual_handle)
+            return self.gathered_fused
+
+        with (
+            patch.dict(
+                "rtp_llm.models_py.modules.dsv4.fp8.compressor.os.environ",
+                {"DSV4_CP_COMPRESSOR_DIRECT_GATHERED": "1"},
+            ),
+            patch(
+                "rtp_llm.models_py.modules.dsv4.fp8.compressor.cp_all_gather_full_async",
+                side_effect=fake_start,
+            ),
+            patch(
+                "rtp_llm.models_py.modules.dsv4.fp8.compressor.cp_wait_gather_rank_major",
+                side_effect=fake_rank_major_wait,
+            ),
+            patch(
+                "rtp_llm.models_py.modules.dsv4.fp8.compressor.cp_wait_gather_full",
+                side_effect=fake_full_wait,
+            ),
+        ):
+            pending = cmp.start_prefill(self.x, 0, meta=self.meta, workspace=_WS)
+            self.assertIsNotNone(pending)
+            original_fused_flat = pending.fused_flat
+            cmp.wait_prefill_gather(pending)
+
+        self.assertEqual(rank_major_wait_calls, [handle])
+        self.assertEqual(full_wait_calls, [])
+        self.assertIs(pending.fused_gather_handle, handle)
+        self.assertIs(pending.fused_flat, original_fused_flat)
+
+    def test_direct_gathered_wait_falls_back_for_cp_sharded_prefix(self):
+        cmp = _build_compressor(
+            dim=self.dim,
+            head_dim=self.head_dim,
+            compress_ratio=self.compress_ratio,
+            device=self.device,
+        )
+        cp_ctx = replace(self.cp_ctx, kv_cache_sharded=True)
+        meta = replace(self.meta, has_prefix=True)
+        cmp.set_cp_ctx(cp_ctx)
+        handle = object()
+        rank_major_wait_calls = []
+        full_wait_calls = []
+
+        def fake_start(
+            local_2d,
+            ctx,
+            stream=None,
+            restored_buf=None,
+            profile_name=None,
+            workspace=None,
+            cp_role=None,
+        ):
+            del local_2d, ctx, stream, restored_buf, profile_name, workspace, cp_role
+            return handle
+
+        def fake_rank_major_wait(actual_handle):
+            rank_major_wait_calls.append(actual_handle)
+            return self.gathered_fused, cp_ctx
+
+        def fake_full_wait(actual_handle):
+            full_wait_calls.append(actual_handle)
+            return self.gathered_fused
+
+        with (
+            patch.dict(
+                "rtp_llm.models_py.modules.dsv4.fp8.compressor.os.environ",
+                {"DSV4_CP_COMPRESSOR_DIRECT_GATHERED": "1"},
+            ),
+            patch(
+                "rtp_llm.models_py.modules.dsv4.fp8.compressor.cp_all_gather_full_async",
+                side_effect=fake_start,
+            ),
+            patch(
+                "rtp_llm.models_py.modules.dsv4.fp8.compressor.cp_wait_gather_rank_major",
+                side_effect=fake_rank_major_wait,
+            ),
+            patch(
+                "rtp_llm.models_py.modules.dsv4.fp8.compressor.cp_wait_gather_full",
+                side_effect=fake_full_wait,
+            ),
+        ):
+            pending = cmp.start_prefill(self.x, 0, meta=meta, workspace=_WS)
+            self.assertIsNotNone(pending)
+            cmp.wait_prefill_gather(pending)
+
+        self.assertEqual(rank_major_wait_calls, [])
+        self.assertEqual(full_wait_calls, [handle])
+        self.assertIsNone(pending.fused_gather_handle)
+        self.assertIs(pending.fused_flat, self.gathered_fused)
+
+    def test_direct_gathered_wait_then_finish_uses_direct_writer_once(self):
+        cmp = _build_compressor(
+            dim=self.dim,
+            head_dim=self.head_dim,
+            compress_ratio=self.compress_ratio,
+            device=self.device,
+        )
+        cmp.set_cp_ctx(self.cp_ctx)
+        handle = object()
+        rank_major_wait_calls = []
+        direct_calls = []
+        full_wait_calls = []
+        launch_calls = []
+
+        def fake_start(
+            local_2d,
+            ctx,
+            stream=None,
+            restored_buf=None,
+            profile_name=None,
+            workspace=None,
+            cp_role=None,
+        ):
+            del local_2d, ctx, stream, restored_buf, profile_name, workspace, cp_role
+            return handle
+
+        def fake_rank_major_wait(actual_handle):
+            rank_major_wait_calls.append(actual_handle)
+            return self.gathered_fused, self.cp_ctx
+
+        def fake_direct(actual_handle, actual_meta, out_dim, sp):
+            direct_calls.append((actual_handle, actual_meta, out_dim, sp))
+            return True
+
+        with (
+            patch.dict(
+                "rtp_llm.models_py.modules.dsv4.fp8.compressor.os.environ",
+                {"DSV4_CP_COMPRESSOR_DIRECT_GATHERED": "1"},
+            ),
+            patch(
+                "rtp_llm.models_py.modules.dsv4.fp8.compressor.cp_all_gather_full_async",
+                side_effect=fake_start,
+            ),
+            patch(
+                "rtp_llm.models_py.modules.dsv4.fp8.compressor.cp_wait_gather_rank_major",
+                side_effect=fake_rank_major_wait,
+            ),
+            patch(
+                "rtp_llm.models_py.modules.dsv4.fp8.compressor.cp_wait_gather_full",
+                side_effect=lambda h: full_wait_calls.append(h) or self.gathered_fused,
+            ),
+            patch.object(cmp, "_launch", side_effect=lambda *a, **k: launch_calls.append((a, k))),
+            patch.object(cmp, "_try_direct_gathered_prefill_write", side_effect=fake_direct),
+        ):
+            pending = cmp.start_prefill(self.x, 0, meta=self.meta, workspace=_WS)
+            self.assertIsNotNone(pending)
+            cmp.wait_prefill_gather(pending)
+            cmp.finish_prefill(pending)
+
+        self.assertEqual(rank_major_wait_calls, [handle])
+        self.assertEqual(direct_calls, [(handle, self.meta, self.out_dim, 0)])
+        self.assertEqual(full_wait_calls, [])
+        self.assertEqual(launch_calls, [])
+
+    def test_forward_cp_path_can_use_direct_gathered_writer(self):
+        cmp = _build_compressor(
+            dim=self.dim,
+            head_dim=self.head_dim,
+            compress_ratio=self.compress_ratio,
+            device=self.device,
+        )
+        cmp.set_cp_ctx(self.cp_ctx)
+        handle = object()
+        direct_calls = []
+        full_wait_calls = []
+        launch_calls = []
+
+        def fake_start(
+            local_2d,
+            ctx,
+            stream=None,
+            restored_buf=None,
+            profile_name=None,
+            workspace=None,
+            cp_role=None,
+        ):
+            del local_2d, ctx, stream, restored_buf, profile_name, workspace, cp_role
+            return handle
+
+        def fake_direct(actual_handle, actual_meta, out_dim, sp):
+            direct_calls.append((actual_handle, actual_meta, out_dim, sp))
+            return True
+
+        with (
+            patch(
+                "rtp_llm.models_py.modules.dsv4.fp8.compressor.cp_all_gather_full_async",
+                side_effect=fake_start,
+            ),
+            patch(
+                "rtp_llm.models_py.modules.dsv4.fp8.compressor.cp_wait_gather_full",
+                side_effect=lambda h: full_wait_calls.append(h) or self.gathered_fused,
+            ),
+            patch.object(cmp, "_launch", side_effect=lambda *a, **k: launch_calls.append((a, k))),
+            patch.object(cmp, "_try_direct_gathered_prefill_write", side_effect=fake_direct),
+        ):
+            cmp.forward(self.x, 0, meta=self.meta, workspace=_WS)
+
+        self.assertEqual(direct_calls, [(handle, self.meta, self.out_dim, 0)])
+        self.assertEqual(full_wait_calls, [])
+        self.assertEqual(launch_calls, [])
 
     def test_warmup_start_returns_none_and_finish_is_noop(self):
         cmp = _build_compressor(

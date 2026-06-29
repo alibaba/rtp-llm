@@ -27,6 +27,7 @@ stashed on each module via ``_cp_ctx`` before ``forward`` runs.  A
 single-rank path unchanged.
 """
 
+import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Optional, Tuple, Union
 
@@ -60,6 +61,10 @@ _DEFAULT_CP_PROFILE_NAME = "dsv4.cp.all_gather"
 _CP_ROLE_MAIN = "main"
 _CP_ROLE_INDEXER = "indexer"
 _CP_ROLE_SWA_KV_FULL = "swa_kv_full"
+
+
+def _cp_gather_sync_workspace_enabled() -> bool:
+    return os.environ.get("DSV4_CP_GATHER_SYNC_WORKSPACE", "0") == "1"
 
 
 @dataclass
@@ -130,8 +135,12 @@ class CPContext:
 class CPSyncGatherHandle:
     """Completed synchronous CP gather result."""
 
-    full_2d: torch.Tensor
+    full_2d: Optional[torch.Tensor]
     profile_name: str = _DEFAULT_CP_PROFILE_NAME
+    gathered: Optional[torch.Tensor] = None
+    cp_ctx: Optional[CPContext] = None
+    workspace: Optional["PrefillWorkspace"] = None
+    cp_role: str = _CP_ROLE_MAIN
 
 
 @dataclass
@@ -180,7 +189,125 @@ class SyncCPGatherImpl:
             raise TypeError(
                 f"SyncCPGatherImpl.wait expected CPSyncGatherHandle, got {type(handle)!r}"
             )
+        if handle.full_2d is not None:
+            return handle.full_2d
+        if handle.gathered is None or handle.cp_ctx is None:
+            raise RuntimeError("sync CP gather handle has no gathered tensor to restore")
+        out_buf = None
+        if not handle.cp_ctx.unpad_restore_is_prefix and handle.workspace is not None:
+            out_buf = _cp_workspace_restore_buffer(
+                handle.workspace,
+                handle.cp_role,
+                handle.cp_ctx.seq_len_full,
+                handle.gathered.size(1),
+                handle.gathered.dtype,
+            )
+        handle.full_2d = _cp_restore_gathered_full_2d(
+            handle.gathered, handle.cp_ctx, out=out_buf
+        )
         return handle.full_2d
+
+
+def _cp_workspace_gather_buffer(
+    workspace: "PrefillWorkspace",
+    cp_role: str,
+    rows: int,
+    dim: int,
+    dtype: torch.dtype,
+) -> torch.Tensor:
+    if cp_role == _CP_ROLE_MAIN:
+        return workspace.cp_gather_main(rows, dim, dtype)
+    if cp_role == _CP_ROLE_INDEXER:
+        return workspace.cp_gather_idx(rows, dim, dtype)
+    if cp_role == _CP_ROLE_SWA_KV_FULL:
+        return workspace.cp_gather_swa(rows, dim, dtype)
+    raise ValueError(f"unknown cp_role {cp_role!r}")
+
+
+def _cp_workspace_restore_buffer(
+    workspace: "PrefillWorkspace",
+    cp_role: str,
+    rows: int,
+    dim: int,
+    dtype: torch.dtype,
+) -> torch.Tensor:
+    if cp_role == _CP_ROLE_MAIN:
+        return workspace.cp_restore_main(rows, dim, dtype)
+    if cp_role == _CP_ROLE_INDEXER:
+        return workspace.cp_restore_idx(rows, dim, dtype)
+    if cp_role == _CP_ROLE_SWA_KV_FULL:
+        return workspace.cp_restore_swa(rows, dim, dtype)
+    raise ValueError(f"unknown cp_role {cp_role!r}")
+
+
+def _cp_all_gather_full_sync_workspace(
+    local_2d: torch.Tensor,
+    cp_ctx: CPContext,
+    *,
+    profile_name: Optional[str],
+    workspace: "PrefillWorkspace",
+    cp_role: str,
+) -> CPSyncGatherHandle:
+    profile_name = profile_name or f"{_DEFAULT_CP_PROFILE_NAME}.sync_workspace"
+    local_2d = _cp_gather_2d(local_2d, cp_ctx)
+    if not local_2d.is_cuda:
+        raise RuntimeError("sync workspace CP gather requires CUDA tensor input")
+    if not torch.distributed.is_initialized():
+        raise RuntimeError("sync workspace CP gather requires torch.distributed")
+
+    process_group = collective_torch._get_group(Group.TP)
+    world_size = torch.distributed.get_world_size(process_group)
+    if world_size != cp_ctx.cp_size:
+        raise RuntimeError(
+            f"CP gather world_size({world_size}) != cp_ctx.cp_size({cp_ctx.cp_size})"
+        )
+    gather_rows = world_size * local_2d.size(0)
+    with record_function_range(f"{profile_name}.alloc"):
+        gathered = _cp_workspace_gather_buffer(
+            workspace,
+            cp_role,
+            gather_rows,
+            local_2d.size(1),
+            local_2d.dtype,
+        )
+    with record_function_range(f"{profile_name}.launch"):
+        torch.distributed.all_gather_into_tensor(
+            gathered,
+            local_2d,
+            group=process_group,
+            async_op=False,
+        )
+    if os.environ.get("DSV4_CP_COMPRESSOR_DIRECT_GATHERED", "0") == "1" and cp_role in (
+        _CP_ROLE_MAIN,
+        _CP_ROLE_INDEXER,
+    ):
+        return CPSyncGatherHandle(
+            full_2d=None,
+            profile_name=profile_name,
+            gathered=gathered,
+            cp_ctx=cp_ctx,
+            workspace=workspace,
+            cp_role=cp_role,
+        )
+    out_buf = None
+    if not cp_ctx.unpad_restore_is_prefix:
+        out_buf = _cp_workspace_restore_buffer(
+            workspace,
+            cp_role,
+            cp_ctx.seq_len_full,
+            gathered.size(1),
+            gathered.dtype,
+        )
+    with record_function_range(f"{profile_name}.restore"):
+        full = _cp_restore_gathered_full_2d(gathered, cp_ctx, out=out_buf)
+    return CPSyncGatherHandle(
+        full_2d=full,
+        profile_name=profile_name,
+        gathered=gathered,
+        cp_ctx=cp_ctx,
+        workspace=workspace,
+        cp_role=cp_role,
+    )
 
 
 class CudaAsyncCPGatherImpl:
@@ -233,18 +360,13 @@ class CudaAsyncCPGatherImpl:
         # orchestrator; SWA runs on its own side stream and can be in flight
         # alongside both. Distinct sub-regions guarantee they never alias.
         with record_function_range(f"{profile_name}.alloc"):
-            if cp_role == _CP_ROLE_MAIN:
-                gathered = workspace.cp_gather_main(
-                    gather_rows, local_2d.size(1), local_2d.dtype
-                )
-            elif cp_role == _CP_ROLE_INDEXER:
-                gathered = workspace.cp_gather_idx(
-                    gather_rows, local_2d.size(1), local_2d.dtype
-                )
-            else:  # _CP_ROLE_SWA_KV_FULL
-                gathered = workspace.cp_gather_swa(
-                    gather_rows, local_2d.size(1), local_2d.dtype
-                )
+            gathered = _cp_workspace_gather_buffer(
+                workspace,
+                cp_role,
+                gather_rows,
+                local_2d.size(1),
+                local_2d.dtype,
+            )
 
         current_stream = torch.cuda.current_stream(local_2d.device)
         gather_stream = stream or torch.cuda.Stream(device=local_2d.device)
@@ -308,12 +430,13 @@ class CudaAsyncCPGatherImpl:
             rows = handle.cp_ctx.seq_len_full
             dim = handle.gathered.size(1)
             dtype = handle.gathered.dtype
-            if handle.cp_role == _CP_ROLE_MAIN:
-                out_buf = handle.workspace.cp_restore_main(rows, dim, dtype)
-            elif handle.cp_role == _CP_ROLE_INDEXER:
-                out_buf = handle.workspace.cp_restore_idx(rows, dim, dtype)
-            else:  # _CP_ROLE_SWA_KV_FULL
-                out_buf = handle.workspace.cp_restore_swa(rows, dim, dtype)
+            out_buf = _cp_workspace_restore_buffer(
+                handle.workspace,
+                handle.cp_role,
+                rows,
+                dim,
+                dtype,
+            )
         with record_function_range(f"{handle.profile_name}.restore"):
             full = _cp_restore_gathered_full_2d(
                 handle.gathered, handle.cp_ctx, out=out_buf
@@ -634,6 +757,19 @@ def cp_all_gather_full_async(
     ``cp_role`` selects which workspace buffer pair backs this gather:
     ``_CP_ROLE_MAIN`` / ``_CP_ROLE_INDEXER`` / ``_CP_ROLE_SWA_KV_FULL``.
     """
+    if _cp_gather_sync_workspace_enabled():
+        # Diagnostic / small-token fast mode: despite this function's historical
+        # "async" name, this branch intentionally runs the collective and restore
+        # immediately on the current stream and returns a completed sync handle.
+        # The caller-provided side stream is ignored; overlap is deliberately
+        # traded away to remove async Work/event orchestration overhead.
+        return _cp_all_gather_full_sync_workspace(
+            local_2d,
+            cp_ctx,
+            profile_name=profile_name,
+            workspace=workspace,
+            cp_role=cp_role,
+        )
     return CudaAsyncCPGatherImpl().start(
         local_2d,
         cp_ctx,
@@ -651,6 +787,26 @@ def cp_wait_gather_full(handle: Any) -> torch.Tensor:
     if isinstance(handle, CPCudaAsyncGatherHandle):
         return CudaAsyncCPGatherImpl().wait(handle)
     raise TypeError(f"unsupported CP gather handle type: {type(handle)!r}")
+
+
+def cp_wait_gather_rank_major(handle: Any) -> tuple[torch.Tensor, CPContext] | None:
+    """Wait for a CP gather and return rank-major gathered rows without restore.
+
+    This is a narrow optimization hook for DSV4 compressor writers that can
+    consume ``cp_ctx.unpad_restore`` directly. Callers that cannot handle the
+    rank-major layout must use :func:`cp_wait_gather_full`.
+    """
+    if isinstance(handle, CPSyncGatherHandle):
+        if handle.gathered is None or handle.cp_ctx is None:
+            return None
+        return handle.gathered, handle.cp_ctx
+    if isinstance(handle, CPCudaAsyncGatherHandle):
+        current_stream = torch.cuda.current_stream(handle.gathered.device)
+        with record_function_range(f"{handle.profile_name}.wait_host"):
+            current_stream.wait_event(handle.completion_event)
+            handle.work.wait()
+        return handle.gathered, handle.cp_ctx
+    return None
 
 
 def cp_all_gather_full_varlen(

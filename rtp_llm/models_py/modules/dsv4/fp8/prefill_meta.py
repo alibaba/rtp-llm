@@ -14,6 +14,7 @@ asserted to be ``AttentionFP8``.
 
 from __future__ import annotations
 
+import os
 from typing import TYPE_CHECKING, Any, Dict, Optional
 
 import torch
@@ -46,7 +47,7 @@ def build_and_propagate_prefill_meta_fp8(
     req_id_per_token: Optional[torch.Tensor] = None,
     max_seqlen_q: int = 0,
     workspace: "PrefillWorkspace",
-) -> None:
+) -> Dict[int, "PrefillMeta"]:
     """Build the layer-invariant prefill meta once per ``compress_ratio``
     bucket and broadcast each bucket's meta to its layers'
     ``AttentionFP8._prefill_meta_shared``.
@@ -105,6 +106,13 @@ def build_and_propagate_prefill_meta_fp8(
                 attn._block_tables_by_type = prev_bt
 
     with record_function_range("dsv4.fp8.prefill_meta.propagate"):
+        if os.environ.get("DSV4_PREFILL_STATIC_META_VALIDATE", "0") == "1":
+            from rtp_llm.models_py.modules.dsv4.prefill_graph import (
+                update_static_prefill_meta_buckets,
+            )
+
+            update_static_prefill_meta_buckets(v4, meta_by_ratio)
+
         for layer in v4.layers:
             attn = getattr(layer, "attn", None)
             if attn is None:
@@ -114,6 +122,7 @@ def build_and_propagate_prefill_meta_fp8(
             # is-None set.
             attn._ensure_freqs_cis_bound()
             attn._set_prefill_meta_shared(meta_by_ratio.get(int(attn.compress_ratio)))
+    return meta_by_ratio
 
 
 def clear_prefill_meta_shared_fp8(v4: "V4Transformer") -> None:

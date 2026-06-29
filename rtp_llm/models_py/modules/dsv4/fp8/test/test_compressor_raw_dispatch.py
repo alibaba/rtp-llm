@@ -39,6 +39,7 @@ import torch
 from rtp_llm.models_py.modules.dsv4.fp8._compressor_vllm_triton import (
     run_fused_compress_kv_write,
     run_save_partial_states,
+    run_save_partial_states_from_gathered,
 )
 
 # --------------------------------------------------------------------------- #
@@ -208,6 +209,108 @@ def _launch(
         overlap=OVERLAP,
         state_tokens_per_block=PAGE,
     )
+
+
+def _launch_direct_gathered(
+    *,
+    fused_gathered: torch.Tensor,
+    restore_indices: torch.Tensor,
+    ape: torch.Tensor,
+    positions: torch.Tensor,
+    state_cache: torch.Tensor,
+    state_slots: torch.Tensor,
+    state_block_table: torch.Tensor,
+    kv_cache: torch.Tensor,
+    kv_slots: torch.Tensor,
+    sp: int,
+    head_dim: int,
+):
+    width = COFF * head_dim
+    rope_dim = _ROPE_DIM[head_dim]
+    rms_w = torch.ones(head_dim, dtype=torch.bfloat16, device="cuda")
+    cos_sin = _identity_cos_sin(head_dim, int(positions.max().item()) + 16)
+    token_to_req = torch.zeros(positions.shape[0], dtype=torch.int32, device="cuda")
+
+    run_save_partial_states_from_gathered(
+        fused_gathered,
+        restore_indices,
+        width,
+        ape,
+        positions,
+        state_cache,
+        state_slots,
+        compress_ratio=COMPRESS_RATIO,
+    )
+    # Slice only to set n_raw to the logical token count. Triton pointer math
+    # still permits restore_indices to address rows beyond that view, matching
+    # CP rank-major gathered layout.
+    raw_base = fused_gathered[: int(restore_indices.numel())]
+    run_fused_compress_kv_write(
+        state_cache,
+        token_to_req,
+        positions,
+        state_slots,
+        state_block_table.to(torch.int32),
+        rms_w,
+        1e-6,
+        cos_sin,
+        kv_cache,
+        kv_slots,
+        raw_base,
+        raw_base,
+        ape,
+        sp,
+        disable_raw_path=False,
+        head_dim=head_dim,
+        rope_head_dim=rope_dim,
+        compress_ratio=COMPRESS_RATIO,
+        overlap=OVERLAP,
+        state_tokens_per_block=PAGE,
+        raw_restore_indices=restore_indices,
+        raw_score_offset=width,
+    )
+
+
+def _test_direct_gathered_restore(head_dim: int, *, tag: str) -> None:
+    target_pos = COMPRESS_RATIO * 130 - 1  # 519
+    N = target_pos + 1
+    ref = _run_reference(N, head_dim, seed=23)
+
+    width = COFF * head_dim
+    padded = N + 17
+    gen = torch.Generator(device="cuda").manual_seed(1234 + head_dim)
+    restore = torch.randperm(padded, device="cuda", generator=gen)[:N].to(torch.long)
+    fused = torch.zeros(padded, 2 * width, dtype=torch.float32, device="cuda")
+    fused[restore, :width] = ref["kv_flat"]
+    fused[restore, width:] = ref["score_flat"]
+
+    n_logical = (N + PAGE - 1) // PAGE
+    bt = torch.arange(1, n_logical + 1, dtype=torch.int64, device="cuda").view(1, -1)
+    positions = torch.arange(N, dtype=torch.int64, device="cuda")
+    state_slots = _build_state_slots(positions, bt)
+    n_b = N // COMPRESS_RATIO
+    kv_cache = _alloc_kv_cache(head_dim, n_b)
+    kv_slots = _build_kv_slots(positions, 1, n_b)
+    state_cache = _alloc_state_cache(head_dim, n_logical)
+
+    _launch_direct_gathered(
+        fused_gathered=fused,
+        restore_indices=restore,
+        ape=ref["ape"],
+        positions=positions,
+        state_cache=state_cache,
+        state_slots=state_slots,
+        state_block_table=bt,
+        kv_cache=kv_cache,
+        kv_slots=kv_slots,
+        sp=0,
+        head_dim=head_dim,
+    )
+
+    bidx = _global_boundary_idx(target_pos)
+    ref_kv, ref_sc = _read_kv_slot(ref["kv_cache"], bidx, head_dim, ref["n_boundaries"])
+    got_kv, got_sc = _read_kv_slot(kv_cache, bidx, head_dim, n_b)
+    _assert_eq(tag, "direct_gathered", target_pos, ref_kv, ref_sc, got_kv, got_sc)
 
 
 def _run_reference(N_total: int, head_dim: int, *, seed: int):
@@ -442,6 +545,7 @@ def main():
     for hd in (128, 512):
         tag = "indexer" if hd == 128 else "sparse "
         _test_long_prefill(hd, tag=tag)
+        _test_direct_gathered_restore(hd, tag=tag)
         _test_prefix_reuse(hd, tag=tag)
         _test_decode(hd, tag=tag)
     print("OK")

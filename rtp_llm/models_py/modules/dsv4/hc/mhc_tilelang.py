@@ -31,7 +31,7 @@ from __future__ import annotations
 
 import importlib
 import os
-from typing import NoReturn, Tuple
+from typing import Any, Dict, NoReturn, Tuple
 
 import torch
 
@@ -40,6 +40,8 @@ _tk_mhc_pre = None
 _tk_mhc_post = None
 _tk_mhc_head_fused = None
 _tk_mhc_head = None
+_tk_mhc_pre_big_fuse_mod = None
+_tk_mhc_post_ops_mod = None
 
 
 def _import_tk():
@@ -47,7 +49,7 @@ def _import_tk():
 
     Raises on import failure — caller wraps with shape context.
     """
-    global _tk_mhc_pre, _tk_mhc_post, _tk_mhc_head_fused, _tk_mhc_head
+    global _tk_mhc_pre, _tk_mhc_post, _tk_mhc_head_fused, _tk_mhc_head, _tk_mhc_pre_big_fuse_mod, _tk_mhc_post_ops_mod
     # Importing tilelang_kernels triggers its module-level env-prep
     # (libz3 preload + TVM tmpdir setup), which must run before any tilelang
     # JIT import below.
@@ -62,11 +64,21 @@ def _import_tk():
     _tk_mhc_post = mod.mhc_post
     _tk_mhc_head_fused = getattr(mod, "mhc_head_fuse", None)
     _tk_mhc_head = mod.mhc_head
+    _tk_mhc_pre_big_fuse_mod = importlib.import_module(
+        "rtp_llm.models_py.3rdparty.tile_kernels.modeling.mhc.ops.pre_big_fuse"
+    )
+    _tk_mhc_post_ops_mod = importlib.import_module(
+        "rtp_llm.models_py.3rdparty.tile_kernels.modeling.mhc.ops.post"
+    )
     return _tk_mhc_pre, _tk_mhc_post, _tk_mhc_head_fused, _tk_mhc_head
 
 
 def _env_disabled() -> bool:
     return os.environ.get("DSV4_USE_TK_MHC", "1") == "0"
+
+
+def _prefill_mhc_pre_out_unchecked_enabled() -> bool:
+    return os.environ.get("DSV4_MHC_PRE_OUT_UNCHECKED", "0") == "1"
 
 
 def tk_mhc_head_fused_enabled() -> bool:
@@ -221,6 +233,166 @@ def tk_mhc_pre(
         ) from e
 
 
+def tk_mhc_pre_out(
+    residual: torch.Tensor,
+    fn: torch.Tensor,
+    scale: torch.Tensor,
+    base: torch.Tensor,
+    *,
+    norm_eps: float,
+    pre_eps: float,
+    sinkhorn_eps: float,
+    sinkhorn_iters: int,
+    workspace: Dict[str, Any],
+    hc_mult: int = 4,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None:
+    """Fast ``mhc_pre`` wrapper that reuses exact-shape output buffers."""
+    if not _can_use_tk(residual, hc_mult):
+        return None
+    try:
+        if _tk_mhc_pre_big_fuse_mod is None:
+            _import_tk()
+        mod = _tk_mhc_pre_big_fuse_mod
+        if mod is None:
+            raise RuntimeError("TileLang mHC pre_big_fuse module was not imported")
+
+        mhc_mult = int(residual.shape[-2])
+        hidden_size = int(residual.shape[-1])
+        mhc_mult2 = mhc_mult * mhc_mult
+        mhc_mult3 = mhc_mult * 2 + mhc_mult2
+        mhc_hidden_size = mhc_mult * hidden_size
+        residual_flat = residual.view(-1, mhc_mult, hidden_size)
+        num_tokens = int(residual_flat.shape[0])
+
+        backend = mod._requested_backend()
+        use_unchecked = _prefill_mhc_pre_out_unchecked_enabled()
+        n_splits = (
+            mod._compute_num_split(64, mhc_hidden_size, mod._ceil_div(num_tokens, 64))
+            if backend in ("deepgemm", "tilelang_splitk")
+            else 1
+        )
+        key = (
+            str(residual.device),
+            tuple(residual.shape),
+            backend,
+            n_splits,
+            hidden_size,
+            mhc_mult,
+            use_unchecked,
+            float(norm_eps),
+            float(pre_eps),
+            float(sinkhorn_eps),
+            int(sinkhorn_iters),
+        )
+        if workspace.get("key") != key:
+            device = residual.device
+            new_workspace: Dict[str, Any] = {"key": key}
+            new_workspace["backend"] = backend
+            new_workspace["n_splits"] = n_splits
+            new_workspace["post_mix"] = torch.empty(
+                num_tokens, mhc_mult, dtype=torch.float32, device=device
+            )
+            new_workspace["comb_mix"] = torch.empty(
+                num_tokens, mhc_mult2, dtype=torch.float32, device=device
+            )
+            new_workspace["layer_input"] = torch.empty(
+                num_tokens, hidden_size, dtype=torch.bfloat16, device=device
+            )
+            new_workspace["gemm_out_mul"] = torch.empty(
+                n_splits, num_tokens, mhc_mult3, dtype=torch.float32, device=device
+            )
+            new_workspace["gemm_out_sqrsum"] = torch.empty(
+                n_splits, num_tokens, dtype=torch.float32, device=device
+            )
+            if use_unchecked:
+                new_workspace["pre_big_fuse_kernel"] = mod._mhc_pre_big_fuse(
+                    hidden_size,
+                    norm_eps,
+                    pre_eps,
+                    sinkhorn_eps,
+                    2.0,
+                    sinkhorn_iters,
+                    n_splits=n_splits,
+                    mhc_mult=mhc_mult,
+                )
+            workspace.clear()
+            workspace.update(new_workspace)
+
+        if use_unchecked:
+            residual_flat = residual.view(-1, mhc_mult, hidden_size)
+            if backend == "deepgemm":
+                mod._run_deepgemm_splitk_gemm(
+                    residual_flat.view(num_tokens, mhc_hidden_size),
+                    fn,
+                    workspace["gemm_out_mul"],
+                    workspace["gemm_out_sqrsum"],
+                    n_splits,
+                )
+            elif backend == "tilelang_single":
+                actual_splits = mod._run_tilelang_single_gemm(
+                    residual_flat,
+                    fn,
+                    workspace["gemm_out_mul"],
+                    workspace["gemm_out_sqrsum"],
+                    mhc_mult3,
+                    mhc_hidden_size,
+                )
+                if actual_splits != n_splits:
+                    raise RuntimeError(
+                        "tilelang_single returned n_splits="
+                        f"{actual_splits}, expected {n_splits}"
+                    )
+            elif backend == "tilelang_splitk":
+                raise RuntimeError(
+                    "DSV4_MHC_PRE_GEMM_BACKEND=tilelang_splitk is not wired in "
+                    "this RTP TileKernels snapshot; use deepgemm or tilelang_single."
+                )
+            else:
+                raise ValueError(
+                    "Unsupported DSV4_MHC_PRE_GEMM_BACKEND="
+                    f"{backend!r}; expected deepgemm, tilelang_splitk, or tilelang_single."
+                )
+
+            workspace["pre_big_fuse_kernel"](
+                workspace["gemm_out_mul"],
+                workspace["gemm_out_sqrsum"],
+                scale,
+                base,
+                residual_flat,
+                workspace["post_mix"],
+                workspace["comb_mix"],
+                workspace["layer_input"],
+            )
+            outer_shape = residual.shape[:-2]
+            return (
+                workspace["layer_input"].view(*outer_shape, hidden_size),
+                workspace["post_mix"].view(*outer_shape, mhc_mult, 1),
+                workspace["comb_mix"].view(*outer_shape, mhc_mult, mhc_mult),
+            )
+
+        post_mix, comb_mix, layer_input = mod.mhc_pre_big_fuse_out(
+            residual,
+            fn,
+            scale,
+            base,
+            rms_eps=norm_eps,
+            mhc_pre_eps=pre_eps,
+            mhc_sinkhorn_eps=sinkhorn_eps,
+            mhc_post_mult_value=2.0,
+            sinkhorn_repeat=sinkhorn_iters,
+            post_mix=workspace["post_mix"],
+            comb_mix=workspace["comb_mix"],
+            layer_input=workspace["layer_input"],
+            gemm_out_mul=workspace["gemm_out_mul"],
+            gemm_out_sqrsum=workspace["gemm_out_sqrsum"],
+        )
+        return layer_input, post_mix, comb_mix
+    except Exception as e:
+        raise RuntimeError(
+            "TileLang mhc_pre_out failed: " + _shape_ctx(residual, hc_mult=hc_mult)
+        ) from e
+
+
 def tk_mhc_post(
     x: torch.Tensor,
     residual: torch.Tensor,
@@ -259,6 +431,36 @@ def tk_mhc_post(
     except Exception as e:
         raise RuntimeError(
             "TileLang mhc_post failed: "
+            + _shape_ctx(residual, hc_mult=hc_mult, extra=f"x.shape={tuple(x.shape)}")
+        ) from e
+
+
+def tk_mhc_post_fwd_out(
+    x: torch.Tensor,
+    residual: torch.Tensor,
+    post_mix: torch.Tensor,
+    comb_mix: torch.Tensor,
+    hc_mult: int = 4,
+    out: torch.Tensor | None = None,
+) -> torch.Tensor | None:
+    """Inference-only ``mhc_post`` wrapper that bypasses autograd.Function."""
+    if not _can_use_tk(residual, hc_mult):
+        return None
+    if x.dtype != torch.bfloat16:
+        raise RuntimeError(
+            "TileLang mhc_post_fwd_out requires a bfloat16 sublayer output x; got "
+            f"x.dtype={x.dtype}, x.shape={tuple(x.shape)}. {_shape_ctx(residual, hc_mult=hc_mult)}"
+        )
+    try:
+        if _tk_mhc_post_ops_mod is None:
+            _import_tk()
+        mod = _tk_mhc_post_ops_mod
+        if mod is None:
+            raise RuntimeError("TileLang mHC post ops module was not imported")
+        return mod.mhc_post_fwd(x, residual, post_mix, comb_mix, out=out)
+    except Exception as e:
+        raise RuntimeError(
+            "TileLang mhc_post_fwd_out failed: "
             + _shape_ctx(residual, hc_mult=hc_mult, extra=f"x.shape={tuple(x.shape)}")
         ) from e
 

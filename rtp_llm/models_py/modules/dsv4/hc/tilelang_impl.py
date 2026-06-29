@@ -12,7 +12,9 @@ from rtp_llm.models_py.modules.dsv4.hc.mhc_tilelang import (
     tk_mhc_head_fused,
     tk_mhc_head_fused_enabled,
     tk_mhc_post,
+    tk_mhc_post_fwd_out,
     tk_mhc_pre,
+    tk_mhc_pre_out,
 )
 from rtp_llm.models_py.modules.dsv4.hc.utils import squeeze_hc_batch, wrap_hc_batch
 
@@ -72,6 +74,35 @@ class TileLangHCUnit(HCUnitBase):
             squeeze_hc_batch(comb, wrapped, name="mhc_pre comb"),
         )
 
+    def _pre_impl_prefill_fast(self, x: torch.Tensor):
+        tk_x, wrapped = wrap_hc_batch(x, 4, name="mhc_pre residual")
+        tk_x = _require_contiguous(tk_x, name="mhc_pre residual")
+        workspace = getattr(self, "_prefill_fast_pre_workspace", None)
+        if workspace is None:
+            workspace = {}
+            self._prefill_fast_pre_workspace = workspace
+        with torch.inference_mode():
+            out = tk_mhc_pre_out(
+                tk_x,
+                self.fn,
+                self.scale,
+                self.base,
+                norm_eps=self.norm_eps,
+                pre_eps=self.hc_eps,
+                sinkhorn_eps=self.hc_eps,
+                sinkhorn_iters=self.hc_sinkhorn_iters,
+                workspace=workspace,
+                hc_mult=self.hc_mult,
+            )
+        if out is None:
+            _raise_unavailable("pre_out", x, self.hc_mult)
+        y, post, comb = out
+        return (
+            squeeze_hc_batch(y, wrapped, name="mhc_pre y"),
+            squeeze_hc_batch(post, wrapped, name="mhc_pre post"),
+            squeeze_hc_batch(comb, wrapped, name="mhc_pre comb"),
+        )
+
     def _post_impl(
         self,
         x: torch.Tensor,
@@ -111,6 +142,34 @@ class TileLangHCUnit(HCUnitBase):
             )
         if out is None:
             _raise_unavailable("post", residual, self.hc_mult)
+        return squeeze_hc_batch(out, wrapped, name="mhc_post output")
+
+    def _post_impl_prefill_fast(
+        self,
+        x: torch.Tensor,
+        residual: torch.Tensor,
+        post: torch.Tensor,
+        comb: torch.Tensor,
+    ) -> torch.Tensor:
+        tk_x, wrapped = wrap_hc_batch(x, 3, name="mhc_post x")
+        tk_residual, _ = wrap_hc_batch(residual, 4, name="mhc_post residual")
+        tk_post, _ = wrap_hc_batch(post, 4, name="mhc_post post")
+        tk_comb, _ = wrap_hc_batch(comb, 4, name="mhc_post comb")
+        tk_x = _require_contiguous(tk_x, name="mhc_post x")
+        tk_residual = _require_contiguous(tk_residual, name="mhc_post residual")
+        tk_post = _require_contiguous(tk_post, name="mhc_post post")
+        tk_comb = _require_contiguous(tk_comb, name="mhc_post comb")
+        with torch.inference_mode():
+            out = tk_mhc_post_fwd_out(
+                tk_x,
+                tk_residual,
+                tk_post,
+                tk_comb,
+                hc_mult=self.hc_mult,
+                out=tk_residual,
+            )
+        if out is None:
+            _raise_unavailable("post_fwd_out", residual, self.hc_mult)
         return squeeze_hc_batch(out, wrapped, name="mhc_post output")
 
 

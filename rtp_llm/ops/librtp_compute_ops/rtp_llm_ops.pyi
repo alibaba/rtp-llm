@@ -501,6 +501,12 @@ def cublas_gemm_bf16_bf16_fp32(input: torch.Tensor, weight: torch.Tensor) -> tor
     """
 
 
+def cublas_gemm_bf16_bf16_fp32_out(input: torch.Tensor, weight: torch.Tensor, out: torch.Tensor) -> torch.Tensor:
+    """
+    BF16 x BF16 GEMM with FP32 accumulation into caller-owned FP32 output.
+    """
+
+
 def prepare_sparse_mla_params(attention_inputs: librtp_compute_ops.PyAttentionInputs, seq_size_per_block: int) -> SparseMlaParams:
     ...
 

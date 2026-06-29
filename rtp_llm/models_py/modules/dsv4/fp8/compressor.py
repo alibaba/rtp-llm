@@ -34,6 +34,8 @@ Public API:
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
+import os
 from typing import Any, Dict, Optional, Tuple
 
 import torch
@@ -44,9 +46,28 @@ from rtp_llm.models_py.modules.dsv4._profiler import record_function_range
 from rtp_llm.ops.compute_ops import rtp_llm_ops
 
 _CUBLAS_GEMM_BF16_BF16_FP32 = getattr(rtp_llm_ops, "cublas_gemm_bf16_bf16_fp32", None)
+_CUBLAS_GEMM_BF16_BF16_FP32_OUT = getattr(
+    rtp_llm_ops, "cublas_gemm_bf16_bf16_fp32_out", None
+)
+_LOG = logging.getLogger(__name__)
+_BF16_GEMM_OUT_DISABLED = False
+_BF16_GEMM_OUT_LOGGED = False
 
 
-def _linear_bf16_bf16_fp32(x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
+def _env_flag(name: str, default: str = "0") -> bool:
+    return os.environ.get(name, default).strip().lower() in ("1", "true", "yes", "on")
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.environ.get(name, str(default)).strip())
+    except (TypeError, ValueError):
+        return int(default)
+
+
+def _linear_bf16_bf16_fp32(
+    x: torch.Tensor, weight: torch.Tensor, out: Optional[torch.Tensor] = None
+) -> torch.Tensor:
     """F.linear(x, weight) with BF16 operands and FP32 accumulation/output."""
     assert x.dtype == torch.bfloat16, f"expected BF16 input, got {x.dtype}"
     assert weight.dtype == torch.bfloat16, f"expected BF16 weight, got {weight.dtype}"
@@ -57,6 +78,37 @@ def _linear_bf16_bf16_fp32(x: torch.Tensor, weight: torch.Tensor) -> torch.Tenso
     ), "cublas_gemm_bf16_bf16_fp32 op is not built"
     leading_shape = x.shape[:-1]
     x_2d = x.reshape(-1, x.shape[-1])
+    if out is not None:
+        expected = (*leading_shape, weight.shape[0])
+        assert tuple(out.shape) == expected, (
+            f"expected out shape {expected}, got {tuple(out.shape)}"
+        )
+        assert out.dtype == torch.float32, f"expected FP32 out, got {out.dtype}"
+        assert out.device == x.device, "out device must match input device"
+        assert out.is_contiguous(), "expected contiguous output"
+        out_2d = out.reshape(-1, weight.shape[0])
+        global _BF16_GEMM_OUT_DISABLED
+        if not _BF16_GEMM_OUT_DISABLED:
+            try:
+                if _CUBLAS_GEMM_BF16_BF16_FP32_OUT is not None:
+                    _CUBLAS_GEMM_BF16_BF16_FP32_OUT(x_2d, weight, out_2d)
+                else:
+                    from rtp_llm.models_py.modules.dsv4.fp8._bf16_gemm_out_jit import (
+                        cublas_gemm_bf16_bf16_fp32_out,
+                    )
+
+                    cublas_gemm_bf16_bf16_fp32_out(x_2d, weight, out_2d)
+
+                global _BF16_GEMM_OUT_LOGGED
+                if not _BF16_GEMM_OUT_LOGGED:
+                    _LOG.info("DSV4 compressor BF16 GEMM out path enabled")
+                    _BF16_GEMM_OUT_LOGGED = True
+                return out
+            except Exception:
+                _BF16_GEMM_OUT_DISABLED = True
+                _LOG.exception(
+                    "DSV4 compressor BF16 GEMM out path failed; falling back"
+                )
     out_2d = _CUBLAS_GEMM_BF16_BF16_FP32(x_2d, weight)
     return out_2d.reshape(*leading_shape, weight.shape[0])
 
@@ -68,6 +120,7 @@ from rtp_llm.models_py.modules.dsv4.cp import (
     cp_all_gather_full_async,
     cp_should_gather,
     cp_wait_gather_full,
+    cp_wait_gather_rank_major,
 )
 from rtp_llm.models_py.modules.dsv4.fp8._compressor_consts import (
     INDEXER_ENTRY_BYTES,
@@ -79,6 +132,7 @@ from rtp_llm.models_py.modules.dsv4.fp8._compressor_vllm_triton import (
     build_cos_sin_cache,
     run_fused_compress_kv_write,
     run_save_partial_states,
+    run_save_partial_states_from_gathered,
 )
 from rtp_llm.models_py.modules.dsv4.fp8._kv_cache_utils import PoolBackedModule
 from rtp_llm.models_py.modules.dsv4.prefill_workspace import PrefillWorkspace
@@ -250,6 +304,7 @@ class _CompressorPending:
     out_dim: int
     profile_label: Optional[str] = None
     restored_buf: Optional[torch.Tensor] = None
+    uses_fused_linear_workspace: bool = False
 
 
 class _CompressorNorm(nn.Module):
@@ -361,6 +416,8 @@ class CompressorFP8(PoolBackedModule):
         self._cp_gather_stream: Optional[Any] = None
         self._kv_cache_sharded: bool = False
         self._profile_label: Optional[str] = None
+        self._prefill_fused_linear_workspace: Dict[Tuple[Any, ...], torch.Tensor] = {}
+        self._prefill_fused_linear_workspace_in_use = False
         # MOEDBG: caller (Attention / IndexerFP8) sets this to a name
         # prefix like ``"L02_attn_cmp"`` before forward and clears after;
         # _forward_prefill_body uses it as the rec name root. None / empty
@@ -386,6 +443,63 @@ class CompressorFP8(PoolBackedModule):
             out_dim = coff * self.head_dim
             self.wkv.weight = nn.Parameter(fused[:out_dim], requires_grad=False)
             self.wgate.weight = nn.Parameter(fused[out_dim:], requires_grad=False)
+
+    def _prefill_fused_linear_out(self, x: torch.Tensor) -> Optional[torch.Tensor]:
+        if not _env_flag("DSV4_COMPRESSOR_FUSED_LINEAR_OUT", "0"):
+            return None
+        if _BF16_GEMM_OUT_DISABLED:
+            return None
+        if self._prefill_fused_linear_workspace_in_use:
+            return None
+        if not x.is_cuda or x.dtype != torch.bfloat16 or not x.is_contiguous():
+            return None
+        if self._wkv_wgate_fused is None:
+            return None
+        if self._wkv_wgate_fused.dtype != torch.bfloat16:
+            return None
+        if x.dim() not in (2, 3):
+            return None
+
+        out_features = int(self._wkv_wgate_fused.size(0))
+        leading_shape = tuple(int(v) for v in x.shape[:-1])
+        rows = int(x.numel() // x.shape[-1])
+        max_rows = _env_int(
+            "DSV4_COMPRESSOR_FUSED_LINEAR_OUT_MAX_TOKENS",
+            _env_int("DSV4_PREFILL_SMALL_TOKEN_BYPASS_MAX_TOKENS", 8192),
+        )
+        if max_rows <= 0 or rows > max_rows:
+            return None
+        # Exact-shape cache by design: the current small-token target pads to a
+        # fixed bucket, while varied token counts should fall back to bounded
+        # one-shape-per-module reuse instead of growing a persistent cache.
+        key = (str(x.device), leading_shape, out_features)
+        out = self._prefill_fused_linear_workspace.get(key)
+        if out is None:
+            if self._prefill_fused_linear_workspace:
+                self._prefill_fused_linear_workspace.clear()
+            out = torch.empty(
+                *leading_shape,
+                out_features,
+                dtype=torch.float32,
+                device=x.device,
+            )
+            self._prefill_fused_linear_workspace[key] = out
+        if out.numel() != rows * out_features:
+            return None
+        return out
+
+    def _prefill_fused_linear(self, x: torch.Tensor) -> torch.Tensor:
+        out = self._prefill_fused_linear_out(x)
+        fused = _linear_bf16_bf16_fp32(x, self._wkv_wgate_fused, out=out)
+        if out is not None and fused.data_ptr() != out.data_ptr():
+            self._prefill_fused_linear_workspace.clear()
+        return fused
+
+    def _uses_prefill_fused_linear_workspace(self, tensor: torch.Tensor) -> bool:
+        for out in self._prefill_fused_linear_workspace.values():
+            if tensor.data_ptr() == out.data_ptr():
+                return True
+        return False
 
     # ----------------------------------------------------------------------
     # Compatibility shims (kept to match the BF16 ``Compressor`` API surface
@@ -840,9 +954,12 @@ class CompressorFP8(PoolBackedModule):
 
         out_dim = (1 + self.overlap) * self.head_dim
         with record_function_range("dsv4.fp8.compressor.prefill.fused_linear"):
-            fused_out = _linear_bf16_bf16_fp32(x, self._wkv_wgate_fused)
+            fused_out = self._prefill_fused_linear(x)
             N = bsz * seqlen
             fused_flat = fused_out.reshape(N, -1)
+            uses_fused_linear_workspace = self._uses_prefill_fused_linear_workspace(
+                fused_out
+            )
 
         cp_ctx = self._cp_ctx
         cp_gather = cp_should_gather(cp_ctx, start_pos)
@@ -881,6 +998,8 @@ class CompressorFP8(PoolBackedModule):
                     cp_role=self._cp_role,
                 )
 
+        if uses_fused_linear_workspace:
+            self._prefill_fused_linear_workspace_in_use = True
         return _CompressorPending(
             fused_flat=fused_flat,
             fused_gather_handle=fused_gather_handle,
@@ -891,6 +1010,7 @@ class CompressorFP8(PoolBackedModule):
             out_dim=out_dim,
             profile_label=profile_label,
             restored_buf=None,
+            uses_fused_linear_workspace=uses_fused_linear_workspace,
         )
 
     def wait_prefill_gather(self, pending: Optional[_CompressorPending]) -> None:
@@ -908,8 +1028,110 @@ class CompressorFP8(PoolBackedModule):
                 f"dsv4.fp8.compressor.prefill.{pending.profile_label}.cp_wait_kv_score"
             )
         with record_function_range(wait_range):
+            if self._direct_gathered_prefill_eligible(
+                pending.fused_gather_handle,
+                pending.meta,
+            ):
+                rank_major = cp_wait_gather_rank_major(pending.fused_gather_handle)
+                if rank_major is not None:
+                    return
             pending.fused_flat = cp_wait_gather_full(pending.fused_gather_handle)
             pending.fused_gather_handle = None
+
+    def release_prefill_pending_workspace(
+        self, pending: Optional[_CompressorPending]
+    ) -> None:
+        if pending is not None and pending.uses_fused_linear_workspace:
+            self._prefill_fused_linear_workspace_in_use = False
+
+    def _direct_gathered_prefill_eligible(
+        self,
+        gather_handle: Any,
+        meta: Optional[CompressorMeta],
+    ) -> bool:
+        if not (
+            _env_flag("DSV4_CP_COMPRESSOR_DIRECT_GATHERED", "0")
+            and gather_handle is not None
+            and meta is not None
+            and self._state_pool_3d is not None
+            and self._kv_pool_view is not None
+            and self._state_block_table is not None
+            and self._kv_block_table is not None
+        ):
+            return False
+        if _cp_sliced_state_read_needed(meta, self._cp_ctx, raw_disabled=False):
+            return False
+        return True
+
+    def _try_direct_gathered_prefill_write(
+        self,
+        gather_handle: Any,
+        meta: Optional[CompressorMeta],
+        out_dim: int,
+        sp: int,
+    ) -> bool:
+        if not self._direct_gathered_prefill_eligible(gather_handle, meta):
+            return False
+
+        rank_major = cp_wait_gather_rank_major(gather_handle)
+        if rank_major is None:
+            return False
+
+        gathered, cp_ctx = rank_major
+        restore = cp_ctx.unpad_restore.to(device=gathered.device, dtype=torch.long)
+        with record_function_range(
+            "dsv4.fp8.compressor.prefill.direct_gathered.save_partial"
+        ):
+            run_save_partial_states_from_gathered(
+                gathered,
+                restore,
+                out_dim,
+                self.ape,
+                meta.positions,
+                self._state_pool_3d,
+                meta.state_slots,
+                compress_ratio=self.compress_ratio,
+            )
+
+        with record_function_range(
+            "dsv4.fp8.compressor.prefill.direct_gathered.compress_write"
+        ):
+            cos_sin_cache = self._ensure_cos_sin_cache(gathered.device)
+            # Pass the full rank-major storage; raw_restore_indices maps each
+            # logical token row to the corresponding gathered row.
+            raw_base = gathered
+            use_varlen_raw = (
+                meta.is_batched
+                and meta.seq_start_per_req is not None
+                and meta.cu_seq_per_req is not None
+            )
+            run_fused_compress_kv_write(
+                self._state_pool_3d,
+                meta.token_to_req,
+                meta.positions,
+                meta.state_slots,
+                self._state_block_table,
+                self.norm.weight,
+                self.norm_eps,
+                cos_sin_cache,
+                self._kv_pool_view,
+                meta.kv_slots,
+                raw_base,
+                raw_base,
+                self.ape,
+                0 if use_varlen_raw else int(sp),
+                disable_raw_path=False,
+                head_dim=self.head_dim,
+                rope_head_dim=self.rope_head_dim,
+                compress_ratio=self.compress_ratio,
+                overlap=self.overlap,
+                seq_start_per_req=meta.seq_start_per_req if use_varlen_raw else None,
+                cu_seq_per_req=meta.cu_seq_per_req if use_varlen_raw else None,
+                state_tokens_per_block=self._state_tokens_per_block,
+                raw_restore_indices=restore,
+                raw_score_offset=out_dim,
+            )
+        return True
 
     def finish_prefill(self, pending: Optional[_CompressorPending]) -> None:
         """Drain a :meth:`start_prefill` and write the FP8 KV pool.
@@ -920,37 +1142,48 @@ class CompressorFP8(PoolBackedModule):
         """
         if pending is None:
             return  # warmup, mirrors forward()'s early return
-        self.wait_prefill_gather(pending)
-        fused_flat = pending.fused_flat
-        out_dim = pending.out_dim
-        meta = pending.meta
+        try:
+            if self._try_direct_gathered_prefill_write(
+                pending.fused_gather_handle,
+                pending.meta,
+                pending.out_dim,
+                pending.sp,
+            ):
+                pending.fused_gather_handle = None
+                return
+            self.wait_prefill_gather(pending)
+            fused_flat = pending.fused_flat
+            out_dim = pending.out_dim
+            meta = pending.meta
 
-        with record_function_range("dsv4.fp8.compressor.prefill.split_kv_score"):
-            assert fused_flat.dim() == 2, (
-                f"CompressorFP8 prefill expects flat fused projection, got "
-                f"{tuple(fused_flat.shape)}"
-            )
-            assert fused_flat.size(1) == 2 * out_dim, (
-                f"CompressorFP8 fused hidden mismatch: got {fused_flat.size(1)}, "
-                f"expected {2 * out_dim}"
-            )
-            kv_flat = fused_flat[:, :out_dim]
-            score_flat = fused_flat[:, out_dim:]
-
-        if meta is None:
-            # Non-CP fallback: rebuild positions/b_idx from sp/bsz/seqlen.
-            device = fused_flat.device
-            with record_function_range("dsv4.fp8.compressor.prefill.build_meta"):
-                positions, b_idx = _build_prefill_positions(
-                    pending.sp, pending.bsz, pending.seqlen, device
+            with record_function_range("dsv4.fp8.compressor.prefill.split_kv_score"):
+                assert fused_flat.dim() == 2, (
+                    f"CompressorFP8 prefill expects flat fused projection, got "
+                    f"{tuple(fused_flat.shape)}"
                 )
-                meta = self.prepare_metadata(
-                    positions, b_idx, has_prefix=pending.sp > 0
+                assert fused_flat.size(1) == 2 * out_dim, (
+                    f"CompressorFP8 fused hidden mismatch: got {fused_flat.size(1)}, "
+                    f"expected {2 * out_dim}"
                 )
+                kv_flat = fused_flat[:, :out_dim]
+                score_flat = fused_flat[:, out_dim:]
 
-        seq_start = None if meta.is_batched else pending.sp
-        with record_function_range("dsv4.fp8.compressor.prefill.launch"):
-            self._launch(kv_flat, score_flat, meta, seq_start=seq_start)
+            if meta is None:
+                # Non-CP fallback: rebuild positions/b_idx from sp/bsz/seqlen.
+                device = fused_flat.device
+                with record_function_range("dsv4.fp8.compressor.prefill.build_meta"):
+                    positions, b_idx = _build_prefill_positions(
+                        pending.sp, pending.bsz, pending.seqlen, device
+                    )
+                    meta = self.prepare_metadata(
+                        positions, b_idx, has_prefix=pending.sp > 0
+                    )
+
+            seq_start = None if meta.is_batched else pending.sp
+            with record_function_range("dsv4.fp8.compressor.prefill.launch"):
+                self._launch(kv_flat, score_flat, meta, seq_start=seq_start)
+        finally:
+            self.release_prefill_pending_workspace(pending)
 
     # ----------------------------------------------------------------------
     # Forward (prefill)
@@ -1003,7 +1236,7 @@ class CompressorFP8(PoolBackedModule):
         device = x.device
         out_dim = (1 + self.overlap) * self.head_dim
         with record_function_range("dsv4.fp8.compressor.prefill.fused_linear"):
-            fused_out = _linear_bf16_bf16_fp32(x, self._wkv_wgate_fused)
+            fused_out = self._prefill_fused_linear(x)
             N = bsz * seqlen
             fused_flat = fused_out.reshape(N, -1)
 
@@ -1043,6 +1276,13 @@ class CompressorFP8(PoolBackedModule):
                 f"seq_len_full={N}"
             )
             assert fused_gather_handle is not None
+            if self._try_direct_gathered_prefill_write(
+                fused_gather_handle,
+                meta,
+                out_dim,
+                sp,
+            ):
+                return None
             with record_function_range("dsv4.fp8.compressor.prefill.cp_wait_kv_score"):
                 fused_flat = cp_wait_gather_full(fused_gather_handle)
 
