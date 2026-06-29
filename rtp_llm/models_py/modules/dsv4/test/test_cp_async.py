@@ -3,6 +3,7 @@ from unittest.mock import patch
 
 import torch
 
+from rtp_llm.models_py.distributed import pynccl_cp
 from rtp_llm.models_py.modules.dsv4.cp import (
     _CP_ROLE_MAIN,
     CPContext,
@@ -236,6 +237,160 @@ def test_build_cp_context_supports_multi_prefill_stream():
     assert torch.equal(ctx.local_is_real, torch.ones(8, dtype=torch.bool))
 
 
+def test_pynccl_symm_rounds_rows_by_default_for_prefix_cache_shapes():
+    with patch.dict("os.environ", {}, clear=True):
+        assert pynccl_cp._round_symm_rows(1) == 1
+        assert pynccl_cp._round_symm_rows(24576) == 32768
+        assert pynccl_cp._round_symm_rows(28672) == 32768
+        assert pynccl_cp._round_symm_rows(32768) == 32768
+
+
+def test_pynccl_symm_allows_only_safe_default_roles():
+    with patch.dict("os.environ", {}, clear=True):
+        assert pynccl_cp.symm_role_allowed("state_read")
+        assert pynccl_cp.symm_role_allowed("full_sync")
+        assert pynccl_cp.symm_role_allowed("varlen")
+        assert pynccl_cp.symm_role_allowed("main")
+        assert pynccl_cp.symm_role_allowed("indexer")
+        assert not pynccl_cp.symm_role_allowed("gather_cmp")
+        assert not pynccl_cp.symm_role_allowed("swa_prefix")
+        assert not pynccl_cp.symm_role_allowed("indexer_k_packed")
+
+
+def test_pynccl_symm_uses_torch_max_bytes_as_capacity_limit():
+    max_nbytes = 64 * 1024 * 1024
+    assert pynccl_cp._fits_torch_symm_mem_limit(
+        rows=1024,
+        cols=1024,
+        dtype=torch.bfloat16,
+        max_nbytes=max_nbytes,
+    )
+    assert not pynccl_cp._fits_torch_symm_mem_limit(
+        rows=max_nbytes // 2 + 1,
+        cols=1,
+        dtype=torch.bfloat16,
+        max_nbytes=max_nbytes,
+    )
+    assert not pynccl_cp._fits_torch_symm_mem_limit(
+        rows=1,
+        cols=1,
+        dtype=torch.bfloat16,
+        max_nbytes=None,
+    )
+
+
+def test_pynccl_symm_over_limit_falls_back_to_plain_pynccl():
+    process_group = object()
+    device = torch.device("cuda", 0)
+    with patch.dict("os.environ", {"DSV4_CP_SYMM": "1"}, clear=True):
+        with patch.object(pynccl_cp, "symm_available", return_value=True):
+            with patch.object(pynccl_cp, "symm_persistent", return_value=None):
+                with patch.object(pynccl_cp, "_comm_ready", return_value=True) as ready:
+                    symm_out, symm_ok, use_pynccl = pynccl_cp._select_cp_backend(
+                        "main",
+                        1,
+                        1,
+                        torch.bfloat16,
+                        device,
+                        process_group,
+                        False,
+                        "test.profile",
+                    )
+    assert symm_out is None
+    assert not symm_ok
+    assert use_pynccl
+    ready.assert_called_once_with(process_group)
+
+
+def test_pynccl_symm_disallowed_roles_fall_back_to_plain_pynccl():
+    process_group = object()
+    device = torch.device("cuda", 0)
+    with patch.dict("os.environ", {"DSV4_CP_SYMM": "1"}, clear=True):
+        with patch.object(pynccl_cp, "symm_available", return_value=True):
+            with patch.object(pynccl_cp, "symm_persistent") as symm_persistent:
+                with patch.object(pynccl_cp, "_comm_ready", return_value=True) as ready:
+                    symm_out, symm_ok, use_pynccl = pynccl_cp._select_cp_backend(
+                        "gather_cmp",
+                        1,
+                        1,
+                        torch.uint8,
+                        device,
+                        process_group,
+                        True,
+                        "test.profile",
+                    )
+    assert symm_out is None
+    assert not symm_ok
+    assert use_pynccl
+    symm_persistent.assert_not_called()
+    ready.assert_called_once_with(process_group)
+
+
+def test_pynccl_symm_init_defaults_cover_variable_roles_and_dtypes():
+    with patch.dict("os.environ", {}, clear=True):
+        pairs = pynccl_cp._symm_init_pairs()
+
+    assert ("main", torch.bfloat16) in pairs
+    assert ("main", torch.float32) in pairs
+    assert ("indexer", torch.bfloat16) in pairs
+    assert ("indexer", torch.float32) in pairs
+    assert ("state_read", torch.float32) in pairs
+    assert ("gather_cmp", torch.uint8) not in pairs
+    if hasattr(torch, "float8_e4m3fn"):
+        assert ("indexer_k_quant", torch.float8_e4m3fn) not in pairs
+
+
+def test_pynccl_symm_init_registers_windows_within_budget():
+    process_group = object()
+    device = torch.device("cuda", 0)
+    with patch.object(pynccl_cp, "symm_enabled", return_value=True):
+        with patch.object(pynccl_cp, "_symm_pool", return_value=object()):
+            with patch.object(pynccl_cp, "symm_available", return_value=True):
+                with patch.object(pynccl_cp, "_torch_symm_mem_max_nbytes", return_value=128):
+                    with patch.object(
+                        pynccl_cp,
+                        "_symm_init_pairs",
+                        return_value=(
+                            ("main", torch.bfloat16),
+                            ("gather_cmp", torch.uint8),
+                            ("state_read", torch.float32),
+                            ("indexer_k_scale", torch.float32),
+                        ),
+                    ):
+                        with patch.object(pynccl_cp, "_ring_symm_base") as ring_base:
+                            pynccl_cp._init_symm_windows(process_group, device)
+
+    assert ring_base.call_count == 2
+    ring_base.assert_any_call(
+        "main", torch.bfloat16, device, process_group, 128, create=True
+    )
+    ring_base.assert_any_call(
+        "state_read", torch.float32, device, process_group, 128, create=True
+    )
+
+
+def test_pynccl_symm_runtime_does_not_create_missing_windows():
+    process_group = object()
+    device = torch.device("cuda", 0)
+    with patch.dict("os.environ", {"DSV4_CP_SYMM": "1"}, clear=True):
+        with patch.object(pynccl_cp, "_torch_symm_mem_max_nbytes", return_value=1024):
+            with patch.object(pynccl_cp, "_ring_symm_base", return_value=None) as ring_base:
+                out = pynccl_cp.symm_persistent(
+                    "main",
+                    1,
+                    1,
+                    torch.bfloat16,
+                    device,
+                    process_group,
+                    "test.profile",
+                )
+
+    assert out is None
+    ring_base.assert_called_once_with(
+        "main", torch.bfloat16, device, process_group, 1024
+    )
+
+
 def test_build_cp_context_moves_restore_indices_independently_when_cuda_available():
     if not torch.cuda.is_available():
         return
@@ -279,6 +434,22 @@ if __name__ == "__main__":
     print("PASS test_cp_gather_2d_keeps_contiguous_input_object")
     test_build_cp_context_supports_multi_prefill_stream()
     print("PASS test_build_cp_context_supports_multi_prefill_stream")
+    test_pynccl_symm_rounds_rows_by_default_for_prefix_cache_shapes()
+    print("PASS test_pynccl_symm_rounds_rows_by_default_for_prefix_cache_shapes")
+    test_pynccl_symm_allows_only_safe_default_roles()
+    print("PASS test_pynccl_symm_allows_only_safe_default_roles")
+    test_pynccl_symm_uses_torch_max_bytes_as_capacity_limit()
+    print("PASS test_pynccl_symm_uses_torch_max_bytes_as_capacity_limit")
+    test_pynccl_symm_over_limit_falls_back_to_plain_pynccl()
+    print("PASS test_pynccl_symm_over_limit_falls_back_to_plain_pynccl")
+    test_pynccl_symm_disallowed_roles_fall_back_to_plain_pynccl()
+    print("PASS test_pynccl_symm_disallowed_roles_fall_back_to_plain_pynccl")
+    test_pynccl_symm_init_defaults_cover_variable_roles_and_dtypes()
+    print("PASS test_pynccl_symm_init_defaults_cover_variable_roles_and_dtypes")
+    test_pynccl_symm_init_registers_windows_within_budget()
+    print("PASS test_pynccl_symm_init_registers_windows_within_budget")
+    test_pynccl_symm_runtime_does_not_create_missing_windows()
+    print("PASS test_pynccl_symm_runtime_does_not_create_missing_windows")
     test_build_cp_context_moves_restore_indices_independently_when_cuda_available()
     print(
         "PASS test_build_cp_context_moves_restore_indices_independently_when_cuda_available"

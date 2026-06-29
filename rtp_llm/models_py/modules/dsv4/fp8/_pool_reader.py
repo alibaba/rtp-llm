@@ -270,11 +270,11 @@ class CPShardedPoolReader(CompressedKPoolReader):
         current_stream = torch.cuda.current_stream(device)
         stream.wait_stream(current_stream)
         local_flat.record_stream(stream)
-        # CP all-gather backend (symm > pynccl > torch) is selected inside the
-        # dispatcher. gather_cmp is one of the smallest CP AGs, so it benefits
-        # most from the pynccl/symm paths. ``work`` is None on pynccl/symm
-        # (stream-ordered, fenced via completion_event); the symm path here needs
-        # the extra DSV4_CP_SYMM_VAR opt-in (variable gather shape).
+        # CP all-gather backend is selected inside the dispatcher. gather_cmp is
+        # intentionally not a symmetric-memory role because its async consumer
+        # lifetime is separate from the workspace-backed compressor gathers.
+        # Under DSV4_CP_SYMM it falls back to ordinary pynccl. ``work`` is None
+        # on pynccl (stream-ordered, fenced via completion_event).
         gather_rows = world_size * int(local_flat.shape[0])
         gathered, work, completion_event = pynccl_cp.cp_all_gather(
             local_flat,

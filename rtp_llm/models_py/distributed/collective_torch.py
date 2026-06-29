@@ -149,6 +149,7 @@ def init_distributed_environment(
         rocm_rccl = _get_rocm_rccl()
         if rocm_rccl is not None and parallelism_config.tp_size > 1:
             rocm_rccl.prepare_comm_if_needed(parallelism_config, _get_group(Group.TP))
+        _init_cp_comm()
         return
 
     _normalize_parallelism_ranks(parallelism_config)
@@ -178,6 +179,7 @@ def init_distributed_environment(
         _register_process_groups_to_cpp()
         if rocm_rccl is not None and parallelism_config.tp_size > 1:
             rocm_rccl.prepare_comm_if_needed(parallelism_config, _get_group(Group.TP))
+        _init_cp_comm()
         return
 
     logging.info(
@@ -212,6 +214,7 @@ def init_distributed_environment(
     _register_process_groups_to_cpp()
     if rocm_rccl is not None and parallelism_config.tp_size > 1:
         rocm_rccl.prepare_comm_if_needed(parallelism_config, _get_group(Group.TP))
+    _init_cp_comm()
     init_user_buffers_environment(parallelism_config)
 
 
@@ -289,6 +292,27 @@ def _create_process_groups(
     elif tp_size > 1 and world_size == tp_size:
         # Single TP group: WORLD is the TP group, init symm_mem for it
         _get_symm_mem().init_symm_mem_communicator(torch.distributed.group.WORLD)
+
+
+def _init_cp_comm():
+    """Build optional pynccl CP resources during distributed startup.
+
+    Uses ``_get_group(Group.TP)`` (the exact PG the CP gathers use). When
+    DSV4_CP_PYNCCL / DSV4_CP_SYMM is enabled, failures are startup failures
+    rather than hot-path lazy init surprises.
+    """
+    if _parallelism_config is None or _parallelism_config.tp_size <= 1:
+        return
+    if not torch.cuda.is_available():
+        return
+    from rtp_llm.models_py.distributed import pynccl_cp
+
+    if not (pynccl_cp.pynccl_enabled() or pynccl_cp.symm_enabled()):
+        return
+    pg = _get_group(Group.TP)
+    device = torch.device("cuda", _parallelism_config.local_rank)
+    pynccl_cp.init(pg, device)
+    logging.info(f"[rank: {_parallelism_config.world_rank}] initialized pynccl CP")
 
 
 def _register_process_groups_to_cpp():

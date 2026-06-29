@@ -921,11 +921,11 @@ def start_dequantize_and_gather_k_cache_slots_cp_byte_sliced(
     gather_stream = stream
     gather_stream.wait_stream(current_stream)
 
-    # CP all-gather backend (symm > pynccl > torch) is selected inside the
-    # dispatcher. swa_prefix shapes are rank-uniform (all_gather requires it) so
-    # any collective window registration stays in sync across ranks; the symm
-    # path needs the extra DSV4_CP_SYMM_VAR opt-in (variable shape). ``work`` is
-    # None on the pynccl/symm paths (stream-ordered, fenced via completion_event).
+    # CP all-gather backend is selected inside the dispatcher. swa_prefix is not
+    # a symmetric-memory role because it returns an async pending handle with a
+    # separate consumer lifetime; under DSV4_CP_SYMM it falls back to ordinary
+    # pynccl. ``work`` is None on pynccl (stream-ordered, fenced via
+    # completion_event).
     gather_rows = cp_size * int(unique_blocks.numel())
     gather_cols = int(k_cache_raw.shape[1])
     with torch.cuda.stream(gather_stream):
