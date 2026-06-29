@@ -240,6 +240,11 @@ class MoriEpIntranodeRouter(FusedMoeDataRouter):
     ) -> torch.Tensor:
         # Use the cached global dispatch_ids for combine, not the local_ids
         # that were set as expert_topk_ids for the fused_moe kernel.
+        # Guard against finalize being called without a preceding successful
+        # prepare (e.g. an exception aborted prepare but finalize still runs).
+        assert (
+            self._dispatch_ids is not None
+        ), "_finalize_single called before prepare populated _dispatch_ids"
         global_dispatch_ids = self._dispatch_ids
         if global_dispatch_ids.dtype != torch.int32:
             global_dispatch_ids = global_dispatch_ids.to(torch.int32)

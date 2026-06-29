@@ -200,8 +200,16 @@ class TestXQAAttnOp(BaseAttentionTest):
                 supported_count += 1
             else:
                 logging.warning(f"    ⚠️  Expected SUPPORTED but got NOT SUPPORTED")
+            self.assertTrue(
+                is_supported, f"Expected SUPPORTED but got NOT SUPPORTED: {desc}"
+            )
 
         logging.info(f"\nSupported cases: {supported_count}/{len(supported_cases)}")
+        self.assertEqual(
+            supported_count,
+            len(supported_cases),
+            "Not all supported configurations were reported as supported",
+        )
 
         # Test UNSUPPORTED configurations
         logging.info("\n--- Testing UNSUPPORTED configurations ---")
@@ -262,9 +270,17 @@ class TestXQAAttnOp(BaseAttentionTest):
                 unsupported_count += 1
             else:
                 logging.warning(f"    ⚠️  Expected UNSUPPORTED but got SUPPORTED")
+            self.assertFalse(
+                is_supported, f"Expected UNSUPPORTED but got SUPPORTED: {desc}"
+            )
 
         logging.info(
             f"\nUnsupported cases correctly rejected: {unsupported_count}/{len(unsupported_cases)}"
+        )
+        self.assertEqual(
+            unsupported_count,
+            len(unsupported_cases),
+            "Not all unsupported configurations were rejected",
         )
 
         # Test boundary cases
@@ -327,6 +343,9 @@ class TestXQAAttnOp(BaseAttentionTest):
                 f"    head_dim={size_per_head}, page_size={seq_size_per_block}\n"
                 f"    → Support: {is_supported}"
             )
+            # Expected outcome is encoded in the case description.
+            expected_supported = "SHOULD BE UNSUPPORTED" not in desc
+            self.assertEqual(is_supported, expected_supported, desc)
 
         logging.info("\n=== XQAAttnOp support() testing completed ===")
 
@@ -371,6 +390,11 @@ class TestXQAAttnOp(BaseAttentionTest):
             )
             logging.info(f"  Batch size: {batch_size}, seq_lens: {seq_lens}")
             logging.info(f"  Support result: {is_supported}")
+
+            # support() must return a bool, and every case here is a valid XQA
+            # config (supported dtype / group_size / head_dim), so expect True.
+            self.assertIsInstance(is_supported, bool, desc)
+            self.assertTrue(is_supported, f"Expected SUPPORTED for known config: {desc}")
 
     def test_single_batch_decode(self):
         """Test decode for a single batch"""

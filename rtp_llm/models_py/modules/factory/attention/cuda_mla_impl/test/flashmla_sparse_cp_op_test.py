@@ -258,11 +258,14 @@ def _tp2_worker(rank: int, nccl_port: int, result_queue: mp.Queue) -> None:
             torch.cuda.synchronize()
             result_queue.put(("ref", oref.cpu().float().numpy()))
         _barrier()
-        destroy_distributed_environment()
     except Exception:
         logging.exception("tp2 rank %s", rank)
         result_queue.put(("err", str(rank)))
         raise
+    finally:
+        # Always tear down the NCCL communicator, even on the exception path,
+        # so a failing rank does not leak the process group until it is killed.
+        destroy_distributed_environment()
 
 
 @skipIf(not CUDA_FLASHMLA_OK, SKIP_REASON)

@@ -308,21 +308,23 @@ def test_deepep_low_latency_router():
     world_size = 2
     test_tp_sizes = [1, 2]
 
-    for use_fp8 in [True, False]:
-        for test_tp_size in test_tp_sizes:
-            logging.info(
-                f"test_deepep_low_latency_router: use_fp8: {use_fp8}, test_tp_size: {test_tp_size}, world_size: {world_size}"
-            )
-            mp.spawn(  # pyright: ignore[reportPrivateImportUsage]
-                _spawn_wrapper,
-                args=(use_fp8, world_size, test_tp_size, nccl_port),
-                nprocs=world_size,
-                join=True,
-            )
-
-    # Release locks after all tests complete
-    for lock in locks:
-        lock.__exit__(None, None, None)
+    try:
+        for use_fp8 in [True, False]:
+            for test_tp_size in test_tp_sizes:
+                logging.info(
+                    f"test_deepep_low_latency_router: use_fp8: {use_fp8}, test_tp_size: {test_tp_size}, world_size: {world_size}"
+                )
+                mp.spawn(  # pyright: ignore[reportPrivateImportUsage]
+                    _spawn_wrapper,
+                    args=(use_fp8, world_size, test_tp_size, nccl_port),
+                    nprocs=world_size,
+                    join=True,
+                )
+    finally:
+        # Release port locks even if mp.spawn raises, so the reserved ports
+        # are not leaked until the process exits.
+        for lock in locks:
+            lock.__exit__(None, None, None)
 
 
 if __name__ == "__main__":

@@ -306,8 +306,13 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.absorb_opt_len);
             },
             [](py::tuple t) {
-                if (t.size() != 14)
-                    throw std::runtime_error("Invalid state!");
+                // Accept the legacy 12-field layout for rolling upgrades (front-end
+                // already updated, back-end still on old code): the two new trailing
+                // fields (use_triton_pa, absorb_opt_len) keep their defaults when absent.
+                const size_t n = t.size();
+                if (n != 12 && n != 14)
+                    throw std::runtime_error("Invalid FMHAConfig state: expected 12 or 14 fields, got "
+                                             + std::to_string(n));
                 FMHAConfig c;
                 try {
                     c.attn_backend            = t[0].cast<std::string>();
@@ -322,8 +327,10 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     c.enable_xqa              = t[9].cast<bool>();
                     c.use_aiter_pa            = t[10].cast<bool>();
                     c.use_asm_pa              = t[11].cast<bool>();
-                    c.use_triton_pa           = t[12].cast<bool>();
-                    c.absorb_opt_len          = t[13].cast<int64_t>();
+                    if (n >= 14) {
+                        c.use_triton_pa  = t[12].cast<bool>();
+                        c.absorb_opt_len = t[13].cast<int64_t>();
+                    }
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("FMHAConfig unpickle error: ") + e.what());
                 }
@@ -665,8 +672,12 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.fp4_moe_op);
             },
             [](py::tuple t) {
-                if (t.size() != 13)
-                    throw std::runtime_error("Invalid state!");
+                // Accept the legacy 11-field layout for rolling upgrades: the two new
+                // trailing fields (moe_strategy, fp4_moe_op) keep their defaults when absent.
+                const size_t n = t.size();
+                if (n != 11 && n != 13)
+                    throw std::runtime_error("Invalid MoeConfig state: expected 11 or 13 fields, got "
+                                             + std::to_string(n));
                 MoeConfig c;
                 try {
                     c.use_deepep_moe             = t[0].cast<bool>();
@@ -680,8 +691,10 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     c.masked_max_token_num       = t[8].cast<int>();
                     c.use_all_gather             = t[9].cast<bool>();
                     c.ll_num_max_token           = t[10].cast<int>();
-                    c.moe_strategy               = t[11].cast<std::string>();
-                    c.fp4_moe_op                 = t[12].cast<std::string>();
+                    if (n >= 13) {
+                        c.moe_strategy = t[11].cast<std::string>();
+                        c.fp4_moe_op   = t[12].cast<std::string>();
+                    }
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("MoeConfig unpickle error: ") + e.what());
                 }

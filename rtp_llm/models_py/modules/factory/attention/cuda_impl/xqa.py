@@ -48,6 +48,9 @@ class XQAParams:
     q_scale: float = 1.0
     kv_scale: float = 1.0
     o_scale: float = 1.0
+    # Tokens per request, precomputed in prepare() to keep the GPU->CPU sync
+    # off the per-layer forward hot path.
+    q_len_per_req: int = 1
 
 
 class XQAImpl(FMHAImplBase):
@@ -137,7 +140,8 @@ class XQADecodeImpl(FMHAImplBase):
             attn_configs.dtype in [torch.bfloat16, torch.float16, torch.float8_e4m3fn]
             and 1 <= group_size <= 16
             and attn_configs.size_per_head in [64, 128, 256]
-            and attn_configs.tokens_per_block in [16, 32, 64, 128]
+            # Match the kernel's page-size check (XQAWrapper.support uses the same).
+            and attn_configs.kernel_tokens_per_block in [16, 32, 64, 128]
         )
 
     def forward(
@@ -163,6 +167,7 @@ class XQADecodeImpl(FMHAImplBase):
         self.fmha_params.seq_lens = new_fmha_params.seq_lens
         self.fmha_params.batch_size = new_fmha_params.batch_size
         self.fmha_params.max_seq_len = new_fmha_params.max_seq_len
+        self.fmha_params.q_len_per_req = new_fmha_params.q_len_per_req
 
         # update_trt_params only copies kv_cache_offset. The TRT XQA kernel also
         # reads sequence_lengths via the captured data_ptr(), so we must update
@@ -219,6 +224,12 @@ class XQAWrapper:
         kv_scale: float = 1.0,
         o_scale: float = 1.0,
     ) -> XQAParams:
+        # Precompute tokens-per-request here (once per step) instead of in
+        # forward() (per layer), avoiding a GPU->CPU sync on the hot path.
+        seqlens = torch.diff(attn_inputs.decode_cu_seqlens_d).cpu().tolist()
+        assert (
+            len(set(seqlens)) == 1
+        ), f"All sequences must have the same length for XQA, got lengths: {seqlens}"
         return XQAParams(
             page_table=attn_inputs.kv_cache_kernel_block_id_device,
             seq_lens=attn_inputs.sequence_lengths,
@@ -231,6 +242,7 @@ class XQAWrapper:
             q_scale=q_scale,
             kv_scale=kv_scale,
             o_scale=o_scale,
+            q_len_per_req=seqlens[0],
         )
 
     def init_spec_mask(self, q_4d: torch.Tensor):
@@ -292,12 +304,9 @@ class XQAWrapper:
         page_size = k_cache.shape[2]
         kv_layout = "HND"
 
-        seqlens = torch.diff(self.attn_inputs.decode_cu_seqlens_d).cpu().tolist()
-        assert (
-            len(set(seqlens)) == 1
-        ), f"All sequences must have the same length for XQA, got lengths: {seqlens}"
-        q_len_per_req = seqlens[0]
-        batch_size = len(seqlens)
+        # Reuse the value precomputed in prepare() to avoid a per-forward GPU sync.
+        q_len_per_req = fmha_params.q_len_per_req
+        batch_size = fmha_params.batch_size
         q_4d = q.reshape(batch_size, q_len_per_req, q.shape[1], q.shape[2])
 
         if seq_lens.dim() == 1:
