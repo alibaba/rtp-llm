@@ -2,7 +2,6 @@
 
 #include <cstdint>
 #include <memory>
-#include <mutex>
 #include "kmonitor/client/MetricsReporter.h"
 #include "rtp_llm/models_py/bindings/core/OpData.h"
 
@@ -18,11 +17,8 @@ public:
 private:
     class Writer;
 
-    int64_t                                    rank_id_{0};
-    int                                        backup_count_{0};
-    kmonitor::MetricsReporterPtr               metrics_reporter_;
-    std::once_flag                             init_once_;
-    std::unique_ptr<ModelInputsLogger::Writer> writer_;
+    kmonitor::MetricsReporterPtr metrics_reporter_;
+    std::unique_ptr<Writer>      writer_;
 };
 
 }  // namespace rtp_llm

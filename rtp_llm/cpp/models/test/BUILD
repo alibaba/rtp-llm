@@ -1,7 +1,11 @@
 load("//:def.bzl", "cc_test_wrapper", "copts")
-load("//bazel:arch_select.bzl", "torch_deps")
+load("//bazel:arch_select.bzl", "requirement", "torch_deps")
 
 cc_test = cc_test_wrapper
+
+requirement([
+    "torch",
+])
 
 test_copts = [
     "-fno-access-control",
@@ -31,6 +35,10 @@ test_deps = [
     "@local_config_cuda//cuda:cudart",
 ] + torch_deps() + cuda13_torch_link_deps
 
+model_inputs_logger_deps = [
+    "//rtp_llm/cpp/models:models",
+] + torch_deps() + cuda13_torch_link_deps
+
 cc_test(
     name = "model_data_test",
     srcs = [
@@ -43,4 +51,27 @@ cc_test(
         "TEST_USING_DEVICE": "CUDA",
     },
     exec_properties = {'gpu':'H20'},
+)
+
+cc_binary(
+    name = "model_inputs_logger_dump_tool",
+    srcs = [
+        "ModelInputsLoggerDumpTool.cc",
+    ],
+    copts = test_copts,
+    deps = model_inputs_logger_deps,
+)
+
+py_test(
+    name = "model_inputs_logger_replay_test",
+    srcs = [
+        "model_inputs_logger_replay_test.py",
+    ],
+    data = [
+        ":model_inputs_logger_dump_tool",
+    ],
+    deps = [
+        "//rtp_llm/models_py/standalone:auto_model",
+        ":torch",
+    ],
 )
