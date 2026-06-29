@@ -67,3 +67,18 @@ cc_library(
     visibility = ["//visibility:public"],
     copts = test_copts,
 )
+
+cc_library(
+    name = "rejection_sampling_test_utils",
+    hdrs = [
+        "RejectionSamplingOpTest.hpp",
+    ],
+    deps = [
+        "//rtp_llm/models_py/bindings/core:op_data",
+        "//rtp_llm/models_py/bindings/core:rejection_sampling_ops_test_lib",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ] + torch_deps(),
+    visibility = ["//visibility:public"],
+    copts = test_copts,
+)

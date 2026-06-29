@@ -113,10 +113,7 @@ const CacheKeysType& GenerateStream::cacheKeys(int32_t batch_id) const {
 absl::Status GenerateStream::initKVBlock() {
     RTP_LLM_PROFILE_FUNCTION();
     std::lock_guard<std::mutex> lock(*mutex_);
-    if (generate_status_->status == StreamState::WAITING) {
-        wait_time_us_ = autil::TimeUtility::currentTimeInMicroSeconds() - begin_time_us_;
-    }
-    auto ret = stream_cache_resource_->initKVBlock(reserve_step_);
+    auto                        ret = stream_cache_resource_->initKVBlock(reserve_step_);
     if (!ret.ok()) {
         RTP_LLM_LOG_WARNING("GenerateStream::initKVBlock: initKVBlock failed, stream_id: %lld", streamId());
     }
@@ -537,10 +534,16 @@ void GenerateStream::setReserveStep(size_t reserve_step) {
 StreamState GenerateStream::moveToNext() {
     checkTimeout();
     std::lock_guard<std::mutex> lock(*mutex_);
-    StreamState                 state = generate_status_->moveToNext();
+    const auto                  old_status = getStatus();
+    StreamState                 state      = generate_status_->moveToNext();
+    const auto                  new_status = getStatus();
+
+    if (old_status == StreamState::WAITING && new_status != StreamState::WAITING) {
+        wait_time_us_ = autil::TimeUtility::currentTimeInMicroSeconds() - begin_time_us_;
+    }
 
     // notify one thread waiting for stream completion
-    if (getStatus() == StreamState::FINISHED) {
+    if (new_status == StreamState::FINISHED) {
         cv_->notify_one();
     }
     return state;

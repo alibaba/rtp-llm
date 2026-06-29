@@ -40,18 +40,18 @@
                         "index": 0,
                         "message": {
                             "role": "assistant",
-                            "content": "This is a heartwarming, sun-drenched photograph capturing a tender moment between a woman and her dog on a beach at sunset.\n\n**Key Elements:**\n\n*   **The Subjects:** A woman with long, dark hair, wearing a plaid shirt and dark pants, is sitting on the sand. She is smiling warmly, looking at her dog. A large, light-colored Labrador Retriever, wearing a colorful patterned harness, is sitting beside her, extending its front paw to give her",
+                            "content": "This is a heartwarming, sun-drenched photograph capturing a tender moment between a woman and her dog on a beach at sunset.\n\n**Key Elements:**\n\n*   **The Subjects:** A woman with long, dark hair, wearing a plaid shirt and dark pants, is sitting on the sand. She is smiling warmly, looking at her dog. Beside her, a large, light-colored Labrador Retriever, wearing a colorful harness, sits attentively, extending its paw to give a",
                             "partial": false
                         },
                         "finish_reason": "length"
                     }
                 ],
                 "usage": {
-                    "prompt_tokens": 964,
-                    "total_tokens": 1064,
+                    "prompt_tokens": 2766,
+                    "total_tokens": 2866,
                     "completion_tokens": 100,
                     "prompt_tokens_details": {
-                        "image_tokens": 950
+                        "image_tokens": 2752
                     }
                 }
             }
@@ -93,19 +93,19 @@
                         "index": 0,
                         "message": {
                             "role": "assistant",
-                            "content": "This is a heartwarming, sun-drenched photograph capturing a tender moment between a woman and her dog on a beach at sunset.\n\n**Key Elements:**\n\n- **The Subjects:** A woman with long, dark hair, wearing a plaid shirt and dark pants, is sitting on the sand. She is smiling warmly, looking at her dog. A large, light-colored Labrador Retriever, wearing a colorful patterned harness, is sitting beside her, extending its front paw to give her a",
+                            "content": "This is a heartwarming, sun-drenched photograph capturing a tender moment between a woman and her dog on a beach at sunset.\n\n**Key Elements:**\n\n*   **The Subjects:** A woman with long, dark hair, wearing a plaid shirt and dark pants, is sitting on the sand. She is smiling warmly, looking at her dog. Beside her, a large, light-colored Labrador Retriever, wearing a colorful harness, sits attentively, extending its paw to give a",
                             "partial": false
                         },
                         "finish_reason": "length"
                     }
                 ],
                 "usage": {
-                    "prompt_tokens": 964,
-                    "total_tokens": 1064,
+                    "prompt_tokens": 2766,
+                    "total_tokens": 2866,
                     "completion_tokens": 100,
                     "prompt_tokens_details": {
-                        "cached_tokens": 960,
-                        "image_tokens": 950
+                        "cached_tokens": 2752,
+                        "image_tokens": 2752
                     }
                 }
             }

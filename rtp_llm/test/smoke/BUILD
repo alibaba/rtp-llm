@@ -13,6 +13,11 @@ exports_files([
     "data/prompt_candidates.json",
 ])
 
+filegroup(
+    name = "smoke_model_configs",
+    srcs = glob(["data/model/**/*.json"]),
+)
+
 # ============================================================================
 # Open-source smoke test suites (platform-grouped)
 # ============================================================================

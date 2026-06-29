@@ -133,8 +133,8 @@ def _make_prefill_inputs(
     for sl in input_lengths:
         cu.append(cu[-1] + sl)
     cu_tensor = torch.tensor(cu, dtype=torch.int32, device=device)
-    attn_inputs.cu_seqlens = cu_tensor
-    attn_inputs.cu_kv_seqlens = cu_tensor
+    attn_inputs.cu_seqlens_device = cu_tensor
+    attn_inputs.cu_kv_seqlens_device = cu_tensor
 
     # Kernel reads padding_offset[t] and computes:
     #   tgt = t + padding_offset[t]
@@ -158,7 +158,7 @@ def _make_prefill_inputs(
         input_lengths, tokens_per_block, device
     )
     attn_inputs.kv_cache_kernel_block_id_device = block_table_dev
-    attn_inputs.kv_cache_kernel_block_id_host = block_table_dev.to(
+    attn_inputs.kv_cache_kernel_block_id = block_table_dev.to(
         "cpu", non_blocking=False
     )
     return attn_inputs, per_batch_block_ids
@@ -372,7 +372,7 @@ class FusedQKVTransposePrefillTest(unittest.TestCase):
             rope_dim=cfg.rope_config.dim,
             rope_base=float(cfg.rope_config.base),
             rope_scale=float(cfg.rope_config.scale),
-            cu_seqlens=attn_inputs.cu_seqlens.cpu(),
+            cu_seqlens=attn_inputs.cu_seqlens_device.cpu(),
         )
 
         # bf16 RoPE: ~2-bit ULP after 2 fp16 muls + 1 add; 1e-2 atol is the
@@ -606,7 +606,7 @@ class FusedQKVTransposePrefillAsmTest(unittest.TestCase):
             rope_dim=rope_dim,
             rope_base=float(cfg.rope_config.base),
             rope_scale=float(cfg.rope_config.scale),
-            cu_seqlens=attn_inputs.cu_seqlens.cpu(),
+            cu_seqlens=attn_inputs.cu_seqlens_device.cpu(),
         )
         torch.testing.assert_close(q_out, q_ref, atol=1e-2, rtol=1e-2)
 
