@@ -141,7 +141,9 @@ class Qwen3_VLImageEmbedding(Qwen2_5_VLImageEmbedding):
     def embedding(self, data, **kwargs):
         pixel_values = data[0].to(self._device).to(self._data_type)
         grid_thw = data[1].to(self._device)
-        embeds, deepstack_embeds = self.visual(pixel_values, grid_thw=grid_thw)
+        vision_output = self.visual(pixel_values, grid_thw=grid_thw)
+        embeds = vision_output.pooler_output
+        deepstack_embeds = vision_output.deepstack_features
         split_sizes = (grid_thw.prod(-1) // self.visual.spatial_merge_size**2).tolist()
         embeds = torch.split(embeds, split_sizes)
         pos_id = self.get_position_ids(grid_thw)[0]
@@ -166,7 +168,9 @@ class Qwen3_VLImageEmbedding(Qwen2_5_VLImageEmbedding):
             torch.concat(pixel_values_list, dim=0).to(self._device).to(self._data_type)
         )
         grid_thw = torch.concat(grid_thw_list, dim=0).to(self._device)
-        embeds, deepstack_embeds = self.visual(pixel_values, grid_thw=grid_thw)
+        vision_output = self.visual(pixel_values, grid_thw=grid_thw)
+        embeds = vision_output.pooler_output
+        deepstack_embeds = vision_output.deepstack_features
         split_sizes = (grid_thw.prod(-1) // self.visual.spatial_merge_size**2).tolist()
         embeds = torch.split(embeds, split_sizes)
         pos_id = self.get_position_ids(grid_thw)

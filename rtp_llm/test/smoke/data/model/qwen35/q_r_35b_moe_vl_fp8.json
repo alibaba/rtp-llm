@@ -33,15 +33,15 @@
                         "index": 0,
                         "message": {
                             "role": "assistant",
-                            "content": "The user wants a description of the provided image.\n\n1.  **Identify the main subjects:** A woman and a dog.\n2.  **Identify the setting:** A sandy beach with the ocean in the background. The lighting suggests sunset or sunrise (golden hour).\n3.  **Describe the action:** The dog is sitting and giving its paw to the woman. The woman is holding the paw. They are looking at each other.\n4.  **Describe the subjects",
+                            "content": "The user wants a description of the provided image.\n\n1.  **Identify the main subjects:** A woman and a dog.\n2.  **Identify the setting:** A sandy beach with the ocean in the background. The lighting suggests late afternoon or sunset (golden hour).\n3.  **Describe the action:** The woman is sitting on the sand. The dog is sitting facing her. They are interacting, specifically the dog is lifting its paw and the woman is holding it (",
                             "partial": false
                         },
                         "finish_reason": "length"
                     }
                 ],
                 "usage": {
-                    "prompt_tokens": 971,
-                    "total_tokens": 1071,
+                    "prompt_tokens": 2773,
+                    "total_tokens": 2873,
                     "completion_tokens": 100
                 }
             }

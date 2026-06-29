@@ -135,8 +135,8 @@ def _make_rope_prefill_inputs(
     for seq_len in input_lengths:
         cu.append(cu[-1] + seq_len)
     cu_seqlens = torch.tensor(cu, dtype=torch.int32, device=device)
-    attn_inputs.cu_seqlens = cu_seqlens
-    attn_inputs.cu_kv_seqlens = cu_seqlens
+    attn_inputs.cu_seqlens_device = cu_seqlens
+    attn_inputs.cu_kv_seqlens_device = cu_seqlens
 
     max_seq_len = max(input_lengths)
     padding_offset = []
@@ -1269,8 +1269,8 @@ class TestAiterPrefillImplNoKvRopeRealOp(unittest.TestCase):
             q_rope,
             k_rope,
             v,
-            attn_inputs.cu_seqlens,
-            attn_inputs.cu_kv_seqlens,
+            attn_inputs.cu_seqlens_device,
+            attn_inputs.cu_kv_seqlens_device,
             causal=True,
         )
         torch.testing.assert_close(actual, ref, atol=1e-2, rtol=1e-2)

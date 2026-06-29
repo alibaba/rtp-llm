@@ -84,10 +84,10 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
     py_attn_inputs.input_lengths    = inputs.input_lengths;
 
     if (inputs.kv_cache_kernel_block_id.defined()) {
-        py_attn_inputs.kv_cache_kernel_block_id_host = inputs.kv_cache_kernel_block_id.clone().pin_memory();
+        py_attn_inputs.kv_cache_kernel_block_id = inputs.kv_cache_kernel_block_id.clone().pin_memory();
     }
     if (inputs.kv_cache_block_id.defined()) {
-        py_attn_inputs.kv_cache_block_id_host = inputs.kv_cache_block_id.clone().pin_memory();
+        py_attn_inputs.kv_cache_block_id = inputs.kv_cache_block_id.clone().pin_memory();
     }
     if (inputs.kv_cache_layer_to_group.defined()) {
         py_attn_inputs.kv_cache_layer_to_group = inputs.kv_cache_layer_to_group;
@@ -138,37 +138,37 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
 
         py_attn_inputs.context_total_kv_length = cu_kv_seqlens[context_batch_size].item<int>();
         py_attn_inputs.total_tokens            = cu_seqlens[batch_size].item<int>();
-        py_attn_inputs.cu_seqlens_host         = cu_seqlens;
-        py_attn_inputs.cu_seqlens              = tensorHoldHostAndToCuda(cu_seqlens);
-        py_attn_inputs.cu_kv_seqlens           = tensorHoldHostAndToCuda(cu_kv_seqlens);
+        py_attn_inputs.cu_seqlens         = cu_seqlens;
+        py_attn_inputs.cu_seqlens_device       = tensorHoldHostAndToCuda(cu_seqlens);
+        py_attn_inputs.cu_kv_seqlens_device    = tensorHoldHostAndToCuda(cu_kv_seqlens);
     } else {
         py_attn_inputs.total_tokens = 0;
-        py_attn_inputs.cu_seqlens_host =
-            torch::zeros({batch_size + 1}, torch::TensorOptions(torch::kInt32).device(torch::kCPU).pinned_memory(true));
         py_attn_inputs.cu_seqlens =
+            torch::zeros({batch_size + 1}, torch::TensorOptions(torch::kInt32).device(torch::kCPU).pinned_memory(true));
+        py_attn_inputs.cu_seqlens_device =
             torch::zeros({batch_size + 1}, torch::TensorOptions(torch::kInt32).device(torch::kCUDA));
-        py_attn_inputs.cu_kv_seqlens =
+        py_attn_inputs.cu_kv_seqlens_device =
             torch::zeros({batch_size + 1}, torch::TensorOptions(torch::kInt32).device(torch::kCUDA));
         torch::Tensor decode_cu_seqlens =
             torch::arange(0,
                           py_attn_inputs.sequence_lengths.size(0) + 1,
                           1,
                           torch::TensorOptions(torch::kInt32).device(torch::kCPU).pinned_memory(true));
-        py_attn_inputs.decode_cu_seqlens_host = decode_cu_seqlens;
-        py_attn_inputs.decode_cu_seqlens_d    = tensorHoldHostAndToCuda(decode_cu_seqlens);
+        py_attn_inputs.decode_cu_seqlens   = decode_cu_seqlens;
+        py_attn_inputs.decode_cu_seqlens_device = tensorHoldHostAndToCuda(decode_cu_seqlens);
     }
 
     // create device tensors
-    py_attn_inputs.prefix_lengths_d = tensorHoldHostAndToCuda(py_attn_inputs.prefix_lengths);
-    py_attn_inputs.input_lengths_d  = tensorHoldHostAndToCuda(py_attn_inputs.input_lengths);
+    py_attn_inputs.prefix_lengths_device = tensorHoldHostAndToCuda(py_attn_inputs.prefix_lengths);
+    py_attn_inputs.input_lengths_device  = tensorHoldHostAndToCuda(py_attn_inputs.input_lengths);
 
-    // In qwen3-next target verify mode, sequence_lengths_plus_1_d uses prefix_lengths
+    // In qwen3-next target verify mode, sequence_lengths_plus_1_device uses prefix_lengths
     if (py_attn_inputs.is_target_verify) {
-        auto sequence_lengths_plus_1             = (py_attn_inputs.prefix_lengths + 1).pin_memory();
-        py_attn_inputs.sequence_lengths_plus_1_d = tensorHoldHostAndToCuda(sequence_lengths_plus_1);
+        auto sequence_lengths_plus_1                  = (py_attn_inputs.prefix_lengths + 1).pin_memory();
+        py_attn_inputs.sequence_lengths_plus_1_device = tensorHoldHostAndToCuda(sequence_lengths_plus_1);
     } else {
-        auto sequence_lengths_plus_1             = (py_attn_inputs.sequence_lengths + 1).pin_memory();
-        py_attn_inputs.sequence_lengths_plus_1_d = tensorHoldHostAndToCuda(sequence_lengths_plus_1);
+        auto sequence_lengths_plus_1                  = (py_attn_inputs.sequence_lengths + 1).pin_memory();
+        py_attn_inputs.sequence_lengths_plus_1_device = tensorHoldHostAndToCuda(sequence_lengths_plus_1);
     }
 
     return py_attn_inputs;
@@ -187,22 +187,22 @@ void PyWrappedModel::setupKVCacheForAttentionInputs(torch_ext::PyAttentionInputs
     // build per-group contiguous 2-D tables on device.
     const size_t group = inputs.kv_cache_kernel_block_id.size(0);
 
-    py_attn_inputs.kv_cache_kernel_block_id_host_by_group.clear();
+    py_attn_inputs.kv_cache_kernel_block_id_by_group.clear();
     py_attn_inputs.kv_cache_kernel_block_id_device_by_group.clear();
-    py_attn_inputs.kv_cache_kernel_block_id_host_by_group.reserve(group);
+    py_attn_inputs.kv_cache_kernel_block_id_by_group.reserve(group);
     py_attn_inputs.kv_cache_kernel_block_id_device_by_group.reserve(group);
 
     for (size_t g = 0; g < group; ++g) {
         // group view: [batch, kernel_blocks] on HOST
         auto group_view = inputs.kv_cache_kernel_block_id[g];
-        py_attn_inputs.kv_cache_kernel_block_id_host_by_group.push_back(group_view);
+        py_attn_inputs.kv_cache_kernel_block_id_by_group.push_back(group_view);
         py_attn_inputs.kv_cache_kernel_block_id_device_by_group.push_back(tensorHoldHostAndToCuda(group_view));
     }
 
     // Legacy 2-D fields default to group 0.
     // NOTE: keep host/device 2-D fields consistent to avoid shape mismatch in CUDA graph replay path.
     py_attn_inputs.kv_cache_kernel_block_id_device = py_attn_inputs.kv_cache_kernel_block_id_device_by_group[0];
-    py_attn_inputs.kv_cache_kernel_block_id_host   = py_attn_inputs.kv_cache_kernel_block_id_host_by_group[0];
+    py_attn_inputs.kv_cache_kernel_block_id   = py_attn_inputs.kv_cache_kernel_block_id_by_group[0];
 }
 
 // Helper function to build BertEmbeddingInputs from GptModelInputs

@@ -97,7 +97,7 @@ class PCPAllGatherAttnOp:
         return attention_inputs.is_prefill
 
     def prepare(self, attention_inputs: PyAttentionInputs) -> ParamsBase:
-        cu_seqlens = attention_inputs.cu_seqlens[
+        cu_seqlens = attention_inputs.cu_seqlens_device[
             : attention_inputs.input_lengths.size(0) + 1
         ]
         padding_mask = self.cp_info.prefill_qkv_padding_mask
@@ -122,7 +122,7 @@ class PCPAllGatherAttnOp:
             self.attn_inputs.prefix_lengths,
             self.attn_inputs.sequence_lengths,
             self.cp_info.prefill_actual_input_lengths_cpu,
-            self.attn_inputs.kv_cache_kernel_block_id_host,
+            self.attn_inputs.kv_cache_kernel_block_id,
             self.attn_configs.kernel_tokens_per_block,
         )
 
