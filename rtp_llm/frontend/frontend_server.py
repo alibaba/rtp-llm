@@ -145,6 +145,22 @@ class FrontendServer(object):
         else:
             loop.create_task(self.close())
 
+    @staticmethod
+    def _response_finished(response: Any) -> bool:
+        if bool(getattr(response, "finished", False)):
+            return True
+        response_batch = getattr(response, "response_batch", None)
+        if response_batch:
+            return all(
+                FrontendServer._response_finished(item) for item in response_batch
+            )
+        choices = getattr(response, "choices", None)
+        if choices:
+            return all(
+                getattr(choice, "finish_reason", None) is not None for choice in choices
+            )
+        return False
+
     async def embedding(self, request: Dict[str, Any], raw_request: Request):
         start_time = time.time()
         try:
@@ -197,8 +213,12 @@ class FrontendServer(object):
     ):
         is_openai_response = request.get("stream", False)
         response_data_prefix = "data: " if is_openai_response else "data:"
+        generation_finished = False
         try:
             async for res in response:
+                generation_finished = generation_finished or self._response_finished(
+                    res
+                )
                 data_str = res.model_dump_json(exclude_none=True)
                 yield response_data_prefix + data_str + "\r\n\r\n"
                 await asyncio.sleep(0)
@@ -215,6 +235,17 @@ class FrontendServer(object):
                     "close streaming response after cancellation failed: %s",
                     close_error,
                 )
+            if generation_finished:
+                try:
+                    await self._collect_complete_response_and_record_access_log(
+                        request, response
+                    )
+                except Exception as log_error:
+                    logging.warning(
+                        "record completed response after disconnect failed: %s",
+                        log_error,
+                    )
+                return
             self._access_logger.log_exception_access(request, e)
             kmonitor.report(
                 AccMetrics.CANCEL_QPS_METRIC,
@@ -468,10 +499,14 @@ class FrontendServer(object):
             return StreamingResponse(
                 self.stream_response(req, res), media_type="text/event-stream"
             )
+        generation_finished = False
         async for x in res:
+            generation_finished = generation_finished or self._response_finished(x)
             if await raw_request.is_disconnected():
                 # Abort the request if the client disconnects.
                 await res.aclose()
+                if generation_finished:
+                    break
                 raise asyncio.CancelledError("client disconnects")
 
         complete_response = await self._collect_complete_response_and_record_access_log(
