@@ -18,7 +18,7 @@ from rtp_llm.multimodal.multimodal_mixins.qwen3_5_moe.qwen3_5_moe_vit import (
     Qwen3_5MoeVisionConfig,
     Qwen3_5MoeVisionModel,
 )
-from rtp_llm.multimodal.multimodal_mixins.qwen3_vl_mixin import (
+from rtp_llm.multimodal.multimodal_mixins.qwen3_vl.qwen3_vl_mixin import (
     Qwen3_VLImageEmbedding,
     Qwen3_VLMixin,
 )
