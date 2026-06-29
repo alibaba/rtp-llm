@@ -258,7 +258,7 @@ class CPShardedPoolReader(CompressedKPoolReader):
             device=device,
         )
 
-        from rtp_llm.models_py.distributed import collective_torch
+        from rtp_llm.models_py.distributed import collective_torch, pynccl_cp
 
         process_group = collective_torch._get_group(Group.TP)
         world_size = torch.distributed.get_world_size(process_group)
@@ -270,30 +270,23 @@ class CPShardedPoolReader(CompressedKPoolReader):
         current_stream = torch.cuda.current_stream(device)
         stream.wait_stream(current_stream)
         local_flat.record_stream(stream)
-        with torch.cuda.stream(stream):
-            gathered = torch.empty(
-                (world_size * int(local_flat.shape[0]), ENTRY_BYTES),
-                dtype=local_flat.dtype,
-                device=device,
-            )
-            with record_function_range(
-                "dsv4.cp.all_gather.pool_reader.gather_cmp.launch"
-            ):
-                work = torch.distributed.all_gather_into_tensor(
-                    gathered,
-                    local_flat,
-                    group=process_group,
-                    async_op=True,
-                )
-            try:
-                completion_event = torch.cuda.Event()
-                completion_event.record(stream)
-            except Exception:
-                # Drain the in-flight NCCL Work before propagating; the
-                # caller never sees the pending handle, so nothing else
-                # would wait it.
-                work.wait()
-                raise
+        # CP all-gather backend (symm > pynccl > torch) is selected inside the
+        # dispatcher. gather_cmp is one of the smallest CP AGs, so it benefits
+        # most from the pynccl/symm paths. ``work`` is None on pynccl/symm
+        # (stream-ordered, fenced via completion_event); the symm path here needs
+        # the extra DSV4_CP_SYMM_VAR opt-in (variable gather shape).
+        gather_rows = world_size * int(local_flat.shape[0])
+        gathered, work, completion_event = pynccl_cp.cp_all_gather(
+            local_flat,
+            lambda r, c, d: torch.empty((r, c), dtype=d, device=device),
+            role="gather_cmp",
+            rows=gather_rows,
+            cols=ENTRY_BYTES,
+            process_group=process_group,
+            gather_stream=stream,
+            profile_name="dsv4.cp.all_gather.pool_reader.gather_cmp",
+            symm_variable=True,
+        )
 
         return CPShardedPoolReadHandle(
             gathered=gathered,
@@ -356,7 +349,8 @@ class CPShardedPoolReader(CompressedKPoolReader):
     @staticmethod
     def _wait_fill_work_once(handle: CPShardedPoolReadHandle) -> None:
         if not handle.work_waited:
-            handle.work.wait()
+            if handle.work is not None:  # None on the pynccl path (stream-ordered)
+                handle.work.wait()
             handle.work_waited = True
 
     def _validate_call(

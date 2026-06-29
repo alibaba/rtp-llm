@@ -32,7 +32,7 @@ from typing import TYPE_CHECKING, Any, Optional, Tuple, Union
 
 import torch
 
-from rtp_llm.models_py.distributed import collective_torch
+from rtp_llm.models_py.distributed import collective_torch, pynccl_cp
 from rtp_llm.models_py.distributed.collective_torch import Group, all_gather
 from rtp_llm.models_py.modules.dsv4._profiler import record_function_range
 
@@ -221,19 +221,6 @@ class CudaAsyncCPGatherImpl:
             )
 
         gather_rows = world_size * local_2d.size(0)
-        # Both compressor roles draw from the per-forward workspace (a dedicated
-        # pair each, reused across layers) and share the serialized compressor
-        # side stream. Distinct sub-regions guarantee the roles never alias.
-        with record_function_range(f"{profile_name}.alloc"):
-            if cp_role == _CP_ROLE_MAIN:
-                gathered = workspace.cp_gather_main(
-                    gather_rows, local_2d.size(1), local_2d.dtype
-                )
-            else:
-                gathered = workspace.cp_gather_idx(
-                    gather_rows, local_2d.size(1), local_2d.dtype
-                )
-
         current_stream = torch.cuda.current_stream(local_2d.device)
         gather_stream = stream if stream is not None else current_stream
         if stream is not None:
@@ -243,24 +230,29 @@ class CudaAsyncCPGatherImpl:
         # allocator can reuse its storage before NCCL finishes, corrupting the
         # input. ``wait_stream`` above gives NCCL a happens-after edge but NOT
         # allocator lifetime extension — that is what ``record_stream`` does.
-        #
-        # ``gathered`` does NOT need ``record_stream``: it's a view into the
-        # per-forward workspace (reused across layers, never recycled by the
-        # allocator). Cross-layer reuse of the same sub-region is ordered by
-        # the ``gather_stream.wait_stream(current_stream)`` edge above, which
-        # waits on the prior layer's restore (the consumer of ``gathered``).
+        # ``gathered`` needs none: it's a per-forward workspace view, reused
+        # across layers and never recycled, ordered by the wait_stream edge.
         local_2d.record_stream(gather_stream)
+        # Non-symm output allocator: each compressor role draws its own
+        # per-forward workspace pair (reused across layers; distinct sub-regions
+        # never alias). Backend selection (pynccl vs torch.distributed; symm is
+        # an additive backend) and the cross-stream contract all live in
+        # ``pynccl_cp.cp_all_gather``.
+        if cp_role == _CP_ROLE_MAIN:
+            alloc_plain = workspace.cp_gather_main
+        else:
+            alloc_plain = workspace.cp_gather_idx
         try:
-            with torch.cuda.stream(gather_stream):
-                with record_function_range(f"{profile_name}.launch"):
-                    work = torch.distributed.all_gather_into_tensor(
-                        gathered,
-                        local_2d,
-                        group=process_group,
-                        async_op=True,
-                    )
-                    completion_event = torch.cuda.Event()
-                    completion_event.record(gather_stream)
+            gathered, work, completion_event = pynccl_cp.cp_all_gather(
+                local_2d,
+                alloc_plain,
+                role=cp_role,
+                rows=gather_rows,
+                cols=local_2d.size(1),
+                process_group=process_group,
+                gather_stream=gather_stream,
+                profile_name=profile_name,
+            )
         except Exception as exc:
             raise RuntimeError(
                 "failed to launch CUDA CP all_gather_into_tensor"
@@ -286,7 +278,8 @@ class CudaAsyncCPGatherImpl:
         current_stream = torch.cuda.current_stream(handle.gathered.device)
         with record_function_range(f"{handle.profile_name}.wait_host"):
             current_stream.wait_event(handle.completion_event)
-            handle.work.wait()
+            if handle.work is not None:  # None on the pynccl/symm stream-ordered path
+                handle.work.wait()
         # Restore destination: the per-forward workspace restore scratch
         # (non-prefix path) instead of a fresh per-layer ``index_select``
         # output. The prefix fast-path returns a view of ``gathered`` and
@@ -579,6 +572,46 @@ def _cp_restore_gathered_full_2d(
     return full
 
 
+def _cp_all_gather_sync_2d(
+    local_2d: torch.Tensor,
+    cp_ctx: CPContext,
+    *,
+    role: str,
+    profile_name: str,
+    symm_variable: bool = False,
+) -> torch.Tensor:
+    """Synchronous CP all-gather with pynccl/symm opt-in and torch fallback."""
+
+    def torch_fallback() -> torch.Tensor:
+        with record_function_range(f"{profile_name}.launch"):
+            return all_gather(local_2d, group=Group.TP)
+
+    if not (local_2d.is_cuda and torch.distributed.is_initialized()):
+        return torch_fallback()
+
+    process_group = collective_torch._get_group(Group.TP)
+    world_size = torch.distributed.get_world_size(process_group)
+    if world_size != cp_ctx.cp_size:
+        raise RuntimeError(
+            f"CP sync gather world_size({world_size}) != cp_ctx.cp_size({cp_ctx.cp_size})"
+        )
+
+    rows = world_size * int(local_2d.size(0))
+    cols = int(local_2d.size(1))
+    return pynccl_cp.cp_all_gather_sync(
+        local_2d,
+        lambda r, c, d: torch.empty((r, c), dtype=d, device=local_2d.device),
+        torch_fallback,
+        role=role,
+        rows=rows,
+        cols=cols,
+        process_group=process_group,
+        stream=torch.cuda.current_stream(local_2d.device),
+        profile_name=profile_name,
+        symm_variable=symm_variable,
+    )
+
+
 def cp_all_gather_full(
     local_2d: torch.Tensor,
     cp_ctx: CPContext,
@@ -593,8 +626,12 @@ def cp_all_gather_full(
     """
     profile_name = profile_name or f"{_DEFAULT_CP_PROFILE_NAME}.sync"
     local_2d = _cp_gather_2d(local_2d, cp_ctx)
-    with record_function_range(f"{profile_name}.launch"):
-        gathered = all_gather(local_2d, group=Group.TP)
+    gathered = _cp_all_gather_sync_2d(
+        local_2d,
+        cp_ctx,
+        role="full_sync",
+        profile_name=profile_name,
+    )
     # gathered: [cp_size * chunk_length, H]
     with record_function_range(f"{profile_name}.restore"):
         return _cp_restore_gathered_full_2d(gathered, cp_ctx)
@@ -667,8 +704,13 @@ def cp_all_gather_full_varlen(
     ), f"local_flat.size(0)={local_flat.size(0)} != chunk_length={cp_ctx.chunk_length}"
     trailing = local_flat.shape[1:]
     local_2d = local_flat.reshape(cp_ctx.chunk_length, -1).contiguous()
-    with record_function_range(f"{profile_name}.launch"):
-        gathered = all_gather(local_2d, group=Group.TP)
+    gathered = _cp_all_gather_sync_2d(
+        local_2d,
+        cp_ctx,
+        role="varlen",
+        profile_name=profile_name,
+        symm_variable=True,
+    )
     with record_function_range(f"{profile_name}.restore"):
         full = _cp_restore_gathered_full_2d(gathered, cp_ctx)
     return full.view((cp_ctx.seq_len_full,) + trailing)

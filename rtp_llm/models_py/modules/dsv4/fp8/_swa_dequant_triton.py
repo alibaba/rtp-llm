@@ -904,7 +904,7 @@ def start_dequantize_and_gather_k_cache_slots_cp_byte_sliced(
     if not torch.distributed.is_initialized():
         return None
 
-    from rtp_llm.models_py.distributed import collective_torch
+    from rtp_llm.models_py.distributed import collective_torch, pynccl_cp
     from rtp_llm.models_py.distributed.collective_torch import Group
 
     process_group = collective_torch._get_group(Group.TP)
@@ -921,32 +921,27 @@ def start_dequantize_and_gather_k_cache_slots_cp_byte_sliced(
     gather_stream = stream
     gather_stream.wait_stream(current_stream)
 
+    # CP all-gather backend (symm > pynccl > torch) is selected inside the
+    # dispatcher. swa_prefix shapes are rank-uniform (all_gather requires it) so
+    # any collective window registration stays in sync across ranks; the symm
+    # path needs the extra DSV4_CP_SYMM_VAR opt-in (variable shape). ``work`` is
+    # None on the pynccl/symm paths (stream-ordered, fenced via completion_event).
+    gather_rows = cp_size * int(unique_blocks.numel())
+    gather_cols = int(k_cache_raw.shape[1])
     with torch.cuda.stream(gather_stream):
         local_slices = k_cache_raw.index_select(0, unique_blocks).contiguous()
-        gathered = torch.empty(
-            (
-                cp_size * int(unique_blocks.numel()),
-                int(k_cache_raw.shape[1]),
-            ),
-            dtype=k_cache_raw.dtype,
-            device=device,
-        )
         local_slices.record_stream(gather_stream)
-        with record_function_range(f"{profile_name}.launch"):
-            work = torch.distributed.all_gather_into_tensor(
-                gathered,
-                local_slices,
-                group=process_group,
-                async_op=True,
-            )
-        try:
-            completion_event = torch.cuda.Event()
-            completion_event.record(gather_stream)
-        except Exception:
-            # Drain the in-flight NCCL Work before propagating; the caller
-            # never sees the pending handle so nothing else will wait it.
-            work.wait()
-            raise
+    gathered, work, completion_event = pynccl_cp.cp_all_gather(
+        local_slices,
+        lambda r, c, d: torch.empty((r, c), dtype=d, device=device),
+        role="swa_prefix",
+        rows=gather_rows,
+        cols=gather_cols,
+        process_group=process_group,
+        gather_stream=gather_stream,
+        profile_name=profile_name,
+        symm_variable=True,
+    )
 
     return CPByteSlicedSwaPrefixPending(
         cp_size=cp_size,
@@ -1053,7 +1048,8 @@ def discard_dequantize_and_gather_k_cache_slots_cp_byte_sliced(
 
 def _wait_swa_prefix_work_once(pending: CPByteSlicedSwaPrefixPending) -> None:
     if not pending.work_waited:
-        pending.work.wait()
+        if pending.work is not None:  # None on the pynccl path (stream-ordered)
+            pending.work.wait()
         pending.work_waited = True
 
 

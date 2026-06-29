@@ -297,8 +297,27 @@ def _build_cp_full_state_read_cache(
 
     local_blocks = state_cache.index_select(0, selection.block_ids)
     local_2d = local_blocks.reshape(num_blocks * local_eb, hidden).contiguous()
-    with record_function_range("dsv4.cp.all_gather.state_read_cache.sync.launch"):
-        gathered = all_gather(local_2d, group=Group.TP)
+    # state_read is the single biggest exposed CP all-gather (~33% of 32k exposed
+    # comm; cp_comm_opt.md §12). Backend (symm > pynccl > torch) is selected
+    # inside the sync dispatcher: symm/pynccl gather on the current stream into an
+    # explicit buffer (fp8 state pool byte-moved as ncclUint8); the plain path
+    # defers to collective_torch.all_gather (keeps its torch symm_mem / rocm fast
+    # paths). Sync: result consumed right after on the same stream (stream-
+    # ordered, no event). Shape is narrowed (~1 tail block) so a symm buffer
+    # registers ~once.
+    from rtp_llm.models_py.distributed import collective_torch as _ct, pynccl_cp
+    _pg = _ct._get_group(Group.TP)
+    gathered = pynccl_cp.cp_all_gather_sync(
+        local_2d,
+        lambda r, c, d: torch.empty((r, c), dtype=d, device=local_2d.device),
+        lambda: all_gather(local_2d, group=Group.TP),
+        role="state_read",
+        rows=cp_size * int(local_2d.shape[0]),
+        cols=hidden,
+        process_group=_pg,
+        stream=torch.cuda.current_stream(local_2d.device),
+        profile_name="dsv4.cp.all_gather.state_read_cache.sync",
+    )
     _fill_cp_state_read_cache(
         read_cache, gathered, cp_size, num_blocks, local_eb, hidden
     )

@@ -281,7 +281,7 @@ def start_assemble_indexer_k_async(
     ):
         return None
 
-    from rtp_llm.models_py.distributed import collective_torch
+    from rtp_llm.models_py.distributed import collective_torch, pynccl_cp
 
     process_group = collective_torch._get_group(Group.TP)
     world_size = torch.distributed.get_world_size(process_group)
@@ -295,45 +295,43 @@ def start_assemble_indexer_k_async(
     stream.wait_stream(current_stream)
     local_k_quant.record_stream(stream)
     local_k_scale.record_stream(stream)
-    with torch.cuda.stream(stream):
-        gathered_q = torch.empty(
-            (world_size * int(local_k_quant.shape[0]), local_k_quant.shape[1]),
-            dtype=local_k_quant.dtype,
-            device=device,
+    # CP all-gather backend (symm > pynccl > torch) is selected inside the
+    # dispatcher; indexer-K quant+scale are the smallest CP AGs (biggest
+    # symmetric win), so the symm path here needs the extra DSV4_CP_SYMM_VAR
+    # opt-in. Both gathers run on ``stream`` in order: the scale event (recorded
+    # last) implies the quant gather is done, so it is the handle's single
+    # completion event. ``work_*`` is None on the pynccl/symm paths.
+    def _empty(r, c, d):
+        return torch.empty((r, c), dtype=d, device=device)
+
+    gathered_q, work_q, _ = pynccl_cp.cp_all_gather(
+        local_k_quant,
+        _empty,
+        role="indexer_k_quant",
+        rows=world_size * int(local_k_quant.shape[0]),
+        cols=int(local_k_quant.shape[1]),
+        process_group=process_group,
+        gather_stream=stream,
+        profile_name="dsv4.cp.all_gather.indexer_k.quant",
+        symm_variable=True,
+    )
+    try:
+        gathered_s, work_s, completion_event = pynccl_cp.cp_all_gather(
+            local_k_scale,
+            _empty,
+            role="indexer_k_scale",
+            rows=world_size * int(local_k_scale.shape[0]),
+            cols=int(local_k_scale.shape[1]),
+            process_group=process_group,
+            gather_stream=stream,
+            profile_name="dsv4.cp.all_gather.indexer_k.scale",
+            symm_variable=True,
         )
-        gathered_s = torch.empty(
-            (world_size * int(local_k_scale.shape[0]), local_k_scale.shape[1]),
-            dtype=local_k_scale.dtype,
-            device=device,
-        )
-        with record_function_range("dsv4.cp.all_gather.indexer_k.quant.launch"):
-            work_q = torch.distributed.all_gather_into_tensor(
-                gathered_q,
-                local_k_quant,
-                group=process_group,
-                async_op=True,
-            )
-        with record_function_range("dsv4.cp.all_gather.indexer_k.scale.launch"):
-            try:
-                work_s = torch.distributed.all_gather_into_tensor(
-                    gathered_s,
-                    local_k_scale,
-                    group=process_group,
-                    async_op=True,
-                )
-            except Exception:
-                # quant gather already launched — drain it before propagating.
-                work_q.wait()
-                raise
-        try:
-            completion_event = torch.cuda.Event()
-            completion_event.record(stream)
-        except Exception:
-            # Both NCCL gathers in flight but pending handle never returns;
-            # drain both before propagating.
+    except Exception:
+        # quant gather already launched — drain it before propagating.
+        if work_q is not None:
             work_q.wait()
-            work_s.wait()
-            raise
+        raise
 
     return IndexerKCPGatherHandle(
         plan=plan,
@@ -399,8 +397,10 @@ def discard_assemble_indexer_k_async(handle: IndexerKCPGatherHandle) -> None:
 
 def _wait_indexer_k_work_once(handle: IndexerKCPGatherHandle) -> None:
     if not handle.work_waited:
-        handle.work_q.wait()
-        handle.work_s.wait()
+        if handle.work_q is not None:  # None on the pynccl path (stream-ordered)
+            handle.work_q.wait()
+        if handle.work_s is not None:
+            handle.work_s.wait()
         handle.work_waited = True
 
 
