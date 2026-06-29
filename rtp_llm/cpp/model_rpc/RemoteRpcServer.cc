@@ -15,6 +15,7 @@ grpc::Status RemoteRpcServer::init(const EngineInitParams&                      
     }
     initLocalHostInfo();
     initLocalPeerInfo();
+    
     initCacheStore(maga_init_params, propose_params_ptr);
     return grpc::Status::OK;
 }

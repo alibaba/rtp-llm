@@ -33,6 +33,10 @@ public:
                               std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> propose_params,
                               py::object                                             mm_process_engine);
 
+    // Starts the engine loop (and system prompt on tp0). Call after init() and any subclass-specific setup
+    // (e.g. RemoteRpcServer::init finishes initCacheStore first).
+    grpc::Status start();
+
     grpc::Status
     GetWorkerStatus(grpc::ServerContext* context, const ::StatusVersionPB* request, ::WorkerStatusPB* response);
 

@@ -36,9 +36,8 @@ public:
     absl::Status stop();
 
     absl::Status step();
-    absl::Status startLoop();
+    absl::Status start();
 
-public:
     const ResourceContext& resourceContext() const {
         return resource_context_;
     }
@@ -52,6 +51,7 @@ public:
     }
 
 private:
+    absl::Status startLoop();
     absl::Status trySaveStepError() const;
     void         loop();
 
@@ -66,6 +66,7 @@ private:
     ResourceContext                     resource_context_;
     kmonitor::MetricsReporterPtr        metrics_reporter_ = nullptr;
     StepWindowProfiler                  step_profiler_;
+    bool                                loop_started_ = false;
 };
 
 }  // namespace rtp_llm
