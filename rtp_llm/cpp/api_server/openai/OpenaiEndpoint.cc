@@ -116,22 +116,24 @@ std::string OpenaiEndpoint::getDebugInfo(const ChatCompletionRequest& chat_reque
     });
 
     std::string prompt;
-    if (rendered_input.rendered_prompt.empty()) {
+    if (!rendered_input.rendered_prompt.empty()) {
+        prompt = rendered_input.rendered_prompt;
+    } else if (tokenizer_) {
         prompt = tokenizer_->decode(rendered_input.input_ids);
     } else {
-        prompt = rendered_input.rendered_prompt;
+        RTP_LLM_LOG_WARNING("tokenizer is null and rendered_prompt is empty, skip decoding prompt");
     }
 
     DebugInfo debug_info;
     debug_info.input_prompt       = prompt;
     debug_info.input_ids          = rendered_input.input_ids;
     debug_info.input_urls         = input_urls;
-    debug_info.tokenizer_info     = tokenizer_->toString();
+    debug_info.tokenizer_info     = tokenizer_ ? tokenizer_->toString() : "";
     debug_info.max_seq_len        = max_seq_len_;
     debug_info.eos_token_id       = eos_token_id_;
     debug_info.stop_word_ids_list = stop_word_ids_list_;
     debug_info.stop_words_list    = stop_words_list_;
-    debug_info.renderer_info      = chat_render_->toString();
+    debug_info.renderer_info      = chat_render_ ? chat_render_->toString() : "";
     debug_info.generate_config    = *(extract_generation_config(chat_request));
 
     return ToJsonString(debug_info, true);
