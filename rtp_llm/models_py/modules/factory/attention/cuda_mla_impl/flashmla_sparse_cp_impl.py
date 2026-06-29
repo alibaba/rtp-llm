@@ -29,6 +29,7 @@ from rtp_llm.models_py.modules.dsv4.cp import (
     cp_actual_owned_kv_lens,
     cp_padded_local_kv_lens,
 )
+from rtp_llm.models_py.modules.dsv4.fp8 import _indexer_cp_assembler as asm
 from rtp_llm.models_py.modules.factory.attention import common
 from rtp_llm.models_py.modules.factory.attention.cuda_cp_impl.prefill_mha.cp_utils import (
     generate_q_indices,
@@ -445,6 +446,10 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
         self.sharded_actual_local_kv_lens: Optional[torch.Tensor] = None
         self.sharded_actual_workspace_starts: Optional[torch.Tensor] = None
         self.sharded_actual_total_local_kv_len: int = 0
+        self.indexer_cp_plan: Optional[asm.IndexerCPChunkPlan] = None
+        self.indexer_cp_local_cu: Optional[torch.Tensor] = None
+        self.indexer_copy_dst_idx: Optional[torch.Tensor] = None
+        self.indexer_src_for_padded: Optional[torch.Tensor] = None
         self._fp8_kernel_metadata_q0: Optional[SparseMlaFp8DecodeParams] = None
         self._fp8_kernel_metadata_q0_key = None
         # Wired up by SparseMlaCpImpl post-construction
@@ -644,6 +649,55 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
                 self.use_cuda_graph,
             )
             self.sharded_actual_total_local_kv_len = int(actual_local_lens.sum().item())
+            cp_ctx = SimpleNamespace(
+                cp_size=self.prefill_cp_size, cp_rank=self.prefill_cp_rank
+            )
+            self.indexer_cp_plan = asm.build_indexer_cp_chunk_plan(
+                cp_ctx=cp_ctx,
+                per_req_total_kv_lens=per_req_total_kv_lens,
+                block_size=self.token_per_block,
+                device=block_table.device,
+                owner_block_size=owner_tpb,
+            )
+            self.indexer_cp_local_cu = asm.build_actual_local_cu_kv_seqlens(
+                self.indexer_cp_plan
+            )
+            # Precompute scatter dst_idx for copy_actual_to_padded (B>1, has padding)
+            _plan = self.indexer_cp_plan
+            _B = int(_plan.per_req_actual_local_kv_lens.numel())
+            if (
+                _plan.total_actual_local_T > 0
+                and _B > 1
+                and _plan.total_actual_local_T != _plan.total_local_T
+            ):
+                _dev = block_table.device
+                _a_lens = _plan.per_req_actual_local_kv_lens
+                _p_lens = _plan.per_req_local_kv_lens
+                _req_ids = torch.repeat_interleave(
+                    torch.arange(_B, device=_dev, dtype=torch.int64),
+                    _a_lens,
+                    output_size=_plan.total_actual_local_T,
+                )
+                _a_cu = torch.zeros(_B, dtype=torch.int64, device=_dev)
+                _p_cu = torch.zeros(_B, dtype=torch.int64, device=_dev)
+                _a_cu[1:] = torch.cumsum(_a_lens[:-1], dim=0)
+                _p_cu[1:] = torch.cumsum(_p_lens[:-1], dim=0)
+                _in_req_pos = torch.arange(
+                    _plan.total_actual_local_T, device=_dev, dtype=torch.int64
+                ) - _a_cu.index_select(0, _req_ids)
+                self.indexer_copy_dst_idx = (
+                    _p_cu.index_select(0, _req_ids) + _in_req_pos
+                )
+                # Inverse map: for each padded row, which actual row maps to it (-1 = zero)
+                self.indexer_src_for_padded = torch.full(
+                    (_plan.total_local_T,), -1, dtype=torch.int64, device=_dev
+                )
+                self.indexer_src_for_padded[self.indexer_copy_dst_idx] = torch.arange(
+                    _plan.total_actual_local_T, device=_dev, dtype=torch.int64
+                )
+            else:
+                self.indexer_copy_dst_idx = None
+                self.indexer_src_for_padded = None
         else:
             self.sharded_slot_mapping = None
             self.sharded_local_kv_lens = None
@@ -653,6 +707,10 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
             self.sharded_actual_local_kv_lens = None
             self.sharded_actual_workspace_starts = None
             self.sharded_actual_total_local_kv_len = 0
+            self.indexer_cp_plan = None
+            self.indexer_cp_local_cu = None
+            self.indexer_copy_dst_idx = None
+            self.indexer_src_for_padded = None
 
         n_q = self.total_global_ids.size(0)
         self._refresh_fp8_kernel_metadata(n_q)
@@ -1150,6 +1208,11 @@ class SparseMlaCpImpl(SparseMlaImpl):
             cp_rank=self._cp_rank,
             cp_size=self._cp_size,
             sharded_slot_mapping=self.fmha_impl.sharded_slot_mapping,
+            indexer_cp_plan=self.fmha_impl.indexer_cp_plan,
+            indexer_cp_local_cu=self.fmha_impl.indexer_cp_local_cu,
+            indexer_copy_dst_idx=self.fmha_impl.indexer_copy_dst_idx,
+            indexer_src_for_padded=self.fmha_impl.indexer_src_for_padded,
+            total_local_ids_is_identity=self.fmha_impl.total_local_ids_is_identity,
         )
 
         if self.cp_params is None or not use_cuda_graph:
@@ -1168,6 +1231,7 @@ class SparseMlaCpImpl(SparseMlaImpl):
             "precomputed_topk_off",
             "precomputed_req_ids",
             "sharded_slot_mapping",
+            "indexer_cp_local_cu",
         )
         for name in tensor_fields:
             setattr(
@@ -1184,6 +1248,12 @@ class SparseMlaCpImpl(SparseMlaImpl):
         self.cp_params.kv_cache_sharded = new_params["kv_cache_sharded"]
         self.cp_params.cp_rank = new_params["cp_rank"]
         self.cp_params.cp_size = new_params["cp_size"]
+        self.cp_params.indexer_cp_plan = new_params["indexer_cp_plan"]
+        self.cp_params.indexer_copy_dst_idx = new_params["indexer_copy_dst_idx"]
+        self.cp_params.indexer_src_for_padded = new_params["indexer_src_for_padded"]
+        self.cp_params.total_local_ids_is_identity = new_params[
+            "total_local_ids_is_identity"
+        ]
 
     def forward(
         self,
