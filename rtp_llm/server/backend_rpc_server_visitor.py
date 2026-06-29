@@ -363,6 +363,12 @@ class BackendRPCServerVisitor:
             allow_domain_fallback = master_route_result is None or (
                 master_route_result.connection_failed
             )
+            if self.master_config and self.master_config.disable_domain_fallback:
+                allow_domain_fallback = False
+                route_logger.warning(
+                    "master_config.disable_domain_fallback is enabled, "
+                    "skipping domain fallback routing"
+                )
             if (
                 not input.generate_config.role_addrs or need_domain_routing
             ) and allow_domain_fallback:

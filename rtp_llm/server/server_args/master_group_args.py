@@ -48,3 +48,13 @@ def init_master_group_args(parser, master_config):
         "<0: auto (3600 when queue mode, 0.5 otherwise); "
         "==0: 不设超时（链路不超时）; >0: 使用该值",
     )
+
+    master_group.add_argument(
+        "--master_disable_domain_fallback",
+        env_name="MASTER_DISABLE_DOMAIN_FALLBACK",
+        bind_to=(master_config, "disable_domain_fallback"),
+        type=bool,
+        default=False,
+        help="When True, disable domain fallback routing when master is unavailable or not configured. "
+        "Requests will fail with ROUTE_ERROR instead of falling back to VipServer domain routing.",
+    )
