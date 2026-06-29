@@ -35,8 +35,8 @@ from .decode.topk_sparse import (
 from .prefill.flash_with_topk_idx import flash_prefill_with_topk_index
 from .prefill.topk_bt_fused import (
     flash_decode_with_trtllm_gen,
-    flash_prefill_with_fused_topk_index,
     flash_prefill_with_fmha,
+    flash_prefill_with_fused_topk_index,
 )
 from .prefill.topk_sparse import flash_prefill_with_gqa_share_sparse
 
@@ -97,11 +97,11 @@ def minimax_sparse_prefill(
     # under CUDA's grid_dim_x = 65535 limit.
     use_trtllm = (
         workspace is not None
+        and sparse_attn_plan is not None
         and idx_group_size == 1
         and disable_index_value
         and idx_sink is None
         and sink is None
-        and ((cu_seqlens.numel() - 1) <= 2 or sparse_attn_plan is not None)
     )
     if use_trtllm:
         sm_scale_v = sm_scale if sm_scale is not None else q.shape[-1] ** -0.5

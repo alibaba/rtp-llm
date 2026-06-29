@@ -258,6 +258,37 @@ def _mxfp8_build_active_row_kernel(
 
 
 @triton.jit
+def _mxfp8_build_active_row_prefix_kernel(
+    masked_m_ptr,
+    row_expert_ptr,
+    row_token_ptr,
+    row_count_ptr,
+    MAX_M: tl.constexpr,
+    MAX_ACTIVE_ROWS: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    E: tl.constexpr,
+):
+    expert = tl.program_id(0)
+    offsets = tl.arange(0, BLOCK_M)
+
+    prefix = tl.full((), 0, tl.int32)
+    for prev_expert in tl.static_range(0, E):
+        prev_count = tl.load(masked_m_ptr + prev_expert).to(tl.int32)
+        prev_count = tl.minimum(prev_count, MAX_M)
+        prefix += tl.where(prev_expert < expert, prev_count, 0)
+
+    count = tl.load(masked_m_ptr + expert).to(tl.int32)
+    count = tl.minimum(count, MAX_M)
+    slots = prefix + offsets
+    mask = (offsets < count) & (slots < MAX_ACTIVE_ROWS)
+    tl.store(row_expert_ptr + slots, expert, mask=mask)
+    tl.store(row_token_ptr + slots, offsets, mask=mask)
+
+    total = tl.minimum(prefix + count, MAX_ACTIVE_ROWS)
+    tl.store(row_count_ptr, total, mask=expert == E - 1)
+
+
+@triton.jit
 def _mxfp8_quant_act_active_row_kernel(
     x_ptr,
     q_ptr,
@@ -396,6 +427,77 @@ def _mxfp8_swiglu_oai_quant_active_row_kernel(
     )
 
 
+@triton.jit
+def _mxfp8_quant_act_active_row_block_kernel(
+    x_ptr,
+    q_ptr,
+    s_ptr,
+    row_expert_ptr,
+    row_token_ptr,
+    row_count_ptr,
+    masked_m_ptr,
+    x_stride_e,
+    x_stride_m,
+    x_stride_k,
+    q_stride_e,
+    q_stride_m,
+    q_stride_k,
+    s_stride_e,
+    s_stride_m,
+    s_stride_g,
+    K: tl.constexpr,
+    FP8_MAX: tl.constexpr,
+    GROUP: tl.constexpr,
+    BLOCK_R: tl.constexpr,
+):
+    row_block = tl.program_id(0) * BLOCK_R
+    packed_group = tl.program_id(1)
+    offs = tl.arange(0, GROUP)
+    row_count = tl.load(row_count_ptr)
+    if row_block >= row_count:
+        return
+    base_group = packed_group * 4
+
+    for r in tl.static_range(0, BLOCK_R):
+        row_slot = row_block + r
+        valid_row = row_slot < row_count
+        expert = tl.load(row_expert_ptr + row_slot, mask=valid_row, other=0).to(
+            tl.int64
+        )
+        token = tl.load(row_token_ptr + row_slot, mask=valid_row, other=0).to(tl.int64)
+        valid_row = valid_row & (token < tl.load(masked_m_ptr + expert))
+        packed_scale: tl.int32 = 0
+
+        for g in tl.static_range(4):
+            group = base_group + g
+            cols = group * GROUP + offs
+            mask = valid_row & (cols < K)
+            vals = tl.load(
+                x_ptr + expert * x_stride_e + token * x_stride_m + cols * x_stride_k,
+                mask=mask,
+                other=0.0,
+            ).to(tl.float32)
+            amax = tl.maximum(tl.max(tl.abs(vals), axis=0), 1e-20)
+            scale, exp_bits = _ue8m0_pow2_round(amax / FP8_MAX)
+            q_vals = vals / scale
+            q_vals = tl.minimum(tl.maximum(q_vals, -FP8_MAX), FP8_MAX)
+            tl.store(
+                q_ptr + expert * q_stride_e + token * q_stride_m + cols * q_stride_k,
+                q_vals.to(q_ptr.dtype.element_ty),
+                mask=mask,
+            )
+            packed_scale = packed_scale | (exp_bits.to(tl.int32) << (g * 8))
+
+        tl.store(
+            s_ptr
+            + expert * s_stride_e
+            + token * s_stride_m
+            + packed_group * s_stride_g,
+            packed_scale,
+            mask=valid_row,
+        )
+
+
 def mxfp8_build_active_experts(masked_m: torch.Tensor, E: int):
     active_experts = torch.empty((E,), device=masked_m.device, dtype=torch.int32)
     active_count = torch.empty((1,), device=masked_m.device, dtype=torch.int32)
@@ -419,14 +521,17 @@ def mxfp8_build_active_rows(
         (max_active_rows,), device=masked_m.device, dtype=torch.int32
     )
     row_count = torch.empty((1,), device=masked_m.device, dtype=torch.int32)
-    _mxfp8_zero_i32_kernel[(1,)](row_count, num_warps=1)
-    _mxfp8_build_active_row_kernel[(E, max_m)](
+    block_m = triton.next_power_of_2(max(1, min(int(max_m), int(max_active_rows))))
+    _mxfp8_build_active_row_prefix_kernel[(E,)](
         masked_m,
         row_experts,
         row_tokens,
         row_count,
+        MAX_M=max_m,
         MAX_ACTIVE_ROWS=max_active_rows,
-        num_warps=1,
+        BLOCK_M=block_m,
+        E=E,
+        num_warps=8,
     )
     return row_experts, row_tokens, row_count
 
@@ -472,8 +577,9 @@ def mxfp8_quant_act_masked_packed_triton(
             if max_active_rows is None
             else max(0, min(E * active_m, int(max_active_rows)))
         )
-        grid = (active_rows, K // (MX_BLOCK * 4))
-        _mxfp8_quant_act_active_row_kernel[grid](
+        block_r = 4
+        grid = (triton.cdiv(active_rows, block_r), K // (MX_BLOCK * 4))
+        _mxfp8_quant_act_active_row_block_kernel[grid](
             x,
             q,
             s_packed,
@@ -493,6 +599,7 @@ def mxfp8_quant_act_masked_packed_triton(
             K=K,
             FP8_MAX=float(_FP8_E4M3_MAX),
             GROUP=MX_BLOCK,
+            BLOCK_R=block_r,
             num_warps=1,
         )
     elif active_experts is not None and active_count is not None:

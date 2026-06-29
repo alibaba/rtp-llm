@@ -244,8 +244,6 @@ class FusedRopeKVCacheDecodeOp:
         )
         kv_cache_offset_h = None  # not used
         position_ids = attn_inputs.combo_position_ids
-        if position_ids is None:
-            position_ids = (attn_inputs.sequence_lengths - 1).to(torch.int32)
         return FusedRopeAttnParams(
             kv_cache_offset,
             kv_cache_offset_h,
