@@ -207,10 +207,11 @@ try:
 
     from libth_transformer import RtpEmbeddingOp, RtpLLMOp
     from libth_transformer import EmbeddingCppOutput
+    from libth_transformer import MMRdmaEncoderOp
 
     libth_transformer_imported = True
 except BaseException as e:
-    EmbeddingCppOutput = RtpEmbeddingOp = RtpLLMOp = EmptyClass
+    EmbeddingCppOutput = RtpEmbeddingOp = RtpLLMOp = MMRdmaEncoderOp = EmptyClass
 
     logging.info(
         "libth_transformer not imported, you may under python standalone mode or frontend mode now."
