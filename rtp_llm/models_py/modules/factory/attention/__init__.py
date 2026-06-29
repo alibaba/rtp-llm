@@ -28,7 +28,16 @@ from rtp_llm.models_py.modules.factory.attention.attn_factory import (
 )
 
 device_type = get_device_type()
-if device_type == DeviceType.ROCm:
+if device_type == DeviceType.Xpu:
+    # XPU hard-requires the accelerated vllm-xpu-kernels attention path,
+    # matching the CUDA and ROCm backends (no pure-PyTorch attention fallback).
+    from rtp_llm.models_py.modules.factory.attention.xpu_impl.vllm_flash_attn import (
+        XpuVllmFlashAttnPrefillImpl,
+        XpuVllmFlashAttnDecodeImpl,
+    )
+    PREFILL_MHA_IMPS.append(XpuVllmFlashAttnPrefillImpl)
+    DECODE_MHA_IMPS.append(XpuVllmFlashAttnDecodeImpl)
+elif device_type == DeviceType.ROCm:
     # Import to register ROCm FMHA implementations
     from rtp_llm.models_py.modules.factory.attention.rocm_impl.aiter import (
         AiterDecodeImplAsm,

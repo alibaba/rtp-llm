@@ -12,6 +12,13 @@ from multiprocessing import Process
 from typing import List, Optional
 
 import torch
+from rtp_llm.device.device_impl import (
+    gpu_is_available,
+    gpu_device_count,
+    get_visible_device_list,
+    _is_xpu_device,
+)
+from rtp_llm.ops import VitSeparation
 from setproctitle import setproctitle
 
 CUR_PATH = os.path.dirname(os.path.abspath(__file__))
@@ -117,7 +124,7 @@ def local_rank_start(
 def _get_local_world_size(py_env_configs: PyEnvConfigs) -> int:
     """Calculate local world size based on environment and hardware"""
     world_size = py_env_configs.parallelism_config.world_size
-    local_world_size = min(torch.cuda.device_count(), world_size)
+    local_world_size = min(gpu_device_count(), world_size)
     if "LOCAL_WORLD_SIZE" in os.environ:
         logging.info(
             f"multi rank starts with local world size specified in env: {os.environ['LOCAL_WORLD_SIZE']}"
@@ -126,20 +133,15 @@ def _get_local_world_size(py_env_configs: PyEnvConfigs) -> int:
     else:
         logging.info(
             f"multi rank starts with default local world size: {local_world_size}, "
-            f"device count = {torch.cuda.device_count()}, world size = {world_size}"
+            f"device count = {gpu_device_count()}, world size = {world_size}"
         )
     os.environ["LOCAL_WORLD_SIZE"] = str(local_world_size)
     return local_world_size
 
 
 def _get_cuda_device_list() -> List[str]:
-    """Get CUDA device list from environment or hardware detection"""
-    cuda_devices = os.environ.get("CUDA_VISIBLE_DEVICES", None)
-    return (
-        cuda_devices.split(",")
-        if cuda_devices is not None
-        else [str(i) for i in range(torch.cuda.device_count())]
-    )
+    """Get GPU device list from environment or hardware detection"""
+    return get_visible_device_list()
 
 
 def _validate_dp_configuration(py_env_configs: PyEnvConfigs):
@@ -167,7 +169,14 @@ def _create_rank_processes(
         range(pc.world_rank, pc.world_rank + local_world_size)
     ):
         reader, writer = multiprocessing.Pipe(duplex=False)
-        os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(cuda_device_list)
+        # Bind visible devices using the env var that matches the runtime:
+        # XPU honors ZE_AFFINITY_MASK, CUDA/ROCm honor CUDA_VISIBLE_DEVICES.
+        # (Per-rank device pinning itself happens in the child via
+        # setup_cuda_device_and_accl_env -> torch.{xpu,cuda}.set_device.)
+        if _is_xpu_device():
+            os.environ["ZE_AFFINITY_MASK"] = ",".join(cuda_device_list)
+        else:
+            os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(cuda_device_list)
         os.environ["WORLD_RANK"] = str(world_rank)
 
         proc = Process(
@@ -425,20 +434,50 @@ def start_backend_server(
 
     clear_jit_filelock()
 
-    if not torch.cuda.is_available():
+    if py_env_configs.vit_config.vit_separation == VitSeparation.VIT_SEPARATION_ROLE:
+        from rtp_llm.multimodal.vit_start_server import vit_start_server
+
+        return vit_start_server(
+            server_id=py_env_configs.server_config.vit_server_id,
+            py_env_configs=py_env_configs,
+            grpc_port=py_env_configs.server_config.grpc_port,
+            http_port=py_env_configs.server_config.http_port,
+        )
+
+    if not gpu_is_available():
         return local_rank_start(global_controller, py_env_configs)
 
     pc = py_env_configs.parallelism_config
-    if (
-        pc.world_size % torch.cuda.device_count() != 0
-        and pc.world_size > torch.cuda.device_count()
-    ):
-        raise Exception(
-            f"result: {pc.world_size % torch.cuda.device_count()} \
-            not support WORLD_SIZE {pc.world_size} for {torch.cuda.device_count()} local gpu"
+
+    # XPU multi-rank requires oneCCL/xccl distributed backend.
+    # Fail-fast when world_size>1 on XPU until DP/PP paths are validated.
+    if _is_xpu_device() and pc.world_size > 1:
+        raise RuntimeError(
+            f"XPU multi-rank startup (world_size={pc.world_size}, "
+            f"device_count={gpu_device_count()}) is not supported yet. "
+            "Run with world_size=1."
         )
 
-    if torch.cuda.device_count() > 1 and pc.world_size > 1:
+    # Guard against a 0-device backend (e.g. RTP_LLM_DEVICE_TYPE override points
+    # at a backend with no visible devices) before using gpu_device_count() as a
+    # divisor below.
+    if gpu_device_count() == 0:
+        raise RuntimeError(
+            "No usable GPU devices found for the resolved device type. Check "
+            "RTP_LLM_DEVICE_TYPE and the visible-device mask "
+            "(CUDA_VISIBLE_DEVICES/ZE_AFFINITY_MASK)."
+        )
+
+    if (
+        pc.world_size % gpu_device_count() != 0
+        and pc.world_size > gpu_device_count()
+    ):
+        raise Exception(
+            f"result: {pc.world_size % gpu_device_count()} \
+            not support WORLD_SIZE {pc.world_size} for {gpu_device_count()} local gpu"
+        )
+
+    if gpu_device_count() > 1 and pc.world_size > 1:
         return multi_rank_start(global_controller, py_env_configs, pipe_writer)
     else:
         return local_rank_start(global_controller, py_env_configs, 0, pipe_writer)

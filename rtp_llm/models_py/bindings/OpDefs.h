@@ -83,12 +83,26 @@ struct KVCache {
                                                               (int64_t)kernel_seq_size_per_block,
                                                               (int64_t)(kv_lora_rank + rope_head_dim)});
                 } else if (num_kv_heads > 0 && head_dim > 0) {
+#if USING_XPU
+                    // XPU flash layout (NSHD): [kernel_block_num, 2, kernel_seq_size_per_block, num_kv_heads, head_dim]
+                    // Seq-before-head so paged flash attention can gather with no transpose.
+                    // SOLE CONSUMER: rtp_llm/models_py/modules/factory/attention/xpu_impl/vllm_flash_attn.py
+                    //   (_read_from_paged_cache / _write_to_paged_cache / XpuVllm{Prefill,Decode}Impl),
+                    //   which index cache[block, k/v, seq_offset, head, dim]. Keep this layout and that
+                    //   consumer in sync; covered by xpu_impl/test/test_kv_cache_layout.py.
+                    layer_cache.kv_cache_base = base.reshape({kernel_block_num,
+                                                              2,
+                                                              (int64_t)kernel_seq_size_per_block,
+                                                              (int64_t)num_kv_heads,
+                                                              (int64_t)head_dim});
+#else
                     // MHA layout: [kernel_block_num, 2, num_kv_heads, kernel_seq_size_per_block, head_dim]
                     layer_cache.kv_cache_base = base.reshape({kernel_block_num,
                                                               2,
                                                               (int64_t)num_kv_heads,
                                                               (int64_t)kernel_seq_size_per_block,
                                                               (int64_t)head_dim});
+#endif
                 } else {
                     layer_cache.kv_cache_base = base;
                 }
@@ -189,7 +203,10 @@ struct PyAttentionInputs {
     int           total_tokens            = 0;
     torch::Tensor padding_offset;
     torch::Tensor combo_position_ids;
-
+#if USING_XPU
+    // XPU: per-token RoPE position ids, cached across layers within one forward pass.
+    torch::Tensor position_ids;
+#endif
     // for write cache store
     std::optional<PyCacheStoreInputs> cache_store_inputs;
 

@@ -24,7 +24,23 @@ from rtp_llm.models_py.modules.base.common.norm import (
 # Determine device type and import architecture-specific modules
 device_type = get_device_type()
 
-if device_type == DeviceType.ROCm:
+if device_type == DeviceType.Xpu:
+    from rtp_llm.models_py.modules.base.xpu.activation import FusedSiluAndMul
+    from rtp_llm.models_py.modules.base.xpu.moe_gating import SigmoidGateScaleAdd
+    from rtp_llm.models_py.modules.base.xpu.norm import (
+        AddBiasResLayerNorm,
+        FusedQKRMSNorm,
+        QKRMSNorm,
+        RMSNorm,
+        RMSResNorm,
+    )
+    from rtp_llm.models_py.modules.base.xpu.not_implemented_ops import (
+        FakeBalanceExpert,
+        GroupTopK,
+        IndexerOp,
+    )
+    from rtp_llm.models_py.modules.base.xpu.select_topk import SelectTopk
+elif device_type == DeviceType.ROCm:
     from rtp_llm.models_py.modules.base.rocm.activation import FusedSiluAndMul
     from rtp_llm.models_py.modules.base.rocm.moe_gating import SigmoidGateScaleAdd
     from rtp_llm.models_py.modules.base.rocm.norm import (

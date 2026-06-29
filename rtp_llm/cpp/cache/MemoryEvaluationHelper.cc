@@ -7,6 +7,9 @@
 #elif USING_ROCM
 #include <hip/hip_runtime.h>
 #include "rtp_llm/models_py/bindings/rocm/hip_host_utils.h"
+#elif USING_XPU
+#include <c10/xpu/XPUCachingAllocator.h>
+#include <ATen/xpu/XPUContext.h>
 #endif
 
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
@@ -59,6 +62,22 @@ size_t MemoryEvaluationHelper::getDefaultRuntimeMemorySize(const RuntimeConfig& 
     check_cuda_value(cudaMemGetInfo(&free_gpu_bytes, &total_gpu_bytes));
 #elif USING_ROCM
     ROCM_CHECK(hipMemGetInfo(&free_gpu_bytes, &total_gpu_bytes));
+#elif USING_XPU
+    {
+        auto device_idx = static_cast<c10::DeviceIndex>(c10::xpu::current_device());
+        auto* props = at::xpu::getDeviceProperties(device_idx);
+        RTP_LLM_CHECK_WITH_INFO(props != nullptr,
+                                "at::xpu::getDeviceProperties returned null for device " +
+                                    std::to_string(device_idx));
+        total_gpu_bytes = props->global_mem_size;
+        auto stats = c10::xpu::XPUCachingAllocator::getDeviceStats(device_idx);
+        // Match getGpuExecStatus(): use reserved_bytes (memory the caching allocator
+        // holds from the driver), not allocated_bytes (the live subset), so the two
+        // memory accounting paths stay consistent.
+        size_t reserved =
+            stats.reserved_bytes[static_cast<size_t>(c10::CachingAllocator::StatType::AGGREGATE)].current;
+        free_gpu_bytes = (total_gpu_bytes > reserved) ? (total_gpu_bytes - reserved) : 0;
+    }
 #endif
     const auto minimal_runtime_bytes = std::max(2048L * 1024 * 1024, (long)(total_gpu_bytes * 0.05));
     if (reserve_runtime_mem_bytes < minimal_runtime_bytes) {
