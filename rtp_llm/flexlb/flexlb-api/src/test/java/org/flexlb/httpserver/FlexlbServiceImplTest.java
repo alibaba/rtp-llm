@@ -8,6 +8,8 @@ import org.flexlb.engine.grpc.EngineRpcService;
 import org.flexlb.service.RouteService;
 import org.flexlb.service.grace.ActiveRequestCounter;
 import org.flexlb.service.monitor.EngineHealthReporter;
+import org.flexlb.config.ConfigService;
+import org.flexlb.config.FlexlbConfig;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
@@ -24,6 +26,7 @@ class FlexlbServiceImplTest {
     private EngineHealthReporter engineHealthReporter;
     private ActiveRequestCounter activeRequestCounter;
     private FlexlbGrpcForwarder grpcForwarder;
+    private ConfigService configService;
     private FlexlbServiceImpl service;
 
     @BeforeEach
@@ -34,6 +37,10 @@ class FlexlbServiceImplTest {
         activeRequestCounter = mock(ActiveRequestCounter.class);
         grpcForwarder = mock(FlexlbGrpcForwarder.class);
 
+        configService = mock(ConfigService.class);
+        FlexlbConfig flexlbConfig = new FlexlbConfig();
+        when(configService.loadBalanceConfig()).thenReturn(flexlbConfig);
+
         ActiveRequestCounter.RequestToken token = mock(ActiveRequestCounter.RequestToken.class);
         when(activeRequestCounter.acquire()).thenReturn(token);
 
@@ -42,7 +49,8 @@ class FlexlbServiceImplTest {
                 lbStatusConsistencyService,
                 engineHealthReporter,
                 activeRequestCounter,
-                grpcForwarder
+                grpcForwarder,
+                configService
         );
     }
 
