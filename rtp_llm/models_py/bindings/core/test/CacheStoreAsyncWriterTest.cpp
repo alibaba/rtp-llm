@@ -86,6 +86,19 @@ TEST_F(CacheStoreAsyncWriterTest, AsyncExecution) {
     ASSERT_TRUE(different_thread.load());
 }
 
+TEST_F(CacheStoreAsyncWriterTest, AsyncExecutionWithDeviceId) {
+    CacheStoreAsyncWriter writer(0);
+    writer.init();
+
+    std::atomic<int> counter{0};
+    writer.submit([&counter]() { counter.fetch_add(1); });
+    writer.waitAllDone();
+
+    ASSERT_TRUE(writer.state_ == CacheStoreAsyncWriter::State::IDLE);
+    ASSERT_EQ(1, counter.load());
+    ASSERT_EQ(0, writer.pending_count_.load());
+}
+
 TEST_F(CacheStoreAsyncWriterTest, ExceptionPropagation) {
     CacheStoreAsyncWriter writer;
     writer.init();

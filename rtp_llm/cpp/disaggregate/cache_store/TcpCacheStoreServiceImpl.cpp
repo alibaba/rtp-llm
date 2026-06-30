@@ -95,7 +95,7 @@ void TcpCacheStoreServiceImpl::blockReadImpl(::google::protobuf::RpcController* 
                                              const ::BlockReadRequest*          request,
                                              BlockReadResponse*                 response,
                                              ::google::protobuf::Closure*       done) {
-    pinThreadToDeviceOnce(device_id_);
+    setCurrentThreadDeviceIfNeeded(device_id_);
 
     for (int i = 0; i < request->blocks_size(); i++) {
         auto& block_info   = request->blocks(i);
@@ -117,9 +117,10 @@ void TcpCacheStoreServiceImpl::blockReadImpl(::google::protobuf::RpcController* 
             resp_block_info->set_addr(block_info.addr());
             resp_block_info->set_len(block_info.len());
 
-            auto src_tensor = torch::from_blob((void*)block_info.addr(),
-                                               {(int64_t)block_info.len()},
-                                               torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA));
+            auto src_tensor = torch::from_blob(
+                (void*)block_info.addr(),
+                {(int64_t)block_info.len()},
+                torch::TensorOptions().dtype(torch::kUInt8).device(torch::Device(getPinnedTorchDeviceType())));
 
             auto tmp_buffer = static_cast<char*>(malloc(block_info.len()));
             auto dst_tensor = torch::from_blob(tmp_buffer,

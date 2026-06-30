@@ -70,7 +70,7 @@ bool NormalCacheStore::init(const CacheStoreInitParams& params) {
     }
 
     auto check_task_readiness = [this]() {
-        pinThreadToDeviceOnce(this->device_id_);
+        setCurrentThreadDeviceIfNeeded(this->device_id_);
         while (!thread_pool_close_) {
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
             std::unique_lock<std::shared_mutex> lock(store_tasks_mutex_);
@@ -118,7 +118,7 @@ void NormalCacheStore::store(const std::shared_ptr<RequestBlockBuffer>& request_
         metrics_reporter_, request_block_buffer->getBlocksCount(), request_block_buffer->getBlocksSize());
     // task 只在threadpool中运行, threadpool退出前会清理所有running task, 用this是安全的
     auto task = [this, request_block_buffer, callback, collector]() {
-        pinThreadToDeviceOnce(this->device_id_);
+        setCurrentThreadDeviceIfNeeded(this->device_id_);
         this->runStoreTask(request_block_buffer, callback, collector);
     };
 
@@ -197,7 +197,7 @@ void NormalCacheStore::load(const std::shared_ptr<RequestBlockBuffer>& request_b
                  collector,
                  partition_count,
                  partition_id]() {
-        pinThreadToDeviceOnce(this->device_id_);
+        setCurrentThreadDeviceIfNeeded(this->device_id_);
         this->runLoadTask(
             request_block_buffer, callback, ip, port, rdma_port, timeout_ms, collector, partition_count, partition_id);
     };

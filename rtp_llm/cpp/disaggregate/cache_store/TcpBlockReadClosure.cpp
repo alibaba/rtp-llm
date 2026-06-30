@@ -30,7 +30,7 @@ TcpBlockReadClosure::~TcpBlockReadClosure() {
 }
 
 void TcpBlockReadClosure::Run() {
-    pinThreadToDeviceOnce(device_id_);
+    setCurrentThreadDeviceIfNeeded(device_id_);
 
     if (controller_->Failed()) {
         RTP_LLM_LOG_WARNING("tcp transfer connection read failed, error is %s", controller_->ErrorText().c_str());
