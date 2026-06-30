@@ -605,7 +605,12 @@ void PrefillRpcServer::multimodalProcess(PrefillGenerateContext& prefill_context
     auto& input = prefill_context.generate_input;
     if (mm_processor_ != nullptr && input->multimodal_inputs) {
         auto result = mm_processor_->updateMultimodalFeatures(input);
-        CLIENT_GRPC_RET_IF_ERROR(prefill_context, result.ok(), result.code());
+        if (!result.ok()) {
+            prefill_context.error_info = result;
+            prefill_context.error_status =
+                serializeErrorMsg(prefill_context.request_key, prefill_context.request_info, result);
+            return;
+        }
 
         auto mutable_request = const_cast<GenerateInputPB*>(prefill_context.rpc_context.request);
         mutable_request->clear_token_ids();
