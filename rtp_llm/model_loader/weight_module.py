@@ -350,6 +350,10 @@ class AtomicWeight(WeightModule):
         for ckpt_weight in self.weights:
             name = ckpt_weight.tensor_name(layer_id)
             try:
+                loaded = tensor_source.load_tensor(name, convert_type)
+                if len(loaded) == 0:
+                    print(f"[DEBUG] EMPTY TENSOR: self.name={self.name}, ckpt_key={name}, "
+                          f"data_type={self.data_type}, convert_type={convert_type}", flush=True)
                 before_merge_tensors.append(
                     ckpt_weight.merge_fun(
                         [
@@ -358,7 +362,7 @@ class AtomicWeight(WeightModule):
                                 if "scale" in name and x.dim() == 1
                                 else x.to(device)
                             )
-                            for x in tensor_source.load_tensor(name, convert_type)
+                            for x in loaded
                         ]
                     )
                 )
