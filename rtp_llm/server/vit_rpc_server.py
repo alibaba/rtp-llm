@@ -99,10 +99,20 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
         return EmptyPB()
 
     def RemoteMultimodalEmbedding(self, multimodal_inputs: MultimodalInputsPB, context):
-        converted_inputs = trans_mm_input(multimodal_inputs)
-        results = self.engine.get_embedding_result(converted_inputs)
-        merged = merge_embedding_results(results)
-        return trans_output(merged)
+        try:
+            converted_inputs = trans_mm_input(multimodal_inputs)
+            results = self.engine.get_embedding_result(converted_inputs)
+            merged = merge_embedding_results(results)
+            return trans_output(merged)
+        except FtRuntimeException as e:
+            context.abort(
+                grpc.StatusCode.INTERNAL, f"[{e.exception_type.name}] {e.message}"
+            )
+        except Exception as e:
+            logging.exception("RemoteMultimodalEmbedding failed")
+            context.abort(
+                grpc.StatusCode.INTERNAL, f"[MM_PROCESS_ERROR] {type(e).__name__}: {e}"
+            )
 
     def GetWorkerStatus(self, request: StatusVersionPB, context):
         worker_status = WorkerStatusPB()
