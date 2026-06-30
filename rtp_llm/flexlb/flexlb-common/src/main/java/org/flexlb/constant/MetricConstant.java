@@ -51,6 +51,11 @@ public class MetricConstant {
     public static final String ENGINE_BALANCING_MASTER_SELECT_DETAIL = "app.engine.balancing.master.select.detail";
 
     /**
+     * Batch dispatch size (number of requests per batch)
+     */
+    public static final String ENGINE_BALANCING_MASTER_BATCH_SIZE = "app.engine.balancing.master.batch.size";
+
+    /**
      * Engine running queue time (from EP authoritative value)
      */
     public static final String ENGINE_RUNNING_QUEUE_TIME = "app.engine.health.check.running.queue.time";

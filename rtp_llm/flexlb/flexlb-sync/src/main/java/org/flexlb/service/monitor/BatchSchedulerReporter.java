@@ -10,6 +10,7 @@ import org.springframework.stereotype.Component;
 
 import javax.annotation.PostConstruct;
 
+import static org.flexlb.constant.MetricConstant.ENGINE_BALANCING_MASTER_BATCH_SIZE;
 import static org.flexlb.constant.MetricConstant.ENGINE_BALANCING_MASTER_SELECT_DETAIL;
 import static org.flexlb.constant.MetricConstant.ENGINE_LOCAL_TASK_MAP_SIZE;
 import static org.flexlb.constant.MetricConstant.ENGINE_RUNNING_TASK_INFO_SIZE;
@@ -45,11 +46,14 @@ public class BatchSchedulerReporter {
         // Dispatch reason — same type as EngineHealthReporter
         monitor.register(ENGINE_BALANCING_MASTER_SELECT_DETAIL, FlexMetricType.QPS, FlexPriorityType.PRECISE);
 
+        // Batch size — gauge, reported per dispatch
+        monitor.register(ENGINE_BALANCING_MASTER_BATCH_SIZE, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+
         // Inflight — same type as EngineHealthReporter
         monitor.register(ENGINE_LOCAL_TASK_MAP_SIZE, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         monitor.register(ENGINE_RUNNING_TASK_INFO_SIZE, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
 
-        log.info("BatchSchedulerReporter initialized (5 metrics reusing existing dashboard keys)");
+        log.info("BatchSchedulerReporter initialized (6 metrics reusing existing dashboard keys)");
     }
 
     // ==================== Queue metrics ====================
@@ -89,6 +93,17 @@ public class BatchSchedulerReporter {
     }
 
     // ==================== Inflight metrics ====================
+
+    /**
+     * Report batch size (number of requests dispatched together) via {@code engine.balancing.master.batch.size}.
+     */
+    public void reportBatchSize(String role, String engineIp, String reason, int batchSize) {
+        FlexMetricTags tags = FlexMetricTags.of(
+                "role", role,
+                "engineIp", engineIp,
+                "reason", reason);
+        monitor.report(ENGINE_BALANCING_MASTER_BATCH_SIZE, tags, batchSize);
+    }
 
     /**
      * Report scheduler inflight map size via {@code health.check.local.task.map.size}.

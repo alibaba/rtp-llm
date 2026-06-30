@@ -142,6 +142,7 @@ public class FixedWindowBatcherAlgorithm implements BatcherAlgorithm {
         long waitMs = ctx.now() - head.enqueuedAtMs();
 
         ctx.reporter().reportDispatchReason("prefill", ctx.prefillEp().getIp(), reason);
+        ctx.reporter().reportBatchSize("prefill", ctx.prefillEp().getIp(), reason, picked.size());
 
         Logger.info("flexlb_batch_decision reason={} picked_size={} "
                         + "wait_ms={} queue_before={} worker={} head_req_id={}",
