@@ -1,7 +1,6 @@
 import logging
 import os
 from concurrent.futures import ProcessPoolExecutor
-from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
 from transformers import AutoTokenizer, PreTrainedTokenizerBase, PreTrainedTokenizerFast
@@ -56,133 +55,6 @@ def _create_query_worker(args: Tuple[str, int]) -> Tuple[int, str]:
     return (input_len, base_query[:left])
 
 
-@dataclass
-class ReuseCacheQuery:
-    seed_query: str
-    hit_queries: List[str]
-    target_reuse_len: int
-    target_hit_rate: float
-
-
-def _stable_single_token_id(
-    tokenizer: Any,
-    candidates: List[str],
-    forbidden: Optional[set] = None,
-) -> int:
-    forbidden = forbidden or set()
-    for candidate in candidates:
-        ids = tokenizer.encode(candidate)
-        if len(ids) != 1 or ids[0] in forbidden:
-            continue
-        token_id = ids[0]
-        repeated = [token_id] * 32
-        text = tokenizer.decode(
-            repeated,
-            skip_special_tokens=False,
-            clean_up_tokenization_spaces=False,
-        )
-        if tokenizer.encode(text) == repeated:
-            return token_id
-    raise ValueError("No stable single-token candidate found for reuse-cache query")
-
-
-def _decode_exact_token_ids(tokenizer: Any, token_ids: List[int]) -> str:
-    text = tokenizer.decode(
-        token_ids,
-        skip_special_tokens=False,
-        clean_up_tokenization_spaces=False,
-    )
-    encoded = tokenizer.encode(text)
-    if encoded != token_ids:
-        raise ValueError(
-            "Decoded reuse-cache query does not round-trip through tokenizer: "
-            f"wanted {len(token_ids)} tokens, got {len(encoded)}"
-        )
-    return text
-
-
-def target_reuse_len_for_hit_rate(
-    input_len: int,
-    hit_rate: float,
-    seq_size_per_block: int,
-) -> int:
-    if input_len <= 1:
-        raise ValueError(f"input_len must be > 1, got {input_len}")
-    if not 0.0 < hit_rate < 1.0:
-        raise ValueError(f"hit_rate must be in (0, 1), got {hit_rate}")
-
-    block_tokens = max(1, seq_size_per_block)
-    target_blocks = max(1, round((input_len * hit_rate) / block_tokens))
-    target_reuse_len = target_blocks * block_tokens
-    max_reuse_len = max(1, input_len - 1)
-    if block_tokens > 1 and input_len > block_tokens:
-        max_reuse_len = input_len - (input_len % block_tokens or block_tokens)
-    return min(target_reuse_len, max_reuse_len)
-
-
-def _create_reuse_cache_query_worker(
-    args: Tuple[str, int, float, int, int]
-) -> Tuple[int, ReuseCacheQuery]:
-    tokenizer_path, input_len, hit_rate, seq_size_per_block, num_variants = args
-    tokenizer = _load_tokenizer(tokenizer_path)
-
-    target_reuse_len = target_reuse_len_for_hit_rate(
-        input_len, hit_rate, seq_size_per_block
-    )
-    suffix_len = input_len - target_reuse_len
-    if suffix_len <= 0:
-        raise ValueError(
-            f"reuse-cache target leaves no suffix: input_len={input_len}, "
-            f"target_reuse_len={target_reuse_len}"
-        )
-
-    candidates = [
-        " hello",
-        " cache",
-        " data",
-        " query",
-        " token",
-        " alpha",
-        " beta",
-        " gamma",
-        " delta",
-        " value",
-        " prefix",
-        " suffix",
-        " reuse",
-        " tensor",
-        " batch",
-        " model",
-    ]
-    prefix_token = _stable_single_token_id(tokenizer, candidates)
-    suffix_tokens: List[int] = []
-    used = {prefix_token}
-    for _ in range(max(1, num_variants)):
-        token_id = _stable_single_token_id(tokenizer, candidates, used)
-        suffix_tokens.append(token_id)
-        used.add(token_id)
-
-    prefix_ids = [prefix_token] * target_reuse_len
-    seed_query = _decode_exact_token_ids(tokenizer, prefix_ids)
-
-    hit_queries = [
-        _decode_exact_token_ids(
-            tokenizer,
-            prefix_ids + [suffix_token] * suffix_len,
-        )
-        for suffix_token in suffix_tokens
-    ]
-    return (
-        input_len,
-        ReuseCacheQuery(
-            seed_query=seed_query,
-            hit_queries=hit_queries,
-            target_reuse_len=target_reuse_len,
-            target_hit_rate=target_reuse_len / input_len,
-        ),
-    )
-
-
 def create_query(
     tokenizer_path: str = "",
     input_len_list: Optional[List[int]] = None,
@@ -213,14 +85,90 @@ def create_query(
     return dict(results)
 
 
-def create_reuse_cache_queries(
+def _build_query_from_word(tokenizer: Any, word: str, target_len: int) -> str:
+    base = word * (target_len + 20)
+    left, right = 0, len(base)
+    while left < right:
+        mid = (left + right) // 2
+        if len(tokenizer.encode(base[:mid])) < target_len:
+            left = mid + 1
+        else:
+            right = mid
+    return base[:left]
+
+
+def _build_reuse_pair(
+    tokenizer: Any,
+    prefix_word: str,
+    suffix_word: str,
+    input_len: int,
+    reuse_len: int,
+) -> Tuple[str, str]:
+    warmup = _build_query_from_word(tokenizer, prefix_word, input_len)
+    prefix = _build_query_from_word(tokenizer, prefix_word, reuse_len)
+    new_len = input_len - len(tokenizer.encode(prefix))
+    suffix_base = suffix_word * (new_len + 20)
+    left, right = 0, len(suffix_base)
+    while left < right:
+        mid = (left + right) // 2
+        if len(tokenizer.encode(prefix + suffix_base[:mid])) < input_len:
+            left = mid + 1
+        else:
+            right = mid
+    test = prefix + suffix_base[:left]
+    return (warmup, test)
+
+
+REUSE_PHASE_WORDS = [
+    ("hello ", "world "),
+    ("apple ", "grape "),
+    ("brick ", "stone "),
+]
+
+
+def _create_reuse_query_worker(
+    args: Tuple[str, int, float],
+) -> Tuple[int, List[Tuple[str, str]]]:
+    tokenizer_path, input_len, reuse_ratio = args
+    tokenizer = _load_tokenizer(tokenizer_path)
+    reuse_len = int(input_len * reuse_ratio)
+
+    pairs = []
+    for prefix_word, suffix_word in REUSE_PHASE_WORDS:
+        warmup, test = _build_reuse_pair(
+            tokenizer,
+            prefix_word,
+            suffix_word,
+            input_len,
+            reuse_len,
+        )
+        pairs.append((warmup, test))
+
+    actual_prefix_len = len(
+        tokenizer.encode(_build_query_from_word(tokenizer, "hello ", reuse_len))
+    )
+    logging.info(
+        f"Reuse query: input_len={input_len}, "
+        f"reuse_len={reuse_len}, "
+        f"actual_prefix_len={actual_prefix_len}, "
+        f"ratio={actual_prefix_len/input_len:.1%}, "
+        f"phases={len(pairs)}"
+    )
+
+    return (input_len, pairs)
+
+
+def create_reuse_query(
+    reuse_ratio: float,
     tokenizer_path: str = "",
     input_len_list: Optional[List[int]] = None,
-    hit_rate: float = 0.0,
-    seq_size_per_block: int = 1,
-    num_variants: int = 3,
     max_workers: int = 8,
-) -> Dict[int, ReuseCacheQuery]:
+) -> Dict[int, List[Tuple[str, str]]]:
+    """Create reuse query pairs for each phase (jit_warmup, measure, profile).
+
+    Each phase uses different words so cache entries don't interfere.
+    Returns dict mapping input_len -> [(warmup, test), (warmup, test), (warmup, test)].
+    """
     if input_len_list is None:
         input_len_list = []
     tokenizer_path = tokenizer_path or os.environ.get(
@@ -232,19 +180,15 @@ def create_reuse_cache_queries(
 
     effective_workers = min(max_workers, len(input_len_list))
     logging.info(
-        f"Creating reuse-cache queries for {len(input_len_list)} input lengths "
-        f"with hit_rate={hit_rate}, seq_size_per_block={seq_size_per_block}, "
-        f"variants={num_variants}, workers={effective_workers}"
+        f"Creating reuse queries (ratio={reuse_ratio}) for "
+        f"{len(input_len_list)} input lengths with {effective_workers} workers"
     )
 
-    worker_args = [
-        (tokenizer_path, x, hit_rate, seq_size_per_block, num_variants)
-        for x in input_len_list
-    ]
-    if effective_workers <= 1:
-        return dict(_create_reuse_cache_query_worker(x) for x in worker_args)
-
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
+    worker_args = [(tokenizer_path, x, reuse_ratio) for x in input_len_list]
+    if effective_workers <= 1:
+        return dict(_create_reuse_query_worker(a) for a in worker_args)
+
     with ProcessPoolExecutor(max_workers=effective_workers) as executor:
-        results = list(executor.map(_create_reuse_cache_query_worker, worker_args))
+        results = list(executor.map(_create_reuse_query_worker, worker_args))
     return dict(results)

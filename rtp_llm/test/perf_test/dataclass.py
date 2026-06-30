@@ -193,32 +193,46 @@ def create_metrics_table(
     }
     main_table = PrettyTable()
     main_table.title = title
-    main_table.field_names = [
-        "Seq Len",
-        "Batch Size",
-        "Sucess/Total Req",
-        "Input/Output",
-        "Waiting Time(ms)",
-    ] + (
-        ["Prefill Time(ms)"] if table_type == TableType.Prefill else ["Decode Time(ms)"]
+    has_reuse = any(
+        m.metrics.avg_reuse_len > 0
+        for m in metrics_list
+        if m.metrics.success_requests > 0
+    )
+    main_table.field_names = (
+        [
+            "Seq Len",
+            "Batch Size",
+            "Sucess/Total Req",
+            "Input/Output",
+            "Waiting Time(ms)",
+        ]
+        + (
+            ["Prefill Time(ms)"]
+            if table_type == TableType.Prefill
+            else ["Decode Time(ms)"]
+        )
+        + (["Reuse Len", "Reuse Rate"] if has_reuse else [])
     )
     for metrics_item in metrics_list:
         metrics = metrics_item.metrics
         if metrics.success_requests > 0:
-            main_table.add_row(
-                [
-                    metrics_item.input_len,
-                    metrics_item.batch_size,
-                    f"{metrics.success_requests}/{metrics.total_requests}",
-                    f"{metrics.avg_input_len:.0f}/{metrics.avg_output_len:.0f}",
-                    f"{metrics.avg_wait_time:.2f}",
-                ]
-                + (
-                    [f"{metrics.avg_prefill_time:.2f}"]
-                    if table_type == TableType.Prefill
-                    else [f"{metrics.avg_decode_time:.2f}"]
-                )
+            row = [
+                metrics_item.input_len,
+                metrics_item.batch_size,
+                f"{metrics.success_requests}/{metrics.total_requests}",
+                f"{metrics.avg_input_len:.0f}/{metrics.avg_output_len:.0f}",
+                f"{metrics.avg_wait_time:.2f}",
+            ] + (
+                [f"{metrics.avg_prefill_time:.2f}"]
+                if table_type == TableType.Prefill
+                else [f"{metrics.avg_decode_time:.2f}"]
             )
+            if has_reuse:
+                row += [
+                    f"{metrics.avg_reuse_len:.0f}",
+                    f"{metrics.avg_reuse_hit_rate:.1%}",
+                ]
+            main_table.add_row(row)
             json_result["metrics"].append(
                 {
                     "input_len": metrics_item.input_len,
@@ -233,16 +247,17 @@ def create_metrics_table(
                 }
             )
         else:
-            main_table.add_row(
-                [
-                    metrics_item.input_len,
-                    metrics_item.batch_size,
-                    f"0/{metrics.total_requests}",
-                    "N/A",
-                    "N/A",
-                    "N/A",
-                ]
-            )
+            row = [
+                metrics_item.input_len,
+                metrics_item.batch_size,
+                f"0/{metrics.total_requests}",
+                "N/A",
+                "N/A",
+                "N/A",
+            ]
+            if has_reuse:
+                row += ["N/A", "N/A"]
+            main_table.add_row(row)
     os.makedirs(dump_json_path, exist_ok=True)
     with open(f"{dump_json_path}/{title.replace(' ', '_')}.json", "w") as f:
         json.dump(json_result, f, indent=4)
