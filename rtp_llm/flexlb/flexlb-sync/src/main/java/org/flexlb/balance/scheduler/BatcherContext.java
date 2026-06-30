@@ -24,9 +24,6 @@ public class BatcherContext {
     private final BatchDecisionHandler handler;
     private final PriorityBlockingQueue<BatchItem> queue;
     private final BatchSchedulerReporter reporter;
-    private volatile boolean sortedCacheDirty = true;
-    private List<BatchItem> sortedCache = null;
-
     BatcherContext(String key, PrefillEndpoint prefillEp, FlexlbConfig cfg,
                    BatchDecisionHandler handler,
                    PriorityBlockingQueue<BatchItem> queue,
@@ -82,33 +79,24 @@ public class BatcherContext {
     // ---- queue mutation ----
 
     BatchItem poll() {
-        sortedCacheDirty = true;
         return queue.poll();
     }
 
     boolean remove(BatchItem item) {
-        sortedCacheDirty = true;
         return queue.remove(item);
     }
 
     void drainTo(List<BatchItem> dst) {
-        sortedCacheDirty = true;
         queue.drainTo(dst);
     }
 
     /**
      * Items sorted by {@link BatchItem#sortKey()}, suitable for
      * greedy-fill iteration in dispatch algorithms.
-     * Results are cached until the queue is mutated.
      */
     List<BatchItem> sortedItems() {
-        if (!sortedCacheDirty && sortedCache != null) {
-            return sortedCache;
-        }
         List<BatchItem> candidates = new ArrayList<>(queue);
         candidates.sort(Comparator.comparingLong(BatchItem::sortKey));
-        sortedCache = candidates;
-        sortedCacheDirty = false;
         return candidates;
     }
 
