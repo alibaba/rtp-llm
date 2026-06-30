@@ -1,6 +1,7 @@
 package org.flexlb.balance.scheduler;
 
 import org.flexlb.config.FlexlbConfig;
+import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.junit.jupiter.api.Test;
 
 import java.util.Comparator;
@@ -8,6 +9,7 @@ import java.util.concurrent.PriorityBlockingQueue;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.mock;
 
 /**
  * Tests for {@link FixedWindowBatcherAlgorithm#headWaitMs(BatcherContext)}.
@@ -29,7 +31,7 @@ class FixedWindowBatcherAlgorithmTest {
         BatchItem head = enqueuedItem(1L, now - 200);
         PriorityBlockingQueue<BatchItem> queue = queueWith(head);
 
-        BatcherContext ctx = new BatcherContext("test", null, config, null, queue);
+        BatcherContext ctx = new BatcherContext("test", null, config, null, queue, mock(BatchSchedulerReporter.class));
 
         // Head enqueued 200ms ago, window=300ms → ~100ms remaining (±5ms tolerance for timing)
         long waitMs = algo.headWaitMs(ctx);
@@ -44,7 +46,7 @@ class FixedWindowBatcherAlgorithmTest {
         FlexlbConfig config = new FlexlbConfig();
         PriorityBlockingQueue<BatchItem> queue = new PriorityBlockingQueue<>(11, Comparator.comparingLong(BatchItem::sortKey));
 
-        BatcherContext ctx = new BatcherContext("test", null, config, null, queue);
+        BatcherContext ctx = new BatcherContext("test", null, config, null, queue, mock(BatchSchedulerReporter.class));
 
         assertEquals(0, algo.headWaitMs(ctx));
     }
@@ -61,7 +63,7 @@ class FixedWindowBatcherAlgorithmTest {
         BatchItem head = enqueuedItem(1L, now - 500);
         PriorityBlockingQueue<BatchItem> queue = queueWith(head);
 
-        BatcherContext ctx = new BatcherContext("test", null, config, null, queue);
+        BatcherContext ctx = new BatcherContext("test", null, config, null, queue, mock(BatchSchedulerReporter.class));
 
         assertEquals(0, algo.headWaitMs(ctx));
     }
@@ -81,7 +83,7 @@ class FixedWindowBatcherAlgorithmTest {
         // FixedWindow headWaitMs computes: fixedWaitMs - elapsed = 300 - 200 = 100
         PriorityBlockingQueue<BatchItem> queue = queueWith(head);
 
-        BatcherContext ctx = new BatcherContext("test", null, config, null, queue);
+        BatcherContext ctx = new BatcherContext("test", null, config, null, queue, mock(BatchSchedulerReporter.class));
 
         long fixedWaitMs = algo.headWaitMs(ctx);
         assertTrue(fixedWaitMs >= 95 && fixedWaitMs <= 100,

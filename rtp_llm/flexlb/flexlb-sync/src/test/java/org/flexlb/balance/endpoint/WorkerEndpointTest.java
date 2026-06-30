@@ -9,6 +9,7 @@ import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
@@ -33,7 +34,7 @@ class WorkerEndpointTest {
         config.setCostAlpha0(0);
         config.setCostAlpha1(1);
         BatchDecisionHandler handler = Mockito.mock(BatchDecisionHandler.class);
-        endpoint = new PrefillEndpoint(status, config, handler);
+        endpoint = new PrefillEndpoint(status, config, handler, Mockito.mock(BatchSchedulerReporter.class));
     }
 
     @Test

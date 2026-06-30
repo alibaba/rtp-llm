@@ -12,6 +12,7 @@ import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.sync.status.EngineWorkerStatus;
 import org.flexlb.sync.status.ModelWorkerStatus;
 import org.junit.jupiter.api.Assertions;
@@ -52,7 +53,7 @@ class CostBasedDecodeStrategyTest {
 
     /** Create an EndpointRegistry with DecodeEndpoints registered for each WorkerStatus entry. */
     private EndpointRegistry createDecodeRegistry(Map<String, WorkerStatus> workerMap) {
-        EndpointRegistry registry = new EndpointRegistry(configService, null);
+        EndpointRegistry registry = new EndpointRegistry(configService, null, Mockito.mock(BatchSchedulerReporter.class));
         for (Map.Entry<String, WorkerStatus> entry : workerMap.entrySet()) {
             WorkerStatus ws = entry.getValue();
             ws.setGrpcPort(9090);
@@ -65,7 +66,7 @@ class CostBasedDecodeStrategyTest {
 
     @Test
     void should_handle_empty_worker_map_when_no_workers_available() {
-        EndpointRegistry emptyRegistry = new EndpointRegistry(configService, null);
+        EndpointRegistry emptyRegistry = new EndpointRegistry(configService, null, Mockito.mock(BatchSchedulerReporter.class));
         EngineWorkerStatus engineWorkerStatus = new EngineWorkerStatus(new ModelMetaConfig(), emptyRegistry);
         ResourceMeasureFactory resourceMeasureFactory = Mockito.mock(ResourceMeasureFactory.class);
         DecodeResourceMeasure decodeResourceMeasure = new DecodeResourceMeasure(configService);

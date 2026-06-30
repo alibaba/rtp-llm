@@ -10,6 +10,7 @@ import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.enums.TaskPhase;
+import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -33,17 +34,19 @@ public class PrefillEndpoint extends WorkerEndpoint {
     private final InflightEvictor<Long, BatchInflight> batchEvictor;
 
     public PrefillEndpoint(WorkerStatus status, FlexlbConfig config,
-                           BatchDecisionHandler handler) {
+                           BatchDecisionHandler handler,
+                           BatchSchedulerReporter reporter) {
         super(status);
         this.predictor = createPredictor(config);
-        this.batcher = createBatcher(config, handler);
+        this.batcher = createBatcher(config, handler, reporter);
         this.batchEvictor = new InflightEvictor<>(inflightBatches,
                 batch -> refreshEstimatedWaitingTime());
         this.batcher.start();
     }
 
-    private WorkerBatcher createBatcher(FlexlbConfig config, BatchDecisionHandler handler) {
-        return new WorkerBatcher(status.getIpPort(), this, config, handler);
+    private WorkerBatcher createBatcher(FlexlbConfig config, BatchDecisionHandler handler,
+                                        BatchSchedulerReporter reporter) {
+        return new WorkerBatcher(status.getIpPort(), this, config, handler, reporter);
     }
 
     public WorkerBatcher getBatcher() {
@@ -145,8 +148,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
                 if (batchId < 0) {
                     BatchInflight removed = inflightBatches.remove(task.getRequestId());
                     if (removed == null) {
-                        logger.warn("Prefill calibrate: finished non-batch reqId={} not in inflight, errorCode={}",
-                                task.getRequestId(), task.getErrorCode());
+                        logger.warn("Prefill calibrate: finished non-batch request reqId={} not in inflight", task.getRequestId());
                     }
                     continue;
                 }
@@ -290,6 +292,17 @@ public class PrefillEndpoint extends WorkerEndpoint {
 
     ConcurrentHashMap<Long, BatchInflight> getInflightBatches() {
         return inflightBatches;
+    }
+
+    // ==================== Metrics ====================
+
+    /**
+     * Report per-worker batch metrics via the given reporter.
+     * Called periodically by {@link org.flexlb.balance.scheduler.FlexlbBatchScheduler}.
+     */
+    public void reportBatchMetrics(BatchSchedulerReporter reporter) {
+        reporter.reportBatcherQueueDepth("prefill", getIp(), getBatcherQueueSize());
+        reporter.reportPrefillInflightBatchCount("prefill", getIp(), getInflightBatchCount());
     }
 
     private void refreshEstimatedWaitingTime() {

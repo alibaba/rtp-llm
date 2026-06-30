@@ -13,6 +13,7 @@ import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.TaskPhase;
+import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -25,6 +26,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.mock;
 
 class PrefillEndpointTest {
 
@@ -49,7 +51,7 @@ class PrefillEndpointTest {
         config.setCostAlpha4(0);
         config.setCostAlpha5(5);
 
-        endpoint = new PrefillEndpoint(status, config, noopHandler());
+        endpoint = new PrefillEndpoint(status, config, noopHandler(), mock(BatchSchedulerReporter.class));
     }
 
     // ---- batch commit / release ----
@@ -166,12 +168,12 @@ class PrefillEndpointTest {
 
         Map<String, TaskInfo> finished = new HashMap<>();
         TaskInfo badTask = new TaskInfo();
-        badTask.setRequestId(1L);
-        badTask.setBatchId(-1); // invalid batch id
+        badTask.setRequestId(999L); // non-colliding: won't match batchId=1
+        badTask.setBatchId(-1);
         badTask.setErrorCode(0);
         finished.put("1", badTask);
 
-        // should not throw, just skip
+        // should not throw, just log a warning for missing non-batch inflight
         endpoint.calibrate(finished, Map.of());
         assertEquals(1, endpoint.getInflightBatchCount());
     }

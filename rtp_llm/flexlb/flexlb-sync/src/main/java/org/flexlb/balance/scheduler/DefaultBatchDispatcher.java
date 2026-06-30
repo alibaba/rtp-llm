@@ -73,6 +73,23 @@ public class DefaultBatchDispatcher implements BatchDispatcher {
 
     private void doDispatch(List<BatchItem> items, PrefillEndpoint prefillEp,
                             long batchId, long predMs, String reason, DispatchCallback callback) {
+        try {
+            doDispatchInternal(items, prefillEp, batchId, predMs, reason, callback);
+        } catch (Throwable t) {
+            // Safety net: ensure callbacks are always invoked even for unexpected errors
+            Logger.error("Unexpected error in doDispatch batchId={}", batchId, t);
+            for (BatchItem item : items) {
+                try {
+                    callback.onFailure(item, t);
+                } catch (Throwable ignored) {
+                    // best-effort
+                }
+            }
+        }
+    }
+
+    private void doDispatchInternal(List<BatchItem> items, PrefillEndpoint prefillEp,
+                                    long batchId, long predMs, String reason, DispatchCallback callback) {
         // Filter out items that were cancelled before dispatch
         List<BatchItem> active = new ArrayList<>();
         for (BatchItem item : items) {

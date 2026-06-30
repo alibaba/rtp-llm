@@ -17,6 +17,7 @@ import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.LoadBalanceStrategyEnum;
+import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.sync.status.EngineWorkerStatus;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -48,7 +49,7 @@ class RandomStrategyTest {
     void setUp() {
         ConfigService configService = Mockito.mock(ConfigService.class);
         ResourceMeasureFactory resourceMeasureFactory = Mockito.mock(ResourceMeasureFactory.class);
-        endpointRegistry = new EndpointRegistry(configService, null);
+        endpointRegistry = new EndpointRegistry(configService, null, Mockito.mock(BatchSchedulerReporter.class));
         resourceMeasure = Mockito.mock(ResourceMeasure.class);
         Mockito.when(configService.loadBalanceConfig()).thenReturn(new FlexlbConfig());
         Mockito.when(resourceMeasureFactory.getMeasure(Mockito.any())).thenReturn(resourceMeasure);

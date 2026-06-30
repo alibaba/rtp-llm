@@ -14,6 +14,7 @@ import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineGrpcClient;
 import org.flexlb.engine.grpc.EngineRpcService;
+import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.sync.status.EngineWorkerStatus;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -47,6 +48,7 @@ class FlexlbBatchSchedulerTest {
     private Router router;
     private EngineGrpcClient grpcClient;
     private EngineWorkerStatus engineWorkerStatus;
+    private BatchSchedulerReporter reporter;
     private FlexlbBatchScheduler scheduler;
     private FlexlbConfig config;
     private final List<EngineRpcService.EnqueueBatchRequestPB> sentBatches = new CopyOnWriteArrayList<>();
@@ -58,6 +60,7 @@ class FlexlbBatchSchedulerTest {
         router = mock(Router.class);
         grpcClient = mock(EngineGrpcClient.class);
         engineWorkerStatus = mock(EngineWorkerStatus.class);
+        reporter = mock(BatchSchedulerReporter.class);
 
         config = new FlexlbConfig();
         config.setScheduleWorkerSize(1);
@@ -82,10 +85,10 @@ class FlexlbBatchSchedulerTest {
         when(grpcClient.cancel(anyString(), anyInt(), anyLong(), anyLong()))
                 .thenReturn(EngineRpcService.EmptyPB.getDefaultInstance());
 
-        EndpointRegistry endpointRegistry = new EndpointRegistry(configService, null);
+        EndpointRegistry endpointRegistry = new EndpointRegistry(configService, null, reporter);
         BatchDispatcher dispatcher = new DefaultBatchDispatcher(grpcClient, configService);
         scheduler = new FlexlbBatchScheduler(configService, router, grpcClient, engineWorkerStatus,
-                endpointRegistry, dispatcher);
+                endpointRegistry, dispatcher, reporter);
 
         // Create endpoint and batcher for the worker that successRoute() returns
         String ipPort = "10.0.0.1:8080";
@@ -93,7 +96,7 @@ class FlexlbBatchSchedulerTest {
         ws.setIp("10.0.0.1");
         ws.setPort(8080);
         ws.setGrpcPort(9080);
-        PrefillEndpoint endpoint = new PrefillEndpoint(ws, config, scheduler);
+        PrefillEndpoint endpoint = new PrefillEndpoint(ws, config, scheduler, reporter);
         ServerStatus prefill = new ServerStatus();
         prefill.setServerIp("10.0.0.1");
         prefill.setHttpPort(8080);
@@ -239,7 +242,7 @@ class FlexlbBatchSchedulerTest {
         unsyncedDp0.setPort(8090);
         unsyncedDp0.setGrpcPort(9090);
         unsyncedDp0.setDpRank(0);
-        PrefillEndpoint unsyncedEp = new PrefillEndpoint(unsyncedDp0, config, scheduler);
+        PrefillEndpoint unsyncedEp = new PrefillEndpoint(unsyncedDp0, config, scheduler, reporter);
         when(engineWorkerStatus.selectModelWorkerStatus(RoleType.PREFILL, "g1"))
                 .thenReturn(Map.of("10.0.0.9:8090", unsyncedEp));
 
@@ -384,9 +387,8 @@ class FlexlbBatchSchedulerTest {
     @Test
     void processQueue_bsIter_exhaustion_uses_conservative_bound() throws Exception {
         // With slo_budget batcher (default), two 100-token requests each have
-        // budget ≈ 350ms (slo=500, margin=50, pred≈100). Inside 10s window,
-        // the batcher dispatches each via "arrival_guard" because the next
-        // expected arrival (window/minBatch=3333ms) exceeds the remaining slack.
+        // budget ≈ 350ms (slo=500, margin=50, pred≈100). Both fit within the
+        // incremental budget and are dispatched together in a single batch.
         // flexlbBatchSearchIter is NOT used by slo_budget; flexlbBatchScanAhead
         // (default 64) determines how many candidates are scanned per iteration.
         config.setCostSloMs(500L);
@@ -401,11 +403,10 @@ class FlexlbBatchSchedulerTest {
         assertTrue(f1.get(2, TimeUnit.SECONDS).isSuccess());
         assertTrue(f2.get(2, TimeUnit.SECONDS).isSuccess());
 
-        // slo_budget dispatches each via arrival_guard → 2 separate batches
-        assertEquals(2, sentBatches.size(),
-                "slo_budget dispatches each request individually when next arrival is too far");
-        assertEquals(1, batchInputs(sentBatches.get(0)).size());
-        assertEquals(1, batchInputs(sentBatches.get(1)).size());
+        // Both requests fit within the incremental budget → 1 combined batch
+        assertEquals(1, sentBatches.size(),
+                "slo_budget dispatches both requests together when they fit within budget");
+        assertEquals(2, batchInputs(sentBatches.get(0)).size());
     }
 
     @Test

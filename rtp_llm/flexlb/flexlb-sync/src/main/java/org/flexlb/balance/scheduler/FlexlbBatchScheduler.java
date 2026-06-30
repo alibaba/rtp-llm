@@ -15,6 +15,7 @@ import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.engine.grpc.EngineGrpcClient;
+import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.sync.status.EngineWorkerStatus;
 import org.flexlb.util.Logger;
 import org.springframework.context.annotation.Lazy;
@@ -56,6 +57,7 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
     final EngineWorkerStatus engineWorkerStatus;
     final EndpointRegistry endpointRegistry;
     final BatchDispatcher dispatcher;
+    final BatchSchedulerReporter reporter;
     final Map<Long, InflightEntry> inflight = new ConcurrentHashMap<>();
     final AtomicLong batchIdGenerator = new AtomicLong(0);
     private final InflightEvictor<Long, InflightEntry> inflightEvictor
@@ -71,13 +73,15 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
                                 EngineGrpcClient grpcClient,
                                 EngineWorkerStatus engineWorkerStatus,
                                 EndpointRegistry endpointRegistry,
-                                BatchDispatcher dispatcher) {
+                                BatchDispatcher dispatcher,
+                                BatchSchedulerReporter reporter) {
         this.configService = configService;
         this.router = router;
         this.grpcClient = grpcClient;
         this.engineWorkerStatus = engineWorkerStatus;
         this.endpointRegistry = endpointRegistry;
         this.dispatcher = dispatcher;
+        this.reporter = reporter;
     }
 
     // ==================== Request submission ====================
@@ -292,6 +296,8 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
         }
 
         // [ASYNC] Delegate gRPC dispatch — dispatcher owns its own thread pool
+        long waitMs = System.currentTimeMillis() - items.get(0).enqueuedAtMs();
+        reporter.reportBatchWaitTimeMs("prefill", prefillEp != null ? prefillEp.getIp() : "", waitMs);
         dispatcher.dispatch(active, prefillEp, batchId, predMs, reason, this);
     }
 
@@ -540,6 +546,20 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
     }
 
     // ==================== Lifecycle ====================
+
+    public BatchSchedulerReporter getReporter() {
+        return reporter;
+    }
+
+    @Scheduled(fixedRate = 20000L)
+    public void reportBatchMetrics() {
+        reporter.reportSchedulerInflightSize(inflight.size());
+
+        // Per-worker metrics: delegated to each PrefillEndpoint
+        for (Map.Entry<String, PrefillEndpoint> entry : endpointRegistry.getPrefillEndpoints().entrySet()) {
+            entry.getValue().reportBatchMetrics(reporter);
+        }
+    }
 
     @PreDestroy
     public void shutdown() {

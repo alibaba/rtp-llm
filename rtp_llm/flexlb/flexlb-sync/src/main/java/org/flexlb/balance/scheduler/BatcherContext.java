@@ -2,6 +2,7 @@ package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.config.FlexlbConfig;
+import org.flexlb.service.monitor.BatchSchedulerReporter;
 
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -22,17 +23,20 @@ public class BatcherContext {
     private final FlexlbConfig cfg;
     private final BatchDecisionHandler handler;
     private final PriorityBlockingQueue<BatchItem> queue;
+    private final BatchSchedulerReporter reporter;
     private volatile boolean sortedCacheDirty = true;
     private List<BatchItem> sortedCache = null;
 
     BatcherContext(String key, PrefillEndpoint prefillEp, FlexlbConfig cfg,
                    BatchDecisionHandler handler,
-                   PriorityBlockingQueue<BatchItem> queue) {
+                   PriorityBlockingQueue<BatchItem> queue,
+                   BatchSchedulerReporter reporter) {
         this.key = key;
         this.prefillEp = prefillEp;
         this.cfg = cfg;
         this.handler = handler;
         this.queue = queue;
+        this.reporter = reporter;
     }
 
     // ---- accessors ----
@@ -51,6 +55,10 @@ public class BatcherContext {
 
     BatchDecisionHandler handler() {
         return handler;
+    }
+
+    BatchSchedulerReporter reporter() {
+        return reporter;
     }
 
     long now() {

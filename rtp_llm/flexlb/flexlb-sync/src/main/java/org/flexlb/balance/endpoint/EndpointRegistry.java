@@ -3,6 +3,7 @@ package org.flexlb.balance.endpoint;
 import org.flexlb.balance.scheduler.FlexlbBatchScheduler;
 import org.flexlb.config.ConfigService;
 import org.flexlb.dao.master.WorkerStatus;
+import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.springframework.context.annotation.Lazy;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
@@ -16,11 +17,14 @@ public class EndpointRegistry {
     private final ConcurrentHashMap<String, DecodeEndpoint> decodeEndpoints = new ConcurrentHashMap<>();
     private final ConfigService configService;
     private final FlexlbBatchScheduler batchScheduler;
+    private final BatchSchedulerReporter reporter;
 
     public EndpointRegistry(ConfigService configService,
-                            @Lazy FlexlbBatchScheduler batchScheduler) {
+                            @Lazy FlexlbBatchScheduler batchScheduler,
+                            BatchSchedulerReporter reporter) {
         this.configService = configService;
         this.batchScheduler = batchScheduler;
+        this.reporter = reporter;
     }
 
     public WorkerEndpoint get(String ipPort) {
@@ -41,7 +45,7 @@ public class EndpointRegistry {
 
     public PrefillEndpoint ensurePrefillEndpoint(String ipPort, WorkerStatus status) {
         return prefillEndpoints.computeIfAbsent(ipPort,
-                k -> new PrefillEndpoint(status, configService.loadBalanceConfig(), batchScheduler));
+                k -> new PrefillEndpoint(status, configService.loadBalanceConfig(), batchScheduler, reporter));
     }
 
     public DecodeEndpoint ensureDecodeEndpoint(String ipPort, WorkerStatus status) {
@@ -74,6 +78,13 @@ public class EndpointRegistry {
     public void close() {
         prefillEndpoints.values().forEach(WorkerEndpoint::close);
         decodeEndpoints.values().forEach(WorkerEndpoint::close);
+    }
+
+    /**
+     * Expose all prefill endpoints for per-worker metrics reporting.
+     */
+    public ConcurrentHashMap<String, PrefillEndpoint> getPrefillEndpoints() {
+        return prefillEndpoints;
     }
 
     /**

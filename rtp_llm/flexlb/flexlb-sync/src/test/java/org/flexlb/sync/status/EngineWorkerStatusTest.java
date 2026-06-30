@@ -6,6 +6,7 @@ import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
@@ -28,7 +29,7 @@ class EngineWorkerStatusTest {
     void setUp() {
         configService = Mockito.mock(ConfigService.class);
         Mockito.when(configService.loadBalanceConfig()).thenReturn(new FlexlbConfig());
-        registry = new EndpointRegistry(configService, null);
+        registry = new EndpointRegistry(configService, null, Mockito.mock(BatchSchedulerReporter.class));
         engineWorkerStatus = new EngineWorkerStatus(new ModelMetaConfig(), registry);
         workerStatus1 = new WorkerStatus();
         workerStatus1.setGroup("group1");

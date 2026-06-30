@@ -17,6 +17,7 @@ import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.master.CacheStatus;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.sync.status.EngineWorkerStatus;
 import org.junit.jupiter.api.BeforeEach;
@@ -52,7 +53,7 @@ class CostBasedPrefillStrategyTest {
         batchScheduler = Mockito.mock(FlexlbBatchScheduler.class);
 
         // Create registry first to break circular dependency
-        endpointRegistry = new EndpointRegistry(configService, batchScheduler);
+        endpointRegistry = new EndpointRegistry(configService, batchScheduler, Mockito.mock(BatchSchedulerReporter.class));
         engineWorkerStatus = new EngineWorkerStatus(new ModelMetaConfig(), endpointRegistry);
 
         PrefillResourceMeasure prefillResourceMeasure = Mockito.mock(PrefillResourceMeasure.class);

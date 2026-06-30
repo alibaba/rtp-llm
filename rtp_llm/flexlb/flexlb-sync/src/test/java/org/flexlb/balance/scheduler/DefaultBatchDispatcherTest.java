@@ -14,6 +14,7 @@ import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineGrpcClient;
 import org.flexlb.engine.grpc.EngineRpcService;
+import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -38,6 +39,7 @@ class DefaultBatchDispatcherTest {
 
     private ConfigService configService;
     private EngineGrpcClient grpcClient;
+    private BatchSchedulerReporter reporter;
     private FlexlbConfig config;
     private DefaultBatchDispatcher dispatcher;
     private TestCallback callback;
@@ -46,6 +48,7 @@ class DefaultBatchDispatcherTest {
     void setUp() {
         configService = mock(ConfigService.class);
         grpcClient = mock(EngineGrpcClient.class);
+        reporter = mock(BatchSchedulerReporter.class);
         config = new FlexlbConfig();
         config.setFlexlbBatchDispatchPoolSize(2);
         config.setFlexlbBatchDispatchQueueSize(10);
@@ -217,7 +220,7 @@ class DefaultBatchDispatcherTest {
         FlexlbConfig epConfig = new FlexlbConfig();
         epConfig.setFlexlbBatchQueueMaxSize(100);
         epConfig.setFlexlbBatchFixedWaitMs(300);
-        return new PrefillEndpoint(status, epConfig, noopHandler());
+        return new PrefillEndpoint(status, epConfig, noopHandler(), reporter);
     }
 
     private static BatchDecisionHandler noopHandler() {

@@ -2,6 +2,7 @@ package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.config.FlexlbConfig;
+import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.util.Logger;
 
 import java.util.ArrayList;
@@ -31,13 +32,14 @@ public class WorkerBatcher {
     private final BatcherContext ctx;
 
     public WorkerBatcher(String key, PrefillEndpoint prefillEp, FlexlbConfig cfg,
-                         BatchDecisionHandler handler) {
+                         BatchDecisionHandler handler,
+                         BatchSchedulerReporter reporter) {
         this.key = key;
         this.prefillEp = prefillEp;
         this.cfg = cfg;
         this.handler = handler;
         this.algorithm = createAlgorithm(cfg);
-        this.ctx = new BatcherContext(key, prefillEp, cfg, handler, queue);
+        this.ctx = new BatcherContext(key, prefillEp, cfg, handler, queue, reporter);
         this.workerThread = new Thread(this::runLoop, "flexlb-batcher-" + key);
         this.workerThread.setDaemon(true);
         this.workerThread.setUncaughtExceptionHandler((t, e) ->
