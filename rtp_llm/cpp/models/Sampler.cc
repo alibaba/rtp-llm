@@ -54,7 +54,9 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
             copy_done_event.record(copy_stream_);
         }
         copy_done_event.block(main_stream);
+#ifndef USE_ROCM
         inputs_token_ids_cuda.record_stream(main_stream);
+#endif
     }
 
     auto all_token_ids_out     = variable_num_beams ?
