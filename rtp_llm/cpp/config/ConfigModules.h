@@ -200,6 +200,9 @@ struct ProfilingDebugLoggingConfig {
     bool        ft_core_dump_on_exception = false;
     std::string ft_alog_conf_path         = "";
     bool        gen_timeline_sync         = false;
+    int         timeline_start_step       = 0;
+    int         timeline_num_steps        = 3;
+    std::string timeline_trace_name       = "profiler";
     std::string torch_cuda_profiler_dir   = "";
     int         log_file_backup_count     = 16;
     bool        debug_load_server         = false;
