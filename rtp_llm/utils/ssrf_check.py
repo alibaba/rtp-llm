@@ -13,7 +13,7 @@ _MAX_REDIRECTS = 5
 
 
 def _is_private_ip(ip_str: str) -> bool:
-    """Return True if *ip_str* is a private/loopback/reserved/link-local address."""
+    """Return True if *ip_str* is a private/loopback/reserved/link-local/multicast/unspecified address."""
     try:
         ip_obj = ipaddress.ip_address(ip_str)
     except ValueError:
@@ -29,7 +29,7 @@ def _is_private_ip(ip_str: str) -> bool:
 
 
 def _is_private_host(hostname: str) -> bool:
-    """Return True if *hostname* resolves to a private/loopback/reserved/link-local address."""
+    """Return True if *hostname* resolves to a private/loopback/reserved/link-local/multicast/unspecified address."""
     if not hostname:
         return True
     try:

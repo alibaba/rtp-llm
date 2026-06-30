@@ -33,7 +33,7 @@ class EmbedingTest(TestCase):
         model_config.attn_config.size_per_head = 1
         model_config.num_layers = 1
         model_config.max_seq_len = 1
-        model_config.vocab_size = 1
+        model_config.vocab_size = vocab_size
 
         parallelism_config = ParallelismConfig()
         parallelism_config.tp_size = 1

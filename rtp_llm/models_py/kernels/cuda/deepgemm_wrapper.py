@@ -156,16 +156,18 @@ def _lazy_init_deep_gemm(symbols: List[str]) -> None:
     # resolve symbols
     for i, symbol in enumerate(symbols):
         symbol_impl = symbol_impls[i]
-        try:
-            globals()[symbol_impl] = resolve_symbol(
-                deep_gemm,
-                _deep_gemm_impl_new_map[symbol],
-                _deep_gemm_impl_old_map[symbol],
-            )
-        except AttributeError:
+        # resolve_symbol returns None (never raises) when neither the new nor the
+        # legacy symbol exists, so check the return value explicitly.
+        resolved = resolve_symbol(
+            deep_gemm,
+            _deep_gemm_impl_new_map[symbol],
+            _deep_gemm_impl_old_map[symbol],
+        )
+        if resolved is None:
             raise RuntimeError(
                 f"DeepGEMM symbol {_deep_gemm_impl_new_map[symbol]} and {_deep_gemm_impl_old_map[symbol]} not found in deep_gemm module"
             )
+        globals()[symbol_impl] = resolved
 
 
 def _lazy_init_deep_gemm_once():

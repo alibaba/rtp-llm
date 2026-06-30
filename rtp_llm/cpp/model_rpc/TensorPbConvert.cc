@@ -145,10 +145,11 @@ void TensorPbConvert::torchToPb(TensorPB* tensor_pb, const torch::Tensor& tensor
     for (auto dim : shape) {
         tensor_pb->add_shape(dim);
     }
-    // Move to CPU before reading data_ptr(): a CUDA tensor's data_ptr() points
-    // to device memory and cannot be serialized directly. .to(kCPU) is a no-op
-    // when the tensor is already on CPU.
-    torch::Tensor contiguous_tensor = tensor.to(torch::kCPU).contiguous();
+    // Make contiguous on-device, then copy to CPU before reading data_ptr():
+    // a CUDA tensor's data_ptr() points to device memory and cannot be
+    // serialized directly. Doing contiguous() first keeps the D2H copy a single
+    // contiguous transfer; .to(kCPU) is a no-op when already on CPU.
+    torch::Tensor contiguous_tensor = tensor.contiguous().to(torch::kCPU);
     switch (tensor.dtype().toScalarType()) {
         case torch::kFloat32: {
             size_t      num_bytes = contiguous_tensor.numel() * sizeof(float);

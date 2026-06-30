@@ -268,6 +268,12 @@ class MoriEpIntranodeRouter(FusedMoeDataRouter):
         fused_out: torch.Tensor,
         extra_finalize_args: Optional[Dict[str, Any]],
     ) -> torch.Tensor:
+        # Guard against finalize being called without a preceding successful
+        # prepare (mirrors the _finalize_single defense).
+        assert (
+            self._chunk_dispatch_ids is not None
+            and len(self._chunk_dispatch_ids) > 0
+        ), "_finalize_chunked called before prepare populated _chunk_dispatch_ids"
         results = []
         offset = 0
 

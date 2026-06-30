@@ -572,5 +572,4 @@ class TestDistributedEnvironment(unittest.TestCase):
 if __name__ == "__main__":
     os.environ["NCCL_DEBUG"] = "INFO"
     os.environ["NCCL_DEBUG_FILE"] = "nccl.log"
-if __name__ == "__main__":
     unittest.main()

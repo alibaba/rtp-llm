@@ -155,6 +155,10 @@ class Tau2BenchComparer(BaseComparer):
                 try:
                     tar.extractall(path=dest_dir, filter="data")
                 except TypeError:
+                    logging.warning(
+                        "[TAU2] tarfile.extractall filter='data' unsupported on "
+                        "this Python; extracting without path-traversal filtering"
+                    )
                     tar.extractall(path=dest_dir)
         finally:
             try:
