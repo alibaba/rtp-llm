@@ -23,3 +23,16 @@ def init_engine_group_args(parser, runtime_config):
         default=False,
         help="在服务启动时是否开启损失去预热",
     )
+    engine_group.add_argument(
+        "--enable_sleep_mode",
+        "--enable-sleep-mode",
+        env_name="ENABLE_SLEEP_MODE",
+        bind_to=(
+            (runtime_config, 'enable_sleep_mode')
+            if hasattr(runtime_config, 'enable_sleep_mode')
+            else None
+        ),
+        type=str2bool,
+        default=False,
+        help="是否开启 sleep/wake_up 生命周期管理接口，默认关闭",
+    )

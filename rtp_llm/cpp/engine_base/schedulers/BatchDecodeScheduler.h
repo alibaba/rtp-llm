@@ -5,6 +5,7 @@
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cache/Types.h"
 #include <atomic>
+#include <chrono>
 #include <mutex>
 #include <condition_variable>
 #include <list>
@@ -56,6 +57,11 @@ public:
         }
         {
             std::lock_guard<std::mutex> lock(lock_);
+            if (stop_) {
+                stream->reportError(ErrorCode::CANCELLED, "scheduler stopped");
+                stream->moveToNext();
+                return absl::CancelledError("BatchDecodeScheduler stopped");
+            }
             waiting_streams_.emplace_back(stream);
             if (waiting_streams_.size() % 16 == 0) {
                 RTP_LLM_LOG_DEBUG("BatchDecodeScheduler::enqueue: waiting_streams_.size() = %d",
@@ -79,7 +85,14 @@ public:
         }
         {
             std::lock_guard<std::mutex> lock(lock_);
-            waiting_streams_.insert(waiting_streams_.end(), stream_enqueued.begin(), stream_enqueued.end());
+            if (stop_) {
+                for (const auto& stream : stream_enqueued) {
+                    stream->reportError(ErrorCode::CANCELLED, "scheduler stopped");
+                    stream->moveToNext();
+                }
+            } else {
+                waiting_streams_.insert(waiting_streams_.end(), stream_enqueued.begin(), stream_enqueued.end());
+            }
         }
         cond_.notify_all();
         return streams;
@@ -186,9 +199,12 @@ public:
     absl::StatusOr<std::list<GenerateStreamPtr>> schedule() override {
         std::unique_lock<std::mutex> lock(lock_);
         cond_.wait_for(lock, std::chrono::seconds(30), [this] {
-            return waiting_streams_.size() >= batch_size_ || running_streams_.size() > 0
+            return stop_ || waiting_streams_.size() >= batch_size_ || running_streams_.size() > 0
                    || !loading_cache_streams_.empty();
         });
+        if (stop_) {
+            return running_streams_;
+        }
 
         // 统一通过状态机驱动各队列中 stream 的状态转移
         // LOADING_CACHE -> DONE/WAITING: error / load cache done
@@ -204,21 +220,39 @@ public:
             }
         }
 
+        last_schedule_time_.store(autil::TimeUtility::currentTimeInMilliSeconds(), std::memory_order_release);
         return running_streams_;
     }
 
+    void cancelStreams(std::list<GenerateStreamPtr>& streams) {
+        for (auto& stream : streams) {
+            stream->reportError(ErrorCode::CANCELLED, "scheduler stopped");
+            stream->moveToNext();
+        }
+        streams.clear();
+    }
+
     absl::Status stop() override {
-        // Not implemented
-        return absl::UnimplementedError("BatchDecodeScheduler::stop not implemented");
+        RTP_LLM_LOG_INFO("stop BatchDecodeScheduler");
+        {
+            std::lock_guard<std::mutex> lock(lock_);
+            stop_ = true;
+            cancelStreams(waiting_streams_);
+            cancelStreams(loading_cache_streams_);
+            cancelStreams(running_streams_);
+        }
+        cond_.notify_all();
+        return absl::OkStatus();
     }
 
     bool empty() override {
-        // Not implemented
-        return true;  // 默认返回值
+        std::lock_guard<std::mutex> lock(lock_);
+        return waiting_streams_.empty() && loading_cache_streams_.empty() && running_streams_.empty();
     }
 
     int64_t lastScheduleTime() override {
-        return 0;  // 默认返回值
+        return empty() ? autil::TimeUtility::currentTimeInMilliSeconds() :
+                         last_schedule_time_.load(std::memory_order_acquire);
     }
 
     int64_t onflightStreams() override {
@@ -235,6 +269,8 @@ private:
     uint32_t                     batch_size_;
     bool                         reorder_request_;
     uint32_t                     current_step_ = 0;
+    std::atomic<int64_t>         last_schedule_time_{autil::TimeUtility::currentTimeInMilliSeconds()};
+    std::atomic<bool>            stop_{false};
 
     std::shared_ptr<KVCacheManager> cache_manager_;
     kmonitor::MetricsReporterPtr    metrics_reporter_;
