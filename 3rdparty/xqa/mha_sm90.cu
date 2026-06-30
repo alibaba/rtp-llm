@@ -170,6 +170,8 @@ struct alignas(128) SharedMem {
 #if SWAP_AB
     ShmQWiseVec xColMax[nbXBuf];
     ShmQWiseVec xColSum[nbXBuf][gemm0NbWarps];
+    float       xVScale[nbXBuf];
+    float       scaleScratch[gemm0NbWarps];
 #else
     ShmQWiseVec xRowMax[nbXBuf];
     ShmQWiseVec xRowSum[nbXBuf];
@@ -231,7 +233,7 @@ struct F16QToF8Converter {
     static constexpr uint32_t grainsPerPaddedInputHead     = exactDiv(paddedInputHeadBytes, grainBytes);
     static constexpr uint32_t grainsPerPaddedInputQHeadGrp = grainsPerPaddedInputHead * headGrpSize;
 #if !(SPEC_DEC)
-    static constexpr uint32_t totalGrains = grainsPerPaddedInputQHeadGrp * beamWidth;
+    static constexpr uint32_t totalGrains = grainsPerPaddedInputHead * ctaNbQHeads;
 #else
     static_assert(beamWidth == 1);
     static constexpr uint32_t totalGrains     = grainsPerPaddedInputQHeadGrp * inputTokensPerCta;
@@ -400,7 +402,17 @@ __device__ RegColWiseVec computeWarpGrpColMax_sync(CtaBarrier&     warpGrpBar,
 	             Vec<KVCachePageIndex, SharedMem::nbPagesPerTile> const&    pages,
 	             uint32_t                                                   idxTile,
 	             uint32_t                                                   idxHeadGrp,
-	             uint32_t                                                   nbKHeads);
+	             uint32_t                                                   nbKHeads,
+	             float                                                      scaleNormalizer = 1.f);
+	__device__ float         computePagedKVScaleTileMax_sync(
+	             uint32_t                                                   warpRank,
+	             float const* __restrict__                                  scaleCache,
+	             Vec<KVCachePageIndex, SharedMem::nbPagesPerTile> const&    pages,
+	             uint32_t                                                   idxTile,
+	             uint32_t                                                   idxHeadGrp,
+	             uint32_t                                                   nbKHeads,
+	             float (&scaleScratch)[gemm0NbWarps],
+	             CtaBarrier&                                                warpGrpBar);
 #endif
 	__device__ void          storeGemm0AccToShm(
 	             uint32_t warpRank, uint32_t lane, SharedMem::XBuffer& smemX, CtaBarrier& barConsumed, Gemm0Acc const& acc);
@@ -431,6 +443,7 @@ __device__ void rescaleGemm1AccForNewColMax_sync(uint32_t           warpRank,
                                                  Gemm1Acc&    acc,
                                                  ShmQWiseVec& shmAccColSum,
                                                  CtaBarrier&  gemm1WarpGrpBar);
+__device__ void scaleAndAccumulateGemm1Acc(Gemm1Acc& dst, Gemm1Acc const& src, float scale);
 template<typename DstHead>
 __device__ void finalizeAndWriteOut_sync(uint32_t                  threadRank,
                                          uint32_t                  warpRank,
@@ -801,6 +814,9 @@ __launch_bounds__(128 * 3, 1)
             uint32_t const idxKTile = idxKTileInit + idxIter * nbSubSeq;
             assert(idxKTile < nbTiles);
             Acc acc;  // no need to initialize. GMMA allows us to ignore acc initial values.
+#if USE_PAGED_KV_CACHE
+            Vec<KVCachePageIndex, SharedMem::nbPagesPerTile> scalePages;
+#endif
             gmma::fence();
             static_assert(cacheHeadNbParts == nbQParts);
 #pragma unroll
@@ -822,6 +838,11 @@ __launch_bounds__(128 * 3, 1)
                                             gmma::getSwizzleMode<true>(SharedMem::KBuffer{}))
                               .raw());
                 arrive_tx_and_wait(kBar.produced, exactDiv(sizeof(SharedMem::KBuffer), gemm0NbThrds));
+                if (idxPart == 0) {
+#if USE_PAGED_KV_CACHE
+                    scalePages = smem.pages[0];
+#endif
+                }
                 // if (threadIdx.x == 0) {
                 //     printf("************* part %u *******\n", idxPart);
                 //     printf("q:\n");
@@ -866,7 +887,7 @@ __launch_bounds__(128 * 3, 1)
             acc = acc * qkScale;
             if (hasPerTokenScale) {
 #if SWAP_AB && USE_PAGED_KV_CACHE
-                applyPagedKVScaleToGemm0Acc(warpRank, acc, kScaleCache, smem.pages[0], idxKTile, idxHeadGrp, nbKHeads);
+                applyPagedKVScaleToGemm0Acc(warpRank, acc, kScaleCache, scalePages, idxKTile, idxHeadGrp, nbKHeads);
 #endif
             }
 
@@ -906,9 +927,19 @@ __launch_bounds__(128 * 3, 1)
             RegRowWiseVec const rowSum = computeWarpRowSum(acc);
 #endif
 
+            float vScaleNormalizer = 1.f;
             if (hasPerTokenScale) {
 #if SWAP_AB && USE_PAGED_KV_CACHE
-                applyPagedKVScaleToGemm0Acc(warpRank, acc, vScaleCache, smem.pages[1], idxKTile, idxHeadGrp, nbKHeads);
+                vScaleNormalizer = computePagedKVScaleTileMax_sync(warpRank,
+                                                                    vScaleCache,
+                                                                    scalePages,
+                                                                    idxKTile,
+                                                                    idxHeadGrp,
+                                                                    nbKHeads,
+                                                                    smem.scaleScratch,
+                                                                    smem.gemm0WarpGrpBar);
+                applyPagedKVScaleToGemm0Acc(
+                    warpRank, acc, vScaleCache, scalePages, idxKTile, idxHeadGrp, nbKHeads, vScaleNormalizer);
 #endif
             }
             // map 1 to fp8_max before conversion to fp8
@@ -921,6 +952,9 @@ __launch_bounds__(128 * 3, 1)
             storeGemm0AccToShm(warpRank, laneId(), smem.xBuf(idxXBuf), xBar.consumed, acc);
             // store colMax and warpColSum
             auto const lane = laneId();
+            if (threadIdx.x == 0) {
+                smem.xVScale[idxXBuf] = vScaleNormalizer;
+            }
             if (lane < 4) {
                 auto& xColMax = smem.xColMax[idxXBuf];
                 auto& xColSum = smem.xColSum[idxXBuf][warpRank];
@@ -1050,6 +1084,8 @@ __launch_bounds__(128 * 3, 1)
                 warpRank, smem.xRowMax[idxXBuf], smem.xRowSum[idxXBuf], smem.gemm1AccColMax, acc, smem.gemm1AccColSum);
 #endif
             auto& xBuf = smem.xBuf(idxXBuf);
+            Gemm1Acc  tileAcc{};
+            Gemm1Acc& gmmaAcc = hasPerTokenScale ? tileAcc : acc;
 
             auto const descXBase = gmma::makeMatDesc(nullptr,
                                                      0,
@@ -1126,13 +1162,13 @@ __launch_bounds__(128 * 3, 1)
                     auto const descV =
                         addAddr(descVBase, &vBuf[idxInstM](kOffsetInGrains.get() * cacheElemsPerGrain, 0));
                     gmma::mma_async_shmA<MathElem, ctaNbQHeads, true, false>(
-                        reinterpret_cast<float(&)[exactDiv(ctaNbQHeads, gmma::instNBase)][2][2]>(acc(idxInstM, 0)),
+                        reinterpret_cast<float(&)[exactDiv(ctaNbQHeads, gmma::instNBase)][2][2]>(gmmaAcc(idxInstM, 0)),
                         descV,
                         descX,
                         true);
 #elif CACHE_ELEM_ENUM == 2
                     gmma::mma_async_regA<MathElem, ctaNbQHeads>(
-                        reinterpret_cast<float(&)[exactDiv(ctaNbQHeads, gmma::instNBase)][2][2]>(acc(idxInstM, 0)),
+                        reinterpret_cast<float(&)[exactDiv(ctaNbQHeads, gmma::instNBase)][2][2]>(gmmaAcc(idxInstM, 0)),
                         reinterpret_cast<uint32_t const(&)[2][2][1]>(fragA[idxInstM]),
                         descX,
                         true);
@@ -1142,6 +1178,9 @@ __launch_bounds__(128 * 3, 1)
                 //@fixme: delay wait and consumption to next tile. Note that fragA must also persist until finish of
                 // gmma.
                 gmma::wait_group<0>();
+            }
+            if (hasPerTokenScale) {
+                scaleAndAccumulateGemm1Acc(acc, tileAcc, smem.xVScale[idxXBuf]);
             }
 #else
             auto const descVTBase =
@@ -1628,11 +1667,15 @@ F16QToF8Converter<nbThrds, beamWidth>::load(uint32_t                     tid,
         uint32_t       offsetInGrains = idxGrain + tokenPad * idxToken;
         static_assert(beamWidth == 1);
 #else
-        uint32_t const idxBeam        = beamWidth == 1 ? 0 : idxGrain / grainsPerPaddedInputQHeadGrp;
+        uint32_t const idxHeadInCta   = idxGrain / grainsPerPaddedInputHead;
+        uint32_t const idxBeam        = beamWidth == 1 ? 0 : idxHeadInCta / headGrpSize;
         uint32_t const beamPad        = grainsPerPaddedInputQHeadGrp * (nbKHeads - 1);
         uint32_t       offsetInGrains = idxGrain + beamPad * idxBeam;
 #endif
         bool isGrainInBound = true;
+#if !(SPEC_DEC)
+        isGrainInBound = isGrainInBound && (idxHeadInCta < headGrpSize * beamWidth);
+#endif
         if constexpr (isHeadPadded) {
             uint32_t const idxGrainInsideHead = offsetInGrains % grainsPerPaddedInputHead;
             offsetInGrains = offsetInGrains / grainsPerPaddedInputHead * grainsPerIOHead + idxGrainInsideHead;
@@ -1917,14 +1960,17 @@ __device__ inline void applyPagedKVScaleToGemm0Acc(
     Vec<KVCachePageIndex, SharedMem::nbPagesPerTile> const&    pages,
     uint32_t                                                   idxTile,
     uint32_t                                                   idxHeadGrp,
-    uint32_t                                                   nbKHeads) {
+    uint32_t                                                   nbKHeads,
+    float                                                      scaleNormalizer) {
     uint32_t const idxQuad = laneId() / 4;
+    float const    rcpScaleNormalizer = 1.f / scaleNormalizer;
 #pragma unroll
     for (uint32_t m = 0; m < acc.rows; m++) {
 #pragma unroll
         for (uint32_t i = 0; i < GmmaAccCoreMat::rows; i++) {
             uint32_t const tokenInTile = 64 * m + 16 * warpRank + 8 * i + idxQuad;
-            float const scale = loadPagedKVScale(scaleCache, pages, idxTile, tokenInTile, idxHeadGrp, nbKHeads);
+            float const scale =
+                loadPagedKVScale(scaleCache, pages, idxTile, tokenInTile, idxHeadGrp, nbKHeads) * rcpScaleNormalizer;
 #pragma unroll
             for (uint32_t n = 0; n < acc.cols; n++) {
 #pragma unroll
@@ -1934,6 +1980,42 @@ __device__ inline void applyPagedKVScaleToGemm0Acc(
             }
         }
     }
+}
+
+__device__ inline float computePagedKVScaleTileMax_sync(
+    uint32_t                                                   warpRank,
+    float const* __restrict__                                  scaleCache,
+    Vec<KVCachePageIndex, SharedMem::nbPagesPerTile> const&    pages,
+    uint32_t                                                   idxTile,
+    uint32_t                                                   idxHeadGrp,
+    uint32_t                                                   nbKHeads,
+    float (&scaleScratch)[gemm0NbWarps],
+    CtaBarrier&                                                warpGrpBar) {
+    if (scaleCache == nullptr) {
+        return 1.f;
+    }
+
+    uint32_t const lane = laneId();
+    float partialMax = threadIdx.x < gemm0CtaTileNbTokens ?
+        loadPagedKVScale(scaleCache, pages, idxTile, threadIdx.x, idxHeadGrp, nbKHeads) :
+        0.f;
+#pragma unroll
+    for (uint32_t xorMask = 16; xorMask > 0; xorMask /= 2) {
+        partialMax = fmaxf(partialMax, __shfl_xor_sync(~0U, partialMax, xorMask));
+    }
+    if (lane == 0) {
+        scaleScratch[warpRank] = partialMax;
+    }
+    warpGrpBar.arrive_and_wait();
+
+    float tileMax = lane < gemm0NbWarps ? scaleScratch[lane] : 0.f;
+#pragma unroll
+    for (uint32_t xorMask = 16; xorMask > 0; xorMask /= 2) {
+        tileMax = fmaxf(tileMax, __shfl_xor_sync(~0U, tileMax, xorMask));
+    }
+    tileMax = __shfl_sync(~0U, tileMax, 0);
+    warpGrpBar.arrive_and_wait();
+    return fmaxf(tileMax, 1e-20f);
 }
 #endif
 
@@ -2441,6 +2523,22 @@ __device__ inline void rescaleGemm1AccForNewColMax_sync(uint32_t           warpR
         storeShmColWiseVecNoDup(shmAccColSum, accColSum);
     }
     gemm1WarpGrpBar.arrive_and_wait();
+}
+
+__device__ inline void scaleAndAccumulateGemm1Acc(Gemm1Acc& dst, Gemm1Acc const& src, float scale) {
+#pragma unroll
+    for (uint32_t m = 0; m < Gemm1Acc::rows; m++) {
+#pragma unroll
+        for (uint32_t n = 0; n < Gemm1Acc::cols; n++) {
+#pragma unroll
+            for (uint32_t i = 0; i < GmmaAccCoreMat::rows; i++) {
+#pragma unroll
+                for (uint32_t j = 0; j < GmmaAccCoreMat::cols; j++) {
+                    dst(m, n)(i, j) += src(m, n)(i, j) * scale;
+                }
+            }
+        }
+    }
 }
 #else
 __device__ inline void rescaleGemm1AccForNewRowMax_sync(uint32_t           warpRank,
@@ -3061,6 +3159,11 @@ void XQA_FUNC_SM90(cudaDeviceProp const& prop,
                                prop.multiProcessorCount / (divUp(qSeqLen, inputTokensPerCta) * batchSize * nbKHeads)),
             divUp(maxSeqLen, gemm0CtaTileNbTokens));
 #else
+        if (kScaleCache != nullptr && vScaleCache != nullptr) {
+            // Keep FP8 per-token/head V scales tile-local. The original persistent CTA path can mix multiple
+            // scale-normalized tiles in one accumulator, which is not accurate enough for realistic amax/448 scales.
+            return divUp(maxSeqLen, gemm0CtaTileNbTokens);
+        }
         float const factor = mha::min<float>(
             0.75f,
             mha::max<float>(0.25f,

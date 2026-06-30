@@ -5,9 +5,6 @@ from typing import Any, Optional, Type
 import torch
 
 from rtp_llm.models_py.modules.factory.attention import common
-from rtp_llm.models_py.modules.factory.attention.cuda_impl.flashinfer_rotary_emb import (
-    MhaRotaryEmbeddingOp,
-)
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.kv_cache_write_op import (
     KVCacheWriteOp,
 )
@@ -23,6 +20,7 @@ from rtp_llm.ops import (
 )
 from rtp_llm.ops.compute_ops import (
     FusedRopeKVCacheDecodeOp,
+    FusedRopeKVCachePrefillOpQKVOut,
     LayerKVCache,
     PyAttentionInputs,
     XQAAttnOp,
@@ -85,10 +83,15 @@ class XQAImpl(FMHAImplBase):
         self.fmha_impl = XQAAttnOp(attn_configs)
         if self.use_fp8_per_token_head:
             self.rope_kvcache_impl = None
-            self.rope_impl = (
-                None
-                if attn_configs.rope_config.style == RopeStyle.No
-                else MhaRotaryEmbeddingOp(attn_configs)
+            # Apply RoPE through the C++ fused-rope kernel (rope-only, no cache write)
+            # so that MRoPE + partial-rotary models (e.g. Qwen3.5) are handled exactly
+            # like the per-tensor path. The FP8 per-token-head cache write is done
+            # separately by KVCacheWriteOp.
+            self.fused_rope_impl = (
+                FusedRopeKVCachePrefillOpQKVOut(attn_configs)
+                if self.need_rope_kv_cache
+                and attn_configs.rope_config.style != RopeStyle.No
+                else None
             )
             self.kv_cache_write_op = KVCacheWriteOp(
                 num_kv_heads=attn_configs.kv_head_num,
@@ -99,13 +102,14 @@ class XQAImpl(FMHAImplBase):
             )
         else:
             self.rope_kvcache_impl = FusedRopeKVCacheDecodeOp(attn_configs)
-            self.rope_impl = None
+            self.fused_rope_impl = None
             self.kv_cache_write_op = None
 
         self.attn_inputs = attn_inputs
 
         self.fmha_params = self.fmha_impl.prepare(attn_inputs)
         if self.use_fp8_per_token_head:
+            # FlashInferMlaAttnParams carries the slot mapping used by KVCacheWriteOp.
             self.rope_params = rtp_llm_ops.FlashInferMlaAttnParams()
             self.rope_params.fill_params(
                 attn_inputs.prefix_lengths,
@@ -114,9 +118,12 @@ class XQAImpl(FMHAImplBase):
                 attn_inputs.kv_cache_kernel_block_id_host,
                 attn_configs.kernel_tokens_per_block,
             )
-            if self.rope_impl is not None:
-                self.rope_impl.set_params(self.rope_params)
             self.kv_cache_write_op.set_params(self.rope_params)
+            self.fused_rope_params = (
+                None
+                if self.fused_rope_impl is None
+                else self.fused_rope_impl.prepare(attn_inputs)
+            )
         else:
             self.rope_params = self.rope_kvcache_impl.prepare(attn_inputs)
         self.write_cache_store_impl = common.create_write_cache_store_impl(attn_inputs)
@@ -159,11 +166,11 @@ class XQAImpl(FMHAImplBase):
             assert (
                 kv_cache is not None
             ), "kv_cache is required for FP8 per-token-head XQA"
-            if self.need_rope_kv_cache and self.rope_impl is not None:
-                q, k, v = self.rope_impl.forward(qkv)
-                q = q.contiguous()
-                k = k.contiguous()
-                v = v.contiguous()
+            if self.need_rope_kv_cache and self.fused_rope_impl is not None:
+                roped_qkv = self.fused_rope_impl.forward(
+                    qkv, None, self.fused_rope_params
+                )
+                q, k, v = self._split_qkv(roped_qkv)
             else:
                 q, k, v = self._split_qkv(qkv)
             assert self.kv_cache_write_op is not None
@@ -190,6 +197,15 @@ class XQAImpl(FMHAImplBase):
                 self.attn_configs.kernel_tokens_per_block,
                 True,
             )
+            if self.fused_rope_impl is not None:
+                new_rope_params = self.fused_rope_impl.prepare(attn_inputs)
+                if self.fused_rope_params is not None:
+                    common.copy_kv_cache_offset(
+                        self.fused_rope_params.kv_cache_offset,
+                        new_rope_params.kv_cache_offset,
+                    )
+                else:
+                    self.fused_rope_params = new_rope_params
             new_fmha_params = self.fmha_impl.prepare(attn_inputs)
             common.copy_kv_cache_offset(
                 self.fmha_params.kv_cache_offset,

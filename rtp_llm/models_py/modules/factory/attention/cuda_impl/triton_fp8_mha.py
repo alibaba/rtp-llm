@@ -6,9 +6,6 @@ import torch
 import triton
 
 from rtp_llm.models_py.modules.factory.attention import common
-from rtp_llm.models_py.modules.factory.attention.cuda_impl.flashinfer_rotary_emb import (
-    MhaRotaryEmbeddingOp,
-)
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.kv_cache_write_op import (
     KVCacheWriteOp,
 )
@@ -22,7 +19,12 @@ from rtp_llm.models_py.modules.factory.attention.cuda_impl.triton_fp8_mha_kernel
 )
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import FMHAImplBase
 from rtp_llm.ops import AttentionConfigs, KvCacheDataType, ParallelismConfig, RopeStyle
-from rtp_llm.ops.compute_ops import LayerKVCache, PyAttentionInputs, rtp_llm_ops
+from rtp_llm.ops.compute_ops import (
+    FusedRopeKVCachePrefillOpQKVOut,
+    LayerKVCache,
+    PyAttentionInputs,
+    rtp_llm_ops,
+)
 
 
 def _debug_sync(stage: str) -> None:
@@ -319,10 +321,13 @@ class TritonFp8PagedPrefillImpl(FMHAImplBase):
         self.attn_inputs = attn_inputs
         self.fmha_impl = TritonFp8PagedMHAOp(attn_configs)
         self.flashinfer_prefill_impl = PyFlashinferPrefillAttnOp(attn_configs)
-        self.rope_impl = (
-            None
-            if attn_configs.rope_config.style == RopeStyle.No
-            else MhaRotaryEmbeddingOp(attn_configs)
+        # RoPE via the C++ fused-rope kernel (rope-only, no cache write) so that
+        # MRoPE + partial-rotary models are handled exactly like the per-tensor path.
+        self.fused_rope_impl = (
+            FusedRopeKVCachePrefillOpQKVOut(attn_configs)
+            if self.need_rope_kv_cache
+            and attn_configs.rope_config.style != RopeStyle.No
+            else None
         )
         self.kv_cache_write_op = KVCacheWriteOp(
             num_kv_heads=attn_configs.kv_head_num,
@@ -340,11 +345,14 @@ class TritonFp8PagedPrefillImpl(FMHAImplBase):
             attn_inputs.kv_cache_kernel_block_id_host,
             attn_configs.kernel_tokens_per_block,
         )
-        if self.rope_impl is not None:
-            self.rope_impl.set_params(self.params)
         self.kv_cache_write_op.set_params(self.params)
         self.flashinfer_prefill_impl.set_params(self.params)
         self.flashinfer_prefill_impl.prepare(attn_inputs)
+        self.fused_rope_params = (
+            None
+            if self.fused_rope_impl is None
+            else self.fused_rope_impl.prepare(attn_inputs)
+        )
         self.write_cache_store_impl = common.create_write_cache_store_impl(attn_inputs)
 
     def _split_qkv(
@@ -410,6 +418,8 @@ class TritonFp8PagedPrefillImpl(FMHAImplBase):
             True,
         )
         self.flashinfer_prefill_impl.prepare(attn_inputs)
+        if self.fused_rope_impl is not None:
+            self.fused_rope_params = self.fused_rope_impl.prepare(attn_inputs)
 
     def forward(
         self,
@@ -421,10 +431,13 @@ class TritonFp8PagedPrefillImpl(FMHAImplBase):
             kv_cache is not None
         ), "kv_cache is required for Triton FP8 paged attention"
         if self.need_rope_kv_cache:
-            if self.rope_impl is None:
+            if self.fused_rope_impl is None:
                 q, k, v = self._split_qkv(qkv)
             else:
-                q, k, v = self.rope_impl.forward(qkv)
+                roped_qkv = self.fused_rope_impl.forward(
+                    qkv, None, self.fused_rope_params
+                )
+                q, k, v = self._split_qkv(roped_qkv)
                 _debug_sync("prefill_rope")
             self.kv_cache_write_op.forward(k, v, kv_cache)
             _debug_sync("prefill_kv_write")
@@ -458,10 +471,13 @@ class TritonFp8PagedDecodeImpl(FMHAImplBase):
         self.attn_configs = attn_configs
         self.attn_inputs = attn_inputs
         self.fmha_impl = TritonFp8PagedMHAOp(attn_configs)
-        self.rope_impl = (
-            None
-            if attn_configs.rope_config.style == RopeStyle.No
-            else MhaRotaryEmbeddingOp(attn_configs)
+        # RoPE via the C++ fused-rope kernel (rope-only, no cache write) so that
+        # MRoPE + partial-rotary models are handled exactly like the per-tensor path.
+        self.fused_rope_impl = (
+            FusedRopeKVCachePrefillOpQKVOut(attn_configs)
+            if self.need_rope_kv_cache
+            and attn_configs.rope_config.style != RopeStyle.No
+            else None
         )
         self.kv_cache_write_op = KVCacheWriteOp(
             num_kv_heads=attn_configs.kv_head_num,
@@ -479,9 +495,12 @@ class TritonFp8PagedDecodeImpl(FMHAImplBase):
             attn_inputs.kv_cache_kernel_block_id_host,
             attn_configs.kernel_tokens_per_block,
         )
-        if self.rope_impl is not None:
-            self.rope_impl.set_params(self.params)
         self.kv_cache_write_op.set_params(self.params)
+        self.fused_rope_params = (
+            None
+            if self.fused_rope_impl is None
+            else self.fused_rope_impl.prepare(attn_inputs)
+        )
         self.write_cache_store_impl = common.create_write_cache_store_impl(attn_inputs)
 
     def _split_qkv(
@@ -521,6 +540,8 @@ class TritonFp8PagedDecodeImpl(FMHAImplBase):
             self.attn_configs.kernel_tokens_per_block,
             True,
         )
+        if self.fused_rope_impl is not None:
+            self.fused_rope_params = self.fused_rope_impl.prepare(attn_inputs)
 
     def forward(
         self,
@@ -532,10 +553,13 @@ class TritonFp8PagedDecodeImpl(FMHAImplBase):
             kv_cache is not None
         ), "kv_cache is required for Triton FP8 paged attention"
         if self.need_rope_kv_cache:
-            if self.rope_impl is None:
+            if self.fused_rope_impl is None:
                 q, k, v = self._split_qkv(qkv)
             else:
-                q, k, v = self.rope_impl.forward(qkv)
+                roped_qkv = self.fused_rope_impl.forward(
+                    qkv, None, self.fused_rope_params
+                )
+                q, k, v = self._split_qkv(roped_qkv)
                 _debug_sync("decode_rope")
             self.kv_cache_write_op.forward(k, v, kv_cache)
             _debug_sync("decode_kv_write")

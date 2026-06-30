@@ -7,6 +7,9 @@ import triton
 from attention_ref import compute_flashinfer_decode_reference
 from base_attention_test import BaseAttentionTest, compare_tensors
 
+from rtp_llm.models_py.modules.factory.attention.cuda_impl.kv_cache_write_op import (
+    KVCacheWriteOp,
+)
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.xqa import XQAImpl
 from rtp_llm.ops import KvCacheDataType
 from rtp_llm.ops.compute_ops import (
@@ -14,6 +17,7 @@ from rtp_llm.ops.compute_ops import (
     PyAttentionInputs,
     XQAAttnOp,
     XQAParams,
+    rtp_llm_ops,
 )
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
@@ -401,6 +405,165 @@ class TestXQAAttnOp(BaseAttentionTest):
             flush=True,
         )
 
+    def test_fp8_per_token_head_qwen35_no_reuse_write_then_decode(self):
+        """Verify no-reuse prefill writes multi-block FP8 PTH cache for XQA decode."""
+        batch_size = 1
+        sequence_lengths = [2049]
+        head_num = 16
+        head_num_kv = 4
+        size_per_head = 256
+        seq_size_per_block = 1024
+
+        config = self._create_config(
+            head_num=head_num,
+            head_num_kv=head_num_kv,
+            size_per_head=size_per_head,
+            seq_size_per_block=seq_size_per_block,
+            data_type="bf16",
+        )
+        config.attn_configs.need_rope_kv_cache = False
+        config.attn_configs.kv_cache_dtype = KvCacheDataType.FP8
+        config.attn_configs.fp8_kv_cache_scale_mode = "per_token_head"
+
+        prefill_inputs = self._create_prefill_attention_inputs(
+            batch_size, sequence_lengths, config.seq_size_per_block, torch.bfloat16
+        )
+        params = rtp_llm_ops.FlashInferMlaAttnParams()
+        params.fill_params(
+            prefill_inputs.prefix_lengths,
+            prefill_inputs.sequence_lengths,
+            prefill_inputs.input_lengths,
+            prefill_inputs.kv_cache_kernel_block_id_host,
+            config.seq_size_per_block,
+        )
+
+        total_tokens = sum(sequence_lengths)
+        total_blocks = self._calculate_total_blocks(
+            sequence_lengths, config.seq_size_per_block
+        )
+        kv_cache = LayerKVCache()
+        kv_cache.kv_cache_base = torch.zeros(
+            total_blocks,
+            2,
+            head_num_kv,
+            seq_size_per_block,
+            size_per_head,
+            dtype=torch.float8_e4m3fn,
+            device=self.device,
+        )
+        kv_cache.kv_scale_base = torch.full(
+            (total_blocks, 2 * head_num_kv * seq_size_per_block),
+            1e-6,
+            dtype=torch.float32,
+            device=self.device,
+        )
+        k = torch.randn(
+            total_tokens,
+            head_num_kv,
+            size_per_head,
+            dtype=torch.bfloat16,
+            device=self.device,
+        )
+        v = torch.randn_like(k)
+
+        write_op = KVCacheWriteOp(
+            num_kv_heads=head_num_kv,
+            head_size=size_per_head,
+            token_per_block=seq_size_per_block,
+            fp8_kv_cache_scale_mode="per_token_head",
+            kv_cache_dtype=KvCacheDataType.FP8,
+        )
+        write_op.set_params(params)
+        write_op.forward(k, v, kv_cache)
+        torch.cuda.synchronize()
+
+        block_id_list = self._generate_block_id_list(
+            prefill_inputs, sequence_lengths, config.seq_size_per_block
+        )
+        sample_positions = [0, 1023, 1024, 2048]
+        for pos in sample_positions:
+            block_id = block_id_list[0][pos // seq_size_per_block]
+            slot = pos % seq_size_per_block
+            head_offsets = (
+                torch.arange(head_num_kv, device=self.device) * seq_size_per_block
+                + slot
+            )
+            k_scale = kv_cache.kv_scale_base[block_id, head_offsets]
+            v_scale = kv_cache.kv_scale_base[
+                block_id, head_num_kv * seq_size_per_block + head_offsets
+            ]
+            expected_k_scale = torch.clamp(
+                k[pos].float().abs().amax(dim=-1) / 448.0, min=1e-6
+            )
+            expected_v_scale = torch.clamp(
+                v[pos].float().abs().amax(dim=-1) / 448.0, min=1e-6
+            )
+            compare_tensors(
+                k_scale,
+                expected_k_scale,
+                rtol=1e-5,
+                atol=1e-7,
+                name=f"Qwen35 no-reuse written K scale pos={pos}",
+            )
+            compare_tensors(
+                v_scale,
+                expected_v_scale,
+                rtol=1e-5,
+                atol=1e-7,
+                name=f"Qwen35 no-reuse written V scale pos={pos}",
+            )
+            written_k = (
+                kv_cache.kv_cache_base[block_id, 0, :, slot, :].float()
+                * k_scale[:, None]
+            )
+            written_v = (
+                kv_cache.kv_cache_base[block_id, 1, :, slot, :].float()
+                * v_scale[:, None]
+            )
+            compare_tensors(
+                written_k,
+                k[pos].float(),
+                rtol=8e-2,
+                atol=8e-2,
+                name=f"Qwen35 no-reuse written K cache pos={pos}",
+            )
+            compare_tensors(
+                written_v,
+                v[pos].float(),
+                rtol=8e-2,
+                atol=8e-2,
+                name=f"Qwen35 no-reuse written V cache pos={pos}",
+            )
+
+        decode_inputs = self._create_attention_inputs(
+            batch_size, sequence_lengths, config.seq_size_per_block
+        )
+        attn_op = XQAAttnOp(config.attn_configs)
+        q = self._create_query_tensor(
+            batch_size, head_num, size_per_head, dtype=torch.bfloat16
+        )
+        params_base = attn_op.prepare(decode_inputs)
+        params = XQAParams() if not isinstance(params_base, XQAParams) else params_base
+        output = attn_op.forward(q, kv_cache, params).reshape(
+            batch_size, head_num, size_per_head
+        )
+        ref = self._compute_fp8_per_token_head_reference(
+            q,
+            kv_cache.kv_cache_base[:, 0, :, :, :],
+            kv_cache.kv_cache_base[:, 1, :, :, :],
+            kv_cache.kv_scale_base,
+            sequence_lengths,
+            block_id_list,
+            config.seq_size_per_block,
+        )
+        compare_tensors(
+            output,
+            ref,
+            rtol=3e-2,
+            atol=3e-2,
+            name="XQA FP8 per-token-head qwen35 no-reuse write+decode output",
+        )
+
     def test_fp8_per_token_head_qwen25_group7_head64_correctness(self):
         """Verify Qwen2.5-style GQA shape: group_size=7, head_dim=64."""
         batch_size = 2
@@ -418,6 +581,7 @@ class TestXQAAttnOp(BaseAttentionTest):
             data_type="bf16",
         )
         config.attn_configs.kv_cache_dtype = KvCacheDataType.FP8
+        config.attn_configs.fp8_kv_cache_scale_mode = "per_token_head"
 
         attn_inputs = self._create_attention_inputs(
             batch_size, sequence_lengths, config.seq_size_per_block
@@ -631,6 +795,7 @@ class TestXQAAttnOp(BaseAttentionTest):
         )
         config.attn_configs.need_rope_kv_cache = False
         config.attn_configs.kv_cache_dtype = KvCacheDataType.FP8
+        config.attn_configs.fp8_kv_cache_scale_mode = "per_token_head"
 
         attn_inputs = self._create_attention_inputs(
             batch_size, sequence_lengths, config.seq_size_per_block
