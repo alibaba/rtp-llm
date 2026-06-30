@@ -26,6 +26,7 @@ RecommendationLogitsProcessor::fromGenerateInput(std::shared_ptr<GenerateInput> 
     }
 
     const bool is_beam_search = config->hasNumBeams() || config->num_return_sequences > 1;
+    const bool enable_cross_seq_ban = config->enable_cross_sequence_ban;
     // 若为空,think_done 初始为 true,Processor 行为等同历史版本(从首个 token 起累 combo)。
     const std::vector<int>& end_think_token_ids = config->end_think_token_ids;
 
@@ -36,7 +37,8 @@ RecommendationLogitsProcessor::fromGenerateInput(std::shared_ptr<GenerateInput> 
                                       /*current_output_length=*/0,
                                       is_beam_search,
                                       banned_combos,
-                                      end_think_token_ids);
+                                      end_think_token_ids,
+                                      enable_cross_seq_ban);
         processor_ptr->infos_.push_back(std::move(info));
     }
     return processor_ptr;
@@ -142,7 +144,7 @@ void RecommendationLogitsProcessor::advanceOneToken(StreamRecommendationInfo& in
         // 本次 token 即 combo 的最后一位:形成完整 combo 并加入去重集合
         std::vector<int> full_combo = info.current_prefix;
         full_combo.push_back(token_id);
-        info.banned_combos.insert(std::move(full_combo));
+        info.banned_combos.insert(full_combo);
         info.current_prefix.clear();
         info.pos_in_combo = 0;
     }
@@ -173,6 +175,17 @@ void RecommendationLogitsProcessor::updateStatus(const torch::Tensor& new_tokens
         }
 
         info.current_output_length += num_new_tokens;
+    }
+
+    // 跨序列广播:将所有序列的 banned_combos 合并为统一集合,确保多序列输出互不重复
+    if (size() > 1 && infos_[0].enable_cross_sequence_ban) {
+        std::set<std::vector<int>> merged;
+        for (size_t i = 0; i < size(); ++i) {
+            merged.insert(infos_[i].banned_combos.begin(), infos_[i].banned_combos.end());
+        }
+        for (size_t i = 0; i < size(); ++i) {
+            infos_[i].banned_combos = merged;
+        }
     }
 }
 

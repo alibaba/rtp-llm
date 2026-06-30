@@ -16,10 +16,11 @@ namespace rtp_llm {
 // 对 qwen3 等会默认输出 <think>\n\n</think>\n\n 占位的模型,若 end_think_token_ids
 // 非空,则先按该序列跳过 think prelude,跳过完成前的 token 不进入 combo 前缀。
 struct StreamRecommendationInfo {
-    int32_t combo_token_size      = 0;
-    int32_t input_length          = 0;
-    int32_t current_output_length = 0;
-    bool    is_beam_search        = false;
+    int32_t combo_token_size          = 0;
+    int32_t input_length              = 0;
+    int32_t current_output_length     = 0;
+    bool    is_beam_search            = false;
+    bool    enable_cross_sequence_ban = false;
 
     // 当前正在生成 combo 内的位置,取值 [0, combo_token_size-1]
     int32_t pos_in_combo = 0;
@@ -41,27 +42,30 @@ struct StreamRecommendationInfo {
                              int32_t                           current_output_length,
                              bool                              is_beam_search,
                              const std::set<std::vector<int>>& banned_combos,
-                             const std::vector<int>&           end_think_token_ids = {}):
+                             const std::vector<int>&           end_think_token_ids = {},
+                             bool                              enable_cross_sequence_ban = false):
         combo_token_size(combo_token_size),
         input_length(input_length),
         current_output_length(current_output_length),
         is_beam_search(is_beam_search),
+        enable_cross_sequence_ban(enable_cross_sequence_ban),
         banned_combos(banned_combos),
         end_think_token_ids(end_think_token_ids),
         think_done(end_think_token_ids.empty()) {}
 
     StreamRecommendationInfo copy() const {
         StreamRecommendationInfo info;
-        info.combo_token_size      = combo_token_size;
-        info.input_length          = input_length;
-        info.current_output_length = current_output_length;
-        info.is_beam_search        = is_beam_search;
-        info.pos_in_combo          = pos_in_combo;
-        info.current_prefix        = current_prefix;
-        info.banned_combos         = banned_combos;
-        info.end_think_token_ids   = end_think_token_ids;
-        info.think_done            = think_done;
-        info.end_think_match_pos   = end_think_match_pos;
+        info.combo_token_size          = combo_token_size;
+        info.input_length              = input_length;
+        info.current_output_length     = current_output_length;
+        info.is_beam_search            = is_beam_search;
+        info.enable_cross_sequence_ban = enable_cross_sequence_ban;
+        info.pos_in_combo              = pos_in_combo;
+        info.current_prefix            = current_prefix;
+        info.banned_combos             = banned_combos;
+        info.end_think_token_ids       = end_think_token_ids;
+        info.think_done                = think_done;
+        info.end_think_match_pos       = end_think_match_pos;
         return info;
     }
 };

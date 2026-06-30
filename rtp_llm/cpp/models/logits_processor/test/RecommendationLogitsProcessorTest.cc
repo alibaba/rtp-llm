@@ -198,4 +198,57 @@ TEST_F(RecommendationLogitsProcessorTest, testFromGenerateInputEnabled) {
     }
 }
 
+// 场景 8：跨序列去重 —— 多序列生成时广播 banned_combos
+TEST_F(RecommendationLogitsProcessorTest, testCrossSequenceBanBroadcast) {
+    // 模拟 2 条序列，combo_token_size=3，开启跨序列去重
+    std::vector<StreamRecommendationInfo> infos;
+    std::set<std::vector<int>> empty_set;
+    infos.push_back(StreamRecommendationInfo(3, 0, 0, true, empty_set, {}, true));
+    infos.push_back(StreamRecommendationInfo(3, 0, 0, true, empty_set, {}, true));
+    auto processor = std::make_shared<RecommendationLogitsProcessor>(infos);
+
+    // 序列 0 生成 combo (1,2,3)，序列 1 生成 combo (4,5,6)
+    auto step = [&](int tok0, int tok1) {
+        auto t = torch::tensor({{tok0}, {tok1}}, torch::kInt32);
+        processor->updateStatus(t, 1);
+    };
+    step(1, 4);  // pos_in_combo: 0 → 1
+    step(2, 5);  // pos_in_combo: 1 → 2
+    step(3, 6);  // pos_in_combo: 2 → 0 (combo 完成)
+
+    // 跨序列广播后，两条序列都应有 {(1,2,3), (4,5,6)}
+    ASSERT_EQ(2u, processor->infos()[0].banned_combos.size());
+    ASSERT_EQ(2u, processor->infos()[1].banned_combos.size());
+    EXPECT_TRUE(processor->infos()[0].banned_combos.count({1, 2, 3}));
+    EXPECT_TRUE(processor->infos()[0].banned_combos.count({4, 5, 6}));
+    EXPECT_TRUE(processor->infos()[1].banned_combos.count({1, 2, 3}));
+    EXPECT_TRUE(processor->infos()[1].banned_combos.count({4, 5, 6}));
+}
+
+// 场景 9：关闭跨序列去重时，各序列独立维护 banned_combos
+TEST_F(RecommendationLogitsProcessorTest, testCrossSequenceBanDisabled) {
+    std::vector<StreamRecommendationInfo> infos;
+    std::set<std::vector<int>> empty_set;
+    // enable_cross_sequence_ban = false
+    infos.push_back(StreamRecommendationInfo(3, 0, 0, true, empty_set, {}, false));
+    infos.push_back(StreamRecommendationInfo(3, 0, 0, true, empty_set, {}, false));
+    auto processor = std::make_shared<RecommendationLogitsProcessor>(infos);
+
+    auto step = [&](int tok0, int tok1) {
+        auto t = torch::tensor({{tok0}, {tok1}}, torch::kInt32);
+        processor->updateStatus(t, 1);
+    };
+    step(1, 4);
+    step(2, 5);
+    step(3, 6);
+
+    // 关闭跨序列去重时，各序列只有自己的 combo
+    ASSERT_EQ(1u, processor->infos()[0].banned_combos.size());
+    ASSERT_EQ(1u, processor->infos()[1].banned_combos.size());
+    EXPECT_TRUE(processor->infos()[0].banned_combos.count({1, 2, 3}));
+    EXPECT_FALSE(processor->infos()[0].banned_combos.count({4, 5, 6}));
+    EXPECT_TRUE(processor->infos()[1].banned_combos.count({4, 5, 6}));
+    EXPECT_FALSE(processor->infos()[1].banned_combos.count({1, 2, 3}));
+}
+
 }  // namespace rtp_llm

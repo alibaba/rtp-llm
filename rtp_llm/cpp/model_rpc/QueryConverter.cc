@@ -108,6 +108,7 @@ std::shared_ptr<GenerateConfig> QueryConverter::transGenerateConfig(const Genera
 
     // 生成式推荐：组合 token 约束
     generate_config->combo_token_size = config_proto->combo_token_size();
+    generate_config->enable_cross_sequence_ban = config_proto->enable_cross_sequence_ban();
     for (const auto& combo_proto : config_proto->banned_combo_token_ids().rows()) {
         std::vector<int> combo;
         combo.reserve(combo_proto.values_size());

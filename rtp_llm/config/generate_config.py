@@ -81,6 +81,9 @@ class GenerateConfig(BaseModel):
     combo_token_size: int = 0
     banned_combo_token_ids: List[List[int]] = []
     auto_parse_banned_combo: bool = False
+    # 跨序列 combo 去重：当 num_return_sequences > 1 时，任一序列生成完整 combo 后自动广播到
+    # 其他序列的 banned_combos，确保多条序列输出互不重复。默认关闭。
+    enable_cross_sequence_ban: bool = False
     random_seed: Optional[Union[List[int], int]] = None
     top_p_decay: Optional[Union[List[float], float]] = None
     top_p_min: Optional[Union[List[float], float]] = None
