@@ -250,13 +250,11 @@ public:
     // 无锁版本的 reportError，供已持有 mutex_ 的内部路径（dispatch/process/acceptTokens）使用，
     // 避免在非递归 mutex 上自死锁。语义上等价于 reportEventWithoutLock(Error, code, msg)，
     // 提供独立 API 仅为调用方意图更清晰（对应 reportError vs reportEvent 的命名分工）。
-    void reportErrorWithoutLock(ErrorCode error_code, const std::string& error_msg);
-    bool hasEvent(StreamEvents::EventType event) const;
-    // No-lock variant for callers already holding mutex_.
-    bool         hasEventWithoutLock(StreamEvents::EventType event) const;
+    void         reportErrorWithoutLock(ErrorCode error_code, const std::string& error_msg);
+    bool         hasEvent(StreamEvents::EventType event) const;
     virtual bool hasError() const;
-    ErrorInfo   statusInfo();
-    std::string stopReason();
+    ErrorInfo    statusInfo();
+    std::string  stopReason();
 
     void        setReserveStep(size_t reserve_step);
     StreamState moveToNext();
@@ -546,16 +544,28 @@ public:
     TimeInfo getTimeInfo();
     bool     queryPdSep() const;
 
+private:
+    struct TokenCommitResult {
+        bool ok                       = false;
+        int  committed_num_new_tokens = 0;
+        int  error_token_id           = 0;
+    };
+
+    TokenCommitResult commitTokenIdsWithoutLock(const torch::Tensor& new_tokens, int num_new_tokens);
+    void              reportOutOfVocabErrorWithoutLock(int error_token_id);
+
 protected:
     // Caller must already hold mutex_; both implementations use reportErrorWithoutLock.
-    bool hasStatefulLogitsProcessor() const;
+    bool    hasStatefulLogitsProcessor() const;
     int64_t processorAcceptedTokenLen() const;
-    void updateLogitProcessorMultiSeqStatus(const torch::Tensor& src_batch_indices);
-    void updateLogitProcessorStatus(const StreamUpdateInfo& update_info);
-    void updateLogitProcessorStatus(const torch::Tensor& new_tokens,
-                                    int32_t              num_new_tokens,
-                                    const torch::Tensor& src_batch_indices,
-                                    bool                 stateful_only);
+    void    updateLogitProcessorMultiSeqStatus(const torch::Tensor& src_batch_indices);
+    void    updateLogitProcessorStatus(const StreamUpdateInfo& update_info);
+    void    updateLogitProcessorStatus(const torch::Tensor& new_tokens,
+                                       int32_t              num_new_tokens,
+                                       const torch::Tensor& src_batch_indices,
+                                       bool                 stateful_only);
+    // Caller must already hold mutex_. Routes the first processor error to this stream.
+    void pollLogitsProcessorErrors();
     void validateStatefulLogitsProcessorState();
     void fillSubGenerateStatus(StreamState state);
     void resizeSubGenerateStatus(size_t new_size);

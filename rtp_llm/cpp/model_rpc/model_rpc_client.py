@@ -1,7 +1,6 @@
 import functools
-import json
 import logging
-from typing import Any, AsyncGenerator, Mapping, Optional, Union
+from typing import Any, AsyncGenerator, Optional, Union
 
 import grpc
 from grpc import StatusCode
@@ -34,15 +33,6 @@ from rtp_llm.utils.grpc_util import (
 )
 
 MAX_GRPC_TIMEOUT_SECONDS = 3600
-
-_JSON_PB_KW = {"ensure_ascii": False, "separators": (",", ":")}
-
-
-def _pb_string_value_for_json_field(value: Union[str, Mapping[str, Any]]) -> str:
-    """Protobuf StringValue fields expect a string; GenerateConfig may use dict (e.g. OpenAI response_format)."""
-    if isinstance(value, str):
-        return value
-    return json.dumps(value, **_JSON_PB_KW)
 
 
 class StreamState:
@@ -113,15 +103,11 @@ def trans_input(input_py: GenerateInput):
     trans_option(generate_config_pb, input_py.generate_config, "top_p_min")
     trans_option(generate_config_pb, input_py.generate_config, "top_p_reset_ids")
     if input_py.generate_config.json_schema is not None:
-        generate_config_pb.json_schema.value = _pb_string_value_for_json_field(
-            input_py.generate_config.json_schema
-        )
+        generate_config_pb.json_schema.value = input_py.generate_config.json_schema
     trans_option(generate_config_pb, input_py.generate_config, "regex")
     trans_option(generate_config_pb, input_py.generate_config, "ebnf")
     if input_py.generate_config.structural_tag is not None:
-        generate_config_pb.structural_tag.value = _pb_string_value_for_json_field(
-            input_py.generate_config.structural_tag
-        )
+        generate_config_pb.structural_tag.value = input_py.generate_config.structural_tag
     trans_option(generate_config_pb, input_py.generate_config, "adapter_name")
     trans_option_cast(
         generate_config_pb, input_py.generate_config, "task_id", functools.partial(str)
@@ -193,9 +179,7 @@ def trans_input(input_py: GenerateInput):
     generate_config_pb.combo_token_size = input_py.generate_config.combo_token_size
     for i in range(len(input_py.generate_config.banned_combo_token_ids)):
         banned_combo = generate_config_pb.banned_combo_token_ids.rows.add()
-        banned_combo.values.extend(
-            input_py.generate_config.banned_combo_token_ids[i]
-        )
+        banned_combo.values.extend(input_py.generate_config.banned_combo_token_ids[i])
 
     for role_addr in input_py.generate_config.role_addrs:
         role_addr_pb = RoleAddrPB()
@@ -462,14 +446,17 @@ class ModelRpcClient(object):
         if "grpc-status-details-bin" in metadata and error_details.ParseFromString(
             metadata["grpc-status-details-bin"]
         ):
+            # Unknown C++ codes degrade to UNKNOWN_ERROR rather than masking the real failure with ValueError.
+            try:
+                exc_type = ExceptionType(error_details.error_code)
+            except ValueError:
+                exc_type = ExceptionType.UNKNOWN_ERROR
             logging.error(
                 f"{request_desc} RPC failed: "
                 f"{e.code()}, {e.details()}, detail error code is "
-                f"{ExceptionType.from_value(error_details.error_code)}"
+                f"{exc_type.name}({error_details.error_code})"
             )
-            raise FtRuntimeException(
-                ExceptionType(error_details.error_code), error_details.error_message
-            )
+            raise FtRuntimeException(exc_type, error_details.error_message)
         else:
             logging.error(
                 f"{request_desc} RPC failed: "

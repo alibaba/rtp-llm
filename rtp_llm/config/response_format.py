@@ -4,9 +4,7 @@ from pydantic import BaseModel, ConfigDict, model_validator
 
 
 class ResponseFormatJSONSchema(BaseModel):
-    # `schema` shadows BaseModel.schema() in pydantic v1 and triggers a v2
-    # protected_namespaces UserWarning. The OpenAI wire field is literally
-    # named "schema", so we keep the alias and silence the namespace.
+    # OpenAI wire field is literally "schema"; silence pydantic v2 protected_namespaces warning.
     model_config = ConfigDict(protected_namespaces=())
 
     name: Optional[str] = None

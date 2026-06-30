@@ -1,15 +1,14 @@
 #include "rtp_llm/cpp/models/logits_processor/ReasoningGrammarLogitsProcessor.h"
 
 #include <algorithm>
+#include <atomic>
 #include <limits>
-
-#include <dlpack/dlpack.h>
 
 #include "rtp_llm/cpp/engine_base/stream/GenerateConfig.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
 #include "rtp_llm/cpp/models/SampleInfos.h"
 #include "rtp_llm/cpp/models/logits_processor/BitmaskUtils.h"
-#include "rtp_llm/cpp/models/logits_processor/LogitsProcessorException.h"
+#include "rtp_llm/cpp/models/logits_processor/ThinkModeStateMachine.h"
 #include "rtp_llm/cpp/engine_base/grammar/RtpGrammarMatcher.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
 #include "rtp_llm/cpp/utils/Logger.h"
@@ -17,32 +16,7 @@
 namespace rtp_llm {
 namespace {
 
-constexpr int32_t kInvalidTokenId = -1;
-
-int32_t firstTokenOrInvalid(const std::vector<int>& token_ids) {
-    return token_ids.empty() ? kInvalidTokenId : token_ids.front();
-}
-
-bool isActiveThinkState(const StreamThinkInfo& info) {
-    return info.process_state == ThinkProcessState::IN_THINK || info.process_state == ThinkProcessState::CLOSING_THINK;
-}
-
-bool transitionToAfterThinkIfClosed(StreamThinkInfo& info) {
-    if (!info.dfa_ptr || !info.dfa_ptr->isFinished()) {
-        return false;
-    }
-    info.process_state = ThinkProcessState::AFTER_THINK;
-    return true;
-}
-
-bool thinkEndCloseInProgress(const StreamThinkInfo& info) {
-    return info.dfa_ptr && info.dfa_ptr->status() > 0;
-}
-
-bool budgetExhausted(const StreamThinkInfo& info, int tokens_emitted) {
-    return info.dfa_ptr && !info.end_think_token_ids.empty() && info.max_thinking_tokens > 0
-           && tokens_emitted >= info.max_thinking_tokens;
-}
+namespace tsm = ::rtp_llm::think_state_machine;
 
 int generatedTokens(const SamplerInputs& inputs, size_t batch_idx) {
     if (!inputs.input_lengths.defined() || !inputs.sequence_lengths.defined()) {
@@ -53,126 +27,129 @@ int generatedTokens(const SamplerInputs& inputs, size_t batch_idx) {
     return sequence_lengths[batch_idx] - input_lengths[batch_idx];
 }
 
-bool drainPendingForcedThinkEnd(StreamThinkInfo& info, int32_t token_id) {
-    if (info.pending_forced_think_end_token_ids.empty()
-        || info.pending_forced_think_end_token_ids.front() != token_id) {
-        return false;
+}  // namespace
+
+ThinkRouter::ThinkRouter(int              max_thinking_tokens,
+                         std::vector<int> begin_think_token_ids,
+                         std::vector<int> end_think_token_ids,
+                         int32_t          input_length,
+                         int64_t          eos_token_id):
+    eos_token_id_(eos_token_id) {
+    info_.in_think_mode         = true;
+    info_.max_thinking_tokens   = max_thinking_tokens;
+    info_.begin_think_token_ids = std::move(begin_think_token_ids);
+    info_.end_think_token_ids   = end_think_token_ids;
+    info_.input_length          = input_length;
+    info_.current_output_length = 0;
+    info_.is_beam_search        = false;
+    if (!end_think_token_ids.empty()) {
+        info_.dfa_ptr = std::make_shared<StringContainDFA<size_t, int>>(end_think_token_ids);
     }
-    info.pending_forced_think_end_token_ids.erase(info.pending_forced_think_end_token_ids.begin());
-    return true;
+    info_.process_state = info_.dfa_ptr ? ThinkProcessState::IN_THINK : ThinkProcessState::NO_THINK;
 }
 
-// One think-state decision shared by sampler and spec paths. May transition
-// info.process_state IN_THINK -> CLOSING_THINK / AFTER_THINK before returning.
-// Concretely four outcomes:
-//   - GrammarRoute   : non-think state, caller falls through to grammar mask
-//   - AllowAll       : passthrough, leave the row untouched
-//   - ForceEndToken  : forced_token must be the only allowed id
-//   - MaskBoundaries : drop begin_think + eos
-enum class ThinkAction {
-    GrammarRoute,
-    AllowAll,
-    ForceEndToken,
-    MaskBoundaries,
-};
-
-struct ThinkDecision {
-    ThinkAction action       = ThinkAction::GrammarRoute;
-    int32_t     forced_token = kInvalidTokenId;
-    int32_t     begin_token  = kInvalidTokenId;
-    int32_t     eos_token    = kInvalidTokenId;
-};
-
-ThinkDecision decideThinkMask(StreamThinkInfo& info, int tokens_emitted, int64_t eos_token_id) {
-    ThinkDecision d;
-    d.begin_token = firstTokenOrInvalid(info.begin_think_token_ids);
+// Maps the shared think state-machine decision onto the reasoning-grammar action set.
+// Distinct name from tsm::decideThinkMask to avoid the two reading as the same call.
+ReasoningGrammarDecision ThinkRouter::decide(StreamThinkInfo& state, int64_t eos_token_id, int tokens_emitted) {
+    ReasoningGrammarDecision d;
+    d.begin_token = tsm::firstTokenOrInvalid(state.begin_think_token_ids);
     d.eos_token   = static_cast<int32_t>(eos_token_id);
 
-    auto force_or_boundaries = [&]() -> ThinkDecision {
-        if (!info.dfa_ptr || info.dfa_ptr->isFinished() || info.end_think_token_ids.empty()) {
-            d.action = ThinkAction::MaskBoundaries;
+    const auto base = tsm::decideThinkMask(state, tokens_emitted);
+    switch (base.action) {
+        case tsm::ThinkDecisionAction::OutsideThink:
+            d.action = ReasoningGrammarAction::GrammarRoute;
             return d;
-        }
-        const auto next_idx = info.dfa_ptr->status();
-        if (next_idx >= info.end_think_token_ids.size()) {
-            d.action = ThinkAction::MaskBoundaries;
+        case tsm::ThinkDecisionAction::InsideThink:
+            d.action = ReasoningGrammarAction::MaskBoundaries;
             return d;
-        }
-        d.action       = ThinkAction::ForceEndToken;
-        d.forced_token = info.end_think_token_ids[next_idx];
-        return d;
-    };
-
-    switch (info.process_state) {
-        case ThinkProcessState::NO_THINK:
-        case ThinkProcessState::AFTER_THINK:
-            d.action = ThinkAction::GrammarRoute;
+        case tsm::ThinkDecisionAction::ForceEndToken:
+            d.action       = ReasoningGrammarAction::ForceEndToken;
+            d.forced_token = base.forced_token;
             return d;
-        case ThinkProcessState::IN_THINK: {
-            if (transitionToAfterThinkIfClosed(info)) {
-                d.action = ThinkAction::GrammarRoute;
-                return d;
-            }
-            if (thinkEndCloseInProgress(info) || budgetExhausted(info, tokens_emitted)) {
-                info.process_state = ThinkProcessState::CLOSING_THINK;
-                return force_or_boundaries();
-            }
-            d.action = ThinkAction::MaskBoundaries;
+        case tsm::ThinkDecisionAction::MaskBoundaries:
+            d.action = ReasoningGrammarAction::MaskBoundaries;
             return d;
-        }
-        case ThinkProcessState::CLOSING_THINK: {
-            if (transitionToAfterThinkIfClosed(info)) {
-                d.action = ThinkAction::GrammarRoute;
-                return d;
-            }
-            return force_or_boundaries();
-        }
     }
-    d.action = ThinkAction::GrammarRoute;
+    d.action = ReasoningGrammarAction::GrammarRoute;
     return d;
 }
 
-// Push a committed token through the DFA. Same logic the sampler path runs in
-// updateStatus; spec path calls this on the cloned state after a successful
-// accept of a non-grammar token.
-void commitThinkToken(StreamThinkInfo& info, int32_t token_id) {
-    if (!isActiveThinkState(info) || !info.dfa_ptr) {
-        return;
-    }
-    info.dfa_ptr->next(token_id);
-    if (info.dfa_ptr->isFinished()) {
-        info.process_state = ThinkProcessState::AFTER_THINK;
-    } else if (thinkEndCloseInProgress(info)) {
-        info.process_state = ThinkProcessState::CLOSING_THINK;
-    } else if (info.process_state == ThinkProcessState::CLOSING_THINK) {
-        info.process_state = ThinkProcessState::IN_THINK;
-    }
+bool ThinkRouter::tokenBelongsToGrammar(const StreamThinkInfo& state) {
+    return state.process_state == ThinkProcessState::AFTER_THINK || state.process_state == ThinkProcessState::NO_THINK;
 }
 
-}  // namespace
+void ThinkRouter::advanceForVerify(StreamThinkInfo& state, int32_t token_id) {
+    // ReasoningGrammar drains only on equality (KeepPending); mismatch leaves the pending token.
+    if (tsm::drainPendingForcedEnd(state, token_id, tsm::PendingMismatchPolicy::KeepPending, /*who=*/"")) {
+        return;
+    }
+    state.current_output_length += 1;
+    tsm::advanceThinkDfa(state, token_id);
+}
+
+void ThinkRouter::commitForcedEnd(int32_t forced_token) {
+    info_.dfa_ptr->next(forced_token);
+    info_.pending_forced_think_end_token_ids.push_back(forced_token);
+    info_.current_output_length += 1;
+    info_.process_state =
+        info_.dfa_ptr->isFinished() ? ThinkProcessState::AFTER_THINK : ThinkProcessState::CLOSING_THINK;
+}
+
+ThinkRouter::CommitRoute ThinkRouter::commitToken(int32_t token_id) {
+    if (tsm::drainPendingForcedEnd(info_, token_id, tsm::PendingMismatchPolicy::KeepPending, /*who=*/"")) {
+        return CommitRoute::ConsumedByThink;
+    }
+    info_.current_output_length += 1;
+    if (tsm::isActiveThinkState(info_)) {
+        tsm::advanceThinkDfa(info_, token_id);
+        return CommitRoute::ConsumedByThink;
+    }
+    return CommitRoute::RouteToGrammar;
+}
+
+ThinkRouter::VerifyCursor::VerifyCursor(StreamThinkInfo state, int64_t eos_token_id):
+    state_(std::move(state)), eos_token_id_(eos_token_id) {}
+
+ReasoningGrammarDecision ThinkRouter::VerifyCursor::decideForMask() {
+    return ThinkRouter::decide(state_, eos_token_id_, state_.current_output_length);
+}
+
+bool ThinkRouter::VerifyCursor::tokenBelongsToGrammar() const {
+    return ThinkRouter::tokenBelongsToGrammar(state_);
+}
+
+void ThinkRouter::VerifyCursor::commitThinkToken(int32_t token_id) {
+    ThinkRouter::advanceForVerify(state_, token_id);
+}
+
+void ThinkRouter::VerifyCursor::commitGrammarToken() {
+    state_.current_output_length += 1;
+}
+
+ThinkRouter::VerifyCursor ThinkRouter::verifyCursor() const {
+    return VerifyCursor(info_.copy(), eos_token_id_);
+}
 
 ReasoningGrammarLogitsProcessor::ReasoningGrammarLogitsProcessor(std::shared_ptr<RtpGrammarMatcher> matcher,
-                                                                 int64_t          eos_token_id,
-                                                                 int              max_thinking_tokens,
+                                                                 int64_t                            eos_token_id,
+                                                                 int                                max_thinking_tokens,
                                                                  std::vector<int> begin_think_token_ids,
                                                                  std::vector<int> end_think_token_ids,
                                                                  int32_t          input_length):
-    matcher_(std::move(matcher)), eos_token_id_(eos_token_id) {
-    think_info_.in_think_mode         = true;
-    think_info_.max_thinking_tokens   = max_thinking_tokens;
-    think_info_.begin_think_token_ids = std::move(begin_think_token_ids);
-    think_info_.end_think_token_ids   = end_think_token_ids;
-    think_info_.input_length          = input_length;
-    think_info_.current_output_length = 0;
-    think_info_.is_beam_search        = false;
-    if (!end_think_token_ids.empty()) {
-        think_info_.dfa_ptr = std::make_shared<StringContainDFA<size_t, int>>(end_think_token_ids);
-    }
-    think_info_.process_state = think_info_.dfa_ptr ? ThinkProcessState::IN_THINK : ThinkProcessState::NO_THINK;
-}
+    mask_core_(std::move(matcher), eos_token_id),
+    eos_token_id_(eos_token_id),
+    think_(max_thinking_tokens,
+           std::move(begin_think_token_ids),
+           std::move(end_think_token_ids),
+           input_length,
+           eos_token_id) {}
 
 void ReasoningGrammarLogitsProcessor::process(const SamplerInputs& inputs, size_t start_idx, size_t finish_idx) {
-    if (!matcher_) {
+    if (hasError()) {
+        return;
+    }
+    if (!mask_core_.matcher()) {
         return;
     }
     const size_t batch_size = finish_idx - start_idx;
@@ -180,8 +157,9 @@ void ReasoningGrammarLogitsProcessor::process(const SamplerInputs& inputs, size_
         return;
     }
     if (batch_size != 1) {
-        throw LogitsProcessorException(ErrorCode::INVALID_PARAMS,
-                                       "reasoning grammar logits processor only supports single sequence decoding");
+        setError(ErrorCode::INVALID_PARAMS,
+                 "reasoning grammar logits processor only supports single sequence decoding");
+        return;
     }
     if (inputs.finished_mask.defined()) {
         const auto* finished = inputs.finished_mask.data_ptr<bool>();
@@ -190,359 +168,250 @@ void ReasoningGrammarLogitsProcessor::process(const SamplerInputs& inputs, size_
         }
     }
 
-    std::lock_guard<std::mutex> lock(mutex_);
-    applyMaskLocked(inputs, start_idx);
+    ErrorInfo local_err;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        applyMaskLocked(inputs, start_idx, local_err);
+    }
+    if (local_err.hasError()) {
+        setError(local_err);
+    }
 }
 
-void ReasoningGrammarLogitsProcessor::updateMultiSeqStatus(const std::vector<int>& /* src_batch_indices */) {}
-
 void ReasoningGrammarLogitsProcessor::updateStatus(const torch::Tensor& new_tokens, int32_t num_new_tokens) {
+    if (hasError()) {
+        return;
+    }
     if (num_new_tokens <= 0) {
         return;
     }
     if (new_tokens.dim() != 2 || new_tokens.size(0) != 1 || new_tokens.size(1) < num_new_tokens) {
-        throw LogitsProcessorException(ErrorCode::INVALID_PARAMS,
-                                       "reasoning grammar accept expects one row with num_new_tokens columns");
+        setError(ErrorCode::INVALID_PARAMS, "reasoning grammar accept expects one row with num_new_tokens columns");
+        return;
     }
 
     auto tokens_cpu       = new_tokens.is_cuda() ? new_tokens.cpu() : new_tokens;
     tokens_cpu            = tokens_cpu.to(torch::kInt32).contiguous();
     const auto* token_ptr = tokens_cpu.data_ptr<int32_t>();
 
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (!matcher_ || matcher_->finished()) {
-        return;
-    }
+    ErrorInfo local_err;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!mask_core_.matcher() || mask_core_.finished()) {
+            return;
+        }
 
-    for (int32_t i = 0; i < num_new_tokens; ++i) {
-        const int32_t token_id = token_ptr[i];
-        if (drainPendingForcedThinkEnd(think_info_, token_id)) {
-            continue;
+        for (int32_t i = 0; i < num_new_tokens; ++i) {
+            const int32_t token_id = token_ptr[i];
+            if (think_.commitToken(token_id) == ThinkRouter::CommitRoute::ConsumedByThink) {
+                continue;
+            }
+            acceptCommittedGrammarTokenLocked(token_id, local_err);
+            if (local_err.hasError()) {
+                break;
+            }
         }
-        think_info_.current_output_length += 1;
-        if (isActiveThinkState(think_info_)) {
-            commitThinkToken(think_info_, token_id);
-            continue;
-        }
-        acceptCommittedGrammarTokenLocked(token_id);
+    }
+    if (local_err.hasError()) {
+        setError(local_err);
     }
 }
 
 bool ReasoningGrammarLogitsProcessor::isSpecVerifyEligible() const {
-    return matcher_ != nullptr;
+    return mask_core_.matcher() != nullptr;
 }
 
-int ReasoningGrammarLogitsProcessor::tryAcceptAndFillBitmask(const SpecLogitsProcessorRequest& request) {
-    if (!matcher_ || request.propose_step <= 0 || request.bitmask_cpu_out == nullptr) {
-        return static_cast<int>(request.propose_step);
-    }
-    if (request.bitmask_size_int32 < static_cast<size_t>((request.vocab_size + 31) / 32)) {
-        throw LogitsProcessorException(
-            ErrorCode::GRAMMAR_BITMASK_BUFFER_TOO_SMALL,
-            "reasoning grammar MTP verify: bitmask buffer smaller than model vocab (words="
-                + std::to_string(request.bitmask_size_int32)
-                + ", vocab=" + std::to_string(request.vocab_size) + ")");
+int ReasoningGrammarLogitsProcessor::runSpecVerifyLocked(const SpecLogitsProcessorRequest& request,
+                                                         ErrorInfo&                        out_err) {
+    if (auto err = mask_core_.validateMatcherInvariantsLocked(request, think_.endThinkTokenIds()); err.hasError()) {
+        out_err = err;
+        return 0;
     }
 
-    std::lock_guard<std::mutex> lock(mutex_);
+    const int  P      = request.propose_step;
+    const auto W      = request.bitmask_size_int32;
+    auto       verify = think_.verifyCursor();
 
-    const int  P                       = request.propose_step;
-    const auto W                       = request.bitmask_size_int32;
-    int        grammar_accepted_prefix = 0;
-    int        cap                     = P;
-    auto       think_state             = think_info_.copy();
+    // Reuse GrammarMaskCore::RowState directly: the verify loop below only distinguishes
+    // Failed / {Terminated,Finished} / non-terminal, so think-routed "allow-all" rows
+    // (boundary mask, force-end, inside-think) all map to RowState::Active = non-terminal.
+    using RowState = GrammarMaskCore::RowState;
 
-    {
-        const int32_t grammar_vocab_size = matcher_->vocabSize();
-        if (grammar_vocab_size > 0 && SpecLogitsProcessor::bitmaskWordCount(grammar_vocab_size) > W) {
-            matcher_->markFinished();
-            throw LogitsProcessorException(
-                ErrorCode::GRAMMAR_VOCAB_EXCEEDS_MODEL_VOCAB,
-                "reasoning grammar vocab exceeds model vocab in MTP verify (grammar="
-                    + std::to_string(grammar_vocab_size) + ", model_words=" + std::to_string(W) + ")");
+    auto fill_grammar_row = [&](int32_t* row) -> RowState {
+        const RowState gs = mask_core_.fillGrammarRowLocked(row, W, request.vocab_size);
+        if (gs == RowState::Active) {
+            clearTokenFromBitmask(row, W, tsm::firstTokenOrInvalid(verify.beginThinkTokenIds()));
+            clearTokenFromBitmask(row, W, tsm::firstTokenOrInvalid(verify.endThinkTokenIds()));
         }
-    }
-
-    // forceTokenInBitmask asserts on out-of-range token_id. Validate eos and every
-    // configured end-think token here so a misconfigured generate_config surfaces
-    // as a stream error instead of aborting the worker mid-verify.
-    auto token_in_range = [W](int64_t t) { return t >= 0 && static_cast<size_t>(t / 32) < W; };
-    if (!token_in_range(eos_token_id_)) {
-        matcher_->markFinished();
-        throw LogitsProcessorException(ErrorCode::GRAMMAR_EOS_OUT_OF_VOCAB,
-                                       "reasoning grammar MTP verify: eos_token_id (" + std::to_string(eos_token_id_)
-                                           + ") out of model vocab bitmask (words=" + std::to_string(W) + ")");
-    }
-    for (int t : think_info_.end_think_token_ids) {
-        if (!token_in_range(t)) {
-            matcher_->markFinished();
-            throw LogitsProcessorException(
-                ErrorCode::GRAMMAR_EOS_OUT_OF_VOCAB,
-                "reasoning grammar MTP verify: end_think_token_id (" + std::to_string(t)
-                    + ") out of model vocab bitmask (words=" + std::to_string(W) + ")");
-        }
-    }
-
-    enum class GrammarRowState {
-        Active,
-        AllowAll,
-        Finished,
-        Terminated,
-        Failed,
+        return gs;
     };
 
-    auto fill_grammar_row = [&](int32_t* row) -> GrammarRowState {
+    auto fill_row = [&](int32_t* row) -> RowState {
         std::fill_n(row, W, SpecLogitsProcessor::kBitmaskAllowAll);
-        if (matcher_->finished()) {
-            forceTokenInBitmask(row, W, eos_token_id_);
-            return GrammarRowState::Finished;
-        }
-        if (matcher_->isTerminated()) {
-            forceTokenInBitmask(row, W, eos_token_id_);
-            return GrammarRowState::Terminated;
-        }
-        if (matcher_->isPassthroughForMask()) {
-            return GrammarRowState::AllowAll;
-        }
-
-        const int32_t grammar_vocab_size = matcher_->vocabSize();
-        const size_t  grammar_words      = SpecLogitsProcessor::bitmaskWordCount(grammar_vocab_size);
-
-        int64_t  dl_shape[2];
-        DLTensor dl = makeSingleRowBitmaskView(row, static_cast<int32_t>(grammar_words), dl_shape);
-        if (!matcher_->fillBitmask(&dl, 0)) {
-            return GrammarRowState::Failed;
-        }
-        clearBitmaskTokenRange(row, W, grammar_vocab_size, static_cast<int64_t>(request.vocab_size));
-        clearTokenFromBitmask(row, W, firstTokenOrInvalid(think_state.begin_think_token_ids));
-        clearTokenFromBitmask(row, W, firstTokenOrInvalid(think_state.end_think_token_ids));
-        return GrammarRowState::Active;
-    };
-
-    auto fill_row = [&](int32_t* row) -> GrammarRowState {
-        std::fill_n(row, W, SpecLogitsProcessor::kBitmaskAllowAll);
-        const ThinkDecision d = decideThinkMask(think_state, think_state.current_output_length, eos_token_id_);
+        const ReasoningGrammarDecision d = verify.decideForMask();
         switch (d.action) {
-            case ThinkAction::GrammarRoute:
+            case ReasoningGrammarAction::GrammarRoute:
                 return fill_grammar_row(row);
-            case ThinkAction::AllowAll:
-                return GrammarRowState::AllowAll;
-            case ThinkAction::ForceEndToken:
+            case ReasoningGrammarAction::AllowAll:
+                return RowState::Active;
+            case ReasoningGrammarAction::ForceEndToken:
                 forceTokenInBitmask(row, W, d.forced_token);
-                return GrammarRowState::AllowAll;
-            case ThinkAction::MaskBoundaries:
+                return RowState::Active;
+            case ReasoningGrammarAction::MaskBoundaries:
                 clearTokenFromBitmask(row, W, d.begin_token);
                 clearTokenFromBitmask(row, W, d.eos_token);
-                return GrammarRowState::AllowAll;
+                return RowState::Active;
         }
-        return GrammarRowState::AllowAll;
+        return RowState::Active;
     };
 
-    const auto reasoner_snapshot    = matcher_->reasonerSnapshot();
-    auto       rollback_provisional = [&]() noexcept {
-        if (grammar_accepted_prefix > 0) {
-            matcher_->rollback(grammar_accepted_prefix);
-        }
-        matcher_->restoreReasoner(reasoner_snapshot);
-    };
-
-    std::string verify_exception_what;
-    bool        fill_bitmask_failed = false;
-
-    try {
-        for (int offset = 0; offset <= P; ++offset) {
-            int32_t*              row       = request.bitmask_cpu_out + offset * W;
-            const GrammarRowState row_state = fill_row(row);
-            if (row_state == GrammarRowState::Failed) {
-                fill_bitmask_failed = true;
-                cap                 = offset;
-                forceTokenInBitmask(row, W, eos_token_id_);
-                break;
-            }
-            if (offset == P) {
-                break;
-            }
-            if (row_state == GrammarRowState::Terminated || row_state == GrammarRowState::Finished) {
-                cap = offset;
-                break;
-            }
-
-            const int32_t draft_token = request.draft_tokens[offset];
-            if (draft_token < 0 || static_cast<size_t>(draft_token) >= request.vocab_size
-                || !bitmaskAllowsToken(row, W, draft_token)) {
-                cap = offset;
-                break;
-            }
-
-            const bool token_belongs_to_grammar = think_state.process_state == ThinkProcessState::AFTER_THINK
-                                                  || think_state.process_state == ThinkProcessState::NO_THINK;
-            if (token_belongs_to_grammar) {
-                if (!matcher_->acceptToken(draft_token)) {
+    // Shared snapshot/rollback/exception scaffolding lives in GrammarMaskCore; here we only
+    // supply the think-routed per-offset walk. grammar_accepted_prefix counts only grammar
+    // accepts (think-DFA advances run on the local VerifyCursor and need no rollback).
+    return mask_core_.runSpecVerifyGuarded(
+        request.bitmask_cpu_out,
+        W,
+        "reasoning grammar",
+        [&](int& grammar_accepted_prefix, ErrorInfo& walk_err) -> int {
+            int cap = P;
+            for (int offset = 0; offset <= P; ++offset) {
+                int32_t*       row       = request.bitmask_cpu_out + offset * W;
+                const RowState row_state = fill_row(row);
+                if (row_state == RowState::Failed) {
+                    // fillGrammarRowLocked already markFinished'd the matcher and forced eos into
+                    // the grammar row; force eos across the full model vocab and surface the error.
+                    forceTokenInBitmask(row, W, eos_token_id_);
+                    walk_err = ErrorInfo(ErrorCode::GRAMMAR_FILL_BITMASK_FAILED,
+                                         "reasoning grammar matcher fillBitmask failed during MTP verify; "
+                                         "matcher state corrupted");
+                    cap      = offset;
+                    break;
+                }
+                if (offset == P) {
+                    break;
+                }
+                if (row_state == RowState::Terminated || row_state == RowState::Finished) {
                     cap = offset;
                     break;
                 }
-                ++grammar_accepted_prefix;
-                think_state.current_output_length += 1;
-            } else {
-                if (drainPendingForcedThinkEnd(think_state, draft_token)) {
-                    continue;
+
+                const int32_t draft_token = request.draft_tokens[offset];
+                if (draft_token < 0 || static_cast<size_t>(draft_token) >= request.vocab_size
+                    || !bitmaskAllowsToken(row, W, draft_token)) {
+                    cap = offset;
+                    break;
                 }
-                think_state.current_output_length += 1;
-                commitThinkToken(think_state, draft_token);
+
+                if (verify.tokenBelongsToGrammar()) {
+                    if (!mask_core_.acceptToken(draft_token)) {
+                        cap = offset;
+                        break;
+                    }
+                    ++grammar_accepted_prefix;
+                    verify.commitGrammarToken();
+                } else {
+                    verify.commitThinkToken(draft_token);
+                }
             }
-        }
-    } catch (const std::exception& e) {
-        verify_exception_what = e.what();
-    } catch (...) {
-        verify_exception_what = "unknown";
-    }
-
-    rollback_provisional();
-
-    if (!verify_exception_what.empty()) {
-        matcher_->markFinished();
-        if (request.bitmask_cpu_out != nullptr && request.bitmask_size_int32 > 0) {
-            forceTokenInBitmask(request.bitmask_cpu_out, W, eos_token_id_);
-        }
-        throw LogitsProcessorException(ErrorCode::GRAMMAR_VERIFY_EXCEPTION,
-                                       "reasoning grammar MTP verify exception: " + verify_exception_what);
-    }
-    if (fill_bitmask_failed) {
-        matcher_->markFinished();
-        throw LogitsProcessorException(ErrorCode::GRAMMAR_FILL_BITMASK_FAILED,
-                                       "reasoning grammar matcher fillBitmask failed during MTP verify; "
-                                       "matcher state corrupted");
-    }
-    return static_cast<int>(cap);
+            return cap;
+        },
+        out_err);
 }
 
-int64_t ReasoningGrammarLogitsProcessor::acceptedTokenLen() const {
+int ReasoningGrammarLogitsProcessor::tryAcceptAndFillBitmask(const SpecLogitsProcessorRequest& request) {
+    if (hasError()) {
+        return 0;
+    }
+    if (!mask_core_.matcher() || request.propose_step <= 0 || request.bitmask_cpu_out == nullptr) {
+        return static_cast<int>(request.propose_step);
+    }
+    if (auto err = mask_core_.preflightSpecRequest(request); err.hasError()) {
+        setError(err);
+        return 0;
+    }
+
+    ErrorInfo local_err;
+    int       cap_out = 0;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        cap_out = runSpecVerifyLocked(request, local_err);
+    }
+    if (local_err.hasError()) {
+        setError(local_err);
+        return 0;
+    }
+    return cap_out;
+}
+
+int64_t ReasoningGrammarLogitsProcessor::committedOutputLen() const {
     std::lock_guard<std::mutex> lock(mutex_);
-    return think_info_.current_output_length;
+    // Stream output length = think-phase tokens + grammar-phase tokens. Intentionally tracks the
+    // think router's output counter (not mask_core_.acceptedTokenLen()), because think-phase
+    // tokens are committed to the stream but never fed to the grammar matcher.
+    return think_.committedOutputLen();
 }
 
-void ReasoningGrammarLogitsProcessor::applyMaskLocked(const SamplerInputs& inputs, size_t batch_idx) {
+void ReasoningGrammarLogitsProcessor::applyMaskLocked(const SamplerInputs& inputs,
+                                                      size_t               batch_idx,
+                                                      ErrorInfo&           out_err) {
     auto logits = inputs.logits[batch_idx];
 
     const int tokens_emitted =
-        std::max(generatedTokens(inputs, batch_idx), think_info_.current_output_length);
-    const ThinkDecision d = decideThinkMask(think_info_, tokens_emitted, eos_token_id_);
+        std::max(generatedTokens(inputs, batch_idx), static_cast<int>(think_.committedOutputLen()));
+    ReasoningGrammarDecision d = think_.decideForMask(tokens_emitted);
+
+    // OOV forced_token → MaskBoundaries; do NOT advance dfa_ptr / push pending (would corrupt DFA).
+    static std::atomic<bool> warned_force_oob{false};
+    if (d.action == ReasoningGrammarAction::ForceEndToken
+        && !tsm::forcedEndTokenUsable(d.forced_token, inputs.vocab_size, warned_force_oob, "reasoning grammar ")) {
+        d.action = ReasoningGrammarAction::MaskBoundaries;
+    }
 
     switch (d.action) {
-        case ThinkAction::GrammarRoute:
-            applyGrammarMaskLocked(logits);
+        case ReasoningGrammarAction::GrammarRoute:
+            applyGrammarMaskLocked(logits, out_err);
             return;
-        case ThinkAction::AllowAll:
+        case ReasoningGrammarAction::AllowAll:
             return;
-        case ThinkAction::ForceEndToken: {
-            forceToken(logits, d.forced_token);
-            think_info_.dfa_ptr->next(d.forced_token);
-            think_info_.pending_forced_think_end_token_ids.push_back(d.forced_token);
-            think_info_.current_output_length += 1;
-            think_info_.process_state =
-                think_info_.dfa_ptr->isFinished() ? ThinkProcessState::AFTER_THINK : ThinkProcessState::CLOSING_THINK;
+        case ReasoningGrammarAction::ForceEndToken: {
+            // Two-phase force-close protocol (paired with updateStatus):
+            //   phase 1 (here, mask time): forceToken locks the sampler to forced_token, so we
+            //     can already pre-advance the think DFA + state and push the token to pending.
+            //     This is required because the *next* step's mask decision depends on the closing
+            //     progress being reflected now, before the token is actually committed.
+            //   phase 2 (updateStatus): ThinkRouter::commitToken drains this pending entry for
+            //     reconciliation. The two phases MUST stay paired — do not move this advance into
+            //     updateStatus, or the next mask step would route on stale think state.
+            GrammarMaskCore::forceToken(logits, d.forced_token);
+            think_.commitForcedEnd(d.forced_token);
             return;
         }
-        case ThinkAction::MaskBoundaries:
-            maskToken(logits, d.begin_token);
-            maskToken(logits, d.eos_token);
+        case ReasoningGrammarAction::MaskBoundaries:
+            GrammarMaskCore::maskToken(logits, d.begin_token);
+            GrammarMaskCore::maskToken(logits, d.eos_token);
             return;
     }
 }
 
-void ReasoningGrammarLogitsProcessor::applyGrammarMaskLocked(const torch::Tensor& logits) {
-    if (!matcher_ || matcher_->finished()) {
+void ReasoningGrammarLogitsProcessor::applyGrammarMaskLocked(const torch::Tensor& logits, ErrorInfo& out_err) {
+    if (!mask_core_.matcher() || mask_core_.finished()) {
         return;
     }
-    if (matcher_->isTerminated()) {
-        forceToken(logits, eos_token_id_);
+    if (mask_core_.isTerminated()) {
+        GrammarMaskCore::forceToken(logits, eos_token_id_);
         return;
     }
-    if (matcher_->isPassthroughForMask()) {
-        // Reasoner-mode passthrough (require_reasoning_ && </think> not yet crossed):
-        // matcher is frozen and fillBitmask returns false BY DESIGN.
-        return;
-    }
-
-    const int32_t grammar_vocab_size = matcher_->vocabSize();
-    if (grammar_vocab_size <= 0) {
+    if (mask_core_.isPassthroughForMask()) {
         return;
     }
 
-    const int32_t words   = (grammar_vocab_size + 31) / 32;
-    auto          bitmask = at::full({1, words}, -1, at::dtype(at::kInt));
-    int64_t       dl_shape[2];
-    DLTensor      dl = makeSingleRowBitmaskView(bitmask.data_ptr<int32_t>(), words, dl_shape);
-    if (!matcher_->fillBitmask(&dl, 0)) {
-        matcher_->markFinished();
-        forceToken(logits, eos_token_id_);
-        throw LogitsProcessorException(ErrorCode::GRAMMAR_FILL_BITMASK_FAILED,
-                                       "reasoning grammar matcher fillBitmask failed; matcher state corrupted");
-    }
-
-    auto mask_options = torch::TensorOptions().dtype(torch::kBool);
-    if (logits.device().is_cuda()) {
-        mask_options = mask_options.pinned_memory(true);
-    }
-    auto           vocab_mask  = torch::empty({grammar_vocab_size}, mask_options);
-    bool*          mask_ptr    = vocab_mask.data_ptr<bool>();
-    const int32_t* bitmask_ptr = bitmask.data_ptr<int32_t>();
-    for (int32_t token_id = 0; token_id < grammar_vocab_size; ++token_id) {
-        mask_ptr[token_id] = !bitmaskAllowsToken(bitmask_ptr, static_cast<size_t>(words), token_id);
-    }
-
-    auto mask = vocab_mask;
-    if (mask.device() != logits.device()) {
-        mask = mask.to(logits.device(), /*non_blocking=*/true);
-    }
-    const int64_t mask_vocab_size = std::min<int64_t>(logits.size(0), mask.size(0));
-    if (mask_vocab_size > 0) {
-        logits.narrow(0, 0, mask_vocab_size)
-            .masked_fill_(mask.narrow(0, 0, mask_vocab_size), BaseLogitsProcessor::neg_inf);
-    }
-    if (mask.size(0) < logits.size(0)) {
-        logits.narrow(0, mask.size(0), logits.size(0) - mask.size(0)).fill_(BaseLogitsProcessor::neg_inf);
-    }
-
-    maskToken(logits, firstTokenOrInvalid(think_info_.begin_think_token_ids));
-    maskToken(logits, firstTokenOrInvalid(think_info_.end_think_token_ids));
+    mask_core_.applyMaskLocked(logits, out_err);
+    GrammarMaskCore::maskToken(logits, tsm::firstTokenOrInvalid(think_.beginThinkTokenIds()));
+    GrammarMaskCore::maskToken(logits, tsm::firstTokenOrInvalid(think_.endThinkTokenIds()));
 }
 
-void ReasoningGrammarLogitsProcessor::acceptCommittedGrammarTokenLocked(int32_t token_id) {
-    if (!matcher_ || matcher_->finished()) {
-        return;
-    }
-    if (matcher_->isTerminated()) {
-        if (token_id != eos_token_id_) {
-            matcher_->markFinished();
-            throw LogitsProcessorException(ErrorCode::GRAMMAR_NON_EOS_AFTER_TERMINAL,
-                                           "reasoning grammar received non-EOS token after terminal state "
-                                               + std::to_string(token_id));
-        }
-        matcher_->markFinished();
-        return;
-    }
-    if (!matcher_->acceptToken(token_id)) {
-        matcher_->markFinished();
-        throw LogitsProcessorException(ErrorCode::GRAMMAR_PARSER_REJECTED_TOKEN,
-                                       "reasoning grammar accept_token error: parser rejected token "
-                                           + std::to_string(token_id));
-    }
-}
-
-void ReasoningGrammarLogitsProcessor::forceToken(const torch::Tensor& logits, int64_t token_id) {
-    if (token_id < 0 || token_id >= logits.size(0)) {
-        return;
-    }
-    logits.fill_(BaseLogitsProcessor::neg_inf);
-    logits[token_id] = 0.0f;
-}
-
-void ReasoningGrammarLogitsProcessor::maskToken(const torch::Tensor& logits, int64_t token_id) {
-    if (token_id < 0 || token_id >= logits.size(0)) {
-        return;
-    }
-    logits[token_id] = BaseLogitsProcessor::neg_inf;
+void ReasoningGrammarLogitsProcessor::acceptCommittedGrammarTokenLocked(int32_t token_id, ErrorInfo& out_err) {
+    mask_core_.acceptCommittedLocked(&token_id, 1, out_err);
 }
 
 }  // namespace rtp_llm

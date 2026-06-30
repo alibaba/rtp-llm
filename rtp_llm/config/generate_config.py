@@ -3,7 +3,13 @@ import hashlib
 import json
 from typing import Any, Dict, List, Optional, Union
 
-from pydantic import BaseModel, ConfigDict, field_serializer, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    ValidationError,
+    field_serializer,
+    field_validator,
+)
 from transformers.tokenization_utils_base import PreTrainedTokenizerBase
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
@@ -106,7 +112,7 @@ class GenerateConfig(BaseModel):
     json_schema: Optional[Union[str, Dict[str, Any]]] = None
     regex: Optional[str] = None
     ebnf: Optional[str] = None
-    structural_tag: Optional[str] = None
+    structural_tag: Optional[Union[str, Dict[str, Any]]] = None
     # calculate_loss style: 0 for not calculate; 1 for sum; 2 for each token
     calculate_loss: int = 0
     return_logits: bool = False
@@ -194,10 +200,7 @@ class GenerateConfig(BaseModel):
     @field_validator("response_format", mode="before")
     @classmethod
     def _coerce_response_format(cls, v):
-        """Accept str/dict/ResponseFormat for response_format; envelope shape
-        validation lives in ResponseFormat._check_payload — malformed input
-        (missing inner schema/pattern/grammar/structural_tag, unknown type,
-        wrong inner type) raises here at parse time, never reaches C++."""
+        """Coerce str/dict/ResponseFormat; ResponseFormat._check_payload rejects malformed envelopes here."""
         if v is None:
             return None
         if isinstance(v, ResponseFormat):
@@ -212,6 +215,18 @@ class GenerateConfig(BaseModel):
                 return None
             return ResponseFormat(**v)
         raise TypeError(f"response_format has unsupported type {type(v).__name__}")
+
+    @classmethod
+    def _coerce_response_format_for_update(cls, v):
+        try:
+            return cls._coerce_response_format(v)
+        except FtRuntimeException:
+            raise
+        except (json.JSONDecodeError, ValidationError, TypeError) as e:
+            raise FtRuntimeException(
+                ExceptionType.ERROR_INPUT_FORMAT_ERROR,
+                f"response_format invalid: {str(e)}",
+            )
 
     def gen_hash_value(self):
         cp = copy.copy(self)
@@ -239,7 +254,7 @@ class GenerateConfig(BaseModel):
         for key, value in new.items():
             if hasattr(self, key):
                 if key == "response_format":
-                    value = self._coerce_response_format(value)
+                    value = self._coerce_response_format_for_update(value)
                 setattr(self, key, value)
 
     def update_and_pop(self, new: Dict[str, Any]):
@@ -247,7 +262,7 @@ class GenerateConfig(BaseModel):
         for key, value in new.items():
             if hasattr(self, key):
                 if key == "response_format":
-                    value = self._coerce_response_format(value)
+                    value = self._coerce_response_format_for_update(value)
                 setattr(self, key, value)
                 to_remove.append(key)
         return {k: v for k, v in new.items() if k not in to_remove}
@@ -452,23 +467,11 @@ class GenerateConfig(BaseModel):
             raise FtRuntimeException(ExceptionType.ERROR_INPUT_FORMAT_ERROR, str(e))
 
         self._project_response_format_to_grammar_fields()
+        self._normalize_grammar_fields()
         self._validate_grammar_constraints()
 
     def _project_response_format_to_grammar_fields(self) -> None:
-        """Project response_format envelope onto typed grammar fields and clear it.
-
-        After this call, response_format is None and at most one of
-        json_schema/regex/ebnf/structural_tag is set. The typed fields are the
-        single source of truth — C++ never sees the envelope. Envelope shape
-        validation happens in ResponseFormat (pydantic), so any malformed
-        input has already raised before reaching here.
-
-        Top-level response_format is the single source of truth for a
-        request's grammar. Clear every grammar-bearing field first so a stale
-        constraint left over in extra_configs cannot survive — e.g.
-        extra_configs.json_schema=X plus response_format.type='text' must end
-        up unconstrained, not still json-schema-locked.
-        """
+        """Project response_format onto typed fields and clear it; rf wins over stale extra_configs grammar."""
         rf = self.response_format
         if rf is None:
             return
@@ -496,9 +499,18 @@ class GenerateConfig(BaseModel):
 
         self.response_format = None
 
+    def _normalize_grammar_fields(self) -> None:
+        """Normalize grammar fields before they cross backend/RPC boundaries."""
+        if isinstance(self.json_schema, dict):
+            self.json_schema = json.dumps(
+                self.json_schema, ensure_ascii=False, separators=(",", ":")
+            )
+        if isinstance(self.structural_tag, dict):
+            self.structural_tag = json.dumps(
+                self.structural_tag, ensure_ascii=False, separators=(",", ":")
+            )
+
     def _validate_grammar_constraints(self) -> None:
-        # response_format has been projected and cleared by
-        # _project_response_format_to_grammar_fields; only typed fields remain.
         count = (
             (self.json_schema is not None)
             + (self.regex is not None)

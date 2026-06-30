@@ -3,6 +3,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <list>
 #include <memory>
 #include <mutex>
@@ -20,6 +21,7 @@
 namespace rtp_llm {
 
 class RtpGrammarMatcher;
+class TokenizerInfo;
 
 // Grammar request key shared by scheduler and backend.
 struct GrammarKeyCpp {
@@ -69,10 +71,6 @@ struct XGrammarBackendOptions {
 };
 
 // Owns the xgrammar compiler + LRU caches; thread-safe, no GIL.
-//
-// Lifecycle: built once at engine startup by LogitsProcessorFactory::init via
-// fromConfig(cfg); the factory holds the active instance. Returns nullptr from
-// fromConfig when grammar is disabled / tokenizer info empty / build fails.
 class XGrammarBackend {
 public:
     // tokenizer_info_json: xgrammar::TokenizerInfo::SerializeJSON(). Throws on parse fail.
@@ -82,9 +80,9 @@ public:
     XGrammarBackend(const XGrammarBackend&)            = delete;
     XGrammarBackend& operator=(const XGrammarBackend&) = delete;
 
-    // Build a backend from GrammarConfig (parses tokenizer info, applies options).
-    // Returns nullptr (not throw) if cfg is empty/invalid -> structured output stays disabled.
-    static std::shared_ptr<XGrammarBackend> fromConfig(const GrammarConfig& cfg) noexcept;
+    // Returns nullptr (not throw) when tokenizer is empty / build fails.
+    static std::shared_ptr<XGrammarBackend> create(const TokenizerInfo& tokenizer_info,
+                                                   const GrammarConfig& cfg) noexcept;
 
     // True iff the tokenizer is non-empty so the backend can compile / mask grammars.
     bool isEnabled() const noexcept;
@@ -92,18 +90,11 @@ public:
     // Fills missing json_schema/schema defaults; returns input unchanged on parse failure.
     static std::string sanitizeStructuralTag(const std::string& tag_json);
 
-    // Cache hit returns instantly. On miss the compile runs synchronously on the
-    // calling thread; concurrent requests for the same key may each compile (the
-    // underlying xgrammar::GrammarCompiler caches identical grammars internally,
-    // so the duplicate work is bounded). Populates the success cache on completion
-    // and the invalid-cache on schema rejection.
+    // Synchronous; concurrent same-key compiles dedup inside xgrammar::GrammarCompiler.
     CompileResult getOrCompile(const GrammarKeyCpp& key);
 
     std::shared_ptr<xgrammar::CompiledGrammar> getCached(const GrammarKeyCpp& key) const;
     std::string                                getCachedInvalid(const GrammarKeyCpp& key) const;
-
-    // Does NOT consult the cache; getOrCompile() is the public API.
-    CompileResult compileNow(const GrammarKeyCpp& key);
 
     void setCache(const GrammarKeyCpp& key, std::shared_ptr<xgrammar::CompiledGrammar> compiled);
     void setCacheInvalid(const GrammarKeyCpp& key, const std::string& error_message);
@@ -120,18 +111,15 @@ private:
     xgrammar::TokenizerInfo   tokenizer_info_;
     xgrammar::GrammarCompiler compiler_;
 
+    // Does NOT consult the cache; getOrCompile() is the public API.
+    CompileResult compileNow(const GrammarKeyCpp& key);
+
     // LRU-bounded caches; front = MRU, evict from back on overflow.
     static constexpr size_t kMaxCompiledCacheEntries = 1024;
     static constexpr size_t kMaxInvalidCacheEntries  = 4096;
-    // Per-request schema/regex/EBNF/structural-tag size cap, enforced at the
-    // getOrCompile entry. Real schemas in practice are a few KB; this leaves
-    // ~10x headroom while preventing a caller from amplifying the cache to
-    // GB-scale by submitting MB-scale payloads.
+    // Per-request payload size cap; blocks MB-scale schemas amplifying the cache.
     static constexpr size_t kMaxKeyStringBytes = 64 * 1024;
-    // Hard byte budget for invalid_cache_ payload (kid copies + error_message).
-    // Pins worst-case memory regardless of how the entry-count and per-key caps
-    // multiply out: with 4096 entries × 64 KB keys × 2 copies (map key + LRU
-    // node) the entry-count cap alone admits ~512 MB; this caps it at 32 MB.
+    // Hard byte budget for invalid_cache_ — entry-count cap alone admits ~512 MB.
     static constexpr size_t kMaxInvalidCacheBytes = 32 * 1024 * 1024;
     // Truncate xgrammar error strings before they enter invalid_cache_; the
     // useful prefix (rule name, position) fits well under 1 KB.
@@ -151,9 +139,26 @@ private:
     std::unordered_map<std::string, CompiledEntry> cache_;
     mutable std::list<std::string>                 invalid_lru_;  // keys, front = MRU
     std::unordered_map<std::string, InvalidEntry>  invalid_cache_;
+    // Live byte total for cache_; counts kid (x2: map key + LRU node) and
+    // CompiledGrammar::MemorySizeBytes(). Maintained under cache_mutex_.
+    size_t compiled_cache_bytes_ = 0;
     // Live byte total for invalid_cache_; counts kid (×2: map key + LRU node)
     // and error_message. Maintained under cache_mutex_.
     size_t invalid_cache_bytes_ = 0;
+
+    size_t maxCompiledCacheBytes() const {
+        return options_.compiler_cache_bytes > 0 ? static_cast<size_t>(options_.compiler_cache_bytes) :
+                                                   std::numeric_limits<size_t>::max();
+    }
+
+    static size_t compiledEntryBytes(size_t kid_size, const std::shared_ptr<xgrammar::CompiledGrammar>& compiled) {
+        return 2 * kid_size + (compiled ? compiled->MemorySizeBytes() : 0);
+    }
+
+    // Each invalid entry contributes one kid copy in the map key and one in the LRU node.
+    static size_t invalidEntryBytes(size_t kid_size, size_t msg_size) {
+        return 2 * kid_size + msg_size;
+    }
 };
 
 }  // namespace rtp_llm

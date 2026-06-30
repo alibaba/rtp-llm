@@ -7,6 +7,7 @@
 #include "rtp_llm/cpp/engine_base/schedulers/FIFOScheduler.h"
 #include "rtp_llm/cpp/engine_base/schedulers/BatchDecodeScheduler.h"
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
+#include "rtp_llm/cpp/engine_base/grammar/XGrammarBackend.h"
 #include "rtp_llm/cpp/engine_base/system_prompt/SystemPromptConstructor.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
@@ -119,6 +120,12 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
 
 void NormalEngine::initExecutor(const EngineInitParams&                        params,
                                 std::unique_ptr<ProposeModelEngineInitParams>& propose_params) {
+    // Engine-scoped grammar backend: bound to this engine's tokenizer and carried
+    // via ResourceContext to every stream this engine creates. Avoids the previous
+    // process-global backend, which would be overwritten by any other engine
+    // (e.g. MTP draft executor) and could mask logits with the wrong tokenizer.
+    resource_context_.grammar_backend = XGrammarBackend::create(params.tokenizer_info, params.grammar_config);
+
     if (propose_params_) {
         executor_.reset(new MtpExecutor(params,
                                         propose_params,
@@ -150,8 +157,7 @@ void NormalEngine::initScheduler() {
                                            parallelism_config,
                                            model_specific_config,
                                            resource_context_.cache_manager,
-                                           metrics_reporter_,
-                                           1));
+                                           metrics_reporter_));
         RTP_LLM_LOG_INFO("create fifo scheduler done");
     }
 }

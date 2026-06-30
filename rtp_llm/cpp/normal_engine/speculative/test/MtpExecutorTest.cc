@@ -691,10 +691,10 @@ TEST_F(MtpExecutorTest, testSingleBatchDecode) {
 
     // set fake speculative sampler outputs
     spec::SpeculativeSamplerOutput speculative_sampler_output;
-    speculative_sampler_output.accept_tokens_cpu = torch::tensor({{3, 2, 0}}, torch::kInt32);
-    speculative_sampler_output.accept_len_cpu    = torch::tensor({3}, torch::kInt32);
-    auto draft_spec_sample_input    = SamplerOutput{};
-    auto target_spec_sample_input   = SamplerOutput{};
+    speculative_sampler_output.accept_tokens = {torch::tensor({3, 2, 0}, torch::kInt32).reshape({1, 3})};
+    speculative_sampler_output.accept_len    = {3};
+    auto draft_spec_sample_input             = SamplerOutput{};
+    auto target_spec_sample_input            = SamplerOutput{};
 
     vector<vector<float>> draft_all_probs_list;
     draft_all_probs_list.push_back(toVec<float>(stream1_draft_token_probs));
@@ -866,11 +866,11 @@ TEST_F(MtpExecutorTest, testMultiBatchDecode) {
 
     // set fake speculative sampler outputs
     spec::SpeculativeSamplerOutput speculative_sampler_output;
-    speculative_sampler_output.accept_tokens_cpu =
-        torch::tensor({{3, 0, 0, 0, 0}, {3, 0, 2, 2, 1}}, torch::kInt32);
-    speculative_sampler_output.accept_len_cpu = torch::tensor({1, 5}, torch::kInt32);
-    auto draft_spec_sample_input    = SamplerOutput{};
-    auto target_spec_sample_input   = SamplerOutput{};
+    speculative_sampler_output.accept_tokens = {torch::tensor({3}, torch::kInt32).reshape({1, 1}),
+                                                torch::tensor({3, 0, 2, 2, 1}, torch::kInt32).reshape({1, 5})};
+    speculative_sampler_output.accept_len    = {1, 5};
+    auto draft_spec_sample_input             = SamplerOutput{};
+    auto target_spec_sample_input            = SamplerOutput{};
 
     vector<vector<float>> draft_all_probs_list;
     draft_all_probs_list.push_back({0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0});

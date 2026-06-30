@@ -53,13 +53,9 @@ public:
     std::optional<std::string> regex;
     std::optional<std::string> ebnf;
     std::optional<std::string> structural_tag;
-    // The OpenAI response_format envelope is intentionally absent here: the
-    // Python frontend projects it to the four typed fields above in
-    // GenerateConfig.validate(), and the gRPC wire field of the same name is
-    // rejected by QueryConverter when it arrives non-empty. Internal code must
-    // only read the typed fields.
-    std::string                adapter_name = "";
-    std::vector<std::string>   adapter_names;
+    // response_format envelope is projected to the typed fields above in Python.
+    std::string              adapter_name = "";
+    std::vector<std::string> adapter_names;
 
     std::vector<int>              select_tokens_id;
     std::vector<std::string>      select_tokens_str;
@@ -133,9 +129,7 @@ public:
     }
 
     bool hasStructuredOutputRequest() const noexcept {
-        // Only typed fields carry grammar in C++; the response_format envelope
-        // is projected to these by Python GenerateConfig.validate before the
-        // request reaches the engine.
+        // Envelope is projected to typed fields by Python GenerateConfig.validate.
         return json_schema.has_value() || regex.has_value() || ebnf.has_value() || structural_tag.has_value();
     }
 

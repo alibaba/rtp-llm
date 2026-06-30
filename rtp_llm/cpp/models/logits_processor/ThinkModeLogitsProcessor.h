@@ -71,9 +71,7 @@ struct StreamThinkInfo {
 
 class ThinkModeLogitsProcessorTestPeer;
 
-// Snapshot of think state published lock-free for spec verifiers. Combines the
-// eligibility flag, the cloned info, and a monotonic version counter so the spec
-// path observes a consistent triple via a single atomic_load.
+// Lock-free snapshot for spec verifiers; consistent triple via single atomic_load.
 struct ThinkModeSpecSnapshot {
     bool            eligible = false;
     StreamThinkInfo info;
@@ -96,7 +94,7 @@ public:
     bool    isSpecVerifyEligible() const override;
     int     tryAcceptAndFillBitmask(const SpecLogitsProcessorRequest& request) override;
     bool    isStateful() const override;
-    int64_t acceptedTokenLen() const override;
+    int64_t committedOutputLen() const override;
 
 private:
     friend class ThinkModeLogitsProcessorTestPeer;
@@ -105,18 +103,12 @@ private:
 
     std::vector<StreamThinkInfo> think_infos_;
     mutable std::mutex           mutex_;
-    // `spec_eligible_` is fixed at construction time: only updateMultiSeqStatus
-    // could resize think_infos_, and that path is only taken for beam search,
-    // which is itself ineligible for spec. So the flag never needs to flip.
-    bool                                          spec_eligible_ = false;
-    std::shared_ptr<const ThinkModeSpecSnapshot>  spec_snapshot_;
-    uint64_t                                      spec_snapshot_version_ = 0;
-    // Lifetime-scoped dedup for forced-end-token out-of-vocab WARN.
-    // Spec path runs per propose step (high-frequency); without dedup a
-    // misconfigured request would flood logs. process() path warns once
-    // per sampler tick which is already low-frequency, but uses the same
-    // flag so the union is "warn at most once per processor lifetime".
-    std::atomic<bool>                             warned_force_oob_{false};
+    // Fixed at construction; only beam-search resizes think_infos_, and beam is spec-ineligible.
+    bool                                         spec_eligible_ = false;
+    std::shared_ptr<const ThinkModeSpecSnapshot> spec_snapshot_;
+    uint64_t                                     spec_snapshot_version_ = 0;
+    // Lifetime-scoped dedup for forced-end-token OOV WARN (spec path is high-frequency).
+    std::atomic<bool> warned_force_oob_{false};
 };
 
 using ThinkModeLogitsProcessorPtr = std::shared_ptr<ThinkModeLogitsProcessor>;

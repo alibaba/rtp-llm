@@ -13,7 +13,7 @@
 #include "rtp_llm/cpp/engine_base/EngineInitParams.h"
 #include "rtp_llm/cpp/engine_base/ProposeModelEngineInitParams.h"
 #include "rtp_llm/cpp/engine_base/WeightsConverter.h"
-#include "rtp_llm/cpp/engine_base/grammar/XGrammarBootstrap.h"
+#include "rtp_llm/cpp/engine_base/grammar/TokenizerInfo.h"
 #include "rtp_llm/cpp/pybind/PyUtils.h"
 #include "rtp_llm/cpp/models/models_weight/W.h"
 #include "rtp_llm/cpp/utils/Logger.h"
@@ -211,28 +211,10 @@ EngineInitParams RtpLLMOp::initModel(py::object model, py::object engine_config,
                                 py_eplb);
         params.nccl_comm_config = engine_config.attr("nccl_comm_config").cast<NcclCommConfig>();
         params.server_config    = engine_config.attr("server_config");
-        params.grammar_config = engine_config.attr("grammar_config").cast<GrammarConfig>();
-        // Cook tokenizer_info_json at the pybind boundary so the grammar subsystem
-        // (LogitsProcessorFactory + XGrammarBackend) stays pure C++. The Python
-        // tokenizer object only lives here.
-        if (params.grammar_config.tokenizer_info_json.empty()) {
-            try {
-                py::object tokenizer = model.attr("tokenizer").attr("tokenizer");
-                auto       vocab =
-                    tokenizer.attr("get_vocab")().cast<std::unordered_map<std::string, int32_t>>();
-                const std::string backend_str =
-                    tokenizer.attr("backend_tokenizer").attr("to_str")().cast<std::string>();
-                const auto stop_ids = collectStopTokenIds(model_config.special_tokens);
-                params.grammar_config.tokenizer_info_json =
-                    buildXGrammarTokenizerInfoJson(vocab, backend_str, stop_ids);
-                RTP_LLM_LOG_INFO("grammar bootstrap: json=%zuB, stop_tokens=%zu",
-                                 params.grammar_config.tokenizer_info_json.size(),
-                                 stop_ids.size());
-            } catch (const std::exception& e) {
-                RTP_LLM_LOG_ERROR("xgrammar bootstrap failed (%s); grammar disabled", e.what());
-                params.grammar_config.tokenizer_info_json = "";
-            }
-        }
+        params.grammar_config   = engine_config.attr("grammar_config").cast<GrammarConfig>();
+        // Cook tokenizer here so grammar (LogitsProcessorFactory + XGrammarBackend) stays pure C++.
+        params.tokenizer_info = TokenizerInfo::fromHuggingFaceTokenizer(
+            model.attr("tokenizer").attr("tokenizer"), model_config.special_tokens, model_config.vocab_size);
         model_id_++;
         if (parallelism_config.tp_rank == 0) {
             // kmon metric init

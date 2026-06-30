@@ -1,11 +1,9 @@
 #pragma once
 
 #include "absl/status/statusor.h"
-#include "c10/core/Event.h"
 #include "rtp_llm/cpp/engine_base/EngineInitParams.h"
 #include "rtp_llm/cpp/engine_base/ProposeModelEngineInitParams.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
-#include "rtp_llm/cpp/models/ModelTypes.h"
 
 namespace rtp_llm {
 
@@ -13,18 +11,8 @@ namespace speculative {
 
 struct SpeculativeSamplerOutput {
 public:
-    torch::Tensor accept_tokens;
-    torch::Tensor accept_len;
-
-    torch::Tensor accept_tokens_cpu;
-    torch::Tensor accept_len_cpu;
-
-    std::shared_ptr<torch::Event> transfer_done_event;
-
-    // Defined in SpeculativeSampler.cc — keeps the cuda_graph shim include out of this
-    // header so CPU/ARM build targets that transitively include SpeculativeSampler.h
-    // don't trip the shim's USING_CUDA/USING_ROCM #error.
-    SpeculativeSamplerOutput();
+    std::vector<torch::Tensor> accept_tokens;
+    std::vector<int>           accept_len;
 };
 
 struct FastTopKSamplerOutput {

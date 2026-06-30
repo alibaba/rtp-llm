@@ -2,6 +2,8 @@
 
 #include <algorithm>
 
+#include "rtp_llm/cpp/models/logits_processor/BitmaskUtils.h"
+#include "rtp_llm/cpp/models/logits_processor/ThinkModeStateMachine.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
 using namespace std;
@@ -10,23 +12,24 @@ namespace rtp_llm {
 
 namespace {
 
+namespace tsm = ::rtp_llm::think_state_machine;
+
 constexpr int32_t kInvalidTokenId = -1;
 
-// Pull the boundary token ids that the masking and spec paths both need.
 struct BoundaryTokens {
     int32_t begin = kInvalidTokenId;
     int32_t end   = kInvalidTokenId;
 
     static BoundaryTokens of(const StreamThinkInfo& info) {
         BoundaryTokens b;
-        if (!info.begin_think_token_ids.empty())
-            b.begin = info.begin_think_token_ids.front();
-        if (!info.end_think_token_ids.empty())
-            b.end = info.end_think_token_ids.front();
+        b.begin = tsm::firstTokenOrInvalid(info.begin_think_token_ids);
+        b.end   = tsm::firstTokenOrInvalid(info.end_think_token_ids);
         return b;
     }
 };
 
+// ThinkMode-concrete action set. InsideThink maps to "mask begin-only";
+// ReasoningGrammar's InsideThink maps to "mask both boundaries + grammar route off".
 enum class MaskAction {
     ALLOW_ALL,
     MASK_BOUNDARIES,
@@ -36,109 +39,33 @@ enum class MaskAction {
 
 struct MaskDecision {
     MaskAction action       = MaskAction::ALLOW_ALL;
-    int32_t    forced_token = kInvalidTokenId;  // valid iff action==FORCE_END_TOKEN
+    int32_t    forced_token = kInvalidTokenId;
 };
 
-bool dfaClosing(const StreamThinkInfo& info) {
-    return info.dfa_ptr && info.dfa_ptr->status() > 0;
-}
-
-// May transition info.process_state (IN_THINK -> CLOSING_THINK / AFTER_THINK).
-MaskDecision decideMask(StreamThinkInfo& info, int tokens_emitted) {
-    // Active thinking ended: drop into AFTER_THINK and forbid further boundary tokens.
-    if (info.dfa_ptr && info.dfa_ptr->isFinished()) {
-        info.process_state = ThinkProcessState::AFTER_THINK;
-    }
-
-    switch (info.process_state) {
-        case ThinkProcessState::NO_THINK:
-        case ThinkProcessState::AFTER_THINK:
+MaskDecision adapt(tsm::ThinkDecision d) {
+    switch (d.action) {
+        case tsm::ThinkDecisionAction::OutsideThink:
             return {MaskAction::MASK_BOUNDARIES, kInvalidTokenId};
-
-        case ThinkProcessState::IN_THINK: {
-            const bool budget_exhausted = info.dfa_ptr && !info.end_think_token_ids.empty()
-                                          && info.max_thinking_tokens > 0 && tokens_emitted >= info.max_thinking_tokens;
-            if (dfaClosing(info) || budget_exhausted) {
-                info.process_state = ThinkProcessState::CLOSING_THINK;
-                // fallthrough into CLOSING_THINK handling below.
-            } else {
-                return {MaskAction::MASK_BEGIN_ONLY, kInvalidTokenId};
-            }
-        }
-            [[fallthrough]];
-        case ThinkProcessState::CLOSING_THINK: {
-            if (!info.dfa_ptr || info.dfa_ptr->isFinished() || info.end_think_token_ids.empty()) {
-                return {MaskAction::MASK_BOUNDARIES, kInvalidTokenId};
-            }
-            const auto next_idx = info.dfa_ptr->status();
-            if (next_idx >= info.end_think_token_ids.size()) {
-                return {MaskAction::MASK_BOUNDARIES, kInvalidTokenId};
-            }
-            return {MaskAction::FORCE_END_TOKEN, info.end_think_token_ids[next_idx]};
-        }
+        case tsm::ThinkDecisionAction::InsideThink:
+            return {MaskAction::MASK_BEGIN_ONLY, kInvalidTokenId};
+        case tsm::ThinkDecisionAction::ForceEndToken:
+            return {MaskAction::FORCE_END_TOKEN, d.forced_token};
+        case tsm::ThinkDecisionAction::MaskBoundaries:
+            return {MaskAction::MASK_BOUNDARIES, kInvalidTokenId};
     }
     return {MaskAction::ALLOW_ALL, kInvalidTokenId};
 }
 
-// Returns true if the token was consumed as a deferred forced-end token.
+// Returns true iff the token was consumed as a deferred forced-end token.
+// ThinkMode policy: front-pop and warn on mismatch (sampler enforced the token).
 bool commitToken(StreamThinkInfo& info, int32_t token_id) {
-    if (!info.pending_forced_think_end_token_ids.empty()) {
-        const int32_t expected = info.pending_forced_think_end_token_ids.front();
-        info.pending_forced_think_end_token_ids.erase(info.pending_forced_think_end_token_ids.begin());
-        if (token_id != expected) {
-            RTP_LLM_LOG_WARNING(
-                "forced think end token mismatch, expected=%d actual=%d, trust precommitted state", expected, token_id);
-        }
+    if (tsm::drainPendingForcedEnd(info, token_id, tsm::PendingMismatchPolicy::PopAndWarn, /*who=*/"")) {
         return true;
     }
 
     info.current_output_length += 1;
-
-    const bool active =
-        info.process_state == ThinkProcessState::IN_THINK || info.process_state == ThinkProcessState::CLOSING_THINK;
-    if (!active || info.max_thinking_tokens <= 0 || !info.dfa_ptr) {
-        return false;
-    }
-
-    info.dfa_ptr->next(token_id);
-    if (info.dfa_ptr->isFinished()) {
-        info.process_state = ThinkProcessState::AFTER_THINK;
-    } else if (dfaClosing(info)) {
-        info.process_state = ThinkProcessState::CLOSING_THINK;
-    } else if (info.process_state == ThinkProcessState::CLOSING_THINK) {
-        info.process_state = ThinkProcessState::IN_THINK;
-    }
+    tsm::advanceThinkDfa(info, token_id);
     return false;
-}
-
-// --- bitmask helpers (packed 32-bit rows, bit=1 means allowed) ---
-
-void bitmaskClear(int32_t* row, size_t words, int32_t token_id) {
-    if (token_id < 0 || static_cast<size_t>(token_id / 32) >= words)
-        return;
-    row[token_id / 32] &= ~(1u << (token_id % 32));
-}
-
-void bitmaskForceOnly(int32_t* row, size_t words, int32_t token_id) {
-    std::fill_n(row, words, 0);
-    if (token_id < 0 || static_cast<size_t>(token_id / 32) >= words)
-        return;
-    row[token_id / 32] |= (1u << (token_id % 32));
-}
-
-bool bitmaskAllows(const int32_t* row, size_t words, int32_t token_id) {
-    if (token_id < 0 || static_cast<size_t>(token_id / 32) >= words)
-        return false;
-    return (static_cast<uint32_t>(row[token_id / 32]) & (1u << (token_id % 32))) != 0u;
-}
-
-// Shared by process() and the spec path: a forced end-think token is only
-// safe if it lies inside the runtime vocab. Both paths downgrade to
-// MASK_BOUNDARIES on failure so a misconfigured per-request override never
-// turns into an all-masked row (which would zero-out the entire spec window
-// or, on the sampler path, mask the full logits to -inf).
-bool forcedTokenInVocab(int32_t fid, size_t vocab_size) {
-    return fid >= 0 && static_cast<size_t>(fid) < vocab_size;
 }
 
 }  // namespace
@@ -150,9 +77,7 @@ ThinkModeLogitsProcessor::ThinkModeLogitsProcessor(std::vector<StreamThinkInfo> 
     publishSpecSnapshotLocked();
 }
 
-// Republishes a snapshot on every process()/updateStatus() tick rather than only
-// on actual state transitions. The snapshot is a small shared_ptr<StreamThinkInfo>
-// and the contained DFA copy is cheap (a small KMP table). Kept simple on purpose.
+// Republishes every tick (small shared_ptr+KMP DFA copy; cheap).
 void ThinkModeLogitsProcessor::publishSpecSnapshotLocked() {
     ++spec_snapshot_version_;
     auto snapshot      = std::make_shared<ThinkModeSpecSnapshot>();
@@ -180,18 +105,12 @@ void ThinkModeLogitsProcessor::process(const SamplerInputs& inputs, size_t start
 
         const int tokens_emitted =
             std::max(sequence_lengths[batch_idx] - input_lengths[batch_idx], info.current_output_length);
-        MaskDecision decision = decideMask(info, tokens_emitted);
+        MaskDecision decision = adapt(tsm::decideThinkMask(info, tokens_emitted));
 
         // FORCE_END_TOKEN may downgrade to MASK_BOUNDARIES if the chosen token id
         // would be out-of-vocab (defensive: misconfigured per-request override).
         if (decision.action == MaskAction::FORCE_END_TOKEN
-            && !forcedTokenInVocab(decision.forced_token, inputs.vocab_size)) {
-            if (!warned_force_oob_.exchange(true, std::memory_order_relaxed)) {
-                RTP_LLM_LOG_WARNING("forceThinkEndToken: end_think_token_id=%d out of vocab_size=%zu; "
-                                    "downgrade to MASK_BOUNDARIES",
-                                    decision.forced_token,
-                                    inputs.vocab_size);
-            }
+            && !tsm::forcedEndTokenUsable(decision.forced_token, inputs.vocab_size, warned_force_oob_, "")) {
             decision.action = MaskAction::MASK_BOUNDARIES;
         }
 
@@ -212,6 +131,11 @@ void ThinkModeLogitsProcessor::process(const SamplerInputs& inputs, size_t start
                 }
                 break;
             case MaskAction::FORCE_END_TOKEN:
+                // Two-phase force-close protocol (paired with updateStatus/commitToken):
+                // memFill locks the sampler to forced_token at mask time, so we pre-advance the
+                // DFA + state and push to pending here; commitToken later front-pops the pending
+                // entry for reconciliation. The next step's mask decision needs the closing
+                // progress reflected now, so this advance cannot move into updateStatus.
                 RTP_LLM_LOG_INFO("sampler enforce think end token");
                 memFill(row, inputs.vocab_size, static_cast<size_t>(decision.forced_token));
                 if (!info.is_beam_search) {
@@ -286,7 +210,7 @@ bool ThinkModeLogitsProcessor::isStateful() const {
     return spec_eligible_;
 }
 
-int64_t ThinkModeLogitsProcessor::acceptedTokenLen() const {
+int64_t ThinkModeLogitsProcessor::committedOutputLen() const {
     auto snapshot = std::atomic_load_explicit(&spec_snapshot_, std::memory_order_acquire);
     if (!snapshot) {
         return 0;
@@ -311,15 +235,11 @@ int ThinkModeLogitsProcessor::tryAcceptAndFillBitmask(const SpecLogitsProcessorR
         std::fill_n(row, W, SpecLogitsProcessor::kBitmaskAllowAll);
 
         const auto   bounds   = BoundaryTokens::of(state);
-        MaskDecision decision = decideMask(state, state.current_output_length);
+        MaskDecision decision = adapt(tsm::decideThinkMask(state, state.current_output_length));
 
-        // Mirror process(): a forced token outside vocab would make
-        // bitmaskForceOnly clear the whole row (all-zero = nothing allowed),
-        // which collapses the spec accept window to cap=offset and silently
-        // bypasses the budget. Downgrade to MASK_BOUNDARIES, same as the
-        // sampler path.
+        // OOV forced token would silently collapse the spec window; downgrade like process().
         if (decision.action == MaskAction::FORCE_END_TOKEN
-            && !forcedTokenInVocab(decision.forced_token, request.vocab_size)) {
+            && !tsm::forcedTokenInVocab(decision.forced_token, request.vocab_size)) {
             if (!warned_force_oob_.exchange(true, std::memory_order_relaxed)) {
                 RTP_LLM_LOG_WARNING("forceThinkEndToken[spec]: end_think_token_id=%d out of vocab_size=%zu; "
                                     "downgrade to MASK_BOUNDARIES",
@@ -333,14 +253,14 @@ int ThinkModeLogitsProcessor::tryAcceptAndFillBitmask(const SpecLogitsProcessorR
             case MaskAction::ALLOW_ALL:
                 break;
             case MaskAction::MASK_BEGIN_ONLY:
-                bitmaskClear(row, W, bounds.begin);
+                clearTokenFromBitmask(row, W, bounds.begin);
                 break;
             case MaskAction::MASK_BOUNDARIES:
-                bitmaskClear(row, W, bounds.begin);
-                bitmaskClear(row, W, bounds.end);
+                clearTokenFromBitmask(row, W, bounds.begin);
+                clearTokenFromBitmask(row, W, bounds.end);
                 break;
             case MaskAction::FORCE_END_TOKEN:
-                bitmaskForceOnly(row, W, decision.forced_token);
+                forceTokenInBitmask(row, W, decision.forced_token);
                 break;
         }
 
@@ -348,7 +268,7 @@ int ThinkModeLogitsProcessor::tryAcceptAndFillBitmask(const SpecLogitsProcessorR
             break;
 
         const int32_t draft_token = request.draft_tokens[offset];
-        if (!bitmaskAllows(row, W, draft_token)) {
+        if (!bitmaskAllowsToken(row, W, draft_token)) {
             cap = offset;
             break;
         }

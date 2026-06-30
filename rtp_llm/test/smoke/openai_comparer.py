@@ -1,20 +1,21 @@
 import copy
 import json
-import logging
-import re
-from typing import Any, Dict, List, Optional, Union
 import os
+from typing import Any, Dict, List, Optional, Union
+
 import torch
 from pydantic import BaseModel
 from smoke.base_comparer import BaseComparer
-from smoke.common_def import QueryStatus, SmokeException, REL_PATH
+from smoke.common_def import REL_PATH, QueryStatus, SmokeException
+from smoke.grammar_constraint_validator import validate_constraint
 from smoke.utils import create_temporary_copy
-from rtp_llm.utils.base_model_datatypes import AuxInfo
+
 from rtp_llm.openai.api_datatype import (
     ChatCompletionRequest,
     ChatCompletionResponse,
     ChatCompletionStreamResponse,
 )
+from rtp_llm.utils.base_model_datatypes import AuxInfo
 
 
 class OpenaiComparer(BaseComparer):
@@ -28,10 +29,12 @@ class OpenaiComparer(BaseComparer):
         return query_info
 
     def format_result(self, result_json: Dict[str, Any]) -> BaseModel:
-        if result_json.get('extra_outputs', None) is not None:
-            path = result_json['extra_outputs'].get('all_hidden_states', None)
+        if result_json.get("extra_outputs", None) is not None:
+            path = result_json["extra_outputs"].get("all_hidden_states", None)
             if path is not None and isinstance(path, str):
-                result_json['extra_outputs']['all_hidden_states'] = torch.load(os.path.join(REL_PATH, path)).numpy().tolist()
+                result_json["extra_outputs"]["all_hidden_states"] = (
+                    torch.load(os.path.join(REL_PATH, path)).numpy().tolist()
+                )
         if self.is_stream:
             return ChatCompletionStreamResponse(**result_json)
         else:
@@ -215,82 +218,38 @@ class OpenaiComparer(BaseComparer):
         lines.append("=" * 60)
         return "\n".join(lines)
 
-    def _maybe_rewrite_expect_result(
-        self,
-        smoke_response: Union[ChatCompletionResponse, ChatCompletionStreamResponse],
-        expect_result: Union[ChatCompletionResponse, ChatCompletionStreamResponse],
-        query_info: ChatCompletionRequest,
+    def _validate_grammar_constraint(
+        self, actual_result: Union[ChatCompletionResponse, ChatCompletionStreamResponse]
     ) -> None:
-        """For grammar smoke cases marked grammar_constraint_only=true: when each
-        actual choice's content satisfies query.response_format, copy the
-        non-deterministic fields (content, reasoning_content, timing, role_addrs)
-        from actual into expect so byte-eq compare passes. If the constraint
-        fails, leave expect untouched so the diff exposes the real bug.
+        """grammar_constraint_only: each choice's content must satisfy response_format.
+
+        Validates the constraint (regex / json_schema / structural_tag), not golden
+        bytes. Raises SmokeException on any violation so the case fails loudly; the
+        actual response is already dumped to smoke_actual/ before this runs.
         """
-        if not self.qr_info.get("grammar_constraint_only"):
-            return
         if self.is_stream:
             return  # streaming smoke for grammar isn't used today; keep simple
         response_format = self.qr_info["query"].get("response_format")
         if not response_format:
             return
         try:
-            self._validate_response_format(smoke_response, response_format)
+            for idx, choice in enumerate(actual_result.choices):
+                validate_constraint(choice.message.content, response_format, idx)
         except Exception as e:
-            logging.warning(
-                "[grammar_constraint_only] constraint check failed: %s", e
-            )
-            return  # expect_result stays untouched; compare_result will diff
-        # constraint passed → mirror non-deterministic fields from actual to expect
-        if len(expect_result.choices) != len(smoke_response.choices):
-            return
-        for i, actual_choice in enumerate(smoke_response.choices):
-            expect_choice = expect_result.choices[i]
-            expect_choice.message.content = actual_choice.message.content
-            expect_choice.message.reasoning_content = (
-                actual_choice.message.reasoning_content
-            )
-        expect_result.created = smoke_response.created
-        # Constraint-only intentionally skips byte-eq on usage / aux_info — they
-        # vary by prompt (input_len, prompt_tokens), hardware (cost_time), and
-        # scheduler (role_addrs). All constraint signal lives in
-        # choices[*].message.content, which is validated above.
-        expect_result.usage = smoke_response.usage
-        expect_result.aux_info = smoke_response.aux_info
-
-    @staticmethod
-    def _validate_response_format(
-        response: ChatCompletionResponse, response_format: Dict[str, Any]
-    ) -> None:
-        rf_type = response_format.get("type")
-        for idx, choice in enumerate(response.choices):
-            content = choice.message.content
-            if content is None:
-                raise ValueError(f"choice[{idx}].message.content is None")
-            if rf_type == "json_schema":
-                schema = (response_format.get("json_schema") or {}).get("schema")
-                if not schema:
-                    raise ValueError("response_format.json_schema.schema missing")
-                import jsonschema
-                jsonschema.validate(json.loads(content), schema)
-            elif rf_type == "regex":
-                pattern = response_format.get("pattern")
-                if not pattern:
-                    raise ValueError("response_format.pattern missing")
-                if not re.fullmatch(pattern, content):
-                    raise ValueError(
-                        f"choice[{idx}] content {content!r} does not match {pattern!r}"
-                    )
-            else:
-                raise ValueError(
-                    f"grammar_constraint_only does not support type={rf_type}"
-                )
+            raise SmokeException(
+                QueryStatus.COMPARE_FAILED,
+                f"[grammar_constraint_only] constraint check failed: {e}",
+            ) from e
 
     def compare_result(
         self,
         expect_result: Union[ChatCompletionResponse, ChatCompletionStreamResponse],
         actual_result: Union[ChatCompletionResponse, ChatCompletionStreamResponse],
     ) -> None:
+        if self.qr_info.get("grammar_constraint_only"):
+            self._validate_grammar_constraint(actual_result)
+            return
+
         diffs: List[str] = []
 
         if type(expect_result) != type(actual_result):
@@ -481,13 +440,15 @@ class OpenaiComparer(BaseComparer):
             return
 
         obj1, obj2 = expect_aux, actual_aux
-        ignore_fields = set([
-            "cost_time",
-            "wait_time",
-            "first_token_cost_time",
-            "role_addrs.http_port",
-            "role_addrs.grpc_port",
-        ])
+        ignore_fields = set(
+            [
+                "cost_time",
+                "wait_time",
+                "first_token_cost_time",
+                "role_addrs.http_port",
+                "role_addrs.grpc_port",
+            ]
+        )
         top_level_ignore = set()
         nested_ignore: Dict[str, set] = {}
         for field in ignore_fields:

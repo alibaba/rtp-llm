@@ -41,10 +41,7 @@ inline void clearTokenFromBitmask(int32_t* bitmask, size_t words, int64_t token_
     bitmask[token_id / 32] &= ~(1u << (token_id % 32));
 }
 
-// Out-of-range token_id violates an upstream invariant (eos / end_think_token_ids
-// must fit within the model vocab bitmask). Caller is expected to validate before
-// reaching here; bail loudly so the misconfiguration is visible at the source
-// instead of producing a silent all-zero (all-disabled) row that deadlocks sampling.
+// Out-of-range token_id is a caller bug; abort instead of returning an all-disabled row.
 inline void forceTokenInBitmask(int32_t* bitmask, size_t words, int64_t token_id) {
     RTP_LLM_CHECK_WITH_INFO(token_id >= 0 && static_cast<size_t>(token_id / 32) < words,
                             "forceTokenInBitmask: token_id %ld out of range (bitmask words=%zu)",

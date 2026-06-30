@@ -1,6 +1,7 @@
 #pragma once
 
 #include <list>
+#include <memory>
 
 #include <torch/all.h>
 #include "absl/status/statusor.h"
@@ -8,6 +9,8 @@
 #include "rtp_llm/cpp/models/SampleInfos.h"
 
 namespace rtp_llm {
+
+class BaseLogitsProcessor;
 
 class NormalSamplerInputGatherer {
 public:
@@ -30,6 +33,13 @@ public:
     void setLogitsProcessorInputs(SamplerInputs&                sampler_inputs,
                                   std::list<GenerateStreamPtr>& all_streams,
                                   bool                          score_batch = false) const;
+
+private:
+    static void insertProcessorState(LogitsProcessorStatesPtr&                   state_ptr,
+                                     const std::shared_ptr<BaseLogitsProcessor>& processor,
+                                     GenerateStreamPtr&                          stream,
+                                     size_t                                      idx,
+                                     int                                         score_len);
 };
 
 }  // namespace rtp_llm

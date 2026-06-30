@@ -121,10 +121,9 @@ public:
 
 private:
     void loadCacheSync();
-    // stream_lock_held=true: caller is on the moveToNext → handleLoading → loadCacheDone
-    // chain and already holds GenerateStream::mutex_, so error reporting must use the
-    // *WithoutLock variant. Non-recursive std::mutex would otherwise self-deadlock.
-    void waitLoadCacheDone(const std::shared_ptr<AsyncContext>& load_context, bool stream_lock_held = false);
+    // Wait for load to complete, log on failure, write back reuse lengths on success.
+    // Does NOT report errors — callers decide whether to terminate, retry, or degrade.
+    void awaitLoadCache(const std::shared_ptr<AsyncContext>& load_context);
     void updateReuseLengthsFromContext(const std::shared_ptr<FusedAsyncReadContext>& read_context);
     std::shared_ptr<AsyncContext> storeCacheAsync(const std::shared_ptr<BatchKVCacheResource>& batch_resource,
                                                   bool                                         enable_memory_cache,

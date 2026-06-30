@@ -129,11 +129,7 @@ static bool applyP2PSideChannelToStream(const std::shared_ptr<FusedAsyncReadCont
     // Apply side-channel data to GenerateStream. Must use updateWithoutLock:
     // moveToNext already holds mutex_ when it reaches us via handleLoading.
     //
-    // first_token_id presence: PrefillRpcServer::remoteGenerate always populates
-    // first_generate_token_id when a payload is produced, so reaching here with a
-    // payload means the field is set. token id 0 is a legitimate model token
-    // (BOS/PAD/byte-fallback collisions in some tokenizers) — using `> 0` as the
-    // existence guard would silently drop it. Accept any non-negative id.
+    // Use `>= 0`: id 0 is a legitimate model token (BOS/PAD collisions).
     if (payload->first_token_id >= 0) {
         stream->setIsContextStream(false);
         stream->step();
@@ -437,7 +433,9 @@ bool StreamCacheResource::loadCacheDone() {
     }
     // 加载完成（无论成功失败），更新 reuse lengths
     // 调用栈：GenerateStream::moveToNext (持 mutex_) → handleLoading → loadCacheDone
-    waitLoadCacheDone(load_cache_context_, /*stream_lock_held=*/true);
+    // 不在 helper 里 reportError：下面要按 match-fail / transfer-fail / 重试耗尽分类，
+    // 提前 reportError 会被 GenerateStateMachine::moveToNext 当成终态，把重试逻辑变成死代码。
+    awaitLoadCache(load_cache_context_);
     if (!load_cache_context_->success()) {
         // 区分匹配失败和传输失败
         auto      read_context = std::dynamic_pointer_cast<FusedAsyncReadContext>(load_cache_context_);
@@ -602,29 +600,26 @@ void StreamCacheResource::loadCacheSync() {
         RTP_LLM_PROFILE_SCOPE("asyncLoadCache");
         load_cache_context = resource_context_.cache_manager->asyncLoadCache(connector_context);
     }
-    waitLoadCacheDone(load_cache_context);
+    awaitLoadCache(load_cache_context);
+    if (load_cache_context && !load_cache_context->success()) {
+        auto error = load_cache_context->errorInfo();
+        if (error.hasError()) {
+            stream_->reportError(error.code(), error.ToString());
+        }
+    }
     // TODO: scheduler will call incrkvblock after load cache, or may lack block on p2p connector
 }
 
-void StreamCacheResource::waitLoadCacheDone(const std::shared_ptr<AsyncContext>& load_context, bool stream_lock_held) {
+void StreamCacheResource::awaitLoadCache(const std::shared_ptr<AsyncContext>& load_context) {
     RTP_LLM_PROFILE_FUNCTION();
     if (!load_context) {
         return;
     }
     load_context->waitDone();
-    if (!(load_context->success())) {
-        auto error = load_context->errorInfo();
-        RTP_LLM_LOG_WARNING(
-            "load cache done but not success, stream: [%ld], error: %s", stream_->streamId(), error.ToString().c_str());
-        if (error.hasError()) {
-            // moveToNext → handleLoading → loadCacheDone path holds mutex_; reportError
-            // would re-lock the non-recursive mutex and self-deadlock.
-            if (stream_lock_held) {
-                stream_->reportErrorWithoutLock(error.code(), error.ToString());
-            } else {
-                stream_->reportError(error.code(), error.ToString());
-            }
-        }
+    if (!load_context->success()) {
+        RTP_LLM_LOG_WARNING("load cache done but not success, stream: [%ld], error: %s",
+                            stream_->streamId(),
+                            load_context->errorInfo().ToString().c_str());
         return;
     }
     auto read_context = std::dynamic_pointer_cast<FusedAsyncReadContext>(load_context);

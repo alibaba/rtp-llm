@@ -2,12 +2,15 @@
 
 #include <algorithm>
 
+#include "rtp_llm/cpp/models/logits_processor/BaseLogitsProcessor.h"
 #include "rtp_llm/cpp/models/logits_processor/BitmaskUtils.h"
-#include "rtp_llm/cpp/models/logits_processor/LogitsProcessorException.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
-#include "rtp_llm/cpp/utils/ErrorCode.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
+#if USING_CUDA
+#include <ATen/cuda/CUDAContext.h>
+#include <c10/cuda/CUDACachingAllocator.h>
+#endif
 
 namespace rtp_llm {
 
@@ -26,6 +29,33 @@ void bitwiseAndBitmaskInplace(int32_t* dst, const int32_t* src, size_t words) {
 }
 
 }  // namespace
+
+void SpecLogitsVerifyRunner::applyMaskToLogits(const torch::Tensor& logits,
+                                               const torch::Tensor& spec_vocab_mask_gpu,
+                                               size_t               vocab_size) {
+    if (!spec_vocab_mask_gpu.defined()) {
+        return;
+    }
+
+    RTP_LLM_CHECK_WITH_INFO(spec_vocab_mask_gpu.device() == logits.device(),
+                            "MTP verify spec mask device (%s) must match logits device (%s)",
+                            spec_vocab_mask_gpu.device().str().c_str(),
+                            logits.device().str().c_str());
+    RTP_LLM_CHECK_WITH_INFO(logits.size(1) >= static_cast<int64_t>(vocab_size),
+                            "MTP verify logits vocab dim (%lld) < vocab_size=%lld",
+                            static_cast<long long>(logits.size(1)),
+                            static_cast<long long>(vocab_size));
+#if USING_CUDA
+    // Spec mask was allocated on a copy stream; pin it to the compute stream.
+    if (spec_vocab_mask_gpu.is_cuda()) {
+        c10::cuda::CUDACachingAllocator::recordStream(
+            spec_vocab_mask_gpu.storage().data_ptr(),
+            at::cuda::getCurrentCUDAStream(spec_vocab_mask_gpu.device().index()));
+    }
+#endif
+    const int64_t V = static_cast<int64_t>(vocab_size);
+    logits.narrow(1, 0, V).masked_fill_(spec_vocab_mask_gpu.narrow(1, 0, V), BaseLogitsProcessor::neg_inf);
+}
 
 void SpecLogitsVerifyRunner::ensureBuffersFit(size_t total_streams,
                                               int    propose_step,
@@ -57,11 +87,7 @@ void SpecLogitsVerifyRunner::ensureBuffersFit(size_t total_streams,
     if (!spec_cap_cpu_.defined() || spec_cap_cpu_.numel() < B) {
         spec_cap_cpu_ = torch::empty({B}, pinned_i32);
     }
-    auto cuda_i32  = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
     auto cuda_bool = torch::TensorOptions().dtype(torch::kBool).device(torch::kCUDA);
-    if (!spec_cap_gpu_.defined() || spec_cap_gpu_.numel() < B) {
-        spec_cap_gpu_ = torch::empty({B}, cuda_i32);
-    }
     if (!disallow_mask_cpu_.defined() || disallow_mask_cpu_.size(0) < rows || disallow_mask_cpu_.size(1) < V) {
         disallow_mask_cpu_ = torch::zeros({rows, V}, pinned_bool);
         last_active_stream_rows_.clear();
@@ -118,7 +144,7 @@ SpecLogitsVerifyRunner::LaunchResult SpecLogitsVerifyRunner::buildInline(const L
     ensureBuffersFit(B, P, V, W);
     bool draft_tokens_materialized = false;
 
-    auto* merged_base        = merged_bitmask_cpu_.data_ptr<int32_t>();
+    auto*        merged_base = merged_bitmask_cpu_.data_ptr<int32_t>();
     const size_t row_words   = static_cast<size_t>(P + 1) * W;
     const size_t buffer_rows = static_cast<size_t>(merged_bitmask_cpu_.size(0)) / static_cast<size_t>(P + 1);
 
@@ -155,43 +181,14 @@ SpecLogitsVerifyRunner::LaunchResult SpecLogitsVerifyRunner::buildInline(const L
         request.bitmask_size_int32 = W;
         request.vocab_size         = V;
 
-        int cap = 0;
-        try {
-            cap = std::max(0, std::min(item.processor->tryAcceptAndFillBitmask(request), P));
-        } catch (const LogitsProcessorException& e) {
-            RTP_LLM_LOG_WARNING("spec verify: stream_id=%llu processor_idx=%zu reported %s",
-                                static_cast<unsigned long long>(item.stream_id),
-                                item.processor_idx,
-                                e.what());
-            if (item.error_sink) {
-                item.error_sink(e.code(), e.what());
-            }
-            cap = 0;
-        } catch (const std::exception& e) {
-            RTP_LLM_LOG_WARNING("spec verify: stream_id=%llu processor_idx=%zu unexpected exception: %s",
-                                static_cast<unsigned long long>(item.stream_id),
-                                item.processor_idx,
-                                e.what());
-            if (item.error_sink) {
-                item.error_sink(ErrorCode::EXECUTION_EXCEPTION,
-                                std::string("spec verify exception: ") + e.what());
-            }
-            cap = 0;
-        } catch (...) {
-            RTP_LLM_LOG_WARNING("spec verify: stream_id=%llu processor_idx=%zu unknown exception",
-                                static_cast<unsigned long long>(item.stream_id),
-                                item.processor_idx);
-            if (item.error_sink) {
-                item.error_sink(ErrorCode::EXECUTION_EXCEPTION, "spec verify unknown exception");
-            }
-            cap = 0;
-        }
+        // Never throws; errors stash on the processor and surface via hasError() later.
+        const int cap = std::max(0, std::min(item.processor->tryAcceptAndFillBitmask(request), P));
 
         auto* merged_row = merged_base + item.stream_idx * row_words;
         bitwiseAndBitmaskInplace(merged_row, proc_mask.data_ptr<int32_t>(), row_words);
         auto* cap_ptr            = spec_cap_cpu_.data_ptr<int32_t>();
         cap_ptr[item.stream_idx] = std::min<int32_t>(cap_ptr[item.stream_idx], cap);
-        result.applied_processors.push_back({item.stream_id, item.processor_idx});
+        result.applied_processors.insert(item.base_id);
         this_active_rows.push_back(item.stream_idx);
     }
 
@@ -214,9 +211,8 @@ SpecLogitsVerifyRunner::LaunchResult SpecLogitsVerifyRunner::buildInline(const L
         return {};
     }
 
-    auto cap_cpu  = spec_cap_cpu_.narrow(0, 0, static_cast<int64_t>(B));
     auto mask_gpu = disallow_mask_gpu_.narrow(0, 0, static_cast<int64_t>(rows)).narrow(1, 0, static_cast<int64_t>(V));
-    auto cap_gpu  = spec_cap_gpu_.narrow(0, 0, static_cast<int64_t>(B));
+    auto cap_cpu  = spec_cap_cpu_.narrow(0, 0, static_cast<int64_t>(B));
 
     for (size_t row : rows_to_reset) {
         upload_row_bool(row);
@@ -224,15 +220,12 @@ SpecLogitsVerifyRunner::LaunchResult SpecLogitsVerifyRunner::buildInline(const L
     for (size_t row : this_active_rows) {
         upload_row_bool(row);
     }
-    cap_gpu.copy_(cap_cpu, /*non_blocking=*/true);
-
     last_active_stream_rows_ = std::move(this_active_rows);
 
-    result.spec_vocab_mask_gpu       = mask_gpu;
-    result.spec_cap_gpu              = cap_gpu;
-    result.has_active_processor      = true;
-    result.spec_vocab_mask_cpu_owner = disallow_mask_cpu_.narrow(0, 0, static_cast<int64_t>(rows))
-                                            .narrow(1, 0, static_cast<int64_t>(V));
+    result.spec_vocab_mask_gpu  = mask_gpu;
+    result.has_active_processor = true;
+    result.spec_vocab_mask_cpu_owner =
+        disallow_mask_cpu_.narrow(0, 0, static_cast<int64_t>(rows)).narrow(1, 0, static_cast<int64_t>(V));
     result.spec_cap_cpu_owner = cap_cpu;
     return result;
 }

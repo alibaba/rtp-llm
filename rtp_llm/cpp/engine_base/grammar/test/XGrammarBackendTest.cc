@@ -77,9 +77,7 @@ TEST(XGrammarBackendTest, CompileMalformedJsonSchemaIsInvalid) {
 }
 
 TEST(XGrammarBackendTest, OversizeKeyStringRejectedAtEntry) {
-    // Caller-controlled payload above kMaxKeyStringBytes must be rejected as
-    // is_invalid without entering either cache, so an adversary cannot amplify
-    // memory by submitting many distinct large blobs.
+    // Oversize payloads must be is_invalid without entering either cache (memory amplification guard).
     XGrammarBackend backend(makeTokenizerInfoJson(), defaultOptions());
     std::string     huge(64 * 1024 + 1, 'x');
     GrammarKeyCpp   key{"json", huge};
@@ -139,6 +137,28 @@ TEST(XGrammarBackendTest, CompiledCacheLruKeepsRecentlyUsed) {
     EXPECT_TRUE(backend.getCached({"json", "k_extra"}));
 }
 
+TEST(XGrammarBackendTest, CompiledCacheRespectsByteBudget) {
+    XGrammarBackend compile_backend(makeTokenizerInfoJson(), defaultOptions());
+    auto            compiled = compile_backend.compileNow({"json", R"({"type":"integer"})"}).compiled;
+    ASSERT_TRUE(compiled);
+
+    GrammarKeyCpp key0{"json", "k0"};
+    GrammarKeyCpp key1{"json", "k1"};
+
+    XGrammarBackendOptions opts = defaultOptions();
+    opts.compiler_cache_bytes =
+        static_cast<int64_t>(XGrammarBackend::compiledEntryBytes(key0.id().size(), compiled) + 1);
+    XGrammarBackend backend(makeTokenizerInfoJson(), opts);
+
+    backend.setCache(key0, compiled);
+    EXPECT_TRUE(backend.getCached(key0));
+
+    backend.setCache(key1, compiled);
+    EXPECT_FALSE(backend.getCached(key0)) << "oldest compiled entry should be evicted by byte budget";
+    EXPECT_TRUE(backend.getCached(key1)) << "newest compiled entry must survive byte-budget eviction";
+    EXPECT_LE(backend.compiled_cache_bytes_, static_cast<size_t>(opts.compiler_cache_bytes));
+}
+
 // Invalid-cache byte budget pins worst-case memory below kMaxInvalidCacheBytes
 // even when the entry-count cap alone would admit much more.
 TEST(XGrammarBackendTest, InvalidCacheRespectsByteBudget) {
@@ -170,15 +190,35 @@ TEST(XGrammarBackendTest, InvalidCacheRespectsByteBudget) {
     EXPECT_TRUE(backend.getCachedInvalid({"json", first_body}).empty()) << "oldest entry must be evicted";
 }
 
-// Oversize keys must be rejected at setCacheInvalid entry — mirrors getOrCompile
-// so callers (e.g. LogitsProcessorFactory) can't punch through the size guard
-// and inflate per-entry bytes past 2*kMaxKeyStringBytes before LRU eviction.
+// setCacheInvalid must reject oversize keys (mirrors getOrCompile size guard).
 TEST(XGrammarBackendTest, InvalidCacheRejectsOversizeKey) {
     XGrammarBackend   backend(makeTokenizerInfoJson(), defaultOptions());
     const std::string huge_key(XGrammarBackend::kMaxKeyStringBytes + 1, 'k');
     backend.setCacheInvalid({"json", huge_key}, "boom");
-    EXPECT_TRUE(backend.getCachedInvalid({"json", huge_key}).empty())
-        << "oversize key must not enter invalid_cache_";
+    EXPECT_TRUE(backend.getCachedInvalid({"json", huge_key}).empty()) << "oversize key must not enter invalid_cache_";
+}
+
+// invalid → valid → invalid: bytes counter must return to a per-entry value,
+// not accumulate phantom bytes from the dropped invalid on the valid transition.
+TEST(XGrammarBackendTest, InvalidCacheBytesAccountedOnValidTransition) {
+    XGrammarBackend     backend(makeTokenizerInfoJson(), defaultOptions());
+    const GrammarKeyCpp key{"json", R"({"type":"integer"})"};
+    const std::string   err = "boom";
+
+    backend.setCacheInvalid(key, err);
+    const size_t expected = XGrammarBackend::invalidEntryBytes(key.id().size(), err.size());
+    EXPECT_EQ(backend.invalid_cache_bytes_, expected);
+
+    auto compiled = backend.compileNow(key).compiled;
+    ASSERT_TRUE(compiled);
+    backend.setCache(key, compiled);
+    EXPECT_EQ(backend.compiled_cache_bytes_, XGrammarBackend::compiledEntryBytes(key.id().size(), compiled));
+    EXPECT_EQ(backend.invalid_cache_bytes_, 0u) << "valid transition must zero out the invalid byte counter";
+
+    backend.setCacheInvalid(key, err);
+    EXPECT_EQ(backend.compiled_cache_bytes_, 0u) << "invalid transition must zero out the valid byte counter";
+    EXPECT_EQ(backend.invalid_cache_bytes_, expected)
+        << "second invalid must not stack with stale bytes from the first";
 }
 
 // Oversize error_messages get truncated before they enter invalid_cache_, so

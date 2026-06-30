@@ -5,7 +5,6 @@ cc_library(
     name = "sample_infos",
     hdrs = [
         "SampleInfos.h",
-        "SpecLogitsProcessorTypes.h",
     ],
     deps = [
         "//:rtp_compute_ops",
@@ -45,23 +44,21 @@ cc_library(
     visibility = ["//visibility:public"],
 )
 
-# Logits processor - model output processing.
-# The grammar-constrained processors are co-located here so that
-# LogitsProcessorFactory can dispatch structured-output requests directly
-# without a runtime plug-in hook (see dsv4 composition root).
+# Grammar processors co-located so LogitsProcessorFactory dispatches without a runtime plug-in hook.
 cc_library(
     name = "logits_processor",
     hdrs = [
         "logits_processor/BaseLogitsProcessor.h",
-        "logits_processor/LogitsProcessorException.h",
         "logits_processor/SpecLogitsProcessor.h",
         "logits_processor/MultiSeqLogitsProcessor.h",
         "logits_processor/LogitsProcessorStates.h",
         "logits_processor/ThinkModeLogitsProcessor.h",
+        "logits_processor/ThinkModeStateMachine.h",
         "logits_processor/TreeLogitsProcessor.h",
         "logits_processor/RecommendationLogitsProcessor.h",
         "logits_processor/LogitsProcessorFactory.h",
         "logits_processor/GrammarLogitsProcessor.h",
+        "logits_processor/GrammarMaskCore.h",
         "logits_processor/ReasoningGrammarLogitsProcessor.h",
         "logits_processor/SpecLogitsVerifyRunner.h",
         "logits_processor/BitmaskUtils.h",
@@ -71,10 +68,12 @@ cc_library(
         "logits_processor/MultiSeqLogitsProcessor.cc",
         "logits_processor/LogitsProcessorStates.cc",
         "logits_processor/ThinkModeLogitsProcessor.cc",
+        "logits_processor/ThinkModeStateMachine.cc",
         "logits_processor/TreeLogitsProcessor.cc",
         "logits_processor/RecommendationLogitsProcessor.cc",
         "logits_processor/LogitsProcessorFactory.cc",
         "logits_processor/GrammarLogitsProcessor.cc",
+        "logits_processor/GrammarMaskCore.cc",
         "logits_processor/ReasoningGrammarLogitsProcessor.cc",
         "logits_processor/SpecLogitsVerifyRunner.cc",
     ],
@@ -162,10 +161,7 @@ cc_library(
         "//rtp_llm/models_py/bindings/core:cache_store_async_writer",
         "//rtp_llm/cpp/utils:debug_utils",
         "//rtp_llm/cpp/utils:profiling_scope",
-        # cuda_graph_base is platform-agnostic struct definitions used by
-        # PyWrappedModel.h (GraphParams/CudaGraphState); safe on all platforms.
-        # cuda_graph_impl/cuda_graph_hdrs_lib pull in the device-specific
-        # runner srcs/headers and only link on CUDA/ROCm.
+        # cuda_graph_base = platform-agnostic structs; cuda_graph_impl/hdrs_lib are CUDA/ROCm-only.
         "//rtp_llm/cpp/cuda_graph:cuda_graph_base",
         "//rtp_llm/models_py/bindings/common:fuse_copy_op",
         "//rtp_llm/cpp/multimodal_processor:multimodal_types",

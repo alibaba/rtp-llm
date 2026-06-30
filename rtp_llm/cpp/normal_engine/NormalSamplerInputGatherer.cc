@@ -1,10 +1,10 @@
-#include <algorithm>
 #include <cstring>
 #include "torch/all.h"
 #include "rtp_llm/cpp/normal_engine/NormalSamplerInputGatherer.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
+#include "rtp_llm/cpp/models/logits_processor/BaseLogitsProcessor.h"
 #include "rtp_llm/cpp/models/logits_processor/LogitsProcessorStates.h"
-#include "rtp_llm/cpp/models/logits_processor/SpecLogitsProcessor.h"
+#include "rtp_llm/cpp/utils/ErrorCode.h"
 #include "rtp_llm/cpp/utils/TensorDebugUtils.h"
 
 namespace rtp_llm {
@@ -15,10 +15,10 @@ absl::StatusOr<SamplerInputs> NormalSamplerInputGatherer::gather(const StreamGro
     (void)model_inputs;
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
     RTP_LLM_CHECK(!stream_groups.empty());
-    auto all_streams          = stream_groups.allStreams();
-    auto total_batch_size_in  = stream_groups.totalSamplerBatchSizeIn();
-    auto total_batch_size_out = stream_groups.totalSamplerBatchSizeOut();
-    ReturnAllProbsMode return_all_probs = stream_groups.needReturnAllProbs();
+    auto               all_streams          = stream_groups.allStreams();
+    auto               total_batch_size_in  = stream_groups.totalSamplerBatchSizeIn();
+    auto               total_batch_size_out = stream_groups.totalSamplerBatchSizeOut();
+    ReturnAllProbsMode return_all_probs     = stream_groups.needReturnAllProbs();
 
     SamplerInputs sampler_inputs = allocateSamplerInputs(stream_groups, total_batch_size_in, total_batch_size_out);
     fillSamplerCommonInputs(sampler_inputs, all_streams);
@@ -198,52 +198,51 @@ void NormalSamplerInputGatherer::fillSamplerCommonInputs(SamplerInputs&         
     }
 }
 
+void NormalSamplerInputGatherer::insertProcessorState(LogitsProcessorStatesPtr&                    state_ptr,
+                                                      const std::shared_ptr<BaseLogitsProcessor>& processor,
+                                                      GenerateStreamPtr&                           stream,
+                                                      size_t                                       idx,
+                                                      int                                          score_len) {
+    switch (processor->scoreBatchRole()) {
+        case ScoreBatchRole::kStatelessProcess:
+            for (int i = 0; i < score_len; ++i) {
+                state_ptr->insert(processor, idx + i, idx + i + 1);
+            }
+            break;
+        case ScoreBatchRole::kSpecVerify:
+            break;
+        case ScoreBatchRole::kIncompatible:
+            stream->reportError(ErrorCode::INVALID_PARAMS,
+                                "stateful logits processor lacks spec-verify coverage in "
+                                "score_batch decoding");
+            break;
+    }
+}
+
 void NormalSamplerInputGatherer::setLogitsProcessorInputs(SamplerInputs&                sampler_inputs,
                                                           std::list<GenerateStreamPtr>& all_streams,
                                                           bool                          score_batch) const {
     LogitsProcessorStatesPtr state_ptr = std::make_shared<LogitsProcessorStates>();
-    std::for_each(all_streams.begin(), all_streams.end(), [&state_ptr, score_batch, idx = 0](auto& stream) mutable {
-        const auto                    stream_id   = static_cast<uint64_t>(stream->streamId());
-        std::weak_ptr<GenerateStream> stream_weak = stream;
-        // Sink keeps logits_processor decoupled from GenerateStream (avoids the
-        // logits_processor → stream → logits_processor Bazel cycle).
-        auto make_sink = [stream_weak]() {
-            return LogitsProcessorStates::ErrorSink([stream_weak](ErrorCode code, const std::string& msg) {
-                if (auto s = stream_weak.lock()) {
-                    s->reportError(code, msg);
-                }
-            });
-        };
+    size_t                   idx       = 0;
+    for (auto& stream : all_streams) {
         if (score_batch) {
-            const int score_len     = static_cast<int>(stream->scoreLen());
-            size_t    processor_idx = 0;
-            for (const auto& processor : stream->getAllLogitsProcessorPtr()) {
-                if (!processor || processor->isStateful()) {
-                    ++processor_idx;
-                    continue;
-                }
-                for (int i = 0; i < score_len; ++i) {
-                    state_ptr->insert(processor, idx + i, idx + i + 1, stream_id, processor_idx, make_sink());
-                }
-                ++processor_idx;
-            }
-            idx += score_len;
-        } else {
-            size_t processor_idx = 0;
+            const int score_len = static_cast<int>(stream->scoreLen());
             for (const auto& processor : stream->getAllLogitsProcessorPtr()) {
                 if (processor) {
-                    state_ptr->insert(processor,
-                                      idx,
-                                      idx + stream->currentBatchSize(),
-                                      stream_id,
-                                      processor_idx,
-                                      make_sink());
+                    NormalSamplerInputGatherer::insertProcessorState(state_ptr, processor, stream, idx, score_len);
                 }
-                ++processor_idx;
             }
-            idx += stream->currentBatchSize();
+            idx += static_cast<size_t>(score_len);
+        } else {
+            const size_t batch_size = stream->currentBatchSize();
+            for (const auto& processor : stream->getAllLogitsProcessorPtr()) {
+                if (processor) {
+                    state_ptr->insert(processor, idx, idx + batch_size);
+                }
+            }
+            idx += batch_size;
         }
-    });
+    }
     sampler_inputs.logits_processor_states_ptr = state_ptr;
 }
 

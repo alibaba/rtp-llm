@@ -384,6 +384,85 @@
                 "_comment": "constraint_only — content/usage/aux_info filled in from actual when schema validates"
             },
             "_comment": "complex_schema (no-thinking, MTP) — nested object + enum × 3 + pattern × 3 + bounded array. Prompt is a natural-language ticket description that does NOT mention 'JSON' or any schema field. Without xgrammar masking the model will: (1) prefix with explanation/markdown fence, (2) hallucinate ticket_id format, (3) emit free-text severity ('Severe', 'major'), (4) skip the nested phone pattern, (5) drop required actions[] or exceed maxItems=3. Each of those is rejected by jsonschema.validate. This case fails open under any grammar bug that lets a single token escape the mask."
+        },
+        {
+            "endpoint": "/v1/chat/completions",
+            "query": {
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": "你不用调用天气查询工具"
+                    },
+                    {
+                        "role": "user",
+                        "content": "你吃饭了么"
+                    }
+                ],
+                "response_format": {
+                    "type": "structural_tag",
+                    "structural_tag": {
+                        "type": "structural_tag",
+                        "format": {
+                            "type": "triggered_tags",
+                            "triggers": ["<tool_call>"],
+                            "tags": [
+                                {
+                                    "type": "tag",
+                                    "begin": "<tool_call>get_current_weather",
+                                    "content": {
+                                        "type": "json_schema",
+                                        "json_schema": {
+                                            "type": "object",
+                                            "properties": {
+                                                "location": {
+                                                    "type": "string",
+                                                    "description": "城市 杭州市、余杭区"
+                                                }
+                                            },
+                                            "required": ["location"]
+                                        },
+                                        "style": "glm_xml"
+                                    },
+                                    "end": "</tool_call>"
+                                }
+                            ],
+                            "at_least_one": true,
+                            "stop_after_first": false,
+                            "excludes": ["<think>", "</think>"]
+                        }
+                    }
+                },
+                "max_tokens": 256,
+                "temperature": 0.0,
+                "top_p": 1.0,
+                "stream": false,
+                "extra_configs": {
+                    "chat_template_kwargs": {
+                        "enable_thinking": false
+                    }
+                }
+            },
+            "result": {
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": "",
+                            "reasoning_content": null
+                        },
+                        "finish_reason": "stop"
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 0,
+                    "total_tokens": 0,
+                    "completion_tokens": 0
+                },
+                "aux_info": null,
+                "_comment": "constraint_only placeholder — actual is validated against the structural_tag constraint, not compared byte-for-byte."
+            },
+            "_comment": "triggered_tags ACTIVE-constraint test — at_least_one=true forces the grammar to emit at least one complete <tool_call>get_current_weather...{glm_xml location}...</tool_call> tag EVEN THOUGH the system msg ('你不用调用天气查询工具') and the off-topic prompt ('你吃饭了么') push the model away from tool use. The validator asserts: (1) excludes <think>/</think> never appear; (2) every <tool_call> trigger completes into a well-formed tag whose inner glm_xml payload carries the required 'location' key; (3) no bare/uncompleted trigger leaks into the free text. Any token escaping the structural-tag mask breaks one of these."
         }
     ]
 }

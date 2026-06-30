@@ -45,16 +45,13 @@ py_library(
             "//rtp_llm/models_py/triton_kernels:triton_kernels",
         ] + flashinfer + deep,
         "@//:using_ppu": [
-            # modules/base/__init__.py unconditionally imports cuda/moe_gating
-            # on non-ROCm; that file pulls triton_kernels.common. PPU has triton
-            # but does not inherit using_cuda12, so wire the dep explicitly.
+            # PPU has triton but doesn't inherit using_cuda12; modules/base imports triton_kernels.common.
             "//rtp_llm/models_py/triton_kernels:triton_kernels",
         ] + deep,
         "@//:using_rocm": [
             "//rtp_llm/models_py/modules/base/rocm:rocm_base",
             "//rtp_llm/models_py/modules/base/rocm:trt_allreduce",
-            # rocm/routers/pure_tp_router.py + mori_ep_intranode_router.py
-            # top-level import triton_kernels.moe.*.
+            # rocm/routers/*.py top-level import triton_kernels.moe.*.
             "//rtp_llm/models_py/triton_kernels:moe",
         ],
         "//conditions:default": [],

@@ -102,10 +102,7 @@ void RtpGrammarMatcher::rollback(int n) {
         return;
     }
 
-    // Only the post-think-end portion of the count corresponds to xgrammar accepts;
-    // pre-think-end tokens are absorbed by the reasoner state alone. Reasoner state
-    // is NOT touched — callers that need to undo reasoner transitions snapshot/restore
-    // via reasonerSnapshot() / restoreReasoner().
+    // Only post-think-end tokens reach xgrammar; reasoner KMP state is untouched here.
     const int active_steps = require_reasoning_ ? std::min<int>(n, std::max<int>(0, tokens_after_think_end_)) : n;
     if (active_steps > 0) {
         matcher_->Rollback(active_steps);
@@ -142,7 +139,7 @@ size_t RtpGrammarMatcher::nextThinkEndMatchPos(int32_t token_id) const noexcept 
     if (token_id == think_end_token_ids_[pos]) {
         return pos + 1;
     }
-    return token_id == think_end_token_ids_.front() ? 1 : 0;
+    return 0;
 }
 
 }  // namespace rtp_llm

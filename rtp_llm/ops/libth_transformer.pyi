@@ -2,7 +2,7 @@ from __future__ import annotations
 import libth_transformer_config
 import torch
 import typing
-__all__: list[str] = ['EmbeddingCppOutput', 'MultimodalInput', 'RtpEmbeddingOp', 'RtpLLMOp', 'TypedOutput']
+__all__: list[str] = ['EmbeddingCppOutput', 'RtpEmbeddingOp', 'RtpLLMOp', 'TypedOutput']
 class EmbeddingCppOutput:
     output: TypedOutput
     def __init__(self) -> None:
@@ -25,7 +25,7 @@ class RtpLLMOp:
         ...
     def init(self, model: typing.Any, engine_config: typing.Any, vit_config: typing.Any, propose_model: typing.Any, token_processor: typing.Any, mm_process_engine: typing.Any) -> None:
         ...
-    def start_http_server(self, model_weights_loader: typing.Any, world_info: typing.Any, tokenizer: typing.Any, render: typing.Any) -> None:
+    def start_http_server(self, model_weights_loader: typing.Any, lora_infos: typing.Any, world_info: typing.Any, tokenizer: typing.Any, render: typing.Any) -> None:
         ...
     def stop(self) -> None:
         ...

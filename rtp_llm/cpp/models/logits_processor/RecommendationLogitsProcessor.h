@@ -82,6 +82,16 @@ public:
     void updateMultiSeqStatus(const std::vector<int>& src_batch_indices) override;
     void updateStatus(const torch::Tensor& new_tokens, int32_t num_new_tokens) override;
 
+    // mask depends on pos_in_combo / prefix advanced by updateStatus — skip in MTP score_batch.
+    bool isStateful() const override {
+        return true;
+    }
+
+    // All infos advance current_output_length together in updateStatus(); take any.
+    int64_t committedOutputLen() const override {
+        return infos_.empty() ? 0 : static_cast<int64_t>(infos_.front().current_output_length);
+    }
+
 public:
     size_t size() const {
         return infos_.size();

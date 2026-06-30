@@ -10,14 +10,8 @@
 
 namespace rtp_llm {
 
-// Thin adapter over xgrammar::GrammarMatcher; one per stream, single sampler thread.
-//
-// When require_reasoning_ is set, the matcher tracks an in-stream think-body window:
-// while inside the body the parser is frozen and fillBitmask returns false (caller
-// emits an allow-all mask); once the think_end token sequence is matched (KMP), the
-// matcher transitions to grammar-active and accepts/masks every subsequent token.
-// rollback() unwinds both the parser and the reasoner state so MTP verify can DFS
-// past the think boundary safely.
+// Per-stream xgrammar::GrammarMatcher adapter. With require_reasoning_, the parser
+// is frozen inside the think body and resumes once the think_end KMP match completes.
 class RtpGrammarMatcher {
 public:
     RtpGrammarMatcher(std::shared_ptr<xgrammar::CompiledGrammar> compiled,
@@ -45,11 +39,8 @@ public:
     }
 
     bool isTerminated() const;
-    // Rolls back xgrammar by the count of xgrammar-accepted tokens within the
-    // last n accepts (passthrough tokens are absorbed by the reasoner only).
-    // Reasoner KMP state is NOT touched here — callers that need to undo the
-    // reasoner transitions must take a snapshot via reasonerSnapshot() before
-    // accepting and pass it to restoreReasoner() after rollback().
+    // Rolls back xgrammar by the count of xgrammar-accepted tokens in the last n.
+    // Reasoner KMP state is untouched — pair with reasonerSnapshot/restoreReasoner.
     void rollback(int n);
 
     struct ReasonerSnapshot {

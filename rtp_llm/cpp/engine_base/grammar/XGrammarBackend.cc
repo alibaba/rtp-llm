@@ -1,7 +1,6 @@
 #include "rtp_llm/cpp/engine_base/grammar/XGrammarBackend.h"
 
 #include <algorithm>
-#include <cassert>
 #include <chrono>
 #include <functional>
 #include <mutex>
@@ -16,6 +15,8 @@
 #include "autil/legacy/json.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/engine_base/grammar/RtpGrammarMatcher.h"
+#include "rtp_llm/cpp/engine_base/grammar/TokenizerInfo.h"
+#include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
 namespace rtp_llm {
@@ -127,9 +128,7 @@ XGrammarBackendOptions backendOptionsFromConfig(const GrammarConfig& cfg) {
     opts.strict_mode           = true;
     opts.max_compiler_threads  = std::max(1, cfg.num_workers);
     opts.enable_compiler_cache = true;
-    // <=0 = unlimited (passes -1 through to xgrammar). Bounding the byte cap
-    // keeps adversarial unique-schema streams from pinning GBs in xgrammar's
-    // internal compiler cache — the outer LRU only bounds entry count.
+    // <=0 = unlimited; bounds adversarial unique-schema streams in xgrammar's compile cache.
     opts.compiler_cache_bytes = cfg.compiler_cache_bytes > 0 ? cfg.compiler_cache_bytes : -1;
     if (!cfg.override_stop_tokens.empty()) {
         opts.override_stop_tokens = cfg.override_stop_tokens;
@@ -138,20 +137,22 @@ XGrammarBackendOptions backendOptionsFromConfig(const GrammarConfig& cfg) {
 }
 }  // namespace
 
-std::shared_ptr<XGrammarBackend> XGrammarBackend::fromConfig(const GrammarConfig& cfg) noexcept {
+std::shared_ptr<XGrammarBackend> XGrammarBackend::create(const TokenizerInfo& tokenizer_info,
+                                                         const GrammarConfig& cfg) noexcept {
     try {
-        if (cfg.tokenizer_info_json.empty()) {
-            RTP_LLM_LOG_INFO("XGrammarBackend::fromConfig: structured output disabled (tokenizer_info_json empty)");
+        if (tokenizer_info.empty()) {
+            RTP_LLM_LOG_INFO("XGrammarBackend::create: structured output disabled (TokenizerInfo empty)");
             return nullptr;
         }
+        const std::string&     opaque  = TokenizerInfo::BackendAccess::opaque(tokenizer_info);
         XGrammarBackendOptions opts    = backendOptionsFromConfig(cfg);
-        auto                   backend = std::make_shared<XGrammarBackend>(cfg.tokenizer_info_json, opts);
-        RTP_LLM_LOG_INFO("XGrammarBackend::fromConfig: ready (override_stop_tokens=%zu, threads=%d)",
+        auto                   backend = std::make_shared<XGrammarBackend>(opaque, opts);
+        RTP_LLM_LOG_INFO("XGrammarBackend::create: ready (override_stop_tokens=%zu, threads=%d)",
                          cfg.override_stop_tokens.size(),
                          opts.max_compiler_threads);
         return backend;
     } catch (const std::exception& e) {
-        RTP_LLM_LOG_ERROR("XGrammarBackend::fromConfig: build threw (%s); disabling grammar", e.what());
+        RTP_LLM_LOG_ERROR("XGrammarBackend::create: build threw (%s); disabling grammar", e.what());
         return nullptr;
     }
 }
@@ -219,31 +220,35 @@ void XGrammarBackend::setCache(const GrammarKeyCpp& key, std::shared_ptr<xgramma
 
     // Drop any invalid entry for this key (it just compiled successfully).
     if (auto iit = invalid_cache_.find(kid); iit != invalid_cache_.end()) {
+        invalid_cache_bytes_ -= invalidEntryBytes(kid.size(), iit->second.error_message.size());
         invalid_lru_.erase(iit->second.lru_it);
         invalid_cache_.erase(iit);
     }
 
     if (auto it = cache_.find(kid); it != cache_.end()) {
+        compiled_cache_bytes_ -= compiledEntryBytes(kid.size(), it->second.compiled);
         it->second.compiled = std::move(compiled);
+        compiled_cache_bytes_ += compiledEntryBytes(kid.size(), it->second.compiled);
         cache_lru_.splice(cache_lru_.begin(), cache_lru_, it->second.lru_it);
     } else {
         cache_lru_.push_front(kid);
+        compiled_cache_bytes_ += compiledEntryBytes(kid.size(), compiled);
         cache_[kid] = CompiledEntry{std::move(compiled), cache_lru_.begin()};
     }
 
-    while (cache_.size() > kMaxCompiledCacheEntries) {
+    const size_t max_compiled_cache_bytes = maxCompiledCacheBytes();
+    while (cache_.size() > kMaxCompiledCacheEntries || compiled_cache_bytes_ > max_compiled_cache_bytes) {
         const std::string victim = cache_lru_.back();  // LRU
         cache_lru_.pop_back();
-        cache_.erase(victim);
+        auto vit = cache_.find(victim);
+        compiled_cache_bytes_ -= compiledEntryBytes(victim.size(), vit->second.compiled);
+        cache_.erase(vit);
     }
 }
 
 void XGrammarBackend::setCacheInvalid(const GrammarKeyCpp& key, const std::string& error_message) {
-    // Mirror getOrCompile: oversize keys MUST NOT enter invalid_cache_. Otherwise N
-    // distinct >kMaxKeyStringBytes blobs would each cost ~2*key_size in the LRU
-    // before the byte cap evicts them, letting an attacker briefly inflate memory
-    // far above kMaxInvalidCacheBytes. This is the load-bearing invariant; guard
-    // here so callers can't violate it.
+    // Mirror getOrCompile: oversize keys MUST NOT enter invalid_cache_ (load-bearing
+    // memory invariant; otherwise N distinct >64KB blobs spike memory before LRU evicts).
     if (key.key_string.size() > kMaxKeyStringBytes) {
         return;
     }
@@ -252,25 +257,23 @@ void XGrammarBackend::setCacheInvalid(const GrammarKeyCpp& key, const std::strin
                                 error_message.substr(0, kMaxErrorMessageBytes) + "...[truncated]" :
                                 error_message;
 
-    // Each entry contributes one kid copy in the map key and one in the LRU node.
-    auto entry_bytes = [](size_t kid_size, size_t msg_size) { return 2 * kid_size + msg_size; };
-
     std::lock_guard<std::mutex> lock(cache_mutex_);
 
     // Drop any compiled entry for this key (now known invalid).
     if (auto cit = cache_.find(kid); cit != cache_.end()) {
+        compiled_cache_bytes_ -= compiledEntryBytes(kid.size(), cit->second.compiled);
         cache_lru_.erase(cit->second.lru_it);
         cache_.erase(cit);
     }
 
     if (auto it = invalid_cache_.find(kid); it != invalid_cache_.end()) {
-        invalid_cache_bytes_ -= entry_bytes(kid.size(), it->second.error_message.size());
+        invalid_cache_bytes_ -= invalidEntryBytes(kid.size(), it->second.error_message.size());
         it->second.error_message = std::move(err);
-        invalid_cache_bytes_ += entry_bytes(kid.size(), it->second.error_message.size());
+        invalid_cache_bytes_ += invalidEntryBytes(kid.size(), it->second.error_message.size());
         invalid_lru_.splice(invalid_lru_.begin(), invalid_lru_, it->second.lru_it);
     } else {
         invalid_lru_.push_front(kid);
-        invalid_cache_bytes_ += entry_bytes(kid.size(), err.size());
+        invalid_cache_bytes_ += invalidEntryBytes(kid.size(), err.size());
         invalid_cache_[kid] = InvalidEntry{std::move(err), invalid_lru_.begin()};
     }
 
@@ -279,7 +282,7 @@ void XGrammarBackend::setCacheInvalid(const GrammarKeyCpp& key, const std::strin
         const std::string victim = std::move(invalid_lru_.back());
         invalid_lru_.pop_back();
         auto vit = invalid_cache_.find(victim);
-        invalid_cache_bytes_ -= entry_bytes(victim.size(), vit->second.error_message.size());
+        invalid_cache_bytes_ -= invalidEntryBytes(victim.size(), vit->second.error_message.size());
         invalid_cache_.erase(vit);
     }
 }
@@ -345,15 +348,9 @@ CompileResult XGrammarBackend::compileNow(const GrammarKeyCpp& key) {
     return result;
 }
 
-// Synchronous: cache hit returns instantly; misses compile inline on the calling
-// thread, then publish to the LRU caches. Two callers racing on the same fresh
-// key may each compile, but xgrammar::GrammarCompiler dedups identical grammars
-// in its own cache so the duplicate work is bounded; both observe consistent
-// compiled artifacts afterwards via setCache's last-writer-wins semantics.
+// Synchronous; same-key races dedup inside xgrammar::GrammarCompiler (last-writer-wins).
 CompileResult XGrammarBackend::getOrCompile(const GrammarKeyCpp& key) {
-    // Reject oversize payloads before they touch the cache or compiler. Treat
-    // as is_invalid (request-level error) but do NOT enter invalid_cache_,
-    // otherwise an attacker could fill the cache with N distinct >64KB blobs.
+    // Reject oversize payloads before cache/compiler; do NOT cache (memory amplification).
     if (key.key_string.size() > kMaxKeyStringBytes) {
         CompileResult result;
         result.is_invalid    = true;
@@ -382,9 +379,7 @@ CompileResult XGrammarBackend::getOrCompile(const GrammarKeyCpp& key) {
         }
     }
 
-    // Compile outside cache_mutex_ — xgrammar takes its own internal locks and
-    // can be slow on adversarial schemas; holding cache_mutex_ across it would
-    // block every other reader, including cache hits.
+    // Compile outside cache_mutex_ — would block cache hits during slow compiles.
     CompileResult result;
     try {
         result = compileNow(key);
@@ -410,7 +405,7 @@ std::shared_ptr<RtpGrammarMatcher> XGrammarBackend::createMatcher(std::shared_pt
                                                                   bool                            require_reasoning,
                                                                   std::optional<std::vector<int>> think_end_token_ids,
                                                                   bool terminate_without_stop_token) {
-    assert(compiled && "createMatcher requires a non-null CompiledGrammar");
+    RTP_LLM_CHECK_WITH_INFO(compiled != nullptr, "createMatcher requires a non-null CompiledGrammar");
     return std::make_shared<RtpGrammarMatcher>(std::move(compiled),
                                                require_reasoning,
                                                std::move(think_end_token_ids),
@@ -425,6 +420,7 @@ void XGrammarBackend::clear() {
         invalid_cache_.clear();
         cache_lru_.clear();
         invalid_lru_.clear();
+        compiled_cache_bytes_ = 0;
         invalid_cache_bytes_ = 0;
     }
     compiler_.ClearCache();

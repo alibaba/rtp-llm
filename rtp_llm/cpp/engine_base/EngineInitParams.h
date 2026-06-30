@@ -9,6 +9,7 @@
 #include "rtp_llm/cpp/config/EplbConfig.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/config/ModelConfig.h"
+#include "rtp_llm/cpp/engine_base/grammar/TokenizerInfo.h"
 #include "kmonitor/client/MetricsReporter.h"
 
 namespace th = torch;
@@ -114,10 +115,9 @@ struct EngineInitParams {
     py::object                  py_eplb;
     py::object                  py_sp_model;
     py::object                  weight_manager;
-    // Grammar/structured-output config. tokenizer_info_json is filled in by
-    // RtpLLMOp::initModel from the loaded model's tokenizer; if it stays empty,
-    // grammar is disabled.
+    // Cooked at pybind boundary (RtpLLMOp::initModel); empty disables grammar.
     GrammarConfig                grammar_config;
+    TokenizerInfo                tokenizer_info;
     kmonitor::MetricsReporterPtr metrics_reporter = nullptr;
 
 public:

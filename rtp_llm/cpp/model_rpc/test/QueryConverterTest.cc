@@ -201,9 +201,7 @@ TEST_F(QueryConverterTest, TransTensorPB_UnsupportedType) {
     EXPECT_THROW(QueryConverter::transTensorPB(&tensor_pb, tensor), std::runtime_error);
 }
 
-// Typed grammar fields (json_schema / regex / ebnf / structural_tag) flow
-// through the wire as google.protobuf.StringValue and reach GenerateConfig as
-// Optional<string>.
+// Typed grammar fields wire as google.protobuf.StringValue → Optional<string>.
 TEST_F(QueryConverterTest, GrammarTypedFieldsAreAccepted) {
     GenerateInputPB input;
     input.add_token_ids(0);

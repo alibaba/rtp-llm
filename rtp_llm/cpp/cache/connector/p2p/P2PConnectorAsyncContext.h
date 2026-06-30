@@ -62,7 +62,7 @@ public:
         return tp_sync_result_ ? tp_sync_result_->uniqueKey() : "";
     }
 
-    // Access side-channel payload parsed from Prefill response (for downstream apply in waitLoadCacheDone)
+    // Access side-channel payload parsed from Prefill response (for downstream apply in updateReuseLengthsFromContext)
     const P2PSideChannelPayload* sideChannelPayload() const {
         if (!server_call_result_ || !server_call_result_->side_channel_payload.has_data) {
             return nullptr;
