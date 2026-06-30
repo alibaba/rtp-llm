@@ -40,6 +40,16 @@ SLEEP_STATUS_OK: Dict[str, Any] = {
 }
 
 
+def lifecycle_operation_for_state(state: str) -> str:
+    if state in ("DRAINING", "SUSPENDING"):
+        return "sleep"
+    if state == "WAKING_UP":
+        return "wake_up"
+    if state == "ERROR":
+        return "error"
+    return "none"
+
+
 class _FakeProtoMessage:
     def to_dict(self) -> Dict[str, Any]:
         return dict(self.__dict__)
@@ -446,6 +456,144 @@ class GrpcClientWrapperSleepTest(unittest.IsolatedAsyncioTestCase):
         }
         defaults.update(kwargs)
         return pb2.SleepStatusResponsePB(**defaults)
+
+    async def test_control_plane_sleep_wake_up_smoke_flow(self):
+        addresses = ["127.0.0.1:10001", "127.0.0.1:10009"]
+        wrapper, pb2 = self._build_wrapper(
+            control_addresses=addresses,
+            expected_control_address_count=len(addresses),
+        )
+        rank_statuses: Dict[str, Dict[str, Any]] = {
+            address: {
+                "state": "RUNNING",
+                "sleep_epoch": 0,
+                "kv_memory_state": "ACTIVE",
+                "device_kv_cache_valid": True,
+                "active_request_count": 0,
+                "active_cache_transfer_count": 0,
+                "gpu_resource_state": "ACTIVE",
+            }
+            for address in addresses
+        }
+        observed_states = []
+
+        for address in addresses:
+
+            async def get_status(*args, address=address, **kwargs):
+                return self._status_pb(pb2, **rank_statuses[address])
+
+            async def sleep_rpc(request, *args, address=address, **kwargs):
+                if request.prepare_only:
+                    rank_statuses[address].update(
+                        state="DRAINING",
+                        sleep_epoch=1,
+                        kv_memory_state="ACTIVE",
+                        device_kv_cache_valid=True,
+                        gpu_resource_state="ACTIVE",
+                    )
+                elif request.commit_only:
+                    self.assertEqual(rank_statuses[address]["state"], "DRAINING")
+                    rank_statuses[address].update(
+                        state="SLEEPING",
+                        sleep_epoch=1,
+                        kv_memory_state="PAUSED",
+                        device_kv_cache_valid=False,
+                        gpu_resource_state="RELEASED",
+                    )
+                else:
+                    rank_statuses[address].update(state="SLEEPING")
+                observed_states.append(rank_statuses[address]["state"])
+                return pb2.EmptyPB()
+
+            async def wake_up_rpc(request, *args, address=address, **kwargs):
+                if request.prepare_only:
+                    self.assertEqual(rank_statuses[address]["state"], "SLEEPING")
+                    rank_statuses[address].update(
+                        state="WAKING_UP",
+                        kv_memory_state="WAKING_UP",
+                        device_kv_cache_valid=False,
+                        gpu_resource_state="RESTORING",
+                    )
+                elif request.commit_only:
+                    self.assertEqual(rank_statuses[address]["state"], "WAKING_UP")
+                    rank_statuses[address].update(
+                        state="RUNNING",
+                        kv_memory_state="ACTIVE",
+                        device_kv_cache_valid=True,
+                        gpu_resource_state="ACTIVE",
+                    )
+                else:
+                    rank_statuses[address].update(state="RUNNING")
+                observed_states.append(rank_statuses[address]["state"])
+                return pb2.EmptyPB()
+
+            wrapper._dp_stubs[address].GetSleepStatus = AsyncMock(
+                side_effect=get_status
+            )
+            wrapper._dp_stubs[address].SleepServing = AsyncMock(side_effect=sleep_rpc)
+            wrapper._dp_stubs[address].WakeUpServing = AsyncMock(
+                side_effect=wake_up_rpc
+            )
+
+        initial_status = await wrapper.get_sleep_status()
+        self.assertEqual(initial_status["state"], "RUNNING")
+        self.assertEqual(lifecycle_operation_for_state(initial_status["state"]), "none")
+
+        sleep_result = await wrapper.sleep_serving(
+            {"level": 1, "mode": "wait", "timeout_ms": 1000, "reason": "smoke"}
+        )
+        self.assertEqual(sleep_result, {"status": "ok"})
+        self.assertIn("DRAINING", observed_states)
+        self.assertEqual(lifecycle_operation_for_state("DRAINING"), "sleep")
+
+        sleeping_status = await wrapper.get_sleep_status()
+        self.assertEqual(sleeping_status["state"], "SLEEPING")
+        self.assertEqual(sleeping_status["gpu_resource_state"], "RELEASED")
+        self.assertFalse(bool(sleeping_status["device_kv_cache_valid"]))
+        self.assertEqual(
+            lifecycle_operation_for_state(sleeping_status["state"]), "none"
+        )
+
+        wake_up_result = await wrapper.wake_up_serving()
+        self.assertEqual(wake_up_result, {"status": "ok"})
+        self.assertIn("WAKING_UP", observed_states)
+        self.assertEqual(lifecycle_operation_for_state("WAKING_UP"), "wake_up")
+
+        running_status = await wrapper.get_sleep_status()
+        self.assertEqual(running_status["state"], "RUNNING")
+        self.assertEqual(running_status["gpu_resource_state"], "ACTIVE")
+        self.assertTrue(bool(running_status["device_kv_cache_valid"]))
+        self.assertEqual(lifecycle_operation_for_state(running_status["state"]), "none")
+
+        for address in addresses:
+            self.assertEqual(wrapper._dp_stubs[address].SleepServing.await_count, 2)
+            self.assertEqual(wrapper._dp_stubs[address].WakeUpServing.await_count, 2)
+
+    async def test_get_sleep_status_exposes_in_progress_states_for_control_plane(self):
+        cases = [
+            ("DRAINING", "ACTIVE", "sleep"),
+            ("SUSPENDING", "RELEASING", "sleep"),
+            ("WAKING_UP", "RESTORING", "wake_up"),
+        ]
+        for state, gpu_resource_state, operation in cases:
+            with self.subTest(state=state):
+                wrapper, pb2 = self._build_wrapper()
+                address = wrapper.control_addresses[0]
+                wrapper._dp_stubs[address].GetSleepStatus = AsyncMock(
+                    return_value=self._status_pb(
+                        pb2,
+                        state=state,
+                        gpu_resource_state=gpu_resource_state,
+                    )
+                )
+
+                result = await wrapper.get_sleep_status()
+
+                self.assertEqual(result["state"], state)
+                self.assertEqual(result["gpu_resource_state"], gpu_resource_state)
+                self.assertEqual(
+                    lifecycle_operation_for_state(result["state"]), operation
+                )
 
     async def test_sleep_serving_broadcasts_all_control_ranks(self):
         addresses = ["127.0.0.1:10001", "127.0.0.1:10009"]

@@ -153,6 +153,7 @@ py_library(
         ":cpm_kernels",
         ":prettytable",
         ":psutil",
+        ":frontend_sleep_validation",
         "//rtp_llm/aios/kmonitor:kmonitor_py",
     ] + internal_deps()
 )
@@ -408,13 +409,22 @@ py_library(
     srcs = ["frontend/sleep_routes.py"],
     deps = [
         ":fastapi",
+        ":frontend_sleep_validation",
     ],
+)
+
+py_library(
+    name = "frontend_sleep_validation",
+    srcs = ["frontend/sleep_validation.py"],
+    deps = [],
 )
 
 py_library(
     name = "frontend_worker_address_utils",
     srcs = ["frontend/worker_address_utils.py"],
-    deps = [],
+    deps = [
+        ":frontend_sleep_validation",
+    ],
 )
 
 py_library(

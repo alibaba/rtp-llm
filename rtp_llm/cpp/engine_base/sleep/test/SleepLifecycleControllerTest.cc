@@ -86,8 +86,10 @@ TEST(SleepLifecycleControllerTest, SleepWithDefaultHooksReachesSleeping) {
     EXPECT_EQ(controller.sleepEpoch(), 1);
 
     const auto status = controller.status();
-    EXPECT_EQ(status.kv_memory_state, "PAUSED");
-    EXPECT_FALSE(status.device_kv_cache_valid);
+    // Empty hooks are no-op success for core state-machine unit tests. Without
+    // an injected KV release hook, resource-specific KV status stays active.
+    EXPECT_EQ(status.kv_memory_state, "ACTIVE");
+    EXPECT_TRUE(status.device_kv_cache_valid);
     EXPECT_EQ(status.gpu_resource_state, "RELEASED");
 }
 
@@ -307,6 +309,62 @@ TEST(SleepLifecycleControllerTest, WakeUpPrepareOnlyStaysWakingUpUntilCommit) {
     EXPECT_TRUE(controller.admit());
     EXPECT_EQ(restart_called.load(), 1);
     EXPECT_TRUE(controller.status().device_kv_cache_valid);
+}
+
+TEST(SleepLifecycleControllerTest, ControlPlaneSmokeFlowExposesExpectedIntermediateStates) {
+    SleepLifecycleController controller(true);
+    SleepHooks               hooks;
+    hooks.quiesceEngine                          = [](const SleepOptions&) { return true; };
+    hooks.synchronizeAndDeregisterMr             = [](const SleepOptions&) { return true; };
+    hooks.releaseKvMemoryBacking                 = [](const SleepOptions&) { return true; };
+    hooks.releaseRestorableGpuMemory             = [](const SleepOptions&) { return true; };
+    hooks.restoreKvMemoryBackingAndResetMetadata = []() { return true; };
+    hooks.restoreRestorableGpuMemory             = []() { return true; };
+    hooks.registerMr                             = []() { return true; };
+    hooks.restartEngine                          = []() { return true; };
+    hooks.warmupAndHealthCheck                   = []() { return true; };
+    controller.setHooks(hooks);
+
+    auto status = controller.status();
+    EXPECT_EQ(status.state, SleepState::RUNNING);
+    EXPECT_TRUE(controller.admit());
+    EXPECT_EQ(status.gpu_resource_state, "ACTIVE");
+
+    SleepOptions sleep_prepare = gracefulOptions();
+    sleep_prepare.prepare_only = true;
+    ASSERT_TRUE(controller.sleep(sleep_prepare).ok);
+    status = controller.status();
+    EXPECT_EQ(status.state, SleepState::DRAINING);
+    EXPECT_FALSE(controller.admit());
+    EXPECT_EQ(status.gpu_resource_state, "ACTIVE");
+    EXPECT_TRUE(status.device_kv_cache_valid);
+
+    SleepOptions sleep_commit = gracefulOptions();
+    sleep_commit.commit_only  = true;
+    ASSERT_TRUE(controller.sleep(sleep_commit).ok);
+    status = controller.status();
+    EXPECT_EQ(status.state, SleepState::SLEEPING);
+    EXPECT_EQ(status.gpu_resource_state, "RELEASED");
+    EXPECT_EQ(status.kv_memory_state, "PAUSED");
+    EXPECT_FALSE(status.device_kv_cache_valid);
+
+    WakeUpOptions wake_prepare;
+    wake_prepare.prepare_only = true;
+    ASSERT_TRUE(controller.wakeUp(wake_prepare).ok);
+    status = controller.status();
+    EXPECT_EQ(status.state, SleepState::WAKING_UP);
+    EXPECT_EQ(status.gpu_resource_state, "RESTORING");
+    EXPECT_FALSE(controller.admit());
+
+    WakeUpOptions wake_commit;
+    wake_commit.commit_only = true;
+    ASSERT_TRUE(controller.wakeUp(wake_commit).ok);
+    status = controller.status();
+    EXPECT_EQ(status.state, SleepState::RUNNING);
+    EXPECT_EQ(status.gpu_resource_state, "ACTIVE");
+    EXPECT_EQ(status.kv_memory_state, "ACTIVE");
+    EXPECT_TRUE(status.device_kv_cache_valid);
+    EXPECT_TRUE(controller.admit());
 }
 
 TEST(SleepLifecycleControllerTest, WakeUpPrepareFailureDoesNotRestartEngine) {
