@@ -7,7 +7,9 @@
 #include "rtp_llm/cpp/disaggregate/cache_store/RemoteStoreTaskImpl.h"
 #include "autil/ThreadPool.h"
 
+#include <atomic>
 #include <memory>
+#include <shared_mutex>
 
 namespace rtp_llm {
 
@@ -46,10 +48,11 @@ public:
     storeBuffers(const std::vector<std::shared_ptr<RequestBlockBuffer>>& request_block_buffers,
                  int64_t                                                 timeout_ms) override;
 
-    std::shared_ptr<RemoteStoreTask> submitRemoteStoreTask(const std::shared_ptr<RemoteStoreRequest>& request,
-                                                           const std::shared_ptr<CacheStoreRemoteStoreMetricsCollector>& collector,
-                                                           RemoteStoreTask::CheckCancelFunc check_cancel_func) override;
-    void                             releaseRemoteStoreTask(const std::shared_ptr<RemoteStoreTask>& task) override;
+    std::shared_ptr<RemoteStoreTask>
+         submitRemoteStoreTask(const std::shared_ptr<RemoteStoreRequest>&                    request,
+                               const std::shared_ptr<CacheStoreRemoteStoreMetricsCollector>& collector,
+                               RemoteStoreTask::CheckCancelFunc                              check_cancel_func) override;
+    void releaseRemoteStoreTask(const std::shared_ptr<RemoteStoreTask>& task) override;
 
     bool                         regUserBuffers(const std::vector<std::shared_ptr<BlockBuffer>>& buffers) override;
     std::shared_ptr<BlockBuffer> findUserBuffer(const std::string& buffer_key) override;
@@ -60,8 +63,24 @@ public:
 
     const std::shared_ptr<MemoryUtil>& getMemoryUtil() const override;
 
+    size_t activeTransferCount() const override;
+
 private:
     bool init(const CacheStoreInitParams& params);
+
+    // Wraps a done callback so the global active transfer counter is
+    // incremented now and decremented exactly once when the callback fires.
+    template<typename Callback>
+    Callback countTransfer(Callback callback) {
+        active_transfer_count_.fetch_add(1, std::memory_order_relaxed);
+        auto done = std::make_shared<std::atomic<bool>>(false);
+        return [this, callback = std::move(callback), done](auto&&... args) {
+            if (!done->exchange(true, std::memory_order_acq_rel)) {
+                active_transfer_count_.fetch_sub(1, std::memory_order_relaxed);
+            }
+            callback(std::forward<decltype(args)>(args)...);
+        };
+    }
     void runStoreTask(const std::shared_ptr<RequestBlockBuffer>&              value,
                       CacheStoreStoreDoneCallback                             callback,
                       const std::shared_ptr<CacheStoreStoreMetricsCollector>& collector);
@@ -86,10 +105,13 @@ private:
     std::shared_ptr<Messager>                                                        messager_;
     autil::ThreadPoolBasePtr                                                         thread_pool_;  // task executor
     kmonitor::MetricsReporterPtr                                                     metrics_reporter_;
-    std::shared_mutex                                                                remote_store_tasks_mutex_;
+    mutable std::shared_mutex                                                        remote_store_tasks_mutex_;
     std::unordered_map<std::string, std::list<std::shared_ptr<RemoteStoreTaskImpl>>> remote_store_tasks_;
+    std::atomic<size_t>                                                              active_transfer_count_{0};
     std::shared_mutex                                                                store_tasks_mutex_;
-    std::unordered_map<std::shared_ptr<RequestBlockBuffer>, std::pair<CacheStoreStoreDoneCallback, std::function<void()>>> store_tasks_;
+    std::unordered_map<std::shared_ptr<RequestBlockBuffer>,
+                       std::pair<CacheStoreStoreDoneCallback, std::function<void()>>>
+        store_tasks_;
 };
 
 }  // namespace rtp_llm

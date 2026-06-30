@@ -43,6 +43,10 @@ public:
     bool hasActiveConnectors() const override;
     bool hasP2PConnector() const override;
 
+    // In-flight async transfer count (read + write), used by DrainManager (M3)
+    // to decide whether the engine is fully drained before sleep.
+    size_t inflightTransferCount() const;
+
     // virtual for test
     virtual std::shared_ptr<AsyncContext>
     asyncRead(const std::shared_ptr<KVCacheConnectorReadWriteContext>& connector_context) override;

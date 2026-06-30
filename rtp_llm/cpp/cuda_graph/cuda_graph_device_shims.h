@@ -101,6 +101,7 @@ void            graphDeviceSynchronize();
 void            graphMemGetInfo(size_t* free_bytes, size_t* total_bytes);
 size_t          graphReservedBytes();
 size_t          graphAllocatedBytes();
+void            graphEmptyCache();
 GraphPoolHandle graphPoolHandle();
 void            graphCaptureBegin(at::cuda::CUDAGraph& graph, GraphPoolHandle pool);
 

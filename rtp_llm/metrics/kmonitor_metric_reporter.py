@@ -16,6 +16,12 @@ class AccMetrics(Enum):
     # worker_status
     WORKER_STATUS_QPS_METRIC = "py_rtp_worker_status_qps"
     CACHE_STATUS_QPS_METRIC = "py_rtp_cache_status_qps"
+    SLEEP_QPS_METRIC = "py_rtp_sleep_qps"
+    SLEEP_SUCCESS_QPS_METRIC = "py_rtp_sleep_success_qps"
+    SLEEP_ERROR_QPS_METRIC = "py_rtp_sleep_error_qps"
+    WAKE_UP_QPS_METRIC = "py_rtp_wake_up_qps"
+    WAKE_UP_SUCCESS_QPS_METRIC = "py_rtp_wake_up_success_qps"
+    WAKE_UP_ERROR_QPS_METRIC = "py_rtp_wake_up_error_qps"
     # route:
     ROUTE_QPS_METRIC = "py_rtp_route_qps"
     MASTER_ROUTE_QPS_METRIC = "py_rtp_master_route_qps"
@@ -52,6 +58,12 @@ class GaugeMetrics(Enum):
     # worker_status
     WORKER_STATUS_QPS_LANTENCY_METRIC = "py_rtp_worker_status_rt"
     CACHE_STATUS_QPS_LATENCY_METRIC = "py_rtp_cache_status_rt"
+    SLEEP_RT_METRIC = "py_rtp_sleep_rt"
+    WAKE_UP_RT_METRIC = "py_rtp_wake_up_rt"
+    SLEEP_ACTIVE_REQUEST_COUNT_METRIC = "py_rtp_sleep_active_request_count"
+    SLEEP_ACTIVE_CACHE_TRANSFER_COUNT_METRIC = (
+        "py_rtp_sleep_active_cache_transfer_count"
+    )
 
     # route:
     ROUTE_RT_METRIC = "py_rtp_route_rt"
