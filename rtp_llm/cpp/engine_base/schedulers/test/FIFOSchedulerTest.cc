@@ -19,6 +19,12 @@ public:
     FIFOSchedulerTest() {}
 };
 
+static PDSepConfig makeLegacyPDSepConfig() {
+    PDSepConfig pd_sep_config;
+    pd_sep_config.role_type = RoleType::PREFILL;
+    return pd_sep_config;
+}
+
 TEST_F(FIFOSchedulerTest, testSimple) {
     CacheConfig                     cache_config  = makeMhaCacheConfig(1, 4, 1, 4, 8, rtp_llm::DataType::TYPE_FP16);
     std::shared_ptr<KVCacheManager> cache_manager = std::make_shared<KVCacheManager>(cache_config);
@@ -32,7 +38,7 @@ TEST_F(FIFOSchedulerTest, testSimple) {
     RuntimeConfig runtime_config;
     runtime_config.max_generate_batch_size                     = 100;
     runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8192;
-    PDSepConfig         pd_sep_config;
+    PDSepConfig         pd_sep_config = makeLegacyPDSepConfig();
     ParallelismConfig   parallelism_config;
     ModelSpecificConfig model_specific_config;
     FIFOScheduler       scheduler(
@@ -76,7 +82,7 @@ TEST_F(FIFOSchedulerTest, testInitKVCacheLackMem) {
     RuntimeConfig runtime_config;
     runtime_config.max_generate_batch_size                     = 100;
     runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8192;
-    PDSepConfig         pd_sep_config;
+    PDSepConfig         pd_sep_config = makeLegacyPDSepConfig();
     ParallelismConfig   parallelism_config;
     ModelSpecificConfig model_specific_config;
     FIFOScheduler       scheduler(
@@ -107,7 +113,7 @@ TEST_F(FIFOSchedulerTest, testIncrKVCacheLackMem) {
     RuntimeConfig runtime_config;
     runtime_config.max_generate_batch_size                     = 100;
     runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8192;
-    PDSepConfig         pd_sep_config;
+    PDSepConfig         pd_sep_config = makeLegacyPDSepConfig();
     ParallelismConfig   parallelism_config;
     ModelSpecificConfig model_specific_config;
     FIFOScheduler       scheduler(
@@ -162,7 +168,7 @@ TEST_F(FIFOSchedulerTest, testInitKVCacheRejectedByReserveBlocks) {
     RuntimeConfig runtime_config;
     runtime_config.max_generate_batch_size                     = 100;
     runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8192;
-    PDSepConfig         pd_sep_config;
+    PDSepConfig         pd_sep_config = makeLegacyPDSepConfig();
     ParallelismConfig   parallelism_config;
     ModelSpecificConfig model_specific_config;
     FIFOScheduler       scheduler(
@@ -211,7 +217,7 @@ TEST_F(FIFOSchedulerTest, testReserveBlocksOnlyAffectInitMallocNotIncrMalloc) {
     RuntimeConfig runtime_config;
     runtime_config.max_generate_batch_size                     = 100;
     runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8192;
-    PDSepConfig         pd_sep_config;
+    PDSepConfig         pd_sep_config = makeLegacyPDSepConfig();
     ParallelismConfig   parallelism_config;
     ModelSpecificConfig model_specific_config;
     FIFOScheduler       scheduler(
@@ -255,7 +261,7 @@ TEST_F(FIFOSchedulerTest, testReuseCache) {
     RuntimeConfig runtime_config;
     runtime_config.max_generate_batch_size                     = 100;
     runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8192;
-    PDSepConfig         pd_sep_config;
+    PDSepConfig         pd_sep_config = makeLegacyPDSepConfig();
     ParallelismConfig   parallelism_config;
     ModelSpecificConfig model_specific_config;
     FIFOScheduler       scheduler(
@@ -327,7 +333,7 @@ TEST_F(FIFOSchedulerTest, testMaxContextBatchSize) {
     runtime_config.max_generate_batch_size                      = 1;
     runtime_config.fifo_scheduler_config.max_context_batch_size = 1;
     runtime_config.fifo_scheduler_config.max_batch_tokens_size  = 100;
-    PDSepConfig         pd_sep_config;
+    PDSepConfig         pd_sep_config = makeLegacyPDSepConfig();
     ParallelismConfig   parallelism_config;
     ModelSpecificConfig model_specific_config;
     FIFOScheduler       scheduler(
@@ -422,7 +428,7 @@ TEST_F(FIFOSchedulerTest, testCheckInputLengthIgnoresBatchSizeFanOut) {
     RuntimeConfig runtime_config;
     runtime_config.max_generate_batch_size                     = 100;
     runtime_config.fifo_scheduler_config.max_batch_tokens_size = 100;
-    PDSepConfig         pd_sep_config;
+    PDSepConfig         pd_sep_config = makeLegacyPDSepConfig();
     ParallelismConfig   parallelism_config;
     ModelSpecificConfig model_specific_config;
     FIFOScheduler       scheduler(
@@ -479,7 +485,7 @@ TEST_F(FIFOSchedulerTest, testBatchEnqueue) {
     RuntimeConfig runtime_config;
     runtime_config.max_generate_batch_size                     = 100;
     runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8192;
-    PDSepConfig         pd_sep_config;
+    PDSepConfig         pd_sep_config = makeLegacyPDSepConfig();
     ParallelismConfig   parallelism_config;
     ModelSpecificConfig model_specific_config;
     FIFOScheduler       scheduler(
@@ -526,7 +532,7 @@ TEST_F(FIFOSchedulerTest, testForceBatchGroupComplete) {
     RuntimeConfig runtime_config;
     runtime_config.max_generate_batch_size                     = 100;
     runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8192;
-    PDSepConfig         pd_sep_config;
+    PDSepConfig         pd_sep_config = makeLegacyPDSepConfig();
     ParallelismConfig   parallelism_config;
     ModelSpecificConfig model_specific_config;
     FIFOScheduler       scheduler(
@@ -604,7 +610,7 @@ TEST_F(FIFOSchedulerTest, testForceBatchTimeout) {
     RuntimeConfig runtime_config;
     runtime_config.max_generate_batch_size                     = 100;
     runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8192;
-    PDSepConfig         pd_sep_config;
+    PDSepConfig         pd_sep_config = makeLegacyPDSepConfig();
     ParallelismConfig   parallelism_config;
     ModelSpecificConfig model_specific_config;
     FIFOScheduler       scheduler(
@@ -662,7 +668,7 @@ TEST_F(FIFOSchedulerTest, testForceBatchIsolation) {
     RuntimeConfig runtime_config;
     runtime_config.max_generate_batch_size                     = 100;
     runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8192;
-    PDSepConfig         pd_sep_config;
+    PDSepConfig         pd_sep_config = makeLegacyPDSepConfig();
     ParallelismConfig   parallelism_config;
     ModelSpecificConfig model_specific_config;
     FIFOScheduler       scheduler(
@@ -740,7 +746,7 @@ TEST_F(FIFOSchedulerTest, testTwoForceBatchGroupsIsolation) {
     RuntimeConfig runtime_config;
     runtime_config.max_generate_batch_size                     = 100;
     runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8192;
-    PDSepConfig         pd_sep_config;
+    PDSepConfig         pd_sep_config = makeLegacyPDSepConfig();
     ParallelismConfig   parallelism_config;
     ModelSpecificConfig model_specific_config;
     FIFOScheduler       scheduler(
@@ -1056,6 +1062,34 @@ TEST_F(FIFOSchedulerTest, testConcurrencyCapCountsPending) {
     ASSERT_TRUE(r2.ok());
     ASSERT_EQ(scheduler.runningStreamsSize() + scheduler.pendingDecodeStreamsSize(), 2);
     ASSERT_EQ(scheduler.waitingStreamsSize(), 2);
+}
+
+TEST_F(FIFOSchedulerTest, testEmptyDegradedPrefillDoesNotAdvanceDecodeCounter) {
+    CacheConfig cache_config  = makeMhaCacheConfig(1, 64, 1, 4, 8, rtp_llm::DataType::TYPE_FP16);
+    auto        cache_manager = std::make_shared<KVCacheManager>(cache_config);
+    ASSERT_TRUE(cache_manager->init());
+    ResourceContext resource_context;
+    resource_context.cache_manager = cache_manager;
+    ModelConfig model_config;
+    model_config.max_seq_len = 8192;
+    RuntimeConfig runtime_config;
+    runtime_config.max_generate_batch_size                     = 0;  // force admission failure
+    runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8192;
+    runtime_config.fifo_scheduler_config.decode_prefill_ratio  = "1";
+    PDSepConfig         pd_sep_config;
+    ParallelismConfig   parallelism_config;
+    ModelSpecificConfig model_specific_config;
+    FIFOScheduler       scheduler(
+        runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager);
+
+    auto s1 = makeStream({1, 2}, model_config, runtime_config, resource_context);
+    ASSERT_TRUE(scheduler.enqueue(s1).ok());
+
+    auto r1 = scheduler.schedule();  // PREFILL selected, admission fails, no decode batch runs.
+    ASSERT_TRUE(r1.ok());
+    ASSERT_EQ(r1.value().size(), 0);
+    ASSERT_EQ(scheduler.waitingStreamsSize(), 1);
+    ASSERT_EQ(scheduler.decodeSincePrefillForTest(), 0);
 }
 
 // ---------------------------------------------------------------------------

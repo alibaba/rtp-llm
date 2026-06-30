@@ -426,9 +426,11 @@ list<GenerateStreamPtr> FIFOScheduler::schedulePrefillFirst() {
     // DECODE path (cadence decode, or degraded prefill)
     evaluateAndUpdateStreams(running_streams_);  // incrKVBlock-prep survivors for THIS decode (only here)
     promotePendingDecodeStreams();
-    decode_since_prefill_ += 1;
-    prefill_since_decode_ = 0;
-    decode_round_count_ += 1;
+    if (!running_streams_.empty()) {
+        decode_since_prefill_ += 1;
+        prefill_since_decode_ = 0;
+        decode_round_count_ += 1;
+    }
     if (!pending_decode_streams_.empty() || !waiting_streams_.empty()) {
         schedule_trigger_ = true;  // more work pending; keep the loop moving
     }
@@ -498,6 +500,11 @@ int64_t FIFOScheduler::pendingDecodeStreamsSize() {
     return pending_decode_streams_.size();
 }
 
+int64_t FIFOScheduler::decodeSincePrefillForTest() {
+    std::lock_guard<mutex> lock(lock_);
+    return decode_since_prefill_;
+}
+
 int64_t FIFOScheduler::onflightStreams() {
     std::lock_guard<mutex> lock(lock_);
     return waiting_streams_.size() + loading_cache_streams_.size() + running_streams_.size()
@@ -542,8 +549,7 @@ void FIFOScheduler::reportMetrics() {
         collector.prefill_round_count        = prefill_round_count_;
         collector.decode_round_count         = decode_round_count_;
         collector.degraded_prefill_count     = degraded_prefill_count_;
-        collector.decode_since_prefill =
-            decode_since_prefill_ == std::numeric_limits<int64_t>::max() ? 0 : decode_since_prefill_;
+        collector.decode_since_prefill        = decode_since_prefill_;
         metrics_reporter_->report<RtpLLMSchedulerMetrics, RtpLLMSchedulerMetricsCollector>(nullptr, &collector);
     }
     return;
