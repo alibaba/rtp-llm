@@ -3,7 +3,7 @@
 #include <torch/extension.h>
 
 #include "rtp_llm/cpp/cache/connector/p2p/LayerBlockConverter.h"
-#include "rtp_llm/cpp/cache/KVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/allocator/KVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/BlockInfo.h"
 
 namespace rtp_llm {

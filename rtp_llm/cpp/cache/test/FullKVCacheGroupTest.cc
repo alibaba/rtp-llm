@@ -4,7 +4,7 @@
 #include <thread>
 #include <atomic>
 #include <algorithm>
-#include "rtp_llm/cpp/cache/FullKVCacheGroup.h"
+#include "rtp_llm/cpp/cache/group/FullKVCacheGroup.h"
 #include "rtp_llm/cpp/cache/test/BlockPoolTestHelper.h"
 
 namespace rtp_llm {

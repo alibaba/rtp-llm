@@ -5,7 +5,7 @@
 #include <condition_variable>
 #include <c10/core/InferenceMode.h>
 
-#include "rtp_llm/cpp/cache/CacheGroupType.h"
+#include "rtp_llm/cpp/cache/spec/CacheGroupType.h"
 #include "rtp_llm/cpp/utils/KVCacheUtils.h"
 #include "rtp_llm/cpp/model_rpc/QueryConverter.h"
 #include "rtp_llm/cpp/model_rpc/DecodeRpcServer.h"

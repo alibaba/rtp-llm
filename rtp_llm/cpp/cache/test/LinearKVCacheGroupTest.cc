@@ -4,7 +4,7 @@
 #include <vector>
 
 #include "rtp_llm/cpp/cache/BlockCache.h"
-#include "rtp_llm/cpp/cache/LinearKVCacheGroup.h"
+#include "rtp_llm/cpp/cache/group/LinearKVCacheGroup.h"
 #include "rtp_llm/cpp/cache/test/BlockPoolTestHelper.h"
 
 namespace rtp_llm {

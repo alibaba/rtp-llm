@@ -1,4 +1,4 @@
-#include "rtp_llm/cpp/cache/SingleTypeKVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/allocator/SingleTypeKVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/connector/Meta.h"
 #include "rtp_llm/cpp/cache/connector/remote_connector/test/RemoteConnectorMockTestBase.h"
 

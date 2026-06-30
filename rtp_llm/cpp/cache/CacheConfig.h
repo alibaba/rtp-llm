@@ -5,8 +5,8 @@
 #include <string>
 #include <vector>
 
-#include "rtp_llm/cpp/cache/CacheGroupType.h"
-#include "rtp_llm/cpp/cache/KVCacheSpec.h"
+#include "rtp_llm/cpp/cache/spec/CacheGroupType.h"
+#include "rtp_llm/cpp/cache/spec/KVCacheSpec.h"
 #include "rtp_llm/models_py/bindings/core/Types.h"
 #include "rtp_llm/cpp/utils/StringUtil.h"
 

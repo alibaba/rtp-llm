@@ -8,7 +8,7 @@
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/cache/BlockPool.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
-#include "rtp_llm/cpp/cache/CacheConfigCreator.h"
+#include "rtp_llm/cpp/cache/config_creator/CacheConfigCreator.h"
 #include "rtp_llm/cpp/cache/BlockPoolConfigHelper.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/cpp/cache/test/BlockPoolTestHelper.h"

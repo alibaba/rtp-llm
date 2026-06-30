@@ -4,7 +4,7 @@
 #include "rtp_llm/cpp/cache/BlockPoolConfigHelper.h"
 #include "rtp_llm/cpp/cache/connector/memory/MemoryAsyncContext.h"
 #include "rtp_llm/cpp/cache/connector/Meta.h"
-#include "rtp_llm/cpp/cache/KVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/allocator/KVCacheAllocator.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/models_py/bindings/NoBlockCopy.h"
 #include "rtp_llm/cpp/utils/Logger.h"

@@ -2,7 +2,7 @@
 #include "rtp_llm/models_py/bindings/core/CommonDefines.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/CacheStore.h"
 #include "rtp_llm/cpp/utils/Logger.h"
-#include "rtp_llm/cpp/cache/CacheGroupType.h"
+#include "rtp_llm/cpp/cache/spec/CacheGroupType.h"
 #include "rtp_llm/cpp/utils/KVCacheUtils.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
 #include "rtp_llm/cpp/utils/StackTrace.h"
