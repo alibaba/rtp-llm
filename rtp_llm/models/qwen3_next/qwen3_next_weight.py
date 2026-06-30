@@ -550,7 +550,7 @@ class Qwen3NextWeight(Qwen3NextBaseWeight):
 
 
 class Qwen35MoeWeight(Qwen3NextBaseWeight):
-    """Qwen3.5 MoE weight loading (model.language_model. prefix, separate weight format, stackwd support)."""
+    """Qwen3.5 MoE weight loading (dynamic prefix detection, separate weight format, stacked support)."""
 
     def __init__(self, *args: List[Any], **kwargs: Dict[str, Any]):
         super().__init__(*args, **kwargs)
@@ -650,7 +650,7 @@ class Qwen35MoeWeight(Qwen3NextBaseWeight):
 
 
 class Qwen35DenseWeight(Qwen35MoeWeight):
-    """Qwen3.5 Dense weight loading (model.language_model. prefix, separate weight format, stackwd support)."""
+    """Qwen3.5 Dense weight loading (dynamic prefix detection, separate weight format, stacked support)."""
 
     def __init__(self, *args: List[Any], **kwargs: Dict[str, Any]):
         super().__init__(*args, **kwargs)
