@@ -23,7 +23,7 @@ void GrammarLogitsProcessor::process(const SamplerInputs& inputs, size_t start_i
         return;
     }
     if (batch_size != 1) {
-        RTP_LLM_LOG_WARNING("grammar logits processor unexpected batch_size=%zu", batch_size);
+        setError(ErrorCode::INVALID_PARAMS, "grammar logits processor only supports single sequence decoding");
         return;
     }
     if (inputs.finished_mask.defined()) {

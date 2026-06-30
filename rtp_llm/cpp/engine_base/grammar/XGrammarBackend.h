@@ -36,21 +36,18 @@ struct GrammarKeyCpp {
     }
 
     // 0x1f (US) cannot appear in a grammar body, so the join is collision-free.
-    const std::string& id() const {
-        if (cached_id_.empty()) {
-            cached_id_.reserve(key_type.size() + 1 + key_string.size());
-            cached_id_.append(key_type);
-            cached_id_.push_back('\x1f');
-            cached_id_.append(key_string);
-        }
-        return cached_id_;
+    std::string id() const {
+        std::string result;
+        result.reserve(key_type.size() + 1 + key_string.size());
+        result.append(key_type);
+        result.push_back('\x1f');
+        result.append(key_string);
+        return result;
     }
 
     std::string brief() const {
         return key_type + "(len=" + std::to_string(key_string.size()) + ")";
     }
-
-    mutable std::string cached_id_;
 };
 
 // (compiled != null) ok; is_invalid → cacheable schema rejection; else system

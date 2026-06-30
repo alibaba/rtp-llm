@@ -3,6 +3,8 @@
 #include "rtp_llm/cpp/models/logits_processor/GrammarLogitsProcessor.h"
 #include "rtp_llm/cpp/engine_base/grammar/RtpGrammarMatcher.h"
 #include "rtp_llm/cpp/engine_base/grammar/XGrammarBackend.h"
+#include "rtp_llm/cpp/models/logits_processor/BitmaskUtils.h"
+#include "rtp_llm/cpp/models/logits_processor/ReasoningGrammarLogitsProcessor.h"
 #include "rtp_llm/cpp/models/logits_processor/SpecLogitsProcessor.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
 
@@ -49,6 +51,15 @@ struct ProcessorBundle {
     }
 };
 
+struct ReasoningProcessorBundle {
+    std::shared_ptr<ReasoningGrammarLogitsProcessor> proc;
+    std::shared_ptr<RtpGrammarMatcher>               matcher;
+
+    ReasoningGrammarLogitsProcessor* operator->() const noexcept {
+        return proc.get();
+    }
+};
+
 // terminate_without_stop_token=true so the matcher flips IsTerminated() the moment the regex completes.
 ProcessorBundle makeProcessor(XGrammarBackend& backend, const std::string& regex) {
     auto compiled = backend.compileNow({"regex", regex}).compiled;
@@ -58,6 +69,25 @@ ProcessorBundle makeProcessor(XGrammarBackend& backend, const std::string& regex
                                                                        /*think_end_token_ids=*/std::nullopt,
                                                                        /*terminate_without_stop_token=*/true);
     auto                               proc    = std::make_shared<GrammarLogitsProcessor>(matcher);
+    return {std::move(proc), std::move(matcher)};
+}
+
+ReasoningProcessorBundle makeReasoningGrammarProcessor(XGrammarBackend& backend,
+                                                       const std::string& regex,
+                                                       int                max_thinking_tokens) {
+    auto compiled = backend.compileNow({"regex", regex}).compiled;
+    EXPECT_TRUE(compiled);
+    // Keep matcher reasoning state active, matching LogitsProcessorFactory construction.
+    std::shared_ptr<RtpGrammarMatcher> matcher = backend.createMatcher(compiled,
+                                                                       /*require_reasoning=*/true,
+                                                                       /*think_end_token_ids=*/std::vector<int>{'z'},
+                                                                       /*terminate_without_stop_token=*/true);
+    auto proc = std::make_shared<ReasoningGrammarLogitsProcessor>(matcher,
+                                                                  /*eos_token_id=*/0,
+                                                                  max_thinking_tokens,
+                                                                  /*begin_think_token_ids=*/std::vector<int>{'<'},
+                                                                  /*end_think_token_ids=*/std::vector<int>{'z'},
+                                                                  /*input_length=*/0);
     return {std::move(proc), std::move(matcher)};
 }
 
@@ -84,6 +114,7 @@ constexpr int kA   = 'a';  // token id 97
 constexpr int kB   = 'b';  // token id 98
 constexpr int kX   = 'x';  // token id 120
 constexpr int kEos = 0;    // stop token in makeAsciiTokenizerInfoJson
+constexpr int kZ   = 'z';
 
 }  // namespace
 
@@ -301,6 +332,55 @@ TEST(GrammarLogitsProcessorTest, RejectsUndersizedBitmaskBuffer) {
     EXPECT_EQ(proc->tryAcceptAndFillBitmask(req), 0);
     ASSERT_TRUE(proc->hasError());
     EXPECT_EQ(proc->error().code(), ErrorCode::GRAMMAR_BITMASK_BUFFER_TOO_SMALL);
+}
+
+TEST(GrammarLogitsProcessorTest, ClearBitmaskTokenRangeClearsFullWordsAndEdges) {
+    const size_t         words = SpecLogitsProcessor::bitmaskWordCount(96);
+    std::vector<int32_t> bm(words, SpecLogitsProcessor::kBitmaskAllowAll);
+
+    clearBitmaskTokenRange(bm.data(), words, 35, 70);
+
+    EXPECT_TRUE(rowAllows(bm, words, 0, 34));
+    EXPECT_FALSE(rowAllows(bm, words, 0, 35));
+    EXPECT_FALSE(rowAllows(bm, words, 0, 63));
+    EXPECT_FALSE(rowAllows(bm, words, 0, 64));
+    EXPECT_FALSE(rowAllows(bm, words, 0, 69));
+    EXPECT_TRUE(rowAllows(bm, words, 0, 70));
+}
+
+TEST(GrammarLogitsProcessorTest, ReasoningGrammarSpecVerifyForceEndThenGrammarWithRollback) {
+    XGrammarBackend backend(makeAsciiTokenizerInfoJson(), defaultOptions());
+    auto            proc = makeReasoningGrammarProcessor(backend, "ab", /*max_thinking_tokens=*/1);
+
+    const int            propose_step = 3;
+    const size_t         words        = SpecLogitsProcessor::bitmaskWordCount(128);
+    std::vector<int32_t> bm(static_cast<size_t>(propose_step + 1) * words, 0);
+    std::vector<int32_t> draft{kX, kZ, kA};
+
+    SpecLogitsProcessorRequest req;
+    req.draft_tokens       = draft.data();
+    req.propose_step       = propose_step;
+    req.bitmask_cpu_out    = bm.data();
+    req.bitmask_size_int32 = words;
+    req.vocab_size         = 128;
+
+    const int cap = proc->tryAcceptAndFillBitmask(req);
+    EXPECT_EQ(cap, propose_step);
+
+    EXPECT_TRUE(rowAllows(bm, words, 0, kX));
+    EXPECT_FALSE(rowAllows(bm, words, 0, kEos));
+
+    EXPECT_TRUE(rowAllows(bm, words, 1, kZ));
+    EXPECT_FALSE(rowAllows(bm, words, 1, kX));
+    EXPECT_FALSE(rowAllows(bm, words, 1, kA));
+
+    EXPECT_TRUE(rowAllows(bm, words, 2, kA));
+    EXPECT_FALSE(rowAllows(bm, words, 2, kB));
+    EXPECT_TRUE(rowAllows(bm, words, 3, kB));
+
+    EXPECT_EQ(proc->committedOutputLen(), 0);
+    EXPECT_EQ(proc.matcher->numAcceptedTokens(), 0);
+    EXPECT_FALSE(proc.matcher->isTerminated());
 }
 
 }  // namespace rtp_llm

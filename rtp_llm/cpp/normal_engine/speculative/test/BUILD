@@ -40,7 +40,7 @@ cc_test(
         "//rtp_llm/cpp/cache/test:cache_config_test_utils",
         "//rtp_llm/cpp/normal_engine:normal_engine",
         "//rtp_llm/cpp/models:models",
-        "//rtp_llm/cpp/models:grammar_logits_processor",
+        "//rtp_llm/cpp/models:logits_processor",
         "//rtp_llm/cpp/config:config_modules",
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",

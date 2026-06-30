@@ -1,13 +1,4 @@
-import argparse
-
-from rtp_llm.server.server_args.util import str2bool
-
-
-def _positive_int(value: str) -> int:
-    ivalue = int(value)
-    if ivalue <= 0:
-        raise argparse.ArgumentTypeError(f"must be a positive integer, got {value!r}")
-    return ivalue
+from rtp_llm.server.server_args.util import positive_int, str2bool
 
 
 def init_grammar_group_args(parser, grammar_config):
@@ -24,7 +15,7 @@ def init_grammar_group_args(parser, grammar_config):
         "--grammar_num_workers",
         env_name="GRAMMAR_NUM_WORKERS",
         bind_to=(grammar_config, "num_workers"),
-        type=_positive_int,
+        type=positive_int,
         default=grammar_config.num_workers,
         help=(
             "Forwarded to xgrammar's GrammarCompiler as max_compiler_threads, "

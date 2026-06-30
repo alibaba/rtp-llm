@@ -100,14 +100,6 @@ cc_library(
     visibility = ["//visibility:public"],
 )
 
-# Back-compat alias: callers historically depended on :grammar_logits_processor;
-# the grammar processors now live in :logits_processor.
-alias(
-    name = "grammar_logits_processor",
-    actual = ":logits_processor",
-    visibility = ["//visibility:public"],
-)
-
 # Context Parallel Interface - base interface for context parallel processors
 cc_library(
     name = "context_parallel_interface",
@@ -161,21 +153,12 @@ cc_library(
         "//rtp_llm/models_py/bindings/core:cache_store_async_writer",
         "//rtp_llm/cpp/utils:debug_utils",
         "//rtp_llm/cpp/utils:profiling_scope",
-        # cuda_graph_base = platform-agnostic structs; cuda_graph_impl/hdrs_lib are CUDA/ROCm-only.
+        "//rtp_llm/cpp/cuda_graph:cuda_graph_impl",
         "//rtp_llm/cpp/cuda_graph:cuda_graph_base",
+        "//rtp_llm/cpp/cuda_graph:cuda_graph_hdrs_lib",
         "//rtp_llm/models_py/bindings/common:fuse_copy_op",
         "//rtp_llm/cpp/multimodal_processor:multimodal_types",
-    ] + select({
-        "//:using_cuda": [
-            "//rtp_llm/cpp/cuda_graph:cuda_graph_impl",
-            "//rtp_llm/cpp/cuda_graph:cuda_graph_hdrs_lib",
-        ],
-        "@//:using_rocm": [
-            "//rtp_llm/cpp/cuda_graph:cuda_graph_impl",
-            "//rtp_llm/cpp/cuda_graph:cuda_graph_hdrs_lib",
-        ],
-        "//conditions:default": [],
-    }),
+    ],
     visibility = ["//visibility:public"],
 )
 

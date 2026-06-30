@@ -67,10 +67,10 @@ cc_test(
     srcs = [
         "GrammarLogitsProcessorTest.cc",
     ],
-    copts = copts(),
+    copts = test_copts,
     deps = [
         "//rtp_llm/cpp/engine_base/grammar:grammar_cpp_lib",
-        "//rtp_llm/cpp/models:grammar_logits_processor",
+        "//rtp_llm/cpp/models:logits_processor",
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
         "@local_config_cuda//cuda:cuda_headers",

@@ -15,6 +15,13 @@ def str2bool(v):
     raise argparse.ArgumentTypeError("Boolean value expected.")
 
 
+def positive_int(value: str) -> int:
+    ivalue = int(value)
+    if ivalue <= 0:
+        raise argparse.ArgumentTypeError(f"must be a positive integer, got {value!r}")
+    return ivalue
+
+
 def str2_cp_rotate_method(value):
     """Convert string to CPRotateMethod enum."""
     if value is None:
