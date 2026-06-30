@@ -163,14 +163,27 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
         return EmptyPB()
 
     def RemoteMultimodalEmbedding(self, multimodal_inputs: MultimodalInputsPB, context):
-        converted_inputs = trans_mm_input(multimodal_inputs)
-        results = self.engine.get_embedding_result(converted_inputs)
-        merged = merge_embedding_results(results)
-        if getattr(multimodal_inputs, "support_rdma", False) and self._rdma is not None:
-            rdma_out = self._trans_output_rdma(merged)
-            if rdma_out is not None:
-                return rdma_out
-        return trans_output(merged)
+        try:
+            converted_inputs = trans_mm_input(multimodal_inputs)
+            results = self.engine.get_embedding_result(converted_inputs)
+            merged = merge_embedding_results(results)
+            if (
+                getattr(multimodal_inputs, "support_rdma", False)
+                and self._rdma is not None
+            ):
+                rdma_out = self._trans_output_rdma(merged)
+                if rdma_out is not None:
+                    return rdma_out
+            return trans_output(merged)
+        except FtRuntimeException as e:
+            context.abort(
+                grpc.StatusCode.INTERNAL, f"[{e.exception_type.name}] {e.message}"
+            )
+        except Exception as e:
+            logging.exception("RemoteMultimodalEmbedding failed")
+            context.abort(
+                grpc.StatusCode.INTERNAL, f"[MM_PROCESS_ERROR] {type(e).__name__}: {e}"
+            )
 
     def ReleaseMultimodalEmbedding(self, request: ReleaseEmbeddingPB, context):
         if self._rdma is not None and len(request.handle) > 0:
