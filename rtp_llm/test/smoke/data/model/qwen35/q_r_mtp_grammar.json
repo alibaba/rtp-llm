@@ -391,11 +391,11 @@
                 "messages": [
                     {
                         "role": "system",
-                        "content": "你不用调用天气查询工具"
+                        "content": "你必须调用天气查询工具，只填写 location 字段，不要输出 unit、date、time 或其他字段。"
                     },
                     {
                         "role": "user",
-                        "content": "你吃饭了么"
+                        "content": "查询杭州天气"
                     }
                 ],
                 "response_format": {
@@ -419,7 +419,8 @@
                                                     "description": "城市 杭州市、余杭区"
                                                 }
                                             },
-                                            "required": ["location"]
+                                            "required": ["location"],
+                                            "additionalProperties": false
                                         },
                                         "style": "glm_xml"
                                     },
@@ -427,7 +428,7 @@
                                 }
                             ],
                             "at_least_one": true,
-                            "stop_after_first": false,
+                            "stop_after_first": true,
                             "excludes": ["<think>", "</think>"]
                         }
                     }
@@ -462,7 +463,7 @@
                 "aux_info": null,
                 "_comment": "constraint_only placeholder — actual is validated against the structural_tag constraint, not compared byte-for-byte."
             },
-            "_comment": "triggered_tags ACTIVE-constraint test — at_least_one=true forces the grammar to emit at least one complete <tool_call>get_current_weather...{glm_xml location}...</tool_call> tag EVEN THOUGH the system msg ('你不用调用天气查询工具') and the off-topic prompt ('你吃饭了么') push the model away from tool use. The validator asserts: (1) excludes <think>/</think> never appear; (2) every <tool_call> trigger completes into a well-formed tag whose inner glm_xml payload carries the required 'location' key; (3) no bare/uncompleted trigger leaks into the free text. Any token escaping the structural-tag mask breaks one of these."
+            "_comment": "triggered_tags ACTIVE-constraint test — at_least_one=true forces the grammar to emit at least one complete <tool_call>get_current_weather...{glm_xml location}...</tool_call> tag. Keep the prompt simple and aligned with the tool call; the purpose is to validate triggered_tags wiring under smoke, not to test adversarial model behavior. The validator asserts: (1) excludes <think>/</think> never appear; (2) every <tool_call> trigger completes into a well-formed tag whose inner glm_xml payload carries the required 'location' key; (3) no bare/uncompleted trigger leaks into the free text."
         }
     ]
 }
