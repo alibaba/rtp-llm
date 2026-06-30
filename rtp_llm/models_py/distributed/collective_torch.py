@@ -558,6 +558,8 @@ def destroy_distributed_environment():
 
         if hasattr(librtp_compute_ops, "clear_comm_ops"):
             librtp_compute_ops.clear_comm_ops()
+        # Missing this symbol means mixed Python/C++ artifacts; fail fast
+        # instead of masking a broken deployment.
         librtp_compute_ops.destroy_cpu_tp_broadcaster()
     except ImportError:
         pass
