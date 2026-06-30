@@ -102,6 +102,13 @@ public:
     int combo_token_size = 0;
     // banned_combo_token_ids 是禁止生成的商品 token 组合列表，每项长度应等于 combo_token_size
     std::vector<std::vector<int>> banned_combo_token_ids;
+    // 跨序列 combo 去重：当 num_return_sequences > 1 时，任一序列生成完整 combo 后
+    // 自动广播到其他序列的 banned_combos，确保多条序列输出互不重复。默认关闭。
+    // 启用后采用主序列保护模式：序列 0 不接收其他序列的 ban，补充序列接收所有。
+    bool enable_cross_sequence_ban = false;
+    // 跨序列分叉起始商品位置：前 N 个商品所有序列保持 greedy 一致，
+    // 从第 N+1 个商品开始对非主序列施加 top-K 遮蔽制造分叉。默认 0（立即分叉）。
+    int cross_seq_diverge_start_combo = 0;
 
     bool top1() {
         return top_k == 1;
@@ -158,7 +165,9 @@ public:
                      << ", enable_memory_cache: " << enable_memory_cache
                      << ", enable_remote_cache: " << enable_remote_cache << ", force_batch: " << force_batch
                      << ", unique_key: " << unique_key << ", combo_token_size: " << combo_token_size
-                     << ", banned_combo_token_ids_size: " << banned_combo_token_ids.size() << "}";
+                     << ", banned_combo_token_ids_size: " << banned_combo_token_ids.size()
+                     << ", enable_cross_sequence_ban: " << enable_cross_sequence_ban
+                     << ", cross_seq_diverge_start_combo: " << cross_seq_diverge_start_combo << "}";
         return debug_string.str();
     }
 
@@ -268,6 +277,8 @@ public:
         JSONIZE(unique_key);
         JSONIZE(combo_token_size);
         JSONIZE(banned_combo_token_ids);
+        JSONIZE(enable_cross_sequence_ban);
+        JSONIZE(cross_seq_diverge_start_combo);
 #undef JSONIZE
 #undef JSONIZE_OPTIONAL
     }

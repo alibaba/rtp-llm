@@ -5,6 +5,7 @@
 #include <vector>
 
 #include "rtp_llm/cpp/models/logits_processor/BaseLogitsProcessor.h"
+#include "rtp_llm/cpp/utils/AssertUtils.h"
 
 namespace rtp_llm {
 
@@ -16,13 +17,17 @@ namespace rtp_llm {
 // 对 qwen3 等会默认输出 <think>\n\n</think>\n\n 占位的模型,若 end_think_token_ids
 // 非空,则先按该序列跳过 think prelude,跳过完成前的 token 不进入 combo 前缀。
 struct StreamRecommendationInfo {
-    int32_t combo_token_size      = 0;
-    int32_t input_length          = 0;
-    int32_t current_output_length = 0;
-    bool    is_beam_search        = false;
+    int32_t combo_token_size          = 0;
+    int32_t input_length              = 0;
+    int32_t current_output_length     = 0;
+    bool    is_beam_search            = false;
+    bool    enable_cross_sequence_ban = false;
+    int32_t cross_seq_diverge_start_combo = 0;
 
     // 当前正在生成 combo 内的位置,取值 [0, combo_token_size-1]
     int32_t pos_in_combo = 0;
+    // 已完成的 combo 数量（用于判断是否达到分叉起始位置）
+    int32_t completed_combo_count = 0;
     // 当前 combo 已生成的前缀(长度 = pos_in_combo)
     std::vector<int> current_prefix;
     // 被禁止生成的 combo 集合;初始由 config 填充,每产生一个完整 combo 自动加入
@@ -41,27 +46,34 @@ struct StreamRecommendationInfo {
                              int32_t                           current_output_length,
                              bool                              is_beam_search,
                              const std::set<std::vector<int>>& banned_combos,
-                             const std::vector<int>&           end_think_token_ids = {}):
+                             const std::vector<int>&           end_think_token_ids = {},
+                             bool                              enable_cross_sequence_ban = false,
+                             int32_t                           cross_seq_diverge_start_combo = 0):
         combo_token_size(combo_token_size),
         input_length(input_length),
         current_output_length(current_output_length),
         is_beam_search(is_beam_search),
+        enable_cross_sequence_ban(enable_cross_sequence_ban),
+        cross_seq_diverge_start_combo(cross_seq_diverge_start_combo),
         banned_combos(banned_combos),
         end_think_token_ids(end_think_token_ids),
         think_done(end_think_token_ids.empty()) {}
 
     StreamRecommendationInfo copy() const {
         StreamRecommendationInfo info;
-        info.combo_token_size      = combo_token_size;
-        info.input_length          = input_length;
-        info.current_output_length = current_output_length;
-        info.is_beam_search        = is_beam_search;
-        info.pos_in_combo          = pos_in_combo;
-        info.current_prefix        = current_prefix;
-        info.banned_combos         = banned_combos;
-        info.end_think_token_ids   = end_think_token_ids;
-        info.think_done            = think_done;
-        info.end_think_match_pos   = end_think_match_pos;
+        info.combo_token_size              = combo_token_size;
+        info.input_length                  = input_length;
+        info.current_output_length         = current_output_length;
+        info.is_beam_search                = is_beam_search;
+        info.enable_cross_sequence_ban     = enable_cross_sequence_ban;
+        info.cross_seq_diverge_start_combo = cross_seq_diverge_start_combo;
+        info.pos_in_combo                  = pos_in_combo;
+        info.completed_combo_count         = completed_combo_count;
+        info.current_prefix                = current_prefix;
+        info.banned_combos                 = banned_combos;
+        info.end_think_token_ids           = end_think_token_ids;
+        info.think_done                    = think_done;
+        info.end_think_match_pos           = end_think_match_pos;
         return info;
     }
 };
@@ -91,14 +103,21 @@ public:
     }
     void insert(std::shared_ptr<RecommendationLogitsProcessor> others) {
         if (others != nullptr) {
+            // 不变量守卫：insert 后 infos_[0].enable_cross_sequence_ban 必须仍然能代表全局状态。
+            // 若两个 processor 的 enable_cross_sequence_ban 不一致，合并会破坏广播门控语义。
+            if (!infos_.empty() && !others->infos_.empty()) {
+                RTP_LLM_CHECK_WITH_INFO(
+                    infos_[0].enable_cross_sequence_ban == others->infos_[0].enable_cross_sequence_ban,
+                    "insert() requires consistent enable_cross_sequence_ban across processors");
+            }
             infos_.insert(infos_.end(), others->infos_.begin(), others->infos_.end());
         }
     }
 
 private:
-    // 将单个 token 推进到状态机;若形成完整 combo 则自动加入 banned_combos。
+    // 将单个 token 推进到状态机;若形成完整 combo 则自动加入 banned_combos 并返回 true。
     // 若 think prelude 未跳过完毕,则本 token 仅用于推进 think DFA,不进入 combo 前缀。
-    void advanceOneToken(StreamRecommendationInfo& info, int token_id);
+    bool advanceOneToken(StreamRecommendationInfo& info, int token_id);
 
 private:
     std::vector<StreamRecommendationInfo> infos_;

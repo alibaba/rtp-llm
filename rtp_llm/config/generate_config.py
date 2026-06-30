@@ -1,5 +1,6 @@
 import copy
 import hashlib
+import logging
 from typing import Any, Dict, List, Optional, Union
 
 from pydantic import BaseModel, ConfigDict, field_serializer, field_validator
@@ -81,6 +82,26 @@ class GenerateConfig(BaseModel):
     combo_token_size: int = 0
     banned_combo_token_ids: List[List[int]] = []
     auto_parse_banned_combo: bool = False
+    # 跨序列 combo 去重：当 num_return_sequences > 1 时，任一序列生成完整 combo 后自动广播到
+    # 其他序列的 banned_combos，确保多条序列输出互不重复。默认关闭。
+    # 跨序列去重开关（primary-protected 非对称模式）：开启后，主序列（序列 0）仅保留自身 ban、
+    # 不受其他序列影响；补充序列接收所有序列 banned_combos 并集，保证彼此不重复。
+    enable_cross_sequence_ban: bool = False
+    # 跨序列分叉起始商品位置：前 N 个商品所有序列保持 greedy 一致，
+    # 从第 N+1 个商品开始对非主序列施加 top-K 遮蔽制造分叉。默认 0（立即分叉）。
+    cross_seq_diverge_start_combo: int = 0
+
+    @field_validator("cross_seq_diverge_start_combo", mode="before")
+    @classmethod
+    def _clamp_diverge_start_combo(cls, v):
+        """确保分叉起始位置非负，负值 clamp 到 0 并输出 warning。"""
+        val = int(v)
+        if val < 0:
+            logging.getLogger(__name__).warning(
+                "cross_seq_diverge_start_combo is negative (%d), clamped to 0", val)
+            return 0
+        return val
+
     random_seed: Optional[Union[List[int], int]] = None
     top_p_decay: Optional[Union[List[float], float]] = None
     top_p_min: Optional[Union[List[float], float]] = None
