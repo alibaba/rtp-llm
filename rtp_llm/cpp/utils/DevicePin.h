@@ -2,8 +2,6 @@
 
 #include "rtp_llm/cpp/utils/Logger.h"
 
-#include <c10/core/DeviceType.h>
-
 #if USING_CUDA
 #include <ATen/cuda/CUDAContext.h>
 #include <cuda_runtime.h>
@@ -13,16 +11,6 @@
 #endif
 
 namespace rtp_llm {
-
-inline c10::DeviceType getPinnedTorchDeviceType() {
-#if USING_ROCM
-    return c10::DeviceType::HIP;
-#elif USING_CUDA
-    return c10::DeviceType::CUDA;
-#else
-    return c10::DeviceType::CPU;
-#endif
-}
 
 inline void setCurrentThreadDeviceIfNeeded(int device_id) {
     if (device_id < 0) {
@@ -37,6 +25,7 @@ inline void setCurrentThreadDeviceIfNeeded(int device_id) {
 
     // Thread-pool workers may serve different cache stores over time; a new
     // device_id intentionally retargets the current thread instead of no-oping.
+    // ROCm PyTorch exposes ordinary GPU tensors as CUDA; only pinning uses HIP APIs.
 #if USING_CUDA
     at::cuda::set_device(device_id);
 #elif USING_ROCM

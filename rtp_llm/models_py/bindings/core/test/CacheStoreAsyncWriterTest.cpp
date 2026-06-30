@@ -6,7 +6,49 @@
 #include <thread>
 #include <vector>
 
+#if USING_CUDA
+#include <cuda_runtime.h>
+#elif USING_ROCM
+#include <hip/hip_runtime.h>
+#endif
+
 namespace rtp_llm {
+
+#if USING_CUDA || USING_ROCM
+namespace {
+
+bool hasGpuDeviceForTest() {
+#if USING_CUDA
+    int device_count = 0;
+    return cudaGetDeviceCount(&device_count) == cudaSuccess && device_count > 0;
+#elif USING_ROCM
+    int device_count = 0;
+    return hipGetDeviceCount(&device_count) == hipSuccess && device_count > 0;
+#else
+    return false;
+#endif
+}
+
+int currentDeviceForTest() {
+#if USING_CUDA
+    int device = -1;
+    if (cudaGetDevice(&device) != cudaSuccess) {
+        return -1;
+    }
+    return device;
+#elif USING_ROCM
+    int device = -1;
+    if (hipGetDevice(&device) != hipSuccess) {
+        return -1;
+    }
+    return device;
+#else
+    return -1;
+#endif
+}
+
+}  // namespace
+#endif
 
 class CacheStoreAsyncWriterTest: public ::testing::Test {};
 
@@ -87,16 +129,29 @@ TEST_F(CacheStoreAsyncWriterTest, AsyncExecution) {
 }
 
 TEST_F(CacheStoreAsyncWriterTest, AsyncExecutionWithDeviceId) {
+#if USING_CUDA || USING_ROCM
+    if (!hasGpuDeviceForTest()) {
+        GTEST_SKIP() << "No GPU device available";
+    }
+
     CacheStoreAsyncWriter writer(0);
     writer.init();
 
     std::atomic<int> counter{0};
-    writer.submit([&counter]() { counter.fetch_add(1); });
+    std::atomic<int> observed_device{-1};
+    writer.submit([&counter, &observed_device]() {
+        observed_device.store(currentDeviceForTest(), std::memory_order_release);
+        counter.fetch_add(1);
+    });
     writer.waitAllDone();
 
     ASSERT_TRUE(writer.state_ == CacheStoreAsyncWriter::State::IDLE);
     ASSERT_EQ(1, counter.load());
+    ASSERT_EQ(0, observed_device.load(std::memory_order_acquire));
     ASSERT_EQ(0, writer.pending_count_.load());
+#else
+    GTEST_SKIP() << "GPU device pinning is unavailable in CPU-only builds";
+#endif
 }
 
 TEST_F(CacheStoreAsyncWriterTest, ExceptionPropagation) {
