@@ -1,6 +1,7 @@
 #include <memory>
 #include <chrono>
 #include <c10/core/InferenceMode.h>
+#include <pybind11/pybind11.h>
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
@@ -120,7 +121,13 @@ grpc::Status LocalRpcServer::pollStreamOutput(grpc::ServerContext*             c
 }
 
 ErrorInfo LocalRpcServer::prepareInput(const GenerateInputPB& input_pb, std::shared_ptr<GenerateInput>& output) {
-    output = QueryConverter::transQuery(&input_pb);
+    try {
+        output = QueryConverter::transQuery(&input_pb);
+    } catch (const pybind11::error_already_set& e) {
+        return ErrorInfo(ErrorCode::INVALID_PARAMS, std::string("Request parsing error: ") + e.what());
+    } catch (const std::exception& e) {
+        return ErrorInfo(ErrorCode::INVALID_PARAMS, std::string("Request parsing error: ") + e.what());
+    }
     if (mm_processor_ != nullptr && output->multimodal_inputs) {
         RTP_LLM_PROFILE_SCOPE("rpc.mm_update_features");
         auto mm_res = mm_processor_->updateMultimodalFeatures(output);
@@ -210,9 +217,10 @@ grpc::Status LocalRpcServer::BatchGenerateCall(grpc::ServerContext*        conte
                 auto* err_pb = result->mutable_error_info();
                 err_pb->set_error_code(ErrorCodePB::UNKNOWN_ERROR);
                 if (j == i) {
-                    err_pb->set_error_message("multimodal processing failed: " + err.ToString());
+                    err_pb->set_error_message("request preparation failed: " + err.ToString());
                 } else {
-                    err_pb->set_error_message("batch aborted due to multimodal failure at index " + std::to_string(i));
+                    err_pb->set_error_message("batch aborted due to request preparation failure at index "
+                                              + std::to_string(i));
                 }
             }
             return grpc::Status::OK;

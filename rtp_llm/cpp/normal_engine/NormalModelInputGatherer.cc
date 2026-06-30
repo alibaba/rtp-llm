@@ -3,6 +3,7 @@
 #include <sstream>
 #include "torch/all.h"
 #include "rtp_llm/cpp/cache/Types.h"
+#include "rtp_llm/cpp/engine_base/stream/InputEmbeddingsUtils.h"
 #include "rtp_llm/cpp/normal_engine/NormalModelInputGatherer.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/StatusUtil.h"
@@ -182,6 +183,45 @@ void gatherMultimodalFeaturesForContextBatch(const GenerateStreamPtr&    stream,
     memcpy(ctx.merged_text_mask + ctx.token_idx, text_token_mask.data(), text_token_mask.size() * sizeof(int));
 }
 
+// Sole H2D owner for input_embeddings. Downstream consumers assert CUDA
+// placement and forward without copying — keep that invariant if you change this.
+absl::Status gatherInputEmbeddingsForContextBatch(const GenerateStreamPtr&       stream,
+                                                  const GatherModelInputContext& ctx,
+                                                  size_t                         current_token_count,
+                                                  std::vector<torch::Tensor>&    gathered_input_embeddings,
+                                                  std::vector<int32_t>&          gathered_input_embedding_locs) {
+    if (!stream->hasInputEmbeddings()) {
+        return absl::OkStatus();
+    }
+    const auto& embeddings = stream->inputEmbeddings();
+    const auto& locs       = stream->inputEmbeddingsLocs();
+    RETURN_IF_STATUS_ERROR(validateInputEmbeddings(embeddings, locs, stream->inputLength()));
+    for (size_t i = 0; i < embeddings.size(); ++i) {
+        auto embedding = embeddings[i];
+        if (embedding.dim() == 1) {
+            embedding = embedding.unsqueeze(0);
+        }
+        const auto adjusted_loc = locs[i] - stream->reuseLength() + ctx.token_idx;
+        const auto emb_len      = embedding.size(0);
+        if (adjusted_loc < ctx.token_idx
+            || adjusted_loc + emb_len > ctx.token_idx + static_cast<int64_t>(current_token_count)) {
+            std::ostringstream error_msg;
+            error_msg << "input_embeddings_locs[" << i << "]=" << locs[i] << " with emb length " << emb_len
+                      << " falls outside current context batch [" << ctx.token_idx << ", "
+                      << ctx.token_idx + static_cast<int64_t>(current_token_count)
+                      << ") after reuse_length=" << stream->reuseLength() << " for stream " << stream->streamId();
+            return absl::InvalidArgumentError(error_msg.str());
+        }
+        if (embedding.is_cuda()) {
+            gathered_input_embeddings.emplace_back(embedding);
+        } else {
+            gathered_input_embeddings.emplace_back(embedding.to(torch::kCUDA));
+        }
+        gathered_input_embedding_locs.push_back(adjusted_loc);
+    }
+    return absl::OkStatus();
+}
+
 void addCacheUpdateCopy(GatherModelInputContext& ctx, const std::vector<BlockIdPair>& update_mapping) {
     if (!ctx.kv_cache_update_mapping) {
         return;
@@ -313,6 +353,8 @@ absl::Status NormalModelInputGatherer::processContextStreams(GptModelInputs&    
                                                              const StreamGroups& stream_groups) const {
     std::vector<torch::Tensor> gathered_mm_features;
     std::vector<torch::Tensor> gathered_mm_extra_input;
+    std::vector<torch::Tensor> gathered_input_embeddings;
+    std::vector<int32_t>       gathered_input_embedding_locs;
     auto ctx = createGatherContext(config_, model_input, stream_groups, GatherContextMode::CONTEXT);
 
     for (const auto& stream : stream_groups.contextStreams()) {
@@ -350,6 +392,8 @@ absl::Status NormalModelInputGatherer::processContextStreams(GptModelInputs&    
             ctx.lm_output_indexes[ctx.batch_idx]  = ctx.cum_output_seq_len - 1;
             ctx.lm_output_lengths[ctx.batch_idx]  = 1;
 
+            RETURN_IF_STATUS_ERROR(gatherInputEmbeddingsForContextBatch(
+                stream, ctx, input_tokens.size(), gathered_input_embeddings, gathered_input_embedding_locs));
             gatherMultimodalFeaturesForContextBatch(stream, ctx, gathered_mm_features);
 
             if (ctx.need_cal_position_id) {
@@ -408,6 +452,10 @@ absl::Status NormalModelInputGatherer::processContextStreams(GptModelInputs&    
     if (ctx.has_multimodal_input && model_input.mm_features_locs.defined()
         && ctx.mm_feature_index < model_input.mm_features_locs.numel()) {
         model_input.mm_features_locs = model_input.mm_features_locs.slice(0, 0, ctx.mm_feature_index);
+    }
+    if (!gathered_input_embeddings.empty()) {
+        model_input.input_embeddings      = std::move(gathered_input_embeddings);
+        model_input.input_embeddings_locs = torch::tensor(gathered_input_embedding_locs, torch::kInt32);
     }
     return absl::OkStatus();
 }

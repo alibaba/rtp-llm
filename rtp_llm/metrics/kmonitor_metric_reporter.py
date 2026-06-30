@@ -1,6 +1,6 @@
 import logging
 from enum import Enum
-from typing import Any, Dict, Union
+from typing import Any, Callable, Dict, Optional, Type, Union
 
 
 class AccMetrics(Enum):
@@ -90,15 +90,30 @@ class MetricReporter(object):
     def flush(self) -> None:
         self._kmon.flush()
 
-    def init(self):
+    def _register_metrics(
+        self, metrics: Type[Enum], register_fn: Callable[[str], Any]
+    ) -> None:
+        for metric in metrics:
+            if metric.value in self._matic_map:
+                continue
+            self._matic_map[metric.value] = register_fn(metric.value)
+
+    def init(
+        self,
+        *,
+        additional_acc_metrics: Optional[Type[Enum]] = None,
+        additional_gauge_metrics: Optional[Type[Enum]] = None,
+    ):
         if not self._inited:
             self._inited = True
-            for metric in AccMetrics:
-                self._matic_map[metric.value] = self._kmon.register_acc_metric(
-                    metric.value
-                )
+            self._register_metrics(AccMetrics, self._kmon.register_acc_metric)
+            self._register_metrics(GaugeMetrics, self._kmon.register_gauge_metric)
 
-            for metric in GaugeMetrics:
-                self._matic_map[metric.value] = self._kmon.register_gauge_metric(
-                    metric.value
-                )
+        if additional_acc_metrics is not None:
+            self._register_metrics(
+                additional_acc_metrics, self._kmon.register_acc_metric
+            )
+        if additional_gauge_metrics is not None:
+            self._register_metrics(
+                additional_gauge_metrics, self._kmon.register_gauge_metric
+            )
