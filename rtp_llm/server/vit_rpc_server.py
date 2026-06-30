@@ -2,7 +2,6 @@ import logging
 from concurrent import futures
 
 import grpc
-import torch
 
 from rtp_llm.config.engine_config import EngineConfig
 from rtp_llm.config.log_config import setup_logging
@@ -11,9 +10,7 @@ from rtp_llm.config.server_config_setup import setup_and_configure_server
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     CacheStatusPB,
     CacheVersionPB,
-    MMPreprocessConfigPB,
     MultimodalInputsPB,
-    MultimodalOutputPB,
     StatusVersionPB,
     WorkerStatusPB,
 )
@@ -24,33 +21,12 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2_grpc import (
 from rtp_llm.distribute.distributed_server import get_world_info
 from rtp_llm.model_factory import ModelFactory
 from rtp_llm.multimodal.mm_process_engine import MMEmbeddingRes, MMProcessEngine
-from rtp_llm.ops import MMPreprocessConfig, MultimodalInput
+from rtp_llm.multimodal.multimodal_util import build_multimodal_output_pb
 from rtp_llm.server.server_args.server_args import setup_args
-from rtp_llm.utils.grpc_util import trans_from_tensor, trans_tensor
 
 
 def trans_output(res: MMEmbeddingRes):
-    # Guard against empty embeddings (e.g. error path where mm_embedding_rpc
-    # returns no tensors). torch.concat on an empty list raises RuntimeError.
-    if not res.embeddings:
-        return MultimodalOutputPB()
-
-    contain_pos = (res.position_ids is not None) and (len(res.position_ids) > 0)
-    contain_extra_input = (res.extra_input is not None) and (len(res.extra_input) > 0)
-
-    output_pb = MultimodalOutputPB(
-        multimodal_embedding=trans_from_tensor(torch.concat(res.embeddings)),
-        split_size=[e.shape[0] for e in res.embeddings],
-    )
-    if contain_pos:
-        output_pb.multimodal_pos_id.CopyFrom(
-            trans_from_tensor(torch.concat(res.position_ids))
-        )
-    if contain_extra_input:
-        # Each extra-input is an opaque flat 1-D tensor (one per image).
-        for extra in res.extra_input:
-            output_pb.multimodal_extra_input.append(trans_from_tensor(extra))
-    return output_pb
+    return build_multimodal_output_pb(res.embeddings, res.position_ids, res.extra_input)
 
 
 class MultimodalRpcServer(MultimodalRpcServiceServicer):
@@ -59,8 +35,9 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
 
     def RemoteMultimodalEmbedding(self, multimodal_inputs: MultimodalInputsPB, context):
         res: MMEmbeddingRes = self.engine.mm_embedding_rpc(multimodal_inputs)
-        res = trans_output(res)
-        return res
+
+        output_pb = trans_output(res)
+        return output_pb
 
     def GetWorkerStatus(self, request: StatusVersionPB, context):
         worker_status = WorkerStatusPB()

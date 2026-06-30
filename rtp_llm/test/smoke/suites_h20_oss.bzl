@@ -472,6 +472,18 @@ def h20_oss_suites():
                 gpu_type=["H20"],
                 data=native.glob(['data/model/llava/*.jpg']),
             ),
+            # Same model with the VIT GPU batch scheduler enabled, to smoke the
+            # real batched_embedding path, multi-image ordering and serialized output.
+            smoke_test(
+                name="qwen3_vl_gpu_batch",
+                task_info="data/model/qwen_vl/q_r_3.json",
+                smoke_args = {
+                    "llm": "--act_type BF16 --use_local 1 --tp_size 2 --reuse_cache 1",
+                    "vit": "--act_type BF16 --use_local 1 --use_local_preprocess 1 --use_gpu_batch 1 --gpu_batch_wait_ms 10 --gpu_max_batch_size 8"
+                },
+                gpu_type=["H20"],
+                data=native.glob(['data/model/llava/*.jpg']),
+            ),
             smoke_test(
                 name="qwen3_vl_moe",
                 task_info="data/model/qwen_vl/q_r_3_moe.json",

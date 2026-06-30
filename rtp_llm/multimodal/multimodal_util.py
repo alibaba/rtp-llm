@@ -7,7 +7,7 @@ import threading
 from dataclasses import dataclass
 from enum import IntEnum
 from io import BytesIO
-from typing import Optional
+from typing import Any, List, Optional
 
 import requests
 import torch
@@ -15,10 +15,11 @@ import torch
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     MMPreprocessConfigPB,
     MultimodalInputsPB,
+    MultimodalOutputPB,
 )
 from rtp_llm.ops import MMPreprocessConfig, MultimodalInput
 from rtp_llm.utils.base_model_datatypes import MMUrlType
-from rtp_llm.utils.grpc_util import trans_tensor
+from rtp_llm.utils.grpc_util import trans_from_tensor, trans_tensor
 from rtp_llm.utils.lru_dict import LruDict
 from rtp_llm.utils.oss_util import get_bytes_io_from_oss_path
 
@@ -246,3 +247,45 @@ def trans_mm_input(multimodal_inputs):
         raise ValueError(
             f"Unsupported multimodal input type: {type(multimodal_inputs)}"
         )
+
+
+def maybe_tensor_to_list(tensor: Any, ndim_threshold: int = 2) -> Any:
+    """Split a stacked tensor into a per-image list, or wrap a single tensor.
+
+    `ndim_threshold` is a number-of-dimensions threshold (NOT a dim to operate
+    on): a tensor with more than `ndim_threshold` dims is treated as stacked and
+    split along its leading dim; otherwise it is wrapped in a single-element list.
+    Non-tensor input is returned unchanged (hence the `Any` return type); None
+    becomes [].
+    """
+    if tensor is None:
+        return []
+    if not isinstance(tensor, torch.Tensor):
+        return tensor
+    if len(tensor.shape) > ndim_threshold:
+        return list(tensor)
+    return [tensor]
+
+
+def build_multimodal_output_pb(
+    embeddings: Optional[List[torch.Tensor]],
+    position_ids: Optional[List[torch.Tensor]],
+    extra_input: Optional[List[torch.Tensor]],
+) -> MultimodalOutputPB:
+    """Serialize embedding tensors into a MultimodalOutputPB."""
+    embeddings = embeddings or []
+    position_ids = position_ids or []
+    extra_input = extra_input or []
+    if not embeddings:
+        return MultimodalOutputPB()
+    output_pb = MultimodalOutputPB(
+        multimodal_embedding=trans_from_tensor(torch.concat(embeddings)),
+        split_size=[e.shape[0] for e in embeddings],
+    )
+    if position_ids:
+        output_pb.multimodal_pos_id.CopyFrom(
+            trans_from_tensor(torch.concat(position_ids))
+        )
+    for extra in extra_input:
+        output_pb.multimodal_extra_input.append(trans_from_tensor(extra))
+    return output_pb
