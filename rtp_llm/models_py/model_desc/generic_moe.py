@@ -99,7 +99,14 @@ class GenericMoeLayer(nn.Module):
             self.shared_expert = None
         if weights.get(W.shared_expert_gate, None) is not None:
             self.shared_expert_gate = LinearFactory.create_linear_from_weights(
-                weights, W.shared_expert_gate, None, None, config
+                weights,
+                W.shared_expert_gate,
+                None,
+                None,
+                quant_config=quant_config,
+                # The scalar shared gate is not preshuffled by the weight loader.
+                # Keep it on NoSwizzle even when USE_SWIZZLEA is enabled.
+                hw_kernel_config=None,
             )
             self.sigmoid_gate_scale_add = SigmoidGateScaleAdd()
         else:
@@ -250,7 +257,11 @@ class GenericMoeDecoderLayer(nn.Module):
         # Determine if this is a Dense layer (before first MoE layer or dense only)
         if layer_idx not in config.moe_layer_index:
             self.mlp = DenseMLP(
-                config.activation_type, parallelism_config, weights, quant_config
+                config.activation_type,
+                parallelism_config,
+                weights,
+                quant_config,
+                hw_kernel_config=hw_kernel_config,
             )
         else:
             self.mlp = GenericMoeLayer(
