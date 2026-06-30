@@ -105,6 +105,8 @@ message GenerateConfigPB {
     google.protobuf.StringValue ebnf = 61;
     google.protobuf.StringValue structural_tag = 62;
     google.protobuf.StringValue response_format = 63;
+    bool return_aux_hidden_states = 64;
+    repeated int32 aux_hidden_states_layers = 65;
 }
 
 message MMPreprocessConfigPB {
@@ -194,6 +196,8 @@ message FlattenOutputPB {
     TensorPB logits = 6;
     TensorPB all_probs = 7;
     TensorPB all_hidden_states = 8;
+    TensorPB aux_hidden_states = 9;
+    TensorPB aux_hidden_states_layers = 10;
 }
 
 message GenerateOutputsPB {

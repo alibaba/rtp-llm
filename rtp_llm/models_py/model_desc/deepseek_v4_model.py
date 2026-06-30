@@ -46,6 +46,10 @@ from rtp_llm.models_py.modules.dsv4.decode.forward import (
     build_paged_pool_specs,
     forward_decode,
 )
+from rtp_llm.models_py.modules.dsv4.aux_hidden_states import (
+    make_aux_hidden_states_layers_tensor,
+    resolve_aux_hidden_states_layers,
+)
 from rtp_llm.models_py.modules.dsv4.moe.moe_layer import (
     chunked_moe_enabled,
     cp_padded_tokens_per_rank_bound,
@@ -1192,9 +1196,28 @@ class DeepSeekV4Model(GptModelBase):
             )
             T = max(inputs.input_ids.numel(), 1)
             device = self.v4.embed.weight.device
-            return PyModelOutputs(
-                torch.zeros(T, self._v4_args.dim, dtype=torch.bfloat16, device=device)
+            outputs = PyModelOutputs(
+                torch.zeros((T, self._v4_args.dim), dtype=torch.bfloat16, device=device)
             )
+            if bool(getattr(inputs, "need_aux_hidden_states", False)):
+                layers = resolve_aux_hidden_states_layers(
+                    getattr(inputs, "aux_hidden_states_layer_ids", None),
+                    num_layers=len(self.v4.layers),
+                )
+                outputs.aux_hidden_states = torch.zeros(
+                    (
+                        T,
+                        len(layers)
+                        * int(self._v4_args.hc_mult)
+                        * int(self._v4_args.dim),
+                    ),
+                    dtype=torch.bfloat16,
+                    device=device,
+                )
+                outputs.aux_hidden_states_layers = make_aux_hidden_states_layers_tensor(
+                    layers, device
+                )
+            return outputs
         attn = inputs.attention_inputs
 
         # Subclass-overridable hidden-state preparation hooks.  When a

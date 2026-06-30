@@ -35,6 +35,8 @@ struct StreamUpdateInfo {
     const torch::Tensor all_probs;
     const torch::Tensor loss;
     const torch::Tensor src_batch_indices;
+    const torch::Tensor aux_hidden_states;
+    const torch::Tensor aux_hidden_states_layers;
     // for mtp
     const torch::Tensor all_hidden_states;
     bool                update_remote_generate = true;

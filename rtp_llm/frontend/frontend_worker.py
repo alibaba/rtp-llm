@@ -38,6 +38,8 @@ class PipelineResponse(BaseModel):
     finished: bool = True
     aux_info: Dict[str, Any] = {}
     hidden_states: Optional[Union[List[float], List[List[float]]]] = None
+    aux_hidden_states: Optional[Union[List[float], List[List[float]]]] = None
+    aux_hidden_states_layers: Optional[List[int]] = None
     loss: Optional[Union[float, List[float]]] = None
     logits: Optional[Union[List[float], List[List[float]]]] = None
     output_ids: Optional[List[List[int]]] = None
@@ -210,6 +212,12 @@ class FrontendWorker:
             if generate_config.has_num_beams():
                 aux_info.beam_responses = generate_texts
         hidden_states = gen_responses.generate_outputs.generate_outputs[0].hidden_states
+        aux_hidden_states = gen_responses.generate_outputs.generate_outputs[
+            0
+        ].aux_hidden_states
+        aux_hidden_states_layers = gen_responses.generate_outputs.generate_outputs[
+            0
+        ].aux_hidden_states_layers
         output_ids = gen_responses.generate_outputs.generate_outputs[0].output_ids
         input_ids = gen_responses.generate_outputs.generate_outputs[0].input_ids
         loss = gen_responses.generate_outputs.generate_outputs[0].loss
@@ -223,6 +231,22 @@ class FrontendWorker:
                 hidden_states.tolist()
                 if generate_config.return_hidden_states and hidden_states is not None
                 else None
+            ),
+            aux_hidden_states=(
+                aux_hidden_states.tolist()
+                if generate_config.return_aux_hidden_states
+                and aux_hidden_states is not None
+                else None
+            ),
+            aux_hidden_states_layers=(
+                [int(x) for x in aux_hidden_states_layers.tolist()]
+                if generate_config.return_aux_hidden_states
+                and aux_hidden_states_layers is not None
+                else (
+                    list(generate_config.aux_hidden_states_layers)
+                    if generate_config.return_aux_hidden_states
+                    else None
+                )
             ),
             loss=(
                 loss.tolist()

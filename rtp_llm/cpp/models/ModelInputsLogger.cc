@@ -138,6 +138,7 @@ std::string formatModelInputs(const GptModelInputs& inputs) {
     appendTensor("combo_tokens_type_ids", inputs.combo_tokens_type_ids, torch::Tensor());
     appendTensor("combo_position_ids", inputs.combo_position_ids, torch::Tensor());
     appendTensor("last_hidden_states", inputs.last_hidden_states, torch::Tensor());
+    appendTensor("aux_hidden_states_layer_ids", inputs.aux_hidden_states_layer_ids, torch::Tensor());
     appendTensor("attention_mask", inputs.attention_mask, torch::Tensor());
     appendTensor("kv_cache_block_id", inputs.kv_cache_block_id, torch::Tensor());
     appendTensor("kv_cache_layer_to_group", inputs.kv_cache_layer_to_group, torch::Tensor());
@@ -154,6 +155,7 @@ std::string formatModelInputs(const GptModelInputs& inputs) {
     appendBool("use_opaque_kv_cache_store", inputs.use_opaque_kv_cache_store);
     appendBool("need_all_logits", inputs.need_all_logits);
     appendBool("need_all_hidden_states", inputs.need_all_hidden_states);
+    appendBool("need_aux_hidden_states", inputs.need_aux_hidden_states);
     appendBool("need_moe_gating", inputs.need_moe_gating);
     appendBool("warmup", inputs.warmup);
     appendBool("skip_run", inputs.skip_run);

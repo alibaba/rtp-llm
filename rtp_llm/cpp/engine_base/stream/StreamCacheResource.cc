@@ -150,6 +150,8 @@ static bool applyP2PSideChannelToStream(const std::shared_ptr<FusedAsyncReadCont
                         .all_probs         = {},
                         .loss              = {},
                         .src_batch_indices = {},
+                        .aux_hidden_states = {},
+                        .aux_hidden_states_layers = {},
                         .all_hidden_states = {}});
         if (stream->nextBatchSize() == 1) {
             const auto cuda_i32 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);

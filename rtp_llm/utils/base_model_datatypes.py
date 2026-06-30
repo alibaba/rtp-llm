@@ -102,6 +102,8 @@ class AuxInfo:
 class GenerateOutput:
     hidden_states: Optional[torch.Tensor] = None
     all_hidden_states: Optional[torch.Tensor] = None
+    aux_hidden_states: Optional[torch.Tensor] = None
+    aux_hidden_states_layers: Optional[torch.Tensor] = None
     output_ids: Optional[torch.Tensor] = None
     input_ids: Optional[torch.Tensor] = None
     finished: bool = False

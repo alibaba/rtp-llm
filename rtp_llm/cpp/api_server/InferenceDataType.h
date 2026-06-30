@@ -136,6 +136,11 @@ public:
             json.Jsonize("loss", loss.value(), loss.value());
         if (hidden_states.has_value())
             json.Jsonize("hidden_states", hidden_states.value(), hidden_states.value());
+        if (aux_hidden_states.has_value())
+            json.Jsonize("aux_hidden_states", aux_hidden_states.value(), aux_hidden_states.value());
+        if (aux_hidden_states_layers.has_value())
+            json.Jsonize(
+                "aux_hidden_states_layers", aux_hidden_states_layers.value(), aux_hidden_states_layers.value());
         if (output_ids.has_value())
             json.Jsonize("output_ids", output_ids.value(), output_ids.value());
         if (input_ids.has_value())
@@ -147,6 +152,8 @@ public:
     std::optional<std::vector<std::vector<float>>> logits;
     std::optional<std::vector<std::vector<float>>> loss;
     std::optional<std::vector<std::vector<float>>> hidden_states;
+    std::optional<std::vector<std::vector<float>>> aux_hidden_states;
+    std::optional<std::vector<std::vector<int>>>   aux_hidden_states_layers;
     std::optional<std::vector<std::vector<int>>>   output_ids;
     std::optional<std::vector<std::vector<int>>>   input_ids;
 };

@@ -193,16 +193,25 @@ void registerPyOpDefs(pybind11::module& m) {
 
     pybind11::class_<PyModelInputs>(m, "PyModelInputs")
         .def(pybind11::init<>())
-        .def(pybind11::init<torch::Tensor, torch::Tensor, PyAttentionInputs, BertEmbeddingInputs>(),
-             pybind11::arg("input_ids")             = torch::empty(0),
-             pybind11::arg("input_hiddens")         = torch::empty(0),
-             pybind11::arg("attention_inputs")      = PyAttentionInputs(),
-             pybind11::arg("bert_embedding_inputs") = BertEmbeddingInputs())
+        .def(pybind11::
+                 init<torch::Tensor, torch::Tensor, PyAttentionInputs, BertEmbeddingInputs, bool, torch::Tensor>(),
+             pybind11::arg("input_ids")                    = torch::empty(0),
+             pybind11::arg("input_hiddens")                = torch::empty(0),
+             pybind11::arg("attention_inputs")             = PyAttentionInputs(),
+             pybind11::arg("bert_embedding_inputs")        = BertEmbeddingInputs(),
+             pybind11::arg("need_aux_hidden_states")       = false,
+             pybind11::arg("aux_hidden_states_layer_ids")  = torch::empty({0}, torch::kInt32))
         .def_readwrite("input_ids", &PyModelInputs::input_ids, "Input token IDs tensor")
         .def_readwrite("input_hiddens", &PyModelInputs::input_hiddens, "Input hidden states tensor")
         .def_readwrite("attention_inputs", &PyModelInputs::attention_inputs, "Attention inputs structure")
         .def_readwrite(
-            "bert_embedding_inputs", &PyModelInputs::bert_embedding_inputs, "BERT embedding inputs structure");
+            "bert_embedding_inputs", &PyModelInputs::bert_embedding_inputs, "BERT embedding inputs structure")
+        .def_readwrite("need_aux_hidden_states",
+                       &PyModelInputs::need_aux_hidden_states,
+                       "Whether to capture auxiliary hidden states from selected layers")
+        .def_readwrite("aux_hidden_states_layer_ids",
+                       &PyModelInputs::aux_hidden_states_layer_ids,
+                       "Layer ids to capture auxiliary hidden states from");
 
     pybind11::class_<PyModelOutputs>(m, "PyModelOutputs")
         .def(pybind11::init<>(), "Default constructor")
@@ -226,6 +235,11 @@ void registerPyOpDefs(pybind11::module& m) {
              pybind11::arg("params_ptr"),
              "Initialize with hidden states tensor and params pointer")
         .def_readwrite("hidden_states", &PyModelOutputs::hidden_states, "Hidden states output tensor")
+        .def_readwrite(
+            "aux_hidden_states", &PyModelOutputs::aux_hidden_states, "Auxiliary selected-layer hidden states")
+        .def_readwrite("aux_hidden_states_layers",
+                       &PyModelOutputs::aux_hidden_states_layers,
+                       "Layer ids captured in aux_hidden_states")
         .def_readwrite("params_ptr", &PyModelOutputs::params_ptr, "Parameters pointer");
 }
 

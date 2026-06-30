@@ -180,6 +180,18 @@ void NormalOutputDispatcher::dispatchSingleStream(GenerateStreamPtr    stream,
         all_hidden_states = model_output.all_hidden_states.narrow(0, token_offset, token_size);
     }
 
+    torch::Tensor aux_hidden_states;
+    torch::Tensor aux_hidden_states_layers;
+    if (stream->generateConfig()->return_aux_hidden_states) {
+        RTP_LLM_CHECK_WITH_INFO(model_output.aux_hidden_states.defined(),
+                                "return_aux_hidden_states is enabled but model_output.aux_hidden_states is undefined");
+        RTP_LLM_CHECK_WITH_INFO(
+            model_output.aux_hidden_states_layers.defined(),
+            "return_aux_hidden_states is enabled but model_output.aux_hidden_states_layers is undefined");
+        aux_hidden_states = model_output.aux_hidden_states.narrow(0, token_offset, token_size);
+        aux_hidden_states_layers = model_output.aux_hidden_states_layers;
+    }
+
     auto new_tokens = new_tokens_all.narrow(0, batch_idx_out, next_batch_size);
     for (size_t i = 0; i < next_batch_size; ++i) {
         new_tokens.data_ptr<int32_t>()[i] =
@@ -231,6 +243,8 @@ void NormalOutputDispatcher::dispatchSingleStream(GenerateStreamPtr    stream,
                     all_probs,
                     loss,
                     src_batch_indices,
+                    aux_hidden_states,
+                    aux_hidden_states_layers,
                     all_hidden_states});
 }
 

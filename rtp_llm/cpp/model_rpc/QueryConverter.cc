@@ -26,6 +26,9 @@ std::shared_ptr<GenerateConfig> QueryConverter::transGenerateConfig(const Genera
     generate_config->return_incremental       = config_proto->return_incremental();
     generate_config->return_hidden_states     = config_proto->return_hidden_states();
     generate_config->return_all_hidden_states = config_proto->return_all_hidden_states();
+    generate_config->return_aux_hidden_states = config_proto->return_aux_hidden_states();
+    generate_config->aux_hidden_states_layers.assign(config_proto->aux_hidden_states_layers().begin(),
+                                                     config_proto->aux_hidden_states_layers().end());
     generate_config->hidden_states_cut_dim    = config_proto->hidden_states_cut_dim();
     generate_config->normalized_hidden_states = config_proto->normalized_hidden_states();
     generate_config->calculate_loss           = config_proto->calculate_loss();
@@ -354,6 +357,13 @@ void QueryConverter::transResponse(GenerateOutputsPB*     outputs,
 
     stackBuffersToTensorPB(
         flatten_output->mutable_all_hidden_states(), source_outputs, [](const auto& r) { return r.all_hidden_states; });
+
+    stackBuffersToTensorPB(
+        flatten_output->mutable_aux_hidden_states(), source_outputs, [](const auto& r) { return r.aux_hidden_states; });
+
+    stackBuffersToTensorPB(flatten_output->mutable_aux_hidden_states_layers(),
+                           source_outputs,
+                           [](const auto& r) { return r.aux_hidden_states_layers; });
 
     RTP_LLM_LOG_DEBUG("transResponse done");
 }

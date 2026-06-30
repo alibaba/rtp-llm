@@ -204,6 +204,67 @@ torch::Tensor publishInt32ToCuda(const torch::Tensor& tensor, TensorHolder& host
     return tensor.to(cuda_i32, /*non_blocking=*/true);
 }
 
+std::vector<int32_t> resolveAuxHiddenStatesLayers(const GenerateConfig& generate_config, size_t num_layers) {
+    std::vector<int32_t> layers;
+    if (generate_config.aux_hidden_states_layers.empty()) {
+        RTP_LLM_CHECK_WITH_INFO(num_layers >= 4,
+                                "return_aux_hidden_states default layers require num_layers >= 4, got %zu",
+                                num_layers);
+        layers = {1, static_cast<int32_t>(num_layers / 2 - 1), static_cast<int32_t>(num_layers - 4)};
+    } else {
+        layers.reserve(generate_config.aux_hidden_states_layers.size());
+        for (int layer_id : generate_config.aux_hidden_states_layers) {
+            layers.push_back(static_cast<int32_t>(layer_id));
+        }
+    }
+    RTP_LLM_CHECK_WITH_INFO(!layers.empty(), "aux_hidden_states_layers must not be empty");
+    for (size_t i = 0; i < layers.size(); ++i) {
+        const int32_t layer_id = layers[i];
+        RTP_LLM_CHECK_WITH_INFO(layer_id >= 0 && static_cast<size_t>(layer_id) < num_layers,
+                                "aux_hidden_states_layers[%zu]=%d out of range [0, %zu)",
+                                i,
+                                layer_id,
+                                num_layers);
+        for (size_t j = i + 1; j < layers.size(); ++j) {
+            RTP_LLM_CHECK_WITH_INFO(layer_id != layers[j],
+                                    "aux_hidden_states_layers contains duplicate layer id %d",
+                                    layer_id);
+        }
+    }
+    return layers;
+}
+
+void mergeAuxHiddenStatesConfig(GptModelInputs& model_input, const GenerateStreamPtr& stream, size_t num_layers) {
+    const auto& generate_config = stream->generateConfig();
+    if (!generate_config->return_aux_hidden_states) {
+        return;
+    }
+    auto layers = resolveAuxHiddenStatesLayers(*generate_config, num_layers);
+    if (!model_input.need_aux_hidden_states) {
+        auto tensor = torch::empty({static_cast<int64_t>(layers.size())},
+                                  torch::TensorOptions(torch::kInt32).pinned_memory(true));
+        std::memcpy(tensor.data_ptr<int32_t>(), layers.data(), layers.size() * sizeof(int32_t));
+        model_input.need_aux_hidden_states       = true;
+        model_input.aux_hidden_states_layer_ids = tensor;
+        return;
+    }
+
+    RTP_LLM_CHECK_WITH_INFO(model_input.aux_hidden_states_layer_ids.defined(),
+                            "aux hidden states were requested but layer id tensor is undefined");
+    RTP_LLM_CHECK_WITH_INFO(static_cast<size_t>(model_input.aux_hidden_states_layer_ids.numel()) == layers.size(),
+                            "batched requests must use the same aux_hidden_states_layers size: got %ld vs %zu",
+                            model_input.aux_hidden_states_layer_ids.numel(),
+                            layers.size());
+    const auto* existing = model_input.aux_hidden_states_layer_ids.data_ptr<int32_t>();
+    for (size_t i = 0; i < layers.size(); ++i) {
+        RTP_LLM_CHECK_WITH_INFO(existing[i] == layers[i],
+                                "batched requests must use the same aux_hidden_states_layers: index %zu got %d vs %d",
+                                i,
+                                existing[i],
+                                layers[i]);
+    }
+}
+
 void publishModelInputCoreTensorsToCuda(GptModelInputs& model_input, TensorHolder& host_holder) {
     // TODO(async): stream state is still gathered through CPU pointers above.
     // Publish only device tensors at the model boundary.
@@ -335,6 +396,7 @@ absl::Status NormalModelInputGatherer::processDecodeStreams(GptModelInputs&     
     for (const auto& stream : stream_groups.decodeStreams()) {
         model_input.need_all_logits        = model_input.need_all_logits || stream->calculateLoss();
         model_input.need_all_hidden_states = model_input.need_all_hidden_states || stream->needReturnHiddenStates();
+        mergeAuxHiddenStatesConfig(model_input, stream, config_.num_layers);
         auto  current_batch_size           = stream->currentBatchSize();
         auto& kv_cache                     = *stream->kvCachePtr();
         RTP_LLM_LOG_DEBUG("decode kv_cache: %s", kv_cache.debugString().c_str());
@@ -407,6 +469,7 @@ absl::Status NormalModelInputGatherer::processContextStreams(GptModelInputs&    
     for (const auto& stream : stream_groups.contextStreams()) {
         model_input.need_all_logits        = model_input.need_all_logits || stream->calculateLoss();
         model_input.need_all_hidden_states = model_input.need_all_hidden_states || stream->needReturnHiddenStates();
+        mergeAuxHiddenStatesConfig(model_input, stream, config_.num_layers);
         auto  current_batch_size           = stream->currentBatchSize();
         auto& kv_cache                     = *stream->kvCachePtr();
         if (config_.enable_detail_log) {

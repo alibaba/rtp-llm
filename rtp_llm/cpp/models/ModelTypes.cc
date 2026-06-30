@@ -68,6 +68,8 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
         inputs.last_hidden_states.defined() ? inputs.last_hidden_states.numel() : 0;
     shape_hints_ptr[GptModelInputIndex::mtpHiddenStatesDtype] =
         inputs.last_hidden_states.defined() ? (std::uint8_t)torchDTypeToDataType(inputs.last_hidden_states.dtype()) : 0;
+    shape_hints_ptr[GptModelInputIndex::auxHiddenStatesLayerIds] =
+        inputs.aux_hidden_states_layer_ids.defined() ? inputs.aux_hidden_states_layer_ids.numel() : 0;
     shape_hints_ptr[GptModelInputIndex::skipRun] = inputs.skip_run;
     shape_hints_ptr[GptModelInputIndex::gptModelRequestLength] =
         inputs.request_id.defined() ? inputs.request_id.numel() : 0;
@@ -105,6 +107,7 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     int32_t*      mm_features_shape_ptr = nullptr;
     inputs.need_all_logits              = shape_hints_ptr[GptModelInputIndex::needAllLogits];
     inputs.need_all_hidden_states       = shape_hints_ptr[GptModelInputIndex::needAllHiddenStates];
+    inputs.need_aux_hidden_states       = shape_hints_ptr[GptModelInputIndex::auxHiddenStatesLayerIds] > 0;
     inputs.skip_run                     = shape_hints_ptr[GptModelInputIndex::skipRun];
     inputs.is_fake_stream               = shape_hints_ptr[GptModelInputIndex::isFakeStream];
     if (inputs.skip_run) {
@@ -132,6 +135,7 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     auto   text_tokens_mask_size   = shape_hints_ptr[GptModelInputIndex::textTokensMask];
     auto   mm_features_locs_size   = shape_hints_ptr[GptModelInputIndex::mmFeaturesLocs];
     auto   hidden_states_size      = shape_hints_ptr[GptModelInputIndex::mtpHiddenStates];
+    auto   aux_layer_ids_size      = shape_hints_ptr[GptModelInputIndex::auxHiddenStatesLayerIds];
     size_t request_length          = shape_hints_ptr[GptModelInputIndex::gptModelRequestLength];
 
     auto allocBuf = [&](rtp_llm::DataType       dtype,
@@ -217,6 +221,10 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
                          {hidden_states_dim0, hidden_states_dim1},
                          rtp_llm::AllocationType::DEVICE);
         }
+        if (aux_layer_ids_size) {
+            inputs.aux_hidden_states_layer_ids =
+                allocBuf(rtp_llm::DataType::TYPE_INT32, {(size_t)aux_layer_ids_size});
+        }
         if (text_tokens_mask_size) {
             inputs.text_tokens_mask = allocBuf(rtp_llm::DataType::TYPE_INT32, {(size_t)text_tokens_mask_size});
         }
@@ -282,6 +290,9 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     }
     if (hidden_states_size) {
         collect(inputs.last_hidden_states);
+    }
+    if (aux_layer_ids_size) {
+        collect(inputs.aux_hidden_states_layer_ids);
     }
 
     // Classify tensors by device type (runtime check) and calculate packed sizes.

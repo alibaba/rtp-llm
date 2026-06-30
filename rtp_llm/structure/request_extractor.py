@@ -55,13 +55,49 @@ class RequestExtractor:
             for source in [remain_config_json, remain_kwargs]:
                 for param in params:
                     if param in source:
-                        setattr(generate_config, key, source[param])
+                        setattr(generate_config, key, source.pop(param))
                         return
+
+        def normalize_int_list(key: str) -> None:
+            value = getattr(generate_config, key)
+            if value is None:
+                setattr(generate_config, key, [])
+                return
+            if isinstance(value, str):
+                value = [part.strip() for part in value.split(",") if part.strip()]
+            if isinstance(value, (list, tuple)):
+                setattr(generate_config, key, [int(item) for item in value])
+                return
+            raise FtRuntimeException(
+                ExceptionType.ERROR_INPUT_FORMAT_ERROR,
+                f"{key} should be a list of int or comma separated int string",
+            )
 
         update_optional(
             "return_hidden_states", ["return_hidden_states", "output_hidden_states"]
         )
         update_optional("return_all_hidden_states", ["return_hidden_states"])
+        update_optional(
+            "return_aux_hidden_states",
+            [
+                "return_aux_hidden_states",
+                "output_aux_hidden_states",
+                "enable_aux_hidden_states",
+            ],
+        )
+        update_optional(
+            "aux_hidden_states_layers",
+            [
+                "aux_hidden_states_layers",
+                "aux_hidden_states_layer_ids",
+                "aux_hidden_state_layer_ids",
+                "aux_hidden_states_blocks",
+                "aux_hidden_states_block_ids",
+                "aux_hidden_state_block_ids",
+                "eagle_aux_hidden_state_layer_ids",
+            ],
+        )
+        normalize_int_list("aux_hidden_states_layers")
         update_optional("return_logits", ["return_logits", "output_logits"])
         update_optional("return_input_ids", ["return_input_ids", "output_input_ids"])
         update_optional("max_new_tokens", ["gen_length", "max_new_tokens"])

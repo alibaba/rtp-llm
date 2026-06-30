@@ -590,6 +590,19 @@ class CustomChatRenderer:
             and output.all_hidden_states is not None
         ):
             result().all_hidden_states = output.all_hidden_states.tolist()
+        if (
+            generate_config.return_aux_hidden_states
+            and output.aux_hidden_states is not None
+        ):
+            result().aux_hidden_states = output.aux_hidden_states.tolist()
+            if output.aux_hidden_states_layers is not None:
+                result().aux_hidden_states_layers = [
+                    int(x) for x in output.aux_hidden_states_layers.tolist()
+                ]
+            else:
+                result().aux_hidden_states_layers = list(
+                    generate_config.aux_hidden_states_layers
+                )
         if generate_config.calculate_loss != 0 and output.loss is not None:
             result().loss = output.loss.tolist()
         if generate_config.return_logits and output.logits is not None:

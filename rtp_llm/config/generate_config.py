@@ -123,6 +123,8 @@ class GenerateConfig(BaseModel):
     return_incremental: bool = False
     return_hidden_states: bool = False
     return_all_hidden_states: bool = False
+    return_aux_hidden_states: bool = False
+    aux_hidden_states_layers: List[int] = []
     hidden_states_cut_dim: int = 0
     normalized_hidden_states: bool = False
     select_tokens_str: List[str] = []

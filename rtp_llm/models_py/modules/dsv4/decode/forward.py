@@ -25,6 +25,11 @@ import torch
 
 from rtp_llm.models_py.modules.dsv4 import _forward_tensor_debug as _fwd_dbg
 from rtp_llm.models_py.modules.dsv4 import _record_tensor as _rt
+from rtp_llm.models_py.modules.dsv4.aux_hidden_states import (
+    AuxHiddenStatesCapture,
+    make_aux_hidden_states_layers_tensor,
+    resolve_aux_hidden_states_layers,
+)
 from rtp_llm.models_py.modules.dsv4.attn_type import (
     CSA_KV,
     CSA_STATE,
@@ -284,7 +289,9 @@ def forward_layers(
     input_ids: torch.Tensor,  # [T_total]
     attn_metadata: Any,  # DSv4DecodeAttnMetadata
     prepare_hidden_fn: Optional[Any] = None,
-) -> torch.Tensor:
+    return_aux_hidden_states: bool = False,
+    aux_hidden_states_layer_ids: Optional[torch.Tensor] = None,
+) -> Any:
     """qwen3-style decode per-layer loop. Same body shape as the prefill
     helper (:func:`rtp_llm.models_py.modules.dsv4.prefill.forward.forward_layers`)
     but dispatches to ``layer.forward_decode`` (FlashMLA / FP8 path)
@@ -315,10 +322,21 @@ def forward_layers(
         h = prepare_hidden_fn(input_ids=input_ids, meta=attn_metadata)
     if _rt_on:
         _rt.record("decode_embed_hc_expanded", h)
+
+    aux_capture: Optional[AuxHiddenStatesCapture] = None
+    aux_layers = None
+    if return_aux_hidden_states:
+        aux_layers = resolve_aux_hidden_states_layers(
+            aux_hidden_states_layer_ids,
+            num_layers=len(v4.layers),
+        )
+        aux_capture = AuxHiddenStatesCapture(aux_layers, h)
     for layer in v4.layers:
         h = layer.forward_decode(h, attn_metadata, input_ids, kv_cache=kv_cache)
         if _rt_on:
             _rt.record(f"decode_layer{layer.layer_id:02d}_out", h)
+        if aux_capture is not None:
+            aux_capture.maybe_capture(int(layer.layer_id), h)
     if v4._mtp_hidden_buffer is not None:
         _pre_hc_flat = h.flatten(-2).reshape(-1, h.size(-2) * h.size(-1))
         v4._write_mtp_hidden_buffer(
@@ -347,6 +365,12 @@ def forward_layers(
             },
         )
         v4._dbg_step = step + 1
+    if aux_capture is not None:
+        return (
+            h,
+            aux_capture.tensor,
+            make_aux_hidden_states_layers_tensor(aux_layers, h.device),
+        )
     return h
 
 
@@ -424,13 +448,23 @@ def forward_decode(
         )
         if meta is None:
             # Empty batch (B == 0) — short-circuit with zero-row hidden.
-            return PyModelOutputs(
-                torch.zeros(
-                    (0, v4_args.dim),
+            outputs = PyModelOutputs(
+                torch.zeros((0, v4_args.dim), dtype=torch.bfloat16, device=param_dev)
+            )
+            if bool(getattr(inputs, "need_aux_hidden_states", False)):
+                layers = resolve_aux_hidden_states_layers(
+                    getattr(inputs, "aux_hidden_states_layer_ids", None),
+                    num_layers=len(v4.layers),
+                )
+                outputs.aux_hidden_states = torch.empty(
+                    (0, len(layers) * int(v4_args.hc_mult) * int(v4_args.dim)),
                     dtype=torch.bfloat16,
                     device=param_dev,
                 )
-            )
+                outputs.aux_hidden_states_layers = make_aux_hidden_states_layers_tensor(
+                    layers, param_dev
+                )
+            return outputs
 
     B = meta.batch_size
     q_len = meta.q_len_per_req
@@ -448,7 +482,13 @@ def forward_decode(
         input_ids,
         meta,
         prepare_hidden_fn=prepare_hidden_fn,
+        return_aux_hidden_states=bool(getattr(inputs, "need_aux_hidden_states", False)),
+        aux_hidden_states_layer_ids=getattr(inputs, "aux_hidden_states_layer_ids", None),
     )  # [B, q_len, dim]
+    aux_hidden_states = None
+    aux_hidden_states_layers = None
+    if bool(getattr(inputs, "need_aux_hidden_states", False)):
+        h, aux_hidden_states, aux_hidden_states_layers = h
     hidden = h.reshape(B * q_len, v4_args.dim)  # packed [T_total, dim]
     if _fwd_dbg.enabled():
         _fwd_dbg.print_decode(
@@ -484,4 +524,8 @@ def forward_decode(
             extra["start_pos"] = start_pos.detach().cpu()
         _rt.dump(step=v4._dbg_step, extra=extra)
         v4._dbg_step += 1
-    return PyModelOutputs(hidden)
+    outputs = PyModelOutputs(hidden)
+    if aux_hidden_states is not None:
+        outputs.aux_hidden_states = aux_hidden_states
+        outputs.aux_hidden_states_layers = aux_hidden_states_layers
+    return outputs

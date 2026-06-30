@@ -99,6 +99,11 @@ import torch
 
 from rtp_llm.models_py.modules.dsv4 import _forward_tensor_debug as _fwd_dbg
 from rtp_llm.models_py.modules.dsv4 import _record_tensor as _rt
+from rtp_llm.models_py.modules.dsv4.aux_hidden_states import (
+    AuxHiddenStatesCapture,
+    make_aux_hidden_states_layers_tensor,
+    resolve_aux_hidden_states_layers,
+)
 from rtp_llm.models_py.modules.dsv4.cp import (
     build_cp_context,
     cp_gather_last_by_request,
@@ -222,7 +227,9 @@ def forward_layers(
     block_tables_by_type: Optional[Dict[int, torch.Tensor]],
     attn_inputs: Optional[PyAttentionInputs] = None,
     prepare_hidden_fn: Optional[Any] = None,
-) -> torch.Tensor:
+    return_aux_hidden_states: bool = False,
+    aux_hidden_states_layer_ids: Optional[torch.Tensor] = None,
+) -> Any:
     """Flat per-layer loop — vLLM-aligned layout.
 
     Shapes:
@@ -315,6 +322,15 @@ def forward_layers(
         h = prepare_hidden_fn(input_ids=input_ids, positions=positions)
     if _rt_on:
         _rt.record("prefill_embed_hc_expanded", h)
+
+    aux_capture: Optional[AuxHiddenStatesCapture] = None
+    aux_layers = None
+    if return_aux_hidden_states:
+        aux_layers = resolve_aux_hidden_states_layers(
+            aux_hidden_states_layer_ids,
+            num_layers=len(v4.layers),
+        )
+        aux_capture = AuxHiddenStatesCapture(aux_layers, h)
 
     # FP8 KV-cache: hoist host-side prefill metadata once per ratio bucket
     # and broadcast to every layer's ``AttentionFP8._prefill_meta_shared``.
@@ -427,6 +443,8 @@ def forward_layers(
             )  # [T, hc, dim]
             if _rt_on:
                 _rt.record(f"prefill_layer{layer_idx:02d}_out", h)
+            if aux_capture is not None:
+                aux_capture.maybe_capture(layer_idx, h)
             if write_cache_store_impl is not None:
                 write_cache_store_impl(kv_cache.get_layer_caches(layer_idx))
             if _rt_on:
@@ -559,6 +577,12 @@ def forward_layers(
     # forward (which runs right after the main model on a near-full card) can
     # borrow it. No explicit reset needed — the per-layer ``common.workspace``
     # references were cleared by ``clear_prefill_meta_shared_fp8`` above.
+    if aux_capture is not None:
+        return (
+            h,
+            aux_capture.tensor,
+            make_aux_hidden_states_layers_tensor(aux_layers, h.device),
+        )
     return h  # [T, dim]
 
 
@@ -629,5 +653,13 @@ def forward_prefill(
         block_tables_by_type,
         attn_inputs=attn,
         prepare_hidden_fn=prepare_hidden_fn,
+        return_aux_hidden_states=bool(getattr(inputs, "need_aux_hidden_states", False)),
+        aux_hidden_states_layer_ids=getattr(inputs, "aux_hidden_states_layer_ids", None),
     )  # [T_total, dim]
+    if bool(getattr(inputs, "need_aux_hidden_states", False)):
+        hidden, aux_hidden_states, aux_hidden_states_layers = hidden
+        outputs = PyModelOutputs(hidden)
+        outputs.aux_hidden_states = aux_hidden_states
+        outputs.aux_hidden_states_layers = aux_hidden_states_layers
+        return outputs
     return PyModelOutputs(hidden)

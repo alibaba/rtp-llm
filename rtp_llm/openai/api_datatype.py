@@ -354,6 +354,8 @@ class ChatCompletionResponseChoice(BaseModel):
 class ChatCompletionExtraOutputs(BaseModel):
     hidden_states: Optional[Union[List[float], List[List[float]]]] = None
     all_hidden_states: Optional[Union[List[float], List[List[float]]]] = None
+    aux_hidden_states: Optional[Union[List[float], List[List[float]]]] = None
+    aux_hidden_states_layers: Optional[List[int]] = None
     loss: Optional[Union[float, List[float]]] = None
     logits: Optional[Union[List[float], List[List[float]]]] = None
     output_ids: Optional[List[List[int]]] = None

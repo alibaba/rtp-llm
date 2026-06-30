@@ -73,6 +73,12 @@ py_test(
 )
 
 py_test(
+    name = "test_aux_hidden_states",
+    srcs = ["test_aux_hidden_states.py"],
+    deps = _DSV4_TEST_DEPS,
+)
+
+py_test(
     name = "test_cp_attention_merge",
     srcs = ["test_cp_attention_merge.py"],
     deps = _DSV4_TEST_DEPS,

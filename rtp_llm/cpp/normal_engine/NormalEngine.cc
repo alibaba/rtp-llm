@@ -371,6 +371,8 @@ std::shared_ptr<GenerateStream> NormalEngine::createMinFakeStream(int32_t max_ne
                                      torch::Tensor(),
                                      torch::Tensor(),
                                      torch::Tensor(),
+                                     torch::Tensor(),
+                                     torch::Tensor(),
                                      false};
         stream->update(update_info);
         const auto cuda_i32 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);

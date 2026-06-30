@@ -159,6 +159,12 @@ def trans_input(input_py: GenerateInput):
     generate_config_pb.return_all_hidden_states = (
         input_py.generate_config.return_all_hidden_states
     )
+    generate_config_pb.return_aux_hidden_states = (
+        input_py.generate_config.return_aux_hidden_states
+    )
+    generate_config_pb.aux_hidden_states_layers.extend(
+        input_py.generate_config.aux_hidden_states_layers
+    )
     generate_config_pb.hidden_states_cut_dim = (
         input_py.generate_config.hidden_states_cut_dim
     )
@@ -285,6 +291,20 @@ def trans_output(
         and output_pb.all_hidden_states.shape[0] > 0
         else None
     )
+    all_aux_hidden_states = (
+        trans_tensor(output_pb.aux_hidden_states)
+        if output_pb.HasField("aux_hidden_states")
+        and len(output_pb.aux_hidden_states.shape) > 0
+        and output_pb.aux_hidden_states.shape[0] > 0
+        else None
+    )
+    all_aux_hidden_states_layers = (
+        trans_tensor(output_pb.aux_hidden_states_layers)
+        if output_pb.HasField("aux_hidden_states_layers")
+        and len(output_pb.aux_hidden_states_layers.shape) > 0
+        and output_pb.aux_hidden_states_layers.shape[0] > 0
+        else None
+    )
     all_loss = (
         trans_tensor(output_pb.loss)
         if output_pb.HasField("loss")
@@ -362,6 +382,12 @@ def trans_output(
 
         if all_all_hidden_states is not None:
             output_py.all_hidden_states = all_all_hidden_states[i]
+
+        if all_aux_hidden_states is not None:
+            output_py.aux_hidden_states = all_aux_hidden_states[i]
+
+        if all_aux_hidden_states_layers is not None:
+            output_py.aux_hidden_states_layers = all_aux_hidden_states_layers[i]
 
         if all_loss is not None:
             loss_slice = all_loss[i]

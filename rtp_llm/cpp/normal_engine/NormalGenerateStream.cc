@@ -79,6 +79,13 @@ GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateIn
             && iter_count_ == 1) {
             generate_output.all_hidden_states = update_info.all_hidden_states.cpu();
         }
+        if (generate_input_->generate_config->return_aux_hidden_states && update_info.aux_hidden_states.defined()
+            && iter_count_ == 1) {
+            generate_output.aux_hidden_states = update_info.aux_hidden_states.cpu();
+            if (update_info.aux_hidden_states_layers.defined()) {
+                generate_output.aux_hidden_states_layers = update_info.aux_hidden_states_layers.cpu();
+            }
+        }
         if (loss_.defined()) {
             RTP_LLM_CHECK_WITH_INFO(loss_index_ == inputLength() - 1,
                                     "loss index should be input len [%d] - 1 but is [%d]",

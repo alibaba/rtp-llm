@@ -117,6 +117,8 @@ public:
 
     std::optional<torch::Tensor> hidden_states;
     std::optional<torch::Tensor> all_hidden_states;
+    std::optional<torch::Tensor> aux_hidden_states;
+    std::optional<torch::Tensor> aux_hidden_states_layers;
     std::optional<torch::Tensor> logits;
     std::optional<torch::Tensor> loss;
 };

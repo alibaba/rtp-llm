@@ -305,6 +305,8 @@ class PyModelInputs:
         input_hiddens: torch.Tensor = ...,
         attention_inputs: PyAttentionInputs = ...,
         bert_embedding_inputs: BertEmbeddingInputs = ...,
+        need_aux_hidden_states: bool = ...,
+        aux_hidden_states_layer_ids: torch.Tensor = ...,
     ) -> None: ...
     @property
     def attention_inputs(self) -> PyAttentionInputs:
@@ -338,6 +340,22 @@ class PyModelInputs:
 
     @input_ids.setter
     def input_ids(self, arg0: torch.Tensor) -> None: ...
+    @property
+    def need_aux_hidden_states(self) -> bool:
+        """
+        Whether to capture auxiliary hidden states from selected layers
+        """
+
+    @need_aux_hidden_states.setter
+    def need_aux_hidden_states(self, arg0: bool) -> None: ...
+    @property
+    def aux_hidden_states_layer_ids(self) -> torch.Tensor:
+        """
+        Layer ids to capture auxiliary hidden states from
+        """
+
+    @aux_hidden_states_layer_ids.setter
+    def aux_hidden_states_layer_ids(self, arg0: torch.Tensor) -> None: ...
 
 class PyModelOutputs:
     @typing.overload
@@ -366,6 +384,22 @@ class PyModelOutputs:
 
     @hidden_states.setter
     def hidden_states(self, arg0: torch.Tensor) -> None: ...
+    @property
+    def aux_hidden_states(self) -> torch.Tensor:
+        """
+        Auxiliary selected-layer hidden states
+        """
+
+    @aux_hidden_states.setter
+    def aux_hidden_states(self, arg0: torch.Tensor) -> None: ...
+    @property
+    def aux_hidden_states_layers(self) -> torch.Tensor:
+        """
+        Layer ids captured in aux_hidden_states
+        """
+
+    @aux_hidden_states_layers.setter
+    def aux_hidden_states_layers(self, arg0: torch.Tensor) -> None: ...
     @property
     def params_ptr(self) -> ParamsBase:
         """

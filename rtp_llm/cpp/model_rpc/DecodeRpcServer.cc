@@ -226,6 +226,8 @@ void DecodeRpcServer::localGenerate(DecodeGenerateContext& decode_context) {
                              torch::Tensor(),
                              torch::Tensor(),
                              torch::Tensor(),
+                             torch::Tensor(),
+                             torch::Tensor(),
                              torch::Tensor()});
     if (generate_request.position_ids_size() > 0) {
         auto context_position_ids = torch::from_blob(const_cast<int32_t*>(generate_request.position_ids().data()),

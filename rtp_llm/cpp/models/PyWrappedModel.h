@@ -77,7 +77,9 @@ private:
     GptModelOutputs callForwardPostLayers(torch::Tensor         hidden_states,
                                           const GptModelInputs& inputs,
                                           bool                  skip_final_layernorm,
-                                          size_t                num_valid_tokens = -1);
+                                          size_t                num_valid_tokens           = -1,
+                                          torch::Tensor         aux_hidden_states          = torch::Tensor(),
+                                          torch::Tensor         aux_hidden_states_layers   = torch::Tensor());
     torch::Tensor   tensorHoldHostAndToCuda(const torch::Tensor& tensor);
 
     // Methods absorbed from GptModel
@@ -90,6 +92,8 @@ private:
                                       size_t                token_num,
                                       const GptModelInputs& inputs,
                                       torch::Tensor         merged_eagle3_hidden,
+                                      torch::Tensor         aux_hidden_states        = torch::Tensor(),
+                                      torch::Tensor         aux_hidden_states_layers = torch::Tensor(),
                                       bool                  skip_final_layernorm = false);
     // CP gather-last-hidden exit: `hidden` is already the lm_output_indexes-selected,
     // post-final-layernorm rows produced by handleOutputsLastHidden, so this runs

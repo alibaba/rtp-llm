@@ -488,6 +488,26 @@ class Pipeline(object):
         token_buffers: List[str] = []
         generate_outputs_cache = GenerateOutputs()
 
+        def keep_prefill_side_outputs(
+            cached_output: GenerateOutput, current_output: GenerateOutput
+        ) -> GenerateOutput:
+            if (
+                cached_output.all_hidden_states is not None
+                and current_output.all_hidden_states is None
+            ):
+                current_output.all_hidden_states = cached_output.all_hidden_states
+            if (
+                cached_output.aux_hidden_states is not None
+                and current_output.aux_hidden_states is None
+            ):
+                current_output.aux_hidden_states = cached_output.aux_hidden_states
+            if (
+                cached_output.aux_hidden_states_layers is not None
+                and current_output.aux_hidden_states_layers is None
+            ):
+                current_output.aux_hidden_states_layers = cached_output.aux_hidden_states_layers
+            return current_output
+
         async def backend_stream():
             try:
                 stream: AsyncGenerator[GenerateOutputs, None] = (
@@ -527,7 +547,11 @@ class Pipeline(object):
                 )
             else:
                 generate_outputs_cache.generate_outputs = [
-                    out if out.finished else generate_outputs.generate_outputs[i]
+                    out
+                    if out.finished
+                    else keep_prefill_side_outputs(
+                        out, generate_outputs.generate_outputs[i]
+                    )
                     for i, out in enumerate(generate_outputs_cache.generate_outputs)
                 ]
             assert len(generate_outputs_cache.generate_outputs) == len(

@@ -86,6 +86,8 @@ struct GptModelInputs {
     // CP prefill exit must materialize the full [seq, hidden] all_hidden_states
     // (true) or may gather only the last-token rows lm_head needs (false).
     bool need_all_hidden_states = false;
+    bool need_aux_hidden_states = false;
+    torch::Tensor aux_hidden_states_layer_ids;
     bool need_moe_gating        = false;
     bool warmup                 = false;
     bool skip_run               = false;
@@ -110,6 +112,8 @@ struct GptModelOutputs {
     torch::Tensor all_hidden_states;
     torch::Tensor all_logits;
     torch::Tensor softmax_result;
+    torch::Tensor aux_hidden_states;
+    torch::Tensor aux_hidden_states_layers;
 
     std::vector<torch::Tensor> moe_gating;
 };

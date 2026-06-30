@@ -105,6 +105,10 @@ MultiSeqsResponse GenerateStreamWrapper::formatResponse(const std::vector<std::s
         res.loss.emplace();
     if (generate_config->return_hidden_states)
         res.hidden_states.emplace();
+    if (generate_config->return_aux_hidden_states) {
+        res.aux_hidden_states.emplace();
+        res.aux_hidden_states_layers.emplace();
+    }
     if (generate_config->return_output_ids)
         res.output_ids.emplace();
     if (generate_config->return_input_ids)
@@ -114,6 +118,8 @@ MultiSeqsResponse GenerateStreamWrapper::formatResponse(const std::vector<std::s
         auto logits        = generate_output.logits;
         auto loss          = generate_output.loss;
         auto hidden_states = generate_output.hidden_states;
+        auto aux_hidden_states = generate_output.aux_hidden_states;
+        auto aux_hidden_states_layers = generate_output.aux_hidden_states_layers;
         auto output_ids    = generate_output.output_ids;
 
         if (generate_config->return_logits && logits.has_value()) {
@@ -131,6 +137,18 @@ MultiSeqsResponse GenerateStreamWrapper::formatResponse(const std::vector<std::s
             std::vector<float> hidden_states_vec(hidden_states_tensor.data_ptr<float>(),
                                                  hidden_states_tensor.data_ptr<float>() + hidden_states_tensor.numel());
             res.hidden_states.value().push_back(hidden_states_vec);
+        }
+        if (generate_config->return_aux_hidden_states && aux_hidden_states.has_value()) {
+            auto aux_hidden_states_tensor = aux_hidden_states.value().to(torch::kFloat).to(torch::kCPU).contiguous();
+            std::vector<float> aux_hidden_states_vec(
+                aux_hidden_states_tensor.data_ptr<float>(),
+                aux_hidden_states_tensor.data_ptr<float>() + aux_hidden_states_tensor.numel());
+            res.aux_hidden_states.value().push_back(aux_hidden_states_vec);
+            if (aux_hidden_states_layers.has_value()) {
+                auto layers = aux_hidden_states_layers.value().to(torch::kInt32).to(torch::kCPU).contiguous();
+                res.aux_hidden_states_layers.value().push_back(
+                    std::vector<int>(layers.data_ptr<int32_t>(), layers.data_ptr<int32_t>() + layers.numel()));
+            }
         }
         if (generate_config->return_output_ids) {
             auto ids_contig = output_ids.contiguous();

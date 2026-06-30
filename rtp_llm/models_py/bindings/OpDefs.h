@@ -346,10 +346,14 @@ struct PyModelInputs {
     torch::Tensor       input_hiddens;
     PyAttentionInputs   attention_inputs;
     BertEmbeddingInputs bert_embedding_inputs;
+    bool                need_aux_hidden_states = false;
+    torch::Tensor       aux_hidden_states_layer_ids;
 };
 
 struct PyModelOutputs {
     torch::Tensor          hidden_states;
+    torch::Tensor          aux_hidden_states;
+    torch::Tensor          aux_hidden_states_layers;
     rtp_llm::ParamsBasePtr params_ptr{nullptr};
     py::object             py_attn_params{py::none()};
 
