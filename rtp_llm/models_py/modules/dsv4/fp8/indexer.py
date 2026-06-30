@@ -22,7 +22,7 @@ What this class does NOT do — by design:
 from __future__ import annotations
 
 import os
-from typing import Any, Callable, Dict, NamedTuple, Optional
+from typing import Any, Callable, Dict, NamedTuple, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -1031,6 +1031,7 @@ class IndexerFP8(PoolBackedModule):
         workspace: "PrefillWorkspace",
         cp_gather_stream: Optional[Any] = None,
         post_gather_stream: Optional[Any] = None,
+        precomputed_qw: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
     ) -> torch.Tensor:
         M = attention_inputs.M
         T = attention_inputs.T
@@ -1059,15 +1060,21 @@ class IndexerFP8(PoolBackedModule):
         self._propagate_pool_to_nested()
         indexer_k_pending = None
         try:
-            with record_function_range("dsv4.fp8.indexer.prefill.compute_q"):
-                q = self._compute_indexer_q(qr, attention_inputs.freqs_cis_slice)
+            if precomputed_qw is None:
+                with record_function_range("dsv4.fp8.indexer.prefill.compute_q"):
+                    q = self._compute_indexer_q(qr, attention_inputs.freqs_cis_slice)
+            else:
+                q = precomputed_qw[0]
             with record_function_range("dsv4.fp8.indexer.prefill.nested_compressor"):
                 self.compressor(
                     x, sp, meta=attention_inputs.compressor_meta, workspace=workspace
                 )
             # ``softmax_scale * n_heads^-0.5`` is pre-folded into weights_proj at __init__.
-            with record_function_range("dsv4.fp8.indexer.prefill.weights_proj"):
-                weights = F.linear(x, self.weights_proj)
+            if precomputed_qw is None:
+                with record_function_range("dsv4.fp8.indexer.prefill.weights_proj"):
+                    weights = F.linear(x, self.weights_proj)
+            else:
+                weights = precomputed_qw[1]
 
             assert (
                 has_fp8_mqa_logits()
@@ -1229,6 +1236,7 @@ class IndexerFP8(PoolBackedModule):
         before_gather_k: Optional[Callable[[], None]] = None,
         cp_gather_stream: Optional[Any] = None,
         post_gather_stream: Optional[Any] = None,
+        precomputed_qw: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
     ) -> torch.Tensor:
         """Overlap-variant of :meth:`forward`.
 
@@ -1276,12 +1284,18 @@ class IndexerFP8(PoolBackedModule):
         self._propagate_pool_to_nested()
         indexer_k_pending = None
         try:
-            with record_function_range("dsv4.fp8.indexer.prefill.compute_q"):
-                q = self._compute_indexer_q(qr, attention_inputs.freqs_cis_slice)
+            if precomputed_qw is None:
+                with record_function_range("dsv4.fp8.indexer.prefill.compute_q"):
+                    q = self._compute_indexer_q(qr, attention_inputs.freqs_cis_slice)
+            else:
+                q = precomputed_qw[0]
             with record_function_range("dsv4.fp8.indexer.prefill.nested_compressor"):
                 self.compressor.finish_prefill(nested_pending)
-            with record_function_range("dsv4.fp8.indexer.prefill.weights_proj"):
-                weights = F.linear(x, self.weights_proj)
+            if precomputed_qw is None:
+                with record_function_range("dsv4.fp8.indexer.prefill.weights_proj"):
+                    weights = F.linear(x, self.weights_proj)
+            else:
+                weights = precomputed_qw[1]
 
             assert (
                 has_fp8_mqa_logits()

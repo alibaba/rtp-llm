@@ -122,6 +122,8 @@ class PrefillWorkspace:
         union_bytes = max(self._q_bytes, cp_region_bytes)
         union_bytes = ((union_bytes + align - 1) // align) * align
         self._union = torch.empty(union_bytes, dtype=torch.uint8, device=device)
+        self._attn_workspace: torch.Tensor | None = None
+        self._attn_workspace_numel = 0
 
     def prefill_q(self, num_tokens: int) -> torch.Tensor:
         """``[num_tokens, q_dim]`` bf16 view at the front of the union buffer."""
@@ -182,6 +184,45 @@ class PrefillWorkspace:
             dim,
             dtype,
         )
+
+    def attention_workspace(
+        self,
+        batch: int,
+        rows: int,
+        dim: int,
+        dtype: torch.dtype,
+        *,
+        zero_on_allocate: bool = True,
+    ) -> torch.Tensor:
+        """Reusable ``[batch, rows, dim]`` attention workspace for one forward.
+
+        This is intentionally separate from the Q/CP union buffer: sparse
+        attention reads this workspace while Q and CP scratch may still be live,
+        so aliasing it into the union would be unsafe.  The buffer grows within
+        a forward if a later layer needs a larger ``M``; otherwise layers reuse
+        the same allocation.
+        """
+
+        batch = int(batch)
+        rows = int(rows)
+        dim = int(dim)
+        assert batch >= 0 and rows >= 0 and dim >= 0
+        required = batch * rows * dim
+        buf = self._attn_workspace
+        needs_alloc = (
+            buf is None
+            or buf.dtype != dtype
+            or buf.device != self._device
+            or int(buf.numel()) < required
+        )
+        if needs_alloc:
+            new_numel = max(int(self._attn_workspace_numel), required)
+            buf = torch.empty((new_numel,), dtype=dtype, device=self._device)
+            if zero_on_allocate:
+                buf.zero_()
+            self._attn_workspace = buf
+            self._attn_workspace_numel = int(buf.numel())
+        return buf[:required].view(batch, rows, dim)
 
     def _cp_view(
         self,

@@ -24,6 +24,7 @@ from unittest.mock import MagicMock, patch
 import torch
 
 import rtp_llm.models_py.modules.dsv4.fp8.attention as attention_mod
+import rtp_llm.models_py.modules.dsv4.cp as cp_mod
 from rtp_llm.models_py.modules.dsv4.fp8.attention import (
     AttentionFP8,
     PrefillMeta,
@@ -220,6 +221,49 @@ class AttentionSwaAsyncGatherTest(unittest.TestCase):
         self.assertIsNone(qkv.q)
         self.assertIsNotNone(qkv.kv_full)
 
+    def test_local_qkv_non_cp_marks_graph_owned_kv_non_disposable(self) -> None:
+        layer = self._make_qkv_layer([])
+        common = _make_common(cp_on=False, device=torch.device("cuda"))
+        qr = torch.ones(3, 4, dtype=torch.bfloat16)
+        kv = torch.ones(3, 2, dtype=torch.bfloat16)
+        layer._prefill_local_qkv_override = (qr, kv)
+
+        qkv = layer._prefill_compute_qkv(
+            torch.zeros(3, 4, dtype=torch.bfloat16),
+            common,
+        )
+
+        self.assertEqual(qkv.kv_full.data_ptr(), kv.data_ptr())
+        self.assertFalse(qkv.kv_full_disposable)
+
+    def test_local_qkv_cp_gathered_kv_remains_disposable(self) -> None:
+        layer = self._make_qkv_layer([])
+        common = _make_common(cp_on=True, device=torch.device("cuda"))
+        qr = torch.ones(3, 4, dtype=torch.bfloat16)
+        kv = torch.ones(3, 2, dtype=torch.bfloat16)
+        layer._prefill_local_qkv_override = (qr, kv)
+        gathered = torch.arange(12, dtype=torch.bfloat16).view(6, 2)
+
+        with (
+            patch.dict(
+                os.environ,
+                {"DSV4_PREFILL_CP_OVERLAP": "0", "DSV4_VARLEN_PREFILL": "1"},
+            ),
+            patch.object(
+                cp_mod,
+                "cp_all_gather_full_varlen",
+                return_value=gathered,
+            ),
+        ):
+            qkv = layer._prefill_compute_qkv(
+                torch.zeros(3, 4, dtype=torch.bfloat16),
+                common,
+            )
+
+        self.assertEqual(tuple(qkv.kv_full.shape), (6, 2))
+        self.assertNotEqual(qkv.kv_full.data_ptr(), kv.data_ptr())
+        self.assertTrue(qkv.kv_full_disposable)
+
     def test_materialize_prefill_q_reuses_wq_b_output_for_rope(self) -> None:
         # The deferred q_lora_b + RoPE now live in _materialize_prefill_q, which
         # writes wq_b straight into the workspace Q slice and RoPEs it in-place.
@@ -234,7 +278,7 @@ class AttentionSwaAsyncGatherTest(unittest.TestCase):
                 seen["q_out"] = kwargs["out"]
                 self.assertIs(kwargs["out"], t)
                 return kwargs["out"]
-            self.assertNotIn("out", kwargs)
+            self.assertIsNone(kwargs.get("out"))
             return t
 
         with patch.object(attention_mod, "fused_rmsnorm_rope", fake_fused):
@@ -252,6 +296,62 @@ class AttentionSwaAsyncGatherTest(unittest.TestCase):
         self.assertEqual(seq[-1], "lin_wq_b")
         self.assertIn("q_out", seen)
         self.assertEqual(qkv.q.data_ptr(), seen["q_out"].data_ptr())
+
+    def test_swa_concat_does_not_dispose_non_disposable_bf16_alias(self) -> None:
+        layer = AttentionFP8.__new__(AttentionFP8)
+        torch.nn.Module.__init__(layer)
+        layer.head_dim = 2
+        layer.softmax_scale = 1.0
+        layer.attn_sink = None
+        layer._swa_cp_byte_sliced = lambda: False  # type: ignore[assignment]
+        layer._pool_view_3d_fp8 = lambda attn_type: torch.zeros(1, 1, 2, dtype=torch.uint8)  # type: ignore[assignment]
+
+        kv = torch.ones(3, 2, dtype=torch.bfloat16)
+        qkv = PrefillQKV(
+            qr=torch.zeros(3, 4, dtype=torch.bfloat16),
+            q=torch.zeros(3, 1, 2, dtype=torch.bfloat16),
+            kv_full=kv,
+            kv_full_disposable=False,
+        )
+        common = _make_common(cp_on=False, device=torch.device("cuda"))._replace(
+            use_varlen=True,
+            batch_size=1,
+            swa_meta=attention_mod.SwaPrefillMeta(
+                slot_mapping=torch.zeros(3, dtype=torch.int32),
+                query_start_loc=torch.tensor([0], dtype=torch.int32),
+                combined_seq_lens=torch.tensor([3], dtype=torch.int32),
+                topk_length_kv_full=torch.tensor([3], dtype=torch.int32),
+                combined_gather_lens=torch.tensor([3], dtype=torch.int32),
+                combined_gather_len_max=3,
+                M=3,
+                cache_seq_lens=torch.tensor([0], dtype=torch.int32),
+                cache_gather_lens=torch.tensor([0], dtype=torch.int32),
+                prefix_len_max=0,
+                combined_indices=torch.zeros(3, dtype=torch.int32),
+                combined_lens=torch.tensor([3], dtype=torch.int32),
+                slot_in_flat=torch.arange(3, dtype=torch.long),
+                cache_slot_mapping=None,
+            ),
+        )
+        disposed: list[int] = []
+
+        class _FakeFlashMla:
+            @staticmethod
+            def flash_mla_sparse_fwd(**kwargs):
+                return torch.zeros(3, 1, 2, dtype=torch.bfloat16), None, None
+
+        with (
+            patch.dict(sys.modules, {"flash_mla": _FakeFlashMla}),
+            patch.object(
+                attention_mod,
+                "dispose_tensor",
+                side_effect=lambda t: disposed.append(t.data_ptr()),
+            ),
+        ):
+            out = layer._attn_fp8_swa_via_concat(qkv, common)
+
+        self.assertEqual(tuple(out.shape), (1, 3, 1, 2))
+        self.assertEqual(disposed, [])
 
     def test_prefill_workspace_q_rejects_overflow(self) -> None:
         ws = PrefillWorkspace(
@@ -275,7 +375,9 @@ class AttentionSwaAsyncGatherTest(unittest.TestCase):
         layer.wq_a = object()
         layer.wq_b = object()
         layer.wkv = object()
-        layer._rmsnorm_weighted = lambda t, w: t  # type: ignore[assignment]
+        layer._rmsnorm_weighted = (  # type: ignore[assignment]
+            lambda t, w, **kwargs: kwargs.get("out") if kwargs.get("out") is not None else t
+        )
 
         def fake_lin(op, x, out=None):
             T = int(x.size(1))

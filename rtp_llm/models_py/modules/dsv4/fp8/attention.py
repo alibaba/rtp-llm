@@ -816,6 +816,10 @@ class PrefillQKV(NamedTuple):
     qr: torch.Tensor
     q: Optional[torch.Tensor]
     kv_full: torch.Tensor
+    kv_full_disposable: bool = True
+
+
+PrefillLocalQKV = Tuple[torch.Tensor, ...]
 
 
 class AttentionFP8(nn.Module):
@@ -1902,16 +1906,36 @@ class AttentionFP8(nn.Module):
             )
         return self._fp8_decode_op
 
-    def _rmsnorm_weighted(self, x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
+    def _rmsnorm_weighted(
+        self,
+        x: torch.Tensor,
+        weight: torch.Tensor,
+        out: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
         # Framework C++ ``rtp_llm_ops.rmsnorm`` (single launch, bf16 weight).
         # Requires 2D input — reshape/restore keeps this a drop-in.
         orig_shape = x.shape
         x_2d = x.reshape(-1, orig_shape[-1])
-        out = torch.empty_like(x_2d)
+        if out is None:
+            out_2d = torch.empty_like(x_2d)
+        else:
+            if out.shape != x.shape:
+                raise ValueError(
+                    f"rmsnorm out shape mismatch: got {tuple(out.shape)}, "
+                    f"expected {tuple(x.shape)}"
+                )
+            if out.dtype != x.dtype or out.device != x.device:
+                raise ValueError(
+                    "rmsnorm out must match input dtype/device: "
+                    f"out=({out.dtype}, {out.device}) input=({x.dtype}, {x.device})"
+                )
+            if not out.is_contiguous():
+                raise ValueError("rmsnorm out must be contiguous")
+            out_2d = out.reshape(-1, orig_shape[-1])
         rtp_llm_ops.rmsnorm(
-            out, x_2d, weight, self.eps, torch.cuda.current_stream().cuda_stream
+            out_2d, x_2d, weight, self.eps, torch.cuda.current_stream().cuda_stream
         )
-        return out.view(orig_shape)
+        return out_2d.view(orig_shape)
 
     def _lin(
         self,
@@ -2434,6 +2458,8 @@ class AttentionFP8(nn.Module):
         positions: torch.Tensor,
         kv_cache: Optional[Any] = None,
         block_tables_by_type: Optional[Dict[int, torch.Tensor]] = None,
+        prefill_local_qkv: Optional[PrefillLocalQKV] = None,
+        prefill_attn_out: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Prefill entry point.
 
@@ -2464,6 +2490,16 @@ class AttentionFP8(nn.Module):
             self._kv_cache = kv_cache
         if block_tables_by_type is not None:
             self._block_tables_by_type = block_tables_by_type
+        previous_local_qkv = getattr(self, "_prefill_local_qkv_override", None)
+        previous_indexer_qw = getattr(self, "_prefill_indexer_qw_override", None)
+        previous_attn_out = getattr(self, "_prefill_attn_out_override", None)
+        self._prefill_local_qkv_override = prefill_local_qkv
+        self._prefill_attn_out_override = prefill_attn_out
+        self._prefill_indexer_qw_override = (
+            prefill_local_qkv[3:]
+            if prefill_local_qkv is not None and len(prefill_local_qkv) >= 5
+            else None
+        )
         try:
             with record_function_range("dsv4.fp8.attn.set_pool_context"):
                 self._set_compressor_pool_context()
@@ -2476,8 +2512,41 @@ class AttentionFP8(nn.Module):
                 with record_function_range("dsv4.fp8.attn.clear_pool_context"):
                     self._clear_compressor_pool_context()
         finally:
+            self._prefill_local_qkv_override = previous_local_qkv
+            self._prefill_indexer_qw_override = previous_indexer_qw
+            self._prefill_attn_out_override = previous_attn_out
             self._kv_cache = prev_kv
             self._block_tables_by_type = prev_bt
+
+    def forward_prefill_fast(
+        self,
+        x: torch.Tensor,
+        positions: torch.Tensor,
+        kv_cache: Optional[Any] = None,
+        block_tables_by_type: Optional[Dict[int, torch.Tensor]] = None,
+        prefill_local_qkv: Optional[PrefillLocalQKV] = None,
+        prefill_attn_out: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """Graph-oriented split prefill entry.
+
+        The public ``forward`` path stays unchanged. This fast entry only
+        enables local buffer reuse inside the Q/KV prefill prologue while
+        preserving the same operator order and pool-context handling.
+        """
+        previous = getattr(self, "_prefill_fast_qkv_inplace", False)
+        self._prefill_fast_qkv_inplace = True
+        try:
+            kwargs = {
+                "kv_cache": kv_cache,
+                "block_tables_by_type": block_tables_by_type,
+            }
+            if prefill_local_qkv is not None:
+                kwargs["prefill_local_qkv"] = prefill_local_qkv
+            if prefill_attn_out is not None:
+                kwargs["prefill_attn_out"] = prefill_attn_out
+            return self.forward(x, positions, **kwargs)
+        finally:
+            self._prefill_fast_qkv_inplace = previous
 
     # ------------------------------------------------------------------
     # CP-overlap orchestration helpers (Phase-Z; env-default-off)
@@ -2657,6 +2726,7 @@ class AttentionFP8(nn.Module):
         assert common.csa_meta is not None, (
             "CSA prefill requires common.csa_meta — built by " "_build_csa_prefill_meta"
         )
+        precomputed_indexer_qw = getattr(self, "_prefill_indexer_qw_override", None)
 
         # Phase-3a part 3: IndexerFP8.forward + nested CompressorFP8.forward
         # are now flat-input-native (accept ``[T_total, dim]`` /
@@ -2664,7 +2734,11 @@ class AttentionFP8(nn.Module):
         # batched flat caller hits the same code path without rewrapping.
         with record_function_range("dsv4.fp8.attn.csa.indexer"):
             raw = self.indexer(
-                x, qkv.qr, common.csa_meta.indexer_meta, workspace=common.workspace
+                x,
+                qkv.qr,
+                common.csa_meta.indexer_meta,
+                workspace=common.workspace,
+                precomputed_qw=precomputed_indexer_qw,
             )
         return self._forward_prefill_compressed(
             x,
@@ -2731,6 +2805,7 @@ class AttentionFP8(nn.Module):
         cp_stream = self._get_cp_gather_stream(x.device)
         csa_meta = common.csa_meta
         layer_label = f"L{int(getattr(self, 'layer_id', 0)):02d}"
+        precomputed_indexer_qw = getattr(self, "_prefill_indexer_qw_override", None)
         nested_pending = None
         main_pending = None
         try:
@@ -2780,6 +2855,7 @@ class AttentionFP8(nn.Module):
                     before_gather_k=wait_main_before_indexer_k,
                     cp_gather_stream=cp_stream,
                     post_gather_stream=indexer_post_stream,
+                    precomputed_qw=precomputed_indexer_qw,
                 )
                 nested_pending = None
             if main_pending is not None:
@@ -3057,9 +3133,20 @@ class AttentionFP8(nn.Module):
 
         async_workspace_reads = self._should_async_workspace_reads_for_prefill(common)
         with record_function_range("dsv4.fp8.attn.workspace.alloc"):
-            workspace = torch.zeros(
-                (B, wm.M, D), dtype=torch.bfloat16, device=qkv.q.device
-            )
+            if (
+                os.environ.get(
+                    "DSV4_PREFILL_ATTENTION_WORKSPACE_REUSE_NOZERO", "0"
+                )
+                == "1"
+                and common.workspace is not None
+            ):
+                workspace = common.workspace.attention_workspace(
+                    B, wm.M, D, torch.bfloat16
+                )
+            else:
+                workspace = torch.zeros(
+                    (B, wm.M, D), dtype=torch.bfloat16, device=qkv.q.device
+                )
 
         cmp_pending = None
         cmp_reader_for_pending = None
@@ -3179,8 +3266,10 @@ class AttentionFP8(nn.Module):
                 # each FlashMLA chunk immediately after attention.
                 # The NamedTuple ref keeps it alive otherwise, costing ~1.1 GiB
                 # of peak overlap with the sparse-attn workspace at 1M ctx.
-                dispose_tensor(kv_bf16)
-                dispose_tensor(qkv.kv_full)
+                if kv_bf16.data_ptr() != qkv.kv_full.data_ptr():
+                    dispose_tensor(kv_bf16)
+                if qkv.kv_full_disposable:
+                    dispose_tensor(qkv.kv_full)
 
             # combine_topk: HCA uses precomputed dense arange(N_max); CSA uses
             # the runtime indexer output (raw compressed-pool offsets in [0, N_b)).
@@ -3316,7 +3405,12 @@ class AttentionFP8(nn.Module):
                 min_value=0,
             )
             s_q = qkv.q.shape[0]
-            out = torch.empty(s_q, self.dim, dtype=torch.bfloat16, device=qkv.q.device)
+            out = getattr(self, "_prefill_attn_out_override", None)
+            if out is None:
+                out = torch.empty(s_q, self.dim, dtype=torch.bfloat16, device=qkv.q.device)
+            else:
+                assert tuple(out.shape) == (s_q, self.dim)
+                assert out.dtype == torch.bfloat16 and out.device == qkv.q.device
             if q_chunk <= 0:
                 raise ValueError(
                     "DSV4_FLASH_MLA_SPARSE_Q_CHUNK must be positive for workspace "
@@ -4963,25 +5057,19 @@ class AttentionFP8(nn.Module):
         ``(B, S, …)`` layout it expects. Returned tensors keep the 3D
         shape because downstream pool/compressor helpers rely on it.
         """
-        x_3d = x.unsqueeze(0)
-        rd = common.rd
+        local_qkv = getattr(self, "_prefill_local_qkv_override", None)
+        if local_qkv is None:
+            compute_qr, compute_kv = self._prefill_local_qkv_fns(x, common)
+            q_local_override = None
+        else:
+            qr_local, kv_local = local_qkv[:2]
+            q_local_override = local_qkv[2] if len(local_qkv) > 2 else None
 
-        def compute_qr() -> torch.Tensor:
-            # q_lora_a + norm only — small ``[1, T, q_lora_rank]`` (fed to the
-            # indexer). The big ``q_lora_b`` + RoPE are deferred to
-            # ``_materialize_prefill_q`` so the 16 GiB Q buffer can reuse the
-            # union workspace storage after the compressors finish.
-            with record_function_range("dsv4.fp8.attn.qkv.q_lora_a_norm"):
-                return self._rmsnorm_weighted(
-                    self._lin(self.wq_a, x_3d), self.q_norm
-                )  # [1, T, q_lora_rank]
+            def compute_qr() -> torch.Tensor:
+                return qr_local.unsqueeze(0)
 
-        def compute_kv() -> torch.Tensor:
-            with record_function_range("dsv4.fp8.attn.qkv.kv_proj_rope"):
-                kv_in = self._lin(self.wkv, x_3d)
-                return fused_rmsnorm_rope(
-                    kv_in, self.kv_norm, common.freqs_cis, rd, eps=self.eps
-                )
+            def compute_kv() -> torch.Tensor:
+                return kv_local.unsqueeze(0)
 
         qr = compute_qr()
         kv = compute_kv()
@@ -5005,9 +5093,115 @@ class AttentionFP8(nn.Module):
 
         return PrefillQKV(
             qr=qr.squeeze(0),
-            q=None,  # deferred to _materialize_prefill_q
+            q=q_local_override,
             kv_full=kv_full.squeeze(0),
+            # A graph-island local_qkv override owns its output tensors. In
+            # non-CP prefill, kv_full aliases that graph output, so disposing it
+            # would mutate the persistent graph-owned Tensor object via set_().
+            kv_full_disposable=not (local_qkv is not None and not common.cp_on),
         )
+
+    def _prefill_local_qkv_fns(
+        self,
+        x: torch.Tensor,
+        common: PrefillMeta,
+        *,
+        freqs_cis: Optional[torch.Tensor] = None,
+    ):
+        x_3d = x.unsqueeze(0)
+        rd = common.rd
+        freqs = common.freqs_cis if freqs_cis is None else freqs_cis
+
+        def compute_qr() -> torch.Tensor:
+            with record_function_range("dsv4.fp8.attn.qkv.q_lora_a_norm"):
+                q_lora_a = self._lin(self.wq_a, x_3d)
+                q_lora_a_out = (
+                    q_lora_a
+                    if getattr(self, "_prefill_fast_qkv_inplace", False)
+                    else None
+                )
+                return self._rmsnorm_weighted(
+                    q_lora_a, self.q_norm, out=q_lora_a_out
+                )
+
+        def compute_kv() -> torch.Tensor:
+            with record_function_range("dsv4.fp8.attn.qkv.kv_proj_rope"):
+                kv_in = self._lin(self.wkv, x_3d)
+                kv_out = (
+                    kv_in if getattr(self, "_prefill_fast_qkv_inplace", False) else None
+                )
+                return fused_rmsnorm_rope(
+                    kv_in,
+                    self.kv_norm,
+                    freqs,
+                    rd,
+                    eps=self.eps,
+                    out=kv_out,
+                )
+
+        return compute_qr, compute_kv
+
+    def prefill_fast_compute_local_qkv(
+        self,
+        x: torch.Tensor,
+        common: PrefillMeta,
+        *,
+        freqs_cis: Optional[torch.Tensor] = None,
+        include_q: bool = False,
+    ) -> Tuple[torch.Tensor, ...]:
+        compute_qr, compute_kv = self._prefill_local_qkv_fns(
+            x, common, freqs_cis=freqs_cis
+        )
+        qr = compute_qr()
+        kv = compute_kv()
+        qr_2d = qr.squeeze(0)
+        kv_2d = kv.squeeze(0)
+        if not include_q:
+            return qr_2d, kv_2d
+        q = self._compute_prefill_q_from_qr(qr_2d, common, freqs_cis=freqs_cis)
+        return qr_2d, kv_2d, q
+
+    def prefill_fast_compute_indexer_qw(
+        self,
+        x: torch.Tensor,
+        qr: torch.Tensor,
+        common: PrefillMeta,
+        *,
+        freqs_cis: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        from rtp_llm.models_py.modules.dsv4.fp8.indexer import IndexerFP8
+
+        assert isinstance(self.indexer, IndexerFP8)
+        assert common.csa_meta is not None
+        freqs = (
+            common.csa_meta.indexer_meta.freqs_cis_slice
+            if freqs_cis is None
+            else freqs_cis
+        )
+        q = self.indexer._compute_indexer_q(qr, freqs)
+        weights = F.linear(x, self.indexer.weights_proj)
+        return q, weights
+
+    def _compute_prefill_q_from_qr(
+        self,
+        qr: torch.Tensor,
+        common: PrefillMeta,
+        *,
+        freqs_cis: Optional[torch.Tensor] = None,
+        out: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        freqs = common.freqs_cis if freqs_cis is None else freqs_cis
+        qr_3d = qr.unsqueeze(0)
+        seqlen = int(qr_3d.shape[1])
+        q_out = out
+        if q_out is not None:
+            q_out = q_out.view(seqlen, self.n_heads * self.head_dim)
+        q_local_flat = self._lin(self.wq_b, qr_3d, out=q_out)
+        q_local = q_local_flat.view(1, seqlen, self.n_heads, self.head_dim)
+        q_local = fused_rmsnorm_rope(
+            q_local, None, freqs, common.rd, eps=self.eps, out=q_local
+        )
+        return q_local.squeeze(0)
 
     def _materialize_prefill_q(
         self, qkv: PrefillQKV, common: PrefillMeta
@@ -5023,21 +5217,16 @@ class AttentionFP8(nn.Module):
         if qkv.q is not None:
             return qkv
         assert common.workspace is not None, "prefill workspace not bound"
-        qr_3d = qkv.qr.unsqueeze(0)  # [1, T, q_lora_rank]
         with record_function_range("dsv4.fp8.attn.qkv.q_lora_b_rope"):
-            seqlen = int(qr_3d.shape[1])
+            seqlen = int(qkv.qr.shape[0])
             q_out = common.workspace.prefill_q(seqlen)
-            q_local_flat = self._lin(
-                self.wq_b,
-                qr_3d,
-                out=q_out.view(seqlen, self.n_heads * self.head_dim),
+            q_local = self._compute_prefill_q_from_qr(
+                qkv.qr,
+                common,
+                out=q_out,
             )
-            assert q_local_flat.data_ptr() == q_out.data_ptr()
-            q_local = q_local_flat.view(1, seqlen, self.n_heads, self.head_dim)
-            q_local = fused_rmsnorm_rope(
-                q_local, None, common.freqs_cis, common.rd, eps=self.eps, out=q_local
-            )
-        return qkv._replace(q=q_local.squeeze(0))
+            assert q_local.data_ptr() == q_out.data_ptr()
+        return qkv._replace(q=q_local)
 
     def _ensure_prefill_kv_full(
         self, qkv: PrefillQKV, common: PrefillMeta
@@ -5154,7 +5343,8 @@ class AttentionFP8(nn.Module):
                 topk_length=meta.topk_length_kv_full,
             )
         # kv_full has no remaining consumer after flash_mla_sparse_fwd.
-        dispose_tensor(qkv.kv_full)
+        if qkv.kv_full_disposable:
+            dispose_tensor(qkv.kv_full)
         return o3.unsqueeze(0)
 
     def _attn_fp8_swa_via_concat(
@@ -5256,8 +5446,10 @@ class AttentionFP8(nn.Module):
         # overlay nothing else reads it on this path; the NamedTuple ref
         # would otherwise keep it alive through the sparse-attn workspace
         # alloc — ~1.1 GiB peak overlap at 1M ctx.
-        dispose_tensor(kv_bf16)
-        dispose_tensor(qkv.kv_full)
+        if kv_bf16.data_ptr() != qkv.kv_full.data_ptr():
+            dispose_tensor(kv_bf16)
+        if qkv.kv_full_disposable:
+            dispose_tensor(qkv.kv_full)
 
         # 3. flash_mla_sparse_fwd over the [B*M] flat KV view.
         with record_function_range("dsv4.fp8.attn.swa_concat.flash_mla"):
@@ -5289,7 +5481,12 @@ class AttentionFP8(nn.Module):
     ) -> torch.Tensor:
         """Inverse-RoPE + grouped wo_a + wo_b into a fresh ``[T, dim]`` tensor."""
         seqlen = o.shape[-3]
-        out = torch.empty(seqlen, self.dim, dtype=torch.bfloat16, device=o.device)
+        out = getattr(self, "_prefill_attn_out_override", None)
+        if out is None:
+            out = torch.empty(seqlen, self.dim, dtype=torch.bfloat16, device=o.device)
+        else:
+            assert tuple(out.shape) == (seqlen, self.dim)
+            assert out.dtype == torch.bfloat16 and out.device == o.device
         self._prefill_output_proj_into(o, freqs_cis, out=out)
         return out
 

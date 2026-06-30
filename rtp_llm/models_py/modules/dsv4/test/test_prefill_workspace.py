@@ -300,6 +300,58 @@ def test_cp_gather_restore_overflow():
     )
 
 
+def test_attention_workspace_reuses_until_growth():
+    ws = PrefillWorkspace(
+        torch.device("cpu"), q_rows=1, q_dim=1, reserve_cp=False, align_bytes=1
+    )
+    a = ws.attention_workspace(1, 4, 8, torch.bfloat16)
+    assert tuple(a.shape) == (1, 4, 8)
+    assert a.dtype == torch.bfloat16
+    assert torch.count_nonzero(a.float()).item() == 0
+
+    a.fill_(3)
+    b = ws.attention_workspace(1, 2, 8, torch.bfloat16)
+    assert b.data_ptr() == a.data_ptr()
+    assert tuple(b.shape) == (1, 2, 8)
+    assert b.is_contiguous()
+    assert b.view(2, 8).data_ptr() == b.data_ptr()
+    # Reuse intentionally does not clear; the production experiment relies on
+    # one zero-on-allocate and finite stale values thereafter.
+    assert torch.all(b == 3)
+
+    c = ws.attention_workspace(1, 6, 8, torch.bfloat16)
+    assert tuple(c.shape) == (1, 6, 8)
+    assert c.data_ptr() != a.data_ptr()
+    assert torch.count_nonzero(c.float()).item() == 0
+
+
+def test_attention_workspace_batched_shrink_is_packed_contiguous():
+    ws = PrefillWorkspace(
+        torch.device("cpu"), q_rows=1, q_dim=1, reserve_cp=False, align_bytes=1
+    )
+    large = ws.attention_workspace(2, 6, 8, torch.bfloat16)
+    large.fill_(5)
+
+    small = ws.attention_workspace(2, 4, 8, torch.bfloat16)
+    assert small.data_ptr() == large.data_ptr()
+    assert tuple(small.shape) == (2, 4, 8)
+    assert small.is_contiguous()
+    assert small.stride() == (4 * 8, 8, 1)
+    flat = small.view(2 * 4, 8)
+    assert flat.data_ptr() == small.data_ptr()
+    assert torch.all(flat == 5)
+
+
+def test_attention_workspace_dtype_change_reallocates():
+    ws = PrefillWorkspace(
+        torch.device("cpu"), q_rows=1, q_dim=1, reserve_cp=False, align_bytes=1
+    )
+    a = ws.attention_workspace(1, 4, 8, torch.bfloat16)
+    b = ws.attention_workspace(1, 4, 8, torch.float32)
+    assert b.dtype == torch.float32
+    assert b.data_ptr() != a.data_ptr()
+
+
 if __name__ == "__main__":
     test_prefill_q_eager_alloc_shape_and_dtype()
     print("PASS test_prefill_q_eager_alloc_shape_and_dtype")
@@ -325,4 +377,10 @@ if __name__ == "__main__":
     print("PASS test_cp_restore_region_does_not_alias_gather_region")
     test_cp_gather_restore_overflow()
     print("PASS test_cp_gather_restore_overflow")
+    test_attention_workspace_reuses_until_growth()
+    print("PASS test_attention_workspace_reuses_until_growth")
+    test_attention_workspace_batched_shrink_is_packed_contiguous()
+    print("PASS test_attention_workspace_batched_shrink_is_packed_contiguous")
+    test_attention_workspace_dtype_change_reallocates()
+    print("PASS test_attention_workspace_dtype_change_reallocates")
     print("ALL TESTS PASSED")

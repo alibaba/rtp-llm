@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Dict, Optional
+from typing import Dict, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -351,6 +351,135 @@ class MoE(nn.Module):
                 out[token_start:token_end],
             )
         return out.view(shape)
+
+    def prefill_fast_gate(
+        self, x: torch.Tensor, input_ids: torch.Tensor | None
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Graph-island helper for gate-only prefill work.
+
+        This deliberately stops before shared expert / routed MegaMoE execution.
+        """
+        shape = x.size()
+        x = x.view(-1, self.dim)
+        input_ids_flat = None
+        if getattr(self.gate, "hash", False):
+            if input_ids is None:
+                raise RuntimeError("hash MoE gate requires input_ids")
+            input_ids_flat = input_ids.flatten()
+            if input_ids_flat.numel() != x.size(0):
+                raise RuntimeError(
+                    "MoE gate input_ids/token mismatch: "
+                    f"input_ids={input_ids_flat.numel()} tokens={x.size(0)}"
+                )
+        if self._should_chunk(x.size(0)):
+            raise RuntimeError(
+                "DSV4 MoE prefill_fast_gate does not support chunked MoE"
+            )
+        if len(shape) == 0:
+            raise RuntimeError("invalid scalar MoE input")
+        with record_function_range("dsv4.moe.gate"):
+            return self.gate(x, input_ids_flat)
+
+    def forward_with_precomputed_gate(
+        self,
+        x: torch.Tensor,
+        input_ids: torch.Tensor,
+        gate_outputs: Tuple[torch.Tensor, torch.Tensor],
+        out: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        from rtp_llm.models_py.modules.dsv4 import _record_tensor as _rt
+
+        if _rt.should_record_layer(self.layer_id):
+            return self.forward(x, input_ids)
+
+        shape = x.size()
+        x = x.view(-1, self.dim)
+        input_ids_flat = input_ids.flatten()
+        if input_ids_flat.numel() != x.size(0):
+            raise RuntimeError(
+                "MoE input_ids/token mismatch: "
+                f"input_ids={input_ids_flat.numel()} tokens={x.size(0)}"
+            )
+        if self._should_chunk(x.size(0)):
+            return self._forward_chunked(x, input_ids_flat, shape)
+
+        weights, indices = gate_outputs
+        if weights.size(0) != x.size(0) or indices.size(0) != x.size(0):
+            raise RuntimeError(
+                "precomputed MoE gate token mismatch: "
+                f"weights={weights.size(0)} indices={indices.size(0)} tokens={x.size(0)}"
+            )
+
+        with record_function_range("dsv4.moe.shared_expert_start"):
+            self._shared_executor.start(self.shared_experts, x)
+        try:
+            with record_function_range("dsv4.moe.routed_experts"):
+                y = self._strategy(x, weights, indices)
+        except Exception:
+            with record_function_range("dsv4.moe.shared_expert_finish"):
+                self._shared_executor.finish()
+            raise
+
+        with record_function_range("dsv4.moe.shared_expert_finish"):
+            shared_y = self._shared_executor.finish()
+        with record_function_range("dsv4.moe.add_shared"):
+            T = x.size(0)
+            if out is None:
+                out = _get_or_create_final_out(
+                    max(T, self.max_tokens_per_rank, 1),
+                    self.dim,
+                    x.dtype,
+                    x.device,
+                )[:T]
+            else:
+                if tuple(out.shape) != (T, self.dim):
+                    raise RuntimeError(
+                        "precomputed MoE output shape mismatch: "
+                        f"out={tuple(out.shape)} expected={(T, self.dim)}"
+                    )
+                if out.dtype != x.dtype or out.device != x.device:
+                    raise RuntimeError("precomputed MoE output dtype/device mismatch")
+            y = combine_routed_and_shared(y, shared_y, x.dtype, out=out)
+            return y.view(shape)
+
+    def forward_with_output(
+        self,
+        x: torch.Tensor,
+        input_ids: torch.Tensor,
+        out: torch.Tensor,
+        gate_outputs: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+    ) -> torch.Tensor:
+        from rtp_llm.models_py.modules.dsv4 import _record_tensor as _rt
+
+        if _rt.should_record_layer(self.layer_id):
+            return self.forward(x, input_ids)
+        if gate_outputs is not None:
+            return self.forward_with_precomputed_gate(
+                x, input_ids, gate_outputs, out=out
+            )
+
+        shape = x.size()
+        x = x.view(-1, self.dim)
+        input_ids_flat = input_ids.flatten()
+        if input_ids_flat.numel() != x.size(0):
+            raise RuntimeError(
+                "MoE input_ids/token mismatch: "
+                f"input_ids={input_ids_flat.numel()} tokens={x.size(0)}"
+            )
+        if self._should_chunk(x.size(0)):
+            return self.forward(x, input_ids)
+        with record_function_range("dsv4.moe.gate"):
+            weights, indices = self.gate(x, input_ids_flat)
+        if tuple(out.shape) != (x.size(0), self.dim):
+            raise RuntimeError(
+                "MoE output override shape mismatch: "
+                f"out={tuple(out.shape)} expected={(x.size(0), self.dim)}"
+            )
+        if out.dtype != x.dtype or out.device != x.device:
+            raise RuntimeError("MoE output override dtype/device mismatch")
+        return self.forward_with_precomputed_gate(
+            x, input_ids_flat, (weights, indices), out=out
+        ).view(shape)
 
     def forward(self, x: torch.Tensor, input_ids: torch.Tensor) -> torch.Tensor:
         from rtp_llm.models_py.modules.dsv4 import _record_tensor as _rt

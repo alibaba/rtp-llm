@@ -114,6 +114,15 @@ py_test(
 )
 
 py_test(
+    name = "test_prefill_graph_static",
+    srcs = ["test_prefill_graph_static.py"],
+    deps = [
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm:testlib",
+    ],
+)
+
+py_test(
     name = "test_hc_impl",
     srcs = ["test_hc_impl.py"],
     deps = [

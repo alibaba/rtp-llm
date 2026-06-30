@@ -93,11 +93,14 @@ Padding-token slots are nulled via ``cp_info.prefill_qkv_padding_mask``.
 
 from __future__ import annotations
 
+import os
+from contextlib import nullcontext
 from typing import TYPE_CHECKING, Any, Dict, Optional
 
 import torch
 
 from rtp_llm.models_py.modules.dsv4 import _forward_tensor_debug as _fwd_dbg
+from rtp_llm.models_py.modules.dsv4 import _profiler
 from rtp_llm.models_py.modules.dsv4 import _record_tensor as _rt
 from rtp_llm.models_py.modules.dsv4.cp import (
     build_cp_context,
@@ -125,6 +128,397 @@ if TYPE_CHECKING:
     # doesn't depend on ``prefill`` today but this guard makes that
     # non-load-bearing (module loads fine even if the cycle reappears).
     from rtp_llm.models_py.modules.dsv4.transformer import V4Transformer
+
+
+_TRUE_ENV_VALUES = {"1", "true", "yes", "on"}
+
+
+def _log_prefill_graph_line(line: str) -> None:
+    try:
+        graph_log = os.path.join(
+            os.environ.get("HIPPO_APP_WORKDIR", "/tmp"),
+            "graph_decision.log",
+        )
+        os.makedirs(os.path.dirname(graph_log), exist_ok=True)
+        with open(graph_log, "a", encoding="utf-8") as f:
+            f.write(line + "\n")
+    except Exception:
+        pass
+
+
+def _env_flag(name: str, default: str = "0") -> bool:
+    return os.environ.get(name, default).strip().lower() in _TRUE_ENV_VALUES
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
+def _env_int_fail_closed(name: str, default: int) -> Optional[int]:
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return None
+
+
+def _prefill_request_token_count(
+    input_ids: torch.Tensor,
+    cp_ctx: Optional[Any],
+) -> int:
+    if cp_ctx is not None and hasattr(cp_ctx, "seq_len_full"):
+        return int(getattr(cp_ctx, "seq_len_full"))
+    return int(input_ids.numel())
+
+
+class _MetadataOnlyKVCache:
+    """KV-cache metadata shim for graph diagnostics that must not touch pools."""
+
+    def __init__(self, source: Any):
+        for name in (
+            "seq_size_per_block",
+            "kernel_seq_size_per_block",
+            "num_kv_heads",
+            "head_dim",
+            "use_mla",
+            "kv_lora_rank",
+            "rope_head_dim",
+            "layer_group_types",
+            "group_region_names",
+            "group_seq_size_per_block",
+            "layer_region_to_group_id",
+        ):
+            setattr(self, name, getattr(source, name, None))
+
+    def get_layer_cache(self, *args, **kwargs):
+        raise RuntimeError("metadata-only graph KV cache has no pool tensors")
+
+    def get_layer_caches(self, *args, **kwargs):
+        return []
+
+    def get_raw_pool_tensor(self, *args, **kwargs):
+        raise RuntimeError("metadata-only graph KV cache has no raw pool tensor")
+
+
+def _prefill_graph_fast_loop_enabled(
+    v4: "V4Transformer",
+    prepare_hidden_fn: Optional[Any],
+) -> bool:
+    if prepare_hidden_fn is not None:
+        return False
+    if _rt.ENABLED or _fwd_dbg.enabled():
+        return False
+    if not hasattr(v4, "layers"):
+        return False
+    island_requested = _env_flag("DSV4_PREFILL_ISLAND_GRAPH", "0") or _env_flag(
+        "DSV4_PREFILL_ISLAND_BRIDGE", "0"
+    )
+    return (
+        (_env_flag("DSV4_PREFILL_SPLIT_FAST_LOOP", "0") and island_requested)
+        or _env_flag("DSV4_PREFILL_GRAPH_REPLAY", "0")
+        or _env_flag("DSV4_PREFILL_GRAPH_STATIC_EAGER_RUN", "0")
+        or _env_flag("DSV4_PREFILL_GRAPH_COPY_SHADOW", "0")
+        or _env_flag("DSV4_PREFILL_GRAPH_ATTN_BODY_SHADOW", "0")
+    )
+
+
+def _prefill_graph_static_eager_run_allowed(
+    v4: "V4Transformer",
+    graph_decision: Optional[Any],
+    *,
+    kv_cache: Optional[Any],
+    static_state_updated_this_forward: bool,
+    graph_static_bind_allowed: bool,
+    graph_replay_requested: bool,
+    use_graph_fast_loop: bool,
+    write_cache_store_impl: Optional[Any],
+    rt_on: bool,
+) -> bool:
+    """Diagnostic-only gate for running the layer loop on static buffers eagerly."""
+
+    if not _env_flag("DSV4_PREFILL_GRAPH_STATIC_EAGER_RUN", "0"):
+        return False
+    if not static_state_updated_this_forward:
+        return False
+    if graph_replay_requested:
+        return False
+    if not graph_static_bind_allowed or not use_graph_fast_loop:
+        return False
+    if write_cache_store_impl is not None or rt_on:
+        return False
+    if kv_cache is not None and not _env_flag(
+        "DSV4_PREFILL_GRAPH_STATIC_EAGER_ALLOW_LIVE_KV", "0"
+    ):
+        return False
+    if graph_decision is None or not getattr(graph_decision, "enabled", False):
+        return False
+    if not _env_flag("DSV4_PREFILL_GRAPH_BIND_STATIC_INPUTS", "0"):
+        return False
+    if getattr(v4, "fp8_kv_cache", False) and not _env_flag(
+        "DSV4_PREFILL_GRAPH_BIND_STATIC_META", "0"
+    ):
+        return False
+    state = getattr(v4, "_last_prefill_graph_state", None)
+    if state is None or not getattr(state, "valid", False):
+        return False
+    if getattr(v4, "_last_prefill_graph_bind_static_error", None) is not None:
+        return False
+    if getattr(v4, "_last_prefill_graph_bind_static_meta_error", None) is not None:
+        return False
+    report = getattr(v4, "_last_prefill_graph_bound_capture_surface", None)
+    if report is None or not getattr(report, "static_bound", False):
+        return False
+    return True
+
+
+def _prefill_graph_copy_shadow_allowed(
+    v4: "V4Transformer",
+    graph_decision: Optional[Any],
+    *,
+    static_args_bound_this_forward: bool,
+    static_state_updated_this_forward: bool,
+    use_graph_fast_loop: bool,
+    write_cache_store_impl: Optional[Any],
+    rt_on: bool,
+) -> bool:
+    """Diagnostic-only shadow graph that validates static graph copy mechanics."""
+
+    if not _env_flag("DSV4_PREFILL_GRAPH_COPY_SHADOW", "0"):
+        return False
+    if not static_args_bound_this_forward or not static_state_updated_this_forward:
+        return False
+    if not use_graph_fast_loop:
+        return False
+    if write_cache_store_impl is not None or rt_on:
+        return False
+    if graph_decision is None or not getattr(graph_decision, "enabled", False):
+        return False
+    state = getattr(v4, "_last_prefill_graph_state", None)
+    if state is None or not getattr(state, "valid", False):
+        return False
+    if getattr(v4, "_last_prefill_graph_bind_static_error", None) is not None:
+        return False
+    if getattr(v4, "_last_prefill_graph_bind_static_meta_error", None) is not None:
+        return False
+    report = getattr(v4, "_last_prefill_graph_bound_capture_surface", None)
+    if report is None or not getattr(report, "static_bound", False):
+        return False
+    return True
+
+
+def _prefill_graph_needs_bound_capture_surface() -> bool:
+    return (
+        _env_flag("DSV4_PREFILL_GRAPH_STATIC_EAGER_RUN", "0")
+        or _env_flag("DSV4_PREFILL_GRAPH_COPY_SHADOW", "0")
+        or _env_flag("DSV4_PREFILL_GRAPH_CAPTURE_SURFACE_LOG", "0")
+    )
+
+
+def _clear_prefill_graph_copy_shadow_result(v4: "V4Transformer") -> None:
+    setattr(v4, "_last_prefill_graph_copy_shadow_stats", None)
+    setattr(v4, "_last_prefill_graph_copy_shadow_error", None)
+
+
+def _set_prefill_graph_copy_shadow_stats(
+    v4: "V4Transformer",
+    *,
+    mode: str,
+    exact: bool,
+    max_abs: float,
+    mean_abs: float,
+) -> None:
+    setattr(
+        v4,
+        "_last_prefill_graph_copy_shadow_stats",
+        {
+            "mode": mode,
+            "exact": exact,
+            "max_abs": max_abs,
+            "mean_abs": mean_abs,
+        },
+    )
+    setattr(v4, "_last_prefill_graph_copy_shadow_error", None)
+
+
+def _set_prefill_graph_copy_shadow_error(
+    v4: "V4Transformer",
+    error: str,
+) -> None:
+    setattr(v4, "_last_prefill_graph_copy_shadow_stats", None)
+    setattr(v4, "_last_prefill_graph_copy_shadow_error", error)
+
+
+def _prefill_graph_attn_body_shadow_layer() -> Optional[int]:
+    if not _env_flag("DSV4_PREFILL_GRAPH_ATTN_BODY_SHADOW", "0"):
+        return None
+    layer = _env_int_fail_closed("DSV4_PREFILL_GRAPH_ATTN_BODY_SHADOW_LAYER", 0)
+    if layer is None or layer < 0:
+        return None
+    return layer
+
+
+def _prefill_graph_attn_body_shadow_allowed(
+    v4: "V4Transformer",
+    graph_decision: Optional[Any],
+    *,
+    layer_idx: int,
+    loop_kv_cache: Optional[Any],
+    static_state_updated_this_forward: bool,
+    graph_replay_requested: bool,
+    write_cache_store_impl: Optional[Any],
+    rt_on: bool,
+) -> bool:
+    shadow_layer = _prefill_graph_attn_body_shadow_layer()
+    if shadow_layer is None or int(layer_idx) != int(shadow_layer):
+        return False
+    if graph_replay_requested:
+        return False
+    if not static_state_updated_this_forward:
+        return False
+    if not _env_flag("DSV4_PREFILL_GRAPH_ATTN_BODY_SHADOW_ALLOW_GRAPH_KV", "0"):
+        return False
+    if loop_kv_cache is None:
+        return False
+    if write_cache_store_impl is not None or rt_on:
+        return False
+    if graph_decision is None or not getattr(graph_decision, "enabled", False):
+        return False
+    state = getattr(v4, "_last_prefill_graph_state", None)
+    if state is None or not getattr(state, "valid", False):
+        return False
+    if getattr(v4, "_last_prefill_graph_bind_static_error", None) is not None:
+        return False
+    if getattr(v4, "_last_prefill_graph_bind_static_meta_error", None) is not None:
+        return False
+    if getattr(state, "key", None) != getattr(graph_decision, "key", None):
+        return False
+    key = getattr(graph_decision, "key", None)
+    if key is not None and (
+        getattr(key, "prefix_bucket", 0) != 0 or getattr(key, "reuse_bucket", 0) != 0
+    ):
+        return False
+    if getattr(state, "cuda_graph", None) is not None:
+        return False
+    return True
+
+
+def _clear_prefill_graph_attn_body_shadow_result(v4: "V4Transformer") -> None:
+    setattr(v4, "_last_prefill_graph_attn_body_shadow_stats", None)
+    setattr(v4, "_last_prefill_graph_attn_body_shadow_error", None)
+
+
+def _clear_prefill_graph_attn_body_shadow_result_if_enabled(
+    v4: "V4Transformer",
+) -> bool:
+    if not _env_flag("DSV4_PREFILL_GRAPH_ATTN_BODY_SHADOW", "0"):
+        return False
+    _clear_prefill_graph_attn_body_shadow_result(v4)
+    return True
+
+
+def _set_prefill_graph_attn_body_shadow_stats(
+    v4: "V4Transformer",
+    *,
+    layer_idx: int,
+    exact: bool,
+    max_abs: float,
+    mean_abs: float,
+) -> None:
+    setattr(
+        v4,
+        "_last_prefill_graph_attn_body_shadow_stats",
+        {
+            "layer_idx": int(layer_idx),
+            "exact": exact,
+            "max_abs": max_abs,
+            "mean_abs": mean_abs,
+        },
+    )
+    setattr(v4, "_last_prefill_graph_attn_body_shadow_error", None)
+
+
+def _set_prefill_graph_attn_body_shadow_error(
+    v4: "V4Transformer",
+    error: str,
+) -> None:
+    setattr(v4, "_last_prefill_graph_attn_body_shadow_stats", None)
+    setattr(v4, "_last_prefill_graph_attn_body_shadow_error", error)
+
+
+def _release_prefill_graph_shadow_kv(state: Any) -> None:
+    if state is None:
+        return
+    state.graph_kv_cache = None
+    state.graph_kv_block_cap = 0
+    state._graph_kv_signature = None
+
+
+def _compare_prefill_graph_attn_body_shadow_tensors(
+    v4: "V4Transformer",
+    *,
+    layer_idx: int,
+    shadow_out: torch.Tensor,
+    eager_out: torch.Tensor,
+) -> None:
+    # If live eager attention failed asynchronously, make that a real forward
+    # failure rather than hiding it as a diagnostic compare problem.
+    torch.cuda.synchronize(eager_out.device)
+    exact = bool(torch.equal(shadow_out, eager_out))
+    diff = (shadow_out.detach().float() - eager_out.detach().float()).abs()
+    max_abs = float(diff.max().item()) if diff.numel() else 0.0
+    mean_abs = float(diff.mean().item()) if diff.numel() else 0.0
+    _set_prefill_graph_attn_body_shadow_stats(
+        v4,
+        layer_idx=layer_idx,
+        exact=exact,
+        max_abs=max_abs,
+        mean_abs=mean_abs,
+    )
+    if _env_flag("DSV4_PREFILL_GRAPH_LOG_DECISION", "0"):
+        _log_prefill_graph_line(
+            "[DSV4PrefillGraph] stage=attn_body_shadow "
+            f"enabled=True layer={layer_idx} exact={exact} "
+            f"max_abs={max_abs:.9g} mean_abs={mean_abs:.9g}"
+        )
+
+
+def _graph_prefix_facts(
+    cp_ctx: Optional[Any], attn_inputs: Optional[Any], *, batch_size: int = 1
+) -> tuple[int, int, bool]:
+    prefix_length = 0
+    max_prefix_length = 0
+    prefix_unknown = False
+    if cp_ctx is not None:
+        cp_prefix_lengths = getattr(cp_ctx, "prefix_lengths", None)
+        if cp_prefix_lengths is not None and cp_prefix_lengths.numel() > 0:
+            if cp_prefix_lengths.device.type == "cpu":
+                max_prefix_length = int(cp_prefix_lengths.max().item())
+                prefix_length = max_prefix_length
+            elif int(batch_size) <= 1:
+                prefix_length = int(getattr(cp_ctx, "prefix_length", 0))
+                max_prefix_length = prefix_length
+            else:
+                prefix_unknown = True
+        else:
+            prefix_length = int(getattr(cp_ctx, "prefix_length", 0))
+            max_prefix_length = prefix_length
+    elif attn_inputs is not None:
+        prefix_lengths = getattr(attn_inputs, "prefix_lengths", None)
+        if prefix_lengths is not None and prefix_lengths.numel() > 0:
+            if prefix_lengths.device.type == "cpu":
+                max_prefix_length = int(prefix_lengths.max().item())
+                prefix_length = max_prefix_length
+            else:
+                prefix_unknown = True
+    return prefix_length, max_prefix_length, prefix_unknown
 
 
 def _build_positions_from_lengths(
@@ -316,129 +710,906 @@ def forward_layers(
     if _rt_on:
         _rt.record("prefill_embed_hc_expanded", h)
 
+    use_graph_fast_loop = _prefill_graph_fast_loop_enabled(v4, prepare_hidden_fn)
+    graph_decision = None
+    graph_replay_requested = _env_flag("DSV4_PREFILL_GRAPH_REPLAY", "0")
+    graph_drop_kv_for_logits_only = _env_flag(
+        "DSV4_PREFILL_GRAPH_DROP_KV_FOR_LOGITS_ONLY", "0"
+    )
+    graph_owned_kv_requested = _env_flag("DSV4_PREFILL_GRAPH_OWNED_KV", "0")
+    graph_owned_kv = graph_owned_kv_requested and _env_flag(
+        "DSV4_PREFILL_GRAPH_ALLOW_UNSAFE_OWNED_KV", "0"
+    )
+    graph_replay_block_reason = None
+    if graph_replay_requested and graph_owned_kv_requested and not graph_owned_kv:
+        graph_replay_block_reason = "owned_kv_requires_unsafe_ack"
+        setattr(v4, "_last_prefill_graph_replay_error", graph_replay_block_reason)
+        if _env_flag("DSV4_PREFILL_GRAPH_LOG_DECISION", "0"):
+            _log_prefill_graph_line(
+                "[DSV4PrefillGraph] stage=graph_replay "
+                "enabled=False reason=owned_kv_requires_unsafe_ack"
+            )
+    if (
+        graph_replay_requested
+        and graph_replay_block_reason is None
+        and kv_cache is not None
+        and not graph_drop_kv_for_logits_only
+        and not graph_owned_kv
+        and not _env_flag("DSV4_PREFILL_GRAPH_ALLOW_LIVE_KV", "0")
+    ):
+        graph_replay_block_reason = "live_kv_not_static"
+        setattr(v4, "_last_prefill_graph_replay_error", graph_replay_block_reason)
+        if _env_flag("DSV4_PREFILL_GRAPH_LOG_DECISION", "0"):
+            _log_prefill_graph_line(
+                "[DSV4PrefillGraph] stage=graph_replay "
+                "enabled=False reason=live_kv_not_static"
+            )
+    graph_static_bind_allowed = _env_flag(
+        "DSV4_PREFILL_GRAPH_ALLOW_STATIC_EAGER", "0"
+    ) or (graph_replay_requested and graph_replay_block_reason is None)
+    graph_manager_enabled = (
+        _env_flag("DSV4_PREFILL_GRAPH_MANAGER", "0")
+        or _env_flag("DSV4_PREFILL_GRAPH_UPDATE_STATIC", "0")
+        or (graph_replay_requested and graph_replay_block_reason is None)
+    )
+    if graph_manager_enabled:
+        from rtp_llm.models_py.modules.dsv4.prefill_graph import (
+            PrefillGraphRequest,
+            select_prefill_graph_key,
+        )
+
+        token_count_for_graph = (
+            int(getattr(cp_ctx, "seq_len_full"))
+            if cp_ctx is not None and hasattr(cp_ctx, "seq_len_full")
+            else int(input_ids.numel())
+        )
+        batch_size_for_graph = (
+            int(cu_seqlens.numel() - 1)
+            if cu_seqlens is not None and cu_seqlens.numel() >= 2
+            else 1
+        )
+        (
+            prefix_length_for_graph,
+            max_prefix_length_for_graph,
+            prefix_unknown_for_graph,
+        ) = _graph_prefix_facts(cp_ctx, attn_inputs, batch_size=batch_size_for_graph)
+        graph_decision = select_prefill_graph_key(
+            PrefillGraphRequest(
+                token_count=token_count_for_graph,
+                batch_size=batch_size_for_graph,
+                cp_size=int(getattr(cp_ctx, "cp_size", getattr(v4, "_cp_size", 1))),
+                prefix_length=prefix_length_for_graph,
+                max_prefix_length=max_prefix_length_for_graph,
+                prefix_unknown=prefix_unknown_for_graph,
+                prepare_hidden=prepare_hidden_fn is not None,
+                cache_store=write_cache_store_impl is not None,
+                mtp_hidden=getattr(v4, "_mtp_hidden_buffer", None) is not None,
+            ),
+            enabled=hasattr(v4, "layers")
+            and not _rt.ENABLED
+            and not _fwd_dbg.enabled(),
+            token_buckets=os.environ.get("DSV4_PREFILL_GRAPH_BUCKETS", "512"),
+            batch_buckets=os.environ.get("DSV4_PREFILL_GRAPH_BATCH_BUCKETS", "1"),
+            prefix_buckets=os.environ.get("DSV4_PREFILL_GRAPH_PREFIX_BUCKETS", "0"),
+            reuse_buckets=os.environ.get("DSV4_PREFILL_GRAPH_REUSE_BUCKETS", "0"),
+            fixed_cp_size=_env_int("DSV4_PREFILL_GRAPH_CP_SIZE", 8),
+            allow_prefix_reuse=_env_flag("DSV4_PREFILL_GRAPH_ALLOW_PREFIX_REUSE", "0"),
+        )
+        setattr(v4, "_last_prefill_graph_decision", graph_decision)
+        if _env_flag("DSV4_PREFILL_GRAPH_LOG_DECISION", "0"):
+            _log_prefill_graph_line(
+                "[DSV4PrefillGraph] "
+                "stage=decision "
+                f"decision_enabled={getattr(graph_decision, 'enabled', None)} "
+                f"reason={getattr(graph_decision, 'reason', None)} "
+                f"key={getattr(graph_decision, 'key', None)}"
+            )
+    record_range_ctx = (
+        _profiler.disable_record_function_ranges
+        if use_graph_fast_loop
+        else nullcontext
+    )
+
     # FP8 KV-cache: hoist host-side prefill metadata once per ratio bucket
     # and broadcast to every layer's ``AttentionFP8._prefill_meta_shared``.
     # BF16 path doesn't need this; ``Attention`` rebuilds meta inside its
     # own forward.
-    if v4.fp8_kv_cache:
-        sp_int_for_meta = int(positions[0].item())
-        sp_per_req: Optional[torch.Tensor] = None
-        req_id_per_token: Optional[torch.Tensor] = None
-        if cp_ctx is not None:
-            # Under CP, rank-local token order is zigzagged. The first token of
-            # each rank-local request chunk is therefore not necessarily the
-            # request's absolute start position. Use CP metadata instead of
-            # deriving request ids from rank-local cu_seqlens.
-            sp_per_req = cp_ctx.prefix_lengths.to(
-                device=positions.device, dtype=torch.int64
-            ).contiguous()
-            req_id_per_token = cp_ctx.req_id_per_token.to(
-                device=positions.device, dtype=torch.int32
-            ).contiguous()
-        elif cu_seqlens is not None and cu_seqlens.numel() >= 2:
-            starts = cu_seqlens[:-1].to(device=positions.device, dtype=torch.int64)
-            sp_per_req = positions.index_select(0, starts).to(torch.int64).contiguous()
-            req_id_per_token = (
-                torch.searchsorted(
-                    cu_seqlens.to(device=positions.device, dtype=torch.int64),
-                    torch.arange(
-                        int(cu_seqlens[-1].item()),
-                        device=positions.device,
-                        dtype=torch.int64,
-                    ),
-                    right=True,
+    meta_by_ratio = None
+    live_meta_by_ratio = None
+    live_input_ids = input_ids
+    live_h = h
+    live_positions = positions
+    live_cu_seqlens = cu_seqlens
+    live_block_tables_by_type = block_tables_by_type
+    static_state_updated_this_forward = False
+    static_args_bound_this_forward = False
+    with record_range_ctx():
+        if v4.fp8_kv_cache:
+            sp_int_for_meta = int(positions[0].item())
+            sp_per_req: Optional[torch.Tensor] = None
+            req_id_per_token: Optional[torch.Tensor] = None
+            if cp_ctx is not None:
+                # Under CP, rank-local token order is zigzagged. The first token of
+                # each rank-local request chunk is therefore not necessarily the
+                # request's absolute start position. Use CP metadata instead of
+                # deriving request ids from rank-local cu_seqlens.
+                sp_per_req = cp_ctx.prefix_lengths.to(
+                    device=positions.device, dtype=torch.int64
+                ).contiguous()
+                req_id_per_token = cp_ctx.req_id_per_token.to(
+                    device=positions.device, dtype=torch.int32
+                ).contiguous()
+            elif cu_seqlens is not None and cu_seqlens.numel() >= 2:
+                starts = cu_seqlens[:-1].to(device=positions.device, dtype=torch.int64)
+                sp_per_req = (
+                    positions.index_select(0, starts).to(torch.int64).contiguous()
                 )
-                .sub_(1)
-                .to(torch.int32)
-                .contiguous()
+                req_id_per_token = (
+                    torch.searchsorted(
+                        cu_seqlens.to(device=positions.device, dtype=torch.int64),
+                        torch.arange(
+                            int(cu_seqlens[-1].item()),
+                            device=positions.device,
+                            dtype=torch.int64,
+                        ),
+                        right=True,
+                    )
+                    .sub_(1)
+                    .to(torch.int32)
+                    .contiguous()
+                )
+            batch_size = 1
+            if cu_seqlens is not None and cu_seqlens.numel() >= 2:
+                batch_size = int(cu_seqlens.numel() - 1)
+            input_lengths: Optional[torch.Tensor] = None
+            prefix_lengths: Optional[torch.Tensor] = None
+            max_seqlen_q = 0
+            if attn_inputs is not None:
+                il = getattr(attn_inputs, "input_lengths", None)
+                if il is not None and il.numel() > 0:
+                    input_lengths = il.to(
+                        device=positions.device, dtype=torch.int32
+                    ).contiguous()
+                    max_seqlen_q = int(input_lengths.max().item())
+                pl = getattr(attn_inputs, "prefix_lengths", None)
+                if pl is not None and pl.numel() > 0:
+                    prefix_lengths = pl.to(
+                        device=positions.device, dtype=torch.int32
+                    ).contiguous()
+            # Per-forward prefill workspace: one runtime buffer allocated at the
+            # top of the forward, freed when ``forward_layers`` returns (so the
+            # MTP draft forward, which runs right after on a near-full card, can
+            # borrow it). Holds the prefill-Q output (eager) and — whenever CP is
+            # active — the main + indexer compressor CP gather/restore scratch
+            # (dedicated buffer pairs per role, used by BOTH the serial and
+            # overlap paths for the workspace-backed roles). Sizing is MAX
+            # (capacity-bound, runtime-length-independent) so every forward
+            # allocates the same-sized block → zero allocator fragmentation,
+            # IDENTICAL across main and MTP-draft forwards (the draft overrides
+            # ``_resolve_prefill_ws_gather_widths`` to size off the main model's
+            # ratios — see ``deepseek_v4_mtp_model``). Current-layer SWA
+            # ``kv_full`` all-gather is intentionally not workspace-backed.
+            #
+            # ``reserve_cp`` gates the CP region; we cannot derive it from
+            # ``compress_ratio != 0`` on the layers because the workspace is
+            # bound once for the whole prefill forward. The bound
+            # ``_prefill_ws_full_rows>0`` is the canonical signal that CP is
+            # active at workspace bind time.
+            reserve_cp = (cp_ctx is not None) and int(v4._prefill_ws_full_rows) > 0
+            ws = PrefillWorkspace(
+                input_ids.device,
+                q_rows=v4._prefill_ws_q_rows,
+                q_dim=v4._prefill_ws_q_dim,
+                reserve_cp=reserve_cp,
+                cp_rows=v4._prefill_ws_full_rows,
+                main_w=v4._prefill_ws_main_w,
+                idx_w=v4._prefill_ws_idx_w,
             )
-        batch_size = 1
-        if cu_seqlens is not None and cu_seqlens.numel() >= 2:
-            batch_size = int(cu_seqlens.numel() - 1)
-        input_lengths: Optional[torch.Tensor] = None
-        prefix_lengths: Optional[torch.Tensor] = None
-        max_seqlen_q = 0
-        if attn_inputs is not None:
-            il = getattr(attn_inputs, "input_lengths", None)
-            if il is not None and il.numel() > 0:
-                input_lengths = il.to(
-                    device=positions.device, dtype=torch.int32
-                ).contiguous()
-                max_seqlen_q = int(input_lengths.max().item())
-            pl = getattr(attn_inputs, "prefix_lengths", None)
-            if pl is not None and pl.numel() > 0:
-                prefix_lengths = pl.to(
-                    device=positions.device, dtype=torch.int32
-                ).contiguous()
-        # Per-forward prefill workspace: one runtime buffer allocated at the
-        # top of the forward, freed when ``forward_layers`` returns (so the
-        # MTP draft forward, which runs right after on a near-full card, can
-        # borrow it). Holds the prefill-Q output (eager) and — whenever CP is
-        # active — the main + indexer compressor CP gather/restore scratch
-        # (dedicated buffer pairs per role, used by BOTH the serial and
-        # overlap paths for the workspace-backed roles). Sizing is MAX
-        # (capacity-bound, runtime-length-independent) so every forward
-        # allocates the same-sized block → zero allocator fragmentation,
-        # IDENTICAL across main and MTP-draft forwards (the draft overrides
-        # ``_resolve_prefill_ws_gather_widths`` to size off the main model's
-        # ratios — see ``deepseek_v4_mtp_model``). Current-layer SWA ``kv_full``
-        # all-gather is intentionally not workspace-backed.
-        #
-        # ``reserve_cp`` gates the CP region; we cannot derive it from
-        # ``compress_ratio != 0`` on the layers because the workspace is bound
-        # once for the whole prefill forward. The bound ``_prefill_ws_full_rows>0``
-        # is the canonical signal that CP is active at workspace bind time.
-        reserve_cp = (cp_ctx is not None) and int(v4._prefill_ws_full_rows) > 0
-        ws = PrefillWorkspace(
-            input_ids.device,
-            q_rows=v4._prefill_ws_q_rows,
-            q_dim=v4._prefill_ws_q_dim,
-            reserve_cp=reserve_cp,
-            cp_rows=v4._prefill_ws_full_rows,
-            main_w=v4._prefill_ws_main_w,
-            idx_w=v4._prefill_ws_idx_w,
-        )
-        build_and_propagate_prefill_meta_fp8(
-            v4,
-            h,
-            sp_int_for_meta,
-            kv_cache,
-            block_tables_by_type,
-            sp_per_req=sp_per_req,
-            cu_seqlens=cu_seqlens,
-            batch_size=batch_size,
-            input_lengths=input_lengths,
-            prefix_lengths=prefix_lengths,
-            position_ids=positions,
-            req_id_per_token=req_id_per_token,
-            max_seqlen_q=max_seqlen_q,
-            workspace=ws,
-        )
+            meta_by_ratio = build_and_propagate_prefill_meta_fp8(
+                v4,
+                h,
+                sp_int_for_meta,
+                kv_cache,
+                block_tables_by_type,
+                sp_per_req=sp_per_req,
+                cu_seqlens=cu_seqlens,
+                batch_size=batch_size,
+                input_lengths=input_lengths,
+                prefix_lengths=prefix_lengths,
+                position_ids=positions,
+                req_id_per_token=req_id_per_token,
+                max_seqlen_q=max_seqlen_q,
+                workspace=ws,
+            )
+            live_meta_by_ratio = meta_by_ratio
+            if graph_decision is not None and (
+                _env_flag("DSV4_PREFILL_GRAPH_UPDATE_STATIC", "0")
+                or (graph_replay_requested and graph_replay_block_reason is None)
+            ):
+                from rtp_llm.models_py.modules.dsv4.prefill_graph import (
+                    analyze_prefill_capture_surface,
+                    try_update_static_prefill_graph_state,
+                )
 
-    try:
+                graph_cu_seqlens = cu_seqlens
+                if graph_cu_seqlens is None:
+                    graph_cu_seqlens = torch.tensor(
+                        [0, int(input_ids.numel())],
+                        dtype=torch.int64,
+                        device=input_ids.device,
+                    )
+                graph_input_lengths = input_lengths
+                if graph_input_lengths is None:
+                    graph_input_lengths = (
+                        graph_cu_seqlens[1:].to(torch.int64)
+                        - graph_cu_seqlens[:-1].to(torch.int64)
+                    ).to(torch.int32)
+                graph_prefix_lengths = prefix_lengths
+                if graph_prefix_lengths is None:
+                    graph_prefix_lengths = torch.zeros(
+                        int(graph_input_lengths.numel()),
+                        dtype=torch.int32,
+                        device=input_ids.device,
+                    )
+                graph_req_id_per_token = req_id_per_token
+                if graph_req_id_per_token is None:
+                    graph_req_id_per_token = torch.repeat_interleave(
+                        torch.arange(
+                            int(graph_input_lengths.numel()),
+                            device=input_ids.device,
+                            dtype=torch.int32,
+                        ),
+                        graph_input_lengths.to(device=input_ids.device),
+                    )
+                block_cap = _env_int("DSV4_PREFILL_GRAPH_BLOCK_CAP", 0)
+                if block_cap <= 0:
+                    block_cap = 1
+                    if block_tables_by_type:
+                        observed_block_cols = [
+                            int(table.size(1))
+                            for table in block_tables_by_type.values()
+                            if table.dim() == 2
+                        ]
+                        if observed_block_cols:
+                            block_cap = max(observed_block_cols)
+                graph_decision = try_update_static_prefill_graph_state(
+                    v4,
+                    graph_decision,
+                    input_ids=input_ids,
+                    hidden=h,
+                    position_ids=positions,
+                    req_id_per_token=graph_req_id_per_token,
+                    cu_seqlens=graph_cu_seqlens,
+                    input_lengths=graph_input_lengths,
+                    prefix_lengths=graph_prefix_lengths,
+                    block_tables_by_type=block_tables_by_type,
+                    seq_len_full=token_count_for_graph,
+                    prefix_length=prefix_length_for_graph,
+                    meta_by_ratio=meta_by_ratio,
+                    block_cap=block_cap,
+                        workspace_config=dict(
+                            q_rows=int(input_ids.numel()),
+                            q_dim=v4._prefill_ws_q_dim,
+                            reserve_cp=reserve_cp,
+                            cp_rows=token_count_for_graph,
+                            main_w=v4._prefill_ws_main_w,
+                            idx_w=v4._prefill_ws_idx_w,
+                        ),
+                )
+                setattr(v4, "_last_prefill_graph_decision", graph_decision)
+                state_after_update = getattr(v4, "_last_prefill_graph_state", None)
+                static_state_updated_this_forward = bool(
+                    graph_decision.enabled
+                    and state_after_update is not None
+                    and getattr(state_after_update, "valid", False)
+                )
+                if (
+                    graph_decision.enabled
+                    and (
+                        graph_static_bind_allowed
+                        and (
+                            _env_flag("DSV4_PREFILL_GRAPH_BIND_STATIC_META", "0")
+                            or graph_replay_requested
+                        )
+                    )
+                    and getattr(v4, "_last_prefill_graph_state", None) is not None
+                ):
+                    state = getattr(v4, "_last_prefill_graph_state")
+                    try:
+                        meta_by_ratio = state.meta.materialize(
+                            meta_by_ratio, workspace=state.workspace
+                        )
+                        for layer in v4.layers:
+                            attn = getattr(layer, "attn", None)
+                            if attn is None:
+                                continue
+                            attn._ensure_freqs_cis_bound()
+                            attn._set_prefill_meta_shared(
+                                meta_by_ratio.get(int(attn.compress_ratio))
+                            )
+                        setattr(v4, "_last_prefill_graph_bind_static_meta_error", None)
+                        if _env_flag("DSV4_PREFILL_GRAPH_LOG_DECISION", "0"):
+                            _log_prefill_graph_line(
+                                "[DSV4PrefillGraph] "
+                                "stage=bind_static_meta bound=True reason=ok"
+                            )
+                    except Exception as exc:
+                        setattr(
+                            v4,
+                            "_last_prefill_graph_bind_static_meta_error",
+                            str(exc),
+                        )
+                        if _env_flag("DSV4_PREFILL_GRAPH_LOG_DECISION", "0"):
+                            _log_prefill_graph_line(
+                                "[DSV4PrefillGraph] "
+                                f"stage=bind_static_meta bound=False reason={exc}"
+                            )
+                if _env_flag("DSV4_PREFILL_GRAPH_CAPTURE_SURFACE_LOG", "0"):
+                    state = getattr(v4, "_last_prefill_graph_state", None)
+                    if state is not None:
+                        report = analyze_prefill_capture_surface(
+                            state,
+                            input_ids=input_ids,
+                            hidden=h,
+                            position_ids=positions,
+                            req_id_per_token=graph_req_id_per_token,
+                            cu_seqlens=graph_cu_seqlens,
+                            input_lengths=graph_input_lengths,
+                            prefix_lengths=graph_prefix_lengths,
+                            block_tables_by_type=block_tables_by_type,
+                            meta_by_ratio=meta_by_ratio,
+                        )
+                        setattr(v4, "_last_prefill_graph_capture_surface", report)
+                        _log_prefill_graph_line(
+                            "[DSV4PrefillGraph] "
+                            "stage=capture_surface "
+                            f"static_bound={report.static_bound} "
+                            f"live_tensor_count={report.live_tensor_count} "
+                            f"static_bound_count={report.static_bound_count} "
+                            f"live_not_static_count={len(report.live_not_static)} "
+                            f"missing_static_count={len(report.missing_static)} "
+                            f"skipped_critical_count={len(report.skipped_critical)} "
+                            f"live_not_static_sample={report.live_not_static[:8]} "
+                            f"missing_static_sample={report.missing_static[:8]} "
+                            f"skipped_critical_sample={report.skipped_critical[:8]}"
+                        )
+            if _env_flag("DSV4_PREFILL_GRAPH_LOG_DECISION", "0"):
+                state = getattr(v4, "_last_prefill_graph_state", None)
+                log_line = (
+                    "[DSV4PrefillGraph] "
+                    "stage=post_meta "
+                    f"decision_enabled={getattr(graph_decision, 'enabled', None)} "
+                    f"reason={getattr(graph_decision, 'reason', None)} "
+                    f"key={getattr(graph_decision, 'key', None)} "
+                    f"state_valid={getattr(state, 'valid', None)} "
+                    f"pointer_stable={getattr(state, 'pointer_stable', None)} "
+                    "inventory_count="
+                    f"{len(state.pointer_inventory()) if state is not None else None} "
+                    "state_error="
+                    f"{getattr(v4, '_last_prefill_graph_state_error', None)}"
+                )
+                _log_prefill_graph_line(log_line)
+
+    if _prefill_graph_needs_bound_capture_surface():
+        setattr(v4, "_last_prefill_graph_bound_capture_surface", None)
+
+    if graph_decision is not None and (
+        graph_static_bind_allowed
+        and (
+            _env_flag("DSV4_PREFILL_GRAPH_BIND_STATIC_INPUTS", "0")
+            or graph_replay_requested
+        )
+    ):
+        state = getattr(v4, "_last_prefill_graph_state", None)
+        if state is None:
+            setattr(v4, "_last_prefill_graph_bind_static_error", "missing_state")
+            if _env_flag("DSV4_PREFILL_GRAPH_LOG_DECISION", "0"):
+                _log_prefill_graph_line(
+                    "[DSV4PrefillGraph] stage=bind_static "
+                    "bound=False reason=missing_state"
+                )
+        else:
+            try:
+                from rtp_llm.models_py.modules.dsv4.prefill_graph import (
+                    analyze_prefill_capture_surface,
+                    exact_static_prefill_layer_loop_args,
+                )
+
+                static_args = exact_static_prefill_layer_loop_args(
+                    state,
+                    input_ids=input_ids,
+                    hidden=h,
+                    position_ids=positions,
+                    cu_seqlens=cu_seqlens,
+                    block_tables_by_type=block_tables_by_type,
+                )
+                input_ids = static_args.input_ids
+                h = static_args.hidden
+                positions = static_args.position_ids
+                cu_seqlens = static_args.cu_seqlens
+                block_tables_by_type = static_args.block_tables_by_type
+                static_args_bound_this_forward = True
+                setattr(v4, "_last_prefill_graph_bind_static_error", None)
+                should_analyze_bound_surface = (
+                    _prefill_graph_needs_bound_capture_surface()
+                )
+                if should_analyze_bound_surface:
+                    report = analyze_prefill_capture_surface(
+                        state,
+                        input_ids=input_ids,
+                        hidden=h,
+                        position_ids=positions,
+                        req_id_per_token=state.request.req_id_per_token,
+                        cu_seqlens=cu_seqlens,
+                        input_lengths=state.request.input_lengths,
+                        prefix_lengths=state.request.prefix_lengths,
+                        block_tables_by_type=block_tables_by_type,
+                        meta_by_ratio=meta_by_ratio,
+                    )
+                    setattr(v4, "_last_prefill_graph_bound_capture_surface", report)
+                    if _env_flag("DSV4_PREFILL_GRAPH_CAPTURE_SURFACE_LOG", "0"):
+                        _log_prefill_graph_line(
+                            "[DSV4PrefillGraph] "
+                            "stage=bind_static_capture_surface "
+                            f"static_bound={report.static_bound} "
+                            f"live_tensor_count={report.live_tensor_count} "
+                            f"static_bound_count={report.static_bound_count} "
+                            f"live_not_static_count={len(report.live_not_static)} "
+                            f"missing_static_count={len(report.missing_static)} "
+                            f"skipped_critical_count={len(report.skipped_critical)} "
+                            f"live_not_static_sample={report.live_not_static[:8]} "
+                            f"missing_static_sample={report.missing_static[:8]} "
+                            f"skipped_critical_sample={report.skipped_critical[:8]}"
+                        )
+                if _env_flag("DSV4_PREFILL_GRAPH_LOG_DECISION", "0"):
+                    _log_prefill_graph_line(
+                        "[DSV4PrefillGraph] stage=bind_static bound=True reason=ok"
+                    )
+            except Exception as exc:
+                setattr(v4, "_last_prefill_graph_bind_static_error", str(exc))
+                if _env_flag("DSV4_PREFILL_GRAPH_LOG_DECISION", "0"):
+                    _log_prefill_graph_line(
+                        "[DSV4PrefillGraph] stage=bind_static "
+                        f"bound=False reason={exc}"
+                    )
+
+    fast_block_cls = None
+    fast_attn_cls = None
+    if use_graph_fast_loop:
+        from rtp_llm.models_py.modules.dsv4.block import Block
+        from rtp_llm.models_py.modules.dsv4.fp8.attention import AttentionFP8
+
+        fast_block_cls = Block
+        fast_attn_cls = AttentionFP8
+
+    def _run_layer_loop(
+        loop_h: torch.Tensor,
+        *,
+        loop_input_ids: torch.Tensor,
+        loop_positions: torch.Tensor,
+        loop_cu_seqlens: torch.Tensor,
+        loop_kv_cache: Optional[KVCache],
+        loop_block_tables_by_type: Optional[Dict[int, torch.Tensor]],
+    ) -> torch.Tensor:
+        split_fast_loop = _env_flag("DSV4_PREFILL_SPLIT_FAST_LOOP", "0")
+        request_token_count = _prefill_request_token_count(loop_input_ids, cp_ctx)
+        pre_island_enabled = split_fast_loop and _env_flag(
+            "DSV4_PREFILL_ISLAND_GRAPH", "0"
+        )
+        bridge_island_enabled = (
+            split_fast_loop
+            and _env_flag("DSV4_PREFILL_ISLAND_BRIDGE", "0")
+            and write_cache_store_impl is None
+            and not _rt_on
+        )
+        bridge_qkv_enabled = bridge_island_enabled and _env_flag(
+            "DSV4_PREFILL_ISLAND_QKV_BRIDGE", "0"
+        )
+        bridge_q_enabled = bridge_qkv_enabled and _env_flag(
+            "DSV4_PREFILL_ISLAND_Q_BRIDGE", "0"
+        )
+        if bridge_q_enabled:
+            q_bridge_max_tokens = _env_int_fail_closed(
+                "DSV4_PREFILL_ISLAND_Q_BRIDGE_MAX_TOKENS", 512
+            )
+            max_shapes = _env_int_fail_closed("DSV4_PREFILL_ISLAND_GRAPH_MAX_SHAPES", 1)
+            bridge_q_enabled = (
+                q_bridge_max_tokens is not None
+                and q_bridge_max_tokens > 0
+                and request_token_count <= q_bridge_max_tokens
+                and max_shapes == 1
+            )
+        bridge_indexer_qw_enabled = (
+            bridge_q_enabled
+            and _env_flag("DSV4_PREFILL_ISLAND_INDEXER_QW_BRIDGE", "0")
+        )
+        if bridge_indexer_qw_enabled:
+            indexer_qw_bridge_max_tokens = _env_int_fail_closed(
+                "DSV4_PREFILL_ISLAND_INDEXER_QW_BRIDGE_MAX_TOKENS", 512
+            )
+            max_shapes = _env_int_fail_closed("DSV4_PREFILL_ISLAND_GRAPH_MAX_SHAPES", 1)
+            bridge_indexer_qw_enabled = (
+                indexer_qw_bridge_max_tokens is not None
+                and indexer_qw_bridge_max_tokens > 0
+                and request_token_count <= indexer_qw_bridge_max_tokens
+                and max_shapes == 1
+            )
+        attn_ffn_bridge_enabled = bridge_island_enabled and _env_flag(
+            "DSV4_PREFILL_ISLAND_ATTN_FFN_BRIDGE", "0"
+        )
+        if attn_ffn_bridge_enabled:
+            attn_ffn_bridge_max_tokens = _env_int_fail_closed(
+                "DSV4_PREFILL_ISLAND_ATTN_FFN_BRIDGE_MAX_TOKENS", 512
+            )
+            max_shapes = _env_int_fail_closed("DSV4_PREFILL_ISLAND_GRAPH_MAX_SHAPES", 1)
+            attn_ffn_bridge_enabled = (
+                attn_ffn_bridge_max_tokens is not None
+                and attn_ffn_bridge_max_tokens > 0
+                and request_token_count <= attn_ffn_bridge_max_tokens
+                and max_shapes == 1
+            )
+        attn_ffn_gate_bridge_enabled = (
+            attn_ffn_bridge_enabled
+            and _env_flag("DSV4_PREFILL_ISLAND_ATTN_FFN_GATE_BRIDGE", "0")
+        )
+        attn_ffn_passthrough_enabled = (
+            attn_ffn_bridge_enabled
+            and _env_flag("DSV4_PREFILL_ISLAND_ATTN_FFN_BRIDGE_PASSTHROUGH", "0")
+        )
+        attn_out_direct_enabled = attn_ffn_bridge_enabled and _env_flag(
+            "DSV4_PREFILL_ISLAND_ATTN_OUT_DIRECT", "0"
+        )
+        ffn_out_direct_enabled = bridge_island_enabled and _env_flag(
+            "DSV4_PREFILL_ISLAND_FFN_OUT_DIRECT", "0"
+        )
+        island_graph = None
+        island_graph_enabled = pre_island_enabled or bridge_island_enabled
+        if not island_graph_enabled and hasattr(v4, "_prefill_island_graph_manager"):
+            delattr(v4, "_prefill_island_graph_manager")
+        if island_graph_enabled:
+            island_graph = getattr(v4, "_prefill_island_graph_manager", None)
+            if island_graph is None:
+                from rtp_llm.models_py.modules.dsv4.prefill_island_graph import (
+                    PrefillIslandGraphManager,
+                )
+
+                island_graph = PrefillIslandGraphManager()
+                setattr(v4, "_prefill_island_graph_manager", island_graph)
+        pending_attn_pre = None
+        pending_local_qkv = None
+        if _env_flag("DSV4_PREFILL_GRAPH_ATTN_BODY_SHADOW", "0"):
+            _clear_prefill_graph_attn_body_shadow_result(v4)
+
+        def _run_attn_body_shadow(
+            *,
+            layer_idx: int,
+            layer,
+            x_pre: torch.Tensor,
+            prefill_local_qkv,
+        ):
+            target_layer = _prefill_graph_attn_body_shadow_layer()
+            if target_layer is None or int(layer_idx) != int(target_layer):
+                return None
+            _clear_prefill_graph_attn_body_shadow_result(v4)
+            if not _prefill_graph_attn_body_shadow_allowed(
+                v4,
+                graph_decision,
+                layer_idx=layer_idx,
+                loop_kv_cache=loop_kv_cache,
+                static_state_updated_this_forward=static_state_updated_this_forward,
+                graph_replay_requested=graph_replay_requested,
+                write_cache_store_impl=write_cache_store_impl,
+                rt_on=_rt_on,
+            ):
+                return None
+            if x_pre.device.type != "cuda" or not torch.cuda.is_available():
+                return None
+            if torch.cuda.is_current_stream_capturing():
+                return None
+            state = getattr(v4, "_last_prefill_graph_state", None)
+            entered_graph = False
+            try:
+                graph_kv_cache = state.ensure_graph_kv_cache(
+                    loop_kv_cache,
+                    loop_block_tables_by_type,
+                    min_block_cap=_env_int(
+                        "DSV4_PREFILL_GRAPH_ATTN_BODY_SHADOW_KV_BLOCK_CAP", 64
+                    ),
+                )
+                if not state.graph_kv_fits(loop_block_tables_by_type):
+                    raise RuntimeError("attn_body_shadow_graph_kv_block_overflow")
+                torch.cuda.synchronize(x_pre.device)
+                graph = torch.cuda.CUDAGraph()
+                entered_graph = True
+                with torch.cuda.graph(graph):
+                    shadow_out = layer.prefill_fast_attn_body(
+                        x_pre,
+                        loop_positions,
+                        kv_cache=graph_kv_cache,
+                        block_tables_by_type=loop_block_tables_by_type,
+                        prefill_local_qkv=prefill_local_qkv,
+                    )
+                graph.replay()
+                torch.cuda.synchronize(x_pre.device)
+                return shadow_out
+            except Exception as exc:
+                _set_prefill_graph_attn_body_shadow_error(v4, str(exc))
+                if _env_flag("DSV4_PREFILL_GRAPH_LOG_DECISION", "0"):
+                    _log_prefill_graph_line(
+                        "[DSV4PrefillGraph] stage=attn_body_shadow "
+                        f"enabled=False layer={layer_idx} reason={exc}"
+                    )
+                if entered_graph:
+                    raise RuntimeError(
+                        f"attn_body_shadow_graph_failed:{exc}"
+                    ) from exc
+                return None
+            finally:
+                _release_prefill_graph_shadow_kv(state)
+
+        def _compare_attn_body_shadow(
+            *,
+            layer_idx: int,
+            shadow_out,
+            eager_out: torch.Tensor,
+        ) -> None:
+            if shadow_out is None:
+                return
+            _compare_prefill_graph_attn_body_shadow_tensors(
+                v4,
+                layer_idx=layer_idx,
+                shadow_out=shadow_out,
+                eager_out=eager_out,
+            )
         for layer_idx, layer in enumerate(v4.layers):
-            h = layer(
-                h,  # [T, hc, dim]
-                input_ids,  # [T]
-                positions,  # [T]
-                cu_seqlens,  # [B+1]
-                kv_cache=kv_cache,
-                block_tables_by_type=block_tables_by_type,
-            )  # [T, hc, dim]
+            if use_graph_fast_loop and isinstance(layer, fast_block_cls):
+                if split_fast_loop and isinstance(
+                    getattr(layer, "attn", None), fast_attn_cls
+                ):
+                    attn_pre = None
+                    attn_pre_from_bridge = False
+                    if pending_attn_pre is not None:
+                        residual, x_pre, post, comb = pending_attn_pre
+                        pending_attn_pre = None
+                        prefill_local_qkv = pending_local_qkv
+                        pending_local_qkv = None
+                        attn_pre_from_bridge = True
+                    elif pre_island_enabled and island_graph is not None:
+                        attn_pre = island_graph.run_pre(
+                            layer=layer,
+                            kind="attn_pre",
+                            x=loop_h,
+                            eager_fn=layer.prefill_fast_attn_pre,
+                        )
+                        residual = loop_h
+                        if attn_pre is None:
+                            residual, x_pre, post, comb = layer.prefill_fast_attn_pre(
+                                loop_h
+                            )
+                            prefill_local_qkv = None
+                        else:
+                            x_pre, post, comb = attn_pre
+                            prefill_local_qkv = None
+                    else:
+                        residual, x_pre, post, comb = layer.prefill_fast_attn_pre(
+                            loop_h
+                        )
+                        prefill_local_qkv = None
+                    attn_body_shadow_out = _run_attn_body_shadow(
+                        layer_idx=layer_idx,
+                        layer=layer,
+                        x_pre=x_pre,
+                        prefill_local_qkv=prefill_local_qkv,
+                    )
+                    prefill_attn_out = None
+                    if attn_out_direct_enabled and island_graph is not None:
+                        prefill_attn_out = (
+                            island_graph.attn_post_ffn_pre_static_attn_out(
+                                layer=layer,
+                                attn_out_template=x_pre,
+                                residual=residual,
+                                post=post,
+                                comb=comb,
+                                input_ids=loop_input_ids,
+                                include_gate=attn_ffn_gate_bridge_enabled,
+                                passthrough_pre_inputs=(
+                                    attn_ffn_passthrough_enabled
+                                    and attn_pre_from_bridge
+                                ),
+                            )
+                        )
+                    attn_out = layer.prefill_fast_attn_body(
+                        x_pre,
+                        loop_positions,
+                        kv_cache=loop_kv_cache,
+                        block_tables_by_type=loop_block_tables_by_type,
+                        prefill_local_qkv=prefill_local_qkv,
+                        prefill_attn_out=prefill_attn_out,
+                    )
+                    _compare_attn_body_shadow(
+                        layer_idx=layer_idx,
+                        shadow_out=attn_body_shadow_out,
+                        eager_out=attn_out,
+                    )
+                    attn_ffn_bridge = None
+                    precomputed_ffn_gate = None
+                    ffn_pre_from_bridge = False
+                    if attn_ffn_bridge_enabled and island_graph is not None:
+                        attn_ffn_bridge = island_graph.run_attn_post_ffn_pre_bridge(
+                            layer=layer,
+                            attn_out=attn_out,
+                            residual=residual,
+                            post=post,
+                            comb=comb,
+                            input_ids=loop_input_ids,
+                            include_gate=attn_ffn_gate_bridge_enabled,
+                            passthrough_pre_inputs=(
+                                attn_ffn_passthrough_enabled and attn_pre_from_bridge
+                            ),
+                        )
+                        if (
+                            attn_ffn_bridge is None
+                            and attn_ffn_gate_bridge_enabled
+                        ):
+                            attn_ffn_bridge = (
+                                island_graph.run_attn_post_ffn_pre_bridge(
+                                    layer=layer,
+                                    attn_out=attn_out,
+                                    residual=residual,
+                                    post=post,
+                                    comb=comb,
+                                    include_gate=False,
+                                    passthrough_pre_inputs=(
+                                        attn_ffn_passthrough_enabled
+                                        and attn_pre_from_bridge
+                                    ),
+                                )
+                            )
+                        if (
+                            attn_ffn_bridge is None
+                            and attn_ffn_passthrough_enabled
+                            and attn_pre_from_bridge
+                        ):
+                            attn_ffn_bridge = (
+                                island_graph.run_attn_post_ffn_pre_bridge(
+                                    layer=layer,
+                                    attn_out=attn_out,
+                                    residual=residual,
+                                    post=post,
+                                    comb=comb,
+                                    include_gate=False,
+                                    passthrough_pre_inputs=False,
+                                )
+                            )
+                    if attn_ffn_bridge is None:
+                        loop_h = layer.prefill_fast_attn_post(
+                            attn_out, residual, post, comb
+                        )
+                        ffn_pre = None
+                        if pre_island_enabled and island_graph is not None:
+                            ffn_pre = island_graph.run_pre(
+                                layer=layer,
+                                kind="ffn_pre",
+                                x=loop_h,
+                                eager_fn=layer.prefill_fast_ffn_pre,
+                            )
+                        residual = loop_h
+                        if ffn_pre is None:
+                            residual, x_pre, post, comb = layer.prefill_fast_ffn_pre(
+                                loop_h
+                            )
+                        else:
+                            x_pre, post, comb = ffn_pre
+                    else:
+                        residual, x_pre, post, comb = attn_ffn_bridge[:4]
+                        ffn_pre_from_bridge = True
+                        if len(attn_ffn_bridge) >= 6:
+                            precomputed_ffn_gate = (
+                                attn_ffn_bridge[4],
+                                attn_ffn_bridge[5],
+                            )
+                    next_layer = (
+                        v4.layers[layer_idx + 1]
+                        if layer_idx + 1 < len(v4.layers)
+                        else None
+                    )
+                    bridge = None
+                    next_common = None
+                    bridge_candidate_enabled = (
+                        bridge_island_enabled
+                        and island_graph is not None
+                        and next_layer is not None
+                        and isinstance(next_layer, fast_block_cls)
+                        and isinstance(getattr(next_layer, "attn", None), fast_attn_cls)
+                    )
+                    if bridge_candidate_enabled and bridge_qkv_enabled:
+                        next_common = getattr(next_layer.attn, "_prefill_meta_shared", None)
+                    bridge_include_qkv = bool(next_common is not None)
+                    bridge_include_q = bool(next_common is not None and bridge_q_enabled)
+                    bridge_include_indexer_qw = bool(
+                        next_common is not None
+                        and bridge_indexer_qw_enabled
+                        and getattr(next_common, "csa_meta", None) is not None
+                    )
+                    prefill_ffn_out = None
+                    if ffn_out_direct_enabled and bridge_candidate_enabled:
+                        prefill_ffn_out = island_graph.ffn_post_attn_pre_static_ffn_out(
+                            current_layer=layer,
+                            next_layer=next_layer,
+                            ffn_out_template=x_pre,
+                            residual=residual,
+                            post=post,
+                            comb=comb,
+                            common=next_common,
+                            include_qkv=bridge_include_qkv,
+                            include_q=bridge_include_q,
+                            include_indexer_qw=bridge_include_indexer_qw,
+                        )
+                    ffn_out = layer.prefill_fast_ffn_body(
+                        x_pre,
+                        loop_input_ids,
+                        precomputed_gate=precomputed_ffn_gate,
+                        prefill_out=prefill_ffn_out,
+                    )
+                    if bridge_candidate_enabled:
+                        bridge = island_graph.run_ffn_post_attn_pre_bridge(
+                            current_layer=layer,
+                            next_layer=next_layer,
+                            ffn_out=ffn_out,
+                            residual=residual,
+                            post=post,
+                            comb=comb,
+                            common=next_common,
+                            include_qkv=bridge_include_qkv,
+                            include_q=bridge_include_q,
+                            include_indexer_qw=bridge_include_indexer_qw,
+                        )
+                    if bridge is None:
+                        loop_h = layer.prefill_fast_ffn_post(
+                            ffn_out, residual, post, comb
+                        )
+                    else:
+                        bridge_h, next_x_pre, next_post, next_comb = bridge[:4]
+                        loop_h = bridge_h
+                        pending_attn_pre = (
+                            bridge_h,
+                            next_x_pre,
+                            next_post,
+                            next_comb,
+                        )
+                        pending_local_qkv = bridge[4:] if len(bridge) >= 6 else None
+                else:
+                    loop_h = layer.forward_prefill_fast(
+                        loop_h,  # [T, hc, dim]
+                        loop_input_ids,  # [T]
+                        loop_positions,  # [T]
+                        loop_cu_seqlens,  # [B+1]
+                        kv_cache=loop_kv_cache,
+                        block_tables_by_type=loop_block_tables_by_type,
+                    )  # [T, hc, dim]
+            else:
+                loop_h = layer(
+                    loop_h,  # [T, hc, dim]
+                    loop_input_ids,  # [T]
+                    loop_positions,  # [T]
+                    loop_cu_seqlens,  # [B+1]
+                    kv_cache=loop_kv_cache,
+                    block_tables_by_type=loop_block_tables_by_type,
+                )  # [T, hc, dim]
             if _rt_on:
-                _rt.record(f"prefill_layer{layer_idx:02d}_out", h)
+                _rt.record(f"prefill_layer{layer_idx:02d}_out", loop_h)
             if write_cache_store_impl is not None:
                 write_cache_store_impl(kv_cache.get_layer_caches(layer_idx))
             if _rt_on:
-                _rt.record(f"layer{layer_idx:02d}_out", h)
+                _rt.record(f"layer{layer_idx:02d}_out", loop_h)
                 if cp_ctx is None:
-                    layer_last = h[-1:].contiguous()
+                    layer_last = loop_h[-1:].contiguous()
                 else:
                     layer_last_pos = cp_ctx.seq_len_total - 1
                     layer_last_mask = (
                         cp_ctx.global_positions == layer_last_pos
                     ) & cp_ctx.local_is_real
-                    layer_last = h[layer_last_mask].contiguous()
+                    layer_last = loop_h[layer_last_mask].contiguous()
                     dbg_pos = getattr(_rt, "_DBG_GLOBAL_POS", -1)
                     if dbg_pos >= 0:
                         layer_pos_mask = (
@@ -446,28 +1617,423 @@ def forward_layers(
                         ) & cp_ctx.local_is_real
                         _rt.record(
                             f"layer{layer_idx:02d}_pos{dbg_pos}",
-                            h[layer_pos_mask].contiguous(),
+                            loop_h[layer_pos_mask].contiguous(),
                         )
                     layer_tail_mask = (
-                        (cp_ctx.global_positions >= max(cp_ctx.seq_len_total - 128, 0))
+                        (
+                            cp_ctx.global_positions
+                            >= max(cp_ctx.seq_len_total - 128, 0)
+                        )
                         & (cp_ctx.global_positions < cp_ctx.seq_len_total)
                         & cp_ctx.local_is_real
                     )
                     _rt.record(
                         f"layer{layer_idx:02d}_tail128",
-                        h[layer_tail_mask].contiguous(),
+                        loop_h[layer_tail_mask].contiguous(),
                     )
                 _rt.record(f"layer{layer_idx:02d}_last", layer_last)
-    finally:
+        return loop_h
+
+    def _clear_static_prefill_meta_refs() -> None:
         # Always drop the per-layer ``common.workspace`` references, even if a
-        # layer raises mid-prefill (e.g. a CUDA OOM under memory pressure —
-        # the exact case this per-forward workspace exists to relieve). The
-        # ref lives on each layer's ``_prefill_meta_shared`` (a persistent
-        # module attr), so without this the ~16 GiB workspace would stay
-        # pinned past the failing forward and starve the retry / next request
-        # on a near-full card. ``clear`` is idempotent (sets None per layer).
+        # layer raises mid-prefill (e.g. a CUDA OOM under memory pressure — the
+        # exact case this per-forward workspace exists to relieve). The ref lives
+        # on each layer's ``_prefill_meta_shared`` (a persistent module attr), so
+        # without this the ~16 GiB workspace would stay pinned past the failing
+        # forward and starve the retry / next request on a near-full card. ``clear``
+        # is idempotent (sets None per layer).
         if v4.fp8_kv_cache:
             clear_prefill_meta_shared_fp8(v4)
+
+    def _bind_prefill_meta_refs(meta) -> None:
+        if not v4.fp8_kv_cache or meta is None:
+            return
+        for layer in v4.layers:
+            attn = getattr(layer, "attn", None)
+            if attn is None:
+                continue
+            attn._ensure_freqs_cis_bound()
+            attn._set_prefill_meta_shared(meta.get(int(attn.compress_ratio)))
+
+    def _cp_prefill_sync_pending_for_graph() -> bool:
+        if os.environ.get("DSV4_CP_SYNC_AFTER_ATTN_ONCE", "1") == "0":
+            return False
+        if cp_ctx is None:
+            return False
+        for layer in v4.layers:
+            if getattr(layer, "_cp_sync_after_attn_done", True):
+                continue
+            ffn_strategy = getattr(getattr(layer, "ffn", None), "_strategy", None)
+            if getattr(ffn_strategy, "name", "") == "mega":
+                return True
+        return False
+
+    def _try_run_static_prefill_layer_loop_graph(
+        loop_h: torch.Tensor,
+    ) -> Optional[torch.Tensor]:
+        def _skip(reason: str) -> None:
+            setattr(v4, "_last_prefill_graph_replay_error", reason)
+            if _env_flag("DSV4_PREFILL_GRAPH_LOG_DECISION", "0"):
+                _log_prefill_graph_line(
+                    "[DSV4PrefillGraph] stage=graph_replay "
+                    f"enabled=False reason={reason}"
+                )
+
+        if not _env_flag("DSV4_PREFILL_GRAPH_REPLAY", "0"):
+            if _env_flag("DSV4_PREFILL_GRAPH_LOG_DECISION", "0"):
+                _log_prefill_graph_line(
+                    "[DSV4PrefillGraph] stage=graph_try_entry replay_env=False"
+                )
+            return None
+        if _env_flag("DSV4_PREFILL_GRAPH_LOG_DECISION", "0"):
+            _log_prefill_graph_line("[DSV4PrefillGraph] stage=graph_try_entry")
+        if graph_replay_block_reason is not None:
+            _skip(graph_replay_block_reason)
+            return None
+        state = getattr(v4, "_last_prefill_graph_state", None)
+        if graph_decision is None:
+            _skip("missing_decision")
+            return None
+        if not graph_decision.enabled:
+            _skip(f"decision_disabled:{graph_decision.reason}")
+            return None
+        if state is None:
+            _skip("missing_state")
+            return None
+        if not getattr(state, "valid", False):
+            _skip("state_invalid")
+            return None
+        if not use_graph_fast_loop or write_cache_store_impl is not None or _rt_on:
+            _skip("unsupported_forward_context")
+            return None
+        if (
+            kv_cache is not None
+            and not graph_drop_kv_for_logits_only
+            and not graph_owned_kv
+            and not _env_flag("DSV4_PREFILL_GRAPH_ALLOW_LIVE_KV", "0")
+        ):
+            _skip("live_kv_not_static")
+            return None
+        if graph_owned_kv and kv_cache is not None:
+            if getattr(graph_decision.key, "prefix_bucket", 0) != 0 or getattr(
+                graph_decision.key, "reuse_bucket", 0
+            ) != 0:
+                setattr(
+                    v4,
+                    "_last_prefill_graph_replay_error",
+                    "graph_owned_kv_prefix_reuse_unsupported",
+                )
+                if _env_flag("DSV4_PREFILL_GRAPH_LOG_DECISION", "0"):
+                    _log_prefill_graph_line(
+                        "[DSV4PrefillGraph] stage=graph_replay "
+                        "enabled=False reason=graph_owned_kv_prefix_reuse_unsupported"
+                    )
+                return None
+            try:
+                graph_kv_cache = state.ensure_graph_kv_cache(
+                    kv_cache,
+                    block_tables_by_type,
+                    min_block_cap=_env_int("DSV4_PREFILL_GRAPH_KV_BLOCK_CAP", 0),
+                )
+            except Exception as exc:
+                _skip(f"graph_kv_prepare_failed:{exc}")
+                return None
+            if not state.graph_kv_fits(block_tables_by_type):
+                state.reset_cuda_graph("graph_kv_block_overflow")
+                _skip("graph_kv_block_overflow")
+                return None
+            graph_block_tables_by_type = block_tables_by_type
+        else:
+            graph_kv_cache = (
+                _MetadataOnlyKVCache(kv_cache)
+                if graph_drop_kv_for_logits_only and kv_cache is not None
+                else kv_cache
+            )
+            graph_block_tables_by_type = (
+                None if graph_drop_kv_for_logits_only else block_tables_by_type
+            )
+        if loop_h is not state.hidden:
+            _skip("hidden_not_static")
+            return None
+        if loop_h.device.type != "cuda" or not torch.cuda.is_available():
+            _skip("not_cuda")
+            return None
+        if torch.cuda.is_current_stream_capturing():
+            _skip("already_capturing")
+            return None
+        if _cp_prefill_sync_pending_for_graph():
+            _skip("cp_sync_pending")
+            return None
+
+        def _record_graph_output_stats(stage: str) -> None:
+            if not _env_flag("DSV4_PREFILL_GRAPH_OUTPUT_STATS", "0"):
+                return
+            torch.cuda.synchronize(state.output_hidden.device)
+            out_f = state.output_hidden.detach().float()
+            nonzero = int(torch.count_nonzero(out_f).item())
+            max_abs = float(out_f.abs().max().item()) if out_f.numel() else 0.0
+            mean_abs = float(out_f.abs().mean().item()) if out_f.numel() else 0.0
+            stats = {
+                "stage": stage,
+                "numel": int(out_f.numel()),
+                "nonzero": nonzero,
+                "max_abs": max_abs,
+                "mean_abs": mean_abs,
+            }
+            setattr(v4, "_last_prefill_graph_output_stats", stats)
+            _log_prefill_graph_line(
+                "[DSV4PrefillGraph] stage=output_stats "
+                f"mode={stage} numel={stats['numel']} "
+                f"nonzero={stats['nonzero']} "
+                f"max_abs={stats['max_abs']:.9g} "
+                f"mean_abs={stats['mean_abs']:.9g}"
+            )
+
+        ran_graph = False
+        entered_graph = False
+        try:
+            from rtp_llm.models_py.modules.dsv4.prefill_graph import (
+                analyze_prefill_capture_surface,
+            )
+
+            report = analyze_prefill_capture_surface(
+                state,
+                input_ids=input_ids,
+                hidden=loop_h,
+                position_ids=positions,
+                req_id_per_token=state.request.req_id_per_token,
+                cu_seqlens=cu_seqlens,
+                input_lengths=state.request.input_lengths,
+                prefix_lengths=state.request.prefix_lengths,
+                block_tables_by_type=block_tables_by_type,
+                meta_by_ratio=meta_by_ratio,
+            )
+            setattr(v4, "_last_prefill_graph_replay_capture_surface", report)
+            if not report.static_bound:
+                _skip(
+                    "not_static_bound:"
+                    f"live_not_static={report.live_not_static[:4]}:"
+                    f"missing={report.missing_static[:4]}:"
+                    f"skipped={report.skipped_critical[:4]}"
+                )
+                return None
+
+            graph = getattr(state, "cuda_graph", None)
+            if graph is not None:
+                entered_graph = True
+                graph.replay()
+                state.graph_replay_count += 1
+                ran_graph = True
+                if graph_owned_kv and kv_cache is not None:
+                    try:
+                        copied = state.copy_graph_kv_to_live(
+                            kv_cache, block_tables_by_type
+                        )
+                        setattr(v4, "_last_prefill_graph_kv_copy_count", copied)
+                    except Exception as copy_exc:
+                        state.reset_cuda_graph(f"graph_kv_copy_failed:{copy_exc}")
+                        _skip(f"graph_kv_copy_failed:{copy_exc}")
+                        raise RuntimeError(f"graph_kv_copy_failed:{copy_exc}") from copy_exc
+                setattr(v4, "_last_prefill_graph_replay_error", None)
+                if _env_flag("DSV4_PREFILL_GRAPH_LOG_DECISION", "0"):
+                    _log_prefill_graph_line(
+                        "[DSV4PrefillGraph] stage=graph_replay "
+                        f"enabled=True mode=replay count={state.graph_replay_count}"
+                    )
+                _record_graph_output_stats("replay")
+                return state.output_hidden
+
+            torch.cuda.synchronize()
+            graph = torch.cuda.CUDAGraph()
+            entered_graph = True
+            with torch.cuda.graph(graph):
+                graph_out = _run_layer_loop(
+                    state.hidden,
+                    loop_input_ids=input_ids,
+                    loop_positions=positions,
+                    loop_cu_seqlens=cu_seqlens,
+                    loop_kv_cache=graph_kv_cache,
+                    loop_block_tables_by_type=graph_block_tables_by_type,
+                )
+                state.output_hidden.copy_(graph_out)
+            torch.cuda.synchronize()
+            state.mark_cuda_graph_captured(graph)
+            ran_graph = True
+            if graph_owned_kv and kv_cache is not None:
+                try:
+                    copied = state.copy_graph_kv_to_live(kv_cache, block_tables_by_type)
+                    setattr(v4, "_last_prefill_graph_kv_copy_count", copied)
+                except Exception as copy_exc:
+                    state.reset_cuda_graph(f"graph_kv_copy_failed:{copy_exc}")
+                    _skip(f"graph_kv_copy_failed:{copy_exc}")
+                    raise RuntimeError(f"graph_kv_copy_failed:{copy_exc}") from copy_exc
+            setattr(v4, "_last_prefill_graph_replay_error", None)
+            if _env_flag("DSV4_PREFILL_GRAPH_LOG_DECISION", "0"):
+                _log_prefill_graph_line(
+                    "[DSV4PrefillGraph] stage=graph_replay "
+                    "enabled=True mode=capture count="
+                    f"{state.graph_capture_count}"
+                )
+            _record_graph_output_stats("capture")
+            return state.output_hidden
+        except Exception as exc:
+            state.reset_cuda_graph(str(exc))
+            setattr(v4, "_last_prefill_graph_replay_error", str(exc))
+            if _env_flag("DSV4_PREFILL_GRAPH_LOG_DECISION", "0"):
+                _log_prefill_graph_line(
+                    "[DSV4PrefillGraph] stage=graph_replay "
+                    f"enabled=False reason={exc}"
+                )
+            if entered_graph:
+                raise
+            return None
+        finally:
+            if ran_graph:
+                _clear_static_prefill_meta_refs()
+
+    def _run_static_prefill_copy_shadow_graph(loop_h: torch.Tensor) -> None:
+        _clear_prefill_graph_copy_shadow_result(v4)
+        if not _prefill_graph_copy_shadow_allowed(
+            v4,
+            graph_decision,
+            static_args_bound_this_forward=static_args_bound_this_forward,
+            static_state_updated_this_forward=static_state_updated_this_forward,
+            use_graph_fast_loop=use_graph_fast_loop,
+            write_cache_store_impl=write_cache_store_impl,
+            rt_on=_rt_on,
+        ):
+            return
+        state = getattr(v4, "_last_prefill_graph_state", None)
+        if state is None or loop_h is not state.hidden:
+            return
+        if loop_h.device.type != "cuda" or not torch.cuda.is_available():
+            return
+        if torch.cuda.is_current_stream_capturing():
+            return
+        try:
+            signature = (
+                tuple(int(dim) for dim in state.hidden.shape),
+                str(state.hidden.dtype),
+                str(state.hidden.device),
+                int(state.hidden.data_ptr()),
+                int(state.output_hidden.data_ptr()),
+            )
+            graph = getattr(state, "_copy_shadow_graph", None)
+            graph_signature = getattr(state, "_copy_shadow_graph_signature", None)
+            mode = "replay"
+            if graph is None or graph_signature != signature:
+                torch.cuda.synchronize(state.hidden.device)
+                graph = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(graph):
+                    state.output_hidden.copy_(state.hidden)
+                torch.cuda.synchronize(state.hidden.device)
+                setattr(state, "_copy_shadow_graph", graph)
+                setattr(state, "_copy_shadow_graph_signature", signature)
+                setattr(state, "_copy_shadow_graph_capture_count", 1)
+                setattr(state, "_copy_shadow_graph_replay_count", 0)
+                graph.replay()
+                setattr(state, "_copy_shadow_graph_replay_count", 1)
+                mode = "capture_replay"
+            else:
+                graph.replay()
+                replay_count = int(
+                    getattr(state, "_copy_shadow_graph_replay_count", 0)
+                )
+                setattr(state, "_copy_shadow_graph_replay_count", replay_count + 1)
+            torch.cuda.synchronize(state.hidden.device)
+            exact = bool(torch.equal(state.output_hidden, state.hidden))
+            diff = (
+                state.output_hidden.detach().float() - state.hidden.detach().float()
+            ).abs()
+            max_abs = float(diff.max().item()) if diff.numel() else 0.0
+            mean_abs = float(diff.mean().item()) if diff.numel() else 0.0
+            if _env_flag("DSV4_PREFILL_GRAPH_LOG_DECISION", "0"):
+                _log_prefill_graph_line(
+                    "[DSV4PrefillGraph] stage=copy_shadow "
+                    f"enabled=True mode={mode} exact={exact} "
+                    f"max_abs={max_abs:.9g} mean_abs={mean_abs:.9g} "
+                    "capture_count="
+                    f"{getattr(state, '_copy_shadow_graph_capture_count', 0)} "
+                    "replay_count="
+                    f"{getattr(state, '_copy_shadow_graph_replay_count', 0)}"
+                )
+            _set_prefill_graph_copy_shadow_stats(
+                v4,
+                mode=mode,
+                exact=exact,
+                max_abs=max_abs,
+                mean_abs=mean_abs,
+            )
+        except Exception as exc:
+            _set_prefill_graph_copy_shadow_error(v4, str(exc))
+            if _env_flag("DSV4_PREFILL_GRAPH_LOG_DECISION", "0"):
+                _log_prefill_graph_line(
+                    "[DSV4PrefillGraph] stage=copy_shadow "
+                    f"enabled=False reason={exc}"
+                )
+
+    if _env_flag("DSV4_PREFILL_GRAPH_LOG_DECISION", "0"):
+        _log_prefill_graph_line(
+            "[DSV4PrefillGraph] stage=before_graph_try "
+            f"replay_env={_env_flag('DSV4_PREFILL_GRAPH_REPLAY', '0')} "
+            f"graph_decision={getattr(graph_decision, 'enabled', None)} "
+            f"state_valid={getattr(getattr(v4, '_last_prefill_graph_state', None), 'valid', None)} "
+            f"graph_fast_loop={use_graph_fast_loop}"
+        )
+    _clear_prefill_graph_attn_body_shadow_result_if_enabled(v4)
+    _run_static_prefill_copy_shadow_graph(h)
+    graph_h = _try_run_static_prefill_layer_loop_graph(h)
+    static_eager_diag = _prefill_graph_static_eager_run_allowed(
+        v4,
+        graph_decision,
+        kv_cache=kv_cache,
+        static_state_updated_this_forward=static_state_updated_this_forward,
+        graph_static_bind_allowed=graph_static_bind_allowed,
+        graph_replay_requested=graph_replay_requested,
+        use_graph_fast_loop=use_graph_fast_loop,
+        write_cache_store_impl=write_cache_store_impl,
+        rt_on=_rt_on,
+    )
+    if graph_h is not None:
+        h = graph_h
+    else:
+        if static_eager_diag:
+            if _env_flag("DSV4_PREFILL_GRAPH_LOG_DECISION", "0"):
+                _log_prefill_graph_line(
+                    "[DSV4PrefillGraph] stage=static_eager "
+                    "enabled=True reason=diagnostic_static_buffers"
+                )
+        elif (
+            graph_replay_requested
+            or _env_flag("DSV4_PREFILL_GRAPH_UPDATE_STATIC", "0")
+            or static_args_bound_this_forward
+        ):
+            input_ids = live_input_ids
+            h = live_h
+            positions = live_positions
+            cu_seqlens = live_cu_seqlens
+            block_tables_by_type = live_block_tables_by_type
+            meta_by_ratio = live_meta_by_ratio
+            if _env_flag("DSV4_PREFILL_GRAPH_STATIC_EAGER_RUN", "0") and _env_flag(
+                "DSV4_PREFILL_GRAPH_LOG_DECISION", "0"
+            ):
+                _log_prefill_graph_line(
+                    "[DSV4PrefillGraph] stage=static_eager "
+                    "enabled=False reason=gate_failed"
+                )
+        with record_range_ctx():
+            try:
+                _bind_prefill_meta_refs(meta_by_ratio)
+                h = _run_layer_loop(
+                    h,
+                    loop_input_ids=input_ids,
+                    loop_positions=positions,
+                    loop_cu_seqlens=cu_seqlens,
+                    loop_kv_cache=kv_cache,
+                    loop_block_tables_by_type=block_tables_by_type,
+                )
+            finally:
+                _clear_static_prefill_meta_refs()
 
     if v4._mtp_hidden_buffer is not None:
         _pre_hc_flat = h.flatten(-2)
@@ -478,12 +2044,18 @@ def forward_layers(
 
     # _hc_head_reduce is flat-native: [T, hc, dim] -> [T, dim].
     # Framework ``RMSNorm`` expects 2D, which matches the [T, dim] shape here.
-    h = v4._hc_head_reduce(h)  # [T, dim]
-    if _rt_on:
-        _rt.record("prefill_hc_reduced", h)
-    h = v4.norm(h)  # [T, dim]
+    with record_range_ctx():
+        if use_graph_fast_loop and hasattr(v4.head_hc, "_head_impl"):
+            h = v4.head_hc._head_impl(h)  # [T, dim]
+        else:
+            h = v4._hc_head_reduce(h)  # [T, dim]
+        if _rt_on:
+            _rt.record("prefill_hc_reduced", h)
+        h = v4.norm(h)  # [T, dim]
     if _rt_on:
         _rt.record("prefill_final_norm", h)
+
+    if _rt_on:
         if cp_ctx is None:
             last_h = h[-1:].contiguous()
         else:
