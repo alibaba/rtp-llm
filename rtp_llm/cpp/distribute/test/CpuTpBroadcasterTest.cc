@@ -341,5 +341,39 @@ TEST(CpuTpBroadcasterTest, ResetAllowsNewBasePath) {
     cleanupTempBase(base2);
 }
 
+TEST(CpuTpBroadcasterTest, RejectsCrossThreadBroadcastAndReset) {
+    auto& bcast = CpuTpBroadcaster::instance();
+    bcast.reset();
+
+    const std::string base = makeTempBase();
+    bcast.initialize(0, 1, base);
+
+    std::string broadcast_error;
+    std::thread broadcast_thread([&] {
+        try {
+            int value = 7;
+            bcast.broadcast(&value, sizeof(value), 0);
+        } catch (const std::exception& e) {
+            broadcast_error = e.what();
+        }
+    });
+    broadcast_thread.join();
+    EXPECT_NE(broadcast_error.find("initializing thread"), std::string::npos);
+
+    std::string reset_error;
+    std::thread reset_thread([&] {
+        try {
+            bcast.reset();
+        } catch (const std::exception& e) {
+            reset_error = e.what();
+        }
+    });
+    reset_thread.join();
+    EXPECT_NE(reset_error.find("initializing thread"), std::string::npos);
+
+    bcast.reset();
+    cleanupTempBase(base);
+}
+
 }  // namespace
 }  // namespace rtp_llm

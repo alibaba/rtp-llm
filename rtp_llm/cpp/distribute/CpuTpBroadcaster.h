@@ -4,13 +4,16 @@
 #include <cstddef>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace rtp_llm {
 
 // CPU-only UDS broadcaster for intra-node TP metadata sync.
 // Callers must handle unsupported topologies before using this interface.
-// broadcast() is main-thread only.
+// The CPU broadcaster is intentionally single-threaded: initialize(), broadcast(),
+// and reset() must all run on the initializing thread. broadcastCPU does not
+// support concurrent, re-entrant, or cross-thread calls.
 class CpuTpBroadcaster {
 public:
     static CpuTpBroadcaster& instance();
@@ -39,10 +42,14 @@ private:
     CpuTpBroadcaster(const CpuTpBroadcaster&)            = delete;
     CpuTpBroadcaster& operator=(const CpuTpBroadcaster&) = delete;
 
+    void cleanupStateLocked();
+
     std::mutex        mu_;
     std::atomic<bool> initialized_{false};
-    int               tp_rank_ = 0;
-    int               tp_size_ = 1;
+    std::thread::id   owner_thread_id_;
+    bool              broadcast_in_progress_ = false;
+    int               tp_rank_               = 0;
+    int               tp_size_               = 1;
     std::string       base_path_;
     int               listen_fd_ = -1;  // rank 0 only
     // peer_fds_[k] = fd connecting this rank to rank k. peer_fds_[tp_rank_] = -1.

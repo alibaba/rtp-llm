@@ -216,11 +216,11 @@ CpuTpBroadcaster& CpuTpBroadcaster::instance() {
 }
 
 CpuTpBroadcaster::~CpuTpBroadcaster() {
-    reset();
+    std::lock_guard<std::mutex> lock(mu_);
+    cleanupStateLocked();
 }
 
-void CpuTpBroadcaster::reset() {
-    std::lock_guard<std::mutex> lock(mu_);
+void CpuTpBroadcaster::cleanupStateLocked() {
     for (int& fd : peer_fds_) {
         closeFd(fd);
     }
@@ -231,15 +231,34 @@ void CpuTpBroadcaster::reset() {
         my_uds_path_.clear();
     }
     base_path_.clear();
-    tp_rank_ = 0;
-    tp_size_ = 1;
+    tp_rank_               = 0;
+    tp_size_               = 1;
+    owner_thread_id_       = std::thread::id();
+    broadcast_in_progress_ = false;
     initialized_.store(false, std::memory_order_release);
+}
+
+void CpuTpBroadcaster::reset() {
+    std::lock_guard<std::mutex> lock(mu_);
+    if (initialized_.load(std::memory_order_acquire)) {
+        RTP_LLM_CHECK_WITH_INFO(owner_thread_id_ == std::this_thread::get_id(),
+                                "CpuTpBroadcaster::reset must run on the initializing thread; "
+                                "cross-thread reset/broadcastCPU is unsupported");
+        RTP_LLM_CHECK_WITH_INFO(!broadcast_in_progress_,
+                                "CpuTpBroadcaster::reset called while broadcastCPU is in progress; "
+                                "concurrent broadcastCPU/reset is unsupported");
+    }
+    cleanupStateLocked();
 }
 
 void CpuTpBroadcaster::initialize(int tp_rank, int tp_size, const std::string& base_path) {
     std::lock_guard<std::mutex> lock(mu_);
+    const auto                  current_thread_id = std::this_thread::get_id();
 
     if (initialized_.load(std::memory_order_acquire)) {
+        RTP_LLM_CHECK_WITH_INFO(owner_thread_id_ == current_thread_id,
+                                "CpuTpBroadcaster::initialize must run on the initializing thread; "
+                                "cross-thread broadcastCPU lifecycle is unsupported");
         if (tp_rank_ == tp_rank && tp_size_ == tp_size && base_path_ == base_path) {
             return;
         }
@@ -253,10 +272,13 @@ void CpuTpBroadcaster::initialize(int tp_rank, int tp_size, const std::string& b
                      base_path.c_str());
     }
 
+    owner_thread_id_       = current_thread_id;
+    broadcast_in_progress_ = false;
     if (tp_size <= 1) {
         // Single-rank no-op; broadcast() short-circuits.
-        tp_rank_ = tp_rank;
-        tp_size_ = tp_size;
+        tp_rank_   = tp_rank;
+        tp_size_   = tp_size;
+        base_path_ = base_path;
         initialized_.store(true, std::memory_order_release);
         return;
     }
@@ -400,29 +422,61 @@ void CpuTpBroadcaster::initialize(int tp_rank, int tp_size, const std::string& b
 }
 
 void CpuTpBroadcaster::broadcast(void* buf, std::size_t nbytes, int root) {
-    RTP_LLM_CHECK_WITH_INFO(initialized_.load(std::memory_order_acquire),
-                            "CpuTpBroadcaster::broadcast called before initialize");
-    if (tp_size_ <= 1 || nbytes == 0) {
-        return;
-    }
-    RTP_LLM_CHECK_WITH_INFO(root == 0, "CpuTpBroadcaster supports only root=0 (star topology); got %d", root);
+    int              tp_rank = 0;
+    int              tp_size = 1;
+    std::vector<int> peer_fds;
 
-    if (tp_rank_ == 0) {
-        for (int k = 1; k < tp_size_; ++k) {
-            ssize_t n = writeAll(peer_fds_[k], buf, nbytes);
+    {
+        std::lock_guard<std::mutex> lock(mu_);
+        RTP_LLM_CHECK_WITH_INFO(initialized_.load(std::memory_order_acquire),
+                                "CpuTpBroadcaster::broadcast called before initialize");
+        RTP_LLM_CHECK_WITH_INFO(owner_thread_id_ == std::this_thread::get_id(),
+                                "CpuTpBroadcaster::broadcast must run on the initializing thread; "
+                                "cross-thread or concurrent broadcastCPU is unsupported");
+        if (tp_size_ <= 1 || nbytes == 0) {
+            return;
+        }
+        RTP_LLM_CHECK_WITH_INFO(root == 0, "CpuTpBroadcaster supports only root=0 (star topology); got %d", root);
+        RTP_LLM_CHECK_WITH_INFO(!broadcast_in_progress_,
+                                "CpuTpBroadcaster::broadcast does not support concurrent or re-entrant "
+                                "broadcastCPU calls");
+        RTP_LLM_CHECK_WITH_INFO(static_cast<int>(peer_fds_.size()) == tp_size_,
+                                "CpuTpBroadcaster invalid peer fd state: size=%zu tp_size=%d",
+                                peer_fds_.size(),
+                                tp_size_);
+        broadcast_in_progress_ = true;
+        tp_rank                = tp_rank_;
+        tp_size                = tp_size_;
+        peer_fds               = peer_fds_;
+    }
+
+    auto finish_broadcast = [this]() {
+        std::lock_guard<std::mutex> lock(mu_);
+        broadcast_in_progress_ = false;
+    };
+
+    try {
+        if (tp_rank == 0) {
+            for (int k = 1; k < tp_size; ++k) {
+                ssize_t n = writeAll(peer_fds[k], buf, nbytes);
+                RTP_LLM_CHECK_WITH_INFO(n == static_cast<ssize_t>(nbytes),
+                                        "CpuTpBroadcaster write to rank %d (%zu bytes) failed: %s",
+                                        k,
+                                        nbytes,
+                                        std::strerror(errno));
+            }
+        } else {
+            ssize_t n = readAll(peer_fds[0], buf, nbytes);
             RTP_LLM_CHECK_WITH_INFO(n == static_cast<ssize_t>(nbytes),
-                                    "CpuTpBroadcaster write to rank %d (%zu bytes) failed: %s",
-                                    k,
+                                    "CpuTpBroadcaster read from rank 0 (%zu bytes) failed: %s",
                                     nbytes,
                                     std::strerror(errno));
         }
-    } else {
-        ssize_t n = readAll(peer_fds_[0], buf, nbytes);
-        RTP_LLM_CHECK_WITH_INFO(n == static_cast<ssize_t>(nbytes),
-                                "CpuTpBroadcaster read from rank 0 (%zu bytes) failed: %s",
-                                nbytes,
-                                std::strerror(errno));
+    } catch (...) {
+        finish_broadcast();
+        throw;
     }
+    finish_broadcast();
 }
 
 }  // namespace rtp_llm
