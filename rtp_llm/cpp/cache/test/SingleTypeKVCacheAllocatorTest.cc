@@ -996,6 +996,37 @@ TEST_F(SingleTypeKVCacheAllocatorTest, MixedOperations) {
     EXPECT_GT(allocator_->freeBlocksNum(), 0);
 }
 
+
+TEST_F(SingleTypeKVCacheAllocatorTest, EstimatePeakNeedBlocks) {
+    // seq_size_per_block=4, block_num=10
+    auto config = createSingleTypeTestConfig(/*layer_num=*/1, /*block_num=*/10, /*seq_size_per_block=*/4);
+    allocator_  = std::make_shared<SingleTypeKVCacheAllocator>(config);
+    ASSERT_TRUE(allocator_->init());
+
+    // New resource (no blocks allocated): ceil((8+100)/4) - 0 = 27
+    auto new_res = createBatchKVCacheResource(1, config.layer_num);
+    EXPECT_EQ(allocator_->estimatePeakNeedBlocks(new_res, 8, 100, 0), 27);
+
+    // With reserve_step=3: ceil((8+100+3)/4) - 0 = 28
+    EXPECT_EQ(allocator_->estimatePeakNeedBlocks(new_res, 8, 100, 3), 28);
+
+    // Allocate blocks for seq_len=8 (2 blocks)
+    auto token_ids = createCompleteTokenIds(1, /*seq_length=*/8, /*seq_size_per_block=*/4);
+    MallocInfo mi{new_res, token_ids};
+    auto result = allocator_->malloc(mi);
+    ASSERT_TRUE(result.success);
+    ASSERT_EQ(new_res->blocksNum(0, 0), 2);
+
+    // After malloc: ceil((8+0)/4) - 2 = 0
+    EXPECT_EQ(allocator_->estimatePeakNeedBlocks(new_res, 8, 0, 0), 0);
+
+    // remaining=4: ceil((8+4)/4) - 2 = 1
+    EXPECT_EQ(allocator_->estimatePeakNeedBlocks(new_res, 8, 4, 0), 1);
+
+    // remaining=4, reserve=4: ceil((8+4+4)/4) - 2 = 2
+    EXPECT_EQ(allocator_->estimatePeakNeedBlocks(new_res, 8, 4, 4), 2);
+}
+
 }  // namespace test
 }  // namespace rtp_llm
 

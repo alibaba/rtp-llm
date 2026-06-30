@@ -22,6 +22,24 @@ int LinearKVCacheGroup::needBlocksNum(int seq_len, int current_blocks, int reser
     return std::max((seq_len + seq_size_per_block_ - 1) / seq_size_per_block_ + extra_blocks - current_blocks, 0);
 }
 
+int LinearKVCacheGroup::estimatePeakNeedBlocks(
+    int seq_len, int current_blocks, int remaining_tokens, int reserve_step, bool enable_reuse_cache) const {
+    const int extra_blocks = reserve_step ? reserve_step - 1 : 0;
+    const int total_slots  = (seq_len + remaining_tokens + seq_size_per_block_ - 1) / seq_size_per_block_ + extra_blocks;
+
+    auto retained_blocks = [&](int slots) {
+        const int tail_keep_begin = std::max(0, slots - (2 + reserve_step));
+        const int tail_blocks     = slots - tail_keep_begin;
+        if (!enable_reuse_cache) {
+            return tail_blocks;
+        }
+        const int step_blocks_before_tail = tail_keep_begin / std::max(1, linear_step_);
+        return tail_blocks + step_blocks_before_tail;
+    };
+
+    return std::max(retained_blocks(total_slots) - retained_blocks(current_blocks), 0);
+}
+
 NeedBlocksInfo LinearKVCacheGroup::getNeedBlocks(
     int common_seq_len, int seq_len, int reserve_step, int reuse_blocks_len, bool reuse_enabled) const {
     const int reuse_begin = reuse_blocks_len;
