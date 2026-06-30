@@ -11,6 +11,11 @@ enum class KvCacheDataType : int8_t {
     FP8  = 2
 };
 
+enum class MlaFp8KvCacheLayout : int8_t {
+    NATIVE = 0,
+    ATOM   = 1
+};
+
 KvCacheDataType inline loadKvCacheDataTypeFromString(const std::string& str) {
     if (str == "base" || str == "fp16") {
         return KvCacheDataType::BASE;
@@ -52,13 +57,7 @@ struct AttentionConfigs {
     float           softmax_extra_scale = 1.0f;
     KvCacheDataType kv_cache_dtype      = KvCacheDataType::BASE;
     bool            need_rope_kv_cache  = true;
-
-    // When true, allocate the FP8 MLA KV cache using the aiter layout
-    // (576 bytes/token: 512 fp8 nope + 64 fp8 rope, single per-tensor scale passed
-    // separately) instead of the rtp-llm native layout (656 bytes/token with
-    // interleaved per-128-group fp32 scales and bf16 rope). Only affects the fp8
-    // branch; bf16 MLA is unchanged.
-    bool            mla_use_aiter_fp8_layout = false;
+    MlaFp8KvCacheLayout mla_fp8_kv_cache_layout = MlaFp8KvCacheLayout::NATIVE;
 
     // sparse attention config
     bool is_sparse        = false;

@@ -7,23 +7,23 @@ namespace test {
 
 namespace {
 
-MLAKVCacheSpec makeMLASpec(DataType dtype, bool use_aiter_fp8_layout) {
+MLAKVCacheSpec makeMLASpec(DataType dtype, MlaFp8KvCacheLayout fp8_kv_cache_layout) {
     MLAKVCacheSpec spec;
-    spec.type                 = KVCacheSpecType::MultiHeadLatentAttention;
-    spec.dtype                = dtype;
-    spec.layer_num            = 1;
-    spec.local_head_num_kv    = 1;
-    spec.seq_size_per_block   = 16;
-    spec.kv_lora_rank         = 512;
-    spec.rope_head_dim        = 64;
-    spec.use_aiter_fp8_layout = use_aiter_fp8_layout;
+    spec.type                = KVCacheSpecType::MultiHeadLatentAttention;
+    spec.dtype               = dtype;
+    spec.layer_num           = 1;
+    spec.local_head_num_kv   = 1;
+    spec.seq_size_per_block  = 16;
+    spec.kv_lora_rank        = 512;
+    spec.rope_head_dim       = 64;
+    spec.fp8_kv_cache_layout = fp8_kv_cache_layout;
     return spec;
 }
 
 }  // namespace
 
 TEST(MLAKVCacheSpecTest, ComputesBF16BlockSize) {
-    auto spec = makeMLASpec(DataType::TYPE_BF16, /*use_aiter_fp8_layout=*/false);
+    auto spec = makeMLASpec(DataType::TYPE_BF16, MlaFp8KvCacheLayout::NATIVE);
 
     const size_t expected_block_size = (512 + 64) * 16;
     EXPECT_EQ(spec.block_size(), expected_block_size);
@@ -31,7 +31,7 @@ TEST(MLAKVCacheSpecTest, ComputesBF16BlockSize) {
 }
 
 TEST(MLAKVCacheSpecTest, ComputesNativeFP8BlockSize) {
-    auto spec = makeMLASpec(DataType::TYPE_FP8_E4M3, /*use_aiter_fp8_layout=*/false);
+    auto spec = makeMLASpec(DataType::TYPE_FP8_E4M3, MlaFp8KvCacheLayout::NATIVE);
 
     // Native RTP FP8 MLA layout stores 512 fp8 NoPE bytes, 4 fp32 scales,
     // and 64 bf16 RoPE values per token.
@@ -40,10 +40,10 @@ TEST(MLAKVCacheSpecTest, ComputesNativeFP8BlockSize) {
     EXPECT_EQ(spec.block_size_bytes(), expected_block_size);
 }
 
-TEST(MLAKVCacheSpecTest, ComputesAiterFP8BlockSize) {
-    auto spec = makeMLASpec(DataType::TYPE_FP8_E4M3, /*use_aiter_fp8_layout=*/true);
+TEST(MLAKVCacheSpecTest, ComputesAtomFP8BlockSize) {
+    auto spec = makeMLASpec(DataType::TYPE_FP8_E4M3, MlaFp8KvCacheLayout::ATOM);
 
-    // AITER FP8 MLA layout keeps only the packed 512 fp8 NoPE + 64 fp8 RoPE
+    // ATOM FP8 MLA layout keeps only the packed 512 fp8 NoPE + 64 fp8 RoPE
     // bytes in KV cache; scales are passed separately.
     const size_t expected_block_size = (512 + 64) * 16;
     EXPECT_EQ(spec.block_size(), expected_block_size);
