@@ -244,8 +244,8 @@ class IndexerTest(TestCase):
                 dtype=torch.int32,
                 device=device,
             )
-            attn_inputs.cu_seqlens = cu_seqlens
-            attn_inputs.cu_kv_seqlens = cu_seqlens
+            attn_inputs.cu_seqlens_device = cu_seqlens
+            attn_inputs.cu_kv_seqlens_device = cu_seqlens
 
             # Create kv_cache_block_id
             page_size = 64
@@ -261,9 +261,9 @@ class IndexerTest(TestCase):
                     (i + 1) * num_pages,
                     dtype=torch.int32,
                 )
-            attn_inputs.kv_cache_block_id_host = kv_cache_block_id
+            attn_inputs.kv_cache_block_id = kv_cache_block_id
             attn_inputs.kv_cache_block_id_device = kv_cache_block_id.to(device)
-            attn_inputs.kv_cache_kernel_block_id_host = kv_cache_block_id
+            attn_inputs.kv_cache_kernel_block_id = kv_cache_block_id
             attn_inputs.kv_cache_kernel_block_id_device = kv_cache_block_id.to(device)
         else:
             # Decode mode
@@ -282,8 +282,8 @@ class IndexerTest(TestCase):
                 dtype=torch.int32,
                 device=device,
             )
-            attn_inputs.cu_seqlens = cu_seqlens
-            attn_inputs.decode_cu_seqlens_d = cu_seqlens
+            attn_inputs.cu_seqlens_device = cu_seqlens
+            attn_inputs.decode_cu_seqlens_device = cu_seqlens
 
             # Create kv_cache_block_id for decode
             page_size = 64
@@ -299,9 +299,9 @@ class IndexerTest(TestCase):
                     (i + 1) * num_pages,
                     dtype=torch.int32,
                 )
-            attn_inputs.kv_cache_block_id_host = kv_cache_block_id
+            attn_inputs.kv_cache_block_id = kv_cache_block_id
             attn_inputs.kv_cache_block_id_device = kv_cache_block_id.to(device)
-            attn_inputs.kv_cache_kernel_block_id_host = kv_cache_block_id
+            attn_inputs.kv_cache_kernel_block_id = kv_cache_block_id
             attn_inputs.kv_cache_kernel_block_id_device = kv_cache_block_id.to(device)
 
         attn_inputs.prefix_lengths = torch.zeros(

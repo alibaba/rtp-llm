@@ -33,10 +33,6 @@ def get_mla_impl(
         # Check support before creating instance
         if not impl.support(attn_configs, attn_inputs):
             continue
-        # Check parallelism config support (e.g. CP filtering)
-        if not impl.support_parallelism_config(parallelism_config):
-            continue
-
         cos_sin_cache = weight.get_global_weight_or_none(W.rope_cos_sin_cache)
         # Short-circuit before touching cu_kv_seqlens when CP is enabled to avoid
         # an unnecessary GPU->CPU sync on the hot prefill routing path.
@@ -47,8 +43,16 @@ def get_mla_impl(
         use_fast_path = (
             attn_inputs.is_prefill
             and not cp_enabled
-            and attn_inputs.cu_kv_seqlens.max().item() <= attn_configs.indexer_topk
+            and attn_inputs.cu_kv_seqlens_device.max().item() <= attn_configs.indexer_topk
         )
+
+        # Check parallelism config support (e.g. CP filtering). The fast path is
+        # never taken when CP is enabled, so it bypasses this check (matches
+        # upstream's "support fast path for cp prefill").
+        if not use_fast_path and not impl.support_parallelism_config(
+            parallelism_config
+        ):
+            continue
         # Skip sparse MLA if fast path is enabled
         if use_fast_path and impl.is_sparse():
             logging.debug(

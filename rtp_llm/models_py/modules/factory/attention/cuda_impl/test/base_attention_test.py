@@ -170,13 +170,13 @@ class BaseAttentionTest(unittest.TestCase):
         kv_cache_block_id = self._create_kv_cache_block_ids(
             batch_size, sequence_lengths, seq_size_per_block
         )
-        attn_inputs.kv_cache_block_id_host = kv_cache_block_id
+        attn_inputs.kv_cache_block_id = kv_cache_block_id
         attn_inputs.kv_cache_block_id_device = kv_cache_block_id.to(self.device)
-        attn_inputs.kv_cache_kernel_block_id_host = kv_cache_block_id
+        attn_inputs.kv_cache_kernel_block_id = kv_cache_block_id
         attn_inputs.kv_cache_kernel_block_id_device = kv_cache_block_id.to(self.device)
 
         # Create cu_seqlens for decode (just counting tokens)
-        attn_inputs.cu_seqlens = torch.arange(
+        attn_inputs.cu_seqlens_device = torch.arange(
             0, batch_size + 1, dtype=torch.int32, device=self.device
         )
 
@@ -227,16 +227,16 @@ class BaseAttentionTest(unittest.TestCase):
         kv_cache_block_id = self._create_kv_cache_block_ids(
             batch_size, sequence_lengths, seq_size_per_block
         )
-        attn_inputs.kv_cache_block_id_host = kv_cache_block_id
+        attn_inputs.kv_cache_block_id = kv_cache_block_id
         attn_inputs.kv_cache_block_id_device = kv_cache_block_id.to(self.device)
-        attn_inputs.kv_cache_kernel_block_id_host = kv_cache_block_id
+        attn_inputs.kv_cache_kernel_block_id = kv_cache_block_id
         attn_inputs.kv_cache_kernel_block_id_device = kv_cache_block_id.to(self.device)
 
         # Create cu_seqlens (cumulative sequence lengths) for ragged tensor
         cu_seqlens = [0]
         for seq_len in sequence_lengths:
             cu_seqlens.append(cu_seqlens[-1] + seq_len)
-        attn_inputs.cu_seqlens = torch.tensor(
+        attn_inputs.cu_seqlens_device = torch.tensor(
             cu_seqlens, dtype=torch.int32, device=self.device
         )
 
@@ -321,6 +321,6 @@ class BaseAttentionTest(unittest.TestCase):
         block_id_list = []
         for i, seq_len in enumerate(sequence_lengths):
             num_blocks = math.ceil(seq_len / seq_size_per_block)
-            block_ids = attn_inputs.kv_cache_block_id_host[i, :num_blocks].tolist()
+            block_ids = attn_inputs.kv_cache_block_id[i, :num_blocks].tolist()
             block_id_list.append(block_ids)
         return block_id_list

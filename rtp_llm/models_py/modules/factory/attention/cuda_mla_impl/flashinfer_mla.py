@@ -73,8 +73,8 @@ def check_attention_inputs(attention_inputs: PyAttentionInputs) -> None:
     default_tensors = {
         "prefix_lengths": torch.empty(0, dtype=dtype, device=device),
         "sequence_lengths": torch.empty(0, dtype=dtype, device=device),
-        "kv_cache_block_id_host": torch.empty(0, dtype=dtype, device=device),
-        "kv_cache_kernel_block_id_host": torch.empty(0, dtype=dtype, device=device),
+        "kv_cache_block_id": torch.empty(0, dtype=dtype, device=device),
+        "kv_cache_kernel_block_id": torch.empty(0, dtype=dtype, device=device),
     }
 
     for attr_name, default_tensor in default_tensors.items():

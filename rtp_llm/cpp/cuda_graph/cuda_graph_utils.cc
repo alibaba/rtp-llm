@@ -100,13 +100,13 @@ void debugPrintPyModelInputs(const torch_ext::PyModelInputs& inputs) {
     printTensorInfo("prefix_lengths", inputs.attention_inputs.prefix_lengths);
     printTensorInfo("sequence_lengths", inputs.attention_inputs.sequence_lengths);
     printTensorInfo("input_lengths", inputs.attention_inputs.input_lengths);
-    printTensorInfo("kv_cache_block_id_host", inputs.attention_inputs.kv_cache_block_id_host, 40);
+    printTensorInfo("kv_cache_block_id", inputs.attention_inputs.kv_cache_block_id, 40);
     printTensorInfo("kv_cache_block_id_device", inputs.attention_inputs.kv_cache_block_id_device, 40);
-    printTensorInfo("cu_seqlens", inputs.attention_inputs.cu_seqlens);
-    printTensorInfo("cu_seqlens_host", inputs.attention_inputs.cu_seqlens_host);
-    printTensorInfo("cu_kv_seqlens", inputs.attention_inputs.cu_kv_seqlens);
-    printTensorInfo("sequence_lengths_plus_1_d", inputs.attention_inputs.sequence_lengths_plus_1_d);
-    printTensorInfo("decode_cu_seqlens_d", inputs.attention_inputs.decode_cu_seqlens_d);
+    printTensorInfo("cu_seqlens_device", inputs.attention_inputs.cu_seqlens_device);
+    printTensorInfo("cu_seqlens_host", inputs.attention_inputs.cu_seqlens);
+    printTensorInfo("cu_kv_seqlens_device", inputs.attention_inputs.cu_kv_seqlens_device);
+    printTensorInfo("sequence_lengths_plus_1_device", inputs.attention_inputs.sequence_lengths_plus_1_device);
+    printTensorInfo("decode_cu_seqlens_device", inputs.attention_inputs.decode_cu_seqlens_device);
     printTensorInfo("padding_offset", inputs.attention_inputs.padding_offset);
 
     std::cout << "  context_total_kv_length: " << inputs.attention_inputs.context_total_kv_length << std::endl;

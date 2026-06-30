@@ -55,8 +55,8 @@ def _add_device_tensors(inputs, device: torch.device):
     return _AttnInputsWrapper(
         inputs,
         {
-            "prefix_lengths_d": inputs.prefix_lengths.to(device),
-            "input_lengths_d": inputs.input_lengths.to(device),
+            "prefix_lengths_device": inputs.prefix_lengths.to(device),
+            "input_lengths_device": inputs.input_lengths.to(device),
         },
     )
 
@@ -254,7 +254,7 @@ class TestCPLinearAttnForward(unittest.TestCase):
 
         nocp_inputs = PyAttentionInputs()
         nocp_inputs.is_prefill = True
-        nocp_inputs.cu_seqlens = full_cu
+        nocp_inputs.cu_seqlens_device = full_cu
         nocp_inputs.input_lengths = torch.tensor(
             sequence_lengths, dtype=torch.int32, device="cpu"
         )
