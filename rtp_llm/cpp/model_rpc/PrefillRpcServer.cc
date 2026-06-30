@@ -403,6 +403,9 @@ grpc::Status PrefillRpcServer::GenerateStreamCall(grpc::ServerContext*          
                                                   grpc::ServerWriter<GenerateOutputsPB>* writer) {
     RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_LOG_DEBUG("request [%ld] start generate stream call", request->request_id());
+    if (auto admission = checkAdmission(); !admission.ok()) {
+        return admission;
+    }
     c10::InferenceMode inference_guard(true);
     auto pd_separation = request->generate_config().max_new_tokens() > 1 && request->generate_config().num_beams() <= 1
                          && request->generate_config().variable_num_beams().size() == 0

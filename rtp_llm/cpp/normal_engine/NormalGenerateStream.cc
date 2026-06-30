@@ -25,6 +25,11 @@ bool NormalGenerateStream::hasOutput() {
     return !generate_outputs_queue_.isEmpty();
 }
 
+void NormalGenerateStream::reportError(ErrorCode error_code, const std::string& error_msg) {
+    GenerateStream::reportError(error_code, error_msg);
+    generate_outputs_queue_.wakeup();
+}
+
 GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateInfo& update_info) {
     size_t          output_len = seqLength() - last_output_pos_;
     GenerateOutputs generate_results;

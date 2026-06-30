@@ -21,7 +21,7 @@ public:
                 const std::shared_ptr<autil::AtomicCounter>&    request_counter,
                 const std::shared_ptr<Tokenizer>&               tokenizer,
                 const std::shared_ptr<ChatRender>&              render,
-                const ModelConfig&                             model_config,
+                const ModelConfig&                              model_config,
                 const std::shared_ptr<ApiServerMetricReporter>& metric_reporter):
         engine_(engine),
         mm_processor_(mm_processor),
@@ -58,6 +58,7 @@ private:
                                    const std::string&                                      body,
                                    int64_t                                                 request_id,
                                    int64_t                                                 start_time_us);
+    bool rejectIfUnavailable(const std::unique_ptr<http_server::HttpResponseWriter>& writer) const;
     static std::string sseResponse(const std::string& response) {
         return "data: " + response + "\n\n";
     }

@@ -19,6 +19,10 @@ grpc::Status RemoteRpcServer::init(const EngineInitParams&                      
     return grpc::Status::OK;
 }
 
+size_t RemoteRpcServer::activeCacheTransferCount() {
+    return LocalRpcServer::activeCacheTransferCount() + loading_cache_requests_.load(std::memory_order_relaxed);
+}
+
 void RemoteRpcServer::initLocalHostInfo() {
     string local_id, local_ip, hostname;
     if (!autil::NetUtil::GetDefaultIp(local_ip) || local_ip.empty()) {
