@@ -1,8 +1,7 @@
 #pragma once
 
+#include "rtp_llm/cpp/utils/AssertUtils.h"
 #include <utility>
-
-#include "rtp_llm/cpp/utils/Logger.h"
 
 #if USING_CUDA
 #include <ATen/cuda/CUDAContext.h>
@@ -16,22 +15,63 @@ namespace rtp_llm {
 
 namespace detail {
 
-template<typename SetDevice>
-inline void setCurrentThreadDeviceIfNeededImpl(int device_id, int& current_device, SetDevice&& set_device) {
+template<typename SetDeviceContext, typename SetDefaultStream>
+inline void setCurrentThreadDeviceIfNeededImpl(int                device_id,
+                                               int&               current_device,
+                                               SetDeviceContext&& set_device_context,
+                                               SetDefaultStream&& set_default_stream) {
     if (device_id < 0) {
         return;
     }
 
-    if (current_device == device_id) {
-        return;
+    const bool device_changed = current_device != device_id;
+    if (device_changed) {
+        std::forward<SetDeviceContext>(set_device_context)(device_id);
     }
 
-    std::forward<SetDevice>(set_device)(device_id);
-    // Cache only successful backend calls so invalid devices still retry later.
+    std::forward<SetDefaultStream>(set_default_stream)(device_id);
+    // Cache only fully successful backend setup so failures still retry later.
     current_device = device_id;
 }
 
 }  // namespace detail
+
+inline void setCurrentThreadDeviceContext(int device_id) {
+    if (device_id < 0) {
+        return;
+    }
+
+#if USING_CUDA
+    auto err = cudaSetDevice(device_id);
+    RTP_LLM_CHECK_WITH_INFO(err == cudaSuccess, "cudaSetDevice(%d) failed: %s", device_id, cudaGetErrorString(err));
+    at::cuda::set_device(device_id);
+#elif USING_ROCM
+    auto err = hipSetDevice(device_id);
+    RTP_LLM_CHECK_WITH_INFO(err == hipSuccess, "hipSetDevice(%d) failed: %s", device_id, hipGetErrorString(err));
+    at::hip::set_device(device_id);
+#else
+    // CPU-only builds intentionally no-op; production cache-store builds pin to a GPU backend.
+#endif
+}
+
+inline void setCurrentThreadDefaultStream(int device_id) {
+    if (device_id < 0) {
+        return;
+    }
+
+#if USING_CUDA
+    at::cuda::setCurrentCUDAStream(at::cuda::getDefaultCUDAStream(device_id));
+#elif USING_ROCM
+    at::hip::setCurrentHIPStream(at::hip::getDefaultHIPStream(device_id));
+#else
+    // CPU-only builds intentionally no-op; production cache-store builds pin to a GPU backend.
+#endif
+}
+
+inline void setCurrentThreadDevice(int device_id) {
+    setCurrentThreadDeviceContext(device_id);
+    setCurrentThreadDefaultStream(device_id);
+}
 
 inline void setCurrentThreadDeviceIfNeeded(int device_id) {
     if (device_id < 0) {
@@ -43,14 +83,13 @@ inline void setCurrentThreadDeviceIfNeeded(int device_id) {
 
     // Thread-pool workers may serve different cache stores over time; a new
     // device_id intentionally retargets the current thread instead of no-oping.
-    // ROCm PyTorch exposes ordinary GPU tensors as CUDA; only pinning uses HIP APIs.
-#if USING_CUDA
+    // The default stream is restored on every call because same-device tasks
+    // may follow work that temporarily changed PyTorch's current stream.
     detail::setCurrentThreadDeviceIfNeededImpl(
-        device_id, current_device, [](int device) { at::cuda::set_device(device); });
-#elif USING_ROCM
-    detail::setCurrentThreadDeviceIfNeededImpl(
-        device_id, current_device, [](int device) { at::hip::set_device(device); });
-#endif
+        device_id,
+        current_device,
+        [](int device) { setCurrentThreadDeviceContext(device); },
+        [](int device) { setCurrentThreadDefaultStream(device); });
 #else
     // CPU-only builds intentionally no-op; production cache-store builds pin to a GPU backend.
 #endif

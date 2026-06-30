@@ -5,6 +5,7 @@
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
 #include "rtp_llm/cpp/utils/KVCacheUtils.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
+#include "rtp_llm/cpp/utils/DevicePin.h"
 #include "rtp_llm/cpp/utils/StackTrace.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/ErrorCodeUtil.h"
 #include "autil/StackTracer.h"
@@ -16,6 +17,7 @@
 #include <cstdio>
 #include <mutex>
 #include <atomic>
+#include <unordered_map>
 #if USING_CUDA
 #include <c10/cuda/CUDAGuard.h>
 #elif USING_ROCM
@@ -326,13 +328,7 @@ void cudaCheckLastError() {
 }
 
 void cudaPreRun(int device_id) {
-#if USING_CUDA
-    check_cuda_value(cudaSetDevice(device_id));
-    at::cuda::set_device(device_id);
-    at::cuda::setCurrentCUDAStream(at::cuda::getDefaultCUDAStream(device_id));
-#elif USING_ROCM
-    hipSetDevice(device_id);
-#endif
+    setCurrentThreadDevice(device_id);
 }
 
 // === Profiling ===
@@ -383,9 +379,23 @@ void setTraceMemory(bool trace_memory) {
 
 namespace {
 #if USING_CUDA
-at::cuda::CUDAStream& getNoBlockCopyStream() {
-    static thread_local auto stream = at::cuda::getStreamFromPool(/*isHighPriority=*/false);
-    return stream;
+int getCopyDevice(const torch::Tensor& dst, const torch::Tensor& src) {
+    if (dst.is_cuda()) {
+        return static_cast<int>(dst.get_device());
+    }
+    if (src.is_cuda()) {
+        return static_cast<int>(src.get_device());
+    }
+    return static_cast<int>(at::cuda::current_device());
+}
+
+at::cuda::CUDAStream getNoBlockCopyStream(int device_id) {
+    static thread_local std::unordered_map<int, at::cuda::CUDAStream> streams;
+    auto                                                              stream = streams.find(device_id);
+    if (stream == streams.end()) {
+        stream = streams.emplace(device_id, at::cuda::getStreamFromPool(/*isHighPriority=*/false, device_id)).first;
+    }
+    return stream->second;
 }
 #endif
 }  // anonymous namespace
@@ -395,7 +405,9 @@ void execNoBlockCopy(const CopyParams& params) {
     const auto& src = params.src;
     const auto& dst = params.dst;
 #if USING_CUDA
-    auto stream = getNoBlockCopyStream().stream();
+    const auto copy_device = getCopyDevice(dst, src);
+    check_cuda_value(cudaSetDevice(copy_device));
+    auto stream = getNoBlockCopyStream(copy_device).stream();
     check_cuda_value(cudaMemcpyAsync(dst.data_ptr(), src.data_ptr(), src.nbytes(), cudaMemcpyDefault, stream));
     check_cuda_value(cudaStreamSynchronize(stream));
     check_cuda_error();
