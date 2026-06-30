@@ -59,6 +59,7 @@ public class BatchSchedulerReporter {
      */
     public void reportBatcherQueueDepth(String role, String engineIp, int depth) {
         FlexMetricTags tags = FlexMetricTags.of(
+                "type", "batchQueue",
                 "role", role,
                 "engineIp", engineIp);
         monitor.report(ROUTING_QUEUE_LENGTH, tags, depth);
@@ -91,9 +92,13 @@ public class BatchSchedulerReporter {
 
     /**
      * Report scheduler inflight map size via {@code health.check.local.task.map.size}.
+     * Uses role=prefill + engineIp=scheduler tags to match the Grafana panel filter.
      */
     public void reportSchedulerInflightSize(int size) {
-        monitor.report(ENGINE_LOCAL_TASK_MAP_SIZE, size);
+        FlexMetricTags tags = FlexMetricTags.of(
+                "role", "prefill",
+                "engineIp", "scheduler");
+        monitor.report(ENGINE_LOCAL_TASK_MAP_SIZE, tags, size);
     }
 
     /**
