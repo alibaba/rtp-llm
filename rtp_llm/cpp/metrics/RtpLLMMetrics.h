@@ -248,6 +248,11 @@ public:
     int64_t running_stream_size        = 0;
     int64_t remote_running_stream_size = 0;
     int64_t loading_cache_stream_size  = 0;
+    int64_t pending_decode_stream_size = 0;
+    int64_t prefill_round_count        = 0;
+    int64_t decode_round_count         = 0;
+    int64_t degraded_prefill_count     = 0;
+    int64_t decode_since_prefill       = 0;
 };
 
 class RtpLLMSchedulerMetrics: public kmonitor::MetricsGroup {
@@ -260,6 +265,11 @@ public:
     kmonitor::MutableMetric* running_stream_size_metric        = nullptr;
     kmonitor::MutableMetric* remote_running_stream_size_metric = nullptr;
     kmonitor::MutableMetric* loading_cache_stream_size_metric  = nullptr;
+    kmonitor::MutableMetric* pending_decode_stream_size_metric = nullptr;
+    kmonitor::MutableMetric* prefill_round_count_metric        = nullptr;
+    kmonitor::MutableMetric* decode_round_count_metric         = nullptr;
+    kmonitor::MutableMetric* degraded_prefill_count_metric     = nullptr;
+    kmonitor::MutableMetric* decode_since_prefill_metric       = nullptr;
 
 private:
     AUTIL_LOG_DECLARE();
