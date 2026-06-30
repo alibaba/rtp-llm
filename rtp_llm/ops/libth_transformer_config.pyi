@@ -1150,6 +1150,9 @@ class ProfilingDebugLoggingConfig:
     gen_timeline_sync: bool
     hack_layer_num: int
     log_file_backup_count: int
+    timeline_num_steps: int
+    timeline_start_step: int
+    timeline_trace_name: str
     torch_cuda_profiler_dir: str
     trace_memory: bool
     def __getstate__(self) -> tuple:
