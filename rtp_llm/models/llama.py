@@ -225,7 +225,11 @@ class Cohere(Llama):
 
 register_model("internlm", Llama, ["InternLMForCausalLM"])
 register_model("internlm2", Llama, ["InternLM2ForCausalLM"])
-register_model("llama", Llama, ["LlamaForCausalLM", "YiForCausalLM"])
+register_model(
+    "llama",
+    Llama,
+    ["LlamaForCausalLM", "LLaMAForCausalLM", "YiForCausalLM"],
+)
 register_model("xverse", Llama, ["XverseForCausalLM"])
 register_model("aquila", Llama, ["AquilaModel"])
 register_model("mistral", Llama, ["MistralForCausalLM"])
