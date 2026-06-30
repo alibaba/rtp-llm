@@ -1,17 +1,9 @@
-import json
-import logging
 import os
-from typing import Any, Dict, List, Optional
+from typing import Any, List
 
 import torch
-import torch.library as tl
 from PIL import Image
-from transformers import (
-    AutoProcessor,
-    Qwen2VLImageProcessor,
-    Qwen3VLConfig,
-    Qwen3VLVisionModel,
-)
+from transformers import AutoImageProcessor, AutoProcessor, Qwen3VLConfig
 
 from rtp_llm.config.py_config_modules import VitConfig
 from rtp_llm.multimodal.multimodal_mixin_register import register_multimodal_mixin
@@ -24,26 +16,12 @@ from rtp_llm.multimodal.multimodal_mixins.qwen2_5_vl.qwen2_5_vl_mixin import (
     Qwen2_5_VLMixin,
     smart_resize,
 )
+from rtp_llm.multimodal.multimodal_mixins.qwen3_vl.qwen3_vl_vit import (
+    Qwen3VLVisionModel,
+)
 from rtp_llm.multimodal.multimodal_util import get_bytes_io_from_url
-from rtp_llm.ops import MMPreprocessConfig, MultimodalInput
+from rtp_llm.ops import MultimodalInput
 from rtp_llm.utils.base_model_datatypes import MMUrlType
-from rtp_llm.utils.flash_attn_utils import can_use_flash_attn
-
-default_attn_impl = "sdpa"
-try:
-    if can_use_flash_attn():
-        default_attn_impl = "flash_attention_2"
-except Exception as e:
-    logging.info(
-        f"initialize flash_attn failed, exception {e}, using sdpa attention in qwen2.5 vl vit"
-    )
-
-if not hasattr(tl, "wrap_triton"):
-
-    def wrap_triton(fn):
-        return fn
-
-    tl.wrap_triton = wrap_triton
 
 
 class Qwen3_VLImageEmbedding(Qwen2_5_VLImageEmbedding):
@@ -51,12 +29,11 @@ class Qwen3_VLImageEmbedding(Qwen2_5_VLImageEmbedding):
         self.mm_processor = AutoProcessor.from_pretrained(
             mm_related_params.config["ckpt_path"]
         )
-        self.mm_processor.image_processor = Qwen2VLImageProcessor.from_pretrained(
-            mm_related_params.config["ckpt_path"]
+        self.mm_processor.image_processor = AutoImageProcessor.from_pretrained(
+            mm_related_params.config["ckpt_path"], use_fast=True
         )
         config_hf = Qwen3VLConfig.from_pretrained(mm_related_params.config["ckpt_path"])
-        config_hf.vision_config._attn_implementation = default_attn_impl
-        self.visual = Qwen3VLVisionModel._from_config(config_hf.vision_config)
+        self.visual = Qwen3VLVisionModel(config_hf.vision_config)
         self.spatial_merge_size = self.visual.spatial_merge_size
 
     @property
@@ -73,6 +50,7 @@ class Qwen3_VLImageEmbedding(Qwen2_5_VLImageEmbedding):
         vit_config: VitConfig,
         processor,
         factor: int = 32,
+        device: str = "cpu",
     ):
         assert len(mm_inputs) == 1
         mm_input = mm_inputs[0]
@@ -118,7 +96,7 @@ class Qwen3_VLImageEmbedding(Qwen2_5_VLImageEmbedding):
                 image = image.resize((resized_width, resized_height))
                 do_resize = False
             res = processor.image_processor(
-                image, return_tensors="pt", do_resize=do_resize
+                image, return_tensors="pt", do_resize=do_resize, device=device
             )
             return res["pixel_values"], res["image_grid_thw"]
         elif mm_type == MMUrlType.VIDEO:
@@ -132,23 +110,21 @@ class Qwen3_VLImageEmbedding(Qwen2_5_VLImageEmbedding):
             raise Exception("unknown mm url type")
 
     def get_preprocess_params(self):
+        gpu_preprocess = os.environ.get("USE_LOCAL_PREPROCESS", "0") == "1"
         return {
             "processor": self.mm_processor,
             "factor": self.spatial_merge_size * self.visual.patch_size,
+            "device": self._device if gpu_preprocess else "cpu",
         }
 
     @torch.inference_mode()
     def embedding(self, data, **kwargs):
         pixel_values = data[0].to(self._device).to(self._data_type)
         grid_thw = data[1].to(self._device)
-        vision_output = self.visual(pixel_values, grid_thw=grid_thw)
-        embeds = vision_output.pooler_output
-        deepstack_embeds = vision_output.deepstack_features
+        embeds, deepstack_embeds = self.visual(pixel_values, grid_thw=grid_thw)
         split_sizes = (grid_thw.prod(-1) // self.visual.spatial_merge_size**2).tolist()
         embeds = torch.split(embeds, split_sizes)
         pos_id = self.get_position_ids(grid_thw)[0]
-        # Flatten deepstack [layers, tokens, hidden] into a 1-D extra-input tensor for
-        # transport; the qwen3vl model reshapes it back using tokens/hidden from features.
         deepstack_embeds = torch.stack(deepstack_embeds).to(self._data_type).reshape(-1)
         return embeds[0].to(self._data_type), pos_id, deepstack_embeds
 
@@ -168,9 +144,7 @@ class Qwen3_VLImageEmbedding(Qwen2_5_VLImageEmbedding):
             torch.concat(pixel_values_list, dim=0).to(self._device).to(self._data_type)
         )
         grid_thw = torch.concat(grid_thw_list, dim=0).to(self._device)
-        vision_output = self.visual(pixel_values, grid_thw=grid_thw)
-        embeds = vision_output.pooler_output
-        deepstack_embeds = vision_output.deepstack_features
+        embeds, deepstack_embeds = self.visual(pixel_values, grid_thw=grid_thw)
         split_sizes = (grid_thw.prod(-1) // self.visual.spatial_merge_size**2).tolist()
         embeds = torch.split(embeds, split_sizes)
         pos_id = self.get_position_ids(grid_thw)
@@ -178,7 +152,6 @@ class Qwen3_VLImageEmbedding(Qwen2_5_VLImageEmbedding):
             torch.stack(deepstack_embeds).to(self._data_type).split(split_sizes, dim=1)
         )
         for e, p, d in zip(embeds, pos_id, deepstack_embeds):
-            # Flatten per-image deepstack [layers, tokens, hidden] into a 1-D extra-input tensor.
             res_list.append((e.to(self._data_type), p, d.flatten()))
         return res_list
 
