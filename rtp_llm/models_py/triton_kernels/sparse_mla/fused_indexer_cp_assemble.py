@@ -90,6 +90,57 @@ def _gather_restore_fused_kernel(
     tl.store(out_s_ptr + row_id * s_stride + s_cols, s_data, mask=s_mask)
 
 
+@triton.jit
+def _fused_zero_scatter_single_kernel(
+    actual_ptr,
+    padded_ptr,
+    src_for_padded_ptr,
+    row_stride: tl.constexpr,
+    n_padded_rows,
+    BLOCK_D: tl.constexpr,
+):
+    """Fused zero-fill + scatter for a single tensor.
+
+    Grid: (n_padded_rows,)
+    For each padded row: if src_for_padded[row] >= 0, copy from actual;
+    otherwise write zeros.
+    """
+    row_id = tl.program_id(0)
+    if row_id >= n_padded_rows:
+        return
+    src_row = tl.load(src_for_padded_ptr + row_id)
+    cols = tl.arange(0, BLOCK_D)
+    mask = cols < row_stride
+    if src_row >= 0:
+        data = tl.load(actual_ptr + src_row * row_stride + cols, mask=mask)
+    else:
+        data = tl.zeros([BLOCK_D], dtype=tl.uint8)
+    tl.store(padded_ptr + row_id * row_stride + cols, data, mask=mask)
+
+
+@triton.jit
+def _gather_restore_single_kernel(
+    gathered_ptr,
+    out_ptr,
+    indices_ptr,
+    row_stride: tl.constexpr,
+    n_rows,
+    BLOCK_D: tl.constexpr,
+):
+    """Gather rows from allgathered buffer by restore_indices (single tensor).
+
+    Grid: (n_rows,)
+    """
+    row_id = tl.program_id(0)
+    if row_id >= n_rows:
+        return
+    src_row = tl.load(indices_ptr + row_id)
+    cols = tl.arange(0, BLOCK_D)
+    mask = cols < row_stride
+    data = tl.load(gathered_ptr + src_row * row_stride + cols, mask=mask)
+    tl.store(out_ptr + row_id * row_stride + cols, data, mask=mask)
+
+
 def _next_power_of_2(n: int) -> int:
     if n <= 0:
         return 1
@@ -205,3 +256,131 @@ def fused_copy_and_assemble_indexer_k(
         BLOCK_K,
         BLOCK_S,
     )
+
+
+def fused_scatter_allgather_restore_single(
+    *,
+    actual: torch.Tensor,
+    out: torch.Tensor,
+    total_local_T: int,
+    src_for_padded: torch.Tensor,
+    restore_indices: torch.Tensor,
+    fused_dim: int,
+) -> None:
+    """Fused scatter + allgather + restore for a single tensor (MLA dense KV path).
+
+    Replaces _scatter_actual_to_padded + all_gather + gathered[restore_indices].
+
+    Args:
+        actual: Compact actual rows [total_actual_T, fused_dim].
+        out: Output buffer [chunk_T, fused_dim].
+        total_local_T: Padded local token count (per rank).
+        src_for_padded: Inverse map [total_local_T] int64. -1 for zero rows.
+        restore_indices: [chunk_T] int64.
+        fused_dim: Number of elements per row (NOT bytes).
+    """
+    device = actual.device
+    chunk_T = out.shape[0]
+    if chunk_T == 0:
+        return
+
+    row_bytes = fused_dim * actual.element_size()
+    BLOCK_D = _next_power_of_2(row_bytes)
+
+    # Step 1: fused zero + scatter into padded local buffer
+    local_buf = torch.empty(
+        (total_local_T, row_bytes), dtype=torch.uint8, device=device
+    )
+    _fused_zero_scatter_single_kernel[(total_local_T,)](
+        actual.view(torch.uint8),
+        local_buf,
+        src_for_padded,
+        row_bytes,
+        total_local_T,
+        BLOCK_D,
+    )
+
+    # Step 2: all_gather with torch.empty
+    pg = _get_group(Group.TP)
+    world_size = torch.distributed.get_world_size(pg)
+    gathered = torch.empty(
+        (world_size * total_local_T, row_bytes),
+        device=device,
+        dtype=torch.uint8,
+    )
+    torch.distributed.all_gather_into_tensor(gathered, local_buf, group=pg)
+
+    # Step 3: restore gather
+    _gather_restore_single_kernel[(chunk_T,)](
+        gathered,
+        out.view(torch.uint8),
+        restore_indices,
+        row_bytes,
+        chunk_T,
+        BLOCK_D,
+    )
+
+
+@triton.jit
+def _topk_to_global_indices_kernel(
+    topk_ptr,
+    req_ids_ptr,
+    ws_starts_ptr,
+    out_ptr,
+    n_rows,
+    topk: tl.constexpr,
+    BLOCK_TOPK: tl.constexpr,
+):
+    """Fuse topk index → global index conversion.
+
+    Replaces: offsets = ws_starts[req_ids]; raw = topk + offsets; masked_fill(-1).
+
+    Grid: (n_rows,)
+    """
+    row = tl.program_id(0)
+    if row >= n_rows:
+        return
+    req_id = tl.load(req_ids_ptr + row)
+    offset = tl.load(ws_starts_ptr + req_id).to(tl.int32)
+    cols = tl.arange(0, BLOCK_TOPK)
+    mask = cols < topk
+    idx = tl.load(topk_ptr + row * topk + cols, mask=mask, other=-1)
+    result = tl.where(idx >= 0, idx + offset, idx)
+    tl.store(out_ptr + row * topk + cols, result, mask=mask)
+
+
+def fused_topk_to_global_indices(
+    topk_2d: torch.Tensor,
+    precomputed_req_ids: torch.Tensor,
+    workspace_starts: torch.Tensor,
+) -> torch.Tensor:
+    """Convert per-request topk indices to global fused_kv indices.
+
+    Replaces:
+        offsets = ws.workspace_starts[precomputed_req_ids]
+        padding_mask = topk_2d < 0
+        raw_global = topk_2d + offsets.unsqueeze(1)
+        global_indices = raw_global.masked_fill(padding_mask, -1).unsqueeze(1)
+
+    Args:
+        topk_2d: [T, topk] int32, per-request topk indices (-1 = padding).
+        precomputed_req_ids: [T] int64, request id for each token.
+        workspace_starts: [B] int32, per-request offset into fused_kv.
+
+    Returns:
+        [T, 1, topk] int32, global indices for flash_mla_sparse_fwd.
+    """
+    T, topk_val = topk_2d.shape
+    out = torch.empty_like(topk_2d)
+    if T > 0:
+        BLOCK_TOPK = _next_power_of_2(topk_val)
+        _topk_to_global_indices_kernel[(T,)](
+            topk_2d,
+            precomputed_req_ids,
+            workspace_starts,
+            out,
+            T,
+            topk_val,
+            BLOCK_TOPK,
+        )
+    return out.unsqueeze(1)

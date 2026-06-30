@@ -662,37 +662,40 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
             self.indexer_cp_local_cu = asm.build_actual_local_cu_kv_seqlens(
                 self.indexer_cp_plan
             )
-            # Precompute scatter dst_idx for copy_actual_to_padded (B>1, has padding)
+            # Precompute inverse map for fused zero+scatter Triton kernel.
+            # Shared by indexer path and MLA dense gather path.
             _plan = self.indexer_cp_plan
-            _B = int(_plan.per_req_actual_local_kv_lens.numel())
+            _dev = block_table.device
             if (
                 _plan.total_actual_local_T > 0
-                and _B > 1
                 and _plan.total_actual_local_T != _plan.total_local_T
             ):
-                _dev = block_table.device
+                _B = int(_plan.per_req_actual_local_kv_lens.numel())
                 _a_lens = _plan.per_req_actual_local_kv_lens
                 _p_lens = _plan.per_req_local_kv_lens
-                _req_ids = torch.repeat_interleave(
-                    torch.arange(_B, device=_dev, dtype=torch.int64),
-                    _a_lens,
-                    output_size=_plan.total_actual_local_T,
-                )
-                _a_cu = torch.zeros(_B, dtype=torch.int64, device=_dev)
-                _p_cu = torch.zeros(_B, dtype=torch.int64, device=_dev)
-                _a_cu[1:] = torch.cumsum(_a_lens[:-1], dim=0)
-                _p_cu[1:] = torch.cumsum(_p_lens[:-1], dim=0)
-                _in_req_pos = torch.arange(
-                    _plan.total_actual_local_T, device=_dev, dtype=torch.int64
-                ) - _a_cu.index_select(0, _req_ids)
-                self.indexer_copy_dst_idx = (
-                    _p_cu.index_select(0, _req_ids) + _in_req_pos
-                )
-                # Inverse map: for each padded row, which actual row maps to it (-1 = zero)
+                if _B == 1:
+                    dst_idx = torch.arange(
+                        _plan.total_actual_local_T, device=_dev, dtype=torch.int64
+                    )
+                else:
+                    _req_ids = torch.repeat_interleave(
+                        torch.arange(_B, device=_dev, dtype=torch.int64),
+                        _a_lens,
+                        output_size=_plan.total_actual_local_T,
+                    )
+                    _a_cu = torch.zeros(_B, dtype=torch.int64, device=_dev)
+                    _p_cu = torch.zeros(_B, dtype=torch.int64, device=_dev)
+                    _a_cu[1:] = torch.cumsum(_a_lens[:-1], dim=0)
+                    _p_cu[1:] = torch.cumsum(_p_lens[:-1], dim=0)
+                    _in_req_pos = torch.arange(
+                        _plan.total_actual_local_T, device=_dev, dtype=torch.int64
+                    ) - _a_cu.index_select(0, _req_ids)
+                    dst_idx = _p_cu.index_select(0, _req_ids) + _in_req_pos
+                self.indexer_copy_dst_idx = dst_idx
                 self.indexer_src_for_padded = torch.full(
                     (_plan.total_local_T,), -1, dtype=torch.int64, device=_dev
                 )
-                self.indexer_src_for_padded[self.indexer_copy_dst_idx] = torch.arange(
+                self.indexer_src_for_padded[dst_idx] = torch.arange(
                     _plan.total_actual_local_T, device=_dev, dtype=torch.int64
                 )
             else:
@@ -945,21 +948,11 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
         if src.ndim == 4:
             src = src.squeeze(2)
 
-        # Padded buffer MUST be torch.zeros (not torch.empty): padding rows
-        # participate in NCCL all_gather and must stay clean 0. Otherwise a
-        # restore_indices value that lands on a padding row (multi-request
-        # batches with differing per-req actual/padded, last-block-partial,
-        # or workspace reuse across layers) propagates uninitialized memory
-        # into ws.fused_kv → garbled attention output.
-        local_fused = torch.zeros(
-            (self.sharded_total_local_kv_len, ws.fused_kv.size(1)),
-            dtype=ws.fused_kv.dtype,
-            device=ws.fused_kv.device,
-        )
+        fused_dim = ws.fused_kv.size(1)
 
         if self.sharded_actual_total_local_kv_len > 0:
             actual_fused = torch.empty(
-                (self.sharded_actual_total_local_kv_len, ws.fused_kv.size(1)),
+                (self.sharded_actual_total_local_kv_len, fused_dim),
                 dtype=ws.fused_kv.dtype,
                 device=ws.fused_kv.device,
             )
@@ -972,17 +965,41 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
                 ws.batch_size,
                 self.sharded_actual_total_local_kv_len,
             )
-            _scatter_actual_to_padded(
-                actual=actual_fused,
-                padded=local_fused,
-                per_req_actual_local_kv_lens=self.sharded_actual_local_kv_lens,
-                per_req_padded_local_kv_lens=self.sharded_local_kv_lens,
+        else:
+            actual_fused = torch.empty(
+                (0, fused_dim), dtype=ws.fused_kv.dtype, device=ws.fused_kv.device
             )
 
-        gathered = all_gather(local_fused.contiguous(), group=Group.TP).reshape(
-            -1, local_fused.size(-1)
-        )
-        ws.fused_kv.copy_(gathered[self.sharded_kv_restore_indices])
+        if self.indexer_src_for_padded is not None:
+            from rtp_llm.models_py.triton_kernels.sparse_mla.fused_indexer_cp_assemble import (
+                fused_scatter_allgather_restore_single,
+            )
+
+            fused_scatter_allgather_restore_single(
+                actual=actual_fused,
+                out=ws.fused_kv,
+                total_local_T=self.sharded_total_local_kv_len,
+                src_for_padded=self.indexer_src_for_padded,
+                restore_indices=self.sharded_kv_restore_indices,
+                fused_dim=fused_dim,
+            )
+        else:
+            local_fused = torch.zeros(
+                (self.sharded_total_local_kv_len, fused_dim),
+                dtype=ws.fused_kv.dtype,
+                device=ws.fused_kv.device,
+            )
+            if self.sharded_actual_total_local_kv_len > 0:
+                _scatter_actual_to_padded(
+                    actual=actual_fused,
+                    padded=local_fused,
+                    per_req_actual_local_kv_lens=self.sharded_actual_local_kv_lens,
+                    per_req_padded_local_kv_lens=self.sharded_local_kv_lens,
+                )
+            gathered = all_gather(local_fused.contiguous(), group=Group.TP).reshape(
+                -1, local_fused.size(-1)
+            )
+            ws.fused_kv.copy_(gathered[self.sharded_kv_restore_indices])
 
     def _attend_with_kvcache(
         self,
@@ -1041,16 +1058,14 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
                 ws.batch_size,
                 ws.total_kv_len,
             )
-        offsets = ws.workspace_starts[self.precomputed_req_ids]
+        from rtp_llm.models_py.triton_kernels.sparse_mla.fused_indexer_cp_assemble import (
+            fused_topk_to_global_indices,
+        )
+
         topk_2d = _topk_2d(topk)
-        # FIX: topk_2d contains -1 as padding (invalid KV position).
-        # Adding offsets to -1 turns it into a large positive index that
-        # points into another request's KV region in fused_kv, causing
-        # cross-request KV pollution → gibberish / repeat output.
-        # Preserve -1 so flash_mla_sparse_fwd skips these positions.
-        padding_mask = topk_2d < 0
-        raw_global = topk_2d + offsets.unsqueeze(1)
-        global_indices = raw_global.masked_fill(padding_mask, -1).unsqueeze(1)
+        global_indices = fused_topk_to_global_indices(
+            topk_2d, self.precomputed_req_ids, ws.workspace_starts
+        )
         out, _, _ = flash_mla_sparse_fwd(
             q0,
             ws.fused_kv.unsqueeze(1),
