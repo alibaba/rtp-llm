@@ -938,14 +938,18 @@ def _parts_from_dashscope_native(
 
 
 def _iter_messages_from_payload(obj: Any) -> Iterator[Any]:
-    """Yield messages from any of three observed top-level wrappings.
+    """Yield messages from any of four observed top-level wrappings.
 
     Priority order (first hit wins):
+      0. ``[{...}, ...]`` — bare messages list (dashllm ``__messages__`` path).
       1. ``{'payload': {'input': {'messages': [...]}}}`` — full dashscope HTTP body
          (header sibling, payload wrapper); seen in ocr/request_for_general.json.
       2. ``{'input': {'messages': [...]}}`` — gpt3_serving build_payload output.
       3. ``{'messages': [...]}`` — hand-built clients / direct OpenAI shape.
     """
+    if isinstance(obj, list):
+        yield from obj
+        return
     if not isinstance(obj, dict):
         return
     payload = obj.get("payload")

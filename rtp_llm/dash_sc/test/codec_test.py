@@ -704,6 +704,27 @@ class DashScGrpcRequestTest(TestCase):
             [MultimodalPart(url="http://c.png", mm_type=MMUrlType.IMAGE)],
         )
 
+    def test_parse_multimodal_parts_bare_messages_list(self) -> None:
+        # dashllm __messages__ path: bare list without dict wrapper.
+        req = predict_v2_pb2.ModelInferRequest()
+        self._set_payload(
+            req,
+            [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "image_url", "image_url": {"url": "http://d.png"}}
+                    ],
+                }
+            ],
+            key="__messages__",
+        )
+        parts = parse_multimodal_parts_from_request(req)
+        self.assertEqual(
+            parts,
+            [MultimodalPart(url="http://d.png", mm_type=MMUrlType.IMAGE)],
+        )
+
     # ------------------------------------------------------------------
     # Dashscope native shape (multimodal_serving / MMGPT3Item / ocr/*.json)
     # ------------------------------------------------------------------
