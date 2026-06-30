@@ -3,6 +3,7 @@ from typing import Tuple, Union
 import torch
 import torch.nn.functional as F
 from aiter import layernorm2d_fwd as layernorm2d_fwd
+from aiter import layernorm2d_fwd_with_add as layernorm2d_fwd_with_add
 from aiter import rms_norm
 from aiter import rmsnorm2d_fwd_with_add as fused_add_rmsnorm
 from torch import nn
@@ -21,11 +22,23 @@ class LayerNorm(BaseLayerNorm):
         super().__init__(weight, beta, eps)
 
     def forward(self, hidden_states: torch.Tensor):
-        output = torch.empty_like(hidden_states)
-        rtp_llm_ops.layernorm(
-            output, hidden_states, self.weight.data, self.beta, self.variance_epsilon, 0
+        if hidden_states.dim() != 2:
+            output = torch.empty_like(hidden_states)
+            rtp_llm_ops.layernorm(
+                output,
+                hidden_states,
+                self.weight.data,
+                self.beta,
+                self.variance_epsilon,
+                0,
+            )
+            return output
+        return layernorm2d_fwd(
+            hidden_states,
+            self.weight.data,
+            self.beta,
+            self.variance_epsilon,
         )
-        return output
 
 
 class RMSNorm(BaseNorm):
@@ -67,24 +80,13 @@ class AddBiasResLayerNorm(BaseAddBiasResLayerNorm):
         residual: torch.Tensor,
         bias: torch.Tensor,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
-        if bias.numel() == 0:
-            bias = torch.zeros(
-                hidden_states.shape[-1],
-                device=hidden_states.device,
-                dtype=hidden_states.dtype,
-            )
-
-        if hidden_states.shape[0] > 32 and hidden_states.shape[1] <= 768:
-            hidden_states = hidden_states + residual
-            x_bias = bias if bias.numel() > 0 else None
-            return layernorm2d_fwd(
-                hidden_states,
-                self.weight.data,
-                self.beta,
-                self.variance_epsilon,
-                x_bias=x_bias,
-            )
-        else:
+        if hidden_states.dim() != 2 or residual.dim() != 2:
+            if bias.numel() == 0:
+                bias = torch.zeros(
+                    hidden_states.shape[-1],
+                    device=hidden_states.device,
+                    dtype=hidden_states.dtype,
+                )
             rtp_llm_ops.fused_add_layernorm(
                 hidden_states,
                 residual,
@@ -95,6 +97,21 @@ class AddBiasResLayerNorm(BaseAddBiasResLayerNorm):
                 0,
             )
             return hidden_states
+
+        x_bias = bias if bias.numel() > 0 else None
+        out = torch.empty_like(hidden_states)
+        residual_out = torch.empty_like(residual)
+        layernorm2d_fwd_with_add(
+            out,
+            hidden_states,
+            residual,
+            residual_out,
+            self.weight.data,
+            self.beta,
+            self.variance_epsilon,
+            x_bias=x_bias,
+        )
+        return out
 
 
 class AddBiasResLayerNormTorch(BaseAddBiasResLayerNorm):

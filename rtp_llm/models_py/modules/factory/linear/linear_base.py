@@ -4,9 +4,10 @@ Defines the unified interface for all Linear strategies.
 """
 
 from abc import ABC, abstractmethod
-from typing import Optional
+from typing import Optional, Tuple
 
 import torch
+import torch.nn.functional as F
 from torch import nn
 
 from rtp_llm.ops import HWKernelConfig
@@ -87,6 +88,24 @@ class LinearBase(nn.Module, ABC):
             Output tensor
         """
         pass
+
+    def forward_with_deferred_bias(
+        self, input: torch.Tensor
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+        """Forward pass for callers that can consume a deferred output bias.
+
+        Backends that cannot defer bias keep the existing eager behavior by
+        returning the regular output and ``None`` for the deferred bias.
+        """
+        return self.forward(input), None
+
+    def forward_with_bias_gelu(self, input: torch.Tensor) -> torch.Tensor:
+        """Forward pass followed by GELU.
+
+        Backends with a fused GEMM+bias+GELU epilogue can override this method.
+        The default implementation preserves existing device behavior.
+        """
+        return F.gelu(self.forward(input))
 
     def __repr__(self) -> str:
         """Return string representation of the strategy"""

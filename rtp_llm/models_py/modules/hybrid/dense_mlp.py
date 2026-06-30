@@ -1,6 +1,6 @@
 """Unified dense MLP implementation supporting multiple activation types."""
 
-from typing import Dict, Optional, Type
+from typing import Dict, Optional, Tuple, Type
 
 import torch
 from torch import nn
@@ -92,10 +92,42 @@ class DenseMLP(nn.Module):
             input_scale_key=W.ffn_w2_i_s,
         )
 
-    def forward(self, x: torch.Tensor, skip_allreduce: bool = False) -> torch.Tensor:
-        up = self.up_proj(x)
-        activated = self.act_fn(up)
-        output = self.down_proj(activated)
-        if not skip_allreduce and self.parallelism_config.get_ffn_tp_size() > 1:
+    def _forward_impl(
+        self,
+        x: torch.Tensor,
+        skip_allreduce: bool = False,
+        defer_output_bias: bool = False,
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+        if not self.is_gated and self.activation_type == ActivationType.Gelu:
+            activated = self.up_proj.forward_with_bias_gelu(x)
+        else:
+            up = self.up_proj(x)
+            activated = self.act_fn(up)
+
+        ffn_tp_size = self.parallelism_config.get_ffn_tp_size()
+        output_bias = None
+        can_defer_bias = defer_output_bias and (skip_allreduce or ffn_tp_size == 1)
+        if can_defer_bias:
+            output, output_bias = self.down_proj.forward_with_deferred_bias(activated)
+        else:
+            output = self.down_proj(activated)
+
+        if not skip_allreduce and ffn_tp_size > 1:
             output = all_reduce(output, group=Group.TP)
+        return output, output_bias
+
+    def forward(self, x: torch.Tensor, skip_allreduce: bool = False) -> torch.Tensor:
+        output, _ = self._forward_impl(
+            x, skip_allreduce=skip_allreduce, defer_output_bias=False
+        )
         return output
+
+    def forward_defer_output_bias(
+        self, x: torch.Tensor, skip_allreduce: bool = False
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+        """Same as forward() but returns down_proj's bias separately for the
+        caller to fuse into a following residual-add+LayerNorm. Only effective
+        for FP8 linear with TP size 1; otherwise behaves like forward()."""
+        return self._forward_impl(
+            x, skip_allreduce=skip_allreduce, defer_output_bias=True
+        )

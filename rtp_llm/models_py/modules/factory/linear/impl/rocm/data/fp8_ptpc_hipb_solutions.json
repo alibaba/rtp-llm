@@ -1,0 +1,393 @@
+{
+  "format_version": 1,
+  "target": {
+    "arch_prefix": "gfx942",
+    "torch_hip_prefix": "7.2",
+    "aiter_version": "0.1.17.dev79+g2570b35f9.d20260623",
+    "layout": "fp8_ptpc_swizzleA_col16_4r16",
+    "dtype": "float8_e4m3fn"
+  },
+  "selection_policy": "Built-in offline HIPB solution cache for common VisionBert FP8 PTPC swizzleA M-buckets. Candidates are included only when robust confirmation shows correctness on GPU0/2/3/4, every GPU median is at least 3% faster than solution_index=-1, cross-GPU median std is <=5%, and per-GPU round-median std is <=5%. Shapes without a stable >=3% gain intentionally fall back to -1.",
+  "solutions": [
+    {
+      "op": "down_proj",
+      "m": 512,
+      "k": 3072,
+      "n": 768,
+      "epilogue": "bias",
+      "solution_index": 272551,
+      "source": [
+        "_runs/sweep/20260706_fp8_ptpc_hipb_topk_gpu{0,2,3,4,5,6,7}_v1",
+        "_runs/sweep/20260706_fp8_ptpc_hipb_validate_gpu{0,2,3,4,5,6,7}_v1",
+        "_runs/sweep/20260706_fp8_ptpc_hipb_confirm_gpu{0,2,3,4}_v1",
+        "_runs/sweep/20260706_fp8_ptpc_hipb_confirm_robust_summary_selected.csv"
+      ],
+      "candidate_vs_minus1_worst_gpu_pct": -4.7,
+      "median_us": 38.12,
+      "gpu_median_std_pct": 0.651,
+      "max_round_median_std_pct": 0.447,
+      "note": "Selected by robust offline retune: correct on GPU0/2/3/4, every GPU median is >=3% faster than solution_index=-1, cross-GPU median std <=5%, and per-GPU round-median std <=5%. The same row was also accepted by the 7-GPU top5 robust validation except qkv M=4096, which had one short-run outlier and passed the longer confirmation run."
+    },
+    {
+      "op": "o_proj",
+      "m": 512,
+      "k": 768,
+      "n": 768,
+      "epilogue": "bias",
+      "solution_index": 270677,
+      "source": [
+        "_runs/sweep/20260706_fp8_ptpc_hipb_topk_gpu{0,2,3,4,5,6,7}_v1",
+        "_runs/sweep/20260706_fp8_ptpc_hipb_validate_gpu{0,2,3,4,5,6,7}_v1",
+        "_runs/sweep/20260706_fp8_ptpc_hipb_confirm_gpu{0,2,3,4}_v1",
+        "_runs/sweep/20260706_fp8_ptpc_hipb_confirm_robust_summary_selected.csv"
+      ],
+      "candidate_vs_minus1_worst_gpu_pct": -4.208,
+      "median_us": 34.26,
+      "gpu_median_std_pct": 1.416,
+      "max_round_median_std_pct": 0.814,
+      "note": "Selected by robust offline retune: correct on GPU0/2/3/4, every GPU median is >=3% faster than solution_index=-1, cross-GPU median std <=5%, and per-GPU round-median std <=5%. The same row was also accepted by the 7-GPU top5 robust validation except qkv M=4096, which had one short-run outlier and passed the longer confirmation run."
+    },
+    {
+      "op": "qkv",
+      "m": 512,
+      "k": 768,
+      "n": 2304,
+      "epilogue": "bias",
+      "solution_index": 271680,
+      "source": [
+        "_runs/sweep/20260706_fp8_ptpc_hipb_topk_gpu{0,2,3,4,5,6,7}_v1",
+        "_runs/sweep/20260706_fp8_ptpc_hipb_validate_gpu{0,2,3,4,5,6,7}_v1",
+        "_runs/sweep/20260706_fp8_ptpc_hipb_confirm_gpu{0,2,3,4}_v1",
+        "_runs/sweep/20260706_fp8_ptpc_hipb_confirm_robust_summary_selected.csv"
+      ],
+      "candidate_vs_minus1_worst_gpu_pct": -6.992,
+      "median_us": 35.08,
+      "gpu_median_std_pct": 0.85,
+      "max_round_median_std_pct": 0.707,
+      "note": "Selected by robust offline retune: correct on GPU0/2/3/4, every GPU median is >=3% faster than solution_index=-1, cross-GPU median std <=5%, and per-GPU round-median std <=5%. The same row was also accepted by the 7-GPU top5 robust validation except qkv M=4096, which had one short-run outlier and passed the longer confirmation run."
+    },
+    {
+      "op": "up_proj",
+      "m": 512,
+      "k": 768,
+      "n": 3072,
+      "epilogue": "bias_gelu",
+      "solution_index": 272343,
+      "source": [
+        "_runs/sweep/20260706_fp8_ptpc_hipb_topk_gpu{0,2,3,4,5,6,7}_v1",
+        "_runs/sweep/20260706_fp8_ptpc_hipb_validate_gpu{0,2,3,4,5,6,7}_v1",
+        "_runs/sweep/20260706_fp8_ptpc_hipb_confirm_gpu{0,2,3,4}_v1",
+        "_runs/sweep/20260706_fp8_ptpc_hipb_confirm_robust_summary_selected.csv"
+      ],
+      "candidate_vs_minus1_worst_gpu_pct": -3.666,
+      "median_us": 42.64,
+      "gpu_median_std_pct": 0.832,
+      "max_round_median_std_pct": 0.342,
+      "note": "Selected by robust offline retune: correct on GPU0/2/3/4, every GPU median is >=3% faster than solution_index=-1, cross-GPU median std <=5%, and per-GPU round-median std <=5%. The same row was also accepted by the 7-GPU top5 robust validation except qkv M=4096, which had one short-run outlier and passed the longer confirmation run."
+    },
+    {
+      "op": "down_proj",
+      "m": 1024,
+      "k": 3072,
+      "n": 768,
+      "epilogue": "bias",
+      "solution_index": 272557,
+      "source": [
+        "_runs/sweep/20260706_fp8_ptpc_hipb_topk_gpu{0,2,3,4,5,6,7}_v1",
+        "_runs/sweep/20260706_fp8_ptpc_hipb_validate_gpu{0,2,3,4,5,6,7}_v1",
+        "_runs/sweep/20260706_fp8_ptpc_hipb_confirm_gpu{0,2,3,4}_v1",
+        "_runs/sweep/20260706_fp8_ptpc_hipb_confirm_robust_summary_selected.csv"
+      ],
+      "candidate_vs_minus1_worst_gpu_pct": -4.791,
+      "median_us": 43.58,
+      "gpu_median_std_pct": 0.542,
+      "max_round_median_std_pct": 0.387,
+      "note": "Selected by robust offline retune: correct on GPU0/2/3/4, every GPU median is >=3% faster than solution_index=-1, cross-GPU median std <=5%, and per-GPU round-median std <=5%. The same row was also accepted by the 7-GPU top5 robust validation except qkv M=4096, which had one short-run outlier and passed the longer confirmation run."
+    },
+    {
+      "op": "o_proj",
+      "m": 1024,
+      "k": 768,
+      "n": 768,
+      "epilogue": "bias",
+      "solution_index": 270742,
+      "source": [
+        "_runs/sweep/20260706_fp8_ptpc_hipb_topk_gpu{0,2,3,4,5,6,7}_v1",
+        "_runs/sweep/20260706_fp8_ptpc_hipb_validate_gpu{0,2,3,4,5,6,7}_v1",
+        "_runs/sweep/20260706_fp8_ptpc_hipb_confirm_gpu{0,2,3,4}_v1",
+        "_runs/sweep/20260706_fp8_ptpc_hipb_confirm_robust_summary_selected.csv"
+      ],
+      "candidate_vs_minus1_worst_gpu_pct": -4.262,
+      "median_us": 34.8,
+      "gpu_median_std_pct": 0.356,
+      "max_round_median_std_pct": 0.82,
+      "note": "Selected by robust offline retune: correct on GPU0/2/3/4, every GPU median is >=3% faster than solution_index=-1, cross-GPU median std <=5%, and per-GPU round-median std <=5%. The same row was also accepted by the 7-GPU top5 robust validation except qkv M=4096, which had one short-run outlier and passed the longer confirmation run."
+    },
+    {
+      "op": "qkv",
+      "m": 1024,
+      "k": 768,
+      "n": 2304,
+      "epilogue": "bias",
+      "solution_index": 271842,
+      "source": [
+        "_runs/sweep/20260706_fp8_ptpc_hipb_topk_gpu{0,2,3,4,5,6,7}_v1",
+        "_runs/sweep/20260706_fp8_ptpc_hipb_validate_gpu{0,2,3,4,5,6,7}_v1",
+        "_runs/sweep/20260706_fp8_ptpc_hipb_confirm_gpu{0,2,3,4}_v1",
+        "_runs/sweep/20260706_fp8_ptpc_hipb_confirm_robust_summary_selected.csv"
+      ],
+      "candidate_vs_minus1_worst_gpu_pct": -7.198,
+      "median_us": 41.8,
+      "gpu_median_std_pct": 0.622,
+      "max_round_median_std_pct": 0.397,
+      "note": "Selected by robust offline retune: correct on GPU0/2/3/4, every GPU median is >=3% faster than solution_index=-1, cross-GPU median std <=5%, and per-GPU round-median std <=5%. The same row was also accepted by the 7-GPU top5 robust validation except qkv M=4096, which had one short-run outlier and passed the longer confirmation run."
+    },
+    {
+      "op": "up_proj",
+      "m": 1024,
+      "k": 768,
+      "n": 3072,
+      "epilogue": "bias_gelu",
+      "solution_index": 271141,
+      "source": [
+        "_runs/sweep/20260706_fp8_ptpc_hipb_topk_gpu{0,2,3,4,5,6,7}_v1",
+        "_runs/sweep/20260706_fp8_ptpc_hipb_validate_gpu{0,2,3,4,5,6,7}_v1",
+        "_runs/sweep/20260706_fp8_ptpc_hipb_confirm_gpu{0,2,3,4}_v1",
+        "_runs/sweep/20260706_fp8_ptpc_hipb_confirm_robust_summary_selected.csv"
+      ],
+      "candidate_vs_minus1_worst_gpu_pct": -5.753,
+      "median_us": 53.12,
+      "gpu_median_std_pct": 0.284,
+      "max_round_median_std_pct": 0.46,
+      "note": "Selected by robust offline retune: correct on GPU0/2/3/4, every GPU median is >=3% faster than solution_index=-1, cross-GPU median std <=5%, and per-GPU round-median std <=5%. The same row was also accepted by the 7-GPU top5 robust validation except qkv M=4096, which had one short-run outlier and passed the longer confirmation run."
+    },
+    {
+      "op": "down_proj",
+      "m": 2048,
+      "k": 3072,
+      "n": 768,
+      "epilogue": "bias",
+      "solution_index": 272557,
+      "source": [
+        "_runs/sweep/20260706_fp8_ptpc_hipb_topk_gpu{0,2,3,4,5,6,7}_v1",
+        "_runs/sweep/20260706_fp8_ptpc_hipb_validate_gpu{0,2,3,4,5,6,7}_v1",
+        "_runs/sweep/20260706_fp8_ptpc_hipb_confirm_gpu{0,2,3,4}_v1",
+        "_runs/sweep/20260706_fp8_ptpc_hipb_confirm_robust_summary_selected.csv"
+      ],
+      "candidate_vs_minus1_worst_gpu_pct": -4.483,
+      "median_us": 56.22,
+      "gpu_median_std_pct": 0.371,
+      "max_round_median_std_pct": 0.231,
+      "note": "Selected by robust offline retune: correct on GPU0/2/3/4, every GPU median is >=3% faster than solution_index=-1, cross-GPU median std <=5%, and per-GPU round-median std <=5%. The same row was also accepted by the 7-GPU top5 robust validation except qkv M=4096, which had one short-run outlier and passed the longer confirmation run."
+    },
+    {
+      "op": "o_proj",
+      "m": 2048,
+      "k": 768,
+      "n": 768,
+      "epilogue": "bias",
+      "solution_index": 272118,
+      "source": [
+        "_runs/sweep/20260706_fp8_ptpc_hipb_topk_gpu{0,2,3,4,5,6,7}_v1",
+        "_runs/sweep/20260706_fp8_ptpc_hipb_validate_gpu{0,2,3,4,5,6,7}_v1",
+        "_runs/sweep/20260706_fp8_ptpc_hipb_confirm_gpu{0,2,3,4}_v1",
+        "_runs/sweep/20260706_fp8_ptpc_hipb_confirm_robust_summary_selected.csv"
+      ],
+      "candidate_vs_minus1_worst_gpu_pct": -6.339,
+      "median_us": 37.58,
+      "gpu_median_std_pct": 0.643,
+      "max_round_median_std_pct": 0.51,
+      "note": "Selected by robust offline retune: correct on GPU0/2/3/4, every GPU median is >=3% faster than solution_index=-1, cross-GPU median std <=5%, and per-GPU round-median std <=5%. The same row was also accepted by the 7-GPU top5 robust validation except qkv M=4096, which had one short-run outlier and passed the longer confirmation run."
+    },
+    {
+      "op": "qkv",
+      "m": 2048,
+      "k": 768,
+      "n": 2304,
+      "epilogue": "bias",
+      "solution_index": 271305,
+      "source": [
+        "_runs/sweep/20260706_fp8_ptpc_hipb_topk_gpu{0,2,3,4,5,6,7}_v1",
+        "_runs/sweep/20260706_fp8_ptpc_hipb_validate_gpu{0,2,3,4,5,6,7}_v1",
+        "_runs/sweep/20260706_fp8_ptpc_hipb_confirm_gpu{0,2,3,4}_v1",
+        "_runs/sweep/20260706_fp8_ptpc_hipb_confirm_robust_summary_selected.csv"
+      ],
+      "candidate_vs_minus1_worst_gpu_pct": -6.075,
+      "median_us": 54.3,
+      "gpu_median_std_pct": 0.452,
+      "max_round_median_std_pct": 0.242,
+      "note": "Selected by robust offline retune: correct on GPU0/2/3/4, every GPU median is >=3% faster than solution_index=-1, cross-GPU median std <=5%, and per-GPU round-median std <=5%. The same row was also accepted by the 7-GPU top5 robust validation except qkv M=4096, which had one short-run outlier and passed the longer confirmation run."
+    },
+    {
+      "op": "up_proj",
+      "m": 2048,
+      "k": 768,
+      "n": 3072,
+      "epilogue": "bias_gelu",
+      "solution_index": 271300,
+      "source": [
+        "_runs/sweep/20260706_fp8_ptpc_hipb_topk_gpu{0,2,3,4,5,6,7}_v1",
+        "_runs/sweep/20260706_fp8_ptpc_hipb_validate_gpu{0,2,3,4,5,6,7}_v1",
+        "_runs/sweep/20260706_fp8_ptpc_hipb_confirm_gpu{0,2,3,4}_v1",
+        "_runs/sweep/20260706_fp8_ptpc_hipb_confirm_robust_summary_selected.csv"
+      ],
+      "candidate_vs_minus1_worst_gpu_pct": -3.277,
+      "median_us": 77.66,
+      "gpu_median_std_pct": 0.562,
+      "max_round_median_std_pct": 0.274,
+      "note": "Selected by robust offline retune: correct on GPU0/2/3/4, every GPU median is >=3% faster than solution_index=-1, cross-GPU median std <=5%, and per-GPU round-median std <=5%. The same row was also accepted by the 7-GPU top5 robust validation except qkv M=4096, which had one short-run outlier and passed the longer confirmation run."
+    },
+    {
+      "op": "down_proj",
+      "m": 4096,
+      "k": 3072,
+      "n": 768,
+      "epilogue": "bias",
+      "solution_index": 272502,
+      "source": [
+        "_runs/sweep/20260706_fp8_ptpc_hipb_topk_gpu{0,2,3,4,5,6,7}_v1",
+        "_runs/sweep/20260706_fp8_ptpc_hipb_validate_gpu{0,2,3,4,5,6,7}_v1",
+        "_runs/sweep/20260706_fp8_ptpc_hipb_confirm_gpu{0,2,3,4}_v1",
+        "_runs/sweep/20260706_fp8_ptpc_hipb_confirm_robust_summary_selected.csv"
+      ],
+      "candidate_vs_minus1_worst_gpu_pct": -5.934,
+      "median_us": 81.72,
+      "gpu_median_std_pct": 0.504,
+      "max_round_median_std_pct": 0.242,
+      "note": "Selected by robust offline retune: correct on GPU0/2/3/4, every GPU median is >=3% faster than solution_index=-1, cross-GPU median std <=5%, and per-GPU round-median std <=5%. The same row was also accepted by the 7-GPU top5 robust validation except qkv M=4096, which had one short-run outlier and passed the longer confirmation run."
+    },
+    {
+      "op": "o_proj",
+      "m": 4096,
+      "k": 768,
+      "n": 768,
+      "epilogue": "bias",
+      "solution_index": 271305,
+      "source": [
+        "_runs/sweep/20260706_fp8_ptpc_hipb_topk_gpu{0,2,3,4,5,6,7}_v1",
+        "_runs/sweep/20260706_fp8_ptpc_hipb_validate_gpu{0,2,3,4,5,6,7}_v1",
+        "_runs/sweep/20260706_fp8_ptpc_hipb_confirm_gpu{0,2,3,4}_v1",
+        "_runs/sweep/20260706_fp8_ptpc_hipb_confirm_robust_summary_selected.csv"
+      ],
+      "candidate_vs_minus1_worst_gpu_pct": -5.109,
+      "median_us": 46.56,
+      "gpu_median_std_pct": 0.347,
+      "max_round_median_std_pct": 0.627,
+      "note": "Selected by robust offline retune: correct on GPU0/2/3/4, every GPU median is >=3% faster than solution_index=-1, cross-GPU median std <=5%, and per-GPU round-median std <=5%. The same row was also accepted by the 7-GPU top5 robust validation except qkv M=4096, which had one short-run outlier and passed the longer confirmation run."
+    },
+    {
+      "op": "qkv",
+      "m": 4096,
+      "k": 768,
+      "n": 2304,
+      "epilogue": "bias",
+      "solution_index": 271311,
+      "source": [
+        "_runs/sweep/20260706_fp8_ptpc_hipb_topk_gpu{0,2,3,4,5,6,7}_v1",
+        "_runs/sweep/20260706_fp8_ptpc_hipb_validate_gpu{0,2,3,4,5,6,7}_v1",
+        "_runs/sweep/20260706_fp8_ptpc_hipb_confirm_gpu{0,2,3,4}_v1",
+        "_runs/sweep/20260706_fp8_ptpc_hipb_confirm_robust_summary_selected.csv"
+      ],
+      "candidate_vs_minus1_worst_gpu_pct": -4.081,
+      "median_us": 81.42,
+      "gpu_median_std_pct": 0.428,
+      "max_round_median_std_pct": 0.207,
+      "note": "Selected by robust offline retune: correct on GPU0/2/3/4, every GPU median is >=3% faster than solution_index=-1, cross-GPU median std <=5%, and per-GPU round-median std <=5%. The same row was also accepted by the 7-GPU top5 robust validation except qkv M=4096, which had one short-run outlier and passed the longer confirmation run."
+    },
+    {
+      "op": "up_proj",
+      "m": 4096,
+      "k": 768,
+      "n": 3072,
+      "epilogue": "bias_gelu",
+      "solution_index": 271323,
+      "source": [
+        "_runs/sweep/20260706_fp8_ptpc_hipb_topk_gpu{0,2,3,4,5,6,7}_v1",
+        "_runs/sweep/20260706_fp8_ptpc_hipb_validate_gpu{0,2,3,4,5,6,7}_v1",
+        "_runs/sweep/20260706_fp8_ptpc_hipb_confirm_gpu{0,2,3,4}_v1",
+        "_runs/sweep/20260706_fp8_ptpc_hipb_confirm_robust_summary_selected.csv"
+      ],
+      "candidate_vs_minus1_worst_gpu_pct": -4.552,
+      "median_us": 123.74,
+      "gpu_median_std_pct": 0.379,
+      "max_round_median_std_pct": 0.193,
+      "note": "Selected by robust offline retune: correct on GPU0/2/3/4, every GPU median is >=3% faster than solution_index=-1, cross-GPU median std <=5%, and per-GPU round-median std <=5%. The same row was also accepted by the 7-GPU top5 robust validation except qkv M=4096, which had one short-run outlier and passed the longer confirmation run."
+    },
+    {
+      "op": "o_proj",
+      "m": 8192,
+      "k": 768,
+      "n": 768,
+      "epilogue": "bias",
+      "solution_index": 271337,
+      "source": [
+        "_runs/sweep/20260706_fp8_ptpc_hipb_topk_gpu{0,2,3,4,5,6,7}_v1",
+        "_runs/sweep/20260706_fp8_ptpc_hipb_validate_gpu{0,2,3,4,5,6,7}_v1",
+        "_runs/sweep/20260706_fp8_ptpc_hipb_confirm_gpu{0,2,3,4}_v1",
+        "_runs/sweep/20260706_fp8_ptpc_hipb_confirm_robust_summary_selected.csv"
+      ],
+      "candidate_vs_minus1_worst_gpu_pct": -5.197,
+      "median_us": 63.221,
+      "gpu_median_std_pct": 0.303,
+      "max_round_median_std_pct": 0.275,
+      "note": "Selected by robust offline retune: correct on GPU0/2/3/4, every GPU median is >=3% faster than solution_index=-1, cross-GPU median std <=5%, and per-GPU round-median std <=5%. The same row was also accepted by the 7-GPU top5 robust validation except qkv M=4096, which had one short-run outlier and passed the longer confirmation run."
+    },
+    {
+      "op": "qkv",
+      "m": 8192,
+      "k": 768,
+      "n": 2304,
+      "epilogue": "bias",
+      "solution_index": 271339,
+      "source": [
+        "_runs/sweep/20260706_fp8_ptpc_hipb_topk_gpu{0,2,3,4,5,6,7}_v1",
+        "_runs/sweep/20260706_fp8_ptpc_hipb_validate_gpu{0,2,3,4,5,6,7}_v1",
+        "_runs/sweep/20260706_fp8_ptpc_hipb_confirm_gpu{0,2,3,4}_v1",
+        "_runs/sweep/20260706_fp8_ptpc_hipb_confirm_robust_summary_selected.csv"
+      ],
+      "candidate_vs_minus1_worst_gpu_pct": -4.902,
+      "median_us": 133.5,
+      "gpu_median_std_pct": 0.228,
+      "max_round_median_std_pct": 2.196,
+      "note": "Selected by robust offline retune: correct on GPU0/2/3/4, every GPU median is >=3% faster than solution_index=-1, cross-GPU median std <=5%, and per-GPU round-median std <=5%. The same row was also accepted by the 7-GPU top5 robust validation except qkv M=4096, which had one short-run outlier and passed the longer confirmation run."
+    },
+    {
+      "op": "o_proj",
+      "m": 16384,
+      "k": 768,
+      "n": 768,
+      "epilogue": "bias",
+      "solution_index": 271335,
+      "source": [
+        "_runs/sweep/20260706_fp8_ptpc_hipb_topk_gpu{0,2,3,4,5,6,7}_v1",
+        "_runs/sweep/20260706_fp8_ptpc_hipb_validate_gpu{0,2,3,4,5,6,7}_v1",
+        "_runs/sweep/20260706_fp8_ptpc_hipb_confirm_gpu{0,2,3,4}_v1",
+        "_runs/sweep/20260706_fp8_ptpc_hipb_confirm_robust_summary_selected.csv"
+      ],
+      "candidate_vs_minus1_worst_gpu_pct": -3.84,
+      "median_us": 98.74,
+      "gpu_median_std_pct": 0.531,
+      "max_round_median_std_pct": 0.163,
+      "note": "Selected by robust offline retune: correct on GPU0/2/3/4, every GPU median is >=3% faster than solution_index=-1, cross-GPU median std <=5%, and per-GPU round-median std <=5%. The same row was also accepted by the 7-GPU top5 robust validation except qkv M=4096, which had one short-run outlier and passed the longer confirmation run."
+    },
+    {
+      "op": "qkv",
+      "m": 16384,
+      "k": 768,
+      "n": 2304,
+      "epilogue": "bias",
+      "solution_index": 271329,
+      "source": [
+        "_runs/sweep/20260706_fp8_ptpc_hipb_topk_gpu{0,2,3,4,5,6,7}_v1",
+        "_runs/sweep/20260706_fp8_ptpc_hipb_validate_gpu{0,2,3,4,5,6,7}_v1",
+        "_runs/sweep/20260706_fp8_ptpc_hipb_confirm_gpu{0,2,3,4}_v1",
+        "_runs/sweep/20260706_fp8_ptpc_hipb_confirm_robust_summary_selected.csv"
+      ],
+      "candidate_vs_minus1_worst_gpu_pct": -4.803,
+      "median_us": 237.941,
+      "gpu_median_std_pct": 0.383,
+      "max_round_median_std_pct": 0.726,
+      "note": "Selected by robust offline retune: correct on GPU0/2/3/4, every GPU median is >=3% faster than solution_index=-1, cross-GPU median std <=5%, and per-GPU round-median std <=5%. The same row was also accepted by the 7-GPU top5 robust validation except qkv M=4096, which had one short-run outlier and passed the longer confirmation run."
+    }
+  ]
+}
