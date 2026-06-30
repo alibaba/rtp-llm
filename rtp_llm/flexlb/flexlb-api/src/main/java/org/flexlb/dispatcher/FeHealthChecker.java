@@ -46,15 +46,18 @@ public class FeHealthChecker {
     private final Supplier<List<String>> urlSupplier;
     private final WebClient webClient;
     private final String probePath;
+    private final DispatcherMetricsReporter metricsReporter;
     private final ConcurrentMap<String, AtomicInteger> consecFails = new ConcurrentHashMap<>();
     private ScheduledExecutorService scheduler;
 
     public FeHealthChecker(DispatcherFePoolRefresher refresher,
                            @Qualifier("dispatcherProbeWebClient") WebClient webClient,
-                           DispatchConfig cfg) {
+                           DispatchConfig cfg,
+                           DispatcherMetricsReporter metricsReporter) {
         this.urlSupplier = refresher.source();
         this.webClient = webClient;
         this.probePath = cfg.getProbePath();
+        this.metricsReporter = metricsReporter;
     }
 
     /**
@@ -89,8 +92,13 @@ public class FeHealthChecker {
     public Mono<Void> probeOnce() {
         List<String> urls = urlSupplier.get();
         if (urls == null || urls.isEmpty()) {
+            metricsReporter.reportFePool(0, 0);
             return Mono.empty();
         }
+        // Report the current liveness snapshot (the view FePool.next() picks from) before this
+        // round's probes update it; alive==0 is the all-dead fallback signal.
+        int alive = (int) urls.stream().filter(this::isAlive).count();
+        metricsReporter.reportFePool(urls.size(), alive);
         // Counters are keyed by FE url; drop entries for hosts that left the pool so the map
         // stays bounded by the live fleet even when FE identities churn (autoscaling).
         consecFails.keySet().retainAll(Set.copyOf(urls));

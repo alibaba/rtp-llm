@@ -62,7 +62,8 @@ class BatchHandlerContractTest {
     void setUp() {
         lenient().when(cfg.getSubBatchSpec()).thenReturn(SubBatchSpec.parse("count:2"));
         lenient().when(cfg.isPreAssignBe()).thenReturn(false);
-        handler = new BatchHandler(fanoutService, cfg, batchScheduleClient, passthroughClient);
+        handler = new BatchHandler(fanoutService, cfg, batchScheduleClient, passthroughClient,
+                DispatcherTestSupport.noopMetrics());
     }
 
     private void stubBody(String json) {

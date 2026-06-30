@@ -298,4 +298,63 @@ public class MetricConstant {
      * Forward to master result QPS (status: success/failure)
      */
     public static final String FORWARD_TO_MASTER_RESULT = "app.forward.to.master.result";
+
+    /* ------------------------ Dispatcher (batch fanout) Monitoring -------------------------- */
+
+    /**
+     * Dispatcher request QPS (tags: type=batch/passthrough, path, code=httpStatus).
+     * The {@code code} tag carries 200/4xx/5xx/499, so error rate and client-cancel (499) rate
+     * are both derivable from this single metric — mirrors {@link #ENGINE_BALANCING_MASTER_ALL_QPS}.
+     */
+    public static final String DISPATCHER_ALL_QPS = "app.dispatcher.all.qps";
+
+    /**
+     * Dispatcher end-to-end latency in milliseconds (tags: type, path, code).
+     * Mirrors {@link #ENGINE_BALANCING_MASTER_SCHEDULE_RT}.
+     */
+    public static final String DISPATCHER_ALL_RT = "app.dispatcher.all.rt";
+
+    /**
+     * In-process pre-assign (batch_schedule) call latency in milliseconds from the dispatcher's
+     * client view (tags: result=ok/empty). Complements the master-side
+     * {@link #ENGINE_BALANCING_MASTER_BATCH_SCHEDULE_RT}.
+     */
+    public static final String DISPATCHER_PREASSIGN_RT = "app.dispatcher.preassign.rt";
+
+    /**
+     * Fanout latency in milliseconds: from first chunk dispatch to all sub-batch responses collected.
+     */
+    public static final String DISPATCHER_FANOUT_RT = "app.dispatcher.fanout.rt";
+
+    /**
+     * Per-chunk fanout outcome QPS (tags: result=ok/failed, reason). Mirrors the multi-tag detail
+     * style of {@link #ENGINE_BALANCING_MASTER_SELECT_DETAIL}.
+     */
+    public static final String DISPATCHER_CHUNK_DETAIL_QPS = "app.dispatcher.chunk.detail.qps";
+
+    /**
+     * Per-chunk FE call latency in milliseconds (tags: result=ok/failed).
+     */
+    public static final String DISPATCHER_CHUNK_RT = "app.dispatcher.chunk.rt";
+
+    /**
+     * Items in the inbound batch request array per request (tag: path).
+     */
+    public static final String DISPATCHER_BATCH_ITEMS = "app.dispatcher.batch.items";
+
+    /**
+     * Chunks fanned out per request (tag: path).
+     */
+    public static final String DISPATCHER_BATCH_CHUNKS = "app.dispatcher.batch.chunks";
+
+    /**
+     * FE pool size in the current discovery snapshot. {@code alive == 0} (see
+     * {@link #DISPATCHER_FEPOOL_ALIVE}) is the all-dead fallback signal.
+     */
+    public static final String DISPATCHER_FEPOOL_SIZE = "app.dispatcher.fepool.size";
+
+    /**
+     * FE pool alive count (hosts passing the application-level health probe).
+     */
+    public static final String DISPATCHER_FEPOOL_ALIVE = "app.dispatcher.fepool.alive";
 }

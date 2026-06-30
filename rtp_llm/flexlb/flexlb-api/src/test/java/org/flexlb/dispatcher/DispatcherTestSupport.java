@@ -3,6 +3,7 @@ package org.flexlb.dispatcher;
 import org.flexlb.dao.master.WorkerHost;
 import org.flexlb.discovery.ServiceDiscovery;
 import org.flexlb.discovery.ServiceHostListener;
+import org.flexlb.metric.NoOpFlexMonitor;
 import org.springframework.web.reactive.function.client.WebClient;
 
 import java.util.List;
@@ -24,6 +25,14 @@ import static org.mockito.Mockito.when;
 final class DispatcherTestSupport {
 
     private DispatcherTestSupport() {
+    }
+
+    /**
+     * A real {@link DispatcherMetricsReporter} backed by the no-op monitor — every report is a
+     * cheap no-op, so tests that don't assert metrics can pass it without extra mocking.
+     */
+    static DispatcherMetricsReporter noopMetrics() {
+        return new DispatcherMetricsReporter(NoOpFlexMonitor.getInstance());
     }
 
     /**
@@ -54,7 +63,7 @@ final class DispatcherTestSupport {
         when(refresher.source()).thenReturn(urls);
         DispatchConfig cfg = new DispatchConfig();
         cfg.setProbePath(probePath);
-        return new FeHealthChecker(refresher, webClient, cfg);
+        return new FeHealthChecker(refresher, webClient, cfg, noopMetrics());
     }
 
     /**

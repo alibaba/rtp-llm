@@ -39,16 +39,19 @@ public class BatchHandler {
     private final SubBatchSpec subBatch;
     private final BatchScheduleClient batchScheduleClient;
     private final PassthroughClient passthroughClient;
+    private final DispatcherMetricsReporter metricsReporter;
     private final boolean preAssignBe;
 
     public BatchHandler(FanoutService fanoutService,
                         DispatchConfig cfg,
                         BatchScheduleClient batchScheduleClient,
-                        PassthroughClient passthroughClient) {
+                        PassthroughClient passthroughClient,
+                        DispatcherMetricsReporter metricsReporter) {
         this.fanoutService = fanoutService;
         this.subBatch = cfg.getSubBatchSpec();
         this.batchScheduleClient = batchScheduleClient;
         this.passthroughClient = passthroughClient;
+        this.metricsReporter = metricsReporter;
         this.preAssignBe = cfg.isPreAssignBe();
     }
 
@@ -83,10 +86,16 @@ public class BatchHandler {
             pv.setChunkCount(chunks.size());
             List<JSONObject> chunkBodies = BatchChunkAssembler.buildChunkBodies(
                     body, chunks, spec.getRequestArrayField());
+            long preAssignStart = System.currentTimeMillis();
             return resolvePreAssignedTargets(chunks.size())
                     .flatMap(targets -> {
+                        metricsReporter.reportPreassignRt(
+                                System.currentTimeMillis() - preAssignStart, !targets.isEmpty());
                         BatchChunkAssembler.stampPreAssignedBe(chunkBodies, targets);
+                        long fanoutStart = System.currentTimeMillis();
                         return fanoutService.dispatchChunks(spec.getPath(), chunkBodies, spec)
+                                .doOnNext(subs -> metricsReporter.reportFanoutRt(
+                                        System.currentTimeMillis() - fanoutStart))
                                 .map(subs -> ResponseMerger.merge(subs, spec))
                                 .flatMap(merged -> {
                                     pv.setFailedChunks(merged.failedReasons().size());
@@ -119,6 +128,10 @@ public class BatchHandler {
         }
         pv.finish(status, error);
         pv.emit(pvLogger);
+        metricsReporter.reportRequest("batch", pv.getPath(), status, pv.getCostMs());
+        if (pv.getChunkCount() > 0) {
+            metricsReporter.reportBatchShape(pv.getPath(), pv.getTotalItems(), pv.getChunkCount());
+        }
     }
 
     private Mono<ServerResponse> badRequest(String message) {

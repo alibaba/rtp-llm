@@ -61,11 +61,14 @@ public class PassthroughClient {
 
     private final WebClient webClient;
     private final FePool fePool;
+    private final DispatcherMetricsReporter metricsReporter;
 
     public PassthroughClient(@Qualifier("dispatcherPassthroughWebClient") WebClient webClient,
-                             FePool fePool) {
+                             FePool fePool,
+                             DispatcherMetricsReporter metricsReporter) {
         this.webClient = webClient;
         this.fePool = fePool;
+        this.metricsReporter = metricsReporter;
     }
 
     /**
@@ -131,6 +134,8 @@ public class PassthroughClient {
                             .flatMap(clientResponse -> {
                                 pv.finish(clientResponse.statusCode().value(), null);
                                 pv.emit(pvLogger);
+                                metricsReporter.reportRequest("passthrough", fePath,
+                                        clientResponse.statusCode().value(), pv.getCostMs());
                                 return ServerResponse.status(clientResponse.statusCode())
                                         .headers(h -> copyEndToEndHeaders(clientResponse.headers().asHttpHeaders(), h))
                                         .body(BodyInserters.fromDataBuffers(
@@ -145,6 +150,7 @@ public class PassthroughClient {
                             fePath, pv.getFeHost(), reason);
                     pv.finish(502, reason);
                     pv.emit(pvLogger);
+                    metricsReporter.reportRequest("passthrough", fePath, 502, pv.getCostMs());
                 })
                 .onErrorResume(e -> DispatcherResponses.error(
                         502, "passthrough_failed", String.valueOf(e.getMessage())));

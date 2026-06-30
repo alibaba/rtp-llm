@@ -532,7 +532,7 @@ class DispatcherE2ETest {
         feConnectionProvider = reactor.netty.resources.ConnectionProvider.builder("e2e").build();
         FeClient feClient = new FeClient(WebClient.builder(), feConnectionProvider, cfg);
         org.flexlb.dispatcher.FanoutService fanout =
-                new org.flexlb.dispatcher.FanoutService(feClient, pool);
+                new org.flexlb.dispatcher.FanoutService(feClient, pool, DispatcherTestSupport.noopMetrics());
         BatchScheduleClient batchScheduleClient = new BatchScheduleClient(null) {
             @Override
             public reactor.core.publisher.Mono<List<org.flexlb.dao.loadbalance.BatchScheduleTarget>> requestTargets(int count) {
@@ -540,9 +540,10 @@ class DispatcherE2ETest {
             }
         };
         PassthroughClient passthrough =
-                new PassthroughClient(WebClient.create(), pool);
+                new PassthroughClient(WebClient.create(), pool, DispatcherTestSupport.noopMetrics());
         org.flexlb.dispatcher.BatchHandler batchHandler =
-                new org.flexlb.dispatcher.BatchHandler(fanout, cfg, batchScheduleClient, passthrough);
+                new org.flexlb.dispatcher.BatchHandler(fanout, cfg, batchScheduleClient, passthrough,
+                        DispatcherTestSupport.noopMetrics());
 
         // Real inspection handler — refresher source returns the same pool URLs the router fans
         // out to, so /dispatcher/_snapshot reflects what dispatcher actually sees. FeHealthChecker

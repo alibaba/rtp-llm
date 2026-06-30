@@ -33,7 +33,7 @@ class FanoutServiceTest {
         FePool pool = fePool(List.of("http://a"));
         when(feClient.postBytes(anyString(), anyString(), any()))
                 .thenReturn(Mono.error(new RuntimeException("connection refused")));
-        FanoutService svc = new FanoutService(feClient, pool);
+        FanoutService svc = new FanoutService(feClient, pool, DispatcherTestSupport.noopMetrics());
 
         ch.qos.logback.classic.Logger flexlbLogger =
                 (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory.getLogger("flexlbLogger");
@@ -74,7 +74,7 @@ class FanoutServiceTest {
         when(feClient.postBytes(eq("http://b"), eq("/batch_infer"), any()))
                 .thenReturn(Mono.just(responseBatchBytes("r2")));
 
-        FanoutService svc = new FanoutService(feClient, pool);
+        FanoutService svc = new FanoutService(feClient, pool, DispatcherTestSupport.noopMetrics());
 
         StepVerifier.create(svc.dispatchChunks(
                         "/batch_infer", List.of(chunk("p0", "p1"), chunk("p2")), BATCH_INFER))
@@ -105,7 +105,7 @@ class FanoutServiceTest {
         when(feClient.postBytes(eq("http://b"), eq("/batch_infer"), any()))
                 .thenReturn(Mono.error(new RuntimeException("FE down")));
 
-        FanoutService svc = new FanoutService(feClient, pool);
+        FanoutService svc = new FanoutService(feClient, pool, DispatcherTestSupport.noopMetrics());
 
         StepVerifier.create(svc.dispatchChunks(
                         "/batch_infer", List.of(chunk("p0", "p1"), chunk("p2")), BATCH_INFER))
@@ -126,7 +126,7 @@ class FanoutServiceTest {
         FeClient feClient = mock(FeClient.class);
         FePool pool = fePool(List.of());
 
-        FanoutService svc = new FanoutService(feClient, pool);
+        FanoutService svc = new FanoutService(feClient, pool, DispatcherTestSupport.noopMetrics());
 
         StepVerifier.create(svc.dispatchChunks(
                         "/batch_infer", List.of(chunk("p0", "p1")), BATCH_INFER))
@@ -149,7 +149,7 @@ class FanoutServiceTest {
         ArgumentCaptor<byte[]> payload = ArgumentCaptor.forClass(byte[].class);
         when(feClient.postBytes(anyString(), anyString(), payload.capture()))
                 .thenReturn(Mono.just(responseBatchBytes("r0")));
-        FanoutService svc = new FanoutService(feClient, pool);
+        FanoutService svc = new FanoutService(feClient, pool, DispatcherTestSupport.noopMetrics());
 
         JSONObject embeddingBody = new JSONObject();
         embeddingBody.put("input", JSONArray.of("a"));

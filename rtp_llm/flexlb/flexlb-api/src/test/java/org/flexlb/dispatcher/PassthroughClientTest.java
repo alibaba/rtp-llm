@@ -56,7 +56,7 @@ class PassthroughClientTest {
         String base = "http://" + server.getHostName() + ":" + server.getPort();
         FePool pool = DispatcherTestSupport.fePool(() -> List.of(base), url -> true);
         PassthroughClient client =
-                new PassthroughClient(WebClient.builder().build(), pool);
+                new PassthroughClient(WebClient.builder().build(), pool, DispatcherTestSupport.noopMetrics());
 
         MockServerRequest request = MockServerRequest.builder()
                 .method(HttpMethod.GET)
@@ -83,7 +83,7 @@ class PassthroughClientTest {
         String base = "http://" + server.getHostName() + ":" + server.getPort();
         FePool pool = DispatcherTestSupport.fePool(() -> List.of(base), url -> true);
         PassthroughClient client =
-                new PassthroughClient(WebClient.builder().build(), pool);
+                new PassthroughClient(WebClient.builder().build(), pool, DispatcherTestSupport.noopMetrics());
 
         MockServerRequest request = MockServerRequest.builder()
                 .method(HttpMethod.GET)
@@ -103,7 +103,7 @@ class PassthroughClientTest {
     void emptyFePoolBecomes502JsonError() {
         FePool pool = DispatcherTestSupport.fePool(List::of, url -> true);
         PassthroughClient client =
-                new PassthroughClient(WebClient.builder().build(), pool);
+                new PassthroughClient(WebClient.builder().build(), pool, DispatcherTestSupport.noopMetrics());
 
         MockServerRequest request = MockServerRequest.builder()
                 .method(HttpMethod.GET)
@@ -127,7 +127,7 @@ class PassthroughClientTest {
         String base = "http://" + server.getHostName() + ":" + server.getPort();
         FePool pool = DispatcherTestSupport.fePool(() -> List.of(base), url -> true);
         PassthroughClient client =
-                new PassthroughClient(WebClient.builder().build(), pool);
+                new PassthroughClient(WebClient.builder().build(), pool, DispatcherTestSupport.noopMetrics());
 
         MockServerRequest request = MockServerRequest.builder()
                 .method(HttpMethod.GET)
@@ -148,7 +148,7 @@ class PassthroughClientTest {
         server.enqueue(new MockResponse().setBody("ok").setResponseCode(200));
         FePool pool = DispatcherTestSupport.fePool(() -> List.of("http://" + server.getHostName() + ":" + server.getPort()), url -> true);
         PassthroughClient passthrough =
-                new PassthroughClient(WebClient.builder().build(), pool);
+                new PassthroughClient(WebClient.builder().build(), pool, DispatcherTestSupport.noopMetrics());
 
         MockServerRequest request = MockServerRequest.builder()
                 .method(HttpMethod.GET)
@@ -169,7 +169,7 @@ class PassthroughClientTest {
         String base = "http://" + server.getHostName() + ":" + server.getPort();
         FePool pool = DispatcherTestSupport.fePool(() -> List.of(base), url -> true);
         PassthroughClient client =
-                new PassthroughClient(WebClient.builder().build(), pool);
+                new PassthroughClient(WebClient.builder().build(), pool, DispatcherTestSupport.noopMetrics());
 
         MockServerRequest request = MockServerRequest.builder()
                 .method(HttpMethod.GET)
@@ -204,7 +204,7 @@ class PassthroughClientTest {
         String base = "http://" + server.getHostName() + ":" + server.getPort();
         FePool pool = DispatcherTestSupport.fePool(() -> List.of(base), url -> true);
         PassthroughClient client =
-                new PassthroughClient(WebClient.builder().build(), pool);
+                new PassthroughClient(WebClient.builder().build(), pool, DispatcherTestSupport.noopMetrics());
 
         MockServerRequest request = MockServerRequest.builder()
                 .method(HttpMethod.GET)
@@ -234,7 +234,7 @@ class PassthroughClientTest {
         String base = "http://" + server.getHostName() + ":" + server.getPort();
         FePool pool = DispatcherTestSupport.fePool(() -> List.of(base), url -> true);
         PassthroughClient client =
-                new PassthroughClient(WebClient.builder().build(), pool);
+                new PassthroughClient(WebClient.builder().build(), pool, DispatcherTestSupport.noopMetrics());
 
         MockServerRequest request = MockServerRequest.builder()
                 .method(HttpMethod.GET)
@@ -260,7 +260,7 @@ class PassthroughClientTest {
         String base = "http://" + server.getHostName() + ":" + server.getPort();
         FePool pool = DispatcherTestSupport.fePool(() -> List.of(base), url -> true);
         PassthroughClient client =
-                new PassthroughClient(WebClient.builder().build(), pool);
+                new PassthroughClient(WebClient.builder().build(), pool, DispatcherTestSupport.noopMetrics());
 
         MockServerRequest first = MockServerRequest.builder()
                 .method(HttpMethod.GET).uri(URI.create("/a")).body(Flux.empty());
@@ -322,7 +322,7 @@ class PassthroughClientTest {
         FePool pool = DispatcherTestSupport.fePool(
                 () -> List.of("http://" + server.getHostName() + ":" + server.getPort()),
                 url -> true);
-        return new PassthroughClient(webClient, pool);
+        return new PassthroughClient(webClient, pool, DispatcherTestSupport.noopMetrics());
     }
 
     private static RecordedRequest takeRequestWithin(MockWebServer server) throws InterruptedException {

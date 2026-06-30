@@ -88,7 +88,8 @@ class BatchHandlerPvTest {
         byte[] body = "{\"prompt_batch\":[\"a\",\"b\",\"c\",\"d\",\"e\"]}".getBytes(StandardCharsets.UTF_8);
         when(serverRequest.bodyToMono(byte[].class)).thenReturn(Mono.just(body));
 
-        BatchHandler handler = new BatchHandler(fanoutService, cfg, batchScheduleClient, passthroughClient);
+        BatchHandler handler = new BatchHandler(fanoutService, cfg, batchScheduleClient, passthroughClient,
+                DispatcherTestSupport.noopMetrics());
         handler.handle(serverRequest, spec).block();
 
         assertEquals(1, pvAppender.list.size(), "exactly one pv record per request");

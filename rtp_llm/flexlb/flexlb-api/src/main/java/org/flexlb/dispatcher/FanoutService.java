@@ -46,6 +46,7 @@ public class FanoutService {
 
     private final FeClient feClient;
     private final FePool fePool;
+    private final DispatcherMetricsReporter metricsReporter;
     private final AtomicLong lastFailureWarnNanos = new AtomicLong();
     private final AtomicLong suppressedFailureWarns = new AtomicLong();
 
@@ -80,23 +81,44 @@ public class FanoutService {
      */
     private Mono<SubBatchResult> dispatchOne(String fePath, ChunkPlan plan, JSONWriter.Feature[] features) {
         return Mono.fromCallable(() -> new Pick(fePool.next(), JSON.toJSONBytes(plan.body(), features)))
-                .flatMap(pick -> feClient.postBytes(pick.feUrl(), fePath, pick.payload())
-                        .publishOn(Schedulers.parallel())
-                        .map(bytes -> SubBatchResult.ok(
-                                JSON.parseObject(bytes), plan.chunkSize(), plan.startIndex()))
-                        .onErrorResume(e -> {
-                            String reason = DispatcherResponses.briefReason(e);
-                            warnRateLimited("FE chunk failed: url={}, path={}, size={}, err={}, suppressed={}",
-                                    pick.feUrl(), fePath, plan.chunkSize(), reason);
-                            return Mono.just(SubBatchResult.failed(plan.chunkSize(), plan.startIndex(),
-                                    reason, DispatcherResponses.httpStatusOf(e)));
-                        }))
+                .flatMap(pick -> {
+                    long start = System.currentTimeMillis();
+                    return feClient.postBytes(pick.feUrl(), fePath, pick.payload())
+                            .publishOn(Schedulers.parallel())
+                            .map(bytes -> {
+                                metricsReporter.reportChunk("ok", "ok", System.currentTimeMillis() - start);
+                                return SubBatchResult.ok(
+                                        JSON.parseObject(bytes), plan.chunkSize(), plan.startIndex());
+                            })
+                            .onErrorResume(e -> {
+                                String reason = DispatcherResponses.briefReason(e);
+                                int feStatus = DispatcherResponses.httpStatusOf(e);
+                                metricsReporter.reportChunk("failed", reasonCategory(feStatus),
+                                        System.currentTimeMillis() - start);
+                                warnRateLimited("FE chunk failed: url={}, path={}, size={}, err={}, suppressed={}",
+                                        pick.feUrl(), fePath, plan.chunkSize(), reason);
+                                return Mono.just(SubBatchResult.failed(plan.chunkSize(), plan.startIndex(),
+                                        reason, feStatus));
+                            });
+                })
                 .onErrorResume(e -> {
                     String reason = DispatcherResponses.briefReason(e);
+                    metricsReporter.reportChunk("failed", "pick_failed", 0);
                     warnRateLimited("FE pick failed for chunk size={}, err={}, suppressed={}",
                             plan.chunkSize(), reason);
                     return Mono.just(SubBatchResult.failed(plan.chunkSize(), plan.startIndex(), reason));
                 });
+    }
+
+    /** Bounded failure-reason category for the {@code reason} metric tag (keeps cardinality low). */
+    private static String reasonCategory(int feStatus) {
+        if (feStatus >= 400 && feStatus < 500) {
+            return "http_4xx";
+        }
+        if (feStatus >= 500) {
+            return "http_5xx";
+        }
+        return "transport";
     }
 
     /** A chunk's request body plus its absolute offset and item count in the batch. */
