@@ -17,6 +17,7 @@ inline void pinThreadToDeviceOnce(int device_id) {
         return;
     }
 
+#if USING_CUDA || USING_ROCM
     thread_local int pinned_device = -1;
     if (pinned_device == device_id) {
         return;
@@ -27,7 +28,12 @@ inline void pinThreadToDeviceOnce(int device_id) {
 #elif USING_ROCM
     at::hip::set_device(device_id);
 #endif
+    // Keep fail-fast semantics: set_device exceptions propagate, and the
+    // cached thread state is updated only after success so later calls retry.
     pinned_device = device_id;
+#else
+    // CPU-only builds intentionally no-op; production cache-store builds pin to a GPU backend.
+#endif
 }
 
 }  // namespace rtp_llm
