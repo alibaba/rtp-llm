@@ -87,6 +87,7 @@ cc_library(
         "ModelStatusServiceTest.cc",
         "ParallelInfoTest.cc",
         "SysCmdServiceTest.cc",
+        "SleepServiceTest.cc",
         "TokenizerEncodeResponseTest.cc",
         "TokenizerServiceTest.cc",
         "GenerateStreamWrapperTest.cc",
@@ -99,6 +100,65 @@ cc_library(
     ],
     deps = test_deps + [
         "//rtp_llm/cpp/api_server:http_api_server",
+    ],
+    copts = test_copts,
+    alwayslink = 1,
+)
+
+# SleepService admin endpoints unittest, runs cpp gtest via python
+py_test(
+    name = "sleep_service_unittest",  # 需要有一个同名 py 文件
+    python_version = 'PY3',
+    srcs_version = 'PY3',
+    srcs = [
+        "sleep_service_unittest.py",
+    ],
+    deps = [
+        ":sleep_service_unittest_pylib",
+    ],
+    imports = [
+        ".",
+    ],
+    env = select({
+        "@//:using_rocm": {"TEST_USING_DEVICE": "ROCM"},
+        "//conditions:default": {"TEST_USING_DEVICE": "CUDA"},
+    }),
+    exec_properties = {'gpu':'H20'},
+)
+
+py_library(
+    name = "sleep_service_unittest_pylib",
+    srcs = [],
+    deps = [
+        "//rtp_llm:torch",
+    ],
+    data = [
+        ":sleep_service_unittest_lib.so",
+    ],
+)
+
+cc_binary(
+    name = "sleep_service_unittest_lib.so",
+    srcs = [],
+    deps = [
+        ":sleep_service_unittest_lib",
+        "//rtp_llm/cpp/pybind:th_compute_lib",
+    ],
+    data = ["//:rtp_compute_ops"],
+    linkshared = 1,
+)
+
+cc_library(
+    name = "sleep_service_unittest_lib",
+    srcs = [
+        "mock/MockEngineBase.h",
+        "mock/MockHttpResponseWriter.h",
+        "SleepServiceTest.cc",
+        "SleepServiceTestMain.cc",
+    ],
+    deps = test_deps + [
+        "//rtp_llm/cpp/api_server:http_api_server",
+        "//rtp_llm/cpp/engine_base/sleep:sleep",
     ],
     copts = test_copts,
     alwayslink = 1,
