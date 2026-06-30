@@ -92,13 +92,18 @@ def _try_register_mainse_comparers() -> None:
         from rtp_llm.test.smoke.mainse.mainse_decode_arpc_comparer import MainseDecodeArpcComparer
         from rtp_llm.test.smoke.mainse.mainse_embedding_arpc_comparer import MainseEmbeddingArpcComparer
 
+        # Narrow predicates by the per-mode sub-flag: the previous
+        # "mainse_module or mainse" predicate on the decode comparer matched every
+        # mainse case (first-match-wins), so embedding cases were misrouted to the
+        # decode comparer and MainseEmbeddingArpcComparer was never reached.
         register_comparer(
             lambda q_r, ep: q_r.get("mainse_module", False)
-            or q_r.get("mainse", False),
+            and q_r.get("use_decode_arpc", False),
             MainseDecodeArpcComparer,
         )
         register_comparer(
-            lambda q_r, ep: q_r.get("mainse_arpc", False),
+            lambda q_r, ep: q_r.get("mainse_module", False)
+            and q_r.get("use_emb_arpc", False),
             MainseEmbeddingArpcComparer,
         )
     except (ImportError, ModuleNotFoundError):
