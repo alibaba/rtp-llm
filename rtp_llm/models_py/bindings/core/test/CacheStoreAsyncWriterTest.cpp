@@ -1,8 +1,9 @@
 #include "gtest/gtest.h"
-#define private public
 #include "rtp_llm/models_py/bindings/core/CacheStoreAsyncWriter.h"
 
 #include <atomic>
+#include <stdexcept>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -17,15 +18,15 @@ namespace rtp_llm {
 #if USING_CUDA || USING_ROCM
 namespace {
 
-bool hasGpuDeviceForTest() {
+int gpuDeviceCountForTest() {
 #if USING_CUDA
     int device_count = 0;
-    return cudaGetDeviceCount(&device_count) == cudaSuccess && device_count > 0;
+    return cudaGetDeviceCount(&device_count) == cudaSuccess ? device_count : 0;
 #elif USING_ROCM
     int device_count = 0;
-    return hipGetDeviceCount(&device_count) == hipSuccess && device_count > 0;
+    return hipGetDeviceCount(&device_count) == hipSuccess ? device_count : 0;
 #else
-    return false;
+    return 0;
 #endif
 }
 
@@ -47,6 +48,32 @@ int currentDeviceForTest() {
 #endif
 }
 
+bool setDeviceForTest(int device) {
+#if USING_CUDA
+    return cudaSetDevice(device) == cudaSuccess;
+#elif USING_ROCM
+    return hipSetDevice(device) == hipSuccess;
+#else
+    return false;
+#endif
+}
+
+class ScopedDeviceResetForTest {
+public:
+    ScopedDeviceResetForTest(): original_device_(currentDeviceForTest()) {}
+    ~ScopedDeviceResetForTest() {
+        if (original_device_ >= 0) {
+            setDeviceForTest(original_device_);
+        }
+    }
+
+    ScopedDeviceResetForTest(const ScopedDeviceResetForTest&)            = delete;
+    ScopedDeviceResetForTest& operator=(const ScopedDeviceResetForTest&) = delete;
+
+private:
+    int original_device_;
+};
+
 }  // namespace
 #endif
 
@@ -54,10 +81,8 @@ class CacheStoreAsyncWriterTest: public ::testing::Test {};
 
 TEST_F(CacheStoreAsyncWriterTest, InitAndWaitBasic) {
     CacheStoreAsyncWriter writer;
-    ASSERT_TRUE(writer.state_ == CacheStoreAsyncWriter::State::IDLE);
 
     writer.init();
-    ASSERT_FALSE(writer.state_ == CacheStoreAsyncWriter::State::IDLE);
 
     std::atomic<int> counter{0};
     writer.submit([&counter]() { counter.fetch_add(1); });
@@ -65,7 +90,6 @@ TEST_F(CacheStoreAsyncWriterTest, InitAndWaitBasic) {
     writer.submit([&counter]() { counter.fetch_add(1); });
 
     writer.waitAllDone();
-    ASSERT_TRUE(writer.state_ == CacheStoreAsyncWriter::State::IDLE);
     ASSERT_EQ(3, counter.load());
 }
 
@@ -130,11 +154,17 @@ TEST_F(CacheStoreAsyncWriterTest, AsyncExecution) {
 
 TEST_F(CacheStoreAsyncWriterTest, AsyncExecutionWithDeviceId) {
 #if USING_CUDA || USING_ROCM
-    if (!hasGpuDeviceForTest()) {
-        GTEST_SKIP() << "No GPU device available";
+    if (gpuDeviceCountForTest() < 2) {
+        GTEST_SKIP() << "Need at least two GPU devices to prove non-default device pinning";
     }
 
-    CacheStoreAsyncWriter writer(0);
+    ScopedDeviceResetForTest reset_device;
+    constexpr int            kMainThreadDevice = 0;
+    constexpr int            kWriterDevice     = 1;
+    ASSERT_TRUE(setDeviceForTest(kMainThreadDevice));
+    ASSERT_EQ(kMainThreadDevice, currentDeviceForTest());
+
+    CacheStoreAsyncWriter writer(kWriterDevice);
     writer.init();
 
     std::atomic<int> counter{0};
@@ -145,10 +175,9 @@ TEST_F(CacheStoreAsyncWriterTest, AsyncExecutionWithDeviceId) {
     });
     writer.waitAllDone();
 
-    ASSERT_TRUE(writer.state_ == CacheStoreAsyncWriter::State::IDLE);
     ASSERT_EQ(1, counter.load());
-    ASSERT_EQ(0, observed_device.load(std::memory_order_acquire));
-    ASSERT_EQ(0, writer.pending_count_.load());
+    ASSERT_EQ(kWriterDevice, observed_device.load(std::memory_order_acquire));
+    ASSERT_EQ(kMainThreadDevice, currentDeviceForTest());
 #else
     GTEST_SKIP() << "GPU device pinning is unavailable in CPU-only builds";
 #endif
@@ -161,10 +190,8 @@ TEST_F(CacheStoreAsyncWriterTest, ExceptionPropagation) {
     writer.submit([]() { throw std::runtime_error("test error"); });
 
     ASSERT_THROW(writer.waitAllDone(), std::runtime_error);
-    ASSERT_EQ(0, writer.pending_count_.load());
 
     // After exception, writer should be back in IDLE and re-initializable.
-    ASSERT_TRUE(writer.state_ == CacheStoreAsyncWriter::State::IDLE);
     writer.init();
     std::atomic<int> counter{0};
     writer.submit([&counter]() { counter.fetch_add(1); });
@@ -192,7 +219,6 @@ TEST_F(CacheStoreAsyncWriterTest, WaitWithoutSubmit) {
     CacheStoreAsyncWriter writer;
     writer.init();
     writer.waitAllDone();
-    ASSERT_TRUE(writer.state_ == CacheStoreAsyncWriter::State::IDLE);
 }
 
 TEST_F(CacheStoreAsyncWriterTest, ManyCycles) {
