@@ -97,6 +97,8 @@ void execBroadcast(const BroadcastParams& params);
 // CPU metadata broadcast. Uses UDS when the CPU TP broadcaster is initialized;
 // otherwise allow_fallback controls whether regular execBroadcast fallback is
 // used. All ranks must call with identical tensor counts and byte sizes.
+// broadcastCPU is single-thread only: do not call it concurrently, re-entrantly,
+// or from a thread different from the CPU TP broadcaster initializer.
 void            execBroadcastCpu(const BroadcastParams& params, bool allow_fallback = true);
 bool            isCpuTpBroadcasterInitialized();
 AllReduceOutput execAllReduce(const AllReduceParams& params);
