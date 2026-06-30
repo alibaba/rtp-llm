@@ -66,7 +66,7 @@ void CacheStoreAsyncWriter::submit(std::function<void()> task) {
     auto wrapped = [this, task = std::move(task)]() {
         PendingTaskGuard pending_task_guard(*this);
         try {
-            pinThreadToDeviceOnce(device_id_);
+            setCurrentThreadDeviceIfNeeded(device_id_);
             task();
         } catch (...) {
             storeCurrentException();
