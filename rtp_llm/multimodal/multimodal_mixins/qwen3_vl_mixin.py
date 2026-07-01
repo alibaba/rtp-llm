@@ -14,6 +14,7 @@ from transformers import (
 )
 
 from rtp_llm.config.py_config_modules import VitConfig
+from rtp_llm.metrics.kmonitor_metric_reporter import GaugeMetrics
 from rtp_llm.multimodal.multimodal_mixin_register import register_multimodal_mixin
 from rtp_llm.multimodal.multimodal_mixins.base_multimodal_mixin import (
     BaseVitWeights,
@@ -25,6 +26,10 @@ from rtp_llm.multimodal.multimodal_mixins.qwen2_5_vl.qwen2_5_vl_mixin import (
     smart_resize,
 )
 from rtp_llm.multimodal.multimodal_util import get_bytes_io_from_url
+from rtp_llm.multimodal.vit_metrics import (
+    record_vit_preprocess_value,
+    vit_preprocess_timer,
+)
 from rtp_llm.ops import MMPreprocessConfig, MultimodalInput
 from rtp_llm.utils.base_model_datatypes import MMUrlType
 from rtp_llm.utils.flash_attn_utils import can_use_flash_attn
@@ -79,9 +84,13 @@ class Qwen3_VLImageEmbedding(Qwen2_5_VLImageEmbedding):
         mm_type = mm_input.mm_type
         do_resize = True
         if mm_type == MMUrlType.DEFAULT or mm_type == MMUrlType.IMAGE:
-            image = Image.open(
-                get_bytes_io_from_url(mm_input.url, vit_config.download_headers)
-            )
+            tags = {"model": "qwen3_vl", "mm_type": "image"}
+            with vit_preprocess_timer(GaugeMetrics.VIT_IMAGE_FETCH_RT_US_METRIC, tags):
+                image_data = get_bytes_io_from_url(
+                    mm_input.url, vit_config.download_headers
+                )
+            with vit_preprocess_timer(GaugeMetrics.VIT_IMAGE_DECODE_RT_US_METRIC, tags):
+                image = Image.open(image_data)
             if (
                 mm_input.mm_preprocess_config.height != -1
                 and mm_input.mm_preprocess_config.width != -1
@@ -91,7 +100,15 @@ class Qwen3_VLImageEmbedding(Qwen2_5_VLImageEmbedding):
                     mm_input.mm_preprocess_config.width,
                     factor=factor,
                 )
-                image = image.resize((resized_width, resized_height))
+                with vit_preprocess_timer(
+                    GaugeMetrics.VIT_IMAGE_RESIZE_RT_US_METRIC, tags
+                ):
+                    image = image.resize((resized_width, resized_height))
+                record_vit_preprocess_value(
+                    GaugeMetrics.VIT_RESIZED_PIXEL_COUNT_METRIC,
+                    resized_width * resized_height,
+                    tags,
+                )
                 do_resize = False
             elif (
                 mm_input.mm_preprocess_config.max_pixels != -1
@@ -115,18 +132,40 @@ class Qwen3_VLImageEmbedding(Qwen2_5_VLImageEmbedding):
                     min_pixels=min_pixels,
                     max_pixels=max_pixels,
                 )
-                image = image.resize((resized_width, resized_height))
+                with vit_preprocess_timer(
+                    GaugeMetrics.VIT_IMAGE_RESIZE_RT_US_METRIC, tags
+                ):
+                    image = image.resize((resized_width, resized_height))
+                record_vit_preprocess_value(
+                    GaugeMetrics.VIT_RESIZED_PIXEL_COUNT_METRIC,
+                    resized_width * resized_height,
+                    tags,
+                )
                 do_resize = False
-            res = processor.image_processor(
-                image, return_tensors="pt", do_resize=do_resize
-            )
+            with vit_preprocess_timer(
+                GaugeMetrics.VIT_IMAGE_PROCESSOR_RT_US_METRIC, tags
+            ):
+                res = processor.image_processor(
+                    image, return_tensors="pt", do_resize=do_resize
+                )
             return res["pixel_values"], res["image_grid_thw"]
         elif mm_type == MMUrlType.VIDEO:
+            tags = {"model": "qwen3_vl", "mm_type": "video"}
+            with vit_preprocess_timer(GaugeMetrics.VIT_IMAGE_FETCH_RT_US_METRIC, tags):
+                video_data = get_bytes_io_from_url(
+                    mm_input.url, vit_config.download_headers
+                )
             video = Qwen3_VLImageEmbedding.load_video(
-                get_bytes_io_from_url(mm_input.url, vit_config.download_headers),
+                video_data,
                 mm_input.mm_preprocess_config,
+                vit_metrics_tags=tags,
             )
-            res = processor.video_processor(video, return_tensors="pt", do_resize=True)
+            with vit_preprocess_timer(
+                GaugeMetrics.VIT_IMAGE_PROCESSOR_RT_US_METRIC, tags
+            ):
+                res = processor.video_processor(
+                    video, return_tensors="pt", do_resize=True
+                )
             return res["pixel_values_videos"], res["video_grid_thw"]
         else:
             raise Exception("unknown mm url type")

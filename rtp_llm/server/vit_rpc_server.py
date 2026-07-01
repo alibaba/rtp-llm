@@ -1,5 +1,7 @@
 import logging
+import time
 from concurrent import futures
+from typing import Dict
 
 import grpc
 import torch
@@ -22,11 +24,50 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2_grpc import (
     add_MultimodalRpcServiceServicer_to_server,
 )
 from rtp_llm.distribute.distributed_server import get_world_info
+from rtp_llm.metrics import kmonitor
+from rtp_llm.metrics.kmonitor_metric_reporter import AccMetrics, GaugeMetrics
 from rtp_llm.model_factory import ModelFactory
 from rtp_llm.multimodal.mm_process_engine import MMEmbeddingRes, MMProcessEngine
 from rtp_llm.ops import MMPreprocessConfig, MultimodalInput
 from rtp_llm.server.server_args.server_args import setup_args
 from rtp_llm.utils.grpc_util import trans_from_tensor, trans_tensor
+
+
+def _now_us() -> int:
+    return time.monotonic_ns() // 1000
+
+
+def _tensor_pb_bytes(tensor_pb) -> int:
+    return (
+        len(tensor_pb.fp32_data)
+        + len(tensor_pb.int32_data)
+        + len(tensor_pb.fp16_data)
+        + len(tensor_pb.bf16_data)
+    )
+
+
+def _report_output_metrics(output_pb: MultimodalOutputPB, tags: Dict[str, str]) -> None:
+    kmonitor.report(
+        GaugeMetrics.VIT_RPC_RESPONSE_BYTES_METRIC, output_pb.ByteSize(), tags
+    )
+    kmonitor.report(
+        GaugeMetrics.VIT_RESPONSE_EMBEDDING_BYTES_METRIC,
+        _tensor_pb_bytes(output_pb.multimodal_embedding),
+        tags,
+    )
+    kmonitor.report(
+        GaugeMetrics.VIT_RESPONSE_POS_BYTES_METRIC,
+        _tensor_pb_bytes(output_pb.multimodal_pos_id),
+        tags,
+    )
+    kmonitor.report(
+        GaugeMetrics.VIT_RESPONSE_DEEPSTACK_BYTES_METRIC,
+        sum(_tensor_pb_bytes(extra) for extra in output_pb.multimodal_extra_input),
+        tags,
+    )
+    kmonitor.report(
+        GaugeMetrics.VIT_OUTPUT_TOKEN_COUNT_METRIC, sum(output_pb.split_size), tags
+    )
 
 
 def trans_output(res: MMEmbeddingRes):
@@ -58,9 +99,55 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
         self.engine = mm_process_engine
 
     def RemoteMultimodalEmbedding(self, multimodal_inputs: MultimodalInputsPB, context):
-        res: MMEmbeddingRes = self.engine.mm_embedding_rpc(multimodal_inputs)
-        res = trans_output(res)
-        return res
+        tags = {"source": "vit_server"}
+        start_us = _now_us()
+        lifecycle_reported = False
+
+        def _report_lifecycle():
+            nonlocal lifecycle_reported
+            if lifecycle_reported:
+                return
+            lifecycle_reported = True
+            kmonitor.report(
+                GaugeMetrics.VIT_RPC_SERVER_LIFECYCLE_RT_US_METRIC,
+                _now_us() - start_us,
+                tags,
+            )
+
+        callback_added = False
+        if hasattr(context, "add_callback"):
+            callback_added = context.add_callback(_report_lifecycle)
+
+        try:
+            kmonitor.report(
+                GaugeMetrics.VIT_RPC_REQUEST_BYTES_METRIC,
+                multimodal_inputs.ByteSize(),
+                tags,
+            )
+            kmonitor.report(
+                GaugeMetrics.VIT_INPUT_IMAGE_COUNT_METRIC,
+                len(multimodal_inputs.multimodal_inputs),
+                tags,
+            )
+            res: MMEmbeddingRes = self.engine.mm_embedding_rpc(multimodal_inputs)
+            output_pb = trans_output(res)
+            kmonitor.report(
+                GaugeMetrics.VIT_RPC_SERVER_HANDLER_RT_US_METRIC,
+                _now_us() - start_us,
+                tags,
+            )
+            _report_output_metrics(output_pb, tags)
+            return output_pb
+        except Exception:
+            kmonitor.report(
+                AccMetrics.VIT_RPC_SERVER_ERROR_QPS_METRIC,
+                1,
+                {"source": "vit_server", "reason": "exception"},
+            )
+            raise
+        finally:
+            if not callback_added:
+                _report_lifecycle()
 
     def GetWorkerStatus(self, request: StatusVersionPB, context):
         worker_status = WorkerStatusPB()
