@@ -107,6 +107,13 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
 
     RTP_LLM_LOG_INFO("create normal executor done");
 
+    // CUDA graph capture is deferred out of the model constructor (see PyWrappedModel
+    // defer_capture). This is the window where the decode accuracy gate / backend
+    // selection will run in the future; for now we immediately trigger capture here so
+    // behavior is unchanged except that capture happens slightly later in startup.
+    executor_->triggerInitCapture();
+    RTP_LLM_LOG_INFO("trigger deferred cuda graph capture done");
+
     // 释放模型加载过程中使用的临时host内存
     // 此时checkpoint已加载完成，可以将glibc缓存的内存归还给操作系统
     releaseHostMemoryCache();

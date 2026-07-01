@@ -294,8 +294,9 @@ class TestPyFlashinferDecodeCudaGraph(BaseAttentionTest):
     Verifies the critical invariants that the C++ CUDA graph runner depends on:
     1. prepare() with is_cuda_graph=True sets _fixed_batch_size and wires up
        the decode_wrapper's internal buffers for graph capture.
-    2. prepare_for_cuda_graph_replay() refreshes both page tables and, only
-       for FlashInfer fa2, cached plan metadata without reallocating buffers.
+    2. prepare_for_cuda_graph_replay() refreshes the page tables AND calls
+       plan() to update workspace scheduling metadata for ALL decode paths
+       (both FA2 tensor-core and non-tensor-core), without reallocating buffers.
 
     Full forward correctness under CUDA graph capture/replay cannot be tested
     at the Python UT level — that path is exercised by smoke tests with real
@@ -357,7 +358,16 @@ class TestPyFlashinferDecodeCudaGraph(BaseAttentionTest):
         logging.info("_fixed_batch_size correctly set after prepare()")
 
     def test_replay_refreshes_plan_metadata(self):
-        """prepare_for_cuda_graph_replay() must refresh FlashInfer fa2 plan metadata."""
+        """prepare_for_cuda_graph_replay() MUST call plan() during replay.
+
+        FlashInfer's design contract: plan() must be called before every graph
+        replay to update workspace scheduling metadata. Skipping plan() leaves
+        stale data in the workspace buffer → kernel hang/wrong results.
+
+        The previous hang was caused by FlashInfer decode.py L960-961 forcing
+        non_blocking=False for host indices. Fix: pass page_indice_d (device)
+        so all copies inside plan() are non-blocking.
+        """
         config = self._create_config()
         capture_bs = 8
         capture_seq_lens = [64, 128, 256, 512, 64, 128, 256, 512]
@@ -393,16 +403,26 @@ class TestPyFlashinferDecodeCudaGraph(BaseAttentionTest):
         )
         attn_op.prepare_for_cuda_graph_replay(run_inputs)
 
+        # plan() MUST be called during replay (FlashInfer design contract).
         self.assertEqual(len(plan_calls), 1)
-        plan_args, plan_kwargs = plan_calls[0]
-        self.assertFalse(plan_args[0].is_cuda)
-        self.assertFalse(plan_args[1].is_cuda)
-        self.assertFalse(plan_args[2].is_cuda)
-        self.assertTrue(plan_kwargs["non_blocking"])
+
+        # Verify plan() was called with device indices (to avoid sync hang)
+        # and disable_split_kv=True (to match capture-time grid config).
+        _, plan_kwargs = plan_calls[0]
+        self.assertTrue(plan_kwargs.get("disable_split_kv", False))
+        self.assertTrue(plan_kwargs.get("non_blocking", False))
+        # Second positional arg is indices — must be on CUDA device
+        plan_args = plan_calls[0][0]
+        indices_arg = plan_args[1]  # (indptr, indices, last_page_len, ...)
+        self.assertTrue(
+            indices_arg.is_cuda,
+            "indices must be device tensor to avoid sync hang",
+        )
 
         # _fixed_batch_size must stay at the captured graph size.
         self.assertEqual(attn_op.decode_wrapper._fixed_batch_size, capture_bs)
 
+        # Device buffers should be updated by fill_params (verify they exist).
         page_indptr = fmha_params.decode_page_indptr_h
         self.assertIsNotNone(page_indptr)
         self.assertGreaterEqual(len(page_indptr), capture_bs + 1)
@@ -411,8 +431,13 @@ class TestPyFlashinferDecodeCudaGraph(BaseAttentionTest):
             f"page_indptr={page_indptr.tolist()}"
         )
 
-    def test_non_fa2_replay_does_not_replan(self):
-        """Non-fa2 decode keeps the original replay contract: fill params only."""
+    def test_non_fa2_replay_also_replans(self):
+        """Non-fa2 decode also calls plan() during replay (FlashInfer contract).
+
+        Both FA2 and non-FA2 paths need plan() to update workspace scheduling
+        metadata before each replay. The non-FA2 path previously skipped plan(),
+        causing stale workspace hang on models with GQA ratio < 4 (e.g. Qwen3-1.7B).
+        """
         config = self._create_config(head_num=32, head_num_kv=32)
         capture_bs = 4
         capture_seq_lens = [64, 128, 256, 512]
@@ -447,8 +472,11 @@ class TestPyFlashinferDecodeCudaGraph(BaseAttentionTest):
 
         plan_calls = []
 
+        original_plan = attn_op.decode_wrapper.plan
+
         def counted_plan(*args, **kwargs):
             plan_calls.append((args, kwargs))
+            return original_plan(*args, **kwargs)
 
         attn_op.decode_wrapper.plan = counted_plan
 
@@ -460,7 +488,12 @@ class TestPyFlashinferDecodeCudaGraph(BaseAttentionTest):
         )
         attn_op.prepare_for_cuda_graph_replay(run_inputs)
 
-        self.assertEqual(len(plan_calls), 0)
+        # Non-FA2 path ALSO calls plan() during replay (FlashInfer contract).
+        self.assertEqual(len(plan_calls), 1)
+        # Verify CG-safe tensor placement: indices on device, indptr on host
+        plan_args = plan_calls[0][0]
+        self.assertTrue(plan_args[1].is_cuda, "indices must be device")
+        self.assertFalse(plan_args[0].is_cuda, "indptr must be host")
 
     def test_replay_updates_page_tables(self):
         """Page table buffers must reflect the replay inputs, not capture inputs."""
@@ -517,6 +550,149 @@ class TestPyFlashinferDecodeCudaGraph(BaseAttentionTest):
             f"Page table update OK: indptr={expected_indptr}, "
             f"last_page_len={expected_last_page_lens}"
         )
+
+    # (head_num_kv, use_tensor_core, label) — covers BOTH decode CG paths:
+    #   - kv=8  → ratio 4 → use_tensor_core=True  → FA2 tensor-core path
+    #   - kv=16 → ratio 2 → use_tensor_core=False → non-FA2 path
+    #     (this is the Qwen3-1.7B config that actually hung: the non-FA2 replay
+    #      previously skipped plan(), leaving stale workspace → deadlock)
+    _NO_HANG_CONFIGS = [(8, True, "fa2"), (16, False, "non_fa2")]
+
+    def _run_no_hang_subprocess(self, head_num_kv: int, expect_tc: bool, label: str):
+        """Run one CG capture+replay+hang-detection scenario in a subprocess."""
+        import subprocess
+
+        test_dir = str(__import__("pathlib").Path(__file__).resolve().parent)
+        # test file is at github-opensource/rtp_llm/models_py/modules/factory/attention/cuda_impl/test/
+        project_root = str(__import__("pathlib").Path(__file__).resolve().parents[7])
+
+        script_tpl = """
+import math, signal, sys, logging, torch
+logging.basicConfig(level=logging.INFO, format="%(message)s")
+sys.path.insert(0, ".")
+sys.path.insert(0, "rtp_llm/models_py/modules/factory/attention/cuda_impl/test")
+
+from base_attention_test import BaseAttentionTest
+from rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha import PyFlashinferDecodeAttnOp
+from rtp_llm.ops.compute_ops import PyAttentionInputs, get_typemeta, rtp_llm_ops, LayerKVCache
+
+def make_cg_inputs(bt, bs, seq_lens, spb):
+    ai = PyAttentionInputs()
+    ai.is_prefill = False
+    ai.is_cuda_graph = True
+    st = torch.tensor(seq_lens, dtype=torch.int32)
+    ai.sequence_lengths = (st - 1).pin_memory()
+    ai.input_lengths = torch.ones(bs, dtype=torch.int32).pin_memory()
+    ai.prefix_lengths = torch.empty(0, dtype=torch.int32).pin_memory()
+    bid = bt._create_kv_cache_block_ids(bs, seq_lens, spb)
+    ai.kv_cache_kernel_block_id = bid
+    ai.kv_cache_kernel_block_id_device = bid.cuda()
+    ai.cu_seqlens_device = torch.arange(0, bs + 1, dtype=torch.int32, device="cuda")
+    ai.dtype = get_typemeta(torch.zeros(1, dtype=torch.float16))
+    return ai
+
+def alarm_handler(signum, frame):
+    raise TimeoutError("HANG")
+
+bt = BaseAttentionTest()
+bt.setUp()
+cfg = bt._create_config(head_num=32, head_num_kv=__HEAD_NUM_KV__, size_per_head=128, seq_size_per_block=32)
+bs = 4
+cap_sl = [128, 256, 192, 224]
+run_sl = [64, 128, 96, 160]
+lhn = cfg.head_num // cfg.tp_size
+lkvhn = cfg.head_num_kv // cfg.tp_size
+
+cap_inp = make_cg_inputs(bt, bs, cap_sl, cfg.seq_size_per_block)
+attn_op = PyFlashinferDecodeAttnOp(cfg.attn_configs, cap_inp)
+assert attn_op.use_tensor_core is __EXPECT_TC__, f"use_tensor_core={attn_op.use_tensor_core}, expected __EXPECT_TC__"
+fp = rtp_llm_ops.FlashInferMlaAttnParams()
+attn_op.set_params(fp)
+attn_op.prepare(cap_inp)
+
+blocks = sum(math.ceil(s / cfg.seq_size_per_block) for s in cap_sl)
+kvc = torch.randn(blocks, 2, lkvhn, cfg.seq_size_per_block, cfg.size_per_head, dtype=torch.float16, device="cuda")
+q = torch.randn(bs, lhn, cfg.size_per_head, dtype=torch.float16, device="cuda")
+lkv = LayerKVCache()
+lkv.kv_cache_base = kvc
+
+torch.cuda.synchronize()
+stream = torch.cuda.Stream()
+with torch.cuda.stream(stream):
+    _ = attn_op.forward(q, lkv, fp)
+stream.synchronize()
+graph = torch.cuda.CUDAGraph()
+with torch.cuda.graph(graph, stream=stream):
+    gout = attn_op.forward(q, lkv, fp)
+stream.synchronize()
+logging.info("capture OK")
+
+run_inp = make_cg_inputs(bt, bs, run_sl, cfg.seq_size_per_block)
+signal.signal(signal.SIGALRM, alarm_handler)
+signal.alarm(10)
+try:
+    attn_op.prepare_for_cuda_graph_replay(run_inp)
+    with torch.cuda.stream(stream):
+        graph.replay()
+    stream.synchronize()
+except TimeoutError:
+    print("HANG_DETECTED", flush=True)
+    sys.exit(1)
+finally:
+    signal.alarm(0)
+
+assert gout.shape == (bs, lhn, cfg.size_per_head)
+assert gout.abs().sum().item() > 0
+logging.info(f"replay OK: shape={gout.shape}, sum={gout.abs().sum().item():.4f}")
+print("ALL_PASSED", flush=True)
+"""
+        script = script_tpl.replace("__HEAD_NUM_KV__", str(head_num_kv)).replace(
+            "__EXPECT_TC__", "True" if expect_tc else "False"
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            cwd=project_root,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            env={
+                **__import__("os").environ,
+                # Prepend our paths but KEEP the inherited PYTHONPATH: the bazel
+                # wrapper injects torch/flashinfer site-packages (_JIT_CACHE_PATHS)
+                # there. Overwriting it makes the subprocess fail to import torch.
+                "PYTHONPATH": f"{project_root}:{test_dir}:"
+                + __import__("os").environ.get("PYTHONPATH", ""),
+            },
+        )
+        combined = result.stdout + result.stderr
+        if "HANG_DETECTED" in combined:
+            self.fail(
+                f"[{label}] CUDA graph replay hung! plan() likely deadlocked. "
+                "Check that page_indice_d (device) is passed to avoid "
+                "FlashInfer's forced synchronous H2D copy."
+            )
+        self.assertEqual(
+            result.returncode,
+            0,
+            f"[{label}] Subprocess failed (rc={result.returncode}):\n{combined[-2000:]}",
+        )
+        self.assertIn("ALL_PASSED", combined, f"[{label}] did not finish")
+
+    def test_cuda_graph_capture_replay_no_hang(self):
+        """End-to-end CUDA graph capture + replay with hang detection.
+
+        Runs each config in a subprocess to avoid FlashInfer JIT cache
+        contamination across configs. A 10s signal.alarm() watchdog inside the
+        subprocess (plus a 30s subprocess timeout) detects hangs.
+
+        Covers BOTH decode CG paths — see _NO_HANG_CONFIGS:
+        - FA2 tensor-core path (GQA 4:1, use_tensor_core=True)
+        - non-FA2 path (GQA 2:1, use_tensor_core=False) — the Qwen3-1.7B config
+          that actually deadlocked because non-FA2 replay skipped plan().
+        """
+        for head_num_kv, expect_tc, label in self._NO_HANG_CONFIGS:
+            with self.subTest(path=label):
+                self._run_no_hang_subprocess(head_num_kv, expect_tc, label)
 
 
 if __name__ == "__main__":
