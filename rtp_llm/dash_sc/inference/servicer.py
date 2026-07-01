@@ -449,6 +449,29 @@ def _apply_request_overrides(
             generate_config.end_think_token_ids = list(runtime.eos_tokens)
         if hasattr(generate_config, "thinking"):
             generate_config.thinking = True
+    if not runtime.phase2_enabled:
+        total_completion_budget = bool(sampling.max_new_tokens_from_completion_alias)
+        if (
+            not total_completion_budget
+            and sampling.max_total_tokens is not None
+            and sampling.max_total_tokens > 0
+            and sampling.max_new_tokens == sampling.max_total_tokens
+        ):
+            total_completion_budget = True
+        if total_completion_budget:
+            # ``max_completion_tokens`` (or ``max_tokens`` acting as the total
+            # completion budget) is the sole budget: a separately-supplied
+            # ``max_tokens`` (parsed into ``max_total_tokens``) must NOT clip it.
+            # ``codec.to_generate_config`` applies that legacy clip for DSV4;
+            # neutralize it here on the non-phase2 (e.g. GLM5) path only.
+            generate_config.max_new_tokens = int(sampling.max_new_tokens)
+        if total_completion_budget and other.enable_thinking is not False:
+            if request_max_think is None and other.enable_thinking is True:
+                generate_config.max_thinking_tokens = -1
+            elif request_max_think is not None and request_max_think > 0:
+                generate_config.max_new_tokens = max(
+                    0, int(sampling.max_new_tokens) - int(request_max_think)
+                )
     if other.timeout_ms is not None:
         # Subtract a margin so the engine times out BEFORE the upstream gateway
         # sends RST_STREAM. This ensures the timeout surfaces as a normal

@@ -2091,7 +2091,7 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
             backend_visitor=visitor,
             tokenizer=tok,
             generate_env_config=env_cfg,
-            think_runtime=build_think_runtime(tok, env_cfg, "deepseek_v4"),
+            think_runtime=build_think_runtime(tok, env_cfg, "glm_5"),
         )
         req = self._valid_infer_request()
         req.parameters["max_new_tokens"].int64_param = 200
@@ -2103,7 +2103,92 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(visitor.enqueue_called, 1)
         generate_config = visitor.last_generate_input.generate_config
+        self.assertEqual(generate_config.max_new_tokens, 90)
+        self.assertTrue(generate_config.in_think_mode)
+        self.assertEqual(generate_config.max_thinking_tokens, 10)
+
+    async def test_glm5_max_completion_tokens_without_thinking_budget_unlimited_think(
+        self,
+    ) -> None:
+        visitor = _FakeVisitor(_FakeAsyncStream([]))
+        tok = _dsv4_tokenizer()
+        env_cfg = _GenerateEnvCfg()
+        servicer = DashScInferenceServicer(
+            backend_visitor=visitor,
+            tokenizer=tok,
+            generate_env_config=env_cfg,
+            think_runtime=build_think_runtime(tok, env_cfg, "glm_5"),
+        )
+        req = self._valid_infer_request()
+        req.parameters["max_completion_tokens"].int64_param = 100
+        req.parameters["enable_thinking"].bool_param = True
+
+        await _drain(servicer.ModelStreamInfer(_areq_iter([req]), MagicMock()))
+
+        self.assertEqual(visitor.enqueue_called, 1)
+        generate_config = visitor.last_generate_input.generate_config
         self.assertEqual(generate_config.max_new_tokens, 100)
+        self.assertTrue(generate_config.in_think_mode)
+        self.assertEqual(generate_config.max_thinking_tokens, -1)
+
+    async def test_glm5_ds_header_max_tokens_thinking_budget_uses_total_budget(
+        self,
+    ) -> None:
+        visitor = _FakeVisitor(_FakeAsyncStream([]))
+        tok = _dsv4_tokenizer()
+        env_cfg = _GenerateEnvCfg()
+        servicer = DashScInferenceServicer(
+            backend_visitor=visitor,
+            tokenizer=tok,
+            generate_env_config=env_cfg,
+            think_runtime=build_think_runtime(tok, env_cfg, "glm_5"),
+        )
+        req = self._valid_infer_request()
+        req.parameters["ds_header_attributes"].string_param = json.dumps(
+            {
+                "body": {
+                    "parameters": {
+                        "max_tokens": 100,
+                        "enable_thinking": True,
+                        "thinking_budget": 10,
+                    }
+                }
+            }
+        )
+
+        await _drain(servicer.ModelStreamInfer(_areq_iter([req]), MagicMock()))
+
+        self.assertEqual(visitor.enqueue_called, 1)
+        generate_config = visitor.last_generate_input.generate_config
+        self.assertEqual(generate_config.max_new_tokens, 90)
+        self.assertTrue(generate_config.in_think_mode)
+        self.assertEqual(generate_config.max_thinking_tokens, 10)
+
+    async def test_glm5_max_completion_tokens_priority_over_smaller_max_tokens(
+        self,
+    ) -> None:
+        """max_completion_tokens is the sole budget; a smaller max_tokens must
+        NOT clip it on the GLM5 (non-phase2) path."""
+        visitor = _FakeVisitor(_FakeAsyncStream([]))
+        tok = _dsv4_tokenizer()
+        env_cfg = _GenerateEnvCfg()
+        servicer = DashScInferenceServicer(
+            backend_visitor=visitor,
+            tokenizer=tok,
+            generate_env_config=env_cfg,
+            think_runtime=build_think_runtime(tok, env_cfg, "glm_5"),
+        )
+        req = self._valid_infer_request()
+        req.parameters["max_completion_tokens"].int64_param = 100
+        req.parameters["max_tokens"].int64_param = 50
+        req.parameters["enable_thinking"].bool_param = True
+        req.parameters["thinking_budget"].int64_param = 10
+
+        await _drain(servicer.ModelStreamInfer(_areq_iter([req]), MagicMock()))
+
+        self.assertEqual(visitor.enqueue_called, 1)
+        generate_config = visitor.last_generate_input.generate_config
+        self.assertEqual(generate_config.max_new_tokens, 90)
         self.assertTrue(generate_config.in_think_mode)
         self.assertEqual(generate_config.max_thinking_tokens, 10)
 

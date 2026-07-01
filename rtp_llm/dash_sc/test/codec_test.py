@@ -675,6 +675,58 @@ class DashScGrpcRequestTest(TestCase):
         self.assertEqual(generate_config.max_new_tokens, 100)
         self.assertEqual(generate_config.max_thinking_tokens, 10)
 
+    def test_deprecated_max_tokens_thinking_budget_parses_legacy_backend_limit(
+        self,
+    ) -> None:
+        req = predict_v2_pb2.ModelInferRequest()
+        req.parameters["max_tokens"].int64_param = 100
+        req.parameters["enable_thinking"].bool_param = True
+        req.parameters["thinking_budget"].int64_param = 10
+
+        sampling = parse_sampling_params(req)
+        other = parse_other_params(req)
+        generate_config = sampling.to_generate_config(other=other)
+
+        self.assertEqual(generate_config.max_new_tokens, 100)
+        self.assertEqual(generate_config.max_thinking_tokens, 10)
+
+    def test_ds_header_max_tokens_thinking_budget_parses_legacy_backend_limit(
+        self,
+    ) -> None:
+        req = predict_v2_pb2.ModelInferRequest()
+        req.parameters["ds_header_attributes"].string_param = json.dumps(
+            {
+                "body": {
+                    "parameters": {
+                        "max_tokens": 100,
+                        "enable_thinking": True,
+                        "thinking_budget": 10,
+                    }
+                }
+            }
+        )
+
+        sampling = parse_sampling_params(req)
+        other = parse_other_params(req)
+        generate_config = sampling.to_generate_config(other=other)
+
+        self.assertEqual(generate_config.max_new_tokens, 100)
+        self.assertEqual(generate_config.max_thinking_tokens, 10)
+
+    def test_completion_alias_without_thinking_budget_keeps_codec_default(
+        self,
+    ) -> None:
+        sampling = SamplingParams(
+            max_new_tokens=100,
+            max_new_tokens_from_completion_alias=True,
+        )
+        other = OtherParams(enable_thinking=True)
+
+        generate_config = sampling.to_generate_config(other=other)
+
+        self.assertEqual(generate_config.max_new_tokens, 100)
+        self.assertEqual(generate_config.max_thinking_tokens, 32000)
+
     def test_explicit_max_new_tokens_thinking_budget_keeps_backend_limit(
         self,
     ) -> None:
