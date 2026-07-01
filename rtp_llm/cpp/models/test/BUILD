@@ -32,3 +32,23 @@ cc_test(
     },
     exec_properties = {'gpu':'H20'},
 )
+
+cc_test(
+    name = "model_inputs_logger_test",
+    srcs = ["ModelInputsLoggerTest.cc"],
+    copts = test_copts,
+    deps = [
+        "//rtp_llm/cpp/models:model_inputs_logger",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ] + torch_deps(),
+    exec_properties = {"gpu": "H20"},
+)
+
+py_test(
+    name = "model_inputs_replay_test",
+    srcs = ["model_inputs_replay_test.py"],
+    tags = ["manual"],
+    deps = ["//rtp_llm/models_py/standalone:auto_model"],
+    exec_properties = {"gpu": "H20"},
+)

@@ -16,6 +16,7 @@
 namespace rtp_llm {
 
 class KVCacheManager;
+class ModelInputsLogger;
 struct GptModelInitParams;
 
 class NormalExecutor: public Executor {
@@ -51,6 +52,7 @@ private:
     std::unique_ptr<Sampler>                                                 sampler_;
     std::unique_ptr<NormalBatchStreamProcessor>                              batch_stream_processor_;
     std::shared_ptr<KVCacheManager>                                          cache_manager_;
+    std::shared_ptr<ModelInputsLogger>                                       model_inputs_logger_;
     std::shared_ptr<ExpertBalancer>                                          expert_balancer_;
     bool                                                                     warm_up_;
     bool                                                                     use_all_gather_;

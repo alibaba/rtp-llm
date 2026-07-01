@@ -67,6 +67,8 @@ EmbeddingExecutor::EmbeddingExecutor(const EngineInitParams& params, py::object 
 
     RTP_LLM_CHECK_WITH_INFO(!params.py_model.is_none(), "py_model must be provided, legacy C++ GptModel path removed");
     RTP_LLM_LOG_INFO("init executor with python model");
+    // Model-input dumps target autoregressive Normal/MTP replay. Embedding and
+    // rerank use a different input contract and intentionally do not need it.
     model_.reset(new PyWrappedModel(model_init_params, params.py_model, true));
 
     init_position_ids(model_config_.max_seq_len);
