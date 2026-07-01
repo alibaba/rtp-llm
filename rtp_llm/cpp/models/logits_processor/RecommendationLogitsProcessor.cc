@@ -57,6 +57,10 @@ RecommendationLogitsProcessor::fromGenerateInput(std::shared_ptr<GenerateInput> 
     if (config->cross_seq_diverge_start_combo < 0) {
         RTP_LLM_LOG_WARNING("cross_seq_diverge_start_combo is negative (%d), clamped to 0",
                             config->cross_seq_diverge_start_combo);
+    } else if (enable_cross_seq_ban && diverge_start_combo > 100) {
+        RTP_LLM_LOG_WARNING(
+            "cross_seq_diverge_start_combo=%d is very large, top-K diverge masking may never activate",
+            diverge_start_combo);
     }
     // 若为空,think_done 初始为 true,Processor 行为等同历史版本(从首个 token 起累 combo)。
     const std::vector<int>& end_think_token_ids = config->end_think_token_ids;
@@ -180,18 +184,20 @@ void RecommendationLogitsProcessor::process(const SamplerInputs& inputs, size_t 
         }
     }
 
-    // 安全检查：diverge 遮蔽 + banned combo 遮蔽叠加后，确保每行至少保留 1 个有效 token。
-    // 若某行全部被 mask，恢复该行为均匀分布（安全降级），避免 sampler 采样 NaN/随机 token。
-    // 使用 batch max 一次获取各行最大值，仅 1 次 GPU→CPU 同步（而非 N 次）。
-    auto row_maxes = logits.max(/*dim=*/1).values;  // [batch_size], single kernel
-    auto row_maxes_cpu = row_maxes.cpu();           // single D2H sync
-    auto row_maxes_acc = row_maxes_cpu.accessor<float, 1>();
-    for (size_t i = 0; i < batch_size; ++i) {
-        if (row_maxes_acc[i] == -std::numeric_limits<float>::infinity()) {
-            logits[i].fill_(0.0f);
-            RTP_LLM_LOG_WARNING(
-                "RecommendationLogitsProcessor: row %zu all logits masked after diverge+ban, "
-                "falling back to uniform distribution", i);
+    // 安全检查：仅当 diverge 遮蔽参与时才有叠加导致全 mask 的风险。
+    // ban-only 路径中 vocab 通常数千~十万量级，单靠 banned combo 无法覆盖所有 token，
+    // 此处避免对 ban-only 热路径引入 D2H 同步开销。
+    if (need_diverge_process) {
+        auto row_maxes = logits.max(/*dim=*/1).values;  // [batch_size], single kernel
+        auto row_maxes_cpu = row_maxes.cpu();           // single D2H sync
+        auto row_maxes_acc = row_maxes_cpu.accessor<float, 1>();
+        for (size_t i = 0; i < batch_size; ++i) {
+            if (row_maxes_acc[i] == -std::numeric_limits<float>::infinity()) {
+                logits[i].fill_(0.0f);
+                RTP_LLM_LOG_WARNING(
+                    "RecommendationLogitsProcessor: row %zu all logits masked after diverge+ban, "
+                    "falling back to uniform distribution", i);
+            }
         }
     }
 }
@@ -258,8 +264,12 @@ void RecommendationLogitsProcessor::updateStatus(const torch::Tensor& new_tokens
     RTP_LLM_CHECK(size() == (size_t)new_tokens.size(0));
 
     bool any_combo_completed = false;
-    // 按序列分组收集新完成的 combo，广播时仅插入其他序列的 combo，避免自身重复插入
-    std::vector<std::vector<std::vector<int>>> new_combos_per_seq(size());
+    // 仅在跨序列 ban 开启时分配 combo 收集容器，避免未启用功能时的无效内存分配
+    const bool need_broadcast = size() > 1 && !infos_.empty() && infos_[0].enable_cross_sequence_ban;
+    std::vector<std::vector<std::vector<int>>> new_combos_per_seq;
+    if (need_broadcast) {
+        new_combos_per_seq.resize(size());
+    }
     for (size_t i = 0; i < size(); ++i) {
         auto& info = infos_[i];
         if (info.combo_token_size <= 0) {
@@ -275,7 +285,7 @@ void RecommendationLogitsProcessor::updateStatus(const torch::Tensor& new_tokens
         const int64_t stride = new_tokens.size(1);
         for (int32_t j = 0; j < num_new_tokens; ++j) {
             const int token_id = new_tokens.data_ptr<int>()[i * stride + j + offset];
-            if (advanceOneToken(info, token_id, &new_combos_per_seq[i])) {
+            if (advanceOneToken(info, token_id, need_broadcast ? &new_combos_per_seq[i] : nullptr)) {
                 any_combo_completed = true;
             }
         }
@@ -286,7 +296,7 @@ void RecommendationLogitsProcessor::updateStatus(const torch::Tensor& new_tokens
     // 跨序列增量广播（非对称模式）：仅将其他序列本步新完成的 combo 插入非主序列，跳过自身已有的
     // 设计意图（primary-protected）：序列 0（主序列）仅保留自身产生的 banned_combos，不接收其他
     // 序列的 ban。补充序列接收其他序列的新增 combo，确保彼此不重复。
-    if (any_combo_completed && size() > 1 && infos_[0].enable_cross_sequence_ban) {
+    if (any_combo_completed && need_broadcast) {
         for (size_t i = 1; i < size(); ++i) {
             for (size_t j = 0; j < size(); ++j) {
                 if (j == i) continue;  // 跳过自身，避免冗余 set::insert

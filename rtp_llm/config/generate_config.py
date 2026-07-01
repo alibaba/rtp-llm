@@ -107,6 +107,9 @@ class GenerateConfig(BaseModel):
             logging.getLogger(__name__).warning(
                 "cross_seq_diverge_start_combo is negative (%d), clamped to 0", val)
             return 0
+        if val > 100:
+            logging.getLogger(__name__).warning(
+                "cross_seq_diverge_start_combo=%d is very large, top-K diverge masking may never activate", val)
         return val
 
     random_seed: Optional[Union[List[int], int]] = None

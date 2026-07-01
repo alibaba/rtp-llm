@@ -734,7 +734,7 @@ TEST_F(RecommendationLogitsProcessorTest, testSafetyFallbackAllMasked) {
     // 初始 logits 全部为 1.0
     inputs.logits.fill_(1.0f);
 
-    processor->process(inputs);
+    processor->process(inputs, 0, N);
 
     // 序列 1 应该触发安全降级：全部回退为 0.0 (均匀分布)
     auto logits_cpu = inputs.logits.cpu();
@@ -746,6 +746,46 @@ TEST_F(RecommendationLogitsProcessorTest, testSafetyFallbackAllMasked) {
     for (size_t v = 0; v < vocab_size; ++v) {
         EXPECT_FLOAT_EQ(1.0f, acc[0][v]);
     }
+}
+
+// 场景 22：num_return_sequences=1 + enable_cross_sequence_ban=true 的 no-op 边界
+TEST_F(RecommendationLogitsProcessorTest, testSingleSequenceCrossSeqBanNoOp) {
+    // N=1 时 updateStatus 跳过广播(size()>1 不满足)，process 跳过 diverge(i>0 不满足)
+    const int N = 1;
+    const size_t vocab_size = 10;
+    const int combo_size = 2;
+    std::set<std::vector<int>> banned = {{1, 2}};
+
+    std::vector<StreamRecommendationInfo> infos;
+    StreamRecommendationInfo info(combo_size, 0, 0, false, banned, {},
+                                   /*enable_cross_sequence_ban=*/true,
+                                   /*cross_seq_diverge_start_combo=*/0);
+    info.pos_in_combo = 1;
+    info.current_prefix = {1};
+    info.completed_combo_count = 1;
+    infos.push_back(std::move(info));
+
+    auto processor = std::make_shared<RecommendationLogitsProcessor>(std::move(infos));
+    auto inputs = allocateSamplerInputs(N, vocab_size, processor);
+    inputs.logits.fill_(1.0f);
+
+    processor->process(inputs, 0, N);
+
+    // ban 应该正常工作：token 2 被封锁
+    auto logits_cpu = inputs.logits.cpu();
+    auto acc = logits_cpu.accessor<float, 2>();
+    EXPECT_FLOAT_EQ(-std::numeric_limits<float>::infinity(), acc[0][2]);
+    // 其他 token 不受影响
+    EXPECT_FLOAT_EQ(1.0f, acc[0][0]);
+    EXPECT_FLOAT_EQ(1.0f, acc[0][1]);
+    EXPECT_FLOAT_EQ(1.0f, acc[0][3]);
+
+    // updateStatus 不应崩溃，且无广播发生
+    auto tokens = torch::zeros({N, 1}, torch::kInt32);
+    tokens[0][0] = 2;  // 完成 combo [1,2]
+    processor->updateStatus(tokens, 1);
+    EXPECT_EQ(2, processor->infos()[0].completed_combo_count);
+    EXPECT_TRUE(processor->infos()[0].banned_combos.count({1, 2}));
 }
 
 }  // namespace rtp_llm
