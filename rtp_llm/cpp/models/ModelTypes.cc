@@ -70,7 +70,7 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     shape_hints_ptr[GptModelInputIndex::isFakeStream] = inputs.is_fake_stream;
     execBroadcast({{shape_hints_t}, 0});
     execSyncCommunication(false);
-    cudaSyncAndCheck();
+    cudaCurrentStreamSyncAndCheck();
 
     // multimodal features shape broadcast
     torch::Tensor mm_features_shape_t;
@@ -95,7 +95,7 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
         }
         execBroadcast({{mm_features_shape_t}, 0});
         execSyncCommunication(false);
-        cudaSyncAndCheck();
+        cudaCurrentStreamSyncAndCheck();
     }
 
     // extra-input element counts broadcast: each extra-input is an opaque flat 1-D tensor,
@@ -173,6 +173,9 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
         }
         inputs.request_id            = allocBuf(rtp_llm::DataType::TYPE_INT64, {request_length});
         inputs.request_pd_separation = allocBuf(rtp_llm::DataType::TYPE_BOOL, {request_length});
+        // request_deadline_ms shares request_length with request_id (one entry
+        // per context request). See GptModelInputs::request_deadline_ms.
+        inputs.request_deadline_ms   = allocBuf(rtp_llm::DataType::TYPE_INT64, {request_length});
         inputs.lm_output_indexes =
             allocBuf(rtp_llm::DataType::TYPE_INT32, {(size_t)shape_hints_ptr[GptModelInputIndex::lmOutputIndexes]});
         inputs.lm_output_lengths =
@@ -245,6 +248,7 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     }
     collect(inputs.request_id);
     collect(inputs.request_pd_separation);
+    collect(inputs.request_deadline_ms);
     collect(inputs.lm_output_indexes);
     collect(inputs.lm_output_lengths);
     if (combo_position_ids_size) {
@@ -335,7 +339,7 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
         packed_buffers.push_back(gpu_packed);
     }
     execBroadcast({packed_buffers, 0});
-    cudaSyncAndCheck();
+    cudaCurrentStreamSyncAndCheck();
 
     // Unpack from packed buffers back to each tensor's original storage.
     if (!is_root) {

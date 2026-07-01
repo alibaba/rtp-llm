@@ -1,0 +1,73 @@
+#pragma once
+
+#include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
+#include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorConfig.h"
+#include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorWorkerPrefill.h"
+#include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorWorkerDecode.h"
+#include "rtp_llm/cpp/cache/connector/p2p/ComputedLayerCacheBuffer.h"
+#include "rtp_llm/cpp/cache/connector/p2p/LayerBlockConverter.h"
+#include "rtp_llm/cpp/cache/connector/p2p/LayerCacheBuffer.h"
+#include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorMetrics.h"
+#include <torch/extension.h>
+#include "rtp_llm/cpp/utils/ErrorCode.h"
+#include <memory>
+#include <string>
+#include <vector>
+
+namespace rtp_llm {
+
+/// @brief Facade: 统一外部接口，内部委托给 Prefill / Decode 子对象
+class P2PConnectorWorker {
+public:
+    P2PConnectorWorker(P2PConnectorWorkerConfig                    config,
+                       const std::shared_ptr<LayerBlockConverter>& layer_block_converter,
+                       const kmonitor::MetricsReporterPtr&         metrics_reporter);
+    ~P2PConnectorWorker();
+
+public:
+    bool init(int64_t store_wait_timeout_ms = 10 * 1000);
+
+public:
+    // deadline_ms: absolute business deadline (ms since epoch). Passed through
+    // to ComputedLayerCacheBuffer so its lifetime tracks the request's own
+    // deadline rather than a hard-coded store-wait timeout. INT64_MAX means
+    // "no deadline" → fall back to store_wait_timeout_ms_.
+    bool writeByLayer(int                           layer_id,
+                      const KVCacheResourcePtr&     resource,
+                      int64_t                       request_id,
+                      std::shared_ptr<torch::Event> event,
+                      int64_t                       deadline_ms);
+
+    ErrorInfo sendKVCache(int64_t                                              request_id,
+                          const std::string&                                   unique_key,
+                          int64_t                                              deadline_ms,
+                          const std::vector<std::pair<std::string, uint32_t>>& decode_transfer_servers);
+
+    ErrorInfo read(int64_t                                               request_id,
+                   const std::string&                                    unique_key,
+                   int64_t                                               deadline_ms,
+                   const std::vector<std::shared_ptr<LayerCacheBuffer>>& layer_cache_buffers,
+                   int                                                   remote_tp_size = 1);
+
+    bool cancelRead(const std::string& unique_key);
+    bool cancelSend(const std::string& unique_key);
+
+    // Query the local lease state for QUERY_LEASE_STATUS broadcast handler.
+    bool
+    queryLeaseStatus(const std::string& unique_key, bool& sealed, int& started_ops, int& finished_ops, bool& stopped);
+
+public:
+    std::shared_ptr<ComputedLayerCacheBufferStore> getComputedBuffersStore() const;
+
+    void setStoreWaitTimeoutMs(int64_t store_wait_timeout_ms);
+
+private:
+    P2PConnectorWorkerConfig             config_;
+    std::shared_ptr<LayerBlockConverter> layer_block_converter_;
+    kmonitor::MetricsReporterPtr         metrics_reporter_;
+
+    std::unique_ptr<P2PConnectorWorkerPrefill> prefill_;
+    std::unique_ptr<P2PConnectorWorkerDecode>  decode_;
+};
+
+}  // namespace rtp_llm

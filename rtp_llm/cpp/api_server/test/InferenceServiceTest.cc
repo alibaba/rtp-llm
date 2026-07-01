@@ -1,6 +1,7 @@
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
+#include "autil/legacy/json.h"
 #include "rtp_llm/cpp/api_server/Exception.h"
 #include "rtp_llm/cpp/api_server/ErrorResponse.h"
 #include "rtp_llm/cpp/api_server/InferenceService.h"
@@ -321,6 +322,75 @@ TEST_F(InferenceServiceTest, InferResponseSuccess) {
     EXPECT_EQ(writer_ptr->_statusCode, 200);
 
     // 需要手动释放 unique_ptr 的所有权, 避免 double free
+    writer_ptr.release();
+}
+
+TEST_F(InferenceServiceTest, InferResponseStreamingErrorAfterStart_WritesSseError) {
+    auto writer = dynamic_cast<http_server::HttpResponseWriter*>(mock_writer_.get());
+    ASSERT_TRUE(writer != nullptr);
+    std::unique_ptr<http_server::HttpResponseWriter> writer_ptr(writer);
+
+    http_server::HttpRequest request;
+    const std::string        body = R"del(
+        {
+            "prompt": "hello request",
+            "generate_config": {
+                "is_streaming": true,
+                "max_new_tokens": 20
+            },
+            "source": "test_source"
+        }
+    )del";
+    request._request              = CreateHttpPacket(body);
+
+    auto                           mock_stream = CreateMockGenerateStream();
+    auto                           stream      = std::dynamic_pointer_cast<GenerateStream>(mock_stream);
+    std::vector<GenerateStreamPtr> streams({stream});
+    EXPECT_CALL(*mock_engine_, batchEnqueue(Matcher<const std::vector<std::shared_ptr<GenerateInput>>&>(_)))
+        .WillOnce(Return(streams));
+
+    GenerateOutput output;
+    output.output_ids = torch::tensor(std::vector<int32_t>{1, 2, 3}, torch::kInt32);
+    GenerateOutputs outputs;
+    outputs.generate_outputs.push_back(output);
+    EXPECT_CALL(*mock_stream, nextOutput())
+        .WillOnce(Return(ErrorResult<GenerateOutputs>(std::move(outputs))))
+        .WillOnce(Return(ErrorResult<GenerateOutputs>(ErrorCode::UNKNOWN_ERROR, "broken \"json\"\nline")));
+    EXPECT_CALL(*mock_stream, getStatus()).Times(AnyNumber()).WillRepeatedly(Return(StreamState::RUNNING));
+    EXPECT_CALL(*mock_stream, hasError()).Times(AnyNumber()).WillRepeatedly(Return(false));
+
+    EXPECT_CALL(*mock_writer_, isConnected()).WillOnce(Return(true));
+    EXPECT_CALL(*mock_writer_, WriteDone()).Times(1);
+
+    std::vector<std::string> writes;
+    EXPECT_CALL(*mock_writer_, Write).WillRepeatedly(Invoke([&writes](const std::string& data) {
+        writes.push_back(data);
+        return true;
+    }));
+
+    std::vector<std::string> texts;
+    texts.emplace_back("hello response");
+    EXPECT_CALL(*mock_token_processor_, getTokenProcessorCtx(_, _, _)).WillOnce(Return(nullptr));
+    EXPECT_CALL(*mock_token_processor_, decodeTokens(_, _, _, _)).WillOnce(Return(texts));
+    EXPECT_CALL(*mock_token_processor_, encode(StrEq("hello request")));
+
+    EXPECT_CALL(*mock_metric_reporter_, reportErrorQpsMetric(Eq("test_source"), _)).Times(1);
+
+    EXPECT_NO_THROW(inference_service_->inferResponse(10086, writer_ptr, request));
+    ASSERT_EQ(writes.size(), 2u);
+    EXPECT_THAT(writes[0], HasSubstr("hello response"));
+    EXPECT_THAT(writes[1], StartsWith("data:"));
+
+    const std::string error_json = writes[1].substr(5, writes[1].size() - 7);
+    ErrorResponse      error_response;
+    autil::legacy::FromJsonString(error_response, error_json);
+    EXPECT_EQ(error_response.error_code, HttpApiServerException::UNKNOWN_ERROR);
+    EXPECT_EQ(error_response.error_msg, "broken \"json\"\nline");
+
+    EXPECT_EQ(writer_ptr->_type, http_server::HttpResponseWriter::WriteType::Stream);
+    EXPECT_EQ(writer_ptr->_headers.count("Content-Type"), 1);
+    EXPECT_EQ(writer_ptr->_headers.at("Content-Type"), "text/event-stream");
+
     writer_ptr.release();
 }
 
