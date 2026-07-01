@@ -61,6 +61,26 @@ void CudaGraphRunner::captureDecode() {
         inputs.attention_inputs.context_total_kv_length = bs * (max_input_len + max_prefix_len);
 
         graph_instances_[bs].mem_hold_ = createCaptureMemoryHold(inputs, bs * num_tokens_per_bs_);
+        // Dynamic decode backend selection: benchmark eligible backends on this bs's
+        // real inputs (real capture path) and record the per-bs winner into the model's
+        // backend_plan; the following prepare_fmha_impl then instantiates that winner.
+        // Must complete (and fully sync, done Python-side) before captureDecodeOneBatchSize.
+        // On any failure the plan stays empty for this bs → prepare_fmha_impl falls back
+        // to fixed priority (no behavior change).
+        // Guard: only run for real decode (1 token per batch). Target-model verify/score
+        // has num_tokens_per_bs_ > 1 and uses PREFILL FMHA; selecting a DECODE backend
+        // would produce wrong output shape (bs×hidden vs tokens×hidden).
+        if (enable_dynamic_decode_backend_ && num_tokens_per_bs_ == 1 && py_select_method_
+            && !py_select_method_.is_none()) {
+            try {
+                py_select_method_(graph_instances_[bs].mem_hold_.py_model_inputs_, true);
+            } catch (const std::exception& e) {
+                RTP_LLM_LOG_WARNING("dynamic decode backend selection failed for bs=%d: %s, "
+                                    "falling back to fixed priority",
+                                    bs,
+                                    e.what());
+            }
+        }
         graph_instances_[bs].mem_hold_.attn_pyobj_ =
             py_attn_pyobj_method_(graph_instances_[bs].mem_hold_.py_model_inputs_, true);
         captureDecodeOneBatchSize(bs);

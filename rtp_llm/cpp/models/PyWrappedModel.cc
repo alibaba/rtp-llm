@@ -48,6 +48,29 @@ torch::Tensor PyWrappedModel::tensorHoldHostAndToCuda(const torch::Tensor& tenso
     return cuda_tensor;
 }
 
+void PyWrappedModel::triggerInitCapture() {
+    if (!enable_cuda_graph_ || graph_runner_ == nullptr) {
+        // CUDA graph disabled / skipped (e.g. warmup, no kv layout): nothing to do.
+        return;
+    }
+    if (capture_done_) {
+        RTP_LLM_LOG_WARNING("PyWrappedModel::triggerInitCapture called but capture already done, skip");
+        return;
+    }
+#if USING_CUDA || USING_ROCM
+    // Mirror the guards the constructor held when it would have captured:
+    // InferenceMode for the capture forwards, GIL for the Python model calls.
+    c10::InferenceMode     inference_guard(true);
+    py::gil_scoped_acquire gil;
+    RTP_LLM_LOG_INFO("PyWrappedModel: triggering deferred CUDA graph capture");
+    graph_runner_->initCapture();
+    capture_done_ = true;
+    RTP_LLM_LOG_INFO("PyWrappedModel: deferred CUDA graph capture done");
+#else
+    RTP_LLM_CHECK_WITH_INFO(false, "CUDA/HIP Graph is only supported on CUDA/ROCm platform");
+#endif
+}
+
 void PyWrappedModel::releaseBuffers() {
     if (held_attn_pyobj_.ptr()) {
         py::gil_scoped_acquire gil;
@@ -138,7 +161,7 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
 
         py_attn_inputs.context_total_kv_length = cu_kv_seqlens[context_batch_size].item<int>();
         py_attn_inputs.total_tokens            = cu_seqlens[batch_size].item<int>();
-        py_attn_inputs.cu_seqlens         = cu_seqlens;
+        py_attn_inputs.cu_seqlens              = cu_seqlens;
         py_attn_inputs.cu_seqlens_device       = tensorHoldHostAndToCuda(cu_seqlens);
         py_attn_inputs.cu_kv_seqlens_device    = tensorHoldHostAndToCuda(cu_kv_seqlens);
     } else {
@@ -154,7 +177,7 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
                           py_attn_inputs.sequence_lengths.size(0) + 1,
                           1,
                           torch::TensorOptions(torch::kInt32).device(torch::kCPU).pinned_memory(true));
-        py_attn_inputs.decode_cu_seqlens   = decode_cu_seqlens;
+        py_attn_inputs.decode_cu_seqlens        = decode_cu_seqlens;
         py_attn_inputs.decode_cu_seqlens_device = tensorHoldHostAndToCuda(decode_cu_seqlens);
     }
 
@@ -202,7 +225,7 @@ void PyWrappedModel::setupKVCacheForAttentionInputs(torch_ext::PyAttentionInputs
     // Legacy 2-D fields default to group 0.
     // NOTE: keep host/device 2-D fields consistent to avoid shape mismatch in CUDA graph replay path.
     py_attn_inputs.kv_cache_kernel_block_id_device = py_attn_inputs.kv_cache_kernel_block_id_device_by_group[0];
-    py_attn_inputs.kv_cache_kernel_block_id   = py_attn_inputs.kv_cache_kernel_block_id_by_group[0];
+    py_attn_inputs.kv_cache_kernel_block_id        = py_attn_inputs.kv_cache_kernel_block_id_by_group[0];
 }
 
 // Helper function to build BertEmbeddingInputs from GptModelInputs

@@ -854,11 +854,36 @@ def build_model_config(
         kv_cache_config=kv_cache_config, act_type=model_args.act_type
     )
     model_config.attn_config.tokens_per_block = kv_cache_config.seq_size_per_block
-    model_config.attn_config.kernel_tokens_per_block = (
-        kv_cache_config.kernel_seq_size_per_block
-        if kv_cache_config.kernel_seq_size_per_block > 0
-        else kv_cache_config.seq_size_per_block
-    )
+    # When kernel_seq_size_per_block is not explicitly set (=0), find the largest
+    # value in [128,64,32,16] that divides seq_size_per_block. This stays within
+    # all attention backends' safe range (XQA: [16,32,64,128], FlashInfer FA2 CG:
+    # padding-CTA stride amplification at large page sizes) while guaranteeing
+    # divisibility. Explicit values are respected as-is; backend support() will
+    # reject unsafe ones.
+    _KERNEL_PAGE_CANDIDATES = [128, 64, 32, 16]
+    if kv_cache_config.kernel_seq_size_per_block > 0:
+        _kernel_page_size = kv_cache_config.kernel_seq_size_per_block
+    else:
+        if kv_cache_config.seq_size_per_block <= _KERNEL_PAGE_CANDIDATES[0]:
+            _kernel_page_size = kv_cache_config.seq_size_per_block
+        else:
+            _kernel_page_size = next(
+                (
+                    c
+                    for c in _KERNEL_PAGE_CANDIDATES
+                    if kv_cache_config.seq_size_per_block % c == 0
+                ),
+                _KERNEL_PAGE_CANDIDATES[-1],  # fallback to 16
+            )
+        if _kernel_page_size < kv_cache_config.seq_size_per_block:
+            logging.warning(
+                "kernel_seq_size_per_block not set, auto-selected %d "
+                "(seq_size_per_block=%d). Set --kernel_seq_size_per_block "
+                "explicitly to override.",
+                _kernel_page_size,
+                kv_cache_config.seq_size_per_block,
+            )
+    model_config.attn_config.kernel_tokens_per_block = _kernel_page_size
     model_config.linear_attention_config.ssm_state_dtype = (
         ssm_state_dtype_str_to_data_type(kv_cache_config.ssm_state_dtype)
     )

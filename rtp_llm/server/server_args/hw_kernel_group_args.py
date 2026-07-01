@@ -20,6 +20,15 @@ def init_hw_kernel_group_args(parser, hw_kernel_config):
     )
 
     hw_kernel_group.add_argument(
+        "--enable_dynamic_decode_backend",
+        env_name="ENABLE_DYNAMIC_DECODE_BACKEND",
+        bind_to=(hw_kernel_config, "enable_dynamic_decode_backend"),
+        type=str2bool,
+        default=False,
+        help="At CUDA graph capture time, dynamically pick the decode attention backend per bs bucket via on-device benchmarking; when off, use fixed priority",
+    )
+
+    hw_kernel_group.add_argument(
         "--enable_cuda_graph_debug_mode",
         env_name="ENABLE_CUDA_GRAPH_DEBUG_MODE",
         bind_to=(hw_kernel_config, "enable_cuda_graph_debug_mode"),

@@ -1,6 +1,9 @@
+import logging
 from typing import Any, Optional
 
 import torch
+
+logger = logging.getLogger(__name__)
 from flashinfer.decode import BatchDecodeWithPagedKVCacheWrapper
 from flashinfer.prefill import (
     BatchPrefillWithPagedKVCacheWrapper,
@@ -138,7 +141,11 @@ class PyFlashinferPrefillPagedAttnOp(object):
                 : attn_inputs.input_lengths.size(0) + 1
             ]
 
-        if self.enable_cuda_graph and self.prefill_wrapper._qo_indptr_buf is None:
+        _is_init = (
+            self.enable_cuda_graph and self.prefill_wrapper._qo_indptr_buf is None
+        )
+
+        if _is_init:
             self.prefill_wrapper._use_cuda_graph = True
             self.prefill_wrapper._qo_indptr_buf = qo_indptr
             self.prefill_wrapper._paged_kv_indptr_buf = (
@@ -167,8 +174,10 @@ class PyFlashinferPrefillPagedAttnOp(object):
                     * self.prefill_cuda_graph_copy_params.max_seq_len
                 )
 
-        # Update buffers for subsequent calls if in CUDA graph mode
-        if self.prefill_cuda_graph_copy_params is not None:
+        # Update buffers for subsequent calls if in CUDA graph mode.
+        # Skip on init: the padded qo_indptr [0, max_sl, 2*max_sl, ...] set above
+        # matches q_aligned's fixed size (max_batch_size * max_seq_len) during capture.
+        if self.prefill_cuda_graph_copy_params is not None and not _is_init:
             assert attn_inputs.prefill_cuda_graph_copy_params is not None
             assert self.input_lengths is not None
             assert self.cu_seq_lens is not None
@@ -687,13 +696,68 @@ class PyFlashinferDecodeAttnOp(object):
         # fa3 prefill paths do not need this replay-time plan refresh.
         return self.use_tensor_core
 
-    def _plan_decode_wrapper(self, attn_inputs: PyAttentionInputs) -> None:
-        if self._requires_fa2_cuda_graph_replan():
+    def _plan_decode_wrapper(
+        self, attn_inputs: PyAttentionInputs, *, for_cuda_graph: bool = False
+    ) -> None:
+        """Call FlashInfer plan() to set up scheduling metadata.
+
+        Args:
+            for_cuda_graph: True when in CUDA graph mode (both capture and replay).
+                Uses host tensors for indptr/last_page_len (so decode.py L977-978
+                `.to("cpu")` are no-ops) and device tensor for indices (so L960-961
+                copy is non_blocking=True). This avoids ALL synchronous operations
+                inside plan() that would deadlock in CudaGraphRunner's stream context.
+                Additionally passes disable_split_kv=True for the FA2 tensor-core
+                path to keep the kernel grid deterministic.
+        """
+        if for_cuda_graph:
+            # CG-safe tensor placement:
+            # - indptr: HOST → L977 indptr.to("cpu") is no-op
+            # - indices: DEVICE → L960-961 non_blocking=True (device==device)
+            # - last_page_len: HOST → L978 .to("cpu") is no-op
+            page_indptr = self.fmha_params.decode_page_indptr_h
+            page_indice = self.fmha_params.page_indice_d
+            last_page_len = self.fmha_params.paged_kv_last_page_len_h
+            plan_kwargs = {"non_blocking": True}
+            if self._requires_fa2_cuda_graph_replan():
+                plan_kwargs["disable_split_kv"] = True
+                # FlashInfer scheduler bug (confirmed in 0.6.6–0.6.12,
+                # scheduler.cuh PrefillPlan): in CG mode the fa2 prefill grid
+                # is padded to padded_batch_size, but request_indices / qo_tile
+                # / kv_tile arrays are only written for new_batch_size entries.
+                # block_valid_mask (which would neutralize padding CTAs) is
+                # only allocated inside `if (split_kv)`, so with
+                # disable_split_kv=True it is nullptr → padding CTAs read
+                # stale request_idx → paged_kv OOB → IMA.
+                #
+                # Fix: zero both host and device int workspace buffers before
+                # plan(). The host zero ensures the pinned staging buffer has
+                # request_idx=0 in padding slots. The device zero covers
+                # FlashInfer versions where the H2D copy inside plan() only
+                # transfers new_batch_size entries (leaving device padding
+                # stale). On versions where H2D covers the full padded region,
+                # the device zero is redundant but harmless.
+                _w = self.decode_wrapper
+                if hasattr(_w, "_pin_memory_int_workspace_buffer") and hasattr(
+                    _w, "_int_workspace_buffer"
+                ):
+                    _w._pin_memory_int_workspace_buffer.zero_()
+                    _w._int_workspace_buffer.zero_()
+                elif not getattr(self, "_zero_warn_emitted", False):
+                    logger.warning(
+                        "FlashInfer decode wrapper missing _pin_memory_int_workspace_buffer "
+                        "or _int_workspace_buffer; skipping CG workspace zero — "
+                        "padding-CTA IMA workaround inactive, upgrade may be needed"
+                    )
+                    self._zero_warn_emitted = True
+        elif self._requires_fa2_cuda_graph_replan():
+            # Non-CG FA2 path (normal forward without graph)
             page_indptr = self.fmha_params.decode_page_indptr_h
             page_indice = self.fmha_params.page_indice_h
             last_page_len = self.fmha_params.paged_kv_last_page_len_h
             plan_kwargs = {"non_blocking": True}
         else:
+            # Non-CG non-FA2 path (normal forward without graph)
             page_indptr = self.fmha_params.decode_page_indptr_d
             page_indice = self.fmha_params.page_indice_d
             last_page_len = self.fmha_params.paged_kv_last_page_len_d
@@ -751,11 +815,21 @@ class PyFlashinferDecodeAttnOp(object):
                     device=self.g_workspace_buffer.device,
                 )
 
-        self._plan_decode_wrapper(attn_inputs)
+        # for_cuda_graph=True sets disable_split_kv and uses device indices.
+        self._plan_decode_wrapper(attn_inputs, for_cuda_graph=self.enable_cuda_graph)
         return self.fmha_params
 
     def prepare_for_cuda_graph_replay(self, attn_inputs: PyAttentionInputs) -> None:
-        """Refresh FlashInfer runtime buffers before replaying the captured graph."""
+        """Refresh FlashInfer runtime buffers before replaying the captured graph.
+
+        Calls plan() before EVERY graph replay for ALL decode paths (FA2 tensor-core
+        AND non-tensor-core) — FlashInfer's design contract requires plan() to update
+        workspace scheduling metadata before each run/replay.
+
+        Uses CG-safe tensor placement (host indptr/last_page_len + device indices)
+        to avoid ALL synchronous operations inside plan() that would deadlock in
+        CudaGraphRunner's stream context.
+        """
         self.fmha_params.fill_params(
             attn_inputs.prefix_lengths,
             attn_inputs.sequence_lengths,
@@ -764,8 +838,16 @@ class PyFlashinferDecodeAttnOp(object):
             self.seq_size_per_block,
             forbid_realloc=True,
         )
-        if self._requires_fa2_cuda_graph_replan():
-            self._plan_decode_wrapper(attn_inputs)
+        # Call plan() for ALL paths (both FA2 and non-FA2 need workspace update).
+        self._plan_decode_wrapper(attn_inputs, for_cuda_graph=True)
+        # No explicit sync needed. plan() enqueues its workspace updates (async
+        # non_blocking H2D + device-side scheduling) on the current stream, and the
+        # subsequent graph.replay() launches on that SAME stream, so same-stream
+        # ordering guarantees the writes are visible to the replayed kernels. This
+        # mirrors the normal (non-graph) forward path, which runs plan() then
+        # decode_wrapper.run() back-to-back without any sync. A full
+        # current_stream().synchronize() here would add a per-decode-step CPU-GPU
+        # sync (pipeline bubble) that defeats the purpose of CUDA graphs.
 
     def support(self, attn_inputs: PyAttentionInputs) -> bool:
         return True
@@ -824,7 +906,15 @@ class PyFlashinferDecodeImpl(FMHAImplBase):
     def support(
         cls, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
     ) -> bool:
-        return not attn_configs.use_mla
+        if attn_configs.use_mla:
+            return False
+        # FlashInfer FA2 CG decode path has padding-CTA stride amplification risk
+        # at large page sizes (page.cuh:105: stride = heads * page_size * dim).
+        # Cap at 128 to prevent stride overflow; small page sizes (e.g. 8) are safe.
+        _MAX_SUPPORTED_KERNEL_PAGE_SIZE = 128
+        if attn_configs.kernel_tokens_per_block > _MAX_SUPPORTED_KERNEL_PAGE_SIZE:
+            return False
+        return True
 
     def forward(
         self,

@@ -10,6 +10,26 @@
 
 namespace rtp_llm {
 
+size_t CacheConfigCreator::defaultKernelSeqSizePerBlock(size_t seq_size_per_block) {
+    RTP_LLM_CHECK_WITH_INFO(seq_size_per_block > 0, "seq_size_per_block must be positive");
+    static constexpr size_t kCandidates[] = {128, 64, 32, 16};
+    size_t                  result        = seq_size_per_block;
+    if (seq_size_per_block > kCandidates[0]) {
+        result = kCandidates[3];
+        for (size_t c : kCandidates) {
+            if (seq_size_per_block % c == 0) {
+                result = c;
+                break;
+            }
+        }
+    }
+    RTP_LLM_CHECK_WITH_INFO(seq_size_per_block % result == 0,
+                            "no candidate kernel_seq_size_per_block divides seq_size_per_block(%zu); "
+                            "set --kernel_seq_size_per_block explicitly",
+                            seq_size_per_block);
+    return result;
+}
+
 CacheConfig CacheConfigCreator::createBasicConfig(const ModelConfig&       model_config,
                                                   const ParallelismConfig& parallelism_config,
                                                   bool                     is_mtp) {
@@ -37,8 +57,7 @@ CacheConfig CacheConfigCreator::createConfig(const ModelConfig&                 
                                 kv_cache_config.kernel_seq_size_per_block);
         config.kernel_seq_size_per_block = static_cast<size_t>(kv_cache_config.kernel_seq_size_per_block);
     } else {
-        // Default: kernel block size == physical block size (no split).
-        config.kernel_seq_size_per_block = config.seq_size_per_block;
+        config.kernel_seq_size_per_block = defaultKernelSeqSizePerBlock(config.seq_size_per_block);
     }
 
     if (kv_cache_config.test_block_num > 0) {
@@ -93,9 +112,8 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
         score_config.kernel_seq_size_per_block   = kernel_seq_size_per_block;
         propose_config.kernel_seq_size_per_block = kernel_seq_size_per_block;
     } else {
-        // Default: kernel block size == physical block size (no split).
-        score_config.kernel_seq_size_per_block   = score_config.seq_size_per_block;
-        propose_config.kernel_seq_size_per_block = propose_config.seq_size_per_block;
+        score_config.kernel_seq_size_per_block   = defaultKernelSeqSizePerBlock(score_config.seq_size_per_block);
+        propose_config.kernel_seq_size_per_block = defaultKernelSeqSizePerBlock(propose_config.seq_size_per_block);
     }
 
     int num_mtp_modules = 1;
