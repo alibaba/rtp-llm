@@ -41,6 +41,7 @@ cc_test(
         "//rtp_llm/cpp/cache/connector:connector",
         "//rtp_llm/cpp/cache/connector/test/mock:connector_mock_files_lib",
         "//rtp_llm/cpp/cache/connector/memory/test/mock:mock_memory_connector_lib",
+        "//rtp_llm/cpp/cache/test:cache_config_test_utils",
         "//rtp_llm/cpp/cache/test/mock:mock_allocator_lib",
         "//rtp_llm/models_py/bindings/core:exec_ops_test_lib",
     ],

@@ -68,7 +68,7 @@ static CacheConfig makeTinyMultiPoolHybridConfig(uint32_t       linear_block_num
     full_spec->seq_size_per_block = static_cast<uint32_t>(config.seq_size_per_block);
 
     config.use_independent_block_pools = true;
-    config.fromGroupedSpecs({linear_spec, full_spec},
+    setGroupedSpecs(config, {linear_spec, full_spec},
                             {{0, 1}, {2, 3}},
                             {CacheGroupType::LINEAR, second_type},
                             {"linear", second_type == CacheGroupType::SWA ? "swa" : "full"});

@@ -52,7 +52,7 @@ CacheConfig makeCPHybridConfig() {
     full_spec->size_per_head      = 1;
     full_spec->seq_size_per_block = static_cast<uint32_t>(config.seq_size_per_block);
 
-    config.fromGroupedSpecs({linear_spec, full_spec},
+    setGroupedSpecs(config, {linear_spec, full_spec},
                             {{0, 1}, {2, 3}},
                             {CacheGroupType::LINEAR, CacheGroupType::FULL},
                             {"linear", "full"});

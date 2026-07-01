@@ -14,6 +14,7 @@
 #include "rtp_llm/cpp/cache/connector/test/mock/MockKVCacheConnectorReadWriteContext.h"
 #include "rtp_llm/cpp/cache/connector/test/mock/MockKVCacheConnector.h"
 #include "rtp_llm/cpp/cache/test/mock/MockKVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/cache/connector/Meta.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
@@ -35,7 +36,7 @@ void initSingleGroupConfig(CacheConfig& config, uint32_t block_num = 1, size_t b
     spec->seq_size_per_block = static_cast<uint32_t>(std::max<size_t>(1, config.seq_size_per_block));
     std::vector<int> layers(static_cast<size_t>(config.layer_num));
     std::iota(layers.begin(), layers.end(), 0);
-    config.fromGroupedSpecs({spec}, {layers}, {CacheGroupType::FULL}, {"default"});
+    setGroupedSpecs(config, {spec}, {layers}, {CacheGroupType::FULL}, {"default"});
     config.setGroupBlockLayout({block_num}, {block_stride_bytes}, {0});
 }
 
@@ -48,7 +49,7 @@ void initTwoGroupCpConfig(CacheConfig& config) {
     full_spec->seq_size_per_block = static_cast<uint32_t>(std::max<size_t>(1, config.seq_size_per_block));
 
     auto swa_spec = std::make_shared<FixedStateCacheSpec>("swa", 1, 1, config.dtype, full_spec->seq_size_per_block);
-    config.fromGroupedSpecs({full_spec, swa_spec}, {{0}, {1}}, {CacheGroupType::FULL, CacheGroupType::SWA}, {"full", "swa"});
+    setGroupedSpecs(config, {full_spec, swa_spec}, {{0}, {1}}, {CacheGroupType::FULL, CacheGroupType::SWA}, {"full", "swa"});
 }
 
 class TestMeta final: public Meta {

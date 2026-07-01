@@ -255,6 +255,70 @@ inline void setDsv4ExplicitPoolBlocks(ModelConfig& model_config, const std::stri
     }
 }
 
+inline void setGroupedSpecs(CacheConfig&                         config,
+                            const std::vector<KVCacheSpecPtr>&    specs,
+                            const std::vector<std::vector<int>>& layers_by_group,
+                            const std::vector<CacheGroupType>&   types,
+                            const std::vector<std::string>&      tags = {}) {
+    const size_t group_num = specs.size();
+    RTP_LLM_CHECK_WITH_INFO(group_num > 0, "setGroupedSpecs requires at least one cache spec");
+    RTP_LLM_CHECK_WITH_INFO(layers_by_group.size() == group_num,
+                            "setGroupedSpecs layer group count %zu != spec count %zu",
+                            layers_by_group.size(),
+                            group_num);
+    RTP_LLM_CHECK_WITH_INFO(types.size() == group_num,
+                            "setGroupedSpecs group type count %zu != spec count %zu",
+                            types.size(),
+                            group_num);
+    RTP_LLM_CHECK_WITH_INFO(tags.empty() || tags.size() == group_num,
+                            "setGroupedSpecs tag count %zu != spec count %zu",
+                            tags.size(),
+                            group_num);
+    RTP_LLM_CHECK_WITH_INFO(config.layer_num > 0, "setGroupedSpecs requires positive layer_num");
+
+    std::vector<GroupInfo> new_groups;
+    std::vector<LayerInfo> new_layers(static_cast<size_t>(config.layer_num));
+    new_groups.reserve(group_num);
+
+    for (size_t gid = 0; gid < group_num; ++gid) {
+        const auto& spec = specs[gid];
+        RTP_LLM_CHECK_WITH_INFO(spec != nullptr, "setGroupedSpecs got null spec at group %zu", gid);
+        std::string tag = tags.empty() ? spec->tag : tags[gid];
+        if (tag.empty() && group_num == 1) {
+            tag = "default";
+        }
+        RTP_LLM_CHECK_WITH_INFO(!tag.empty(), "setGroupedSpecs requires non-empty tag for cache spec %zu", gid);
+        auto stored_spec = spec->clone();
+        stored_spec->tag = tag;
+
+        GroupInfo group;
+        group.spec               = stored_spec;
+        group.policy             = CacheConfig::cacheGroupPolicyForSpec(stored_spec, types[gid]);
+        group.layer_ids          = layers_by_group[gid];
+        group.seq_size_per_block = stored_spec->seq_size_per_block;
+        new_groups.push_back(group);
+
+        for (int layer_id : layers_by_group[gid]) {
+            RTP_LLM_CHECK_WITH_INFO(layer_id >= 0 && static_cast<size_t>(layer_id) < new_layers.size(),
+                                    "setGroupedSpecs tag=%s has invalid layer id %d for layer_num=%u",
+                                    tag.c_str(),
+                                    layer_id,
+                                    config.layer_num);
+            auto& layer = new_layers[static_cast<size_t>(layer_id)];
+            layer.group_ids.push_back(static_cast<int>(gid));
+            const auto [it, inserted] = layer.tag_to_gid.emplace(tag, static_cast<int>(gid));
+            RTP_LLM_CHECK_WITH_INFO(inserted || it->second == static_cast<int>(gid),
+                                    "setGroupedSpecs layer %d tag %s maps to both group %d and %zu",
+                                    layer_id,
+                                    tag.c_str(),
+                                    inserted ? static_cast<int>(gid) : it->second,
+                                    gid);
+        }
+    }
+
+    config.setTopology(std::move(new_groups), std::move(new_layers));
+}
+
 // A tiny helper for unit tests to construct a minimal MultiHeadAttention KV cache config.
 //
 // NOTE:
@@ -283,7 +347,7 @@ inline CacheConfig makeSimpleMhaCacheConfig(int               layer_num,
     for (int i = 0; i < layer_num; ++i) {
         layer_ids[i] = i;
     }
-    config.fromGroupedSpecs({spec}, {layer_ids}, {CacheGroupType::FULL}, {"default"});
+    setGroupedSpecs(config, {spec}, {layer_ids}, {CacheGroupType::FULL}, {"default"});
 
     size_t kv_scale_stride_bytes = 0;
     if (dtype == rtp_llm::TYPE_INT8 || dtype == rtp_llm::TYPE_FP8_E4M3) {
@@ -378,7 +442,7 @@ inline CacheConfig makeSimpleHybridMhaCacheConfig(int               layer_num,
         }
         tags.push_back("default");
     }
-    config.fromGroupedSpecs(specs, layers_by_group, types, tags);
+    setGroupedSpecs(config, specs, layers_by_group, types, tags);
 
     // Physical sizes for hybrid memory layout: one group worth of layers.
     const size_t kv_block_stride_bytes = std::max(full_spec->block_size_bytes(), linear_spec->block_size_bytes());

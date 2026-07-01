@@ -37,7 +37,6 @@ struct LayerInfo {
 struct CacheConfig {
     std::vector<GroupInfo>          groups;
     std::vector<LayerInfo>          layers;
-    std::unordered_map<std::string, int> tag_to_gid;
 
     bool                           group_block_layout_initialized          = false;
     bool                           use_independent_block_pools              = false;
@@ -97,9 +96,13 @@ struct CacheConfig {
     }
 
     int groupIdForTag(const std::string& tag) const {
-        const auto it = tag_to_gid.find(tag);
-        RTP_LLM_CHECK_WITH_INFO(it != tag_to_gid.end(), "CacheConfig::groupIdForTag missing tag=%s", tag.c_str());
-        return it->second;
+        for (size_t gid = 0; gid < groups.size(); ++gid) {
+            if (groups[gid].spec != nullptr && groups[gid].spec->tag == tag) {
+                return static_cast<int>(gid);
+            }
+        }
+        RTP_LLM_FAIL("CacheConfig::groupIdForTag missing tag=%s", tag.c_str());
+        return -1;
     }
 
     const std::vector<int>& layerIdsForGroup(size_t gid) const {
@@ -510,10 +513,6 @@ struct CacheConfig {
 
         sub_cfg->groups                         = std::move(sub_groups);
         sub_cfg->layers                         = std::move(sub_layers);
-        sub_cfg->tag_to_gid.clear();
-        for (size_t gid = 0; gid < sub_cfg->groups.size(); ++gid) {
-            sub_cfg->tag_to_gid.emplace(sub_cfg->groups[gid].spec->tag, static_cast<int>(gid));
-        }
         sub_cfg->group_block_layout_initialized = group_block_layout_initialized;
         return sub_cfg;
     }
@@ -605,14 +604,16 @@ struct CacheConfig {
                                 new_layers.size(),
                                 layer_num);
 
-        std::unordered_map<std::string, int> new_tag_to_gid;
+        std::map<std::string, int> tag_to_gid;
         for (size_t gid = 0; gid < new_groups.size(); ++gid) {
             auto& group = new_groups[gid];
             RTP_LLM_CHECK_WITH_INFO(group.spec != nullptr, "CacheConfig::setTopology got null spec at group %zu", gid);
             RTP_LLM_CHECK_WITH_INFO(!group.spec->tag.empty(),
                                     "CacheConfig::setTopology requires non-empty tag for group %zu",
                                     gid);
-            new_tag_to_gid.emplace(group.spec->tag, static_cast<int>(gid));
+            RTP_LLM_CHECK_WITH_INFO(tag_to_gid.emplace(group.spec->tag, static_cast<int>(gid)).second,
+                                    "CacheConfig::setTopology duplicate group tag=%s",
+                                    group.spec->tag.c_str());
             group.spec         = group.spec->clone();
             group.spec->layers = group.layer_ids;
             if (group.seq_size_per_block == 0) {
@@ -682,73 +683,7 @@ struct CacheConfig {
 
         groups                         = std::move(new_groups);
         layers                         = std::move(new_layers);
-        tag_to_gid                     = std::move(new_tag_to_gid);
         group_block_layout_initialized = false;
-    }
-
-    void fromGroupedSpecs(const std::vector<KVCacheSpecPtr>&    specs,
-                          const std::vector<std::vector<int>>& layers_by_group,
-                          const std::vector<CacheGroupType>&   types,
-                          const std::vector<std::string>&      tags = {}) {
-        const size_t group_num = specs.size();
-        RTP_LLM_CHECK_WITH_INFO(group_num > 0, "CacheConfig::fromGroupedSpecs requires at least one cache spec");
-        RTP_LLM_CHECK_WITH_INFO(layers_by_group.size() == group_num,
-                                "CacheConfig::fromGroupedSpecs layer group count %zu != spec count %zu",
-                                layers_by_group.size(),
-                                group_num);
-        RTP_LLM_CHECK_WITH_INFO(types.size() == group_num,
-                                "CacheConfig::fromGroupedSpecs group type count %zu != spec count %zu",
-                                types.size(),
-                                group_num);
-        RTP_LLM_CHECK_WITH_INFO(tags.empty() || tags.size() == group_num,
-                                "CacheConfig::fromGroupedSpecs tag count %zu != spec count %zu",
-                                tags.size(),
-                                group_num);
-        RTP_LLM_CHECK_WITH_INFO(layer_num > 0, "CacheConfig::fromGroupedSpecs requires positive layer_num");
-
-        std::vector<GroupInfo> new_groups;
-        std::vector<LayerInfo> new_layers(static_cast<size_t>(layer_num));
-        new_groups.reserve(group_num);
-
-        for (size_t gid = 0; gid < group_num; ++gid) {
-            const auto& spec = specs[gid];
-            RTP_LLM_CHECK_WITH_INFO(spec != nullptr, "CacheConfig::fromGroupedSpecs got null spec at group %zu", gid);
-            std::string tag = tags.empty() ? spec->tag : tags[gid];
-            if (tag.empty() && group_num == 1) {
-                tag = "default";
-            }
-            RTP_LLM_CHECK_WITH_INFO(!tag.empty(),
-                                    "CacheConfig::fromGroupedSpecs requires non-empty tag for cache spec %zu",
-                                    gid);
-            auto stored_spec = spec->clone();
-            stored_spec->tag = tag;
-
-            GroupInfo group;
-            group.spec               = stored_spec;
-            group.policy             = cacheGroupPolicyForSpec(stored_spec, types[gid]);
-            group.layer_ids          = layers_by_group[gid];
-            group.seq_size_per_block = stored_spec->seq_size_per_block;
-            new_groups.push_back(group);
-
-            for (int layer_id : layers_by_group[gid]) {
-                RTP_LLM_CHECK_WITH_INFO(layer_id >= 0 && static_cast<size_t>(layer_id) < new_layers.size(),
-                                        "CacheConfig::fromGroupedSpecs tag=%s has invalid layer id %d for layer_num=%u",
-                                        tag.c_str(),
-                                        layer_id,
-                                        layer_num);
-                auto& layer = new_layers[static_cast<size_t>(layer_id)];
-                layer.group_ids.push_back(static_cast<int>(gid));
-                const auto [it, inserted] = layer.tag_to_gid.emplace(tag, static_cast<int>(gid));
-                RTP_LLM_CHECK_WITH_INFO(inserted || it->second == static_cast<int>(gid),
-                                        "CacheConfig::fromGroupedSpecs layer %d tag %s maps to both group %d and %zu",
-                                        layer_id,
-                                        tag.c_str(),
-                                        inserted ? static_cast<int>(gid) : it->second,
-                                        gid);
-            }
-        }
-
-        setTopology(std::move(new_groups), std::move(new_layers));
     }
 
     void finalizeBlockNums(uint32_t global_block_num, const RuntimeConfig& runtime_config) {

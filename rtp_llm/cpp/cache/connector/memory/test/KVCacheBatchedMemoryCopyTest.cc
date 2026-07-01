@@ -125,7 +125,7 @@ CacheConfig makeTinyTypedHybridPoolConfig() {
     auto csa_spec = make_spec(/*size_per_head=*/4);
     auto swa_spec = make_spec(/*size_per_head=*/8);
 
-    config.fromGroupedSpecs({csa_spec, swa_spec},
+    setGroupedSpecs(config, {csa_spec, swa_spec},
                             {{0, 1}, {0, 1}},
                             {CacheGroupType::FULL, CacheGroupType::FULL},
                             {"csa_kv", "swa_kv"});
@@ -226,7 +226,7 @@ CacheConfig makeCompactDsv4TypedMemoryCopyConfig(bool use_flash) {
     for (size_t gid = 0; gid < kDsv4PoolNum; ++gid) {
         specs.push_back(make_spec(gid));
     }
-    config.fromGroupedSpecs(specs, layers_by_group, group_types, group_tags);
+    setGroupedSpecs(config, specs, layers_by_group, group_types, group_tags);
     config.setGroupSeqSizesPerBlock(std::vector<size_t>(kDsv4PoolNum, config.seq_size_per_block));
     config.setGroupPolicies(group_policies);
     config.setGroupBlockLayout(group_block_nums, group_kv_block_stride_bytes, group_kv_scale_stride_bytes);

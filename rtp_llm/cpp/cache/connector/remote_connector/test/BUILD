@@ -41,6 +41,7 @@ cc_test(
     # tags = ["H20"],
     deps = test_deps + [
         "//rtp_llm/cpp/cache/connector/remote_connector",
+        "//rtp_llm/cpp/cache/test:cache_config_test_utils",
     ],
 )
 
@@ -54,6 +55,7 @@ cc_test(
     # tags = ["H20"],
     deps = test_deps + [
         "//rtp_llm/cpp/cache/connector/remote_connector",
+        "//rtp_llm/cpp/cache/test:cache_config_test_utils",
     ],
 )
 
@@ -67,6 +69,7 @@ cc_test(
     # tags = ["H20"],
     deps = [
         ":remote_connector_mock_base",
+        "//rtp_llm/cpp/cache/test:cache_config_test_utils",
     ],
 )
 
@@ -80,6 +83,7 @@ cc_test(
     # tags = ["H20"],
     deps = [
         ":remote_connector_mock_base",
+        "//rtp_llm/cpp/cache/test:cache_config_test_utils",
     ],
 )
 

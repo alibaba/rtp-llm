@@ -5,6 +5,7 @@
 
 #include "rtp_llm/cpp/cache/connector/remote_connector/RemoteConnector.h"
 #include "rtp_llm/cpp/cache/allocator/KVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "autil/EnvUtil.h"
@@ -141,7 +142,7 @@ public:
         cache_config_.layer_all_num  = layer_num_;
         std::vector<int> layers(layer_num_);
         std::iota(layers.begin(), layers.end(), 0);
-        cache_config_.fromGroupedSpecs({mha_spec, mha_spec, mha_spec},
+        setGroupedSpecs(cache_config_, {mha_spec, mha_spec, mha_spec},
                                        {layers, layers, layers},
                                        {CacheGroupType::FULL, CacheGroupType::LINEAR, CacheGroupType::LINEAR},
                                        {"F0", "L1", "L2"});

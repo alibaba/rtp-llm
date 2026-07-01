@@ -1,6 +1,7 @@
 #include "rtp_llm/cpp/cache/allocator/SingleTypeKVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/connector/Meta.h"
 #include "rtp_llm/cpp/cache/connector/remote_connector/test/RemoteConnectorMockTestBase.h"
+#include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 
 #include <stdio.h>
 
@@ -107,7 +108,7 @@ private:
         for (int i = 0; i < layer_num; ++i) {
             layer_ids[i] = i;
         }
-        cache_config_.fromGroupedSpecs({mha_spec}, {layer_ids}, {CacheGroupType::FULL}, {"default"});
+        setGroupedSpecs(cache_config_, {mha_spec}, {layer_ids}, {CacheGroupType::FULL}, {"default"});
         cache_config_.setGroupBlockLayout({static_cast<uint32_t>(block_num)}, {mha_spec->block_size_bytes()}, {0});
     }
 };

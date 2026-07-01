@@ -50,7 +50,7 @@ static CacheConfig makeTinyHybridConfig() {
     full_spec->seq_size_per_block = static_cast<uint32_t>(config.seq_size_per_block);
 
     // Order matters: linear groups first, then full groups (as in CacheConfigCreator).
-    config.fromGroupedSpecs({linear_spec, full_spec},
+    setGroupedSpecs(config, {linear_spec, full_spec},
                             {{0, 1}, {2, 3}},
                             {CacheGroupType::LINEAR, CacheGroupType::FULL},
                             {"linear", "full"});

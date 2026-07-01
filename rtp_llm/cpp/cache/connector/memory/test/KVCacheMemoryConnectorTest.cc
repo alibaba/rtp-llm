@@ -27,6 +27,7 @@
 #include "rtp_llm/cpp/cache/spec/OpaqueKVCacheSpec.h"
 #include "rtp_llm/cpp/cache/allocator/SingleTypeKVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/allocator/HybridTypeKVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/models_py/bindings/cuda/cuda_host_utils.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
@@ -152,7 +153,7 @@ void makeConfigUseZeroStrideSpec(CacheConfig& config) {
     spec->seq_size_per_block = static_cast<uint32_t>(config.seq_size_per_block);
     std::vector<int> layer_ids(static_cast<size_t>(config.layer_all_num));
     std::iota(layer_ids.begin(), layer_ids.end(), 0);
-    config.fromGroupedSpecs({spec}, {layer_ids}, {CacheGroupType::FULL}, {"default"});
+    setGroupedSpecs(config, {spec}, {layer_ids}, {CacheGroupType::FULL}, {"default"});
     config.setGroupBlockLayout({block_num}, {0}, {0});
 }
 
@@ -229,7 +230,7 @@ CacheConfig createDsv4TypedConnectorConfig() {
             specs[gid]               = spec;
         }
     }
-    config.fromGroupedSpecs(specs, layers_by_group, group_types, group_tags);
+    setGroupedSpecs(config, specs, layers_by_group, group_types, group_tags);
     config.setGroupPolicies(group_policies);
     config.setGroupBlockLayout(std::vector<uint32_t>(kDsv4PoolNum, 16),
                                group_kv_block_stride_bytes,
@@ -345,7 +346,7 @@ private:
         for (int i = 0; i < layer_num; ++i) {
             layer_ids[i] = i;
         }
-        config.fromGroupedSpecs({mha_spec}, {layer_ids}, {CacheGroupType::FULL}, {"default"});
+        setGroupedSpecs(config, {mha_spec}, {layer_ids}, {CacheGroupType::FULL}, {"default"});
         config.setGroupBlockLayout({static_cast<uint32_t>(block_num)},
                                    {mha_spec->block_size_bytes()},
                                    {mha_spec->scale_block_size_bytes()});
@@ -1776,7 +1777,7 @@ TEST_F(KVCacheMemoryConnectorTest, buildCopyPlanForWrite_UsesLayerAndGroupSlots)
     cfg.layer_num     = 1;
     cfg.layer_all_num = 1;
     auto spec = cfg.specForGroup(0);
-    cfg.fromGroupedSpecs({spec, spec}, {{0}, {0}}, {CacheGroupType::FULL, CacheGroupType::FULL}, {"csa_kv", "swa_kv"});
+    setGroupedSpecs(cfg, {spec, spec}, {{0}, {0}}, {CacheGroupType::FULL, CacheGroupType::FULL}, {"csa_kv", "swa_kv"});
     cfg.setGroupBlockLayout({cache_config_.blockNumForGroup(0), cache_config_.blockNumForGroup(0)}, {16, 32}, {0, 0});
 
     auto kv_cfg                         = kv_cache_config_;
@@ -2992,7 +2993,7 @@ TEST_F(KVCacheMemoryConnectorTest, copyCache_ReturnTrue_H2D_SplitKvScale_NoBlock
     for (int i = 0; i < kLayerNum; ++i) {
         layer_ids[i] = i;
     }
-    cache_config_.fromGroupedSpecs({mla_spec}, {layer_ids}, {CacheGroupType::FULL}, {"default"});
+    setGroupedSpecs(cache_config_, {mla_spec}, {layer_ids}, {CacheGroupType::FULL}, {"default"});
     cache_config_.setGroupBlockLayout({static_cast<uint32_t>(kBlockNum)}, {kv_block_stride_bytes}, {kv_scale_stride_bytes});
 
     ASSERT_EQ(mla_spec->block_size_bytes(), kv_block_stride_bytes);
@@ -3285,7 +3286,7 @@ protected:
             full_layer_ids[i] = i;
             swa_layer_ids[i]  = i;
         }
-        config.fromGroupedSpecs({full_spec, swa_spec},
+        setGroupedSpecs(config, {full_spec, swa_spec},
                                 {full_layer_ids, swa_layer_ids},
                                 {CacheGroupType::FULL, CacheGroupType::SWA},
                                 {"default", "swa_kv"});
@@ -3427,7 +3428,7 @@ TEST_F(KVCacheMemoryConnectorDualPoolTest, Init_PureFullUsesSinglePool) {
     spec->dtype                  = rtp_llm::DataType::TYPE_FP16;
     config.dtype                 = spec->dtype;
     std::vector<int> ids = {0, 1, 2, 3};
-    config.fromGroupedSpecs({spec}, {ids}, {CacheGroupType::FULL}, {"default"});
+    setGroupedSpecs(config, {spec}, {ids}, {CacheGroupType::FULL}, {"default"});
     config.setGroupBlockLayout({10}, {spec->block_size_bytes()}, {spec->scale_block_size_bytes()});
 
     allocator_ = std::make_shared<SingleTypeKVCacheAllocator>(config, AllocationType::DEVICE);

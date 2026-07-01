@@ -4,6 +4,7 @@
 #include <numeric>
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/BlockPoolConfigHelper.h"
+#include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/config/ModelConfig.h"
@@ -79,7 +80,7 @@ inline BlockPoolConfig createTestConfig(size_t            k_block_stride_bytes =
 
     std::vector<int> layer_ids(kLayerNum);
     std::iota(layer_ids.begin(), layer_ids.end(), 0);
-    cache_config.fromGroupedSpecs({spec}, {layer_ids}, {CacheGroupType::FULL}, {"default"});
+    test::setGroupedSpecs(cache_config, {spec}, {layer_ids}, {CacheGroupType::FULL}, {"default"});
     cache_config.setGroupBlockLayout(
         {kBlockNum}, {k_block_stride_bytes + v_block_stride_bytes}, {k_scale_stride_bytes + v_scale_stride_bytes});
 
