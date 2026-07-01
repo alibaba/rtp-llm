@@ -9,6 +9,10 @@
 
 namespace rtp_llm {
 
+// 遮蔽深度上界：防止 num_return_sequences 过大时采样退化为随机噪声。
+// 实际场景推荐 N=2~4，设为 8 提供安全余量。
+static constexpr int kMaxDivergeDepth = 8;
+
 RecommendationLogitsProcessor::RecommendationLogitsProcessor(std::vector<StreamRecommendationInfo> infos):
     infos_(std::move(infos)) {}
 
@@ -41,6 +45,13 @@ RecommendationLogitsProcessor::fromGenerateInput(std::shared_ptr<GenerateInput> 
             RTP_LLM_LOG_WARNING("cross_sequence_ban disabled: combo_token_size must be >= 2, got %d",
                                 config->combo_token_size);
         }
+    }
+    // 遮蔽深度上界校验：最大遮蔽 k = num-1，若超过 kMaxDivergeDepth 则警告采样可能退化
+    if (enable_cross_seq_ban && num - 1 > kMaxDivergeDepth) {
+        RTP_LLM_LOG_WARNING(
+            "cross_sequence_ban: num_return_sequences=%d exceeds recommended max diverge depth %d, "
+            "sampling quality may degrade for higher-indexed sequences",
+            num, kMaxDivergeDepth);
     }
     const int32_t diverge_start_combo = std::max(0, config->cross_seq_diverge_start_combo);
     if (config->cross_seq_diverge_start_combo < 0) {
@@ -106,7 +117,7 @@ void RecommendationLogitsProcessor::process(const SamplerInputs& inputs, size_t 
                 || info.completed_combo_count < info.cross_seq_diverge_start_combo) {
                 continue;
             }
-            int k = std::min(static_cast<int>(i), static_cast<int>(vocab_size) - 1);
+            int k = std::min({static_cast<int>(i), static_cast<int>(vocab_size) - 1, kMaxDivergeDepth});
             if (k > max_k) max_k = k;
         }
         if (max_k > 0) {
@@ -120,8 +131,8 @@ void RecommendationLogitsProcessor::process(const SamplerInputs& inputs, size_t 
                     || info.completed_combo_count < info.cross_seq_diverge_start_combo) {
                     continue;
                 }
-                // 防御：确保至少保留 1 个可选 token，避免 k >= vocab_size 时全部遮蔽
-                const int k = std::min(static_cast<int>(i), static_cast<int>(vocab_size) - 1);
+                // 防御：确保至少保留 1 个可选 token，同时不超过 kMaxDivergeDepth 避免采样退化
+                const int k = std::min({static_cast<int>(i), static_cast<int>(vocab_size) - 1, kMaxDivergeDepth});
                 if (k <= 0) continue;
                 // 从预计算的 batch topk indices 中裁剪前 k 个位置进行遮蔽
                 // topk_indices 行号 = i-1（因为 narrow 排除了 row 0）

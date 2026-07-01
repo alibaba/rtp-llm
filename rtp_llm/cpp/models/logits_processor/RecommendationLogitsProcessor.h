@@ -103,14 +103,17 @@ public:
     }
     void insert(std::shared_ptr<RecommendationLogitsProcessor> others) {
         if (others != nullptr) {
-            // 不变量守卫：insert 后 infos_[0].enable_cross_sequence_ban 必须仍然能代表全局状态。
-            // 若两个 processor 的 enable_cross_sequence_ban 不一致，合并会破坏广播门控语义。
-            if (!infos_.empty() && !others->infos_.empty()) {
-                RTP_LLM_CHECK_WITH_INFO(
-                    infos_[0].enable_cross_sequence_ban == others->infos_[0].enable_cross_sequence_ban,
-                    "insert() requires consistent enable_cross_sequence_ban across processors");
-            }
             infos_.insert(infos_.end(), others->infos_.begin(), others->infos_.end());
+            // 后置不变量：合并后所有 info 的 enable_cross_sequence_ban 必须一致。
+            // 覆盖空 processor 被 insert 非空 others 的场景（此时 infos_[0] 来自 others）。
+            if (infos_.size() > 1) {
+                const bool flag = infos_[0].enable_cross_sequence_ban;
+                for (size_t i = 1; i < infos_.size(); ++i) {
+                    RTP_LLM_CHECK_WITH_INFO(
+                        infos_[i].enable_cross_sequence_ban == flag,
+                        "insert() resulted in inconsistent enable_cross_sequence_ban");
+                }
+            }
         }
     }
 

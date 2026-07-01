@@ -509,4 +509,57 @@ TEST_F(RecommendationLogitsProcessorTest, testFromGenerateInputProductionPath) {
     EXPECT_TRUE(p->infos()[1].banned_combos.count({30, 31, 32}));
 }
 
+// 场景 17：top-K 遮蔽深度上界保护 —— num_return_sequences=12 时，序列 11 的遮蔽深度
+// 应被 kMaxDivergeDepth(=8) 钳制，至少保留足够可选 token
+TEST_F(RecommendationLogitsProcessorTest, testDivergeDepthCappedByMaxLimit) {
+    const int N = 12;  // 超过 kMaxDivergeDepth=8
+    const int combo_size = 2;
+    const int vocab = 20;
+
+    std::vector<StreamRecommendationInfo> infos;
+    for (int i = 0; i < N; ++i) {
+        StreamRecommendationInfo info(combo_size, 0, 0, false, {}, {},
+                                      /*enable_cross_sequence_ban=*/true,
+                                      /*cross_seq_diverge_start_combo=*/0);
+        infos.push_back(std::move(info));
+    }
+    auto p = std::make_shared<RecommendationLogitsProcessor>(std::move(infos));
+
+    // 创建 logits [N, vocab]，每行相同分布
+    auto logits = torch::ones({N, vocab}, torch::kFloat32);
+    // 让 token 0~11 有高分，方便观察遮蔽
+    for (int i = 0; i < N; ++i) {
+        for (int j = 0; j < N; ++j) {
+            logits[i][j] = 100.0f - j;
+        }
+    }
+
+    SamplerInputs inputs;
+    inputs.logits = logits;
+    p->process(inputs, 0, N);
+
+    // 序列 0 不应被遮蔽
+    for (int j = 0; j < vocab; ++j) {
+        EXPECT_GT(inputs.logits[0][j].item<float>(), -1e30);
+    }
+    // 序列 11(i=11)：k = min(11, vocab-1=19, kMaxDivergeDepth=8) = 8
+    // 应恰好有 8 个 token 被遮蔽为 -inf
+    int masked_count = 0;
+    for (int j = 0; j < vocab; ++j) {
+        if (inputs.logits[11][j].item<float>() < -1e30) {
+            masked_count++;
+        }
+    }
+    EXPECT_EQ(8, masked_count);  // 受 kMaxDivergeDepth 钳制，而非 11
+
+    // 序列 5(i=5)：k = min(5, 19, 8) = 5，正常不受 cap 影响
+    int masked_count_5 = 0;
+    for (int j = 0; j < vocab; ++j) {
+        if (inputs.logits[5][j].item<float>() < -1e30) {
+            masked_count_5++;
+        }
+    }
+    EXPECT_EQ(5, masked_count_5);
+}
+
 }  // namespace rtp_llm
