@@ -604,6 +604,23 @@ class JitCacheManagerTest(unittest.TestCase):
             "failed to report JIT cache usage metrics", "\n".join(logs.output)
         )
 
+    def test_sync_once_lock_contention_returns_standard_summary(self):
+        remote = self.root / "remote"
+        manager = self.make_manager(str(remote))
+
+        manager._sync_lock.acquire()
+        try:
+            summary = manager.sync_once("manual_contention")
+        finally:
+            manager._sync_lock.release()
+
+        self.assertEqual(summary["mode"], "manual_contention")
+        self.assertEqual(summary["result"], "skipped")
+        self.assertEqual(summary["reason"], "sync in progress")
+        self.assertIn("timestamp_ms", summary)
+        self.assertIn("total_cost_ms", summary)
+        self.assertEqual(self.read_summary()["result"], "skipped")
+
     def test_upload_skips_empty_files(self):
         remote = self.root / "remote"
         manager = self.make_manager(str(remote))

@@ -403,7 +403,7 @@ class JitCacheManager:
         self.startup_lock: FileLock | None = None
         self.remote_cache_available = False
         self._sync_executor: ThreadPoolExecutor | None = None
-        # avoid redundant mkdir RPCs on remote jit cache dir
+        # Avoid redundant mkdir RPCs on remote JIT cache dirs.
         self._known_remote_dirs: set[Path] = set()
 
     @property
@@ -809,10 +809,7 @@ class JitCacheManager:
         src_stat = src.stat()
         if src_stat.st_size <= 0:
             return 0
-        parent = dst.parent
-        if parent not in self._known_remote_dirs:
-            parent.mkdir(parents=True, exist_ok=True)
-            self._known_remote_dirs.add(parent)
+        self._ensure_remote_parent(dst.parent)
         try:
             with atomic_write_path(dst, ensure_parent=False) as tmp:
                 _copy_with_deadline(src, tmp, deadline_s)
@@ -827,11 +824,27 @@ class JitCacheManager:
             raise
         return src_stat.st_size
 
+    def _ensure_remote_parent(self, parent: Path) -> None:
+        with self._lock:
+            if parent in self._known_remote_dirs:
+                return
+        # Avoid holding the state lock across FUSE metadata RPCs; duplicate
+        # mkdirs during first-use races are safe with exist_ok=True.
+        parent.mkdir(parents=True, exist_ok=True)
+        with self._lock:
+            self._known_remote_dirs.add(parent)
+
     def sync_once(
         self, mode: str = "manual_sync", drain_timeout_s: float | None = None
     ) -> dict[str, Any]:
+        start_s = time.monotonic()
         if not self._sync_lock.acquire(blocking=False):
-            return {"mode": mode, "result": "skipped", "reason": "sync in progress"}
+            return self._make_summary(
+                mode,
+                "skipped",
+                start_s,
+                reason="sync in progress",
+            )
         try:
             return self._sync_once_impl(mode, drain_timeout_s)
         finally:
