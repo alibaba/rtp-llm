@@ -416,6 +416,13 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("reco_get_broadcast_timeout", &KVCacheConfig::reco_get_broadcast_timeout)
         .def_readwrite("reco_put_broadcast_timeout", &KVCacheConfig::reco_put_broadcast_timeout)
         .def_readwrite("reco_client_config", &KVCacheConfig::reco_client_config)
+        .def_readwrite("enable_kvs_cache", &KVCacheConfig::enable_kvs_cache)
+        .def_readwrite("kvs_v6d_url", &KVCacheConfig::kvs_v6d_url)
+        .def_readwrite("kvs_v6d_socket_path", &KVCacheConfig::kvs_v6d_socket_path)
+        .def_readwrite("kvs_timeout_ms", &KVCacheConfig::kvs_timeout_ms)
+        .def_readwrite("kvs_lease_term_sec", &KVCacheConfig::kvs_lease_term_sec)
+        .def_readwrite("kvs_object_namespace", &KVCacheConfig::kvs_object_namespace)
+        .def_readwrite("kvs_cache_key_version", &KVCacheConfig::kvs_cache_key_version)
         .def("insertMultiTaskPromptTokens", &KVCacheConfig::insertMultiTaskPromptTokens)
         .def("to_string", &KVCacheConfig::to_string)
         .def(py::pickle(
@@ -473,13 +480,20 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.enable_prefix_tree_memory_cache,
                                       self.enable_legacy_memory_connector_fallback,
                                       self.prefix_tree_memory_state_swa_pool_ratio,
-                                      self.enable_independent_group_eviction);
+                                      self.enable_independent_group_eviction,
+                                      self.enable_kvs_cache,
+                                      self.kvs_v6d_url,
+                                      self.kvs_v6d_socket_path,
+                                      self.kvs_timeout_ms,
+                                      self.kvs_lease_term_sec,
+                                      self.kvs_object_namespace,
+                                      self.kvs_cache_key_version);
             },
             [](py::tuple t) {
                 const bool has_disk_fields =
                     t.size() >= 50 && py::isinstance<py::str>(t[9]);
                 const size_t min_size = has_disk_fields ? 54u : 49u;
-                const size_t max_size = has_disk_fields ? 56u : 51u;
+                const size_t max_size = has_disk_fields ? 63u : 58u;
                 if (t.size() < min_size || t.size() > max_size) {
                     throw std::runtime_error("Invalid state!");
                 }
@@ -547,8 +561,30 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     c.enable_legacy_memory_connector_fallback = t[extra_idx++].cast<bool>();
                     c.prefix_tree_memory_state_swa_pool_ratio = t[extra_idx++].cast<int64_t>();
                     c.enable_independent_group_eviction       = t[extra_idx++].cast<bool>();
-                    if (t.size() > extra_idx) {
+                    if (t.size() > extra_idx && py::isinstance<py::dict>(t[extra_idx])) {
                         (void)t[extra_idx].cast<std::map<std::string, uint32_t>>();
+                        extra_idx++;
+                    }
+                    if (t.size() > extra_idx) {
+                        c.enable_kvs_cache = t[extra_idx++].cast<bool>();
+                    }
+                    if (t.size() > extra_idx) {
+                        c.kvs_v6d_url = t[extra_idx++].cast<std::string>();
+                    }
+                    if (t.size() > extra_idx) {
+                        c.kvs_v6d_socket_path = t[extra_idx++].cast<std::string>();
+                    }
+                    if (t.size() > extra_idx) {
+                        c.kvs_timeout_ms = t[extra_idx++].cast<int>();
+                    }
+                    if (t.size() > extra_idx) {
+                        c.kvs_lease_term_sec = t[extra_idx++].cast<int>();
+                    }
+                    if (t.size() > extra_idx) {
+                        c.kvs_object_namespace = t[extra_idx++].cast<std::string>();
+                    }
+                    if (t.size() > extra_idx) {
+                        c.kvs_cache_key_version = t[extra_idx++].cast<std::string>();
                     }
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("KVCacheConfig unpickle error: ") + e.what());
