@@ -1,6 +1,7 @@
 #include "autil/StringUtil.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/api_server/openai/OpenaiEndpoint.h"
+#include "rtp_llm/cpp/api_server/Exception.h"
 
 namespace rtp_llm {
 
@@ -78,9 +79,14 @@ std::shared_ptr<GenerateConfig> OpenaiEndpoint::extract_generation_config(const 
         auto request_stop_words_list_ids = chat_render_->tokenize_words(request_stop_words_list);
         config.stop_words_list.insert(
             config.stop_words_list.begin(), request_stop_words_list_ids.begin(), request_stop_words_list_ids.end());
-    } else {
-        RTP_LLM_LOG_WARNING("chat render is null, skip tokenizing request stop words");
+    } else if (!request_stop_words_list.empty()) {
+        // fail-fast: the request provided stop words but chat_render_ is null, so we
+        // cannot tokenize them. Surfacing an error is better than silently dropping
+        // the user's stop words and returning unexpected output.
+        throw HttpApiServerException(HttpApiServerException::TOKENIZER_ERROR,
+                                     "chat_render is null; cannot tokenize request stop_words");
     }
+    // If no request stop words were provided, a null chat_render_ drops nothing.
     // if (req.chat_id.has_value()) {
     //     config.chat_id = req.chat_id.value();
     // }
@@ -101,9 +107,13 @@ std::shared_ptr<GenerateConfig> OpenaiEndpoint::extract_generation_config(const 
         if (config.sp_advice_prompt.empty() == false) {
             config.sp_advice_prompt_token_ids = tokenizer_->encode(config.sp_advice_prompt);
         }
-    } else {
-        RTP_LLM_LOG_WARNING("tokenizer is null, skip select tokens and sp advice prompt encoding");
+    } else if (config.select_tokens_str.empty() == false || config.sp_advice_prompt.empty() == false) {
+        // fail-fast: the request needs select_tokens / sp_advice_prompt encoding but
+        // tokenizer_ is null. Reject instead of silently skipping so the caller is aware.
+        throw HttpApiServerException(HttpApiServerException::TOKENIZER_ERROR,
+                                     "tokenizer is null; cannot process select_tokens/sp_advice_prompt");
     }
+    // If neither select_tokens nor sp_advice_prompt was requested, a null tokenizer_ drops nothing.
     return std::make_shared<GenerateConfig>(config);
 }
 
