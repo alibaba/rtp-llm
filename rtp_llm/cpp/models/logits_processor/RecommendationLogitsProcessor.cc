@@ -106,8 +106,9 @@ void RecommendationLogitsProcessor::process(const SamplerInputs& inputs, size_t 
     const size_t vocab_size = logits.size(1);
 
     // --- top-K 分叉遮蔽：对非主序列在 combo 起始位置遮蔽前 i 个最大 logit ---
-    // 批量化：先确定最大遮蔽深度 max_k，对整个 batch 做一次 topk，再按行裁剪遮蔽，
-    // 将 N-1 次 topk kernel launch 降为 1 次。
+    // 批量化设计决策：对所有非主行做一次 batch topk(max_k)，而非逐行筛选后再 gather/topk/scatter。
+    // 原因：1) 单次 kernel launch 比多次显著更快；2) N=2-4 时几乎所有非主行都符合条件，
+    // 不符合条件的行其 topk 结果不会被使用（下方 for 循环中 skip），无副作用。
     if (need_diverge_process) {
         int max_k = 0;
         for (size_t i = 1; i < batch_size; ++i) {
@@ -249,7 +250,8 @@ void RecommendationLogitsProcessor::updateStatus(const torch::Tensor& new_tokens
     RTP_LLM_CHECK(size() == (size_t)new_tokens.size(0));
 
     bool any_combo_completed = false;
-    std::vector<std::vector<int>> new_combos_this_step;  // 增量广播用
+    // 按序列分组收集新完成的 combo，广播时仅插入其他序列的 combo，避免自身重复插入
+    std::vector<std::vector<std::vector<int>>> new_combos_per_seq(size());
     for (size_t i = 0; i < size(); ++i) {
         auto& info = infos_[i];
         if (info.combo_token_size <= 0) {
@@ -265,7 +267,7 @@ void RecommendationLogitsProcessor::updateStatus(const torch::Tensor& new_tokens
         const int64_t stride = new_tokens.size(1);
         for (int32_t j = 0; j < num_new_tokens; ++j) {
             const int token_id = new_tokens.data_ptr<int>()[i * stride + j + offset];
-            if (advanceOneToken(info, token_id, &new_combos_this_step)) {
+            if (advanceOneToken(info, token_id, &new_combos_per_seq[i])) {
                 any_combo_completed = true;
             }
         }
@@ -273,14 +275,16 @@ void RecommendationLogitsProcessor::updateStatus(const torch::Tensor& new_tokens
         info.current_output_length += num_new_tokens;
     }
 
-    // 跨序列增量广播（非对称模式）：仅将本步新完成的 combo 插入非主序列
+    // 跨序列增量广播（非对称模式）：仅将其他序列本步新完成的 combo 插入非主序列，跳过自身已有的
     // 设计意图（primary-protected）：序列 0（主序列）仅保留自身产生的 banned_combos，不接收其他
-    // 序列的 ban，以保证主序列输出质量不受补充序列影响。补充序列接收所有序列的新增 combo，确保彼此
-    // 不重复。因此主序列可能产生与补充序列相同的 combo —— 这是有意为之的设计权衡。
+    // 序列的 ban。补充序列接收其他序列的新增 combo，确保彼此不重复。
     if (any_combo_completed && size() > 1 && infos_[0].enable_cross_sequence_ban) {
         for (size_t i = 1; i < size(); ++i) {
-            for (const auto& combo : new_combos_this_step) {
-                infos_[i].banned_combos.insert(combo);
+            for (size_t j = 0; j < size(); ++j) {
+                if (j == i) continue;  // 跳过自身，避免冗余 set::insert
+                for (const auto& combo : new_combos_per_seq[j]) {
+                    infos_[i].banned_combos.insert(combo);
+                }
             }
         }
     }

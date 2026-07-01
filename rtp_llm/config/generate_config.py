@@ -95,7 +95,12 @@ class GenerateConfig(BaseModel):
     @classmethod
     def _clamp_diverge_start_combo(cls, v):
         """确保分叉起始位置非负，负值 clamp 到 0 并输出 warning。"""
-        val = int(v)
+        if v is None:
+            return 0
+        try:
+            val = int(v)
+        except (TypeError, ValueError):
+            return 0
         if val < 0:
             logging.getLogger(__name__).warning(
                 "cross_seq_diverge_start_combo is negative (%d), clamped to 0", val)
