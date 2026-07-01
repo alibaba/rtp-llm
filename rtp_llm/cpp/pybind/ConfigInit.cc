@@ -498,6 +498,9 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("ft_core_dump_on_exception", &ProfilingDebugLoggingConfig::ft_core_dump_on_exception)
         .def_readwrite("ft_alog_conf_path", &ProfilingDebugLoggingConfig::ft_alog_conf_path)
         .def_readwrite("gen_timeline_sync", &ProfilingDebugLoggingConfig::gen_timeline_sync)
+        .def_readwrite("timeline_start_step", &ProfilingDebugLoggingConfig::timeline_start_step)
+        .def_readwrite("timeline_num_steps", &ProfilingDebugLoggingConfig::timeline_num_steps)
+        .def_readwrite("timeline_trace_name", &ProfilingDebugLoggingConfig::timeline_trace_name)
         .def_readwrite("torch_cuda_profiler_dir", &ProfilingDebugLoggingConfig::torch_cuda_profiler_dir)
         .def_readwrite("log_file_backup_count", &ProfilingDebugLoggingConfig::log_file_backup_count)
         .def_readwrite("debug_load_server", &ProfilingDebugLoggingConfig::debug_load_server)
@@ -513,6 +516,9 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.ft_core_dump_on_exception,
                                       self.ft_alog_conf_path,
                                       self.gen_timeline_sync,
+                                      self.timeline_start_step,
+                                      self.timeline_num_steps,
+                                      self.timeline_trace_name,
                                       self.torch_cuda_profiler_dir,
                                       self.log_file_backup_count,
                                       self.debug_load_server,
@@ -522,7 +528,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.check_nan);
             },
             [](py::tuple t) {
-                if (t.size() != 12)
+                if (t.size() != 12 && t.size() != 15)
                     throw std::runtime_error("Invalid state!");
 
                 ProfilingDebugLoggingConfig c;
@@ -532,13 +538,26 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     c.ft_core_dump_on_exception = t[2].cast<bool>();
                     c.ft_alog_conf_path         = t[3].cast<std::string>();
                     c.gen_timeline_sync         = t[4].cast<bool>();
-                    c.torch_cuda_profiler_dir   = t[5].cast<std::string>();
-                    c.log_file_backup_count     = t[6].cast<int>();
-                    c.debug_load_server         = t[7].cast<bool>();
-                    c.hack_layer_num            = t[8].cast<int>();
-                    c.debug_start_fake_process  = t[9].cast<bool>();
-                    c.enable_detail_log         = t[10].cast<bool>();
-                    c.check_nan                 = t[11].cast<bool>();
+                    if (t.size() == 12) {
+                        c.torch_cuda_profiler_dir  = t[5].cast<std::string>();
+                        c.log_file_backup_count    = t[6].cast<int>();
+                        c.debug_load_server        = t[7].cast<bool>();
+                        c.hack_layer_num           = t[8].cast<int>();
+                        c.debug_start_fake_process = t[9].cast<bool>();
+                        c.enable_detail_log        = t[10].cast<bool>();
+                        c.check_nan                = t[11].cast<bool>();
+                    } else {
+                        c.timeline_start_step      = t[5].cast<int>();
+                        c.timeline_num_steps       = t[6].cast<int>();
+                        c.timeline_trace_name      = t[7].cast<std::string>();
+                        c.torch_cuda_profiler_dir  = t[8].cast<std::string>();
+                        c.log_file_backup_count    = t[9].cast<int>();
+                        c.debug_load_server        = t[10].cast<bool>();
+                        c.hack_layer_num           = t[11].cast<int>();
+                        c.debug_start_fake_process = t[12].cast<bool>();
+                        c.enable_detail_log        = t[13].cast<bool>();
+                        c.check_nan                = t[14].cast<bool>();
+                    }
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("ProfilingDebugLoggingConfig unpickle error: ") + e.what());
                 }

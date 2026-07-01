@@ -55,7 +55,8 @@ grpc::Status LocalRpcServer::init(const EngineInitParams&                       
                 && role_type != RoleType::VIT);
         if (use_remote) {
             mm_processor_.reset(new RemoteMultimodalProcessor(maga_init_params.model_config_.mm_model_config,
-                                                              maga_init_params.model_config_.max_seq_len));
+                                                              maga_init_params.model_config_.max_seq_len,
+                                                              metrics_reporter_));
         } else {
             // Local mode (LOCAL or ROLE+VIT) requires mm_process_engine.
             if (mm_process_engine.is_none()) {
