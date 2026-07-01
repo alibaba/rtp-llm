@@ -387,14 +387,23 @@ class QWenV2(QWen):
         if config_json.get("hidden_size") is not None:
             config.hidden_size = config_json["hidden_size"]
         config.num_layers = config_json["num_hidden_layers"]
-        config.attn_config.rope_config.base = int(
-            config_json.get("rope_theta", config.attn_config.rope_config.base)
-        )
+        # transformers>=5.2.0 moved rope_theta into nested "rope_parameters" and renamed
+        # "torch_dtype" -> "dtype"; read top-level first, then the new location, so
+        # new-format configs don't silently default to base=10000 / fp16.
+        # TODO(tech-debt): same top-level-only parsing in ~14 other model files; extract
+        # shared helpers and reuse. yarn/linear scaling in rope_parameters unhandled.
+        rope_params = config_json.get("rope_parameters") or {}
+        rope_theta = config_json.get("rope_theta")
+        if rope_theta is None and isinstance(rope_params, dict):
+            rope_theta = rope_params.get("rope_theta")
+        if rope_theta is not None:
+            config.attn_config.rope_config.base = int(rope_theta)
         config.vocab_size = config_json["vocab_size"]
         config.attn_config.rope_config.dim = config.attn_config.size_per_head
         config.layernorm_eps = config_json.get("rms_norm_eps", 1e-06)
         config.tie_word_embeddings = config_json.get("tie_word_embeddings", False)
-        config.config_dtype = config_json.get("torch_dtype", None)
+        # transformers>=5.2.0 renamed "torch_dtype" -> "dtype" in config.json.
+        config.config_dtype = config_json.get("torch_dtype") or config_json.get("dtype")
         config.headwise_config = config_json.get("headwise_config", None)
 
     @staticmethod

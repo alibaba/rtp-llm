@@ -14,6 +14,19 @@ py_test(
 )
 
 py_test(
+    name = "model_config_parse_test",
+    srcs = [
+        "model_config_parse_test.py",
+    ],
+    data = [
+        "//rtp_llm:sdk"
+    ],
+    deps = [
+        "//rtp_llm:testlib",
+    ],
+)
+
+py_test(
     name = "slice_stop_word_list_test",
     srcs = [
         "slice_stop_word_list_test.py",
