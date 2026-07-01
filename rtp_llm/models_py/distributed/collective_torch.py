@@ -112,6 +112,18 @@ def _normalize_parallelism_ranks(parallelism_config: ParallelismConfig) -> None:
         parallelism_config.dp_rank = dp_rank
 
 
+def _set_current_device_from_local_rank(parallelism_config: ParallelismConfig) -> None:
+    if not torch.cuda.is_available():
+        return
+    local_rank = int(parallelism_config.local_rank)
+    device_count = torch.cuda.device_count()
+    if local_rank < 0 or local_rank >= device_count:
+        raise RuntimeError(
+            f"local_rank {local_rank} exceeds available CUDA/HIP device count {device_count}"
+        )
+    torch.cuda.set_device(local_rank)
+
+
 def init_distributed_environment(
     parallelism_config: ParallelismConfig,
     nccl_comm_config: NcclCommConfig,
@@ -135,6 +147,8 @@ def init_distributed_environment(
         RuntimeError: If already initialized and not destroyed
     """
     global _group_map, _parallelism_config, _initialized, _cpu_tp_broadcaster_base_path
+
+    _set_current_device_from_local_rank(parallelism_config)
 
     # Check if already initialized (and not destroyed)
     if _initialized and torch.distributed.is_initialized():
@@ -796,7 +810,10 @@ def reduce_scatter(input_tensor: torch.Tensor, group: Group) -> torch.Tensor:
         dtype=input_tensor.dtype,
     )
     torch.distributed.reduce_scatter_tensor(
-        output_tensor, input_tensor, op=torch.distributed.ReduceOp.SUM, group=process_group
+        output_tensor,
+        input_tensor,
+        op=torch.distributed.ReduceOp.SUM,
+        group=process_group,
     )
     return output_tensor
 
