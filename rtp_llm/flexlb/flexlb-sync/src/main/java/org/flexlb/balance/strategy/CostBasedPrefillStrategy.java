@@ -9,6 +9,7 @@ import org.flexlb.balance.resource.ResourceMeasureFactory;
 import org.flexlb.cache.service.CacheAwareService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
+import org.flexlb.dao.loadbalance.DebugInfo;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
@@ -113,7 +114,7 @@ public class CostBasedPrefillStrategy implements LoadBalancer {
 
         reportCacheHitMetrics(roleType, best.getIp(), bestCacheHit, seqLen);
 
-        return buildServerStatus(best, roleType, requestId, bestScore, config, balanceContext);
+        return buildServerStatus(best, roleType, requestId, bestScore, config, balanceContext, bestCacheHit);
     }
 
     private record EndpointFilterResult(List<PrefillEndpoint> endpoints, Map<String, Integer> rejections) {}
@@ -246,12 +247,17 @@ public class CostBasedPrefillStrategy implements LoadBalancer {
     }
 
     private ServerStatus buildServerStatus(PrefillEndpoint ep, RoleType roleType, long requestId, long score,
-                                            FlexlbConfig config, BalanceContext balanceContext) {
+                                            FlexlbConfig config, BalanceContext balanceContext,
+                                            long bestCacheHit) {
         // Non-batch path: reserve prefill inflight for load-aware scoring.
         // Batch path uses FlexlbBatchScheduler.commitBatch() instead — skip here to avoid double-counting.
         if (isNonBatchPath(config, balanceContext)) {
             ep.commitBatch(requestId, score, Collections.emptyList());
         }
+
+        // Populate DebugInfo so BatchItem.hitCache() can read hitCacheLen for batch metrics
+        DebugInfo debugInfo = new DebugInfo();
+        debugInfo.setHitCacheLen(bestCacheHit);
 
         ServerStatus result = new ServerStatus();
         result.setSuccess(true);
@@ -263,6 +269,7 @@ public class CostBasedPrefillStrategy implements LoadBalancer {
         result.setHttpPort(ep.getHttpPort());
         result.setGrpcPort(CommonUtils.toGrpcPort(ep.getHttpPort()));
         result.setDpRank(ep.getStatus().getDpRank());
+        result.setDebugInfo(debugInfo);
         return result;
     }
 
