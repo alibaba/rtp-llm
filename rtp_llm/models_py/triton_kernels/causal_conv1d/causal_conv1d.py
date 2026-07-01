@@ -703,6 +703,15 @@ def _causal_conv1d_update_kernel(
 
     sequence_length = tl.load(sequence_lengths_ptr + idx_seq).to(tl.int32)
     read_block_offset = cal_block_idx(sequence_length - 1, SEQ_SIZE_PER_BLOCK)
+    # Clamp to the last allocated block: when sequence_length exceeds
+    # block_map.size(1) * SEQ_SIZE_PER_BLOCK, read_block_offset reaches
+    # stride_block_map — one past the end of block_map. An OOB block_map read
+    # yields a garbage block id, and every downstream conv_state load then
+    # computes an out-of-bounds address. Some hardware evaluates the load
+    # address even for masked-off lanes, so a bad address faults regardless of
+    # the mask; clamping keeps the read on the last valid block.
+    if read_block_offset >= stride_block_map:
+        read_block_offset = stride_block_map - 1
     read_block_id = tl.load(
         block_map_ptr + idx_seq * stride_block_map + read_block_offset
     ).to(tl.int64)
@@ -767,29 +776,37 @@ def _causal_conv1d_update_kernel(
     # for seqLen = n, we need to write n block in sequential manner
     for idx in tl.range(seqlen):
         write_block_offset = (cal_block_idx(sequence_length, SEQ_SIZE_PER_BLOCK)) + idx
-        write_block_id = tl.load(
-            block_map_ptr + idx_seq * stride_block_map + write_block_offset
-        ).to(tl.int64)
+        # Guard: when a sequence exactly fills all allocated KV-cache blocks
+        # (sequence_length == block_map.size(1) * SEQ_SIZE_PER_BLOCK),
+        # write_block_offset reaches stride_block_map — one past the end of block_map.
+        # Use a branch rather than a masked load: some hardware evaluates the
+        # load address even when the predicate is False, which can trigger a
+        # fault on an out-of-bounds address.
+        if write_block_offset < stride_block_map:
+            write_block_id = tl.load(
+                block_map_ptr + idx_seq * stride_block_map + write_block_offset,
+            ).to(tl.int64)
 
-        if write_block_id != -1:
-            conv_state_base = (
-                conv_state_ptr
-                + (write_block_id * stride_conv_state_seq)
-                + (idx_feats * stride_conv_state_dim)
-            )  # [BLOCK_N,]
+            if write_block_id != -1:
+                conv_state_base = (
+                    conv_state_ptr
+                    + (write_block_id * stride_conv_state_seq)
+                    + (idx_feats * stride_conv_state_dim)
+                )  # [BLOCK_N,]
 
-            # base offset
-            idx_tokens_offset = idx_tokens - idx
+                # base offset
+                idx_tokens_offset = idx_tokens - idx
 
-            conv_state_ptrs_target = (
-                conv_state_base + (idx_tokens_offset * stride_conv_state_tok)[:, None]
-            )  # [BLOCK_M, BLOCK_N]
-            mask = (
-                (idx_tokens_offset >= 0)[:, None]
-                & (idx_tokens_offset < state_len)[:, None]
-                & (idx_feats < dim)[None, :]
-            )
-            tl.store(conv_state_ptrs_target, new_conv_state, mask)
+                conv_state_ptrs_target = (
+                    conv_state_base
+                    + (idx_tokens_offset * stride_conv_state_tok)[:, None]
+                )  # [BLOCK_M, BLOCK_N]
+                mask = (
+                    (idx_tokens_offset >= 0)[:, None]
+                    & (idx_tokens_offset < state_len)[:, None]
+                    & (idx_feats < dim)[None, :]
+                )
+                tl.store(conv_state_ptrs_target, new_conv_state, mask)
 
     # STEP 3: init accumulator
     if HAS_BIAS:
