@@ -24,7 +24,7 @@ def init_hw_kernel_group_args(parser, hw_kernel_config):
         env_name="ENABLE_DYNAMIC_DECODE_BACKEND",
         bind_to=(hw_kernel_config, "enable_dynamic_decode_backend"),
         type=str2bool,
-        default=False,
+        default=True,  # TEMP (throwaway branch): default-on for CI sweep
         help="At CUDA graph capture time, dynamically pick the decode attention backend per bs bucket via on-device benchmarking; when off, use fixed priority",
     )
 

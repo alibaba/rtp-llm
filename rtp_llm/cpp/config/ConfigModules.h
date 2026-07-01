@@ -237,7 +237,7 @@ struct HWKernelConfig {
     // benchmarks eligible decode backends per capture bs (real capture path) and
     // bakes the per-bs winner into the graph instead of fixed-priority first-match.
     // Off by default; also gated on enable_cuda_graph.
-    bool        enable_dynamic_decode_backend = false;
+    bool        enable_dynamic_decode_backend = true;  // TEMP (throwaway branch): default-on for CI sweep
     std::string to_string() const;
 };
 
