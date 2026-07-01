@@ -190,6 +190,19 @@ TEST_F(BroadcastManagerTest, Broadcast_ReturnNotNull_AllRequestsSuccess) {
     }
 }
 
+TEST_F(BroadcastManagerTest, Broadcast_ReturnNull_WhenAsyncReaderCreationFails) {
+    std::vector<FunctionRequestPB> requests(manager_->workerNum());
+    auto                           rpc_call = [](const std::shared_ptr<RpcService::Stub>&,
+                       const std::shared_ptr<grpc::ClientContext>&,
+                       const FunctionRequestPB&,
+                       grpc::CompletionQueue*) -> std::unique_ptr<grpc::ClientAsyncResponseReader<FunctionResponsePB>> {
+        return nullptr;
+    };
+
+    auto result = manager_->broadcast<FunctionRequestPB, FunctionResponsePB>(requests, /*timeout_ms=*/100, rpc_call);
+    EXPECT_EQ(result, nullptr);
+}
+
 TEST_F(BroadcastManagerTest, Broadcast_ReturnNotNull_AllRequestsTimeout) {
     std::vector<std::unique_ptr<TestRpcServer>> servers;
     std::vector<std::string>                    server_addrs;
@@ -216,7 +229,9 @@ TEST_F(BroadcastManagerTest, Broadcast_ReturnNotNull_AllRequestsTimeout) {
     auto result   = manager->broadcast<FunctionRequestPB, FunctionResponsePB>(requests, /*timeout_ms=*/50, rpc_call);
     ASSERT_NE(result, nullptr);
 
-    EXPECT_THROW(result->waitDone(), rtp_llm::RTPException);
+    result->waitDone();
+    EXPECT_TRUE(result->done());
+    EXPECT_FALSE(result->success());
 }
 
 TEST_F(BroadcastManagerTest, Broadcast_ReturnNotNull_PartialRequestsTimeout) {
@@ -247,7 +262,9 @@ TEST_F(BroadcastManagerTest, Broadcast_ReturnNotNull_PartialRequestsTimeout) {
     auto result   = manager->broadcast<FunctionRequestPB, FunctionResponsePB>(requests, /*timeout_ms=*/50, rpc_call);
     ASSERT_NE(result, nullptr);
 
-    EXPECT_THROW(result->waitDone(), rtp_llm::RTPException);
+    result->waitDone();
+    EXPECT_TRUE(result->done());
+    EXPECT_FALSE(result->success());
 }
 
 TEST_F(BroadcastManagerTest, Broadcast_ReturnNotNull_PartialResponseRpcStatusFailed) {
@@ -506,6 +523,38 @@ TEST_F(BroadcastManagerTest, Broadcast_WaitDone_FailureStatePersistsAcrossTimeou
 
     server1->shutdown();
     server0->shutdown();
+}
+
+TEST_F(BroadcastManagerTest, Broadcast_DestructorReturnsQuickly_WhenDrainTimesOut) {
+    std::vector<std::unique_ptr<TestRpcServer>> servers;
+    std::vector<std::string>                    server_addrs;
+    for (int i = 0; i < 2; ++i) {
+        auto service = std::make_unique<TestRpcService>();
+        service->setSleepMillis(3000);
+        auto server = std::make_unique<TestRpcServer>(std::move(service));
+        ASSERT_TRUE(server->start());
+        server_addrs.push_back("127.0.0.1:" + std::to_string(server->listenPort()));
+        servers.push_back(std::move(server));
+    }
+
+    auto manager = std::make_unique<BroadcastManager>(server_addrs);
+    ASSERT_TRUE(manager->init());
+
+    std::vector<FunctionRequestPB> requests(manager->workerNum());
+    auto                           rpc_call = [](const std::shared_ptr<RpcService::Stub>&    stub,
+                       const std::shared_ptr<grpc::ClientContext>& ctx,
+                       const FunctionRequestPB&                    req,
+                       grpc::CompletionQueue* cq) { return stub->AsyncExecuteFunction(ctx.get(), req, cq); };
+
+    const auto start = std::chrono::steady_clock::now();
+    {
+        auto result = manager->broadcast<FunctionRequestPB, FunctionResponsePB>(requests, /*timeout_ms=*/5000, rpc_call);
+        ASSERT_NE(result, nullptr);
+    }
+    const auto elapsed_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
+
+    EXPECT_LT(elapsed_ms, 1000) << "BroadcastResult destruction should hand off slow CQ draining";
 }
 
 // ---------------------------- workerNum ----------------------------

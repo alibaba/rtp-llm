@@ -3,6 +3,7 @@
 #include <atomic>
 #include <chrono>
 #include <mutex>
+#include <thread>
 #include <vector>
 
 #include "rtp_llm/cpp/model_rpc/RPCPool.h"
@@ -27,7 +28,48 @@ public:
 public:
     explicit BroadcastResult(const std::vector<std::shared_ptr<WorkerRpcContext>>& worker_rpc_contexts):
         worker_contexts_(worker_rpc_contexts), finished_(worker_rpc_contexts.size(), false) {}
-    ~BroadcastResult() = default;
+    ~BroadcastResult() {
+        std::unique_lock<std::mutex> lock(wait_done_mutex_);
+        for (size_t rank = 0; rank < worker_contexts_.size(); ++rank) {
+            if (!finished_[rank] && worker_contexts_[rank] && worker_contexts_[rank]->client_context) {
+                worker_contexts_[rank]->client_context->TryCancel();
+            }
+        }
+        for (const auto& worker_rpc_context : worker_contexts_) {
+            if (worker_rpc_context) {
+                worker_rpc_context->completion_queue.Shutdown();
+            }
+        }
+
+        constexpr int64_t kDrainBudgetMs = 100;
+        const auto        deadline       = std::chrono::system_clock::now() + std::chrono::milliseconds(kDrainBudgetMs);
+        bool              drain_timed_out = false;
+        for (const auto& worker_rpc_context : worker_contexts_) {
+            if (!worker_rpc_context) {
+                continue;
+            }
+            void* got_tag = nullptr;
+            bool  ok      = false;
+            while (true) {
+                auto next_status = worker_rpc_context->completion_queue.AsyncNext(&got_tag, &ok, deadline);
+                if (next_status == grpc::CompletionQueue::NextStatus::SHUTDOWN) {
+                    break;
+                }
+                if (next_status == grpc::CompletionQueue::NextStatus::TIMEOUT) {
+                    drain_timed_out = true;
+                    break;
+                }
+            }
+            if (drain_timed_out) {
+                break;
+            }
+        }
+        if (drain_timed_out) {
+            RTP_LLM_LOG_WARNING("[PD-DIAG] BroadcastResult destructor timed out draining CQ, worker_count=%zu",
+                                worker_contexts_.size());
+            drainWorkerContextsAsync(std::move(worker_contexts_));
+        }
+    }
 
 public:
     /// Snapshot of internal completion counters, not a live probe of RPC completion.
@@ -80,21 +122,25 @@ public:
                     continue;
                 }
                 if (!ok) {
-                    RTP_LLM_FAIL("broadcast rpc cq failed, rank=%d status=%d", rank, static_cast<int>(next_status));
+                    RTP_LLM_LOG_WARNING("broadcast rpc cq failed, rank=%d status=%d", rank, static_cast<int>(next_status));
+                    ++finished_count_;
+                    finished_[rank]           = true;
+                    grpc_status_failure_seen_ = true;
+                    continue;
                 }
                 ++finished_count_;
                 finished_[rank] = true;
 
                 const auto& status = ctx->status;
                 if (status.error_code() == grpc::StatusCode::DEADLINE_EXCEEDED) {
-                    RTP_LLM_FAIL("broadcast rpc timeout, timeout_ms=%d rank=%d err=%d(%s) addr=%s",
-                                 ctx->timeout_ms,
-                                 rank,
-                                 status.error_code(),
-                                 status.error_message().c_str(),
-                                 ctx->server_addr.c_str());
-                }
-                if (!status.ok()) {
+                    RTP_LLM_LOG_WARNING("broadcast rpc timeout, timeout_ms=%d rank=%d err=%d(%s) addr=%s",
+                                        ctx->timeout_ms,
+                                        rank,
+                                        status.error_code(),
+                                        status.error_message().c_str(),
+                                        ctx->server_addr.c_str());
+                    grpc_status_failure_seen_ = true;
+                } else if (!status.ok()) {
                     RTP_LLM_LOG_WARNING("broadcast rpc failed, rank=%d err=%d(%s) addr=%s",
                                         rank,
                                         status.error_code(),
@@ -131,6 +177,36 @@ public:
     }
 
 private:
+    static void drainWorkerContextsAsync(std::vector<std::shared_ptr<WorkerRpcContext>> worker_contexts) {
+        if (worker_contexts.empty()) {
+            return;
+        }
+        std::thread([contexts = std::move(worker_contexts)]() mutable {
+            constexpr int64_t kAsyncDrainBudgetMs = 60000;
+            const auto        deadline =
+                std::chrono::system_clock::now() + std::chrono::milliseconds(kAsyncDrainBudgetMs);
+            for (const auto& worker_rpc_context : contexts) {
+                if (!worker_rpc_context) {
+                    continue;
+                }
+                void* got_tag = nullptr;
+                bool  ok      = false;
+                while (true) {
+                    auto next_status = worker_rpc_context->completion_queue.AsyncNext(&got_tag, &ok, deadline);
+                    if (next_status == grpc::CompletionQueue::NextStatus::SHUTDOWN) {
+                        break;
+                    }
+                    if (next_status == grpc::CompletionQueue::NextStatus::TIMEOUT) {
+                        RTP_LLM_LOG_ERROR(
+                            "[PD-DIAG] BroadcastResult async drain timed out, worker_count=%zu",
+                            contexts.size());
+                        return;
+                    }
+                }
+            }
+        }).detach();
+    }
+
     std::vector<std::shared_ptr<WorkerRpcContext>> worker_contexts_;
     std::vector<bool>                              finished_;
     std::atomic<int>                               finished_count_{0};
@@ -172,6 +248,11 @@ public:
         std::vector<std::shared_ptr<CtxT>> contexts(worker_size);
         const auto deadline = std::chrono::system_clock::now() + std::chrono::milliseconds(timeout_ms);
 
+        // [PD-DIAG] track total getConnection time across all workers — when one
+        // peer's channel is in TRANSIENT_FAILURE this loop can serialize behind
+        // RpcPool's mutex and the entire broadcast appears slow.
+        const auto t_get_conn_start = std::chrono::steady_clock::now();
+
         for (int rank = 0; rank < worker_size; ++rank) {
             const auto& addr        = worker_addrs_[rank];
             auto        conn_status = rpc_pool_->getConnection(addr);
@@ -190,9 +271,23 @@ public:
             ctx->client_context->set_deadline(deadline);
         }
 
+        const auto get_conn_loop_us = std::chrono::duration_cast<std::chrono::microseconds>(
+                                          std::chrono::steady_clock::now() - t_get_conn_start)
+                                          .count();
+        if (get_conn_loop_us >= 100 * 1000) {
+            RTP_LLM_LOG_WARNING(
+                "[PD-DIAG] BroadcastManager::broadcast slow getConnection loop, worker_count=%zu, total_us=%lld",
+                worker_size,
+                (long long)get_conn_loop_us);
+        }
+
         for (int rank = 0; rank < worker_size; ++rank) {
             auto& ctx    = contexts.at(rank);
             auto  reader = rpc_call(ctx->stub, ctx->client_context, ctx->request, &ctx->completion_queue);
+            if (!reader) {
+                RTP_LLM_LOG_WARNING("broadcast: create async reader failed rank=%d addr=%s", rank, ctx->server_addr.c_str());
+                return nullptr;
+            }
             reader->Finish(&ctx->response, &ctx->status, reinterpret_cast<void*>(static_cast<intptr_t>(rank)));
         }
 

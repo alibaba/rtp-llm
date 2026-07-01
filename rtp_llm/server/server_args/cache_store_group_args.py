@@ -163,6 +163,30 @@ def init_cache_store_group_args(parser, cache_store_config):
         help="P2P Scheduler 广播 CANCEL 时的 gRPC 超时（毫秒）。",
     )
     cache_store_group.add_argument(
+        "--p2p_prefill_resource_hold_ms",
+        env_name="P2P_PREFILL_RESOURCE_HOLD_MS",
+        bind_to=(cache_store_config, "p2p_prefill_resource_hold_ms"),
+        type=int,
+        default=300000,
+        help="Prefill 侧 resource / side-channel 在未被 decode 消费时的最大保留时长（毫秒）。",
+    )
+    cache_store_group.add_argument(
+        "--p2p_max_transfer_deadline_ms",
+        env_name="P2P_MAX_TRANSFER_DEADLINE_MS",
+        bind_to=(cache_store_config, "p2p_max_transfer_deadline_ms"),
+        type=int,
+        default=300000,
+        help="单次 P2P 传输 deadline 的硬上限（毫秒），业务超时会被 clamp 到 now + 该值。",
+    )
+    cache_store_group.add_argument(
+        "--p2p_cancelled_keys_ttl_ms",
+        env_name="P2P_CANCELLED_KEYS_TTL_MS",
+        bind_to=(cache_store_config, "p2p_cancelled_keys_ttl_ms"),
+        type=int,
+        default=3600000,
+        help="P2P cancelled key tombstone 的 TTL（毫秒），用于拒绝迟到的 prefill 资源。",
+    )
+    cache_store_group.add_argument(
         "--cache_store_tcp_anet_rpc_thread_num",
         env_name="CACHE_STORE_TCP_ANET_RPC_THREAD_NUM",
         bind_to=(cache_store_config, "cache_store_tcp_anet_rpc_thread_num"),
@@ -177,4 +201,28 @@ def init_cache_store_group_args(parser, cache_store_config):
         type=int,
         default=100,
         help="P2P TCP 控制面 ANetRPCServer queueNum。",
+    )
+    cache_store_group.add_argument(
+        "--cache_store_tcp_worker_queue_size",
+        env_name="CACHE_STORE_TCP_WORKER_QUEUE_SIZE",
+        bind_to=(cache_store_config, "cache_store_tcp_worker_queue_size"),
+        type=int,
+        default=500,
+        help="P2P TCP/RDMA 控制面 worker 线程池（tcp_server_rpc_threadpool）队列深度，默认 500。",
+    )
+    cache_store_group.add_argument(
+        "--rdma_transfer_worker_thread_count",
+        env_name="RDMA_TRANSFER_WORKER_THREAD_COUNT",
+        bind_to=(cache_store_config, "rdma_transfer_worker_thread_count"),
+        type=int,
+        default=16,
+        help="RDMA 传输 worker 线程池（RdmaTransferServiceWorker）线程数，默认 16。",
+    )
+    cache_store_group.add_argument(
+        "--rdma_transfer_worker_queue_size",
+        env_name="RDMA_TRANSFER_WORKER_QUEUE_SIZE",
+        bind_to=(cache_store_config, "rdma_transfer_worker_queue_size"),
+        type=int,
+        default=100,
+        help="RDMA 传输 worker 线程池（RdmaTransferServiceWorker）队列深度，默认 100。",
     )
