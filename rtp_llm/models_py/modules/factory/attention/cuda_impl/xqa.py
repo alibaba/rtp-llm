@@ -60,6 +60,8 @@ class XQAParams:
 
 
 class XQAImpl(FMHAImplBase):
+    # Backend NAME required by _validate_impl_names(); matches --attn_backend=xqa.
+    NAME = "xqa"
 
     def __init__(
         self,
@@ -121,6 +123,9 @@ class XQAImpl(FMHAImplBase):
 
 
 class XQADecodeImpl(FMHAImplBase):
+    # Same public backend NAME as XQAImpl; the two live in separate prefill/decode
+    # registries and are selected by stage, so --attn_backend=xqa resolves both.
+    NAME = "xqa"
 
     def __init__(
         self,
