@@ -77,4 +77,92 @@ LayerCacheBufferUtil::buildKeyBlockInfos(const std::shared_ptr<LayerBlockConvert
     return key_block_infos;
 }
 
+// --- Group-type-aware overloads ---
+
+std::vector<std::shared_ptr<LayerCacheBuffer>>
+LayerCacheBufferUtil::convert(KVCacheResource&                   resource,
+                              int                                batch_id,
+                              const std::vector<CacheGroupType>& layer_attn_types,
+                              int                                start_block_idx,
+                              int                                block_count) {
+    std::vector<std::shared_ptr<LayerCacheBuffer>> layer_cache_buffers;
+
+    const auto& layer_block_ids = resource.layerBlocks();
+    for (size_t i = 0; i < layer_block_ids.size(); ++i) {
+        CacheGroupType group_type = (i < layer_attn_types.size()) ? layer_attn_types[i] : CacheGroupType::FULL;
+        auto layer_cache_buffer   = convertLayer(resource, batch_id, i, start_block_idx, block_count, group_type);
+        if (layer_cache_buffer) {
+            layer_cache_buffers.push_back(layer_cache_buffer);
+        }
+    }
+    return layer_cache_buffers;
+}
+
+std::shared_ptr<LayerCacheBuffer> LayerCacheBufferUtil::convertLayer(KVCacheResource& resource,
+                                                                     int              batch_id,
+                                                                     int              layer_id,
+                                                                     int              start_block_idx,
+                                                                     int              block_count,
+                                                                     CacheGroupType   group_type) {
+    const auto& layer_block_ids = resource.layerBlocks();
+    const auto& cache_keys      = resource.cacheKeys();
+
+    if (layer_id < 0 || static_cast<size_t>(layer_id) >= layer_block_ids.size()) {
+        RTP_LLM_LOG_WARNING("invalid layer_id %d, total layers: %zu", layer_id, layer_block_ids.size());
+        return nullptr;
+    }
+
+    if (start_block_idx < 0 || block_count == 0 || block_count < -1) {
+        RTP_LLM_LOG_WARNING("invalid start_block_idx %d, block_count %d", start_block_idx, block_count);
+        return nullptr;
+    }
+
+    const auto& block_ids          = layer_block_ids[layer_id]->blocks();
+    int         actual_block_count = static_cast<int>(std::min(block_ids.size(), cache_keys.size()));
+    if (start_block_idx >= actual_block_count) {
+        RTP_LLM_LOG_WARNING("start_block_idx %d >= actual_block_count %d", start_block_idx, actual_block_count);
+        return nullptr;
+    }
+    int block_ids_size = (block_count > 0) ? std::min(block_count, actual_block_count - start_block_idx) :
+                                             (actual_block_count - start_block_idx);
+    if (block_ids_size <= 0) {
+        RTP_LLM_LOG_WARNING("block_ids_size %d", block_ids_size);
+        return nullptr;
+    }
+
+    auto layer_cache_buffer = std::make_shared<LayerCacheBuffer>(layer_id);
+
+    switch (group_type) {
+        case CacheGroupType::FULL:
+            for (int i = 0; i < block_ids_size; ++i) {
+                int block_id = block_ids[start_block_idx + i];
+                if (isNullBlockIdx(block_id)) {
+                    RTP_LLM_LOG_WARNING("FULL group layer %d has NULL_BLOCK_IDX at position %d, skipping", layer_id, i);
+                    continue;
+                }
+                layer_cache_buffer->addBlockId(cache_keys[start_block_idx + i], block_id);
+            }
+            break;
+
+        case CacheGroupType::LINEAR:
+            for (int i = block_ids_size - 1; i >= 0; --i) {
+                int block_id = block_ids[start_block_idx + i];
+                if (!isNullBlockIdx(block_id)) {
+                    layer_cache_buffer->addBlockId(cache_keys[start_block_idx + i], block_id);
+                    break;
+                }
+            }
+            break;
+
+            // Future: case CacheGroupType::SLIDING_WINDOW:
+            //   Select last N blocks based on window config.
+            //   break;
+    }
+
+    if (layer_cache_buffer->blockIdMap().empty()) {
+        return nullptr;
+    }
+    return layer_cache_buffer;
+}
+
 }  // namespace rtp_llm

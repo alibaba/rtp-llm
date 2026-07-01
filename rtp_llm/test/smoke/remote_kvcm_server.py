@@ -19,6 +19,7 @@ class RemoteKVCMServer:
         self._server_path = server_path
         self._block_path = server_path + "/block/"
         self._bin_path = server_path + "/bin/kv_cache_manager_bin"
+        self._server_process = None
         self._fault_trigger = False
         self._enable_debug_service = False
         logging.info(f"kvcm_server_path:{server_path}\nblock_path:{self._block_path}\nbin_path:{self._bin_path}\nkvcm_src_logs_path:{kvcm_src_logs_path}\nkvcm_dst_logs_path:{kvcm_dst_logs_path}")

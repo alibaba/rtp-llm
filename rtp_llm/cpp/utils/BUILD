@@ -114,6 +114,27 @@ cc_library(
     visibility = ["//visibility:public"],
 )
 
+cc_library(
+    name = "deferred_completion_queue_drainer",
+    hdrs = [
+        "DeferredCompletionQueueDrainer.h",
+    ],
+    deps = [
+        "@grpc//:grpc++",
+    ],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "grpc_address_util",
+    hdrs = [
+        "GrpcAddressUtil.h",
+    ],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+)
+
 # LRU Cache implementation
 cc_library(
     name = "lru_cache",

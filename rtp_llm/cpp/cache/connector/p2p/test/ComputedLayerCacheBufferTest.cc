@@ -123,6 +123,34 @@ TEST_F(ComputedLayerCacheBufferTest, ComputedLayerCacheBuffer_WaitChangeTimeout)
     EXPECT_LE(elapsed, 200);
 }
 
+TEST_F(ComputedLayerCacheBufferTest, GetBuffersReturnsStoredLayerCountForWaitChange) {
+    int64_t request_id  = 1008;
+    auto    buffer0     = createLayerCacheBuffer(0);
+    int64_t deadline_ms = getDeadlineMs();
+
+    auto computed_buffer = std::make_shared<ComputedLayerCacheBuffer>(request_id, buffer0, deadline_ms);
+    auto [stored_layer_count, ready_buffers] = computed_buffer->getBuffers({1});
+    EXPECT_EQ(stored_layer_count, 1);
+    EXPECT_TRUE(ready_buffers.empty());
+
+    std::thread producer([computed_buffer, deadline_ms, this]() {
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        computed_buffer->addBuffer(createLayerCacheBuffer(1), deadline_ms);
+    });
+
+    auto start = std::chrono::steady_clock::now();
+    computed_buffer->waitChange(stored_layer_count, 1000);
+    auto end     = std::chrono::steady_clock::now();
+    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
+
+    producer.join();
+
+    EXPECT_GE(elapsed, 30);
+    auto [final_layer_count, final_buffers] = computed_buffer->getBuffers({0, 1});
+    EXPECT_EQ(final_layer_count, 2);
+    EXPECT_EQ(final_buffers.size(), 2);
+}
+
 // ==================== ComputedLayerCacheBufferStore 类测试 ====================
 
 TEST_F(ComputedLayerCacheBufferTest, AddAndGetBuffer) {
@@ -196,6 +224,44 @@ TEST_F(ComputedLayerCacheBufferTest, CheckTimeoutMixed) {
     EXPECT_EQ(retrieved2, nullptr);
 
     EXPECT_EQ(store_->getBuffersCount(), 1);
+}
+
+TEST_F(ComputedLayerCacheBufferTest, LayerCacheBuffer_HoldsKVCacheResourceLifetime) {
+    bool deleter_called = false;
+    auto owned_resource =
+        std::shared_ptr<KVCacheResource>(new KVCacheResource(), [&deleter_called](KVCacheResource* p) {
+            deleter_called = true;
+            delete p;
+        });
+    auto layer_cache_buffer = std::make_shared<LayerCacheBuffer>(0, owned_resource);
+
+    owned_resource.reset();
+    EXPECT_FALSE(deleter_called);
+
+    auto computed_buffer = std::make_shared<ComputedLayerCacheBuffer>(1007, layer_cache_buffer, getDeadlineMs());
+    layer_cache_buffer.reset();
+    EXPECT_FALSE(deleter_called);
+
+    computed_buffer.reset();
+    EXPECT_TRUE(deleter_called);
+}
+
+TEST_F(ComputedLayerCacheBufferTest, AddBufferRejectedAfterRemove) {
+    int64_t request_id  = 4001;
+    auto    buffer      = createLayerCacheBuffer(0);
+    int64_t deadline_ms = getDeadlineMs();
+
+    auto result = store_->addBuffer(request_id, buffer, deadline_ms);
+    ASSERT_NE(result, nullptr);
+
+    store_->removeBuffer(request_id);
+
+    // Late-arriving addBuffer should be rejected
+    auto buffer2 = createLayerCacheBuffer(1);
+    auto result2 = store_->addBuffer(request_id, buffer2, deadline_ms);
+    EXPECT_EQ(result2, nullptr);
+    EXPECT_EQ(store_->getBuffer(request_id), nullptr);
+    EXPECT_EQ(store_->getBuffersCount(), 0);
 }
 
 }  // namespace rtp_llm

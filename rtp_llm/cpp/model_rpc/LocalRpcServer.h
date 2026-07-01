@@ -30,8 +30,8 @@ public:
     LocalRpcServer() {}
     virtual ~LocalRpcServer() {}
     virtual grpc::Status init(const EngineInitParams&                                maga_init_params,
-                              std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> propose_params,
-                              py::object                                             mm_process_engine);
+                              py::object                                             mm_process_engine,
+                              std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> propose_params);
 
     grpc::Status
     GetWorkerStatus(grpc::ServerContext* context, const ::StatusVersionPB* request, ::WorkerStatusPB* response);
@@ -107,6 +107,7 @@ protected:
                                   const std::string&               request_key,
                                   WriterInterface*                 writer,
                                   std::shared_ptr<GenerateStream>& stream);
+    virtual void updateAuxInfo(GenerateOutputsPB& outputs_pb, std::shared_ptr<GenerateStream>& stream) {}
 
     // Shared helpers for single and batch paths
     ErrorInfo prepareInput(const GenerateInputPB& input_pb, std::shared_ptr<GenerateInput>& output);

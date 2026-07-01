@@ -4,6 +4,8 @@
 #include "grpc++/grpc++.h"
 
 #include "autil/NetUtil.h"
+#include "rtp_llm/cpp/cache/CacheGroupType.h"
+#include "rtp_llm/cpp/cache/KVCacheResource.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorScheduler.h"
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
@@ -70,8 +72,7 @@ protected:
         return resource;
     }
 
-    std::shared_ptr<MockMeta>
-    createMockMeta(int64_t request_id, const std::string& unique_key, int64_t deadline_ms) {
+    std::shared_ptr<MockMeta> createMockMeta(int64_t request_id, const std::string& unique_key, int64_t deadline_ms) {
         auto meta = std::make_shared<MockMeta>();
         meta->setRequestId(request_id);
         meta->setUniqueKey(unique_key);
@@ -108,6 +109,16 @@ protected:
         cfg.worker_addrs.push_back("127.0.0.1:12345:" + std::to_string(prefill_server_->listenPort()));
         cfg.p2p_transfer_not_done_resource_hold_ms = hold_ms;
         scheduler_                                 = std::make_unique<P2PConnectorScheduler>(std::move(cfg), nullptr);
+        ASSERT_TRUE(scheduler_->init());
+    }
+
+    void rebuildSchedulerWithLayerAttnTypes(const std::vector<CacheGroupType>& layer_attn_types) {
+        scheduler_.reset();
+        P2PConnectorSchedulerConfig cfg;
+        cfg.worker_grpc_addrs = tp_broadcast_addrs_;
+        cfg.worker_addrs.push_back("127.0.0.1:12345:" + std::to_string(prefill_server_->listenPort()));
+        cfg.layer_attn_types = layer_attn_types;
+        scheduler_           = std::make_unique<P2PConnectorScheduler>(std::move(cfg), nullptr);
         ASSERT_TRUE(scheduler_->init());
     }
 
@@ -163,6 +174,39 @@ TEST_F(P2PConnectorSchedulerTest, HandleRead_ReturnOK_BroadcastSuccess) {
     }
 }
 
+TEST_F(P2PConnectorSchedulerTest, HandleRead_FiltersLinearLayersByAttentionType) {
+    rebuildSchedulerWithLayerAttnTypes({CacheGroupType::FULL, CacheGroupType::LINEAR});
+
+    auto resource = std::make_shared<KVCacheResource>();
+    resource->initGroups(2, 2, {0, 1}, 1, {CacheGroupType::FULL, CacheGroupType::LINEAR});
+    resource->mutableBlockIds(0).assign({10, 11, 12, 13});
+    resource->mutableBlockIds(1).assign({NULL_BLOCK_IDX, 21, NULL_BLOCK_IDX, 25});
+    resource->cacheKeys() = {1000, 1001, 1002, 1003};
+
+    std::vector<std::pair<std::string, uint32_t>> decode_transfer_servers;
+    decode_transfer_servers.push_back({"127.0.0.1", 12345});
+
+    ErrorInfo error_info =
+        scheduler_->sendKVCache(resource, "test_linear_filter", 1009, decode_transfer_servers, currentTimeMs() + 1000);
+
+    ASSERT_TRUE(error_info.ok());
+    for (const auto& server : tp_broadcast_servers_) {
+        auto request = server->service()->getLastBroadcastTpRequest();
+        ASSERT_EQ(request.layer_blocks_size(), 2);
+
+        const auto& full_layer = request.layer_blocks(0);
+        EXPECT_EQ(full_layer.layer_id(), 0u);
+        EXPECT_EQ(full_layer.block_ids_size(), 4);
+
+        const auto& linear_layer = request.layer_blocks(1);
+        EXPECT_EQ(linear_layer.layer_id(), 1u);
+        ASSERT_EQ(linear_layer.block_ids_size(), 1);
+        ASSERT_EQ(linear_layer.cache_keys_size(), 1);
+        EXPECT_EQ(linear_layer.block_ids(0), 25u);
+        EXPECT_EQ(linear_layer.cache_keys(0), 1003);
+    }
+}
+
 // 测试：broadcast 返回失败（所有响应失败）
 TEST_F(P2PConnectorSchedulerTest, HandleRead_ReturnError_BroadcastPartialFailed) {
     for (auto& server : tp_broadcast_servers_) {
@@ -188,8 +232,8 @@ TEST_F(P2PConnectorSchedulerTest, HandleRead_ReturnError_BroadcastPartialFailed)
     }
 }
 
-// 测试: broadcast worker 慢于 gRPC deadline，checkDone 路径抛 RTPException
-TEST_F(P2PConnectorSchedulerTest, HandleRead_ThrowException_BroadcastTimeout) {
+// 测试: broadcast worker 慢于 gRPC deadline，sendKVCache 返回超时错误
+TEST_F(P2PConnectorSchedulerTest, HandleRead_ReturnError_BroadcastTimeout) {
     for (auto& server : tp_broadcast_servers_) {
         server->service()->setSleepMillis(500);  // 延迟 500ms
         break;
@@ -202,9 +246,61 @@ TEST_F(P2PConnectorSchedulerTest, HandleRead_ThrowException_BroadcastTimeout) {
 
     auto deadline_ms = currentTimeMs() + 50;
 
-    EXPECT_THROW(
-        scheduler_->sendKVCache(valid_resource, "test_broadcast_timeout", 1004, decode_transfer_servers, deadline_ms),
-        RTPException);
+    ErrorInfo error_info =
+        scheduler_->sendKVCache(valid_resource, "test_broadcast_timeout", 1004, decode_transfer_servers, deadline_ms);
+
+    EXPECT_TRUE(error_info.hasError());
+    EXPECT_EQ(error_info.code(), ErrorCode::P2P_CONNECTOR_WORKER_HANDLE_READ_TIMEOUT);
+}
+
+// 修复 5/22 现场 B 类(7 笔 handleRead cost > 60s,最大 ~1h)的回归测试:
+// cancel 已发且 cancel_result 已 done(成功送达 or cancel 自身 gRPC timeout)后,
+// 即使原 HANDLE_READ broadcast 的 result 仍未 done(worker hang / channel down),
+// waitForBroadcastCompletion 也应立即退出,不再盲等 client 业务 deadline_ms。
+//
+// 复现 corner case 的近似手法:让 broadcast worker 慢响应 3s(模拟 worker hang),
+// 把 deadline_ms 设到 10s 远大于 worker sleep(避免靠 gRPC client deadline 退出),
+// 100ms 后触发 cancel。test server 的 cancel 路径立即 ack,所以 cancel_result 几 ms done。
+// - 修复前:主循环只看 result->done(),要等 worker sleep 结束 ~3s 才返回
+// - 修复后:cancel done 立即 break,函数在 ~120ms 内返回
+TEST_F(P2PConnectorSchedulerTest, HandleRead_ExitsImmediately_AfterCancelDoneEvenIfBroadcastSlow) {
+    for (auto& server : tp_broadcast_servers_) {
+        server->service()->setSleepMillis(3000);  // 3s 慢 worker,模拟 hang
+    }
+
+    auto                                          valid_resource = createValidKVCacheResource(2, 2);
+    std::vector<std::pair<std::string, uint32_t>> decode_transfer_servers;
+    decode_transfer_servers.push_back({"127.0.0.1", 12345});
+
+    // deadline_ms 设大,确保不靠 gRPC client deadline 退出循环
+    auto deadline_ms = currentTimeMs() + 10000;
+
+    std::atomic<bool> cancelled{false};
+    auto              is_cancelled = [&cancelled]() { return cancelled.load(); };
+    std::thread       cancel_thread([&cancelled]() {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        cancelled = true;
+    });
+
+    auto      start_ms   = currentTimeMs();
+    ErrorInfo error_info = scheduler_->sendKVCache(
+        valid_resource, "test_exit_after_cancel_done", 4007, decode_transfer_servers, deadline_ms, is_cancelled);
+    auto duration_ms = currentTimeMs() - start_ms;
+
+    cancel_thread.join();
+
+    EXPECT_TRUE(error_info.hasError());
+    EXPECT_EQ(error_info.code(), ErrorCode::P2P_CONNECTOR_WORKER_HANDLE_READ_CANCELLED);
+
+    // 修复后应在 cancel done 后立即返回(~100ms cancel 触发延迟 + 几 ms cancel RPC + break)。
+    // 给 CI 噪声留充足余量(1s),但远低于 broadcast worker 的 3s sleep,
+    // 确保确实因为 cancel done 早退,而不是等 worker 自然完成。
+    EXPECT_LT(duration_ms, 1000) << "function should exit shortly after cancel completes, "
+                                 << "but took " << duration_ms << "ms (likely waited for broadcast worker)";
+
+    for (size_t i = 0; i < tp_broadcast_servers_.size(); ++i) {
+        EXPECT_EQ(tp_broadcast_servers_[i]->service()->getBroadcastTpCancelCallCount(), 1);
+    }
 }
 
 // 测试: handleRead 被 client 取消, 返回失败
@@ -245,6 +341,47 @@ TEST_F(P2PConnectorSchedulerTest, HandleRead_ReturnFalse_BroadcastCancelled) {
         EXPECT_EQ(tp_broadcast_servers_[i]->service()->getBroadcastTpCallCount(), 1);
         EXPECT_EQ(tp_broadcast_servers_[i]->service()->getBroadcastTpCancelCallCount(), 1);
     }
+}
+
+TEST_F(P2PConnectorSchedulerTest, AsyncRead_HoldsCancelledOutcomeUntilLeaseWindowExpires) {
+    auto tp_ctx = std::make_shared<P2PBroadcastClient::TpBroadcastResult::WorkerRpcContext>();
+    tp_ctx->response.mutable_p2p_response()->set_error_code(
+        transErrorCodeToRPC(ErrorCode::P2P_CONNECTOR_WORKER_READ_CANCELLED));
+    tp_ctx->response.mutable_p2p_response()->set_error_message("worker cancelled");
+
+    auto tp_result = std::make_shared<P2PBroadcastClient::TpBroadcastResult>(
+        std::vector<std::shared_ptr<P2PBroadcastClient::TpBroadcastResult::WorkerRpcContext>>{tp_ctx});
+    tp_result->finished_[0] = true;
+    tp_result->finished_count_.store(1);
+    tp_result->already_done_.store(true);
+    tp_result->all_request_success_.store(false);
+
+    auto broadcast_result = std::make_shared<P2PBroadcastClient::Result>("cancel-hold", tp_result);
+
+    auto server_result          = std::make_shared<PrefillLoadCaller::Result>();
+    server_result->done_        = true;
+    server_result->success_     = true;
+    server_result->error_code   = ErrorCode::NONE_ERROR;
+    server_result->error_message.clear();
+
+    auto resource = createValidKVCacheResource(1, 1);
+    auto collector = std::make_shared<DecodeSchedulerMetricsCollector>(nullptr);
+    auto context = std::make_shared<P2PConnectorAsyncReadContext>(
+        resource, broadcast_result, server_result, collector, /*transfer_not_done_hold_ms=*/80);
+
+    context->checkDone();
+
+    EXPECT_FALSE(context->done());
+    EXPECT_FALSE(context->success());
+    EXPECT_FALSE(context->needCancel());
+    EXPECT_EQ(context->errorInfo().code(), ErrorCode::P2P_CONNECTOR_WORKER_READ_CANCELLED);
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(120));
+    context->checkDone();
+
+    EXPECT_TRUE(context->done());
+    EXPECT_FALSE(context->success());
+    EXPECT_EQ(context->errorInfo().code(), ErrorCode::P2P_CONNECTOR_WORKER_READ_CANCELLED);
 }
 
 // ==================== asyncRead 测试 (Decode 端功能) ====================
@@ -420,8 +557,8 @@ TEST_F(P2PConnectorSchedulerTest, AsyncRead_ReturnFalse_PrefillTimeout) {
     EXPECT_EQ(prefill_server_->service()->getStartLoadCallCount(), 1);
 }
 
-// 测试: broadcast worker 慢于 gRPC deadline，checkDone 抛 RTPException
-TEST_F(P2PConnectorSchedulerTest, AsyncRead_ThrowException_BroadcastTimeout) {
+// 测试: broadcast worker 慢于 gRPC deadline，checkDone 标记失败
+TEST_F(P2PConnectorSchedulerTest, AsyncRead_ReturnFalse_BroadcastTimeout) {
     tp_broadcast_servers_[0]->service()->setSleepMillis(500);
 
     scheduler_->stopChecker();
@@ -434,7 +571,10 @@ TEST_F(P2PConnectorSchedulerTest, AsyncRead_ThrowException_BroadcastTimeout) {
     auto async_context = result.context;
     ASSERT_NE(async_context, nullptr);
 
-    EXPECT_THROW(waitAsyncContextDone(async_context, 500, /*check_done=*/true), RTPException);
+    waitAsyncContextDone(async_context, 5000, /*check_done=*/true);
+
+    EXPECT_TRUE(async_context->done());
+    EXPECT_FALSE(async_context->success());
 }
 
 // 测试: asyncread prefill 失败, 取消broadcast
@@ -509,10 +649,10 @@ TEST_F(P2PConnectorSchedulerTest, AsyncRead_CancelPrefill_WhenBroadcastFailed) {
     // 服务端可能已经开始处理请求，所以这里不验证取消是否成功
 }
 
-// Prefill：worker 极慢导致 gRPC DEADLINE_EXCEEDED 时抛 RTPException（与 BroadcastManager 行为一致）
-TEST_F(P2PConnectorSchedulerTest, SendKVCache_ThrowException_WhenBroadcastExceedsDeadline) {
+// Prefill：worker 极慢导致超过 deadline，返回超时错误
+TEST_F(P2PConnectorSchedulerTest, SendKVCache_ReturnError_WhenBroadcastExceedsDeadline) {
     for (auto& server : tp_broadcast_servers_) {
-        server->service()->setSleepMillis(120000);
+        server->service()->setSleepMillis(200);
         server->service()->setP2PResponseSuccess(true);
     }
 
@@ -521,10 +661,11 @@ TEST_F(P2PConnectorSchedulerTest, SendKVCache_ThrowException_WhenBroadcastExceed
     decode_transfer_servers.push_back({"127.0.0.1", 12345});
 
     const int64_t deadline_ms = currentTimeMs() + 80;
-    EXPECT_THROW(
-        scheduler_->sendKVCache(
-            valid_resource, "test_prefill_broadcast_past_deadline", 4006, decode_transfer_servers, deadline_ms),
-        RTPException);
+    ErrorInfo     error_info  = scheduler_->sendKVCache(
+        valid_resource, "test_prefill_broadcast_past_deadline", 4006, decode_transfer_servers, deadline_ms);
+
+    EXPECT_TRUE(error_info.hasError());
+    EXPECT_EQ(error_info.code(), ErrorCode::P2P_CONNECTOR_WORKER_HANDLE_READ_TIMEOUT);
 }
 
 // StartLoad 返回 TRANSFER_NOT_DONE 且 hold_ms>0：checkDone 进入保留窗口，done 仍为 false 且 needCancel 为 false；hold

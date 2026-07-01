@@ -68,6 +68,11 @@ struct GptModelInputs {
 
     torch::Tensor request_id;             // int64, [context_batch_size]
     torch::Tensor request_pd_separation;  // bool, [context_batch_size]
+    // Absolute business deadline (ms since epoch) per context request, used by
+    // P2P prefill to align ComputedLayerCacheBuffer lifetime with the request's
+    // own deadline (see KVCacheConnectorLayerContext::deadlineMs()).
+    // Empty / undefined → no deadline (workers fall back to store_wait_timeout).
+    torch::Tensor request_deadline_ms;    // int64, [context_batch_size]
     torch::Tensor cache_keys;             // [context_batch_size]
     size_t        kv_block_stride_bytes;
     size_t        kv_scale_stride_bytes;
@@ -181,6 +186,9 @@ struct CacheStoreInputs {
 
     torch::Tensor            request_id;             // [context_batch_size]
     torch::Tensor            request_pd_separation;  // [context_batch_size]
+    // Absolute business deadline (ms since epoch) per context request.
+    // Empty / undefined → no deadline (P2P workers fall back to store_wait_timeout).
+    torch::Tensor            request_deadline_ms;    // [context_batch_size], int64
     std::vector<std::string> cache_keys;             // [context_batch_size]
     size_t                   tokens_per_block;
     size_t                   kv_block_stride_bytes = 0;

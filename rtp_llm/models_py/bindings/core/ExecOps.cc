@@ -1,12 +1,16 @@
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/models_py/bindings/core/CommonDefines.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/CacheStore.h"
+#include "rtp_llm/cpp/cache/KVCacheResource.h"
+#include "rtp_llm/cpp/cache/connector/IKVCacheConnectorCoordinator.h"
+#include "rtp_llm/cpp/cache/connector/KVCacheConnectorLayerContext.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
 #include "rtp_llm/cpp/utils/KVCacheUtils.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
 #include "rtp_llm/cpp/utils/StackTrace.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/ErrorCodeUtil.h"
+#include "autil/StringUtil.h"
 #include "autil/StackTracer.h"
 #include "autil/EnvUtil.h"
 #include <unistd.h>
@@ -16,6 +20,7 @@
 #include <cstdio>
 #include <mutex>
 #include <atomic>
+#include <limits>
 #if USING_CUDA
 #include <c10/cuda/CUDAGuard.h>
 #elif USING_ROCM
@@ -133,6 +138,215 @@ std::shared_ptr<torch::Event> runtimeCreateEvent() {
 // CacheStore (cache_store passed explicitly from KVCacheManager)
 // ============================================================
 
+namespace {
+
+class WriteCacheLayerContext: public KVCacheConnectorLayerContext {
+public:
+    WriteCacheLayerContext(std::shared_ptr<KVCacheResource> resource,
+                           int64_t                          request_id,
+                           std::shared_ptr<torch::Event>    attention_event,
+                           int64_t                          deadline_ms):
+        resource_(std::move(resource)),
+        request_id_(request_id),
+        attention_event_(std::move(attention_event)),
+        deadline_ms_(deadline_ms) {}
+
+    const KVCacheResource& kvCacheResource() const override {
+        return *resource_;
+    }
+
+    KVCacheResourcePtr heldKVCacheResource() const override {
+        return resource_;
+    }
+
+    int64_t requestId() const override {
+        return request_id_;
+    }
+
+    std::shared_ptr<torch::Event> attentionEvent() const override {
+        return attention_event_;
+    }
+
+    int64_t deadlineMs() const override {
+        return deadline_ms_;
+    }
+
+private:
+    std::shared_ptr<KVCacheResource> resource_;
+    int64_t                          request_id_;
+    std::shared_ptr<torch::Event>    attention_event_;
+    int64_t                          deadline_ms_;
+};
+
+std::shared_ptr<torch::Event> makeConnectorEvent(const std::shared_ptr<torch::Event>& event) {
+    return event;
+}
+
+void writeCacheToConnector(const CacheStoreInputs& param, IKVCacheConnectorCoordinator* connector_coordinator) {
+    if (param.warmup || !connector_coordinator) {
+        return;
+    }
+    if (!param.pd_separation || param.context_batch_size == 0) {
+        return;
+    }
+
+    RTP_LLM_CHECK_WITH_INFO(param.host_kv_cache_offset.defined(), "failed to get host_kv_cache_offset");
+
+    const auto seq_size_per_block = param.tokens_per_block;
+    const auto global_layer_id    = connector_coordinator->convertToGlobalLayerId(param.model_id, param.layer_id);
+    if (global_layer_id == std::numeric_limits<uint32_t>::max()) {
+        RTP_LLM_LOG_ERROR("writeCacheToConnector: convertToGlobalLayerId failed, model_id=%zu, layer_id=%d. "
+                          "Skipping P2P cache write for this layer — decode side will not receive data.",
+                          param.model_id,
+                          param.layer_id);
+        connector_coordinator->reportP2PCacheWriteFailure();
+        return;
+    }
+
+    bool is_hybrid = false;
+    if (param.kv_cache_group_types_host.defined() && param.kv_cache_group_types_host.size(0) > 1) {
+        is_hybrid =
+            !torch::all(param.kv_cache_group_types_host.index({param.kv_cache_layer_to_group_host}) == 1).item<bool>();
+    }
+    const int group_num = is_hybrid ? static_cast<int>(param.kv_cache_group_types_host.size(0)) : 1;
+
+    int gid = 0;
+    if (param.host_kv_cache_offset.dim() == 3) {
+        gid = -1;
+        if (param.kv_cache_layer_to_group_host.defined() && param.layer_id >= 0
+            && static_cast<size_t>(param.layer_id) < static_cast<size_t>(param.kv_cache_layer_to_group_host.numel())) {
+            gid = param.kv_cache_layer_to_group_host.data_ptr<int32_t>()[param.layer_id];
+        }
+        RTP_LLM_CHECK_WITH_INFO(gid >= 0 && gid < group_num,
+                                "writeCacheToConnector: invalid group id [%d], group_num=%d, layer_id=%d",
+                                gid,
+                                group_num,
+                                param.layer_id);
+    } else if (param.kv_cache_layer_to_group_host.defined() && param.layer_id >= 0
+               && static_cast<size_t>(param.layer_id)
+                      < static_cast<size_t>(param.kv_cache_layer_to_group_host.numel())) {
+        gid = param.kv_cache_layer_to_group_host.data_ptr<int32_t>()[param.layer_id];
+        RTP_LLM_CHECK_WITH_INFO(gid >= 0 && gid < group_num,
+                                "writeCacheToConnector: invalid group id [%d], group_num=%d, layer_id=%d",
+                                gid,
+                                group_num,
+                                param.layer_id);
+    }
+
+    const int32_t* offset_addr          = nullptr;
+    size_t         max_blocks_per_batch = 0;
+    if (param.host_kv_cache_offset.dim() == 3) {
+        const auto group_offset_view = param.host_kv_cache_offset[static_cast<int64_t>(gid)];
+        max_blocks_per_batch         = group_offset_view.size(1);
+        offset_addr                  = group_offset_view.data_ptr<int32_t>();
+    } else {
+        max_blocks_per_batch = param.host_kv_cache_offset.size(1);
+        offset_addr          = param.host_kv_cache_offset.data_ptr<int32_t>();
+    }
+
+    RTP_LLM_CHECK_WITH_INFO(param.context_batch_size == static_cast<size_t>(param.request_pd_separation.numel()),
+                            "size not same");
+    RTP_LLM_CHECK_WITH_INFO(param.context_batch_size == static_cast<size_t>(param.request_id.numel()),
+                            "context batch size and request id size is not same");
+
+    for (size_t batch_id = 0; batch_id < param.context_batch_size; batch_id++) {
+        if (*(param.request_pd_separation.data_ptr<bool>() + batch_id) == false) {
+            continue;
+        }
+
+        RTP_LLM_CHECK_WITH_INFO(param.prefix_lengths_host.defined() && param.input_lengths_host.defined(),
+                                "failed to get prefix_length_host and input_length_host for cache store");
+        RTP_LLM_CHECK_WITH_INFO(param.prefix_lengths_host.data_ptr<int>()[batch_id] % seq_size_per_block == 0,
+                                "prefix_length %% seq_size_per_block != 0");
+
+        const auto request_id      = *(param.request_id.data_ptr<int64_t>() + batch_id);
+        const int  reuse_block_num = param.prefix_lengths_host.data_ptr<int>()[batch_id] / seq_size_per_block;
+        const int  block_num =
+            (param.input_lengths_host.data_ptr<int>()[param.decoder_batch_size + batch_id] + seq_size_per_block - 1)
+            / seq_size_per_block;
+        const int total_block_num = block_num + reuse_block_num;
+        if (total_block_num <= 0) {
+            continue;
+        }
+
+        CacheGroupType group_type = CacheGroupType::FULL;
+        if (param.kv_cache_group_types_host.defined() && gid >= 0
+            && static_cast<size_t>(gid) < static_cast<size_t>(param.kv_cache_group_types_host.numel())) {
+            group_type = static_cast<CacheGroupType>(param.kv_cache_group_types_host.data_ptr<int32_t>()[gid]);
+        }
+
+        std::vector<int> block_indices;
+        if (group_type == CacheGroupType::LINEAR) {
+            block_indices.push_back(total_block_num - 1);
+        } else {
+            block_indices.reserve(total_block_num);
+            for (int index = 0; index < total_block_num; ++index) {
+                block_indices.push_back(index);
+            }
+        }
+
+        auto kv_cache_resource = std::make_shared<KVCacheResource>();
+        bool cache_keys_valid  = true;
+        for (const int index : block_indices) {
+            const auto& str_cache_key = param.cache_keys[batch_id * max_blocks_per_batch + index];
+            int64_t     cache_key     = 0;
+            if (!autil::StringUtil::strToInt64(str_cache_key.c_str(), cache_key)) {
+                RTP_LLM_LOG_WARNING("writeCacheToConnector failed to convert cache_key to int64_t, cache_key: %s",
+                                    str_cache_key.c_str());
+                cache_keys_valid = false;
+                break;
+            }
+            kv_cache_resource->cacheKeys().push_back(cache_key);
+        }
+        if (!cache_keys_valid) {
+            RTP_LLM_LOG_ERROR("writeCacheToConnector: cache_key conversion failed, request_id=%ld, batch_id=%zu, "
+                              "skipping P2P cache write for this batch",
+                              request_id,
+                              batch_id);
+            connector_coordinator->reportP2PCacheWriteFailure();
+            continue;
+        }
+
+        std::vector<int> layer_to_group_id(global_layer_id + 1, 0);
+        layer_to_group_id[global_layer_id] = gid;
+        kv_cache_resource->initGroups(group_num, global_layer_id + 1, layer_to_group_id);
+
+        auto& block_ids = kv_cache_resource->mutableBlockIds(gid);
+        block_ids.resize(block_indices.size(), -1);
+        for (size_t output_index = 0; output_index < block_indices.size(); ++output_index) {
+            const int index    = block_indices[output_index];
+            auto      block_id = *(offset_addr + (param.decoder_batch_size + batch_id) * max_blocks_per_batch + index);
+            block_ids.setAt(output_index, block_id);
+        }
+
+        auto held_resource =
+            connector_coordinator->holdKVCacheResourceForConnector(*kv_cache_resource, global_layer_id);
+        if (!held_resource) {
+            RTP_LLM_LOG_ERROR("writeCacheToConnector: failed to hold connector ref, request_id=%ld, batch_id=%zu, "
+                              "layer_id=%d, skipping P2P cache write for this batch",
+                              request_id,
+                              batch_id,
+                              param.layer_id);
+            connector_coordinator->reportP2PCacheWriteFailure();
+            continue;
+        }
+
+        auto event = param.pre_created_event ? param.pre_created_event : runtimeCreateEvent();
+        // Per-context-request absolute business deadline (ms since epoch).
+        // INT64_MAX means "no deadline set" — P2P workers fall back to their
+        // configured store_wait_timeout in that case.
+        const int64_t deadline_ms =
+            (param.request_deadline_ms.defined()
+             && static_cast<size_t>(param.request_deadline_ms.numel()) > batch_id) ?
+                *(param.request_deadline_ms.data_ptr<int64_t>() + batch_id) :
+                std::numeric_limits<int64_t>::max();
+        auto layer_context =
+            std::make_shared<WriteCacheLayerContext>(held_resource, request_id, makeConnectorEvent(event), deadline_ms);
+        connector_coordinator->asyncWriteByLayer(global_layer_id, layer_context);
+    }
+}
+
+}  // namespace
 void runtimeWriteCacheStore(const CacheStoreInputs&     cache_store_inputs,
                             const KvCacheInfo&          kv_cache,
                             bool                        mla_kvcache,
@@ -156,6 +370,7 @@ void runtimeWriteCacheStore(const CacheStoreInputs&     cache_store_inputs,
     RTP_LLM_CHECK_WITH_INFO(param.host_kv_cache_offset.defined(), "failed to get host_kv_cache_offset");
     const int32_t* offset_addr          = nullptr;
     size_t         max_blocks_per_batch = 0;
+    int            gid                  = 0;
 
     bool is_hybrid = false;
     if (param.kv_cache_group_types_host.defined() && param.kv_cache_group_types_host.size(0) > 1) {
@@ -165,19 +380,25 @@ void runtimeWriteCacheStore(const CacheStoreInputs&     cache_store_inputs,
 
     const size_t group_num = is_hybrid ? param.kv_cache_group_types_host.size(0) : 1;
 
-    int gid = 0;
-    if (param.kv_cache_layer_to_group_host.defined() && param.layer_id >= 0
-        && static_cast<size_t>(param.layer_id) < static_cast<size_t>(param.kv_cache_layer_to_group_host.numel())) {
-        gid = param.kv_cache_layer_to_group_host.data_ptr<int32_t>()[param.layer_id];
-    }
-
-    RTP_LLM_CHECK_WITH_INFO(gid >= 0 && gid < static_cast<int32_t>(group_num), "invalid kv cache group id [%d]", gid);
-
     if (param.host_kv_cache_offset.dim() == 3) {
+        gid = -1;
+        if (param.kv_cache_layer_to_group_host.defined() && param.layer_id >= 0
+            && static_cast<size_t>(param.layer_id) < static_cast<size_t>(param.kv_cache_layer_to_group_host.numel())) {
+            gid = param.kv_cache_layer_to_group_host.data_ptr<int32_t>()[param.layer_id];
+        }
+        RTP_LLM_CHECK_WITH_INFO(
+            gid >= 0 && gid < static_cast<int32_t>(group_num), "invalid kv cache group id [%d]", gid);
         const auto group_offset_view = param.host_kv_cache_offset[static_cast<int64_t>(gid)];
         max_blocks_per_batch         = group_offset_view.size(1);
         offset_addr                  = group_offset_view.data_ptr<int32_t>();
     } else {
+        gid = 0;
+        if (param.kv_cache_layer_to_group_host.defined() && param.layer_id >= 0
+            && static_cast<size_t>(param.layer_id) < static_cast<size_t>(param.kv_cache_layer_to_group_host.numel())) {
+            gid = param.kv_cache_layer_to_group_host.data_ptr<int32_t>()[param.layer_id];
+        }
+        RTP_LLM_CHECK_WITH_INFO(
+            gid >= 0 && gid < static_cast<int32_t>(group_num), "invalid kv cache group id [%d]", gid);
         max_blocks_per_batch = param.host_kv_cache_offset.size(1);
         offset_addr          = param.host_kv_cache_offset.data_ptr<int32_t>();
     }
@@ -212,7 +433,9 @@ void runtimeWriteCacheStore(const CacheStoreInputs&     cache_store_inputs,
             "write cache store, request id is %ld, blocks num is %ld", request_id, block_num + reuse_block_num);
 
         CacheGroupType group_type = CacheGroupType::FULL;
-        group_type = static_cast<CacheGroupType>(param.kv_cache_group_types_host.data_ptr<int32_t>()[gid]);
+        if (param.kv_cache_group_types_host.defined()) {
+            group_type = static_cast<CacheGroupType>(param.kv_cache_group_types_host.data_ptr<int32_t>()[gid]);
+        }
 
         const int total_blocks = block_num + reuse_block_num;
         if (total_blocks <= 0) {
@@ -314,6 +537,18 @@ void cudaSyncAndCheck() {
     runtimeSyncAndCheck();
 }
 
+void cudaCurrentStreamSyncAndCheck() {
+#if USING_CUDA
+    auto stream = at::cuda::getCurrentCUDAStream();
+    check_cuda_value(cudaStreamSynchronize(stream));
+    check_cuda_error();
+#elif USING_ROCM
+    auto stream = at::cuda::getCurrentHIPStream();
+    ROCM_CHECK(hipStreamSynchronize(stream));
+    ROCM_CHECK_ERROR();
+#endif
+}
+
 void cudaCheckLastError() {
 #if USING_CUDA
     check_cuda_error();
@@ -331,7 +566,7 @@ void cudaPreRun(int device_id) {
     at::cuda::set_device(device_id);
     at::cuda::setCurrentCUDAStream(at::cuda::getDefaultCUDAStream(device_id));
 #elif USING_ROCM
-    hipSetDevice(device_id);
+    ROCM_CHECK(hipSetDevice(device_id));
 #endif
 }
 
@@ -358,7 +593,7 @@ ExecStatus getGpuExecStatus() {
     auto error = cudaMemGetInfo(&mem.free_bytes, &total_bytes);
     RTP_LLM_CHECK(error == cudaSuccess);
 #elif USING_ROCM
-    hipMemGetInfo(&mem.free_bytes, &total_bytes);
+    ROCM_CHECK(hipMemGetInfo(&mem.free_bytes, &total_bytes));
 #endif
     mem.used_bytes      = total_bytes - mem.free_bytes;
     mem.available_bytes = mem.free_bytes;
@@ -516,11 +751,13 @@ OverallExpertStats execCreateMoeExpertStates(const ExpertStatsParams& params) {
 
 // === CacheStore wrapper ===
 
-void execWriteCacheStore(const CacheStoreInputs&     inputs,
-                         const KvCacheInfo&          kv_cache,
-                         bool                        mla_kvcache,
-                         std::shared_ptr<CacheStore> cache_store) {
+void execWriteCacheStore(const CacheStoreInputs&       inputs,
+                         const KvCacheInfo&            kv_cache,
+                         bool                          mla_kvcache,
+                         std::shared_ptr<CacheStore>   cache_store,
+                         IKVCacheConnectorCoordinator* connector_coordinator) {
     runtimeWriteCacheStore(inputs, kv_cache, mla_kvcache, std::move(cache_store));
+    writeCacheToConnector(inputs, connector_coordinator);
 }
 
 // ============================================================
