@@ -1069,7 +1069,6 @@ def _topk_index_merge_kernel(
 @torch.no_grad()
 def flash_decode_with_topk_idx_paged(
     q: torch.Tensor,  # [batch_size, num_heads, head_dim]
-    sink: Optional[torch.Tensor],
     k_paged: torch.Tensor,  # [block, page, idx_dim] scale view
     block_table: torch.Tensor,  # [batch, max_blocks] physical page ids
     seq_lens: torch.Tensor,  # [batch_size]
@@ -1257,27 +1256,14 @@ def flash_decode_with_topk_idx(
     init_blocks: int,
     local_blocks: int,
     sm_scale: Optional[float] = None,
-    use_tma: bool = True,
     score_type: str = "max",
     disable_index_value: bool = False,
-    k_paged: Optional[torch.Tensor] = None,  # [block, page, idx_dim] scale view
-    block_table: Optional[torch.Tensor] = None,  # [batch, max_blocks] phys pages
-) -> torch.Tensor:
+) -> tuple[Optional[torch.Tensor], torch.Tensor]:
     assert score_type in (
         "max",
         "lse",
     ), f"score_type must be 'max' or 'lse', got {score_type!r}"
     triton.set_allocator(robust_allocator)
-    # Zero-copy paged idx scoring: read idx_K straight from the paged scale
-    # region via the physical block table instead of the token-major gather
-    # scratch. Only the disable_index_value (score-only) path supports it; the
-    # value path keeps the scratch flow. Requires page_size == block_size.
-    use_paged_score = (
-        disable_index_value
-        and k_paged is not None
-        and block_table is not None
-        and int(k_paged.shape[1]) == int(block_size)
-    )
     # dtype check
     assert (
         q.dtype == torch.bfloat16
@@ -1288,16 +1274,10 @@ def flash_decode_with_topk_idx(
         assert v_cache is not None
     # shape
     batch_size, num_q_heads, head_dim = q.shape
-    if use_paged_score:
-        num_phys_blocks, page_size, _ = k_paged.shape
-        num_kv_heads = 1  # idx_K is a single shared head
-        max_kv_len = int(block_table.shape[1]) * page_size
-    else:
-        max_slots, num_kv_heads, _ = k_cache.shape
-        max_kv_len = req_to_token.shape[1]
+    max_slots, num_kv_heads, _ = k_cache.shape
+    max_kv_len = req_to_token.shape[1]
     assert seq_lens.shape[0] == batch_size
-    if not use_paged_score:
-        assert slot_ids.shape[0] == batch_size
+    assert slot_ids.shape[0] == batch_size
     # gqa
     assert num_q_heads % num_kv_heads == 0
     gqa_group_size = num_q_heads // num_kv_heads
@@ -1328,36 +1308,7 @@ def flash_decode_with_topk_idx(
     )
 
     grid = (batch_size * NUM_KV_CHUNKS, num_kv_heads)
-    if use_paged_score:
-        _decode_score_kernel_paged[grid](
-            q,
-            k_paged,
-            block_table,
-            score,
-            seq_lens,
-            batch_size,
-            gqa_group_size,
-            head_dim,
-            num_phys_blocks,
-            block_size,
-            sm_scale,
-            init_blocks,
-            local_blocks,
-            q.stride(0),
-            q.stride(1),
-            q.stride(2),
-            k_paged.stride(0),
-            k_paged.stride(1),
-            k_paged.stride(2),
-            block_table.stride(0),
-            block_table.stride(1),
-            score.stride(0),
-            score.stride(1),
-            score.stride(2),
-            NUM_KV_CHUNKS=NUM_KV_CHUNKS,
-            SCORE_TYPE=score_type,
-        )
-    elif disable_index_value:
+    if disable_index_value:
         _decode_score_kernel[grid](
             q,
             k_cache,
