@@ -144,7 +144,7 @@ grpc::Status LocalRpcServer::pollStreamOutput(grpc::ServerContext*             c
             break;
         }
     }
-    RTP_LLM_LOG_DEBUG("request [%s] local generate done", request_key.c_str());
+    RTP_LLM_LOG_INFO("request [%s] local generate done", request_key.c_str());
 
     return grpc::Status::OK;
 }
@@ -155,7 +155,7 @@ grpc::Status LocalRpcServer::GenerateStreamCall(grpc::ServerContext*            
     RTP_LLM_PROFILE_SCOPE("rpc.generate_stream_call");
     AtomicGuard request_guard(onflight_requests_);
     auto        request_id = request->request_id();
-    RTP_LLM_LOG_DEBUG("receive request %ld", request_id);
+    RTP_LLM_LOG_INFO("receive request %ld", request_id);
     auto generate_context =
         GenerateContext(request_id, request->generate_config().timeout_ms(), context, metrics_reporter_, meta_);
     auto input                    = QueryConverter::transQuery(request);

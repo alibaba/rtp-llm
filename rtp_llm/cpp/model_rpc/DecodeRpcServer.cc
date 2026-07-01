@@ -193,12 +193,12 @@ void DecodeRpcServer::loadCacheFromPrefill(DecodeGenerateContext& decode_context
         decode_context.error_info = error_info;
     }
     GRPC_RET_IF_ERROR(decode_context, error_info.ok(), grpc::StatusCode::INTERNAL, error_info.ToString().c_str());
-    RTP_LLM_LOG_DEBUG("request [%s] load cache from prefill done", decode_context.request_key.c_str());
+    RTP_LLM_LOG_INFO("request [%s] load cache from prefill done", decode_context.request_key.c_str());
 }
 
 void DecodeRpcServer::localGenerate(DecodeGenerateContext& decode_context) {
     RTP_LLM_PROFILE_FUNCTION();
-    RTP_LLM_LOG_DEBUG("request [%s] start to local generate", decode_context.request_key.c_str());
+    RTP_LLM_LOG_INFO("request [%s] start to local generate", decode_context.request_key.c_str());
     auto&             grpc_stream     = decode_context.rpc_context.grpc_stream;
     auto&             generate_stream = decode_context.getStream();
     GenerateRequestPB generate_request;
@@ -286,7 +286,7 @@ void DecodeRpcServer::localGenerate(DecodeGenerateContext& decode_context) {
     decode_context.time_info.updateGenerateEndTime();
     meta_->dequeue(decode_context.request_id, decode_context.getStream());
 
-    RTP_LLM_LOG_DEBUG("request [%s] local generate done", decode_context.request_key.c_str());
+    RTP_LLM_LOG_INFO("request [%s] local generate done", decode_context.request_key.c_str());
 }
 
 BroadcastLoadRequestPB DecodeRpcServer::constructRemoteLoadRequestForMla(
