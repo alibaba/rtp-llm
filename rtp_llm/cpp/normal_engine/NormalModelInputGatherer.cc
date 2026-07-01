@@ -409,6 +409,9 @@ absl::Status NormalModelInputGatherer::processContextStreams(GptModelInputs&    
         && ctx.mm_feature_index < model_input.mm_features_locs.numel()) {
         model_input.mm_features_locs = model_input.mm_features_locs.slice(0, 0, ctx.mm_feature_index);
     }
+    if (config_.enable_model_inputs_log) {
+        model_input.prefix_lengths_host_for_log = model_input.prefix_lengths;
+    }
     return absl::OkStatus();
 }
 
@@ -421,6 +424,17 @@ absl::StatusOr<GptModelInputs> NormalModelInputGatherer::gather(const StreamGrou
     initializeKvCacheMetadata(model_input);
     RETURN_IF_STATUS_ERROR(processDecodeStreams(model_input, stream_groups));
     RETURN_IF_STATUS_ERROR(processContextStreams(model_input, stream_groups));
+    if (config_.enable_model_inputs_log) {
+        if (model_input.combo_tokens.defined() && !model_input.combo_tokens.is_cuda()) {
+            model_input.combo_tokens_host_for_log = model_input.combo_tokens;
+        }
+        if (model_input.input_lengths.defined() && !model_input.input_lengths.is_cuda()) {
+            model_input.input_lengths_host_for_log = model_input.input_lengths;
+        }
+        if (model_input.sequence_lengths.defined() && !model_input.sequence_lengths.is_cuda()) {
+            model_input.sequence_lengths_host_for_log = model_input.sequence_lengths;
+        }
+    }
     return model_input;
 }
 

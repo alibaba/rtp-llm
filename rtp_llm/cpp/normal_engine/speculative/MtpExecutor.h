@@ -15,6 +15,8 @@
 
 namespace rtp_llm {
 
+class ModelInputsLogger;
+
 struct MtpMetricsCollector {
     RtpLLMExecutorMetricsCollector          executor_collector;
     RtpLLMTokenPSMetricsCollector           tps_collector;
@@ -111,6 +113,7 @@ private:
     std::unique_ptr<Sampler>                 sampler_;
     std::unique_ptr<MtpBatchStreamProcessor> batch_stream_processor_;
     std::shared_ptr<KVCacheManager>          cache_manager_;
+    std::shared_ptr<ModelInputsLogger>       model_inputs_logger_;
     bool                                     enable_ffn_disaggregate_ = false;
     bool                                     enable_detail_log_       = false;
     int                                      tp_rank_                 = 0;
