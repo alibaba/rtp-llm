@@ -56,6 +56,12 @@ public class MetricConstant {
     public static final String ENGINE_BALANCING_MASTER_BATCH_SIZE = "app.engine.balancing.master.batch.size";
 
     /**
+     * Batch dispatch total token count per batch (sum of seqLen across picked items)
+     */
+    public static final String ENGINE_BALANCING_MASTER_BATCH_TOTAL_TOKENS =
+            "app.engine.balancing.master.batch.total.tokens";
+
+    /**
      * Engine running queue time (from EP authoritative value)
      */
     public static final String ENGINE_RUNNING_QUEUE_TIME = "app.engine.health.check.running.queue.time";

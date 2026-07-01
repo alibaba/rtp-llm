@@ -14,6 +14,7 @@ import static org.flexlb.constant.MetricConstant.CACHE_HIT_COUNT;
 import static org.flexlb.constant.MetricConstant.CACHE_HIT_RATIO;
 import static org.flexlb.constant.MetricConstant.CACHE_REQUEST_TOTAL;
 import static org.flexlb.constant.MetricConstant.ENGINE_BALANCING_MASTER_BATCH_SIZE;
+import static org.flexlb.constant.MetricConstant.ENGINE_BALANCING_MASTER_BATCH_TOTAL_TOKENS;
 import static org.flexlb.constant.MetricConstant.ENGINE_BALANCING_MASTER_SELECT_DETAIL;
 import static org.flexlb.constant.MetricConstant.ENGINE_LOCAL_TASK_MAP_SIZE;
 import static org.flexlb.constant.MetricConstant.ENGINE_RUNNING_TASK_INFO_SIZE;
@@ -52,11 +53,14 @@ public class BatchSchedulerReporter {
         // Batch size — gauge, reported per dispatch
         monitor.register(ENGINE_BALANCING_MASTER_BATCH_SIZE, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
 
+        // Batch total tokens — gauge, reported per dispatch
+        monitor.register(ENGINE_BALANCING_MASTER_BATCH_TOTAL_TOKENS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+
         // Inflight — same type as EngineHealthReporter
         monitor.register(ENGINE_LOCAL_TASK_MAP_SIZE, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         monitor.register(ENGINE_RUNNING_TASK_INFO_SIZE, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
 
-        log.info("BatchSchedulerReporter initialized (6 metrics reusing existing dashboard keys)");
+        log.info("BatchSchedulerReporter initialized (7 metrics)");
     }
 
     // ==================== Queue metrics ====================
@@ -129,6 +133,18 @@ public class BatchSchedulerReporter {
                 "engineIp", engineIp,
                 "reason", reason);
         monitor.report(ENGINE_BALANCING_MASTER_BATCH_SIZE, tags, batchSize);
+    }
+
+    /**
+     * Report batch total token count (sum of seqLen across picked items) via
+     * {@code engine.balancing.master.batch.total.tokens}.
+     */
+    public void reportBatchTotalTokens(String role, String engineIp, String reason, long totalTokens) {
+        FlexMetricTags tags = FlexMetricTags.of(
+                "role", role,
+                "engineIp", engineIp,
+                "reason", reason);
+        monitor.report(ENGINE_BALANCING_MASTER_BATCH_TOTAL_TOKENS, tags, totalTokens);
     }
 
     /**
