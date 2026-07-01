@@ -724,13 +724,14 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
             self.use_cuda_graph,
         )
 
-        # Pack rope positions for the local q tokens into the full buffer; the
-        # rope path consumes this as precomputed_pos_ids.
+        # Pack rope positions for the local padded q/k buffer; padding rows keep
+        # pos=0 and are never selected by total_local_ids.
         if n_q > 0:
             positions_d = mla_params.positions_d
+            full_rope_size = int(local_tokens)
             if self.use_cuda_graph and self.full_rope_pos_ids is not None:
                 if (
-                    self.full_rope_pos_ids.size(0) != positions_d.size(0)
+                    self.full_rope_pos_ids.size(0) != full_rope_size
                     or self.full_rope_pos_ids.dtype != positions_d.dtype
                     or self.full_rope_pos_ids.device != positions_d.device
                 ):
@@ -742,7 +743,7 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
                 full_rope.zero_()
             else:
                 full_rope = torch.zeros(
-                    positions_d.size(0),
+                    full_rope_size,
                     dtype=positions_d.dtype,
                     device=positions_d.device,
                 )
