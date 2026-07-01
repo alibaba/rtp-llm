@@ -265,7 +265,15 @@ void RecommendationLogitsProcessor::updateStatus(const torch::Tensor& new_tokens
 
     bool any_combo_completed = false;
     // 仅在跨序列 ban 开启时分配 combo 收集容器，避免未启用功能时的无效内存分配
-    const bool need_broadcast = size() > 1 && !infos_.empty() && infos_[0].enable_cross_sequence_ban;
+    // 检查任意序列是否启用，而非仅依赖 infos_[0]，以正确处理 insert() 合并后 flag 不一致的场景
+    bool any_cross_seq_ban = false;
+    for (const auto& info : infos_) {
+        if (info.enable_cross_sequence_ban) {
+            any_cross_seq_ban = true;
+            break;
+        }
+    }
+    const bool need_broadcast = size() > 1 && any_cross_seq_ban;
     std::vector<std::vector<std::vector<int>>> new_combos_per_seq;
     if (need_broadcast) {
         new_combos_per_seq.resize(size());
