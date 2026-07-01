@@ -277,30 +277,18 @@ class TestXQAAttnOp(BaseAttentionTest):
         # Test boundary cases
         logging.info("\n--- Testing BOUNDARY cases ---")
 
+        # (head_num, head_num_kv, size_per_head, seq_size_per_block, data_type,
+        #  expected_supported, description)
         boundary_cases = [
             # Edge cases for group_size
-            (
-                32,
-                2,
-                128,
-                64,
-                "fp16",
-                "group_size=16 (max allowed): SHOULD BE SUPPORTED",
-            ),
-            (
-                34,
-                2,
-                128,
-                64,
-                "fp16",
-                "group_size=17 (just over limit): SHOULD BE UNSUPPORTED",
-            ),
+            (32, 2, 128, 64, "fp16", True, "group_size=16 (max allowed)"),
+            (34, 2, 128, 64, "fp16", False, "group_size=17 (just over limit)"),
             # Edge cases for head_dim
-            (32, 8, 64, 64, "fp16", "head_dim=64 (min): SHOULD BE SUPPORTED"),
-            (32, 8, 256, 64, "fp16", "head_dim=256 (max): SHOULD BE SUPPORTED"),
+            (32, 8, 64, 64, "fp16", True, "head_dim=64 (min)"),
+            (32, 8, 256, 64, "fp16", True, "head_dim=256 (max)"),
             # Edge cases for page_size
-            (32, 8, 128, 16, "fp16", "page_size=16 (min): SHOULD BE SUPPORTED"),
-            (32, 8, 128, 128, "fp16", "page_size=128 (max): SHOULD BE SUPPORTED"),
+            (32, 8, 128, 16, "fp16", True, "page_size=16 (min)"),
+            (32, 8, 128, 128, "fp16", True, "page_size=128 (max)"),
         ]
 
         for (
@@ -309,6 +297,7 @@ class TestXQAAttnOp(BaseAttentionTest):
             size_per_head,
             seq_size_per_block,
             data_type,
+            expected_supported,
             desc,
         ) in boundary_cases:
             config = self._create_config(
@@ -335,7 +324,6 @@ class TestXQAAttnOp(BaseAttentionTest):
                 f"    → Support: {is_supported}"
             )
 
-            expected_supported = "UNSUPPORTED" not in desc
             self.assertEqual(
                 is_supported,
                 expected_supported,
