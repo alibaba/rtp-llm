@@ -143,57 +143,49 @@ void RecommendationLogitsProcessor::process(const SamplerInputs& inputs, size_t 
         }
     }
 
-    // --- banned combo 屏蔽（原有逻辑不变） ---
-    if (!need_ban_process) {
-        return;
-    }
-
-    // 只收集要屏蔽的 (row, col) 坐标,避开按 batch*vocab 分配 mask 张量与 H2D 拷贝的热路径开销。
-    std::vector<int64_t> rows;
-    std::vector<int64_t> cols;
-    for (size_t i = 0; i < batch_size; ++i) {
-        auto& info = infos_[i];
-        if (info.combo_token_size <= 0 || info.pos_in_combo != info.combo_token_size - 1) {
-            continue;
-        }
-        const int combo_last_idx = info.combo_token_size - 1;
-        // 对所有前 n-1 个 token 等于 current_prefix 的 banned combo,屏蔽其最后一位
-        for (const auto& combo : info.banned_combos) {
-            RTP_LLM_CHECK((int32_t)combo.size() == info.combo_token_size);
-            bool prefix_match = true;
-            for (int32_t k = 0; k < combo_last_idx; ++k) {
-                if (combo[k] != info.current_prefix[k]) {
-                    prefix_match = false;
-                    break;
-                }
-            }
-            if (!prefix_match) {
+    // --- banned combo 屏蔽 ---
+    if (need_ban_process) {
+        // 只收集要屏蔽的 (row, col) 坐标,避开按 batch*vocab 分配 mask 张量与 H2D 拷贝的热路径开销。
+        std::vector<int64_t> rows;
+        std::vector<int64_t> cols;
+        for (size_t i = 0; i < batch_size; ++i) {
+            auto& info = infos_[i];
+            if (info.combo_token_size <= 0 || info.pos_in_combo != info.combo_token_size - 1) {
                 continue;
             }
-            const int banned_token = combo[combo_last_idx];
-            if (banned_token >= 0 && (size_t)banned_token < vocab_size) {
-                rows.push_back(static_cast<int64_t>(i));
-                cols.push_back(static_cast<int64_t>(banned_token));
+            const int combo_last_idx = info.combo_token_size - 1;
+            for (const auto& combo : info.banned_combos) {
+                RTP_LLM_CHECK((int32_t)combo.size() == info.combo_token_size);
+                bool prefix_match = true;
+                for (int32_t k = 0; k < combo_last_idx; ++k) {
+                    if (combo[k] != info.current_prefix[k]) {
+                        prefix_match = false;
+                        break;
+                    }
+                }
+                if (!prefix_match) {
+                    continue;
+                }
+                const int banned_token = combo[combo_last_idx];
+                if (banned_token >= 0 && (size_t)banned_token < vocab_size) {
+                    rows.push_back(static_cast<int64_t>(i));
+                    cols.push_back(static_cast<int64_t>(banned_token));
+                }
             }
         }
+        if (!rows.empty()) {
+            auto rows_t = torch::tensor(rows, torch::kLong).to(logits.device());
+            auto cols_t = torch::tensor(cols, torch::kLong).to(logits.device());
+            logits.index_put_({rows_t, cols_t}, -std::numeric_limits<float>::infinity());
+        }
     }
-
-    if (rows.empty()) {
-        return;
-    }
-
-    // 直接在 logits 上按坐标批量写 -inf,按命中数量分摊 H2D 拷贝,体积 O(K) 远小于 O(B*V)。
-    auto rows_t = torch::tensor(rows, torch::kLong).to(logits.device());
-    auto cols_t = torch::tensor(cols, torch::kLong).to(logits.device());
-    logits.index_put_({rows_t, cols_t}, -std::numeric_limits<float>::infinity());
 
     // 安全检查：diverge 遮蔽 + banned combo 遮蔽叠加后，确保每行至少保留 1 个有效 token。
     // 若某行全部被 mask，恢复该行为均匀分布（安全降级），避免 sampler 采样 NaN/随机 token。
     for (size_t i = 0; i < batch_size; ++i) {
         auto row = logits[i];
-        bool all_masked = (row.max().item<float>() == -std::numeric_limits<float>::infinity());
-        if (all_masked) {
-            row.fill_(0.0f);  // 均匀分布降级
+        if (row.max().item<float>() == -std::numeric_limits<float>::infinity()) {
+            row.fill_(0.0f);
             RTP_LLM_LOG_WARNING(
                 "RecommendationLogitsProcessor: row %zu all logits masked after diverge+ban, "
                 "falling back to uniform distribution", i);

@@ -602,4 +602,46 @@ TEST_F(RecommendationLogitsProcessorTest, testBatchTokenAdvance) {
     EXPECT_FALSE(p->infos()[0].banned_combos.count({30, 31}));
 }
 
+// 场景 19：num_new_tokens=4，combo_size=2，同一序列一次 updateStatus 完成 2 个完整 combo
+TEST_F(RecommendationLogitsProcessorTest, testBatchTokenMultipleCombos) {
+    const int N = 2;
+    const int combo_size = 2;
+    std::set<std::vector<int>> empty_set;
+
+    std::vector<StreamRecommendationInfo> infos;
+    for (int i = 0; i < N; ++i) {
+        StreamRecommendationInfo info(combo_size, 0, 0, false, empty_set, {},
+                                      /*enable_cross_sequence_ban=*/true,
+                                      /*cross_seq_diverge_start_combo=*/0);
+        infos.push_back(std::move(info));
+    }
+    auto p = std::make_shared<RecommendationLogitsProcessor>(std::move(infos));
+
+    // 一次推 4 个 token: combo_size=2 → 完成 2 个 combo
+    // 序列 0: [A,B,C,D] → combo1=[A,B], combo2=[C,D]
+    auto tokens = torch::zeros({N, 4}, torch::kInt32);
+    tokens[0][0] = 1; tokens[0][1] = 2; tokens[0][2] = 3; tokens[0][3] = 4;
+    tokens[1][0] = 5; tokens[1][1] = 6; tokens[1][2] = 7; tokens[1][3] = 8;
+
+    p->updateStatus(tokens, 4);
+
+    // 序列 0: 2 个 combo 完成，pos_in_combo=0 (刚好在边界上)
+    EXPECT_EQ(0, p->infos()[0].pos_in_combo);
+    EXPECT_EQ(2, p->infos()[0].completed_combo_count);
+    EXPECT_TRUE(p->infos()[0].banned_combos.count({1, 2}));
+    EXPECT_TRUE(p->infos()[0].banned_combos.count({3, 4}));
+
+    // 序列 1: 同样 2 个 combo
+    EXPECT_EQ(0, p->infos()[1].pos_in_combo);
+    EXPECT_EQ(2, p->infos()[1].completed_combo_count);
+    EXPECT_TRUE(p->infos()[1].banned_combos.count({5, 6}));
+    EXPECT_TRUE(p->infos()[1].banned_combos.count({7, 8}));
+
+    // 跨序列广播：序列 1 应收到序列 0 的两个 combo
+    EXPECT_TRUE(p->infos()[1].banned_combos.count({1, 2}));
+    EXPECT_TRUE(p->infos()[1].banned_combos.count({3, 4}));
+    // 序列 0 不接收序列 1 的
+    EXPECT_FALSE(p->infos()[0].banned_combos.count({5, 6}));
+}
+
 }  // namespace rtp_llm
