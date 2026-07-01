@@ -1228,8 +1228,10 @@ void PrefillRpcServer::pollRemoteOutput(PrefillGenerateContext& prefill_context)
             return;
         }
     }
-    CLIENT_GRPC_RET_IF_ERROR(
-        prefill_context, prefill_context.closeGrpcStream().ok(), ErrorCode::REMOTE_GENERATE_FAILED);
+    auto status = prefill_context.closeGrpcStream();
+    if (!status.ok() && status.error_code() != grpc::StatusCode::CANCELLED) {
+        CLIENT_GRPC_RET_IF_ERROR(prefill_context, false, ErrorCode::REMOTE_GENERATE_FAILED);
+    }
 }
 
 grpc::Status PrefillRpcServer::prepareAllocateResource(PrefillGenerateContext& prefill_context) {
