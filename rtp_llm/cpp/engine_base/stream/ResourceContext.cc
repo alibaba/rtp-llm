@@ -8,7 +8,7 @@ void ResourceContext::initCacheConfig(const KVCacheConfig&       kv_cache_config
                                       int64_t                    max_seq_len) {
     reuse_cache                = kv_cache_config.reuse_cache;
     enable_memory_cache        = kv_cache_config.enable_memory_cache;
-    enable_remote_cache        = kv_cache_config.enable_remote_cache;
+    enable_remote_cache        = kv_cache_config.enable_remote_cache || kv_cache_config.enable_kvs_cache;
     enable_device_cache        = kv_cache_config.enable_device_cache;
     write_cache_sync           = kv_cache_config.write_cache_sync;
     enable_tiered_memory_cache = kv_cache_config.enable_tiered_memory_cache;

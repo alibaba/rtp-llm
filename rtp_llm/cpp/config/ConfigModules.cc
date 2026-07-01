@@ -145,7 +145,14 @@ std::string KVCacheConfig::to_string() const {
         << "prefix_tree_memory_state_swa_pool_ratio: " << prefix_tree_memory_state_swa_pool_ratio << "\n"
         << "enable_independent_group_eviction: " << enable_independent_group_eviction << "\n"
         << "device_cache_min_free_blocks: " << device_cache_min_free_blocks << "\n"
-        << "load_cache_retry_times: " << load_cache_retry_times << "\n";
+        << "load_cache_retry_times: " << load_cache_retry_times << "\n"
+        << "enable_kvs_cache: " << enable_kvs_cache << "\n"
+        << "kvs_v6d_url: " << kvs_v6d_url << "\n"
+        << "kvs_v6d_socket_path: " << (kvs_v6d_socket_path.empty() ? "" : "[set]") << "\n"
+        << "kvs_timeout_ms: " << kvs_timeout_ms << "\n"
+        << "kvs_lease_term_sec: " << kvs_lease_term_sec << "\n"
+        << "kvs_object_namespace: " << kvs_object_namespace << "\n"
+        << "kvs_cache_key_version: " << kvs_cache_key_version << "\n";
     return oss.str();
 }
 
