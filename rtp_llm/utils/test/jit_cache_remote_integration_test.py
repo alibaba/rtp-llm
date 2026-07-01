@@ -27,12 +27,15 @@ from rtp_llm.utils import jit_cache_manager as jit_cache_module
 from rtp_llm.utils.jit_cache_manager import (
     COMPONENT_BY_NAME,
     COMPONENT_SPECS,
-    SNAPSHOT_NAME,
+    SNAPSHOT_PREFIX,
     JitCacheManager,
 )
 from rtp_llm.utils.test.jit_cache_manager_test import (
     add_path_to_tracker,
+    find_latest_snapshot,
     iter_component_files,
+    snapshot_member_names,
+    wait_for_snapshot_publish,
     write_snapshot,
 )
 
@@ -57,14 +60,6 @@ _JIT_ENV_NAMES = (
 )
 
 
-def _wait_for_snapshot_publish(manager: JitCacheManager, timeout_s: float = 10) -> None:
-    deadline = time.time() + timeout_s
-    while manager._snapshot_publishing:
-        if time.time() >= deadline:
-            raise TimeoutError("timed out waiting for snapshot publish")
-        time.sleep(0.05)
-
-
 def _make_jit_manager(
     local_root: Path,
     remote_root: Path,
@@ -74,8 +69,8 @@ def _make_jit_manager(
     remote_root.mkdir(parents=True, exist_ok=True)
     config = JITConfig()
     config.local_jit_cache_dir = str(local_root)
-    config.remote_jit_dir = str(remote_root)
-    config.jit_remote_timeout_s = timeout_s
+    config.remote_jit_cache_dir = str(remote_root)
+    config.remote_sync_timeout_s = timeout_s
     manager = JitCacheManager(config, run_id=run_id)
     manager.bootstrap()
     return manager
@@ -140,7 +135,7 @@ def _two_rank_snapshot_publish_worker(
         os.environ["RANK"] = str(rank)
         os.environ["WORLD_SIZE"] = str(world_size)
         os.environ["TRITON_AUTOTUNE_GPU_NAME"] = "NVIDIA_H20"
-        jit_cache_module.get_gpu_scope.cache_clear()
+        jit_cache_module.get_gpu_info.cache_clear()
 
         if not torch.cuda.is_available():
             raise RuntimeError("CUDA is not available")
@@ -186,7 +181,7 @@ def _two_rank_snapshot_publish_worker(
         ):
             with mock.patch.object(jit_cache_module.time, "time", return_value=1200.0):
                 summary = manager.sync_once(f"rank_{rank}_publish")
-            _wait_for_snapshot_publish(manager)
+            wait_for_snapshot_publish(manager, timeout_s=10)
 
         result_queue.put(
             {
@@ -205,7 +200,7 @@ def _two_rank_snapshot_publish_worker(
         if manager is not None:
             manager.remote_cache_available = False
             manager.stop()
-        jit_cache_module.get_gpu_scope.cache_clear()
+        jit_cache_module.get_gpu_info.cache_clear()
 
 
 class _GpuJitTestBase(unittest.TestCase):
@@ -271,7 +266,7 @@ class RemoteJitIntegrationTest(_GpuJitTestBase):
             self.assertEqual(uploaded["result"], "success")
 
             write_snapshot(remote_root)
-            self.assertTrue((remote_root / SNAPSHOT_NAME).exists())
+            self.assertIsNotNone(find_latest_snapshot(remote_root))
             self.assert_components_have_files(remote_root)
         finally:
             first.stop()
@@ -414,12 +409,12 @@ class RemoteSnapshotCompressionDesignTest(unittest.TestCase):
         self.root = Path(self.tmp.name)
         self.old_env = os.environ.copy()
         os.environ["TRITON_AUTOTUNE_GPU_NAME"] = "NVIDIA_H20"
-        jit_cache_module.get_gpu_scope.cache_clear()
+        jit_cache_module.get_gpu_info.cache_clear()
 
     def tearDown(self):
         os.environ.clear()
         os.environ.update(self.old_env)
-        jit_cache_module.get_gpu_scope.cache_clear()
+        jit_cache_module.get_gpu_info.cache_clear()
         self.tmp.cleanup()
 
     def make_manager(
@@ -429,13 +424,6 @@ class RemoteSnapshotCompressionDesignTest(unittest.TestCase):
         run_id: str,
     ) -> JitCacheManager:
         return _make_jit_manager(local_root, remote_root, run_id, timeout_s=10)
-
-    def snapshot_member_names(self, snapshot_path: Path) -> set[str]:
-        dctx = jit_cache_module.zstd.ZstdDecompressor()
-        with snapshot_path.open("rb") as compressed:
-            with dctx.stream_reader(compressed) as reader:
-                with tarfile.open(fileobj=reader, mode="r|") as tar:
-                    return {member.name for member in tar}
 
     def test_two_gpu_rank_processes_compete_for_single_snapshot_publish_lease(self):
         if not torch.cuda.is_available():
@@ -495,9 +483,11 @@ class RemoteSnapshotCompressionDesignTest(unittest.TestCase):
         self.assertEqual(len(lease_dirs), 1)
         self.assertEqual(lease_dirs[0].name, ".jit_snapshot_publish_lease.1")
 
-        snapshot_path = remote_root / SNAPSHOT_NAME
+        snapshot_path = find_latest_snapshot(remote_root)
+        self.assertIsNotNone(snapshot_path)
         self.assertTrue(snapshot_path.is_file())
-        members = self.snapshot_member_names(snapshot_path)
+        self.assertTrue(snapshot_path.name.startswith(SNAPSHOT_PREFIX))
+        members = snapshot_member_names(snapshot_path)
         self.assertIn(publishers[0]["marker_member"], members)
 
 
@@ -509,15 +499,6 @@ class EventRecord:
     def record(self, component_name: str, event_type: str, path: str):
         with self.lock:
             self.events[component_name].append((event_type, path))
-
-    def get_event_types_for_syncable(self, component_name: str) -> set[str]:
-        component = COMPONENT_BY_NAME[component_name]
-        with self.lock:
-            return {
-                etype
-                for etype, path in self.events[component_name]
-                if jit_cache_module.should_sync_file(component, path)
-            }
 
     def get_syncable_events(self, component_name: str) -> list[tuple[str, str]]:
         component = COMPONENT_BY_NAME[component_name]
@@ -584,7 +565,8 @@ class JitEventSignalVerificationTest(_GpuJitTestBase):
         all_ok = True
         for component in COMPONENT_SPECS:
             expected = component.upload_events
-            actual_types = recorder.get_event_types_for_syncable(component.name)
+            syncable = recorder.get_syncable_events(component.name)
+            actual_types = {etype for etype, _ in syncable}
             hit = expected & actual_types
             missed = expected - actual_types
 
@@ -598,7 +580,6 @@ class JitEventSignalVerificationTest(_GpuJitTestBase):
             if missed:
                 print(f"  MISSING:    {sorted(missed)}")
 
-            syncable = recorder.get_syncable_events(component.name)
             if syncable:
                 print(f"  sample events ({len(syncable)} total):")
                 for etype, path in syncable[:5]:

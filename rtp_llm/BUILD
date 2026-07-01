@@ -148,7 +148,6 @@ py_library(
         "utils/**/*.py",
     ], exclude = [
         "utils/jit_cache_manager.py",
-        "utils/module_util.py",
         "utils/test/*.py",
         "utils/test/**/*.py",
     ]),

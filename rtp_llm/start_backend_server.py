@@ -1,4 +1,3 @@
-import glob
 import logging
 import multiprocessing
 import os
@@ -33,9 +32,18 @@ setup_logging()
 
 def prepare_jit_cache(py_env_configs: PyEnvConfigs, run_id: str):
     manager = JitCacheManager(py_env_configs.jit_config, run_id=run_id)
-    manager.bootstrap()
-    manager.prepare()
-    manager.start_background_sync()
+    try:
+        manager.bootstrap()
+        manager.prepare()
+        manager.start_background_sync()
+    except BaseException:
+        try:
+            manager.stop()
+        except Exception:
+            logging.warning(
+                "failed to stop JitCacheManager after init error", exc_info=True
+            )
+        raise
     return manager
 
 
@@ -51,17 +59,6 @@ def local_rank_start(
     jit_cache_manager = None
     logging.info(f"[PROCESS_START]Start local rank process")
     from rtp_llm.utils.util import copy_gemm_config
-
-    def stop_jit_cache_manager():
-        nonlocal jit_cache_manager
-        manager = jit_cache_manager
-        if manager is None:
-            return
-        jit_cache_manager = None
-        try:
-            manager.stop()
-        except Exception as e:
-            logging.error(f"Error during JIT cache manager shutdown: {e}")
 
     def signal_handler(signum, frame):
         logging.info(
@@ -105,8 +102,8 @@ def local_rank_start(
         logging.info(f"import BackendManager took {time.time()- start_time:.2f}s")
         backend_manager = BackendManager(py_env_configs)
         backend_manager.start()
-        # Engine startup installs native signal handlers; restore the Python
-        # shutdown path so runtime JIT files are synced before process exit.
+        # Engine startup overwrites SIGTERM/SIGINT; restore Python handlers
+        # so the finally block can flush JIT artifacts on shutdown.
         install_signal_handlers()
         logging.info("Backend server initialized successfully, sending ready status")
 
@@ -143,7 +140,11 @@ def local_rank_start(
                 logging.warning(f"Failed to send error status via pipe: {pipe_error}")
         raise e
     finally:
-        stop_jit_cache_manager()
+        if jit_cache_manager is not None:
+            try:
+                jit_cache_manager.stop()
+            except Exception as e:
+                logging.error(f"Error during JIT cache manager shutdown: {e}")
 
 
 def _get_local_world_size(py_env_configs: PyEnvConfigs) -> int:
@@ -196,9 +197,7 @@ def _create_rank_processes(
     processes = []
     rank_pipe_readers = []  # Store pipe readers for each rank
 
-    for _, world_rank in enumerate(
-        range(pc.world_rank, pc.world_rank + local_world_size)
-    ):
+    for world_rank in range(pc.world_rank, pc.world_rank + local_world_size):
         reader, writer = multiprocessing.Pipe(duplex=False)
         os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(cuda_device_list)
         os.environ["WORLD_RANK"] = str(world_rank)
@@ -445,14 +444,6 @@ def load_gpu_nic_affinity():
         return False
 
 
-def clear_jit_filelock():
-    # check whether exists jit dir
-    if os.path.exists("deep_gemm_runtime"):
-        files = glob.glob("./deep_gemm_runtime/**/*_lock", recursive=True)
-        for file in files:
-            os.remove(file)
-
-
 def start_backend_server(
     global_controller: ConcurrencyController,
     py_env_configs: PyEnvConfigs,
@@ -464,8 +455,6 @@ def start_backend_server(
     load_gpu_nic_affinity()
 
     jit_cache_run_id = new_jit_cache_run_id()
-
-    clear_jit_filelock()
 
     if not torch.cuda.is_available():
         return local_rank_start(
