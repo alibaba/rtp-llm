@@ -186,6 +186,19 @@ void RecommendationLogitsProcessor::process(const SamplerInputs& inputs, size_t 
     auto rows_t = torch::tensor(rows, torch::kLong).to(logits.device());
     auto cols_t = torch::tensor(cols, torch::kLong).to(logits.device());
     logits.index_put_({rows_t, cols_t}, -std::numeric_limits<float>::infinity());
+
+    // 安全检查：diverge 遮蔽 + banned combo 遮蔽叠加后，确保每行至少保留 1 个有效 token。
+    // 若某行全部被 mask，恢复该行为均匀分布（安全降级），避免 sampler 采样 NaN/随机 token。
+    for (size_t i = 0; i < batch_size; ++i) {
+        auto row = logits[i];
+        bool all_masked = (row.max().item<float>() == -std::numeric_limits<float>::infinity());
+        if (all_masked) {
+            row.fill_(0.0f);  // 均匀分布降级
+            RTP_LLM_LOG_WARNING(
+                "RecommendationLogitsProcessor: row %zu all logits masked after diverge+ban, "
+                "falling back to uniform distribution", i);
+        }
+    }
 }
 
 void RecommendationLogitsProcessor::updateMultiSeqStatus(const std::vector<int>& src_batch_indices) {

@@ -562,4 +562,44 @@ TEST_F(RecommendationLogitsProcessorTest, testDivergeDepthCappedByMaxLimit) {
     EXPECT_EQ(5, masked_count_5);
 }
 
+// 场景 18：num_new_tokens > 1 批量推进（speculative decoding 场景）
+// 一次推 3 个 token，combo_size=2，同一序列在一次 updateStatus 中完成 1 个 combo 并开始下一个
+TEST_F(RecommendationLogitsProcessorTest, testBatchTokenAdvance) {
+    const int N = 2;
+    const int combo_size = 2;
+    std::set<std::vector<int>> empty_set;
+
+    std::vector<StreamRecommendationInfo> infos;
+    for (int i = 0; i < N; ++i) {
+        StreamRecommendationInfo info(combo_size, 0, 0, false, empty_set, {},
+                                      /*enable_cross_sequence_ban=*/true,
+                                      /*cross_seq_diverge_start_combo=*/0);
+        infos.push_back(std::move(info));
+    }
+    auto p = std::make_shared<RecommendationLogitsProcessor>(std::move(infos));
+
+    // 一次推 3 个 token: [A, B, C]
+    // combo_size=2: token A+B 组成第 1 个 combo，token C 是第 2 个 combo 的第 1 位
+    auto tokens = torch::zeros({N, 3}, torch::kInt32);
+    tokens[0][0] = 10; tokens[0][1] = 11; tokens[0][2] = 20;
+    tokens[1][0] = 30; tokens[1][1] = 31; tokens[1][2] = 40;
+
+    p->updateStatus(tokens, 3);  // num_new_tokens=3
+
+    // 序列 0: combo [10,11] 完成，然后 token 20 开始新 combo→pos_in_combo=1
+    EXPECT_EQ(1, p->infos()[0].pos_in_combo);
+    EXPECT_EQ(1, p->infos()[0].completed_combo_count);
+    EXPECT_TRUE(p->infos()[0].banned_combos.count({10, 11}));
+
+    // 序列 1: combo [30,31] 完成，然后 token 40 开始新 combo→pos_in_combo=1
+    EXPECT_EQ(1, p->infos()[1].pos_in_combo);
+    EXPECT_EQ(1, p->infos()[1].completed_combo_count);
+    EXPECT_TRUE(p->infos()[1].banned_combos.count({30, 31}));
+
+    // 跨序列广播验证：序列 1 应收到序列 0 的 combo [10,11]
+    EXPECT_TRUE(p->infos()[1].banned_combos.count({10, 11}));
+    // 序列 0 不接收序列 1 的 combo（primary-protected）
+    EXPECT_FALSE(p->infos()[0].banned_combos.count({30, 31}));
+}
+
 }  // namespace rtp_llm

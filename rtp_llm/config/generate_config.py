@@ -99,7 +99,9 @@ class GenerateConfig(BaseModel):
             return 0
         try:
             val = int(v)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError) as e:
+            logging.getLogger(__name__).warning(
+                "cross_seq_diverge_start_combo received non-integer value %r, defaulting to 0: %s", v, e)
             return 0
         if val < 0:
             logging.getLogger(__name__).warning(
