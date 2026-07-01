@@ -65,7 +65,7 @@ public class MasterEngineSynchronizer extends AbstractEngineStatusSynchronizer {
                 : 20;
         this.syncRequestTimeoutMs = System.getenv("SYNC_REQUEST_TIMEOUT_MS") != null
                 ? Long.parseLong(System.getenv("SYNC_REQUEST_TIMEOUT_MS"))
-                : syncEngineStatusInterval;
+                : 5000;  // 5s default for gRPC calls, must not fallback to sync interval (20ms) which is too short
         this.scheduler = new ScheduledThreadPoolExecutor(5, new NamedThreadFactory("sync-status-scheduler"),
                 new ThreadPoolExecutor.AbortPolicy());
         this.scheduler.scheduleAtFixedRate(this::syncEngineStatus, 0, syncEngineStatusInterval, TimeUnit.MILLISECONDS);
