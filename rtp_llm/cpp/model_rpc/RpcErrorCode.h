@@ -15,6 +15,7 @@ inline grpc::StatusCode transErrorCodeToGrpc(ErrorCode error_code) {
         {ErrorCode::GENERATE_TIMEOUT, grpc::StatusCode::DEADLINE_EXCEEDED},
         {ErrorCode::OUT_OF_VOCAB_RANGE, grpc::StatusCode::OUT_OF_RANGE},
         {ErrorCode::LONG_PROMPT_ERROR, grpc::StatusCode::OUT_OF_RANGE},
+        {ErrorCode::INVALID_PARAMS, grpc::StatusCode::INVALID_ARGUMENT},
     };
     auto it = error_code_map.find(error_code);
     if (it != error_code_map.end()) {
@@ -22,6 +23,31 @@ inline grpc::StatusCode transErrorCodeToGrpc(ErrorCode error_code) {
     } else {
         return grpc::StatusCode::INTERNAL;
     }
+}
+
+// Reverse of transErrorCodeToGrpc: extract a representative ErrorCode from a
+// grpc::StatusCode received over the wire. Lossy by design — multiple
+// ErrorCodes share the same grpc status (e.g. MALLOC_FAILED and
+// DECODE_MALLOC_FAILED both → RESOURCE_EXHAUSTED), so we pick the most
+// common producer for each status. Used by PrefillServerCallerContext
+// when wrapping prefill's gRPC failures back into ErrorInfo for downstream
+// consumers, so they don't all collapse to UNKNOWN_ERROR.
+inline ErrorCode transGrpcStatusToErrorCode(grpc::StatusCode status_code) {
+    const static std::unordered_map<grpc::StatusCode, ErrorCode> status_code_map = {
+        {grpc::StatusCode::CANCELLED, ErrorCode::CANCELLED},
+        {grpc::StatusCode::RESOURCE_EXHAUSTED, ErrorCode::MALLOC_FAILED},
+        {grpc::StatusCode::DEADLINE_EXCEEDED, ErrorCode::GENERATE_TIMEOUT},
+        {grpc::StatusCode::OUT_OF_RANGE, ErrorCode::LONG_PROMPT_ERROR},
+        {grpc::StatusCode::INVALID_ARGUMENT, ErrorCode::INVALID_PARAMS},
+    };
+    auto it = status_code_map.find(status_code);
+    if (it != status_code_map.end()) {
+        return it->second;
+    }
+    // grpc::StatusCode::INTERNAL and any other status fall here. INTERNAL is
+    // a catch-all on the prefill side (transErrorCodeToGrpc default), so the
+    // original ErrorCode is genuinely lost — keep UNKNOWN_ERROR.
+    return ErrorCode::UNKNOWN_ERROR;
 }
 
 inline ErrorCode transRPCErrorCode(ErrorCodePB error_code) {

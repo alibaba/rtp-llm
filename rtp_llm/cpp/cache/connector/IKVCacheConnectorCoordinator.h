@@ -1,0 +1,41 @@
+#pragma once
+
+#include <memory>
+#include <string>
+
+#include "rtp_llm/cpp/cache/connector/AsyncContext.h"
+#include "rtp_llm/cpp/cache/connector/KVCacheConnectorLayerContext.h"
+
+namespace rtp_llm {
+
+class KVCacheConnectorReadWriteContext;
+class KVCacheResource;
+
+class IKVCacheConnectorCoordinator {
+public:
+    virtual ~IKVCacheConnectorCoordinator() = default;
+
+    virtual bool hasActiveConnectors() const = 0;
+    virtual bool hasP2PConnector() const     = 0;
+
+    /// Returns global layer id; std::numeric_limits<uint32_t>::max() indicates invalid (caller must check before use).
+    virtual uint32_t convertToGlobalLayerId(int model_id, int layer_id) const = 0;
+
+    virtual std::shared_ptr<AsyncContext>
+    asyncRead(const std::shared_ptr<KVCacheConnectorReadWriteContext>& connector_context) = 0;
+
+    virtual std::shared_ptr<AsyncContext>
+    asyncWrite(const std::shared_ptr<KVCacheConnectorReadWriteContext>& connector_context) = 0;
+
+    virtual std::shared_ptr<AsyncContext>
+    asyncWriteByLayer(int layer_id, const std::shared_ptr<KVCacheConnectorLayerContext>& layer_context) = 0;
+
+    virtual std::shared_ptr<KVCacheResource> holdKVCacheResourceForConnector(const KVCacheResource& resource,
+                                                                             int                    layer_id = -1) = 0;
+
+    /// Report a P2P cache write failure at the Op level (e.g. layer-id mapping or cache-key conversion).
+    /// Default no-op; concrete coordinators with metrics_reporter override this.
+    virtual void reportP2PCacheWriteFailure() {}
+};
+
+}  // namespace rtp_llm

@@ -1,0 +1,120 @@
+#pragma once
+
+#include "rtp_llm/cpp/utils/Logger.h"
+#include "rtp_llm/cpp/model_rpc/RPCPool.h"
+#include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.grpc.pb.h"
+#include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
+#include "rtp_llm/cpp/cache/connector/p2p/LayerCacheBuffer.h"
+#include "rtp_llm/cpp/cache/connector/KVCacheConnector.h"
+#include "rtp_llm/cpp/utils/TimeUtil.h"
+#include "rtp_llm/cpp/utils/ErrorCode.h"
+#include <grpc++/grpc++.h>
+#include <memory>
+#include <string>
+#include <vector>
+#include <optional>
+
+namespace rtp_llm {
+
+class GenerateStream;
+
+// Side-channel payload for P2P bypass (carries first token, reuse, SP info, position_ids)
+struct P2PSideChannelPayload {
+    bool                 has_first_token  = false;
+    int64_t              first_token_id   = 0;
+    int32_t              total_reuse_len  = 0;
+    int32_t              local_reuse_len  = 0;
+    int32_t              remote_reuse_len = 0;
+    int32_t              memory_reuse_len = 0;
+    std::vector<int>     propose_tokens;
+    TensorPB             propose_probs;
+    TensorPB             propose_hidden;
+    std::vector<int32_t> position_ids;
+    bool                 has_data = false;
+};
+
+class PrefillLoadCaller {
+public:
+    /// @param worker_addrs Decode worker 地址列表，每项格式为 host:cache_store_port:grpc_port
+    /// 或 [IPv6]:cache_store_port:grpc_port
+    PrefillLoadCaller(const std::vector<std::string>& worker_addrs);
+    ~PrefillLoadCaller() = default;
+
+public:
+    struct Result: public std::enable_shared_from_this<Result> {
+        Result(): success_(false), timeout_ms(0), request_id(0), start_time_us(currentTimeUs()) {}
+        ~Result() {
+            shutdownAndDrainCompletionQueue();
+        }
+
+        bool success() const {
+            return success_;
+        }
+        bool done() const {
+            return done_;
+        }
+        void    checkDone();
+        void    cancel();
+        int64_t totalCostTimeUs() const {
+            return total_cost_time_us;
+        }
+
+    private:
+        bool pollCompletionQueue();
+        void updateStreamFromResponse();
+        /// Shutdown the CompletionQueue and drain remaining events.
+        ///
+        /// Drains with a bounded budget (≈100ms). If draining does not complete in time
+        /// (typical cause: prefill gRPC channel is unhealthy, TryCancel signal cannot
+        /// propagate quickly), the CQ + reader + context are handed off to a process-wide
+        /// background drainer so the calling thread is not blocked. This is the fix for
+        /// the 8-min decode-side stalls observed on 2026/05/22 (DingTalk doc §7).
+        ///
+        /// Safe to call multiple times (idempotent via completion_queue_shutdown_drained_).
+        void shutdownAndDrainCompletionQueue();
+
+    public:
+        bool                                                                              success_ = false;
+        bool                                                                              done_    = false;
+        std::shared_ptr<RpcService::Stub>                                                 stub;
+        std::shared_ptr<grpc::ClientContext>                                              client_context;
+        P2PConnectorStartLoadRequestPB                                                    request;
+        P2PConnectorStartLoadResponsePB                                                   response;
+        std::shared_ptr<grpc::CompletionQueue>                                            completion_queue;
+        std::unique_ptr<grpc::ClientAsyncResponseReader<P2PConnectorStartLoadResponsePB>> reader;
+        grpc::Status                                                                      status;
+        std::string                                                                       server_addr;
+        std::string                                                                       unique_key;
+        int                                                                               timeout_ms;
+        int64_t                                                                           request_id;
+        int64_t                                                                           start_time_us;
+        int64_t                                                                           total_cost_time_us;
+        ErrorCode   error_code = ErrorCode::NONE_ERROR;
+        std::string error_message;
+
+        // P2P bypass: parsed side-channel payload.
+        P2PSideChannelPayload side_channel_payload;
+
+        bool completion_queue_shutdown_drained_{false};
+    };
+
+    /// @brief 向 Prefill server 发起异步 StartLoad RPC，通知其开始向 Decode 发送 KV cache
+    std::shared_ptr<Result> load(int64_t            request_id,
+                                 const std::string& prefill_ip,
+                                 uint32_t           prefill_port,
+                                 const std::string& unique_key,
+                                 int64_t            deadline_ms,
+                                 GenerateStream*    generate_stream);
+
+private:
+    bool buildAndStartAsyncRpc(const std::shared_ptr<Result>& result,
+                               const std::string&             unique_key,
+                               int64_t                        deadline_ms,
+                               int64_t                        request_id);
+
+    std::vector<std::string>    worker_addrs_;
+    std::shared_ptr<RPCPool>    rpc_pool_;
+    std::vector<TPWorkerInfoPB> tp_worker_infos_;
+};
+
+}  // namespace rtp_llm

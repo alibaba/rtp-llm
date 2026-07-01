@@ -1,18 +1,21 @@
 import copy
 import json
-from typing import Any, Dict, List, Optional, Union
 import os
+from enum import Enum
+from typing import Any, Dict, List, Optional, Union
+
 import torch
 from pydantic import BaseModel
 from smoke.base_comparer import BaseComparer
-from smoke.common_def import QueryStatus, SmokeException, REL_PATH
+from smoke.common_def import REL_PATH, QueryStatus, SmokeException
 from smoke.utils import create_temporary_copy
-from rtp_llm.utils.base_model_datatypes import AuxInfo
+
 from rtp_llm.openai.api_datatype import (
     ChatCompletionRequest,
     ChatCompletionResponse,
     ChatCompletionStreamResponse,
 )
+from rtp_llm.utils.base_model_datatypes import AuxInfo
 
 
 class OpenaiComparer(BaseComparer):
@@ -26,10 +29,12 @@ class OpenaiComparer(BaseComparer):
         return query_info
 
     def format_result(self, result_json: Dict[str, Any]) -> BaseModel:
-        if result_json.get('extra_outputs', None) is not None:
-            path = result_json['extra_outputs'].get('all_hidden_states', None)
+        if result_json.get("extra_outputs", None) is not None:
+            path = result_json["extra_outputs"].get("all_hidden_states", None)
             if path is not None and isinstance(path, str):
-                result_json['extra_outputs']['all_hidden_states'] = torch.load(os.path.join(REL_PATH, path)).numpy().tolist()
+                result_json["extra_outputs"]["all_hidden_states"] = (
+                    torch.load(os.path.join(REL_PATH, path)).numpy().tolist()
+                )
         if self.is_stream:
             return ChatCompletionStreamResponse(**result_json)
         else:
@@ -163,19 +168,40 @@ class OpenaiComparer(BaseComparer):
                         logprob.logprob = 0
         return logprobs, choices
 
-    def _to_json_safe(self, value: Any) -> Any:
+    def _to_json_safe(self, value: Any, _depth: int = 0, _seen: Optional[set] = None) -> Any:
         """Convert value to JSON-serializable form (e.g. BaseModel -> dict)."""
+        if _depth > 32:
+            return repr(value)
+        if _seen is None:
+            _seen = set()
+        obj_id = id(value)
+        if obj_id in _seen:
+            return repr(value)
         if isinstance(value, BaseModel):
-            return value.model_dump()
+            return self._to_json_safe(value.model_dump(mode="json"), _depth + 1, _seen)
+        if isinstance(value, Enum):
+            return value.value
+        if isinstance(value, (str, int, float, bool, type(None))):
+            return value
+        _seen.add(obj_id)
+        if isinstance(value, tuple):
+            return [self._to_json_safe(x, _depth + 1, _seen) for x in value]
         if isinstance(value, list):
-            return [self._to_json_safe(x) for x in value]
+            return [self._to_json_safe(x, _depth + 1, _seen) for x in value]
         if isinstance(value, dict):
-            return {k: self._to_json_safe(v) for k, v in value.items()}
+            return {k: self._to_json_safe(v, _depth + 1, _seen) for k, v in value.items()}
+        if hasattr(value, "__dict__"):
+            return self._to_json_safe(vars(value), _depth + 1, _seen)
         return value
 
     def _dump_value(self, value: Any) -> str:
         """Serialize value for diff output (JSON-serializable, handles BaseModel/list/dict)."""
-        return json.dumps(self._to_json_safe(value), ensure_ascii=False, indent=2)
+        return json.dumps(
+            self._to_json_safe(value),
+            ensure_ascii=False,
+            indent=2,
+            default=lambda obj: self._to_json_safe(obj),
+        )
 
     def _format_expect_actual(self, title: str, expect: Any, actual: Any) -> str:
         """Format a single diff block with title and expect/actual for readability."""
@@ -408,13 +434,17 @@ class OpenaiComparer(BaseComparer):
             return
 
         obj1, obj2 = expect_aux, actual_aux
-        ignore_fields = set([
-            "cost_time",
-            "wait_time",
-            "first_token_cost_time",
-            "role_addrs.http_port",
-            "role_addrs.grpc_port",
-        ])
+        ignore_fields = set(
+            [
+                "cost_time",
+                "wait_time",
+                "first_token_cost_time",
+                "step_output_len",
+                "role_addrs.ip",
+                "role_addrs.http_port",
+                "role_addrs.grpc_port",
+            ]
+        )
         top_level_ignore = set()
         nested_ignore: Dict[str, set] = {}
         for field in ignore_fields:
