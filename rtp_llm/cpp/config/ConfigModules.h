@@ -208,6 +208,15 @@ struct KVCacheConfig {
     int         reco_get_broadcast_timeout           = 15000;
     int         reco_put_broadcast_timeout           = 15000;
     std::string reco_client_config                   = "";
+
+    // KVS/v6d connector configuration fields
+    bool        enable_kvs_cache        = false;
+    std::string kvs_v6d_url             = "http://127.0.0.1:8080";
+    std::string kvs_v6d_socket_path     = "";
+    int         kvs_timeout_ms          = 12000;
+    int         kvs_lease_term_sec      = 60;
+    std::string kvs_object_namespace    = "rtp_llm";
+    std::string kvs_cache_key_version   = "1";
     void        insertMultiTaskPromptTokens(std::string task_id, std::vector<int64_t> tokens_id);
     std::string to_string() const;
 };

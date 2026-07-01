@@ -8,6 +8,7 @@
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include "rtp_llm/cpp/cache/connector/KVCacheConnectorReadWriteContext.h"
 #include "rtp_llm/cpp/cache/connector/memory/KVCacheMemoryConnector.h"
+#include "rtp_llm/cpp/cache/connector/kvs_connector/KVSConnector.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnector.h"
 #include "rtp_llm/cpp/cache/connector/p2p/LayerBlockConverterImpl.h"
 #ifdef USE_REMOTE_KV_CACHE
@@ -198,11 +199,15 @@ bool KVCacheConnectorCoordinator::init() {
         connectors_.emplace_back(memory_connector_);
     }
 #ifdef USE_REMOTE_KV_CACHE
-    if (kv_cache_config_.reuse_cache && kv_cache_config_.enable_remote_cache) {
+    if (kv_cache_config_.reuse_cache && kv_cache_config_.enable_remote_cache && !kv_cache_config_.enable_kvs_cache) {
         remote_connector_ = initRemoteConnector();
         connectors_.emplace_back(remote_connector_);
     }
 #endif
+    if (kv_cache_config_.reuse_cache && kv_cache_config_.enable_kvs_cache) {
+        kvs_connector_ = initKVSConnector();
+        connectors_.emplace_back(kvs_connector_);
+    }
     if (!initP2PConnectorInternal()) {
         RTP_LLM_LOG_WARNING("init P2P connector failed, P2P path disabled — engine continues without it");
     }
@@ -369,6 +374,17 @@ std::shared_ptr<RemoteConnector> KVCacheConnectorCoordinator::initRemoteConnecto
 #endif
 }
 
+std::shared_ptr<kvs::KVSConnector> KVCacheConnectorCoordinator::initKVSConnector() {
+    auto kvs_connector = std::make_shared<kvs::KVSConnector>(cache_config_,
+                                                             kv_cache_config_,
+                                                             runtime_config_,
+                                                             parallelism_config_,
+                                                             allocator_,
+                                                             metrics_reporter_);
+    RTP_LLM_CHECK_WITH_INFO(kvs_connector->init(), "KVS connector init failed");
+    return kvs_connector;
+}
+
 int KVCacheConnectorCoordinator::cpSize() const {
     const auto& cp_cfg = parallelism_config_.prefill_cp_config;
     if (!cp_cfg.kv_cache_sharded) {
@@ -475,10 +491,13 @@ bool KVCacheConnectorCoordinator::executeFunction(const FunctionRequestPB& reque
         return memory_connector_->copyCache(request.mem_request(), *(response.mutable_mem_response()));
     } else if (request.has_remote_request()) {
 #ifdef USE_REMOTE_KV_CACHE
-        RTP_LLM_CHECK(remote_connector_ != nullptr);
+        if (!remote_connector_) {
+            RTP_LLM_LOG_WARNING("executeFunction: remote_request received but remote connector not initialized");
+            return false;
+        }
         return remote_connector_->copyCache(request.remote_request(), *(response.mutable_remote_response()));
 #endif
-        RTP_LLM_CHECK(false);
+        RTP_LLM_LOG_WARNING("executeFunction: remote_request received but remote cache support is disabled");
         return false;
     } else if (request.has_p2p_request()) {
         if (!p2p_connector_) {

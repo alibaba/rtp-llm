@@ -17,6 +17,7 @@ cc_library(
     deps = [
         "//rtp_llm/cpp/cache:cache_core",
         "//rtp_llm/cpp/cache:cache_types",
+        "//rtp_llm/cpp/cache/connector/kvs_connector",
         "//rtp_llm/cpp/cache/connector/memory:memory_connector",
         "//rtp_llm/cpp/cache/connector/p2p:connector",
         "//rtp_llm/cpp/cache/connector/p2p:layer_block_converter",
