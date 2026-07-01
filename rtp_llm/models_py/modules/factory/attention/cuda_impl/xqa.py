@@ -10,7 +10,6 @@ from rtp_llm.models_py.utils.arch import get_num_device_sms
 from rtp_llm.ops import (
     AttentionConfigs,
     FMHAConfig,
-    FMHAType,
     KvCacheDataType,
     ParallelismConfig,
 )
