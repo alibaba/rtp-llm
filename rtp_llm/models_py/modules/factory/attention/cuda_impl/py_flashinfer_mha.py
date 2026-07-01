@@ -751,6 +751,15 @@ class PyFlashinferDecodeAttnOp(object):
         the graph must remain stable.  fill_params() updates the bound tensors
         in-place, which is sufficient for replay.
         """
+        # Replay must not exceed the batch size the graph was planned/captured
+        # with: without a replan, a larger batch would read stale/undersized
+        # FlashInfer workspace (forbid_realloc=True below only prevents realloc).
+        replay_batch_size = attn_inputs.input_lengths.size(0)
+        captured_batch_size = self.decode_wrapper._fixed_batch_size
+        assert replay_batch_size <= captured_batch_size, (
+            f"CUDA graph replay batch_size ({replay_batch_size}) exceeds captured "
+            f"batch_size ({captured_batch_size}); FlashInfer workspace is stale."
+        )
         self.fmha_params.fill_params(
             attn_inputs.prefix_lengths,
             attn_inputs.sequence_lengths,
