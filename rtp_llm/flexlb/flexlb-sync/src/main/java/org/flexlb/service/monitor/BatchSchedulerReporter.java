@@ -10,6 +10,9 @@ import org.springframework.stereotype.Component;
 
 import javax.annotation.PostConstruct;
 
+import static org.flexlb.constant.MetricConstant.CACHE_HIT_COUNT;
+import static org.flexlb.constant.MetricConstant.CACHE_HIT_RATIO;
+import static org.flexlb.constant.MetricConstant.CACHE_REQUEST_TOTAL;
 import static org.flexlb.constant.MetricConstant.ENGINE_BALANCING_MASTER_BATCH_SIZE;
 import static org.flexlb.constant.MetricConstant.ENGINE_BALANCING_MASTER_SELECT_DETAIL;
 import static org.flexlb.constant.MetricConstant.ENGINE_LOCAL_TASK_MAP_SIZE;
@@ -93,6 +96,29 @@ public class BatchSchedulerReporter {
     }
 
     // ==================== Inflight metrics ====================
+
+    /**
+     * Report batch-aggregated cache hit metrics via reuse of the existing
+     * {@code cache.hit.count} / {@code cache.hit.ratio} / {@code cache.request.total}
+     * keys registered by {@link CacheMetricsReporter}.
+     *
+     * @param role        prefill / decode
+     * @param engineIp    the selected prefill endpoint IP
+     * @param hitTokens   total cache-hit tokens across the batch
+     * @param totalTokens total sequence length across the batch
+     */
+    public void reportBatchCacheHitMetrics(String role, String engineIp, long hitTokens, long totalTokens) {
+        if (totalTokens <= 0L) {
+            return;
+        }
+        double hitRatio = hitTokens / (double) totalTokens;
+        FlexMetricTags tags = FlexMetricTags.of(
+                "role", role,
+                "engineIp", engineIp);
+        monitor.report(CACHE_HIT_COUNT, tags, hitTokens);
+        monitor.report(CACHE_HIT_RATIO, tags, hitRatio);
+        monitor.report(CACHE_REQUEST_TOTAL, tags, 1.0);
+    }
 
     /**
      * Report batch size (number of requests dispatched together) via {@code engine.balancing.master.batch.size}.
