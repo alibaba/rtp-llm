@@ -103,21 +103,15 @@ public:
     }
     void insert(std::shared_ptr<RecommendationLogitsProcessor> others) {
         if (others != nullptr && !others->infos_.empty()) {
-            // O(1) 一致性校验：fromGenerateInput 保证单 processor 内部一致，
-            // 只需比较两侧各一个代表元素。空 this 合入 others 天然一致，无需检查。
-            if (!infos_.empty()) {
-                RTP_LLM_CHECK_WITH_INFO(
-                    infos_[0].enable_cross_sequence_ban == others->infos_[0].enable_cross_sequence_ban,
-                    "insert() requires consistent enable_cross_sequence_ban across processors");
-            }
             infos_.insert(infos_.end(), others->infos_.begin(), others->infos_.end());
         }
     }
 
 private:
-    // 将单个 token 推进到状态机;若形成完整 combo 则自动加入 banned_combos 并返回 true。
-    // 若 think prelude 未跳过完毕,则本 token 仅用于推进 think DFA,不进入 combo 前缀。
-    bool advanceOneToken(StreamRecommendationInfo& info, int token_id);
+    // 将单个 token 推进到状态机;若形成完整 combo 则加入 banned_combos 并返回 true。
+    // 若 new_combos 非空，新完成的 combo 会同时被 push 到该向量（用于增量广播）。
+    bool advanceOneToken(StreamRecommendationInfo& info, int token_id,
+                         std::vector<std::vector<int>>* new_combos = nullptr);
 
 private:
     std::vector<StreamRecommendationInfo> infos_;

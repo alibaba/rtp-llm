@@ -201,7 +201,8 @@ void RecommendationLogitsProcessor::updateMultiSeqStatus(const std::vector<int>&
     infos_ = std::move(new_infos);
 }
 
-bool RecommendationLogitsProcessor::advanceOneToken(StreamRecommendationInfo& info, int token_id) {
+bool RecommendationLogitsProcessor::advanceOneToken(StreamRecommendationInfo& info, int token_id,
+                                                    std::vector<std::vector<int>>* new_combos) {
     if (info.combo_token_size <= 0) {
         return false;
     }
@@ -230,6 +231,7 @@ bool RecommendationLogitsProcessor::advanceOneToken(StreamRecommendationInfo& in
         // 本次 token 即 combo 的最后一位:形成完整 combo 并加入去重集合
         std::vector<int> full_combo = info.current_prefix;
         full_combo.push_back(token_id);
+        if (new_combos) new_combos->push_back(full_combo);
         info.banned_combos.insert(std::move(full_combo));
         info.current_prefix.clear();
         info.pos_in_combo = 0;
@@ -245,6 +247,7 @@ void RecommendationLogitsProcessor::updateStatus(const torch::Tensor& new_tokens
     RTP_LLM_CHECK(size() == (size_t)new_tokens.size(0));
 
     bool any_combo_completed = false;
+    std::vector<std::vector<int>> new_combos_this_step;  // 增量广播用
     for (size_t i = 0; i < size(); ++i) {
         auto& info = infos_[i];
         if (info.combo_token_size <= 0) {
@@ -260,7 +263,7 @@ void RecommendationLogitsProcessor::updateStatus(const torch::Tensor& new_tokens
         const int64_t stride = new_tokens.size(1);
         for (int32_t j = 0; j < num_new_tokens; ++j) {
             const int token_id = new_tokens.data_ptr<int>()[i * stride + j + offset];
-            if (advanceOneToken(info, token_id)) {
+            if (advanceOneToken(info, token_id, &new_combos_this_step)) {
                 any_combo_completed = true;
             }
         }
@@ -268,22 +271,15 @@ void RecommendationLogitsProcessor::updateStatus(const torch::Tensor& new_tokens
         info.current_output_length += num_new_tokens;
     }
 
-    // 跨序列广播（非对称模式）：仅在本步有 combo 完成时触发，避免无效集合拷贝
+    // 跨序列增量广播（非对称模式）：仅将本步新完成的 combo 插入非主序列
     // 设计意图（primary-protected）：序列 0（主序列）仅保留自身产生的 banned_combos，不接收其他
-    // 序列的 ban，以保证主序列输出质量不受补充序列影响。补充序列接收所有序列的并集，确保彼此
+    // 序列的 ban，以保证主序列输出质量不受补充序列影响。补充序列接收所有序列的新增 combo，确保彼此
     // 不重复。因此主序列可能产生与补充序列相同的 combo —— 这是有意为之的设计权衡。
-    // 不变量：fromGenerateInput 保证同一 processor 内所有 info 的 enable_cross_sequence_ban 一致，
-    // 因此仅检查 infos_[0] 即可代表全局开关状态。
-    // TODO(性能): 当 num_return_sequences 较大(>8) 且 banned_combos 集合膨胀时，可改为增量 diff 同步
-    // （仅插入本步新产生的 combo）而非全量赋值。当前 N=2-4 场景下开销可接受。
     if (any_combo_completed && size() > 1 && infos_[0].enable_cross_sequence_ban) {
-        std::set<std::vector<int>> merged;
-        for (size_t i = 0; i < size(); ++i) {
-            merged.insert(infos_[i].banned_combos.begin(), infos_[i].banned_combos.end());
-        }
-        // 仅对非主序列（i > 0）赋值合并结果，序列 0 保持不变（primary-protected）
         for (size_t i = 1; i < size(); ++i) {
-            infos_[i].banned_combos = merged;
+            for (const auto& combo : new_combos_this_step) {
+                infos_[i].banned_combos.insert(combo);
+            }
         }
     }
 }
