@@ -331,186 +331,6 @@ def _decode_score_kernel_paged(
         )
 
 
-@triton.jit
-def _decode_score_kernel_paged_h4(
-    q_ptr,  # Q: b x 4 x d
-    k_paged_ptr,  # idx K paged: block x page x d
-    block_table_ptr,  # physical block table: b x max_blocks
-    score_ptr,  # Score: 4 x b x max_seqblock
-    seq_lens,
-    batch_size,
-    head_dim: tl.constexpr,
-    block_size: tl.constexpr,
-    sm_scale,
-    init_blocks,
-    local_blocks,
-    stride_q_b: tl.constexpr,
-    stride_q_h: tl.constexpr,
-    stride_q_d: tl.constexpr,
-    stride_k_blk: tl.constexpr,
-    stride_k_p: tl.constexpr,
-    stride_k_d: tl.constexpr,
-    stride_bt_b: tl.constexpr,
-    stride_bt_blk: tl.constexpr,
-    stride_s_h: tl.constexpr,
-    stride_s_b: tl.constexpr,
-    stride_s_n: tl.constexpr,
-    NUM_KV_CHUNKS: tl.constexpr,
-    BLOCK_SIZE_D: tl.constexpr,
-):
-    """Fixed H4 max-score paged decode kernel for M3 sparse index heads.
-
-    The generic paged score kernel pads gqa_group_size=4 to BLOCK_SIZE_H=16,
-    doing 4x more query rows than the production M3 sparse-index shape needs.
-    This path keeps the same one-page-per-loop semantics as the generic kernel
-    and only specializes the head tile to 4.
-    """
-    # For SCORE_TYPE=max callers only top-k order matters. sm_scale is a
-    # positive constant, so skipping the multiply preserves selected blocks.
-    BLOCK_SIZE_H: tl.constexpr = 4
-    BLOCK_SIZE_N: tl.constexpr = block_size
-    pid_bc = tl.program_id(0)
-    pid_b = pid_bc % batch_size
-    pid_c = pid_bc // batch_size
-    seq_len = tl.load(seq_lens + pid_b).to(tl.int32)
-    num_blocks = (seq_len + block_size - 1) // block_size
-    chunk_size_blocks = tl.cdiv(num_blocks, NUM_KV_CHUNKS)
-    chunk_start_block = pid_c * chunk_size_blocks
-    chunk_end_block = tl.minimum(chunk_start_block + chunk_size_blocks, num_blocks)
-    if chunk_start_block >= chunk_end_block:
-        return
-    q_ptrs = tl.make_block_ptr(
-        base=q_ptr + pid_b * stride_q_b,
-        shape=(BLOCK_SIZE_H, head_dim),
-        strides=(stride_q_h, stride_q_d),
-        offsets=(0, 0),
-        block_shape=(BLOCK_SIZE_H, BLOCK_SIZE_D),
-        order=(1, 0),
-    )
-    q = tl.load(q_ptrs, boundary_check=(0, 1), padding_option="zero")
-    off_h = tl.arange(0, BLOCK_SIZE_H)
-    off_n = tl.arange(0, BLOCK_SIZE_N)
-    off_d = tl.arange(0, BLOCK_SIZE_D)
-    dim_mask = off_d < head_dim
-    local_start = tl.maximum(0, num_blocks - local_blocks)
-    bt_row = block_table_ptr + pid_b * stride_bt_b
-    for blk in range(chunk_start_block, chunk_end_block):
-        page = tl.load(bt_row + blk * stride_bt_blk).to(tl.int64)
-        base_pos = blk * block_size
-        pos_mask = (base_pos + off_n) < seq_len
-        k_off = (
-            page * stride_k_blk
-            + off_n[None, :] * stride_k_p
-            + off_d[:, None] * stride_k_d
-        )
-        k = tl.load(
-            k_paged_ptr + k_off,
-            mask=dim_mask[:, None] & pos_mask[None, :],
-            other=0.0,
-        )
-        qk = tl.dot(q, k)
-        qk += tl.where(pos_mask[None, :], 0, float("-inf"))
-        score = tl.max(qk, axis=1)
-        is_init = blk < init_blocks
-        is_local = (blk >= local_start) & (blk < num_blocks)
-        score = tl.where(is_local, 1e29, tl.where(is_init, 1e30, score))
-        s_col = score_ptr + pid_b * stride_s_b + off_h * stride_s_h + blk * stride_s_n
-        tl.store(s_col, score.to(score_ptr.dtype.element_ty))
-
-
-@triton.jit
-def _decode_score_kernel_paged_h32(
-    q_ptr,  # Q: b x 32 x d
-    k_paged_ptr,  # idx K paged: block x page x d
-    block_table_ptr,  # physical block table: b x max_blocks
-    score_ptr,  # Score: 32 x b x max_seqblock
-    seq_lens,
-    batch_size,
-    head_dim: tl.constexpr,
-    block_size: tl.constexpr,
-    sm_scale,
-    init_blocks,
-    local_blocks,
-    stride_q_b: tl.constexpr,
-    stride_q_h: tl.constexpr,
-    stride_q_d: tl.constexpr,
-    stride_k_blk: tl.constexpr,
-    stride_k_p: tl.constexpr,
-    stride_k_d: tl.constexpr,
-    stride_bt_b: tl.constexpr,
-    stride_bt_blk: tl.constexpr,
-    stride_s_h: tl.constexpr,
-    stride_s_b: tl.constexpr,
-    stride_s_n: tl.constexpr,
-    NUM_KV_CHUNKS: tl.constexpr,
-    BLOCK_SIZE_D: tl.constexpr,
-):
-    """Fixed-config H32 max-score paged decode kernel.
-
-    The M3 long-context decode indexer uses 32 query index heads over one
-    shared idx-K head. The generic autotuned kernel sometimes picks a slower
-    configuration for this shape; this path pins the measured best config
-    (NUM_KV_CHUNKS=80, 4 warps, 2 stages at launch).
-    """
-    sm_scale_log2e = sm_scale * 1.4426950409
-    BLOCK_SIZE_H: tl.constexpr = 32
-    BLOCK_SIZE_N: tl.constexpr = block_size
-    pid_bc, pid_kh = tl.program_id(0), tl.program_id(1)
-    pid_b = pid_bc % batch_size
-    pid_c = pid_bc // batch_size
-    pid_h = pid_kh * BLOCK_SIZE_H
-    seq_len = tl.load(seq_lens + pid_b).to(tl.int32)
-    num_blocks = (seq_len + block_size - 1) // block_size
-    chunk_size_blocks = tl.cdiv(num_blocks, NUM_KV_CHUNKS)
-    chunk_start_block = pid_c * chunk_size_blocks
-    chunk_end_block = tl.minimum(chunk_start_block + chunk_size_blocks, num_blocks)
-    if chunk_start_block >= chunk_end_block:
-        return
-    q_ptrs = tl.make_block_ptr(
-        base=q_ptr + pid_b * stride_q_b + pid_h * stride_q_h,
-        shape=(BLOCK_SIZE_H, head_dim),
-        strides=(stride_q_h, stride_q_d),
-        offsets=(0, 0),
-        block_shape=(BLOCK_SIZE_H, BLOCK_SIZE_D),
-        order=(1, 0),
-    )
-    q = tl.load(q_ptrs, boundary_check=(0, 1), padding_option="zero")
-    off_h = tl.arange(0, BLOCK_SIZE_H)
-    off_n = tl.arange(0, BLOCK_SIZE_N)
-    off_d = tl.arange(0, BLOCK_SIZE_D)
-    dim_mask = off_d < head_dim
-    local_start = tl.maximum(0, num_blocks - local_blocks)
-    bt_row = block_table_ptr + pid_b * stride_bt_b
-    for blk in range(chunk_start_block, chunk_end_block):
-        page = tl.load(bt_row + blk * stride_bt_blk).to(tl.int64)
-        base_pos = blk * block_size
-        pos_mask = (base_pos + off_n) < seq_len
-        k_off = (
-            page * stride_k_blk
-            + off_n[None, :] * stride_k_p
-            + off_d[:, None] * stride_k_d
-        )
-        k = tl.load(
-            k_paged_ptr + k_off,
-            mask=dim_mask[:, None] & pos_mask[None, :],
-            other=0.0,
-        )
-        qk = tl.zeros((BLOCK_SIZE_H, BLOCK_SIZE_N), dtype=tl.float32)
-        qk += tl.where(pos_mask[None, :], 0, float("-inf"))
-        qk += tl.dot(q, k) * sm_scale_log2e
-        score = tl.max(qk, axis=1)
-        is_init = blk < init_blocks
-        is_local = (blk >= local_start) & (blk < num_blocks)
-        score = tl.where(is_local, 1e29, tl.where(is_init, 1e30, score))
-        s_col = (
-            score_ptr
-            + pid_b * stride_s_b
-            + (pid_h + off_h) * stride_s_h
-            + blk * stride_s_n
-        )
-        tl.store(s_col, score.to(score_ptr.dtype.element_ty))
-
-
 _HEUR_decode_score_attn_kernel = {
     "BLOCK_SIZE_H": lambda args: max(
         16, triton.next_power_of_2(args["gqa_group_size"])
@@ -1285,32 +1105,13 @@ def flash_decode_with_topk_idx_paged(
         1, min(int(max_seqlen), int(block_table.shape[1]) * int(page_size))
     )
     max_seqblock = triton.cdiv(max_kv_len, block_size)
-    # M3 sparse index decode uses four query index heads over one shared idx-K
-    # head. The generic paged score kernel pads this to a 16-row head tile; keep
-    # the same chunking policy but use the fixed H4 tile for this shape.
-    use_paged_h4_score = (
-        score_type == "max"
-        and int(gqa_group_size) == 4
-        and int(block_size) == 128
-        and int(head_dim) == 128
-    )
-    use_paged_h32_score = (
-        score_type == "max"
-        and int(gqa_group_size) == 32
-        and int(block_size) == 128
-        and int(head_dim) == 128
-        and int(max_seqblock) >= 256
-    )
     TARGET_GRID = 4096
     MAX_NUM_KV_CHUNKS = 256
-    if use_paged_h32_score:
-        NUM_KV_CHUNKS = 80
-    else:
-        target = max(
-            1,
-            min(MAX_NUM_KV_CHUNKS, TARGET_GRID // max(1, batch_size * num_kv_heads)),
-        )
-        NUM_KV_CHUNKS = 1 << (target.bit_length() - 1)
+    target = max(
+        1,
+        min(MAX_NUM_KV_CHUNKS, TARGET_GRID // max(1, batch_size * num_kv_heads)),
+    )
+    NUM_KV_CHUNKS = 1 << (target.bit_length() - 1)
     # Paged score kernels write every valid KV block that topk scans. Capacity
     # beyond ceil(seq_len / block_size) is never read, so avoid an extra fill.
     score = torch.empty(
@@ -1320,93 +1121,34 @@ def flash_decode_with_topk_idx_paged(
     )
 
     grid = (batch_size * NUM_KV_CHUNKS, num_kv_heads)
-    if use_paged_h4_score:
-        _decode_score_kernel_paged_h4[grid](
-            q,
-            k_paged,
-            block_table,
-            score,
-            seq_lens,
-            batch_size,
-            head_dim,
-            block_size,
-            sm_scale,
-            init_blocks,
-            local_blocks,
-            q.stride(0),
-            q.stride(1),
-            q.stride(2),
-            k_paged.stride(0),
-            k_paged.stride(1),
-            k_paged.stride(2),
-            block_table.stride(0),
-            block_table.stride(1),
-            score.stride(0),
-            score.stride(1),
-            score.stride(2),
-            NUM_KV_CHUNKS=NUM_KV_CHUNKS,
-            BLOCK_SIZE_D=triton.next_power_of_2(head_dim),
-            num_warps=4,
-            num_stages=2,
-        )
-    elif use_paged_h32_score:
-        _decode_score_kernel_paged_h32[grid](
-            q,
-            k_paged,
-            block_table,
-            score,
-            seq_lens,
-            batch_size,
-            head_dim,
-            block_size,
-            sm_scale,
-            init_blocks,
-            local_blocks,
-            q.stride(0),
-            q.stride(1),
-            q.stride(2),
-            k_paged.stride(0),
-            k_paged.stride(1),
-            k_paged.stride(2),
-            block_table.stride(0),
-            block_table.stride(1),
-            score.stride(0),
-            score.stride(1),
-            score.stride(2),
-            NUM_KV_CHUNKS=NUM_KV_CHUNKS,
-            BLOCK_SIZE_D=triton.next_power_of_2(head_dim),
-            num_warps=4,
-            num_stages=2,
-        )
-    else:
-        _decode_score_kernel_paged[grid](
-            q,
-            k_paged,
-            block_table,
-            score,
-            seq_lens,
-            batch_size,
-            gqa_group_size,
-            head_dim,
-            num_phys_blocks,
-            block_size,
-            sm_scale,
-            init_blocks,
-            local_blocks,
-            q.stride(0),
-            q.stride(1),
-            q.stride(2),
-            k_paged.stride(0),
-            k_paged.stride(1),
-            k_paged.stride(2),
-            block_table.stride(0),
-            block_table.stride(1),
-            score.stride(0),
-            score.stride(1),
-            score.stride(2),
-            NUM_KV_CHUNKS=NUM_KV_CHUNKS,
-            SCORE_TYPE=score_type,
-        )
+    _decode_score_kernel_paged[grid](
+        q,
+        k_paged,
+        block_table,
+        score,
+        seq_lens,
+        batch_size,
+        gqa_group_size,
+        head_dim,
+        num_phys_blocks,
+        block_size,
+        sm_scale,
+        init_blocks,
+        local_blocks,
+        q.stride(0),
+        q.stride(1),
+        q.stride(2),
+        k_paged.stride(0),
+        k_paged.stride(1),
+        k_paged.stride(2),
+        block_table.stride(0),
+        block_table.stride(1),
+        score.stride(0),
+        score.stride(1),
+        score.stride(2),
+        NUM_KV_CHUNKS=NUM_KV_CHUNKS,
+        SCORE_TYPE=score_type,
+    )
 
     topk_idx = torch.empty(
         (num_q_heads, batch_size, topk),
@@ -1571,34 +1313,13 @@ def flash_decode_with_topk_idx(
     # Empty chunks early-return cheaply, so over-chunking is nearly free.
     # E.g. with num_kv_heads=1: BS=1→NKC=256,CTAs=256; BS=32→NKC=128,CTAs=4096.
     max_seqblock = triton.cdiv(max_kv_len, block_size)
-    # M3 sparse index decode uses four query index heads over one shared idx-K
-    # head. The generic paged score kernel pads this to a 16-row head tile; keep
-    # the same chunking policy but use the fixed H4 tile for this shape.
-    use_paged_h4_score = (
-        use_paged_score
-        and score_type == "max"
-        and int(gqa_group_size) == 4
-        and int(block_size) == 128
-        and int(head_dim) == 128
-    )
-    use_paged_h32_score = (
-        use_paged_score
-        and score_type == "max"
-        and int(gqa_group_size) == 32
-        and int(block_size) == 128
-        and int(head_dim) == 128
-        and int(max_seqblock) >= 256
-    )
     TARGET_GRID = 4096
     MAX_NUM_KV_CHUNKS = 256
-    if use_paged_h32_score:
-        NUM_KV_CHUNKS = 80
-    else:
-        target = max(
-            1,
-            min(MAX_NUM_KV_CHUNKS, TARGET_GRID // max(1, batch_size * num_kv_heads)),
-        )
-        NUM_KV_CHUNKS = 1 << (target.bit_length() - 1)
+    target = max(
+        1,
+        min(MAX_NUM_KV_CHUNKS, TARGET_GRID // max(1, batch_size * num_kv_heads)),
+    )
+    NUM_KV_CHUNKS = 1 << (target.bit_length() - 1)
     score = torch.full(
         (num_q_heads, batch_size, max_seqblock),
         fill_value=-float("inf"),
@@ -1607,65 +1328,7 @@ def flash_decode_with_topk_idx(
     )
 
     grid = (batch_size * NUM_KV_CHUNKS, num_kv_heads)
-    if use_paged_h4_score:
-        _decode_score_kernel_paged_h4[grid](
-            q,
-            k_paged,
-            block_table,
-            score,
-            seq_lens,
-            batch_size,
-            head_dim,
-            block_size,
-            sm_scale,
-            init_blocks,
-            local_blocks,
-            q.stride(0),
-            q.stride(1),
-            q.stride(2),
-            k_paged.stride(0),
-            k_paged.stride(1),
-            k_paged.stride(2),
-            block_table.stride(0),
-            block_table.stride(1),
-            score.stride(0),
-            score.stride(1),
-            score.stride(2),
-            NUM_KV_CHUNKS=NUM_KV_CHUNKS,
-            BLOCK_SIZE_D=triton.next_power_of_2(head_dim),
-            num_warps=4,
-            num_stages=2,
-        )
-    elif use_paged_h32_score:
-        _decode_score_kernel_paged_h32[grid](
-            q,
-            k_paged,
-            block_table,
-            score,
-            seq_lens,
-            batch_size,
-            head_dim,
-            block_size,
-            sm_scale,
-            init_blocks,
-            local_blocks,
-            q.stride(0),
-            q.stride(1),
-            q.stride(2),
-            k_paged.stride(0),
-            k_paged.stride(1),
-            k_paged.stride(2),
-            block_table.stride(0),
-            block_table.stride(1),
-            score.stride(0),
-            score.stride(1),
-            score.stride(2),
-            NUM_KV_CHUNKS=NUM_KV_CHUNKS,
-            BLOCK_SIZE_D=triton.next_power_of_2(head_dim),
-            num_warps=4,
-            num_stages=2,
-        )
-    elif use_paged_score:
+    if use_paged_score:
         _decode_score_kernel_paged[grid](
             q,
             k_paged,
