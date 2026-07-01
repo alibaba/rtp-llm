@@ -40,6 +40,18 @@ _hw_kernel_config = None
 _initialized: bool = False  # Track if we've initialized (to prevent double init)
 
 
+def _set_current_device_from_local_rank(parallelism_config: ParallelismConfig) -> None:
+    if not torch.cuda.is_available():
+        return
+    local_rank = int(parallelism_config.local_rank)
+    device_count = torch.cuda.device_count()
+    if local_rank < 0 or local_rank >= device_count:
+        raise RuntimeError(
+            f"local_rank {local_rank} exceeds available CUDA/HIP device count {device_count}"
+        )
+    torch.cuda.set_device(local_rank)
+
+
 def init_distributed_environment(
     parallelism_config: ParallelismConfig,
     nccl_comm_config: NcclCommConfig,
@@ -67,6 +79,8 @@ def init_distributed_environment(
 
     _hw_kernel_config = hw_kernel_config
     rocm_rccl.configure_custom_ar_from_hw_config(hw_kernel_config)
+
+    _set_current_device_from_local_rank(parallelism_config)
 
     # Check if already initialized (and not destroyed)
     if _initialized and torch.distributed.is_initialized():

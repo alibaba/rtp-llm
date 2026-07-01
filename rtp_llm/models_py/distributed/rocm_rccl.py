@@ -219,9 +219,19 @@ def _ensure_rccl_comm_from_process_group(
         return True
     try:
         comm_ptr = int(process_group._comm_ptr())
-    except Exception as e:
-        logging.warning("Failed to fetch NCCL comm from process group: %s", e)
-        return False
+    except Exception as process_group_error:
+        try:
+            backend = process_group._get_backend(
+                torch.device("cuda", torch.cuda.current_device())
+            )
+            comm_ptr = int(backend._comm_ptr())
+        except Exception as backend_error:
+            logging.warning(
+                "Failed to fetch NCCL comm from process group: %s; backend fallback: %s",
+                process_group_error,
+                backend_error,
+            )
+            return False
     if comm_ptr == 0:
         return False
     lib = _load_rccl()
@@ -466,8 +476,10 @@ def prepare_hipgraph_capture_rccl_comm_if_needed(
         return
     if parallelism_config.tp_size <= 1:
         return
-    # IMPORTANT: bootstrap must happen before graph capture begins.
-    bootstrap_hipgraph_capture_rccl_comm_from_tp_group(tp_group)
+
+    if not _ensure_rccl_comm_from_process_group(tp_group):
+        # IMPORTANT: bootstrap must happen before graph capture begins.
+        bootstrap_hipgraph_capture_rccl_comm_from_tp_group(tp_group)
     # Pre-initialize trt_allreduce with the correct TP group so that
     # hipgraph_capture_all_reduce can use it during graph capture.
     _pre_init_trtllm_allreduce(tp_group)
@@ -680,8 +692,20 @@ def _try_trt_all_reduce(
 
     try:
         from rtp_llm.models_py.modules.base.rocm.trt_allreduce import (
+            _trtllm_comm_manager,
+        )
+        from rtp_llm.models_py.modules.base.rocm.trt_allreduce import (
             allreduce as trtllm_allreduce,
         )
+
+        # Size guard: fall through to RCCL when input exceeds the workspace
+        # capacity. Without this check CommWorkspace::get_comm_data can write
+        # past its `data_` allocation and corrupt neighbouring device memory.
+        if (
+            tensor.numel() * tensor.element_size()
+            > _trtllm_comm_manager.dist_env.max_size_in_bytes
+        ):
+            return None
 
         device_id = torch.cuda.current_device()
         return trtllm_allreduce(
