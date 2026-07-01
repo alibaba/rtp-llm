@@ -229,6 +229,8 @@ public class DefaultBatchDispatcher implements BatchDispatcher {
 
         EngineRpcService.GenerateConfigPB.Builder config = input.getGenerateConfigBuilder();
         config.clearRoleAddrs();
+        config.setReuseCache(true);
+        config.setEnableDeviceCache(true);
         addRoleAddr(config, item.prefill());
         addRoleAddr(config, item.decode());
         return input.build();

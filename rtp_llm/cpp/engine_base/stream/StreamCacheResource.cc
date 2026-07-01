@@ -603,7 +603,9 @@ int StreamCacheResource::mallocFailedTimes() const {
 }
 
 bool StreamCacheResource::reuseCache() const {
-    return resource_context_.reuse_cache && stream_->reuseCache();
+    // Global engine-level switch: REUSE_CACHE=1 enables cache for all requests.
+    // No longer requires per-request reuse_cache field in protobuf.
+    return resource_context_.reuse_cache;
 }
 
 bool StreamCacheResource::enableRemoteCache() const {
