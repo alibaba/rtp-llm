@@ -486,7 +486,7 @@ class GenerateConfig(BaseModel):
                 rf.json_schema.schema, ensure_ascii=False, separators=(",", ":")
             )
         elif rf.type == "json_object":
-            self.json_schema = json.dumps({"type": "object"})
+            self.json_schema = json.dumps({"type": "object"}, separators=(",", ":"))
         elif rf.type == "regex":
             self.regex = rf.pattern
         elif rf.type == "ebnf":

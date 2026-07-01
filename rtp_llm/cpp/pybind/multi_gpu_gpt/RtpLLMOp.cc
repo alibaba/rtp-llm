@@ -213,8 +213,15 @@ EngineInitParams RtpLLMOp::initModel(py::object model, py::object engine_config,
         params.server_config    = engine_config.attr("server_config");
         params.grammar_config   = engine_config.attr("grammar_config").cast<GrammarConfig>();
         // Cook tokenizer here so grammar (LogitsProcessorFactory + XGrammarBackend) stays pure C++.
-        params.tokenizer_info = TokenizerInfo::fromHuggingFaceTokenizer(
-            model.attr("tokenizer").attr("tokenizer"), model_config.special_tokens, model_config.vocab_size);
+        py::object hf_tokenizer = py::none();
+        if (py::hasattr(model, "tokenizer")) {
+            py::object tokenizer = model.attr("tokenizer");
+            if (py::hasattr(tokenizer, "tokenizer")) {
+                hf_tokenizer = tokenizer.attr("tokenizer");
+            }
+        }
+        params.tokenizer_info =
+            TokenizerInfo::fromHuggingFaceTokenizer(hf_tokenizer, model_config.special_tokens, model_config.vocab_size);
         model_id_++;
         if (parallelism_config.tp_rank == 0) {
             // kmon metric init

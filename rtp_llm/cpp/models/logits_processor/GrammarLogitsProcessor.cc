@@ -56,9 +56,18 @@ void GrammarLogitsProcessor::updateStatus(const torch::Tensor& new_tokens, int32
     RTP_LLM_CHECK(new_tokens.size(1) >= num_new_tokens);
     RTP_LLM_CHECK(new_tokens.is_contiguous());
 
-    const int            batch_size = static_cast<int>(new_tokens.size(0));
-    const int            stride     = static_cast<int>(new_tokens.size(1));
-    const auto*          data       = new_tokens.data_ptr<int32_t>();
+    const int batch_size = static_cast<int>(new_tokens.size(0));
+    // Mirror process()'s single-sequence guard: with batch_size > 1 the loop below
+    // concatenates tokens from different sequences into one vector fed to a single
+    // matcher state machine, corrupting the parse state. LogitsProcessorFactory
+    // already rejects beam/num_return_sequences>1, but keep the defensive parity
+    // with process() and ReasoningGrammarLogitsProcessor::updateStatus.
+    if (batch_size != 1) {
+        setError(ErrorCode::INVALID_PARAMS, "grammar logits processor only supports single sequence decoding");
+        return;
+    }
+    const int            stride = static_cast<int>(new_tokens.size(1));
+    const auto*          data   = new_tokens.data_ptr<int32_t>();
     std::vector<int32_t> tokens;
     tokens.reserve(static_cast<size_t>(batch_size * num_new_tokens));
     for (int i = 0; i < batch_size; ++i) {

@@ -62,8 +62,15 @@ void applySpecLogitsCap(const SpecLogitsVerifyRunner::LaunchResult& spec_logits_
                             static_cast<long long>(target_token_ids.dim()));
 
     const int64_t token_stride = target_token_ids.size(1);
-    const auto*   cap_ptr      = cap_cpu.data_ptr<int32_t>();
-    const auto*   target_ptr   = target_token_ids.data_ptr<int32_t>();
+    // The loop below indexes row (i * (propose_step + 1) + cap) with cap < propose_step,
+    // so the sampler must have emitted B*(P+1) rows. Guard the row count explicitly
+    // (dim()==2 alone does not bound size(0)) to fail fast instead of reading OOB.
+    RTP_LLM_CHECK_WITH_INFO(target_token_ids.size(0) >= batch_size * (propose_step + 1),
+                            "spec logits cap target token_ids rows=%lld < batch_size*(propose_step+1)=%lld",
+                            static_cast<long long>(target_token_ids.size(0)),
+                            static_cast<long long>(batch_size * (propose_step + 1)));
+    const auto* cap_ptr    = cap_cpu.data_ptr<int32_t>();
+    const auto* target_ptr = target_token_ids.data_ptr<int32_t>();
 
     for (int64_t i = 0; i < batch_size; ++i) {
         const int cap     = std::max(0, std::min<int>(cap_ptr[i], static_cast<int>(propose_step)));

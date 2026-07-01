@@ -9,7 +9,6 @@ class ResponseFormatJSONSchema(BaseModel):
 
     name: Optional[str] = None
     schema: Optional[Dict[str, Any]] = None
-    strict: Optional[bool] = None
 
 
 class ResponseFormat(BaseModel):

@@ -3,6 +3,8 @@
 
 #include "rtp_llm/cpp/testing/TestBase.h"
 #include "rtp_llm/cpp/models/logits_processor/ThinkModeLogitsProcessor.h"
+#include "rtp_llm/cpp/models/logits_processor/ThinkModeStateMachine.h"
+#include "rtp_llm/cpp/models/logits_processor/SpecLogitsProcessor.h"
 #include "rtp_llm/cpp/models/logits_processor/LogitsProcessorStates.h"
 
 using namespace std;
@@ -93,6 +95,100 @@ public:
 };
 
 class SamplerTest: public DeviceTestBase {};
+
+namespace {
+
+// Build a spec-eligible (single, non-beam) ThinkModeLogitsProcessor with a live
+// DFA so the spec-verify path (tryAcceptAndFillBitmask) is exercised end-to-end.
+ThinkModeLogitsProcessorPtr makeSpecThinkProcessor(int budget, const std::vector<int>& end_think, int begin_token) {
+    auto            dfa = std::make_shared<StringContainDFA<size_t, int>>(end_think);
+    StreamThinkInfo info(/*think_mode=*/true,
+                         budget,
+                         /*begin_think_token_ids=*/std::vector<int>{begin_token},
+                         end_think,
+                         /*input_length=*/0,
+                         /*output_length=*/0,
+                         /*is_beam_search=*/false,
+                         dfa);
+    std::vector<StreamThinkInfo> infos;
+    infos.push_back(std::move(info));
+    return std::make_shared<ThinkModeLogitsProcessor>(std::move(infos));
+}
+
+// Run one spec-verify pass and return the accept cap in [0, propose_step].
+int runSpecVerify(const ThinkModeLogitsProcessorPtr& proc, std::vector<int32_t> draft, size_t vocab_size) {
+    const int            propose_step = static_cast<int>(draft.size());
+    const size_t         W            = SpecLogitsProcessor::bitmaskWordCount(vocab_size);
+    std::vector<int32_t> bitmask(static_cast<size_t>(propose_step + 1) * W, 0);
+    SpecLogitsProcessorRequest req;
+    req.draft_tokens       = draft.data();
+    req.propose_step       = propose_step;
+    req.bitmask_cpu_out    = bitmask.data();
+    req.bitmask_size_int32 = W;
+    req.vocab_size         = vocab_size;
+    return proc->tryAcceptAndFillBitmask(req);
+}
+
+}  // namespace
+
+// Spec verify must force the think-end token once the budget is hit mid-window:
+// a mismatching draft at that position is rejected (cap stops there), while a
+// draft carrying the forced end token is accepted through the boundary.
+TEST_F(SamplerTest, testSpecBudgetExhaustionForcesEnd) {
+    auto proc = makeSpecThinkProcessor(/*budget=*/2, /*end=*/{5}, /*begin=*/201);
+    ASSERT_TRUE(proc->isSpecVerifyEligible());
+    // 10,11 accepted as think tokens; at offset 2 budget is exhausted so end token
+    // (5) is forced, and content token 12 is rejected there.
+    EXPECT_EQ(2, runSpecVerify(proc, {10, 11, 12}, /*vocab=*/1024));
+
+    auto proc_accept = makeSpecThinkProcessor(2, {5}, 201);
+    // Same window but the draft supplies the forced end token -> full accept.
+    EXPECT_EQ(3, runSpecVerify(proc_accept, {10, 11, 5}, 1024));
+}
+
+// Multi-token end-think: a natural </think> start (5) enters CLOSING_THINK and the
+// next spec position is forced to the second end token (6); a non-6 draft there is
+// rejected, exercising the CLOSING_THINK force branch on the spec path.
+TEST_F(SamplerTest, testSpecMultiTokenCloseForcesSequence) {
+    auto proc = makeSpecThinkProcessor(/*budget=*/100, /*end=*/{5, 6}, /*begin=*/201);
+    // 10 think, 5 opens close, forced 6 accepted, 12 content -> all four accepted.
+    EXPECT_EQ(4, runSpecVerify(proc, {10, 5, 6, 12}, 1024));
+
+    auto proc_reject = makeSpecThinkProcessor(100, {5, 6}, 201);
+    // After 5 the close is in progress; draft 99 != forced 6 -> reject at offset 2.
+    EXPECT_EQ(2, runSpecVerify(proc_reject, {10, 5, 99, 12}, 1024));
+}
+
+// Directly cover ThinkModeStateMachine::advanceThinkDfa CLOSING_THINK -> IN_THINK
+// fallback: a partial end-think match broken by a non-matching token neither
+// finishes the DFA nor keeps it closing, so the state reverts to IN_THINK.
+TEST_F(SamplerTest, testAdvanceThinkDfaClosingFallbackToInThink) {
+    namespace tsm = ::rtp_llm::think_state_machine;
+    auto            dfa = std::make_shared<StringContainDFA<size_t, int>>(std::vector<int>{5, 6});
+    StreamThinkInfo info(/*think_mode=*/true, /*budget=*/100, {201}, {5, 6}, 0, 0, /*is_beam=*/false, dfa);
+    ASSERT_EQ(ThinkProcessState::IN_THINK, info.process_state);
+
+    tsm::advanceThinkDfa(info, 5);  // partial match "5" -> closing
+    EXPECT_EQ(ThinkProcessState::CLOSING_THINK, info.process_state);
+
+    tsm::advanceThinkDfa(info, 7);  // "5,7" breaks the partial match -> back to IN_THINK
+    EXPECT_EQ(ThinkProcessState::IN_THINK, info.process_state);
+}
+
+// Spec-verify decisions must stay consistent with the committed state produced by
+// updateStatus: after committing 2 think tokens, the snapshot the spec path reads
+// carries that output length, so the budget boundary lands at the same place.
+TEST_F(SamplerTest, testSpecMatchesCommittedStateAfterUpdate) {
+    auto proc = makeSpecThinkProcessor(/*budget=*/3, /*end=*/{5}, /*begin=*/201);
+
+    auto committed = torch::tensor({{10, 11}}, torch::kInt32);
+    proc->updateStatus(committed, /*num_new_tokens=*/2);
+    EXPECT_EQ(2, proc->committedOutputLen());
+
+    // From committed length 2: 12 accepted (reaches budget 3), then end is forced
+    // and content token 13 is rejected -> cap 1.
+    EXPECT_EQ(1, runSpecVerify(proc, {12, 13, 14}, 1024));
+}
 
 #define EXPECT_SIMILAR(vec1, vec2, eps)                                                                                \
     do {                                                                                                               \
