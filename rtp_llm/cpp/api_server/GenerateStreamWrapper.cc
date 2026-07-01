@@ -8,11 +8,12 @@ GenerateStreamWrapper::GenerateStreamWrapper(const std::shared_ptr<ApiServerMetr
                                              const std::shared_ptr<TokenProcessor>&          token_processor):
     metric_reporter_(metric_reporter), token_processor_(token_processor) {}
 
-void GenerateStreamWrapper::init(const std::shared_ptr<GenerateInput>& input,
+bool GenerateStreamWrapper::init(const std::shared_ptr<GenerateInput>& input,
                                  const std::shared_ptr<EngineBase>&    engine) {
     input_ids_       = input->input_ids;
     generate_config_ = input->generate_config;
     stream_          = engine->enqueue(input);
+    return !stream_->hasError();
 }
 
 void GenerateStreamWrapper::init(GenerateStreamPtr stream, const std::shared_ptr<EngineBase>& engine) {
@@ -32,6 +33,11 @@ std::pair<MultiSeqsResponse, bool> GenerateStreamWrapper::generateResponse() {
 
     const auto result = stream_->nextOutput();
     if (!result.ok()) {
+        if (result.status().code() != ErrorCode::FINISHED
+            && result.status().code() != ErrorCode::OUTPUT_QUEUE_IS_EMPTY) {
+            throw HttpApiServerException(transErrorCodeToHttpExceptionType(result.status().code()),
+                                         result.status().ToString());
+        }
         RTP_LLM_LOG_INFO("stream nextOutput failed.");
         return std::make_pair(MultiSeqsResponse(), true);
     }

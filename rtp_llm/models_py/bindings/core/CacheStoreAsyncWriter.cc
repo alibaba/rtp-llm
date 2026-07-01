@@ -1,5 +1,6 @@
 #include "rtp_llm/models_py/bindings/core/CacheStoreAsyncWriter.h"
 #include "autil/LockFreeThreadPool.h"
+#include "autil/TimeUtility.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 
 namespace rtp_llm {
@@ -44,7 +45,12 @@ void CacheStoreAsyncWriter::submit(std::function<void()> task) {
 
     auto wrapped = [this, task = std::move(task)]() {
         try {
+            int64_t start = autil::TimeUtility::monotonicTimeUs();
             task();
+            int64_t cost = autil::TimeUtility::monotonicTimeUs() - start;
+            if (cost >= 2000000) {
+                RTP_LLM_LOG_WARNING("[CacheStoreAsync] slow cache store task, cost_us: %ld", cost);
+            }
         } catch (...) {
             {
                 std::lock_guard<std::mutex> ex_lock(exception_mutex_);

@@ -12,6 +12,7 @@
 #include "rtp_llm/cpp/utils/StringUtil.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 #include "rtp_llm/cpp/model_rpc/RpcErrorCode.h"
+#include <algorithm>
 #include <chrono>
 #include <thread>
 
@@ -43,7 +44,15 @@ bool P2PConnector::init() {
 
     // 创建 stream store（用于管理 stream）
     stream_store_ = std::make_shared<P2PConnectorResourceStore>(
-        metrics_reporter_, config_.scheduler_config.p2p_resource_store_timeout_check_interval_ms);
+        metrics_reporter_,
+        config_.scheduler_config.p2p_resource_store_timeout_check_interval_ms,
+        config_.scheduler_config.p2p_prefill_resource_hold_ms,
+        config_.scheduler_config.p2p_cancelled_keys_ttl_ms);
+    stream_store_->setOnRequestReleased([computed_buffers = worker_->getComputedBuffersStore()](int64_t request_id) {
+        if (computed_buffers) {
+            computed_buffers->removeBuffer(request_id);
+        }
+    });
     if (!stream_store_->init()) {
         RTP_LLM_LOG_ERROR("init failed: stream_store init failed");
         return false;
@@ -97,7 +106,7 @@ std::shared_ptr<AsyncContext> P2PConnector::asyncRead(const KVCacheResourcePtr& 
             RTP_LLM_LOG_WARNING("asyncRead failed, unique_key: %s, error: %s",
                                 meta->p2pRouting().value_or(Meta::P2PRoutingContext{}).unique_key.c_str(),
                                 result.error_info.ToString().c_str());
-            meta->setStop(result.error_info.code(), result.error_info.ToString());
+            meta->reportError(result.error_info.code(), result.error_info.ToString());
             return nullptr;
         }
         return result.context;
@@ -114,8 +123,15 @@ std::shared_ptr<AsyncContext> P2PConnector::asyncWrite(const KVCacheResourcePtr&
 
 std::shared_ptr<AsyncContext>
 P2PConnector::asyncWriteByLayer(int layer_id, const std::shared_ptr<KVCacheConnectorLayerContext>& layer_context) {
-    auto resource = std::make_shared<KVCacheResource>(layer_context->kvCacheResource());
-    worker_->writeByLayer(layer_id, resource, layer_context->requestId(), layer_context->attentionEvent());
+    auto resource = layer_context->heldKVCacheResource();
+    if (!resource) {
+        RTP_LLM_LOG_WARNING("asyncWriteByLayer failed, held resource is null, layer_id=%d, request_id=%ld",
+                            layer_id,
+                            layer_context->requestId());
+        return nullptr;
+    }
+    worker_->writeByLayer(
+        layer_id, resource, layer_context->requestId(), layer_context->attentionEvent(), layer_context->deadlineMs());
     return std::make_shared<P2PConnectorAsyncWriteByLayerContext>(resource);
 }
 
@@ -129,46 +145,92 @@ void P2PConnector::handleRead(const P2PConnectorStartLoadRequestPB& request,
         return;
     }
 
-    const std::string& unique_key  = request.unique_key();
-    int64_t            deadline_ms = request.deadline_ms();
+    const std::string& unique_key = request.unique_key();
+    // Defensive clamp on the incoming deadline. Decode is expected to clamp
+    // at P2PConnectorSchedulerDecode::asyncRead, but a stale decode build or
+    // a misconfigured caller could still pass the full business deadline
+    // (~1h). Capping here protects waitForBroadcastCompletion /
+    // waitSendCallbacksWithTimeout from sitting on a single hung transfer
+    // for the full hour.
+    const int64_t now_ms_for_clamp     = currentTimeMs();
+    const int64_t max_transfer_dl_ms   = config_.scheduler_config.p2p_max_transfer_deadline_ms;
+    int64_t       deadline_ms          = std::min(request.deadline_ms(), now_ms_for_clamp + max_transfer_dl_ms);
+    auto          handle_read_start_us = currentTimeUs();
 
     std::vector<std::pair<std::string, uint32_t>> decode_transfer_servers;
     for (const auto& worker : request.workers()) {
         decode_transfer_servers.emplace_back(worker.ip(), worker.cache_store_port());
     }
 
-    RTP_LLM_LOG_INFO("handleRead [P2P]: start unique_key=%s, deadline_ms=%ld, decode_servers=%zu",
+    RTP_LLM_LOG_DEBUG("[PD-DIAG] handleRead start, unique_key=%s, deadline_ms=%ld, timestamp_us=%ld",
                      unique_key.c_str(),
                      deadline_ms,
-                     decode_transfer_servers.size());
+                     handle_read_start_us);
 
     std::shared_ptr<P2PConnectorResourceEntry> resource_entry = nullptr;
-    grpc::Status wait_status = waitForResourceEntry(unique_key, deadline_ms, is_cancelled, resource_entry);
+    grpc::Status wait_status           = waitForResourceEntry(unique_key, deadline_ms, is_cancelled, resource_entry);
+    auto         wait_resource_cost_us = currentTimeUs() - handle_read_start_us;
     if (!wait_status.ok()) {
-        RTP_LLM_LOG_WARNING("handleRead [P2P]: waitForResourceEntry failed, unique_key=%s, status=%s",
+        RTP_LLM_LOG_WARNING("[PD-DIAG] handleRead waitForResourceEntry failed, unique_key=%s, cost_us=%ld, status=%s",
                             unique_key.c_str(),
+                            wait_resource_cost_us,
                             wait_status.error_message().c_str());
-        response.set_error_code(transErrorCodeToRPC(ErrorCode::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED));
+        ErrorCode error_code = ErrorCode::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED;
+        if (wait_status.error_code() == grpc::StatusCode::DEADLINE_EXCEEDED) {
+            error_code = ErrorCode::GENERATE_TIMEOUT;
+        } else if (wait_status.error_code() == grpc::StatusCode::CANCELLED) {
+            error_code = ErrorCode::CANCELLED;
+        }
+        response.set_error_code(transErrorCodeToRPC(error_code));
         response.set_error_message("waitForResourceEntry failed: " + wait_status.error_message());
         return;
     }
 
     int64_t request_id = resource_entry->request_id;
-    RTP_LLM_LOG_INFO("handleRead [P2P]: resource ready, unique_key=%s, request_id=%ld, sending KV cache",
-                     unique_key.c_str(),
-                     request_id);
-    ErrorInfo error_info = scheduler_->sendKVCache(
-        resource_entry->kv_cache_resource, unique_key, request_id, decode_transfer_servers, deadline_ms, is_cancelled);
+    // Downgrade noisy entry log: total_cost_us in the "handleRead complete" log
+    // below already accounts for wait_resource_cost_us; keep this as DEBUG for
+    // ad-hoc tracing without dominating the log file (~1150 entries per 4h).
+    RTP_LLM_LOG_DEBUG("[PD-DIAG] handleRead resource ready, unique_key=%s, request_id=%ld, wait_cost_us=%ld",
+                      unique_key.c_str(),
+                      request_id,
+                      wait_resource_cost_us);
+    // Wrap is_cancelled to also directly cancel the local worker's send
+    // when the gRPC client disconnects — bypassing the CANCEL_HANDLE_READ
+    // broadcast RPC hop. Remote workers (other TP ranks) still receive
+    // the broadcast; this only accelerates rank-0's own worker.
+    auto direct_cancel = [is_cancelled, worker = worker_, unique_key]() -> bool {
+        if (is_cancelled && is_cancelled()) {
+            worker->cancelSend(unique_key);
+            return true;
+        }
+        return false;
+    };
+    auto      send_start_us = currentTimeUs();
+    ErrorInfo error_info    = scheduler_->sendKVCache(
+        resource_entry->kv_cache_resource, unique_key, request_id, decode_transfer_servers, deadline_ms, direct_cancel);
+    auto send_cost_us = currentTimeUs() - send_start_us;
     if (error_info.hasError()) {
-        RTP_LLM_LOG_ERROR("handleRead failed: worker handleRead failed, unique_key: %s, error: %s",
+        RTP_LLM_LOG_ERROR("[PD-DIAG] handleRead sendKVCache failed, unique_key=%s, send_cost_us=%ld, error=%s",
                           unique_key.c_str(),
+                          send_cost_us,
                           error_info.ToString().c_str());
         response.set_error_code(transErrorCodeToRPC(error_info.code()));
         response.set_error_message(error_info.ToString());
         return;
     }
 
+    // send_cost_us is already implied by total_cost_us - wait_resource_cost_us
+    // in the complete log; demote to DEBUG to reduce log volume.
+    RTP_LLM_LOG_DEBUG(
+        "[PD-DIAG] handleRead sendKVCache done, unique_key=%s, send_cost_us=%ld", unique_key.c_str(), send_cost_us);
     waitAndFillResponse(resource_entry, response, is_cancelled);
+    RTP_LLM_LOG_DEBUG("[PD-DIAG] handleRead complete, unique_key=%s, request_id=%ld, "
+                     "total_cost_us=%ld, wait_resource_us=%ld, send_us=%ld",
+                     unique_key.c_str(),
+                     request_id,
+                     currentTimeUs() - handle_read_start_us,
+                     wait_resource_cost_us,
+                     send_cost_us);
 }
 
 void P2PConnector::waitAndFillResponse(const std::shared_ptr<P2PConnectorResourceEntry>& resource_entry,
@@ -183,6 +245,7 @@ void P2PConnector::waitAndFillResponse(const std::shared_ptr<P2PConnectorResourc
     const int64_t                remaining_us = deadline_ms * 1000 - currentTimeUs();
     if (remaining_us <= 0) {
         RTP_LLM_LOG_WARNING("waitAndFillResponse: past deadline, unique_key: %s", unique_key.c_str());
+        stream_store_->clearSideChannelData(unique_key);
         response.set_error_code(transErrorCodeToRPC(ErrorCode::P2P_CONNECTOR_SCHEDULER_FILL_RESPONSE_FAILED));
         response.set_error_message("waitAndFillResponse: past deadline");
         return;
@@ -192,14 +255,30 @@ void P2PConnector::waitAndFillResponse(const std::shared_ptr<P2PConnectorResourc
     while (!resource_entry->side_channel_ready) {
         if (is_cancelled && is_cancelled()) {
             RTP_LLM_LOG_DEBUG("waitAndFillResponse: cancelled, unique_key: %s", unique_key.c_str());
+            stream_store_->clearSideChannelData(unique_key);
             response.set_error_code(transErrorCodeToRPC(ErrorCode::P2P_CONNECTOR_SCHEDULER_FILL_RESPONSE_FAILED));
             response.set_error_message("waitAndFillResponse: cancelled");
             return;
         }
-        resource_entry->side_channel_cv.wait_until(lock, timeout_tp);
+
+        P2PConnectorResourceEntry::SideChannelData side_channel_data;
+        if (stream_store_->consumeSideChannelData(unique_key, side_channel_data)) {
+            resource_entry->side_channel_data  = std::move(side_channel_data);
+            resource_entry->side_channel_ready = true;
+            break;
+        }
+
+        auto next_wake_tp = std::min(timeout_tp, std::chrono::system_clock::now() + std::chrono::milliseconds(10));
+        resource_entry->side_channel_cv.wait_until(lock, next_wake_tp);
         if (!resource_entry->side_channel_ready) {
+            if (stream_store_->consumeSideChannelData(unique_key, side_channel_data)) {
+                resource_entry->side_channel_data  = std::move(side_channel_data);
+                resource_entry->side_channel_ready = true;
+                break;
+            }
             if (std::chrono::system_clock::now() >= timeout_tp) {
                 RTP_LLM_LOG_WARNING("waitAndFillResponse: timeout, unique_key: %s", unique_key.c_str());
+                stream_store_->clearSideChannelData(unique_key);
                 response.set_error_code(transErrorCodeToRPC(ErrorCode::P2P_CONNECTOR_SCHEDULER_FILL_RESPONSE_FAILED));
                 response.set_error_message("waitAndFillResponse: timeout");
                 return;
@@ -216,11 +295,13 @@ void P2PConnector::waitAndFillResponse(const std::shared_ptr<P2PConnectorResourc
         RTP_LLM_LOG_WARNING("waitAndFillResponse failed, unique_key: %s, error: %s",
                             resource_entry->unique_key.c_str(),
                             fill_status.error_message().c_str());
+        stream_store_->clearSideChannelData(unique_key);
         response.set_error_code(transErrorCodeToRPC(ErrorCode::P2P_CONNECTOR_SCHEDULER_FILL_RESPONSE_FAILED));
         response.set_error_message("fillResponseWithStreamInfo failed: " + fill_status.error_message());
         return;
     }
 
+    stream_store_->clearSideChannelData(unique_key);
     response.set_error_code(ErrorCodePB::NONE_ERROR);
 }
 
@@ -276,6 +357,22 @@ bool P2PConnector::executeRead(int64_t                                 request_i
         auto layer_cache_buffer = std::make_shared<LayerCacheBuffer>(layer_id);
         auto cache_keys         = layer_block_pb.cache_keys();
         auto block_ids          = layer_block_pb.block_ids();
+        if (cache_keys.size() != block_ids.size()) {
+            ErrorInfo error_info(ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED,
+                                 "cache_keys size "
+                                     + std::to_string(cache_keys.size()) + " != block_ids size "
+                                     + std::to_string(block_ids.size()) + " for unique_key=" + unique_key
+                                     + ", layer_id=" + std::to_string(layer_id));
+            RTP_LLM_LOG_WARNING("executeRead rejected malformed request, request_id=%ld, unique_key=%s, layer_id=%d, "
+                                "cache_keys=%d, block_ids=%d",
+                                request_id,
+                                unique_key.c_str(),
+                                layer_id,
+                                cache_keys.size(),
+                                block_ids.size());
+            setP2PResponse(response, error_info);
+            return false;
+        }
         for (size_t i = 0; i < cache_keys.size(); i++) {
             layer_cache_buffer->addBlockId(cache_keys[i], block_ids[i]);
         }
@@ -305,6 +402,31 @@ bool P2PConnector::executeCancelHandleRead(const std::string& unique_key, Functi
     return ret;
 }
 
+bool P2PConnector::executeQueryLeaseStatus(const std::string& unique_key, FunctionResponsePB& response) {
+    bool sealed       = true;
+    int  started_ops  = 0;
+    int  finished_ops = 0;
+    bool stopped      = true;
+
+    worker_->queryLeaseStatus(unique_key, sealed, started_ops, finished_ops, stopped);
+
+    auto* p2p_response = response.mutable_p2p_response();
+    p2p_response->set_error_code(ErrorCodePB::NONE_ERROR);
+    auto* lease_status = p2p_response->mutable_lease_status();
+    lease_status->set_sealed(sealed);
+    lease_status->set_started_ops(started_ops);
+    lease_status->set_finished_ops(finished_ops);
+    lease_status->set_stopped(stopped);
+
+    RTP_LLM_LOG_DEBUG("executeQueryLeaseStatus: unique_key=%s sealed=%d started=%d finished=%d stopped=%d",
+                      unique_key.c_str(),
+                      sealed,
+                      started_ops,
+                      finished_ops,
+                      stopped);
+    return true;
+}
+
 bool P2PConnector::executeFunction(const FunctionRequestPB& request, FunctionResponsePB& response) {
     if (worker_ == nullptr) {
         RTP_LLM_LOG_WARNING("executeFunction failed, worker not init");
@@ -330,6 +452,8 @@ bool P2PConnector::executeFunction(const FunctionRequestPB& request, FunctionRes
             return executeCancelRead(unique_key, response);
         case P2PConnectorBroadcastType::CANCEL_HANDLE_READ:
             return executeCancelHandleRead(unique_key, response);
+        case P2PConnectorBroadcastType::QUERY_LEASE_STATUS:
+            return executeQueryLeaseStatus(unique_key, response);
         default:
             RTP_LLM_LOG_WARNING("executeFunction failed, unsupported p2p_request type %d", p2p_request.type());
             auto* p2p_response = response.mutable_p2p_response();
@@ -343,15 +467,28 @@ grpc::Status P2PConnector::waitForResourceEntry(const std::string&              
                                                 int64_t                                     deadline_ms,
                                                 std::function<bool()>                       is_cancelled,
                                                 std::shared_ptr<P2PConnectorResourceEntry>& resource_entry) {
+    if (currentTimeMs() >= deadline_ms) {
+        RTP_LLM_LOG_WARNING("waiting for resource deadline exceeded, unique_key: %s", unique_key.c_str());
+        return grpc::Status(grpc::StatusCode::DEADLINE_EXCEEDED, "resource wait deadline exceeded");
+    }
     resource_entry = stream_store_->waitAndStealResource(unique_key, deadline_ms, is_cancelled);
     if (resource_entry) {
         return grpc::Status::OK;
     }
     if (is_cancelled && is_cancelled()) {
+        // The decode-side gRPC was cancelled while we were waiting for the resource.
+        // The resource may not be in the store yet (prefill is still computing), or it
+        // may arrive shortly after this handler exits. Mark the key as cancelled so that
+        // addResource() rejects it immediately on arrival instead of pinning KV blocks
+        // until the next checkTimeout() cycle (avoiding LACK MEM under sustained overload).
+        stream_store_->markCancelled(unique_key);
         RTP_LLM_LOG_WARNING("waiting for resource cancelled, unique_key: %s", unique_key.c_str());
         return grpc::Status(grpc::StatusCode::CANCELLED, "request cancelled");
     }
     RTP_LLM_LOG_WARNING("resource not found, unique_key: %s", unique_key.c_str());
+    if (stream_store_->isMarkedCancelled(unique_key)) {
+        return grpc::Status(grpc::StatusCode::DEADLINE_EXCEEDED, "resource expired: prefill hold time exceeded");
+    }
     return grpc::Status(grpc::StatusCode::INTERNAL, "resource not found");
 }
 
@@ -369,7 +506,10 @@ grpc::Status P2PConnector::fillResponseWithStreamInfo(const std::shared_ptr<P2PC
 
     // Fill response proto from side-channel data
     auto* payload = response.mutable_payload();
-    payload->set_first_generate_token_id(data.first_token_id);
+    payload->set_has_first_generate_token(data.has_first_token);
+    if (data.has_first_token) {
+        payload->set_first_generate_token_id(data.first_token_id);
+    }
     payload->set_total_reuse_len(data.total_reuse_len);
     payload->set_local_reuse_len(data.local_reuse_len);
     payload->set_remote_reuse_len(data.remote_reuse_len);

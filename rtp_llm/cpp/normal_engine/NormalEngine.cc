@@ -302,6 +302,11 @@ std::shared_ptr<GenerateStream> NormalEngine::createMinFakeStream(int32_t max_ne
 }
 
 void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) {
+    RTP_LLM_LOG_INFO("initCacheManager: pd_sep_config.cache_store_rdma_mode=%d, "
+                     "pd_sep_config.decode_entrance=%d, pd_sep_config.role_type=%d",
+                     pd_sep_config.cache_store_rdma_mode ? 1 : 0,
+                     pd_sep_config.decode_entrance ? 1 : 0,
+                     static_cast<int>(pd_sep_config.role_type));
     if (propose_params_ && propose_params_->draftModel()) {
         auto config = CacheConfigCreator::createSpConfig(model_config_,
                                                          propose_params_->getEngineInitParams().model_config_,
@@ -313,9 +318,16 @@ void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) 
                                                          isMTPEagle(),
                                                          isEagle());
 
-        resource_context_.cache_manager = make_shared<KVCacheManager>(
-            config, false, metrics_reporter_, kv_cache_config, parallelism_config, runtime_config, sp_config);
-        resource_context_.role_type = pd_sep_config.role_type;
+        resource_context_.cache_manager   = make_shared<KVCacheManager>(config,
+                                                                      false,
+                                                                      metrics_reporter_,
+                                                                      kv_cache_config,
+                                                                      parallelism_config,
+                                                                      runtime_config,
+                                                                      sp_config,
+                                                                      pd_sep_config);
+        resource_context_.role_type       = pd_sep_config.role_type;
+        resource_context_.decode_entrance = pd_sep_config.decode_entrance;
         if (!resource_context_.cache_manager->init()) {
             RTP_LLM_FAIL("init kv cache manager failed");
         }
@@ -331,9 +343,16 @@ void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) 
                          result.block_num,
                          result.block_size_bytes / 1024);
         RTP_LLM_LOG_INFO("create cache manager with linear step %d", result.linear_step);
-        resource_context_.cache_manager = make_shared<KVCacheManager>(
-            result, false, metrics_reporter_, kv_cache_config, parallelism_config, runtime_config);
-        resource_context_.role_type = pd_sep_config.role_type;
+        resource_context_.cache_manager   = make_shared<KVCacheManager>(result,
+                                                                      false,
+                                                                      metrics_reporter_,
+                                                                      kv_cache_config,
+                                                                      parallelism_config,
+                                                                      runtime_config,
+                                                                      SpeculativeExecutionConfig{},
+                                                                      pd_sep_config);
+        resource_context_.role_type       = pd_sep_config.role_type;
+        resource_context_.decode_entrance = pd_sep_config.decode_entrance;
         if (!resource_context_.cache_manager->init()) {
             RTP_LLM_FAIL("init kv cache manager failed");
         }
@@ -408,14 +427,20 @@ std::shared_ptr<GenerateStream> NormalEngine::makeStream(const std::shared_ptr<G
 
 void NormalEngine::enqueue(std::shared_ptr<GenerateStream>& stream) {
     stream->setReserveStep(reserve_step_);
-    (void)scheduler_->enqueue(stream);
+    auto status = scheduler_->enqueue(stream);
+    if (!status.ok()) {
+        RTP_LLM_LOG_WARNING("enqueue stream [%ld] failed: %s", stream->streamId(), status.ToString().c_str());
+    }
 }
 
 std::shared_ptr<GenerateStream> NormalEngine::enqueue(const std::shared_ptr<GenerateInput>& input) {
     std::shared_ptr<GenerateStream> stream = std::make_shared<NormalGenerateStream>(
         input, model_config_, runtime_config, resource_context_, metrics_reporter_);
     stream->setReserveStep(reserve_step_);
-    (void)scheduler_->enqueue(stream);
+    auto status = scheduler_->enqueue(stream);
+    if (!status.ok()) {
+        RTP_LLM_LOG_WARNING("enqueue stream [%ld] failed: %s", stream->streamId(), status.ToString().c_str());
+    }
     return stream;
 }
 
@@ -429,7 +454,8 @@ NormalEngine::batchEnqueue(const std::vector<std::shared_ptr<GenerateInput>>& in
         stream->setReserveStep(reserve_step_);
         streams.push_back(stream);
     }
-    return scheduler_->batchEnqueue(streams);
+    scheduler_->batchEnqueue(streams);
+    return streams;
 }
 
 absl::Status NormalEngine::step() {

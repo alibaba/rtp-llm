@@ -38,9 +38,9 @@ string makeRequestKey(const string& client_id, size_t request_id) {
 namespace rtp_llm {
 
 grpc::Status DecodeRpcServer::init(const EngineInitParams&                                maga_init_params,
-                                   std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> propose_params,
-                                   py::object                                             mm_process_engine) {
-    auto ret = RemoteRpcServer::init(maga_init_params, std::move(propose_params), mm_process_engine);
+                                   py::object                                             mm_process_engine,
+                                   std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> propose_params) {
+    auto ret = RemoteRpcServer::init(maga_init_params, mm_process_engine, std::move(propose_params));
     if (!ret.ok()) {
         return ret;
     }
@@ -209,6 +209,10 @@ void DecodeRpcServer::localGenerate(DecodeGenerateContext& decode_context) {
     RTP_LLM_LOG_DEBUG(
         "decode init stream[%d]: %s", generate_stream->streamId(), generate_stream->debugString().c_str());
     engine_->enqueue(generate_stream);
+    if (generate_stream->hasError()) {
+        decode_context.error_status = serializeErrorMsg(decode_context.request_key, generate_stream->statusInfo());
+        return;
+    }
     RTP_LLM_LOG_DEBUG("request [%s] enqueue success", decode_context.request_key.c_str());
     decode_context.error_status =
         pollStreamOutput(decode_context.server_context,

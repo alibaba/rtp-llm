@@ -1,6 +1,6 @@
 #pragma once
 
-#include <c10/core/Event.h>
+#include <torch/extension.h>
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorMetrics.h"
 #include "rtp_llm/cpp/cache/connector/p2p/ComputedLayerCacheBuffer.h"
 #include "rtp_llm/cpp/cache/connector/p2p/LayerCacheBuffer.h"
@@ -15,13 +15,13 @@ namespace rtp_llm {
 
 struct StoreWaitContext {
     int64_t                                             request_id;
-    std::optional<c10::Event>                           event;
+    std::shared_ptr<torch::Event>                       event;
     std::shared_ptr<LayerCacheBuffer>                   layer_cache_buffer;
     int64_t                                             deadline_ms;
     std::shared_ptr<PrefillWorkerStoreMetricsCollector> collector;
 
     StoreWaitContext(int64_t                                             request_id,
-                     std::optional<c10::Event>                           event,
+                     std::shared_ptr<torch::Event>                       event,
                      std::shared_ptr<LayerCacheBuffer>                   layer_cache_buffer,
                      int64_t                                             deadline_ms,
                      std::shared_ptr<PrefillWorkerStoreMetricsCollector> collector):

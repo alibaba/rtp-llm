@@ -18,7 +18,8 @@ bool TcpServer::init(uint32_t io_thread_count,
                      uint32_t listen_port,
                      bool     enable_metric,
                      uint32_t anet_rpc_thread_num,
-                     uint32_t anet_rpc_queue_num) {
+                     uint32_t anet_rpc_queue_num,
+                     uint32_t worker_queue_size) {
     if (rpc_server_transport_ == nullptr) {
         rpc_server_transport_.reset(new anet::Transport(io_thread_count));
         if (!rpc_server_transport_ || !rpc_server_transport_->start()) {
@@ -45,7 +46,7 @@ bool TcpServer::init(uint32_t io_thread_count,
     }
 
     rpc_worker_threadpool_.reset(
-        new autil::LockFreeThreadPool(worker_thread_count, 100, nullptr, "tcp_server_rpc_threadpool", false));
+        new autil::LockFreeThreadPool(worker_thread_count, worker_queue_size, nullptr, "tcp_server_rpc_threadpool", false));
     if (!rpc_worker_threadpool_->start()) {
         RTP_LLM_LOG_WARNING("tcp server init failed, start rpc worker threadpool failed");
         stop();

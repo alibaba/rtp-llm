@@ -14,6 +14,9 @@ struct TransferBackendConfig {
     int64_t cache_store_listen_port             = 0;
     int     cache_store_tcp_anet_rpc_thread_num = 3;
     int     cache_store_tcp_anet_rpc_queue_num  = 100;
+    int     cache_store_tcp_worker_queue_size   = 500;
+    int     rdma_transfer_worker_thread_count   = 16;
+    int     rdma_transfer_worker_queue_size     = 100;
     /// 0: 关闭 TcpClient channel idle 淘汰；大于 0 为毫秒
     int64_t tcp_channel_idle_ttl_ms = 0;
     /// 0: 关闭每 N 次 getChannel 的全表清扫，仅 miss 时清扫；大于 0 为间隔

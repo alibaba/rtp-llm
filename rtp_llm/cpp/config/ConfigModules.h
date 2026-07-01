@@ -318,8 +318,30 @@ struct CacheStoreConfig {
     int     p2p_resource_store_timeout_check_interval_ms = 100;
     int64_t p2p_layer_cache_buffer_store_timeout_ms      = 100 * 1000;
     int64_t p2p_cancel_broadcast_timeout_ms              = 1000;
-    int     cache_store_tcp_anet_rpc_thread_num          = 3;
-    int     cache_store_tcp_anet_rpc_queue_num           = 100;
+    // Prefill-side hold time for P2PConnectorResourceStore::resource_map_ /
+    // side_channel_data_map_. Replaces the per-request business deadline as the
+    // entry expiration so prefill stops pinning KV blocks for the full request
+    // timeout (commonly ~1h) when decode never sends StartLoad.
+    int64_t p2p_prefill_resource_hold_ms = 300 * 1000;
+    // Hard cap on a single P2P transfer's effective deadline. The caller's
+    // business deadline (from generate_config->timeout_ms, often 1h) is
+    // clamped to now + p2p_max_transfer_deadline_ms at the connector entry
+    // points (decode asyncRead + prefill handleRead). Without this cap,
+    // P2PConnectorWorkerPrefill::waitSendCallbacksWithTimeout and
+    // P2PConnectorSchedulerPrefill::waitForBroadcastCompletion can sit on
+    // a single hung RDMA transfer for the full business deadline (5/26
+    // incident: 8 reads each blocked ~3600s before broadcast timeout
+    // triggered, cascading into engine scheduler stall).
+    int64_t p2p_max_transfer_deadline_ms = 300 * 1000;
+    // TTL for cancelled_keys_ tombstones; should cover the longest expected
+    // decode StartLoad arrival skew so we can tell "request expired" vs
+    // "request never seen". Keep ≥ business deadline upper bound.
+    int64_t p2p_cancelled_keys_ttl_ms           = 3600 * 1000;
+    int     cache_store_tcp_anet_rpc_thread_num     = 3;
+    int     cache_store_tcp_anet_rpc_queue_num      = 100;
+    int     cache_store_tcp_worker_queue_size        = 500;
+    int     rdma_transfer_worker_thread_count        = 16;
+    int     rdma_transfer_worker_queue_size           = 100;
 
     std::string to_string() const;
 };
@@ -354,6 +376,7 @@ struct RuntimeConfig {
     std::string              model_name = "";
     std::vector<std::string> worker_grpc_addrs;
     std::vector<std::string> worker_addrs;
+    std::vector<std::string> p2p_worker_addrs;
 
     // Fields merged from PyDeviceResourceConfig
     std::string specify_gpu_arch = "";
