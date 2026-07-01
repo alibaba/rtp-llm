@@ -321,7 +321,7 @@ class JitCacheManagerTest(unittest.TestCase):
         # at the start of _prepare_as_leader rather than by skipping the touch.
         self.assertTrue(manager.snapshot_complete_path.exists())
         self.assertFalse((self.root / "local" / "triton" / "kernel" / "a.so").exists())
-        self.assertEqual(self.read_summary()["mode"], "periodic_flush")
+        self.assertEqual(self.read_summary()["mode"], "snapshot_download")
 
     def test_snapshot_miss_retries_on_next_boot(self):
         # First "boot" sees an empty remote → snapshot_miss; the second "boot"
@@ -569,7 +569,7 @@ class JitCacheManagerTest(unittest.TestCase):
         manager = self.make_manager(str(remote))
 
         manager.prepare()
-        usage = manager._usage_summary()
+        usage = manager._usage_summary(manager._usage_snapshot())
         self.assertEqual(usage["local_cache"]["components"]["triton"]["files"], 1)
         self.assertGreater(usage["local_cache"]["components"]["triton"]["bytes"], 0)
 
@@ -579,7 +579,7 @@ class JitCacheManagerTest(unittest.TestCase):
         ) as report:
             summary = manager.sync_once("periodic_flush")
 
-        usage = manager._usage_summary()
+        usage = manager._usage_summary(manager._usage_snapshot())
         self.assertEqual(usage["remote_cache"]["components"]["triton"]["files"], 1)
         self.assertIn("remote_cache", summary)
         self.assertGreater(summary["remote_cache"]["files"], 0)
@@ -1063,7 +1063,7 @@ class JitCacheManagerTest(unittest.TestCase):
             "cubin",
         )
         stored = self.read_summary()
-        self.assertEqual(stored["mode"], "periodic_flush")
+        self.assertEqual(stored["mode"], "snapshot_download")
 
     def test_background_sync_runs_periodic_flush(self):
         remote = self.root / "remote"
@@ -1078,12 +1078,23 @@ class JitCacheManagerTest(unittest.TestCase):
             return original_sync_once(mode)
 
         manager.sync_once = wrapped_sync_once
-        with mock.patch.object(jit_cache_module, "PERIODIC_SYNC_INTERVAL_S", 0.01):
-            manager.start_background_sync()
-            self.assertTrue(called.wait(timeout=1))
+        manager.config.remote_sync_longer_timeout_s = 0.01
+        manager.start_background_sync()
+        self.assertTrue(called.wait(timeout=1))
 
         manager.stop()
         self.assertIsNone(manager._periodic_sync_thread)
+
+    def test_periodic_sync_clamps_nonpositive_interval(self):
+        manager = self.make_manager()
+        manager.config.remote_sync_longer_timeout_s = 0
+
+        with mock.patch.object(
+            manager._periodic_sync_stop, "wait", return_value=True
+        ) as wait:
+            manager._periodic_sync_loop()
+
+        wait.assert_called_once_with(jit_cache_module.STARTUP_WAIT_POLL_S)
 
     def test_stop_freezes_watcher_before_executor_shutdown(self):
         remote = self.root / "remote"

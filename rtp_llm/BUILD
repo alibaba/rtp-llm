@@ -172,7 +172,6 @@ py_library(
     deps = [
         ":config_ops",
         ":filelock",
-        ":orjson",
         ":utils",
         ":watchdog",
         ":zstandard",

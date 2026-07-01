@@ -32,7 +32,6 @@ SNAPSHOT_SUFFIX = ".tar.zst"
 SNAPSHOT_KEEP_COUNT = 2
 SNAPSHOT_PUBLISH_LEASE_PREFIX = ".jit_snapshot_publish_lease."
 SNAPSHOT_PUBLISH_INTERVAL_S = 20 * 60
-PERIODIC_SYNC_INTERVAL_S = 5 * 60
 LOCAL_LOCK_NAME = ".rtp_jit_local.lock"
 SNAPSHOT_COMPLETE_NAME = ".rtp_jit_snapshot_complete"
 SUMMARY_NAME = ".rtp_jit_summary.json"
@@ -41,6 +40,8 @@ DEFAULT_JIT_SYNC_WORKERS = 8
 COPY_CHUNK_SIZE = 4 * 1024 * 1024
 STARTUP_WAIT_POLL_S = 0.3
 WATCHDOG_JOIN_TIMEOUT_S = 2.0
+PERIODIC_JOIN_TIMEOUT_S = 5.0
+# .ptx / .ttir / .ttgir / .llir are triton IR intermediates not needed at runtime.
 DEFAULT_SYNC_SUFFIXES = (".so", ".cubin", ".json")
 
 
@@ -98,6 +99,32 @@ class SyncStats:
     skipped_files: int = 0
     failed_files: int = 0
 
+    @property
+    def candidate_files(self) -> int:
+        return self.uploaded_files + self.skipped_files + self.failed_files
+
+    def add(self, other: SyncStats) -> None:
+        self.uploaded_files += other.uploaded_files
+        self.uploaded_bytes += other.uploaded_bytes
+        self.skipped_files += other.skipped_files
+        self.failed_files += other.failed_files
+
+    def record_upload(self, uploaded_bytes: int) -> None:
+        if uploaded_bytes > 0:
+            self.uploaded_files += 1
+            self.uploaded_bytes += uploaded_bytes
+        else:
+            self.skipped_files += 1
+
+    def as_summary(self) -> dict[str, int]:
+        return {
+            "candidate_files": self.candidate_files,
+            "uploaded_files": self.uploaded_files,
+            "uploaded_bytes": self.uploaded_bytes,
+            "skipped_files": self.skipped_files,
+            "failed_files": self.failed_files,
+        }
+
 
 @dataclass
 class JitCacheConfig:
@@ -111,12 +138,11 @@ class JitCacheConfig:
     def from_config(cls, jit_config: JITConfig | None = None) -> JitCacheConfig:
         if jit_config is None:
             jit_config = JITConfig()
-        timeout = float(jit_config.remote_sync_timeout_s)
         return cls(
             remote_root=resolve_remote_root(jit_config.remote_jit_cache_dir),
             local_root=Path(jit_config.local_jit_cache_dir).expanduser().absolute(),
-            remote_sync_timeout_s=timeout,
-            remote_sync_longer_timeout_s=5 * timeout,
+            remote_sync_timeout_s=jit_config.remote_sync_timeout_s,
+            remote_sync_longer_timeout_s=5 * jit_config.remote_sync_timeout_s,
         )
 
 
@@ -249,6 +275,10 @@ def should_sync_file(component: ComponentSpec, rel: str) -> bool:
     return not any(part.startswith("tmp.pid_") for part in rel.split("/"))
 
 
+def is_snapshot_name(name: str) -> bool:
+    return name.startswith(SNAPSHOT_PREFIX) and name.endswith(SNAPSHOT_SUFFIX)
+
+
 def _stream_copy(
     source: Any, out: Any, buffer: bytearray, view: memoryview, deadline_s: float
 ) -> None:
@@ -331,11 +361,9 @@ class JitDirtyTracker:
                 "failed to start JIT cache dirty watcher; remote writeback is disabled",
                 exc_info=True,
             )
-            try:
+            with suppress(Exception):
                 observer.stop()
                 observer.join(timeout=WATCHDOG_JOIN_TIMEOUT_S)
-            except Exception:
-                pass
             return False
 
     def stop(self) -> None:
@@ -360,7 +388,8 @@ class JitCacheManager:
         self._pending_empty = threading.Event()
         self._pending_empty.set()
         self._sync_lock = threading.Lock()
-        self._snapshot_publishing = False
+        self._snapshot_publish_done = threading.Event()
+        self._snapshot_publish_done.set()
 
         self._periodic_sync_stop = threading.Event()
         self._periodic_sync_thread: threading.Thread | None = None
@@ -397,6 +426,10 @@ class JitCacheManager:
     @property
     def snapshot_complete_path(self) -> Path:
         return self.config.local_root / SNAPSHOT_COMPLETE_NAME
+
+    @property
+    def _snapshot_publishing(self) -> bool:
+        return not self._snapshot_publish_done.is_set()
 
     def _add_usage(self, location: str, component_name: str, size: int) -> None:
         with self._lock:
@@ -440,9 +473,7 @@ class JitCacheManager:
             logging.warning("failed to report JIT cache usage metrics", exc_info=True)
 
     @staticmethod
-    def _usage_summary(
-        snapshot: dict[str, dict[str, Any]],
-    ) -> dict[str, Any]:
+    def _usage_summary(snapshot: dict[str, dict[str, Any]]) -> dict[str, Any]:
         return {
             f"{loc}_cache": snapshot[loc]
             for loc, _ in _USAGE_LOCATIONS
@@ -470,33 +501,12 @@ class JitCacheManager:
             agg = SyncStats()
             components: dict[str, dict[str, int]] = {}
             for name, st in stats.items():
-                row = {
-                    "candidate_files": st.uploaded_files
-                    + st.skipped_files
-                    + st.failed_files,
-                    "uploaded_files": st.uploaded_files,
-                    "uploaded_bytes": st.uploaded_bytes,
-                    "skipped_files": st.skipped_files,
-                    "failed_files": st.failed_files,
-                }
-                agg.uploaded_files += st.uploaded_files
-                agg.uploaded_bytes += st.uploaded_bytes
-                agg.skipped_files += st.skipped_files
-                agg.failed_files += st.failed_files
+                row = st.as_summary()
+                agg.add(st)
                 if any(row.values()):
                     components[name] = row
             event["components"] = components
-            event.update(
-                {
-                    "candidate_files": agg.uploaded_files
-                    + agg.skipped_files
-                    + agg.failed_files,
-                    "uploaded_files": agg.uploaded_files,
-                    "uploaded_bytes": agg.uploaded_bytes,
-                    "skipped_files": agg.skipped_files,
-                    "failed_files": agg.failed_files,
-                }
-            )
+            event.update(agg.as_summary())
             if drain_timed_out:
                 event["drain_timed_out"] = True
         event.update(
@@ -652,45 +662,43 @@ class JitCacheManager:
         gpu_scope = get_gpu_info()
         buffer = bytearray(COPY_CHUNK_SIZE)
         view = memoryview(buffer)
-        with archive.open("rb") as compressed:
-            with dctx.stream_reader(compressed) as reader:
-                with tarfile.open(fileobj=reader, mode="r|") as tar:
-                    for member in tar:
-                        parts = member.name.split("/")
-                        if not parts or member.name.startswith("/") or ".." in parts:
-                            raise RuntimeError(f"unsafe snapshot path: {member.name}")
-                        component = COMPONENT_BY_NAME.get(parts[0])
-                        if component is None or not member.isfile():
-                            continue
-                        if component.gpu_scoped and (
-                            len(parts) < 2 or parts[1] != gpu_scope
-                        ):
-                            continue
-                        if time.monotonic() >= deadline_s:
-                            raise TimeoutError(
-                                "snapshot extraction exceeded prepare timeout"
-                            )
-                        target = self.config.local_root.joinpath(*parts)
-                        try:
-                            st = target.stat()
-                            if st.st_size == member.size and int(st.st_mtime) == int(
-                                member.mtime
-                            ):
-                                continue
-                        except OSError:
-                            pass
-                        source = tar.extractfile(member)
-                        if source is None:
-                            continue
-                        with source, atomic_write_path(target) as tmp:
-                            with tmp.open("wb") as out:
-                                _stream_copy(source, out, buffer, view, deadline_s)
-                            os.utime(tmp, (member.mtime, member.mtime))
-                        rel = "/".join(parts[1:])
-                        if should_sync_file(component, rel):
-                            extracted_files += 1
-                            extracted_bytes += member.size
-                            self._add_usage("local", component.name, member.size)
+        with (
+            archive.open("rb") as compressed,
+            dctx.stream_reader(compressed) as reader,
+            tarfile.open(fileobj=reader, mode="r|") as tar,
+        ):
+            for member in tar:
+                parts = member.name.split("/")
+                if not parts or member.name.startswith("/") or ".." in parts:
+                    raise RuntimeError(f"unsafe snapshot path: {member.name}")
+                component = COMPONENT_BY_NAME.get(parts[0])
+                if component is None or not member.isfile():
+                    continue
+                if component.gpu_scoped and (len(parts) < 2 or parts[1] != gpu_scope):
+                    continue
+                if time.monotonic() >= deadline_s:
+                    raise TimeoutError("snapshot extraction exceeded prepare timeout")
+                target = self.config.local_root.joinpath(*parts)
+                try:
+                    st = target.stat()
+                    if st.st_size == member.size and int(st.st_mtime) == int(
+                        member.mtime
+                    ):
+                        continue
+                except OSError:
+                    pass
+                source = tar.extractfile(member)
+                if source is None:
+                    continue
+                with source, atomic_write_path(target) as tmp:
+                    with tmp.open("wb") as out:
+                        _stream_copy(source, out, buffer, view, deadline_s)
+                    os.utime(tmp, (member.mtime, member.mtime))
+                rel = "/".join(parts[1:])
+                if should_sync_file(component, rel):
+                    extracted_files += 1
+                    extracted_bytes += member.size
+                    self._add_usage("local", component.name, member.size)
         return extracted_bytes, extracted_files
 
     @property
@@ -698,9 +706,7 @@ class JitCacheManager:
         return self.enabled and self.owns_startup_lock and self.remote_cache_available
 
     def start_background_sync(self) -> None:
-        if not self._sync_eligible:
-            return
-        if self.dirty_tracker is not None:
+        if not self._sync_eligible or self.dirty_tracker is not None:
             return
         tracker = JitDirtyTracker(self.component_dirs, self.enqueue_upload)
         if not tracker.start():
@@ -721,7 +727,8 @@ class JitCacheManager:
         t.start()
 
     def _periodic_sync_loop(self) -> None:
-        while not self._periodic_sync_stop.wait(PERIODIC_SYNC_INTERVAL_S):
+        interval_s = max(self.config.remote_sync_longer_timeout_s, STARTUP_WAIT_POLL_S)
+        while not self._periodic_sync_stop.wait(interval_s):
             try:
                 self.sync_once("periodic_flush")
             except Exception:
@@ -731,10 +738,12 @@ class JitCacheManager:
         t = self._periodic_sync_thread
         if t is None:
             return
-        # Signal the loop to exit; short join since we don't drain remaining uploads.
         self._periodic_sync_stop.set()
+        # Wake any in-flight _drain_upload_queue.wait() so join returns promptly
+        # instead of blocking up to remote_sync_timeout_s.
+        self._pending_empty.set()
         if t is not threading.current_thread():
-            t.join(timeout=WATCHDOG_JOIN_TIMEOUT_S)
+            t.join(timeout=PERIODIC_JOIN_TIMEOUT_S)
         self._periodic_sync_thread = None
 
     def enqueue_upload(self, component: ComponentSpec, rel_path: str) -> bool:
@@ -758,12 +767,9 @@ class JitCacheManager:
         try:
             uploaded = self._do_upload(component, rel_path)
             with self._lock:
-                st = self.sync_stats.setdefault(component.name, SyncStats())
-                if uploaded > 0:
-                    st.uploaded_files += 1
-                    st.uploaded_bytes += uploaded
-                else:
-                    st.skipped_files += 1
+                self.sync_stats.setdefault(component.name, SyncStats()).record_upload(
+                    uploaded
+                )
             if uploaded > 0:
                 self._add_usage("remote", component.name, uploaded)
         except Exception:
@@ -832,7 +838,9 @@ class JitCacheManager:
             self._sync_lock.release()
 
     def _sync_once_impl(
-        self, mode: str, drain_timeout_s: float | None = None
+        self,
+        mode: str,
+        drain_timeout_s: float | None = None,
     ) -> dict[str, Any]:
         start_s = time.monotonic()
         if not self.enabled:
@@ -842,7 +850,6 @@ class JitCacheManager:
                 start_s,
                 cache_state="disabled",
             )
-        usage_snap = self._usage_snapshot()
         drain_timed_out = False
         try:
             stats, drain_timed_out = self._drain_upload_queue(drain_timeout_s)
@@ -850,6 +857,7 @@ class JitCacheManager:
             logging.warning("failed to sync remote JIT cache", exc_info=True)
             stats = {}
             drain_timed_out = True
+        usage_snap = self._usage_snapshot()
         self._report_usage_metrics(usage_snap)
         has_failures = drain_timed_out or any(s.failed_files for s in stats.values())
         summary = self._make_summary(
@@ -892,42 +900,39 @@ class JitCacheManager:
         if not self._sync_eligible:
             return
         with self._lock:
-            if self._snapshot_publishing:
+            if not self._snapshot_publish_done.is_set():
                 return
-            self._snapshot_publishing = True
+            self._snapshot_publish_done.clear()
         lease_dir = self._try_acquire_publish_lease()
         if lease_dir is None:
-            with self._lock:
-                self._snapshot_publishing = False
+            self._snapshot_publish_done.set()
             return
         try:
             self.sync_executor.submit(self._snapshot_publish_task, lease_dir)
         except RuntimeError:
-            with self._lock:
-                self._snapshot_publishing = False
             self._release_publish_lease(lease_dir)
+            self._snapshot_publish_done.set()
 
     def _snapshot_publish_task(self, lease_dir: Path) -> None:
         try:
-            if not self._publish_snapshot():
-                self._release_publish_lease(lease_dir)
+            published = self._publish_snapshot()
         except Exception:
-            self._release_publish_lease(lease_dir)
+            published = False
             logging.warning("failed to publish JIT cache snapshot", exc_info=True)
+        try:
+            if not published:
+                self._release_publish_lease(lease_dir)
         finally:
-            with self._lock:
-                self._snapshot_publishing = False
+            self._snapshot_publish_done.set()
 
     def _try_acquire_publish_lease(self) -> Path | None:
         remote_root = self.config.remote_root
         if remote_root is None:
             return None
         bucket = int(time.time()) // SNAPSHOT_PUBLISH_INTERVAL_S
-        self._cleanup_stale_leases(remote_root, bucket)
         lease_dir = remote_root / f"{SNAPSHOT_PUBLISH_LEASE_PREFIX}{bucket}"
         try:
             lease_dir.mkdir()
-            return lease_dir
         except FileExistsError:
             return None
         except OSError:
@@ -935,6 +940,10 @@ class JitCacheManager:
                 "failed to acquire JIT snapshot publish lease", exc_info=True
             )
             return None
+        # We are the publisher for this bucket — piggyback a stale-lease scan
+        # so we don't pay a FUSE readdir on every publish attempt.
+        self._cleanup_stale_leases(remote_root, bucket)
+        return lease_dir
 
     @staticmethod
     def _cleanup_stale_leases(remote_root: Path, current_bucket: int) -> None:
@@ -973,17 +982,12 @@ class JitCacheManager:
 
     @staticmethod
     def _list_versioned_snapshots(remote_root: Path) -> list[Path]:
-        result: list[Path] = []
         try:
-            for entry in remote_root.iterdir():
-                if entry.name.startswith(SNAPSHOT_PREFIX) and entry.name.endswith(
-                    SNAPSHOT_SUFFIX
-                ):
-                    result.append(entry)
+            entries = [e for e in remote_root.iterdir() if is_snapshot_name(e.name)]
         except OSError:
-            pass
-        result.sort(key=lambda p: p.name)
-        return result
+            return []
+        entries.sort(key=lambda p: p.name)
+        return entries
 
     @staticmethod
     def _find_latest_snapshot(remote_root: Path) -> Path | None:
@@ -999,25 +1003,8 @@ class JitCacheManager:
     def _cleanup_remote_root(
         remote_root: Path,
         keep_snapshots: int = SNAPSHOT_KEEP_COUNT,
-        tmp_max_age_s: float = 3600,
     ) -> None:
-        snapshots: list[Path] = []
-        now = time.time()
-        try:
-            for entry in remote_root.iterdir():
-                name = entry.name
-                if name.startswith(SNAPSHOT_PREFIX) and name.endswith(SNAPSHOT_SUFFIX):
-                    snapshots.append(entry)
-                elif name.endswith(".tmp"):
-                    try:
-                        if now - entry.stat().st_mtime > tmp_max_age_s:
-                            with suppress(OSError):
-                                entry.unlink()
-                    except OSError:
-                        pass
-        except OSError:
-            pass
-        snapshots.sort(key=lambda p: p.name)
+        snapshots = JitCacheManager._list_versioned_snapshots(remote_root)
         for old in snapshots[:-keep_snapshots]:
             with suppress(OSError):
                 old.unlink()
@@ -1036,6 +1023,8 @@ class JitCacheManager:
             if files <= 0:
                 logging.info("skip publishing empty JIT cache snapshot")
                 return False
+            # Direct write avoids FUSE rename overhead; failed writes are not
+            # exposed as partial non-empty files on this mount.
             _copy_with_deadline(local_tmp, snapshot_path, publish_deadline)
             self._cleanup_remote_root(remote_root)
             logging.info(
@@ -1059,45 +1048,43 @@ class JitCacheManager:
         assert remote_root is not None
         local_root = self.config.local_root
         cctx = zstd.ZstdCompressor(level=3)
-        with archive.open("wb") as raw:
-            with cctx.stream_writer(raw) as compressed:
-                with tarfile.open(fileobj=compressed, mode="w|") as tar:
-                    for component, remote_path, rel in self._iter_snapshot_files(
-                        remote_root
-                    ):
-                        if time.monotonic() >= deadline_s:
-                            logging.warning(
-                                "snapshot archive creation exceeded deadline after %d files",
-                                files,
-                            )
-                            break
-                        # File list from remote (authoritative); prefer local copy to avoid FUSE overhead.
-                        local_path = local_root / component.name / rel
-                        source_path = (
-                            local_path if local_path.is_file() else remote_path
-                        )
-                        try:
-                            with source_path.open("rb") as source:
-                                source_stat = os.fstat(source.fileno())
-                                if source_stat.st_size <= 0 or not stat.S_ISREG(
-                                    source_stat.st_mode
-                                ):
-                                    continue
-                                info = tarfile.TarInfo(f"{component.name}/{rel}")
-                                info.size = source_stat.st_size
-                                info.mtime = source_stat.st_mtime
-                                info.mode = stat.S_IMODE(source_stat.st_mode)
-                                tar.addfile(info, source)
-                                files += 1
-                                bytes_ += source_stat.st_size
-                        except FileNotFoundError:
+        with (
+            archive.open("wb") as raw,
+            cctx.stream_writer(raw) as compressed,
+            tarfile.open(fileobj=compressed, mode="w|") as tar,
+        ):
+            for component, remote_path, rel in self._iter_snapshot_files(remote_root):
+                if time.monotonic() >= deadline_s:
+                    logging.warning(
+                        "snapshot archive creation exceeded deadline after %d files",
+                        files,
+                    )
+                    break
+                # File list from remote (authoritative); prefer local copy to avoid FUSE overhead.
+                local_path = local_root / component.name / rel
+                source_path = local_path if local_path.is_file() else remote_path
+                try:
+                    with source_path.open("rb") as source:
+                        source_stat = os.fstat(source.fileno())
+                        if source_stat.st_size <= 0 or not stat.S_ISREG(
+                            source_stat.st_mode
+                        ):
                             continue
-                        except OSError:
-                            logging.warning(
-                                "failed to add JIT cache file to snapshot: %s",
-                                remote_path,
-                                exc_info=True,
-                            )
+                        info = tarfile.TarInfo(f"{component.name}/{rel}")
+                        info.size = source_stat.st_size
+                        info.mtime = source_stat.st_mtime
+                        info.mode = stat.S_IMODE(source_stat.st_mode)
+                        tar.addfile(info, source)
+                        files += 1
+                        bytes_ += source_stat.st_size
+                except FileNotFoundError:
+                    continue
+                except OSError:
+                    logging.warning(
+                        "failed to add JIT cache file to snapshot: %s",
+                        remote_path,
+                        exc_info=True,
+                    )
         return files, bytes_
 
     @staticmethod
@@ -1135,6 +1122,7 @@ class JitCacheManager:
             self.dirty_tracker.stop()
             self.dirty_tracker = None
         self._stop_periodic_sync()
+        self._snapshot_publish_done.wait(timeout=WATCHDOG_JOIN_TIMEOUT_S)
         # By design: JIT cache does not need strong consistency; drop pending uploads.
         if self._sync_executor is not None:
             self._sync_executor.shutdown(wait=False, cancel_futures=True)
@@ -1142,7 +1130,9 @@ class JitCacheManager:
             # reset the counter to unblock any _drain_upload_queue still waiting.
             self._pending_count = 0
             self._pending_empty.set()
-            self._snapshot_publishing = False
+        # Ensure _snapshot_publishing reads False after stop even if the
+        # publish task was cancelled before it could set the Event.
+        self._snapshot_publish_done.set()
         self.release_startup_lock()
 
     def release_startup_lock(self) -> None:
