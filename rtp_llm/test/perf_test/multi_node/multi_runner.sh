@@ -51,17 +51,24 @@ multi_kill_script() {
   # Run kill script on each ip with environment variables
   (
     trap 'kill 0' SIGINT;
+    PIDS=()
     for IP in "${IP_ARRAY[@]}"
     do
       (
+        set -e
         scp -P ${SSH_PORT} multi_local_executor.sh ${RUN_USER}@${IP}:/tmp/multi_local_executor.sh;
         # Concat all environment variables
         ENV_STR=$(printenv | paste -sd " ");
         echo "Environment variables: $ENV_STR";
         ssh ${RUN_USER}@${IP} -p ${SSH_PORT} "$ENV_STR bash /tmp/multi_local_executor.sh";
       ) &
+      PIDS+=("$!")
     done;
-    wait;
+    EXIT_CODE=0
+    for PID in "${PIDS[@]}"; do
+      wait "$PID" || EXIT_CODE=$?
+    done;
+    exit $EXIT_CODE
   )
 }
 
@@ -81,9 +88,11 @@ multi_copy_script() {
   (
     trap 'kill 0' SIGINT;
     export WORLD_RANK=0;
+    PIDS=()
     for IP in "${IP_ARRAY[@]}"
     do
       (
+        set -e
         # Concat all environment variables
         ENV_STR=$(printenv | paste -sd " ");
         echo "Environment variables: $ENV_STR";
@@ -96,9 +105,14 @@ multi_copy_script() {
           scp -P ${SSH_PORT} ${RUN_USER}@${IP}:${TEST_OUTPUT_PATH}/*Result.json ${TASK_OUTPUT_DIR}/;
         fi
       ) &
+      PIDS+=("$!")
       export WORLD_RANK=$((WORLD_RANK + 8));
     done;
-    wait;
+    EXIT_CODE=0
+    for PID in "${PIDS[@]}"; do
+      wait "$PID" || EXIT_CODE=$?
+    done;
+    exit $EXIT_CODE
   )
 }
 
@@ -113,17 +127,24 @@ multi_clean_script() {
   # Run clean script on each ip with environment variables
   (
     trap 'kill 0' SIGINT;
+    PIDS=()
     for IP in "${IP_ARRAY[@]}"
     do
       (
+        set -e
         scp -P ${SSH_PORT} multi_local_executor.sh ${RUN_USER}@${IP}:/tmp/multi_local_executor.sh;
         # Concat all environment variables
         ENV_STR=$(printenv | paste -sd " ");
         echo "Environment variables: $ENV_STR";
         ssh ${RUN_USER}@${IP} -p ${SSH_PORT} "$ENV_STR bash /tmp/multi_local_executor.sh";
       ) &
+      PIDS+=("$!")
     done;
-    wait;
+    EXIT_CODE=0
+    for PID in "${PIDS[@]}"; do
+      wait "$PID" || EXIT_CODE=$?
+    done;
+    exit $EXIT_CODE
   )
 }
 
