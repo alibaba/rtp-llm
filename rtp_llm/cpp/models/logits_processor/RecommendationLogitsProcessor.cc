@@ -187,6 +187,9 @@ void RecommendationLogitsProcessor::process(const SamplerInputs& inputs, size_t 
     // 安全检查：仅当 diverge 遮蔽参与时才有叠加导致全 mask 的风险。
     // ban-only 路径中 vocab 通常数千~十万量级，单靠 banned combo 无法覆盖所有 token，
     // 此处避免对 ban-only 热路径引入 D2H 同步开销。
+    // 触发频次：diverge 在 combo 起始位置触发 (pos_in_combo==0)，即每 combo_token_size 步一次。
+    // 典型场景 combo_token_size=3、生成 20 个商品 → 整条请求约 7 次 D2H 同步，
+    // 单次 PCIe 延迟 ~5-50μs，总计 < 0.5ms，相对 decode step 延迟 (ms 级) 可忽略。
     if (need_diverge_process) {
         auto row_maxes = logits.max(/*dim=*/1).values;  // [batch_size], single kernel
         auto row_maxes_cpu = row_maxes.cpu();           // single D2H sync
@@ -203,12 +206,15 @@ void RecommendationLogitsProcessor::process(const SamplerInputs& inputs, size_t 
 }
 
 void RecommendationLogitsProcessor::updateMultiSeqStatus(const std::vector<int>& src_batch_indices) {
-    // 安全前置：避免空 infos_ 时访问 infos_[0] 导致未定义行为
+    // 安全前置：避免空 infos_ 时访问导致未定义行为
     RTP_LLM_CHECK_WITH_INFO(!infos_.empty(),
         "updateMultiSeqStatus called on empty processor");
     // 业务不变量：updateMultiSeqStatus 用于 beam search 重排序列，与 cross-sequence ban 互斥
-    RTP_LLM_CHECK_WITH_INFO(!infos_[0].enable_cross_sequence_ban,
-        "updateMultiSeqStatus must not be called when cross_sequence_ban is enabled");
+    // 检查所有序列（而非仅 infos_[0]），以正确处理 insert() 合并后 flag 不一致的场景
+    for (const auto& info : infos_) {
+        RTP_LLM_CHECK_WITH_INFO(!info.enable_cross_sequence_ban,
+            "updateMultiSeqStatus must not be called when cross_sequence_ban is enabled");
+    }
     std::vector<StreamRecommendationInfo> new_infos;
     new_infos.reserve(src_batch_indices.size());
     for (const auto src_idx : src_batch_indices) {

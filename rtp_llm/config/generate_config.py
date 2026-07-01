@@ -3,7 +3,7 @@ import hashlib
 import logging
 from typing import Any, Dict, List, Optional, Union
 
-from pydantic import BaseModel, ConfigDict, field_serializer, field_validator
+from pydantic import BaseModel, ConfigDict, field_serializer, field_validator, model_validator
 from transformers.tokenization_utils_base import PreTrainedTokenizerBase
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
@@ -111,6 +111,20 @@ class GenerateConfig(BaseModel):
             logging.getLogger(__name__).warning(
                 "cross_seq_diverge_start_combo=%d is very large, top-K diverge masking may never activate", val)
         return val
+
+    @model_validator(mode='after')
+    def _check_cross_seq_ban_compatibility(self):
+        """cross_sequence_ban 与 beam search / combo_token_size<2 互斥，不匹配时输出 warning。"""
+        if self.enable_cross_sequence_ban:
+            if self.num_beams > 1:
+                logging.getLogger(__name__).warning(
+                    "enable_cross_sequence_ban is incompatible with num_beams=%d, "
+                    "cross_sequence_ban will be disabled at runtime", self.num_beams)
+            elif self.combo_token_size < 2:
+                logging.getLogger(__name__).warning(
+                    "enable_cross_sequence_ban requires combo_token_size>=2, got %d, "
+                    "cross_sequence_ban will be disabled at runtime", self.combo_token_size)
+        return self
 
     random_seed: Optional[Union[List[int], int]] = None
     top_p_decay: Optional[Union[List[float], float]] = None

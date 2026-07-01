@@ -57,5 +57,37 @@ class TestClampDivergeStartCombo(unittest.TestCase):
         self.assertEqual(cfg.cross_seq_diverge_start_combo, 100)
 
 
+class TestCrossSeqBanCompatibility(unittest.TestCase):
+    """测试 enable_cross_sequence_ban 与 beam search / combo_token_size 的互斥校验。"""
+
+    def test_beam_search_incompatible_warns(self):
+        """开启 cross_seq_ban + num_beams>1 应触发 warning。"""
+        with self.assertLogs(level=logging.WARNING) as cm:
+            GenerateConfig(
+                enable_cross_sequence_ban=True,
+                num_beams=4,
+                combo_token_size=3,
+            )
+        self.assertTrue(any("incompatible with num_beams" in msg for msg in cm.output))
+
+    def test_combo_token_size_lt2_warns(self):
+        """开启 cross_seq_ban + combo_token_size<2 应触发 warning。"""
+        with self.assertLogs(level=logging.WARNING) as cm:
+            GenerateConfig(
+                enable_cross_sequence_ban=True,
+                combo_token_size=1,
+            )
+        self.assertTrue(any("combo_token_size>=2" in msg for msg in cm.output))
+
+    def test_valid_config_no_warning(self):
+        """合法配置不触发 warning。"""
+        cfg = GenerateConfig(
+            enable_cross_sequence_ban=True,
+            combo_token_size=3,
+            num_beams=1,
+        )
+        self.assertTrue(cfg.enable_cross_sequence_ban)
+
+
 if __name__ == "__main__":
     unittest.main()
