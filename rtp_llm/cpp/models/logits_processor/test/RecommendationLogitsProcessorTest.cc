@@ -644,4 +644,108 @@ TEST_F(RecommendationLogitsProcessorTest, testBatchTokenMultipleCombos) {
     EXPECT_FALSE(p->infos()[0].banned_combos.count({5, 6}));
 }
 
+// 场景 20：think prelude 未完成时不进 combo，完成后正常进 combo + 跨序列广播
+TEST_F(RecommendationLogitsProcessorTest, testThinkPreludeWithCrossSeqBan) {
+    const int N = 2;
+    const int combo_size = 2;
+    std::set<std::vector<int>> empty_set;
+    // end_think_token_ids = {99, 100}
+    std::vector<int> end_think_ids = {99, 100};
+
+    std::vector<StreamRecommendationInfo> infos;
+    for (int i = 0; i < N; ++i) {
+        StreamRecommendationInfo info(combo_size, 0, 0, false, empty_set, end_think_ids,
+                                      /*enable_cross_sequence_ban=*/true,
+                                      /*cross_seq_diverge_start_combo=*/0);
+        infos.push_back(std::move(info));
+    }
+    auto p = std::make_shared<RecommendationLogitsProcessor>(std::move(infos));
+
+    // 第 1 步：推送非 end_think token，think 未完成，combo 不应推进
+    auto tokens1 = torch::zeros({N, 1}, torch::kInt32);
+    tokens1[0][0] = 50;  tokens1[1][0] = 50;
+    p->updateStatus(tokens1, 1);
+    EXPECT_EQ(0, p->infos()[0].pos_in_combo);  // combo 未推进
+    EXPECT_EQ(0, p->infos()[0].completed_combo_count);
+    EXPECT_FALSE(p->infos()[0].think_done);
+
+    // 第 2 步：推送 end_think 序列的第一个 token (99)
+    auto tokens2 = torch::zeros({N, 1}, torch::kInt32);
+    tokens2[0][0] = 99;  tokens2[1][0] = 99;
+    p->updateStatus(tokens2, 1);
+    EXPECT_FALSE(p->infos()[0].think_done);  // 仅匹配一半
+
+    // 第 3 步：推送 end_think 序列的第二个 token (100)，think 完成
+    auto tokens3 = torch::zeros({N, 1}, torch::kInt32);
+    tokens3[0][0] = 100;  tokens3[1][0] = 100;
+    p->updateStatus(tokens3, 1);
+    EXPECT_TRUE(p->infos()[0].think_done);
+    EXPECT_EQ(0, p->infos()[0].pos_in_combo);  // combo 仍未开始
+
+    // 第 4-5 步：think 完成后推送 combo token，应形成完整 combo 并广播
+    auto tokens4 = torch::zeros({N, 1}, torch::kInt32);
+    tokens4[0][0] = 10;  tokens4[1][0] = 30;
+    p->updateStatus(tokens4, 1);
+    EXPECT_EQ(1, p->infos()[0].pos_in_combo);  // combo 推进到第 1 位
+
+    auto tokens5 = torch::zeros({N, 1}, torch::kInt32);
+    tokens5[0][0] = 11;  tokens5[1][0] = 31;
+    p->updateStatus(tokens5, 1);
+    EXPECT_EQ(0, p->infos()[0].pos_in_combo);  // combo 完成，复位
+    EXPECT_EQ(1, p->infos()[0].completed_combo_count);
+    EXPECT_TRUE(p->infos()[0].banned_combos.count({10, 11}));
+    EXPECT_TRUE(p->infos()[1].banned_combos.count({30, 31}));
+    // 跨序列广播
+    EXPECT_TRUE(p->infos()[1].banned_combos.count({10, 11}));
+    // primary-protected: 序列 0 不接收序列 1
+    EXPECT_FALSE(p->infos()[0].banned_combos.count({30, 31}));
+}
+
+// 场景 21：安全降级路径——diverge + banned combo 叠加导致某行全 -inf，验证回退均匀分布
+TEST_F(RecommendationLogitsProcessorTest, testSafetyFallbackAllMasked) {
+    // 构造极端场景：vocab_size=3，combo_size=1，N=2
+    // combo_size=1 时 pos_in_combo==0 同时满足 diverge条件(pos==0) 和 ban条件(pos==combo_size-1==0)
+    // 序列 1 的 banned_combos 将封锁 token 1 和 2，diverge 封锁 topk=1 (token 0)
+    // 导致序列 1 全部 3 个 token 都被遮蔽
+    const int N = 2;
+    const size_t vocab_size = 3;
+    const int combo_size = 1;
+    std::set<std::vector<int>> empty_set;
+    // banned combo: {1} 和 {2} (combo_size=1，单元素 combo)
+    std::set<std::vector<int>> banned = {{1}, {2}};
+
+    std::vector<StreamRecommendationInfo> infos;
+    // 序列 0: 主序列，无 ban，pos_in_combo=0
+    StreamRecommendationInfo info0(combo_size, 0, 0, false, empty_set, {},
+                                    /*enable_cross_sequence_ban=*/true,
+                                    /*cross_seq_diverge_start_combo=*/0);
+    infos.push_back(std::move(info0));
+
+    // 序列 1: banned={1},{2}，pos_in_combo=0，completed_combo_count=1 (触发 diverge)
+    StreamRecommendationInfo info1(combo_size, 0, 0, false, banned, {},
+                                    /*enable_cross_sequence_ban=*/true,
+                                    /*cross_seq_diverge_start_combo=*/0);
+    info1.completed_combo_count = 1;
+    infos.push_back(std::move(info1));
+
+    auto processor = std::make_shared<RecommendationLogitsProcessor>(std::move(infos));
+    auto inputs = allocateSamplerInputs(N, vocab_size, processor);
+
+    // 初始 logits 全部为 1.0
+    inputs.logits.fill_(1.0f);
+
+    processor->process(inputs);
+
+    // 序列 1 应该触发安全降级：全部回退为 0.0 (均匀分布)
+    auto logits_cpu = inputs.logits.cpu();
+    auto acc = logits_cpu.accessor<float, 2>();
+    for (size_t v = 0; v < vocab_size; ++v) {
+        EXPECT_FLOAT_EQ(0.0f, acc[1][v]);
+    }
+    // 序列 0 不应被影响（主序列无 diverge，无 ban）
+    for (size_t v = 0; v < vocab_size; ++v) {
+        EXPECT_FLOAT_EQ(1.0f, acc[0][v]);
+    }
+}
+
 }  // namespace rtp_llm

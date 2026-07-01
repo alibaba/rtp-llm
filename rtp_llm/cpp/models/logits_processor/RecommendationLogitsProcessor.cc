@@ -182,10 +182,13 @@ void RecommendationLogitsProcessor::process(const SamplerInputs& inputs, size_t 
 
     // 安全检查：diverge 遮蔽 + banned combo 遮蔽叠加后，确保每行至少保留 1 个有效 token。
     // 若某行全部被 mask，恢复该行为均匀分布（安全降级），避免 sampler 采样 NaN/随机 token。
+    // 使用 batch max 一次获取各行最大值，仅 1 次 GPU→CPU 同步（而非 N 次）。
+    auto row_maxes = logits.max(/*dim=*/1).values;  // [batch_size], single kernel
+    auto row_maxes_cpu = row_maxes.cpu();           // single D2H sync
+    auto row_maxes_acc = row_maxes_cpu.accessor<float, 1>();
     for (size_t i = 0; i < batch_size; ++i) {
-        auto row = logits[i];
-        if (row.max().item<float>() == -std::numeric_limits<float>::infinity()) {
-            row.fill_(0.0f);
+        if (row_maxes_acc[i] == -std::numeric_limits<float>::infinity()) {
+            logits[i].fill_(0.0f);
             RTP_LLM_LOG_WARNING(
                 "RecommendationLogitsProcessor: row %zu all logits masked after diverge+ban, "
                 "falling back to uniform distribution", i);
