@@ -204,6 +204,11 @@ build:cicd --worker_verbose
 build:cicd --show_result=0 --auto_output_filter=all
 test:cicd --test_output=errors --max_test_output_bytes=10240000 --experimental_ui_max_stdouterr_bytes=31457280
 
+# TEMP (do-not-merge sweep only): force the smoke matrix through the dynamic decode
+# backend path for a one-time robustness sweep, without flipping the shipped default
+# (enable_dynamic_decode_backend stays false in code). Drop this line before merge.
+test:cicd --test_env=ENABLE_DYNAMIC_DECODE_BACKEND=1
+
 # asan
 build:asan --copt -fsanitize=address
 build:asan --copt -DADDRESS_SANITIZER
