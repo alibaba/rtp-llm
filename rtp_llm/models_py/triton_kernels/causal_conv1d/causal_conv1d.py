@@ -703,6 +703,12 @@ def _causal_conv1d_update_kernel(
 
     sequence_length = tl.load(sequence_lengths_ptr + idx_seq).to(tl.int32)
     read_block_offset = cal_block_idx(sequence_length - 1, SEQ_SIZE_PER_BLOCK)
+    # Clamp to the last allocated block (branchless): when sequence_length
+    # exceeds block_map.size(1) * SEQ_SIZE_PER_BLOCK, read_block_offset reaches
+    # stride_block_map — one past the end. Use tl.minimum to avoid if-branch
+    # which can cause phi-node type mismatch or register overflow on some
+    # hardware (e.g. PPU) during CUDA Graph capture.
+    read_block_offset = tl.minimum(read_block_offset, stride_block_map - 1)
     read_block_id = tl.load(
         block_map_ptr + idx_seq * stride_block_map + read_block_offset
     ).to(tl.int64)
@@ -767,11 +773,17 @@ def _causal_conv1d_update_kernel(
     # for seqLen = n, we need to write n block in sequential manner
     for idx in tl.range(seqlen):
         write_block_offset = (cal_block_idx(sequence_length, SEQ_SIZE_PER_BLOCK)) + idx
+        # Guard OOB: clamp write_block_offset so that the block_map load never
+        # goes past the last valid slot. When OOB, we load a clamped (last) slot
+        # but skip the actual store via the write_ok mask. This avoids if-branch
+        # which causes phi-node / register issues on PPU during CUDA Graph capture.
+        write_ok = write_block_offset < stride_block_map
+        safe_write_offset = tl.minimum(write_block_offset, stride_block_map - 1)
         write_block_id = tl.load(
-            block_map_ptr + idx_seq * stride_block_map + write_block_offset
+            block_map_ptr + idx_seq * stride_block_map + safe_write_offset,
         ).to(tl.int64)
 
-        if write_block_id != -1:
+        if write_ok and (write_block_id != -1):
             conv_state_base = (
                 conv_state_ptr
                 + (write_block_id * stride_conv_state_seq)
@@ -782,7 +794,8 @@ def _causal_conv1d_update_kernel(
             idx_tokens_offset = idx_tokens - idx
 
             conv_state_ptrs_target = (
-                conv_state_base + (idx_tokens_offset * stride_conv_state_tok)[:, None]
+                conv_state_base
+                + (idx_tokens_offset * stride_conv_state_tok)[:, None]
             )  # [BLOCK_M, BLOCK_N]
             mask = (
                 (idx_tokens_offset >= 0)[:, None]
