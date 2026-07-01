@@ -170,13 +170,13 @@ class BackendManager(object):
 
     def stop(self) -> None:
         """Stop the backend manager and cleanup resources"""
-        if isinstance(self.engine, BaseEngine):
+        if self.engine is not None and hasattr(self.engine, 'stop'):
             _nfs_manager.unmount_all()
             logging.info("all nfs paths unmounted")
             self.engine.stop()
 
     def ready(self):
-        if isinstance(self.engine, BaseEngine):
+        if self.engine is not None and hasattr(self.engine, 'ready'):
             return self.engine.ready()
         return True
 
