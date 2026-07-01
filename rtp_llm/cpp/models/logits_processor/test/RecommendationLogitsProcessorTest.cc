@@ -525,28 +525,28 @@ TEST_F(RecommendationLogitsProcessorTest, testDivergeDepthCappedByMaxLimit) {
     }
     auto p = std::make_shared<RecommendationLogitsProcessor>(std::move(infos));
 
-    // 创建 logits [N, vocab]，每行相同分布
-    auto logits = torch::ones({N, vocab}, torch::kFloat32);
-    // 让 token 0~11 有高分，方便观察遮蔽
+    // 通过 allocateSamplerInputs 在 CUDA 上分配，与其他测试保持一致
+    auto sampler_inputs = allocateSamplerInputs(N, vocab, p);
+    // 填充 logits: 让 token 0~11 有高分，方便观察遮蔽
+    sampler_inputs.logits.fill_(1.0f);
     for (int i = 0; i < N; ++i) {
         for (int j = 0; j < N; ++j) {
-            logits[i][j] = 100.0f - j;
+            sampler_inputs.logits[i][j] = 100.0f - j;
         }
     }
 
-    SamplerInputs inputs;
-    inputs.logits = logits;
-    p->process(inputs, 0, N);
+    p->process(sampler_inputs, 0, N);
 
+    auto logits_cpu = sampler_inputs.logits.cpu();
     // 序列 0 不应被遮蔽
     for (int j = 0; j < vocab; ++j) {
-        EXPECT_GT(inputs.logits[0][j].item<float>(), -1e30);
+        EXPECT_GT(logits_cpu[0][j].item<float>(), -1e30);
     }
     // 序列 11(i=11)：k = min(11, vocab-1=19, kMaxDivergeDepth=8) = 8
     // 应恰好有 8 个 token 被遮蔽为 -inf
     int masked_count = 0;
     for (int j = 0; j < vocab; ++j) {
-        if (inputs.logits[11][j].item<float>() < -1e30) {
+        if (logits_cpu[11][j].item<float>() < -1e30) {
             masked_count++;
         }
     }
@@ -555,7 +555,7 @@ TEST_F(RecommendationLogitsProcessorTest, testDivergeDepthCappedByMaxLimit) {
     // 序列 5(i=5)：k = min(5, 19, 8) = 5，正常不受 cap 影响
     int masked_count_5 = 0;
     for (int j = 0; j < vocab; ++j) {
-        if (inputs.logits[5][j].item<float>() < -1e30) {
+        if (logits_cpu[5][j].item<float>() < -1e30) {
             masked_count_5++;
         }
     }

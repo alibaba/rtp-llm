@@ -188,9 +188,11 @@ void RecommendationLogitsProcessor::process(const SamplerInputs& inputs, size_t 
 }
 
 void RecommendationLogitsProcessor::updateMultiSeqStatus(const std::vector<int>& src_batch_indices) {
-    // 运行时不变量：updateMultiSeqStatus 用于 beam search 重排序列，与 cross-sequence ban 互斥。
-    // 如果在启用跨序列去重时被调用，会破坏主序列保护语义和 completed_combo_count 一致性。
-    RTP_LLM_CHECK_WITH_INFO(!infos_.empty() && !infos_[0].enable_cross_sequence_ban,
+    // 安全前置：避免空 infos_ 时访问 infos_[0] 导致未定义行为
+    RTP_LLM_CHECK_WITH_INFO(!infos_.empty(),
+        "updateMultiSeqStatus called on empty processor");
+    // 业务不变量：updateMultiSeqStatus 用于 beam search 重排序列，与 cross-sequence ban 互斥
+    RTP_LLM_CHECK_WITH_INFO(!infos_[0].enable_cross_sequence_ban,
         "updateMultiSeqStatus must not be called when cross_sequence_ban is enabled");
     std::vector<StreamRecommendationInfo> new_infos;
     new_infos.reserve(src_batch_indices.size());
