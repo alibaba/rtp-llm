@@ -102,18 +102,15 @@ public:
         return infos_;
     }
     void insert(std::shared_ptr<RecommendationLogitsProcessor> others) {
-        if (others != nullptr) {
-            infos_.insert(infos_.end(), others->infos_.begin(), others->infos_.end());
-            // 后置不变量：合并后所有 info 的 enable_cross_sequence_ban 必须一致。
-            // 覆盖空 processor 被 insert 非空 others 的场景（此时 infos_[0] 来自 others）。
-            if (infos_.size() > 1) {
-                const bool flag = infos_[0].enable_cross_sequence_ban;
-                for (size_t i = 1; i < infos_.size(); ++i) {
-                    RTP_LLM_CHECK_WITH_INFO(
-                        infos_[i].enable_cross_sequence_ban == flag,
-                        "insert() resulted in inconsistent enable_cross_sequence_ban");
-                }
+        if (others != nullptr && !others->infos_.empty()) {
+            // O(1) 一致性校验：fromGenerateInput 保证单 processor 内部一致，
+            // 只需比较两侧各一个代表元素。空 this 合入 others 天然一致，无需检查。
+            if (!infos_.empty()) {
+                RTP_LLM_CHECK_WITH_INFO(
+                    infos_[0].enable_cross_sequence_ban == others->infos_[0].enable_cross_sequence_ban,
+                    "insert() requires consistent enable_cross_sequence_ban across processors");
             }
+            infos_.insert(infos_.end(), others->infos_.begin(), others->infos_.end());
         }
     }
 
