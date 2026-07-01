@@ -110,6 +110,19 @@ def add_unit_offset(ts: List[torch.Tensor]) -> torch.Tensor:
     return (ts[0] + 1.0).contiguous()
 
 
+def _env_flag(name: str, default: str = "0") -> bool:
+    return os.environ.get(name, default).strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
+def _should_load_raw_mxfp8_idx() -> bool:
+    return _env_flag("M3_MSA_RAW_IDX_MXFP8")
+
+
 class MiniMaxM3Weight(ModelDeployWeightInfo):
     """Weight loader for MiniMax-M3 text backbone.
 
@@ -129,6 +142,7 @@ class MiniMaxM3Weight(ModelDeployWeightInfo):
     """
 
     def __init__(self, *args: Any, **kwargs: Any):
+        self._load_raw_mxfp8_idx = _should_load_raw_mxfp8_idx()
         super().__init__(*args, **kwargs)
         # Multi-modal checkpoints prefix all LLM tensors with `language_model.`
         self.prefix = "language_model."
@@ -310,52 +324,87 @@ class MiniMaxM3Weight(ModelDeployWeightInfo):
         # main GQA chain is loaded and every layer runs dense FlashInfer
         # attention (numerically equivalent to MSA for kv_len <= topk*block);
         # when on, sparse layers load the index weights and route to MSAAttention.
-        import os as _os
-
-        _load_msa_index = _os.environ.get(
-            "M3_LOAD_MSA_INDEX", "false"
-        ).strip().lower() in (
-            "1",
-            "true",
-            "yes",
-            "on",
-        )
-        if _load_msa_index and layer_id in sparse_set:
+        load_msa_index = _env_flag("M3_LOAD_MSA_INDEX", "false")
+        if load_msa_index and layer_id in sparse_set:
             idx_prefix = self.prefix + "model.layers.{i}.self_attn."
-            # index_{q,k}_proj are MXFP8 on disk (e4m3 weight + UE8M0
-            # weight_scale_inv). Dequantize to BF16 at load — the index branch
-            # only drives top-k block selection, so this avoids threading an
-            # MXFP8 linear through the index path. Declared as plain
-            # AtomicWeight (not the quant-wrapped path) since the MXFP8 loader
-            # only matches the main w8a8 weight list.
+            # Always keep BF16-dequantized idx weights for the original/F.linear
+            # paths. When M3_MSA_RAW_IDX_MXFP8 is enabled, load an additional
+            # raw MXFP8 copy for the fused decode projection. This lets PDFUSION
+            # performance tests exercise fused decode while preserving fallback.
+            idx_projection_weights = [
+                AtomicWeight(
+                    W.msa_idx_q_w,
+                    [
+                        CkptWeightInfo(idx_prefix + "index_q_proj.weight", identity),
+                        CkptWeightInfo(
+                            idx_prefix + "index_q_proj.weight_scale_inv", identity
+                        ),
+                    ],
+                    _mxfp8_dequant_to_bf16,
+                    data_type=torch.bfloat16,
+                ),
+                AtomicWeight(
+                    W.msa_idx_k_w,
+                    [
+                        CkptWeightInfo(idx_prefix + "index_k_proj.weight", identity),
+                        CkptWeightInfo(
+                            idx_prefix + "index_k_proj.weight_scale_inv", identity
+                        ),
+                    ],
+                    _mxfp8_dequant_to_bf16,
+                    data_type=torch.bfloat16,
+                ),
+            ]
+            if self._load_raw_mxfp8_idx:
+                idx_projection_weights.extend(
+                    [
+                        AtomicWeight(
+                            W.msa_idx_q_raw_w,
+                            [
+                                CkptWeightInfo(
+                                    idx_prefix + "index_q_proj.weight", identity
+                                )
+                            ],
+                            identity,
+                            data_type=torch.float8_e4m3fn,
+                        ),
+                        AtomicWeight(
+                            W.msa_idx_q_raw_s,
+                            [
+                                CkptWeightInfo(
+                                    idx_prefix + "index_q_proj.weight_scale_inv",
+                                    identity,
+                                )
+                            ],
+                            identity,
+                            data_type=torch.uint8,
+                        ),
+                        AtomicWeight(
+                            W.msa_idx_k_raw_w,
+                            [
+                                CkptWeightInfo(
+                                    idx_prefix + "index_k_proj.weight", identity
+                                )
+                            ],
+                            identity,
+                            data_type=torch.float8_e4m3fn,
+                        ),
+                        AtomicWeight(
+                            W.msa_idx_k_raw_s,
+                            [
+                                CkptWeightInfo(
+                                    idx_prefix + "index_k_proj.weight_scale_inv",
+                                    identity,
+                                )
+                            ],
+                            identity,
+                            data_type=torch.uint8,
+                        ),
+                    ]
+                )
             layer_weights.extend(
                 [
-                    AtomicWeight(
-                        W.msa_idx_q_w,
-                        [
-                            CkptWeightInfo(
-                                idx_prefix + "index_q_proj.weight", identity
-                            ),
-                            CkptWeightInfo(
-                                idx_prefix + "index_q_proj.weight_scale_inv", identity
-                            ),
-                        ],
-                        _mxfp8_dequant_to_bf16,
-                        data_type=torch.bfloat16,
-                    ),
-                    AtomicWeight(
-                        W.msa_idx_k_w,
-                        [
-                            CkptWeightInfo(
-                                idx_prefix + "index_k_proj.weight", identity
-                            ),
-                            CkptWeightInfo(
-                                idx_prefix + "index_k_proj.weight_scale_inv", identity
-                            ),
-                        ],
-                        _mxfp8_dequant_to_bf16,
-                        data_type=torch.bfloat16,
-                    ),
+                    *idx_projection_weights,
                     AtomicWeight(
                         W.msa_idx_q_norm,
                         [CkptWeightInfo(idx_prefix + "index_q_norm.weight", identity)],

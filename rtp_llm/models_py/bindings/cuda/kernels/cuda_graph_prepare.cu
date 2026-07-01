@@ -37,43 +37,62 @@ __global__ void prepareFlashInferDecodeParamsKernel(const int32_t* sequence_leng
                                                     int32_t        max_blocks_per_batch,
                                                     int32_t        seq_size_per_block,
                                                     int32_t        captured_batch_capacity) {
-    // Replay path is small-batch metadata; one CUDA block avoids any host prefix-sum.
-    if (threadIdx.x != 0 || blockIdx.x != 0) {
+    const int32_t batch = static_cast<int32_t>(blockIdx.x);
+    if (batch >= captured_batch_capacity) {
         return;
     }
 
-    int32_t page_offset        = 0;
-    decode_page_indptr[0]      = 0;
-    qo_indptr[0]               = 0;
     const int32_t safe_page_sz = seq_size_per_block > 0 ? seq_size_per_block : 1;
+    if (batch == 0 && threadIdx.x == 0) {
+        decode_page_indptr[0] = 0;
+        qo_indptr[0]          = 0;
+    }
 
-    for (int32_t batch = 0; batch < batch_size; ++batch) {
+    if (batch < batch_size) {
         const int32_t seq_len = sequence_lengths_plus_1[batch] > 1 ? sequence_lengths_plus_1[batch] : 1;
         const int32_t pages   = (seq_len + safe_page_sz - 1) / safe_page_sz;
 
-        batch_indice[batch]           = batch;
-        positions[batch]              = seq_len - 1;
-        kvlen[batch]                  = seq_len;
-        paged_kv_last_page_len[batch] = (seq_len - 1) % safe_page_sz + 1;
-        const int32_t block_index     = (seq_len - 1) / safe_page_sz;
-        const int32_t block_offset    = (seq_len - 1) % safe_page_sz;
-        const int32_t block_number =
-            block_index < max_blocks_per_batch ? block_ids[batch * max_blocks_per_batch + block_index] : 0;
-        slot_mapping[batch] = static_cast<int64_t>(block_number) * safe_page_sz + static_cast<int64_t>(block_offset);
+        int32_t page_offset = 0;
+        for (int32_t prev_batch = 0; prev_batch < batch; ++prev_batch) {
+            const int32_t prev_seq_len =
+                sequence_lengths_plus_1[prev_batch] > 1 ? sequence_lengths_plus_1[prev_batch] : 1;
+            const int32_t prev_pages = (prev_seq_len + safe_page_sz - 1) / safe_page_sz;
+            page_offset += prev_pages < max_blocks_per_batch ? prev_pages : max_blocks_per_batch;
+        }
 
         const int32_t pages_to_copy = pages < max_blocks_per_batch ? pages : max_blocks_per_batch;
-        for (int32_t page = 0; page < pages_to_copy; ++page) {
+        for (int32_t page = threadIdx.x; page < pages_to_copy; page += blockDim.x) {
             page_indice[page_offset + page] = block_ids[batch * max_blocks_per_batch + page];
         }
-        page_offset += pages_to_copy;
-        decode_page_indptr[batch + 1] = page_offset;
-        qo_indptr[batch + 1]          = batch + 1;
+
+        if (threadIdx.x == 0) {
+            batch_indice[batch]           = batch;
+            positions[batch]              = seq_len - 1;
+            kvlen[batch]                  = seq_len;
+            paged_kv_last_page_len[batch] = (seq_len - 1) % safe_page_sz + 1;
+            const int32_t block_index     = (seq_len - 1) / safe_page_sz;
+            const int32_t block_offset    = (seq_len - 1) % safe_page_sz;
+            const int32_t block_number =
+                block_index < max_blocks_per_batch ? block_ids[batch * max_blocks_per_batch + block_index] : 0;
+            slot_mapping[batch] =
+                static_cast<int64_t>(block_number) * safe_page_sz + static_cast<int64_t>(block_offset);
+            decode_page_indptr[batch + 1] = page_offset + pages_to_copy;
+            qo_indptr[batch + 1]          = batch + 1;
+        }
+        return;
     }
 
     // Decode CUDA graph replay can use a graph captured for a larger batch
     // than the current live batch. Clear stale entries so the captured kernels
     // do not process phantom rows with old kvlen/page metadata and block_id=0.
-    for (int32_t batch = batch_size; batch < captured_batch_capacity; ++batch) {
+    if (threadIdx.x == 0) {
+        int32_t page_offset = 0;
+        for (int32_t active_batch = 0; active_batch < batch_size; ++active_batch) {
+            const int32_t seq_len =
+                sequence_lengths_plus_1[active_batch] > 1 ? sequence_lengths_plus_1[active_batch] : 1;
+            const int32_t pages = (seq_len + safe_page_sz - 1) / safe_page_sz;
+            page_offset += pages < max_blocks_per_batch ? pages : max_blocks_per_batch;
+        }
         batch_indice[batch]           = 0;
         positions[batch]              = 0;
         kvlen[batch]                  = 0;
@@ -244,20 +263,21 @@ void invokePrepareFlashInferDecodeParams(const int32_t* sequence_lengths_plus_1,
     if (batch_size <= 0 || max_blocks_per_batch <= 0) {
         return;
     }
-    prepareFlashInferDecodeParamsKernel<<<1, 1, 0, stream>>>(sequence_lengths_plus_1,
-                                                             block_ids,
-                                                             batch_indice,
-                                                             page_indice,
-                                                             decode_page_indptr,
-                                                             paged_kv_last_page_len,
-                                                             qo_indptr,
-                                                             kvlen,
-                                                             positions,
-                                                             slot_mapping,
-                                                             batch_size,
-                                                             max_blocks_per_batch,
-                                                             seq_size_per_block,
-                                                             captured_batch_capacity);
+    constexpr int block_size = 128;
+    prepareFlashInferDecodeParamsKernel<<<captured_batch_capacity, block_size, 0, stream>>>(sequence_lengths_plus_1,
+                                                                                            block_ids,
+                                                                                            batch_indice,
+                                                                                            page_indice,
+                                                                                            decode_page_indptr,
+                                                                                            paged_kv_last_page_len,
+                                                                                            qo_indptr,
+                                                                                            kvlen,
+                                                                                            positions,
+                                                                                            slot_mapping,
+                                                                                            batch_size,
+                                                                                            max_blocks_per_batch,
+                                                                                            seq_size_per_block,
+                                                                                            captured_batch_capacity);
     const auto result = cudaGetLastError();
     TORCH_CHECK(
         result == cudaSuccess, "FlashInfer decode CUDA graph prepare kernel failed: ", cudaGetErrorString(result));

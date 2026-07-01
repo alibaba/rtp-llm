@@ -52,9 +52,6 @@ _USE_V2_CP_PREFILL = os.environ.get("M3_MSA_USE_V2_CP_PREFILL", "1") != "0"
 # Fused CP paged write removes the unpack tensors plus mha_kv_write_cache
 # for cold/sharded v2 prefill. Set to 0 to fall back to the two-kernel path.
 _USE_FUSED_CP_PAGED_WRITE = os.environ.get("M3_MSA_FUSED_CP_PAGED_WRITE", "1") != "0"
-# Default-on direct-paged sparse decode. Set M3_MSA_PAGED_DECODE=0 to
-# fall back to the original scratch-backed decode path.
-_USE_PAGED_DECODE = os.environ.get("M3_MSA_PAGED_DECODE", "1") == "1"
 
 import torch.nn as nn
 import torch.nn.functional as F
@@ -62,6 +59,9 @@ import torch.nn.functional as F
 from rtp_llm.device.device_type import DeviceType, get_device_type
 from rtp_llm.models_py.distributed.collective_torch import Group, all_gather, all_reduce
 from rtp_llm.models_py.modules.factory import LinearFactory
+from rtp_llm.models_py.modules.factory.linear.impl.cuda.mxfp8_linear import (
+    CudaMxfp8Linear,
+)
 from rtp_llm.ops import AttentionConfigs, HWKernelConfig, ParallelismConfig
 from rtp_llm.ops.compute_ops import LayerKVCache, PyAttentionInputs
 
@@ -283,161 +283,276 @@ def _fused_split_rope_pack(
 
 
 @triton.jit
-def _fused_qk_norm_rope_split_decode_kernel(
-    qkv_ptr,  # [T, QKV_DIM] bf16, contiguous
+def _fused_qk_idx_norm_rope_write_paged_decode_kernel(
+    fused_ptr,  # [T, Q|K|V|idx_Q|idx_K] bf16, contiguous
+    q_out_ptr,  # [T, num_q_heads, head_dim] bf16, contiguous
+    idx_q_out_ptr,  # [T, num_idx_q_heads, head_dim] bf16, contiguous
     q_weight_ptr,  # [HEAD_DIM]
     k_weight_ptr,  # [HEAD_DIM]
+    idx_q_weight_ptr,  # [HEAD_DIM]
+    idx_k_weight_ptr,  # [HEAD_DIM]
     cos_sin_ptr,  # [max_pos, rotary_dim]
     pos_ids_ptr,  # [T]
-    q_ptr,  # [T, NUM_Q_HEADS, HEAD_DIM]
-    k_ptr,  # [T, NUM_KV_HEADS, HEAD_DIM]
-    qkv_row_stride,
-    cos_sin_row_stride,
+    seq_lens_ptr,  # [T] int32, current kv length after writing decode token
+    block_table_ptr,  # [T, max_blocks]
+    paged_kv_ptr,  # [block,2,kv_head,page,head_dim]
+    paged_idx_k_ptr,  # [block*page, idx_dim]
+    FUSED_ROW_STRIDE: tl.constexpr,
+    Q_STRIDE_T: tl.constexpr,
+    Q_STRIDE_H: tl.constexpr,
+    Q_STRIDE_D: tl.constexpr,
+    IDX_Q_STRIDE_T: tl.constexpr,
+    IDX_Q_STRIDE_H: tl.constexpr,
+    IDX_Q_STRIDE_D: tl.constexpr,
+    COS_SIN_ROW_STRIDE: tl.constexpr,
+    BT_STRIDE_B: tl.constexpr,
+    BT_STRIDE_BLK: tl.constexpr,
+    KV_STRIDE_BLOCK: tl.constexpr,
+    KV_STRIDE_KV: tl.constexpr,
+    KV_STRIDE_HEAD: tl.constexpr,
+    KV_STRIDE_PAGE: tl.constexpr,
+    KV_STRIDE_DIM: tl.constexpr,
+    PAGE_SIZE: tl.constexpr,
     HEAD_DIM: tl.constexpr,
     ROTARY_DIM: tl.constexpr,
     HALF_ROT: tl.constexpr,
     NUM_Q_HEADS: tl.constexpr,
     NUM_KV_HEADS: tl.constexpr,
+    NUM_IDX_Q_HEADS: tl.constexpr,
     EPS: tl.constexpr,
     BLOCK_HEAD: tl.constexpr,
     BLOCK_HALF: tl.constexpr,
     REM: tl.constexpr,
     BLOCK_REM: tl.constexpr,
 ):
-    token = tl.program_id(0).to(tl.int64)
-    group = tl.program_id(1)
-    is_q = group < NUM_Q_HEADS
-    k_head = group - NUM_Q_HEADS
+    token_id = tl.program_id(0).to(tl.int64)
+    output_group = tl.program_id(1)
 
-    qkv_row = token * qkv_row_stride
-    src_base = qkv_row + group * HEAD_DIM
-    q_out_base = token * NUM_Q_HEADS * HEAD_DIM + group * HEAD_DIM
-    k_out_base = token * NUM_KV_HEADS * HEAD_DIM + k_head * HEAD_DIM
+    q_group_end = NUM_Q_HEADS
+    kv_k_group_end = q_group_end + NUM_KV_HEADS
+    idx_q_group_end = kv_k_group_end + NUM_IDX_Q_HEADS
+    idx_k_output_head = NUM_Q_HEADS + 2 * NUM_KV_HEADS + NUM_IDX_Q_HEADS
 
+    is_q = output_group < q_group_end
+    is_k = (output_group >= q_group_end) & (output_group < kv_k_group_end)
+    is_idx_q = (output_group >= kv_k_group_end) & (output_group < idx_q_group_end)
+    fused_output_head = tl.where(
+        is_idx_q,
+        output_group + NUM_KV_HEADS,  # skip V heads between K and idx_Q
+        tl.where(output_group >= idx_q_group_end, idx_k_output_head, output_group),
+    )
+
+    fused_row = token_id * FUSED_ROW_STRIDE
+    fused_head_base = fused_row + fused_output_head * HEAD_DIM
+
+    decode_kv_len = tl.load(seq_lens_ptr + token_id).to(tl.int64)
+    token_pos = decode_kv_len - 1
+    page_index = token_pos // PAGE_SIZE
+    page_offset = token_pos - page_index * PAGE_SIZE
+    kv_block_id = tl.load(
+        block_table_ptr + token_id * BT_STRIDE_B + page_index * BT_STRIDE_BLK,
+        mask=decode_kv_len > 0,
+        other=-1,
+    ).to(tl.int64)
     head_off = tl.arange(0, BLOCK_HEAD)
     head_mask = head_off < HEAD_DIM
-    x = tl.load(qkv_ptr + src_base + head_off, mask=head_mask, other=0.0).to(tl.float32)
-    q_w = tl.load(q_weight_ptr + head_off, mask=head_mask, other=0.0).to(tl.float32)
-    k_w = tl.load(k_weight_ptr + head_off, mask=head_mask, other=0.0).to(tl.float32)
-    w = tl.where(is_q, q_w, k_w)
+    x = tl.load(fused_ptr + fused_head_base + head_off, mask=head_mask, other=0.0).to(
+        tl.float32
+    )
+
+    weight_ptr = tl.where(
+        is_q,
+        q_weight_ptr,
+        tl.where(
+            is_k,
+            k_weight_ptr,
+            tl.where(is_idx_q, idx_q_weight_ptr, idx_k_weight_ptr),
+        ),
+    )
+    w = tl.load(weight_ptr + head_off, mask=head_mask, other=0.0).to(tl.float32)
     var = tl.sum(x * x) / HEAD_DIM
     rrms = tl.rsqrt(var + EPS)
 
-    pos = tl.load(pos_ids_ptr + token).to(tl.int64)
+    pos = tl.load(pos_ids_ptr + token_id).to(tl.int64)
     rot_off = tl.arange(0, BLOCK_HALF)
     rot_mask = rot_off < HALF_ROT
     cos = tl.load(
-        cos_sin_ptr + pos * cos_sin_row_stride + rot_off,
+        cos_sin_ptr + pos * COS_SIN_ROW_STRIDE + rot_off,
         mask=rot_mask,
         other=0.0,
     ).to(tl.float32)
     sin = tl.load(
-        cos_sin_ptr + pos * cos_sin_row_stride + HALF_ROT + rot_off,
+        cos_sin_ptr + pos * COS_SIN_ROW_STRIDE + HALF_ROT + rot_off,
         mask=rot_mask,
         other=0.0,
     ).to(tl.float32)
 
-    first = tl.load(qkv_ptr + src_base + rot_off, mask=rot_mask, other=0.0).to(
+    first = tl.load(fused_ptr + fused_head_base + rot_off, mask=rot_mask, other=0.0).to(
         tl.float32
     )
     second = tl.load(
-        qkv_ptr + src_base + HALF_ROT + rot_off,
+        fused_ptr + fused_head_base + HALF_ROT + rot_off,
         mask=rot_mask,
         other=0.0,
     ).to(tl.float32)
-    q_w_first = tl.load(q_weight_ptr + rot_off, mask=rot_mask, other=0.0).to(tl.float32)
-    q_w_second = tl.load(
-        q_weight_ptr + HALF_ROT + rot_off,
-        mask=rot_mask,
-        other=0.0,
-    ).to(tl.float32)
-    k_w_first = tl.load(k_weight_ptr + rot_off, mask=rot_mask, other=0.0).to(tl.float32)
-    k_w_second = tl.load(
-        k_weight_ptr + HALF_ROT + rot_off,
-        mask=rot_mask,
-        other=0.0,
-    ).to(tl.float32)
-    w_first = tl.where(is_q, q_w_first, k_w_first)
-    w_second = tl.where(is_q, q_w_second, k_w_second)
-    # Match the original path: flashinfer.rmsnorm materializes BF16 q/k before
-    # flashinfer RoPE reads them. Keeping FP32 normalized values here changes
-    # q/k by up to one BF16 bucket after rotation.
+    w_first = tl.load(weight_ptr + rot_off, mask=rot_mask, other=0.0).to(tl.float32)
+    w_second = tl.load(weight_ptr + HALF_ROT + rot_off, mask=rot_mask, other=0.0).to(
+        tl.float32
+    )
+    # Match the original path: RMSNorm materializes BF16 Q/K/idx_Q/idx_K
+    # before RoPE reads them. Keeping FP32 normalized values here is a real
+    # numerical behavior change from the unfused decode path.
     first = (first * rrms * w_first).to(tl.bfloat16).to(tl.float32)
     second = (second * rrms * w_second).to(tl.bfloat16).to(tl.float32)
     rot_first = first * cos - second * sin
     rot_second = second * cos + first * sin
-
+    q_out_head = tl.where(is_q, output_group, 0)
+    idx_q_head = tl.where(is_idx_q, output_group - kv_k_group_end, 0)
+    q_out_base = token_id * Q_STRIDE_T + q_out_head * Q_STRIDE_H
+    idx_q_out_base = token_id * IDX_Q_STRIDE_T + idx_q_head * IDX_Q_STRIDE_H
     tl.store(
-        q_ptr + q_out_base + rot_off,
-        rot_first.to(q_ptr.dtype.element_ty),
+        q_out_ptr + q_out_base + rot_off * Q_STRIDE_D,
+        rot_first.to(q_out_ptr.dtype.element_ty),
         mask=rot_mask & is_q,
     )
     tl.store(
-        q_ptr + q_out_base + HALF_ROT + rot_off,
-        rot_second.to(q_ptr.dtype.element_ty),
+        q_out_ptr + q_out_base + (HALF_ROT + rot_off) * Q_STRIDE_D,
+        rot_second.to(q_out_ptr.dtype.element_ty),
         mask=rot_mask & is_q,
     )
     tl.store(
-        k_ptr + k_out_base + rot_off,
-        rot_first.to(k_ptr.dtype.element_ty),
-        mask=rot_mask & (~is_q),
+        idx_q_out_ptr + idx_q_out_base + rot_off * IDX_Q_STRIDE_D,
+        rot_first.to(idx_q_out_ptr.dtype.element_ty),
+        mask=rot_mask & is_idx_q,
     )
     tl.store(
-        k_ptr + k_out_base + HALF_ROT + rot_off,
-        rot_second.to(k_ptr.dtype.element_ty),
-        mask=rot_mask & (~is_q),
+        idx_q_out_ptr + idx_q_out_base + (HALF_ROT + rot_off) * IDX_Q_STRIDE_D,
+        rot_second.to(idx_q_out_ptr.dtype.element_ty),
+        mask=rot_mask & is_idx_q,
     )
 
     rem_off = tl.arange(0, BLOCK_REM)
     rem_mask = rem_off < REM
     if REM > 0:
-        q_w_rem = tl.load(
-            q_weight_ptr + ROTARY_DIM + rem_off,
-            mask=rem_mask,
-            other=0.0,
-        ).to(tl.float32)
-        k_w_rem = tl.load(
-            k_weight_ptr + ROTARY_DIM + rem_off,
+        w_rem = tl.load(
+            weight_ptr + ROTARY_DIM + rem_off,
             mask=rem_mask,
             other=0.0,
         ).to(tl.float32)
         rem = (
             tl.load(
-                qkv_ptr + src_base + ROTARY_DIM + rem_off,
+                fused_ptr + fused_head_base + ROTARY_DIM + rem_off,
                 mask=rem_mask,
                 other=0.0,
             ).to(tl.float32)
             * rrms
-            * tl.where(is_q, q_w_rem, k_w_rem)
+            * w_rem
         )
         tl.store(
-            q_ptr + q_out_base + ROTARY_DIM + rem_off,
-            rem.to(q_ptr.dtype.element_ty),
+            q_out_ptr + q_out_base + (ROTARY_DIM + rem_off) * Q_STRIDE_D,
+            rem.to(q_out_ptr.dtype.element_ty),
             mask=rem_mask & is_q,
         )
         tl.store(
-            k_ptr + k_out_base + ROTARY_DIM + rem_off,
-            rem.to(k_ptr.dtype.element_ty),
-            mask=rem_mask & (~is_q),
+            idx_q_out_ptr + idx_q_out_base + (ROTARY_DIM + rem_off) * IDX_Q_STRIDE_D,
+            rem.to(idx_q_out_ptr.dtype.element_ty),
+            mask=rem_mask & is_idx_q,
+        )
+
+    valid_paged_slot = kv_block_id >= 0
+    store_block = tl.where(valid_paged_slot, kv_block_id, 0)
+    store_page_offset = tl.where(valid_paged_slot, page_offset, 0)
+
+    kv_head = output_group - q_group_end
+    store_kv_head = tl.where(is_k, kv_head, 0)
+    paged_k_offset = (
+        store_block * KV_STRIDE_BLOCK
+        + store_kv_head * KV_STRIDE_HEAD
+        + store_page_offset * KV_STRIDE_PAGE
+        + head_off * KV_STRIDE_DIM
+    )
+    kv_store_mask = head_mask & valid_paged_slot & is_k
+    v_output_head = NUM_Q_HEADS + NUM_KV_HEADS + store_kv_head
+    v_output_base = fused_row + v_output_head * HEAD_DIM
+    tl.store(
+        paged_kv_ptr + paged_k_offset + KV_STRIDE_KV,
+        tl.load(fused_ptr + v_output_base + head_off, mask=head_mask, other=0.0),
+        mask=kv_store_mask,
+    )
+
+    is_idx_k = output_group >= idx_q_group_end
+    paged_token_slot = store_block * PAGE_SIZE + store_page_offset
+
+    # K/idx_K are consumed only by paged caches, so write them directly. Reloading
+    # from fused_ptr after an in-kernel store is not ordered and can corrupt K.
+    k_store_base = (
+        store_block * KV_STRIDE_BLOCK
+        + store_kv_head * KV_STRIDE_HEAD
+        + store_page_offset * KV_STRIDE_PAGE
+    )
+    tl.store(
+        paged_kv_ptr + k_store_base + rot_off * KV_STRIDE_DIM,
+        rot_first.to(paged_kv_ptr.dtype.element_ty),
+        mask=rot_mask & valid_paged_slot & is_k,
+    )
+    tl.store(
+        paged_kv_ptr + k_store_base + (HALF_ROT + rot_off) * KV_STRIDE_DIM,
+        rot_second.to(paged_kv_ptr.dtype.element_ty),
+        mask=rot_mask & valid_paged_slot & is_k,
+    )
+    tl.store(
+        paged_idx_k_ptr + paged_token_slot * HEAD_DIM + rot_off,
+        rot_first.to(paged_idx_k_ptr.dtype.element_ty),
+        mask=rot_mask & valid_paged_slot & is_idx_k,
+    )
+    tl.store(
+        paged_idx_k_ptr + paged_token_slot * HEAD_DIM + HALF_ROT + rot_off,
+        rot_second.to(paged_idx_k_ptr.dtype.element_ty),
+        mask=rot_mask & valid_paged_slot & is_idx_k,
+    )
+    if REM > 0:
+        tl.store(
+            paged_kv_ptr + k_store_base + (ROTARY_DIM + rem_off) * KV_STRIDE_DIM,
+            rem.to(paged_kv_ptr.dtype.element_ty),
+            mask=rem_mask & valid_paged_slot & is_k,
+        )
+        tl.store(
+            paged_idx_k_ptr + paged_token_slot * HEAD_DIM + ROTARY_DIM + rem_off,
+            rem.to(paged_idx_k_ptr.dtype.element_ty),
+            mask=rem_mask & valid_paged_slot & is_idx_k,
         )
 
 
-def _fused_qk_norm_rope_split_decode(
-    qkv: torch.Tensor,
+def _fused_qk_idx_norm_rope_write_paged_decode(
+    fused_qkv_idx_out: torch.Tensor,
+    q_out: torch.Tensor,
+    idx_q_out: torch.Tensor,
     q_weight: torch.Tensor,
     k_weight: torch.Tensor,
+    idx_q_weight: torch.Tensor,
+    idx_k_weight: torch.Tensor,
     cos_sin_cache: torch.Tensor,
     pos_ids: torch.Tensor,
-    q: torch.Tensor,
-    k: torch.Tensor,
+    seq_lens: torch.Tensor,
+    phys_block_table: torch.Tensor,
+    paged_kv_base: torch.Tensor,
+    paged_idx_k_flat: torch.Tensor,
+    page_size: int,
     head_dim: int,
     rotary_dim: int,
     num_q_heads: int,
     num_kv_heads: int,
+    num_idx_q_heads: int,
     eps: float,
 ) -> None:
-    """Fused QK RMSNorm + Q/K split + NeoX RoPE for paged decode."""
-    T = qkv.shape[0]
+    """SGLang-style 4-group Gemma RMSNorm + NeoX RoPE for paged decode.
+
+    Q and idx_Q are written directly to their downstream contiguous outputs.
+    K/V and idx_K are persisted into the paged cache. The original fallback path
+    materializes bf16 after RMSNorm before RoPE, so keep that as the numerical
+    reference when needed.
+    """
+    T = fused_qkv_idx_out.shape[0]
     if T == 0:
         return
     half_rot = rotary_dim // 2
@@ -448,21 +563,43 @@ def _fused_qk_norm_rope_split_decode(
     if pos_ids.dtype != torch.int32:
         pos_ids = pos_ids.to(torch.int32)
 
-    _fused_qk_norm_rope_split_decode_kernel[(T, num_q_heads + num_kv_heads)](
-        qkv,
+    total_norm_heads = num_q_heads + num_kv_heads + num_idx_q_heads + 1
+    _fused_qk_idx_norm_rope_write_paged_decode_kernel[(T, total_norm_heads)](
+        fused_qkv_idx_out,
+        q_out,
+        idx_q_out,
         q_weight,
         k_weight,
+        idx_q_weight,
+        idx_k_weight,
         cos_sin_cache,
         pos_ids,
-        q,
-        k,
-        qkv.stride(0),
-        cos_sin_cache.stride(0),
+        seq_lens,
+        phys_block_table,
+        paged_kv_base,
+        paged_idx_k_flat,
+        FUSED_ROW_STRIDE=int(fused_qkv_idx_out.stride(0)),
+        Q_STRIDE_T=int(q_out.stride(0)),
+        Q_STRIDE_H=int(q_out.stride(1)),
+        Q_STRIDE_D=int(q_out.stride(2)),
+        IDX_Q_STRIDE_T=int(idx_q_out.stride(0)),
+        IDX_Q_STRIDE_H=int(idx_q_out.stride(1)),
+        IDX_Q_STRIDE_D=int(idx_q_out.stride(2)),
+        COS_SIN_ROW_STRIDE=int(cos_sin_cache.stride(0)),
+        BT_STRIDE_B=int(phys_block_table.stride(0)),
+        BT_STRIDE_BLK=int(phys_block_table.stride(1)),
+        KV_STRIDE_BLOCK=int(paged_kv_base.stride(0)),
+        KV_STRIDE_KV=int(paged_kv_base.stride(1)),
+        KV_STRIDE_HEAD=int(paged_kv_base.stride(2)),
+        KV_STRIDE_PAGE=int(paged_kv_base.stride(3)),
+        KV_STRIDE_DIM=int(paged_kv_base.stride(4)),
+        PAGE_SIZE=page_size,
         HEAD_DIM=head_dim,
         ROTARY_DIM=rotary_dim,
         HALF_ROT=half_rot,
         NUM_Q_HEADS=num_q_heads,
         NUM_KV_HEADS=num_kv_heads,
+        NUM_IDX_Q_HEADS=num_idx_q_heads,
         EPS=eps,
         BLOCK_HEAD=block_head,
         BLOCK_HALF=block_half,
@@ -546,7 +683,9 @@ def _fused_unpack_packed_cp(
 
 
 @triton.jit
-def _rows_to_contig_kernel(src, out, T, row_stride, ROW: tl.constexpr, BLK: tl.constexpr):
+def _rows_to_contig_kernel(
+    src, out, T, row_stride, ROW: tl.constexpr, BLK: tl.constexpr
+):
     t = tl.program_id(0)
     if t >= T:
         return
@@ -570,7 +709,9 @@ def _rows_to_contig(x: torch.Tensor) -> torch.Tensor:
     if x.stride(2) != 1 or x.stride(1) != hd:
         return x.contiguous()
     out = torch.empty((T, H, hd), dtype=x.dtype, device=x.device)
-    _rows_to_contig_kernel[(T,)](x, out, T, x.stride(0), ROW=H * hd, BLK=2048, num_warps=8)
+    _rows_to_contig_kernel[(T,)](
+        x, out, T, x.stride(0), ROW=H * hd, BLK=2048, num_warps=8
+    )
     return out
 
 
@@ -990,6 +1131,126 @@ class _IdxKScratch:
 _IDX_K_SCRATCH = _IdxKScratch()
 
 
+class _Mxfp8FusedQKVIndexProj(nn.Module):
+    """MXFP8 output-dim concat projection for MSA decode QKV + idx_Q + idx_K.
+
+    This is intentionally narrow: it only supports the current MiniMax-M3
+    decode business path where qkv_proj is CudaMxfp8Linear and idx_Q/idx_K are
+    loaded in MXFP8 form. Normal BF16-dequantized idx weights use the
+    original unfused F.linear fallback.
+    """
+
+    def __init__(self, fused_linear: CudaMxfp8Linear) -> None:
+        super().__init__()
+        self.fused_linear = fused_linear
+
+    @staticmethod
+    def _valid_weight_shapes(
+        qkv_w: Optional[torch.Tensor],
+        idx_q_w: torch.Tensor,
+        idx_k_w: torch.Tensor,
+        expected_qkv_dim: int,
+    ) -> bool:
+        return (
+            qkv_w is not None
+            and qkv_w.dim() == 2
+            and idx_q_w.dim() == 2
+            and idx_k_w.dim() == 2
+            and int(qkv_w.shape[0]) == int(expected_qkv_dim)
+            and int(qkv_w.shape[1]) == int(idx_q_w.shape[1])
+            and int(qkv_w.shape[1]) == int(idx_k_w.shape[1])
+        )
+
+    @staticmethod
+    def _mxfp8_scale_inv_to_weight_scale(
+        weight: torch.Tensor, scale_inv: torch.Tensor
+    ) -> torch.Tensor:
+        if weight.dtype != torch.float8_e4m3fn or scale_inv.dtype != torch.uint8:
+            raise ValueError(
+                "MSA idx weight must be float8_e4m3fn with uint8 scale_inv"
+            )
+        if weight.dim() != 2 or scale_inv.dim() != 2:
+            raise ValueError("MSA idx weight and scale_inv must be 2D")
+        n, k = weight.shape
+        expected = (int(k) + 31) // 32
+        if int(scale_inv.shape[0]) != int(n) or int(scale_inv.shape[1]) != expected:
+            raise ValueError(
+                f"MSA idx scale_inv shape mismatch: weight={tuple(weight.shape)}, "
+                f"scale={tuple(scale_inv.shape)}, expected second dim {expected}"
+            )
+        return torch.exp2(scale_inv.to(torch.float32) - 127.0).contiguous()
+
+    @classmethod
+    @torch.inference_mode()
+    def build(
+        cls,
+        qkv_proj: nn.Module,
+        expected_qkv_dim: int,
+        idx_q_w: Optional[torch.Tensor],
+        idx_q_s: Optional[torch.Tensor],
+        idx_k_w: Optional[torch.Tensor],
+        idx_k_s: Optional[torch.Tensor],
+    ) -> Optional["_Mxfp8FusedQKVIndexProj"]:
+        if not isinstance(qkv_proj, CudaMxfp8Linear):
+            return None
+        qkv_w = getattr(qkv_proj, "weight", None)
+        qkv_s = getattr(qkv_proj, "weight_scale", None)
+        qkv_b = getattr(qkv_proj, "bias", None)
+        if (
+            qkv_b is not None
+            or qkv_w is None
+            or qkv_w.dtype != torch.float8_e4m3fn
+            or qkv_s is None
+            or qkv_s.dtype != torch.float32
+            or idx_q_w is None
+            or idx_q_s is None
+            or idx_k_w is None
+            or idx_k_s is None
+        ):
+            return None
+        if not cls._valid_weight_shapes(qkv_w, idx_q_w, idx_k_w, expected_qkv_dim):
+            return None
+        scale_cols = (int(qkv_w.shape[1]) + 31) // 32
+        if (
+            int(qkv_s.shape[0]) != int(qkv_w.shape[0])
+            or int(qkv_s.shape[1]) != scale_cols
+        ):
+            return None
+
+        idx_q_weight_scale = cls._mxfp8_scale_inv_to_weight_scale(idx_q_w, idx_q_s)
+        idx_k_weight_scale = cls._mxfp8_scale_inv_to_weight_scale(idx_k_w, idx_k_s)
+        if (
+            int(idx_q_weight_scale.shape[1]) != scale_cols
+            or int(idx_k_weight_scale.shape[1]) != scale_cols
+        ):
+            return None
+        fused_w = torch.cat(
+            [qkv_w.contiguous(), idx_q_w.contiguous(), idx_k_w.contiguous()],
+            dim=0,
+        ).contiguous()
+        fused_s = torch.cat(
+            [qkv_s.contiguous(), idx_q_weight_scale, idx_k_weight_scale], dim=0
+        ).contiguous()
+        fused_linear = CudaMxfp8Linear(
+            weight=fused_w,
+            weight_scales=fused_s,
+            input_scales=None,
+            bias=None,
+            quant_config=None,
+        )
+        # Build-time packing keeps the first decode/capture step free of this
+        # one-time MXFP8 scale transform.
+        fused_linear._packed_weight_scale()
+        return cls(fused_linear=fused_linear)
+
+    def forward(
+        self,
+        x_fp8: torch.Tensor,
+        x_scale: torch.Tensor,
+    ) -> torch.Tensor:
+        return self.fused_linear(x_fp8, input_scales=x_scale)
+
+
 class MSAAttention(nn.Module):
     """MiniMax-M3 sparse attention for a single sparse layer."""
 
@@ -1007,6 +1268,101 @@ class MSAAttention(nn.Module):
             ws = torch.zeros(256 * 1024 * 1024, dtype=torch.uint8, device=device)
             cls._trtllm_workspace[device] = ws
         return ws
+
+    def _maybe_build_mxfp8_fused_qkv_idx_proj(self) -> None:
+        if not self._has_raw_mxfp8_idx_weights:
+            self._mxfp8_fused_qkv_idx_proj = None
+            self._can_use_mxfp8_fused_qkv_idx_decode = False
+            return
+
+        expected_qkv_dim = self.q_size + 2 * self.kv_size
+        self._mxfp8_fused_qkv_idx_proj = _Mxfp8FusedQKVIndexProj.build(
+            self.qkv_proj,
+            expected_qkv_dim,
+            self.idx_q_raw_w,
+            self.idx_q_raw_s,
+            self.idx_k_raw_w,
+            self.idx_k_raw_s,
+        )
+        fused_decode_ready = (
+            self._mxfp8_fused_qkv_idx_proj is not None
+            and self.qk_fuse_norm is not None
+            and self.cos_sin_cache is not None
+            and not self._rope_interleave
+            and int(self.head_dim) == int(self.idx_head_dim)
+            and int(self.rotary_dim) <= int(self.head_dim)
+        )
+        self._can_use_mxfp8_fused_qkv_idx_decode = fused_decode_ready
+
+    def _should_use_mxfp8_fused_qkv_idx_decode(
+        self,
+        x_fp8: Optional[torch.Tensor],
+        x_scale: Optional[torch.Tensor],
+    ) -> bool:
+        return (
+            self._can_use_mxfp8_fused_qkv_idx_decode
+            and x_fp8 is not None
+            and x_scale is not None
+        )
+
+    def _decode_project_fused_qkv_idx(
+        self,
+        total_tokens: int,
+        positions: torch.Tensor,
+        seq_lens: torch.Tensor,
+        phys_block_table: torch.Tensor,
+        paged_kv_base: torch.Tensor,
+        paged_idx_k_flat: torch.Tensor,
+        x_fp8: torch.Tensor,
+        x_scale: torch.Tensor,
+    ):
+        fused_qkv_idx = self._mxfp8_fused_qkv_idx_proj(x_fp8=x_fp8, x_scale=x_scale)
+        if (
+            paged_kv_base.dtype != fused_qkv_idx.dtype
+            or paged_idx_k_flat.dtype != fused_qkv_idx.dtype
+        ):
+            raise RuntimeError(
+                "M3_MSA_RAW_IDX_MXFP8 fused paged decode requires BF16 paged "
+                "KV cache and BF16 idx_K cache view. Disable M3_MSA_RAW_IDX_MXFP8 "
+                "to use the BF16 idx fallback."
+            )
+        q = torch.empty(
+            total_tokens,
+            self.head_num,
+            self.head_dim,
+            dtype=fused_qkv_idx.dtype,
+            device=fused_qkv_idx.device,
+        )
+        idx_q = torch.empty(
+            total_tokens,
+            self.num_idx_heads,
+            self.idx_head_dim,
+            dtype=fused_qkv_idx.dtype,
+            device=fused_qkv_idx.device,
+        )
+        _fused_qk_idx_norm_rope_write_paged_decode(
+            fused_qkv_idx,
+            q,
+            idx_q,
+            self.qk_fuse_norm.q_weight,
+            self.qk_fuse_norm.k_weight,
+            self.idx_q_norm_w,
+            self.idx_k_norm_w,
+            self.cos_sin_cache,
+            positions,
+            seq_lens,
+            phys_block_table,
+            paged_kv_base,
+            paged_idx_k_flat,
+            int(self.page_size),
+            self.head_dim,
+            self.rotary_dim,
+            self.head_num,
+            self.kv_head_num,
+            self.num_idx_heads,
+            self.layernorm_eps,
+        )
+        return q, idx_q
 
     def _maybe_trtllm_workspace(self, device: torch.device):
         """Workspace for the trtllm-gen MSA fast path, or None to force the Triton path.
@@ -1104,26 +1460,51 @@ class MSAAttention(nn.Module):
                 layernorm_eps,
             )
 
-        # --- index branch (BF16; dequantized from MXFP8 at load) ---
+        # --- index branch ---
+        # BF16 idx projections are always present for the original/F.linear
+        # fallback. Optional raw MXFP8 copies feed only the fused decode matmul.
         self.idx_head_dim = int(sparse_config["idx_head_dim"])
-        full_idx_q_w = weights[W.msa_idx_q_w]  # [num_idx_heads*idx_dim, hidden]
-        self.idx_k_w = weights[W.msa_idx_k_w]  # [idx_dim, hidden]
         self.idx_q_norm_w = weights[W.msa_idx_q_norm]  # [idx_dim]
         self.idx_k_norm_w = weights[W.msa_idx_k_norm]  # [idx_dim]
+        has_bf16_idx_w = W.msa_idx_q_w in weights and W.msa_idx_k_w in weights
+        raw_idx_key_count = sum(
+            key in weights
+            for key in (
+                W.msa_idx_q_raw_w,
+                W.msa_idx_q_raw_s,
+                W.msa_idx_k_raw_w,
+                W.msa_idx_k_raw_s,
+            )
+        )
+        if not has_bf16_idx_w or raw_idx_key_count not in (0, 4):
+            raise RuntimeError(
+                "MSA idx weights must contain BF16 q/k weights and either all "
+                "raw MXFP8 q/k weights+scales or none. Check M3_MSA_RAW_IDX_MXFP8."
+            )
+
+        self.idx_q_w: Optional[torch.Tensor] = None
+        self.idx_k_w: Optional[torch.Tensor] = None
+        self.idx_q_raw_w: Optional[torch.Tensor] = None
+        self.idx_q_raw_s: Optional[torch.Tensor] = None
+        self.idx_k_raw_w: Optional[torch.Tensor] = None
+        self.idx_k_raw_s: Optional[torch.Tensor] = None
+        self._has_raw_mxfp8_idx_weights = raw_idx_key_count == 4
+
+        full_idx_q_w_for_heads = weights[W.msa_idx_q_w]
         self.total_idx_heads = int(
             sparse_config.get(
-                "num_idx_heads", full_idx_q_w.shape[0] // self.idx_head_dim
+                "num_idx_heads", full_idx_q_w_for_heads.shape[0] // self.idx_head_dim
             )
         )
         self.num_idx_heads = self._local_idx_heads()
-        loaded_idx_heads = full_idx_q_w.shape[0] // self.idx_head_dim
+        loaded_idx_heads = full_idx_q_w_for_heads.shape[0] // self.idx_head_dim
         if loaded_idx_heads == self.total_idx_heads:
             start_head = self.idx_head_rank * self.num_idx_heads
             start = start_head * self.idx_head_dim
             end = start + self.num_idx_heads * self.idx_head_dim
-            self.idx_q_w = full_idx_q_w[start:end].contiguous()
         elif loaded_idx_heads == self.num_idx_heads:
-            self.idx_q_w = full_idx_q_w.contiguous()
+            start = 0
+            end = full_idx_q_w_for_heads.shape[0]
         else:
             raise RuntimeError(
                 "unexpected MSA index_q weight shape: "
@@ -1131,6 +1512,17 @@ class MSAAttention(nn.Module):
                 f"total_idx_heads={self.total_idx_heads}, "
                 f"local_idx_heads={self.num_idx_heads}"
             )
+
+        self.idx_q_w = weights[W.msa_idx_q_w][start:end].contiguous()
+        self.idx_k_w = weights[W.msa_idx_k_w].contiguous()
+        if self._has_raw_mxfp8_idx_weights:
+            self.idx_q_raw_w = weights[W.msa_idx_q_raw_w][start:end].contiguous()
+            self.idx_q_raw_s = weights[W.msa_idx_q_raw_s][start:end].contiguous()
+            self.idx_k_raw_w = weights[W.msa_idx_k_raw_w].contiguous()
+            self.idx_k_raw_s = weights[W.msa_idx_k_raw_s].contiguous()
+
+        self._mxfp8_fused_qkv_idx_proj: Optional[_Mxfp8FusedQKVIndexProj] = None
+        self._can_use_mxfp8_fused_qkv_idx_decode = False
 
         # --- sparse params ---
         self.topk_blocks = int(sparse_config["topk_blocks"])
@@ -1165,6 +1557,8 @@ class MSAAttention(nn.Module):
             self.cos_sin_cache = None
             self.rotary_dim = 0
 
+        self._maybe_build_mxfp8_fused_qkv_idx_proj()
+
         # Paged-only store: the main K/V live in the standard cache-manager
         # paged pool (kv_cache_base) and idx_K in its scale region
         # (kv_scale_base, reinterpreted as BF16). Both are PD-transferable and
@@ -1185,7 +1579,7 @@ class MSAAttention(nn.Module):
 
     def _check_paged_decode_static(self, kv_cache: LayerKVCache) -> bool:
         if (
-            (not _USE_PAGED_DECODE)
+            kv_cache is None
             or self._kv_sharded
             or int(self.page_size) != int(self.block_size)
             or (not self.disable_index_value)
@@ -1197,6 +1591,7 @@ class MSAAttention(nn.Module):
         if (
             base is None
             or base.dim() != 5
+            or base.dtype != torch.bfloat16
             or int(base.shape[2]) != int(self.kv_head_num)
             or int(base.shape[3]) != int(self.page_size)
             or int(base.shape[4]) != int(self.head_dim)
@@ -1228,19 +1623,13 @@ class MSAAttention(nn.Module):
         seq = attn_inputs.sequence_lengths
         phys_block_table = self._physical_block_table(attn_inputs)
         cache_key = (
-            id(attn_inputs),
             int(seq.data_ptr()),
             tuple(seq.shape),
             str(seq.device),
-            int(phys_block_table.data_ptr()),
-            tuple(phys_block_table.shape),
-            str(phys_block_table.device),
             int(self.page_size),
         )
 
         # Sparse layers execute in increasing layer order within one decode step.
-        # Reuse metadata only for later sparse layers of the same attn_inputs and
-        # block-table snapshot; the key prevents cross-request or stale-step reuse.
         cache = MSAAttention._paged_decode_shared_meta
         if (
             cache is not None
@@ -1252,7 +1641,7 @@ class MSAAttention(nn.Module):
                 cache["kv_lens"],
                 cache["seq_lens"],
                 cache["positions"],
-                cache["phys_block_table"],
+                phys_block_table,
             )
 
         prefix_i64 = seq.to(device=device, dtype=torch.int64)
@@ -1265,7 +1654,6 @@ class MSAAttention(nn.Module):
             "kv_lens": kv_lens,
             "seq_lens": seq_lens,
             "positions": positions,
-            "phys_block_table": phys_block_table,
         }
         return kv_lens, seq_lens, positions, phys_block_table
 
@@ -2644,34 +3032,37 @@ class MSAAttention(nn.Module):
         total_tokens = hidden_states.shape[0]
         device = hidden_states.device
 
-        if x_fp8 is not None and x_scale is not None:
-            qkv = self.qkv_proj(x_fp8, input_scales=x_scale)
-        else:
-            qkv = self.qkv_proj(hidden_states)
-        can_fuse_qk = (
-            self.qk_fuse_norm is not None
-            and self.cos_sin_cache is not None
-            and not self._rope_interleave
+        kv_lens, seq_lens, positions, phys_block_table = self._paged_decode_addressing(
+            attn_inputs, device
         )
-        if can_fuse_qk:
-            q = torch.empty(
-                total_tokens,
-                self.head_num,
-                self.head_dim,
-                dtype=qkv.dtype,
-                device=device,
+
+        if self._should_use_mxfp8_fused_qkv_idx_decode(x_fp8, x_scale):
+            paged_kv_base = kv_cache.kv_cache_base
+            scale = kv_cache.kv_scale_base
+            paged_idx_k = scale.view(torch.bfloat16).view(
+                int(scale.shape[0]), int(self.page_size), int(self.idx_head_dim)
             )
-            k = torch.empty(
+            q, idx_q = self._decode_project_fused_qkv_idx(
                 total_tokens,
-                self.kv_head_num,
-                self.head_dim,
-                dtype=qkv.dtype,
-                device=device,
+                positions,
+                seq_lens,
+                phys_block_table,
+                paged_kv_base,
+                paged_idx_k.reshape(-1, self.idx_head_dim),
+                x_fp8=x_fp8,
+                x_scale=x_scale,
             )
-            v = qkv[:, self.q_size + self.kv_size :].reshape(
-                total_tokens, self.kv_head_num, self.head_dim
+            paged_decode_views = (
+                paged_kv_base[:, 0],
+                paged_kv_base[:, 1],
+                phys_block_table,
+                paged_idx_k,
             )
         else:
+            if x_fp8 is not None and x_scale is not None:
+                qkv = self.qkv_proj(x_fp8, input_scales=x_scale)
+            else:
+                qkv = self.qkv_proj(hidden_states)
             if self.qk_fuse_norm is not None:
                 qkv = self.qk_fuse_norm(qkv)
             q, k, v = torch.split(
@@ -2681,48 +3072,33 @@ class MSAAttention(nn.Module):
             k = k.reshape(total_tokens, self.kv_head_num, self.head_dim)
             v = v.reshape(total_tokens, self.kv_head_num, self.head_dim)
 
-        idx_q = F.linear(hidden_states, self.idx_q_w)
-        idx_k = F.linear(hidden_states, self.idx_k_w)
-        idx_q = idx_q.reshape(total_tokens, self.num_idx_heads, self.idx_head_dim)
-        idx_k = idx_k.reshape(total_tokens, 1, self.idx_head_dim)
-        idx_q = _gemma_rmsnorm_per_head(idx_q, self.idx_q_norm_w, self.layernorm_eps)
-        idx_k = _gemma_rmsnorm_per_head(idx_k, self.idx_k_norm_w, self.layernorm_eps)
-
-        kv_lens, seq_lens, positions, phys_block_table = self._paged_decode_addressing(
-            attn_inputs, device
-        )
-
-        if can_fuse_qk:
-            _fused_qk_norm_rope_split_decode(
-                qkv,
-                self.qk_fuse_norm.q_weight,
-                self.qk_fuse_norm.k_weight,
-                self.cos_sin_cache,
-                positions,
-                q,
-                k,
-                self.head_dim,
-                self.rotary_dim,
-                self.head_num,
-                self.kv_head_num,
-                self.qk_fuse_norm.eps,
+            idx_q = F.linear(hidden_states, self.idx_q_w)
+            idx_k = F.linear(hidden_states, self.idx_k_w)
+            idx_q = idx_q.reshape(total_tokens, self.num_idx_heads, self.idx_head_dim)
+            idx_k = idx_k.reshape(total_tokens, 1, self.idx_head_dim)
+            idx_q = _gemma_rmsnorm_per_head(
+                idx_q, self.idx_q_norm_w, self.layernorm_eps
             )
-        else:
+            idx_k = _gemma_rmsnorm_per_head(
+                idx_k, self.idx_k_norm_w, self.layernorm_eps
+            )
+
             q = q.contiguous()
             k = k.contiguous()
             self._apply_rope(q, k, positions)
-        idx_q = idx_q.contiguous()
-        idx_k = idx_k.contiguous()
-        self._apply_rope(idx_q, idx_k, positions)
+            idx_q = idx_q.contiguous()
+            idx_k = idx_k.contiguous()
+            self._apply_rope(idx_q, idx_k, positions)
 
-        paged_decode_views = self._write_kv_cache_and_idx_k_for_decode(
-            kv_cache, k, v, idx_k, seq_lens, phys_block_table
-        )
+            paged_decode_views = self._write_kv_cache_and_idx_k_for_decode(
+                kv_cache, k, v, idx_k, seq_lens, phys_block_table
+            )
         if paged_decode_views is None:
             raise RuntimeError(
-                "M3_MSA_PAGED_DECODE requires a BF16 5-D paged KV cache and "
-                "a BF16-compatible idx_K scale region. Disable M3_MSA_PAGED_DECODE "
-                "to use the original forward decode path."
+                "MSA paged decode requires a BF16 5-D paged KV cache and "
+                "a BF16-compatible idx_K scale region. The original forward "
+                "decode path is selected automatically when static paged KV "
+                "conditions are not satisfied."
             )
         paged_main_k, paged_main_v, phys_block_table, paged_idx_k = paged_decode_views
 
