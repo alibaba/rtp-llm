@@ -2,20 +2,34 @@ package org.flexlb.config;
 
 import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
+import org.apache.commons.lang3.StringUtils;
 import org.flexlb.util.JsonUtils;
 import org.springframework.stereotype.Component;
 
+import java.io.IOException;
 import java.lang.reflect.Field;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.Map;
 
 @Getter
 @Slf4j
 @Component
 public class ConfigService {
 
+    private static final String FLEXLB_CONFIG_ENV = "FLEXLB_CONFIG";
+    private static final String TRAFFIC_POLICY_CONFIG_ENV = "TRAFFIC_POLICY_CONFIG";
+    private static final String TRAFFIC_POLICY_CONFIG_FILE_ENV = "TRAFFIC_POLICY_CONFIG_FILE";
+
     private final FlexlbConfig flexlbConfig;
 
     public ConfigService() {
-        String lbConfigStr = System.getenv("FLEXLB_CONFIG");
+        this(System.getenv());
+    }
+
+    ConfigService(Map<String, String> environment) {
+        String lbConfigStr = environment.get(FLEXLB_CONFIG_ENV);
         log.warn("FLEXLB_CONFIG = {}", lbConfigStr);
         FlexlbConfig config;
         if (lbConfigStr != null) {
@@ -25,7 +39,8 @@ public class ConfigService {
         }
 
         // If corresponding advanced environment variables exist, override and update
-        applyEnvironmentOverrides(config);
+        applyEnvironmentOverrides(config, environment);
+        applyTrafficPolicyOverride(config, environment);
 
         this.flexlbConfig = config;
     }
@@ -34,12 +49,20 @@ public class ConfigService {
         return flexlbConfig;
     }
 
+    public synchronized void updateTrafficPolicy(TrafficPolicyConfig trafficPolicy) {
+        if (trafficPolicy == null) {
+            throw new IllegalArgumentException("trafficPolicy cannot be null");
+        }
+        flexlbConfig.setTrafficPolicy(trafficPolicy);
+        log.warn("Traffic policy updated: {}", JsonUtils.toStringOrEmpty(trafficPolicy));
+    }
+
     /**
      * Apply environment variable overrides to configuration
      * Environment variable naming rule: {FIELD_NAME_UPPER_SNAKE_CASE}
      * Example: enableQueueing -> ENABLE_QUEUEING
      */
-    private void applyEnvironmentOverrides(FlexlbConfig config) {
+    private void applyEnvironmentOverrides(FlexlbConfig config, Map<String, String> environment) {
         Field[] fields = FlexlbConfig.class.getDeclaredFields();
         for (Field field : fields) {
             // Only process primitive types and wrapper types
@@ -49,7 +72,7 @@ public class ConfigService {
             }
 
             String envVarName = camelToUpperSnakeCase(field.getName());
-            String envValue = System.getenv(envVarName);
+            String envValue = environment.get(envVarName);
 
             if (envValue != null && !envValue.trim().isEmpty()) {
                 try {
@@ -71,6 +94,35 @@ public class ConfigService {
                             e);
                 }
             }
+        }
+    }
+
+    /**
+     * Apply traffic policy from a standalone env var or file.
+     * Priority: TRAFFIC_POLICY_CONFIG > TRAFFIC_POLICY_CONFIG_FILE > FLEXLB_CONFIG.trafficPolicy.
+     */
+    private void applyTrafficPolicyOverride(FlexlbConfig config, Map<String, String> environment) {
+        String trafficPolicyConfig = environment.get(TRAFFIC_POLICY_CONFIG_ENV);
+        String trafficPolicyConfigFile = environment.get(TRAFFIC_POLICY_CONFIG_FILE_ENV);
+
+        if (StringUtils.isBlank(trafficPolicyConfig) && StringUtils.isNotBlank(trafficPolicyConfigFile)) {
+            trafficPolicyConfig = readConfigFile(trafficPolicyConfigFile);
+        }
+
+        if (StringUtils.isBlank(trafficPolicyConfig)) {
+            return;
+        }
+
+        TrafficPolicyConfig trafficPolicy = JsonUtils.toObject(trafficPolicyConfig, TrafficPolicyConfig.class);
+        config.setTrafficPolicy(trafficPolicy);
+        log.warn("Traffic policy loaded from standalone config: {}", JsonUtils.toStringOrEmpty(trafficPolicy));
+    }
+
+    private String readConfigFile(String filePath) {
+        try {
+            return Files.readString(Path.of(filePath), StandardCharsets.UTF_8);
+        } catch (IOException e) {
+            throw new IllegalArgumentException("Failed to read config file: " + filePath, e);
         }
     }
 

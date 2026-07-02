@@ -2,13 +2,19 @@ package org.flexlb.balance.strategy;
 
 import org.apache.commons.collections4.CollectionUtils;
 import org.apache.commons.collections4.MapUtils;
+import org.flexlb.balance.resource.ResourceMeasure;
+import org.flexlb.balance.resource.ResourceMeasureFactory;
+import org.flexlb.config.ConfigService;
+import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
+import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.LoadBalanceStrategyEnum;
+import org.flexlb.enums.ResourceMeasureIndicatorEnum;
 import org.flexlb.sync.status.EngineWorkerStatus;
 import org.flexlb.util.CommonUtils;
 import org.flexlb.util.Logger;
@@ -25,14 +31,25 @@ public class RandomStrategy implements LoadBalancer {
     private static final org.slf4j.Logger logger = LoggerFactory.getLogger(RandomStrategy.class);
 
     private final EngineWorkerStatus engineWorkerStatus;
+    private final ConfigService configService;
+    private final ResourceMeasureFactory resourceMeasureFactory;
 
-    public RandomStrategy(EngineWorkerStatus engineWorkerStatus) {
+    public RandomStrategy(EngineWorkerStatus engineWorkerStatus,
+                          ConfigService configService,
+                          ResourceMeasureFactory resourceMeasureFactory) {
         this.engineWorkerStatus = engineWorkerStatus;
+        this.configService = configService;
+        this.resourceMeasureFactory = resourceMeasureFactory;
         LoadBalanceStrategyFactory.register(LoadBalanceStrategyEnum.RANDOM, this);
     }
 
     @Override
     public void rollBack(String ipPort, long requestId) {
+        Map<String, WorkerStatus> workerStatusMap = engineWorkerStatus.selectModelWorkerStatus(RoleType.DECODE, null);
+        WorkerStatus workerStatus = workerStatusMap.get(ipPort);
+        if (workerStatus != null) {
+            workerStatus.removeLocalTask(requestId);
+        }
     }
 
     @Override
@@ -58,23 +75,43 @@ public class RandomStrategy implements LoadBalancer {
         WorkerStatus selectedWorker = null;
         for (int i = 0; i < size; i++) {
             WorkerStatus ws = workerStatuses.get((startIndex + i) % size);
-            if (ws != null && ws.isAlive()) {
+            if (isWorkerAvailable(balanceContext, roleType, ws)) {
                 selectedWorker = ws;
                 break;
             }
         }
         if (selectedWorker == null) {
-            logger.warn("No alive workers available out of {} total workers", size);
+            logger.warn("No serviceable workers available out of {} total workers", size);
             return ServerStatus.code(StrategyErrorType.NO_AVAILABLE_WORKER);
         }
 
         logger.debug("Selected worker ip: {}, httpPort: {}", selectedWorker.getIp(), selectedWorker.getPort());
-        return buildServerStatus(selectedWorker, roleType, balanceContext.getRequestId());
+        return buildServerStatus(selectedWorker, roleType, balanceContext.getRequestId(), request);
     }
 
-    private ServerStatus buildServerStatus(WorkerStatus worker, RoleType roleType, long requestId) {
+    private boolean isWorkerAvailable(BalanceContext balanceContext, RoleType roleType, WorkerStatus workerStatus) {
+        if (workerStatus == null || !workerStatus.isAlive()) {
+            return false;
+        }
+
+        FlexlbConfig config = balanceContext.getConfig() != null
+                ? balanceContext.getConfig()
+                : configService.loadBalanceConfig();
+        ResourceMeasureIndicatorEnum indicator = config.getResourceMeasureIndicator(roleType);
+        ResourceMeasure resourceMeasure = resourceMeasureFactory.getMeasure(indicator);
+        return resourceMeasure == null || resourceMeasure.isResourceAvailable(workerStatus);
+    }
+
+    private ServerStatus buildServerStatus(WorkerStatus worker, RoleType roleType, long requestId, Request request) {
         ServerStatus result = new ServerStatus();
         try {
+            if (RoleType.DECODE == roleType) {
+                TaskInfo taskInfo = new TaskInfo();
+                taskInfo.setRequestId(requestId);
+                taskInfo.setInputLength(request == null ? 0 : request.getSeqLen());
+                taskInfo.setPrefixLength(0);
+                worker.putLocalTask(requestId, taskInfo);
+            }
             result.setSuccess(true);
             result.setServerIp(worker.getIp());
             result.setHttpPort(worker.getPort());
