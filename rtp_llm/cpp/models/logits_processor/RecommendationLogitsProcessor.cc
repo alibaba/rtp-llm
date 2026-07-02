@@ -191,8 +191,8 @@ void RecommendationLogitsProcessor::process(const SamplerInputs& inputs, size_t 
     // 典型场景 combo_token_size=3、生成 20 个商品 → 整条请求约 7 次 D2H 同步，
     // 单次 PCIe 延迟 ~5-50μs，总计 < 0.5ms，相对 decode step 延迟 (ms 级) 可忽略。
     if (need_diverge_process) {
-        auto row_maxes = logits.max(/*dim=*/1).values;  // [batch_size], single kernel
-        auto row_maxes_cpu = row_maxes.cpu();           // single D2H sync
+        auto row_maxes = std::get<0>(logits.max(/*dim=*/1));  // [batch_size], single kernel
+        auto row_maxes_cpu = row_maxes.cpu();                 // single D2H sync
         auto row_maxes_acc = row_maxes_cpu.accessor<float, 1>();
         for (size_t i = 0; i < batch_size; ++i) {
             if (row_maxes_acc[i] == -std::numeric_limits<float>::infinity()) {
