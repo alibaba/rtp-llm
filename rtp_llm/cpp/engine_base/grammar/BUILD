@@ -8,7 +8,10 @@ cc_library(
     name = "grammar_xgrammar_cooker",
     hdrs = ["XGrammarTokenizerInfoCooker.h"],
     srcs = ["XGrammarTokenizerInfoCooker.cc"],
-    deps = ["@xgrammar//:xgrammar"],
+    deps = [
+        "@havenask//aios/autil:json",
+        "@xgrammar//:xgrammar",
+    ],
     visibility = ["//visibility:private"],
     copts = copts(),
 )
@@ -24,6 +27,7 @@ cc_library(
     ],
     deps = [
         ":grammar_xgrammar_cooker",
+        "//rtp_llm/cpp/config:model_config",
         "//rtp_llm/cpp/config:special_tokens",
         "//rtp_llm/cpp/utils:core_utils",
     ] + torch_deps(),
@@ -47,7 +51,6 @@ cc_library(
         "//rtp_llm/cpp/config:config_modules",
         "//rtp_llm/cpp/config:special_tokens",
         "//rtp_llm/cpp/utils:core_utils",
-        "@havenask//aios/autil:json",
         "@xgrammar//:xgrammar",
     ] + torch_deps(),
     copts = copts(),

@@ -20,9 +20,8 @@ def init_grammar_group_args(parser, grammar_config):
         help=(
             "Forwarded to xgrammar's GrammarCompiler as max_compiler_threads, "
             "which parallelizes FSM construction (NFA→DFA) within a single "
-            "compile. Each cache-miss compile already runs on its own detached "
-            "std::thread on the RTP-LLM side, so this knob only affects "
-            "intra-compile parallelism, not request-level concurrency. Raise "
+            "compile. This knob affects intra-compile parallelism, not request-level "
+            "concurrency. Raise "
             "for large/complex schemas; C++ clamps invalid values to at least 1."
         ),
     )
@@ -33,10 +32,7 @@ def init_grammar_group_args(parser, grammar_config):
         type=int,
         default=grammar_config.compiler_cache_bytes,
         help=(
-            "Byte cap on xgrammar's internal compiled-grammar cache. The outer "
-            "RTP-LLM LRU only bounds entry count, so this is the actual ceiling "
-            "on resident DFA memory. Set <=0 for unlimited (legacy). Default "
-            "256 MiB matches typical production schema reuse without throttling "
-            "legitimate workloads."
+            "Byte cap on xgrammar's internal compiled-grammar cache. Set <=0 "
+            "for unlimited."
         ),
     )

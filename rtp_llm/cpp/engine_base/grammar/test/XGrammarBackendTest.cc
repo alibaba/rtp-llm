@@ -32,11 +32,10 @@ std::string makeTokenizerInfoJson() {
 
 XGrammarBackendOptions defaultOptions() {
     XGrammarBackendOptions opts;
-    opts.any_whitespace        = true;
-    opts.strict_mode           = true;
-    opts.max_compiler_threads  = 2;
-    opts.enable_compiler_cache = true;
-    opts.compiler_cache_bytes  = -1;
+    opts.any_whitespace            = true;
+    opts.strict_mode               = true;
+    opts.max_compiler_threads      = 2;
+    opts.compiler_cache_bytes      = -1;
     return opts;
 }
 
@@ -49,7 +48,7 @@ TEST(XGrammarBackendTest, CompileBuiltinJSONViaSentinel) {
     XGrammarBackend backend(makeTokenizerInfoJson(), defaultOptions());
 
     GrammarKeyCpp key{"json", "$$ANY$$"};
-    auto          result = backend.compileNow(key);
+    auto          result = backend.getOrCompile(key);
     ASSERT_TRUE(result.compiled) << "$$ANY$$ should map to builtin JSON grammar";
     EXPECT_FALSE(result.is_invalid);
     EXPECT_GT(result.compiled->MemorySizeBytes(), 0u);
@@ -59,7 +58,7 @@ TEST(XGrammarBackendTest, CompileSimpleJsonSchema) {
     XGrammarBackend backend(makeTokenizerInfoJson(), defaultOptions());
     GrammarKeyCpp   key{"json", R"({"type":"object","properties":{"a":{"type":"integer"}},"required":["a"]})"};
 
-    auto result = backend.compileNow(key);
+    auto result = backend.getOrCompile(key);
     ASSERT_TRUE(result.compiled);
     EXPECT_FALSE(result.is_invalid);
     EXPECT_TRUE(result.error_message.empty());
@@ -70,208 +69,33 @@ TEST(XGrammarBackendTest, CompileMalformedJsonSchemaIsInvalid) {
     // Malformed JSON must surface as cacheable is_invalid, not throw.
     GrammarKeyCpp key{"json", "{this is not json at all"};
 
-    auto result = backend.compileNow(key);
+    auto result = backend.getOrCompile(key);
     EXPECT_FALSE(result.compiled);
     EXPECT_TRUE(result.is_invalid);
     EXPECT_FALSE(result.error_message.empty());
 }
 
-TEST(XGrammarBackendTest, OversizeKeyStringRejectedAtEntry) {
-    // Oversize payloads must be is_invalid without entering either cache (memory amplification guard).
-    XGrammarBackend backend(makeTokenizerInfoJson(), defaultOptions());
-    std::string     huge(64 * 1024 + 1, 'x');
-    GrammarKeyCpp   key{"json", huge};
-
-    auto result = backend.getOrCompile(key);
-    EXPECT_FALSE(result.compiled);
-    EXPECT_TRUE(result.is_invalid);
-    EXPECT_NE(result.error_message.find("too large"), std::string::npos);
-    EXPECT_TRUE(backend.getCachedInvalid(key).empty()) << "oversize keys must not populate invalid_cache_";
-    EXPECT_FALSE(backend.getCached(key)) << "oversize keys must not populate cache_";
-}
-
-TEST(XGrammarBackendTest, CacheGetAndSet) {
-    XGrammarBackend backend(makeTokenizerInfoJson(), defaultOptions());
-    GrammarKeyCpp   key{"json", R"({"type":"integer"})"};
-
-    EXPECT_FALSE(backend.getCached(key));
-
-    auto compiled = backend.compileNow(key).compiled;
-    ASSERT_TRUE(compiled);
-    backend.setCache(key, compiled);
-
-    auto cached = backend.getCached(key);
-    ASSERT_TRUE(cached);
-    EXPECT_EQ(cached.get(), compiled.get()) << "cache must hand back the same shared_ptr";
-}
-
-// LRU-bounded compiled-grammar cache; needs -fno-access-control for private capacity.
-TEST(XGrammarBackendTest, CompiledCacheBoundedByCapacity) {
-    XGrammarBackend backend(makeTokenizerInfoJson(), defaultOptions());
-    auto            compiled = backend.compileNow({"json", R"({"type":"integer"})"}).compiled;
-    ASSERT_TRUE(compiled);
-
-    const size_t cap = XGrammarBackend::kMaxCompiledCacheEntries;
-    for (size_t i = 0; i <= cap; ++i) {  // cap + 1 distinct keys
-        backend.setCache({"json", "k" + std::to_string(i)}, compiled);
-    }
-    EXPECT_FALSE(backend.getCached({"json", "k0"})) << "oldest key should have been evicted";
-    EXPECT_TRUE(backend.getCached({"json", "k" + std::to_string(cap)})) << "newest key must survive";
-}
-
-TEST(XGrammarBackendTest, CompiledCacheLruKeepsRecentlyUsed) {
-    XGrammarBackend backend(makeTokenizerInfoJson(), defaultOptions());
-    auto            compiled = backend.compileNow({"json", R"({"type":"integer"})"}).compiled;
-    ASSERT_TRUE(compiled);
-
-    const size_t cap = XGrammarBackend::kMaxCompiledCacheEntries;
-    for (size_t i = 0; i < cap; ++i) {  // fill to capacity: k0..k(cap-1)
-        backend.setCache({"json", "k" + std::to_string(i)}, compiled);
-    }
-    // Touching k0 promotes it; the next overflow now evicts k1 instead.
-    ASSERT_TRUE(backend.getCached({"json", "k0"}));
-    backend.setCache({"json", "k_extra"}, compiled);  // overflow by one
-
-    EXPECT_TRUE(backend.getCached({"json", "k0"})) << "recently-used key must survive eviction";
-    EXPECT_FALSE(backend.getCached({"json", "k1"})) << "least-recently-used key should be evicted";
-    EXPECT_TRUE(backend.getCached({"json", "k_extra"}));
-}
-
-TEST(XGrammarBackendTest, CompiledCacheRespectsByteBudget) {
-    XGrammarBackend compile_backend(makeTokenizerInfoJson(), defaultOptions());
-    auto            compiled = compile_backend.compileNow({"json", R"({"type":"integer"})"}).compiled;
-    ASSERT_TRUE(compiled);
-
-    GrammarKeyCpp key0{"json", "k0"};
-    GrammarKeyCpp key1{"json", "k1"};
-
-    XGrammarBackendOptions opts = defaultOptions();
-    opts.compiler_cache_bytes =
-        static_cast<int64_t>(XGrammarBackend::compiledEntryBytes(key0.id().size(), compiled) + 1);
-    XGrammarBackend backend(makeTokenizerInfoJson(), opts);
-
-    backend.setCache(key0, compiled);
-    EXPECT_TRUE(backend.getCached(key0));
-
-    backend.setCache(key1, compiled);
-    EXPECT_FALSE(backend.getCached(key0)) << "oldest compiled entry should be evicted by byte budget";
-    EXPECT_TRUE(backend.getCached(key1)) << "newest compiled entry must survive byte-budget eviction";
-    EXPECT_LE(backend.compiled_cache_bytes_, static_cast<size_t>(opts.compiler_cache_bytes));
-}
-
-// Invalid-cache byte budget pins worst-case memory below kMaxInvalidCacheBytes
-// even when the entry-count cap alone would admit much more.
-TEST(XGrammarBackendTest, InvalidCacheRespectsByteBudget) {
-    XGrammarBackend backend(makeTokenizerInfoJson(), defaultOptions());
-
-    // Each kid contributes ~kMaxKeyStringBytes; flooding well past the byte
-    // budget must be absorbed by LRU eviction, not by unbounded growth.
-    const size_t      payload_size = XGrammarBackend::kMaxKeyStringBytes - 64;
-    const std::string err          = "boom";
-    const size_t      n_writes     = (XGrammarBackend::kMaxInvalidCacheBytes / payload_size) * 4 + 16;
-
-    for (size_t i = 0; i < n_writes; ++i) {
-        std::string body(payload_size, 'a');
-        // Make every key distinct so no in-place update path is taken.
-        std::string suffix = std::to_string(i);
-        std::copy(suffix.begin(), suffix.end(), body.begin());
-        backend.setCacheInvalid({"json", body}, err);
-    }
-
-    // Exercise the most-recently-written key still being a hit.
-    std::string last_body(payload_size, 'a');
-    std::string last_suffix = std::to_string(n_writes - 1);
-    std::copy(last_suffix.begin(), last_suffix.end(), last_body.begin());
-    EXPECT_FALSE(backend.getCachedInvalid({"json", last_body}).empty()) << "MRU entry must survive eviction";
-
-    // Oldest key must have been evicted under the byte budget.
-    std::string first_body(payload_size, 'a');
-    first_body[0] = '0';
-    EXPECT_TRUE(backend.getCachedInvalid({"json", first_body}).empty()) << "oldest entry must be evicted";
-}
-
-// setCacheInvalid must reject oversize keys (mirrors getOrCompile size guard).
-TEST(XGrammarBackendTest, InvalidCacheRejectsOversizeKey) {
-    XGrammarBackend   backend(makeTokenizerInfoJson(), defaultOptions());
-    const std::string huge_key(XGrammarBackend::kMaxKeyStringBytes + 1, 'k');
-    backend.setCacheInvalid({"json", huge_key}, "boom");
-    EXPECT_TRUE(backend.getCachedInvalid({"json", huge_key}).empty()) << "oversize key must not enter invalid_cache_";
-}
-
-// invalid → valid → invalid: bytes counter must return to a per-entry value,
-// not accumulate phantom bytes from the dropped invalid on the valid transition.
-TEST(XGrammarBackendTest, InvalidCacheBytesAccountedOnValidTransition) {
-    XGrammarBackend     backend(makeTokenizerInfoJson(), defaultOptions());
-    const GrammarKeyCpp key{"json", R"({"type":"integer"})"};
-    const std::string   err = "boom";
-
-    backend.setCacheInvalid(key, err);
-    const size_t expected = XGrammarBackend::invalidEntryBytes(key.id().size(), err.size());
-    EXPECT_EQ(backend.invalid_cache_bytes_, expected);
-
-    auto compiled = backend.compileNow(key).compiled;
-    ASSERT_TRUE(compiled);
-    backend.setCache(key, compiled);
-    EXPECT_EQ(backend.compiled_cache_bytes_, XGrammarBackend::compiledEntryBytes(key.id().size(), compiled));
-    EXPECT_EQ(backend.invalid_cache_bytes_, 0u) << "valid transition must zero out the invalid byte counter";
-
-    backend.setCacheInvalid(key, err);
-    EXPECT_EQ(backend.compiled_cache_bytes_, 0u) << "invalid transition must zero out the valid byte counter";
-    EXPECT_EQ(backend.invalid_cache_bytes_, expected)
-        << "second invalid must not stack with stale bytes from the first";
-}
-
-// Oversize error_messages get truncated before they enter invalid_cache_, so
-// they cannot inflate per-entry bytes past kMaxErrorMessageBytes.
-TEST(XGrammarBackendTest, InvalidCacheErrorMessageTruncated) {
-    XGrammarBackend   backend(makeTokenizerInfoJson(), defaultOptions());
-    const std::string huge_err(8 * 1024, 'E');
-    backend.setCacheInvalid({"json", "k_trunc"}, huge_err);
-    const std::string stored = backend.getCachedInvalid({"json", "k_trunc"});
-    EXPECT_LE(stored.size(), XGrammarBackend::kMaxErrorMessageBytes + 32);
-    EXPECT_NE(stored.find("...[truncated]"), std::string::npos);
-}
-
 TEST(XGrammarBackendTest, CreateMatcherProducesUsableObject) {
     XGrammarBackend backend(makeTokenizerInfoJson(), defaultOptions());
-    auto            compiled = backend.compileNow({"json", "$$ANY$$"}).compiled;
-    ASSERT_TRUE(compiled);
+    auto            result = backend.getOrCompile({"json", "$$ANY$$"});
+    ASSERT_TRUE(result.compiled);
 
-    auto matcher = backend.createMatcher(compiled, /*require_reasoning=*/false, /*think_end_token_ids=*/std::nullopt);
+    auto matcher =
+        backend.createMatcher(result.compiled, /*require_reasoning=*/false, /*think_end_token_ids=*/std::nullopt);
     ASSERT_TRUE(matcher);
     EXPECT_EQ(matcher->numAcceptedTokens(), 0);
     EXPECT_FALSE(matcher->isTerminated());
-}
-
-// ---- sanitizeStructuralTag (private; reached via -fno-access-control) ----
-
-TEST(XGrammarBackendTest, SanitizeNewFormatRecursesIntoSequenceElements) {
-    const std::string in =
-        R"({"format":{"type":"sequence","elements":[{"type":"json_schema"},{"type":"qwen_xml_parameter"}]}})";
-    const std::string out = XGrammarBackend::sanitizeStructuralTag(in);
-    // Both inner nodes should now carry an empty json_schema.
-    size_t first = out.find(R"("json_schema":{})");
-    ASSERT_NE(first, std::string::npos);
-    size_t second = out.find(R"("json_schema":{})", first + 1);
-    EXPECT_NE(second, std::string::npos);
-}
-
-TEST(XGrammarBackendTest, SanitizeLeavesPresentJsonSchemaUntouched) {
-    const std::string in  = R"({"format":{"type":"json_schema","json_schema":{"type":"integer"}}})";
-    const std::string out = XGrammarBackend::sanitizeStructuralTag(in);
-    EXPECT_NE(out.find(R"("type":"integer")"), std::string::npos);
-    // No spurious empty-dict insertion.
-    EXPECT_EQ(out.find(R"("json_schema":{})"), std::string::npos);
 }
 
 // ---- RtpGrammarMatcher rollback ----------------------------------------
 
 TEST(RtpGrammarMatcherTest, RollbackRestoresAcceptedCount) {
     XGrammarBackend backend(makeTokenizerInfoJson(), defaultOptions());
-    auto            compiled = backend.compileNow({"regex", "a"}).compiled;
-    ASSERT_TRUE(compiled);
+    auto            result = backend.getOrCompile({"regex", "a"});
+    ASSERT_TRUE(result.compiled);
 
-    auto matcher = backend.createMatcher(compiled, /*require_reasoning=*/false, /*think_end_token_ids=*/std::nullopt);
+    auto matcher =
+        backend.createMatcher(result.compiled, /*require_reasoning=*/false, /*think_end_token_ids=*/std::nullopt);
     constexpr int kA = 'a';
     EXPECT_TRUE(matcher->acceptToken(kA));
     EXPECT_EQ(matcher->numAcceptedTokens(), 1);

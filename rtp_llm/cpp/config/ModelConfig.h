@@ -11,9 +11,11 @@
 #include "rtp_llm/cpp/config/EplbConfig.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/config/SpecialTokens.h"
+#include <cstdint>
 #include <vector>
 #include <string>
 #include <map>
+#include <unordered_map>
 
 namespace rtp_llm {
 
@@ -111,10 +113,12 @@ public:
     bool reverse_e_h_norm = false;
 
     // Model loading and quantization
-    std::string   tokenizer_path = "";
-    std::string   ckpt_path      = "";
-    SpecialTokens special_tokens;
-    QuantAlgo     quant_algo;
+    std::string                              tokenizer_path = "";
+    std::string                              ckpt_path      = "";
+    std::unordered_map<std::string, int32_t> tokenizer_vocab;
+    std::string                              tokenizer_backend_str = "";
+    SpecialTokens                            special_tokens;
+    QuantAlgo                                quant_algo;
 
     // EPLB configuration
     EPLBConfig eplb_config;

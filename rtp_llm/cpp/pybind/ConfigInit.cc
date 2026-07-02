@@ -1515,6 +1515,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         // task_type is defined as property below
         .def_readwrite("ckpt_path", &ModelConfig::ckpt_path)
         .def_readwrite("tokenizer_path", &ModelConfig::tokenizer_path)
+        .def_readwrite("tokenizer_vocab", &ModelConfig::tokenizer_vocab)
+        .def_readwrite("tokenizer_backend_str", &ModelConfig::tokenizer_backend_str)
         .def_readwrite("position_ids_style", &ModelConfig::position_ids_style)
         .def_readwrite("pre_seq_len", &ModelConfig::pre_seq_len)
         .def_readwrite("use_kvcache", &ModelConfig::use_kvcache)

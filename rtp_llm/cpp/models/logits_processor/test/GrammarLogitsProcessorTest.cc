@@ -37,7 +37,6 @@ XGrammarBackendOptions defaultOptions() {
     opts.any_whitespace        = true;
     opts.strict_mode           = true;
     opts.max_compiler_threads  = 2;
-    opts.enable_compiler_cache = true;
     opts.compiler_cache_bytes  = -1;
     return opts;
 }

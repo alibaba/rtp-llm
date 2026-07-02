@@ -3,18 +3,14 @@
 #include <algorithm>
 #include <cstdint>
 #include <exception>
-#include <unordered_map>
 #include <vector>
 
-#include <pybind11/stl.h>
-
+#include "rtp_llm/cpp/config/ModelConfig.h"
 #include "rtp_llm/cpp/config/SpecialTokens.h"
 #include "rtp_llm/cpp/engine_base/grammar/XGrammarTokenizerInfoCooker.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
 namespace rtp_llm {
-
-namespace py = pybind11;
 
 namespace {
 
@@ -42,14 +38,13 @@ std::vector<int32_t> collectStopTokenIds(const SpecialTokens& st) {
 
 }  // namespace
 
-TokenizerInfo TokenizerInfo::fromHuggingFaceTokenizer(py::object           py_tokenizer,
-                                                      const SpecialTokens& special_tokens,
-                                                      int64_t              model_vocab_size) noexcept {
+TokenizerInfo TokenizerInfo::fromHuggingFaceTokenizer(const ModelConfig& model_config) noexcept {
     try {
-        auto              vocab = py_tokenizer.attr("get_vocab")().cast<std::unordered_map<std::string, int32_t>>();
-        const std::string backend_str = py_tokenizer.attr("backend_tokenizer").attr("to_str")().cast<std::string>();
-        const auto        stops       = collectStopTokenIds(special_tokens);
-        auto              opaque = xgrammar_impl::cookTokenizerInfoOpaque(vocab, backend_str, stops, model_vocab_size);
+        const auto stops = collectStopTokenIds(model_config.special_tokens);
+        auto       opaque = xgrammar_impl::cookTokenizerInfoOpaque(model_config.tokenizer_vocab,
+                                                                   model_config.tokenizer_backend_str,
+                                                                   stops,
+                                                                   model_config.vocab_size);
         RTP_LLM_LOG_INFO("TokenizerInfo: cooked %zuB, stop_tokens=%zu", opaque.size(), stops.size());
         return TokenizerInfo(std::move(opaque));
     } catch (const std::exception& e) {

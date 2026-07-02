@@ -344,9 +344,9 @@ struct GrammarConfig {
     std::vector<int32_t> override_stop_tokens;
 
     bool constrained_json_disable_any_whitespace = false;
-    int  num_workers                             = 32;
-    // Byte cap on xgrammar compiled-grammar cache; <=0 disables (memory unbounded).
-    int64_t compiler_cache_bytes = 256LL * 1024 * 1024;
+    int  num_workers                             = 8;
+    // Byte cap on xgrammar's internal compiled-grammar cache; <=0 = unlimited.
+    int64_t compiler_cache_bytes = -1;
 };
 
 struct RuntimeConfig {
