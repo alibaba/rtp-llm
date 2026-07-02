@@ -89,7 +89,18 @@ void             execRejectionSampling(const RejectionSamplingParams& params);
 // Communication ops (backed by c10d ProcessGroup)
 // ===================================================================
 
-void            execBroadcast(const BroadcastParams& params);
+// c10d broadcast wrapper. For CUDA tensors, the callback must keep normal
+// PyTorch stream ordering so later GPU work can consume the buffer without a
+// device-wide sync. Communication errors must propagate as exceptions from the
+// callback.
+void execBroadcast(const BroadcastParams& params);
+// CPU metadata broadcast. Uses UDS when the CPU TP broadcaster is initialized;
+// otherwise allow_fallback controls whether regular execBroadcast fallback is
+// used. All ranks must call with identical tensor counts and byte sizes.
+// broadcastCPU is single-thread only: do not call it concurrently, re-entrantly,
+// or from a thread different from the CPU TP broadcaster initializer.
+void            execBroadcastCpu(const BroadcastParams& params, bool allow_fallback = true);
+bool            isCpuTpBroadcasterInitialized();
 AllReduceOutput execAllReduce(const AllReduceParams& params);
 void            execAllGather(const AllGatherParams& params);
 void            execSyncCommunication(bool timeout = true);

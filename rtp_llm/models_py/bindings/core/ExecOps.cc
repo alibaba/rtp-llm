@@ -1,6 +1,7 @@
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/models_py/bindings/core/CommonDefines.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/CacheStore.h"
+#include "rtp_llm/cpp/distribute/CpuTpBroadcaster.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
 #include "rtp_llm/cpp/utils/KVCacheUtils.h"
@@ -454,7 +455,43 @@ void execBroadcast(const BroadcastParams& params) {
     py::list               tensors;
     for (auto& t : params.buffers)
         tensors.append(t);
+    // The Python c10d callback owns stream ordering and error propagation.
+    // Do not add a CUDA device sync here; GPU callers depend on keeping the
+    // broadcast on the asynchronous communication path.
     fn(tensors, params.root, static_cast<int>(params.mode));
+}
+
+void execBroadcastCpu(const BroadcastParams& params, bool allow_fallback) {
+    RTP_LLM_CHECK_WITH_INFO(
+        params.root == 0, "execBroadcastCpu supports only root=0; got %ld", static_cast<long>(params.root));
+    RTP_LLM_CHECK_WITH_INFO(params.mode == ParallelMode::TP,
+                            "execBroadcastCpu supports only ParallelMode::TP; got %d",
+                            static_cast<int>(params.mode));
+
+    for (auto& t : params.buffers) {
+        RTP_LLM_CHECK_WITH_INFO(
+            t.is_cpu(), "execBroadcastCpu requires CPU tensors (got device=%s)", t.device().str().c_str());
+    }
+
+    auto& bcast = CpuTpBroadcaster::instance();
+    if (!bcast.isInitialized()) {
+        RTP_LLM_CHECK_WITH_INFO(allow_fallback, "execBroadcastCpu called before CpuTpBroadcaster is initialized");
+        execBroadcast(params);
+        execSyncCommunication(false);
+        cudaSyncAndCheck();
+        return;
+    }
+    for (auto& t : params.buffers) {
+        auto contig = t.contiguous();
+        bcast.broadcast(contig.data_ptr(), contig.nbytes(), params.root);
+        if (!contig.is_same(t)) {
+            t.copy_(contig);
+        }
+    }
+}
+
+bool isCpuTpBroadcasterInitialized() {
+    return CpuTpBroadcaster::instance().isInitialized();
 }
 
 AllReduceOutput execAllReduce(const AllReduceParams& params) {
@@ -614,6 +651,28 @@ void registerExecCtxOps(pybind11::module& m) {
             g_allgather_fn = py::function();
         },
         "Clear registered Python communication callbacks.");
+
+    m.def(
+        "init_cpu_tp_broadcaster",
+        [](int tp_rank, int tp_size, const std::string& base_path) {
+            py::gil_scoped_release release;
+            CpuTpBroadcaster::instance().initialize(tp_rank, tp_size, base_path);
+        },
+        py::arg("tp_rank"),
+        py::arg("tp_size"),
+        py::arg("base_path"),
+        "Bootstrap the UDS-backed intra-node TP broadcaster used by tpSyncModelInputs. "
+        "Call from the same thread that will use broadcastCPU and destroy it; "
+        "broadcastCPU is not concurrent-safe.");
+
+    m.def(
+        "destroy_cpu_tp_broadcaster",
+        []() {
+            py::gil_scoped_release release;
+            CpuTpBroadcaster::instance().reset();
+        },
+        "Tear down the UDS-backed intra-node TP broadcaster and clear its singleton state. "
+        "Call from the initializer thread; do not race with broadcastCPU.");
 }
 
 }  // namespace rtp_llm
