@@ -153,6 +153,10 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .value("FLASH_INFER", MlaOpsType::FLASH_INFER)
         .value("FLASH_MLA", MlaOpsType::FLASH_MLA);
 
+    py::enum_<MlaFp8KvCacheLayout>(m, "MlaFp8KvCacheLayout")
+        .value("NATIVE", MlaFp8KvCacheLayout::NATIVE)
+        .value("ATOM", MlaFp8KvCacheLayout::ATOM);
+
     // Register LayerNormType enum
     py::enum_<LayerNormType>(m, "LayerNormType")
         .value("pre_layernorm", LayerNormType::pre_layernorm)
@@ -1378,6 +1382,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("softmax_extra_scale", &AttentionConfigs::softmax_extra_scale)
         .def_readwrite("kv_cache_dtype", &AttentionConfigs::kv_cache_dtype)
         .def_readwrite("need_rope_kv_cache", &AttentionConfigs::need_rope_kv_cache)
+        .def_readwrite("mla_fp8_kv_cache_layout", &AttentionConfigs::mla_fp8_kv_cache_layout)
         .def_readwrite("is_sparse", &AttentionConfigs::is_sparse)
         .def_readwrite("indexer_head_dim", &AttentionConfigs::indexer_head_dim)
         .def_readwrite("indexer_head_num", &AttentionConfigs::indexer_head_num)

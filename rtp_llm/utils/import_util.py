@@ -1,3 +1,4 @@
+import importlib
 import importlib.util
 import logging
 import os
@@ -18,6 +19,14 @@ def load_module(module_path: str):
     else:
         raise Exception(f"ModuleSpec [{module_spec}] has no loader.")
     return imported_module
+
+
+def load_external_model_packages(packages_csv: str) -> None:
+    for package_name in [
+        item.strip() for item in packages_csv.split(",") if item.strip()
+    ]:
+        logging.info("loading external model package: %s", package_name)
+        importlib.import_module(package_name)
 
 
 @lru_cache(maxsize=1)

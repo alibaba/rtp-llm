@@ -70,6 +70,14 @@ def init_model_group_args(parser, model_args):
         help="A dictionary in JSON string format used to override default model configurations.",
     )
     model_group.add_argument(
+        "--external_model_packages",
+        env_name="RTP_LLM_EXTERNAL_MODEL_PACKAGES",
+        bind_to=(model_args, "external_model_packages"),
+        type=str,
+        default="",
+        help="Comma-separated external model packages to import before model type inference.",
+    )
+    model_group.add_argument(
         "--max_seq_len",
         env_name="MAX_SEQ_LEN",
         bind_to=(model_args, "max_seq_len"),

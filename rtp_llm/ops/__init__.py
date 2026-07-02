@@ -124,6 +124,7 @@ try:
         HWKernelConfig,
         KVCacheConfig,
         MiscellaneousConfig,
+        MlaFp8KvCacheLayout,
         MlaOpsType,
         ModelConfig,
         ModelSpecificConfig,
