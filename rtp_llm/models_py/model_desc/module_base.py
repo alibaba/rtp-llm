@@ -51,6 +51,12 @@ class GptModelBase(nn.Module):
         ## (batch_size -> fmha_params)
         self.params_dict: dict[int, Any] = {}
 
+        ## Dynamic decode backend dispatch result: capture bs bucket -> backend class name.
+        ## Filled by select_decode_backend (at capture time, called per bs by the engine)
+        ## and looked up by prepare_fmha_impl; empty or a miss falls back to fixed priority
+        ## (zero behavior change).
+        self.backend_plan: dict[int, str] = {}
+
     def initialize(self, init_resource: PyModelInitResources) -> bool:
         self.kv_cache = init_resource.kv_cache
         if self.kv_cache is not None:
@@ -91,9 +97,73 @@ class GptModelBase(nn.Module):
             seq_size_per_block,
         )
 
+    def select_decode_backend(
+        self, inputs: PyModelInputs, is_cuda_graph: bool = True
+    ) -> None:
+        """Called per bs by the engine at capture time: benchmark on-device and pick a
+        decode backend, writing the winner into self.backend_plan[bs].
+
+        If any guard fails or selection fails, no plan is written (prepare_fmha_impl then
+        falls back to fixed priority, zero behavior change). Under TP all ranks must call
+        in lockstep (the C++ side drives this per bs in the same order on every rank);
+        internally only rank0 benchmarks and the winner is broadcast. Active only when
+        enable_dynamic_decode_backend is on and the kv cache is ready.
+        """
+        if not getattr(
+            self.py_hw_kernel_config, "enable_dynamic_decode_backend", False
+        ):
+            return
+        # CUDA-only feature: the selectable backends are FlashInfer-based decode impls
+        # that only exist on CUDA. On ROCm/PPU/CPU the on-device bench would drive the
+        # platform's paged-attention (e.g. aiter pa on ROCm) through the CUDA-graph
+        # capture path with synthetic bench inputs, which faults. Skip here so those
+        # platforms keep their fixed-priority decode backend (no behavior change).
+        if self.device_type != DeviceType.Cuda:
+            return
+        if self.kv_cache is None:
+            return
+        try:
+            from rtp_llm.models_py.modules.factory.attention.dispatch import (
+                backend_selector,
+            )
+
+            bs = int(inputs.attention_inputs.input_lengths.size(0))
+            winner = backend_selector.run_backend_selection(self, inputs)
+            if winner:
+                self.backend_plan[bs] = winner
+        except (
+            Exception
+        ) as e:  # noqa: BLE001 -- on failure fall back to fixed priority, never block startup
+            logging.warning(
+                f"select_decode_backend failed, fallback to fixed priority: {e}"
+            )
+
     def prepare_fmha_impl(
         self, inputs: PyModelInputs, is_cuda_graph: bool = False
     ) -> Any:
+        # Dynamic dispatch lookup: only on the cuda graph capture path, and only when the
+        # plan has an entry for this bs, instantiate the chosen backend; on a miss or
+        # instantiation failure fall through to fixed priority below, never assert.
+        # Guard: backend_plan only contains DECODE backends; skip when is_prefill
+        # (target-model verify/score has is_prefill=True with num_tokens_per_bs > 1).
+        if (
+            is_cuda_graph
+            and self.backend_plan
+            and not inputs.attention_inputs.is_prefill
+        ):
+            bs = int(inputs.attention_inputs.input_lengths.size(0))
+            name = self.backend_plan.get(bs)
+            if name:
+                from rtp_llm.models_py.modules.factory.attention.dispatch import (
+                    backend_selector,
+                )
+
+                inst = backend_selector.instantiate_decode_impl(
+                    self, inputs.attention_inputs, name, is_cuda_graph
+                )
+                if inst is not None:
+                    return inst
+
         fmha_impl = AttnImplFactory.get_fmha_impl(
             self.config,
             self.parallelism_config,

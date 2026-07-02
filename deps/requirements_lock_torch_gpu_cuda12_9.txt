@@ -4,6 +4,8 @@
 #
 #    bazel run //deps:requirements_torch_gpu_cuda12_9.update
 #
+# cache-bust: flashinfer 0.6.6 -> 0.6.11 upgrade (remove after CI passes)
+#
 --extra-index-url https://mirrors.aliyun.com/pypi/simple/
 
 accelerate==0.25.0 \
@@ -651,6 +653,9 @@ cuda-pathfinder==1.4.0 \
     # via
     #   cuda-bindings
     #   cuda-python
+cuda-tile==1.4.0 \
+    --hash=sha256:63fc9edd9376a196870ff9dcd9cdb9a7e4d2f2271a4e531c390b232bc60ee0f0
+    # via flashinfer-python
 cuda-python==13.1.1 \
     --hash=sha256:944cc4fe6482673d28dd545797a28840945a1668739328fa2ad1e9be4f7050d9
     # via nvidia-cutlass-dsl-libs-base
@@ -786,14 +791,14 @@ flash-attn-3 @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129
 flash-mla @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/flash_mla-1.0.0%2Bca58fed-cp310-cp310-linux_x86_64.whl \
     --hash=sha256:960fecb602f90f0f882b6e460f9ddebaec0c3cedca3b01594330445c90afaa5e
     # via -r deps/requirements_torch_gpu_cuda12_9.txt
-flashinfer-cubin @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/flashinfer_260319/flashinfer_cubin-0.6.6-py3-none-any.whl \
-    --hash=sha256:3363511f06b0315b9267fc3976412b7f844750fdfe451c44f3f84076bffac641
+flashinfer-cubin @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/flashinfer_260513/flashinfer_cubin-0.6.11-py3-none-any.whl \
+    --hash=sha256:6611c4431b71b81f47019cdd5da7db2fff411deb00cb90378f68bd2c2482aef1
     # via -r deps/requirements_torch_gpu_cuda12_9.txt
-flashinfer-jit-cache @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/flashinfer_260319/flashinfer_jit_cache-0.6.6-cp39-abi3-manylinux_2_28_x86_64.whl \
-    --hash=sha256:346bb153c2fab3922e017f9f1fb41d5dad679849d787c2dac9d2fc7102a74e64
+flashinfer-jit-cache @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/flashinfer_260513/flashinfer_jit_cache-0.6.11-cp39-abi3-manylinux_2_28_x86_64.whl \
+    --hash=sha256:4657447c063942487a56851781cfa9f81a57644c11e9d148232d195bf535a3e4
     # via -r deps/requirements_torch_gpu_cuda12_9.txt
-flashinfer-python @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/flashinfer_260319/flashinfer_python-0.6.6-py3-none-any.whl \
-    --hash=sha256:4ee501a8cc6a4479c6a23e6fb4f0a1ebcce3212d72d6ae15c9bcf9a79571efa5
+flashinfer-python @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/flashinfer_260513/flashinfer_python-0.6.11-py3-none-any.whl \
+    --hash=sha256:8b829b4eba76b0c700bfe7c86e878c9d654d9c1427b6bee252bd928baabe5f9c
     # via
     #   -r deps/requirements_torch_gpu_cuda12_9.txt
     #   rtp-kernel

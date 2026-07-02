@@ -82,6 +82,10 @@ public:
         return false;
     }
 
+    // Trigger any deferred CUDA graph capture held by the underlying model(s).
+    // Default no-op for executors that capture eagerly during construction.
+    virtual void triggerInitCapture() {}
+
 public:
 };
 

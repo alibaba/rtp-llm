@@ -18,13 +18,16 @@ struct CudaGraphState {
 };
 
 struct GraphParams {
-    bool                 enable_cuda_graph            = false;
-    bool                 enable_cuda_graph_debug_mode = false;
-    bool                 is_prefill_cuda_graph_mode   = false;
-    bool                 is_target_verify             = false;
-    int                  max_seq_len                  = 0;
-    int                  tokens_per_block             = 0;  // physical kv block size
-    int                  kernel_tokens_per_block      = 0;  // must be explicitly configured
+    bool enable_cuda_graph            = false;
+    bool enable_cuda_graph_debug_mode = false;
+    // When true, decode capture benchmarks eligible backends per bs and bakes the
+    // per-bs winner into the graph (vs fixed-priority first-match). See dispatch/.
+    bool                 enable_dynamic_decode_backend = false;
+    bool                 is_prefill_cuda_graph_mode    = false;
+    bool                 is_target_verify              = false;
+    int                  max_seq_len                   = 0;
+    int                  tokens_per_block              = 0;  // physical kv block size
+    int                  kernel_tokens_per_block       = 0;  // must be explicitly configured
     int                  num_tokens_per_bs = 1;  // Number of tokens per batch (1 for decode, max_seq_len for prefill)
     int                  sp_steps          = 0;
     size_t               max_context_batch_size = 128;
@@ -38,7 +41,7 @@ struct GraphParams {
     // 0 = model does not use combo_position_ids (no buffer allocated, capture skips it).
     // >0 = factor (e.g. Mrope = rope_config.index_factor). Sourced from
     //     description_.attention_conf.rope_config in the model wrapper, not Python reflection.
-    int                  position_id_len_factor = 0;
+    int position_id_len_factor = 0;
 };
 
 class GraphBase {

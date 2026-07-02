@@ -125,6 +125,10 @@ public:
     virtual ~ModelBase()                                          = default;
     virtual GptModelOutputs forward(const GptModelInputs& inputs) = 0;
     virtual void            releaseBuffers() {}
+    // Trigger any deferred CUDA graph capture. No-op for models that capture
+    // eagerly in their constructor; PyWrappedModel overrides this when capture
+    // is deferred (e.g. so an accuracy gate can run before the graph is frozen).
+    virtual void triggerInitCapture() {}
 
     rtp_llm::Weights            weights_;
     rtp_llm::OverallExpertStats overall_expert_stats_;
