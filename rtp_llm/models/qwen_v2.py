@@ -403,14 +403,17 @@ class QWenV2(QWen):
         if config_json.get("hidden_size") is not None:
             config.hidden_size = config_json["hidden_size"]
         config.layer_num = config_json["num_hidden_layers"]
-        config.rotary_embedding_base = config_json.get(
-            "rope_theta", config.rotary_embedding_base
-        )
+        rope_params = config_json.get("rope_parameters") or {}
+        rope_theta = config_json.get("rope_theta")
+        if rope_theta is None and isinstance(rope_params, dict):
+            rope_theta = rope_params.get("rope_theta")
+        if rope_theta is not None:
+            config.rotary_embedding_base = rope_theta
         config.vocab_size = config_json["vocab_size"]
         config.rotary_embedding_dim = config.size_per_head
         config.layernorm_eps = config_json.get("rms_norm_eps", 1e-06)
         config.tie_word_embeddings = config_json.get("tie_word_embeddings", False)
-        config.config_dtype = config_json.get("torch_dtype", None)
+        config.config_dtype = config_json.get("torch_dtype") or config_json.get("dtype")
 
     @staticmethod
     def get_weight_cls():
