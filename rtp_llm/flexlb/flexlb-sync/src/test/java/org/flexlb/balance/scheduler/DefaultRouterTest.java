@@ -1,5 +1,7 @@
 package org.flexlb.balance.scheduler;
 
+import org.flexlb.balance.endpoint.EndpointRegistry;
+import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.strategy.LoadBalanceStrategyFactory;
 import org.flexlb.balance.strategy.LoadBalancer;
 import org.flexlb.balance.policy.GroupRoutingDecision;
@@ -61,6 +63,9 @@ class DefaultRouterTest {
     private LoadBalancer fusionLoadBalancer;
 
     @Mock
+    private EndpointRegistry endpointRegistry;
+
+    @Mock
     private BalanceContext balanceContext;
 
     @Mock
@@ -97,7 +102,7 @@ class DefaultRouterTest {
 
         // Create scheduler instance
         lenient().when(groupRoutingPolicy.route(any(BalanceContext.class))).thenReturn(GroupRoutingDecision.none());
-        defaultRouter = new DefaultRouter(configService, groupRoutingPolicy);
+        defaultRouter = new DefaultRouter(configService, groupRoutingPolicy, endpointRegistry);
 
         // Mock LoadBalanceStrategyFactory to return our mock load balancers
         mockStaticLoadBalanceStrategyFactory();
@@ -400,13 +405,17 @@ class DefaultRouterTest {
         prefillServerStatus.setMessage("No prefill worker available");
         when(prefillLoadBalancer.select(any(BalanceContext.class), eq(RoleType.PREFILL), any())).thenReturn(prefillServerStatus);
 
+        // Ensure endpoint registry returns a non-null endpoint so rollback proceeds
+        lenient().when(endpointRegistry.get("192.168.1.2:8081"))
+                .thenReturn(org.mockito.Mockito.mock(WorkerEndpoint.class));
+
         // Execute
         Response response = defaultRouter.route(balanceContext);
 
         // Verify
         assertFalse(response.isSuccess(), "Response should not be successful");
         assertEquals(StrategyErrorType.NO_PREFILL_WORKER.getErrorCode(), response.getCode(), "Error code should match NO_PREFILL_WORKER");
-        verify(decodeLoadBalancer).rollBack(eq("192.168.1.2:8081"), anyLong());
+        verify(decodeLoadBalancer).rollBack(any(WorkerEndpoint.class), anyLong());
     }
 
     @Test

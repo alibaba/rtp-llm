@@ -63,7 +63,7 @@ class CostBasedPrefillStrategyTest {
 
         strategy = new CostBasedPrefillStrategy(
                 engineWorkerStatus, cacheAwareService, resourceMeasureFactory,
-                engineHealthReporter, endpointRegistry);
+                engineHealthReporter);
     }
 
     /** Helper: register PrefillEndpoints for all entries in the given worker map. */
@@ -190,7 +190,7 @@ class CostBasedPrefillStrategyTest {
         ServerStatus result = strategy.select(buildContext(500, 9L), RoleType.PREFILL, null);
         assertTrue(result.isSuccess());
 
-        assertDoesNotThrow(() -> strategy.rollBack("10.0.0.1:8080", 9L));
+        assertDoesNotThrow(() -> strategy.rollBack(endpointRegistry.get("10.0.0.1:8080"), 9L));
     }
 
     @Test

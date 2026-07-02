@@ -57,8 +57,7 @@ class RandomStrategyTest {
         randomStrategy = new RandomStrategy(
                 new EngineWorkerStatus(new ModelMetaConfig(), endpointRegistry),
                 configService,
-                resourceMeasureFactory,
-                endpointRegistry);
+                resourceMeasureFactory);
     }
 
     @AfterEach
@@ -390,7 +389,7 @@ class RandomStrategyTest {
 
     @Test
     void should_handle_rollback_without_error() {
-        randomStrategy.rollBack("127.0.0.1:8080", 0);
+        randomStrategy.rollBack(null, 0);
     }
 
     private WorkerStatus createWorkerStatus(String ip) {

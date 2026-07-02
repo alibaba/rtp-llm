@@ -2,8 +2,8 @@ package org.flexlb.balance.strategy;
 
 import org.apache.commons.collections4.CollectionUtils;
 import org.apache.commons.collections4.MapUtils;
-import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
+import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.resource.PrefillResourceMeasure;
 import org.flexlb.balance.resource.ResourceMeasureFactory;
 import org.flexlb.cache.service.CacheAwareService;
@@ -36,18 +36,15 @@ public class CostBasedPrefillStrategy implements LoadBalancer {
     private final CacheAwareService cacheAwareService;
     private final ResourceMeasureFactory resourceMeasureFactory;
     private final EngineHealthReporter engineHealthReporter;
-    private final EndpointRegistry endpointRegistry;
 
     public CostBasedPrefillStrategy(EngineWorkerStatus engineWorkerStatus,
                                     CacheAwareService cacheAwareService,
                                     ResourceMeasureFactory resourceMeasureFactory,
-                                    EngineHealthReporter engineHealthReporter,
-                                    EndpointRegistry endpointRegistry) {
+                                    EngineHealthReporter engineHealthReporter) {
         this.engineWorkerStatus = engineWorkerStatus;
         this.cacheAwareService = cacheAwareService;
         this.resourceMeasureFactory = resourceMeasureFactory;
         this.engineHealthReporter = engineHealthReporter;
-        this.endpointRegistry = endpointRegistry;
         LoadBalanceStrategyFactory.register(LoadBalanceStrategyEnum.COST_BASED_PREFILL, this);
     }
 
@@ -62,12 +59,11 @@ public class CostBasedPrefillStrategy implements LoadBalancer {
     }
 
     @Override
-    public void rollBack(String ipPort, long requestId) {
+    public void rollBack(WorkerEndpoint ep, long requestId) {
         // Release non-batch prefill inflight reservation on routing failure.
         // Batch path inflight is managed by FlexlbBatchScheduler — no-op here.
-        PrefillEndpoint ep = endpointRegistry.getPrefill(ipPort);
-        if (ep != null) {
-            ep.releaseBatch(requestId);
+        if (ep instanceof PrefillEndpoint pe) {
+            pe.releaseBatch(requestId);
         }
     }
 

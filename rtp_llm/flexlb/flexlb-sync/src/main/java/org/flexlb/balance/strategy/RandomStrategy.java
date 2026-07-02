@@ -2,7 +2,6 @@ package org.flexlb.balance.strategy;
 
 import org.apache.commons.collections4.CollectionUtils;
 import org.apache.commons.collections4.MapUtils;
-import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.resource.ResourceMeasure;
 import org.flexlb.balance.resource.ResourceMeasureFactory;
@@ -33,21 +32,18 @@ public class RandomStrategy implements LoadBalancer {
     private final EngineWorkerStatus engineWorkerStatus;
     private final ConfigService configService;
     private final ResourceMeasureFactory resourceMeasureFactory;
-    private final EndpointRegistry endpointRegistry;
 
     public RandomStrategy(EngineWorkerStatus engineWorkerStatus,
                           ConfigService configService,
-                          ResourceMeasureFactory resourceMeasureFactory,
-                          EndpointRegistry endpointRegistry) {
+                          ResourceMeasureFactory resourceMeasureFactory) {
         this.engineWorkerStatus = engineWorkerStatus;
         this.configService = configService;
         this.resourceMeasureFactory = resourceMeasureFactory;
-        this.endpointRegistry = endpointRegistry;
         LoadBalanceStrategyFactory.register(LoadBalanceStrategyEnum.RANDOM, this);
     }
 
     @Override
-    public void rollBack(String ipPort, long requestId) {
+    public void rollBack(WorkerEndpoint ep, long requestId) {
     }
 
     @Override

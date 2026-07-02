@@ -3,7 +3,6 @@ package org.flexlb.balance.strategy;
 import org.apache.commons.collections4.CollectionUtils;
 import org.apache.commons.collections4.MapUtils;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
-import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.resource.DecodeResourceMeasure;
 import org.flexlb.balance.resource.ResourceMeasureFactory;
 import org.flexlb.config.ConfigService;
@@ -35,17 +34,14 @@ public class CostBasedDecodeStrategy implements LoadBalancer {
     private final EngineWorkerStatus engineWorkerStatus;
     private final double decayFactor;
     private final ResourceMeasureFactory resourceMeasureFactory;
-    private final EndpointRegistry endpointRegistry;
 
     public CostBasedDecodeStrategy(ConfigService configService,
                                     EngineWorkerStatus engineWorkerStatus,
-                                    ResourceMeasureFactory resourceMeasureFactory,
-                                    EndpointRegistry endpointRegistry) {
+                                    ResourceMeasureFactory resourceMeasureFactory) {
         this.engineWorkerStatus = engineWorkerStatus;
         FlexlbConfig config = configService.loadBalanceConfig();
         this.decayFactor = config.getWeightedCacheDecayFactor();
         this.resourceMeasureFactory = resourceMeasureFactory;
-        this.endpointRegistry = endpointRegistry;
         LoadBalanceStrategyFactory.register(LoadBalanceStrategyEnum.COST_BASED_DECODE, this);
     }
 
@@ -115,12 +111,11 @@ public class CostBasedDecodeStrategy implements LoadBalancer {
     }
 
     @Override
-    public void rollBack(String ipPort, long requestId) {
-        Logger.debug("Decode rollBack - ip: {}, requestId: {}", ipPort, requestId);
+    public void rollBack(WorkerEndpoint ep, long requestId) {
+        Logger.debug("Decode rollBack - ip: {}, requestId: {}", ep.ipPort(), requestId);
 
-        DecodeEndpoint ep = endpointRegistry.getDecode(ipPort);
-        if (ep != null) {
-            ep.release(requestId);
+        if (ep instanceof DecodeEndpoint de) {
+            de.release(requestId);
         }
     }
 

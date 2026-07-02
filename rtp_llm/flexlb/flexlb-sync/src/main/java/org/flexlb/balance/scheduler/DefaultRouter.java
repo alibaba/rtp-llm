@@ -2,6 +2,8 @@ package org.flexlb.balance.scheduler;
 
 import org.apache.commons.collections4.CollectionUtils;
 import org.apache.commons.lang3.StringUtils;
+import org.flexlb.balance.endpoint.EndpointRegistry;
+import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.policy.GroupRoutingDecision;
 import org.flexlb.balance.policy.GroupRoutingPolicy;
 import org.flexlb.balance.strategy.LoadBalanceStrategyFactory;
@@ -34,9 +36,12 @@ public class DefaultRouter implements Router {
 
     private final Map<RoleType, LoadBalancer> loadBalancerMap;
     private final GroupRoutingPolicy groupRoutingPolicy;
+    private final EndpointRegistry endpointRegistry;
 
-    public DefaultRouter(ConfigService configService, GroupRoutingPolicy groupRoutingPolicy) {
+    public DefaultRouter(ConfigService configService, GroupRoutingPolicy groupRoutingPolicy,
+                         EndpointRegistry endpointRegistry) {
         this.groupRoutingPolicy = groupRoutingPolicy;
+        this.endpointRegistry = endpointRegistry;
         FlexlbConfig config = configService.loadBalanceConfig();
         this.loadBalancerMap = new EnumMap<>(RoleType.class);
 
@@ -168,9 +173,15 @@ public class DefaultRouter implements Router {
             String serverIpPort = serverStatus.getServerIp() + ":" + serverStatus.getHttpPort();
             long requestId = balanceContext.getRequestId();
 
+            WorkerEndpoint ep = endpointRegistry.get(serverIpPort);
+            if (ep == null) {
+                Logger.warn("DefaultRouter.rollBack: endpoint not found for ipPort={}", serverIpPort);
+                continue;
+            }
+
             RoleType role = serverStatus.getRole();
             LoadBalancer loadBalancer = getLoadBalancer(role);
-            loadBalancer.rollBack(serverIpPort, requestId);
+            loadBalancer.rollBack(ep, requestId);
         }
     }
 
