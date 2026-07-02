@@ -91,7 +91,7 @@ public class CostBasedPrefillStrategy implements LoadBalancer {
 
         for (PrefillEndpoint ep : survivors) {
             long cacheHit = calculateCacheHit(ep, cacheMatchResults);
-            long score = computeScore(ep);
+            long score = computeScore(ep, cacheHit, seqLen);
 
             if (score < bestScore) {
                 bestScore = score;
@@ -188,8 +188,10 @@ public class CostBasedPrefillStrategy implements LoadBalancer {
         return new FilterResult(survivors, rejections);
     }
 
-    private long computeScore(PrefillEndpoint ep) {
-        return ep.batcherWaitMs() + ep.realWaitTimeMs();
+    private long computeScore(PrefillEndpoint ep, long cacheHit, long seqLen) {
+        PrefillTimePredictor predictor = ep.getPredictor();
+        long prefillMs = predictor.estimateMs(seqLen, cacheHit);
+        return prefillMs + ep.batcherWaitMs() + ep.realWaitTimeMs();
     }
 
     private EndpointFilterResult getAvailableEndpoints(RoleType roleType, String group, ResourceMeasureIndicatorEnum indicator) {
