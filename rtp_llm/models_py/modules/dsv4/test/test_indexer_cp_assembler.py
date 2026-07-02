@@ -34,6 +34,9 @@ def _stub_modules():
         stub.Group = _Group
         stub.all_gather = _stub_all_gather
         sys.modules[mod_name] = stub
+        sys.modules["rtp_llm.models_py.distributed.pynccl_cp"] = types.ModuleType(
+            "rtp_llm.models_py.distributed.pynccl_cp"
+        )
         for p in (
             "rtp_llm",
             "rtp_llm.models_py",
@@ -41,6 +44,10 @@ def _stub_modules():
         ):
             if p not in sys.modules:
                 sys.modules[p] = types.ModuleType(p)
+        sys.modules["rtp_llm.models_py.distributed"].collective_torch = stub
+        sys.modules["rtp_llm.models_py.distributed"].pynccl_cp = sys.modules[
+            "rtp_llm.models_py.distributed.pynccl_cp"
+        ]
 
     cp_name = "rtp_llm.models_py.modules.dsv4.cp"
     if cp_name not in sys.modules:
@@ -271,6 +278,47 @@ def test_assemble_indexer_k_cp1_passthrough():
         out_k_quant=out_q,
         out_k_scale=out_s,
     )
+    assert torch.equal(out_q, local_q)
+    assert torch.equal(out_s, local_s)
+
+
+def test_assemble_indexer_k_packs_quant_and_scale_into_one_gather():
+    plan = A.build_indexer_cp_chunk_plan(
+        cp_ctx=_ctx(1, 0),
+        per_req_total_kv_lens=torch.tensor([3], dtype=torch.int64),
+        block_size=1,
+        device=torch.device("cpu"),
+    )
+    local_q = torch.tensor(
+        [[1, 2, 3, 4], [5, 6, 7, 8], [9, 10, 11, 12]],
+        dtype=torch.uint8,
+    )
+    local_s = torch.tensor([[101, 102], [103, 104], [105, 106]], dtype=torch.uint8)
+    out_q = torch.zeros_like(local_q)
+    out_s = torch.zeros_like(local_s)
+    calls = []
+    old_all_gather = A.all_gather
+
+    def fake_all_gather(local, group=None):
+        calls.append(local.clone())
+        return local
+
+    A.all_gather = fake_all_gather
+    try:
+        A.assemble_indexer_k(
+            plan=plan,
+            local_k_quant=local_q,
+            local_k_scale=local_s,
+            out_k_quant=out_q,
+            out_k_scale=out_s,
+        )
+    finally:
+        A.all_gather = old_all_gather
+
+    assert len(calls) == 1
+    assert tuple(calls[0].shape) == (3, 6)
+    assert torch.equal(calls[0][:, :4], local_q)
+    assert torch.equal(calls[0][:, 4:], local_s)
     assert torch.equal(out_q, local_q)
     assert torch.equal(out_s, local_s)
 

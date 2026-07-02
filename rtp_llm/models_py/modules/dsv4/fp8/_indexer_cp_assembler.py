@@ -215,6 +215,103 @@ def copy_actual_indexer_k_to_padded(
     padded_k_scale.index_copy_(0, dst_idx, actual_k_scale)
 
 
+def _pack_indexer_k_payload(
+    local_k_quant: torch.Tensor,
+    local_k_scale: torch.Tensor,
+) -> "tuple[torch.Tensor, int, int, torch.dtype, torch.dtype]":
+    if local_k_quant.dim() != 2 or local_k_scale.dim() != 2:
+        raise ValueError(
+            "indexer K pack expects 2D quant/scale buffers, got "
+            f"{tuple(local_k_quant.shape)} and {tuple(local_k_scale.shape)}"
+        )
+    if local_k_quant.device != local_k_scale.device:
+        raise ValueError("indexer K pack requires quant/scale on the same device")
+    rows = int(local_k_quant.shape[0])
+    if int(local_k_scale.shape[0]) != rows:
+        raise ValueError(
+            f"indexer K pack row mismatch: quant={rows}, "
+            f"scale={int(local_k_scale.shape[0])}"
+        )
+    local_q_bytes = local_k_quant.contiguous().view(torch.uint8)
+    local_s_bytes = local_k_scale.contiguous().view(torch.uint8)
+    q_cols = int(local_q_bytes.shape[1])
+    s_cols = int(local_s_bytes.shape[1])
+    packed = torch.empty(
+        (rows, q_cols + s_cols),
+        dtype=torch.uint8,
+        device=local_k_quant.device,
+    )
+    packed[:, :q_cols].copy_(local_q_bytes)
+    packed[:, q_cols:].copy_(local_s_bytes)
+    return packed, q_cols, s_cols, local_k_quant.dtype, local_k_scale.dtype
+
+
+def _split_indexer_k_payload(
+    gathered_packed: torch.Tensor,
+    q_cols: int,
+    s_cols: int,
+    q_dtype: torch.dtype,
+    s_dtype: torch.dtype,
+) -> "tuple[torch.Tensor, torch.Tensor]":
+    if gathered_packed.dim() != 2:
+        raise ValueError(
+            f"packed indexer K gather must be 2D, got {tuple(gathered_packed.shape)}"
+        )
+    expected_cols = int(q_cols) + int(s_cols)
+    if int(gathered_packed.shape[1]) != expected_cols:
+        raise ValueError(
+            f"packed indexer K cols {int(gathered_packed.shape[1])} != "
+            f"expected {expected_cols}"
+        )
+    if q_dtype != torch.uint8 or s_dtype != torch.uint8:
+        raise ValueError(
+            "packed indexer K currently expects uint8 quant/scale byte buffers, "
+            f"got {q_dtype} and {s_dtype}"
+        )
+    return (
+        gathered_packed[:, : int(q_cols)],
+        gathered_packed[:, int(q_cols) : expected_cols],
+    )
+
+
+def _all_gather_indexer_k_packed_sync(
+    local_packed: torch.Tensor,
+    plan: IndexerCPChunkPlan,
+) -> torch.Tensor:
+    profile_name = "dsv4.cp.all_gather.indexer_k.packed"
+
+    def torch_fallback() -> torch.Tensor:
+        with record_function_range(f"{profile_name}.launch"):
+            return all_gather(local_packed, group=Group.TP)
+
+    if not (local_packed.is_cuda and torch.distributed.is_initialized()):
+        return torch_fallback()
+
+    from rtp_llm.models_py.distributed import collective_torch, pynccl_cp
+
+    process_group = collective_torch._get_group(Group.TP)
+    world_size = torch.distributed.get_world_size(process_group)
+    if world_size != plan.cp_ctx.cp_size:
+        raise RuntimeError(
+            f"indexer K packed gather world_size({world_size}) "
+            f"!= cp_size({plan.cp_ctx.cp_size})"
+        )
+    rows = world_size * int(local_packed.shape[0])
+    cols = int(local_packed.shape[1])
+    return pynccl_cp.cp_all_gather_sync(
+        local_packed,
+        lambda r, c, d: torch.empty((r, c), dtype=d, device=local_packed.device),
+        torch_fallback,
+        role="indexer_k_packed",
+        rows=rows,
+        cols=cols,
+        process_group=process_group,
+        stream=torch.cuda.current_stream(local_packed.device),
+        profile_name=profile_name,
+        symm_variable=True,
+    )
+
+
 def assemble_indexer_k(
     *,
     plan: IndexerCPChunkPlan,
@@ -242,16 +339,21 @@ def assemble_indexer_k(
     # asserts T_local == cp_ctx.chunk_length — that's the prefill-token
     # space; here local_k_* lives in KV-pool-entry space sized by
     # plan.total_local_T = sum_b n_virtual_blocks * block_size). The
-    # restore_indices are built against this rank-major layout.
+    # restore_indices are built against this rank-major layout. Quant and scale
+    # share identical row ownership, so pack them row-wise and issue one
+    # all_gather instead of two small back-to-back NCCL collectives.
     # INVARIANT: the nested compressor writer lands its indexer-pool writes
     # on the current stream (cp_wait_gather_full + writer _launch), so NCCL
     # stream-ordering alone suffices for visibility. No CPU-blocking sync —
     # at chunk granularity this would serialize the pipeline. See
     # _pool_reader.fill for the same pattern.
-    with record_function_range("dsv4.cp.all_gather.indexer_k.quant.launch"):
-        gathered_q = all_gather(local_k_quant, group=Group.TP)
-    with record_function_range("dsv4.cp.all_gather.indexer_k.scale.launch"):
-        gathered_s = all_gather(local_k_scale, group=Group.TP)
+    local_packed, q_cols, s_cols, q_dtype, s_dtype = _pack_indexer_k_payload(
+        local_k_quant, local_k_scale
+    )
+    gathered_packed = _all_gather_indexer_k_packed_sync(local_packed, plan)
+    gathered_q, gathered_s = _split_indexer_k_payload(
+        gathered_packed, q_cols, s_cols, q_dtype, s_dtype
+    )
     restore_indexer_k(plan, gathered_q, gathered_s, out_k_quant, out_k_scale)
 
 
@@ -292,53 +394,39 @@ def start_assemble_indexer_k_async(
 
     device = local_k_quant.device
     current_stream = torch.cuda.current_stream(device)
+    local_packed, q_cols, s_cols, q_dtype, s_dtype = _pack_indexer_k_payload(
+        local_k_quant, local_k_scale
+    )
     stream.wait_stream(current_stream)
-    local_k_quant.record_stream(stream)
-    local_k_scale.record_stream(stream)
-    # CP all-gather backend (symm > pynccl > torch) is selected inside the
-    # dispatcher; indexer-K quant+scale are the smallest CP AGs (biggest
-    # symmetric win), so the symm path here needs the extra DSV4_CP_SYMM_VAR
-    # opt-in. Both gathers run on ``stream`` in order: the scale event (recorded
-    # last) implies the quant gather is done, so it is the handle's single
-    # completion event. ``work_*`` is None on the pynccl/symm paths.
+    local_packed.record_stream(stream)
+    # Quant+scale use the same rank-major row layout, so pack them into one
+    # uint8 payload and issue a single all_gather. ``indexer_k_packed`` is not a
+    # symmetric-memory role: under DSV4_CP_SYMM it falls back to ordinary pynccl,
+    # avoiding extra persistent windows for this async-specialized path.
     def _empty(r, c, d):
         return torch.empty((r, c), dtype=d, device=device)
 
-    gathered_q, work_q, _ = pynccl_cp.cp_all_gather(
-        local_k_quant,
+    gathered_packed, work_packed, completion_event = pynccl_cp.cp_all_gather(
+        local_packed,
         _empty,
-        role="indexer_k_quant",
-        rows=world_size * int(local_k_quant.shape[0]),
-        cols=int(local_k_quant.shape[1]),
+        role="indexer_k_packed",
+        rows=world_size * int(local_packed.shape[0]),
+        cols=int(local_packed.shape[1]),
         process_group=process_group,
         gather_stream=stream,
-        profile_name="dsv4.cp.all_gather.indexer_k.quant",
+        profile_name="dsv4.cp.all_gather.indexer_k.packed",
         symm_variable=True,
     )
-    try:
-        gathered_s, work_s, completion_event = pynccl_cp.cp_all_gather(
-            local_k_scale,
-            _empty,
-            role="indexer_k_scale",
-            rows=world_size * int(local_k_scale.shape[0]),
-            cols=int(local_k_scale.shape[1]),
-            process_group=process_group,
-            gather_stream=stream,
-            profile_name="dsv4.cp.all_gather.indexer_k.scale",
-            symm_variable=True,
-        )
-    except Exception:
-        # quant gather already launched — drain it before propagating.
-        if work_q is not None:
-            work_q.wait()
-        raise
+    gathered_q, gathered_s = _split_indexer_k_payload(
+        gathered_packed, q_cols, s_cols, q_dtype, s_dtype
+    )
 
     return IndexerKCPGatherHandle(
         plan=plan,
         gathered_q=gathered_q,
         gathered_s=gathered_s,
-        work_q=work_q,
-        work_s=work_s,
+        work_q=work_packed,
+        work_s=None,
         completion_event=completion_event,
         stream=stream,
         out_k_quant=out_k_quant,
