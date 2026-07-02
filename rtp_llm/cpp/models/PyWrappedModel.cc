@@ -4,9 +4,9 @@
 #include "rtp_llm/cpp/utils/DebugUtils.h"
 #include "rtp_llm/cpp/utils/utils.h"
 #include "rtp_llm/cpp/model_utils/AttentionConfig.h"
+#include <algorithm>
 #include <cstdint>
 #include <stdexcept>
-#include <mutex>
 #include <vector>
 #include "rtp_llm/cpp/pybind/PyUtils.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
@@ -14,6 +14,8 @@
 #include <cstring>
 #include <iostream>
 #include <numeric>
+#include <sstream>
+#include "rtp_llm/cpp/models/ModelInputsLogger.h"
 #include "rtp_llm/cpp/utils/DevicePerfWrapper.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #if USING_CUDA
@@ -138,7 +140,7 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
 
         py_attn_inputs.context_total_kv_length = cu_kv_seqlens[context_batch_size].item<int>();
         py_attn_inputs.total_tokens            = cu_seqlens[batch_size].item<int>();
-        py_attn_inputs.cu_seqlens         = cu_seqlens;
+        py_attn_inputs.cu_seqlens              = cu_seqlens;
         py_attn_inputs.cu_seqlens_device       = tensorHoldHostAndToCuda(cu_seqlens);
         py_attn_inputs.cu_kv_seqlens_device    = tensorHoldHostAndToCuda(cu_kv_seqlens);
     } else {
@@ -154,7 +156,7 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
                           py_attn_inputs.sequence_lengths.size(0) + 1,
                           1,
                           torch::TensorOptions(torch::kInt32).device(torch::kCPU).pinned_memory(true));
-        py_attn_inputs.decode_cu_seqlens   = decode_cu_seqlens;
+        py_attn_inputs.decode_cu_seqlens        = decode_cu_seqlens;
         py_attn_inputs.decode_cu_seqlens_device = tensorHoldHostAndToCuda(decode_cu_seqlens);
     }
 
@@ -202,7 +204,7 @@ void PyWrappedModel::setupKVCacheForAttentionInputs(torch_ext::PyAttentionInputs
     // Legacy 2-D fields default to group 0.
     // NOTE: keep host/device 2-D fields consistent to avoid shape mismatch in CUDA graph replay path.
     py_attn_inputs.kv_cache_kernel_block_id_device = py_attn_inputs.kv_cache_kernel_block_id_device_by_group[0];
-    py_attn_inputs.kv_cache_kernel_block_id   = py_attn_inputs.kv_cache_kernel_block_id_by_group[0];
+    py_attn_inputs.kv_cache_kernel_block_id        = py_attn_inputs.kv_cache_kernel_block_id_by_group[0];
 }
 
 // Helper function to build BertEmbeddingInputs from GptModelInputs
@@ -457,6 +459,10 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
     d2d_copies_.clear();
     DevicePerfWrapper wrapper(enable_device_perf_, "py model forward");
     holdInputsHostBuffers(inputs);
+    if (model_inputs_logger_) {
+        model_inputs_logger_->log(inputs);
+    }
+
     if (pinned_check_remaining_ > 0) {
         --pinned_check_remaining_;
     }

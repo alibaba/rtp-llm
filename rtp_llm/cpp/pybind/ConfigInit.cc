@@ -520,6 +520,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("debug_start_fake_process", &ProfilingDebugLoggingConfig::debug_start_fake_process)
         .def_readwrite("enable_detail_log", &ProfilingDebugLoggingConfig::enable_detail_log)
         .def_readwrite("check_nan", &ProfilingDebugLoggingConfig::check_nan)
+        .def_readwrite("enable_model_inputs_log", &ProfilingDebugLoggingConfig::enable_model_inputs_log)
         .def("to_string", &ProfilingDebugLoggingConfig::to_string)
         .def(py::pickle(
             [](const ProfilingDebugLoggingConfig& self) {
@@ -537,10 +538,11 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.hack_layer_num,
                                       self.debug_start_fake_process,
                                       self.enable_detail_log,
-                                      self.check_nan);
+                                      self.check_nan,
+                                      self.enable_model_inputs_log);
             },
             [](py::tuple t) {
-                if (t.size() != 12 && t.size() != 15)
+                if (t.size() != 12 && t.size() != 13 && t.size() != 15 && t.size() != 16)
                     throw std::runtime_error("Invalid state!");
 
                 ProfilingDebugLoggingConfig c;
@@ -550,7 +552,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     c.ft_core_dump_on_exception = t[2].cast<bool>();
                     c.ft_alog_conf_path         = t[3].cast<std::string>();
                     c.gen_timeline_sync         = t[4].cast<bool>();
-                    if (t.size() == 12) {
+                    if (t.size() == 12 || t.size() == 13) {
                         c.torch_cuda_profiler_dir  = t[5].cast<std::string>();
                         c.log_file_backup_count    = t[6].cast<int>();
                         c.debug_load_server        = t[7].cast<bool>();
@@ -558,6 +560,9 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                         c.debug_start_fake_process = t[9].cast<bool>();
                         c.enable_detail_log        = t[10].cast<bool>();
                         c.check_nan                = t[11].cast<bool>();
+                        if (t.size() == 13) {
+                            c.enable_model_inputs_log = t[12].cast<bool>();
+                        }
                     } else {
                         c.timeline_start_step      = t[5].cast<int>();
                         c.timeline_num_steps       = t[6].cast<int>();
@@ -569,6 +574,9 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                         c.debug_start_fake_process = t[12].cast<bool>();
                         c.enable_detail_log        = t[13].cast<bool>();
                         c.check_nan                = t[14].cast<bool>();
+                        if (t.size() == 16) {
+                            c.enable_model_inputs_log = t[15].cast<bool>();
+                        }
                     }
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("ProfilingDebugLoggingConfig unpickle error: ") + e.what());

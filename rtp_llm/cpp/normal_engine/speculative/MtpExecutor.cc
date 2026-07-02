@@ -12,6 +12,7 @@
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/StringUtil.h"
+#include "rtp_llm/cpp/models/ModelInputsLogger.h"
 #include "rtp_llm/cpp/models/PyWrappedModel.h"
 #include "rtp_llm/cpp/models/logits_processor/LogitsProcessorFactory.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
@@ -133,6 +134,12 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
     tp_rank_            = params.parallelism_config.tp_rank;
     parallelism_config_ = params.parallelism_config;
     RTP_LLM_LOG_INFO("enable_detail_log_ = %d, tp_rank_ = %d", enable_detail_log_, tp_rank_);
+    if (params.profiling_debug_logging_config.enable_model_inputs_log) {
+        model_inputs_logger_ =
+            std::make_shared<ModelInputsLogger>(params.parallelism_config.world_rank,
+                                                params.profiling_debug_logging_config.log_file_backup_count,
+                                                metrics_reporter_);
+    }
 
     if (params.eplb_config.enable_eplb() && params.model_config_.moe_style != 0) {
         // use first moe layer weight as moe weight type
@@ -196,8 +203,12 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
 
     if (!params.py_model.is_none()) {
         RTP_LLM_LOG_INFO("init executor with python model");
-        model_.reset(new PyWrappedModel(
-            model_init_params, params.py_model, false, true, target_cache_layer_layout.layer_to_groups));
+        model_.reset(new PyWrappedModel(model_init_params,
+                                        params.py_model,
+                                        false,
+                                        true,
+                                        target_cache_layer_layout.layer_to_groups,
+                                        model_inputs_logger_));
     }
 
     // when warmup, cache manager maybe nullptr
@@ -238,8 +249,12 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
                                 cache_manager});
         if (!params.py_sp_model.is_none()) {
             RTP_LLM_LOG_INFO("[speculative decoding] using py model");
-            draft_model_.reset(new PyWrappedModel(
-                model_params, params.py_sp_model, false, false, draft_cache_layer_layout.layer_to_groups));
+            draft_model_.reset(new PyWrappedModel(model_params,
+                                                  params.py_sp_model,
+                                                  false,
+                                                  false,
+                                                  draft_cache_layer_layout.layer_to_groups,
+                                                  model_inputs_logger_));
             // Create separate model for speculative prefill with CUDA graph if enabled (from params)
             const bool enable_cuda_graph = params.hw_kernel_config.enable_cuda_graph;
             RTP_LLM_LOG_INFO(
@@ -248,8 +263,12 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
             if (enable_cuda_graph) {
                 RTP_LLM_LOG_INFO(
                     "[speculative decoding] creating separate prefill draft model with CUDA graph support");
-                sp_prefill_draft_model_.reset(new PyWrappedModel(
-                    model_params, params.py_sp_model, true, false, draft_cache_layer_layout.layer_to_groups));
+                sp_prefill_draft_model_.reset(new PyWrappedModel(model_params,
+                                                                 params.py_sp_model,
+                                                                 true,
+                                                                 false,
+                                                                 draft_cache_layer_layout.layer_to_groups,
+                                                                 model_inputs_logger_));
             }
         }
         break;  // NOTE: only support one mtp model now

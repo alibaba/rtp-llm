@@ -28,6 +28,7 @@ NormalBatchStreamProcessor::NormalBatchStreamProcessor(
     model_input_gatherer_config_.kv_cache_group_types       = cache_config.group_types;
     model_input_gatherer_config_.warm_up                    = warm_up;
     model_input_gatherer_config_.enable_detail_log          = profiling_debug_logging_config.enable_detail_log;
+    model_input_gatherer_config_.enable_model_inputs_log    = profiling_debug_logging_config.enable_model_inputs_log;
 
     model_input_gatherer_   = std::make_unique<NormalModelInputGatherer>(model_input_gatherer_config_);
     sampler_input_gatherer_ = std::make_unique<NormalSamplerInputGatherer>();
