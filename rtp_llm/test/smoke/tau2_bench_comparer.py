@@ -149,7 +149,15 @@ class Tau2BenchComparer(BaseComparer):
             urllib.request.urlretrieve(TAU2_TARBALL_URL, tarball_path)
             logging.info(f"[TAU2] extracting to {dest_dir}")
             with tarfile.open(tarball_path, "r:gz") as tar:
-                tar.extractall(path=dest_dir, filter="data")
+                # filter="data" hardens extraction against path traversal, but the
+                # kwarg only exists on Python >= 3.12 (backported to 3.10.12 /
+                # 3.11.4 / 3.9.17). On the smoke container's 3.10.9 it raises
+                # TypeError at call time (before extracting anything), so fall back
+                # to a plain extractall there.
+                try:
+                    tar.extractall(path=dest_dir, filter="data")
+                except TypeError:
+                    tar.extractall(path=dest_dir)
         finally:
             try:
                 os.remove(tarball_path)
