@@ -13,7 +13,8 @@ public:
                              const kmonitor::MetricsReporterPtr&              metrics_reporter,
                              const std::shared_ptr<TimerManager>&             timer_manager,
                              const std::shared_ptr<LockedBlockBufferManager>& locked_block_buffer_manager,
-                             const std::shared_ptr<TcpClient>&                tcp_client);
+                             const std::shared_ptr<TcpClient>&                tcp_client,
+                             int                                              device_id = -1);
     virtual ~TcpCacheStoreServiceImpl() = default;
 
 protected:
@@ -41,6 +42,7 @@ protected:
 
 private:
     std::shared_ptr<TcpClient> tcp_client_;
+    int                        device_id_{-1};
 };
 
 }  // namespace rtp_llm
