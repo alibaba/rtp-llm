@@ -40,7 +40,7 @@ pynvml
 pyodps
 pyOpenSSL==24.1.0
 safetensors
-sentence-transformers==5.2.0
+sentence-transformers==2.7.0
 sentencepiece==0.2.0
 setproctitle
 setuptools==60.5.0
@@ -48,7 +48,14 @@ sympy
 thrift
 tiktoken==0.7.0
 timm==0.9.12
-transformers==5.2.0
+# Pinned to 4.51.2 to stay in sync with the opensource lockfiles.
+# UPGRADE PLAN: upstream code already carries transformers==5.2.0 workarounds
+# (see rtp_llm/frontend/tokenizer_factory/tokenizers/*), so the eventual target
+# is to realign this pin to 5.2.0. Doing so requires regenerating all three
+# lockfiles (requirements_lock_{torch_gpu_cuda12_9,cuda12_arm,rocm}.txt) on a
+# Linux x86_64 + Python 3.10 host (macOS cannot build the Linux-only
+# tensorrt-cu12 sdist), plus a smoke test, before landing.
+transformers==4.51.2
 typing-extensions
 uvicorn==0.30.0
 xfastertransformer_devel==1.8.1.1 ; platform_machine == "x86_64"

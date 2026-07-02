@@ -28,9 +28,9 @@ git clone git@github.com:alibaba/rtp-llm.git
 cd RTP-LLM
 
 # build RTP-LLM whl target
-# --config=cuda12_6 build target for NVIDIA GPU with cuda12_6
+# --config=cuda12_9 build target for NVIDIA GPU with cuda12_9
 # --config=rocm build target for AMD
-bazelisk build //rtp_llm:rtp_llm --verbose_failures --config=cuda12_6 --test_output=errors --test_env="LOG_LEVEL=INFO"  --jobs=64
+bazelisk build //rtp_llm:rtp_llm --verbose_failures --config=cuda12_9 --jobs=64
 
 ln  -sf `pwd`/bazel-out/k8-opt/bin/rtp_llm/cpp/model_rpc/proto/model_rpc_service_pb2_grpc.py  `pwd`/rtp_llm/cpp/model_rpc/proto/
 ln  -sf `pwd`/bazel-out/k8-opt/bin/rtp_llm/cpp/model_rpc/proto/model_rpc_service_pb2.py  `pwd`/rtp_llm/cpp/model_rpc/proto/model_rpc_service_pb2.py

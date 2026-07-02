@@ -54,7 +54,7 @@ void TensorPbConvert::torchToPb(TensorPB* tensor_pb, const torch::Tensor& tensor
     for (auto dim : shape) {
         tensor_pb->add_shape(dim);
     }
-    torch::Tensor contiguous_tensor = tensor.contiguous();
+    torch::Tensor contiguous_tensor = tensor.to(torch::kCPU).contiguous();
     switch (tensor.dtype().toScalarType()) {
         case torch::kFloat32: {
             size_t      num_bytes = contiguous_tensor.numel() * sizeof(float);

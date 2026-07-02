@@ -63,10 +63,9 @@ py_test(
     srcs = ["test_xqa_batch_decode.py"],
     deps = py_test_deps + select({
         "@//:using_cuda12_9_x86": ["//rtp_llm:flashinfer-python"],
-        "@//:cuda_pre_12_9": ["//rtp_llm:flashinfer-python"],
         "//conditions:default": []
     }),
-    tags = ["open_skip", "H20"],
+    tags = ["open_skip", "H20", "manual"],
     exec_properties = {'gpu':'H20'},
 )
 

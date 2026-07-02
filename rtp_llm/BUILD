@@ -50,7 +50,6 @@ flashattn = [
 ]
 
 xft_dep = select({
-    "@//:using_arm": [],
     "//:xft_use_icx": [
         # "xfastertransformer_devel_icx",
     ],
@@ -60,15 +59,13 @@ xft_dep = select({
 })
 
 arch_dep = select({
-    "@//:using_arm": [],
     "@//:using_cuda12_arm": [],
-    "//conditions:default": [":decord", ":av"],
+    "//conditions:default": [":decord"],
 })
 
 arch_with_version_dep = select({
-    "@//:using_arm": [],
     "@//:using_cuda12_arm": [],
-    "//conditions:default": ["decord==0.6.0", "av==16.1.0"],
+    "//conditions:default": ["decord==0.6.0"],
 })
 
 requirement([
@@ -105,7 +102,6 @@ requirement([
     "xfastertransformer_devel",
     "xfastertransformer_devel_icx",
     "decord",
-    "av",
     # add qwen agent package
     "pydantic",
     "json5",
@@ -152,6 +148,7 @@ py_library(
         ":cpm_kernels",
         ":prettytable",
         ":psutil",
+        ":aiohttp",
         "//rtp_llm/aios/kmonitor:kmonitor_py",
     ] + internal_deps()
 )
@@ -226,9 +223,7 @@ py_library(
         ":protobuf",
         ":pyOpenSSL",
     ] + select({
-        "@//:using_arm": [],
 	    "@//:using_rocm": ["pyrsmi", "amdsmi"],
-        "@//:using_cpu": [],
         "@//:using_cuda12_arm": [],
         "//conditions:default": ["flash_attn"]
     }) + arch_dep,
@@ -265,20 +260,16 @@ py_library(
     }) + select({
         "@//:using_cuda12_9_x86": flashinfer_with_cache + flashmla,
         "@//:using_cuda12_arm": flashinfer_with_cache + ["flash-mla", "fast-hadamard-transform"],
-        "@//:cuda_pre_12_9": flashinfer,
         "//conditions:default": []
     }) + select({
         "@//:using_cuda12_9_x86": rtp_kernel,
         "@//:using_cuda12_arm": rtp_kernel,
-        "@//:cuda_pre_12_9": [],
         "//conditions:default": []
     }) + select({
         "@//:using_cuda12_9_x86": flashattn,
         "@//:using_cuda12_arm": flashattn,
-        "@//:cuda_pre_12_9": [],
         "//conditions:default": []
     }) + select({
-        "@//:using_arm": [],
         "@//:using_cuda12_arm": [],
         # "//:xft_use_icx": [
         #     "xfastertransformer_devel_icx",
@@ -287,9 +278,7 @@ py_library(
             "xfastertransformer_devel",
         ],
     }) + select({
-        "@//:using_arm": [],
-	    "@//:using_rocm": ["pyrsmi", "amdsmi"],
-        "@//:using_cpu": [],
+        "@//:using_rocm": ["pyrsmi", "amdsmi"],
         "@//:using_cuda12_arm": [],
         "//conditions:default": []
     }) + triton_deps(["triton"]) + internal_deps(),
@@ -571,7 +560,9 @@ whl_reqs = [
     "sympy",
     "typing-extensions",
     "importlib_metadata",
-    "transformers==5.2.0",
+    # Pinned to 4.51.2 to match requirements_base.txt and the regenerated
+    # lockfiles. Bump only after regenerating lockfiles on Linux x86_64 + py3.10.
+    "transformers==4.51.2",
     "sentencepiece==0.2.0",
     "fastapi==0.115.6",
     "grpcio-tools==1.57.0",
@@ -597,7 +588,7 @@ whl_reqs = [
     "pydantic",
     "timm==0.9.12",
     "onnx",
-    "sentence-transformers==5.2.0",
+    "sentence-transformers==2.7.0",
     # "xfastertransformer_devel==1.8.1.1",
     # "xfastertransformer_devel_icx==1.8.1.1",
     "grpcio==1.62.0",

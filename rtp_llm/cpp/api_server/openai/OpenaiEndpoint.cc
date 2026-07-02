@@ -1,6 +1,7 @@
 #include "autil/StringUtil.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/api_server/openai/OpenaiEndpoint.h"
+#include "rtp_llm/cpp/api_server/Exception.h"
 
 namespace rtp_llm {
 
@@ -74,9 +75,18 @@ std::shared_ptr<GenerateConfig> OpenaiEndpoint::extract_generation_config(const 
     config.stop_words_str.insert(config.stop_words_str.begin(), stop_words_list_.begin(), stop_words_list_.end());
     config.stop_words_list.insert(
         config.stop_words_list.begin(), stop_word_ids_list_.begin(), stop_word_ids_list_.end());
-    auto request_stop_words_list_ids = chat_render_->tokenize_words(request_stop_words_list);
-    config.stop_words_list.insert(
-        config.stop_words_list.begin(), request_stop_words_list_ids.begin(), request_stop_words_list_ids.end());
+    if (chat_render_) {
+        auto request_stop_words_list_ids = chat_render_->tokenize_words(request_stop_words_list);
+        config.stop_words_list.insert(
+            config.stop_words_list.begin(), request_stop_words_list_ids.begin(), request_stop_words_list_ids.end());
+    } else if (!request_stop_words_list.empty()) {
+        // fail-fast: the request provided stop words but chat_render_ is null, so we
+        // cannot tokenize them. Surfacing an error is better than silently dropping
+        // the user's stop words and returning unexpected output.
+        throw HttpApiServerException(HttpApiServerException::TOKENIZER_ERROR,
+                                     "chat_render is null; cannot tokenize request stop_words");
+    }
+    // If no request stop words were provided, a null chat_render_ drops nothing.
     // if (req.chat_id.has_value()) {
     //     config.chat_id = req.chat_id.value();
     // }
@@ -91,11 +101,19 @@ std::shared_ptr<GenerateConfig> OpenaiEndpoint::extract_generation_config(const 
     }
     config.addSpecialTokens(model_config_.special_tokens);
 
-    auto select_tokens_id = tokenizer_->convertSelectTokens(config.select_tokens_str, model_config_.vocab_size);
-    config.select_tokens_id.insert(config.select_tokens_id.begin(), select_tokens_id.begin(), select_tokens_id.end());
-    if (config.sp_advice_prompt.empty() == false) {
-        config.sp_advice_prompt_token_ids = tokenizer_->encode(config.sp_advice_prompt);
+    if (tokenizer_) {
+        auto select_tokens_id = tokenizer_->convertSelectTokens(config.select_tokens_str, model_config_.vocab_size);
+        config.select_tokens_id.insert(config.select_tokens_id.begin(), select_tokens_id.begin(), select_tokens_id.end());
+        if (config.sp_advice_prompt.empty() == false) {
+            config.sp_advice_prompt_token_ids = tokenizer_->encode(config.sp_advice_prompt);
+        }
+    } else if (config.select_tokens_str.empty() == false || config.sp_advice_prompt.empty() == false) {
+        // fail-fast: the request needs select_tokens / sp_advice_prompt encoding but
+        // tokenizer_ is null. Reject instead of silently skipping so the caller is aware.
+        throw HttpApiServerException(HttpApiServerException::TOKENIZER_ERROR,
+                                     "tokenizer is null; cannot process select_tokens/sp_advice_prompt");
     }
+    // If neither select_tokens nor sp_advice_prompt was requested, a null tokenizer_ drops nothing.
     return std::make_shared<GenerateConfig>(config);
 }
 
@@ -108,22 +126,24 @@ std::string OpenaiEndpoint::getDebugInfo(const ChatCompletionRequest& chat_reque
     });
 
     std::string prompt;
-    if (rendered_input.rendered_prompt.empty()) {
+    if (!rendered_input.rendered_prompt.empty()) {
+        prompt = rendered_input.rendered_prompt;
+    } else if (tokenizer_) {
         prompt = tokenizer_->decode(rendered_input.input_ids);
     } else {
-        prompt = rendered_input.rendered_prompt;
+        RTP_LLM_LOG_WARNING("tokenizer is null and rendered_prompt is empty, skip decoding prompt");
     }
 
     DebugInfo debug_info;
     debug_info.input_prompt       = prompt;
     debug_info.input_ids          = rendered_input.input_ids;
     debug_info.input_urls         = input_urls;
-    debug_info.tokenizer_info     = tokenizer_->toString();
+    debug_info.tokenizer_info     = tokenizer_ ? tokenizer_->toString() : "";
     debug_info.max_seq_len        = max_seq_len_;
     debug_info.eos_token_id       = eos_token_id_;
     debug_info.stop_word_ids_list = stop_word_ids_list_;
     debug_info.stop_words_list    = stop_words_list_;
-    debug_info.renderer_info      = chat_render_->toString();
+    debug_info.renderer_info      = chat_render_ ? chat_render_->toString() : "";
     debug_info.generate_config    = *(extract_generation_config(chat_request));
 
     return ToJsonString(debug_info, true);

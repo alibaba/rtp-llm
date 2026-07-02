@@ -21,7 +21,6 @@ py_test (
         "//rtp_llm:testlib",
     ] + select({
         "@//:using_cuda12_9_x86": flashinfer_deps,
-        "@//:cuda_pre_12_9": flashinfer_deps,
         "//conditions:default": []
     }),
     tags = ["open_skip", "H20"],
@@ -35,7 +34,6 @@ py_test (
         "//rtp_llm:testlib",
     ] + select({
         "@//:using_cuda12_9_x86": flashinfer_deps,
-        "@//:cuda_pre_12_9": flashinfer_deps,
         "//conditions:default": []
     }),
     tags = ["open_skip", "H20"],

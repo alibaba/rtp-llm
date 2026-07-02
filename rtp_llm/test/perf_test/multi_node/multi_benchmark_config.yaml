@@ -23,7 +23,7 @@ build_config:
   # open_source_url: "git@github.com:alibaba/rtp-llm.git"
   open_source_ref: "origin/main"
   ft_sub_dir: "rtp_llm_perf_test"
-  bazel_build_args: '" --jobs 64 --verbose_failures --config=cuda12_6 "'
+  bazel_build_args: '" --jobs 64 --verbose_failures --config=cuda12_9 "'
 
 common_config:
   warm_up: true
@@ -59,7 +59,7 @@ benchmarks:
     tp_size: [1,2,4]
     dp_size: [32,16,8]
     # build config
-    bazel_build_args: '" --jobs 100 --verbose_failures --config=cuda12_6 "'
+    bazel_build_args: '" --jobs 100 --verbose_failures --config=cuda12_9 "'
     # file dir config
     ft_sub_dir: "rtp_llm_perf_test"
     # model config
