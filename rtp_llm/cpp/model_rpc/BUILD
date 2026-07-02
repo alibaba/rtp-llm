@@ -1,9 +1,6 @@
 load("//:def.bzl", "copts")
-load("@arch_config//:arch_select.bzl", "embedding_arpc_deps", "requirement", "torch_deps")
-
-requirement([
-    "grpcio",
-])
+load("@arch_config//:arch_select.bzl", "embedding_arpc_deps")
+load("@rtp_llm//bazel:defs.bzl", "torch_deps")
 
 embedding_arpc_deps()
 
@@ -67,16 +64,6 @@ cc_library(
         "//rtp_llm/cpp/normal_engine",
         "//rtp_llm/cpp/utils:atomic_util",
         "//rtp_llm/cpp/utils:profiling_scope",
-    ],
-)
-
-py_library(
-    name = "model_rpc_client",
-    srcs = ["model_rpc_client.py"],
-    visibility = ["//visibility:public"],
-    deps = [
-        ":grpcio",
-        "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_py_proto",
     ],
 )
 

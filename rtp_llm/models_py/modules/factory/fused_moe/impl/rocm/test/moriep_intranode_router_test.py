@@ -32,6 +32,7 @@ import types
 import unittest
 from typing import Any, List, Optional, Tuple
 
+import pytest
 import torch
 import torch.distributed as dist
 
@@ -574,6 +575,7 @@ class MoriEpIntranodeRouterTest(unittest.TestCase):
         if max_gpu_count < 2:
             self.skipTest(f"Need at least 2 GPUs, got {max_gpu_count}")
 
+    @pytest.mark.gpu(type="MI308X_ROCM7", count=2)
     def test_world_size_2(self):
         self._check_skip()
         max_gpu_count, _ = _gpu_count_without_parent_cuda_init()
@@ -582,6 +584,7 @@ class MoriEpIntranodeRouterTest(unittest.TestCase):
         mp.set_start_method("spawn", force=True)
         test_single(world_size=2, dist_port=_get_free_port())
 
+    @pytest.mark.gpu(type="MI308X_ROCM7", count=4)
     def test_world_size_4(self):
         if _MAX_GPUS > 0 and _MAX_GPUS < 4:
             self.skipTest(f"MORIEP_TEST_MAX_GPUS={_MAX_GPUS}, skipping 4-GPU test")

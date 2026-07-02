@@ -1,7 +1,17 @@
 from typing import Optional, Tuple
 
-import flashinfer
 import torch
+
+# flashinfer is CUDA-only. base/__init__.py imports this module on the
+# else-branch of `device_type == ROCm`, but pytest test-collection on a
+# CPU-only container (where torch.cuda.is_available() is False) also
+# routes through the same else-branch and would crash on a top-level
+# `import flashinfer`. Defer the import to the only function that uses
+# it (FusedQKRMSNorm.forward), which never runs on a CPU/ROCm host.
+try:
+    import flashinfer
+except ImportError:
+    flashinfer = None  # type: ignore[assignment]
 from torch import nn
 
 from rtp_llm.models_py.modules.base.common.norm import (
@@ -92,6 +102,8 @@ class FusedQKRMSNorm(nn.Module):
         enable_pdl: bool = False,
     ):
         super().__init__()
+        if flashinfer is None:
+            raise RuntimeError("FusedQKRMSNorm requires flashinfer (CUDA-only)")
         self.q_weight = q_weight
         self.k_weight = k_weight
         self.eps = eps

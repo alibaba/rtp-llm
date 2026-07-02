@@ -1,5 +1,8 @@
 import functools
+import importlib.util
+import os
 from contextlib import contextmanager
+from pathlib import Path
 from typing import Any, Callable, Generator, List, NoReturn, Optional, Tuple
 
 import torch
@@ -48,6 +51,37 @@ _m_grouped_bf16_gemm_nt_contiguous_impl: Callable[..., Any] | None = None
 _m_grouped_bf16_gemm_nt_masked_impl: Callable[..., Any] | None = None
 
 
+def _prepend_path_env(key: str, value: str) -> None:
+    old = os.environ.get(key, "")
+    paths = [path for path in old.split(os.pathsep) if path]
+    if value not in paths:
+        os.environ[key] = os.pathsep.join([value] + paths)
+
+
+def _prepend_flag_env(key: str, flag: str) -> None:
+    old = os.environ.get(key, "")
+    flags = old.split()
+    if flag not in flags:
+        os.environ[key] = f"{flag} {old}".strip()
+
+
+@functools.cache
+def _prepare_deep_gemm_jit_env() -> None:
+    spec = importlib.util.find_spec("deep_gemm")
+    locations = getattr(spec, "submodule_search_locations", None) if spec else None
+    if not locations:
+        return
+
+    include_dir = Path(next(iter(locations))) / "include"
+    if not include_dir.is_dir():
+        return
+
+    include_path = str(include_dir)
+    _prepend_path_env("CPATH", include_path)
+    _prepend_path_env("CPLUS_INCLUDE_PATH", include_path)
+    _prepend_flag_env("NVCC_PREPEND_FLAGS", f"-I{include_path}")
+
+
 @functools.cache
 def has_deep_gemm() -> bool:
     """Whether the optional `deep_gemm` package is available."""
@@ -66,6 +100,7 @@ def configure_deep_gemm_num_sms(num_sms: int) -> Generator[None, None, None]:
         raise RuntimeError(
             "DeepGEMM is not available. Please install the `deep_gemm` package to enable DeepGEMM kernels."
         )
+    _prepare_deep_gemm_jit_env()
     import deep_gemm
 
     # get original num sms
@@ -96,7 +131,9 @@ def _lazy_init_deep_gemm(symbols: List[str]) -> None:
     if any(symbol not in _deep_gemm_impl_new_map for symbol in symbols):
         raise ValueError(f"Invalid symbols: {symbols}")
     if all(
-        getattr(globals(), symbol_impl, None) is not None
+        # globals() is a dict: use .get(), not getattr() (which inspects dict
+        # attributes and would always return None, defeating this guard).
+        globals().get(symbol_impl) is not None
         for symbol_impl in symbol_impls
     ):
         # already initialized
@@ -105,21 +142,32 @@ def _lazy_init_deep_gemm(symbols: List[str]) -> None:
         # deep_gemm is not available
         return
 
-    import deep_gemm
+    try:
+        _prepare_deep_gemm_jit_env()
+        import deep_gemm
+    except (ImportError, AssertionError, RuntimeError, OSError) as e:
+        # deep_gemm found by find_spec but fails to import
+        # (e.g. CUDA_HOME not set, missing shared libs)
+        import logging
+
+        logging.debug("deep_gemm import failed: %s", e)
+        return
 
     # resolve symbols
     for i, symbol in enumerate(symbols):
         symbol_impl = symbol_impls[i]
-        try:
-            globals()[symbol_impl] = resolve_symbol(
-                deep_gemm,
-                _deep_gemm_impl_new_map[symbol],
-                _deep_gemm_impl_old_map[symbol],
-            )
-        except AttributeError:
+        # resolve_symbol returns None (never raises) when neither the new nor the
+        # legacy symbol exists, so check the return value explicitly.
+        resolved = resolve_symbol(
+            deep_gemm,
+            _deep_gemm_impl_new_map[symbol],
+            _deep_gemm_impl_old_map[symbol],
+        )
+        if resolved is None:
             raise RuntimeError(
                 f"DeepGEMM symbol {_deep_gemm_impl_new_map[symbol]} and {_deep_gemm_impl_old_map[symbol]} not found in deep_gemm module"
             )
+        globals()[symbol_impl] = resolved
 
 
 def _lazy_init_deep_gemm_once():
@@ -280,6 +328,7 @@ def pack_ue8m0_kernel_gran1(
 
 
 def pack_ue8m0_kernel_launcher(scale: torch.Tensor, gran_mn: int):
+    _prepare_deep_gemm_jit_env()
     import deep_gemm
 
     if scale.dim() == 2:

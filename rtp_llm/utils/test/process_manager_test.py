@@ -6,6 +6,10 @@ import time
 import unittest
 from unittest.mock import Mock, patch
 
+import pytest
+
+pytestmark = [pytest.mark.gpu(type="A10")]
+
 from rtp_llm.utils.process_manager import ProcessManager
 
 

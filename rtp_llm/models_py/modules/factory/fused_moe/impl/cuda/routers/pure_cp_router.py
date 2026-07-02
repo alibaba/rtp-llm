@@ -94,6 +94,10 @@ class PureCpRouterBase(FusedMoeDataRouter):
         self.expert_num_per_rank = self.expert_num // self.ep_size
         self.expert_start_id = self.ep_rank * self.expert_num_per_rank
 
+        # Reusable output buffer for reduce_scatter to avoid allocation on the
+        # hot finalize() path. Shape/device/dtype are checked each call.
+        self._reduce_scatter_output_buffer: Optional[torch.Tensor] = None
+
     @abstractmethod
     def _do_quant(
         self, a1: torch.Tensor
@@ -139,7 +143,22 @@ class PureCpRouterBase(FusedMoeDataRouter):
         apply_router_weight_on_input: bool,
         extra_finalize_args: Optional[Dict[str, Any]],
     ) -> torch.Tensor:
-        return reduce_scatter(payload.fused_expert_output, group=Group.TP)
+        fused_output = payload.fused_expert_output
+        output_shape = (fused_output.shape[0] // self.tp_size, *fused_output.shape[1:])
+        if (
+            self._reduce_scatter_output_buffer is None
+            or self._reduce_scatter_output_buffer.shape != output_shape
+            or self._reduce_scatter_output_buffer.device != fused_output.device
+            or self._reduce_scatter_output_buffer.dtype != fused_output.dtype
+        ):
+            self._reduce_scatter_output_buffer = torch.empty(
+                output_shape, device=fused_output.device, dtype=fused_output.dtype
+            )
+        return reduce_scatter(
+            fused_output,
+            group=Group.TP,
+            output_tensor=self._reduce_scatter_output_buffer,
+        )
 
 
 class PureCpRouterFp8PerBlock(PureCpRouterBase):

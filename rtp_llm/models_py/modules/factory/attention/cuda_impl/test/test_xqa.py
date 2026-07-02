@@ -2,11 +2,18 @@ import logging
 import unittest
 from typing import List
 
+import pytest
+
+pytestmark = [pytest.mark.gpu(type="H20")]
+
 import torch
 from attention_ref import compute_flashinfer_decode_reference
 from base_attention_test import BaseAttentionTest, compare_tensors
 
-from rtp_llm.ops.compute_ops import PyAttentionInputs, XQAAttnOp, XQAParams
+try:
+    from rtp_llm.ops.compute_ops import PyAttentionInputs, XQAAttnOp, XQAParams
+except ImportError as e:
+    pytest.skip(f"CUDA-only compute_ops unavailable: {e}", allow_module_level=True)
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 
@@ -193,8 +200,16 @@ class TestXQAAttnOp(BaseAttentionTest):
                 supported_count += 1
             else:
                 logging.warning(f"    ⚠️  Expected SUPPORTED but got NOT SUPPORTED")
+            self.assertTrue(
+                is_supported, f"Expected SUPPORTED but got NOT SUPPORTED: {desc}"
+            )
 
         logging.info(f"\nSupported cases: {supported_count}/{len(supported_cases)}")
+        self.assertEqual(
+            supported_count,
+            len(supported_cases),
+            "Not all supported configurations were reported as supported",
+        )
 
         # Test UNSUPPORTED configurations
         logging.info("\n--- Testing UNSUPPORTED configurations ---")
@@ -255,38 +270,35 @@ class TestXQAAttnOp(BaseAttentionTest):
                 unsupported_count += 1
             else:
                 logging.warning(f"    ⚠️  Expected UNSUPPORTED but got SUPPORTED")
+            self.assertFalse(
+                is_supported, f"Expected UNSUPPORTED but got SUPPORTED: {desc}"
+            )
 
         logging.info(
             f"\nUnsupported cases correctly rejected: {unsupported_count}/{len(unsupported_cases)}"
+        )
+        self.assertEqual(
+            unsupported_count,
+            len(unsupported_cases),
+            "Not all unsupported configurations were rejected",
         )
 
         # Test boundary cases
         logging.info("\n--- Testing BOUNDARY cases ---")
 
+        # (head_num, head_num_kv, size_per_head, seq_size_per_block, data_type,
+        #  expected_supported, desc) — expected is an explicit field so renaming
+        #  desc cannot silently change the assertion.
         boundary_cases = [
             # Edge cases for group_size
-            (
-                32,
-                2,
-                128,
-                64,
-                "fp16",
-                "group_size=16 (max allowed): SHOULD BE SUPPORTED",
-            ),
-            (
-                34,
-                2,
-                128,
-                64,
-                "fp16",
-                "group_size=17 (just over limit): SHOULD BE UNSUPPORTED",
-            ),
+            (32, 2, 128, 64, "fp16", True, "group_size=16 (max allowed)"),
+            (34, 2, 128, 64, "fp16", False, "group_size=17 (just over limit)"),
             # Edge cases for head_dim
-            (32, 8, 64, 64, "fp16", "head_dim=64 (min): SHOULD BE SUPPORTED"),
-            (32, 8, 256, 64, "fp16", "head_dim=256 (max): SHOULD BE SUPPORTED"),
+            (32, 8, 64, 64, "fp16", True, "head_dim=64 (min)"),
+            (32, 8, 256, 64, "fp16", True, "head_dim=256 (max)"),
             # Edge cases for page_size
-            (32, 8, 128, 16, "fp16", "page_size=16 (min): SHOULD BE SUPPORTED"),
-            (32, 8, 128, 128, "fp16", "page_size=128 (max): SHOULD BE SUPPORTED"),
+            (32, 8, 128, 16, "fp16", True, "page_size=16 (min)"),
+            (32, 8, 128, 128, "fp16", True, "page_size=128 (max)"),
         ]
 
         for (
@@ -295,6 +307,7 @@ class TestXQAAttnOp(BaseAttentionTest):
             size_per_head,
             seq_size_per_block,
             data_type,
+            expected_supported,
             desc,
         ) in boundary_cases:
             config = self._create_config(
@@ -320,6 +333,7 @@ class TestXQAAttnOp(BaseAttentionTest):
                 f"    head_dim={size_per_head}, page_size={seq_size_per_block}\n"
                 f"    → Support: {is_supported}"
             )
+            self.assertEqual(is_supported, expected_supported, desc)
 
         logging.info("\n=== XQAAttnOp support() testing completed ===")
 
@@ -364,6 +378,11 @@ class TestXQAAttnOp(BaseAttentionTest):
             )
             logging.info(f"  Batch size: {batch_size}, seq_lens: {seq_lens}")
             logging.info(f"  Support result: {is_supported}")
+
+            # support() must return a bool, and every case here is a valid XQA
+            # config (supported dtype / group_size / head_dim), so expect True.
+            self.assertIsInstance(is_supported, bool, desc)
+            self.assertTrue(is_supported, f"Expected SUPPORTED for known config: {desc}")
 
     def test_single_batch_decode(self):
         """Test decode for a single batch"""

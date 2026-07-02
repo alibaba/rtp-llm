@@ -137,123 +137,134 @@ def start_vit_server_impl(
     start_port = server_config.start_port
     vit_server_count = server_config.vit_server_count
 
-    if vit_server_count > 1:
-        logging.info(
-            f"[VIT_SERVER] Starting in PROXY mode: 1 proxy + {vit_server_count} workers "
-            f"(role_type=VIT)"
-        )
-
-        worker_processes = []
-        worker_addresses = []
-        worker_http_addresses = []
-
-        base_grpc_port = py_env_configs.server_config.rpc_server_port
-
-        # Per-worker we consume two ports (grpc + http). Fail fast if the
-        # range would walk past the 16-bit TCP port ceiling — otherwise
-        # bind() errors only surface inside the spawned worker and look like
-        # health-check timeouts.
-        max_port = base_grpc_port + vit_server_count * 2
-        if max_port >= 65536:
-            raise ValueError(
-                f"VIT worker port range exceeds 65535: base={base_grpc_port}, "
-                f"vit_server_count={vit_server_count}, max={max_port}"
+    vit_processes: list = []
+    vit_server_port = 0
+    try:
+        if vit_server_count > 1:
+            logging.info(
+                f"[VIT_SERVER] Starting in PROXY mode: 1 proxy + {vit_server_count} workers "
+                f"(role_type=VIT)"
             )
 
-        for i in range(vit_server_count):
-            internal_grpc_port = base_grpc_port + i * 2 + 1
-            internal_http_port = base_grpc_port + i * 2 + 2
-            worker_addresses.append(f"127.0.0.1:{internal_grpc_port}")
-            worker_http_addresses.append(f"127.0.0.1:{internal_http_port}")
+            worker_addresses = []
+            worker_http_addresses = []
 
+            base_grpc_port = py_env_configs.server_config.rpc_server_port
+
+            # Per-worker we consume two ports (grpc + http). Fail fast if the
+            # range would walk past the 16-bit TCP port ceiling — otherwise
+            # bind() errors only surface inside the spawned worker and look like
+            # health-check timeouts.
+            max_port = base_grpc_port + vit_server_count * 2
+            if max_port >= 65536:
+                raise ValueError(
+                    f"VIT worker port range exceeds 65535: base={base_grpc_port}, "
+                    f"vit_server_count={vit_server_count}, max={max_port}"
+                )
+
+            for i in range(vit_server_count):
+                internal_grpc_port = base_grpc_port + i * 2 + 1
+                internal_http_port = base_grpc_port + i * 2 + 2
+                worker_addresses.append(f"127.0.0.1:{internal_grpc_port}")
+                worker_http_addresses.append(f"127.0.0.1:{internal_http_port}")
+
+                logging.info(
+                    f"[PROCESS_SPAWN] Start vit worker process worker_{i} "
+                    f"(internal grpc_port={internal_grpc_port}, "
+                    f"internal http_port={internal_http_port})"
+                )
+                process = torch.multiprocessing.Process(
+                    target=vit_start_server,
+                    args=(
+                        i,
+                        py_env_configs,
+                        internal_grpc_port,  # grpc_port
+                        internal_http_port,  # http_port
+                        True,  # is_proxy_mode (proxy 模式下的 worker 进程)
+                    ),
+                    name=f"vit_worker_{i}",
+                )
+                process.start()
+                vit_processes.append(process)
+
+            external_grpc_port = base_grpc_port  # 主进程使用基础 gRPC 端口
+            external_http_port = py_env_configs.server_config.server_port
+
+            # 2. 启动主进程（代理服务器）
             logging.info(
-                f"[PROCESS_SPAWN] Start vit worker process worker_{i} "
-                f"(internal grpc_port={internal_grpc_port}, "
-                f"internal http_port={internal_http_port})"
+                f"[PROCESS_SPAWN] Start vit proxy process "
+                f"(external grpc_port={external_grpc_port}, http_port={external_http_port})"
+            )
+            proxy_process = torch.multiprocessing.Process(
+                target=vit_proxy_start_server,
+                args=(
+                    py_env_configs,
+                    worker_addresses,
+                    external_grpc_port,  # grpc_port
+                    external_http_port,  # http_port
+                    worker_http_addresses,  # worker_http_addresses
+                ),
+                name="vit_proxy",
+            )
+            proxy_process.start()
+            vit_processes.insert(0, proxy_process)
+
+            # 健康检查：检查代理服务器的端口（代理模式只在 VIT 角色时启用）
+            vit_server_port = py_env_configs.server_config.server_port
+            # 保存 worker 地址列表，用于健康检查
+
+        else:
+            grpc_port = py_env_configs.server_config.rpc_server_port
+            http_port = py_env_configs.server_config.server_port
+            vit_server_port = http_port
+            logging.info(
+                f"[PROCESS_SPAWN] Start vit server process "
+                f"(grpc_port={grpc_port}, http_port={http_port})"
             )
             process = torch.multiprocessing.Process(
                 target=vit_start_server,
                 args=(
-                    i,
+                    0,
                     py_env_configs,
-                    internal_grpc_port,  # grpc_port
-                    internal_http_port,  # http_port
-                    True,  # is_proxy_mode (proxy 模式下的 worker 进程)
+                    grpc_port,  # grpc_port
+                    http_port,  # http_port
+                    False,  # is_proxy_mode (standalone 模式，需要记录 QPS)
                 ),
-                name=f"vit_worker_{i}",
+                name="vit_server",
             )
-            worker_processes.append(process)
             process.start()
+            vit_processes.append(process)
 
-        external_grpc_port = base_grpc_port  # 主进程使用基础 gRPC 端口
-        external_http_port = py_env_configs.server_config.server_port
+        if process_manager and vit_processes:
+            logging.info(
+                f"[VIT_SERVER] Registering health check for {len(vit_processes)} VIT processes, "
+                f"current_managed_processes={len(process_manager.processes)}"
+            )
 
-        # 2. 启动主进程（代理服务器）
-        logging.info(
-            f"[PROCESS_SPAWN] Start vit proxy process "
-            f"(external grpc_port={external_grpc_port}, http_port={external_http_port})"
+            def check_vit_ready():
+                return check_server_health(vit_server_port)
+
+            process_manager.register_health_check(
+                processes=vit_processes,
+                process_name="vit_server",
+                check_ready_fn=check_vit_ready,
+                retry_interval_seconds=1,
+            )
+            logging.info(
+                f"[VIT_SERVER] Health check registered, after_registration: "
+                f"managed_processes={len(process_manager.processes)}, "
+                f"health_check_processes={len(process_manager.health_check_processes)}"
+            )
+    except Exception as e:
+        logging.error(
+            f"[VIT_SERVER] Failed to start VIT server, terminating "
+            f"{len(vit_processes)} already-started processes: {e}"
         )
-        proxy_process = torch.multiprocessing.Process(
-            target=vit_proxy_start_server,
-            args=(
-                py_env_configs,
-                worker_addresses,
-                external_grpc_port,  # grpc_port
-                external_http_port,  # http_port
-                worker_http_addresses,  # worker_http_addresses
-            ),
-            name="vit_proxy",
-        )
-        proxy_process.start()
-
-        vit_processes = [proxy_process] + worker_processes
-
-        # 健康检查：检查代理服务器的端口（代理模式只在 VIT 角色时启用）
-        vit_server_port = py_env_configs.server_config.server_port
-        # 保存 worker 地址列表，用于健康检查
-
-    else:
-        grpc_port = py_env_configs.server_config.rpc_server_port
-        http_port = py_env_configs.server_config.server_port
-        vit_server_port = http_port
-        logging.info(
-            f"[PROCESS_SPAWN] Start vit server process "
-            f"(grpc_port={grpc_port}, http_port={http_port})"
-        )
-        process = torch.multiprocessing.Process(
-            target=vit_start_server,
-            args=(
-                0,
-                py_env_configs,
-                grpc_port,  # grpc_port
-                http_port,  # http_port
-                False,  # is_proxy_mode (standalone 模式，需要记录 QPS)
-            ),
-            name="vit_server",
-        )
-        process.start()
-        vit_processes = [process]
-
-    if process_manager and vit_processes:
-        logging.info(
-            f"[VIT_SERVER] Registering health check for {len(vit_processes)} VIT processes, "
-            f"current_managed_processes={len(process_manager.processes)}"
-        )
-
-        def check_vit_ready():
-            return check_server_health(vit_server_port)
-
-        process_manager.register_health_check(
-            processes=vit_processes,
-            process_name="vit_server",
-            check_ready_fn=check_vit_ready,
-            retry_interval_seconds=1,
-        )
-        logging.info(
-            f"[VIT_SERVER] Health check registered, after_registration: "
-            f"managed_processes={len(process_manager.processes)}, "
-            f"health_check_processes={len(process_manager.health_check_processes)}"
-        )
+        for p in vit_processes:
+            if p.is_alive():
+                p.terminate()
+            p.join(timeout=5)
+        raise
 
     return vit_processes
 

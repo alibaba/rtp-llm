@@ -5,9 +5,14 @@ import socket
 import threading
 import time
 import unittest
+import unittest.mock
 from multiprocessing import Process
 from unittest import TestCase
 from unittest.mock import patch
+
+import pytest
+
+pytestmark = [pytest.mark.gpu(type="A10", count=2)]
 
 import torch
 
@@ -34,10 +39,6 @@ def fake_init(self, *args, **kwargs):
     self.model_cls = None
     self.pipeline = None
     self.backend_rpc_server_visitor = None
-
-
-FrontendWorker.__init__ = fake_init
-OpenaiEndpoint.__init__ = fake_init
 
 
 class FakeStore:
@@ -139,7 +140,7 @@ class TestGetWorldInfo(TestCase):
         clear=True,
     )
     def test_single_node(self):
-        py_env_configs: PyEnvConfigs = setup_args()
+        py_env_configs: PyEnvConfigs = setup_args(args=[])
         from rtp_llm.config.server_config_setup import (
             fetch_model_files_to_local,
             setup_default_args,
@@ -166,303 +167,315 @@ class DistributedServerTest(unittest.TestCase):
         self.maxDiff = None
         super().__init__(*args, **kwargs)
 
-        def test_get_master_from_json(self):
-            gang_info_json: Dict[str, Any] = {
-                "worker_part0": {"ip": "10.0.0.1"},
-                "worker_part1": {"ip": "10.0.0.2"},
-            }
-            ip, port = ds.get_master_from_json(gang_info_json)
-            assert ip == "10.0.0.1"
-            assert port == ""
+    def setUp(self):
+        self._patches = [
+            unittest.mock.patch.object(FrontendWorker, "__init__", fake_init),
+            unittest.mock.patch.object(OpenaiEndpoint, "__init__", fake_init),
+        ]
+        for p in self._patches:
+            p.start()
 
-        def test_get_master_from_json_no_part0(self):
-            gang_info_json: Dict[str, Any] = {
-                "worker_part1": {"ip": "10.0.0.2"},
-            }
-            ip, port = ds.get_master_from_json(gang_info_json)
-            assert ip == ""
-            assert port == ""
+    def tearDown(self):
+        for p in reversed(self._patches):
+            p.stop()
 
-        def test_get_master_from_test_env(self):
-            env_str = "name:worker_part1,ip:10.0.0.2;name:worker_part0,ip:10.0.0.1"
-            ip, port = ds.get_master_from_test_env(env_str)
-            assert ip == "10.0.0.1"
-            assert port == ""
+    def test_get_master_from_json(self):
+        gang_info_json: Dict[str, Any] = {
+            "worker_part0": {"ip": "10.0.0.1"},
+            "worker_part1": {"ip": "10.0.0.2"},
+        }
+        ip, port = ds.get_master_from_json(gang_info_json)
+        assert ip == "10.0.0.1"
+        assert port == ""
 
-        def test_get_master_from_test_env_not_found(self):
-            env_str = "name:worker_part1,ip:10.0.0.2"
-            ip, port = ds.get_master_from_test_env(env_str)
-            assert ip == ""
-            assert port == ""
+    def test_get_master_from_json_no_part0(self):
+        gang_info_json: Dict[str, Any] = {
+            "worker_part1": {"ip": "10.0.0.2"},
+        }
+        ip, port = ds.get_master_from_json(gang_info_json)
+        assert ip == ""
+        assert port == ""
 
-        @patch.dict(
-            "os.environ",
-            {
-                "DISTRIBUTE_CONFIG_FILE": "rtp_llm/distribute/test/testdata/parallel.json",
-                "TP_SIZE": "2",
-                "PP_SIZE": "1",
-                "WORLD_SIZE": "2",
-                "WORLD_RANK": "0",
-                "LOCAL_WORLD_SIZE": "1",
-                "MODEL_TYPE": "fake_model",
-            },
-            clear=True,
+    def test_get_master_from_test_env(self):
+        env_str = "name:worker_part1,ip:10.0.0.2;name:worker_part0,ip:10.0.0.1"
+        ip, port = ds.get_master_from_test_env(env_str)
+        assert ip == "10.0.0.1"
+        assert port == ""
+
+    def test_get_master_from_test_env_not_found(self):
+        env_str = "name:worker_part1,ip:10.0.0.2"
+        ip, port = ds.get_master_from_test_env(env_str)
+        assert ip == ""
+        assert port == ""
+
+    @patch.dict(
+        "os.environ",
+        {
+            "DISTRIBUTE_CONFIG_FILE": "rtp_llm/distribute/test/testdata/parallel.json",
+            "TP_SIZE": "2",
+            "PP_SIZE": "1",
+            "WORLD_SIZE": "2",
+            "WORLD_RANK": "0",
+            "LOCAL_WORLD_SIZE": "1",
+            "MODEL_TYPE": "fake_model",
+        },
+        clear=True,
+    )
+    def test_get_master_use_distribute_config_file(self):
+        py_env_configs: PyEnvConfigs = setup_args(args=[])
+        setup_and_configure_server(py_env_configs)
+
+        ip, port = ds.get_master(
+            py_env_configs.distribute_config,
+            py_env_configs.parallelism_config,
         )
-        def test_get_master_use_distribute_config_file(self):
-            py_env_configs: PyEnvConfigs = setup_args()
-            setup_and_configure_server(py_env_configs)
+        assert ip == "11.161.48.116"
+        assert port == "10000"
 
-            ip, port = ds.get_master(
-                py_env_configs.distribute_config,
-                py_env_configs.parallelism_config,
-            )
-            assert ip == "11.161.48.116"
-            assert port == "10000"
-
-        @patch.dict(
-            "os.environ",
-            {
-                "GANG_CONFIG_STRING": "name:worker_part0,ip:10.0.0.123",
-                "TP_SIZE": "2",
-                "PP_SIZE": "1",
-                "WORLD_SIZE": "2",
-                "WORLD_RANK": "0",
-                "LOCAL_WORLD_SIZE": "1",
-                "MODEL_TYPE": "fake_model",
-            },
-            clear=True,
+    @patch.dict(
+        "os.environ",
+        {
+            "GANG_CONFIG_STRING": "name:worker_part0,ip:10.0.0.123",
+            "TP_SIZE": "2",
+            "PP_SIZE": "1",
+            "WORLD_SIZE": "2",
+            "WORLD_RANK": "0",
+            "LOCAL_WORLD_SIZE": "1",
+            "MODEL_TYPE": "fake_model",
+        },
+        clear=True,
+    )
+    def test_get_master_use_gang_config_string(self):
+        py_env_configs: PyEnvConfigs = setup_args(args=[])
+        setup_and_configure_server(py_env_configs)
+        ip, port = ds.get_master(
+            py_env_configs.distribute_config,
+            py_env_configs.parallelism_config,
         )
-        def test_get_master_use_gang_config_string(self):
-            py_env_configs: PyEnvConfigs = setup_args()
-            setup_and_configure_server(py_env_configs)
-            ip, port = ds.get_master(
-                py_env_configs.distribute_config,
-                py_env_configs.parallelism_config,
-            )
-            assert ip == "10.0.0.123"
-            assert port == ""
+        assert ip == "10.0.0.123"
+        assert port == ""
 
-        @patch.dict(
-            "os.environ",
-            {
-                "LEADER_ADDRESS": "10.0.0.5",
-                "TP_SIZE": "2",
-                "PP_SIZE": "1",
-                "WORLD_SIZE": "2",
-                "WORLD_RANK": "0",
-                "LOCAL_WORLD_SIZE": "1",
-                "MODEL_TYPE": "fake_model",
-            },
-            clear=True,
+    @patch.dict(
+        "os.environ",
+        {
+            "LEADER_ADDRESS": "10.0.0.5",
+            "TP_SIZE": "2",
+            "PP_SIZE": "1",
+            "WORLD_SIZE": "2",
+            "WORLD_RANK": "0",
+            "LOCAL_WORLD_SIZE": "1",
+            "MODEL_TYPE": "fake_model",
+        },
+        clear=True,
+    )
+    def test_get_master_use_leader_address(self):
+        py_env_configs: PyEnvConfigs = setup_args(args=[])
+        setup_and_configure_server(py_env_configs)
+
+        ip, port = ds.get_master(
+            py_env_configs.distribute_config,
+            py_env_configs.parallelism_config,
         )
-        def test_get_master_use_leader_address(self):
-            py_env_configs: PyEnvConfigs = setup_args()
-            setup_and_configure_server(py_env_configs)
+        assert ip == "10.0.0.5"
+        assert port == ""
 
-            ip, port = ds.get_master(
-                py_env_configs.distribute_config,
-                py_env_configs.parallelism_config,
-            )
-            assert ip == "10.0.0.5"
-            assert port == ""
-
-        @patch.dict(
-            "os.environ",
-            {
-                "GANG_ANNOCATION_PATH": "rtp_llm/distribute/test/testdata/annocation",
-                "TP_SIZE": "2",
-                "PP_SIZE": "1",
-                "WORLD_SIZE": "2",
-                "WORLD_RANK": "0",
-                "LOCAL_WORLD_SIZE": "1",
-                "MODEL_TYPE": "fake_model",
-            },
-            clear=True,
+    @patch.dict(
+        "os.environ",
+        {
+            "GANG_ANNOCATION_PATH": "rtp_llm/distribute/test/testdata/annocation",
+            "TP_SIZE": "2",
+            "PP_SIZE": "1",
+            "WORLD_SIZE": "2",
+            "WORLD_RANK": "0",
+            "LOCAL_WORLD_SIZE": "1",
+            "MODEL_TYPE": "fake_model",
+        },
+        clear=True,
+    )
+    def test_get_master_use_c2_file(self):
+        py_env_configs: PyEnvConfigs = setup_args(args=[])
+        setup_and_configure_server(py_env_configs)
+        ip, port = ds.get_master(
+            py_env_configs.distribute_config,
+            py_env_configs.parallelism_config,
         )
-        def test_get_master_use_c2_file(self):
-            py_env_configs: PyEnvConfigs = setup_args()
-            setup_and_configure_server(py_env_configs)
-            ip, port = ds.get_master(
-                py_env_configs.distribute_config,
-                py_env_configs.parallelism_config,
-            )
-            # 具体 IP 取决于 annocation 文件的内容，这里只检查非空
-            assert isinstance(ip, str)
-            assert ip == "33.115.125.211"
-            assert port == ""
+        # 具体 IP 取决于 annocation 文件的内容，这里只检查非空
+        assert isinstance(ip, str)
+        assert ip == "33.115.125.211"
+        assert port == ""
 
-        @patch.dict(
-            "os.environ",
-            {
-                "WORLD_SIZE": "1",
-                "WORLD_RANK": "0",
-                "LOCAL_WORLD_SIZE": "1",
-                "MODEL_TYPE": "fake_model",
-            },
-            clear=True,
+    @patch.dict(
+        "os.environ",
+        {
+            "WORLD_SIZE": "1",
+            "WORLD_RANK": "0",
+            "LOCAL_WORLD_SIZE": "1",
+            "MODEL_TYPE": "fake_model",
+        },
+        clear=True,
+    )
+    def test_get_master_single_machine(self):
+        py_env_configs: PyEnvConfigs = setup_args(args=[])
+        setup_and_configure_server(py_env_configs)
+
+        ip, port = ds.get_master(
+            py_env_configs.distribute_config,
+            py_env_configs.parallelism_config,
         )
-        def test_get_master_single_machine(self):
-            py_env_configs: PyEnvConfigs = setup_args()
-            setup_and_configure_server(py_env_configs)
+        assert ip == socket.gethostbyname(socket.gethostname())
+        assert port == ""
 
-            ip, port = ds.get_master(
-                py_env_configs.distribute_config,
-                py_env_configs.parallelism_config,
-            )
-            assert ip == socket.gethostbyname(socket.gethostname())
-            assert port == ""
+    @patch.dict(
+        "os.environ",
+        {
+            "DISTRIBUTE_CONFIG_FILE": "rtp_llm/distribute/test/testdata/parallel.json",
+            "MODEL_TYPE": "fake_model",
+        },
+        clear=True,
+    )
+    def test_get_master_from_file(self):
+        py_env_configs: PyEnvConfigs = setup_args(args=[])
+        setup_and_configure_server(py_env_configs)
+        ip, port = ds.get_master_from_file()
+        assert ip == "11.161.48.116"
+        assert port == "10000"
 
-        @patch.dict(
-            "os.environ",
-            {
-                "DISTRIBUTE_CONFIG_FILE": "rtp_llm/distribute/test/testdata/parallel.json",
-                "MODEL_TYPE": "fake_model",
-            },
-            clear=True,
+    @patch.dict(
+        "os.environ",
+        {
+            "GANG_ANNOCATION_PATH": "rtp_llm/distribute/test/testdata/annocation",
+            "MODEL_TYPE": "fake_model",
+        },
+        clear=True,
+    )
+    def test_get_master_from_c2(self):
+        py_env_configs: PyEnvConfigs = setup_args(args=[])
+        setup_and_configure_server(py_env_configs)
+        ip, port = ds.get_master_from_c2()
+        assert ip == "33.115.125.211"
+        assert port == ""
+
+    @patch.dict(
+        "os.environ",
+        {
+            "TP_SIZE": "2",
+            "PP_SIZE": "1",
+            "WORLD_SIZE": "2",
+            "WORLD_RANK": "0",
+            "LOCAL_WORLD_SIZE": "2",
+            "WORKER_INFO_PORT_NUM": "7",
+            "START_PORT": "20000",
+            "MODEL_TYPE": "fake_model",
+        },
+        clear=True,
+    )
+    def test_distributed_server_safe_store_set_get(self):
+        py_env_configs: PyEnvConfigs = setup_args(args=[])
+        setup_and_configure_server(py_env_configs)
+        stop_event = threading.Event()
+
+        t = threading.Thread(
+            target=init_server, args=(py_env_configs, 1, 2, stop_event)
         )
-        def test_get_master_from_file(self):
-            py_env_configs: PyEnvConfigs = setup_args()
-            setup_and_configure_server(py_env_configs)
-            ip, port = ds.get_master_from_file()
-            assert ip == "11.161.48.116"
-            assert port == "10000"
-
-        @patch.dict(
-            "os.environ",
-            {
-                "GANG_ANNOCATION_PATH": "rtp_llm/distribute/test/testdata/annocation",
-                "MODEL_TYPE": "fake_model",
-            },
-            clear=True,
+        t.start()
+        py_env_configs.server_config.ip = socket.gethostbyname(socket.gethostname())
+        set_parallelism_config(
+            py_env_configs.parallelism_config,
+            0,
+            py_env_configs.ffn_disaggregate_config,
         )
-        def test_get_master_from_c2(self):
-            py_env_configs: PyEnvConfigs = setup_args()
-            setup_and_configure_server(py_env_configs)
-            ip, port = ds.get_master_from_c2()
-            assert ip == "33.115.125.211"
-            assert port == ""
-
-        @patch.dict(
-            "os.environ",
-            {
-                "TP_SIZE": "2",
-                "PP_SIZE": "1",
-                "WORLD_SIZE": "2",
-                "WORLD_RANK": "0",
-                "LOCAL_WORLD_SIZE": "2",
-                "WORKER_INFO_PORT_NUM": "7",
-                "START_PORT": "20000",
-                "MODEL_TYPE": "fake_model",
-            },
-            clear=True,
+        py_env_configs.server_config.set_local_rank(
+            py_env_configs.parallelism_config.local_rank
         )
-        def test_distributed_server_safe_store_set_get(self):
-            py_env_configs: PyEnvConfigs = setup_args()
-            setup_and_configure_server(py_env_configs)
-            stop_event = threading.Event()
-
-            t = threading.Thread(
-                target=init_server, args=(py_env_configs, 1, 2, stop_event)
-            )
-            t.start()
-            py_env_configs.server_config.ip = socket.gethostbyname(socket.gethostname())
-            set_parallelism_config(
-                py_env_configs.parallelism_config,
-                0,
-                py_env_configs.ffn_disaggregate_config,
-            )
-            py_env_configs.server_config.set_local_rank(
-                py_env_configs.parallelism_config.local_rank
-            )
-            py_env_configs.distribute_config.set_local_rank(
-                py_env_configs.parallelism_config.local_rank
-            )
-            server = ds.DistributedServer(
-                py_env_configs,
-                rank=0,
-                world_size=2,
-            )
-
-            server.safe_store_set("foo", "bar")
-            assert server.safe_store_get("foo") == "bar"
-            stop_event.set()
-
-        def test_split_ip_port_valid(self):
-            ip, port = ds.split_ip_port("1.2.3.4:1234")
-            assert ip == "1.2.3.4"
-            assert port == 1234
-
-        def test_split_ip_port_invalid_no_colon(self):
-            ip, port = ds.split_ip_port("1.2.3.4")
-            assert ip == ""
-            assert port == 0
-
-        def test_split_ip_port_invalid_port_not_digit(self):
-            ip, port = ds.split_ip_port("1.2.3.4:abc")
-            assert ip == ""
-            assert port == 0
-
-        def test_split_ip_port_empty_ip(self):
-            ip, port = ds.split_ip_port(":1234")
-            assert ip == ""
-            assert port == 0
-
-        @patch.dict(
-            "os.environ",
-            {
-                "TP_SIZE": "2",
-                "PP_SIZE": "1",
-                "WORLD_SIZE": "2",
-                "WORLD_RANK": "0",
-                "LOCAL_WORLD_SIZE": "2",
-                "WORKER_INFO_PORT_NUM": "7",
-                "START_PORT": "20000",
-                "GANG_TIMEOUT_MIN": "1",
-                "GANG_SLEEP_TIME": "0",
-                "MODEL_TYPE": "fake_model",
-            },
-            clear=True,
+        py_env_configs.distribute_config.set_local_rank(
+            py_env_configs.parallelism_config.local_rank
         )
-        def test_distributed_server_regist_and_bootstrap(self):
-            py_env_configs: PyEnvConfigs = setup_args()
-            setup_and_configure_server(py_env_configs)
-            stop_event = threading.Event()
+        server = ds.DistributedServer(
+            py_env_configs,
+            rank=0,
+            world_size=2,
+        )
 
-            # rank1
-            stop_event = threading.Event()
-            t = threading.Thread(
-                target=regist_server, args=(py_env_configs, 1, 2, stop_event)
-            )
-            t.start()
+        server.safe_store_set("foo", "bar")
+        assert server.safe_store_get("foo") == "bar"
+        stop_event.set()
 
-            # rank0
-            py_env_configs_0: PyEnvConfigs = setup_args()
-            setup_and_configure_server(py_env_configs_0)
-            stop_event = threading.Event()
-            py_env_configs_0.server_config.ip = socket.gethostbyname(
-                socket.gethostname()
-            )
-            set_parallelism_config(
-                py_env_configs_0.parallelism_config,
-                0,
-                py_env_configs_0.ffn_disaggregate_config,
-            )
-            py_env_configs_0.server_config.set_local_rank(
-                py_env_configs_0.parallelism_config.local_rank
-            )
-            py_env_configs_0.distribute_config.set_local_rank(
-                py_env_configs_0.parallelism_config.local_rank
-            )
-            server0 = ds.DistributedServer(
-                py_env_configs_0,
-                rank=0,
-                world_size=2,
-            )
-            server0.bootstrap()
+    def test_split_ip_port_valid(self):
+        ip, port = ds.split_ip_port("1.2.3.4:1234")
+        assert ip == "1.2.3.4"
+        assert port == 1234
 
-            assert len(server0._world_info.members) == 2
-            assert server0._world_info.master is not None
-            stop_event.set()
+    def test_split_ip_port_invalid_no_colon(self):
+        ip, port = ds.split_ip_port("1.2.3.4")
+        assert ip == ""
+        assert port == 0
+
+    def test_split_ip_port_invalid_port_not_digit(self):
+        ip, port = ds.split_ip_port("1.2.3.4:abc")
+        assert ip == ""
+        assert port == 0
+
+    def test_split_ip_port_empty_ip(self):
+        ip, port = ds.split_ip_port(":1234")
+        assert ip == ""
+        assert port == 0
+
+    @patch.dict(
+        "os.environ",
+        {
+            "TP_SIZE": "2",
+            "PP_SIZE": "1",
+            "WORLD_SIZE": "2",
+            "WORLD_RANK": "0",
+            "LOCAL_WORLD_SIZE": "2",
+            "WORKER_INFO_PORT_NUM": "7",
+            "START_PORT": "20000",
+            "GANG_TIMEOUT_MIN": "1",
+            "GANG_SLEEP_TIME": "0",
+            "MODEL_TYPE": "fake_model",
+        },
+        clear=True,
+    )
+    def test_distributed_server_regist_and_bootstrap(self):
+        py_env_configs: PyEnvConfigs = setup_args(args=[])
+        setup_and_configure_server(py_env_configs)
+        stop_event = threading.Event()
+
+        # rank1
+        stop_event = threading.Event()
+        t = threading.Thread(
+            target=regist_server, args=(py_env_configs, 1, 2, stop_event)
+        )
+        t.start()
+
+        # rank0
+        py_env_configs_0: PyEnvConfigs = setup_args(args=[])
+        setup_and_configure_server(py_env_configs_0)
+        stop_event = threading.Event()
+        py_env_configs_0.server_config.ip = socket.gethostbyname(
+            socket.gethostname()
+        )
+        set_parallelism_config(
+            py_env_configs_0.parallelism_config,
+            0,
+            py_env_configs_0.ffn_disaggregate_config,
+        )
+        py_env_configs_0.server_config.set_local_rank(
+            py_env_configs_0.parallelism_config.local_rank
+        )
+        py_env_configs_0.distribute_config.set_local_rank(
+            py_env_configs_0.parallelism_config.local_rank
+        )
+        server0 = ds.DistributedServer(
+            py_env_configs_0,
+            rank=0,
+            world_size=2,
+        )
+        server0.bootstrap()
+
+        assert len(server0._world_info.members) == 2
+        assert server0._world_info.master is not None
+        stop_event.set()
 
 
 if __name__ == "__main__":

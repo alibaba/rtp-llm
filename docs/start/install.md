@@ -11,8 +11,8 @@ To speed up installation, it is recommended to use pip to install dependencies:
 ## Method 1: With pip
 
 ```bash
-pip install --upgrade pip
-pip install "rtp_llm>=0.2.0"
+pip install --compile --upgrade pip
+pip install --compile "rtp_llm>=0.2.0"
 ```
 
 
@@ -30,11 +30,10 @@ cd RTP-LLM
 # build RTP-LLM whl target
 # --config=cuda12_6 build target for NVIDIA GPU with cuda12_6
 # --config=rocm build target for AMD
-bazelisk build //rtp_llm:rtp_llm --verbose_failures --config=cuda12_6 --test_output=errors --test_env="LOG_LEVEL=INFO"  --jobs=64
+pip wheel . --no-deps --no-build-isolation -w dist/
 
-ln  -sf `pwd`/bazel-out/k8-opt/bin/rtp_llm/cpp/model_rpc/proto/model_rpc_service_pb2_grpc.py  `pwd`/rtp_llm/cpp/model_rpc/proto/
-ln  -sf `pwd`/bazel-out/k8-opt/bin/rtp_llm/cpp/model_rpc/proto/model_rpc_service_pb2.py  `pwd`/rtp_llm/cpp/model_rpc/proto/model_rpc_service_pb2.py
-
+# Install the built wheel
+pip install dist/rtp_llm-*.whl
 ```
 
 

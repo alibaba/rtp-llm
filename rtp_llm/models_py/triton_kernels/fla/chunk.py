@@ -255,6 +255,16 @@ def chunk_gated_delta_rule_flydsl_with_cache_store(
         raise ValueError(
             f"The batch size is expected to be 1 rather than {q.shape[0]} when using `cu_seqlens`."
         )
+    # Avoid GPU sync in the hot path: only validate cu_seqlens when it is on CPU.
+    # GPU-side cu_seqlens are assumed to come from code that already validated input
+    # lengths on the host (e.g., NormalModelInputGatherer).
+    if cu_seqlens is not None and not cu_seqlens.is_cuda:
+        seq_lengths = cu_seqlens[1:] - cu_seqlens[:-1]
+        if (seq_lengths <= 0).any():
+            raise ValueError(
+                "FlyDSL chunk GDN requires all sequence lengths > 0, "
+                f"but got min length {seq_lengths.min().item()}."
+            )
     if cu_seqlens is not None and initial_state is not None:
         expected_states = len(cu_seqlens) - 1
         if initial_state.shape[0] != expected_states:
@@ -534,7 +544,7 @@ def chunk_gated_delta_rule(
                 f"V-first [N, H, V, K] tensors directly.",
                 stacklevel=2,
             )
-            initial_state = initial_state.transpose(-1, -2).contiguous()
+            initial_state = initial_state.contiguous()
     if cu_seqlens is not None:
         if q.shape[0] != 1:
             raise ValueError(

@@ -34,7 +34,14 @@ _DEFAULT_VIDEO_PLACEHOLDER = "<|kimi_k25_video_placeholder|>"
 def _read_top_config(ckpt_path: str) -> Dict[str, Any]:
     config_path = os.path.join(ckpt_path, "config.json")
     if not os.path.exists(config_path):
-        return {}
+        # Returning {} here silently produced a misconfigured model (missing
+        # text/quantization config) instead of failing fast on a bad path.
+        raise FileNotFoundError(
+            "KimiK25._read_top_config: config.json not found at "
+            + config_path + " (ckpt_path=" + repr(ckpt_path) + "). "
+            "Verify CHECKPOINT_PATH env / model_path arg is correct "
+            "and the model dir is mounted on this host."
+        )
     with open(config_path, "r") as f:
         return json.load(f)
 
@@ -44,6 +51,30 @@ class KimiK25(DeepSeekV2):
 
     def support_cuda_graph(self) -> bool:
         return True
+
+    def _create_python_model(self):
+        # Override DeepSeekV2._create_python_model to use MultimodalGenericModel
+        # so that vision features are injected into text embeddings.
+        # DeepSeekV2 uses GenericMoeModel (text-only) which silently drops image features.
+        from rtp_llm.models_py.model_desc.multimodal_generic import MultimodalGenericModel
+
+        model_config = self.model_config
+        parallelism_config = self.parallelism_config
+        fmha_config = self.fmha_config
+        py_hw_kernel_config = self.hw_kernel_config
+        moe_config = self.moe_config
+        max_generate_batch_size = self.max_generate_batch_size
+
+        self.py_model = MultimodalGenericModel(
+            model_config,
+            parallelism_config,
+            self.weight,
+            moe_config,
+            max_generate_batch_size=max_generate_batch_size,
+            fmha_config=fmha_config,
+            py_hw_kernel_config=py_hw_kernel_config,
+            device_resource_config=self.device_resource_config,
+        )
 
     @classmethod
     def _create_config(cls, ckpt_path: str) -> ModelConfig:

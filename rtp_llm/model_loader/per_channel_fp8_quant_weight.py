@@ -847,18 +847,18 @@ class LoadQuantPerChannelFp8Weight(PerChannelFp8Weight):
 
         if kernel._process_fun_name == "transpose_stack_moe_w1":
             # Swap upper/lower halves (gate/up reorder).
-            # Avoid torch.cat on FP8 tensors directly — ROCm does not support it.
-            # Instead pre-allocate and copy_ each half into swapped positions.
+            # Use a half-size temporary buffer and in-place copy_ to avoid
+            # allocating two full-size tensors, which doubles peak memory.
             half = fp8_out.shape[1] // 2
-            swapped_fp8 = torch.empty_like(fp8_out)
-            swapped_fp8[:, :half, :].copy_(fp8_out[:, half:, :])
-            swapped_fp8[:, half:, :].copy_(fp8_out[:, :half, :])
-            fp8_out = swapped_fp8
+            tmp_fp8 = fp8_out[:, :half, :].clone()
+            fp8_out[:, :half, :].copy_(fp8_out[:, half:, :])
+            fp8_out[:, half:, :].copy_(tmp_fp8)
+            del tmp_fp8
 
-            swapped_scale = torch.empty_like(scale_out)
-            swapped_scale[:, :half, :].copy_(scale_out[:, half:, :])
-            swapped_scale[:, half:, :].copy_(scale_out[:, :half, :])
-            scale_out = swapped_scale
+            tmp_scale = scale_out[:, :half, :].clone()
+            scale_out[:, :half, :].copy_(scale_out[:, half:, :])
+            scale_out[:, half:, :].copy_(tmp_scale)
+            del tmp_scale
 
         used_prequant = (
             has_prequant

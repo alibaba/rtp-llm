@@ -27,11 +27,24 @@ class StrategyRegistry:
         self._strategies: List[MoeStrategy] = []
 
     def register(self, strategy: MoeStrategy) -> None:
-        """Register a strategy
+        """Register a strategy. Idempotent on (module, class name) — silently
+        skips if a strategy of the same logical class is already registered.
 
-        Args:
-            strategy: Strategy instance to register
+        Why: same root cause as `LinearFactory.register` — under
+        pytest+editable install, the same strategy module can be loaded twice
+        under different `sys.modules` keys, producing two DIFFERENT class
+        objects with the same `__name__` and `__module__`. `type(s) in set`
+        identity-compares; we need (module, name) keying to actually dedup.
         """
+        cls = type(strategy)
+        key = (cls.__module__, cls.__name__)
+        existing_keys = {(type(s).__module__, type(s).__name__) for s in self._strategies}
+        if key in existing_keys:
+            logger.debug(
+                f"MoE strategy {cls.__name__} (module={cls.__module__}) "
+                "already registered, skipping duplicate"
+            )
+            return
         self._strategies.append(strategy)
 
     def list_strategies(self) -> List[MoeStrategy]:

@@ -1,4 +1,4 @@
-from typing import List, Sequence
+from typing import List, Sequence, Union
 
 import torch
 from torch import nn
@@ -15,11 +15,41 @@ def reshape_extra_input_to_deepstack(
     layers is derived from the element count. This is the model-specific inverse of the
     flatten done in the qwen3-vl producer.
     """
+    if len(extra_input) != len(multimodal_features):
+        raise ValueError(
+            f"extra_input count ({len(extra_input)}) must match multimodal_features count "
+            f"({len(multimodal_features)})"
+        )
+
     deepstack: List[torch.Tensor] = []
-    for flat, feature in zip(extra_input, multimodal_features):
+    for idx, (flat, feature) in enumerate(zip(extra_input, multimodal_features)):
+        if flat.dim() != 1:
+            raise ValueError(
+                f"extra_input[{idx}] must be a 1-D flat tensor, got shape={list(flat.shape)}"
+            )
+        if feature.dim() != 2:
+            raise ValueError(
+                f"multimodal_features[{idx}] must be 2-D ([tokens, hidden]), "
+                f"got shape={list(feature.shape)}"
+            )
+
         tokens = feature.size(0)
         hidden = feature.size(-1)
-        layers = flat.numel() // (tokens * hidden)
+        if tokens <= 0 or hidden <= 0:
+            raise ValueError(
+                f"multimodal_features[{idx}] must have positive tokens and hidden size, "
+                f"got shape={list(feature.shape)}"
+            )
+
+        expected_per_layer = tokens * hidden
+        if flat.numel() % expected_per_layer != 0:
+            raise ValueError(
+                f"extra_input[{idx}] numel ({flat.numel()}) is not divisible by "
+                f"tokens*hidden ({expected_per_layer}) inferred from "
+                f"multimodal_features[{idx}] shape={list(feature.shape)}"
+            )
+
+        layers = flat.numel() // expected_per_layer
         deepstack.append(flat.reshape(layers, tokens, hidden))
     return deepstack
 
@@ -31,23 +61,30 @@ class MultimodalEmbeddingInjector(nn.Module):
         self,
         embeddings: torch.Tensor,
         multimodal_features: Sequence[torch.Tensor],
-        multimodal_locs: torch.Tensor,
+        multimodal_locs: Union[torch.Tensor, Sequence[int]],
     ) -> torch.Tensor:
         if not multimodal_features:
             return embeddings
 
-        if multimodal_locs.numel() != len(multimodal_features):
-            raise ValueError(
-                f"multimodal_locs has {multimodal_locs.numel()} entries "
-                f"but {len(multimodal_features)} features were provided"
-            )
+        if isinstance(multimodal_locs, torch.Tensor):
+            if multimodal_locs.numel() != len(multimodal_features):
+                raise ValueError(
+                    f"multimodal_locs has {multimodal_locs.numel()} entries "
+                    f"but {len(multimodal_features)} features were provided"
+                )
+            locs = multimodal_locs.to(device="cpu", dtype=torch.long).view(-1).tolist()
+        else:
+            if len(multimodal_locs) != len(multimodal_features):
+                raise ValueError(
+                    f"multimodal_locs has {len(multimodal_locs)} entries "
+                    f"but {len(multimodal_features)} features were provided"
+                )
+            locs = list(multimodal_locs)
 
         if embeddings.dim() != 2:
             raise ValueError(
-                "embeddings must be a 2D tensor of shape [tokens, hidden_size]"
+                "embeddings must be a 2D tensor of [tokens, hidden_size]"
             )
-
-        locs = multimodal_locs.to(device="cpu", dtype=torch.long).view(-1).tolist()
 
         hidden_size = embeddings.size(-1)
         for idx, (feature, loc) in enumerate(zip(multimodal_features, locs)):

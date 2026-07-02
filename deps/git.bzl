@@ -25,13 +25,6 @@ def git_deps():
     )
 
     new_git_repository(
-        name = "cutlass_fa",
-        remote = "https://github.com/NVIDIA/cutlass.git",
-        commit = "bbe579a9e3beb6ea6626d9227ec32d0dae119a49",
-        build_file = str(Label("@rtp_llm//3rdparty/cutlass:cutlass.BUILD")),
-    )
-
-    new_git_repository(
         name = "cutlass",
         remote = "https://github.com/NVIDIA/cutlass.git",
         commit = "80243e0b8c644f281e2beb0c20fe78cf7b267061",
@@ -75,16 +68,6 @@ def git_deps():
             "@rtp_llm//3rdparty/flashinfer:0008-enable-pdl.patch",
             "@rtp_llm//3rdparty/flashinfer:0009-sp-sample.patch",
             "@rtp_llm//3rdparty/flashinfer:0010-silu-mul-vec-size.patch",
-        ],
-    )
-
-    new_git_repository(
-        name = "flashmla",
-        remote = "https://github.com/deepseek-ai/FlashMLA.git",
-        commit = "b31bfe72a83ea205467b3271a5845440a03ed7cb",
-        build_file = str(Label("@rtp_llm//3rdparty/flashmla:flashmla.BUILD")),
-        patches = [
-            "@rtp_llm//3rdparty/flashmla:0001-add-interface.patch",
         ],
     )
 
@@ -197,14 +180,6 @@ def git_deps():
         shallow_since = "1518192000 +0800",
     )
 
-    git_repository(
-        name = "KleidiAI",
-        remote = "https://git.gitlab.arm.com/kleidi/kleidiai.git",
-        commit = "2d160cf675d6df7068a17da07ec6218fd9478541",
-        patch_args = ["-p1"],
-        patches = ["@rtp_llm//patches/kai:0001-add-a8w4-fp16-support.patch"],
-    )
-
     http_archive(
         name = "boringssl",
         sha256 = "1188e29000013ed6517168600fc35a010d58c5d321846d6a6dfee74e4c788b45",
@@ -213,18 +188,6 @@ def git_deps():
             "https://mirror.bazel.build/github.com/google/boringssl/archive/7f634429a04abc48e2eb041c81c5235816c96514.tar.gz",
             "https://github.com/google/boringssl/archive/7f634429a04abc48e2eb041c81c5235816c96514.tar.gz",
         ],
-    )
-
-    http_file(
-        name = "krb5-devel",
-        urls = ["http://mirrors.aliyun.com/centos/7/os/x86_64/Packages/krb5-devel-1.15.1-50.el7.x86_64.rpm"],
-        sha256 = "75069ac38fed957b70ea1de5e2824e6a77468e9745a3a828d47a02bab727ba11",
-    )
-
-    http_file(
-        name = "libcom_err-devel",
-        urls = ["https://mirrors.aliyun.com/centos/7/os/x86_64/Packages/libcom_err-devel-1.42.9-19.el7.x86_64.rpm"],
-        sha256 = "3a14db2d86490211494bb142139121da838160fb7ba28d46cd01568b0173969c",
     )
 
     # Needed by Protobuf
@@ -261,16 +224,6 @@ def git_deps():
     native.bind(
         name = "protobuf_headers",
         actual = "@com_google_protobuf//:protobuf_headers",
-    )
-
-    # # Needed by Protobuf
-    native.bind(
-        name = "grpc_cpp_plugin",
-        actual = "@grpc//:grpc_cpp_plugin",
-    )
-    native.bind(
-        name = "grpc_python_plugin",
-        actual = "@grpc//:grpc_python_plugin",
     )
 
     # # Needed by Protobuf

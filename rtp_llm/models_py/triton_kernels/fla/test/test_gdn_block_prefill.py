@@ -4,6 +4,10 @@ import random
 import unittest
 from typing import List
 
+import pytest
+
+pytestmark = [pytest.mark.gpu(type="H20")]
+
 import torch
 
 from rtp_llm.models_py.triton_kernels.fla import (
@@ -217,6 +221,17 @@ class BlockTest(unittest.TestCase):
                                 random.randint(1, 10) * seq_size_per_block
                                 for _ in range(bs - 1)
                             ] + [0]
+                            input_lengths = [
+                                random.randint(10, 1024) for _ in range(bs)
+                            ]
+                            _test_one_case(
+                                k_size,
+                                head_num,
+                                bs,
+                                prefix_lengths,
+                                input_lengths,
+                                ssm_state_dtype,
+                            )
                         else:
                             prefix_lengths = [
                                 random.randint(1, 10) * seq_size_per_block

@@ -3,6 +3,7 @@
 #include <chrono>
 #include <functional>
 #include <algorithm>
+#include <chrono>
 #include <string>
 #include <vector>
 #include <torch/python.h>
@@ -84,6 +85,19 @@ private:
         auto                stub       = connection.stub;
         MultimodalOutputPB  output_pb;
         grpc::ClientContext context;
+
+        // Set gRPC deadline from the max mm_timeout_ms across all inputs.
+        // Start from 0 so explicitly small timeouts (e.g. 1000ms) are honored;
+        // fall back to the 30s default only when no input configures a positive timeout.
+        int32_t max_timeout_ms = 0;
+        for (const auto& mm_input : mm_inputs) {
+            max_timeout_ms = std::max(max_timeout_ms, mm_input.mm_preprocess_config.mm_timeout_ms);
+        }
+        if (max_timeout_ms <= 0) {
+            max_timeout_ms = 30000;  // default 30 s
+        }
+        context.set_deadline(std::chrono::system_clock::now() + std::chrono::milliseconds(max_timeout_ms));
+
         auto                request_pb    = QueryConverter::transMMInputsPB(mm_inputs);
         const int64_t       request_bytes = request_pb.ByteSizeLong();
         const auto          start         = std::chrono::steady_clock::now();
@@ -93,6 +107,9 @@ private:
         reportRpcMetrics(ip_port, cost_us, request_bytes, output_pb.ByteSizeLong(), &status);
 
         if (!status.ok()) {
+            // Remove the bad connection on failure (timeout, unavailable, etc.)
+            // so subsequent requests don't reuse a dead/stuck VIT worker.
+            pool_.removeConnection(ip_port);
             return ErrorInfo(ErrorCode::MM_PROCESS_ERROR, status.error_message());
         }
         return QueryConverter::transMMOutput(&output_pb);

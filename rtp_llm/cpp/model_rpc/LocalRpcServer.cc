@@ -9,6 +9,7 @@
 #include "rtp_llm/cpp/model_rpc/QueryConverter.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
 #include "rtp_llm/cpp/config/EplbConfig.h"
+#include "rtp_llm/cpp/config/RoleTypes.h"
 #include "rtp_llm/cpp/cache/Types.h"
 
 using namespace std;
@@ -40,11 +41,32 @@ grpc::Status LocalRpcServer::init(const EngineInitParams&                       
         engine_.reset(new NormalEngine(maga_init_params, std::move(propose_params)));
     }
     if (maga_init_params.model_config_.mm_model_config.is_multimodal) {
-        if (mm_process_engine.is_none()) {
+        const auto vit_separation = maga_init_params.vit_config.vit_separation;
+        const auto role_type      = maga_init_params.pd_sep_config.role_type;
+        const auto tp_rank        = maga_init_params.parallelism_config.tp_rank;
+        // VIT_SEPARATION_REMOTE: always use RemoteMultimodalProcessor.
+        // VIT_SEPARATION_ROLE: only the VIT role process has a local
+        //   mm_process_engine; non-VIT roles (PREFILL/DECODE/etc.) must
+        //   use RemoteMultimodalProcessor to call the VIT process.
+        // VIT_SEPARATION_LOCAL: backend process has a local mm_process_engine.
+        const bool use_remote =
+            vit_separation == VitSeparation::VIT_SEPARATION_REMOTE
+            || (vit_separation == VitSeparation::VIT_SEPARATION_ROLE
+                && role_type != RoleType::VIT);
+        if (use_remote) {
             mm_processor_.reset(new RemoteMultimodalProcessor(maga_init_params.model_config_.mm_model_config,
                                                               maga_init_params.model_config_.max_seq_len,
                                                               metrics_reporter_));
         } else {
+            // Local mode (LOCAL or ROLE+VIT) requires mm_process_engine.
+            if (mm_process_engine.is_none()) {
+                return grpc::Status(
+                    grpc::StatusCode::INTERNAL,
+                    "Local multimodal processing requires mm_process_engine "
+                    "(vit_separation=" + std::to_string(static_cast<int>(vit_separation))
+                    + ", role=" + std::to_string(static_cast<int>(role_type))
+                    + ", tp_rank=" + std::to_string(tp_rank) + ")");
+            }
             mm_processor_.reset(new LocalMultimodalProcessor(mm_process_engine,
                                                              maga_init_params.model_config_.mm_model_config,
                                                              maga_init_params.model_config_.max_seq_len));
@@ -614,10 +636,7 @@ LocalRpcServer::UpdateWeights(grpc::ServerContext* context, const UpdateWeightsR
         }
         return grpc::Status::OK;
     } catch (const py::error_already_set& e) {
-        PyObject *type, *value, *traceback;
-        PyErr_Fetch(&type, &value, &traceback);
-        std::string err_msg = value ? PyUnicode_AsUTF8(value) : "Unknown Python error";
-        return {grpc::StatusCode::INTERNAL, "exception from python: " + err_msg};
+        return {grpc::StatusCode::INTERNAL, "exception from python: " + std::string(e.what())};
     } catch (const std::exception& e) {
         return {grpc::StatusCode::INTERNAL, "exception from C++: " + std::string(e.what())};
     }

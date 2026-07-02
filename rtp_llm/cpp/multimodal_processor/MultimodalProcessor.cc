@@ -1,6 +1,7 @@
 
 #include <functional>
 #include <algorithm>
+#include <limits>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -14,30 +15,24 @@ namespace py = pybind11;
 namespace rtp_llm {
 
 ErrorInfo MultimodalProcessor::getFeatureHash(int32_t* token_ids, const torch::Tensor& mm_emb) {
-    // Derive one cache-key hash per multimodal token from the content of its feature row.
-    // This makes the prefix cache key reflect the actual image/video embedding, so only
-    // identical content reuses cached blocks.
-    //
-    // NOTE on the GPU->CPU sync below: hashing must inspect every byte of the embedding,
-    // so we have to materialize it on the host. This is a deliberate blocking step on the
-    // prefill-prep path (NOT the decode hot path). Without it the cache key would either
-    // (a) require a GPU hash kernel — adds significant complexity for the marginal benefit
-    // of avoiding one extra prefill-time D2H, or (b) fall back to URL-based hashing, which
-    // would over-share cache blocks between requests whose URLs match but whose actual
-    // embedding bytes differ (e.g. dynamic image transforms). Keep this sync.
+    // Derive one cache-key hash per multimodal token from the FULL byte content of its
+    // feature row.  Low-dimensional statistics (mean / moments) collide across different
+    // images and cause silent KV-cache reuse corruption, so we hash the raw bytes of each
+    // row in storage order — this is order-sensitive and covers dtype + shape + content.
     if (mm_emb.dim() < 1 || mm_emb.size(0) <= 0) {
         return ErrorInfo(ErrorCode::MM_WRONG_FORMAT_ERROR, "multimodal feature tensor is empty");
     }
-    auto          emb        = mm_emb.to(torch::kCPU).contiguous();
-    const int64_t num_tokens = emb.size(0);
-    const int64_t row_bytes  = emb.numel() / num_tokens * emb.element_size();
-    const char*   base       = static_cast<const char*>(emb.data_ptr());
+    const int64_t num_tokens = mm_emb.size(0);
 
-    std::hash<std::string_view> hasher;
-    for (int64_t j = 0; j < num_tokens; ++j) {
-        std::string_view row(base + j * row_bytes, static_cast<size_t>(row_bytes));
-        int32_t          hash_res = static_cast<int32_t>(hasher(row));
-        memcpy(token_ids + j, &hash_res, sizeof(int32_t));
+    // D2H the entire embedding (contiguous) so we can hash each row's raw bytes.
+    auto mm_emb_cpu = mm_emb.to(torch::kCPU).contiguous();
+    const int64_t row_bytes = mm_emb_cpu.nbytes() / num_tokens;
+    const auto* base_ptr    = static_cast<const char*>(mm_emb_cpu.data_ptr());
+
+    for (int64_t i = 0; i < num_tokens; ++i) {
+        const auto* row_ptr = base_ptr + i * row_bytes;
+        size_t h = std::hash<std::string_view>{}(std::string_view(row_ptr, row_bytes));
+        token_ids[i] = static_cast<int32_t>(h % std::numeric_limits<int32_t>::max());
     }
     return ErrorInfo::OkStatus();
 }

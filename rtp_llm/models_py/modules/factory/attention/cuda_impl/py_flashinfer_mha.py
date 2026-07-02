@@ -19,13 +19,7 @@ from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashinfer_mla im
     check_attention_inputs,
 )
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import FMHAImplBase
-from rtp_llm.ops import (
-    AttentionConfigs,
-    FMHAType,
-    KvCacheDataType,
-    ParallelismConfig,
-    RopeStyle,
-)
+from rtp_llm.ops import AttentionConfigs, KvCacheDataType, ParallelismConfig, RopeStyle
 from rtp_llm.ops.compute_ops import (
     FusedRopeKVCacheDecodeOp,
     LayerKVCache,
@@ -535,6 +529,8 @@ class PyFlashinferPrefillImplBase(FMHAImplBase):
 class PyFlashinferPagedPrefillImpl(PyFlashinferPrefillImplBase):
     """FlashInfer prefill implementation with paged KV cache layout using MhaRotaryEmbeddingOp."""
 
+    NAME = "py_flashinfer_paged"
+
     def _create_fmha_impl(
         self, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
     ) -> Any:
@@ -574,6 +570,8 @@ class PyFlashinferPagedPrefillImpl(PyFlashinferPrefillImplBase):
 
 class PyFlashinferPrefillImpl(PyFlashinferPrefillImplBase):
     """FlashInfer prefill implementation with ragged KV cache layout using MhaRotaryEmbeddingOp."""
+
+    NAME = "py_flashinfer"
 
     def _create_fmha_impl(
         self, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
@@ -746,7 +744,22 @@ class PyFlashinferDecodeAttnOp(object):
         return self.fmha_params
 
     def prepare_for_cuda_graph_replay(self, attn_inputs: PyAttentionInputs) -> None:
-        """Refresh FlashInfer runtime buffers before replaying the captured graph."""
+        """Refresh FlashInfer runtime buffers before replaying the captured graph.
+
+        Do NOT call plan() here: the decode wrapper was already planned during
+        graph capture, and the fixed workspace buffers / page indices captured in
+        the graph must remain stable.  fill_params() updates the bound tensors
+        in-place, which is sufficient for replay.
+        """
+        # Replay must not exceed the batch size the graph was planned/captured
+        # with: without a replan, a larger batch would read stale/undersized
+        # FlashInfer workspace (forbid_realloc=True below only prevents realloc).
+        replay_batch_size = attn_inputs.input_lengths.size(0)
+        captured_batch_size = self.decode_wrapper._fixed_batch_size
+        assert replay_batch_size <= captured_batch_size, (
+            f"CUDA graph replay batch_size ({replay_batch_size}) exceeds captured "
+            f"batch_size ({captured_batch_size}); FlashInfer workspace is stale."
+        )
         self.fmha_params.fill_params(
             attn_inputs.prefix_lengths,
             attn_inputs.sequence_lengths,
@@ -755,8 +768,6 @@ class PyFlashinferDecodeAttnOp(object):
             self.seq_size_per_block,
             forbid_realloc=True,
         )
-        if self._requires_fa2_cuda_graph_replan():
-            self._plan_decode_wrapper(attn_inputs)
 
     def support(self, attn_inputs: PyAttentionInputs) -> bool:
         return True
@@ -778,6 +789,8 @@ class PyFlashinferDecodeAttnOp(object):
 
 
 class PyFlashinferDecodeImpl(FMHAImplBase):
+    NAME = "py_flashinfer"
+
     def __init__(
         self,
         attn_configs: AttentionConfigs,

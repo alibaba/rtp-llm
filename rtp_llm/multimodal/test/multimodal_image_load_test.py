@@ -3,6 +3,10 @@ import tempfile
 from random import randint
 from unittest import TestCase, main
 
+import pytest
+
+pytestmark = [pytest.mark.gpu(type="A10")]
+
 import PIL
 import pillow_avif
 import pillow_heif

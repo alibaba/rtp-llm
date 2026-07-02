@@ -1,5 +1,5 @@
 load("//:def.bzl", "copts", "cuda_copts")
-load("@arch_config//:arch_select.bzl", "torch_deps")
+load("@rtp_llm//bazel:defs.bzl", "torch_deps")
 
 cc_library(
     name = "th_eplb_py_wrapper_test_lib",
@@ -22,18 +22,4 @@ cc_binary(
     deps = [":th_eplb_py_wrapper_test_lib"],
     linkshared = 1,
     visibility = ["//visibility:public"],
-)
-
-py_test(
-    name = "eplb_py_wrapper_test",
-    srcs = [
-        "eplb_py_wrapper_test.py"
-    ],
-    data = [
-        ":th_eplb_py_wrapper_test"
-    ],
-    deps = [
-        "//rtp_llm:torch"
-    ],
-    exec_properties = {'gpu':'H20'},
 )

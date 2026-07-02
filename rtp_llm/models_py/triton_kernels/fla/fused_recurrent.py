@@ -409,7 +409,7 @@ def fused_recurrent_gated_delta_rule(
                 f"V-first [N, H, V, K] tensors directly.",
                 stacklevel=2,
             )
-            initial_state = initial_state.transpose(-1, -2).contiguous()
+            initial_state = initial_state.contiguous()
     if cu_seqlens is not None and q.shape[0] != 1:
         raise ValueError(
             f"The batch size is expected to be 1 rather than {q.shape[0]} when using `cu_seqlens`."

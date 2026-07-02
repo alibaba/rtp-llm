@@ -1,4 +1,5 @@
-load("@arch_config//:arch_select.bzl", "no_block_copy_link_deps", "torch_deps")
+load("@arch_config//:arch_select.bzl", "no_block_copy_link_deps")
+load("@rtp_llm//bazel:defs.bzl", "torch_deps")
 
 package(default_visibility = ["//visibility:public"])
 

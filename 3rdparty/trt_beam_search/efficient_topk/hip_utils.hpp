@@ -3,6 +3,7 @@
 #include <hip/hip_runtime.h>
 #include <hip/hip_runtime_api.h>
 
+#include <array>
 #include <cassert>
 #include <limits>
 #include <stdexcept>
@@ -68,6 +69,32 @@ class MemoryAligner {
     for (const auto size : sizes) {
       pointers.push_back(current_ptr);
       current_ptr += align_up(size);
+    }
+
+    return pointers;
+  }
+
+  template <size_t N>
+  static inline size_t calculate_required_size(
+      const size_t (&sizes)[N]) {
+    size_t total_aligned_size = 0;
+    for (const auto size : sizes) {
+      total_aligned_size += align_up(size);
+    }
+    return total_aligned_size + (Alignment - 1);
+  }
+
+  template <size_t N>
+  static inline std::array<void*, N> partition_buffer(
+      const void* buffer, const size_t (&sizes)[N]) {
+    auto* aligned_buffer_start =
+        reinterpret_cast<char*>(align_up(reinterpret_cast<uintptr_t>(buffer)));
+
+    std::array<void*, N> pointers{};
+    char* current_ptr = aligned_buffer_start;
+    for (size_t i = 0; i < N; ++i) {
+      pointers[i] = current_ptr;
+      current_ptr += align_up(sizes[i]);
     }
 
     return pointers;

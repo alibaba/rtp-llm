@@ -1,0 +1,25 @@
+diff --git a/providers.bzl b/providers.bzl
+new file mode 100644
+--- /dev/null
++++ b/providers.bzl
+@@ -0,0 +1,20 @@
++"""Shim for loads of @rules_pkg//:providers.bzl (rules_pkg 0.9+ moved sources under //pkg:)."""
++
++load(
++    "//pkg:providers.bzl",
++    _PackageArtifactInfo = "PackageArtifactInfo",
++    _PackageDirsInfo = "PackageDirsInfo",
++    _PackageFilegroupInfo = "PackageFilegroupInfo",
++    _PackageFilesInfo = "PackageFilesInfo",
++    _PackageSymlinkInfo = "PackageSymlinkInfo",
++    _PackageVariablesInfo = "PackageVariablesInfo",
++)
++
++# Starlark does not re-export symbols from nested loads; assign for callers of @rules_pkg//:providers.bzl.
++PackageArtifactInfo = _PackageArtifactInfo
++PackageDirsInfo = _PackageDirsInfo
++PackageFilegroupInfo = _PackageFilegroupInfo
++PackageFilesInfo = _PackageFilesInfo
++PackageSymlinkInfo = _PackageSymlinkInfo
++PackageVariablesInfo = _PackageVariablesInfo
++

@@ -18,10 +18,16 @@
             "result": {
                 "response_batch": [
                     {
-                        "response": " In Django, I would use `nav`, in"
+                        "response": " In Django, I would use `nav`, in",
+                        "response_alternatives": [
+                            " In Django, I would use `reverse`, in"
+                        ]
                     },
                     {
-                        "response": " In Django, I would use `nav`, in"
+                        "response": " In Django, I would use `nav`, in",
+                        "response_alternatives": [
+                            " In Django, I would use `reverse`, in"
+                        ]
                     }
                 ]
             }

@@ -73,8 +73,10 @@ def _report_output_metrics(output_pb: MultimodalOutputPB, tags: Dict[str, str]) 
 def trans_output(res: MMEmbeddingRes):
     # Guard against empty embeddings (e.g. error path where mm_embedding_rpc
     # returns no tensors). torch.concat on an empty list raises RuntimeError.
+    # The caller (RemoteMultimodalEmbedding) aborts the RPC with a clear status
+    # instead of returning an empty OK response that triggers C++ CHECK failures.
     if not res.embeddings:
-        return MultimodalOutputPB()
+        raise ValueError("empty multimodal embedding returned by VIT engine")
 
     contain_pos = (res.position_ids is not None) and (len(res.position_ids) > 0)
     contain_extra_input = (res.extra_input is not None) and (len(res.extra_input) > 0)
@@ -130,6 +132,12 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
                 tags,
             )
             res: MMEmbeddingRes = self.engine.mm_embedding_rpc(multimodal_inputs)
+            if not res.embeddings:
+                context.abort(
+                    grpc.StatusCode.INTERNAL,
+                    "VIT engine returned empty multimodal embeddings",
+                )
+                return
             output_pb = trans_output(res)
             kmonitor.report(
                 GaugeMetrics.VIT_RPC_SERVER_HANDLER_RT_US_METRIC,

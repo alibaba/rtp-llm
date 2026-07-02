@@ -33,13 +33,7 @@ from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import MlaImplBa
 from rtp_llm.models_py.triton_kernels.sparse_mla.block_index_to_global import (
     triton_convert_req_index_to_global_index,
 )
-from rtp_llm.ops import (
-    AttentionConfigs,
-    FMHAConfig,
-    FMHAType,
-    KvCacheDataType,
-    ParallelismConfig,
-)
+from rtp_llm.ops import AttentionConfigs, FMHAConfig, KvCacheDataType, ParallelismConfig
 from rtp_llm.ops.compute_ops import KVCache, PyAttentionInputs, rtp_llm_ops
 from rtp_llm.utils.model_weight import W
 
@@ -311,6 +305,8 @@ class SparseMlaImpl(MlaImplBase):
     Uses the same operator (SparseMlaOp) for both stages with triton-based index conversion.
     """
 
+    NAME = "sparse_mla"
+
     def __init__(
         self,
         attn_configs: AttentionConfigs,
@@ -390,11 +386,6 @@ class SparseMlaImpl(MlaImplBase):
         self.fmha_params = rtp_llm_ops.SparseMlaParams()
         self.rope_params = self.fmha_params
         self.prepare(attn_inputs)
-
-    @staticmethod
-    def fmha_type() -> FMHAType:
-        """Return FMHA type."""
-        return FMHAType.SPARSE_FLASHMLA
 
     @staticmethod
     def is_sparse() -> bool:

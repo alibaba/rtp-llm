@@ -4,12 +4,15 @@ import os
 import random
 from unittest import TestCase, main
 
+import pytest
+
+pytestmark = [pytest.mark.gpu(type="A10")]
+
 from rtp_llm.frontend.tokenizer_factory.tokenizer_utils import (
     DecodingState,
     IncrementDecodingUtils,
 )
 from rtp_llm.frontend.tokenizer_factory.tokenizers import LlamaTokenizer, QWenTokenizer
-
 
 
 class IncrementalDecodeTest(TestCase):

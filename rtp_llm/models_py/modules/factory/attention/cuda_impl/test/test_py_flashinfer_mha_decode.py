@@ -4,6 +4,10 @@ import sys
 import unittest
 from typing import List
 
+import pytest
+
+pytestmark = [pytest.mark.gpu(type="H20")]
+
 import torch
 from attention_ref import compute_flashinfer_decode_reference
 from base_attention_test import BaseAttentionTest, compare_tensors
@@ -294,8 +298,8 @@ class TestPyFlashinferDecodeCudaGraph(BaseAttentionTest):
     Verifies the critical invariants that the C++ CUDA graph runner depends on:
     1. prepare() with is_cuda_graph=True sets _fixed_batch_size and wires up
        the decode_wrapper's internal buffers for graph capture.
-    2. prepare_for_cuda_graph_replay() refreshes both page tables and, only
-       for FlashInfer fa2, cached plan metadata without reallocating buffers.
+    2. prepare_for_cuda_graph_replay() only calls fill_params (no plan()),
+       correctly updating page tables without reallocating buffers.
 
     Full forward correctness under CUDA graph capture/replay cannot be tested
     at the Python UT level — that path is exercised by smoke tests with real
@@ -356,8 +360,12 @@ class TestPyFlashinferDecodeCudaGraph(BaseAttentionTest):
         self.assertTrue(attn_op.decode_wrapper._use_cuda_graph)
         logging.info("_fixed_batch_size correctly set after prepare()")
 
-    def test_replay_refreshes_plan_metadata(self):
-        """prepare_for_cuda_graph_replay() must refresh FlashInfer fa2 plan metadata."""
+    def test_replay_does_not_replan(self):
+        """prepare_for_cuda_graph_replay() must not call plan().
+
+        Verifies that only fill_params is called by checking that the
+        _fixed_batch_size remains unchanged (plan() would reset it).
+        """
         config = self._create_config()
         capture_bs = 8
         capture_seq_lens = [64, 128, 256, 512, 64, 128, 256, 512]
@@ -368,99 +376,34 @@ class TestPyFlashinferDecodeCudaGraph(BaseAttentionTest):
             config.seq_size_per_block,
         )
         attn_op = PyFlashinferDecodeAttnOp(config.attn_configs, capture_inputs)
-        self.assertTrue(attn_op.use_tensor_core)
-        self.assertTrue(attn_op._requires_fa2_cuda_graph_replan())
         fmha_params = rtp_llm_ops.FlashInferMlaAttnParams()
         attn_op.set_params(fmha_params)
         attn_op.prepare(capture_inputs)
 
         self.assertEqual(attn_op.decode_wrapper._fixed_batch_size, capture_bs)
 
-        original_plan = attn_op.decode_wrapper.plan
-        plan_calls = []
-
-        def counted_plan(*args, **kwargs):
-            plan_calls.append((args, kwargs))
-            return original_plan(*args, **kwargs)
-
-        attn_op.decode_wrapper.plan = counted_plan
-
-        run_seq_lens = [100, 200, 300, 400, 64, 128, 256, 512]
+        run_bs = 3
+        run_seq_lens = [100, 200, 300]
         run_inputs = self._create_cuda_graph_inputs(
-            capture_bs,
+            run_bs,
             run_seq_lens,
             config.seq_size_per_block,
         )
         attn_op.prepare_for_cuda_graph_replay(run_inputs)
 
-        self.assertEqual(len(plan_calls), 1)
-        plan_args, plan_kwargs = plan_calls[0]
-        self.assertFalse(plan_args[0].is_cuda)
-        self.assertFalse(plan_args[1].is_cuda)
-        self.assertFalse(plan_args[2].is_cuda)
-        self.assertTrue(plan_kwargs["non_blocking"])
-
-        # _fixed_batch_size must stay at the captured graph size.
+        # _fixed_batch_size must stay at capture_bs (replay doesn't replan)
         self.assertEqual(attn_op.decode_wrapper._fixed_batch_size, capture_bs)
 
+        # fill_params must have updated the page table buffers on the device
         page_indptr = fmha_params.decode_page_indptr_h
         self.assertIsNotNone(page_indptr)
-        self.assertGreaterEqual(len(page_indptr), capture_bs + 1)
+        # The indptr for run_bs=3 should have run_bs+1 meaningful entries
+        # (the rest is padding from capture_bs allocation)
+        self.assertGreaterEqual(len(page_indptr), run_bs + 1)
         logging.info(
             f"Replay OK: _fixed_batch_size={attn_op.decode_wrapper._fixed_batch_size}, "
-            f"page_indptr={page_indptr.tolist()}"
+            f"page_indptr[:4]={page_indptr[:run_bs+1].tolist()}"
         )
-
-    def test_non_fa2_replay_does_not_replan(self):
-        """Non-fa2 decode keeps the original replay contract: fill params only."""
-        config = self._create_config(head_num=32, head_num_kv=32)
-        capture_bs = 4
-        capture_seq_lens = [64, 128, 256, 512]
-
-        capture_inputs = self._create_cuda_graph_inputs(
-            capture_bs,
-            capture_seq_lens,
-            config.seq_size_per_block,
-        )
-        attn_op = PyFlashinferDecodeAttnOp(config.attn_configs, capture_inputs)
-        self.assertFalse(attn_op.use_tensor_core)
-        self.assertFalse(attn_op._requires_fa2_cuda_graph_replan())
-        fmha_params = rtp_llm_ops.FlashInferMlaAttnParams()
-        attn_op.set_params(fmha_params)
-        attn_op.prepare(capture_inputs)
-
-        self.assertTrue(attn_op.decode_wrapper._use_cuda_graph)
-        self.assertEqual(attn_op.decode_wrapper._fixed_batch_size, capture_bs)
-        self.assertEqual(
-            attn_op.decode_wrapper._paged_kv_indptr_buf.data_ptr(),
-            fmha_params.decode_page_indptr_d.data_ptr(),
-        )
-        self.assertEqual(
-            attn_op.decode_wrapper._paged_kv_indices_buf.data_ptr(),
-            fmha_params.page_indice_d.data_ptr(),
-        )
-        self.assertEqual(
-            attn_op.decode_wrapper._paged_kv_last_page_len_buf.data_ptr(),
-            fmha_params.paged_kv_last_page_len_d.data_ptr(),
-        )
-        self.assertFalse(hasattr(attn_op.decode_wrapper, "_qo_indptr_buf"))
-
-        plan_calls = []
-
-        def counted_plan(*args, **kwargs):
-            plan_calls.append((args, kwargs))
-
-        attn_op.decode_wrapper.plan = counted_plan
-
-        run_seq_lens = [100, 200, 256, 512]
-        run_inputs = self._create_cuda_graph_inputs(
-            capture_bs,
-            run_seq_lens,
-            config.seq_size_per_block,
-        )
-        attn_op.prepare_for_cuda_graph_replay(run_inputs)
-
-        self.assertEqual(len(plan_calls), 0)
 
     def test_replay_updates_page_tables(self):
         """Page table buffers must reflect the replay inputs, not capture inputs."""
@@ -469,8 +412,8 @@ class TestPyFlashinferDecodeCudaGraph(BaseAttentionTest):
         config = self._create_config(seq_size_per_block=64)
         capture_bs = 4
         capture_seq_lens = [64, 128, 256, 512]
-        active_bs = 2
-        run_seq_lens = [100, 200, 256, 512]
+        run_bs = 2
+        run_seq_lens = [100, 200]
 
         capture_inputs = self._create_cuda_graph_inputs(
             capture_bs,
@@ -483,7 +426,7 @@ class TestPyFlashinferDecodeCudaGraph(BaseAttentionTest):
         attn_op.prepare(capture_inputs)
 
         run_inputs = self._create_cuda_graph_inputs(
-            capture_bs,
+            run_bs,
             run_seq_lens,
             config.seq_size_per_block,
         )
@@ -491,12 +434,12 @@ class TestPyFlashinferDecodeCudaGraph(BaseAttentionTest):
 
         # Verify page_indptr matches run_seq_lens
         page_indptr = fmha_params.decode_page_indptr_h.tolist()
-        expected_blocks = [math.ceil(s / 64) for s in run_seq_lens[:active_bs]]
+        expected_blocks = [math.ceil(s / 64) for s in run_seq_lens]
         expected_indptr = [0]
         for nb in expected_blocks:
             expected_indptr.append(expected_indptr[-1] + nb)
 
-        for i in range(active_bs + 1):
+        for i in range(run_bs + 1):
             self.assertEqual(
                 page_indptr[i],
                 expected_indptr[i],
@@ -505,17 +448,15 @@ class TestPyFlashinferDecodeCudaGraph(BaseAttentionTest):
 
         # Verify last_page_len
         last_page_len = fmha_params.paged_kv_last_page_len_h.tolist()
-        for i, seq_len in enumerate(run_seq_lens[:active_bs]):
+        for i, seq_len in enumerate(run_seq_lens):
             expected = seq_len % 64 or 64
             self.assertEqual(
                 last_page_len[i],
                 expected,
                 f"last_page_len[{i}] mismatch: expected {expected}, got {last_page_len[i]}",
             )
-        expected_last_page_lens = [s % 64 or 64 for s in run_seq_lens[:active_bs]]
         logging.info(
-            f"Page table update OK: indptr={expected_indptr}, "
-            f"last_page_len={expected_last_page_lens}"
+            f"Page table update OK: indptr={expected_indptr}, last_page_len={[s % 64 or 64 for s in run_seq_lens]}"
         )
 
 

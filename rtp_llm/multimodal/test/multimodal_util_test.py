@@ -4,6 +4,10 @@ import logging
 import tempfile
 import unittest
 
+import pytest
+
+pytestmark = [pytest.mark.gpu(type="A10")]
+
 from PIL import Image
 
 from rtp_llm.multimodal.multimodal_util import get_bytes_io_from_url

@@ -1,5 +1,4 @@
 import base64
-import concurrent.futures
 import json
 import logging
 import re
@@ -7,40 +6,38 @@ import threading
 from dataclasses import dataclass
 from enum import IntEnum
 from io import BytesIO
-from typing import Optional
+from typing import Dict, Optional
 
-import requests
 import torch
 
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     MMPreprocessConfigPB,
     MultimodalInputsPB,
 )
-from rtp_llm.ops import MMPreprocessConfig, MultimodalInput
-from rtp_llm.utils.base_model_datatypes import MMUrlType
+from rtp_llm.ops import MMPreprocessConfig as _CppMMPreprocessConfig, MultimodalInput as _CppMultimodalInput
 from rtp_llm.utils.grpc_util import trans_tensor
 from rtp_llm.utils.lru_dict import LruDict
 from rtp_llm.utils.oss_util import get_bytes_io_from_oss_path
 
-download_executor = concurrent.futures.ThreadPoolExecutor()
-
 logger = logging.getLogger(__name__)
 
-REQUEST_GET = None
+_request_get_impl = None
 
 
 def request_get(url, headers):
-    global REQUEST_GET
-    if REQUEST_GET is None:
+    global _request_get_impl
+    if _request_get_impl is None:
         try:
-            from internal_source.rtp_llm.utils.ssrf_check import safe_request_get
+            from rtp_llm.utils.ssrf_check import safe_request_get
 
-            REQUEST_GET = safe_request_get
-        except ImportError:
-            REQUEST_GET = lambda url, headers: requests.get(
-                url, stream=True, headers=headers, timeout=10
-            )
-    return REQUEST_GET(url, headers)
+            _request_get_impl = safe_request_get
+        except ImportError as e:
+            raise ImportError(
+                f"rtp_llm.utils.ssrf_check is required for safe URL downloading "
+                f"but could not be imported: {e}. "
+                f"Please ensure the ssrf_check module is installed."
+            ) from e
+    return _request_get_impl(url, headers)
 
 
 def _get_http_heads(download_headers: str = ""):
@@ -63,6 +60,45 @@ def get_base64_prefix(s):
     if not match:
         return 0
     return match.end()
+
+
+class MMUrlType(IntEnum):
+    DEFAULT = 0
+    IMAGE = 1
+    VIDEO = 2
+    AUDIO = 3
+    TENSOR = 4
+    IGRAPH = 5
+
+
+@dataclass
+class MMPreprocessConfig:
+    width: int = -1
+    height: int = -1
+    min_pixels: int = -1
+    max_pixels: int = -1
+    fps: int = -1
+    min_frames: int = -1
+    max_frames: int = -1
+
+
+class MultimodalInput:
+    url: str
+    mm_type: MMUrlType
+    mm_preprocess_config: MMPreprocessConfig
+    tensor: torch.Tensor
+
+    def __init__(
+        self,
+        url: str,
+        mm_type: MMUrlType = MMUrlType.DEFAULT,
+        mm_preprocess_config: Optional[MMPreprocessConfig] = None,
+        tensor: Optional[torch.Tensor] = None,
+    ):
+        self.url = url
+        self.mm_type = mm_type
+        self.mm_preprocess_config = mm_preprocess_config or MMPreprocessConfig()
+        self.tensor = tensor if tensor is not None else torch.empty(1)
 
 
 class IgraphItemKeyCountMismatchError(Exception):
@@ -111,7 +147,7 @@ def get_json_result_from_url(url: str, download_headers: str = ""):
     headers = _get_http_heads(download_headers)
     try:
         if url.startswith("http") or url.startswith("https"):
-            response = requests.get(url, stream=True, headers=headers, timeout=10)
+            response = request_get(url, headers)
             if response.status_code == 200:
                 res = response.content.decode("utf-8")
             else:
@@ -129,42 +165,78 @@ def get_json_result_from_url(url: str, download_headers: str = ""):
     return res
 
 
+def _download_url_bytes(url: str, download_headers: str = "") -> bytes:
+    """Download raw bytes for *url* (HTTP/HTTPS, OSS, base64, or local path)."""
+    headers = _get_http_heads(download_headers)
+    try:
+        if url.startswith("http") or url.startswith("https"):
+            response = request_get(url, headers)
+            if response.status_code == 200:
+                return response.content
+            else:
+                raise Exception(f"download failed, error code: {response.status_code}")
+        elif url.startswith("oss"):
+            return get_bytes_io_from_oss_path(url).getvalue()
+        elif get_base64_prefix(url) > 0:
+            return base64.b64decode(url[get_base64_prefix(url) :])
+        else:
+            # treat url as local path
+            with open(url, "rb") as fh:
+                return fh.read()
+    except Exception as e:
+        raise Exception(f"download and load {url} error, exception {e}")
+
+
+_url_singleflight_lock = threading.Lock()
+_url_singleflight_events: Dict[str, threading.Event] = {}
+
+
 def get_bytes_io_from_url(url: str, download_headers: str = ""):
     """Get BytesIO from URL.
 
     Args:
         url: URL to fetch from.
         download_headers: JSON string containing HTTP headers. If empty, uses default headers.
+
+    The cache stores immutable bytes instead of a shared BytesIO so concurrent
+    callers cannot race on a mutable cursor. A per-URL singleflight prevents
+    multiple concurrent misses from downloading the same image repeatedly.
     """
 
-    cached_res = url_data_cache_.check_cache(url)
-    if cached_res is None:
-        headers = _get_http_heads(download_headers)
-        try:
-            if url.startswith("http") or url.startswith("https"):
-                response = request_get(url, headers)
-                if response.status_code == 200:
-                    res = BytesIO(response.content)
-                else:
-                    raise Exception(
-                        f"download failed, error code: {response.status_code}"
-                    )
-            elif url.startswith("oss"):
-                res = get_bytes_io_from_oss_path(url)
-            elif get_base64_prefix(url) > 0:
-                res = BytesIO(base64.b64decode(url[get_base64_prefix(url) :]))
-            else:
-                # treat url as local path
-                with open(url, "rb") as fh:
-                    buf = BytesIO(fh.read())
-                res = buf
-        except Exception as e:
-            raise Exception(f"download and load {url} error, exception {e}")
-        url_data_cache_.insert_cache(url, res)
-        return res
-    else:
-        cached_res.seek(0)
-        return cached_res
+    cached_bytes = url_data_cache_.check_cache(url)
+    if cached_bytes is not None:
+        return BytesIO(cached_bytes)
+
+    with _url_singleflight_lock:
+        cached_bytes = url_data_cache_.check_cache(url)
+        if cached_bytes is not None:
+            return BytesIO(cached_bytes)
+        if url in _url_singleflight_events:
+            event = _url_singleflight_events[url]
+            is_downloader = False
+        else:
+            event = threading.Event()
+            _url_singleflight_events[url] = event
+            is_downloader = True
+
+    if not is_downloader:
+        event.wait()
+        cached_bytes = url_data_cache_.check_cache(url)
+        if cached_bytes is not None:
+            return BytesIO(cached_bytes)
+        # Cache disabled or downloader failed without inserting; fall back.
+        cached_bytes = _download_url_bytes(url, download_headers)
+        return BytesIO(cached_bytes)
+
+    try:
+        cached_bytes = _download_url_bytes(url, download_headers)
+        url_data_cache_.insert_cache(url, cached_bytes)
+    finally:
+        with _url_singleflight_lock:
+            _url_singleflight_events.pop(url, None)
+        event.set()
+
+    return BytesIO(cached_bytes)
 
 
 class MMDataCache(object):
@@ -193,8 +265,7 @@ class MMDataCache(object):
         with self.cache_lock:
             if cache_size <= 0:
                 self.mm_data_cache = None
-                return
-            if self.mm_data_cache is None:
+            elif self.mm_data_cache is None:
                 self.mm_data_cache = LruDict(cache_size)
             else:
                 self.mm_data_cache.set_size(cache_size)
@@ -206,7 +277,7 @@ url_data_cache_ = MMDataCache(cache_size=10)
 
 
 def trans_config(mm_process_config_pb: MMPreprocessConfigPB):
-    return MMPreprocessConfig(
+    return _CppMMPreprocessConfig(
         width=mm_process_config_pb.width,
         height=mm_process_config_pb.height,
         min_pixels=mm_process_config_pb.min_pixels,
@@ -223,7 +294,7 @@ def trans_mm_input(multimodal_inputs):
     # vit sep
     if isinstance(multimodal_inputs, MultimodalInputsPB):
         return [
-            MultimodalInput(
+            _CppMultimodalInput(
                 mm_input.multimodal_url,
                 MMUrlType(mm_input.multimodal_type),
                 trans_tensor(mm_input.multimodal_tensor),
@@ -233,8 +304,13 @@ def trans_mm_input(multimodal_inputs):
         ]
     # not sep
     elif isinstance(multimodal_inputs, list):
+        if not all(isinstance(mm_input, MultimodalInput) for mm_input in multimodal_inputs):
+            raise ValueError(
+                f"multimodal_inputs list must contain only MultimodalInput objects, "
+                f"got types {[type(x).__name__ for x in multimodal_inputs]}"
+            )
         return [
-            MultimodalInput(
+            _CppMultimodalInput(
                 mm_input.url,
                 MMUrlType(mm_input.mm_type),
                 mm_input.tensor,

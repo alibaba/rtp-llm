@@ -1,6 +1,7 @@
 import itertools
 from unittest import SkipTest, TestCase, main
 
+import pytest
 import torch
 from torch import dtype as _dtype
 
@@ -8,6 +9,8 @@ from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.models_py.modules import Embedding
 from rtp_llm.models_py.modules.base.common.embedding import EmbeddingTorch
 from rtp_llm.ops import ParallelismConfig
+
+pytestmark = [pytest.mark.gpu(type="MI308X")]
 
 
 class EmbedingTest(TestCase):
@@ -29,11 +32,11 @@ class EmbedingTest(TestCase):
         model_config.num_layers = 1
         model_config.max_seq_len = 1
         model_config.vocab_size = 1
-        
+
         parallelism_config = ParallelismConfig()
         parallelism_config.tp_size = 1
         parallelism_config.tp_rank = 0
-        
+
         embeding = Embedding(model_config, parallelism_config, w)
         embeding_torch = EmbeddingTorch(w)
         x = torch.randint(0, hidden_size, (num_tokens,), dtype=torch.int32)
@@ -53,7 +56,7 @@ class EmbedingTest(TestCase):
             self.DTYPES,
         ):
             with self.subTest(
-                num_tokens=params[0], hidden_size=params[1], dtype=params[2]
+                num_tokens=params[0], hidden_size=params[1], dtype=str(params[2])
             ):
                 self._run_embeding_test(*params)
 
