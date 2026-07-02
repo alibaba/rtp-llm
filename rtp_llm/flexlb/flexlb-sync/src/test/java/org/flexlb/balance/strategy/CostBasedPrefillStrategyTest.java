@@ -215,19 +215,20 @@ class CostBasedPrefillStrategyTest {
     }
 
     @Test
-    void predictorUsesPolynomialFormula() {
-        PrefillTimePredictor predictor = new PrefillTimePredictor(10, 0.5, 0.001, 0.0005, 0.2, 5);
+    void predictorUsesFormula() {
+        PrefillTimePredictor predictor = new PrefillTimePredictor("10 + 0.5*sum_c + 0.001*sum_c2 + 0.0005*sum_cp + 0.2*sum_p + 5*n");
 
-        // Single request: n=1000, p=200 → c=800, bs=1
-        // = 10 + 0.5*800 + (0.001*640000 + 0.0005*160000) + 0.2*200 + 5*1
-        // = 10 + 400 + (640 + 80) + 40 + 5 = 1175
+        // Single request: n=1000, p=200 → c=800, n=1
+        // = 10 + 0.5*800 + 0.001*640000 + 0.0005*160000 + 0.2*200 + 5*1
+        // = 10 + 400 + 640 + 80 + 40 + 5 = 1175
         long single = predictor.predictBatchMs(List.of(batchItem(0, 1000, 200)));
         assertEquals(1175, single);
 
         // Batch of 2: req1=(1000,200) req2=(500,100)
         // c1=800, p1=200, c2=400, p2=100
-        // Σc=1200, Σ(640+80, 160+20)=900, Σp=300, bs=2
-        // = 10 + 0.5*1200 + 900 + 0.2*300 + 5*2 = 1580
+        // sum_c=1200, sum_c2=640000+160000=800000, sum_cp=160000+40000=200000, sum_p=300, n=2
+        // = 10 + 0.5*1200 + 0.001*800000 + 0.0005*200000 + 0.2*300 + 5*2
+        // = 10 + 600 + 800 + 100 + 60 + 10 = 1580
         long batch = predictor.predictBatchMs(List.of(
                 batchItem(0, 1000, 200),
                 batchItem(1, 500, 100)));

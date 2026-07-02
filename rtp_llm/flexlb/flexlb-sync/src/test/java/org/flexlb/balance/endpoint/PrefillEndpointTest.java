@@ -44,12 +44,7 @@ class PrefillEndpointTest {
         config = new FlexlbConfig();
         config.setFlexlbBatchQueueMaxSize(100);
         config.setFlexlbBatchFixedWaitMs(300);
-        config.setCostAlpha0(10);
-        config.setCostAlpha1(0.1);
-        config.setCostAlpha2(0);
-        config.setCostAlpha3(0);
-        config.setCostAlpha4(0);
-        config.setCostAlpha5(5);
+        config.setCostFormula("10 + 0.1*c + 5*n");
 
         endpoint = new PrefillEndpoint(status, config, noopHandler(), mock(BatchSchedulerReporter.class));
     }

@@ -75,9 +75,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
     }
 
     private static PrefillTimePredictor createPredictor(FlexlbConfig cfg) {
-        return new PrefillTimePredictor(
-                cfg.getCostAlpha0(), cfg.getCostAlpha1(), cfg.getCostAlpha2(),
-                cfg.getCostAlpha3(), cfg.getCostAlpha4(), cfg.getCostAlpha5());
+        return new PrefillTimePredictor(cfg.getCostFormula());
     }
 
     public void commitBatch(long batchId, long predictMs, List<BatchItem> requests) {

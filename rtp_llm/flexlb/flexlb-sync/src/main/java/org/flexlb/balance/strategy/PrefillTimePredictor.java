@@ -2,50 +2,88 @@ package org.flexlb.balance.strategy;
 
 import org.flexlb.balance.scheduler.BatchItem;
 
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 /**
- * α₀ + α₁·Σcᵢ + α₂·Σcᵢ² + α₃·Σ(cᵢ·pᵢ) + α₄·Σpᵢ + α₅·bs
+ * Prefill-time predictor driven by a user-configurable formula.
  *
- * where cᵢ = inputLen - hitCacheTokens (compute tokens), pᵢ = hitCacheTokens, bs = batch size.
+ * <p>Two evaluation modes share the same formula string:
+ * <ul>
+ *   <li>{@link #estimateMs(long, long)} — single request:
+ *       fills {@code c, p} as well as {@code sum_c, sum_c2, sum_cp, sum_p, n=1}</li>
+ *   <li>{@link #predictBatchMs(List)} — batch: aggregates token statistics,
+ *       then fills {@code sum_c, sum_c2, sum_cp, sum_p, n}</li>
+ * </ul>
+ *
+ * <p>Construction is cheap — the formula is parsed once and the AST is shared
+ * across all evaluations.
  */
 public class PrefillTimePredictor {
 
-    private final double a0, a1, a2, a3, a4, a5;
+    private final PrefillTimeFormula formula;
 
-    public PrefillTimePredictor(double a0, double a1, double a2, double a3, double a4, double a5) {
-        this.a0 = a0;
-        this.a1 = a1;
-        this.a2 = a2;
-        this.a3 = a3;
-        this.a4 = a4;
-        this.a5 = a5;
+    public PrefillTimePredictor(String formulaString) {
+        this.formula = PrefillTimeFormula.parse(formulaString);
     }
 
-    /** Estimate prefill time for a single request from raw token counts. */
+    /**
+     * Estimate prefill time for a single request from raw token counts.
+     *
+     * @param totalTokens input length
+     * @param hitTokens   cache-hit token count (0 ≤ hitTokens ≤ totalTokens)
+     */
     public long estimateMs(long totalTokens, long hitTokens) {
         long c = Math.max(0, totalTokens - hitTokens);
-        return (long) (a0 + a1 * c + a2 * c * c + a3 * c * hitTokens + a4 * hitTokens + a5);
+        long p = hitTokens;
+        Map<String, Double> vars = new HashMap<>();
+        vars.put("c",      (double) c);
+        vars.put("p",      (double) p);
+        vars.put("sum_c",  (double) c);
+        vars.put("sum_c2", (double) (c * c));
+        vars.put("sum_cp", (double) (c * p));
+        vars.put("sum_p",  (double) p);
+        vars.put("n",      1.0);
+        return formula.evaluate(vars);
     }
 
-    /** Estimate prefill time for a batch of {@link BatchItem}s. */
+    /**
+     * Estimate prefill time for a batch of requests.
+     *
+     * @param items batch items (may be empty)
+     * @return predicted time in milliseconds, or 0 for an empty batch
+     */
     public long predictBatchMs(List<BatchItem> items) {
         if (items.isEmpty()) {
             return 0;
         }
-        int bs = items.size();
+        int n = items.size();
         long sumC = 0;
-        double sumQuadratic = 0;
+        long sumC2 = 0;
+        long sumCp = 0;
         long sumP = 0;
 
         for (BatchItem item : items) {
             long c = item.computeTokens();
             long p = item.hitCache();
-            sumC += c;
-            sumQuadratic += a2 * c * c + a3 * c * p;
-            sumP += p;
+            sumC  += c;
+            sumC2 += c * c;
+            sumCp += c * p;
+            sumP  += p;
         }
 
-        return (long) (a0 + a1 * sumC + sumQuadratic + a4 * sumP + a5 * bs);
+        Map<String, Double> vars = new HashMap<>();
+        vars.put("sum_c",  (double) sumC);
+        vars.put("sum_c2", (double) sumC2);
+        vars.put("sum_cp", (double) sumCp);
+        vars.put("sum_p",  (double) sumP);
+        vars.put("n",      (double) n);
+        return formula.evaluate(vars);
+    }
+
+    /** The parsed formula, for inspection. */
+    public String formulaString() {
+        return formula.toString();
     }
 }
