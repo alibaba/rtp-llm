@@ -13,6 +13,9 @@ namespace rtp_llm {
 // 实际场景推荐 N=2~4，设为 8 提供安全余量。
 static constexpr int kMaxDivergeDepth = 8;
 
+// cross_seq_diverge_start_combo "过大" 告警阈值，Python 侧 generate_config.py 使用相同值。
+static constexpr int kDivergeStartComboWarnThreshold = 100;
+
 RecommendationLogitsProcessor::RecommendationLogitsProcessor(std::vector<StreamRecommendationInfo> infos):
     infos_(std::move(infos)) {}
 
@@ -57,7 +60,7 @@ RecommendationLogitsProcessor::fromGenerateInput(std::shared_ptr<GenerateInput> 
     if (config->cross_seq_diverge_start_combo < 0) {
         RTP_LLM_LOG_WARNING("cross_seq_diverge_start_combo is negative (%d), clamped to 0",
                             config->cross_seq_diverge_start_combo);
-    } else if (enable_cross_seq_ban && diverge_start_combo > 100) {
+    } else if (enable_cross_seq_ban && diverge_start_combo > kDivergeStartComboWarnThreshold) {
         RTP_LLM_LOG_WARNING(
             "cross_seq_diverge_start_combo=%d is very large, top-K diverge masking may never activate",
             diverge_start_combo);
@@ -95,8 +98,8 @@ void RecommendationLogitsProcessor::process(const SamplerInputs& inputs, size_t 
         if (info.pos_in_combo == info.combo_token_size - 1 && !info.banned_combos.empty()) {
             need_ban_process = true;
         }
-        // top-K 分叉：非主序列(i>0) + 在 combo 起始位置 + 已达到分叉起始商品 + 开关开启
-        if (i > 0 && info.enable_cross_sequence_ban
+        // top-K 分叉：非主序列(i>0) + think完成 + 在 combo 起始位置 + 已达到分叉起始商品 + 开关开启
+        if (i > 0 && info.enable_cross_sequence_ban && info.think_done
             && info.pos_in_combo == 0
             && info.completed_combo_count >= info.cross_seq_diverge_start_combo) {
             need_diverge_process = true;
@@ -120,7 +123,7 @@ void RecommendationLogitsProcessor::process(const SamplerInputs& inputs, size_t 
         int max_k = 0;
         for (size_t i = 1; i < batch_size; ++i) {
             auto& info = infos_[i];
-            if (info.combo_token_size <= 0 || !info.enable_cross_sequence_ban) continue;
+            if (info.combo_token_size <= 0 || !info.enable_cross_sequence_ban || !info.think_done) continue;
             if (info.pos_in_combo != 0
                 || info.completed_combo_count < info.cross_seq_diverge_start_combo) {
                 continue;
@@ -133,10 +136,10 @@ void RecommendationLogitsProcessor::process(const SamplerInputs& inputs, size_t 
             max_k = std::min(max_k, static_cast<int>(vocab_size));
             // 仅对非主序列(row 1~N-1)做 topk，避免对 row 0 的无效计算
             auto non_primary_logits = logits.narrow(0, 1, batch_size - 1);
-            auto topk_indices = non_primary_logits.topk(max_k, /*dim=*/1).indices();
+            auto topk_indices = std::get<1>(non_primary_logits.topk(max_k, /*dim=*/1));
             for (size_t i = 1; i < batch_size; ++i) {
                 auto& info = infos_[i];
-                if (info.combo_token_size <= 0 || !info.enable_cross_sequence_ban) continue;
+                if (info.combo_token_size <= 0 || !info.enable_cross_sequence_ban || !info.think_done) continue;
                 if (info.pos_in_combo != 0
                     || info.completed_combo_count < info.cross_seq_diverge_start_combo) {
                     continue;

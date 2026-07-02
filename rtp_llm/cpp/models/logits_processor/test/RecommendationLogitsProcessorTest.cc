@@ -795,4 +795,54 @@ TEST_F(RecommendationLogitsProcessorTest, testInsertFlagConsistencyCheck) {
     }
 }
 
+// 场景 24：think 模型 + 跨序列去重，think 前缀未完成时不应触发 diverge 遮蔽
+TEST_F(RecommendationLogitsProcessorTest, testThinkModeSkipsDiverge) {
+    const int N = 2;
+    const size_t vocab_size = 10;
+    const int combo_size = 2;
+    std::set<std::vector<int>> banned = {};
+    // end_think_token_ids = {7, 8}，think 完成前不应遮蔽 topk
+    std::vector<int> end_think = {7, 8};
+
+    std::vector<StreamRecommendationInfo> infos;
+    for (int i = 0; i < N; ++i) {
+        infos.emplace_back(combo_size, 0, 0, false, banned, end_think,
+                           /*enable_cross_sequence_ban=*/true,
+                           /*cross_seq_diverge_start_combo=*/0);
+    }
+    auto processor = std::make_shared<RecommendationLogitsProcessor>(std::move(infos));
+    auto inputs = allocateSamplerInputs(N, vocab_size, processor);
+    inputs.logits.fill_(1.0f);
+    // 给序列 1 的 token 0 一个较高的 logit，如果 diverge 触发则会被遮蔽
+    inputs.logits[1][0] = 10.0f;
+
+    // think_done = false，不应触发 diverge
+    processor->process(inputs, 0, N);
+
+    auto logits_cpu = inputs.logits.cpu();
+    auto acc = logits_cpu.accessor<float, 2>();
+    // 序列 1 的 token 0 应该不被遮蔽（think 未完成，diverge 跳过）
+    EXPECT_FLOAT_EQ(10.0f, acc[1][0]);
+
+    // 现在完成 think：喂入 token 7, 8
+    auto tokens = torch::zeros({N, 1}, torch::kInt32);
+    tokens[0][0] = 7;
+    tokens[1][0] = 7;
+    processor->updateStatus(tokens, 1);
+    tokens[0][0] = 8;
+    tokens[1][0] = 8;
+    processor->updateStatus(tokens, 1);
+
+    // think_done = true，pos_in_combo=0，现在应该触发 diverge
+    EXPECT_TRUE(processor->infos()[1].think_done);
+    inputs.logits.fill_(1.0f);
+    inputs.logits[1][0] = 10.0f;
+    processor->process(inputs, 0, N);
+
+    logits_cpu = inputs.logits.cpu();
+    acc = logits_cpu.accessor<float, 2>();
+    // 序列 1 的 token 0 应被遮蔽（diverge k=1）
+    EXPECT_FLOAT_EQ(-std::numeric_limits<float>::infinity(), acc[1][0]);
+}
+
 }  // namespace rtp_llm
