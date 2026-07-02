@@ -88,6 +88,7 @@ struct AuxInfo {
     bool                         pd_sep                   = false;
     int32_t                      first_token_cost_time_us = 0;
     int32_t                      wait_time_us             = 0;
+    int32_t                      gap_latency_us           = 0;
     int32_t                      local_reuse_len          = 0;
     int32_t                      remote_reuse_len         = 0;
     int32_t                      memory_reuse_len         = 0;
