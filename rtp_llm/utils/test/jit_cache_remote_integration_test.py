@@ -50,7 +50,7 @@ _JIT_ENV_NAMES = (
     "DG_JIT_CACHE_DIR",
     "TORCH_EXTENSIONS_DIR",
     "REMOTE_JIT_DIR",
-    "LOCAL_JIT_CACHE_DIR",
+    "LOCAL_JIT_DIR",
 )
 
 
@@ -61,8 +61,8 @@ def _make_jit_manager(
 ) -> JitCacheManager:
     remote_root.mkdir(parents=True, exist_ok=True)
     config = JITConfig()
-    config.local_jit_cache_dir = str(local_root)
-    config.remote_jit_cache_dir = str(remote_root)
+    config.local_jit_dir = str(local_root)
+    config.remote_jit_dir = str(remote_root)
     config.remote_sync_timeout_s = timeout_s
     manager = JitCacheManager(config)
     manager.bootstrap()

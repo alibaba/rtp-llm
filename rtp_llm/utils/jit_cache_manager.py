@@ -172,8 +172,8 @@ class JitCacheManager:
         }
         if stats is not None:
             event.update(SyncStats.aggregate(stats))
-            if drain_timed_out:
-                event["drain_timed_out"] = True
+        if drain_timed_out:
+            event["drain_timed_out"] = True
         event.update(extra)
         if persist:
             with atomic_write_path(self.config.local_root / SUMMARY_NAME) as tmp:
@@ -196,10 +196,15 @@ class JitCacheManager:
         local_root = self.config.local_root
         remote_root = self.config.remote_root
         local_root.mkdir(parents=True, exist_ok=True)
-        # Do NOT unlink snapshot marker here: late followers can erase leader completion.
+        # Marker persists across restarts: it signals "local cache populated by
+        # a prior successful pull", letting later runs skip download entirely.
         # Env first so component_dirs follow the effective JIT read/write paths.
         apply_jit_cache_env(local_root)
         for component in COMPONENT_SPECS:
+            # TRITON_AUTOTUNE_CONFIG_DIR=__builtin__ opts out (use packaged fallback).
+            # Must match BUILTIN_CONFIG_SENTINEL in autotune_cache/cache.py.
+            if os.environ.get(component.env_name) == "__builtin__":
+                continue
             local_dir = normalize_local_path(os.environ[component.env_name])
             local_dir.mkdir(parents=True, exist_ok=True)
             clear_component_startup_files(component, local_dir)
@@ -252,12 +257,20 @@ class JitCacheManager:
         return True
 
     def _prepare_as_leader(self, deadline_s: float) -> dict[str, Any]:
-        self.snapshot_complete_path.unlink(missing_ok=True)
-        try:
-            return self._pull_snapshot(deadline_s)
-        finally:
-            # Write marker even on failure so followers don't block indefinitely.
+        # Marker present → prior run already populated local cache; skip pull.
+        # Force re-pull by clearing local_root (needed after ABI-breaking upgrades).
+        if self.snapshot_complete_path.exists():
+            return self.make_summary(
+                "snapshot_download",
+                "success",
+                time.monotonic(),
+                persist=True,
+                cache_state="local_ready",
+            )
+        summary, ok = self._pull_snapshot(deadline_s)
+        if ok:
             self.snapshot_complete_path.touch()
+        return summary
 
     def _wait_ready_or_takeover(
         self, start_s: float, deadline_s: float
@@ -268,7 +281,7 @@ class JitCacheManager:
                     "snapshot_download",
                     "success",
                     start_s,
-                    cache_state="leader_completed",
+                    cache_state="local_ready",
                 )
             if self.acquire_startup_lock(0.0):
                 return self._prepare_as_leader(deadline_s)
@@ -279,26 +292,33 @@ class JitCacheManager:
             "snapshot_download", "timeout", start_s, persist=True, cache_state="timeout"
         )
 
-    def _pull_snapshot(self, deadline_s: float) -> dict[str, Any]:
+    def _pull_snapshot(self, deadline_s: float) -> tuple[dict[str, Any], bool]:
+        """Returns (summary, ok). ok=True iff snapshot was fully extracted."""
         start_s = time.monotonic()
         summary = partial(
             self.make_summary, "snapshot_download", start_s=start_s, persist=True
         )
         snapshot_path = find_latest_snapshot(self.config.remote_root)
         if snapshot_path is None:
-            return summary("skipped", cache_state="snapshot_miss")
+            return summary("skipped", cache_state="snapshot_miss"), False
         try:
             ext_bytes, ext_files = self._extract_snapshot(snapshot_path, deadline_s)
         except TimeoutError as e:
-            return summary("timeout", cache_state="timeout", message=str(e))
+            return summary("timeout", cache_state="timeout", message=str(e)), False
         except Exception as e:
             logging.exception("failed to download/extract JIT cache snapshot")
-            return summary("failed", cache_state="snapshot_error", message=str(e))
-        return summary(
-            "success",
-            cache_state="snapshot_hit",
-            extracted_files=ext_files,
-            extracted_bytes=ext_bytes,
+            return (
+                summary("failed", cache_state="snapshot_error", message=str(e)),
+                False,
+            )
+        return (
+            summary(
+                "success",
+                cache_state="snapshot_hit",
+                extracted_files=ext_files,
+                extracted_bytes=ext_bytes,
+            ),
+            True,
         )
 
     def _extract_snapshot(self, archive: Path, deadline_s: float) -> tuple[int, int]:
@@ -315,9 +335,10 @@ class JitCacheManager:
                 parts = member.name.split("/")
                 if member.name.startswith("/") or ".." in parts:
                     raise RuntimeError(f"unsafe snapshot path: {member.name}")
-                component = COMPONENT_BY_NAME.get(parts[0])
-                if component is None or not member.isfile():
+                # component_dirs is the managed set (opt-outs excluded).
+                if parts[0] not in self.component_dirs or not member.isfile():
                     continue
+                component = COMPONENT_BY_NAME[parts[0]]
                 if component.gpu_scoped and (len(parts) < 2 or parts[1] != gpu_scope):
                     continue
                 local_rel = strip_gpu_prefix(component, "/".join(parts[1:]))
@@ -626,51 +647,51 @@ class JitCacheManager:
         if remote_root is None:
             return files, bytes_
         # Enumerate remote union; prefer local reads to avoid FUSE small-file I/O.
-        candidates = (
-            (component, rel)
-            for component in COMPONENT_SPECS
-            for _, rel in iter_component_sync_files(
-                remote_root / component.name, component, log_errors=True
-            )
-        )
+        # component_dirs is the effective managed set (opt-outs excluded).
+        deadline_hit = False
         with open_snapshot_writer(archive) as tar:
-            for component, rel in candidates:
-                if time.monotonic() >= deadline_s:
-                    logging.warning(
-                        "snapshot archive creation exceeded deadline after %d files",
-                        files,
-                    )
+            for name, (local_dir, _) in self.component_dirs.items():
+                if deadline_hit:
                     break
-                local_path = self.component_dirs[component.name][0] / strip_gpu_prefix(
-                    component, rel
-                )
-                remote_path = remote_root / component.name / rel
-                try:
+                component = COMPONENT_BY_NAME[name]
+                for _, rel in iter_component_sync_files(
+                    remote_root / name, component, log_errors=True
+                ):
+                    if time.monotonic() >= deadline_s:
+                        logging.warning(
+                            "snapshot archive creation exceeded deadline after %d files",
+                            files,
+                        )
+                        deadline_hit = True
+                        break
+                    local_path = local_dir / strip_gpu_prefix(component, rel)
+                    remote_path = remote_root / name / rel
                     try:
-                        source = local_path.open("rb")
+                        try:
+                            source = local_path.open("rb")
+                        except FileNotFoundError:
+                            source = remote_path.open("rb")
+                        with source:
+                            source_stat = os.fstat(source.fileno())
+                            if source_stat.st_size <= 0 or not stat.S_ISREG(
+                                source_stat.st_mode
+                            ):
+                                continue
+                            info = tarfile.TarInfo(f"{name}/{rel}")
+                            info.size = source_stat.st_size
+                            info.mtime = source_stat.st_mtime
+                            info.mode = stat.S_IMODE(source_stat.st_mode)
+                            tar.addfile(info, source)
+                            files += 1
+                            bytes_ += source_stat.st_size
                     except FileNotFoundError:
-                        source = remote_path.open("rb")
-                    with source:
-                        source_stat = os.fstat(source.fileno())
-                        if source_stat.st_size <= 0 or not stat.S_ISREG(
-                            source_stat.st_mode
-                        ):
-                            continue
-                        info = tarfile.TarInfo(f"{component.name}/{rel}")
-                        info.size = source_stat.st_size
-                        info.mtime = source_stat.st_mtime
-                        info.mode = stat.S_IMODE(source_stat.st_mode)
-                        tar.addfile(info, source)
-                        files += 1
-                        bytes_ += source_stat.st_size
-                except FileNotFoundError:
-                    continue
-                except OSError:
-                    logging.warning(
-                        "failed to add JIT cache file to snapshot: %s (local=%s)",
-                        remote_path,
-                        local_path,
-                    )
+                        continue
+                    except OSError:
+                        logging.warning(
+                            "failed to add JIT cache file to snapshot: %s (local=%s)",
+                            remote_path,
+                            local_path,
+                        )
         return files, bytes_
 
     def stop(self) -> None:

@@ -142,8 +142,8 @@ class JitCacheConfig:
         if jit_config is None:
             jit_config = JITConfig()
         return cls(
-            remote_root=resolve_remote_root(jit_config.remote_jit_cache_dir),
-            local_root=normalize_local_path(jit_config.local_jit_cache_dir),
+            remote_root=resolve_remote_root(jit_config.remote_jit_dir),
+            local_root=normalize_local_path(jit_config.local_jit_dir),
             remote_sync_timeout_s=jit_config.remote_sync_timeout_s,
         )
 
@@ -157,29 +157,29 @@ def normalize_local_path(p: str | Path) -> Path:
     return Path(p).expanduser().absolute()
 
 
-def resolve_remote_root(remote_jit_cache_dir: Any) -> Path | None:
-    text = str(remote_jit_cache_dir or "").strip()
+def resolve_remote_root(remote_jit_dir: Any) -> Path | None:
+    text = str(remote_jit_dir or "").strip()
     if not text:
         return None
     if urlparse(text).scheme:
         try:
             mounted_path = fetch_remote_file_to_local(text, MountRwMode.RWMODE_RW)
             if not mounted_path:
-                raise ValueError(f"failed to mount remote_jit_cache_dir: {text!r}")
+                raise ValueError(f"failed to mount remote_jit_dir: {text!r}")
             text = mounted_path
         except Exception as e:
             logging.warning(
-                "failed to mount remote_jit_cache_dir %r: %s; remote JIT cache is disabled",
+                "failed to mount remote_jit_dir %r: %s; remote JIT cache is disabled",
                 text,
                 e,
             )
             return None
     path = Path(text).expanduser()
     if not path.is_absolute():
-        raise ValueError(f"remote_jit_cache_dir must be an absolute path, got {text!r}")
+        raise ValueError(f"remote_jit_dir must be an absolute path, got {text!r}")
     if not path.is_dir():
         logging.warning(
-            "remote_jit_cache_dir %r is not an existing directory; remote JIT cache is disabled",
+            "remote_jit_dir %r is not an existing directory; remote JIT cache is disabled",
             text,
         )
         return None
@@ -468,20 +468,19 @@ class JitDirtyTracker:
         self.enqueue_upload = enqueue_upload
         self.observer: Any | None = None
 
+    def _make_handler(
+        self, component: ComponentSpec, root: Path
+    ) -> _JitFileEventHandler:
+        return _JitFileEventHandler(component, str(root) + os.sep, self.enqueue_upload)
+
     def start(self) -> bool:
         if self.observer is not None:
             return True
         observer = Observer()
         try:
             for name, (local_dir, _) in self.component_dirs.items():
-                component = COMPONENT_BY_NAME[name]
-                observer.schedule(
-                    _JitFileEventHandler(
-                        component, str(local_dir) + os.sep, self.enqueue_upload
-                    ),
-                    str(local_dir),
-                    recursive=True,
-                )
+                handler = self._make_handler(COMPONENT_BY_NAME[name], local_dir)
+                observer.schedule(handler, str(local_dir), recursive=True)
             observer.start()
             self.observer = observer
             return True

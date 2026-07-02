@@ -119,9 +119,9 @@ class JitCacheManagerTest(unittest.TestCase):
             if create_remote and remote_path.is_absolute():
                 remote_path.mkdir(parents=True, exist_ok=True)
         config = JITConfig()
-        config.local_jit_cache_dir = str(local_root or self.root / "local")
+        config.local_jit_dir = str(local_root or self.root / "local")
         config.remote_sync_timeout_s = timeout_s
-        config.remote_jit_cache_dir = remote
+        config.remote_jit_dir = remote
         manager = JitCacheManager(config)
         self.managers.append(manager)
         manager.bootstrap()
@@ -1298,8 +1298,8 @@ class SnapshotPublishConsumerTest(unittest.TestCase):
     def make_manager(self, local_root, remote_root):
         remote_root.mkdir(parents=True, exist_ok=True)
         config = JITConfig()
-        config.local_jit_cache_dir = str(local_root)
-        config.remote_jit_cache_dir = str(remote_root)
+        config.local_jit_dir = str(local_root)
+        config.remote_jit_dir = str(remote_root)
         config.remote_sync_timeout_s = 10
         manager = JitCacheManager(config)
         manager.bootstrap()
