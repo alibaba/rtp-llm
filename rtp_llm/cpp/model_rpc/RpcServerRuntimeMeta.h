@@ -101,23 +101,23 @@ public:
                     int64_t            error_code    = 0,
                     const std::string& error_message = "") {
         std::unique_lock<std::shared_mutex> lock(read_write_lock_);
+        EngineScheduleInfo::TaskInfo        task_info{request_id,
+                                               prefix_length,
+                                               input_length,
+                                               /*waiting_time_ms=*/0,
+                                               /*iterate_count=*/0,
+                                               /*end_time_ms=*/-1};
         auto                                ptr = running_streams_.find(request_id);
-        if (ptr == running_streams_.end()) {
-            // Request was already dequeued (reported via dequeue()), e.g.
-            // prefill completed successfully at remoteLoadCacheEnd but
-            // remoteGenerate subsequently failed.  The error is communicated
-            // through the gRPC response (markResponseEntryDone), not via
-            // a duplicate finished_streams_ entry.
-            return;
+        if (ptr != running_streams_.end()) {
+            task_info = ptr->second.task_info;
+            if (input_length > 0) {
+                task_info.input_length = input_length;
+            }
+            if (prefix_length > 0) {
+                task_info.prefix_length = prefix_length;
+            }
+            running_streams_.erase(ptr);
         }
-        EngineScheduleInfo::TaskInfo task_info = ptr->second.task_info;
-        if (input_length > 0) {
-            task_info.input_length = input_length;
-        }
-        if (prefix_length > 0) {
-            task_info.prefix_length = prefix_length;
-        }
-        running_streams_.erase(ptr);
         if (finished_streams_.size() >= finished_capacity_) {
             finished_streams_.pop_front();
         }
