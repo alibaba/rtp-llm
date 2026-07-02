@@ -16,7 +16,7 @@ from rtp_llm.models_py.modules.factory.attention.rocm_impl._attn_utils import (
     split_raw_qkv,
     unpad_kv_vectorized,
 )
-from rtp_llm.ops import AttentionConfigs, FMHAType, KvCacheDataType, ParallelismConfig
+from rtp_llm.ops import AttentionConfigs, FMHAType, KvCacheDataType, ParallelismConfig, RopeStyle
 from rtp_llm.ops.compute_ops import (
     FusedRopeKVCacheDecodeOpAsm,
     FusedRopeKVCacheDecodeOpNonAsm,
@@ -1399,6 +1399,10 @@ class AiterPrefillImplAsm(FMHAImplBase):
     def support(
         cls, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
     ) -> bool:
+        # ROCm fused rope kernel does not support MRoPE with mrope_interleaved=false
+        if (attn_configs.rope_config.style == RopeStyle.Mrope
+                and not attn_configs.rope_config.mrope_interleaved):
+            return False
         return True
 
     def forward(
@@ -1459,6 +1463,10 @@ class AiterPrefillImplNonAsm(FMHAImplBase):
     def support(
         cls, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
     ) -> bool:
+        # ROCm fused rope kernel does not support MRoPE with mrope_interleaved=false
+        if (attn_configs.rope_config.style == RopeStyle.Mrope
+                and not attn_configs.rope_config.mrope_interleaved):
+            return False
         return True
 
     def forward(
@@ -1718,6 +1726,10 @@ class AiterDecodeImplAsm(AiterDecodeImplBase):
     def support(
         cls, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
     ) -> bool:
+        # ROCm fused rope kernel does not support MRoPE with mrope_interleaved=false
+        if (attn_configs.rope_config.style == RopeStyle.Mrope
+                and not attn_configs.rope_config.mrope_interleaved):
+            return False
         return True
 
     def forward(
@@ -1765,6 +1777,10 @@ class AiterDecodeImplNonAsm(AiterDecodeImplBase):
     def support(
         cls, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
     ) -> bool:
+        # ROCm fused rope kernel does not support MRoPE with mrope_interleaved=false
+        if (attn_configs.rope_config.style == RopeStyle.Mrope
+                and not attn_configs.rope_config.mrope_interleaved):
+            return False
         return True
 
     def forward(
@@ -1811,6 +1827,10 @@ class AiterDecodeImplTriton(AiterDecodeImplBase):
     def support(
         cls, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
     ) -> bool:
+        # ROCm fused rope kernel does not support MRoPE with mrope_interleaved=false
+        if (attn_configs.rope_config.style == RopeStyle.Mrope
+                and not attn_configs.rope_config.mrope_interleaved):
+            return False
         return True
 
     def forward(
