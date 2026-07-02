@@ -30,6 +30,14 @@ py_test(
 )
 
 py_test(
+    name = "test_embedding_fast_path",
+    srcs = ["test_embedding_fast_path.py"],
+    deps = py_test_deps,
+    tags = ["rocm"],
+    exec_properties = {"gpu": "MI308X-ROCM7"},
+)
+
+py_test(
     name = "test_fused_qkv_transpose_v3",
     srcs = ["test_fused_qkv_transpose_v3.py"],
     deps = [
