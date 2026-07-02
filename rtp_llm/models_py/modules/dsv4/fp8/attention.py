@@ -13,6 +13,7 @@ slow but correct. M6 will swap in FlashMLA sparse impl.
 """
 
 import json
+import logging
 import os
 from contextlib import suppress
 from typing import Any, Dict, NamedTuple, Optional, Tuple, Union
@@ -69,6 +70,10 @@ from rtp_llm.models_py.modules.dsv4.fp8._pool_reader import (
     make_compressed_k_pool_reader,
 )
 from rtp_llm.models_py.modules.dsv4.fp8.compressor import CompressorFP8, CompressorMeta
+from rtp_llm.models_py.modules.dsv4.fp8.distributed_attention_buffer import (
+    build_dsv4_cp_attention_buffer_spec,
+    get_or_create_dsv4_cp_attention_buffer,
+)
 from rtp_llm.models_py.modules.dsv4.fp8.indexer import IndexerFP8
 from rtp_llm.models_py.modules.dsv4.prefill_workspace import PrefillWorkspace
 from rtp_llm.models_py.modules.dsv4.rope import precompute_freqs_cis
@@ -167,6 +172,22 @@ from rtp_llm.models_py.modules.dsv4.fp8._kv_cache_utils import (
 # in which case the baseline path runs even with the env on.
 def _prefill_cp_overlap_enabled() -> bool:
     return os.environ.get("DSV4_PREFILL_CP_OVERLAP", "0") == "1"
+
+
+def _prefill_cp_distributed_attention_enabled() -> bool:
+    return os.environ.get("DSV4_CP_DISTRIBUTED_PREFILL_ATTN", "0") == "1"
+
+
+def _cp_distributed_attention_op_available() -> bool:
+    try:
+        from rtp_llm.ops.compute_ops import rtp_llm_ops
+    except Exception:
+        return False
+    return hasattr(rtp_llm_ops, "dsv4_cp_distributed_prefill_attention")
+
+
+def _cp_distributed_attention_py_debug_enabled() -> bool:
+    return os.environ.get("DSV4_CP_ATTENTION_DEBUG_PY", "0") == "1"
 
 
 def _flat_1d(t: torch.Tensor) -> torch.Tensor:
@@ -784,6 +805,10 @@ class PrefillQKV(NamedTuple):
     kv_full: Optional[torch.Tensor]
     kv_full_gather_handle: Optional[Any] = None
     kv_full_trailing_shape: Optional[Tuple[int, ...]] = None
+    # Rank-local padded SWA K stream before CP gather. The distributed
+    # attention op gathers this internally and writes SWA cache in gathered
+    # rank-major order.
+    swa_k_local: Optional[torch.Tensor] = None
 
 
 class AttentionFP8(nn.Module):
@@ -1248,7 +1273,9 @@ class AttentionFP8(nn.Module):
             raw = self._pool_raw_u8(SWA_KV)
             cp_ctx = getattr(self, "_cp_ctx", None)
             if raw is not None and cp_ctx is not None:
-                return (int(raw.shape[1]) * int(cp_ctx.cp_size)) // _DSV4_FP8_KV_ENTRY_BYTES
+                return (
+                    int(raw.shape[1]) * int(cp_ctx.cp_size)
+                ) // _DSV4_FP8_KV_ENTRY_BYTES
         return self._pool_entries_per_block(SWA_KV)
 
     def _pool_entries_per_block(self, attn_type: int) -> int:
@@ -2562,12 +2589,18 @@ class AttentionFP8(nn.Module):
             common = self._prefill_common_setup(x, positions)
         with record_function_range("dsv4.fp8.attn.prefill.compute_qkv"):
             qkv = self._prefill_compute_qkv(x, common)
+        distributed_workspace_meta = self._cp_distributed_workspace_meta(common)
+        use_cp_distributed_attention = (
+            self._should_use_cp_distributed_prefill_attention(
+                common, distributed_workspace_meta
+            )
+        )
 
         # Phase-Z overlap dispatch: hoist the SWA write into the orchestrator
         # so it can run on the default stream while the compressor NCCL
         # gather drains on the side stream. The baseline path below is
         # left untouched for non-overlap and warmup forwards.
-        if self._should_overlap_cp_for_prefill(common):
+        if (not use_cp_distributed_attention) and self._should_overlap_cp_for_prefill(common):
             if self.compress_ratio == 128:
                 with record_function_range("dsv4.fp8.attn.prefill.path_hca_overlap"):
                     return self._forward_prefill_hca_overlapped(x, qkv, common)
@@ -2579,9 +2612,10 @@ class AttentionFP8(nn.Module):
         # downstream decode. Safe to do before attention because new K
         # (abs pos [sp, sp+S)) and any cont-prefill prefix tail
         # (abs pos [sp-P, sp)) target disjoint slots.
-        qkv = self._ensure_prefill_kv_full(qkv, common)
-        with record_function_range("dsv4.fp8.attn.prefill.swa_write"):
-            self._prefill_write_swa_fp8_paged(common, qkv.kv_full)
+        if not use_cp_distributed_attention:
+            qkv = self._ensure_prefill_kv_full(qkv, common)
+            with record_function_range("dsv4.fp8.attn.prefill.swa_write"):
+                self._prefill_write_swa_fp8_paged(common, qkv.kv_full)
 
         if self.compress_ratio == 0:
             with record_function_range("dsv4.fp8.attn.prefill.path_swa"):
@@ -2642,14 +2676,40 @@ class AttentionFP8(nn.Module):
             "CSA prefill requires common.csa_meta — built by " "_build_csa_prefill_meta"
         )
 
-        # Phase-3a part 3: IndexerFP8.forward + nested CompressorFP8.forward
-        # are now flat-input-native (accept ``[T_total, dim]`` /
-        # ``[T_total, q_lora]``). Drop the legacy ``unsqueeze(0)`` so the
-        # batched flat caller hits the same code path without rewrapping.
-        with record_function_range("dsv4.fp8.attn.csa.indexer"):
-            raw = self.indexer(
-                x, qkv.qr, common.csa_meta.indexer_meta, workspace=common.workspace
-            )
+        indexer_payload = None
+        if self._should_use_cp_distributed_prefill_attention(
+            common, common.csa_meta.workspace_meta
+        ):
+            with record_function_range("dsv4.fp8.attn.csa.indexer_project_only"):
+                indexer_payload = self.indexer.project_prefill_local(
+                    x, qkv.qr, common.csa_meta.indexer_meta
+                )
+            if _cp_distributed_attention_py_debug_enabled():
+                logging.warning(
+                    "[DSV4 CP Attention Py] csa project payload layer=%s cp_rank=%s "
+                    "indexer_q=%s/%s weights=%s/%s nested_kv=%s/%s nested_score=%s/%s",
+                    int(getattr(self, "layer_id", -1)),
+                    int(getattr(common.cp_ctx, "cp_rank", -1)) if common.cp_ctx is not None else -1,
+                    tuple(indexer_payload.indexer_q.shape),
+                    indexer_payload.indexer_q.dtype,
+                    tuple(indexer_payload.weights.shape),
+                    indexer_payload.weights.dtype,
+                    tuple(indexer_payload.compressor_kv.shape),
+                    indexer_payload.compressor_kv.dtype,
+                    tuple(indexer_payload.compressor_score.shape),
+                    indexer_payload.compressor_score.dtype,
+                )
+                torch.cuda.synchronize(device=common.device)
+            raw = None
+        else:
+            # Phase-3a part 3: IndexerFP8.forward + nested
+            # CompressorFP8.forward are flat-input-native. The distributed path
+            # above intentionally avoids this method so nested writes/topk stay
+            # inside the custom op.
+            with record_function_range("dsv4.fp8.attn.csa.indexer"):
+                raw = self.indexer(
+                    x, qkv.qr, common.csa_meta.indexer_meta, workspace=common.workspace
+                )
         return self._forward_prefill_compressed(
             x,
             qkv,
@@ -2657,6 +2717,7 @@ class AttentionFP8(nn.Module):
             cmp_topk_runtime=raw,
             compressor_meta=common.csa_meta.compressor_meta,
             workspace_meta=common.csa_meta.workspace_meta,
+            indexer_payload=indexer_payload,
         )
 
     def _forward_prefill_csa_overlapped(
@@ -2890,6 +2951,7 @@ class AttentionFP8(nn.Module):
         workspace_meta: Optional[WorkspaceMeta],
         *,
         _skip_compressor_write: bool = False,
+        indexer_payload: Optional[Any] = None,
     ) -> torch.Tensor:
         """Shared CSA/HCA epilogue: write compressed-K via main compressor
         (with hoisted ``compressor_meta``), then run the workspace-path
@@ -2914,10 +2976,22 @@ class AttentionFP8(nn.Module):
         # without re-shaping. B==1 reaches the same kernel — same flat
         # ``[T_total, dim]`` reshape inside ``_launch``.
         if not _skip_compressor_write:
-            with record_function_range("dsv4.fp8.attn.compressed.compressor"):
-                self.compressor(
-                    x, common.sp_int, meta=compressor_meta, workspace=common.workspace
-                )
+            if self._should_use_cp_distributed_prefill_attention(common, workspace_meta):
+                with record_function_range(
+                    "dsv4.fp8.attn.compressed.compressor_project_only"
+                ):
+                    compressor_payload = self.compressor.project_prefill_local(x)
+            else:
+                compressor_payload = None
+                with record_function_range("dsv4.fp8.attn.compressed.compressor"):
+                    self.compressor(
+                        x,
+                        common.sp_int,
+                        meta=compressor_meta,
+                        workspace=common.workspace,
+                    )
+        else:
+            compressor_payload = None
 
         # Materialize the deferred dense Q now that the compressor(s) have
         # drained their CP gather/restore buffers (which alias Q's union
@@ -2934,12 +3008,738 @@ class AttentionFP8(nn.Module):
             with record_function_range("dsv4.fp8.attn.prefill.output_proj"):
                 out = self._prefill_output_proj(o, common.freqs_cis)
             self._prefill_output_all_reduce(out)
+        elif self._should_use_cp_distributed_prefill_attention(common, workspace_meta):
+            with record_function_range("dsv4.fp8.attn.compressed.cp_distributed_op"):
+                out = self._forward_prefill_cp_distributed_attention(
+                    qkv,
+                    common,
+                    workspace_meta,
+                    cmp_topk_runtime,
+                    compressor_meta,
+                    compressor_payload,
+                    indexer_payload,
+                )
         else:
             with record_function_range("dsv4.fp8.attn.compressed.workspace_attn"):
                 out = self._attn_via_workspace(
                     qkv, common, workspace_meta, cmp_topk_runtime
                 )
         return out
+
+    def _should_use_cp_distributed_prefill_attention(
+        self,
+        common: PrefillMeta,
+        workspace_meta: Optional["WorkspaceMeta"],
+    ) -> bool:
+        if not _prefill_cp_distributed_attention_enabled():
+            return False
+        if self.compress_ratio not in (4, 128):
+            return False
+        if workspace_meta is None:
+            return False
+        if common.device.type != "cuda":
+            return False
+        if torch.cuda.is_available() and torch.cuda.is_current_stream_capturing():
+            return False
+        cp_ctx = common.cp_ctx
+        if not common.cp_on or cp_ctx is None:
+            return False
+        if int(getattr(cp_ctx, "cp_size", 1)) != 8:
+            return False
+        if bool(getattr(cp_ctx, "kv_cache_sharded", False)):
+            return False
+        return _cp_distributed_attention_op_available()
+
+    def _cp_distributed_workspace_meta(
+        self, common: PrefillMeta
+    ) -> Optional["WorkspaceMeta"]:
+        if self.compress_ratio == 128 and common.hca_meta is not None:
+            return common.hca_meta.workspace_meta
+        if self.compress_ratio == 4 and common.csa_meta is not None:
+            return common.csa_meta.workspace_meta
+        return None
+
+    def _build_cp_distributed_swa_slot_mapping(
+        self, common: PrefillMeta
+    ) -> torch.Tensor:
+        cp_ctx = common.cp_ctx
+        if cp_ctx is None:
+            raise RuntimeError("distributed SWA slot mapping requires CP context")
+        meta = common.swa_meta
+        if meta is None or meta.slot_mapping is None:
+            raise RuntimeError("distributed SWA cache write requires swa_meta.slot_mapping")
+        restore = getattr(cp_ctx, "unpad_restore", None)
+        if restore is None:
+            raise RuntimeError("distributed SWA cache write requires cp_ctx.unpad_restore")
+        cp_size = int(getattr(cp_ctx, "cp_size", 1))
+        chunk_length = int(getattr(cp_ctx, "chunk_length", 0))
+        if cp_size <= 1 or chunk_length <= 0:
+            raise RuntimeError(
+                f"invalid CP geometry for distributed SWA cache write: cp_size={cp_size}, chunk_length={chunk_length}"
+            )
+        slot_mapping = meta.slot_mapping.to(device=common.device, dtype=torch.long).reshape(-1)
+        restore = restore.to(device=common.device, dtype=torch.long).reshape(-1)
+        if int(slot_mapping.numel()) != int(restore.numel()):
+            raise RuntimeError(
+                "distributed SWA slot_mapping must match cp_ctx.unpad_restore length: "
+                f"{int(slot_mapping.numel())} vs {int(restore.numel())}"
+            )
+        padded = torch.full(
+            (cp_size * chunk_length,),
+            -1,
+            dtype=torch.long,
+            device=common.device,
+        )
+        padded.index_copy_(0, restore, slot_mapping)
+        return padded.contiguous()
+
+    def _build_cp_distributed_swa_kwargs(
+        self,
+        qkv: PrefillQKV,
+        common: PrefillMeta,
+    ) -> dict[str, torch.Tensor]:
+        from rtp_llm.models_py.modules.dsv4.attn_type import SWA_KV
+
+        cp_ctx = common.cp_ctx
+        if cp_ctx is None:
+            raise RuntimeError("distributed SWA cache write requires CP context")
+        if qkv.swa_k_local is None:
+            raise RuntimeError("distributed SWA cache write requires rank-local SWA K")
+        swa_pool_3d = self._pool_view_3d_fp8(SWA_KV)
+        if swa_pool_3d is None:
+            raise RuntimeError("distributed SWA cache write requires SWA_KV FP8 pool")
+        chunk_length = int(getattr(cp_ctx, "chunk_length", 0))
+        swa_k = qkv.swa_k_local.reshape(chunk_length, -1).contiguous()
+        if int(swa_k.size(1)) != int(self.head_dim):
+            raise RuntimeError(
+                f"distributed SWA K must be [chunk_length, {self.head_dim}], got {tuple(swa_k.shape)}"
+            )
+        if swa_k.dtype != torch.bfloat16:
+            swa_k = swa_k.to(torch.bfloat16)
+        return {
+            "swa_k": swa_k,
+            "swa_k_cache": swa_pool_3d,
+            "swa_slot_mapping": self._build_cp_distributed_swa_slot_mapping(common),
+        }
+
+    def _cp_distributed_pad_global_1d(
+        self,
+        values: torch.Tensor,
+        common: PrefillMeta,
+        *,
+        pad_value: int,
+        dtype: torch.dtype,
+    ) -> torch.Tensor:
+        cp_ctx = common.cp_ctx
+        if cp_ctx is None:
+            raise RuntimeError("distributed metadata padding requires CP context")
+        restore = getattr(cp_ctx, "unpad_restore", None)
+        if restore is None:
+            raise RuntimeError("distributed metadata padding requires cp_ctx.unpad_restore")
+        cp_size = int(getattr(cp_ctx, "cp_size", 1))
+        chunk_length = int(getattr(cp_ctx, "chunk_length", 0))
+        values = values.to(device=common.device, dtype=dtype).reshape(-1)
+        restore = restore.to(device=common.device, dtype=torch.long).reshape(-1)
+        if int(values.numel()) != int(restore.numel()):
+            raise RuntimeError(
+                "distributed metadata length must match cp_ctx.unpad_restore: "
+                f"{int(values.numel())} vs {int(restore.numel())}"
+            )
+        out = torch.full(
+            (cp_size * chunk_length,),
+            int(pad_value),
+            dtype=dtype,
+            device=common.device,
+        )
+        out.index_copy_(0, restore, values)
+        return out.contiguous()
+
+    def _build_cp_distributed_compressor_kwargs(
+        self,
+        *,
+        prefix: str,
+        compressor: Any,
+        common: PrefillMeta,
+        compressor_meta,
+        compressor_payload: tuple[torch.Tensor, torch.Tensor],
+        label: str,
+    ) -> dict[str, torch.Tensor | int | bool | float]:
+        cp_ctx = common.cp_ctx
+        if cp_ctx is None:
+            raise RuntimeError(f"distributed {label} write requires CP context")
+        kv, score = compressor_payload
+        if kv.dtype != torch.bfloat16:
+            kv = kv.to(torch.bfloat16)
+        if score.dtype != torch.bfloat16:
+            score = score.to(torch.bfloat16)
+        if int(kv.size(0)) != int(cp_ctx.chunk_length):
+            raise RuntimeError(
+                f"distributed {label} local rows must equal chunk_length, got {tuple(kv.shape)}"
+            )
+        state_slots = compressor_meta.state_slots
+        kv_slots = compressor_meta.kv_slots
+        token_to_req = compressor_meta.token_to_req
+        if state_slots is None or kv_slots is None or token_to_req is None:
+            raise RuntimeError(f"distributed {label} metadata requires pool-bound slots")
+        state_cache = getattr(compressor, "_state_pool_3d", None)
+        kv_cache = getattr(compressor, "_kv_pool_view", None)
+        state_block_table = getattr(compressor, "_state_block_table", None)
+        if state_cache is None or kv_cache is None or state_block_table is None:
+            raise RuntimeError(f"distributed {label} requires bound STATE/KV pools")
+        cos_sin_cache = compressor._ensure_cos_sin_cache(common.device)
+        kwargs: dict[str, torch.Tensor | int | bool | float] = {
+            f"{prefix}kv": kv.contiguous(),
+            f"{prefix}score": score.contiguous(),
+            f"{prefix}ape": compressor.ape,
+            f"{prefix}positions": self._cp_distributed_pad_global_1d(
+                compressor_meta.positions,
+                common,
+                pad_value=0,
+                dtype=torch.long,
+            ),
+            f"{prefix}state_cache": state_cache,
+            f"{prefix}state_slots": self._cp_distributed_pad_global_1d(
+                state_slots,
+                common,
+                pad_value=-1,
+                dtype=torch.long,
+            ),
+            f"{prefix}ratio": int(getattr(compressor, "compress_ratio", self.compress_ratio)),
+            f"{prefix}token_to_req": self._cp_distributed_pad_global_1d(
+                token_to_req,
+                common,
+                pad_value=0,
+                dtype=torch.int32,
+            ),
+            f"{prefix}state_block_table": state_block_table.to(
+                device=common.device, dtype=torch.int32
+            ).contiguous(),
+            f"{prefix}norm_weight": compressor.norm.weight,
+            f"{prefix}cos_sin_cache": cos_sin_cache,
+            f"{prefix}kv_cache": kv_cache,
+            f"{prefix}kv_slots": self._cp_distributed_pad_global_1d(
+                kv_slots,
+                common,
+                pad_value=-1,
+                dtype=torch.long,
+            ),
+            f"{prefix}seq_start": 0,
+            f"{prefix}disable_raw_path": False,
+            f"{prefix}rms_norm_eps": float(compressor.norm_eps),
+            f"{prefix}head_dim": int(compressor.head_dim),
+            f"{prefix}rope_head_dim": int(compressor.rope_head_dim),
+            f"{prefix}overlap": bool(compressor.overlap),
+            f"{prefix}state_tokens_per_block": int(
+                getattr(compressor, "_state_tokens_per_block", 0)
+            ),
+            f"{prefix}unpad_restore": cp_ctx.unpad_restore.to(
+                device=common.device, dtype=torch.long
+            ).contiguous(),
+        }
+        if compressor_meta.seq_start_per_req is not None and compressor_meta.cu_seq_per_req is not None:
+            kwargs.update(
+                {
+                    f"{prefix}seq_start_per_req": compressor_meta.seq_start_per_req.to(
+                        device=common.device, dtype=torch.int32
+                    ).contiguous(),
+                    f"{prefix}cu_seq_per_req": compressor_meta.cu_seq_per_req.to(
+                        device=common.device, dtype=torch.int32
+                    ).contiguous(),
+                }
+            )
+        return kwargs
+
+    def _build_cp_distributed_hca_compressor_kwargs(
+        self,
+        common: PrefillMeta,
+        compressor_meta,
+        compressor_payload: tuple[torch.Tensor, torch.Tensor],
+    ) -> dict[str, torch.Tensor | int | bool | float]:
+        return self._build_cp_distributed_compressor_kwargs(
+            prefix="compressor_",
+            compressor=self.compressor,
+            common=common,
+            compressor_meta=compressor_meta,
+            compressor_payload=compressor_payload,
+            label="main compressor",
+        )
+
+    def _build_cp_distributed_csa_indexer_kwargs(
+        self,
+        common: PrefillMeta,
+        indexer_payload: Any,
+    ) -> dict[str, torch.Tensor]:
+        if self.indexer is None or common.csa_meta is None:
+            raise RuntimeError("distributed CSA indexer requires bound IndexerFP8 metadata")
+        indexer_meta = common.csa_meta.indexer_meta
+        indexer_pool = getattr(self.indexer, "_kv_pool_view", None)
+        if indexer_pool is None:
+            raise RuntimeError("distributed CSA indexer requires INDEXER_KV pool")
+        cu_kv = indexer_meta.cu_kv_seqlens.to(
+            device=common.device, dtype=torch.int32
+        ).contiguous()
+        if int(cu_kv.numel()) < 2:
+            raise RuntimeError("distributed CSA indexer requires non-empty cu_kv_seqlens")
+        return {
+            "csa_indexer_k_pool": indexer_pool,
+            "csa_indexer_weights": indexer_payload.weights.float().contiguous(),
+            "csa_indexer_block_table": indexer_meta.block_table_i32.to(
+                device=common.device, dtype=torch.int32
+            ).contiguous(),
+            "csa_indexer_seq_lens": (cu_kv[1:] - cu_kv[:-1]).contiguous(),
+        }
+
+    def _build_cp_distributed_csa_indexer_compressor_kwargs(
+        self,
+        common: PrefillMeta,
+        indexer_payload: Any,
+    ) -> dict[str, torch.Tensor | int | bool | float]:
+        if self.indexer is None or common.csa_meta is None:
+            raise RuntimeError("distributed CSA nested compressor requires IndexerFP8")
+        nested = getattr(self.indexer, "compressor", None)
+        if nested is None:
+            raise RuntimeError("distributed CSA nested compressor is missing")
+        nested_meta = common.csa_meta.indexer_meta.compressor_meta
+        if nested_meta is None:
+            raise RuntimeError("distributed CSA nested compressor requires hoisted metadata")
+        propagate_nested_pool = getattr(self.indexer, "_propagate_pool_to_nested", None)
+        if callable(propagate_nested_pool):
+            propagate_nested_pool()
+        return self._build_cp_distributed_compressor_kwargs(
+            prefix="csa_indexer_compressor_",
+            compressor=nested,
+            common=common,
+            compressor_meta=nested_meta,
+            compressor_payload=(
+                indexer_payload.compressor_kv,
+                indexer_payload.compressor_score,
+            ),
+            label="CSA nested indexer compressor",
+        )
+
+    def _build_cp_distributed_attention_pool_kwargs(
+        self,
+        common: PrefillMeta,
+        workspace_meta: "WorkspaceMeta",
+    ) -> dict[str, torch.Tensor]:
+        from rtp_llm.models_py.modules.dsv4.attn_type import CSA_KV, HCA_KV, SWA_KV
+
+        cmp_attn_type = CSA_KV if self.compress_ratio == 4 else HCA_KV
+        cmp_pool = self._pool_view_3d_fp8(cmp_attn_type)
+        swa_pool = self._pool_view_3d_fp8(SWA_KV)
+        if cmp_pool is None or swa_pool is None:
+            raise RuntimeError("distributed compressed attention requires compressed-K and SWA_KV pools")
+        if workspace_meta.swa_cache_slot_mapping is None:
+            raise RuntimeError("distributed compressed attention requires SWA cache slot mapping")
+        return {
+            "attention_cmp_k_pool": cmp_pool,
+            "attention_cmp_block_table": workspace_meta.cmp_bt_int32.to(
+                device=common.device, dtype=torch.int32
+            ).contiguous(),
+            "attention_cmp_seq_lens": workspace_meta.cmp_seq_lens.to(
+                device=common.device, dtype=torch.int32
+            ).contiguous(),
+            "attention_swa_k_pool": swa_pool,
+            "attention_swa_slot_mapping": workspace_meta.swa_cache_slot_mapping.to(
+                device=common.device, dtype=torch.long
+            ).contiguous(),
+            "attention_swa_gather_lens": workspace_meta.swa_cache_gather_lens.to(
+                device=common.device, dtype=torch.int32
+            ).contiguous(),
+        }
+
+    def _forward_prefill_cp_distributed_attention(
+        self,
+        qkv: PrefillQKV,
+        common: PrefillMeta,
+        workspace_meta: "WorkspaceMeta",
+        cmp_topk_runtime: Optional[torch.Tensor],
+        compressor_meta,
+        compressor_payload: Optional[tuple[torch.Tensor, torch.Tensor]],
+        indexer_payload: Optional[Any] = None,
+    ) -> torch.Tensor:
+        if self.compress_ratio not in (4, 128):
+            raise RuntimeError("distributed prefill attention hook supports only CSA/HCA")
+        if qkv.q is None:
+            raise RuntimeError("distributed prefill attention requires materialized Q")
+        if qkv.swa_k_local is None:
+            raise RuntimeError("distributed prefill attention requires rank-local fresh K")
+        if compressor_payload is None:
+            raise RuntimeError("distributed attention requires main compressor project-only payload")
+        cp_ctx = common.cp_ctx
+        if cp_ctx is None:
+            raise RuntimeError("distributed prefill attention requires CP context")
+        if self.compress_ratio == 4 and indexer_payload is None:
+            raise RuntimeError("distributed CSA attention requires indexer project-only payload")
+        buffer = self._ensure_cp_distributed_attention_buffer(qkv, common)
+        swa_kwargs = self._build_cp_distributed_swa_kwargs(qkv, common)
+        compressor_kwargs = self._build_cp_distributed_hca_compressor_kwargs(
+            common,
+            compressor_meta,
+            compressor_payload,
+        )
+        if os.environ.get("DSV4_CP_ATTENTION_SKIP_SWA_WRITER", "0") == "1":
+            swa_kwargs = {}
+        if os.environ.get("DSV4_CP_ATTENTION_SKIP_COMPRESSOR_WRITER", "0") == "1":
+            compressor_kwargs = {}
+        if _cp_distributed_attention_py_debug_enabled():
+            def _debug_shapes(kwargs: dict[str, Any]) -> dict[str, Any]:
+                return {
+                    key: tuple(value.shape)
+                    for key, value in kwargs.items()
+                    if isinstance(value, torch.Tensor)
+                }
+
+            def _debug_tensor_values(
+                name: str,
+                value: Any,
+                limit: int = 16,
+            ) -> str:
+                if not isinstance(value, torch.Tensor):
+                    return f"{name}=<none>"
+                flat = value.detach().reshape(-1)
+                if flat.numel() == 0:
+                    return f"{name}=shape{tuple(value.shape)} empty"
+                sample = flat[: min(limit, int(flat.numel()))].cpu().tolist()
+                try:
+                    min_value = flat.min().detach().cpu().item()
+                    max_value = flat.max().detach().cpu().item()
+                    return (
+                        f"{name}=shape{tuple(value.shape)} min={min_value} "
+                        f"max={max_value} head={sample}"
+                    )
+                except Exception:
+                    return f"{name}=shape{tuple(value.shape)} head={sample}"
+
+            logging.warning(
+                "[DSV4 CP Attention Py] kwargs layer=%s cp_rank=%s swa=%s "
+                "compressor=%s",
+                int(getattr(self, "layer_id", -1)),
+                int(getattr(cp_ctx, "cp_rank", -1)),
+                _debug_shapes(swa_kwargs),
+                _debug_shapes(compressor_kwargs),
+            )
+            logging.warning(
+                "[DSV4 CP Attention Py] value-summary layer=%s cp_rank=%s %s %s "
+                "%s %s %s %s %s %s",
+                int(getattr(self, "layer_id", -1)),
+                int(getattr(cp_ctx, "cp_rank", -1)),
+                _debug_tensor_values("swa_slot", swa_kwargs.get("swa_slot_mapping")),
+                _debug_tensor_values(
+                    "cmp_slots", compressor_kwargs.get("compressor_kv_slots")
+                ),
+                _debug_tensor_values(
+                    "cmp_state_slots",
+                    compressor_kwargs.get("compressor_state_slots"),
+                ),
+                _debug_tensor_values(
+                    "cmp_seq_start",
+                    compressor_kwargs.get("compressor_seq_start_per_req"),
+                ),
+                _debug_tensor_values(
+                    "cmp_cu_seq",
+                    compressor_kwargs.get("compressor_cu_seq_per_req"),
+                ),
+                _debug_tensor_values(
+                    "cmp_unpad",
+                    compressor_kwargs.get("compressor_unpad_restore"),
+                ),
+                _debug_tensor_values("req_ids", getattr(cp_ctx, "req_id_per_token", None)),
+                _debug_tensor_values(
+                    "unpad_restore",
+                    getattr(cp_ctx, "unpad_restore", None),
+                ),
+            )
+        try:
+            attention_pool_kwargs = self._build_cp_distributed_attention_pool_kwargs(
+                common,
+                workspace_meta,
+            )
+            csa_indexer_kwargs: dict[str, Any] = {}
+            csa_indexer_compressor_kwargs: dict[str, Any] = {}
+            if self.compress_ratio == 4:
+                if _cp_distributed_attention_py_debug_enabled():
+                    logging.warning(
+                        "[DSV4 CP Attention Py] build csa kwargs begin layer=%s cp_rank=%s "
+                        "indexer_q=%s weights=%s",
+                        int(getattr(self, "layer_id", -1)),
+                        int(getattr(cp_ctx, "cp_rank", -1)),
+                        tuple(indexer_payload.indexer_q.shape),
+                        tuple(indexer_payload.weights.shape),
+                    )
+                csa_indexer_kwargs = self._build_cp_distributed_csa_indexer_kwargs(
+                    common,
+                    indexer_payload,
+                )
+                if _cp_distributed_attention_py_debug_enabled():
+                    logging.warning(
+                        "[DSV4 CP Attention Py] build csa indexer kwargs done layer=%s cp_rank=%s %s",
+                        int(getattr(self, "layer_id", -1)),
+                        int(getattr(cp_ctx, "cp_rank", -1)),
+                        {
+                            key: tuple(value.shape)
+                            for key, value in csa_indexer_kwargs.items()
+                            if isinstance(value, torch.Tensor)
+                        },
+                    )
+                csa_indexer_compressor_kwargs = (
+                    self._build_cp_distributed_csa_indexer_compressor_kwargs(
+                        common,
+                        indexer_payload,
+                    )
+                )
+                if _cp_distributed_attention_py_debug_enabled():
+                    logging.warning(
+                        "[DSV4 CP Attention Py] build csa nested compressor kwargs done layer=%s cp_rank=%s",
+                        int(getattr(self, "layer_id", -1)),
+                        int(getattr(cp_ctx, "cp_rank", -1)),
+                    )
+        except Exception:
+            logging.exception(
+                "[DSV4 CP Attention Py] pre-op kwargs failed layer=%s ratio=%s cp_rank=%s",
+                int(getattr(self, "layer_id", -1)),
+                int(self.compress_ratio),
+                int(getattr(cp_ctx, "cp_rank", -1)),
+            )
+            raise
+        from rtp_llm.ops.compute_ops import rtp_llm_ops
+
+        local_rows = torch.arange(
+            int(qkv.q.size(0)), dtype=torch.long, device=common.device
+        )
+        req_ids = cp_ctx.req_id_per_token
+        if req_ids is None:
+            req_ids = torch.zeros(
+                int(qkv.q.size(0)), dtype=torch.long, device=common.device
+            )
+        else:
+            req_ids = req_ids.to(device=common.device, dtype=torch.long).contiguous()
+        position_ids = cp_ctx.global_positions.to(
+            device=common.device, dtype=torch.long
+        ).contiguous()
+        prefix_lengths = (
+            cp_ctx.prefix_lengths
+            if cp_ctx.prefix_lengths is not None
+            else torch.tensor([int(cp_ctx.prefix_length)], dtype=torch.long, device=common.device)
+        )
+        input_lengths = (
+            cp_ctx.input_lengths_global
+            if cp_ctx.input_lengths_global is not None
+            else torch.tensor([int(cp_ctx.seq_len_full)], dtype=torch.long, device=common.device)
+        )
+        cu_lens = (
+            cp_ctx.cu_seqlens_global
+            if cp_ctx.cu_seqlens_global is not None
+            else torch.tensor([0, int(cp_ctx.seq_len_full)], dtype=torch.long, device=common.device)
+        )
+        if self.compress_ratio == 4:
+            indexer_q = indexer_payload.indexer_q.contiguous()
+            compressed_topk = int(
+                getattr(self.indexer, "index_topk", int(workspace_meta.N))
+            )
+            dummy_indexer_k = torch.empty(
+                int(input_lengths.numel()),
+                1,
+                int(indexer_q.size(1)),
+                int(indexer_q.size(2)),
+                dtype=indexer_q.dtype,
+                device=common.device,
+            )
+        else:
+            indexer_q = qkv.q[:, :1, :1].contiguous()
+            compressed_topk = int(workspace_meta.N)
+            dummy_indexer_k = torch.empty(
+                int(input_lengths.numel()),
+                1,
+                1,
+                1,
+                dtype=qkv.q.dtype,
+                device=common.device,
+            )
+        local_kv_2d = qkv.swa_k_local
+        if local_kv_2d.dtype != qkv.q.dtype:
+            local_kv_2d = local_kv_2d.to(qkv.q.dtype)
+        local_kv = local_kv_2d.view(1, int(cp_ctx.chunk_length), 1, self.head_dim)
+        if _cp_distributed_attention_py_debug_enabled():
+            logging.warning(
+                "[DSV4 CP Attention Py] enter layer=%s ratio=%s cp_rank=%s "
+                "chunk=%s q=%s local_kv=%s indexer_q=%s batch=%s prefix=%s input=%s "
+                "pool=%s",
+                int(getattr(self, "layer_id", -1)),
+                int(self.compress_ratio),
+                int(getattr(cp_ctx, "cp_rank", -1)),
+                int(getattr(cp_ctx, "chunk_length", -1)),
+                tuple(qkv.q.shape),
+                tuple(local_kv.shape),
+                tuple(indexer_q.shape),
+                int(input_lengths.numel()),
+                [int(x) for x in prefix_lengths.detach().cpu().reshape(-1).tolist()],
+                [int(x) for x in input_lengths.detach().cpu().reshape(-1).tolist()],
+                {
+                    key: (
+                        tuple(value.shape)
+                        if isinstance(value, torch.Tensor)
+                        else type(value).__name__
+                    )
+                    for key, value in attention_pool_kwargs.items()
+                },
+            )
+            logging.warning(
+                "[DSV4 CP Attention Py] pool-values layer=%s cp_rank=%s %s %s %s %s %s",
+                int(getattr(self, "layer_id", -1)),
+                int(getattr(cp_ctx, "cp_rank", -1)),
+                _debug_tensor_values(
+                    "attn_cmp_seq",
+                    attention_pool_kwargs.get("attention_cmp_seq_lens"),
+                ),
+                _debug_tensor_values(
+                    "attn_cmp_block",
+                    attention_pool_kwargs.get("attention_cmp_block_table"),
+                ),
+                _debug_tensor_values(
+                    "attn_swa_slot",
+                    attention_pool_kwargs.get("attention_swa_slot_mapping"),
+                ),
+                _debug_tensor_values(
+                    "attn_swa_lens",
+                    attention_pool_kwargs.get("attention_swa_gather_lens"),
+                ),
+                _debug_tensor_values("kv_cu_lens", cu_lens),
+            )
+            def _debug_tensor_meta(name: str, value: Any) -> str:
+                if not isinstance(value, torch.Tensor):
+                    return f"{name}=None"
+                return (
+                    f"{name}=shape{tuple(value.shape)} stride{tuple(value.stride())} "
+                    f"dtype={value.dtype} contiguous={value.is_contiguous()}"
+                )
+
+            logging.warning(
+                "[DSV4 CP Attention Py] tensor-meta layer=%s cp_rank=%s %s %s %s %s %s %s %s",
+                int(getattr(self, "layer_id", -1)),
+                int(getattr(cp_ctx, "cp_rank", -1)),
+                _debug_tensor_meta("q", qkv.q),
+                _debug_tensor_meta("local_kv", local_kv),
+                _debug_tensor_meta("cmp_pool", attention_pool_kwargs.get("attention_cmp_k_pool")),
+                _debug_tensor_meta("cmp_bt", attention_pool_kwargs.get("attention_cmp_block_table")),
+                _debug_tensor_meta("swa_pool", attention_pool_kwargs.get("attention_swa_k_pool")),
+                _debug_tensor_meta("swa_slot", attention_pool_kwargs.get("attention_swa_slot_mapping")),
+                _debug_tensor_meta("unpad_restore", getattr(cp_ctx, "unpad_restore", None)),
+            )
+        try:
+            o = rtp_llm_ops.dsv4_cp_distributed_prefill_attention(
+                qkv.q.contiguous(),
+                local_kv.contiguous(),
+                indexer_q,
+                dummy_indexer_k,
+                self.attn_sink.contiguous(),
+                req_ids,
+                position_ids,
+                prefix_lengths.to(device=common.device, dtype=torch.long).contiguous(),
+                input_lengths.to(device=common.device, dtype=torch.long).contiguous(),
+                local_rows,
+                int(self.compress_ratio),
+                int(self.window_size),
+                int(compressed_topk),
+                int(workspace_meta.N),
+                **buffer.op_kwargs(cp_rank=int(cp_ctx.cp_rank)),
+                **swa_kwargs,
+                **csa_indexer_compressor_kwargs,
+                **compressor_kwargs,
+                **csa_indexer_kwargs,
+                **attention_pool_kwargs,
+                kv_unpad_restore=cp_ctx.unpad_restore.to(
+                    device=common.device, dtype=torch.long
+                ).contiguous(),
+                kv_cu_lens=cu_lens.to(device=common.device, dtype=torch.long).contiguous(),
+            )
+        except Exception:
+            logging.exception(
+                "[DSV4 CP Attention Py] op failed layer=%s ratio=%s cp_rank=%s",
+                int(getattr(self, "layer_id", -1)),
+                int(self.compress_ratio),
+                int(getattr(cp_ctx, "cp_rank", -1)),
+            )
+            raise
+        if _cp_distributed_attention_py_debug_enabled():
+            logging.warning(
+                "[DSV4 CP Attention Py] exit layer=%s ratio=%s cp_rank=%s o=%s",
+                int(getattr(self, "layer_id", -1)),
+                int(self.compress_ratio),
+                int(getattr(cp_ctx, "cp_rank", -1)),
+                tuple(o.shape),
+            )
+        with record_function_range("dsv4.fp8.attn.prefill.output_proj"):
+            out = self._prefill_output_proj(o, common.freqs_cis)
+        self._prefill_output_all_reduce(out)
+        return out
+
+    def _ensure_cp_distributed_attention_buffer(
+        self,
+        qkv: PrefillQKV,
+        common: PrefillMeta,
+    ):
+        """Allocate/lookup the attention symmetric buffer after preflight.
+
+        This function intentionally runs before any future op-side barrier.
+        Unsupported V0 geometry must fail here on every rank, instead of after
+        one rank has entered the peer-symmetric CUDA protocol.
+        """
+        cp_ctx = common.cp_ctx
+        if cp_ctx is None:
+            raise RuntimeError("distributed attention buffer requires CP context")
+        if qkv.swa_k_local is None:
+            raise RuntimeError(
+                "distributed attention buffer requires rank-local fresh K"
+            )
+        if qkv.swa_k_local.dim() != 2:
+            raise RuntimeError(
+                f"distributed attention fresh K must be 2D [chunk_length, D], got {tuple(qkv.swa_k_local.shape)}"
+            )
+
+        import torch.distributed as dist
+
+        if not dist.is_available() or not dist.is_initialized():
+            raise RuntimeError(
+                "distributed attention buffer requires initialized torch.distributed"
+            )
+
+        swa_payload_elems = int(qkv.swa_k_local.size(1)) if qkv.swa_k_local.size(0) > 0 else 1
+        swa_bytes_per_token = swa_payload_elems * int(qkv.swa_k_local.element_size())
+        tokens_per_rank = int(
+            getattr(
+                cp_ctx,
+                "chunk_length",
+                int(qkv.q.size(0)) if qkv.q is not None else int(common.seqlen),
+            )
+        )
+        spec = build_dsv4_cp_attention_buffer_spec(
+            cp_size=int(cp_ctx.cp_size),
+            actual_tokens_per_rank=tokens_per_rank,
+            batch_size=int(common.batch_size),
+            swa_bytes_per_token=swa_bytes_per_token,
+            page_rr=bool(getattr(cp_ctx, "kv_cache_sharded", False)),
+        )
+        group = dist.group.WORLD
+        with suppress(Exception):
+            from rtp_llm.models_py.distributed import collective_torch
+            from rtp_llm.models_py.distributed.collective_torch import Group
+
+            group = collective_torch._get_group(Group.TP)
+        try:
+            group_world_size = int(dist.get_world_size(group))
+        except Exception:
+            group_world_size = int(cp_ctx.cp_size)
+        if group_world_size != int(cp_ctx.cp_size):
+            raise RuntimeError(
+                "distributed attention buffer group size must match cp_size: "
+                f"group_world_size={group_world_size}, cp_size={int(cp_ctx.cp_size)}"
+            )
+        return get_or_create_dsv4_cp_attention_buffer(
+            group=group,
+            cp_rank=int(cp_ctx.cp_rank),
+            spec=spec,
+        )
 
     def _attn_via_workspace(
         self,
@@ -4954,7 +5754,12 @@ class AttentionFP8(nn.Module):
         """
         x_3d = x.unsqueeze(0)
         rd = common.rd
-        overlap_swa_gather = self._should_overlap_swa_kv_gather_for_prefill(common)
+        use_cp_distributed_attention = self._should_use_cp_distributed_prefill_attention(
+            common, self._cp_distributed_workspace_meta(common)
+        )
+        overlap_swa_gather = self._should_overlap_swa_kv_gather_for_prefill(
+            common
+        ) and not use_cp_distributed_attention
 
         def compute_qr() -> torch.Tensor:
             # q_lora_a + norm only — small ``[1, T, q_lora_rank]`` (fed to the
@@ -4979,6 +5784,7 @@ class AttentionFP8(nn.Module):
             kv_flat = kv.reshape(kv.size(0) * kv.size(1), *kv.shape[2:])
             trailing = tuple(int(s) for s in kv_flat.shape[1:])
             local_2d = kv_flat.reshape(common.cp_ctx.chunk_length, -1).contiguous()
+            swa_k_local = local_2d
             cp_stream = self._get_swa_cp_gather_stream(x.device)
             with record_function_range("dsv4.fp8.attn.swa_kv_full.cp_gather_start"):
                 kv_full_gather_handle = cp_all_gather_full_async(
@@ -5000,9 +5806,14 @@ class AttentionFP8(nn.Module):
         else:
             qr = compute_qr()
             kv = compute_kv()
+            kv_flat = kv.reshape(kv.size(0) * kv.size(1), *kv.shape[2:])
+            if common.cp_on and common.cp_ctx is not None:
+                swa_k_local = kv_flat.reshape(common.cp_ctx.chunk_length, -1).contiguous()
+            else:
+                swa_k_local = kv_flat.reshape(kv_flat.size(0), -1).contiguous()
             kv_full_gather_handle = None
             kv_full_trailing_shape = None
-            if common.cp_on:
+            if common.cp_on and not use_cp_distributed_attention:
                 # Dispatch on _use_varlen_prefill: varlen (default) supports
                 # B>=1 via the flat helper; legacy keeps the B==1 [B, T, *F]
                 # path. Both produce [1, seq_len_full, head_dim] downstream.
@@ -5038,8 +5849,13 @@ class AttentionFP8(nn.Module):
                                     "swa_kv_full"
                                 ),
                             ).unsqueeze(0)
-            else:
+            elif not common.cp_on:
                 kv_full = kv
+            else:
+                # The distributed attention op gathers rank-local fresh K
+                # internally and uses ``kv_unpad_restore`` for global-order
+                # reads, so no standalone CP all-gather is needed here.
+                kv_full = None
 
         return PrefillQKV(
             qr=qr.squeeze(0),
@@ -5047,6 +5863,7 @@ class AttentionFP8(nn.Module):
             kv_full=kv_full.squeeze(0) if kv_full is not None else None,
             kv_full_gather_handle=kv_full_gather_handle,
             kv_full_trailing_shape=kv_full_trailing_shape,
+            swa_k_local=swa_k_local,
         )
 
     def _materialize_prefill_q(
@@ -5122,7 +5939,9 @@ class AttentionFP8(nn.Module):
         cp_byte_sliced = self._swa_cp_byte_sliced()
         packed_3d = None if cp_byte_sliced else self._pool_view_3d_fp8(SWA_KV)
         raw_u8 = self._pool_raw_u8(SWA_KV) if cp_byte_sliced else None
-        if (cp_byte_sliced and raw_u8 is None) or (not cp_byte_sliced and packed_3d is None):
+        if (cp_byte_sliced and raw_u8 is None) or (
+            not cp_byte_sliced and packed_3d is None
+        ):
             return
 
         k_bf16 = kv_full.reshape(-1, self.head_dim)

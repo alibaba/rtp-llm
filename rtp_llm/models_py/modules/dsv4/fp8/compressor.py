@@ -955,6 +955,32 @@ class CompressorFP8(PoolBackedModule):
     # ----------------------------------------------------------------------
     # Forward (prefill)
     # ----------------------------------------------------------------------
+    def project_prefill_local(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Run only the compressor projection DeepGEMM for rank-local prefill.
+
+        The distributed attention op owns CP gather plus STATE/KV persistent
+        writes, so the hook needs the local ``kv``/``score`` payload without
+        entering :meth:`_launch`.
+        """
+        if x.dim() == 2:
+            N = int(x.size(0))
+        else:
+            bsz, seqlen, _ = x.size()
+            N = int(bsz) * int(seqlen)
+        out_dim = (1 + self.overlap) * self.head_dim
+        with record_function_range("dsv4.fp8.compressor.prefill.project_only"):
+            fused_out = _linear_bf16_bf16_fp32(x, self._wkv_wgate_fused)
+            fused_flat = fused_out.reshape(N, -1)
+        assert fused_flat.dim() == 2, (
+            f"CompressorFP8 project_only expects flat fused projection, got "
+            f"{tuple(fused_flat.shape)}"
+        )
+        assert fused_flat.size(1) == 2 * out_dim, (
+            f"CompressorFP8 fused hidden mismatch: got {fused_flat.size(1)}, "
+            f"expected {2 * out_dim}"
+        )
+        return fused_flat[:, :out_dim].contiguous(), fused_flat[:, out_dim:].contiguous()
+
     def forward(
         self,
         x: torch.Tensor,

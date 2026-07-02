@@ -43,9 +43,12 @@ def _make_common(
     if cp_on:
         cp_ctx = SimpleNamespace(
             cp_size=cp_size,
+            cp_rank=0,
             chunk_length=3,
             seq_len_full=6,
+            unpad_restore=torch.arange(6, dtype=torch.long),
             unpad_restore_is_prefix=True,
+            kv_cache_sharded=False,
         )
     tensor_device = torch.device("cpu")
     # Per-forward prefill scratch is now threaded via ``PrefillMeta.workspace``;
@@ -78,6 +81,7 @@ def _make_qkv(*, with_pending: bool = False) -> PrefillQKV:
         kv_full=kv_full,
         kv_full_gather_handle=object() if with_pending else None,
         kv_full_trailing_shape=(2,) if with_pending else None,
+        swa_k_local=torch.zeros(3, 4, dtype=torch.bfloat16),
     )
 
 
@@ -200,6 +204,412 @@ class AttentionCPPrefillDispatchTest(unittest.TestCase):
         self.assertEqual(seq, ["common", "qkv", "ensure", "swa_write", "hca_path"])
 
 
+class AttentionCPDistributedPrefillGateTest(unittest.TestCase):
+    def _make_layer(self, compress_ratio: int = 128) -> AttentionFP8:
+        layer = AttentionFP8.__new__(AttentionFP8)
+        torch.nn.Module.__init__(layer)
+        layer.compress_ratio = compress_ratio
+        layer.layer_id = 9
+        layer.head_dim = 4
+        return layer
+
+    def test_gate_accepts_cp8_cuda_page_rr_off_when_op_available(self) -> None:
+        layer = self._make_layer()
+        common = _make_common(cp_on=True, cp_size=8, device=torch.device("cuda"))
+
+        with (
+            patch.dict(os.environ, {"DSV4_CP_DISTRIBUTED_PREFILL_ATTN": "1"}),
+            patch.object(
+                attention_mod,
+                "_cp_distributed_attention_op_available",
+                return_value=True,
+            ),
+        ):
+            self.assertTrue(
+                layer._should_use_cp_distributed_prefill_attention(common, object())
+            )
+
+    def test_gate_rejects_page_rr_and_non_cp8(self) -> None:
+        layer = self._make_layer()
+        common_rr = _make_common(cp_on=True, cp_size=8, device=torch.device("cuda"))
+        common_rr.cp_ctx.kv_cache_sharded = True
+        common_cp4 = _make_common(cp_on=True, cp_size=4, device=torch.device("cuda"))
+
+        with (
+            patch.dict(os.environ, {"DSV4_CP_DISTRIBUTED_PREFILL_ATTN": "1"}),
+            patch.object(
+                attention_mod,
+                "_cp_distributed_attention_op_available",
+                return_value=True,
+            ),
+        ):
+            self.assertFalse(
+                layer._should_use_cp_distributed_prefill_attention(common_rr, object())
+            )
+            self.assertFalse(
+                layer._should_use_cp_distributed_prefill_attention(common_cp4, object())
+            )
+
+    def test_compressed_epilogue_enters_distributed_hook_before_workspace(self) -> None:
+        layer = self._make_layer(compress_ratio=128)
+        common = _make_common(cp_on=True, cp_size=8, device=torch.device("cuda"))
+        qkv = _make_qkv()
+        expected = torch.ones(3, 8, dtype=torch.bfloat16)
+        layer.compressor = MagicMock()
+        layer._materialize_prefill_q = MagicMock(return_value=qkv)  # type: ignore[assignment]
+        layer._should_use_cp_distributed_prefill_attention = MagicMock(  # type: ignore[assignment]
+            return_value=True
+        )
+        layer._forward_prefill_cp_distributed_attention = MagicMock(  # type: ignore[assignment]
+            return_value=expected
+        )
+        layer._attn_via_workspace = MagicMock(  # type: ignore[assignment]
+            side_effect=AssertionError("workspace path should not run")
+        )
+
+        out = layer._forward_prefill_compressed(
+            torch.zeros(3, 4, dtype=torch.bfloat16),
+            qkv,
+            common,
+            cmp_topk_runtime=None,
+            compressor_meta=object(),
+            workspace_meta=object(),
+            _skip_compressor_write=True,
+        )
+
+        self.assertIs(out, expected)
+        layer._forward_prefill_cp_distributed_attention.assert_called_once()
+        layer._attn_via_workspace.assert_not_called()
+
+    def test_compressed_epilogue_distributed_path_uses_project_only_payload(
+        self,
+    ) -> None:
+        layer = self._make_layer(compress_ratio=128)
+        common = _make_common(cp_on=True, cp_size=8, device=torch.device("cuda"))
+        qkv = _make_qkv()
+        expected = torch.ones(3, 8, dtype=torch.bfloat16)
+        payload = (torch.zeros(3, 4), torch.zeros(3, 4))
+        compressor = MagicMock()
+        compressor.project_prefill_local.return_value = payload
+        layer.compressor = compressor
+        layer._materialize_prefill_q = MagicMock(return_value=qkv)  # type: ignore[assignment]
+        layer._should_use_cp_distributed_prefill_attention = MagicMock(  # type: ignore[assignment]
+            return_value=True
+        )
+        layer._forward_prefill_cp_distributed_attention = MagicMock(  # type: ignore[assignment]
+            return_value=expected
+        )
+        layer._attn_via_workspace = MagicMock(  # type: ignore[assignment]
+            side_effect=AssertionError("workspace path should not run")
+        )
+
+        x = torch.zeros(3, 4, dtype=torch.bfloat16)
+        meta = object()
+        wm = object()
+        out = layer._forward_prefill_compressed(
+            x,
+            qkv,
+            common,
+            cmp_topk_runtime=None,
+            compressor_meta=meta,
+            workspace_meta=wm,
+            _skip_compressor_write=False,
+        )
+
+        self.assertIs(out, expected)
+        compressor.assert_not_called()
+        compressor.project_prefill_local.assert_called_once_with(x)
+        layer._forward_prefill_cp_distributed_attention.assert_called_once_with(
+            qkv,
+            common,
+            wm,
+            None,
+            meta,
+            payload,
+            None,
+        )
+        layer._attn_via_workspace.assert_not_called()
+
+    def test_csa_distributed_path_uses_indexer_project_only_payload(self) -> None:
+        layer = self._make_layer(compress_ratio=4)
+        common = _make_common(cp_on=True, cp_size=8, device=torch.device("cuda"))
+        indexer_meta = object()
+        compressor_meta = object()
+        wm = object()
+        common = common._replace(
+            csa_meta=SimpleNamespace(
+                indexer_meta=indexer_meta,
+                compressor_meta=compressor_meta,
+                workspace_meta=wm,
+            )
+        )
+        qkv = _make_qkv()
+        expected = torch.ones(3, 8, dtype=torch.bfloat16)
+        payload = object()
+        from rtp_llm.models_py.modules.dsv4.fp8.indexer import IndexerFP8
+
+        indexer = IndexerFP8.__new__(IndexerFP8)
+        torch.nn.Module.__init__(indexer)
+        indexer.project_prefill_local = MagicMock(return_value=payload)  # type: ignore[method-assign]
+        indexer.forward = MagicMock(  # type: ignore[method-assign]
+            side_effect=AssertionError("standalone indexer forward should not run")
+        )
+        layer.indexer = indexer
+        layer._should_use_cp_distributed_prefill_attention = MagicMock(  # type: ignore[assignment]
+            return_value=True
+        )
+        layer._forward_prefill_compressed = MagicMock(return_value=expected)  # type: ignore[assignment]
+
+        x = torch.zeros(3, 4, dtype=torch.bfloat16)
+        out = layer._forward_prefill_csa(x, qkv, common)
+
+        self.assertIs(out, expected)
+        indexer.forward.assert_not_called()
+        indexer.project_prefill_local.assert_called_once_with(x, qkv.qr, indexer_meta)
+        layer._forward_prefill_compressed.assert_called_once_with(
+            x,
+            qkv,
+            common,
+            cmp_topk_runtime=None,
+            compressor_meta=compressor_meta,
+            workspace_meta=wm,
+            indexer_payload=payload,
+        )
+
+    def test_forward_prefill_distributed_path_skips_standalone_swa_write(self) -> None:
+        common = _make_common(cp_on=True, cp_size=8, device=torch.device("cuda"))
+        common = common._replace(hca_meta=SimpleNamespace(workspace_meta=object()))
+
+        seq: list = []
+        layer = _make_dispatch_layer(128, seq)
+        layer._prefill_common_setup.side_effect = (  # type: ignore[attr-defined]
+            lambda x, p: seq.append("common") or common
+        )
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "DSV4_CP_DISTRIBUTED_PREFILL_ATTN": "1",
+                    "DSV4_PREFILL_CP_OVERLAP": "1",
+                },
+            ),
+            patch.object(
+                attention_mod,
+                "_cp_distributed_attention_op_available",
+                return_value=True,
+            ),
+        ):
+            out = layer._forward_prefill(
+                torch.zeros(3, 4, dtype=torch.bfloat16),
+                torch.arange(3, dtype=torch.long),
+            )
+
+        self.assertEqual(tuple(out.shape), (3, 8))
+        self.assertEqual(seq, ["common", "qkv", "hca_path"])
+        layer._prefill_write_swa_fp8_paged.assert_not_called()
+        layer._forward_prefill_hca_overlapped.assert_not_called()
+
+    def test_forward_prefill_csa_distributed_path_skips_standalone_swa_write(
+        self,
+    ) -> None:
+        common = _make_common(cp_on=True, cp_size=8, device=torch.device("cuda"))
+        common = common._replace(csa_meta=SimpleNamespace(workspace_meta=object()))
+
+        seq: list = []
+        layer = _make_dispatch_layer(4, seq)
+        layer._prefill_common_setup.side_effect = (  # type: ignore[attr-defined]
+            lambda x, p: seq.append("common") or common
+        )
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "DSV4_CP_DISTRIBUTED_PREFILL_ATTN": "1",
+                    "DSV4_PREFILL_CP_OVERLAP": "1",
+                },
+            ),
+            patch.object(
+                attention_mod,
+                "_cp_distributed_attention_op_available",
+                return_value=True,
+            ),
+        ):
+            out = layer._forward_prefill(
+                torch.zeros(3, 4, dtype=torch.bfloat16),
+                torch.arange(3, dtype=torch.long),
+            )
+
+        self.assertEqual(tuple(out.shape), (3, 8))
+        self.assertEqual(seq, ["common", "qkv", "csa_path"])
+        layer._prefill_write_swa_fp8_paged.assert_not_called()
+        layer._forward_prefill_csa_overlapped.assert_not_called()
+
+    def test_distributed_swa_slot_mapping_uses_rank_major_padded_order(self) -> None:
+        layer = self._make_layer(compress_ratio=128)
+        common = _make_common(cp_on=True, cp_size=2, device=torch.device("cpu"))
+        common.cp_ctx.chunk_length = 3
+        common.cp_ctx.unpad_restore = torch.tensor([0, 2, 3, 5], dtype=torch.long)
+        common = common._replace(
+            swa_meta=SimpleNamespace(
+                slot_mapping=torch.tensor([10, 11, 12, 13], dtype=torch.long)
+            )
+        )
+
+        got = layer._build_cp_distributed_swa_slot_mapping(common)
+
+        self.assertEqual(got.tolist(), [10, -1, 11, 12, -1, 13])
+
+    def test_distributed_swa_kwargs_use_local_k_pool_and_padded_slots(self) -> None:
+        layer = self._make_layer(compress_ratio=128)
+        common = _make_common(cp_on=True, cp_size=2, device=torch.device("cpu"))
+        common.cp_ctx.chunk_length = 3
+        common.cp_ctx.unpad_restore = torch.tensor([0, 2, 3, 5], dtype=torch.long)
+        common = common._replace(
+            swa_meta=SimpleNamespace(
+                slot_mapping=torch.tensor([20, 21, 22, 23], dtype=torch.long)
+            )
+        )
+        pool = torch.empty(2, 8, 584, dtype=torch.uint8)
+        layer._pool_view_3d_fp8 = MagicMock(return_value=pool)  # type: ignore[assignment]
+        qkv = PrefillQKV(
+            qr=torch.zeros(3, 4, dtype=torch.bfloat16),
+            q=torch.zeros(3, 1, 4, dtype=torch.bfloat16),
+            kv_full=torch.zeros(4, 4, dtype=torch.bfloat16),
+            swa_k_local=torch.arange(12, dtype=torch.float32).view(3, 4),
+        )
+
+        kwargs = layer._build_cp_distributed_swa_kwargs(qkv, common)
+
+        self.assertIs(kwargs["swa_k_cache"], pool)
+        self.assertEqual(tuple(kwargs["swa_k"].shape), (3, 4))
+        self.assertEqual(kwargs["swa_k"].dtype, torch.bfloat16)
+        self.assertEqual(kwargs["swa_slot_mapping"].tolist(), [20, -1, 21, 22, -1, 23])
+
+    def test_distributed_buffer_preflight_rejects_uninitialized_dist(self) -> None:
+        layer = self._make_layer(compress_ratio=128)
+        common = _make_common(cp_on=True, cp_size=8, device=torch.device("cuda"))
+        qkv = PrefillQKV(
+            qr=torch.zeros(3, 4, dtype=torch.bfloat16),
+            q=torch.zeros(3, 1, 4, dtype=torch.bfloat16),
+            kv_full=torch.zeros(6, 2, 4, dtype=torch.bfloat16),
+            swa_k_local=torch.zeros(3, 8, dtype=torch.bfloat16),
+        )
+
+        with (
+            patch.object(torch.distributed, "is_available", return_value=True),
+            patch.object(torch.distributed, "is_initialized", return_value=False),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "initialized torch.distributed"):
+                layer._ensure_cp_distributed_attention_buffer(qkv, common)
+
+    def test_distributed_buffer_preflight_builds_attention_buffer(self) -> None:
+        layer = self._make_layer(compress_ratio=128)
+        common = _make_common(cp_on=True, cp_size=8, device=torch.device("cuda"))
+        common = common._replace(batch_size=2)
+        qkv = PrefillQKV(
+            qr=torch.zeros(3, 4, dtype=torch.bfloat16),
+            q=torch.zeros(3, 1, 4, dtype=torch.bfloat16),
+            kv_full=torch.zeros(6, 2, 4, dtype=torch.bfloat16),
+            swa_k_local=torch.zeros(3, 8, dtype=torch.bfloat16),
+        )
+        captured = {}
+        expected = object()
+
+        def fake_spec(**kwargs):
+            captured["spec_kwargs"] = kwargs
+            return "spec"
+
+        def fake_get(**kwargs):
+            captured["buffer_kwargs"] = kwargs
+            return expected
+
+        with (
+            patch.object(torch.distributed, "is_available", return_value=True),
+            patch.object(torch.distributed, "is_initialized", return_value=True),
+            patch.object(torch.distributed, "group", SimpleNamespace(WORLD=object())),
+            patch.object(
+                attention_mod, "build_dsv4_cp_attention_buffer_spec", fake_spec
+            ),
+            patch.object(
+                attention_mod, "get_or_create_dsv4_cp_attention_buffer", fake_get
+            ),
+        ):
+            got = layer._ensure_cp_distributed_attention_buffer(qkv, common)
+
+        self.assertIs(got, expected)
+        self.assertEqual(
+            captured["spec_kwargs"],
+            {
+                "cp_size": 8,
+                "actual_tokens_per_rank": 3,
+                "batch_size": 2,
+                "swa_bytes_per_token": 16,
+                "page_rr": False,
+            },
+        )
+        self.assertEqual(captured["buffer_kwargs"]["cp_rank"], 0)
+        self.assertEqual(captured["buffer_kwargs"]["spec"], "spec")
+
+    def test_distributed_buffer_uses_cp_chunk_length_for_capacity_key(self) -> None:
+        layer = self._make_layer(compress_ratio=128)
+        common = _make_common(cp_on=True, cp_size=8, device=torch.device("cuda"))
+        common.cp_ctx.chunk_length = 8
+        qkv = PrefillQKV(
+            qr=torch.zeros(3, 4, dtype=torch.bfloat16),
+            q=torch.zeros(3, 1, 4, dtype=torch.bfloat16),
+            kv_full=torch.zeros(6, 2, 4, dtype=torch.bfloat16),
+            swa_k_local=torch.zeros(8, 8, dtype=torch.bfloat16),
+        )
+        captured = {}
+
+        def fake_spec(**kwargs):
+            captured.update(kwargs)
+            return "spec"
+
+        with (
+            patch.object(torch.distributed, "is_available", return_value=True),
+            patch.object(torch.distributed, "is_initialized", return_value=True),
+            patch.object(torch.distributed, "group", SimpleNamespace(WORLD=object())),
+            patch.object(
+                attention_mod, "build_dsv4_cp_attention_buffer_spec", fake_spec
+            ),
+            patch.object(
+                attention_mod,
+                "get_or_create_dsv4_cp_attention_buffer",
+                return_value=object(),
+            ),
+        ):
+            layer._ensure_cp_distributed_attention_buffer(qkv, common)
+
+        self.assertEqual(captured["actual_tokens_per_rank"], 8)
+
+    def test_distributed_buffer_preflight_rejects_page_rr_before_allocation(
+        self,
+    ) -> None:
+        layer = self._make_layer(compress_ratio=128)
+        common = _make_common(cp_on=True, cp_size=8, device=torch.device("cuda"))
+        common.cp_ctx.kv_cache_sharded = True
+        qkv = PrefillQKV(
+            qr=torch.zeros(3, 4, dtype=torch.bfloat16),
+            q=torch.zeros(3, 1, 4, dtype=torch.bfloat16),
+            kv_full=torch.zeros(6, 2, 4, dtype=torch.bfloat16),
+            swa_k_local=torch.zeros(3, 8, dtype=torch.bfloat16),
+        )
+
+        with (
+            patch.object(torch.distributed, "is_available", return_value=True),
+            patch.object(torch.distributed, "is_initialized", return_value=True),
+            patch.object(torch.distributed, "group", SimpleNamespace(WORLD=object())),
+            patch.object(
+                attention_mod,
+                "get_or_create_dsv4_cp_attention_buffer",
+                side_effect=AssertionError("buffer allocation should not happen"),
+            ),
+        ):
+            with self.assertRaisesRegex(ValueError, "page/RR"):
+                layer._ensure_cp_distributed_attention_buffer(qkv, common)
+
+
 class AttentionSwaAsyncGatherTest(unittest.TestCase):
     def test_ensure_prefill_kv_full_waits_pending_handle_once(self) -> None:
         layer = AttentionFP8.__new__(AttentionFP8)
@@ -212,6 +622,7 @@ class AttentionSwaAsyncGatherTest(unittest.TestCase):
             kv_full=None,
             kv_full_gather_handle=handle,
             kv_full_trailing_shape=(2, 3),
+            swa_k_local=torch.zeros(3, 6, dtype=torch.bfloat16),
         )
         gathered = torch.arange(36, dtype=torch.float32).view(6, 6)
 
@@ -261,6 +672,8 @@ class AttentionSwaAsyncGatherTest(unittest.TestCase):
         self.assertIs(qkv.kv_full_gather_handle, handle)
         self.assertIsNone(qkv.kv_full)
         self.assertEqual(qkv.kv_full_trailing_shape, (2, 3))
+        self.assertIsNotNone(qkv.swa_k_local)
+        self.assertEqual(tuple(qkv.swa_k_local.shape), (3, 6))
 
     def test_prefill_compute_qkv_waits_swa_gather_if_q_compute_raises(self) -> None:
         seq: list = []
@@ -321,6 +734,8 @@ class AttentionSwaAsyncGatherTest(unittest.TestCase):
             self.assertIsNone(qkv.q)
             self.assertNotIn("lin_wq_b", seq)
             self.assertNotIn("q_out", seen)
+            self.assertIsNotNone(qkv.swa_k_local)
+            self.assertEqual(tuple(qkv.swa_k_local.shape), (3, 6))
             qkv = layer._materialize_prefill_q(qkv, common)
 
         self.assertEqual(seq[0], "lin_wq_a")
@@ -420,6 +835,7 @@ class AttentionRawQMergeWorkspaceTest(unittest.TestCase):
             qr=torch.zeros(3, 2, dtype=torch.bfloat16),
             q=torch.zeros(3, 1, 2, dtype=torch.bfloat16),
             kv_full=torch.arange(6, dtype=torch.float32).view(3, 2),
+            swa_k_local=torch.zeros(3, 2, dtype=torch.bfloat16),
         )
         wm = WorkspaceMeta(
             M=3,

@@ -9,7 +9,7 @@ import librtp_compute_ops
 import libth_transformer_config
 import torch
 
-__all__: list[str] = ['FlashInferAttnParams', 'FlashInferDecodeOp', 'FlashInferMlaAttnParams', 'FlashInferPrefillOp', 'GroupTopKOp', 'SelectTopkOp', 'SparseMlaParams', 'TRTAttn', 'TRTAttnOp', 'TRTPagedAttnOp', 'XQAAttnOp', 'XQAParams', 'allocate_shared_buffer', 'concat_and_cache_mla', 'cp_gather_and_upconvert_fp8_kv_cache', 'cp_gather_indexer_k_quant_cache', 'cuda_graph_copy_large2small', 'cuda_graph_copy_small2large', 'cutlass_scaled_fp4_mm', 'debug_kernel', 'dispose_communicator', 'embedding', 'embedding_bert', 'fast_topk_transform_fused', 'fast_topk_transform_ragged_fused', 'fast_topk_v2', 'fast_topk_v2_variable', 'fill_mla_params', 'fused_add_layernorm', 'fused_add_rmsnorm', 'fused_qk_rmsnorm', 'indexer_k_quant_and_cache', 'init_communicator', 'layernorm', 'mla_k_merge', 'moe_post_reorder', 'moe_pre_reorder', 'moe_topk_softmax', 'open_ipc_handle', 'per_tensor_quant_fp8', 'per_token_group_quant_fp8', 'per_token_group_quant_fp8_v2', 'per_token_group_quant_int8', 'per_token_quant_fp8', 'prepare_sparse_mla_params', 'register_buffer_to_communicator', 'reuse_kv_cache_indexed_batched', 'rmsnorm', 'scaled_fp4_experts_quant', 'scaled_fp4_quant', 'silu_and_mul', 'silu_and_mul_scaled_fp4_experts_quant', 'trt_fp8_quantize_128', 'trt_fp8_quantize_128_inplace', 'userbuffers_recv', 'userbuffers_ring_all_gather', 'userbuffers_send', 'write_cache_store']
+__all__: list[str] = ['FlashInferAttnParams', 'FlashInferDecodeOp', 'FlashInferMlaAttnParams', 'FlashInferPrefillOp', 'GroupTopKOp', 'SelectTopkOp', 'SparseMlaParams', 'TRTAttn', 'TRTAttnOp', 'TRTPagedAttnOp', 'XQAAttnOp', 'XQAParams', 'allocate_shared_buffer', 'concat_and_cache_mla', 'cp_gather_and_upconvert_fp8_kv_cache', 'cp_gather_indexer_k_quant_cache', 'cuda_graph_copy_large2small', 'cuda_graph_copy_small2large', 'cutlass_scaled_fp4_mm', 'debug_kernel', 'dispose_communicator', 'dsv4_cp_distributed_prefill_attention', 'embedding', 'embedding_bert', 'fast_topk_transform_fused', 'fast_topk_transform_ragged_fused', 'fast_topk_v2', 'fast_topk_v2_variable', 'fill_mla_params', 'fused_add_layernorm', 'fused_add_rmsnorm', 'fused_qk_rmsnorm', 'indexer_k_quant_and_cache', 'init_communicator', 'layernorm', 'mla_k_merge', 'moe_post_reorder', 'moe_pre_reorder', 'moe_topk_softmax', 'open_ipc_handle', 'per_tensor_quant_fp8', 'per_token_group_quant_fp8', 'per_token_group_quant_fp8_v2', 'per_token_group_quant_int8', 'per_token_quant_fp8', 'prepare_sparse_mla_params', 'register_buffer_to_communicator', 'reuse_kv_cache_indexed_batched', 'rmsnorm', 'scaled_fp4_experts_quant', 'scaled_fp4_quant', 'silu_and_mul', 'silu_and_mul_scaled_fp4_experts_quant', 'trt_fp8_quantize_128', 'trt_fp8_quantize_128_inplace', 'userbuffers_recv', 'userbuffers_ring_all_gather', 'userbuffers_send', 'write_cache_store']
 
 
 class FlashInferAttnParams(librtp_compute_ops.ParamsBase):
@@ -398,6 +398,105 @@ def fast_topk_v2_variable(score: torch.Tensor, indices: torch.Tensor, lengths: t
 def dsv4_top_k_per_row_prefill(logits: torch.Tensor, row_starts: torch.Tensor, row_ends: torch.Tensor, indices_out: torch.Tensor, num_rows: int, stride0: int, stride1: int, top_k: int, force_radix_sort: bool = False) -> None:
     """
     Per-row TopK for DSv4 indexer prefill
+    """
+
+
+def dsv4_cp_distributed_prefill_attention(
+    q: torch.Tensor,
+    kv: torch.Tensor,
+    indexer_q: torch.Tensor,
+    indexer_k: torch.Tensor,
+    attn_sink: torch.Tensor,
+    req_id_per_token: torch.Tensor,
+    position_ids: torch.Tensor,
+    prefix_lengths: torch.Tensor,
+    input_lengths: torch.Tensor,
+    local_rows: torch.Tensor,
+    compress_ratio: int,
+    window_size: int,
+    compressed_topk: int,
+    compressed_region_width: int = -1,
+    cp_rank: int = 0,
+    cp_size: int = 1,
+    comm_ptr: int = 0,
+    buffer_handle: int = -1,
+    signal_handle: int = -1,
+    per_rank_buffer_bytes: int = 0,
+    rank_offsets: list[int] = [],
+    swa_k: torch.Tensor | None = None,
+    swa_k_cache: torch.Tensor | None = None,
+    swa_slot_mapping: torch.Tensor | None = None,
+    symm_buffer: torch.Tensor | None = None,
+    symm_buffer_ptrs_dev: int = 0,
+    symm_signal_pad_ptrs_dev: int = 0,
+    symm_handle: object | None = None,
+    compressor_kv: torch.Tensor | None = None,
+    compressor_score: torch.Tensor | None = None,
+    compressor_ape: torch.Tensor | None = None,
+    compressor_positions: torch.Tensor | None = None,
+    compressor_state_cache: torch.Tensor | None = None,
+    compressor_state_slots: torch.Tensor | None = None,
+    compressor_ratio: int = 0,
+    compressor_token_to_req: torch.Tensor | None = None,
+    compressor_state_block_table: torch.Tensor | None = None,
+    compressor_norm_weight: torch.Tensor | None = None,
+    compressor_cos_sin_cache: torch.Tensor | None = None,
+    compressor_kv_cache: torch.Tensor | None = None,
+    compressor_kv_slots: torch.Tensor | None = None,
+    compressor_seq_start: int = 0,
+    compressor_disable_raw_path: bool = False,
+    compressor_rms_norm_eps: float = 1.0e-6,
+    compressor_head_dim: int = 0,
+    compressor_rope_head_dim: int = 0,
+    compressor_overlap: bool = False,
+    compressor_state_tokens_per_block: int = 0,
+    compressor_seq_start_per_req: torch.Tensor | None = None,
+    compressor_cu_seq_per_req: torch.Tensor | None = None,
+    compressor_unpad_restore: torch.Tensor | None = None,
+    csa_indexer_compressor_kv: torch.Tensor | None = None,
+    csa_indexer_compressor_score: torch.Tensor | None = None,
+    csa_indexer_compressor_ape: torch.Tensor | None = None,
+    csa_indexer_compressor_positions: torch.Tensor | None = None,
+    csa_indexer_compressor_state_cache: torch.Tensor | None = None,
+    csa_indexer_compressor_state_slots: torch.Tensor | None = None,
+    csa_indexer_compressor_ratio: int = 0,
+    csa_indexer_compressor_token_to_req: torch.Tensor | None = None,
+    csa_indexer_compressor_state_block_table: torch.Tensor | None = None,
+    csa_indexer_compressor_norm_weight: torch.Tensor | None = None,
+    csa_indexer_compressor_cos_sin_cache: torch.Tensor | None = None,
+    csa_indexer_compressor_kv_cache: torch.Tensor | None = None,
+    csa_indexer_compressor_kv_slots: torch.Tensor | None = None,
+    csa_indexer_compressor_seq_start: int = 0,
+    csa_indexer_compressor_disable_raw_path: bool = False,
+    csa_indexer_compressor_rms_norm_eps: float = 1.0e-6,
+    csa_indexer_compressor_head_dim: int = 0,
+    csa_indexer_compressor_rope_head_dim: int = 0,
+    csa_indexer_compressor_overlap: bool = False,
+    csa_indexer_compressor_state_tokens_per_block: int = 0,
+    csa_indexer_compressor_seq_start_per_req: torch.Tensor | None = None,
+    csa_indexer_compressor_cu_seq_per_req: torch.Tensor | None = None,
+    csa_indexer_compressor_unpad_restore: torch.Tensor | None = None,
+    csa_indexer_k_cache: torch.Tensor | None = None,
+    csa_indexer_weights: torch.Tensor | None = None,
+    csa_indexer_cu_lens: torch.Tensor | None = None,
+    csa_indexer_k_pool: torch.Tensor | None = None,
+    csa_indexer_block_table: torch.Tensor | None = None,
+    csa_indexer_seq_lens: torch.Tensor | None = None,
+    attention_cmp_k_cache: torch.Tensor | None = None,
+    attention_cmp_cu_lens: torch.Tensor | None = None,
+    attention_cmp_k_pool: torch.Tensor | None = None,
+    attention_cmp_block_table: torch.Tensor | None = None,
+    attention_cmp_seq_lens: torch.Tensor | None = None,
+    attention_swa_k_cache: torch.Tensor | None = None,
+    attention_swa_cu_lens: torch.Tensor | None = None,
+    attention_swa_k_pool: torch.Tensor | None = None,
+    attention_swa_slot_mapping: torch.Tensor | None = None,
+    attention_swa_gather_lens: torch.Tensor | None = None,
+    kv_unpad_restore: torch.Tensor | None = None,
+    kv_cu_lens: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """
+    DSv4 CP distributed prefill attention semantic CUDA op
     """
 
 

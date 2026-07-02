@@ -670,7 +670,8 @@ class DeepSeekV4Model(GptModelBase):
         # doing it here (outside graph capture) caches the compiled kernel so
         # subsequent calls inside CUDA graph capture hit the cache and skip
         # JIT — which would otherwise abort via __unexpected (noexcept violation).
-        if device_str.startswith("cuda"):
+        skip_sparse_prewarm = os.environ.get("DSV4_SKIP_TILELANG_SPARSE_PREWARM", "0") == "1"
+        if device_str.startswith("cuda") and not skip_sparse_prewarm:
             from rtp_llm.models_py.modules.dsv4 import tilelang_kernels as _tl_kernels
 
             first_attn = self.v4.layers[0].attn
@@ -680,7 +681,10 @@ class DeepSeekV4Model(GptModelBase):
                 first_attn.softmax_scale,
                 device_str,
             )
+        elif device_str.startswith("cuda"):
+            logging.warning("[DeepSeekV4Model] skip TileLang sparse_attn prewarm by env")
 
+        if device_str.startswith("cuda"):
             # Pre-warm the v4_indexer_score Triton kernel for the SAME
             # constexpr config the live decode (and CSA prefill) call will
             # use, so JIT compile never happens inside CUDA graph capture

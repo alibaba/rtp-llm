@@ -206,6 +206,21 @@ cc_library(
 )
 
 cc_library(
+    name = "dsv4_cp_distributed_prefill_attention",
+    srcs = ["dsv4_cp_distributed_prefill_attention.cu"],
+    hdrs = ["dsv4_cp_distributed_prefill_attention.h"],
+    deps = [
+        "//rtp_llm/models_py/bindings/cuda:cuda_host_utils",
+        ":cuda_utils_common",
+        ":dsv4_top_k_per_row_prefill",
+        ":user_buffers",
+        "//rtp_llm/cpp/utils:core_utils",
+    ] + torch_deps(),
+    copts = cuda_copts(),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "mtp_target_verify_prepare",
     srcs = ["mtp_target_verify_prepare.cu"],
     hdrs = ["mtp_target_verify_prepare.h"],

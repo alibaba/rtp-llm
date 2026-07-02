@@ -53,6 +53,8 @@ _DSV4_FP8_CPU_TESTS = [
     "test_attention_hca_overlap",
     "test_compressor_start_finish_prefill",
     "test_decode_topk_length",
+    "test_distributed_attention_buffer",
+    "test_distributed_attention_op_baseline",
     "test_indexer_forward_with_pending_nested",
     "test_prefill_mixed_layer_cache_store",
 ]

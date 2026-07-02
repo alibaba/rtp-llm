@@ -258,7 +258,7 @@ class V4Transformer(nn.Module):
         full_rows: int,
         main_w: int,
         idx_w: int,
-        swa_w: int,
+        swa_w: int = 0,
     ) -> None:
         """Stash the max-sized per-forward prefill workspace dimensions.
 

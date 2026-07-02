@@ -275,6 +275,15 @@ class _IndexerFP8PrefillMeta(NamedTuple):
     indexer_cp_local_cu: Optional[torch.Tensor]
 
 
+class IndexerPrefillLocalPayload(NamedTuple):
+    """Projection-only payload consumed by the CP distributed attention op."""
+
+    indexer_q: torch.Tensor
+    weights: torch.Tensor
+    compressor_kv: torch.Tensor
+    compressor_score: torch.Tensor
+
+
 class IndexerFP8(PoolBackedModule):
     """FP8 lightning indexer. DeepGEMM-only score; nested
     ``CompressorFP8(head_dim=128)`` writes the 132B pool."""
@@ -982,6 +991,42 @@ class IndexerFP8(PoolBackedModule):
     # consumer (``flash_mla_sparse_fwd``) accepts ``-1`` directly so no
     # sentinel-aware post-process is needed here.
     # --------------------------------------------------------------
+    def project_prefill_local(
+        self,
+        x: torch.Tensor,
+        qr: torch.Tensor,
+        attention_inputs: _IndexerFP8PrefillMeta,
+    ) -> IndexerPrefillLocalPayload:
+        """Run only rank-local CSA indexer projections.
+
+        The distributed attention op owns nested INDEXER_STATE/INDEXER_KV
+        writes, INDEXER_KV read, score/topk, and the final sparse attention.
+        This helper deliberately avoids :meth:`forward` so no standalone writer
+        or DeepGEMM logits launch escapes the op boundary.
+        """
+
+        if self.compressor.freqs_cis is None:
+            self.compressor.freqs_cis = self.freqs_cis
+        with record_function_range("dsv4.fp8.indexer.prefill.project_only.compute_q"):
+            q = self._compute_indexer_q(qr, attention_inputs.freqs_cis_slice)
+        with record_function_range("dsv4.fp8.indexer.prefill.project_only.weights"):
+            weights = F.linear(x, self.weights_proj)
+        q_for_quant = q if q.dim() == 4 else q.unsqueeze(0)
+        w_for_quant = weights if weights.dim() == 3 else weights.unsqueeze(0)
+        with record_function_range("dsv4.fp8.indexer.prefill.project_only.quant_q"):
+            q_fp8, w_fold = indexer_q_fp8_quant_fold(
+                _as_bf16_contig(q_for_quant), _as_bf16_contig(w_for_quant)
+            )
+        with record_function_range("dsv4.fp8.indexer.prefill.project_only.nested_compressor"):
+            compressor_kv, compressor_score = self.compressor.project_prefill_local(x)
+        q_fp8_value = q_fp8.float().to(dtype=q.dtype)
+        return IndexerPrefillLocalPayload(
+            indexer_q=q_fp8_value.reshape(-1, self.n_heads, self.head_dim).contiguous(),
+            weights=w_fold.reshape(-1, self.n_heads).float().contiguous(),
+            compressor_kv=compressor_kv,
+            compressor_score=compressor_score,
+        )
+
     def forward(
         self,
         x: torch.Tensor,
