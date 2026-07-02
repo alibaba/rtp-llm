@@ -7,6 +7,7 @@ import lombok.Builder;
 import lombok.Data;
 import lombok.NoArgsConstructor;
 
+import java.util.List;
 import java.util.Set;
 
 @Data
@@ -30,4 +31,12 @@ public class CacheStatus {
     private Set<Long> cachedKeys;
     @JsonProperty("cache_key_size")
     private long cacheKeySize;
+    /**
+     * Per-DP-rank cache breakdown, populated when the engine is DP-enabled
+     * from {@code CacheStatusPB.dp_cache[]}. Empty for non-DP pods. The outer
+     * {@link #cachedKeys} stays as the union view, so legacy any-rank prefix
+     * matching is unaffected.
+     */
+    @lombok.Builder.Default
+    private List<DpRankCacheStatus> dpCaches = List.of();
 }

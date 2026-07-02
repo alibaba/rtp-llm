@@ -155,6 +155,14 @@ public class ShortestTTFTStrategy implements LoadBalancer {
             return new ArrayList<>();
         }
 
+        // DP-enabled pods (dp_size>1) are scored alongside single-rank pods.
+        // For DP engines, KvCacheManager.findMatchingEngines returns the MAX
+        // per-rank prefix length (not the misleading union), so the TTFT score
+        // here reflects what the engine can actually serve from a single rank.
+        // Aggregate-of-pod queue / latency fields stay as DP0 reports them
+        // (sum / max), which over-estimates queue depth — accepted as a
+        // conservative upper bound for legacy-path requests (max_new_tokens=1,
+        // beam search, SP-disabled) that bypass DpBatchScheduler.
         return new ArrayList<>(workerStatusMap.values()).stream()
                 .filter(WorkerStatus::isAlive)
                 .filter(resourceMeasure::isResourceAvailable)
