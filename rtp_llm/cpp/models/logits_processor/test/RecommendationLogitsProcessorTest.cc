@@ -703,53 +703,6 @@ TEST_F(RecommendationLogitsProcessorTest, testThinkPreludeWithCrossSeqBan) {
     EXPECT_FALSE(p->infos()[0].banned_combos.count({30, 31}));
 }
 
-// 场景 21：安全降级路径——diverge + banned combo 叠加导致某行全 -inf，验证回退均匀分布
-TEST_F(RecommendationLogitsProcessorTest, testSafetyFallbackAllMasked) {
-    // 构造极端场景：vocab_size=3，combo_size=1，N=2
-    // combo_size=1 时 pos_in_combo==0 同时满足 diverge条件(pos==0) 和 ban条件(pos==combo_size-1==0)
-    // 序列 1 的 banned_combos 将封锁 token 1 和 2，diverge 封锁 topk=1 (token 0)
-    // 导致序列 1 全部 3 个 token 都被遮蔽
-    const int N = 2;
-    const size_t vocab_size = 3;
-    const int combo_size = 1;
-    std::set<std::vector<int>> empty_set;
-    // banned combo: {1} 和 {2} (combo_size=1，单元素 combo)
-    std::set<std::vector<int>> banned = {{1}, {2}};
-
-    std::vector<StreamRecommendationInfo> infos;
-    // 序列 0: 主序列，无 ban，pos_in_combo=0
-    StreamRecommendationInfo info0(combo_size, 0, 0, false, empty_set, {},
-                                    /*enable_cross_sequence_ban=*/true,
-                                    /*cross_seq_diverge_start_combo=*/0);
-    infos.push_back(std::move(info0));
-
-    // 序列 1: banned={1},{2}，pos_in_combo=0，completed_combo_count=1 (触发 diverge)
-    StreamRecommendationInfo info1(combo_size, 0, 0, false, banned, {},
-                                    /*enable_cross_sequence_ban=*/true,
-                                    /*cross_seq_diverge_start_combo=*/0);
-    info1.completed_combo_count = 1;
-    infos.push_back(std::move(info1));
-
-    auto processor = std::make_shared<RecommendationLogitsProcessor>(std::move(infos));
-    auto inputs = allocateSamplerInputs(N, vocab_size, processor);
-
-    // 初始 logits 全部为 1.0
-    inputs.logits.fill_(1.0f);
-
-    processor->process(inputs, 0, N);
-
-    // 序列 1 应该触发安全降级：全部回退为 0.0 (均匀分布)
-    auto logits_cpu = inputs.logits.cpu();
-    auto acc = logits_cpu.accessor<float, 2>();
-    for (size_t v = 0; v < vocab_size; ++v) {
-        EXPECT_FLOAT_EQ(0.0f, acc[1][v]);
-    }
-    // 序列 0 不应被影响（主序列无 diverge，无 ban）
-    for (size_t v = 0; v < vocab_size; ++v) {
-        EXPECT_FLOAT_EQ(1.0f, acc[0][v]);
-    }
-}
-
 // 场景 22：num_return_sequences=1 + enable_cross_sequence_ban=true 的 no-op 边界
 TEST_F(RecommendationLogitsProcessorTest, testSingleSequenceCrossSeqBanNoOp) {
     // N=1 时 updateStatus 跳过广播(size()>1 不满足)，process 跳过 diverge(i>0 不满足)

@@ -183,26 +183,6 @@ void RecommendationLogitsProcessor::process(const SamplerInputs& inputs, size_t 
             logits.index_put_({rows_t, cols_t}, -std::numeric_limits<float>::infinity());
         }
     }
-
-    // 安全检查：仅当 diverge 遮蔽参与时才有叠加导致全 mask 的风险。
-    // ban-only 路径中 vocab 通常数千~十万量级，单靠 banned combo 无法覆盖所有 token，
-    // 此处避免对 ban-only 热路径引入 D2H 同步开销。
-    // 触发频次：diverge 在 combo 起始位置触发 (pos_in_combo==0)，即每 combo_token_size 步一次。
-    // 典型场景 combo_token_size=3、生成 20 个商品 → 整条请求约 7 次 D2H 同步，
-    // 单次 PCIe 延迟 ~5-50μs，总计 < 0.5ms，相对 decode step 延迟 (ms 级) 可忽略。
-    if (need_diverge_process) {
-        auto row_maxes = std::get<0>(logits.max(/*dim=*/1));  // [batch_size], single kernel
-        auto row_maxes_cpu = row_maxes.cpu();                 // single D2H sync
-        auto row_maxes_acc = row_maxes_cpu.accessor<float, 1>();
-        for (size_t i = 0; i < batch_size; ++i) {
-            if (row_maxes_acc[i] == -std::numeric_limits<float>::infinity()) {
-                logits[i].fill_(0.0f);
-                RTP_LLM_LOG_WARNING(
-                    "RecommendationLogitsProcessor: row %zu all logits masked after diverge+ban, "
-                    "falling back to uniform distribution", i);
-            }
-        }
-    }
 }
 
 void RecommendationLogitsProcessor::updateMultiSeqStatus(const std::vector<int>& src_batch_indices) {
