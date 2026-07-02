@@ -41,12 +41,25 @@ class Embedding(nn.Module):
     ) -> torch.Tensor:
         tokens = input.size(0)
         hidden_size = self.weight.size(-1)
-        output = torch.empty(
-            (tokens, hidden_size), dtype=self.weight.dtype, device=input.device
-        )
-        rtp_llm_ops.embedding(
-            output, input, self.weight.data, position_ids, token_types, text_tokens_mask
-        )
+        if not hasattr(rtp_llm_ops, 'embedding'):
+            # The F.embedding fallback cannot honor multimodal mask / position /
+            # token-type semantics. Continuing would silently produce wrong
+            # output, so fail-fast when any of those inputs is actually present.
+            if (text_tokens_mask is not None and text_tokens_mask.numel() > 0) \
+                    or position_ids is not None or token_types is not None:
+                raise NotImplementedError(
+                    "rtp_llm_ops.embedding is unavailable on this backend, but "
+                    "text_tokens_mask/position_ids/token_types were provided. "
+                    "The F.embedding fallback cannot reproduce these masking "
+                    "semantics; refusing to run with silently incorrect output.")
+            output = F.embedding(input, self.weight.data)
+        else:
+            output = torch.empty(
+                (tokens, hidden_size), dtype=self.weight.dtype, device=input.device
+            )
+            rtp_llm_ops.embedding(
+                output, input, self.weight.data, position_ids, token_types, text_tokens_mask
+            )
         if self.tp_size > 1:
             m, n = output.shape
             output = all_gather(output, group=Group.TP)

@@ -1016,3 +1016,199 @@ class RocmImpl(GpuImpl):
         # https://onnx.ai/onnx/technical/float8.html
         weight_scale = weight_scale * 2.0
         return weight, weight_scale
+
+
+class XpuImpl(GpuImpl):
+    """Intel XPU (GPU) device implementation using PyTorch XPU backend."""
+
+    def __init__(self):
+        super().__init__()
+
+    def get_device_id(self) -> int:
+        try:
+            return torch.xpu.current_device()
+        except Exception as e:
+            logger = logging.getLogger(__name__)
+            # current_device() can fail before set_device() has run. Rather than
+            # blindly targeting device 0 (wrong on a multi-card box and a silent
+            # source of cross-device corruption), derive the id from LOCAL_RANK
+            # honoured against the visible-device mask (ZE_AFFINITY_MASK).
+            try:
+                local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+                visible = get_visible_device_list()
+                if visible and local_rank < len(visible):
+                    dev_id = int(visible[local_rank])
+                    logger.warning(
+                        "XPU current_device() failed (%s); using device %d "
+                        "derived from LOCAL_RANK=%d and visible list %s",
+                        e, dev_id, local_rank, visible)
+                    return dev_id
+            except Exception as inner:
+                logger.warning("XPU device-id derivation failed (%s)", inner)
+            raise RuntimeError(
+                f"XPU current_device() failed ({e}) and device id could not be "
+                f"derived from LOCAL_RANK={os.environ.get('LOCAL_RANK', '<unset>')}"
+                f"/ZE_AFFINITY_MASK={os.environ.get('ZE_AFFINITY_MASK', '<unset>')}. "
+                f"Ensure torch.xpu.set_device() is called before model init.")
+
+    def _get_mem_info(self) -> MemInfo:
+        dev_id = self.get_device_id()
+        free, total = torch.xpu.mem_get_info(dev_id)
+        return MemInfo(used=total - free, free=free)
+
+    @property
+    def arch(self) -> str:
+        try:
+            dev_id = self.get_device_id()
+            name = torch.xpu.get_device_name(dev_id)
+            return name
+        except Exception as e:
+            logging.warning(f"Cannot get XPU device name: {e}")
+            return "unknown_xpu"
+
+    def preprocess_weights_for_mixed_gemm(
+        self,
+        tensor: torch.Tensor,
+        quant_mode: torch.dtype,
+        arch: str = "",
+    ) -> torch.Tensor:
+        # XPU does not support weight-only quantization (INT8/INT4) that
+        # requires CUDA-specific preprocessing. Fail fast rather than silently
+        # returning unprocessed weights which would cause wrong inference results.
+        _UNSUPPORTED_QUANT = (torch.int8, torch.quint4x2)
+        if quant_mode in _UNSUPPORTED_QUANT:
+            raise NotImplementedError(
+                f"Weight quantization format {quant_mode} is not supported on XPU. "
+                "Please use a non-quantized (FP16/BF16) or FP8 model."
+            )
+        return tensor
+
+
+# ── Device-agnostic utility functions ──────────────────────────────────────
+
+def _is_xpu_device() -> bool:
+    """Check if the resolved device type is XPU, respecting RTP_LLM_DEVICE_TYPE override."""
+    from rtp_llm.device.device_type import get_device_type, DeviceType
+    return get_device_type() == DeviceType.Xpu
+
+
+def _is_cuda_device() -> bool:
+    """Check if the resolved device type is CUDA/ROCm (not XPU), respecting RTP_LLM_DEVICE_TYPE."""
+    from rtp_llm.device.device_type import get_device_type, DeviceType
+    dt = get_device_type()
+    return dt in (DeviceType.Cuda, DeviceType.ROCm, DeviceType.Ppu)
+
+
+def gpu_is_available() -> bool:
+    """Check if the resolved GPU backend is actually usable.
+
+    Honors the resolved device type (RTP_LLM_DEVICE_TYPE) but reports real
+    availability, so a forced-but-unusable backend reads as unavailable rather
+    than silently True.
+    """
+    if _is_xpu_device():
+        return (hasattr(torch, "xpu") and torch.xpu.is_available()
+                and torch.xpu.device_count() > 0)
+    if _is_cuda_device():
+        return torch.cuda.is_available()
+    return False
+
+
+def gpu_device_count() -> int:
+    """Return the number of available GPU devices.
+
+    Raises a clear error when the resolved device type is forced via
+    RTP_LLM_DEVICE_TYPE but the backend is not actually usable.
+    """
+    if _is_xpu_device():
+        if not (hasattr(torch, "xpu") and torch.xpu.is_available()):
+            raise RuntimeError(
+                "Resolved device type is XPU but torch.xpu is not available. "
+                "Check RTP_LLM_DEVICE_TYPE / ZE_AFFINITY_MASK and the torch XPU "
+                "build.")
+        return torch.xpu.device_count()
+    if _is_cuda_device():
+        if not torch.cuda.is_available():
+            raise RuntimeError(
+                "Resolved device type is CUDA but torch.cuda is not available. "
+                "Check RTP_LLM_DEVICE_TYPE / CUDA_VISIBLE_DEVICES and the torch "
+                "CUDA build.")
+        return torch.cuda.device_count()
+    return 0
+
+
+def gpu_set_device(device_id: int) -> None:
+    """Set the current GPU device."""
+    if _is_xpu_device():
+        if not (hasattr(torch, "xpu") and torch.xpu.is_available()
+                and torch.xpu.device_count() > 0):
+            raise RuntimeError(
+                "Resolved device type is XPU but no usable torch.xpu device is "
+                "available. Check RTP_LLM_DEVICE_TYPE / ZE_AFFINITY_MASK and the "
+                "torch XPU build.")
+        torch.xpu.set_device(device_id)
+    elif _is_cuda_device():
+        if not torch.cuda.is_available():
+            raise RuntimeError(
+                "Resolved device type is CUDA but torch.cuda is not available. "
+                "Check RTP_LLM_DEVICE_TYPE / CUDA_VISIBLE_DEVICES and the torch "
+                "CUDA build.")
+        torch.cuda.set_device(device_id)
+
+
+def gpu_current_device() -> int:
+    """Get the current GPU device index."""
+    if _is_xpu_device():
+        return torch.xpu.current_device()
+    if _is_cuda_device():
+        return torch.cuda.current_device()
+    return 0
+
+
+def gpu_device_name(device_id: int = 0) -> str:
+    """Get the name of a GPU device."""
+    if _is_xpu_device():
+        return torch.xpu.get_device_name(device_id)
+    if _is_cuda_device():
+        return torch.cuda.get_device_name(device_id)
+    return "cpu"
+
+
+def gpu_memory_info(device_id: int = 0):
+    """Return (free, total) memory in bytes for the GPU device."""
+    if _is_xpu_device():
+        return torch.xpu.mem_get_info(device_id)
+    if _is_cuda_device():
+        return torch.cuda.mem_get_info(device_id)
+    import psutil
+    vmem = psutil.virtual_memory()
+    return (vmem.available, vmem.total)
+
+
+def get_device_string() -> str:
+    """Return the device string for tensor placement ('cuda', 'xpu', or 'cpu')."""
+    if _is_xpu_device():
+        return "xpu"
+    if _is_cuda_device():
+        return "cuda"
+    return "cpu"
+
+
+def get_visible_device_list():
+    """Get list of visible device indices from environment or hardware detection."""
+    import os
+    # Honor the resolved device type (RTP_LLM_DEVICE_TYPE) rather than raw
+    # hardware presence, so a CUDA override on a mixed host does not read the
+    # XPU affinity mask (and vice versa).
+    if _is_xpu_device():
+        xpu_mask = os.environ.get("ZE_AFFINITY_MASK", None)
+        if xpu_mask is not None and xpu_mask.strip():
+            # ZE_AFFINITY_MASK may use dotted format "0.0,1.0" for sub-devices;
+            # extract only the device portion (before the dot) for indexing.
+            return [e.split(".")[0] for e in xpu_mask.split(",")]
+    elif _is_cuda_device():
+        cuda_devices = os.environ.get("CUDA_VISIBLE_DEVICES", None)
+        if cuda_devices is not None:
+            return cuda_devices.split(",")
+
+    return [str(i) for i in range(gpu_device_count())]

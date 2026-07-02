@@ -13,6 +13,7 @@ namespace rtp_llm {
 struct BlockInfo {
     // Torch device of the backing storage (CPU/CUDA), taken from the underlying tensor.
     // Kept as raw values to avoid torch->rtp conversions inside cache.
+    // TODO(xpu): rename is_cuda to is_device (or add is_xpu) for multi-device support.
     bool    is_cuda      = false;
     int32_t device_index = 0;
 

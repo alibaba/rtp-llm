@@ -102,6 +102,8 @@ except BaseException as e:
     logging.info(f"Exception: {e}, traceback: {traceback.format_exc()}")
 
 # frontend cannot load libpython3.10.so, so we need to load it manually
+# In XPU env, we keep libpython3.10.so hardcoded and explicitly link it
+# to the actual Python runtime library.
 import sysconfig
 from ctypes import cdll
 

@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/models/logits_processor/BaseLogitsProcessor.h"
+#include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #if USING_CUDA
 #include "rtp_llm/models_py/bindings/cuda/ops/StandaloneOps.h"
@@ -33,7 +34,7 @@ torch::Tensor BaseLogitsProcessor::generateVocabMask(
         }
     }
 
-    return vocab_mask_cpu.to(torch::kCUDA);
+    return vocab_mask_cpu.to(getTorchDevice());
 }
 void BaseLogitsProcessor::maskLogits(torch::Tensor& new_tokens_logits, const torch::Tensor& vocab_mask) {
     RTP_LLM_CHECK(new_tokens_logits.dim() == 2);
