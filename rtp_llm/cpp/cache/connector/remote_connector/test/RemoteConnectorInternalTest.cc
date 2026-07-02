@@ -1,8 +1,10 @@
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
+#include <numeric>
+
 #include "rtp_llm/cpp/cache/connector/remote_connector/RemoteConnector.h"
-#include "rtp_llm/cpp/cache/KVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/allocator/KVCacheAllocator.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "autil/EnvUtil.h"
@@ -29,12 +31,12 @@ public:
         KVCacheAllocator(config) {
         for (int32_t full_group_id : full_group_ids) {
             for (int i = 0; i < per_group_layer_num; i++) {
-                fake_layout_.layer_to_groups.push_back(full_group_id);
+                fake_layout_.layer_to_group_ids.push_back({full_group_id});
             }
         }
         for (int32_t other_group_id : other_group_ids) {
             for (int i = 0; i < per_group_layer_num; i++) {
-                fake_layout_.layer_to_groups.push_back(other_group_id);
+                fake_layout_.layer_to_group_ids.push_back({other_group_id});
             }
         }
     }
@@ -128,22 +130,23 @@ public:
     void SetUp() override {
         rtp_llm::initLogger();
         auto mha_spec                = std::make_shared<MHAKVCacheSpec>();
-        mha_spec->layer_num          = layer_num_;
         mha_spec->local_head_num_kv  = 8;
         mha_spec->size_per_head      = 128;
         mha_spec->seq_size_per_block = 8;
         mha_spec->dtype              = rtp_llm::DataType::TYPE_FP16;
         mha_spec->type               = KVCacheSpecType::MultiHeadAttention;
         cache_config_.block_num      = 8;
-        cache_config_.cache_specs.push_back(mha_spec);
-        byte_size_per_block_           = static_cast<size_t>(mha_spec->block_size_bytes() * mha_spec->layer_num);
+        byte_size_per_block_           = static_cast<size_t>(mha_spec->block_size_bytes() * layer_num_);
         cache_config_.block_size_bytes = byte_size_per_block_;
         cache_config_.dtype            = rtp_llm::DataType::TYPE_FP16;
-        cache_config_.group_types.push_back(CacheGroupType::FULL);
-        cache_config_.group_types.push_back(CacheGroupType::LINEAR);
-        cache_config_.group_types.push_back(CacheGroupType::LINEAR);
-        cache_config_.full_group_num   = 1;
-        cache_config_.linear_group_num = 2;
+        cache_config_.layer_num        = layer_num_;
+        cache_config_.layer_all_num    = layer_num_;
+        std::vector<int> layers(layer_num_);
+        std::iota(layers.begin(), layers.end(), 0);
+        cache_config_.fromGroupedSpecs({mha_spec, mha_spec, mha_spec},
+                                       {layers, layers, layers},
+                                       {CacheGroupType::FULL, CacheGroupType::LINEAR, CacheGroupType::LINEAR},
+                                       {"F0", "L1", "L2"});
     }
 
     void TearDown() override {}

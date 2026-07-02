@@ -5,7 +5,7 @@
 #include <condition_variable>
 #include <c10/core/InferenceMode.h>
 
-#include "rtp_llm/cpp/cache/CacheGroupType.h"
+#include "rtp_llm/cpp/cache/spec/CacheGroupType.h"
 #include "rtp_llm/cpp/utils/KVCacheUtils.h"
 #include "rtp_llm/cpp/model_rpc/QueryConverter.h"
 #include "rtp_llm/cpp/model_rpc/DecodeRpcServer.h"
@@ -579,7 +579,7 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
 
     const bool   use_mla       = cache_config.use_mla;
     const bool   use_hybrid    = cache_config.groupNums() > 1;
-    const auto&  spec          = cache_config.cache_specs[0];
+    const auto&  spec          = cache_config.specForGroup(0);
     const size_t k_total_bytes = spec->k_block_size_bytes();
     const size_t v_total_bytes = spec->v_block_size_bytes();
 
@@ -607,8 +607,8 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
             auto load_layer_cache =
                 std::make_shared<RequestBlockBuffer>(std::to_string(load_context.request_id), request_key);
             size_t gid = 0;
-            if (use_hybrid && layer_id < cache_config.layer_to_group_id.size()) {
-                const int mapped_gid = cache_config.layer_to_group_id[layer_id];
+            if (use_hybrid && layer_id < cache_config.layers.size()) {
+                const int mapped_gid = cache_config.groupIdFor(layer_id);
                 if (mapped_gid >= 0) {
                     gid = static_cast<size_t>(mapped_gid);
                 }
@@ -627,10 +627,10 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
             block_pos_list.reserve(block_num);
             if (use_hybrid && block_num > 0) {
                 CacheGroupType group_type = CacheGroupType::FULL;
-                if (layer_id < cache_config.layer_to_group_id.size() && !cache_config.group_types.empty()) {
-                    const int gid = cache_config.layer_to_group_id[layer_id];
-                    if (gid >= 0 && static_cast<size_t>(gid) < cache_config.group_types.size()) {
-                        group_type = cache_config.group_types[static_cast<size_t>(gid)];
+                if (layer_id < cache_config.layers.size()) {
+                    const int gid = cache_config.groupIdFor(layer_id);
+                    if (gid >= 0 && static_cast<size_t>(gid) < static_cast<size_t>(cache_config.groupNums())) {
+                        group_type = cache_config.typeForGroup(static_cast<size_t>(gid));
                     }
                 }
                 if (group_type == CacheGroupType::LINEAR) {
@@ -707,9 +707,23 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                                             "mtp layer_num mismatch: engine=" + std::to_string(layer_num)
                                                 + " cache_cfg=" + std::to_string(mtp_cache_cfg.layer_num)
                                                 + " (mtp_model_id=" + std::to_string(mtp_model_id) + ")");
-                    RTP_LLM_CHECK_WITH_INFO(
-                        !mtp_cache_cfg.global_layer_ids.empty(),
-                        "mtp_cache_cfg.global_layer_ids is empty (mtp_model_id=" + std::to_string(mtp_model_id) + ")");
+                    // Flatten per-group layer ids into a local-layer-id indexed
+                    // table. SWA-only DSV4 propose configs place the single MTP layer
+                    // in the SWA group (gid=6), NOT in FULL[0], so reading
+                    // group 0 returned garbage (empty vector
+                    // out-of-bounds) and crashed loadCache with SIGSEGV during
+                    // convertIndexToBuffer.
+                    std::vector<int> mtp_local_to_global_layer_id;
+                    for (size_t gid = 0; gid < static_cast<size_t>(mtp_cache_cfg.groupNums()); ++gid) {
+                        for (int lid : mtp_cache_cfg.layerIdsForGroup(gid)) {
+                            mtp_local_to_global_layer_id.push_back(lid);
+                        }
+                    }
+                    RTP_LLM_CHECK_WITH_INFO(mtp_local_to_global_layer_id.size() == layer_num,
+                                            "mtp flat layer id size %zu != layer_num %zu (mtp_model_id=%zu)",
+                                            mtp_local_to_global_layer_id.size(),
+                                            layer_num,
+                                            mtp_model_id);
 
                     for (size_t layer_id = 0; layer_id < layer_num; layer_id++) {
                         auto request_key = std::to_string(load_context.request_id) + "-" + std::to_string(layer_id);
@@ -717,8 +731,8 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                             std::make_shared<RequestBlockBuffer>(std::to_string(load_context.request_id), request_key);
                         size_t     gid            = 0;
                         const bool mtp_use_hybrid = mtp_cache_cfg.groupNums() > 1;
-                        if (mtp_use_hybrid && layer_id < mtp_cache_cfg.layer_to_group_id.size()) {
-                            const int mapped_gid = mtp_cache_cfg.layer_to_group_id[layer_id];
+                        if (mtp_use_hybrid && layer_id < mtp_cache_cfg.layers.size()) {
+                            const int mapped_gid = mtp_cache_cfg.groupIdFor(layer_id);
                             if (mapped_gid >= 0) {
                                 gid = static_cast<size_t>(mapped_gid);
                             }
@@ -733,19 +747,18 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                         auto        block_num = block_ids.size();
                         size_t      model_id  = mtp_base_model_id;
 
-                        // Use per-module global_layer_ids for address lookup.
-                        const int global_layer_id = mtp_cache_cfg.global_layer_ids[0][layer_id];
+                        // Use per-module flattened layer ids for address lookup.
+                        const int global_layer_id = mtp_local_to_global_layer_id[layer_id];
 
                         // Hybrid cache: Linear group only needs the last block; Full group needs all blocks.
                         std::vector<size_t> block_pos_list;
                         block_pos_list.reserve(block_num);
                         if (mtp_use_hybrid && block_num > 0) {
                             CacheGroupType group_type = CacheGroupType::FULL;
-                            if (layer_id < mtp_cache_cfg.layer_to_group_id.size()
-                                && !mtp_cache_cfg.group_types.empty()) {
-                                const int gid = mtp_cache_cfg.layer_to_group_id[layer_id];
-                                if (gid >= 0 && static_cast<size_t>(gid) < mtp_cache_cfg.group_types.size()) {
-                                    group_type = mtp_cache_cfg.group_types[static_cast<size_t>(gid)];
+                            if (layer_id < mtp_cache_cfg.layers.size()) {
+                                const int gid = mtp_cache_cfg.groupIdFor(layer_id);
+                                if (gid >= 0 && static_cast<size_t>(gid) < static_cast<size_t>(mtp_cache_cfg.groupNums())) {
+                                    group_type = mtp_cache_cfg.typeForGroup(static_cast<size_t>(gid));
                                 }
                             }
                             if (group_type == CacheGroupType::LINEAR) {

@@ -5,7 +5,7 @@
 #include "autil/EnvUtil.h"
 #include "rtp_llm/cpp/cache/connector/remote_connector/GroupPolicy.h"
 #include "rtp_llm/cpp/cache/Types.h"
-#include "rtp_llm/cpp/cache/KVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/allocator/KVCacheAllocator.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
 namespace rtp_llm {
@@ -70,31 +70,38 @@ bool DefaultLayerGroupPolicy::init() {
     }
     const auto  layer_layout       = allocator_->allLayerCacheBase();
     uint64_t    group_name_bithash = 1;
-    const auto& layer_to_groups    = layer_layout.layer_to_groups;
-    for (int layer = 0; layer < static_cast<int>(layer_to_groups.size()); ++layer) {
-        const int group_idx     = layer_to_groups.at(layer);
-        bool      is_full_group = false;
-        if (full_group_ids_.find(group_idx) != full_group_ids_.end()) {
-            is_full_group = true;
+    const auto& layer_group_ids    = layer_layout.layer_to_group_ids;
+    for (int layer = 0; layer < static_cast<int>(layer_group_ids.size()); ++layer) {
+        if (layer_group_ids.at(layer).empty()) {
+            RTP_LLM_LOG_ERROR("layer [%d] has no cache group id", layer);
+            return false;
         }
-        if (!is_full_group) {
-            if (other_group_ids_.find(group_idx) == other_group_ids_.end()) {
-                RTP_LLM_LOG_ERROR("not find valid group id, [%d]", group_idx);
-                return false;
+        for (const int group_idx : layer_group_ids.at(layer)) {
+            bool is_full_group = false;
+            if (full_group_ids_.find(group_idx) != full_group_ids_.end()) {
+                is_full_group = true;
             }
+            if (!is_full_group) {
+                if (other_group_ids_.find(group_idx) == other_group_ids_.end()) {
+                    RTP_LLM_LOG_ERROR("not find valid group id, [%d]", group_idx);
+                    return false;
+                }
+            }
+            if (groups_.count(group_idx) == 0) {
+                if (groups_.size() >= 64) {
+                    RTP_LLM_LOG_ERROR("not support bigger than 64 groups");
+                    return false;
+                }
+                std::string group_name         = is_full_group ? ("F" + std::to_string(group_idx)) :
+                                                                 (GetOtherGroupPrefixName() + std::to_string(group_idx));
+                groups_[group_idx]             = Group{is_full_group, group_name_bithash, group_name};
+                group_to_layer_ids_[group_idx] = {};
+                if (groups_.size() < 64) {
+                    group_name_bithash <<= 1;
+                }
+            }
+            group_to_layer_ids_.at(group_idx).push_back(layer);
         }
-        if (groups_.count(group_idx) == 0) {
-            std::string group_name         = is_full_group ? ("F" + std::to_string(group_idx)) :
-                                                             (GetOtherGroupPrefixName() + std::to_string(group_idx));
-            groups_[group_idx]             = Group{is_full_group, group_name_bithash, group_name};
-            group_to_layer_ids_[group_idx] = {};
-            group_name_bithash <<= 1;
-        }
-        group_to_layer_ids_.at(group_idx).push_back(layer);
-    }
-    if (groups_.size() > 64) {
-        RTP_LLM_LOG_ERROR("not support bigger than 64 groups");
-        return false;
     }
     return true;
 }
@@ -158,17 +165,20 @@ bool DefaultLayerGroupPolicy::genBlockBuffers(const std::vector<int32_t>&     gr
         iovs.reserve(layer_ids.size() * 2);
         for (size_t j = 0; j < layer_ids.size(); ++j) {
             // if support scale, block_infos: {kv_info, scale_info}
-            const auto& block_infos = allocator_->convertIndexToBuffer(layer_ids[j], block_ids[i]);
+            const auto& block_infos = allocator_->convertIndexToBuffer(layer_ids[j], group_ids[i], block_ids[i]);
             if (block_infos.empty()) {
-                RTP_LLM_LOG_WARNING(
-                    "convertIndexToBuffer returned empty for layer_id [%d] block_id[%d]", layer_ids[j], block_ids[i]);
+                RTP_LLM_LOG_WARNING("convertIndexToBuffer returned empty for layer_id [%d] group_id [%d] block_id[%d]",
+                                    layer_ids[j],
+                                    group_ids[i],
+                                    block_ids[i]);
             }
             for (size_t idx = 0; idx < block_infos.size(); ++idx) {
                 CHECK_BLOCK_INFO_VALID(
                     block_infos[idx],
-                    "convertIndexToBuffer failed layer_id [%d] block_id[%d], block_info.addr or block_info.size_bytes is invalid",
-                    j,
-                    i);
+                    "convertIndexToBuffer failed layer_id [%d] group_id [%d] block_id[%d], block_info.addr or block_info.size_bytes is invalid",
+                    layer_ids[j],
+                    group_ids[i],
+                    block_ids[i]);
                 push_iov(iovs, block_infos[idx]);
             }
         }

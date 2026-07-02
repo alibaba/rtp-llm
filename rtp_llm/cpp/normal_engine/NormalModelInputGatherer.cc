@@ -229,7 +229,6 @@ GptModelInputs NormalModelInputGatherer::allocateModelInputBuffers(const StreamG
                          pinned_i32);
         model_input.kv_cache_block_id = torch::zeros(
             {(int64_t)config_.kv_cache_group_nums, (int64_t)total_batch_size, (int64_t)max_blocks_num}, pinned_i32);
-        model_input.kv_cache_layer_to_group = torch::empty({(int64_t)config_.num_layers}, pinned_i32);
         model_input.kv_cache_group_types    = torch::empty({(int64_t)config_.kv_cache_group_nums}, pinned_i32);
         model_input.kv_cache_update_mapping = torch::empty({(int64_t)total_block_copy_num, 2}, pinned_i32);
         model_input.cache_keys = torch::empty({(int64_t)total_context_batch_size, (int64_t)max_blocks_num}, pinned_i64);
@@ -257,12 +256,6 @@ GptModelInputs NormalModelInputGatherer::allocateModelInputBuffers(const StreamG
 }
 
 void NormalModelInputGatherer::initializeKvCacheMetadata(GptModelInputs& model_input) const {
-    if (model_input.kv_cache_layer_to_group.defined()) {
-        size_t num_layers = config_.layer_to_kv_cache_group_id.size();
-        std::memcpy(model_input.kv_cache_layer_to_group.data_ptr(),
-                    config_.layer_to_kv_cache_group_id.data(),
-                    num_layers * sizeof(int32_t));
-    }
     if (model_input.kv_cache_group_types.defined()) {
         auto* dst = model_input.kv_cache_group_types.data_ptr<int32_t>();
         for (size_t g = 0; g < config_.kv_cache_group_nums; ++g) {

@@ -105,7 +105,7 @@ class Qwen3VLModel(GptModelBase):
             cpu_locs = []
 
         for i, decoder_layer in enumerate(self.layers[: self.layer_num]):
-            select_block_map_for_layer(inputs.attention_inputs, i)
+            select_block_map_for_layer(inputs.attention_inputs, self.kv_cache, i)
             hidden_states = decoder_layer(
                 hidden_states,
                 fmha_impl,

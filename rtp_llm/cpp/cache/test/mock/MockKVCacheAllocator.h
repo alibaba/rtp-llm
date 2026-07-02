@@ -2,7 +2,7 @@
 
 #include <gmock/gmock.h>
 
-#include "rtp_llm/cpp/cache/KVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/allocator/KVCacheAllocator.h"
 
 namespace rtp_llm {
 

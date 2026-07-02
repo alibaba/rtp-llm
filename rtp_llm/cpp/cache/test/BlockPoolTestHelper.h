@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <numeric>
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/BlockPoolConfigHelper.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
@@ -40,7 +41,6 @@ inline KVCacheSpecPtr createTestKvCacheSpec(uint32_t          layer_num,
         auto spec                = std::make_shared<MHAKVCacheSpec>();
         spec->type               = KVCacheSpecType::MultiHeadAttention;
         spec->dtype              = dtype;
-        spec->layer_num          = layer_num;
         spec->local_head_num_kv  = local_head_num_kv;
         spec->seq_size_per_block = seq_size_per_block;
         spec->size_per_head      = static_cast<uint32_t>(k_elems / denom);
@@ -50,7 +50,6 @@ inline KVCacheSpecPtr createTestKvCacheSpec(uint32_t          layer_num,
         auto spec                = std::make_shared<MLAKVCacheSpec>();
         spec->type               = KVCacheSpecType::MultiHeadLatentAttention;
         spec->dtype              = dtype;
-        spec->layer_num          = layer_num;
         spec->local_head_num_kv  = local_head_num_kv;
         spec->seq_size_per_block = seq_size_per_block;
         spec->kv_lora_rank       = static_cast<uint32_t>(k_elems / denom);
@@ -72,15 +71,18 @@ inline BlockPoolConfig createTestConfig(size_t            k_block_stride_bytes =
     auto spec = createTestKvCacheSpec(
         kLayerNum, dtype, local_head_num_kv, seq_size_per_block, k_block_stride_bytes, v_block_stride_bytes);
 
-    // Create CacheConfig with the spec
     rtp_llm::CacheConfig cache_config;
-    cache_config.cache_specs           = {spec};
     cache_config.layer_num             = kLayerNum;
+    cache_config.layer_all_num         = kLayerNum;
     cache_config.block_num             = kBlockNum;
     cache_config.dtype                 = dtype;
     cache_config.seq_size_per_block    = seq_size_per_block;
     cache_config.kv_block_stride_bytes = k_block_stride_bytes + v_block_stride_bytes;
     cache_config.kv_scale_stride_bytes = k_scale_stride_bytes + v_scale_stride_bytes;
+
+    std::vector<int> layer_ids(kLayerNum);
+    std::iota(layer_ids.begin(), layer_ids.end(), 0);
+    cache_config.fromGroupedSpecs({spec}, {layer_ids}, {CacheGroupType::FULL}, {"default"});
 
     return BlockPoolConfigHelper::createConfig(cache_config);
 }

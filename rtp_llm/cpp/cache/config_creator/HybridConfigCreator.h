@@ -1,0 +1,56 @@
+#pragma once
+
+#include <memory>
+#include <vector>
+#include <utility>
+#include <string>
+#include "rtp_llm/cpp/cache/CacheConfig.h"
+#include "rtp_llm/cpp/config/ConfigModules.h"
+#include "rtp_llm/cpp/config/ModelConfig.h"
+
+namespace rtp_llm {
+
+class HybridConfigCreator {
+public:
+    static CacheConfig                   createHybridConfig(const ModelConfig&       model_config,
+                                                            const ParallelismConfig& parallelism_config,
+                                                            const KVCacheConfig&     kv_cache_config,
+                                                            bool                     is_mtp = false,
+                                                            int                      gen_num_per_cycle = 0);
+    static std::vector<std::vector<int>> splitIntoGroups(const std::vector<int>& ids, int group_layer_num);
+
+    // Calculate the number of layers per group based on linear and full layers count
+    static int calculateGroupLayerNum(int linear_layer_count, int full_layer_count);
+
+private:
+    // Helper functions for creating hybrid config in the order they appear in the main flow
+    static std::pair<std::vector<int>, std::vector<int>> splitLayersByAttentionType(const ModelConfig& model_config);
+    static CacheConfig                                   initializeConfig(const ModelConfig&      model_config,
+                                                                          const std::vector<int>& linear_layers,
+                                                                          const std::vector<int>& full_layers,
+                                                                          rtp_llm::DataType       dtype);
+    static KVCacheSpecPtr getSpecFromLayers(const LayerKVCacheSpecs& runtime_specs,
+                                            const std::vector<int>&  layer_ids,
+                                            const char*              spec_role);
+    static void           prepareFullAttentionSpec(KVCacheSpecPtr            spec,
+                                                   const ModelConfig&       model_config,
+                                                   const ParallelismConfig& parallelism_config,
+                                                   rtp_llm::DataType        dtype,
+                                                   uint32_t                 layer_num);
+    static void           prepareLinearAttentionSpec(KVCacheSpecPtr            spec,
+                                                     const ModelConfig&       model_config,
+                                                     const ParallelismConfig& parallelism_config,
+                                                     rtp_llm::DataType        dtype,
+                                                     uint32_t                 layer_num);
+    static std::pair<std::vector<std::vector<int>>, std::vector<std::vector<int>>>
+    createLayerGroups(const std::vector<int>& linear_layers, const std::vector<int>& full_layers, int& group_layer_num);
+    static void setupCacheConfigSpecs(CacheConfig&                         config,
+                                      const std::vector<std::vector<int>>& linear_groups,
+                                      const std::vector<std::vector<int>>& full_groups,
+                                      const KVCacheSpecPtr&                linear_spec,
+                                      const KVCacheSpecPtr&                full_spec);
+    static void
+    setupPhysicalSizes(CacheConfig& config, const KVCacheSpecPtr& full_spec, const KVCacheSpecPtr& linear_spec);
+};
+
+}  // namespace rtp_llm

@@ -11,7 +11,7 @@
 #include "rtp_llm/cpp/cache/connector/AsyncContext.h"
 #include "rtp_llm/cpp/cache/connector/IKVCacheConnectorCoordinator.h"
 #include "rtp_llm/cpp/cache/connector/KVCacheConnector.h"
-#include "rtp_llm/cpp/cache/KVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/allocator/KVCacheAllocator.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.grpc.pb.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
@@ -67,6 +67,8 @@ private:
     std::shared_ptr<KVCacheMemoryConnector> initMemoryConnector();
     std::shared_ptr<RemoteConnector>        initRemoteConnector();
     bool                                    initP2PConnectorInternal();
+    // Returns CP size when page-level RR sharding is active; 1 otherwise.
+    int                                     cpSize() const;
     void                                    initUpdateThread();
     void                                    updateOnce();
     void                                    processReadContexts();

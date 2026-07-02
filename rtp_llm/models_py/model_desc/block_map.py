@@ -1,27 +1,41 @@
+from typing import Any
+
 from rtp_llm.ops.compute_ops import PyAttentionInputs
 
 
 def select_block_map_for_layer(
-    attention_inputs: PyAttentionInputs, layer_idx: int
+    attention_inputs: PyAttentionInputs, kv_cache: Any, local_layer_idx: int
 ) -> int:
-    if attention_inputs.kv_cache_kernel_block_id_device_by_group is None:
-        return
+    device_by_group = attention_inputs.kv_cache_kernel_block_id_device_by_group
+    if device_by_group is None or len(device_by_group) == 0:
+        return 0
+    host_by_group = attention_inputs.kv_cache_kernel_block_id_by_group
 
     gid = 0
-    if attention_inputs.kv_cache_layer_to_group is not None:
-        gid = int(attention_inputs.kv_cache_layer_to_group[layer_idx].item())
+    if kv_cache is not None and kv_cache.layer_to_group_ids:
+        if local_layer_idx < 0 or local_layer_idx >= len(kv_cache.layer_to_group_ids):
+            raise RuntimeError(
+                f"local layer {local_layer_idx} is out of layer_to_group_ids range "
+                f"{len(kv_cache.layer_to_group_ids)}"
+            )
+        group_ids = kv_cache.layer_to_group_ids[local_layer_idx]
+        if len(group_ids) != 1:
+            raise RuntimeError(
+                f"local layer {local_layer_idx} owns groups {group_ids}; "
+                "select_block_map_for_layer requires a single default group"
+            )
+        gid = int(group_ids[0])
 
-    if attention_inputs.kv_cache_kernel_block_id_device_by_group is not None and len(
-        attention_inputs.kv_cache_kernel_block_id_device_by_group
-    ):
-        attention_inputs.kv_cache_kernel_block_id_device = (
-            attention_inputs.kv_cache_kernel_block_id_device_by_group[gid]
+    if gid < 0 or gid >= len(device_by_group):
+        raise RuntimeError(
+            f"local layer {local_layer_idx} maps to invalid device group {gid}; "
+            f"available groups={len(device_by_group)}"
         )
-
-    if attention_inputs.kv_cache_kernel_block_id_by_group is not None and len(
-        attention_inputs.kv_cache_kernel_block_id_by_group
-    ):
-        attention_inputs.kv_cache_kernel_block_id = (
-            attention_inputs.kv_cache_kernel_block_id_by_group[gid]
+    if host_by_group is None or gid >= len(host_by_group):
+        raise RuntimeError(
+            f"local layer {local_layer_idx} maps to invalid host group {gid}; "
+            f"available groups={0 if host_by_group is None else len(host_by_group)}"
         )
+    attention_inputs.kv_cache_kernel_block_id_device = device_by_group[gid]
+    attention_inputs.kv_cache_kernel_block_id = host_by_group[gid]
     return gid

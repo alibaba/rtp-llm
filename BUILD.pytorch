@@ -25,6 +25,7 @@ cc_library(
         ] + glob([
             "torch/lib/libcudart*.so*",
             "torch/lib/libnvToolsExt*.so*",
+            "torch/lib/libtorch_nvshmem*.so*",
         ]),
         "@//:using_rocm": [
             # "torch/lib/librocfft.so",

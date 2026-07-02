@@ -1174,7 +1174,7 @@ class Qwen3NextModel(GptModelBase):
         residual = torch.zeros_like(hidden_states)
 
         for i, decoder_layer in enumerate(self.layers):
-            select_block_map_for_layer(attention_inputs, i)
+            select_block_map_for_layer(attention_inputs, self.kv_cache, i)
             hidden_states, residual = decoder_layer(
                 hidden_states,
                 residual,

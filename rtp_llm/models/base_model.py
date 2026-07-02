@@ -20,9 +20,12 @@ from rtp_llm.model_loader.weight_manager import WeightManager
 from rtp_llm.models.downstream_modules.custom_module import CustomModule
 from rtp_llm.models.downstream_modules.utils import create_custom_module
 from rtp_llm.ops import (
+    CacheType,
     DeviceResourceConfig,
     FMHAConfig,
     HWKernelConfig,
+    KVCacheSpecDesc,
+    MlaOpsType,
     MoeConfig,
     ParallelismConfig,
 )
@@ -189,11 +192,38 @@ class BaseModel(object):
     @classmethod
     def create_config(cls, ckpt_path: str) -> ModelConfig:
         config = cls._create_config(ckpt_path)
+        cls._post_build_model_config(config)
         return config
 
     @classmethod
     def _create_config(cls, ckpt_path: str) -> ModelConfig:
         raise NotImplementedError()
+
+    @classmethod
+    def _post_build_model_config(cls, model_config: ModelConfig) -> None:
+        if model_config.kv_cache_spec_descs:
+            return
+
+        if (
+            model_config.attn_config.use_mla
+            and model_config.mla_ops_type != MlaOpsType.MHA
+        ):
+            desc = KVCacheSpecDesc()
+            desc.cache_type = CacheType.MLA
+            desc.kv_lora_rank = int(model_config.attn_config.kv_lora_rank)
+            desc.rope_head_dim = int(model_config.attn_config.rope_head_dim)
+            desc.num_kv_heads = 1  # MLA does not split heads across TP
+        else:
+            desc = KVCacheSpecDesc()
+            desc.cache_type = CacheType.MHA
+            desc.size_per_head = int(model_config.attn_config.size_per_head)
+            desc.num_kv_heads = int(model_config.attn_config.kv_head_num)
+
+        desc.tag = "default"
+        desc.seq_size_per_block = int(model_config.attn_config.tokens_per_block)
+        model_config.kv_cache_spec_descs = [
+            [desc] for _ in range(model_config.num_layers)
+        ]
 
     @classmethod
     def from_config(
