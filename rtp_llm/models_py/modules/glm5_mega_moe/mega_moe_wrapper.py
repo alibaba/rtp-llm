@@ -34,8 +34,8 @@ def _split_stacked_moe_w1_up_gate(
             f"Expected even stacked moe_w1 N dimension, got shape={tuple(w1.shape)}"
         )
     half_n = w1.shape[1] // 2
-    # RTP's generic MoE kernels use [up/value | gate].  DeepGEMM Mega MoE
-    # follows the DSV4 convention [gate | up], so callers must reorder.
+    # Supported MegaMoE loaders pass W.moe_w1 as [up/value | gate].  DeepGEMM
+    # takes logical gate and up weights separately, then restacks [gate | up].
     w1_up = w1[:, :half_n, :].contiguous()
     w1_gate = w1[:, half_n:, :].contiguous()
     return w1_up, w1_gate
@@ -149,6 +149,8 @@ class MegaMoeWrapper(nn.Module):
             moe_inter_dim=moe_inter_dim_raw,
             n_routed_experts=n_routed_experts,
             n_activated_experts=n_activated_experts,
+            swiglu_limit=float(getattr(config, "swiglu_limit", 0.0) or 0.0),
+            swiglu_alpha=float(getattr(config, "swiglu_alpha", 0.0) or 0.0),
             ep_size=ep_size,
             ep_rank=ep_rank,
             max_tokens_per_rank=max_tokens_per_rank,

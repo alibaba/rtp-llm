@@ -5,6 +5,7 @@ from unittest.mock import patch
 import torch
 
 from rtp_llm.models_py.modules.glm5_mega_moe import (
+    mega_moe_fp8_wrapper,
     mega_moe_fused_wrapper,
     mega_moe_wrapper,
 )
@@ -64,7 +65,7 @@ class MegaMoeWrapperLayoutTest(unittest.TestCase):
                     config, _parallelism(), weights, moe_config=None, layer_idx=0
                 )
 
-    def test_fp8_stacked_moe_w1_reorders_up_gate_for_deepgemm(self):
+    def test_fp8_stacked_moe_w1_passes_gate_up_to_deepgemm(self):
         config = _config(hidden_size=8, inter=4)
         up_w = torch.full((2, 4, 8), 3, dtype=torch.float32).to(torch.float8_e4m3fn)
         gate_w = torch.full((2, 4, 8), 7, dtype=torch.float32).to(torch.float8_e4m3fn)
@@ -92,7 +93,35 @@ class MegaMoeWrapperLayoutTest(unittest.TestCase):
         torch.testing.assert_close(captured["w3_fp8"], up_w)
         torch.testing.assert_close(captured["w3_scale"], up_s)
 
-    def test_fp4_stacked_moe_w1_reorders_up_gate_for_deepgemm(self):
+    def test_fp8_wrapper_uses_fp8_class_and_passes_swiglu_params(self):
+        config = _config(hidden_size=8, inter=4)
+        config.swiglu_limit = 7.0
+        config.swiglu_alpha = 1.702
+        up_w = torch.full((2, 4, 8), 3, dtype=torch.float32).to(torch.float8_e4m3fn)
+        gate_w = torch.full((2, 4, 8), 7, dtype=torch.float32).to(torch.float8_e4m3fn)
+        up_s = torch.full((2, 4, 1), 5, dtype=torch.float32)
+        gate_s = torch.full((2, 4, 1), 11, dtype=torch.float32)
+        weights = {
+            W.moe_w1: torch.cat([up_w, gate_w], dim=1),
+            W.moe_s1: torch.cat([up_s, gate_s], dim=1),
+            W.moe_w2: torch.zeros((2, 8, 4), dtype=torch.float32).to(
+                torch.float8_e4m3fn
+            ),
+            W.moe_s2: torch.ones((2, 8, 1), dtype=torch.float32),
+        }
+
+        with patch.object(mega_moe_fp8_wrapper, "GLM5MegaMoEFP8", _FakeMegaMoE):
+            mega_moe_fp8_wrapper.MegaMoeFp8Wrapper(
+                config, _parallelism(), weights, moe_config=None, layer_idx=0
+            )
+
+        self.assertEqual(_FakeMegaMoE.instance.params["swiglu_limit"], 7.0)
+        self.assertEqual(_FakeMegaMoE.instance.params["swiglu_alpha"], 1.702)
+        captured = _FakeMegaMoE.instance.fp8_kwargs
+        torch.testing.assert_close(captured["w1_fp8"], gate_w)
+        torch.testing.assert_close(captured["w3_fp8"], up_w)
+
+    def test_fp4_stacked_moe_w1_passes_gate_up_to_deepgemm(self):
         config = _config(hidden_size=8, inter=4)
         up_w = torch.full((2, 4, 4), 3, dtype=torch.int8)
         gate_w = torch.full((2, 4, 4), 7, dtype=torch.int8)
