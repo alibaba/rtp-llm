@@ -76,13 +76,15 @@ void HybridTypeKVCacheAllocator::referenceValidBlocks(const BlockIndicesType& bl
     }
 }
 
-int HybridTypeKVCacheAllocator::reuseCache(const CacheKeysType& cache_keys, BatchKVCacheResource& kv_resource) {
+int HybridTypeKVCacheAllocator::reuseCache(const CacheKeysType&  cache_keys,
+                                           BatchKVCacheResource& kv_resource,
+                                           int64_t               current_batch_epoch) {
     // 1) Prefix match on all full-attn groups, take the shortest prefix.
     int                           min_full_reuse_blocks = static_cast<int>(cache_keys.size());
     std::vector<BlockIndicesType> full_matched_blocks(kv_cache_groups_.size());
 
     for (int gid : full_group_ids_) {
-        auto match_result     = kv_cache_groups_[static_cast<size_t>(gid)]->match(cache_keys);
+        auto match_result     = kv_cache_groups_[static_cast<size_t>(gid)]->match(cache_keys, current_batch_epoch);
         min_full_reuse_blocks = std::min(min_full_reuse_blocks, static_cast<int>(match_result.reuse_blocks));
         full_matched_blocks[static_cast<size_t>(gid)] = std::move(match_result.block_indices);
     }
@@ -97,7 +99,7 @@ int HybridTypeKVCacheAllocator::reuseCache(const CacheKeysType& cache_keys, Batc
         for (size_t i = 0; i < linear_group_ids_.size(); ++i) {
             const int gid      = linear_group_ids_[i];
             auto* linear_group = dynamic_cast<LinearKVCacheGroup*>(kv_cache_groups_[static_cast<size_t>(gid)].get());
-            auto  result       = linear_group->matchSingleKey(cache_keys[static_cast<size_t>(pos)]);
+            auto  result = linear_group->matchSingleKey(cache_keys[static_cast<size_t>(pos)], current_batch_epoch);
             if (result.block_indices.empty()) {
                 all_linear_matched = false;
                 break;
@@ -234,7 +236,7 @@ MallocResult HybridTypeKVCacheAllocator::initMallocForCommonLen(const MallocInfo
         // Drop last key of partial block (same rationale as SingleType).
         CacheKeysType match_keys(cache_keys.begin(), cache_keys.empty() ? cache_keys.end() : cache_keys.end() - 1);
         auto          begin_us = currentTimeUs();
-        reuse_blocks           = reuseCache(match_keys, *kv_resource);
+        reuse_blocks           = reuseCache(match_keys, *kv_resource, malloc_info.epoch);
         match_cost_time_us     = currentTimeUs() - begin_us;
 
         // Reference reused blocks in batch 0 (filter NULL_BLOCK_IDX).
@@ -309,16 +311,23 @@ void HybridTypeKVCacheAllocator::insertIntoCache(const InsertInfo& insert_info) 
 
     for (int batch_id = 0; batch_id < batch_size; ++batch_id) {
         const auto& cache_keys = kv_cache_resource->cacheKeys(batch_id);
-
-        auto token_ids = insert_info.complete_token_ids->completeTokenIdsVec(batch_id);
-        if (token_ids.size() <= 1 || cache_keys.empty()) {
+        if (cache_keys.empty()) {
             continue;
         }
 
         // Only insert full blocks.
-        const size_t token_len       = token_ids.size() - 1;
-        const size_t full_blocks_num = token_len / static_cast<size_t>(seq_size_per_block);
-        const size_t n               = std::min(cache_keys.size(), full_blocks_num);
+        size_t full_blocks_num = insert_info.cacheable_blocks;
+        if (full_blocks_num == SIZE_MAX) {
+            const int seq_len = insert_info.complete_token_ids->seqLength();
+            if (seq_len <= 0) {
+                continue;
+            }
+            const bool keep_decode_tail = insert_info.is_resident || insert_info.epoch > 0;
+            const auto token_len =
+                keep_decode_tail ? static_cast<size_t>(seq_len) : static_cast<size_t>(std::max(seq_len - 1, 0));
+            full_blocks_num = token_len / static_cast<size_t>(seq_size_per_block);
+        }
+        const size_t n = std::min(cache_keys.size(), full_blocks_num);
         if (n == 0) {
             continue;
         }
@@ -332,7 +341,7 @@ void HybridTypeKVCacheAllocator::insertIntoCache(const InsertInfo& insert_info) 
                 put_blocks.push_back(blocks[i]);
             }
             kv_cache_groups_[static_cast<size_t>(gid)]->insertIntoCache(
-                put_cache_keys, put_blocks, insert_info.is_resident);
+                put_cache_keys, put_blocks, insert_info.is_resident, insert_info.epoch);
         }
     }
 }

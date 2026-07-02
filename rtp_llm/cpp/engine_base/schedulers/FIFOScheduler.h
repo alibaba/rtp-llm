@@ -56,7 +56,7 @@ private:
     void accountBatchMetrics(const GenerateStreamPtr& new_stream);
     bool waitPredicate();
     void addStreamToNewState(const GenerateStreamPtr& stream, StreamState new_state);
-    void evaluateWaitingStreams(std::list<GenerateStreamPtr>& streams);
+    void evaluateWaitingStreams();
     void cancelStreams(std::list<GenerateStreamPtr>& streams);
     bool checkInputLength(const GenerateStreamPtr& stream);
 
@@ -84,6 +84,8 @@ protected:
 
     std::vector<EngineScheduleInfo::TaskInfo> waiting_task_list_;
     std::vector<EngineScheduleInfo::TaskInfo> running_task_list_;
+
+    std::atomic<int64_t> schedule_round_{0};
 
     // TODO @wangyin support different beams run togather
 };

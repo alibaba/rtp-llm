@@ -9,9 +9,55 @@
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 
 namespace rtp_llm {
+
+// Forward declaration for pointer type
+class BatchKVCacheResource;
+using BatchKVCacheResourcePtr = std::shared_ptr<BatchKVCacheResource>;
+
 class BatchKVCacheResource {
 public:
-    BatchKVCacheResource() {}
+    BatchKVCacheResource() = default;
+
+    // Copy constructor: RAII-compliant deep copy
+    BatchKVCacheResource(const BatchKVCacheResource& other) {
+        initializeFrom(other);
+    }
+
+    // Copy assignment operator
+    BatchKVCacheResource& operator=(const BatchKVCacheResource& other) {
+        if (this != &other) {
+            initializeFrom(other);
+        }
+        return *this;
+    }
+
+    // Move constructor
+    BatchKVCacheResource(BatchKVCacheResource&& other) noexcept: batch_resource(std::move(other.batch_resource)) {}
+
+    // Move assignment operator
+    BatchKVCacheResource& operator=(BatchKVCacheResource&& other) noexcept {
+        if (this != &other) {
+            batch_resource = std::move(other.batch_resource);
+        }
+        return *this;
+    }
+
+    BatchKVCacheResourcePtr copy() const {
+        return std::make_shared<BatchKVCacheResource>(*this);
+    }
+
+    // Prefix-only copy: each batch's KVCacheResource keeps only the first
+    // `n_blocks` of cache_keys and per-group block_indices. Used by
+    // insertIntoCache to avoid deep-copying the full per-batch layer_block_ids
+    // and tail entries that the cache layer never reads.
+    BatchKVCacheResourcePtr prefixCopy(size_t n_blocks) const {
+        auto out = std::make_shared<BatchKVCacheResource>();
+        out->batch_resource.reserve(batch_resource.size());
+        for (const auto& res : batch_resource) {
+            out->batch_resource.push_back(res.prefixCopy(n_blocks));
+        }
+        return out;
+    }
 
     int batchSize() const {
         return static_cast<int>(batch_resource.size());
@@ -220,9 +266,15 @@ public:
     }
 
 private:
+    void initializeFrom(const BatchKVCacheResource& other) {
+        batch_resource.clear();
+        batch_resource.reserve(other.batch_resource.size());
+        for (const auto& res : other.batch_resource) {
+            batch_resource.push_back(res.deepCopy());
+        }
+    }
+
     std::vector<KVCacheResource> batch_resource;  // [batch_size]
 };
-
-using BatchKVCacheResourcePtr = std::shared_ptr<BatchKVCacheResource>;
 
 }  // namespace rtp_llm

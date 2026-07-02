@@ -27,7 +27,7 @@
                         "index": 0,
                         "message": {
                             "role": "assistant",
-                            "content": "Here's a thinking process that leads to the suggested questions about English listening methods:\n\n1.  **Analyze the Request:**\n    *   **Topic:** English Listening Methods (英语听力方法).\n    *   **Task:** Propose several questions (提出几个问题).\n    *   **Language:** The user asked in Chinese, so the output should be in Chinese (with English terms where appropriate for clarity).\n    *   **Goal:** Create thought-provoking, practical",
+                            "content": "Here's a thinking process that leads to the suggested questions about English listening methods:\n\n1.  **Analyze the Request:**\n    *   **Topic:** English Listening Methods (英语听力方法).\n    *   **Task:** Propose several questions (提出几个问题).\n    *   **Language:** The user asked in Chinese, so the output should be in Chinese (with English terms where appropriate).\n    *   **Goal:** The questions should be thought-provoking,",
                             "reasoning_content": null,
                             "function_call": null,
                             "tool_calls": null,
@@ -37,6 +37,24 @@
                         "finish_reason": "length",
                         "logprobs": null
                     }
+                ],
+                "choices_alternatives": [
+                    [
+                        {
+                            "index": 0,
+                            "message": {
+                                "role": "assistant",
+                                "content": "Here's a thinking process that leads to the suggested questions about English listening methods:\n\n1.  **Analyze the Request:**\n    *   **Topic:** English Listening Methods (英语听力方法).\n    *   **Task:** Propose several questions (提出几个问题).\n    *   **Language:** The user asked in Chinese, so the output should be in Chinese (with English terms where appropriate for clarity).\n    *   **Goal:** Create thought-provoking, practical",
+                                "reasoning_content": null,
+                                "function_call": null,
+                                "tool_calls": null,
+                                "partial": false,
+                                "tool_call_id": null
+                            },
+                            "finish_reason": "length",
+                            "logprobs": null
+                        }
+                    ]
                 ],
                 "usage": {
                     "prompt_tokens": 18,

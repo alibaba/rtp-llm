@@ -5,39 +5,100 @@
 
 namespace rtp_llm {
 
-BlockCache::MatchResult BlockCache::match(CacheKeyType cache_key, int group_id) {
+CacheKeyGroupEpoch BlockCache::makeKey(CacheKeyType cache_key, GroupIdType group_id, int64_t epoch) const {
+    return CacheKeyGroupEpoch{cache_key, group_id, epoch};
+}
+
+CacheKeyGroupEpoch BlockCache::makeKey(const CacheItem& item) const {
+    return makeKey(item.cache_key, item.group_id, item.epoch);
+}
+
+BlockCache::MatchResult BlockCache::match(CacheKeyType cache_key, int group_id, int64_t current_batch_epoch) {
     RTP_LLM_PROFILE_FUNCTION();
     std::lock_guard<std::mutex> lock(mu_);
-    CacheKeyGroupPair           key{cache_key, group_id};
-    auto [success, item] = lru_cache_.get(key);
-    if (success) {
-        return {item.block_index};
-    } else {
+
+    auto touch_if_present = [&](const CacheKeyGroupEpoch& key) -> std::optional<CacheItem> {
+        auto [found, item] = lru_cache_.peek(key);
+        if (!found) {
+            return std::nullopt;
+        }
+        lru_cache_.get(key);
+        return item;
+    };
+
+    if (current_batch_epoch >= 1) {
+        if (auto item = touch_if_present(makeKey(cache_key, group_id, current_batch_epoch))) {
+            return {item->block_index};
+        }
+        if (auto item = touch_if_present(makeKey(cache_key, group_id, GLOBAL_EPOCH))) {
+            return {item->block_index};
+        }
         return {NULL_BLOCK_IDX};
     }
+
+    if (current_batch_epoch == GLOBAL_EPOCH) {
+        if (auto item = touch_if_present(makeKey(cache_key, group_id, GLOBAL_EPOCH))) {
+            return {item->block_index};
+        }
+        return {NULL_BLOCK_IDX};
+    }
+
+    if (current_batch_epoch == NO_EPOCH_FILTER) {
+        if (auto item = touch_if_present(makeKey(cache_key, group_id, GLOBAL_EPOCH))) {
+            return {item->block_index};
+        }
+        for (const auto& [key, item] : lru_cache_.items()) {
+            if (key.cache_key == cache_key && key.group_id == group_id) {
+                lru_cache_.get(key);
+                return {item.block_index};
+            }
+        }
+    }
+    return {NULL_BLOCK_IDX};
 }
 
 bool BlockCache::contains(CacheKeyType cache_key, int group_id) const {
     std::lock_guard<std::mutex> lock(mu_);
-    CacheKeyGroupPair           key{cache_key, group_id};
-    return lru_cache_.contains(key);
+    for (const auto& [key, item] : lru_cache_.items()) {
+        (void)item;
+        if (key.cache_key == cache_key && key.group_id == group_id) {
+            return true;
+        }
+    }
+    return false;
 }
 
-bool BlockCache::put(CacheItem& item) {
+BlockCache::PutResult BlockCache::put(CacheItem& item) {
     RTP_LLM_PROFILE_FUNCTION();
     std::lock_guard<std::mutex> lock(mu_);
     RTP_LLM_CHECK_WITH_INFO(!isNullBlockIdx(item.block_index), "put block id should not be null block");
+    RTP_LLM_CHECK_WITH_INFO(item.epoch >= 0,
+                            "CacheItem.epoch must be >= 0 (got %ld); negative values are reserved as query-side "
+                            "sentinels",
+                            item.epoch);
 
-    CacheKeyGroupPair key{item.cache_key, item.group_id};
+    auto key               = makeKey(item);
+    auto [found, old_item] = lru_cache_.peek(key);
+    if (found) {
+        // Preserve privileged states: a resident entry must not be downgraded
+        // by a non-resident put.
+        if (old_item.is_resident && !item.is_resident) {
+            return {PutResult::Action::SKIPPED, NULL_BLOCK_IDX};
+        }
 
-    if (lru_cache_.contains(key)) {
-        // It already exists; increase its popularity.
-        lru_cache_.get(key);
-        return false;
+        BlockIdxType old_block_index = old_item.block_index;
+        lru_cache_.put(key, item);
+        return {PutResult::Action::REPLACED, old_block_index};
+    } else {
+        if (item.epoch != GLOBAL_EPOCH) {
+            auto [global_found, global_item] = lru_cache_.peek(makeKey(item.cache_key, item.group_id, GLOBAL_EPOCH));
+            if (global_found) {
+                return {PutResult::Action::SKIPPED, NULL_BLOCK_IDX};
+            }
+        }
+        lru_cache_.put(key, item);
+        return {PutResult::Action::INSERTED, NULL_BLOCK_IDX};
     }
-
-    lru_cache_.put(key, item);
-    return true;
 }
 
 BlockIndicesType BlockCache::pop(int nums) {
@@ -46,10 +107,22 @@ BlockIndicesType BlockCache::pop(int nums) {
     RTP_LLM_CHECK_WITH_INFO(nums > 0, "pop nums should > 0, nums = " + std::to_string(nums));
     BlockIndicesType pop_blocks;
 
-    auto cond = [&](const CacheKeyGroupPair& key, const CacheItem& item) { return !item.is_resident; };
-
+    // Phase 1: prefer evicting stale epoch>0 entries (batch-specific, likely dead)
+    auto stale_cond = [](const CacheKeyGroupEpoch&, const CacheItem& item) {
+        return !item.is_resident && item.epoch > 0;
+    };
     while (nums > 0 && !lru_cache_.empty()) {
-        auto [success, item] = lru_cache_.popWithCond(cond);
+        auto [success, item] = lru_cache_.popWithCond(stale_cond);
+        if (!success)
+            break;
+        pop_blocks.push_back(item.block_index);
+        nums--;
+    }
+
+    // Phase 2: fall back to normal LRU eviction
+    auto normal_cond = [](const CacheKeyGroupEpoch&, const CacheItem& item) { return !item.is_resident; };
+    while (nums > 0 && !lru_cache_.empty()) {
+        auto [success, item] = lru_cache_.popWithCond(normal_cond);
         if (!success)
             break;
         pop_blocks.push_back(item.block_index);
@@ -61,9 +134,8 @@ BlockIndicesType BlockCache::pop(int nums) {
 
 std::optional<BlockCache::CacheItem> BlockCache::remove(CacheKeyType cache_key, int group_id) {
     std::lock_guard<std::mutex> lock(mu_);
-    CacheKeyGroupPair           key{cache_key, group_id};
     CacheItem                   removed_item;
-    if (!lru_cache_.remove(key, &removed_item)) {
+    if (!lru_cache_.remove(makeKey(cache_key, group_id, GLOBAL_EPOCH), &removed_item)) {
         return std::nullopt;
     }
     return removed_item;
@@ -100,12 +172,20 @@ BlockCache::EvictResult BlockCache::selectAndEvict(size_t min_blocks) {
         }
     }
 
-    // Second pass: group non-resident items by cache_key in LRU order (back = least-recently-used)
+    // Second pass: group non-resident items by cache_key in LRU order (back = least-recently-used).
+    // Tiered eviction promotes selected entries to memory/remote cache via
+    // storeCacheAsync, where there is no epoch concept — exposing a batch-local
+    // (epoch>0) entry to that path would leak it into the global memory cache and
+    // break batch isolation. Skip epoch>0 entries here; they are only reclaimed
+    // through BlockCache::pop (Phase 1) which frees blocks locally without export.
     std::unordered_map<CacheKeyType, std::vector<CacheItem>> grouped_items;
     std::vector<CacheKeyType>                                lru_keys;
     for (auto it = lru_cache_.items().rbegin(); it != lru_cache_.items().rend(); ++it) {
         const auto& item = it->second;
         if (item.is_resident) {
+            continue;
+        }
+        if (item.epoch != GLOBAL_EPOCH) {
             continue;
         }
         auto [iter, inserted] = grouped_items.try_emplace(item.cache_key);
@@ -142,9 +222,8 @@ BlockCache::EvictResult BlockCache::selectAndEvict(size_t min_blocks) {
         auto&                  items = grouped_items.at(cache_key);
         std::vector<CacheItem> evicted_items;
         for (const auto& item : items) {
-            CacheKeyGroupPair key{item.cache_key, item.group_id};
-            CacheItem         removed_item;
-            if (lru_cache_.remove(key, &removed_item)) {
+            CacheItem removed_item;
+            if (lru_cache_.remove(makeKey(item), &removed_item)) {
                 evicted_items.push_back(removed_item);
             }
         }

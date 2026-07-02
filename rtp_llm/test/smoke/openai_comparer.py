@@ -1,24 +1,29 @@
 import copy
 import json
-from typing import Any, Dict, List, Optional, Union
 import os
+from typing import Any, Dict, List, Optional, Union
+
 import torch
 from pydantic import BaseModel
 from smoke.base_comparer import BaseComparer
-from smoke.common_def import QueryStatus, SmokeException, REL_PATH
+from smoke.common_def import REL_PATH, QueryStatus, SmokeException
 from smoke.utils import create_temporary_copy
-from rtp_llm.utils.base_model_datatypes import AuxInfo
+
 from rtp_llm.openai.api_datatype import (
     ChatCompletionRequest,
     ChatCompletionResponse,
+    ChatCompletionResponseChoice,
+    ChatCompletionResponseStreamChoice,
     ChatCompletionStreamResponse,
 )
+from rtp_llm.utils.base_model_datatypes import AuxInfo
 
 
 class OpenaiComparer(BaseComparer):
     def __init__(self, *args: Any, **kwargs: Any):
         super().__init__(*args, **kwargs)
         self.is_stream = self.qr_info["query"].get("stream", False)
+        self.choices_alternatives = None
 
     def format_query(self, query_json: Dict[str, Any]) -> BaseModel:
         query_info = ChatCompletionRequest(**query_json)
@@ -26,10 +31,24 @@ class OpenaiComparer(BaseComparer):
         return query_info
 
     def format_result(self, result_json: Dict[str, Any]) -> BaseModel:
-        if result_json.get('extra_outputs', None) is not None:
-            path = result_json['extra_outputs'].get('all_hidden_states', None)
+        result_json = copy.copy(result_json)
+        choices_alternatives = result_json.pop("choices_alternatives", None)
+        if choices_alternatives is not None:
+            choice_type = (
+                ChatCompletionResponseStreamChoice
+                if self.is_stream
+                else ChatCompletionResponseChoice
+            )
+            self.choices_alternatives = [
+                [choice_type(**choice) for choice in choices]
+                for choices in choices_alternatives
+            ]
+        if result_json.get("extra_outputs", None) is not None:
+            path = result_json["extra_outputs"].get("all_hidden_states", None)
             if path is not None and isinstance(path, str):
-                result_json['extra_outputs']['all_hidden_states'] = torch.load(os.path.join(REL_PATH, path)).numpy().tolist()
+                result_json["extra_outputs"]["all_hidden_states"] = (
+                    torch.load(os.path.join(REL_PATH, path)).numpy().tolist()
+                )
         if self.is_stream:
             return ChatCompletionStreamResponse(**result_json)
         else:
@@ -213,6 +232,47 @@ class OpenaiComparer(BaseComparer):
         lines.append("=" * 60)
         return "\n".join(lines)
 
+    def _choices_match_with_logprobs(
+        self,
+        expect_choices: Any,
+        expect_logprobs: List[float],
+        actual_choices: Any,
+        actual_logprobs: List[float],
+    ) -> bool:
+        if expect_choices != actual_choices:
+            return False
+        rtol = atol = 1e-2
+        if expect_logprobs is None or actual_logprobs is None:
+            return expect_logprobs == actual_logprobs
+        return bool(
+            all(
+                torch.isclose(
+                    torch.tensor(expect_logprobs),
+                    torch.tensor(actual_logprobs),
+                    rtol=rtol,
+                    atol=atol,
+                ).reshape(-1)
+            )
+        )
+
+    def _matches_choices_alternative(
+        self,
+        actual_choices: Any,
+        actual_logprobs: List[float],
+    ) -> bool:
+        if not self.choices_alternatives:
+            return False
+        for choices in self.choices_alternatives:
+            alternative_logprobs, alternative_choices = self.extract_logprobs(choices)
+            if self._choices_match_with_logprobs(
+                alternative_choices,
+                alternative_logprobs,
+                actual_choices,
+                actual_logprobs,
+            ):
+                return True
+        return False
+
     def compare_result(
         self,
         expect_result: Union[ChatCompletionResponse, ChatCompletionStreamResponse],
@@ -266,8 +326,12 @@ class OpenaiComparer(BaseComparer):
 
         expect_logprobs, expect_choices = self.extract_logprobs(expect_result.choices)
         actual_logprobs, actual_choices = self.extract_logprobs(actual_result.choices)
+        choices_match_alternative = self._matches_choices_alternative(
+            actual_choices,
+            actual_logprobs,
+        )
 
-        if expect_choices != actual_choices:
+        if expect_choices != actual_choices and not choices_match_alternative:
             diffs.append(
                 self._format_expect_actual(
                     "choices not equal (after normalizing logprobs)",
@@ -278,13 +342,16 @@ class OpenaiComparer(BaseComparer):
 
         rtol = atol = 1e-2
         if expect_logprobs is not None and actual_logprobs is not None:
-            if not all(
-                torch.isclose(
-                    torch.tensor(expect_logprobs),
-                    torch.tensor(actual_logprobs),
-                    rtol=rtol,
-                    atol=atol,
-                ).reshape(-1)
+            if (
+                not all(
+                    torch.isclose(
+                        torch.tensor(expect_logprobs),
+                        torch.tensor(actual_logprobs),
+                        rtol=rtol,
+                        atol=atol,
+                    ).reshape(-1)
+                )
+                and not choices_match_alternative
             ):
                 diffs.append(
                     self._format_expect_actual(
@@ -408,13 +475,15 @@ class OpenaiComparer(BaseComparer):
             return
 
         obj1, obj2 = expect_aux, actual_aux
-        ignore_fields = set([
-            "cost_time",
-            "wait_time",
-            "first_token_cost_time",
-            "role_addrs.http_port",
-            "role_addrs.grpc_port",
-        ])
+        ignore_fields = set(
+            [
+                "cost_time",
+                "wait_time",
+                "first_token_cost_time",
+                "role_addrs.http_port",
+                "role_addrs.grpc_port",
+            ]
+        )
         top_level_ignore = set()
         nested_ignore: Dict[str, set] = {}
         for field in ignore_fields:

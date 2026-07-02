@@ -6,10 +6,15 @@ namespace rtp_llm {
 void ResourceContext::initCacheConfig(const KVCacheConfig&       kv_cache_config,
                                       const FIFOSchedulerConfig& scheduler_config,
                                       int64_t                    max_seq_len) {
-    reuse_cache                = kv_cache_config.reuse_cache;
-    enable_memory_cache        = kv_cache_config.enable_memory_cache;
-    enable_remote_cache        = kv_cache_config.enable_remote_cache;
-    enable_device_cache        = kv_cache_config.enable_device_cache;
+    reuse_cache                 = kv_cache_config.reuse_cache;
+    enable_memory_cache         = kv_cache_config.enable_memory_cache;
+    enable_remote_cache         = kv_cache_config.enable_remote_cache;
+    enable_device_cache         = kv_cache_config.enable_device_cache;
+    enable_reuse_cache_in_batch = kv_cache_config.enable_reuse_cache_in_batch;
+    RTP_LLM_LOG_INFO("initCacheConfig: reuse_cache=%d, enable_reuse_cache_in_batch=%d, enable_device_cache=%d",
+                     (int)reuse_cache,
+                     (int)enable_reuse_cache_in_batch,
+                     (int)enable_device_cache);
     write_cache_sync           = kv_cache_config.write_cache_sync;
     enable_tiered_memory_cache = kv_cache_config.enable_tiered_memory_cache;
     load_cache_retry_times     = kv_cache_config.load_cache_retry_times;

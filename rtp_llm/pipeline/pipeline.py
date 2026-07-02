@@ -1,6 +1,8 @@
 import asyncio
 import copy
+import hashlib
 import logging
+import os
 import queue
 import threading
 from typing import Any, AsyncGenerator, Dict, Iterator, List, Optional, Tuple, Union
@@ -43,6 +45,7 @@ from rtp_llm.utils.word_util import (
 )
 
 request_counter = AtomicCounter()
+batch_group_counter = AtomicCounter()
 
 
 class Pipeline(object):
@@ -99,7 +102,7 @@ class Pipeline(object):
         special_tokens: Any,
         tokenizer: BaseTokenizer,
         generate_env_config,
-        **kwargs: Any
+        **kwargs: Any,
     ) -> GenerateConfig:
         if isinstance(generate_config, dict):
             config = GenerateConfig.create_generate_config(generate_config, **kwargs)
@@ -112,6 +115,15 @@ class Pipeline(object):
         config.add_stop_ids_from_str(tokenizer)
         return config
 
+    def _make_batch_group_id(self, base_request_id: int) -> int:
+        sequence = batch_group_counter.increment()
+        payload = f"{os.getpid()}:{id(self)}:{base_request_id}:{sequence}".encode(
+            "utf-8"
+        )
+        return int.from_bytes(
+            hashlib.blake2b(payload, digest_size=8).digest(), "big"
+        ) & ((1 << 63) - 1)
+
     def __call__(
         self, prompt: str, urls: Optional[List[str]] = None, **kwargs: Any
     ) -> Iterator[GenerateResponse]:
@@ -123,7 +135,7 @@ class Pipeline(object):
         prompt: str,
         request_id: int = None,
         urls: Optional[List[str]] = None,
-        **kwargs: Any
+        **kwargs: Any,
     ) -> Iterator[GenerateResponse]:
 
         q = queue.Queue()
@@ -169,7 +181,7 @@ class Pipeline(object):
         prompt: str,
         request_id: int = None,
         urls: Optional[List[str]] = None,
-        **kwargs: Any
+        **kwargs: Any,
     ) -> AsyncGenerator[GenerateResponse, None]:
         begin_time = current_time_ms()
 
@@ -182,7 +194,7 @@ class Pipeline(object):
             len(self.tokenizer),
             self._special_tokens,
             self.tokenizer,
-            **kwargs
+            **kwargs,
         )
         mm_inputs = (
             [
@@ -252,7 +264,7 @@ class Pipeline(object):
         stop_word_str_list: List[str],
         stop_word_str_slices: List[str],
         token_buffer: str,
-        **kwargs: Any
+        **kwargs: Any,
     ):
         if generate_config.return_incremental:
             text = token_buffer + text
@@ -289,7 +301,7 @@ class Pipeline(object):
         stop_word_ids: List[int],
         stop_word_id_slices: List[int],
         ouput_tokens_list: List[torch.Tensor],
-        **kwargs: Any
+        **kwargs: Any,
     ) -> Tuple[List[str], List[int]]:
         tokens_lists_for_decode_input = []
         output_lens = []
@@ -345,7 +357,7 @@ class Pipeline(object):
         decoded_batch = self.tokenizer.batch_decode(
             token_lists_to_decode,
             skip_special_tokens=generate_config.skip_special_tokens,
-            **kwargs
+            **kwargs,
         )
         newly_decoded_texts = [text.rstrip("\uFFFD") for text in decoded_batch]
         all_texts = newly_decoded_texts
@@ -360,7 +372,7 @@ class Pipeline(object):
                 stop_word_str_list,
                 stop_word_str_slices,
                 "",
-                **kwargs
+                **kwargs,
             )
 
             if generate_config.out_prefix:
@@ -381,7 +393,7 @@ class Pipeline(object):
         decoding_states: List[DecodingState],
         token_buffers: List[str],
         ouput_tokens_list: List[torch.Tensor],
-        **kwargs: Any
+        **kwargs: Any,
     ) -> Tuple[List[str], List[int]]:
         """处理增量解码的逻辑。"""
         num_outputs = len(generate_outputs.generate_outputs)
@@ -445,7 +457,7 @@ class Pipeline(object):
                 stop_word_str_list,
                 stop_word_str_slices,
                 token_buffers[i],
-                **kwargs
+                **kwargs,
             )
 
             if generate_config.out_prefix:
@@ -468,7 +480,7 @@ class Pipeline(object):
         token_ids: List[int],
         mm_inputs: List[MultimodalInput],
         generate_config: GenerateConfig,
-        **kwargs: Any
+        **kwargs: Any,
     ) -> AsyncGenerator[GenerateResponse, None]:
         token_type_ids = []
 
@@ -534,7 +546,7 @@ class Pipeline(object):
                     decoding_states,
                     token_buffers,
                     ouput_tokens_list,
-                    **kwargs
+                    **kwargs,
                 )
             else:
                 (
@@ -549,7 +561,7 @@ class Pipeline(object):
                     stop_word_ids,
                     stop_word_id_slices,
                     ouput_tokens_list,
-                    **kwargs
+                    **kwargs,
                 )
 
             kmonitor.report(
@@ -584,7 +596,7 @@ class Pipeline(object):
         base_request_id: int,
         generate_config_json: dict,
         generate_env_config=None,
-        **kwargs: Any
+        **kwargs: Any,
     ) -> List[GenerateResponse]:
         generate_config = self.create_generate_config(
             generate_config_json,
@@ -592,9 +604,14 @@ class Pipeline(object):
             self._special_tokens,
             self.tokenizer,
             generate_env_config=generate_env_config,
-            **kwargs
+            **kwargs,
         )
         generate_config.is_streaming = False
+        batch_group_id = (
+            self._make_batch_group_id(base_request_id)
+            if generate_config.force_batch
+            else -1
+        )
 
         inputs = []
         for i, prompt in enumerate(prompts):
@@ -621,6 +638,14 @@ class Pipeline(object):
                 generate_config=copy.copy(generate_config),
                 tokenizer=self.tokenizer,
             )
+            if generate_config.force_batch:
+                # FIFOScheduler.evaluateWaitingStreams locks force_batch_group_id only
+                # when batch_group_id != -1. Without these fields, later force_batch
+                # siblings are skipped (FIFOScheduler.cc:228-234), splitting them
+                # across separate batch_epochs and defeating both batch-local KV reuse
+                # and the "force_batch" guarantee.
+                gen_input.batch_group_id = batch_group_id
+                gen_input.batch_group_size = len(prompts)
             inputs.append(gen_input)
 
         batch_outputs = await self.backend_rpc_server_visitor.batch_enqueue(inputs)
