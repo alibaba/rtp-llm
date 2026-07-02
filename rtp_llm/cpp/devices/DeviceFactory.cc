@@ -234,17 +234,6 @@ void registerDeviceOps(py::module& m) {
              py::arg("key"),
              py::arg("weight"),
              py::arg("user_arm_gemm_use_kai"))
-        .def("pack_int8_tensor_to_packed_int4", &DeviceExporter::packInt8TensorToPackedInt4, py::arg("weight"))
-        .def("preprocess_weights_for_mixed_gemm",
-             &DeviceExporter::preprocessWeightsForMixedGemm,
-             py::arg("weight"),
-             py::arg("quant_type"),
-             py::arg("arch"))
-        .def("symmetric_quantize_last_axis_of_batched_matrix",
-             &DeviceExporter::symmetricQuantizeLastAxisOfBatchedMatrix,
-             py::arg("weight"),
-             py::arg("quant_type"),
-             py::arg("arch"))
         .def("preprocess_weight_scale", &DeviceExporter::preprocessWeightScale, py::arg("weight"), py::arg("scale"));
 
     m.def("get_device", &DeviceFactory::getDeviceExporter);
