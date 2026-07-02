@@ -4,6 +4,7 @@ import os
 import signal
 import subprocess
 import sys
+import threading
 import time
 import traceback
 from multiprocessing import Process
@@ -39,6 +40,7 @@ def local_rank_start(
     """Start local rank with proper signal handling for graceful shutdown"""
     backend_manager = None
     jit_cache_manager = None
+    shutdown_requested = threading.Event()
     logging.info(f"[PROCESS_START]Start local rank process")
     from rtp_llm.utils.util import copy_gemm_config
 
@@ -46,6 +48,7 @@ def local_rank_start(
         logging.info(
             f"Local rank received signal {signum}, shutting down gracefully..."
         )
+        shutdown_requested.set()
         if backend_manager is not None:
             try:
                 backend_manager.request_shutdown()
@@ -77,7 +80,11 @@ def local_rank_start(
         set_global_controller(global_controller)
         jit_cache_manager = JitCacheManager(py_env_configs.jit_config)
         jit_cache_manager.bootstrap()
-        jit_cache_manager.prepare()
+        if shutdown_requested.is_set():
+            raise KeyboardInterrupt("shutdown requested before JIT prepare")
+        jit_cache_manager.prepare(should_stop=shutdown_requested.is_set)
+        if shutdown_requested.is_set():
+            raise KeyboardInterrupt("shutdown requested after JIT prepare")
         jit_cache_manager.start_background_sync()
         start_time = time.time()
         from rtp_llm.server.backend_manager import BackendManager

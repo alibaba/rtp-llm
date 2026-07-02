@@ -124,7 +124,7 @@ def get_config_dir() -> Path:
     `configs/{GPU}/` subdirectory next to this file.
     """
     override = os.environ.get("TRITON_AUTOTUNE_CONFIG_DIR")
-    if override is not None and override != BUILTIN_CONFIG_SENTINEL:
+    if override and override != BUILTIN_CONFIG_SENTINEL:
         return Path(override)
     return Path(__file__).parent / "configs" / get_gpu_info()
 

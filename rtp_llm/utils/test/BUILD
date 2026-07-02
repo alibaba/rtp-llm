@@ -20,7 +20,6 @@ py_library(
     deps = [
         "//rtp_llm:config_ops",
         "//rtp_llm:jit_cache_manager_lib",
-        "//rtp_llm/metrics",
     ],
 )
 
@@ -35,7 +34,6 @@ py_test(
     deps = [
         "//rtp_llm:config_ops",
         "//rtp_llm:jit_cache_manager_lib",
-        "//rtp_llm/metrics",
     ],
 )
 
@@ -115,7 +113,7 @@ py_test(
         "jit_cache_remote_integration_test.py",
     ],
     args = [
-        "RemoteSnapshotCompressionDesignTest.test_two_gpu_rank_processes_compete_for_single_snapshot_publish_lease",
+        "TwoRankSnapshotPublishTest.test_two_gpu_rank_processes_publish_single_snapshot_file",
     ],
     env = {
         "FLASHINFER_DISABLE_VERSION_CHECK": "1",

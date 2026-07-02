@@ -147,7 +147,6 @@ py_library(
     srcs = glob([
         "utils/**/*.py",
     ], exclude = [
-        "utils/jit_cache_common.py",
         "utils/jit_cache_manager.py",
         "utils/test/*.py",
         "utils/test/**/*.py",
@@ -167,7 +166,6 @@ py_library(
 py_library(
     name = "jit_cache_manager_lib",
     srcs = [
-        "utils/jit_cache_common.py",
         "utils/jit_cache_manager.py",
     ],
     deps = [
@@ -176,7 +174,6 @@ py_library(
         ":utils",
         ":watchdog",
         ":zstandard",
-        "//rtp_llm/metrics:metrics",
         "//rtp_llm/models_py/triton_kernels:autotune_cache",
     ],
     visibility = ["//visibility:public"],

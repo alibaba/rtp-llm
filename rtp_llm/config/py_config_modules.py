@@ -397,15 +397,13 @@ class MasterConfig:
 
 class JITConfig:
     def __init__(self):
-        self.local_jit_dir: str = "./.jit_cache"
+        self.local_jit_dir: str = os.environ.get("LOCAL_JIT_DIR", "./.jit_cache")
         self.remote_jit_dir: str = ""
-        self.remote_sync_timeout_s: float = 60
 
     def to_string(self):
         return (
             f"local_jit_dir: {self.local_jit_dir}\n"
-            f"remote_jit_dir: {self.remote_jit_dir}\n"
-            f"remote_sync_timeout_s: {self.remote_sync_timeout_s}"
+            f"remote_jit_dir: {self.remote_jit_dir}"
         )
 
 

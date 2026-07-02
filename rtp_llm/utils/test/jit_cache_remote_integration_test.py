@@ -1,36 +1,29 @@
 import os
 import sys
 import tempfile
-import threading
-import time
 import traceback
 import unittest
-from collections import defaultdict
 from multiprocessing import get_context
 from pathlib import Path
-from unittest import mock
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 import torch
-from watchdog.events import FileSystemEventHandler
-from watchdog.observers import Observer
 
 from rtp_llm.config.py_config_modules import JITConfig
 from rtp_llm.models_py.triton_kernels.autotune_cache.export import (
     write_default_config_json,
 )
-from rtp_llm.utils import jit_cache_common as jit_cache_common_module
 from rtp_llm.utils import jit_cache_manager as jit_cache_module
-from rtp_llm.utils.jit_cache_manager import JitCacheManager
+from rtp_llm.utils.jit_cache_manager import (
+    JitCacheManager,
+    iter_component_sync_files,
+    snapshot_path,
+)
 from rtp_llm.utils.test.jit_cache_manager_test import (
-    add_path_to_tracker,
-    find_latest_snapshot,
-    iter_component_files,
     snapshot_member_names,
-    wait_for_snapshot_publish,
     write_snapshot,
 )
 
@@ -57,13 +50,11 @@ _JIT_ENV_NAMES = (
 def _make_jit_manager(
     local_root: Path,
     remote_root: Path,
-    timeout_s: float = 30,
 ) -> JitCacheManager:
     remote_root.mkdir(parents=True, exist_ok=True)
     config = JITConfig()
     config.local_jit_dir = str(local_root)
     config.remote_jit_dir = str(remote_root)
-    config.remote_sync_timeout_s = timeout_s
     manager = JitCacheManager(config)
     manager.bootstrap()
     return manager
@@ -133,7 +124,7 @@ def _two_rank_snapshot_publish_worker(
         os.environ["RANK"] = str(rank)
         os.environ["WORLD_SIZE"] = str(world_size)
         os.environ["TRITON_AUTOTUNE_GPU_NAME"] = "NVIDIA_H20"
-        jit_cache_common_module.get_gpu_info.cache_clear()
+        jit_cache_module.get_gpu_info.cache_clear()
 
         if not torch.cuda.is_available():
             raise RuntimeError("CUDA is not available")
@@ -148,9 +139,9 @@ def _two_rank_snapshot_publish_worker(
         prepare = manager.prepare()
         _run_triton_rank_jit(rank)
 
-        component = jit_cache_common_module.COMPONENT_BY_NAME["triton"]
-        local_dir, _ = manager.component_dirs[component.name]
-        generated_files = list(iter_component_files(local_dir, component))
+        component = jit_cache_module.COMPONENT_BY_NAME["triton"]
+        local_dir = manager.component_dirs[component.name]
+        generated_files = list(iter_component_sync_files(local_dir, component))
         if not generated_files:
             raise RuntimeError(f"rank {rank} Triton JIT produced no syncable files")
 
@@ -159,34 +150,20 @@ def _two_rank_snapshot_publish_worker(
         marker_path.parent.mkdir(parents=True, exist_ok=True)
         marker_path.write_text(f'{{"rank": {rank}}}', encoding="utf-8")
 
-        enqueued = 0
-        for path, rel in iter_component_files(local_dir, component):
-            if manager.enqueue_upload(component, rel):
-                enqueued += 1
-
-        publish_attempted = False
-        original_publish_snapshot = manager._publish_snapshot
-
-        def wrapped_publish_snapshot(bucket):
-            nonlocal publish_attempted
-            publish_attempted = True
-            return original_publish_snapshot(bucket)
+        uploaded = 0
+        for path, rel in iter_component_sync_files(local_dir, component):
+            if manager.upload_file(component, rel):
+                uploaded += 1
 
         barrier.wait(timeout=30)
-        with mock.patch.object(
-            manager, "_publish_snapshot", side_effect=wrapped_publish_snapshot
-        ):
-            with mock.patch.object(jit_cache_module.time, "time", return_value=1200.0):
-                summary = manager.sync_once(f"rank_{rank}_publish")
-            wait_for_snapshot_publish(manager, timeout_s=10)
+        summary = manager.sync_once(f"rank_{rank}_publish")
 
         result_queue.put(
             {
                 "rank": rank,
                 "prepare": prepare,
                 "summary": summary,
-                "publish_attempted": publish_attempted,
-                "enqueued": enqueued,
+                "uploaded": uploaded,
                 "generated_files": len(generated_files),
                 "marker_member": f"triton/{marker_rel}",
             }
@@ -195,9 +172,8 @@ def _two_rank_snapshot_publish_worker(
         result_queue.put({"rank": rank, "error": traceback.format_exc()})
     finally:
         if manager is not None:
-            manager.remote_cache_available = False
             manager.stop()
-        jit_cache_common_module.get_gpu_info.cache_clear()
+        jit_cache_module.get_gpu_info.cache_clear()
 
 
 class _GpuJitTestBase(unittest.TestCase):
@@ -245,32 +221,32 @@ class RemoteJitIntegrationTest(_GpuJitTestBase):
 
     def test_single_gpu_reuses_same_remote_jit_for_all_components(self):
         remote_root = self.root / "remote"
-        first = _make_jit_manager(self.root / "local_first", remote_root, timeout_s=120)
+        first = _make_jit_manager(self.root / "local_first", remote_root)
         try:
             prepare = first.prepare()
             self.assertEqual(prepare["cache_state"], "snapshot_miss")
 
             self.run_all_jit_workloads()
-            first.dirty_tracker = jit_cache_common_module.JitDirtyTracker(
-                first.component_dirs, first.enqueue_upload
-            )
-            uploaded = self.enqueue_and_sync(first)
+            uploaded = self.upload_and_sync(first)
             self.assertEqual(uploaded["result"], "success")
 
             write_snapshot(remote_root)
-            self.assertIsNotNone(find_latest_snapshot(remote_root))
+            self.assertTrue(snapshot_path(remote_root).is_file())
             self.assert_components_have_files(remote_root)
         finally:
             first.stop()
 
-        second = _make_jit_manager(
-            self.root / "local_second", remote_root, timeout_s=120
-        )
+        # This test drives two managers in one process, so reset envs before
+        # binding the second manager to a different local cache root.
+        for env_name in _JIT_ENV_NAMES:
+            os.environ.pop(env_name, None)
+
+        second = _make_jit_manager(self.root / "local_second", remote_root)
         try:
             prepare = second.prepare()
             self.assertEqual(prepare["cache_state"], "snapshot_hit")
             self.assertEqual(prepare["result"], "success")
-            self.assert_components_have_files(second.config.local_root)
+            self.assert_components_have_files(second.local_root)
         finally:
             second.stop()
 
@@ -337,9 +313,9 @@ class RemoteJitIntegrationTest(_GpuJitTestBase):
         b = torch.randn((16, 16), device="cuda", dtype=torch.bfloat16)
         d = torch.empty((16, 16), device="cuda", dtype=torch.bfloat16)
         deep_gemm.bf16_gemm_nt(a, b, d, None)
-        component = jit_cache_common_module.COMPONENT_BY_NAME["deep_gemm"]
+        component = jit_cache_module.COMPONENT_BY_NAME["deep_gemm"]
         local_dir = Path(os.environ[component.env_name])
-        if not list(iter_component_files(local_dir, component)):
+        if not list(iter_component_sync_files(local_dir, component)):
             path = local_dir / "cache/integration_probe.cubin"
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(b"jit-cache-integration-probe")
@@ -360,16 +336,15 @@ class RemoteJitIntegrationTest(_GpuJitTestBase):
         )
         self.assertEqual(module.add_one_int(41), 42)
 
-    def enqueue_and_sync(self, manager: JitCacheManager):
-        assert manager.dirty_tracker is not None
+    def upload_and_sync(self, manager: JitCacheManager):
         missing = []
-        for component in jit_cache_common_module.COMPONENT_SPECS:
-            local_dir, _ = manager.component_dirs[component.name]
-            files = list(iter_component_files(local_dir, component))
+        for component in jit_cache_module.COMPONENT_SPECS:
+            local_dir = manager.component_dirs[component.name]
+            files = list(iter_component_sync_files(local_dir, component))
             if not files:
                 missing.append(component.name)
-            for path, _ in files:
-                add_path_to_tracker(manager.dirty_tracker, component, path, local_dir)
+            for _, rel in files:
+                manager.upload_file(component, rel)
         if missing:
             self.fail(f"workload did not produce JIT cache files for: {missing}")
         return manager.sync_once("single_gpu_jit_workload")
@@ -377,28 +352,32 @@ class RemoteJitIntegrationTest(_GpuJitTestBase):
     def assert_components_have_files(self, root: Path) -> None:
         missing = [
             c.name
-            for c in jit_cache_common_module.COMPONENT_SPECS
-            if not list(iter_component_files(root / c.name, c))
+            for c in jit_cache_module.COMPONENT_SPECS
+            if not list(
+                iter_component_sync_files(
+                    jit_cache_module.component_cache_dir(root, c), c
+                )
+            )
         ]
         if missing:
             self.fail(f"missing JIT cache files for components: {missing}")
 
 
-class RemoteSnapshotCompressionDesignTest(unittest.TestCase):
+class TwoRankSnapshotPublishTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
         self.old_env = os.environ.copy()
         os.environ["TRITON_AUTOTUNE_GPU_NAME"] = "NVIDIA_H20"
-        jit_cache_common_module.get_gpu_info.cache_clear()
+        jit_cache_module.get_gpu_info.cache_clear()
 
     def tearDown(self):
         os.environ.clear()
         os.environ.update(self.old_env)
-        jit_cache_common_module.get_gpu_info.cache_clear()
+        jit_cache_module.get_gpu_info.cache_clear()
         self.tmp.cleanup()
 
-    def test_two_gpu_rank_processes_compete_for_single_snapshot_publish_lease(self):
+    def test_two_gpu_rank_processes_publish_single_snapshot_file(self):
         if not torch.cuda.is_available():
             self.skipTest("CUDA is not available")
         if torch.cuda.device_count() < 2:
@@ -441,147 +420,17 @@ class RemoteSnapshotCompressionDesignTest(unittest.TestCase):
         if errors:
             self.fail("\n".join(e["error"] for e in errors))
 
-        publishers = [r for r in results if r["publish_attempted"]]
-        self.assertEqual(
-            len(publishers),
-            1,
-            f"expected one snapshot publisher, got results={results}",
-        )
         for result in results:
             self.assertEqual(result["summary"]["result"], "success")
             self.assertGreater(result["generated_files"], 0)
-            self.assertGreater(result["enqueued"], 0)
+            self.assertGreater(result["uploaded"], 0)
 
-        lease_dirs = list(remote_root.glob(".jit_snapshot_publish_lease.*"))
-        self.assertEqual(len(lease_dirs), 1)
-        self.assertEqual(lease_dirs[0].name, ".jit_snapshot_publish_lease.1")
-
-        snapshot_path = find_latest_snapshot(remote_root)
-        self.assertIsNotNone(snapshot_path)
-        self.assertTrue(snapshot_path.is_file())
-        self.assertTrue(
-            snapshot_path.name.startswith(jit_cache_common_module.SNAPSHOT_PREFIX)
-        )
-        members = snapshot_member_names(snapshot_path)
-        self.assertIn(publishers[0]["marker_member"], members)
-
-
-class EventRecord:
-    def __init__(self):
-        self.lock = threading.Lock()
-        self.events: dict[str, list[tuple[str, str]]] = defaultdict(list)
-
-    def record(self, component_name: str, event_type: str, path: str):
-        with self.lock:
-            self.events[component_name].append((event_type, path))
-
-    def get_syncable_events(self, component_name: str) -> list[tuple[str, str]]:
-        component = jit_cache_common_module.COMPONENT_BY_NAME[component_name]
-        with self.lock:
-            return [
-                (t, p)
-                for t, p in self.events[component_name]
-                if jit_cache_common_module.should_sync_file(component, p)
-            ]
-
-
-class JitEventSignalVerificationTest(_GpuJitTestBase):
-    def test_jit_components_produce_expected_filesystem_events(self):
-        local_root = self.root / "local"
-        local_root.mkdir(parents=True)
-        for component in jit_cache_common_module.COMPONENT_SPECS:
-            jit_cache_common_module.component_cache_dir(local_root, component).mkdir(
-                parents=True,
-                exist_ok=True,
-            )
-        jit_cache_common_module.apply_jit_cache_env(local_root)
-
-        recorder = EventRecord()
-        observer = Observer()
-        for component in jit_cache_common_module.COMPONENT_SPECS:
-            comp_dir = jit_cache_common_module.component_cache_dir(
-                local_root, component
-            )
-            prefix = str(comp_dir) + os.sep
-            comp_name = component.name
-
-            class Handler(FileSystemEventHandler):
-                _prefix = prefix
-                _name = comp_name
-                _recorder = recorder
-
-                def on_any_event(self, event):
-                    if event.is_directory:
-                        return
-                    src = (
-                        event.dest_path
-                        if event.event_type == "moved"
-                        else event.src_path
-                    )
-                    if not src.startswith(self._prefix):
-                        return
-                    self._recorder.record(
-                        self._name, event.event_type, src[len(self._prefix) :]
-                    )
-
-            observer.schedule(Handler(), str(comp_dir), recursive=True)
-
-        observer.start()
-        try:
-            time.sleep(0.1)
-            self._run_all_workloads()
-            torch.cuda.synchronize()
-            time.sleep(1.0)
-        finally:
-            observer.stop()
-            observer.join(timeout=5)
-
-        failures = []
-        for component in jit_cache_common_module.COMPONENT_SPECS:
-            expected = component.upload_events
-            actual_types = {
-                etype for etype, _ in recorder.get_syncable_events(component.name)
-            }
-            missed = expected - actual_types
-            if missed or not (expected & actual_types):
-                failures.append(
-                    f"{component.name}: expected={sorted(expected)} actual={sorted(actual_types)} missing={sorted(missed)}"
-                )
-        self.assertFalse(failures, "\n".join(failures))
-
-    def _run_all_workloads(self):
-        import deep_gemm
-        from torch.utils.cpp_extension import load_inline
-
-        _setup_flashinfer_workspace_and_build()
-
-        x = torch.arange(256, device="cuda", dtype=torch.float32)
-        _run_triton_add_kernel(x, add=1.0)
-
-        autotune_dir = Path(os.environ["TRITON_AUTOTUNE_CONFIG_DIR"])
-        autotune_dir.mkdir(parents=True, exist_ok=True)
-        write_default_config_json(
-            autotune_dir / "test_autotune_signal.json",
-            "test_autotune_signal",
-            {"kwargs": {"block": 128}, "num_warps": 4, "num_stages": 3},
-        )
-
-        a = torch.randn((16, 16), device="cuda", dtype=torch.bfloat16)
-        b = torch.randn((16, 16), device="cuda", dtype=torch.bfloat16)
-        d = torch.empty((16, 16), device="cuda", dtype=torch.bfloat16)
-        deep_gemm.bf16_gemm_nt(a, b, d, None)
-
-        load_inline(
-            name=f"rtp_jit_signal_test_{os.getpid()}",
-            cpp_sources=[
-                "#include <torch/extension.h>\n"
-                "int signal_test(int v) { return v + 1; }\n"
-            ],
-            functions=["signal_test"],
-            extra_cflags=["-O0"],
-            with_cuda=False,
-            verbose=False,
-        )
+        snapshot = snapshot_path(remote_root)
+        self.assertEqual(snapshot, remote_root / jit_cache_module.SNAPSHOT_NAME)
+        self.assertTrue(snapshot.is_file())
+        members = snapshot_member_names(snapshot)
+        for result in results:
+            self.assertIn(result["marker_member"], members)
 
 
 if __name__ == "__main__":

@@ -9,10 +9,14 @@ from pathlib import Path
 from unittest import mock
 
 from rtp_llm.config.py_config_modules import JITConfig
-from rtp_llm.utils import jit_cache_common as jit_cache_common_module
 from rtp_llm.utils import jit_cache_manager as jit_cache_module
-from rtp_llm.utils.jit_cache_common import open_snapshot_reader, open_snapshot_writer
-from rtp_llm.utils.jit_cache_manager import JitCacheManager
+from rtp_llm.utils.jit_cache_manager import (
+    JitCacheManager,
+    iter_component_sync_files,
+    open_snapshot_reader,
+    open_snapshot_writer,
+    snapshot_path,
+)
 
 
 class FakeFileEvent:
@@ -23,38 +27,20 @@ class FakeFileEvent:
         self.is_directory = False
 
 
-def iter_component_files(root: Path, component):
-    yield from jit_cache_common_module.iter_component_sync_files(root, component)
-
-
-def add_path_to_tracker(tracker, component, path: Path, root: Path) -> None:
-    rel = path.relative_to(root).as_posix()
-    if jit_cache_common_module.should_sync_file(component, rel):
-        tracker.enqueue_upload(component, rel)
-
-
-def find_latest_snapshot(remote: Path) -> Path | None:
-    return jit_cache_common_module.find_latest_snapshot(remote)
-
-
 def write_snapshot(remote: Path) -> Path:
-    snapshot = remote / jit_cache_common_module.new_snapshot_name()
+    snapshot = remote / jit_cache_module.SNAPSHOT_NAME
     snapshot.parent.mkdir(parents=True, exist_ok=True)
     with open_snapshot_writer(snapshot) as tar:
-        for component in jit_cache_common_module.COMPONENT_SPECS:
-            component_root = remote / component.name
-            for path, rel in iter_component_files(component_root, component):
-                info = tar.gettarinfo(
-                    str(path),
-                    arcname=f"{component.name}/{rel}",
-                )
-                with path.open("rb") as source:
-                    tar.addfile(info, source)
+        for component in jit_cache_module.COMPONENT_SPECS:
+            component_root = jit_cache_module.component_cache_dir(remote, component)
+            for path, rel in iter_component_sync_files(component_root, component):
+                arcname = f"{component.name}/{jit_cache_module.component_snapshot_rel(component, rel)}"
+                tar.add(str(path), arcname=arcname, recursive=False)
     return snapshot
 
 
 def write_raw_snapshot(remote: Path, entries: dict[str, bytes | None]) -> Path:
-    snapshot = remote / jit_cache_common_module.new_snapshot_name()
+    snapshot = remote / jit_cache_module.SNAPSHOT_NAME
     snapshot.parent.mkdir(parents=True, exist_ok=True)
     with open_snapshot_writer(snapshot) as tar:
         for name, payload in entries.items():
@@ -66,14 +52,6 @@ def write_raw_snapshot(remote: Path, entries: dict[str, bytes | None]) -> Path:
                 info.size = len(payload)
                 tar.addfile(info, BytesIO(payload))
     return snapshot
-
-
-def wait_for_snapshot_publish(manager: JitCacheManager, timeout_s: float = 5) -> None:
-    deadline = time.time() + timeout_s
-    while not manager._snapshot_publish_done.is_set():
-        if time.time() >= deadline:
-            raise TimeoutError("timed out waiting for snapshot publish")
-        time.sleep(0.05)
 
 
 def snapshot_member_names(snapshot_path: Path) -> set[str]:
@@ -92,1183 +70,563 @@ def snapshot_members(snapshot_path: Path) -> dict[str, bytes]:
     return members
 
 
+def make_manager(
+    root: Path,
+    remote: str = "",
+    *,
+    local_root: Path | None = None,
+    create_remote: bool = True,
+    debounce_s: float = 0,
+) -> JitCacheManager:
+    """Helper used by both test classes; debounce_s=0 makes publish synchronous."""
+    if remote and create_remote:
+        Path(remote).mkdir(parents=True, exist_ok=True)
+    config = JITConfig()
+    config.local_jit_dir = str(local_root or root / "local")
+    config.remote_jit_dir = remote
+    manager = JitCacheManager(config, debounce_s=debounce_s)
+    manager.bootstrap()
+    return manager
+
+
 class JitCacheManagerTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
         self.old_env = os.environ.copy()
-        self.managers = []
+        self.managers: list[JitCacheManager] = []
 
     def tearDown(self):
         for manager in self.managers:
-            wait_for_snapshot_publish(manager)
+            manager.stop()
         os.environ.clear()
         os.environ.update(self.old_env)
         self.tmp.cleanup()
 
     def make_manager(
         self,
-        remote="",
-        timeout_s: float = 5,
-        create_remote: bool = True,
+        remote: str = "",
+        *,
         local_root: Path | None = None,
+        create_remote: bool = True,
+        debounce_s: float = 0,
     ) -> JitCacheManager:
-        if remote:
-            remote_path = Path(remote)
-            if create_remote and remote_path.is_absolute():
-                remote_path.mkdir(parents=True, exist_ok=True)
-        config = JITConfig()
-        config.local_jit_dir = str(local_root or self.root / "local")
-        config.remote_sync_timeout_s = timeout_s
-        config.remote_jit_dir = remote
-        manager = JitCacheManager(config)
+        manager = make_manager(
+            self.root,
+            remote,
+            local_root=local_root,
+            create_remote=create_remote,
+            debounce_s=debounce_s,
+        )
         self.managers.append(manager)
-        manager.bootstrap()
         return manager
 
     def make_remote_manager(self, **kwargs) -> tuple[Path, JitCacheManager]:
         remote = self.root / "remote"
-        manager = self.make_manager(str(remote), **kwargs)
-        return remote, manager
-
-    def seed_remote_snapshot(
-        self, remote: Path, key: str = "kernel/a.so", content: str = "so"
-    ) -> Path:
-        remote_file = remote / "triton" / key
-        remote_file.parent.mkdir(parents=True, exist_ok=True)
-        remote_file.write_text(content, encoding="utf-8")
-        write_snapshot(remote)
-        return remote_file
-
-    def local_path(self, *parts) -> Path:
-        return self.root.joinpath("local", *parts)
-
-    def patch_time(self, value: float = 1200.0):
-        return mock.patch.object(jit_cache_module.time, "time", return_value=value)
+        return remote, self.make_manager(str(remote), **kwargs)
 
     def component(self, name: str):
-        return jit_cache_common_module.COMPONENT_BY_NAME[name]
+        return jit_cache_module.COMPONENT_BY_NAME[name]
 
-    def enqueue_file(self, manager: JitCacheManager, component_name: str, key: str):
+    def component_dir(self, root: Path, name: str) -> Path:
+        return jit_cache_module.component_cache_dir(root, self.component(name))
+
+    def upload_file_helper(
+        self, manager: JitCacheManager, component_name: str, rel: str
+    ):
         component = self.component(component_name)
-        root = manager.component_dirs.get(
-            component_name, (self.root / "local" / component_name, None)
-        )[0]
-        path = root / key
+        local_root = manager.component_dirs[component_name]
+        path = local_root / rel
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(component_name, encoding="utf-8")
-        tracker = manager.dirty_tracker or jit_cache_common_module.JitDirtyTracker(
-            manager.component_dirs, manager.enqueue_upload
-        )
-        manager.dirty_tracker = tracker
-        add_path_to_tracker(tracker, component, path, root)
+        self.assertTrue(manager.upload_file(component, rel))
         return path
 
-    def wait_for_pending_empty(self, manager: JitCacheManager):
-        with manager._pending_cv:
-            drained = manager._pending_cv.wait_for(
-                lambda: manager._pending_count == 0, timeout=5
-            )
-        if not drained:
-            self.fail("timed out waiting for pending uploads to drain")
-
-    def test_bootstrap_creates_component_cache_dirs(self):
-        manager = self.make_manager(str(self.root / "remote"))
+    def test_bootstrap_creates_managed_component_dirs(self):
+        remote, manager = self.make_remote_manager()
 
         self.assertTrue(manager.enabled)
         self.assertEqual(
             set(manager.component_dirs),
-            {component.name for component in jit_cache_common_module.COMPONENT_SPECS},
+            {component.name for component in jit_cache_module.COMPONENT_SPECS},
         )
-        for component in jit_cache_common_module.COMPONENT_SPECS:
-            self.assertTrue((self.root / "local" / component.name).is_dir())
-
-    def test_triton_autotune_cache_dir_and_env_are_gpu_scoped(self):
-        os.environ["TRITON_AUTOTUNE_CACHE_MODE"] = "disabled"
-        with mock.patch.object(
-            jit_cache_common_module,
-            "get_gpu_info",
-            return_value="NVIDIA_H20",
-        ):
-            manager = self.make_manager(str(self.root / "remote"))
-
-            self.assertEqual(
-                manager.component_dirs["triton_autotune"][0],
-                self.root / "local" / "triton_autotune" / "NVIDIA_H20",
+        for component in jit_cache_module.COMPONENT_SPECS:
+            self.assertTrue(
+                jit_cache_module.component_cache_dir(
+                    self.root / "local", component
+                ).is_dir()
             )
             self.assertEqual(
-                manager.component_dirs["triton_autotune"][1],
-                self.root / "remote" / "triton_autotune" / "NVIDIA_H20",
-            )
-            self.assertEqual(
-                os.environ["TRITON_CACHE_DIR"],
-                str(manager.component_dirs["triton"][0]),
-            )
-            self.assertEqual(
-                os.environ["TRITON_AUTOTUNE_CONFIG_DIR"],
-                str(manager.component_dirs["triton_autotune"][0]),
+                manager.component_dirs[component.name],
+                jit_cache_module.component_cache_dir(self.root / "local", component),
             )
 
-            for c in jit_cache_common_module.COMPONENT_SPECS:
-                os.environ.pop(c.env_name, None)
-            os.environ.pop("TRITON_AUTOTUNE_CACHE_MODE", None)
-            jit_cache_common_module.apply_jit_cache_env(self.root / "local_env")
-
-        self.assertEqual(
-            os.environ["TRITON_AUTOTUNE_CONFIG_DIR"],
-            str(self.root / "local_env" / "triton_autotune" / "NVIDIA_H20"),
-        )
-        self.assertEqual(os.environ["TRITON_AUTOTUNE_CACHE_MODE"], "cached")
-
-    def test_bootstrap_clears_configured_startup_files(self):
-        local_root = self.root / "local"
-        deep_gemm_dir = local_root / "deep_gemm"
-        stale_lock = deep_gemm_dir / "cache" / "kernel_lock"
-        nested_lock = deep_gemm_dir / "cache" / "nested" / "build_lock"
-        keep_file = deep_gemm_dir / "cache" / "kernel.cubin"
-        legacy_lock = self.root / "deep_gemm_runtime" / "legacy_lock"
-        triton_lock = local_root / "triton" / "cache" / "kernel_lock"
-        lock_dir = deep_gemm_dir / "cache" / "dir_lock"
-        for path in (stale_lock, nested_lock, keep_file, legacy_lock, triton_lock):
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text("data", encoding="utf-8")
-        lock_dir.mkdir()
-
-        self.make_manager(local_root=local_root)
-
-        self.assertFalse(stale_lock.exists())
-        self.assertFalse(nested_lock.exists())
-        self.assertTrue(keep_file.exists())
-        self.assertTrue(legacy_lock.exists())
-        self.assertTrue(triton_lock.exists())
-        self.assertTrue(lock_dir.exists())
-
-    def test_prepare_without_remote_returns_disabled_summary(self):
+    def test_prepare_without_remote_is_disabled(self):
         manager = self.make_manager()
 
         summary = manager.prepare()
 
-        self.assertFalse(manager.enabled)
-        self.assertEqual(summary["mode"], "snapshot_download")
+        self.assertEqual(summary["result"], "skipped")
         self.assertEqual(summary["cache_state"], "disabled")
-        self.assertNotIn("components", summary)
 
-    def test_remote_config_validates_path(self):
-        with self.assertRaisesRegex(ValueError, "absolute path"):
-            self.make_manager("relative/jit_cache")
+    def test_prepare_miss_skips_snapshot_download(self):
+        _remote, manager = self.make_remote_manager()
 
-        manager = self.make_manager(
-            str(self.root / "missing_remote"), create_remote=False
+        summary = manager.prepare()
+
+        self.assertEqual(summary["result"], "skipped")
+        self.assertEqual(summary["cache_state"], "snapshot_miss")
+
+    def test_prepare_extracts_fixed_snapshot_every_boot_and_overwrites_local(self):
+        remote = self.root / "remote"
+        local = self.root / "local"
+        first = self.make_manager(str(remote), local_root=local)
+        remote_file = self.component_dir(remote, "triton") / "kernel/a.so"
+        remote_file.parent.mkdir(parents=True, exist_ok=True)
+        remote_file.write_text("first", encoding="utf-8")
+        write_snapshot(remote)
+
+        first_summary = first.prepare()
+        self.assertEqual(first_summary["cache_state"], "snapshot_hit")
+        target = self.component_dir(local, "triton") / "kernel/a.so"
+        self.assertEqual(target.read_text(encoding="utf-8"), "first")
+
+        remote_file.write_text("second", encoding="utf-8")
+        write_snapshot(remote)
+        second = self.make_manager(str(remote), local_root=local)
+        second_summary = second.prepare()
+
+        self.assertEqual(second_summary["cache_state"], "snapshot_hit")
+        self.assertEqual(target.read_text(encoding="utf-8"), "second")
+
+    def test_concurrent_prepare_same_local_is_serialized(self):
+        remote = self.root / "remote"
+        local = self.root / "local"
+        first = self.make_manager(str(remote), local_root=local)
+        second = self.make_manager(str(remote), local_root=local)
+        remote_file = self.component_dir(remote, "triton") / "kernel/a.so"
+        remote_file.parent.mkdir(parents=True, exist_ok=True)
+        remote_file.write_text("shared", encoding="utf-8")
+        write_snapshot(remote)
+
+        first_started = threading.Event()
+        release_first = threading.Event()
+        second_entered_extract = threading.Event()
+        original_first_extract = first._extract_snapshot
+        original_second_extract = second._extract_snapshot
+
+        def slow_first_extract(archive: Path):
+            first_started.set()
+            self.assertTrue(release_first.wait(timeout=5))
+            return original_first_extract(archive)
+
+        def recording_second_extract(archive: Path):
+            second_entered_extract.set()
+            return original_second_extract(archive)
+
+        results: list[dict] = []
+        with (
+            mock.patch.object(
+                first, "_extract_snapshot", side_effect=slow_first_extract
+            ),
+            mock.patch.object(
+                second, "_extract_snapshot", side_effect=recording_second_extract
+            ),
+        ):
+            leader = threading.Thread(target=lambda: results.append(first.prepare()))
+            follower = threading.Thread(target=lambda: results.append(second.prepare()))
+            leader.start()
+            self.assertTrue(first_started.wait(timeout=5))
+            follower.start()
+            time.sleep(0.1)
+            self.assertFalse(second_entered_extract.is_set())
+            release_first.set()
+            leader.join(timeout=5)
+            follower.join(timeout=5)
+
+        self.assertEqual([r["result"] for r in results], ["success", "success"])
+        self.assertEqual(
+            (self.component_dir(local, "triton") / "kernel/a.so").read_text(), "shared"
         )
-        self.assertFalse(manager.enabled)
-        self.assertEqual(manager.component_dirs, {})
+
+    def test_prepare_rejects_unsafe_snapshot_paths(self):
+        remote, manager = self.make_remote_manager()
+        write_raw_snapshot(remote, {"../../escape.so": b"bad"})
+
+        summary = manager.prepare()
+
+        self.assertEqual(summary["result"], "failed")
+        self.assertEqual(summary["cache_state"], "snapshot_error")
+        self.assertFalse((self.root / "escape.so").exists())
+
+    def test_prepare_skips_other_component_scopes(self):
+        remote, manager = self.make_remote_manager()
+        write_raw_snapshot(
+            remote,
+            {
+                "deep_gemm/cache/old.cubin": b"old",
+                "triton/kernel/keep.so": b"keep",
+            },
+        )
+
+        summary = manager.prepare()
+
+        self.assertEqual(summary["result"], "success")
+        self.assertEqual(summary["extracted_files"], 1)
+        self.assertFalse(
+            (manager.component_dirs["deep_gemm"] / "cache/old.cubin").exists()
+        )
+        self.assertEqual(
+            (manager.component_dirs["triton"] / "kernel/keep.so").read_text(
+                encoding="utf-8"
+            ),
+            "keep",
+        )
+
+    def test_upload_file_publishes_snapshot_without_writing_remote_file_tree(self):
+        remote, manager = self.make_remote_manager()
+        component = self.component("triton")
+        local_root = manager.component_dirs["triton"]
+        remote_root = jit_cache_module.component_cache_dir(remote, component)
+        local_file = local_root / "kernel/a.so"
+        remote_file = remote_root / "kernel/a.so"
+        local_file.parent.mkdir(parents=True, exist_ok=True)
+        remote_file.parent.mkdir(parents=True, exist_ok=True)
+        remote_file.write_text("old", encoding="utf-8")
+        local_file.write_text("new", encoding="utf-8")
+
+        self.assertTrue(manager.upload_file(component, "kernel/a.so"))
+        summary = manager.sync_once()
+
+        self.assertEqual(remote_file.read_text(encoding="utf-8"), "old")
+        self.assertEqual(
+            snapshot_members(snapshot_path(remote)), {"triton/kernel/a.so": b"new"}
+        )
+        self.assertEqual(summary["result"], "success")
+
+    def test_upload_file_reports_failures(self):
+        _remote, manager = self.make_remote_manager()
+        component = self.component("triton")
+        local_root = manager.component_dirs["triton"]
+        local_file = local_root / "kernel/a.so"
+        local_file.parent.mkdir(parents=True, exist_ok=True)
+        local_file.write_text("so", encoding="utf-8")
+
+        with mock.patch.object(
+            manager, "_publish_snapshot", side_effect=OSError("publish failed")
+        ):
+            self.assertFalse(manager.upload_file(component, "kernel/a.so"))
+
+    def test_sync_once_publishes_one_fixed_snapshot_file(self):
+        remote, manager = self.make_remote_manager()
+        manager.prepare()
+        self.upload_file_helper(manager, "triton", "kernel/a.so")
+
+        summary = manager.sync_once()
+        snapshot = snapshot_path(remote)
+
+        self.assertEqual(summary["result"], "success")
+        self.assertEqual(snapshot, remote / jit_cache_module.SNAPSHOT_NAME)
+        self.assertEqual(snapshot_members(snapshot), {"triton/kernel/a.so": b"triton"})
+
+    def test_snapshot_publish_overwrites_existing_snapshot(self):
+        remote, manager = self.make_remote_manager()
+        manager.prepare()
+        self.upload_file_helper(manager, "triton", "kernel/a.so")
+        manager.sync_once()
+        self.upload_file_helper(manager, "triton", "kernel/b.so")
+        manager.sync_once()
+
+        snapshot = snapshot_path(remote)
+
+        self.assertEqual(
+            snapshot_members(snapshot),
+            {"triton/kernel/a.so": b"triton", "triton/kernel/b.so": b"triton"},
+        )
+        self.assertEqual(
+            [p.name for p in remote.glob("*.tar.zst")], [jit_cache_module.SNAPSHOT_NAME]
+        )
+
+    def test_snapshot_publish_keeps_existing_remote_members(self):
+        remote, manager = self.make_remote_manager()
+        write_raw_snapshot(
+            remote,
+            {
+                "triton/kernel/a.so": b"remote",
+                "triton/kernel/other.so": b"other",
+            },
+        )
+        self.upload_file_helper(manager, "triton", "kernel/a.so")
+        self.upload_file_helper(manager, "triton", "kernel/b.so")
+
+        self.assertEqual(
+            snapshot_members(snapshot_path(remote)),
+            {
+                "triton/kernel/a.so": b"remote",
+                "triton/kernel/other.so": b"other",
+                "triton/kernel/b.so": b"triton",
+            },
+        )
+
+    def test_watcher_uses_component_specific_completion_events(self):
+        _remote, manager = self.make_remote_manager()
+        calls = []
+        cases = (
+            ("flashinfer", "kernel.so", "created", "closed"),
+            ("torch_extensions", "extension.so", "moved", "closed"),
+            ("triton", "kernel/a.so", "closed", "moved"),
+            ("triton_autotune", "kernel.json", "created", "closed"),
+            ("deep_gemm", "cache/kernel.cubin", "closed", "created"),
+            ("deep_gemm", "cache/kernel2.cubin", "closed", "moved"),
+        )
+        for component_name, rel, ignored_event, upload_event in cases:
+            component = self.component(component_name)
+            root = manager.component_dirs[component_name]
+            path = root / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("x", encoding="utf-8")
+            handler = jit_cache_module._JitFileEventHandler(
+                component,
+                root,
+                lambda component, rel: calls.append((component.name, rel)) or True,
+            )
+            before = len(calls)
+
+            handler.on_any_event(FakeFileEvent(ignored_event, str(path)))
+            self.assertEqual(len(calls), before)
+
+            if upload_event == "moved":
+                event = FakeFileEvent("moved", str(path.with_suffix(".tmp")), str(path))
+            else:
+                event = FakeFileEvent(upload_event, str(path))
+            handler.on_any_event(event)
+            self.assertEqual(len(calls), before + 1)
+
+    def test_file_event_handler_uploads_syncable_file(self):
+        remote, manager = self.make_remote_manager()
+        manager.prepare()
+        local_root = manager.component_dirs["triton"]
+        final_file = local_root / "kernel/a.cubin"
+        final_file.parent.mkdir(parents=True, exist_ok=True)
+        final_file.write_text("cubin", encoding="utf-8")
+        handler = manager._make_handler(self.component("triton"), local_root)
+
+        handler.on_any_event(
+            FakeFileEvent("moved", str(final_file.with_suffix(".tmp")), str(final_file))
+        )
+
+        self.assertEqual(
+            snapshot_members(snapshot_path(remote)), {"triton/kernel/a.cubin": b"cubin"}
+        )
 
     def test_remote_config_mounts_uri_before_validation(self):
+        from rtp_llm.utils.fuser import MountRwMode
+
         mounted_remote = self.root / "mounted_remote"
         mounted_remote.mkdir()
 
-        with mock.patch.object(
-            jit_cache_common_module,
-            "fetch_remote_file_to_local",
+        with mock.patch(
+            "rtp_llm.utils.fuser.fetch_remote_file_to_local",
             return_value=str(mounted_remote),
         ) as fetch_remote:
             manager = self.make_manager("oss://bucket/jit-cache", create_remote=False)
 
         fetch_remote.assert_called_once_with(
-            "oss://bucket/jit-cache",
-            jit_cache_common_module.MountRwMode.RWMODE_RW,
+            "oss://bucket/jit-cache", MountRwMode.RWMODE_RW
         )
-        self.assertEqual(manager.config.remote_root, mounted_remote)
-        self.assertEqual(manager.component_dirs["triton"][1], mounted_remote / "triton")
+        self.assertEqual(manager.remote_root, mounted_remote)
 
-    def test_remote_config_disables_cache_when_uri_mount_fails(self):
-        with mock.patch.object(
-            jit_cache_common_module,
-            "fetch_remote_file_to_local",
-            side_effect=RuntimeError("mount failed"),
-        ) as fetch_remote:
-            manager = self.make_manager("oss://bucket/jit-cache", create_remote=False)
+    def test_debounce_batches_rapid_uploads_into_single_publish(self):
+        remote, manager = self.make_remote_manager(debounce_s=0.1)
+        component = self.component("triton")
+        local_root = manager.component_dirs["triton"]
 
-        fetch_remote.assert_called_once_with(
-            "oss://bucket/jit-cache",
-            jit_cache_common_module.MountRwMode.RWMODE_RW,
-        )
-        self.assertFalse(manager.enabled)
-        self.assertEqual(manager.component_dirs, {})
+        publish_calls: list[None] = []
+        original = manager._publish_snapshot
 
-    def test_prepare_snapshot_miss_does_not_scan_remote_files(self):
-        remote = self.root / "remote"
-        remote_kernel = remote / "triton" / "kernel"
-        remote_kernel.mkdir(parents=True)
-        (remote_kernel / "a.so").write_text("so", encoding="utf-8")
-        manager = self.make_manager(str(remote))
-
-        summary = manager.prepare()
-        manager.stop()
-
-        self.assertEqual(summary["cache_state"], "snapshot_miss")
-        self.assertEqual(summary["result"], "skipped")
-        # Miss must not leave a marker — next boot has to retry.
-        self.assertFalse(manager.snapshot_complete_path.exists())
-        self.assertFalse(self.local_path("triton", "kernel", "a.so").exists())
-        self.assertEqual(summary["mode"], "snapshot_download")
-
-    def test_snapshot_miss_retries_on_next_boot(self):
-        # First "boot" sees an empty remote → snapshot_miss; the second "boot"
-        # (a fresh manager sharing local_root) must re-attempt the pull and
-        # find the snapshot the first one missed.
-        remote = self.root / "remote"
-        remote.mkdir()
-        local = self.root / "local"
-
-        first = self.make_manager(str(remote), local_root=local)
-        first_summary = first.prepare()
-        first.stop()
-
-        # Another node publishes a snapshot between boots.
-        remote_kernel = remote / "triton" / "kernel"
-        remote_kernel.mkdir(parents=True)
-        (remote_kernel / "a.so").write_text("so", encoding="utf-8")
-        write_snapshot(remote)
-
-        second = self.make_manager(str(remote), local_root=local)
-        second_summary = second.prepare()
-        second.stop()
-
-        self.assertEqual(first_summary["cache_state"], "snapshot_miss")
-        self.assertEqual(second_summary["cache_state"], "snapshot_hit")
-        self.assertEqual(second_summary["result"], "success")
-        self.assertTrue((local / "triton" / "kernel" / "a.so").exists())
-
-    def test_prepare_uses_external_snapshot_and_marks_memory_cache(self):
-        remote, manager = self.make_remote_manager()
-        self.seed_remote_snapshot(remote)
-
-        summary = manager.prepare()
-        sync = manager.sync_once("periodic_flush")
-        manager.stop()
-
-        self.assertEqual(summary["cache_state"], "snapshot_hit")
-        self.assertEqual(summary["result"], "success")
-        self.assertEqual(summary["extracted_files"], 1)
-        self.assertTrue(self.local_path("triton", "kernel", "a.so").exists())
-        self.assertTrue(manager.snapshot_complete_path.exists())
-        self.assertEqual(sync["uploaded_files"], 0)
-        self.assertEqual(sync["components"], {})
-
-    def test_snapshot_rejects_path_traversal_before_writing(self):
-        remote = self.root / "remote"
-        remote.mkdir()
-
-        for member_name, escaped_name, payload in (
-            ("../../escaped.txt", "escaped.txt", b"escaped"),
-            ("../../escaped_dir", "escaped_dir", None),
-        ):
-            with self.subTest(member_name=member_name):
-                snapshot = write_raw_snapshot(remote, {member_name: payload})
-                manager = self.make_manager(str(remote))
-
-                summary = manager.prepare()
-                manager.stop()
-
-                self.assertEqual(summary["cache_state"], "snapshot_error")
-                self.assertEqual(summary["result"], "failed")
-                self.assertFalse((self.root / escaped_name).exists())
-                snapshot.unlink(missing_ok=True)
-
-    def test_extract_snapshot_closes_member_source_on_timeout(self):
-        remote, manager = self.make_remote_manager()
-        self.seed_remote_snapshot(remote)
-
-        class TimeoutSource(BytesIO):
-            def readinto(self, buffer):
-                raise TimeoutError("copy timeout")
-
-        source = TimeoutSource(b"so")
-        with mock.patch.object(tarfile.TarFile, "extractfile", return_value=source):
-            summary = manager.prepare()
-
-        self.assertEqual(summary["result"], "timeout")
-        self.assertTrue(source.closed)
-
-    def test_snapshot_skips_unknown_component_entries(self):
-        remote = self.root / "remote"
-        remote.mkdir()
-        write_raw_snapshot(remote, {"legacy_component/kernel/a.so": b"legacy"})
-        manager = self.make_manager(str(remote))
-
-        summary = manager.prepare()
-        manager.stop()
-
-        self.assertEqual(summary["cache_state"], "snapshot_hit")
-        self.assertEqual(summary["result"], "success")
-        self.assertEqual(summary.get("extracted_files", 0), 0)
-        self.assertEqual(summary.get("extracted_bytes", 0), 0)
-        self.assertFalse(
-            (self.root / "local" / "legacy_component" / "kernel" / "a.so").exists()
-        )
-
-    def test_snapshot_extracts_only_current_gpu_scope(self):
-        remote = self.root / "remote"
-        remote.mkdir()
-        write_raw_snapshot(
-            remote,
-            {
-                "triton_autotune/NVIDIA_H20/configs/keep.json": b"keep",
-                "triton_autotune/NVIDIA_A100/configs/drop.json": b"drop",
-            },
-        )
-        manager = self.make_manager(str(remote))
+        def counting_publish():
+            publish_calls.append(None)
+            return original()
 
         with mock.patch.object(
-            jit_cache_common_module,
-            "get_gpu_info",
-            return_value="NVIDIA_H20",
+            manager, "_publish_snapshot", side_effect=counting_publish
         ):
-            summary = manager.prepare()
-        manager.stop()
+            for i in range(5):
+                path = local_root / f"kernel/k{i}.so"
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("x", encoding="utf-8")
+                manager.upload_file(component, f"kernel/k{i}.so")
 
-        self.assertEqual(summary["cache_state"], "snapshot_hit")
-        self.assertEqual(summary["result"], "success")
-        self.assertEqual(summary["extracted_files"], 1)
-        self.assertEqual(
-            (
-                self.root
-                / "local"
-                / "triton_autotune"
-                / "NVIDIA_H20"
-                / "configs"
-                / "keep.json"
-            ).read_text(encoding="utf-8"),
-            "keep",
-        )
-        self.assertFalse(
-            (
-                self.root
-                / "local"
-                / "triton_autotune"
-                / "NVIDIA_A100"
-                / "configs"
-                / "drop.json"
-            ).exists()
-        )
-
-    def test_upload_skips_existing_remote_file(self):
-        remote, manager = self.make_remote_manager()
-        local_file = self.enqueue_file(manager, "flashinfer", "kernel/a.cubin")
-
-        first = manager.sync_once()
-        local_file.write_text("same_size!", encoding="utf-8")
-        add_path_to_tracker(
-            manager.dirty_tracker,
-            self.component("flashinfer"),
-            local_file,
-            self.root / "local" / "flashinfer",
-        )
-        second = manager.sync_once()
-
-        self.assertEqual(first["components"]["flashinfer"]["uploaded_files"], 1)
-        self.assertEqual(second["components"]["flashinfer"]["uploaded_files"], 0)
-        self.assertEqual(
-            (remote / "flashinfer" / "kernel" / "a.cubin").read_text(encoding="utf-8"),
-            "flashinfer",
-        )
-
-    def test_upload_covers_all_jit_components(self):
-        _remote, manager = self.make_remote_manager()
-        filenames = {
-            "flashinfer": "kernel/a.cubin",
-            "triton": "kernel/a.so",
-            "triton_autotune": "configs/a.pkl",
-            "deep_gemm": "kernel/a.cubin",
-            "torch_extensions": "extension/a.so",
-        }
-
-        for component, key in filenames.items():
-            self.enqueue_file(manager, component, key)
-
-        summary = manager.sync_once("periodic_flush")
+            time.sleep(0.5)
 
         self.assertEqual(
-            summary["uploaded_files"], len(jit_cache_common_module.COMPONENT_SPECS)
+            len(publish_calls),
+            1,
+            "5 rapid uploads should trigger exactly 1 debounced publish",
         )
-        for component, key in filenames.items():
-            self.assertEqual(
-                (manager.component_dirs[component][1] / key).read_text(
-                    encoding="utf-8"
-                ),
-                component,
-            )
 
-    def test_upload_skips_tmp_jit_paths(self):
+    def test_debounce_keeps_existing_pending_timer(self):
+        _remote, manager = self.make_remote_manager(debounce_s=60)
+        component = self.component("triton")
+        local_root = manager.component_dirs["triton"]
+        first = local_root / "kernel/a.so"
+        second = local_root / "kernel/b.so"
+        first.parent.mkdir(parents=True, exist_ok=True)
+        first.write_bytes(b"a")
+        second.write_bytes(b"b")
+
+        self.assertTrue(manager.upload_file(component, "kernel/a.so"))
+        timer = manager._debounce_timer
+        self.assertIsNotNone(timer)
+        self.assertTrue(manager.upload_file(component, "kernel/b.so"))
+
+        self.assertIs(manager._debounce_timer, timer)
+
+    def test_concurrent_publish_does_not_corrupt_snapshot(self):
+        """Parallel _publish_snapshot calls must not produce a truncated archive."""
         remote, manager = self.make_remote_manager()
         component = self.component("triton")
-        key = "hash/tmp.pid_1_abc/a.cubin"
-        local_file = self.root / "local" / component.name / key
-        local_file.parent.mkdir(parents=True)
-        local_file.write_text("tmp", encoding="utf-8")
+        local_root = manager.component_dirs["triton"]
+        for i in range(10):
+            p = local_root / f"kernel/k{i}.so"
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_bytes(b"x" * 1024)
 
-        manager.enqueue_upload(component, key)
-        summary = manager.sync_once()
+        errors: list[Exception] = []
 
-        self.assertEqual(summary["uploaded_files"], 0)
-        self.assertFalse((remote / component.name / key).exists())
+        def publish_worker():
+            try:
+                manager._publish_snapshot()
+            except Exception as exc:
+                errors.append(exc)
 
-    def test_usage_tracker_increments_on_upload_and_extract(self):
-        from rtp_llm.metrics import GaugeMetrics, kmonitor
+        threads = [threading.Thread(target=publish_worker) for _ in range(4)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=30)
 
-        remote, manager = self.make_remote_manager()
-        self.seed_remote_snapshot(remote)
+        self.assertFalse(errors, f"concurrent publish raised: {errors}")
+        # Snapshot must be readable after concurrent writes.
+        names = snapshot_member_names(snapshot_path(remote))
+        self.assertGreater(len(names), 0)
 
-        manager.prepare()
-        snap = manager.usage_snapshot()
-        self.assertEqual(snap["local"]["triton"]["files"], 1)
-        self.assertGreater(snap["local"]["triton"]["bytes"], 0)
-
-        self.enqueue_file(manager, "triton", "kernel/b.so")
-        with mock.patch.object(kmonitor, "_inited", True), mock.patch.object(
-            kmonitor, "report"
-        ) as report:
-            summary = manager.sync_once("periodic_flush")
-
-        snap = manager.usage_snapshot()
-        self.assertEqual(snap["remote"]["triton"]["files"], 1)
-        self.assertIn("remote_cache", summary)
-        self.assertGreater(summary["remote_cache"]["files"], 0)
-        self.assertTrue(report.called)
-        manager.stop()
-
-    def test_sync_once_ignores_kmonitor_report_errors(self):
-        from rtp_llm.metrics import kmonitor
-
-        _remote, manager = self.make_remote_manager()
-        bucket = manager._usage["remote"]["triton"]
-        bucket["bytes"] += 4
-        bucket["files"] += 1
-
-        with mock.patch.object(kmonitor, "_inited", True), mock.patch.object(
-            kmonitor, "report", side_effect=RuntimeError("kmonitor unavailable")
-        ):
-            summary = manager.sync_once()
-
-        self.assertEqual(summary["result"], "success")
-        self.assertEqual(summary["remote_cache"]["files"], 1)
-
-    def test_sync_once_lock_contention_returns_standard_summary(self):
-        _remote, manager = self.make_remote_manager()
-
-        manager._sync_lock.acquire()
-        try:
-            summary = manager.sync_once("manual_contention")
-        finally:
-            manager._sync_lock.release()
-
-        self.assertEqual(summary["mode"], "manual_contention")
-        self.assertEqual(summary["result"], "skipped")
-        self.assertEqual(summary["reason"], "sync in progress")
-        self.assertIn("timestamp_ms", summary)
-        self.assertIn("total_cost_ms", summary)
-
-    def test_upload_skips_empty_files(self):
-        remote, manager = self.make_remote_manager()
-        component = self.component("triton")
-        key = "kernel/empty.cubin"
-        local_file = self.root / "local" / component.name / key
-        local_file.parent.mkdir(parents=True)
-        local_file.write_bytes(b"")
-
-        manager.enqueue_upload(component, key)
-        summary = manager.sync_once()
-
-        self.assertEqual(summary["components"]["triton"]["skipped_files"], 1)
-        self.assertFalse((remote / component.name / key).exists())
-
-    def test__copy_atomic_skips_existing_destination(self):
-        remote, manager = self.make_remote_manager()
-        src = self.local_path("triton", "kernel", "a.cubin")
-        src.parent.mkdir(parents=True)
-        src.write_text("new", encoding="utf-8")
-        dst = remote / "triton" / "kernel" / "a.cubin"
-        dst.parent.mkdir(parents=True)
-        dst.write_text("old", encoding="utf-8")
-
-        result = manager._copy_atomic(src, dst, time.monotonic() + 5)
-
-        self.assertEqual(result, 0)
-        self.assertEqual(dst.read_text(encoding="utf-8"), "old")
-
-    def test__copy_atomic_copies_file_content(self):
-        remote, manager = self.make_remote_manager()
-        src = self.local_path("triton", "kernel", "a.cubin")
-        src.parent.mkdir(parents=True)
-        src.write_text("new", encoding="utf-8")
-        dst = remote / "triton" / "kernel" / "a.cubin"
-
-        result = manager._copy_atomic(src, dst, time.monotonic() + 5)
-
-        self.assertEqual(dst.read_text(encoding="utf-8"), "new")
-        self.assertGreater(result, 0)
-
-    def test_watcher_filters_paths_and_only_enqueues_completed_events(self):
-        _remote, manager = self.make_remote_manager()
-        tracker = jit_cache_common_module.JitDirtyTracker(
-            manager.component_dirs, manager.enqueue_upload
-        )
-        root = self.local_path("triton")
-        kernel = root / "kernel"
-        kernel.mkdir(parents=True)
-        handler = tracker._make_handler(self.component("triton"), root)
-
-        with mock.patch.object(manager, "_upload_task"):
-            handler.on_any_event(
-                FakeFileEvent(
-                    "moved",
-                    str(root / "kernel" / "moved_out.so"),
-                    str(self.root / "outside" / "moved_out.so"),
-                )
-            )
-            self.assertEqual(manager._pending_count, 0)
-
-            ignored_file = kernel / "ignored.so"
-            ignored_file.write_text("ignored", encoding="utf-8")
-            for event_type in ("opened", "deleted", "modified"):
-                handler.on_any_event(FakeFileEvent(event_type, str(ignored_file)))
-            self.assertEqual(manager._pending_count, 0)
-
-            tmp_file = root / "hash" / "tmp.pid_1_abc" / "tmp.cubin"
-            tmp_file.parent.mkdir(parents=True)
-            tmp_file.write_text("tmp", encoding="utf-8")
-            handler.on_any_event(FakeFileEvent("closed", str(tmp_file)))
-            handler.on_any_event(FakeFileEvent("created", str(tmp_file)))
-            self.assertEqual(manager._pending_count, 0)
-
-            created_file = kernel / "created.so"
-            created_file.write_text("so", encoding="utf-8")
-            handler.on_any_event(FakeFileEvent("created", str(created_file)))
-            self.assertEqual(manager._pending_count, 0)
-
-            closed_file = kernel / "closed.so"
-            closed_file.write_text("so", encoding="utf-8")
-            handler.on_any_event(FakeFileEvent("closed", str(closed_file)))
-            self.assertEqual(manager._pending_count, 0)
-
-            moved_file = kernel / "moved.so"
-            moved_file.write_text("so", encoding="utf-8")
-            handler.on_any_event(
-                FakeFileEvent("moved", str(kernel / "tmp.so"), str(moved_file))
-            )
-            self.assertEqual(manager._pending_count, 1)
-
-            for name in ("a.cubin.tmp", "a.o", "a.cu", "compile.log", "build.ninja"):
-                bad_suffix = kernel / name
-                bad_suffix.write_text("skip", encoding="utf-8")
-                handler.on_any_event(
-                    FakeFileEvent("moved", str(kernel / "tmp"), str(bad_suffix))
-                )
-            self.assertEqual(manager._pending_count, 1)
-
-    def test_watcher_uses_component_specific_completion_events(self):
-        _remote, manager = self.make_remote_manager()
-        tracker = jit_cache_common_module.JitDirtyTracker(
-            manager.component_dirs, manager.enqueue_upload
-        )
-
-        def handler_for(component_name: str):
-            root = manager.component_dirs[component_name][0]
-            root.mkdir(parents=True, exist_ok=True)
-            return (
-                tracker._make_handler(self.component(component_name), root),
-                root,
-            )
-
-        cases = (
-            ("flashinfer", "kernel.so", "created", "closed", "so"),
-            ("torch_extensions", "extension.so", "moved", "closed", "so"),
-            ("triton", "kernel/a.so", "closed", "moved", "so"),
-            ("triton_autotune", "kernel.json", "created", "closed", "{}"),
-            ("deep_gemm", "cache/kernel.cubin", "closed", "created", "cubin"),
-        )
-        with mock.patch.object(manager, "_upload_task"):
-            for component_name, key, ignored_event, upload_event, content in cases:
-                with self.subTest(component=component_name):
-                    handler, root = handler_for(component_name)
-                    path = root / key
-                    path.parent.mkdir(parents=True, exist_ok=True)
-                    path.write_text(content, encoding="utf-8")
-                    before = manager._pending_count
-
-                    handler.on_any_event(FakeFileEvent(ignored_event, str(path)))
-                    self.assertEqual(manager._pending_count, before)
-
-                    if upload_event == "moved":
-                        event = FakeFileEvent(
-                            "moved", str(path.with_suffix(".tmp")), str(path)
-                        )
-                    else:
-                        event = FakeFileEvent(upload_event, str(path))
-                    handler.on_any_event(event)
-                    self.assertEqual(manager._pending_count, before + 1)
-
-    def test_upload_failure_releases_pending_candidate(self):
-        remote, manager = self.make_remote_manager()
-        original_copy = manager._copy_atomic
-        failures = 0
-
-        def raise_copy(src, dst, deadline_s=None):
-            nonlocal failures
-            failures += 1
-            raise OSError("remote write failed")
-
-        manager._copy_atomic = raise_copy
-        with self.assertLogs(level="WARNING"):
-            self.enqueue_file(manager, "triton", "kernel/a.cubin")
-            first = manager.sync_once()
-        self.assertEqual(first["result"], "failed")
-        self.assertEqual(first["components"]["triton"]["failed_files"], 1)
-        self.assertEqual(failures, 1)
-        self.assertTrue(manager._pending_count == 0)
-
-        manager._copy_atomic = original_copy
-        self.enqueue_file(manager, "triton", "kernel/a.cubin")
-        second = manager.sync_once()
-
-        self.assertEqual(second["components"]["triton"]["uploaded_files"], 1)
-        self.assertEqual(
-            (remote / "triton" / "kernel" / "a.cubin").read_text(encoding="utf-8"),
-            "triton",
-        )
-
-    def test_enqueue_upload_cleans_pending_when_executor_rejects_task(self):
-        _remote, manager = self.make_remote_manager()
-        component = self.component("triton")
-        executor = manager.ensure_sync_executor()
-
-        with mock.patch.object(
-            executor, "submit", side_effect=RuntimeError("shutdown")
-        ):
-            self.assertFalse(manager.enqueue_upload(component, "kernel/a.so"))
-
-        self.assertEqual(manager._pending_count, 0)
-        self.assertTrue(manager._pending_count == 0)
-
-    def test_background_worker_records_upload_failure(self):
-        remote, manager = self.make_remote_manager()
-        manager.prepare()
-        manager.start_background_sync()
-        local_file = self.local_path("triton", "kernel", "a.so")
-        local_file.parent.mkdir(parents=True)
-        local_file.write_text("so", encoding="utf-8")
-        attempts = 0
-
-        def failing_copy(src, dst, deadline_s=None):
-            nonlocal attempts
-            attempts += 1
-            raise OSError("remote write failed")
-
-        manager._copy_atomic = failing_copy
-        with self.assertLogs(level="WARNING"):
-            add_path_to_tracker(
-                manager.dirty_tracker,
-                self.component("triton"),
-                local_file,
-                self.root / "local" / "triton",
-            )
-            self.wait_for_pending_empty(manager)
-        manager.stop()
-
-        self.assertEqual(attempts, 1)
-        self.assertFalse((remote / "triton" / "kernel" / "a.so").exists())
-
-    def test_sync_times_out_waiting_for_stuck_upload_worker(self):
-        _remote, manager = self.make_remote_manager()
-        component = self.component("triton")
-        block = threading.Event()
-
-        def blocking_upload(*a, **kw):
-            block.wait()
-            return 0
-
-        manager._do_upload = blocking_upload
-        manager.enqueue_upload(component, "kernel/a.so")
-
-        manager.config.remote_sync_timeout_s = 0.01
-        with self.assertLogs(level="WARNING") as logs:
-            summary = manager.sync_once()
-
-        block.set()
-        self.assertEqual(summary["result"], "failed")
-        self.assertTrue(summary.get("drain_timed_out", False))
-        self.assertIn("drain timed out", "\n".join(logs.output))
-
-    def test_sync_once_schedules_snapshot_publish_as_best_effort(self):
-        _remote, manager = self.make_remote_manager()
-        manager.prepare()
-        self.enqueue_file(manager, "triton", "kernel/a.so")
-        started = threading.Event()
-        release = threading.Event()
-
-        def blocking_publish(_bucket):
-            started.set()
-            self.assertTrue(release.wait(timeout=5))
-
-        with mock.patch.object(
-            manager, "_publish_snapshot", side_effect=blocking_publish
-        ):
-            with self.patch_time():
-                summary = manager.sync_once()
-            self.assertEqual(summary["result"], "success")
-            self.assertTrue(started.wait(timeout=1))
-            self.assertFalse(manager._snapshot_publish_done.is_set())
-            release.set()
-            wait_for_snapshot_publish(manager)
-
-    def test_sync_once_publishes_snapshot_after_successful_drain(self):
-        remote, manager = self.make_remote_manager()
-        manager.prepare()
-        self.enqueue_file(manager, "triton", "kernel/a.so")
-
-        with self.patch_time():
-            summary = manager.sync_once()
-
-        wait_for_snapshot_publish(manager)
-        snapshot = find_latest_snapshot(remote)
-        self.assertIsNotNone(snapshot)
-        self.assertEqual(summary["result"], "success")
-        self.assertTrue(snapshot.is_file())
-        self.assertTrue(
-            snapshot.name.startswith(jit_cache_common_module.SNAPSHOT_PREFIX)
-        )
-        self.assertEqual(
-            snapshot_members(snapshot),
-            {"triton/kernel/a.so": b"triton"},
-        )
-        self.assertTrue((remote / ".jit_snapshot_publish_lease.1").is_dir())
-        manager.stop()
-
-    def test_snapshot_publish_lease_allows_one_publisher_per_bucket(self):
+    def test_snapshot_mklock_times_out_when_lock_dir_is_left_behind(self):
         remote = self.root / "remote"
-        first = self.make_manager(
-            str(remote),
-            local_root=self.root / "local_first",
-        )
-        second = self.make_manager(
-            str(remote),
-            local_root=self.root / "local_second",
-        )
-        first.prepare()
-        second.prepare()
-        self.enqueue_file(first, "triton", "kernel/first.so")
+        remote.mkdir()
+        (remote / jit_cache_module.SNAPSHOT_LOCK_DIR_NAME).mkdir()
 
-        with mock.patch.object(jit_cache_module.time, "time", return_value=1200.0):
-            first.sync_once()
-        wait_for_snapshot_publish(first)
-
-        self.enqueue_file(second, "triton", "kernel/second.so")
-        with mock.patch.object(jit_cache_module.time, "time", return_value=1200.0):
-            second.sync_once()
-        wait_for_snapshot_publish(second)
-
-        snapshot = find_latest_snapshot(remote)
-        self.assertIsNotNone(snapshot)
-        self.assertEqual(
-            snapshot_members(snapshot),
-            {"triton/kernel/first.so": b"triton"},
-        )
-        self.assertTrue((remote / "triton" / "kernel" / "second.so").is_file())
-        self.assertEqual(len(list(remote.glob(".jit_snapshot_publish_lease.*"))), 1)
-        second.stop()
-        first.stop()
-
-    def test_snapshot_publish_lease_expiry_allows_next_bucket(self):
-        remote, manager = self.make_remote_manager()
-        manager.prepare()
-        stale_lease = remote / ".jit_snapshot_publish_lease.1"
-        stale_lease.mkdir()
-
-        self.enqueue_file(manager, "triton", "kernel/a.so")
-        with self.patch_time():
-            first = manager.sync_once()
-        wait_for_snapshot_publish(manager)
-
-        self.assertEqual(first["result"], "success")
-        self.assertIsNone(find_latest_snapshot(remote))
-        self.assertEqual(
-            sorted(path.name for path in remote.glob(".jit_snapshot_publish_lease.*")),
-            [".jit_snapshot_publish_lease.1"],
-        )
-
-        self.enqueue_file(manager, "triton", "kernel/a.so")
-        with self.patch_time(2400.0):
-            second = manager.sync_once()
-        wait_for_snapshot_publish(manager)
-
-        self.assertEqual(second["result"], "success")
-        snapshot = find_latest_snapshot(remote)
-        self.assertIsNotNone(snapshot)
-        self.assertEqual(
-            snapshot_members(snapshot),
-            {"triton/kernel/a.so": b"triton"},
-        )
-        self.assertEqual(
-            sorted(path.name for path in remote.glob(".jit_snapshot_publish_lease.*")),
-            [".jit_snapshot_publish_lease.1", ".jit_snapshot_publish_lease.2"],
-        )
-        manager.stop()
-
-    def test_snapshot_publish_skips_empty_archive_and_preserves_existing_snapshot(self):
-        remote, manager = self.make_remote_manager()
-        manager.prepare()
-
-        with self.patch_time():
-            summary = manager.sync_once()
-
-        wait_for_snapshot_publish(manager)
-        self.assertEqual(summary["result"], "success")
-        self.assertIsNone(find_latest_snapshot(remote))
-        self.assertFalse((remote / ".jit_snapshot_publish_lease.1").exists())
-
-        self.enqueue_file(manager, "triton", "kernel/new.so")
-        with self.patch_time():
-            manager.sync_once()
-        wait_for_snapshot_publish(manager)
-
-        snapshot = find_latest_snapshot(remote)
-        self.assertIsNotNone(snapshot)
-        self.assertEqual(
-            snapshot_members(snapshot),
-            {"triton/kernel/new.so": b"triton"},
-        )
-        self.assertTrue((remote / ".jit_snapshot_publish_lease.1").is_dir())
-        manager.stop()
-
-    def test_snapshot_publish_empty_archive_cleans_stale_leases(self):
-        remote, manager = self.make_remote_manager()
-        manager.prepare()
-        (remote / ".jit_snapshot_publish_lease.1").mkdir()
-
-        with self.patch_time(4800.0):
-            manager.sync_once()
-        wait_for_snapshot_publish(manager)
-
-        self.assertFalse((remote / ".jit_snapshot_publish_lease.1").exists())
-        self.assertFalse((remote / ".jit_snapshot_publish_lease.4").exists())
-        manager.stop()
-
-    def test_snapshot_publish_failure_does_not_fail_sync_once(self):
-        remote, manager = self.make_remote_manager()
-        manager.prepare()
-        self.enqueue_file(manager, "triton", "kernel/a.so")
-
-        with mock.patch.object(
-            manager, "_publish_snapshot", side_effect=OSError("publish failed")
-        ), self.assertLogs(level="WARNING") as logs:
-            summary = manager.sync_once()
-            wait_for_snapshot_publish(manager)
-
-        self.assertEqual(summary["result"], "success")
-        self.assertIn("failed to publish JIT cache snapshot", "\n".join(logs.output))
-        self.assertFalse(any(remote.glob(".jit_snapshot_publish_lease.*")))
-        self.assertEqual(
-            (remote / "triton" / "kernel" / "a.so").read_text(encoding="utf-8"),
-            "triton",
-        )
-        manager.stop()
-
-    def test_snapshot_publish_failure_does_not_expose_partial_snapshot(self):
-        remote, manager = self.make_remote_manager()
-        remote_file = remote / "triton" / "kernel" / "a.so"
-        remote_file.parent.mkdir(parents=True)
-        remote_file.write_text("triton", encoding="utf-8")
-
-        def partial_copy(src: Path, dst: Path, deadline_s: float) -> None:
-            dst.write_bytes(b"partial")
-            raise TimeoutError("copy failed after partial write")
-
-        with mock.patch.object(jit_cache_module, "copy_with_deadline", partial_copy):
+        with (
+            mock.patch.object(jit_cache_module, "SNAPSHOT_LOCK_TIMEOUT_S", 0.01),
+            mock.patch.object(jit_cache_module, "SNAPSHOT_LOCK_POLL_S", 0.001),
+        ):
             with self.assertRaises(TimeoutError):
-                manager._publish_snapshot(1)
+                with jit_cache_module._snapshot_mklock(remote):
+                    pass
 
-        self.assertIsNone(find_latest_snapshot(remote))
-        self.assertEqual([], list(remote.glob("*.tmp")))
-        manager.stop()
-
-    def test_cleanup_remote_root_removes_snapshot_tmp(self):
+    def test_two_services_accumulate_entries_without_loss(self):
+        """Simulates two services writing to the same remote dir sequentially
+        (worst-case overlap without flock released between them) and verifies
+        neither service's entries are lost."""
         remote = self.root / "remote"
-        remote.mkdir()
-        snapshot_tmp = remote / f".{jit_cache_common_module.new_snapshot_name()}.1.tmp"
-        other_tmp = remote / "other.tmp"
-        stale_lease = remote / ".jit_snapshot_publish_lease.1"
-        fresh_lease = remote / ".jit_snapshot_publish_lease.3"
-        snapshot_tmp.write_text("partial", encoding="utf-8")
-        other_tmp.write_text("keep", encoding="utf-8")
-        stale_lease.mkdir()
-        fresh_lease.mkdir()
+        local_a = self.root / "local_a"
+        local_b = self.root / "local_b"
 
-        jit_cache_common_module.cleanup_remote_root(remote, current_lease_bucket=4)
+        svc_a = self.make_manager(str(remote), local_root=local_a)
+        svc_b = self.make_manager(str(remote), local_root=local_b)
 
-        self.assertFalse(snapshot_tmp.exists())
-        self.assertTrue(other_tmp.exists())
-        self.assertFalse(stale_lease.exists())
-        self.assertTrue(fresh_lease.exists())
-
-    def test_start_background_sync_uploads_files_moved_after_prepare(self):
-        remote, manager = self.make_remote_manager()
-
-        summary = manager.prepare()
-        manager.start_background_sync()
-        local_kernel = self.local_path("triton", "kernel")
-        local_kernel.mkdir(parents=True)
-        time.sleep(0.05)
-        final_file = local_kernel / "a.cubin"
-        final_file.write_text("cubin", encoding="utf-8")
-        handler = manager.dirty_tracker._make_handler(
-            self.component("triton"),
-            self.local_path("triton"),
-        )
-        handler.on_any_event(
-            FakeFileEvent("moved", str(local_kernel / "tmp.cubin"), str(final_file))
-        )
-        self.wait_for_pending_empty(manager)
-        manager.stop()
-
-        self.assertEqual(summary["cache_state"], "snapshot_miss")
-        self.assertEqual(summary["mode"], "snapshot_download")
-        self.assertEqual(
-            (remote / "triton" / "kernel" / "a.cubin").read_text(encoding="utf-8"),
-            "cubin",
-        )
-
-    def test_background_sync_runs_periodic_flush(self):
-        _remote, manager = self.make_remote_manager()
-        manager.prepare()
-        called = threading.Event()
-        original_sync_once = manager.sync_once
-
-        def wrapped_sync_once(mode="manual_sync"):
-            if mode == "periodic_flush":
-                called.set()
-            return original_sync_once(mode)
-
-        manager.sync_once = wrapped_sync_once
-        # longer_timeout is 5x this, so 0.002 keeps periodic interval < 0.01s
-        manager.config.remote_sync_timeout_s = 0.002
-        manager.start_background_sync()
-        self.assertTrue(called.wait(timeout=1))
-
-        manager.stop()
-        self.assertIsNone(manager._periodic_sync_thread)
-
-    def test_periodic_sync_clamps_nonpositive_interval(self):
-        manager = self.make_manager()
-        manager.config.remote_sync_timeout_s = 0
-
-        with mock.patch.object(
-            manager._periodic_sync_stop, "wait", return_value=True
-        ) as wait:
-            manager._periodic_sync_loop()
-
-        wait.assert_called_once_with(jit_cache_common_module.STARTUP_WAIT_POLL_S)
-
-    def test_stop_freezes_watcher_before_executor_shutdown(self):
-        _remote, manager = self.make_remote_manager()
-        manager.prepare()
-        manager.start_background_sync()
-        order = []
-        original_tracker_stop = manager.dirty_tracker.stop
-
-        def wrapped_tracker_stop():
-            order.append("tracker_stop")
-            original_tracker_stop()
-
-        manager.dirty_tracker.stop = wrapped_tracker_stop
-
-        manager.stop()
-
-        self.assertEqual(order, ["tracker_stop"])
-        self.assertFalse(manager.owns_startup_lock)
-
-    def test_non_owner_takes_over_after_owner_lock_is_released(self):
-        remote = self.root / "remote"
-        first = self.make_manager(str(remote))
-        self.assertTrue(first.acquire_startup_lock())
-        second = self.make_manager(str(remote), timeout_s=1)
-        release_owner = threading.Timer(0.05, first.stop)
-
-        release_owner.start()
-        try:
-            summary = second.prepare()
-        finally:
-            release_owner.join()
-            second.stop()
-            first.stop()
-
-        self.assertEqual(summary["cache_state"], "snapshot_miss")
-        self.assertEqual(summary["result"], "skipped")
-
-    def test_prepare_timeout_returns_timeout_summary(self):
-        remote = self.root / "remote"
-        self.seed_remote_snapshot(remote)
-        manager = self.make_manager(str(remote), timeout_s=0)
-
-        summary = manager.prepare()
-        manager.stop()
-
-        self.assertEqual(summary["cache_state"], "timeout")
-        self.assertEqual(summary["result"], "timeout")
-
-    def test_stop_rejects_new_uploads(self):
-        manager = self.make_manager(str(self.root / "remote"))
         component = self.component("triton")
 
-        manager.stop()
-        before = manager._pending_count
+        # Service A writes its file and publishes.
+        path_a = svc_a.component_dirs["triton"] / "kernel/a_kernel.so"
+        path_a.parent.mkdir(parents=True, exist_ok=True)
+        path_a.write_bytes(b"svc_a_kernel")
+        svc_a.upload_file(component, "kernel/a_kernel.so")
+        svc_a.sync_once()
 
-        self.assertFalse(manager.enqueue_upload(component, "kernel/a.so"))
-        self.assertEqual(manager._pending_count, before)
-        self.assertTrue(manager._pending_count == 0)
-        self.assertIsNone(manager._sync_executor)
+        # Service B writes a *different* file and publishes.
+        path_b = svc_b.component_dirs["triton"] / "kernel/b_kernel.so"
+        path_b.parent.mkdir(parents=True, exist_ok=True)
+        path_b.write_bytes(b"svc_b_kernel")
+        svc_b.upload_file(component, "kernel/b_kernel.so")
+        svc_b.sync_once()
 
-    def test_stop_waits_for_running_snapshot_publish(self):
+        members = snapshot_members(snapshot_path(remote))
+        self.assertIn(
+            "triton/kernel/a_kernel.so",
+            members,
+            "service A entry lost after service B publish",
+        )
+        self.assertIn(
+            "triton/kernel/b_kernel.so",
+            members,
+            "service B entry missing from snapshot",
+        )
+        self.assertEqual(members["triton/kernel/a_kernel.so"], b"svc_a_kernel")
+        self.assertEqual(members["triton/kernel/b_kernel.so"], b"svc_b_kernel")
+
+    def test_upload_file_returns_false_for_missing_file(self):
         _remote, manager = self.make_remote_manager()
-        manager.prepare()
-        started = threading.Event()
-        release = threading.Event()
-        finished = threading.Event()
+        component = self.component("triton")
 
-        def blocking_publish(_bucket):
-            started.set()
-            self.assertTrue(release.wait(timeout=5))
-            finished.set()
-            return True
+        result = manager.upload_file(component, "nonexistent/path.so")
 
-        with mock.patch.object(
-            manager, "_publish_snapshot", side_effect=blocking_publish
-        ):
-            with self.patch_time():
-                manager._publish_snapshot_if_due()
-            self.assertTrue(started.wait(timeout=1))
-            threading.Timer(0.05, release.set).start()
-            manager.stop()
+        self.assertFalse(result)
 
-        self.assertTrue(finished.is_set())
-        self.assertTrue(manager._snapshot_publish_done.is_set())
+    def test_sync_once_cancels_pending_debounce_timer(self):
+        remote, manager = self.make_remote_manager(debounce_s=60)
+        component = self.component("triton")
+        local_root = manager.component_dirs["triton"]
+        path = local_root / "kernel/a.so"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"data")
 
-    def test_snapshot_publish_rechecks_stop_before_submit(self):
-        remote, manager = self.make_remote_manager()
-        manager.prepare()
-        lease_dir = remote / ".jit_snapshot_publish_lease.1"
+        manager.upload_file(component, "kernel/a.so")
+        self.assertIsNotNone(manager._debounce_timer)
 
-        def acquire_then_stop():
-            lease_dir.mkdir()
-            manager.stop()
-            return lease_dir, 1
+        manager.sync_once()
 
-        with mock.patch.object(
-            manager, "_try_acquire_publish_lease", side_effect=acquire_then_stop
-        ):
-            manager._publish_snapshot_if_due()
+        self.assertIsNone(
+            manager._debounce_timer,
+            "sync_once should cancel the pending debounce timer",
+        )
+        self.assertTrue(snapshot_path(remote).is_file())
 
-        self.assertFalse(lease_dir.exists())
-        self.assertTrue(manager._snapshot_publish_done.is_set())
-        self.assertIsNone(manager._sync_executor)
+    def test_stop_cancels_debounce_timer(self):
+        _remote, manager = self.make_remote_manager(debounce_s=60)
+        component = self.component("triton")
+        local_root = manager.component_dirs["triton"]
+        path = local_root / "kernel/a.so"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"data")
 
-    def test_stop_waits_for_active_sync_before_executor_shutdown(self):
-        manager = self.make_manager()
-        sync_entered = threading.Event()
-        release_sync = threading.Event()
+        manager.upload_file(component, "kernel/a.so")
+        self.assertIsNotNone(manager._debounce_timer)
 
-        def blocked_sync_impl(mode):
-            sync_entered.set()
-            self.assertTrue(release_sync.wait(timeout=5))
-            return manager.make_summary(mode, "success", time.monotonic())
-
-        manager._sync_once_impl = blocked_sync_impl
-        sync_thread = threading.Thread(target=manager.sync_once)
-        sync_thread.start()
-        self.assertTrue(sync_entered.wait(timeout=1))
-
-        executor = manager.ensure_sync_executor()
-        with mock.patch.object(
-            executor, "shutdown", wraps=executor.shutdown
-        ) as shutdown:
-            threading.Timer(0.05, release_sync.set).start()
-            manager.stop()
-
-        sync_thread.join(timeout=1)
-        self.assertFalse(sync_thread.is_alive())
-        shutdown.assert_called_once_with(wait=False, cancel_futures=True)
-
-    def test_snapshot_iter_skips_component_when_dir_probe_fails(self):
-        # OSError on one component's local dir must not abort iteration.
-        _remote, manager = self.make_remote_manager()
-        local = manager.config.local_root
-        for name in ("triton", "flashinfer"):
-            d = local / name / "kernel"
-            d.mkdir(parents=True, exist_ok=True)
-            (d / f"{name}.so").write_text(name, encoding="utf-8")
-
-        real_is_dir = Path.is_dir
-
-        def flaky_is_dir(self):
-            if "flashinfer" in self.parts and self.name == "flashinfer":
-                raise OSError("simulated local FS error")
-            return real_is_dir(self)
-
-        names: set[str] = set()
-        with mock.patch.object(Path, "is_dir", flaky_is_dir):
-            for component in jit_cache_common_module.COMPONENT_SPECS:
-                for _ in jit_cache_common_module.iter_component_sync_files(
-                    local / component.name, component, log_errors=True
-                ):
-                    names.add(component.name)
         manager.stop()
 
-        self.assertIn("triton", names)
-        self.assertNotIn("flashinfer", names)
-
-    def test_apply_jit_cache_env_respects_pre_set_cache_mode(self):
-        # Smoke tests pre-set TRITON_AUTOTUNE_CACHE_MODE; bootstrap must not clobber it.
-        os.environ["TRITON_AUTOTUNE_CACHE_MODE"] = "disabled"
-        jit_cache_common_module.apply_jit_cache_env(self.root / "local_apply")
-        self.assertEqual(os.environ["TRITON_AUTOTUNE_CACHE_MODE"], "disabled")
-
-    def test_leader_skips_pull_when_marker_present(self):
-        # Marker from a prior boot → leader short-circuits, no pull.
-        remote, manager = self.make_remote_manager()
-        self.seed_remote_snapshot(remote, content="remote")
-        manager.snapshot_complete_path.touch()
-
-        summary = manager.prepare()
-        manager.stop()
-
-        self.assertEqual(summary["cache_state"], "local_ready")
-        self.assertEqual(summary["result"], "success")
-        self.assertFalse(self.local_path("triton", "kernel", "a.so").exists())
+        self.assertIsNone(
+            manager._debounce_timer, "stop should cancel the pending debounce timer"
+        )
 
 
 class SnapshotPublishConsumerTest(unittest.TestCase):
-    """Publish snapshot then verify a new manager extracts it (no GPU needed)."""
-
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
         self.old_env = os.environ.copy()
-        os.environ["TRITON_AUTOTUNE_GPU_NAME"] = "NVIDIA_H20"
-        jit_cache_common_module.get_gpu_info.cache_clear()
 
     def tearDown(self):
         os.environ.clear()
         os.environ.update(self.old_env)
-        jit_cache_common_module.get_gpu_info.cache_clear()
         self.tmp.cleanup()
 
-    def make_manager(self, local_root, remote_root):
+    def make_manager(self, local_root: Path, remote_root: Path) -> JitCacheManager:
         remote_root.mkdir(parents=True, exist_ok=True)
         config = JITConfig()
         config.local_jit_dir = str(local_root)
         config.remote_jit_dir = str(remote_root)
-        config.remote_sync_timeout_s = 10
-        manager = JitCacheManager(config)
+        manager = JitCacheManager(config, debounce_s=0)
         manager.bootstrap()
         return manager
 
@@ -1276,55 +634,39 @@ class SnapshotPublishConsumerTest(unittest.TestCase):
         remote_root = self.root / "remote"
         first = self.make_manager(self.root / "local_first", remote_root)
         try:
-            prepare = first.prepare()
-            self.assertEqual(prepare["cache_state"], "snapshot_miss")
-
+            first.prepare()
             expected_members = set()
-            for component in jit_cache_common_module.COMPONENT_SPECS:
-                local_root, _ = first.component_dirs[component.name]
+            for component in jit_cache_module.COMPONENT_SPECS:
+                local_root = first.component_dirs[component.name]
                 filename = f"kernel/{component.name}{component.sync_suffixes[0]}"
                 local_file = local_root / filename
                 local_file.parent.mkdir(parents=True, exist_ok=True)
                 local_file.write_text(component.name, encoding="utf-8")
-                self.assertTrue(first.enqueue_upload(component, filename))
-                if component.gpu_scoped:
-                    expected_members.add(
-                        f"{component.name}/{jit_cache_common_module.get_gpu_info()}/{filename}"
-                    )
-                else:
-                    expected_members.add(f"{component.name}/{filename}")
-
-            with mock.patch.object(jit_cache_module.time, "time", return_value=1200.0):
-                summary = first.sync_once("publish_consumer_test")
-            wait_for_snapshot_publish(first, timeout_s=10)
-
-            snapshot_path = find_latest_snapshot(remote_root)
-            self.assertIsNotNone(snapshot_path)
-            self.assertEqual(summary["result"], "success")
-            self.assertTrue(snapshot_path.is_file())
-            self.assertTrue(
-                snapshot_path.name.startswith(jit_cache_common_module.SNAPSHOT_PREFIX)
-            )
-            self.assertEqual(snapshot_member_names(snapshot_path), expected_members)
-            self.assertTrue((remote_root / ".jit_snapshot_publish_lease.1").is_dir())
+                first.upload_file(component, filename)
+                expected_members.add(
+                    f"{component.name}/{jit_cache_module.component_snapshot_rel(component, filename)}"
+                )
+            first.sync_once("publish_consumer_test")
+            snapshot = snapshot_path(remote_root)
+            self.assertEqual(snapshot_member_names(snapshot), expected_members)
         finally:
             first.stop()
+
+        for component in jit_cache_module.COMPONENT_SPECS:
+            os.environ.pop(component.env_name, None)
 
         second = self.make_manager(self.root / "local_second", remote_root)
         try:
             prepare = second.prepare()
-            self.assertEqual(prepare["cache_state"], "snapshot_hit")
             self.assertEqual(prepare["result"], "success")
             self.assertEqual(
-                prepare["extracted_files"], len(jit_cache_common_module.COMPONENT_SPECS)
+                prepare["extracted_files"], len(jit_cache_module.COMPONENT_SPECS)
             )
-
-            for component in jit_cache_common_module.COMPONENT_SPECS:
-                local_root, _ = second.component_dirs[component.name]
+            for component in jit_cache_module.COMPONENT_SPECS:
+                local_root = second.component_dirs[component.name]
                 filename = f"kernel/{component.name}{component.sync_suffixes[0]}"
                 self.assertEqual(
-                    (local_root / filename).read_text(encoding="utf-8"),
-                    component.name,
+                    (local_root / filename).read_text(encoding="utf-8"), component.name
                 )
         finally:
             second.stop()
