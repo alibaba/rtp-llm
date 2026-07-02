@@ -90,6 +90,9 @@ grpc::Status LocalRpcServer::pollStreamOutput(grpc::ServerContext*             c
             }
         }
         RTP_LLM_LOG_DEBUG("request [%s] generate next output success", request_key.c_str());
+        if (result.value().generate_outputs.empty()) {
+            continue;
+        }
         GenerateOutputsPB outputs_pb;
 
         QueryConverter::transResponse(&outputs_pb,
@@ -116,6 +119,11 @@ grpc::Status LocalRpcServer::pollStreamOutput(grpc::ServerContext*             c
         }
     }
     RTP_LLM_LOG_DEBUG("request [%s] local generate done", request_key.c_str());
+
+    // isActive()==false conflates clean finish with async-reported errors arriving post-loop.
+    if (stream->hasError()) {
+        return serializeErrorMsg(request_key, stream->statusInfo());
+    }
 
     return grpc::Status::OK;
 }
@@ -149,6 +157,10 @@ ErrorInfo LocalRpcServer::collectStreamOutput(grpc::ServerContext*              
             break;
         }
         last_outputs = output_result.value();
+    }
+    // Mirrors pollStreamOutput: catch async errors that surface after the loop exits.
+    if (stream->hasError()) {
+        return stream->statusInfo();
     }
     return ErrorInfo::OkStatus();
 }

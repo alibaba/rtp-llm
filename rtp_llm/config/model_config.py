@@ -89,6 +89,8 @@ class ModelConfig(CppModelConfig):
         "eplb_config",
         "ckpt_path",
         "tokenizer_path",
+        "tokenizer_vocab",
+        "tokenizer_backend_str",
         "position_ids_style",
         "pre_seq_len",
         "use_kvcache",

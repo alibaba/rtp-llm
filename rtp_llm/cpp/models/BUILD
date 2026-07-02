@@ -9,6 +9,7 @@ cc_library(
     deps = [
         "//:rtp_compute_ops",
         "//rtp_llm/cpp/utils:tensor_debug_utils",
+        "//rtp_llm/cpp/pybind:py_utils",
     ],
     visibility = ["//visibility:public"],
 )
@@ -43,38 +44,59 @@ cc_library(
     visibility = ["//visibility:public"],
 )
 
-# Logits processor - model output processing
+# Grammar processors co-located so LogitsProcessorFactory dispatches without a runtime plug-in hook.
 cc_library(
     name = "logits_processor",
     hdrs = [
         "logits_processor/BaseLogitsProcessor.h",
+        "logits_processor/SpecLogitsProcessor.h",
         "logits_processor/MultiSeqLogitsProcessor.h",
         "logits_processor/LogitsProcessorStates.h",
         "logits_processor/ThinkModeLogitsProcessor.h",
+        "logits_processor/ThinkModeStateMachine.h",
         "logits_processor/TreeLogitsProcessor.h",
         "logits_processor/RecommendationLogitsProcessor.h",
         "logits_processor/LogitsProcessorFactory.h",
+        "logits_processor/GrammarLogitsProcessor.h",
+        "logits_processor/GrammarMaskCore.h",
+        "logits_processor/ReasoningGrammarLogitsProcessor.h",
+        "logits_processor/SpecLogitsVerifyRunner.h",
+        "logits_processor/BitmaskUtils.h",
     ],
     srcs = [
         "logits_processor/BaseLogitsProcessor.cc",
         "logits_processor/MultiSeqLogitsProcessor.cc",
         "logits_processor/LogitsProcessorStates.cc",
         "logits_processor/ThinkModeLogitsProcessor.cc",
+        "logits_processor/ThinkModeStateMachine.cc",
         "logits_processor/TreeLogitsProcessor.cc",
         "logits_processor/RecommendationLogitsProcessor.cc",
         "logits_processor/LogitsProcessorFactory.cc",
+        "logits_processor/GrammarLogitsProcessor.cc",
+        "logits_processor/GrammarMaskCore.cc",
+        "logits_processor/ReasoningGrammarLogitsProcessor.cc",
+        "logits_processor/SpecLogitsVerifyRunner.cc",
     ],
     deps = [
         ":sample_infos",
         ":dfa_utils",
+        "//rtp_llm/cpp/engine_base/grammar:grammar_cpp_lib",
         "//rtp_llm/cpp/engine_base/stream:generate_types",
         "//rtp_llm/cpp/engine_base/stream:generate_config",
+        "//rtp_llm/cpp/config:config_modules",
+        "//rtp_llm/cpp/metrics:metrics",
         "//rtp_llm/cpp/pybind:py_utils",
+        "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/cpp/utils:error_code",
+        "//rtp_llm/cpp/utils:profiling_scope",
     ] + select({
-        "//:using_cuda": ["//rtp_llm/models_py/bindings/cuda/ops:standalone_ops"],
+        "//:using_cuda": [
+            "//rtp_llm/models_py/bindings/cuda/ops:standalone_ops",
+        ],
+        "@//:using_rocm": [],
         "//conditions:default": [],
     }),
+    copts = copts(),
     visibility = ["//visibility:public"],
 )
 
@@ -124,6 +146,7 @@ cc_library(
         ":context_parallel",
         "//:rtp_compute_ops",
         "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
+        "//rtp_llm/cpp/pybind:py_utils",
         "//rtp_llm/cpp/engine_base/stream:complete_token_ids",
         "//rtp_llm/cpp/cache:cache_types",
         "//rtp_llm/cpp/cache:cache",

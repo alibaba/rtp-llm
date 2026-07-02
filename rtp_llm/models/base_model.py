@@ -275,7 +275,25 @@ class BaseModel(object):
         self.tokenizer = TokenizerFactory.create(ckpt_path, tokenizer_path, model_type)
         if self.tokenizer.eos_token_id:
             self.model_config.special_tokens.eos_token_id = self.tokenizer.eos_token_id
+        self._fill_xgrammar_tokenizer_info()
 
+    def _fill_xgrammar_tokenizer_info(self) -> None:
+        """Fill tokenizer-derived C++ init params for xgrammar when available."""
+        real_tokenizer = self.tokenizer.get_real_tokenizer()
+        if real_tokenizer is None:
+            return
+
+        backend_tokenizer = getattr(real_tokenizer, "backend_tokenizer", None)
+        if not hasattr(real_tokenizer, "get_vocab") or not hasattr(
+            backend_tokenizer, "to_str"
+        ):
+            logging.warning(
+                "Tokenizer does not expose HuggingFace backend info; grammar disabled"
+            )
+            return
+        self.model_config.tokenizer_vocab = real_tokenizer.get_vocab()
+        self.model_config.tokenizer_backend_str = backend_tokenizer.to_str()
+        
     def is_multimodal(self) -> bool:
         return self.model_config.mm_model_config.is_multimodal
 

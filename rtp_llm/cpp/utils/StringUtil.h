@@ -1,11 +1,15 @@
 #pragma once
 
+#include <functional>
+#include <iomanip>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <vector>
 #include <cstdint>
 #include <cassert>
+#include <cstdio>
 #include <cstring>
 #include <sstream>
 #include <limits>
@@ -73,6 +77,21 @@ inline bool startsWith(const std::string& str, const std::string& prefix) {
     if (str.size() < prefix.size())
         return false;
     return str.compare(0, prefix.size(), prefix) == 0;
+}
+
+// "<unset>" or "len=N hash=0x..." — avoids logging full grammar/schema bodies.
+inline std::string summarizeOptionalString(const std::optional<std::string>& field) {
+    if (!field.has_value()) {
+        return "<unset>";
+    }
+    const auto& s = field.value();
+    const auto  h = static_cast<unsigned long long>(std::hash<std::string>{}(s));
+    char        buf[64];
+    const int   n = std::snprintf(buf, sizeof(buf), "len=%zu hash=0x%016llx", s.size(), h);
+    if (n <= 0) {
+        return "<error>";
+    }
+    return std::string(buf, static_cast<size_t>(n));
 }
 
 inline std::vector<std::string> split(const std::string& s, char delimiter) {

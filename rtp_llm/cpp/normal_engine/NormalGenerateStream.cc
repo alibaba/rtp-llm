@@ -196,7 +196,14 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
                       isStreaming(),
                       update_info.update_remote_generate);
 
-    if (!finished_ && queryPdSep() && update_info.update_remote_generate) {
+    // PD-sep first-token forward-to-decode: prefill role only; DECODE side must skip
+    // or the stream closes after a single token.
+    if (!finished_ && queryPdSep() && update_info.update_remote_generate
+        && resourceContext().role_type != RoleType::DECODE) {
+        RTP_LLM_LOG_DEBUG("[pd_trace] pd_sep prefill forward-to-decode stream=%ld seq_len=%d num_new_tokens=%d",
+                          streamId(),
+                          seqLength(),
+                          update_info.num_new_tokens);
         holdKVCacheForPDSep();
         reportEventWithoutLock(StreamEvents::NeedRemoteGenerate);
         reportEventWithoutLock(StreamEvents::GenerateDone);
@@ -212,6 +219,15 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
         return;
     }
 
+    RTP_LLM_LOG_DEBUG("[pd_trace] enqueueGenerateOutput stream=%ld pd_sep=%d role=%d seq_len=%d "
+                      "last_output_pos=%d num_new_tokens=%d finished=%d",
+                      streamId(),
+                      pd_sep_first_token ? 1 : 0,
+                      static_cast<int>(resourceContext().role_type),
+                      seqLength(),
+                      last_output_pos_,
+                      update_info.num_new_tokens,
+                      finished_ ? 1 : 0);
     RTP_LLM_LOG_DEBUG("stream [%ld] enqueue generate output", streamId());
     enqueueGenerateOutput(prepareGenerateOutput(update_info));
 

@@ -7,12 +7,16 @@ cc_library(
         "*.h",
         "speculative/*.h",
     ]),
-    srcs = glob([
-        "*.cc",
-        "speculative/*.cc",
-    ]),
+    # speculative/*.cc is GPU-only (MTP kernels, CUDA tensors). Compile it
+    # only on cuda/rocm; CPU/ARM consumers of normal_engine never hit MTP paths.
+    srcs = glob(["*.cc"]) + select({
+        "//:using_cuda": glob(["speculative/*.cc"]),
+        "@//:using_rocm": glob(["speculative/*.cc"]),
+        "//conditions:default": [],
+    }),
     deps = [
         "//rtp_llm/cpp/models:models",
+        "//rtp_llm/cpp/models:logits_processor",
         "//rtp_llm/cpp/engine_base:engine_base",
         "//rtp_llm/cpp/engine_base/stream:generate_config",
         "//rtp_llm/cpp/engine_base:worker_status_info",

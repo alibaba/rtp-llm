@@ -50,6 +50,16 @@ public:
     void updateMultiSeqStatus(const std::vector<int>& src_batch_indices) override;
     void updateStatus(const torch::Tensor& new_tokens, int32_t num_new_tokens) override;
 
+    // mask depends on DFA state advanced by updateStatus — skip in MTP score_batch.
+    bool isStateful() const override {
+        return true;
+    }
+
+    // All tree_infos advance current_output_length together in updateStatus(); take any.
+    int64_t committedOutputLen() const override {
+        return tree_infos_.empty() ? 0 : static_cast<int64_t>(tree_infos_.front().current_output_length);
+    }
+
 public:
     std::vector<std::string> getStatus();
     size_t                   size() {

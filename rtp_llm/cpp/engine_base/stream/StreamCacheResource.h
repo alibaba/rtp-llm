@@ -121,7 +121,9 @@ public:
 
 private:
     void loadCacheSync();
-    void waitLoadCacheDone(const std::shared_ptr<AsyncContext>& load_context);
+    // Wait for load to complete, log on failure, write back reuse lengths on success.
+    // Does NOT report errors — callers decide whether to terminate, retry, or degrade.
+    void awaitLoadCache(const std::shared_ptr<AsyncContext>& load_context);
     void updateReuseLengthsFromContext(const std::shared_ptr<FusedAsyncReadContext>& read_context);
     std::shared_ptr<AsyncContext> storeCacheAsync(const std::shared_ptr<BatchKVCacheResource>& batch_resource,
                                                   bool                                         enable_memory_cache,

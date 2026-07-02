@@ -4,6 +4,7 @@
 #include "rtp_llm/cpp/engine_base/EngineBase.h"
 #include "rtp_llm/cpp/engine_base/stream/StreamGroups.h"
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
+#include "rtp_llm/cpp/models/logits_processor/SpecLogitsProcessor.h"
 #include "rtp_llm/cpp/utils/StatusUtil.h"
 #include "rtp_llm/cpp/engine_base/schedulers/FIFOScheduler.h"
 #include "rtp_llm/cpp/engine_base/schedulers/BatchDecodeScheduler.h"
@@ -15,12 +16,84 @@
 #include "rtp_llm/cpp/models/PyWrappedModel.h"
 #include "rtp_llm/cpp/models/logits_processor/LogitsProcessorFactory.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
-#include "autil/TimeUtility.h"
+#include <algorithm>
 #include <memory>
-#include <thread>
 #include <random>
 
 namespace rtp_llm {
+
+namespace {
+
+// Post-rejection spec-logits cap for grammar/think MTP verify. Keep this on the
+// CPU/vector SpeculativeSamplerOutput path to avoid the broader GPU output refactor.
+void applySpecLogitsCap(const SpecLogitsVerifyRunner::LaunchResult& spec_logits_result,
+                        const SamplerOutput&                        target_sampler_output,
+                        speculative::SpeculativeSamplerOutput&      output,
+                        int64_t                                     batch_size,
+                        int64_t                                     propose_step) {
+    if (!spec_logits_result.spec_cap_cpu_owner.defined()) {
+        return;
+    }
+
+    RTP_LLM_CHECK_WITH_INFO(target_sampler_output.token_ids.defined(),
+                            "spec logits cap requires target sampler token_ids");
+    RTP_LLM_CHECK_WITH_INFO(static_cast<int64_t>(output.accept_len.size()) == batch_size
+                                && static_cast<int64_t>(output.accept_tokens.size()) == batch_size,
+                            "spec logits cap output batch mismatch, accept_len=%zu accept_tokens=%zu batch=%lld",
+                            output.accept_len.size(),
+                            output.accept_tokens.size(),
+                            static_cast<long long>(batch_size));
+
+    auto cap_cpu = spec_logits_result.spec_cap_cpu_owner;
+    if (cap_cpu.is_cuda()) {
+        cap_cpu = cap_cpu.cpu();
+    }
+    cap_cpu = cap_cpu.scalar_type() == torch::kInt32 ? cap_cpu.contiguous() : cap_cpu.to(torch::kInt32).contiguous();
+
+    auto target_token_ids = target_sampler_output.token_ids;
+    if (target_token_ids.is_cuda()) {
+        target_token_ids = target_token_ids.cpu();
+    }
+    target_token_ids = target_token_ids.scalar_type() == torch::kInt32 ?
+                           target_token_ids.contiguous() :
+                           target_token_ids.to(torch::kInt32).contiguous();
+    RTP_LLM_CHECK_WITH_INFO(target_token_ids.dim() == 2,
+                            "spec logits cap target token_ids must be 2D, dim=%lld",
+                            static_cast<long long>(target_token_ids.dim()));
+
+    const int64_t token_stride = target_token_ids.size(1);
+    // The loop below indexes row (i * (propose_step + 1) + cap) with cap < propose_step,
+    // so the sampler must have emitted B*(P+1) rows. Guard the row count explicitly
+    // (dim()==2 alone does not bound size(0)) to fail fast instead of reading OOB.
+    RTP_LLM_CHECK_WITH_INFO(target_token_ids.size(0) >= batch_size * (propose_step + 1),
+                            "spec logits cap target token_ids rows=%lld < batch_size*(propose_step+1)=%lld",
+                            static_cast<long long>(target_token_ids.size(0)),
+                            static_cast<long long>(batch_size * (propose_step + 1)));
+    const auto* cap_ptr    = cap_cpu.data_ptr<int32_t>();
+    const auto* target_ptr = target_token_ids.data_ptr<int32_t>();
+
+    for (int64_t i = 0; i < batch_size; ++i) {
+        const int cap     = std::max(0, std::min<int>(cap_ptr[i], static_cast<int>(propose_step)));
+        const int old_len = output.accept_len[i];
+        RTP_LLM_CHECK_WITH_INFO(old_len > 0 && old_len <= propose_step + 1,
+                                "invalid accept_len[%lld]=%d (max=%lld)",
+                                static_cast<long long>(i),
+                                old_len,
+                                static_cast<long long>(propose_step + 1));
+        if (cap < propose_step && old_len > cap) {
+            output.accept_tokens[i].data_ptr<int32_t>()[cap] =
+                target_ptr[(i * (propose_step + 1) + cap) * token_stride + token_stride - 1];
+        }
+
+        const int new_len    = std::min(old_len, cap + 1);
+        output.accept_len[i] = new_len;
+        if (output.accept_tokens[i].size(1) != new_len) {
+            output.accept_tokens[i] = output.accept_tokens[i].narrow(1, 0, new_len).contiguous();
+        }
+    }
+}
+
+}  // namespace
 
 bool MtpExecutor::isTpRank0() const {
     return tp_rank_ == 0;
@@ -507,7 +580,8 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     RtpLLMTokenPSMetricsCollector&           tps_collector       = metrics_collector.tps_collector;
     RtpLLMSpeculativeEngineMetricsCollector& sp_engine_collector = metrics_collector.sp_engine_collector;
 
-    StreamGroups    stream_groups(streams);
+    StreamGroups stream_groups(streams);
+
     GptModelInputs  model_input;
     GptModelOutputs model_output;
     SamplerOutput   sampler_output;
@@ -528,6 +602,8 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     speculative::FastTopKSamplerOutput fast_topk_sampler_output;
 
     size_t total_accept_len = 0;
+
+    SpecLogitsVerifyRunner::LaunchResult spec_logits_result;
 
     // clone tensors from grpc
     {
@@ -628,6 +704,22 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         }
     }
 
+    if (isTpRank0() && !warm_up_ && !model_input.is_fake_stream) {
+        RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(spec_logits_verify)");
+        torch::Tensor draft_tokens;
+        if (propose_step_ == 1) {
+            if (draft_sampler_output.token_ids.defined() && draft_sampler_output.token_ids.numel() > 0) {
+                draft_tokens = draft_sampler_output.token_ids;
+            } else {
+                draft_tokens = model_input.combo_tokens.reshape(
+                    {static_cast<int64_t>(streams.size()), static_cast<int64_t>(propose_step_ + 1)});
+            }
+        } else {
+            draft_tokens = draft_token_ids_t;
+        }
+        spec_logits_result = buildSpecLogitsVerifyInline(streams, draft_tokens);
+    }
+
     // eplb
     if (expert_balancer_) {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(eplb_step_forward)");
@@ -646,17 +738,21 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
             cudaSyncAndCheck();
         } else {
             // target model sample
-            CHECK_AND_RETURN_REF(
-                sampler_input,
-                batch_stream_processor_->gatherSpecSamplerInput(stream_groups, model_input, model_output));
+            CHECK_AND_RETURN_REF(sampler_input,
+                                 batch_stream_processor_->gatherSpecSamplerInput(
+                                     stream_groups, model_input, model_output, spec_logits_result));
+
             sampler_output           = std::move(sampler_->forward(sampler_input));
             sampler_output.all_probs = sampler_output.all_probs.reshape(
                 {(int64_t)batch_size, (int64_t)(propose_step_ + 1), (int64_t)vocab_size_});
 
-            // rejection sampling
             speculative_sampler_output = speculative_sampler_->forward(streams, draft_sampler_output, sampler_output);
+            applySpecLogitsCap(spec_logits_result,
+                               sampler_output,
+                               speculative_sampler_output,
+                               static_cast<int64_t>(batch_size),
+                               static_cast<int64_t>(propose_step_));
         }
-        // NOTE: here will have cuda device sync before update model input
         batch_stream_processor_->updateDecodePostDraftModelInput(
             model_input, model_output, speculative_sampler_output, batch_size, hidden_states_d_t, total_accept_len);
     }
@@ -726,6 +822,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
             stream_groups,
             speculative_sampler_output,
             {std::move(draft_prefill_model_output), std::move(draft_prefill_sampler_output)});
+
         // clean holder tensors from grpc
         for (auto& stream : streams) {
             stream->getSPOutputBuffer()->tensors_holder.clear();
@@ -843,8 +940,8 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
     auto pre_target_token = torch::empty({(int64_t)batch_size}, torch::kInt32);
     int  batch_idx        = 0;
     for (const auto& stream : stream_groups.allStreams()) {
-        int* propose_tokens                         = stream->getSPOutputBuffer()->tokens.data_ptr<int>();
-        pre_target_token.data_ptr<int>()[batch_idx] = propose_tokens[0];
+        int* propose_tokens                             = stream->getSPOutputBuffer()->tokens.data_ptr<int>();
+        pre_target_token.data_ptr<int32_t>()[batch_idx] = propose_tokens[0];
         batch_idx++;
     }
 
@@ -897,10 +994,10 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
                                           torch::TensorOptions(torch::kInt32).device(torch::kCPU).pinned_memory(true));
 
         for (int i = 0; i < batch_size; i++) {
-            input_lengths.data_ptr<int>()[i] = propose_step_ + 1;
+            input_lengths.data_ptr<int32_t>()[i] = propose_step_ + 1;
         }
         for (int i = 0; i < batch_size * (propose_step_ + 1); i++) {
-            lm_output_indexes.data_ptr<int>()[i] = i;
+            lm_output_indexes.data_ptr<int32_t>()[i] = i;
         }
 
         model_input.input_lengths     = std::move(input_lengths);
@@ -921,6 +1018,28 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
         model_input.kv_block_stride_bytes = cache_cfg.kv_block_stride_bytes;
         model_input.kv_scale_stride_bytes = cache_cfg.kv_scale_stride_bytes;
     }
+}
+
+SpecLogitsVerifyRunner::LaunchResult
+MtpExecutor::buildSpecLogitsVerifyInline(const std::list<GenerateStreamPtr>& streams,
+                                         const torch::Tensor&                draft_tokens) {
+    SpecLogitsVerifyRunner::LaunchTask task;
+    task.total_streams = streams.size();
+    task.propose_step  = static_cast<int>(propose_step_);
+    task.vocab_size    = vocab_size_;
+    task.draft_tokens  = draft_tokens;
+
+    size_t stream_idx = 0;
+    for (const auto& stream : streams) {
+        for (const auto& processor : stream->getAllLogitsProcessorPtr()) {
+            auto spec_processor = std::dynamic_pointer_cast<SpecLogitsProcessor>(processor);
+            if (spec_processor) {
+                task.active.push_back({spec_processor, processor.get(), stream_idx});
+            }
+        }
+        ++stream_idx;
+    }
+    return spec_logits_verify_runner_.buildInline(task);
 }
 
 }  // namespace rtp_llm

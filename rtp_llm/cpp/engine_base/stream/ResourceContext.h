@@ -11,10 +11,16 @@
 namespace rtp_llm {
 
 class GenerateStream;
+class XGrammarBackend;
 
 struct ResourceContext {
     std::shared_ptr<KVCacheManager> cache_manager;
     std::shared_ptr<SystemPrompt>   system_prompt;
+
+    // Engine-scoped grammar backend, bound to this engine's tokenizer. Owned here
+    // (not as a process-global singleton) so multiple engines in one process never
+    // cross-talk through each other's tokenizer / grammar backend.
+    std::shared_ptr<XGrammarBackend> grammar_backend;
 
     RoleType role_type{RoleType::PDFUSION};
     bool     decode_entrance{false};  // PD反转模式：Decode侧作为请求入口

@@ -72,7 +72,7 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
             idx++;
         }
     }
-    torch::Tensor output_token_ids_d     = torch::zeros({(long)batch_size, (long)propose_step_ + 1},
+    torch::Tensor output_token_ids_d = torch::zeros({(long)batch_size, (long)propose_step_ + 1},
                                                     torch::TensorOptions().device(target_device).dtype(torch::kInt32));
     torch::Tensor output_accepted_token_num_d =
         torch::zeros({(long)batch_size}, torch::TensorOptions().device(target_device).dtype(torch::kInt32));

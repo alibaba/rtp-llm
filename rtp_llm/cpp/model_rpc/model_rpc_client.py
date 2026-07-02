@@ -1,6 +1,6 @@
 import functools
 import logging
-from typing import AsyncGenerator, Optional
+from typing import Any, AsyncGenerator, Optional, Union
 
 import grpc
 from grpc import StatusCode
@@ -73,6 +73,9 @@ def trans_input(input_py: GenerateInput):
     generate_config_pb.end_think_token_ids.extend(
         input_py.generate_config.end_think_token_ids
     )
+    generate_config_pb.begin_think_token_ids.extend(
+        input_py.generate_config.begin_think_token_ids
+    )
     generate_config_pb.in_think_mode = input_py.generate_config.in_think_mode
     generate_config_pb.num_beams = input_py.generate_config.num_beams
     generate_config_pb.variable_num_beams.extend(
@@ -99,6 +102,12 @@ def trans_input(input_py: GenerateInput):
     trans_option(generate_config_pb, input_py.generate_config, "top_p_decay")
     trans_option(generate_config_pb, input_py.generate_config, "top_p_min")
     trans_option(generate_config_pb, input_py.generate_config, "top_p_reset_ids")
+    if input_py.generate_config.json_schema is not None:
+        generate_config_pb.json_schema.value = input_py.generate_config.json_schema
+    trans_option(generate_config_pb, input_py.generate_config, "regex")
+    trans_option(generate_config_pb, input_py.generate_config, "ebnf")
+    if input_py.generate_config.structural_tag is not None:
+        generate_config_pb.structural_tag.value = input_py.generate_config.structural_tag
     trans_option(generate_config_pb, input_py.generate_config, "adapter_name")
     trans_option_cast(
         generate_config_pb, input_py.generate_config, "task_id", functools.partial(str)
@@ -170,9 +179,7 @@ def trans_input(input_py: GenerateInput):
     generate_config_pb.combo_token_size = input_py.generate_config.combo_token_size
     for i in range(len(input_py.generate_config.banned_combo_token_ids)):
         banned_combo = generate_config_pb.banned_combo_token_ids.rows.add()
-        banned_combo.values.extend(
-            input_py.generate_config.banned_combo_token_ids[i]
-        )
+        banned_combo.values.extend(input_py.generate_config.banned_combo_token_ids[i])
 
     for role_addr in input_py.generate_config.role_addrs:
         role_addr_pb = RoleAddrPB()
@@ -439,14 +446,17 @@ class ModelRpcClient(object):
         if "grpc-status-details-bin" in metadata and error_details.ParseFromString(
             metadata["grpc-status-details-bin"]
         ):
+            # Unknown C++ codes degrade to UNKNOWN_ERROR rather than masking the real failure with ValueError.
+            try:
+                exc_type = ExceptionType(error_details.error_code)
+            except ValueError:
+                exc_type = ExceptionType.UNKNOWN_ERROR
             logging.error(
                 f"{request_desc} RPC failed: "
                 f"{e.code()}, {e.details()}, detail error code is "
-                f"{ExceptionType.from_value(error_details.error_code)}"
+                f"{exc_type.name}({error_details.error_code})"
             )
-            raise FtRuntimeException(
-                ExceptionType(error_details.error_code), error_details.error_message
-            )
+            raise FtRuntimeException(exc_type, error_details.error_message)
         else:
             logging.error(
                 f"{request_desc} RPC failed: "

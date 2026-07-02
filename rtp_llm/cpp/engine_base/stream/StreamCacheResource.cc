@@ -126,25 +126,29 @@ static bool applyP2PSideChannelToStream(const std::shared_ptr<FusedAsyncReadCont
         return false;
     }
 
-    // Apply side-channel data to GenerateStream
-    // 1. First token: append to stream
-    if (payload->first_token_id > 0) {
+    // Apply side-channel data to GenerateStream. Must use updateWithoutLock:
+    // moveToNext already holds mutex_ when it reaches us via handleLoading.
+    //
+    // Use `>= 0`: id 0 is a legitimate model token (BOS/PAD collisions).
+    if (payload->first_token_id >= 0) {
         stream->setIsContextStream(false);
         stream->step();
-        auto new_tokens                   = torch::zeros({(int64_t)stream->nextBatchSize(), 1}, torch::kInt32);
-        new_tokens.data_ptr<int32_t>()[0] = static_cast<int32_t>(payload->first_token_id);
         stream->incLastOutputPos();
-        stream->update({.new_tokens        = new_tokens,
-                        .num_new_tokens    = 1,
-                        .hidden_states     = {},
-                        .logits            = {},
-                        .softmax_probs     = {},
-                        .cum_log_probs     = {},
-                        .all_probs         = {},
-                        .loss              = {},
-                        .src_batch_indices = {},
-                        .all_hidden_states = {}});
-        RTP_LLM_LOG_DEBUG("applyP2PSideChannel: appended first_token_id=%ld, stream_id=%ld",
+        auto bonus_tokens                   = torch::zeros({(int64_t)stream->nextBatchSize(), 1}, torch::kInt32);
+        bonus_tokens.data_ptr<int32_t>()[0] = static_cast<int32_t>(payload->first_token_id);
+        StreamUpdateInfo bonus_info{bonus_tokens,
+                                    /*num_new_tokens=*/1,
+                                    torch::Tensor(),
+                                    torch::Tensor(),
+                                    torch::Tensor(),
+                                    torch::Tensor(),
+                                    torch::Tensor(),
+                                    torch::Tensor(),
+                                    torch::Tensor(),
+                                    torch::Tensor(),
+                                    /*update_remote_generate=*/false};
+        stream->updateWithoutLock(bonus_info);
+        RTP_LLM_LOG_DEBUG("applyP2PSideChannel: committed first_token_id=%ld via updateWithoutLock(), stream_id=%ld",
                           payload->first_token_id,
                           stream->streamId());
     }
@@ -428,7 +432,10 @@ bool StreamCacheResource::loadCacheDone() {
         return false;  // coordinator 后台线程尚未处理完
     }
     // 加载完成（无论成功失败），更新 reuse lengths
-    waitLoadCacheDone(load_cache_context_);
+    // 调用栈：GenerateStream::moveToNext (持 mutex_) → handleLoading → loadCacheDone
+    // 不在 helper 里 reportError：下面要按 match-fail / transfer-fail / 重试耗尽分类，
+    // 提前 reportError 会被 GenerateStateMachine::moveToNext 当成终态，把重试逻辑变成死代码。
+    awaitLoadCache(load_cache_context_);
     if (!load_cache_context_->success()) {
         // 区分匹配失败和传输失败
         auto      read_context = std::dynamic_pointer_cast<FusedAsyncReadContext>(load_cache_context_);
@@ -593,23 +600,26 @@ void StreamCacheResource::loadCacheSync() {
         RTP_LLM_PROFILE_SCOPE("asyncLoadCache");
         load_cache_context = resource_context_.cache_manager->asyncLoadCache(connector_context);
     }
-    waitLoadCacheDone(load_cache_context);
+    awaitLoadCache(load_cache_context);
+    if (load_cache_context && !load_cache_context->success()) {
+        auto error = load_cache_context->errorInfo();
+        if (error.hasError()) {
+            stream_->reportError(error.code(), error.ToString());
+        }
+    }
     // TODO: scheduler will call incrkvblock after load cache, or may lack block on p2p connector
 }
 
-void StreamCacheResource::waitLoadCacheDone(const std::shared_ptr<AsyncContext>& load_context) {
+void StreamCacheResource::awaitLoadCache(const std::shared_ptr<AsyncContext>& load_context) {
     RTP_LLM_PROFILE_FUNCTION();
     if (!load_context) {
         return;
     }
     load_context->waitDone();
-    if (!(load_context->success())) {
-        auto error = load_context->errorInfo();
-        RTP_LLM_LOG_WARNING(
-            "load cache done but not success, stream: [%ld], error: %s", stream_->streamId(), error.ToString().c_str());
-        if (error.hasError()) {
-            stream_->reportError(error.code(), error.ToString());
-        }
+    if (!load_context->success()) {
+        RTP_LLM_LOG_WARNING("load cache done but not success, stream: [%ld], error: %s",
+                            stream_->streamId(),
+                            load_context->errorInfo().ToString().c_str());
         return;
     }
     auto read_context = std::dynamic_pointer_cast<FusedAsyncReadContext>(load_context);

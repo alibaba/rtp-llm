@@ -5,6 +5,7 @@ from typing import Any, Dict, List, Literal, Optional, Union
 from pydantic import BaseModel, Field
 
 from rtp_llm.config.generate_config import GenerateConfig
+from rtp_llm.config.response_format import ResponseFormat, ResponseFormatJSONSchema
 from rtp_llm.utils.base_model_datatypes import AuxInfo
 
 
@@ -139,6 +140,7 @@ class ChatCompletionRequest(BaseModel):
     logprobs: Optional[bool] = None
     logprobs_mode: Optional[Literal["original", "default"]] = None
     top_logprobs: Optional[int] = None
+    response_format: Optional[ResponseFormat] = None
 
     # ---- These functions are not implemented yet.
     # presence_penalty: Optional[float] = 0.0

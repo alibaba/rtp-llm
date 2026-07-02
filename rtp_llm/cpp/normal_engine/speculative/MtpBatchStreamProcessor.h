@@ -2,6 +2,8 @@
 
 #include "rtp_llm/cpp/normal_engine/NormalBatchStreamProcessor.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
+#include "rtp_llm/cpp/models/SampleInfos.h"
+#include "rtp_llm/cpp/models/logits_processor/SpecLogitsVerifyRunner.h"
 #include "rtp_llm/cpp/normal_engine/speculative/SpeculativeSampler.h"
 
 namespace rtp_llm {
@@ -27,9 +29,11 @@ public:
 
     absl::StatusOr<GptModelInputs> gatherDecodeModelInput(const StreamGroups& stream_groups) const;
 
-    absl::StatusOr<SamplerInputs> gatherSpecSamplerInput(const StreamGroups&    stream_groups,
-                                                         const GptModelInputs&  model_inputs,
-                                                         const GptModelOutputs& model_output) const;
+    absl::StatusOr<SamplerInputs>
+    gatherSpecSamplerInput(const StreamGroups&                         stream_groups,
+                           const GptModelInputs&                       model_inputs,
+                           const GptModelOutputs&                      model_output,
+                           const SpecLogitsVerifyRunner::LaunchResult& spec_logits_result) const;
 
     void prepareDecodeDraftModelInput(const StreamGroups& stream_groups, GptModelInputs& model_input);
 

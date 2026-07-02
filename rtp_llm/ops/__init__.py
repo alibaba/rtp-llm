@@ -121,6 +121,7 @@ try:
         FIFOSchedulerConfig,
         FMHAConfig,
         FMHAType,
+        GrammarConfig,
         HWKernelConfig,
         KVCacheConfig,
         MiscellaneousConfig,

@@ -14,7 +14,10 @@
 #include "rtp_llm/cpp/engine_base/system_prompt/SystemPrompt.h"
 #include "rtp_llm/cpp/models/position_ids/PositionIdsGenerator.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
+#include <algorithm>
+#include <cstdint>
 #include <iterator>
+#include <memory>
 #include <mutex>
 #include <optional>
 
@@ -98,11 +101,10 @@ public:
                    kmonitor::MetricsReporterPtr          metrics_reporter,
                    size_t                                extra_reserve_token_num = 0,
                    bool                                  pert_test               = false);
-    virtual ~GenerateStream() {
-        reportMetric();
-        releaseResource();
-        stream_magic_ = 0;
-    }
+    // Out-of-line so that include-heavy member destruction (stream cache
+    // resource, complete-token-ids, etc.) doesn't pull every dependent
+    // header into call sites of `~GenerateStreamPtr`.
+    virtual ~GenerateStream();
 
     bool isStreamAlive() const {
         return stream_magic_ == STREAM_MAGIC;
@@ -124,8 +126,13 @@ public:
 
     virtual void updateOutput(const StreamUpdateInfo& update_info) = 0;
     void         update(const StreamUpdateInfo& update_info);
-    void         specUpdate(const StreamSpecUpdateInfo& update_info);
-    bool         updateKvCacheBlocks(const torch::Tensor& src_batch_indices);
+    // Lock-free counterpart of update(), for callers that already hold mutex_
+    // (e.g. moveToNext → handleLoading → loadCacheDone → applyP2PSideChannelToStream).
+    // Calling update() from such a path would self-deadlock on the non-recursive mutex.
+    void updateWithoutLock(const StreamUpdateInfo& update_info);
+    void specUpdate(const StreamSpecUpdateInfo& update_info);
+
+    bool updateKvCacheBlocks(const torch::Tensor& src_batch_indices);
 
     virtual size_t scoreLen() const {
         return score_len_ == 0 ? 1 : score_len_;
@@ -239,7 +246,11 @@ public:
                                 ErrorCode               error_code = ErrorCode::NONE_ERROR,
                                 const std::string&      error_msg  = "");
 
-    void         reportError(ErrorCode error_code = ErrorCode::NONE_ERROR, const std::string& error_msg = "");
+    void reportError(ErrorCode error_code = ErrorCode::NONE_ERROR, const std::string& error_msg = "");
+    // 无锁版本的 reportError，供已持有 mutex_ 的内部路径（dispatch/process/acceptTokens）使用，
+    // 避免在非递归 mutex 上自死锁。语义上等价于 reportEventWithoutLock(Error, code, msg)，
+    // 提供独立 API 仅为调用方意图更清晰（对应 reportError vs reportEvent 的命名分工）。
+    void         reportErrorWithoutLock(ErrorCode error_code, const std::string& error_msg);
     bool         hasEvent(StreamEvents::EventType event) const;
     virtual bool hasError() const;
     ErrorInfo    statusInfo();
@@ -443,7 +454,7 @@ public:
         return generate_input_->begin_time_us;
     }
 
-    std::vector<BaseLogitsProcessorPtr> getAllLogitsProcessorPtr() const {
+    const std::vector<BaseLogitsProcessorPtr>& getAllLogitsProcessorPtr() const {
         return logits_processor_list_;
     }
 
@@ -533,9 +544,29 @@ public:
     TimeInfo getTimeInfo();
     bool     queryPdSep() const;
 
+private:
+    struct TokenCommitResult {
+        bool ok                       = false;
+        int  committed_num_new_tokens = 0;
+        int  error_token_id           = 0;
+    };
+
+    TokenCommitResult commitTokenIdsWithoutLock(const torch::Tensor& new_tokens, int num_new_tokens);
+    void              reportOutOfVocabErrorWithoutLock(int error_token_id);
+
 protected:
-    void updateLogitProcessorMultiSeqStatus(const torch::Tensor& src_batch_indices);
-    void updateLogitProcessorStatus(const StreamUpdateInfo& update_info);
+    // Caller must already hold mutex_; both implementations use reportErrorWithoutLock.
+    bool    hasStatefulLogitsProcessor() const;
+    int64_t processorAcceptedTokenLen() const;
+    void    updateLogitProcessorMultiSeqStatus(const torch::Tensor& src_batch_indices);
+    void    updateLogitProcessorStatus(const StreamUpdateInfo& update_info);
+    void    updateLogitProcessorStatus(const torch::Tensor& new_tokens,
+                                       int32_t              num_new_tokens,
+                                       const torch::Tensor& src_batch_indices,
+                                       bool                 stateful_only);
+    // Caller must already hold mutex_. Routes the first processor error to this stream.
+    void pollLogitsProcessorErrors();
+    void validateStatefulLogitsProcessorState();
     void fillSubGenerateStatus(StreamState state);
     void resizeSubGenerateStatus(size_t new_size);
 

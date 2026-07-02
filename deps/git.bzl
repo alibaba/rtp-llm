@@ -78,6 +78,15 @@ def git_deps():
         ],
     )
 
+    # xgrammar v0.2.2 — submodules unused (dlpack via @rtp_llm//3rdparty/dlpack).
+    new_git_repository(
+        name = "xgrammar",
+        remote = "https://github.com/mlc-ai/xgrammar.git",
+        commit = "36998a7abfb6a8fb79057aef110a6e93d0fd634c",  # v0.2.2
+        init_submodules = False,
+        build_file = str(Label("@rtp_llm//3rdparty/xgrammar:xgrammar.BUILD")),
+    )
+
     new_git_repository(
         name = "flashmla",
         remote = "https://github.com/deepseek-ai/FlashMLA.git",

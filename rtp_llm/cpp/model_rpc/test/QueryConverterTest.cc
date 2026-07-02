@@ -32,6 +32,10 @@ TEST_F(QueryConverterTest, testTransInput) {
     generate_config_pb->mutable_top_p_decay()->set_value(0.7);
     generate_config_pb->mutable_top_p_min()->set_value(0.3);
     generate_config_pb->mutable_top_p_reset_ids()->set_value(7);
+    generate_config_pb->mutable_json_schema()->set_value("{\"type\":\"object\"}");
+    generate_config_pb->mutable_regex()->set_value("[a-z]+");
+    generate_config_pb->mutable_ebnf()->set_value("root ::= \"a\"");
+    generate_config_pb->mutable_structural_tag()->set_value("{\"format\":{\"type\":\"json_schema\"}}");
     generate_config_pb->mutable_task_id()->set_value("8");
     generate_config_pb->set_calculate_loss(1);
     generate_config_pb->set_return_hidden_states(true);
@@ -57,6 +61,10 @@ TEST_F(QueryConverterTest, testTransInput) {
     ASSERT_FLOAT_EQ(generate_config->top_p_decay.value(), 0.7);
     ASSERT_FLOAT_EQ(generate_config->top_p_min.value(), 0.3);
     ASSERT_EQ(generate_config->top_p_reset_ids.value(), 7);
+    ASSERT_EQ(generate_config->json_schema.value(), "{\"type\":\"object\"}");
+    ASSERT_EQ(generate_config->regex.value(), "[a-z]+");
+    ASSERT_EQ(generate_config->ebnf.value(), "root ::= \"a\"");
+    ASSERT_EQ(generate_config->structural_tag.value(), "{\"format\":{\"type\":\"json_schema\"}}");
     ASSERT_EQ(generate_config->task_id.value(), "8");
     ASSERT_EQ(generate_config->calculate_loss, 1);
     ASSERT_TRUE(generate_config->return_hidden_states);
@@ -191,6 +199,16 @@ TEST_F(QueryConverterTest, TransTensorPB_UnsupportedType) {
     torch::Tensor tensor = torch::ones({1}, torch::kInt64);
     TensorPB      tensor_pb;
     EXPECT_THROW(QueryConverter::transTensorPB(&tensor_pb, tensor), std::runtime_error);
+}
+
+// Typed grammar fields wire as google.protobuf.StringValue → Optional<string>.
+TEST_F(QueryConverterTest, GrammarTypedFieldsAreAccepted) {
+    GenerateInputPB input;
+    input.add_token_ids(0);
+    input.mutable_generate_config()->mutable_json_schema()->set_value(R"({"type":"object"})");
+    auto cfg = QueryConverter::transQuery(&input)->generate_config;
+    ASSERT_TRUE(cfg->json_schema.has_value());
+    EXPECT_EQ(cfg->json_schema.value(), R"({"type":"object"})");
 }
 
 }  // namespace rtp_llm

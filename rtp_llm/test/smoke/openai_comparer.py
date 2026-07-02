@@ -1,18 +1,21 @@
 import copy
 import json
-from typing import Any, Dict, List, Optional, Union
 import os
+from typing import Any, Dict, List, Optional, Union
+
 import torch
 from pydantic import BaseModel
 from smoke.base_comparer import BaseComparer
-from smoke.common_def import QueryStatus, SmokeException, REL_PATH
+from smoke.common_def import REL_PATH, QueryStatus, SmokeException
+from smoke.grammar_constraint_validator import validate_constraint
 from smoke.utils import create_temporary_copy
-from rtp_llm.utils.base_model_datatypes import AuxInfo
+
 from rtp_llm.openai.api_datatype import (
     ChatCompletionRequest,
     ChatCompletionResponse,
     ChatCompletionStreamResponse,
 )
+from rtp_llm.utils.base_model_datatypes import AuxInfo
 
 
 class OpenaiComparer(BaseComparer):
@@ -26,10 +29,12 @@ class OpenaiComparer(BaseComparer):
         return query_info
 
     def format_result(self, result_json: Dict[str, Any]) -> BaseModel:
-        if result_json.get('extra_outputs', None) is not None:
-            path = result_json['extra_outputs'].get('all_hidden_states', None)
+        if result_json.get("extra_outputs", None) is not None:
+            path = result_json["extra_outputs"].get("all_hidden_states", None)
             if path is not None and isinstance(path, str):
-                result_json['extra_outputs']['all_hidden_states'] = torch.load(os.path.join(REL_PATH, path)).numpy().tolist()
+                result_json["extra_outputs"]["all_hidden_states"] = (
+                    torch.load(os.path.join(REL_PATH, path)).numpy().tolist()
+                )
         if self.is_stream:
             return ChatCompletionStreamResponse(**result_json)
         else:
@@ -213,11 +218,38 @@ class OpenaiComparer(BaseComparer):
         lines.append("=" * 60)
         return "\n".join(lines)
 
+    def _validate_grammar_constraint(
+        self, actual_result: Union[ChatCompletionResponse, ChatCompletionStreamResponse]
+    ) -> None:
+        """grammar_constraint_only: each choice's content must satisfy response_format.
+
+        Validates the constraint (regex / json_schema / structural_tag), not golden
+        bytes. Raises SmokeException on any violation so the case fails loudly; the
+        actual response is already dumped to smoke_actual/ before this runs.
+        """
+        if self.is_stream:
+            return  # streaming smoke for grammar isn't used today; keep simple
+        response_format = self.qr_info["query"].get("response_format")
+        if not response_format:
+            return
+        try:
+            for idx, choice in enumerate(actual_result.choices):
+                validate_constraint(choice.message.content, response_format, idx)
+        except Exception as e:
+            raise SmokeException(
+                QueryStatus.COMPARE_FAILED,
+                f"[grammar_constraint_only] constraint check failed: {e}",
+            ) from e
+
     def compare_result(
         self,
         expect_result: Union[ChatCompletionResponse, ChatCompletionStreamResponse],
         actual_result: Union[ChatCompletionResponse, ChatCompletionStreamResponse],
     ) -> None:
+        if self.qr_info.get("grammar_constraint_only"):
+            self._validate_grammar_constraint(actual_result)
+            return
+
         diffs: List[str] = []
 
         if type(expect_result) != type(actual_result):
@@ -408,13 +440,15 @@ class OpenaiComparer(BaseComparer):
             return
 
         obj1, obj2 = expect_aux, actual_aux
-        ignore_fields = set([
-            "cost_time",
-            "wait_time",
-            "first_token_cost_time",
-            "role_addrs.http_port",
-            "role_addrs.grpc_port",
-        ])
+        ignore_fields = set(
+            [
+                "cost_time",
+                "wait_time",
+                "first_token_cost_time",
+                "role_addrs.http_port",
+                "role_addrs.grpc_port",
+            ]
+        )
         top_level_ignore = set()
         nested_ignore: Dict[str, set] = {}
         for field in ignore_fields:

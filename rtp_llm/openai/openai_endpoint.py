@@ -27,6 +27,7 @@ from rtp_llm.openai.api_datatype import (
     FunctionCall,
     ModelCard,
     ModelList,
+    ResponseFormat,
     RoleEnum,
     ToolCall,
     UsageInfo,
@@ -222,8 +223,13 @@ class OpenaiEndpoint(object):
             and isinstance(request.extra_configs.max_thinking_tokens, int)
         ):
             config.max_thinking_tokens = request.extra_configs.max_thinking_tokens
-        # add_thinking_params now accepts generate_env_config parameter
+        # OpenAI response_format takes precedence over grammar fields from extra_configs.
+        # GenerateConfig.validate() projects it to json_schema / regex / ebnf / structural_tag.
+        if request.response_format is not None:
+            config.response_format = request.response_format
         config.add_thinking_params(self.tokenizer, self.generate_env_config)
+        if request.disable_thinking():
+            config.in_think_mode = False
         if request.debug_info:
             config.return_output_ids = True
         return config

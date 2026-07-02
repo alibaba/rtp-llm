@@ -1,5 +1,6 @@
 #include <condition_variable>
 #include <cstddef>
+#include <exception>
 #include <memory>
 #include <ATen/Generator.h>
 #if defined(USING_CUDA) || defined(USING_ROCM)
@@ -86,8 +87,20 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
 
     setReturnAllProbs(generate_input_->generate_config->return_all_probs);
 
-    logits_processor_list_ = LogitsProcessorFactory::createLogitsProcessors(
-        generate_input_, init_batch_size, maxBatchSize(), special_tokens_.eos_token_id);
+    // Surface factory errors (grammar compile, etc.) on the stream during construction.
+    {
+        auto factory_result = LogitsProcessorFactory::createLogitsProcessors(resource_context.grammar_backend,
+                                                                             generate_input_,
+                                                                             init_batch_size,
+                                                                             maxBatchSize(),
+                                                                             special_tokens_.eos_token_id);
+        if (!factory_result.ok()) {
+            const auto& err = factory_result.status();
+            generate_status_->reportEvent(StreamEvents::Error, err.code(), err.ToString());
+        } else {
+            logits_processor_list_ = std::move(factory_result.value());
+        }
+    }
 
     if (generateConfig()->random_seed.has_value()) {
 #if defined(USING_CUDA) || defined(USING_ROCM)
@@ -510,6 +523,10 @@ void GenerateStream::reportError(ErrorCode error_code, const std::string& error_
     generate_status_->reportEvent(StreamEvents::Error, error_code, error_msg);
 }
 
+void GenerateStream::reportErrorWithoutLock(ErrorCode error_code, const std::string& error_msg) {
+    generate_status_->reportEvent(StreamEvents::Error, error_code, error_msg);
+}
+
 bool GenerateStream::hasEvent(StreamEvents::EventType event) const {
     std::lock_guard<std::mutex> lock(*mutex_);
     return generate_status_->hasEvent(event);
@@ -535,9 +552,9 @@ void GenerateStream::setReserveStep(size_t reserve_step) {
 StreamState GenerateStream::moveToNext() {
     checkTimeout();
     std::lock_guard<std::mutex> lock(*mutex_);
-    const auto                  old_status = getStatus();
-    StreamState                 state      = generate_status_->moveToNext();
-    const auto                  new_status = getStatus();
+    const auto  old_status = getStatus();
+    StreamState state      = generate_status_->moveToNext();
+    const auto  new_status = getStatus();
 
     if (old_status == StreamState::WAITING && new_status != StreamState::WAITING) {
         wait_time_us_ = autil::TimeUtility::currentTimeInMicroSeconds() - begin_time_us_;
@@ -697,25 +714,12 @@ void GenerateStream::matchStopWordsList(int batch_id) {
     }
 }
 
-void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
-    RTP_LLM_PROFILE_FUNCTION();
-    std::lock_guard<std::mutex> lock(*mutex_);
-    RTP_LLM_LOG_DEBUG("stream [%ld] spec update", streamId());
-    *is_context_stream_ = false;
-    if (hasError() && !update_info.force_update_info) {
-        return;
-    }
+GenerateStream::TokenCommitResult GenerateStream::commitTokenIdsWithoutLock(const torch::Tensor& new_tokens,
+                                                                            int                  num_new_tokens) {
+    const int seq_len_before_commit = seqLength();
+    int       error_token_id        = 0;
 
-    const auto& new_tokens = update_info.new_tokens;
-
-    if (isPerfTest()) {
-        const_cast<torch::Tensor&>(new_tokens).zero_();
-    }
-
-    auto num_new_tokens = update_info.num_new_tokens;
-    int  cur_cached_len = seqLength() - 1;
-
-    int error_token_id = 0;
+    TokenCommitResult result;
     if (!complete_token_ids_->update(new_tokens,
                                      begin_time_us_,
                                      num_new_tokens,
@@ -725,10 +729,49 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
                                      hasNumBeams(),
                                      streamId(),
                                      error_token_id)) {
-        reportEventWithoutLock(StreamEvents::Error,
-                               ErrorCode::OUT_OF_VOCAB_RANGE,
-                               "output token id:" + std::to_string(error_token_id)
-                                   + " out of vocab size: " + std::to_string(vocab_size_));
+        result.error_token_id = error_token_id;
+        return result;
+    }
+
+    result.ok                       = true;
+    result.committed_num_new_tokens = std::max(0, seqLength() - seq_len_before_commit);
+    return result;
+}
+
+void GenerateStream::reportOutOfVocabErrorWithoutLock(int error_token_id) {
+    reportEventWithoutLock(StreamEvents::Error,
+                           ErrorCode::OUT_OF_VOCAB_RANGE,
+                           "output token id:" + std::to_string(error_token_id)
+                               + " out of vocab size: " + std::to_string(vocab_size_));
+}
+
+void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
+    RTP_LLM_PROFILE_FUNCTION();
+    std::lock_guard<std::mutex> lock(*mutex_);
+    RTP_LLM_LOG_DEBUG("stream [%ld] spec update", streamId());
+    *is_context_stream_ = false;
+    // Drain processor errors stashed during the prior sampler tick (off-stream-mutex).
+    pollLogitsProcessorErrors();
+    if (hasError() && !update_info.force_update_info) {
+        return;
+    }
+    // Ignore stale worker updates after finish; committing them would duplicate
+    // tokens and touch KV blocks only deferred until this worker exits.
+    if (isFinished() && !update_info.force_update_info) {
+        return;
+    }
+
+    const auto& new_tokens = update_info.new_tokens;
+
+    if (isPerfTest()) {
+        const_cast<torch::Tensor&>(new_tokens).zero_();
+    }
+
+    auto       num_new_tokens = update_info.num_new_tokens;
+    int        cur_cached_len = seqLength() - 1;
+    const auto commit_result  = commitTokenIdsWithoutLock(new_tokens, num_new_tokens);
+    if (!commit_result.ok) {
+        reportOutOfVocabErrorWithoutLock(commit_result.error_token_id);
         return;
     }
 
@@ -771,6 +814,17 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
             "[stream %d (%d -> %d)] no swap cache blocks", streamId(), cur_cached_len + 1, nxt_cached_len + 1);
     }
 
+    // Notify processors before publishing so MTP prefill T0 reaches the grammar matcher
+    // before step 2 builds the verify mask, and mismatches surface as hasError().
+    const int committed_num_new_tokens = commit_result.committed_num_new_tokens;
+    if (committed_num_new_tokens > 0) {
+        updateLogitProcessorStatus(new_tokens, committed_num_new_tokens, torch::Tensor(), /*stateful_only=*/true);
+    }
+    validateStatefulLogitsProcessorState();
+    if (hasError()) {
+        return;
+    }
+
     // update normal output buffer
     updateOutput({new_tokens,
                   num_new_tokens,
@@ -789,33 +843,47 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
 void GenerateStream::update(const StreamUpdateInfo& update_info) {
     RTP_LLM_PROFILE_FUNCTION();
     std::lock_guard<std::mutex> lock(*mutex_);
+    updateWithoutLock(update_info);
+}
+
+void GenerateStream::updateWithoutLock(const StreamUpdateInfo& update_info) {
     RTP_LLM_LOG_DEBUG("stream [%ld] update", streamId());
     *is_context_stream_ = false;
+    // Drain processor errors stashed during the prior sampler tick (off-stream-mutex).
+    pollLogitsProcessorErrors();
     if (hasError() && !update_info.force_update_info) {
+        return;
+    }
+    // Ignore stale worker updates after finish; committing them would duplicate
+    // tokens and touch KV blocks only deferred until this worker exits.
+    if (isFinished() && !update_info.force_update_info) {
         return;
     }
 
     const auto& new_tokens     = update_info.new_tokens;
     auto        num_new_tokens = update_info.num_new_tokens;
-
-    int error_token_id = 0;
-    if (!complete_token_ids_->update(new_tokens,
-                                     begin_time_us_,
-                                     num_new_tokens,
-                                     generate_input_->inputLength(),
-                                     maxTokenNum(),
-                                     vocab_size_,
-                                     hasNumBeams(),
-                                     streamId(),
-                                     error_token_id)) {
-        reportEventWithoutLock(StreamEvents::Error,
-                               ErrorCode::OUT_OF_VOCAB_RANGE,
-                               "output token id:" + std::to_string(error_token_id)
-                                   + " out of vocab size: " + std::to_string(vocab_size_));
+    const auto  commit_result  = commitTokenIdsWithoutLock(new_tokens, num_new_tokens);
+    if (!commit_result.ok) {
+        reportOutOfVocabErrorWithoutLock(commit_result.error_token_id);
         return;
     }
 
     resizeSubGenerateStatus(update_info.new_tokens.size(0));
+
+    const bool was_done                 = getStatus() == StreamState::FINISHED;
+    const int  committed_num_new_tokens = commit_result.committed_num_new_tokens;
+
+    // Validate before publishing so stateful-processor mismatches block bad output.
+    if (committed_num_new_tokens > 0) {
+        updateLogitProcessorStatus(update_info.new_tokens,
+                                   committed_num_new_tokens,
+                                   update_info.src_batch_indices,
+                                   /*stateful_only=*/was_done);
+        validateStatefulLogitsProcessorState();
+        if (hasError()) {
+            return;
+        }
+    }
 
     // TODO(xinfei.sxf) fix this (update_queue)
     updateOutput(update_info);
@@ -823,10 +891,6 @@ void GenerateStream::update(const StreamUpdateInfo& update_info) {
     // checkFinished() 已将本轮 updateOutput 中上报的 GenerateDone/Error 事件应用到状态上，
     // 即使 moveToNext() 还未被调度器轮询，这里也能拿到与事件一致的"已完成"判断。
     bool is_done = generate_status_->checkFinished();
-
-    if (!is_done) {
-        updateLogitProcessorStatus(update_info);
-    }
 
     if (!is_done || stream_cache_resource_->reuseCache()) {
         // kv cache blocks must be updated if REUSE_CACHE is on, even the stream is done
@@ -858,6 +922,33 @@ bool GenerateStream::updateKvCacheBlocks(const torch::Tensor& src_batch_indices)
     return stream_cache_resource_->updateKVBlock(block_src_batch, is_seq_len_misaligned);
 }
 
+bool GenerateStream::hasStatefulLogitsProcessor() const {
+    for (const auto& p : logits_processor_list_) {
+        if (p && p->isStateful()) {
+            return true;
+        }
+    }
+    return false;
+}
+
+int64_t GenerateStream::processorAcceptedTokenLen() const {
+    int64_t accepted_token_len = -1;
+    for (const auto& p : logits_processor_list_) {
+        if (!p || !p->isStateful()) {
+            continue;
+        }
+        const auto processor_token_len = p->committedOutputLen();
+        if (accepted_token_len < 0) {
+            accepted_token_len = processor_token_len;
+            continue;
+        }
+        if (accepted_token_len != processor_token_len) {
+            return -1;
+        }
+    }
+    return accepted_token_len < 0 ? 0 : accepted_token_len;
+}
+
 void GenerateStream::updateLogitProcessorMultiSeqStatus(const torch::Tensor& src_batch_indices) {
     RTP_LLM_PROFILE_FUNCTION();
     if (!src_batch_indices.defined() || !hasNumBeams()) {
@@ -868,22 +959,77 @@ void GenerateStream::updateLogitProcessorMultiSeqStatus(const torch::Tensor& src
     std::vector<int> src_batch_indices_vec(data, data + src_batch_indices.numel());
     RTP_LLM_CHECK(src_batch_indices_vec.size() == currentBatchSize());
 
-    for (auto logit_processor_ptr : getAllLogitsProcessorPtr()) {
-        logit_processor_ptr->updateMultiSeqStatus(src_batch_indices_vec);
+    for (const auto& p : logits_processor_list_) {
+        if (!p) {
+            continue;
+        }
+        p->updateMultiSeqStatus(src_batch_indices_vec);
     }
 }
 
 void GenerateStream::updateLogitProcessorStatus(const StreamUpdateInfo& update_info) {
     RTP_LLM_PROFILE_FUNCTION();
-    updateLogitProcessorMultiSeqStatus(update_info.src_batch_indices);
+    updateLogitProcessorStatus(update_info.new_tokens,
+                               update_info.num_new_tokens,
+                               update_info.src_batch_indices,
+                               /*stateful_only=*/false);
+}
 
-    const auto& new_tokens = update_info.new_tokens;
-    RTP_LLM_CHECK(new_tokens.size(0) == currentBatchSize());
-    auto num_new_tokens = update_info.num_new_tokens;
+void GenerateStream::updateLogitProcessorStatus(const torch::Tensor& new_tokens,
+                                                int32_t              num_new_tokens,
+                                                const torch::Tensor& src_batch_indices,
+                                                bool                 stateful_only) {
+    RTP_LLM_PROFILE_FUNCTION();
+    updateLogitProcessorMultiSeqStatus(src_batch_indices);
 
-    for (auto logit_processor_ptr : getAllLogitsProcessorPtr()) {
-        logit_processor_ptr->updateStatus(new_tokens, num_new_tokens);
+    if (new_tokens.size(0) != currentBatchSize()) {
+        reportErrorWithoutLock(ErrorCode::EXECUTION_EXCEPTION,
+                               "updateLogitProcessorStatus: new_tokens.size(0)=" + std::to_string(new_tokens.size(0))
+                                   + " != currentBatchSize()=" + std::to_string(currentBatchSize()));
+        return;
     }
+
+    for (const auto& p : logits_processor_list_) {
+        if (!p) {
+            continue;
+        }
+        if (stateful_only && !p->isStateful()) {
+            continue;
+        }
+        // updateStatus stores any error on the processor itself (no throws).
+        p->updateStatus(new_tokens, num_new_tokens);
+    }
+    pollLogitsProcessorErrors();
+}
+
+void GenerateStream::pollLogitsProcessorErrors() {
+    // hasError() flips first, then reportEvent records the state. The hasError()
+    // shortcut just avoids re-walking the list once we've already routed an error.
+    if (hasError()) {
+        return;
+    }
+    for (const auto& p : logits_processor_list_) {
+        if (p && p->hasError()) {
+            const auto err = p->error();
+            reportErrorWithoutLock(err.code(), err.ToString());
+            return;
+        }
+    }
+}
+
+void GenerateStream::validateStatefulLogitsProcessorState() {
+    if (!hasStatefulLogitsProcessor() || hasError()) {
+        return;
+    }
+    const auto processor_token_len = processorAcceptedTokenLen();
+    const auto stream_output_len   = static_cast<int64_t>(outputTokenLen());
+    if (processor_token_len == stream_output_len) {
+        return;
+    }
+    reportErrorWithoutLock(ErrorCode::UNKNOWN_ERROR,
+                           "stateful logits processor accepted token length mismatch: processor="
+                               + std::to_string(processor_token_len)
+                               + ", stream_output=" + std::to_string(stream_output_len));
 }
 
 void GenerateStream::setLoss(const torch::Tensor& loss) {
@@ -1017,6 +1163,12 @@ int GenerateStream::reuseBlockSize() const {
     int reuse_length       = reuseLength();
     int seq_size_per_block = seqSizePerBlock();
     return reuse_length / seq_size_per_block;
+}
+
+GenerateStream::~GenerateStream() {
+    reportMetric();
+    releaseResource();
+    stream_magic_ = 0;
 }
 
 void GenerateStream::setSeqLength(int seq_length) {
