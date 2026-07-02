@@ -103,6 +103,12 @@ class GenerateConfig(BaseModel):
     calculate_loss: int = 0
     return_logits: bool = False
     logits_index: Optional[int] = None
+    # prompt scoring: return logits for all positions in the input sequence
+    return_prompt_logits: bool = False
+    prompt_logits_top_k: int = 64
+    prompt_logits_start: int = -1
+    prompt_logits_end: int = -1
+    return_target_logprob: bool = True
     return_incremental: bool = False
     return_hidden_states: bool = False
     return_all_hidden_states: bool = False
@@ -414,5 +420,22 @@ class GenerateConfig(BaseModel):
                 f"calculate_loss {self.top_k} in generate_config can only be in {calculate_loss_list},"
                 " but it's {self.calculate_loss}",
             )
+            if self.return_prompt_logits:
+                self.max_new_tokens = min(self.max_new_tokens, 1)
+                self.is_streaming = False
+                self.reuse_cache = False
+                check_with_info(
+                    self.prompt_logits_top_k > 0,
+                    f"prompt_logits_top_k must be positive, got {self.prompt_logits_top_k}",
+                )
+                check_with_info(
+                    self.num_return_sequences <= 1 and self.num_beams <= 1,
+                    "prompt scoring does not support num_return_sequences > 1 or beam search",
+                )
+                if self.prompt_logits_start >= 0 and self.prompt_logits_end >= 0:
+                    check_with_info(
+                        self.prompt_logits_start <= self.prompt_logits_end,
+                        f"prompt_logits_start ({self.prompt_logits_start}) must <= prompt_logits_end ({self.prompt_logits_end})",
+                    )
         except Exception as e:
             raise FtRuntimeException(ExceptionType.ERROR_INPUT_FORMAT_ERROR, str(e))

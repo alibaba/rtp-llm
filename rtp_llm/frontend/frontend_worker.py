@@ -29,6 +29,39 @@ from rtp_llm.utils.complete_response_async_generator import (
 )
 
 
+def build_prompt_logits_dict(
+    pl_raw: Dict[str, Any], top_k: int = 0
+) -> Optional[Dict[str, Any]]:
+    if pl_raw is None:
+        return None
+    topk_logprobs = pl_raw["topk_logprobs"]
+    if top_k > 0:
+        actual_top_k = top_k
+    elif hasattr(topk_logprobs, "shape"):
+        actual_top_k = topk_logprobs.shape[1]
+    else:
+        actual_top_k = len(topk_logprobs[0]) if topk_logprobs else 0
+    result = {
+        "start_pos": pl_raw.get("start_pos", 0),
+        "end_pos": pl_raw.get("end_pos", 0),
+        "top_k": actual_top_k,
+        "topk_logprobs": (
+            pl_raw["topk_logprobs"].tolist()
+            if hasattr(pl_raw["topk_logprobs"], "tolist")
+            else pl_raw["topk_logprobs"]
+        ),
+        "topk_token_ids": (
+            pl_raw["topk_token_ids"].tolist()
+            if hasattr(pl_raw["topk_token_ids"], "tolist")
+            else pl_raw["topk_token_ids"]
+        ),
+    }
+    if pl_raw.get("target_logprobs") is not None:
+        t = pl_raw["target_logprobs"]
+        result["target_logprobs"] = t.tolist() if hasattr(t, "tolist") else t
+    return result
+
+
 class PipelineResponse(BaseModel):
     response: str = ""
     finished: bool = True
@@ -38,6 +71,7 @@ class PipelineResponse(BaseModel):
     logits: Optional[Union[List[float], List[List[float]]]] = None
     output_ids: Optional[List[List[int]]] = None
     input_ids: Optional[List[List[int]]] = None
+    prompt_logits: Optional[Dict[str, Any]] = None
 
 
 class MultiSequencesPipelineResponse(BaseModel):
@@ -194,6 +228,11 @@ class FrontendWorker:
                 if gc.has_num_beams():
                     aux.beam_responses = generate_texts
                 aux_info_dict = asdict(aux)
+            prompt_logits_dict = (
+                build_prompt_logits_dict(out.prompt_logits, gc.prompt_logits_top_k)
+                if gc.return_prompt_logits
+                else None
+            )
             pipeline_responses.append(
                 PipelineResponse(
                     response=generate_texts[0],
@@ -214,6 +253,7 @@ class FrontendWorker:
                         if gc.return_logits and out.logits is not None
                         else None
                     ),
+                    prompt_logits=prompt_logits_dict,
                 )
             )
         return BatchPipelineResponse(response_batch=pipeline_responses)
@@ -295,6 +335,17 @@ class FrontendWorker:
         input_ids = gen_responses.generate_outputs.generate_outputs[0].input_ids
         loss = gen_responses.generate_outputs.generate_outputs[0].loss
         logits = gen_responses.generate_outputs.generate_outputs[0].logits
+        prompt_logits_raw = gen_responses.generate_outputs.generate_outputs[
+            0
+        ].prompt_logits
+
+        prompt_logits_dict = (
+            build_prompt_logits_dict(
+                prompt_logits_raw, generate_config.prompt_logits_top_k
+            )
+            if generate_config.return_prompt_logits
+            else None
+        )
 
         response = PipelineResponse(
             response=generate_texts[0],
@@ -325,6 +376,7 @@ class FrontendWorker:
                 if generate_config.return_input_ids and input_ids is not None
                 else None
             ),
+            prompt_logits=prompt_logits_dict,
         )
 
         return response
