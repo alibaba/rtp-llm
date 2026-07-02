@@ -1,4 +1,3 @@
-import json
 import os
 import tarfile
 import tempfile
@@ -146,11 +145,6 @@ class JitCacheManagerTest(unittest.TestCase):
 
     def patch_time(self, value: float = 1200.0):
         return mock.patch.object(jit_cache_module.time, "time", return_value=value)
-
-    def read_summary(self):
-        return json.loads(
-            (self.root / "local" / ".rtp_jit_summary.json").read_text(encoding="utf-8")
-        )
 
     def component(self, name: str):
         return jit_cache_common_module.COMPONENT_BY_NAME[name]
@@ -314,9 +308,10 @@ class JitCacheManagerTest(unittest.TestCase):
 
         self.assertEqual(summary["cache_state"], "snapshot_miss")
         self.assertEqual(summary["result"], "skipped")
-        self.assertTrue(manager.snapshot_complete_path.exists())
+        # Miss must not leave a marker — next boot has to retry.
+        self.assertFalse(manager.snapshot_complete_path.exists())
         self.assertFalse(self.local_path("triton", "kernel", "a.so").exists())
-        self.assertEqual(self.read_summary()["mode"], "snapshot_download")
+        self.assertEqual(summary["mode"], "snapshot_download")
 
     def test_snapshot_miss_retries_on_next_boot(self):
         # First "boot" sees an empty remote → snapshot_miss; the second "boot"
@@ -548,8 +543,8 @@ class JitCacheManagerTest(unittest.TestCase):
 
         _remote, manager = self.make_remote_manager()
         bucket = manager._usage["remote"]["triton"]
-        bucket.bytes += 4
-        bucket.files += 1
+        bucket["bytes"] += 4
+        bucket["files"] += 1
 
         with mock.patch.object(kmonitor, "_inited", True), mock.patch.object(
             kmonitor, "report", side_effect=RuntimeError("kmonitor unavailable")
@@ -573,7 +568,6 @@ class JitCacheManagerTest(unittest.TestCase):
         self.assertEqual(summary["reason"], "sync in progress")
         self.assertIn("timestamp_ms", summary)
         self.assertIn("total_cost_ms", summary)
-        self.assertEqual(self.read_summary()["result"], "skipped")
 
     def test_upload_skips_empty_files(self):
         remote, manager = self.make_remote_manager()
@@ -805,18 +799,6 @@ class JitCacheManagerTest(unittest.TestCase):
         self.assertEqual(summary["result"], "failed")
         self.assertTrue(summary.get("drain_timed_out", False))
         self.assertIn("drain timed out", "\n".join(logs.output))
-
-    def test_sync_once_marks_failed_when_drain_raises(self):
-        _remote, manager = self.make_remote_manager()
-
-        with mock.patch.object(
-            manager, "_drain_upload_queue", side_effect=RuntimeError("drain failed")
-        ), self.assertLogs(level="WARNING") as logs:
-            summary = manager.sync_once()
-
-        self.assertEqual(summary["result"], "failed")
-        self.assertTrue(summary.get("drain_timed_out", False))
-        self.assertIn("failed to sync remote JIT cache", "\n".join(logs.output))
 
     def test_sync_once_schedules_snapshot_publish_as_best_effort(self):
         _remote, manager = self.make_remote_manager()
@@ -1050,12 +1032,11 @@ class JitCacheManagerTest(unittest.TestCase):
         manager.stop()
 
         self.assertEqual(summary["cache_state"], "snapshot_miss")
+        self.assertEqual(summary["mode"], "snapshot_download")
         self.assertEqual(
             (remote / "triton" / "kernel" / "a.cubin").read_text(encoding="utf-8"),
             "cubin",
         )
-        stored = self.read_summary()
-        self.assertEqual(stored["mode"], "snapshot_download")
 
     def test_background_sync_runs_periodic_flush(self):
         _remote, manager = self.make_remote_manager()
@@ -1124,20 +1105,7 @@ class JitCacheManagerTest(unittest.TestCase):
         self.assertEqual(summary["cache_state"], "snapshot_miss")
         self.assertEqual(summary["result"], "skipped")
 
-    def test_prepare_returns_cached_result_on_second_call(self):
-        _remote, manager = self.make_remote_manager()
-
-        with mock.patch.object(
-            manager, "_pull_snapshot", wraps=manager._pull_snapshot
-        ) as pull_snapshot:
-            first = manager.prepare()
-            second = manager.prepare()
-
-        self.assertIs(first, second)
-        self.assertEqual(pull_snapshot.call_count, 1)
-        manager.stop()
-
-    def test_prepare_timeout_writes_summary_event(self):
+    def test_prepare_timeout_returns_timeout_summary(self):
         remote = self.root / "remote"
         self.seed_remote_snapshot(remote)
         manager = self.make_manager(str(remote), timeout_s=0)
@@ -1147,7 +1115,6 @@ class JitCacheManagerTest(unittest.TestCase):
 
         self.assertEqual(summary["cache_state"], "timeout")
         self.assertEqual(summary["result"], "timeout")
-        self.assertEqual(self.read_summary()["cache_state"], "timeout")
 
     def test_stop_rejects_new_uploads(self):
         manager = self.make_manager(str(self.root / "remote"))
@@ -1213,7 +1180,7 @@ class JitCacheManagerTest(unittest.TestCase):
         def blocked_sync_impl(mode):
             sync_entered.set()
             self.assertTrue(release_sync.wait(timeout=5))
-            return manager.make_summary(mode, "success", time.monotonic(), persist=True)
+            return manager.make_summary(mode, "success", time.monotonic())
 
         manager._sync_once_impl = blocked_sync_impl
         sync_thread = threading.Thread(target=manager.sync_once)
@@ -1265,8 +1232,8 @@ class JitCacheManagerTest(unittest.TestCase):
         jit_cache_common_module.apply_jit_cache_env(self.root / "local_apply")
         self.assertEqual(os.environ["TRITON_AUTOTUNE_CACHE_MODE"], "disabled")
 
-    def test_leader_ignores_pre_existing_marker(self):
-        # Marker is boot-scoped; a leftover marker must not block re-pull.
+    def test_leader_skips_pull_when_marker_present(self):
+        # Marker from a prior boot → leader short-circuits, no pull.
         remote, manager = self.make_remote_manager()
         self.seed_remote_snapshot(remote, content="remote")
         manager.snapshot_complete_path.touch()
@@ -1274,9 +1241,9 @@ class JitCacheManagerTest(unittest.TestCase):
         summary = manager.prepare()
         manager.stop()
 
-        self.assertEqual(summary["cache_state"], "snapshot_hit")
+        self.assertEqual(summary["cache_state"], "local_ready")
         self.assertEqual(summary["result"], "success")
-        self.assertTrue(self.local_path("triton", "kernel", "a.so").exists())
+        self.assertFalse(self.local_path("triton", "kernel", "a.so").exists())
 
 
 class SnapshotPublishConsumerTest(unittest.TestCase):

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import logging
 import os
 import stat
@@ -28,12 +27,11 @@ from rtp_llm.utils.jit_cache_common import (
     SNAPSHOT_PUBLISH_INTERVAL_S,
     SNAPSHOT_PUBLISH_LEASE_PREFIX,
     STARTUP_WAIT_POLL_S,
-    SUMMARY_NAME,
     ComponentSpec,
     JitCacheConfig,
     JitDirtyTracker,
     SyncStats,
-    UsageCounter,
+    aggregate_sync_stats,
     apply_jit_cache_env,
     atomic_write_path,
     cleanup_remote_root,
@@ -53,6 +51,13 @@ from rtp_llm.utils.jit_cache_common import (
     tmp_sibling,
 )
 from rtp_llm.utils.time_util import current_time_ms, elapsed_ms
+
+
+def _path_exists(path: Path) -> bool:
+    with suppress(OSError):
+        return path.exists()
+    return False
+
 
 _USAGE_LOCATIONS = ("local", "remote")
 _USAGE_METRICS = (
@@ -81,12 +86,11 @@ class JitCacheManager:
         self._periodic_sync_stop = threading.Event()
         self._periodic_sync_thread: threading.Thread | None = None
 
-        self._usage: dict[str, dict[str, UsageCounter]] = {
-            loc: {c.name: UsageCounter() for c in COMPONENT_SPECS}
+        self._usage: dict[str, dict[str, dict[str, int]]] = {
+            loc: {c.name: {"bytes": 0, "files": 0} for c in COMPONENT_SPECS}
             for loc in _USAGE_LOCATIONS
         }
 
-        self._prepare_result: dict[str, Any] | None = None
         self.startup_lock: FileLock | None = None
         self.remote_cache_available = False
         self._sync_executor: ThreadPoolExecutor | None = None
@@ -120,7 +124,7 @@ class JitCacheManager:
     def usage_snapshot(self) -> dict[str, dict[str, dict[str, int]]]:
         with self._lock:
             return {
-                loc: {name: c.to_dict() for name, c in buckets.items()}
+                loc: {name: dict(bucket) for name, bucket in buckets.items()}
                 for loc, buckets in self._usage.items()
             }
 
@@ -159,7 +163,6 @@ class JitCacheManager:
         result: str,
         start_s: float,
         *,
-        persist: bool = False,
         stats: dict[str, SyncStats] | None = None,
         drain_timed_out: bool = False,
         **extra: Any,
@@ -171,33 +174,16 @@ class JitCacheManager:
             "total_cost_ms": elapsed_ms(start_s),
         }
         if stats is not None:
-            event.update(SyncStats.aggregate(stats))
+            event.update(aggregate_sync_stats(stats))
         if drain_timed_out:
             event["drain_timed_out"] = True
         event.update(extra)
-        if persist:
-            with atomic_write_path(self.config.local_root / SUMMARY_NAME) as tmp:
-                tmp.write_bytes(
-                    json.dumps(
-                        {
-                            "event": "jit_cache_summary",
-                            "updated_at_ms": int(current_time_ms()),
-                            "remote_root": str(self.config.remote_root or ""),
-                            "local_root": str(self.config.local_root),
-                            **event,
-                        },
-                        indent=2,
-                        sort_keys=True,
-                    ).encode()
-                )
         return event
 
     def bootstrap(self) -> None:
         local_root = self.config.local_root
         remote_root = self.config.remote_root
         local_root.mkdir(parents=True, exist_ok=True)
-        # Marker persists across restarts: it signals "local cache populated by
-        # a prior successful pull", letting later runs skip download entirely.
         # Env first so component_dirs follow the effective JIT read/write paths.
         apply_jit_cache_env(local_root)
         for component in COMPONENT_SPECS:
@@ -216,30 +202,25 @@ class JitCacheManager:
         logging.info("JIT cache local=%s remote=%s", local_root, remote_root)
 
     def prepare(self) -> dict[str, Any]:
-        if self._prepare_result is not None:
-            return self._prepare_result
         start_s = time.monotonic()
         if not self.enabled:
-            summary = self.make_summary(
+            return self.make_summary(
                 "snapshot_download",
                 "skipped",
                 start_s,
-                persist=True,
                 cache_state="disabled",
             )
+        deadline_s = start_s + self.config.remote_sync_longer_timeout_s
+        if self.acquire_startup_lock(0.0):
+            summary = self._prepare_as_leader(deadline_s)
         else:
-            deadline_s = start_s + self.config.remote_sync_longer_timeout_s
-            if self.acquire_startup_lock(0.0):
-                summary = self._prepare_as_leader(deadline_s)
-            else:
-                summary = self._wait_ready_or_takeover(start_s, deadline_s)
-            self.remote_cache_available = summary.get("result") not in {
-                "failed",
-                "timeout",
-            }
-            if not self.remote_cache_available:
-                self.release_startup_lock()
-        self._prepare_result = summary
+            summary = self._wait_ready_or_takeover(start_s, deadline_s)
+        self.remote_cache_available = summary.get("result") not in {
+            "failed",
+            "timeout",
+        }
+        if not self.remote_cache_available:
+            self.release_startup_lock()
         return summary
 
     def acquire_startup_lock(self, timeout_s: float = 0.0) -> bool:
@@ -257,18 +238,18 @@ class JitCacheManager:
         return True
 
     def _prepare_as_leader(self, deadline_s: float) -> dict[str, Any]:
-        # Marker present → prior run already populated local cache; skip pull.
-        # Force re-pull by clearing local_root (needed after ABI-breaking upgrades).
+        # Marker means a prior boot already pulled — skip re-extract.
+        # Clear local_root to force re-pull after ABI-breaking upgrades.
         if self.snapshot_complete_path.exists():
             return self.make_summary(
                 "snapshot_download",
                 "success",
                 time.monotonic(),
-                persist=True,
                 cache_state="local_ready",
             )
-        summary, ok = self._pull_snapshot(deadline_s)
-        if ok:
+        summary = self._pull_snapshot(deadline_s)
+        # Only mark on a real hit; a miss must let future boots retry.
+        if summary.get("cache_state") == "snapshot_hit":
             self.snapshot_complete_path.touch()
         return summary
 
@@ -289,40 +270,33 @@ class JitCacheManager:
                 min(STARTUP_WAIT_POLL_S, max(0.0, deadline_s - time.monotonic()))
             )
         return self.make_summary(
-            "snapshot_download", "timeout", start_s, persist=True, cache_state="timeout"
+            "snapshot_download", "timeout", start_s, cache_state="timeout"
         )
 
-    def _pull_snapshot(self, deadline_s: float) -> tuple[dict[str, Any], bool]:
-        """Returns (summary, ok). ok=True iff snapshot was fully extracted."""
+    def _pull_snapshot(self, deadline_s: float) -> dict[str, Any]:
         start_s = time.monotonic()
-        summary = partial(
-            self.make_summary, "snapshot_download", start_s=start_s, persist=True
-        )
+        summary = partial(self.make_summary, "snapshot_download", start_s=start_s)
         snapshot_path = find_latest_snapshot(self.config.remote_root)
         if snapshot_path is None:
-            return summary("skipped", cache_state="snapshot_miss"), False
+            return summary("skipped", cache_state="snapshot_miss")
         try:
             ext_bytes, ext_files = self._extract_snapshot(snapshot_path, deadline_s)
         except TimeoutError as e:
-            return summary("timeout", cache_state="timeout", message=str(e)), False
+            return summary("timeout", cache_state="timeout", message=str(e))
         except Exception as e:
             logging.exception("failed to download/extract JIT cache snapshot")
-            return (
-                summary("failed", cache_state="snapshot_error", message=str(e)),
-                False,
-            )
-        return (
-            summary(
-                "success",
-                cache_state="snapshot_hit",
-                extracted_files=ext_files,
-                extracted_bytes=ext_bytes,
-            ),
-            True,
+            return summary("failed", cache_state="snapshot_error", message=str(e))
+        return summary(
+            "success",
+            cache_state="snapshot_hit",
+            extracted_files=ext_files,
+            extracted_bytes=ext_bytes,
         )
 
     def _extract_snapshot(self, archive: Path, deadline_s: float) -> tuple[int, int]:
-        per_component: dict[str, UsageCounter] = defaultdict(UsageCounter)
+        per_component: dict[str, dict[str, int]] = defaultdict(
+            lambda: {"bytes": 0, "files": 0}
+        )
         gpu_scope = get_gpu_info()
         # Dedup parent mkdirs across all extracted files: a snapshot has hundreds
         # of files sharing a handful of parent dirs, and atomic_write_path would
@@ -357,16 +331,18 @@ class JitCacheManager:
                     with tmp.open("wb") as out:
                         stream_copy(source, out, deadline_s, buffer=copy_buffer)
                     os.utime(tmp, (member.mtime, member.mtime))
-                per_component[component.name] += UsageCounter(
-                    bytes=member.size, files=1
-                )
+                bucket = per_component[component.name]
+                bucket["bytes"] += member.size
+                bucket["files"] += 1
         if per_component:
             with self._lock:
                 for name, agg in per_component.items():
-                    self._usage["local"][name] += agg
+                    dst = self._usage["local"][name]
+                    dst["bytes"] += agg["bytes"]
+                    dst["files"] += agg["files"]
         return (
-            sum(a.bytes for a in per_component.values()),
-            sum(a.files for a in per_component.values()),
+            sum(a["bytes"] for a in per_component.values()),
+            sum(a["files"] for a in per_component.values()),
         )
 
     @property
@@ -440,22 +416,18 @@ class JitCacheManager:
             stats = self.sync_stats.setdefault(component.name, SyncStats())
             if uploaded is None:
                 stats.failed_files += 1
+            elif uploaded > 0:
+                stats.uploaded_files += 1
+                stats.uploaded_bytes += uploaded
+                bucket = self._usage["remote"][component.name]
+                bucket["bytes"] += uploaded
+                bucket["files"] += 1
             else:
-                stats.record_upload(uploaded)
-                if uploaded > 0:
-                    self._usage["remote"][component.name] += UsageCounter(
-                        bytes=uploaded, files=1
-                    )
+                stats.skipped_files += 1
             self._decrement_pending_locked()
 
-    @staticmethod
-    def already_present(path: Path) -> bool:
-        with suppress(OSError):
-            return path.exists()
-        return False
-
     def _copy_atomic(self, local: Path, remote: Path, deadline_s: float) -> int:
-        if self.already_present(remote):
+        if _path_exists(remote):
             return 0
         try:
             local_stat = local.stat()
@@ -468,7 +440,7 @@ class JitCacheManager:
             with atomic_write_path(remote) as tmp:
                 copy_with_deadline(local, tmp, deadline_s)
         except PermissionError:
-            if self.already_present(remote):
+            if _path_exists(remote):
                 return 0
             raise
         return local_stat.st_size
@@ -513,7 +485,6 @@ class JitCacheManager:
             mode,
             "failed" if has_failures else "success",
             start_s,
-            persist=True,
             cache_state="remote_hit",
             stats=stats,
             drain_timed_out=drain_timed_out,

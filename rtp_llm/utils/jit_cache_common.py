@@ -29,7 +29,6 @@ SNAPSHOT_PUBLISH_LEASE_PREFIX = ".jit_snapshot_publish_lease."
 SNAPSHOT_PUBLISH_INTERVAL_S = 20 * 60
 LOCAL_LOCK_NAME = ".rtp_jit_local.lock"
 SNAPSHOT_COMPLETE_NAME = ".rtp_jit_snapshot_complete"
-SUMMARY_NAME = ".rtp_jit_summary.json"
 
 DEFAULT_JIT_SYNC_WORKERS = 8
 COPY_CHUNK_SIZE = 4 * 1024 * 1024
@@ -47,8 +46,6 @@ class ComponentSpec:
     upload_events: frozenset[str] = frozenset({"closed"})
     gpu_scoped: bool = False
     import_time_sensitive: bool = False
-    startup_cleanup_globs: tuple[str, ...] = ()
-    extra_env: tuple[tuple[str, str], ...] = ()
 
 
 COMPONENT_SPECS = (
@@ -60,7 +57,6 @@ COMPONENT_SPECS = (
         "DG_JIT_CACHE_DIR",
         upload_events=frozenset({"created"}),
         import_time_sensitive=True,
-        startup_cleanup_globs=("**/*_lock",),
     ),
     ComponentSpec("torch_extensions", "TORCH_EXTENSIONS_DIR"),
     ComponentSpec("triton", "TRITON_CACHE_DIR", upload_events=frozenset({"moved"})),
@@ -69,24 +65,11 @@ COMPONENT_SPECS = (
         "TRITON_AUTOTUNE_CONFIG_DIR",
         sync_suffixes=(".json", ".pkl", ".pickle"),
         gpu_scoped=True,
-        extra_env=(("TRITON_AUTOTUNE_CACHE_MODE", "cached"),),
     ),
 )
 COMPONENT_BY_NAME = {c.name: c for c in COMPONENT_SPECS}
-
-
-@dataclass
-class UsageCounter:
-    bytes: int = 0
-    files: int = 0
-
-    def __iadd__(self, other: UsageCounter) -> UsageCounter:
-        self.bytes += other.bytes
-        self.files += other.files
-        return self
-
-    def to_dict(self) -> dict[str, int]:
-        return {"bytes": self.bytes, "files": self.files}
+_DEEP_GEMM_STALE_LOCK_GLOB = "**/*_lock"
+_TRITON_AUTOTUNE_EXTRA_ENV = (("TRITON_AUTOTUNE_CACHE_MODE", "cached"),)
 
 
 @dataclass
@@ -95,13 +78,6 @@ class SyncStats:
     uploaded_bytes: int = 0
     skipped_files: int = 0
     failed_files: int = 0
-
-    def record_upload(self, uploaded_bytes: int) -> None:
-        if uploaded_bytes > 0:
-            self.uploaded_files += 1
-            self.uploaded_bytes += uploaded_bytes
-        else:
-            self.skipped_files += 1
 
     def as_summary(self) -> dict[str, int]:
         return {
@@ -114,20 +90,19 @@ class SyncStats:
             "failed_files": self.failed_files,
         }
 
-    @classmethod
-    def aggregate(cls, stats_by_component: dict[str, SyncStats]) -> dict[str, Any]:
-        """One-pass aggregation: sums counters + collects non-empty components."""
-        total = cls()
-        components: dict[str, dict[str, int]] = {}
-        for name, st in stats_by_component.items():
-            row = st.as_summary()
-            if any(row.values()):
-                components[name] = row
-            total.uploaded_files += st.uploaded_files
-            total.uploaded_bytes += st.uploaded_bytes
-            total.skipped_files += st.skipped_files
-            total.failed_files += st.failed_files
-        return {"components": components, **total.as_summary()}
+
+def aggregate_sync_stats(stats: dict[str, SyncStats]) -> dict[str, Any]:
+    total = SyncStats()
+    components: dict[str, dict[str, int]] = {}
+    for name, s in stats.items():
+        row = s.as_summary()
+        if any(row.values()):
+            components[name] = row
+        total.uploaded_files += s.uploaded_files
+        total.uploaded_bytes += s.uploaded_bytes
+        total.skipped_files += s.skipped_files
+        total.failed_files += s.failed_files
+    return {"components": components, **total.as_summary()}
 
 
 @dataclass
@@ -228,36 +203,33 @@ def apply_jit_cache_env(local_root: Path | str) -> None:
                 managed,
             )
         os.environ.setdefault(component.env_name, managed)
-        for env_key, env_value in component.extra_env:
-            os.environ.setdefault(env_key, env_value)
+    for env_key, env_value in _TRITON_AUTOTUNE_EXTRA_ENV:
+        os.environ.setdefault(env_key, env_value)
 
 
 def clear_component_startup_files(
     component: ComponentSpec, component_dir: Path
 ) -> None:
-    if not component.startup_cleanup_globs:
+    # Only deep_gemm leaves lock files (from its C++ FileLock) — the rest have no
+    # startup-time cleanup to do.
+    if component.name != "deep_gemm":
         return
     cleared = 0
-    for pattern in component.startup_cleanup_globs:
-        for path in component_dir.glob(pattern):
-            if not path.is_file():
-                continue
-            try:
-                path.unlink(missing_ok=True)
-                cleared += 1
-            except OSError:
-                logging.warning(
-                    "failed to remove %s startup file: %s",
-                    component.name,
-                    path,
-                    exc_info=True,
-                )
+    for path in component_dir.glob(_DEEP_GEMM_STALE_LOCK_GLOB):
+        if not path.is_file():
+            continue
+        try:
+            path.unlink(missing_ok=True)
+            cleared += 1
+        except OSError:
+            logging.warning(
+                "failed to remove deep_gemm startup file: %s",
+                path,
+                exc_info=True,
+            )
     if cleared:
         logging.info(
-            "removed %d %s startup files from %s",
-            cleared,
-            component.name,
-            component_dir,
+            "removed %d deep_gemm startup files from %s", cleared, component_dir
         )
 
 
