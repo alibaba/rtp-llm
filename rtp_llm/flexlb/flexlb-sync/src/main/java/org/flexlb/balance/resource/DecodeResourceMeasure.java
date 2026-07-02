@@ -51,7 +51,7 @@ public class DecodeResourceMeasure implements ResourceMeasure {
         long concurrency = calculateDecodeConcurrency(endpoint.getStatus());
         if (concurrencyLimit > 0 && concurrency >= concurrencyLimit) {
             Logger.warn("Decode worker {} resource unavailable: concurrency={}, limit={}",
-                    endpoint.getIp(), concurrency, concurrencyLimit);
+                    endpoint.ipPort(), concurrency, concurrencyLimit);
             return false;
         }
         long used = endpoint.realKvUsed();
@@ -64,7 +64,7 @@ public class DecodeResourceMeasure implements ResourceMeasure {
         boolean available = endpoint.getStatus().updateResourceAvailabilityWithHysteresis(usagePercentage, availableThreshold, hysteresisBiasPercent);
         if (!available) {
             Logger.warn("Decode worker {} resource unavailable: kvUsage={}%, threshold={}%, used={}, total={}",
-                    endpoint.getIp(), usagePercentage, availableThreshold, used, total);
+                    endpoint.ipPort(), usagePercentage, availableThreshold, used, total);
         }
         return available;
     }

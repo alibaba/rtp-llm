@@ -712,6 +712,9 @@ void GenerateStream::finish() {
 void GenerateStream::finish_internal() {
     if (generate_status_->getStatus() == StreamState::FINISHED)
         return;
+    // Set FINISHED before releaseResource so that tryReleaseKVBlock's
+    // status == FINISHED guard allows insertIntoCache to persist kv items.
+    generate_status_->status.store(StreamState::FINISHED, std::memory_order_release);
     // releaseResource runs under mutex_; do not wait here.
     // If a worker still owns KV blocks, mark deferred and let its dec path
     // perform the release after the pending count drains.
@@ -720,7 +723,6 @@ void GenerateStream::finish_internal() {
     } else if (!streamCacheResource().isResourceReleased()) {
         streamCacheResource().releaseResource();
     }
-    generate_status_->status.store(StreamState::FINISHED, std::memory_order_release);
     cv_->notify_one();
 }
 
