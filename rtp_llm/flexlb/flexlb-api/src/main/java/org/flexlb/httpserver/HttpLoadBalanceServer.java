@@ -1,24 +1,29 @@
 package org.flexlb.httpserver;
 
-import lombok.extern.slf4j.Slf4j;
 import org.flexlb.balance.scheduler.QueueManager;
 import org.flexlb.consistency.LBStatusConsistencyService;
 import org.flexlb.dao.BalanceContext;
+import org.flexlb.dao.BatchScheduleContext;
+import org.flexlb.dao.loadbalance.BatchScheduleRequest;
+import org.flexlb.dao.loadbalance.BatchScheduleResponse;
 import org.flexlb.dao.loadbalance.LogLevelUpdateRequest;
 import org.flexlb.dao.loadbalance.QueueSnapshotResponse;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
+import org.flexlb.dao.pv.BatchPvLogData;
 import org.flexlb.dao.pv.PvLogData;
 import org.flexlb.domain.consistency.MasterChangeNotifyReq;
 import org.flexlb.domain.consistency.MasterChangeNotifyResp;
 import org.flexlb.domain.consistency.SyncLBStatusReq;
 import org.flexlb.domain.consistency.SyncLBStatusResp;
+import org.flexlb.exception.BatchScheduleTransportException;
+import org.flexlb.exception.EngineReadTimeoutException;
+import org.flexlb.service.BatchScheduleCoordinator;
 import org.flexlb.service.RouteService;
 import org.flexlb.service.grace.ActiveRequestCounter;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.transport.GeneralHttpNettyService;
-import org.flexlb.util.JsonUtils;
 import org.flexlb.util.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.context.annotation.Bean;
@@ -30,13 +35,11 @@ import org.springframework.web.reactive.function.server.ServerResponse;
 import reactor.core.publisher.Mono;
 
 import java.net.URI;
-import java.util.concurrent.TimeoutException;
 import java.util.function.Function;
 
 import static org.springframework.web.reactive.function.server.RequestPredicates.accept;
 import static org.springframework.web.reactive.function.server.RouterFunctions.route;
 
-@Slf4j
 @Component
 public class HttpLoadBalanceServer {
     private static final org.slf4j.Logger pvLogger = LoggerFactory.getLogger("pvLogger");
@@ -46,19 +49,22 @@ public class HttpLoadBalanceServer {
     private final EngineHealthReporter engineHealthReporter;
     private final QueueManager queueManager;
     private final ActiveRequestCounter activeRequestCounter;
+    private final BatchScheduleCoordinator batchScheduleCoordinator;
 
     public HttpLoadBalanceServer(GeneralHttpNettyService generalHttpNettyService,
                                  RouteService routeService,
                                  LBStatusConsistencyService lbStatusConsistencyService,
                                  EngineHealthReporter engineHealthReporter,
                                  QueueManager queueManager,
-                                 ActiveRequestCounter activeRequestCounter) {
+                                 ActiveRequestCounter activeRequestCounter,
+                                 BatchScheduleCoordinator batchScheduleCoordinator) {
         this.generalHttpNettyService = generalHttpNettyService;
         this.routeService = routeService;
         this.lbStatusConsistencyService = lbStatusConsistencyService;
         this.engineHealthReporter = engineHealthReporter;
         this.queueManager = queueManager;
         this.activeRequestCounter = activeRequestCounter;
+        this.batchScheduleCoordinator = batchScheduleCoordinator;
     }
 
     @Bean
@@ -66,6 +72,8 @@ public class HttpLoadBalanceServer {
         return route()
                 .POST("/rtp_llm/schedule", accept(MediaType.APPLICATION_JSON),
                         this::scheduleRequest)
+                .POST("/rtp_llm/batch_schedule", accept(MediaType.APPLICATION_JSON),
+                        this::batchScheduleRequest)
                 .POST("/rtp_llm/master/info", accept(MediaType.APPLICATION_JSON),
                         this::responseMasterInfo)
                 .POST("/rtp_llm/schedule_snapshot", accept(MediaType.APPLICATION_JSON),
@@ -100,6 +108,50 @@ public class HttpLoadBalanceServer {
                 })
                 .onErrorResume(e -> handleRequestError(ctx, e))
                 .doFinally(signal -> finalizeRequestContext(ctx));
+    }
+
+    public Mono<ServerResponse> batchScheduleRequest(ServerRequest request) {
+        BatchScheduleContext bctx = new BatchScheduleContext();
+        return request.bodyToMono(BatchScheduleRequest.class)
+                .switchIfEmpty(Mono.error(new IllegalArgumentException("empty request body")))
+                .flatMap(batchRequest -> {
+                    bctx.setBatchRequest(batchRequest);
+                    return Mono.using(
+                            activeRequestCounter::acquire,
+                            ignored -> processBatchScheduleRequest(bctx),
+                            ActiveRequestCounter.RequestToken::close);
+                })
+                .onErrorResume(e -> {
+                    Logger.error("Batch schedule request processing error", e);
+                    BatchScheduleResponse errorResponse = BatchScheduleResponse.error(
+                            StrategyErrorType.INVALID_REQUEST, e.getMessage());
+                    bctx.setBatchResponse(errorResponse);
+                    bctx.setSuccess(false);
+                    bctx.setErrorMessage(e.getMessage());
+                    return json(500, errorResponse);
+                })
+                .doFinally(signal -> finalizeBatchContext(bctx));
+    }
+
+    private Mono<ServerResponse> processBatchScheduleRequest(BatchScheduleContext bctx) {
+        return batchScheduleCoordinator.schedule(bctx.getBatchRequest())
+                .flatMap(response -> {
+                    bctx.setBatchResponse(response);
+                    bctx.setSuccess(response.isSuccess());
+                    if (!response.isSuccess()) {
+                        bctx.setErrorMessage(response.getErrorMessage());
+                        Logger.error("[BatchSchedule] failed: {}", response.getErrorMessage());
+                    }
+                    return json(response.isSuccess() ? 200 : 500, response);
+                })
+                .onErrorResume(BatchScheduleTransportException.class, e -> {
+                    BatchScheduleResponse errorResponse = BatchScheduleResponse.error(
+                            StrategyErrorType.NO_AVAILABLE_WORKER, e.getMessage());
+                    bctx.setBatchResponse(errorResponse);
+                    bctx.setSuccess(false);
+                    bctx.setErrorMessage(e.getMessage());
+                    return json(500, errorResponse);
+                });
     }
 
     private Mono<ServerResponse> processScheduledRequest(BalanceContext ctx, Request req) {
@@ -214,7 +266,7 @@ public class HttpLoadBalanceServer {
             engineHealthReporter.reportForwardToMasterResult("LOCAL", "MASTER_NULL");
             return fallbackToLocalRouting(ctx);
         }
-        Logger.info("Forwarding request to master: {}, request: {}", master, request);
+        Logger.info("Forwarding request to master: {}, requestId: {}", master, request.getRequestId());
         URI uri = URI.create("http://" + master);
         return generalHttpNettyService.request(request, uri, "/rtp_llm/schedule", Response.class)
                 .flatMap(resp -> {
@@ -225,7 +277,7 @@ public class HttpLoadBalanceServer {
                         }
                 )
                 .onErrorResume(e -> {
-                    String errorCode = e instanceof TimeoutException ? "TIMEOUT" : "CONNECT_FAILED";
+                    String errorCode = e instanceof EngineReadTimeoutException ? "TIMEOUT" : "CONNECT_FAILED";
                     Logger.error("[Fallback] Master unreachable, routing locally: {}, errorCode: {}", e.getMessage(), errorCode);
                     engineHealthReporter.reportForwardToMasterResult("LOCAL", errorCode);
                     return fallbackToLocalRouting(ctx);
@@ -256,37 +308,18 @@ public class HttpLoadBalanceServer {
         response.setRealMasterHost(lbStatusConsistencyService.getMasterHostIpPort());
 
         if (response.isSuccess()) {
-            return buildSuccessResponse(response);
-        } else {
-            Logger.error("Routing failed with error code: {}", response.getErrorMessage());
-            ctx.setSuccess(false);
-            ctx.setErrorMessage("error_code:" + response.getErrorMessage());
-            return buildErrorResponse(response);
+            return json(200, response);
         }
+        Logger.error("Routing failed with error code: {}", response.getErrorMessage());
+        ctx.setSuccess(false);
+        ctx.setErrorMessage("error_code:" + response.getErrorMessage());
+        return json(500, response);
     }
 
-    /**
-     * Builds a successful HTTP response.
-     *
-     * @param result the master response containing the result
-     * @return successful HTTP response
-     */
-    private Mono<ServerResponse> buildSuccessResponse(Response result) {
-        return ServerResponse.ok()
+    private Mono<ServerResponse> json(int status, Object body) {
+        return ServerResponse.status(status)
                 .contentType(MediaType.APPLICATION_JSON)
-                .body(Mono.just(result), Response.class);
-    }
-
-    /**
-     * Builds an error HTTP response.
-     *
-     * @param result the master response containing the error
-     * @return error HTTP response
-     */
-    private Mono<ServerResponse> buildErrorResponse(Response result) {
-        return ServerResponse.status(500)
-                .contentType(MediaType.APPLICATION_JSON)
-                .body(Mono.just(result), Response.class);
+                .bodyValue(body);
     }
 
     /**
@@ -322,19 +355,17 @@ public class HttpLoadBalanceServer {
      * @param ctx the balance context containing PV log data
      */
     private void logPvRecord(BalanceContext ctx) {
+        new PvLogData(ctx).emit(pvLogger);
+    }
 
-        PvLogData pvLogData = new PvLogData(ctx);
-
-        try {
-            String jsonLog = JsonUtils.toStringOrEmpty(pvLogData);
-            if (pvLogData.isSuccess()) {
-                pvLogger.info(jsonLog);
-            } else {
-                pvLogger.error(jsonLog);
-            }
-        } catch (Exception ex) {
-            Logger.error("Failed to serialize PV log data", ex);
-        }
+    /**
+     * Finalizes the batch schedule context by reporting metrics and writing the PV log.
+     *
+     * @param bctx the batch schedule context to finalize
+     */
+    private void finalizeBatchContext(BatchScheduleContext bctx) {
+        engineHealthReporter.reportBatchSchedule(bctx);
+        new BatchPvLogData(bctx).emit(pvLogger);
     }
 
 }

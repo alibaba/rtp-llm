@@ -1,9 +1,9 @@
 package org.flexlb.httpserver;
 
-import org.flexlb.service.grace.strategy.ActiveRequestShutdownHooker;
 import org.flexlb.service.grace.GracefulLifecycleReporter;
 import org.flexlb.service.grace.GracefulOnlineService;
 import org.flexlb.service.grace.GracefulShutdownService;
+import org.flexlb.service.grace.strategy.ActiveRequestShutdownHooker;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;

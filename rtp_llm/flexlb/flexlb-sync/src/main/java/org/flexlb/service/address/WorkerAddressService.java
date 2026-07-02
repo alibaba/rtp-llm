@@ -10,6 +10,7 @@ import org.flexlb.dao.route.ServiceRoute;
 import org.flexlb.discovery.ServiceDiscovery;
 import org.flexlb.enums.BackendServiceProtocolEnum;
 import org.flexlb.enums.BalanceStatusEnum;
+import org.flexlb.exception.ServiceDiscoveryException;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.util.IdUtils;
 import org.slf4j.Logger;
@@ -20,6 +21,7 @@ import javax.annotation.PreDestroy;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.Callable;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Future;
 import java.util.concurrent.LinkedBlockingQueue;
@@ -81,23 +83,34 @@ public class WorkerAddressService {
         return workerHosts;
     }
 
+    /**
+     * Resolves the hosts behind one discovery address. A successful lookup may legitimately
+     * return an empty list (the service has no hosts); a failed or timed-out lookup throws
+     * {@link ServiceDiscoveryException} so callers never mistake an outage for an empty fleet.
+     */
     public List<WorkerHost> getServiceHosts(String modelName, String address) {
         // Use all machines mounted on the first service discovery address in ServiceRoute
-        ServiceDiscoveryRunner serviceDiscoveryRunner = new ServiceDiscoveryRunner(modelName, address, engineHealthReporter, serviceDiscovery);
+        ServiceDiscoveryRunner serviceDiscoveryRunner = new ServiceDiscoveryRunner(address, serviceDiscovery);
         Future<List<WorkerHost>> future = serviceDiscoveryExecutor.submit(serviceDiscoveryRunner);
         try {
             // Set timeout to prevent blocking threads when service discovery has no machines and takes long to return
             return future.get(500, TimeUnit.MILLISECONDS);
-        } catch (Exception e) {
-            if (e instanceof TimeoutException) {
-                logger.error("query service discovery timeout, model={}, address={}, msg:{}", modelName, address, "timeout");
-                engineHealthReporter.reportStatusCheckerFail(modelName, BalanceStatusEnum.SERVICE_DISCOVERY_TIMEOUT, null, null);
-            } else {
-                logger.error("query service discovery error, model={}, address={}, msg:{}", modelName, address, e.getMessage());
-                engineHealthReporter.reportStatusCheckerFail(modelName, BalanceStatusEnum.SERVICE_DISCOVERY_ERROR, null, null);
-            }
+        } catch (TimeoutException e) {
             future.cancel(true);
-            return new ArrayList<>();
+            logger.error("query service discovery timeout, model={}, address={}, msg:{}", modelName, address, "timeout");
+            engineHealthReporter.reportStatusCheckerFail(modelName, BalanceStatusEnum.SERVICE_DISCOVERY_TIMEOUT, null, null);
+            throw new ServiceDiscoveryException(BalanceStatusEnum.SERVICE_DISCOVERY_TIMEOUT,
+                    "service discovery timeout, model=" + modelName + ", address=" + address, e);
+        } catch (Exception e) {
+            future.cancel(true);
+            if (e instanceof InterruptedException) {
+                Thread.currentThread().interrupt();
+            }
+            Throwable cause = e instanceof ExecutionException && e.getCause() != null ? e.getCause() : e;
+            logger.error("query service discovery error, model={}, address={}, msg:{}", modelName, address, cause.getMessage());
+            engineHealthReporter.reportStatusCheckerFail(modelName, BalanceStatusEnum.SERVICE_DISCOVERY_ERROR, null, null);
+            throw new ServiceDiscoveryException(BalanceStatusEnum.SERVICE_DISCOVERY_ERROR,
+                    "service discovery failed, model=" + modelName + ", address=" + address + ", msg=" + cause.getMessage(), cause);
         }
     }
 
@@ -115,37 +128,18 @@ public class WorkerAddressService {
 
     public static class ServiceDiscoveryRunner implements Callable<List<WorkerHost>> {
 
-        private static final Logger logger = LoggerFactory.getLogger("syncLogger");
-
-        private final String modelName;
-
         private final String address;
-
-        private final EngineHealthReporter engineHealthReporter;
 
         private final ServiceDiscovery serviceDiscovery;
 
-        public ServiceDiscoveryRunner(String modelName,
-                                      String address,
-                                      EngineHealthReporter engineHealthReporter,
-                                      ServiceDiscovery serviceDiscovery) {
+        public ServiceDiscoveryRunner(String address, ServiceDiscovery serviceDiscovery) {
             this.address = address;
-            this.engineHealthReporter = engineHealthReporter;
-            this.modelName = modelName;
             this.serviceDiscovery = serviceDiscovery;
         }
 
         @Override
-        public List<WorkerHost> call() {
-            long start = System.nanoTime() / 1000;
-            try {
-                return serviceDiscovery.getHosts(address);
-            } catch (Throwable e) {
-                logger.error("query service discovery exception, cost={}ms, model={}, address={}, msg:{}",
-                        System.nanoTime() / 1000 - start, modelName, address, e.getMessage());
-                engineHealthReporter.reportStatusCheckerFail(modelName, BalanceStatusEnum.SERVICE_DISCOVERY_ERROR, null, null);
-                return new ArrayList<>();
-            }
+        public List<WorkerHost> call() throws Exception {
+            return serviceDiscovery.getHosts(address);
         }
     }
 }

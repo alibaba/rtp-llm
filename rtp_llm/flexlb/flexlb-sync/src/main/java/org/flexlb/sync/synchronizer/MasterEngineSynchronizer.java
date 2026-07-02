@@ -57,9 +57,6 @@ public class MasterEngineSynchronizer extends AbstractEngineStatusSynchronizer {
         this.syncRequestTimeoutMs = System.getenv("SYNC_REQUEST_TIMEOUT_MS") != null
                 ? Long.parseLong(System.getenv("SYNC_REQUEST_TIMEOUT_MS"))
                 : syncEngineStatusInterval;
-        this.scheduler = new ScheduledThreadPoolExecutor(5, new NamedThreadFactory("sync-status-scheduler"),
-                new ThreadPoolExecutor.AbortPolicy());
-        this.scheduler.scheduleAtFixedRate(this::syncEngineStatus, 0, syncEngineStatusInterval, TimeUnit.MILLISECONDS);
 
         // Get environment variable
         String modelConfig = System.getenv("MODEL_SERVICE_CONFIG");
@@ -71,6 +68,15 @@ public class MasterEngineSynchronizer extends AbstractEngineStatusSynchronizer {
         });
         ModelMetaConfig.putServiceRoute(serviceRoute.getServiceId(), serviceRoute);
         modelNames.add(IdUtils.getModelNameByServiceId(serviceRoute.getServiceId()));
+
+        flexlbConfig.validateEngineTypeConfig(serviceRoute.getAllRoleTypes());
+        Logger.warn("engine type: {}", flexlbConfig.getEngineType());
+
+        // Start the periodic sync only after config parse + validation succeed, so a failed
+        // construction never leaves a live scheduler thread running against partial state.
+        this.scheduler = new ScheduledThreadPoolExecutor(5, new NamedThreadFactory("sync-status-scheduler"),
+                new ThreadPoolExecutor.AbortPolicy());
+        this.scheduler.scheduleAtFixedRate(this::syncEngineStatus, 0, syncEngineStatusInterval, TimeUnit.MILLISECONDS);
     }
 
     public void syncEngineStatus() {
@@ -98,7 +104,8 @@ public class MasterEngineSynchronizer extends AbstractEngineStatusSynchronizer {
                                 modelName, modelWorkerStatus.getRoleStatusMap(roleType),
                                 workerAddressService, statusCheckExecutor, engineHealthReporter,
                                 engineGrpcService, roleType, localKvCacheAwareManager,
-                                syncRequestTimeoutMs, syncCount, syncEngineStatusInterval
+                                syncRequestTimeoutMs, syncCount, syncEngineStatusInterval,
+                                flexlbConfig.getEngineType()
                         ));
                     } else {
                         logger.error("roleEndpoints is null, by roleType : {}", roleType);

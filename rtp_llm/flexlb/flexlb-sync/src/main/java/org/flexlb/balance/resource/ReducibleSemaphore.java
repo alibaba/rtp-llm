@@ -1,8 +1,8 @@
 package org.flexlb.balance.resource;
 
-import java.util.concurrent.Semaphore;
-
 import org.flexlb.util.Logger;
+
+import java.util.concurrent.Semaphore;
 
 /**
  * A Semaphore that allows reducing the number of available permits.

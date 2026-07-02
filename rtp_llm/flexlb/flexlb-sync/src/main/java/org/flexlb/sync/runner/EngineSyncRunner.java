@@ -5,6 +5,8 @@ import org.flexlb.dao.master.WorkerHost;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.BalanceStatusEnum;
+import org.flexlb.enums.EngineType;
+import org.flexlb.exception.ServiceDiscoveryException;
 import org.flexlb.service.address.WorkerAddressService;
 import org.flexlb.service.grpc.EngineGrpcService;
 import org.flexlb.service.monitor.EngineHealthReporter;
@@ -16,6 +18,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ExecutorService;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.LongAdder;
 import java.util.stream.Collectors;
 
@@ -45,6 +49,8 @@ public class EngineSyncRunner implements Runnable {
 
     private final Long syncEngineStatusInterval;
 
+    private final EngineType engineType;
+
     public EngineSyncRunner(String modelName,
                             Map<String, WorkerStatus> workerStatusMap,
                             WorkerAddressService workerAddressService,
@@ -55,7 +61,8 @@ public class EngineSyncRunner implements Runnable {
                             CacheAwareService localKvCacheAwareManager,
                             long syncRequestTimeoutMs,
                             LongAdder syncCount,
-                            Long syncEngineStatusInterval) {
+                            Long syncEngineStatusInterval,
+                            EngineType engineType) {
 
         this.modelName = modelName;
         this.workerAddressService = workerAddressService;
@@ -68,6 +75,7 @@ public class EngineSyncRunner implements Runnable {
         this.syncRequestTimeoutMs = syncRequestTimeoutMs;
         this.syncCount = syncCount;
         this.syncEngineStatusInterval = syncEngineStatusInterval;
+        this.engineType = engineType;
     }
 
     @Override
@@ -78,123 +86,207 @@ public class EngineSyncRunner implements Runnable {
             List<WorkerHost> latestEngineWorkerList = workerAddressService.getEngineWorkerList(modelName, roleType);
             logger.info("workerAddressService getEngineWorkerList, model: {}, role: {}, size: {}", modelName, roleType, latestEngineWorkerList.size());
             engineHealthReporter.reportServiceDiscoveryResult(modelName, latestEngineWorkerList.size(), roleType.toString());
+            Set<String> latestValidIpPorts = latestEngineWorkerList.stream()
+                    .map(WorkerHost::getIpPort)
+                    .collect(Collectors.toSet());
+            // Discovery presence is the only liveness signal for embedding engines (no gRPC
+            // probe), so a worker missing from the list stops being routable immediately. This
+            // runs before the empty-list short-circuit below: an empty list is exactly the case
+            // where every previously-alive embedding worker has to be marked dead. The contract
+            // holds because getEngineWorkerList throws on discovery failure, so an empty list
+            // here always means a genuinely empty fleet.
+            if (engineType == EngineType.EMBEDDING) {
+                markDeadFromDiscovery(latestValidIpPorts);
+            }
+            // Reconcile stale workers before the empty short-circuit, so a genuinely empty fleet
+            // still drops its gone-past-threshold workers (discovery failure throws and is handled
+            // separately, so an empty list here always means an empty fleet).
+            removeStaleWorkers(latestValidIpPorts);
             if (CollectionUtils.isEmpty(latestEngineWorkerList)) {
                 logger.error("get engine worker list is empty, cost={}μs, model={}", System.nanoTime() / 1000 - startTimeInUs, modelName);
                 return;
             }
-            Map<String/*ip*/, WorkerStatus> cachedWorkerStatuses = workerStatusMap;
-            // Log if latest worker count differs from cached worker count
-            if (cachedWorkerStatuses.size() != latestEngineWorkerList.size()) {
+            if (workerStatusMap.size() != latestEngineWorkerList.size()) {
                 logger.info("[update] engine ip changes, model={}, role={}, before={}, after={}",
-                        modelName, roleType, cachedWorkerStatuses.size(), latestEngineWorkerList.size());
-            }
-
-            // Remove if not in latest engine list
-            Set<String> latestValidIpPorts = latestEngineWorkerList.stream()
-                    .map(WorkerHost::getIpPort)
-                    .collect(Collectors.toSet());
-            logger.info("Current cached worker size: {}, latest worker list size: {}", cachedWorkerStatuses.size(), latestEngineWorkerList.size());
-            for (Map.Entry<String, WorkerStatus> entry: cachedWorkerStatuses.entrySet()) {
-                WorkerStatus workerStatus = entry.getValue();
-                String ipPort = entry.getKey();
-                if (!latestValidIpPorts.contains(ipPort)) {
-                    long lastTime = workerStatus.getStatusLastUpdateTime().get();
-                    long actualIntervalUs = workerStatus.getStatusUpdateIntervalUs().get();
-                    // Use max(3 * actual sync interval, 1s) as removal threshold to tolerate transient service discovery flaps
-                    long removalThresholdUs = Math.max(3 * actualIntervalUs, 1_000_000L);
-                    if (System.nanoTime() / 1000 - lastTime > removalThresholdUs) {
-                        cachedWorkerStatuses.remove(ipPort);
-                        logger.info("[remove] engine ip changes, model={}, role={}, ipPort={}", modelName, roleType, ipPort);
-                    }
-                }
-            }
-            if (latestEngineWorkerList.isEmpty()) {
-                logger.warn("latestEngineWorkerList is empty, role: {}", roleType);
-                return;
-            } else {
-                logger.info("latestEngineWorkerList for role: {}, workers:{}", roleType, latestEngineWorkerList.size());
+                        modelName, roleType, workerStatusMap.size(), latestEngineWorkerList.size());
             }
 
             logger.info("Submitting status check tasks for {} workers", latestEngineWorkerList.size());
             for (WorkerHost host : latestEngineWorkerList) {
-                String workerIpPort = host.getIpPort();
-                String site = host.getSite();
-
-                WorkerStatus workerStatus = getOrCreateWorkerStatus(cachedWorkerStatuses, workerIpPort);
-
-                if (workerStatus.getStatusCheckInProgress().compareAndSet(false, true)) {
-                    logger.debug("Submitting GrpcWorkerStatusRunner for worker: {}, site: {}", workerIpPort, site);
-                    GrpcWorkerStatusRunner grpcWorkerStatusRunner
-                            = new GrpcWorkerStatusRunner(modelName, workerIpPort, site, roleType, host.getGroup(),
-                            workerStatus, engineHealthReporter, engineGrpcService,
-                            syncRequestTimeoutMs);
-                    statusCheckExecutor.submit(grpcWorkerStatusRunner);
-                } else {
-                    logger.info("Skip status check for worker: {}, previous request in progress", workerIpPort);
-                }
-
-                if (workerStatus.getCacheCheckInProgress().compareAndSet(false, true)) {
-                    logger.debug("Submitting GrpcCacheStatusCheckRunner for worker: {}, site: {}", workerIpPort, site);
-                    GrpcCacheStatusCheckRunner grpcCacheStatusCheckRunner
-                            = new GrpcCacheStatusCheckRunner(modelName, workerIpPort, site, roleType,
-                            workerStatus, engineHealthReporter, engineGrpcService, localKvCacheAwareManager,
-                            syncRequestTimeoutMs, syncCount, syncEngineStatusInterval);
-                    statusCheckExecutor.submit(grpcCacheStatusCheckRunner);
-                } else {
-                    logger.info("Skip cache check for worker: {}, previous request in progress", workerIpPort);
+                try {
+                    submitStatusChecks(host);
+                } catch (Exception e) {
+                    logger.error("skip worker with submit failure, model={}, role={}, ipPort={}, error:{}",
+                            modelName, roleType, host.getIpPort(), e.getMessage());
                 }
             }
             logger.info("Finished submitting status check tasks for model: {}, role: {}, worker count: {}", modelName,
                     roleType, latestEngineWorkerList.size());
 
+        } catch (ServiceDiscoveryException e) {
+            // Already reported by WorkerAddressService; skip the round and keep the previous worker
+            // state until discovery recovers. A failed round can neither enumerate nor probe
+            // workers, so refresh the staleness clock of the ones already known — otherwise the
+            // independent ExpirationCleaner (and the stale-worker sweep above) would evict a healthy
+            // fleet within one worker-timeout window just because discovery briefly hiccuped. Aging
+            // resumes from the next successful round.
+            long nowUs = System.nanoTime() / 1000;
+            for (WorkerStatus workerStatus : workerStatusMap.values()) {
+                workerStatus.getStatusLastUpdateTime().set(nowUs);
+            }
+            logger.error("service discovery failed, keeping previous worker state, model={}, role={}, error:{}",
+                    modelName, roleType, e.getMessage());
         } catch (Exception e) {
             logger.error("sync engine workers status exception, modelName:{}, error:{}", modelName, e.getMessage(), e);
             engineHealthReporter.reportStatusCheckerFail(modelName, BalanceStatusEnum.UNKNOWN_ERROR, null, null);
         } finally {
-            logger.debug("Entering finally block for model: {}", modelName);
-            int size = workerStatusMap.size();
-            logger.debug("Worker status map size: {}", size);
+            reportLatencyVariance();
+        }
+    }
 
-            if (size >= 2) {
-                double sumStepLatency = 0.0;
-                double sumRunningQueryTime = 0.0;
-                for (WorkerStatus workerStatus : workerStatusMap.values()) {
-                    sumStepLatency += workerStatus.getStepLatencyMs();
-                    sumRunningQueryTime += workerStatus.getRunningQueueTime().get();
-                }
-                double meanStepLatency = sumStepLatency / size;
-                double meanRunningQueryLen = sumRunningQueryTime / size;
-
-                // Calculate variance (sample variance using Bessel correction)
-                double sumStepLatencyOfSquaredDiffs = 0.0;
-                double sumRunningQueryLenOfSquaredDiffs = 0.0;
-                for (WorkerStatus workerStatus : workerStatusMap.values()) {
-                    double diff = workerStatus.getStepLatencyMs() - meanStepLatency;
-                    double diff2 = workerStatus.getRunningQueueTime().get() - meanRunningQueryLen;
-                    sumStepLatencyOfSquaredDiffs += diff * diff;
-                    sumRunningQueryLenOfSquaredDiffs += diff2 * diff2;
-                }
-                double variance = sumStepLatencyOfSquaredDiffs / (size - 1); // Sample variance
-                double variance2 = sumRunningQueryLenOfSquaredDiffs / (size - 1);
-
-                engineHealthReporter.reportLatencyMetric(modelName, this.roleType.toString(), variance, variance2);
-                logger.info("EngineSyncRunner finished for model: {}, role: {}", modelName, roleType);
-            } else {
-                logger.debug("Less than 2 workers, skipping variance calculation for model: {}", modelName);
+    /**
+     * Mark workers that vanished from the latest discovery list as not-routable. For embedding
+     * engines discovery presence is the only liveness signal, so this is how a dropped worker
+     * stops receiving traffic; physical removal is handled separately by {@link #removeStaleWorkers}.
+     */
+    private void markDeadFromDiscovery(Set<String> latestValidIpPorts) {
+        for (Map.Entry<String, WorkerStatus> entry : workerStatusMap.entrySet()) {
+            if (!latestValidIpPorts.contains(entry.getKey()) && entry.getValue().isAlive()) {
+                entry.getValue().setAlive(false);
+                logger.info("[dead] embedding worker dropped by discovery, model={}, role={}, ipPort={}",
+                        modelName, roleType, entry.getKey());
             }
         }
     }
 
+    /**
+     * Drop workers no longer in the discovery list once they have been gone past the removal
+     * threshold (max(3 * actual sync interval, 1s)), tolerating transient discovery flaps.
+     */
+    private void removeStaleWorkers(Set<String> latestValidIpPorts) {
+        for (Map.Entry<String, WorkerStatus> entry : workerStatusMap.entrySet()) {
+            String ipPort = entry.getKey();
+            if (latestValidIpPorts.contains(ipPort)) {
+                continue;
+            }
+            WorkerStatus workerStatus = entry.getValue();
+            long lastTime = workerStatus.getStatusLastUpdateTime().get();
+            long actualIntervalUs = workerStatus.getStatusUpdateIntervalUs().get();
+            long removalThresholdUs = Math.max(3 * actualIntervalUs, 1_000_000L);
+            if (System.nanoTime() / 1000 - lastTime > removalThresholdUs) {
+                workerStatusMap.remove(ipPort);
+                logger.info("[remove] engine ip changes, model={}, role={}, ipPort={}", modelName, roleType, ipPort);
+            }
+        }
+    }
+
+    private void submitStatusChecks(WorkerHost host) {
+        String workerIpPort = host.getIpPort();
+        String site = host.getSite();
+        WorkerStatus workerStatus = getOrCreateWorkerStatus(workerStatusMap, workerIpPort);
+
+        if (engineType == EngineType.EMBEDDING) {
+            markAliveFromDiscovery(workerStatus, host);
+            return;
+        }
+
+        if (workerStatus.getStatusCheckInProgress().compareAndSet(false, true)) {
+            logger.debug("Submitting GrpcWorkerStatusRunner for worker: {}, site: {}", workerIpPort, site);
+            GrpcWorkerStatusRunner grpcWorkerStatusRunner
+                    = new GrpcWorkerStatusRunner(modelName, workerIpPort, site, roleType, host.getGroup(),
+                    workerStatus, engineHealthReporter, engineGrpcService,
+                    syncRequestTimeoutMs);
+            submitOrReset(grpcWorkerStatusRunner, workerStatus.getStatusCheckInProgress(), workerIpPort, "status");
+        } else {
+            logger.info("Skip status check for worker: {}, previous request in progress", workerIpPort);
+        }
+
+        if (workerStatus.getCacheCheckInProgress().compareAndSet(false, true)) {
+            logger.debug("Submitting GrpcCacheStatusCheckRunner for worker: {}, site: {}", workerIpPort, site);
+            GrpcCacheStatusCheckRunner grpcCacheStatusCheckRunner
+                    = new GrpcCacheStatusCheckRunner(modelName, workerIpPort, site, roleType,
+                    workerStatus, engineHealthReporter, engineGrpcService, localKvCacheAwareManager,
+                    syncRequestTimeoutMs, syncCount, syncEngineStatusInterval);
+            submitOrReset(grpcCacheStatusCheckRunner, workerStatus.getCacheCheckInProgress(), workerIpPort, "cache");
+        } else {
+            logger.info("Skip cache check for worker: {}, previous request in progress", workerIpPort);
+        }
+    }
+
+    /**
+     * Submits a probe and, if the bounded executor rejects it (queue full or shutting down),
+     * resets the in-progress flag the runner would have cleared on completion. Without this the
+     * flag stays set forever and the worker is never probed again.
+     */
+    private void submitOrReset(Runnable runner, AtomicBoolean inProgress, String workerIpPort, String kind) {
+        try {
+            statusCheckExecutor.submit(runner);
+        } catch (RejectedExecutionException e) {
+            inProgress.set(false);
+            logger.warn("status executor rejected {} check for worker: {}, skipping this round", kind, workerIpPort);
+        }
+    }
+
+    private void reportLatencyVariance() {
+        int size = workerStatusMap.size();
+        if (size < 2 || engineType == EngineType.EMBEDDING) {
+            logger.debug("Less than 2 workers, skipping variance calculation for model: {}", modelName);
+            return;
+        }
+        double sumStepLatency = 0.0;
+        double sumRunningQueryTime = 0.0;
+        for (WorkerStatus workerStatus : workerStatusMap.values()) {
+            sumStepLatency += workerStatus.getStepLatencyMs();
+            sumRunningQueryTime += workerStatus.getRunningQueueTime().get();
+        }
+        double meanStepLatency = sumStepLatency / size;
+        double meanRunningQueryLen = sumRunningQueryTime / size;
+
+        // Sample variance (Bessel correction)
+        double sumStepLatencyOfSquaredDiffs = 0.0;
+        double sumRunningQueryLenOfSquaredDiffs = 0.0;
+        for (WorkerStatus workerStatus : workerStatusMap.values()) {
+            double diff = workerStatus.getStepLatencyMs() - meanStepLatency;
+            double diff2 = workerStatus.getRunningQueueTime().get() - meanRunningQueryLen;
+            sumStepLatencyOfSquaredDiffs += diff * diff;
+            sumRunningQueryLenOfSquaredDiffs += diff2 * diff2;
+        }
+        double variance = sumStepLatencyOfSquaredDiffs / (size - 1);
+        double variance2 = sumRunningQueryLenOfSquaredDiffs / (size - 1);
+
+        engineHealthReporter.reportLatencyMetric(modelName, this.roleType.toString(), variance, variance2);
+        logger.info("EngineSyncRunner finished for model: {}, role: {}", modelName, roleType);
+    }
+
+    /**
+     * EMBEDDING engines expose no {@code GetWorkerStatus}, so the host appearing in the
+     * service-discovery list is the liveness signal: register it alive without probing.
+     * Engine-level liveness degrades to the discovery service's own health check; no load
+     * metrics are collected (callers are limited to load-unaware strategies, enforced at
+     * boot). Refreshing statusLastUpdateTime keeps the stale-worker removal above working
+     * unchanged when discovery drops a host.
+     */
+    private void markAliveFromDiscovery(WorkerStatus workerStatus, WorkerHost host) {
+        workerStatus.setSite(host.getSite());
+        workerStatus.setGroup(host.getGroup());
+        workerStatus.setRole(roleType.getCode());
+        workerStatus.setAlive(true);
+        long nowUs = System.nanoTime() / 1000;
+        long prevUpdateTime = workerStatus.getStatusLastUpdateTime().get();
+        if (prevUpdateTime > 0) {
+            workerStatus.getStatusUpdateIntervalUs().set(nowUs - prevUpdateTime);
+        }
+        workerStatus.getStatusLastUpdateTime().set(nowUs);
+    }
+
     private WorkerStatus getOrCreateWorkerStatus(Map<String, WorkerStatus> workerStatuses, String workerIpPort) {
-        WorkerStatus workerStatus = workerStatuses.get(workerIpPort);
-        if (workerStatus == null) {
-            workerStatus = new WorkerStatus();
-            String[] split = workerIpPort.split(":");
+        return workerStatuses.computeIfAbsent(workerIpPort, key -> {
+            WorkerStatus workerStatus = new WorkerStatus();
+            String[] split = key.split(":");
             workerStatus.setIp(split[0]);
             workerStatus.setPort(Integer.parseInt(split[1]));
-            workerStatuses.put(workerIpPort, workerStatus);
-            logger.info("Created new WorkerStatus for worker: {}", workerIpPort);
-        }
-        return workerStatus;
+            logger.info("Created new WorkerStatus for worker: {}", key);
+            return workerStatus;
+        });
     }
 }
