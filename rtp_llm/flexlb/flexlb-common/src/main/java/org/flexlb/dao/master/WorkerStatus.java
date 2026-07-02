@@ -65,7 +65,11 @@ public class WorkerStatus {
         this.dpRank = resp.getDpRank();
         this.availableKvCacheTokens.set(resp.getAvailableKvCacheTokens());
         this.totalKvCacheTokens.set(resp.getTotalKvCacheTokens());
-        this.cacheStatus = resp.getCacheStatus();
+        // GetWorkerStatus response does not include cache status; preserve the one
+        // set by GrpcCacheStatusCheckRunner to avoid nullifying it on every status sync.
+        if (resp.getCacheStatus() != null) {
+            this.cacheStatus = resp.getCacheStatus();
+        }
         this.runningTaskList = resp.getRunningTaskInfo();
         this.statusVersion.set(resp.getStatusVersion());
         this.latestFinishedTaskVersion.set(resp.getLatestFinishedVersion());
