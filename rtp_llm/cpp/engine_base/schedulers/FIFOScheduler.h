@@ -52,16 +52,31 @@ public:
 
 private:
     int64_t lastScheduleTime() override;
-    bool evaluateRunningMemory(const std::list<GenerateStreamPtr>& streams, const GenerateStreamPtr& new_stream) const;
+    bool evaluateRunningMemory(const std::list<GenerateStreamPtr>& streams,
+                               const GenerateStreamPtr&            new_stream,
+                               bool                                has_running_prefill,
+                               bool                                has_running_decode) const;
     void accountBatchMetrics(const GenerateStreamPtr& new_stream);
     bool waitPredicate();
     void addStreamToNewState(const GenerateStreamPtr& stream, StreamState new_state);
-    void evaluateWaitingStreams(std::list<GenerateStreamPtr>& streams);
+    void evaluateWaitingStreams(std::list<GenerateStreamPtr>& streams,
+                               bool                          has_running_prefill,
+                               bool                          has_running_decode);
     void cancelStreams(std::list<GenerateStreamPtr>& streams);
     bool checkInputLength(const GenerateStreamPtr& stream);
+    bool hasRunningPrefill() const;
+    bool hasRunningDecode() const;
+    bool hasAvailableKVForPrefill(const std::list<GenerateStreamPtr>& streams,
+                                  const GenerateStreamPtr&            new_stream) const;
+    struct StreamLifetime {
+        int seq_len;
+        int remaining_tokens;
+    };
+    static size_t computePeakKVTokens(std::vector<StreamLifetime>& lifetimes);
+    std::list<GenerateStreamPtr> selectRunnableStreams() const;
 
 protected:
-    void evaluateAndUpdateStreams(std::list<GenerateStreamPtr>& streams);
+    void evaluateAndUpdateStreams(std::list<GenerateStreamPtr>& streams, bool skip_decode_streams = false);
 
 protected:
     PDSepConfig                     pd_sep_config_;
@@ -72,9 +87,9 @@ protected:
     std::list<GenerateStreamPtr>    new_streams_;
     std::shared_ptr<KVCacheManager> cache_manager_;
     std::atomic<int64_t>            last_schedule_time_      = autil::TimeUtility::currentTimeInMilliSeconds();
-    size_t                          max_seq_len_             = 0;
-    size_t                          max_batch_tokens_size_   = 0;
-    size_t                          max_generate_batch_size_ = 1;
+    size_t                          max_seq_len_                     = 0;
+    size_t                          max_batch_tokens_size_           = 0;
+    size_t                          max_generate_batch_size_         = 1;
     const bool                      need_fill_fake_stream_   = false;
     std::atomic<bool>               stop_                    = false;
     bool                            schedule_trigger_        = false;

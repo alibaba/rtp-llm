@@ -62,6 +62,13 @@ public:
                               int                            reserve_step) const override {
         return 0;
     }
+    int estimatePeakNeedBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
+                               int                            seq_len,
+                               int                            remaining_tokens,
+                               int                            reserve_step,
+                               bool                           enable_reuse_cache) const override {
+        return 0;
+    }
     int getNeedBlocks(const MallocInfo& malloc_info) const override {
         return 0;
     }

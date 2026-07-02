@@ -15,12 +15,13 @@ class EngineServer:
         self._remaining_args = remaining_args
         self._server: Optional[MagaServerManager] = None
 
-    def start(self, max_seq_len: int, max_concurrency: int) -> None:
+    def start(
+        self, max_seq_len: int, max_concurrency: int, server_start_timeout: int = 1600
+    ) -> None:
         """Assemble CLI args and start MagaServerManager."""
         engine_cli = self._build_engine_cli(max_seq_len, max_concurrency)
 
         env: Dict[str, str] = {
-            "USE_BATCH_DECODE_SCHEDULER": "1",
             "FAKE_BALANCE_EXPERT": "1",
             "BATCH_DECODE_SCHEDULER_WARMUP_TYPE": (
                 "0" if self._args.partial in (0, 1) else "1"
@@ -35,7 +36,7 @@ class EngineServer:
             process_file_name="process.log",
             smoke_args_str=engine_cli,
         )
-        if not self._server.start_server():
+        if not self._server.start_server(timeout=server_start_timeout):
             self._server.print_process_log()
             raise RuntimeError(
                 "Engine server failed to start. Check process.log above for details."

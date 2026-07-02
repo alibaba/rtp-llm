@@ -46,6 +46,11 @@ public:
     virtual int              singleBatchNeedBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
                                                    int                            seq_len,
                                                    int                            reserve_step) const                 = 0;
+    virtual int              estimatePeakNeedBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
+                                                    int                            seq_len,
+                                                    int                            remaining_tokens,
+                                                    int                            reserve_step,
+                                                    bool                           enable_reuse_cache = false) const  = 0;
 
     MallocResult malloc(const MallocInfo& malloc_info);
     void         blockCopy(int src_block_index, int dest_block_index);

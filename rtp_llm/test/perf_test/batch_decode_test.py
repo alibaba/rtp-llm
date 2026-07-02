@@ -15,6 +15,7 @@ from typing import Any, Dict, List, Optional
 from rtp_llm.test.perf_test.dataclass import PerfTestConfig
 from rtp_llm.test.perf_test.distribution_runner import DistributionRunner
 from rtp_llm.test.perf_test.grid_runner import GridRunner
+from rtp_llm.test.perf_test.dataset import extract_arg
 from rtp_llm.test.perf_test.perf_config import (
     parse_args,
     prepare_config,
@@ -165,6 +166,9 @@ def main() -> str:
 
     args, remaining = parse_args()
     remaining = resolve_perf_engine_paths(remaining)
+    # batch_decode_test always needs BatchDecodeScheduler
+    if extract_arg(remaining, "use_batch_decode_scheduler") is None:
+        remaining.extend(["--use_batch_decode_scheduler", "1"])
     generate_config = json.loads(args.generate_config)
     os.makedirs(args.result_dir, exist_ok=True)
     EngineServer.propagate_engine_env(remaining)

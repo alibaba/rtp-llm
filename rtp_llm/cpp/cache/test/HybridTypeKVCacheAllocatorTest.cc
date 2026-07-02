@@ -705,6 +705,58 @@ TEST_F(HybridTypeKVCacheAllocatorTest, DecodeIncrMallocAppliesSparseCleanupOnLin
     }
 }
 
+TEST_F(HybridTypeKVCacheAllocatorTest, EstimatePeakNeedBlocks) {
+    // Config: [0,1]=linear group (gid=0), [2,3]=full group (gid=1). seq_size_per_block=4.
+    auto config    = makeTinyHybridConfig();
+    auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
+    ASSERT_TRUE(allocator->init());
+
+    const int group_nums = 2;
+    const int blk = config.seq_size_per_block;  // 4
+
+    // New resource (cur_slots=0 for both groups):
+    // reuse disabled: full=ceil(108/4)=27, linear tail=2 => total=29.
+    auto new_res = makeBatchResource(1, group_nums, config.layer_num, config.layer_to_group_id, {});
+    EXPECT_EQ(allocator->estimatePeakNeedBlocks(new_res, 8, 100, 0, /*enable_reuse_cache=*/false), 29);
+
+    // reuse enabled: linear additionally keeps step-hit slots before the tail window.
+    // total_slots=27, tail=2, step-hits before tail=25/2=12 => linear=14.
+    EXPECT_EQ(allocator->estimatePeakNeedBlocks(new_res, 8, 100, 0, /*enable_reuse_cache=*/true), 41);
+
+    // With reserve_step=3: full=ceil(111/4)=28. linear: total_slots=29, tail=5,
+    // step-hits before tail=24/2=12 => linear=17. total=45.
+    EXPECT_EQ(allocator->estimatePeakNeedBlocks(new_res, 8, 100, 3, /*enable_reuse_cache=*/true), 45);
+
+    // Allocate blocks to simulate running decode (seqLen=8 → 2 slots per group)
+    auto token_ids = makeCompleteTokenIds(1, /*seq_length=*/8, config.seq_size_per_block);
+    MallocInfo mi{new_res, token_ids};
+    auto result = allocator->malloc(mi);
+    ASSERT_TRUE(result.success);
+
+    const int full_slots   = new_res->blocksNum(0, 1);   // full group slots after malloc
+    const int linear_slots = new_res->blocksNum(0, 0);   // linear group slots after malloc
+
+    // remaining=0: no more slots needed for either group
+    EXPECT_EQ(allocator->estimatePeakNeedBlocks(new_res, 8, 0, 0), 0);
+
+    // remaining=4: ceil((8+4)/4)=3 per group, minus cur_slots
+    int expect_per_group = (8 + 4 + blk - 1) / blk;
+    EXPECT_EQ(allocator->estimatePeakNeedBlocks(new_res, 8, 4, 0),
+              std::max(expect_per_group - full_slots, 0) + std::max(expect_per_group - linear_slots, 0));
+
+    // Large remaining from current_slots=2:
+    // reuse disabled: target linear tail keeps 2 blocks; current linear tail already keeps 2.
+    int expect_full_large = (8 + 100 + blk - 1) / blk;  // 27
+    EXPECT_EQ(allocator->estimatePeakNeedBlocks(new_res, 8, 100, 0, /*enable_reuse_cache=*/false),
+              std::max(expect_full_large - full_slots, 0));
+
+    // reuse enabled: target linear keeps tail 2 + step-hit slots before tail 12;
+    // current linear keeps tail 2, so additional linear blocks = 12.
+    int expect_linear_large = 12;
+    EXPECT_EQ(allocator->estimatePeakNeedBlocks(new_res, 8, 100, 0, /*enable_reuse_cache=*/true),
+              std::max(expect_full_large - full_slots, 0) + expect_linear_large);
+}
+
 }  // namespace test
 }  // namespace rtp_llm
 

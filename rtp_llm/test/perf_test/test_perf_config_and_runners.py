@@ -8,6 +8,7 @@ Tests:
 """
 
 import argparse
+import asyncio
 import sys
 import unittest
 from unittest.mock import MagicMock, patch
@@ -363,6 +364,237 @@ class TestTpsBsCandidates(unittest.TestCase):
     def test_max_bs_4(self):
         candidates = TpsBinarySearchRunner._make_bs_candidates(4)
         self.assertEqual(candidates, [1, 4])
+
+
+class TestOfflineBenchConfig(unittest.TestCase):
+    """Lightweight tests for OfflineBenchConfig.validate."""
+
+    def test_validate_ok(self):
+        from rtp_llm.test.perf_test.offline_runner import OfflineBenchConfig
+        config = OfflineBenchConfig(input_len_min=128, input_len_max=512,
+                                    output_len_min=32, output_len_max=128)
+        config.validate()
+
+    def test_validate_input_len_inverted(self):
+        from rtp_llm.test.perf_test.offline_runner import OfflineBenchConfig
+        config = OfflineBenchConfig(input_len_min=512, input_len_max=128)
+        with self.assertRaises(ValueError):
+            config.validate()
+
+    def test_validate_output_len_zero(self):
+        from rtp_llm.test.perf_test.offline_runner import OfflineBenchConfig
+        config = OfflineBenchConfig(output_len_min=0)
+        with self.assertRaises(ValueError):
+            config.validate()
+
+    def test_validate_prefix_len_exceeds_input(self):
+        from rtp_llm.test.perf_test.offline_runner import OfflineBenchConfig
+        config = OfflineBenchConfig(input_len_min=64, prefix_len=128)
+        with self.assertRaises(ValueError):
+            config.validate()
+
+
+class TestWorkloadGenerator(unittest.TestCase):
+    """Test WorkloadGenerator prompt generation with a fake tokenizer."""
+
+    def _make_fake_tokenizer(self):
+        tok = MagicMock()
+        tok.encode = lambda text: list(range(len(text.split())))
+        tok.decode = lambda ids: " ".join(str(i) for i in ids)
+        return tok
+
+    def test_basic_generation(self):
+        from rtp_llm.test.perf_test.offline_runner import OfflineBenchConfig, WorkloadGenerator
+        config = OfflineBenchConfig(input_len_min=4, input_len_max=8,
+                                    output_len_min=2, output_len_max=4, prefix_len=0)
+        gen = WorkloadGenerator(config, self._make_fake_tokenizer(), seed=0)
+        prompt, out_len = gen.next()
+        self.assertIsInstance(prompt, str)
+        self.assertGreaterEqual(out_len, 2)
+        self.assertLessEqual(out_len, 4)
+
+    def test_prefix_groups_have_different_prefixes(self):
+        from rtp_llm.test.perf_test.offline_runner import OfflineBenchConfig, WorkloadGenerator
+        config = OfflineBenchConfig(input_len_min=16, input_len_max=32,
+                                    output_len_min=2, output_len_max=4,
+                                    prefix_groups=3, prefix_len=4)
+        gen = WorkloadGenerator(config, self._make_fake_tokenizer(), seed=0)
+        prefixes = [g.prefix_text for g in gen._groups]
+        self.assertEqual(len(prefixes), 3)
+        self.assertEqual(len(set(prefixes)), 3)
+
+    def test_prefix_groups_wrap_short_token_buffer(self):
+        from rtp_llm.test.perf_test.offline_runner import OfflineBenchConfig, WorkloadGenerator
+
+        tok = MagicMock()
+        tok.encode = lambda text: [0, 1, 2]
+        tok.decode = lambda ids: " ".join(str(i) for i in ids)
+        config = OfflineBenchConfig(input_len_min=5, input_len_max=8,
+                                    output_len_min=1, output_len_max=1,
+                                    prefix_groups=4, prefix_len=5)
+        gen = WorkloadGenerator(config, tok, seed=0)
+
+        prefixes = [g.prefix_text.split() for g in gen._groups]
+        self.assertEqual([len(p) for p in prefixes], [5, 5, 5, 5])
+
+    def test_long_prompt_generation_does_not_resize_token_buffer(self):
+        from rtp_llm.test.perf_test.offline_runner import OfflineBenchConfig, WorkloadGenerator
+
+        tok = MagicMock()
+        tok.encode = lambda text: [0, 1, 2]
+        tok.decode = lambda ids: " ".join(str(i) for i in ids)
+        config = OfflineBenchConfig(input_len_min=20, input_len_max=20,
+                                    output_len_min=1, output_len_max=1)
+        gen = WorkloadGenerator(config, tok, seed=0)
+        initial_len = len(gen._big_tokens)
+
+        for _ in range(5):
+            prompt, output_len = gen.next()
+            self.assertEqual(output_len, 1)
+            self.assertTrue(prompt)
+            self.assertEqual(len(gen._big_tokens), initial_len)
+
+
+class TestOfflineAnalyze(unittest.TestCase):
+    """Test OfflineRunner._analyze with synthetic records."""
+
+    def test_analyze_basic(self):
+        from rtp_llm.test.perf_test.offline_runner import OfflineBenchConfig, OfflineRunner, _RequestRecord
+        config = OfflineBenchConfig(input_len_min=4, input_len_max=8,
+                                    output_len_min=2, output_len_max=4)
+        runner = OfflineRunner.__new__(OfflineRunner)
+        runner._config = config
+        runner._result_dir = "/tmp"
+        runner._status_samples = []
+
+        records = [
+            _RequestRecord(
+                submit_time=0.0, finish_time=1.0,
+                response={
+                    "aux_info": [{
+                        "input_len": 100, "output_len": 50,
+                        "cost_time": 500.0, "wait_time": 10.0,
+                        "first_token_cost_time": 100.0,
+                    }]
+                },
+            ),
+            _RequestRecord(
+                submit_time=0.5, finish_time=1.5,
+                response={
+                    "aux_info": [{
+                        "input_len": 200, "output_len": 80,
+                        "cost_time": 800.0, "wait_time": 20.0,
+                        "first_token_cost_time": 150.0,
+                    }]
+                },
+            ),
+        ]
+
+        metrics = runner._analyze(records, wall_time=2.0, engine_status={},
+                                  submitted_count=2, cancelled_count=0)
+        self.assertEqual(metrics.success_requests, 2)
+        self.assertEqual(metrics.fail_requests, 0)
+        self.assertAlmostEqual(metrics.output_tps, (50 + 80) / 2.0)
+        self.assertAlmostEqual(metrics.input_tps, (100 + 200) / 2.0)
+
+    def test_analyze_with_failures(self):
+        from rtp_llm.test.perf_test.offline_runner import OfflineBenchConfig, OfflineRunner, _RequestRecord
+        config = OfflineBenchConfig()
+        runner = OfflineRunner.__new__(OfflineRunner)
+        runner._config = config
+        runner._result_dir = "/tmp"
+        runner._status_samples = []
+
+        records = [
+            _RequestRecord(submit_time=0.0, finish_time=1.0,
+                          response={"error_code": "MALLOC_FAILED", "message": "OOM"}),
+        ]
+        metrics = runner._analyze(records, wall_time=1.0, engine_status={},
+                                  submitted_count=1, cancelled_count=0)
+        self.assertEqual(metrics.success_requests, 0)
+        self.assertEqual(metrics.fail_requests, 1)
+
+    def test_dispatch_drains_only_inflight_fast_tasks(self):
+        from rtp_llm.test.perf_test.offline_runner import OfflineBenchConfig, OfflineRunner
+        import rtp_llm.test.perf_test.offline_runner as offline_runner
+
+        class FakeClientSession:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+        class FakeGenerator:
+            def __init__(self):
+                self.count = 0
+
+            def next(self):
+                self.count += 1
+                return "prompt", 1
+
+        async def run_dispatch():
+            config = OfflineBenchConfig(input_len_min=1, input_len_max=1,
+                                        output_len_min=1, output_len_max=1)
+            runner = OfflineRunner.__new__(OfflineRunner)
+            runner._config = config
+            runner._port = 0
+            runner._profile = False
+            runner._profile_steps = 1
+            runner._status_samples = []
+            runner._status_sample_errors = 0
+
+            async def fake_status_sampler(*args, **kwargs):
+                try:
+                    while True:
+                        await asyncio.sleep(3600)
+                except asyncio.CancelledError:
+                    raise
+
+            async def fake_send_one(session, prompt, output_len):
+                await asyncio.sleep(0)
+                return {"aux_info": [{"input_len": 1, "output_len": output_len}]}
+
+            runner._status_sampler = fake_status_sampler
+            runner._send_one = fake_send_one
+
+            with patch.object(offline_runner.aiohttp, "ClientSession", FakeClientSession):
+                return await runner._dispatch(FakeGenerator(), concurrency_limit=2,
+                                              duration_s=0.01, drain_timeout_s=1)
+
+        loop = asyncio.new_event_loop()
+        try:
+            records, cancelled_count, submitted_count = loop.run_until_complete(run_dispatch())
+        finally:
+            loop.close()
+        self.assertEqual(cancelled_count, 0)
+        self.assertEqual(len(records), submitted_count)
+        self.assertGreater(submitted_count, 2)
+
+
+class TestParseOfflineArgs(unittest.TestCase):
+    """Test parse_offline_args from offline_bench_test."""
+
+    def test_default_args(self):
+        from rtp_llm.test.perf_test.offline_bench_test import parse_offline_args
+        with patch("sys.argv", ["prog", "--checkpoint_path", "/tmp/model"]):
+            args, remaining = parse_offline_args()
+            self.assertEqual(args.checkpoint_path, "/tmp/model")
+            self.assertEqual(args.input_len_min, 512)
+            self.assertEqual(args.server_start_timeout, 1600)
+
+    def test_custom_args(self):
+        from rtp_llm.test.perf_test.offline_bench_test import parse_offline_args
+        with patch("sys.argv", ["prog", "--checkpoint_path", "/tmp/m",
+                                "--input_len_min", "1024", "--duration", "60",
+                                "--server_start_timeout", "3600"]):
+            args, remaining = parse_offline_args()
+            self.assertEqual(args.input_len_min, 1024)
+            self.assertEqual(args.duration, 60)
+            self.assertEqual(args.server_start_timeout, 3600)
 
 
 if __name__ == "__main__":
