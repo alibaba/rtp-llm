@@ -394,7 +394,7 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
     }
 
     if (!isTpRank0() || warm_up_ || streams.size() == 0 || model_input.is_fake_stream) {
-        cudaSyncAndCheck();
+        cudaCurrentStreamSyncAndCheck();
         model_->releaseBuffers();
         draft_model_->releaseBuffers();
         return absl::OkStatus();
@@ -538,8 +538,12 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
             if (!tensors_holder.empty()) {
                 auto const& propose_probs       = tensors_holder[0];
                 auto const& propose_hidden      = tensors_holder[1];
+                auto const  hidden_target_dtype = dataTypeToTorchType(data_type_);
                 sp_output_buffer->all_probs     = propose_probs.to(torch::kCUDA).clone();
-                sp_output_buffer->hidden_states = propose_hidden.to(torch::kCUDA).clone();
+                // P2P / PD side-channel payloads may carry propose_hidden as FP32.
+                // Normalize it to the draft model dtype before feeding MTP draft decode.
+                sp_output_buffer->hidden_states =
+                    propose_hidden.to(torch::TensorOptions().device(torch::kCUDA).dtype(hidden_target_dtype)).clone();
             }
         }
     }
@@ -643,7 +647,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
             auto accept_tokens                       = torch::zeros({1, 1}, torch::kInt32);
             speculative_sampler_output.accept_len    = {1};
             speculative_sampler_output.accept_tokens = {std::move(accept_tokens)};
-            cudaSyncAndCheck();
+            cudaCurrentStreamSyncAndCheck();
         } else {
             // target model sample
             CHECK_AND_RETURN_REF(
@@ -686,7 +690,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     }
 
     if (!isTpRank0() || warm_up_ || streams.size() == 0 || model_input.is_fake_stream) {
-        cudaSyncAndCheck();
+        cudaCurrentStreamSyncAndCheck();
         draft_model_->releaseBuffers();
         model_->releaseBuffers();
         return absl::OkStatus();

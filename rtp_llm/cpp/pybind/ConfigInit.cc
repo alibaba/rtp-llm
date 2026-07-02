@@ -840,8 +840,14 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("p2p_layer_cache_buffer_store_timeout_ms",
                        &CacheStoreConfig::p2p_layer_cache_buffer_store_timeout_ms)
         .def_readwrite("p2p_cancel_broadcast_timeout_ms", &CacheStoreConfig::p2p_cancel_broadcast_timeout_ms)
+        .def_readwrite("p2p_prefill_resource_hold_ms", &CacheStoreConfig::p2p_prefill_resource_hold_ms)
+        .def_readwrite("p2p_max_transfer_deadline_ms", &CacheStoreConfig::p2p_max_transfer_deadline_ms)
+        .def_readwrite("p2p_cancelled_keys_ttl_ms", &CacheStoreConfig::p2p_cancelled_keys_ttl_ms)
         .def_readwrite("cache_store_tcp_anet_rpc_thread_num", &CacheStoreConfig::cache_store_tcp_anet_rpc_thread_num)
         .def_readwrite("cache_store_tcp_anet_rpc_queue_num", &CacheStoreConfig::cache_store_tcp_anet_rpc_queue_num)
+        .def_readwrite("cache_store_tcp_worker_queue_size", &CacheStoreConfig::cache_store_tcp_worker_queue_size)
+        .def_readwrite("rdma_transfer_worker_thread_count", &CacheStoreConfig::rdma_transfer_worker_thread_count)
+        .def_readwrite("rdma_transfer_worker_queue_size", &CacheStoreConfig::rdma_transfer_worker_queue_size)
         .def("to_string", &CacheStoreConfig::to_string)
         .def(py::pickle(
             [](const CacheStoreConfig& self) {
@@ -863,11 +869,17 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.p2p_resource_store_timeout_check_interval_ms,
                                       self.p2p_layer_cache_buffer_store_timeout_ms,
                                       self.p2p_cancel_broadcast_timeout_ms,
+                                      self.p2p_prefill_resource_hold_ms,
+                                      self.p2p_max_transfer_deadline_ms,
+                                      self.p2p_cancelled_keys_ttl_ms,
                                       self.cache_store_tcp_anet_rpc_thread_num,
-                                      self.cache_store_tcp_anet_rpc_queue_num);
+                                      self.cache_store_tcp_anet_rpc_queue_num,
+                                      self.cache_store_tcp_worker_queue_size,
+                                      self.rdma_transfer_worker_thread_count,
+                                      self.rdma_transfer_worker_queue_size);
             },
             [](py::tuple t) {
-                if (t.size() != 20)
+                if (t.size() != 20 && t.size() != 23 && t.size() != 26)
                     throw std::runtime_error("Invalid state!");
                 CacheStoreConfig c;
                 try {
@@ -889,8 +901,19 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     c.p2p_resource_store_timeout_check_interval_ms = t[15].cast<int>();
                     c.p2p_layer_cache_buffer_store_timeout_ms      = t[16].cast<int64_t>();
                     c.p2p_cancel_broadcast_timeout_ms              = t[17].cast<int64_t>();
-                    c.cache_store_tcp_anet_rpc_thread_num          = t[18].cast<int>();
-                    c.cache_store_tcp_anet_rpc_queue_num           = t[19].cast<int>();
+                    int idx = 18;
+                    if (t.size() == 26) {
+                        c.p2p_prefill_resource_hold_ms = t[idx++].cast<int64_t>();
+                        c.p2p_max_transfer_deadline_ms = t[idx++].cast<int64_t>();
+                        c.p2p_cancelled_keys_ttl_ms    = t[idx++].cast<int64_t>();
+                    }
+                    c.cache_store_tcp_anet_rpc_thread_num   = t[idx++].cast<int>();
+                    c.cache_store_tcp_anet_rpc_queue_num    = t[idx++].cast<int>();
+                    if (t.size() >= 23) {
+                        c.cache_store_tcp_worker_queue_size      = t[idx++].cast<int>();
+                        c.rdma_transfer_worker_thread_count      = t[idx++].cast<int>();
+                        c.rdma_transfer_worker_queue_size        = t[idx++].cast<int>();
+                    }
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("CacheStoreConfig unpickle error: ") + e.what());
                 }
@@ -1172,6 +1195,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("model_name", &RuntimeConfig::model_name)
         .def_readwrite("worker_grpc_addrs", &RuntimeConfig::worker_grpc_addrs)
         .def_readwrite("worker_addrs", &RuntimeConfig::worker_addrs)
+        .def_readwrite("p2p_worker_addrs", &RuntimeConfig::p2p_worker_addrs)
         // Fields merged from PyDeviceResourceConfig
         .def_readwrite("specify_gpu_arch", &RuntimeConfig::specify_gpu_arch)
         // Add sub-configs as properties that return references
@@ -1197,10 +1221,11 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.model_name,
                                       self.worker_grpc_addrs,
                                       self.worker_addrs,
+                                      self.p2p_worker_addrs,
                                       self.specify_gpu_arch);
             },
             [](py::tuple t) {
-                if (t.size() != 12)
+                if (t.size() != 12 && t.size() != 13)
                     throw std::runtime_error("Invalid state!");
                 RuntimeConfig c;
                 try {
@@ -1215,7 +1240,12 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     c.model_name                    = t[8].cast<std::string>();
                     c.worker_grpc_addrs             = t[9].cast<std::vector<std::string>>();
                     c.worker_addrs                  = t[10].cast<std::vector<std::string>>();
-                    c.specify_gpu_arch              = t[11].cast<std::string>();
+                    if (t.size() == 13) {
+                        c.p2p_worker_addrs = t[11].cast<std::vector<std::string>>();
+                        c.specify_gpu_arch = t[12].cast<std::string>();
+                    } else {
+                        c.specify_gpu_arch = t[11].cast<std::string>();
+                    }
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("RuntimeConfig unpickle error: ") + e.what());
                 }

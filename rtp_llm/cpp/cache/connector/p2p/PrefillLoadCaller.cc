@@ -1,48 +1,287 @@
 #include "rtp_llm/cpp/cache/connector/p2p/PrefillLoadCaller.h"
 
 #include "rtp_llm/cpp/utils/Logger.h"
+#include "rtp_llm/cpp/utils/DeferredCompletionQueueDrainer.h"
+#include "rtp_llm/cpp/utils/GrpcAddressUtil.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 #include "rtp_llm/cpp/model_rpc/RpcErrorCode.h"
-#include "autil/StringUtil.h"
+#include <google/protobuf/io/coded_stream.h>
+#include <google/protobuf/unknown_field_set.h>
 #include <grpc++/grpc++.h>
+#include <cerrno>
 #include <chrono>
+#include <cstdlib>
 #include <limits>
+#include <mutex>
+#include <utility>
 
 namespace rtp_llm {
+
+namespace {
+
+using google::protobuf::UnknownField;
+using google::protobuf::UnknownFieldSet;
+
+struct WorkerAddrParts {
+    std::string host;
+    int32_t     cache_store_port = 0;
+};
+
+bool parseWorkerAddrPort(const std::string& port_text, int32_t* port) {
+    if (!port || port_text.empty()) {
+        return false;
+    }
+    char* end   = nullptr;
+    errno       = 0;
+    auto value  = std::strtoll(port_text.c_str(), &end, 10);
+    const bool parsed_all = end == port_text.c_str() + port_text.size();
+    if (errno != 0 || !parsed_all || value < 1 || value > 65535) {
+        return false;
+    }
+    *port = static_cast<int32_t>(value);
+    return true;
+}
+
+bool parseWorkerAddr(const std::string& worker_addr, WorkerAddrParts* parts) {
+    if (!parts || worker_addr.empty()) {
+        return false;
+    }
+
+    std::string host;
+    std::string cache_store_port_text;
+    std::string grpc_port_text;
+    if (worker_addr.front() == '[') {
+        const auto close_pos = worker_addr.find(']');
+        if (close_pos == std::string::npos || close_pos + 1 >= worker_addr.size()
+            || worker_addr[close_pos + 1] != ':') {
+            return false;
+        }
+        const auto cache_port_begin = close_pos + 2;
+        const auto cache_port_end   = worker_addr.find(':', cache_port_begin);
+        if (cache_port_end == std::string::npos || cache_port_end + 1 >= worker_addr.size()) {
+            return false;
+        }
+        host                  = worker_addr.substr(1, close_pos - 1);
+        cache_store_port_text = worker_addr.substr(cache_port_begin, cache_port_end - cache_port_begin);
+        grpc_port_text        = worker_addr.substr(cache_port_end + 1);
+    } else {
+        const auto grpc_col = worker_addr.rfind(':');
+        const auto cache_col = (grpc_col == std::string::npos || grpc_col == 0)
+                                   ? std::string::npos
+                                   : worker_addr.rfind(':', grpc_col - 1);
+        if (cache_col == std::string::npos || cache_col == 0 || cache_col + 1 >= grpc_col
+            || grpc_col + 1 >= worker_addr.size()) {
+            return false;
+        }
+        host                  = worker_addr.substr(0, cache_col);
+        cache_store_port_text = worker_addr.substr(cache_col + 1, grpc_col - cache_col - 1);
+        grpc_port_text        = worker_addr.substr(grpc_col + 1);
+        if (host.find(':') != std::string::npos && host.find('.') != std::string::npos) {
+            return false;
+        }
+    }
+
+    int32_t cache_store_port = 0;
+    int32_t grpc_port        = 0;
+    if (host.empty() || !parseWorkerAddrPort(cache_store_port_text, &cache_store_port)
+        || !parseWorkerAddrPort(grpc_port_text, &grpc_port)) {
+        return false;
+    }
+    parts->host             = std::move(host);
+    parts->cache_store_port = cache_store_port;
+    return true;
+}
+
+bool parsePackedInt32s(const std::string& bytes, std::vector<int32_t>& out) {
+    google::protobuf::io::CodedInputStream input(reinterpret_cast<const uint8_t*>(bytes.data()),
+                                                 static_cast<int>(bytes.size()));
+    uint32_t                               value = 0;
+    while (input.ReadVarint32(&value)) {
+        out.push_back(static_cast<int32_t>(value));
+    }
+    return input.ConsumedEntireMessage();
+}
+
+bool extractLegacyStartLoadPayload(const P2PConnectorStartLoadResponsePB& response,
+                                   P2PSideChannelPayload&                 side_channel_payload) {
+    const UnknownFieldSet& unknown_fields     = response.GetReflection()->GetUnknownFields(response);
+    bool                   found_legacy_field = false;
+    bool                   has_first_token    = false;
+
+    for (int i = 0; i < unknown_fields.field_count(); ++i) {
+        const UnknownField& field = unknown_fields.field(i);
+        switch (field.number()) {
+            case 1:
+                if (field.type() == UnknownField::TYPE_VARINT) {
+                    side_channel_payload.first_token_id = static_cast<int64_t>(field.varint());
+                    has_first_token                     = true;
+                    found_legacy_field                  = true;
+                }
+                break;
+            case 2:
+                if (field.type() == UnknownField::TYPE_VARINT) {
+                    side_channel_payload.total_reuse_len = static_cast<int32_t>(field.varint());
+                    found_legacy_field                   = true;
+                }
+                break;
+            case 3:
+                if (field.type() == UnknownField::TYPE_VARINT) {
+                    side_channel_payload.local_reuse_len = static_cast<int32_t>(field.varint());
+                    found_legacy_field                   = true;
+                }
+                break;
+            case 4:
+                if (field.type() == UnknownField::TYPE_VARINT) {
+                    side_channel_payload.remote_reuse_len = static_cast<int32_t>(field.varint());
+                    found_legacy_field                    = true;
+                }
+                break;
+            case 5:
+                if (field.type() == UnknownField::TYPE_LENGTH_DELIMITED) {
+                    found_legacy_field = true;
+                    parsePackedInt32s(field.length_delimited(), side_channel_payload.propose_tokens);
+                } else if (field.type() == UnknownField::TYPE_VARINT) {
+                    found_legacy_field = true;
+                    side_channel_payload.propose_tokens.push_back(static_cast<int32_t>(field.varint()));
+                }
+                break;
+            case 6:
+                if (field.type() == UnknownField::TYPE_LENGTH_DELIMITED) {
+                    found_legacy_field = true;
+                    side_channel_payload.propose_probs.ParseFromString(field.length_delimited());
+                }
+                break;
+            case 7:
+                if (field.type() == UnknownField::TYPE_LENGTH_DELIMITED) {
+                    found_legacy_field = true;
+                    side_channel_payload.propose_hidden.ParseFromString(field.length_delimited());
+                }
+                break;
+            case 8:
+                if (field.type() == UnknownField::TYPE_LENGTH_DELIMITED) {
+                    found_legacy_field = true;
+                    parsePackedInt32s(field.length_delimited(), side_channel_payload.position_ids);
+                } else if (field.type() == UnknownField::TYPE_VARINT) {
+                    found_legacy_field = true;
+                    side_channel_payload.position_ids.push_back(static_cast<int32_t>(field.varint()));
+                }
+                break;
+            case 11:
+                if (field.type() == UnknownField::TYPE_VARINT) {
+                    side_channel_payload.memory_reuse_len = static_cast<int32_t>(field.varint());
+                    found_legacy_field                    = true;
+                }
+                break;
+            default:
+                break;
+        }
+    }
+
+    side_channel_payload.has_first_token = has_first_token;
+    side_channel_payload.has_data        = found_legacy_field;
+    return found_legacy_field;
+}
+
+struct PrefillLoadCallerResultDrainTraits {
+    static std::shared_ptr<grpc::CompletionQueue>
+    completionQueue(const std::shared_ptr<PrefillLoadCaller::Result>& result) {
+        return result ? result->completion_queue : nullptr;
+    }
+
+    static void markDrained(const std::shared_ptr<PrefillLoadCaller::Result>& result) {
+        if (result) {
+            result->completion_queue_shutdown_drained_ = true;
+        }
+    }
+};
+
+using PrefillLoadCallerCqDrainer =
+    DeferredCompletionQueueDrainer<PrefillLoadCaller::Result, PrefillLoadCallerResultDrainTraits>;
+
+void drainCompletionQueueInlineUntilShutdown(const std::shared_ptr<grpc::CompletionQueue>& completion_queue,
+                                             const std::string&                            server_addr,
+                                             const std::string&                            unique_key) {
+    if (!completion_queue) {
+        return;
+    }
+
+    void*   tag         = nullptr;
+    bool    ok          = false;
+    int64_t last_log_us = currentTimeUs();
+    while (true) {
+        const auto deadline = std::chrono::system_clock::now() + std::chrono::seconds(1);
+        const auto status   = completion_queue->AsyncNext(&tag, &ok, deadline);
+        if (status == grpc::CompletionQueue::NextStatus::SHUTDOWN) {
+            return;
+        }
+        if (status == grpc::CompletionQueue::NextStatus::TIMEOUT) {
+            const auto now_us = currentTimeUs();
+            if (now_us - last_log_us >= 10000000) {
+                RTP_LLM_LOG_WARNING("[PD-DIAG] PrefillLoadCaller inline CQ drain still waiting; "
+                                    "server_addr=%s, unique_key=%s",
+                                    server_addr.c_str(),
+                                    unique_key.c_str());
+                last_log_us = now_us;
+            }
+        }
+    }
+}
+
+}  // namespace
 
 PrefillLoadCaller::PrefillLoadCaller(const std::vector<std::string>& worker_addrs): worker_addrs_(worker_addrs) {
     rpc_pool_ = std::make_shared<RPCPool>();
 
-    // worker_addrs 每项为 ip:cache_store_port:grpc_port（三段），解析 ip 与 cache_store_port 写入 tp_worker_infos_
+    // worker_addrs entries are host:cache_store_port:grpc_port or [IPv6]:cache_store_port:grpc_port.
     for (const auto& worker_addr : worker_addrs_) {
-        auto ip_parts = autil::StringUtil::split(worker_addr, ":");
-        if (ip_parts.size() != 3) {
-            RTP_LLM_FAIL("PrefillLoadCaller: invalid worker addr format [%s], expected ip:cache_store_port:grpc_port",
+        WorkerAddrParts parts;
+        if (!parseWorkerAddr(worker_addr, &parts)) {
+            RTP_LLM_FAIL("PrefillLoadCaller: invalid worker addr format [%s], expected "
+                         "host:cache_store_port:grpc_port or [IPv6]:cache_store_port:grpc_port",
                          worker_addr.c_str());
             continue;
         }
         TPWorkerInfoPB tp_worker;
-        tp_worker.set_ip(ip_parts[0]);
-        tp_worker.set_cache_store_port(autil::StringUtil::strToInt32WithDefault(ip_parts[1].c_str(), 0));
+        tp_worker.set_ip(parts.host);
+        tp_worker.set_cache_store_port(parts.cache_store_port);
         tp_worker_infos_.push_back(tp_worker);
     }
 }
 
-std::shared_ptr<PrefillLoadCaller::Result> PrefillLoadCaller::load(int64_t                   request_id,
-                                                                   const std::string&        prefill_ip,
-                                                                   uint32_t                  prefill_port,
-                                                                   const std::string&        unique_key,
-                                                                   int64_t                   deadline_ms,
-                                                                   GenerateStream*           generate_stream) {
+std::shared_ptr<PrefillLoadCaller::Result> PrefillLoadCaller::load(int64_t            request_id,
+                                                                   const std::string& prefill_ip,
+                                                                   uint32_t           prefill_port,
+                                                                   const std::string& unique_key,
+                                                                   int64_t            deadline_ms,
+                                                                   GenerateStream*    /*generate_stream*/) {
     if (!rpc_pool_) {
         RTP_LLM_LOG_WARNING("PrefillLoadCaller load failed: rpc_pool is null");
         return nullptr;
     }
 
     auto result         = std::make_shared<Result>();
-    result->server_addr = prefill_ip + ":" + std::to_string(prefill_port);
+    result->server_addr = formatGrpcHostPort(prefill_ip, prefill_port);
+    if (result->server_addr.empty()) {
+        RTP_LLM_LOG_WARNING("PrefillLoadCaller load failed: invalid server addr, ip: %s, port: %u",
+                            prefill_ip.c_str(),
+                            prefill_port);
+        return nullptr;
+    }
 
-    auto conn_status = rpc_pool_->getConnection(result->server_addr);
+    // [PD-DIAG] Measure getConnection separately. RpcPool::getConnection holds a
+    // pool-wide mutex and may synchronously trigger gRPC channel reconnection
+    // (channel->GetState(true)) when the cached connection is in TRANSIENT_FAILURE,
+    // which can serialize all callers behind the slow reconnect of one peer.
+    const int64_t get_conn_start_us = currentTimeUs();
+    auto          conn_status       = rpc_pool_->getConnection(result->server_addr);
+    const int64_t get_conn_cost_us  = currentTimeUs() - get_conn_start_us;
+    if (get_conn_cost_us >= 100000) {
+        RTP_LLM_LOG_WARNING(
+            "[PD-DIAG] PrefillLoadCaller::load slow getConnection, addr: %s, cost_us=%ld, unique_key: %s",
+            result->server_addr.c_str(),
+            get_conn_cost_us,
+            unique_key.c_str());
+    }
     if (!conn_status.ok()) {
         RTP_LLM_LOG_WARNING("PrefillLoadCaller load failed: getConnection failed, addr: %s",
                             result->server_addr.c_str());
@@ -55,11 +294,19 @@ std::shared_ptr<PrefillLoadCaller::Result> PrefillLoadCaller::load(int64_t      
         return nullptr;
     }
 
-    result->request_id      = request_id;
-    result->generate_stream = generate_stream;
+    result->request_id = request_id;
 
+    const int64_t build_rpc_start_us = currentTimeUs();
     if (!buildAndStartAsyncRpc(result, unique_key, deadline_ms, request_id)) {
         return nullptr;
+    }
+    const int64_t build_rpc_cost_us = currentTimeUs() - build_rpc_start_us;
+    if (build_rpc_cost_us >= 100000) {
+        RTP_LLM_LOG_WARNING(
+            "[PD-DIAG] PrefillLoadCaller::load slow buildAndStartAsyncRpc, addr: %s, cost_us=%ld, unique_key: %s",
+            result->server_addr.c_str(),
+            build_rpc_cost_us,
+            unique_key.c_str());
     }
 
     RTP_LLM_LOG_DEBUG("PrefillLoadCaller load started, unique_key: %s, addr: %s, deadline_ms: %lld, timeout ms: %d",
@@ -117,12 +364,46 @@ void PrefillLoadCaller::Result::shutdownAndDrainCompletionQueue() {
         return;
     }
     completion_queue->Shutdown();
+
+    // Bounded drain. If we exceed kDrainBudgetMs without SHUTDOWN, hand the CQ + reader
+    // + context off to PrefillLoadCallerCqDrainer (a background thread that keeps
+    // shared_ptr<Result> alive until SHUTDOWN). This unblocks the caller (typically the
+    // checker thread holding async_contexts_mutex_) — see DingTalk doc §7 for the
+    // production 8-min stall we are fixing.
+    constexpr int64_t kDrainBudgetMs = 100;
+    const auto        deadline       = std::chrono::system_clock::now() + std::chrono::milliseconds(kDrainBudgetMs);
+
     void* tag = nullptr;
     bool  ok  = false;
-    while (completion_queue->Next(&tag, &ok)) {
-        // Drain Finish / cancellation notifications; tag is the request_id we passed to Finish().
+    while (true) {
+        auto next_status = completion_queue->AsyncNext(&tag, &ok, deadline);
+        if (next_status == grpc::CompletionQueue::NextStatus::SHUTDOWN) {
+            completion_queue_shutdown_drained_ = true;
+            return;
+        }
+        if (next_status == grpc::CompletionQueue::NextStatus::TIMEOUT) {
+            RTP_LLM_LOG_WARNING(
+                "[PD-DIAG] PrefillLoadCaller drain abandoned to deferred drainer; "
+                "server_addr=%s, unique_key=%s, budget_ms=%ld",
+                server_addr.c_str(),
+                unique_key.c_str(),
+                kDrainBudgetMs);
+            // Mark drained BEFORE handing off so ~Result is a no-op when the drainer drops its ref.
+            completion_queue_shutdown_drained_ = true;
+            try {
+                PrefillLoadCallerCqDrainer::instance().enqueue(shared_from_this());
+            } catch (const std::bad_weak_ptr&) {
+                // Called outside a shared_ptr (e.g. from ~Result when count is already 0).
+                RTP_LLM_LOG_WARNING(
+                    "[PD-DIAG] PrefillLoadCaller drain abandoned but cannot hand off "
+                    "(shared_from_this failed); draining inline for server_addr=%s",
+                    server_addr.c_str());
+                drainCompletionQueueInlineUntilShutdown(completion_queue, server_addr, unique_key);
+            }
+            return;
+        }
+        // GOT_EVENT: drained one tag, loop again until SHUTDOWN or TIMEOUT.
     }
-    completion_queue_shutdown_drained_ = true;
 }
 
 void PrefillLoadCaller::Result::cancel() {
@@ -187,47 +468,54 @@ bool PrefillLoadCaller::Result::pollCompletionQueue() {
 }
 
 void PrefillLoadCaller::Result::updateStreamFromResponse() {
-    const auto& payload = response.payload();
-    side_channel_payload.first_token_id   = payload.first_generate_token_id();
-    side_channel_payload.total_reuse_len  = payload.total_reuse_len();
-    side_channel_payload.local_reuse_len  = payload.local_reuse_len();
-    side_channel_payload.remote_reuse_len = payload.remote_reuse_len();
-    side_channel_payload.memory_reuse_len = payload.memory_reuse_len();
-    side_channel_payload.has_data         = true;
+    if (response.has_payload()) {
+        const auto& payload = response.payload();
+        side_channel_payload.has_first_token =
+            payload.has_first_generate_token() || payload.first_generate_token_id() != 0;
+        side_channel_payload.first_token_id   = payload.first_generate_token_id();
+        side_channel_payload.total_reuse_len  = payload.total_reuse_len();
+        side_channel_payload.local_reuse_len  = payload.local_reuse_len();
+        side_channel_payload.remote_reuse_len = payload.remote_reuse_len();
+        side_channel_payload.memory_reuse_len = payload.memory_reuse_len();
+        side_channel_payload.has_data         = true;
 
-    // Extract tensors from the payload map
-    auto it_propose = payload.tensors().find("propose_tokens");
-    if (it_propose != payload.tensors().end() && it_propose->second.has_tensor()) {
-        const auto& tensor_pb = it_propose->second.tensor();
-        if (tensor_pb.data_type() == TensorPB::INT32 && !tensor_pb.int32_data().empty()) {
-            const auto* data = reinterpret_cast<const int*>(tensor_pb.int32_data().data());
-            size_t count = tensor_pb.int32_data().size() / sizeof(int);
-            side_channel_payload.propose_tokens.assign(data, data + count);
+        // Extract tensors from the payload map
+        auto it_propose = payload.tensors().find("propose_tokens");
+        if (it_propose != payload.tensors().end() && it_propose->second.has_tensor()) {
+            const auto& tensor_pb = it_propose->second.tensor();
+            if (tensor_pb.data_type() == TensorPB::INT32 && !tensor_pb.int32_data().empty()) {
+                const auto* data  = reinterpret_cast<const int*>(tensor_pb.int32_data().data());
+                size_t      count = tensor_pb.int32_data().size() / sizeof(int);
+                side_channel_payload.propose_tokens.assign(data, data + count);
+            }
         }
-    }
 
-    auto it_probs = payload.tensors().find("propose_probs");
-    if (it_probs != payload.tensors().end() && it_probs->second.has_tensor()) {
-        side_channel_payload.propose_probs.CopyFrom(it_probs->second.tensor());
-    }
-
-    auto it_hidden = payload.tensors().find("propose_hidden");
-    if (it_hidden != payload.tensors().end() && it_hidden->second.has_tensor()) {
-        side_channel_payload.propose_hidden.CopyFrom(it_hidden->second.tensor());
-    }
-
-    auto it_pos = payload.tensors().find("position_ids");
-    if (it_pos != payload.tensors().end() && it_pos->second.has_tensor()) {
-        const auto& tensor_pb = it_pos->second.tensor();
-        if (tensor_pb.data_type() == TensorPB::INT32 && !tensor_pb.int32_data().empty()) {
-            const auto* data = reinterpret_cast<const int32_t*>(tensor_pb.int32_data().data());
-            size_t count = tensor_pb.int32_data().size() / sizeof(int32_t);
-            side_channel_payload.position_ids.assign(data, data + count);
+        auto it_probs = payload.tensors().find("propose_probs");
+        if (it_probs != payload.tensors().end() && it_probs->second.has_tensor()) {
+            side_channel_payload.propose_probs.CopyFrom(it_probs->second.tensor());
         }
+
+        auto it_hidden = payload.tensors().find("propose_hidden");
+        if (it_hidden != payload.tensors().end() && it_hidden->second.has_tensor()) {
+            side_channel_payload.propose_hidden.CopyFrom(it_hidden->second.tensor());
+        }
+
+        auto it_pos = payload.tensors().find("position_ids");
+        if (it_pos != payload.tensors().end() && it_pos->second.has_tensor()) {
+            const auto& tensor_pb = it_pos->second.tensor();
+            if (tensor_pb.data_type() == TensorPB::INT32 && !tensor_pb.int32_data().empty()) {
+                const auto* data  = reinterpret_cast<const int32_t*>(tensor_pb.int32_data().data());
+                size_t      count = tensor_pb.int32_data().size() / sizeof(int32_t);
+                side_channel_payload.position_ids.assign(data, data + count);
+            }
+        }
+    } else {
+        extractLegacyStartLoadPayload(response, side_channel_payload);
     }
 
     RTP_LLM_LOG_DEBUG("PrefillLoadCaller::Result: parsed side-channel payload, first_token: %ld, total_reuse: %d",
-                      side_channel_payload.first_token_id, side_channel_payload.total_reuse_len);
+                      side_channel_payload.first_token_id,
+                      side_channel_payload.total_reuse_len);
 }
 
 void PrefillLoadCaller::Result::checkDone() {
@@ -236,14 +524,12 @@ void PrefillLoadCaller::Result::checkDone() {
     }
     bool poll_ok = pollCompletionQueue();
     if (!poll_ok) {
-        // error already set in pollCompletionQueue
         return;
     }
     if (!done_) {
         return;  // TIMEOUT — not finished yet
     }
 
-    RTP_LLM_LOG_DEBUG("PrefillLoadCaller::Result::checkDone: response success");
     updateStreamFromResponse();
     success_           = true;
     done_              = true;

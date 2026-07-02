@@ -1,6 +1,7 @@
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
+#include "rtp_llm/cpp/api_server/Exception.h"
 #include "rtp_llm/cpp/api_server/GenerateStreamWrapper.h"
 
 #include "rtp_llm/cpp/api_server/test/mock/MockEngineBase.h"
@@ -61,7 +62,7 @@ TEST_F(GenerateStreamWrapperTest, generateResponse) {
     input->input_ids       = torch::tensor({1, 2, 3, 4, 5}, torch::kInt32);
 
     GenerateStreamWrapper stream_wrapper(metric_reporter, token_processor);
-    stream_wrapper.init(input, engine);
+    EXPECT_TRUE(stream_wrapper.init(input, engine));
     EXPECT_TRUE(stream_wrapper.generate_config_ != nullptr);
     EXPECT_EQ(stream_wrapper.input_ids_.scalar_type(), torch::kInt32);
     EXPECT_EQ(stream_wrapper.input_ids_.numel(), 5);
@@ -77,6 +78,56 @@ TEST_F(GenerateStreamWrapperTest, generateResponse) {
         auto [response, finished] = stream_wrapper.generateResponse();
         ASSERT_EQ(finished, true);
     }
+}
+
+TEST_F(GenerateStreamWrapperTest, initReturnsFalseWhenEnqueueReturnsErroredStream) {
+    auto mock_engine_ = std::make_shared<MockEngineBase>();
+    auto engine       = std::dynamic_pointer_cast<EngineBase>(mock_engine_);
+
+    auto mock_token_processor_ = std::make_shared<MockTokenProcessor>();
+    auto token_processor       = std::dynamic_pointer_cast<TokenProcessor>(mock_token_processor_);
+
+    auto mock_metric_reporter_ = std::make_shared<MockApiServerMetricReporter>();
+    auto metric_reporter       = std::dynamic_pointer_cast<ApiServerMetricReporter>(mock_metric_reporter_);
+
+    auto mock_stream = CreateMockGenerateStream();
+    auto stream      = std::dynamic_pointer_cast<GenerateStream>(mock_stream);
+    EXPECT_CALL(*mock_engine_, enqueue(Matcher<const std::shared_ptr<GenerateInput>&>(_))).WillOnce(Return(stream));
+    EXPECT_CALL(*mock_stream, hasError()).WillRepeatedly(Return(true));
+
+    auto input             = std::make_shared<GenerateInput>();
+    input->generate_config = std::make_shared<GenerateConfig>();
+    input->input_ids       = torch::tensor({1, 2, 3}, torch::kInt32);
+
+    GenerateStreamWrapper stream_wrapper(metric_reporter, token_processor);
+    EXPECT_FALSE(stream_wrapper.init(input, engine));
+}
+
+TEST_F(GenerateStreamWrapperTest, generateResponseThrowsOnRealError) {
+    auto mock_engine_ = std::make_shared<MockEngineBase>();
+    auto engine       = std::dynamic_pointer_cast<EngineBase>(mock_engine_);
+
+    auto mock_token_processor_ = std::make_shared<MockTokenProcessor>();
+    auto token_processor       = std::dynamic_pointer_cast<TokenProcessor>(mock_token_processor_);
+
+    auto mock_metric_reporter_ = std::make_shared<MockApiServerMetricReporter>();
+    auto metric_reporter       = std::dynamic_pointer_cast<ApiServerMetricReporter>(mock_metric_reporter_);
+
+    auto mock_stream = CreateMockGenerateStream();
+    auto stream      = std::dynamic_pointer_cast<GenerateStream>(mock_stream);
+    EXPECT_CALL(*mock_engine_, enqueue(Matcher<const std::shared_ptr<GenerateInput>&>(_))).WillOnce(Return(stream));
+    EXPECT_CALL(*mock_stream, hasError()).WillRepeatedly(Return(false));
+    EXPECT_CALL(*mock_stream, getStatus()).WillRepeatedly(Return(StreamState::RUNNING));
+    EXPECT_CALL(*mock_stream, nextOutput())
+        .WillOnce(Return(ErrorResult<GenerateOutputs>(ErrorCode::MALLOC_FAILED, "kv cache exhausted")));
+
+    auto input             = std::make_shared<GenerateInput>();
+    input->generate_config = std::make_shared<GenerateConfig>();
+    input->input_ids       = torch::tensor({1, 2, 3}, torch::kInt32);
+
+    GenerateStreamWrapper stream_wrapper(metric_reporter, token_processor);
+    EXPECT_TRUE(stream_wrapper.init(input, engine));
+    EXPECT_THROW(stream_wrapper.generateResponse(), HttpApiServerException);
 }
 
 TEST_F(GenerateStreamWrapperTest, formatResponse_NumBeams) {
