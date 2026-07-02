@@ -421,6 +421,9 @@ public:
     }
 
     std::string traceId() const {
+        if (!generate_input_->request_info.trace_id.empty()) {
+            return generate_input_->request_info.trace_id;
+        }
         return generate_input_->generate_config->trace_id;
     }
 
@@ -442,6 +445,9 @@ public:
     int64_t enqueueTime() const {
         return generate_input_->begin_time_us;
     }
+
+    /// Log-friendly stream id: numeric ``streamId()`` (``request_id`` / ``inter_request_id``) + ``trace_id`` string.
+    std::string streamLogTag() const;
 
     std::vector<BaseLogitsProcessorPtr> getAllLogitsProcessorPtr() const {
         return logits_processor_list_;

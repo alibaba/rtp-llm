@@ -1,0 +1,23 @@
+{
+    "model_type": "qwen35_moe",
+    "model_path": "/mnt/nas1/hf/Qwen3.5-35B-A3B-FP8",
+    "tokenizer_path": "/mnt/nas1/hf/Qwen3.5-35B-A3B-FP8",
+    "query_result": [
+        {
+            "endpoint": "dash://ModelStreamInfer",
+            "query": {
+                "prompt": "Hello, world!",
+                "generate_config": {
+                    "max_new_tokens": 16,
+                    "top_k": 1,
+                    "temperature": 1.0
+                },
+                "request_id": "smoke_dash_basic"
+            },
+            "result": {
+                "response": "\n\nThis is a simple example of a web application built with the\n[Fl",
+                "finish_reason": 1
+            }
+        }
+    ]
+}

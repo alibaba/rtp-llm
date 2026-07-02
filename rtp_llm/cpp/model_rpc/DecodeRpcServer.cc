@@ -207,7 +207,7 @@ void DecodeRpcServer::localGenerate(DecodeGenerateContext& decode_context) {
 
     generate_stream->resetBeginTime(currentTimeUs());
     RTP_LLM_LOG_DEBUG(
-        "decode init stream[%d]: %s", generate_stream->streamId(), generate_stream->debugString().c_str());
+        "decode init stream[%s]: %s", generate_stream->streamLogTag().c_str(), generate_stream->debugString().c_str());
     engine_->enqueue(generate_stream);
     RTP_LLM_LOG_DEBUG("request [%s] enqueue success", decode_context.request_key.c_str());
     decode_context.error_status =

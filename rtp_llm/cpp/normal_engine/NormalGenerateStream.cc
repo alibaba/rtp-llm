@@ -189,14 +189,15 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
     }
 
     // TODO: move it to better position
-    RTP_LLM_LOG_DEBUG("stream [%ld] finished: %d, pd_sep: %d, is_streaming: %d, need_remote_generate: %d",
-                      streamId(),
+    RTP_LLM_LOG_DEBUG("stream [%s] finished: %d, pd_sep: %d, is_streaming: %d, need_remote_generate: %d",
+                      streamLogTag().c_str(),
                       finished_,
                       queryPdSep(),
                       isStreaming(),
                       update_info.update_remote_generate);
 
     if (!finished_ && queryPdSep() && update_info.update_remote_generate) {
+        RTP_LLM_LOG_DEBUG("stream [%s] set need_remote_generate", streamLogTag().c_str());
         holdKVCacheForPDSep();
         reportEventWithoutLock(StreamEvents::NeedRemoteGenerate);
         reportEventWithoutLock(StreamEvents::GenerateDone);
@@ -212,7 +213,7 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
         return;
     }
 
-    RTP_LLM_LOG_DEBUG("stream [%ld] enqueue generate output", streamId());
+    RTP_LLM_LOG_DEBUG("stream [%s] enqueue generate output", streamLogTag().c_str());
     enqueueGenerateOutput(prepareGenerateOutput(update_info));
 
     if (hasError()) {

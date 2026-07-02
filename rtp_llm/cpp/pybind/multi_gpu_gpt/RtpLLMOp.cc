@@ -1,6 +1,7 @@
 #include <cstddef>
 #include <memory>
 #include <tuple>
+#include "autil/EnvUtil.h"
 #include "autil/Log.h"
 #include "c10/util/intrusive_ptr.h"
 #include <grpcpp/grpcpp.h>
@@ -20,6 +21,23 @@ using namespace std;
 namespace th = torch;
 
 namespace rtp_llm {
+
+namespace {
+
+int64_t getGrpcStopTimeoutMs() {
+    constexpr int64_t kDefaultStopTimeoutMs = 600 * 1000;
+    const auto        explicit_timeout_ms   = autil::EnvUtil::getEnv("RTP_LLM_STOP_TIMEOUT_MS", int64_t(0));
+    if (explicit_timeout_ms > 0) {
+        return explicit_timeout_ms;
+    }
+    const auto shutdown_timeout_s = autil::EnvUtil::getEnv("SHUTDOWN_TIMEOUT", int64_t(600));
+    if (shutdown_timeout_s <= 0) {
+        return kDefaultStopTimeoutMs;
+    }
+    return shutdown_timeout_s * 1000;
+}
+
+}  // namespace
 
 std::unique_ptr<ProposeModelEngineInitParams>
 prepareMTPEngineInitParams(size_t model_id, py::object propose_model, const EngineInitParams& base_params) {
@@ -322,6 +340,10 @@ void RtpLLMOp::initRPCServer(const EngineInitParams                        maga_
         RTP_LLM_LOG_INFO("grpc server add channel argument %s: %d", it->first.c_str(), it->second);
         builder.AddChannelArgument(it->first, it->second);
     }
+    if (grpc_config.max_server_pollers > 0) {
+        builder.SetSyncServerOption(grpc::ServerBuilder::MAX_POLLERS, grpc_config.max_server_pollers);
+        RTP_LLM_LOG_INFO("grpc sync server MAX_POLLERS: %d", grpc_config.max_server_pollers);
+    }
     builder.AddListeningPort(server_address, grpc::InsecureServerCredentials());
     builder.RegisterService(model_rpc_service_.get());
 
@@ -350,14 +372,16 @@ void RtpLLMOp::startHttpServer(py::object model_weights_loader,
 }
 
 void RtpLLMOp::stop() {
-    int64_t STOP_TIMEOUT_MS = 60 * 1000;
+    const int64_t stop_timeout_ms = getGrpcStopTimeoutMs();
     if (!is_server_shutdown_) {
         if (grpc_server_) {
             auto begin_wait_us = autil::TimeUtility::currentTimeInMicroSeconds();
             while (auto onflight_request = model_rpc_service_->onflightRequestNum()) {
-                RTP_LLM_LOG_INFO("rpc service has [%lu] onflight request, waiting 1s", onflight_request);
+                RTP_LLM_LOG_INFO("rpc service has [%lu] onflight request, waiting 1s, stop_timeout_ms=%ld",
+                                 onflight_request,
+                                 stop_timeout_ms);
                 sleep(1);
-                if (autil::TimeUtility::currentTimeInMicroSeconds() - begin_wait_us > STOP_TIMEOUT_MS * 1000) {
+                if (autil::TimeUtility::currentTimeInMicroSeconds() - begin_wait_us > stop_timeout_ms * 1000) {
                     RTP_LLM_LOG_INFO("rpc service wait timeout, no more waiting");
                     break;
                 }

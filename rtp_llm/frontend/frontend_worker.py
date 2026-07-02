@@ -18,7 +18,11 @@ from pydantic import BaseModel
 from rtp_llm.config.engine_config import EngineConfig
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.generate_config import GenerateConfig
-from rtp_llm.distribute.distributed_server import WorldInfo, get_world_info
+from rtp_llm.distribute.distributed_server import (
+    WorldInfo,
+    get_dp_addrs_from_world_info,
+    get_world_info,
+)
 from rtp_llm.frontend.tokenizer_factory.tokenizer_factory import TokenizerFactory
 from rtp_llm.ops import ParallelismConfig, SpecialTokens, VitSeparation
 from rtp_llm.pipeline.pipeline import Pipeline
@@ -55,53 +59,6 @@ class TokenizerEncodeResponse(BaseModel):
     offset_mapping: Optional[List[Any]] = None
     tokens: List[str] = []
     error: str = ""
-
-
-def get_dp_addrs_from_world_info(
-    world_info: WorldInfo, parallelism_config: ParallelismConfig
-) -> list[str]:
-    """Get data parallel addresses from world_info.
-
-    Args:
-        world_info: WorldInfo containing all worker members
-        parallelism_config: ParallelismConfig containing parallelism configuration
-        address: Optional address to use when dp_size == 1 (defaults to localhost:rpc_server_port)
-
-    Returns:
-        List of RPC addresses for data parallel communication
-    """
-    addresses = []
-
-    ffn_disaggregate_config = parallelism_config.ffn_disaggregate_config
-    logging.info(
-        f"frontend worker ffn_disaggregate_config: {ffn_disaggregate_config.to_string()}"
-    )
-    # If FFN disaggregate is enabled, use only 1 address so the frontend talks to
-    # a single serving rank (additional ranks are used internally by that node).
-    if ffn_disaggregate_config.enable_ffn_disaggregate:
-        serving_ranks = (
-            ffn_disaggregate_config.attention_tp_size
-            * ffn_disaggregate_config.attention_dp_size
-        )
-        members = world_info.members[:serving_ranks]
-        logging.info(
-            f"FFN disaggregate enabled, limiting addresses to {serving_ranks} serving ranks: {members}"
-        )
-    else:
-        # Get all addresses from world_info members with tp_rank == 0
-        members = [
-            member
-            for member in world_info.members
-            if (member.world_rank % parallelism_config.tp_size) == 0
-        ]
-
-    addresses = [f"{member.ip}:{member.rpc_server_port}" for member in members]
-    logging.info(
-        f"[world_rank: {parallelism_config.world_rank}] "
-        f"using addresses from world_info: {addresses}"
-    )
-
-    return addresses
 
 
 class FrontendWorker:
@@ -155,6 +112,17 @@ class FrontendWorker:
         self.generate_env_config = py_env_configs.generate_env_config
 
         logging.info("frontend worker start done.")
+
+    async def close(self):
+        await self.pipeline.close()
+
+    def stop(self):
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            asyncio.run(self.close())
+        else:
+            loop.create_task(self.close())
 
     def tokenizer_offset_mapping(self, prompt: str) -> Any:
         return self.pipeline.tokenizer(

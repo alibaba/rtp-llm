@@ -26,6 +26,7 @@ from rtp_llm.openai.api_datatype import ChatCompletionRequest
 from rtp_llm.openai.openai_endpoint import OpenaiEndpoint
 from rtp_llm.ops import SpecialTokens, TaskType
 from rtp_llm.server.misc import format_exception
+from rtp_llm.server.request_headers import extract_request_headers
 from rtp_llm.structure.request_extractor import request_id_field_name
 from rtp_llm.utils.complete_response_async_generator import (
     CompleteResponseAsyncGenerator,
@@ -131,9 +132,21 @@ class FrontendServer(object):
             )
             self.is_embedding = True
 
-    def stop(self):
+    async def close(self):
         if self._frontend_worker is not None:
-            self._frontend_worker.stop()
+            close = getattr(self._frontend_worker, "close", None)
+            if close is not None:
+                maybe = close()
+                if asyncio.iscoroutine(maybe):
+                    await maybe
+
+    def stop(self):
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            asyncio.run(self.close())
+        else:
+            loop.create_task(self.close())
 
     async def embedding(self, request: Dict[str, Any], raw_request: Request):
         start_time = time.time()
@@ -198,6 +211,13 @@ class FrontendServer(object):
                 request, response
             )
         except asyncio.CancelledError as e:
+            try:
+                await response.aclose()
+            except Exception as close_error:
+                logging.warning(
+                    "close streaming response after cancellation failed: %s",
+                    close_error,
+                )
             self._access_logger.log_exception_access(request, e)
             kmonitor.report(
                 AccMetrics.CANCEL_QPS_METRIC,
@@ -208,6 +228,7 @@ class FrontendServer(object):
                     "source": request.get("source", "unkown"),
                 },
             )
+            raise
         except BaseException as e:
             # 捕获非Cancel以外所有的异常,所以使用BaseException
             self._access_logger.log_exception_access(request, e)
@@ -229,6 +250,7 @@ class FrontendServer(object):
             self._global_controller.decrement()
 
     async def inference(self, req: Union[str, Dict[Any, Any]], raw_request: RawRequest):
+        request_headers: Dict[str, str] = {}
         try:
             if isinstance(req, str):
                 req = json.loads(req)
@@ -240,16 +262,19 @@ class FrontendServer(object):
                 self.server_id,
                 sequence,
             )
+            request_headers = extract_request_headers(raw_request.headers)
         except Exception as e:
             return self._handle_exception(req, e)
 
         def generate_call():
             assert self._frontend_worker is not None
+            if request_headers:
+                return self._frontend_worker.inference(**req, headers=request_headers)
             return self._frontend_worker.inference(**req)
 
         try:
             rep = await self._infer_wrap(req, raw_request, generate_call)
-        except Exception as e:
+        except BaseException as e:
             self._global_controller.decrement()
             raise e
 
@@ -295,7 +320,7 @@ class FrontendServer(object):
             request_dict = request.model_dump(exclude_none=True)
             request_dict[request_id_field_name] = request_id
             rep = await self._infer_wrap(request_dict, raw_request, generate_call)
-        except Exception as e:
+        except BaseException as e:
             self._global_controller.decrement()
             raise e
 

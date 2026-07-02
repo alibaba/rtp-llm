@@ -1,14 +1,38 @@
 import copy
 import hashlib
+import json
 from typing import Any, Dict, List, Optional, Union
 
 from pydantic import BaseModel, ConfigDict, field_serializer, field_validator
-from transformers.tokenization_utils_base import PreTrainedTokenizerBase
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.ops import RoleType
 from rtp_llm.utils.check_util import *
 from rtp_llm.utils.util import check_with_info
+
+_GRAMMAR_RESPONSE_FORMAT_TYPES = frozenset(
+    {"json_schema", "json_object", "regex", "ebnf", "structural_tag"}
+)
+_JSON_OBJECT_SCHEMA: Dict[str, str] = {"type": "object"}
+
+
+def _compact_json(value: Union[str, Dict[str, Any]]) -> str:
+    if isinstance(value, str):
+        return value
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+
+def _response_format_is_grammar(rf: Optional[Union[str, Dict[str, Any]]]) -> bool:
+    if rf is None:
+        return False
+    if isinstance(rf, str):
+        try:
+            rf = json.loads(rf)
+        except Exception:
+            return True
+    if not isinstance(rf, dict):
+        return False
+    return rf.get("type") in _GRAMMAR_RESPONSE_FORMAT_TYPES
 
 
 class RequestFormat:
@@ -58,6 +82,7 @@ class GenerateConfig(BaseModel):
         False  # same as `enable_thinking` in chat_template_kwargs, discard one in the future
     )
     chat_template_kwargs: Optional[Dict[str, Any]] = None
+    begin_think_token_ids: List[int] = []
     end_think_token_ids: List[int] = []
     num_beams: int = 1
     variable_num_beams: List[int] = []
@@ -99,6 +124,12 @@ class GenerateConfig(BaseModel):
     chat_id: Optional[str] = None
     task_id: Optional[Union[str, int]] = None
     request_format: str = RequestFormat.RAW
+    json_format: bool = False
+    response_format: Optional[Union[str, Dict[str, Any]]] = None
+    json_schema: Optional[Union[str, Dict[str, Any]]] = None
+    regex: Optional[str] = None
+    ebnf: Optional[str] = None
+    structural_tag: Optional[Union[str, Dict[str, Any]]] = None
     # calculate_loss style: 0 for not calculate; 1 for sum; 2 for each token
     calculate_loss: int = 0
     return_logits: bool = False
@@ -399,6 +430,10 @@ class GenerateConfig(BaseModel):
                 is_union_positive_integer(self.sp_advice_prompt_token_ids),
                 f"sp_advice_prompt_token_ids {self.sp_advice_prompt_token_ids} is wrong data type",
             )
+            check_with_info(
+                is_list_positive_integer(self.begin_think_token_ids),
+                f"begin_think_token_ids {self.begin_think_token_ids} is wrong data type",
+            )
             if self.in_think_mode:
                 check_with_info(
                     is_positive_integer(self.max_thinking_tokens),
@@ -414,5 +449,40 @@ class GenerateConfig(BaseModel):
                 f"calculate_loss {self.top_k} in generate_config can only be in {calculate_loss_list},"
                 " but it's {self.calculate_loss}",
             )
+            has_grammar_constraint = self._has_grammar_constraint()
+            if (
+                self.has_num_beams() or self.num_return_sequences > 1
+            ) and has_grammar_constraint:
+                raise ValueError(
+                    "grammar-constrained decoding does not support beam search or num_return_sequences > 1"
+                )
+            self._normalize_grammar_fields()
         except Exception as e:
             raise FtRuntimeException(ExceptionType.ERROR_INPUT_FORMAT_ERROR, str(e))
+
+    def _has_grammar_constraint(self) -> bool:
+        return (
+            self.json_format
+            or self.json_schema is not None
+            or self.regex is not None
+            or self.ebnf is not None
+            or self.structural_tag is not None
+            or _response_format_is_grammar(self.response_format)
+        )
+
+    def _normalize_grammar_fields(self):
+        if (
+            self.json_format
+            and self.response_format is None
+            and self.json_schema is None
+            and self.regex is None
+            and self.ebnf is None
+            and self.structural_tag is None
+        ):
+            self.json_schema = _JSON_OBJECT_SCHEMA
+        if self.json_schema is not None:
+            self.json_schema = _compact_json(self.json_schema)
+        if self.structural_tag is not None:
+            self.structural_tag = _compact_json(self.structural_tag)
+        if self.response_format is not None:
+            self.response_format = _compact_json(self.response_format)

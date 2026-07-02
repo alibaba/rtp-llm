@@ -29,6 +29,32 @@ py_test(
 )
 
 py_test(
+    name = "frontend_shutdown_test",
+    srcs = [
+        "frontend_shutdown_test.py",
+    ],
+    deps = [
+        "//rtp_llm:fastapi",
+        "//rtp_llm:frontend",
+        "//rtp_llm:testlib",
+        "//rtp_llm:uvicorn",
+    ],
+)
+
+py_test(
+    name = "frontend_graceful_shutdown_business_test",
+    srcs = [
+        "frontend_graceful_shutdown_business_test.py",
+    ],
+    deps = [
+        "//rtp_llm:fastapi",
+        "//rtp_llm:frontend",
+        "//rtp_llm:testlib",
+        "//rtp_llm:uvicorn",
+    ],
+)
+
+py_test(
     name = "token_processor_test",
     srcs = ["token_processor_test.py"],
     data = [

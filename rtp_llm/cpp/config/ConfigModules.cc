@@ -181,6 +181,7 @@ std::string HWKernelConfig::to_string() const {
     std::ostringstream oss;
     oss << "deep_gemm_num_sm: " << deep_gemm_num_sm << "\n"
         << "arm_gemm_use_kai: " << arm_gemm_use_kai << "\n"
+        << "enable_stable_scatter_add: " << enable_stable_scatter_add << "\n"
         << "enable_multi_block_mode: " << enable_multi_block_mode << "\n"
         << "ft_disable_custom_ar: " << ft_disable_custom_ar << "\n"
         << "rocm_hipblaslt_config: " << rocm_hipblaslt_config << "\n"
@@ -192,7 +193,9 @@ std::string HWKernelConfig::to_string() const {
         << "prefill_capture_seq_lens size: " << prefill_capture_seq_lens.size() << "\n"
         << "decode_capture_batch_sizes size: " << decode_capture_batch_sizes.size() << "\n"
         << "disable_dpc_random: " << disable_dpc_random << "\n"
-        << "rocm_disable_custom_ag: " << rocm_disable_custom_ag;
+        << "rocm_disable_custom_ag: " << rocm_disable_custom_ag << "\n"
+        << "deterministic_gemm: " << deterministic_gemm << "\n"
+        << "deterministic_attn: " << deterministic_attn;
     return oss.str();
 }
 
@@ -229,7 +232,7 @@ std::string MoeConfig::to_string() const {
 // ModelSpecificConfig
 std::string ModelSpecificConfig::to_string() const {
     std::ostringstream oss;
-    // Empty struct — no fields remaining.
+    oss << "load_python_model: " << load_python_model;
     return oss.str();
 }
 
@@ -367,6 +370,7 @@ std::string RuntimeConfig::to_string() const {
         << "warm_up: " << warm_up << "\n"
         << "warm_up_with_loss: " << warm_up_with_loss << "\n"
         << "use_batch_decode_scheduler: " << use_batch_decode_scheduler << "\n"
+        << "use_gather_batch_scheduler: " << use_gather_batch_scheduler << "\n"
         << "batch_decode_scheduler_config: {\n"
         << batch_decode_scheduler_config.to_string() << "\n}\n"
         << "fifo_scheduler_config: {\n"
@@ -399,41 +403,21 @@ std::string ArpcConfig::to_string() const {
     return oss.str();
 }
 
-GrpcConfig::GrpcConfig(const std::string& json_str) {
-    from_json(json_str);
+static int parse_optional_root_int_json(const std::string& json_str, const char* key, int default_value) {
+    try {
+        std::string pat = std::string("\"") + key + "\"\\s*:\\s*(\\d+)";
+        std::regex  re(pat);
+        std::smatch m;
+        if (std::regex_search(json_str, m, re) && m.size() > 1) {
+            return std::stoi(m[1].str());
+        }
+    } catch (...) {}
+    return default_value;
 }
 
-std::string GrpcConfig::to_string() const {
-    std::ostringstream oss;
-
-    // Output client config
-    oss << "Client Config:\n";
-    for (auto it = client_config.begin(); it != client_config.end(); ++it) {
-        oss << "  " << it->first << ": " << it->second << "\n";
-    }
-
-    // Output server config
-    oss << "Server Config:\n";
-    for (auto it = server_config.begin(); it != server_config.end(); ++it) {
-        oss << "  " << it->first << ": " << it->second << "\n";
-    }
-
-    return oss.str();
-}
-
-void GrpcConfig::from_json(const std::string& json_str) {
-    if (json_str.empty()) {
-        return;
-    }
-
-    // Clear existing configs
-    client_config.clear();
-    server_config.clear();
-
-    // Parse 2-level JSON structure
-    // Expected format: {"client_config": {"key1": value1, ...}, "server_config": {"key2": value2, ...}}
-
-    // Find client_config section
+static void parse_grpc_client_server_maps_json(const std::string&          json_str,
+                                               std::map<std::string, int>& client_config,
+                                               std::map<std::string, int>& server_config) {
     std::regex  client_section_pattern("\"client_config\"\\s*:\\s*\\{([^}]+)\\}");
     std::smatch client_match;
     if (std::regex_search(json_str, client_match, client_section_pattern)) {
@@ -450,7 +434,6 @@ void GrpcConfig::from_json(const std::string& json_str) {
         }
     }
 
-    // Find server_config section
     std::regex  server_section_pattern("\"server_config\"\\s*:\\s*\\{([^}]+)\\}");
     std::smatch server_match;
     if (std::regex_search(json_str, server_match, server_section_pattern)) {
@@ -466,6 +449,64 @@ void GrpcConfig::from_json(const std::string& json_str) {
             ++iter;
         }
     }
+}
+
+static void append_grpc_maps_to_stream(std::ostringstream& oss, const GrpcMapsConfig& maps) {
+    oss << "Client Config:\n";
+    for (auto it = maps.client_config.begin(); it != maps.client_config.end(); ++it) {
+        oss << "  " << it->first << ": " << it->second << "\n";
+    }
+    oss << "Server Config:\n";
+    for (auto it = maps.server_config.begin(); it != maps.server_config.end(); ++it) {
+        oss << "  " << it->first << ": " << it->second << "\n";
+    }
+}
+
+GrpcConfig::GrpcConfig(const std::string& json_str) {
+    from_json(json_str);
+}
+
+std::string GrpcConfig::to_string() const {
+    std::ostringstream oss;
+    append_grpc_maps_to_stream(oss, *this);
+    oss << "max_server_pollers: " << max_server_pollers << "\n";
+    return oss.str();
+}
+
+void GrpcConfig::from_json(const std::string& json_str) {
+    if (json_str.empty()) {
+        return;
+    }
+
+    client_config.clear();
+    server_config.clear();
+    max_server_pollers = 0;
+
+    parse_grpc_client_server_maps_json(json_str, client_config, server_config);
+    max_server_pollers = parse_optional_root_int_json(json_str, "max_server_pollers", 0);
+}
+
+DashScGrpcConfig::DashScGrpcConfig(const std::string& json_str) {
+    from_json(json_str);
+}
+
+std::string DashScGrpcConfig::to_string() const {
+    std::ostringstream oss;
+    append_grpc_maps_to_stream(oss, *this);
+    oss << "max_server_workers: " << max_server_workers << "\n";
+    return oss.str();
+}
+
+void DashScGrpcConfig::from_json(const std::string& json_str) {
+    if (json_str.empty()) {
+        return;
+    }
+    client_config.clear();
+    server_config.clear();
+    max_server_workers = 4;
+    parse_grpc_client_server_maps_json(json_str, client_config, server_config);
+    int mw             = parse_optional_root_int_json(json_str, "max_server_workers", 4);
+    max_server_workers = mw > 0 ? mw : 4;
 }
 
 // FfnDisAggregateConfig

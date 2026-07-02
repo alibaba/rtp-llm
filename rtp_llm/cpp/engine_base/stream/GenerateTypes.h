@@ -13,6 +13,19 @@
 
 namespace rtp_llm {
 
+struct RequestInfo {
+    std::string frontend_ip;
+    std::string dash_ip;
+    std::string trace_id;
+    std::string request_id;
+    std::string source_role;
+
+    bool empty() const {
+        return frontend_ip.empty() && dash_ip.empty() && trace_id.empty() && request_id.empty()
+               && source_role.empty();
+    }
+};
+
 class GenerateInput {
 public:
     int inputLength() {
@@ -43,7 +56,14 @@ public:
         debug_string << "GenerateInput {"
                      << "request_id: " << request_id << ", generate_config:" << generate_config->debugString()
                      << ", input_ids: tensor[" << input_ids.numel() << "]"
-                     << ", prefix_length:" << prefix_length << "}";
+                     << ", prefix_length:" << prefix_length;
+        if (!request_info.empty()) {
+            debug_string << ", source_role:" << request_info.source_role
+                         << ", frontend_ip:" << request_info.frontend_ip << ", dash_ip:" << request_info.dash_ip
+                         << ", trace_id:" << request_info.trace_id
+                         << ", source_request_id:" << request_info.request_id;
+        }
+        debug_string << "}";
         return debug_string.str();
     }
 
@@ -56,6 +76,7 @@ public:
 
 public:
     int64_t                         request_id = 0;
+    RequestInfo                     request_info;
     std::shared_ptr<GenerateConfig> generate_config;
     torch::Tensor                   input_ids;
     bool                            need_release_resource = true;

@@ -36,6 +36,16 @@ class AccMetrics(Enum):
     VIT_RPC_SERVER_ERROR_QPS_METRIC = "rtp_llm_vit_rpc_server_error_qps"
     VIT_RPC_PROXY_ERROR_QPS_METRIC = "rtp_llm_vit_rpc_proxy_error_qps"
 
+    # dash_sc DSV4 phase-2: incremented once per request that enters phase-2
+    # via the terminate-token-id (token 1) abort path in the think phase.
+    # One increment per request — guarded by ``phase2_triggered`` so the
+    # rate matches "requests with a think-abort", not "abort tokens seen".
+    DASH_SC_DSV4_PHASE2_QPS_METRIC = "py_rtp_dash_sc_dsv4_phase2_qps"
+
+    # Tool-call output fell into a repeated span. Reported once per request by the
+    # frontend gRPC access-log interceptor; tags intentionally avoid request_id.
+    TOOL_CALL_LOOP_QPS_METRIC = "py_rtp_tool_call_loop_qps"
+
 
 class GaugeMetrics(Enum):
     RESPONSE_FIRST_TOKEN_RT_METRIC = "py_rtp_response_first_token_rt"
@@ -86,6 +96,12 @@ class GaugeMetrics(Enum):
     VIT_IMAGE_RESIZE_RT_US_METRIC = "rtp_llm_vit_image_resize_rt_us"
     VIT_IMAGE_PROCESSOR_RT_US_METRIC = "rtp_llm_vit_image_processor_rt_us"
     VIT_RESIZED_PIXEL_COUNT_METRIC = "rtp_llm_vit_resized_pixel_count"
+
+    TOOL_CALL_LOOP_REPEAT_COUNT_METRIC = "py_rtp_tool_call_loop_repeat_count"
+    TOOL_CALL_LOOP_CURRENT_SPAN_TOKENS_METRIC = (
+        "py_rtp_tool_call_loop_current_span_tokens"
+    )
+    TOOL_CALL_LOOP_CHECK_RT_METRIC = "py_rtp_tool_call_loop_check_rt"
 
 
 class MetricReporter(object):

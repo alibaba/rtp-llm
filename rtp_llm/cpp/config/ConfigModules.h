@@ -122,16 +122,16 @@ enum class FMHAType {
 };
 
 struct FMHAConfig {
-    bool enable_fmha                   = true;
-    bool enable_trt_fmha               = true;
-    bool enable_paged_trt_fmha         = true;
-    bool enable_open_source_fmha       = true;
-    bool enable_paged_open_source_fmha = true;
-    bool enable_trtv1_fmha             = true;
-    bool disable_flash_infer           = false;
-    bool enable_xqa                    = true;
-    bool use_aiter_pa                  = true;
-    bool use_asm_pa                    = true;
+    bool        enable_fmha                   = true;
+    bool        enable_trt_fmha               = true;
+    bool        enable_paged_trt_fmha         = true;
+    bool        enable_open_source_fmha       = true;
+    bool        enable_paged_open_source_fmha = true;
+    bool        enable_trtv1_fmha             = true;
+    bool        disable_flash_infer           = false;
+    bool        enable_xqa                    = true;
+    bool        use_aiter_pa                  = true;
+    bool        use_asm_pa                    = true;
     // Default off: Triton PA on ROCm regressed vs ASM PA after the rocm_impl
     // refactor; ASM/NonAsm now own the default decode path. Set to true to opt
     // back into the Triton kernel.
@@ -217,6 +217,7 @@ struct ProfilingDebugLoggingConfig {
 struct HWKernelConfig {
     int         deep_gemm_num_sm             = -1;
     bool        arm_gemm_use_kai             = false;
+    bool        enable_stable_scatter_add    = false;
     bool        enable_multi_block_mode      = true;
     bool        ft_disable_custom_ar         = true;
     std::string rocm_hipblaslt_config        = "gemm_config.csv";
@@ -233,6 +234,8 @@ struct HWKernelConfig {
     std::vector<int> decode_capture_batch_sizes;
     bool             disable_dpc_random     = false;
     bool             rocm_disable_custom_ag = true;
+    bool             deterministic_gemm     = false;
+    bool             deterministic_attn     = false;
     std::string      to_string() const;
 };
 
@@ -263,6 +266,11 @@ struct MoeConfig {
 };
 
 struct ModelSpecificConfig {
+    // When the Python-wrapped model (PyWrappedModel) owns execution it cannot
+    // service a mixed prefill+decode batch in the same forward (see
+    // GatherBatchScheduler / FIFOScheduler guards).  Schedulers read this flag
+    // to keep prefill streams off a non-empty running list.
+    bool        load_python_model = false;
     std::string to_string() const;
 };
 
@@ -351,6 +359,7 @@ struct RuntimeConfig {
 
     // Scheduler configuration
     bool                       use_batch_decode_scheduler = false;
+    bool                       use_gather_batch_scheduler = false;
     BatchDecodeSchedulerConfig batch_decode_scheduler_config;
     FIFOSchedulerConfig        fifo_scheduler_config;
 
@@ -508,19 +517,35 @@ struct ArpcConfig {
     std::string to_string() const;
 };
 
-struct GrpcConfig {
+/// Shared ``client_config`` / ``server_config`` maps for gRPC channel options (JSON root keys).
+struct GrpcMapsConfig {
     std::map<std::string, int> client_config;
     std::map<std::string, int> server_config;
-    GrpcConfig() {};
-    GrpcConfig(const std::string& json_str);
-    std::string                to_string() const;
-    void                       from_json(const std::string& json_str);
     std::map<std::string, int> get_client_config() const {
         return client_config;
     }
     std::map<std::string, int> get_server_config() const {
         return server_config;
     }
+};
+
+struct GrpcConfig: GrpcMapsConfig {
+    /// If > 0, passed to gRPC sync server as ``MAX_POLLERS`` (per completion queue).
+    int max_server_pollers = 0;
+    GrpcConfig() {};
+    GrpcConfig(const std::string& json_str);
+    std::string to_string() const;
+    void        from_json(const std::string& json_str);
+};
+
+/// DashSc gRPC (predict_v2.proto) Python client/server channel options + executor workers.
+struct DashScGrpcConfig: GrpcMapsConfig {
+    /// ``ThreadPoolExecutor(max_workers=...)`` for ``grpc.server``; must be >= 1 when used.
+    int max_server_workers = 4;
+    DashScGrpcConfig() {};
+    DashScGrpcConfig(const std::string& json_str);
+    std::string to_string() const;
+    void        from_json(const std::string& json_str);
 };
 
 struct LinearAttentionConfig {
