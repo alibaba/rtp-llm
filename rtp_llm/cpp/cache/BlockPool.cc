@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/cache/BlockPool.h"
+#include "rtp_llm/cpp/cache/KVCachePhysicalMemoryController.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/cpp/cache/MemoryLayoutStrategy.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
@@ -42,8 +43,24 @@ void BlockPool::initializeCacheBuffer() {
                                              torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCPU))
                                     .pin_memory();
     } else {
+        // Sleep/wake_up (M5): tag the KV big-buffer allocation so the torch_memory_saver
+        // preload shim (when present) tracks it under "kv_cache" and can later
+        // pause/resume its physical pages. Without the shim this is a no-op.
+        VmmBackend vmm_backend;
+        const bool tagged = vmm_backend.isAvailable()
+                            && vmm_backend.beginAllocationRegion(KVCachePhysicalMemoryController::kDefaultTag);
         cache_aligned_buffer_ = torch::empty({static_cast<int64_t>(config_.total_size_bytes)},
                                              torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA));
+        if (tagged) {
+            vmm_backend.endAllocationRegion();
+        }
+        if (tagged) {
+            RTP_LLM_LOG_INFO("KV cache buffer (%zu bytes) allocated under VMM tag '%s'",
+                             config_.total_size_bytes,
+                             KVCachePhysicalMemoryController::kDefaultTag);
+            VmmTagStatsRegistry::recordAllocation(KVCachePhysicalMemoryController::kDefaultTag,
+                                                  config_.total_size_bytes);
+        }
     }
     cache_base_ptr_ = cache_aligned_buffer_.data_ptr();
     RTP_LLM_CHECK_WITH_INFO(cache_base_ptr_ != nullptr, "block pool allocate cache aligned buffer is null");
@@ -202,6 +219,23 @@ void BlockPool::initFreeBlocks() {
     block_cache_ref_counter_.init(config_.block_num);
     req_cache_ref_counter_.init(config_.block_num);
     block_cache_ = std::make_shared<BlockCache>();
+}
+
+void BlockPool::resetMetadata() {
+    std::scoped_lock lock(ref_mu_, free_mu_);
+    free_block_ids_.clear();
+    // block 0 is reserved, same as initFreeBlocks()
+    for (BlockIdxType i = 1; i < static_cast<BlockIdxType>(config_.block_num); ++i) {
+        free_block_ids_.insert(i);
+    }
+    request_ref_counter_.init(config_.block_num);
+    connector_ref_counter_.init(config_.block_num);
+    req_con_ref_counter_.init(config_.block_num);
+    block_cache_ref_counter_.init(config_.block_num);
+    req_cache_ref_counter_.init(config_.block_num);
+    RTP_LLM_LOG_INFO("BlockPool metadata reset to fresh state: free_blocks=%zu, total_blocks=%u",
+                     free_block_ids_.size(),
+                     config_.block_num);
 }
 
 std::vector<torch::Tensor> BlockPool::allLayerCacheBase() const {

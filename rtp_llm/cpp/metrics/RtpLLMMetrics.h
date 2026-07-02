@@ -141,6 +141,33 @@ private:
     AUTIL_LOG_DECLARE();
 };
 
+class SleepLifecycleMetricsCollector final {
+public:
+    bool    drain_timeout_qps   = false;
+    int64_t drain_rt_us         = -1;
+    int64_t vmm_op_rt_us        = -1;
+    int64_t mr_op_rt_us         = -1;
+    int64_t vmm_tag_known_bytes = -1;
+    int64_t vmm_tag_known_count = -1;
+};
+
+class SleepLifecycleMetrics: public kmonitor::MetricsGroup {
+public:
+    bool init(kmonitor::MetricsGroupManager* manager) override;
+    void report(const kmonitor::MetricsTags* tags, SleepLifecycleMetricsCollector* collector);
+
+public:
+    kmonitor::MutableMetric* drain_rt_us_metric         = nullptr;
+    kmonitor::MutableMetric* drain_timeout_qps_metric   = nullptr;
+    kmonitor::MutableMetric* vmm_op_rt_us_metric        = nullptr;
+    kmonitor::MutableMetric* mr_op_rt_us_metric         = nullptr;
+    kmonitor::MutableMetric* vmm_tag_known_bytes_metric = nullptr;
+    kmonitor::MutableMetric* vmm_tag_known_count_metric = nullptr;
+
+private:
+    AUTIL_LOG_DECLARE();
+};
+
 class RtpLLMStreamMetricsCollector final {
 public:
     bool qps               = false;

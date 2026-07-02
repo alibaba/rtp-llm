@@ -348,6 +348,7 @@ struct RuntimeConfig {
     int64_t reserve_runtime_mem_mb = 0;
     bool    warm_up                = false;
     bool    warm_up_with_loss      = false;
+    bool    enable_sleep_mode      = false;
 
     // Scheduler configuration
     bool                       use_batch_decode_scheduler = false;

@@ -3,8 +3,10 @@
 #include "rtp_llm/cpp/api_server/WorkerStatusService.h"
 #include "rtp_llm/cpp/api_server/ModelStatusService.h"
 #include "rtp_llm/cpp/api_server/SysCmdService.h"
+#include "rtp_llm/cpp/api_server/SleepService.h"
 #include "rtp_llm/cpp/api_server/TokenizerService.h"
 #include "rtp_llm/cpp/api_server/Exception.h"
+#include "rtp_llm/cpp/engine_base/sleep/SleepLifecycleController.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
 namespace rtp_llm {
@@ -94,6 +96,14 @@ bool HttpApiServer::registerServices() {
     }
 
     // add uri:
+    // POST: /sleep /wake_up
+    // GET: /is_sleeping /sleep_status
+    if (!registerSleepService()) {
+        RTP_LLM_LOG_WARNING("HttpApiServer register sleep service failed.");
+        return false;
+    }
+
+    // add uri:
     // POST: /tokenizer/encode
     if (!registerTokenizerService()) {
         RTP_LLM_LOG_WARNING("HttpApiServer register tokenizer service failed.");
@@ -131,7 +141,13 @@ bool HttpApiServer::registerHealthService() {
         return false;
     }
 
-    health_service_.reset(new HealthService());
+    auto readiness_state_provider = [engine = engine_]() -> std::string {
+        if (!engine || engine->sleepController().admit()) {
+            return "";
+        }
+        return sleepStateToString(engine->sleepController().state());
+    };
+    health_service_.reset(new HealthService(readiness_state_provider));
     return registerHealthServiceStatic(*http_server_, health_service_);
 }
 
@@ -178,6 +194,37 @@ bool HttpApiServer::registerSysCmdService() {
         sys_cmd_service->setLogLevel(writer, request);
     };
     return http_server_->RegisterRoute("POST", "/set_log_level", set_log_level_callback);
+}
+
+bool HttpApiServer::registerSleepService() {
+    if (!http_server_) {
+        RTP_LLM_LOG_WARNING("register sleep service failed, http server is null");
+        return false;
+    }
+
+    sleep_service_.reset(new SleepService(engine_));
+    auto sleep_callback = [sleep_service = sleep_service_](std::unique_ptr<http_server::HttpResponseWriter> writer,
+                                                           const http_server::HttpRequest& request) -> void {
+        sleep_service->sleep(writer, request);
+    };
+    auto wake_up_callback = [sleep_service = sleep_service_](std::unique_ptr<http_server::HttpResponseWriter> writer,
+                                                             const http_server::HttpRequest& request) -> void {
+        sleep_service->wakeUp(writer, request);
+    };
+    auto is_sleeping_callback = [sleep_service =
+                                     sleep_service_](std::unique_ptr<http_server::HttpResponseWriter> writer,
+                                                     const http_server::HttpRequest& request) -> void {
+        sleep_service->isSleeping(writer, request);
+    };
+    auto sleep_status_callback = [sleep_service =
+                                      sleep_service_](std::unique_ptr<http_server::HttpResponseWriter> writer,
+                                                      const http_server::HttpRequest& request) -> void {
+        sleep_service->sleepStatus(writer, request);
+    };
+    return http_server_->RegisterRoute("POST", "/sleep", sleep_callback)
+           && http_server_->RegisterRoute("POST", "/wake_up", wake_up_callback)
+           && http_server_->RegisterRoute("GET", "/is_sleeping", is_sleeping_callback)
+           && http_server_->RegisterRoute("GET", "/sleep_status", sleep_status_callback);
 }
 
 bool HttpApiServer::registerTokenizerService() {

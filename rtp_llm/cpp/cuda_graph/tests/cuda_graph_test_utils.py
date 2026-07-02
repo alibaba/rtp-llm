@@ -6,10 +6,12 @@ This module provides common model building and KV cache initialization functiona
 import logging
 import math
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import Any, Optional
 
 import torch
+from torch import nn
 
 from rtp_llm.config.engine_config import EngineConfig
 from rtp_llm.config.py_config_modules import PyEnvConfigs
@@ -19,10 +21,16 @@ from rtp_llm.ops.compute_ops import (
     CacheGroupType,
     KVCache,
     PyModelInputs,
+    PyModelOutputs,
     get_scalar_type,
     init_exec_ctx,
 )
 from rtp_llm.tools.api.hf_model_helper import get_model_info_from_hf
+
+
+def use_synthetic_cuda_graph_model() -> bool:
+    value = os.environ.get("RTP_LLM_CUDA_GRAPH_USE_SYNTHETIC_MODEL", "")
+    return value.lower() in ("1", "true", "yes", "on")
 
 
 @dataclass
@@ -37,6 +45,49 @@ class ModelBuildConfig:
     hack_layer_num: int = 1
     act_type: Optional[str] = None
     device: str = "cuda:0"
+
+
+class _NoopCudaGraphAttention:
+    def prepare_cuda_graph(self, attention_inputs: Any) -> None:
+        return None
+
+
+class SyntheticCudaGraphModel(nn.Module):
+    def __init__(self, hidden_size: int, compute_dtype: torch.dtype, device: str):
+        super().__init__()
+        self.hidden_size = hidden_size
+        self.compute_dtype = compute_dtype
+        self.device = device
+        self.kv_cache = None
+        self._attention = _NoopCudaGraphAttention()
+
+    def prepare_fmha_impl(
+        self, inputs: PyModelInputs, is_cuda_graph: bool = False
+    ) -> _NoopCudaGraphAttention:
+        return self._attention
+
+    def forward(
+        self,
+        inputs: PyModelInputs,
+        fmha_impl: Optional[_NoopCudaGraphAttention] = None,
+    ) -> PyModelOutputs:
+        if (
+            isinstance(inputs.input_hiddens, torch.Tensor)
+            and inputs.input_hiddens.numel() > 0
+        ):
+            hidden_states = inputs.input_hiddens.to(dtype=self.compute_dtype)
+        else:
+            hidden_states = torch.zeros(
+                (inputs.input_ids.numel(), self.hidden_size),
+                dtype=self.compute_dtype,
+                device=inputs.input_ids.device,
+            )
+
+        token_signal = inputs.input_ids.to(dtype=self.compute_dtype).reshape(-1, 1)
+        hidden_states = (
+            hidden_states + token_signal.expand(-1, self.hidden_size) * 0.001
+        )
+        return PyModelOutputs(hidden_states.contiguous())
 
 
 @dataclass
@@ -105,6 +156,9 @@ class CudaGraphTestModelBuilder:
         Returns:
             ModelBuildResult containing the model and related configurations
         """
+        if use_synthetic_cuda_graph_model():
+            return self._build_synthetic_model(init_kv_cache)
+
         self._set_configs()
 
         # Create EngineConfig from py_env_configs
@@ -149,6 +203,13 @@ class CudaGraphTestModelBuilder:
         self.gpt_model.load()
         compute_dtype = self.gpt_model.weight.dtype
         model = self.gpt_model.py_model
+        if model is None:
+            raise RuntimeError(
+                "CUDA graph test model did not create a Python model; "
+                "use a model type with _create_python_model/support_cuda_graph, "
+                "or set RTP_LLM_CUDA_GRAPH_USE_SYNTHETIC_MODEL=1 for local "
+                "CudaGraphRunner coverage"
+            )
         py_model_config = model.config
 
         pc = engine_config.parallelism_config
@@ -170,6 +231,43 @@ class CudaGraphTestModelBuilder:
         # Initialize KV cache if requested
         if init_kv_cache:
             self._init_kv_cache(result, py_model_config)
+            model.kv_cache = result.kv_cache
+
+        return result
+
+    def _build_synthetic_model(self, init_kv_cache: bool) -> ModelBuildResult:
+        hidden_size = 256
+        compute_dtype = (
+            torch.bfloat16
+            if self.config.act_type and self.config.act_type.upper() == "BF16"
+            else torch.float16
+        )
+        attn_config = SimpleNamespace(
+            kv_head_num=1,
+            size_per_head=hidden_size,
+            tokens_per_block=self.config.tokens_per_block,
+            kernel_tokens_per_block=self.config.kernel_tokens_per_block,
+        )
+        model_config = SimpleNamespace(
+            num_layers=1,
+            attn_config=attn_config,
+        )
+        model = SyntheticCudaGraphModel(hidden_size, compute_dtype, self.config.device)
+
+        result = ModelBuildResult(
+            model=model,
+            model_config=model_config,
+            compute_dtype=compute_dtype,
+            layer_num=model_config.num_layers,
+            kv_head_num=attn_config.kv_head_num,
+            size_per_head=attn_config.size_per_head,
+            tokens_per_block=attn_config.tokens_per_block,
+            kernel_tokens_per_block=attn_config.kernel_tokens_per_block,
+            hidden_size=hidden_size,
+        )
+
+        if init_kv_cache:
+            self._init_kv_cache(result, model_config)
             model.kv_cache = result.kv_cache
 
         return result

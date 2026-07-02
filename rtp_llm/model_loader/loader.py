@@ -19,6 +19,7 @@ from rtp_llm.model_loader.model_weight_info import (
     ModelWeights,
 )
 from rtp_llm.model_loader.tensor_source import DatabaseTensorSource, TensorCollector
+from rtp_llm.model_loader.weight_memory_saver import weights_region
 from rtp_llm.model_loader.weight_module import CustomAtomicWeight, WeightModule
 from rtp_llm.ops import TaskType, VitSeparation
 from rtp_llm.utils.database import BaseDatabase, CkptDatabase
@@ -85,16 +86,20 @@ class ModelLoader:
     @timer_wrapper(description="load weights")
     @torch.inference_mode()
     def load_weights(self, device: str):
-        if self._load_config.is_ft_style_weight:
-            weights = self._load_from_ft_style(device)
-        else:
-            weights = self._load_weight(device)
-            self.force_clean_cuda_memory()
+        # Sleep/wake_up M6: register every weight GPU allocation (incl. quant
+        # scales/zeros, dynamic weights and static EPLB buffers) as pausable
+        # cpu-backup memory. No-op unless sleep mode is enabled.
+        with weights_region():
+            if self._load_config.is_ft_style_weight:
+                weights = self._load_from_ft_style(device)
+            else:
+                weights = self._load_weight(device)
+                self.force_clean_cuda_memory()
 
-        # load dynamic weight
-        self._load_dynamic_weights(weights, device)
-        # load eplb weight
-        self._init_eplb_weight(weights, device)
+            # load dynamic weight
+            self._load_dynamic_weights(weights, device)
+            # load eplb weight
+            self._init_eplb_weight(weights, device)
         return weights
 
     def load_lora_weights(self, adapter_name: str, lora_path: str, device: str = "cpu"):
@@ -109,10 +114,12 @@ class ModelLoader:
         if self._weights_info.weight_style == WeightStyle.RTP_LLM_STYLE:
             raise ValueError("load_lora_weights only support non-ft-style weight")
 
-        for id in range(self._load_config.num_layers):
-            result = self._load_layer_lora_weights(adapter_name, id, device)
-            for name, tensor in result.items():
-                lora_weights.set_layer_weight(False, id, name, tensor)
+        # Sleep/wake_up M6: cover LoRA tensors when loaded directly to GPU.
+        with weights_region():
+            for id in range(self._load_config.num_layers):
+                result = self._load_layer_lora_weights(adapter_name, id, device)
+                for name, tensor in result.items():
+                    lora_weights.set_layer_weight(False, id, name, tensor)
 
         lora_weights.apply_scale(lora_alpha / rank)  # apply scale
         self._load_config.database.remove_lora(adapter_name)

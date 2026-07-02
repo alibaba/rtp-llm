@@ -21,7 +21,6 @@ from rtp_llm.distribute.worker_info import WorkerInfo
 from rtp_llm.ops import NcclCommConfig, ParallelismConfig
 
 
-
 @dataclass
 class WorldInfo:
     members: List[WorkerInfo]
@@ -84,6 +83,124 @@ def get_world_info(
         distribute_config,
         parallelism_config,
     )
+
+
+def get_global_world_info_from_store(
+    server_config: ServerConfig,
+    distribute_config: DistributeConfig,
+    parallelism_config: ParallelismConfig,
+    timeout_seconds: int = 3,
+) -> Optional[WorldInfo]:
+    """Read global backend rank membership from the distributed bootstrap store.
+
+    This is used by instance-level coordinators such as the frontend sleep
+    coordinator. The coordinator must not register itself as a backend rank; it
+    only connects as a TCPStore client and reads the rank addresses published by
+    backend ``DistributedServer.bootstrap``.
+    """
+    if parallelism_config.world_size == 1:
+        return get_world_info(server_config, distribute_config, parallelism_config)
+
+    try:
+        master_ip, master_server_port = get_master(
+            distribute_config, parallelism_config
+        )
+    except Exception as e:
+        logging.warning("failed to resolve master for global world_info store: %s", e)
+        return None
+    if not master_ip:
+        logging.warning("failed to resolve master ip for global world_info store")
+        return None
+    if master_server_port == "":
+        master_server_port = server_config.start_port
+    try:
+        store_port = int(master_server_port) - 1
+    except (TypeError, ValueError):
+        logging.warning(
+            "invalid master port for global world_info store: %s", master_server_port
+        )
+        return None
+
+    try:
+        store = TCPStore(
+            host_name=master_ip,
+            port=store_port,
+            world_size=None,
+            is_master=False,
+            timeout=timedelta(seconds=timeout_seconds),
+            wait_for_workers=False,
+        )
+    except Exception as e:
+        logging.warning(
+            "failed to connect distributed store for global world_info: %s:%s, error: %s",
+            master_ip,
+            store_port,
+            e,
+        )
+        return None
+
+    keys = [
+        DistributedServer.REGISTRY_RANK_ADDRESS_KEY + str(rank)
+        for rank in range(parallelism_config.world_size)
+    ]
+    try:
+        store.wait(keys)
+    except Exception as e:
+        logging.warning(
+            "failed to wait backend rank addresses from distributed store, keys=%s, error=%s",
+            keys,
+            e,
+        )
+        return None
+
+    members: List[WorkerInfo] = []
+    master: Optional[WorkerInfo] = None
+    for rank, key in enumerate(keys):
+        try:
+            address_bytes = store.get(key)
+            address = address_bytes.decode("utf-8")
+        except Exception as e:
+            logging.warning(
+                "failed to read backend rank address from distributed store, key=%s, error=%s",
+                key,
+                e,
+            )
+            return None
+        ip, server_port = split_ip_port(address)
+        if ip == "":
+            logging.warning(
+                "invalid backend rank address from distributed store: %s", address
+            )
+            return None
+        local_rank = rank % parallelism_config.local_world_size
+        member = WorkerInfo(
+            ip=ip,
+            local_rank=local_rank,
+            world_rank=rank,
+            name=f"{distribute_config.zone_name}_rank_{rank}_{local_rank}",
+            server_port=server_port,
+            worker_info_port_num=0,
+            remote_server_port=distribute_config.remote_server_port,
+        )
+        members.append(member)
+        if rank == 0:
+            master = member
+
+    world_info = WorldInfo(
+        members=members,
+        self=None,
+        master=master,
+        num_nodes=(
+            parallelism_config.world_size + parallelism_config.local_world_size - 1
+        )
+        // parallelism_config.local_world_size,
+        initialized=True,
+    )
+    logging.info(
+        "loaded global world_info from distributed store: %s",
+        [f"{member.ip}:{member.rpc_server_port}" for member in members],
+    )
+    return world_info
 
 
 def get_local_world_info(

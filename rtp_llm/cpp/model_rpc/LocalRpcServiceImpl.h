@@ -97,6 +97,26 @@ public:
         return local_server_->SetRestart(context, request, response);
     }
 
+    ::grpc::Status
+    SleepServing(::grpc::ServerContext* context, const SleepRequestPB* request, EmptyPB* response) override {
+        return local_server_->SleepServing(context, request, response);
+    }
+
+    ::grpc::Status
+    WakeUpServing(::grpc::ServerContext* context, const WakeUpRequestPB* request, EmptyPB* response) override {
+        return local_server_->WakeUpServing(context, request, response);
+    }
+
+    ::grpc::Status
+    IsSleeping(::grpc::ServerContext* context, const EmptyPB* request, IsSleepingResponsePB* response) override {
+        return local_server_->IsSleeping(context, request, response);
+    }
+
+    ::grpc::Status
+    GetSleepStatus(::grpc::ServerContext* context, const EmptyPB* request, SleepStatusResponsePB* response) override {
+        return local_server_->GetSleepStatus(context, request, response);
+    }
+
     WorkerStatusInfo getWorkerStatusInfo(int64_t latest_finished_version) {
         return local_server_->getWorkerStatusInfo(latest_finished_version);
     }

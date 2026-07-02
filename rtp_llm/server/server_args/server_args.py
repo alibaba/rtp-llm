@@ -495,5 +495,9 @@ def setup_args() -> PyEnvConfigs:
 
     # 解析参数（会自动应用所有配置绑定）
     parsed_args = parser.parse_args()
+    # Sleep mode is parsed into RuntimeConfig, but Python weight allocation
+    # wrappers run before C++ hooks. Mirror this one switch into the process
+    # environment so ENABLE_SLEEP_MODE works the same from CLI and env.
+    os.environ["ENABLE_SLEEP_MODE"] = "1" if getattr(parsed_args, "enable_sleep_mode", False) else "0"
 
     return py_env_configs

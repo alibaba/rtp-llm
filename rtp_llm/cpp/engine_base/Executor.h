@@ -6,6 +6,7 @@
 #include "rtp_llm/cpp/config/EplbConfig.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/config/ModelConfig.h"
+#include <list>
 #include <memory>
 #include <cstdlib>
 
@@ -15,6 +16,13 @@ class Executor {
 public:
     Executor() {};
     virtual absl::Status process(const std::list<GenerateStreamPtr>& streams) = 0;
+    virtual absl::Status processForPause() {
+        std::list<GenerateStreamPtr> empty_streams;
+        return process(empty_streams);
+    }
+    virtual bool consumeLastPauseSignal() {
+        return false;
+    }
 
     static GptModelDescription genModelDescription(const ModelConfig&       model_config,
                                                    const ParallelismConfig& parallelism_config,

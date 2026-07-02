@@ -3939,6 +3939,9 @@ torch @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/torch-
     #   tilelang
     #   timm
     #   torchvision
+torch-memory-saver==0.0.9.post1 \
+    --hash=sha256:b4e560fcd88a0641efb21ac530bb79a6e78fc0b31c9a654fa3b5eb7c3629e555
+    # via -r deps/requirements_torch_gpu_cuda12_9.txt
 torchvision @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/torchvision-0.23.0%2Bcu129-cp310-cp310-manylinux_2_28_x86_64.whl \
     --hash=sha256:5690810877f2d7d1a2b432e31d68d4a9ccbb695a9a8fa0e27bbad44c6a90a181
     # via

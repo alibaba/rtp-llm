@@ -4,11 +4,62 @@
 #include <cstring>
 #include <c10/core/InferenceMode.h>
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
+#include "rtp_llm/cpp/cache/KVCachePhysicalMemoryController.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include "torch/csrc/autograd/generated/variable_factories.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 using namespace torch_ext;
 namespace rtp_llm {
+
+namespace {
+
+constexpr const char* kCudaGraphVmmTag = "cuda_graph";
+
+class CudaGraphVmmRegionGuard {
+public:
+    CudaGraphVmmRegionGuard() {
+        if (!vmm_backend_.isAvailable()) {
+            return;
+        }
+        cuda_graph::graphEmptyCache();
+        // CUDA graph capture owns persistent staging tensors and attention
+        // plan/workspace buffers. VMM pause may recycle the old physical pages,
+        // so preserve their content unless every referenced buffer is proven to
+        // be deterministically refilled before replay.
+        active_ = vmm_backend_.beginAllocationRegion(kCudaGraphVmmTag, true);
+        if (active_) {
+            pre_reserved_bytes_ = cuda_graph::graphReservedBytes();
+            RTP_LLM_LOG_INFO("CUDA graph allocations are tagged under VMM tag '%s'", kCudaGraphVmmTag);
+        }
+    }
+
+    ~CudaGraphVmmRegionGuard() {
+        if (active_) {
+            vmm_backend_.endAllocationRegion();
+            const size_t post_reserved_bytes = cuda_graph::graphReservedBytes();
+            const size_t known_delta_bytes =
+                post_reserved_bytes > pre_reserved_bytes_ ? post_reserved_bytes - pre_reserved_bytes_ : 0;
+            if (known_delta_bytes > 0) {
+                VmmTagStatsRegistry::recordAllocation(kCudaGraphVmmTag, known_delta_bytes);
+            } else {
+                RTP_LLM_LOG_WARNING("CUDA graph VMM tag '%s' recorded zero known reserved-byte delta; "
+                                    "sleep can still pause the tag through torch_memory_saver, but known-byte "
+                                    "metrics cannot validate captured graph allocations for this run",
+                                    kCudaGraphVmmTag);
+            }
+        }
+    }
+
+    CudaGraphVmmRegionGuard(const CudaGraphVmmRegionGuard&)            = delete;
+    CudaGraphVmmRegionGuard& operator=(const CudaGraphVmmRegionGuard&) = delete;
+
+private:
+    VmmBackend vmm_backend_;
+    size_t     pre_reserved_bytes_{0};
+    bool       active_{false};
+};
+
+}  // namespace
 
 // clang-format off
 // CUDA Graph Mode Configuration Table:
@@ -199,8 +250,7 @@ void CudaGraphRunner::prepareInputs(const PyModelInputs& inputs, CudaGraphState&
                 == py_model_inputs_.attention_inputs.kv_cache_kernel_block_id_device_by_group.size(),
             "kv_cache_kernel_block_id_device_by_group size mismatch");
         hybrid_cache_group = inputs.attention_inputs.kv_cache_kernel_block_id_device_by_group.size();
-        RTP_LLM_CHECK_WITH_INFO(inputs.attention_inputs.kv_cache_kernel_block_id_by_group.size()
-                                        == hybrid_cache_group
+        RTP_LLM_CHECK_WITH_INFO(inputs.attention_inputs.kv_cache_kernel_block_id_by_group.size() == hybrid_cache_group
                                     && py_model_inputs_.attention_inputs.kv_cache_kernel_block_id_by_group.size()
                                            == hybrid_cache_group,
                                 "kv_cache_kernel_block_id_by_group size mismatch");
@@ -430,7 +480,7 @@ void CudaGraphRunner::initKernelInternalMemory() {
     if (prefix_lengths.defined() && prefix_lengths.size(0) > 0) {
         cu_kv_seqlens.slice(0, 1, max_bs_ + 1) = input_lengths.add(prefix_lengths).cumsum(0);
     }
-    capture_mem_hold_.py_model_inputs_.attention_inputs.cu_seqlens      = cu_seqlens;
+    capture_mem_hold_.py_model_inputs_.attention_inputs.cu_seqlens           = cu_seqlens;
     capture_mem_hold_.py_model_inputs_.attention_inputs.cu_seqlens_device    = cu_seqlens.cuda();
     capture_mem_hold_.py_model_inputs_.attention_inputs.cu_kv_seqlens_device = cu_kv_seqlens.cuda();
 }
@@ -446,8 +496,8 @@ void CudaGraphRunner::initCaptureAttentionInputs(PyModelInputs& inputs, int max_
     // input_ids [tokens_nums] = [batch_size * num_tokens_per_bs]
     inputs.input_ids = torch::zeros({max_num_token_}, options_cuda_int32_);
     // input_lengths [batch_size, int32] (decode only)
-    inputs.attention_inputs.input_lengths   = torch::full({int(max_bs_)}, num_tokens_per_bs_, options_cpu_int32_);
-    inputs.attention_inputs.input_lengths   = inputs.attention_inputs.input_lengths.pin_memory();
+    inputs.attention_inputs.input_lengths        = torch::full({int(max_bs_)}, num_tokens_per_bs_, options_cpu_int32_);
+    inputs.attention_inputs.input_lengths        = inputs.attention_inputs.input_lengths.pin_memory();
     inputs.attention_inputs.input_lengths_device = inputs.attention_inputs.input_lengths.cuda();
     // sequence_lengths [batch_size, int32] (decode only)
     // sequence_length should in pinned memory
@@ -524,10 +574,10 @@ void CudaGraphRunner::initCaptureAttentionInputs(PyModelInputs& inputs, int max_
         inputs.attention_inputs.prefix_lengths = torch::empty({0}, options_cpu_int32_).pin_memory();
     }
     // padding_offset [max_num_token_, int32] (for attention padding)
-    inputs.attention_inputs.padding_offset            = torch::zeros({int(max_seq_len_ * max_bs_)}, options_cpu_int32_);
-    inputs.attention_inputs.padding_offset            = inputs.attention_inputs.padding_offset.pin_memory();
-    inputs.attention_inputs.dtype                     = model_data_type_;
-    inputs.attention_inputs.is_s_padded               = true;
+    inputs.attention_inputs.padding_offset = torch::zeros({int(max_seq_len_ * max_bs_)}, options_cpu_int32_);
+    inputs.attention_inputs.padding_offset = inputs.attention_inputs.padding_offset.pin_memory();
+    inputs.attention_inputs.dtype          = model_data_type_;
+    inputs.attention_inputs.is_s_padded    = true;
     inputs.attention_inputs.sequence_lengths_plus_1_device = torch::zeros({int(max_bs_)}, options_cuda_int32_);
     // Step=1 is intentional: when num_tokens_per_bs_ > 1 (target verify), is_prefill is set to true
     // so the factory selects PREFILL impls (which use cu_seqlens, not decode_cu_seqlens).
@@ -610,6 +660,7 @@ void CudaGraphRunner::initCapture() {
     c10::InferenceMode inference_guard(true);
 
     if (enable_cuda_graph_) {
+        CudaGraphVmmRegionGuard vmm_region_guard;
         RTP_LLM_LOG_INFO("CUDA graph capture is enabled");
         shared_graph_pool_ = cuda_graph::graphPoolHandle();
         if (is_prefill_cuda_graph_mode_) {

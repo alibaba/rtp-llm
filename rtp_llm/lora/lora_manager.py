@@ -6,6 +6,7 @@ from rtp_llm.async_decoder_engine.base_engine import BaseEngine
 from rtp_llm.async_decoder_engine.rpc_engine import LanguageCppEngine
 from rtp_llm.lora.lora_exception import LoraCountException, LoraException
 from rtp_llm.model_loader.loader import ModelLoader
+from rtp_llm.model_loader.weight_memory_saver import weights_region
 from rtp_llm.utils.time_util import Timer
 
 
@@ -76,9 +77,13 @@ class LoraManager:
             weights = self.weights_loader_.load_lora_weights(
                 adapter_name, lora_path, "cpu"
             )
-            self.lora_cpp_wrapper_.add_lora(
-                adapter_name, weights.lora_a_weights, weights.lora_b_weights
-            )
+            # Freeze/Resume M6: the C++ add_lora uploads adapters host->GPU on
+            # this thread; register those allocations as pausable weight
+            # memory (the LD_PRELOAD hook intercepts in-thread C++ cudaMalloc).
+            with weights_region():
+                self.lora_cpp_wrapper_.add_lora(
+                    adapter_name, weights.lora_a_weights, weights.lora_b_weights
+                )
 
     def remove_lora(self, adapter_name: str) -> Optional[LoraException]:
         with self.thread_lock_:

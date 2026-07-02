@@ -58,6 +58,14 @@ public:
     void   connectorReference(BlockIdxType block_idx);
     void   connectorReference(const BlockIndicesType& block_indices);
 
+    // Sleep/wake_up (M5): reset all block metadata to the fresh-pool state after the physical
+    // KV memory has been resumed (content discarded). Rebuilds free_block_ids_ to the full set
+    // and re-inits every BlockRefCounter, exactly like initFreeBlocks() on a new pool.
+    // Does NOT touch block_cache_ (callers clear it separately via BlockCache::clear()) and
+    // does NOT recreate the underlying buffer (VA must stay stable).
+    // Caller must guarantee no in-flight users of the pool (engine drained).
+    void resetMetadata();
+
     void    regUserMr(size_t model_id, std::shared_ptr<CacheStore> cache_store = nullptr);
     void    deregUserMr();
     int64_t getMrCostTimeMs() const {

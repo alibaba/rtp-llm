@@ -1168,6 +1168,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("reserve_runtime_mem_mb", &RuntimeConfig::reserve_runtime_mem_mb)
         .def_readwrite("warm_up", &RuntimeConfig::warm_up)
         .def_readwrite("warm_up_with_loss", &RuntimeConfig::warm_up_with_loss)
+        .def_readwrite("enable_sleep_mode", &RuntimeConfig::enable_sleep_mode)
         .def_readwrite("use_batch_decode_scheduler", &RuntimeConfig::use_batch_decode_scheduler)
         .def_readwrite("model_name", &RuntimeConfig::model_name)
         .def_readwrite("worker_grpc_addrs", &RuntimeConfig::worker_grpc_addrs)
@@ -1191,6 +1192,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.reserve_runtime_mem_mb,
                                       self.warm_up,
                                       self.warm_up_with_loss,
+                                      self.enable_sleep_mode,
                                       self.use_batch_decode_scheduler,
                                       self.batch_decode_scheduler_config,
                                       self.fifo_scheduler_config,
@@ -1200,22 +1202,25 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.specify_gpu_arch);
             },
             [](py::tuple t) {
-                if (t.size() != 12)
+                if (t.size() != 12 && t.size() != 13)
                     throw std::runtime_error("Invalid state!");
                 RuntimeConfig c;
                 try {
+                    const bool has_sleep_mode = t.size() == 13;
                     c.max_generate_batch_size       = t[0].cast<int64_t>();
                     c.max_block_size_per_item       = t[1].cast<int64_t>();
                     c.reserve_runtime_mem_mb        = t[2].cast<int64_t>();
                     c.warm_up                       = t[3].cast<bool>();
                     c.warm_up_with_loss             = t[4].cast<bool>();
-                    c.use_batch_decode_scheduler    = t[5].cast<bool>();
-                    c.batch_decode_scheduler_config = t[6].cast<BatchDecodeSchedulerConfig>();
-                    c.fifo_scheduler_config         = t[7].cast<FIFOSchedulerConfig>();
-                    c.model_name                    = t[8].cast<std::string>();
-                    c.worker_grpc_addrs             = t[9].cast<std::vector<std::string>>();
-                    c.worker_addrs                  = t[10].cast<std::vector<std::string>>();
-                    c.specify_gpu_arch              = t[11].cast<std::string>();
+                    c.enable_sleep_mode             = has_sleep_mode ? t[5].cast<bool>() : false;
+                    const size_t offset             = has_sleep_mode ? 1 : 0;
+                    c.use_batch_decode_scheduler    = t[5 + offset].cast<bool>();
+                    c.batch_decode_scheduler_config = t[6 + offset].cast<BatchDecodeSchedulerConfig>();
+                    c.fifo_scheduler_config         = t[7 + offset].cast<FIFOSchedulerConfig>();
+                    c.model_name                    = t[8 + offset].cast<std::string>();
+                    c.worker_grpc_addrs             = t[9 + offset].cast<std::vector<std::string>>();
+                    c.worker_addrs                  = t[10 + offset].cast<std::vector<std::string>>();
+                    c.specify_gpu_arch              = t[11 + offset].cast<std::string>();
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("RuntimeConfig unpickle error: ") + e.what());
                 }

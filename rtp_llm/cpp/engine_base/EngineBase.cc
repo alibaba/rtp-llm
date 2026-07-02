@@ -23,6 +23,7 @@ std::shared_ptr<GenerateStream> EngineBase::makeStream(const std::shared_ptr<Gen
 }
 
 void EngineBase::initRuntime(const EngineInitParams& params) {
+    sleep_controller_.setEnabled(params.runtime_config.enable_sleep_mode);
     const auto rank =
         params.parallelism_config.dp_rank * params.parallelism_config.tp_size + params.parallelism_config.tp_rank;
     Logger::getEngineLogger().setRank(rank);

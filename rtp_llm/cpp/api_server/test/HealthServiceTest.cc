@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/api_server/common/HealthService.h"
+#include "rtp_llm/cpp/api_server/test/mock/MockEngineBase.h"
 #include "rtp_llm/cpp/api_server/test/mock/MockHttpResponseWriter.h"
 
 using namespace ::testing;
@@ -54,6 +55,35 @@ TEST_F(HealthServiceTest, HealthCheck_ServerStopped) {
     std::unique_ptr<http_server::HttpResponseWriter> writer_ptr(writer);
     http_server::HttpRequest                         request;
     health_service_->healthCheck(writer_ptr, request);
+    EXPECT_EQ(writer_ptr->_type, http_server::HttpResponseWriter::WriteType::Normal);
+    EXPECT_EQ(writer_ptr->_headers.count("Content-Type"), 1);
+    EXPECT_EQ(writer_ptr->_headers.at("Content-Type"), "application/json");
+    EXPECT_EQ(mock_writer_->_statusCode, 503);
+    EXPECT_EQ(mock_writer_->_statusMessage, "Service Unavailable");
+
+    // 需要手动释放 unique_ptr 的所有权, 避免 double free
+    writer_ptr.release();
+}
+
+TEST_F(HealthServiceTest, HealthCheck_SleepingEngineNotReady) {
+    auto mock_engine = std::make_shared<MockEngineBase>();
+    ASSERT_TRUE(mock_engine->sleepController().sleep(SleepOptions()).ok);
+    auto health_service = std::make_shared<HealthService>([mock_engine]() {
+        return mock_engine->sleepController().admit() ? "" :
+                                                         sleepStateToString(mock_engine->sleepController().state());
+    });
+
+    EXPECT_CALL(*mock_writer_, Write).WillOnce(Invoke([](const std::string& data) {
+        EXPECT_THAT(data, HasSubstr(R"("detail":"engine is not ready")"));
+        EXPECT_THAT(data, HasSubstr(R"("state":"SLEEPING")"));
+        return true;
+    }));
+
+    auto writer = dynamic_cast<http_server::HttpResponseWriter*>(mock_writer_.get());
+    ASSERT_TRUE(writer != nullptr);
+    std::unique_ptr<http_server::HttpResponseWriter> writer_ptr(writer);
+    http_server::HttpRequest                         request;
+    health_service->healthCheck(writer_ptr, request);
     EXPECT_EQ(writer_ptr->_type, http_server::HttpResponseWriter::WriteType::Normal);
     EXPECT_EQ(writer_ptr->_headers.count("Content-Type"), 1);
     EXPECT_EQ(writer_ptr->_headers.at("Content-Type"), "application/json");

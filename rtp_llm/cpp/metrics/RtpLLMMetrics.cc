@@ -9,6 +9,7 @@ namespace rtp_llm {
 AUTIL_LOG_SETUP(rtp_llm, RpcMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RpcWorkerStatusMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RpcCacheStatusMetrics);
+AUTIL_LOG_SETUP(rtp_llm, SleepLifecycleMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMStreamMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpEmbeddingGlobalMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpEmbeddingStreamMetrics);
@@ -98,6 +99,37 @@ bool RpcWorkerStatusMetrics::init(kmonitor::MetricsGroupManager* manager) {
 void RpcWorkerStatusMetrics::report(const kmonitor::MetricsTags* tags, RpcWorkerStatusMetricsCollector* collector) {
     REPORT_QPS(qps);
     REPORT_GAUGE(total_rt_us);
+}
+
+bool SleepLifecycleMetrics::init(kmonitor::MetricsGroupManager* manager) {
+    REGISTER_GAUGE_MUTABLE_METRIC(drain_rt_us_metric, "rtp_llm_sleep_drain_rt_us");
+    REGISTER_QPS_MUTABLE_METRIC(drain_timeout_qps_metric, "rtp_llm_sleep_drain_timeout_qps");
+    REGISTER_GAUGE_MUTABLE_METRIC(vmm_op_rt_us_metric, "rtp_llm_sleep_vmm_op_rt_us");
+    REGISTER_GAUGE_MUTABLE_METRIC(mr_op_rt_us_metric, "rtp_llm_sleep_mr_op_rt_us");
+    REGISTER_GAUGE_MUTABLE_METRIC(vmm_tag_known_bytes_metric, "rtp_llm_sleep_vmm_tag_known_bytes");
+    REGISTER_GAUGE_MUTABLE_METRIC(vmm_tag_known_count_metric, "rtp_llm_sleep_vmm_tag_known_count");
+    return true;
+}
+
+void SleepLifecycleMetrics::report(const kmonitor::MetricsTags* tags, SleepLifecycleMetricsCollector* collector) {
+    if (collector->drain_rt_us >= 0) {
+        REPORT_MUTABLE_METRIC(drain_rt_us_metric, collector->drain_rt_us);
+    }
+    if (collector->drain_timeout_qps) {
+        REPORT_MUTABLE_QPS(drain_timeout_qps_metric);
+    }
+    if (collector->vmm_op_rt_us >= 0) {
+        REPORT_MUTABLE_METRIC(vmm_op_rt_us_metric, collector->vmm_op_rt_us);
+    }
+    if (collector->mr_op_rt_us >= 0) {
+        REPORT_MUTABLE_METRIC(mr_op_rt_us_metric, collector->mr_op_rt_us);
+    }
+    if (collector->vmm_tag_known_bytes >= 0) {
+        REPORT_MUTABLE_METRIC(vmm_tag_known_bytes_metric, collector->vmm_tag_known_bytes);
+    }
+    if (collector->vmm_tag_known_count >= 0) {
+        REPORT_MUTABLE_METRIC(vmm_tag_known_count_metric, collector->vmm_tag_known_count);
+    }
 }
 
 void RpcMetrics::report(const kmonitor::MetricsTags* tags, RpcMetricsCollector* collector) {
