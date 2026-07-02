@@ -108,6 +108,7 @@ void RecommendationLogitsProcessor::process(const SamplerInputs& inputs, size_t 
 
     auto         logits     = inputs.logits.narrow(0, start_idx, batch_size);
     const size_t vocab_size = logits.size(1);
+    RTP_LLM_CHECK_WITH_INFO(vocab_size > 0, "process called with vocab_size=0");
 
     // --- top-K 分叉遮蔽：对非主序列在 combo 起始位置遮蔽前 i 个最大 logit ---
     // 批量化设计决策：对所有非主行做一次 batch topk(max_k)，而非逐行筛选后再 gather/topk/scatter。
@@ -128,6 +129,8 @@ void RecommendationLogitsProcessor::process(const SamplerInputs& inputs, size_t 
             if (k > max_k) max_k = k;
         }
         if (max_k > 0) {
+            // 防御：确保 topk 的 k 不超过 vocab_size（torch::topk 要求 k <= dim_size）
+            max_k = std::min(max_k, static_cast<int>(vocab_size));
             // 仅对非主序列(row 1~N-1)做 topk，避免对 row 0 的无效计算
             auto non_primary_logits = logits.narrow(0, 1, batch_size - 1);
             auto topk_indices = non_primary_logits.topk(max_k, /*dim=*/1).indices();
@@ -191,13 +194,15 @@ void RecommendationLogitsProcessor::updateMultiSeqStatus(const std::vector<int>&
     RTP_LLM_CHECK_WITH_INFO(!infos_.empty(),
         "updateMultiSeqStatus called on empty processor");
     // 业务不变量：updateMultiSeqStatus 用于 beam search 重排序列，与 cross-sequence ban 互斥
-    RTP_LLM_CHECK_WITH_INFO(!infos_[0].enable_cross_sequence_ban,
+    RTP_LLM_CHECK_WITH_INFO(
+        std::none_of(infos_.begin(), infos_.end(),
+                     [](const StreamRecommendationInfo& info) { return info.enable_cross_sequence_ban; }),
         "updateMultiSeqStatus must not be called when cross_sequence_ban is enabled");
     std::vector<StreamRecommendationInfo> new_infos;
     new_infos.reserve(src_batch_indices.size());
     for (const auto src_idx : src_batch_indices) {
         RTP_LLM_CHECK((size_t)src_idx < infos_.size());
-        new_infos.push_back(infos_[src_idx].copy());
+        new_infos.push_back(infos_[src_idx]);
     }
     infos_ = std::move(new_infos);
 }
@@ -277,15 +282,15 @@ void RecommendationLogitsProcessor::updateStatus(const torch::Tensor& new_tokens
         info.current_output_length += num_new_tokens;
     }
 
-    // 跨序列增量广播（非对称模式）：仅将其他序列本步新完成的 combo 插入非主序列，跳过自身已有的
+    // 跨序列增量广播（非对称模式）：将其他序列本步新完成的 combo 插入非主序列
     // 设计意图（primary-protected）：序列 0（主序列）仅保留自身产生的 banned_combos，不接收其他
-    // 序列的 ban。补充序列接收其他序列的新增 combo，确保彼此不重复。
+    // 序列的 ban。补充序列接收所有其他序列的新增 combo，确保彼此不重复。
     // 复杂度：O((N-1) * N * new_combos_per_step)，生产场景 N=2~4、每步最多 1 个 combo 完成，
-    // 实际开销可忽略。若未来 N 增大，可考虑将 banned_combos 改为 shared 视图避免拷贝。
+    // 实际开销可忽略。若未来 N 增大，可将序列 0 的 combo 批量插入后再处理交叉插入，或改用 shared 视图。
     if (any_combo_completed && need_broadcast) {
         for (size_t i = 1; i < size(); ++i) {
             for (size_t j = 0; j < size(); ++j) {
-                if (j == i) continue;  // 跳过自身，避免冗余 set::insert
+                if (j == i) continue;
                 for (const auto& combo : new_combos_per_seq[j]) {
                     infos_[i].banned_combos.insert(combo);
                 }

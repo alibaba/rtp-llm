@@ -61,23 +61,11 @@ struct StreamRecommendationInfo {
         end_think_token_ids(end_think_token_ids),
         think_done(end_think_token_ids.empty()) {}
 
-    StreamRecommendationInfo copy() const {
-        StreamRecommendationInfo info;
-        info.combo_token_size              = combo_token_size;
-        info.input_length                  = input_length;
-        info.current_output_length         = current_output_length;
-        info.needs_token_offset            = needs_token_offset;
-        info.enable_cross_sequence_ban     = enable_cross_sequence_ban;
-        info.cross_seq_diverge_start_combo = cross_seq_diverge_start_combo;
-        info.pos_in_combo                  = pos_in_combo;
-        info.completed_combo_count         = completed_combo_count;
-        info.current_prefix                = current_prefix;
-        info.banned_combos                 = banned_combos;
-        info.end_think_token_ids           = end_think_token_ids;
-        info.think_done                    = think_done;
-        info.end_think_match_pos           = end_think_match_pos;
-        return info;
-    }
+    // 默认拷贝构造/赋值即为深拷贝（std::set、std::vector 均值语义），无需手动 copy()。
+    StreamRecommendationInfo(const StreamRecommendationInfo&) = default;
+    StreamRecommendationInfo& operator=(const StreamRecommendationInfo&) = default;
+    StreamRecommendationInfo(StreamRecommendationInfo&&) = default;
+    StreamRecommendationInfo& operator=(StreamRecommendationInfo&&) = default;
 };
 
 class RecommendationLogitsProcessor: public BaseLogitsProcessor {
