@@ -117,6 +117,15 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
     if USE_INITIAL_STATE:
         if IS_CONTINUOUS_BATCHING:
             load_block_offset = cal_block_idx(sequence_length - 1, SEQ_SIZE_PER_BLOCK)
+            # Clamp to the last allocated block: when sequence_length exceeds
+            # max_block_size * SEQ_SIZE_PER_BLOCK, load_block_offset reaches
+            # max_block_size — one past the end of block_map. An OOB block_map
+            # read yields a garbage block id (or faults on PPU hardware which
+            # evaluates load addresses unconditionally). Clamping keeps the read
+            # on the last valid block; the read_block_id <= 0 check below will
+            # then cause an early return for truly exhausted sequences.
+            if load_block_offset >= max_block_size:
+                load_block_offset = (max_block_size - 1).to(tl.int64)
             read_block_id = tl.load(
                 block_map + i_n * max_block_size + load_block_offset
             ).to(tl.int64)
@@ -158,14 +167,21 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
             write_block_offset = (
                 cal_block_idx(sequence_length, SEQ_SIZE_PER_BLOCK) + i_t
             )
-            write_block_id = tl.load(
-                block_map + i_n * max_block_size + write_block_offset
-            ).to(tl.int64)
-            p_ht = ht + write_block_id * stride_final_state_token
+            # Guard: when sequence_length == max_block_size * SEQ_SIZE_PER_BLOCK
+            # (sequence exactly fills all allocated KV-cache blocks), write_block_offset
+            # equals max_block_size — one past the last valid entry.  Skip the write
+            # to avoid an OOB block_map read and a store to a garbage address.
+            if write_block_offset < max_block_size:
+                write_block_id = tl.load(
+                    block_map + i_n * max_block_size + write_block_offset
+                ).to(tl.int64)
+                p_ht = ht + write_block_id * stride_final_state_token
+                p_ht = p_ht + i_hv * K * V + o_v[:, None] * K + o_k[None, :]
+                tl.store(p_ht, b_h.to(p_ht.dtype.element_ty), mask=mask_h)
         else:
             p_ht = ht + (bos + i_t) * stride_final_state_token
-        p_ht = p_ht + i_hv * K * V + o_v[:, None] * K + o_k[None, :]
-        tl.store(p_ht, b_h.to(p_ht.dtype.element_ty), mask=mask_h)
+            p_ht = p_ht + i_hv * K * V + o_v[:, None] * K + o_k[None, :]
+            tl.store(p_ht, b_h.to(p_ht.dtype.element_ty), mask=mask_h)
 
         p_q += stride_qs
         p_k += stride_ks
@@ -402,6 +418,7 @@ def fused_recurrent_gated_delta_rule(
         # a proper V-first contiguous tensor has stride(-2) == K and stride(-1) == 1.
         if V == K and initial_state.stride(-2) == 1 and initial_state.stride(-1) == V:
             import warnings
+
             warnings.warn(
                 f"initial_state appears to be a transposed K-first view "
                 f"(stride(-2)=1, stride(-1)={V}) rather than a true V-first layout. "
