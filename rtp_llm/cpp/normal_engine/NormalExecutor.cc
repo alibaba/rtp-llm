@@ -2,6 +2,7 @@
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include <cstdlib>
+#include <algorithm>
 #include <memory>
 #include "rtp_llm/cpp/utils/StatusUtil.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
@@ -64,7 +65,9 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
                                                        params.eplb_config);
     }
 
-    sampler_.reset(new Sampler(SamplerInitParams{}));
+    const auto max_sampler_batch_size =
+        static_cast<size_t>(std::max<int64_t>(1, params.runtime_config.max_generate_batch_size));
+    sampler_.reset(new Sampler(SamplerInitParams{max_sampler_batch_size}));
 
     GptModelInitParams model_init_params(
         {params.gpt_weights,
