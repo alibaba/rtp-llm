@@ -128,6 +128,8 @@ BlockPool::~BlockPool() {
 }
 
 void BlockPool::validateConfig() const {
+    RTP_LLM_CHECK_WITH_INFO(!(use_pinned_cpu_backing_ && use_cuda_malloc_backing_),
+                            "BlockPool cannot use both pinned CPU backing and cudaMalloc backing");
     RTP_LLM_CHECK_WITH_INFO(!config_.memory_layouts.empty(), "BlockPoolConfig.memory_layouts must not be empty");
     RTP_LLM_CHECK_WITH_INFO(config_.block_num > 0, "BlockPoolConfig.block_num must be > 0");
 

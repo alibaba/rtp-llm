@@ -648,6 +648,7 @@ struct CacheConfig {
     }
 
     void finalizeBlockNums(uint32_t global_block_num, const RuntimeConfig& runtime_config) {
+        // TODO: use RuntimeConfig when group-level block sizing needs runtime parallelism context.
         (void)runtime_config;
         if (!use_independent_block_pools || !group_block_layout_initialized || groups.empty()) {
             explicitly_sized_pool_reserve_bytes = 0;

@@ -328,13 +328,8 @@ SharedBlockCache::EvictResult SharedBlockCache::selectAndEvictForGroup(int group
     size_t selected_blocks = 0;
     for (const auto cache_key : lru_keys) {
         UnifiedCacheItem removed_item;
-        bool has_target_slot = false;
-        for (const auto& [key, item] : lru_cache_.items()) {
-            if (key == cache_key) {
-                has_target_slot = hasUsableSlot(item, group_id);
-                break;
-            }
-        }
+        const auto* item      = lru_cache_.find(cache_key);
+        bool        has_target_slot = item && hasUsableSlot(*item, group_id);
         if (!has_target_slot) {
             continue;
         }
@@ -745,10 +740,9 @@ SharedBlockCache::collectEvictChainLocked(const NamespacedKey& leaf_key) const {
 
 bool SharedBlockCache::chainHasUsableSlotLocked(const std::vector<NamespacedKey>& chain, int group_id) const {
     for (const auto& key : chain) {
-        for (const auto& [cache_key, item] : lru_cache_.items()) {
-            if (cache_key == key.cache_key && hasUsableSlot(item, group_id)) {
-                return true;
-            }
+        const auto* item = lru_cache_.find(key.cache_key);
+        if (item && hasUsableSlot(*item, group_id)) {
+            return true;
         }
     }
     return false;
@@ -766,13 +760,8 @@ bool SharedBlockCache::chainHasReachableAncestorSlotLocked(const std::vector<Nam
             || !hasFlatItemLocked(parent_it->first.cache_key) || isFlatItemResidentLocked(parent_it->first.cache_key)) {
             return false;
         }
-        bool parent_has_target_slot = false;
-        for (const auto& [cache_key, item] : lru_cache_.items()) {
-            if (cache_key == parent_it->first.cache_key && hasUsableSlot(item, group_id)) {
-                parent_has_target_slot = true;
-                break;
-            }
-        }
+        const auto* parent_item            = lru_cache_.find(parent_it->first.cache_key);
+        bool        parent_has_target_slot = parent_item && hasUsableSlot(*parent_item, group_id);
         if (parent_has_target_slot) {
             bool all_children_evictable = true;
             for (const auto& child : parent_it->second.children) {
@@ -886,12 +875,8 @@ bool SharedBlockCache::hasFlatItemLocked(CacheKeyType cache_key) const {
 }
 
 bool SharedBlockCache::isFlatItemResidentLocked(CacheKeyType cache_key) const {
-    for (const auto& [key, item] : lru_cache_.items()) {
-        if (key == cache_key) {
-            return item.is_resident;
-        }
-    }
-    return false;
+    const auto* item = lru_cache_.find(cache_key);
+    return item && item->is_resident;
 }
 
 bool SharedBlockCache::isIndependentEvictionGroupLocked(int group_id) const {

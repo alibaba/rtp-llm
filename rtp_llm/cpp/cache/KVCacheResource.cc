@@ -48,12 +48,12 @@ void BlockIds::remove(const std::vector<size_t>& indices) {
 
 void BlockIds::swap(size_t pos_a, size_t pos_b) {
     if (pos_a >= block_indices.size() || pos_b >= block_indices.size()) {
-        RTP_LLM_LOG_ERROR("BlockIds::swap: pos_a=%d or pos_b=%d is out of range, block_indices.size()=%d",
+        RTP_LLM_LOG_ERROR("BlockIds::swap: pos_a=%zu or pos_b=%zu is out of range, block_indices.size()=%zu",
                           pos_a,
                           pos_b,
                           block_indices.size());
         RTP_LLM_CHECK_WITH_INFO(false,
-                                "BlockIds::swap: pos_a=%d or pos_b=%d is out of range, block_indices.size()=%d",
+                                "BlockIds::swap: pos_a=%zu or pos_b=%zu is out of range, block_indices.size()=%zu",
                                 pos_a,
                                 pos_b,
                                 block_indices.size());

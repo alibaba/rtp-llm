@@ -40,7 +40,7 @@ private:
 
 private:
     // NOTE: linear attention cache can be sparsified; current implementation is conservative:
-    // - always keep the last 2 blocks (decode edge case: read block i, write block i+1)
+    // - always keep policy_.active_tail_blocks tail blocks
     // - other blocks can be freed (set to NULL_BLOCK_IDX)
     int linear_step_ = 0;
 };

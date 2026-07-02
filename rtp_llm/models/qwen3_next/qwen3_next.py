@@ -147,6 +147,7 @@ class Qwen3NextBase(BaseModel):
         full_desc.cache_type = CacheType.MHA
         full_desc.seq_size_per_block = int(model_config.attn_config.tokens_per_block)
         full_desc.size_per_head = int(model_config.attn_config.size_per_head)
+        full_desc.num_kv_heads = int(model_config.attn_config.kv_head_num)
 
         linear_config = model_config.linear_attention_config
         linear_desc = KVCacheSpecDesc()

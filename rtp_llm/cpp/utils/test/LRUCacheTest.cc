@@ -186,4 +186,24 @@ TEST_F(LRUCacheTest, testGetUpdatesLRUOrder) {
     ASSERT_TRUE(cache.contains(key(1, 1)));
 }
 
+
+TEST_F(LRUCacheTest, testFindDoesNotUpdateLRUOrder) {
+    LRUCache<IntPair, std::string, IntPairHash, IntPairEqual> cache(3);
+
+    cache.put(key(1, 1), "A");
+    cache.put(key(2, 2), "B");
+    cache.put(key(3, 3), "C");
+
+    const auto* value = cache.find(key(1, 1));
+    ASSERT_NE(value, nullptr);
+    ASSERT_EQ(*value, "A");
+
+    cache.put(key(4, 4), "D");
+
+    ASSERT_FALSE(cache.contains(key(1, 1)));
+    ASSERT_TRUE(cache.contains(key(2, 2)));
+    ASSERT_TRUE(cache.contains(key(3, 3)));
+    ASSERT_TRUE(cache.contains(key(4, 4)));
+}
+
 }  // namespace rtp_llm

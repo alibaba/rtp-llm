@@ -1,5 +1,9 @@
 #include "rtp_llm/cpp/cache/connector/memory/MemoryAsyncContext.h"
 
+#include <exception>
+
+#include "rtp_llm/cpp/utils/Logger.h"
+
 namespace rtp_llm {
 
 // ----------------------------- MemoryAsyncMatchContext ---------------------------------
@@ -76,27 +80,37 @@ void MemoryAsyncContext::waitDone() {
         result      = broadcast_result_;
     }
 
-    if (result) {
-        result->waitDone();
-    }
+    auto finalize = [this]() {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            already_done_.store(true);
+            finalizing_ = false;
+        }
+        cv_.notify_all();
+    };
 
     bool ok = false;
     std::function<void(bool)> done_callback;
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        ok            = successLocked();
-        done_callback = std::move(done_callback_);
-    }
-    if (done_callback) {
-        done_callback(ok);
+    try {
+        if (result) {
+            result->waitDone();
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            ok            = successLocked();
+            done_callback = std::move(done_callback_);
+        }
+        if (done_callback) {
+            done_callback(ok);
+        }
+    } catch (const std::exception& e) {
+        RTP_LLM_LOG_WARNING("MemoryAsyncContext::waitDone finalization failed: %s", e.what());
+    } catch (...) {
+        RTP_LLM_LOG_WARNING("MemoryAsyncContext::waitDone finalization failed with unknown exception");
     }
 
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        already_done_.store(true);
-        finalizing_ = false;
-    }
-    cv_.notify_all();
+    finalize();
 }
 
 void MemoryAsyncContext::setBroadcastResult(

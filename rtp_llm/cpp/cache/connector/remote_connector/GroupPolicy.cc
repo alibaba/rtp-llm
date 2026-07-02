@@ -88,18 +88,20 @@ bool DefaultLayerGroupPolicy::init() {
                 }
             }
             if (groups_.count(group_idx) == 0) {
+                if (groups_.size() >= 64) {
+                    RTP_LLM_LOG_ERROR("not support bigger than 64 groups");
+                    return false;
+                }
                 std::string group_name         = is_full_group ? ("F" + std::to_string(group_idx)) :
                                                                  (GetOtherGroupPrefixName() + std::to_string(group_idx));
                 groups_[group_idx]             = Group{is_full_group, group_name_bithash, group_name};
                 group_to_layer_ids_[group_idx] = {};
-                group_name_bithash <<= 1;
+                if (groups_.size() < 64) {
+                    group_name_bithash <<= 1;
+                }
             }
             group_to_layer_ids_.at(group_idx).push_back(layer);
         }
-    }
-    if (groups_.size() > 64) {
-        RTP_LLM_LOG_ERROR("not support bigger than 64 groups");
-        return false;
     }
     return true;
 }

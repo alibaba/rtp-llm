@@ -666,14 +666,17 @@ PrefixTreeMemoryBlockCache::popStateOnlyFromChainLocked(const CacheKeyType& leaf
         if (!state.has_value || state.detached || state.backing_type != backing_type || state.is_resident
             || state.in_flight_ref > 0) {
             continue;
-	        }
-	        auto item = toItemLocked(node_it->second, CacheBlockKind::STATE_SWA_KV);
-	        eraseEvictKeyLocked(node_it->second, CacheBlockKind::STATE_SWA_KV);
-	        state.detached = true;
-	        decrementAncestorsLocked(item->cache_key, CacheBlockKind::STATE_SWA_KV);
-	        const auto descendant_ref_count = state.subtree_ref_count;
-	        state                           = KindState{};
-	        state.subtree_ref_count         = descendant_ref_count;
+        }
+        auto item = toItemLocked(node_it->second, CacheBlockKind::STATE_SWA_KV);
+        if (!item.has_value()) {
+            continue;
+        }
+        eraseEvictKeyLocked(node_it->second, CacheBlockKind::STATE_SWA_KV);
+        state.detached = true;
+        decrementAncestorsLocked(item->cache_key, CacheBlockKind::STATE_SWA_KV);
+        const auto descendant_ref_count = state.subtree_ref_count;
+        state                           = KindState{};
+        state.subtree_ref_count         = descendant_ref_count;
         pruneLocked(item->cache_key);
         return item;
     }

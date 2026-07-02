@@ -69,7 +69,7 @@ inline const char* cacheEvictPolicyName(CacheEvictPolicy evict_policy) {
 inline CacheGroupPolicy defaultCacheGroupPolicy(CacheGroupType group_type) {
     CacheGroupPolicy policy;
     policy.group_type         = group_type;
-    policy.active_tail_blocks = group_type == CacheGroupType::LINEAR ? 1 : (group_type == CacheGroupType::SWA ? 2 : 0);
+    policy.active_tail_blocks = group_type == CacheGroupType::LINEAR ? 2 : (group_type == CacheGroupType::SWA ? 2 : 0);
     policy.prefix_reusable = group_type == CacheGroupType::FULL;
     policy.is_cp_shardable = group_type == CacheGroupType::FULL;
     policy.has_sparse_slots = group_type != CacheGroupType::FULL;

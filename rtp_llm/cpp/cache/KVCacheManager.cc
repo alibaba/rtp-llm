@@ -187,7 +187,6 @@ bool KVCacheManager::init() {
 
     allocator_->setCPSlotMapper(cp_slot_mapper_);
     allocator_->setSharedBlockCache(shared_cache);
-    allocator_->setCPSlotMapper(cp_slot_mapper_);
     RTP_LLM_CHECK_WITH_INFO(allocator_->init(), "KVCacheAllocator init failed");
     shared_cache->setIndependentGroupEviction(enable_independent_group_eviction,
                                               allocator_->independentEvictionGroupIds());

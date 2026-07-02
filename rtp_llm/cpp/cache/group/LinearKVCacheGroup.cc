@@ -27,10 +27,11 @@ bool LinearKVCacheGroup::shouldMaterializeBlock(int pos, int seq_len, int reserv
         return false;
     }
 
-    const int  step        = std::max(1, linear_step_);
-    const int  seq_slots   = needBlocksNum(seq_len, 0, 0);
-    const int  total_slots = needBlocksNum(seq_len, 0, reserve_step);
-    const bool is_seq_tail = (seq_slots > 0) && (pos >= std::max(0, seq_slots - 2)) && (pos < seq_slots);
+    const int  step               = std::max(1, linear_step_);
+    const int  active_tail_blocks = std::max(1, static_cast<int>(activeTailBlocks()));
+    const int  seq_slots          = needBlocksNum(seq_len, 0, 0);
+    const int  total_slots        = needBlocksNum(seq_len, 0, reserve_step);
+    const bool is_seq_tail = (seq_slots > 0) && (pos >= std::max(0, seq_slots - active_tail_blocks)) && (pos < seq_slots);
     const bool is_reserve  = (reserve_step > 0) && (pos >= seq_slots) && (pos < total_slots);
     const bool step_hit    = (((pos + 1) % step) == 0);
     return is_reserve || (enable_reuse_cache ? (step_hit || is_seq_tail) : is_seq_tail);
@@ -90,8 +91,10 @@ bool LinearKVCacheGroup::malloc(BlockIds& block_ids, int seq_len, bool enable_re
     const int total_slots        = needBlocksNum(seq_len, 0, reserve_step);
     const int new_blocks_len     = std::max(total_slots - current_blocks_len, 0);
 
+    const int active_tail_blocks = std::max(1, static_cast<int>(activeTailBlocks()));
     auto should_materialize = [&](int pos) {
-        const bool is_seq_tail = (seq_slots > 0) && (pos >= std::max(0, seq_slots - 2)) && (pos < seq_slots);
+        const bool is_seq_tail =
+            (seq_slots > 0) && (pos >= std::max(0, seq_slots - active_tail_blocks)) && (pos < seq_slots);
         const bool is_reserve  = (reserve_step > 0) && (pos >= seq_slots) && (pos < total_slots);
         const bool step_hit    = (((pos + 1) % step) == 0);
         return is_reserve || (enable_reuse_cache ? (step_hit || is_seq_tail) : is_seq_tail);
@@ -166,12 +169,13 @@ void LinearKVCacheGroup::removeSkippedBlocks(BlockIds& block_ids, bool enable_re
     if (block_indices.empty()) {
         return;
     }
-    const int step       = std::max(1, linear_step_);
-    const int block_size = static_cast<int>(block_indices.size());
+    const int step               = std::max(1, linear_step_);
+    const int active_tail_blocks = std::max(1, static_cast<int>(activeTailBlocks()));
+    const int block_size         = static_cast<int>(block_indices.size());
 
     BlockIndicesType    blocks_to_free;
     std::vector<size_t> pos_to_remove;
-    for (int i = block_size - 3 - reserve_step; i >= 0; i--) {
+    for (int i = block_size - active_tail_blocks - 1 - reserve_step; i >= 0; i--) {
         if (isNullBlockIdx(block_indices[i])) {
             continue;
         }
