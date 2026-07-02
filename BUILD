@@ -32,12 +32,32 @@ config_setting(
     define_values = {
         "using_cuda12_9_x86": "false",
         "using_cuda12_arm": "false",
+        "using_cuda13_x86": "false",
     },
 )
 
 config_setting(
     name = "using_cuda12_arm",
     values = {"define": "using_cuda12_arm=true"},
+)
+
+config_setting(
+    name = "using_cuda13_arm",
+    define_values = {
+        "using_cuda": "true",
+        "using_cuda12": "true",
+        "using_cuda13_arm": "true",
+        "using_cuda12_arm": "true",
+    },
+)
+
+config_setting(
+    name = "using_cuda13_x86",
+    define_values = {
+        "using_cuda": "true",
+        "using_cuda12": "true",
+        "using_cuda13_x86": "true",
+    },
 )
 
 config_setting(
@@ -74,6 +94,14 @@ selects.config_setting_group(
     match_any = [
         ":using_cuda12_9_x86",
         ":using_cuda12_arm",
+    ],
+)
+
+selects.config_setting_group(
+    name = "using_cu12_9_or_13_x86",
+    match_any = [
+        ":using_cuda12_9_x86",
+        ":using_cuda13_x86",
     ],
 )
 
