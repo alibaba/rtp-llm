@@ -206,15 +206,11 @@ void RecommendationLogitsProcessor::process(const SamplerInputs& inputs, size_t 
 }
 
 void RecommendationLogitsProcessor::updateMultiSeqStatus(const std::vector<int>& src_batch_indices) {
-    // 安全前置：避免空 infos_ 时访问导致未定义行为
     RTP_LLM_CHECK_WITH_INFO(!infos_.empty(),
         "updateMultiSeqStatus called on empty processor");
     // 业务不变量：updateMultiSeqStatus 用于 beam search 重排序列，与 cross-sequence ban 互斥
-    // 检查所有序列（而非仅 infos_[0]），以正确处理 insert() 合并后 flag 不一致的场景
-    for (const auto& info : infos_) {
-        RTP_LLM_CHECK_WITH_INFO(!info.enable_cross_sequence_ban,
-            "updateMultiSeqStatus must not be called when cross_sequence_ban is enabled");
-    }
+    RTP_LLM_CHECK_WITH_INFO(!infos_[0].enable_cross_sequence_ban,
+        "updateMultiSeqStatus must not be called when cross_sequence_ban is enabled");
     std::vector<StreamRecommendationInfo> new_infos;
     new_infos.reserve(src_batch_indices.size());
     for (const auto src_idx : src_batch_indices) {
@@ -271,15 +267,7 @@ void RecommendationLogitsProcessor::updateStatus(const torch::Tensor& new_tokens
 
     bool any_combo_completed = false;
     // 仅在跨序列 ban 开启时分配 combo 收集容器，避免未启用功能时的无效内存分配
-    // 检查任意序列是否启用，而非仅依赖 infos_[0]，以正确处理 insert() 合并后 flag 不一致的场景
-    bool any_cross_seq_ban = false;
-    for (const auto& info : infos_) {
-        if (info.enable_cross_sequence_ban) {
-            any_cross_seq_ban = true;
-            break;
-        }
-    }
-    const bool need_broadcast = size() > 1 && any_cross_seq_ban;
+    const bool need_broadcast = size() > 1 && infos_[0].enable_cross_sequence_ban;
     std::vector<std::vector<std::vector<int>>> new_combos_per_seq;
     if (need_broadcast) {
         new_combos_per_seq.resize(size());

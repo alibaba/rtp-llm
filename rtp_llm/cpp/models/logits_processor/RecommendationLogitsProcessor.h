@@ -103,13 +103,6 @@ public:
     }
     void insert(std::shared_ptr<RecommendationLogitsProcessor> others) {
         if (others != nullptr && !others->infos_.empty()) {
-            // 防御：合并后所有序列的 cross_sequence_ban 标志应一致，否则广播条件依赖 infos_[0] 会失效
-            if (!infos_.empty()
-                && infos_[0].enable_cross_sequence_ban != others->infos_[0].enable_cross_sequence_ban) {
-                RTP_LLM_LOG_WARNING(
-                    "RecommendationLogitsProcessor::insert: merging processors with inconsistent "
-                    "enable_cross_sequence_ban flags, broadcast behavior may be incorrect");
-            }
             infos_.insert(infos_.end(), others->infos_.begin(), others->infos_.end());
         }
     }

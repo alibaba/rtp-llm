@@ -116,10 +116,11 @@ class GenerateConfig(BaseModel):
     def _check_cross_seq_ban_compatibility(self):
         """cross_sequence_ban 与 beam search / combo_token_size<2 互斥，不匹配时输出 warning。"""
         if self.enable_cross_sequence_ban:
-            if self.num_beams > 1:
+            if self.has_num_beams():
                 logging.getLogger(__name__).warning(
-                    "enable_cross_sequence_ban is incompatible with num_beams=%d, "
-                    "cross_sequence_ban will be disabled at runtime", self.num_beams)
+                    "enable_cross_sequence_ban is incompatible with beam search "
+                    "(max_num_beams=%d), cross_sequence_ban will be disabled at runtime",
+                    self.max_num_beams())
             elif self.combo_token_size < 2:
                 logging.getLogger(__name__).warning(
                     "enable_cross_sequence_ban requires combo_token_size>=2, got %d, "

@@ -68,7 +68,18 @@ class TestCrossSeqBanCompatibility(unittest.TestCase):
                 num_beams=4,
                 combo_token_size=3,
             )
-        self.assertTrue(any("incompatible with num_beams" in msg for msg in cm.output))
+        self.assertTrue(any("incompatible with beam search" in msg for msg in cm.output))
+
+    def test_variable_num_beams_incompatible_warns(self):
+        """开启 cross_seq_ban + num_beams=1 但 variable_num_beams 包含>1 应触发 warning。"""
+        with self.assertLogs(level=logging.WARNING) as cm:
+            GenerateConfig(
+                enable_cross_sequence_ban=True,
+                num_beams=1,
+                variable_num_beams=[1, 4],
+                combo_token_size=3,
+            )
+        self.assertTrue(any("incompatible with beam search" in msg for msg in cm.output))
 
     def test_combo_token_size_lt2_warns(self):
         """开启 cross_seq_ban + combo_token_size<2 应触发 warning。"""
