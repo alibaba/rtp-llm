@@ -46,6 +46,8 @@ public:
     // for test
     int64_t                                   waitingStreamsSize();
     int64_t                                   runningStreamsSize();
+    int64_t                                   pendingDecodeStreamsSize();
+    int64_t                                   decodeSincePrefillForTest();
     std::vector<EngineScheduleInfo::TaskInfo> waitingTaskList();
     std::vector<EngineScheduleInfo::TaskInfo> runningTaskList();
     int64_t                                   onflightStreams() override;
@@ -60,6 +62,18 @@ private:
     void cancelStreams(std::list<GenerateStreamPtr>& streams);
     bool checkInputLength(const GenerateStreamPtr& stream);
 
+    enum class RoundType {
+        PREFILL,
+        DECODE
+    };
+
+    // PDFUSION prefill-first scheduling
+    std::list<GenerateStreamPtr> schedulePrefillFirst();
+    std::list<GenerateStreamPtr> scheduleLegacy();
+    RoundType                    chooseRound();
+    void                         reapFinished(std::list<GenerateStreamPtr>& streams);
+    void                         promotePendingDecodeStreams();
+
 protected:
     void evaluateAndUpdateStreams(std::list<GenerateStreamPtr>& streams);
 
@@ -68,16 +82,23 @@ protected:
     ModelSpecificConfig             model_specific_config_;
     std::list<GenerateStreamPtr>    waiting_streams_;
     std::list<GenerateStreamPtr>    loading_cache_streams_;
+    // Streams in StreamState::RUNNING. In PDFUSION, these are decode-ready streams:
+    // held back during prefill rounds and returned only on decode rounds.
     std::list<GenerateStreamPtr>    running_streams_;
     std::list<GenerateStreamPtr>    new_streams_;
+    // PDFUSION only: streams whose prefill batch has run and now wait for KV-gated decode promotion.
+    std::list<GenerateStreamPtr>    pending_decode_streams_;
     std::shared_ptr<KVCacheManager> cache_manager_;
     std::atomic<int64_t>            last_schedule_time_      = autil::TimeUtility::currentTimeInMilliSeconds();
     size_t                          max_seq_len_             = 0;
     size_t                          max_batch_tokens_size_   = 0;
     size_t                          max_generate_batch_size_ = 1;
-    const bool                      need_fill_fake_stream_   = false;
-    std::atomic<bool>               stop_                    = false;
-    bool                            schedule_trigger_        = false;
+    int64_t                         decode_prefill_step_     = 1;
+    int64_t                         decode_since_prefill_  = 0;
+    int64_t                         prefill_since_decode_   = 0;
+    const bool                      need_fill_fake_stream_  = false;
+    std::atomic<bool>               stop_                   = false;
+    bool                            schedule_trigger_       = false;
     std::mutex                      lock_;
     std::condition_variable         cond_;
     kmonitor::MetricsReporterPtr    metrics_reporter_ = nullptr;

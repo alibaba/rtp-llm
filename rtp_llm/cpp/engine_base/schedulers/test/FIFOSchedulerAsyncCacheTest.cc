@@ -51,13 +51,14 @@ protected:
         cache_manager_->coordinator_ = mock_coord_;
     }
 
-    std::shared_ptr<FIFOScheduler> createScheduler() {
+    std::shared_ptr<FIFOScheduler> createScheduler(RoleType role_type = RoleType::PREFILL) {
         ModelConfig model_config;
         model_config.max_seq_len = 8192;
         RuntimeConfig runtime_config;
         runtime_config.max_generate_batch_size                     = 100;
         runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8192;
         PDSepConfig         pd_sep_config;
+        pd_sep_config.role_type = role_type;
         ParallelismConfig   parallelism_config;
         ModelSpecificConfig model_specific_config;
         return std::make_shared<FIFOScheduler>(
@@ -186,6 +187,47 @@ TEST_F(FIFOSchedulerAsyncCacheTest, testEvaluateLoadingCache_LoadDone_MovesToRun
     ASSERT_EQ(scheduler->runningStreamsSize(), 1);
 }
 
+TEST_F(FIFOSchedulerAsyncCacheTest, testPDFusionLoadingCacheLifecyclePromotesToDecode) {
+    setupMockCoordinator();
+
+    auto mock_ctx = std::make_shared<NiceMock<MockAsyncContext>>();
+    ON_CALL(*mock_ctx, done()).WillByDefault(Return(true));
+    ON_CALL(*mock_ctx, success()).WillByDefault(Return(true));
+    ON_CALL(*mock_ctx, waitDone()).WillByDefault(Return());
+    EXPECT_CALL(*mock_coord_, asyncRead(_)).WillOnce(Return(std::static_pointer_cast<AsyncContext>(mock_ctx)));
+
+    auto scheduler = createScheduler(RoleType::PDFUSION);
+    auto stream    = createStream({1, 2, 3}, /*reuse_cache=*/true, /*enable_memory_cache=*/true);
+
+    ASSERT_TRUE(scheduler->enqueue(stream).ok());
+
+    auto loading = scheduler->schedule();
+    ASSERT_TRUE(loading.ok());
+    ASSERT_EQ(loading.value().size(), 0);
+    ASSERT_EQ(stream->getStatus(), StreamState::LOADING_CACHE);
+    ASSERT_EQ(scheduler->loading_cache_streams_.size(), 1);
+    ASSERT_EQ(scheduler->waitingStreamsSize(), 0);
+    ASSERT_EQ(scheduler->pendingDecodeStreamsSize(), 0);
+
+    auto prefill = scheduler->schedule();
+    ASSERT_TRUE(prefill.ok());
+    ASSERT_EQ(prefill.value().size(), 1);
+    ASSERT_EQ(prefill.value().front().get(), stream.get());
+    ASSERT_EQ(stream->getStatus(), StreamState::RUNNING);
+    ASSERT_EQ(scheduler->loading_cache_streams_.size(), 0);
+    ASSERT_EQ(scheduler->waitingStreamsSize(), 0);
+    ASSERT_EQ(scheduler->runningStreamsSize(), 0);
+    ASSERT_EQ(scheduler->pendingDecodeStreamsSize(), 1);
+
+    stream->setSeqLength(stream->seqLength() + 1);
+    auto decode = scheduler->schedule();
+    ASSERT_TRUE(decode.ok());
+    ASSERT_EQ(decode.value().size(), 1);
+    ASSERT_EQ(decode.value().front().get(), stream.get());
+    ASSERT_EQ(scheduler->runningStreamsSize(), 1);
+    ASSERT_EQ(scheduler->pendingDecodeStreamsSize(), 0);
+}
+
 // ============================================================================
 // 4. evaluateLoadingCacheStreams: stream with error during loading -> evicted
 // ============================================================================
@@ -236,6 +278,7 @@ TEST_F(FIFOSchedulerAsyncCacheTest, testLoadingCacheStreams_CountedInBatchLimit)
     runtime_config.max_generate_batch_size                     = 2;
     runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8192;
     PDSepConfig         pd_sep_config;
+    pd_sep_config.role_type = RoleType::PREFILL;
     ParallelismConfig   parallelism_config;
     ModelSpecificConfig model_specific_config;
     auto                scheduler = std::make_shared<FIFOScheduler>(

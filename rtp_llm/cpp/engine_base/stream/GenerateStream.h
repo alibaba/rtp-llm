@@ -14,7 +14,9 @@
 #include "rtp_llm/cpp/engine_base/system_prompt/SystemPrompt.h"
 #include "rtp_llm/cpp/models/position_ids/PositionIdsGenerator.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
+#include <algorithm>
 #include <iterator>
+#include <limits>
 #include <mutex>
 #include <optional>
 
@@ -533,6 +535,23 @@ public:
     TimeInfo getTimeInfo();
     bool     queryPdSep() const;
 
+    void addActiveRunTime(int64_t us) {
+        active_run_time_us_ += us;
+    }
+    int64_t activeRunTimeUs() const {
+        return active_run_time_us_;
+    }
+
+    // gap_latency = in-flight time the stream was NOT executing (held back by scheduling):
+    //   max(0, (cost_time_us - wait_time_us) - active_run_time_us)
+    static int32_t computeGapLatencyUs(int64_t cost_time_us, int64_t wait_time_us, int64_t active_run_time_us) {
+        int64_t gap = (cost_time_us - wait_time_us) - active_run_time_us;
+        if (gap <= 0) {
+            return 0;
+        }
+        return static_cast<int32_t>(std::min(gap, static_cast<int64_t>(std::numeric_limits<int32_t>::max())));
+    }
+
 protected:
     void updateLogitProcessorMultiSeqStatus(const torch::Tensor& src_batch_indices);
     void updateLogitProcessorStatus(const StreamUpdateInfo& update_info);
@@ -551,7 +570,8 @@ protected:
     int64_t                               vocab_size_;
     std::shared_ptr<CompleteTokenIds>     complete_token_ids_;
     int64_t                               begin_time_us_;
-    int64_t                               wait_time_us_ = 0;
+    int64_t                               wait_time_us_       = 0;
+    int64_t                               active_run_time_us_ = 0;  // wall-time spent in executed forwards
     std::shared_ptr<StreamCacheResource>  stream_cache_resource_;
     std::shared_ptr<bool>                 is_context_stream_;
     size_t                                iter_count_           = 0;
