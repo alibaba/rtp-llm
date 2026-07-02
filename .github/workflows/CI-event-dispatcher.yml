@@ -54,8 +54,26 @@ jobs:
        contains(github.event.comment.body, 'lgtm ready to ci'))
     runs-on: [self-hosted, Linux]
     steps:
+      # For PRs from forks, `pull_request_review` grants the dispatcher a
+      # read-only GITHUB_TOKEN with no secret access, so the rerun API call
+      # below would 403. Set a sentinel so subsequent steps short-circuit;
+      # `dispatcher-fork-helper.yml` (triggered via workflow_run, which runs
+      # in base context with full permissions) handles the rerun instead.
+      - name: Detect fork PR review (delegated to helper)
+        id: guard
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request_review" ] && \
+             [ "${{ github.event.pull_request.head.repo.fork }}" = "true" ]; then
+            echo "Fork PR review detected (#${{ github.event.pull_request.number }} @ ${{ github.event.pull_request.head.sha }})."
+            echo "Delegating rerun to dispatcher-fork-helper.yml via workflow_run."
+            echo "delegated=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "delegated=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Resolve PR context
         id: ctx
+        if: steps.guard.outputs.delegated != 'true'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -74,6 +92,7 @@ jobs:
 
       - name: Checkout repository (attempt 1)
         id: checkout1
+        if: steps.guard.outputs.delegated != 'true'
         continue-on-error: true
         uses: actions/checkout@v4
         with:
@@ -81,7 +100,7 @@ jobs:
           sparse-checkout: .github/scripts
 
       - name: Checkout repository (attempt 2)
-        if: steps.checkout1.outcome == 'failure'
+        if: steps.guard.outputs.delegated != 'true' && steps.checkout1.outcome == 'failure'
         id: checkout2
         continue-on-error: true
         uses: actions/checkout@v4
@@ -90,13 +109,14 @@ jobs:
           sparse-checkout: .github/scripts
 
       - name: Checkout repository (attempt 3)
-        if: steps.checkout2.outcome == 'failure'
+        if: steps.guard.outputs.delegated != 'true' && steps.checkout2.outcome == 'failure'
         uses: actions/checkout@v4
         with:
           ref: main
           sparse-checkout: .github/scripts
 
       - name: Rerun PR build
+        if: steps.guard.outputs.delegated != 'true'
         run: |
           python3 -m ci_gate rerun-pr-build \
             --repository "${{ github.repository }}" \

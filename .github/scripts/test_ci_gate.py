@@ -18,7 +18,13 @@ from ci_gate.review import (
     resolve_context,
 )
 from ci_gate.ci import pre_check_status, trigger_ci, wait_status
-from ci_gate.merge import check_merge_conflicts, trigger_merge, wait_merge
+from ci_gate.merge import (
+    check_merge_conflicts,
+    check_merge_done,
+    trigger_merge,
+    wait_merge,
+)
+from ci_gate.rerun import rerun_pr_build
 
 
 # ---------------------------------------------------------------------------
@@ -244,6 +250,112 @@ class TestCheckReviewQualified(unittest.TestCase):
         mock_get.return_value = self._mock_pr()
         mock_pages.return_value = []
         result = check_review_qualified("1", "repo", "sha1", "token", "LLLLKKKK")
+        self.assertFalse(result)
+
+
+# ---------------------------------------------------------------------------
+# review.check_review_qualified — require_approved mode (gate job)
+# ---------------------------------------------------------------------------
+class TestCheckReviewQualifiedRequireApproved(unittest.TestCase):
+    @patch("ci_gate.review.github_get_pages")
+    @patch("ci_gate.review.github_get")
+    def test_approved_passes(self, mock_get, mock_pages):
+        mock_get.return_value = {"user": {"login": "author"}}
+        mock_pages.return_value = [
+            {"id": 1, "user": {"login": "rev", "type": "User"},
+             "state": "APPROVED", "commit_id": "sha1", "body": ""}
+        ]
+        self.assertTrue(check_review_qualified(
+            "1", "repo", "sha1", "token", "LLLLKKKK", require_approved=True
+        ))
+
+    @patch("ci_gate.review.github_get_pages")
+    @patch("ci_gate.review.github_get")
+    def test_lgtm_comment_rejected(self, mock_get, mock_pages):
+        mock_get.return_value = {"user": {"login": "author"}}
+        mock_pages.return_value = [
+            {"id": 1, "user": {"login": "LLLLKKKK", "type": "User"},
+             "state": "COMMENTED", "commit_id": "sha1",
+             "body": "lgtm ready to ci"}
+        ]
+        self.assertFalse(check_review_qualified(
+            "1", "repo", "sha1", "token", "LLLLKKKK", require_approved=True
+        ))
+
+    @patch("ci_gate.review._check_issue_comments_qualified")
+    @patch("ci_gate.review.github_get_pages")
+    @patch("ci_gate.review.github_get")
+    def test_issue_comment_fallback_skipped(self, mock_get, mock_pages, mock_issue):
+        mock_get.return_value = {"user": {"login": "author"}}
+        mock_pages.return_value = []
+        self.assertFalse(check_review_qualified(
+            "1", "repo", "sha1", "token", "LLLLKKKK", require_approved=True
+        ))
+        mock_issue.assert_not_called()
+
+    @patch("ci_gate.review.github_get_pages")
+    @patch("ci_gate.review.github_get")
+    def test_changes_requested_blocks(self, mock_get, mock_pages):
+        mock_get.return_value = {"user": {"login": "author"}}
+        mock_pages.return_value = [
+            {"id": 1, "user": {"login": "rev", "type": "User"},
+             "state": "CHANGES_REQUESTED", "commit_id": "sha1", "body": ""}
+        ]
+        self.assertFalse(check_review_qualified(
+            "1", "repo", "sha1", "token", "LLLLKKKK", require_approved=True
+        ))
+
+
+# ---------------------------------------------------------------------------
+# review.check_review_qualified — verify_current_head (gate stale-commit guard)
+# ---------------------------------------------------------------------------
+class TestCheckReviewQualifiedVerifyHead(unittest.TestCase):
+    """`cancel-in-progress: false` lets stale gate runs continue after the PR
+    HEAD has moved. `verify_current_head` makes the gate refuse to act on a
+    commit that is no longer HEAD, so we never merge a stale snapshot."""
+
+    @patch("ci_gate.review.github_get_pages")
+    @patch("ci_gate.review.github_get")
+    def test_head_unchanged_passes(self, mock_get, mock_pages):
+        mock_get.return_value = {
+            "user": {"login": "author"},
+            "head": {"sha": "sha1"},
+        }
+        mock_pages.return_value = [
+            {"id": 1, "user": {"login": "rev", "type": "User"},
+             "state": "APPROVED", "commit_id": "sha1", "body": ""}
+        ]
+        self.assertTrue(check_review_qualified(
+            "1", "repo", "sha1", "token", "LLLLKKKK",
+            require_approved=True, verify_current_head=True,
+        ))
+
+    @patch("ci_gate.review.github_get")
+    def test_head_changed_raises(self, mock_get):
+        mock_get.return_value = {
+            "user": {"login": "author"},
+            "head": {"sha": "newSha"},
+        }
+        with self.assertRaises(GateError):
+            check_review_qualified(
+                "1", "repo", "oldSha", "token", "LLLLKKKK",
+                require_approved=True, verify_current_head=True,
+            )
+
+    @patch("ci_gate.review.github_get_pages")
+    @patch("ci_gate.review.github_get")
+    def test_disabled_by_default(self, mock_get, mock_pages):
+        """Without the flag, a moved HEAD does not raise — preserves the
+        existing semantics for callers that don't opt in."""
+        mock_get.return_value = {
+            "user": {"login": "author"},
+            "head": {"sha": "newSha"},
+        }
+        mock_pages.return_value = []
+        result = check_review_qualified(
+            "1", "repo", "oldSha", "token", "LLLLKKKK",
+            require_approved=True,
+        )
         self.assertFalse(result)
 
 
@@ -783,6 +895,203 @@ class TestWaitMerge(unittest.TestCase):
         mock_request.return_value = {"status": {"success": False}}
         with self.assertRaises(GateError):
             wait_merge(self._args())
+
+
+# ---------------------------------------------------------------------------
+# merge.check_merge_done (single-shot dedup precheck)
+# ---------------------------------------------------------------------------
+class TestCheckMergeDone(unittest.TestCase):
+    """Verify the 3-way dedup state machine: done | wait | trigger.
+
+    The workflow keys off `merge_action` to decide whether to skip,
+    just-wait, or trigger a fresh MERGE-TASK. PENDING must map to
+    `wait` (not `trigger`) so we don't duplicate an in-flight task.
+    """
+
+    def _args(self, output_file="", **overrides):
+        defaults = {
+            "commit_id": "abc123",
+            "security": "secret",
+            "repository": "repo",
+            "output_file": output_file,
+        }
+        defaults.update(overrides)
+        return argparse.Namespace(**defaults)
+
+    def _run(self, mock_ci, response):
+        mock_ci.return_value = response
+        with tempfile.NamedTemporaryFile(mode="r+") as out:
+            rc = check_merge_done(self._args(output_file=out.name))
+            out.seek(0)
+            return rc, out.read()
+
+    def _run_raises(self, mock_ci, exc):
+        mock_ci.side_effect = exc
+        with tempfile.NamedTemporaryFile(mode="r+") as out:
+            with self.assertRaises(GateError):
+                check_merge_done(self._args(output_file=out.name))
+            out.seek(0)
+            return out.read()
+
+    @patch("ci_gate.merge.ci_service_request")
+    def test_success_returns_done(self, mock_ci):
+        rc, out = self._run(mock_ci, {"status": {"success": True}})
+        self.assertEqual(rc, 0)
+        self.assertIn("merge_action=done", out)
+
+    @patch("ci_gate.merge.ci_service_request")
+    def test_success_string_returns_done(self, mock_ci):
+        rc, out = self._run(mock_ci, {"status": '{"success": true}'})
+        self.assertEqual(rc, 0)
+        self.assertIn("merge_action=done", out)
+
+    @patch("ci_gate.merge.ci_service_request")
+    def test_pending_returns_wait_not_trigger(self, mock_ci):
+        """PENDING must map to wait so the workflow skips trigger-merge.
+
+        Regression guard for the dedup state machine: returning trigger
+        here would re-issue MERGE-TASK for a commit whose internal merge
+        is already running.
+        """
+        rc, out = self._run(mock_ci, {"status": "PENDING"})
+        self.assertEqual(rc, 0)
+        self.assertIn("merge_action=wait", out)
+        self.assertNotIn("merge_action=trigger", out)
+
+    @patch("ci_gate.merge.ci_service_request")
+    def test_explicit_failure_returns_trigger(self, mock_ci):
+        rc, out = self._run(mock_ci, {"status": {"success": False}})
+        self.assertEqual(rc, 1)
+        self.assertIn("merge_action=trigger", out)
+
+    @patch("ci_gate.merge.time.sleep")
+    @patch("ci_gate.merge.ci_service_request")
+    def test_non_dict_response_fails_closed(self, mock_ci, mock_sleep):
+        """Non-dict status response must NOT auto-trigger a new MERGE-TASK.
+
+        Regression guard: an undeterminable status is not the same as
+        'no record'. We retry, then raise — operators re-run the gate.
+        """
+        mock_ci.return_value = "OK"
+        with tempfile.NamedTemporaryFile(mode="r+") as f:
+            with self.assertRaises(GateError):
+                check_merge_done(self._args(output_file=f.name))
+            f.seek(0)
+            self.assertNotIn("merge_action=trigger", f.read())
+        self.assertEqual(mock_ci.call_count, 3)
+
+    @patch("ci_gate.merge.time.sleep")
+    @patch("ci_gate.merge.ci_service_request")
+    def test_network_error_fails_closed_after_retries(self, mock_ci, mock_sleep):
+        """Persistent query failure → GateError raised, no trigger written.
+
+        Earlier behavior wrote merge_action=trigger on a single exception,
+        which double-issued MERGE-TASK whenever status query had a transient
+        outage. New behavior: retry, then fail closed.
+        """
+        out = self._run_raises(mock_ci, GateError("boom", 2))
+        self.assertNotIn("merge_action=trigger", out)
+        self.assertEqual(mock_ci.call_count, 3)
+
+    @patch("ci_gate.merge.time.sleep")
+    @patch("ci_gate.merge.ci_service_request")
+    def test_transient_error_then_success_recovers(self, mock_ci, mock_sleep):
+        """A transient error followed by a successful query must resolve
+        to the actual status — not be swallowed by the new fail-closed path."""
+        mock_ci.side_effect = [
+            GateError("transient", 2),
+            {"status": {"success": True}},
+        ]
+        with tempfile.NamedTemporaryFile(mode="r+") as out:
+            rc = check_merge_done(self._args(output_file=out.name))
+            out.seek(0)
+            self.assertEqual(rc, 0)
+            self.assertIn("merge_action=done", out.read())
+        self.assertEqual(mock_ci.call_count, 2)
+
+
+class TestRerunPrBuildHelperPath(unittest.TestCase):
+    """Cover the helper-context path: rerun-pr-build invoked with head_sha
+    only (no --pr-number), as `dispatcher-fork-helper.yml` does for fork
+    PRs whose `pull_request_review` dispatcher run is permission-blocked.
+    """
+
+    def _args(self, pr_number=""):
+        return argparse.Namespace(
+            repository="alibaba/rtp-llm",
+            pr_number=pr_number,
+            head_sha="abc123def456" + "0" * 28,
+            workflow_file="CI-request-trigger.yml",
+            github_token="t",
+            max_retries=3,
+            retry_backoff=0.0,
+        )
+
+    @patch("ci_gate.rerun.rerun_workflow_run")
+    @patch("ci_gate.rerun.list_workflow_runs")
+    @patch("ci_gate.rerun.find_pr_for_commit")
+    def test_pr_number_resolved_from_head_sha(self, mock_find, mock_list, mock_rerun):
+        """When --pr-number omitted, fall back to find_pr_for_commit."""
+        mock_find.return_value = "1012"
+        mock_list.return_value = [{"id": 99, "status": "completed", "conclusion": "failure"}]
+        mock_rerun.return_value = (201, {})
+        rc = rerun_pr_build(self._args(pr_number=""))
+        self.assertEqual(rc, 0)
+        mock_find.assert_called_once()
+        mock_rerun.assert_called_once()
+
+    @patch("ci_gate.rerun.post_pr_comment")
+    @patch("ci_gate.rerun.list_workflow_runs")
+    @patch("ci_gate.rerun.find_pr_for_commit")
+    def test_no_pr_no_run_skips_comment(self, mock_find, mock_list, mock_comment):
+        """No PR resolvable AND no build run found → log only, no API write."""
+        mock_find.return_value = ""
+        mock_list.return_value = []
+        rc = rerun_pr_build(self._args(pr_number=""))
+        self.assertEqual(rc, 0)
+        mock_comment.assert_not_called()
+
+    @patch("ci_gate.rerun.post_pr_comment")
+    @patch("ci_gate.rerun.rerun_workflow_run")
+    @patch("ci_gate.rerun.list_workflow_runs")
+    @patch("ci_gate.rerun.find_pr_for_commit")
+    def test_expired_run_with_pr_posts_comment(
+        self, mock_find, mock_list, mock_rerun, mock_comment
+    ):
+        """422 expired run AND resolved PR → comment posted."""
+        mock_find.return_value = "1012"
+        mock_list.return_value = [{"id": 99, "status": "completed", "conclusion": "failure"}]
+        mock_rerun.return_value = (422, {"message": "too old"})
+        mock_comment.return_value = (201, {})
+        rc = rerun_pr_build(self._args(pr_number=""))
+        self.assertEqual(rc, 0)
+        mock_comment.assert_called_once()
+
+    @patch("ci_gate.rerun.post_pr_comment")
+    @patch("ci_gate.rerun.rerun_workflow_run")
+    @patch("ci_gate.rerun.list_workflow_runs")
+    @patch("ci_gate.rerun.find_pr_for_commit")
+    def test_expired_run_without_pr_skips_comment(
+        self, mock_find, mock_list, mock_rerun, mock_comment
+    ):
+        """422 expired AND no PR resolvable → log, do NOT post."""
+        mock_find.return_value = ""
+        mock_list.return_value = [{"id": 99, "status": "completed", "conclusion": "failure"}]
+        mock_rerun.return_value = (422, {"message": "too old"})
+        rc = rerun_pr_build(self._args(pr_number=""))
+        self.assertEqual(rc, 0)
+        mock_comment.assert_not_called()
+
+    @patch("ci_gate.rerun.rerun_workflow_run")
+    @patch("ci_gate.rerun.list_workflow_runs")
+    @patch("ci_gate.rerun.find_pr_for_commit")
+    def test_explicit_pr_number_skips_lookup(self, mock_find, mock_list, mock_rerun):
+        """When --pr-number is supplied, do not call find_pr_for_commit."""
+        mock_list.return_value = [{"id": 99, "status": "completed", "conclusion": "failure"}]
+        mock_rerun.return_value = (201, {})
+        rc = rerun_pr_build(self._args(pr_number="1012"))
+        self.assertEqual(rc, 0)
+        mock_find.assert_not_called()
 
 
 if __name__ == "__main__":
