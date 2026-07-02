@@ -1,8 +1,9 @@
 import copy
 import hashlib
+import logging
 from typing import Any, Dict, List, Optional, Union
 
-from pydantic import BaseModel, ConfigDict, field_serializer, field_validator
+from pydantic import BaseModel, ConfigDict, field_serializer, field_validator, model_validator
 from transformers.tokenization_utils_base import PreTrainedTokenizerBase
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
@@ -48,6 +49,9 @@ class RoleAddr(BaseModel):
         """Serialize RoleType enum to its name string for JSON serialization."""
         return role.name
 
+# cross_seq_diverge_start_combo "过大" 告警阈值，C++ 侧 RecommendationLogitsProcessor.cc 使用相同值。
+_DIVERGE_START_COMBO_WARN_THRESHOLD = 100
+
 
 class GenerateConfig(BaseModel):
     max_new_tokens: int = 32000
@@ -81,6 +85,51 @@ class GenerateConfig(BaseModel):
     combo_token_size: int = 0
     banned_combo_token_ids: List[List[int]] = []
     auto_parse_banned_combo: bool = False
+    # 跨序列 combo 去重：当 num_return_sequences > 1 时，任一序列生成完整 combo 后自动广播到
+    # 其他序列的 banned_combos，确保多条序列输出互不重复。默认关闭。
+    # 跨序列去重开关（primary-protected 非对称模式）：开启后，主序列（序列 0）仅保留自身 ban、
+    # 不受其他序列影响；补充序列接收所有序列 banned_combos 并集，保证彼此不重复。
+    enable_cross_sequence_ban: bool = False
+    # 跨序列分叉起始商品位置：前 N 个商品所有序列保持 greedy 一致，
+    # 从第 N+1 个商品开始对非主序列施加 top-K 遮蔽制造分叉。默认 0（立即分叉）。
+    cross_seq_diverge_start_combo: int = 0
+
+    @field_validator("cross_seq_diverge_start_combo", mode="before")
+    @classmethod
+    def _clamp_diverge_start_combo(cls, v):
+        """确保分叉起始位置非负，负值 clamp 到 0 并输出 warning。"""
+        if v is None:
+            return 0
+        try:
+            val = int(v)
+        except (TypeError, ValueError) as e:
+            logging.getLogger(__name__).warning(
+                "cross_seq_diverge_start_combo received non-integer value %r, defaulting to 0: %s", v, e)
+            return 0
+        if val < 0:
+            logging.getLogger(__name__).warning(
+                "cross_seq_diverge_start_combo is negative (%d), clamped to 0", val)
+            return 0
+        if val > _DIVERGE_START_COMBO_WARN_THRESHOLD:
+            logging.getLogger(__name__).warning(
+                "cross_seq_diverge_start_combo=%d is very large, top-K diverge masking may never activate", val)
+        return val
+
+    @model_validator(mode='after')
+    def _check_cross_seq_ban_compatibility(self):
+        """cross_sequence_ban 与 beam search / combo_token_size<2 互斥，不匹配时输出 warning。"""
+        if self.enable_cross_sequence_ban:
+            if self.has_num_beams():
+                logging.getLogger(__name__).warning(
+                    "enable_cross_sequence_ban is incompatible with beam search "
+                    "(max_num_beams=%d), cross_sequence_ban will be disabled at runtime",
+                    self.max_num_beams())
+            elif self.combo_token_size < 2:
+                logging.getLogger(__name__).warning(
+                    "enable_cross_sequence_ban requires combo_token_size>=2, got %d, "
+                    "cross_sequence_ban will be disabled at runtime", self.combo_token_size)
+        return self
+
     random_seed: Optional[Union[List[int], int]] = None
     top_p_decay: Optional[Union[List[float], float]] = None
     top_p_min: Optional[Union[List[float], float]] = None
