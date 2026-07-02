@@ -113,6 +113,8 @@ void RecommendationLogitsProcessor::process(const SamplerInputs& inputs, size_t 
     // 批量化设计决策：对所有非主行做一次 batch topk(max_k)，而非逐行筛选后再 gather/topk/scatter。
     // 原因：1) 单次 kernel launch 比多次显著更快；2) N=2-4 时几乎所有非主行都符合条件，
     // 不符合条件的行其 topk 结果不会被使用（下方 for 循环中 skip），无副作用。
+    // trade-off 记录：对不需要 diverge 的行仍做了 topk，但避免了更复杂的条件筛选 + scatter 逻辑，
+    // 在 N<=8 的场景下，多余 topk 计算的开销远小于额外 kernel launch 的开销。
     if (need_diverge_process) {
         int max_k = 0;
         for (size_t i = 1; i < batch_size; ++i) {
@@ -278,6 +280,8 @@ void RecommendationLogitsProcessor::updateStatus(const torch::Tensor& new_tokens
     // 跨序列增量广播（非对称模式）：仅将其他序列本步新完成的 combo 插入非主序列，跳过自身已有的
     // 设计意图（primary-protected）：序列 0（主序列）仅保留自身产生的 banned_combos，不接收其他
     // 序列的 ban。补充序列接收其他序列的新增 combo，确保彼此不重复。
+    // 复杂度：O((N-1) * N * new_combos_per_step)，生产场景 N=2~4、每步最多 1 个 combo 完成，
+    // 实际开销可忽略。若未来 N 增大，可考虑将 banned_combos 改为 shared 视图避免拷贝。
     if (any_combo_completed && need_broadcast) {
         for (size_t i = 1; i < size(); ++i) {
             for (size_t j = 0; j < size(); ++j) {
