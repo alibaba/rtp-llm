@@ -12,11 +12,17 @@ py_test (
     exec_properties = {'gpu':'H20'},
 )
 
-
 py_test (
     name = "multimodal_embedding_test",
     srcs = ["multimodal_embedding_test.py"],
     deps = py_test_deps,
     env = test_envs,
+    exec_properties = {'gpu':'H20'},
+)
+
+py_test (
+    name = "layerwise_qk_norm_test",
+    srcs = ["layerwise_qk_norm_test.py"],
+    deps = py_test_deps,
     exec_properties = {'gpu':'H20'},
 )

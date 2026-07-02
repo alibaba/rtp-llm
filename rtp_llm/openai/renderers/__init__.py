@@ -9,6 +9,7 @@ from .deepseekv32_renderer import DeepseekV32Renderer
 from .kimi_k25_renderer import KimiK25Renderer
 from .kimik2_renderer import KimiK2Renderer
 from .llava_renderer import LlavaRenderer
+from .minimax_m2_renderer import MinimaxM2Renderer
 from .qwen3_code_renderer import Qwen3CoderRenderer
 from .qwen35_renderer import Qwen35Renderer
 from .qwen_agent_renderer import QwenAgentRenderer

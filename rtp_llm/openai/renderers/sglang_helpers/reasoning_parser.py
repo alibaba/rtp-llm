@@ -64,14 +64,14 @@ class BaseReasoningFormatDetector:
         If stream_reasoning is True:
             Streams reasoning content as it arrives
         """
-        logging.info(
+        logging.debug(
             f"[REASONING_DEBUG] parse_streaming_increment: buffer={repr(self._buffer)}, new_text={repr(new_text)}"
         )
         self._buffer += new_text
         current_text = self._buffer
 
         # If the current text is a prefix of the think token, keep buffering
-        logging.info(
+        logging.debug(
             f"[REASONING_DEBUG] parse_streaming_increment: current_text={repr(current_text)}, in_reasoning={self._in_reasoning}"
         )
         if any(
@@ -209,6 +209,7 @@ class ReasoningParser:
         "glm45": Qwen3Detector,
         "kimi": KimiDetector,
         "kimi_k2": Qwen3Detector,
+        "minimax_m2": Qwen3Detector,
         "qwen3": Qwen3Detector,
         "qwen3-thinking": Qwen3Detector,
         "step3": DeepSeekR1Detector,
@@ -227,7 +228,7 @@ class ReasoningParser:
         if not detector_class:
             raise ValueError(f"Unsupported model type: {model_type}")
 
-        if model_type.lower() == "qwen3-thinking":
+        if model_type.lower() in ("qwen3-thinking", "minimax_m2"):
             force_reasoning = True
 
         self.detector = detector_class(
