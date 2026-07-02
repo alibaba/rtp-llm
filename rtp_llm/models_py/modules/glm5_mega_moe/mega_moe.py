@@ -185,6 +185,7 @@ class GLM5MegaMoeCfg:
     n_routed_experts: int  # 256
     n_activated_experts: int  # top_k = 8
     swiglu_limit: float  # activation clamp (0 = no clamp)
+    swiglu_alpha: float  # OAI SwiGLU alpha (0 = regular SwiGLU)
     ep_size: int
     ep_rank: int
     n_local_experts: int
@@ -249,6 +250,7 @@ class GLM5MegaMoE(nn.Module):
         n_routed_experts: int = 256,
         n_activated_experts: int = 8,
         swiglu_limit: float = 0.0,
+        swiglu_alpha: float = 0.0,
         ep_size: int = 4,
         ep_rank: int = 0,
         max_tokens_per_rank: int = 8192,
@@ -263,6 +265,7 @@ class GLM5MegaMoE(nn.Module):
             n_routed_experts=n_routed_experts,
             n_activated_experts=n_activated_experts,
             swiglu_limit=swiglu_limit,
+            swiglu_alpha=swiglu_alpha,
             ep_size=ep_size,
             ep_rank=ep_rank,
             n_local_experts=n_local_experts,
