@@ -1,11 +1,19 @@
+import logging
+
 from rtp_llm.models_py.utils.arch import is_cuda
 
 if is_cuda():
     from .fp4_kernel import cutlass_scaled_fp4_mm_wrapper
     from .fp4_kernel import scaled_fp4_quant_wrapper
-    from .flashinfer_cutedsl_moe import scaled_fp4_grouped_quant
-    from .flashinfer_cutedsl_moe import silu_and_mul_scaled_fp4_grouped_quant
-    from .flashinfer_cutedsl_moe import flashinfer_cutedsl_moe_masked
+    try:
+        from .flashinfer_cutedsl_moe import scaled_fp4_grouped_quant
+        from .flashinfer_cutedsl_moe import silu_and_mul_scaled_fp4_grouped_quant
+        from .flashinfer_cutedsl_moe import flashinfer_cutedsl_moe_masked
+    except ImportError as e:
+        logging.warning(f"Failed to import flashinfer_cutedsl_moe: {e}")
+        scaled_fp4_grouped_quant = None
+        silu_and_mul_scaled_fp4_grouped_quant = None
+        flashinfer_cutedsl_moe_masked = None
 else:
     cutlass_scaled_fp4_mm_wrapper = None
     scaled_fp4_quant_wrapper = None
