@@ -511,6 +511,19 @@ class GenerateConfig(BaseModel):
             )
 
     def _validate_grammar_constraints(self) -> None:
+        grammar_fields = {
+            "json_schema": self.json_schema,
+            "regex": self.regex,
+            "ebnf": self.ebnf,
+            "structural_tag": self.structural_tag,
+        }
+        for name, value in grammar_fields.items():
+            if isinstance(value, str) and not value.strip():
+                raise FtRuntimeException(
+                    ExceptionType.ERROR_INPUT_FORMAT_ERROR,
+                    f"{name} must not be empty",
+                )
+
         count = (
             (self.json_schema is not None)
             + (self.regex is not None)

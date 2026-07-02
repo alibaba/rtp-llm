@@ -207,7 +207,7 @@ bool ThinkModeLogitsProcessor::isSpecVerifyEligible() const {
 }
 
 bool ThinkModeLogitsProcessor::isStateful() const {
-    return spec_eligible_;
+    return true;
 }
 
 int64_t ThinkModeLogitsProcessor::committedOutputLen() const {

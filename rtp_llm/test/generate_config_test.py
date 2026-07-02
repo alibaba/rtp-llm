@@ -523,17 +523,13 @@ class GrammarBeamSearchRejectionTest(TestCase):
         GenerateConfig(**fields).validate()
 
     def test_grammar_field_plus_beam_rejected(self):
-        # Direct grammar field (incl. empty/falsy values) × beam-search knob.
+        # Direct grammar field × beam-search knob.
         grammar_fields = [
             ("json_schema", '{"type": "object"}'),
             ("json_schema", {}),
-            ("json_schema", ""),
             ("regex", r"\d+"),
-            ("regex", ""),
             ("ebnf", "root ::= 'a'"),
-            ("ebnf", ""),
             ("structural_tag", '{"begin": "<t>", "end": "</t>"}'),
-            ("structural_tag", ""),
         ]
         beam_knobs = [
             {"num_beams": 4},
@@ -604,6 +600,24 @@ class GrammarBeamSearchRejectionTest(TestCase):
             num_beams=4, json_schema=None, regex=None, ebnf=None, structural_tag=None
         )
 
+    def test_empty_direct_grammar_field_rejected(self):
+        cases = [
+            {"json_schema": ""},
+            {"regex": ""},
+            {"ebnf": ""},
+            {"structural_tag": ""},
+            {"regex": "   "},
+        ]
+        for fields in cases:
+            with self.subTest(fields=fields):
+                cfg = GenerateConfig(**fields)
+                with self.assertRaises(FtRuntimeException) as ctx:
+                    cfg.validate()
+                self.assertEqual(
+                    ctx.exception.exception_type,
+                    ExceptionType.ERROR_INPUT_FORMAT_ERROR,
+                )
+
 
 class ResponseFormatProjectionTest(TestCase):
     """rf projected to typed fields and cleared by validate(); rf wins over stale extra_configs."""
@@ -626,7 +640,7 @@ class ResponseFormatProjectionTest(TestCase):
         cfg = GenerateConfig(response_format={"type": "json_object"})
         cfg.validate()
         self.assertIsNone(cfg.response_format)
-        self.assertEqual(cfg.json_schema, '{"type": "object"}')
+        self.assertEqual(cfg.json_schema, '{"type":"object"}')
 
     def test_regex_envelope_projected(self):
         cfg = GenerateConfig(response_format={"type": "regex", "pattern": r"\d+"})
@@ -659,7 +673,7 @@ class ResponseFormatProjectionTest(TestCase):
         cfg = GenerateConfig(response_format='{"type":"json_object"}')
         cfg.validate()
         self.assertIsNone(cfg.response_format)
-        self.assertEqual(cfg.json_schema, '{"type": "object"}')
+        self.assertEqual(cfg.json_schema, '{"type":"object"}')
 
     def test_blank_string_envelope_treated_as_none(self):
         cfg = GenerateConfig(response_format="   ")
@@ -699,7 +713,7 @@ class RawUpdateResponseFormatCoercionTest(TestCase):
         self.assertIsInstance(cfg.response_format, ResponseFormat)
         cfg.validate()
         self.assertIsNone(cfg.response_format)
-        self.assertEqual(cfg.json_schema, '{"type": "object"}')
+        self.assertEqual(cfg.json_schema, '{"type":"object"}')
 
     def test_update_and_pop_coerces_string_envelope(self):
         cfg = GenerateConfig()
@@ -752,7 +766,7 @@ class GrammarConstraintMutualExclusionTest(TestCase):
         )
         cfg.validate()
         self.assertIsNone(cfg.response_format)
-        self.assertEqual(cfg.json_schema, '{"type": "object"}')
+        self.assertEqual(cfg.json_schema, '{"type":"object"}')
 
 
 if __name__ == "__main__":

@@ -190,6 +190,23 @@ TEST_F(SamplerTest, testSpecMatchesCommittedStateAfterUpdate) {
     EXPECT_EQ(1, runSpecVerify(proc, {12, 13, 14}, 1024));
 }
 
+TEST_F(SamplerTest, testBeamThinkProcessorIsStatefulButSpecIneligible) {
+    auto            dfa = std::make_shared<StringContainDFA<size_t, int>>(std::vector<int>{5});
+    StreamThinkInfo info(/*think_mode=*/true,
+                         /*budget=*/3,
+                         /*begin_think_token_ids=*/std::vector<int>{201},
+                         /*end_think_token_ids=*/std::vector<int>{5},
+                         /*input_length=*/0,
+                         /*output_length=*/0,
+                         /*is_beam_search=*/true,
+                         dfa);
+    auto proc = std::make_shared<ThinkModeLogitsProcessor>(std::vector<StreamThinkInfo>{info});
+
+    EXPECT_TRUE(proc->isStateful());
+    EXPECT_FALSE(proc->isSpecVerifyEligible());
+    EXPECT_EQ(ScoreBatchRole::kIncompatible, proc->scoreBatchRole());
+}
+
 #define EXPECT_SIMILAR(vec1, vec2, eps)                                                                                \
     do {                                                                                                               \
         bool similar = true;                                                                                           \
