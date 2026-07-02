@@ -20,13 +20,29 @@ size_t MemoryAsyncMatchContext::matchedBlockCount() const {
     return matched_block_count_;
 }
 
+int MemoryAsyncMatchContext::startReadBlockIndex() const {
+    return start_read_block_index_;
+}
+
+int MemoryAsyncMatchContext::readBlockNum() const {
+    return read_block_num_;
+}
+
+std::shared_ptr<void> MemoryAsyncMatchContext::readCopyPlan() const {
+    return read_copy_plan_;
+}
+
+void MemoryAsyncMatchContext::clearReadCopyPlan() {
+    read_copy_plan_.reset();
+}
+
 // ----------------------------- MemoryAsyncContext ---------------------------------
 
 bool MemoryAsyncContext::done() const {
     return already_done_.load();
 }
 
-bool MemoryAsyncContext::success() const {
+bool MemoryAsyncContext::successLocked() const {
     if (!broadcast_result_ || !broadcast_result_->success()) {
         return false;
     }
@@ -39,22 +55,58 @@ bool MemoryAsyncContext::success() const {
     return true;
 }
 
+bool MemoryAsyncContext::success() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return successLocked();
+}
+
 void MemoryAsyncContext::waitDone() {
-    if (done()) {
-        return;
+    std::shared_ptr<BroadcastResult<FunctionRequestPB, FunctionResponsePB>> result;
+    {
+        std::unique_lock<std::mutex> lock(mutex_);
+        cv_.wait(lock, [this]() { return result_ready_ || already_done_.load(); });
+        if (already_done_.load()) {
+            return;
+        }
+        if (finalizing_) {
+            cv_.wait(lock, [this]() { return already_done_.load(); });
+            return;
+        }
+        finalizing_ = true;
+        result      = broadcast_result_;
     }
-    if (broadcast_result_) {
-        broadcast_result_->waitDone();
+
+    if (result) {
+        result->waitDone();
     }
-    if (done_callback_) {
-        done_callback_(success());
+
+    bool ok = false;
+    std::function<void(bool)> done_callback;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        ok            = successLocked();
+        done_callback = std::move(done_callback_);
     }
-    already_done_.store(true);
+    if (done_callback) {
+        done_callback(ok);
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        already_done_.store(true);
+        finalizing_ = false;
+    }
+    cv_.notify_all();
 }
 
 void MemoryAsyncContext::setBroadcastResult(
     const std::shared_ptr<BroadcastResult<FunctionRequestPB, FunctionResponsePB>>& result) {
-    broadcast_result_ = result;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        broadcast_result_ = result;
+        result_ready_     = true;
+    }
+    cv_.notify_all();
 }
 
 }  // namespace rtp_llm

@@ -384,6 +384,11 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("max_block_size_per_item", &KVCacheConfig::max_block_size_per_item)
         .def_readwrite("memory_cache_size_mb", &KVCacheConfig::memory_cache_size_mb)
         .def_readwrite("memory_cache_sync_timeout_ms", &KVCacheConfig::memory_cache_sync_timeout_ms)
+        .def_readwrite("enable_memory_cache_disk", &KVCacheConfig::enable_memory_cache_disk)
+        .def_readwrite("memory_cache_disk_paths", &KVCacheConfig::memory_cache_disk_paths)
+        .def_readwrite("memory_cache_disk_size_mb", &KVCacheConfig::memory_cache_disk_size_mb)
+        .def_readwrite("memory_cache_disk_buffered_io", &KVCacheConfig::memory_cache_disk_buffered_io)
+        .def_readwrite("memory_cache_disk_sync_timeout_ms", &KVCacheConfig::memory_cache_disk_sync_timeout_ms)
         .def_readwrite("linear_step", &KVCacheConfig::linear_step)
         .def_readwrite("int8_kv_cache", &KVCacheConfig::int8_kv_cache)
         .def_readwrite("fp8_kv_cache", &KVCacheConfig::fp8_kv_cache)
@@ -399,6 +404,10 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("enable_tiered_memory_cache", &KVCacheConfig::enable_tiered_memory_cache)
         .def_readwrite("enable_gpu_prefix_tree", &KVCacheConfig::enable_gpu_prefix_tree)
         .def_readwrite("enable_prefix_tree_memory_cache", &KVCacheConfig::enable_prefix_tree_memory_cache)
+        .def_readwrite("enable_legacy_memory_connector_fallback",
+                       &KVCacheConfig::enable_legacy_memory_connector_fallback)
+        .def_readwrite("prefix_tree_memory_state_swa_pool_ratio",
+                       &KVCacheConfig::prefix_tree_memory_state_swa_pool_ratio)
         .def_readwrite("enable_independent_group_eviction", &KVCacheConfig::enable_independent_group_eviction)
         .def_readwrite("device_cache_min_free_blocks", &KVCacheConfig::device_cache_min_free_blocks)
         .def_readwrite("load_cache_retry_times", &KVCacheConfig::load_cache_retry_times)
@@ -473,10 +482,17 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.reco_get_broadcast_timeout,
                                       self.reco_put_broadcast_timeout,
                                       self.reco_client_config,
-                                      self.ssm_state_dtype);
+                                      self.ssm_state_dtype,
+                                      self.enable_memory_cache_disk,
+                                      self.memory_cache_disk_paths,
+                                      self.memory_cache_disk_size_mb,
+                                      self.memory_cache_disk_buffered_io,
+                                      self.memory_cache_disk_sync_timeout_ms,
+                                      self.enable_legacy_memory_connector_fallback,
+                                      self.prefix_tree_memory_state_swa_pool_ratio);
             },
             [](py::tuple t) {
-                if (t.size() != 47)
+                if (t.size() != 47 && t.size() != 54)
                     throw std::runtime_error("Invalid state!");
                 KVCacheConfig c;
                 try {
@@ -527,6 +543,15 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     c.reco_put_broadcast_timeout           = t[44].cast<int>();
                     c.reco_client_config                   = t[45].cast<std::string>();
                     c.ssm_state_dtype                      = t[46].cast<std::string>();
+                    if (t.size() >= 54) {
+                        c.enable_memory_cache_disk                  = t[47].cast<bool>();
+                        c.memory_cache_disk_paths                   = t[48].cast<std::string>();
+                        c.memory_cache_disk_size_mb                 = t[49].cast<int64_t>();
+                        c.memory_cache_disk_buffered_io             = t[50].cast<bool>();
+                        c.memory_cache_disk_sync_timeout_ms         = t[51].cast<int64_t>();
+                        c.enable_legacy_memory_connector_fallback   = t[52].cast<bool>();
+                        c.prefix_tree_memory_state_swa_pool_ratio   = t[53].cast<int64_t>();
+                    }
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("KVCacheConfig unpickle error: ") + e.what());
                 }

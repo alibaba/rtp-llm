@@ -151,9 +151,14 @@ struct KVCacheConfig {
     std::map<std::string, std::vector<int>> multi_task_prompt_tokens;
     int64_t                                 reserve_block_ratio          = 5;
     int                                     max_block_size_per_item      = 16;
-    int64_t                                 memory_cache_size_mb         = 0;
-    int64_t                                 memory_cache_sync_timeout_ms = 10000;
-    int                                     linear_step                  = 1;  // for linear attention cache reuse
+    int64_t                                 memory_cache_size_mb              = 0;
+    int64_t                                 memory_cache_sync_timeout_ms      = 10000;
+    bool                                    enable_memory_cache_disk          = false;
+    std::string                             memory_cache_disk_paths           = "";
+    int64_t                                 memory_cache_disk_size_mb         = 0;
+    bool                                    memory_cache_disk_buffered_io     = true;
+    int64_t                                 memory_cache_disk_sync_timeout_ms = 30000;
+    int                                     linear_step                       = 1;  // for linear attention cache reuse
     // Fields merged from PyKvCacheConfig
     int         int8_kv_cache             = 0;
     int         fp8_kv_cache              = 0;
@@ -172,6 +177,8 @@ struct KVCacheConfig {
     bool    enable_tiered_memory_cache                   = false;
     bool    enable_gpu_prefix_tree                       = true;
     bool    enable_prefix_tree_memory_cache              = true;
+    bool    enable_legacy_memory_connector_fallback      = true;
+    int64_t prefix_tree_memory_state_swa_pool_ratio      = 0;
     bool    enable_independent_group_eviction            = false;
     int64_t device_cache_min_free_blocks                 = 0;
     int     load_cache_retry_times       = 1;  // Maximum retry attempts for load cache transfer failures

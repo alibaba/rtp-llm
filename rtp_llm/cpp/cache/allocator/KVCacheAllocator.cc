@@ -261,6 +261,18 @@ BatchKVCacheResourcePtr KVCacheAllocator::popBlocksFromCache(size_t min_blocks_t
     if (evict_result.evicted_keys.empty()) {
         return nullptr;
     }
+    if (metrics_reporter_) {
+        for (const auto& [cache_key, lifetime_ms] : evict_result.evicted_lifetime_ms) {
+            RtpLLMCacheEvictionMetricsCollector collector;
+            collector.lifetime_ms = lifetime_ms;
+            kmonitor::MetricsTags tags("scope", "gpu");
+            tags.AddTag("evict_policy",
+                        evict_result.evicted_independent_group.count(cache_key) ? "independent" : "chain");
+            tags.AddTag("backing", "device");
+            metrics_reporter_->report<RtpLLMCacheEvictionMetrics, RtpLLMCacheEvictionMetricsCollector>(&tags,
+                                                                                                       &collector);
+        }
+    }
 
     auto batch_resource = std::make_shared<BatchKVCacheResource>();
     batch_resource->resetBatchSize(1);
