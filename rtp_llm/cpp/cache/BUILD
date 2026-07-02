@@ -20,16 +20,34 @@ cc_library(
 )
 
 cc_library(
+    name = "kvcache_spec_desc_types",
+    hdrs = [
+        "spec/KVCacheSpecDescTypes.h",
+    ],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+    deps = [
+        ":cache_group_type",
+        "//rtp_llm/models_py/bindings/core:types",
+    ],
+)
+
+cc_library(
     name = "cache_types",
+    srcs = [
+        "Types.cc",
+    ],
     hdrs = [
         "BufferTypes.h",
         "CacheConfig.h",
         "spec/CacheGroupType.h",
         "spec/KVCacheSpec.h",
         "spec/KVCacheSpecBase.h",
+        "spec/KVCacheSpecDesc.h",
         "spec/MHAKVCacheSpec.h",
         "spec/LinearKVCacheSpec.h",
         "spec/MLAKVCacheSpec.h",
+        "spec/OpaqueKVCacheSpec.h",
         "Types.h",
         "WarmUpResult.h",
     ],
@@ -39,10 +57,32 @@ cc_library(
         ":block_info",
         ":batch_kv_cache_resource",
         ":cache_group_type",
+        ":cp_slot_mapper",
+        ":kvcache_spec_desc_types",
         "//:rtp_compute_ops",
         "//rtp_llm/cpp/config:config_modules",
+        "//rtp_llm/cpp/engine_base/stream:complete_token_ids",
         "//rtp_llm/models_py/bindings/core:types",
     ] + torch_deps(),
+)
+
+cc_library(
+    name = "cp_slot_mapper",
+    srcs = ["CPSlotMapper.cc"],
+    hdrs = ["CPSlotMapper.h"],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "kv_cache_transfer_planner",
+    srcs = ["KVCacheTransferPlanner.cc"],
+    hdrs = ["KVCacheTransferPlanner.h"],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+    deps = [
+        ":cache_group_type",
+    ],
 )
 
 cc_library(
@@ -51,6 +91,7 @@ cc_library(
         "BlockCache.cc",
         "BlockPool.cc",
         "MemoryLayoutStrategy.cc",
+        "SharedBlockCache.cc",
     ],
     hdrs = [
         "BlockCache.h",
@@ -60,6 +101,7 @@ cc_library(
         "BlockRefCounter.h",
         "MemoryLayoutStrategy.h",
         "MemoryLayoutConfig.h",
+        "SharedBlockCache.h",
     ],
     copts = copts(),
     visibility = ["//visibility:public"],
@@ -75,17 +117,7 @@ cc_library(
 )
 
 cc_library(
-    name = "kv_cache_group",
-    srcs = [
-        "group/FullKVCacheGroup.cc",
-        "group/KVCacheGroup.cc",
-        "group/LinearKVCacheGroup.cc",
-    ],
-    hdrs = [
-        "group/FullKVCacheGroup.h",
-        "group/KVCacheGroup.h",
-        "group/LinearKVCacheGroup.h",
-    ],
+    name = "shared_block_cache",
     copts = copts(),
     visibility = ["//visibility:public"],
     deps = [
@@ -94,13 +126,40 @@ cc_library(
 )
 
 cc_library(
+    name = "kv_cache_group",
+    srcs = [
+        "group/FullKVCacheGroup.cc",
+        "group/KVCacheGroup.cc",
+        "group/LinearKVCacheGroup.cc",
+        "group/SWAKVCacheGroup.cc",
+    ],
+    hdrs = [
+        "group/FullKVCacheGroup.h",
+        "group/KVCacheGroup.h",
+        "group/LinearKVCacheGroup.h",
+        "group/SWAKVCacheGroup.h",
+    ],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+    deps = [
+        ":block_pool",
+        ":shared_block_cache",
+        "//rtp_llm/cpp/metrics",
+    ],
+)
+
+cc_library(
     name = "kv_cache_allocator",
     srcs = [
+        "allocator/HybridKVCacheAllocator.cc",
+        "allocator/HybridPoolKVCacheAllocator.cc",
         "allocator/HybridTypeKVCacheAllocator.cc",
         "allocator/KVCacheAllocator.cc",
         "allocator/SingleTypeKVCacheAllocator.cc",
     ],
     hdrs = [
+        "allocator/HybridKVCacheAllocator.h",
+        "allocator/HybridPoolKVCacheAllocator.h",
         "allocator/HybridTypeKVCacheAllocator.h",
         "allocator/KVCacheAllocator.h",
         "allocator/SingleTypeKVCacheAllocator.h",
@@ -108,7 +167,9 @@ cc_library(
     copts = copts(),
     visibility = ["//visibility:public"],
     deps = [
+        ":cp_slot_mapper",
         ":kv_cache_group",
+        "//rtp_llm/cpp/config:config_modules",
         "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
     ],
 )
@@ -133,6 +194,7 @@ cc_library(
     srcs = [
         "config_creator/CacheConfigCreator.cc",
         "config_creator/HybridConfigCreator.cc",
+        "config_creator/HybridPoolConfigCreator.cc",
         "KVCacheHashUtil.cc",
         "config_creator/MemoryEvaluationHelper.cc",
         "config_creator/SingleConfigCreator.cc",
@@ -140,6 +202,7 @@ cc_library(
     hdrs = [
         "config_creator/CacheConfigCreator.h",
         "config_creator/HybridConfigCreator.h",
+        "config_creator/HybridPoolConfigCreator.h",
         "KVCacheHashUtil.h",
         "config_creator/MemoryEvaluationHelper.h",
         "config_creator/SingleConfigCreator.h",

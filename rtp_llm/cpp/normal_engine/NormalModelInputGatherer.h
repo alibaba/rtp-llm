@@ -29,7 +29,6 @@ struct NormalModelInputGathererConfig {
     size_t                      kernel_seq_size_per_block{};
     size_t                      kernel_blocks_per_kv_block = 1;
     size_t                      kv_cache_group_nums        = 1;
-    std::vector<int32_t>        layer_to_kv_cache_group_id;
     std::vector<CacheGroupType> kv_cache_group_types;
     bool                        warm_up{};
     bool                        enable_detail_log{};

@@ -434,6 +434,52 @@ private:
     AUTIL_LOG_DECLARE();
 };
 
+class RtpLLMCachePoolMetricsCollector final {
+public:
+    int64_t free_blocks          = 0;
+    int64_t available_blocks     = 0;
+    int64_t request_ref_blocks   = 0;
+    int64_t connector_ref_blocks = 0;
+    int64_t total_blocks         = 0;
+    int64_t reserve_blocks       = 0;
+    float   used_ratio           = 0;
+};
+
+class RtpLLMCachePoolMetrics: public kmonitor::MetricsGroup {
+public:
+    bool init(kmonitor::MetricsGroupManager* manager) override;
+    void report(const kmonitor::MetricsTags* tags, RtpLLMCachePoolMetricsCollector* collector);
+
+public:
+    kmonitor::MutableMetric* free_blocks_metric          = nullptr;
+    kmonitor::MutableMetric* available_blocks_metric     = nullptr;
+    kmonitor::MutableMetric* request_ref_blocks_metric   = nullptr;
+    kmonitor::MutableMetric* connector_ref_blocks_metric = nullptr;
+    kmonitor::MutableMetric* total_blocks_metric         = nullptr;
+    kmonitor::MutableMetric* reserve_blocks_metric       = nullptr;
+    kmonitor::MutableMetric* used_ratio_metric           = nullptr;
+
+private:
+    AUTIL_LOG_DECLARE();
+};
+
+class RtpLLMCacheEvictionMetricsCollector final {
+public:
+    int64_t lifetime_ms = 0;
+};
+
+class RtpLLMCacheEvictionMetrics: public kmonitor::MetricsGroup {
+public:
+    bool init(kmonitor::MetricsGroupManager* manager) override;
+    void report(const kmonitor::MetricsTags* tags, RtpLLMCacheEvictionMetricsCollector* collector);
+
+public:
+    kmonitor::MutableMetric* evicted_block_lifetime_ms_metric = nullptr;
+
+private:
+    AUTIL_LOG_DECLARE();
+};
+
 class RtpLLMCacheReuseMetricsCollector final {
 public:
     int64_t kv_cache_reuse_length = 0;

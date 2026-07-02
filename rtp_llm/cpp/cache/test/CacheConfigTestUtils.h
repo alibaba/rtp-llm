@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <numeric>
 #include <vector>
 
 #include "rtp_llm/cpp/cache/CacheConfig.h"
@@ -33,22 +34,15 @@ inline CacheConfig makeSimpleMhaCacheConfig(int               layer_num,
     spec->type               = KVCacheSpecType::MultiHeadAttention;
     spec->dtype              = dtype;
     spec->seq_size_per_block = static_cast<uint32_t>(tokens_per_block);
-    spec->layer_num          = static_cast<uint32_t>(layer_num);
     spec->local_head_num_kv  = local_head_num_kv;
     spec->size_per_head      = size_per_head;
-    config.cache_specs.push_back(spec);
 
-    std::vector<int> layer_ids(layer_num);
-    for (int i = 0; i < layer_num; ++i) {
-        layer_ids[i] = i;
-    }
-    config.layer_ids.push_back(layer_ids);
-    config.global_layer_ids.push_back(layer_ids);
-    config.layer_to_group_id.assign(layer_num, 0);
-    config.layer_attn_types.assign(layer_num, CacheGroupType::FULL);
+    std::vector<int> all_layer_ids(layer_num);
+    std::iota(all_layer_ids.begin(), all_layer_ids.end(), 0);
+    config.fromGroupedSpecs({spec}, {all_layer_ids}, {CacheGroupType::FULL});
 
     config.kv_block_stride_bytes = spec->block_size_bytes();
-    config.kv_block_size_bytes   = static_cast<size_t>(spec->block_size_bytes() * spec->layer_num);
+    config.kv_block_size_bytes   = static_cast<size_t>(spec->block_size_bytes() * layer_num);
 
     if (dtype == rtp_llm::TYPE_INT8 || dtype == rtp_llm::TYPE_FP8_E4M3) {
         const size_t kv_scale_kv_stride       = static_cast<size_t>(spec->local_head_num_kv) * tokens_per_block;
@@ -59,7 +53,6 @@ inline CacheConfig makeSimpleMhaCacheConfig(int               layer_num,
 
     config.block_size_bytes = config.kv_block_size_bytes + config.kv_scale_size_bytes;
 
-    // Per-layer block stride (kv + scale).
     const size_t per_layer_stride_bytes = config.kv_block_stride_bytes + config.kv_scale_stride_bytes;
     config.layer_to_block_stride_bytes.assign(static_cast<size_t>(config.layer_all_num),
                                               static_cast<int>(per_layer_stride_bytes));
@@ -99,15 +92,12 @@ inline CacheConfig makeSimpleHybridMhaCacheConfig(int               layer_num,
             layer_num, block_num, tokens_per_block, dtype, local_head_num_kv, size_per_head);
     }
 
-    const int group_cnt     = layer_num / config.group_layer_num;
-    const int linear_groups = 1;
-    const int full_groups   = group_cnt - 1;
+    const int group_cnt = layer_num / config.group_layer_num;
 
     // Specs.
     auto linear_spec                = std::make_shared<LinearKVCacheSpec>();
     linear_spec->type               = KVCacheSpecType::LinearAttention;
     linear_spec->dtype              = dtype;
-    linear_spec->layer_num          = static_cast<uint32_t>(config.group_layer_num);
     linear_spec->local_num_k_heads  = 1;
     linear_spec->local_num_v_heads  = 1;
     linear_spec->head_k_dim         = 1;
@@ -115,52 +105,37 @@ inline CacheConfig makeSimpleHybridMhaCacheConfig(int               layer_num,
     linear_spec->conv_kernel_dim    = 2;
     linear_spec->local_head_num_kv  = 1;
     linear_spec->seq_size_per_block = static_cast<uint32_t>(tokens_per_block);
+    linear_spec->tag                = "linear";
 
     auto full_spec                = std::make_shared<MHAKVCacheSpec>();
     full_spec->type               = KVCacheSpecType::MultiHeadAttention;
     full_spec->dtype              = dtype;
     full_spec->seq_size_per_block = static_cast<uint32_t>(tokens_per_block);
-    full_spec->layer_num          = static_cast<uint32_t>(config.group_layer_num);
     full_spec->local_head_num_kv  = local_head_num_kv;
     full_spec->size_per_head      = size_per_head;
+    full_spec->tag                = "full";
 
-    config.layer_ids.clear();
-    config.global_layer_ids.clear();
-    config.linear_groups.clear();
-    config.full_groups.clear();
-    config.cache_specs.clear();
-    config.group_types.clear();
+    std::vector<KVCacheSpecPtr>   specs;
+    std::vector<std::vector<int>> layers_by_group;
+    std::vector<CacheGroupType>   types;
 
-    config.layer_to_group_id.assign(static_cast<size_t>(layer_num), 0);
-    config.layer_attn_types.assign(static_cast<size_t>(layer_num), CacheGroupType::FULL);
-
-    // Build groups: gid=0 linear, gid>=1 full.
     for (int gid = 0; gid < group_cnt; ++gid) {
         std::vector<int> group_layers;
         group_layers.reserve(static_cast<size_t>(config.group_layer_num));
         for (int local = 0; local < config.group_layer_num; ++local) {
-            const int layer_id = gid * config.group_layer_num + local;
-            group_layers.push_back(layer_id);
-            config.layer_to_group_id[static_cast<size_t>(layer_id)] = gid;
-            config.layer_attn_types[static_cast<size_t>(layer_id)] =
-                (gid == 0) ? CacheGroupType::LINEAR : CacheGroupType::FULL;
+            group_layers.push_back(gid * config.group_layer_num + local);
         }
-        config.layer_ids.push_back(group_layers);
-        config.global_layer_ids.push_back(group_layers);
+        layers_by_group.push_back(group_layers);
 
         if (gid == 0) {
-            config.cache_specs.push_back(linear_spec);
-            config.group_types.push_back(CacheGroupType::LINEAR);
-            config.linear_groups.push_back(group_layers);
+            specs.push_back(linear_spec);
+            types.push_back(CacheGroupType::LINEAR);
         } else {
-            config.cache_specs.push_back(full_spec);
-            config.group_types.push_back(CacheGroupType::FULL);
-            config.full_groups.push_back(group_layers);
+            specs.push_back(full_spec);
+            types.push_back(CacheGroupType::FULL);
         }
     }
-
-    config.linear_group_num = linear_groups;
-    config.full_group_num   = full_groups;
+    config.fromGroupedSpecs(specs, layers_by_group, types);
 
     // Physical sizes for hybrid memory layout: one group (group_layer_num) worth of layers.
     config.kv_block_stride_bytes = std::max(full_spec->block_size_bytes(), linear_spec->block_size_bytes());
@@ -173,6 +148,7 @@ inline CacheConfig makeSimpleHybridMhaCacheConfig(int               layer_num,
     const size_t per_layer_stride_bytes = config.kv_block_stride_bytes + config.kv_scale_stride_bytes;
     config.layer_to_block_stride_bytes.assign(static_cast<size_t>(config.layer_all_num),
                                               static_cast<int>(per_layer_stride_bytes));
+
     return config;
 }
 

@@ -58,6 +58,16 @@ struct CrashHandlerInstaller {
 
 static CrashHandlerInstaller g_crash_handler_installer;
 
+void setGroupStridesForConfig(CacheConfig& config,
+                              const std::vector<size_t>& kv_block_stride_bytes,
+                              const std::vector<size_t>& kv_scale_stride_bytes) {
+    std::vector<uint32_t> block_nums = config.groupBlockNumsSnapshot();
+    if (block_nums.empty()) {
+        block_nums.assign(static_cast<size_t>(config.groupNums()), config.block_num);
+    }
+    config.setGroupBlockLayout(block_nums, kv_block_stride_bytes, kv_scale_stride_bytes);
+}
+
 }  // namespace
 
 // Test-local helper struct. Business code no longer exposes a LayerBlock type.
@@ -145,14 +155,11 @@ private:
         kv_cache_config_.memory_cache_sync_timeout_ms = kTestMemoryCacheSyncTimeout;
 
         auto mha_spec       = std::make_shared<MHAKVCacheSpec>();
-        mha_spec->layer_num = layer_num;
-        // mha_spec->block_nums         = block_num;
         mha_spec->local_head_num_kv  = 8;
         mha_spec->size_per_head      = 128;
         mha_spec->seq_size_per_block = seq_size_per_block;
         mha_spec->dtype              = mha_dtype;
         mha_spec->type               = KVCacheSpecType::MultiHeadAttention;
-        config.cache_specs.push_back(mha_spec);
         // Keep CacheConfig sizes consistent with current business definition (see CacheConfig.h):
         // - kv_block_stride_bytes / kv_scale_stride_bytes are "per-layer" strides for one logical block
         // - kv_block_size_bytes / kv_scale_size_bytes are "all layers" totals for one logical block
@@ -172,10 +179,7 @@ private:
         for (int i = 0; i < layer_num; ++i) {
             layer_ids[i] = i;
         }
-        config.layer_ids.push_back(layer_ids);
-        // SingleTypeKVCacheAllocator::init() expects global_layer_ids[0] to exist.
-        // In these unit tests we only have one "model group", so keep it consistent with layer_ids.
-        config.global_layer_ids.push_back(layer_ids);
+        config.fromGroupedSpecs({mha_spec}, {layer_ids}, {CacheGroupType::FULL}, {"default"});
 
         return config;
     }
@@ -1701,7 +1705,6 @@ TEST_F(KVCacheMemoryConnectorTest, copyCache_ReturnTrue_H2D_SplitKvScale_NoBlock
 
     auto mla_spec                = std::make_shared<rtp_llm::MLAKVCacheSpec>();
     mla_spec->type               = rtp_llm::KVCacheSpecType::MultiHeadLatentAttention;
-    mla_spec->layer_num          = static_cast<uint32_t>(kLayerNum);
     mla_spec->local_head_num_kv  = 1;
     mla_spec->seq_size_per_block = kSeqPerBlock;
     mla_spec->kv_lora_rank       = 512;
@@ -1715,7 +1718,6 @@ TEST_F(KVCacheMemoryConnectorTest, copyCache_ReturnTrue_H2D_SplitKvScale_NoBlock
     cache_config_.use_mla               = true;
     cache_config_.is_sparse             = false;
     cache_config_.dtype                 = mla_spec->dtype;
-    cache_config_.cache_specs           = {mla_spec};
     cache_config_.kv_block_stride_bytes = kKvBytesPerTok * kSeqPerBlock;
     cache_config_.kv_scale_stride_bytes = kScaleBytesPerTok * kSeqPerBlock;
     cache_config_.kv_block_size_bytes   = static_cast<size_t>(kLayerNum) * cache_config_.kv_block_stride_bytes;
@@ -1728,10 +1730,8 @@ TEST_F(KVCacheMemoryConnectorTest, copyCache_ReturnTrue_H2D_SplitKvScale_NoBlock
     for (int i = 0; i < kLayerNum; ++i) {
         layer_ids[i] = i;
     }
-    cache_config_.layer_ids.clear();
-    cache_config_.global_layer_ids.clear();
-    cache_config_.layer_ids.push_back(layer_ids);
-    cache_config_.global_layer_ids.push_back(layer_ids);
+    cache_config_.fromGroupedSpecs({mla_spec}, {layer_ids}, {CacheGroupType::FULL}, {"default"});
+    setGroupStridesForConfig(cache_config_, {cache_config_.kv_block_stride_bytes}, {cache_config_.kv_scale_stride_bytes});
 
     ASSERT_EQ(mla_spec->block_size_bytes(), cache_config_.kv_block_stride_bytes);
 

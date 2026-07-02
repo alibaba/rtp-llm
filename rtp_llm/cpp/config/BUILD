@@ -53,6 +53,7 @@ cc_library(
         ":eplb_config",
         ":special_tokens",
         ":config_modules",
+        "//rtp_llm/cpp/cache:kvcache_spec_desc_types",
         "//rtp_llm/cpp/model_utils:model_utils",
         "//rtp_llm/models_py/bindings/core:types",
         "//rtp_llm/models_py/bindings/core:type_convert"

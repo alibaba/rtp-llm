@@ -3,6 +3,8 @@
 #include <atomic>
 #include <cassert>
 #include <functional>
+#include <mutex>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -25,14 +27,15 @@ class KVCacheConnectorReadWriteContext;
 class KVCacheManager {
 public:
     KVCacheManager(const CacheConfig&                 config,
-                   bool                               warmup             = false,
-                   const kmonitor::MetricsReporterPtr metrics_reporter   = nullptr,
-                   const KVCacheConfig&               kv_cache_config    = KVCacheConfig{},
-                   const ParallelismConfig&           parallelism_config = ParallelismConfig{},
-                   const RuntimeConfig&               runtime_config     = RuntimeConfig{},
-                   const SpeculativeExecutionConfig&  sp_config          = SpeculativeExecutionConfig{},
-                   const PDSepConfig&                 pd_sep_config      = PDSepConfig{},
-                   const CacheStoreConfig&            cache_store_config = CacheStoreConfig{});
+                   bool                               warmup                     = false,
+                   const kmonitor::MetricsReporterPtr metrics_reporter           = nullptr,
+                   const KVCacheConfig&               kv_cache_config            = KVCacheConfig{},
+                   const ParallelismConfig&           parallelism_config         = ParallelismConfig{},
+                   const RuntimeConfig&               runtime_config             = RuntimeConfig{},
+                   const SpeculativeExecutionConfig&  sp_config                  = SpeculativeExecutionConfig{},
+                   const PDSepConfig&                 pd_sep_config              = PDSepConfig{},
+                   const CacheStoreConfig&            cache_store_config         = CacheStoreConfig{},
+                   bool                               use_cuda_malloc_block_pool = false);
     ~KVCacheManager();
 
     // 初始化和配置相关
@@ -60,16 +63,19 @@ public:
                        bool                           copy_last_block,
                        std::vector<BlockIdPair>&      block_update_mapping);
 
-    // Write one KV block (optionally per-layer) from host/device tensors for test
-    virtual bool
-    setKVBlockValue(int block_index, int layer_id, const torch::Tensor& k_buffer, const torch::Tensor& v_buffer);
-    virtual bool setKVBlockValue(int block_index, const torch::Tensor& k_buffer, const torch::Tensor& v_buffer);
-
     // 地址转换和缓冲区访问
     BlockAddrInfo          convertIndexToAddr(int block_index, int layer_id) const;
     std::vector<BlockInfo> convertIndexToBuffer(int block_index, int layer_id) const;
     std::vector<BlockInfo>
-    convertIndexToBuffer(int block_index, int layer_id, int partition_count, int partition_id) const;
+                  convertIndexToBuffer(int block_index, int layer_id, int partition_count, int partition_id) const;
+    BlockAddrInfo          convertIndexToAddr(int block_index, int layer_id, int group_id) const;
+    std::vector<BlockInfo> convertIndexToBuffer(int block_index, int layer_id, int group_id) const;
+    std::vector<BlockInfo>
+    convertIndexToBuffer(int block_index, int layer_id, int group_id, int partition_count, int partition_id) const;
+    BlockAddrInfo          convertIndexToAddrByTag(int block_index, int layer_id, const std::string& tag) const;
+    std::vector<BlockInfo> convertIndexToBufferByTag(int block_index, int layer_id, const std::string& tag) const;
+    std::vector<BlockInfo> convertIndexToBufferByTag(
+        int block_index, int layer_id, const std::string& tag, int partition_count, int partition_id) const;
 
     CacheLayerLayout allLayerCacheBase() const;
 
@@ -124,6 +130,18 @@ public:
     std::shared_ptr<KVCacheResource>
     incrKVCacheRef(const KVCacheResource& resource, const CacheKeysType& cache_keys, bool is_connector = true);
 
+    // CP page-level RR sharding context. Returns nullptr when sharding is not active
+    // (single-rank or kv_cache_sharded=false).  Used by connector / cache_store to
+    // remap cacheKeys -> last-rank-key namespace.
+    std::shared_ptr<CPSlotMapper> cpSlotMapper() const {
+        return cp_slot_mapper_;
+    }
+
+    // Write one KV block (optionally per-layer) from host/device tensors for test
+    virtual bool
+    writeKVBlockForTest(int block_index, int layer_id, const torch::Tensor& k_buffer, const torch::Tensor& v_buffer);
+    virtual bool writeKVBlockForTest(int block_index, const torch::Tensor& k_buffer, const torch::Tensor& v_buffer);
+
 private:
     void initConnectorCoordinator();
     void allocateAndSync();
@@ -140,6 +158,9 @@ private:
     const SpeculativeExecutionConfig   sp_config_;
     const PDSepConfig                  pd_sep_config_;
     const CacheStoreConfig             cache_store_config_;
+    const bool                         use_cuda_malloc_block_pool_;
+
+    std::shared_ptr<CPSlotMapper> cp_slot_mapper_;
 
     std::atomic<bool> stop_{false};
     std::thread       metrics_reporter_thread_;

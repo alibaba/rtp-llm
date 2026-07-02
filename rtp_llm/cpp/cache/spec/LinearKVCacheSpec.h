@@ -4,7 +4,7 @@
 #include <sstream>
 #include <string>
 
-#include "rtp_llm/cpp/cache/KVCacheSpecBase.h"
+#include "rtp_llm/cpp/cache/spec/KVCacheSpecBase.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/models_py/bindings/core/Types.h"
 #include "rtp_llm/cpp/model_utils/AttentionConfig.h"
@@ -24,7 +24,10 @@ struct LinearKVCacheSpec: public KVCacheSpec {
     DataType ssm_state_dtype   = DataType::TYPE_BF16;
     DataType conv_state_dtype  = DataType::TYPE_BF16;
 
-    LinearKVCacheSpec() = default;
+    LinearKVCacheSpec() {
+        type      = KVCacheSpecType::LinearAttention;
+        lifecycle = CacheGroupType::LINEAR;
+    }
 
     LinearKVCacheSpec(const AttentionConfigs&      attn_config,
                       const ParallelismConfig&     parallelism_config,
@@ -52,7 +55,7 @@ struct LinearKVCacheSpec: public KVCacheSpec {
                                 linear_config.linear_value_head_dim);
 
         type               = KVCacheSpecType::LinearAttention;
-        layer_num          = 1;  // Will be set by caller
+        lifecycle          = CacheGroupType::LINEAR;
         local_head_num_kv  = static_cast<uint32_t>(std::max(
             1,
             (linear_config.linear_num_value_heads > 1) ?
@@ -132,6 +135,35 @@ struct LinearKVCacheSpec: public KVCacheSpec {
 
         // For Linear attention implementation, return the full blocks without any head-based partitioning
         return {0, k_block_bytes, k_block_bytes, v_block_bytes};
+    }
+
+    KVCacheSpecPtr clone() const override {
+        return std::make_shared<LinearKVCacheSpec>(*this);
+    }
+
+protected:
+    std::string fingerprintExtra() const override {
+        std::ostringstream os;
+        os << ";linear.local_num_k_heads=" << local_num_k_heads
+           << ";linear.local_num_v_heads=" << local_num_v_heads << ";linear.head_k_dim=" << head_k_dim
+           << ";linear.head_v_dim=" << head_v_dim << ";linear.conv_kernel_dim=" << conv_kernel_dim
+           << ";linear.ssm_state_dtype=" << static_cast<int>(ssm_state_dtype)
+           << ";linear.conv_state_dtype=" << static_cast<int>(conv_state_dtype);
+        return os.str();
+    }
+
+public:
+    // Override physicalSignature() to capture the dual-dtype layout.
+    // LinearKVCacheSpec uses ssm_state_dtype for the K (SSM) segment and
+    // conv_state_dtype for the V (conv) segment. Since block_size_bytes() already
+    // encodes their combined element count, we also expose k_block_size_bytes()
+    // (= SSM segment bytes) via scale_block_size_bytes to distinguish specs that
+    // share total block bytes but have a different K/V dtype split.
+    SpecPhysicalSignature physicalSignature() const override {
+        return {block_size_bytes(),
+                k_block_size_bytes(),  // K segment bytes as secondary discriminator
+                lifecycle,             // always LINEAR; use field for consistency with base class
+                ssm_state_dtype};      // primary dtype for the K (SSM) segment
     }
 
     std::string debugString(size_t indent = 0) const override {

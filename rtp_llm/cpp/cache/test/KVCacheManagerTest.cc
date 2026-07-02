@@ -7,7 +7,7 @@
 #include <thread>
 
 #include "kmonitor/client/MetricsReporter.h"
-#include "rtp_llm/cpp/cache/BlockCache.h"
+#include "rtp_llm/cpp/cache/SharedBlockCache.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/cache/test/BlockPoolTestHelper.h"
@@ -115,7 +115,7 @@ TEST_F(KVCacheManagerTest, SetKVBlockValueAndBlockCopy) {
     auto cache_manager = std::make_shared<KVCacheManager>(cache_config, /*warmup=*/false);
     ASSERT_TRUE(cache_manager->init());
 
-    auto&        spec    = cache_manager->cacheConfig().cache_specs[0];
+    auto&        spec    = cache_manager->cacheConfig().specForGroup(0);
     const size_t k_bytes = spec->k_block_size_bytes();
     const size_t v_bytes = spec->v_block_size_bytes();
     ASSERT_GT(k_bytes, 0u);
@@ -129,7 +129,7 @@ TEST_F(KVCacheManagerTest, SetKVBlockValueAndBlockCopy) {
     auto                k_t = torch::from_blob(k_vec.data(), {(int64_t)k_bytes}, torch::kInt8).clone();
     auto                v_t = torch::from_blob(v_vec.data(), {(int64_t)v_bytes}, torch::kInt8).clone();
 
-    ASSERT_TRUE(cache_manager->setKVBlockValue(block_src, k_t, v_t));
+    ASSERT_TRUE(cache_manager->writeKVBlockForTest(block_src, k_t, v_t));
 
     std::vector<int8_t> expected_block(k_bytes + v_bytes, 0);
     std::fill(expected_block.begin(), expected_block.begin() + k_bytes, 7);
@@ -149,7 +149,7 @@ TEST_F(KVCacheManagerTest, SetKVBlockValueAndBlockCopy) {
     std::vector<int8_t> v2_vec(v_bytes, 2);
     auto                k2_t = torch::from_blob(k2_vec.data(), {(int64_t)k_bytes}, torch::kInt8).clone();
     auto                v2_t = torch::from_blob(v2_vec.data(), {(int64_t)v_bytes}, torch::kInt8).clone();
-    ASSERT_TRUE(cache_manager->setKVBlockValue(block_dst, /*layer_id=*/0, k2_t, v2_t));
+    ASSERT_TRUE(cache_manager->writeKVBlockForTest(block_dst, /*layer_id=*/0, k2_t, v2_t));
 
     std::vector<int8_t> expected_layer0(k_bytes + v_bytes, 0);
     std::fill(expected_layer0.begin(), expected_layer0.begin() + k_bytes, 1);
@@ -212,7 +212,7 @@ TEST_F(KVCacheManagerTest, BlockBatchCopy) {
     auto cache_manager = std::make_shared<KVCacheManager>(cache_config, /*warmup=*/false);
     ASSERT_TRUE(cache_manager->init());
 
-    auto&        spec    = cache_manager->cacheConfig().cache_specs[0];
+    auto&        spec    = cache_manager->cacheConfig().specForGroup(0);
     const size_t k_bytes = spec->k_block_size_bytes();
     const size_t v_bytes = spec->v_block_size_bytes();
 
@@ -226,7 +226,7 @@ TEST_F(KVCacheManagerTest, BlockBatchCopy) {
         std::vector<int8_t> v_vec(v_bytes, static_cast<int8_t>(block_id + 10));
         auto                k_t = torch::from_blob(k_vec.data(), {(int64_t)k_bytes}, torch::kInt8).clone();
         auto                v_t = torch::from_blob(v_vec.data(), {(int64_t)v_bytes}, torch::kInt8).clone();
-        ASSERT_TRUE(cache_manager->setKVBlockValue(block_id, k_t, v_t));
+        ASSERT_TRUE(cache_manager->writeKVBlockForTest(block_id, k_t, v_t));
     }
 
     std::vector<BlockIdPair> mapping;
@@ -405,21 +405,12 @@ TEST_F(KVCacheManagerTest, GetKVCacheInfo_MergesDeviceAndMemoryKeys_Dedup) {
     ASSERT_NE(kv_cache_manager->coordinator_, nullptr);
 
     // Seed device block cache with keys: 10, 11, 12 (put makes MRU at front => snapshot order: 12,11,10)
-    auto block_cache = kv_cache_manager->allocator_->getBlockPool()->blockCache();
-    ASSERT_NE(block_cache, nullptr);
+    auto shared_cache = kv_cache_manager->allocator_->sharedBlockCache().get();
+    ASSERT_NE(shared_cache, nullptr);
     {
-        BlockCache::CacheItem item;
-        item.group_id    = 0;
-        item.is_resident = false;
-        item.cache_key   = 10;
-        item.block_index = 1;
-        ASSERT_TRUE(block_cache->put(item));
-        item.cache_key   = 11;
-        item.block_index = 2;
-        ASSERT_TRUE(block_cache->put(item));
-        item.cache_key   = 12;
-        item.block_index = 3;
-        ASSERT_TRUE(block_cache->put(item));
+        shared_cache->put(10, {1}, false);
+        shared_cache->put(11, {2}, false);
+        shared_cache->put(12, {3}, false);
     }
 
     // Inject a lightweight memory connector with a MemoryBlockCache snapshot:

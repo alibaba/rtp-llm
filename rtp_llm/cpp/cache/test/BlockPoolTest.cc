@@ -9,6 +9,7 @@
 #include "rtp_llm/cpp/cache/BlockPool.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/config_creator/CacheConfigCreator.h"
+#include "rtp_llm/cpp/cache/spec/KVCacheSpecDesc.h"
 #include "rtp_llm/cpp/cache/BlockPoolConfigHelper.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/cpp/cache/test/BlockPoolTestHelper.h"
@@ -46,7 +47,15 @@ static rtp_llm::ModelConfig makeTestModelConfig(uint32_t num_layers) {
     m.attn_config.kv_lora_rank     = 0;
     m.attn_config.rope_head_dim    = 0;
     m.attn_config.head_num         = 2;
-    // keep other fields default
+
+    KVCacheSpecDesc desc;
+    desc.cache_type         = CacheType::MHA;
+    desc.tag                = "default";
+    desc.size_per_head      = m.attn_config.size_per_head;
+    desc.num_kv_heads       = m.attn_config.kv_head_num;
+    desc.seq_size_per_block = m.attn_config.tokens_per_block;
+    m.kv_cache_spec_descs.assign(static_cast<size_t>(m.num_layers), {desc});
+
     return m;
 }
 
@@ -99,23 +108,23 @@ TEST_F(BlockPoolTest, MTPConvertIndexGlobalIdMapping) {
     // main(2 layers) + mtp1(1 layer) + mtp2(1 layer)
     auto cache_cfg = makeMtpCacheConfigByCreateSpConfig(/*main_layers=*/2, /*mtp_module_num=*/2, /*block_num=*/4);
 
-    ASSERT_FALSE(cache_cfg.global_layer_ids.empty());
-    ASSERT_EQ(cache_cfg.global_layer_ids[0].size(), static_cast<size_t>(cache_cfg.layer_all_num));
+    ASSERT_GT(cache_cfg.groupNums(), 0);
+    ASSERT_EQ(cache_cfg.layerIdsForGroup(0).size(), static_cast<size_t>(cache_cfg.layer_all_num));
 
     ASSERT_EQ(cache_cfg.mtp_sub_configs.size(), 2u);
     ASSERT_NE(cache_cfg.mtp_sub_configs[0], nullptr);
     ASSERT_NE(cache_cfg.mtp_sub_configs[1], nullptr);
     ASSERT_EQ(cache_cfg.mtp_sub_configs[0]->groupNums(), 1);
     ASSERT_EQ(cache_cfg.mtp_sub_configs[1]->groupNums(), 1);
-    EXPECT_EQ(cache_cfg.mtp_sub_configs[0]->cache_specs[0]->block_size_bytes(),
-              cache_cfg.mtp_sub_configs[1]->cache_specs[0]->block_size_bytes());
+    EXPECT_EQ(cache_cfg.mtp_sub_configs[0]->specForGroup(0)->block_size_bytes(),
+              cache_cfg.mtp_sub_configs[1]->specForGroup(0)->block_size_bytes());
 
-    ASSERT_FALSE(cache_cfg.mtp_sub_configs[0]->global_layer_ids.empty());
-    ASSERT_FALSE(cache_cfg.mtp_sub_configs[1]->global_layer_ids.empty());
-    ASSERT_EQ(cache_cfg.mtp_sub_configs[0]->global_layer_ids[0].size(), 1u);
-    ASSERT_EQ(cache_cfg.mtp_sub_configs[1]->global_layer_ids[0].size(), 1u);
-    EXPECT_EQ(cache_cfg.mtp_sub_configs[0]->global_layer_ids[0][0], 2);
-    EXPECT_EQ(cache_cfg.mtp_sub_configs[1]->global_layer_ids[0][0], 3);
+    ASSERT_GT(cache_cfg.mtp_sub_configs[0]->groupNums(), 0);
+    ASSERT_GT(cache_cfg.mtp_sub_configs[1]->groupNums(), 0);
+    ASSERT_EQ(cache_cfg.mtp_sub_configs[0]->layerIdsForGroup(0).size(), 1u);
+    ASSERT_EQ(cache_cfg.mtp_sub_configs[1]->layerIdsForGroup(0).size(), 1u);
+    EXPECT_EQ(cache_cfg.mtp_sub_configs[0]->layerIdsForGroup(0)[0], 2);
+    EXPECT_EQ(cache_cfg.mtp_sub_configs[1]->layerIdsForGroup(0)[0], 3);
 
     auto pool_cfg = rtp_llm::BlockPoolConfigHelper::createConfig(cache_cfg);
     ASSERT_EQ(pool_cfg.memory_layouts.size(), 3u);

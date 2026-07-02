@@ -4,7 +4,7 @@
 #include <sstream>
 #include <string>
 
-#include "rtp_llm/cpp/cache/KVCacheSpecBase.h"
+#include "rtp_llm/cpp/cache/spec/KVCacheSpecBase.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/models_py/bindings/core/Types.h"
 #include "rtp_llm/cpp/model_utils/AttentionConfig.h"
@@ -15,11 +15,13 @@ struct MLAKVCacheSpec: public KVCacheSpec {
     uint32_t kv_lora_rank;
     uint32_t rope_head_dim;
 
-    MLAKVCacheSpec() = default;
+    MLAKVCacheSpec() {
+        type      = KVCacheSpecType::MultiHeadLatentAttention;
+        lifecycle = CacheGroupType::FULL;
+    }
 
-    MLAKVCacheSpec(const AttentionConfigs& attn_config, const ParallelismConfig& parallelism_config) {
-        type               = KVCacheSpecType::MultiHeadLatentAttention;
-        layer_num          = 1;  // Will be set by caller
+    MLAKVCacheSpec(const AttentionConfigs& attn_config, const ParallelismConfig& parallelism_config)
+        : MLAKVCacheSpec() {
         local_head_num_kv  = 1;  // mla set local_head_num_kv to 1
         seq_size_per_block = static_cast<uint32_t>(attn_config.tokens_per_block);
         kv_lora_rank       = static_cast<uint32_t>(attn_config.kv_lora_rank);
@@ -81,6 +83,18 @@ struct MLAKVCacheSpec: public KVCacheSpec {
         return {0, k_block_bytes, k_block_bytes, v_block_bytes};
     }
 
+    KVCacheSpecPtr clone() const override {
+        return std::make_shared<MLAKVCacheSpec>(*this);
+    }
+
+protected:
+    std::string fingerprintExtra() const override {
+        std::ostringstream os;
+        os << ";mla.kv_lora_rank=" << kv_lora_rank << ";mla.rope_head_dim=" << rope_head_dim;
+        return os.str();
+    }
+
+public:
     std::string debugString(size_t indent = 0) const override {
         const std::string indent_str = std::string(indent, ' ');
         const std::string indent1    = indent_str + "  ";

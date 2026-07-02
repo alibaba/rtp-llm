@@ -1,8 +1,8 @@
 #pragma once
 
 #include <memory>
-#include "rtp_llm/cpp/cache/KVCacheAllocator.h"
-#include "rtp_llm/cpp/cache/FullKVCacheGroup.h"
+#include "rtp_llm/cpp/cache/allocator/KVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/group/FullKVCacheGroup.h"
 
 namespace rtp_llm {
 
@@ -42,6 +42,7 @@ private:
     MallocResult incrMalloc(const MallocInfo& malloc_info) override;
     MallocResult initMallocForCommonLen(const MallocInfo& malloc_info) override;
     int          getNeedBlocks(const MallocInfo& malloc_info) const override;
+    void         checkCPShardedMallocResult(const MallocInfo& malloc_info) const override;
     void         decrKVCacheRef(const KVCacheResource& kvcache_resource, bool is_connector = false) override;
 
 private:

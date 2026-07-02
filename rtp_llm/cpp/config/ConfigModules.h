@@ -29,7 +29,9 @@ enum class CPRotateMethod {
 struct PrefillCPConfig {
     CPRotateMethod method           = CPRotateMethod::DISABLED;
     size_t         comm_buffer_size = 512 * 1024 * 1024;  // 512MB
-    bool           is_enabled() const {
+    bool    kv_cache_sharded = false;
+    int64_t prefill_cp_size  = 0;
+    bool    is_enabled() const {
         return method != CPRotateMethod::DISABLED && method != CPRotateMethod::UNKNOWN
                && method != CPRotateMethod::PREFILL_CP;
     }
@@ -68,6 +70,8 @@ struct ParallelismConfig {
     int64_t ffn_tp_rank      = 0;
     bool    enable_sp        = false;
     bool    use_ub_comm      = false;
+
+    RoleType role_type = RoleType::PDFUSION;
 
     FfnDisAggregateConfig ffn_disaggregate_config;  // FFN disaggregate configuration
 
@@ -165,8 +169,11 @@ struct KVCacheConfig {
     bool    enable_memory_cache_sm_copy  = false;
     bool    enable_remote_cache          = false;
     bool    write_cache_sync             = false;
-    bool    enable_tiered_memory_cache   = false;
-    int64_t device_cache_min_free_blocks = 0;
+    bool    enable_tiered_memory_cache                   = false;
+    bool    enable_gpu_prefix_tree                       = true;
+    bool    enable_prefix_tree_memory_cache              = true;
+    bool    enable_independent_group_eviction            = false;
+    int64_t device_cache_min_free_blocks                 = 0;
     int     load_cache_retry_times       = 1;  // Maximum retry attempts for load cache transfer failures
 
     // Remote connector configuration fields
@@ -541,7 +548,8 @@ enum class HybridAttentionType {
 };
 
 struct HybridAttentionConfig {
-    bool                             enable_hybrid_attention = false;
+    bool                             enable_hybrid_attention           = false;
+    bool                             enable_independent_kv_cache_pools = false;
     std::vector<HybridAttentionType> hybrid_attention_types;
     std::string                      to_string() const;
 };

@@ -1,10 +1,11 @@
 #pragma once
 
 #include <memory>
+#include <numeric>
 #include <sstream>
 #include <string>
 
-#include "rtp_llm/cpp/cache/KVCacheSpecBase.h"
+#include "rtp_llm/cpp/cache/spec/KVCacheSpecBase.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/models_py/bindings/core/Types.h"
 #include "rtp_llm/cpp/model_utils/AttentionConfig.h"
@@ -14,12 +15,13 @@ namespace rtp_llm {
 struct MHAKVCacheSpec: public KVCacheSpec {
     uint32_t size_per_head;
 
-    MHAKVCacheSpec() = default;
+    MHAKVCacheSpec() {
+        type      = KVCacheSpecType::MultiHeadAttention;
+        lifecycle = CacheGroupType::FULL;
+    }
 
-    MHAKVCacheSpec(const AttentionConfigs& attn_config, const ParallelismConfig& parallelism_config) {
-        type              = KVCacheSpecType::MultiHeadAttention;
-        layer_num         = 1;  // Will be set by caller
-
+    MHAKVCacheSpec(const AttentionConfigs& attn_config, const ParallelismConfig& parallelism_config)
+        : MHAKVCacheSpec() {
         // TODO(xinfei.sxf): 这里的head_num_kv分配逻辑需要和ModelConfig::getAttentionConfigs里保持一致，目前这里还是单独计算的
         local_head_num_kv = static_cast<uint32_t>(
             (attn_config.kv_head_num % parallelism_config.get_attn_tp_size() == 0) ?
@@ -126,6 +128,18 @@ struct MHAKVCacheSpec: public KVCacheSpec {
         return {k_partition_off, k_partition_sz, v_partition_off, v_partition_sz};
     }
 
+    KVCacheSpecPtr clone() const override {
+        return std::make_shared<MHAKVCacheSpec>(*this);
+    }
+
+protected:
+    std::string fingerprintExtra() const override {
+        std::ostringstream os;
+        os << ";mha.size_per_head=" << size_per_head;
+        return os.str();
+    }
+
+public:
     std::string debugString(size_t indent = 0) const override {
         const std::string indent_str = std::string(indent, ' ');
         const std::string indent1    = indent_str + "  ";

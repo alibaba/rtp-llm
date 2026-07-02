@@ -196,25 +196,23 @@ static bool applyP2PSideChannelToStream(const std::shared_ptr<FusedAsyncReadCont
 
 void StreamCacheResource::init(int batch_size) {
     batch_kv_cache_resource_->resetBatchSize(batch_size);
-    int                         group_nums     = 1;
-    int                         layer_all_num  = 0;
-    std::vector<int>            layer_to_group = {};
-    std::vector<CacheGroupType> group_types    = {};
+    int                           group_nums            = 1;
+    int                           layer_all_num         = 0;
+    std::vector<CacheGroupType>   group_types           = {};
+    std::vector<std::vector<int>> layer_to_groups = {};
 
     size_t kernel_blocks_per_kv_block = 1;
     if (resource_context_.cache_manager) {  // cache manager is null when warmup
-        const auto& cache_config = resource_context_.cache_manager->cacheConfig();
-        group_nums               = cache_config.groupNums();
-        layer_all_num            = static_cast<int>(cache_config.layer_all_num);
-        layer_to_group           = cache_config.layer_to_group_id;
-        group_types              = cache_config.group_types;
-        if (cache_config.kernel_seq_size_per_block > 0 && cache_config.seq_size_per_block > 0) {
-            kernel_blocks_per_kv_block = cache_config.seq_size_per_block / cache_config.kernel_seq_size_per_block;
-        }
+        const auto& cache_config   = resource_context_.cache_manager->cacheConfig();
+        group_nums                 = cache_config.groupNums();
+        layer_all_num              = static_cast<int>(cache_config.layer_all_num);
+        group_types                = cache_config.groupTypesSnapshot();
+        layer_to_groups            = cache_config.layerGroupIdsSnapshot();
+        kernel_blocks_per_kv_block = cache_config.kernelBlocksPerKvBlock();
     }
 
     batch_kv_cache_resource_->initGroups(
-        group_nums, layer_all_num, layer_to_group, kernel_blocks_per_kv_block, group_types);
+        group_nums, layer_all_num, layer_to_groups, kernel_blocks_per_kv_block, group_types);
     resource_released_ = false;
 }
 
@@ -330,11 +328,12 @@ absl::Status StreamCacheResource::initKVBlock(size_t reserve_step) {
     malloc_info.request_id              = stream_->streamId();
     malloc_info.verbose                 = malloc_failed_times_ >= 10 ? malloc_failed_times_ % 100 == 0 : true;
 
-    const bool is_hybrid       = resource_context_.cache_manager->cacheConfig().groupNums() > 1;
+    const bool disable_first_malloc_reuse =
+        resource_context_.cache_manager->cacheConfig().disable_decode_first_malloc_device_reuse;
     const bool is_decode_role  = (resource_context_.role_type == RoleType::DECODE);
     const bool is_first_malloc = (batch_kv_cache_resource_->curBlocksNum() == 0);
 
-    if (is_hybrid && is_decode_role && is_first_malloc) {
+    if (disable_first_malloc_reuse && is_decode_role && is_first_malloc) {
         malloc_info.reuse_cache         = false;
         malloc_info.enable_device_cache = false;
     } else {
@@ -522,22 +521,22 @@ const CacheKeysType& StreamCacheResource::cacheKeys(int32_t batch_id) const {
 void StreamCacheResource::fakeInitKVBlock(size_t reserved_blocks) {
     fake_inited_ = true;
     batch_kv_cache_resource_->resetBatchSize(stream_->maxBatchSize());
-    int                         group_nums                 = 1;
-    int                         layer_all_num              = 0;
-    size_t                      kernel_blocks_per_kv_block = 1;
-    std::vector<int>            layer_to_group             = {};
-    std::vector<CacheGroupType> group_types                = {};
+    int                           group_nums                 = 1;
+    int                           layer_all_num              = 0;
+    size_t                        kernel_blocks_per_kv_block = 1;
+    std::vector<CacheGroupType>   group_types                = {};
+    std::vector<std::vector<int>> layer_to_groups      = {};
 
     if (resource_context_.cache_manager) {
         const auto& cache_config   = resource_context_.cache_manager->cacheConfig();
         group_nums                 = cache_config.groupNums();
         layer_all_num              = static_cast<int>(cache_config.layer_all_num);
-        layer_to_group             = cache_config.layer_to_group_id;
-        group_types                = cache_config.group_types;
+        group_types                = cache_config.groupTypesSnapshot();
+        layer_to_groups            = cache_config.layerGroupIdsSnapshot();
         kernel_blocks_per_kv_block = cache_config.kernelBlocksPerKvBlock();
     }
     batch_kv_cache_resource_->initGroups(
-        group_nums, layer_all_num, layer_to_group, kernel_blocks_per_kv_block, group_types);
+        group_nums, layer_all_num, layer_to_groups, kernel_blocks_per_kv_block, group_types);
 
     reserved_blocks = std::max(1ul, reserved_blocks);
     batch_kv_cache_resource_->resizeBlocks(reserved_blocks, 0);
@@ -705,7 +704,7 @@ void StreamCacheResource::swapLinearBlocks(int32_t batch_id, size_t rhs, size_t 
         return;
     }
 
-    auto type_list = resource_context_.cache_manager->cacheConfig().group_types;
+    auto type_list = resource_context_.cache_manager->cacheConfig().groupTypesSnapshot();
 
     for (size_t i = 0; i < type_list.size(); i++) {
         if (type_list[i] == CacheGroupType::LINEAR) {

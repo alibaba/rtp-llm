@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 #include <memory>
+#include <numeric>
 #include <vector>
 #include <torch/torch.h>
 #include "rtp_llm/cpp/cache/MemoryLayoutStrategy.h"
@@ -70,7 +71,6 @@ protected:
             auto spec                = std::make_shared<MHAKVCacheSpec>();
             spec->type               = KVCacheSpecType::MultiHeadAttention;
             spec->dtype              = dtype;
-            spec->layer_num          = layer_num;
             spec->local_head_num_kv  = local_head_num_kv;
             spec->seq_size_per_block = seq_size_per_block;
             spec->size_per_head      = static_cast<uint32_t>(k_elems / denom);
@@ -79,7 +79,6 @@ protected:
             auto spec                = std::make_shared<MLAKVCacheSpec>();
             spec->type               = KVCacheSpecType::MultiHeadLatentAttention;
             spec->dtype              = dtype;
-            spec->layer_num          = layer_num;
             spec->local_head_num_kv  = local_head_num_kv;
             spec->seq_size_per_block = seq_size_per_block;
             spec->kv_lora_rank       = static_cast<uint32_t>(k_elems / denom);
@@ -101,12 +100,15 @@ protected:
 
         // Create CacheConfig with the spec
         rtp_llm::CacheConfig cache_config;
-        cache_config.cache_specs           = {spec};
         cache_config.layer_num             = layer_num;
         cache_config.block_num             = block_num;
         cache_config.dtype                 = rtp_llm::DataType::TYPE_INT8;
         cache_config.seq_size_per_block    = 1;
         cache_config.kv_block_stride_bytes = spec->block_size_bytes();
+
+        std::vector<int> all_layer_ids(layer_num);
+        std::iota(all_layer_ids.begin(), all_layer_ids.end(), 0);
+        cache_config.fromGroupedSpecs({spec}, {all_layer_ids}, {CacheGroupType::FULL});
 
         auto pool_cfg   = BlockPoolConfigHelper::createConfig(cache_config);
         auto layout_cfg = pool_cfg.memory_layouts[0];
@@ -188,13 +190,16 @@ TEST_F(MemoryLayoutStrategyTest, InitializationWithScaleTensor) {
                                       /*v_block_stride_bytes=*/512);
     // Create CacheConfig with the spec
     rtp_llm::CacheConfig cache_config;
-    cache_config.cache_specs           = {spec};
     cache_config.layer_num             = 4;
     cache_config.block_num             = 8;
     cache_config.dtype                 = rtp_llm::DataType::TYPE_INT8;
     cache_config.seq_size_per_block    = 4;
     cache_config.kv_block_stride_bytes = spec->block_size_bytes();
     cache_config.kv_scale_stride_bytes = spec->scale_block_size_bytes();
+
+    std::vector<int> all_layer_ids_init(4);
+    std::iota(all_layer_ids_init.begin(), all_layer_ids_init.end(), 0);
+    cache_config.fromGroupedSpecs({spec}, {all_layer_ids_init}, {CacheGroupType::FULL});
 
     auto pool_cfg = BlockPoolConfigHelper::createConfig(cache_config);
     auto config   = pool_cfg.memory_layouts[0];  // keep enable_kv_scale=true
@@ -353,12 +358,15 @@ TEST_F(MemoryLayoutStrategyTest, ConvertIndexToBufferPartitionedByHeadFp16UsesBy
                                       /*v_block_stride_bytes=*/1024);
     // Create CacheConfig with the spec
     rtp_llm::CacheConfig cache_config;
-    cache_config.cache_specs           = {spec};
     cache_config.layer_num             = 4;
     cache_config.block_num             = 8;
     cache_config.dtype                 = rtp_llm::DataType::TYPE_FP16;
     cache_config.seq_size_per_block    = 64;
     cache_config.kv_block_stride_bytes = spec->block_size_bytes();
+
+    std::vector<int> all_layer_ids_fp16(4);
+    std::iota(all_layer_ids_fp16.begin(), all_layer_ids_fp16.end(), 0);
+    cache_config.fromGroupedSpecs({spec}, {all_layer_ids_fp16}, {CacheGroupType::FULL});
 
     auto pool_cfg = BlockPoolConfigHelper::createConfig(cache_config);
     auto config   = pool_cfg.memory_layouts[0];
@@ -424,13 +432,16 @@ TEST_F(MemoryLayoutStrategyTest, ConvertIndexToBufferPartitionedByHeadWithScale)
                                       /*v_block_stride_bytes=*/512);
     // Create CacheConfig with the spec
     rtp_llm::CacheConfig cache_config;
-    cache_config.cache_specs           = {spec};
     cache_config.layer_num             = 4;
     cache_config.block_num             = 8;
     cache_config.dtype                 = rtp_llm::DataType::TYPE_INT8;
     cache_config.seq_size_per_block    = 64;
     cache_config.kv_block_stride_bytes = spec->block_size_bytes();
     cache_config.kv_scale_stride_bytes = spec->scale_block_size_bytes();
+
+    std::vector<int> all_layer_ids_scale(4);
+    std::iota(all_layer_ids_scale.begin(), all_layer_ids_scale.end(), 0);
+    cache_config.fromGroupedSpecs({spec}, {all_layer_ids_scale}, {CacheGroupType::FULL});
 
     auto pool_cfg = BlockPoolConfigHelper::createConfig(cache_config);
     auto config   = pool_cfg.memory_layouts[0];  // keep enable_kv_scale=true

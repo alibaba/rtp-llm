@@ -10,7 +10,11 @@ from rtp_llm.models.qwen3_next.qwen3_next_weight import (
     Qwen35DenseWeight,
     Qwen35MoeWeight,
 )
-from rtp_llm.ops import HybridAttentionType
+from rtp_llm.ops import (
+    CacheType,
+    HybridAttentionType,
+    KVCacheSpecDesc,
+)
 
 
 class Qwen3NextBase(BaseModel):
@@ -135,6 +139,37 @@ class Qwen3NextBase(BaseModel):
         config.linear_attention_config.linear_value_head_dim = config_json[
             "linear_value_head_dim"
         ]
+
+    @classmethod
+    def _post_build_model_config(cls, model_config: ModelConfig) -> None:
+        full_desc = KVCacheSpecDesc()
+        full_desc.tag = "full"
+        full_desc.cache_type = CacheType.MHA
+        full_desc.seq_size_per_block = int(model_config.attn_config.tokens_per_block)
+        full_desc.size_per_head = int(model_config.attn_config.size_per_head)
+
+        linear_config = model_config.linear_attention_config
+        linear_desc = KVCacheSpecDesc()
+        linear_desc.tag = "linear"
+        linear_desc.cache_type = CacheType.LINEAR
+        linear_desc.seq_size_per_block = int(model_config.attn_config.tokens_per_block)
+        linear_desc.head_k_dim = int(linear_config.linear_key_head_dim)
+        linear_desc.head_v_dim = int(linear_config.linear_value_head_dim)
+        linear_desc.conv_kernel_dim = int(linear_config.linear_conv_kernel_dim)
+        linear_desc.ssm_state_dtype = linear_config.ssm_state_dtype
+        linear_desc.conv_state_dtype = linear_config.conv_state_dtype
+        linear_desc.num_k_heads = int(linear_config.linear_num_key_heads)
+        linear_desc.num_v_heads = int(linear_config.linear_num_value_heads)
+
+        layer_descs = []
+        for _, attn_type in enumerate(
+            model_config.hybrid_attention_config.hybrid_attention_types
+        ):
+            if attn_type == HybridAttentionType.LINEAR:
+                layer_descs.append([linear_desc])
+            else:
+                layer_descs.append([full_desc])
+        model_config.kv_cache_spec_descs = layer_descs
 
 
 class Qwen3Next(Qwen3NextBase):
