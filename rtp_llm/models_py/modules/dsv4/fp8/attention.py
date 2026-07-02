@@ -3033,9 +3033,11 @@ class AttentionFP8(nn.Module):
     ) -> bool:
         if not _prefill_cp_distributed_attention_enabled():
             return False
-        if self.compress_ratio not in (4, 128):
+        if self.compress_ratio not in (0, 4, 128):
             return False
-        if workspace_meta is None:
+        if self.compress_ratio == 0 and self._kv_cache is None:
+            return False
+        if self.compress_ratio in (4, 128) and workspace_meta is None:
             return False
         if common.device.type != "cuda":
             return False
@@ -5962,6 +5964,107 @@ class AttentionFP8(nn.Module):
             else:
                 _ins.quantize_and_insert_k_cache(k_bf16, packed_3d, meta.slot_mapping)
 
+    def _attn_fp8_swa_via_cp_distributed_op(
+        self,
+        qkv: PrefillQKV,
+        common: PrefillMeta,
+    ) -> torch.Tensor:
+        if qkv.q is None:
+            raise RuntimeError("distributed SWA-only attention requires materialized Q")
+        if qkv.swa_k_local is None:
+            raise RuntimeError("distributed SWA-only attention requires rank-local K")
+        cp_ctx = common.cp_ctx
+        if cp_ctx is None:
+            raise RuntimeError("distributed SWA-only attention requires CP context")
+        if cp_ctx.unpad_restore is None:
+            raise RuntimeError("distributed SWA-only attention requires CP unpad_restore")
+
+        buffer = self._ensure_cp_distributed_attention_buffer(qkv, common)
+        swa_kwargs = self._build_cp_distributed_swa_kwargs(qkv, common)
+        if os.environ.get("DSV4_CP_ATTENTION_SKIP_SWA_WRITER", "0") == "1":
+            swa_kwargs = {}
+
+        local_rows = torch.arange(
+            int(qkv.q.size(0)), dtype=torch.long, device=common.device
+        )
+        req_ids = cp_ctx.req_id_per_token
+        if req_ids is None:
+            req_ids = torch.zeros(
+                int(qkv.q.size(0)), dtype=torch.long, device=common.device
+            )
+        else:
+            req_ids = req_ids.to(device=common.device, dtype=torch.long).contiguous()
+        position_ids = cp_ctx.global_positions.to(
+            device=common.device, dtype=torch.long
+        ).contiguous()
+        prefix_lengths = (
+            cp_ctx.prefix_lengths
+            if cp_ctx.prefix_lengths is not None
+            else torch.tensor(
+                [int(cp_ctx.prefix_length)], dtype=torch.long, device=common.device
+            )
+        )
+        input_lengths = (
+            cp_ctx.input_lengths_global
+            if cp_ctx.input_lengths_global is not None
+            else torch.tensor(
+                [int(cp_ctx.seq_len_full)], dtype=torch.long, device=common.device
+            )
+        )
+        cu_lens = (
+            cp_ctx.cu_seqlens_global
+            if cp_ctx.cu_seqlens_global is not None
+            else torch.tensor(
+                [0, int(cp_ctx.seq_len_full)], dtype=torch.long, device=common.device
+            )
+        )
+
+        local_kv_2d = qkv.swa_k_local
+        if local_kv_2d.dtype != qkv.q.dtype:
+            local_kv_2d = local_kv_2d.to(qkv.q.dtype)
+        local_kv = local_kv_2d.view(1, int(cp_ctx.chunk_length), 1, self.head_dim)
+        indexer_q = qkv.q[:, :1, :1].contiguous()
+        dummy_indexer_k = torch.empty(
+            int(input_lengths.numel()),
+            1,
+            1,
+            1,
+            dtype=qkv.q.dtype,
+            device=common.device,
+        )
+
+        try:
+            o = rtp_llm_ops.dsv4_cp_distributed_prefill_attention(
+                qkv.q.contiguous(),
+                local_kv.contiguous(),
+                indexer_q,
+                dummy_indexer_k,
+                self.attn_sink.contiguous(),
+                req_ids,
+                position_ids,
+                prefix_lengths.to(device=common.device, dtype=torch.long).contiguous(),
+                input_lengths.to(device=common.device, dtype=torch.long).contiguous(),
+                local_rows,
+                0,
+                int(self.window_size),
+                0,
+                0,
+                **buffer.op_kwargs(cp_rank=int(cp_ctx.cp_rank)),
+                **swa_kwargs,
+                kv_unpad_restore=cp_ctx.unpad_restore.to(
+                    device=common.device, dtype=torch.long
+                ).contiguous(),
+                kv_cu_lens=cu_lens.to(device=common.device, dtype=torch.long).contiguous(),
+            )
+        except Exception:
+            logging.exception(
+                "[DSV4 CP Attention Py] SWA-only op failed layer=%s cp_rank=%s",
+                int(getattr(self, "layer_id", -1)),
+                int(getattr(cp_ctx, "cp_rank", -1)),
+            )
+            raise
+        return o.unsqueeze(0)
+
     def _attn_fp8_swa_via_kv_full(
         self,
         qkv: PrefillQKV,
@@ -5984,6 +6087,14 @@ class AttentionFP8(nn.Module):
         assert (
             qkv.q is not None
         ), "_attn_fp8_swa_via_kv_full: prefill Q not materialized"
+        if (
+            self._kv_cache is not None
+            and self._should_use_cp_distributed_prefill_attention(common, None)
+            and qkv.swa_k_local is not None
+        ):
+            with record_function_range("dsv4.fp8.attn.swa.cp_distributed_op"):
+                return self._attn_fp8_swa_via_cp_distributed_op(qkv, common)
+
         from flash_mla import flash_mla_sparse_fwd  # type: ignore[import-not-found]
 
         meta = common.swa_meta

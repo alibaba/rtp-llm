@@ -20,7 +20,7 @@ import torch.distributed as dist
 
 _BUFFER_CACHE: dict[tuple, "Dsv4CpAttentionBuffer"] = {}
 _DEFAULT_ALIGN_BYTES = 256
-_DEFAULT_PROTOCOL_BYTES = 4096
+_DEFAULT_PROTOCOL_BYTES = 4352
 _ENV_MAX_TOKENS = "DSV4_CP_DISTRIBUTED_PREFILL_ATTN_MAX_TOKENS_PER_RANK"
 _SIGNAL_PAD_CHANNEL_BASE = 224
 _SIGNAL_PAD_CHANNEL_COUNT = 32
@@ -47,10 +47,10 @@ def _env_int(name: str, default: int) -> int:
 class Dsv4CpAttentionBufferSpec:
     """Capacity key for the attention symmetric buffer.
 
-    The per-rank region is reused by the op's ordered stages:
-    SWA KV exchange, main compressor exchange, nested indexer compressor
-    exchange, and scratch/protocol state.  A single per-rank staging region is
-    enough because those stages execute serially inside the op.
+    The per-rank region has persistent payloads plus a transient scratch
+    payload.  Fresh KV and semantic indexer-K must remain readable until the
+    attention body finishes, while SWA/compressor exchanges reuse the scratch
+    payload during earlier writer phases.
     """
 
     cp_size: int
@@ -61,7 +61,7 @@ class Dsv4CpAttentionBufferSpec:
     # writes the packed 584B / 132B cache rows.  Size for worst-case
     # overlap=True payload widths, not for the packed cache entry sizes.
     main_bytes_per_token: int = 2048
-    indexer_bytes_per_token: int = 512
+    indexer_bytes_per_token: int = 1024
     scratch_bytes_per_rank: int = 0
     protocol_bytes_per_rank: int = _DEFAULT_PROTOCOL_BYTES
     align_bytes: int = _DEFAULT_ALIGN_BYTES
@@ -94,12 +94,16 @@ class Dsv4CpAttentionBufferSpec:
     @property
     def stage_bytes_per_rank(self) -> int:
         token_cap = int(self.max_tokens_per_rank)
-        return max(
+        persistent_bytes = token_cap * (
+            int(self.main_bytes_per_token) + int(self.indexer_bytes_per_token)
+        )
+        transient_bytes = max(
             token_cap * int(self.swa_bytes_per_token),
             token_cap * int(self.main_bytes_per_token),
             token_cap * int(self.indexer_bytes_per_token),
             int(self.scratch_bytes_per_rank),
         )
+        return persistent_bytes + transient_bytes
 
     @property
     def per_rank_bytes(self) -> int:
