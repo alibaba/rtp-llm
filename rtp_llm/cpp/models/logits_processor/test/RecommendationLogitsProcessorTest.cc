@@ -743,4 +743,56 @@ TEST_F(RecommendationLogitsProcessorTest, testSingleSequenceCrossSeqBanNoOp) {
     EXPECT_TRUE(processor->infos()[0].banned_combos.count({1, 2}));
 }
 
+// 场景 23：insert() flag 一致性校验
+TEST_F(RecommendationLogitsProcessorTest, testInsertFlagConsistencyCheck) {
+    const int combo_size = 3;
+    std::set<std::vector<int>> empty_set;
+
+    // 正向：flag 一致时 insert 成功
+    {
+        std::vector<StreamRecommendationInfo> infos_a;
+        infos_a.emplace_back(combo_size, 0, 0, false, empty_set, {},
+                             /*enable_cross_sequence_ban=*/true, 0);
+        auto proc_a = std::make_shared<RecommendationLogitsProcessor>(std::move(infos_a));
+
+        std::vector<StreamRecommendationInfo> infos_b;
+        infos_b.emplace_back(combo_size, 0, 0, false, empty_set, {},
+                             /*enable_cross_sequence_ban=*/true, 0);
+        auto proc_b = std::make_shared<RecommendationLogitsProcessor>(std::move(infos_b));
+
+        proc_a->insert(proc_b);
+        EXPECT_EQ(2u, proc_a->size());
+    }
+
+    // 反向：flag 不一致时触发 CHECK 失败
+    {
+        std::vector<StreamRecommendationInfo> infos_a;
+        infos_a.emplace_back(combo_size, 0, 0, false, empty_set, {},
+                             /*enable_cross_sequence_ban=*/true, 0);
+        auto proc_a = std::make_shared<RecommendationLogitsProcessor>(std::move(infos_a));
+
+        std::vector<StreamRecommendationInfo> infos_b;
+        infos_b.emplace_back(combo_size, 0, 0, false, empty_set, {},
+                             /*enable_cross_sequence_ban=*/false, 0);
+        auto proc_b = std::make_shared<RecommendationLogitsProcessor>(std::move(infos_b));
+
+        EXPECT_THROW(proc_a->insert(proc_b), std::exception);
+    }
+
+    // 边界：insert nullptr 和空 processor 不崩溃
+    {
+        std::vector<StreamRecommendationInfo> infos_a;
+        infos_a.emplace_back(combo_size, 0, 0, false, empty_set, {},
+                             /*enable_cross_sequence_ban=*/true, 0);
+        auto proc_a = std::make_shared<RecommendationLogitsProcessor>(std::move(infos_a));
+
+        proc_a->insert(nullptr);
+        EXPECT_EQ(1u, proc_a->size());
+
+        auto proc_empty = std::make_shared<RecommendationLogitsProcessor>(std::vector<StreamRecommendationInfo>{});
+        proc_a->insert(proc_empty);
+        EXPECT_EQ(1u, proc_a->size());
+    }
+}
+
 }  // namespace rtp_llm
