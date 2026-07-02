@@ -1,3 +1,9 @@
+load("@arch_config//:arch_select.bzl", "requirement")
+
+requirement([
+    "grpcio",
+    "packaging",
+])
 
 filegroup(
     name = "testdata",
@@ -8,20 +14,147 @@ filegroup(
     visibility = ["//visibility:public"],
 )
 
+py_library(
+    name = "jit_cache_manager_test_lib",
+    srcs = ["jit_cache_manager_test.py"],
+    deps = [
+        "//rtp_llm:config_ops",
+        "//rtp_llm:jit_cache_manager_lib",
+    ],
+)
+
+py_test(
+    name = "jit_cache_manager_test",
+    srcs = [
+        "jit_cache_manager_test.py",
+    ],
+    data = [
+        "//:th_transformer_config",
+    ],
+    deps = [
+        "//rtp_llm:config_ops",
+        "//rtp_llm:jit_cache_manager_lib",
+    ],
+)
+
+py_test(
+    name = "jit_cache_remote_integration_test",
+    timeout = "long",
+    srcs = [
+        "jit_cache_remote_integration_test.py",
+    ],
+    args = [
+        "RemoteJitIntegrationTest",
+    ],
+    env = {
+        "FLASHINFER_DISABLE_VERSION_CHECK": "1",
+        "GPU_COUNT": "1",
+    },
+    exec_properties = {
+        "gpu": "H20",
+        "gpu_count": "1",
+    },
+    tags = [
+        "H20",
+        "open_skip",
+    ],
+    deps = [
+        ":jit_cache_manager_test_lib",
+        ":packaging",
+        "//rtp_llm:apache-tvm-ffi",
+        "//rtp_llm:deep_gemm",
+        "//rtp_llm:flashinfer-python",
+        "//rtp_llm:jit_cache_manager_lib",
+        "//rtp_llm:torch",
+        "//rtp_llm:triton",
+        "//rtp_llm/models_py/triton_kernels/autotune_cache",
+    ],
+)
+
+py_test(
+    name = "jit_cache_event_signal_test",
+    timeout = "long",
+    srcs = [
+        "jit_cache_remote_integration_test.py",
+    ],
+    args = [
+        "JitEventSignalVerificationTest",
+    ],
+    env = {
+        "FLASHINFER_DISABLE_VERSION_CHECK": "1",
+        "GPU_COUNT": "1",
+    },
+    exec_properties = {
+        "gpu": "H20",
+        "gpu_count": "1",
+    },
+    main = "jit_cache_remote_integration_test.py",
+    tags = [
+        "H20",
+        "open_skip",
+    ],
+    deps = [
+        ":jit_cache_manager_test_lib",
+        ":packaging",
+        "//rtp_llm:apache-tvm-ffi",
+        "//rtp_llm:deep_gemm",
+        "//rtp_llm:flashinfer-python",
+        "//rtp_llm:jit_cache_manager_lib",
+        "//rtp_llm:torch",
+        "//rtp_llm:triton",
+        "//rtp_llm/models_py/triton_kernels/autotune_cache",
+    ],
+)
+
+py_test(
+    name = "jit_cache_remote_2rank_test",
+    timeout = "long",
+    srcs = [
+        "jit_cache_remote_integration_test.py",
+    ],
+    args = [
+        "TwoRankSnapshotPublishTest.test_two_gpu_rank_processes_publish_single_snapshot_file",
+    ],
+    env = {
+        "FLASHINFER_DISABLE_VERSION_CHECK": "1",
+        "GPU_COUNT": "2",
+    },
+    exec_properties = {
+        "gpu": "H20",
+        "gpu_count": "2",
+    },
+    main = "jit_cache_remote_integration_test.py",
+    tags = [
+        "H20",
+        "open_skip",
+    ],
+    deps = [
+        ":jit_cache_manager_test_lib",
+        ":packaging",
+        "//rtp_llm:apache-tvm-ffi",
+        "//rtp_llm:deep_gemm",
+        "//rtp_llm:flashinfer-python",
+        "//rtp_llm:jit_cache_manager_lib",
+        "//rtp_llm:torch",
+        "//rtp_llm:triton",
+        "//rtp_llm/models_py/triton_kernels/autotune_cache",
+    ],
+)
+
 py_test(
     name = "ckpt_database_test",
     srcs = [
         "ckpt_database_test.py",
     ],
-    deps = [
-        "//rtp_llm:utils",
-        "//rtp_llm:config",
-        "//rtp_llm:_ft_pickler",
-        "//rtp_llm:lora"
-    ],
     data = [
         "//rtp_llm/utils/test:testdata",
-    ]
+    ],
+    deps = [
+        "//rtp_llm:_ft_pickler",
+        "//rtp_llm:config",
+        "//rtp_llm:lora",
+        "//rtp_llm:utils",
+    ],
 )
 
 py_test(
@@ -34,18 +167,17 @@ py_test(
     ],
 )
 
-
 py_test(
     name = "util_test",
     srcs = [
         "util_test.py",
     ],
     deps = [
-        "//rtp_llm:utils",
         "//rtp_llm:_ft_pickler",
-        "//rtp_llm:pynvml",
-        "//rtp_llm:psutil",
         "//rtp_llm:fastapi",
+        "//rtp_llm:psutil",
+        "//rtp_llm:pynvml",
+        "//rtp_llm:utils",
     ],
 )
 
@@ -54,38 +186,32 @@ py_test(
     srcs = [
         "process_manager_test.py",
     ],
+    data = [
+        "//:rtp_compute_ops",
+        "//:th_transformer",
+        "//:th_transformer_config",
+    ],
+    exec_properties = {"gpu": "H20"},
     deps = [
         "//rtp_llm:utils",
     ],
-    data = [
-        "//:th_transformer",
-        "//:th_transformer_config",
-        "//:rtp_compute_ops",
-    ],
-    exec_properties = {'gpu':'H20'}
 )
-
-load("@arch_config//:arch_select.bzl", "requirement")
-
-requirement([
-    "grpcio",
-])
 
 py_test(
     name = "grpc_host_channel_pool_test",
     srcs = [
         "grpc_host_channel_pool_test.py",
     ],
-    deps = [
-        "//rtp_llm:utils",
-        ":grpcio",
-    ],
     data = [
+        "//:rtp_compute_ops",
         "//:th_transformer",
         "//:th_transformer_config",
-        "//:rtp_compute_ops",
     ],
-    exec_properties = {'gpu':'H20'}
+    exec_properties = {"gpu": "H20"},
+    deps = [
+        ":grpcio",
+        "//rtp_llm:utils",
+    ],
 )
 
 py_test(
@@ -93,15 +219,15 @@ py_test(
     srcs = [
         "duplicated_kv_test.py",
     ],
-    deps = [
-        "//rtp_llm:utils",
-        "//rtp_llm:fastapi",
-        "//rtp_llm:_ft_pickler",
-    ],
     data = [
+        "//:rtp_compute_ops",
         "//:th_transformer",
         "//:th_transformer_config",
-        "//:rtp_compute_ops",
     ],
-    exec_properties = {'gpu':'A10'}
+    exec_properties = {"gpu": "A10"},
+    deps = [
+        "//rtp_llm:_ft_pickler",
+        "//rtp_llm:fastapi",
+        "//rtp_llm:utils",
+    ],
 )

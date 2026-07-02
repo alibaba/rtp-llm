@@ -15,7 +15,8 @@
 #
 # Environment variables:
 #   TRITON_AUTOTUNE_CACHE_MODE     - "disabled" | "cached"; default "disabled"
-#   TRITON_AUTOTUNE_CONFIG_DIR     - override JSON root; default <this_dir>/configs/{GPU}/
+#   TRITON_AUTOTUNE_CONFIG_DIR     - override JSON root; default <this_dir>/configs/{GPU}/.
+#                                    Set to BUILTIN_CONFIG_SENTINEL to use the default.
 #   TRITON_AUTOTUNE_GPU_NAME       - override GPU model id used for path lookup
 
 import dataclasses
@@ -55,6 +56,11 @@ except Exception:
 # on older Triton. Hardcoded on — debug-time invalidation goes via
 # `TRITON_CACHE_DIR` rather than a separate env knob.
 autotune_cache_kwargs = {"cache_results": True} if SUPPORTS_AUTOTUNE_CACHE else {}
+
+
+# Smoke tests set TRITON_AUTOTUNE_CONFIG_DIR to this to pin checked-in configs.
+# Mirrored in suites_h20_oss.bzl:_KIMI_KDA_AUTOTUNE_ENVS.
+BUILTIN_CONFIG_SENTINEL = "__builtin__"
 
 
 class CacheMode(enum.Enum):
@@ -118,7 +124,7 @@ def get_config_dir() -> Path:
     `configs/{GPU}/` subdirectory next to this file.
     """
     override = os.environ.get("TRITON_AUTOTUNE_CONFIG_DIR")
-    if override is not None:
+    if override and override != BUILTIN_CONFIG_SENTINEL:
         return Path(override)
     return Path(__file__).parent / "configs" / get_gpu_info()
 

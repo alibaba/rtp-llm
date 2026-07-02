@@ -397,10 +397,14 @@ class MasterConfig:
 
 class JITConfig:
     def __init__(self):
+        self.local_jit_dir: str = os.environ.get("LOCAL_JIT_DIR", "./.jit_cache")
         self.remote_jit_dir: str = ""
 
     def to_string(self):
-        return f"remote_jit_dir: {self.remote_jit_dir}"
+        return (
+            f"local_jit_dir: {self.local_jit_dir}\n"
+            f"remote_jit_dir: {self.remote_jit_dir}"
+        )
 
 
 class DeepEPConfig:

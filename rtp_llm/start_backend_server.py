@@ -1,15 +1,14 @@
-import glob
 import logging
-import logging.config
 import multiprocessing
 import os
 import signal
 import subprocess
 import sys
+import threading
 import time
 import traceback
 from multiprocessing import Process
-from typing import List, Optional
+from typing import List
 
 import torch
 from setproctitle import setproctitle
@@ -26,6 +25,7 @@ from rtp_llm.utils.concurrency_controller import (
     ConcurrencyController,
     set_global_controller,
 )
+from rtp_llm.utils.jit_cache_manager import JitCacheManager
 from rtp_llm.utils.process_manager import ProcessManager
 
 setup_logging()
@@ -39,26 +39,28 @@ def local_rank_start(
 ):
     """Start local rank with proper signal handling for graceful shutdown"""
     backend_manager = None
+    jit_cache_manager = None
+    shutdown_requested = threading.Event()
     logging.info(f"[PROCESS_START]Start local rank process")
-    start_time = time.time()
-    from rtp_llm.server.backend_manager import BackendManager
     from rtp_llm.utils.util import copy_gemm_config
-
-    logging.info(f"import BackendManager took {time.time()- start_time:.2f}s")
 
     def signal_handler(signum, frame):
         logging.info(
             f"Local rank received signal {signum}, shutting down gracefully..."
         )
+        shutdown_requested.set()
         if backend_manager is not None:
             try:
                 backend_manager.request_shutdown()
             except Exception as e:
                 logging.error(f"Error during backend manager shutdown: {e}")
 
+    def install_signal_handlers():
+        signal.signal(signal.SIGTERM, signal_handler)
+        signal.signal(signal.SIGINT, signal_handler)
+
     # Setup signal handlers for graceful shutdown
-    signal.signal(signal.SIGTERM, signal_handler)
-    signal.signal(signal.SIGINT, signal_handler)
+    install_signal_handlers()
 
     copy_gemm_config()
 
@@ -76,8 +78,23 @@ def local_rank_start(
         if py_env_configs.parallelism_config.world_size > 1:
             setproctitle(f"rtp_llm_rank-{local_rank}")
         set_global_controller(global_controller)
+        jit_cache_manager = JitCacheManager(py_env_configs.jit_config)
+        jit_cache_manager.bootstrap()
+        if shutdown_requested.is_set():
+            raise KeyboardInterrupt("shutdown requested before JIT prepare")
+        jit_cache_manager.prepare(should_stop=shutdown_requested.is_set)
+        if shutdown_requested.is_set():
+            raise KeyboardInterrupt("shutdown requested after JIT prepare")
+        jit_cache_manager.start_background_sync()
+        start_time = time.time()
+        from rtp_llm.server.backend_manager import BackendManager
+
+        logging.info(f"import BackendManager took {time.time()- start_time:.2f}s")
         backend_manager = BackendManager(py_env_configs)
         backend_manager.start()
+        # Engine startup overwrites SIGTERM/SIGINT; restore Python handlers
+        # so the finally block can flush JIT artifacts on shutdown.
+        install_signal_handlers()
         logging.info("Backend server initialized successfully, sending ready status")
 
         # Send startup success message
@@ -112,6 +129,9 @@ def local_rank_start(
             except Exception as pipe_error:
                 logging.warning(f"Failed to send error status via pipe: {pipe_error}")
         raise e
+    finally:
+        if jit_cache_manager:
+            jit_cache_manager.stop()
 
 
 def _get_local_world_size(py_env_configs: PyEnvConfigs) -> int:
@@ -163,16 +183,19 @@ def _create_rank_processes(
     processes = []
     rank_pipe_readers = []  # Store pipe readers for each rank
 
-    for _, world_rank in enumerate(
-        range(pc.world_rank, pc.world_rank + local_world_size)
-    ):
+    for world_rank in range(pc.world_rank, pc.world_rank + local_world_size):
         reader, writer = multiprocessing.Pipe(duplex=False)
         os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(cuda_device_list)
         os.environ["WORLD_RANK"] = str(world_rank)
 
         proc = Process(
             target=local_rank_start,
-            args=(global_controller, py_env_configs, world_rank, writer),
+            args=(
+                global_controller,
+                py_env_configs,
+                world_rank,
+                writer,
+            ),
             name=f"rank-{world_rank}",
         )
         proc.start()
@@ -405,14 +428,6 @@ def load_gpu_nic_affinity():
         return False
 
 
-def clear_jit_filelock():
-    # check whether exists jit dir
-    if os.path.exists("deep_gemm_runtime"):
-        files = glob.glob("./deep_gemm_runtime/**/*_lock", recursive=True)
-        for file in files:
-            os.remove(file)
-
-
 def start_backend_server(
     global_controller: ConcurrencyController,
     py_env_configs: PyEnvConfigs,
@@ -423,10 +438,11 @@ def start_backend_server(
     os.makedirs("logs", exist_ok=True)
     load_gpu_nic_affinity()
 
-    clear_jit_filelock()
-
     if not torch.cuda.is_available():
-        return local_rank_start(global_controller, py_env_configs)
+        return local_rank_start(
+            global_controller,
+            py_env_configs,
+        )
 
     pc = py_env_configs.parallelism_config
     if (
@@ -441,7 +457,12 @@ def start_backend_server(
     if torch.cuda.device_count() > 1 and pc.world_size > 1:
         return multi_rank_start(global_controller, py_env_configs, pipe_writer)
     else:
-        return local_rank_start(global_controller, py_env_configs, 0, pipe_writer)
+        return local_rank_start(
+            global_controller,
+            py_env_configs,
+            0,
+            pipe_writer,
+        )
 
 
 def main():

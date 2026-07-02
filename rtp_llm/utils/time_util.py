@@ -8,6 +8,11 @@ def current_time_ms() -> float:
     return time.time() * 1000
 
 
+def elapsed_ms(start_s: float) -> int:
+    """Milliseconds elapsed since a `time.monotonic()` reading — safe for durations."""
+    return int((time.monotonic() - start_s) * 1000)
+
+
 class Timer(object):
     def __init__(self):
         self.start_time: Optional[float] = None

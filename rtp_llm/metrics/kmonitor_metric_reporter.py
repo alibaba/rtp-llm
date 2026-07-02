@@ -94,6 +94,10 @@ class MetricReporter(object):
         self._matic_map: Dict[str, Any] = {}
         self._inited = False
 
+    @property
+    def is_inited(self) -> bool:
+        return self._inited
+
     def report(
         self,
         metric: Union[AccMetrics, GaugeMetrics],
