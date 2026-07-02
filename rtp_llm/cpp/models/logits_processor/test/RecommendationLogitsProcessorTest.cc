@@ -11,10 +11,10 @@ namespace rtp_llm {
 // 构造一个 StreamRecommendationInfo 便捷方法
 static StreamRecommendationInfo makeInfo(int32_t                                  combo_token_size,
                                          const std::vector<std::vector<int>>&     banned,
-                                         bool                                     is_beam_search = false,
+                                         bool                                     needs_token_offset = false,
                                          int32_t                                  input_length   = 0) {
     std::set<std::vector<int>> banned_set(banned.begin(), banned.end());
-    return StreamRecommendationInfo(combo_token_size, input_length, 0, is_beam_search, banned_set);
+    return StreamRecommendationInfo(combo_token_size, input_length, 0, needs_token_offset, banned_set);
 }
 
 // 分配一个仅装载 logits 的 SamplerInputs（vocab_size 可控）
@@ -440,11 +440,13 @@ TEST_F(RecommendationLogitsProcessorTest, testUpdateMultiSeqStatusWorksWhenCross
     EXPECT_EQ(processor->infos().size(), 2u);
 }
 
-// 场景 16：通过 fromGenerateInput 走生产路径（is_beam_search=true, enable_cross_seq_ban=true）
+// 场景 16：通过 fromGenerateInput 走生产路径（needs_token_offset=true, enable_cross_seq_ban=true）
 // 验证 updateStatus 在 offset = current_output_length + input_length 路径下正确工作
 TEST_F(RecommendationLogitsProcessorTest, testFromGenerateInputProductionPath) {
     // 配置：combo_token_size=3, num_return_sequences=3, enable_cross_sequence_ban=true
-    // 生产中 is_beam_search = hasNumBeams() || num_return_sequences > 1 = true
+    // 生产中 needs_token_offset = hasNumBeams() || num_return_sequences > 1 = true
+    // 注意：needs_token_offset 与 enable_cross_sequence_ban 不互斥，
+    // 互斥的是 hasNumBeams()（即真正的 beam search），这里 num_return_sequences>1 触发 offset 但不是 beam search。
     auto generate_input             = std::make_shared<GenerateInput>();
     generate_input->generate_config = std::make_shared<GenerateConfig>();
     generate_input->generate_config->combo_token_size          = 3;
@@ -458,14 +460,14 @@ TEST_F(RecommendationLogitsProcessorTest, testFromGenerateInputProductionPath) {
     ASSERT_NE(nullptr, p);
     ASSERT_EQ(3u, p->size());
 
-    // 验证 is_beam_search=true 和 enable_cross_sequence_ban=true
+    // 验证 needs_token_offset=true 和 enable_cross_sequence_ban=true
     for (const auto& info : p->infos()) {
-        EXPECT_TRUE(info.is_beam_search);
+        EXPECT_TRUE(info.needs_token_offset);
         EXPECT_TRUE(info.enable_cross_sequence_ban);
         EXPECT_EQ(4, info.input_length);
     }
 
-    // 模拟 updateStatus （is_beam_search=true 路径）
+    // 模拟 updateStatus （needs_token_offset=true 路径）
     // tensor 形状 [N, input_length + total_output_length]
     // 第一步：output_length=0，offset=0+4=4，张量的第 4 列是新 token
     int input_len = 4;

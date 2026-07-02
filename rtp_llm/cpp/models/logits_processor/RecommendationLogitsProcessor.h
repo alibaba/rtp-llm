@@ -20,7 +20,9 @@ struct StreamRecommendationInfo {
     int32_t combo_token_size          = 0;
     int32_t input_length              = 0;
     int32_t current_output_length     = 0;
-    bool    is_beam_search            = false;
+    // 实际语义：hasNumBeams() || num_return_sequences > 1，控制 token 读取是否需要 full-position offset。
+    // 与 enable_cross_sequence_ban 不互斥（互斥的是 hasNumBeams()，见 fromGenerateInput）。
+    bool    needs_token_offset        = false;
     bool    enable_cross_sequence_ban = false;
     int32_t cross_seq_diverge_start_combo = 0;
 
@@ -44,7 +46,7 @@ struct StreamRecommendationInfo {
     StreamRecommendationInfo(int32_t                           combo_token_size,
                              int32_t                           input_length,
                              int32_t                           current_output_length,
-                             bool                              is_beam_search,
+                             bool                              needs_token_offset,
                              const std::set<std::vector<int>>& banned_combos,
                              const std::vector<int>&           end_think_token_ids = {},
                              bool                              enable_cross_sequence_ban = false,
@@ -52,7 +54,7 @@ struct StreamRecommendationInfo {
         combo_token_size(combo_token_size),
         input_length(input_length),
         current_output_length(current_output_length),
-        is_beam_search(is_beam_search),
+        needs_token_offset(needs_token_offset),
         enable_cross_sequence_ban(enable_cross_sequence_ban),
         cross_seq_diverge_start_combo(cross_seq_diverge_start_combo),
         banned_combos(banned_combos),
@@ -64,7 +66,7 @@ struct StreamRecommendationInfo {
         info.combo_token_size              = combo_token_size;
         info.input_length                  = input_length;
         info.current_output_length         = current_output_length;
-        info.is_beam_search                = is_beam_search;
+        info.needs_token_offset            = needs_token_offset;
         info.enable_cross_sequence_ban     = enable_cross_sequence_ban;
         info.cross_seq_diverge_start_combo = cross_seq_diverge_start_combo;
         info.pos_in_combo                  = pos_in_combo;
@@ -103,6 +105,12 @@ public:
     }
     void insert(std::shared_ptr<RecommendationLogitsProcessor> others) {
         if (others != nullptr && !others->infos_.empty()) {
+            // 接口契约：合并后 enable_cross_sequence_ban 必须一致，否则广播判断（基于 infos_[0]）失效
+            if (!infos_.empty()) {
+                RTP_LLM_CHECK_WITH_INFO(
+                    infos_[0].enable_cross_sequence_ban == others->infos_[0].enable_cross_sequence_ban,
+                    "insert: enable_cross_sequence_ban flag mismatch between existing and incoming infos");
+            }
             infos_.insert(infos_.end(), others->infos_.begin(), others->infos_.end());
         }
     }

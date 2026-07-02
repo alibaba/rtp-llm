@@ -31,7 +31,7 @@ RecommendationLogitsProcessor::fromGenerateInput(std::shared_ptr<GenerateInput> 
         }
     }
 
-    const bool is_beam_search = config->hasNumBeams() || config->num_return_sequences > 1;
+    const bool needs_token_offset = config->hasNumBeams() || config->num_return_sequences > 1;
     // beam search 与跨序列去重互斥：updateMultiSeqStatus 会重排序列身份，破坏主序列不变量
     // combo_token_size == 1 时 diverge 与 ban 在同一步叠加，易导致采样退化，仅 combo_token_size >= 2 时启用
     const bool enable_cross_seq_ban = config->enable_cross_sequence_ban
@@ -70,7 +70,7 @@ RecommendationLogitsProcessor::fromGenerateInput(std::shared_ptr<GenerateInput> 
         StreamRecommendationInfo info(config->combo_token_size,
                                       generate_input->inputLength(),
                                       /*current_output_length=*/0,
-                                      is_beam_search,
+                                      needs_token_offset,
                                       banned_combos,
                                       end_think_token_ids,
                                       enable_cross_seq_ban,
@@ -278,9 +278,9 @@ void RecommendationLogitsProcessor::updateStatus(const torch::Tensor& new_tokens
             continue;
         }
 
-        const int64_t offset = info.is_beam_search ? (info.current_output_length + info.input_length) : 0;
+        const int64_t offset = info.needs_token_offset ? (info.current_output_length + info.input_length) : 0;
 
-        if (!info.is_beam_search) {
+        if (!info.needs_token_offset) {
             RTP_LLM_CHECK(num_new_tokens == new_tokens.size(1));
         }
 
