@@ -300,12 +300,13 @@ class RocmExpertsFp8PerBlock(FusedMoeExpertExecutor):
         super().__init__(config, quant_config, weights)
 
         # Avoid mutating the strategy-shared FusedMoEQuantConfig instance.
-        # block_shape is left as set by the strategy ([128, 128]) so that
-        # FusedMoEQuantConfig.is_block_quantized() stays consistent.
+        # Keep the executor block-quantized even when built with the default
+        # quant config in tests or direct construction.
         self.quant_config = copy.copy(self.quant_config)
         self.quant_config.quant_dtype = get_rocm_fp8_dtype()
         self.quant_config.per_act_token_quant = False
         self.quant_config.per_out_ch_quant = False
+        self.quant_config.block_shape = [128, 128]
 
         self.num_experts = config.expert_num
         self.ep_rank = config.ep_rank

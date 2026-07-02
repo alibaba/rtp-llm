@@ -112,6 +112,38 @@ def _make_config_adapter(expert_num: int, top_k: int, inter_dim: int):
     )
 
 
+class RocmExpertsFp8PerBlockQuantConfigTest(unittest.TestCase):
+    """Regression coverage for the per-128x128 quantization contract."""
+
+    def setUp(self):
+        if _IMPORT_ERROR is not None:
+            raise SkipTest(
+                f"ROCm fused_moe deps unavailable (likely stale librtp_compute_ops.so): {_IMPORT_ERROR}"
+            )
+
+    def test_executor_keeps_per_block_quantization_with_default_config(self):
+        config_adapter = _make_config_adapter(expert_num=2, top_k=1, inter_dim=256)
+        fp8_dtype = get_rocm_fp8_dtype()
+        input_dim = 128
+        inter_dim = 128
+        weights = {
+            W.moe_w1: torch.empty(2, 2 * inter_dim, input_dim, dtype=fp8_dtype),
+            W.moe_w2: torch.empty(2, input_dim, inter_dim, dtype=fp8_dtype),
+            W.moe_s1: torch.empty(2, 2, 1, dtype=torch.float32),
+            W.moe_s2: torch.empty(2, 1, 1, dtype=torch.float32),
+        }
+
+        base_quant_config = FusedMoEQuantConfig()
+        executor = RocmExpertsFp8PerBlock(config_adapter, base_quant_config, weights)
+
+        self.assertIsNot(executor.quant_config, base_quant_config)
+        self.assertIsNone(base_quant_config.block_shape)
+        self.assertEqual(executor.quant_config.block_shape, [128, 128])
+        self.assertTrue(executor.quant_config.is_block_quantized)
+        self.assertFalse(executor.quant_config.is_per_tensor)
+        self.assertEqual(executor.quant_config.scale_shape(17, 256), (17, 2))
+
+
 class _Fp8MoeBaseTest(unittest.TestCase):
     """Shared scaffolding for FP8 MoE executor tests."""
 
