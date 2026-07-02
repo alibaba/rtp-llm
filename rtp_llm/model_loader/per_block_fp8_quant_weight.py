@@ -1,5 +1,6 @@
 import copy
 import functools
+import os
 from typing import Any, Dict, List, Optional, Union
 
 import torch
@@ -838,7 +839,10 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
             )
             # kernel_weight, scale_weight = load_config.exported_device.convert_fp8_weight_params(kernel_weight, scale_weight)
 
-            if is_deep_gemm_e8m0_used():
+            skip_moe_scale_repack = os.environ.get(
+                "MOE_STRATEGY"
+            ) == "mega_moe_fp8" and self.kernel.name in (W.moe_w1, W.moe_w2)
+            if is_deep_gemm_e8m0_used() and not skip_moe_scale_repack:
                 kernel_weight, scale_weight = requant_weight_ue8m0(
                     kernel_weight, scale_weight
                 )
@@ -861,12 +865,13 @@ class LoadQuantPerBlockFp8Weight(PerBlockFp8Weight):
         name = src_weight_info.name
         if name not in cls.w8a8_weight_list or name in [W.mla_kc, W.mla_vc]:
             return False
-        # skip_moe: leave MoE w1/w2 in compute dtype (BF16) so a downstream MoE
-        # path (e.g. mega_moe) can do its own quantization.
+        # skip_moe normally leaves MoE w1/w2 in compute dtype so the FP8->FP4
+        # mega_moe path can quantize them itself. The FP8 mega kernel consumes
+        # checkpoint FP8 weights directly, so keep the FP8 loader on.
         if getattr(quant_config, "skip_moe", False) and isinstance(
             src_weight_info, MoeAtomicWeight
         ):
-            return False
+            return os.environ.get("MOE_STRATEGY") == "mega_moe_fp8"
         return True
 
     def __init__(
