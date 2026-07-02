@@ -4,414 +4,104 @@ import json
 import logging
 import os
 import stat
-import sys
 import tarfile
 import threading
 import time
-import uuid
+from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import contextmanager, suppress
-from dataclasses import dataclass
+from contextlib import suppress
+from functools import partial
 from pathlib import Path
-from typing import Any, Callable, Iterator
-from urllib.parse import urlparse
+from typing import Any
 
-import zstandard as zstd
 from filelock import FileLock, Timeout
-from watchdog.events import FileSystemEventHandler
-from watchdog.observers import Observer
 
 from rtp_llm.config.py_config_modules import JITConfig
 from rtp_llm.metrics import GaugeMetrics, kmonitor
-from rtp_llm.models_py.triton_kernels.autotune_cache import get_gpu_info
-from rtp_llm.utils.fuser import MountRwMode, fetch_remote_file_to_local
-from rtp_llm.utils.time_util import current_time_ms
-
-SNAPSHOT_PREFIX = ".jit_snapshot_"
-SNAPSHOT_SUFFIX = ".tar.zst"
-SNAPSHOT_KEEP_COUNT = 2
-SNAPSHOT_PUBLISH_LEASE_PREFIX = ".jit_snapshot_publish_lease."
-SNAPSHOT_PUBLISH_INTERVAL_S = 20 * 60
-LOCAL_LOCK_NAME = ".rtp_jit_local.lock"
-SNAPSHOT_COMPLETE_NAME = ".rtp_jit_snapshot_complete"
-SUMMARY_NAME = ".rtp_jit_summary.json"
-
-DEFAULT_JIT_SYNC_WORKERS = 8
-COPY_CHUNK_SIZE = 4 * 1024 * 1024
-STARTUP_WAIT_POLL_S = 0.3
-WATCHDOG_JOIN_TIMEOUT_S = 2.0
-PERIODIC_JOIN_TIMEOUT_S = 5.0
-# .ptx / .ttir / .ttgir / .llir are triton IR intermediates not needed at runtime.
-DEFAULT_SYNC_SUFFIXES = (".so", ".cubin", ".json")
-
-
-@dataclass(frozen=True)
-class ComponentSpec:
-    name: str
-    env_name: str
-    sync_suffixes: tuple[str, ...]
-    upload_events: frozenset[str]
-    gpu_scoped: bool = False
-    import_time_sensitive: bool = False
-    startup_cleanup_globs: tuple[str, ...] = ()
-
-
-COMPONENT_SPECS = (
-    ComponentSpec(
-        "flashinfer",
-        "FLASHINFER_WORKSPACE_BASE",
-        DEFAULT_SYNC_SUFFIXES,
-        frozenset({"closed"}),
-        import_time_sensitive=True,
-    ),
-    ComponentSpec(
-        "deep_gemm",
-        "DG_JIT_CACHE_DIR",
-        DEFAULT_SYNC_SUFFIXES,
-        frozenset({"created"}),
-        import_time_sensitive=True,
-        startup_cleanup_globs=("**/*_lock",),
-    ),
-    ComponentSpec(
-        "torch_extensions",
-        "TORCH_EXTENSIONS_DIR",
-        DEFAULT_SYNC_SUFFIXES,
-        frozenset({"closed"}),
-    ),
-    ComponentSpec(
-        "triton", "TRITON_CACHE_DIR", DEFAULT_SYNC_SUFFIXES, frozenset({"moved"})
-    ),
-    ComponentSpec(
-        "triton_autotune",
-        "TRITON_AUTOTUNE_CONFIG_DIR",
-        (".json", ".pkl", ".pickle"),
-        frozenset({"closed"}),
-        gpu_scoped=True,
-    ),
+from rtp_llm.utils.jit_cache_common import (
+    COMPONENT_BY_NAME,
+    COMPONENT_SPECS,
+    COPY_CHUNK_SIZE,
+    LOCAL_LOCK_NAME,
+    PERIODIC_JOIN_TIMEOUT_S,
+    SNAPSHOT_COMPLETE_NAME,
+    SNAPSHOT_PUBLISH_INTERVAL_S,
+    SNAPSHOT_PUBLISH_LEASE_PREFIX,
+    STARTUP_WAIT_POLL_S,
+    SUMMARY_NAME,
+    ComponentSpec,
+    JitCacheConfig,
+    JitDirtyTracker,
+    SyncStats,
+    UsageCounter,
+    apply_jit_cache_env,
+    atomic_write_path,
+    cleanup_remote_root,
+    clear_component_startup_files,
+    component_cache_dir,
+    copy_with_deadline,
+    find_latest_snapshot,
+    get_gpu_info,
+    iter_component_sync_files,
+    new_snapshot_name,
+    normalize_local_path,
+    open_snapshot_reader,
+    open_snapshot_writer,
+    should_sync_file,
+    stream_copy,
+    strip_gpu_prefix,
+    tmp_sibling,
 )
-COMPONENT_BY_NAME = {c.name: c for c in COMPONENT_SPECS}
+from rtp_llm.utils.time_util import current_time_ms, elapsed_ms
 
-
-@dataclass
-class SyncStats:
-    uploaded_files: int = 0
-    uploaded_bytes: int = 0
-    skipped_files: int = 0
-    failed_files: int = 0
-
-    @property
-    def candidate_files(self) -> int:
-        return self.uploaded_files + self.skipped_files + self.failed_files
-
-    def add(self, other: SyncStats) -> None:
-        self.uploaded_files += other.uploaded_files
-        self.uploaded_bytes += other.uploaded_bytes
-        self.skipped_files += other.skipped_files
-        self.failed_files += other.failed_files
-
-    def record_upload(self, uploaded_bytes: int) -> None:
-        if uploaded_bytes > 0:
-            self.uploaded_files += 1
-            self.uploaded_bytes += uploaded_bytes
-        else:
-            self.skipped_files += 1
-
-    def as_summary(self) -> dict[str, int]:
-        return {
-            "candidate_files": self.candidate_files,
-            "uploaded_files": self.uploaded_files,
-            "uploaded_bytes": self.uploaded_bytes,
-            "skipped_files": self.skipped_files,
-            "failed_files": self.failed_files,
-        }
-
-
-@dataclass
-class JitCacheConfig:
-    remote_root: Path | None
-    local_root: Path
-    remote_sync_timeout_s: float
-    remote_sync_longer_timeout_s: float = 0.0
-    sync_workers: int = DEFAULT_JIT_SYNC_WORKERS
-
-    @classmethod
-    def from_config(cls, jit_config: JITConfig | None = None) -> JitCacheConfig:
-        if jit_config is None:
-            jit_config = JITConfig()
-        return cls(
-            remote_root=resolve_remote_root(jit_config.remote_jit_cache_dir),
-            local_root=Path(jit_config.local_jit_cache_dir).expanduser().absolute(),
-            remote_sync_timeout_s=jit_config.remote_sync_timeout_s,
-            remote_sync_longer_timeout_s=5 * jit_config.remote_sync_timeout_s,
-        )
-
-
-def elapsed_ms(start_s: float) -> int:
-    return int((time.monotonic() - start_s) * 1000)
-
-
-def new_jit_cache_run_id() -> str:
-    return f"{int(current_time_ms())}-{os.getpid()}-{uuid.uuid4().hex}"
-
-
-def resolve_remote_root(remote_jit_cache_dir: Any) -> Path | None:
-    text = str(remote_jit_cache_dir or "").strip()
-    if not text:
-        return None
-    if urlparse(text).scheme:
-        try:
-            mounted_path = fetch_remote_file_to_local(text, MountRwMode.RWMODE_RW)
-            if not mounted_path:
-                raise ValueError(f"failed to mount remote_jit_cache_dir: {text!r}")
-            text = mounted_path
-        except Exception as e:
-            logging.warning(
-                "failed to mount remote_jit_cache_dir %r: %s; remote JIT cache is disabled",
-                text,
-                e,
-            )
-            return None
-    path = Path(text).expanduser()
-    if not path.is_absolute():
-        raise ValueError(f"remote_jit_cache_dir must be an absolute path, got {text!r}")
-    if not path.is_dir():
-        logging.warning(
-            "remote_jit_cache_dir %r is not an existing directory; remote JIT cache is disabled",
-            text,
-        )
-        return None
-    return path
-
-
-def component_cache_dir(root: Path, component: ComponentSpec) -> Path:
-    component_root = root / component.name
-    if component.gpu_scoped:
-        return component_root / get_gpu_info()
-    return component_root
-
-
-def apply_jit_cache_env(local_root: Path | str) -> None:
-    """Must be called BEFORE importing deep_gemm/flashinfer.
-
-    deep_gemm reads DG_JIT_CACHE_DIR once in C++ init() at import time.
-    flashinfer resolves FLASHINFER_WORKSPACE_BASE into a module-level Path at import time.
-    torch_extensions, triton, and triton_autotune read their env vars dynamically at
-    each compilation/invocation, so they are safe to call after import.
-    """
-    root = Path(local_root).expanduser().absolute()
-    for component in COMPONENT_SPECS:
-        if component.import_time_sensitive and component.name in sys.modules:
-            logging.warning(
-                "%s already imported before apply_jit_cache_env, "
-                "cache dir env var may not take effect",
-                component.name,
-            )
-        os.environ.setdefault(
-            component.env_name, str(component_cache_dir(root, component))
-        )
-    os.environ.setdefault("TRITON_AUTOTUNE_CACHE_MODE", "cached")
-
-
-def _clear_component_startup_files(
-    component: ComponentSpec, component_dir: Path
-) -> int:
-    if not component.startup_cleanup_globs or not component_dir.exists():
-        return 0
-    cleared = 0
-    for pattern in component.startup_cleanup_globs:
-        for path in component_dir.glob(pattern):
-            try:
-                if not path.is_file():
-                    continue
-                path.unlink()
-                cleared += 1
-            except FileNotFoundError:
-                pass
-            except OSError:
-                logging.warning(
-                    "failed to remove %s startup file: %s",
-                    component.name,
-                    path,
-                    exc_info=True,
-                )
-    if cleared:
-        logging.info(
-            "removed %d %s startup files from %s",
-            cleared,
-            component.name,
-            component_dir,
-        )
-    return cleared
-
-
-def _tmp_sibling(path: Path) -> Path:
-    return path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
-
-
-@contextmanager
-def atomic_write_path(path: Path, ensure_parent: bool = True) -> Iterator[Path]:
-    if ensure_parent:
-        path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = _tmp_sibling(path)
-    try:
-        yield tmp
-        try:
-            tmp.replace(path)
-        except PermissionError:
-            # FUSE mounts reject rename-over-existing (EPERM).
-            try:
-                path.unlink()
-            except FileNotFoundError:
-                pass
-            tmp.replace(path)
-    finally:
-        with suppress(OSError):
-            tmp.unlink()
-
-
-def should_sync_file(component: ComponentSpec, rel: str) -> bool:
-    if not rel.rsplit("/", 1)[-1].endswith(component.sync_suffixes):
-        return False
-    return not any(part.startswith("tmp.pid_") for part in rel.split("/"))
-
-
-def is_snapshot_name(name: str) -> bool:
-    return name.startswith(SNAPSHOT_PREFIX) and name.endswith(SNAPSHOT_SUFFIX)
-
-
-def _stream_copy(
-    source: Any, out: Any, buffer: bytearray, view: memoryview, deadline_s: float
-) -> None:
-    while True:
-        if time.monotonic() >= deadline_s:
-            raise TimeoutError("JIT cache file copy exceeded deadline")
-        read_size = source.readinto(buffer)
-        if not read_size:
-            return
-        out.write(view[:read_size])
-
-
-def _copy_with_deadline(src: Path, dst: Path, deadline_s: float) -> None:
-    buffer = bytearray(COPY_CHUNK_SIZE)
-    view = memoryview(buffer)
-    with src.open("rb") as source, dst.open("wb") as out:
-        _stream_copy(source, out, buffer, view, deadline_s)
-
-
-_USAGE_LOCATIONS = (
-    ("local", GaugeMetrics.JIT_CACHE_LOCAL_USAGE_METRIC),
-    ("remote", GaugeMetrics.JIT_CACHE_REMOTE_USAGE_METRIC),
+_USAGE_LOCATIONS = ("local", "remote")
+_USAGE_METRICS = (
+    ("bytes", GaugeMetrics.JIT_CACHE_USAGE_BYTES_METRIC),
+    ("files", GaugeMetrics.JIT_CACHE_USAGE_FILES_METRIC),
 )
-
-
-class JitDirtyTracker:
-    def __init__(
-        self,
-        component_dirs: dict[str, tuple[Path, Path]],
-        enqueue_upload: Callable[[ComponentSpec, str], bool],
-    ):
-        self.component_dirs = component_dirs
-        self.enqueue_upload = enqueue_upload
-        self.observer: Any | None = None
-
-    def _make_handler(
-        self, component: ComponentSpec, root: Path
-    ) -> FileSystemEventHandler:
-        root_prefix = str(root) + os.sep
-        upload_events = component.upload_events
-        enqueue = self.enqueue_upload
-
-        class Handler(FileSystemEventHandler):
-            def on_any_event(self, event: Any) -> None:
-                if event.is_directory or event.event_type not in upload_events:
-                    return
-                src = event.dest_path if event.event_type == "moved" else event.src_path
-                if not src.startswith(root_prefix):
-                    return
-                rel = src[len(root_prefix) :].replace(os.sep, "/")
-                if not should_sync_file(component, rel):
-                    return
-                if event.event_type == "created":
-                    try:
-                        if os.stat(src).st_size == 0:
-                            return
-                    except OSError:
-                        return
-                enqueue(component, rel)
-
-        return Handler()
-
-    def start(self) -> bool:
-        if self.observer is not None:
-            return True
-        observer = Observer()
-        try:
-            for name, (local_dir, _) in self.component_dirs.items():
-                component = COMPONENT_BY_NAME[name]
-                observer.schedule(
-                    self._make_handler(component, local_dir),
-                    str(local_dir),
-                    recursive=True,
-                )
-            observer.start()
-            self.observer = observer
-            return True
-        except Exception:
-            logging.warning(
-                "failed to start JIT cache dirty watcher; remote writeback is disabled",
-                exc_info=True,
-            )
-            with suppress(Exception):
-                observer.stop()
-                observer.join(timeout=WATCHDOG_JOIN_TIMEOUT_S)
-            return False
-
-    def stop(self) -> None:
-        observer = self.observer
-        if observer is None:
-            return
-        observer.stop()
-        observer.join(timeout=WATCHDOG_JOIN_TIMEOUT_S)
-        self.observer = None
+_USAGE_VALUES = tuple(v for v, _ in _USAGE_METRICS)
 
 
 class JitCacheManager:
-    def __init__(self, jit_config: JITConfig | None = None, run_id: str | None = None):
+    def __init__(self, jit_config: JITConfig | None = None):
         self.config = JitCacheConfig.from_config(jit_config)
-        self.run_id = run_id or new_jit_cache_run_id()
         self.component_dirs: dict[str, tuple[Path, Path]] = {}
         self.dirty_tracker: JitDirtyTracker | None = None
 
         self._lock = threading.Lock()
         self.sync_stats: dict[str, SyncStats] = {}
         self._pending_count = 0
-        self._pending_empty = threading.Event()
-        self._pending_empty.set()
+        # notify_all when pending drains OR when stop() sets _stopping.
+        self._pending_cv = threading.Condition(self._lock)
         self._sync_lock = threading.Lock()
         self._snapshot_publish_done = threading.Event()
         self._snapshot_publish_done.set()
+        self._stopping = False
 
         self._periodic_sync_stop = threading.Event()
         self._periodic_sync_thread: threading.Thread | None = None
 
-        self._usage: dict[str, dict[str, dict[str, int]]] = {
-            loc: {c.name: {"bytes": 0, "files": 0} for c in COMPONENT_SPECS}
-            for loc, _ in _USAGE_LOCATIONS
+        self._usage: dict[str, dict[str, UsageCounter]] = {
+            loc: {c.name: UsageCounter() for c in COMPONENT_SPECS}
+            for loc in _USAGE_LOCATIONS
         }
 
         self._prepare_result: dict[str, Any] | None = None
         self.startup_lock: FileLock | None = None
         self.remote_cache_available = False
         self._sync_executor: ThreadPoolExecutor | None = None
-        # Avoid redundant mkdir RPCs on remote JIT cache dirs.
+        # Cache mkdir'd remote dirs to skip redundant FUSE RPCs.
         self._known_remote_dirs: set[Path] = set()
+        self.snapshot_complete_path = self.config.local_root / SNAPSHOT_COMPLETE_NAME
 
     @property
     def enabled(self) -> bool:
         return self.config.remote_root is not None
 
-    @property
-    def sync_executor(self) -> ThreadPoolExecutor:
+    def _get_or_create_executor_locked(self) -> ThreadPoolExecutor | None:
+        """Caller must hold self._lock."""
+        if self._stopping:
+            return None
         if self._sync_executor is None:
             self._sync_executor = ThreadPoolExecutor(
                 max_workers=self.config.sync_workers,
@@ -419,76 +109,59 @@ class JitCacheManager:
             )
         return self._sync_executor
 
+    def ensure_sync_executor(self) -> ThreadPoolExecutor | None:
+        with self._lock:
+            return self._get_or_create_executor_locked()
+
     @property
     def owns_startup_lock(self) -> bool:
         return bool(self.startup_lock and self.startup_lock.is_locked)
 
-    @property
-    def snapshot_complete_path(self) -> Path:
-        return self.config.local_root / SNAPSHOT_COMPLETE_NAME
-
-    @property
-    def _snapshot_publishing(self) -> bool:
-        return not self._snapshot_publish_done.is_set()
-
-    def _add_usage(self, location: str, component_name: str, size: int) -> None:
-        with self._lock:
-            b = self._usage[location][component_name]
-            b["bytes"] += size
-            b["files"] += 1
-
-    def _usage_snapshot(self) -> dict[str, dict[str, Any]]:
+    def usage_snapshot(self) -> dict[str, dict[str, dict[str, int]]]:
         with self._lock:
             return {
-                loc: {
-                    "bytes": sum(b["bytes"] for b in buckets.values()),
-                    "files": sum(b["files"] for b in buckets.values()),
-                    "components": {n: dict(b) for n, b in buckets.items()},
-                }
+                loc: {name: c.to_dict() for name, c in buckets.items()}
                 for loc, buckets in self._usage.items()
             }
 
-    def _report_usage_metrics(
-        self, snapshot: dict[str, dict[str, Any]] | None = None
-    ) -> None:
-        if snapshot is None:
-            snapshot = self._usage_snapshot()
-        try:
-            for loc, metric in _USAGE_LOCATIONS:
-                data = snapshot[loc]
-                for name, comp in data["components"].items():
-                    kmonitor.report(
-                        metric, comp["bytes"], {"module": name, "value": "bytes"}
-                    )
-                    kmonitor.report(
-                        metric, comp["files"], {"module": name, "value": "files"}
-                    )
-                kmonitor.report(
-                    metric, data["bytes"], {"module": "total", "value": "bytes"}
-                )
-                kmonitor.report(
-                    metric, data["files"], {"module": "total", "value": "files"}
-                )
-        except Exception:
-            logging.warning("failed to report JIT cache usage metrics", exc_info=True)
-
     @staticmethod
-    def _usage_summary(snapshot: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    def usage_totals(
+        snapshot: dict[str, dict[str, dict[str, int]]]
+    ) -> dict[str, dict[str, int]]:
         return {
-            f"{loc}_cache": snapshot[loc]
-            for loc, _ in _USAGE_LOCATIONS
-            if snapshot[loc]["files"]
+            loc: {
+                v: sum(bucket[v] for bucket in buckets.values()) for v in _USAGE_VALUES
+            }
+            for loc, buckets in snapshot.items()
         }
 
-    def _make_summary(
+    def _report_usage_metrics(
+        self,
+        snapshot: dict[str, dict[str, dict[str, int]]],
+        totals: dict[str, dict[str, int]] | None = None,
+    ) -> None:
+        if not kmonitor.is_inited:
+            return
+        if totals is None:
+            totals = self.usage_totals(snapshot)
+        for loc in _USAGE_LOCATIONS:
+            buckets = {**snapshot[loc], "total": totals[loc]}
+            for name, comp in buckets.items():
+                for value, metric in _USAGE_METRICS:
+                    with suppress(Exception):
+                        kmonitor.report(
+                            metric, comp[value], {"location": loc, "module": name}
+                        )
+
+    def make_summary(
         self,
         mode: str,
         result: str,
         start_s: float,
         *,
+        persist: bool = False,
         stats: dict[str, SyncStats] | None = None,
         drain_timed_out: bool = False,
-        usage: dict[str, Any] | None = None,
         **extra: Any,
     ) -> dict[str, Any]:
         event: dict[str, Any] = {
@@ -498,74 +171,69 @@ class JitCacheManager:
             "total_cost_ms": elapsed_ms(start_s),
         }
         if stats is not None:
-            agg = SyncStats()
-            components: dict[str, dict[str, int]] = {}
-            for name, st in stats.items():
-                row = st.as_summary()
-                agg.add(st)
-                if any(row.values()):
-                    components[name] = row
-            event["components"] = components
-            event.update(agg.as_summary())
+            event.update(SyncStats.aggregate(stats))
             if drain_timed_out:
                 event["drain_timed_out"] = True
-        event.update(
-            {k: v for k, v in extra.items() if v is not None and v != "" and v != 0}
-        )
-        if usage:
-            event.update(usage)
-        self._write_summary(event)
+        event.update(extra)
+        if persist:
+            with atomic_write_path(self.config.local_root / SUMMARY_NAME) as tmp:
+                tmp.write_bytes(
+                    json.dumps(
+                        {
+                            "event": "jit_cache_summary",
+                            "updated_at_ms": int(current_time_ms()),
+                            "remote_root": str(self.config.remote_root or ""),
+                            "local_root": str(self.config.local_root),
+                            **event,
+                        },
+                        indent=2,
+                        sort_keys=True,
+                    ).encode()
+                )
         return event
 
-    def _write_summary(self, event: dict[str, Any]) -> None:
-        with atomic_write_path(self.config.local_root / SUMMARY_NAME) as tmp:
-            tmp.write_bytes(
-                json.dumps(
-                    {
-                        "event": "jit_cache_summary",
-                        "updated_at_ms": int(current_time_ms()),
-                        "run_id": self.run_id,
-                        "remote_root": str(self.config.remote_root or ""),
-                        "local_root": str(self.config.local_root),
-                        **event,
-                    },
-                    indent=2,
-                    sort_keys=True,
-                ).encode()
-            )
-
     def bootstrap(self) -> None:
-        self.config.local_root.mkdir(parents=True, exist_ok=True)
+        local_root = self.config.local_root
+        remote_root = self.config.remote_root
+        local_root.mkdir(parents=True, exist_ok=True)
+        # Do NOT unlink snapshot marker here: late followers can erase leader completion.
+        # Env first so component_dirs follow the effective JIT read/write paths.
+        apply_jit_cache_env(local_root)
         for component in COMPONENT_SPECS:
-            local_dir = component_cache_dir(self.config.local_root, component)
+            local_dir = normalize_local_path(os.environ[component.env_name])
             local_dir.mkdir(parents=True, exist_ok=True)
-            _clear_component_startup_files(component, local_dir)
-            if self.config.remote_root is not None:
-                remote_dir = component_cache_dir(self.config.remote_root, component)
-                self.component_dirs[component.name] = (local_dir, remote_dir)
-        apply_jit_cache_env(self.config.local_root)
-        logging.info(
-            "JIT cache local=%s remote=%s",
-            self.config.local_root,
-            self.config.remote_root,
-        )
+            clear_component_startup_files(component, local_dir)
+            if remote_root is not None:
+                self.component_dirs[component.name] = (
+                    local_dir,
+                    component_cache_dir(remote_root, component),
+                )
+        logging.info("JIT cache local=%s remote=%s", local_root, remote_root)
 
     def prepare(self) -> dict[str, Any]:
-        start_s = time.monotonic()
-        if not self.enabled:
-            return self._make_summary(
-                "snapshot_download", "skipped", start_s, cache_state="disabled"
-            )
         if self._prepare_result is not None:
             return self._prepare_result
-        deadline_s = start_s + self.config.remote_sync_longer_timeout_s
-        if self.acquire_startup_lock(0.0):
-            summary = self._prepare_as_leader(deadline_s)
+        start_s = time.monotonic()
+        if not self.enabled:
+            summary = self.make_summary(
+                "snapshot_download",
+                "skipped",
+                start_s,
+                persist=True,
+                cache_state="disabled",
+            )
         else:
-            summary = self._wait_ready_or_takeover(start_s, deadline_s)
-        self.remote_cache_available = summary.get("result") not in {"failed", "timeout"}
-        if not self.remote_cache_available:
-            self.release_startup_lock()
+            deadline_s = start_s + self.config.remote_sync_longer_timeout_s
+            if self.acquire_startup_lock(0.0):
+                summary = self._prepare_as_leader(deadline_s)
+            else:
+                summary = self._wait_ready_or_takeover(start_s, deadline_s)
+            self.remote_cache_available = summary.get("result") not in {
+                "failed",
+                "timeout",
+            }
+            if not self.remote_cache_available:
+                self.release_startup_lock()
         self._prepare_result = summary
         return summary
 
@@ -588,15 +256,15 @@ class JitCacheManager:
         try:
             return self._pull_snapshot(deadline_s)
         finally:
-            # By design: write marker even on failure so followers don't block or retry indefinitely.
+            # Write marker even on failure so followers don't block indefinitely.
             self.snapshot_complete_path.touch()
 
     def _wait_ready_or_takeover(
         self, start_s: float, deadline_s: float
     ) -> dict[str, Any]:
-        while True:
+        while time.monotonic() < deadline_s:
             if self.snapshot_complete_path.exists():
-                return self._make_summary(
+                return self.make_summary(
                     "snapshot_download",
                     "success",
                     start_s,
@@ -604,127 +272,106 @@ class JitCacheManager:
                 )
             if self.acquire_startup_lock(0.0):
                 return self._prepare_as_leader(deadline_s)
-            if time.monotonic() >= deadline_s:
-                return self._make_summary(
-                    "snapshot_download", "timeout", start_s, cache_state="timeout"
-                )
             time.sleep(
                 min(STARTUP_WAIT_POLL_S, max(0.0, deadline_s - time.monotonic()))
             )
+        return self.make_summary(
+            "snapshot_download", "timeout", start_s, persist=True, cache_state="timeout"
+        )
 
     def _pull_snapshot(self, deadline_s: float) -> dict[str, Any]:
         start_s = time.monotonic()
-        remote_root = self.config.remote_root
-        snapshot_path = self._find_latest_snapshot(remote_root)
-        snapshot_bytes = 0
+        summary = partial(
+            self.make_summary, "snapshot_download", start_s=start_s, persist=True
+        )
+        snapshot_path = find_latest_snapshot(self.config.remote_root)
+        if snapshot_path is None:
+            return summary("skipped", cache_state="snapshot_miss")
         try:
-            if snapshot_path is None:
-                return self._make_summary(
-                    "snapshot_download", "skipped", start_s, cache_state="snapshot_miss"
-                )
-            try:
-                snapshot_bytes = snapshot_path.stat().st_size
-            except OSError:
-                pass
             ext_bytes, ext_files = self._extract_snapshot(snapshot_path, deadline_s)
-            return self._make_summary(
-                "snapshot_download",
-                "success",
-                start_s,
-                cache_state="snapshot_hit",
-                snapshot_bytes=snapshot_bytes,
-                extracted_files=ext_files,
-                extracted_bytes=ext_bytes,
-            )
         except TimeoutError as e:
-            return self._make_summary(
-                "snapshot_download",
-                "timeout",
-                start_s,
-                cache_state="timeout",
-                message=str(e),
-                snapshot_bytes=snapshot_bytes,
-            )
+            return summary("timeout", cache_state="timeout", message=str(e))
         except Exception as e:
             logging.exception("failed to download/extract JIT cache snapshot")
-            return self._make_summary(
-                "snapshot_download",
-                "failed",
-                start_s,
-                cache_state="snapshot_error",
-                message=str(e),
-            )
+            return summary("failed", cache_state="snapshot_error", message=str(e))
+        return summary(
+            "success",
+            cache_state="snapshot_hit",
+            extracted_files=ext_files,
+            extracted_bytes=ext_bytes,
+        )
 
     def _extract_snapshot(self, archive: Path, deadline_s: float) -> tuple[int, int]:
-        extracted_bytes = 0
-        extracted_files = 0
-        dctx = zstd.ZstdDecompressor()
+        per_component: dict[str, UsageCounter] = defaultdict(UsageCounter)
         gpu_scope = get_gpu_info()
-        buffer = bytearray(COPY_CHUNK_SIZE)
-        view = memoryview(buffer)
-        with (
-            archive.open("rb") as compressed,
-            dctx.stream_reader(compressed) as reader,
-            tarfile.open(fileobj=reader, mode="r|") as tar,
-        ):
+        # Dedup parent mkdirs across all extracted files: a snapshot has hundreds
+        # of files sharing a handful of parent dirs, and atomic_write_path would
+        # otherwise re-mkdir them every time.
+        mkdirs_done: set[Path] = set()
+        # Reuse one 4 MB buffer across all members instead of alloc-per-file.
+        copy_buffer = bytearray(COPY_CHUNK_SIZE)
+        with open_snapshot_reader(archive) as tar:
             for member in tar:
                 parts = member.name.split("/")
-                if not parts or member.name.startswith("/") or ".." in parts:
+                if member.name.startswith("/") or ".." in parts:
                     raise RuntimeError(f"unsafe snapshot path: {member.name}")
                 component = COMPONENT_BY_NAME.get(parts[0])
                 if component is None or not member.isfile():
                     continue
                 if component.gpu_scoped and (len(parts) < 2 or parts[1] != gpu_scope):
                     continue
+                local_rel = strip_gpu_prefix(component, "/".join(parts[1:]))
+                if not should_sync_file(component, local_rel):
+                    continue
                 if time.monotonic() >= deadline_s:
                     raise TimeoutError("snapshot extraction exceeded prepare timeout")
-                target = self.config.local_root.joinpath(*parts)
-                try:
-                    st = target.stat()
-                    if st.st_size == member.size and int(st.st_mtime) == int(
-                        member.mtime
-                    ):
-                        continue
-                except OSError:
-                    pass
                 source = tar.extractfile(member)
                 if source is None:
                     continue
+                target = self.component_dirs[component.name][0] / local_rel
+                if target.parent not in mkdirs_done:
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    mkdirs_done.add(target.parent)
                 with source, atomic_write_path(target) as tmp:
                     with tmp.open("wb") as out:
-                        _stream_copy(source, out, buffer, view, deadline_s)
+                        stream_copy(source, out, deadline_s, buffer=copy_buffer)
                     os.utime(tmp, (member.mtime, member.mtime))
-                rel = "/".join(parts[1:])
-                if should_sync_file(component, rel):
-                    extracted_files += 1
-                    extracted_bytes += member.size
-                    self._add_usage("local", component.name, member.size)
-        return extracted_bytes, extracted_files
+                per_component[component.name] += UsageCounter(
+                    bytes=member.size, files=1
+                )
+        if per_component:
+            with self._lock:
+                for name, agg in per_component.items():
+                    self._usage["local"][name] += agg
+        return (
+            sum(a.bytes for a in per_component.values()),
+            sum(a.files for a in per_component.values()),
+        )
 
     @property
-    def _sync_eligible(self) -> bool:
-        return self.enabled and self.owns_startup_lock and self.remote_cache_available
+    def _can_sync_remote(self) -> bool:
+        # remote_cache_available is only set by a successful prepare(),
+        return (
+            self.remote_cache_available
+            and self.owns_startup_lock
+            and not self._stopping
+        )
 
     def start_background_sync(self) -> None:
-        if not self._sync_eligible or self.dirty_tracker is not None:
+        if not self._can_sync_remote or self.dirty_tracker is not None:
             return
         tracker = JitDirtyTracker(self.component_dirs, self.enqueue_upload)
         if not tracker.start():
             return
         self.dirty_tracker = tracker
-        self._start_periodic_sync()
-
-    def _start_periodic_sync(self) -> None:
-        if self._periodic_sync_thread is not None:
-            return
-        self._periodic_sync_stop.clear()
-        t = threading.Thread(
+        # Reaching here implies dirty_tracker was None (outer guard),
+        # and thread/tracker are set+cleared together — so thread is also None.
+        self._periodic_sync_thread = threading.Thread(
             target=self._periodic_sync_loop,
-            name=f"jit-periodic-sync-{self.run_id}",
+            name="jit-periodic-sync",
             daemon=True,
         )
-        self._periodic_sync_thread = t
-        t.start()
+        self._periodic_sync_thread.start()
 
     def _periodic_sync_loop(self) -> None:
         interval_s = max(self.config.remote_sync_longer_timeout_s, STARTUP_WAIT_POLL_S)
@@ -732,216 +379,196 @@ class JitCacheManager:
             try:
                 self.sync_once("periodic_flush")
             except Exception:
-                logging.warning("periodic JIT cache sync failed", exc_info=True)
-
-    def _stop_periodic_sync(self) -> None:
-        t = self._periodic_sync_thread
-        if t is None:
-            return
-        self._periodic_sync_stop.set()
-        # Wake any in-flight _drain_upload_queue.wait() so join returns promptly
-        # instead of blocking up to remote_sync_timeout_s.
-        self._pending_empty.set()
-        if t is not threading.current_thread():
-            t.join(timeout=PERIODIC_JOIN_TIMEOUT_S)
-        self._periodic_sync_thread = None
+                logging.exception("periodic JIT cache sync failed")
 
     def enqueue_upload(self, component: ComponentSpec, rel_path: str) -> bool:
+        # Executor check/create + pending++ under one lock (halves lock traffic per enqueue).
         with self._lock:
+            executor = self._get_or_create_executor_locked()
+            if executor is None:
+                return False
             self._pending_count += 1
-            self._pending_empty.clear()
         try:
-            self.sync_executor.submit(self._upload_task, component, rel_path)
+            executor.submit(self._upload_task, component, rel_path)
             return True
         except RuntimeError:
-            self._complete_pending()
+            with self._lock:
+                self._decrement_pending_locked()
             return False
 
-    def _complete_pending(self) -> None:
-        with self._lock:
-            self._pending_count = max(0, self._pending_count - 1)
-            if self._pending_count == 0:
-                self._pending_empty.set()
+    def _decrement_pending_locked(self) -> None:
+        """Caller must hold self._lock."""
+        self._pending_count -= 1
+        if self._pending_count == 0:
+            self._pending_cv.notify_all()
 
     def _upload_task(self, component: ComponentSpec, rel_path: str) -> None:
+        local_dir, remote_dir = self.component_dirs[component.name]
+        deadline_s = time.monotonic() + self.config.remote_sync_timeout_s
         try:
-            uploaded = self._do_upload(component, rel_path)
-            with self._lock:
-                self.sync_stats.setdefault(component.name, SyncStats()).record_upload(
-                    uploaded
-                )
-            if uploaded > 0:
-                self._add_usage("remote", component.name, uploaded)
+            uploaded: int | None = self._copy_atomic(
+                local_dir / rel_path, remote_dir / rel_path, deadline_s
+            )
         except Exception:
-            logging.warning(
-                "failed to upload JIT cache file %s/%s",
-                component.name,
-                rel_path,
-                exc_info=True,
+            logging.exception(
+                "failed to upload JIT cache file %s/%s", component.name, rel_path
             )
-            with self._lock:
-                self.sync_stats.setdefault(
-                    component.name, SyncStats()
-                ).failed_files += 1
-        finally:
-            self._complete_pending()
+            uploaded = None
+        # One lock pass covers stats, usage, and pending decrement.
+        with self._lock:
+            stats = self.sync_stats.setdefault(component.name, SyncStats())
+            if uploaded is None:
+                stats.failed_files += 1
+            else:
+                stats.record_upload(uploaded)
+                if uploaded > 0:
+                    self._usage["remote"][component.name] += UsageCounter(
+                        bytes=uploaded, files=1
+                    )
+            self._decrement_pending_locked()
 
-    def _do_upload(self, component: ComponentSpec, rel_path: str) -> int:
-        if not should_sync_file(component, rel_path):
+    @staticmethod
+    def already_present(path: Path) -> bool:
+        with suppress(OSError):
+            return path.exists()
+        return False
+
+    def _copy_atomic(self, local: Path, remote: Path, deadline_s: float) -> int:
+        if self.already_present(remote):
             return 0
-        src_root, dst_root = self.component_dirs[component.name]
-        src = src_root / rel_path
         try:
-            return self._copy_atomic(
-                src,
-                dst_root / rel_path,
-                time.monotonic() + self.config.remote_sync_timeout_s,
-            )
+            local_stat = local.stat()
         except FileNotFoundError:
             return 0
-
-    def _copy_atomic(self, src: Path, dst: Path, deadline_s: float) -> int:
-        try:
-            if dst.exists():
-                return 0
-        except OSError:
-            pass
-        src_stat = src.stat()
-        if src_stat.st_size <= 0:
+        if local_stat.st_size <= 0:
             return 0
-        self._ensure_remote_parent(dst.parent)
+        self._ensure_remote_parent(remote.parent)
         try:
-            with atomic_write_path(dst, ensure_parent=False) as tmp:
-                _copy_with_deadline(src, tmp, deadline_s)
+            with atomic_write_path(remote) as tmp:
+                copy_with_deadline(local, tmp, deadline_s)
         except PermissionError:
-            # FUSE mounts may reject overwrite-rename (EPERM); if the
-            # destination already landed from another rank, treat as skip.
-            try:
-                if dst.exists():
-                    return 0
-            except OSError:
-                pass
+            if self.already_present(remote):
+                return 0
             raise
-        return src_stat.st_size
+        return local_stat.st_size
 
     def _ensure_remote_parent(self, parent: Path) -> None:
         with self._lock:
             if parent in self._known_remote_dirs:
                 return
-        # Avoid holding the state lock across FUSE metadata RPCs; duplicate
-        # mkdirs during first-use races are safe with exist_ok=True.
-        parent.mkdir(parents=True, exist_ok=True)
-        with self._lock:
             self._known_remote_dirs.add(parent)
+        parent.mkdir(parents=True, exist_ok=True)
 
-    def sync_once(
-        self, mode: str = "manual_sync", drain_timeout_s: float | None = None
-    ) -> dict[str, Any]:
+    def sync_once(self, mode: str = "manual_sync") -> dict[str, Any]:
         start_s = time.monotonic()
+        if self._stopping:
+            return self.make_summary(mode, "skipped", start_s, reason="stopping")
+        if not self.enabled:
+            return self.make_summary(mode, "skipped", start_s, cache_state="disabled")
         if not self._sync_lock.acquire(blocking=False):
-            return self._make_summary(
-                mode,
-                "skipped",
-                start_s,
-                reason="sync in progress",
+            return self.make_summary(
+                mode, "skipped", start_s, reason="sync in progress"
             )
         try:
-            return self._sync_once_impl(mode, drain_timeout_s)
+            return self._sync_once_impl(mode)
         finally:
             self._sync_lock.release()
 
-    def _sync_once_impl(
-        self,
-        mode: str,
-        drain_timeout_s: float | None = None,
-    ) -> dict[str, Any]:
+    def _sync_once_impl(self, mode: str) -> dict[str, Any]:
         start_s = time.monotonic()
-        if not self.enabled:
-            return self._make_summary(
-                mode,
-                "skipped",
-                start_s,
-                cache_state="disabled",
-            )
-        drain_timed_out = False
-        try:
-            stats, drain_timed_out = self._drain_upload_queue(drain_timeout_s)
-        except Exception:
-            logging.warning("failed to sync remote JIT cache", exc_info=True)
-            stats = {}
-            drain_timed_out = True
-        usage_snap = self._usage_snapshot()
-        self._report_usage_metrics(usage_snap)
+        stats, drain_timed_out = self._drain_upload_queue()
+        usage_snap = self.usage_snapshot()
+        usage_totals = self.usage_totals(usage_snap)
+        self._report_usage_metrics(usage_snap, usage_totals)
         has_failures = drain_timed_out or any(s.failed_files for s in stats.values())
-        summary = self._make_summary(
+        extras: dict[str, Any] = {
+            f"{loc}_cache": {**usage_totals[loc], "components": usage_snap[loc]}
+            for loc in _USAGE_LOCATIONS
+            if usage_totals[loc]["files"]
+        }
+        if has_failures:
+            extras["message"] = "remote JIT cache sync failed"
+        summary = self.make_summary(
             mode,
             "failed" if has_failures else "success",
             start_s,
+            persist=True,
             cache_state="remote_hit",
             stats=stats,
             drain_timed_out=drain_timed_out,
-            message="remote JIT cache sync failed" if has_failures else "",
-            usage=self._usage_summary(usage_snap),
+            **extras,
         )
         if not has_failures:
-            try:
-                self._publish_snapshot_if_due()
-            except Exception:
-                logging.warning("failed to publish JIT cache snapshot", exc_info=True)
+            self._publish_snapshot_if_due()
         return summary
 
-    def _drain_upload_queue(
-        self, drain_timeout_s: float | None = None
-    ) -> tuple[dict[str, SyncStats], bool]:
-        timeout = (
-            drain_timeout_s
-            if drain_timeout_s is not None
-            else self.config.remote_sync_timeout_s
-        )
-        timed_out = not self._pending_empty.wait(timeout=max(timeout, 0.0))
+    def _drain_upload_queue(self) -> tuple[dict[str, SyncStats], bool]:
+        timeout = max(self.config.remote_sync_timeout_s, 0.0)
         with self._lock:
-            stats = dict(self.sync_stats)
+            # wait_for returns False on timeout; stop() satisfies the predicate
+            # via _stopping without needing to force _pending_count to 0.
+            drained = self._pending_cv.wait_for(
+                lambda: self._pending_count == 0 or self._stopping,
+                timeout=timeout,
+            )
+            stats = self.sync_stats
             self.sync_stats = {}
-            pending = self._pending_count if timed_out else 0
-        if timed_out:
+            pending = self._pending_count
+        if not drained:
             logging.warning(
                 "JIT cache upload queue drain timed out with %d pending", pending
             )
-        return stats, timed_out
+        return stats, not drained
 
     def _publish_snapshot_if_due(self) -> None:
-        if not self._sync_eligible:
+        if not self._can_sync_remote:
             return
         with self._lock:
-            if not self._snapshot_publish_done.is_set():
+            if self._stopping or not self._snapshot_publish_done.is_set():
                 return
             self._snapshot_publish_done.clear()
-        lease_dir = self._try_acquire_publish_lease()
-        if lease_dir is None:
+
+        lease = self._try_acquire_publish_lease()
+        if lease is None:
             self._snapshot_publish_done.set()
             return
-        try:
-            self.sync_executor.submit(self._snapshot_publish_task, lease_dir)
-        except RuntimeError:
+        lease_dir, lease_bucket = lease
+
+        future = None
+        executor = self.ensure_sync_executor()
+        if executor is not None:
+            with suppress(RuntimeError):
+                future = executor.submit(self._snapshot_publish_task, lease_bucket)
+
+        if future is None:
             self._release_publish_lease(lease_dir)
             self._snapshot_publish_done.set()
+            return
 
-    def _snapshot_publish_task(self, lease_dir: Path) -> None:
-        try:
-            published = self._publish_snapshot()
-        except Exception:
-            published = False
-            logging.warning("failed to publish JIT cache snapshot", exc_info=True)
-        try:
+        def _on_done(
+            fut: Any, lease_dir: Path = lease_dir, lease_bucket: int = lease_bucket
+        ) -> None:
+            # Single decision point for lease lifecycle: keep on success (bucket marker),
+            # release+cleanup on cancel / exception / empty-archive returned False.
+            published = (
+                not fut.cancelled() and fut.exception() is None and fut.result() is True
+            )
             if not published:
+                cleanup_remote_root(lease_dir.parent, current_lease_bucket=lease_bucket)
                 self._release_publish_lease(lease_dir)
-        finally:
             self._snapshot_publish_done.set()
 
-    def _try_acquire_publish_lease(self) -> Path | None:
+        future.add_done_callback(_on_done)
+
+    def _snapshot_publish_task(self, lease_bucket: int) -> bool:
+        try:
+            return self._publish_snapshot(lease_bucket)
+        except Exception:
+            logging.exception("failed to publish JIT cache snapshot")
+            return False
+
+    def _try_acquire_publish_lease(self) -> tuple[Path, int] | None:
         remote_root = self.config.remote_root
-        if remote_root is None:
-            return None
         bucket = int(time.time()) // SNAPSHOT_PUBLISH_INTERVAL_S
         lease_dir = remote_root / f"{SNAPSHOT_PUBLISH_LEASE_PREFIX}{bucket}"
         try:
@@ -949,30 +576,9 @@ class JitCacheManager:
         except FileExistsError:
             return None
         except OSError:
-            logging.warning(
-                "failed to acquire JIT snapshot publish lease", exc_info=True
-            )
+            logging.exception("failed to acquire JIT snapshot publish lease")
             return None
-        # We are the publisher for this bucket — piggyback a stale-lease scan
-        # so we don't pay a FUSE readdir on every publish attempt.
-        self._cleanup_stale_leases(remote_root, bucket)
-        return lease_dir
-
-    @staticmethod
-    def _cleanup_stale_leases(remote_root: Path, current_bucket: int) -> None:
-        try:
-            for entry in remote_root.iterdir():
-                if not entry.name.startswith(SNAPSHOT_PUBLISH_LEASE_PREFIX):
-                    continue
-                try:
-                    entry_bucket = int(entry.name[len(SNAPSHOT_PUBLISH_LEASE_PREFIX) :])
-                except ValueError:
-                    continue
-                if entry_bucket < current_bucket - 2:
-                    with suppress(OSError):
-                        entry.rmdir()
-        except OSError:
-            pass
+        return lease_dir, bucket
 
     @staticmethod
     def _release_publish_lease(lease_dir: Path) -> None:
@@ -981,54 +587,14 @@ class JitCacheManager:
         except FileNotFoundError:
             pass
         except OSError:
-            logging.warning(
-                "failed to release JIT snapshot publish lease: %s",
-                lease_dir,
-                exc_info=True,
+            logging.exception(
+                "failed to release JIT snapshot publish lease: %s", lease_dir
             )
 
-    @staticmethod
-    def _new_snapshot_name() -> str:
-        epoch_ms = int(current_time_ms())
-        short_uuid = uuid.uuid4().hex[:8]
-        return f"{SNAPSHOT_PREFIX}{epoch_ms}_{short_uuid}{SNAPSHOT_SUFFIX}"
-
-    @staticmethod
-    def _list_versioned_snapshots(remote_root: Path) -> list[Path]:
-        try:
-            entries = [e for e in remote_root.iterdir() if is_snapshot_name(e.name)]
-        except OSError:
-            return []
-        entries.sort(key=lambda p: p.name)
-        return entries
-
-    @staticmethod
-    def _find_latest_snapshot(remote_root: Path) -> Path | None:
-        for entry in reversed(JitCacheManager._list_versioned_snapshots(remote_root)):
-            try:
-                if entry.stat().st_size > 0:
-                    return entry
-            except OSError:
-                continue
-        return None
-
-    @staticmethod
-    def _cleanup_remote_root(
-        remote_root: Path,
-        keep_snapshots: int = SNAPSHOT_KEEP_COUNT,
-    ) -> None:
-        snapshots = JitCacheManager._list_versioned_snapshots(remote_root)
-        for old in snapshots[:-keep_snapshots]:
-            with suppress(OSError):
-                old.unlink()
-
-    def _publish_snapshot(self) -> bool:
+    def _publish_snapshot(self, current_lease_bucket: int) -> bool:
         remote_root = self.config.remote_root
-        if remote_root is None:
-            return False
-        snapshot_name = self._new_snapshot_name()
-        snapshot_path = remote_root / snapshot_name
-        local_tmp = _tmp_sibling(self.config.local_root / "snapshot_build.tar.zst")
+        snapshot_path = remote_root / new_snapshot_name()
+        local_tmp = tmp_sibling(self.config.local_root / "snapshot_build.tar.zst")
         start_s = time.monotonic()
         publish_deadline = start_s + self.config.remote_sync_longer_timeout_s
         try:
@@ -1036,10 +602,10 @@ class JitCacheManager:
             if files <= 0:
                 logging.info("skip publishing empty JIT cache snapshot")
                 return False
-            # Direct write avoids FUSE rename overhead; failed writes are not
-            # exposed as partial non-empty files on this mount.
-            _copy_with_deadline(local_tmp, snapshot_path, publish_deadline)
-            self._cleanup_remote_root(remote_root)
+            # remote_root already exists (lease mkdir succeeded above), skip parent mkdir
+            with atomic_write_path(snapshot_path) as snapshot_tmp:
+                copy_with_deadline(local_tmp, snapshot_tmp, publish_deadline)
+            cleanup_remote_root(remote_root, current_lease_bucket=current_lease_bucket)
             logging.info(
                 "published JIT cache snapshot %s files=%d bytes=%d cost_ms=%d",
                 snapshot_path,
@@ -1049,35 +615,42 @@ class JitCacheManager:
             )
             return True
         finally:
-            with suppress(OSError):
-                local_tmp.unlink()
+            local_tmp.unlink(missing_ok=True)
 
     def _create_snapshot_archive(
-        self, archive: Path, deadline_s: float = float("inf")
+        self, archive: Path, deadline_s: float
     ) -> tuple[int, int]:
         files = 0
         bytes_ = 0
         remote_root = self.config.remote_root
-        assert remote_root is not None
-        local_root = self.config.local_root
-        cctx = zstd.ZstdCompressor(level=3)
-        with (
-            archive.open("wb") as raw,
-            cctx.stream_writer(raw) as compressed,
-            tarfile.open(fileobj=compressed, mode="w|") as tar,
-        ):
-            for component, remote_path, rel in self._iter_snapshot_files(remote_root):
+        if remote_root is None:
+            return files, bytes_
+        # Enumerate remote union; prefer local reads to avoid FUSE small-file I/O.
+        candidates = (
+            (component, rel)
+            for component in COMPONENT_SPECS
+            for _, rel in iter_component_sync_files(
+                remote_root / component.name, component, log_errors=True
+            )
+        )
+        with open_snapshot_writer(archive) as tar:
+            for component, rel in candidates:
                 if time.monotonic() >= deadline_s:
                     logging.warning(
                         "snapshot archive creation exceeded deadline after %d files",
                         files,
                     )
                     break
-                # File list from remote (authoritative); prefer local copy to avoid FUSE overhead.
-                local_path = local_root / component.name / rel
-                source_path = local_path if local_path.is_file() else remote_path
+                local_path = self.component_dirs[component.name][0] / strip_gpu_prefix(
+                    component, rel
+                )
+                remote_path = remote_root / component.name / rel
                 try:
-                    with source_path.open("rb") as source:
+                    try:
+                        source = local_path.open("rb")
+                    except FileNotFoundError:
+                        source = remote_path.open("rb")
+                    with source:
                         source_stat = os.fstat(source.fileno())
                         if source_stat.st_size <= 0 or not stat.S_ISREG(
                             source_stat.st_mode
@@ -1094,63 +667,41 @@ class JitCacheManager:
                     continue
                 except OSError:
                     logging.warning(
-                        "failed to add JIT cache file to snapshot: %s",
+                        "failed to add JIT cache file to snapshot: %s (local=%s)",
                         remote_path,
-                        exc_info=True,
+                        local_path,
                     )
         return files, bytes_
 
-    @staticmethod
-    def _iter_snapshot_files(root: Path) -> Iterator[tuple[ComponentSpec, Path, str]]:
-        for component in COMPONENT_SPECS:
-            component_root = root / component.name
-            try:
-                if not component_root.is_dir():
-                    continue
-            except OSError:
-                logging.warning(
-                    "failed to probe component dir %s; skipping in snapshot",
-                    component.name,
-                    exc_info=True,
-                )
-                continue
-            prefix = str(component_root) + os.sep
-            for dirpath, dirnames, filenames in os.walk(
-                component_root,
-                onerror=lambda e: logging.warning(
-                    "os.walk error during JIT snapshot scan: %s", e
-                ),
-            ):
-                dirnames[:] = [d for d in dirnames if d != "__pycache__"]
-                for filename in filenames:
-                    full = os.path.join(dirpath, filename)
-                    rel = full[len(prefix) :].replace(os.sep, "/")
-                    if not should_sync_file(component, rel):
-                        continue
-                    yield component, Path(full), rel
-
     def stop(self) -> None:
-        # Stop watchdog first so no new uploads are enqueued.
-        if self.dirty_tracker:
-            self.dirty_tracker.stop()
-            self.dirty_tracker = None
-        self._stop_periodic_sync()
-        self._snapshot_publish_done.wait(timeout=WATCHDOG_JOIN_TIMEOUT_S)
-        # By design: JIT cache does not need strong consistency; drop pending uploads.
-        if self._sync_executor is not None:
-            self._sync_executor.shutdown(wait=False, cancel_futures=True)
         with self._lock:
-            # reset the counter to unblock any _drain_upload_queue still waiting.
-            self._pending_count = 0
-            self._pending_empty.set()
-        # Ensure _snapshot_publishing reads False after stop even if the
-        # publish task was cancelled before it could set the Event.
-        self._snapshot_publish_done.set()
-        self.release_startup_lock()
+            self._stopping = True
+            executor = self._sync_executor
+            self._sync_executor = None
+            # Wake in-flight drain waiters — predicate now sees _stopping.
+            self._pending_cv.notify_all()
+        try:
+            tracker = self.dirty_tracker
+            self.dirty_tracker = None
+            if tracker is not None:
+                tracker.stop()
+
+            self._periodic_sync_stop.set()  # idempotent even if thread was never started
+            t = self._periodic_sync_thread
+            if t is not None and t is not threading.current_thread():
+                t.join(timeout=PERIODIC_JOIN_TIMEOUT_S)
+
+            if executor is not None:
+                executor.shutdown(wait=False, cancel_futures=True)
+        finally:
+            # Snapshot publish runs in the sync executor — use the sync-side
+            # timeout, not the watchdog observer's.
+            self._snapshot_publish_done.wait(timeout=PERIODIC_JOIN_TIMEOUT_S)
+            self.release_startup_lock()
 
     def release_startup_lock(self) -> None:
         with self._lock:
             lock = self.startup_lock
             self.startup_lock = None
-        if lock and lock.is_locked:
+        if lock:
             lock.release()

@@ -1,6 +1,5 @@
 import os
 import sys
-import tarfile
 import tempfile
 import threading
 import time
@@ -23,13 +22,9 @@ from rtp_llm.config.py_config_modules import JITConfig
 from rtp_llm.models_py.triton_kernels.autotune_cache.export import (
     write_default_config_json,
 )
+from rtp_llm.utils import jit_cache_common as jit_cache_common_module
 from rtp_llm.utils import jit_cache_manager as jit_cache_module
-from rtp_llm.utils.jit_cache_manager import (
-    COMPONENT_BY_NAME,
-    COMPONENT_SPECS,
-    SNAPSHOT_PREFIX,
-    JitCacheManager,
-)
+from rtp_llm.utils.jit_cache_manager import JitCacheManager
 from rtp_llm.utils.test.jit_cache_manager_test import (
     add_path_to_tracker,
     find_latest_snapshot,
@@ -56,14 +51,12 @@ _JIT_ENV_NAMES = (
     "TORCH_EXTENSIONS_DIR",
     "REMOTE_JIT_DIR",
     "LOCAL_JIT_CACHE_DIR",
-    "RTP_JIT_CACHE_RUN_ID",
 )
 
 
 def _make_jit_manager(
     local_root: Path,
     remote_root: Path,
-    run_id: str,
     timeout_s: float = 30,
 ) -> JitCacheManager:
     remote_root.mkdir(parents=True, exist_ok=True)
@@ -71,7 +64,7 @@ def _make_jit_manager(
     config.local_jit_cache_dir = str(local_root)
     config.remote_jit_cache_dir = str(remote_root)
     config.remote_sync_timeout_s = timeout_s
-    manager = JitCacheManager(config, run_id=run_id)
+    manager = JitCacheManager(config)
     manager.bootstrap()
     return manager
 
@@ -103,20 +96,25 @@ def _setup_flashinfer_workspace_and_build():
     spec.build_and_load()
 
 
-def _run_triton_rank_jit(rank: int) -> None:
+def _run_triton_add_kernel(x: torch.Tensor, add: float = 1.0) -> torch.Tensor:
     import triton
     import triton.language as tl
 
     @triton.jit
-    def rank_add_kernel(x, y, n: tl.constexpr, block: tl.constexpr):
+    def add_kernel(x, y, n: tl.constexpr, block: tl.constexpr, val: tl.constexpr):
         offsets = tl.program_id(0) * block + tl.arange(0, block)
         mask = offsets < n
         values = tl.load(x + offsets, mask=mask)
-        tl.store(y + offsets, values + 1.0, mask=mask)
+        tl.store(y + offsets, values + val, mask=mask)
 
-    x = torch.arange(256, device="cuda", dtype=torch.float32) + rank
     y = torch.empty_like(x)
-    rank_add_kernel[(triton.cdiv(x.numel(), 128),)](x, y, x.numel(), block=128)
+    add_kernel[(triton.cdiv(x.numel(), 128),)](x, y, x.numel(), block=128, val=add)
+    return y
+
+
+def _run_triton_rank_jit(rank: int) -> None:
+    x = torch.arange(256, device="cuda", dtype=torch.float32) + rank
+    y = _run_triton_add_kernel(x, add=1.0)
     torch.cuda.synchronize()
     if not torch.allclose(y, x + 1.0):
         raise AssertionError(f"rank {rank} Triton JIT result mismatch")
@@ -135,7 +133,7 @@ def _two_rank_snapshot_publish_worker(
         os.environ["RANK"] = str(rank)
         os.environ["WORLD_SIZE"] = str(world_size)
         os.environ["TRITON_AUTOTUNE_GPU_NAME"] = "NVIDIA_H20"
-        jit_cache_module.get_gpu_info.cache_clear()
+        jit_cache_common_module.get_gpu_info.cache_clear()
 
         if not torch.cuda.is_available():
             raise RuntimeError("CUDA is not available")
@@ -146,12 +144,11 @@ def _two_rank_snapshot_publish_worker(
         manager = _make_jit_manager(
             root_path / f"local_rank_{rank}",
             remote_path,
-            f"rank-{rank}",
         )
         prepare = manager.prepare()
         _run_triton_rank_jit(rank)
 
-        component = COMPONENT_BY_NAME["triton"]
+        component = jit_cache_common_module.COMPONENT_BY_NAME["triton"]
         local_dir, _ = manager.component_dirs[component.name]
         generated_files = list(iter_component_files(local_dir, component))
         if not generated_files:
@@ -170,10 +167,10 @@ def _two_rank_snapshot_publish_worker(
         publish_attempted = False
         original_publish_snapshot = manager._publish_snapshot
 
-        def wrapped_publish_snapshot():
+        def wrapped_publish_snapshot(bucket):
             nonlocal publish_attempted
             publish_attempted = True
-            return original_publish_snapshot()
+            return original_publish_snapshot(bucket)
 
         barrier.wait(timeout=30)
         with mock.patch.object(
@@ -200,12 +197,10 @@ def _two_rank_snapshot_publish_worker(
         if manager is not None:
             manager.remote_cache_available = False
             manager.stop()
-        jit_cache_module.get_gpu_info.cache_clear()
+        jit_cache_common_module.get_gpu_info.cache_clear()
 
 
 class _GpuJitTestBase(unittest.TestCase):
-    """Base class for GPU JIT tests: CUDA/SM90+ gate, env & flashinfer state save/restore."""
-
     def setUp(self):
         if not torch.cuda.is_available():
             self.skipTest("CUDA is not available")
@@ -248,18 +243,15 @@ class _GpuJitTestBase(unittest.TestCase):
 
 class RemoteJitIntegrationTest(_GpuJitTestBase):
 
-    def make_manager(self, local_root: Path, remote_root: Path) -> JitCacheManager:
-        return _make_jit_manager(local_root, remote_root, run_id="", timeout_s=120)
-
     def test_single_gpu_reuses_same_remote_jit_for_all_components(self):
         remote_root = self.root / "remote"
-        first = self.make_manager(self.root / "local_first", remote_root)
+        first = _make_jit_manager(self.root / "local_first", remote_root, timeout_s=120)
         try:
             prepare = first.prepare()
             self.assertEqual(prepare["cache_state"], "snapshot_miss")
 
             self.run_all_jit_workloads()
-            first.dirty_tracker = jit_cache_module.JitDirtyTracker(
+            first.dirty_tracker = jit_cache_common_module.JitDirtyTracker(
                 first.component_dirs, first.enqueue_upload
             )
             uploaded = self.enqueue_and_sync(first)
@@ -271,7 +263,9 @@ class RemoteJitIntegrationTest(_GpuJitTestBase):
         finally:
             first.stop()
 
-        second = self.make_manager(self.root / "local_second", remote_root)
+        second = _make_jit_manager(
+            self.root / "local_second", remote_root, timeout_s=120
+        )
         try:
             prepare = second.prepare()
             self.assertEqual(prepare["cache_state"], "snapshot_hit")
@@ -297,16 +291,8 @@ class RemoteJitIntegrationTest(_GpuJitTestBase):
         import triton
         import triton.language as tl
 
-        @triton.jit
-        def add_kernel(x, y, n: tl.constexpr, block: tl.constexpr):
-            offsets = tl.program_id(0) * block + tl.arange(0, block)
-            mask = offsets < n
-            values = tl.load(x + offsets, mask=mask)
-            tl.store(y + offsets, values + 1.0, mask=mask)
-
         x = torch.arange(256, device="cuda", dtype=torch.float32)
-        y = torch.empty_like(x)
-        add_kernel[(triton.cdiv(x.numel(), 128),)](x, y, x.numel(), block=128)
+        y = _run_triton_add_kernel(x, add=1.0)
         self.assertTrue(torch.allclose(y, x + 1.0))
 
         autotune_dir = Path(os.environ["TRITON_AUTOTUNE_CONFIG_DIR"])
@@ -351,14 +337,18 @@ class RemoteJitIntegrationTest(_GpuJitTestBase):
         b = torch.randn((16, 16), device="cuda", dtype=torch.bfloat16)
         d = torch.empty((16, 16), device="cuda", dtype=torch.bfloat16)
         deep_gemm.bf16_gemm_nt(a, b, d, None)
-        self.ensure_component_file("deep_gemm", "cache/integration_probe.cubin")
+        component = jit_cache_common_module.COMPONENT_BY_NAME["deep_gemm"]
+        local_dir = Path(os.environ[component.env_name])
+        if not list(iter_component_files(local_dir, component)):
+            path = local_dir / "cache/integration_probe.cubin"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"jit-cache-integration-probe")
 
     def run_torch_extension_jit(self) -> None:
         from torch.utils.cpp_extension import load_inline
 
-        name = f"rtp_jit_cache_test_ext_{os.getpid()}"
         module = load_inline(
-            name=name,
+            name=f"rtp_jit_cache_test_ext_{os.getpid()}",
             cpp_sources=[
                 "#include <torch/extension.h>\n"
                 "int add_one_int(int value) { return value + 1; }\n"
@@ -370,19 +360,10 @@ class RemoteJitIntegrationTest(_GpuJitTestBase):
         )
         self.assertEqual(module.add_one_int(41), 42)
 
-    def ensure_component_file(self, component_name: str, rel: str) -> None:
-        component = COMPONENT_BY_NAME[component_name]
-        local_dir = Path(os.environ[component.env_name])
-        if list(iter_component_files(local_dir, component)):
-            return
-        path = local_dir / rel
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(b"jit-cache-integration-probe")
-
     def enqueue_and_sync(self, manager: JitCacheManager):
         assert manager.dirty_tracker is not None
         missing = []
-        for component in COMPONENT_SPECS:
+        for component in jit_cache_common_module.COMPONENT_SPECS:
             local_dir, _ = manager.component_dirs[component.name]
             files = list(iter_component_files(local_dir, component))
             if not files:
@@ -396,7 +377,7 @@ class RemoteJitIntegrationTest(_GpuJitTestBase):
     def assert_components_have_files(self, root: Path) -> None:
         missing = [
             c.name
-            for c in COMPONENT_SPECS
+            for c in jit_cache_common_module.COMPONENT_SPECS
             if not list(iter_component_files(root / c.name, c))
         ]
         if missing:
@@ -409,21 +390,13 @@ class RemoteSnapshotCompressionDesignTest(unittest.TestCase):
         self.root = Path(self.tmp.name)
         self.old_env = os.environ.copy()
         os.environ["TRITON_AUTOTUNE_GPU_NAME"] = "NVIDIA_H20"
-        jit_cache_module.get_gpu_info.cache_clear()
+        jit_cache_common_module.get_gpu_info.cache_clear()
 
     def tearDown(self):
         os.environ.clear()
         os.environ.update(self.old_env)
-        jit_cache_module.get_gpu_info.cache_clear()
+        jit_cache_common_module.get_gpu_info.cache_clear()
         self.tmp.cleanup()
-
-    def make_manager(
-        self,
-        local_root: Path,
-        remote_root: Path,
-        run_id: str,
-    ) -> JitCacheManager:
-        return _make_jit_manager(local_root, remote_root, run_id, timeout_s=10)
 
     def test_two_gpu_rank_processes_compete_for_single_snapshot_publish_lease(self):
         if not torch.cuda.is_available():
@@ -486,7 +459,9 @@ class RemoteSnapshotCompressionDesignTest(unittest.TestCase):
         snapshot_path = find_latest_snapshot(remote_root)
         self.assertIsNotNone(snapshot_path)
         self.assertTrue(snapshot_path.is_file())
-        self.assertTrue(snapshot_path.name.startswith(SNAPSHOT_PREFIX))
+        self.assertTrue(
+            snapshot_path.name.startswith(jit_cache_common_module.SNAPSHOT_PREFIX)
+        )
         members = snapshot_member_names(snapshot_path)
         self.assertIn(publishers[0]["marker_member"], members)
 
@@ -501,32 +476,32 @@ class EventRecord:
             self.events[component_name].append((event_type, path))
 
     def get_syncable_events(self, component_name: str) -> list[tuple[str, str]]:
-        component = COMPONENT_BY_NAME[component_name]
+        component = jit_cache_common_module.COMPONENT_BY_NAME[component_name]
         with self.lock:
             return [
                 (t, p)
                 for t, p in self.events[component_name]
-                if jit_cache_module.should_sync_file(component, p)
+                if jit_cache_common_module.should_sync_file(component, p)
             ]
 
 
 class JitEventSignalVerificationTest(_GpuJitTestBase):
-    """Verify that each JIT component produces the expected filesystem events."""
-
     def test_jit_components_produce_expected_filesystem_events(self):
         local_root = self.root / "local"
         local_root.mkdir(parents=True)
-        for component in COMPONENT_SPECS:
-            jit_cache_module.component_cache_dir(local_root, component).mkdir(
+        for component in jit_cache_common_module.COMPONENT_SPECS:
+            jit_cache_common_module.component_cache_dir(local_root, component).mkdir(
                 parents=True,
                 exist_ok=True,
             )
-        jit_cache_module.apply_jit_cache_env(local_root)
+        jit_cache_common_module.apply_jit_cache_env(local_root)
 
         recorder = EventRecord()
         observer = Observer()
-        for component in COMPONENT_SPECS:
-            comp_dir = jit_cache_module.component_cache_dir(local_root, component)
+        for component in jit_cache_common_module.COMPONENT_SPECS:
+            comp_dir = jit_cache_common_module.component_cache_dir(
+                local_root, component
+            )
             prefix = str(comp_dir) + os.sep
             comp_name = component.name
 
@@ -561,60 +536,28 @@ class JitEventSignalVerificationTest(_GpuJitTestBase):
             observer.stop()
             observer.join(timeout=5)
 
-        print("\n=== JIT Cache Filesystem Event Verification ===\n")
-        all_ok = True
-        for component in COMPONENT_SPECS:
+        failures = []
+        for component in jit_cache_common_module.COMPONENT_SPECS:
             expected = component.upload_events
-            syncable = recorder.get_syncable_events(component.name)
-            actual_types = {etype for etype, _ in syncable}
-            hit = expected & actual_types
+            actual_types = {
+                etype for etype, _ in recorder.get_syncable_events(component.name)
+            }
             missed = expected - actual_types
-
-            status = "OK" if hit and not missed else "FAIL"
-            if status == "FAIL":
-                all_ok = False
-
-            print(f"[{status}] {component.name}:")
-            print(f"  configured upload_events: {sorted(expected)}")
-            print(f"  actual syncable events:   {sorted(actual_types)}")
-            if missed:
-                print(f"  MISSING:    {sorted(missed)}")
-
-            if syncable:
-                print(f"  sample events ({len(syncable)} total):")
-                for etype, path in syncable[:5]:
-                    print(f"    {etype:10s} {path}")
-            print()
-
-        self.assertTrue(
-            all_ok,
-            "Some components did not produce their expected upload events. "
-            "Check output above for details.",
-        )
+            if missed or not (expected & actual_types):
+                failures.append(
+                    f"{component.name}: expected={sorted(expected)} actual={sorted(actual_types)} missing={sorted(missed)}"
+                )
+        self.assertFalse(failures, "\n".join(failures))
 
     def _run_all_workloads(self):
+        import deep_gemm
+        from torch.utils.cpp_extension import load_inline
+
         _setup_flashinfer_workspace_and_build()
-        self._run_triton()
-        self._run_triton_autotune()
-        self._run_deep_gemm()
-        self._run_torch_extensions()
-
-    def _run_triton(self):
-        import triton
-        import triton.language as tl
-
-        @triton.jit
-        def add_kernel(x, y, n: tl.constexpr, block: tl.constexpr):
-            offsets = tl.program_id(0) * block + tl.arange(0, block)
-            mask = offsets < n
-            values = tl.load(x + offsets, mask=mask)
-            tl.store(y + offsets, values + 1.0, mask=mask)
 
         x = torch.arange(256, device="cuda", dtype=torch.float32)
-        y = torch.empty_like(x)
-        add_kernel[(triton.cdiv(x.numel(), 128),)](x, y, x.numel(), block=128)
+        _run_triton_add_kernel(x, add=1.0)
 
-    def _run_triton_autotune(self):
         autotune_dir = Path(os.environ["TRITON_AUTOTUNE_CONFIG_DIR"])
         autotune_dir.mkdir(parents=True, exist_ok=True)
         write_default_config_json(
@@ -623,20 +566,13 @@ class JitEventSignalVerificationTest(_GpuJitTestBase):
             {"kwargs": {"block": 128}, "num_warps": 4, "num_stages": 3},
         )
 
-    def _run_deep_gemm(self):
-        import deep_gemm
-
         a = torch.randn((16, 16), device="cuda", dtype=torch.bfloat16)
         b = torch.randn((16, 16), device="cuda", dtype=torch.bfloat16)
         d = torch.empty((16, 16), device="cuda", dtype=torch.bfloat16)
         deep_gemm.bf16_gemm_nt(a, b, d, None)
 
-    def _run_torch_extensions(self):
-        from torch.utils.cpp_extension import load_inline
-
-        name = f"rtp_jit_signal_test_{os.getpid()}"
         load_inline(
-            name=name,
+            name=f"rtp_jit_signal_test_{os.getpid()}",
             cpp_sources=[
                 "#include <torch/extension.h>\n"
                 "int signal_test(int v) { return v + 1; }\n"

@@ -87,9 +87,9 @@ class GaugeMetrics(Enum):
     VIT_IMAGE_PROCESSOR_RT_US_METRIC = "rtp_llm_vit_image_processor_rt_us"
     VIT_RESIZED_PIXEL_COUNT_METRIC = "rtp_llm_vit_resized_pixel_count"
 
-    # jit cache
-    JIT_CACHE_REMOTE_USAGE_METRIC = "py_rtp_jit_cache_remote_usage"
-    JIT_CACHE_LOCAL_USAGE_METRIC = "py_rtp_jit_cache_local_usage"
+    # jit cache — split by unit; location/module carried in tags
+    JIT_CACHE_USAGE_BYTES_METRIC = "py_rtp_jit_cache_usage_bytes"
+    JIT_CACHE_USAGE_FILES_METRIC = "py_rtp_jit_cache_usage_files"
 
 
 class MetricReporter(object):
@@ -97,6 +97,10 @@ class MetricReporter(object):
         self._kmon = kmonitor
         self._matic_map: Dict[str, Any] = {}
         self._inited = False
+
+    @property
+    def is_inited(self) -> bool:
+        return self._inited
 
     def report(
         self,

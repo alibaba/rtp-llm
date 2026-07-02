@@ -147,6 +147,7 @@ py_library(
     srcs = glob([
         "utils/**/*.py",
     ], exclude = [
+        "utils/jit_cache_common.py",
         "utils/jit_cache_manager.py",
         "utils/test/*.py",
         "utils/test/**/*.py",
@@ -166,8 +167,8 @@ py_library(
 py_library(
     name = "jit_cache_manager_lib",
     srcs = [
+        "utils/jit_cache_common.py",
         "utils/jit_cache_manager.py",
-        "utils/module_util.py",
     ],
     deps = [
         ":config_ops",
