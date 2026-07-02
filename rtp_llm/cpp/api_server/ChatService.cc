@@ -191,6 +191,16 @@ void ChatService::chatCompletions(const std::unique_ptr<http_server::HttpRespons
 
     auto input  = fillGenerateInput(request_id, chat_request, rendered_input);
     auto stream = engine_->enqueue(input);
+    if (stream->hasError()) {
+        auto error_info = stream->statusInfo();
+        HttpApiServerException e(transErrorCodeToHttpExceptionType(error_info.code()), error_info.ToString());
+        if (metric_reporter_) {
+            metric_reporter_->reportErrorQpsMetric(chat_request.source.value_or("unknown"), e.getType());
+        }
+        AccessLogWrapper::logExceptionAccess(body, request_id, e.what());
+        WriteExceptionResponse(writer, e);
+        return;
+    }
 
     if (chat_request.stream.value_or(false) == false) {
         generateResponse(input->generate_config,
