@@ -10,6 +10,9 @@ import org.springframework.stereotype.Component;
 
 import javax.annotation.PostConstruct;
 
+import static org.flexlb.constant.MetricConstant.BATCH_ACTUAL_TIME_MS;
+import static org.flexlb.constant.MetricConstant.BATCH_PREDICTED_TIME_MS;
+import static org.flexlb.constant.MetricConstant.BATCH_PREDICT_GAP_MS;
 import static org.flexlb.constant.MetricConstant.CACHE_HIT_COUNT;
 import static org.flexlb.constant.MetricConstant.CACHE_HIT_RATIO;
 import static org.flexlb.constant.MetricConstant.CACHE_REQUEST_TOTAL;
@@ -60,7 +63,12 @@ public class BatchSchedulerReporter {
         monitor.register(ENGINE_LOCAL_TASK_MAP_SIZE, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         monitor.register(ENGINE_RUNNING_TASK_INFO_SIZE, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
 
-        log.info("BatchSchedulerReporter initialized (7 metrics)");
+        // Prediction accuracy — predicted vs actual engine execution time
+        monitor.register(BATCH_PREDICTED_TIME_MS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        monitor.register(BATCH_ACTUAL_TIME_MS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        monitor.register(BATCH_PREDICT_GAP_MS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+
+        log.info("BatchSchedulerReporter initialized (10 metrics)");
     }
 
     // ==================== Queue metrics ====================
@@ -166,5 +174,37 @@ public class BatchSchedulerReporter {
                 "role", role,
                 "engineIp", engineIp);
         monitor.report(ENGINE_RUNNING_TASK_INFO_SIZE, tags, count);
+    }
+
+    // ==================== Prediction accuracy metrics ====================
+
+    /**
+     * Report formula-predicted batch execution time via {@code batch.predicted.time.ms}.
+     */
+    public void reportBatchPredictedTimeMs(String role, String engineIp, long predictedMs) {
+        FlexMetricTags tags = FlexMetricTags.of(
+                "role", role,
+                "engineIp", engineIp);
+        monitor.report(BATCH_PREDICTED_TIME_MS, tags, predictedMs);
+    }
+
+    /**
+     * Report engine-reported actual batch execution time via {@code batch.actual.time.ms}.
+     */
+    public void reportBatchActualTimeMs(String role, String engineIp, long actualMs) {
+        FlexMetricTags tags = FlexMetricTags.of(
+                "role", role,
+                "engineIp", engineIp);
+        monitor.report(BATCH_ACTUAL_TIME_MS, tags, actualMs);
+    }
+
+    /**
+     * Report the gap between actual and predicted batch execution time via {@code batch.predict.gap.ms}.
+     */
+    public void reportBatchPredictGapMs(String role, String engineIp, long gapMs) {
+        FlexMetricTags tags = FlexMetricTags.of(
+                "role", role,
+                "engineIp", engineIp);
+        monitor.report(BATCH_PREDICT_GAP_MS, tags, gapMs);
     }
 }

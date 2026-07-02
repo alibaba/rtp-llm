@@ -34,6 +34,8 @@ public class TaskInfo {
     private long batchId = -1;
     @JsonProperty("phase")
     private TaskPhase phase;
+    @JsonProperty("execution_time_ms")
+    private long executionTimeMs = -1;
 
     // Task state related fields
     private TaskStateEnum taskState = TaskStateEnum.CREATED;

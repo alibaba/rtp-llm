@@ -62,6 +62,22 @@ public class MetricConstant {
             "app.engine.balancing.master.batch.total.tokens";
 
     /**
+     * Batch predicted execution time (formula estimate) in milliseconds
+     */
+    public static final String BATCH_PREDICTED_TIME_MS = "app.batch.predicted.time.ms";
+
+    /**
+     * Batch actual execution time reported by the engine (NormalEngine execution, excludes queueing) in milliseconds
+     */
+    public static final String BATCH_ACTUAL_TIME_MS = "app.batch.actual.time.ms";
+
+    /**
+     * Gap between actual and predicted batch execution time (actual minus predicted) in milliseconds;
+     * positive means the prediction underestimated
+     */
+    public static final String BATCH_PREDICT_GAP_MS = "app.batch.predict.gap.ms";
+
+    /**
      * Engine running queue time (from EP authoritative value)
      */
     public static final String ENGINE_RUNNING_QUEUE_TIME = "app.engine.health.check.running.queue.time";

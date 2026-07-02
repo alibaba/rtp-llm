@@ -418,6 +418,7 @@ message TaskInfoPB {
     ErrorDetailsPB error_info = 10;
     int64 batch_id = 11;
     TaskPhase phase = 12;
+    int64 execution_time_ms = 13;
 }
 
 message UpdateWeightsRequestPB {

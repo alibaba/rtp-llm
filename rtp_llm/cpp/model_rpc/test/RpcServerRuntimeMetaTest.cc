@@ -58,4 +58,16 @@ TEST(RpcServerRuntimeMetaTest, FinishTaskWithoutPendingStillReportsFailure) {
     EXPECT_EQ(finished.error_message, "remote load failed");
 }
 
+// Engine execution time is the turnaround (finish - begin) minus the queue wait.
+TEST(RpcServerRuntimeMetaTest, ComputeExecutionTimeExcludesQueueWait) {
+    // Begin at 1000ms, finish at 1800ms → 800ms turnaround, of which 120ms was queued.
+    EXPECT_EQ(RpcServerRuntimeMeta::computeExecutionTimeMs(
+                  /*finish_time_ms=*/1800, /*begin_time_us=*/1'000'000, /*waiting_time_ms=*/120),
+              680);
+    // With no queue wait, execution time equals the full turnaround.
+    EXPECT_EQ(RpcServerRuntimeMeta::computeExecutionTimeMs(
+                  /*finish_time_ms=*/1800, /*begin_time_us=*/1'000'000, /*waiting_time_ms=*/0),
+              800);
+}
+
 }  // namespace rtp_llm::test

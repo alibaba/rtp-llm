@@ -32,11 +32,13 @@ public class PrefillEndpoint extends WorkerEndpoint {
     private final AtomicReference<Long> estimatedWaitingTimeMs = new AtomicReference<>(0L);
     private volatile WorkerBatcher batcher;
     private final InflightEvictor<Long, BatchInflight> batchEvictor;
+    private final BatchSchedulerReporter reporter;
 
     public PrefillEndpoint(WorkerStatus status, FlexlbConfig config,
                            BatchDecisionHandler handler,
                            BatchSchedulerReporter reporter) {
         super(status);
+        this.reporter = reporter;
         this.predictor = createPredictor(config);
         this.batcher = createBatcher(config, handler, reporter);
         this.batchEvictor = new InflightEvictor<>(inflightBatches,
@@ -158,9 +160,12 @@ public class PrefillEndpoint extends WorkerEndpoint {
             }
         }
 
-        // Phase 2: any success request → remove entire batch
+        // Phase 2: any success request → remove entire batch, report predicted vs actual timing
         for (long batchId : batchesWithSuccess) {
-            inflightBatches.remove(batchId);
+            BatchInflight batch = inflightBatches.remove(batchId);
+            if (batch != null) {
+                reportBatchCompletion(batchId, batch, finishedTaskInfo);
+            }
         }
 
         // Phase 3: fail-only batches → repack survivors
@@ -301,6 +306,36 @@ public class PrefillEndpoint extends WorkerEndpoint {
     public void reportBatchMetrics(BatchSchedulerReporter reporter) {
         reporter.reportBatcherQueueDepth("prefill", getIp(), getBatcherQueueSize());
         reporter.reportPrefillInflightBatchCount("prefill", getIp(), getInflightBatchCount());
+    }
+
+    /**
+     * On batch completion, compare the formula-predicted execution time against the
+     * engine-reported actual execution time (max across the batch's finished tasks),
+     * then log and emit prediction-accuracy metrics.
+     */
+    private void reportBatchCompletion(long batchId, BatchInflight batch, Map<String, TaskInfo> finishedTaskInfo) {
+        long actualMs = -1;
+        if (finishedTaskInfo != null) {
+            for (TaskInfo task : finishedTaskInfo.values()) {
+                if (task.getBatchId() == batchId && task.getExecutionTimeMs() > 0) {
+                    actualMs = Math.max(actualMs, task.getExecutionTimeMs());
+                }
+            }
+        }
+        if (actualMs < 0) {
+            return;
+        }
+
+        long predictedMs = batch.predictTimeMs();
+        long gapMs = actualMs - predictedMs;
+        logger.info("flexlb_batch_complete batch_id={} predicted_ms={} actual_ms={} gap_ms={} batch_size={} engine={}",
+                batchId, predictedMs, actualMs, gapMs, batch.requests().size(), getIp());
+
+        if (reporter != null) {
+            reporter.reportBatchPredictedTimeMs("prefill", getIp(), predictedMs);
+            reporter.reportBatchActualTimeMs("prefill", getIp(), actualMs);
+            reporter.reportBatchPredictGapMs("prefill", getIp(), gapMs);
+        }
     }
 
     private void refreshEstimatedWaitingTime() {

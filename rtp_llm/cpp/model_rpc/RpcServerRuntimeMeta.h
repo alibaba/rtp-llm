@@ -16,6 +16,12 @@ struct RunningEntry {
 
 class RpcServerRuntimeMeta {
 public:
+    // Engine execution time: wall time from task begin to finish, minus the time
+    // spent queued. This isolates the NormalEngine execution cost from queueing.
+    static int64_t computeExecutionTimeMs(int64_t finish_time_ms, int64_t begin_time_us, int64_t waiting_time_ms) {
+        return finish_time_ms - begin_time_us / 1000 - waiting_time_ms;
+    }
+
     static TaskPhase derivePhase(const GenerateStreamPtr& stream) {
         if (!stream)
             return TaskPhase::PENDING;
@@ -79,12 +85,13 @@ public:
         if (finished_streams_.size() >= finished_capacity_) {
             finished_streams_.pop_front();
         }
-        int64_t current           = autil::TimeUtility::currentTimeInMilliSeconds();
-        task_info.end_time_ms     = current;
-        task_info.prefix_length   = stream->prefixLength();
-        task_info.input_length    = stream->inputLength();
-        task_info.waiting_time_ms = stream->getTimeInfo().wait_time_us / 1000;
-        task_info.iterate_count   = stream->iterCount();
+        int64_t current             = autil::TimeUtility::currentTimeInMilliSeconds();
+        task_info.end_time_ms       = current;
+        task_info.prefix_length     = stream->prefixLength();
+        task_info.input_length      = stream->inputLength();
+        task_info.waiting_time_ms   = stream->getTimeInfo().wait_time_us / 1000;
+        task_info.iterate_count     = stream->iterCount();
+        task_info.execution_time_ms = computeExecutionTimeMs(current, stream->beginTimeUs(), task_info.waiting_time_ms);
         if (stream->hasError()) {
             task_info.error_code    = static_cast<int64_t>(stream->statusInfo().code());
             task_info.error_message = stream->statusInfo().ToString();

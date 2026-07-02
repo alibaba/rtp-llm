@@ -23,7 +23,8 @@ struct EngineScheduleInfo {
         TaskPhase   phase         = TaskPhase::PENDING;
         int64_t     error_code    = 0;
         std::string error_message;
-        int64_t     batch_id = -1;
+        int64_t     batch_id          = -1;
+        int64_t     execution_time_ms = -1;
     };
     std::vector<TaskInfo> running_task_info_list;
     std::vector<TaskInfo> finished_task_info_list;

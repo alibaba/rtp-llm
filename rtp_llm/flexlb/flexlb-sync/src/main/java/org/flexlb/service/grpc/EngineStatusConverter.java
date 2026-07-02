@@ -83,6 +83,7 @@ public class EngineStatusConverter {
             taskInfo.setEndTimeMs(taskInfoPB.getEndTimeMs());
             taskInfo.setDpRank(taskInfoPB.getDpRank());
             taskInfo.setBatchId(taskInfoPB.getBatchId());
+            taskInfo.setExecutionTimeMs(taskInfoPB.getExecutionTimeMs());
             taskInfo.setPhase(convertPhase(taskInfoPB.getPhase()));
             if (taskInfoPB.hasErrorInfo() && taskInfoPB.getErrorInfo().getErrorCode() != 0L) {
                 taskInfo.setErrorCode(taskInfoPB.getErrorInfo().getErrorCode());
