@@ -2,6 +2,7 @@
 
 import logging
 import os
+from collections import defaultdict
 from types import SimpleNamespace
 from typing import Any, Dict, Optional, Tuple
 
@@ -51,6 +52,170 @@ def _fp8_mqa_logits_chunk_rows() -> int:
         default=0,
         min_value=0,
     )
+
+
+def _prefill_topk_force_radix_sort() -> bool:
+    return os.environ.get("DSV4_PREFILL_TOPK_FORCE_RADIX", "1") != "0"
+
+
+def _indexer_topk_canonicalize_enabled() -> bool:
+    return os.environ.get("DSV4_INDEXER_TOPK_CANONICALIZE", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
+def _cp_prefill_fused_qk_enabled() -> bool:
+    return os.environ.get("DSV4_CP_PREFILL_INDEXER_FUSED_QK", "0").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
+def _canonicalize_topk_indices(indices: torch.Tensor) -> torch.Tensor:
+    if not _indexer_topk_canonicalize_enabled():
+        return indices
+    sentinel = torch.full_like(indices, torch.iinfo(indices.dtype).max)
+    sortable = torch.where(indices >= 0, indices, sentinel)
+    sorted_indices = torch.sort(sortable, dim=-1).values
+    return torch.where(
+        sorted_indices == sentinel,
+        torch.full_like(sorted_indices, -1),
+        sorted_indices,
+    )
+
+
+def _indexer_reuse_dump_dir() -> str:
+    return os.environ.get("RTP_LLM_INDEXER_REUSE_DUMP_DIR", "")
+
+
+def _indexer_reuse_dump_max() -> int:
+    try:
+        return int(os.environ.get("RTP_LLM_INDEXER_REUSE_DUMP_MAX", "1"))
+    except ValueError:
+        return 1
+
+
+def _indexer_reuse_dump_full_limit() -> int:
+    try:
+        return int(os.environ.get("RTP_LLM_INDEXER_REUSE_DUMP_FULL_LIMIT", "262144"))
+    except ValueError:
+        return 262144
+
+
+def _indexer_case_from_prefix(attention_inputs: Any) -> str:
+    prefix_lengths = getattr(attention_inputs, "prefix_lengths", None)
+    if not isinstance(prefix_lengths, torch.Tensor) or prefix_lengths.numel() == 0:
+        return "miss"
+    try:
+        return "hit" if int(prefix_lengths.detach().max().item()) > 0 else "miss"
+    except Exception:
+        return "unknown"
+
+
+def _indexer_tensor_snapshot(t: Any) -> Any:
+    if t is None:
+        return None
+    if not isinstance(t, torch.Tensor):
+        return t
+    meta: Dict[str, Any] = {
+        "shape": list(t.shape),
+        "dtype": str(t.dtype),
+        "device": str(t.device),
+        "numel": int(t.numel()),
+    }
+    if t.numel() == 0:
+        meta["full"] = t.detach().cpu()
+        return meta
+    try:
+        if t.is_cuda:
+            torch.cuda.synchronize(t.device)
+        cpu = t.detach().cpu().contiguous()
+        flat = cpu.reshape(-1)
+        try:
+            raw = cpu.view(torch.uint8).numpy().tobytes()
+            meta["md5"] = hashlib.md5(raw).hexdigest()
+        except Exception as exc:
+            meta["md5_error"] = str(exc)
+        if cpu.is_floating_point():
+            f = cpu.to(torch.float32)
+            meta.update(
+                {
+                    "sum": float(f.sum().item()),
+                    "mean": float(f.mean().item()),
+                    "l2": float(torch.linalg.vector_norm(f).item()),
+                    "max_abs": float(f.abs().max().item()),
+                    "nan": int(torch.isnan(f).sum().item()),
+                    "inf": int(torch.isinf(f).sum().item()),
+                }
+            )
+        else:
+            meta.update(
+                {
+                    "min": int(flat.min().item()),
+                    "max": int(flat.max().item()),
+                }
+            )
+        full_limit = _indexer_reuse_dump_full_limit()
+        if int(flat.numel()) <= full_limit:
+            meta["full"] = cpu
+        else:
+            n = min(4096, int(flat.numel()))
+            meta["head"] = flat[:n].clone()
+            meta["tail"] = flat[-n:].clone()
+    except Exception as exc:
+        meta["snapshot_error"] = str(exc)
+    return meta
+
+
+def _indexer_reuse_dump(
+    stage: str,
+    case: str,
+    tensors: Dict[str, Any],
+    *,
+    layer_id: int,
+    extra: Optional[Dict[str, Any]] = None,
+) -> None:
+    dump_dir = _indexer_reuse_dump_dir()
+    if not dump_dir:
+        return
+    rank = os.environ.get("RANK", os.environ.get("WORLD_RANK", "0"))
+    local_rank = os.environ.get("LOCAL_RANK", "?")
+    pid = os.getpid()
+    key = f"{stage}:{case}:{rank}:{pid}:{layer_id}"
+    count = _INDEXER_REUSE_DUMP_COUNTS[key]
+    if count >= _indexer_reuse_dump_max():
+        return
+    _INDEXER_REUSE_DUMP_COUNTS[key] = count + 1
+    os.makedirs(dump_dir, exist_ok=True)
+    payload: Dict[str, Any] = {
+        "stage": stage,
+        "case": case,
+        "layer_id": layer_id,
+        "rank": rank,
+        "local_rank": local_rank,
+        "pid": pid,
+        "count": count,
+        "tensors": {
+            name: _indexer_tensor_snapshot(value) for name, value in tensors.items()
+        },
+    }
+    if extra:
+        payload.update(extra)
+    filename = (
+        f"{count:02d}_{case}_{stage}_rank{rank}_local{local_rank}_pid{pid}"
+        f"_layer{layer_id}.pt"
+    )
+    path = os.path.join(dump_dir, filename)
+    try:
+        torch.save(payload, path)
+        logging.info("[INDEXER_REUSE_DUMP] wrote %s", path)
+    except Exception as exc:
+        logging.warning("[INDEXER_REUSE_DUMP] failed to write %s: %s", path, exc)
 
 
 def _halve_chunk_rows(chunk_rows: int) -> int:
@@ -363,18 +528,17 @@ class IndexerOp(nn.Module):
         Returns:
             Tuple of (rotated_query, rotated_key)
         """
-        # Fast path: fused Triton kernel + cuBLAS GEMM (2 launches instead of 4)
-        # Skips when full_rope_pos_ids is None (CP edge case: n_q == 0).
-        fused = _try_fused_prefill_rope_hadamard_qk(
-            q,
-            k,
-            full_rope_pos_ids,
-            self.cos_sin_cache,
-            self.rope_head_dim,
-            self.is_neox_style,
-        )
-        if fused is not None:
-            return fused
+        if _cp_prefill_fused_qk_enabled():
+            fused = _try_fused_prefill_rope_hadamard_qk(
+                q,
+                k,
+                full_rope_pos_ids,
+                self.cos_sin_cache,
+                self.rope_head_dim,
+                self.is_neox_style,
+            )
+            if fused is not None:
+                return fused
 
         # Fallback: unfused 4-op chain
         q_pe = q[:, :, : self.index_head_dim - self.rope_head_dim]
@@ -544,7 +708,7 @@ class IndexerOp(nn.Module):
 
         # RoPE is applied to first (index_head_dim - rope_head_dim) dims
         actual_rot_dim = self.index_head_dim - self.rope_head_dim
-        return fused_q_rope_quant(
+        return fused_rope_quant_q(
             q,
             positions,
             self.cos_sin_cache,
@@ -641,6 +805,27 @@ class IndexerOp(nn.Module):
             q_scale = _unpack_ue8m0_scale(q_scale)
         q_scale = q_scale.view(-1, self.index_n_heads, 1)
         return q_fp8, q_scale
+
+    def quant_k_cp_only(
+        self,
+        key: torch.Tensor,
+        kv_cache: KVCache,
+        slot_mapping: torch.Tensor,
+        kv_restore_unpad_indices: torch.Tensor,
+    ) -> None:
+        """CP variant that writes only K cache when Q was already quantized."""
+        assert kv_cache is not None, "kv_cache is required"
+        gathered_key = all_gather(key.contiguous(), group=Group.TP)
+        gathered_key = gathered_key.reshape(-1, key.size(-1))
+        restored_key = gathered_key[kv_restore_unpad_indices]
+
+        rtp_llm_ops.indexer_k_quant_and_cache(
+            restored_key,
+            self._kv_cache_blocks(kv_cache),
+            slot_mapping,
+            self.block_size,
+            self.scale_fmt,
+        )
 
     def _get_topk_paged(
         self,
