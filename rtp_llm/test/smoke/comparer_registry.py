@@ -43,10 +43,25 @@ def resolve_comparer(q_r: Dict[str, Any], request_endpoint: str) -> Type:
     """Resolve the comparer class for a (q_r, endpoint) pair.
 
     Raises RuntimeError if no predicate matches and no fallback is registered.
+    For cases flagged with ``mainse_module=True``, the fallback is never used —
+    a missing mainse comparer is a configuration error that must fail loudly
+    rather than silently falling back to the OSS comparer.
     """
     for predicate, comparer_cls in _REGISTRY:
         if predicate(q_r, request_endpoint):
             return comparer_cls
+
+    # Cases that require the internal mainse comparer must not silently fall
+    # back to the OSS default — that would mask a missing mainse installation.
+    is_mainse = q_r.get("mainse_module", False) or q_r.get("mainse", False)
+    if is_mainse:
+        raise RuntimeError(
+            f"mainse comparer not registered for q_r keys={sorted(q_r.keys())} "
+            f"endpoint={request_endpoint!r}; the internal mainse smoke package "
+            "must be imported before this test ran. Refusing to fall back to "
+            "OSS comparer for a mainse-flagged case."
+        )
+
     if _FALLBACK is None:
         raise RuntimeError(
             f"comparer not registered: q_r keys={sorted(q_r.keys())} "
@@ -65,3 +80,35 @@ def _reset_for_tests() -> None:
     global _FALLBACK
     _REGISTRY.clear()
     _FALLBACK = None
+
+
+def _try_register_mainse_comparers() -> None:
+    """Auto-register internal mainse comparers when the internal package exists.
+
+    Registered before any OSS fallback so mainse-flagged cases pick the
+    internal comparer first.
+    """
+    try:
+        from rtp_llm.test.smoke.mainse.mainse_decode_arpc_comparer import MainseDecodeArpcComparer
+        from rtp_llm.test.smoke.mainse.mainse_embedding_arpc_comparer import MainseEmbeddingArpcComparer
+
+        # Narrow predicates by the per-mode sub-flag: the previous
+        # "mainse_module or mainse" predicate on the decode comparer matched every
+        # mainse case (first-match-wins), so embedding cases were misrouted to the
+        # decode comparer and MainseEmbeddingArpcComparer was never reached.
+        register_comparer(
+            lambda q_r, ep: q_r.get("mainse_module", False)
+            and q_r.get("use_decode_arpc", False),
+            MainseDecodeArpcComparer,
+        )
+        register_comparer(
+            lambda q_r, ep: q_r.get("mainse_module", False)
+            and q_r.get("use_emb_arpc", False),
+            MainseEmbeddingArpcComparer,
+        )
+    except (ImportError, ModuleNotFoundError):
+        # OSS-only checkouts legitimately lack internal mainse comparers.
+        pass
+
+
+_try_register_mainse_comparers()

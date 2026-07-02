@@ -222,6 +222,9 @@ cc_library(
             "@local_config_rocm//rocm:rocm_headers",
             "@local_config_rocm//rocm:rocm",
         ],
+        "@//:using_cuda": [
+            "//rtp_llm/models_py/bindings/cuda/kernels/sampling:sampling",
+        ],
         "//conditions:default": [],
     }),
     copts = copts(),
@@ -265,8 +268,45 @@ cc_library(
             "//rtp_llm/models_py/bindings/rocm/kernels/sampling:sampling",
             "//rtp_llm/models_py/bindings/rocm:speculative_sampling",
             "//rtp_llm/models_py/bindings/rocm:rocm_host_utils",
+            "//rtp_llm/models_py/bindings/common/kernels:kernels_copy",
+            "//3rdparty/trt_beam_search:trt_beam_search_impl",
             "@local_config_rocm//rocm:rocm_headers",
             "@local_config_rocm//rocm:rocm",
+        ],
+        "@//:using_cuda": [
+            "//rtp_llm/models_py/bindings/cuda/kernels/sampling:sampling",
+            "//rtp_llm/models_py/bindings/cuda/kernels:kernels_speculative_sampling",
+        ],
+        "//conditions:default": [],
+    }),
+    copts = copts(),
+    visibility = ["//visibility:public"],
+    alwayslink = 1,
+)
+
+cc_library(
+    name = "rejection_sampling_ops_test_lib",
+    srcs = [
+        "CudaSampleOp.cc",
+    ],
+    deps = [
+        ":common_defines",
+        ":op_data",
+        "//rtp_llm/cpp/utils:debug_utils",
+        "//rtp_llm/models_py/bindings/common/kernels:kernels_sampling",
+    ] + torch_deps() + select({
+        "@//:using_rocm": [
+            "//rtp_llm/models_py/bindings/rocm/kernels/sampling:sampling",
+            "//rtp_llm/models_py/bindings/rocm:speculative_sampling",
+            "//rtp_llm/models_py/bindings/rocm:rocm_host_utils",
+            "@local_config_rocm//rocm:rocm_headers",
+            "@local_config_rocm//rocm:rocm",
+        ],
+        "@//:using_cuda": [
+            "//rtp_llm/models_py/bindings/cuda:cuda_host_utils",
+            "//rtp_llm/models_py/bindings/cuda/kernels/sampling:sampling",
+            "//rtp_llm/models_py/bindings/cuda/kernels:kernels_speculative_sampling",
+            "//3rdparty/flashinfer:flashinfer",
         ],
         "//conditions:default": [],
     }),
@@ -300,4 +340,3 @@ cc_library(
     visibility = ["//visibility:public"],
     copts = copts(),
 )
-

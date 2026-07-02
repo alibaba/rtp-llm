@@ -157,6 +157,8 @@ struct PyContextParallelParams {
     torch::Tensor prefill_actual_input_lengths_cpu;
 };
 
+// Naming convention: the host (pinned CPU) tensor uses the bare name; its device (CUDA)
+// counterpart carries a _device suffix.
 struct PyAttentionInputs {
     bool          is_prefill{false};
     bool          is_target_verify{false};
@@ -165,30 +167,28 @@ struct PyAttentionInputs {
     torch::Tensor input_lengths;
     // Kernel-granularity block IDs for attention compute.
     // Shape: [group, batch, max_kernel_blocks] or [batch, max_kernel_blocks].
-    torch::Tensor kv_cache_kernel_block_id_host;
+    torch::Tensor kv_cache_kernel_block_id;
     torch::Tensor kv_cache_kernel_block_id_device;
     // Physical block IDs dedicated for cache store.
     // Shape: [group, batch, max_blocks] or [batch, max_blocks].
-    torch::Tensor kv_cache_block_id_host;
+    torch::Tensor kv_cache_block_id;
     torch::Tensor kv_cache_block_id_device;
-    // Hybrid cache support:
-    // - kv_cache_kernel_block_id_*_by_group: vector of 2-D kernel block tables, each [batch, max_kernel_blocks].
-    std::vector<torch::Tensor> kv_cache_kernel_block_id_host_by_group;
+    // Hybrid cache support: vector of 2-D kernel block tables, each [batch, max_kernel_blocks].
+    std::vector<torch::Tensor> kv_cache_kernel_block_id_by_group;  // host
     std::vector<torch::Tensor> kv_cache_kernel_block_id_device_by_group;
     torch::Tensor              kv_cache_layer_to_group;
     caffe2::TypeMeta           dtype;
     // Cumulative sequence lengths for attention kernels (e.g. FusedRopeKVCacheDecodeOp).
-    // cu_seqlens lives on CUDA device; cu_seqlens_host is its pinned-memory CPU mirror
+    // cu_seqlens_device lives on CUDA device; cu_seqlens is its pinned-memory CPU mirror
     // used for CUDA graph replay (write host → async copy to device, avoiding GPU-side fills).
     torch::Tensor cu_seqlens;
-    torch::Tensor cu_seqlens_host;
-    torch::Tensor cu_kv_seqlens;
-    torch::Tensor decode_cu_seqlens_host;
-
+    torch::Tensor cu_seqlens_device;
+    torch::Tensor cu_kv_seqlens_device;  // device only (no host mirror needed)
+    torch::Tensor decode_cu_seqlens;
     int           context_total_kv_length = 0;
     int           total_tokens            = 0;
     torch::Tensor padding_offset;
-    torch::Tensor position_ids;
+    torch::Tensor combo_position_ids;
 
     // for write cache store
     std::optional<PyCacheStoreInputs> cache_store_inputs;
@@ -196,10 +196,10 @@ struct PyAttentionInputs {
     std::optional<PyPrefillCudaGaphCopyParams> prefill_cuda_graph_copy_params;
     bool                                       is_s_padded = false;
     // Device-side mirrors of host tensors, managed by C++ for fused D2D copy in CUDA graph.
-    torch::Tensor prefix_lengths_d;
-    torch::Tensor sequence_lengths_plus_1_d;
-    torch::Tensor input_lengths_d;
-    torch::Tensor decode_cu_seqlens_d;
+    torch::Tensor prefix_lengths_device;
+    torch::Tensor sequence_lengths_plus_1_device;
+    torch::Tensor input_lengths_device;
+    torch::Tensor decode_cu_seqlens_device;
 
     // CUDA Graph mode flags
     bool is_cuda_graph = false;  // True when running in CUDA graph mode (capture or replay)
@@ -218,9 +218,23 @@ struct BertEmbeddingInputs {
     float         input_embedding_scalar{1.0};
 };
 
+struct PyEmbeddingInputs {
+    torch::Tensor combo_tokens_type_ids;
+    torch::Tensor text_tokens_mask;
+};
+
+struct PyMultimodalInputs {
+    std::vector<torch::Tensor> multimodal_features;
+    torch::Tensor              mm_features_locs;
+    std::vector<torch::Tensor> mm_extra_input;
+};
+
 struct PyModelInputs {
     torch::Tensor       input_ids;
     torch::Tensor       input_hiddens;
+    torch::Tensor       combo_position_ids;
+    PyEmbeddingInputs   embedding_inputs;
+    PyMultimodalInputs  multimodal_inputs;
     PyAttentionInputs   attention_inputs;
     BertEmbeddingInputs bert_embedding_inputs;
 };

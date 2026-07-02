@@ -2,40 +2,15 @@ import json
 import os
 from typing import Any, Dict, Optional
 
+
 from rtp_llm.config.model_config import ModelConfig
+from rtp_llm.frontend.tokenizer_factory.tokenizer_factory import TokenizerFactory
 from rtp_llm.model_factory_register import register_model
 from rtp_llm.models.base_model import BaseModel
-from rtp_llm.models.deepseek_vl2.deepseek_vl2_vit import DeepSeekVLV2ImageEmbedding
-from rtp_llm.models.deepseek_vl2.deepseek_vl2_weight import (
-    DeepSeekVLV2VitWeight,
-    DeepSeekVLV2Weight,
-)
-from rtp_llm.models.multimodal.multimodal_mixin import MultiModalMixin
+from rtp_llm.models.deepseek_vl2.deepseek_vl2_weight import DeepSeekVLV2Weight
 
 
-class DeepSeekVLV2(BaseModel, MultiModalMixin):
-
-    def _init_multimodal(self, mm_model_config, vit_config):
-        # mm_related_params is in model_config, not mm_model_config
-        mm_related_params = self.model_config.mm_related_params
-        self.ignore_id = -100
-        self.mm_part = DeepSeekVLV2ImageEmbedding(
-            mm_related_params,
-            model_config=self.model_config,
-            ignore_id=self.ignore_id,
-        )
-        mm_related_params.vit_weights = DeepSeekVLV2VitWeight(
-            {"vision": self.mm_part.vision, "projector": self.mm_part.projector}, True
-        )
-        # must use add_special_tokens=False
-        self.image_id = self.tokenizer.tokenizer.encode(
-            "<image>", add_special_tokens=False
-        )[0]
-        mm_related_params.special_token_ids.update(
-            {"ignore_token_index": self.ignore_id, "image_token_index": self.image_id}
-        )
-        self.model_config.mm_model_config.mm_sep_tokens = [[self.image_id]]
-
+class DeepSeekVLV2(BaseModel):
     @classmethod
     def _create_config(cls, ckpt_path: str) -> ModelConfig:
         config = ModelConfig()
@@ -45,7 +20,14 @@ class DeepSeekVLV2(BaseModel, MultiModalMixin):
         config.activation_type = "gated-silu"
         config_path = os.path.join(ckpt_path, "config.json")
         if not os.path.exists(config_path):
-            return
+            # Surface the missing path explicitly instead of returning None,
+            # which would defer the failure to an opaque assert downstream.
+            raise FileNotFoundError(
+                "DeepSeekVLV2._create_config: config.json not found at "
+                + config_path + " (ckpt_path=" + repr(ckpt_path) + "). "
+                "Verify CHECKPOINT_PATH env / model_path arg is correct "
+                "and the model dir is mounted on this host."
+            )
         with open(config_path) as reader:
             content = reader.read()
             top_config_json = json.loads(content)
@@ -55,7 +37,7 @@ class DeepSeekVLV2(BaseModel, MultiModalMixin):
 
     def _create_python_model(self):
 
-        from rtp_llm.models_py.model_desc.generic_moe import GenericMoeModel    
+        from rtp_llm.models_py.model_desc.multimodal_generic import MultimodalGenericModel
         model_config = self.model_config
         parallelism_config = self.parallelism_config
         fmha_config = self.fmha_config
@@ -63,9 +45,9 @@ class DeepSeekVLV2(BaseModel, MultiModalMixin):
         moe_config = self.moe_config
         max_generate_batch_size = self.max_generate_batch_size
 
-        # Use GenericMoeModel with new config architecture
-        # attention_type is determined from model_config.attn_config.use_mla
-        self.py_model = GenericMoeModel(
+        # Use MultimodalGenericModel to inject visual features into text embeddings.
+        # GenericMoeModel (text-only) would silently drop image features.
+        self.py_model = MultimodalGenericModel(
             model_config,
             parallelism_config,
             self.weight,
@@ -164,6 +146,21 @@ class DeepSeekVLV2(BaseModel, MultiModalMixin):
         config.mm_related_params.config["global_view_pos"] = top_config_json.get(
             "global_view_pos", "head"
         )
+
+        config.mm_model_config.is_multimodal = True
+
+    def load_tokenizer(self) -> None:
+        super().load_tokenizer()
+        # Reuse the tokenizer that BaseModel.load_tokenizer() already initialized
+        # and augmented with special tokens. Avoid creating a second AutoTokenizer
+        # from the same path, which may not have the <image> special token added.
+        image_id = getattr(self.tokenizer, "image_token_id", None)
+        if image_id is None:
+            image_id = self.tokenizer.encode("<image>", add_special_tokens=False)[0]
+        self.model_config.mm_related_params.special_token_ids.update(
+            {"ignore_token_index": -100, "image_token_index": image_id}
+        )
+        self.model_config.mm_model_config.mm_sep_tokens = [[image_id]]
 
     @staticmethod
     def get_weight_cls():

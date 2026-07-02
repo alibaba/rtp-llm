@@ -39,6 +39,7 @@ _KNOWN_MARKERS = {
     "vit",
     "embedding",
     "PD",
+    "eval",
     # Platform families
     "cuda",
     "rocm",

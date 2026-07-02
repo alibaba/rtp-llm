@@ -697,7 +697,7 @@ class DeepSeekV2(BaseModel):
             config.has_moe_norm = config_json.get("norm_topk_prob", False)
             config.moe_style = 2  # shared + expert
 
-            moe_step = config_json["moe_layer_freq"]
+            moe_step = config_json.get("moe_layer_freq", 1)
             first_k_dense_replace = config_json["first_k_dense_replace"]
             config.moe_layer_index = [
                 i

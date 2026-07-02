@@ -50,6 +50,19 @@ cc_test(
 )
 
 cc_test(
+    name = "rejection_sampling_op_test",
+    srcs = [
+        "CudaRejectionSamplingOpTest.cc",
+    ],
+    data = [],
+    copts = copts(),
+    deps = [
+        "//rtp_llm/cpp/testing:rejection_sampling_test_utils",
+    ] + torch_deps(),
+    exec_properties = {'gpu':'H20'},
+)
+
+cc_test(
     name = "beam_search_op_test",
     srcs = [
         "CudaBeamSearchOpTest.cc",
@@ -58,19 +71,6 @@ cc_test(
     copts = copts(),
     deps = test_deps,
     exec_properties = {'gpu':'H20'},
-)
-
-cc_test(
-    name = "torch_beam_search_test",
-    srcs = [
-        "TorchBeamSearchOpTest.cc",
-    ],
-    data = [],
-    copts = copts(),
-    deps = [
-        "//rtp_llm/models_py/bindings/cuda/ops:torch_beam_search_op_impl",
-        "@com_google_googletest//:gtest",
-    ] + torch_deps(),
 )
 
 # Aliases: CudaGraph tests at //rtp_llm/cpp/cuda_graph/tests/

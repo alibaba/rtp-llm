@@ -33,12 +33,26 @@ def get_mla_impl(
         # Check support before creating instance
         if not impl.support(attn_configs, attn_inputs):
             continue
-
-        cos_sin_cache = weight.get_global_weight(W.rope_cos_sin_cache)
+        cos_sin_cache = weight.get_global_weight_or_none(W.rope_cos_sin_cache)
+        # Short-circuit before touching cu_kv_seqlens when CP is enabled to avoid
+        # an unnecessary GPU->CPU sync on the hot prefill routing path.
+        cp_enabled = (
+            parallelism_config is not None
+            and parallelism_config.prefill_cp_config.is_enabled()
+        )
         use_fast_path = (
             attn_inputs.is_prefill
-            and attn_inputs.cu_kv_seqlens.max().item() <= attn_configs.indexer_topk
+            and not cp_enabled
+            and attn_inputs.cu_kv_seqlens_device.max().item() <= attn_configs.indexer_topk
         )
+
+        # Check parallelism config support (e.g. CP filtering). The fast path is
+        # never taken when CP is enabled, so it bypasses this check (matches
+        # upstream's "support fast path for cp prefill").
+        if not use_fast_path and not impl.support_parallelism_config(
+            parallelism_config
+        ):
+            continue
         # Skip sparse MLA if fast path is enabled
         if use_fast_path and impl.is_sparse():
             logging.debug(
@@ -59,6 +73,7 @@ def get_mla_impl(
             quant_config=quant_config,
             max_seq_len=max_seq_len,
             is_cuda_graph=is_cuda_graph,
+            parallelism_config=parallelism_config,
         )
         if not is_cuda_graph or instance.support_cuda_graph():
             return instance
@@ -84,23 +99,38 @@ def _get_effective_backends(fmha_config: FMHAConfig, is_prefill: bool) -> List[s
     return [s.strip() for s in raw.split(",") if s.strip()]
 
 
+def _expand_flashinfer_alias(names: set) -> set:
+    """Expand the flashinfer alias in both directions so that the public alias
+    "flashinfer" and the canonical NAME "py_flashinfer" are treated
+    interchangeably in blocklists / known-name sets. Returns a new set."""
+    expanded = set(names)
+    if "flashinfer" in expanded:
+        expanded.add("py_flashinfer")
+    if "py_flashinfer" in expanded:
+        expanded.add("flashinfer")
+    return expanded
+
+
 def _get_blocked_backends(fmha_config: FMHAConfig) -> set:
     if not fmha_config.disable_attn_backends:
         return set()
-    return {
-        s.strip() for s in fmha_config.disable_attn_backends.split(",") if s.strip()
-    }
+    blocked = {s.strip() for s in fmha_config.disable_attn_backends.split(",") if s.strip()}
+    # Expand alias so the blocklist works in both auto and explicit backend modes.
+    return _expand_flashinfer_alias(blocked)
 
 
 def _is_fmha_impl_disabled_legacy(impl_class: type, fmha_config: FMHAConfig) -> bool:
     """Legacy boolean flag check. Only called when effective_backend == "auto"."""
+    # Global FMHA switch: when false, disable all MHA implementations.
+    if not fmha_config.enable_fmha:
+        return True
     impl_class_name = impl_class.__name__
     if "XQA" in impl_class_name:
         return not fmha_config.enable_xqa
     elif impl_class_name == "TRTMHAImpl":
-        return not fmha_config.enable_trt_fmha
+        return not fmha_config.enable_trt_fmha or not fmha_config.enable_open_source_fmha
     elif impl_class_name == "TRTPagedMHAImpl":
-        return not fmha_config.enable_paged_trt_fmha
+        return not fmha_config.enable_paged_trt_fmha or not fmha_config.enable_open_source_fmha
     elif "FlashInfer" in impl_class_name or "Flashinfer" in impl_class_name:
         return fmha_config.disable_flash_infer
     elif (
@@ -164,6 +194,37 @@ def get_fmha_impl(
     if backends == ["none"]:
         raise Exception("Attention is disabled (attn_backend=none)")
 
+    # Build registry metadata and validate explicit backend names.
+    registered_names = set()
+    name_to_impls: Dict[str, List[type[FMHAImplBase]]] = {}
+    for impl in mha_impls:
+        name = getattr(impl, "NAME", None)
+        if name:
+            registered_names.add(name)
+            name_to_impls.setdefault(name, []).append(impl)
+
+    # Public alias: "flashinfer" refers to the Python FlashInfer backend.
+    if "py_flashinfer" in registered_names:
+        name_to_impls.setdefault("flashinfer", []).extend(
+            name_to_impls.get("py_flashinfer", [])
+        )
+    # Also expand the alias in the blocked set so auto mode honors it.
+    blocked = _expand_flashinfer_alias(blocked)
+    # Rebuild known_names after alias expansion.
+    known_names = registered_names | {"auto", "none", "flashinfer"}
+    for backend_name in backends:
+        if backend_name not in known_names:
+            raise ValueError(
+                f"Unknown attention backend {backend_name!r}. "
+                f"Registered backends: {sorted(registered_names)}"
+            )
+    for blocked_name in blocked:
+        if blocked_name not in known_names:
+            raise ValueError(
+                f"Unknown attention backend in disable_attn_backends: {blocked_name!r}. "
+                f"Registered backends: {sorted(registered_names)}"
+            )
+
     if backends == ["auto"]:
         # Auto mode: iterate impls in registration order, check legacy flags + blocklist
         for impl in mha_impls:
@@ -180,16 +241,11 @@ def get_fmha_impl(
     else:
         # Explicit backend list: iterate in user-specified order.
         # For each backend name, find all matching impls and try them.
-        name_to_impls = {}
-        for impl in mha_impls:
-            name = getattr(impl, "NAME", None)
-            if name:
-                name_to_impls.setdefault(name, []).append(impl)
-
         for backend_name in backends:
             if backend_name in blocked:
                 continue
-            for impl in name_to_impls.get(backend_name, []):
+            resolved_name = "py_flashinfer" if backend_name == "flashinfer" else backend_name
+            for impl in name_to_impls.get(resolved_name, []):
                 instance = _try_instantiate(
                     impl, attn_configs, attn_inputs, parallelism_config, is_cuda_graph
                 )
@@ -228,6 +284,7 @@ class AttnImplFactory(object):
         attn_configs = model_config.getAttentionConfigs(
             parallelism_config.get_attn_tp_size()
         )
+        attn_inputs.headwise_config = getattr(model_config, "headwise_config", None)
         key_str = "mla" if attn_configs.use_mla else "mha"
         fmha_impl_method = cls.FMHA_IMPL_REGISTRY[key_str]
         instance = fmha_impl_method(

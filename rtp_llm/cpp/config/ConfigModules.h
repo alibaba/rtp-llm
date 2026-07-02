@@ -111,7 +111,7 @@ struct FMHAConfig {
     bool        enable_xqa              = true;
     bool        use_aiter_pa            = true;
     bool        use_asm_pa              = true;
-    bool        use_triton_pa           = true;
+    bool        use_triton_pa           = false;
     int64_t     absorb_opt_len          = 1024;
     std::string to_string() const;
 };
@@ -175,6 +175,9 @@ struct ProfilingDebugLoggingConfig {
     bool        ft_core_dump_on_exception = false;
     std::string ft_alog_conf_path         = "";
     bool        gen_timeline_sync         = false;
+    int         timeline_start_step       = 0;
+    int         timeline_num_steps        = 3;
+    std::string timeline_trace_name       = "profiler";
     std::string torch_cuda_profiler_dir   = "";
     int         log_file_backup_count     = 16;
     bool        debug_load_server         = false;
@@ -222,6 +225,7 @@ struct MoeConfig {
     bool        use_deepep_internode       = false;
     bool        use_deepep_low_latency     = true;
     bool        use_deepep_p2p_low_latency = false;
+    bool        use_mori_ep                = false;
     bool        fake_balance_expert        = false;
     bool        hack_moe_expert            = false;
     int         deep_ep_num_sm             = 0;

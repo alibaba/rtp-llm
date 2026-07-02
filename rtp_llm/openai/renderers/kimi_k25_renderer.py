@@ -28,7 +28,9 @@ from rtp_llm.openai.renderer_factory_register import register_renderer
 from rtp_llm.openai.renderers.basic_renderer import PromptWithMMInput
 from rtp_llm.openai.renderers.custom_renderer import RenderedInputs
 from rtp_llm.openai.renderers.kimik2_renderer import KimiK2Renderer
-from rtp_llm.utils.multimodal_util import MMUrlType
+from rtp_llm.openai.renderers.llava_renderer import get_preprocess_config
+from rtp_llm.ops import MMPreprocessConfig  # type: ignore
+from rtp_llm.utils.base_model_datatypes import MMUrlType
 
 
 class KimiK25Renderer(KimiK2Renderer):
@@ -48,6 +50,7 @@ class KimiK25Renderer(KimiK2Renderer):
 
         urls: List[str] = []
         types: List[MMUrlType] = []
+        preprocess_configs: List[MMPreprocessConfig] = []
         rewritten: List[ChatMessage] = []
         for msg in messages:
             if isinstance(msg.content, str) or msg.content is None:
@@ -62,6 +65,14 @@ class KimiK25Renderer(KimiK2Renderer):
                     assert part.image_url is not None
                     urls.append(part.image_url.url)
                     types.append(MMUrlType.IMAGE)
+                    if part.preprocess_config is not None:
+                        preprocess_configs.append(
+                            get_preprocess_config(part.preprocess_config)
+                        )
+                    else:
+                        preprocess_configs.append(
+                            MMPreprocessConfig(-1, -1, -1, -1, -1, -1, -1, [], 30000)
+                        )
                     new_parts.append({"type": "image", "image": part.image_url.url})
                 elif part.type == ContentPartTypeEnum.video_url:
                     raise ValueError(
@@ -75,7 +86,7 @@ class KimiK25Renderer(KimiK2Renderer):
             rewritten.append(new_msg)
 
         return rewritten, PromptWithMMInput(
-            prompt="", urls=urls, mm_types=types
+            prompt="", urls=urls, mm_types=types, preprocess_configs=preprocess_configs
         )
 
     @override
@@ -97,6 +108,7 @@ class KimiK25Renderer(KimiK2Renderer):
             input_ids=input_ids,
             input_urls=mm_input.urls,
             input_urls_type=mm_input.mm_types,
+            preprocess_configs=mm_input.preprocess_configs,
             rendered_prompt=prompt,
         )
 

@@ -24,9 +24,9 @@ void CudaGraphRunner::capturePrefill() {
             inputs.attention_inputs.prefix_lengths.fill_(0);
             // Must set cu_seqlens/cu_kv_seqlens/input_lengths to match actual seq_len,
             // otherwise FlashInfer plans for max_seq_len tokens but q/k/v only have seq_len tokens
-            inputs.attention_inputs.cu_seqlens_host[0] = 0;
-            inputs.attention_inputs.cu_seqlens_host[1] = seq_len;
-            inputs.attention_inputs.cu_seqlens.copy_(inputs.attention_inputs.cu_seqlens_host, false);
+            inputs.attention_inputs.cu_seqlens[0] = 0;
+            inputs.attention_inputs.cu_seqlens[1] = seq_len;
+            inputs.attention_inputs.cu_seqlens_device.copy_(inputs.attention_inputs.cu_seqlens, false);
             inputs.attention_inputs.input_lengths[0] = seq_len;
         } else {
             // Draft model prefill: distribute seq_len tokens across batches (max num_tokens_per_bs_ each).
@@ -40,24 +40,25 @@ void CudaGraphRunner::capturePrefill() {
             inputs.attention_inputs.prefix_lengths.fill_(prefix_len);
             auto& input_lengths = inputs.attention_inputs.input_lengths;
             for (int b = 0; b < active_bs; b++) {
-                int tokens           = (b < active_bs - 1) ? num_tokens_per_bs_ : (seq_len - b * num_tokens_per_bs_);
+                int tokens       = (b < active_bs - 1) ? num_tokens_per_bs_ : (seq_len - b * num_tokens_per_bs_);
                 input_lengths[b] = tokens;
             }
 
             // Build cu_seqlens and cu_kv_seqlens as cumulative sums
-            auto cu_seqlens_host = inputs.attention_inputs.cu_seqlens_host;
-            auto cu_kv_seqlens_host = inputs.attention_inputs.cu_kv_seqlens.cpu();
-            auto prefix_lengths = inputs.attention_inputs.prefix_lengths;
+            auto cu_seqlens_host    = inputs.attention_inputs.cu_seqlens;
+            auto cu_kv_seqlens_host = inputs.attention_inputs.cu_kv_seqlens_device.cpu();
+            auto prefix_lengths     = inputs.attention_inputs.prefix_lengths;
 
-            cu_seqlens_host[0]        = 0;
-            cu_kv_seqlens_host[0]     = 0;
+            cu_seqlens_host[0]    = 0;
+            cu_kv_seqlens_host[0] = 0;
             for (int b = 0; b < max_bs_; b++) {
-                cu_seqlens_host[b + 1]    = cu_seqlens_host[b].item<int>() + input_lengths[b].item<int>();
-                cu_kv_seqlens_host[b + 1] = cu_kv_seqlens_host[b].item<int>() + input_lengths[b].item<int>() + prefix_lengths[b].item<int>();
+                cu_seqlens_host[b + 1] = cu_seqlens_host[b].item<int>() + input_lengths[b].item<int>();
+                cu_kv_seqlens_host[b + 1] =
+                    cu_kv_seqlens_host[b].item<int>() + input_lengths[b].item<int>() + prefix_lengths[b].item<int>();
             }
 
-            inputs.attention_inputs.cu_seqlens.copy_(cu_seqlens_host);
-            inputs.attention_inputs.cu_kv_seqlens.copy_(cu_kv_seqlens_host);
+            inputs.attention_inputs.cu_seqlens_device.copy_(cu_seqlens_host);
+            inputs.attention_inputs.cu_kv_seqlens_device.copy_(cu_kv_seqlens_host);
         }
 
         inputs.attention_inputs.context_total_kv_length = seq_len;

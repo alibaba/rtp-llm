@@ -27,6 +27,8 @@ from pathlib import Path
 from setuptools import Extension
 from setuptools import setup as setuptools_setup
 from setuptools.command.build_ext import build_ext
+from setuptools.command.build_py import build_py
+from setuptools.command.sdist import sdist
 
 # Force line-buffered stdout so prints appear in real-time in CI (no TTY)
 if hasattr(sys.stdout, "reconfigure"):
@@ -850,7 +852,10 @@ def build_bazel_extensions(build_config: str) -> None:
     last_error = None
     for attempt in range(_REAPI_MAX_RETRIES + 1):
         try:
-            with open(log_file, "w") as f:
+            # Preserve previous attempt logs on retry so failures are not silently
+            # overwritten; first attempt starts fresh with "w".
+            log_mode = "w" if attempt == 0 else "a"
+            with open(log_file, log_mode) as f:
                 # Write command info to log
                 f.write(f"Command: {' '.join(cmd)}\n")
                 f.write(f"Working directory: {project_root}\n")
@@ -1607,31 +1612,54 @@ class BazelTest(Command):
             raise SystemExit(result.returncode)
 
 
-# install_requires carries base + auto-detected platform (merged URLs).
-# GPU extras (cuda12_9, rocm, …) live in _build/oss_optional_extras.toml for
-# reference / tooling only — do NOT also pass them as setuptools extras_require
-# or uv sees two torch pins (install_requires + extras).
-#
-# `dev` / `docs` are now declared statically in pyproject.toml
-# [project.optional-dependencies] (uv reads PEP 621 directly and drops
-# setup.py-only extras), so we MUST NOT also inject them here — setuptools
-# rejects duplicate static + dynamic declarations. Only `all` (which references
-# extras across files) stays here.
-_merged_extras = get_merged_optional_dependencies()
-_non_gpu_extras = {k: v for k, v in _merged_extras.items() if k in ("all",)}
-
-all_deps = dynamic_install_requires()
-version = dynamic_version()
-print(f"Building rtp-llm version: {version}")
-
 cmdclass = {"build_ext": BuildBazelExtension, "test": BazelTest}
 if BdistWheelWithPlatform is not None:
     cmdclass["bdist_wheel"] = BdistWheelWithPlatform
 
+
+class BuildPyWithProto(build_py):
+    """Ensure proto-generated *_pb2.py files exist before build_py copies them."""
+
+    def run(self):
+        ensure_proto_files_generated(get_project_root())
+        super().run()
+
+
+class SdistWithProto(sdist):
+    """Ensure proto-generated *_pb2.py files are included in sdist."""
+
+    def run(self):
+        ensure_proto_files_generated(get_project_root())
+        super().run()
+
+
+cmdclass["build_py"] = BuildPyWithProto
+cmdclass["sdist"] = SdistWithProto
+
 # Only invoke setuptools when running as a script (`python setup.py …`). PEP 517 / setuptools
 # imports this file to resolve ``dynamic_version`` / metadata; a top-level ``setup()`` call would
 # re-enter setuptools while the module is still loading and break ``read_attr("setup.dynamic_version")``.
+# Likewise, keep the install_requires / extras computation inside this block so that
+# metadata-only imports (e.g. ``uv pip install -e .`` resolving PEP 621 dynamic fields)
+# do not trigger platform detection, Bazel, or network side effects.
 if __name__ == "__main__":
+    # install_requires carries base + auto-detected platform (merged URLs).
+    # GPU extras (cuda12_9, rocm, …) live in _build/oss_optional_extras.toml for
+    # reference / tooling only — do NOT also pass them as setuptools extras_require
+    # or uv sees two torch pins (install_requires + extras).
+    #
+    # `dev` / `docs` are now declared statically in pyproject.toml
+    # [project.optional-dependencies] (uv reads PEP 621 directly and drops
+    # setup.py-only extras), so we MUST NOT also inject them here — setuptools
+    # rejects duplicate static + dynamic declarations. Only `all` (which references
+    # extras across files) stays here.
+    _merged_extras = get_merged_optional_dependencies()
+    _non_gpu_extras = {k: v for k, v in _merged_extras.items() if k in ("all",)}
+
+    all_deps = dynamic_install_requires()
+    version = dynamic_version()
+    print(f"Building rtp-llm version: {version}")
+
     setuptools_setup(
         version=version,
         install_requires=all_deps if all_deps else None,

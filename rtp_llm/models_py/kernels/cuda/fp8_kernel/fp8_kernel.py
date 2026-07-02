@@ -28,6 +28,7 @@ if is_cuda():
     )
 else:
     logging.info("skip import fp8 quant from rtp_llm_ops for non cuda platform")
+    fp8_grouped_gemm_ptpc = None
 
 logger = logging.getLogger(__name__)
 
@@ -220,6 +221,12 @@ def cutlass_moe_mm_fp8_scaled(
 
     assert per_act_token == True
     assert per_out_ch == False
+
+    if fp8_grouped_gemm_ptpc is None:
+        raise RuntimeError(
+            "fp8_grouped_gemm_ptpc is not available; "
+            "rtp_kernel.fp8_group_gemm import failed or running on a non-CUDA platform"
+        )
 
     E, N, _ = w.shape
     M, K = aq.shape

@@ -119,6 +119,9 @@ base-dependencies = [
     "importlib_metadata",
 
     # ML/Transformers
+    # transformers is pinned to 4.51.2 to stay aligned with tokenizers 0.21.4 and
+    # ROCm/ARM wheel availability. Bumping to 4.57.x requires validating tokenizer
+    # and generation behavior across all supported platforms.
     "transformers==4.51.2",
     "tokenizers==0.21.4",
     "huggingface-hub>=0.30.0,<1.0",
@@ -234,6 +237,7 @@ markers = [
     "SM100: (deprecated) use gpu(type='SM100')",
     "SM100_ARM: (deprecated) use gpu(type='SM100_ARM')",
     "MI308X: (deprecated) use gpu(type='MI308X')",
+    "MI308X_ROCM7: (deprecated) use gpu(type='MI308X_ROCM7')",
 
     # Test type markers
     "smoke: smoke tests",

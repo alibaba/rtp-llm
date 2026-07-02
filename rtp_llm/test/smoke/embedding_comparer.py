@@ -76,7 +76,7 @@ class EmbeddingComparer(BaseComparer):
     def _compare_dict_result(self, expect: Dict[str, float], actual: Dict[str, float]):
         for key in expect.keys():
             if key not in actual:
-                raise Exception(f"failed to find {key} in actual response")
+                raise SmokeException(QueryStatus.COMPARE_FAILED, f"failed to find {key} in actual response")
             res = torch.isclose(
                 torch.tensor(expect[key]),
                 torch.tensor(actual[key]),

@@ -87,11 +87,17 @@ class FMHAParams(ParamsBase):
                 )
                 self.max_seqlen_k = self.max_seq_len + max_prefix_length
                 kv_lengths = input_lengths + prefix_lengths
+                # Hoist FMHA-setup tensor out of the per-layer hot path: with prefix,
+                # seqlen_k = input_lengths + prefix_lengths (int32, on GPU).
+                self.prefill_seqlen_k_int32 = kv_lengths_gpu.to(torch.int32)
             else:
                 # No prefix, kv_lengths equals input_lengths
                 kv_lengths = input_lengths
                 self.cu_seqlens_k = self.cu_seqlens_q.clone()
                 self.max_seqlen_k = self.max_seq_len
+                # Hoist FMHA-setup tensor: with no prefix, seqlen_k == input_lengths
+                # (int32 on GPU). Saves a per-layer alloc + add + dtype-cast trio.
+                self.prefill_seqlen_k_int32 = input_lengths_gpu.to(torch.int32)
 
             self.max_seqlen_q = self.max_seq_len
             self.seq_lens = None
@@ -150,7 +156,7 @@ class FMHAParams(ParamsBase):
     ):
         self.sequence_lengths = sequence_lengths
         self.input_lengths = input_lengths
-        self.kv_cache_block_id_host = kv_cache_block_id_host
+        self.kv_cache_block_id = kv_cache_block_id_host
         if kv_cache_block_id_device is not None:
             self.kv_cache_block_id_device = kv_cache_block_id_device
         if self.seq_lens is not None and self.sequence_lengths is not None:
@@ -177,7 +183,23 @@ class AiterPrefillAttnOp:
         self.head_num_kv = attn_configs.kv_head_num
         self.tokens_per_block = attn_configs.kernel_tokens_per_block
         self.is_causal = attn_configs.is_causal
+        self.kv_cache_torch_dtype = self._get_kv_cache_torch_dtype(
+            attn_configs.kv_cache_dtype, attn_configs.dtype
+        )
         self.v1_kv_layout = v1_kv_layout
+        self.use_compact = (
+            self.v1_kv_layout and attn_configs.kv_cache_dtype != KvCacheDataType.FP8
+        )
+        self._block_positions: Optional[torch.Tensor] = None
+        self._compact_arange: Optional[torch.Tensor] = None
+
+    @staticmethod
+    def _get_kv_cache_torch_dtype(kv_cache_dtype, base_dtype):
+        if kv_cache_dtype == KvCacheDataType.INT8:
+            return torch.int8
+        if kv_cache_dtype == KvCacheDataType.FP8:
+            return torch.float8_e4m3fn
+        return base_dtype
 
     def support(self, attn_inputs: PyAttentionInputs) -> bool:
         return True
@@ -187,7 +209,68 @@ class AiterPrefillAttnOp:
             attn_inputs=attn_inputs,
             is_prefill=True,
         )
+        self._prepare_block_table_indices(self.fmha_params)
+
         return self.fmha_params
+
+    def _prepare_block_table_indices(self, fmha_params):
+        """Eagerly compute sanitized block table, block indices, compact
+        block table, and KV pad tensors so _forward_paged can skip them
+        on every layer."""
+        block_table = fmha_params.kv_cache_block_id_device
+        if block_table is None:
+            fmha_params.sanitized_block_table = None
+            fmha_params.block_indices = None
+            fmha_params.compact_block_table = None
+            fmha_params.k_compact_buf = None
+            fmha_params.v_compact_buf = None
+            return
+
+        seqlen_k = fmha_params.prefill_seqlen_k_int32
+        max_seqlen_k = fmha_params.max_seqlen_k
+
+        sanitized = self._sanitize_block_table(block_table, seqlen_k, max_seqlen_k)
+        fmha_params.sanitized_block_table = sanitized
+
+        block_indices = sanitized.reshape(-1).to(torch.int64)
+        fmha_params.block_indices = block_indices
+
+        num_gathered = block_indices.numel()
+        cached_arange = self._compact_arange
+        if (
+            cached_arange is None
+            or cached_arange.numel() < num_gathered
+            or cached_arange.device != sanitized.device
+        ):
+            cached_arange = torch.arange(
+                max(num_gathered, 1024), dtype=torch.int32, device=sanitized.device
+            )
+            self._compact_arange = cached_arange
+        fmha_params.compact_block_table = cached_arange[:num_gathered].view_as(
+            sanitized
+        )
+
+        if self.use_compact:
+            # Pre-allocate compact K/V buffers with trailing zero-block for CK
+            # speculative read safety. Reused every layer — forward() writes into
+            # buf[:num_gathered] and the last row stays zero, eliminating per-layer
+            # cat allocations and the V contiguous() intermediate.
+            hk = self.head_num_kv
+            ps = self.tokens_per_block
+            hd = self.head_dim
+            dtype = self.kv_cache_torch_dtype
+            device = sanitized.device
+            vs = 16 // torch.empty(0, dtype=dtype).element_size()
+            n = num_gathered + 1
+            fmha_params.k_compact_buf = torch.zeros(
+                (n, hk, hd // vs, ps, vs), dtype=dtype, device=device
+            )
+            fmha_params.v_compact_buf = torch.zeros(
+                (n, hk, ps // vs, hd, vs), dtype=dtype, device=device
+            )
+        else:
+            fmha_params.k_compact_buf = None
+            fmha_params.v_compact_buf = None
 
     def _reshape_kv_cache_vectorized(self, kv_cache_base):
         """Reshape kv_cache_base into 5D VECTORIZED_LAYOUT for mha_batch_prefill.
@@ -252,6 +335,84 @@ class AiterPrefillAttnOp:
 
         return k_cache, v_cache
 
+    def _sanitize_block_table(self, block_table, seqlen_k=None, max_seqlen_k=None):
+        """Sanitize + pad block_table via shared helper."""
+        if max_seqlen_k is None:
+            max_seqlen_k = 0
+        result, self._block_positions = _sanitize_and_pad_block_table(
+            block_table,
+            seqlen_k,
+            self.tokens_per_block,
+            max_seqlen_k,
+            self._block_positions,
+        )
+        return result
+
+    def _gather_and_reshape_kv_compact(
+        self,
+        kv_cache_base,
+        block_indices,
+        k_compact_buf,
+        v_compact_buf,
+    ):
+        """Gather referenced blocks once, then reshape to VECTORIZED_LAYOUT.
+
+        For v1_kv_layout=True (non-ASM, non-FP8) path, the V cache needs a
+        permute+contiguous to convert from linear [hd, ps] to vectorized
+        [ps//vs, hd, vs] layout. Doing this on the full KV cache pool is
+        extremely expensive. This method gathers all referenced blocks
+        (including duplicates) from the current prefill batch and writes the
+        reshaped result into the caller-provided compact buffers.
+
+        This also avoids the int32 offset overflow in aiter CK kernel when
+        block_num * batch_stride_k > INT32_MAX (single-layer K cache > 2 GB).
+
+        Args:
+            kv_cache_base: Full pool — [block_num, 2, hk, ps, hd] (5D) or 2D flat.
+            block_indices: int64 indices into kv_cache_base block dimension.
+            k_compact_buf: Pre-allocated K buffer [num_gathered+1, hk, hd//vs, ps, vs].
+                           Gathered data is written into buf[:num_gathered]; the trailing
+                           row stays zero for CK speculative read safety.
+            v_compact_buf: Pre-allocated V buffer [num_gathered+1, hk, ps//vs, hd, vs].
+
+        Returns:
+            (k_cache_5d, v_cache_5d) — the compact buffers with gathered data.
+        """
+        hk = self.head_num_kv
+        ps = self.tokens_per_block
+        hd = self.head_dim
+        vs = 16 // kv_cache_base.element_size()
+
+        num_gathered = block_indices.numel()
+
+        if kv_cache_base.ndim >= 4:
+            # 5D path: [block_num, 2, hk, ps, hd]
+            k_4d = kv_cache_base.select(1, 0)  # [block_num, hk, ps, hd]
+            v_4d = kv_cache_base.select(1, 1)  # [block_num, hk, ps, hd]
+            k_used = k_4d.index_select(0, block_indices)  # [n, hk, ps, hd]
+            v_used = v_4d.index_select(0, block_indices)  # [n, hk, ps, hd]
+            k_compact_buf[:num_gathered] = k_used.view(
+                num_gathered, hk, hd // vs, ps, vs
+            )
+            v_compact_buf[:num_gathered] = v_used.reshape(
+                num_gathered, hk, hd, ps // vs, vs
+            ).permute(0, 1, 3, 2, 4)
+        else:
+            # 2D flat buffer path
+            block_num = kv_cache_base.shape[0]
+            expected_elems = 2 * hk * ps * hd
+            flat = kv_cache_base[:, :expected_elems].reshape(block_num, 2, hk, ps * hd)
+            k_used = flat[:, 0, :, :].index_select(0, block_indices)
+            v_used = flat[:, 1, :, :].index_select(0, block_indices)
+            k_compact_buf[:num_gathered] = k_used.view(
+                num_gathered, hk, hd // vs, ps, vs
+            )
+            v_compact_buf[:num_gathered] = v_used.view(
+                num_gathered, hk, hd, ps // vs, vs
+            ).permute(0, 1, 3, 2, 4)
+
+        return k_compact_buf, v_compact_buf
+
     def _split_qkv_fp8(self, qkv_fp8):
         return split_qkv_fp8(qkv_fp8, self.head_num, self.head_num_kv, self.head_dim)
 
@@ -264,25 +425,6 @@ class AiterPrefillAttnOp:
             token_q_num,
             token_kv_num,
         )
-
-    @staticmethod
-    def _unpad_kv(kv_padded: torch.Tensor, cu_seqlens_k: torch.Tensor) -> torch.Tensor:
-        """Unpad 4D [B, H_kv, max_seqlen, D] → 3D [total_tokens, H_kv, D].
-
-        This reverses the padding applied by C++ FusedRopeKVCachePrefillOp which
-        emits K/V in [B, H_kv, max_seqlen_k, D] layout.
-        """
-        batch_size = kv_padded.shape[0]
-        head_num_kv = kv_padded.shape[1]
-        head_dim = kv_padded.shape[3]
-        cu_seqlens_cpu = cu_seqlens_k.cpu()
-        chunks = []
-        for i in range(batch_size):
-            seq_len = int(cu_seqlens_cpu[i + 1].item() - cu_seqlens_cpu[i].item())
-            # kv_padded[i] is [H_kv, max_seqlen, D], take first seq_len tokens
-            # and transpose to [seq_len, H_kv, D]
-            chunks.append(kv_padded[i, :, :seq_len, :].permute(1, 0, 2))
-        return torch.cat(chunks, dim=0)
 
     def _forward_varlen(self, qkv, fmha_params):
         """Varlen path using flash_attn_varlen_func.
@@ -298,16 +440,16 @@ class AiterPrefillAttnOp:
             # Ensure Q is 3D [tokens, heads, head_dim]
             if query.dim() == 2:
                 query = query.view(-1, self.head_num, self.head_dim)
-            # K/V from C++ FusedRopeKVCachePrefillOp are 4D padded [B, H_kv, max_seqlen, D].
-            # Unpad them to [total_kv_tokens, H_kv, D] using cu_seqlens_k.
-            if key.dim() == 4:
-                key = self._unpad_kv(key, fmha_params.cu_seqlens_k)
-            elif key.dim() == 2:
-                key = key.view(-1, self.head_num_kv, self.head_dim)
-            if value.dim() == 4:
-                value = self._unpad_kv(value, fmha_params.cu_seqlens_k)
-            elif value.dim() == 2:
-                value = value.view(-1, self.head_num_kv, self.head_dim)
+            # K/V from C++ FusedRopeKVCachePrefillOp are 4D padded
+            # [B, H_kv, max_seqlen, D]. Unpad on device via vectorized gather to
+            # avoid per-layer D2H sync and Python batch loop on the hot path.
+            if key.dim() == 4 and value.dim() == 4:
+                key, value = unpad_kv_vectorized(key, value, fmha_params.cu_seqlens_k)
+            else:
+                if key.dim() == 2:
+                    key = key.view(-1, self.head_num_kv, self.head_dim)
+                if value.dim() == 2:
+                    value = value.view(-1, self.head_num_kv, self.head_dim)
         else:
             query, key, value = self._split_raw_qkv(
                 qkv, fmha_params.token_q_num, fmha_params.token_kv_num
@@ -342,38 +484,35 @@ class AiterPrefillAttnOp:
         if q_tensor.dim() == 2:
             q_tensor = q_tensor.view(q_tensor.size(0), self.head_num, self.head_dim)
 
-        k_cache, v_cache = self._reshape_kv_cache_vectorized(kv_cache.kv_cache_base)
-
-        block_table = fmha_params.kv_cache_block_id_device
         # cu_seqlens are already created on GPU in FMHAParams.__init__
         cu_seqlens_q = fmha_params.cu_seqlens_q
         # Ensure cu_seqlens_q is on the same device as q_tensor
         if cu_seqlens_q.device != q_tensor.device:
             cu_seqlens_q = cu_seqlens_q.to(q_tensor.device, non_blocking=True)
 
-        # prefix_lengths: default to zeros when no prefix (unified logic)
+        # FMHA-setup tensor is pre-computed once per prefill in FMHAParams.__init__,
+        # so the per-layer hot path skips a kernel/alloc trio (prefix-zeros allocation
+        # + cu_seqlens diff + add+to_int32). The cached tensor is bit-exact identical
+        # to the per-layer recomputation.
         batch_size = cu_seqlens_q.shape[0] - 1
-        if (
-            fmha_params.prefix_lengths is not None
-            and fmha_params.prefix_lengths.numel() > 0
-        ):
-            prefix_lengths_device = fmha_params.prefix_lengths
-            if prefix_lengths_device.device != cu_seqlens_q.device:
-                prefix_lengths_device = prefix_lengths_device.to(
-                    cu_seqlens_q.device, non_blocking=True
-                )
-        else:
-            prefix_lengths_device = torch.zeros(
-                batch_size, dtype=torch.int32, device=cu_seqlens_q.device
-            )
+        seqlen_k = fmha_params.prefill_seqlen_k_int32
+        if seqlen_k.device != q_tensor.device:
+            seqlen_k = seqlen_k.to(q_tensor.device, non_blocking=True)
 
-        input_lengths = cu_seqlens_q[1:] - cu_seqlens_q[:-1]
-        seqlen_k = (prefix_lengths_device + input_lengths).to(torch.int32)
-
-        # Reuse values computed once in FMHAParams.prepare() to avoid
-        # per-layer GPU→CPU sync from .item() on the hot path.
         max_seqlen_q = fmha_params.max_seqlen_q
         max_seqlen_k = fmha_params.max_seqlen_k
+
+        if self.use_compact:
+            block_table = fmha_params.compact_block_table
+            k_cache, v_cache = self._gather_and_reshape_kv_compact(
+                kv_cache.kv_cache_base,
+                fmha_params.block_indices,
+                fmha_params.k_compact_buf,
+                fmha_params.v_compact_buf,
+            )
+        else:
+            block_table = fmha_params.sanitized_block_table
+            k_cache, v_cache = self._reshape_kv_cache_vectorized(kv_cache.kv_cache_base)
 
         softmax_scale = 1.0 / math.sqrt(self.head_dim)
         # kv_indptr must be all-zeros when kv_page_indices is empty (block_table
@@ -435,7 +574,7 @@ class AiterPrefillAttnOp:
         # regardless of kv_cache presence — the caller provides K/V explicitly.
         # NOTE on head_dim=256: aiter.mha_batch_prefill_func supports head_dim in {64,128,256}
         # since aiter 0.1.13.dev4 (commit 9ed3e3490). No varlen fallback needed here.
-        if kv_cache is not None and hasattr(kv_cache, 'kv_cache_base'):
+        if kv_cache is not None and hasattr(kv_cache, "kv_cache_base"):
             return self._forward_paged(q_tensor, kv_cache, fmha_params)
 
         # FP8 non-paged path: C++ returns full qkv_buf_fp8 (Q+K+V concatenated in FP8).
@@ -465,16 +604,84 @@ class AiterPrefillAttnOp:
         return self._forward_varlen(qkv, fmha_params)
 
 
+def _sanitize_and_pad_block_table(
+    block_table: Optional[torch.Tensor],
+    seqlen_k: Optional[torch.Tensor],
+    tokens_per_block: int,
+    max_seqlen_k: int,
+    block_positions_cache: Optional[torch.Tensor] = None,
+):
+    """Shared helper: sanitize padding columns + pad for CK speculative prefetch.
+
+    Only padding/speculative columns (beyond valid blocks per sequence) are
+    filled with the last valid block id. Valid-mask entries are left untouched
+    so that truly invalid block ids fail fast.
+
+    Returns (sanitized_and_padded_block_table, updated_block_positions_cache).
+    """
+    if block_table is None:
+        return None, block_positions_cache
+
+    if seqlen_k is None or block_table.dim() != 2:
+        return block_table, block_positions_cache
+
+    if seqlen_k.device != block_table.device:
+        seqlen_k = seqlen_k.to(block_table.device, non_blocking=True)
+
+    max_blocks_per_seq = block_table.shape[1]
+    if seqlen_k.numel() != block_table.shape[0]:
+        return block_table, block_positions_cache
+
+    # Sanitize: fill padding columns with last-valid-block-id
+    if (
+        block_positions_cache is None
+        or block_positions_cache.numel() < max_blocks_per_seq
+        or block_positions_cache.device != block_table.device
+    ):
+        block_positions_cache = torch.arange(
+            max(max_blocks_per_seq, 1024),
+            dtype=torch.int32,
+            device=block_table.device,
+        )
+
+    valid_blocks = torch.div(
+        seqlen_k + tokens_per_block - 1,
+        tokens_per_block,
+        rounding_mode="floor",
+    ).to(torch.int32)
+    positions = block_positions_cache[:max_blocks_per_seq].unsqueeze(0)
+    valid_mask = positions < valid_blocks.unsqueeze(1)
+
+    last_valid_col = (valid_blocks - 1).clamp(min=0).unsqueeze(1)
+    last_valid_block_id = block_table.gather(1, last_valid_col.to(torch.int64))
+    fill_value = last_valid_block_id.expand_as(block_table)
+    block_table = torch.where(valid_mask, block_table, fill_value)
+
+    # Pad: CK kernel speculatively prefetches V tiles beyond valid page entries.
+    # Use kN0=128 (conservative upper bound for all head_dim configs).
+    _CK_KN0 = 128
+    extra_pages = (_CK_KN0 + tokens_per_block - 1) // tokens_per_block
+    required_cols = (
+        max_seqlen_k + tokens_per_block - 1
+    ) // tokens_per_block + extra_pages
+    if block_table.shape[1] < required_cols:
+        pad_cols = required_cols - block_table.shape[1]
+        last_col = block_table[:, -1:].expand(-1, pad_cols)
+        block_table = torch.cat([block_table, last_col], dim=1)
+
+    return block_table, block_positions_cache
+
+
 def _infer_cuda_graph_device(
     attn_inputs: PyAttentionInputs,
     fmha_params: FMHAParams,
     fallback_tensor: Optional[torch.Tensor],
 ) -> torch.device:
     candidates = [
-        getattr(attn_inputs, "input_lengths_d", None),
-        getattr(attn_inputs, "prefix_lengths_d", None),
-        getattr(attn_inputs, "decode_cu_seqlens_d", None),
-        getattr(attn_inputs, "sequence_lengths_plus_1_d", None),
+        getattr(attn_inputs, "input_lengths_device", None),
+        getattr(attn_inputs, "prefix_lengths_device", None),
+        getattr(attn_inputs, "decode_cu_seqlens_device", None),
+        getattr(attn_inputs, "sequence_lengths_plus_1_device", None),
         getattr(attn_inputs, "kv_cache_kernel_block_id_device", None),
         getattr(attn_inputs, "kv_cache_block_id_device", None),
         getattr(fmha_params, "cu_seqlens_q", None),
@@ -496,6 +703,7 @@ class AiterPrefillAttnOpPaged:
         self.head_num = attn_configs.head_num
         self.head_dim = attn_configs.size_per_head
         self.head_num_kv = attn_configs.kv_head_num
+        self.tokens_per_block = attn_configs.kernel_tokens_per_block
         self.enable_cuda_graph = False
         self.cuda_graph_prepared = False
         self.graph_device: Optional[torch.device] = None
@@ -503,6 +711,7 @@ class AiterPrefillAttnOpPaged:
         self.kv_indptr_buf: Optional[torch.Tensor] = None
         self.kv_page_indices_buf: Optional[torch.Tensor] = None
         self.descale_buf: Optional[torch.Tensor] = None
+        self._block_positions: Optional[torch.Tensor] = None
 
     def support(self, attn_inputs: PyAttentionInputs) -> bool:
         has_prefix = (
@@ -523,8 +732,12 @@ class AiterPrefillAttnOpPaged:
             self.prepare_cuda_graph(fmha_params, attn_inputs)
         return fmha_params
 
-    def prepare_cuda_graph(self, fmha_params: FMHAParams, attn_inputs: PyAttentionInputs) -> None:
-        graph_block_table = getattr(attn_inputs, "kv_cache_kernel_block_id_device", None)
+    def prepare_cuda_graph(
+        self, fmha_params: FMHAParams, attn_inputs: PyAttentionInputs
+    ) -> None:
+        graph_block_table = getattr(
+            attn_inputs, "kv_cache_kernel_block_id_device", None
+        )
         if graph_block_table is None:
             graph_block_table = getattr(attn_inputs, "kv_cache_block_id_device", None)
         self.graph_device = _infer_cuda_graph_device(
@@ -556,9 +769,24 @@ class AiterPrefillAttnOpPaged:
             self.descale_buf = torch.ones(
                 1, dtype=torch.float32, device=self.graph_device
             )
+        # Pre-allocate a fixed-address buffer for the sanitized+padded block_table.
+        # CUDA graph replay requires stable tensor addresses; sanitize produces a
+        # new tensor each call, so we copy_ into this fixed buffer.
+        bt = fmha_params.kv_cache_block_id_device
+        extra_pages = (128 + self.tokens_per_block - 1) // self.tokens_per_block
+        max_cols = bt.shape[1] + extra_pages
+        self.sanitized_bt_buf = torch.zeros(
+            batch_size, max_cols, dtype=torch.int32, device=self.graph_device
+        )
         self.cuda_graph_prepared = True
 
     def forward(self, qkv, kv_cache, fmha_params) -> torch.Tensor:
+        # NOTE: This is a *prefill*-stage operator (handles prefix-cache prefill).
+        # The graph_ready branches below are interface-compatible scaffolding for
+        # potential future CUDA-graph-captured prefill; in production, CUDA graph
+        # capture only happens in the decode stage (AiterDecodeAttnOp), so the
+        # graph_ready path here is never triggered and does not require dedicated
+        # regression tests.
         q_tensor = qkv[0][: fmha_params.token_q_num]
         device = q_tensor.device
 
@@ -596,6 +824,26 @@ class AiterPrefillAttnOpPaged:
                 dtype=torch.int32, device=device
             )
 
+        max_seqlen_q = fmha_params.max_seqlen_q
+        max_seqlen_k = fmha_params.max_seqlen_k
+
+        # Apply sanitize + pad to prevent CK speculative prefetch OOB.
+        sanitized_bt, self._block_positions = _sanitize_and_pad_block_table(
+            block_table,
+            seqlen_k,
+            self.tokens_per_block,
+            max_seqlen_k,
+            self._block_positions,
+        )
+        if graph_ready:
+            # CUDA graph replay requires stable tensor addresses. Copy the
+            # sanitized result into the pre-allocated fixed-address buffer.
+            cols = sanitized_bt.shape[1]
+            self.sanitized_bt_buf[:, :cols] = sanitized_bt
+            block_table = self.sanitized_bt_buf[:, :cols]
+        else:
+            block_table = sanitized_bt
+
         if graph_ready:
             self.kv_indptr_buf.zero_()
             kv_indptr = self.kv_indptr_buf
@@ -603,9 +851,6 @@ class AiterPrefillAttnOpPaged:
         else:
             kv_indptr = torch.zeros(batch_size + 1, dtype=torch.int32, device=device)
             kv_page_indices = torch.zeros(1, dtype=torch.int32, device=device)
-
-        max_seqlen_q = fmha_params.max_seqlen_q
-        max_seqlen_k = fmha_params.max_seqlen_k
 
         q_descale = None
         k_descale = None
@@ -1165,7 +1410,14 @@ class AiterPrefillImplAsm(FMHAImplBase):
         layer_idx: int = 0,
     ) -> torch.Tensor:
         if kv_cache is None:
-            return self.fmha_impl.forward(qkv, kv_cache, self.fmha_params)
+            # Embedding models still need positional encoding even without a KV cache.
+            if self.need_rope_kv_cache:
+                fmha_input = self.rope_kvcache_impl.forward(
+                    qkv, kv_cache, self.rope_params
+                )
+            else:
+                fmha_input = qkv
+            return self.fmha_impl.forward(fmha_input, kv_cache, self.fmha_params)
 
         # Apply RoPE and KV Cache processing
         if self.need_rope_kv_cache:
@@ -1220,7 +1472,14 @@ class AiterPrefillImplNonAsm(FMHAImplBase):
         layer_idx: int = 0,
     ) -> torch.Tensor:
         if kv_cache is None:
-            return self.fmha_impl.forward(qkv, kv_cache, self.fmha_params)
+            # Embedding models still need positional encoding even without a KV cache.
+            if self.need_rope_kv_cache:
+                fmha_input = self.rope_kvcache_impl.forward(
+                    qkv, kv_cache, self.rope_params
+                )
+            else:
+                fmha_input = qkv
+            return self.fmha_impl.forward(fmha_input, kv_cache, self.fmha_params)
 
         # Apply RoPE and KV Cache processing
         if self.need_rope_kv_cache:
@@ -1277,14 +1536,16 @@ class AiterPrefillImplPaged(FMHAImplBase):
             return False
         return int(pl.max().item()) > 0
 
-    def _update_prefill_params_for_cuda_graph(self, attn_inputs: PyAttentionInputs) -> None:
+    def _update_prefill_params_for_cuda_graph(
+        self, attn_inputs: PyAttentionInputs
+    ) -> None:
         input_lengths = attn_inputs.input_lengths
 
         fmha_params = self.fmha_params
         expected_batch = fmha_params.cu_seqlens_q.numel() - 1
 
-        live_cu_seqlens_q = getattr(attn_inputs, "cu_seqlens", None)
-        live_cu_seqlens_k = getattr(attn_inputs, "cu_kv_seqlens", None)
+        live_cu_seqlens_q = getattr(attn_inputs, "cu_seqlens_device", None)
+        live_cu_seqlens_k = getattr(attn_inputs, "cu_kv_seqlens_device", None)
         use_live_cu_seqlens = (
             live_cu_seqlens_q is not None
             and live_cu_seqlens_k is not None
@@ -1344,6 +1605,12 @@ class AiterPrefillImplPaged(FMHAImplBase):
         fmha_params.max_seqlen_k = int(kv_lens.max()) if expected_batch > 0 else 0
         fmha_params.token_q_num = int(q_lens.sum())
         fmha_params.token_kv_num = int(kv_lens.sum())
+
+        # Sync prefill_seqlen_k_int32 from updated cu_seqlens_k so that
+        # CUDA graph replay does not reuse stale seqlen_k values.
+        fmha_params.prefill_seqlen_k_int32 = (
+            fmha_params.cu_seqlens_k[1:] - fmha_params.cu_seqlens_k[:-1]
+        ).to(torch.int32)
 
         kv_block_id = getattr(attn_inputs, "kv_cache_kernel_block_id_device", None)
         if kv_block_id is None:
@@ -1418,7 +1685,7 @@ class AiterDecodeImplBase(FMHAImplBase):
         self.fmha_params.fillParams(
             attn_inputs.sequence_lengths,
             attn_inputs.input_lengths,
-            attn_inputs.kv_cache_kernel_block_id_host,
+            attn_inputs.kv_cache_kernel_block_id,
             attn_inputs.kv_cache_kernel_block_id_device,
         )
         if attn_inputs.kv_cache_kernel_block_id_device is not None:

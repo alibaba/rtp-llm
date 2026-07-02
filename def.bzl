@@ -294,7 +294,14 @@ read_release_version = repository_rule(
 def _torch_repo_impl(ctx):
     torch_path = ctx.os.environ.get("TORCH_ROOT")
     if not torch_path:
-        fail("TORCH_ROOT environment variable is not set. " +
+        # Fallback: auto-detect the installed torch path via python3 so a direct
+        # `bazel build` works even without setup.py's generated .torch_bazelrc.
+        result = ctx.execute(["python3", "-c", "import torch; print(torch.__path__[0])"])
+        if result.return_code == 0:
+            torch_path = result.stdout.strip()
+    if not torch_path:
+        fail("TORCH_ROOT environment variable is not set and torch could not be " +
+             "auto-detected via python3. " +
              "Run 'pip install --compile -e .' first (setup.py generates .torch_bazelrc), " +
              "or set TORCH_ROOT manually to your torch installation path.")
 

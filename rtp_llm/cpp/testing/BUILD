@@ -16,13 +16,19 @@ cc_library(
     ),
     deps = [
         "@com_google_googletest//:gtest",
-        "//rtp_llm/models_py/bindings/core:exec_ops_test_lib",
-        "//rtp_llm/models_py/bindings/cuda/ops:cuda_impl",
         "//rtp_llm/cpp/cache:cache",
         "//rtp_llm/cpp/cache/test:cache_config_test_utils",
         "//rtp_llm/cpp/engine_base/stream:complete_token_ids",
-        "//:rtp_compute_ops",
-    ],
+    ] + select({
+        "@//:using_rocm": [
+            "//rtp_llm/models_py/bindings/core:exec_ctx_rocm",
+        ],
+        "//conditions:default": [
+            "//rtp_llm/models_py/bindings/core:exec_ops_test_lib",
+            "//rtp_llm/models_py/bindings/cuda/ops:cuda_impl",
+            "//:rtp_compute_ops",
+        ],
+    }),
     visibility = ["//visibility:public"],
     copts = copts(),
 )
@@ -49,12 +55,30 @@ cc_library(
 
 cc_library(
     name = "base_tests",
-    hdrs = ["BeamSearchOpTest.hpp"],
+    hdrs = [
+        "BeamSearchOpTest.hpp",
+    ],
     deps = [
         ":device_test_utils",
-        "//rtp_llm/models_py/bindings/cuda/ops:torch_beam_search_op_impl",
+        "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
+        "//rtp_llm/models_py/bindings/core/ops:torch_beam_search_op_impl",
         "//rtp_llm/cpp/models:models",
     ],
+    visibility = ["//visibility:public"],
+    copts = test_copts,
+)
+
+cc_library(
+    name = "rejection_sampling_test_utils",
+    hdrs = [
+        "RejectionSamplingOpTest.hpp",
+    ],
+    deps = [
+        "//rtp_llm/models_py/bindings/core:op_data",
+        "//rtp_llm/models_py/bindings/core:rejection_sampling_ops_test_lib",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ] + torch_deps(),
     visibility = ["//visibility:public"],
     copts = test_copts,
 )

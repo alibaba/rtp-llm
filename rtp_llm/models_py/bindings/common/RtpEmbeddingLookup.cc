@@ -11,9 +11,15 @@ namespace th = torch;
 using namespace rtp_llm;
 namespace rtp_llm {
 
-void embedding(at::Tensor& output, at::Tensor& input, at::Tensor& weight) {
+void embedding(at::Tensor&               output,
+               at::Tensor&               input,
+               at::Tensor&               weight,
+               std::optional<at::Tensor> position_ids,
+               std::optional<at::Tensor> token_type_ids,
+               std::optional<at::Tensor> text_tokens_mask) {
     CHECK_INPUT(input);
     CHECK_INPUT(weight);
+    CHECK_INPUT(output);
     auto device = input.device();
     CHECK_EQ(weight.device(), device);
     CHECK_DIM(1, input);   // input: (tokens)
@@ -23,11 +29,34 @@ void embedding(at::Tensor& output, at::Tensor& input, at::Tensor& weight) {
     CHECK_EQ(output.size(0), tokens);
     CHECK_EQ(output.size(1), hidden_size);
 
-    StreamType stream = GET_CURRENT_STREAM();
+    StreamType stream              = GET_CURRENT_STREAM();
+    auto       tensor_data_or_null = [](const std::optional<at::Tensor>& t) -> const int* {
+        return (t.has_value() && t.value().defined() && t.value().numel() > 0) ? t.value().data_ptr<int>() : nullptr;
+    };
+
+    // Validate optional int tensors when they are actually provided.
+    auto validate_optional_int_tensor = [&](const std::optional<at::Tensor>& t, const char* name) {
+        if (!t.has_value() || !t.value().defined() || t.value().numel() == 0) {
+            return;
+        }
+        const auto& tensor = t.value();
+        CHECK_INPUT(tensor);
+        CHECK_EQ(tensor.device(), device);
+        CHECK_EQ(tensor.dtype(), at::kInt);
+        CHECK_DIM(1, tensor);
+        CHECK_EQ(tensor.size(0), tokens);
+    };
+    validate_optional_int_tensor(position_ids, "position_ids");
+    validate_optional_int_tensor(token_type_ids, "token_type_ids");
+    validate_optional_int_tensor(text_tokens_mask, "text_tokens_mask");
+
+    auto* pos_ptr  = tensor_data_or_null(position_ids);
+    auto* type_ptr = tensor_data_or_null(token_type_ids);
+    auto* mask_ptr = tensor_data_or_null(text_tokens_mask);
 
     DISPATCH_PYTORCH_DTYPE_TO_CTYPE_FP16(weight.scalar_type(), c_type, [&] {
         const int vecSize = sizeof(float4) / sizeof(c_type);
-        if (hidden_size % vecSize == 0) {
+        if (hidden_size % vecSize == 0 && !pos_ptr && !type_ptr && !mask_ptr) {  // this kernel does not support mask
             invokeEmbeddingLookupVec(static_cast<c_type*>(output.data_ptr()),
                                      static_cast<const c_type*>(weight.data_ptr()),
                                      1.0,
@@ -47,9 +76,9 @@ void embedding(at::Tensor& output, at::Tensor& input, at::Tensor& weight) {
                                   static_cast<const c_type*>(nullptr),  // postition_table
                                   static_cast<const c_type*>(nullptr),  // token_type_table
                                   static_cast<const int*>(input.data_ptr()),
-                                  static_cast<const int*>(nullptr),  // position_ids
-                                  static_cast<const int*>(nullptr),  // token_types
-                                  static_cast<const int*>(nullptr),  // mask
+                                  static_cast<const int*>(pos_ptr),   // position_ids
+                                  static_cast<const int*>(type_ptr),  // token_types
+                                  static_cast<const int*>(mask_ptr),  // mask
                                   tokens,
                                   hidden_size,
                                   stream);

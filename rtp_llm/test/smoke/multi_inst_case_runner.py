@@ -1,4 +1,5 @@
-from typing import Dict, List, Union
+import logging
+from typing import Any, Dict, List, Optional, Union
 
 from rtp_llm.server.host_service import EndPoint, GroupEndPoint, ServiceRoute
 from rtp_llm.test.smoke.case_runner import CaseRunner
@@ -12,6 +13,33 @@ FRONTEND_ROLE_NAME = "frontend"
 PD_FUNSION_ROLE_NAME = "pd_fusion"
 
 
+def _stop_server_safe(manager: Any) -> None:
+    """Stop *manager* if it is not None; tolerates already-stopped servers."""
+    if manager is None:
+        return
+    try:
+        manager.stop_server()
+    except Exception as e:
+        logging.warning("Failed to stop server: %s", e)
+
+
+def _cleanup_servers(
+    started_managers: List[Any], remote_kvcm_server: Optional[Any] = None
+) -> None:
+    """Stop all *started_managers* and the optional remote KVCM server."""
+    for mgr in reversed(started_managers):
+        _stop_server_safe(mgr)
+    if remote_kvcm_server is not None:
+        try:
+            remote_kvcm_server.stop_server()
+        except Exception as e:
+            logging.warning("Failed to stop remote KVCM server: %s", e)
+        try:
+            remote_kvcm_server.copy_logs()
+        except Exception as e:
+            logging.warning("Failed to copy remote KVCM logs: %s", e)
+
+
 class PdSeperationCaseRunner(CaseRunner):
     def __init__(
         self,
@@ -22,6 +50,7 @@ class PdSeperationCaseRunner(CaseRunner):
         **kwargs,
     ):
         super().__init__(task_info, env_args, gpu_card, smoke_args, **kwargs)
+        self.remote_kvcm_server = None
         if not isinstance(env_args, dict):
             raise Exception("env_args in PdSeperationCaseRunner should be dict")
         if (
@@ -60,6 +89,8 @@ class PdSeperationCaseRunner(CaseRunner):
         prefill_port = MagaServerManager.get_free_port()
         decode_port = MagaServerManager.get_free_port()
         gpu_ids = [str(x) for x in get_gpu_ids()]
+        assert decode_gpu_size + prefill_gpu_size <= len(gpu_ids), \
+            f"需要 {decode_gpu_size + prefill_gpu_size} 块 GPU，但只有 {len(gpu_ids)} 块可用"
 
         decode_endpoint = EndPoint(
             type="Vipserver",
@@ -131,24 +162,31 @@ class PdSeperationCaseRunner(CaseRunner):
             task_states_list[1],
         )
 
+        started_managers = []
+        if frontend_server_manager is not None:
+            started_managers.append(frontend_server_manager)
+
         if decode_task_states.ret != True:
             decode_task_states.err_msg = (
                 "decode server start failed, " + decode_task_states.err_msg
             )
+            _cleanup_servers(started_managers, self.remote_kvcm_server)
             return decode_task_states
         assert (
             decode_server_manager is not None
         ), "decode server manager should not be None"
+        started_managers.append(decode_server_manager)
 
         if prefill_task_states.ret != True:
             prefill_task_states.err_msg = (
                 "prefill server start failed, " + prefill_task_states.err_msg
             )
-            decode_server_manager.stop_server()
+            _cleanup_servers(started_managers, self.remote_kvcm_server)
             return prefill_task_states
         assert (
             prefill_server_manager is not None
         ), "prefill server manager should not be None"
+        started_managers.append(prefill_server_manager)
 
         curl_server_mgr = (
             prefill_server_manager
@@ -156,16 +194,11 @@ class PdSeperationCaseRunner(CaseRunner):
             else frontend_server_manager
         )
 
-        task_states = self.curl_server(curl_server_mgr)
-        prefill_server_manager.stop_server()
-        decode_server_manager.stop_server()
-
-        if frontend_server_manager is not None:
-            frontend_server_manager.stop_server()
-        if enable_remote_cache and self.remote_kvcm_server is not None:
-            self.remote_kvcm_server.stop_server()
-            self.remote_kvcm_server.copy_logs()
-        return task_states
+        try:
+            task_states = self.curl_server(curl_server_mgr)
+            return task_states
+        finally:
+            _cleanup_servers(started_managers, self.remote_kvcm_server)
 
 
 class DpSeperationCaseRunner(CaseRunner):
@@ -178,14 +211,15 @@ class DpSeperationCaseRunner(CaseRunner):
         **kwargs,
     ):
         super().__init__(task_info, env_args, gpu_card, smoke_args, **kwargs)
+        self.remote_kvcm_server = None
         if not isinstance(env_args, dict):
-            raise Exception("env_args in PdSeperationCaseRunner should be dict")
+            raise Exception("env_args in DpSeperationCaseRunner should be dict")
         if (
             len(env_args) < 2
             or PREFILL_ROLE_NAME not in env_args
             or DECODE_ROLE_NAME not in env_args
         ):
-            raise Exception("env_args in PdSeperationCaseRunner should not empty")
+            raise Exception("env_args in DpSeperationCaseRunner should not empty")
 
     # override
     def run(self):
@@ -216,6 +250,8 @@ class DpSeperationCaseRunner(CaseRunner):
         prefill_port = MagaServerManager.get_free_port()
         decode_port = MagaServerManager.get_free_port()
         gpu_ids = [str(x) for x in get_gpu_ids()]
+        assert decode_gpu_size + prefill_gpu_size <= len(gpu_ids), \
+            f"需要 {decode_gpu_size + prefill_gpu_size} 块 GPU，但只有 {len(gpu_ids)} 块可用"
 
         # 提前选择机器，直接指定具体的机器地址而不是使用负载均衡
         decode_endpoint = EndPoint(
@@ -291,26 +327,33 @@ class DpSeperationCaseRunner(CaseRunner):
             task_states_list[1],
         )
 
+        started_managers = []
+        if frontend_server_manager is not None:
+            started_managers.append(frontend_server_manager)
+
         # check decode server start result
         if decode_task_states.ret != True:
             decode_task_states.err_msg = (
                 "decode server start failed, " + decode_task_states.err_msg
             )
+            _cleanup_servers(started_managers, self.remote_kvcm_server)
             return decode_task_states
         assert (
             decode_server_manager is not None
         ), "decode server manager should not be None"
+        started_managers.append(decode_server_manager)
 
         # check prefill server start result
         if prefill_task_states.ret != True:
             prefill_task_states.err_msg = (
                 "prefill server start failed, " + prefill_task_states.err_msg
             )
-            decode_server_manager.stop_server()
+            _cleanup_servers(started_managers, self.remote_kvcm_server)
             return prefill_task_states
         assert (
             prefill_server_manager is not None
         ), "prefill server manager should not be None"
+        started_managers.append(prefill_server_manager)
 
         curl_server_mgr = (
             decode_server_manager
@@ -318,16 +361,11 @@ class DpSeperationCaseRunner(CaseRunner):
             else frontend_server_manager
         )
 
-        task_states = self.curl_server(curl_server_mgr)
-        prefill_server_manager.stop_server()
-        decode_server_manager.stop_server()
-
-        if frontend_server_manager is not None:
-            frontend_server_manager.stop_server()
-        if enable_remote_cache and self.remote_kvcm_server is not None:
-            self.remote_kvcm_server.stop_server()
-            self.remote_kvcm_server.copy_logs()
-        return task_states
+        try:
+            task_states = self.curl_server(curl_server_mgr)
+            return task_states
+        finally:
+            _cleanup_servers(started_managers, self.remote_kvcm_server)
 
 
 class FrontAppSeperationCaseRunner(CaseRunner):
@@ -379,12 +417,15 @@ class FrontAppSeperationCaseRunner(CaseRunner):
             port=frontend_port,
             role_name="frontend",
         )
+        started_managers = []
         if task_states.ret != True:
             task_states.err_msg = "frontend server start failed, " + task_states.err_msg
+            _cleanup_servers(started_managers)
             return task_states
         assert (
             frontend_server_manager is not None
         ), "frontend server manager should not be None"
+        started_managers.append(frontend_server_manager)
 
         # start PDFUSION server after frontend is ready
         pd_fusion_envs["CUDA_VISIBLE_DEVICES"] = ",".join(gpu_ids[:gpu_size])
@@ -400,15 +441,16 @@ class FrontAppSeperationCaseRunner(CaseRunner):
         )
         if task_states.ret != True:
             task_states.err_msg = "PDFUSION server start failed, " + task_states.err_msg
+            _cleanup_servers(started_managers)
             return task_states
         assert server_manager is not None, "PDFUSION server manager should not be None"
+        started_managers.append(server_manager)
 
-        task_states = self.curl_server(frontend_server_manager)
-        server_manager.stop_server()
-
-        if frontend_server_manager is not None:
-            frontend_server_manager.stop_server()
-        return task_states
+        try:
+            task_states = self.curl_server(frontend_server_manager)
+            return task_states
+        finally:
+            _cleanup_servers(started_managers)
 
 
 LLM_ROLE_NAME = "llm"
@@ -471,6 +513,7 @@ class VitSeperationCaseRunner(CaseRunner):
 
         vit_envs["CUDA_VISIBLE_DEVICES"] = ",".join(gpu_ids[llm_gpu_size:])
         vit_envs["VIT_SEPARATION"] = "1"
+        vit_envs["ROLE_TYPE"] = "VIT"
         vit_envs["MODEL_SERVICE_CONFIG"] = service_route.model_dump_json()
         server_configs = [
             {
@@ -493,23 +536,30 @@ class VitSeperationCaseRunner(CaseRunner):
         llm_server_manager, llm_task_states = server_managers[0], task_states_list[0]
         vit_server_manager, vit_task_states = server_managers[1], task_states_list[1]
 
+        started_managers = []
+
         # check llm server start result
         if llm_task_states.ret != True:
             llm_task_states.err_msg = (
                 "llm server start failed, " + llm_task_states.err_msg
             )
+            _cleanup_servers(started_managers)
             return llm_task_states
         assert llm_server_manager is not None, "llm server manager should not be None"
+        started_managers.append(llm_server_manager)
 
         # check vit server start result
         if vit_task_states.ret != True:
             vit_task_states.err_msg = (
                 "vit server start failed, " + vit_task_states.err_msg
             )
-            vit_server_manager.stop_server()
+            _cleanup_servers(started_managers)
             return vit_task_states
         assert vit_server_manager is not None, "vit server manager should not be None"
-        task_states = self.curl_server(llm_server_manager)
-        vit_server_manager.stop_server()
-        llm_server_manager.stop_server()
-        return task_states
+        started_managers.append(vit_server_manager)
+
+        try:
+            task_states = self.curl_server(llm_server_manager)
+            return task_states
+        finally:
+            _cleanup_servers(started_managers)

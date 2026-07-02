@@ -34,8 +34,6 @@ class WorkerStatusComparer(BaseComparer):
             "dp_size",
             "tp_size",
         ]
-        expect = expect_result.model_dump(exclude_defaults=True)
-        actual = actual_result.model_dump(exclude_defaults=True)
         for check_field in check_fields:
             expect_val = getattr(expect_result, check_field)
             actual_val = getattr(actual_result, check_field)

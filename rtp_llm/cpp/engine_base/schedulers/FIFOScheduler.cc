@@ -204,7 +204,17 @@ void FIFOScheduler::evaluateWaitingStreams(list<GenerateStreamPtr>& waiting_stre
         }
     }
 
-    int64_t force_batch_group_id = -1;
+    int64_t           force_batch_group_id       = -1;
+    ReturnAllProbsMode batch_return_all_probs_mode = ReturnAllProbsMode::NONE;
+    // Initialise the batch mode from existing RUNNING streams so that new
+    // waiting streams with an incompatible mode are not mixed in.
+    for (const auto& s : running_streams_) {
+        auto mode = s->getReturnAllProbs();
+        if (mode != ReturnAllProbsMode::NONE) {
+            batch_return_all_probs_mode = mode;
+            break;
+        }
+    }
 
     for (auto it = waiting_streams.begin(); it != waiting_streams.end();) {
         auto& stream      = *it;
@@ -238,6 +248,19 @@ void FIFOScheduler::evaluateWaitingStreams(list<GenerateStreamPtr>& waiting_stre
                     it++;
                     continue;
                 }
+            }
+        }
+
+        // ReturnAllProbsMode isolation: DEFAULT and ORIGINAL must not be mixed in one batch.
+        // NONE streams can join any batch. FIFOScheduler/BatchDecodeScheduler enforce this so
+        // that DEFAULT consumers do not receive un-renormalized ORIGINAL probabilities.
+        auto stream_return_all_probs = stream->getReturnAllProbs();
+        if (stream_return_all_probs != ReturnAllProbsMode::NONE) {
+            if (batch_return_all_probs_mode == ReturnAllProbsMode::NONE) {
+                batch_return_all_probs_mode = stream_return_all_probs;
+            } else if (stream_return_all_probs != batch_return_all_probs_mode) {
+                it++;
+                continue;
             }
         }
 

@@ -15,7 +15,6 @@ Usage:
 
 import enum
 import math
-import sys
 from typing import Tuple
 from unittest import SkipTest, TestCase, main, skipIf
 
@@ -24,8 +23,6 @@ import torch
 import torch.nn.functional as F
 
 pytestmark = [pytest.mark.gpu(type="H20"), pytest.mark.manual]
-
-sys.path.append("/data2/baowending.bwd/new/RTP-LLM/github-opensource/")
 
 
 # Check if CUDA version >= 12.9 for flash_mla support

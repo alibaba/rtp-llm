@@ -1,36 +1,127 @@
 #include "rtp_llm/cpp/model_rpc/TensorPbConvert.h"
 
+#include <limits>
 #include <stdexcept>
 
 namespace rtp_llm {
 
+namespace {
+
+size_t dtypeSize(TensorPB::DataType dtype) {
+    switch (dtype) {
+        case TensorPB::FP32:
+            return sizeof(float);
+        case TensorPB::INT32:
+            return sizeof(int32_t);
+        case TensorPB::FP16:
+            return sizeof(c10::Half);
+        case TensorPB::BF16:
+            return sizeof(c10::BFloat16);
+        default:
+            throw std::runtime_error("Unsupported TensorPB data type.");
+    }
+}
+
+size_t dataBytes(const TensorPB& tensor_pb) {
+    switch (tensor_pb.data_type()) {
+        case TensorPB::FP32:
+            return tensor_pb.fp32_data().size();
+        case TensorPB::INT32:
+            return tensor_pb.int32_data().size();
+        case TensorPB::FP16:
+            return tensor_pb.fp16_data().size();
+        case TensorPB::BF16:
+            return tensor_pb.bf16_data().size();
+        default:
+            throw std::runtime_error("Unsupported TensorPB data type.");
+    }
+}
+
+torch::ScalarType pbDtypeToTorch(TensorPB::DataType dtype) {
+    switch (dtype) {
+        case TensorPB::FP32:
+            return torch::kFloat32;
+        case TensorPB::INT32:
+            return torch::kInt32;
+        case TensorPB::FP16:
+            return torch::kFloat16;
+        case TensorPB::BF16:
+            return torch::kBFloat16;
+        default:
+            throw std::runtime_error("Unsupported TensorPB data type.");
+    }
+}
+
+}  // namespace
+
 torch::Tensor TensorPbConvert::pbToTorch(const TensorPB& tensor_pb) {
     std::vector<int64_t> shape(tensor_pb.shape().begin(), tensor_pb.shape().end());
+
+    int64_t numel = 1;
+    for (auto dim : shape) {
+        if (dim < 0) {
+            throw std::runtime_error("TensorPB shape dimension must be non-negative, got "
+                                     + std::to_string(dim));
+        }
+        if (dim != 0 && numel > std::numeric_limits<int64_t>::max() / dim) {
+            throw std::runtime_error("TensorPB shape numel overflow");
+        }
+        numel *= dim;
+    }
+
+    // Default-constructed / empty TensorPB has no shape and no data. Do not
+    // treat it as a scalar; return an empty 1-D tensor. Also handle explicitly
+    // zero-volume tensors (e.g., shape {0}).
+    if (shape.empty() && dataBytes(tensor_pb) == 0) {
+        return torch::empty({0});
+    }
+    if (numel == 0) {
+        auto options = torch::TensorOptions().dtype(pbDtypeToTorch(tensor_pb.data_type()));
+        return torch::empty(shape, options);
+    }
+
+    // Validate that the declared payload size matches shape * dtype size before
+    // reading the data pointer.
+    const size_t expected_bytes = static_cast<size_t>(numel) * dtypeSize(tensor_pb.data_type());
+    const size_t actual_bytes   = dataBytes(tensor_pb);
+    if (actual_bytes != expected_bytes) {
+        throw std::runtime_error("TensorPB data size mismatch: expected "
+                                 + std::to_string(expected_bytes) + " bytes, got "
+                                 + std::to_string(actual_bytes) + " bytes for shape ["
+                                 + [&shape]() {
+                                       std::string s;
+                                       for (size_t i = 0; i < shape.size(); ++i) {
+                                           if (i) s += ", ";
+                                           s += std::to_string(shape[i]);
+                                       }
+                                       return s;
+                                   }()
+                                 + "] and dtype " + std::to_string(tensor_pb.data_type()) + ".");
+    }
+
     void*                data_ptr = nullptr;
+    auto                 options  = torch::TensorOptions().dtype(pbDtypeToTorch(tensor_pb.data_type()));
     switch (tensor_pb.data_type()) {
         case TensorPB::FP32: {
-            data_ptr     = const_cast<char*>(tensor_pb.fp32_data().data());
-            auto options = torch::TensorOptions().dtype(torch::kFloat32);
-            return torch::from_blob(data_ptr, shape, options).clone();
+            data_ptr = const_cast<char*>(tensor_pb.fp32_data().data());
+            break;
         }
         case TensorPB::INT32: {
-            data_ptr     = const_cast<char*>(tensor_pb.int32_data().data());
-            auto options = torch::TensorOptions().dtype(torch::kInt32);
-            return torch::from_blob(data_ptr, shape, options).clone();
+            data_ptr = const_cast<char*>(tensor_pb.int32_data().data());
+            break;
         }
         case TensorPB::FP16: {
-            data_ptr     = const_cast<char*>(tensor_pb.fp16_data().data());
-            auto options = torch::TensorOptions().dtype(torch::kFloat16);
-            return torch::from_blob(data_ptr, shape, options).clone();
+            data_ptr = const_cast<char*>(tensor_pb.fp16_data().data());
+            break;
         }
         case TensorPB::BF16: {
-            data_ptr     = const_cast<char*>(tensor_pb.bf16_data().data());
-            auto options = torch::TensorOptions().dtype(torch::kBFloat16);
-            return torch::from_blob(data_ptr, shape, options).clone();
+            data_ptr = const_cast<char*>(tensor_pb.bf16_data().data());
+            break;
         }
         default:
-            throw std::runtime_error("Unsupported data type.");
+            throw std::runtime_error("Unsupported TensorPB data type.");
     }
+    return torch::from_blob(data_ptr, shape, options).clone();
 }
 
 void TensorPbConvert::torchToPb(TensorPB* tensor_pb, const torch::Tensor& tensor) {
@@ -54,7 +145,11 @@ void TensorPbConvert::torchToPb(TensorPB* tensor_pb, const torch::Tensor& tensor
     for (auto dim : shape) {
         tensor_pb->add_shape(dim);
     }
-    torch::Tensor contiguous_tensor = tensor.contiguous();
+    // Make contiguous on-device, then copy to CPU before reading data_ptr():
+    // a CUDA tensor's data_ptr() points to device memory and cannot be
+    // serialized directly. Doing contiguous() first keeps the D2H copy a single
+    // contiguous transfer; .to(kCPU) is a no-op when already on CPU.
+    torch::Tensor contiguous_tensor = tensor.contiguous().to(torch::kCPU);
     switch (tensor.dtype().toScalarType()) {
         case torch::kFloat32: {
             size_t      num_bytes = contiguous_tensor.numel() * sizeof(float);

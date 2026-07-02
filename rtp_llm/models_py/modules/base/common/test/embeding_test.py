@@ -26,13 +26,14 @@ class EmbedingTest(TestCase):
 
     def _run_embeding_test(self, num_tokens: int, hidden_size: int, dtype: _dtype):
         torch.manual_seed(0)
-        w = torch.randn(131072, hidden_size, dtype=dtype)
+        vocab_size = 131072
+        w = torch.randn(vocab_size, hidden_size, dtype=dtype)
         model_config = ModelConfig()
         model_config.attn_config.head_num = 1
         model_config.attn_config.size_per_head = 1
         model_config.num_layers = 1
         model_config.max_seq_len = 1
-        model_config.vocab_size = 1
+        model_config.vocab_size = vocab_size
 
         parallelism_config = ParallelismConfig()
         parallelism_config.tp_size = 1
@@ -40,7 +41,9 @@ class EmbedingTest(TestCase):
 
         embeding = Embedding(model_config, parallelism_config, w)
         embeding_torch = EmbeddingTorch(w)
-        x = torch.randint(0, hidden_size, (num_tokens,), dtype=torch.int32)
+        # Token ids index into the embedding table (rows = vocab_size), not
+        # hidden_size; the previous hidden_size bound produced wrong/out-of-range ids.
+        x = torch.randint(0, vocab_size, (num_tokens,), dtype=torch.int32)
         # with profile(activities=[ProfilerActivity.CUDA], record_shapes=True) as prof:
         #     for _ in range(10):
         #         out = embeding(x)

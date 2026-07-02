@@ -94,7 +94,7 @@ from ctypes import cdll
 try:
     _pyver = f"{sys.version_info.major}.{sys.version_info.minor}"
     cdll.LoadLibrary(sysconfig.get_config_var("LIBDIR") + f"/libpython{_pyver}.so")
-except OSError:
+except (OSError, TypeError):
     pass
 
 try:
@@ -155,6 +155,7 @@ try:
     from libth_transformer_config import (
         get_block_cache_keys as cpp_get_block_cache_keys,
     )
+    from libth_transformer_config import MultimodalInput, MMPreprocessConfig
 
 except BaseException as e:
     logging.info(f"Exception: {e}, traceback: {traceback.format_exc()}")
@@ -192,16 +193,12 @@ except BaseException as e:
 
 try:
 
-    from libth_transformer import MultimodalInput as MultimodalInputCpp
     from libth_transformer import RtpEmbeddingOp, RtpLLMOp
     from libth_transformer import EmbeddingCppOutput
 
     libth_transformer_imported = True
 except BaseException as e:
-    MultimodalInputCpp = EmbeddingCppOutput = (
-        EmptyClass
-    )
-    RtpEmbeddingOp = RtpLLMOp = EmptyClass
+    EmbeddingCppOutput = RtpEmbeddingOp = RtpLLMOp = EmptyClass
 
     logging.warning(f"libth_transformer import failed: {type(e).__name__}: {e}")
     logging.info(

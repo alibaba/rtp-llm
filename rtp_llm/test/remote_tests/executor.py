@@ -13,9 +13,19 @@ from typing import Callable, Dict, List, Optional
 import grpc
 from google.protobuf import duration_pb2
 
-from . import bytestream_pb2 as bs_pb2
-from . import remote_execution_pb2 as re_pb2
-from . import remote_execution_pb2_grpc as re_grpc
+# Proto modules are generated at build time.  In a source-only checkout they
+# may not exist yet — provide a clear error rather than a bare ImportError.
+try:
+    from . import bytestream_pb2 as bs_pb2
+    from . import remote_execution_pb2 as re_pb2
+    from . import remote_execution_pb2_grpc as re_grpc
+except ImportError as _proto_err:
+    raise ImportError(
+        f"remote_tests proto modules not found: {_proto_err}. "
+        "Run the proto generation step (e.g. `python -m grpc_tools.protoc` "
+        "or the project build system) before importing remote_tests, "
+        "or ensure generated files are included in the wheel/distribution."
+    ) from _proto_err
 from .action_cache_client import _encode_varint
 from .cas_client import CASClient
 from .endpoint_info import (
@@ -633,9 +643,11 @@ class RemoteExecutor:
         then stays idle. After completion we have full stdout/stderr in the response.
         """
         if stdout_file is not None:
-            stdout_file.write_bytes(result.stdout_raw or b"")
+            if not started_byte_stream_stdout or len(result.stdout_raw or b"") > (stdout_file.stat().st_size if stdout_file.exists() else 0):
+                stdout_file.write_bytes(result.stdout_raw or b"")
         if stderr_file is not None:
-            stderr_file.write_bytes(result.stderr_raw or b"")
+            if not started_byte_stream_stderr or len(result.stderr_raw or b"") > (stderr_file.stat().st_size if stderr_file.exists() else 0):
+                stderr_file.write_bytes(result.stderr_raw or b"")
         if stdout_file is None and stderr_file is None:
             return
         if not started_byte_stream_stdout and not started_byte_stream_stderr:
@@ -723,22 +735,66 @@ class RemoteExecutor:
         return None
 
     def _parse(self, op) -> ExecutionResult:
+        # LRO operation errors indicate infrastructure-level failures; fail fast
+        # instead of trying to unpack a response that may be of the wrong type.
+        if op.error and op.error.code != 0:
+            err_msg = f"LRO operation failed: code={op.error.code}, message={op.error.message!r}"
+            log.error(err_msg)
+            # Classify the error: recoverable infra failures (worker setup,
+            # GPU Xid, etc.) should return exit_code=-1 with infra_category
+            # so the caller can failover/retry.  Non-recoverable errors are
+            # treated as normal test failures (exit_code=1).
+            status_message = op.error.message or ""
+            infra_category = self._classify_execute_response_infra(
+                exit_code=op.error.code,
+                status_code=op.error.code,
+                status_message=status_message,
+                stdout_raw=b"",
+                stderr_raw=err_msg.encode("utf-8"),
+            )
+            if infra_category is not None:
+                return ExecutionResult(
+                    exit_code=-1,
+                    stderr_raw=err_msg.encode("utf-8"),
+                    executor_endpoint=self.grpc_uri,
+                    infra_category=infra_category,
+                )
+            return ExecutionResult(
+                exit_code=1,
+                stderr_raw=err_msg.encode("utf-8"),
+            )
+
         resp = re_pb2.ExecuteResponse()
-        try:
-            # Try Unpack first (handles type_url matching)
-            op.response.Unpack(resp)
-        except Exception:
+        # Unpack returns False when the type_url does not match ExecuteResponse.
+        if not op.response.Unpack(resp):
             try:
-                # Fallback: parse raw value bytes
+                # Fallback: parse raw value bytes (older REAPI endpoints may not
+                # set type_url correctly).
                 resp.ParseFromString(op.response.value)
             except Exception:
                 return ExecutionResult(
                     exit_code=-1,
                     stderr_raw=(
-                        b"Failed to unpack response\n[reapi-targets] "
+                        b"Failed to unpack response as ExecuteResponse\n[reapi-targets] "
                         + self.reapi_targets_combined.encode()
                     ),
                 )
+
+        # An ExecuteResponse without a result is not a successful execution.
+        if not resp.HasField("result"):
+            status_code = resp.status.code if resp.HasField("status") else None
+            status_message = resp.status.message if resp.HasField("status") else ""
+            err_msg = (
+                f"ExecuteResponse has no result: status={status_code}, "
+                f"message={status_message!r}"
+            )
+            log.error(err_msg)
+            return ExecutionResult(
+                exit_code=1,
+                stderr_raw=err_msg.encode("utf-8"),
+                response_status_code=status_code,
+                response_status_message=status_message,
+            )
 
         r = resp.result
         log.info(
@@ -781,6 +837,37 @@ class RemoteExecutor:
         worker_ip = extract_remote_worker_ip(out_txt)
         status_code = resp.status.code if resp.HasField("status") else None
         status_message = resp.status.message if resp.HasField("status") else None
+
+        # Fail-closed: if the REAPI response status is non-OK, treat the
+        # execution as a failure regardless of exit_code.  Without this an
+        # infrastructure error (e.g. deadline exceeded, resource exhausted)
+        # could be silently treated as a passing test.
+        if status_code is not None and status_code != 0:
+            err_msg = (
+                f"REAPI Execute returned non-OK status: code={status_code}, "
+                f"message={status_message!r}"
+            ).encode("utf-8")
+            return ExecutionResult(
+                exit_code=1,
+                stdout_raw=out_raw,
+                stderr_raw=err_raw + b"\n" + err_msg,
+                stdout_digest=r.stdout_digest if r.stdout_digest.hash else None,
+                stderr_digest=r.stderr_digest if r.stderr_digest.hash else None,
+                output_files=output_files,
+                worker_host_ip=worker_ip,
+                metadata_worker=meta_worker or None,
+                cached_result=resp.cached_result,
+                response_status_code=status_code,
+                response_status_message=status_message,
+                infra_category=self._classify_execute_response_infra(
+                    exit_code=1,
+                    status_code=status_code,
+                    status_message=status_message,
+                    stdout_raw=out_raw,
+                    stderr_raw=err_raw,
+                ),
+            )
+
         infra_category = self._classify_execute_response_infra(
             exit_code=r.exit_code,
             status_code=status_code,

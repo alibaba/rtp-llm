@@ -3,6 +3,7 @@
 #include <unistd.h>
 #include <limits.h>
 #include <condition_variable>
+#include <c10/core/InferenceMode.h>
 
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
 #include "rtp_llm/cpp/utils/KVCacheUtils.h"
@@ -37,9 +38,9 @@ string makeRequestKey(const string& client_id, size_t request_id) {
 namespace rtp_llm {
 
 grpc::Status DecodeRpcServer::init(const EngineInitParams&                                maga_init_params,
-                                   py::object                                             mm_process_engine,
-                                   std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> propose_params) {
-    auto ret = RemoteRpcServer::init(maga_init_params, mm_process_engine, std::move(propose_params));
+                                   std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> propose_params,
+                                   py::object                                             mm_process_engine) {
+    auto ret = RemoteRpcServer::init(maga_init_params, std::move(propose_params), mm_process_engine);
     if (!ret.ok()) {
         return ret;
     }
@@ -895,8 +896,9 @@ grpc::Status DecodeRpcServer::allocateResourceFunc(DecodeGenerateContext& decode
 
 grpc::Status DecodeRpcServer::RemoteGenerate(grpc::ServerContext* server_context, ServerStream* grpc_stream) {
     RTP_LLM_PROFILE_FUNCTION();
-    AtomicGuard      request_guard(onflight_requests_);
-    DecodeRpcContext rpc_context{grpc_stream};
+    c10::InferenceMode inference_guard(true);
+    AtomicGuard        request_guard(onflight_requests_);
+    DecodeRpcContext   rpc_context{grpc_stream};
     // TODO(xinfei.sxf) request id is 0 here
     auto decode_context              = DecodeGenerateContext(rpc_context, 0, server_context, metrics_reporter_, meta_);
     decode_context.onflight_requests = onflight_requests_;

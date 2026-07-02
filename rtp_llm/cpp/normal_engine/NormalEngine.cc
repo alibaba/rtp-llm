@@ -13,6 +13,7 @@
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include "autil/TimeUtility.h"
 #include "rtp_llm/cpp/normal_engine/speculative/MtpExecutor.h"
+#include <c10/core/InferenceMode.h>
 #include <algorithm>
 #include <memory>
 #include <thread>
@@ -111,6 +112,7 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
     releaseHostMemoryCache();
 
     initScheduler();
+    step_profiler_.configureFromConfig(profiling_debug_logging_config);
     (void)startLoop();
 }
 
@@ -159,6 +161,8 @@ NormalEngine::~NormalEngine() {
 
 absl::StatusOr<GenerateStreamPtr> NormalEngine::preRun(const std::shared_ptr<GenerateInput>& generate_input,
                                                        preRunMode                            mode) {
+    c10::InferenceMode inference_guard(true);
+
     auto stream = std::make_shared<NormalGenerateStream>(generate_input,
                                                          model_config_,
                                                          runtime_config,
@@ -382,6 +386,7 @@ absl::Status NormalEngine::stop() {
 void NormalEngine::loop() {
     RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_LOG_INFO("loop begin");
+    c10::InferenceMode inference_guard(true);
     cudaPreRun(getDeviceId());
     while (running_) {
         auto status = step();
@@ -457,30 +462,23 @@ absl::Status NormalEngine::step() {
     int64_t      step_begin_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
     absl::Status status             = absl::OkStatus();
 
-    // If any stream in this batch requested gen_timeline AND no profiling session is
-    // already active, configure + tick BEFORE process() so the profiler is up before
-    // the actual work runs. This guarantees the trace captures THIS step's work, not
-    // the next step's. If a session is already active (e.g. external StartProfile RPC),
-    // skip — first-come-first-served.
+    // Per-request timeline: if any stream requested gen_timeline and no session is
+    // active yet, configure the profiler so the next stepScope() captures THIS step.
     if (!step_profiler_.enabled()) {
         for (const auto& stream : streams) {
             if (stream && stream->genTimeline()) {
                 const auto& cfg = stream->generateConfig();
                 step_profiler_.configure(true, cfg->profile_trace_name, 0, cfg->profile_step);
-                step_profiler_.tick();  // start profiler now (start_step=0)
                 break;
             }
         }
     }
 
     {
+        [[maybe_unused]] auto profile_step = step_profiler_.stepScope();
         RTP_LLM_PROFILE_SCOPE_DYNAMIC("engine.normal.execute(stream_size=%zu)", streams.size());
         status = executor_->process(streams);
     }
-
-    // tick profiler after process() to count this step (and stop when num_steps reached).
-    // All TP ranks synchronize inside process() via NCCL, so stop happens at aligned points.
-    step_profiler_.tick();
 
     // report step metrics
     if (parallelism_config.tp_rank == 0) {

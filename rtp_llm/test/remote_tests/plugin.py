@@ -777,6 +777,8 @@ class RemoteREAPIPlugin:
         return False
 
     def _execute_with_retry(self, **kwargs) -> ExecutionResult:
+        if MAX_RETRIES < 0:
+            raise ValueError(f"MAX_RETRIES must be >= 0, got {MAX_RETRIES}")
         self._ensure_remote_clients()
         last_result = None
         for attempt in range(MAX_RETRIES + 1):
@@ -1723,7 +1725,15 @@ class RemoteREAPIPlugin:
             print("::endgroup::", file=_sys.stderr)
 
         exit_code = result.exit_code
-        if "EXIT_CODE=" in stdout:
+        # Do NOT let the remote worker's EXIT_CODE override a non-OK REAPI
+        # response status.  A status code != 0 means the execution itself failed
+        # at the REAPI layer, regardless of what the worker claims.
+        if (
+            result.response_status_code is not None
+            and result.response_status_code != 0
+        ):
+            exit_code = result.exit_code or 1
+        elif "EXIT_CODE=" in stdout:
             try:
                 exit_code = int(stdout.rsplit("EXIT_CODE=", 1)[1].strip().split()[0])
             except (ValueError, IndexError):

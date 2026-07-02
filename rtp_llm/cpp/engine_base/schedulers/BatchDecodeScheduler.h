@@ -5,9 +5,11 @@
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cache/Types.h"
 #include <atomic>
+#include <map>
 #include <mutex>
 #include <condition_variable>
 #include <list>
+#include <unordered_set>
 
 namespace rtp_llm {
 
@@ -133,21 +135,67 @@ public:
     }
 
     void evaluateWaitingStreams() {
-        // 清理 waiting_streams_ 中有错误的 stream
-        waiting_streams_.remove_if([](const auto& s) { return s->hasError(); });
+        // 清理 waiting_streams_ 中有错误或已结束的 stream
+        waiting_streams_.remove_if([](const auto& s) {
+            return s->hasError() || s->getStatus() == StreamState::FINISHED;
+        });
+
+        // Group streams by ReturnAllProbsMode to avoid mixing DEFAULT and ORIGINAL
+        // in one batch.  NONE streams are wildcards and can join either group.
+        std::map<ReturnAllProbsMode, std::list<GenerateStreamPtr>> mode_groups;
+        for (auto& s : waiting_streams_) {
+            if (!s->hasError()) {
+                mode_groups[s->getReturnAllProbs()].push_back(s);
+            }
+        }
+
+        // Pick the non-NONE group with the most streams.  If only NONE streams
+        // are waiting, treat NONE as the selected group.
+        ReturnAllProbsMode selected_mode = ReturnAllProbsMode::NONE;
+        size_t             max_count     = 0;
+        for (auto& [mode, streams] : mode_groups) {
+            if (mode == ReturnAllProbsMode::NONE) {
+                continue;
+            }
+            if (streams.size() > max_count) {
+                max_count     = streams.size();
+                selected_mode = mode;
+            }
+        }
+        auto& none_streams = mode_groups[ReturnAllProbsMode::NONE];
+        if (selected_mode == ReturnAllProbsMode::NONE && !none_streams.empty()) {
+            selected_mode = ReturnAllProbsMode::NONE;
+            max_count     = none_streams.size();
+        }
+
+        if (max_count == 0) {
+            return;
+        }
+
+        // Build the candidate list from the selected concrete mode plus all NONE
+        // streams.  This lets compatible wildcard requests batch together instead
+        // of being stranded in their own group.
+        std::list<GenerateStreamPtr> candidates;
+        if (selected_mode != ReturnAllProbsMode::NONE) {
+            auto& selected_group = mode_groups[selected_mode];
+            candidates.splice(candidates.end(), selected_group);
+        }
+        candidates.splice(candidates.end(), none_streams);
 
         std::list<GenerateStreamPtr> new_streams;
-        for (auto it = waiting_streams_.begin(); it != waiting_streams_.end(); it++) {
-            // 先检查是否有错误，避免错误请求占用资源
-            if (!(*it)->hasError()) {
-                new_streams.push_back(*it);
-            }
+        for (auto& s : candidates) {
+            new_streams.push_back(s);
             if (new_streams.size() >= batch_size_) {
                 break;
             }
         }
-        // 凑到batch_size_个stream再统一入队
-        if (new_streams.size() >= batch_size_) {
+        // Schedule any non-empty compatible group.  Waiting for a full batch
+        // would strand smaller groups (e.g., mixed DEFAULT/ORIGINAL all-probs
+        // modes) when the total never reaches batch_size_.  The caller wakes
+        // up at most every kFlushTimeoutMs to batch as much as possible while
+        // still flushing partial groups promptly.
+        bool should_schedule = !new_streams.empty();
+        if (should_schedule) {
             for (auto& stream : new_streams) {
                 stream->reportEvent(StreamEvents::CanRun);
                 // 忙等stream load cache done, 和原有SyncLoadCache逻辑等效
@@ -159,9 +207,15 @@ public:
             new_streams.remove_if([](const auto& s) { return s->getStatus() == StreamState::FINISHED; });
             running_streams_.insert(running_streams_.end(), new_streams.begin(), new_streams.end());
             // 从waiting_streams_中移除已调度的stream
+            // Use a set + single remove_if to avoid O(batch_size * waiting_size)
+            std::unordered_set<GenerateStream*> scheduled_ptrs;
+            scheduled_ptrs.reserve(new_streams.size());
             for (auto& stream : new_streams) {
-                waiting_streams_.remove(stream);
+                scheduled_ptrs.insert(stream.get());
             }
+            waiting_streams_.remove_if([&](const GenerateStreamPtr& s) {
+                return scheduled_ptrs.count(s.get()) > 0;
+            });
         }
     }
 
@@ -183,10 +237,17 @@ public:
         }
     }
 
+    // Maximum time a compatible group of waiting streams may sit before being
+    // scheduled as a partial batch.  Prevents mixed ReturnAllProbsMode groups
+    // (or low-traffic periods) from waiting forever for a full batch_size_.
+    static constexpr std::chrono::milliseconds kFlushTimeoutMs{100};
+
     absl::StatusOr<std::list<GenerateStreamPtr>> schedule() override {
         std::unique_lock<std::mutex> lock(lock_);
-        cond_.wait_for(lock, std::chrono::seconds(30), [this] {
-            return waiting_streams_.size() >= batch_size_ || running_streams_.size() > 0
+        // Use a longer timeout when idle to avoid CPU spinning (enqueue() will notify on new requests)
+        auto timeout = waiting_streams_.empty() ? std::chrono::seconds(5) : kFlushTimeoutMs;
+        bool woken = cond_.wait_for(lock, timeout, [this] {
+            return !waiting_streams_.empty() || running_streams_.size() > 0
                    || !loading_cache_streams_.empty();
         });
 
@@ -195,7 +256,11 @@ public:
         evaluateAndUpdateStreams(loading_cache_streams_);
         evaluateAndUpdateStreams(running_streams_);
 
-        if (running_streams_.empty() && waiting_streams_.size() >= batch_size_) {
+        // If no running work and there are waiting streams, schedule them.
+        // When the flush timeout fires (!woken), run a partial batch so low-traffic
+        // or mixed ReturnAllProbsMode groups never wait forever for batch_size_.
+        if (running_streams_.empty() && !waiting_streams_.empty()
+            && (waiting_streams_.size() >= batch_size_ || !woken)) {
             evaluateWaitingStreams();
             if (!running_streams_.empty()) {
                 initRunningStreams();

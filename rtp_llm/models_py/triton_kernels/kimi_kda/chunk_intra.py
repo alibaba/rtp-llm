@@ -11,9 +11,12 @@ import torch
 import triton
 import triton.language as tl
 
+from rtp_llm.models_py.triton_kernels.autotune_cache import (
+    autotune_cache_kwargs,
+    cuda_cached_autotune,
+)
 from rtp_llm.models_py.triton_kernels.fla.index import prepare_chunk_indices
 from rtp_llm.models_py.triton_kernels.fla.op import exp2
-from rtp_llm.models_py.triton_kernels.fla.utils import autotune_cache_kwargs
 from rtp_llm.models_py.triton_kernels.fla.utils import (
     is_gather_supported as IS_GATHER_SUPPORTED,
 )
@@ -40,7 +43,7 @@ else:
         "IS_VARLEN": lambda args: args["cu_seqlens"] is not None,
     }
 )
-@triton.autotune(
+@cuda_cached_autotune(
     configs=[
         triton.Config({"BK": BK}, num_warps=num_warps)
         for BK in [32, 64]
@@ -425,7 +428,7 @@ def chunk_kda_fwd_kernel_inter_solve_fused(
         "IS_VARLEN": lambda args: args["cu_seqlens"] is not None,
     }
 )
-@triton.autotune(
+@cuda_cached_autotune(
     configs=[
         triton.Config({}, num_warps=num_warps, num_stages=num_stages)
         for num_warps in [1, 2, 4, 8]

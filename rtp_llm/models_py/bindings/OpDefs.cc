@@ -97,31 +97,30 @@ void registerPyOpDefs(pybind11::module& m) {
         .def_readwrite("prefix_lengths", &PyAttentionInputs::prefix_lengths)
         .def_readwrite("sequence_lengths", &PyAttentionInputs::sequence_lengths)
         .def_readwrite("input_lengths", &PyAttentionInputs::input_lengths)
-        .def_readwrite("kv_cache_kernel_block_id_host", &PyAttentionInputs::kv_cache_kernel_block_id_host)
+        .def_readwrite("kv_cache_kernel_block_id", &PyAttentionInputs::kv_cache_kernel_block_id)
         .def_readwrite("kv_cache_kernel_block_id_device", &PyAttentionInputs::kv_cache_kernel_block_id_device)
-        .def_readwrite("kv_cache_block_id_host", &PyAttentionInputs::kv_cache_block_id_host)
+        .def_readwrite("kv_cache_block_id", &PyAttentionInputs::kv_cache_block_id)
         .def_readwrite("kv_cache_block_id_device", &PyAttentionInputs::kv_cache_block_id_device)
-        .def_readwrite("kv_cache_kernel_block_id_host_by_group",
-                       &PyAttentionInputs::kv_cache_kernel_block_id_host_by_group)
+        .def_readwrite("kv_cache_kernel_block_id_by_group", &PyAttentionInputs::kv_cache_kernel_block_id_by_group)
         .def_readwrite("kv_cache_kernel_block_id_device_by_group",
                        &PyAttentionInputs::kv_cache_kernel_block_id_device_by_group)
         .def_readwrite("kv_cache_layer_to_group", &PyAttentionInputs::kv_cache_layer_to_group)
         .def_readwrite("dtype", &PyAttentionInputs::dtype)
+        .def_readwrite("cu_seqlens_device", &PyAttentionInputs::cu_seqlens_device)
         .def_readwrite("cu_seqlens", &PyAttentionInputs::cu_seqlens)
-        .def_readwrite("cu_seqlens_host", &PyAttentionInputs::cu_seqlens_host)
-        .def_readwrite("cu_kv_seqlens", &PyAttentionInputs::cu_kv_seqlens)
+        .def_readwrite("cu_kv_seqlens_device", &PyAttentionInputs::cu_kv_seqlens_device)
         .def_readwrite("context_total_kv_length", &PyAttentionInputs::context_total_kv_length)
         .def_readwrite("total_tokens", &PyAttentionInputs::total_tokens)
         .def_readwrite("padding_offset", &PyAttentionInputs::padding_offset)
         .def_readwrite("is_s_padded", &PyAttentionInputs::is_s_padded)
-        .def_readonly("prefix_lengths_d", &PyAttentionInputs::prefix_lengths_d)
-        .def_readwrite("sequence_lengths_plus_1_d", &PyAttentionInputs::sequence_lengths_plus_1_d)
-        .def_readonly("input_lengths_d", &PyAttentionInputs::input_lengths_d)
-        .def_readwrite("decode_cu_seqlens_d", &PyAttentionInputs::decode_cu_seqlens_d)
-        .def_readonly("decode_cu_seqlens_host", &PyAttentionInputs::decode_cu_seqlens_host)
-        .def_readwrite("position_ids", &PyAttentionInputs::position_ids)
+        .def_readonly("prefix_lengths_device", &PyAttentionInputs::prefix_lengths_device)
+        .def_readwrite("sequence_lengths_plus_1_device", &PyAttentionInputs::sequence_lengths_plus_1_device)
+        .def_readonly("input_lengths_device", &PyAttentionInputs::input_lengths_device)
+        .def_readwrite("decode_cu_seqlens_device", &PyAttentionInputs::decode_cu_seqlens_device)
+        .def_readwrite("decode_cu_seqlens", &PyAttentionInputs::decode_cu_seqlens)
         .def_readwrite("cache_store_inputs", &PyAttentionInputs::cache_store_inputs)
         .def_readwrite("context_parallel_info", &PyAttentionInputs::context_parallel_info)
+        .def_readwrite("combo_position_ids", &PyAttentionInputs::combo_position_ids)
         .def("__repr__", [](const PyAttentionInputs& self) { return "PyAttentionInputs"; })
         .def_readwrite("prefill_cuda_graph_copy_params", &PyAttentionInputs::prefill_cuda_graph_copy_params)
         .def_readwrite("headwise_config", &PyAttentionInputs::headwise_config)
@@ -145,15 +144,43 @@ void registerPyOpDefs(pybind11::module& m) {
             "input_embedding_scalar", &BertEmbeddingInputs::input_embedding_scalar, "Input embedding scalar value")
         .def("__repr__", [](const BertEmbeddingInputs& self) { return "BertEmbeddingInputs"; });
 
+    pybind11::class_<PyEmbeddingInputs>(m, "PyEmbeddingInputs")
+        .def(pybind11::init<>())
+        .def_readwrite(
+            "combo_tokens_type_ids", &PyEmbeddingInputs::combo_tokens_type_ids, "Combined token type IDs tensor")
+        .def_readwrite("text_tokens_mask", &PyEmbeddingInputs::text_tokens_mask, "Text tokens mask tensor")
+        .def("__repr__", [](const PyEmbeddingInputs& self) { return "PyEmbeddingInputs"; });
+
+    pybind11::class_<PyMultimodalInputs>(m, "PyMultimodalInputs")
+        .def(pybind11::init<>())
+        .def_readwrite("multimodal_features", &PyMultimodalInputs::multimodal_features, "Multimodal features tensor")
+        .def_readwrite(
+            "mm_features_locs", &PyMultimodalInputs::mm_features_locs, "Multimodal features locations tensor")
+        .def_readwrite(
+            "mm_extra_input", &PyMultimodalInputs::mm_extra_input, "Multimodal model-specific extra input tensor")
+        .def("__repr__", [](const PyMultimodalInputs& self) { return "PyMultimodalInputs"; });
+
     pybind11::class_<PyModelInputs>(m, "PyModelInputs")
         .def(pybind11::init<>())
-        .def(pybind11::init<torch::Tensor, torch::Tensor, PyAttentionInputs, BertEmbeddingInputs>(),
+        .def(pybind11::init<torch::Tensor,
+                            torch::Tensor,
+                            torch::Tensor,
+                            PyEmbeddingInputs,
+                            PyMultimodalInputs,
+                            PyAttentionInputs,
+                            BertEmbeddingInputs>(),
              pybind11::arg("input_ids")             = torch::empty(0),
              pybind11::arg("input_hiddens")         = torch::empty(0),
+             pybind11::arg("combo_position_ids")    = torch::empty(0),
+             pybind11::arg("embedding_inputs")      = PyEmbeddingInputs(),
+             pybind11::arg("multimodal_inputs")     = PyMultimodalInputs(),
              pybind11::arg("attention_inputs")      = PyAttentionInputs(),
              pybind11::arg("bert_embedding_inputs") = BertEmbeddingInputs())
         .def_readwrite("input_ids", &PyModelInputs::input_ids, "Input token IDs tensor")
         .def_readwrite("input_hiddens", &PyModelInputs::input_hiddens, "Input hidden states tensor")
+        .def_readwrite("combo_position_ids", &PyModelInputs::combo_position_ids, "Combo position IDs tensor")
+        .def_readwrite("embedding_inputs", &PyModelInputs::embedding_inputs, "Embedding inputs structure")
+        .def_readwrite("multimodal_inputs", &PyModelInputs::multimodal_inputs, "Multimodal inputs structure")
         .def_readwrite("attention_inputs", &PyModelInputs::attention_inputs, "Attention inputs structure")
         .def_readwrite(
             "bert_embedding_inputs", &PyModelInputs::bert_embedding_inputs, "BERT embedding inputs structure");

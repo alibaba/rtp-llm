@@ -454,6 +454,43 @@ def destroy_distributed_environment():
     if rocm_rccl.is_available_runtime():
         rocm_rccl.destroy_capture_comm()
 
+    # Close symmetric memory communicator before destroying process groups.
+    # Must happen before destroy_process_group() because PyTorch does NOT clean
+    # up _symmetric_memory globals, leaving stale IPC handles that corrupt
+    # the CUDA address space for subsequent re-initialization.
+    try:
+        from rtp_llm.models_py.distributed.symm_mem import _symm_mem_comm
+
+        if _symm_mem_comm is not None:
+            _symm_mem_comm.close()
+    except Exception as e:
+        logging.warning(f"Failed to close symm_mem communicator: {e}")
+
+    # Release MoriEP singleton resources before destroying process groups so
+    # subsequent re-initialization starts from a clean state.
+    try:
+        from rtp_llm.models_py.distributed.moriep_wrapper import MoriEPWrapper
+
+        if MoriEPWrapper.is_initialized():
+            instance = MoriEPWrapper.get_instance()
+            if instance is not None:
+                instance.reset_op()
+            MoriEPWrapper.reset()
+    except Exception as e:
+        logging.warning(f"Failed to reset MoriEP wrapper: {e}")
+
+    # Finalize MORI shared-memory runtime after resetting the wrapper, so that
+    # the same process can re-initialize MoriEP later without stale shmem state.
+    try:
+        import mori  # type: ignore
+
+        if hasattr(mori, "shmem") and hasattr(mori.shmem, "shmem_finalize"):
+            mori.shmem.shmem_finalize()
+    except ImportError:
+        pass
+    except Exception as e:
+        logging.warning(f"Failed to finalize MoriEP shmem: {e}")
+
     if torch.distributed.is_initialized():
         torch.distributed.destroy_process_group()
     _group_map.clear()
@@ -634,6 +671,65 @@ def all_gather(tensor: torch.Tensor, group: Group) -> torch.Tensor:
     # return torch.cat(tensor_list, dim=0)
 
 
+def reduce_scatter(
+    input_tensor: torch.Tensor,
+    group: Group,
+    output_tensor: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    """Reduce-scatter a tensor across all ranks in the group.
+
+    Reduces (sums) the input tensor across all ranks and scatters the result
+    so that each rank receives a 1/world_size chunk of the reduced tensor.
+
+    Args:
+        input_tensor: Full-size tensor to reduce-scatter
+            (shape: [world_size * chunk_size] + remaining_dims)
+        group: Process group to use
+        output_tensor: Optional pre-allocated output buffer. When provided, it
+            must have shape [chunk_size] + remaining_dims, and match the input
+            device and dtype. This avoids allocating a new tensor on every call.
+
+    Returns:
+        Scattered chunk of the reduced tensor for this rank
+        (shape: [chunk_size] + remaining_dims)
+    """
+    process_group = _get_group(group)
+    world_size = torch.distributed.get_world_size(process_group)
+    if input_tensor.shape[0] % world_size != 0:
+        raise ValueError(
+            f"reduce_scatter: input dim 0 ({input_tensor.shape[0]}) "
+            f"must be divisible by world_size ({world_size})"
+        )
+    chunk_size = input_tensor.shape[0] // world_size
+    expected_shape = [chunk_size] + list(input_tensor.shape[1:])
+    if output_tensor is None:
+        output_tensor = torch.empty(
+            expected_shape,
+            device=input_tensor.device,
+            dtype=input_tensor.dtype,
+        )
+    else:
+        if tuple(output_tensor.shape) != tuple(expected_shape):
+            raise ValueError(
+                f"reduce_scatter: output_tensor shape {tuple(output_tensor.shape)} "
+                f"does not match expected {tuple(expected_shape)}"
+            )
+        if output_tensor.device != input_tensor.device:
+            raise ValueError(
+                f"reduce_scatter: output_tensor device {output_tensor.device} "
+                f"does not match input device {input_tensor.device}"
+            )
+        if output_tensor.dtype != input_tensor.dtype:
+            raise ValueError(
+                f"reduce_scatter: output_tensor dtype {output_tensor.dtype} "
+                f"does not match input dtype {input_tensor.dtype}"
+            )
+    torch.distributed.reduce_scatter_tensor(
+        output_tensor, input_tensor, op=torch.distributed.ReduceOp.SUM, group=process_group
+    )
+    return output_tensor
+
+
 def barrier(group: Group) -> None:
     """Barrier all ranks in the group.
 
@@ -655,5 +751,6 @@ __all__ = [
     "broadcast",
     "all_reduce",
     "all_gather",
+    "reduce_scatter",
     "barrier",
 ]

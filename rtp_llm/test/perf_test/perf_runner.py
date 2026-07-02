@@ -7,12 +7,11 @@ adjacent ``baselines``/``test_data`` directories. Each suite resolves its own
 stays decoupled from data location.
 """
 
-import logging
 import os
 import sys
 import time
 from pathlib import Path
-from typing import List, Optional
+from typing import List
 
 
 def build_perf_params(pytest_module, perf_tests: dict):
@@ -64,10 +63,15 @@ def run_perf_test(test_name: str, test_config: dict, data_dir: Path):
     baseline_rel = test_config.get("baseline", "")
     if baseline_rel:
         candidate = str(data_dir / baseline_rel)
-        if os.path.exists(candidate):
-            baseline_path = candidate
-        else:
-            logging.warning("Baseline file not found: %s", candidate)
+        if not os.path.exists(candidate):
+            raise AssertionError(
+                f"Baseline file configured but not found for {test_name}: {candidate}"
+            )
+        if os.path.getsize(candidate) == 0:
+            raise AssertionError(
+                f"Baseline file configured but is empty for {test_name}: {candidate}"
+            )
+        baseline_path = candidate
 
     from rtp_llm.test.perf_test.batch_decode_test import main
     from rtp_llm.test.perf_test.test_entry import (

@@ -37,6 +37,7 @@ cc_library(
     ],
     deps = [
         "//:rtp_compute_ops",
+        "@rapidjson//:rapidjson",
     ],
     copts = copts(),
     visibility = ["//visibility:public"],
@@ -68,7 +69,6 @@ cc_library(
         ":dfa_utils",
         "//rtp_llm/cpp/engine_base/stream:generate_types",
         "//rtp_llm/cpp/engine_base/stream:generate_config",
-        "//rtp_llm/cpp/multimodal_processor:multimodal_types",
         "//rtp_llm/cpp/pybind:py_utils",
         "//rtp_llm/cpp/utils:error_code",
     ] + select({
@@ -134,6 +134,7 @@ cc_library(
         "//rtp_llm/cpp/cuda_graph:cuda_graph_base",
         "//rtp_llm/cpp/cuda_graph:cuda_graph_hdrs_lib",
         "//rtp_llm/models_py/bindings/common:fuse_copy_op",
+        "//rtp_llm/cpp/multimodal_processor:multimodal_types",
     ],
     visibility = ["//visibility:public"],
 )

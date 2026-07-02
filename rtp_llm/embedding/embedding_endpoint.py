@@ -1,10 +1,9 @@
-import asyncio
 import json
 import logging
-from typing import Any, Dict, Optional, Tuple
+import time
+from typing import Any, Dict, List, Optional, Tuple
 
 import grpc
-import numpy as np
 import torch
 
 import rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 as pb2
@@ -13,6 +12,9 @@ from rtp_llm.async_decoder_engine.embedding.interface import EngineInputs, Engin
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
 from rtp_llm.models.downstream_modules.utils import create_custom_module
+from rtp_llm.ops import RoleType
+from rtp_llm.server.host_service import HostService, HostServiceArgs
+from rtp_llm.utils.grpc_util import trans_from_tensor
 
 
 def tensor_pb_to_torch(tensor_pb) -> Optional[torch.Tensor]:
@@ -61,6 +63,16 @@ class EmbeddingEndpoint(object):
         if client_config is not None:
             for key, value in client_config.items():
                 self.options.append((key, value))
+        host_args = HostServiceArgs.create_from_env()
+        self.host_service = HostService(host_args)
+        # Cache the VIT role address list and round-robin across backends on
+        # each request.  Caching a single address would bypass HostService's
+        # multi-backend selection and create a hot spot; refreshing on failure
+        # handles role migration.
+        self._vit_role_addrs: List[str] = []
+        self._vit_role_addr_idx = 0
+        self._vit_role_addr_ts = 0.0
+        self._vit_role_addr_ttl = 30.0
         logging.info(f"embedding endpoint grpc options: {self.options}")
 
     async def embedding(
@@ -94,10 +106,42 @@ class EmbeddingEndpoint(object):
         channel = grpc.aio.insecure_channel(self.address, options=self.options)
         stub = pb2_grpc.EmbeddingRpcServiceStub(channel)
         multimodal_features = []
+
+        vit_role_addr = ""
+        if input.multimodal_inputs and self.host_service:
+            now = time.time()
+            if self._vit_role_addrs and now - self._vit_role_addr_ts < self._vit_role_addr_ttl:
+                vit_role_addr = self._vit_role_addrs[self._vit_role_addr_idx]
+                self._vit_role_addr_idx = (self._vit_role_addr_idx + 1) % len(self._vit_role_addrs)
+            else:
+                role_addrs = self.host_service.get_backend_role_addrs([RoleType.VIT])
+                if role_addrs:
+                    self._vit_role_addrs = [
+                        addr.ip + ":" + str(addr.grpc_port) for addr in role_addrs
+                    ]
+                    self._vit_role_addr_idx = 0
+                    self._vit_role_addr_ts = now
+                    vit_role_addr = self._vit_role_addrs[self._vit_role_addr_idx]
+                    self._vit_role_addr_idx = (self._vit_role_addr_idx + 1) % len(self._vit_role_addrs)
+
         for feature in input.multimodal_inputs:
+            preprocess_config = pb2.MMPreprocessConfigPB(
+                width=feature.mm_preprocess_config.width,
+                height=feature.mm_preprocess_config.height,
+                min_pixels=feature.mm_preprocess_config.min_pixels,
+                max_pixels=feature.mm_preprocess_config.max_pixels,
+                fps=feature.mm_preprocess_config.fps,
+                min_frames=feature.mm_preprocess_config.min_frames,
+                max_frames=feature.mm_preprocess_config.max_frames,
+                crop_positions=feature.mm_preprocess_config.crop_positions,
+                mm_timeout_ms=feature.mm_preprocess_config.mm_timeout_ms,
+            )
             multimodal_features.append(
                 pb2.MultimodalInputPB(
-                    multimodal_type=feature.mm_type, multimodal_url=feature.url
+                    multimodal_type=feature.mm_type,
+                    multimodal_url=feature.url,
+                    multimodal_tensor=trans_from_tensor(feature.tensor),
+                    mm_preprocess_config=preprocess_config,
                 )
             )
         request = pb2.EmbeddingInputPB(
@@ -106,6 +150,7 @@ class EmbeddingEndpoint(object):
             input_lengths=input.input_lengths.tolist(),  # 输入长度
             request_id=1,  # 唯一请求ID
             multimodal_features=multimodal_features,
+            vit_role_addr=vit_role_addr,
         )
         try:
             response = await stub.embedding(request)
@@ -125,6 +170,11 @@ class EmbeddingEndpoint(object):
             return result
         except grpc.RpcError as e:
             logging.warning(f"RPC failed: {e.code()}: {e.details()}")
+            # Refresh cached VIT address list on RPC failure in case the role
+            # has migrated to a different backend.
+            self._vit_role_addrs = []
+            self._vit_role_addr_idx = 0
+            self._vit_role_addr_ts = 0.0
             raise
         finally:
             await channel.close()

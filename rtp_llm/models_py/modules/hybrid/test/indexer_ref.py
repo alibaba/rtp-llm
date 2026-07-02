@@ -526,7 +526,7 @@ def prepare_indexer_params(
         extend_seq_lens = input_lengths.cpu().tolist()
 
         # cu_seqlens_q: cumulative sequence lengths [0, len1, len1+len2, ...]
-        cu_seqlens_q = attention_inputs.cu_seqlens.to(torch.int32).to("cuda")
+        cu_seqlens_q = attention_inputs.cu_seqlens_device.to(torch.int32).to("cuda")
 
         kv_lens = input_lengths + attention_inputs.prefix_lengths
         q_lens = input_lengths
@@ -672,7 +672,7 @@ def prepare_indexer_params(
         positions_d=positions_d,
         slot_mapping=slot_mapping,
         block_table=attention_inputs.kv_cache_kernel_block_id_device,
-        cu_seq_lens=attention_inputs.cu_seqlens,
+        cu_seq_lens=attention_inputs.cu_seqlens_device,
         ks=ks,
         ke=ke,
         is_prefill=is_prefill,

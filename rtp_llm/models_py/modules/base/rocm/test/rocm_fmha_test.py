@@ -831,6 +831,9 @@ def _run_paged_attention(
         print(
             f"Output difference: max diff = {(out_native - out_aiter).abs().max().item()}"
         )
+        # Match the run_atrex path: a numerical mismatch is a test failure, not
+        # a silently-ignored difference.
+        return {"test_status": "failed"}
 
     if torch.allclose(out_native, out_atrex, atol=1e-2, rtol=1e-2):
         print("run_atrex test passed")
