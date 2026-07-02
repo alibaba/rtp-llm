@@ -35,36 +35,40 @@ bool KVCacheGroup::ensureFreeBlocks(int required_blocks) {
         return true;
     }
 
-    if (!shared_cache_) {
-        RTP_LLM_LOG_WARNING("ensureFreeBlocks called without shared_cache_, cannot evict");
-        return false;
-    }
-
     while (true) {
         const auto free_blocks = block_pool_->freeBlocksNum();
         if (free_blocks >= static_cast<size_t>(required_blocks)) {
             break;
         }
 
+        if (!shared_cache_) {
+            RTP_LLM_LOG_WARNING(
+                "ensure free blocks failed, no shared cache, free blocks: %zu, need: %d", free_blocks, required_blocks);
+            return false;
+        }
+
         const size_t need_evict = static_cast<size_t>(required_blocks) - free_blocks;
         SharedBlockCache::EvictResult evict_result;
         size_t freed = shared_cache_->evictAndFreeForGroup(group_id_, need_evict, &evict_result);
-
-        if (freed == 0) {
-            RTP_LLM_LOG_WARNING("ensure free blocks failed, free blocks : %zu, need evict blocks : %zu",
-                                block_pool_->freeBlocksNum(),
-                                need_evict);
-            return false;
-        }
 
         if (metrics_reporter_) {
             for (const auto& [cache_key, lifetime_ms] : evict_result.evicted_lifetime_ms) {
                 RtpLLMCacheEvictionMetricsCollector collector;
                 collector.lifetime_ms = lifetime_ms;
                 kmonitor::MetricsTags tags("scope", "gpu");
-                metrics_reporter_->report<RtpLLMCacheEvictionMetrics, RtpLLMCacheEvictionMetricsCollector>(
-                    &tags, &collector);
+                tags.AddTag("evict_policy",
+                            evict_result.evicted_independent_group.count(cache_key) ? "independent" : "chain");
+                tags.AddTag("backing", "device");
+                metrics_reporter_->report<RtpLLMCacheEvictionMetrics, RtpLLMCacheEvictionMetricsCollector>(&tags,
+                                                                                                           &collector);
             }
+        }
+
+        if (freed == 0) {
+            RTP_LLM_LOG_WARNING("ensure free blocks failed, free blocks: %zu, need evict blocks: %zu",
+                                block_pool_->freeBlocksNum(),
+                                need_evict);
+            return false;
         }
     }
 
@@ -75,14 +79,14 @@ MatchResult KVCacheGroup::match(const CacheKeysType& cache_keys) {
     return matchPrefix(cache_keys);
 }
 
-MatchResult KVCacheGroup::matchPrefix(const CacheKeysType& /*cache_keys*/) {
-    RTP_LLM_FAIL("matchPrefix not implemented for this group type");
-    return MatchResult{};
+MatchResult KVCacheGroup::matchPrefix(const CacheKeysType& /*cache_keys*/) const {
+    RTP_LLM_FAIL("KVCacheGroup gid=%d does not support prefix matching", group_id_);
+    return {};
 }
 
 MatchResult KVCacheGroup::matchSingleKey(CacheKeyType /*cache_key*/) const {
-    RTP_LLM_FAIL("matchSingleKey not implemented for this group type");
-    return MatchResult{};
+    RTP_LLM_FAIL("KVCacheGroup gid=%d does not support single-key matching", group_id_);
+    return {};
 }
 
 size_t KVCacheGroup::freeBlocksNum() const {
@@ -143,12 +147,12 @@ CacheEvictPolicy KVCacheGroup::evictPolicy() const {
     return policy_.evict_policy;
 }
 
-int KVCacheGroup::explicitBlockNum() const {
+uint32_t KVCacheGroup::explicitBlockNum() const {
     return policy_.explicit_block_num;
 }
 
-int KVCacheGroup::activeTailBlocks() const {
-    return policy_.active_tail_blocks;
+size_t KVCacheGroup::activeTailBlocks() const {
+    return policy_.active_tail_blocks > 0 ? static_cast<size_t>(policy_.active_tail_blocks) : 0;
 }
 
 bool KVCacheGroup::isCpShardable() const {
@@ -156,7 +160,7 @@ bool KVCacheGroup::isCpShardable() const {
 }
 
 bool KVCacheGroup::prefixReusable() const {
-    return policy_.prefix_reusable;
+    return policy_.prefix_reusable && policy_.reuse_policy == CacheReusePolicy::REUSABLE;
 }
 
 bool KVCacheGroup::hasSparseSlots() const {

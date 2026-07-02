@@ -45,7 +45,7 @@ public:
     bool init();
     virtual bool malloc(BlockIds& block_ids, int seq_len, bool enable_reuse_cache = false, int reserve_step = 0) = 0;
     virtual MatchResult match(const CacheKeysType& cache_keys);
-    virtual MatchResult matchPrefix(const CacheKeysType& cache_keys);
+    virtual MatchResult matchPrefix(const CacheKeysType& cache_keys) const;
     virtual MatchResult matchSingleKey(CacheKeyType cache_key) const;
     virtual void        free(const BlockIndicesType& block_indices) = 0;
     virtual void removeSkippedBlocks(BlockIds& block_ids, bool enable_reuse_cache = false, int reserve_step = 0) = 0;
@@ -70,8 +70,8 @@ public:
 
     CacheReusePolicy reusePolicy() const;
     CacheEvictPolicy evictPolicy() const;
-    int              explicitBlockNum() const;
-    int              activeTailBlocks() const;
+    uint32_t         explicitBlockNum() const;
+    size_t           activeTailBlocks() const;
     bool             isCpShardable() const;
     bool             prefixReusable() const;
     bool             hasSparseSlots() const;

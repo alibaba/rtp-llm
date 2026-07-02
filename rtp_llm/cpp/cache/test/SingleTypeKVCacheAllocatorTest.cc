@@ -6,14 +6,14 @@
 #include <torch/torch.h>
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/cache/allocator/SingleTypeKVCacheAllocator.h"
-#include "rtp_llm/cpp/cache/SharedBlockCache.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/config_creator/CacheConfigCreator.h"
-#include "rtp_llm/cpp/cache/spec/KVCacheSpecDesc.h"
+#include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/cpp/cache/test/BlockPoolTestHelper.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
+#include "rtp_llm/cpp/cache/SharedBlockCache.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
 
 namespace rtp_llm {
@@ -43,15 +43,7 @@ static rtp_llm::ModelConfig makeTestModelConfig(uint32_t num_layers) {
     m.attn_config.kv_lora_rank     = 0;
     m.attn_config.rope_head_dim    = 0;
     m.attn_config.head_num         = 2;
-
-    KVCacheSpecDesc desc;
-    desc.cache_type         = CacheType::MHA;
-    desc.tag                = "default";
-    desc.size_per_head      = m.attn_config.size_per_head;
-    desc.num_kv_heads       = m.attn_config.kv_head_num;
-    desc.seq_size_per_block = m.attn_config.tokens_per_block;
-    m.kv_cache_spec_descs.assign(static_cast<size_t>(m.num_layers), {desc});
-
+    setDefaultKvCacheSpec(m);
     return m;
 }
 
@@ -105,7 +97,7 @@ BatchKVCacheResourcePtr createBatchKVCacheResource(int batch_size, int layer_num
     auto resource = std::make_shared<BatchKVCacheResource>();
     resource->resetBatchSize(batch_size);
     for (int i = 0; i < batch_size; ++i) {
-        std::vector<std::vector<int>> layer_group_ids(layer_num, {0});
+        std::vector<std::vector<int>> layer_group_ids(static_cast<size_t>(layer_num), std::vector<int>{0});
         resource->initBatchGroups(i, 1, layer_num, layer_group_ids);
         resource->setBatchBlocks(i, 0, std::vector<int>(block_num_per_batch));
         resource->setBatchCacheKeys(i, CacheKeysType(block_num_per_batch, static_cast<CacheKeyType>(i * 100)));
@@ -460,7 +452,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, ConvertToGlobalLayerIdSingleWithMtp) {
     EXPECT_EQ(allocator_->convertToGlobalLayerId(/*model_id=*/0, /*local_layer_id=*/2),
               std::numeric_limits<uint32_t>::max());
 
-    // mtp sub-models map via sub_cfg->layerIdsForGroup(0)
+    // mtp sub-models map via sub_cfg->global_layer_ids[0]
     EXPECT_EQ(allocator_->convertToGlobalLayerId(/*model_id=*/1, /*local_layer_id=*/0), 2u);
     EXPECT_EQ(allocator_->convertToGlobalLayerId(/*model_id=*/2, /*local_layer_id=*/0), 3u);
     EXPECT_EQ(allocator_->convertToGlobalLayerId(/*model_id=*/1, /*local_layer_id=*/1),
@@ -489,7 +481,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, LayerCacheBase) {
     auto layout = allocator_->allLayerCacheBase();
     EXPECT_EQ(layout.layers_to_kv_buffer_ptrs.size(), config.layer_num);
     EXPECT_EQ(layout.layers_to_scale_buffer_ptrs.size(), config.layer_num);
-    EXPECT_EQ((std::vector<std::vector<int>>(4, {0})), layout.layer_to_group_ids);
+    EXPECT_EQ((std::vector<std::vector<int>>(4, std::vector<int>{0})), layout.layer_to_group_ids);
 
     for (size_t i = 0; i < layout.layers_to_kv_buffer_ptrs.size(); ++i) {
         EXPECT_TRUE(layout.layers_to_kv_buffer_ptrs[i].defined());
@@ -772,6 +764,38 @@ TEST_F(SingleTypeKVCacheAllocatorTest, IncrKVCacheRefReferencesMatchedBlocksOnly
     EXPECT_EQ(allocator_->freeBlocksNum(), total_free_before);
 }
 
+TEST_F(SingleTypeKVCacheAllocatorTest, IncrKVCacheRefPreservesConnectorDummyTail) {
+    auto config = createSingleTypeTestConfig(/*layer_num=*/4, /*block_num=*/10, /*seq_size_per_block=*/8);
+    allocator_  = std::make_shared<SingleTypeKVCacheAllocator>(config, AllocationType::HOST);
+    ASSERT_TRUE(allocator_->init());
+
+    auto block_pool = allocator_->getBlockPool();
+    ASSERT_NE(block_pool, nullptr);
+
+    const size_t total_free_before = allocator_->freeBlocksNum();
+    auto         blocks            = block_pool->malloc(2);
+    ASSERT_EQ(blocks.size(), 2);
+
+    KVCacheResource resource;
+    resource.initGroups(1, config.layer_all_num, config.layerGroupIdsSnapshot());
+    resource.cacheKeys() = CacheKeysType{101, 103, 999};
+    resource.rebuildLinearBlockDependencies();
+    resource.setLastBlockAligned(false);
+    resource.mutableBlockIds(0).assign(BlockIndicesType{blocks[0], blocks[1]});
+
+    auto ref_resource = allocator_->incrKVCacheRef(resource, CacheKeysType{101, 103, 999}, /*is_connector=*/true);
+    ASSERT_NE(ref_resource, nullptr);
+    EXPECT_FALSE(ref_resource->lastBlockAligned());
+    EXPECT_EQ(ref_resource->cacheKeys(), (CacheKeysType{101, 103, 999}));
+    EXPECT_EQ(ref_resource->blocks(0), (BlockIndicesType{blocks[0], blocks[1], NULL_BLOCK_IDX}));
+
+    block_pool->requestFree(blocks);
+    EXPECT_EQ(allocator_->freeBlocksNum(), total_free_before - 2);
+
+    ref_resource.reset();
+    EXPECT_EQ(allocator_->freeBlocksNum(), total_free_before);
+}
+
 TEST_F(SingleTypeKVCacheAllocatorTest, IncrKVCacheRefEmptyInputNoEffect) {
     auto config = createSingleTypeTestConfig(/*layer_num=*/4, /*block_num=*/10, /*seq_size_per_block=*/8);
     allocator_  = std::make_shared<SingleTypeKVCacheAllocator>(config, AllocationType::HOST);
@@ -811,6 +835,21 @@ TEST_F(SingleTypeKVCacheAllocatorTest, MaxSeqLen) {
     allocator_->init();
 
     EXPECT_EQ(allocator_->maxAvailableTokensNum(), (10 - 1) * 8);  // block_num * seq_size_per_block
+}
+
+TEST_F(SingleTypeKVCacheAllocatorTest, CapacityAndNeedBlocksUseCPVirtualBlockSize) {
+    auto config = createSingleTypeTestConfig(/*layer_num=*/4, /*block_num=*/10, /*seq_size_per_block=*/8);
+    allocator_  = std::make_shared<SingleTypeKVCacheAllocator>(config);
+    ASSERT_TRUE(allocator_->init());
+
+    allocator_->setCPSlotMapper(
+        std::make_shared<CPSlotMapper>(/*cp_rank=*/0, /*cp_size=*/2, /*block_size=*/8));
+
+    EXPECT_EQ(allocator_->maxAvailableTokensNum(), (10u - 1u) * 16u);
+    EXPECT_EQ(allocator_->availableTokensNum(), (10u - 1u) * 16u);
+
+    auto batch_resource = createBatchKVCacheResource(/*batch_size=*/1, config.layer_num);
+    EXPECT_EQ(allocator_->singleBatchNeedBlocks(batch_resource, /*seq_len=*/65, /*reserve_step=*/0), 5);
 }
 
 // Test boundary conditions
