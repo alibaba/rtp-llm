@@ -445,6 +445,10 @@ struct PDSepConfig {
     int64_t prefill_worker_lambda_pool_size = 0;
     // slot pool size (L2 Prepare + L3 Load + L4 Finish). 0 = use formula default.
     int64_t prefill_slot_pool_size = 0;
+    // Max wait time in stopStream() for Engine Loop to call finish_internal().
+    // When GenerateDone is set and stream has no error, stopStream() waits up to
+    // this many ms for Engine Loop's advance() to detect GenerateDone and set FINISHED.
+    int64_t prefill_stop_stream_wait_timeout_ms = 2000;
 
     std::string to_string() const;
 };

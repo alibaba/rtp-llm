@@ -603,9 +603,9 @@ int StreamCacheResource::mallocFailedTimes() const {
 }
 
 bool StreamCacheResource::reuseCache() const {
-    // Global engine-level switch: REUSE_CACHE=1 enables cache for all requests.
-    // No longer requires per-request reuse_cache field in protobuf.
-    return resource_context_.reuse_cache;
+    // AND logic: global REUSE_CACHE=1 AND per-request reuse_cache both must be true.
+    // Per-request field flows frontend → FlexLB → engine via protobuf.
+    return resource_context_.reuse_cache && stream_->reuseCache();
 }
 
 bool StreamCacheResource::enableRemoteCache() const {

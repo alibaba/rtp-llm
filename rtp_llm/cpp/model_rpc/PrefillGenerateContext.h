@@ -61,10 +61,12 @@ public:
                            int64_t                               timeout_ms,
                            grpc::ServerContext*                  server_context,
                            kmonitor::MetricsReporterPtr&         metrics_reporter,
-                           std::shared_ptr<RpcServerRuntimeMeta> meta):
+                           std::shared_ptr<RpcServerRuntimeMeta> meta,
+                           int64_t                               prefill_stop_stream_wait_timeout_ms = 2000):
         GenerateContext(rpc_context.requestID(), timeout_ms, server_context, metrics_reporter, meta),
         resource(resource),
-        rpc_context(rpc_context) {
+        rpc_context(rpc_context),
+        prefill_stop_stream_wait_timeout_ms_(prefill_stop_stream_wait_timeout_ms) {
         prefill_worker_cache_store_addrs = resource->workers;
     }
     ~PrefillGenerateContext();
@@ -94,8 +96,9 @@ public:
     bool                                      grpc_stream_closed             = false;
     grpc::Status                              last_grpc_stream_closed_status = grpc::Status::OK;
     PrefillStatInfo                           stat_info;
-    int64_t                                   loading_cache_requests           = 0;
-    bool                                      recent_cache_key_metric_reported = false;
+    int64_t                                   loading_cache_requests               = 0;
+    bool                                      recent_cache_key_metric_reported     = false;
+    int64_t                                   prefill_stop_stream_wait_timeout_ms_ = 2000;
 };
 
 }  // namespace rtp_llm

@@ -601,7 +601,8 @@ std::string PDSepConfig::to_string() const {
         << "batch_load_timeout_ms: " << batch_load_timeout_ms << "\n"
         << "prefill_enqueue_pool_size: " << prefill_enqueue_pool_size << "\n"
         << "prefill_worker_lambda_pool_size: " << prefill_worker_lambda_pool_size << "\n"
-        << "prefill_slot_pool_size: " << prefill_slot_pool_size;
+        << "prefill_slot_pool_size: " << prefill_slot_pool_size << "\n"
+        << "prefill_stop_stream_wait_timeout_ms: " << prefill_stop_stream_wait_timeout_ms;
     return oss.str();
 }
 

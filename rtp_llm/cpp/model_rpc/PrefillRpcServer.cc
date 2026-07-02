@@ -1372,7 +1372,8 @@ grpc::Status PrefillRpcServer::GenerateStreamCall(grpc::ServerContext*          
                                                   request->generate_config().timeout_ms(),
                                                   server_context,
                                                   metrics_reporter_,
-                                                  meta_);
+                                                  meta_,
+                                                  maga_init_params_.pd_sep_config.prefill_stop_stream_wait_timeout_ms);
     prefill_context.onflight_requests      = onflight_requests_;
     prefill_context.loading_cache_requests = loading_cache_requests_;
 
@@ -1879,14 +1880,16 @@ grpc::Status PrefillRpcServer::EnqueueGroup(grpc::ServerContext*         context
                 };
 
                 for (auto& slot : slots) {
-                    auto rpc_ctx               = std::make_shared<RPCContext>(RPCContext{slot.input.get(), nullptr});
-                    auto pfx_ctx               = std::make_shared<PrefillGenerateContext>(&this->resource(),
-                                                                            *rpc_ctx,
-                                                                            slot.input->generate_config().timeout_ms(),
-                                                                            /*server_context=*/nullptr,
-                                                                            metrics_reporter_,
-                                                                            meta_);
-                    pfx_ctx->onflight_requests = onflight_requests_;
+                    auto rpc_ctx = std::make_shared<RPCContext>(RPCContext{slot.input.get(), nullptr});
+                    auto pfx_ctx = std::make_shared<PrefillGenerateContext>(
+                        &this->resource(),
+                        *rpc_ctx,
+                        slot.input->generate_config().timeout_ms(),
+                        /*server_context=*/nullptr,
+                        metrics_reporter_,
+                        meta_,
+                        maga_init_params_.pd_sep_config.prefill_stop_stream_wait_timeout_ms);
+                    pfx_ctx->onflight_requests      = onflight_requests_;
                     pfx_ctx->loading_cache_requests = loading_cache_requests_;
                     auto guard                      = std::make_shared<AtomicGuard>(onflight_requests_);
                     auto cancel_state               = std::make_shared<AsyncProducerCancelState>();
