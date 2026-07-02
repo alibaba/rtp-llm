@@ -32,6 +32,17 @@ def is_gfx950(arch_fallback: Optional[str] = None) -> bool:
         return os.environ.get("ROCM_GFX_ARCH", "") == "950"
 
 
+def is_gfx942(arch_fallback: Optional[str] = None) -> bool:
+    """Detect whether the current ROCm device is gfx942 (MI308X/MI300X)."""
+    try:
+        prop = torch.cuda.get_device_properties(torch.cuda.current_device())
+        return "gfx942" in getattr(prop, "gcnArchName", "")
+    except Exception:
+        if arch_fallback is not None:
+            return arch_fallback == "942"
+        return os.environ.get("ROCM_GFX_ARCH", "") == "942"
+
+
 class CpuImpl(DeviceBase):
     def __init__(self):
         super().__init__()

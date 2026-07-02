@@ -1,11 +1,13 @@
 import copy
+import logging
+import os
 from typing import Any, Dict, Optional
 
 import aiter
 import torch
 from aiter.fused_moe import fused_moe
 
-from rtp_llm.device.device_impl import is_gfx950
+from rtp_llm.device.device_impl import is_gfx942, is_gfx950
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
 )
@@ -21,16 +23,216 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.type import ExecutorType
 from rtp_llm.models_py.modules.factory.fused_moe.impl.rocm._utils import (
     get_rocm_fp8_dtype,
 )
+from rtp_llm.models_py.modules.factory.fused_moe.impl.rocm.flydsl.tuning import (
+    get_qwen_ptpc_fp8_tuning,
+)
 from rtp_llm.models_py.modules.factory.fused_moe.utils.config_resolver import (
     MoeConfigResolver,
 )
 from rtp_llm.utils.model_weight import W
+
+logger = logging.getLogger(__name__)
+
+
+_FLYDSL_AVAILABLE = False
+_FLYDSL_IMPORT_ATTEMPTED = False
+_fused_moe_flydsl_fn = None
+_FlyDSLActivationType = None
+_FlyDSLQuantType = None
+
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    val = os.environ.get(name)
+    if val is None:
+        return default
+    return val.strip().lower() in ("1", "true", "yes", "y", "on")
+
+
+def _flydsl_fused_moe_enabled() -> bool:
+    return _env_flag("USE_FLYDSL") and _env_flag("USE_FLYDSL_MOE")
+
+
+def _load_flydsl_fused_moe() -> bool:
+    global _FLYDSL_AVAILABLE
+    global _FLYDSL_IMPORT_ATTEMPTED
+    global _fused_moe_flydsl_fn
+    global _FlyDSLActivationType
+    global _FlyDSLQuantType
+
+    if _FLYDSL_AVAILABLE:
+        return True
+    if _FLYDSL_IMPORT_ATTEMPTED:
+        return False
+    _FLYDSL_IMPORT_ATTEMPTED = True
+    try:
+        from rtp_llm.models_py.modules.factory.fused_moe.impl.rocm.flydsl.fused_moe_flydsl import (
+            fused_moe_flydsl as _fused_moe_flydsl_fn,
+        )
+        from rtp_llm.models_py.modules.factory.fused_moe.impl.rocm.flydsl.fused_moe_helper import (
+            ActivationType as _FlyDSLActivationType,
+            QuantType as _FlyDSLQuantType,
+        )
+
+        _FLYDSL_AVAILABLE = True
+    except ImportError as e:
+        logger.debug("FlyDSL fused_moe failed to import, falling back to AITER: %s", e)
+    return _FLYDSL_AVAILABLE
 
 
 def _moe_activation_type(activation: str) -> aiter.ActivationType:
     if activation in ("silu", "SiGLU"):
         return aiter.ActivationType.Silu
     return aiter.ActivationType.Gelu
+
+
+def _flatten_per_channel_scale(scale: torch.Tensor) -> torch.Tensor:
+    if scale.dim() == 3 and scale.shape[-1] == 1:
+        return scale.reshape(scale.shape[0], scale.shape[1]).contiguous()
+    return scale
+
+
+def _flydsl_fused_moe_unsupported_reason(
+    hidden_states: torch.Tensor,
+    w1: torch.Tensor,
+    w2: torch.Tensor,
+    topk_ids: torch.Tensor,
+    *,
+    activation: str,
+    is_prefill: bool = False,
+    effective_expert_mask: Optional[torch.Tensor],
+    expert_ids_are_local: bool,
+    num_experts: int,
+    local_num_experts: int,
+    ep_size: int,
+) -> Optional[str]:
+    if is_prefill:
+        return "prefill uses AITER fused_moe"
+    if not is_gfx942():
+        return "FlyDSL fused_moe is enabled only on MI308X/gfx942"
+    if activation not in ("silu", "SiGLU"):
+        return f"activation={activation!r}"
+    if effective_expert_mask is not None:
+        return "expert_mask is set"
+    if expert_ids_are_local:
+        return "expert ids are already local"
+    if ep_size != 1 or num_experts != local_num_experts:
+        return f"non-pure-TP experts ep_size={ep_size}, global={num_experts}, local={local_num_experts}"
+    if hidden_states.dim() != 2 or topk_ids.dim() != 2:
+        return f"unexpected dims hidden={tuple(hidden_states.shape)}, topk_ids={tuple(topk_ids.shape)}"
+    if hidden_states.dtype not in (torch.float16, torch.bfloat16):
+        return f"hidden dtype={hidden_states.dtype}"
+    if w1.dim() != 3 or w2.dim() != 3:
+        return f"unexpected weight dims w1={tuple(w1.shape)}, w2={tuple(w2.shape)}"
+
+    batch_m = hidden_states.shape[0]
+    experts, w1_out, model_dim = w1.shape
+    w2_model_dim, inter_dim = w2.shape[1], w2.shape[2]
+    topk = topk_ids.shape[1]
+    if (experts, topk, model_dim) != (512, 10, 4096):
+        return f"shape E={experts}, topk={topk}, model_dim={model_dim}"
+    if w1_out != 2 * inter_dim or w2_model_dim != model_dim:
+        return f"inconsistent weights w1={tuple(w1.shape)}, w2={tuple(w2.shape)}"
+    tuning = get_qwen_ptpc_fp8_tuning(inter_dim)
+    if tuning is None:
+        return f"inter_dim={inter_dim}"
+
+    max_m = tuning.max_m
+    if max_m > 0 and batch_m > max_m:
+        return f"M={batch_m} exceeds FlyDSL tuned max M={max_m}"
+    return None
+
+
+def _log_flydsl_fallback(reason: str) -> None:
+    logger.debug("Falling back to AITER fused_moe: %s", reason)
+
+
+def _should_use_flydsl_fused_moe(
+    hidden_states: torch.Tensor,
+    w1: torch.Tensor,
+    w2: torch.Tensor,
+    topk_ids: torch.Tensor,
+    *,
+    activation: str,
+    is_prefill: bool = False,
+    effective_expert_mask: Optional[torch.Tensor],
+    expert_ids_are_local: bool,
+    num_experts: int,
+    local_num_experts: int,
+    ep_size: int,
+) -> bool:
+    if not _flydsl_fused_moe_enabled():
+        return False
+
+    reason = _flydsl_fused_moe_unsupported_reason(
+        hidden_states,
+        w1,
+        w2,
+        topk_ids,
+        activation=activation,
+        is_prefill=is_prefill,
+        effective_expert_mask=effective_expert_mask,
+        expert_ids_are_local=expert_ids_are_local,
+        num_experts=num_experts,
+        local_num_experts=local_num_experts,
+        ep_size=ep_size,
+    )
+    if reason is not None:
+        _log_flydsl_fallback(reason)
+        return False
+    return True
+
+
+def _aiter_fp8_per_channel_fused_moe(
+    hidden_states: torch.Tensor,
+    w1: torch.Tensor,
+    w2: torch.Tensor,
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    w1_scale: torch.Tensor,
+    w2_scale: torch.Tensor,
+    activation: str,
+    effective_expert_mask: Optional[torch.Tensor],
+) -> torch.Tensor:
+    return fused_moe(
+        hidden_states,
+        w1,
+        w2,
+        topk_weights,
+        topk_ids,
+        quant_type=aiter.QuantType.per_Token,
+        w1_scale=w1_scale,
+        w2_scale=w2_scale,
+        activation=_moe_activation_type(activation),
+        expert_mask=effective_expert_mask,
+    )
+
+
+def _flydsl_fused_moe(
+    hidden_states: torch.Tensor,
+    w1: torch.Tensor,
+    w2: torch.Tensor,
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    w1_scale: torch.Tensor,
+    w2_scale: torch.Tensor,
+) -> torch.Tensor:
+    if not _load_flydsl_fused_moe():
+        raise RuntimeError("fused_moe_flydsl requires FlyDSL fused_moe imports")
+
+    s1 = _flatten_per_channel_scale(w1_scale)
+    s2 = _flatten_per_channel_scale(w2_scale)
+
+    return _fused_moe_flydsl_fn(
+        hidden_states,
+        w1,
+        w2,
+        topk_weights,
+        topk_ids,
+        activation=_FlyDSLActivationType.Silu,
+        quant_type=_FlyDSLQuantType.per_Token,
+        w1_scale=s1,
+        w2_scale=s2,
+    )
 
 
 def build_ep_expert_mask(
@@ -50,6 +252,12 @@ def build_ep_expert_mask(
     mask = torch.zeros(num_experts, dtype=torch.int32, device=w1.device)
     mask[start:end] = 1
     return mask
+
+
+def _is_prefill_from_extra_args(extra_expert_args: Optional[dict[str, Any]]) -> bool:
+    if not extra_expert_args:
+        return False
+    return bool(extra_expert_args.get("is_prefill", False))
 
 
 class RocmExpertsBf16(FusedMoeExpertExecutor):
@@ -256,18 +464,40 @@ class RocmExpertsFp8PerChannel(FusedMoeExpertExecutor):
             hidden_states = hidden_states * topk_weights.to(hidden_states.dtype)
             topk_weights = torch.ones_like(topk_weights, dtype=torch.float32)
 
-        output = fused_moe(
+        if _should_use_flydsl_fused_moe(
             hidden_states,
             self.w1,
             self.w2,
-            topk_weights,
             topk_ids,
-            quant_type=aiter.QuantType.per_Token,
-            w1_scale=self.w1_scale,
-            w2_scale=self.w2_scale,
-            activation=_moe_activation_type(activation),
-            expert_mask=effective_expert_mask,
-        )
+            activation=activation,
+            is_prefill=_is_prefill_from_extra_args(extra_expert_args),
+            effective_expert_mask=effective_expert_mask,
+            expert_ids_are_local=payload.expert_ids_are_local,
+            num_experts=self.num_experts,
+            local_num_experts=self.local_num_experts,
+            ep_size=self.ep_size,
+        ):
+            output = _flydsl_fused_moe(
+                hidden_states,
+                self.w1,
+                self.w2,
+                topk_weights,
+                topk_ids,
+                w1_scale=self.w1_scale,
+                w2_scale=self.w2_scale,
+            )
+        else:
+            output = _aiter_fp8_per_channel_fused_moe(
+                hidden_states,
+                self.w1,
+                self.w2,
+                topk_weights,
+                topk_ids,
+                self.w1_scale,
+                self.w2_scale,
+                activation,
+                effective_expert_mask,
+            )
 
         return CombineForwardPayload(fused_expert_output=output)
 
