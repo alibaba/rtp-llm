@@ -82,24 +82,22 @@ void prepareInPlace(CKAttn& params, const torch_ext::PyAttentionInputs& attn_inp
     params.prefill_runtime_seq_len_with_prefix = params.max_seq_len + max_prefix_len;
 
     updateKvCacheOffset(params, attn_inputs.kv_cache_kernel_block_id_device);
-}
 
-static void rejectMropeWithoutPositionIds(const RopeConfig& rope_config, const char* where) {
-    // ROCm prefill/decode dispatch always passes position_ids=nullptr (combo_position_ids
-    // is not plumbed through this path yet). Mrope needs real per-axis position ids — without
-    // them the kernel silently uses position_id=-1, producing wrong RoPE positions.
-    if (rope_config.style == RopeStyle::Mrope) {
-        throw std::runtime_error(std::string(where)
-                                 + ": RopeStyle::Mrope requires combo_position_ids, but ROCm "
-                                   "fused RoPE+KV-cache path does not plumb position_ids yet. "
-                                   "Run this model on the CUDA path or extend this op to accept "
-                                   "position_ids before enabling Mrope.");
+    // Refresh position_ids for Mrope: the C++ graph runner copies new
+    // combo_position_ids data into the capture-time buffer via
+    // optimizedCopyAsync, so params.position_ids (which points to that
+    // buffer) sees the updated values automatically. If the pointers
+    // diverge (e.g. a non-graph caller reuses prepareInPlace), fall back
+    // to an explicit in-place copy.
+    if (attn_inputs.combo_position_ids.defined() && params.position_ids.defined()
+        && attn_inputs.combo_position_ids.data_ptr() != params.position_ids.data_ptr()) {
+        copyTensorExactInPlace(params.position_ids, attn_inputs.combo_position_ids, "position_ids");
     }
 }
 
+
 FusedRopeKVCachePrefillOpBase::FusedRopeKVCachePrefillOpBase(const AttentionConfigs& attn_configs):
     attn_configs_(attn_configs) {
-    rejectMropeWithoutPositionIds(attn_configs.rope_config, "FusedRopeKVCachePrefillOp");
 }
 
 FusedRopeKVCachePrefillOpAsm::FusedRopeKVCachePrefillOpAsm(const AttentionConfigs& attn_configs):
@@ -270,6 +268,11 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> FusedRopeKVCachePrefillO
     }
     if (params->position_ids.defined()) {
         position_ids = params->position_ids.data_ptr<int>();
+    } else if (attn_configs_.rope_config.style == RopeStyle::Mrope) {
+        throw std::runtime_error(
+            "FusedRopeKVCachePrefillOp: Mrope requires combo_position_ids but "
+            "none were provided. Ensure combo_position_ids is set in "
+            "PyAttentionInputs before calling prefill.");
     }
 
     auto    rope_cache = getRopeCacheOnce(attn_configs_.rope_config, attn_configs_.max_seq_len, false);
@@ -353,7 +356,6 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> FusedRopeKVCachePrefillO
 
 FusedRopeKVCacheDecodeOpBase::FusedRopeKVCacheDecodeOpBase(const AttentionConfigs& attn_configs):
     attn_configs_(attn_configs) {
-    rejectMropeWithoutPositionIds(attn_configs.rope_config, "FusedRopeKVCacheDecodeOp");
 }
 
 FusedRopeKVCacheDecodeOpAsm::FusedRopeKVCacheDecodeOpAsm(const AttentionConfigs& attn_configs):
@@ -457,6 +459,11 @@ torch::Tensor FusedRopeKVCacheDecodeOpBase::forward(const torch::Tensor&        
     int* position_ids_ptr = nullptr;
     if (params->position_ids.defined()) {
         position_ids_ptr = params->position_ids.data_ptr<int>();
+    } else if (attn_configs_.rope_config.style == RopeStyle::Mrope) {
+        throw std::runtime_error(
+            "FusedRopeKVCacheDecodeOp: Mrope requires combo_position_ids but "
+            "none were provided. This typically means CUDA graph capture is "
+            "running with Mrope, which is not yet supported on ROCm.");
     } else {
         position_ids_ptr = params->sequence_lengths.data_ptr<int>();
     }
