@@ -11,8 +11,8 @@ sequential execution with no overhead.
 
 Design notes (aligned with ``dsv4/moe/shared_expert.py:OverlapSharedExpertExecutor``):
   - Token-count threshold (``MOE_SHARED_EXPERT_OVERLAP_TOKEN_THRESHOLD``,
-    default 4096): large batches make the shared expert heavy enough that
-    overlap adds stream-switching cost without hiding it behind dispatch.
+    default 4096): overlap is used only when explicitly enabled and the
+    rank-local token count is no larger than the configured threshold.
   - CUDA graph capture: overlap is disabled while capture is in progress.
     Capturing the auxiliary stream once per graph/layer creates a large
     multi-stream replay topology; the sequential fallback keeps decode graph
@@ -184,11 +184,8 @@ class SharedExpertOverlapExecutor:
         # of per-layer stream lanes when overlap is enabled globally.
         if torch.cuda.is_current_stream_capturing():
             return False
-        # Token-count threshold: large batches make the shared expert itself
-        # expensive enough that it no longer hides behind dispatch/combine.
+        token_count = int(args[0].shape[0])
         threshold = int(
             os.environ.get("MOE_SHARED_EXPERT_OVERLAP_TOKEN_THRESHOLD", "4096")
         )
-        if args[0].shape[0] > threshold:
-            return False
-        return True
+        return token_count <= threshold
