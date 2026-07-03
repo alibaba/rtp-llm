@@ -326,7 +326,6 @@ struct RuntimeConfig {
 
     // Scheduler configuration
     bool                       use_batch_decode_scheduler = false;
-    bool                       use_gather_batch_scheduler = false;
     BatchDecodeSchedulerConfig batch_decode_scheduler_config;
     FIFOSchedulerConfig        fifo_scheduler_config;
 

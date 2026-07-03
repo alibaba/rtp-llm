@@ -133,9 +133,15 @@ def _is_fmha_impl_disabled_legacy(impl_class: type, fmha_config: FMHAConfig) -> 
         return not fmha_config.enable_paged_trt_fmha or not fmha_config.enable_open_source_fmha
     elif "FlashInfer" in impl_class_name or "Flashinfer" in impl_class_name:
         return fmha_config.disable_flash_infer
+    elif "AiterDecodeImplAsm" in impl_class_name:
+        # Triton PA takes priority for decode: when it is available, disable ASM
+        # decode so ASM and triton decode do not both enter dispatch. Otherwise
+        # gate on use_asm_pa like the other ASM impls.
+        if fmha_config.use_triton_pa:
+            return True
+        return not fmha_config.use_asm_pa
     elif (
         "AiterPrefillImplAsm" in impl_class_name
-        or "AiterDecodeImplAsm" in impl_class_name
         or "AiterPrefillImplPaged" in impl_class_name
     ):
         return not fmha_config.use_asm_pa

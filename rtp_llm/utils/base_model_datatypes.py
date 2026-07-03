@@ -45,8 +45,10 @@ class VitParameters:
     special_tokens: Dict[str, Any] = field(default_factory=dict)
     vit_weights: Any = None
     preprocess_batch_size: int = 1
-    eval_param_count = None
-    eval_model_size = None
+    # Annotated so @dataclass actually manages them as init fields; without a type
+    # annotation they would be plain class attributes (not in __init__).
+    eval_param_count: Optional[int] = None
+    eval_model_size: Optional[int] = None
 
 
 # single batch prompt input
