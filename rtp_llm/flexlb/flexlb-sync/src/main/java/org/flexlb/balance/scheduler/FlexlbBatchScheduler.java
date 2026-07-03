@@ -27,6 +27,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -64,6 +65,7 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
             = new InflightEvictor<>(inflight, entry -> {
                 synchronized (entry) {
                     rollbackOnce(entry);
+                    repackPrefillBatch(entry);
                     completeCancelled(entry);
                 }
             });
@@ -172,6 +174,11 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
             // If ackFinished and future already done (success), skip rollback
         }
         cancelPrefill(entry);
+        // Remove this request from PrefillEndpoint.inflightBatches to prevent
+        // inflight leak. Without this, the batch entry stays until calibrate
+        // (if engine reports the cancel) or TTL (300s) — inflating the count
+        // and causing false backpressure when FLEXLB_BATCH_FIXED_MAX_INFLIGHT_BATCHES is enabled.
+        repackPrefillBatch(entry);
     }
 
     // ==================== Completion from worker status ====================
@@ -295,6 +302,18 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
             prefillEp.commitBatch(batchId, predMs, active);
         }
 
+        // Store batchId in inflight entries so cancel() can repack the batch.
+        // Must be set AFTER commitBatch (so repackBatch finds the entry) and
+        // BEFORE dispatch (so cancel during gRPC can also repack).
+        // Edge case: cancel in the tiny window between commitBatch and this
+        // loop sees batchId=-1, skips repack; calibrate cleans up (~10ms).
+        for (BatchItem item : active) {
+            InflightEntry entry = inflight.get(item.requestId());
+            if (entry != null) {
+                entry.batchId = batchId;
+            }
+        }
+
         // [ASYNC] Delegate gRPC dispatch — dispatcher owns its own thread pool
         long waitMs = System.currentTimeMillis() - items.get(0).enqueuedAtMs();
         reporter.reportBatchWaitTimeMs("prefill", prefillEp != null ? prefillEp.getIp() : "", waitMs);
@@ -330,6 +349,7 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
         if (cancelAfterAck) {
             inflight.remove(item.requestId());
             cancelPrefill(entry);
+            repackPrefillBatch(entry);
             completeCancelled(entry);
         }
     }
@@ -473,6 +493,28 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
         }
     }
 
+    /**
+     * Remove a cancelled request from its prefill batch entry to prevent
+     * inflight leak.  Uses {@link PrefillEndpoint#repackBatch} which:
+     * <ul>
+     *   <li>Single-request batch → removes the entire entry (batch becomes empty)</li>
+     *   <li>Multi-request batch → keeps survivors, removes only this request</li>
+     *   <li>Batch already removed (calibrate or releaseBatch ran first) → no-op</li>
+     * </ul>
+     * Safe to call multiple times (idempotent via ConcurrentHashMap.computeIfPresent).
+     */
+    private void repackPrefillBatch(InflightEntry entry) {
+        if (entry.batchId < 0) {
+            return;
+        }
+        PrefillEndpoint prefillEp = entry.item.prefillEp();
+        if (prefillEp != null) {
+            prefillEp.repackBatch(entry.batchId, Set.of(entry.item.requestId()));
+            Logger.info("FlexLB cancel repack: request_id={} batch_id={} engine={}",
+                    entry.item.requestId(), entry.batchId, prefillEp.getIp());
+        }
+    }
+
     // ==================== Internal: static utilities ====================
 
     private static ServerStatus findServer(Response response, RoleType roleType) {
@@ -574,6 +616,15 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
         final AtomicBoolean cancelled = new AtomicBoolean(false);
         final AtomicBoolean rolledBack = new AtomicBoolean(false);
         boolean ackFinished;
+
+        /**
+         * Batch ID assigned by flushItems() when the batch is committed to
+         * PrefillEndpoint.inflightBatches.  -1 means the batch has not been
+         * committed yet (request is still in the batcher queue or dispatch
+         * has not started).  Volatile so cancel() on another thread sees
+         * the value set by flushItems() without explicit synchronization.
+         */
+        volatile long batchId = -1;
 
         InflightEntry(BatchItem item) {
             this.item = Objects.requireNonNull(item);
