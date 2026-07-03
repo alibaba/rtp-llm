@@ -236,6 +236,7 @@ class MasterClient:
             force_disable_sp_run=gc.force_disable_sp_run,
             model="engine_service",
             api_key=api_key,
+            cache_key_block_size=cache_key_block_size,
         )
         if input_pb is not None:
             request_pb.generate_input.CopyFrom(input_pb)

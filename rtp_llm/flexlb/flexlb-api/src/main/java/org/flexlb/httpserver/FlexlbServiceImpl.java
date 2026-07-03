@@ -115,6 +115,7 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
         request.setForceDisableSpRun(pb.getForceDisableSpRun());
         request.setModel(pb.getModel());
         request.setApiKey(pb.getApiKey());
+        request.setCacheKeyBlockSize(pb.getCacheKeyBlockSize());
         ctx.setRequest(request);
 
         if (pb.hasGenerateInput()) {

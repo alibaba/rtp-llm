@@ -3,6 +3,7 @@ package org.flexlb.httpserver;
 import io.grpc.stub.StreamObserver;
 import org.flexlb.consistency.LBStatusConsistencyService;
 import org.flexlb.dao.BalanceContext;
+import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.engine.grpc.EngineRpcService;
 import org.flexlb.service.RouteService;
@@ -67,6 +68,7 @@ class FlexlbServiceImplTest {
         EngineRpcService.FlexlbScheduleRequestPB request = EngineRpcService.FlexlbScheduleRequestPB.newBuilder()
                 .setRequestId(12345L)
                 .setSeqLen(100)
+                .setCacheKeyBlockSize(1024L)
                 .build();
 
         StreamObserver<EngineRpcService.FlexlbScheduleResponsePB> observer = mock(StreamObserver.class);
@@ -219,5 +221,40 @@ class FlexlbServiceImplTest {
         verify(observer).onError(any());
         verify(observer, never()).onNext(any());
         verify(observer, never()).onCompleted();
+    }
+
+    @Test
+    void testSchedule_buildContextPreservesCacheKeyBlockSize() {
+        // Given: not master, no consistency needed
+        when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(false);
+
+        Response response = new Response();
+        response.setSuccess(true);
+        response.setCode(200);
+
+        ArgumentCaptor<BalanceContext> ctxCaptor = ArgumentCaptor.forClass(BalanceContext.class);
+        when(routeService.route(ctxCaptor.capture())).thenReturn(Mono.just(response));
+
+        EngineRpcService.FlexlbScheduleRequestPB request = EngineRpcService.FlexlbScheduleRequestPB.newBuilder()
+                .setRequestId(99999L)
+                .setSeqLen(2048)
+                .setCacheKeyBlockSize(1024L)
+                .addBlockCacheKeys(100L)
+                .addBlockCacheKeys(200L)
+                .build();
+
+        StreamObserver<EngineRpcService.FlexlbScheduleResponsePB> observer = mock(StreamObserver.class);
+
+        // When
+        service.schedule(request, observer);
+
+        // Then: verify cacheKeyBlockSize is propagated to Request
+        BalanceContext capturedCtx = ctxCaptor.getValue();
+        Request capturedRequest = capturedCtx.getRequest();
+        assertEquals(1024L, capturedRequest.getCacheKeyBlockSize());
+        assertEquals(2, capturedRequest.getBlockCacheKeys().size());
+        assertEquals(100L, capturedRequest.getBlockCacheKeys().get(0));
+        assertEquals(200L, capturedRequest.getBlockCacheKeys().get(1));
+        assertEquals(2048L, capturedRequest.getSeqLen());
     }
 }

@@ -758,6 +758,7 @@ message FlexlbScheduleRequestPB {
     string model = 10;
     string api_key = 11;
     FlexlbScheduleModePB schedule_mode = 12;
+    int64 cache_key_block_size = 13;
 }
 
 message FlexlbServerStatusPB {
