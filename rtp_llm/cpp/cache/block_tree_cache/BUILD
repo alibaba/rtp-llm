@@ -1,4 +1,5 @@
 load("//:def.bzl", "copts")
+load("//bazel:arch_select.bzl", "no_block_copy_link_deps", "torch_deps")
 
 cc_library(
     name = "block_tree_cache",
@@ -13,7 +14,6 @@ cc_library(
         "copy_engine/CopyEngine.cc",
         "copy_engine/DiskBlockIO.cc",
         "copy_engine/DiskBlockPool.cc",
-        "copy_engine/HostBlockPool.cc",
     ],
     hdrs = [
         "BlockTree.h",
@@ -30,7 +30,6 @@ cc_library(
         "copy_engine/CopyEngine.h",
         "copy_engine/DiskBlockIO.h",
         "copy_engine/DiskBlockPool.h",
-        "copy_engine/HostBlockPool.h",
     ],
     copts = copts(),
     visibility = ["//visibility:public"],
@@ -42,7 +41,8 @@ cc_library(
         "//rtp_llm/cpp/cache/connector:connector_base",
         "//rtp_llm/cpp/model_rpc:broadcast_manager",
         "//rtp_llm/cpp/utils:core_utils",
+        "//rtp_llm/models_py/bindings:no_block_copy_hdr",
         "@havenask//aios/autil:lock_free",
         "@havenask//aios/autil:thread",
-    ],
+    ] + torch_deps() + no_block_copy_link_deps(),
 )

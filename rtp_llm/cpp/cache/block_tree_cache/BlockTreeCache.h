@@ -30,15 +30,57 @@ struct CacheStats {
     size_t disk_heap_total_size{0};
 };
 
+// Configuration for BlockTreeCache L2 (Host) and L3 (Disk) tier pools.
+// Capacity is derived from KVCacheConfig as described in the design doc:
+//   L2 Host blocks = memory_cache_size_mb * 1MB / block_size_bytes
+//   L3 Disk blocks = memory_cache_disk_size_mb * 1MB / block_size_bytes
+struct BlockTreeCacheConfig {
+    // L2 Host pool configuration
+    int64_t memory_cache_size_mb{0};  // 0 = disabled
+
+    // L3 Disk pool configuration
+    int64_t     memory_cache_disk_size_mb{0};  // 0 = disabled
+    std::string memory_cache_disk_path;
+    bool        memory_cache_disk_buffered_io{true};
+
+    // Block size (from CacheConfig), used to compute pool block count
+    size_t block_size_bytes{0};
+
+    // Tier enable flags
+    bool enable_device_cache{true};
+    bool enable_memory_cache{false};
+    bool enable_disk_cache{false};
+    bool enable_remote_cache{false};
+
+    // Eviction thread pool
+    int eviction_thread_pool_size{2};
+
+    // Compute the number of host blocks from config.
+    size_t hostBlockCount() const {
+        if (memory_cache_size_mb <= 0 || block_size_bytes == 0)
+            return 0;
+        return static_cast<size_t>(memory_cache_size_mb) * 1024 * 1024 / block_size_bytes;
+    }
+
+    // Compute the disk pool total size in bytes.
+    size_t diskPoolSizeBytes() const {
+        if (memory_cache_disk_size_mb <= 0)
+            return 0;
+        return static_cast<size_t>(memory_cache_disk_size_mb) * 1024 * 1024;
+    }
+};
+
 // BlockTreeCache: eviction workflow coordinator.
-// Owns BlockTree, ComponentGroups, CopyEngine, StorageBackend, autil::LockFreeThreadPool.
+// Owns BlockTree, ComponentGroups, BlockPool-HOST (L2), DiskBlockPool (L3),
+// CopyEngine (stateless data-movement utility), StorageBackend, thread pool.
 // Each storage tier (Device/Host/Disk/Remote) can be independently enabled/disabled.
 class BlockTreeCache {
 public:
     BlockTreeCache(std::unique_ptr<BlockTree>        tree,
                    std::vector<ComponentGroupPtr>    component_groups,
                    std::vector<Component>            components,
-                   CopyEnginePtr                     copy_engine               = nullptr,
+                   BlockPoolPtr                      host_pool                 = nullptr,
+                   std::shared_ptr<DiskBlockPool>    disk_pool                 = nullptr,
                    int                               eviction_thread_pool_size = 2,
                    std::shared_ptr<StorageBackend>   storage_backend           = nullptr,
                    bool                              enable_device_cache       = true,
@@ -107,6 +149,14 @@ public:
         return storage_backend_;
     }
 
+    // Pool accessors (L2 / L3 tier resources owned by BlockTreeCache)
+    BlockPoolPtr hostPool() const {
+        return host_pool_;
+    }
+    std::shared_ptr<DiskBlockPool> diskPool() const {
+        return disk_pool_;
+    }
+
     // Tier enable queries
     bool isDeviceCacheEnabled() const {
         return enable_device_cache_;
@@ -138,6 +188,8 @@ private:
     std::vector<ComponentGroupPtr>             component_groups_;
     std::vector<Component>                     components_;
     CopyEnginePtr                              copy_engine_;
+    BlockPoolPtr                               host_pool_;
+    std::shared_ptr<DiskBlockPool>             disk_pool_;
     std::shared_ptr<StorageBackend>            storage_backend_;
     std::shared_ptr<autil::LockFreeThreadPool> thread_pool_;
     std::shared_ptr<BroadcastManager>          broadcast_manager_;

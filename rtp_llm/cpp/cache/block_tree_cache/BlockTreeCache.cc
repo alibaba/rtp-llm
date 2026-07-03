@@ -12,7 +12,8 @@ namespace rtp_llm {
 BlockTreeCache::BlockTreeCache(std::unique_ptr<BlockTree>        tree,
                                std::vector<ComponentGroupPtr>    component_groups,
                                std::vector<Component>            components,
-                               CopyEnginePtr                     copy_engine,
+                               BlockPoolPtr                      host_pool,
+                               std::shared_ptr<DiskBlockPool>    disk_pool,
                                int                               eviction_thread_pool_size,
                                std::shared_ptr<StorageBackend>   storage_backend,
                                bool                              enable_device_cache,
@@ -23,7 +24,9 @@ BlockTreeCache::BlockTreeCache(std::unique_ptr<BlockTree>        tree,
     tree_(std::move(tree)),
     component_groups_(std::move(component_groups)),
     components_(std::move(components)),
-    copy_engine_(std::move(copy_engine)),
+    copy_engine_(std::make_shared<CopyEngine>()),
+    host_pool_(std::move(host_pool)),
+    disk_pool_(std::move(disk_pool)),
     storage_backend_(std::move(storage_backend)),
     broadcast_manager_(std::move(broadcast_manager)),
     enable_device_cache_(enable_device_cache),
@@ -47,7 +50,7 @@ BlockTreeCache::BlockTreeCache(std::unique_ptr<BlockTree>        tree,
                      component_groups_.size(),
                      components_.size(),
                      eviction_thread_pool_size,
-                     copy_engine_ ? "enabled" : "null",
+                     host_pool_ ? "enabled" : "null",
                      storage_backend_ ? "enabled" : "null",
                      enable_device_cache_ ? "on" : "off",
                      enable_memory_cache_ ? "on" : "off",
@@ -301,14 +304,13 @@ int BlockTreeCache::evict(size_t num_blocks, Tier tier) {
                 onEvictionComplete(er);
             } else {
                 // Allocate target block for REUSABLE tier demotion
-                if (copy_engine_) {
-                    if (er.target_tier == Tier::HOST && copy_engine_->hostPool()) {
-                        er.target_block = copy_engine_->hostPool()->malloc();
-                    } else if (er.target_tier == Tier::DISK && copy_engine_->diskPool()) {
-                        auto slot = copy_engine_->diskPool()->malloc();
-                        if (slot.has_value()) {
-                            er.target_block = slot.value();
-                        }
+                if (er.target_tier == Tier::HOST && host_pool_) {
+                    auto alloc      = host_pool_->malloc(1);
+                    er.target_block = alloc.empty() ? NULL_BLOCK_IDX : alloc[0];
+                } else if (er.target_tier == Tier::DISK && disk_pool_) {
+                    auto slot = disk_pool_->malloc();
+                    if (slot.has_value()) {
+                        er.target_block = slot.value();
                     }
                 }
 
@@ -351,7 +353,7 @@ void BlockTreeCache::performEvictionCopy(EvictionResult er) {
     // Phase 2: perform data movement using CopyEngine + TransferDescriptor (no lock held)
     bool copy_ok = true;
 
-    if (copy_engine_ && er.node != nullptr) {
+    if (copy_engine_ && er.node != nullptr && host_pool_) {
         const auto& desc = er.transfer;
 
         if (desc.source_tier == Tier::DEVICE && desc.target_tier == Tier::HOST) {
@@ -379,7 +381,8 @@ void BlockTreeCache::performEvictionCopy(EvictionResult er) {
                     device_buffer_resolver_ ?
                         device_buffer_resolver_ :
                         DeviceBufferResolver([](int, BlockIdxType) -> BlockInfo { return BlockInfo{}; });
-                copy_ok = copy_engine_->deviceToHost(desc.source_blocks[0], er.target_block, layer_slots, resolver);
+                copy_ok = copy_engine_->deviceToHost(
+                    desc.source_blocks[0], er.target_block, layer_slots, resolver, *host_pool_);
                 if (!copy_ok) {
                     RTP_LLM_LOG_WARNING("BlockTreeCache::performEvictionCopy: D2H copy FAILED "
                                         "group[%d] node_key=%ld",
@@ -396,7 +399,7 @@ void BlockTreeCache::performEvictionCopy(EvictionResult er) {
         } else if (desc.source_tier == Tier::HOST && desc.target_tier == Tier::DISK) {
             if (!desc.source_blocks.empty() && !desc.source_blocks[0].empty()
                 && !isNullBlockIdx(desc.source_blocks[0][0]) && !isNullBlockIdx(er.target_block)) {
-                copy_ok = copy_engine_->hostToDisk(desc.source_blocks[0][0], er.target_block);
+                copy_ok = copy_engine_->hostToDisk(desc.source_blocks[0][0], er.target_block, *host_pool_, *disk_pool_);
                 if (!copy_ok) {
                     RTP_LLM_LOG_WARNING("BlockTreeCache::performEvictionCopy: H2Disk copy FAILED "
                                         "group[%d] node_key=%ld",
@@ -414,7 +417,7 @@ void BlockTreeCache::performEvictionCopy(EvictionResult er) {
         } else if (desc.source_tier == Tier::DISK && desc.target_tier == Tier::HOST) {
             if (!desc.source_blocks.empty() && !desc.source_blocks[0].empty()
                 && !isNullBlockIdx(desc.source_blocks[0][0]) && !isNullBlockIdx(er.target_block)) {
-                copy_ok = copy_engine_->diskToHost(desc.source_blocks[0][0], er.target_block);
+                copy_ok = copy_engine_->diskToHost(desc.source_blocks[0][0], er.target_block, *host_pool_, *disk_pool_);
                 if (!copy_ok) {
                     RTP_LLM_LOG_WARNING("BlockTreeCache::performEvictionCopy: Disk2H copy FAILED "
                                         "group[%d] node_key=%ld",
@@ -440,10 +443,10 @@ void BlockTreeCache::performEvictionCopy(EvictionResult er) {
         } else {
             // Rollback: free allocated target block, restore source tier heap
             if (!isNullBlockIdx(er.target_block)) {
-                if (er.target_tier == Tier::HOST && copy_engine_->hostPool()) {
-                    copy_engine_->hostPool()->free(er.target_block);
-                } else if (er.target_tier == Tier::DISK && copy_engine_->diskPool()) {
-                    copy_engine_->diskPool()->blockCacheFree(er.target_block);
+                if (er.target_tier == Tier::HOST && host_pool_) {
+                    host_pool_->requestFree(er.target_block);
+                } else if (er.target_tier == Tier::DISK && disk_pool_) {
+                    disk_pool_->blockCacheFree(er.target_block);
                 }
             }
             auto gid = static_cast<size_t>(er.component_group_id);
@@ -721,14 +724,13 @@ void BlockTreeCache::checkWatermark() {
                 onEvictionComplete(*er);
             } else {
                 // Async path: allocate target block and submit to thread pool
-                if (copy_engine_) {
-                    if (er->target_tier == Tier::HOST && copy_engine_->hostPool()) {
-                        er->target_block = copy_engine_->hostPool()->malloc();
-                    } else if (er->target_tier == Tier::DISK && copy_engine_->diskPool()) {
-                        auto slot = copy_engine_->diskPool()->malloc();
-                        if (slot.has_value())
-                            er->target_block = slot.value();
-                    }
+                if (er->target_tier == Tier::HOST && host_pool_) {
+                    auto alloc       = host_pool_->malloc(1);
+                    er->target_block = alloc.empty() ? NULL_BLOCK_IDX : alloc[0];
+                } else if (er->target_tier == Tier::DISK && disk_pool_) {
+                    auto slot = disk_pool_->malloc();
+                    if (slot.has_value())
+                        er->target_block = slot.value();
                 }
                 taskStarted();
                 auto  captured_er = *er;

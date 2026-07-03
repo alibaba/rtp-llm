@@ -21,8 +21,8 @@ protected:
         swa_nr->component_group_id            = 2;
         swa_nr->reuse_policy                  = CacheReusePolicy::NON_REUSABLE;
         std::vector<ComponentGroupPtr> groups = {full, swa_r, swa_nr};
-        cache_ =
-            std::make_unique<BlockTreeCache>(std::move(tree), std::move(groups), std::vector<Component>{}, nullptr, 2);
+        cache_                                = std::make_unique<BlockTreeCache>(
+            std::move(tree), std::move(groups), std::vector<Component>{}, nullptr, nullptr, 2);
     }
 
     void insertPath(const CacheKeysType& keys, BlockIdxType full_b, BlockIdxType swa_r_b, BlockIdxType swa_nr_b) {
@@ -151,13 +151,13 @@ TEST_F(FullSWANonReusableEvictionTest, HeapSizesMixedReuse) {
 //   (no REUSABLE data to keep it alive).
 // ---------------------------------------------------------------------------
 TEST_F(FullSWANonReusableEvictionTest, SWANonReusableOnlyCacheSynchronous) {
-    auto tree                             = std::make_unique<BlockTree>(1);
-    auto swa_nr                           = std::make_shared<SWAComponentGroup>(64, 32);
-    swa_nr->component_group_id            = 0;
-    swa_nr->reuse_policy                  = CacheReusePolicy::NON_REUSABLE;
-    std::vector<ComponentGroupPtr> groups = {swa_nr};
-    auto                           nr_cache =
-        std::make_unique<BlockTreeCache>(std::move(tree), std::move(groups), std::vector<Component>{}, nullptr, 2);
+    auto tree                               = std::make_unique<BlockTree>(1);
+    auto swa_nr                             = std::make_shared<SWAComponentGroup>(64, 32);
+    swa_nr->component_group_id              = 0;
+    swa_nr->reuse_policy                    = CacheReusePolicy::NON_REUSABLE;
+    std::vector<ComponentGroupPtr> groups   = {swa_nr};
+    auto                           nr_cache = std::make_unique<BlockTreeCache>(
+        std::move(tree), std::move(groups), std::vector<Component>{}, nullptr, nullptr, 2);
 
     std::vector<GroupSlot> slots(1);
     slots[0].device_blocks = {30};

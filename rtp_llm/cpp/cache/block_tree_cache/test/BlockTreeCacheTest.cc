@@ -4,14 +4,28 @@
 #include <thread>
 #include <unordered_map>
 
+#include <torch/torch.h>
+
+#include "rtp_llm/cpp/cache/BlockPool.h"
+#include "rtp_llm/cpp/cache/BlockPoolConfigHelper.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCache.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/copy_engine/CopyEngine.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/copy_engine/DiskBlockPool.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/copy_engine/HostBlockPool.h"
 #include "rtp_llm/cpp/model_rpc/BroadcastManager.h"
 
 namespace rtp_llm {
 namespace {
+
+// Helper: create a HOST BlockPool with the given block_size and usable_count.
+static std::shared_ptr<BlockPool> makeHostPool(size_t block_size, size_t usable_count) {
+    auto cfg = BlockPoolConfigHelper::createConfig(
+        /*layer_num=*/1,
+        static_cast<uint32_t>(usable_count + 1),
+        static_cast<uint32_t>(block_size),
+        rtp_llm::TYPE_INT8);
+    auto pool = std::make_shared<BlockPool>(cfg, AllocationType::HOST);
+    return pool;
+}
 
 // Helper to build a simple single-group BlockTreeCache for testing.
 class BlockTreeCacheTest: public ::testing::Test {
@@ -26,8 +40,8 @@ protected:
         std::vector<ComponentGroupPtr> groups = {full_group};
         std::vector<Component>         components;
 
-        cache_ =
-            std::make_unique<BlockTreeCache>(std::move(tree), std::move(groups), std::move(components), nullptr, 2);
+        cache_ = std::make_unique<BlockTreeCache>(
+            std::move(tree), std::move(groups), std::move(components), nullptr, nullptr, 2);
     }
 
     std::unique_ptr<BlockTreeCache> cache_;
@@ -250,10 +264,8 @@ TEST_F(BlockTreeCacheTest, ThreadSafety) {
 //
 //   D2H copy fails → target host_block freed, source device heap restored.
 TEST_F(BlockTreeCacheTest, EvictWithCopyEngineAllocatesHostBlock) {
-    auto host_pool = std::make_shared<HostBlockPool>(256, 4);
+    auto host_pool = makeHostPool(256, 4);
     ASSERT_TRUE(host_pool->init());
-    auto copy_engine = std::make_shared<CopyEngine>(host_pool);
-
     auto tree                             = std::make_unique<BlockTree>(1);
     auto full                             = std::make_shared<FullComponentGroup>();
     full->component_group_id              = 0;
@@ -263,7 +275,8 @@ TEST_F(BlockTreeCacheTest, EvictWithCopyEngineAllocatesHostBlock) {
     auto ce_cache = std::make_unique<BlockTreeCache>(std::move(tree),
                                                      std::move(groups),
                                                      std::vector<Component>{},
-                                                     copy_engine,
+                                                     host_pool,
+                                                     nullptr,
                                                      2,
                                                      nullptr,
                                                      /*enable_device=*/true,
@@ -274,13 +287,13 @@ TEST_F(BlockTreeCacheTest, EvictWithCopyEngineAllocatesHostBlock) {
     ce_cache->insert({100}, slots);
 
     EXPECT_EQ(ce_cache->getStats().tree_node_count, 1u);
-    EXPECT_EQ(host_pool->freeBlocks(), 4u);
+    EXPECT_EQ(host_pool->freeBlocksNum(), 4u);
 
     ce_cache->evict(1, Tier::DEVICE);
     ce_cache->waitForPendingTasks();
 
     // D2H copy failed → rollback: host_block freed, node back in device heap
-    EXPECT_EQ(host_pool->freeBlocks(), 4u);
+    EXPECT_EQ(host_pool->freeBlocksNum(), 4u);
     EXPECT_EQ(ce_cache->getStats().tree_node_count, 1u);
     auto find = ce_cache->tree()->findNode({100});
     ASSERT_NE(find.matched_node, nullptr);
@@ -288,7 +301,7 @@ TEST_F(BlockTreeCacheTest, EvictWithCopyEngineAllocatesHostBlock) {
     EXPECT_TRUE(find.matched_node->group_slots[0].has_device_value());
 }
 
-// Test: Sequential eviction without CopyEngine — direct release path.
+// Test: Sequential eviction without Host pool — direct release path.
 //
 //   root → [100] → [200] → [300] all D={42}
 //   Host disabled → eviction target=NONE (direct release), synchronous.
@@ -300,10 +313,11 @@ TEST_F(BlockTreeCacheTest, SequentialEvictionAllocatesMultipleHostBlocks) {
     full->reuse_policy                    = CacheReusePolicy::REUSABLE;
     std::vector<ComponentGroupPtr> groups = {full};
 
-    // No CopyEngine, Host disabled → direct release on eviction
+    // No Host pool, Host disabled → direct release on eviction
     auto ce_cache = std::make_unique<BlockTreeCache>(std::move(tree),
                                                      std::move(groups),
                                                      std::vector<Component>{},
+                                                     nullptr,
                                                      nullptr,
                                                      2,
                                                      nullptr,
@@ -326,9 +340,8 @@ TEST_F(BlockTreeCacheTest, SequentialEvictionAllocatesMultipleHostBlocks) {
 
 // Test: NON_REUSABLE eviction does NOT allocate host block.
 TEST_F(BlockTreeCacheTest, NonReusableEvictionNoHostAllocation) {
-    auto host_pool = std::make_shared<HostBlockPool>(256, 4);
+    auto host_pool = makeHostPool(256, 4);
     ASSERT_TRUE(host_pool->init());
-    auto copy_engine = std::make_shared<CopyEngine>(host_pool);
 
     auto tree                             = std::make_unique<BlockTree>(1);
     auto full                             = std::make_shared<FullComponentGroup>();
@@ -339,7 +352,8 @@ TEST_F(BlockTreeCacheTest, NonReusableEvictionNoHostAllocation) {
     auto ce_cache = std::make_unique<BlockTreeCache>(std::move(tree),
                                                      std::move(groups),
                                                      std::vector<Component>{},
-                                                     copy_engine,
+                                                     host_pool,
+                                                     nullptr,
                                                      2,
                                                      nullptr,
                                                      /*enable_device=*/true,
@@ -353,7 +367,7 @@ TEST_F(BlockTreeCacheTest, NonReusableEvictionNoHostAllocation) {
     // Synchronous, no wait needed
 
     // No host block allocated (NON_REUSABLE → target=NONE)
-    EXPECT_EQ(host_pool->freeBlocks(), 4u);
+    EXPECT_EQ(host_pool->freeBlocksNum(), 4u);
     EXPECT_EQ(ce_cache->getStats().tree_node_count, 0u);
 }
 
@@ -373,6 +387,7 @@ TEST_F(BlockTreeCacheTest, DiskRequiresHostValidation) {
                                                   std::move(groups),
                                                   std::vector<Component>{},
                                                   nullptr,
+                                                  nullptr,
                                                   2,
                                                   nullptr,
                                                   /*enable_device=*/true,
@@ -391,8 +406,8 @@ TEST_F(BlockTreeCacheTest, EvictDisabledTierReturnsZero) {
     std::vector<ComponentGroupPtr> groups = {full};
 
     // Device enabled, Host disabled (default)
-    auto cache =
-        std::make_unique<BlockTreeCache>(std::move(tree), std::move(groups), std::vector<Component>{}, nullptr, 2);
+    auto cache = std::make_unique<BlockTreeCache>(
+        std::move(tree), std::move(groups), std::vector<Component>{}, nullptr, nullptr, 2);
 
     std::vector<GroupSlot> slots(1);
     slots[0].device_blocks = {42};
@@ -406,9 +421,8 @@ TEST_F(BlockTreeCacheTest, EvictDisabledTierReturnsZero) {
 
 // Test: Host disabled → Device eviction does direct release (no D2H demotion).
 TEST_F(BlockTreeCacheTest, HostDisabledDirectRelease) {
-    auto host_pool = std::make_shared<HostBlockPool>(256, 4);
+    auto host_pool = makeHostPool(256, 4);
     ASSERT_TRUE(host_pool->init());
-    auto copy_engine = std::make_shared<CopyEngine>(host_pool);
 
     auto tree                             = std::make_unique<BlockTree>(1);
     auto full                             = std::make_shared<FullComponentGroup>();
@@ -417,8 +431,8 @@ TEST_F(BlockTreeCacheTest, HostDisabledDirectRelease) {
     std::vector<ComponentGroupPtr> groups = {full};
 
     // Host disabled (default): Device eviction → direct release
-    auto cache =
-        std::make_unique<BlockTreeCache>(std::move(tree), std::move(groups), std::vector<Component>{}, copy_engine, 2);
+    auto cache = std::make_unique<BlockTreeCache>(
+        std::move(tree), std::move(groups), std::vector<Component>{}, host_pool, nullptr, 2);
 
     std::vector<GroupSlot> slots(1);
     slots[0].device_blocks = {42};
@@ -428,7 +442,7 @@ TEST_F(BlockTreeCacheTest, HostDisabledDirectRelease) {
     cache->waitForPendingTasks();
 
     // No host block allocated (Host disabled → direct release)
-    EXPECT_EQ(host_pool->freeBlocks(), 4u);
+    EXPECT_EQ(host_pool->freeBlocksNum(), 4u);
     // Node deleted (direct release, no host data to keep it alive)
     EXPECT_EQ(cache->getStats().tree_node_count, 0u);
 }
@@ -443,6 +457,7 @@ TEST_F(BlockTreeCacheTest, TierEnableQueries) {
     auto cache = std::make_unique<BlockTreeCache>(std::move(tree),
                                                   std::move(groups),
                                                   std::vector<Component>{},
+                                                  nullptr,
                                                   nullptr,
                                                   2,
                                                   nullptr,
@@ -566,9 +581,8 @@ TEST_F(BlockTreeCacheTest, MatchUsesFullGroupIdNotHardcodedZero) {
 // Node either stays in tree (rollback) or is deleted (sync fallback path).
 // ---------------------------------------------------------------------------
 TEST_F(BlockTreeCacheTest, NodeEntersHostHeapAfterDemotion) {
-    auto host_pool = std::make_shared<HostBlockPool>(256, 8);
+    auto host_pool = makeHostPool(256, 8);
     ASSERT_TRUE(host_pool->init());
-    auto copy_engine = std::make_shared<CopyEngine>(host_pool);
 
     auto tree                             = std::make_unique<BlockTree>(1);
     auto full                             = std::make_shared<FullComponentGroup>();
@@ -577,7 +591,7 @@ TEST_F(BlockTreeCacheTest, NodeEntersHostHeapAfterDemotion) {
     std::vector<ComponentGroupPtr> groups = {full};
 
     auto cache = std::make_unique<BlockTreeCache>(
-        std::move(tree), std::move(groups), std::vector<Component>{}, copy_engine, 2, nullptr, true, true);
+        std::move(tree), std::move(groups), std::vector<Component>{}, host_pool, nullptr, 2, nullptr, true, true);
 
     std::vector<GroupSlot> slots(1);
     slots[0].device_blocks = {42};
@@ -592,7 +606,7 @@ TEST_F(BlockTreeCacheTest, NodeEntersHostHeapAfterDemotion) {
         EXPECT_FALSE(find.matched_node->group_slots[0].has_host_value());
     }
     // Host pool has no outstanding allocations (freed on rollback)
-    EXPECT_EQ(host_pool->freeBlocks(), 8u);
+    EXPECT_EQ(host_pool->freeBlocksNum(), 8u);
 }
 
 // ---------------------------------------------------------------------------
@@ -659,9 +673,8 @@ TEST_F(BlockTreeCacheTest, NonReusableFullLifecycle) {
 // UT-9: CopyEngine failure does not update slot (Issue 7 fix)
 // ---------------------------------------------------------------------------
 TEST_F(BlockTreeCacheTest, CopyFailureDoesNotUpdateSlot) {
-    auto host_pool = std::make_shared<HostBlockPool>(256, 4);
+    auto host_pool = makeHostPool(256, 4);
     ASSERT_TRUE(host_pool->init());
-    auto copy_engine = std::make_shared<CopyEngine>(host_pool);
 
     auto tree                             = std::make_unique<BlockTree>(1);
     auto full                             = std::make_shared<FullComponentGroup>();
@@ -678,7 +691,7 @@ TEST_F(BlockTreeCacheTest, CopyFailureDoesNotUpdateSlot) {
     std::vector<Component> components = {comp};
 
     auto cache = std::make_unique<BlockTreeCache>(
-        std::move(tree), std::move(groups), std::move(components), copy_engine, 2, nullptr, true, true);
+        std::move(tree), std::move(groups), std::move(components), host_pool, nullptr, 2, nullptr, true, true);
 
     std::vector<GroupSlot> slots(1);
     slots[0].device_blocks = {42};
@@ -697,37 +710,39 @@ TEST_F(BlockTreeCacheTest, CopyFailureDoesNotUpdateSlot) {
 }
 
 // ---------------------------------------------------------------------------
-// Mock device memory for DeviceBufferResolver tests
+// Real CUDA device memory for DeviceBufferResolver tests.
+// Allocates GPU buffers via torch; total GPU usage < 1KB.
 // ---------------------------------------------------------------------------
-class MockDeviceMemory {
+class CudaDeviceMemory {
 public:
     void allocate(int layer_id, BlockIdxType block_idx, size_t size_bytes) {
-        auto key = makeKey(layer_id, block_idx);
-        buffers_[key].resize(size_bytes, 0);
+        auto key      = makeKey(layer_id, block_idx);
+        auto gpu_opts = torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA, 0);
+        tensors_[key] = torch::zeros({static_cast<int64_t>(size_bytes)}, gpu_opts);
     }
     void fill(int layer_id, BlockIdxType block_idx, uint8_t pattern) {
         auto key = makeKey(layer_id, block_idx);
-        auto it  = buffers_.find(key);
-        if (it != buffers_.end()) {
-            std::memset(it->second.data(), pattern, it->second.size());
+        auto it  = tensors_.find(key);
+        if (it != tensors_.end()) {
+            it->second.fill_(pattern);
         }
     }
-    uint8_t* mutableData(int layer_id, BlockIdxType block_idx) {
+    void* devicePtr(int layer_id, BlockIdxType block_idx) {
         auto key = makeKey(layer_id, block_idx);
-        auto it  = buffers_.find(key);
-        return it != buffers_.end() ? it->second.data() : nullptr;
+        auto it  = tensors_.find(key);
+        return it != tensors_.end() ? it->second.data_ptr() : nullptr;
     }
     size_t size(int layer_id, BlockIdxType block_idx) const {
         auto key = makeKey(layer_id, block_idx);
-        auto it  = buffers_.find(key);
-        return it != buffers_.end() ? it->second.size() : 0;
+        auto it  = tensors_.find(key);
+        return it != tensors_.end() ? static_cast<size_t>(it->second.numel()) : 0;
     }
     DeviceBufferResolver makeResolver() {
         return [this](int layer_id, BlockIdxType block_idx) -> BlockInfo {
             BlockInfo info;
-            info.is_cuda      = false;
+            info.is_cuda      = true;
             info.device_index = 0;
-            info.addr         = mutableData(layer_id, block_idx);
+            info.addr         = devicePtr(layer_id, block_idx);
             info.size_bytes   = size(layer_id, block_idx);
             return info;
         };
@@ -737,20 +752,21 @@ private:
     static uint64_t makeKey(int layer_id, BlockIdxType block_idx) {
         return (static_cast<uint64_t>(layer_id) << 32) | static_cast<uint64_t>(block_idx);
     }
-    std::unordered_map<uint64_t, std::vector<uint8_t>> buffers_;
+    std::unordered_map<uint64_t, torch::Tensor> tensors_;
 };
 
 // ---------------------------------------------------------------------------
-// Test: DeviceBufferResolver — D2H copy succeeds with real resolver
+// Test: DeviceBufferResolver — D2H copy succeeds with real CUDA resolver
 // ---------------------------------------------------------------------------
 TEST_F(BlockTreeCacheTest, DeviceBufferResolverEnablesD2HCopy) {
-    // Set up host pool and copy engine
-    auto host_pool = std::make_shared<HostBlockPool>(512, 4);
-    ASSERT_TRUE(host_pool->init());
-    auto copy_engine = std::make_shared<CopyEngine>(host_pool);
+    ASSERT_TRUE(torch::cuda::is_available()) << "CUDA not available";
 
-    // Set up mock device memory: layer 0 block 42 = 128 bytes filled with 0xAA
-    MockDeviceMemory device_mem;
+    // Set up host pool with pinned memory for async DMA
+    auto host_pool = makeHostPool(512, 4);
+    ASSERT_TRUE(host_pool->init());
+
+    // Set up real CUDA device memory: layer 0 block 42 = 128 bytes filled with 0xAA
+    CudaDeviceMemory device_mem;
     device_mem.allocate(0, 42, 128);
     device_mem.fill(0, 42, 0xAA);
 
@@ -769,7 +785,7 @@ TEST_F(BlockTreeCacheTest, DeviceBufferResolverEnablesD2HCopy) {
     std::vector<Component>         components = {comp};
 
     auto cache = std::make_unique<BlockTreeCache>(
-        std::move(tree), std::move(groups), std::move(components), copy_engine, 2, nullptr, true, true);
+        std::move(tree), std::move(groups), std::move(components), host_pool, nullptr, 2, nullptr, true, true);
 
     // Inject the real resolver
     cache->setDeviceBufferResolver(device_mem.makeResolver());
@@ -791,7 +807,7 @@ TEST_F(BlockTreeCacheTest, DeviceBufferResolverEnablesD2HCopy) {
     // Verify host block content: should be 0xAA pattern
     auto host_block = find.matched_node->group_slots[0].host_block;
     ASSERT_FALSE(isNullBlockIdx(host_block));
-    void* host_addr = host_pool->blockAddr(host_block);
+    void* host_addr = host_pool->convertIndexToAddr(0, host_block).kv_addr;
     ASSERT_NE(host_addr, nullptr);
     auto* bytes = static_cast<const uint8_t*>(host_addr);
     EXPECT_EQ(bytes[0], 0xAA);
@@ -859,6 +875,7 @@ TEST_F(BlockTreeCacheTest, BroadcastManagerStoredCorrectly) {
     auto cache = std::make_unique<BlockTreeCache>(std::move(tree),
                                                   std::move(groups),
                                                   std::vector<Component>{},
+                                                  nullptr,
                                                   nullptr,
                                                   2,
                                                   nullptr,
