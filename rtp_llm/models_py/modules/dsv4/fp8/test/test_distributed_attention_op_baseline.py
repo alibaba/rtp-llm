@@ -1378,6 +1378,150 @@ class DistributedAttentionCandidateTest(unittest.TestCase):
             dtype=torch.bfloat16,
         )
 
+    def test_candidate_cuda_hca_production_grouped_mqa_allclose(self) -> None:
+        if not torch.cuda.is_available():
+            self.skipTest("candidate distributed attention op requires CUDA")
+        op = _candidate_op()
+        if op is None:
+            self.skipTest(
+                "rtp_llm_ops.dsv4_cp_distributed_prefill_attention is not built yet"
+            )
+        case = AttentionCase(
+            name="hca_production_grouped_mqa",
+            compress_ratio=128,
+            prefix_lengths=(0, 130, 260),
+            input_lengths=(3, 2, 1),
+            window_size=5,
+            compressed_topk=3,
+            n_heads=128,
+            head_dim=512,
+            index_heads=1,
+            index_dim=1,
+        )
+        fixture = _make_case_fixture(case, torch.device("cuda"), dtype=torch.bfloat16)
+        mqa_kv_by_req = [kv[:, :1, :].contiguous() for kv in fixture.kv_by_req]
+        fixture.kv_by_req = [
+            kv.expand(-1, case.n_heads, -1).contiguous() for kv in mqa_kv_by_req
+        ]
+        expected = reference_attention(fixture)
+
+        B = len(mqa_kv_by_req)
+        max_kv_len = max(int(kv.shape[0]) for kv in mqa_kv_by_req)
+        kv = torch.zeros(
+            B,
+            max_kv_len,
+            1,
+            case.head_dim,
+            dtype=fixture.q.dtype,
+            device=fixture.q.device,
+        )
+        for req, src in enumerate(mqa_kv_by_req):
+            kv[req, : src.shape[0]].copy_(src)
+        indexer_k = torch.zeros(
+            B,
+            1,
+            case.index_heads,
+            case.index_dim,
+            dtype=fixture.q.dtype,
+            device=fixture.q.device,
+        )
+        prefix_lengths = torch.tensor(
+            case.prefix_lengths, dtype=torch.long, device=fixture.q.device
+        )
+        input_lengths = torch.tensor(
+            case.input_lengths, dtype=torch.long, device=fixture.q.device
+        )
+
+        restored = torch.empty_like(expected)
+        for rank in range(case.cp_size):
+            rows = rank_local_rows(expected.shape[0], rank, case.cp_size).to(
+                device=fixture.q.device
+            )
+            actual = op(
+                fixture.q.contiguous(),
+                kv.contiguous(),
+                fixture.indexer_q.contiguous(),
+                indexer_k.contiguous(),
+                fixture.attn_sink.contiguous(),
+                fixture.req_id_per_token.contiguous(),
+                fixture.position_ids.contiguous(),
+                prefix_lengths,
+                input_lengths,
+                rows,
+                case.compress_ratio,
+                case.window_size,
+                case.compressed_topk,
+            )
+            _assert_attention_close(actual, expected.index_select(0, rows))
+            restored.index_copy_(0, rows, actual)
+        _assert_attention_close(restored, expected)
+
+    def test_candidate_cuda_hca_kh_gt_one_does_not_use_grouped_mqa(self) -> None:
+        self._run_candidate_case(
+            AttentionCase(
+                name="hca_kh_gt_one_grouped_guard",
+                compress_ratio=128,
+                prefix_lengths=(0, 130),
+                input_lengths=(3, 2),
+                window_size=5,
+                compressed_topk=3,
+                n_heads=8,
+                head_dim=512,
+                index_heads=1,
+                index_dim=1,
+            ),
+            dtype=torch.bfloat16,
+        )
+
+    def test_candidate_cuda_split_k_gate_requires_symmetric_backend(self) -> None:
+        if not torch.cuda.is_available():
+            self.skipTest("candidate distributed attention op requires CUDA")
+        op = _candidate_op()
+        if op is None:
+            self.skipTest(
+                "rtp_llm_ops.dsv4_cp_distributed_prefill_attention is not built yet"
+            )
+        case = AttentionCase(
+            name="splitk_gate_requires_symm",
+            compress_ratio=128,
+            prefix_lengths=(0,),
+            input_lengths=(1,),
+            window_size=1,
+            compressed_topk=0,
+            n_heads=128,
+            head_dim=512,
+            index_heads=1,
+            index_dim=1,
+            cp_size=1,
+        )
+        fixture = _make_case_fixture(case, torch.device("cuda"), dtype=torch.bfloat16)
+        mqa_kv = fixture.kv_by_req[0][:, :1, :].contiguous()
+        rows = torch.arange(1, dtype=torch.long, device=fixture.q.device)
+        old_value = os.environ.get("DSV4_CP_ATTENTION_MEGA_SPLITK")
+        os.environ["DSV4_CP_ATTENTION_MEGA_SPLITK"] = "1"
+        try:
+            with self.assertRaisesRegex(RuntimeError, "requires symmetric backend"):
+                op(
+                    fixture.q.contiguous(),
+                    mqa_kv.view(1, 1, 1, case.head_dim).contiguous(),
+                    fixture.indexer_q.contiguous(),
+                    torch.zeros(1, 1, 1, 1, dtype=fixture.q.dtype, device=fixture.q.device),
+                    fixture.attn_sink.contiguous(),
+                    fixture.req_id_per_token.contiguous(),
+                    fixture.position_ids.contiguous(),
+                    torch.tensor(case.prefix_lengths, dtype=torch.long, device=fixture.q.device),
+                    torch.tensor(case.input_lengths, dtype=torch.long, device=fixture.q.device),
+                    rows,
+                    case.compress_ratio,
+                    case.window_size,
+                    case.compressed_topk,
+                )
+        finally:
+            if old_value is None:
+                os.environ.pop("DSV4_CP_ATTENTION_MEGA_SPLITK", None)
+            else:
+                os.environ["DSV4_CP_ATTENTION_MEGA_SPLITK"] = old_value
+
     def test_candidate_cuda_hca_mqa_fresh_k_restore_allclose(self) -> None:
         if not torch.cuda.is_available():
             self.skipTest("candidate distributed attention op requires CUDA")
@@ -1504,6 +1648,102 @@ class DistributedAttentionCandidateTest(unittest.TestCase):
         dummy_indexer_k = torch.zeros(
             len(case.input_lengths),
             max(int(x.shape[0]) for x in fixture.indexer_k_by_req),
+            case.index_heads,
+            case.index_dim,
+            dtype=fixture.q.dtype,
+            device=fixture.q.device,
+        )
+        restored = torch.empty_like(expected)
+        for rank in range(case.cp_size):
+            rows = rank_local_rows(expected.shape[0], rank, case.cp_size).to(
+                device=fixture.q.device
+            )
+            actual = op(
+                fixture.q.contiguous(),
+                kv,
+                fixture.indexer_q.contiguous(),
+                dummy_indexer_k.contiguous(),
+                fixture.attn_sink.contiguous(),
+                fixture.req_id_per_token.contiguous(),
+                fixture.position_ids.contiguous(),
+                prefix_lengths,
+                input_lengths,
+                rows,
+                case.compress_ratio,
+                case.window_size,
+                case.compressed_topk,
+                csa_indexer_k_cache=k_cache,
+                csa_indexer_weights=weights,
+                csa_indexer_cu_lens=cu_lens,
+            )
+            _assert_attention_close(actual, expected.index_select(0, rows))
+            restored.index_copy_(0, rows, actual)
+        _assert_attention_close(restored, expected)
+
+    def test_candidate_cuda_csa_fp8_indexer_tie_break_allclose(self) -> None:
+        if not torch.cuda.is_available():
+            self.skipTest("candidate distributed attention op requires CUDA")
+        op = _candidate_op()
+        if op is None:
+            self.skipTest(
+                "rtp_llm_ops.dsv4_cp_distributed_prefill_attention is not built yet"
+            )
+        case = AttentionCase(
+            name="csa_fp8_indexer_tie_break",
+            compress_ratio=4,
+            prefix_lengths=(32,),
+            input_lengths=(4,),
+            window_size=4,
+            compressed_topk=3,
+            n_heads=8,
+            head_dim=16,
+            index_heads=64,
+            index_dim=128,
+        )
+        fixture = _make_case_fixture(case, torch.device("cuda"), dtype=torch.float32)
+        kv, _, prefix_lengths, input_lengths = _pad_for_candidate_op(fixture)
+
+        # Every visible compressed candidate gets the same positive score for
+        # every query row. Correct tie-break must therefore keep smaller
+        # candidate indices.
+        flat_k_rows = (case.prefix_lengths[0] + case.input_lengths[0]) // case.compress_ratio
+        k_flat = torch.ones(
+            flat_k_rows,
+            case.index_dim,
+            dtype=torch.float32,
+            device=fixture.q.device,
+        )
+        k_cache = _pack_flat_indexer_cache(k_flat)
+        fixture.indexer_q.fill_(1.0 / float(case.index_dim))
+        weights = torch.ones(
+            fixture.q.shape[0],
+            case.index_heads,
+            dtype=torch.float32,
+            device=fixture.q.device,
+        )
+        cu_lens = torch.tensor([0, flat_k_rows], dtype=torch.long, device=fixture.q.device)
+
+        expected_topk = torch.full(
+            (fixture.q.shape[0], case.compressed_topk),
+            -1,
+            dtype=torch.int32,
+            device=fixture.q.device,
+        )
+        for row in range(fixture.q.shape[0]):
+            q_pos = int(fixture.position_ids[row].item())
+            visible = min((q_pos + 1) // case.compress_ratio, flat_k_rows)
+            count = min(visible, case.compressed_topk)
+            if count > 0:
+                expected_topk[row, :count] = torch.arange(
+                    count,
+                    dtype=torch.int32,
+                    device=fixture.q.device,
+                )
+        expected = reference_attention_with_explicit_csa_topk(fixture, expected_topk)
+
+        dummy_indexer_k = torch.zeros(
+            1,
+            flat_k_rows,
             case.index_heads,
             case.index_dim,
             dtype=fixture.q.dtype,
@@ -3505,6 +3745,215 @@ class DistributedAttentionTorchrunCandidateTest(unittest.TestCase):
             **buffer.op_kwargs(cp_rank=rank),
         )
         _assert_attention_close(actual, expected.index_select(0, rows))
+
+    def _run_hca_grouped_mqa_long_key_case(
+        self, *, splitk_env_value: Optional[str]
+    ) -> None:
+        op = _candidate_op()
+        self.assertIsNotNone(op)
+        rank = torch.distributed.get_rank()
+        case = AttentionCase(
+            name="hca_torchrun_splitk_grouped_mqa",
+            compress_ratio=128,
+            prefix_lengths=(0, 768, 1536),
+            input_lengths=(3, 2, 1),
+            window_size=513,
+            compressed_topk=8,
+            n_heads=128,
+            head_dim=512,
+            index_heads=1,
+            index_dim=1,
+        )
+        fixture = _make_case_fixture(case, torch.device("cuda"), dtype=torch.bfloat16)
+        mqa_kv_by_req = [kv[:, :1, :].contiguous() for kv in fixture.kv_by_req]
+        fixture.kv_by_req = [
+            kv.expand(-1, case.n_heads, -1).contiguous() for kv in mqa_kv_by_req
+        ]
+        expected = reference_attention(fixture)
+        B = len(mqa_kv_by_req)
+        max_kv_len = max(int(kv.shape[0]) for kv in mqa_kv_by_req)
+        kv = torch.zeros(
+            B,
+            max_kv_len,
+            1,
+            case.head_dim,
+            dtype=fixture.q.dtype,
+            device=fixture.q.device,
+        )
+        for req, src in enumerate(mqa_kv_by_req):
+            kv[req, : src.shape[0]].copy_(src)
+        local_kv = _rank_local_4d_chunk(kv, rank, case.cp_size)
+        prefix_lengths = torch.tensor(
+            case.prefix_lengths, dtype=torch.long, device=fixture.q.device
+        )
+        input_lengths = torch.tensor(
+            case.input_lengths, dtype=torch.long, device=fixture.q.device
+        )
+        rows = rank_local_rows(expected.shape[0], rank, case.cp_size).to(
+            device=fixture.q.device
+        )
+        rank_consistent_token_cap = (
+            int(expected.shape[0]) + case.cp_size - 1
+        ) // case.cp_size
+        spec = Dsv4CpAttentionBufferSpec(
+            cp_size=case.cp_size,
+            max_tokens_per_rank=max(rank_consistent_token_cap, 1),
+            batch_cap=len(case.input_lengths),
+            swa_bytes_per_token=1024,
+            scratch_bytes_per_rank=4 * 1024 * 1024,
+        )
+        buffer = get_or_create_dsv4_cp_attention_buffer(
+            group=torch.distributed.group.WORLD,
+            cp_rank=rank,
+            spec=spec,
+        )
+        env_name = "DSV4_CP_ATTENTION_MEGA_SPLITK"
+        old_value = os.environ.get(env_name)
+        if splitk_env_value is None:
+            os.environ.pop(env_name, None)
+        else:
+            os.environ[env_name] = splitk_env_value
+        try:
+            actual = op(
+                fixture.q.contiguous(),
+                local_kv.contiguous(),
+                fixture.indexer_q.contiguous(),
+                torch.zeros(B, 1, 1, 1, dtype=fixture.q.dtype, device=fixture.q.device),
+                fixture.attn_sink.contiguous(),
+                fixture.req_id_per_token.contiguous(),
+                fixture.position_ids.contiguous(),
+                prefix_lengths,
+                input_lengths,
+                rows,
+                case.compress_ratio,
+                case.window_size,
+                case.compressed_topk,
+                **buffer.op_kwargs(cp_rank=rank),
+            )
+        finally:
+            if old_value is None:
+                os.environ.pop(env_name, None)
+            else:
+                os.environ[env_name] = old_value
+        _assert_attention_close(actual, expected.index_select(0, rows))
+
+    def test_torchrun_symm_mem_splitk_hca_grouped_mqa_allclose(self) -> None:
+        """Explicit split-K smoke: production grouped MQA path stays allclose."""
+        self._run_hca_grouped_mqa_long_key_case(splitk_env_value="1")
+
+    def test_torchrun_symm_mem_auto_splitk_hca_grouped_mqa_allclose(self) -> None:
+        """Default long-key grouped MQA path auto-selects in-kernel split-K."""
+        self._run_hca_grouped_mqa_long_key_case(splitk_env_value=None)
+
+    def _run_csa_grouped_mqa_case(
+        self,
+        *,
+        window_size: int,
+        compressed_topk: int,
+        splitk_env_value: Optional[str],
+        scratch_bytes_per_rank: int,
+    ) -> None:
+        op = _candidate_op()
+        self.assertIsNotNone(op)
+        rank = torch.distributed.get_rank()
+        case = AttentionCase(
+            name="csa_torchrun_splitk_grouped_mqa",
+            compress_ratio=4,
+            prefix_lengths=(64, 97, 130),
+            input_lengths=(3, 2, 1),
+            window_size=window_size,
+            compressed_topk=compressed_topk,
+            n_heads=128,
+            head_dim=512,
+            index_heads=64,
+            index_dim=128,
+        )
+        fixture = _make_case_fixture(case, torch.device("cuda"), dtype=torch.bfloat16)
+        mqa_kv_by_req = [kv[:, :1, :].contiguous() for kv in fixture.kv_by_req]
+        fixture.kv_by_req = [
+            kv.expand(-1, case.n_heads, -1).contiguous() for kv in mqa_kv_by_req
+        ]
+        expected = reference_attention(fixture)
+        B = len(mqa_kv_by_req)
+        max_kv_len = max(int(kv.shape[0]) for kv in mqa_kv_by_req)
+        kv = torch.zeros(
+            B,
+            max_kv_len,
+            1,
+            case.head_dim,
+            dtype=fixture.q.dtype,
+            device=fixture.q.device,
+        )
+        for req, src in enumerate(mqa_kv_by_req):
+            kv[req, : src.shape[0]].copy_(src)
+        _, indexer_k, prefix_lengths, input_lengths = _pad_for_candidate_op(fixture)
+        local_kv = _rank_local_4d_chunk(kv, rank, case.cp_size)
+        local_indexer_k = _rank_local_4d_chunk(indexer_k, rank, case.cp_size)
+        rows = rank_local_rows(expected.shape[0], rank, case.cp_size).to(
+            device=fixture.q.device
+        )
+        rank_consistent_token_cap = (
+            int(expected.shape[0]) + case.cp_size - 1
+        ) // case.cp_size
+        spec = Dsv4CpAttentionBufferSpec(
+            cp_size=case.cp_size,
+            max_tokens_per_rank=max(rank_consistent_token_cap, 1),
+            batch_cap=len(case.input_lengths),
+            swa_bytes_per_token=1024,
+            scratch_bytes_per_rank=scratch_bytes_per_rank,
+        )
+        buffer = get_or_create_dsv4_cp_attention_buffer(
+            group=torch.distributed.group.WORLD,
+            cp_rank=rank,
+            spec=spec,
+        )
+        env_name = "DSV4_CP_ATTENTION_MEGA_SPLITK"
+        old_value = os.environ.get(env_name)
+        if splitk_env_value is None:
+            os.environ.pop(env_name, None)
+        else:
+            os.environ[env_name] = splitk_env_value
+        try:
+            actual = op(
+                fixture.q.contiguous(),
+                local_kv.contiguous(),
+                fixture.indexer_q.contiguous(),
+                local_indexer_k.contiguous(),
+                fixture.attn_sink.contiguous(),
+                fixture.req_id_per_token.contiguous(),
+                fixture.position_ids.contiguous(),
+                prefix_lengths,
+                input_lengths,
+                rows,
+                case.compress_ratio,
+                case.window_size,
+                case.compressed_topk,
+                **buffer.op_kwargs(cp_rank=rank),
+            )
+        finally:
+            if old_value is None:
+                os.environ.pop(env_name, None)
+            else:
+                os.environ[env_name] = old_value
+        _assert_attention_close(actual, expected.index_select(0, rows))
+
+    def test_torchrun_symm_mem_splitk_csa_grouped_mqa_allclose(self) -> None:
+        """Short-key CSA smoke: grouped MQA path supports topK and empty ranks."""
+        self._run_csa_grouped_mqa_case(
+            window_size=7,
+            compressed_topk=5,
+            splitk_env_value="1",
+            scratch_bytes_per_rank=8 * 1024 * 1024,
+        )
+
+    def test_torchrun_symm_mem_auto_splitk_csa_grouped_mqa_allclose(self) -> None:
+        """Long-key CSA smoke: default grouped MQA path auto-selects split-K."""
+        self._run_csa_grouped_mqa_case(
+            window_size=508,
+            compressed_topk=5,
+            splitk_env_value=None,
+            scratch_bytes_per_rank=16 * 1024 * 1024,
+        )
 
     def test_torchrun_symm_mem_swa_payload_cache_write_contract(self) -> None:
         """SWA smoke: rank-local fresh-K payload is gathered and cached in op."""
