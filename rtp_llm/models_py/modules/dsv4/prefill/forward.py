@@ -108,7 +108,10 @@ from rtp_llm.models_py.modules.dsv4.fp8.prefill_meta import (
     clear_prefill_meta_shared_fp8,
 )
 from rtp_llm.models_py.modules.dsv4.kv_cache_utils import build_block_tables_batched
-from rtp_llm.models_py.modules.dsv4.prefill_workspace import PrefillWorkspace
+from rtp_llm.models_py.modules.dsv4.prefill_workspace import (
+    PrefillWorkspace,
+    resolve_prefill_workspace_dims_for_forward,
+)
 from rtp_llm.models_py.modules.factory.attention.common import (
     create_write_cache_store_impl,
 )
@@ -370,35 +373,38 @@ def forward_layers(
                 prefix_lengths = pl.to(
                     device=positions.device, dtype=torch.int32
                 ).contiguous()
-        # Per-forward prefill workspace: one runtime buffer allocated at the
-        # top of the forward, freed when ``forward_layers`` returns (so the
-        # MTP draft forward, which runs right after on a near-full card, can
-        # borrow it). Holds the prefill-Q output (eager) and — whenever CP is
-        # active — the main + indexer + SWA CP gather/restore scratch
-        # (dedicated buffer pairs per role, used by BOTH the serial and
-        # overlap paths for the workspace-backed roles). Sizing is MAX
-        # (capacity-bound, runtime-length-independent) so every forward
-        # allocates the same-sized block → zero allocator fragmentation,
-        # IDENTICAL across main and MTP-draft forwards (the draft overrides
-        # ``_resolve_prefill_ws_gather_widths`` to size off the main model's
-        # ratios — see ``deepseek_v4_mtp_model``). All three CP roles
-        # (main / indexer / swa) are workspace-backed.
-        #
-        # ``reserve_cp`` gates the CP region; we cannot derive it from
-        # ``compress_ratio != 0`` on the layers because the SWA gather runs
-        # on EVERY attention layer (including the draft's single SWA layer).
-        # The bound ``_prefill_ws_full_rows>0`` is the canonical signal that
-        # CP is active at workspace bind time.
-        reserve_cp = (cp_ctx is not None) and int(v4._prefill_ws_full_rows) > 0
-        ws = PrefillWorkspace(
-            input_ids.device,
-            q_rows=v4._prefill_ws_q_rows,
+        # Per-forward prefill workspace: legacy CP fallback keeps max-sized
+        # gather/restore scratch for allocator reuse. The distributed attention
+        # op owns CP exchange internally, so that path uses only live Q rows and
+        # skips the old Python/NCCL CP scratch reserve.
+        (
+            ws_q_rows,
+            ws_q_dim,
+            reserve_cp,
+            ws_cp_rows,
+            ws_main_w,
+            ws_idx_w,
+            ws_swa_w,
+        ) = resolve_prefill_workspace_dims_for_forward(
+            max_q_rows=v4._prefill_ws_q_rows,
             q_dim=v4._prefill_ws_q_dim,
-            reserve_cp=reserve_cp,
-            cp_rows=v4._prefill_ws_full_rows,
+            full_rows=v4._prefill_ws_full_rows,
             main_w=v4._prefill_ws_main_w,
             idx_w=v4._prefill_ws_idx_w,
             swa_w=v4._prefill_ws_swa_w,
+            input_token_count=int(input_ids.size(0)),
+            cp_ctx=cp_ctx,
+            device=input_ids.device,
+        )
+        ws = PrefillWorkspace(
+            input_ids.device,
+            q_rows=ws_q_rows,
+            q_dim=ws_q_dim,
+            reserve_cp=reserve_cp,
+            cp_rows=ws_cp_rows,
+            main_w=ws_main_w,
+            idx_w=ws_idx_w,
+            swa_w=ws_swa_w,
         )
         build_and_propagate_prefill_meta_fp8(
             v4,

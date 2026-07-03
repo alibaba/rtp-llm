@@ -679,6 +679,54 @@ def _assert_attention_close(actual: torch.Tensor, expected: torch.Tensor) -> Non
         torch.testing.assert_close(actual, expected, rtol=3e-5, atol=3e-5)
 
 
+def _splitk_actual_tiling(
+    total_keys: int,
+    requested_keys_per_block: int,
+) -> tuple[int, int]:
+    keys = max(int(total_keys), 1)
+    keys_per_block = max(int(requested_keys_per_block), 64)
+    if keys >= 2048:
+        keys_per_block = max(keys_per_block, 256)
+    elif keys >= 1024:
+        keys_per_block = max(keys_per_block, 128)
+    key_blocks = (keys + keys_per_block - 1) // keys_per_block
+    if key_blocks == 8:
+        keys_per_block = max(keys_per_block, (keys + 6) // 7)
+        keys_per_block = ((keys_per_block + 7) // 8) * 8
+        key_blocks = (keys + keys_per_block - 1) // keys_per_block
+    return keys_per_block, max(key_blocks, 1)
+
+
+def _csa_topk_pair_better(lhs: tuple[float, int], rhs: tuple[float, int]) -> bool:
+    return lhs[0] > rhs[0] or (lhs[0] == rhs[0] and lhs[1] < rhs[1])
+
+
+def _csa_streaming_tile_topk(scores: list[float], k: int, tile: int = 8) -> list[int]:
+    selected: list[tuple[float, int]] = []
+    for base in range(0, len(scores), tile):
+        tile_pairs = [(scores[idx], idx) for idx in range(base, min(base + tile, len(scores)))]
+        if len(selected) < k:
+            fill_count = min(k - len(selected), len(tile_pairs))
+            selected.extend(tile_pairs[:fill_count])
+            selected.sort(key=lambda x: (x[0], -x[1]))
+            tile_pairs = tile_pairs[fill_count:]
+        if not tile_pairs:
+            continue
+        worst = selected[0]
+        tile_best = max(tile_pairs, key=lambda x: (x[0], -x[1]))
+        if not _csa_topk_pair_better(tile_best, worst):
+            continue
+        worst_order = sorted(range(len(selected)), key=lambda pos: (selected[pos][0], -selected[pos][1]))
+        tile_order = sorted(tile_pairs, key=lambda x: (-x[0], x[1]))
+        for worst_pos, candidate in zip(worst_order, tile_order):
+            if _csa_topk_pair_better(candidate, selected[worst_pos]):
+                selected[worst_pos] = candidate
+            else:
+                break
+        selected.sort(key=lambda x: (x[0], -x[1]))
+    return [idx for _, idx in sorted(selected, key=lambda x: (-x[0], x[1]))]
+
+
 def _rank_local_4d_chunk(src: torch.Tensor, rank: int, cp_size: int) -> torch.Tensor:
     local_len = (int(src.size(1)) + int(cp_size) - 1) // int(cp_size)
     out = torch.zeros(
@@ -1243,6 +1291,36 @@ class DistributedAttentionOracleTest(unittest.TestCase):
         self.assertGreater(ms, 0.0)
         if os.environ.get("DSV4_DIST_ATTN_PRINT_PERF", "0") == "1":
             print(json.dumps({"case": case.name, "reference_ms": ms}, sort_keys=True))
+
+    def test_splitk_actual_tiling_avoids_single_tail_wave(self) -> None:
+        self.assertEqual(_splitk_actual_tiling(512, 64), (80, 7))
+        self.assertEqual(_splitk_actual_tiling(1024, 128), (152, 7))
+        self.assertEqual(_splitk_actual_tiling(2048, 256), (296, 7))
+
+        self.assertEqual(_splitk_actual_tiling(511, 64), (80, 7))
+        self.assertEqual(_splitk_actual_tiling(513, 64), (64, 9))
+        self.assertEqual(_splitk_actual_tiling(897, 64), (64, 15))
+        self.assertEqual(_splitk_actual_tiling(1025, 128), (128, 9))
+        self.assertEqual(_splitk_actual_tiling(2049, 256), (256, 9))
+
+    def test_csa_streaming_tile_topk_matches_stable_oracle(self) -> None:
+        cases = [
+            ([0.0, 0.5, 0.5, 0.25, 0.75, 0.75, 0.1, 0.2, 0.75], 3, 8),
+            ([float(i % 5) for i in range(23)], 7, 8),
+            ([1.0] * 17, 5, 8),
+            ([0.1, 0.2, 0.3, 0.4, 9.0, 8.0, 7.0, 6.0, 9.0, 8.5], 4, 8),
+            ([float((i * 7) % 11) for i in range(37)], 9, 4),
+            ([float(i % 3) for i in range(19)], 11, 16),
+        ]
+        for scores, k, tile in cases:
+            expected = [
+                idx
+                for _, idx in sorted(
+                    [(score, idx) for idx, score in enumerate(scores)],
+                    key=lambda x: (-x[0], x[1]),
+                )[:k]
+            ]
+            self.assertEqual(_csa_streaming_tile_topk(scores, k, tile), expected)
 
 
 class DistributedAttentionCandidateTest(unittest.TestCase):
@@ -4044,9 +4122,9 @@ class DistributedAttentionTorchrunCandidateTest(unittest.TestCase):
         case = AttentionCase(
             name="hca_torchrun_splitk_grouped_mqa",
             compress_ratio=128,
-            prefix_lengths=(0, 768, 1536),
+            prefix_lengths=(0, 640, 1408),
             input_lengths=(3, 2, 1),
-            window_size=513,
+            window_size=504,
             compressed_topk=8,
             n_heads=128,
             head_dim=512,
@@ -4145,10 +4223,11 @@ class DistributedAttentionTorchrunCandidateTest(unittest.TestCase):
         op = _candidate_op()
         self.assertIsNotNone(op)
         rank = torch.distributed.get_rank()
+        prefix_lengths = (64, 509, 640) if window_size >= 507 else (64, 97, 130)
         case = AttentionCase(
             name="csa_torchrun_splitk_grouped_mqa",
             compress_ratio=4,
-            prefix_lengths=(64, 97, 130),
+            prefix_lengths=prefix_lengths,
             input_lengths=(3, 2, 1),
             window_size=window_size,
             compressed_topk=compressed_topk,
@@ -4238,7 +4317,7 @@ class DistributedAttentionTorchrunCandidateTest(unittest.TestCase):
     def test_torchrun_symm_mem_auto_splitk_csa_grouped_mqa_allclose(self) -> None:
         """Long-key CSA smoke: default grouped MQA path auto-selects split-K."""
         self._run_csa_grouped_mqa_case(
-            window_size=508,
+            window_size=507,
             compressed_topk=5,
             splitk_env_value=None,
             scratch_bytes_per_rank=16 * 1024 * 1024,
@@ -4697,8 +4776,13 @@ class DistributedAttentionTorchrunCandidateTest(unittest.TestCase):
         self.assertIsNotNone(op)
         rank = torch.distributed.get_rank()
         cp_size = 8
-        chunk = 2
-        total_tokens = 15
+        chunk = int(os.environ.get("DSV4_DIST_ATTN_TEST_LAYER0_CHUNK", "2"))
+        total_tokens = int(
+            os.environ.get("DSV4_DIST_ATTN_TEST_LAYER0_TOTAL_TOKENS", str(cp_size * chunk - 1))
+        )
+        self.assertGreater(chunk, 0)
+        self.assertGreater(total_tokens, 0)
+        self.assertLessEqual(total_tokens, cp_size * chunk)
         n_heads = 128
         head_dim = 512
         device = torch.device("cuda")
@@ -4738,21 +4822,36 @@ class DistributedAttentionTorchrunCandidateTest(unittest.TestCase):
         input_lengths = torch.tensor([total_tokens], dtype=torch.long, device=device)
         kv_cu_lens = torch.tensor([0, total_tokens], dtype=torch.long, device=device)
         if os.environ.get("DSV4_DIST_ATTN_TEST_SERVICE_METADATA", "0") == "1":
-            kv_unpad_restore = torch.tensor(
-                [0, 2, 4, 6, 8, 10, 12, 14, 15, 13, 11, 9, 7, 5, 3],
-                dtype=torch.long,
-                device=device,
-            )
+            if total_tokens == 15:
+                kv_unpad_restore = torch.tensor(
+                    [0, 2, 4, 6, 8, 10, 12, 14, 15, 13, 11, 9, 7, 5, 3],
+                    dtype=torch.long,
+                    device=device,
+                )
+            else:
+                even = torch.arange(0, total_tokens, 2, dtype=torch.long, device=device)
+                odd = torch.arange(
+                    total_tokens - 1 if (total_tokens & 1) == 0 else total_tokens - 2,
+                    0,
+                    -2,
+                    dtype=torch.long,
+                    device=device,
+                )
+                kv_unpad_restore = torch.cat([even, odd], dim=0)
         else:
             kv_unpad_restore = torch.arange(total_tokens, dtype=torch.long, device=device)
         local_rows = torch.arange(chunk, dtype=torch.long, device=device)
 
         if os.environ.get("DSV4_DIST_ATTN_TEST_SERVICE_METADATA", "0") == "1":
-            full_slots = torch.tensor(
-                [132, -1, 133, 146, 134, 145, 135, 144, 136, 143, 137, 142, 138, 141, 139, 140],
-                dtype=torch.long,
-                device=device,
-            )
+            if cp_size * chunk == 16:
+                full_slots = torch.tensor(
+                    [132, -1, 133, 146, 134, 145, 135, 144, 136, 143, 137, 142, 138, 141, 139, 140],
+                    dtype=torch.long,
+                    device=device,
+                )
+            else:
+                full_slots = torch.arange(cp_size * chunk, dtype=torch.long, device=device) + 132
+                full_slots[torch.arange(1, cp_size * chunk, 17, device=device)] = -1
         else:
             full_slots = torch.full(
                 (cp_size * chunk,),
@@ -4785,23 +4884,36 @@ class DistributedAttentionTorchrunCandidateTest(unittest.TestCase):
             device=device,
         )
         state_cache.fill_(-123.0)
-        positions_padded = (
-            torch.tensor(
+        if os.environ.get("DSV4_DIST_ATTN_TEST_SERVICE_METADATA", "0") == "1" and cp_size * chunk == 16:
+            positions_padded = torch.tensor(
                 [0, 0, 1, 14, 2, 13, 3, 12, 4, 11, 5, 10, 6, 9, 7, 8],
                 dtype=torch.long,
                 device=device,
             )
-            if os.environ.get("DSV4_DIST_ATTN_TEST_SERVICE_METADATA", "0") == "1"
-            else torch.arange(cp_size * chunk, dtype=torch.long, device=device)
-        )
+        elif os.environ.get("DSV4_DIST_ATTN_TEST_SERVICE_METADATA", "0") == "1":
+            positions_padded = torch.remainder(
+                torch.arange(cp_size * chunk, dtype=torch.long, device=device) * 17,
+                max(total_tokens, 1),
+            )
+        else:
+            positions_padded = torch.arange(cp_size * chunk, dtype=torch.long, device=device)
         state_slots = full_slots.clone()
         token_to_req = torch.zeros(cp_size * chunk, dtype=torch.int32, device=device)
         kv_slots = torch.full((cp_size * chunk,), -1, dtype=torch.long, device=device)
-        state_block_table = (
-            torch.tensor([[4, 5, 6, 7]], dtype=torch.int32, device=device)
-            if os.environ.get("DSV4_DIST_ATTN_TEST_SERVICE_METADATA", "0") == "1"
-            else torch.zeros(1, 4, dtype=torch.int32, device=device)
-        )
+        state_block_table_width = max(4, (total_tokens + 131) // 132 + 1)
+        if os.environ.get("DSV4_DIST_ATTN_TEST_SERVICE_METADATA", "0") == "1":
+            state_block_table = (
+                torch.arange(
+                    4,
+                    4 + state_block_table_width,
+                    dtype=torch.int32,
+                    device=device,
+                )
+                .view(1, -1)
+                .contiguous()
+            )
+        else:
+            state_block_table = torch.zeros(1, state_block_table_width, dtype=torch.int32, device=device)
         norm_weight = torch.ones(head_dim, dtype=torch.bfloat16, device=device)
         cos_sin_cache = torch.zeros(256, 64, dtype=torch.float32, device=device)
         cos_sin_cache[:, :32] = 1.0
@@ -4815,6 +4927,7 @@ class DistributedAttentionTorchrunCandidateTest(unittest.TestCase):
             scratch_bytes_per_rank=max(
                 int(local_kv.numel() * local_kv.element_size()),
                 int(local_q.numel() * local_q.element_size()),
+                4 * 1024 * 1024,
             ),
         )
         dummy_symm_buffer = None

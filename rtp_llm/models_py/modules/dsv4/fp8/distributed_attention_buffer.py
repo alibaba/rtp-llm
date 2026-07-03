@@ -22,6 +22,11 @@ _BUFFER_CACHE: dict[tuple, "Dsv4CpAttentionBuffer"] = {}
 _DEFAULT_ALIGN_BYTES = 256
 _DEFAULT_PROTOCOL_BYTES = 4352
 _ENV_MAX_TOKENS = "DSV4_CP_DISTRIBUTED_PREFILL_ATTN_MAX_TOKENS_PER_RANK"
+_ENV_MEGA_COMPRESSED_TOPK_CAP = "DSV4_CP_DISTRIBUTED_PREFILL_ATTN_COMPRESSED_TOPK_CAP"
+_ENV_MEGA_SPLITK_SCRATCH_BYTES = "DSV4_CP_DISTRIBUTED_PREFILL_ATTN_SPLITK_SCRATCH_BYTES"
+_DEFAULT_MEGA_COMPRESSED_TOPK_CAP = 1024
+_DEFAULT_MEGA_GRID_SYNC_BYTES = 320
+_DEFAULT_MEGA_SPLITK_SCRATCH_BYTES = 4 * 1024 * 1024
 _SIGNAL_PAD_CHANNEL_BASE = 224
 _SIGNAL_PAD_CHANNEL_COUNT = 32
 
@@ -62,6 +67,10 @@ class Dsv4CpAttentionBufferSpec:
     # overlap=True payload widths, not for the packed cache entry sizes.
     main_bytes_per_token: int = 2048
     indexer_bytes_per_token: int = 1024
+    csa_compressor_bytes_per_token: int = 1024
+    mega_compressed_topk_cap: int = 0
+    mega_grid_sync_bytes: int = 0
+    mega_splitk_scratch_bytes_per_rank: int = 0
     scratch_bytes_per_rank: int = 0
     protocol_bytes_per_rank: int = _DEFAULT_PROTOCOL_BYTES
     align_bytes: int = _DEFAULT_ALIGN_BYTES
@@ -88,8 +97,63 @@ class Dsv4CpAttentionBufferSpec:
             raise ValueError(
                 f"indexer_bytes_per_token must be positive, got {self.indexer_bytes_per_token}"
             )
+        if self.csa_compressor_bytes_per_token < 0:
+            raise ValueError(
+                "csa_compressor_bytes_per_token must be non-negative, got "
+                f"{self.csa_compressor_bytes_per_token}"
+            )
+        if self.mega_compressed_topk_cap < 0:
+            raise ValueError(
+                f"mega_compressed_topk_cap must be non-negative, got {self.mega_compressed_topk_cap}"
+            )
+        if self.mega_grid_sync_bytes < 0:
+            raise ValueError(
+                f"mega_grid_sync_bytes must be non-negative, got {self.mega_grid_sync_bytes}"
+            )
+        if self.mega_splitk_scratch_bytes_per_rank < 0:
+            raise ValueError(
+                "mega_splitk_scratch_bytes_per_rank must be non-negative, got "
+                f"{self.mega_splitk_scratch_bytes_per_rank}"
+            )
         if self.page_rr:
             raise ValueError("V0 distributed attention buffer does not support page/RR")
+
+    @property
+    def mega_side_effect_scratch_bytes_per_rank(self) -> int:
+        if (
+            int(self.mega_compressed_topk_cap) <= 0
+            and int(self.mega_grid_sync_bytes) <= 0
+            and int(self.mega_splitk_scratch_bytes_per_rank) <= 0
+        ):
+            return 0
+        token_cap = int(self.max_tokens_per_rank)
+        align = int(self.align_bytes)
+        swa_stage = _align_up(
+            int(self.mega_grid_sync_bytes)
+            + token_cap * int(self.swa_bytes_per_token),
+            align,
+        )
+        csa_compressor_stage = _align_up(
+            token_cap * int(self.csa_compressor_bytes_per_token),
+            align,
+        )
+        main_compressor_stage = _align_up(
+            token_cap * int(self.main_bytes_per_token) * 2,
+            align,
+        )
+        compressed_index_stage = _align_up(
+            token_cap * 8,
+            align,
+        ) + token_cap * max(int(self.mega_compressed_topk_cap), 1) * 4
+        side_effect_stage = (
+            swa_stage
+            + csa_compressor_stage
+            + main_compressor_stage
+            + compressed_index_stage
+        )
+        if side_effect_stage == 0:
+            return 0
+        return side_effect_stage + int(self.mega_splitk_scratch_bytes_per_rank)
 
     @property
     def stage_bytes_per_rank(self) -> int:
@@ -101,6 +165,7 @@ class Dsv4CpAttentionBufferSpec:
             token_cap * int(self.swa_bytes_per_token),
             token_cap * int(self.main_bytes_per_token),
             token_cap * int(self.indexer_bytes_per_token),
+            self.mega_side_effect_scratch_bytes_per_rank,
             int(self.scratch_bytes_per_rank),
         )
         return persistent_bytes + transient_bytes
@@ -143,6 +208,10 @@ class Dsv4CpAttentionBufferSpec:
             int(self.swa_bytes_per_token),
             int(self.main_bytes_per_token),
             int(self.indexer_bytes_per_token),
+            int(self.csa_compressor_bytes_per_token),
+            int(self.mega_compressed_topk_cap),
+            int(self.mega_grid_sync_bytes),
+            int(self.mega_splitk_scratch_bytes_per_rank),
             int(self.scratch_bytes_per_rank),
             int(self.protocol_bytes_per_rank),
             int(self.align_bytes),
@@ -237,11 +306,22 @@ def build_dsv4_cp_attention_buffer_spec(
     page_rr: bool,
 ) -> Dsv4CpAttentionBufferSpec:
     max_tokens = _env_int(_ENV_MAX_TOKENS, max(int(actual_tokens_per_rank), 1))
+    mega_topk_cap = _env_int(
+        _ENV_MEGA_COMPRESSED_TOPK_CAP,
+        _DEFAULT_MEGA_COMPRESSED_TOPK_CAP,
+    )
+    mega_splitk_scratch = _env_int(
+        _ENV_MEGA_SPLITK_SCRATCH_BYTES,
+        _DEFAULT_MEGA_SPLITK_SCRATCH_BYTES,
+    )
     spec = Dsv4CpAttentionBufferSpec(
         cp_size=int(cp_size),
         max_tokens_per_rank=max_tokens,
         batch_cap=max(int(batch_size), 1),
         swa_bytes_per_token=int(swa_bytes_per_token),
+        mega_compressed_topk_cap=max(int(mega_topk_cap), 0),
+        mega_grid_sync_bytes=_DEFAULT_MEGA_GRID_SYNC_BYTES,
+        mega_splitk_scratch_bytes_per_rank=max(int(mega_splitk_scratch), 0),
         page_rr=bool(page_rr),
     )
     spec.validate_request(
@@ -310,6 +390,19 @@ def get_or_create_dsv4_cp_attention_buffer(
                 )
                 if start < end:
                     signal_pad[start:end].zero_()
+                if os.environ.get("DSV4_CP_ATTENTION_DEBUG_PY", "0") == "1":
+                    logging.warning(
+                        "[DSV4 CP Attention Py] symm signal pad cp_rank=%s "
+                        "size_bytes=%s u32=%s zero_range=[%s,%s) channel_base=%s "
+                        "channel_count=%s",
+                        int(cp_rank),
+                        int(signal_pad_size),
+                        int(signal_pad.numel()),
+                        int(start),
+                        int(end),
+                        int(_SIGNAL_PAD_CHANNEL_BASE),
+                        int(_SIGNAL_PAD_CHANNEL_COUNT),
+                    )
         if hasattr(group, "barrier"):
             group.barrier()
         else:

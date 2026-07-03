@@ -43,6 +43,7 @@ constexpr int kIndexerEntryBytes = 132;
 constexpr int kIndexerHeadDim = 128;
 constexpr float kSwaFp8Max = 448.0f;
 constexpr int kAttentionSignalPadChannelBase = 224;
+constexpr int kMegaSignalPadChannelBase = kAttentionSignalPadChannelBase + 16;
 constexpr int64_t kSymmMemBarrierTimeoutCycles = 60000000000ll;
 constexpr float kInvalidCompressorScore = -3.4028234663852886e38F;
 constexpr int64_t kMegaPayloadAlignBytes = 256;
@@ -104,6 +105,10 @@ constexpr int kMegaReduceResultSlots =
     kMegaIndexerCandidateTile > kMegaAttentionKeyTile ? kMegaIndexerCandidateTile : kMegaAttentionKeyTile;
 static_assert(kMegaIndexerCandidateGroups * 64 * kMegaIndexerCandidateHeadLanes == kMegaBlockThreads,
               "CSA matrix scorer maps one CTA exactly across group/head/lane work");
+static_assert(kMegaIndexerCandidateTile
+                      + (kMegaBlockThreads / kMegaAttentionWarpSize) * kMegaIndexerCandidateTile
+                  <= kMegaBlockThreads,
+              "CSA worst-slot tile scratch must fit in reduce_indices_second without aliasing the tile list");
 constexpr unsigned int kMegaCompressedDoneFlag = 0x80000000u;
 constexpr unsigned int kMegaCompressedCountMask = 0x7fffffffu;
 constexpr int kWarpDotAttentionKeyThreshold = 128;
@@ -133,7 +138,7 @@ bool dsv4CpAttentionMegaKernelEnabled() {
 
 bool dsv4CpAttentionMegaGridSideEffectsEnabled() {
     const char* raw = std::getenv("DSV4_CP_ATTENTION_MEGA_GRID_SIDE_EFFECTS");
-    return raw == nullptr || raw[0] == '\0' || raw[0] != '0';
+    return raw != nullptr && raw[0] != '\0' && raw[0] != '0';
 }
 
 bool dsv4CpAttentionMegaSplitKEnabled() {
@@ -703,6 +708,33 @@ __device__ __forceinline__ uint16_t float_to_bf16_bits(float x) {
     return *reinterpret_cast<uint16_t*>(&y);
 }
 
+__device__ __forceinline__ uint16_t load_u16_unaligned(const void* ptr) {
+    const auto* bytes = reinterpret_cast<const uint8_t*>(ptr);
+    return static_cast<uint16_t>(bytes[0]) | (static_cast<uint16_t>(bytes[1]) << 8);
+}
+
+__device__ __forceinline__ void store_u16_unaligned(void* ptr, uint16_t value) {
+    auto* bytes = reinterpret_cast<uint8_t*>(ptr);
+    bytes[0] = static_cast<uint8_t>(value & 0xffu);
+    bytes[1] = static_cast<uint8_t>((value >> 8) & 0xffu);
+}
+
+__device__ __forceinline__ float load_f32_unaligned(const void* ptr) {
+    const auto* bytes = reinterpret_cast<const uint8_t*>(ptr);
+    const uint32_t bits = static_cast<uint32_t>(bytes[0]) | (static_cast<uint32_t>(bytes[1]) << 8)
+                          | (static_cast<uint32_t>(bytes[2]) << 16) | (static_cast<uint32_t>(bytes[3]) << 24);
+    return __uint_as_float(bits);
+}
+
+__device__ __forceinline__ void store_f32_unaligned(void* ptr, float value) {
+    auto* bytes = reinterpret_cast<uint8_t*>(ptr);
+    const uint32_t bits = __float_as_uint(value);
+    bytes[0] = static_cast<uint8_t>(bits & 0xffu);
+    bytes[1] = static_cast<uint8_t>((bits >> 8) & 0xffu);
+    bytes[2] = static_cast<uint8_t>((bits >> 16) & 0xffu);
+    bytes[3] = static_cast<uint8_t>((bits >> 24) & 0xffu);
+}
+
 __device__ __forceinline__ float fp8_e4m3_to_float(uint8_t x, float scale) {
     __half_raw raw = __nv_cvt_fp8_to_halfraw(x, __NV_E4M3);
     __half h = __ushort_as_half(raw.x);
@@ -781,7 +813,7 @@ __device__ __forceinline__ float symm_fresh_kv_at(const uint8_t* const* __restri
     }
     const int owner = static_cast<int>(gathered_row / L_local);
     const int local_row = static_cast<int>(gathered_row - static_cast<int64_t>(owner) * L_local);
-    if (owner < 0 || local_row < 0) {
+    if (owner < 0 || owner >= 8 || local_row < 0 || local_row >= L_local) {
         return 0.0f;
     }
     const int kh = KH == 1 ? 0 : h;
@@ -808,7 +840,7 @@ __device__ __forceinline__ float symm_4d_at(const uint8_t* const* __restrict__ b
     }
     const int owner = pos / L_local;
     const int local_pos = pos - owner * L_local;
-    if (owner < 0 || local_pos < 0) {
+    if (owner < 0 || owner >= 8 || local_pos < 0 || local_pos >= L_local) {
         return 0.0f;
     }
     const int64_t elem_offset = ((static_cast<int64_t>(req) * L_local + local_pos) * IH + h) * ID + d;
@@ -832,7 +864,7 @@ __device__ __forceinline__ float model1_cache_at(const uint8_t* cache,
     }
     const int rope_d = d - kSwaNopeDim;
     if (rope_d < kSwaHeadDim - kSwaNopeDim) {
-        const uint16_t bits = reinterpret_cast<const uint16_t*>(row + kSwaNopeDim)[rope_d];
+        const uint16_t bits = load_u16_unaligned(row + kSwaNopeDim + rope_d * static_cast<int>(sizeof(uint16_t)));
         return bf16_bits_to_float(bits);
     }
     return 0.0f;
@@ -859,7 +891,8 @@ __device__ __forceinline__ float model1_pool_slot_at(const uint8_t* pool,
     }
     const int rope_d = d - kSwaNopeDim;
     if (rope_d < kSwaHeadDim - kSwaNopeDim) {
-        const uint16_t bits = reinterpret_cast<const uint16_t*>(token_data + kSwaNopeDim)[rope_d];
+        const uint16_t bits =
+            load_u16_unaligned(token_data + kSwaNopeDim + rope_d * static_cast<int>(sizeof(uint16_t)));
         return bf16_bits_to_float(bits);
     }
     return 0.0f;
@@ -1211,7 +1244,8 @@ __device__ __forceinline__ void dsv4MegaLoadAttentionKeyTile(const scalar_t* __r
             const uint8_t* data_ptr = packed_data_rows[key_i];
             if (data_ptr != nullptr) {
                 key_tile_shared[static_cast<int64_t>(key_i) * kSwaHeadDim + d] =
-                    bf16_bits_to_float(reinterpret_cast<const uint16_t*>(data_ptr + kSwaNopeDim)[rope_d]);
+                    bf16_bits_to_float(load_u16_unaligned(data_ptr + kSwaNopeDim
+                                                          + rope_d * static_cast<int>(sizeof(uint16_t))));
             } else {
                 key_tile_shared[static_cast<int64_t>(key_i) * kSwaHeadDim + d] =
                     attention_key_at(kv,
@@ -1355,6 +1389,43 @@ __device__ __forceinline__ float* dsv4MegaSplitKRecordAcc(float* record) {
     return record + 2 * kMegaAttentionHeadsPerCta;
 }
 
+struct MegaSplitKTiling {
+    int keys_per_block;
+    int key_blocks;
+};
+
+__device__ __forceinline__ int dsv4MegaCeilDivInt(int x, int y) {
+    return (x + y - 1) / y;
+}
+
+__device__ __forceinline__ int dsv4MegaAlignUpInt(int x, int align) {
+    return dsv4MegaCeilDivInt(x, align) * align;
+}
+
+__device__ __forceinline__ int dsv4MegaSplitKBaseKeysPerBlock(int total_keys, int requested_keys_per_block) {
+    if (total_keys >= 2048) {
+        return max_int(requested_keys_per_block, 256);
+    }
+    if (total_keys >= 1024) {
+        return max_int(requested_keys_per_block, 128);
+    }
+    return max_int(requested_keys_per_block, kMegaSplitKKeysPerBlock);
+}
+
+__device__ __forceinline__ MegaSplitKTiling dsv4MegaSplitKActualTiling(int total_keys, int requested_keys_per_block) {
+    const int keys = max_int(total_keys, 1);
+    int keys_per_block =
+        max_int(dsv4MegaSplitKBaseKeysPerBlock(keys, requested_keys_per_block), kMegaAttentionGroupedKeyTile);
+    int key_blocks = dsv4MegaCeilDivInt(keys, keys_per_block);
+    if (key_blocks == kMegaSplitKGroupSize) {
+        keys_per_block = max_int(keys_per_block, dsv4MegaCeilDivInt(keys, kMegaSplitKBlocksPerWave));
+        keys_per_block =
+            dsv4MegaAlignUpInt(keys_per_block, kMegaAttentionGroupedKeyTile);
+        key_blocks = dsv4MegaCeilDivInt(keys, keys_per_block);
+    }
+    return {keys_per_block, max_int(key_blocks, 1)};
+}
+
 __device__ __forceinline__ int dsv4MegaCombinedKeyPos(int combined_idx,
                                                       int compressed_count,
                                                       int compress_ratio,
@@ -1408,6 +1479,7 @@ __device__ __forceinline__ void dsv4MegaMergeSplitKWave(float* dst,
                                                         int physical_group,
                                                         int wave_blocks) {
     __shared__ float wave_src_scale[kMegaSplitKBlocksPerWave][kMegaAttentionHeadsPerCta];
+    __shared__ float wave_partial_m[kMegaSplitKBlocksPerWave][kMegaAttentionHeadsPerCta];
     __shared__ float wave_dst_scale[kMegaAttentionHeadsPerCta];
     __shared__ float wave_new_m[kMegaAttentionHeadsPerCta];
     __shared__ float wave_new_l[kMegaAttentionHeadsPerCta];
@@ -1419,14 +1491,19 @@ __device__ __forceinline__ void dsv4MegaMergeSplitKWave(float* dst,
         float new_m = dst_m;
 #pragma unroll
         for (int partial_i = 1; partial_i <= kMegaSplitKBlocksPerWave; ++partial_i) {
+            float src_m = kInvalidCompressorScore;
+            float src_l = 0.0f;
             if (partial_i <= wave_blocks) {
                 const float* partial_record =
                     dsv4MegaSplitKRecord(splitk_base, physical_group * kMegaSplitKGroupSize + partial_i);
-                const float src_l = partial_record[kMegaAttentionHeadsPerCta + h];
+                src_m = partial_record[h];
+                src_l = partial_record[kMegaAttentionHeadsPerCta + h];
                 if (src_l > 0.0f) {
-                    new_m = fmaxf(new_m, partial_record[h]);
+                    new_m = fmaxf(new_m, src_m);
                 }
             }
+            wave_partial_m[partial_i - 1][h] = src_m;
+            wave_src_scale[partial_i - 1][h] = src_l;
         }
         const float dst_scale = dst_l > 0.0f ? expf(dst_m - new_m) : 0.0f;
         float new_l = dst_l * dst_scale;
@@ -1434,11 +1511,9 @@ __device__ __forceinline__ void dsv4MegaMergeSplitKWave(float* dst,
 #pragma unroll
         for (int partial_i = 1; partial_i <= kMegaSplitKBlocksPerWave; ++partial_i) {
             float src_scale = 0.0f;
-            if (partial_i <= wave_blocks) {
-                const float* partial_record =
-                    dsv4MegaSplitKRecord(splitk_base, physical_group * kMegaSplitKGroupSize + partial_i);
-                const float src_l = partial_record[kMegaAttentionHeadsPerCta + h];
-                src_scale = src_l > 0.0f ? expf(partial_record[h] - new_m) : 0.0f;
+            const float src_l = wave_src_scale[partial_i - 1][h];
+            if (src_l > 0.0f) {
+                src_scale = expf(wave_partial_m[partial_i - 1][h] - new_m);
                 new_l += src_l * src_scale;
             }
             wave_src_scale[partial_i - 1][h] = src_scale;
@@ -1522,9 +1597,14 @@ __device__ __forceinline__ void dsv4MegaComputeSplitKPartial(const scalar_t* __r
     const int tid = static_cast<int>(threadIdx.x);
     const int warp_id = tid / kMegaAttentionWarpSize;
     const int lane_id = tid & (kMegaAttentionWarpSize - 1);
-    dsv4MegaInitializeSplitKRecord(record, 0);
 
-    if (warp_id >= kMegaAttentionHeadsPerCta || key_block_start >= total_keys) {
+    // Active partials fully overwrite max/denom/acc; empty partials must still
+    // publish a clean zero record because the merge path may read one block.
+    if (key_block_start >= total_keys) {
+        dsv4MegaInitializeSplitKRecord(record, 0);
+        return;
+    }
+    if (warp_id >= kMegaAttentionHeadsPerCta) {
         return;
     }
     const int head = h_base + warp_id;
@@ -1778,7 +1858,7 @@ __device__ __forceinline__ float indexer_pool_k_at(const uint8_t* pool,
     const uint8_t* block = pool + static_cast<int64_t>(block_id) * block_stride;
     const uint8_t* token_ptr = block + in_block * kIndexerHeadDim;
     const uint8_t* scale_ptr = block + static_cast<int64_t>(block_size) * kIndexerHeadDim + in_block * 4;
-    const float scale = *reinterpret_cast<const float*>(scale_ptr);
+    const float scale = load_f32_unaligned(scale_ptr);
     return fp8_e4m3_to_float(token_ptr[d], scale);
 }
 
@@ -1857,7 +1937,7 @@ __device__ float indexer_score_fp8_cache(const scalar_t* indexer_q,
                                          int ID) {
     const int64_t base = cu_lens[req] + pos;
     const uint8_t* k_row = fp8_cache + base * kIndexerEntryBytes;
-    const float k_scale = *reinterpret_cast<const float*>(k_row + kIndexerHeadDim);
+    const float k_scale = load_f32_unaligned(k_row + kIndexerHeadDim);
     float score = 0.0f;
     for (int h = 0; h < IH; ++h) {
         float dot = 0.0f;
@@ -1929,7 +2009,7 @@ __device__ __forceinline__ float dsv4MegaIndexerScoreParallel(const scalar_t* __
             } else if (use_fp8_indexer_cache) {
                 const int64_t base = csa_indexer_cu_lens[req] + c;
                 const uint8_t* k_row = csa_indexer_k_cache + base * kIndexerEntryBytes;
-                const float k_scale = *reinterpret_cast<const float*>(k_row + kIndexerHeadDim);
+                const float k_scale = load_f32_unaligned(k_row + kIndexerHeadDim);
                 for (int d = lane_in_head; d < ID; d += 4) {
                     head_dot += indexer_q_at(indexer_q, row, head, d, IH, ID) * fp8_e4m3_to_float(k_row[d], k_scale);
                 }
@@ -1991,7 +2071,7 @@ __device__ __forceinline__ float dsv4MegaIndexerScoreParallel(const scalar_t* __
     } else if (use_fp8_indexer_cache) {
         const int64_t base = csa_indexer_cu_lens[req] + c;
         const uint8_t* k_row = csa_indexer_k_cache + base * kIndexerEntryBytes;
-        const float k_scale = *reinterpret_cast<const float*>(k_row + kIndexerHeadDim);
+        const float k_scale = load_f32_unaligned(k_row + kIndexerHeadDim);
         for (int h = tid; h < IH; h += static_cast<int>(blockDim.x)) {
             float dot = 0.0f;
             for (int d = 0; d < ID; ++d) {
@@ -2060,9 +2140,6 @@ __device__ __forceinline__ void dsv4MegaIndexerScoreCandidateTile(const scalar_t
     if (tid < kMegaIndexerCandidateTile) {
         tile_scores[tid] = kInvalidCompressorScore;
     }
-    if (tid < kMegaIndexerHeads * kMegaIndexerCandidateTile) {
-        head_scores[tid] = 0.0f;
-    }
     if (tid < kMegaIndexerCandidateTile) {
         const int candidate_lane_init = tid;
         const int candidate_valid_init =
@@ -2080,12 +2157,12 @@ __device__ __forceinline__ void dsv4MegaIndexerScoreCandidateTile(const scalar_t
                 data_ptr = block + in_block * kIndexerHeadDim;
                 const uint8_t* scale_ptr = block + static_cast<int64_t>(csa_indexer_pool_block_size) * kIndexerHeadDim
                                            + in_block * 4;
-                scale = *reinterpret_cast<const float*>(scale_ptr);
+                scale = load_f32_unaligned(scale_ptr);
             }
         } else if (candidate_valid_init != 0 && use_fp8_indexer_cache) {
             const int64_t base = csa_indexer_cu_lens[req] + c;
             data_ptr = csa_indexer_k_cache + base * kIndexerEntryBytes;
-            scale = *reinterpret_cast<const float*>(data_ptr + kIndexerHeadDim);
+            scale = load_f32_unaligned(data_ptr + kIndexerHeadDim);
         }
         candidate_data_rows[candidate_lane_init] = data_ptr;
         candidate_scales[candidate_lane_init] = scale;
@@ -2098,16 +2175,22 @@ __device__ __forceinline__ void dsv4MegaIndexerScoreCandidateTile(const scalar_t
         dot[j] = 0.0f;
     }
     if (group < kMegaIndexerCandidateGroups && (use_fp8_indexer_pool || use_fp8_indexer_cache)) {
+        const uint8_t* candidate_rows[kMegaIndexerCandidatesPerGroup];
+        float candidate_scale_values[kMegaIndexerCandidatesPerGroup];
+#pragma unroll
+        for (int j = 0; j < kMegaIndexerCandidatesPerGroup; ++j) {
+            const int candidate_lane = group * kMegaIndexerCandidatesPerGroup + j;
+            const bool candidate_active = candidate_lane < candidate_count && candidate_valid[candidate_lane] != 0;
+            candidate_rows[j] = candidate_active ? candidate_data_rows[candidate_lane] : nullptr;
+            candidate_scale_values[j] = candidate_active ? candidate_scales[candidate_lane] : 1.0f;
+        }
         for (int d = lane_in_head; d < kIndexerHeadDim; d += kMegaIndexerCandidateHeadLanes) {
             const float q_value = indexer_q_at(indexer_q, row, head, d, kMegaIndexerHeads, kIndexerHeadDim);
 #pragma unroll
             for (int j = 0; j < kMegaIndexerCandidatesPerGroup; ++j) {
-                const int candidate_lane = group * kMegaIndexerCandidatesPerGroup + j;
-                if (candidate_lane < candidate_count && candidate_valid[candidate_lane] != 0) {
-                    const uint8_t* k_row = candidate_data_rows[candidate_lane];
-                    if (k_row != nullptr) {
-                        dot[j] += q_value * fp8_e4m3_to_float(k_row[d], candidate_scales[candidate_lane]);
-                    }
+                const uint8_t* k_row = candidate_rows[j];
+                if (k_row != nullptr) {
+                    dot[j] += q_value * fp8_e4m3_to_float(k_row[d], candidate_scale_values[j]);
                 }
             }
         }
@@ -2121,7 +2204,8 @@ __device__ __forceinline__ void dsv4MegaIndexerScoreCandidateTile(const scalar_t
              && (use_fp8_indexer_pool || use_fp8_indexer_cache) && lane_in_head == 0 && reduced_dot > 0.0f) ?
                 reduced_dot * csa_indexer_weights[row * kMegaIndexerHeads + head] :
                 0.0f;
-        if (candidate_lane < kMegaIndexerCandidateTile && lane_in_head == 0) {
+        if (candidate_lane < candidate_count && candidate_valid[candidate_lane] != 0
+            && (use_fp8_indexer_pool || use_fp8_indexer_cache) && lane_in_head == 0) {
             head_scores[candidate_lane * kMegaIndexerHeads + head] = weighted_head_score;
         }
     }
@@ -2362,43 +2446,66 @@ __device__ __forceinline__ int dsv4MegaBuildCompressedIndicesForRow(const scalar
                                                    reduce_indices,
                                                    reduce_buf);
                     if (tid == 0) {
-                        int remaining_tile_count = tile_valid_count;
-                        for (int tile_rank = 0; tile_rank < kMegaIndexerCandidateTile; ++tile_rank) {
-                            if (tile_rank >= tile_valid_count || remaining_tile_count <= 0) {
-                                break;
+                        int sorted_tile_count = tile_valid_count;
+                        if (sorted_tile_count == 1) {
+                            const int worst_slot = reduce_indices[0];
+                            const int tile_i = reduce_indices_second[0];
+                            const int best_idx = c + tile_i;
+                            const float best_score = reduce_result[tile_i];
+                            if (worst_slot >= 0
+                                && dsv4MegaTopKBetter(best_score,
+                                                      best_idx,
+                                                      scratch_scores[worst_slot],
+                                                      scratch_indices[worst_slot])) {
+                                scratch_indices[worst_slot] = best_idx;
+                                scratch_scores[worst_slot] = best_score;
                             }
-                            int best_tile_pos = -1;
-                            float best_score = kInvalidCompressorScore;
-                            int best_idx = 2147483647;
+                        } else {
 #pragma unroll
-                            for (int scan = 0; scan < kMegaIndexerCandidateTile; ++scan) {
-                                if (scan < remaining_tile_count) {
-                                    const int tile_i = reduce_indices_second[scan];
+                            for (int sort_i = 1; sort_i < kMegaIndexerCandidateTile; ++sort_i) {
+                                if (sort_i < sorted_tile_count) {
+                                    const int tile_i = reduce_indices_second[sort_i];
                                     const int candidate = c + tile_i;
                                     const float score = reduce_result[tile_i];
-                                    if (dsv4MegaTopKBetter(score, candidate, best_score, best_idx)) {
-                                        best_tile_pos = scan;
-                                        best_score = score;
-                                        best_idx = candidate;
+                                    int insert = sort_i;
+#pragma unroll
+                                    for (int scan = sort_i - 1; scan >= 0; --scan) {
+                                        if (scan < sorted_tile_count) {
+                                            const int scan_tile_i = reduce_indices_second[scan];
+                                            const int scan_candidate = c + scan_tile_i;
+                                            const float scan_score = reduce_result[scan_tile_i];
+                                            if (dsv4MegaTopKBetter(score, candidate, scan_score, scan_candidate)) {
+                                                reduce_indices_second[scan + 1] = scan_tile_i;
+                                                insert = scan;
+                                            } else {
+                                                break;
+                                            }
+                                        }
                                     }
+                                    reduce_indices_second[insert] = tile_i;
                                 }
                             }
-                            if (best_tile_pos < 0) {
-                                break;
+#pragma unroll
+                            for (int tile_rank = 0; tile_rank < kMegaIndexerCandidateTile; ++tile_rank) {
+                                if (tile_rank >= sorted_tile_count) {
+                                    break;
+                                }
+                                const int worst_slot = reduce_indices[tile_rank];
+                                if (worst_slot < 0) {
+                                    break;
+                                }
+                                const int tile_i = reduce_indices_second[tile_rank];
+                                const int best_idx = c + tile_i;
+                                const float best_score = reduce_result[tile_i];
+                                if (!dsv4MegaTopKBetter(best_score,
+                                                        best_idx,
+                                                        scratch_scores[worst_slot],
+                                                        scratch_indices[worst_slot])) {
+                                    break;
+                                }
+                                scratch_indices[worst_slot] = best_idx;
+                                scratch_scores[worst_slot] = best_score;
                             }
-                            const int worst_slot = reduce_indices[tile_rank];
-                            if (worst_slot < 0) {
-                                break;
-                            }
-                            const bool replace_worst =
-                                dsv4MegaTopKBetter(best_score, best_idx, scratch_scores[worst_slot], scratch_indices[worst_slot]);
-                            if (!replace_worst) {
-                                break;
-                            }
-                            scratch_indices[worst_slot] = best_idx;
-                            scratch_scores[worst_slot] = best_score;
-                            reduce_indices_second[best_tile_pos] = reduce_indices_second[remaining_tile_count - 1];
-                            --remaining_tile_count;
                         }
                         reduce_indices[0] = 1;
                     }
@@ -3228,8 +3335,8 @@ __global__ void dsv4SwaQuantizeAndInsertKernel(const c10::BFloat16* __restrict__
 
     if (tile == kSwaNopeTiles) {
         const uint16_t* k_u16 = reinterpret_cast<const uint16_t*>(k);
-        uint16_t* rope_u16 = reinterpret_cast<uint16_t*>(token_bf16_ptr);
-        rope_u16[lane] = k_u16[static_cast<int64_t>(token) * kSwaHeadDim + kSwaNopeDim + lane];
+        store_u16_unaligned(token_bf16_ptr + lane * static_cast<int>(sizeof(uint16_t)),
+                            k_u16[static_cast<int64_t>(token) * kSwaHeadDim + kSwaNopeDim + lane]);
         if (lane == 0) {
             token_scale_ptr[kSwaNopeTiles] = 0;
         }
@@ -3372,6 +3479,7 @@ __global__ void dsv4CompressorCompressNormRopeInsertKernel(const kv_t* __restric
                     if (use_raw) {
                         const int64_t global_raw_idx = static_cast<int64_t>(req_cu_lo + flat_in_req);
                         flat_idx = raw_unpad_restore == nullptr ? global_raw_idx : raw_unpad_restore[global_raw_idx];
+                        use_raw = flat_idx >= 0 && flat_idx < num_tokens;
                     }
                 } else {
                     flat_idx = static_cast<int64_t>(pos) - seq_start;
@@ -3427,6 +3535,7 @@ __global__ void dsv4CompressorCompressNormRopeInsertKernel(const kv_t* __restric
                         if (use_raw) {
                             const int64_t global_raw_idx = static_cast<int64_t>(req_cu_lo + flat_in_req);
                             flat_idx = raw_unpad_restore == nullptr ? global_raw_idx : raw_unpad_restore[global_raw_idx];
+                            use_raw = flat_idx >= 0 && flat_idx < num_tokens;
                         }
                     } else {
                         flat_idx = static_cast<int64_t>(pos) - seq_start;
@@ -3530,8 +3639,8 @@ __global__ void dsv4CompressorCompressNormRopeInsertKernel(const kv_t* __restric
             const float cos_v = cache_base[cs_idx];
             const float sin_v = cache_base[rope_head_dim / 2 + cs_idx];
             const float result = (rope_local & 1) == 0 ? even * cos_v - odd * sin_v : odd * cos_v + even * sin_v;
-            uint16_t* rope_ptr = reinterpret_cast<uint16_t*>(token_ptr + nope_head_dim);
-            rope_ptr[rope_local] = float_to_bf16_bits(result);
+            store_u16_unaligned(token_ptr + nope_head_dim + rope_local * static_cast<int>(sizeof(uint16_t)),
+                                float_to_bf16_bits(result));
         }
     } else if (head_dim == 128) {
         constexpr int token_stride = 128;
@@ -3565,7 +3674,7 @@ __global__ void dsv4CompressorCompressNormRopeInsertKernel(const kv_t* __restric
             amax = fmaxf(amax, 1.0e-4f);
             const float exponent = ceilf(log2f((amax / kSwaFp8Max)));
             group_scale_shared[0] = exp2f(exponent);
-            *reinterpret_cast<float*>(scale_ptr) = group_scale_shared[0];
+            store_f32_unaligned(scale_ptr, group_scale_shared[0]);
         }
         __syncthreads();
         if (d < head_dim) {
@@ -3632,6 +3741,55 @@ struct MegaCompressorBf16Args {
     int64_t              kv_bytes = 0;
     int64_t              score_bytes = 0;
 };
+
+__device__ __forceinline__ uint32_t dsv4MegaSignalPadEpoch(unsigned long long launch_epoch, int barrier_channel) {
+    uint32_t epoch = static_cast<uint32_t>(launch_epoch)
+                     ^ (static_cast<uint32_t>(barrier_channel + 1) * 0x9e3779b9u);
+    return epoch == 0u ? 1u : epoch;
+}
+
+__device__ __forceinline__ void dsv4MegaInlineSignalPadBarrier(uint32_t* const* __restrict__ signal_pads,
+                                                               int cp_rank,
+                                                               int cp_size,
+                                                               int barrier_channel,
+                                                               unsigned long long launch_epoch) {
+    if (cp_size <= 1) {
+        __syncthreads();
+        return;
+    }
+    if (signal_pads == nullptr) {
+        if (threadIdx.x == 0) {
+            printf("DSV4 mega attention requires signal pads for in-kernel CP barrier\n");
+            asm("trap;");
+        }
+        __syncthreads();
+        return;
+    }
+    if (threadIdx.x < static_cast<unsigned int>(cp_size)) {
+        const int peer = static_cast<int>(threadIdx.x);
+        const int channel = kMegaSignalPadChannelBase + barrier_channel;
+        const uint32_t epoch = dsv4MegaSignalPadEpoch(launch_epoch, barrier_channel);
+        uint32_t* peer_signal = signal_pads[peer] + static_cast<int64_t>(channel) * cp_size + cp_rank;
+        uint32_t* local_signal = signal_pads[cp_rank] + static_cast<int64_t>(channel) * cp_size + peer;
+        cuda::atomic_ref<uint32_t, cuda::thread_scope_system> peer_ref(*peer_signal);
+        cuda::atomic_ref<uint32_t, cuda::thread_scope_system> local_ref(*local_signal);
+        peer_ref.store(epoch, cuda::std::memory_order_release);
+        const unsigned long long start = clock64();
+        while (local_ref.load(cuda::std::memory_order_acquire) != epoch) {
+            if (clock64() - start > static_cast<unsigned long long>(kSymmMemBarrierTimeoutCycles)) {
+                printf("DSV4 mega inline signal wait timeout: rank=%d peer=%d channel=%d expected=%u value=%u\n",
+                       cp_rank,
+                       peer,
+                       channel,
+                       epoch,
+                       local_ref.load(cuda::std::memory_order_relaxed));
+                asm("trap;");
+            }
+        }
+    }
+    __threadfence_system();
+    __syncthreads();
+}
 
 __device__ __forceinline__ void dsv4MegaInlineSignalPadBarrier(uint32_t* const* __restrict__ signal_pads,
                                                                int cp_rank,
@@ -3798,11 +3956,14 @@ __device__ __forceinline__ const T* dsv4Mega2DPtr(const T* __restrict__ local,
     if (cp_size <= 1 || symm_buffer_ptrs == nullptr) {
         return local + static_cast<int64_t>(global_row) * width + col;
     }
-    if (local_rows <= 0) {
-        return local;
+    if (local_rows <= 0 || global_row < 0 || col < 0 || col >= width) {
+        return nullptr;
     }
     const int owner = global_row / local_rows;
     const int local_row = global_row - owner * local_rows;
+    if (owner < 0 || owner >= cp_size || local_row < 0 || local_row >= local_rows) {
+        return nullptr;
+    }
     const int64_t elem_offset = static_cast<int64_t>(local_row) * width + col;
     const int64_t byte_offset = static_cast<int64_t>(owner) * per_rank_buffer_bytes + payload_offset
                                 + elem_offset * static_cast<int64_t>(sizeof(T));
@@ -3828,6 +3989,9 @@ __device__ __forceinline__ float dsv4MegaBf16RawAt(const MegaCompressorBf16Args&
                                              global_row,
                                              col,
                                              cp_size);
+    if (ptr == nullptr) {
+        return 0.0f;
+    }
     return to_float_device(*ptr);
 }
 
@@ -3849,6 +4013,9 @@ __device__ __forceinline__ uint16_t dsv4MegaBf16Bits2D(const c10::BFloat16* __re
                                              global_row,
                                              col,
                                              cp_size);
+    if (ptr == nullptr) {
+        return 0;
+    }
     return *reinterpret_cast<const uint16_t*>(ptr);
 }
 
@@ -3875,22 +4042,21 @@ __device__ __noinline__ void dsv4MegaWriteSwaCachePhase(const MegaSwaWriterArgs&
         if (blockIdx.x == 0) {
             __threadfence_system();
             __syncthreads();
-            dsv4MegaInlineSignalPadBarrier(symm_signal_pads, cp_rank, cp_size, barrier_channel);
+            dsv4MegaInlineSignalPadBarrier(symm_signal_pads, cp_rank, cp_size, barrier_channel, launch_epoch);
         }
-        dsv4MegaGridBarrier(grid_sync_base, grid_barrier_base + 1, launch_epoch);
-    } else {
-        dsv4MegaStageBytes(args.k,
-                           payload_bytes,
+	        dsv4MegaGridBarrier(grid_sync_base, grid_barrier_base + 1, launch_epoch);
+	    } else {
+	        dsv4MegaStageBytes(args.k,
+	                           payload_bytes,
                            symm_buffer_ptrs,
                            per_rank_buffer_bytes,
                            scratch_payload_offset,
                            cp_rank,
                            cp_size,
-                           symm_signal_pads,
-                           barrier_channel);
-    }
-
-    __shared__ float   abs_values[kSwaQuantBlock];
+	                           symm_signal_pads,
+	                           barrier_channel);
+	    }
+		    __shared__ float   abs_values[kSwaQuantBlock];
     __shared__ float   tile_scale;
     __shared__ uint8_t encoded_scale;
 
@@ -3962,16 +4128,16 @@ __device__ __noinline__ void dsv4MegaWriteSwaCachePhase(const MegaSwaWriterArgs&
             __syncthreads();
         } else {
             if (lane_active && valid) {
-                uint16_t* rope_u16 = reinterpret_cast<uint16_t*>(token_data_ptr + kSwaNopeDim);
-                rope_u16[tid] = dsv4MegaBf16Bits2D(args.k,
-                                                   symm_buffer_ptrs,
-                                                   per_rank_buffer_bytes,
-                                                   scratch_payload_offset,
-                                                   args.local_rows,
-                                                   kSwaHeadDim,
-                                                   token,
-                                                   kSwaNopeDim + tid,
-                                                   cp_size);
+                store_u16_unaligned(token_data_ptr + kSwaNopeDim + tid * static_cast<int>(sizeof(uint16_t)),
+                                    dsv4MegaBf16Bits2D(args.k,
+                                                       symm_buffer_ptrs,
+                                                       per_rank_buffer_bytes,
+                                                       scratch_payload_offset,
+                                                       args.local_rows,
+                                                       kSwaHeadDim,
+                                                       token,
+                                                       kSwaNopeDim + tid,
+                                                       cp_size));
                 if (tid == 0) {
                     token_scale_ptr[kSwaNopeTiles] = 0;
                 }
@@ -4013,7 +4179,7 @@ __device__ __noinline__ void dsv4MegaRunCompressorBf16Phase(const MegaCompressor
             if (blockIdx.x == 0) {
                 __threadfence_system();
                 __syncthreads();
-                dsv4MegaInlineSignalPadBarrier(symm_signal_pads, cp_rank, cp_size, barrier_channel);
+                dsv4MegaInlineSignalPadBarrier(symm_signal_pads, cp_rank, cp_size, barrier_channel, launch_epoch);
             }
             dsv4MegaGridBarrier(grid_sync_base, grid_barrier_base + 1, launch_epoch);
         } else {
@@ -4135,6 +4301,7 @@ __device__ __noinline__ void dsv4MegaRunCompressorBf16Phase(const MegaCompressor
                             if (use_raw) {
                                 const int64_t global_raw_idx = static_cast<int64_t>(req_cu_lo + flat_in_req);
                                 flat_idx = args.raw_unpad_restore == nullptr ? global_raw_idx : args.raw_unpad_restore[global_raw_idx];
+                                use_raw = flat_idx >= 0 && flat_idx < total_tokens;
                             }
                         } else {
                             flat_idx = static_cast<int64_t>(pos) - args.seq_start;
@@ -4198,6 +4365,7 @@ __device__ __noinline__ void dsv4MegaRunCompressorBf16Phase(const MegaCompressor
                                     const int64_t global_raw_idx = static_cast<int64_t>(req_cu_lo + flat_in_req);
                                     flat_idx = args.raw_unpad_restore == nullptr ? global_raw_idx :
                                                                                 args.raw_unpad_restore[global_raw_idx];
+                                    use_raw = flat_idx >= 0 && flat_idx < total_tokens;
                                 }
                             } else {
                                 flat_idx = static_cast<int64_t>(pos) - args.seq_start;
@@ -4318,8 +4486,8 @@ __device__ __noinline__ void dsv4MegaRunCompressorBf16Phase(const MegaCompressor
                 const float sin_v = cache_base[args.rope_head_dim / 2 + cs_idx];
                 const float result =
                     (rope_local & 1) == 0 ? even * cos_v - odd * sin_v : odd * cos_v + even * sin_v;
-                uint16_t* rope_ptr = reinterpret_cast<uint16_t*>(token_ptr + nope_head_dim);
-                rope_ptr[rope_local] = float_to_bf16_bits(result);
+                store_u16_unaligned(token_ptr + nope_head_dim + rope_local * static_cast<int>(sizeof(uint16_t)),
+                                    float_to_bf16_bits(result));
             }
             }
         } else if (args.head_dim == 128) {
@@ -4352,7 +4520,7 @@ __device__ __noinline__ void dsv4MegaRunCompressorBf16Phase(const MegaCompressor
                 amax = fmaxf(amax, 1.0e-4f);
                 const float exponent = ceilf(log2f(amax / kSwaFp8Max));
                 group_scale_shared[0] = exp2f(exponent);
-                *reinterpret_cast<float*>(scale_ptr) = group_scale_shared[0];
+                store_f32_unaligned(scale_ptr, group_scale_shared[0]);
             }
             __syncthreads();
             for (int d = tid; d < args.head_dim; d += blockDim.x) {
@@ -5492,23 +5660,23 @@ __global__ __launch_bounds__(kMegaBlockThreads, 1) void dsv4CpDistributedPrefill
 			        alignUpInt64(csa_compressor_scratch_payload_offset + csa_indexer_compressor_writer.kv_bytes
 			                         + csa_indexer_compressor_writer.score_bytes,
 			                     kMegaPayloadAlignBytes);
-			    const int64_t compressed_index_scratch_payload_offset =
-			        alignUpInt64(main_compressor_scratch_payload_offset + main_compressor_writer.kv_bytes
-			                         + main_compressor_writer.score_bytes,
-			                     kMegaPayloadAlignBytes);
-			    if (grid_parallel_side_effects || blockIdx.x == 0) {
-			        dsv4MegaWriteSwaCachePhase(swa_writer,
-			                                   symm_buffer_ptrs,
+				    const int64_t compressed_index_scratch_payload_offset =
+				        alignUpInt64(main_compressor_scratch_payload_offset + main_compressor_writer.kv_bytes
+				                         + main_compressor_writer.score_bytes,
+				                     kMegaPayloadAlignBytes);
+				    if (grid_parallel_side_effects || blockIdx.x == 0) {
+				        dsv4MegaWriteSwaCachePhase(swa_writer,
+				                                   symm_buffer_ptrs,
 			                                   symm_per_rank_buffer_bytes,
 			                                   swa_scratch_payload_offset,
 			                                   cp_rank,
 			                                   cp_size,
 			                                   symm_signal_pads,
 		                                   2,
-		                                   grid_parallel_side_effects,
-		                                   local_scratch_base,
-		                                   launch_epoch,
-		                                   0);
+			                                   grid_parallel_side_effects,
+			                                   local_scratch_base,
+			                                   launch_epoch,
+			                                   0);
 			        dsv4MegaRunCompressorBf16Phase(csa_indexer_compressor_writer,
 			                                       symm_buffer_ptrs,
 			                                       symm_per_rank_buffer_bytes,
@@ -5546,7 +5714,7 @@ __global__ __launch_bounds__(kMegaBlockThreads, 1) void dsv4CpDistributedPrefill
 			                if (blockIdx.x == 0) {
 			                    __threadfence_system();
 			                    __syncthreads();
-			                    dsv4MegaInlineSignalPadBarrier(symm_signal_pads, cp_rank, cp_size, 0);
+			                    dsv4MegaInlineSignalPadBarrier(symm_signal_pads, cp_rank, cp_size, 0, launch_epoch);
 			                }
 			                dsv4MegaGridBarrier(local_scratch_base, 13, launch_epoch);
 		            } else {
@@ -5575,7 +5743,7 @@ __global__ __launch_bounds__(kMegaBlockThreads, 1) void dsv4CpDistributedPrefill
 			                if (blockIdx.x == 0) {
 			                    __threadfence_system();
 			                    __syncthreads();
-			                    dsv4MegaInlineSignalPadBarrier(symm_signal_pads, cp_rank, cp_size, 1);
+			                    dsv4MegaInlineSignalPadBarrier(symm_signal_pads, cp_rank, cp_size, 1, launch_epoch);
 			                }
 			                dsv4MegaGridBarrier(local_scratch_base, 15, launch_epoch);
 		            } else {
@@ -5735,6 +5903,7 @@ __global__ __launch_bounds__(kMegaBlockThreads, 1) void dsv4CpDistributedPrefill
             int split_swa_start = 0;
             int split_swa_end = 0;
             int split_total_keys = 0;
+            int split_task_keys_per_block = splitk_keys_per_block;
             int split_key_blocks = max_split_key_blocks;
             const bool split_task_valid = split_task < task_count;
             if (split_task_valid) {
@@ -5785,8 +5954,10 @@ __global__ __launch_bounds__(kMegaBlockThreads, 1) void dsv4CpDistributedPrefill
                 split_swa_start = max_int(0, split_q_pos - window_size + 1);
                 split_swa_end = min_int(split_q_pos + 1, split_kv_len);
                 split_total_keys = split_compressed_count + max_int(0, split_swa_end - split_swa_start);
-                split_key_blocks =
-                    max_int(1, (split_total_keys + splitk_keys_per_block - 1) / splitk_keys_per_block);
+                const MegaSplitKTiling split_tiling =
+                    dsv4MegaSplitKActualTiling(split_total_keys, splitk_keys_per_block);
+                split_task_keys_per_block = split_tiling.keys_per_block;
+                split_key_blocks = split_tiling.key_blocks;
             }
             float* merge_record = dsv4MegaSplitKRecord(splitk_base, physical_group * kMegaSplitKGroupSize);
             if (role == 0) {
@@ -5843,8 +6014,8 @@ __global__ __launch_bounds__(kMegaBlockThreads, 1) void dsv4CpDistributedPrefill
                                                      compress_ratio,
                                                      split_compressed_count,
                                                      split_total_keys,
-                                                     partial_block * splitk_keys_per_block,
-                                                     (partial_block + 1) * splitk_keys_per_block,
+                                                     partial_block * split_task_keys_per_block,
+                                                     (partial_block + 1) * split_task_keys_per_block,
                                                      attention_cmp_k_pool != nullptr || attention_cmp_k_cache != nullptr,
                                                      split_swa_start,
                                                      rsqrtf(static_cast<float>(D)),
@@ -6601,7 +6772,7 @@ __global__ void dsv4GatherIndexerKvForDeepGemmKernel(const uint8_t* __restrict__
     const uint8_t* scale_ptr = block + static_cast<int64_t>(block_size) * kIndexerHeadDim + in_block * 4;
     k_quant[out_row * kIndexerHeadDim + d] = token_ptr[d];
     if (d == 0) {
-        k_scale[out_row] = *reinterpret_cast<const float*>(scale_ptr);
+        k_scale[out_row] = load_f32_unaligned(scale_ptr);
     }
 }
 

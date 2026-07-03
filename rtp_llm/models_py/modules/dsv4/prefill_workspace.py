@@ -32,6 +32,9 @@ allocator) and relies on the ``gather_stream.wait_stream`` edge for
 cross-layer ordering. See ``cp._CP_ROLE_*``.
 """
 
+import os
+from typing import Any, Optional
+
 import torch
 
 # Default union-buffer alignment. Rounding every per-forward union block up to a
@@ -47,6 +50,52 @@ _PREFILL_WS_ALIGN_BYTES = 1 << 30
 
 def _dtype_size(dtype: torch.dtype) -> int:
     return torch.empty((), dtype=dtype).element_size()
+
+
+def distributed_attention_workspace_enabled(
+    cp_ctx: Optional[Any], device: torch.device
+) -> bool:
+    if os.environ.get("DSV4_CP_DISTRIBUTED_PREFILL_ATTN", "0") != "1":
+        return False
+    if cp_ctx is None or int(getattr(cp_ctx, "cp_size", 1)) != 8:
+        return False
+    if bool(getattr(cp_ctx, "kv_cache_sharded", False)):
+        return False
+    return torch.device(device).type == "cuda"
+
+
+def resolve_prefill_workspace_dims_for_forward(
+    *,
+    max_q_rows: int,
+    q_dim: int,
+    full_rows: int,
+    main_w: int,
+    idx_w: int,
+    swa_w: int,
+    input_token_count: int,
+    cp_ctx: Optional[Any],
+    device: torch.device,
+) -> tuple[int, int, bool, int, int, int, int]:
+    """Return PrefillWorkspace dims for this forward.
+
+    The distributed attention op owns CP exchange, SWA write, compressor/indexer
+    staging, and barriers. When it is active, keeping the legacy Python CP
+    gather workspace only burns the 1M-context reserve before the first layer
+    can enter the op. Use live Q rows and skip the old CP scratch region on
+    that path; preserve the max-sized workspace for fallback paths.
+    """
+    if distributed_attention_workspace_enabled(cp_ctx, device):
+        return (int(input_token_count), int(q_dim), False, 0, 0, 0, 0)
+    reserve_cp = (cp_ctx is not None) and int(full_rows) > 0
+    return (
+        int(max_q_rows),
+        int(q_dim),
+        reserve_cp,
+        int(full_rows),
+        int(main_w),
+        int(idx_w),
+        int(swa_w),
+    )
 
 
 class PrefillWorkspace:

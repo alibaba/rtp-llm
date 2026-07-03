@@ -18,9 +18,30 @@ disjointness. ``align_bytes=1`` is passed throughout to avoid the production
 1 GiB alignment forcing a 1 GiB CPU allocation.
 """
 
+import os
+from contextlib import contextmanager
+
 import torch
 
-from rtp_llm.models_py.modules.dsv4.prefill_workspace import PrefillWorkspace
+from rtp_llm.models_py.modules.dsv4.prefill_workspace import (
+    PrefillWorkspace,
+    resolve_prefill_workspace_dims_for_forward,
+)
+
+
+class _FakeV4:
+    _prefill_ws_q_rows = 131072
+    _prefill_ws_q_dim = 65536
+    _prefill_ws_full_rows = 1048576
+    _prefill_ws_main_w = 2048
+    _prefill_ws_idx_w = 512
+    _prefill_ws_swa_w = 512
+
+
+class _FakeCPContext:
+    def __init__(self, *, cp_size: int = 8, kv_cache_sharded: bool = False) -> None:
+        self.cp_size = cp_size
+        self.kv_cache_sharded = kv_cache_sharded
 
 
 def _assert_raises(fn, exc_type, msg_substr: str):
@@ -30,6 +51,19 @@ def _assert_raises(fn, exc_type, msg_substr: str):
         assert msg_substr in str(exc), str(exc)
         return
     raise AssertionError(f"expected {exc_type.__name__} containing {msg_substr!r}")
+
+
+@contextmanager
+def _env(name: str, value: str):
+    old = os.environ.get(name)
+    os.environ[name] = value
+    try:
+        yield
+    finally:
+        if old is None:
+            os.environ.pop(name, None)
+        else:
+            os.environ[name] = old
 
 
 def test_prefill_q_eager_alloc_shape_and_dtype():
@@ -367,6 +401,73 @@ def test_cp_gather_restore_overflow():
         AssertionError,
         "cp_restore_swa overflow",
     )
+
+
+def test_distributed_attention_workspace_uses_live_rows_and_skips_cp_scratch():
+    with _env("DSV4_CP_DISTRIBUTED_PREFILL_ATTN", "1"):
+        dims = resolve_prefill_workspace_dims_for_forward(
+            max_q_rows=_FakeV4._prefill_ws_q_rows,
+            q_dim=_FakeV4._prefill_ws_q_dim,
+            full_rows=_FakeV4._prefill_ws_full_rows,
+            main_w=_FakeV4._prefill_ws_main_w,
+            idx_w=_FakeV4._prefill_ws_idx_w,
+            swa_w=_FakeV4._prefill_ws_swa_w,
+            input_token_count=2,
+            cp_ctx=_FakeCPContext(cp_size=8),
+            device=torch.device("cuda"),
+        )
+    assert dims == (2, _FakeV4._prefill_ws_q_dim, False, 0, 0, 0, 0)
+
+
+def test_distributed_attention_workspace_keeps_legacy_dims_for_fallback():
+    with _env("DSV4_CP_DISTRIBUTED_PREFILL_ATTN", "1"):
+        for cp_ctx, device in (
+            (_FakeCPContext(cp_size=4), torch.device("cuda")),
+            (_FakeCPContext(cp_size=8, kv_cache_sharded=True), torch.device("cuda")),
+            (_FakeCPContext(cp_size=8), torch.device("cpu")),
+        ):
+            dims = resolve_prefill_workspace_dims_for_forward(
+                max_q_rows=_FakeV4._prefill_ws_q_rows,
+                q_dim=_FakeV4._prefill_ws_q_dim,
+                full_rows=_FakeV4._prefill_ws_full_rows,
+                main_w=_FakeV4._prefill_ws_main_w,
+                idx_w=_FakeV4._prefill_ws_idx_w,
+                swa_w=_FakeV4._prefill_ws_swa_w,
+                input_token_count=2,
+                cp_ctx=cp_ctx,
+                device=device,
+            )
+            assert dims == (
+                _FakeV4._prefill_ws_q_rows,
+                _FakeV4._prefill_ws_q_dim,
+                True,
+                _FakeV4._prefill_ws_full_rows,
+                _FakeV4._prefill_ws_main_w,
+                _FakeV4._prefill_ws_idx_w,
+                _FakeV4._prefill_ws_swa_w,
+            )
+
+    with _env("DSV4_CP_DISTRIBUTED_PREFILL_ATTN", "0"):
+        dims = resolve_prefill_workspace_dims_for_forward(
+            max_q_rows=_FakeV4._prefill_ws_q_rows,
+            q_dim=_FakeV4._prefill_ws_q_dim,
+            full_rows=_FakeV4._prefill_ws_full_rows,
+            main_w=_FakeV4._prefill_ws_main_w,
+            idx_w=_FakeV4._prefill_ws_idx_w,
+            swa_w=_FakeV4._prefill_ws_swa_w,
+            input_token_count=2,
+            cp_ctx=_FakeCPContext(cp_size=8),
+            device=torch.device("cuda"),
+        )
+        assert dims == (
+            _FakeV4._prefill_ws_q_rows,
+            _FakeV4._prefill_ws_q_dim,
+            True,
+            _FakeV4._prefill_ws_full_rows,
+            _FakeV4._prefill_ws_main_w,
+            _FakeV4._prefill_ws_idx_w,
+            _FakeV4._prefill_ws_swa_w,
+        )
 
 
 if __name__ == "__main__":

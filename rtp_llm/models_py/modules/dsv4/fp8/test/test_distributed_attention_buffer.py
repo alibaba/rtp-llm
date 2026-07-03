@@ -37,7 +37,7 @@ class Dsv4CpAttentionBufferSpecTest(unittest.TestCase):
         clear_dsv4_cp_attention_buffer_cache()
         _FakeCommunicator.instances.clear()
 
-    def test_spec_aligns_single_reused_stage_region(self) -> None:
+    def test_legacy_spec_aligns_single_reused_stage_region(self) -> None:
         spec = Dsv4CpAttentionBufferSpec(
             cp_size=8,
             max_tokens_per_rank=17,
@@ -45,6 +45,7 @@ class Dsv4CpAttentionBufferSpecTest(unittest.TestCase):
             swa_bytes_per_token=1024,
             main_bytes_per_token=584,
             indexer_bytes_per_token=132,
+            mega_compressed_topk_cap=0,
             protocol_bytes_per_rank=4096,
             align_bytes=256,
         )
@@ -60,6 +61,7 @@ class Dsv4CpAttentionBufferSpecTest(unittest.TestCase):
             max_tokens_per_rank=17,
             batch_cap=3,
             swa_bytes_per_token=1024,
+            mega_compressed_topk_cap=0,
             protocol_bytes_per_rank=4096,
             align_bytes=256,
         )
@@ -69,6 +71,39 @@ class Dsv4CpAttentionBufferSpecTest(unittest.TestCase):
         self.assertEqual(spec.stage_bytes_per_rank, 17 * 2048)
         self.assertEqual(spec.per_rank_bytes, 38912)
         self.assertEqual(spec.total_bytes, 38912 * 8)
+
+    def test_default_builder_covers_mega_side_effect_scratch(self) -> None:
+        spec = build_dsv4_cp_attention_buffer_spec(
+            cp_size=8,
+            actual_tokens_per_rank=2,
+            batch_size=1,
+            swa_bytes_per_token=1024,
+            page_rr=False,
+        )
+
+        # Mirrors the failing service shape at layer2/CSA: persistent fresh-K
+        # plus semantic indexer-K starts scratch at 10496.  The mega side-effect
+        # region then needs 21248B, so the old 14592B/rank allocation was too
+        # small.  The default builder must cover this before any layer enters
+        # the in-kernel CP protocol.
+        self.assertGreaterEqual(spec.per_rank_bytes, 10496 + 21248)
+        self.assertEqual(spec.per_rank_bytes, 4_226_048)
+
+    def test_service_shape_can_disable_splitk_slack_for_exact_contract(self) -> None:
+        with patch.dict(
+            os.environ,
+            {"DSV4_CP_DISTRIBUTED_PREFILL_ATTN_SPLITK_SCRATCH_BYTES": "0"},
+        ):
+            spec = build_dsv4_cp_attention_buffer_spec(
+                cp_size=8,
+                actual_tokens_per_rank=2,
+                batch_size=1,
+                swa_bytes_per_token=1024,
+                page_rr=False,
+            )
+
+        self.assertEqual(spec.stage_bytes_per_rank, 27392)
+        self.assertEqual(spec.per_rank_bytes, 31744)
 
     def test_spec_rejects_non_v0_geometry_before_allocation(self) -> None:
         with self.assertRaisesRegex(ValueError, "cp_size=8"):
