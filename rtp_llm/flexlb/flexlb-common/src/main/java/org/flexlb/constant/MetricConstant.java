@@ -62,6 +62,26 @@ public class MetricConstant {
             "app.engine.balancing.master.batch.total.tokens";
 
     /**
+     * FlexLB scheduler inflight batch count per prefill worker (number of dispatched-but-uncompleted batches)
+     */
+    public static final String BATCH_INFLIGHT_COUNT = "app.flexlb.batch.inflight.count";
+
+    /**
+     * FlexLB scheduler inflight request count per prefill worker (sum of requests across all inflight batches)
+     */
+    public static final String BATCH_INFLIGHT_REQUEST_COUNT = "app.flexlb.batch.inflight.request.count";
+
+    /**
+     * FlexLB scheduler inflight request count per decode worker (dispatched but not yet confirmed by engine)
+     */
+    public static final String DECODE_INFLIGHT_COUNT = "app.flexlb.decode.inflight.count";
+
+    /**
+     * FlexLB scheduler total load per decode worker (confirmed running + scheduler inflight)
+     */
+    public static final String DECODE_TOTAL_LOAD = "app.flexlb.decode.total.load";
+
+    /**
      * Batch predicted execution time (formula estimate) in milliseconds
      */
     public static final String BATCH_PREDICTED_TIME_MS = "app.batch.predicted.time.ms";

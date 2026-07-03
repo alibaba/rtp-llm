@@ -11,16 +11,19 @@ import org.springframework.stereotype.Component;
 import javax.annotation.PostConstruct;
 
 import static org.flexlb.constant.MetricConstant.BATCH_ACTUAL_TIME_MS;
+import static org.flexlb.constant.MetricConstant.BATCH_INFLIGHT_COUNT;
+import static org.flexlb.constant.MetricConstant.BATCH_INFLIGHT_REQUEST_COUNT;
 import static org.flexlb.constant.MetricConstant.BATCH_PREDICTED_TIME_MS;
 import static org.flexlb.constant.MetricConstant.BATCH_PREDICT_GAP_MS;
 import static org.flexlb.constant.MetricConstant.CACHE_HIT_COUNT;
 import static org.flexlb.constant.MetricConstant.CACHE_HIT_RATIO;
 import static org.flexlb.constant.MetricConstant.CACHE_REQUEST_TOTAL;
+import static org.flexlb.constant.MetricConstant.DECODE_INFLIGHT_COUNT;
+import static org.flexlb.constant.MetricConstant.DECODE_TOTAL_LOAD;
 import static org.flexlb.constant.MetricConstant.ENGINE_BALANCING_MASTER_BATCH_SIZE;
 import static org.flexlb.constant.MetricConstant.ENGINE_BALANCING_MASTER_BATCH_TOTAL_TOKENS;
 import static org.flexlb.constant.MetricConstant.ENGINE_BALANCING_MASTER_SELECT_DETAIL;
 import static org.flexlb.constant.MetricConstant.ENGINE_LOCAL_TASK_MAP_SIZE;
-import static org.flexlb.constant.MetricConstant.ENGINE_RUNNING_TASK_INFO_SIZE;
 import static org.flexlb.constant.MetricConstant.ROUTING_QUEUE_LENGTH;
 import static org.flexlb.constant.MetricConstant.ROUTING_QUEUE_WAIT_TIME_MS;
 
@@ -59,16 +62,21 @@ public class BatchSchedulerReporter {
         // Batch total tokens — gauge, reported per dispatch
         monitor.register(ENGINE_BALANCING_MASTER_BATCH_TOTAL_TOKENS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
 
-        // Inflight — same type as EngineHealthReporter
+        // Inflight — batch count and request count per prefill worker (FlexLB scheduler view)
+        monitor.register(BATCH_INFLIGHT_COUNT, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        monitor.register(BATCH_INFLIGHT_REQUEST_COUNT, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         monitor.register(ENGINE_LOCAL_TASK_MAP_SIZE, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
-        monitor.register(ENGINE_RUNNING_TASK_INFO_SIZE, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+
+        // Decode inflight — per decode worker (FlexLB scheduler view)
+        monitor.register(DECODE_INFLIGHT_COUNT, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        monitor.register(DECODE_TOTAL_LOAD, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
 
         // Prediction accuracy — predicted vs actual engine execution time
         monitor.register(BATCH_PREDICTED_TIME_MS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         monitor.register(BATCH_ACTUAL_TIME_MS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         monitor.register(BATCH_PREDICT_GAP_MS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
 
-        log.info("BatchSchedulerReporter initialized (10 metrics)");
+        log.info("BatchSchedulerReporter initialized (13 metrics)");
     }
 
     // ==================== Queue metrics ====================
@@ -167,13 +175,49 @@ public class BatchSchedulerReporter {
     }
 
     /**
-     * Report per-worker prefilled endpoint inflight batch count via {@code health.check.running.task.info.size}.
+     * Report per-worker inflight batch count (number of dispatched-but-uncompleted batches)
+     * via {@code flexlb.batch.inflight.count}.
      */
     public void reportPrefillInflightBatchCount(String role, String engineIp, int count) {
         FlexMetricTags tags = FlexMetricTags.of(
                 "role", role,
                 "engineIp", engineIp);
-        monitor.report(ENGINE_RUNNING_TASK_INFO_SIZE, tags, count);
+        monitor.report(BATCH_INFLIGHT_COUNT, tags, count);
+    }
+
+    /**
+     * Report per-worker inflight request count (sum of requests across all inflight batches)
+     * via {@code flexlb.batch.inflight.request.count}.
+     */
+    public void reportPrefillInflightRequestCount(String role, String engineIp, int count) {
+        FlexMetricTags tags = FlexMetricTags.of(
+                "role", role,
+                "engineIp", engineIp);
+        monitor.report(BATCH_INFLIGHT_REQUEST_COUNT, tags, count);
+    }
+
+    // ==================== Decode inflight metrics ====================
+
+    /**
+     * Report per-decode-worker inflight request count (dispatched but not yet confirmed by engine)
+     * via {@code flexlb.decode.inflight.count}.
+     */
+    public void reportDecodeInflightCount(String engineIp, int count) {
+        FlexMetricTags tags = FlexMetricTags.of(
+                "role", "decode",
+                "engineIp", engineIp);
+        monitor.report(DECODE_INFLIGHT_COUNT, tags, count);
+    }
+
+    /**
+     * Report per-decode-worker total load (confirmed running + scheduler inflight)
+     * via {@code flexlb.decode.total.load}.
+     */
+    public void reportDecodeTotalLoad(String engineIp, int totalLoad) {
+        FlexMetricTags tags = FlexMetricTags.of(
+                "role", "decode",
+                "engineIp", engineIp);
+        monitor.report(DECODE_TOTAL_LOAD, tags, totalLoad);
     }
 
     // ==================== Prediction accuracy metrics ====================

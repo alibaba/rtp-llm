@@ -597,8 +597,13 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
     public void reportBatchMetrics() {
         reporter.reportSchedulerInflightSize(inflight.size());
 
-        // Per-worker metrics: delegated to each PrefillEndpoint
+        // Per-worker metrics: prefill endpoints
         for (Map.Entry<String, PrefillEndpoint> entry : endpointRegistry.getPrefillEndpoints().entrySet()) {
+            entry.getValue().reportBatchMetrics(reporter);
+        }
+
+        // Per-worker metrics: decode endpoints
+        for (Map.Entry<String, DecodeEndpoint> entry : endpointRegistry.getDecodeEndpoints().entrySet()) {
             entry.getValue().reportBatchMetrics(reporter);
         }
     }

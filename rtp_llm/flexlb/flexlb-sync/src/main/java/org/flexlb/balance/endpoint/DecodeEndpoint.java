@@ -5,6 +5,7 @@ import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.enums.TaskPhase;
+import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -121,6 +122,17 @@ public class DecodeEndpoint extends WorkerEndpoint {
      */
     public long realKvAvailable() {
         return Math.max(0, reportedKvAvailable.get() - inflightKvReserved());
+    }
+
+    // ==================== Metrics ====================
+
+    /**
+     * Report per-worker decode inflight metrics via the given reporter.
+     * Called periodically by {@link org.flexlb.balance.scheduler.FlexlbBatchScheduler}.
+     */
+    public void reportBatchMetrics(BatchSchedulerReporter reporter) {
+        reporter.reportDecodeInflightCount(getIp(), getInflightCount());
+        reporter.reportDecodeTotalLoad(getIp(), getTotalLoad());
     }
 
     /**

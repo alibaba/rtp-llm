@@ -88,6 +88,13 @@ public class EndpointRegistry {
     }
 
     /**
+     * Expose all decode endpoints for per-worker metrics reporting.
+     */
+    public ConcurrentHashMap<String, DecodeEndpoint> getDecodeEndpoints() {
+        return decodeEndpoints;
+    }
+
+    /**
      * Trigger TTL eviction on all prefill and decode endpoints.
      *
      * @param ttlMs max age before eviction
