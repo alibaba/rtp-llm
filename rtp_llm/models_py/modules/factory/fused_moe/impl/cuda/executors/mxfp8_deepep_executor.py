@@ -130,7 +130,10 @@ class Mxfp8DeepepExecutor(FusedMoeExpertExecutor):
 
     @property
     def topk_ids_dtype(self) -> torch.dtype:
-        return torch.int32
+        # DeepEP normal dispatch consumes global expert ids as int64. Asking
+        # SelectTopk to produce that dtype avoids a per-layer int32->int64 copy
+        # in the router; DeepEP still returns local ids for this executor.
+        return torch.int64
 
     def _packed_scales(self):
         """Pack (1, 32) fp32 weight scales into DeepGEMM int32 layout (cached)."""

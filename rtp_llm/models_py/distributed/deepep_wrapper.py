@@ -93,6 +93,9 @@ __all__ = [
 ]
 
 
+_DEFAULT_NORMAL_INTRANODE_NUM_SMS = 40
+
+
 def use_accl_ep() -> bool:
     """Check if ACCL EP should be used based on device type."""
     device_type = get_device_type()
@@ -482,6 +485,8 @@ class DeepEPWrapper:
     @property
     def num_sms(self) -> int:
         """Get number of SMs."""
+        if self._mode == DeepEPMode.NORMAL:
+            return self._normal_buffer_num_sms()
         return self._config.deep_ep_num_sm
 
     @property
@@ -525,6 +530,13 @@ class DeepEPWrapper:
                 f"enable_ffn_disaggregate={config.enable_ffn_disaggregate}"
             )
 
+    def _normal_buffer_num_sms(self) -> int:
+        if self._config.deep_ep_num_sm > 0:
+            return self._config.deep_ep_num_sm
+        if not self._config.use_deepep_internode:
+            return _DEFAULT_NORMAL_INTRANODE_NUM_SMS
+        return 0
+
     def _init_normal_buffer(self, group: ProcessGroup) -> DeepEPBuffer:
         """Initialize buffer for normal mode."""
         config = self._config
@@ -550,6 +562,10 @@ class DeepEPWrapper:
         else:
             num_nvl_bytes = int(2e9)
             num_qps_per_rank = 1
+
+        normal_num_sms = self._normal_buffer_num_sms()
+        if normal_num_sms > 0:
+            DeepEPBuffer.set_num_sms(normal_num_sms)
 
         init_kwargs = {
             "group": group,
