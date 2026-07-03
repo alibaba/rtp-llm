@@ -9,10 +9,9 @@ namespace rtp_llm {
 // Uses Any-node heaps like SWA.
 class LinearComponentGroup: public ComponentGroup {
 public:
-    explicit LinearComponentGroup(CacheReusePolicy reuse         = CacheReusePolicy::REUSABLE,
-                                  EvictionPolicy   device_policy = EvictionPolicy::LRU,
-                                  EvictionPolicy   host_policy   = EvictionPolicy::LRU,
-                                  EvictionPolicy   disk_policy   = EvictionPolicy::FIFO);
+    explicit LinearComponentGroup(EvictionPolicy device_policy = EvictionPolicy::LRU,
+                                  EvictionPolicy host_policy   = EvictionPolicy::LRU,
+                                  EvictionPolicy disk_policy   = EvictionPolicy::FIFO);
 
     std::unique_ptr<MatchValidator> createMatchValidator() override;
 

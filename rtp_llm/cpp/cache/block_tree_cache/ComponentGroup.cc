@@ -98,7 +98,7 @@ std::optional<EvictionResult> ComponentGroup::driveEviction(int num_blocks, Tier
 
         switch (tier) {
             case Tier::DEVICE: {
-                result.target_tier       = (reuse_policy == CacheReusePolicy::NON_REUSABLE) ? Tier::NONE : Tier::HOST;
+                result.target_tier       = Tier::HOST;
                 auto& slot               = entry->node->group_slots[static_cast<size_t>(component_group_id)];
                 result.blocks_to_release = slot.device_blocks;
                 result.transfer          = buildTransfer(entry->node, TransferType::DEVICE_TO_HOST);
@@ -207,8 +207,6 @@ bool ComponentGroup::isLeafAtTier(const TreeNode* node, int group_id, Tier tier)
 void ComponentGroup::tryAddToHostHeap(TreeNode* node) {
     if (!host_heap)
         return;
-    if (reuse_policy == CacheReusePolicy::NON_REUSABLE)
-        return;
     auto gid = static_cast<size_t>(component_group_id);
     if (gid >= node->group_slots.size())
         return;
@@ -221,8 +219,6 @@ void ComponentGroup::tryAddToHostHeap(TreeNode* node) {
 
 void ComponentGroup::tryAddToDiskHeap(TreeNode* node) {
     if (!disk_heap)
-        return;
-    if (reuse_policy == CacheReusePolicy::NON_REUSABLE)
         return;
     auto gid = static_cast<size_t>(component_group_id);
     if (gid >= node->group_slots.size())

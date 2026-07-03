@@ -55,11 +55,3 @@ cc_test(
     deps = test_deps,
     env = {},
 )
-
-cc_test(
-    name = "full_swa_non_reusable_eviction_test",
-    srcs = ["FullSWANonReusableEvictionTest.cc"],
-    copts = test_copts,
-    deps = test_deps,
-    env = {},
-)

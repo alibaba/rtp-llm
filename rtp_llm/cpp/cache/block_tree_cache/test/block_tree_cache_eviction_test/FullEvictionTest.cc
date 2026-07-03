@@ -12,7 +12,6 @@ protected:
         auto tree                             = std::make_unique<BlockTree>(1);
         auto full                             = std::make_shared<FullComponentGroup>();
         full->component_group_id              = 0;
-        full->reuse_policy                    = CacheReusePolicy::REUSABLE;
         std::vector<ComponentGroupPtr> groups = {full};
         cache_                                = std::make_unique<BlockTreeCache>(
             std::move(tree), std::move(groups), std::vector<Component>{}, nullptr, nullptr, 2);
@@ -153,32 +152,6 @@ TEST_F(FullEvictionTest, ForkBothLeavesEvictable) {
 // ---------------------------------------------------------------------------
 TEST_F(FullEvictionTest, EvictEmptyTreeReturnsZero) {
     EXPECT_EQ(cache_->evict(1, Tier::DEVICE), 0);
-}
-
-// ---------------------------------------------------------------------------
-// Test: NON_REUSABLE Full group — synchronous eviction, target=NONE.
-//
-//   Before:                              After evict(1, DEVICE):
-//   root → [100] D={10} ← heap           root  (empty, synchronous)
-// ---------------------------------------------------------------------------
-TEST_F(FullEvictionTest, NonReusableEvictionIsSynchronous) {
-    auto tree                               = std::make_unique<BlockTree>(1);
-    auto full                               = std::make_shared<FullComponentGroup>();
-    full->component_group_id                = 0;
-    full->reuse_policy                      = CacheReusePolicy::NON_REUSABLE;
-    std::vector<ComponentGroupPtr> groups   = {full};
-    auto                           nr_cache = std::make_unique<BlockTreeCache>(
-        std::move(tree), std::move(groups), std::vector<Component>{}, nullptr, nullptr, 2);
-
-    std::vector<std::vector<GroupSlot>> slots(1, std::vector<GroupSlot>(1));
-    slots[0][0].device_blocks = {10};
-    nr_cache->insert(nullptr, {100}, slots);
-    EXPECT_EQ(nr_cache->getStats().tree_node_count, 1u);
-
-    int evicted = nr_cache->evict(1, Tier::DEVICE);
-    EXPECT_EQ(evicted, 1);
-    // Synchronous — no wait needed.
-    EXPECT_EQ(nr_cache->getStats().tree_node_count, 0u);
 }
 
 // ---------------------------------------------------------------------------

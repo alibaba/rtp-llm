@@ -49,9 +49,9 @@ struct MemoryBlockLayerTagSlot {
 struct GroupSlot {
     // L1: GPU Device — one block per independent Device BlockPool
     std::vector<BlockIdxType> device_blocks;
-    // L2: CPU Host — one packed block (REUSABLE groups only)
+    // L2: CPU Host — one packed block
     BlockIdxType host_block{NULL_BLOCK_IDX};
-    // L3: Disk — one disk slot (REUSABLE groups only)
+    // L3: Disk — one disk slot
     BlockIdxType disk_slot{NULL_BLOCK_IDX};
 
     // Heap membership flags (per-group, eviction is group-granular)

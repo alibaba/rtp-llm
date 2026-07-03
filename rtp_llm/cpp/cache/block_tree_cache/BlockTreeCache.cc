@@ -94,10 +94,8 @@ BlockTreeCache::BlockTreeCache(std::unique_ptr<BlockTree>        tree,
                      enable_disk_cache_ ? "on" : "off",
                      enable_remote_cache_ ? "on" : "off");
     for (const auto& g : component_groups_) {
-        RTP_LLM_LOG_INFO("BlockTreeCache:   group[%d] type=%s reuse=%s",
-                         g->component_group_id,
-                         cacheGroupTypeName(g->group_type),
-                         g->reuse_policy == CacheReusePolicy::REUSABLE ? "REUSABLE" : "NON_REUSABLE");
+        RTP_LLM_LOG_INFO(
+            "BlockTreeCache:   group[%d] type=%s", g->component_group_id, cacheGroupTypeName(g->group_type));
     }
 }
 
@@ -395,7 +393,7 @@ int BlockTreeCache::evict(size_t num_blocks, Tier tier) {
                               er.node ? er.node->cache_key : 0);
 
             if (er.target_tier == Tier::NONE || !isTierEnabled(er.target_tier)) {
-                // NON_REUSABLE or target tier disabled: direct release, synchronous
+                // Target tier disabled or direct release: synchronous
                 if (!isTierEnabled(er.target_tier) && er.target_tier != Tier::NONE) {
                     RTP_LLM_LOG_DEBUG("BlockTreeCache::evict: target tier %s disabled, "
                                       "downgrading to direct release, group[%d] node_key=%ld",
@@ -707,10 +705,7 @@ void BlockTreeCache::cascadeEviction(TreeNode* node, int source_group_id, Tier t
 bool BlockTreeCache::shouldDeleteNode(const TreeNode* node) const {
     if (node == nullptr || node == tree_->root())
         return false;
-    // 只检查 REUSABLE group（设计文档：NON_REUSABLE 不参与节点保留判定）
     for (const auto& group : component_groups_) {
-        if (group->reuse_policy != CacheReusePolicy::REUSABLE)
-            continue;
         auto gidx = static_cast<size_t>(group->component_group_id);
         if (gidx < node->group_slots.size() && !node->group_slots[gidx].is_empty()) {
             return false;
@@ -730,9 +725,7 @@ std::vector<int> BlockTreeCache::allGroupIds() const {
 std::vector<int> BlockTreeCache::reusableGroupIds() const {
     std::vector<int> ids;
     for (const auto& group : component_groups_) {
-        if (group->reuse_policy == CacheReusePolicy::REUSABLE) {
-            ids.push_back(group->component_group_id);
-        }
+        ids.push_back(group->component_group_id);
     }
     return ids;
 }

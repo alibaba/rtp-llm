@@ -12,10 +12,8 @@ protected:
         auto tree                             = std::make_unique<BlockTree>(2);
         auto full                             = std::make_shared<FullComponentGroup>();
         full->component_group_id              = 0;
-        full->reuse_policy                    = CacheReusePolicy::REUSABLE;
         auto swa                              = std::make_shared<SWAComponentGroup>(128, 64);
         swa->component_group_id               = 1;
-        swa->reuse_policy                     = CacheReusePolicy::REUSABLE;
         std::vector<ComponentGroupPtr> groups = {full, swa};
         cache_                                = std::make_unique<BlockTreeCache>(
             std::move(tree), std::move(groups), std::vector<Component>{}, nullptr, nullptr, 2);
@@ -74,7 +72,6 @@ TEST_F(FullSWAEvictionTest, SWAOnlySequentialDrain) {
     auto tree                                = std::make_unique<BlockTree>(1);
     auto swa                                 = std::make_shared<SWAComponentGroup>(128, 64);
     swa->component_group_id                  = 0;
-    swa->reuse_policy                        = CacheReusePolicy::REUSABLE;
     std::vector<ComponentGroupPtr> groups    = {swa};
     auto                           swa_cache = std::make_unique<BlockTreeCache>(
         std::move(tree), std::move(groups), std::vector<Component>{}, nullptr, nullptr, 2);

@@ -12,8 +12,7 @@ protected:
         auto tree                             = std::make_unique<BlockTree>(2);
         auto full                             = std::make_shared<FullComponentGroup>();
         full->component_group_id              = 0;
-        full->reuse_policy                    = CacheReusePolicy::REUSABLE;
-        auto linear                           = std::make_shared<LinearComponentGroup>(CacheReusePolicy::REUSABLE);
+        auto linear                           = std::make_shared<LinearComponentGroup>();
         linear->component_group_id            = 1;
         std::vector<ComponentGroupPtr> groups = {full, linear};
         cache_                                = std::make_unique<BlockTreeCache>(
@@ -69,7 +68,7 @@ TEST_F(FullLinearEvictionTest, FullEvictionCascadesToLinear) {
 // ---------------------------------------------------------------------------
 TEST_F(FullLinearEvictionTest, LinearOnlySequentialDrain) {
     auto tree                                = std::make_unique<BlockTree>(1);
-    auto linear                              = std::make_shared<LinearComponentGroup>(CacheReusePolicy::REUSABLE);
+    auto linear                              = std::make_shared<LinearComponentGroup>();
     linear->component_group_id               = 0;
     std::vector<ComponentGroupPtr> groups    = {linear};
     auto                           lin_cache = std::make_unique<BlockTreeCache>(
@@ -94,47 +93,6 @@ TEST_F(FullLinearEvictionTest, LinearOnlySequentialDrain) {
     lin_cache->evict(1, Tier::DEVICE);
     lin_cache->waitForPendingTasks();
     EXPECT_EQ(lin_cache->getStats().tree_node_count, 0u);
-}
-
-// ---------------------------------------------------------------------------
-// Test: Full+Linear NON_REUSABLE — Full eviction clears Full data,
-//       Linear data survives but doesn't prevent node deletion.
-//
-//   Before:                               After Full evict + wait:
-//   root → [100] F:{10} L:{30}            root → [100] F:{10} L:_
-//          → [200] F:{10} L:{30} ←leaf           → [200] F:{10} L:_
-//
-//   Full heap: {[200]}, Linear heap: {[200]}
-//   Evict Full[200] → cascade clears Linear[200] → both empty → deleted.
-//   [100] survives, becomes Full leaf.
-// ---------------------------------------------------------------------------
-TEST_F(FullLinearEvictionTest, FullEvictionWithNonReusableLinear) {
-    auto tree                     = std::make_unique<BlockTree>(2);
-    auto full                     = std::make_shared<FullComponentGroup>();
-    full->component_group_id      = 0;
-    full->reuse_policy            = CacheReusePolicy::REUSABLE;
-    auto linear_nr                = std::make_shared<LinearComponentGroup>(CacheReusePolicy::NON_REUSABLE);
-    linear_nr->component_group_id = 1;
-
-    std::vector<ComponentGroupPtr> groups   = {full, linear_nr};
-    auto                           nr_cache = std::make_unique<BlockTreeCache>(
-        std::move(tree), std::move(groups), std::vector<Component>{}, nullptr, nullptr, 2);
-
-    std::vector<std::vector<GroupSlot>> slots(2, std::vector<GroupSlot>(2));
-    slots[0][0].device_blocks = {10};
-    slots[0][1].device_blocks = {30};
-    slots[1][0].device_blocks = {11};
-    slots[1][1].device_blocks = {31};
-    nr_cache->insert(nullptr, {100, 200}, slots);
-
-    // Linear NON_REUSABLE: no host/disk heaps
-    EXPECT_EQ(nr_cache->componentGroups()[1]->host_heap, nullptr);
-    EXPECT_EQ(nr_cache->componentGroups()[1]->disk_heap, nullptr);
-
-    // Evict Full[200] → cascade Linear[200] → deleted
-    nr_cache->evict(1, Tier::DEVICE);
-    nr_cache->waitForPendingTasks();
-    EXPECT_EQ(nr_cache->getStats().tree_node_count, 1u);  // [100] survives
 }
 
 // ---------------------------------------------------------------------------

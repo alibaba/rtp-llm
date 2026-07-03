@@ -10,7 +10,6 @@ protected:
     void SetUp() override {
         group_                     = std::make_shared<FullComponentGroup>();
         group_->component_group_id = 0;
-        group_->reuse_policy       = CacheReusePolicy::REUSABLE;
     }
 
     TreeNode* makeNode(CacheKeyType key, int group_count = 1) {
@@ -98,19 +97,6 @@ TEST_F(FullComponentGroupTest, DriveEvictionDevice) {
     EXPECT_EQ(result->target_tier, Tier::HOST);  // REUSABLE → demote to host
     EXPECT_EQ(result->blocks_to_release.size(), 1u);
     EXPECT_EQ(result->blocks_to_release[0], 42);
-
-    delete a;
-}
-
-TEST_F(FullComponentGroupTest, DriveEvictionNonReusable) {
-    group_->reuse_policy = CacheReusePolicy::NON_REUSABLE;
-    auto* a              = makeNode(100);
-    setDeviceBlock(a, 0, 42);
-
-    group_->tryAddToDeviceHeap(a);
-    auto result = group_->driveEviction(1, Tier::DEVICE);
-    ASSERT_TRUE(result.has_value());
-    EXPECT_EQ(result->target_tier, Tier::NONE);  // NON_REUSABLE → direct release
 
     delete a;
 }

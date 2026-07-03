@@ -20,7 +20,6 @@ struct Component {
     int                                  component_id{-1};
     int                                  component_group_id{-1};
     CacheGroupType                       type{CacheGroupType::FULL};
-    CacheReusePolicy                     reuse_policy{CacheReusePolicy::REUSABLE};
     std::vector<MemoryBlockLayerTagSlot> memory_block_layer_tag_slots;
     int                                  device_pool_index{-1};
 };
@@ -78,7 +77,6 @@ public:
     // ---- Static metadata ----
     int              component_group_id{-1};
     CacheGroupType   group_type{CacheGroupType::FULL};
-    CacheReusePolicy reuse_policy{CacheReusePolicy::REUSABLE};
     std::vector<int> component_indices;
     size_t           host_block_size{0};
 

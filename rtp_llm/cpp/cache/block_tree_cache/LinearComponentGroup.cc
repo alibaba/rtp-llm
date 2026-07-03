@@ -2,17 +2,13 @@
 
 namespace rtp_llm {
 
-LinearComponentGroup::LinearComponentGroup(CacheReusePolicy reuse,
-                                           EvictionPolicy   device_policy,
-                                           EvictionPolicy   host_policy,
-                                           EvictionPolicy   disk_policy) {
-    group_type   = CacheGroupType::LINEAR;
-    reuse_policy = reuse;
-    device_heap  = std::make_unique<EvictionHeap>(device_policy);
-    if (reuse == CacheReusePolicy::REUSABLE) {
-        host_heap = std::make_unique<EvictionHeap>(host_policy);
-        disk_heap = std::make_unique<EvictionHeap>(disk_policy);
-    }
+LinearComponentGroup::LinearComponentGroup(EvictionPolicy device_policy,
+                                           EvictionPolicy host_policy,
+                                           EvictionPolicy disk_policy) {
+    group_type  = CacheGroupType::LINEAR;
+    device_heap = std::make_unique<EvictionHeap>(device_policy);
+    host_heap   = std::make_unique<EvictionHeap>(host_policy);
+    disk_heap   = std::make_unique<EvictionHeap>(disk_policy);
 }
 
 std::unique_ptr<MatchValidator> LinearComponentGroup::createMatchValidator() {

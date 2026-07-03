@@ -42,11 +42,11 @@ public:
     void removeNode(TreeNode* node);
 
     // Walk up from start_node, removing empty ancestors (no children
-    // and all REUSABLE group slots empty). Stops at first non-empty
+    // and all group slots empty). Stops at first non-empty
     // ancestor or root.
-    // reusable_group_ids: group IDs that are REUSABLE (node deletion
+    // group_ids: all group IDs (node deletion
     // only considers these when checking emptiness).
-    void removeEmptyAncestors(TreeNode* start_node, const std::vector<int>& reusable_group_ids);
+    void removeEmptyAncestors(TreeNode* start_node, const std::vector<int>& group_ids);
 
     // Accessors
     TreeNode* root() const {

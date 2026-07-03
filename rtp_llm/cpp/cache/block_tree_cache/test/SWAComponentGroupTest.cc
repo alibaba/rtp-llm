@@ -12,7 +12,6 @@ protected:
             /*sliding_window_size=*/128,
             /*seq_size_per_block=*/64);
         group_->component_group_id = 0;
-        group_->reuse_policy       = CacheReusePolicy::REUSABLE;
     }
 
     TreeNode* makeNode(CacheKeyType key, int group_count = 1) {

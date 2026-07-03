@@ -35,7 +35,6 @@ protected:
 
         auto full_group                = std::make_shared<FullComponentGroup>();
         full_group->component_group_id = 0;
-        full_group->reuse_policy       = CacheReusePolicy::REUSABLE;
 
         std::vector<ComponentGroupPtr> groups = {full_group};
         std::vector<Component>         components;
@@ -147,11 +146,9 @@ TEST_F(BlockTreeCacheTest, CascadeEviction) {
 
     auto full_group                = std::make_shared<FullComponentGroup>();
     full_group->component_group_id = 0;
-    full_group->reuse_policy       = CacheReusePolicy::REUSABLE;
 
     auto swa_group                = std::make_shared<SWAComponentGroup>(128, 64);
     swa_group->component_group_id = 1;
-    swa_group->reuse_policy       = CacheReusePolicy::REUSABLE;
 
     std::vector<ComponentGroupPtr> groups = {full_group, swa_group};
     std::vector<Component>         components;
@@ -212,15 +209,12 @@ TEST_F(BlockTreeCacheTest, MultiGroupConstruction) {
 
     auto full                = std::make_shared<FullComponentGroup>();
     full->component_group_id = 0;
-    full->reuse_policy       = CacheReusePolicy::REUSABLE;
 
     auto swa                = std::make_shared<SWAComponentGroup>(128, 64);
     swa->component_group_id = 1;
-    swa->reuse_policy       = CacheReusePolicy::REUSABLE;
 
     auto linear                = std::make_shared<LinearComponentGroup>();
     linear->component_group_id = 2;
-    linear->reuse_policy       = CacheReusePolicy::NON_REUSABLE;
 
     std::vector<ComponentGroupPtr> groups = {full, swa, linear};
     std::vector<Component>         components;
@@ -280,7 +274,6 @@ TEST_F(BlockTreeCacheTest, EvictWithCopyEngineAllocatesHostBlock) {
     auto tree                             = std::make_unique<BlockTree>(1);
     auto full                             = std::make_shared<FullComponentGroup>();
     full->component_group_id              = 0;
-    full->reuse_policy                    = CacheReusePolicy::REUSABLE;
     std::vector<ComponentGroupPtr> groups = {full};
 
     auto ce_cache = std::make_unique<BlockTreeCache>(std::move(tree),
@@ -321,7 +314,6 @@ TEST_F(BlockTreeCacheTest, SequentialEvictionAllocatesMultipleHostBlocks) {
     auto tree                             = std::make_unique<BlockTree>(1);
     auto full                             = std::make_shared<FullComponentGroup>();
     full->component_group_id              = 0;
-    full->reuse_policy                    = CacheReusePolicy::REUSABLE;
     std::vector<ComponentGroupPtr> groups = {full};
 
     // No Host pool, Host disabled → direct release on eviction
@@ -351,15 +343,14 @@ TEST_F(BlockTreeCacheTest, SequentialEvictionAllocatesMultipleHostBlocks) {
     EXPECT_EQ(ce_cache->getStats().tree_node_count, 0u);
 }
 
-// Test: NON_REUSABLE eviction does NOT allocate host block.
-TEST_F(BlockTreeCacheTest, NonReusableEvictionNoHostAllocation) {
+// Test: REUSABLE eviction allocates host block when host is enabled.
+TEST_F(BlockTreeCacheTest, ReusableEvictionAllocatesHostBlock) {
     auto host_pool = makeHostPool(256, 4);
     ASSERT_TRUE(host_pool->init());
 
     auto tree                             = std::make_unique<BlockTree>(1);
     auto full                             = std::make_shared<FullComponentGroup>();
     full->component_group_id              = 0;
-    full->reuse_policy                    = CacheReusePolicy::NON_REUSABLE;
     std::vector<ComponentGroupPtr> groups = {full};
 
     auto ce_cache = std::make_unique<BlockTreeCache>(std::move(tree),
@@ -379,9 +370,9 @@ TEST_F(BlockTreeCacheTest, NonReusableEvictionNoHostAllocation) {
     ce_cache->evict(1, Tier::DEVICE);
     // Synchronous, no wait needed
 
-    // No host block allocated (NON_REUSABLE → target=NONE)
-    EXPECT_EQ(host_pool->freeBlocksNum(), 4u);
-    EXPECT_EQ(ce_cache->getStats().tree_node_count, 0u);
+    // Host block allocated (REUSABLE eviction with host enabled)
+    EXPECT_EQ(host_pool->freeBlocksNum(), 3u);
+    EXPECT_EQ(ce_cache->getStats().tree_node_count, 1u);
 }
 
 // ---------------------------------------------------------------------------
@@ -415,7 +406,6 @@ TEST_F(BlockTreeCacheTest, EvictDisabledTierReturnsZero) {
     auto tree                             = std::make_unique<BlockTree>(1);
     auto full                             = std::make_shared<FullComponentGroup>();
     full->component_group_id              = 0;
-    full->reuse_policy                    = CacheReusePolicy::REUSABLE;
     std::vector<ComponentGroupPtr> groups = {full};
 
     // Device enabled, Host disabled (default)
@@ -440,7 +430,6 @@ TEST_F(BlockTreeCacheTest, HostDisabledDirectRelease) {
     auto tree                             = std::make_unique<BlockTree>(1);
     auto full                             = std::make_shared<FullComponentGroup>();
     full->component_group_id              = 0;
-    full->reuse_policy                    = CacheReusePolicy::REUSABLE;
     std::vector<ComponentGroupPtr> groups = {full};
 
     // Host disabled (default): Device eviction → direct release
@@ -486,35 +475,29 @@ TEST_F(BlockTreeCacheTest, TierEnableQueries) {
 }
 
 // ---------------------------------------------------------------------------
-// UT-2: shouldDeleteNode only checks REUSABLE groups (Bug 1 fix)
+// UT-2: shouldDeleteNode checks all groups
 // ---------------------------------------------------------------------------
-TEST_F(BlockTreeCacheTest, NodeDeletedEvenIfNonReusableHasData) {
-    auto tree = std::make_unique<BlockTree>(2);
+TEST_F(BlockTreeCacheTest, NodeDeletedWhenAllGroupsEmpty) {
+    auto tree = std::make_unique<BlockTree>(1);
 
     auto full                = std::make_shared<FullComponentGroup>();
     full->component_group_id = 0;
-    full->reuse_policy       = CacheReusePolicy::REUSABLE;
 
-    auto non_reusable                = std::make_shared<SWAComponentGroup>(128, 64);
-    non_reusable->component_group_id = 1;
-    non_reusable->reuse_policy       = CacheReusePolicy::NON_REUSABLE;
-
-    std::vector<ComponentGroupPtr> groups = {full, non_reusable};
+    std::vector<ComponentGroupPtr> groups = {full};
     auto cache = std::make_unique<BlockTreeCache>(std::move(tree), std::move(groups), std::vector<Component>{});
 
-    // Insert: REUSABLE group has data, NON_REUSABLE also has data
-    std::vector<std::vector<GroupSlot>> slots(1, std::vector<GroupSlot>(2));
-    slots[0][0].device_blocks = {42};  // REUSABLE
-    slots[0][1].device_blocks = {99};  // NON_REUSABLE
+    // Insert
+    std::vector<std::vector<GroupSlot>> slots(1, std::vector<GroupSlot>(1));
+    slots[0][0].device_blocks = {42};
     cache->insert(nullptr, {100}, slots);
 
     EXPECT_EQ(cache->getStats().tree_node_count, 1u);
 
-    // Evict REUSABLE group's device data
+    // Evict device data
     cache->evict(1, Tier::DEVICE);
     cache->waitForPendingTasks();
 
-    // Node should be deleted: REUSABLE group empty, NON_REUSABLE doesn't prevent deletion
+    // Node should be deleted: group empty
     EXPECT_EQ(cache->getStats().tree_node_count, 0u);
 }
 
@@ -524,7 +507,6 @@ TEST_F(BlockTreeCacheTest, NodeDeletedEvenIfNonReusableHasData) {
 TEST_F(BlockTreeCacheTest, SWABuildTransferSupportsHostToDisk) {
     auto swa                = std::make_shared<SWAComponentGroup>(128, 64);
     swa->component_group_id = 0;
-    swa->reuse_policy       = CacheReusePolicy::REUSABLE;
 
     // Create a mock tree node with host data
     auto                                tree = std::make_unique<BlockTree>(1);
@@ -567,11 +549,9 @@ TEST_F(BlockTreeCacheTest, MatchUsesFullGroupIdNotHardcodedZero) {
     // group 0 = SWA, group 1 = FULL (FULL's id is NOT 0)
     auto swa                = std::make_shared<SWAComponentGroup>(128, 64);
     swa->component_group_id = 0;
-    swa->reuse_policy       = CacheReusePolicy::REUSABLE;
 
     auto full                = std::make_shared<FullComponentGroup>();
     full->component_group_id = 1;
-    full->reuse_policy       = CacheReusePolicy::REUSABLE;
 
     std::vector<ComponentGroupPtr> groups = {swa, full};
     auto cache = std::make_unique<BlockTreeCache>(std::move(tree), std::move(groups), std::vector<Component>{});
@@ -600,7 +580,6 @@ TEST_F(BlockTreeCacheTest, NodeEntersHostHeapAfterDemotion) {
     auto tree                             = std::make_unique<BlockTree>(1);
     auto full                             = std::make_shared<FullComponentGroup>();
     full->component_group_id              = 0;
-    full->reuse_policy                    = CacheReusePolicy::REUSABLE;
     std::vector<ComponentGroupPtr> groups = {full};
 
     auto cache = std::make_unique<BlockTreeCache>(
@@ -629,7 +608,6 @@ TEST_F(BlockTreeCacheTest, ParentBecomesDeviceLeafAfterChildEviction) {
     auto tree                             = std::make_unique<BlockTree>(1);
     auto full                             = std::make_shared<FullComponentGroup>();
     full->component_group_id              = 0;
-    full->reuse_policy                    = CacheReusePolicy::REUSABLE;
     std::vector<ComponentGroupPtr> groups = {full};
 
     auto cache = std::make_unique<BlockTreeCache>(std::move(tree), std::move(groups), std::vector<Component>{});
@@ -656,35 +634,6 @@ TEST_F(BlockTreeCacheTest, ParentBecomesDeviceLeafAfterChildEviction) {
 }
 
 // ---------------------------------------------------------------------------
-// UT-8: NON_REUSABLE full lifecycle (insert -> match -> evict -> delete)
-// ---------------------------------------------------------------------------
-TEST_F(BlockTreeCacheTest, NonReusableFullLifecycle) {
-    auto tree                             = std::make_unique<BlockTree>(1);
-    auto full                             = std::make_shared<FullComponentGroup>();
-    full->component_group_id              = 0;
-    full->reuse_policy                    = CacheReusePolicy::NON_REUSABLE;
-    std::vector<ComponentGroupPtr> groups = {full};
-
-    auto cache = std::make_unique<BlockTreeCache>(std::move(tree), std::move(groups), std::vector<Component>{});
-
-    // Insert
-    std::vector<std::vector<GroupSlot>> slots(1, std::vector<GroupSlot>(1));
-    slots[0][0].device_blocks = {42};
-    cache->insert(nullptr, {100}, slots);
-    EXPECT_EQ(cache->getStats().tree_node_count, 1u);
-
-    // Match
-    auto result = cache->match({100});
-    EXPECT_EQ(result.matched_blocks, 1u);
-
-    // Evict: NON_REUSABLE -> direct release, target=NONE
-    cache->evict(1, Tier::DEVICE);
-
-    // Node should be deleted
-    EXPECT_EQ(cache->getStats().tree_node_count, 0u);
-}
-
-// ---------------------------------------------------------------------------
 // UT-9: CopyEngine failure does not update slot (Issue 7 fix)
 // ---------------------------------------------------------------------------
 TEST_F(BlockTreeCacheTest, CopyFailureDoesNotUpdateSlot) {
@@ -694,7 +643,6 @@ TEST_F(BlockTreeCacheTest, CopyFailureDoesNotUpdateSlot) {
     auto tree                             = std::make_unique<BlockTree>(1);
     auto full                             = std::make_shared<FullComponentGroup>();
     full->component_group_id              = 0;
-    full->reuse_policy                    = CacheReusePolicy::REUSABLE;
     full->component_indices               = {0};
     std::vector<ComponentGroupPtr> groups = {full};
 
@@ -794,7 +742,6 @@ TEST_F(BlockTreeCacheTest, DeviceBufferResolverEnablesD2HCopy) {
     auto tree                                 = std::make_unique<BlockTree>(1);
     auto full                                 = std::make_shared<FullComponentGroup>();
     full->component_group_id                  = 0;
-    full->reuse_policy                        = CacheReusePolicy::REUSABLE;
     full->component_indices                   = {0};
     std::vector<ComponentGroupPtr> groups     = {full};
     std::vector<Component>         components = {comp};
@@ -836,7 +783,6 @@ TEST_F(BlockTreeCacheTest, LoadBackDetectsHostData) {
     auto tree                             = std::make_unique<BlockTree>(1);
     auto full                             = std::make_shared<FullComponentGroup>();
     full->component_group_id              = 0;
-    full->reuse_policy                    = CacheReusePolicy::REUSABLE;
     std::vector<ComponentGroupPtr> groups = {full};
 
     auto cache = std::make_unique<BlockTreeCache>(std::move(tree), std::move(groups), std::vector<Component>{});
@@ -884,7 +830,6 @@ TEST_F(BlockTreeCacheTest, BroadcastManagerStoredCorrectly) {
     auto tree                             = std::make_unique<BlockTree>(1);
     auto full                             = std::make_shared<FullComponentGroup>();
     full->component_group_id              = 0;
-    full->reuse_policy                    = CacheReusePolicy::REUSABLE;
     std::vector<ComponentGroupPtr> groups = {full};
 
     auto cache = std::make_unique<BlockTreeCache>(std::move(tree),

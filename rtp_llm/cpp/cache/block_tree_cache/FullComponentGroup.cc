@@ -34,8 +34,6 @@ void FullComponentGroup::tryAddToDeviceHeap(TreeNode* node) {
 void FullComponentGroup::tryAddToHostHeap(TreeNode* node) {
     if (!host_heap)
         return;
-    if (reuse_policy == CacheReusePolicy::NON_REUSABLE)
-        return;
     // Full-specific: only HostLeaf nodes enter heap
     if (!isLeafAtTier(node, component_group_id, Tier::HOST))
         return;
@@ -48,8 +46,6 @@ void FullComponentGroup::tryAddToHostHeap(TreeNode* node) {
 
 void FullComponentGroup::tryAddToDiskHeap(TreeNode* node) {
     if (!disk_heap)
-        return;
-    if (reuse_policy == CacheReusePolicy::NON_REUSABLE)
         return;
     // Full-specific: only DiskLeaf nodes enter heap
     if (!isLeafAtTier(node, component_group_id, Tier::DISK))

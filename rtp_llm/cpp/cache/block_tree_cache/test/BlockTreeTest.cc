@@ -249,33 +249,5 @@ TEST(BlockTreeTest, InsertDoesNotOverwriteExistingNodeSlots) {
     EXPECT_EQ(result.path[2]->group_slots[0].device_blocks[0], 101);  // 300 new (99+2)
 }
 
-// UT-3: Verify removeEmptyAncestors only considers REUSABLE groups (Bug 2 fix)
-TEST(BlockTreeTest, RemoveEmptyAncestorsIgnoresNonReusableGroups) {
-    BlockTree tree(2);
-
-    // Build: root -> A(100) -> B(200) with 2 groups
-    // group 0 (REUSABLE) has NULL_BLOCK_IDX, group 1 (NON_REUSABLE) has data
-    std::vector<std::vector<GroupSlot>> slots(2);  // 2 nodes
-    slots[0].resize(2);
-    slots[0][0].device_blocks = {NULL_BLOCK_IDX};  // group 0 empty
-    slots[0][1].device_blocks = {42};              // group 1 has data
-    slots[1].resize(2);
-    slots[1][0].device_blocks = {NULL_BLOCK_IDX};  // group 0 empty
-    slots[1][1].device_blocks = {43};              // group 1 has data
-    tree.insertNode(nullptr, {100, 200}, slots);
-
-    auto find = tree.findNode({100, 200});
-    ASSERT_EQ(find.path.size(), 2u);
-
-    // Remove B
-    tree.removeNode(find.path[1]);
-
-    // removeEmptyAncestors with only REUSABLE group IDs = {0}
-    // A's group 0 is empty -> should be deleted (ignoring group 1)
-    tree.removeEmptyAncestors(find.path[0], {0});
-
-    EXPECT_EQ(tree.nodeCount(), 0u);
-}
-
 }  // namespace
 }  // namespace rtp_llm

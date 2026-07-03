@@ -12,11 +12,9 @@ protected:
         auto tree                             = std::make_unique<BlockTree>(3);
         auto full                             = std::make_shared<FullComponentGroup>();
         full->component_group_id              = 0;
-        full->reuse_policy                    = CacheReusePolicy::REUSABLE;
         auto swa                              = std::make_shared<SWAComponentGroup>(128, 64);
         swa->component_group_id               = 1;
-        swa->reuse_policy                     = CacheReusePolicy::REUSABLE;
-        auto linear                           = std::make_shared<LinearComponentGroup>(CacheReusePolicy::REUSABLE);
+        auto linear                           = std::make_shared<LinearComponentGroup>();
         linear->component_group_id            = 2;
         std::vector<ComponentGroupPtr> groups = {full, swa, linear};
         cache_                                = std::make_unique<BlockTreeCache>(
@@ -179,8 +177,7 @@ TEST_F(FullSWALinearEvictionTest, SWAEvictionCascadesToLinear) {
     auto tree                                    = std::make_unique<BlockTree>(2);
     auto swa                                     = std::make_shared<SWAComponentGroup>(128, 64);
     swa->component_group_id                      = 0;
-    swa->reuse_policy                            = CacheReusePolicy::REUSABLE;
-    auto linear                                  = std::make_shared<LinearComponentGroup>(CacheReusePolicy::REUSABLE);
+    auto linear                                  = std::make_shared<LinearComponentGroup>();
     linear->component_group_id                   = 1;
     std::vector<ComponentGroupPtr> groups        = {swa, linear};
     auto                           swa_lin_cache = std::make_unique<BlockTreeCache>(

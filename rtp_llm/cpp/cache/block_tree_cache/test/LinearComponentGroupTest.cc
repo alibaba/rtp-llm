@@ -10,7 +10,6 @@ protected:
     void SetUp() override {
         group_                     = std::make_shared<LinearComponentGroup>();
         group_->component_group_id = 0;
-        group_->reuse_policy       = CacheReusePolicy::REUSABLE;
     }
 
     TreeNode* makeNode(CacheKeyType key, int group_count = 1) {
@@ -59,25 +58,6 @@ TEST_F(LinearComponentGroupTest, EvictFromTierDevice) {
 
     EXPECT_FALSE(node->group_slots[0].has_device_value());
     EXPECT_FALSE(node->group_slots[0].in_device_heap);
-
-    delete node;
-}
-
-TEST_F(LinearComponentGroupTest, NonReusableNoHostDiskHeap) {
-    auto group                = std::make_shared<LinearComponentGroup>(CacheReusePolicy::NON_REUSABLE);
-    group->component_group_id = 0;
-
-    // For NON_REUSABLE, host/disk heaps should be null
-    EXPECT_EQ(group->host_heap, nullptr);
-    EXPECT_EQ(group->disk_heap, nullptr);
-
-    auto* node                         = makeNode(100);
-    node->group_slots[0].device_blocks = {NULL_BLOCK_IDX};
-    node->group_slots[0].host_block    = 15;
-
-    // Base class tryAddToHostHeap should skip for NON_REUSABLE
-    group->tryAddToHostHeap(node);
-    EXPECT_FALSE(node->group_slots[0].in_host_heap);
 
     delete node;
 }
