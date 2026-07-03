@@ -61,17 +61,46 @@ parent_dir = os.path.dirname(current_dir)
 libs_path = os.path.join(parent_dir, "libs")
 SO_NAME = "libth_transformer_config.so"
 
-# All .so files are in rtp_llm/libs/ (copied by setup.py during uv/pip install)
+
+def _find_so_in_bazel_bin() -> str:
+    """Dev / `bazel test` fallback: locate SO_NAME under the workspace bazel-bin
+    tree (setup.py does not populate libs/ in those flows). Returns the
+    containing directory, or "" if not found / not a bazel workspace."""
+    bazel_bin = os.path.normpath(os.path.join(parent_dir, "..", "bazel-bin"))
+    if not os.path.isdir(bazel_bin):
+        return ""
+    for root, _, files in os.walk(bazel_bin):
+        if SO_NAME in files:
+            return root
+    return ""
+
+
+# All .so files are in rtp_llm/libs/ (copied by setup.py during uv/pip install).
 so_path = libs_path
 _so_available = os.path.exists(os.path.join(so_path, SO_NAME))
 if not _so_available:
-    logging.warning(
-        f"{SO_NAME} not found in {libs_path}. "
-        f"C++ extensions not available (collection-only mode)."
-    )
-else:
+    # Restore the dev/bazel-test fallback removed in the pyproject migration.
+    bazel_so_path = _find_so_in_bazel_bin()
+    if bazel_so_path:
+        so_path = bazel_so_path
+        _so_available = True
+
+if _so_available:
     logging.info(f"so path: {so_path}")
     sys.path.append(so_path)
+elif os.environ.get("RTP_LLM_ALLOW_MISSING_SO") == "1":
+    # Explicit collection-only mode (e.g. pytest collection with no build).
+    logging.warning(
+        f"{SO_NAME} not found in {libs_path} or bazel-bin; running collection-only "
+        f"(RTP_LLM_ALLOW_MISSING_SO=1). C++ extensions are unavailable."
+    )
+else:
+    # Fail fast by default so a missing/broken build is not silently degraded.
+    raise ImportError(
+        f"{SO_NAME} not found in {libs_path} or bazel-bin. Build the C++ extensions "
+        f"(e.g. `pip install -e .` or `bazel build ...`), or set "
+        f"RTP_LLM_ALLOW_MISSING_SO=1 to allow collection-only mode."
+    )
 
 
 # hack for amd rocm 6.3.0.2 test, libcaffe2_nvrtc.so should have been automatically loaded via torch

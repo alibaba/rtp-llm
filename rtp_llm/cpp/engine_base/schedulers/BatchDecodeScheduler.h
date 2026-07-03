@@ -149,17 +149,53 @@ public:
             }
         }
 
-        // Pick the non-NONE group with the most streams.  If only NONE streams
-        // are waiting, treat NONE as the selected group.
+        // Choose which concrete ReturnAllProbsMode group to serve this round.
+        //
+        // Default policy favours throughput: pick the non-NONE group with the
+        // most streams.  That alone can starve a minority mode (e.g. a few
+        // ORIGINAL requests stuck behind a steady stream of DEFAULT ones), so a
+        // fairness override kicks in: if any non-NONE group's oldest stream has
+        // waited longer than the starvation threshold, serve the group whose
+        // oldest stream arrived earliest.  This bounds each group's worst-case
+        // wait to ~starvation_threshold instead of "forever".
+        const int64_t now_us = autil::TimeUtility::currentTimeInMicroSeconds();
+        const int64_t starvation_threshold_us =
+            std::chrono::duration_cast<std::chrono::microseconds>(2 * kFlushTimeoutMs).count();
+
         ReturnAllProbsMode selected_mode = ReturnAllProbsMode::NONE;
         size_t             max_count     = 0;
+
+        ReturnAllProbsMode starved_mode       = ReturnAllProbsMode::NONE;
+        int64_t            starved_arrival_us = 0;
+        bool               has_starved        = false;
         for (auto& [mode, streams] : mode_groups) {
-            if (mode == ReturnAllProbsMode::NONE) {
+            if (mode == ReturnAllProbsMode::NONE || streams.empty()) {
                 continue;
             }
-            if (streams.size() > max_count) {
-                max_count     = streams.size();
-                selected_mode = mode;
+            // Groups are built by iterating waiting_streams_ in arrival order,
+            // so front() is the group's oldest stream.
+            const int64_t arrival_us = streams.front()->enqueueTime();
+            if (now_us - arrival_us > starvation_threshold_us
+                && (!has_starved || arrival_us < starved_arrival_us)) {
+                has_starved        = true;
+                starved_arrival_us = arrival_us;
+                starved_mode       = mode;
+            }
+        }
+
+        if (has_starved) {
+            selected_mode = starved_mode;
+            max_count     = mode_groups[selected_mode].size();
+        } else {
+            // Throughput default: the non-NONE group with the most streams.
+            for (auto& [mode, streams] : mode_groups) {
+                if (mode == ReturnAllProbsMode::NONE) {
+                    continue;
+                }
+                if (streams.size() > max_count) {
+                    max_count     = streams.size();
+                    selected_mode = mode;
+                }
             }
         }
         auto& none_streams = mode_groups[ReturnAllProbsMode::NONE];

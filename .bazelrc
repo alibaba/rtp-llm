@@ -220,6 +220,11 @@ test --test_env LOG_LEVEL="INFO"
 test --test_env NCCL_DEBUG="INFO"
 # for dp scatter add stable result
 test --test_env TZ=Asia/Shanghai
+# Global minimal test LD_LIBRARY_PATH so platforms without a dedicated stanza
+# (cpu / arm / ppu) can still find the conda310 python/torch runtime libs.
+# The cuda/rocm/compat stanzas below set fuller paths and override this for
+# their --config (single-valued --test_env: last applied wins).
+test --test_env LD_LIBRARY_PATH="/opt/conda310/lib/:/usr/lib64:/lib64"
 # for flashinfer find cuda; scope to CUDA-specific test runs
 test:cuda --test_env CUDA_HOME=/usr/local/cuda
 
