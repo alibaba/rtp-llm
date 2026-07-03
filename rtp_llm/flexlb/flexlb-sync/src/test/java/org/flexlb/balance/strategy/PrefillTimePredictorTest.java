@@ -27,7 +27,13 @@ class PrefillTimePredictorTest {
     @Test
     void parseRejectsMalformed() {
         assertThrows(IllegalArgumentException.class, () ->
-                new PrefillTimePredictor("sum_c +"));
+                new PrefillTimePredictor("sum(computeTokens) +"));
+    }
+
+    @Test
+    void parseRejectsShortLegacyVariables() {
+        assertThrows(IllegalArgumentException.class, () ->
+                new PrefillTimePredictor("c + p + sum_c + n"));
     }
 
     // ---- estimateMs (single request) ----
@@ -50,57 +56,87 @@ class PrefillTimePredictorTest {
 
     @Test
     void estimateMsLinearInComputeTokens() {
-        // "2*c" → time = 2*c
-        PrefillTimePredictor p = new PrefillTimePredictor("2*c");
-        // c = 1500-500 = 1000 → 2000
+        PrefillTimePredictor p = new PrefillTimePredictor("2*computeTokens");
         assertEquals(2000, p.estimateMs(1500, 500));
-        // c = 300-0 = 300 → 600
         assertEquals(600, p.estimateMs(300, 0));
     }
 
     @Test
     void estimateMsQuadraticInComputeTokens() {
-        // "0.1*c^2" → time = 0.1 * c²
-        PrefillTimePredictor p = new PrefillTimePredictor("0.1*c^2");
-        // c=100 → 0.1*10000 = 1000
+        PrefillTimePredictor p = new PrefillTimePredictor("0.1*computeTokens^2");
         assertEquals(1000, p.estimateMs(100, 0));
     }
 
     @Test
     void estimateMsInteractionTerm() {
-        // "0.5*c*p" → time = 0.5 * c * hitTokens
-        PrefillTimePredictor p = new PrefillTimePredictor("0.5*c*p");
-        // c=200, hit=400 → 0.5*200*400 = 40000
+        PrefillTimePredictor p = new PrefillTimePredictor("0.5*computeTokens*hitCacheTokens");
         assertEquals(40000, p.estimateMs(600, 400));
     }
 
     @Test
-    void estimateMsSumVariablesInSingleMode() {
-        // In single-request mode, sum_c == c and sum_p == p
-        PrefillTimePredictor p = new PrefillTimePredictor("sum_c + 0.3*sum_p");
-        // c=300, p=200 → 300 + 0.3*200 = 360
+    void estimateMsSumFunctionInSingleMode() {
+        PrefillTimePredictor p = new PrefillTimePredictor(
+                "sum(computeTokens) + 0.3*sum(hitCacheTokens)");
         assertEquals(360, p.estimateMs(500, 200));
     }
 
     @Test
+    void estimateMsHitCacheRequestCount() {
+        PrefillTimePredictor p = new PrefillTimePredictor(
+                "sum(hitCacheTokens) + 100*sum(hasHitCache)");
+
+        assertEquals(300, p.estimateMs(500, 200));
+        assertEquals(0, p.estimateMs(500, 0));
+    }
+
+    @Test
+    void estimateMsReadablePositivePartFormula() {
+        PrefillTimePredictor p = new PrefillTimePredictor(
+                "max(computeTokens - 2048, 0) + 2*max(computeTokens - 24576, 0)"
+                        + " + sum(max(computeTokens - 2048, 0))"
+                        + " + 3*sum(max(computeTokens - 24576, 0))");
+
+        // tokens=30000, hitCacheTokens=1000, computeTokens=29000, positive parts=(26952,4424).
+        assertEquals(76024, p.estimateMs(30000, 1000));
+        assertEquals(0, p.estimateMs(2048, 0));
+    }
+
+    @Test
+    void estimateMsReadableTokenVariables() {
+        PrefillTimePredictor p = new PrefillTimePredictor(
+                "inputTokens - hitCacheTokens + computeTokens + 10*hasHitCache");
+
+        assertEquals(610, p.estimateMs(500, 200));
+        assertEquals(1000, p.estimateMs(500, 0));
+    }
+
+    @Test
     void estimateMsFullFormula() {
-        // "10 + 0.1*c + 0.01*c^2 + 0.001*c*p + 0.5*p + 5"
-        // total=500, hit=200 → c=300
+        // inputTokens=500, hitCacheTokens=200, computeTokens=300
         // = 10 + 30 + 900 + 60 + 100 + 5 = 1105
-        PrefillTimePredictor p = new PrefillTimePredictor("10 + 0.1*sum_c + 0.01*sum_c2 + 0.001*sum_cp + 0.5*sum_p + 5*n");
+        PrefillTimePredictor p = new PrefillTimePredictor(
+                "10 + 0.1*sum(computeTokens)"
+                        + " + 0.01*sum(computeTokens^2)"
+                        + " + 0.001*sum(computeTokens * hitCacheTokens)"
+                        + " + 0.5*sum(hitCacheTokens)"
+                        + " + 5*batchSize");
         assertEquals(1105, p.estimateMs(500, 200));
     }
 
     @Test
     void estimateMsHitTokensCannotExceedTotal() {
-        // c = max(0, total-hit), so if hit > total, c = 0
-        PrefillTimePredictor p = new PrefillTimePredictor("2*c");
+        PrefillTimePredictor p = new PrefillTimePredictor("2*computeTokens");
         assertEquals(0, p.estimateMs(100, 500));
     }
 
     @Test
     void estimateMsLargeValuesNoOverflow() {
-        PrefillTimePredictor p = new PrefillTimePredictor("100 + sum_c + 0.001*sum_c2 + 0.0001*sum_cp + 0.5*sum_p + 10*n");
+        PrefillTimePredictor p = new PrefillTimePredictor(
+                "100 + sum(computeTokens)"
+                        + " + 0.001*sum(computeTokens^2)"
+                        + " + 0.0001*sum(computeTokens * hitCacheTokens)"
+                        + " + 0.5*sum(hitCacheTokens)"
+                        + " + 10*batchSize");
         long result = p.estimateMs(100_000, 50_000);
         assertTrue(result >= 0, "Should not overflow or produce negative values");
     }
@@ -109,13 +145,18 @@ class PrefillTimePredictorTest {
 
     @Test
     void predictBatchMsEmptyListReturnsZero() {
-        PrefillTimePredictor p = new PrefillTimePredictor("10 + sum_c + 5*n");
+        PrefillTimePredictor p = new PrefillTimePredictor("10 + sum(computeTokens) + 5*batchSize");
         assertEquals(0, p.predictBatchMs(List.of()));
     }
 
     @Test
     void predictBatchMsSingleItemMatchesEstimateMs() {
-        PrefillTimePredictor p = new PrefillTimePredictor("10 + 0.1*sum_c + 0.01*sum_c2 + 0.001*sum_cp + 0.5*sum_p + 5*n");
+        PrefillTimePredictor p = new PrefillTimePredictor(
+                "10 + 0.1*sum(computeTokens)"
+                        + " + 0.01*sum(computeTokens^2)"
+                        + " + 0.001*sum(computeTokens * hitCacheTokens)"
+                        + " + 0.5*sum(hitCacheTokens)"
+                        + " + 5*batchSize");
         long single = p.estimateMs(500, 200);
 
         BatchItem item = batchItem(500, 200);
@@ -126,13 +167,18 @@ class PrefillTimePredictorTest {
 
     @Test
     void predictBatchMsMultipleItems() {
-        // "10 + 0.1*sum_c + 0.01*sum_c2 + 0.001*sum_cp + 0.5*sum_p + 5*n"
-        // item1: seq=500, hit=200 → c=300, c²=90000, cp=60000
-        // item2: seq=300, hit=100 → c=200, c²=40000, cp=20000
-        // sum_c=500, sum_c2=130000, sum_cp=80000, sum_p=300, n=2
+        // item1: inputTokens=500, hitCacheTokens=200, computeTokens=300
+        // item2: inputTokens=300, hitCacheTokens=100, computeTokens=200
+        // sum(computeTokens)=500, sum(computeTokens^2)=130000,
+        // sum(computeTokens * hitCacheTokens)=80000, sum(hitCacheTokens)=300, batchSize=2
         // = 10 + 0.1*500 + 0.01*130000 + 0.001*80000 + 0.5*300 + 5*2
         // = 10 + 50 + 1300 + 80 + 150 + 10 = 1600
-        PrefillTimePredictor p = new PrefillTimePredictor("10 + 0.1*sum_c + 0.01*sum_c2 + 0.001*sum_cp + 0.5*sum_p + 5*n");
+        PrefillTimePredictor p = new PrefillTimePredictor(
+                "10 + 0.1*sum(computeTokens)"
+                        + " + 0.01*sum(computeTokens^2)"
+                        + " + 0.001*sum(computeTokens * hitCacheTokens)"
+                        + " + 0.5*sum(hitCacheTokens)"
+                        + " + 5*batchSize");
 
         BatchItem item1 = batchItem(500, 200);
         BatchItem item2 = batchItem(300, 100);
@@ -142,9 +188,45 @@ class PrefillTimePredictorTest {
     }
 
     @Test
+    void predictBatchMsAggregatesHitCacheRequestCount() {
+        PrefillTimePredictor p = new PrefillTimePredictor(
+                "sum(hitCacheTokens) + 100*sum(hasHitCache)");
+
+        BatchItem item1 = batchItem(500, 200);
+        BatchItem item2 = batchItem(300, 0);
+        BatchItem item3 = batchItem(400, 400);
+        long result = p.predictBatchMs(List.of(item1, item2, item3));
+
+        assertEquals(800, result);
+    }
+
+    @Test
+    void predictBatchMsAggregatesReadablePositivePartFormula() {
+        PrefillTimePredictor p = new PrefillTimePredictor(
+                "sum(max(computeTokens - 2048, 0))"
+                        + " + 2*sum(max(computeTokens - 24576, 0))");
+
+        BatchItem item1 = batchItem(30000, 1000); // computeTokens=29000, hinges=(26952,4424)
+        BatchItem item2 = batchItem(4096, 0);     // computeTokens=4096, hinges=(2048,0)
+        long result = p.predictBatchMs(List.of(item1, item2));
+
+        assertEquals(37848, result);
+    }
+
+    @Test
+    void predictBatchMsSumEvaluatesExpressionPerRequest() {
+        PrefillTimePredictor p = new PrefillTimePredictor(
+                "sum(max(computeTokens - 2048, 0))");
+
+        BatchItem item1 = batchItem(3000, 0); // max(3000-2048,0)=952
+        BatchItem item2 = batchItem(1000, 0); // max(1000-2048,0)=0
+
+        assertEquals(952, p.predictBatchMs(List.of(item1, item2)));
+    }
+
+    @Test
     void predictBatchMsBatchSizeAffectsResult() {
-        // "10*n" → time depends only on batch size
-        PrefillTimePredictor p = new PrefillTimePredictor("10*n");
+        PrefillTimePredictor p = new PrefillTimePredictor("10*batchSize");
 
         BatchItem item = batchItem(100, 0);
         assertEquals(10, p.predictBatchMs(List.of(item)));
@@ -154,23 +236,22 @@ class PrefillTimePredictorTest {
 
     @Test
     void predictBatchMsZeroCacheHits() {
-        // "sum_c" → time = sum of compute tokens
-        PrefillTimePredictor p = new PrefillTimePredictor("sum_c");
+        PrefillTimePredictor p = new PrefillTimePredictor("sum(computeTokens)");
         BatchItem item = batchItem(500, 0);
         assertEquals(500, p.predictBatchMs(List.of(item)));
     }
 
     @Test
     void predictBatchMsAllCached() {
-        // "sum_c" → all cached → c=0 for each item → 0
-        PrefillTimePredictor p = new PrefillTimePredictor("sum_c");
+        PrefillTimePredictor p = new PrefillTimePredictor("sum(computeTokens)");
         BatchItem item = batchItem(500, 500);
         assertEquals(0, p.predictBatchMs(List.of(item)));
     }
 
     @Test
     void predictBatchMsLargeBatch() {
-        PrefillTimePredictor p = new PrefillTimePredictor("100 + 0.5*sum_c + 0.1*sum_p + 3*n");
+        PrefillTimePredictor p = new PrefillTimePredictor(
+                "100 + 0.5*sum(computeTokens) + 0.1*sum(hitCacheTokens) + 3*batchSize");
         List<BatchItem> items = new ArrayList<>();
         for (int i = 0; i < 100; i++) {
             items.add(batchItem(1000, 200));
@@ -198,15 +279,16 @@ class PrefillTimePredictorTest {
 
     @Test
     void maxFunction() {
-        PrefillTimePredictor p = new PrefillTimePredictor("max(sum_c, 50)");
-        assertEquals(100, p.estimateMs(100, 0));  // c=100 → max(100,50)=100
-        assertEquals(50, p.estimateMs(30, 0));    // c=30  → max(30,50)=50
+        PrefillTimePredictor p = new PrefillTimePredictor("max(sum(computeTokens), 50)");
+        assertEquals(100, p.estimateMs(100, 0));
+        assertEquals(50, p.estimateMs(30, 0));
     }
 
     @Test
     void nestedFunctions() {
-        PrefillTimePredictor p = new PrefillTimePredictor("sqrt(pow(sum_c, 2) + pow(sum_p, 2))");
-        // total=7, hit=4 → c=3, p=4 → sqrt(9+16) = 5
+        PrefillTimePredictor p = new PrefillTimePredictor(
+                "sqrt(pow(sum(computeTokens), 2) + pow(sum(hitCacheTokens), 2))");
+        // inputTokens=7, hitCacheTokens=4, computeTokens=3, sqrt(9+16) = 5
         assertEquals(5, p.estimateMs(7, 4));
     }
 

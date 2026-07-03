@@ -12,7 +12,6 @@ import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.DebugInfo;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
-import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.LoadBalanceStrategyEnum;
 import org.flexlb.enums.ResourceMeasureIndicatorEnum;
@@ -90,7 +89,7 @@ public class CostBasedPrefillStrategy implements LoadBalancer {
         long bestCacheHit = 0;
 
         for (PrefillEndpoint ep : survivors) {
-            long cacheHit = calculateCacheHit(ep, cacheMatchResults);
+            long cacheHit = calculateCacheHit(ep, cacheMatchResults, seqLen);
             long score = computeScore(ep, cacheHit, seqLen);
 
             if (score < bestScore) {
@@ -133,7 +132,7 @@ public class CostBasedPrefillStrategy implements LoadBalancer {
                 continue;
             }
 
-            long cacheHit = calculateCacheHit(ep, cacheMatchResults);
+            long cacheHit = calculateCacheHit(ep, cacheMatchResults, seqLen);
             long singlePrefillMs = predictor.estimateMs(seqLen, cacheHit);
 
             long endpointWaitMs = ep.realWaitTimeMs();
@@ -228,7 +227,7 @@ public class CostBasedPrefillStrategy implements LoadBalancer {
         return cacheAwareService.findMatchingEngines(blockCacheKeys, roleType, group);
     }
 
-    private long calculateCacheHit(PrefillEndpoint ep, Map<String, Integer> cacheMatchResults) {
+    private long calculateCacheHit(PrefillEndpoint ep, Map<String, Integer> cacheMatchResults, long seqLen) {
         if (ep.getStatus().getCacheStatus() == null || cacheMatchResults == null) {
             return 0L;
         }
@@ -236,7 +235,12 @@ public class CostBasedPrefillStrategy implements LoadBalancer {
         if (prefixMatchLength == null) {
             return 0L;
         }
-        return ep.getStatus().getCacheStatus().getBlockSize() * prefixMatchLength;
+        long blockSize = ep.getStatus().getCacheStatus().getBlockSize();
+        long rawHit = blockSize * prefixMatchLength;
+        if (rawHit >= seqLen) {
+            return Math.max(0L, seqLen - blockSize);
+        }
+        return Math.max(0L, rawHit);
     }
 
     private void reportCacheHitMetrics(RoleType roleType, String ip, long hitCacheTokens, long seqLen) {

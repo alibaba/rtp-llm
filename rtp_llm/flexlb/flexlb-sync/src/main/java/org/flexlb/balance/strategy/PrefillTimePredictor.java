@@ -2,9 +2,7 @@ package org.flexlb.balance.strategy;
 
 import org.flexlb.balance.scheduler.BatchItem;
 
-import java.util.HashMap;
 import java.util.List;
-import java.util.Map;
 
 /**
  * Prefill-time predictor driven by a user-configurable formula.
@@ -12,9 +10,9 @@ import java.util.Map;
  * <p>Two evaluation modes share the same formula string:
  * <ul>
  *   <li>{@link #estimateMs(long, long)} — single request:
- *       fills {@code c, p} as well as {@code sum_c, sum_c2, sum_cp, sum_p, n=1}</li>
+ *       fills per-request variables and sets {@code batchSize=1}</li>
  *   <li>{@link #predictBatchMs(List)} — batch: aggregates token statistics,
- *       then fills {@code sum_c, sum_c2, sum_cp, sum_p, n}</li>
+ *       then evaluates {@code sum(expr)} over the batch items</li>
  * </ul>
  *
  * <p>Construction is cheap — the formula is parsed once and the AST is shared
@@ -35,17 +33,9 @@ public class PrefillTimePredictor {
      * @param hitTokens   cache-hit token count (0 ≤ hitTokens ≤ totalTokens)
      */
     public long estimateMs(long totalTokens, long hitTokens) {
-        long c = Math.max(0, totalTokens - hitTokens);
-        long p = hitTokens;
-        Map<String, Double> vars = new HashMap<>();
-        vars.put("c",      (double) c);
-        vars.put("p",      (double) p);
-        vars.put("sum_c",  (double) c);
-        vars.put("sum_c2", (double) (c * c));
-        vars.put("sum_cp", (double) (c * p));
-        vars.put("sum_p",  (double) p);
-        vars.put("n",      1.0);
-        return formula.evaluate(vars);
+        PrefillTimeVariableBindings.EvaluationVariables vars =
+                PrefillTimeVariableBindings.singleRequestVariables(totalTokens, hitTokens);
+        return formula.evaluate(vars.topLevelVars(), vars.itemVars());
     }
 
     /**
@@ -58,28 +48,9 @@ public class PrefillTimePredictor {
         if (items.isEmpty()) {
             return 0;
         }
-        int n = items.size();
-        long sumC = 0;
-        long sumC2 = 0;
-        long sumCp = 0;
-        long sumP = 0;
-
-        for (BatchItem item : items) {
-            long c = item.computeTokens();
-            long p = item.hitCache();
-            sumC  += c;
-            sumC2 += c * c;
-            sumCp += c * p;
-            sumP  += p;
-        }
-
-        Map<String, Double> vars = new HashMap<>();
-        vars.put("sum_c",  (double) sumC);
-        vars.put("sum_c2", (double) sumC2);
-        vars.put("sum_cp", (double) sumCp);
-        vars.put("sum_p",  (double) sumP);
-        vars.put("n",      (double) n);
-        return formula.evaluate(vars);
+        PrefillTimeVariableBindings.EvaluationVariables vars =
+                PrefillTimeVariableBindings.batchVariables(items);
+        return formula.evaluate(vars.topLevelVars(), vars.itemVars());
     }
 
     /** The parsed formula, for inspection. */

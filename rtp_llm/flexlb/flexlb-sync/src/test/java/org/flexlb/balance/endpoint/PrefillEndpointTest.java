@@ -14,6 +14,7 @@ import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.TaskPhase;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -44,9 +45,14 @@ class PrefillEndpointTest {
         config = new FlexlbConfig();
         config.setFlexlbBatchQueueMaxSize(100);
         config.setFlexlbBatchFixedWaitMs(300);
-        config.setCostFormula("10 + 0.1*c + 5*n");
+        config.setCostFormula("10 + 0.1*sum(computeTokens) + 5*batchSize");
 
         endpoint = new PrefillEndpoint(status, config, noopHandler(), mock(BatchSchedulerReporter.class));
+    }
+
+    @AfterEach
+    void tearDown() {
+        endpoint.close();
     }
 
     // ---- batch commit / release ----
@@ -261,13 +267,17 @@ class PrefillEndpointTest {
     // ---- realPendingCount ----
 
     @Test
-    void realPendingCountIncludesBatcherQueue() {
+    void realPendingCountIncludesBatcherQueue() throws InterruptedException {
         // Initially, batcher queue is empty
         assertEquals(0, endpoint.realPendingCount());
 
         BatchItem item = createBatchItem(1L, 500, 200);
         endpoint.getBatcher().offer(item);
 
+        long deadlineMs = System.currentTimeMillis() + 100;
+        while (endpoint.realPendingCount() == 0 && System.currentTimeMillis() < deadlineMs) {
+            Thread.sleep(1);
+        }
         assertTrue(endpoint.realPendingCount() > 0, "Pending count should include batcher queue");
     }
 

@@ -117,6 +117,22 @@ class CostBasedPrefillStrategyTest {
     }
 
     @Test
+    void fullCacheHitKeepsFinalBlockAsComputeTokens() {
+        Map<String, WorkerStatus> prefillMap = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap();
+        prefillMap.put("10.0.0.1:8080", createWorker("10.0.0.1", 0));
+
+        Map<String, Integer> cacheResults = new HashMap<>();
+        cacheResults.put("10.0.0.1:8080", 4); // 4 blocks * 256 >= seqLen=1000
+        Mockito.when(cacheAwareService.findMatchingEngines(anyList(), any(), any())).thenReturn(cacheResults);
+
+        ServerStatus result = strategy.select(buildContext(1000, 31L), RoleType.PREFILL, null);
+
+        assertTrue(result.isSuccess());
+        assertNotNull(result.getDebugInfo());
+        assertEquals(744, result.getDebugInfo().getHitCacheLen());
+    }
+
+    @Test
     void sloRiskFilterExcludesOverloadedWorker() {
         Map<String, WorkerStatus> prefillMap = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap();
         prefillMap.put("10.0.0.1:8080", createWorker("10.0.0.1", 2000));
@@ -216,17 +232,23 @@ class CostBasedPrefillStrategyTest {
 
     @Test
     void predictorUsesFormula() {
-        PrefillTimePredictor predictor = new PrefillTimePredictor("10 + 0.5*sum_c + 0.001*sum_c2 + 0.0005*sum_cp + 0.2*sum_p + 5*n");
+        PrefillTimePredictor predictor = new PrefillTimePredictor(
+                "10 + 0.5*sum(computeTokens)"
+                        + " + 0.001*sum(computeTokens^2)"
+                        + " + 0.0005*sum(computeTokens * hitCacheTokens)"
+                        + " + 0.2*sum(hitCacheTokens)"
+                        + " + 5*batchSize");
 
-        // Single request: n=1000, p=200 → c=800, n=1
+        // Single request: inputTokens=1000, hitCacheTokens=200, computeTokens=800, batchSize=1
         // = 10 + 0.5*800 + 0.001*640000 + 0.0005*160000 + 0.2*200 + 5*1
         // = 10 + 400 + 640 + 80 + 40 + 5 = 1175
         long single = predictor.predictBatchMs(List.of(batchItem(0, 1000, 200)));
         assertEquals(1175, single);
 
         // Batch of 2: req1=(1000,200) req2=(500,100)
-        // c1=800, p1=200, c2=400, p2=100
-        // sum_c=1200, sum_c2=640000+160000=800000, sum_cp=160000+40000=200000, sum_p=300, n=2
+        // computeTokens=(800,400), hitCacheTokens=(200,100), batchSize=2
+        // sum(computeTokens)=1200, sum(computeTokens^2)=800000,
+        // sum(computeTokens * hitCacheTokens)=200000, sum(hitCacheTokens)=300
         // = 10 + 0.5*1200 + 0.001*800000 + 0.0005*200000 + 0.2*300 + 5*2
         // = 10 + 600 + 800 + 100 + 60 + 10 = 1580
         long batch = predictor.predictBatchMs(List.of(

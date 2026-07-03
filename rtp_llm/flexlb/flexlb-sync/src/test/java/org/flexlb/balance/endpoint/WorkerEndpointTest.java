@@ -31,7 +31,7 @@ class WorkerEndpointTest {
         status.setPort(8080);
         status.setGrpcPort(8081);
         FlexlbConfig config = new FlexlbConfig();
-        config.setCostFormula("sum_c");
+        config.setCostFormula("sum(computeTokens)");
         BatchDecisionHandler handler = Mockito.mock(BatchDecisionHandler.class);
         endpoint = new PrefillEndpoint(status, config, handler, Mockito.mock(BatchSchedulerReporter.class));
     }

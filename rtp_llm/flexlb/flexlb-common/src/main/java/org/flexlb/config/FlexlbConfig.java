@@ -314,13 +314,21 @@ public class FlexlbConfig {
     /**
      * Configurable prefill-time prediction formula.
      *
-     * <p>Supported variables: {@code c, p, sum_c, sum_c2, sum_cp, sum_p, n}
+     * <p>Supported variables:
+     * {@code inputTokens, hitCacheTokens, computeTokens, hasHitCache, batchSize}
      * <br>Operators: {@code + - * / ^}
      * <br>Functions: {@code sqrt(x) log(x) exp(x) abs(x) max(a,b) min(a,b) pow(a,b)}
+     * <br>Batch aggregate: {@code sum(expr)} evaluates {@code expr} per request and sums it.
      *
-     * <p>Example: {@code "205 + 1.2e-8*sum_c2 + 1.2e-8*sum_cp + 5*n"}
+     * <p>DeepSeek-V4-Flash PDFusion example:
+     * {@code "213.058760744
+     * + 0.000420120401621*sum(max(computeTokens - 2048, 0))
+     * + 0.00817215761679*sum(max(computeTokens - 24576, 0))
+     * - 0.000373217058264*sum(hitCacheTokens)
+     * - 10.6141559328*sum(hasHitCache)
+     * + 2.84762280669e-08*sum(computeTokens * hitCacheTokens)"}
      */
-    private String costFormula = "sum_c + 0.3*sum_p";
+    private String costFormula = "sum(computeTokens) + 0.3*sum(hitCacheTokens)";
 
     // ========== SLO-Budget Batcher Configuration ==========
 
