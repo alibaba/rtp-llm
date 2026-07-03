@@ -12,6 +12,11 @@ flashinfer-jit-cache==0.6.6
 flashinfer-python @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/simple/flashinfer-python/flashinfer_python-0.6.6-py3-none-any.whl
 mysql-connector-python
 nvidia-cutlass-dsl==4.4.1
+# rtp-kernel is built per-arch, so this aarch64 wheel carries a different build
+# timestamp than the x86_64 one in requirements_torch_gpu_cuda12_9.txt. Keep both
+# pins on the SAME source commit (currently 125c29e5) and bump + regenerate both
+# lockfiles together, otherwise a one-sided regen would silently ship mismatched
+# rtp-kernel builds across architectures.
 rtp-kernel==0.1.0+125c29e5.20260422155252
 torch==2.9.0+cu129
 torchvision==0.24.0
