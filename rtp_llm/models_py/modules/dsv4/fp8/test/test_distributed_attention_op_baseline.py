@@ -1776,6 +1776,92 @@ class DistributedAttentionCandidateTest(unittest.TestCase):
             restored.index_copy_(0, rows, actual)
         _assert_attention_close(restored, expected)
 
+    def test_candidate_cuda_csa_fp8_indexer_matrix_tile_replacement_allclose(self) -> None:
+        if not torch.cuda.is_available():
+            self.skipTest("candidate distributed attention op requires CUDA")
+        op = _candidate_op()
+        if op is None:
+            self.skipTest(
+                "rtp_llm_ops.dsv4_cp_distributed_prefill_attention is not built yet"
+            )
+        case = AttentionCase(
+            name="csa_fp8_indexer_matrix_tile_replacement",
+            compress_ratio=4,
+            prefix_lengths=(64,),
+            input_lengths=(4,),
+            window_size=4,
+            compressed_topk=3,
+            n_heads=8,
+            head_dim=16,
+            index_heads=64,
+            index_dim=128,
+        )
+        fixture = _make_case_fixture(case, torch.device("cuda"), dtype=torch.float32)
+        kv, _, prefix_lengths, input_lengths = _pad_for_candidate_op(fixture)
+
+        flat_k_rows = (case.prefix_lengths[0] + case.input_lengths[0]) // case.compress_ratio
+        k_flat = torch.zeros(
+            flat_k_rows,
+            case.index_dim,
+            dtype=torch.float32,
+            device=fixture.q.device,
+        )
+        # Later candidates score higher, so the topK builder must replace the
+        # initial fill after multiple 8-candidate matrix-scorer tiles.
+        for c in range(flat_k_rows):
+            k_flat[c].fill_(float(c + 1) / float(flat_k_rows))
+        k_cache = _pack_flat_indexer_cache(k_flat)
+        fixture.indexer_q.fill_(1.0 / float(case.index_dim))
+        weights = torch.ones(
+            fixture.q.shape[0],
+            case.index_heads,
+            dtype=torch.float32,
+            device=fixture.q.device,
+        )
+        cu_lens = torch.tensor([0, flat_k_rows], dtype=torch.long, device=fixture.q.device)
+
+        expected = reference_attention_with_fp8_indexer(
+            fixture,
+            k_cache,
+            weights,
+            cu_lens,
+        )
+
+        dummy_indexer_k = torch.zeros(
+            1,
+            flat_k_rows,
+            case.index_heads,
+            case.index_dim,
+            dtype=fixture.q.dtype,
+            device=fixture.q.device,
+        )
+        restored = torch.empty_like(expected)
+        for rank in range(case.cp_size):
+            rows = rank_local_rows(expected.shape[0], rank, case.cp_size).to(
+                device=fixture.q.device
+            )
+            actual = op(
+                fixture.q.contiguous(),
+                kv,
+                fixture.indexer_q.contiguous(),
+                dummy_indexer_k.contiguous(),
+                fixture.attn_sink.contiguous(),
+                fixture.req_id_per_token.contiguous(),
+                fixture.position_ids.contiguous(),
+                prefix_lengths,
+                input_lengths,
+                rows,
+                case.compress_ratio,
+                case.window_size,
+                case.compressed_topk,
+                csa_indexer_k_cache=k_cache,
+                csa_indexer_weights=weights,
+                csa_indexer_cu_lens=cu_lens,
+            )
+            _assert_attention_close(actual, expected.index_select(0, rows))
+            restored.index_copy_(0, rows, actual)
+        _assert_attention_close(restored, expected)
+
     def test_candidate_cuda_csa_paged_indexer_cache_topk_allclose(self) -> None:
         if not torch.cuda.is_available():
             self.skipTest("candidate distributed attention op requires CUDA")
@@ -1829,6 +1915,123 @@ class DistributedAttentionCandidateTest(unittest.TestCase):
             * 0.2
             + 1.0
         ).to(device=fixture.q.device).contiguous()
+        cu = [0]
+        for k_req in k_by_req:
+            cu.append(cu[-1] + int(k_req.shape[0]))
+        cu_lens = torch.tensor(cu, dtype=torch.long, device=fixture.q.device)
+        expected = reference_attention_with_indexer_k_rows(
+            fixture,
+            k_pool_flat,
+            weights,
+            cu_lens,
+        )
+        block_table = torch.tensor(
+            block_table_rows,
+            dtype=torch.int32,
+            device=fixture.q.device,
+        )
+        seq_lens = torch.tensor(
+            [int(x.shape[0]) for x in k_by_req],
+            dtype=torch.int32,
+            device=fixture.q.device,
+        )
+        dummy_indexer_k = torch.zeros(
+            len(case.input_lengths),
+            max(int(x.shape[0]) for x in fixture.indexer_k_by_req),
+            case.index_heads,
+            case.index_dim,
+            dtype=fixture.q.dtype,
+            device=fixture.q.device,
+        )
+        restored = torch.empty_like(expected)
+        for rank in range(case.cp_size):
+            rows = rank_local_rows(expected.shape[0], rank, case.cp_size).to(
+                device=fixture.q.device
+            )
+            actual = op(
+                fixture.q.contiguous(),
+                kv,
+                fixture.indexer_q.contiguous(),
+                dummy_indexer_k.contiguous(),
+                fixture.attn_sink.contiguous(),
+                fixture.req_id_per_token.contiguous(),
+                fixture.position_ids.contiguous(),
+                prefix_lengths,
+                input_lengths,
+                rows,
+                case.compress_ratio,
+                case.window_size,
+                case.compressed_topk,
+                csa_indexer_k_pool=k_pool,
+                csa_indexer_weights=weights,
+                csa_indexer_block_table=block_table,
+                csa_indexer_seq_lens=seq_lens,
+            )
+            _assert_attention_close(actual, expected.index_select(0, rows))
+            restored.index_copy_(0, rows, actual)
+        _assert_attention_close(restored, expected)
+
+    def test_candidate_cuda_csa_paged_indexer_matrix_tile_replacement_allclose(self) -> None:
+        if not torch.cuda.is_available():
+            self.skipTest("candidate distributed attention op requires CUDA")
+        op = _candidate_op()
+        if op is None:
+            self.skipTest(
+                "rtp_llm_ops.dsv4_cp_distributed_prefill_attention is not built yet"
+            )
+        case = AttentionCase(
+            name="csa_paged_indexer_matrix_tile_replacement",
+            compress_ratio=4,
+            prefix_lengths=(64, 64),
+            input_lengths=(4, 4),
+            window_size=4,
+            compressed_topk=3,
+            n_heads=8,
+            head_dim=16,
+            index_heads=64,
+            index_dim=128,
+        )
+        fixture = _make_case_fixture(case, torch.device("cuda"), dtype=torch.float32)
+        kv, _, prefix_lengths, input_lengths = _pad_for_candidate_op(fixture)
+
+        k_by_req = []
+        slots = []
+        block_table_rows = []
+        for req in range(len(case.input_lengths)):
+            rows = (case.prefix_lengths[req] + case.input_lengths[req]) // case.compress_ratio
+            k_req = torch.zeros(
+                rows,
+                case.index_dim,
+                dtype=torch.float32,
+                device=fixture.q.device,
+            )
+            for c in range(rows):
+                k_req[c].fill_(float(c + 1 + req) / float(rows + req + 1))
+            k_by_req.append(k_req)
+            first_block = 2 + req * 3
+            block_table_rows.append([first_block, first_block + 1])
+            slots.extend(
+                [
+                    first_block * COMPRESSOR_KV_BLOCK_SIZE + c
+                    for c in range(min(COMPRESSOR_KV_BLOCK_SIZE, rows))
+                ]
+            )
+            slots.extend(
+                [
+                    (first_block + 1) * COMPRESSOR_KV_BLOCK_SIZE + c
+                    for c in range(max(0, rows - COMPRESSOR_KV_BLOCK_SIZE))
+                ]
+            )
+        k_flat = torch.cat(k_by_req, dim=0).contiguous()
+        slot_tensor = torch.tensor(slots, dtype=torch.long, device=fixture.q.device)
+        k_pool = _pack_paged_indexer_pool(k_flat, slot_tensor)
+        k_pool_flat = _unpack_paged_indexer_pool(k_pool, slot_tensor, case.index_dim)
+        weights = torch.ones(
+            fixture.q.shape[0],
+            case.index_heads,
+            dtype=torch.float32,
+            device=fixture.q.device,
+        )
         cu = [0]
         for k_req in k_by_req:
             cu.append(cu[-1] + int(k_req.shape[0]))

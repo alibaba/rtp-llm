@@ -82,10 +82,33 @@ static_assert((kMegaBlockThreads & (kMegaBlockThreads - 1)) == 0,
               "mega attention reductions require a power-of-two CTA size");
 static_assert((kMegaBlockThreads % kMegaAttentionWarpSize) == 0,
               "mega attention CTA size must be warp-aligned");
-constexpr int kMegaIndexerCandidateTile = 2;
 constexpr int kMegaIndexerCandidateHeadLanes = 2;
-static_assert(kMegaIndexerCandidateTile * 64 * kMegaIndexerCandidateHeadLanes == kMegaBlockThreads,
-              "CSA candidate scorer maps one CTA exactly across candidate/head/lane work");
+constexpr int kMegaIndexerCandidateGroups =
+    kMegaBlockThreads / (64 * kMegaIndexerCandidateHeadLanes);
+constexpr int kMegaIndexerCandidatesPerGroup = 4;
+constexpr int kMegaIndexerCandidateTile = kMegaIndexerCandidateGroups * kMegaIndexerCandidatesPerGroup;
+constexpr int kMegaIndexerHeads = 64;
+constexpr int kMegaIndexerWarpsPerCandidate = kMegaIndexerHeads / kMegaAttentionWarpSize;
+constexpr int kMegaIndexerMetadataFloatSlots =
+    (kMegaIndexerCandidateTile * static_cast<int>(sizeof(const uint8_t*))
+     + kMegaIndexerCandidateTile * static_cast<int>(sizeof(float)) + static_cast<int>(sizeof(float)) - 1)
+    / static_cast<int>(sizeof(float));
+constexpr int kMegaIndexerScorerFloatSlots =
+    kMegaIndexerCandidateTile * (kMegaIndexerHeads + kMegaIndexerWarpsPerCandidate)
+    + kMegaIndexerMetadataFloatSlots;
+constexpr int kMegaReductionFloatSlots = kMegaBlockThreads * 2;
+constexpr int kMegaReduceBufSlots =
+    kMegaIndexerScorerFloatSlots > kMegaReductionFloatSlots ? kMegaIndexerScorerFloatSlots :
+                                                              kMegaReductionFloatSlots;
+constexpr int kMegaReduceResultSlots =
+    kMegaIndexerCandidateTile > kMegaAttentionKeyTile ? kMegaIndexerCandidateTile : kMegaAttentionKeyTile;
+static_assert(kMegaIndexerCandidateGroups * 64 * kMegaIndexerCandidateHeadLanes == kMegaBlockThreads,
+              "CSA matrix scorer maps one CTA exactly across group/head/lane work");
+static_assert((kMegaIndexerCandidateTile * (kMegaIndexerHeads + kMegaIndexerWarpsPerCandidate)
+               * static_cast<int>(sizeof(float)))
+                      % static_cast<int>(sizeof(const uint8_t*))
+                  == 0,
+              "CSA scorer pointer metadata must be pointer-aligned");
 constexpr unsigned int kMegaCompressedDoneFlag = 0x80000000u;
 constexpr unsigned int kMegaCompressedCountMask = 0x7fffffffu;
 constexpr int kWarpDotAttentionKeyThreshold = 128;
@@ -1907,8 +1930,8 @@ __device__ __forceinline__ void dsv4MegaIndexerScoreCandidateTile(const scalar_t
                                                                   float* head_scores,
                                                                   float* tile_scores) {
     const int tid = static_cast<int>(threadIdx.x);
-    const int candidate_lane = tid / (64 * kMegaIndexerCandidateHeadLanes);
-    const int head_lane = tid - candidate_lane * 64 * kMegaIndexerCandidateHeadLanes;
+    const int group = tid / (64 * kMegaIndexerCandidateHeadLanes);
+    const int head_lane = tid - group * 64 * kMegaIndexerCandidateHeadLanes;
     const int head = head_lane / kMegaIndexerCandidateHeadLanes;
     const int lane_in_head = head_lane - head * kMegaIndexerCandidateHeadLanes;
     const bool use_fp8_indexer_pool = csa_indexer_k_pool != nullptr && csa_indexer_block_table != nullptr
@@ -1916,13 +1939,13 @@ __device__ __forceinline__ void dsv4MegaIndexerScoreCandidateTile(const scalar_t
     const bool use_fp8_indexer_cache = !use_fp8_indexer_pool && csa_indexer_k_cache != nullptr
                                        && csa_indexer_weights != nullptr && csa_indexer_cu_lens != nullptr;
     const uint8_t** candidate_data_rows = reinterpret_cast<const uint8_t**>(
-        head_scores + kMegaIndexerCandidateTile * (64 + 2));
+        head_scores + kMegaIndexerCandidateTile * (kMegaIndexerHeads + kMegaIndexerWarpsPerCandidate));
     float* candidate_scales = reinterpret_cast<float*>(candidate_data_rows + kMegaIndexerCandidateTile);
 
     if (tid < kMegaIndexerCandidateTile) {
         tile_scores[tid] = kInvalidCompressorScore;
     }
-    if (tid < 64 * kMegaIndexerCandidateTile) {
+    if (tid < kMegaIndexerHeads * kMegaIndexerCandidateTile) {
         head_scores[tid] = 0.0f;
     }
     if (tid < kMegaIndexerCandidateTile) {
@@ -1954,47 +1977,62 @@ __device__ __forceinline__ void dsv4MegaIndexerScoreCandidateTile(const scalar_t
     }
     __syncthreads();
 
-    float dot = 0.0f;
-    if (candidate_lane < candidate_count && candidate_valid[candidate_lane] != 0 && (use_fp8_indexer_pool || use_fp8_indexer_cache)) {
-        const uint8_t* k_row = candidate_data_rows[candidate_lane];
-        const float k_scale = candidate_scales[candidate_lane];
-        if (k_row != nullptr) {
-            for (int d = lane_in_head; d < kIndexerHeadDim; d += kMegaIndexerCandidateHeadLanes) {
-                dot += indexer_q_at(indexer_q, row, head, d, 64, kIndexerHeadDim) * fp8_e4m3_to_float(k_row[d], k_scale);
+    float dot[kMegaIndexerCandidatesPerGroup];
+#pragma unroll
+    for (int j = 0; j < kMegaIndexerCandidatesPerGroup; ++j) {
+        dot[j] = 0.0f;
+    }
+    if (group < kMegaIndexerCandidateGroups && (use_fp8_indexer_pool || use_fp8_indexer_cache)) {
+        for (int d = lane_in_head; d < kIndexerHeadDim; d += kMegaIndexerCandidateHeadLanes) {
+            const float q_value = indexer_q_at(indexer_q, row, head, d, kMegaIndexerHeads, kIndexerHeadDim);
+#pragma unroll
+            for (int j = 0; j < kMegaIndexerCandidatesPerGroup; ++j) {
+                const int candidate_lane = group * kMegaIndexerCandidatesPerGroup + j;
+                if (candidate_lane < candidate_count && candidate_valid[candidate_lane] != 0) {
+                    const uint8_t* k_row = candidate_data_rows[candidate_lane];
+                    if (k_row != nullptr) {
+                        dot[j] += q_value * fp8_e4m3_to_float(k_row[d], candidate_scales[candidate_lane]);
+                    }
+                }
             }
         }
     }
-    dot = dsv4MegaHeadLaneReduceSum<kMegaIndexerCandidateHeadLanes>(dot);
-    const float weighted_head_score =
-        (candidate_lane < candidate_count && candidate_valid[candidate_lane] != 0
-         && (use_fp8_indexer_pool || use_fp8_indexer_cache) && lane_in_head == 0 && dot > 0.0f) ?
-            dot * csa_indexer_weights[row * 64 + head] :
-            0.0f;
-    if (candidate_lane < kMegaIndexerCandidateTile && lane_in_head == 0) {
-        head_scores[candidate_lane * 64 + head] = weighted_head_score;
+#pragma unroll
+    for (int j = 0; j < kMegaIndexerCandidatesPerGroup; ++j) {
+        const int candidate_lane = group * kMegaIndexerCandidatesPerGroup + j;
+        float reduced_dot = dsv4MegaHeadLaneReduceSum<kMegaIndexerCandidateHeadLanes>(dot[j]);
+        const float weighted_head_score =
+            (candidate_lane < candidate_count && candidate_valid[candidate_lane] != 0
+             && (use_fp8_indexer_pool || use_fp8_indexer_cache) && lane_in_head == 0 && reduced_dot > 0.0f) ?
+                reduced_dot * csa_indexer_weights[row * kMegaIndexerHeads + head] :
+                0.0f;
+        if (candidate_lane < kMegaIndexerCandidateTile && lane_in_head == 0) {
+            head_scores[candidate_lane * kMegaIndexerHeads + head] = weighted_head_score;
+        }
     }
     __syncthreads();
 
-    constexpr int kIndexerHeadsPerCandidate = 64;
-    constexpr int kWarpsPerCandidate = kIndexerHeadsPerCandidate / kMegaAttentionWarpSize;
-    float* candidate_warp_sums = head_scores + kMegaIndexerCandidateTile * kIndexerHeadsPerCandidate;
-    const int sum_candidate = tid / kIndexerHeadsPerCandidate;
-    const int sum_head = tid - sum_candidate * kIndexerHeadsPerCandidate;
-    const bool sum_active = sum_candidate < candidate_count && candidate_valid[sum_candidate] != 0
-                            && (use_fp8_indexer_pool || use_fp8_indexer_cache);
-    float head_score = sum_active ? head_scores[sum_candidate * kIndexerHeadsPerCandidate + sum_head] : 0.0f;
-    head_score = dsv4MegaWarpReduceSum(head_score);
-    if ((tid & (kMegaAttentionWarpSize - 1)) == 0 && sum_candidate < kMegaIndexerCandidateTile) {
-        const int warp_in_candidate = sum_head / kMegaAttentionWarpSize;
-        candidate_warp_sums[sum_candidate * kWarpsPerCandidate + warp_in_candidate] = head_score;
+    float* candidate_warp_sums = head_scores + kMegaIndexerCandidateTile * kMegaIndexerHeads;
+    for (int sum_idx = tid; sum_idx < kMegaIndexerCandidateTile * kMegaIndexerHeads;
+         sum_idx += static_cast<int>(blockDim.x)) {
+        const int sum_candidate = sum_idx / kMegaIndexerHeads;
+        const int sum_head = sum_idx - sum_candidate * kMegaIndexerHeads;
+        const bool sum_active = sum_candidate < candidate_count && candidate_valid[sum_candidate] != 0
+                                && (use_fp8_indexer_pool || use_fp8_indexer_cache);
+        float head_score = sum_active ? head_scores[sum_candidate * kMegaIndexerHeads + sum_head] : 0.0f;
+        head_score = dsv4MegaWarpReduceSum(head_score);
+        if ((tid & (kMegaAttentionWarpSize - 1)) == 0 && sum_candidate < kMegaIndexerCandidateTile) {
+            const int warp_in_candidate = sum_head / kMegaAttentionWarpSize;
+            candidate_warp_sums[sum_candidate * kMegaIndexerWarpsPerCandidate + warp_in_candidate] = head_score;
+        }
     }
     __syncthreads();
     if (tid < kMegaIndexerCandidateTile) {
         if (tid < candidate_count && candidate_valid[tid] != 0 && (use_fp8_indexer_pool || use_fp8_indexer_cache)) {
             float score = 0.0f;
 #pragma unroll
-            for (int warp_i = 0; warp_i < kWarpsPerCandidate; ++warp_i) {
-                score += candidate_warp_sums[tid * kWarpsPerCandidate + warp_i];
+            for (int warp_i = 0; warp_i < kMegaIndexerWarpsPerCandidate; ++warp_i) {
+                score += candidate_warp_sums[tid * kMegaIndexerWarpsPerCandidate + warp_i];
             }
             tile_scores[tid] = score;
         }
@@ -2104,8 +2142,9 @@ __device__ __forceinline__ int dsv4MegaBuildCompressedIndicesForRow(const scalar
             int cached_worst_idx = -2147483647;
             int cached_second_worst_idx = -2147483647;
             bool refresh_worst_slot = true;
-            // Candidate tiling relies on the DSv4 CSA production shape: four candidates per CTA,
-            // one lane per 128-dim indexer head, and boundary candidates derived from valid q positions.
+            // Candidate tiling relies on the DSv4 CSA production shape: 64 indexer
+            // heads, 2 lanes/head, and several candidates accumulated per head
+            // group so each Q element is reused across candidate scores.
             const bool use_candidate_tile =
                 use_fp8_indexer && IH == 64 && ID == kIndexerHeadDim
                 && static_cast<int>(blockDim.x) == kMegaBlockThreads;
@@ -5334,8 +5373,8 @@ __global__ __launch_bounds__(kMegaBlockThreads, 1) void dsv4CpDistributedPrefill
     __shared__ int   reduce_indices[kMegaBlockThreads];
     __shared__ int   reduce_indices_second[kMegaBlockThreads];
     __shared__ float compressed_scores[kMaxCompressedTopK];
-    __shared__ float reduce_buf[kMegaBlockThreads * 2];
-    __shared__ float reduce_result[kMegaAttentionKeyTile];
+    __shared__ float reduce_buf[kMegaReduceBufSlots];
+    __shared__ float reduce_result[kMegaReduceResultSlots];
     __shared__ float tile_logits[kMegaAttentionKeyTile];
     __shared__ float q_shared[kSwaHeadDim];
     float* grouped_key_tile = reinterpret_cast<float*>(mega_dynamic_smem);
