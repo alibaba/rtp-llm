@@ -2174,23 +2174,40 @@ __device__ __forceinline__ void dsv4MegaIndexerScoreCandidateTile(const scalar_t
     for (int j = 0; j < kMegaIndexerCandidatesPerGroup; ++j) {
         dot[j] = 0.0f;
     }
-    if (group < kMegaIndexerCandidateGroups && (use_fp8_indexer_pool || use_fp8_indexer_cache)) {
+    const bool use_fp8_indexer = use_fp8_indexer_pool || use_fp8_indexer_cache;
+    float head_weight = 0.0f;
+    if (use_fp8_indexer && head < kMegaIndexerHeads) {
+        head_weight = csa_indexer_weights[row * kMegaIndexerHeads + head];
+    }
+    if (group < kMegaIndexerCandidateGroups && use_fp8_indexer) {
         const uint8_t* candidate_rows[kMegaIndexerCandidatesPerGroup];
         float candidate_scale_values[kMegaIndexerCandidatesPerGroup];
+        bool candidate_active_values[kMegaIndexerCandidatesPerGroup];
 #pragma unroll
         for (int j = 0; j < kMegaIndexerCandidatesPerGroup; ++j) {
             const int candidate_lane = group * kMegaIndexerCandidatesPerGroup + j;
             const bool candidate_active = candidate_lane < candidate_count && candidate_valid[candidate_lane] != 0;
+            candidate_active_values[j] = candidate_active;
             candidate_rows[j] = candidate_active ? candidate_data_rows[candidate_lane] : nullptr;
             candidate_scale_values[j] = candidate_active ? candidate_scales[candidate_lane] : 1.0f;
         }
-        for (int d = lane_in_head; d < kIndexerHeadDim; d += kMegaIndexerCandidateHeadLanes) {
+        for (int d = lane_in_head; d < kIndexerHeadDim; d += kMegaIndexerCandidateHeadLanes * 2) {
             const float q_value = indexer_q_at(indexer_q, row, head, d, kMegaIndexerHeads, kIndexerHeadDim);
 #pragma unroll
             for (int j = 0; j < kMegaIndexerCandidatesPerGroup; ++j) {
-                const uint8_t* k_row = candidate_rows[j];
-                if (k_row != nullptr) {
-                    dot[j] += q_value * fp8_e4m3_to_float(k_row[d], candidate_scale_values[j]);
+                if (candidate_active_values[j]) {
+                    dot[j] += q_value * fp8_e4m3_to_float(candidate_rows[j][d], candidate_scale_values[j]);
+                }
+            }
+            const int d_next = d + kMegaIndexerCandidateHeadLanes;
+            if (d_next < kIndexerHeadDim) {
+                const float q_next =
+                    indexer_q_at(indexer_q, row, head, d_next, kMegaIndexerHeads, kIndexerHeadDim);
+#pragma unroll
+                for (int j = 0; j < kMegaIndexerCandidatesPerGroup; ++j) {
+                    if (candidate_active_values[j]) {
+                        dot[j] += q_next * fp8_e4m3_to_float(candidate_rows[j][d_next], candidate_scale_values[j]);
+                    }
                 }
             }
         }
@@ -2201,11 +2218,11 @@ __device__ __forceinline__ void dsv4MegaIndexerScoreCandidateTile(const scalar_t
         float reduced_dot = dsv4MegaHeadLaneReduceSum<kMegaIndexerCandidateHeadLanes>(dot[j]);
         const float weighted_head_score =
             (candidate_lane < candidate_count && candidate_valid[candidate_lane] != 0
-             && (use_fp8_indexer_pool || use_fp8_indexer_cache) && lane_in_head == 0 && reduced_dot > 0.0f) ?
-                reduced_dot * csa_indexer_weights[row * kMegaIndexerHeads + head] :
+             && use_fp8_indexer && lane_in_head == 0 && reduced_dot > 0.0f) ?
+                reduced_dot * head_weight :
                 0.0f;
         if (candidate_lane < candidate_count && candidate_valid[candidate_lane] != 0
-            && (use_fp8_indexer_pool || use_fp8_indexer_cache) && lane_in_head == 0) {
+            && use_fp8_indexer && lane_in_head == 0) {
             head_scores[candidate_lane * kMegaIndexerHeads + head] = weighted_head_score;
         }
     }
@@ -2217,7 +2234,7 @@ __device__ __forceinline__ void dsv4MegaIndexerScoreCandidateTile(const scalar_t
         const int sum_candidate = sum_idx / kMegaIndexerHeads;
         const int sum_head = sum_idx - sum_candidate * kMegaIndexerHeads;
         const bool sum_active = sum_candidate < candidate_count && candidate_valid[sum_candidate] != 0
-                                && (use_fp8_indexer_pool || use_fp8_indexer_cache);
+                                && use_fp8_indexer;
         float head_score = sum_active ? head_scores[sum_candidate * kMegaIndexerHeads + sum_head] : 0.0f;
         head_score = dsv4MegaWarpReduceSum(head_score);
         if ((tid & (kMegaAttentionWarpSize - 1)) == 0 && sum_candidate < kMegaIndexerCandidateTile) {
@@ -2227,7 +2244,7 @@ __device__ __forceinline__ void dsv4MegaIndexerScoreCandidateTile(const scalar_t
     }
     __syncthreads();
     if (tid < kMegaIndexerCandidateTile) {
-        if (tid < candidate_count && candidate_valid[tid] != 0 && (use_fp8_indexer_pool || use_fp8_indexer_cache)) {
+        if (tid < candidate_count && candidate_valid[tid] != 0 && use_fp8_indexer) {
             float score = 0.0f;
 #pragma unroll
             for (int warp_i = 0; warp_i < kMegaIndexerWarpsPerCandidate; ++warp_i) {
