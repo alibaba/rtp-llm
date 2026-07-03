@@ -1,6 +1,7 @@
 import logging
 import os
 
+from rtp_llm.config.py_config_modules import VitConfig
 from rtp_llm.ops import VitSeparation
 from rtp_llm.server.server_args.util import str2bool
 
@@ -172,7 +173,7 @@ def init_vit_group_args(parser, vit_config):
         env_name="MM_TIMEOUT_MS",
         bind_to=(vit_config, "mm_timeout_ms"),
         type=int,
-        default=120000,
+        default=VitConfig.DEFAULT_MM_TIMEOUT_MS,
         help="多模态嵌入的超时时间，单位为毫秒",
     )
     vit_group.add_argument(
@@ -287,4 +288,38 @@ def init_vit_group_args(parser, vit_config):
         type=int,
         default=8 * 1024 * 1024 * 1024,
         help="encoder 侧在途（已注册未释放）embedding slot 的总字节软上限，超过则该次回退 bytes；0 表示不限制",
+    )
+    # ---- GPU embedding batch scheduler (MMScheduler) ----
+    vit_group.add_argument(
+        "--use_gpu_batch",
+        env_name="VIT_USE_GPU_BATCH",
+        bind_to=(vit_config, "use_gpu_batch"),
+        type=str2bool,
+        default=False,
+        help="是否开启GPU embedding batch调度",
+    )
+    vit_group.add_argument(
+        "--gpu_batch_wait_ms",
+        env_name="VIT_GPU_BATCH_WAIT_MS",
+        bind_to=(vit_config, "gpu_batch_wait_ms"),
+        type=int,
+        default=10,
+        help="GPU batch调度等待时间(ms)",
+    )
+    vit_group.add_argument(
+        "--gpu_max_batch_size",
+        env_name="VIT_GPU_MAX_BATCH_SIZE",
+        bind_to=(vit_config, "gpu_max_batch_size"),
+        type=int,
+        default=8,
+        help="GPU batch调度最大batch大小(请求数)",
+    )
+    vit_group.add_argument(
+        "--gpu_max_batch_images",
+        env_name="VIT_GPU_MAX_BATCH_IMAGES",
+        bind_to=(vit_config, "gpu_max_batch_images"),
+        type=int,
+        default=32,
+        help="防止单次forward OOM。单个batch内的最大原始图片/媒体数；同时限制单个请求的最大图片数，"
+        "超过该值的请求将被拒绝（仅在 use_gpu_batch 时生效）",
     )

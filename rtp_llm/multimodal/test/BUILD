@@ -57,3 +57,13 @@ py_test(
         "//rtp_llm:testlib",
     ],
 )
+
+py_test(
+    name = "mm_scheduler_test",
+    srcs = [
+        "mm_scheduler_test.py",
+    ],
+    deps = [
+        "//rtp_llm:testlib",
+    ],
+)
