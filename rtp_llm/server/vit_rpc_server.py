@@ -29,31 +29,16 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2_grpc import (
 from rtp_llm.distribute.distributed_server import get_world_info
 from rtp_llm.model_factory import ModelFactory
 from rtp_llm.multimodal.mm_process_engine import MMEmbeddingRes, MMProcessEngine
-from rtp_llm.multimodal.multimodal_util import trans_mm_input
+from rtp_llm.multimodal.multimodal_util import (
+    build_multimodal_output_pb,
+    trans_mm_input,
+)
 from rtp_llm.ops import MMPreprocessConfig, MMRdmaEncoderOp, MultimodalInput
 from rtp_llm.server.server_args.server_args import setup_args
-from rtp_llm.utils.grpc_util import trans_from_tensor, trans_tensor
 
 
 def trans_output(res: MMEmbeddingRes):
-    if not res.embeddings:
-        return MultimodalOutputPB()
-
-    contain_pos = (res.position_ids is not None) and (len(res.position_ids) > 0)
-    contain_extra_input = (res.extra_input is not None) and (len(res.extra_input) > 0)
-
-    output_pb = MultimodalOutputPB(
-        multimodal_embedding=trans_from_tensor(torch.concat(res.embeddings)),
-        split_size=[e.shape[0] for e in res.embeddings],
-    )
-    if contain_pos:
-        output_pb.multimodal_pos_id.CopyFrom(
-            trans_from_tensor(torch.concat(res.position_ids))
-        )
-    if contain_extra_input:
-        for extra in res.extra_input:
-            output_pb.multimodal_extra_input.append(trans_from_tensor(extra))
-    return output_pb
+    return build_multimodal_output_pb(res.embeddings, res.position_ids, res.extra_input)
 
 
 def merge_embedding_results(results: list[MMEmbeddingRes]) -> MMEmbeddingRes:
