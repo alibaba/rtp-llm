@@ -74,6 +74,12 @@ public:
     size_t getTotalSizeBytes() const {
         return config_.total_size_bytes;
     }
+    // Returns the per-block KV stride in bytes for the primary memory layout.
+    // For memory_connector-style single-layout pools this equals the actual
+    // usable size of one block (excluding the reserved block 0 accounting).
+    size_t kvBlockStrideBytes() const {
+        return config_.memory_layouts.empty() ? 0 : config_.memory_layouts.front().kv_block_stride_bytes;
+    }
     const std::string& poolName() const {
         return config_.pool_name;
     }

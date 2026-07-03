@@ -4,6 +4,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include <cuda_runtime.h>
 #include <torch/torch.h>
 
 #include "rtp_llm/cpp/cache/BlockPool.h"
@@ -48,6 +49,9 @@ public:
         auto it  = tensors_.find(key);
         if (it != tensors_.end()) {
             it->second.fill_(pattern);
+            // Ensure fill_ (default stream) completes before subsequent copies
+            // executed on the CopyEngine's dedicated no-block-copy stream.
+            cudaDeviceSynchronize();
         }
     }
 
@@ -63,6 +67,7 @@ public:
             }
             auto cpu_tensor = torch::from_blob(cpu_data.data(), {size}, torch::kUInt8).clone();
             it->second.copy_(cpu_tensor);
+            cudaDeviceSynchronize();
         }
     }
 
@@ -72,6 +77,9 @@ public:
         auto it  = tensors_.find(key);
         if (it == tensors_.end())
             return {};
+        // Ensure prior GPU work (e.g. execNoBlockCopy on its own stream) is
+        // visible before the D2H readback.
+        cudaDeviceSynchronize();
         auto    cpu_tensor = it->second.cpu();
         auto*   ptr        = cpu_tensor.data_ptr<uint8_t>();
         int64_t n          = cpu_tensor.numel();

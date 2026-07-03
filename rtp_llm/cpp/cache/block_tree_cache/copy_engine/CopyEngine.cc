@@ -260,7 +260,7 @@ bool CopyEngine::hostToDisk(BlockIdxType   host_block,
     }
 
     const void*  host_base      = host_pool.convertIndexToAddr(0, host_block).kv_addr;
-    const size_t host_blk_bytes = host_pool.getTotalSizeBytes() / host_pool.totalBlocksNum();
+    const size_t host_blk_bytes = host_pool.kvBlockStrideBytes();
     const size_t bytes          = std::min(host_blk_bytes, disk_pool.blockSizeBytes());
 
     bool ok = disk_pool.write(disk_slot, host_base, bytes);
@@ -287,7 +287,7 @@ bool CopyEngine::diskToHost(int32_t        disk_slot,
     }
 
     void*        host_base      = host_pool.convertIndexToAddr(0, host_block).kv_addr;
-    const size_t host_blk_bytes = host_pool.getTotalSizeBytes() / host_pool.totalBlocksNum();
+    const size_t host_blk_bytes = host_pool.kvBlockStrideBytes();
     const size_t bytes          = std::min(host_blk_bytes, disk_pool.blockSizeBytes());
 
     bool ok = disk_pool.read(disk_slot, host_base, bytes);
