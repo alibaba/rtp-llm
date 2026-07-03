@@ -43,6 +43,7 @@ from rtp_llm.multimodal.multimodal_mixins.qwen2_vl.image_processing_qwen2_vl imp
 from rtp_llm.multimodal.multimodal_mixins.qwen2_vl.qwen2_vl_mixin import (
     Qwen2_VLImageEmbedding,
 )
+from rtp_llm.multimodal.multimodal_util import vit_emb_cache_
 from rtp_llm.ops import MMPreprocessConfig, MultimodalInput
 from rtp_llm.utils.base_model_datatypes import MMUrlType
 
@@ -102,6 +103,16 @@ class FakeMultiModalEmbeddingInterfaceSlow(FakeMultiModalEmbeddingInterface):
         return {}
 
 
+class FakeMultiModalEmbeddingInterfaceSlowEmbedding(FakeMultiModalEmbeddingInterface):
+    """batched_embedding sleeps, to exercise the embedding-level timeout on the
+    default (non-gpu-batch) serial path."""
+
+    @torch.inference_mode()
+    def batched_embedding(self, data_list, mm_types, **kwargs):
+        time.sleep(5)
+        return [(torch.tensor(0), None) for _ in data_list]
+
+
 class FakeMultiModalEmbeddingInterfaceProcessCrash(FakeMultiModalEmbeddingInterface):
     """Preprocess function that crashes the worker process to trigger BrokenProcessPool."""
 
@@ -113,6 +124,15 @@ class FakeMultiModalEmbeddingInterfaceProcessCrash(FakeMultiModalEmbeddingInterf
 
     def get_preprocess_params(self):
         return {}
+
+
+class FakeMultiModalEmbeddingInterfaceBadCount(FakeMultiModalEmbeddingInterface):
+    """batched_embedding returns the wrong number of outputs."""
+
+    @torch.inference_mode()
+    def batched_embedding(self, data_list, mm_types, **kwargs):
+        # One fewer than requested, to trip the count guard.
+        return [(torch.tensor(0), None) for _ in range(len(data_list) - 1)]
 
 
 class FakeModel:
@@ -225,6 +245,55 @@ class MMProcessEngineTest(TestCase):
     def test_work_item_rejects_empty_inputs(self):
         with self.assertRaises(ValueError):
             MMWorkItem([])
+
+    def test_embedding_timeout_default_path(self):
+        """Default (non-gpu-batch) serial path enforces an embedding-level timeout.
+
+        Regression guard for the timeout semantic migrated from the old inline
+        path: a slow batched_embedding must surface as TimeoutError, not hang.
+        """
+        model = FakeModel(FakeMultiModalEmbeddingInterfaceSlowEmbedding())
+        vit_config = VitConfig()
+        vit_config.use_local_preprocess = True  # fast preprocess; isolate embedding
+        vit_config.mm_cache_item_num = 0  # no cache hit to short-circuit the forward
+        engine = MMProcessEngine(
+            model.mm_part,
+            model.model_config,
+            vit_config,
+            ProfilingDebugLoggingConfig(),
+        )
+        try:
+            with self.assertRaises(TimeoutError):
+                engine.mm_embedding_cpp(
+                    ["./rtp_llm/multimodal/test/testdata/qwen2_vl/1.jpg"],
+                    [MMUrlType.IMAGE],
+                    [torch.empty(0)],
+                    [[-1, -1, -1, -1, -1, -1, -1, [], 100]],  # mm_timeout_ms=100
+                )
+        finally:
+            engine.stop()
+
+    def test_batched_embedding_count_mismatch(self):
+        """Serial-mode scheduler path fails fast when batched_embedding returns wrong count."""
+        model = FakeModel(FakeMultiModalEmbeddingInterfaceBadCount())
+        vit_config = VitConfig()
+        vit_config.use_local_preprocess = True  # local preprocess, serial scheduler
+        engine = MMProcessEngine(
+            model.mm_part,
+            model.model_config,
+            vit_config,
+            ProfilingDebugLoggingConfig(),
+        )
+        try:
+            with self.assertRaises(RuntimeError):
+                engine.mm_embedding_cpp(
+                    ["url0", "url1"],
+                    [MMUrlType.IMAGE, MMUrlType.IMAGE],
+                    [torch.empty(0), torch.empty(0)],
+                    [[-1, -1, -1, -1, -1, -1, -1, [], 30000]] * 2,
+                )
+        finally:
+            engine.stop()
 
     def test_worker_crash_recovery(self):
         """Pool rebuilds after worker process crash and subsequent requests succeed."""
@@ -727,6 +796,129 @@ class MMProcessEngineGreenNetTest(TestCase):
         verdict = engine.wait_greennet_verdict([inp])
         self.assertFalse(verdict.passed)
         engine.stop()
+
+
+_DEFAULT_CONFIG = [-1, -1, -1, -1, -1, -1, -1, [], 30000]
+
+
+class FakeBatchMMPart(MultiModalEmbeddingInterface):
+    """mm_part returning identity-encoded (emb, pos, extra) tuples.
+
+    Each input carries an index in its url ("fake://<i>"); embedding echoes that
+    index into all three output tensors so tests can assert ordering, and counts
+    embedding/batched_embedding invocations to observe cache hits and batching.
+    """
+
+    def __init__(self):
+        self.embedding_calls = 0
+        self.batch_sizes: List[int] = []
+        self._lock = threading.Lock()
+
+    @staticmethod
+    def preprocess_input(mm_inputs, vit_config, **kwargs):
+        # Carry the inputs through; embedding derives identity from the url.
+        return mm_inputs, kwargs
+
+    def get_preprocess_params(self):
+        return {}
+
+    @torch.inference_mode()
+    def embedding(self, data, **kwargs):
+        mm_inputs, _ = data
+        idx = float(int(mm_inputs[0].url.split("://")[1]))
+        with self._lock:
+            self.embedding_calls += 1
+        emb = torch.tensor([[idx]])  # (1, 1) -> one embedding per work item
+        pos = torch.tensor([[idx]])  # (1, 1)
+        extra = torch.tensor([idx])  # (1,) -> one flat extra tensor
+        return emb, pos, extra
+
+    def batched_embedding(self, data_list, mm_types, **kwargs):
+        with self._lock:
+            self.batch_sizes.append(len(data_list))
+        return super().batched_embedding(data_list, mm_types, **kwargs)
+
+
+class MMProcessEngineGpuBatchTest(TestCase):
+    def setUp(self):
+        # vit_emb_cache_ is a process-global; isolate it so cache state never
+        # leaks between these tests (or into other test classes in the process).
+        vit_emb_cache_.resize_cache(0)
+
+    def tearDown(self):
+        vit_emb_cache_.resize_cache(0)
+
+    def _make_engine(self, **vit_overrides):
+        model = FakeModel(FakeBatchMMPart())
+        vit_config = VitConfig()
+        vit_config.use_gpu_batch = True
+        # Local preprocess keeps the test in-process and deterministic.
+        vit_config.use_local_preprocess = True
+        # Cache off by default; the cache test opts in explicitly.
+        vit_config.mm_cache_item_num = 0
+        for key, value in vit_overrides.items():
+            setattr(vit_config, key, value)
+        engine = MMProcessEngine(
+            model.mm_part,
+            model.model_config,
+            vit_config,
+            ProfilingDebugLoggingConfig(),
+        )
+        self.addCleanup(engine.stop)
+        return engine, model.mm_part
+
+    def _embed(self, engine, urls):
+        n = len(urls)
+        return engine.mm_embedding_cpp(
+            urls,
+            [MMUrlType.IMAGE] * n,
+            [torch.empty(0)] * n,
+            [list(_DEFAULT_CONFIG) for _ in range(n)],
+        )
+
+    def test_gpu_batch_order_and_outputs(self):
+        """Single multi-image request: emb/pos/extra preserve input order."""
+        engine, _ = self._make_engine()
+        urls = [f"fake://{i}" for i in range(4)]
+        res = self._embed(engine, urls)
+
+        self.assertEqual([e.item() for e in res.embeddings], [0, 1, 2, 3])
+        self.assertEqual([p.item() for p in res.position_ids], [0, 1, 2, 3])
+        self.assertEqual([x.item() for x in res.extra_input], [0, 1, 2, 3])
+
+    def test_gpu_batch_multi_request(self):
+        """Concurrent requests are batched yet each gets its own correct result."""
+        engine, part = self._make_engine(gpu_batch_wait_ms=400, gpu_max_batch_size=16)
+        n = 5
+        results: List[float] = [None] * n
+
+        def run(i: int):
+            res = self._embed(engine, [f"fake://{i}"])
+            results[i] = res.embeddings[0].item()
+
+        threads = [threading.Thread(target=run, args=(i,)) for i in range(n)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        self.assertEqual(results, [0.0, 1.0, 2.0, 3.0, 4.0])
+        # The wait window should let at least one forward serve >1 request.
+        self.assertGreaterEqual(max(part.batch_sizes), 2)
+
+    def test_gpu_batch_cache_hit(self):
+        """A repeated url is served from cache without a second embedding call."""
+        engine, part = self._make_engine(mm_cache_item_num=10)
+        # tearDown restores the global cache to disabled for other tests.
+
+        url = "fake://7"
+        r1 = self._embed(engine, [url])
+        r2 = self._embed(engine, [url])
+
+        self.assertEqual(r1.embeddings[0].item(), 7)
+        self.assertEqual(r2.embeddings[0].item(), 7)
+        self.assertEqual(part.embedding_calls, 1)
+
 
 
 if __name__ == "__main__":

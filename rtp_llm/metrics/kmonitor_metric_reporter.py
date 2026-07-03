@@ -103,6 +103,10 @@ class GaugeMetrics(Enum):
     # vit preprocess
     VIT_PREPROCESS_RT_METRIC = "py_rtp_vit_preprocess_rt"
     VIT_EMBEDDING_RT_METRIC = "py_rtp_vit_embedding_rt"
+    # End-to-end embedding latency via the GPU batch scheduler (queue wait +
+    # batch-collect wait + forward). Diff against VIT_EMBEDDING_RT (forward only)
+    # to see the scheduling overhead.
+    VIT_EMBEDDING_BATCH_RT_METRIC = "py_rtp_vit_embedding_batch_rt"
 
     TOOL_CALL_LOOP_REPEAT_COUNT_METRIC = "py_rtp_tool_call_loop_repeat_count"
     TOOL_CALL_LOOP_CURRENT_SPAN_TOKENS_METRIC = (
