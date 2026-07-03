@@ -1,6 +1,7 @@
 import os
+import sys
 import time
-from typing import Optional
+from typing import Dict, Optional
 
 from rtp_llm.config.kv_cache_config import KVCacheConfig
 from rtp_llm.config.model_args import ModelArgs
@@ -235,6 +236,11 @@ class DistributeConfig:
 
 
 class VitConfig:
+    # Single source of truth for the multimodal embedding timeout default,
+    # shared by the --mm_timeout_ms / MM_TIMEOUT_MS server arg and the
+    # MMScheduler fallback so the three never drift.
+    DEFAULT_MM_TIMEOUT_MS: int = 120000
+
     def __init__(self):
         self.vit_separation: VitSeparation = VitSeparation.VIT_SEPARATION_LOCAL
         self.vit_trt: int = 0
@@ -251,7 +257,10 @@ class VitConfig:
         self.mm_preprocess_max_workers: int = 4
         self.biencoder_preprocess: bool = False
         self.extra_input_in_mm_embedding = ""
-        self.mm_timeout_ms: Optional[int] = None
+        # Matches the --mm_timeout_ms / MM_TIMEOUT_MS server-arg default so this
+        # is never None on the normal startup path (and not surprising if a
+        # VitConfig is built without arg parsing).
+        self.mm_timeout_ms: int = VitConfig.DEFAULT_MM_TIMEOUT_MS
         self.extra_data_path: str = ""
         self.local_extra_data_path: str = ""
         self.disable_access_log: bool = False
@@ -267,6 +276,33 @@ class VitConfig:
         self.mm_rdma_release_timeout_ms: int = 1000
         self.mm_rdma_slot_gc_timeout_ms: int = 60 * 1000
         self.mm_rdma_max_inflight_bytes: int = 8 * 1024 * 1024 * 1024
+        # ---- GPU embedding batch scheduler (MMScheduler) ----
+        self.use_gpu_batch: bool = False
+        self.gpu_batch_wait_ms: int = 10
+        self.gpu_max_batch_size: int = 8
+        self.gpu_max_batch_images: int = 32
+
+    def embedding_scheduler_args(self) -> Dict[str, int]:
+        """Resolved MMScheduler kwargs.
+
+        use_gpu_batch on  -> cross-request GPU batching with the gpu_* limits;
+        gpu_max_batch_images then caps both the batch and (since a request is never
+        split) the single-request image count.
+        use_gpu_batch off -> serial mode: one request per forward, no wait window,
+        and no image cap (sys.maxsize) — matches the old inline path, which never
+        bounded a single request's image count.
+        """
+        if self.use_gpu_batch:
+            return {
+                "batch_wait_ms": self.gpu_batch_wait_ms,
+                "max_batch_size": self.gpu_max_batch_size,
+                "max_batch_images": self.gpu_max_batch_images,
+            }
+        return {
+            "batch_wait_ms": 0,
+            "max_batch_size": 1,
+            "max_batch_images": sys.maxsize,
+        }
 
     def to_string(self):
         return (
@@ -299,7 +335,11 @@ class VitConfig:
             f"mm_rdma_read_timeout_ms: {self.mm_rdma_read_timeout_ms}\n"
             f"mm_rdma_release_timeout_ms: {self.mm_rdma_release_timeout_ms}\n"
             f"mm_rdma_slot_gc_timeout_ms: {self.mm_rdma_slot_gc_timeout_ms}\n"
-            f"mm_rdma_max_inflight_bytes: {self.mm_rdma_max_inflight_bytes}"
+            f"mm_rdma_max_inflight_bytes: {self.mm_rdma_max_inflight_bytes}\n"
+            f"use_gpu_batch: {self.use_gpu_batch}\n"
+            f"gpu_batch_wait_ms: {self.gpu_batch_wait_ms}\n"
+            f"gpu_max_batch_size: {self.gpu_max_batch_size}\n"
+            f"gpu_max_batch_images: {self.gpu_max_batch_images}"
         )
 
 
