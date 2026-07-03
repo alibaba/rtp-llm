@@ -926,10 +926,10 @@ TEST_F(CudaSamplerTest, testPenalty) {
     check_cuda_error();
 
     auto output_token_ids_host = toHostInt(output_token_ids_t);
-    assertTokenIn(output_token_ids_host, 5, {0, 1, 2, 3, 4, 5, 6, 7, 8, 9});
-    assertTokenIn(output_token_ids_host, 11, {0, 1, 2, 3, 4, 5, 6, 7, 8, 9});
-    assertTokenIn(output_token_ids_host, 17, {0, 1, 2, 3, 4, 5, 6, 7, 8, 9});
-    assertTokenIn(output_token_ids_host, 23, {0, 1, 2, 3, 4, 5, 6, 7, 8, 9});
+    ASSERT_EQ(output_token_ids_host[5], 9);
+    ASSERT_EQ(output_token_ids_host[11], 5);
+    ASSERT_EQ(output_token_ids_host[17], 7);
+    ASSERT_EQ(output_token_ids_host[23], 1);
 
     auto output_all_probs_host = toHostFloat(output_all_probs_t);
     ASSERT_VECTOR_NEAR(
@@ -941,6 +941,10 @@ TEST_F(CudaSamplerTest, testPenalty) {
                             0.0837425, 0.0783417, 0.0865809, 0.0956867, 0.10575,   0.116872,  0.129164,  0.142748}),
         1e-3);
     auto cum_log_probs_host = toHostFloat(cum_log_probs_t);
+    ASSERT_NEAR(cum_log_probs_host[0], -2.97917, 1e-3);
+    ASSERT_NEAR(cum_log_probs_host[1], -4.36467, 1e-3);
+    ASSERT_NEAR(cum_log_probs_host[2], -5.42469, 1e-3);
+    ASSERT_NEAR(cum_log_probs_host[3], -5.41334, 1e-3);
     assertCumLogProbMatches(cum_log_probs_host,
                             output_all_probs_host,
                             output_token_ids_host,
@@ -1006,10 +1010,10 @@ TEST_F(CudaSamplerTest, testDoSample) {
     check_cuda_error();
 
     auto output_token_ids_host = toHostInt(output_token_ids_t);
-    assertTokenIn(output_token_ids_host, 5, {1, 2});
-    assertTokenIn(output_token_ids_host, 11, {1, 2});
-    assertTokenIn(output_token_ids_host, 17, {1, 2});
-    assertTokenIn(output_token_ids_host, 23, {1, 2});
+    ASSERT_EQ(output_token_ids_host[5], 2);
+    ASSERT_EQ(output_token_ids_host[11], 1);
+    ASSERT_EQ(output_token_ids_host[17], 1);
+    ASSERT_EQ(output_token_ids_host[23], 1);
 
     auto output_all_probs_host = toHostFloat(output_all_probs_t);
     ASSERT_VECTOR_NEAR(
@@ -1018,6 +1022,10 @@ TEST_F(CudaSamplerTest, testDoSample) {
                             0, 0.455121, 0.544879, 0, 0, 0, 0, 0, 0, 0, 0, 0.488752, 0.511248, 0, 0, 0, 0, 0, 0, 0}),
         1e-3);
     auto cum_log_probs_host = toHostFloat(cum_log_probs_t);
+    ASSERT_NEAR(cum_log_probs_host[0], -1.60719, 1e-3);
+    ASSERT_NEAR(cum_log_probs_host[1], -2.73916, 1e-3);
+    ASSERT_NEAR(cum_log_probs_host[2], -3.78719, 1e-3);
+    ASSERT_NEAR(cum_log_probs_host[3], -3.71590, 1e-3);
     assertCumLogProbMatches(cum_log_probs_host,
                             output_all_probs_host,
                             output_token_ids_host,

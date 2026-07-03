@@ -33,6 +33,10 @@ void Sampler::ensureGreedySamplingBuffers(size_t batch_size) {
     if (batch_size <= max_batch_size_) {
         return;
     }
+    // NormalExecutor/MtpExecutor construct Sampler with a fixed max batch size,
+    // so production decode never reallocates while async H2D copies may still
+    // reference a rotated slot. Dynamic growth is reserved for non-fixed paths
+    // and rebuilds every slot together.
     RTP_LLM_CHECK_WITH_INFO(!fixed_max_batch_size_,
                             "sampler batch size [%lu] exceeds initialized max batch size [%lu]",
                             batch_size,
