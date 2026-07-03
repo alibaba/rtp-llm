@@ -89,13 +89,13 @@ constexpr int kMegaIndexerCandidatesPerGroup = 4;
 constexpr int kMegaIndexerCandidateTile = kMegaIndexerCandidateGroups * kMegaIndexerCandidatesPerGroup;
 constexpr int kMegaIndexerHeads = 64;
 constexpr int kMegaIndexerWarpsPerCandidate = kMegaIndexerHeads / kMegaAttentionWarpSize;
-constexpr int kMegaIndexerMetadataFloatSlots =
-    (kMegaIndexerCandidateTile * static_cast<int>(sizeof(const uint8_t*))
-     + kMegaIndexerCandidateTile * static_cast<int>(sizeof(float)) + static_cast<int>(sizeof(float)) - 1)
-    / static_cast<int>(sizeof(float));
 constexpr int kMegaIndexerScorerFloatSlots =
-    kMegaIndexerCandidateTile * (kMegaIndexerHeads + kMegaIndexerWarpsPerCandidate)
-    + kMegaIndexerMetadataFloatSlots;
+    kMegaIndexerCandidateTile * (kMegaIndexerHeads + kMegaIndexerWarpsPerCandidate);
+constexpr int kMegaIndexerMetadataBytes =
+    ((kMegaIndexerCandidateTile * static_cast<int>(sizeof(const uint8_t*))
+      + kMegaIndexerCandidateTile * static_cast<int>(sizeof(float)) + 7)
+     / 8)
+    * 8;
 constexpr int kMegaReductionFloatSlots = kMegaBlockThreads * 2;
 constexpr int kMegaReduceBufSlots =
     kMegaIndexerScorerFloatSlots > kMegaReductionFloatSlots ? kMegaIndexerScorerFloatSlots :
@@ -104,11 +104,6 @@ constexpr int kMegaReduceResultSlots =
     kMegaIndexerCandidateTile > kMegaAttentionKeyTile ? kMegaIndexerCandidateTile : kMegaAttentionKeyTile;
 static_assert(kMegaIndexerCandidateGroups * 64 * kMegaIndexerCandidateHeadLanes == kMegaBlockThreads,
               "CSA matrix scorer maps one CTA exactly across group/head/lane work");
-static_assert((kMegaIndexerCandidateTile * (kMegaIndexerHeads + kMegaIndexerWarpsPerCandidate)
-               * static_cast<int>(sizeof(float)))
-                      % static_cast<int>(sizeof(const uint8_t*))
-                  == 0,
-              "CSA scorer pointer metadata must be pointer-aligned");
 constexpr unsigned int kMegaCompressedDoneFlag = 0x80000000u;
 constexpr unsigned int kMegaCompressedCountMask = 0x7fffffffu;
 constexpr int kWarpDotAttentionKeyThreshold = 128;
@@ -1928,6 +1923,7 @@ __device__ __forceinline__ void dsv4MegaIndexerScoreCandidateTile(const scalar_t
                                                                   int64_t csa_indexer_pool_block_stride,
                                                                   int64_t csa_indexer_block_table_stride,
                                                                   float* head_scores,
+                                                                  uint8_t* metadata_storage,
                                                                   float* tile_scores) {
     const int tid = static_cast<int>(threadIdx.x);
     const int group = tid / (64 * kMegaIndexerCandidateHeadLanes);
@@ -1938,8 +1934,7 @@ __device__ __forceinline__ void dsv4MegaIndexerScoreCandidateTile(const scalar_t
                                       && csa_indexer_weights != nullptr;
     const bool use_fp8_indexer_cache = !use_fp8_indexer_pool && csa_indexer_k_cache != nullptr
                                        && csa_indexer_weights != nullptr && csa_indexer_cu_lens != nullptr;
-    const uint8_t** candidate_data_rows = reinterpret_cast<const uint8_t**>(
-        head_scores + kMegaIndexerCandidateTile * (kMegaIndexerHeads + kMegaIndexerWarpsPerCandidate));
+    const uint8_t** candidate_data_rows = reinterpret_cast<const uint8_t**>(metadata_storage);
     float* candidate_scales = reinterpret_cast<float*>(candidate_data_rows + kMegaIndexerCandidateTile);
 
     if (tid < kMegaIndexerCandidateTile) {
@@ -2080,6 +2075,7 @@ __device__ __forceinline__ int dsv4MegaBuildCompressedIndicesForRow(const scalar
                                                                      int* __restrict__ reduce_indices,
                                                                      int* __restrict__ reduce_indices_second,
                                                                      float* __restrict__ reduce_buf,
+                                                                     uint8_t* __restrict__ indexer_metadata_storage,
                                                                      float* __restrict__ reduce_result) {
     const int tid = static_cast<int>(threadIdx.x);
     int compressed_count = 0;
@@ -2178,6 +2174,7 @@ __device__ __forceinline__ int dsv4MegaBuildCompressedIndicesForRow(const scalar
                                                       csa_indexer_pool_block_stride,
                                                       csa_indexer_block_table_stride,
                                                       reduce_buf,
+                                                      indexer_metadata_storage,
                                                       reduce_result);
                 }
                 const bool candidate_tile_ends_initial_fill = c < k_eff && c + candidate_count == k_eff;
@@ -5377,6 +5374,7 @@ __global__ __launch_bounds__(kMegaBlockThreads, 1) void dsv4CpDistributedPrefill
     __shared__ float reduce_result[kMegaReduceResultSlots];
     __shared__ float tile_logits[kMegaAttentionKeyTile];
     __shared__ float q_shared[kSwaHeadDim];
+    __shared__ __align__(8) uint8_t indexer_metadata_storage[kMegaIndexerMetadataBytes];
     float* grouped_key_tile = reinterpret_cast<float*>(mega_dynamic_smem);
 
     const int compressed_stride = max_int(compressed_topk, 1);
@@ -5460,6 +5458,7 @@ __global__ __launch_bounds__(kMegaBlockThreads, 1) void dsv4CpDistributedPrefill
                                                                      reduce_indices,
                                                                      reduce_indices_second,
                                                                      reduce_buf,
+                                                                     indexer_metadata_storage,
                                                                      reduce_result);
             } else {
                 __syncthreads();
@@ -5742,11 +5741,12 @@ __global__ __launch_bounds__(kMegaBlockThreads, 1) void dsv4CpDistributedPrefill
 			                                                                 compressed_meta,
 	                                                                 row_compressed_indices_base,
 		                                                                 compressed_indices,
-		                                                                 compressed_scores,
-		                                                                 reduce_indices,
-		                                                                 reduce_indices_second,
-		                                                                 reduce_buf,
-		                                                                 reduce_result);
+	                                                                 compressed_scores,
+	                                                                 reduce_indices,
+	                                                                 reduce_indices_second,
+	                                                                 reduce_buf,
+	                                                                 indexer_metadata_storage,
+	                                                                 reduce_result);
 			        } else {
 			            __syncthreads();
 			        }
@@ -5809,6 +5809,7 @@ __global__ __launch_bounds__(kMegaBlockThreads, 1) void dsv4CpDistributedPrefill
 			                                                                          reduce_indices,
 			                                                                          reduce_indices_second,
 			                                                                          reduce_buf,
+			                                                                          indexer_metadata_storage,
 			                                                                          reduce_result);
 			    }
 
