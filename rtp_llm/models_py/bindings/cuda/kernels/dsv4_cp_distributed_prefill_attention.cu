@@ -3369,8 +3369,10 @@ __global__ void dsv4CompressorCompressNormRopeInsertKernel(const kv_t* __restric
                     const int req_cu_hi     = cu_seq_per_req[req_idx + 1];
                     const int flat_in_req   = pos - req_seq_start;
                     use_raw = flat_in_req >= 0 && flat_in_req < (req_cu_hi - req_cu_lo);
-                    const int64_t global_raw_idx = static_cast<int64_t>(req_cu_lo + flat_in_req);
-                    flat_idx = raw_unpad_restore == nullptr ? global_raw_idx : raw_unpad_restore[global_raw_idx];
+                    if (use_raw) {
+                        const int64_t global_raw_idx = static_cast<int64_t>(req_cu_lo + flat_in_req);
+                        flat_idx = raw_unpad_restore == nullptr ? global_raw_idx : raw_unpad_restore[global_raw_idx];
+                    }
                 } else {
                     flat_idx = static_cast<int64_t>(pos) - seq_start;
                     use_raw = flat_idx >= 0 && flat_idx < num_tokens;
@@ -3422,8 +3424,10 @@ __global__ void dsv4CompressorCompressNormRopeInsertKernel(const kv_t* __restric
                         const int req_cu_hi     = cu_seq_per_req[req_idx + 1];
                         const int flat_in_req   = pos - req_seq_start;
                         use_raw = flat_in_req >= 0 && flat_in_req < (req_cu_hi - req_cu_lo);
-                        const int64_t global_raw_idx = static_cast<int64_t>(req_cu_lo + flat_in_req);
-                        flat_idx = raw_unpad_restore == nullptr ? global_raw_idx : raw_unpad_restore[global_raw_idx];
+                        if (use_raw) {
+                            const int64_t global_raw_idx = static_cast<int64_t>(req_cu_lo + flat_in_req);
+                            flat_idx = raw_unpad_restore == nullptr ? global_raw_idx : raw_unpad_restore[global_raw_idx];
+                        }
                     } else {
                         flat_idx = static_cast<int64_t>(pos) - seq_start;
                         use_raw = flat_idx >= 0 && flat_idx < num_tokens;
@@ -4128,8 +4132,10 @@ __device__ __noinline__ void dsv4MegaRunCompressorBf16Phase(const MegaCompressor
                             const int req_cu_hi = args.cu_seq_per_req[req_idx + 1];
                             const int flat_in_req = pos - req_seq_start;
                             use_raw = flat_in_req >= 0 && flat_in_req < (req_cu_hi - req_cu_lo);
-                            const int64_t global_raw_idx = static_cast<int64_t>(req_cu_lo + flat_in_req);
-                            flat_idx = args.raw_unpad_restore == nullptr ? global_raw_idx : args.raw_unpad_restore[global_raw_idx];
+                            if (use_raw) {
+                                const int64_t global_raw_idx = static_cast<int64_t>(req_cu_lo + flat_in_req);
+                                flat_idx = args.raw_unpad_restore == nullptr ? global_raw_idx : args.raw_unpad_restore[global_raw_idx];
+                            }
                         } else {
                             flat_idx = static_cast<int64_t>(pos) - args.seq_start;
                             use_raw = flat_idx >= 0 && flat_idx < total_tokens;
@@ -4188,9 +4194,11 @@ __device__ __noinline__ void dsv4MegaRunCompressorBf16Phase(const MegaCompressor
                                 const int req_cu_hi = args.cu_seq_per_req[req_idx + 1];
                                 const int flat_in_req = pos - req_seq_start;
                                 use_raw = flat_in_req >= 0 && flat_in_req < (req_cu_hi - req_cu_lo);
-                                const int64_t global_raw_idx = static_cast<int64_t>(req_cu_lo + flat_in_req);
-                                flat_idx = args.raw_unpad_restore == nullptr ? global_raw_idx :
-                                                                            args.raw_unpad_restore[global_raw_idx];
+                                if (use_raw) {
+                                    const int64_t global_raw_idx = static_cast<int64_t>(req_cu_lo + flat_in_req);
+                                    flat_idx = args.raw_unpad_restore == nullptr ? global_raw_idx :
+                                                                                args.raw_unpad_restore[global_raw_idx];
+                                }
                             } else {
                                 flat_idx = static_cast<int64_t>(pos) - args.seq_start;
                                 use_raw = flat_idx >= 0 && flat_idx < total_tokens;
