@@ -466,6 +466,47 @@ __device__ __forceinline__ bool dsv4MegaTopKWorse(float lhs_score, int lhs_idx, 
     return lhs_score < rhs_score || (lhs_score == rhs_score && lhs_idx > rhs_idx);
 }
 
+__device__ __forceinline__ bool dsv4MegaTopKBetter(float lhs_score, int lhs_idx, float rhs_score, int rhs_idx) {
+    return lhs_score > rhs_score || (lhs_score == rhs_score && lhs_idx < rhs_idx);
+}
+
+__device__ __forceinline__ void dsv4MegaInsertWorstCandidateList(int slot,
+                                                                 float score,
+                                                                 int idx,
+                                                                 int* __restrict__ slots,
+                                                                 float* __restrict__ scores,
+                                                                 int* __restrict__ indices,
+                                                                 int limit) {
+    if (slot < 0 || limit <= 0) {
+        return;
+    }
+    int insert_pos = -1;
+#pragma unroll
+    for (int i = 0; i < kMegaIndexerCandidateTile; ++i) {
+        if (i >= limit) {
+            break;
+        }
+        if (slots[i] < 0 || dsv4MegaTopKWorse(score, idx, scores[i], indices[i])) {
+            insert_pos = i;
+            break;
+        }
+    }
+    if (insert_pos < 0) {
+        return;
+    }
+#pragma unroll
+    for (int i = kMegaIndexerCandidateTile - 1; i > 0; --i) {
+        if (i < limit && i > insert_pos) {
+            slots[i] = slots[i - 1];
+            scores[i] = scores[i - 1];
+            indices[i] = indices[i - 1];
+        }
+    }
+    slots[insert_pos] = slot;
+    scores[insert_pos] = score;
+    indices[insert_pos] = idx;
+}
+
 __device__ __forceinline__ void dsv4MegaInsertWorstCandidate(int slot,
                                                              float score,
                                                              int idx,
@@ -566,6 +607,85 @@ __device__ __forceinline__ void dsv4MegaFindTwoWorstTopKSlots(const int* __restr
     }
     worst_slot_out = reduce_indices[0];
     second_slot_out = reduce_indices_second[0];
+}
+
+__device__ __forceinline__ void dsv4MegaFindWorstTopKSlotsTile(const int* __restrict__ scratch_indices,
+                                                               const float* __restrict__ scratch_scores,
+                                                               int k_eff,
+                                                               int requested_slots,
+                                                               int* __restrict__ warp_slots,
+                                                               int* __restrict__ worst_slots,
+                                                               float* __restrict__ warp_scores) {
+    const int tid = static_cast<int>(threadIdx.x);
+    const int lane = tid & (kMegaAttentionWarpSize - 1);
+    const int warp_id = tid / kMegaAttentionWarpSize;
+    const int num_warps = (static_cast<int>(blockDim.x) + kMegaAttentionWarpSize - 1) / kMegaAttentionWarpSize;
+    const int limit = min_int(min_int(requested_slots, kMegaIndexerCandidateTile), k_eff);
+    int slots[kMegaIndexerCandidateTile];
+    float scores[kMegaIndexerCandidateTile];
+    int indices[kMegaIndexerCandidateTile];
+#pragma unroll
+    for (int i = 0; i < kMegaIndexerCandidateTile; ++i) {
+        slots[i] = -1;
+        scores[i] = 3.4028234663852886e38F;
+        indices[i] = -2147483647;
+    }
+    for (int i = tid; i < k_eff; i += static_cast<int>(blockDim.x)) {
+        const int idx = scratch_indices[i];
+        dsv4MegaInsertWorstCandidateList(i, scratch_scores[i], idx, slots, scores, indices, limit);
+    }
+#pragma unroll
+    for (int offset = kMegaAttentionWarpSize / 2; offset > 0; offset >>= 1) {
+#pragma unroll
+        for (int i = 0; i < kMegaIndexerCandidateTile; ++i) {
+            const int rhs_slot = __shfl_down_sync(0xffffffffu, slots[i], offset);
+            const float rhs_score = __shfl_down_sync(0xffffffffu, scores[i], offset);
+            const int rhs_idx = __shfl_down_sync(0xffffffffu, indices[i], offset);
+            if (lane + offset < kMegaAttentionWarpSize) {
+                dsv4MegaInsertWorstCandidateList(rhs_slot, rhs_score, rhs_idx, slots, scores, indices, limit);
+            }
+        }
+    }
+    if (lane == 0) {
+#pragma unroll
+        for (int i = 0; i < kMegaIndexerCandidateTile; ++i) {
+            const int out = warp_id * kMegaIndexerCandidateTile + i;
+            if (i < limit) {
+                warp_slots[out] = slots[i];
+                warp_scores[out] = scores[i];
+            }
+        }
+    }
+    __syncthreads();
+    if (tid == 0) {
+        int merged_slots[kMegaIndexerCandidateTile];
+        float merged_scores[kMegaIndexerCandidateTile];
+        int merged_indices[kMegaIndexerCandidateTile];
+#pragma unroll
+        for (int i = 0; i < kMegaIndexerCandidateTile; ++i) {
+            merged_slots[i] = -1;
+            merged_scores[i] = 3.4028234663852886e38F;
+            merged_indices[i] = -2147483647;
+        }
+        for (int w = 0; w < num_warps; ++w) {
+#pragma unroll
+            for (int i = 0; i < kMegaIndexerCandidateTile; ++i) {
+                if (i < limit) {
+                    const int slot = warp_slots[w * kMegaIndexerCandidateTile + i];
+                    const int idx = slot >= 0 ? scratch_indices[slot] : -2147483647;
+                    dsv4MegaInsertWorstCandidateList(
+                        slot, warp_scores[w * kMegaIndexerCandidateTile + i], idx, merged_slots, merged_scores, merged_indices, limit);
+                }
+            }
+        }
+#pragma unroll
+        for (int i = 0; i < kMegaIndexerCandidateTile; ++i) {
+            if (i < limit) {
+                worst_slots[i] = merged_slots[i];
+            }
+        }
+    }
+    __syncthreads();
 }
 
 template<typename T>
@@ -2179,6 +2299,114 @@ __device__ __forceinline__ int dsv4MegaBuildCompressedIndicesForRow(const scalar
                 }
                 const bool candidate_tile_ends_initial_fill = c < k_eff && c + candidate_count == k_eff;
                 const bool candidate_tile_crosses_initial_fill = c < k_eff && c + candidate_count > k_eff;
+                if (use_candidate_tile && c >= k_eff) {
+                    if (refresh_worst_slot) {
+                        dsv4MegaFindTwoWorstTopKSlots(scratch_indices,
+                                                      scratch_scores,
+                                                      k_eff,
+                                                      reduce_indices,
+                                                      reduce_indices_second,
+                                                      reduce_buf,
+                                                      cached_worst_slot,
+                                                      cached_second_worst_slot);
+                        cached_worst_score =
+                            cached_worst_slot >= 0 ? scratch_scores[cached_worst_slot] : 3.4028234663852886e38F;
+                        cached_worst_idx = cached_worst_slot >= 0 ? scratch_indices[cached_worst_slot] : -2147483647;
+                        cached_second_worst_score =
+                            cached_second_worst_slot >= 0 ? scratch_scores[cached_second_worst_slot] :
+                                                            3.4028234663852886e38F;
+                        cached_second_worst_idx =
+                            cached_second_worst_slot >= 0 ? scratch_indices[cached_second_worst_slot] : -2147483647;
+                        refresh_worst_slot = false;
+                    }
+                    int tile_valid_count = 0;
+                    if (tid == 0) {
+                        float tile_best_score = kInvalidCompressorScore;
+                        int tile_best_idx = 2147483647;
+#pragma unroll
+                        for (int tile_i = 0; tile_i < kMegaIndexerCandidateTile; ++tile_i) {
+                            if (tile_i < candidate_count) {
+                                const int candidate = c + tile_i;
+                                const int boundary_pos = (candidate + 1) * compress_ratio - 1;
+                                const bool valid_boundary = boundary_pos >= 0 && boundary_pos < topk_kv_len;
+                                if (valid_boundary) {
+                                    reduce_indices_second[tile_valid_count] = tile_i;
+                                    ++tile_valid_count;
+                                    const float score = reduce_result[tile_i];
+                                    if (dsv4MegaTopKBetter(score, candidate, tile_best_score, tile_best_idx)) {
+                                        tile_best_score = score;
+                                        tile_best_idx = candidate;
+                                    }
+                                }
+                            }
+                        }
+                        const bool tile_can_replace =
+                            cached_worst_slot >= 0
+                            && dsv4MegaTopKBetter(tile_best_score,
+                                                  tile_best_idx,
+                                                  cached_worst_score,
+                                                  cached_worst_idx);
+                        reduce_indices[0] = tile_can_replace ? tile_valid_count : 0;
+                    }
+                    __syncthreads();
+                    tile_valid_count = reduce_indices[0];
+                    if (tile_valid_count <= 0) {
+                        c += candidate_count;
+                        continue;
+                    }
+                    dsv4MegaFindWorstTopKSlotsTile(scratch_indices,
+                                                   scratch_scores,
+                                                   k_eff,
+                                                   tile_valid_count,
+                                                   reduce_indices_second + kMegaIndexerCandidateTile,
+                                                   reduce_indices,
+                                                   reduce_buf);
+                    if (tid == 0) {
+                        int remaining_tile_count = tile_valid_count;
+                        for (int tile_rank = 0; tile_rank < kMegaIndexerCandidateTile; ++tile_rank) {
+                            if (tile_rank >= tile_valid_count || remaining_tile_count <= 0) {
+                                break;
+                            }
+                            int best_tile_pos = -1;
+                            float best_score = kInvalidCompressorScore;
+                            int best_idx = 2147483647;
+#pragma unroll
+                            for (int scan = 0; scan < kMegaIndexerCandidateTile; ++scan) {
+                                if (scan < remaining_tile_count) {
+                                    const int tile_i = reduce_indices_second[scan];
+                                    const int candidate = c + tile_i;
+                                    const float score = reduce_result[tile_i];
+                                    if (dsv4MegaTopKBetter(score, candidate, best_score, best_idx)) {
+                                        best_tile_pos = scan;
+                                        best_score = score;
+                                        best_idx = candidate;
+                                    }
+                                }
+                            }
+                            if (best_tile_pos < 0) {
+                                break;
+                            }
+                            const int worst_slot = reduce_indices[tile_rank];
+                            if (worst_slot < 0) {
+                                break;
+                            }
+                            const bool replace_worst =
+                                dsv4MegaTopKBetter(best_score, best_idx, scratch_scores[worst_slot], scratch_indices[worst_slot]);
+                            if (!replace_worst) {
+                                break;
+                            }
+                            scratch_indices[worst_slot] = best_idx;
+                            scratch_scores[worst_slot] = best_score;
+                            reduce_indices_second[best_tile_pos] = reduce_indices_second[remaining_tile_count - 1];
+                            --remaining_tile_count;
+                        }
+                        reduce_indices[0] = 1;
+                    }
+                    __syncthreads();
+                    refresh_worst_slot = reduce_indices[0] != 0;
+                    c += candidate_count;
+                    continue;
+                }
                 for (int tile_i = 0; tile_i < candidate_count; ++tile_i) {
                     const int candidate = c + tile_i;
                     if (candidate == k_eff && candidate_tile_crosses_initial_fill) {

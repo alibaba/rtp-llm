@@ -1862,6 +1862,92 @@ class DistributedAttentionCandidateTest(unittest.TestCase):
             restored.index_copy_(0, rows, actual)
         _assert_attention_close(restored, expected)
 
+    def test_candidate_cuda_csa_fp8_indexer_matrix_tile_cross_tile_tie_allclose(self) -> None:
+        if not torch.cuda.is_available():
+            self.skipTest("candidate distributed attention op requires CUDA")
+        op = _candidate_op()
+        if op is None:
+            self.skipTest(
+                "rtp_llm_ops.dsv4_cp_distributed_prefill_attention is not built yet"
+            )
+        case = AttentionCase(
+            name="csa_fp8_indexer_matrix_tile_cross_tile_tie",
+            compress_ratio=4,
+            prefix_lengths=(64,),
+            input_lengths=(4,),
+            window_size=4,
+            compressed_topk=3,
+            n_heads=8,
+            head_dim=16,
+            index_heads=64,
+            index_dim=128,
+        )
+        fixture = _make_case_fixture(case, torch.device("cuda"), dtype=torch.float32)
+        kv, _, prefix_lengths, input_lengths = _pad_for_candidate_op(fixture)
+
+        flat_k_rows = (case.prefix_lengths[0] + case.input_lengths[0]) // case.compress_ratio
+        k_flat = torch.ones(
+            flat_k_rows,
+            case.index_dim,
+            dtype=torch.float32,
+            device=fixture.q.device,
+        )
+        # The topK boundary crosses the 8-candidate tile edge. Candidate 7 and
+        # 8 have equal scores, so the exact tie-break must keep smaller idx 7.
+        scores = [0.10, 0.15, 0.20, 0.25, 0.30, 0.35, 0.90, 1.00, 1.00, 0.95]
+        for c, value in enumerate(scores):
+            k_flat[c].fill_(value)
+        k_cache = _pack_flat_indexer_cache(k_flat)
+        fixture.indexer_q.fill_(1.0 / float(case.index_dim))
+        weights = torch.ones(
+            fixture.q.shape[0],
+            case.index_heads,
+            dtype=torch.float32,
+            device=fixture.q.device,
+        )
+        cu_lens = torch.tensor([0, flat_k_rows], dtype=torch.long, device=fixture.q.device)
+        expected = reference_attention_with_fp8_indexer(
+            fixture,
+            k_cache,
+            weights,
+            cu_lens,
+        )
+
+        dummy_indexer_k = torch.zeros(
+            1,
+            flat_k_rows,
+            case.index_heads,
+            case.index_dim,
+            dtype=fixture.q.dtype,
+            device=fixture.q.device,
+        )
+        restored = torch.empty_like(expected)
+        for rank in range(case.cp_size):
+            rows = rank_local_rows(expected.shape[0], rank, case.cp_size).to(
+                device=fixture.q.device
+            )
+            actual = op(
+                fixture.q.contiguous(),
+                kv,
+                fixture.indexer_q.contiguous(),
+                dummy_indexer_k.contiguous(),
+                fixture.attn_sink.contiguous(),
+                fixture.req_id_per_token.contiguous(),
+                fixture.position_ids.contiguous(),
+                prefix_lengths,
+                input_lengths,
+                rows,
+                case.compress_ratio,
+                case.window_size,
+                case.compressed_topk,
+                csa_indexer_k_cache=k_cache,
+                csa_indexer_weights=weights,
+                csa_indexer_cu_lens=cu_lens,
+            )
+            _assert_attention_close(actual, expected.index_select(0, rows))
+            restored.index_copy_(0, rows, actual)
+        _assert_attention_close(restored, expected)
+
     def test_candidate_cuda_csa_paged_indexer_cache_topk_allclose(self) -> None:
         if not torch.cuda.is_available():
             self.skipTest("candidate distributed attention op requires CUDA")
