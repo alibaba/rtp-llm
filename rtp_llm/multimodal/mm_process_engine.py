@@ -23,10 +23,12 @@ from rtp_llm.metrics import kmonitor
 from rtp_llm.metrics.kmonitor_metric_reporter import AccMetrics, GaugeMetrics
 from rtp_llm.multimodal.greennet_hook import GreenNetVerdict, get_greennet_provider
 from rtp_llm.multimodal.mm_profiler import MMProfiler
+from rtp_llm.multimodal.mm_scheduler import MMScheduler
 from rtp_llm.multimodal.multimodal_mixins.multimodal_common import (
     MultiModalEmbeddingInterface,
 )
 from rtp_llm.multimodal.multimodal_util import (
+    maybe_tensor_to_list,
     trans_mm_input,
     url_data_cache_,
     vit_emb_cache_,
@@ -369,6 +371,11 @@ class MMEmbeddingAsyncCache:
 
     def try_acquire(self, cache_key: str) -> Tuple[str, MMEmbeddingCacheEntry]:
         with self._lock:
+            # mm_cache_item_num=0 disables caching: always miss, never store.
+            # Without this, duplicate cache_keys (e.g. repeated images) would
+            # be served from cache even when the operator intended no caching.
+            if self._max_size <= 0:
+                return ("miss", MMEmbeddingCacheEntry())
             if cache_key in self._entries:
                 entry = self._entries[cache_key]
                 if entry.is_done:
@@ -464,14 +471,11 @@ class MMProcessEngine:
             model_config.mm_related_params.preprocess_batch_size
         )
 
-        self.mp_context = multiprocessing.get_context("spawn")
-
         self.mm_part = mm_part
 
         # threading.Lock: protects gRPC-handler-thread access within this
         # process. multiprocessing.Lock would round-trip through an OS
         # semaphore on every acquire — wasteful since no cross-process sharing.
-        self.mm_embedding_lock = threading.Lock()
         self.query_num_lock = threading.Lock()
 
         # 根据 vit_config 创建预处理执行器
@@ -493,6 +497,15 @@ class MMProcessEngine:
             logging.info(
                 f"MMProcessEngine: Using MULTIPROCESS preprocessing mode with {vit_config.mm_preprocess_max_workers} workers"
             )
+
+        # Embedding scheduler: always an MMScheduler; gpu-batch vs serial is
+        # resolved by VitConfig (serial = one request per forward, no batching).
+        scheduler_args = vit_config.embedding_scheduler_args()
+        self._scheduler = MMScheduler(mm_part=mm_part, **scheduler_args)
+        logging.info(
+            f"MMProcessEngine: MMScheduler "
+            f"(use_gpu_batch={vit_config.use_gpu_batch}, {scheduler_args})"
+        )
 
         self.profiler = MMProfiler()
 
@@ -537,17 +550,6 @@ class MMProcessEngine:
         """Get the current number of active queries."""
         with self.query_num_lock:
             return self.query_num
-
-    @staticmethod
-    def _maybe_tensor_to_list(tensor: Any, dim: int = 2) -> List[Any]:
-        """Convert tensor to list format if needed."""
-        if tensor is None:
-            return []
-        if not isinstance(tensor, torch.Tensor):
-            return tensor
-        if len(tensor.shape) > dim:
-            return list(tensor)
-        return [tensor]
 
     # ------------------------------------------------------------------
     # GreenNet (content safety) plumbing
@@ -798,48 +800,22 @@ class MMProcessEngine:
         self, work_items: List[MMWorkItem]
     ) -> Tuple[List[Any], List[Any], List[Any]]:
         """Compute embeddings for all work items."""
-        emb_res, pos_res, tensor_res = [], [], []
-
-        ordered_emb: List[Optional[Any]] = [None] * len(work_items)
-        ordered_pos: List[Optional[Any]] = [None] * len(work_items)
-        ordered_tensor: List[Optional[Any]] = [None] * len(work_items)
-
-        pending_items: List[Tuple[int, MMWorkItem]] = []
-        for idx, work_item in enumerate(work_items):
-            if work_item.embedding_result is not None:
-                ordered_emb[idx] = work_item.embedding_result[0]
-                ordered_pos[idx] = work_item.embedding_result[1]
-                if len(work_item.embedding_result) > 2:
-                    ordered_tensor[idx] = work_item.embedding_result[2]
-            else:
-                pending_items.append((idx, work_item))
+        pending_items = [wi for wi in work_items if wi.embedding_result is None]
 
         if pending_items:
-            batch_outputs = None
-            with Timer() as route_timer:
-                with self.mm_embedding_lock:
-                    with torch.profiler.record_function("batched_embedding"):
-                        batch_outputs = self.mm_part.batched_embedding(
-                            [wi.preprocess_result for _, wi in pending_items],
-                            [wi.mm_type for _, wi in pending_items],
-                        )
-            kmonitor.report(GaugeMetrics.VIT_EMBEDDING_RT_METRIC, route_timer.cost_ms())
+            self._scheduler.submit_and_wait(pending_items)
 
-            if batch_outputs is not None:
-                for (idx, work_item), result in zip(pending_items, batch_outputs):
-                    work_item.embedding_result = result
-                    if work_item.need_check_cache:
-                        vit_emb_cache_.insert_cache(work_item.cache_key, result)
-                    ordered_emb[idx] = result[0]
-                    ordered_pos[idx] = result[1]
-                    if len(result) > 2:
-                        ordered_tensor[idx] = result[2]
-
-        for emb, pos, tensor in zip(ordered_emb, ordered_pos, ordered_tensor):
-            emb_res.extend(self._maybe_tensor_to_list(emb, dim=2))
-            pos_res.extend(self._maybe_tensor_to_list(pos, dim=2))
-            # extra input is a flat 1-D tensor per image
-            tensor_res.extend(self._maybe_tensor_to_list(tensor, dim=1))
+        emb_res, pos_res, tensor_res = [], [], []
+        for wi in work_items:
+            result = wi.embedding_result
+            # Scheduler invariant: submit_and_wait either fills embedding_result
+            # for every pending item or raises, so it is never None here.
+            if result is None:
+                raise RuntimeError(f"embedding_result not set for work item {wi}")
+            emb_res.extend(maybe_tensor_to_list(result[0], ndim_threshold=2))
+            pos_res.extend(maybe_tensor_to_list(result[1], ndim_threshold=2))
+            if len(result) > 2:
+                tensor_res.extend(maybe_tensor_to_list(result[2], ndim_threshold=1))
         return emb_res, pos_res, tensor_res
 
     def async_submit(self, mm_inputs: List[MultimodalInput]) -> List[str]:
@@ -935,6 +911,7 @@ class MMProcessEngine:
             self._cancel_greennet(handle)
 
     def stop(self) -> None:
-        """Shutdown the preprocessing executor."""
+        """Shutdown the preprocessing executor and embedding scheduler."""
         self.preprocess_executor.shutdown()
+        self._scheduler.close()
         self._shutdown_greennet_loop()
