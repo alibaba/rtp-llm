@@ -206,11 +206,39 @@ class PrefillTimePredictorTest {
                 "sum(max(computeTokens - 2048, 0))"
                         + " + 2*sum(max(computeTokens - 24576, 0))");
 
-        BatchItem item1 = batchItem(30000, 1000); // computeTokens=29000, hinges=(26952,4424)
-        BatchItem item2 = batchItem(4096, 0);     // computeTokens=4096, hinges=(2048,0)
+        BatchItem item1 = batchItem(30000, 1000); // computeTokens=29000, positive parts=(26952,4424)
+        BatchItem item2 = batchItem(4096, 0);     // computeTokens=4096, positive parts=(2048,0)
         long result = p.predictBatchMs(List.of(item1, item2));
 
         assertEquals(37848, result);
+    }
+
+    @Test
+    void predictBatchMsRecommendedFormulaUsesBatchBoundedCacheTerms() {
+        PrefillTimePredictor p = new PrefillTimePredictor(
+                "174.374677211 + 52.642812003*log(batchSize + 1)"
+                        + " + 0.000746856881262*sum(2048*log(1 + exp((computeTokens - 8192)/2048)))"
+                        + " + 0.0074536400604*sum(4096*log(1 + exp((computeTokens - 24576)/4096)))"
+                        + " + 5.73664292066e-05*sum(8192*log(1 + exp((computeTokens - 65536)/8192)))"
+                        + " + 0.00111135741393*sum(8192*log(1 + exp((computeTokens - 81920)/8192)))"
+                        + " + 0.00424878987222*sum((hitCacheTokens/(inputTokens + 1))"
+                        + " * (4096*log(1 + exp((computeTokens - 24576)/4096))))"
+                        + " + 0.000489415479845*sum((log(hitCacheTokens + 1)/max(log(inputTokens + 1), 1))"
+                        + " * (4096*log(1 + exp((computeTokens - 24576)/4096))))"
+                        + " + 18.7646922156*(sum(hasHitCache)/batchSize)"
+                        + " + 4.59475450657*(sum(hitCacheTokens/(inputTokens + 1))/batchSize)"
+                        + " - 41.7583481006*(sum(log(hitCacheTokens + 1)/max(log(inputTokens + 1), 1))/batchSize)"
+                        + " - 5.4218960925*(sum(hitCacheTokens/(hitCacheTokens + 4096))/batchSize)");
+
+        List<BatchItem> fullHitBatch = new ArrayList<>();
+        for (int i = 0; i < 64; i++) {
+            fullHitBatch.add(batchItem(102400, 101376));
+        }
+
+        assertEquals(187, p.predictBatchMs(fullHitBatch.subList(0, 1)));
+        assertEquals(246, p.predictBatchMs(fullHitBatch.subList(0, 5)));
+        assertEquals(383, p.predictBatchMs(fullHitBatch));
+        assertEquals(886, p.predictBatchMs(List.of(batchItem(102400, 0))));
     }
 
     @Test

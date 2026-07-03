@@ -321,12 +321,17 @@ public class FlexlbConfig {
      * <br>Batch aggregate: {@code sum(expr)} evaluates {@code expr} per request and sums it.
      *
      * <p>DeepSeek-V4-Flash PDFusion example:
-     * {@code "213.058760744
-     * + 0.000420120401621*sum(max(computeTokens - 2048, 0))
-     * + 0.00817215761679*sum(max(computeTokens - 24576, 0))
-     * - 0.000373217058264*sum(hitCacheTokens)
-     * - 10.6141559328*sum(hasHitCache)
-     * + 2.84762280669e-08*sum(computeTokens * hitCacheTokens)"}
+     * {@code "174.374677211 + 52.642812003*log(batchSize + 1)
+     * + 0.000746856881262*sum(2048*log(1 + exp((computeTokens - 8192)/2048)))
+     * + 0.0074536400604*sum(4096*log(1 + exp((computeTokens - 24576)/4096)))
+     * + 5.73664292066e-05*sum(8192*log(1 + exp((computeTokens - 65536)/8192)))
+     * + 0.00111135741393*sum(8192*log(1 + exp((computeTokens - 81920)/8192)))
+     * + 0.00424878987222*sum((hitCacheTokens/(inputTokens + 1))*(4096*log(1 + exp((computeTokens - 24576)/4096))))
+     * + 0.000489415479845*sum((log(hitCacheTokens + 1)/max(log(inputTokens + 1), 1))*(4096*log(1 + exp((computeTokens - 24576)/4096))))
+     * + 18.7646922156*(sum(hasHitCache)/batchSize)
+     * + 4.59475450657*(sum(hitCacheTokens/(inputTokens + 1))/batchSize)
+     * - 41.7583481006*(sum(log(hitCacheTokens + 1)/max(log(inputTokens + 1), 1))/batchSize)
+     * - 5.4218960925*(sum(hitCacheTokens/(hitCacheTokens + 4096))/batchSize)"}
      */
     private String costFormula = "sum(computeTokens) + 0.3*sum(hitCacheTokens)";
 

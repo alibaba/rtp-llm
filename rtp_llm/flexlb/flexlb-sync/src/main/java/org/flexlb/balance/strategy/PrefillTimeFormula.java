@@ -34,11 +34,11 @@ import java.util.function.Predicate;
  *
  * <h3>Example</h3>
  * <pre>{@code
- *   "213.058760744 + 0.000420120401621*sum(max(computeTokens - 2048, 0))
- *       + 0.00817215761679*sum(max(computeTokens - 24576, 0))
- *       - 0.000373217058264*sum(hitCacheTokens)
- *       - 10.6141559328*sum(hasHitCache)
- *       + 2.84762280669e-08*sum(computeTokens * hitCacheTokens)"
+ *   "174.374677211 + 52.642812003*log(batchSize + 1)
+ *       + 0.000746856881262*sum(2048*log(1 + exp((computeTokens - 8192)/2048)))
+ *       + 0.0074536400604*sum(4096*log(1 + exp((computeTokens - 24576)/4096)))
+ *       + 18.7646922156*(sum(hasHitCache)/batchSize)
+ *       - 41.7583481006*(sum(log(hitCacheTokens + 1)/max(log(inputTokens + 1), 1))/batchSize)"
  * }</pre>
  */
 public final class PrefillTimeFormula {
