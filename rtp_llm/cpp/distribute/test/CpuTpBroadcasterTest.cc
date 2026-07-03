@@ -322,6 +322,31 @@ TEST(CpuTpBroadcasterTest, NonRootRejectsBadLinkProbe) {
     cleanupTempBase(base);
 }
 
+TEST(CpuTpBroadcasterTest, NonRootFailsFastOnNonRetryableConnectError) {
+    const std::string base = makeTempBase();
+    ASSERT_EQ(::symlink((base + "_0.sock").c_str(), socketPath(base).c_str()), 0);
+
+    auto& bcast = CpuTpBroadcaster::instance();
+    bcast.reset();
+    const auto start = std::chrono::steady_clock::now();
+    try {
+        bcast.initialize(1, 2, base);
+        ADD_FAILURE() << "expected CpuTpBroadcaster connect failure";
+    } catch (const std::exception& e) {
+        const std::string msg = e.what();
+        EXPECT_NE(msg.find("CpuTpBroadcaster connect("), std::string::npos) << msg;
+        EXPECT_NE(msg.find("failed:"), std::string::npos) << msg;
+        EXPECT_EQ(msg.find("failed after"), std::string::npos) << msg;
+    }
+    const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                std::chrono::steady_clock::now() - start)
+                                .count();
+    EXPECT_LT(elapsed_ms, 1000);
+    bcast.reset();
+
+    cleanupTempBase(base);
+}
+
 TEST(CpuTpBroadcasterTest, ResetAllowsNewBasePath) {
     auto& bcast = CpuTpBroadcaster::instance();
     bcast.reset();

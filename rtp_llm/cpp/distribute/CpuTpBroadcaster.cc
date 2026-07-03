@@ -43,6 +43,10 @@ void cleanupRank0State(std::vector<int>& peer_fds, int& listen_fd, std::string& 
     }
 }
 
+bool isRetryableConnectError(int err) {
+    return err == EINTR || err == ENOENT || err == ECONNREFUSED;
+}
+
 bool waitFdUntil(int fd, short events, std::chrono::steady_clock::time_point deadline) {
     while (true) {
         const auto now = std::chrono::steady_clock::now();
@@ -386,6 +390,9 @@ void CpuTpBroadcaster::initialize(int tp_rank, int tp_size, const std::string& b
             int saved = errno;
             ::close(fd);
             fd = -1;
+            if (!isRetryableConnectError(saved)) {
+                RTP_LLM_FAIL("CpuTpBroadcaster connect(%s) failed: %s", path.c_str(), std::strerror(saved));
+            }
             if (attempt + 1 == kMaxAttempts) {
                 RTP_LLM_FAIL("CpuTpBroadcaster connect(%s) failed after %d attempts: %s",
                              path.c_str(),

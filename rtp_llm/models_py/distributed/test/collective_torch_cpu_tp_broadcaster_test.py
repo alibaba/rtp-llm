@@ -1,4 +1,5 @@
 import os
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -16,6 +17,14 @@ class _FakeLibrtpComputeOps:
         if self.init_error is not None:
             raise self.init_error
         self.init_calls.append((tp_rank, tp_size, base_path))
+
+
+class _FakeIncompleteDestroyLibrtpComputeOps:
+    def __init__(self):
+        self.clear_calls = 0
+
+    def clear_comm_ops(self):
+        self.clear_calls += 1
 
 
 class TestCpuTpBroadcasterBootstrap(unittest.TestCase):
@@ -143,6 +152,27 @@ class TestCpuTpBroadcasterBootstrap(unittest.TestCase):
             "Failed to initialize CpuTpBroadcaster",
             mock_warning.call_args.args[0],
         )
+
+    def test_destroy_distributed_environment_requires_matching_cpp_symbols(self):
+        fake_ops = _FakeIncompleteDestroyLibrtpComputeOps()
+
+        with patch.dict(sys.modules, {"librtp_compute_ops": fake_ops}), patch(
+            "rtp_llm.models_py.distributed.collective_torch.torch.distributed.get_rank",
+            return_value=0,
+        ), patch(
+            "rtp_llm.models_py.distributed.collective_torch.torch.distributed.is_initialized",
+            return_value=False,
+        ), patch(
+            "rtp_llm.models_py.distributed.collective_torch.rocm_rccl.is_available_runtime",
+            return_value=False,
+        ), patch(
+            "rtp_llm.models_py.utils.arch.is_cuda",
+            return_value=False,
+        ):
+            with self.assertRaises(AttributeError):
+                ct.destroy_distributed_environment()
+
+        self.assertEqual(fake_ops.clear_calls, 1)
 
 
 if __name__ == "__main__":
