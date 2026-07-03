@@ -26,11 +26,13 @@ protected:
     }
 
     void insertPath(const CacheKeysType& keys, BlockIdxType full_b, BlockIdxType swa_r_b, BlockIdxType swa_nr_b) {
-        std::vector<GroupSlot> slots(3);
-        slots[0].device_blocks = {full_b};
-        slots[1].device_blocks = {swa_r_b};
-        slots[2].device_blocks = {swa_nr_b};
-        cache_->insert(keys, slots);
+        std::vector<std::vector<GroupSlot>> slots(keys.size(), std::vector<GroupSlot>(3));
+        for (size_t i = 0; i < keys.size(); ++i) {
+            slots[i][0].device_blocks = {static_cast<BlockIdxType>(full_b + i)};
+            slots[i][1].device_blocks = {static_cast<BlockIdxType>(swa_r_b + i)};
+            slots[i][2].device_blocks = {static_cast<BlockIdxType>(swa_nr_b + i)};
+        }
+        cache_->insert(nullptr, keys, slots);
     }
 
     std::unique_ptr<BlockTreeCache> cache_;
@@ -159,9 +161,10 @@ TEST_F(FullSWANonReusableEvictionTest, SWANonReusableOnlyCacheSynchronous) {
     auto                           nr_cache = std::make_unique<BlockTreeCache>(
         std::move(tree), std::move(groups), std::vector<Component>{}, nullptr, nullptr, 2);
 
-    std::vector<GroupSlot> slots(1);
-    slots[0].device_blocks = {30};
-    nr_cache->insert({100, 200}, slots);
+    std::vector<std::vector<GroupSlot>> slots(2, std::vector<GroupSlot>(1));
+    slots[0][0].device_blocks = {30};
+    slots[1][0].device_blocks = {31};
+    nr_cache->insert(nullptr, {100, 200}, slots);
 
     EXPECT_EQ(nr_cache->getStats().tree_node_count, 2u);
     EXPECT_EQ(nr_cache->getStats().device_heap_total_size, 1u);  // [200]

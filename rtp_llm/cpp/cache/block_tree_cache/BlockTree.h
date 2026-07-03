@@ -30,10 +30,12 @@ public:
     // Find the deepest node matching the cache_keys sequence from root.
     BlockTreeFindResult findNode(const CacheKeysType& cache_keys) const;
 
-    // Insert nodes along the cache_keys path. Existing nodes are reused,
-    // new nodes are created for unmatched suffix. The last node gets
-    // group_slots assigned. Returns the deepest node in the path.
-    TreeNode* insertNode(const CacheKeysType& cache_keys, const std::vector<GroupSlot>& group_slots);
+    // Insert nodes along the cache_keys path starting from parent (nullptr = root).
+    // Existing nodes are reused, new nodes are created for unmatched suffix.
+    // slots[i] provides the GroupSlot for the i-th node (cache_keys[i]).
+    // Returns the deepest node in the path.
+    TreeNode*
+    insertNode(TreeNode* parent, const CacheKeysType& cache_keys, const std::vector<std::vector<GroupSlot>>& slots);
 
     // Remove a node from the tree. The node must have no children.
     // The node's parent link is updated accordingly.

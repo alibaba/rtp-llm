@@ -5,11 +5,20 @@
 namespace rtp_llm {
 namespace {
 
-// Helper: create a vector of GroupSlots (one group) with a device block.
-std::vector<GroupSlot> makeGroupSlots(int group_count, BlockIdxType block_idx) {
-    std::vector<GroupSlot> slots(static_cast<size_t>(group_count));
-    slots[0].device_blocks = {block_idx};
+// Helper: create 2D slots — each node gets a single-group slot with incrementing block_idx.
+// slots[i][0].device_blocks = {start_block + i}
+std::vector<std::vector<GroupSlot>> make2DSlots(int group_count, int path_len, BlockIdxType start_block) {
+    std::vector<std::vector<GroupSlot>> slots(static_cast<size_t>(path_len));
+    for (int i = 0; i < path_len; ++i) {
+        slots[i].resize(static_cast<size_t>(group_count));
+        slots[i][0].device_blocks = {static_cast<BlockIdxType>(start_block + i)};
+    }
     return slots;
+}
+
+// Helper: create 2D slots with empty inner vectors (no data assigned to nodes).
+std::vector<std::vector<GroupSlot>> makeEmpty2DSlots(int path_len) {
+    return std::vector<std::vector<GroupSlot>>(static_cast<size_t>(path_len));
 }
 
 TEST(BlockTreeTest, EmptyTreeFindReturnsEmpty) {
@@ -23,21 +32,23 @@ TEST(BlockTreeTest, EmptyTreeFindReturnsEmpty) {
 TEST(BlockTreeTest, InsertSinglePath) {
     BlockTree     tree(1);
     CacheKeysType keys  = {100, 200, 300};
-    auto          slots = makeGroupSlots(1, 42);
+    auto          slots = make2DSlots(1, 3, 42);
 
-    TreeNode* leaf = tree.insertNode(keys, slots);
+    TreeNode* leaf = tree.insertNode(nullptr, keys, slots);
     ASSERT_NE(leaf, nullptr);
     EXPECT_EQ(leaf->cache_key, 300);
-    EXPECT_EQ(leaf->group_slots[0].device_blocks[0], 42);
-    EXPECT_EQ(tree.nodeCount(), 3u);  // 3 nodes created (not counting root)
+    EXPECT_EQ(leaf->group_slots[0].device_blocks[0], 44);  // start_block + 2
+    EXPECT_EQ(tree.nodeCount(), 3u);                       // 3 nodes created (not counting root)
 
-    // Verify tree structure
+    // Verify tree structure and per-node slots
     auto* root = tree.root();
     EXPECT_EQ(root->children.size(), 1u);
     auto* a = root->children.at(100);
     EXPECT_EQ(a->cache_key, 100);
+    EXPECT_EQ(a->group_slots[0].device_blocks[0], 42);  // start_block + 0
     auto* b = a->children.at(200);
     EXPECT_EQ(b->cache_key, 200);
+    EXPECT_EQ(b->group_slots[0].device_blocks[0], 43);  // start_block + 1
     auto* c = b->children.at(300);
     EXPECT_EQ(c->cache_key, 300);
     EXPECT_EQ(c, leaf);
@@ -47,11 +58,11 @@ TEST(BlockTreeTest, InsertForkPath) {
     BlockTree tree(1);
 
     // Insert root → 100 → 200 → 300
-    tree.insertNode({100, 200, 300}, makeGroupSlots(1, 1));
+    tree.insertNode(nullptr, {100, 200, 300}, make2DSlots(1, 3, 1));
     // Insert root → 100 → 200 → 400 (fork at 200)
-    tree.insertNode({100, 200, 400}, makeGroupSlots(1, 2));
+    tree.insertNode(nullptr, {100, 200, 400}, make2DSlots(1, 3, 10));
     // Insert root → 100 → 500 (fork at 100)
-    tree.insertNode({100, 500}, makeGroupSlots(1, 3));
+    tree.insertNode(nullptr, {100, 500}, make2DSlots(1, 2, 20));
 
     EXPECT_EQ(tree.nodeCount(), 5u);  // 100, 200, 300, 400, 500
 
@@ -64,7 +75,7 @@ TEST(BlockTreeTest, InsertForkPath) {
 
 TEST(BlockTreeTest, FindExistingPath) {
     BlockTree tree(1);
-    tree.insertNode({100, 200, 300}, makeGroupSlots(1, 42));
+    tree.insertNode(nullptr, {100, 200, 300}, make2DSlots(1, 3, 42));
 
     auto result = tree.findNode({100, 200, 300});
     EXPECT_EQ(result.matched_blocks, 3u);
@@ -75,7 +86,7 @@ TEST(BlockTreeTest, FindExistingPath) {
 
 TEST(BlockTreeTest, FindPartialMatch) {
     BlockTree tree(1);
-    tree.insertNode({100, 200, 300}, makeGroupSlots(1, 42));
+    tree.insertNode(nullptr, {100, 200, 300}, make2DSlots(1, 3, 42));
 
     // Search for a longer path — only first 2 match
     auto result = tree.findNode({100, 200, 999});
@@ -86,7 +97,7 @@ TEST(BlockTreeTest, FindPartialMatch) {
 
 TEST(BlockTreeTest, FindEmptyKeys) {
     BlockTree tree(1);
-    tree.insertNode({100}, makeGroupSlots(1, 1));
+    tree.insertNode(nullptr, {100}, make2DSlots(1, 1, 1));
 
     auto result = tree.findNode({});
     EXPECT_EQ(result.matched_node, nullptr);
@@ -95,7 +106,7 @@ TEST(BlockTreeTest, FindEmptyKeys) {
 
 TEST(BlockTreeTest, RemoveLeafNode) {
     BlockTree tree(1);
-    tree.insertNode({100, 200, 300}, makeGroupSlots(1, 42));
+    tree.insertNode(nullptr, {100, 200, 300}, make2DSlots(1, 3, 42));
     EXPECT_EQ(tree.nodeCount(), 3u);
 
     // Find and remove leaf node (300)
@@ -112,9 +123,10 @@ TEST(BlockTreeTest, RemoveLeafNode) {
 
 TEST(BlockTreeTest, RemoveEmptyAncestors) {
     BlockTree tree(1);
-    // Insert root → 100 → 200 → 300, all with empty group_slots except leaf
-    tree.insertNode({100, 200}, {});  // intermediate nodes have default (empty) slots
-    TreeNode* leaf = tree.insertNode({100, 200, 300}, makeGroupSlots(1, 42));
+    // Insert root → 100 → 200 with empty group_slots (no data)
+    tree.insertNode(nullptr, {100, 200}, makeEmpty2DSlots(2));
+    // Insert root → 100 → 200 → 300 with data (existing 100, 200 not overwritten)
+    TreeNode* leaf = tree.insertNode(nullptr, {100, 200, 300}, make2DSlots(1, 3, 42));
     EXPECT_EQ(tree.nodeCount(), 3u);
 
     // Remove the leaf
@@ -138,19 +150,20 @@ TEST(BlockTreeTest, RemoveEmptyAncestors) {
 
 TEST(BlockTreeTest, RemoveEmptyAncestorsStopsAtData) {
     BlockTree tree(1);
-    // Insert 100 → 200, where 100 has data
-    tree.insertNode({100}, makeGroupSlots(1, 10));
-    TreeNode* leaf = tree.insertNode({100, 200}, makeGroupSlots(1, 20));
+    // Insert 100 with data
+    tree.insertNode(nullptr, {100}, make2DSlots(1, 1, 10));
+    // Insert 100 → 200 with data (100 already exists, only 200 is new)
+    TreeNode* leaf = tree.insertNode(nullptr, {100, 200}, make2DSlots(1, 2, 20));
 
     // Remove leaf 200
     tree.removeNode(leaf);
 
-    // removeEmptyAncestors from 200's position: 100 has data → stops
+    // removeEmptyAncestors from 100's position: 100 has data → stops
     auto             result          = tree.findNode({100});
     std::vector<int> reusable_groups = {0};
     tree.removeEmptyAncestors(result.matched_node, reusable_groups);
 
-    // 100 should still be in the tree
+    // 100 should still be in the tree (it has data in group 0)
     EXPECT_EQ(tree.nodeCount(), 1u);
     auto check = tree.findNode({100});
     EXPECT_EQ(check.matched_blocks, 1u);
@@ -158,36 +171,59 @@ TEST(BlockTreeTest, RemoveEmptyAncestorsStopsAtData) {
 
 TEST(BlockTreeTest, RepeatedInsertDoesNotDuplicate) {
     BlockTree tree(1);
-    tree.insertNode({100, 200}, makeGroupSlots(1, 1));
+    tree.insertNode(nullptr, {100, 200}, make2DSlots(1, 2, 1));
     EXPECT_EQ(tree.nodeCount(), 2u);
 
     // Insert same path again — should reuse existing nodes
-    tree.insertNode({100, 200}, makeGroupSlots(1, 2));
+    tree.insertNode(nullptr, {100, 200}, make2DSlots(1, 2, 50));
     EXPECT_EQ(tree.nodeCount(), 2u);
 
     // After Bug 3 fix: existing nodes are NOT overwritten.
     // Only newly created nodes get group_slots assigned.
     auto result = tree.findNode({100, 200});
     ASSERT_NE(result.matched_node, nullptr);
-    EXPECT_EQ(result.matched_node->group_slots[0].device_blocks[0], 1);
+    EXPECT_EQ(result.matched_node->group_slots[0].device_blocks[0], 2);  // original value (1+1)
 }
 
 TEST(BlockTreeTest, InsertEmptyKeys) {
     BlockTree tree(1);
-    TreeNode* node = tree.insertNode({}, {});
+    TreeNode* node = tree.insertNode(nullptr, {}, {});
     EXPECT_EQ(node, tree.root());
     EXPECT_EQ(tree.nodeCount(), 0u);
+}
+
+TEST(BlockTreeTest, InsertWithParent) {
+    BlockTree tree(1);
+    // First insert: root → 100 → 200
+    tree.insertNode(nullptr, {100, 200}, make2DSlots(1, 2, 10));
+
+    // Find node 200 and use it as parent to insert 300
+    auto      find   = tree.findNode({100, 200});
+    TreeNode* parent = find.matched_node;
+    ASSERT_NE(parent, nullptr);
+
+    TreeNode* leaf = tree.insertNode(parent, {300}, make2DSlots(1, 1, 50));
+    ASSERT_NE(leaf, nullptr);
+    EXPECT_EQ(leaf->cache_key, 300);
+    EXPECT_EQ(leaf->group_slots[0].device_blocks[0], 50);
+    EXPECT_EQ(tree.nodeCount(), 3u);
+
+    // Verify full path is findable
+    auto result = tree.findNode({100, 200, 300});
+    EXPECT_EQ(result.matched_blocks, 3u);
 }
 
 TEST(BlockTreeTest, MultipleGroups) {
     BlockTree tree(3);  // 3 component groups
 
-    std::vector<GroupSlot> slots(3);
-    slots[0].device_blocks = {10};
-    slots[1].device_blocks = {20, 21};
-    slots[2].device_blocks = {30};
+    // Create 2D slots for a single node with 3 groups
+    std::vector<std::vector<GroupSlot>> slots(1);
+    slots[0].resize(3);
+    slots[0][0].device_blocks = {10};
+    slots[0][1].device_blocks = {20, 21};
+    slots[0][2].device_blocks = {30};
 
-    TreeNode* leaf = tree.insertNode({100}, slots);
+    TreeNode* leaf = tree.insertNode(nullptr, {100}, slots);
     ASSERT_NE(leaf, nullptr);
     EXPECT_EQ(leaf->group_slots.size(), 3u);
     EXPECT_EQ(leaf->group_slots[0].device_blocks[0], 10);
@@ -199,33 +235,34 @@ TEST(BlockTreeTest, MultipleGroups) {
 TEST(BlockTreeTest, InsertDoesNotOverwriteExistingNodeSlots) {
     BlockTree tree(1);
 
-    // First insert: 100 -> 200, with device_blocks={42}
-    std::vector<GroupSlot> slots1(1);
-    slots1[0].device_blocks = {42};
-    tree.insertNode({100, 200}, slots1);
+    // First insert: 100 -> 200, with device_blocks={42, 43}
+    tree.insertNode(nullptr, {100, 200}, make2DSlots(1, 2, 42));
 
-    // Second insert: 100 -> 200 -> 300, with device_blocks={99}
-    std::vector<GroupSlot> slots2(1);
-    slots2[0].device_blocks = {99};
-    tree.insertNode({100, 200, 300}, slots2);
+    // Second insert: 100 -> 200 -> 300, with device_blocks={99, 100, 101}
+    tree.insertNode(nullptr, {100, 200, 300}, make2DSlots(1, 3, 99));
 
-    // Verify: nodes 100 and 200 retain original {42}, only 300 gets {99}
+    // Verify: nodes 100 and 200 retain original values, only 300 gets new value
     auto result = tree.findNode({100, 200, 300});
     ASSERT_EQ(result.path.size(), 3u);
-    EXPECT_EQ(result.path[0]->group_slots[0].device_blocks[0], 42);  // 100 unchanged
-    EXPECT_EQ(result.path[1]->group_slots[0].device_blocks[0], 42);  // 200 unchanged
-    EXPECT_EQ(result.path[2]->group_slots[0].device_blocks[0], 99);  // 300 new
+    EXPECT_EQ(result.path[0]->group_slots[0].device_blocks[0], 42);   // 100 unchanged
+    EXPECT_EQ(result.path[1]->group_slots[0].device_blocks[0], 43);   // 200 unchanged
+    EXPECT_EQ(result.path[2]->group_slots[0].device_blocks[0], 101);  // 300 new (99+2)
 }
 
 // UT-3: Verify removeEmptyAncestors only considers REUSABLE groups (Bug 2 fix)
 TEST(BlockTreeTest, RemoveEmptyAncestorsIgnoresNonReusableGroups) {
     BlockTree tree(2);
 
-    // Build: root -> A(100) -> B(200)
-    std::vector<GroupSlot> slots(2);
-    slots[0].device_blocks = {NULL_BLOCK_IDX};  // group 0 (REUSABLE) empty
-    slots[1].device_blocks = {42};              // group 1 (NON_REUSABLE) has data
-    tree.insertNode({100, 200}, slots);
+    // Build: root -> A(100) -> B(200) with 2 groups
+    // group 0 (REUSABLE) has NULL_BLOCK_IDX, group 1 (NON_REUSABLE) has data
+    std::vector<std::vector<GroupSlot>> slots(2);  // 2 nodes
+    slots[0].resize(2);
+    slots[0][0].device_blocks = {NULL_BLOCK_IDX};  // group 0 empty
+    slots[0][1].device_blocks = {42};              // group 1 has data
+    slots[1].resize(2);
+    slots[1][0].device_blocks = {NULL_BLOCK_IDX};  // group 0 empty
+    slots[1][1].device_blocks = {43};              // group 1 has data
+    tree.insertNode(nullptr, {100, 200}, slots);
 
     auto find = tree.findNode({100, 200});
     ASSERT_EQ(find.path.size(), 2u);

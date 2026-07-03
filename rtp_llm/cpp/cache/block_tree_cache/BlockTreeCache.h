@@ -92,8 +92,8 @@ public:
     ~BlockTreeCache();
 
     BlockTreeMatchResult match(const CacheKeysType& cache_keys);
-    void                 insert(const CacheKeysType& cache_keys, const std::vector<GroupSlot>& slots);
-    int                  evict(size_t num_blocks, Tier tier = Tier::DEVICE);
+    void insert(TreeNode* parent, const CacheKeysType& cache_keys, const std::vector<std::vector<GroupSlot>>& slots);
+    int  evict(size_t num_blocks, Tier tier = Tier::DEVICE);
 
     bool       isEvictable(TreeNode* node, int group_id) const;
     CacheStats getStats() const;

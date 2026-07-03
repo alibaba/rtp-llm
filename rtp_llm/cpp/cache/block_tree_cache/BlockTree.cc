@@ -52,12 +52,16 @@ BlockTreeFindResult BlockTree::findNode(const CacheKeysType& cache_keys) const {
     return result;
 }
 
-TreeNode* BlockTree::insertNode(const CacheKeysType& cache_keys, const std::vector<GroupSlot>& group_slots) {
+TreeNode* BlockTree::insertNode(TreeNode*                                  parent,
+                                const CacheKeysType&                       cache_keys,
+                                const std::vector<std::vector<GroupSlot>>& slots) {
     if (cache_keys.empty()) {
-        return root_.get();
+        return parent ? parent : root_.get();
     }
+    RTP_LLM_CHECK_WITH_INFO(slots.size() == cache_keys.size(),
+                            "BlockTree::insertNode: slots.size() must equal cache_keys.size()");
 
-    TreeNode* current = root_.get();
+    TreeNode* current = parent ? parent : root_.get();
 
     for (size_t i = 0; i < cache_keys.size(); ++i) {
         CacheKeyType key = cache_keys[i];
@@ -66,12 +70,12 @@ TreeNode* BlockTree::insertNode(const CacheKeysType& cache_keys, const std::vect
             // Existing node — move to it, do NOT overwrite group_slots
             current = it->second;
         } else {
-            // Create new child and assign group_slots
+            // Create new child and assign group_slots[i]
             TreeNode* child        = createNode(key, current);
             current->children[key] = child;
             current                = child;
-            if (!group_slots.empty()) {
-                current->group_slots = group_slots;
+            if (!slots[i].empty()) {
+                current->group_slots = slots[i];
             }
         }
     }

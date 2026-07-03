@@ -55,25 +55,31 @@ TEST_F(BlockTreeCacheTest, MatchEmptyTree) {
 }
 
 TEST_F(BlockTreeCacheTest, MatchAfterInsert) {
-    // Insert path: 100 → 200 → 300
-    std::vector<GroupSlot> slots(1);
-    slots[0].device_blocks = {42};
+    // Insert path: 100 → 200 → 300 with per-node blocks
+    std::vector<std::vector<GroupSlot>> slots(3, std::vector<GroupSlot>(1));
+    slots[0][0].device_blocks = {42};
+    slots[1][0].device_blocks = {43};
+    slots[2][0].device_blocks = {44};
 
-    cache_->insert({100, 200, 300}, slots);
+    cache_->insert(nullptr, {100, 200, 300}, slots);
 
     auto result = cache_->match({100, 200, 300});
     EXPECT_NE(result.matched_node, nullptr);
     EXPECT_EQ(result.matched_blocks, 3u);
-    // Each node along the path has device_blocks={42}, so 3 nodes * 1 block = 3
+    // Each node along the path has its own device_blocks
     EXPECT_EQ(result.block_indices.size(), 3u);
     EXPECT_EQ(result.block_indices[0], 42);
+    EXPECT_EQ(result.block_indices[1], 43);
+    EXPECT_EQ(result.block_indices[2], 44);
 }
 
 TEST_F(BlockTreeCacheTest, MatchPartialPath) {
-    std::vector<GroupSlot> slots(1);
-    slots[0].device_blocks = {42};
+    std::vector<std::vector<GroupSlot>> slots(3, std::vector<GroupSlot>(1));
+    slots[0][0].device_blocks = {42};
+    slots[1][0].device_blocks = {43};
+    slots[2][0].device_blocks = {44};
 
-    cache_->insert({100, 200, 300}, slots);
+    cache_->insert(nullptr, {100, 200, 300}, slots);
 
     // Match only first 2 keys (4th key doesn't exist)
     auto result = cache_->match({100, 200, 999});
@@ -82,21 +88,23 @@ TEST_F(BlockTreeCacheTest, MatchPartialPath) {
 }
 
 TEST_F(BlockTreeCacheTest, InsertNewPath) {
-    std::vector<GroupSlot> slots(1);
-    slots[0].device_blocks = {10};
+    std::vector<std::vector<GroupSlot>> slots(2, std::vector<GroupSlot>(1));
+    slots[0][0].device_blocks = {10};
+    slots[1][0].device_blocks = {11};
 
-    cache_->insert({100, 200}, slots);
+    cache_->insert(nullptr, {100, 200}, slots);
 
     auto stats = cache_->getStats();
     EXPECT_EQ(stats.tree_node_count, 2u);
 }
 
 TEST_F(BlockTreeCacheTest, InsertOverlappingPathUpdatesHeat) {
-    std::vector<GroupSlot> slots(1);
-    slots[0].device_blocks = {10};
+    std::vector<std::vector<GroupSlot>> slots(2, std::vector<GroupSlot>(1));
+    slots[0][0].device_blocks = {10};
+    slots[1][0].device_blocks = {11};
 
-    cache_->insert({100, 200}, slots);
-    cache_->insert({100, 200}, slots);  // Overlap
+    cache_->insert(nullptr, {100, 200}, slots);
+    cache_->insert(nullptr, {100, 200}, slots);  // Overlap
 
     // Should still be 2 nodes (no duplication)
     auto stats = cache_->getStats();
@@ -105,9 +113,11 @@ TEST_F(BlockTreeCacheTest, InsertOverlappingPathUpdatesHeat) {
 
 TEST_F(BlockTreeCacheTest, EvictDeviceLeaf) {
     // Insert: root → 100 → 200 → 300
-    std::vector<GroupSlot> slots(1);
-    slots[0].device_blocks = {42};
-    cache_->insert({100, 200, 300}, slots);
+    std::vector<std::vector<GroupSlot>> slots(3, std::vector<GroupSlot>(1));
+    slots[0][0].device_blocks = {42};
+    slots[1][0].device_blocks = {43};
+    slots[2][0].device_blocks = {44};
+    cache_->insert(nullptr, {100, 200, 300}, slots);
 
     // 300 is a DeviceLeaf (no children with device data)
     auto stats = cache_->getStats();
@@ -149,11 +159,11 @@ TEST_F(BlockTreeCacheTest, CascadeEviction) {
     auto multi_cache = std::make_unique<BlockTreeCache>(std::move(tree), std::move(groups), std::move(components));
 
     // Insert a node with both Full and SWA data
-    std::vector<GroupSlot> slots(2);
-    slots[0].device_blocks = {10};  // Full
-    slots[1].device_blocks = {20};  // SWA
+    std::vector<std::vector<GroupSlot>> slots(1, std::vector<GroupSlot>(2));
+    slots[0][0].device_blocks = {10};  // Full
+    slots[0][1].device_blocks = {20};  // SWA
 
-    multi_cache->insert({100}, slots);
+    multi_cache->insert(nullptr, {100}, slots);
 
     // Evict Full group at DEVICE → should cascade to SWA
     int evicted = multi_cache->evict(1, Tier::DEVICE);
@@ -163,10 +173,11 @@ TEST_F(BlockTreeCacheTest, CascadeEviction) {
 }
 
 TEST_F(BlockTreeCacheTest, NodeDeletionWhenAllEmpty) {
-    std::vector<GroupSlot> slots(1);
-    slots[0].device_blocks = {42};
+    std::vector<std::vector<GroupSlot>> slots(2, std::vector<GroupSlot>(1));
+    slots[0][0].device_blocks = {42};
+    slots[1][0].device_blocks = {43};
 
-    cache_->insert({100, 200}, slots);
+    cache_->insert(nullptr, {100, 200}, slots);
 
     auto stats_before = cache_->getStats();
     EXPECT_EQ(stats_before.tree_node_count, 2u);
@@ -187,9 +198,9 @@ TEST_F(BlockTreeCacheTest, GetStats) {
     EXPECT_EQ(stats.tree_node_count, 0u);
     EXPECT_EQ(stats.device_heap_total_size, 0u);
 
-    std::vector<GroupSlot> slots(1);
-    slots[0].device_blocks = {10};
-    cache_->insert({100}, slots);
+    std::vector<std::vector<GroupSlot>> slots(1, std::vector<GroupSlot>(1));
+    slots[0][0].device_blocks = {10};
+    cache_->insert(nullptr, {100}, slots);
 
     stats = cache_->getStats();
     EXPECT_EQ(stats.tree_node_count, 1u);
@@ -227,7 +238,7 @@ TEST_F(BlockTreeCacheTest, MatchEmptyKeys) {
 }
 
 TEST_F(BlockTreeCacheTest, InsertEmptyKeys) {
-    cache_->insert({}, {});
+    cache_->insert(nullptr, {}, {});
     auto stats = cache_->getStats();
     EXPECT_EQ(stats.tree_node_count, 0u);
 }
@@ -237,10 +248,10 @@ TEST_F(BlockTreeCacheTest, ThreadSafety) {
     std::vector<std::thread> threads;
     for (int i = 0; i < 4; ++i) {
         threads.emplace_back([this, i]() {
-            std::vector<GroupSlot> slots(1);
-            slots[0].device_blocks = {static_cast<BlockIdxType>(i * 100)};
-            CacheKeysType keys     = {static_cast<CacheKeyType>(i * 1000 + 1)};
-            cache_->insert(keys, slots);
+            std::vector<std::vector<GroupSlot>> slots(1, std::vector<GroupSlot>(1));
+            slots[0][0].device_blocks = {static_cast<BlockIdxType>(i * 100)};
+            CacheKeysType keys        = {static_cast<CacheKeyType>(i * 1000 + 1)};
+            cache_->insert(nullptr, keys, slots);
         });
     }
 
@@ -282,9 +293,9 @@ TEST_F(BlockTreeCacheTest, EvictWithCopyEngineAllocatesHostBlock) {
                                                      /*enable_device=*/true,
                                                      /*enable_memory=*/true);
 
-    std::vector<GroupSlot> slots(1);
-    slots[0].device_blocks = {42};
-    ce_cache->insert({100}, slots);
+    std::vector<std::vector<GroupSlot>> slots(1, std::vector<GroupSlot>(1));
+    slots[0][0].device_blocks = {42};
+    ce_cache->insert(nullptr, {100}, slots);
 
     EXPECT_EQ(ce_cache->getStats().tree_node_count, 1u);
     EXPECT_EQ(host_pool->freeBlocksNum(), 4u);
@@ -324,9 +335,11 @@ TEST_F(BlockTreeCacheTest, SequentialEvictionAllocatesMultipleHostBlocks) {
                                                      /*enable_device=*/true,
                                                      /*enable_memory=*/false);
 
-    std::vector<GroupSlot> slots(1);
-    slots[0].device_blocks = {42};
-    ce_cache->insert({100, 200, 300}, slots);
+    std::vector<std::vector<GroupSlot>> slots(3, std::vector<GroupSlot>(1));
+    slots[0][0].device_blocks = {42};
+    slots[1][0].device_blocks = {43};
+    slots[2][0].device_blocks = {44};
+    ce_cache->insert(nullptr, {100, 200, 300}, slots);
 
     // Evict all 3 nodes sequentially (synchronous direct release)
     for (int i = 0; i < 3; ++i) {
@@ -359,9 +372,9 @@ TEST_F(BlockTreeCacheTest, NonReusableEvictionNoHostAllocation) {
                                                      /*enable_device=*/true,
                                                      /*enable_memory=*/true);
 
-    std::vector<GroupSlot> slots(1);
-    slots[0].device_blocks = {42};
-    ce_cache->insert({100}, slots);
+    std::vector<std::vector<GroupSlot>> slots(1, std::vector<GroupSlot>(1));
+    slots[0][0].device_blocks = {42};
+    ce_cache->insert(nullptr, {100}, slots);
 
     ce_cache->evict(1, Tier::DEVICE);
     // Synchronous, no wait needed
@@ -409,9 +422,9 @@ TEST_F(BlockTreeCacheTest, EvictDisabledTierReturnsZero) {
     auto cache = std::make_unique<BlockTreeCache>(
         std::move(tree), std::move(groups), std::vector<Component>{}, nullptr, nullptr, 2);
 
-    std::vector<GroupSlot> slots(1);
-    slots[0].device_blocks = {42};
-    cache->insert({100}, slots);
+    std::vector<std::vector<GroupSlot>> slots(1, std::vector<GroupSlot>(1));
+    slots[0][0].device_blocks = {42};
+    cache->insert(nullptr, {100}, slots);
 
     // Evict HOST tier — disabled → returns 0
     EXPECT_EQ(cache->evict(1, Tier::HOST), 0);
@@ -434,9 +447,9 @@ TEST_F(BlockTreeCacheTest, HostDisabledDirectRelease) {
     auto cache = std::make_unique<BlockTreeCache>(
         std::move(tree), std::move(groups), std::vector<Component>{}, host_pool, nullptr, 2);
 
-    std::vector<GroupSlot> slots(1);
-    slots[0].device_blocks = {42};
-    cache->insert({100}, slots);
+    std::vector<std::vector<GroupSlot>> slots(1, std::vector<GroupSlot>(1));
+    slots[0][0].device_blocks = {42};
+    cache->insert(nullptr, {100}, slots);
 
     cache->evict(1, Tier::DEVICE);
     cache->waitForPendingTasks();
@@ -490,10 +503,10 @@ TEST_F(BlockTreeCacheTest, NodeDeletedEvenIfNonReusableHasData) {
     auto cache = std::make_unique<BlockTreeCache>(std::move(tree), std::move(groups), std::vector<Component>{});
 
     // Insert: REUSABLE group has data, NON_REUSABLE also has data
-    std::vector<GroupSlot> slots(2);
-    slots[0].device_blocks = {42};  // REUSABLE
-    slots[1].device_blocks = {99};  // NON_REUSABLE
-    cache->insert({100}, slots);
+    std::vector<std::vector<GroupSlot>> slots(1, std::vector<GroupSlot>(2));
+    slots[0][0].device_blocks = {42};  // REUSABLE
+    slots[0][1].device_blocks = {99};  // NON_REUSABLE
+    cache->insert(nullptr, {100}, slots);
 
     EXPECT_EQ(cache->getStats().tree_node_count, 1u);
 
@@ -514,10 +527,10 @@ TEST_F(BlockTreeCacheTest, SWABuildTransferSupportsHostToDisk) {
     swa->reuse_policy       = CacheReusePolicy::REUSABLE;
 
     // Create a mock tree node with host data
-    auto                   tree = std::make_unique<BlockTree>(1);
-    std::vector<GroupSlot> slots(1);
-    slots[0].device_blocks = {42};
-    tree->insertNode({100}, slots);
+    auto                                tree = std::make_unique<BlockTree>(1);
+    std::vector<std::vector<GroupSlot>> slots(1, std::vector<GroupSlot>(1));
+    slots[0][0].device_blocks = {42};
+    tree->insertNode(nullptr, {100}, slots);
     auto find = tree->findNode({100});
     ASSERT_NE(find.matched_node, nullptr);
     find.matched_node->group_slots[0].host_block = 7;
@@ -563,10 +576,10 @@ TEST_F(BlockTreeCacheTest, MatchUsesFullGroupIdNotHardcodedZero) {
     std::vector<ComponentGroupPtr> groups = {swa, full};
     auto cache = std::make_unique<BlockTreeCache>(std::move(tree), std::move(groups), std::vector<Component>{});
 
-    std::vector<GroupSlot> slots(2);
-    slots[0].device_blocks = {10};  // SWA group
-    slots[1].device_blocks = {42};  // FULL group
-    cache->insert({100}, slots);
+    std::vector<std::vector<GroupSlot>> slots(1, std::vector<GroupSlot>(2));
+    slots[0][0].device_blocks = {10};  // SWA group
+    slots[0][1].device_blocks = {42};  // FULL group
+    cache->insert(nullptr, {100}, slots);
 
     auto result = cache->match({100});
     EXPECT_EQ(result.matched_blocks, 1u);
@@ -593,9 +606,9 @@ TEST_F(BlockTreeCacheTest, NodeEntersHostHeapAfterDemotion) {
     auto cache = std::make_unique<BlockTreeCache>(
         std::move(tree), std::move(groups), std::vector<Component>{}, host_pool, nullptr, 2, nullptr, true, true);
 
-    std::vector<GroupSlot> slots(1);
-    slots[0].device_blocks = {42};
-    cache->insert({100}, slots);
+    std::vector<std::vector<GroupSlot>> slots(1, std::vector<GroupSlot>(1));
+    slots[0][0].device_blocks = {42};
+    cache->insert(nullptr, {100}, slots);
 
     cache->evict(1, Tier::DEVICE);
     cache->waitForPendingTasks();
@@ -622,9 +635,11 @@ TEST_F(BlockTreeCacheTest, ParentBecomesDeviceLeafAfterChildEviction) {
     auto cache = std::make_unique<BlockTreeCache>(std::move(tree), std::move(groups), std::vector<Component>{});
 
     // Insert: root -> A -> B -> C
-    std::vector<GroupSlot> slots(1);
-    slots[0].device_blocks = {42};
-    cache->insert({100, 200, 300}, slots);
+    std::vector<std::vector<GroupSlot>> slots(3, std::vector<GroupSlot>(1));
+    slots[0][0].device_blocks = {42};
+    slots[1][0].device_blocks = {43};
+    slots[2][0].device_blocks = {44};
+    cache->insert(nullptr, {100, 200, 300}, slots);
 
     // Initially only C (leaf) is in heap
     EXPECT_EQ(cache->getStats().device_heap_total_size, 1u);
@@ -653,9 +668,9 @@ TEST_F(BlockTreeCacheTest, NonReusableFullLifecycle) {
     auto cache = std::make_unique<BlockTreeCache>(std::move(tree), std::move(groups), std::vector<Component>{});
 
     // Insert
-    std::vector<GroupSlot> slots(1);
-    slots[0].device_blocks = {42};
-    cache->insert({100}, slots);
+    std::vector<std::vector<GroupSlot>> slots(1, std::vector<GroupSlot>(1));
+    slots[0][0].device_blocks = {42};
+    cache->insert(nullptr, {100}, slots);
     EXPECT_EQ(cache->getStats().tree_node_count, 1u);
 
     // Match
@@ -693,9 +708,9 @@ TEST_F(BlockTreeCacheTest, CopyFailureDoesNotUpdateSlot) {
     auto cache = std::make_unique<BlockTreeCache>(
         std::move(tree), std::move(groups), std::move(components), host_pool, nullptr, 2, nullptr, true, true);
 
-    std::vector<GroupSlot> slots(1);
-    slots[0].device_blocks = {42};
-    cache->insert({100}, slots);
+    std::vector<std::vector<GroupSlot>> slots(1, std::vector<GroupSlot>(1));
+    slots[0][0].device_blocks = {42};
+    cache->insert(nullptr, {100}, slots);
 
     // Evict: DeviceBufferResolver returns empty -> D2H copy should fail
     // After fix: host_block should NOT be set, node stays in device heap
@@ -790,9 +805,9 @@ TEST_F(BlockTreeCacheTest, DeviceBufferResolverEnablesD2HCopy) {
     // Inject the real resolver
     cache->setDeviceBufferResolver(device_mem.makeResolver());
 
-    std::vector<GroupSlot> slots(1);
-    slots[0].device_blocks = {42};
-    cache->insert({100}, slots);
+    std::vector<std::vector<GroupSlot>> slots(1, std::vector<GroupSlot>(1));
+    slots[0][0].device_blocks = {42};
+    cache->insert(nullptr, {100}, slots);
 
     // Evict D2H — should succeed with real resolver
     cache->evict(1, Tier::DEVICE);
@@ -828,9 +843,9 @@ TEST_F(BlockTreeCacheTest, LoadBackDetectsHostData) {
     cache->setEnableLoadBack(true);
 
     // Insert a node and manually set host data (simulating prior eviction)
-    std::vector<GroupSlot> slots(1);
-    slots[0].device_blocks = {42};
-    cache->insert({100}, slots);
+    std::vector<std::vector<GroupSlot>> slots(1, std::vector<GroupSlot>(1));
+    slots[0][0].device_blocks = {42};
+    cache->insert(nullptr, {100}, slots);
 
     // Evict to host (no CopyEngine → direct release, node deleted)
     // Instead, manually set up a node with host_block but no device_blocks
@@ -839,9 +854,9 @@ TEST_F(BlockTreeCacheTest, LoadBackDetectsHostData) {
 
     // After eviction without host enabled, node is deleted.
     // Let's insert again and manually simulate host-only state
-    std::vector<GroupSlot> slots2(1);
-    slots2[0].device_blocks = {55};
-    cache->insert({200}, slots2);
+    std::vector<std::vector<GroupSlot>> slots2(1, std::vector<GroupSlot>(1));
+    slots2[0][0].device_blocks = {55};
+    cache->insert(nullptr, {200}, slots2);
 
     // Manually set host_block and clear device_blocks to simulate evicted state
     auto find = cache->tree()->findNode({200});

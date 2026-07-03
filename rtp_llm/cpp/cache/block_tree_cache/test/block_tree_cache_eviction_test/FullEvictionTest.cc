@@ -20,9 +20,11 @@ protected:
 
     // Insert a path with given device block for group 0.
     void insertPath(const CacheKeysType& keys, BlockIdxType dev_block) {
-        std::vector<GroupSlot> slots(1);
-        slots[0].device_blocks = {dev_block};
-        cache_->insert(keys, slots);
+        std::vector<std::vector<GroupSlot>> slots(keys.size(), std::vector<GroupSlot>(1));
+        for (size_t i = 0; i < keys.size(); ++i) {
+            slots[i][0].device_blocks = {static_cast<BlockIdxType>(dev_block + i)};
+        }
+        cache_->insert(nullptr, keys, slots);
     }
 
     std::unique_ptr<BlockTreeCache> cache_;
@@ -168,9 +170,9 @@ TEST_F(FullEvictionTest, NonReusableEvictionIsSynchronous) {
     auto                           nr_cache = std::make_unique<BlockTreeCache>(
         std::move(tree), std::move(groups), std::vector<Component>{}, nullptr, nullptr, 2);
 
-    std::vector<GroupSlot> slots(1);
-    slots[0].device_blocks = {10};
-    nr_cache->insert({100}, slots);
+    std::vector<std::vector<GroupSlot>> slots(1, std::vector<GroupSlot>(1));
+    slots[0][0].device_blocks = {10};
+    nr_cache->insert(nullptr, {100}, slots);
     EXPECT_EQ(nr_cache->getStats().tree_node_count, 1u);
 
     int evicted = nr_cache->evict(1, Tier::DEVICE);

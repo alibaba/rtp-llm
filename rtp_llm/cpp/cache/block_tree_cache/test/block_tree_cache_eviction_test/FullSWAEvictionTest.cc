@@ -22,10 +22,12 @@ protected:
     }
 
     void insertPath(const CacheKeysType& keys, BlockIdxType full_block, BlockIdxType swa_block) {
-        std::vector<GroupSlot> slots(2);
-        slots[0].device_blocks = {full_block};
-        slots[1].device_blocks = {swa_block};
-        cache_->insert(keys, slots);
+        std::vector<std::vector<GroupSlot>> slots(keys.size(), std::vector<GroupSlot>(2));
+        for (size_t i = 0; i < keys.size(); ++i) {
+            slots[i][0].device_blocks = {static_cast<BlockIdxType>(full_block + i)};
+            slots[i][1].device_blocks = {static_cast<BlockIdxType>(swa_block + i)};
+        }
+        cache_->insert(nullptr, keys, slots);
     }
 
     std::unique_ptr<BlockTreeCache> cache_;
@@ -77,9 +79,11 @@ TEST_F(FullSWAEvictionTest, SWAOnlySequentialDrain) {
     auto                           swa_cache = std::make_unique<BlockTreeCache>(
         std::move(tree), std::move(groups), std::vector<Component>{}, nullptr, nullptr, 2);
 
-    std::vector<GroupSlot> slots(1);
-    slots[0].device_blocks = {20};
-    swa_cache->insert({100, 200, 300}, slots);
+    std::vector<std::vector<GroupSlot>> slots(3, std::vector<GroupSlot>(1));
+    slots[0][0].device_blocks = {20};
+    slots[1][0].device_blocks = {21};
+    slots[2][0].device_blocks = {22};
+    swa_cache->insert(nullptr, {100, 200, 300}, slots);
 
     EXPECT_EQ(swa_cache->getStats().device_heap_total_size, 1u);  // [300]
 

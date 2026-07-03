@@ -208,14 +208,16 @@ BlockTreeMatchResult BlockTreeCache::match(const CacheKeysType& cache_keys) {
     return result;
 }
 
-void BlockTreeCache::insert(const CacheKeysType& cache_keys, const std::vector<GroupSlot>& slots) {
+void BlockTreeCache::insert(TreeNode*                                  parent,
+                            const CacheKeysType&                       cache_keys,
+                            const std::vector<std::vector<GroupSlot>>& slots) {
     std::lock_guard<std::mutex> lock(mutex_);
 
     if (cache_keys.empty()) {
         return;
     }
 
-    TreeNode* leaf = tree_->insertNode(cache_keys, slots);
+    TreeNode* leaf = tree_->insertNode(parent, cache_keys, slots);
 
     // Commit data and add leaf to heaps
     for (auto& group : component_groups_) {

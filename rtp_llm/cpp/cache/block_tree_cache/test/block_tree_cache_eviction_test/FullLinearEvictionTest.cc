@@ -21,10 +21,12 @@ protected:
     }
 
     void insertPath(const CacheKeysType& keys, BlockIdxType full_block, BlockIdxType linear_block) {
-        std::vector<GroupSlot> slots(2);
-        slots[0].device_blocks = {full_block};
-        slots[1].device_blocks = {linear_block};
-        cache_->insert(keys, slots);
+        std::vector<std::vector<GroupSlot>> slots(keys.size(), std::vector<GroupSlot>(2));
+        for (size_t i = 0; i < keys.size(); ++i) {
+            slots[i][0].device_blocks = {static_cast<BlockIdxType>(full_block + i)};
+            slots[i][1].device_blocks = {static_cast<BlockIdxType>(linear_block + i)};
+        }
+        cache_->insert(nullptr, keys, slots);
     }
 
     std::unique_ptr<BlockTreeCache> cache_;
@@ -73,9 +75,11 @@ TEST_F(FullLinearEvictionTest, LinearOnlySequentialDrain) {
     auto                           lin_cache = std::make_unique<BlockTreeCache>(
         std::move(tree), std::move(groups), std::vector<Component>{}, nullptr, nullptr, 2);
 
-    std::vector<GroupSlot> slots(1);
-    slots[0].device_blocks = {30};
-    lin_cache->insert({100, 200, 300}, slots);
+    std::vector<std::vector<GroupSlot>> slots(3, std::vector<GroupSlot>(1));
+    slots[0][0].device_blocks = {30};
+    slots[1][0].device_blocks = {31};
+    slots[2][0].device_blocks = {32};
+    lin_cache->insert(nullptr, {100, 200, 300}, slots);
 
     EXPECT_EQ(lin_cache->getStats().device_heap_total_size, 1u);  // [300]
 
@@ -116,10 +120,12 @@ TEST_F(FullLinearEvictionTest, FullEvictionWithNonReusableLinear) {
     auto                           nr_cache = std::make_unique<BlockTreeCache>(
         std::move(tree), std::move(groups), std::vector<Component>{}, nullptr, nullptr, 2);
 
-    std::vector<GroupSlot> slots(2);
-    slots[0].device_blocks = {10};
-    slots[1].device_blocks = {30};
-    nr_cache->insert({100, 200}, slots);
+    std::vector<std::vector<GroupSlot>> slots(2, std::vector<GroupSlot>(2));
+    slots[0][0].device_blocks = {10};
+    slots[0][1].device_blocks = {30};
+    slots[1][0].device_blocks = {11};
+    slots[1][1].device_blocks = {31};
+    nr_cache->insert(nullptr, {100, 200}, slots);
 
     // Linear NON_REUSABLE: no host/disk heaps
     EXPECT_EQ(nr_cache->componentGroups()[1]->host_heap, nullptr);
