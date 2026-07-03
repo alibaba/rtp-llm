@@ -237,7 +237,6 @@ void CpuTpBroadcaster::cleanupStateLocked() {
     base_path_.clear();
     tp_rank_               = 0;
     tp_size_               = 1;
-    owner_thread_id_       = std::thread::id();
     broadcast_in_progress_ = false;
     initialized_.store(false, std::memory_order_release);
 }
@@ -245,9 +244,6 @@ void CpuTpBroadcaster::cleanupStateLocked() {
 void CpuTpBroadcaster::reset() {
     std::lock_guard<std::mutex> lock(mu_);
     if (initialized_.load(std::memory_order_acquire)) {
-        RTP_LLM_CHECK_WITH_INFO(owner_thread_id_ == std::this_thread::get_id(),
-                                "CpuTpBroadcaster::reset must run on the initializing thread; "
-                                "cross-thread reset/broadcastCPU is unsupported");
         RTP_LLM_CHECK_WITH_INFO(!broadcast_in_progress_,
                                 "CpuTpBroadcaster::reset called while broadcastCPU is in progress; "
                                 "concurrent broadcastCPU/reset is unsupported");
@@ -257,12 +253,8 @@ void CpuTpBroadcaster::reset() {
 
 void CpuTpBroadcaster::initialize(int tp_rank, int tp_size, const std::string& base_path) {
     std::lock_guard<std::mutex> lock(mu_);
-    const auto                  current_thread_id = std::this_thread::get_id();
 
     if (initialized_.load(std::memory_order_acquire)) {
-        RTP_LLM_CHECK_WITH_INFO(owner_thread_id_ == current_thread_id,
-                                "CpuTpBroadcaster::initialize must run on the initializing thread; "
-                                "cross-thread broadcastCPU lifecycle is unsupported");
         if (tp_rank_ == tp_rank && tp_size_ == tp_size && base_path_ == base_path) {
             return;
         }
@@ -276,7 +268,6 @@ void CpuTpBroadcaster::initialize(int tp_rank, int tp_size, const std::string& b
                      base_path.c_str());
     }
 
-    owner_thread_id_       = current_thread_id;
     broadcast_in_progress_ = false;
     if (tp_size <= 1) {
         // Single-rank no-op; broadcast() short-circuits.
@@ -437,9 +428,6 @@ void CpuTpBroadcaster::broadcast(void* buf, std::size_t nbytes, int root) {
         std::lock_guard<std::mutex> lock(mu_);
         RTP_LLM_CHECK_WITH_INFO(initialized_.load(std::memory_order_acquire),
                                 "CpuTpBroadcaster::broadcast called before initialize");
-        RTP_LLM_CHECK_WITH_INFO(owner_thread_id_ == std::this_thread::get_id(),
-                                "CpuTpBroadcaster::broadcast must run on the initializing thread; "
-                                "cross-thread or concurrent broadcastCPU is unsupported");
         if (tp_size_ <= 1 || nbytes == 0) {
             return;
         }

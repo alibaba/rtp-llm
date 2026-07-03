@@ -662,8 +662,8 @@ void registerExecCtxOps(pybind11::module& m) {
         py::arg("tp_size"),
         py::arg("base_path"),
         "Bootstrap the UDS-backed intra-node TP broadcaster used by tpSyncModelInputs. "
-        "Call from the same thread that will use broadcastCPU and destroy it; "
-        "broadcastCPU is not concurrent-safe.");
+        "Request-time broadcastCPU may run from the C++ engine thread; "
+        "do not call broadcastCPU concurrently.");
 
     m.def(
         "destroy_cpu_tp_broadcaster",
@@ -672,7 +672,7 @@ void registerExecCtxOps(pybind11::module& m) {
             CpuTpBroadcaster::instance().reset();
         },
         "Tear down the UDS-backed intra-node TP broadcaster and clear its singleton state. "
-        "Call from the initializer thread; do not race with broadcastCPU.");
+        "Do not race with broadcastCPU.");
 }
 
 }  // namespace rtp_llm

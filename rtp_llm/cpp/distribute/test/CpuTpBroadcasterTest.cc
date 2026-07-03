@@ -366,7 +366,7 @@ TEST(CpuTpBroadcasterTest, ResetAllowsNewBasePath) {
     cleanupTempBase(base2);
 }
 
-TEST(CpuTpBroadcasterTest, RejectsCrossThreadBroadcastAndReset) {
+TEST(CpuTpBroadcasterTest, AllowsCrossThreadBroadcastAndResetWhenIdle) {
     auto& bcast = CpuTpBroadcaster::instance();
     bcast.reset();
 
@@ -383,7 +383,7 @@ TEST(CpuTpBroadcasterTest, RejectsCrossThreadBroadcastAndReset) {
         }
     });
     broadcast_thread.join();
-    EXPECT_NE(broadcast_error.find("initializing thread"), std::string::npos);
+    EXPECT_TRUE(broadcast_error.empty()) << broadcast_error;
 
     std::string reset_error;
     std::thread reset_thread([&] {
@@ -394,7 +394,7 @@ TEST(CpuTpBroadcasterTest, RejectsCrossThreadBroadcastAndReset) {
         }
     });
     reset_thread.join();
-    EXPECT_NE(reset_error.find("initializing thread"), std::string::npos);
+    EXPECT_TRUE(reset_error.empty()) << reset_error;
 
     bcast.reset();
     cleanupTempBase(base);

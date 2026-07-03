@@ -4,16 +4,16 @@
 #include <cstddef>
 #include <mutex>
 #include <string>
-#include <thread>
 #include <vector>
 
 namespace rtp_llm {
 
 // CPU-only UDS broadcaster for intra-node TP metadata sync.
 // Callers must handle unsupported topologies before using this interface.
-// The CPU broadcaster is intentionally single-threaded: initialize(), broadcast(),
-// and reset() must all run on the initializing thread. broadcastCPU does not
-// support concurrent, re-entrant, or cross-thread calls.
+// Python initializes this during distributed bootstrap, while the C++ engine
+// thread performs request-time broadcasts. Calls may cross threads, but
+// broadcastCPU is still serialized: no concurrent or re-entrant broadcasts, and
+// reset must not race with an in-flight broadcast.
 class CpuTpBroadcaster {
 public:
     static CpuTpBroadcaster& instance();
@@ -46,7 +46,6 @@ private:
 
     std::mutex        mu_;
     std::atomic<bool> initialized_{false};
-    std::thread::id   owner_thread_id_;
     bool              broadcast_in_progress_ = false;
     int               tp_rank_               = 0;
     int               tp_size_               = 1;
