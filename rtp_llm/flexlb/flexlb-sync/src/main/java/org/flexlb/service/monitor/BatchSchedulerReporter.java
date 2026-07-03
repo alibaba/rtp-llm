@@ -3,6 +3,7 @@ package org.flexlb.service.monitor;
 import lombok.extern.slf4j.Slf4j;
 import org.flexlb.enums.FlexMetricType;
 import org.flexlb.enums.FlexPriorityType;
+import org.flexlb.dao.route.RoleType;
 import org.flexlb.metric.FlexMetricTags;
 import org.flexlb.metric.FlexMonitor;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -165,11 +166,11 @@ public class BatchSchedulerReporter {
 
     /**
      * Report scheduler inflight map size via {@code health.check.local.task.map.size}.
-     * Uses role=prefill + engineIp=scheduler tags to match the Grafana panel filter.
+     * Uses role=PREFILL + engineIp=scheduler tags to match the Grafana panel filter.
      */
     public void reportSchedulerInflightSize(int size) {
         FlexMetricTags tags = FlexMetricTags.of(
-                "role", "prefill",
+                "role", RoleType.PREFILL.name(),
                 "engineIp", "scheduler");
         monitor.report(ENGINE_LOCAL_TASK_MAP_SIZE, tags, size);
     }
@@ -204,7 +205,7 @@ public class BatchSchedulerReporter {
      */
     public void reportDecodeInflightCount(String engineIp, int count) {
         FlexMetricTags tags = FlexMetricTags.of(
-                "role", "decode",
+                "role", RoleType.DECODE.name(),
                 "engineIp", engineIp);
         monitor.report(DECODE_INFLIGHT_COUNT, tags, count);
     }
@@ -215,7 +216,7 @@ public class BatchSchedulerReporter {
      */
     public void reportDecodeTotalLoad(String engineIp, int totalLoad) {
         FlexMetricTags tags = FlexMetricTags.of(
-                "role", "decode",
+                "role", RoleType.DECODE.name(),
                 "engineIp", engineIp);
         monitor.report(DECODE_TOTAL_LOAD, tags, totalLoad);
     }

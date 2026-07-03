@@ -316,7 +316,7 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
 
         // [ASYNC] Delegate gRPC dispatch — dispatcher owns its own thread pool
         long waitMs = System.currentTimeMillis() - items.get(0).enqueuedAtMs();
-        reporter.reportBatchWaitTimeMs("prefill", prefillEp != null ? prefillEp.getIp() : "", waitMs);
+        reporter.reportBatchWaitTimeMs(RoleType.PREFILL.name(), prefillEp != null ? prefillEp.getIp() : "", waitMs);
         dispatcher.dispatch(active, prefillEp, batchId, predMs, reason, this);
     }
 
@@ -593,7 +593,7 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
         return reporter;
     }
 
-    @Scheduled(fixedRate = 20000L)
+    @Scheduled(fixedRate = 2000L)
     public void reportBatchMetrics() {
         reporter.reportSchedulerInflightSize(inflight.size());
 

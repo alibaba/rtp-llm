@@ -1,6 +1,7 @@
 package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.strategy.PrefillTimePredictor;
+import org.flexlb.dao.route.RoleType;
 import org.flexlb.util.Logger;
 import org.springframework.stereotype.Component;
 
@@ -141,8 +142,8 @@ public class FixedWindowBatcherAlgorithm implements BatcherAlgorithm {
         BatchItem head = picked.get(0);
         long waitMs = ctx.now() - head.enqueuedAtMs();
 
-        ctx.reporter().reportDispatchReason("prefill", ctx.prefillEp().getIp(), reason);
-        ctx.reporter().reportBatchSize("prefill", ctx.prefillEp().getIp(), reason, picked.size());
+        ctx.reporter().reportDispatchReason(RoleType.PREFILL.name(), ctx.prefillEp().getIp(), reason);
+        ctx.reporter().reportBatchSize(RoleType.PREFILL.name(), ctx.prefillEp().getIp(), reason, picked.size());
 
         // Compute batch-aggregated cache hit ratio
         long totalSeqLen = 0;
@@ -151,8 +152,8 @@ public class FixedWindowBatcherAlgorithm implements BatcherAlgorithm {
             totalSeqLen += item.seqLen();
             totalHitCache += item.hitCache();
         }
-        ctx.reporter().reportBatchCacheHitMetrics("prefill", ctx.prefillEp().getIp(), totalHitCache, totalSeqLen);
-        ctx.reporter().reportBatchTotalTokens("prefill", ctx.prefillEp().getIp(), reason, totalSeqLen);
+        ctx.reporter().reportBatchCacheHitMetrics(RoleType.PREFILL.name(), ctx.prefillEp().getIp(), totalHitCache, totalSeqLen);
+        ctx.reporter().reportBatchTotalTokens(RoleType.PREFILL.name(), ctx.prefillEp().getIp(), reason, totalSeqLen);
 
         Logger.info("flexlb_batch_decision reason={} picked_size={} "
                         + "wait_ms={} queue_before={} worker={} head_req_id={}",

@@ -9,6 +9,7 @@ import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusResponse;
+import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.TaskPhase;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.slf4j.Logger;
@@ -304,9 +305,9 @@ public class PrefillEndpoint extends WorkerEndpoint {
      * Called periodically by {@link org.flexlb.balance.scheduler.FlexlbBatchScheduler}.
      */
     public void reportBatchMetrics(BatchSchedulerReporter reporter) {
-        reporter.reportBatcherQueueDepth("prefill", getIp(), getBatcherQueueSize());
-        reporter.reportPrefillInflightBatchCount("prefill", getIp(), getInflightBatchCount());
-        reporter.reportPrefillInflightRequestCount("prefill", getIp(), getInflightRequestCount());
+        reporter.reportBatcherQueueDepth(RoleType.PREFILL.name(), getIp(), getBatcherQueueSize());
+        reporter.reportPrefillInflightBatchCount(RoleType.PREFILL.name(), getIp(), getInflightBatchCount());
+        reporter.reportPrefillInflightRequestCount(RoleType.PREFILL.name(), getIp(), getInflightRequestCount());
     }
 
     /**
@@ -333,9 +334,9 @@ public class PrefillEndpoint extends WorkerEndpoint {
                 batchId, predictedMs, actualMs, gapMs, batch.requests().size(), getIp());
 
         if (reporter != null) {
-            reporter.reportBatchPredictedTimeMs("prefill", getIp(), predictedMs);
-            reporter.reportBatchActualTimeMs("prefill", getIp(), actualMs);
-            reporter.reportBatchPredictGapMs("prefill", getIp(), gapMs);
+            reporter.reportBatchPredictedTimeMs(RoleType.PREFILL.name(), getIp(), predictedMs);
+            reporter.reportBatchActualTimeMs(RoleType.PREFILL.name(), getIp(), actualMs);
+            reporter.reportBatchPredictGapMs(RoleType.PREFILL.name(), getIp(), gapMs);
         }
     }
 
