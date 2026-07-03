@@ -40,3 +40,21 @@ def swizzle_tensor(
 
     dst = tmp.clone()
     return dst.view(src.shape)
+
+
+def can_swizzle_kn(weight: torch.Tensor, dtype: torch.dtype = None) -> bool:
+    """Whether a (k, n) = (hidden, out) weight can be swizzled via
+    swizzle_tensor(weight.t(), col_maj=False).
+
+    That call transposes to (n, k) so the assert becomes m=n % 16 == 0 and
+    k=hidden % (32 for fp16/bf16, 64 for fp8) == 0. Used by both the data side
+    (device_impl swizzle skip) and the dispatch side (linear NoSwizzle fallback)
+    so the two stay consistent for the same weight.
+    """
+    if weight.dim() != 2:
+        return False
+    dt = dtype if dtype is not None else weight.dtype
+    MiK, _, _ = calculate_k_for_swizzling(dt)
+    k_div = 32 if MiK == 16 else 64
+    k, n = weight.shape
+    return (n % 16 == 0) and (k % k_div == 0)

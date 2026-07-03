@@ -54,6 +54,7 @@ from rtp_llm.ops.compute_ops import (
     PyModelOutputs,
 )
 from rtp_llm.utils.model_weight import W
+from rtp_llm.utils.swizzle_utils import can_swizzle_kn
 from rtp_llm.utils.util import to_torch_dtype
 
 
@@ -589,13 +590,21 @@ class Qwen3NextGatedDeltaNet(nn.Module):
                 quant_config,
                 hw_kernel_config=hw_kernel_config,
             )
+            # BA out-dim may be non-16-aligned after TP split (e.g. TP=4 -> 24).
+            # Match device_impl: keep swizzle (WithSwizzle dispatch) only when
+            # aligned, otherwise pass None so dispatch picks NoSwizzle, staying
+            # consistent with the swizzle skipped on the data side.
+            ba_weight = weights[W.linear_attn_ba_w]
+            ba_hw_kernel_config = (
+                hw_kernel_config if can_swizzle_kn(ba_weight) else None
+            )
             self.in_proj_ba = LinearFactory.create_linear_from_weights(
                 weights,
                 W.linear_attn_ba_w,
                 None,
                 None,
                 quant_config,
-                hw_kernel_config=hw_kernel_config,
+                hw_kernel_config=ba_hw_kernel_config,
             )
             self.in_proj_fused = None
 

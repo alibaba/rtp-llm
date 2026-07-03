@@ -59,18 +59,22 @@ class TestQwen3NextQkvzBaFusion(unittest.TestCase):
 
     # ---- (2) Qwen3NextGatedDeltaNet end-to-end ----
 
-    def _build_module(self, weights_extra=None):
+    def _build_module(self, weights_extra=None, hw_kernel_config=None, num_v_heads=4):
         """Construct a small Qwen3NextGatedDeltaNet with random weights.
 
         Mirrors the setup pattern in
         rtp_llm/models_py/modules/factory/attention/cuda_cp_impl/test/test_cp_linear_attn.py
         but at the smallest legal sizes so the test runs fast.
+
+        num_v_heads controls the BA out-dim (= 2 * num_v_heads): 4 -> 8
+        (not 16-aligned), 8 -> 16 (aligned). hw_kernel_config is forwarded to
+        the module so the in_proj_ba swizzle/NoSwizzle decision can be observed.
         """
         from rtp_llm.models_py.model_desc.qwen3_next import Qwen3NextGatedDeltaNet
         from rtp_llm.ops import DataType, LinearAttentionConfig, ParallelismConfig
         from rtp_llm.utils.model_weight import W
 
-        num_k_heads, num_v_heads = 2, 4
+        num_k_heads = 2
         head_k_dim, head_v_dim = 32, 32
         hidden_size, conv_kernel_dim = 128, 4
 
@@ -116,7 +120,9 @@ class TestQwen3NextQkvzBaFusion(unittest.TestCase):
         if weights_extra:
             weights.update(weights_extra)
 
-        return Qwen3NextGatedDeltaNet(cfg, par, weights, layernorm_eps=1e-6).to(dev)
+        return Qwen3NextGatedDeltaNet(
+            cfg, par, weights, layernorm_eps=1e-6, hw_kernel_config=hw_kernel_config
+        ).to(dev)
 
     def test_bf16_path_takes_fusion(self) -> None:
         """When linear_attn_qkvz_s is None (BF16), fusion is enabled."""
@@ -181,6 +187,62 @@ class TestQwen3NextQkvzBaFusion(unittest.TestCase):
             qkvz_calls[0].args[2],
             W.linear_attn_qkvz_s,
             "fallback must pass linear_attn_qkvz_s as scale_key",
+        )
+
+    def _ba_hw_kernel_config_in_fallback(self, num_v_heads):
+        """Build the FP8 fallback (non-fused) branch with swizzle enabled and
+        return the hw_kernel_config the factory received for in_proj_ba.
+
+        Mocks the Linear factory so no real GEMM/strategy lookup runs; we only
+        inspect which hw_kernel_config was wired for the BA projection.
+        """
+        from rtp_llm.models_py.modules.factory.linear.factory import LinearFactory
+        from rtp_llm.ops import HWKernelConfig
+        from rtp_llm.utils.model_weight import W
+
+        hw = HWKernelConfig()
+        hw.use_swizzleA = True
+        # qkvz_s presence forces the 2-GEMM (non-fused) branch where in_proj_ba
+        # is created standalone.
+        scale = torch.randn(8, dtype=torch.float32, device=self.device)
+
+        with patch.object(
+            LinearFactory,
+            "create_linear_from_weights",
+            side_effect=lambda *a, **kw: MagicMock(name="MockLinear"),
+        ) as mock_factory:
+            self._build_module(
+                weights_extra={W.linear_attn_qkvz_s: scale},
+                hw_kernel_config=hw,
+                num_v_heads=num_v_heads,
+            )
+
+        ba_calls = [
+            c
+            for c in mock_factory.call_args_list
+            if len(c.args) >= 2 and c.args[1] == W.linear_attn_ba_w
+        ]
+        self.assertEqual(len(ba_calls), 1, "fallback must build in_proj_ba once")
+        return hw, ba_calls[0].kwargs.get("hw_kernel_config")
+
+    def test_in_proj_ba_no_swizzle_when_unaligned(self) -> None:
+        """BA out-dim 8 (= 2*4, not 16-aligned, mirrors TP=4's 24): in_proj_ba
+        must receive hw_kernel_config=None so dispatch picks NoSwizzle,
+        consistent with device_impl skipping the swizzle. This is the crash fix."""
+        _hw, ba_cfg = self._ba_hw_kernel_config_in_fallback(num_v_heads=4)
+        self.assertIsNone(
+            ba_cfg,
+            "unaligned BA must pass hw_kernel_config=None (NoSwizzle dispatch)",
+        )
+
+    def test_in_proj_ba_keeps_swizzle_when_aligned(self) -> None:
+        """BA out-dim 16 (= 2*8, 16-aligned, mirrors TP=1/2): the swizzle
+        speedup is preserved — in_proj_ba keeps the real hw_kernel_config."""
+        hw, ba_cfg = self._ba_hw_kernel_config_in_fallback(num_v_heads=8)
+        self.assertIs(
+            ba_cfg,
+            hw,
+            "aligned BA must keep the real hw_kernel_config (WithSwizzle dispatch)",
         )
 
     def test_input_project_helper_shapes(self) -> None:
