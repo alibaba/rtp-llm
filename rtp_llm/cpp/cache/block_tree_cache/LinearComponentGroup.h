@@ -15,16 +15,8 @@ public:
                                   EvictionPolicy   disk_policy   = EvictionPolicy::FIFO);
 
     std::unique_ptr<MatchValidator> createMatchValidator() override;
-    void                            finalizeMatchResult(BlockTreeMatchResult& result) override;
 
-    void commitInsertData(TreeNode* node, GroupSlot& slot, const std::vector<BlockIdxType>& block_indices) override;
-    void updateOnInsertOverlap(TreeNode* node, GroupSlot& slot) override;
-
-    void                          evictFromTier(TreeNode* node, GroupSlot& slot, Tier tier) override;
-    std::optional<EvictionResult> driveEviction(int num_blocks, Tier tier) override;
-
-    TransferDescriptor buildTransfer(TreeNode* node, TransferType type) override;
-
+    // LINEAR: any node with data can enter heap.
     void tryAddToDeviceHeap(TreeNode* node) override;
 };
 

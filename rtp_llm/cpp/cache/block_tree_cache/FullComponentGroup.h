@@ -16,20 +16,11 @@ public:
     std::unique_ptr<MatchValidator> createMatchValidator() override;
     void                            finalizeMatchResult(BlockTreeMatchResult& result) override;
 
-    void commitInsertData(TreeNode* node, GroupSlot& slot, const std::vector<BlockIdxType>& block_indices) override;
-    void updateOnInsertOverlap(TreeNode* node, GroupSlot& slot) override;
-
-    void                          evictFromTier(TreeNode* node, GroupSlot& slot, Tier tier) override;
-    std::optional<EvictionResult> driveEviction(int num_blocks, Tier tier) override;
-
-    TransferDescriptor buildTransfer(TreeNode* node, TransferType type) override;
-
     // Full-specific: only DeviceLeaf nodes enter heap.
     void tryAddToDeviceHeap(TreeNode* node) override;
-
-    bool isDeviceLeaf(const TreeNode* node, int group_id) const;
-    bool isHostLeaf(const TreeNode* node, int group_id) const;
-    bool isDiskLeaf(const TreeNode* node, int group_id) const;
+    // Full-specific: only HostLeaf/DiskLeaf nodes enter heap.
+    void tryAddToHostHeap(TreeNode* node) override;
+    void tryAddToDiskHeap(TreeNode* node) override;
 };
 
 class FullMatchValidator: public MatchValidator {

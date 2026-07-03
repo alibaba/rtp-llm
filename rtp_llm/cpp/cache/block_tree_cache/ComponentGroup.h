@@ -1,5 +1,6 @@
 #pragma once
 
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -66,6 +67,9 @@ struct EvictionResult {
     BlockIdxType              target_block{NULL_BLOCK_IDX};
 };
 
+// Predicate: returns true if all blocks in the group are evictable (refcount == 1).
+using IsBlockEvictableFn = std::function<bool(BlockIdxType)>;
+
 // ComponentGroup: active management entity.
 class ComponentGroup {
 public:
@@ -87,25 +91,39 @@ public:
     virtual std::unique_ptr<MatchValidator> createMatchValidator() = 0;
     virtual void                            finalizeMatchResult(BlockTreeMatchResult& result) {}
 
-    // ---- Insert ----
-    virtual void commitInsertData(TreeNode* node, GroupSlot& slot, const std::vector<BlockIdxType>& block_indices) = 0;
-    virtual void updateOnInsertOverlap(TreeNode* node, GroupSlot& slot)                                            = 0;
+    // ---- Insert (base class provides default; subclasses may override) ----
+    virtual void commitInsertData(TreeNode* node, GroupSlot& slot, const std::vector<BlockIdxType>& block_indices);
+    virtual void updateOnInsertOverlap(TreeNode* node, GroupSlot& slot);
 
-    // ---- Evict ----
-    virtual void                          evictFromTier(TreeNode* node, GroupSlot& slot, Tier tier) = 0;
-    virtual std::optional<EvictionResult> driveEviction(int num_blocks, Tier tier)                  = 0;
+    // ---- Evict (base class provides default; subclasses may override) ----
+    virtual void                          evictFromTier(TreeNode* node, GroupSlot& slot, Tier tier);
+    virtual std::optional<EvictionResult> driveEviction(int num_blocks, Tier tier);
 
-    // ---- Transfer ----
-    virtual TransferDescriptor buildTransfer(TreeNode* node, TransferType type) {
-        return TransferDescriptor{};
-    }
+    // ---- Transfer (base class provides default; subclasses may override) ----
+    virtual TransferDescriptor buildTransfer(TreeNode* node, TransferType type);
 
     // ---- Heap management ----
     virtual void tryAddToDeviceHeap(TreeNode* node) = 0;
 
     // Shared across all subclasses (implemented in ComponentGroup.cc).
-    void tryAddToHostHeap(TreeNode* node);
-    void tryAddToDiskHeap(TreeNode* node);
+    // Virtual: FullComponentGroup overrides to add Leaf checks.
+    virtual void tryAddToHostHeap(TreeNode* node);
+    virtual void tryAddToDiskHeap(TreeNode* node);
+
+    // ---- Leaf checks (used by FullComponentGroup and base tryAddTo*Heap) ----
+    bool isLeafAtTier(const TreeNode* node, int group_id, Tier tier) const;
+
+    // ---- Reference count for path lock (per-group strategy) ----
+    // Returns number of nodes from path tail to lock.
+    // Default = matched_blocks (full path); SWA overrides for window lock.
+    virtual size_t computeReferenceCount(size_t matched_blocks, const std::vector<TreeNode*>& path) const {
+        return matched_blocks;
+    }
+
+    // ---- Reference counting callback (injected by BlockTreeCache) ----
+    void setIsBlockEvictable(IsBlockEvictableFn fn) {
+        is_block_evictable_ = std::move(fn);
+    }
 
     // ---- Heap access helpers ----
     EvictionHeap* heapForTier(Tier tier) {
@@ -120,6 +138,9 @@ public:
                 return nullptr;
         }
     }
+
+protected:
+    IsBlockEvictableFn is_block_evictable_;
 };
 
 using ComponentGroupPtr = std::shared_ptr<ComponentGroup>;

@@ -50,11 +50,11 @@ TEST_F(FullComponentGroupTest, DeviceLeafDetection) {
     setDeviceBlock(c, 0, 30);
 
     // C is DeviceLeaf (no children with device value)
-    EXPECT_TRUE(group_->isDeviceLeaf(c, 0));
+    EXPECT_TRUE(group_->isLeafAtTier(c, 0, Tier::DEVICE));
     // B is NOT DeviceLeaf (child C has device value)
-    EXPECT_FALSE(group_->isDeviceLeaf(b, 0));
+    EXPECT_FALSE(group_->isLeafAtTier(b, 0, Tier::DEVICE));
     // A is NOT DeviceLeaf (child B has device value)
-    EXPECT_FALSE(group_->isDeviceLeaf(a, 0));
+    EXPECT_FALSE(group_->isLeafAtTier(a, 0, Tier::DEVICE));
 
     delete a;
     delete b;
@@ -70,13 +70,13 @@ TEST_F(FullComponentGroupTest, DeviceLeafAfterChildEviction) {
     setDeviceBlock(a, 0, 10);
     setDeviceBlock(b, 0, 20);
 
-    EXPECT_FALSE(group_->isDeviceLeaf(a, 0));
+    EXPECT_FALSE(group_->isLeafAtTier(a, 0, Tier::DEVICE));
 
     // Evict B's device data
     setDeviceBlock(b, 0, NULL_BLOCK_IDX);
 
     // Now A should be DeviceLeaf
-    EXPECT_TRUE(group_->isDeviceLeaf(a, 0));
+    EXPECT_TRUE(group_->isLeafAtTier(a, 0, Tier::DEVICE));
 
     delete a;
     delete b;
@@ -227,9 +227,9 @@ TEST_F(FullComponentGroupTest, HostLeafDetection) {
     setHostBlock(b, 0, 25);
 
     // B is HostLeaf (no child with host value)
-    EXPECT_TRUE(group_->isHostLeaf(b, 0));
+    EXPECT_TRUE(group_->isLeafAtTier(b, 0, Tier::HOST));
     // A is NOT HostLeaf (child B has host value)
-    EXPECT_FALSE(group_->isHostLeaf(a, 0));
+    EXPECT_FALSE(group_->isLeafAtTier(a, 0, Tier::HOST));
 
     delete a;
     delete b;

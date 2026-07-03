@@ -100,20 +100,43 @@ public:
     void       waitForPendingTasks();
 
     // Phase 2: Reference counting callbacks
-    using IsBlockEvictableFn = std::function<bool(BlockIdxType)>;
-    using ReferenceBlocksFn  = std::function<void(const std::vector<BlockIdxType>&)>;
-    void setIsBlockEvictable(IsBlockEvictableFn fn) {
-        is_block_evictable_ = std::move(fn);
-    }
+    using ReferenceBlocksFn = std::function<void(const std::vector<BlockIdxType>&)>;
+    void setIsBlockEvictable(IsBlockEvictableFn fn);
     void setReferenceBlocksCallbacks(ReferenceBlocksFn ref_fn, ReferenceBlocksFn release_fn) {
         reference_blocks_ = std::move(ref_fn);
         release_blocks_   = std::move(release_fn);
     }
 
-    // Phase 3: Watermark configuration
+    // Release path-lock references acquired during match().
+    // Must be called by the request owner when matched blocks are no longer needed.
+    void releaseMatchedBlocks(const std::vector<BlockIdxType>& block_indices);
+
+    // Per-tier watermark configuration.
+    struct TierWatermark {
+        double ratio{0.0};   // watermark ratio (0.0 = disabled)
+        size_t capacity{0};  // total block count for this tier
+    };
+
+    // Backward-compatible: sets Device tier watermark only.
     void setWatermark(double ratio, size_t device_capacity) {
-        watermark_ratio_ = ratio;
-        device_capacity_ = device_capacity;
+        watermark_device_ = {ratio, device_capacity};
+    }
+
+    // Per-tier watermark setter (DEVICE / HOST / DISK).
+    void setTierWatermark(Tier tier, double ratio, size_t capacity) {
+        switch (tier) {
+            case Tier::DEVICE:
+                watermark_device_ = {ratio, capacity};
+                break;
+            case Tier::HOST:
+                watermark_host_ = {ratio, capacity};
+                break;
+            case Tier::DISK:
+                watermark_disk_ = {ratio, capacity};
+                break;
+            default:
+                break;
+        }
     }
 
     // Phase 4: DeviceBufferResolver injection for real D2H copy.
@@ -130,6 +153,12 @@ public:
     // Phase 2: load_back enable flag
     void setEnableLoadBack(bool enable) {
         enable_load_back_ = enable;
+    }
+
+    // Device block allocator for load_back (allocates GPU blocks to receive H2D data).
+    using DeviceBlockAllocator = std::function<std::vector<BlockIdxType>(int component_group_id, size_t count)>;
+    void setDeviceBlockAllocator(DeviceBlockAllocator fn) {
+        device_block_allocator_ = std::move(fn);
     }
 
     // Accessors
@@ -183,6 +212,15 @@ private:
     void             taskStarted();
     void             taskFinished();
     void             checkWatermark();
+    void             checkTierWatermark(Tier tier);
+
+    struct LoadBackItem {
+        TreeNode*                 node{nullptr};
+        int                       group_id{-1};
+        Tier                      source_tier{Tier::NONE};
+        std::vector<BlockIdxType> allocated_device_blocks;
+    };
+    void performLoadBack(std::vector<LoadBackItem> items, std::shared_ptr<AsyncContext> ctx);
 
     std::unique_ptr<BlockTree>                 tree_;
     std::vector<ComponentGroupPtr>             component_groups_;
@@ -195,19 +233,22 @@ private:
     std::shared_ptr<BroadcastManager>          broadcast_manager_;
 
     // Phase 2: Reference counting & path lock callbacks
-    IsBlockEvictableFn is_block_evictable_;
-    ReferenceBlocksFn  reference_blocks_;
-    ReferenceBlocksFn  release_blocks_;
+    ReferenceBlocksFn reference_blocks_;
+    ReferenceBlocksFn release_blocks_;
 
     // Phase 2: load_back enable flag
     bool enable_load_back_{false};
 
+    // Device block allocator for load_back
+    DeviceBlockAllocator device_block_allocator_;
+
     // Phase 4: DeviceBufferResolver for real D2H copy
     DeviceBufferResolver device_buffer_resolver_;
 
-    // Phase 3: Watermark mechanism
-    double watermark_ratio_{0.0};
-    size_t device_capacity_{0};
+    // Per-tier watermark mechanism
+    TierWatermark watermark_device_;
+    TierWatermark watermark_host_;
+    TierWatermark watermark_disk_;
 
     // Tier enable flags (design doc section 2.7)
     bool enable_device_cache_{true};

@@ -3,11 +3,48 @@
 #include <algorithm>
 #include <stdexcept>
 
+#include "rtp_llm/cpp/cache/connector/AsyncContext.h"
 #include "rtp_llm/cpp/model_rpc/BroadcastManager.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
 namespace rtp_llm {
+
+namespace {
+
+// AsyncContext for load_back: waits until all copy tasks complete.
+class LoadBackAsyncContext: public AsyncContext {
+public:
+    void addTask() {
+        remaining_++;
+    }
+    void onTaskComplete(bool ok) {
+        if (!ok)
+            all_success_.store(false);
+        if (--remaining_ <= 0) {
+            std::lock_guard<std::mutex> lk(mu_);
+            cv_.notify_all();
+        }
+    }
+    void waitDone() override {
+        std::unique_lock<std::mutex> lk(mu_);
+        cv_.wait(lk, [this] { return remaining_.load() <= 0; });
+    }
+    bool done() const override {
+        return remaining_.load() <= 0;
+    }
+    bool success() const override {
+        return all_success_.load();
+    }
+
+private:
+    std::atomic<int>        remaining_{0};
+    std::atomic<bool>       all_success_{true};
+    std::mutex              mu_;
+    std::condition_variable cv_;
+};
+
+}  // anonymous namespace
 
 BlockTreeCache::BlockTreeCache(std::unique_ptr<BlockTree>        tree,
                                std::vector<ComponentGroupPtr>    component_groups,
@@ -103,6 +140,8 @@ BlockTreeMatchResult BlockTreeCache::match(const CacheKeysType& cache_keys) {
         TreeNode* node      = find_result.path[i];
         bool      all_valid = true;
 
+        // Run ALL validators (no short-circuit) — SWA validator is stateful.
+        // Only FULL validator gates match validity; SWA/LINEAR track state only.
         for (size_t g = 0; g < component_groups_.size(); ++g) {
             auto& slot  = node->group_slots[static_cast<size_t>(component_groups_[g]->component_group_id)];
             bool  valid = validators[g]->validate(node, slot);
@@ -155,42 +194,103 @@ BlockTreeMatchResult BlockTreeCache::match(const CacheKeysType& cache_keys) {
         }
     }
 
-    // Phase 2: path lock — add references on matched path blocks
+    // Phase 2: path lock — per-group reference strategy (SWA uses window lock)
     if (reference_blocks_) {
-        for (size_t i = 0; i < valid_matched_blocks; ++i) {
-            TreeNode* node = find_result.path[i];
-            for (auto& group : component_groups_) {
-                auto  gid  = static_cast<size_t>(group->component_group_id);
-                auto& slot = node->group_slots[gid];
-                if (slot.has_device_value()) {
-                    reference_blocks_(slot.device_blocks);
+        std::vector<TreeNode*> match_path(find_result.path.begin(),
+                                          find_result.path.begin() + static_cast<ptrdiff_t>(valid_matched_blocks));
+
+        for (auto& group : component_groups_) {
+            size_t ref_count = group->computeReferenceCount(valid_matched_blocks, match_path);
+            size_t start_idx = (valid_matched_blocks > ref_count) ? (valid_matched_blocks - ref_count) : 0;
+            auto   gid       = static_cast<size_t>(group->component_group_id);
+            for (size_t i = start_idx; i < valid_matched_blocks; ++i) {
+                TreeNode* node = match_path[i];
+                if (gid < node->group_slots.size()) {
+                    auto& slot = node->group_slots[gid];
+                    if (slot.has_device_value()) {
+                        reference_blocks_(slot.device_blocks);
+                    }
                 }
             }
         }
     }
 
-    // Phase 2: load_back — detect nodes with Host/Disk data but no Device data
+    // Phase 2: load_back — detect and transfer Host/Disk data to GPU
     if (enable_load_back_ && best_match != nullptr) {
+        std::vector<LoadBackItem> lb_items;
+
         for (size_t i = 0; i < valid_matched_blocks; ++i) {
             TreeNode* node = find_result.path[i];
             for (auto& group : component_groups_) {
                 auto  gid  = static_cast<size_t>(group->component_group_id);
                 auto& slot = node->group_slots[gid];
-                if (!slot.has_device_value() && slot.has_host_value()) {
-                    result.host_load_back_blocks++;
-                    result.load_back_blocks++;
-                    RTP_LLM_LOG_DEBUG("BlockTreeCache::match: load_back from HOST "
-                                      "group[%d] node_key=%ld",
-                                      group->component_group_id,
-                                      node->cache_key);
-                } else if (!slot.has_device_value() && slot.has_disk_value()) {
-                    result.disk_load_back_blocks++;
-                    result.load_back_blocks++;
-                    RTP_LLM_LOG_DEBUG("BlockTreeCache::match: load_back from DISK "
-                                      "group[%d] node_key=%ld",
-                                      group->component_group_id,
-                                      node->cache_key);
+
+                if (slot.has_device_value())
+                    continue;  // Already on GPU
+
+                Tier source = Tier::NONE;
+                if (slot.has_host_value()) {
+                    source = Tier::HOST;
+                } else if (slot.has_disk_value()) {
+                    source = Tier::DISK;
                 }
+                if (source == Tier::NONE)
+                    continue;
+
+                // Allocate device blocks (if allocator available)
+                std::vector<BlockIdxType> dev_blocks;
+                if (device_block_allocator_) {
+                    size_t count = group->component_indices.empty() ? 1 : group->component_indices.size();
+                    dev_blocks   = device_block_allocator_(group->component_group_id, count);
+                    if (dev_blocks.empty()) {
+                        RTP_LLM_LOG_WARNING("BlockTreeCache::match: load_back allocator failed "
+                                            "group[%d] node_key=%ld",
+                                            group->component_group_id,
+                                            node->cache_key);
+                        continue;
+                    }
+                    slot.device_blocks = dev_blocks;
+                }
+
+                lb_items.push_back({node, group->component_group_id, source, dev_blocks});
+
+                if (source == Tier::HOST) {
+                    result.host_load_back_blocks++;
+                } else {
+                    result.disk_load_back_blocks++;
+                }
+                result.load_back_blocks++;
+
+                // Add new device blocks to block_indices
+                for (auto b : dev_blocks) {
+                    if (b != NULL_BLOCK_IDX)
+                        result.block_indices.push_back(b);
+                }
+
+                RTP_LLM_LOG_DEBUG("BlockTreeCache::match: load_back from %s "
+                                  "group[%d] node_key=%ld",
+                                  tierName(source),
+                                  group->component_group_id,
+                                  node->cache_key);
+            }
+        }
+
+        // Submit async load_back task
+        if (!lb_items.empty() && device_block_allocator_) {
+            auto lb_ctx = std::make_shared<LoadBackAsyncContext>();
+            lb_ctx->addTask();
+            result.async_context = lb_ctx;
+
+            taskStarted();
+            auto* work_item = new autil::LambdaWorkItem([this, items = std::move(lb_items), lb_ctx]() {
+                performLoadBack(std::move(items), lb_ctx);
+                taskFinished();
+            });
+            auto  err       = thread_pool_->pushWorkItem(work_item);
+            if (err != autil::ThreadPool::ERROR_NONE) {
+                work_item->destroy();
+                lb_ctx->onTaskComplete(false);
+                taskFinished();
             }
         }
     }
@@ -466,12 +566,22 @@ void BlockTreeCache::performEvictionCopy(EvictionResult er) {
     if (copy_ok && enable_remote_cache_ && storage_backend_ && er.node != nullptr) {
         auto key = std::to_string(er.node->cache_key) + "_g" + std::to_string(er.component_group_id);
         std::vector<std::pair<std::string, std::vector<char>>> items;
+        // TODO(catfish): serialize actual block data from host_pool_/device into the vector.
+        // Currently sending empty payload as placeholder; real implementation requires
+        // reading host_block bytes from host_pool_ (or device blocks via resolver).
         items.emplace_back(std::move(key), std::vector<char>{});
-        storage_backend_->batchWrite(items);
-        RTP_LLM_LOG_DEBUG("BlockTreeCache::performEvictionCopy: remote write-through "
-                          "group[%d] node_key=%ld",
-                          er.component_group_id,
-                          er.node->cache_key);
+        if (!items.back().second.empty()) {
+            storage_backend_->batchWrite(items);
+            RTP_LLM_LOG_DEBUG("BlockTreeCache::performEvictionCopy: remote write-through "
+                              "group[%d] node_key=%ld",
+                              er.component_group_id,
+                              er.node->cache_key);
+        } else {
+            RTP_LLM_LOG_WARNING("BlockTreeCache::performEvictionCopy: remote write-through SKIPPED "
+                                "(no data serialization yet) group[%d] node_key=%ld",
+                                er.component_group_id,
+                                er.node->cache_key);
+        }
     }
 
     taskFinished();
@@ -496,6 +606,23 @@ void BlockTreeCache::onEvictionComplete(const EvictionResult& er) {
                       tierName(er.target_tier));
 
     group->evictFromTier(er.node, slot, er.source_tier);
+
+    // Release source blocks back to their pools (design doc §2.7 Phase 3)
+    if (er.source_tier == Tier::DEVICE && release_blocks_ && !er.blocks_to_release.empty()) {
+        release_blocks_(er.blocks_to_release);
+    } else if (er.source_tier == Tier::HOST && host_pool_ && !er.blocks_to_release.empty()) {
+        for (auto block : er.blocks_to_release) {
+            if (!isNullBlockIdx(block)) {
+                host_pool_->requestFree(block);
+            }
+        }
+    } else if (er.source_tier == Tier::DISK && disk_pool_ && !er.blocks_to_release.empty()) {
+        for (auto block : er.blocks_to_release) {
+            if (!isNullBlockIdx(block)) {
+                disk_pool_->blockCacheFree(block);
+            }
+        }
+    }
 
     // Set target tier data from CopyEngine result
     if (er.target_tier == Tier::HOST && er.source_tier == Tier::DEVICE) {
@@ -646,15 +773,23 @@ bool BlockTreeCache::isEvictable(TreeNode* node, int group_id) const {
         return false;
     if (!node->group_slots[gidx].has_device_value())
         return false;
-    // Phase 2: check reference counting callback
-    if (is_block_evictable_) {
-        for (auto block : node->group_slots[gidx].device_blocks) {
-            if (block != NULL_BLOCK_IDX && !is_block_evictable_(block)) {
-                return false;
-            }
-        }
-    }
+    // Note: actual evictability during driveEviction is checked via the
+    // is_block_evictable_ callback injected into each ComponentGroup.
+    // This public method provides a basic structural check only.
     return true;
+}
+
+void BlockTreeCache::setIsBlockEvictable(IsBlockEvictableFn fn) {
+    // Forward to all ComponentGroups so driveEviction can check evictability
+    for (auto& group : component_groups_) {
+        group->setIsBlockEvictable(fn);
+    }
+}
+
+void BlockTreeCache::releaseMatchedBlocks(const std::vector<BlockIdxType>& block_indices) {
+    if (release_blocks_ && !block_indices.empty()) {
+        release_blocks_(block_indices);
+    }
 }
 
 CacheStats BlockTreeCache::getStats() const {
@@ -689,43 +824,182 @@ void BlockTreeCache::taskFinished() {
     }
 }
 
-void BlockTreeCache::checkWatermark() {
-    // Phase 3: watermark auto-evict (called within mutex_ lock from insert())
-    if (watermark_ratio_ <= 0.0 || device_capacity_ == 0)
-        return;
+void BlockTreeCache::performLoadBack(std::vector<LoadBackItem> items, std::shared_ptr<AsyncContext> ctx) {
+    auto lb_ctx = std::dynamic_pointer_cast<LoadBackAsyncContext>(ctx);
+    bool all_ok = true;
 
-    size_t device_used = 0;
-    for (const auto& g : component_groups_) {
-        if (g->device_heap)
-            device_used += g->device_heap->size();
+    DeviceBufferResolver resolver =
+        device_buffer_resolver_ ? device_buffer_resolver_ :
+                                  DeviceBufferResolver([](int, BlockIdxType) -> BlockInfo { return BlockInfo{}; });
+
+    for (auto& item : items) {
+        auto gid = static_cast<size_t>(item.group_id);
+        if (gid >= component_groups_.size() || item.node == nullptr)
+            continue;
+
+        // Collect MemoryBlockLayerTagSlot layout (same as performEvictionCopy)
+        std::vector<MemoryBlockLayerTagSlot> layer_slots;
+        for (int comp_idx : component_groups_[gid]->component_indices) {
+            if (comp_idx >= 0 && static_cast<size_t>(comp_idx) < components_.size()) {
+                const auto& comp = components_[static_cast<size_t>(comp_idx)];
+                for (const auto& lts : comp.memory_block_layer_tag_slots)
+                    layer_slots.push_back(lts);
+            }
+        }
+        std::sort(
+            layer_slots.begin(),
+            layer_slots.end(),
+            [](const MemoryBlockLayerTagSlot& a, const MemoryBlockLayerTagSlot& b) { return a.layer_id < b.layer_id; });
+
+        auto& slot    = item.node->group_slots[gid];
+        bool  copy_ok = false;
+
+        if (item.source_tier == Tier::HOST && host_pool_) {
+            // Host → GPU (direct H2D)
+            copy_ok = copy_engine_->hostToDevice(
+                slot.host_block, item.allocated_device_blocks, layer_slots, resolver, *host_pool_);
+            if (!copy_ok) {
+                RTP_LLM_LOG_WARNING("BlockTreeCache::performLoadBack: H2D FAILED "
+                                    "group[%d] node_key=%ld",
+                                    item.group_id,
+                                    item.node->cache_key);
+            }
+        } else if (item.source_tier == Tier::DISK && host_pool_ && disk_pool_) {
+            // Disk → GPU (cross-layer: Disk → temp Host → GPU, Host not cached)
+            BlockIdxType temp_host = NULL_BLOCK_IDX;
+            auto         alloc     = host_pool_->malloc(1);
+            if (!alloc.empty())
+                temp_host = alloc[0];
+
+            if (!isNullBlockIdx(temp_host)) {
+                bool d2h_ok = copy_engine_->diskToHost(slot.disk_slot, temp_host, *host_pool_, *disk_pool_);
+                if (d2h_ok) {
+                    copy_ok = copy_engine_->hostToDevice(
+                        temp_host, item.allocated_device_blocks, layer_slots, resolver, *host_pool_);
+                }
+                host_pool_->requestFree(temp_host);  // Release temp buffer
+            }
+            if (!copy_ok) {
+                RTP_LLM_LOG_WARNING("BlockTreeCache::performLoadBack: Disk2D FAILED "
+                                    "group[%d] node_key=%ld",
+                                    item.group_id,
+                                    item.node->cache_key);
+            }
+        }
+
+        if (!copy_ok) {
+            all_ok = false;
+            // Rollback: release allocated device blocks
+            if (release_blocks_ && !item.allocated_device_blocks.empty()) {
+                release_blocks_(item.allocated_device_blocks);
+            }
+        }
     }
 
-    size_t threshold = static_cast<size_t>(device_capacity_ * watermark_ratio_);
-    if (device_used <= threshold)
+    // Phase 3: re-acquire lock to update tree state
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        for (auto& item : items) {
+            auto gid = static_cast<size_t>(item.group_id);
+            if (gid >= component_groups_.size() || item.node == nullptr)
+                continue;
+
+            auto& group = component_groups_[gid];
+            auto& slot  = item.node->group_slots[gid];
+
+            // Check if copy succeeded (device_blocks should be valid)
+            if (slot.has_device_value()) {
+                // Remove from source heap
+                if (item.source_tier == Tier::HOST && group->host_heap) {
+                    group->host_heap->invalidate(item.node);
+                    slot.in_host_heap = false;
+                } else if (item.source_tier == Tier::DISK && group->disk_heap) {
+                    group->disk_heap->invalidate(item.node);
+                    slot.in_disk_heap = false;
+                }
+                // Add to device heap if it qualifies as DeviceLeaf
+                group->tryAddToDeviceHeap(item.node);
+                // Add path lock reference
+                if (reference_blocks_) {
+                    reference_blocks_(item.allocated_device_blocks);
+                }
+            } else {
+                // Copy failed: clear device_blocks from slot
+                slot.device_blocks.clear();
+            }
+        }
+    }
+
+    if (lb_ctx) {
+        lb_ctx->onTaskComplete(all_ok);
+    }
+}
+
+void BlockTreeCache::checkWatermark() {
+    checkTierWatermark(Tier::DEVICE);
+    checkTierWatermark(Tier::HOST);
+    checkTierWatermark(Tier::DISK);
+}
+
+void BlockTreeCache::checkTierWatermark(Tier tier) {
+    // Select watermark config for this tier
+    TierWatermark wm;
+    switch (tier) {
+        case Tier::DEVICE:
+            wm = watermark_device_;
+            break;
+        case Tier::HOST:
+            wm = watermark_host_;
+            break;
+        case Tier::DISK:
+            wm = watermark_disk_;
+            break;
+        default:
+            return;
+    }
+    if (wm.ratio <= 0.0 || wm.capacity == 0 || !isTierEnabled(tier))
         return;
 
-    size_t excess = device_used - threshold;
-    RTP_LLM_LOG_INFO("BlockTreeCache::checkWatermark: device_used=%zu > threshold=%zu "
+    size_t used = 0;
+    for (const auto& g : component_groups_) {
+        auto* heap = g->heapForTier(tier);
+        if (heap)
+            used += heap->size();
+    }
+
+    size_t threshold = static_cast<size_t>(wm.capacity * wm.ratio);
+    if (used <= threshold)
+        return;
+
+    size_t excess = used - threshold;
+    RTP_LLM_LOG_INFO("BlockTreeCache::checkTierWatermark: tier=%s used=%zu > threshold=%zu "
                      "(ratio=%.2f, capacity=%zu), evicting %zu blocks",
-                     device_used,
+                     tierName(tier),
+                     used,
                      threshold,
-                     watermark_ratio_,
-                     device_capacity_,
+                     wm.ratio,
+                     wm.capacity,
                      excess);
 
     // Inline eviction within lock (cannot call evict() which also acquires mutex_)
     for (size_t attempt = 0; attempt < excess; ++attempt) {
         bool found = false;
         for (auto& group : component_groups_) {
-            auto er = group->driveEviction(1, Tier::DEVICE);
+            auto er = group->driveEviction(1, tier);
             if (!er.has_value())
                 continue;
 
             found = true;
-            if (er->target_tier == Tier::NONE || !isTierEnabled(er->target_tier)) {
+
+            // Override target_tier if target tier is disabled
+            if (er->target_tier != Tier::NONE && !isTierEnabled(er->target_tier)) {
+                er->target_tier = Tier::NONE;
+            }
+
+            if (er->target_tier == Tier::NONE) {
                 onEvictionComplete(*er);
             } else {
-                // Async path: allocate target block and submit to thread pool
+                // Allocate target block
                 if (er->target_tier == Tier::HOST && host_pool_) {
                     auto alloc       = host_pool_->malloc(1);
                     er->target_block = alloc.empty() ? NULL_BLOCK_IDX : alloc[0];
