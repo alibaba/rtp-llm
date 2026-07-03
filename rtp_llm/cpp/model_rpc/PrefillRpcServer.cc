@@ -814,6 +814,8 @@ void PrefillRpcServer::initThreadPools() {
         std::make_shared<autil::LockFreeThreadPool>(enqueue_threads, enqueue_queue, nullptr, "PrefillEnqueuePool");
     RTP_LLM_CHECK_WITH_INFO(enqueue_worker_pool_->start(), "PrefillRpcServer enqueue thread pool start failed");
     RTP_LLM_LOG_INFO("PrefillRpcServer enqueue pool started: threads=%d queue=%d", enqueue_threads, enqueue_queue);
+    enqueue_pool_metrics_.thread_max = static_cast<size_t>(enqueue_threads);
+    enqueue_pool_metrics_.queue_max  = static_cast<size_t>(enqueue_queue);
 
     // worker lambda pool: heavy EnqueueGroup coordination (I/O-bound, ~12s per batch)
     // Configurable via pd_sep_config.prefill_worker_lambda_pool_size (0 = use formula default)
@@ -831,6 +833,8 @@ void PrefillRpcServer::initThreadPools() {
         worker_lambda_queue,
         dp_size,
         max_context_batch);
+    worker_lambda_pool_metrics_.thread_max = static_cast<size_t>(worker_lambda_threads);
+    worker_lambda_pool_metrics_.queue_max  = static_cast<size_t>(worker_lambda_queue);
 
     // slot pool: L2 Prepare + L3 Load + L4 Finish
     // Configurable via pd_sep_config.prefill_slot_pool_size (0 = use formula default)
@@ -847,30 +851,62 @@ void PrefillRpcServer::initThreadPools() {
                      slot_queue,
                      dp_size,
                      max_context_batch);
+    slot_pool_metrics_.thread_max = static_cast<size_t>(slot_threads);
+    slot_pool_metrics_.queue_max  = static_cast<size_t>(slot_queue);
+}
+
+void PrefillRpcServer::reportOnePoolToKmonitor(const std::string& pool_name, const PoolMetrics& metrics) {
+    if (!metrics_reporter_) {
+        return;
+    }
+    PrefillPoolMetricsCollector collector;
+    collector.active     = static_cast<int64_t>(metrics.active.load());
+    collector.queued     = static_cast<int64_t>(metrics.queued.load());
+    collector.completed  = static_cast<int64_t>(metrics.completed.load());
+    collector.rejected   = static_cast<int64_t>(metrics.rejected.load());
+    collector.fallback   = static_cast<int64_t>(metrics.fallback.load());
+    collector.thread_max = static_cast<int64_t>(metrics.thread_max);
+    collector.queue_max  = static_cast<int64_t>(metrics.queue_max);
+    kmonitor::MetricsTags tags("pool_name", pool_name);
+    metrics_reporter_->report<PrefillPoolMetrics, PrefillPoolMetricsCollector>(&tags, &collector);
 }
 
 void PrefillRpcServer::reportPoolMetrics() {
-    // Periodically log pool health (called every 10s from GC thread)
-    RTP_LLM_LOG_INFO("PoolMetrics enqueue: active=%zu queued=%zu completed=%zu rejected=%zu fallback=%zu",
-                     enqueue_pool_metrics_.active.load(),
-                     enqueue_pool_metrics_.queued.load(),
-                     enqueue_pool_metrics_.completed.load(),
-                     enqueue_pool_metrics_.rejected.load(),
-                     enqueue_pool_metrics_.fallback.load());
-    RTP_LLM_LOG_INFO("PoolMetrics worker_lambda: active=%zu queued=%zu completed=%zu rejected=%zu fallback=%zu",
-                     worker_lambda_pool_metrics_.active.load(),
-                     worker_lambda_pool_metrics_.queued.load(),
-                     worker_lambda_pool_metrics_.completed.load(),
-                     worker_lambda_pool_metrics_.rejected.load(),
-                     worker_lambda_pool_metrics_.fallback.load());
-    RTP_LLM_LOG_INFO(
-        "PoolMetrics slot: active=%zu queued=%zu completed=%zu rejected=%zu fallback=%zu response_workers=%zu",
+    // Report to kmonitor (called every 10s from GC thread)
+    reportOnePoolToKmonitor("enqueue", enqueue_pool_metrics_);
+    reportOnePoolToKmonitor("worker_lambda", worker_lambda_pool_metrics_);
+    reportOnePoolToKmonitor("slot", slot_pool_metrics_);
+
+    // Debug-level log for troubleshooting (avoid INFO noise on production)
+    RTP_LLM_LOG_DEBUG("PoolMetrics enqueue: active=%zu queued=%zu completed=%zu rejected=%zu fallback=%zu "
+                      "thread_max=%zu queue_max=%zu",
+                      enqueue_pool_metrics_.active.load(),
+                      enqueue_pool_metrics_.queued.load(),
+                      enqueue_pool_metrics_.completed.load(),
+                      enqueue_pool_metrics_.rejected.load(),
+                      enqueue_pool_metrics_.fallback.load(),
+                      enqueue_pool_metrics_.thread_max,
+                      enqueue_pool_metrics_.queue_max);
+    RTP_LLM_LOG_DEBUG("PoolMetrics worker_lambda: active=%zu queued=%zu completed=%zu rejected=%zu fallback=%zu "
+                      "thread_max=%zu queue_max=%zu",
+                      worker_lambda_pool_metrics_.active.load(),
+                      worker_lambda_pool_metrics_.queued.load(),
+                      worker_lambda_pool_metrics_.completed.load(),
+                      worker_lambda_pool_metrics_.rejected.load(),
+                      worker_lambda_pool_metrics_.fallback.load(),
+                      worker_lambda_pool_metrics_.thread_max,
+                      worker_lambda_pool_metrics_.queue_max);
+    RTP_LLM_LOG_DEBUG(
+        "PoolMetrics slot: active=%zu queued=%zu completed=%zu rejected=%zu fallback=%zu response_workers=%zu "
+        "thread_max=%zu queue_max=%zu",
         slot_pool_metrics_.active.load(),
         slot_pool_metrics_.queued.load(),
         slot_pool_metrics_.completed.load(),
         slot_pool_metrics_.rejected.load(),
         slot_pool_metrics_.fallback.load(),
-        response_worker_count_);
+        response_worker_count_,
+        slot_pool_metrics_.thread_max,
+        slot_pool_metrics_.queue_max);
 }
 
 ErrorInfo PrefillRpcServer::waitStreamBeforeRun(std::shared_ptr<GenerateStream> stream) {
@@ -1510,7 +1546,14 @@ grpc::Status PrefillRpcServer::EnqueueBatch(grpc::ServerContext*         context
     std::vector<autil::ThreadPoolBase::Future<DispatchResult>> dispatch_futures;
     dispatch_futures.reserve(dispatch_targets.size());
     for (auto& target : dispatch_targets) {
+        enqueue_pool_metrics_.queued++;
         dispatch_futures.push_back(enqueue_worker_pool_->async([this, target = std::move(target)]() -> DispatchResult {
+            enqueue_pool_metrics_.queued--;
+            enqueue_pool_metrics_.active++;
+            ScopeExit      enqueue_task_guard([this] {
+                enqueue_pool_metrics_.active--;
+                enqueue_pool_metrics_.completed++;
+            });
             DispatchResult result;
             if (target.dp_rank == static_cast<int>(maga_init_params_.parallelism_config.dp_rank)) {
                 result.status = EnqueueGroup(/*context=*/nullptr, &target.request, &result.dp_response);
@@ -1734,6 +1777,7 @@ grpc::Status PrefillRpcServer::EnqueueGroup(grpc::ServerContext*         context
 
     auto slots_ptr = std::make_shared<std::vector<LocalSlot>>(std::move(slots));
     try {
+        worker_lambda_pool_metrics_.queued++;
         auto worker_error = worker_lambda_pool_->pushTask(
             [this,
              slots_ptr,
@@ -1741,6 +1785,12 @@ grpc::Status PrefillRpcServer::EnqueueGroup(grpc::ServerContext*         context
              max_retry_timeout_ms     = maga_init_params_.pd_sep_config.prefill_retry_timeout_ms,
              batch_prepare_timeout_ms = maga_init_params_.pd_sep_config.batch_prepare_timeout_ms,
              batch_load_timeout_ms    = maga_init_params_.pd_sep_config.batch_load_timeout_ms]() mutable {
+                worker_lambda_pool_metrics_.queued--;
+                worker_lambda_pool_metrics_.active++;
+                ScopeExit worker_task_guard([this] {
+                    worker_lambda_pool_metrics_.active--;
+                    worker_lambda_pool_metrics_.completed++;
+                });
                 ScopeExit controller_finish_guard([this] { finishAsyncResponseWorker(); });
                 auto&     slots = *slots_ptr;
 
@@ -1802,6 +1852,11 @@ grpc::Status PrefillRpcServer::EnqueueGroup(grpc::ServerContext*         context
                             (void)writer;
                             (void)guard;
                             (void)cancel_state;
+                            slot_pool_metrics_.active++;
+                            ScopeExit    slot_finish_task_guard([this] {
+                                slot_pool_metrics_.active--;
+                                slot_pool_metrics_.completed++;
+                            });
                             ScopeExit    worker_finish_guard([this] { finishAsyncResponseWorker(); });
                             ScopeExit    release_captures_guard([&] {
                                 pfx_ctx.reset();
@@ -1862,6 +1917,7 @@ grpc::Status PrefillRpcServer::EnqueueGroup(grpc::ServerContext*         context
                         // to avoid deadlock (L3 → L4 on same pool, see plan §3.2).
                         auto error = slot_worker_pool_->pushTask(std::move(finish_lambda));
                         if (error != autil::ThreadPoolBase::ERROR_NONE) {
+                            slot_pool_metrics_.rejected++;
                             slot_pool_metrics_.fallback++;
                             std::thread fallback_thread(std::move(finish_lambda));
                             fallback_thread.detach();
@@ -1911,9 +1967,16 @@ grpc::Status PrefillRpcServer::EnqueueGroup(grpc::ServerContext*         context
                 prepare_futures.reserve(slots.size());
                 for (auto& slot : slots) {
                     auto* slot_ptr = &slot;
+                    slot_pool_metrics_.queued++;
                     prepare_futures.push_back(slot_worker_pool_->async(
                         [this, slot_ptr, slots_ptr, entry_cancelled, max_retry_times, max_retry_timeout_ms] {
-                            auto& slot = *slot_ptr;
+                            slot_pool_metrics_.queued--;
+                            slot_pool_metrics_.active++;
+                            ScopeExit slot_prepare_guard([this] {
+                                slot_pool_metrics_.active--;
+                                slot_pool_metrics_.completed++;
+                            });
+                            auto&     slot = *slot_ptr;
                             if (entry_cancelled(slot)) {
                                 slot.stage_status =
                                     grpc::Status(grpc::StatusCode::CANCELLED, "EnqueueGroup request cancelled");
@@ -2039,8 +2102,15 @@ grpc::Status PrefillRpcServer::EnqueueGroup(grpc::ServerContext*         context
                 std::vector<autil::ThreadPoolBase::Future<void>> load_futures;
                 load_futures.reserve(stream_ready_slots.size());
                 for (auto* slot : stream_ready_slots) {
+                    slot_pool_metrics_.queued++;
                     load_futures.push_back(slot_worker_pool_->async(
                         [this, slot, slots_ptr, entry_cancelled, fail_slot, start_finish_worker] {
+                            slot_pool_metrics_.queued--;
+                            slot_pool_metrics_.active++;
+                            ScopeExit slot_load_guard([this] {
+                                slot_pool_metrics_.active--;
+                                slot_pool_metrics_.completed++;
+                            });
                             if (entry_cancelled(*slot)) {
                                 fail_slot(*slot,
                                           grpc::Status(grpc::StatusCode::CANCELLED, "EnqueueGroup request cancelled"));
@@ -2087,6 +2157,7 @@ grpc::Status PrefillRpcServer::EnqueueGroup(grpc::ServerContext*         context
             });
 
         if (worker_error != autil::ThreadPoolBase::ERROR_NONE) {
+            worker_lambda_pool_metrics_.queued--;
             worker_lambda_pool_metrics_.rejected++;
             // Pool saturated: the lambda was NOT enqueued, so ScopeExit guards
             // inside the lambda did not run. We must manually finish the worker.

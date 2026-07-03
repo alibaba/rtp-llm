@@ -6,6 +6,7 @@
 #include <mutex>
 #include <thread>
 #include "autil/LockFreeThreadPool.h"
+#include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include "rtp_llm/cpp/model_rpc/RpcServerRuntimeMeta.h"
 #include "rtp_llm/cpp/model_rpc/RemoteRpcServer.h"
 #include "rtp_llm/cpp/model_rpc/PrefillGenerateContext.h"
@@ -16,11 +17,13 @@ namespace rtp_llm {
 
 // Pool-level health metrics, reported periodically
 struct PoolMetrics {
-    std::atomic<size_t> active    = 0;  // currently executing tasks
-    std::atomic<size_t> queued    = 0;  // tasks waiting in queue
-    std::atomic<size_t> completed = 0;  // total finished since creation
-    std::atomic<size_t> rejected  = 0;  // pushTask refused (pool full)
-    std::atomic<size_t> fallback  = 0;  // fallback to detached thread
+    std::atomic<size_t> active     = 0;  // currently executing tasks
+    std::atomic<size_t> queued     = 0;  // tasks waiting in queue
+    std::atomic<size_t> completed  = 0;  // total finished since creation
+    std::atomic<size_t> rejected   = 0;  // pushTask refused (pool full)
+    std::atomic<size_t> fallback   = 0;  // fallback to detached thread
+    size_t              thread_max = 0;  // configured thread count (set once in initThreadPools)
+    size_t              queue_max  = 0;  // configured queue depth (set once in initThreadPools)
 };
 
 class PrefillRpcServer: public RemoteRpcServer {
@@ -71,6 +74,7 @@ private:
     void         stopAsyncResponseWorkers();
     void         initThreadPools();
     void         reportPoolMetrics();
+    void         reportOnePoolToKmonitor(const std::string& pool_name, const PoolMetrics& metrics);
     std::string  batchTargetAddrForDpRank(int dp_rank) const;
 
 private:
