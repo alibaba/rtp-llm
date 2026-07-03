@@ -2116,6 +2116,7 @@ __device__ __forceinline__ void dsv4MegaIndexerScoreCandidateTile(const scalar_t
                                                                   const int32_t* __restrict__ csa_indexer_block_table,
                                                                   int64_t row,
                                                                   int req,
+                                                                  int candidate_base,
                                                                   const int* __restrict__ candidate_pos,
                                                                   const int* __restrict__ candidate_valid,
                                                                   int candidate_count,
@@ -2147,7 +2148,12 @@ __device__ __forceinline__ void dsv4MegaIndexerScoreCandidateTile(const scalar_t
         if constexpr (!CandidateTileAllValid) {
             candidate_valid_init = candidate_in_range ? candidate_valid[candidate_lane_init] : 0;
         }
-        const int c = candidate_in_range ? candidate_pos[candidate_lane_init] : 0;
+        int c = 0;
+        if constexpr (CandidateTileAllValid) {
+            c = candidate_base + candidate_lane_init;
+        } else {
+            c = candidate_in_range ? candidate_pos[candidate_lane_init] : 0;
+        }
         const uint8_t* data_ptr = nullptr;
         float scale = 1.0f;
         if (candidate_valid_init != 0 && use_fp8_indexer_pool) {
@@ -2382,25 +2388,13 @@ __device__ __forceinline__ int dsv4MegaBuildCompressedIndicesForRow(const scalar
                 use_fp8_indexer && IH == 64 && ID == kIndexerHeadDim
                 && static_cast<int>(blockDim.x) == kMegaBlockThreads;
             for (int c = 0; c < valid;) {
-                int candidate_pos[kMegaIndexerCandidateTile];
-                int candidate_valid[kMegaIndexerCandidateTile];
                 int candidate_count = 1;
+                bool candidate_tile_all_valid = false;
                 if (use_candidate_tile) {
                     candidate_count = min_int(kMegaIndexerCandidateTile, valid - c);
                     const int last_tile_boundary = (c + kMegaIndexerCandidateTile) * compress_ratio - 1;
-                    bool candidate_tile_all_valid =
-                        candidate_count == kMegaIndexerCandidateTile && last_tile_boundary >= 0
-                        && last_tile_boundary < topk_kv_len;
-#pragma unroll
-                    for (int tile_i = 0; tile_i < kMegaIndexerCandidateTile; ++tile_i) {
-                        const int candidate = c + tile_i;
-                        candidate_pos[tile_i] = candidate;
-                        if (!candidate_tile_all_valid) {
-                            const int boundary_pos = (candidate + 1) * compress_ratio - 1;
-                            candidate_valid[tile_i] =
-                                (tile_i < candidate_count && boundary_pos >= 0 && boundary_pos < topk_kv_len) ? 1 : 0;
-                        }
-                    }
+                    candidate_tile_all_valid = candidate_count == kMegaIndexerCandidateTile && last_tile_boundary >= 0
+                                               && last_tile_boundary < topk_kv_len;
                     if (candidate_tile_all_valid) {
                         dsv4MegaIndexerScoreCandidateTile<scalar_t, true>(indexer_q,
                                                                           indexer_k,
@@ -2411,8 +2405,9 @@ __device__ __forceinline__ int dsv4MegaBuildCompressedIndicesForRow(const scalar
                                                                           csa_indexer_block_table,
                                                                           topk_row,
                                                                           topk_req,
-                                                                          candidate_pos,
-                                                                          candidate_valid,
+                                                                          c,
+                                                                          nullptr,
+                                                                          nullptr,
                                                                           candidate_count,
                                                                           csa_indexer_pool_block_size,
                                                                           csa_indexer_pool_block_stride,
@@ -2421,6 +2416,16 @@ __device__ __forceinline__ int dsv4MegaBuildCompressedIndicesForRow(const scalar
                                                                           indexer_metadata_storage,
                                                                           reduce_result);
                     } else {
+                        int candidate_pos[kMegaIndexerCandidateTile];
+                        int candidate_valid[kMegaIndexerCandidateTile];
+#pragma unroll
+                        for (int tile_i = 0; tile_i < kMegaIndexerCandidateTile; ++tile_i) {
+                            const int candidate = c + tile_i;
+                            candidate_pos[tile_i] = candidate;
+                            const int boundary_pos = (candidate + 1) * compress_ratio - 1;
+                            candidate_valid[tile_i] =
+                                (tile_i < candidate_count && boundary_pos >= 0 && boundary_pos < topk_kv_len) ? 1 : 0;
+                        }
                         dsv4MegaIndexerScoreCandidateTile<scalar_t, false>(indexer_q,
                                                                            indexer_k,
                                                                            csa_indexer_k_cache,
@@ -2430,6 +2435,7 @@ __device__ __forceinline__ int dsv4MegaBuildCompressedIndicesForRow(const scalar
                                                                            csa_indexer_block_table,
                                                                            topk_row,
                                                                            topk_req,
+                                                                           c,
                                                                            candidate_pos,
                                                                            candidate_valid,
                                                                            candidate_count,
@@ -2467,19 +2473,33 @@ __device__ __forceinline__ int dsv4MegaBuildCompressedIndicesForRow(const scalar
                     if (tid == 0) {
                         float tile_best_score = kInvalidCompressorScore;
                         int tile_best_idx = 2147483647;
+                        if (candidate_tile_all_valid) {
+                            tile_valid_count = kMegaIndexerCandidateTile;
 #pragma unroll
-                        for (int tile_i = 0; tile_i < kMegaIndexerCandidateTile; ++tile_i) {
-                            if (tile_i < candidate_count) {
+                            for (int tile_i = 0; tile_i < kMegaIndexerCandidateTile; ++tile_i) {
+                                reduce_indices_second[tile_i] = tile_i;
                                 const int candidate = c + tile_i;
-                                const int boundary_pos = (candidate + 1) * compress_ratio - 1;
-                                const bool valid_boundary = boundary_pos >= 0 && boundary_pos < topk_kv_len;
-                                if (valid_boundary) {
-                                    reduce_indices_second[tile_valid_count] = tile_i;
-                                    ++tile_valid_count;
-                                    const float score = reduce_result[tile_i];
-                                    if (dsv4MegaTopKBetter(score, candidate, tile_best_score, tile_best_idx)) {
-                                        tile_best_score = score;
-                                        tile_best_idx = candidate;
+                                const float score = reduce_result[tile_i];
+                                if (dsv4MegaTopKBetter(score, candidate, tile_best_score, tile_best_idx)) {
+                                    tile_best_score = score;
+                                    tile_best_idx = candidate;
+                                }
+                            }
+                        } else {
+#pragma unroll
+                            for (int tile_i = 0; tile_i < kMegaIndexerCandidateTile; ++tile_i) {
+                                if (tile_i < candidate_count) {
+                                    const int candidate = c + tile_i;
+                                    const int boundary_pos = (candidate + 1) * compress_ratio - 1;
+                                    const bool valid_boundary = boundary_pos >= 0 && boundary_pos < topk_kv_len;
+                                    if (valid_boundary) {
+                                        reduce_indices_second[tile_valid_count] = tile_i;
+                                        ++tile_valid_count;
+                                        const float score = reduce_result[tile_i];
+                                        if (dsv4MegaTopKBetter(score, candidate, tile_best_score, tile_best_idx)) {
+                                            tile_best_score = score;
+                                            tile_best_idx = candidate;
+                                        }
                                     }
                                 }
                             }
