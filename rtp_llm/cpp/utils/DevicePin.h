@@ -7,7 +7,8 @@
 #include <ATen/cuda/CUDAContext.h>
 #include <cuda_runtime.h>
 #elif USING_ROCM
-#include <ATen/hip/HIPContext.h>
+#include <c10/hip/HIPFunctions.h>
+#include <c10/hip/HIPStream.h>
 #include <hip/hip_runtime.h>
 #endif
 
@@ -48,7 +49,7 @@ inline void setCurrentThreadDeviceContext(int device_id) {
 #elif USING_ROCM
     auto err = hipSetDevice(device_id);
     RTP_LLM_CHECK_WITH_INFO(err == hipSuccess, "hipSetDevice(%d) failed: %s", device_id, hipGetErrorString(err));
-    at::hip::set_device(device_id);
+    c10::hip::set_device(device_id);
 #else
     // CPU-only builds intentionally no-op; production cache-store builds pin to a GPU backend.
 #endif
@@ -62,7 +63,7 @@ inline void setCurrentThreadDefaultStream(int device_id) {
 #if USING_CUDA
     at::cuda::setCurrentCUDAStream(at::cuda::getDefaultCUDAStream(device_id));
 #elif USING_ROCM
-    at::hip::setCurrentHIPStream(at::hip::getDefaultHIPStream(device_id));
+    c10::hip::setCurrentHIPStream(c10::hip::getDefaultHIPStream(device_id));
 #else
     // CPU-only builds intentionally no-op; production cache-store builds pin to a GPU backend.
 #endif

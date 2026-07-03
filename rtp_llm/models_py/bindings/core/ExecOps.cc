@@ -17,7 +17,6 @@
 #include <cstdio>
 #include <mutex>
 #include <atomic>
-#include <unordered_map>
 #if USING_CUDA
 #include <c10/cuda/CUDAGuard.h>
 #elif USING_ROCM
@@ -379,6 +378,7 @@ void setTraceMemory(bool trace_memory) {
 
 namespace {
 #if USING_CUDA
+// CopyParams is single-copy specific; share only the stream pool with multi-copy.
 int getCopyDevice(const torch::Tensor& dst, const torch::Tensor& src) {
     if (dst.is_cuda()) {
         return static_cast<int>(dst.get_device());
@@ -387,15 +387,6 @@ int getCopyDevice(const torch::Tensor& dst, const torch::Tensor& src) {
         return static_cast<int>(src.get_device());
     }
     return static_cast<int>(at::cuda::current_device());
-}
-
-at::cuda::CUDAStream getNoBlockCopyStream(int device_id) {
-    static thread_local std::unordered_map<int, at::cuda::CUDAStream> streams;
-    auto                                                              stream = streams.find(device_id);
-    if (stream == streams.end()) {
-        stream = streams.emplace(device_id, at::cuda::getStreamFromPool(/*isHighPriority=*/false, device_id)).first;
-    }
-    return stream->second;
 }
 #endif
 }  // anonymous namespace

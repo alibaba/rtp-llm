@@ -9,7 +9,7 @@
 #include <ATen/cuda/CUDAContext.h>
 #include <cuda_runtime.h>
 #elif USING_ROCM
-#include <ATen/hip/HIPContext.h>
+#include <c10/hip/HIPStream.h>
 #include <hip/hip_runtime.h>
 #endif
 
@@ -120,12 +120,12 @@ TEST(DevicePinTest, SetCurrentThreadDeviceResetsHIPStreamToDefault) {
     }
 
     constexpr int kDevice = 0;
-    at::hip::setCurrentHIPStream(at::hip::getStreamFromPool(/*isHighPriority=*/false, kDevice));
-    ASSERT_NE(at::hip::getDefaultHIPStream(kDevice), at::hip::getCurrentHIPStream(kDevice));
+    c10::hip::setCurrentHIPStream(c10::hip::getStreamFromPool(/*isHighPriority=*/false, kDevice));
+    ASSERT_NE(c10::hip::getDefaultHIPStream(kDevice), c10::hip::getCurrentHIPStream(kDevice));
 
     setCurrentThreadDevice(kDevice);
 
-    ASSERT_EQ(at::hip::getDefaultHIPStream(kDevice), at::hip::getCurrentHIPStream(kDevice));
+    ASSERT_EQ(c10::hip::getDefaultHIPStream(kDevice), c10::hip::getCurrentHIPStream(kDevice));
 }
 #endif
 

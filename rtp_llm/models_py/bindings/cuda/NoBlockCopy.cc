@@ -5,7 +5,6 @@
 #include <cuda_runtime.h>
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
-#include <unordered_map>
 
 namespace rtp_llm {
 
@@ -22,15 +21,6 @@ int getCopyDevice(const MultiCopyParams& params) {
         return static_cast<int>(params.multi_src[0].get_device());
     }
     return static_cast<int>(at::cuda::current_device());
-}
-
-at::cuda::CUDAStream getNoBlockCopyStream(int device_id) {
-    static thread_local std::unordered_map<int, at::cuda::CUDAStream> streams;
-    auto                                                              stream = streams.find(device_id);
-    if (stream == streams.end()) {
-        stream = streams.emplace(device_id, at::cuda::getStreamFromPool(/*isHighPriority=*/false, device_id)).first;
-    }
-    return stream->second;
 }
 
 }  // namespace

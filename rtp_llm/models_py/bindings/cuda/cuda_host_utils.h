@@ -22,6 +22,7 @@
 #include <cstddef>
 
 #if USING_CUDA
+#include <ATen/cuda/CUDAContext.h>
 #include <cuda_runtime.h>
 #elif USING_ROCM
 #include <hip/hip_runtime.h>
@@ -64,6 +65,9 @@ int                        getMaxBlocksPerMultiprocessor(int device_id = -1);
 int                        getComputeCapabilityMajor(int device_id = -1);
 int                        getComputeCapabilityMinor(int device_id = -1);
 std::pair<int, int>        getComputeCapability(int device_id = -1);
+#if USING_CUDA
+at::cuda::CUDAStream getNoBlockCopyStream(int device_id);
+#endif
 
 struct CaptureCheck {
     static bool in_cuda_graph_capture;
