@@ -54,7 +54,12 @@ void TensorPbConvert::torchToPb(TensorPB* tensor_pb, const torch::Tensor& tensor
     for (auto dim : shape) {
         tensor_pb->add_shape(dim);
     }
-    torch::Tensor contiguous_tensor = tensor.to(torch::kCPU).contiguous();
+    // The proto serialization boundary is almost always fed CPU tensors; only pay
+    // for the device->host copy when the tensor is on another device. (Serializing a
+    // GPU tensor via data_ptr() below would otherwise read device memory as host
+    // bytes and corrupt the payload.)
+    torch::Tensor contiguous_tensor =
+        tensor.is_cpu() ? tensor.contiguous() : tensor.to(torch::kCPU).contiguous();
     switch (tensor.dtype().toScalarType()) {
         case torch::kFloat32: {
             size_t      num_bytes = contiguous_tensor.numel() * sizeof(float);

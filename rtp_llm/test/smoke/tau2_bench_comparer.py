@@ -28,6 +28,30 @@ EVALSCOPE_PINNED_VERSION = "1.6.0"
 _REPORT_PATH_RE = re.compile(r"Dump report to:\s*(\S+\.json)")
 
 
+def _safe_extractall(tar: tarfile.TarFile, dest_dir: str) -> None:
+    """Path-traversal-safe extraction for Python runtimes without tarfile's
+    ``data`` filter (added in 3.12, backported to 3.10.12 / 3.11.4 / 3.9.17).
+
+    The tarball is downloaded from an external URL, so reject any member (or link
+    target) that would resolve outside ``dest_dir`` (``..`` traversal / absolute
+    paths) before extracting, instead of doing an unguarded extractall.
+    """
+    dest_root = os.path.realpath(dest_dir)
+
+    def _within(path: str) -> bool:
+        resolved = os.path.realpath(os.path.join(dest_dir, path))
+        return resolved == dest_root or resolved.startswith(dest_root + os.sep)
+
+    for member in tar.getmembers():
+        if not _within(member.name):
+            raise SmokeException(f"blocked unsafe path in tarball: {member.name!r}")
+        if (member.islnk() or member.issym()) and not _within(member.linkname):
+            raise SmokeException(
+                f"blocked unsafe link target in tarball: {member.linkname!r}"
+            )
+    tar.extractall(path=dest_dir)
+
+
 class Tau2BenchComparer(BaseComparer):
     """Runs tau2-bench against the running smoke server and asserts OVERALL score >= threshold."""
 
@@ -157,7 +181,10 @@ class Tau2BenchComparer(BaseComparer):
                 try:
                     tar.extractall(path=dest_dir, filter="data")
                 except TypeError:
-                    tar.extractall(path=dest_dir)
+                    # Py < 3.12 without the backport: the filter kwarg is absent, so
+                    # fall back to an explicit path-traversal-safe extraction rather
+                    # than an unguarded extractall (the 3.10.9 smoke container path).
+                    _safe_extractall(tar, dest_dir)
         finally:
             try:
                 os.remove(tarball_path)

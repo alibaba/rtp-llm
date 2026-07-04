@@ -37,6 +37,13 @@ ln  -sf `pwd`/bazel-out/k8-opt/bin/rtp_llm/cpp/model_rpc/proto/model_rpc_service
 
 ```
 
+> **Breaking change (build configs):** the `--config=cpu`, `--config=arm` and
+> `--config=cuda12_6` build configurations have been removed. The supported build
+> configs are now `--config=cuda12_9` (x86 NVIDIA GPU, the default), `--config=cuda12_arm`
+> (aarch64 NVIDIA GPU) and `--config=rocm` (AMD). Building without an explicit
+> `--config` no longer falls back to a CPU build — it resolves the cuda12_9 (cu129)
+> wheels. Update any CI/scripts that referenced the removed configs accordingly.
+
 
 ## Method 3: Using docker
 More Docker versions can be obtained from [RTP-LLM Release](../release/index.rst)
