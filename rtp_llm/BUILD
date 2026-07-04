@@ -560,9 +560,8 @@ whl_reqs = [
     "sympy",
     "typing-extensions",
     "importlib_metadata",
-    # Pinned to 4.51.2 to match requirements_base.txt and the regenerated
-    # lockfiles. Bump only after regenerating lockfiles on Linux x86_64 + py3.10.
-    "transformers==4.51.2",
+    # Kept in sync with requirements_base.txt and the regenerated lockfiles.
+    "transformers==5.2.0",
     "sentencepiece==0.2.0",
     "fastapi==0.115.6",
     "grpcio-tools==1.57.0",
@@ -588,7 +587,7 @@ whl_reqs = [
     "pydantic",
     "timm==0.9.12",
     "onnx",
-    "sentence-transformers==2.7.0",
+    "sentence-transformers==5.2.0",
     # "xfastertransformer_devel==1.8.1.1",
     # "xfastertransformer_devel_icx==1.8.1.1",
     "grpcio==1.62.0",
