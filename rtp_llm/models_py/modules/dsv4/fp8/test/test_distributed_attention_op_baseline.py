@@ -5076,6 +5076,185 @@ class DistributedAttentionTorchrunCandidateTest(unittest.TestCase):
         torch.cuda.synchronize()
         self.assertTrue(torch.isfinite(actual.float()).all().item())
 
+    def test_torchrun_symm_mem_csa_e2e_4k_shape_contract(self) -> None:
+        """Production CSA shape smoke: direct fresh KV plus CSA side effects.
+
+        The default 2k shape is the fast full-kernel correctness contract.
+        Set DSV4_DIST_ATTN_TEST_CSA_TOTAL_TOKENS=4100 for the 4k stress shape.
+        """
+        op = _candidate_op()
+        self.assertIsNotNone(op)
+        rank = torch.distributed.get_rank()
+        cp_size = 8
+        total_tokens = int(os.environ.get("DSV4_DIST_ATTN_TEST_CSA_TOTAL_TOKENS", "2048"))
+        chunk = (total_tokens + cp_size - 1) // cp_size
+        padded_tokens = cp_size * chunk
+        compressed_region_width = (total_tokens + 3) // 4
+        n_heads = 128
+        head_dim = 512
+        index_heads = 64
+        index_dim = 128
+        device = torch.device("cuda")
+
+        gen = torch.Generator(device="cpu")
+        gen.manual_seed(20260704)
+        q_full = (
+            torch.randn(padded_tokens, n_heads, head_dim, generator=gen, dtype=torch.float32) * 0.01
+        ).to(torch.bfloat16).to(device)
+        kv_full = (
+            torch.randn(padded_tokens, head_dim, generator=gen, dtype=torch.float32) * 0.01
+        ).to(torch.bfloat16).to(device)
+        indexer_q_full = (
+            torch.randn(padded_tokens, index_heads, index_dim, generator=gen, dtype=torch.float32) * 0.01
+        ).to(torch.bfloat16).to(device)
+
+        local_q = q_full[rank * chunk : (rank + 1) * chunk].contiguous()
+        local_kv = kv_full[rank * chunk : (rank + 1) * chunk].contiguous()
+        local_indexer_q = indexer_q_full[rank * chunk : (rank + 1) * chunk].contiguous()
+        positions = torch.arange(rank * chunk, (rank + 1) * chunk, dtype=torch.long, device=device)
+        req_ids = torch.zeros(chunk, dtype=torch.long, device=device)
+        prefix_lengths = torch.zeros(1, dtype=torch.long, device=device)
+        input_lengths = torch.tensor([total_tokens], dtype=torch.long, device=device)
+        kv_cu_lens = torch.tensor([0, total_tokens], dtype=torch.long, device=device)
+        kv_unpad_restore = torch.arange(total_tokens, dtype=torch.long, device=device)
+        local_rows = torch.arange(chunk, dtype=torch.long, device=device)
+
+        full_slots = torch.full((padded_tokens,), -1, dtype=torch.long, device=device)
+        full_slots[:total_tokens] = torch.arange(total_tokens, dtype=torch.long, device=device)
+        swa_pool = torch.empty(64, 132, SWA_ENTRY_BYTES, dtype=torch.uint8, device=device)
+        swa_pool.fill_(0x5A)
+        cmp_pool = torch.empty(128, 132, SWA_ENTRY_BYTES, dtype=torch.uint8, device=device)
+        cmp_pool.fill_(0x5A)
+        indexer_pool = torch.empty(128, 132, INDEXER_ENTRY_BYTES, dtype=torch.uint8, device=device)
+        indexer_pool.fill_(0x5A)
+        main_raw_width = head_dim * 2
+        indexer_raw_width = index_dim * 2
+        state_cache = torch.empty(256, 132, main_raw_width * 2, dtype=torch.float32, device=device)
+        state_cache.fill_(-123.0)
+        indexer_state_cache = torch.empty(256, 132, indexer_raw_width * 2, dtype=torch.float32, device=device)
+        indexer_state_cache.fill_(-123.0)
+        state_block_table_width = max(40, (total_tokens + 131) // 132 + 1)
+        block_table = torch.arange(state_block_table_width, dtype=torch.int32, device=device).view(1, -1).contiguous()
+        compressed_block_table_width = max(1, (compressed_region_width + 131) // 132 + 1)
+        compressed_block_table = torch.arange(
+            compressed_block_table_width, dtype=torch.int32, device=device
+        ).view(1, -1).contiguous()
+        token_to_req = torch.zeros(padded_tokens, dtype=torch.int32, device=device)
+        compressor_positions = torch.arange(padded_tokens, dtype=torch.long, device=device)
+        state_slots = full_slots.clone()
+        boundary = ((compressor_positions + 1) % 4 == 0) & (compressor_positions < total_tokens)
+        compressed_slot = compressor_positions // 4
+        kv_slots = torch.where(boundary, compressed_slot, torch.full_like(compressor_positions, -1))
+        norm_weight = torch.ones(head_dim, dtype=torch.bfloat16, device=device)
+        indexer_norm_weight = torch.ones(index_dim, dtype=torch.bfloat16, device=device)
+        cos_sin_cache = torch.zeros(8192, 64, dtype=torch.float32, device=device)
+        cos_sin_cache[:, :32] = 1.0
+        ape = torch.zeros(4, main_raw_width, dtype=torch.float32, device=device)
+        indexer_ape = torch.zeros(4, indexer_raw_width, dtype=torch.float32, device=device)
+
+        local_indexer_kv = torch.cat(
+            [local_indexer_q[:, 0, :], torch.zeros_like(local_indexer_q[:, 0, :])],
+            dim=1,
+        ).contiguous()
+        local_indexer_score = torch.zeros_like(local_indexer_kv)
+        local_main_kv = torch.cat([local_kv, torch.zeros_like(local_kv)], dim=1).contiguous()
+        local_main_score = torch.zeros_like(local_main_kv)
+        weights = torch.ones(chunk, index_heads, dtype=torch.float32, device=device)
+
+        spec = Dsv4CpAttentionBufferSpec(
+            cp_size=cp_size,
+            max_tokens_per_rank=chunk,
+            batch_cap=1,
+            swa_bytes_per_token=1024,
+            scratch_bytes_per_rank=32 * 1024 * 1024,
+        )
+        buffer = get_or_create_dsv4_cp_attention_buffer(
+            group=torch.distributed.group.WORLD,
+            cp_rank=rank,
+            spec=spec,
+        )
+        actual = op(
+            local_q,
+            local_kv.view(1, chunk, 1, head_dim).contiguous(),
+            local_indexer_q,
+            torch.empty(1, 1, index_heads, index_dim, dtype=local_q.dtype, device=device),
+            torch.zeros(n_heads, dtype=torch.float32, device=device),
+            req_ids,
+            positions,
+            prefix_lengths,
+            input_lengths,
+            local_rows,
+            4,
+            512,
+            512,
+            compressed_region_width,
+            **buffer.op_kwargs(cp_rank=rank),
+            swa_k=local_kv.contiguous(),
+            swa_k_cache=swa_pool,
+            swa_slot_mapping=full_slots.contiguous(),
+            csa_indexer_compressor_kv=local_indexer_kv,
+            csa_indexer_compressor_score=local_indexer_score,
+            csa_indexer_compressor_ape=indexer_ape,
+            csa_indexer_compressor_positions=compressor_positions.contiguous(),
+            csa_indexer_compressor_state_cache=indexer_state_cache,
+            csa_indexer_compressor_state_slots=state_slots.contiguous(),
+            csa_indexer_compressor_ratio=4,
+            csa_indexer_compressor_token_to_req=token_to_req.contiguous(),
+            csa_indexer_compressor_state_block_table=block_table,
+            csa_indexer_compressor_norm_weight=indexer_norm_weight,
+            csa_indexer_compressor_cos_sin_cache=cos_sin_cache,
+            csa_indexer_compressor_kv_cache=indexer_pool,
+            csa_indexer_compressor_kv_slots=kv_slots.contiguous(),
+            csa_indexer_compressor_seq_start=0,
+            csa_indexer_compressor_disable_raw_path=False,
+            csa_indexer_compressor_rms_norm_eps=1.0e-6,
+            csa_indexer_compressor_head_dim=index_dim,
+            csa_indexer_compressor_rope_head_dim=64,
+            csa_indexer_compressor_overlap=True,
+            csa_indexer_compressor_state_tokens_per_block=132,
+            csa_indexer_compressor_seq_start_per_req=torch.zeros(1, dtype=torch.int32, device=device),
+            csa_indexer_compressor_cu_seq_per_req=torch.tensor([0, total_tokens], dtype=torch.int32, device=device),
+            csa_indexer_compressor_unpad_restore=kv_unpad_restore,
+            compressor_kv=local_main_kv,
+            compressor_score=local_main_score,
+            compressor_ape=ape,
+            compressor_positions=compressor_positions.contiguous(),
+            compressor_state_cache=state_cache,
+            compressor_state_slots=state_slots.contiguous(),
+            compressor_ratio=4,
+            compressor_token_to_req=token_to_req.contiguous(),
+            compressor_state_block_table=block_table,
+            compressor_norm_weight=norm_weight,
+            compressor_cos_sin_cache=cos_sin_cache,
+            compressor_kv_cache=cmp_pool,
+            compressor_kv_slots=kv_slots.contiguous(),
+            compressor_seq_start=0,
+            compressor_disable_raw_path=False,
+            compressor_rms_norm_eps=1.0e-6,
+            compressor_head_dim=head_dim,
+            compressor_rope_head_dim=64,
+            compressor_overlap=True,
+            compressor_state_tokens_per_block=132,
+            compressor_seq_start_per_req=torch.zeros(1, dtype=torch.int32, device=device),
+            compressor_cu_seq_per_req=torch.tensor([0, total_tokens], dtype=torch.int32, device=device),
+            compressor_unpad_restore=kv_unpad_restore,
+            csa_indexer_k_pool=indexer_pool,
+            csa_indexer_block_table=compressed_block_table,
+            csa_indexer_seq_lens=torch.full((1,), total_tokens // 4, dtype=torch.int32, device=device),
+            csa_indexer_weights=weights,
+            attention_cmp_k_pool=cmp_pool,
+            attention_cmp_block_table=compressed_block_table,
+            attention_cmp_seq_lens=torch.full((1,), total_tokens // 4, dtype=torch.int32, device=device),
+            attention_swa_k_pool=swa_pool,
+            attention_swa_slot_mapping=full_slots.view(1, -1).contiguous(),
+            attention_swa_gather_lens=torch.zeros(1, dtype=torch.int32, device=device),
+            kv_unpad_restore=kv_unpad_restore,
+            kv_cu_lens=kv_cu_lens,
+        )
+        self.assertEqual(tuple(actual.shape), (chunk, n_heads, head_dim))
+        torch.cuda.synchronize()
+        self.assertTrue(torch.isfinite(actual.float()).all().item())
+
 
 if __name__ == "__main__":
     unittest.main()

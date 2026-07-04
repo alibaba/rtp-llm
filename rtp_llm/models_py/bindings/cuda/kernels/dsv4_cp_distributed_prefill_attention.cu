@@ -115,6 +115,8 @@ static_assert(kMegaIndexerCandidateTile
               "CSA worst-slot tile scratch must fit in reduce_indices_second without aliasing the tile list");
 constexpr unsigned int kMegaCompressedDoneFlag = 0x80000000u;
 constexpr unsigned int kMegaCompressedCountMask = 0x7fffffffu;
+constexpr int kMegaCsaScorePrebuildBarrier = 17;
+constexpr int kMegaCompressedIndexPrebuildBarrier = 18;
 constexpr int kWarpDotAttentionKeyThreshold = 128;
 
 void validateTensor(const torch::Tensor& t, const char* name, c10::ScalarType dtype, int64_t dim);
@@ -153,6 +155,46 @@ bool dsv4CpAttentionMegaSplitKEnabled() {
 bool dsv4CpAttentionMegaSplitKDisabled() {
     const char* raw = std::getenv("DSV4_CP_ATTENTION_MEGA_SPLITK");
     return raw != nullptr && raw[0] == '0';
+}
+
+bool dsv4CpAttentionMegaCsaScorePrebuildEnabled() {
+    const char* raw = std::getenv("DSV4_CP_ATTENTION_MEGA_CSA_SCORE_PREBUILD");
+    return raw == nullptr || raw[0] == '\0' || raw[0] != '0';
+}
+
+int dsv4CpAttentionMegaReturnAfterStageCode() {
+    const char* raw = std::getenv("DSV4_CP_ATTENTION_MEGA_RETURN_AFTER_STAGE");
+    if (raw == nullptr || raw[0] == '\0') {
+        return 0;
+    }
+    if (std::strcmp(raw, "after_release") == 0) {
+        return 1;
+    }
+    if (std::strcmp(raw, "after_csa_score_prebuild") == 0) {
+        return 2;
+    }
+    if (std::strcmp(raw, "after_compressed_prebuild") == 0) {
+        return 3;
+    }
+    if (std::strcmp(raw, "after_swa_writer") == 0) {
+        return 4;
+    }
+    if (std::strcmp(raw, "after_csa_indexer_compressor") == 0) {
+        return 5;
+    }
+    if (std::strcmp(raw, "after_main_compressor") == 0) {
+        return 6;
+    }
+    if (std::strcmp(raw, "after_fresh_stage") == 0) {
+        return 7;
+    }
+    if (std::strcmp(raw, "after_indexer_stage") == 0) {
+        return 8;
+    }
+    if (std::strcmp(raw, "before_side_effects") == 0) {
+        return 9;
+    }
+    return 0;
 }
 
 __host__ __device__ __forceinline__ int64_t alignUpInt64(int64_t value, int64_t alignment) {
@@ -748,6 +790,32 @@ __device__ __forceinline__ float fp8_e4m3_to_float(uint8_t x, float scale) {
     return __half2float(h) * scale;
 }
 
+__device__ __forceinline__ int dsv4MegaCsaIndexerValidCount(int q_pos,
+                                                            int req,
+                                                            int LI,
+                                                            int compress_ratio,
+                                                            const uint8_t* csa_indexer_k_cache,
+                                                            const float* csa_indexer_weights,
+                                                            const int64_t* csa_indexer_cu_lens,
+                                                            int csa_indexer_total_len,
+                                                            const uint8_t* csa_indexer_k_pool,
+                                                            const int32_t* csa_indexer_block_table,
+                                                            const int32_t* csa_indexer_seq_lens) {
+    const bool use_fp8_indexer_pool =
+        csa_indexer_k_pool != nullptr && csa_indexer_block_table != nullptr && csa_indexer_weights != nullptr;
+    const bool use_fp8_indexer = use_fp8_indexer_pool
+                                 || (csa_indexer_k_cache != nullptr && csa_indexer_weights != nullptr
+                                     && csa_indexer_cu_lens != nullptr);
+    int req_k_len = LI;
+    if (use_fp8_indexer_pool) {
+        req_k_len = csa_indexer_seq_lens == nullptr ? LI : static_cast<int>(csa_indexer_seq_lens[req]);
+    } else if (use_fp8_indexer) {
+        req_k_len = static_cast<int>(csa_indexer_cu_lens[req + 1] - csa_indexer_cu_lens[req]);
+        req_k_len = min_int(req_k_len, csa_indexer_total_len);
+    }
+    return min_int((q_pos + 1) / compress_ratio, req_k_len);
+}
+
 __device__ __forceinline__ int dsv4MegaSequentialCompressedCount(int compress_ratio,
                                                                  int compressed_topk,
                                                                  int q_pos,
@@ -780,19 +848,17 @@ __device__ __forceinline__ int dsv4MegaSequentialCompressedCount(int compress_ra
         return -1;
     }
 
-    const bool use_fp8_indexer_pool =
-        csa_indexer_k_pool != nullptr && csa_indexer_block_table != nullptr && csa_indexer_weights != nullptr;
-    const bool use_fp8_indexer = use_fp8_indexer_pool
-                                 || (csa_indexer_k_cache != nullptr && csa_indexer_weights != nullptr
-                                     && csa_indexer_cu_lens != nullptr);
-    int req_k_len = LI;
-    if (use_fp8_indexer_pool) {
-        req_k_len = csa_indexer_seq_lens == nullptr ? LI : static_cast<int>(csa_indexer_seq_lens[req]);
-    } else if (use_fp8_indexer) {
-        req_k_len = static_cast<int>(csa_indexer_cu_lens[req + 1] - csa_indexer_cu_lens[req]);
-        req_k_len = min_int(req_k_len, csa_indexer_total_len);
-    }
-    const int valid = min_int((q_pos + 1) / compress_ratio, req_k_len);
+    const int valid = dsv4MegaCsaIndexerValidCount(q_pos,
+                                                   req,
+                                                   LI,
+                                                   compress_ratio,
+                                                   csa_indexer_k_cache,
+                                                   csa_indexer_weights,
+                                                   csa_indexer_cu_lens,
+                                                   csa_indexer_total_len,
+                                                   csa_indexer_k_pool,
+                                                   csa_indexer_block_table,
+                                                   csa_indexer_seq_lens);
     const int k_eff = min_int(min_int(valid, compressed_topk), kMaxCompressedTopK);
     if (k_eff < valid) {
         return -1;
@@ -2735,6 +2801,317 @@ __device__ __forceinline__ int dsv4MegaBuildCompressedIndicesForRow(const scalar
     return compressed_count;
 }
 
+template<typename scalar_t>
+__device__ __forceinline__ void dsv4MegaPrecomputeCsaIndexerScores(const scalar_t* __restrict__ indexer_q,
+                                                                   const scalar_t* __restrict__ indexer_k,
+                                                                   const int64_t* __restrict__ req_id_per_token,
+                                                                   const int64_t* __restrict__ position_ids,
+                                                                   const int64_t* __restrict__ prefix_lengths,
+                                                                   const int64_t* __restrict__ input_lengths,
+                                                                   const int64_t* __restrict__ local_rows,
+                                                                   int R,
+                                                                   int compress_ratio,
+                                                                   int LI,
+                                                                   int IH,
+                                                                   int ID,
+                                                                   const uint8_t* __restrict__ csa_indexer_k_cache,
+                                                                   const float* __restrict__ csa_indexer_weights,
+                                                                   const int64_t* __restrict__ csa_indexer_cu_lens,
+                                                                   int csa_indexer_total_len,
+                                                                   const uint8_t* __restrict__ csa_indexer_k_pool,
+                                                                   const int32_t* __restrict__ csa_indexer_block_table,
+                                                                   const int32_t* __restrict__ csa_indexer_seq_lens,
+                                                                   int csa_indexer_pool_block_size,
+                                                                   int64_t csa_indexer_pool_block_stride,
+                                                                   int64_t csa_indexer_block_table_stride,
+                                                                   const uint8_t* const* __restrict__ symm_buffer_ptrs,
+                                                                   int use_symm_direct_indexer,
+                                                                   int64_t symm_per_rank_buffer_bytes,
+                                                                   int64_t symm_indexer_payload_offset,
+                                                                   int symm_indexer_l_local,
+                                                                   int score_stride,
+                                                                   float* __restrict__ score_matrix,
+                                                                   float* __restrict__ reduce_buf,
+                                                                   uint8_t* __restrict__ indexer_metadata_storage,
+                                                                   float* __restrict__ reduce_result) {
+    const int score_tiles_per_row = (score_stride + kMegaIndexerCandidateTile - 1) / kMegaIndexerCandidateTile;
+    const int64_t total_score_tasks = static_cast<int64_t>(R) * static_cast<int64_t>(score_tiles_per_row);
+    for (int64_t score_task = static_cast<int64_t>(blockIdx.x); score_task < total_score_tasks;
+         score_task += static_cast<int64_t>(gridDim.x)) {
+        const int local_row = static_cast<int>(score_task / score_tiles_per_row);
+        const int tile_id = static_cast<int>(score_task - static_cast<int64_t>(local_row) * score_tiles_per_row);
+        const int candidate_base = tile_id * kMegaIndexerCandidateTile;
+        const int64_t row = local_rows[local_row];
+        const int req = static_cast<int>(req_id_per_token[row]);
+        const int q_pos = static_cast<int>(position_ids[row]);
+        const int kv_len = static_cast<int>(prefix_lengths[req] + input_lengths[req]);
+        int valid = dsv4MegaCsaIndexerValidCount(q_pos,
+                                                 req,
+                                                 LI,
+                                                 compress_ratio,
+                                                 csa_indexer_k_cache,
+                                                 csa_indexer_weights,
+                                                 csa_indexer_cu_lens,
+                                                 csa_indexer_total_len,
+                                                 csa_indexer_k_pool,
+                                                 csa_indexer_block_table,
+                                                 csa_indexer_seq_lens);
+        valid = min_int(valid, max_int(0, kv_len / compress_ratio));
+        if (candidate_base >= valid) {
+            continue;
+        }
+        const int candidate_count = min_int(kMegaIndexerCandidateTile, score_stride - candidate_base);
+        const int last_tile_boundary = (candidate_base + kMegaIndexerCandidateTile) * compress_ratio - 1;
+        const bool candidate_tile_all_valid =
+            candidate_count == kMegaIndexerCandidateTile && candidate_base + kMegaIndexerCandidateTile <= valid
+            && last_tile_boundary >= 0 && last_tile_boundary < kv_len;
+        if (candidate_tile_all_valid) {
+            dsv4MegaIndexerScoreCandidateTile<scalar_t, true>(indexer_q,
+                                                              indexer_k,
+                                                              csa_indexer_k_cache,
+                                                              csa_indexer_weights,
+                                                              csa_indexer_cu_lens,
+                                                              csa_indexer_k_pool,
+                                                              csa_indexer_block_table,
+                                                              row,
+                                                              req,
+                                                              candidate_base,
+                                                              nullptr,
+                                                              nullptr,
+                                                              candidate_count,
+                                                              csa_indexer_pool_block_size,
+                                                              csa_indexer_pool_block_stride,
+                                                              csa_indexer_block_table_stride,
+                                                              reduce_buf,
+                                                              indexer_metadata_storage,
+                                                              reduce_result);
+        } else {
+            int candidate_pos[kMegaIndexerCandidateTile];
+            int candidate_valid[kMegaIndexerCandidateTile];
+#pragma unroll
+            for (int tile_i = 0; tile_i < kMegaIndexerCandidateTile; ++tile_i) {
+                const int candidate = candidate_base + tile_i;
+                candidate_pos[tile_i] = candidate;
+                const int boundary_pos = (candidate + 1) * compress_ratio - 1;
+                candidate_valid[tile_i] =
+                    (tile_i < candidate_count && candidate < valid && boundary_pos >= 0 && boundary_pos < kv_len) ? 1 :
+                                                                                                                     0;
+            }
+            dsv4MegaIndexerScoreCandidateTile<scalar_t, false>(indexer_q,
+                                                               indexer_k,
+                                                               csa_indexer_k_cache,
+                                                               csa_indexer_weights,
+                                                               csa_indexer_cu_lens,
+                                                               csa_indexer_k_pool,
+                                                               csa_indexer_block_table,
+                                                               row,
+                                                               req,
+                                                               candidate_base,
+                                                               candidate_pos,
+                                                               candidate_valid,
+                                                               candidate_count,
+                                                               csa_indexer_pool_block_size,
+                                                               csa_indexer_pool_block_stride,
+                                                               csa_indexer_block_table_stride,
+                                                               reduce_buf,
+                                                               indexer_metadata_storage,
+                                                               reduce_result);
+        }
+        float* row_scores = score_matrix + static_cast<int64_t>(local_row) * score_stride;
+        for (int tile_i = static_cast<int>(threadIdx.x); tile_i < candidate_count; tile_i += static_cast<int>(blockDim.x)) {
+            row_scores[candidate_base + tile_i] = reduce_result[tile_i];
+        }
+        __syncthreads();
+    }
+}
+
+__device__ __forceinline__ int dsv4MegaBuildCompressedIndicesFromScores(const int64_t* __restrict__ req_id_per_token,
+                                                                        const int64_t* __restrict__ position_ids,
+                                                                        const int64_t* __restrict__ prefix_lengths,
+                                                                        const int64_t* __restrict__ input_lengths,
+                                                                        const int64_t* __restrict__ local_rows,
+                                                                        int local_row,
+                                                                        int compress_ratio,
+                                                                        int compressed_topk,
+                                                                        int LI,
+                                                                        const uint8_t* __restrict__ csa_indexer_k_cache,
+                                                                        const float* __restrict__ csa_indexer_weights,
+                                                                        const int64_t* __restrict__ csa_indexer_cu_lens,
+                                                                        int csa_indexer_total_len,
+                                                                        const uint8_t* __restrict__ csa_indexer_k_pool,
+                                                                        const int32_t* __restrict__ csa_indexer_block_table,
+                                                                        const int32_t* __restrict__ csa_indexer_seq_lens,
+                                                                        int compressed_stride,
+                                                                        unsigned int compressed_epoch,
+                                                                        unsigned long long compressed_epoch_prefix,
+                                                                        unsigned long long* __restrict__ compressed_meta,
+                                                                        int* __restrict__ row_compressed_indices_base,
+                                                                        int* __restrict__ scratch_indices,
+                                                                        float* __restrict__ scratch_scores,
+                                                                        int* __restrict__ reduce_indices,
+                                                                        int* __restrict__ reduce_indices_second,
+                                                                        float* __restrict__ reduce_buf,
+                                                                        const float* __restrict__ score_matrix,
+                                                                        int score_stride) {
+    const int tid = static_cast<int>(threadIdx.x);
+    const int64_t topk_row = local_rows[local_row];
+    const int topk_req = static_cast<int>(req_id_per_token[topk_row]);
+    const int topk_q_pos = static_cast<int>(position_ids[topk_row]);
+    const int topk_kv_len = static_cast<int>(prefix_lengths[topk_req] + input_lengths[topk_req]);
+    const int visible_boundaries = max_int(0, topk_kv_len / compress_ratio);
+    int valid = dsv4MegaCsaIndexerValidCount(topk_q_pos,
+                                             topk_req,
+                                             LI,
+                                             compress_ratio,
+                                             csa_indexer_k_cache,
+                                             csa_indexer_weights,
+                                             csa_indexer_cu_lens,
+                                             csa_indexer_total_len,
+                                             csa_indexer_k_pool,
+                                             csa_indexer_block_table,
+                                             csa_indexer_seq_lens);
+    valid = min_int(valid, min_int(visible_boundaries, score_stride));
+    const int k_eff = min_int(min_int(valid, compressed_topk), kMaxCompressedTopK);
+    if (k_eff <= 0) {
+        if (tid == 0 && compressed_meta != nullptr) {
+            cuda::atomic_ref<unsigned long long, cuda::thread_scope_device> meta_ref(compressed_meta[local_row]);
+            meta_ref.store(compressed_epoch_prefix | kMegaCompressedDoneFlag,
+                           cuda::std::memory_order_release);
+        }
+        __syncthreads();
+        return 0;
+    }
+    const float* row_scores = score_matrix + static_cast<int64_t>(local_row) * score_stride;
+    for (int i = tid; i < k_eff; i += static_cast<int>(blockDim.x)) {
+        scratch_indices[i] = i;
+        scratch_scores[i] = row_scores[i];
+    }
+    __syncthreads();
+    if (k_eff < valid) {
+        int cached_worst_slot = -1;
+        int cached_second_worst_slot = -1;
+        float cached_worst_score = 3.4028234663852886e38F;
+        int cached_worst_idx = -2147483647;
+        bool refresh_worst_slot = true;
+        for (int c = k_eff; c < valid; c += kMegaIndexerCandidateTile) {
+            if (refresh_worst_slot) {
+                dsv4MegaFindTwoWorstTopKSlots(scratch_indices,
+                                              scratch_scores,
+                                              k_eff,
+                                              reduce_indices,
+                                              reduce_indices_second,
+                                              reduce_buf,
+                                              cached_worst_slot,
+                                              cached_second_worst_slot);
+                cached_worst_score =
+                    cached_worst_slot >= 0 ? scratch_scores[cached_worst_slot] : 3.4028234663852886e38F;
+                cached_worst_idx = cached_worst_slot >= 0 ? scratch_indices[cached_worst_slot] : -2147483647;
+                refresh_worst_slot = false;
+            }
+            int tile_valid_count = min_int(kMegaIndexerCandidateTile, valid - c);
+            if (tid == 0) {
+                float tile_best_score = kInvalidCompressorScore;
+                int tile_best_idx = 2147483647;
+#pragma unroll
+                for (int tile_i = 0; tile_i < kMegaIndexerCandidateTile; ++tile_i) {
+                    if (tile_i < tile_valid_count) {
+                        reduce_indices_second[tile_i] = tile_i;
+                        const int candidate = c + tile_i;
+                        const float score = row_scores[candidate];
+                        if (dsv4MegaTopKBetter(score, candidate, tile_best_score, tile_best_idx)) {
+                            tile_best_score = score;
+                            tile_best_idx = candidate;
+                        }
+                    }
+                }
+                const bool tile_can_replace =
+                    cached_worst_slot >= 0
+                    && dsv4MegaTopKBetter(tile_best_score, tile_best_idx, cached_worst_score, cached_worst_idx);
+                reduce_indices[0] = tile_can_replace ? tile_valid_count : 0;
+            }
+            __syncthreads();
+            tile_valid_count = reduce_indices[0];
+            if (tile_valid_count <= 0) {
+                continue;
+            }
+            dsv4MegaFindWorstTopKSlotsTile(scratch_indices,
+                                           scratch_scores,
+                                           k_eff,
+                                           tile_valid_count,
+                                           reduce_indices_second + kMegaIndexerCandidateTile,
+                                           reduce_indices,
+                                           reduce_buf);
+            if (tid == 0) {
+                int sorted_tile_count = tile_valid_count;
+#pragma unroll
+                for (int sort_i = 1; sort_i < kMegaIndexerCandidateTile; ++sort_i) {
+                    if (sort_i < sorted_tile_count) {
+                        const int tile_i = reduce_indices_second[sort_i];
+                        const int candidate = c + tile_i;
+                        const float score = row_scores[candidate];
+                        int insert = sort_i;
+#pragma unroll
+                        for (int scan = sort_i - 1; scan >= 0; --scan) {
+                            if (scan < sorted_tile_count) {
+                                const int scan_tile_i = reduce_indices_second[scan];
+                                const int scan_candidate = c + scan_tile_i;
+                                const float scan_score = row_scores[scan_candidate];
+                                if (dsv4MegaTopKBetter(score, candidate, scan_score, scan_candidate)) {
+                                    reduce_indices_second[scan + 1] = scan_tile_i;
+                                    insert = scan;
+                                } else {
+                                    break;
+                                }
+                            }
+                        }
+                        reduce_indices_second[insert] = tile_i;
+                    }
+                }
+#pragma unroll
+                for (int tile_rank = 0; tile_rank < kMegaIndexerCandidateTile; ++tile_rank) {
+                    if (tile_rank >= sorted_tile_count) {
+                        break;
+                    }
+                    const int worst_slot = reduce_indices[tile_rank];
+                    if (worst_slot < 0) {
+                        break;
+                    }
+                    const int tile_i = reduce_indices_second[tile_rank];
+                    const int best_idx = c + tile_i;
+                    const float best_score = row_scores[best_idx];
+                    if (!dsv4MegaTopKBetter(best_score,
+                                            best_idx,
+                                            scratch_scores[worst_slot],
+                                            scratch_indices[worst_slot])) {
+                        break;
+                    }
+                    scratch_indices[worst_slot] = best_idx;
+                    scratch_scores[worst_slot] = best_score;
+                }
+                reduce_indices[0] = 1;
+            }
+            __syncthreads();
+            refresh_worst_slot = reduce_indices[0] != 0;
+        }
+    }
+    if (row_compressed_indices_base != nullptr) {
+        int* dst = row_compressed_indices_base + static_cast<int64_t>(local_row) * compressed_stride;
+        for (int i = tid; i < k_eff; i += static_cast<int>(blockDim.x)) {
+            dst[i] = scratch_indices[i];
+        }
+    }
+    __threadfence();
+    __syncthreads();
+    if (tid == 0 && compressed_meta != nullptr) {
+        cuda::atomic_ref<unsigned long long, cuda::thread_scope_device> meta_ref(compressed_meta[local_row]);
+        meta_ref.store(compressed_epoch_prefix | kMegaCompressedDoneFlag
+                           | (static_cast<unsigned int>(k_eff) & kMegaCompressedCountMask),
+                       cuda::std::memory_order_release);
+    }
+    __syncthreads();
+    return k_eff;
+}
+
 __global__ void writeProtocolRecordKernel(char* base, int64_t offset, int rank, int world_size) {
     if (threadIdx.x != 0) {
         return;
@@ -3936,6 +4313,78 @@ __device__ __forceinline__ void dsv4MegaResidentGridCpBarrier(uint8_t* grid_sync
     } else {
         __syncthreads();
     }
+}
+
+template<typename scalar_t>
+__device__ __forceinline__ void dsv4MegaZeroOutputAndDone(scalar_t* __restrict__ output,
+                                                          int R,
+                                                          int H,
+                                                          int D,
+                                                          uint8_t* local_scratch_base,
+                                                          uint32_t* const* __restrict__ symm_signal_pads,
+                                                          int cp_rank,
+                                                          int cp_size,
+                                                          int rank_side_effect_barriers,
+                                                          unsigned long long launch_epoch) {
+    const int64_t total = static_cast<int64_t>(R) * H * D;
+    const int64_t stride = static_cast<int64_t>(gridDim.x) * blockDim.x;
+    for (int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x; idx < total; idx += stride) {
+        output[idx] = from_float_device<scalar_t>(0.0f);
+    }
+    if (rank_side_effect_barriers) {
+        dsv4MegaResidentGridCpBarrier(local_scratch_base,
+                                      19,
+                                      symm_signal_pads,
+                                      cp_rank,
+                                      cp_size,
+                                      kMegaKernelDoneChannel,
+                                      launch_epoch);
+    }
+}
+
+template<typename scalar_t>
+__device__ __forceinline__ bool dsv4MegaMaybeReturnAfterSideEffectStage(int stage_code,
+                                                                        int target_stage,
+                                                                        scalar_t* __restrict__ output,
+                                                                        int R,
+                                                                        int H,
+                                                                        int D,
+                                                                        uint8_t* local_scratch_base,
+                                                                        uint32_t* const* __restrict__ symm_signal_pads,
+                                                                        int cp_rank,
+                                                                        int cp_size,
+                                                                        int grid_parallel_side_effects,
+                                                                        int rank_side_effect_barriers,
+                                                                        unsigned long long launch_epoch,
+                                                                        int grid_barrier_id) {
+    if (stage_code != target_stage) {
+        return false;
+    }
+    if (grid_parallel_side_effects) {
+        dsv4MegaGridBarrier(local_scratch_base, grid_barrier_id, launch_epoch);
+    } else {
+        __syncthreads();
+    }
+    if (rank_side_effect_barriers) {
+        dsv4MegaResidentGridCpBarrier(local_scratch_base,
+                                      21,
+                                      symm_signal_pads,
+                                      cp_rank,
+                                      cp_size,
+                                      kMegaSideEffectReleaseChannel,
+                                      launch_epoch);
+    }
+    dsv4MegaZeroOutputAndDone(output,
+                              R,
+                              H,
+                              D,
+                              local_scratch_base,
+                              symm_signal_pads,
+                              cp_rank,
+                              cp_size,
+                              rank_side_effect_barriers,
+                              launch_epoch);
+    return true;
 }
 
 __device__ __forceinline__ unsigned long long*
@@ -5692,7 +6141,9 @@ __global__ __launch_bounds__(kMegaBlockThreads, 1) void dsv4CpDistributedPrefill
                                                         uint32_t* const* __restrict__ symm_signal_pads,
                                                         int enable_grid_side_effects,
                                                         int enable_split_k_attention,
-                                                        int splitk_keys_per_block) {
+                                                        int splitk_keys_per_block,
+                                                        int csa_score_prebuild_stride,
+                                                        int mega_return_after_stage) {
 		    const int tid = threadIdx.x;
             if (static_cast<int>(blockDim.x) != kMegaBlockThreads) {
                 if (tid == 0) {
@@ -5711,6 +6162,7 @@ __global__ __launch_bounds__(kMegaBlockThreads, 1) void dsv4CpDistributedPrefill
     }
     const int grid_parallel_side_effects =
         enable_grid_side_effects && local_scratch_base != nullptr && gridDim.x > 1;
+    const int rank_side_effect_barriers = enable_grid_side_effects && local_scratch_base != nullptr;
     const int64_t grid_sync_bytes = grid_parallel_side_effects ? kMegaGridSyncBytes : 0;
     const int64_t swa_scratch_payload_offset = symm_scratch_payload_offset + grid_sync_bytes;
     const int64_t csa_compressor_scratch_payload_offset =
@@ -5726,6 +6178,19 @@ __global__ __launch_bounds__(kMegaBlockThreads, 1) void dsv4CpDistributedPrefill
         alignUpInt64(main_compressor_scratch_payload_offset + main_compressor_writer.kv_bytes
                          + main_compressor_writer.score_bytes,
                      kMegaPayloadAlignBytes);
+    if (mega_return_after_stage == 9) {
+        dsv4MegaZeroOutputAndDone(output,
+                                  R,
+                                  H,
+                                  D,
+                                  local_scratch_base,
+                                  symm_signal_pads,
+                                  cp_rank,
+                                  cp_size,
+                                  rank_side_effect_barriers,
+                                  launch_epoch);
+        return;
+    }
 
     if (grid_parallel_side_effects || blockIdx.x == 0) {
         dsv4MegaWriteSwaCachePhase(swa_writer,
@@ -5740,6 +6205,22 @@ __global__ __launch_bounds__(kMegaBlockThreads, 1) void dsv4CpDistributedPrefill
                                    local_scratch_base,
                                    launch_epoch,
                                    0);
+        if (dsv4MegaMaybeReturnAfterSideEffectStage(mega_return_after_stage,
+                                                    4,
+                                                    output,
+                                                    R,
+                                                    H,
+                                                    D,
+                                                    local_scratch_base,
+                                                    symm_signal_pads,
+                                                    cp_rank,
+                                                    cp_size,
+                                                    grid_parallel_side_effects,
+                                                    rank_side_effect_barriers,
+                                                    launch_epoch,
+                                                    23)) {
+            return;
+        }
         dsv4MegaRunCompressorBf16Phase(csa_indexer_compressor_writer,
                                        symm_buffer_ptrs,
                                        symm_per_rank_buffer_bytes,
@@ -5752,6 +6233,22 @@ __global__ __launch_bounds__(kMegaBlockThreads, 1) void dsv4CpDistributedPrefill
                                        local_scratch_base,
                                        launch_epoch,
                                        2);
+        if (dsv4MegaMaybeReturnAfterSideEffectStage(mega_return_after_stage,
+                                                    5,
+                                                    output,
+                                                    R,
+                                                    H,
+                                                    D,
+                                                    local_scratch_base,
+                                                    symm_signal_pads,
+                                                    cp_rank,
+                                                    cp_size,
+                                                    grid_parallel_side_effects,
+                                                    rank_side_effect_barriers,
+                                                    launch_epoch,
+                                                    23)) {
+            return;
+        }
         dsv4MegaRunCompressorBf16Phase(main_compressor_writer,
                                        symm_buffer_ptrs,
                                        symm_per_rank_buffer_bytes,
@@ -5764,6 +6261,22 @@ __global__ __launch_bounds__(kMegaBlockThreads, 1) void dsv4CpDistributedPrefill
                                        local_scratch_base,
                                        launch_epoch,
                                        7);
+        if (dsv4MegaMaybeReturnAfterSideEffectStage(mega_return_after_stage,
+                                                    6,
+                                                    output,
+                                                    R,
+                                                    H,
+                                                    D,
+                                                    local_scratch_base,
+                                                    symm_signal_pads,
+                                                    cp_rank,
+                                                    cp_size,
+                                                    grid_parallel_side_effects,
+                                                    rank_side_effect_barriers,
+                                                    launch_epoch,
+                                                    23)) {
+            return;
+        }
         if (use_symm_direct_fresh) {
             const int64_t payload_bytes = static_cast<int64_t>(symm_l_local) * KH * D * sizeof(scalar_t);
             if (grid_parallel_side_effects) {
@@ -5791,6 +6304,22 @@ __global__ __launch_bounds__(kMegaBlockThreads, 1) void dsv4CpDistributedPrefill
                                    symm_signal_pads,
                                    0);
             }
+        }
+        if (dsv4MegaMaybeReturnAfterSideEffectStage(mega_return_after_stage,
+                                                    7,
+                                                    output,
+                                                    R,
+                                                    H,
+                                                    D,
+                                                    local_scratch_base,
+                                                    symm_signal_pads,
+                                                    cp_rank,
+                                                    cp_size,
+                                                    grid_parallel_side_effects,
+                                                    rank_side_effect_barriers,
+                                                    launch_epoch,
+                                                    23)) {
+            return;
         }
         if (use_symm_direct_indexer) {
             const int64_t indexer_payload_bytes =
@@ -5821,6 +6350,22 @@ __global__ __launch_bounds__(kMegaBlockThreads, 1) void dsv4CpDistributedPrefill
                                    1);
             }
         }
+        if (dsv4MegaMaybeReturnAfterSideEffectStage(mega_return_after_stage,
+                                                    8,
+                                                    output,
+                                                    R,
+                                                    H,
+                                                    D,
+                                                    local_scratch_base,
+                                                    symm_signal_pads,
+                                                    cp_rank,
+                                                    cp_size,
+                                                    grid_parallel_side_effects,
+                                                    rank_side_effect_barriers,
+                                                    launch_epoch,
+                                                    23)) {
+            return;
+        }
         if (grid_parallel_side_effects) {
             dsv4MegaGridBarrier(local_scratch_base, 16, launch_epoch);
         }
@@ -5828,7 +6373,7 @@ __global__ __launch_bounds__(kMegaBlockThreads, 1) void dsv4CpDistributedPrefill
             dsv4MegaPublishLocalPhase(symm_buffer_ptrs, symm_per_rank_buffer_bytes, cp_rank, launch_epoch);
         }
     }
-    if (grid_parallel_side_effects) {
+    if (rank_side_effect_barriers) {
         dsv4MegaResidentGridCpBarrier(local_scratch_base,
                                       21,
                                       symm_signal_pads,
@@ -5838,6 +6383,19 @@ __global__ __launch_bounds__(kMegaBlockThreads, 1) void dsv4CpDistributedPrefill
                                       launch_epoch);
     }
     dsv4MegaWaitLocalPhase(symm_buffer_ptrs, symm_per_rank_buffer_bytes, cp_rank, launch_epoch);
+    if (mega_return_after_stage == 1) {
+        dsv4MegaZeroOutputAndDone(output,
+                                  R,
+                                  H,
+                                  D,
+                                  local_scratch_base,
+                                  symm_signal_pads,
+                                  cp_rank,
+                                  cp_size,
+                                  rank_side_effect_barriers,
+                                  launch_epoch);
+        return;
+    }
 
     __shared__ int   compressed_indices[kMaxCompressedTopK];
     __shared__ int   reduce_indices[kMegaBlockThreads];
@@ -5870,6 +6428,65 @@ __global__ __launch_bounds__(kMegaBlockThreads, 1) void dsv4CpDistributedPrefill
     const int prebuild_compressed_indices =
         compress_ratio == 4 && compressed_topk > 0 && grid_parallel_side_effects && compressed_meta != nullptr
         && row_compressed_indices_base != nullptr;
+    const int has_fp8_csa_indexer =
+        (csa_indexer_k_pool != nullptr && csa_indexer_block_table != nullptr && csa_indexer_weights != nullptr)
+        || (csa_indexer_k_cache != nullptr && csa_indexer_weights != nullptr && csa_indexer_cu_lens != nullptr);
+    uint8_t* csa_score_prebuild_base =
+        csa_score_prebuild_stride > 0 && !enable_split_k_attention && local_scratch_base != nullptr ?
+            local_scratch_base + (symm_splitk_payload_offset - symm_scratch_payload_offset) :
+            nullptr;
+    float* csa_score_matrix = reinterpret_cast<float*>(csa_score_prebuild_base);
+    const int prebuild_csa_scores =
+        prebuild_compressed_indices && csa_score_matrix != nullptr && csa_score_prebuild_stride > 0
+        && has_fp8_csa_indexer && compress_ratio == 4 && IH == kMegaIndexerHeads && ID == kIndexerHeadDim;
+    if (prebuild_csa_scores) {
+        dsv4MegaPrecomputeCsaIndexerScores<scalar_t>(indexer_q,
+                                                     indexer_k,
+                                                     req_id_per_token,
+                                                     position_ids,
+                                                     prefix_lengths,
+                                                     input_lengths,
+                                                     local_rows,
+                                                     R,
+                                                     compress_ratio,
+                                                     LI,
+                                                     IH,
+                                                     ID,
+                                                     csa_indexer_k_cache,
+                                                     csa_indexer_weights,
+                                                     csa_indexer_cu_lens,
+                                                     csa_indexer_total_len,
+                                                     csa_indexer_k_pool,
+                                                     csa_indexer_block_table,
+                                                     csa_indexer_seq_lens,
+                                                     csa_indexer_pool_block_size,
+                                                     csa_indexer_pool_block_stride,
+                                                     csa_indexer_block_table_stride,
+                                                     symm_buffer_ptrs,
+                                                     use_symm_direct_indexer,
+                                                     symm_per_rank_buffer_bytes,
+                                                     symm_indexer_payload_offset,
+                                                     symm_indexer_l_local,
+                                                     csa_score_prebuild_stride,
+                                                     csa_score_matrix,
+                                                     reduce_buf,
+                                                     indexer_metadata_storage,
+                                                     reduce_result);
+        dsv4MegaGridBarrier(local_scratch_base, kMegaCsaScorePrebuildBarrier, launch_epoch);
+    }
+    if (mega_return_after_stage == 2) {
+        dsv4MegaZeroOutputAndDone(output,
+                                  R,
+                                  H,
+                                  D,
+                                  local_scratch_base,
+                                  symm_signal_pads,
+                                  cp_rank,
+                                  cp_size,
+                                  rank_side_effect_barriers,
+                                  launch_epoch);
+        return;
+    }
     if (prebuild_compressed_indices) {
         for (int prebuild_row = static_cast<int>(blockIdx.x); prebuild_row < R; prebuild_row += static_cast<int>(gridDim.x)) {
             const int64_t prebuild_global_row = local_rows[prebuild_row];
@@ -5892,52 +6509,109 @@ __global__ __launch_bounds__(kMegaBlockThreads, 1) void dsv4CpDistributedPrefill
                                                                                     csa_indexer_seq_lens,
                                                                                     attention_cmp_seq_lens);
             if (prebuild_sequential_count < 0) {
-                (void)dsv4MegaBuildCompressedIndicesForRow<scalar_t>(indexer_q,
-                                                                     indexer_k,
-                                                                     req_id_per_token,
-                                                                     position_ids,
-                                                                     prefix_lengths,
-                                                                     input_lengths,
-                                                                     local_rows,
-                                                                     prebuild_row,
-                                                                     compress_ratio,
-                                                                     compressed_topk,
-                                                                     LI,
-                                                                     IH,
-                                                                     ID,
-                                                                     csa_indexer_k_cache,
-                                                                     csa_indexer_weights,
-                                                                     csa_indexer_cu_lens,
-                                                                     csa_indexer_total_len,
-                                                                     csa_indexer_k_pool,
-                                                                     csa_indexer_block_table,
-                                                                     csa_indexer_seq_lens,
-                                                                     csa_indexer_pool_block_size,
-                                                                     csa_indexer_pool_block_stride,
-                                                                     csa_indexer_block_table_stride,
-                                                                     attention_cmp_seq_lens,
-                                                                     symm_buffer_ptrs,
-                                                                     use_symm_direct_indexer,
-                                                                     symm_per_rank_buffer_bytes,
-                                                                     symm_indexer_payload_offset,
-                                                                     symm_indexer_l_local,
-                                                                     compressed_stride,
-                                                                     compressed_epoch,
-                                                                     compressed_epoch_prefix,
-                                                                     compressed_meta,
-                                                                     row_compressed_indices_base,
-                                                                     compressed_indices,
-                                                                     compressed_scores,
-                                                                     reduce_indices,
-                                                                     reduce_indices_second,
-                                                                     reduce_buf,
-                                                                     indexer_metadata_storage,
-                                                                     reduce_result);
+                int prebuild_valid = dsv4MegaCsaIndexerValidCount(prebuild_q_pos,
+                                                                  prebuild_req,
+                                                                  LI,
+                                                                  compress_ratio,
+                                                                  csa_indexer_k_cache,
+                                                                  csa_indexer_weights,
+                                                                  csa_indexer_cu_lens,
+                                                                  csa_indexer_total_len,
+                                                                  csa_indexer_k_pool,
+                                                                  csa_indexer_block_table,
+                                                                  csa_indexer_seq_lens);
+                const int prebuild_visible = max_int(0, prebuild_kv_len / compress_ratio);
+                prebuild_valid = min_int(prebuild_valid, prebuild_visible);
+                if (prebuild_csa_scores && prebuild_valid <= csa_score_prebuild_stride) {
+                    (void)dsv4MegaBuildCompressedIndicesFromScores(req_id_per_token,
+                                                                   position_ids,
+                                                                   prefix_lengths,
+                                                                   input_lengths,
+                                                                   local_rows,
+                                                                   prebuild_row,
+                                                                   compress_ratio,
+                                                                   compressed_topk,
+                                                                   LI,
+                                                                   csa_indexer_k_cache,
+                                                                   csa_indexer_weights,
+                                                                   csa_indexer_cu_lens,
+                                                                   csa_indexer_total_len,
+                                                                   csa_indexer_k_pool,
+                                                                   csa_indexer_block_table,
+                                                                   csa_indexer_seq_lens,
+                                                                   compressed_stride,
+                                                                   compressed_epoch,
+                                                                   compressed_epoch_prefix,
+                                                                   compressed_meta,
+                                                                   row_compressed_indices_base,
+                                                                   compressed_indices,
+                                                                   compressed_scores,
+                                                                   reduce_indices,
+                                                                   reduce_indices_second,
+                                                                   reduce_buf,
+                                                                   csa_score_matrix,
+                                                                   csa_score_prebuild_stride);
+                } else {
+                    (void)dsv4MegaBuildCompressedIndicesForRow<scalar_t>(indexer_q,
+                                                                         indexer_k,
+                                                                         req_id_per_token,
+                                                                         position_ids,
+                                                                         prefix_lengths,
+                                                                         input_lengths,
+                                                                         local_rows,
+                                                                         prebuild_row,
+                                                                         compress_ratio,
+                                                                         compressed_topk,
+                                                                         LI,
+                                                                         IH,
+                                                                         ID,
+                                                                         csa_indexer_k_cache,
+                                                                         csa_indexer_weights,
+                                                                         csa_indexer_cu_lens,
+                                                                         csa_indexer_total_len,
+                                                                         csa_indexer_k_pool,
+                                                                         csa_indexer_block_table,
+                                                                         csa_indexer_seq_lens,
+                                                                         csa_indexer_pool_block_size,
+                                                                         csa_indexer_pool_block_stride,
+                                                                         csa_indexer_block_table_stride,
+                                                                         attention_cmp_seq_lens,
+                                                                         symm_buffer_ptrs,
+                                                                         use_symm_direct_indexer,
+                                                                         symm_per_rank_buffer_bytes,
+                                                                         symm_indexer_payload_offset,
+                                                                         symm_indexer_l_local,
+                                                                         compressed_stride,
+                                                                         compressed_epoch,
+                                                                         compressed_epoch_prefix,
+                                                                         compressed_meta,
+                                                                         row_compressed_indices_base,
+                                                                         compressed_indices,
+                                                                         compressed_scores,
+                                                                         reduce_indices,
+                                                                         reduce_indices_second,
+                                                                         reduce_buf,
+                                                                         indexer_metadata_storage,
+                                                                         reduce_result);
+                }
             } else {
                 __syncthreads();
             }
         }
-        dsv4MegaGridBarrier(local_scratch_base, 18, launch_epoch);
+        dsv4MegaGridBarrier(local_scratch_base, kMegaCompressedIndexPrebuildBarrier, launch_epoch);
+    }
+    if (mega_return_after_stage == 3) {
+        dsv4MegaZeroOutputAndDone(output,
+                                  R,
+                                  H,
+                                  D,
+                                  local_scratch_base,
+                                  symm_signal_pads,
+                                  cp_rank,
+                                  cp_size,
+                                  rank_side_effect_barriers,
+                                  launch_epoch);
+        return;
     }
     const int heads_per_task = use_grouped_attention ? kMegaAttentionHeadsPerCta : 1;
     const int head_task_count = use_grouped_attention ? H / kMegaAttentionHeadsPerCta : H;
@@ -6116,7 +6790,7 @@ __global__ __launch_bounds__(kMegaBlockThreads, 1) void dsv4CpDistributedPrefill
             }
             dsv4MegaSplitKGroupBarrier(splitk_group_sync_base, physical_group, physical_group_count, 3, launch_epoch);
         }
-        if (grid_parallel_side_effects) {
+        if (rank_side_effect_barriers) {
             dsv4MegaResidentGridCpBarrier(local_scratch_base,
                                           19,
                                           symm_signal_pads,
@@ -6537,7 +7211,7 @@ __global__ __launch_bounds__(kMegaBlockThreads, 1) void dsv4CpDistributedPrefill
 	    }
 #undef DSV4_MEGA_CONSUME_TILE
 	    }
-        if (grid_parallel_side_effects) {
+        if (rank_side_effect_barriers) {
             dsv4MegaResidentGridCpBarrier(local_scratch_base,
                                           19,
                                           symm_signal_pads,
@@ -7924,6 +8598,22 @@ torch::Tensor launchDsv4CpDistributedPrefillAttention(const torch::Tensor& q,
         ((splitk_group_barrier_slots * static_cast<int64_t>(sizeof(unsigned int)) + 63) / 64) * 64;
     const int64_t splitk_group_epoch_bytes =
         ((splitk_group_barrier_slots * static_cast<int64_t>(sizeof(unsigned long long)) + 63) / 64) * 64;
+    const int64_t csa_score_prebuild_stride_host =
+        use_mega_kernel && dsv4CpAttentionMegaCsaScorePrebuildEnabled() && use_symm_backend && enable_grid_side_effects
+                && !enable_split_k_attention
+                && compress_ratio == 4 && compressed_topk > 0 && indexer_q.size(1) == kMegaIndexerHeads
+                && indexer_q.size(2) == kIndexerHeadDim
+                && (has_csa_fp8_indexer || has_csa_fp8_indexer_pool) ?
+            std::min<int64_t>(std::max<int64_t>(compressed_region_width, compressed_topk), kMaxCompressedTopK) :
+            0;
+    const int64_t csa_score_prebuild_bytes =
+        csa_score_prebuild_stride_host > 0 ?
+            static_cast<int64_t>(local_rows.size(0)) * csa_score_prebuild_stride_host
+                * static_cast<int64_t>(sizeof(float)) :
+            0;
+    const bool enable_csa_score_prebuild = csa_score_prebuild_bytes > 0
+                                           && mega_splitk_scratch_offset + csa_score_prebuild_bytes
+                                                  <= per_rank_buffer_bytes;
     if (enable_split_k_attention) {
         const int64_t mega_splitk_scratch_bytes = max_resident_mega_blocks * kMegaSplitKRecordBytes
                                                   + splitk_group_counter_bytes + splitk_group_epoch_bytes;
@@ -7938,6 +8628,9 @@ torch::Tensor launchDsv4CpDistributedPrefillAttention(const torch::Tensor& q,
                     " resident CTAs, got ",
                     max_resident_mega_blocks);
     }
+    const int csa_score_prebuild_stride =
+        enable_csa_score_prebuild ? static_cast<int>(csa_score_prebuild_stride_host) : 0;
+    const int mega_return_after_stage = dsv4CpAttentionMegaReturnAfterStageCode();
     const bool serialize_mega_side_effects_without_grid_barrier =
         needs_mega_side_effects && !use_symm_backend;
     const int64_t mega_grid_limit =
@@ -7960,7 +8653,8 @@ torch::Tensor launchDsv4CpDistributedPrefillAttention(const torch::Tensor& q,
     const int attention_kv_len = use_symm_direct_fresh_kv ? static_cast<int>(kv.size(1) * cp_size) :
                                                             static_cast<int>(gathered_kv.size(1));
     const bool needs_symm_for_mega =
-        use_symm_direct_fresh_kv || use_symm_direct_indexer_k || needs_mega_side_effects || enable_split_k_attention;
+        use_symm_direct_fresh_kv || use_symm_direct_indexer_k || needs_mega_side_effects || enable_split_k_attention
+        || enable_csa_score_prebuild;
     const uint8_t* const* symm_buffer_ptrs_for_mega =
         needs_symm_for_mega ?
             reinterpret_cast<const uint8_t* const*>(symm_buffer_ptrs_dev) :
@@ -8069,7 +8763,9 @@ torch::Tensor launchDsv4CpDistributedPrefillAttention(const torch::Tensor& q,
                 symm_signal_pads_for_mega,
                 enable_grid_side_effects,
                 enable_split_k_attention,
-                splitk_keys_per_block);
+                splitk_keys_per_block,
+                csa_score_prebuild_stride,
+                mega_return_after_stage);
         } else {
             dsv4CpDistributedPrefillAttentionKernel<float><<<legacy_grid, block, 0, stream>>>(
                 q.data_ptr<float>(),
@@ -8218,7 +8914,9 @@ torch::Tensor launchDsv4CpDistributedPrefillAttention(const torch::Tensor& q,
                 symm_signal_pads_for_mega,
                 enable_grid_side_effects,
                 enable_split_k_attention,
-                splitk_keys_per_block);
+                splitk_keys_per_block,
+                csa_score_prebuild_stride,
+                mega_return_after_stage);
         } else {
             dsv4CpDistributedPrefillAttentionKernel<c10::BFloat16><<<legacy_grid, block, 0, stream>>>(
                 q.data_ptr<c10::BFloat16>(),
