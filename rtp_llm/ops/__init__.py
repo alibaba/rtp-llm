@@ -126,6 +126,33 @@ try:
 except (OSError, TypeError):
     pass
 
+
+# Stub used for frontend / standalone / collection-only modes where the C++
+# extension is unavailable. Defined before the import blocks so they can fall
+# back to it.
+class EmptyClass:
+    def __init__(self, **kwargs):
+        pass
+
+
+# Symbols imported from libth_transformer_config; stubbed with EmptyClass in
+# collection-only mode (RTP_LLM_ALLOW_MISSING_SO=1) when the .so is missing.
+_LIBTH_CONFIG_SYMBOLS = [
+    "ArpcConfig", "AttentionConfigs", "GrpcConfig", "BatchDecodeSchedulerConfig",
+    "CacheStoreConfig", "ConcurrencyConfig", "DeviceResourceConfig", "EplbMode",
+    "FfnDisAggregateConfig", "FIFOSchedulerConfig", "FMHAConfig", "HWKernelConfig",
+    "KVCacheConfig", "MiscellaneousConfig", "MlaOpsType", "ModelConfig",
+    "ModelSpecificConfig", "MoeConfig", "NcclCommConfig", "PDSepConfig",
+    "ParallelismConfig", "ProfilingDebugLoggingConfig", "RopeCache", "RopeConfig",
+    "RopeStyle", "TaskType", "VitConfig", "VitSeparation", "check_rope_cache",
+    "get_rope_cache", "get_rope_cache_once", "CPRotateMethod", "PrefillCPConfig",
+    "QuantAlgo", "RoleType", "RuntimeConfig", "SpecialTokens",
+    "SpeculativeExecutionConfig", "SpeculativeType", "EPLBConfig", "ActivationType",
+    "DataType", "KvCacheDataType", "HybridAttentionConfig", "HybridAttentionType",
+    "LinearAttentionConfig", "MultimodalInput", "MMPreprocessConfig",
+    "EplbConfig", "cpp_get_block_cache_keys",
+]
+
 try:
     from libth_transformer_config import (
         ArpcConfig,
@@ -188,7 +215,18 @@ try:
 
 except BaseException as e:
     logging.info(f"Exception: {e}, traceback: {traceback.format_exc()}")
-    raise e
+    if os.environ.get("RTP_LLM_ALLOW_MISSING_SO") != "1":
+        raise e
+    # Collection-only mode: stub every libth_transformer_config symbol with
+    # EmptyClass so `import rtp_llm` succeeds without the C++ extension. Access
+    # to these types is non-functional (pytest collection / frontend only).
+    logging.warning(
+        "RTP_LLM_ALLOW_MISSING_SO=1: stubbing libth_transformer_config symbols "
+        "with EmptyClass (collection-only mode; C++ config types non-functional)."
+    )
+    for _sym in _LIBTH_CONFIG_SYMBOLS:
+        globals()[_sym] = EmptyClass
+
 
 def get_block_cache_keys(token_ids: List[int], block_size: int) -> List[int]:
     try:
@@ -204,11 +242,6 @@ def get_block_cache_keys(token_ids: List[int], block_size: int) -> List[int]:
         # If an error occurs, return an empty list
         return []
 
-
-# Frontend not related
-class EmptyClass:
-    def __init__(self, **kwargs):
-        pass
 
 try:
     import librtp_compute_ops
