@@ -73,6 +73,7 @@ static_assert(kMegaAttentionGroupedKeyTile <= 16,
               "grouped attention tile needs dynamic/shared-memory retuning above 16 keys");
 constexpr int kMegaSplitKKeysPerBlock = 64;
 constexpr int kMegaSplitKMinKeys = 512;
+constexpr int kMegaSplitKAutoMinKeys = 4096;
 constexpr int kMegaSplitKBlocksPerWave = 7;
 constexpr int kMegaSplitKGroupSize = kMegaSplitKBlocksPerWave + 1;
 constexpr int kMegaSplitKGroupBarrierSlots = 4;
@@ -7847,7 +7848,7 @@ torch::Tensor launchDsv4CpDistributedPrefillAttention(const torch::Tensor& q,
         && splitk_supported_ratio
         && (split_k_explicitly_enabled
             || (use_symm_backend && enable_grid_side_effects && host_use_grouped_attention
-                && splitk_max_keys >= kMegaSplitKMinKeys)) ?
+                && splitk_max_keys >= kMegaSplitKAutoMinKeys)) ?
             1 :
             0;
     const int enable_split_k_attention =

@@ -4208,8 +4208,8 @@ class DistributedAttentionTorchrunCandidateTest(unittest.TestCase):
         """Explicit split-K smoke: production grouped MQA path stays allclose."""
         self._run_hca_grouped_mqa_long_key_case(splitk_env_value="1")
 
-    def test_torchrun_symm_mem_auto_splitk_hca_grouped_mqa_allclose(self) -> None:
-        """Default long-key grouped MQA path auto-selects in-kernel split-K."""
+    def test_torchrun_symm_mem_auto_long_hca_grouped_mqa_allclose(self) -> None:
+        """Default long-key grouped MQA path remains correct without forced split-K."""
         self._run_hca_grouped_mqa_long_key_case(splitk_env_value=None)
 
     def _run_csa_grouped_mqa_case(
@@ -4314,8 +4314,8 @@ class DistributedAttentionTorchrunCandidateTest(unittest.TestCase):
             scratch_bytes_per_rank=8 * 1024 * 1024,
         )
 
-    def test_torchrun_symm_mem_auto_splitk_csa_grouped_mqa_allclose(self) -> None:
-        """Long-key CSA smoke: default grouped MQA path auto-selects split-K."""
+    def test_torchrun_symm_mem_auto_long_csa_grouped_mqa_allclose(self) -> None:
+        """Long-key CSA smoke: default grouped MQA path remains correct without forced split-K."""
         self._run_csa_grouped_mqa_case(
             window_size=507,
             compressed_topk=5,
