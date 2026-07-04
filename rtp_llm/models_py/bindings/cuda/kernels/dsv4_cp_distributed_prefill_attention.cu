@@ -1533,6 +1533,76 @@ __device__ __forceinline__ void dsv4MegaConsumeLoadedKeyTileGrouped(
     }
 }
 
+__device__ __forceinline__ void dsv4MegaConsumeLoadedFullKeyTileGrouped(
+    const float* __restrict__ key_tile_shared,
+    const float (&q_values)[kMegaAttentionDimsPerWarp],
+    float scale,
+    float& online_max,
+    float& online_denom,
+    float (&acc)[kMegaAttentionDimsPerWarp],
+    float* __restrict__ tile_weights) {
+    const int tid = static_cast<int>(threadIdx.x);
+    const int lane = tid & (kMegaAttentionWarpSize - 1);
+    const int warp_id = tid / kMegaAttentionWarpSize;
+
+    float tile_max = kInvalidCompressorScore;
+#pragma unroll
+    for (int key_i = 0; key_i < kMegaAttentionGroupedKeyTile; ++key_i) {
+        const float* key_base = key_tile_shared + static_cast<int64_t>(key_i) * kSwaHeadDim;
+        float dot_part = 0.0f;
+#pragma unroll
+        for (int chunk = 0; chunk < kMegaAttentionDimsPerWarp; ++chunk) {
+            const int d = lane + chunk * kMegaAttentionWarpSize;
+            dot_part += q_values[chunk] * key_base[d];
+        }
+        const float online_logit = dsv4MegaWarpReduceSum(dot_part) * scale;
+        if (lane == 0) {
+            tile_weights[warp_id * kMegaAttentionGroupedKeyTile + key_i] = online_logit;
+            tile_max = fmaxf(tile_max, online_logit);
+        }
+    }
+
+    float old_scale = 0.0f;
+    float tile_scale = 0.0f;
+    float new_max = 0.0f;
+    float new_denom = 0.0f;
+    if (lane == 0) {
+        float tile_denom = 0.0f;
+#pragma unroll
+        for (int key_i = 0; key_i < kMegaAttentionGroupedKeyTile; ++key_i) {
+            const int weight_idx = warp_id * kMegaAttentionGroupedKeyTile + key_i;
+            const float rel_weight = expf(tile_weights[weight_idx] - tile_max);
+            tile_weights[weight_idx] = rel_weight;
+            tile_denom += rel_weight;
+        }
+        new_max = fmaxf(online_max, tile_max);
+        old_scale = online_denom > 0.0f ? expf(online_max - new_max) : 0.0f;
+        tile_scale = expf(tile_max - new_max);
+        new_denom = online_denom * old_scale + tile_denom * tile_scale;
+    }
+    __syncwarp();
+    new_max = __shfl_sync(0xffffffffu, new_max, 0);
+    old_scale = __shfl_sync(0xffffffffu, old_scale, 0);
+    tile_scale = __shfl_sync(0xffffffffu, tile_scale, 0);
+    new_denom = __shfl_sync(0xffffffffu, new_denom, 0);
+    online_max = new_max;
+    online_denom = new_denom;
+#pragma unroll
+    for (int chunk = 0; chunk < kMegaAttentionDimsPerWarp; ++chunk) {
+        acc[chunk] *= old_scale;
+    }
+#pragma unroll
+    for (int key_i = 0; key_i < kMegaAttentionGroupedKeyTile; ++key_i) {
+        const float key_scale = tile_weights[warp_id * kMegaAttentionGroupedKeyTile + key_i] * tile_scale;
+        const float* key_base = key_tile_shared + static_cast<int64_t>(key_i) * kSwaHeadDim;
+#pragma unroll
+        for (int chunk = 0; chunk < kMegaAttentionDimsPerWarp; ++chunk) {
+            const int d = lane + chunk * kMegaAttentionWarpSize;
+            acc[chunk] += key_scale * key_base[d];
+        }
+    }
+}
+
 __device__ __forceinline__ float* dsv4MegaSplitKRecord(uint8_t* splitk_base, int record_slot) {
     return reinterpret_cast<float*>(splitk_base + static_cast<int64_t>(record_slot) * kMegaSplitKRecordBytes);
 }
@@ -1753,6 +1823,7 @@ __device__ __forceinline__ void dsv4MegaComputeSplitKPartial(const scalar_t* __r
                                                              int swa_start,
                                                              float scale,
                                                              float* __restrict__ key_tile_shared,
+                                                             float* __restrict__ tile_weights,
                                                              float* record) {
     const int tid = static_cast<int>(threadIdx.x);
     const int warp_id = tid / kMegaAttentionWarpSize;
@@ -1832,7 +1903,13 @@ __device__ __forceinline__ void dsv4MegaComputeSplitKPartial(const scalar_t* __r
                                                fresh_payload_offset,
                                                symm_l_local,
                                                key_tile_shared);
-        dsv4MegaConsumeLoadedKeyTileGrouped(key_tile_shared, q_values, tile_count, scale, online_max, online_denom, acc);
+        if (tile_count == kMegaAttentionGroupedKeyTile) {
+            dsv4MegaConsumeLoadedFullKeyTileGrouped(
+                key_tile_shared, q_values, scale, online_max, online_denom, acc, tile_weights);
+        } else {
+            dsv4MegaConsumeLoadedKeyTileGrouped(
+                key_tile_shared, q_values, tile_count, scale, online_max, online_denom, acc);
+        }
         __syncthreads();
         key_idx += tile_count;
     }
@@ -6632,6 +6709,8 @@ __global__ __launch_bounds__(kMegaBlockThreads, 1) void dsv4CpDistributedPrefill
     __shared__ float q_shared[kSwaHeadDim];
     __shared__ __align__(8) uint8_t indexer_metadata_storage[kMegaIndexerMetadataBytes];
     float* grouped_key_tile = reinterpret_cast<float*>(mega_dynamic_smem);
+    float* grouped_tile_weights =
+        grouped_key_tile + static_cast<int64_t>(kMegaAttentionGroupedKeyTile) * kSwaHeadDim;
 
     const int compressed_stride = max_int(compressed_topk, 1);
 	    uint8_t* scratch_work_base =
@@ -6989,6 +7068,7 @@ __global__ __launch_bounds__(kMegaBlockThreads, 1) void dsv4CpDistributedPrefill
                                                      split_swa_start,
                                                      rsqrtf(static_cast<float>(D)),
                                                      grouped_key_tile,
+                                                     grouped_tile_weights,
                                                      partial_record);
                     }
                 }
@@ -7261,13 +7341,23 @@ __global__ __launch_bounds__(kMegaBlockThreads, 1) void dsv4CpDistributedPrefill
                                                symm_fresh_payload_offset,                                                \
                                                symm_l_local,                                                             \
                                                grouped_key_tile);                                                        \
-        dsv4MegaConsumeLoadedKeyTileGrouped(grouped_key_tile,                                                            \
-                                            q_values,                                                                    \
-                                            KEY_COUNT,                                                                   \
-                                            scale,                                                                       \
-                                            online_max,                                                                  \
-                                            online_denom,                                                                \
-                                            acc);                                                                        \
+        if ((KEY_COUNT) == kMegaAttentionGroupedKeyTile) {                                                               \
+            dsv4MegaConsumeLoadedFullKeyTileGrouped(grouped_key_tile,                                                    \
+                                                    q_values,                                                            \
+                                                    scale,                                                               \
+                                                    online_max,                                                          \
+                                                    online_denom,                                                        \
+                                                    acc,                                                                 \
+                                                    grouped_tile_weights);                                                \
+        } else {                                                                                                         \
+            dsv4MegaConsumeLoadedKeyTileGrouped(grouped_key_tile,                                                        \
+                                                q_values,                                                                \
+                                                KEY_COUNT,                                                               \
+                                                scale,                                                                   \
+                                                online_max,                                                              \
+                                                online_denom,                                                            \
+                                                acc);                                                                    \
+        }                                                                                                                \
         __syncthreads();                                                                                                 \
     } while (0)
             for (int i = 0; i < compressed_count;) {
@@ -8783,7 +8873,9 @@ torch::Tensor launchDsv4CpDistributedPrefillAttention(const torch::Tensor& q,
     const int64_t semantic_task_count = local_rows.size(0) * host_head_task_count;
     const size_t mega_dynamic_smem_bytes =
         host_use_grouped_attention ?
-            static_cast<size_t>(kMegaAttentionGroupedKeyTile) * static_cast<size_t>(kSwaHeadDim) * sizeof(float) :
+            (static_cast<size_t>(kMegaAttentionGroupedKeyTile) * static_cast<size_t>(kSwaHeadDim)
+             + static_cast<size_t>(kMegaAttentionHeadsPerCta) * kMegaAttentionGroupedKeyTile)
+                * sizeof(float) :
             0;
     int device_id = -1;
     AT_CUDA_CHECK(cudaGetDevice(&device_id));

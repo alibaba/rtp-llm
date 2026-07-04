@@ -1526,7 +1526,16 @@ class DistributedAttentionCandidateTest(unittest.TestCase):
             dtype=torch.bfloat16,
         )
 
-    def test_candidate_cuda_hca_production_grouped_mqa_allclose(self) -> None:
+    def _run_hca_production_grouped_mqa_case(
+        self,
+        *,
+        name: str,
+        prefix_lengths: tuple[int, ...],
+        input_lengths: tuple[int, ...],
+        window_size: int,
+        compressed_topk: int,
+        extreme_sink: bool = False,
+    ) -> None:
         if not torch.cuda.is_available():
             self.skipTest("candidate distributed attention op requires CUDA")
         op = _candidate_op()
@@ -1535,18 +1544,23 @@ class DistributedAttentionCandidateTest(unittest.TestCase):
                 "rtp_llm_ops.dsv4_cp_distributed_prefill_attention is not built yet"
             )
         case = AttentionCase(
-            name="hca_production_grouped_mqa",
+            name=name,
             compress_ratio=128,
-            prefix_lengths=(0, 130, 260),
-            input_lengths=(3, 2, 1),
-            window_size=5,
-            compressed_topk=3,
+            prefix_lengths=prefix_lengths,
+            input_lengths=input_lengths,
+            window_size=window_size,
+            compressed_topk=compressed_topk,
             n_heads=128,
             head_dim=512,
             index_heads=1,
             index_dim=1,
         )
         fixture = _make_case_fixture(case, torch.device("cuda"), dtype=torch.bfloat16)
+        if extreme_sink:
+            sink = torch.empty_like(fixture.attn_sink)
+            sink[0::2] = 20.0
+            sink[1::2] = -20.0
+            fixture.attn_sink = sink
         mqa_kv_by_req = [kv[:, :1, :].contiguous() for kv in fixture.kv_by_req]
         fixture.kv_by_req = [
             kv.expand(-1, case.n_heads, -1).contiguous() for kv in mqa_kv_by_req
@@ -1603,6 +1617,35 @@ class DistributedAttentionCandidateTest(unittest.TestCase):
             _assert_attention_close(actual, expected.index_select(0, rows))
             restored.index_copy_(0, rows, actual)
         _assert_attention_close(restored, expected)
+
+    def test_candidate_cuda_hca_production_grouped_mqa_allclose(self) -> None:
+        self._run_hca_production_grouped_mqa_case(
+            name="hca_production_grouped_mqa",
+            prefix_lengths=(0, 130, 260),
+            input_lengths=(3, 2, 1),
+            window_size=5,
+            compressed_topk=3,
+        )
+
+    def test_candidate_cuda_hca_grouped_mqa_full_tile_allclose(self) -> None:
+        self._run_hca_production_grouped_mqa_case(
+            name="hca_grouped_mqa_full_tile",
+            prefix_lengths=(15,),
+            input_lengths=(1,),
+            window_size=16,
+            compressed_topk=0,
+            extreme_sink=True,
+        )
+
+    def test_candidate_cuda_hca_grouped_mqa_full_tile_plus_tail_allclose(self) -> None:
+        self._run_hca_production_grouped_mqa_case(
+            name="hca_grouped_mqa_full_tile_plus_tail",
+            prefix_lengths=(16,),
+            input_lengths=(1,),
+            window_size=17,
+            compressed_topk=0,
+            extreme_sink=True,
+        )
 
     def test_candidate_cuda_hca_kh_gt_one_does_not_use_grouped_mqa(self) -> None:
         self._run_candidate_case(
