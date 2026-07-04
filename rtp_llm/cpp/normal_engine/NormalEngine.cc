@@ -5,6 +5,7 @@
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
 #include "rtp_llm/cpp/utils/StatusUtil.h"
 #include "rtp_llm/cpp/engine_base/schedulers/FIFOScheduler.h"
+#include "rtp_llm/cpp/engine_base/schedulers/PDFusionRatioScheduler.h"
 #include "rtp_llm/cpp/engine_base/schedulers/BatchDecodeScheduler.h"
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
 #include "rtp_llm/cpp/engine_base/system_prompt/SystemPromptConstructor.h"
@@ -142,6 +143,16 @@ void NormalEngine::initScheduler() {
         scheduler_.reset(new BatchDecodeScheduler(
             runtime_config, resource_context_.cache_manager, metrics_reporter_, parallelism_config.dp_rank));
         RTP_LLM_LOG_INFO("create batch decode scheduler done");
+    } else if (pd_sep_config.role_type == RoleType::PDFUSION
+               && runtime_config.fifo_scheduler_config.pdfusion_scheduler_mode == "ratio") {
+        scheduler_.reset(new PDFusionRatioScheduler(runtime_config,
+                                                    model_config_,
+                                                    pd_sep_config,
+                                                    parallelism_config,
+                                                    model_specific_config,
+                                                    resource_context_.cache_manager,
+                                                    metrics_reporter_));
+        RTP_LLM_LOG_INFO("create pdfusion ratio scheduler done");
     } else {
         scheduler_.reset(new FIFOScheduler(runtime_config,
                                            model_config_,
