@@ -73,6 +73,11 @@ constexpr int kMegaAttentionDimsPerWarp = kSwaHeadDim / kMegaAttentionWarpSize;
 constexpr int kMegaAttentionGroupedScaleSlots = kMegaAttentionGroupedKeyTile * kSwaScaleBytes;
 static_assert(kMegaAttentionGroupedKeyTile <= 16,
               "grouped attention tile needs dynamic/shared-memory retuning above 16 keys");
+static_assert((kSwaHeadDim - kSwaNopeDim) % 2 == 0, "packed RoPE pair load requires even BF16 width");
+static_assert(kSwaNopeDim % static_cast<int>(sizeof(uint32_t)) == 0,
+              "packed RoPE region must be 4-byte aligned");
+static_assert(kSwaTokenDataBytes % static_cast<int>(sizeof(uint32_t)) == 0,
+              "packed Model1 data rows must be 4-byte aligned");
 constexpr int kMegaSplitKKeysPerBlock = 64;
 constexpr int kMegaSplitKMinKeys = 512;
 constexpr int kMegaSplitKAutoMinKeys = 4096;
@@ -841,6 +846,10 @@ __device__ __forceinline__ uint16_t load_u16_unaligned(const void* ptr) {
     return static_cast<uint16_t>(bytes[0]) | (static_cast<uint16_t>(bytes[1]) << 8);
 }
 
+__device__ __forceinline__ uint32_t load_u32_aligned(const void* ptr) {
+    return *reinterpret_cast<const uint32_t*>(ptr);
+}
+
 __device__ __forceinline__ void store_u16_unaligned(void* ptr, uint16_t value) {
     auto* bytes = reinterpret_cast<uint8_t*>(ptr);
     bytes[0] = static_cast<uint8_t>(value & 0xffu);
@@ -948,6 +957,13 @@ __device__ __forceinline__ int dsv4MegaSequentialCompressedCount(int compress_ra
 __device__ __forceinline__ float bf16_bits_to_float(uint16_t bits) {
     __nv_bfloat16 bf = *reinterpret_cast<__nv_bfloat16*>(&bits);
     return __bfloat162float(bf);
+}
+
+__device__ __forceinline__ float2 bf16_pair_bits_to_float2(uint32_t bits) {
+    float2 out;
+    out.x = bf16_bits_to_float(static_cast<uint16_t>(bits & 0xffffu));
+    out.y = bf16_bits_to_float(static_cast<uint16_t>(bits >> 16));
+    return out;
 }
 
 __device__ __forceinline__ float dsv4MegaUe8m0Scale(uint8_t scale_byte) {
@@ -1441,15 +1457,19 @@ __device__ __forceinline__ void dsv4MegaLoadAttentionKeyTile(const scalar_t* __r
                 key_tile_shared[static_cast<int64_t>(key_i) * kSwaHeadDim + d] =
                     fp8_e4m3_to_float(data_ptr[d], packed_scales[key_i * kSwaScaleBytes + scale_i]);
             }
-            const int rope_total = key_count * (kSwaHeadDim - kSwaNopeDim);
-            for (int idx = tid; idx < rope_total; idx += static_cast<int>(blockDim.x)) {
-                const int key_i = idx / (kSwaHeadDim - kSwaNopeDim);
-                const int rope_d = idx - key_i * (kSwaHeadDim - kSwaNopeDim);
-                const int d = kSwaNopeDim + rope_d;
+            constexpr int rope_pairs_per_key = (kSwaHeadDim - kSwaNopeDim) / 2;
+            const int rope_pair_total = key_count * rope_pairs_per_key;
+            for (int idx = tid; idx < rope_pair_total; idx += static_cast<int>(blockDim.x)) {
+                const int key_i = idx / rope_pairs_per_key;
+                const int rope_pair = idx - key_i * rope_pairs_per_key;
+                const int d = kSwaNopeDim + 2 * rope_pair;
                 const uint8_t* data_ptr = packed_data_rows[key_i];
-                key_tile_shared[static_cast<int64_t>(key_i) * kSwaHeadDim + d] =
-                    bf16_bits_to_float(load_u16_unaligned(data_ptr + kSwaNopeDim
-                                                          + rope_d * static_cast<int>(sizeof(uint16_t))));
+                const float2 values =
+                    bf16_pair_bits_to_float2(load_u32_aligned(data_ptr + kSwaNopeDim
+                                                              + rope_pair * static_cast<int>(sizeof(uint32_t))));
+                float* key_row = key_tile_shared + static_cast<int64_t>(key_i) * kSwaHeadDim;
+                key_row[d] = values.x;
+                key_row[d + 1] = values.y;
             }
         } else {
             for (int idx = tid; idx < fp8_total; idx += static_cast<int>(blockDim.x)) {
