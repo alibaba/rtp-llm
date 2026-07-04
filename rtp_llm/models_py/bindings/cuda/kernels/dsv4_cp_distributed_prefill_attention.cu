@@ -66,6 +66,7 @@ constexpr int kMegaAttentionKeyTile = 4;
 // memory at one resident CTA/SM while halving the long-key attention loop count
 // versus tile=8.
 constexpr int kMegaAttentionGroupedKeyTile = 16;
+constexpr unsigned int kMegaAttentionGroupedFullMask = (1u << kMegaAttentionGroupedKeyTile) - 1u;
 constexpr int kMegaAttentionHeadsPerCta = 8;
 constexpr int kMegaAttentionWarpSize = 32;
 constexpr int kMegaAttentionDimsPerWarp = kSwaHeadDim / kMegaAttentionWarpSize;
@@ -1255,6 +1256,75 @@ __device__ __forceinline__ float attention_key_at(const scalar_t* kv,
 }
 
 template<typename scalar_t>
+__device__ __forceinline__ float dsv4MegaAttentionKeyTileFallbackAt(const scalar_t* __restrict__ kv,
+                                                                    const uint8_t* __restrict__ cmp_cache,
+                                                                    const int64_t* __restrict__ cmp_cu_lens,
+                                                                    const uint8_t* __restrict__ cmp_pool,
+                                                                    const int32_t* __restrict__ cmp_block_table,
+                                                                    const int32_t* __restrict__ cmp_seq_lens,
+                                                                    int cmp_pool_block_size,
+                                                                    int64_t cmp_pool_block_stride,
+                                                                    int64_t cmp_block_table_stride,
+                                                                    const uint8_t* __restrict__ swa_cache,
+                                                                    const int64_t* __restrict__ swa_cu_lens,
+                                                                    const uint8_t* __restrict__ swa_pool,
+                                                                    const int64_t* __restrict__ swa_slot_mapping,
+                                                                    const int32_t* __restrict__ swa_gather_lens,
+                                                                    int swa_pool_block_size,
+                                                                    int64_t swa_pool_block_stride,
+                                                                    int64_t swa_slot_mapping_stride,
+                                                                    const int* __restrict__ key_is_compressed,
+                                                                    const int* __restrict__ key_pos,
+                                                                    int key_i,
+                                                                    int req,
+                                                                    int prefix_len,
+                                                                    int d,
+                                                                    int L,
+                                                                    int KH,
+                                                                    int D,
+                                                                    const int64_t* __restrict__ kv_unpad_restore,
+                                                                    const int64_t* __restrict__ kv_cu_lens,
+                                                                    const uint8_t* const* __restrict__ symm_buffer_ptrs,
+                                                                    int use_symm_direct_fresh,
+                                                                    int64_t per_rank_buffer_bytes,
+                                                                    int64_t fresh_payload_offset,
+                                                                    int symm_l_local) {
+    return attention_key_at(kv,
+                            cmp_cache,
+                            cmp_cu_lens,
+                            cmp_pool,
+                            cmp_block_table,
+                            cmp_seq_lens,
+                            cmp_pool_block_size,
+                            cmp_pool_block_stride,
+                            cmp_block_table_stride,
+                            swa_cache,
+                            swa_cu_lens,
+                            swa_pool,
+                            swa_slot_mapping,
+                            swa_gather_lens,
+                            swa_pool_block_size,
+                            swa_pool_block_stride,
+                            swa_slot_mapping_stride,
+                            key_is_compressed[key_i],
+                            req,
+                            key_pos[key_i],
+                            prefix_len,
+                            0,
+                            d,
+                            L,
+                            KH,
+                            D,
+                            kv_unpad_restore,
+                            kv_cu_lens,
+                            symm_buffer_ptrs,
+                            use_symm_direct_fresh,
+                            per_rank_buffer_bytes,
+                            fresh_payload_offset,
+                            symm_l_local);
+}
+
+template<typename scalar_t>
 __device__ __forceinline__ void dsv4MegaLoadAttentionKeyTile(const scalar_t* __restrict__ kv,
                                                              const uint8_t* __restrict__ cmp_cache,
                                                              const int64_t* __restrict__ cmp_cu_lens,
@@ -1292,6 +1362,7 @@ __device__ __forceinline__ void dsv4MegaLoadAttentionKeyTile(const scalar_t* __r
     __shared__ float packed_scales[kMegaAttentionGroupedScaleSlots];
     __shared__ const uint8_t* packed_data_rows[kMegaAttentionGroupedKeyTile];
     __shared__ const uint8_t* packed_scale_rows[kMegaAttentionGroupedKeyTile];
+    __shared__ int all_packed_full_tile;
     if (tid < kMegaAttentionGroupedKeyTile) {
         const int key_i = tid;
         const uint8_t* data_ptr = nullptr;
@@ -1332,6 +1403,18 @@ __device__ __forceinline__ void dsv4MegaLoadAttentionKeyTile(const scalar_t* __r
         packed_scale_rows[key_i] = scale_ptr;
     }
     __syncthreads();
+    unsigned int packed_mask = 0u;
+    if (tid < kMegaAttentionGroupedKeyTile) {
+        packed_mask = (packed_data_rows[tid] != nullptr && packed_scale_rows[tid] != nullptr) ? (1u << tid) : 0u;
+    }
+    packed_mask = __reduce_or_sync(0xffffffffu, packed_mask);
+    if (tid == 0) {
+        all_packed_full_tile = (key_count == kMegaAttentionGroupedKeyTile
+                                && (packed_mask & kMegaAttentionGroupedFullMask) == kMegaAttentionGroupedFullMask)
+                                   ? 1
+                                   : 0;
+    }
+    __syncthreads();
     if (D == kSwaHeadDim) {
         const int nope_groups = kSwaNopeDim / kSwaQuantBlock;
         for (int scale_idx = tid; scale_idx < key_count * nope_groups; scale_idx += static_cast<int>(blockDim.x)) {
@@ -1347,98 +1430,121 @@ __device__ __forceinline__ void dsv4MegaLoadAttentionKeyTile(const scalar_t* __r
     if (D == kSwaHeadDim) {
         const int nope_groups = kSwaNopeDim / kSwaQuantBlock;
         const int fp8_total = key_count * nope_groups * kSwaQuantBlock;
-        for (int idx = tid; idx < fp8_total; idx += static_cast<int>(blockDim.x)) {
-            const int lane = idx % kSwaQuantBlock;
-            const int group_linear = idx / kSwaQuantBlock;
-            const int scale_i = group_linear % nope_groups;
-            const int key_i = group_linear / nope_groups;
-            const int d = scale_i * kSwaQuantBlock + lane;
-            const uint8_t* data_ptr = packed_data_rows[key_i];
-            if (data_ptr != nullptr) {
+        if (all_packed_full_tile) {
+            for (int idx = tid; idx < fp8_total; idx += static_cast<int>(blockDim.x)) {
+                const int lane = idx % kSwaQuantBlock;
+                const int group_linear = idx / kSwaQuantBlock;
+                const int scale_i = group_linear % nope_groups;
+                const int key_i = group_linear / nope_groups;
+                const int d = scale_i * kSwaQuantBlock + lane;
+                const uint8_t* data_ptr = packed_data_rows[key_i];
                 key_tile_shared[static_cast<int64_t>(key_i) * kSwaHeadDim + d] =
                     fp8_e4m3_to_float(data_ptr[d], packed_scales[key_i * kSwaScaleBytes + scale_i]);
-            } else {
-                key_tile_shared[static_cast<int64_t>(key_i) * kSwaHeadDim + d] =
-                    attention_key_at(kv,
-                                     cmp_cache,
-                                     cmp_cu_lens,
-                                     cmp_pool,
-                                     cmp_block_table,
-                                     cmp_seq_lens,
-                                     cmp_pool_block_size,
-                                     cmp_pool_block_stride,
-                                     cmp_block_table_stride,
-                                     swa_cache,
-                                     swa_cu_lens,
-                                     swa_pool,
-                                     swa_slot_mapping,
-                                     swa_gather_lens,
-                                     swa_pool_block_size,
-                                     swa_pool_block_stride,
-                                     swa_slot_mapping_stride,
-                                     key_is_compressed[key_i],
-                                     req,
-                                     key_pos[key_i],
-                                     prefix_len,
-                                     0,
-                                     d,
-                                     L,
-                                     KH,
-                                     D,
-                                     kv_unpad_restore,
-                                     kv_cu_lens,
-                                     symm_buffer_ptrs,
-                                     use_symm_direct_fresh,
-                                     per_rank_buffer_bytes,
-                                     fresh_payload_offset,
-                                     symm_l_local);
             }
-        }
-        const int rope_total = key_count * (kSwaHeadDim - kSwaNopeDim);
-        for (int idx = tid; idx < rope_total; idx += static_cast<int>(blockDim.x)) {
-            const int key_i = idx / (kSwaHeadDim - kSwaNopeDim);
-            const int rope_d = idx - key_i * (kSwaHeadDim - kSwaNopeDim);
-            const int d = kSwaNopeDim + rope_d;
-            const uint8_t* data_ptr = packed_data_rows[key_i];
-            if (data_ptr != nullptr) {
+            const int rope_total = key_count * (kSwaHeadDim - kSwaNopeDim);
+            for (int idx = tid; idx < rope_total; idx += static_cast<int>(blockDim.x)) {
+                const int key_i = idx / (kSwaHeadDim - kSwaNopeDim);
+                const int rope_d = idx - key_i * (kSwaHeadDim - kSwaNopeDim);
+                const int d = kSwaNopeDim + rope_d;
+                const uint8_t* data_ptr = packed_data_rows[key_i];
                 key_tile_shared[static_cast<int64_t>(key_i) * kSwaHeadDim + d] =
                     bf16_bits_to_float(load_u16_unaligned(data_ptr + kSwaNopeDim
                                                           + rope_d * static_cast<int>(sizeof(uint16_t))));
-            } else {
-                key_tile_shared[static_cast<int64_t>(key_i) * kSwaHeadDim + d] =
-                    attention_key_at(kv,
-                                     cmp_cache,
-                                     cmp_cu_lens,
-                                     cmp_pool,
-                                     cmp_block_table,
-                                     cmp_seq_lens,
-                                     cmp_pool_block_size,
-                                     cmp_pool_block_stride,
-                                     cmp_block_table_stride,
-                                     swa_cache,
-                                     swa_cu_lens,
-                                     swa_pool,
-                                     swa_slot_mapping,
-                                     swa_gather_lens,
-                                     swa_pool_block_size,
-                                     swa_pool_block_stride,
-                                     swa_slot_mapping_stride,
-                                     key_is_compressed[key_i],
-                                     req,
-                                     key_pos[key_i],
-                                     prefix_len,
-                                     0,
-                                     d,
-                                     L,
-                                     KH,
-                                     D,
-                                     kv_unpad_restore,
-                                     kv_cu_lens,
-                                     symm_buffer_ptrs,
-                                     use_symm_direct_fresh,
-                                     per_rank_buffer_bytes,
-                                     fresh_payload_offset,
-                                     symm_l_local);
+            }
+        } else {
+            for (int idx = tid; idx < fp8_total; idx += static_cast<int>(blockDim.x)) {
+                const int lane = idx % kSwaQuantBlock;
+                const int group_linear = idx / kSwaQuantBlock;
+                const int scale_i = group_linear % nope_groups;
+                const int key_i = group_linear / nope_groups;
+                const int d = scale_i * kSwaQuantBlock + lane;
+                const uint8_t* data_ptr = packed_data_rows[key_i];
+                if (data_ptr != nullptr) {
+                    key_tile_shared[static_cast<int64_t>(key_i) * kSwaHeadDim + d] =
+                        fp8_e4m3_to_float(data_ptr[d], packed_scales[key_i * kSwaScaleBytes + scale_i]);
+                } else {
+                    key_tile_shared[static_cast<int64_t>(key_i) * kSwaHeadDim + d] =
+                        dsv4MegaAttentionKeyTileFallbackAt(kv,
+                                                           cmp_cache,
+                                                           cmp_cu_lens,
+                                                           cmp_pool,
+                                                           cmp_block_table,
+                                                           cmp_seq_lens,
+                                                           cmp_pool_block_size,
+                                                           cmp_pool_block_stride,
+                                                           cmp_block_table_stride,
+                                                           swa_cache,
+                                                           swa_cu_lens,
+                                                           swa_pool,
+                                                           swa_slot_mapping,
+                                                           swa_gather_lens,
+                                                           swa_pool_block_size,
+                                                           swa_pool_block_stride,
+                                                           swa_slot_mapping_stride,
+                                                           key_is_compressed,
+                                                           key_pos,
+                                                           key_i,
+                                                           req,
+                                                           prefix_len,
+                                                           d,
+                                                           L,
+                                                           KH,
+                                                           D,
+                                                           kv_unpad_restore,
+                                                           kv_cu_lens,
+                                                           symm_buffer_ptrs,
+                                                           use_symm_direct_fresh,
+                                                           per_rank_buffer_bytes,
+                                                           fresh_payload_offset,
+                                                           symm_l_local);
+                }
+            }
+            const int rope_total = key_count * (kSwaHeadDim - kSwaNopeDim);
+            for (int idx = tid; idx < rope_total; idx += static_cast<int>(blockDim.x)) {
+                const int key_i = idx / (kSwaHeadDim - kSwaNopeDim);
+                const int rope_d = idx - key_i * (kSwaHeadDim - kSwaNopeDim);
+                const int d = kSwaNopeDim + rope_d;
+                const uint8_t* data_ptr = packed_data_rows[key_i];
+                if (data_ptr != nullptr) {
+                    key_tile_shared[static_cast<int64_t>(key_i) * kSwaHeadDim + d] =
+                        bf16_bits_to_float(load_u16_unaligned(data_ptr + kSwaNopeDim
+                                                              + rope_d * static_cast<int>(sizeof(uint16_t))));
+                } else {
+                    key_tile_shared[static_cast<int64_t>(key_i) * kSwaHeadDim + d] =
+                        dsv4MegaAttentionKeyTileFallbackAt(kv,
+                                                           cmp_cache,
+                                                           cmp_cu_lens,
+                                                           cmp_pool,
+                                                           cmp_block_table,
+                                                           cmp_seq_lens,
+                                                           cmp_pool_block_size,
+                                                           cmp_pool_block_stride,
+                                                           cmp_block_table_stride,
+                                                           swa_cache,
+                                                           swa_cu_lens,
+                                                           swa_pool,
+                                                           swa_slot_mapping,
+                                                           swa_gather_lens,
+                                                           swa_pool_block_size,
+                                                           swa_pool_block_stride,
+                                                           swa_slot_mapping_stride,
+                                                           key_is_compressed,
+                                                           key_pos,
+                                                           key_i,
+                                                           req,
+                                                           prefix_len,
+                                                           d,
+                                                           L,
+                                                           KH,
+                                                           D,
+                                                           kv_unpad_restore,
+                                                           kv_cu_lens,
+                                                           symm_buffer_ptrs,
+                                                           use_symm_direct_fresh,
+                                                           per_rank_buffer_bytes,
+                                                           fresh_payload_offset,
+                                                           symm_l_local);
+                }
             }
         }
     } else {
@@ -1447,39 +1553,39 @@ __device__ __forceinline__ void dsv4MegaLoadAttentionKeyTile(const scalar_t* __r
             const int key_i = idx / D;
             const int d = idx - key_i * D;
             key_tile_shared[static_cast<int64_t>(key_i) * kSwaHeadDim + d] =
-                attention_key_at(kv,
-                                 cmp_cache,
-                                 cmp_cu_lens,
-                                 cmp_pool,
-                                 cmp_block_table,
-                                 cmp_seq_lens,
-                                 cmp_pool_block_size,
-                                 cmp_pool_block_stride,
-                                 cmp_block_table_stride,
-                                 swa_cache,
-                                 swa_cu_lens,
-                                 swa_pool,
-                                 swa_slot_mapping,
-                                 swa_gather_lens,
-                                 swa_pool_block_size,
-                                 swa_pool_block_stride,
-                                 swa_slot_mapping_stride,
-                                 key_is_compressed[key_i],
-                                 req,
-                                 key_pos[key_i],
-                                 prefix_len,
-                                 0,
-                                 d,
-                                 L,
-                                 KH,
-                                 D,
-                                 kv_unpad_restore,
-                                 kv_cu_lens,
-                                 symm_buffer_ptrs,
-                                 use_symm_direct_fresh,
-                                 per_rank_buffer_bytes,
-                                 fresh_payload_offset,
-                                 symm_l_local);
+                dsv4MegaAttentionKeyTileFallbackAt(kv,
+                                                   cmp_cache,
+                                                   cmp_cu_lens,
+                                                   cmp_pool,
+                                                   cmp_block_table,
+                                                   cmp_seq_lens,
+                                                   cmp_pool_block_size,
+                                                   cmp_pool_block_stride,
+                                                   cmp_block_table_stride,
+                                                   swa_cache,
+                                                   swa_cu_lens,
+                                                   swa_pool,
+                                                   swa_slot_mapping,
+                                                   swa_gather_lens,
+                                                   swa_pool_block_size,
+                                                   swa_pool_block_stride,
+                                                   swa_slot_mapping_stride,
+                                                   key_is_compressed,
+                                                   key_pos,
+                                                   key_i,
+                                                   req,
+                                                   prefix_len,
+                                                   d,
+                                                   L,
+                                                   KH,
+                                                   D,
+                                                   kv_unpad_restore,
+                                                   kv_cu_lens,
+                                                   symm_buffer_ptrs,
+                                                   use_symm_direct_fresh,
+                                                   per_rank_buffer_bytes,
+                                                   fresh_payload_offset,
+                                                   symm_l_local);
         }
     }
     __syncthreads();
