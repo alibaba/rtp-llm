@@ -93,6 +93,12 @@ class BaseTokenizer:
            NOTE: upstream tracks this as huggingface/transformers#45488.
            Our fix is model-agnostic and stable — keep until upstream is reliable.
         """
+        # Only applies on transformers >= 5. On 4.x, from_pretrained already passes
+        # add_eos/bos_token from config and there is no tokenizer_object rebuild bug,
+        # so returning {} preserves native 4.x behavior and avoids passing 5.x-only
+        # kwargs into the 4.x loader (mirrors the guard in _fix_post_processor).
+        if version.parse(transformers.__version__).major < 5:
+            return {}
         kwargs: Dict[str, Any] = {}
         if "add_eos_token" in tokenizer_config:
             kwargs["add_eos_token"] = tokenizer_config["add_eos_token"]
