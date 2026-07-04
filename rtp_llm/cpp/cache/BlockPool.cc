@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <cstring>
 #include <exception>
+#include <stdexcept>
 #include <string>
 #include <utility>
 
@@ -68,6 +69,35 @@ bool shouldPinHostBlockPool() {
     }
     const std::string flag(value);
     return flag != "0" && flag != "false" && flag != "FALSE" && flag != "off" && flag != "OFF";
+}
+
+torch::Tensor allocateCpuTensor(size_t size_bytes, bool pinned) {
+    auto options = torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCPU);
+    if (pinned) {
+        options = options.pinned_memory(true);
+    }
+    return torch::empty({static_cast<int64_t>(size_bytes)}, options);
+}
+
+torch::Tensor allocateExactPinnedCpuTensor(size_t size_bytes) {
+#if USING_CUDA
+    void*      ptr = nullptr;
+    const auto err = cudaHostAlloc(&ptr, size_bytes, cudaHostAllocDefault);
+    if (err != cudaSuccess) {
+        throw std::runtime_error(std::string("cudaHostAlloc failed: ") + cudaGetErrorString(err));
+    }
+    auto deleter = [](void* p) {
+        if (p != nullptr) {
+            (void)cudaFreeHost(p);
+        }
+    };
+    return torch::from_blob(ptr,
+                            {static_cast<int64_t>(size_bytes)},
+                            std::move(deleter),
+                            torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCPU));
+#else
+    throw std::runtime_error("exact pinned CPU block pool requested but this binary was not built with CUDA");
+#endif
 }
 
 void markHostBlockPoolDontDump(void* ptr, size_t size) {
@@ -142,23 +172,23 @@ void BlockPool::validateConfig() const {
 }
 
 void BlockPool::initializeCacheBuffer() {
+    cache_buffer_pinned_host_ = false;
     if (allocation_type_ == AllocationType::HOST) {
-        auto cpu_buffer = torch::empty({static_cast<int64_t>(config_.total_size_bytes)},
-                                       torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCPU));
         if (shouldPinHostBlockPool()) {
             try {
-                cache_aligned_buffer_ = cpu_buffer.pin_memory();
+                cache_aligned_buffer_     = allocateExactPinnedCpuTensor(config_.total_size_bytes);
+                cache_buffer_pinned_host_ = true;
             } catch (const std::exception& e) {
                 RTP_LLM_LOG_WARNING(
                     "pin host block pool failed, fallback to pageable CPU memory, total_size=%zu bytes, error=%s",
                     config_.total_size_bytes,
                     e.what());
-                cache_aligned_buffer_ = std::move(cpu_buffer);
+                cache_aligned_buffer_ = allocateCpuTensor(config_.total_size_bytes, /*pinned=*/false);
             }
         } else {
             RTP_LLM_LOG_INFO("host block pool uses pageable CPU memory, total_size=%zu bytes",
                              config_.total_size_bytes);
-            cache_aligned_buffer_ = std::move(cpu_buffer);
+            cache_aligned_buffer_ = allocateCpuTensor(config_.total_size_bytes, /*pinned=*/false);
         }
         RTP_LLM_LOG_INFO("mark host block pool dont dump, ptr=%p, size=%zu",
                          cache_aligned_buffer_.data_ptr(),
@@ -175,7 +205,9 @@ void BlockPool::initializeCacheBuffer() {
     cache_base_ptr_ = cache_aligned_buffer_.data_ptr();
     RTP_LLM_CHECK_WITH_INFO(cache_base_ptr_ != nullptr, "block pool allocate cache aligned buffer is null");
     const bool is_cuda   = cache_aligned_buffer_.is_cuda();
-    const bool is_pinned = !is_cuda && cache_aligned_buffer_.is_pinned();
+    const bool is_pinned = !is_cuda && (cache_buffer_pinned_host_ || cache_aligned_buffer_.is_pinned());
+    // REBASE CONFLICT CONTEXT(2413e8e03): keep the new base's pool-name/MB diagnostics
+    // and include the source branch's cudaMalloc backing in requestedBackingName().
     static constexpr double kBytesPerMB = 1024.0 * 1024.0;
     RTP_LLM_LOG_INFO("BlockPool backing selected: pool_name=%s allocation_type=%s requested_backing=%s "
                      "actual_backing=%s is_cuda=%d is_pinned=%d ptr=%p total_size=%zu bytes total_size_mb=%.2f "
@@ -196,10 +228,9 @@ void BlockPool::initializeCacheBuffer() {
 void BlockPool::initializePinnedCpuBuffer(const char* log_context) {
     RTP_LLM_LOG_WARNING(
         "%s, pool_name=%s, total_size=%zu bytes", log_context, config_.pool_name.c_str(), config_.total_size_bytes);
-    auto cpu_buffer = torch::empty({static_cast<int64_t>(config_.total_size_bytes)},
-                                   torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCPU));
     try {
-        cache_aligned_buffer_ = cpu_buffer.pin_memory();
+        cache_aligned_buffer_     = allocateExactPinnedCpuTensor(config_.total_size_bytes);
+        cache_buffer_pinned_host_ = true;
     } catch (const std::exception& e) {
         RTP_LLM_FAIL("%s pin failed, total_size=%zu bytes, error=%s", log_context, config_.total_size_bytes, e.what());
     }
@@ -707,6 +738,9 @@ BlockPool::convertIndexToBuffer(int layer_id, int block_id, int partition_count,
 MemoryType BlockPool::where() const {
     if (cache_aligned_buffer_.is_cuda()) {
         return MemoryType::MEMORY_GPU;
+    }
+    if (cache_buffer_pinned_host_) {
+        return MemoryType::MEMORY_CPU_PINNED;
     }
     return cache_aligned_buffer_.is_pinned() ? MemoryType::MEMORY_CPU_PINNED : MemoryType::MEMORY_CPU;
 }
