@@ -256,6 +256,37 @@ class ServerArgsSetTest(TestCase):
             1,
         )
 
+    def test_pdfusion_scheduler_mode_config(self):
+        """Test that pdfusion_scheduler_mode is opt-in and decode_prefill_ratio is configurable."""
+        sys.argv = ["prog"]
+
+        import rtp_llm.server.server_args.server_args
+
+        importlib.reload(rtp_llm.server.server_args.server_args)
+        py_env_configs = rtp_llm.server.server_args.server_args.setup_args()
+        self.assertEqual(
+            py_env_configs.runtime_config.fifo_scheduler_config.pdfusion_scheduler_mode,
+            "",
+        )
+
+        sys.argv = [
+            "prog",
+            "--pdfusion_scheduler_mode",
+            "ratio",
+            "--decode_prefill_ratio",
+            "1/3",
+        ]
+        importlib.reload(rtp_llm.server.server_args.server_args)
+        py_env_configs = rtp_llm.server.server_args.server_args.setup_args()
+        self.assertEqual(
+            py_env_configs.runtime_config.fifo_scheduler_config.pdfusion_scheduler_mode,
+            "ratio",
+        )
+        self.assertEqual(
+            py_env_configs.runtime_config.fifo_scheduler_config.decode_prefill_ratio,
+            "1/3",
+        )
+
 
 if __name__ == "__main__":
     main()

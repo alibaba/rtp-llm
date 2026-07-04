@@ -1,0 +1,26 @@
+{
+  "model_type": "qwen_2",
+  "model_path": "/mnt/nas1/hf/Qwen2.5-0.5B-Instruct",
+  "tokenizer_path": "/mnt/nas1/hf/Qwen2.5-0.5B-Instruct",
+  "query_result": [
+    {
+      "query": {
+        "prompt": "$prompt:s5",
+        "batch_group_id": 1147,
+        "batch_group_size": 5,
+        "generate_config": {
+          "max_new_tokens": 10,
+          "top_k": 1,
+          "top_p": 0,
+          "force_batch": true,
+          "batch_group_timeout": 1000
+        }
+      },
+      "result": {
+        "response": " Flask import;q1\n1\n99\n",
+        "iter_count": 10,
+        "finished": true
+      }
+    }
+  ]
+}
