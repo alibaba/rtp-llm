@@ -4,12 +4,10 @@ Mirrors flashmla_sparse_impl.py but with all-gather + restore + zig-zag q split.
 """
 
 import copy
-import hashlib
 import logging
 import os
-from collections import defaultdict
 from types import SimpleNamespace
-from typing import Any, Dict, List, Optional
+from typing import Dict, List, Optional
 
 import torch
 

@@ -1,4 +1,3 @@
-import os
 from typing import Any, Dict, Optional, Tuple
 
 import torch
@@ -142,11 +141,6 @@ class Indexer(nn.Module):
             return False
         return self.parallelism_config.prefill_cp_config.is_enabled()
 
-    def _prefill_cp_fused_quant_enabled(self) -> bool:
-        return os.environ.get(
-            "DSV4_CP_PREFILL_INDEXER_FUSED_QUANT", "1"
-        ).strip().lower() in ("1", "true", "yes", "on")
-
     def _is_sparse_prefill_cp(self, attention_inputs: Any) -> bool:
         return bool(attention_inputs.is_prefill) and self._prefill_cp_enabled()
 
@@ -203,48 +197,6 @@ class Indexer(nn.Module):
         )
         self.indexer_op.quant_k_only(key, kv_cache, fmha_params.slot_mapping)
 
-        return q_fp8, q_scale
-
-    def _fused_forward_prefill_cp(
-        self,
-        q_lora: torch.Tensor,
-        x: torch.Tensor,
-        kv_cache: KVCache,
-        fmha_params: Any,
-        cp_params: Any,
-        x_fp8: Optional[torch.Tensor] = None,
-        x_scale: Optional[torch.Tensor] = None,
-        q_c_fp8: Optional[torch.Tensor] = None,
-        q_c_scale: Optional[torch.Tensor] = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        if q_c_fp8 is not None and q_c_scale is not None:
-            q = self.wq_b(q_c_fp8, input_scales=q_c_scale)
-        else:
-            q = self.wq_b(q_lora)
-        q = q.view(-1, self.index_n_heads, self.index_head_dim)
-
-        if x_fp8 is not None and x_scale is not None:
-            k = self.wk(x_fp8, input_scales=x_scale)
-        else:
-            k = self.wk(x)
-        k = self.k_norm(k)
-
-        q_fp8, q_scale, key = self.indexer_op.fused_rope_quant_qk(
-            q,
-            k,
-            cp_params.full_rope_pos_ids,
-        )
-        slot_mapping = (
-            cp_params.sharded_slot_mapping
-            if bool(getattr(cp_params, "kv_cache_sharded", False))
-            else fmha_params.slot_mapping
-        )
-        self.indexer_op.quant_k_cp_only(
-            key,
-            kv_cache,
-            slot_mapping,
-            cp_params.kv_restore_unpad_indices,
-        )
         return q_fp8, q_scale
 
     def _get_q_k_bf16(
@@ -390,22 +342,6 @@ class Indexer(nn.Module):
         # Fused Q-RoPE-Hadamard-Quant path: single Triton kernel does
         # RoPE + 128-pt Hadamard + ue8m0 FP8 quant for Q (decode only).
         if (
-            self._is_sparse_prefill_cp(attention_inputs)
-            and self._prefill_cp_fused_quant_enabled()
-            and cp_params.full_rope_pos_ids is not None
-        ):
-            q_fp8, q_scale = self._fused_forward_prefill_cp(
-                q_lora,
-                hidden_states,
-                kv_cache,
-                fmha_params,
-                cp_params,
-                x_fp8,
-                x_scale,
-                q_c_fp8,
-                q_c_scale,
-            )
-        elif (
             self._fuse_logits_head_gate
             and not attention_inputs.is_prefill
             and cp_params is None
