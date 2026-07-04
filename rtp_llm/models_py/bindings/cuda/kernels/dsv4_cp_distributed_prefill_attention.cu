@@ -94,9 +94,9 @@ constexpr int kMegaIndexerCandidateGroups =
 constexpr int kMegaIndexerCandidatesPerGroup = 4;
 constexpr int kMegaIndexerCandidateTile = kMegaIndexerCandidateGroups * kMegaIndexerCandidatesPerGroup;
 constexpr int kMegaIndexerHeads = 64;
-constexpr int kMegaIndexerWarpsPerCandidate = kMegaIndexerHeads / kMegaAttentionWarpSize;
-constexpr int kMegaIndexerScorerFloatSlots =
-    kMegaIndexerCandidateTile * (kMegaIndexerHeads + kMegaIndexerWarpsPerCandidate);
+constexpr int kMegaIndexerHeadsPerWarpPartial = kMegaAttentionWarpSize / kMegaIndexerCandidateHeadLanes;
+constexpr int kMegaIndexerWarpsPerCandidate = kMegaIndexerHeads / kMegaIndexerHeadsPerWarpPartial;
+constexpr int kMegaIndexerScorerFloatSlots = kMegaIndexerCandidateTile * kMegaIndexerWarpsPerCandidate;
 constexpr int kMegaIndexerMetadataBytes =
     ((kMegaIndexerCandidateTile * static_cast<int>(sizeof(const uint8_t*))
       + kMegaIndexerCandidateTile * static_cast<int>(sizeof(float)) + 7)
@@ -110,6 +110,8 @@ constexpr int kMegaReduceResultSlots =
     kMegaIndexerCandidateTile > kMegaAttentionKeyTile ? kMegaIndexerCandidateTile : kMegaAttentionKeyTile;
 static_assert(kMegaIndexerCandidateGroups * 64 * kMegaIndexerCandidateHeadLanes == kMegaBlockThreads,
               "CSA matrix scorer maps one CTA exactly across group/head/lane work");
+static_assert(kMegaIndexerHeadsPerWarpPartial * kMegaIndexerWarpsPerCandidate == kMegaIndexerHeads,
+              "CSA scorer warp partials must cover all indexer heads");
 static_assert(kMegaIndexerCandidateTile
                       + (kMegaBlockThreads / kMegaAttentionWarpSize) * kMegaIndexerCandidateTile
                   <= kMegaBlockThreads,
@@ -763,6 +765,59 @@ __device__ __forceinline__ void dsv4MegaFindWorstTopKSlotsTile(const int* __rest
         }
     }
     __syncthreads();
+}
+
+__device__ __forceinline__ void dsv4MegaSelectBestTileLanes(int c,
+                                                            int tile_valid_count,
+                                                            int sorted_tile_count,
+                                                            int* __restrict__ tile_lanes,
+                                                            const float* __restrict__ tile_scores) {
+    int selected[kMegaIndexerCandidateTile];
+#pragma unroll
+    for (int i = 0; i < kMegaIndexerCandidateTile; ++i) {
+        selected[i] = -1;
+    }
+    int selected_count = 0;
+#pragma unroll
+    for (int src_i = 0; src_i < kMegaIndexerCandidateTile; ++src_i) {
+        if (src_i >= tile_valid_count) {
+            break;
+        }
+        const int tile_i = tile_lanes[src_i];
+        const int candidate = c + tile_i;
+        const float score = tile_scores[tile_i];
+        int insert = selected_count;
+#pragma unroll
+        for (int scan = 0; scan < kMegaIndexerCandidateTile; ++scan) {
+            if (scan >= selected_count) {
+                break;
+            }
+            const int scan_tile_i = selected[scan];
+            const int scan_candidate = c + scan_tile_i;
+            const float scan_score = tile_scores[scan_tile_i];
+            if (dsv4MegaTopKBetter(score, candidate, scan_score, scan_candidate)) {
+                insert = scan;
+                break;
+            }
+        }
+        if (insert < sorted_tile_count) {
+            const int max_shift = min_int(selected_count, sorted_tile_count - 1);
+#pragma unroll
+            for (int shift = kMegaIndexerCandidateTile - 1; shift > 0; --shift) {
+                if (shift <= max_shift && shift > insert) {
+                    selected[shift] = selected[shift - 1];
+                }
+            }
+            selected[insert] = tile_i;
+            selected_count = min_int(selected_count + 1, sorted_tile_count);
+        }
+    }
+#pragma unroll
+    for (int i = 0; i < kMegaIndexerCandidateTile; ++i) {
+        if (i < sorted_tile_count) {
+            tile_lanes[i] = selected[i];
+        }
+    }
 }
 
 template<typename T>
@@ -2295,7 +2350,7 @@ __device__ __forceinline__ void dsv4MegaIndexerScoreCandidateTile(const scalar_t
                                                                   int csa_indexer_pool_block_size,
                                                                   int64_t csa_indexer_pool_block_stride,
                                                                   int64_t csa_indexer_block_table_stride,
-                                                                  float* head_scores,
+                                                                  float* candidate_warp_sums,
                                                                   uint8_t* metadata_storage,
                                                                   float* tile_scores) {
     const int tid = static_cast<int>(threadIdx.x);
@@ -2312,6 +2367,10 @@ __device__ __forceinline__ void dsv4MegaIndexerScoreCandidateTile(const scalar_t
 
     if (tid < kMegaIndexerCandidateTile) {
         tile_scores[tid] = kInvalidCompressorScore;
+    }
+    for (int sum_idx = tid; sum_idx < kMegaIndexerCandidateTile * kMegaIndexerWarpsPerCandidate;
+         sum_idx += static_cast<int>(blockDim.x)) {
+        candidate_warp_sums[sum_idx] = 0.0f;
     }
     if (tid < kMegaIndexerCandidateTile) {
         const int candidate_lane_init = tid;
@@ -2409,30 +2468,17 @@ __device__ __forceinline__ void dsv4MegaIndexerScoreCandidateTile(const scalar_t
             (candidate_active && use_fp8_indexer && lane_in_head == 0 && reduced_dot > 0.0f) ?
                 reduced_dot * head_weight :
                 0.0f;
-        if (candidate_active && use_fp8_indexer && lane_in_head == 0) {
-            head_scores[candidate_lane * kMegaIndexerHeads + head] = weighted_head_score;
+        const float warp_partial = dsv4MegaWarpReduceSum(weighted_head_score);
+        const int warp_lane = tid & (kMegaAttentionWarpSize - 1);
+        const int warp_in_group =
+            (tid / kMegaAttentionWarpSize)
+            - group * ((kMegaIndexerHeads * kMegaIndexerCandidateHeadLanes) / kMegaAttentionWarpSize);
+        if (warp_lane == 0 && candidate_lane < kMegaIndexerCandidateTile) {
+            candidate_warp_sums[candidate_lane * kMegaIndexerWarpsPerCandidate + warp_in_group] = warp_partial;
         }
     }
     __syncthreads();
 
-    float* candidate_warp_sums = head_scores + kMegaIndexerCandidateTile * kMegaIndexerHeads;
-    for (int sum_idx = tid; sum_idx < kMegaIndexerCandidateTile * kMegaIndexerHeads;
-         sum_idx += static_cast<int>(blockDim.x)) {
-        const int sum_candidate = sum_idx / kMegaIndexerHeads;
-        const int sum_head = sum_idx - sum_candidate * kMegaIndexerHeads;
-        bool sum_active = use_fp8_indexer;
-        if constexpr (!CandidateTileAllValid) {
-            sum_active = sum_candidate < candidate_count && candidate_valid[sum_candidate] != 0
-                         && use_fp8_indexer;
-        }
-        float head_score = sum_active ? head_scores[sum_candidate * kMegaIndexerHeads + sum_head] : 0.0f;
-        head_score = dsv4MegaWarpReduceSum(head_score);
-        if ((tid & (kMegaAttentionWarpSize - 1)) == 0 && sum_candidate < kMegaIndexerCandidateTile) {
-            const int warp_in_candidate = sum_head / kMegaAttentionWarpSize;
-            candidate_warp_sums[sum_candidate * kMegaIndexerWarpsPerCandidate + warp_in_candidate] = head_score;
-        }
-    }
-    __syncthreads();
     if (tid < kMegaIndexerCandidateTile) {
         bool candidate_active = use_fp8_indexer;
         if constexpr (!CandidateTileAllValid) {
@@ -2699,6 +2745,8 @@ __device__ __forceinline__ int dsv4MegaBuildCompressedIndicesForRow(const scalar
                                                    reduce_buf);
                     if (tid == 0) {
                         int sorted_tile_count = min_int(tile_valid_count, k_eff);
+                        dsv4MegaSelectBestTileLanes(
+                            c, tile_valid_count, sorted_tile_count, reduce_indices_second, reduce_result);
                         int replacements = 0;
                         int replaced_slot = -1;
                         float replaced_score = kInvalidCompressorScore;
@@ -3187,6 +3235,8 @@ __device__ __forceinline__ int dsv4MegaBuildCompressedIndicesFromScores(const in
                                            reduce_buf);
             if (tid == 0) {
                 int sorted_tile_count = min_int(tile_valid_count, k_eff);
+                dsv4MegaSelectBestTileLanes(
+                    c, tile_valid_count, sorted_tile_count, reduce_indices_second, row_scores + c);
                 int replacements = 0;
                 int replaced_slot = -1;
                 float replaced_score = kInvalidCompressorScore;

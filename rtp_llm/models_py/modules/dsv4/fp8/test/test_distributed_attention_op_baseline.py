@@ -2251,6 +2251,44 @@ class DistributedAttentionCandidateTest(unittest.TestCase):
             expected_topk=[8],
         )
 
+    def test_candidate_cuda_csa_fp8_indexer_topk_one_nonfirst_tile_best_allclose(
+        self,
+    ) -> None:
+        self._run_fp8_indexer_score_case(
+            AttentionCase(
+                name="csa_fp8_indexer_topk_one_nonfirst_tile_best",
+                compress_ratio=4,
+                prefix_lengths=(96,),
+                input_lengths=(1,),
+                window_size=4,
+                compressed_topk=1,
+                n_heads=8,
+                head_dim=16,
+                index_heads=64,
+                index_dim=128,
+            ),
+            scores=[
+                0.10,
+                0.00,
+                0.00,
+                0.00,
+                0.00,
+                0.00,
+                0.00,
+                0.00,
+                0.11,
+                0.00,
+                0.00,
+                0.00,
+                0.30,
+                0.00,
+                0.00,
+                0.00,
+                0.15,
+            ],
+            expected_topk=[12],
+        )
+
     def test_candidate_cuda_csa_paged_indexer_cache_topk_allclose(self) -> None:
         if not torch.cuda.is_available():
             self.skipTest("candidate distributed attention op requires CUDA")
