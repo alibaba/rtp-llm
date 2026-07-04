@@ -61,16 +61,16 @@ constexpr int64_t kMegaGridSyncBytes = kMegaGridCounterBytes + kMegaGridEpochByt
 constexpr int kMegaNonCoopGridWaveMultiplier = 16;
 constexpr int kMegaAttentionKeyTile = 4;
 // Larger grouped MQA key tiles amortize packed FP8 row setup and block-wide
-// synchronizations across more keys. Tile=8 keeps the per-CTA footprint within
-// Blackwell opt-in shared memory while cutting the long-key attention loop count
-// in half versus tile=4.
-constexpr int kMegaAttentionGroupedKeyTile = 8;
+// synchronizations across more keys. Tile=16 still fits Blackwell opt-in shared
+// memory at one resident CTA/SM while halving the long-key attention loop count
+// versus tile=8.
+constexpr int kMegaAttentionGroupedKeyTile = 16;
 constexpr int kMegaAttentionHeadsPerCta = 8;
 constexpr int kMegaAttentionWarpSize = 32;
 constexpr int kMegaAttentionDimsPerWarp = kSwaHeadDim / kMegaAttentionWarpSize;
 constexpr int kMegaAttentionGroupedScaleSlots = kMegaAttentionGroupedKeyTile * kSwaScaleBytes;
-static_assert(kMegaAttentionGroupedKeyTile <= 8,
-              "grouped attention tile needs dynamic/shared-memory retuning above 8 keys");
+static_assert(kMegaAttentionGroupedKeyTile <= 16,
+              "grouped attention tile needs dynamic/shared-memory retuning above 16 keys");
 constexpr int kMegaSplitKKeysPerBlock = 64;
 constexpr int kMegaSplitKMinKeys = 512;
 constexpr int kMegaSplitKBlocksPerWave = 7;
