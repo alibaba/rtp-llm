@@ -43,13 +43,16 @@ constexpr int kIndexerEntryBytes = 132;
 constexpr int kIndexerHeadDim = 128;
 constexpr float kSwaFp8Max = 448.0f;
 constexpr int kAttentionSignalPadChannelBase = 224;
-constexpr int kMegaSignalPadChannelBase = kAttentionSignalPadChannelBase + 16;
+constexpr int kMegaSideEffectReleaseChannel = 14;
+constexpr int kMegaKernelDoneChannel = 15;
 constexpr int64_t kSymmMemBarrierTimeoutCycles = 60000000000ll;
 constexpr float kInvalidCompressorScore = -3.4028234663852886e38F;
 constexpr int64_t kMegaPayloadAlignBytes = 256;
 constexpr int64_t kMegaLocalPhaseOffset = 16;
 constexpr int64_t kMegaLocalPhaseComplementOffset = 24;
-constexpr int kMegaGridBarrierSlots = 24;
+constexpr int kMegaGridBarrierLogicalSlots = 24;
+constexpr int kMegaGridBarrierEpochStride = 4;
+constexpr int kMegaGridBarrierSlots = kMegaGridBarrierLogicalSlots * kMegaGridBarrierEpochStride;
 constexpr int64_t kMegaGridCounterBytes =
     ((kMegaGridBarrierSlots * static_cast<int64_t>(sizeof(unsigned int)) + 63) / 64) * 64;
 constexpr int64_t kMegaGridEpochBytes =
@@ -330,7 +333,7 @@ __device__ __forceinline__ void dsv4MegaGridBarrier(uint8_t* scratch_base, int b
         __syncthreads();
         return;
     }
-    if (barrier_id < 0 || barrier_id >= kMegaGridBarrierSlots) {
+    if (barrier_id < 0 || barrier_id >= kMegaGridBarrierLogicalSlots) {
         if (threadIdx.x == 0) {
             printf("DSV4 mega grid barrier id out of range: block=%d barrier=%d\n",
                    static_cast<int>(blockIdx.x),
@@ -340,16 +343,19 @@ __device__ __forceinline__ void dsv4MegaGridBarrier(uint8_t* scratch_base, int b
     }
     auto* counters = reinterpret_cast<unsigned int*>(scratch_base);
     auto* epochs = reinterpret_cast<unsigned long long*>(scratch_base + kMegaGridCounterBytes);
+    const int physical_barrier_id =
+        barrier_id * kMegaGridBarrierEpochStride
+        + static_cast<int>(launch_epoch & static_cast<unsigned long long>(kMegaGridBarrierEpochStride - 1));
     const unsigned long long epoch = launch_epoch ^ (static_cast<unsigned long long>(barrier_id + 1) << 48);
     if (blockIdx.x == 0 && threadIdx.x == 0) {
-        counters[barrier_id] = 0;
-        cuda::atomic_ref<unsigned long long, cuda::thread_scope_device> epoch_ref(epochs[barrier_id]);
+        counters[physical_barrier_id] = 0;
+        cuda::atomic_ref<unsigned long long, cuda::thread_scope_device> epoch_ref(epochs[physical_barrier_id]);
         epoch_ref.store(epoch, cuda::std::memory_order_release);
     }
     __threadfence();
     __syncthreads();
 
-    cuda::atomic_ref<unsigned long long, cuda::thread_scope_device> epoch_ref(epochs[barrier_id]);
+    cuda::atomic_ref<unsigned long long, cuda::thread_scope_device> epoch_ref(epochs[physical_barrier_id]);
     const unsigned long long start_epoch = clock64();
     while (epoch_ref.load(cuda::std::memory_order_acquire) != epoch) {
         if (clock64() - start_epoch > static_cast<unsigned long long>(kSymmMemBarrierTimeoutCycles)) {
@@ -365,10 +371,10 @@ __device__ __forceinline__ void dsv4MegaGridBarrier(uint8_t* scratch_base, int b
     __syncthreads();
 
     if (threadIdx.x == 0) {
-        cuda::atomic_ref<unsigned int, cuda::thread_scope_device> counter_ref(counters[barrier_id]);
+        cuda::atomic_ref<unsigned int, cuda::thread_scope_device> counter_ref(counters[physical_barrier_id]);
         const unsigned int ticket = counter_ref.fetch_add(1, cuda::std::memory_order_acq_rel);
         if (ticket + 1 == static_cast<unsigned int>(gridDim.x)) {
-            counters[barrier_id] = 0;
+            counters[physical_barrier_id] = 0;
             epoch_ref.store(epoch + 1, cuda::std::memory_order_release);
         }
     }
@@ -3822,55 +3828,6 @@ struct MegaCompressorBf16Args {
     int64_t              score_bytes = 0;
 };
 
-__device__ __forceinline__ uint32_t dsv4MegaSignalPadEpoch(unsigned long long launch_epoch, int barrier_channel) {
-    uint32_t epoch = static_cast<uint32_t>(launch_epoch)
-                     ^ (static_cast<uint32_t>(barrier_channel + 1) * 0x9e3779b9u);
-    return epoch == 0u ? 1u : epoch;
-}
-
-__device__ __forceinline__ void dsv4MegaInlineSignalPadBarrier(uint32_t* const* __restrict__ signal_pads,
-                                                               int cp_rank,
-                                                               int cp_size,
-                                                               int barrier_channel,
-                                                               unsigned long long launch_epoch) {
-    if (cp_size <= 1) {
-        __syncthreads();
-        return;
-    }
-    if (signal_pads == nullptr) {
-        if (threadIdx.x == 0) {
-            printf("DSV4 mega attention requires signal pads for in-kernel CP barrier\n");
-            asm("trap;");
-        }
-        __syncthreads();
-        return;
-    }
-    if (threadIdx.x < static_cast<unsigned int>(cp_size)) {
-        const int peer = static_cast<int>(threadIdx.x);
-        const int channel = kMegaSignalPadChannelBase + barrier_channel;
-        const uint32_t epoch = dsv4MegaSignalPadEpoch(launch_epoch, barrier_channel);
-        uint32_t* peer_signal = signal_pads[peer] + static_cast<int64_t>(channel) * cp_size + cp_rank;
-        uint32_t* local_signal = signal_pads[cp_rank] + static_cast<int64_t>(channel) * cp_size + peer;
-        cuda::atomic_ref<uint32_t, cuda::thread_scope_system> peer_ref(*peer_signal);
-        cuda::atomic_ref<uint32_t, cuda::thread_scope_system> local_ref(*local_signal);
-        peer_ref.store(epoch, cuda::std::memory_order_release);
-        const unsigned long long start = clock64();
-        while (local_ref.load(cuda::std::memory_order_acquire) != epoch) {
-            if (clock64() - start > static_cast<unsigned long long>(kSymmMemBarrierTimeoutCycles)) {
-                printf("DSV4 mega inline signal wait timeout: rank=%d peer=%d channel=%d expected=%u value=%u\n",
-                       cp_rank,
-                       peer,
-                       channel,
-                       epoch,
-                       local_ref.load(cuda::std::memory_order_relaxed));
-                asm("trap;");
-            }
-        }
-    }
-    __threadfence_system();
-    __syncthreads();
-}
-
 __device__ __forceinline__ void dsv4MegaInlineSignalPadBarrier(uint32_t* const* __restrict__ signal_pads,
                                                                int cp_rank,
                                                                int cp_size,
@@ -3954,6 +3911,30 @@ __device__ __forceinline__ void dsv4MegaStageBytesParallel(const void* __restric
         dst[off] = src_bytes[off];
     }
     __threadfence_system();
+}
+
+__device__ __forceinline__ void dsv4MegaResidentGridCpBarrier(uint8_t* grid_sync_base,
+                                                              int grid_barrier_base,
+                                                              uint32_t* const* __restrict__ signal_pads,
+                                                              int cp_rank,
+                                                              int cp_size,
+                                                              int barrier_channel,
+                                                              unsigned long long launch_epoch) {
+    if (gridDim.x > 1) {
+        dsv4MegaGridBarrier(grid_sync_base, grid_barrier_base, launch_epoch);
+    } else {
+        __syncthreads();
+    }
+    if (blockIdx.x == 0) {
+        __threadfence_system();
+        __syncthreads();
+        dsv4MegaInlineSignalPadBarrier(signal_pads, cp_rank, cp_size, barrier_channel);
+    }
+    if (gridDim.x > 1) {
+        dsv4MegaGridBarrier(grid_sync_base, grid_barrier_base + 1, launch_epoch);
+    } else {
+        __syncthreads();
+    }
 }
 
 __device__ __forceinline__ unsigned long long*
@@ -4122,9 +4103,9 @@ __device__ __noinline__ void dsv4MegaWriteSwaCachePhase(const MegaSwaWriterArgs&
         if (blockIdx.x == 0) {
             __threadfence_system();
             __syncthreads();
-            dsv4MegaInlineSignalPadBarrier(symm_signal_pads, cp_rank, cp_size, barrier_channel, launch_epoch);
+            dsv4MegaInlineSignalPadBarrier(symm_signal_pads, cp_rank, cp_size, barrier_channel);
         }
-	        dsv4MegaGridBarrier(grid_sync_base, grid_barrier_base + 1, launch_epoch);
+        dsv4MegaGridBarrier(grid_sync_base, grid_barrier_base + 1, launch_epoch);
 	    } else {
 	        dsv4MegaStageBytes(args.k,
 	                           payload_bytes,
@@ -4259,7 +4240,7 @@ __device__ __noinline__ void dsv4MegaRunCompressorBf16Phase(const MegaCompressor
             if (blockIdx.x == 0) {
                 __threadfence_system();
                 __syncthreads();
-                dsv4MegaInlineSignalPadBarrier(symm_signal_pads, cp_rank, cp_size, barrier_channel, launch_epoch);
+                dsv4MegaInlineSignalPadBarrier(symm_signal_pads, cp_rank, cp_size, barrier_channel);
             }
             dsv4MegaGridBarrier(grid_sync_base, grid_barrier_base + 1, launch_epoch);
         } else {
@@ -5720,135 +5701,142 @@ __global__ __launch_bounds__(kMegaBlockThreads, 1) void dsv4CpDistributedPrefill
                 }
                 asm("trap;");
             }
-		    extern __shared__ unsigned char mega_dynamic_smem[];
-		    uint8_t* local_scratch_base = nullptr;
-		    if (symm_buffer_ptrs != nullptr && symm_per_rank_buffer_bytes > symm_scratch_payload_offset) {
-		        local_scratch_base = const_cast<uint8_t*>(symm_buffer_ptrs[cp_rank])
-		                             + static_cast<int64_t>(cp_rank) * symm_per_rank_buffer_bytes
-		                             + symm_scratch_payload_offset;
-		    }
-			    const int grid_parallel_side_effects =
-			        enable_grid_side_effects && local_scratch_base != nullptr && gridDim.x > 1;
-			    const int64_t grid_sync_bytes = grid_parallel_side_effects ? kMegaGridSyncBytes : 0;
-			    const int64_t swa_scratch_payload_offset = symm_scratch_payload_offset + grid_sync_bytes;
-			    const int64_t csa_compressor_scratch_payload_offset =
-			        alignUpInt64(swa_scratch_payload_offset
-			                         + static_cast<int64_t>(swa_writer.local_rows) * kSwaHeadDim
-			                               * static_cast<int64_t>(sizeof(c10::BFloat16)),
-			                     kMegaPayloadAlignBytes);
-			    const int64_t main_compressor_scratch_payload_offset =
-			        alignUpInt64(csa_compressor_scratch_payload_offset + csa_indexer_compressor_writer.kv_bytes
-			                         + csa_indexer_compressor_writer.score_bytes,
-			                     kMegaPayloadAlignBytes);
-				    const int64_t compressed_index_scratch_payload_offset =
-				        alignUpInt64(main_compressor_scratch_payload_offset + main_compressor_writer.kv_bytes
-				                         + main_compressor_writer.score_bytes,
-				                     kMegaPayloadAlignBytes);
-				    if (grid_parallel_side_effects || blockIdx.x == 0) {
-				        dsv4MegaWriteSwaCachePhase(swa_writer,
-				                                   symm_buffer_ptrs,
-			                                   symm_per_rank_buffer_bytes,
-			                                   swa_scratch_payload_offset,
-			                                   cp_rank,
-			                                   cp_size,
-			                                   symm_signal_pads,
-		                                   2,
-			                                   grid_parallel_side_effects,
-			                                   local_scratch_base,
-			                                   launch_epoch,
-			                                   0);
-			        dsv4MegaRunCompressorBf16Phase(csa_indexer_compressor_writer,
-			                                       symm_buffer_ptrs,
-			                                       symm_per_rank_buffer_bytes,
-			                                       csa_compressor_scratch_payload_offset,
-			                                       cp_rank,
-			                                       cp_size,
-			                                       symm_signal_pads,
-		                                       3,
-		                                       grid_parallel_side_effects,
-		                                       local_scratch_base,
-		                                       launch_epoch,
-		                                       2);
-			        dsv4MegaRunCompressorBf16Phase(main_compressor_writer,
-			                                       symm_buffer_ptrs,
-			                                       symm_per_rank_buffer_bytes,
-			                                       main_compressor_scratch_payload_offset,
-			                                       cp_rank,
-			                                       cp_size,
-			                                       symm_signal_pads,
-			                                       5,
-			                                       grid_parallel_side_effects,
-			                                       local_scratch_base,
-			                                       launch_epoch,
-			                                       7);
-		        if (use_symm_direct_fresh) {
-		            const int64_t payload_bytes = static_cast<int64_t>(symm_l_local) * KH * D * sizeof(scalar_t);
-		            if (grid_parallel_side_effects) {
-		                dsv4MegaStageBytesParallel(kv,
-		                                           payload_bytes,
-		                                           symm_buffer_ptrs,
-		                                           symm_per_rank_buffer_bytes,
-		                                           symm_fresh_payload_offset,
-		                                           cp_rank);
-			                dsv4MegaGridBarrier(local_scratch_base, 12, launch_epoch);
-			                if (blockIdx.x == 0) {
-			                    __threadfence_system();
-			                    __syncthreads();
-			                    dsv4MegaInlineSignalPadBarrier(symm_signal_pads, cp_rank, cp_size, 0, launch_epoch);
-			                }
-			                dsv4MegaGridBarrier(local_scratch_base, 13, launch_epoch);
-		            } else {
-		                dsv4MegaStageBytes(kv,
-		                                   payload_bytes,
-		                                   symm_buffer_ptrs,
-		                                   symm_per_rank_buffer_bytes,
-		                                   symm_fresh_payload_offset,
-		                                   cp_rank,
-		                                   cp_size,
-		                                   symm_signal_pads,
-		                                   0);
-		            }
-		        }
-		        if (use_symm_direct_indexer) {
-		            const int64_t indexer_payload_bytes =
-		                static_cast<int64_t>(indexer_batch) * symm_indexer_l_local * IH * ID * sizeof(scalar_t);
-		            if (grid_parallel_side_effects) {
-		                dsv4MegaStageBytesParallel(indexer_k,
-		                                           indexer_payload_bytes,
-		                                           symm_buffer_ptrs,
-		                                           symm_per_rank_buffer_bytes,
-		                                           symm_indexer_payload_offset,
-		                                           cp_rank);
-			                dsv4MegaGridBarrier(local_scratch_base, 14, launch_epoch);
-			                if (blockIdx.x == 0) {
-			                    __threadfence_system();
-			                    __syncthreads();
-			                    dsv4MegaInlineSignalPadBarrier(symm_signal_pads, cp_rank, cp_size, 1, launch_epoch);
-			                }
-			                dsv4MegaGridBarrier(local_scratch_base, 15, launch_epoch);
-		            } else {
-		                dsv4MegaStageBytes(indexer_k,
-		                                   indexer_payload_bytes,
-		                                   symm_buffer_ptrs,
-		                                   symm_per_rank_buffer_bytes,
-		                                   symm_indexer_payload_offset,
-		                                   cp_rank,
-		                                   cp_size,
-		                                   symm_signal_pads,
-		                                   1);
-		            }
-			        }
-			        if (grid_parallel_side_effects) {
-			            dsv4MegaGridBarrier(local_scratch_base, 16, launch_epoch);
-			        }
-			        if (blockIdx.x == 0) {
-			            dsv4MegaPublishLocalPhase(symm_buffer_ptrs, symm_per_rank_buffer_bytes, cp_rank, launch_epoch);
-			        }
-			    }
-			    if (grid_parallel_side_effects) {
-			        dsv4MegaGridBarrier(local_scratch_base, 17, launch_epoch);
-			    }
-		    dsv4MegaWaitLocalPhase(symm_buffer_ptrs, symm_per_rank_buffer_bytes, cp_rank, launch_epoch);
+    extern __shared__ unsigned char mega_dynamic_smem[];
+    uint8_t* local_scratch_base = nullptr;
+    if (symm_buffer_ptrs != nullptr && symm_per_rank_buffer_bytes > symm_scratch_payload_offset) {
+        local_scratch_base = const_cast<uint8_t*>(symm_buffer_ptrs[cp_rank])
+                             + static_cast<int64_t>(cp_rank) * symm_per_rank_buffer_bytes
+                             + symm_scratch_payload_offset;
+    }
+    const int grid_parallel_side_effects =
+        enable_grid_side_effects && local_scratch_base != nullptr && gridDim.x > 1;
+    const int64_t grid_sync_bytes = grid_parallel_side_effects ? kMegaGridSyncBytes : 0;
+    const int64_t swa_scratch_payload_offset = symm_scratch_payload_offset + grid_sync_bytes;
+    const int64_t csa_compressor_scratch_payload_offset =
+        alignUpInt64(swa_scratch_payload_offset
+                         + static_cast<int64_t>(swa_writer.local_rows) * kSwaHeadDim
+                               * static_cast<int64_t>(sizeof(c10::BFloat16)),
+                     kMegaPayloadAlignBytes);
+    const int64_t main_compressor_scratch_payload_offset =
+        alignUpInt64(csa_compressor_scratch_payload_offset + csa_indexer_compressor_writer.kv_bytes
+                         + csa_indexer_compressor_writer.score_bytes,
+                     kMegaPayloadAlignBytes);
+    const int64_t compressed_index_scratch_payload_offset =
+        alignUpInt64(main_compressor_scratch_payload_offset + main_compressor_writer.kv_bytes
+                         + main_compressor_writer.score_bytes,
+                     kMegaPayloadAlignBytes);
+
+    if (grid_parallel_side_effects || blockIdx.x == 0) {
+        dsv4MegaWriteSwaCachePhase(swa_writer,
+                                   symm_buffer_ptrs,
+                                   symm_per_rank_buffer_bytes,
+                                   swa_scratch_payload_offset,
+                                   cp_rank,
+                                   cp_size,
+                                   symm_signal_pads,
+                                   2,
+                                   grid_parallel_side_effects,
+                                   local_scratch_base,
+                                   launch_epoch,
+                                   0);
+        dsv4MegaRunCompressorBf16Phase(csa_indexer_compressor_writer,
+                                       symm_buffer_ptrs,
+                                       symm_per_rank_buffer_bytes,
+                                       csa_compressor_scratch_payload_offset,
+                                       cp_rank,
+                                       cp_size,
+                                       symm_signal_pads,
+                                       3,
+                                       grid_parallel_side_effects,
+                                       local_scratch_base,
+                                       launch_epoch,
+                                       2);
+        dsv4MegaRunCompressorBf16Phase(main_compressor_writer,
+                                       symm_buffer_ptrs,
+                                       symm_per_rank_buffer_bytes,
+                                       main_compressor_scratch_payload_offset,
+                                       cp_rank,
+                                       cp_size,
+                                       symm_signal_pads,
+                                       5,
+                                       grid_parallel_side_effects,
+                                       local_scratch_base,
+                                       launch_epoch,
+                                       7);
+        if (use_symm_direct_fresh) {
+            const int64_t payload_bytes = static_cast<int64_t>(symm_l_local) * KH * D * sizeof(scalar_t);
+            if (grid_parallel_side_effects) {
+                dsv4MegaStageBytesParallel(kv,
+                                           payload_bytes,
+                                           symm_buffer_ptrs,
+                                           symm_per_rank_buffer_bytes,
+                                           symm_fresh_payload_offset,
+                                           cp_rank);
+                dsv4MegaGridBarrier(local_scratch_base, 12, launch_epoch);
+                if (blockIdx.x == 0) {
+                    __threadfence_system();
+                    __syncthreads();
+                    dsv4MegaInlineSignalPadBarrier(symm_signal_pads, cp_rank, cp_size, 0);
+                }
+                dsv4MegaGridBarrier(local_scratch_base, 13, launch_epoch);
+            } else {
+                dsv4MegaStageBytes(kv,
+                                   payload_bytes,
+                                   symm_buffer_ptrs,
+                                   symm_per_rank_buffer_bytes,
+                                   symm_fresh_payload_offset,
+                                   cp_rank,
+                                   cp_size,
+                                   symm_signal_pads,
+                                   0);
+            }
+        }
+        if (use_symm_direct_indexer) {
+            const int64_t indexer_payload_bytes =
+                static_cast<int64_t>(indexer_batch) * symm_indexer_l_local * IH * ID * sizeof(scalar_t);
+            if (grid_parallel_side_effects) {
+                dsv4MegaStageBytesParallel(indexer_k,
+                                           indexer_payload_bytes,
+                                           symm_buffer_ptrs,
+                                           symm_per_rank_buffer_bytes,
+                                           symm_indexer_payload_offset,
+                                           cp_rank);
+                dsv4MegaGridBarrier(local_scratch_base, 14, launch_epoch);
+                if (blockIdx.x == 0) {
+                    __threadfence_system();
+                    __syncthreads();
+                    dsv4MegaInlineSignalPadBarrier(symm_signal_pads, cp_rank, cp_size, 1);
+                }
+                dsv4MegaGridBarrier(local_scratch_base, 15, launch_epoch);
+            } else {
+                dsv4MegaStageBytes(indexer_k,
+                                   indexer_payload_bytes,
+                                   symm_buffer_ptrs,
+                                   symm_per_rank_buffer_bytes,
+                                   symm_indexer_payload_offset,
+                                   cp_rank,
+                                   cp_size,
+                                   symm_signal_pads,
+                                   1);
+            }
+        }
+        if (grid_parallel_side_effects) {
+            dsv4MegaGridBarrier(local_scratch_base, 16, launch_epoch);
+        }
+        if (blockIdx.x == 0) {
+            dsv4MegaPublishLocalPhase(symm_buffer_ptrs, symm_per_rank_buffer_bytes, cp_rank, launch_epoch);
+        }
+    }
+    if (grid_parallel_side_effects) {
+        dsv4MegaResidentGridCpBarrier(local_scratch_base,
+                                      21,
+                                      symm_signal_pads,
+                                      cp_rank,
+                                      cp_size,
+                                      kMegaSideEffectReleaseChannel,
+                                      launch_epoch);
+    }
+    dsv4MegaWaitLocalPhase(symm_buffer_ptrs, symm_per_rank_buffer_bytes, cp_rank, launch_epoch);
 
     __shared__ int   compressed_indices[kMaxCompressedTopK];
     __shared__ int   reduce_indices[kMegaBlockThreads];
@@ -6126,6 +6114,15 @@ __global__ __launch_bounds__(kMegaBlockThreads, 1) void dsv4CpDistributedPrefill
                 }
             }
             dsv4MegaSplitKGroupBarrier(splitk_group_sync_base, physical_group, physical_group_count, 3, launch_epoch);
+        }
+        if (grid_parallel_side_effects) {
+            dsv4MegaResidentGridCpBarrier(local_scratch_base,
+                                          19,
+                                          symm_signal_pads,
+                                          cp_rank,
+                                          cp_size,
+                                          kMegaKernelDoneChannel,
+                                          launch_epoch);
         }
         return;
     }
@@ -6539,6 +6536,15 @@ __global__ __launch_bounds__(kMegaBlockThreads, 1) void dsv4CpDistributedPrefill
 	    }
 #undef DSV4_MEGA_CONSUME_TILE
 	    }
+        if (grid_parallel_side_effects) {
+            dsv4MegaResidentGridCpBarrier(local_scratch_base,
+                                          19,
+                                          symm_signal_pads,
+                                          cp_rank,
+                                          cp_size,
+                                          kMegaKernelDoneChannel,
+                                          launch_epoch);
+        }
 	}
 
 template<typename scalar_t>
