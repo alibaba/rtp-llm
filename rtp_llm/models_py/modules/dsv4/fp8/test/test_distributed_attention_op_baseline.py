@@ -2768,6 +2768,86 @@ class DistributedAttentionCandidateTest(unittest.TestCase):
             restored.index_copy_(0, rows, actual)
         _assert_attention_close(restored, expected)
 
+    def test_candidate_cuda_hca_grouped_mqa_packed_compressed_k_allclose(self) -> None:
+        if not torch.cuda.is_available():
+            self.skipTest("candidate distributed attention op requires CUDA")
+        op = _candidate_op()
+        if op is None:
+            self.skipTest(
+                "rtp_llm_ops.dsv4_cp_distributed_prefill_attention is not built yet"
+            )
+        case = AttentionCase(
+            name="hca_grouped_mqa_packed_cmp_attention",
+            compress_ratio=128,
+            prefix_lengths=(128,),
+            input_lengths=(1,),
+            window_size=1,
+            compressed_topk=1,
+            n_heads=128,
+            head_dim=SWA_HEAD_DIM,
+            index_heads=1,
+            index_dim=1,
+        )
+        fixture = _make_case_fixture(case, torch.device("cuda"), dtype=torch.bfloat16)
+        fixture.kv_by_req[0][127].zero_()
+        mqa_kv = fixture.kv_by_req[0][:, :1, :].contiguous()
+        fixture.kv_by_req = [
+            mqa_kv.expand(-1, case.n_heads, -1).contiguous()
+        ]
+        gen = torch.Generator(device="cpu")
+        gen.manual_seed(20260721)
+        cmp_k = (
+            torch.randn(1, case.head_dim, generator=gen, dtype=torch.float32) * 0.2
+            + 0.35
+        ).to(fixture.q.device)
+        cmp_cache = _pack_flat_model1_cache(cmp_k)
+        cmp_cu_lens = torch.tensor([0, 1], dtype=torch.long, device=fixture.q.device)
+        expected = reference_attention_with_packed_cmp_cache(
+            fixture,
+            cmp_cache,
+            cmp_cu_lens,
+        )
+        kv = mqa_kv.view(1, mqa_kv.shape[0], 1, case.head_dim)
+        indexer_k = torch.zeros(
+            1,
+            1,
+            case.index_heads,
+            case.index_dim,
+            dtype=fixture.q.dtype,
+            device=fixture.q.device,
+        )
+        prefix_lengths = torch.tensor(
+            case.prefix_lengths, dtype=torch.long, device=fixture.q.device
+        )
+        input_lengths = torch.tensor(
+            case.input_lengths, dtype=torch.long, device=fixture.q.device
+        )
+        restored = torch.empty_like(expected)
+        for rank in range(case.cp_size):
+            rows = rank_local_rows(expected.shape[0], rank, case.cp_size).to(
+                device=fixture.q.device
+            )
+            actual = op(
+                fixture.q.contiguous(),
+                kv.contiguous(),
+                fixture.indexer_q.contiguous(),
+                indexer_k.contiguous(),
+                fixture.attn_sink.contiguous(),
+                fixture.req_id_per_token.contiguous(),
+                fixture.position_ids.contiguous(),
+                prefix_lengths,
+                input_lengths,
+                rows,
+                case.compress_ratio,
+                case.window_size,
+                case.compressed_topk,
+                attention_cmp_k_cache=cmp_cache,
+                attention_cmp_cu_lens=cmp_cu_lens,
+            )
+            _assert_attention_close(actual, expected.index_select(0, rows))
+            restored.index_copy_(0, rows, actual)
+        _assert_attention_close(restored, expected)
+
     def test_candidate_cuda_hca_paged_compressed_k_attention_allclose(self) -> None:
         if not torch.cuda.is_available():
             self.skipTest("candidate distributed attention op requires CUDA")

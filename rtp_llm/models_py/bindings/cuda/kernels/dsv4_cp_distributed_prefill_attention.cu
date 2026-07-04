@@ -949,6 +949,10 @@ __device__ __forceinline__ float bf16_bits_to_float(uint16_t bits) {
     return __bfloat162float(bf);
 }
 
+__device__ __forceinline__ float dsv4MegaUe8m0Scale(uint8_t scale_byte) {
+    return ldexpf(1.0f, static_cast<int>(scale_byte) - 127);
+}
+
 template<typename scalar_t>
 __device__ __forceinline__ float symm_fresh_kv_at(const uint8_t* const* __restrict__ buffer_ptrs,
                                                   int64_t per_rank_buffer_bytes,
@@ -1010,7 +1014,7 @@ __device__ __forceinline__ float model1_cache_at(const uint8_t* cache,
     const uint8_t* row = cache + row_idx * kSwaEntryBytes;
     if (d < kSwaNopeDim) {
         const uint8_t encoded = row[kSwaTokenDataBytes + d / kSwaQuantBlock];
-        const float scale = exp2f(static_cast<float>(encoded) - 127.0f);
+        const float scale = dsv4MegaUe8m0Scale(encoded);
         return fp8_e4m3_to_float(row[d], scale);
     }
     const int rope_d = d - kSwaNopeDim;
@@ -1037,7 +1041,7 @@ __device__ __forceinline__ float model1_pool_slot_at(const uint8_t* pool,
                                  + pos_in_block * kSwaScaleBytes;
     if (d < kSwaNopeDim) {
         const uint8_t encoded = token_scale[d / kSwaQuantBlock];
-        const float scale = exp2f(static_cast<float>(encoded) - 127.0f);
+        const float scale = dsv4MegaUe8m0Scale(encoded);
         return fp8_e4m3_to_float(token_data[d], scale);
     }
     const int rope_d = d - kSwaNopeDim;
@@ -1335,7 +1339,7 @@ __device__ __forceinline__ void dsv4MegaLoadAttentionKeyTile(const scalar_t* __r
             const int scale_i = scale_idx - key_i * nope_groups;
             const uint8_t* scale_ptr = packed_scale_rows[key_i];
             packed_scales[key_i * kSwaScaleBytes + scale_i] =
-                scale_ptr == nullptr ? 1.0f : exp2f(static_cast<float>(scale_ptr[scale_i]) - 127.0f);
+                scale_ptr == nullptr ? 1.0f : dsv4MegaUe8m0Scale(scale_ptr[scale_i]);
         }
     }
     __syncthreads();
