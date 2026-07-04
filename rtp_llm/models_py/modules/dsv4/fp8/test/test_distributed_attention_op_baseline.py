@@ -4184,7 +4184,7 @@ class DistributedAttentionTorchrunCandidateTest(unittest.TestCase):
         _assert_attention_close(actual, expected.index_select(0, rows))
 
     def _run_hca_grouped_mqa_long_key_case(
-        self, *, splitk_env_value: Optional[str]
+        self, *, splitk_env_value: Optional[str], auto_min_keys_env_value: Optional[str] = None
     ) -> None:
         op = _candidate_op()
         self.assertIsNotNone(op)
@@ -4246,10 +4246,16 @@ class DistributedAttentionTorchrunCandidateTest(unittest.TestCase):
         )
         env_name = "DSV4_CP_ATTENTION_MEGA_SPLITK"
         old_value = os.environ.get(env_name)
+        auto_env_name = "DSV4_CP_ATTENTION_MEGA_SPLITK_AUTO_MIN_KEYS_HCA"
+        old_auto_value = os.environ.get(auto_env_name)
         if splitk_env_value is None:
             os.environ.pop(env_name, None)
         else:
             os.environ[env_name] = splitk_env_value
+        if auto_min_keys_env_value is None:
+            os.environ.pop(auto_env_name, None)
+        else:
+            os.environ[auto_env_name] = auto_min_keys_env_value
         try:
             actual = op(
                 fixture.q.contiguous(),
@@ -4272,6 +4278,10 @@ class DistributedAttentionTorchrunCandidateTest(unittest.TestCase):
                 os.environ.pop(env_name, None)
             else:
                 os.environ[env_name] = old_value
+            if old_auto_value is None:
+                os.environ.pop(auto_env_name, None)
+            else:
+                os.environ[auto_env_name] = old_auto_value
         _assert_attention_close(actual, expected.index_select(0, rows))
 
     def test_torchrun_symm_mem_splitk_hca_grouped_mqa_allclose(self) -> None:
@@ -4280,7 +4290,10 @@ class DistributedAttentionTorchrunCandidateTest(unittest.TestCase):
 
     def test_torchrun_symm_mem_auto_long_hca_grouped_mqa_allclose(self) -> None:
         """Default long-key grouped MQA path remains correct without forced split-K."""
-        self._run_hca_grouped_mqa_long_key_case(splitk_env_value=None)
+        self._run_hca_grouped_mqa_long_key_case(
+            splitk_env_value=None,
+            auto_min_keys_env_value="512",
+        )
 
     def _run_csa_grouped_mqa_case(
         self,
@@ -4289,6 +4302,7 @@ class DistributedAttentionTorchrunCandidateTest(unittest.TestCase):
         compressed_topk: int,
         splitk_env_value: Optional[str],
         scratch_bytes_per_rank: int,
+        auto_min_keys_env_value: Optional[str] = None,
     ) -> None:
         op = _candidate_op()
         self.assertIsNotNone(op)
@@ -4347,10 +4361,16 @@ class DistributedAttentionTorchrunCandidateTest(unittest.TestCase):
         )
         env_name = "DSV4_CP_ATTENTION_MEGA_SPLITK"
         old_value = os.environ.get(env_name)
+        auto_env_name = "DSV4_CP_ATTENTION_MEGA_SPLITK_AUTO_MIN_KEYS_CSA"
+        old_auto_value = os.environ.get(auto_env_name)
         if splitk_env_value is None:
             os.environ.pop(env_name, None)
         else:
             os.environ[env_name] = splitk_env_value
+        if auto_min_keys_env_value is None:
+            os.environ.pop(auto_env_name, None)
+        else:
+            os.environ[auto_env_name] = auto_min_keys_env_value
         try:
             actual = op(
                 fixture.q.contiguous(),
@@ -4373,6 +4393,10 @@ class DistributedAttentionTorchrunCandidateTest(unittest.TestCase):
                 os.environ.pop(env_name, None)
             else:
                 os.environ[env_name] = old_value
+            if old_auto_value is None:
+                os.environ.pop(auto_env_name, None)
+            else:
+                os.environ[auto_env_name] = old_auto_value
         _assert_attention_close(actual, expected.index_select(0, rows))
 
     def test_torchrun_symm_mem_splitk_csa_grouped_mqa_allclose(self) -> None:
@@ -4390,6 +4414,7 @@ class DistributedAttentionTorchrunCandidateTest(unittest.TestCase):
             window_size=507,
             compressed_topk=5,
             splitk_env_value=None,
+            auto_min_keys_env_value="512",
             scratch_bytes_per_rank=16 * 1024 * 1024,
         )
 

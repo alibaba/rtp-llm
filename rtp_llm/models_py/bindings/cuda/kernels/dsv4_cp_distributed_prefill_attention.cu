@@ -20,6 +20,7 @@
 #include <cstring>
 #include <optional>
 #include <atomic>
+#include <limits>
 #include <vector>
 
 namespace torch_ext {
@@ -160,6 +161,28 @@ bool dsv4CpAttentionMegaSplitKDisabled() {
 bool dsv4CpAttentionMegaCsaScorePrebuildEnabled() {
     const char* raw = std::getenv("DSV4_CP_ATTENTION_MEGA_CSA_SCORE_PREBUILD");
     return raw == nullptr || raw[0] == '\0' || raw[0] != '0';
+}
+
+int dsv4CpAttentionMegaSplitKAutoMinKeys(int compress_ratio) {
+    const char* ratio_env = nullptr;
+    if (compress_ratio == 128) {
+        ratio_env = "DSV4_CP_ATTENTION_MEGA_SPLITK_AUTO_MIN_KEYS_HCA";
+    } else if (compress_ratio == 4) {
+        ratio_env = "DSV4_CP_ATTENTION_MEGA_SPLITK_AUTO_MIN_KEYS_CSA";
+    }
+    const char* raw = ratio_env == nullptr ? nullptr : std::getenv(ratio_env);
+    if (raw == nullptr || raw[0] == '\0') {
+        raw = std::getenv("DSV4_CP_ATTENTION_MEGA_SPLITK_AUTO_MIN_KEYS");
+    }
+    if (raw == nullptr || raw[0] == '\0') {
+        return kMegaSplitKAutoMinKeys;
+    }
+    char* end = nullptr;
+    const long value = std::strtol(raw, &end, 10);
+    if (end == raw || *end != '\0' || value <= 0) {
+        return kMegaSplitKAutoMinKeys;
+    }
+    return static_cast<int>(std::min<long>(value, std::numeric_limits<int>::max()));
 }
 
 int dsv4CpAttentionMegaReturnAfterStageCode() {
@@ -8520,6 +8543,7 @@ torch::Tensor launchDsv4CpDistributedPrefillAttention(const torch::Tensor& q,
         && (H % kMegaAttentionHeadsPerCta) == 0 && static_cast<int>(block.x) == kMegaBlockThreads;
     const int splitk_max_keys = static_cast<int>(std::max<int64_t>(
         1, static_cast<int64_t>(compressed_topk) + static_cast<int64_t>(window_size)));
+    const int splitk_auto_min_keys = dsv4CpAttentionMegaSplitKAutoMinKeys(static_cast<int>(compress_ratio));
     const bool splitk_supported_ratio =
         compress_ratio == 0 || compress_ratio == 4 || compress_ratio == 128;
     if (split_k_explicitly_enabled && !split_k_explicitly_disabled) {
@@ -8535,7 +8559,7 @@ torch::Tensor launchDsv4CpDistributedPrefillAttention(const torch::Tensor& q,
         && splitk_supported_ratio
         && (split_k_explicitly_enabled
             || (use_symm_backend && enable_grid_side_effects && host_use_grouped_attention
-                && splitk_max_keys >= kMegaSplitKAutoMinKeys)) ?
+                && splitk_max_keys >= splitk_auto_min_keys)) ?
             1 :
             0;
     const int enable_split_k_attention =
