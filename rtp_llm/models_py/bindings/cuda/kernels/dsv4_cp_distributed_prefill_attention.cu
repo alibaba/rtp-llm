@@ -2629,6 +2629,10 @@ __device__ __forceinline__ int dsv4MegaBuildCompressedIndicesForRow(const scalar
                                                    reduce_buf);
                     if (tid == 0) {
                         int sorted_tile_count = tile_valid_count;
+                        int replacements = 0;
+                        int replaced_slot = -1;
+                        float replaced_score = kInvalidCompressorScore;
+                        int replaced_idx = -2147483647;
                         if (sorted_tile_count == 1) {
                             const int worst_slot = reduce_indices[0];
                             const int tile_i = reduce_indices_second[0];
@@ -2641,6 +2645,10 @@ __device__ __forceinline__ int dsv4MegaBuildCompressedIndicesForRow(const scalar
                                                       scratch_indices[worst_slot])) {
                                 scratch_indices[worst_slot] = best_idx;
                                 scratch_scores[worst_slot] = best_score;
+                                replacements = 1;
+                                replaced_slot = worst_slot;
+                                replaced_score = best_score;
+                                replaced_idx = best_idx;
                             }
                         } else {
 #pragma unroll
@@ -2687,12 +2695,38 @@ __device__ __forceinline__ int dsv4MegaBuildCompressedIndicesForRow(const scalar
                                 }
                                 scratch_indices[worst_slot] = best_idx;
                                 scratch_scores[worst_slot] = best_score;
+                                ++replacements;
+                                replaced_slot = worst_slot;
+                                replaced_score = best_score;
+                                replaced_idx = best_idx;
                             }
                         }
-                        reduce_indices[0] = 1;
+                        bool needs_refresh = replacements > 0;
+                        if (replacements == 1 && replaced_slot == cached_worst_slot
+                            && (cached_second_worst_slot < 0
+                                || !dsv4MegaTopKBetter(replaced_score,
+                                                       replaced_idx,
+                                                       cached_second_worst_score,
+                                                       cached_second_worst_idx))) {
+                            cached_worst_score = replaced_score;
+                            cached_worst_idx = replaced_idx;
+                            needs_refresh = false;
+                        }
+                        reduce_indices[0] = needs_refresh ? 1 : 0;
+                        reduce_indices[1] = cached_worst_slot;
+                        reduce_indices[2] = cached_second_worst_slot;
+                        reduce_buf[0] = cached_worst_score;
+                        reduce_buf[1] = cached_second_worst_score;
                     }
                     __syncthreads();
                     refresh_worst_slot = reduce_indices[0] != 0;
+                    cached_worst_slot = reduce_indices[1];
+                    cached_second_worst_slot = reduce_indices[2];
+                    cached_worst_score = reduce_buf[0];
+                    cached_second_worst_score = reduce_buf[1];
+                    cached_worst_idx = cached_worst_slot >= 0 ? scratch_indices[cached_worst_slot] : -2147483647;
+                    cached_second_worst_idx =
+                        cached_second_worst_slot >= 0 ? scratch_indices[cached_second_worst_slot] : -2147483647;
                     c += candidate_count;
                     continue;
                 }
@@ -3020,7 +3054,9 @@ __device__ __forceinline__ int dsv4MegaBuildCompressedIndicesFromScores(const in
         int cached_worst_slot = -1;
         int cached_second_worst_slot = -1;
         float cached_worst_score = 3.4028234663852886e38F;
+        float cached_second_worst_score = 3.4028234663852886e38F;
         int cached_worst_idx = -2147483647;
+        int cached_second_worst_idx = -2147483647;
         bool refresh_worst_slot = true;
         for (int c = k_eff; c < valid; c += kMegaIndexerCandidateTile) {
             if (refresh_worst_slot) {
@@ -3035,6 +3071,11 @@ __device__ __forceinline__ int dsv4MegaBuildCompressedIndicesFromScores(const in
                 cached_worst_score =
                     cached_worst_slot >= 0 ? scratch_scores[cached_worst_slot] : 3.4028234663852886e38F;
                 cached_worst_idx = cached_worst_slot >= 0 ? scratch_indices[cached_worst_slot] : -2147483647;
+                cached_second_worst_score =
+                    cached_second_worst_slot >= 0 ? scratch_scores[cached_second_worst_slot] :
+                                                    3.4028234663852886e38F;
+                cached_second_worst_idx =
+                    cached_second_worst_slot >= 0 ? scratch_indices[cached_second_worst_slot] : -2147483647;
                 refresh_worst_slot = false;
             }
             int tile_valid_count = min_int(kMegaIndexerCandidateTile, valid - c);
@@ -3072,6 +3113,10 @@ __device__ __forceinline__ int dsv4MegaBuildCompressedIndicesFromScores(const in
                                            reduce_buf);
             if (tid == 0) {
                 int sorted_tile_count = tile_valid_count;
+                int replacements = 0;
+                int replaced_slot = -1;
+                float replaced_score = kInvalidCompressorScore;
+                int replaced_idx = -2147483647;
 #pragma unroll
                 for (int sort_i = 1; sort_i < kMegaIndexerCandidateTile; ++sort_i) {
                     if (sort_i < sorted_tile_count) {
@@ -3116,11 +3161,37 @@ __device__ __forceinline__ int dsv4MegaBuildCompressedIndicesFromScores(const in
                     }
                     scratch_indices[worst_slot] = best_idx;
                     scratch_scores[worst_slot] = best_score;
+                    ++replacements;
+                    replaced_slot = worst_slot;
+                    replaced_score = best_score;
+                    replaced_idx = best_idx;
                 }
-                reduce_indices[0] = 1;
+                bool needs_refresh = replacements > 0;
+                if (replacements == 1 && replaced_slot == cached_worst_slot
+                    && (cached_second_worst_slot < 0
+                        || !dsv4MegaTopKBetter(replaced_score,
+                                               replaced_idx,
+                                               cached_second_worst_score,
+                                               cached_second_worst_idx))) {
+                    cached_worst_score = replaced_score;
+                    cached_worst_idx = replaced_idx;
+                    needs_refresh = false;
+                }
+                reduce_indices[0] = needs_refresh ? 1 : 0;
+                reduce_indices[1] = cached_worst_slot;
+                reduce_indices[2] = cached_second_worst_slot;
+                reduce_buf[0] = cached_worst_score;
+                reduce_buf[1] = cached_second_worst_score;
             }
             __syncthreads();
             refresh_worst_slot = reduce_indices[0] != 0;
+            cached_worst_slot = reduce_indices[1];
+            cached_second_worst_slot = reduce_indices[2];
+            cached_worst_score = reduce_buf[0];
+            cached_second_worst_score = reduce_buf[1];
+            cached_worst_idx = cached_worst_slot >= 0 ? scratch_indices[cached_worst_slot] : -2147483647;
+            cached_second_worst_idx =
+                cached_second_worst_slot >= 0 ? scratch_indices[cached_second_worst_slot] : -2147483647;
         }
     }
     if (row_compressed_indices_base != nullptr) {
