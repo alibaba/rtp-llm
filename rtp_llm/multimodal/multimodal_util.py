@@ -304,7 +304,14 @@ def trans_mm_input(multimodal_inputs):
         ]
     # not sep
     elif isinstance(multimodal_inputs, list):
-        if not all(isinstance(mm_input, MultimodalInput) for mm_input in multimodal_inputs):
+        # Accept both the local Python MultimodalInput and the C++ binding
+        # (rtp_llm.ops.MultimodalInput): callers such as mm_process_engine pass
+        # the C++ type, which shares the url/mm_type/tensor/mm_preprocess_config
+        # attributes used below. Checking only the local class wrongly rejected it.
+        if not all(
+            isinstance(mm_input, (MultimodalInput, _CppMultimodalInput))
+            for mm_input in multimodal_inputs
+        ):
             raise ValueError(
                 f"multimodal_inputs list must contain only MultimodalInput objects, "
                 f"got types {[type(x).__name__ for x in multimodal_inputs]}"
