@@ -1431,6 +1431,76 @@ class DistributedAttentionCandidateTest(unittest.TestCase):
         self.assertEqual(tuple(actual.shape), (T, H, D))
         self.assertTrue(torch.isfinite(actual.float()).all())
 
+    def test_candidate_cuda_csa_ncu_large_profile_fixture(self) -> None:
+        if os.environ.get("DSV4_DIST_ATTN_NCU_LARGE", "0") != "1":
+            self.skipTest("large profile fixture is enabled only for NCU runs")
+        if not torch.cuda.is_available():
+            self.skipTest("candidate distributed attention op requires CUDA")
+        op = _candidate_op()
+        if op is None:
+            self.skipTest(
+                "rtp_llm_ops.dsv4_cp_distributed_prefill_attention is not built yet"
+            )
+
+        device = torch.device("cuda")
+        gen = torch.Generator(device="cpu")
+        gen.manual_seed(20260720)
+        T, H, D = 512, 128, 512
+        index_heads, index_dim = 64, 128
+        compress_ratio = 4
+        compressed_topk = 128
+        window_size = 128
+        index_len = T // compress_ratio
+
+        q = torch.randn(T, H, D, generator=gen, dtype=torch.float32).to(
+            device=device, dtype=torch.bfloat16
+        )
+        kv = torch.randn(1, T, 1, D, generator=gen, dtype=torch.float32).to(
+            device=device, dtype=torch.bfloat16
+        )
+        indexer_q = torch.randn(
+            T, index_heads, index_dim, generator=gen, dtype=torch.float32
+        ).to(device=device, dtype=torch.bfloat16)
+        k_flat = torch.randn(index_len, index_dim, generator=gen, dtype=torch.float32).to(
+            device=device
+        )
+        slots = torch.arange(index_len, dtype=torch.long, device=device)
+        k_pool = _pack_paged_indexer_pool(k_flat, slots)
+        block_table = torch.arange(
+            (index_len + COMPRESSOR_KV_BLOCK_SIZE - 1) // COMPRESSOR_KV_BLOCK_SIZE,
+            dtype=torch.int32,
+            device=device,
+        ).view(1, -1)
+        weights = (
+            torch.randn(T, index_heads, generator=gen, dtype=torch.float32) * 0.2
+            + 1.0
+        ).to(device=device)
+        dummy_indexer_k = torch.empty(
+            1, 1, index_heads, index_dim, dtype=torch.bfloat16, device=device
+        )
+        actual = op(
+            q.contiguous(),
+            kv.contiguous(),
+            indexer_q.contiguous(),
+            dummy_indexer_k,
+            torch.zeros(H, dtype=torch.float32, device=device),
+            torch.zeros(T, dtype=torch.long, device=device),
+            torch.arange(T, dtype=torch.long, device=device),
+            torch.zeros(1, dtype=torch.long, device=device),
+            torch.tensor([T], dtype=torch.long, device=device),
+            torch.arange(T, dtype=torch.long, device=device),
+            compress_ratio,
+            window_size,
+            compressed_topk,
+            csa_indexer_k_pool=k_pool,
+            csa_indexer_weights=weights.contiguous(),
+            csa_indexer_block_table=block_table.contiguous(),
+            csa_indexer_seq_lens=torch.tensor([index_len], dtype=torch.int32, device=device),
+        )
+        torch.cuda.synchronize()
+        self.assertEqual(tuple(actual.shape), (T, H, D))
+        self.assertTrue(torch.isfinite(actual.float()).all())
+
     def test_candidate_cuda_csa_rank_local_allclose(self) -> None:
         self._run_candidate_case(
             AttentionCase(
