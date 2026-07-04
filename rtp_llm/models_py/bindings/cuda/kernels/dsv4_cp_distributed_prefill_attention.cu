@@ -1427,9 +1427,15 @@ __device__ __forceinline__ void dsv4MegaConsumeLoadedKeyTileGrouped(
         float key_scale = 0.0f;
         float new_denom = 0.0f;
         if (lane == 0) {
-            new_max = fmaxf(online_max, online_logit);
-            old_scale = expf(online_max - new_max);
-            key_scale = expf(online_logit - new_max);
+            if (online_logit > online_max) {
+                new_max = online_logit;
+                old_scale = expf(online_max - online_logit);
+                key_scale = 1.0f;
+            } else {
+                new_max = online_max;
+                old_scale = 1.0f;
+                key_scale = expf(online_logit - online_max);
+            }
             new_denom = online_denom * old_scale + key_scale;
         }
         new_max = __shfl_sync(0xffffffffu, new_max, 0);
@@ -7145,9 +7151,15 @@ __global__ __launch_bounds__(kMegaBlockThreads, 1) void dsv4CpDistributedPrefill
             float key_scale = 0.0f;                                                                                  \
             float new_denom = 0.0f;                                                                                  \
             if (lane_id == 0) {                                                                                      \
-                new_max = fmaxf(online_max, online_logit);                                                           \
-                old_scale = expf(online_max - new_max);                                                              \
-                key_scale = expf(online_logit - new_max);                                                            \
+                if (online_logit > online_max) {                                                                     \
+                    new_max = online_logit;                                                                          \
+                    old_scale = expf(online_max - online_logit);                                                     \
+                    key_scale = 1.0f;                                                                                \
+                } else {                                                                                             \
+                    new_max = online_max;                                                                            \
+                    old_scale = 1.0f;                                                                                \
+                    key_scale = expf(online_logit - online_max);                                                     \
+                }                                                                                                    \
                 new_denom = online_denom * old_scale + key_scale;                                                    \
             }                                                                                                        \
             new_max = __shfl_sync(0xffffffffu, new_max, 0);                                                         \
