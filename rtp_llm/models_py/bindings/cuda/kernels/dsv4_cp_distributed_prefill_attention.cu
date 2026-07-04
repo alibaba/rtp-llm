@@ -1273,12 +1273,15 @@ __device__ __forceinline__ void dsv4MegaLoadAttentionKeyTile(const scalar_t* __r
         packed_scale_rows[key_i] = scale_ptr;
     }
     __syncthreads();
-    for (int scale_idx = tid; scale_idx < key_count * kSwaScaleBytes; scale_idx += static_cast<int>(blockDim.x)) {
-        const int key_i = scale_idx / kSwaScaleBytes;
-        const int scale_i = scale_idx - key_i * kSwaScaleBytes;
-        const uint8_t* scale_ptr = packed_scale_rows[key_i];
-        packed_scales[scale_idx] =
-            scale_ptr == nullptr ? 1.0f : exp2f(static_cast<float>(scale_ptr[scale_i]) - 127.0f);
+    if (D == kSwaHeadDim) {
+        const int nope_groups = kSwaNopeDim / kSwaQuantBlock;
+        for (int scale_idx = tid; scale_idx < key_count * nope_groups; scale_idx += static_cast<int>(blockDim.x)) {
+            const int key_i = scale_idx / nope_groups;
+            const int scale_i = scale_idx - key_i * nope_groups;
+            const uint8_t* scale_ptr = packed_scale_rows[key_i];
+            packed_scales[key_i * kSwaScaleBytes + scale_i] =
+                scale_ptr == nullptr ? 1.0f : exp2f(static_cast<float>(scale_ptr[scale_i]) - 127.0f);
+        }
     }
     __syncthreads();
 
@@ -1841,6 +1844,8 @@ __device__ __forceinline__ void dsv4MegaAttentionLogitsForKeyTile(const float* _
         }
     }
 
+    const int d0 = tid;
+    const int d1 = tid + static_cast<int>(blockDim.x);
     float local_value0[kMegaAttentionKeyTile];
     float local_value1[kMegaAttentionKeyTile];
 #pragma unroll
@@ -1887,11 +1892,6 @@ __device__ __forceinline__ void dsv4MegaAttentionLogitsForKeyTile(const float* _
                                                          per_rank_buffer_bytes,
                                                          fresh_payload_offset,
                                                          symm_l_local);
-                if (d == tid) {
-                    local_value0[i] = key_value;
-                } else {
-                    local_value1[i] = key_value;
-                }
                 dot_part[i] += q_value * key_value;
             }
         }
@@ -1900,6 +1900,76 @@ __device__ __forceinline__ void dsv4MegaAttentionLogitsForKeyTile(const float* _
 #pragma unroll
     for (int i = 0; i < kMegaAttentionKeyTile; ++i) {
         if (i < key_count) {
+            if (d0 < D) {
+                local_value0[i] = attention_key_at(kv,
+                                                   cmp_cache,
+                                                   cmp_cu_lens,
+                                                   cmp_pool,
+                                                   cmp_block_table,
+                                                   cmp_seq_lens,
+                                                   cmp_pool_block_size,
+                                                   cmp_pool_block_stride,
+                                                   cmp_block_table_stride,
+                                                   swa_cache,
+                                                   swa_cu_lens,
+                                                   swa_pool,
+                                                   swa_slot_mapping,
+                                                   swa_gather_lens,
+                                                   swa_pool_block_size,
+                                                   swa_pool_block_stride,
+                                                   swa_slot_mapping_stride,
+                                                   key_is_compressed[i],
+                                                   req,
+                                                   key_pos[i],
+                                                   prefix_len,
+                                                   h,
+                                                   d0,
+                                                   L,
+                                                   KH,
+                                                   D,
+                                                   kv_unpad_restore,
+                                                   kv_cu_lens,
+                                                   symm_buffer_ptrs,
+                                                   use_symm_direct_fresh,
+                                                   per_rank_buffer_bytes,
+                                                   fresh_payload_offset,
+                                                   symm_l_local);
+            }
+            if (d1 < D) {
+                local_value1[i] = attention_key_at(kv,
+                                                   cmp_cache,
+                                                   cmp_cu_lens,
+                                                   cmp_pool,
+                                                   cmp_block_table,
+                                                   cmp_seq_lens,
+                                                   cmp_pool_block_size,
+                                                   cmp_pool_block_stride,
+                                                   cmp_block_table_stride,
+                                                   swa_cache,
+                                                   swa_cu_lens,
+                                                   swa_pool,
+                                                   swa_slot_mapping,
+                                                   swa_gather_lens,
+                                                   swa_pool_block_size,
+                                                   swa_pool_block_stride,
+                                                   swa_slot_mapping_stride,
+                                                   key_is_compressed[i],
+                                                   req,
+                                                   key_pos[i],
+                                                   prefix_len,
+                                                   h,
+                                                   d1,
+                                                   L,
+                                                   KH,
+                                                   D,
+                                                   kv_unpad_restore,
+                                                   kv_cu_lens,
+                                                   symm_buffer_ptrs,
+                                                   use_symm_direct_fresh,
+                                                   per_rank_buffer_bytes,
+                                                   fresh_payload_offset,
+                                                   symm_l_local);
+            }
             values0[i] = local_value0[i];
             values1[i] = local_value1[i];
         }
@@ -2628,7 +2698,7 @@ __device__ __forceinline__ int dsv4MegaBuildCompressedIndicesForRow(const scalar
                                                    reduce_indices,
                                                    reduce_buf);
                     if (tid == 0) {
-                        int sorted_tile_count = tile_valid_count;
+                        int sorted_tile_count = min_int(tile_valid_count, k_eff);
                         int replacements = 0;
                         int replaced_slot = -1;
                         float replaced_score = kInvalidCompressorScore;
@@ -2874,6 +2944,7 @@ __device__ __forceinline__ void dsv4MegaPrecomputeCsaIndexerScores(const scalar_
                                                                    const int64_t* __restrict__ local_rows,
                                                                    int R,
                                                                    int compress_ratio,
+                                                                   int compressed_topk,
                                                                    int LI,
                                                                    int IH,
                                                                    int ID,
@@ -2920,6 +2991,9 @@ __device__ __forceinline__ void dsv4MegaPrecomputeCsaIndexerScores(const scalar_
                                                  csa_indexer_block_table,
                                                  csa_indexer_seq_lens);
         valid = min_int(valid, max_int(0, kv_len / compress_ratio));
+        if (valid <= min_int(compressed_topk, kMaxCompressedTopK)) {
+            continue;
+        }
         if (candidate_base >= valid) {
             continue;
         }
@@ -3112,7 +3186,7 @@ __device__ __forceinline__ int dsv4MegaBuildCompressedIndicesFromScores(const in
                                            reduce_indices,
                                            reduce_buf);
             if (tid == 0) {
-                int sorted_tile_count = tile_valid_count;
+                int sorted_tile_count = min_int(tile_valid_count, k_eff);
                 int replacements = 0;
                 int replaced_slot = -1;
                 float replaced_score = kInvalidCompressorScore;
@@ -6550,6 +6624,7 @@ __global__ __launch_bounds__(kMegaBlockThreads, 1) void dsv4CpDistributedPrefill
                                                      local_rows,
                                                      R,
                                                      compress_ratio,
+                                                     compressed_topk,
                                                      LI,
                                                      IH,
                                                      ID,
@@ -8076,9 +8151,13 @@ torch::Tensor launchDsv4CpDistributedPrefillAttention(const torch::Tensor& q,
                                       stream);
         debugStage(debug_sync, cp_rank, "user_buffer_protocol", "end", stream, true);
     }
-    const bool use_mega_kernel = dsv4CpAttentionMegaKernelEnabled();
+    const bool requested_mega_kernel = dsv4CpAttentionMegaKernelEnabled();
     const bool use_symm_backend = hasSymmMemBackend(symm_buffer, symm_buffer_ptrs_dev);
     const bool needs_semantic_indexer_k = compress_ratio == 4 && !has_csa_fp8_indexer && !has_csa_fp8_indexer_pool;
+    const bool host_shape_can_use_unit_mega =
+        D == kSwaHeadDim && kv.size(2) == 1 && H >= kMegaAttentionHeadsPerCta
+        && (H % kMegaAttentionHeadsPerCta) == 0;
+    const bool use_mega_kernel = requested_mega_kernel && (cp_size > 1 || host_shape_can_use_unit_mega);
     if (use_mega_kernel && cp_size > 1) {
         TORCH_CHECK(use_symm_backend && symm_signal_pad_ptrs_dev != 0,
                     "DSV4_CP_ATTENTION_MEGA_KERNEL requires symmetric memory and signal pads for CP>1");
@@ -8412,7 +8491,7 @@ torch::Tensor launchDsv4CpDistributedPrefillAttention(const torch::Tensor& q,
                     per_rank_buffer_bytes);
     }
 
-    const bool use_flash_mla_attention = !dsv4CpAttentionMegaKernelEnabled() && dsv4CpAttentionFlashMlaEnabled()
+    const bool use_flash_mla_attention = !use_mega_kernel && dsv4CpAttentionFlashMlaEnabled()
                                          && q.scalar_type() == torch::kBFloat16
                                          && H == 128 && D == kSwaHeadDim && gathered_kv.size(1) >= 512
                                          && local_rows.size(0) > 0;
