@@ -6138,6 +6138,7 @@ __global__ __launch_bounds__(kMegaBlockThreads, 1) void dsv4CpDistributedPrefill
                                                         int symm_indexer_l_local,
                                                         int64_t symm_scratch_payload_offset,
                                                         int64_t symm_splitk_payload_offset,
+                                                        int64_t csa_score_prebuild_payload_offset,
                                                         MegaSwaWriterArgs swa_writer,
                                                         MegaCompressorBf16Args csa_indexer_compressor_writer,
                                                         MegaCompressorBf16Args main_compressor_writer,
@@ -6438,8 +6439,8 @@ __global__ __launch_bounds__(kMegaBlockThreads, 1) void dsv4CpDistributedPrefill
         (csa_indexer_k_pool != nullptr && csa_indexer_block_table != nullptr && csa_indexer_weights != nullptr)
         || (csa_indexer_k_cache != nullptr && csa_indexer_weights != nullptr && csa_indexer_cu_lens != nullptr);
     uint8_t* csa_score_prebuild_base =
-        csa_score_prebuild_stride > 0 && !enable_split_k_attention && local_scratch_base != nullptr ?
-            local_scratch_base + (symm_splitk_payload_offset - symm_scratch_payload_offset) :
+        csa_score_prebuild_stride > 0 && csa_score_prebuild_payload_offset > 0 && local_scratch_base != nullptr ?
+            local_scratch_base + (csa_score_prebuild_payload_offset - symm_scratch_payload_offset) :
             nullptr;
     float* csa_score_matrix = reinterpret_cast<float*>(csa_score_prebuild_base);
     const int prebuild_csa_scores =
@@ -8610,9 +8611,15 @@ torch::Tensor launchDsv4CpDistributedPrefillAttention(const torch::Tensor& q,
         ((splitk_group_barrier_slots * static_cast<int64_t>(sizeof(unsigned int)) + 63) / 64) * 64;
     const int64_t splitk_group_epoch_bytes =
         ((splitk_group_barrier_slots * static_cast<int64_t>(sizeof(unsigned long long)) + 63) / 64) * 64;
+    const int64_t mega_splitk_scratch_bytes =
+        enable_split_k_attention ?
+            max_resident_mega_blocks * kMegaSplitKRecordBytes + splitk_group_counter_bytes
+                + splitk_group_epoch_bytes :
+            0;
+    const int64_t csa_score_prebuild_offset =
+        alignUpInt64(mega_splitk_scratch_offset + mega_splitk_scratch_bytes, kMegaPayloadAlignBytes);
     const int64_t csa_score_prebuild_stride_host =
         use_mega_kernel && dsv4CpAttentionMegaCsaScorePrebuildEnabled() && use_symm_backend && enable_grid_side_effects
-                && !enable_split_k_attention
                 && compress_ratio == 4 && compressed_topk > 0 && indexer_q.size(1) == kMegaIndexerHeads
                 && indexer_q.size(2) == kIndexerHeadDim
                 && (has_csa_fp8_indexer || has_csa_fp8_indexer_pool) ?
@@ -8624,11 +8631,9 @@ torch::Tensor launchDsv4CpDistributedPrefillAttention(const torch::Tensor& q,
                 * static_cast<int64_t>(sizeof(float)) :
             0;
     const bool enable_csa_score_prebuild = csa_score_prebuild_bytes > 0
-                                           && mega_splitk_scratch_offset + csa_score_prebuild_bytes
+                                           && csa_score_prebuild_offset + csa_score_prebuild_bytes
                                                   <= per_rank_buffer_bytes;
     if (enable_split_k_attention) {
-        const int64_t mega_splitk_scratch_bytes = max_resident_mega_blocks * kMegaSplitKRecordBytes
-                                                  + splitk_group_counter_bytes + splitk_group_epoch_bytes;
         TORCH_CHECK(mega_splitk_scratch_offset + mega_splitk_scratch_bytes <= per_rank_buffer_bytes,
                     "DSV4 split-K mega attention symmetric buffer too small: need ",
                     mega_splitk_scratch_offset + mega_splitk_scratch_bytes,
@@ -8642,6 +8647,8 @@ torch::Tensor launchDsv4CpDistributedPrefillAttention(const torch::Tensor& q,
     }
     const int csa_score_prebuild_stride =
         enable_csa_score_prebuild ? static_cast<int>(csa_score_prebuild_stride_host) : 0;
+    const int64_t csa_score_prebuild_payload_offset =
+        enable_csa_score_prebuild ? csa_score_prebuild_offset : 0;
     const int mega_return_after_stage = dsv4CpAttentionMegaReturnAfterStageCode();
     const bool serialize_mega_side_effects_without_grid_barrier =
         needs_mega_side_effects && !use_symm_backend;
@@ -8766,6 +8773,7 @@ torch::Tensor launchDsv4CpDistributedPrefillAttention(const torch::Tensor& q,
                 symm_indexer_l_local,
                 symm_scratch_payload_offset,
                 mega_splitk_scratch_offset,
+                csa_score_prebuild_payload_offset,
                 mega_swa_writer,
                 mega_csa_indexer_compressor_writer,
                 mega_main_compressor_writer,
@@ -8917,6 +8925,7 @@ torch::Tensor launchDsv4CpDistributedPrefillAttention(const torch::Tensor& q,
                 symm_indexer_l_local,
                 symm_scratch_payload_offset,
                 mega_splitk_scratch_offset,
+                csa_score_prebuild_payload_offset,
                 mega_swa_writer,
                 mega_csa_indexer_compressor_writer,
                 mega_main_compressor_writer,

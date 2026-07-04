@@ -50,10 +50,11 @@ class Dsv4CpAttentionBufferSpecTest(unittest.TestCase):
             align_bytes=256,
         )
 
-        # SWA is the largest stage here: 17 * 1024 + 4096 = 21488, aligned.
-        self.assertEqual(spec.stage_bytes_per_rank, 17 * 1024)
-        self.assertEqual(spec.per_rank_bytes, 21504)
-        self.assertEqual(spec.total_bytes, 21504 * 8)
+        # stage = persistent raw payloads + largest transient stage.
+        # persistent = 17 * (584 + 132), transient = 17 * 1024.
+        self.assertEqual(spec.stage_bytes_per_rank, 29580)
+        self.assertEqual(spec.per_rank_bytes, 33792)
+        self.assertEqual(spec.total_bytes, 33792 * 8)
 
     def test_default_capacity_covers_raw_bf16_projection_payloads(self) -> None:
         spec = Dsv4CpAttentionBufferSpec(
@@ -68,9 +69,10 @@ class Dsv4CpAttentionBufferSpecTest(unittest.TestCase):
 
         # Compressor payloads are gathered before being packed into 584B/132B
         # cache rows; size the shared stage for raw BF16 overlap=True tensors.
-        self.assertEqual(spec.stage_bytes_per_rank, 17 * 2048)
-        self.assertEqual(spec.per_rank_bytes, 38912)
-        self.assertEqual(spec.total_bytes, 38912 * 8)
+        # persistent = 17 * (2048 + 1024), transient = 17 * 2048.
+        self.assertEqual(spec.stage_bytes_per_rank, 87040)
+        self.assertEqual(spec.per_rank_bytes, 91136)
+        self.assertEqual(spec.total_bytes, 91136 * 8)
 
     def test_default_builder_covers_mega_side_effect_scratch(self) -> None:
         spec = build_dsv4_cp_attention_buffer_spec(
@@ -86,13 +88,16 @@ class Dsv4CpAttentionBufferSpecTest(unittest.TestCase):
         # region then needs 21248B, so the old 14592B/rank allocation was too
         # small.  The default builder must cover this before any layer enters
         # the in-kernel CP protocol.
-        self.assertGreaterEqual(spec.per_rank_bytes, 10496 + 21248)
-        self.assertEqual(spec.per_rank_bytes, 4_226_048)
+        self.assertGreaterEqual(spec.per_rank_bytes, 10496 + 21248 + 8192)
+        self.assertEqual(spec.per_rank_bytes, 4_235_008)
 
     def test_service_shape_can_disable_splitk_slack_for_exact_contract(self) -> None:
         with patch.dict(
             os.environ,
-            {"DSV4_CP_DISTRIBUTED_PREFILL_ATTN_SPLITK_SCRATCH_BYTES": "0"},
+            {
+                "DSV4_CP_DISTRIBUTED_PREFILL_ATTN_SPLITK_SCRATCH_BYTES": "0",
+                "DSV4_CP_DISTRIBUTED_PREFILL_ATTN_CSA_SCORE_SCRATCH_BYTES": "0",
+            },
         ):
             spec = build_dsv4_cp_attention_buffer_spec(
                 cp_size=8,
@@ -102,8 +107,31 @@ class Dsv4CpAttentionBufferSpecTest(unittest.TestCase):
                 page_rr=False,
             )
 
-        self.assertEqual(spec.stage_bytes_per_rank, 27392)
-        self.assertEqual(spec.per_rank_bytes, 31744)
+        self.assertEqual(spec.stage_bytes_per_rank, 28160)
+        self.assertEqual(spec.per_rank_bytes, 32512)
+
+    def test_splitk_and_csa_score_scratch_are_additive(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "DSV4_CP_DISTRIBUTED_PREFILL_ATTN_SPLITK_SCRATCH_BYTES": "1024",
+                "DSV4_CP_DISTRIBUTED_PREFILL_ATTN_CSA_SCORE_SCRATCH_BYTES": "2048",
+            },
+        ):
+            spec = build_dsv4_cp_attention_buffer_spec(
+                cp_size=8,
+                actual_tokens_per_rank=2,
+                batch_size=1,
+                swa_bytes_per_token=1024,
+                page_rr=False,
+            )
+
+        self.assertEqual(spec.mega_splitk_scratch_bytes_per_rank, 1024)
+        self.assertEqual(spec.mega_csa_score_scratch_bytes_per_rank, 2048)
+        self.assertGreaterEqual(
+            spec.mega_side_effect_scratch_bytes_per_rank,
+            22016 + 1024 + 2048,
+        )
 
     def test_spec_rejects_non_v0_geometry_before_allocation(self) -> None:
         with self.assertRaisesRegex(ValueError, "cp_size=8"):

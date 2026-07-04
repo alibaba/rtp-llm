@@ -24,6 +24,7 @@ _DEFAULT_PROTOCOL_BYTES = 4352
 _ENV_MAX_TOKENS = "DSV4_CP_DISTRIBUTED_PREFILL_ATTN_MAX_TOKENS_PER_RANK"
 _ENV_MEGA_COMPRESSED_TOPK_CAP = "DSV4_CP_DISTRIBUTED_PREFILL_ATTN_COMPRESSED_TOPK_CAP"
 _ENV_MEGA_SPLITK_SCRATCH_BYTES = "DSV4_CP_DISTRIBUTED_PREFILL_ATTN_SPLITK_SCRATCH_BYTES"
+_ENV_MEGA_CSA_SCORE_SCRATCH_BYTES = "DSV4_CP_DISTRIBUTED_PREFILL_ATTN_CSA_SCORE_SCRATCH_BYTES"
 _DEFAULT_MEGA_COMPRESSED_TOPK_CAP = 1024
 _DEFAULT_MEGA_GRID_SYNC_BYTES = 1152
 _DEFAULT_MEGA_SPLITK_SCRATCH_BYTES = 4 * 1024 * 1024
@@ -71,6 +72,7 @@ class Dsv4CpAttentionBufferSpec:
     mega_compressed_topk_cap: int = 0
     mega_grid_sync_bytes: int = 0
     mega_splitk_scratch_bytes_per_rank: int = 0
+    mega_csa_score_scratch_bytes_per_rank: int = 0
     scratch_bytes_per_rank: int = 0
     protocol_bytes_per_rank: int = _DEFAULT_PROTOCOL_BYTES
     align_bytes: int = _DEFAULT_ALIGN_BYTES
@@ -115,6 +117,11 @@ class Dsv4CpAttentionBufferSpec:
                 "mega_splitk_scratch_bytes_per_rank must be non-negative, got "
                 f"{self.mega_splitk_scratch_bytes_per_rank}"
             )
+        if self.mega_csa_score_scratch_bytes_per_rank < 0:
+            raise ValueError(
+                "mega_csa_score_scratch_bytes_per_rank must be non-negative, got "
+                f"{self.mega_csa_score_scratch_bytes_per_rank}"
+            )
         if self.page_rr:
             raise ValueError("V0 distributed attention buffer does not support page/RR")
 
@@ -124,6 +131,7 @@ class Dsv4CpAttentionBufferSpec:
             int(self.mega_compressed_topk_cap) <= 0
             and int(self.mega_grid_sync_bytes) <= 0
             and int(self.mega_splitk_scratch_bytes_per_rank) <= 0
+            and int(self.mega_csa_score_scratch_bytes_per_rank) <= 0
         ):
             return 0
         token_cap = int(self.max_tokens_per_rank)
@@ -153,7 +161,11 @@ class Dsv4CpAttentionBufferSpec:
         )
         if side_effect_stage == 0:
             return 0
-        return side_effect_stage + int(self.mega_splitk_scratch_bytes_per_rank)
+        return (
+            side_effect_stage
+            + int(self.mega_splitk_scratch_bytes_per_rank)
+            + int(self.mega_csa_score_scratch_bytes_per_rank)
+        )
 
     @property
     def stage_bytes_per_rank(self) -> int:
@@ -212,6 +224,7 @@ class Dsv4CpAttentionBufferSpec:
             int(self.mega_compressed_topk_cap),
             int(self.mega_grid_sync_bytes),
             int(self.mega_splitk_scratch_bytes_per_rank),
+            int(self.mega_csa_score_scratch_bytes_per_rank),
             int(self.scratch_bytes_per_rank),
             int(self.protocol_bytes_per_rank),
             int(self.align_bytes),
@@ -314,6 +327,21 @@ def build_dsv4_cp_attention_buffer_spec(
         _ENV_MEGA_SPLITK_SCRATCH_BYTES,
         _DEFAULT_MEGA_SPLITK_SCRATCH_BYTES,
     )
+    # CSA score prebuild stores one float score per local row and visible
+    # compressed candidate. The CUDA side uses
+    # min(max(compressed_region_width, compressed_topk), kMaxCompressedTopK).
+    # Approximate compressed_region_width from the rank-consistent token cap so
+    # 4k total tokens (514/rank) reserve 1028 candidates, not just the 1024
+    # default topK cap.
+    csa_score_stride_cap = min(
+        max((max(int(max_tokens), 1) * int(cp_size) + 3) // 4, max(int(mega_topk_cap), 1)),
+        4096,
+    )
+    default_csa_score_scratch = max(int(max_tokens), 1) * csa_score_stride_cap * 4
+    mega_csa_score_scratch = _env_int(
+        _ENV_MEGA_CSA_SCORE_SCRATCH_BYTES,
+        default_csa_score_scratch,
+    )
     spec = Dsv4CpAttentionBufferSpec(
         cp_size=int(cp_size),
         max_tokens_per_rank=max_tokens,
@@ -322,6 +350,7 @@ def build_dsv4_cp_attention_buffer_spec(
         mega_compressed_topk_cap=max(int(mega_topk_cap), 0),
         mega_grid_sync_bytes=_DEFAULT_MEGA_GRID_SYNC_BYTES,
         mega_splitk_scratch_bytes_per_rank=max(int(mega_splitk_scratch), 0),
+        mega_csa_score_scratch_bytes_per_rank=max(int(mega_csa_score_scratch), 0),
         page_rr=bool(page_rr),
     )
     spec.validate_request(
