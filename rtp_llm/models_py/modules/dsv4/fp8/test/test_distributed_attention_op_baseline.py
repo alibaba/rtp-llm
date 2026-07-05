@@ -1448,6 +1448,47 @@ class DistributedAttentionCandidateTest(unittest.TestCase):
         self.assertEqual(tuple(actual.shape), (T, H, D))
         self.assertTrue(torch.isfinite(actual.float()).all())
 
+    def test_candidate_cuda_hca_unit_mega_ncu_profile_fixture(self) -> None:
+        if os.environ.get("DSV4_DIST_ATTN_NCU_LARGE", "0") != "1":
+            self.skipTest("large profile fixture is enabled only for NCU runs")
+        if not torch.cuda.is_available():
+            self.skipTest("candidate distributed attention op requires CUDA")
+        op = _candidate_op()
+        if op is None:
+            self.skipTest(
+                "rtp_llm_ops.dsv4_cp_distributed_prefill_attention is not built yet"
+            )
+        device = torch.device("cuda")
+        gen = torch.Generator(device="cpu")
+        gen.manual_seed(20260724)
+        T, H, D = 512, 128, SWA_HEAD_DIM
+        q = torch.randn(T, H, D, generator=gen, dtype=torch.float32).to(
+            device=device, dtype=torch.bfloat16
+        )
+        kv = torch.randn(1, T, 1, D, generator=gen, dtype=torch.float32).to(
+            device=device, dtype=torch.bfloat16
+        )
+        indexer_q = torch.zeros(T, 1, 1, dtype=torch.bfloat16, device=device)
+        indexer_k = torch.zeros(1, 1, 1, 1, dtype=torch.bfloat16, device=device)
+        actual = op(
+            q.contiguous(),
+            kv.contiguous(),
+            indexer_q,
+            indexer_k,
+            torch.zeros(H, dtype=torch.float32, device=device),
+            torch.zeros(T, dtype=torch.long, device=device),
+            torch.arange(T, dtype=torch.long, device=device),
+            torch.zeros(1, dtype=torch.long, device=device),
+            torch.tensor([T], dtype=torch.long, device=device),
+            torch.arange(T, dtype=torch.long, device=device),
+            128,
+            64,
+            4,
+        )
+        torch.cuda.synchronize()
+        self.assertEqual(tuple(actual.shape), (T, H, D))
+        self.assertTrue(torch.isfinite(actual.float()).all())
+
     def test_candidate_cuda_csa_ncu_large_profile_fixture(self) -> None:
         if os.environ.get("DSV4_DIST_ATTN_NCU_LARGE", "0") != "1":
             self.skipTest("large profile fixture is enabled only for NCU runs")

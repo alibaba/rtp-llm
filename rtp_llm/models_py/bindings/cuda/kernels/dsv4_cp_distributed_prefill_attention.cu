@@ -151,6 +151,11 @@ bool dsv4CpAttentionMegaKernelEnabled() {
     return raw == nullptr || raw[0] == '\0' || raw[0] != '0';
 }
 
+bool dsv4CpAttentionRequireMegaKernel() {
+    const char* raw = std::getenv("DSV4_CP_ATTENTION_REQUIRE_MEGA");
+    return raw != nullptr && raw[0] != '\0' && raw[0] != '0';
+}
+
 bool dsv4CpAttentionMegaGridSideEffectsEnabled() {
     const char* raw = std::getenv("DSV4_CP_ATTENTION_MEGA_GRID_SIDE_EFFECTS");
     return raw != nullptr && raw[0] != '\0' && raw[0] != '0';
@@ -8429,6 +8434,19 @@ torch::Tensor launchDsv4CpDistributedPrefillAttention(const torch::Tensor& q,
         D == kSwaHeadDim && kv.size(2) == 1 && H >= kMegaAttentionHeadsPerCta
         && (H % kMegaAttentionHeadsPerCta) == 0;
     const bool use_mega_kernel = requested_mega_kernel && (cp_size > 1 || host_shape_can_use_unit_mega);
+    TORCH_CHECK(!dsv4CpAttentionRequireMegaKernel() || use_mega_kernel,
+                "DSV4_CP_ATTENTION_REQUIRE_MEGA requested but mega kernel path is disabled: requested_mega_kernel=",
+                requested_mega_kernel,
+                " cp_size=",
+                cp_size,
+                " D=",
+                D,
+                " H=",
+                H,
+                " kv_heads=",
+                kv.size(2),
+                " host_shape_can_use_unit_mega=",
+                host_shape_can_use_unit_mega);
     if (use_mega_kernel && cp_size > 1) {
         TORCH_CHECK(use_symm_backend && symm_signal_pad_ptrs_dev != 0,
                     "DSV4_CP_ATTENTION_MEGA_KERNEL requires symmetric memory and signal pads for CP>1");
