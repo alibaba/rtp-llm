@@ -977,7 +977,10 @@ __device__ __forceinline__ float2 bf16_pair_bits_to_float2(uint32_t bits) {
 }
 
 __device__ __forceinline__ float dsv4MegaUe8m0Scale(uint8_t scale_byte) {
-    return ldexpf(1.0f, static_cast<int>(scale_byte) - 127);
+    if (scale_byte == 0) {
+        return __uint_as_float(0x00400000u);  // 2^-127, encoded as a float subnormal.
+    }
+    return __uint_as_float(static_cast<uint32_t>(scale_byte) << 23);
 }
 
 template<typename scalar_t>
