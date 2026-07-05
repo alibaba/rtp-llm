@@ -6712,7 +6712,7 @@ __global__ void dsv4CpDistributedPrefillAttentionKernel(const scalar_t* __restri
 }
 
 
-template<typename scalar_t, bool GroupedOnly = false>
+template<typename scalar_t, bool GroupedOnly = false, int StaticCompressRatio = 0, bool StaticSplitK = true>
 __global__ __launch_bounds__(kMegaBlockThreads, 1) void dsv4CpDistributedPrefillMegaAttentionKernel(const scalar_t* __restrict__ q,
                                                         const scalar_t* __restrict__ kv,
                                                         const scalar_t* __restrict__ indexer_q,
@@ -6796,6 +6796,8 @@ __global__ __launch_bounds__(kMegaBlockThreads, 1) void dsv4CpDistributedPrefill
                 }
                 asm("trap;");
             }
+    const int effective_compress_ratio = StaticCompressRatio > 0 ? StaticCompressRatio : compress_ratio;
+    const int effective_enable_split_k_attention = StaticSplitK ? enable_split_k_attention : 0;
     extern __shared__ unsigned char mega_dynamic_smem[];
     uint8_t* local_scratch_base = nullptr;
     if (symm_buffer_ptrs != nullptr && symm_per_rank_buffer_bytes > symm_scratch_payload_offset) {
@@ -7086,7 +7088,7 @@ __global__ __launch_bounds__(kMegaBlockThreads, 1) void dsv4CpDistributedPrefill
     }
     const bool use_grouped_attention = GroupedOnly || runtime_grouped_attention;
     const int prebuild_compressed_indices =
-        compress_ratio == 4 && compressed_topk > 0 && grid_parallel_side_effects && compressed_meta != nullptr
+        effective_compress_ratio == 4 && compressed_topk > 0 && grid_parallel_side_effects && compressed_meta != nullptr
         && row_compressed_indices_base != nullptr;
     const int has_fp8_csa_indexer =
         (csa_indexer_k_pool != nullptr && csa_indexer_block_table != nullptr && csa_indexer_weights != nullptr)
@@ -7098,7 +7100,7 @@ __global__ __launch_bounds__(kMegaBlockThreads, 1) void dsv4CpDistributedPrefill
     float* csa_score_matrix = reinterpret_cast<float*>(csa_score_prebuild_base);
     const int prebuild_csa_scores =
         prebuild_compressed_indices && csa_score_matrix != nullptr && csa_score_prebuild_stride > 0
-        && has_fp8_csa_indexer && compress_ratio == 4 && IH == kMegaIndexerHeads && ID == kIndexerHeadDim;
+        && has_fp8_csa_indexer && effective_compress_ratio == 4 && IH == kMegaIndexerHeads && ID == kIndexerHeadDim;
     if (prebuild_csa_scores) {
         dsv4MegaPrecomputeCsaIndexerScores<scalar_t>(indexer_q,
                                                      indexer_k,
@@ -7108,7 +7110,7 @@ __global__ __launch_bounds__(kMegaBlockThreads, 1) void dsv4CpDistributedPrefill
                                                      input_lengths,
                                                      local_rows,
                                                      R,
-                                                     compress_ratio,
+                                                     effective_compress_ratio,
                                                      compressed_topk,
                                                      LI,
                                                      IH,
@@ -7155,7 +7157,7 @@ __global__ __launch_bounds__(kMegaBlockThreads, 1) void dsv4CpDistributedPrefill
             const int prebuild_q_pos = static_cast<int>(position_ids[prebuild_global_row]);
             const int prebuild_kv_len =
                 static_cast<int>(prefix_lengths[prebuild_req] + input_lengths[prebuild_req]);
-            const int prebuild_sequential_count = dsv4MegaSequentialCompressedCount(compress_ratio,
+            const int prebuild_sequential_count = dsv4MegaSequentialCompressedCount(effective_compress_ratio,
                                                                                     compressed_topk,
                                                                                     prebuild_q_pos,
                                                                                     prebuild_kv_len,
@@ -7173,7 +7175,7 @@ __global__ __launch_bounds__(kMegaBlockThreads, 1) void dsv4CpDistributedPrefill
                 int prebuild_valid = dsv4MegaCsaIndexerValidCount(prebuild_q_pos,
                                                                   prebuild_req,
                                                                   LI,
-                                                                  compress_ratio,
+                                                                  effective_compress_ratio,
                                                                   csa_indexer_k_cache,
                                                                   csa_indexer_weights,
                                                                   csa_indexer_cu_lens,
@@ -7181,7 +7183,7 @@ __global__ __launch_bounds__(kMegaBlockThreads, 1) void dsv4CpDistributedPrefill
                                                                   csa_indexer_k_pool,
                                                                   csa_indexer_block_table,
                                                                   csa_indexer_seq_lens);
-                const int prebuild_visible = max_int(0, prebuild_kv_len / compress_ratio);
+                const int prebuild_visible = max_int(0, prebuild_kv_len / effective_compress_ratio);
                 prebuild_valid = min_int(prebuild_valid, prebuild_visible);
                 if (prebuild_csa_scores && prebuild_valid <= csa_score_prebuild_stride) {
                     (void)dsv4MegaBuildCompressedIndicesFromScores(req_id_per_token,
@@ -7190,7 +7192,7 @@ __global__ __launch_bounds__(kMegaBlockThreads, 1) void dsv4CpDistributedPrefill
                                                                    input_lengths,
                                                                    local_rows,
                                                                    prebuild_row,
-                                                                   compress_ratio,
+                                                                   effective_compress_ratio,
                                                                    compressed_topk,
                                                                    LI,
                                                                    csa_indexer_k_cache,
@@ -7221,7 +7223,7 @@ __global__ __launch_bounds__(kMegaBlockThreads, 1) void dsv4CpDistributedPrefill
                                                                          input_lengths,
                                                                          local_rows,
                                                                          prebuild_row,
-                                                                         compress_ratio,
+                                                                         effective_compress_ratio,
                                                                          compressed_topk,
                                                                          LI,
                                                                          IH,
@@ -7275,17 +7277,18 @@ __global__ __launch_bounds__(kMegaBlockThreads, 1) void dsv4CpDistributedPrefill
         return;
     }
     const int grouped_heads_per_task =
-        (!enable_split_k_attention && use_grouped_attention && (H % (2 * kMegaAttentionHeadsPerCta)) == 0) ?
+        (!effective_enable_split_k_attention && use_grouped_attention && (H % (2 * kMegaAttentionHeadsPerCta)) == 0) ?
             2 * kMegaAttentionHeadsPerCta :
             kMegaAttentionHeadsPerCta;
     const int heads_per_task = use_grouped_attention ? grouped_heads_per_task : 1;
     const int head_task_count = use_grouped_attention ? H / heads_per_task : H;
     const int task_count = R * head_task_count;
     uint8_t* splitk_base =
-        enable_split_k_attention && local_scratch_base != nullptr ?
+        effective_enable_split_k_attention && local_scratch_base != nullptr ?
             local_scratch_base + (symm_splitk_payload_offset - symm_scratch_payload_offset) :
             nullptr;
-    if (enable_split_k_attention && use_grouped_attention && splitk_base != nullptr) {
+    if constexpr (StaticSplitK) {
+    if (effective_enable_split_k_attention && use_grouped_attention && splitk_base != nullptr) {
         const int physical_group = static_cast<int>(blockIdx.x) / kMegaSplitKGroupSize;
         const int role = static_cast<int>(blockIdx.x) - physical_group * kMegaSplitKGroupSize;
         const int physical_group_count = max_int(1, static_cast<int>(gridDim.x) / kMegaSplitKGroupSize);
@@ -7324,7 +7327,7 @@ __global__ __launch_bounds__(kMegaBlockThreads, 1) void dsv4CpDistributedPrefill
                 split_prefix_len = static_cast<int>(prefix_lengths[split_req]);
                 split_kv_len = static_cast<int>(prefix_lengths[split_req] + input_lengths[split_req]);
                 split_sequential_compressed_count =
-                    dsv4MegaSequentialCompressedCount(compress_ratio,
+                    dsv4MegaSequentialCompressedCount(effective_compress_ratio,
                                                       compressed_topk,
                                                       split_q_pos,
                                                       split_kv_len,
@@ -7419,7 +7422,7 @@ __global__ __launch_bounds__(kMegaBlockThreads, 1) void dsv4CpDistributedPrefill
                                                      D,
                                                      L,
                                                      KH,
-                                                     compress_ratio,
+                                                     effective_compress_ratio,
                                                      split_compressed_count,
                                                      split_total_keys,
                                                      partial_block * split_task_keys_per_block,
@@ -7467,6 +7470,7 @@ __global__ __launch_bounds__(kMegaBlockThreads, 1) void dsv4CpDistributedPrefill
         }
         return;
     }
+    }
     for (int task = blockIdx.x; task < task_count; task += gridDim.x) {
     const int local_row = task / head_task_count;
     const int head_task = task - local_row * head_task_count;
@@ -7480,7 +7484,7 @@ __global__ __launch_bounds__(kMegaBlockThreads, 1) void dsv4CpDistributedPrefill
 
 			    unsigned long long compressed_meta_value = 0;
 			    int compressed_count = 0;
-			    const int sequential_compressed_count = dsv4MegaSequentialCompressedCount(compress_ratio,
+			    const int sequential_compressed_count = dsv4MegaSequentialCompressedCount(effective_compress_ratio,
 			                                                                              compressed_topk,
 			                                                                              q_pos,
 			                                                                              kv_len,
@@ -7539,7 +7543,7 @@ __global__ __launch_bounds__(kMegaBlockThreads, 1) void dsv4CpDistributedPrefill
 			                                                                 input_lengths,
 			                                                                 local_rows,
 			                                                                 local_row,
-			                                                                 compress_ratio,
+			                                                                 effective_compress_ratio,
 			                                                                 compressed_topk,
 			                                                                 LI,
 			                                                                 IH,
@@ -7603,7 +7607,7 @@ __global__ __launch_bounds__(kMegaBlockThreads, 1) void dsv4CpDistributedPrefill
 			                                                                          input_lengths,
 			                                                                          local_rows,
 			                                                                          local_row,
-			                                                                          compress_ratio,
+			                                                                          effective_compress_ratio,
 			                                                                          compressed_topk,
 			                                                                          LI,
 			                                                                          IH,
@@ -7759,7 +7763,7 @@ __global__ __launch_bounds__(kMegaBlockThreads, 1) void dsv4CpDistributedPrefill
                     if (i + key_i < compressed_count) {
                         const int cmp_idx =
                             sequential_compressed_count >= 0 ? i + key_i : row_compressed_indices[i + key_i];
-                        tile_key_pos[key_i] = use_compressed_cache ? cmp_idx : (cmp_idx + 1) * compress_ratio - 1;
+                        tile_key_pos[key_i] = use_compressed_cache ? cmp_idx : (cmp_idx + 1) * effective_compress_ratio - 1;
                         tile_key_is_compressed[key_i] = use_compressed_cache ? 1 : 0;
                         ++tile_count;
                     }
@@ -7898,7 +7902,7 @@ __global__ __launch_bounds__(kMegaBlockThreads, 1) void dsv4CpDistributedPrefill
             for (int key_i = 0; key_i < kMegaAttentionKeyTile; ++key_i) {
                 if (i + key_i < compressed_count) {
                     const int cmp_idx = sequential_compressed_count >= 0 ? i + key_i : row_compressed_indices[i + key_i];
-                    tile_key_pos[key_i] = use_compressed_cache ? cmp_idx : (cmp_idx + 1) * compress_ratio - 1;
+                    tile_key_pos[key_i] = use_compressed_cache ? cmp_idx : (cmp_idx + 1) * effective_compress_ratio - 1;
                     tile_key_is_compressed[key_i] = use_compressed_cache ? 1 : 0;
                     ++tile_count;
                 }
@@ -9326,25 +9330,52 @@ torch::Tensor launchDsv4CpDistributedPrefillAttention(const torch::Tensor& q,
     } else if (q.scalar_type() == torch::kBFloat16) {
         if (use_mega_kernel && mega_dynamic_smem_bytes > 0) {
             if (host_use_grouped_attention) {
-                AT_CUDA_CHECK(cudaFuncSetAttribute(dsv4CpDistributedPrefillMegaAttentionKernel<c10::BFloat16, true>,
-                                                   cudaFuncAttributeMaxDynamicSharedMemorySize,
-                                                   static_cast<int>(mega_dynamic_smem_bytes)));
+                if (!enable_split_k_attention && compress_ratio == 128) {
+                    AT_CUDA_CHECK(cudaFuncSetAttribute(dsv4CpDistributedPrefillMegaAttentionKernel<c10::BFloat16, true, 128, false>,
+                                                       cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                                       static_cast<int>(mega_dynamic_smem_bytes)));
+                } else if (!enable_split_k_attention && compress_ratio == 4) {
+                    AT_CUDA_CHECK(cudaFuncSetAttribute(dsv4CpDistributedPrefillMegaAttentionKernel<c10::BFloat16, true, 4, false>,
+                                                       cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                                       static_cast<int>(mega_dynamic_smem_bytes)));
+                } else {
+                    AT_CUDA_CHECK(cudaFuncSetAttribute(dsv4CpDistributedPrefillMegaAttentionKernel<c10::BFloat16, true>,
+                                                       cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                                       static_cast<int>(mega_dynamic_smem_bytes)));
+                }
             } else {
                 AT_CUDA_CHECK(cudaFuncSetAttribute(dsv4CpDistributedPrefillMegaAttentionKernel<c10::BFloat16, false>,
                                                    cudaFuncAttributeMaxDynamicSharedMemorySize,
                                                    static_cast<int>(mega_dynamic_smem_bytes)));
             }
         }
-        cudaError_t occ_err =
-            host_use_grouped_attention ?
-                cudaOccupancyMaxActiveBlocksPerMultiprocessor(&mega_active_blocks_per_sm,
-                                                              dsv4CpDistributedPrefillMegaAttentionKernel<c10::BFloat16, true>,
-                                                              static_cast<int>(block.x),
-                                                              mega_dynamic_smem_bytes) :
-                cudaOccupancyMaxActiveBlocksPerMultiprocessor(&mega_active_blocks_per_sm,
-                                                              dsv4CpDistributedPrefillMegaAttentionKernel<c10::BFloat16, false>,
-                                                              static_cast<int>(block.x),
-                                                              mega_dynamic_smem_bytes);
+        cudaError_t occ_err = cudaSuccess;
+        if (host_use_grouped_attention) {
+            if (!enable_split_k_attention && compress_ratio == 128) {
+                occ_err = cudaOccupancyMaxActiveBlocksPerMultiprocessor(
+                    &mega_active_blocks_per_sm,
+                    dsv4CpDistributedPrefillMegaAttentionKernel<c10::BFloat16, true, 128, false>,
+                    static_cast<int>(block.x),
+                    mega_dynamic_smem_bytes);
+            } else if (!enable_split_k_attention && compress_ratio == 4) {
+                occ_err = cudaOccupancyMaxActiveBlocksPerMultiprocessor(
+                    &mega_active_blocks_per_sm,
+                    dsv4CpDistributedPrefillMegaAttentionKernel<c10::BFloat16, true, 4, false>,
+                    static_cast<int>(block.x),
+                    mega_dynamic_smem_bytes);
+            } else {
+                occ_err = cudaOccupancyMaxActiveBlocksPerMultiprocessor(
+                    &mega_active_blocks_per_sm,
+                    dsv4CpDistributedPrefillMegaAttentionKernel<c10::BFloat16, true>,
+                    static_cast<int>(block.x),
+                    mega_dynamic_smem_bytes);
+            }
+        } else {
+            occ_err = cudaOccupancyMaxActiveBlocksPerMultiprocessor(&mega_active_blocks_per_sm,
+                                                                    dsv4CpDistributedPrefillMegaAttentionKernel<c10::BFloat16, false>,
+                                                                    static_cast<int>(block.x),
+                                                                    mega_dynamic_smem_bytes);
+        }
         if (occ_err != cudaSuccess || mega_active_blocks_per_sm <= 0) {
             mega_active_blocks_per_sm = 1;
         }
@@ -9615,17 +9646,44 @@ torch::Tensor launchDsv4CpDistributedPrefillAttention(const torch::Tensor& q,
     } else if (q.scalar_type() == torch::kBFloat16) {
         if (dsv4CpAttentionDebugSyncEnabled()) {
             cudaFuncAttributes attr{};
-            cudaError_t attr_err =
-                host_use_grouped_attention ?
-                    cudaFuncGetAttributes(&attr, dsv4CpDistributedPrefillMegaAttentionKernel<c10::BFloat16, true>) :
-                    cudaFuncGetAttributes(&attr, dsv4CpDistributedPrefillMegaAttentionKernel<c10::BFloat16, false>);
+            cudaError_t attr_err = cudaSuccess;
             int active_blocks = -1;
-            cudaError_t occ_err =
-                host_use_grouped_attention ?
-                    cudaOccupancyMaxActiveBlocksPerMultiprocessor(
-                        &active_blocks, dsv4CpDistributedPrefillMegaAttentionKernel<c10::BFloat16, true>, static_cast<int>(block.x), 0) :
-                    cudaOccupancyMaxActiveBlocksPerMultiprocessor(
-                        &active_blocks, dsv4CpDistributedPrefillMegaAttentionKernel<c10::BFloat16, false>, static_cast<int>(block.x), 0);
+            cudaError_t occ_err = cudaSuccess;
+            if (host_use_grouped_attention) {
+                if (!enable_split_k_attention && compress_ratio == 128) {
+                    attr_err = cudaFuncGetAttributes(
+                        &attr, dsv4CpDistributedPrefillMegaAttentionKernel<c10::BFloat16, true, 128, false>);
+                    occ_err = cudaOccupancyMaxActiveBlocksPerMultiprocessor(
+                        &active_blocks,
+                        dsv4CpDistributedPrefillMegaAttentionKernel<c10::BFloat16, true, 128, false>,
+                        static_cast<int>(block.x),
+                        0);
+                } else if (!enable_split_k_attention && compress_ratio == 4) {
+                    attr_err = cudaFuncGetAttributes(
+                        &attr, dsv4CpDistributedPrefillMegaAttentionKernel<c10::BFloat16, true, 4, false>);
+                    occ_err = cudaOccupancyMaxActiveBlocksPerMultiprocessor(
+                        &active_blocks,
+                        dsv4CpDistributedPrefillMegaAttentionKernel<c10::BFloat16, true, 4, false>,
+                        static_cast<int>(block.x),
+                        0);
+                } else {
+                    attr_err =
+                        cudaFuncGetAttributes(&attr, dsv4CpDistributedPrefillMegaAttentionKernel<c10::BFloat16, true>);
+                    occ_err = cudaOccupancyMaxActiveBlocksPerMultiprocessor(
+                        &active_blocks,
+                        dsv4CpDistributedPrefillMegaAttentionKernel<c10::BFloat16, true>,
+                        static_cast<int>(block.x),
+                        0);
+                }
+            } else {
+                attr_err =
+                    cudaFuncGetAttributes(&attr, dsv4CpDistributedPrefillMegaAttentionKernel<c10::BFloat16, false>);
+                occ_err = cudaOccupancyMaxActiveBlocksPerMultiprocessor(
+                    &active_blocks,
+                    dsv4CpDistributedPrefillMegaAttentionKernel<c10::BFloat16, false>,
+                    static_cast<int>(block.x),
+                    0);
+            }
             std::fprintf(stderr,
                          "[DSV4 CP Attention Cuda] mega kernel<bf16> attr_err=%s occ_err=%s max_threads=%d "
                          "shared=%zu regs=%d const=%zu local=%zu active_blocks=%d block=%u grid=%u grouped_only=%d\n",
@@ -9643,8 +9701,9 @@ torch::Tensor launchDsv4CpDistributedPrefillAttention(const torch::Tensor& q,
             std::fflush(stderr);
         }
         if (use_mega_kernel) {
-#define DSV4_LAUNCH_MEGA_BF16(GROUPED_ONLY)                                                                            \
-            dsv4CpDistributedPrefillMegaAttentionKernel<c10::BFloat16, GROUPED_ONLY><<<grid, block, mega_dynamic_smem_bytes, stream>>>( \
+#define DSV4_LAUNCH_MEGA_BF16(GROUPED_ONLY, STATIC_COMPRESS_RATIO, STATIC_SPLIT_K)                                      \
+            dsv4CpDistributedPrefillMegaAttentionKernel<c10::BFloat16, GROUPED_ONLY, STATIC_COMPRESS_RATIO, STATIC_SPLIT_K> \
+                <<<grid, block, mega_dynamic_smem_bytes, stream>>>(                                                     \
                 q.data_ptr<c10::BFloat16>(),                                                                          \
                 gathered_kv.data_ptr<c10::BFloat16>(),                                                                \
                 indexer_q.data_ptr<c10::BFloat16>(),                                                                  \
@@ -9720,9 +9779,15 @@ torch::Tensor launchDsv4CpDistributedPrefillAttention(const torch::Tensor& q,
                 csa_score_prebuild_stride,                                                                            \
                 mega_return_after_stage);
             if (host_use_grouped_attention) {
-                DSV4_LAUNCH_MEGA_BF16(true);
+                if (!enable_split_k_attention && compress_ratio == 128) {
+                    DSV4_LAUNCH_MEGA_BF16(true, 128, false);
+                } else if (!enable_split_k_attention && compress_ratio == 4) {
+                    DSV4_LAUNCH_MEGA_BF16(true, 4, false);
+                } else {
+                    DSV4_LAUNCH_MEGA_BF16(true, 0, true);
+                }
             } else {
-                DSV4_LAUNCH_MEGA_BF16(false);
+                DSV4_LAUNCH_MEGA_BF16(false, 0, true);
             }
 #undef DSV4_LAUNCH_MEGA_BF16
         } else {
