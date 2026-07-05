@@ -158,7 +158,7 @@ bool dsv4CpAttentionRequireMegaKernel() {
 
 bool dsv4CpAttentionMegaGridSideEffectsEnabled() {
     const char* raw = std::getenv("DSV4_CP_ATTENTION_MEGA_GRID_SIDE_EFFECTS");
-    return raw != nullptr && raw[0] != '\0' && raw[0] != '0';
+    return raw == nullptr || raw[0] == '\0' || raw[0] != '0';
 }
 
 bool dsv4CpAttentionMegaSplitKEnabled() {
@@ -169,6 +169,11 @@ bool dsv4CpAttentionMegaSplitKEnabled() {
 bool dsv4CpAttentionMegaSplitKDisabled() {
     const char* raw = std::getenv("DSV4_CP_ATTENTION_MEGA_SPLITK");
     return raw != nullptr && raw[0] == '0';
+}
+
+bool dsv4CpAttentionMegaSplitKAutoEnabled() {
+    const char* raw = std::getenv("DSV4_CP_ATTENTION_MEGA_SPLITK_AUTO");
+    return raw != nullptr && raw[0] != '\0' && raw[0] != '0';
 }
 
 bool dsv4CpAttentionMegaCsaScorePrebuildEnabled() {
@@ -8767,6 +8772,7 @@ torch::Tensor launchDsv4CpDistributedPrefillAttention(const torch::Tensor& q,
         use_mega_kernel && dsv4CpAttentionMegaGridSideEffectsEnabled() ? 1 : 0;
     const bool split_k_explicitly_enabled = dsv4CpAttentionMegaSplitKEnabled();
     const bool split_k_explicitly_disabled = dsv4CpAttentionMegaSplitKDisabled();
+    const bool split_k_auto_enabled = dsv4CpAttentionMegaSplitKAutoEnabled();
     const int64_t mega_swa_bytes =
         static_cast<int64_t>(mega_swa_writer.local_rows) * kSwaHeadDim * static_cast<int64_t>(sizeof(c10::BFloat16));
     const int64_t mega_csa_compressor_bytes =
@@ -9012,7 +9018,7 @@ torch::Tensor launchDsv4CpDistributedPrefillAttention(const torch::Tensor& q,
         use_mega_kernel && !split_k_explicitly_disabled
         && splitk_supported_ratio
         && (split_k_explicitly_enabled
-            || (use_symm_backend && enable_grid_side_effects && host_use_grouped_attention
+            || (split_k_auto_enabled && use_symm_backend && enable_grid_side_effects && host_use_grouped_attention
                 && splitk_max_keys >= splitk_auto_min_keys)) ?
             1 :
             0;
