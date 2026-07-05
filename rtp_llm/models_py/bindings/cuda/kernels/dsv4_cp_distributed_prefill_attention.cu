@@ -1457,22 +1457,23 @@ __device__ __forceinline__ void dsv4MegaLoadAttentionKeyTile(const scalar_t* __r
                                                              int64_t fresh_payload_offset,
                                                              int symm_l_local,
                                                              float* __restrict__ key_tile_shared) {
-    if (dsv4MegaTryLoadFreshDirectKeyTile<scalar_t>(key_is_compressed,
-                                                   key_pos,
-                                                   key_count,
-                                                   req,
-                                                   prefix_len,
-                                                   D,
-                                                   L,
-                                                   KH,
-                                                   kv_unpad_restore,
-                                                   kv_cu_lens,
-                                                   symm_buffer_ptrs,
-                                                   use_symm_direct_fresh,
-                                                   per_rank_buffer_bytes,
-                                                   fresh_payload_offset,
-                                                   symm_l_local,
-                                                   key_tile_shared)) {
+    if (key_count > 0 && !key_is_compressed[0] && key_pos[0] >= prefix_len
+        && dsv4MegaTryLoadFreshDirectKeyTile<scalar_t>(key_is_compressed,
+                                                       key_pos,
+                                                       key_count,
+                                                       req,
+                                                       prefix_len,
+                                                       D,
+                                                       L,
+                                                       KH,
+                                                       kv_unpad_restore,
+                                                       kv_cu_lens,
+                                                       symm_buffer_ptrs,
+                                                       use_symm_direct_fresh,
+                                                       per_rank_buffer_bytes,
+                                                       fresh_payload_offset,
+                                                       symm_l_local,
+                                                       key_tile_shared)) {
         return;
     }
     const int tid = static_cast<int>(threadIdx.x);
