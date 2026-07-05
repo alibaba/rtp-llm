@@ -3,16 +3,12 @@
 #include "rtp_llm/cpp/engine_base/stream/StreamCacheResource.h"
 #include "rtp_llm/cpp/config/RoleTypes.h"
 #include <cstdlib>
-#include <limits>
 #include <string>
 
 using namespace std;
 
 namespace rtp_llm {
 namespace {
-
-constexpr int         kDefaultInitKVBlockMallocRetryTimes = 10;
-constexpr const char* kInitKVBlockMallocRetryTimesEnv     = "RTP_LLM_PREFILL_REUSE_CACHE_INIT_KV_RETRY_TIMES";
 
 const bool kAsyncDebugEnabled = []() {
     const char* env = std::getenv("RTP_LLM_ASYNC_DEBUG");
@@ -21,28 +17,6 @@ const bool kAsyncDebugEnabled = []() {
 
 bool asyncDebugEnabled() {
     return kAsyncDebugEnabled;
-}
-
-int initKVBlockMallocRetryTimes() {
-    const char* env = std::getenv(kInitKVBlockMallocRetryTimesEnv);
-    if (env == nullptr) {
-        return kDefaultInitKVBlockMallocRetryTimes;
-    }
-    char*      end   = nullptr;
-    const long value = std::strtol(env, &end, 10);
-    if (end == env || *end != '\0' || value < 0 || value > std::numeric_limits<int>::max()) {
-        return kDefaultInitKVBlockMallocRetryTimes;
-    }
-    return static_cast<int>(value);
-}
-
-bool hasOtherStreamUsingKVCache(const StreamCacheResource& stream_cache_resource) {
-    const auto& resource_context = stream_cache_resource.resourceContext();
-    if (!resource_context.cache_manager) {
-        return false;
-    }
-    // In this initKVBlock failure path, the current stream has no allocated request blocks.
-    return true;
 }
 
 }  // namespace
@@ -90,19 +64,6 @@ void GenerateStateMachine::handleWaiting() {
     if (!events_.has(StreamEvents::LoadInitiated)) {
         auto result = stream_cache_resource_->initKVBlock(reserve_step_);
         if (!result.ok()) {
-            const auto failed_times    = stream_cache_resource_->mallocFailedTimes();
-            const auto max_retry_times = initKVBlockMallocRetryTimes();
-            if (stream_cache_resource_->resourceContext().role_type == RoleType::PREFILL
-                && stream_cache_resource_->reuseCache() && result.message() == "malloc failed"
-                && hasOtherStreamUsingKVCache(*stream_cache_resource_) && failed_times < max_retry_times) {
-                if (failed_times <= 10 || failed_times % 100 == 0) {
-                    RTP_LLM_LOG_WARNING("initKVBlock failed with LACK MEM for prefill reuse cache; keep stream "
-                                        "waiting for retry, failed_times=%d/%d",
-                                        failed_times,
-                                        max_retry_times);
-                }
-                return;
-            }
             error_info = ErrorInfo(ErrorCode::MALLOC_FAILED, "LACK MEM");
             status.store(StreamState::FINISHED, std::memory_order_release);
             releaseResource();
