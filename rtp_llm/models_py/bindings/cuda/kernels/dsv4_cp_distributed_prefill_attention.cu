@@ -1532,7 +1532,6 @@ __device__ __forceinline__ void dsv4MegaLoadAttentionKeyTile(const scalar_t* __r
                                    ? 1
                                    : 0;
     }
-    __syncthreads();
     if (D == kSwaHeadDim) {
         const int nope_groups = kSwaNopeDim / kSwaQuantBlock;
         for (int scale_idx = tid; scale_idx < key_count * nope_groups; scale_idx += static_cast<int>(blockDim.x)) {
