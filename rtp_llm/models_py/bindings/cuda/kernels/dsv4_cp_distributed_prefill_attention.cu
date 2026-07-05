@@ -6507,7 +6507,7 @@ __global__ void dsv4CpDistributedPrefillAttentionKernel(const scalar_t* __restri
 }
 
 
-template<typename scalar_t>
+template<typename scalar_t, bool GroupedOnly = false>
 __global__ __launch_bounds__(kMegaBlockThreads, 1) void dsv4CpDistributedPrefillMegaAttentionKernel(const scalar_t* __restrict__ q,
                                                         const scalar_t* __restrict__ kv,
                                                         const scalar_t* __restrict__ indexer_q,
@@ -6862,9 +6862,22 @@ __global__ __launch_bounds__(kMegaBlockThreads, 1) void dsv4CpDistributedPrefill
     const unsigned int compressed_epoch = static_cast<unsigned int>(launch_epoch & 0xffffffffull);
     const unsigned long long compressed_epoch_prefix = static_cast<unsigned long long>(compressed_epoch) << 32;
 
-    const bool use_grouped_attention =
+    const bool runtime_grouped_attention =
         D == kSwaHeadDim && KH == 1 && H >= kMegaAttentionHeadsPerCta
         && (H % kMegaAttentionHeadsPerCta) == 0 && static_cast<int>(blockDim.x) == kMegaBlockThreads;
+    if constexpr (GroupedOnly) {
+        if (!runtime_grouped_attention) {
+            if (tid == 0) {
+                printf("DSV4 grouped-only mega attention launched with unsupported shape: H=%d D=%d KH=%d block=%d\n",
+                       H,
+                       D,
+                       KH,
+                       static_cast<int>(blockDim.x));
+            }
+            asm("trap;");
+        }
+    }
+    const bool use_grouped_attention = GroupedOnly || runtime_grouped_attention;
     const int prebuild_compressed_indices =
         compress_ratio == 4 && compressed_topk > 0 && grid_parallel_side_effects && compressed_meta != nullptr
         && row_compressed_indices_base != nullptr;
@@ -7535,6 +7548,7 @@ __global__ __launch_bounds__(kMegaBlockThreads, 1) void dsv4CpDistributedPrefill
             continue;
         }
 
+        if constexpr (!GroupedOnly) {
 			    const int d0 = tid;
 		    const int d1 = tid + blockDim.x;
 		    const int lane_id = tid & 31;
@@ -7668,6 +7682,7 @@ __global__ __launch_bounds__(kMegaBlockThreads, 1) void dsv4CpDistributedPrefill
 	            from_float_device<scalar_t>(acc1 / online_denom);
 	    }
 #undef DSV4_MEGA_CONSUME_TILE
+        }
 	    }
         if (rank_side_effect_barriers) {
             dsv4MegaResidentGridCpBarrier(local_scratch_base,
@@ -9033,29 +9048,51 @@ torch::Tensor launchDsv4CpDistributedPrefillAttention(const torch::Tensor& q,
     int mega_active_blocks_per_sm = 1;
     if (q.scalar_type() == torch::kFloat32) {
         if (use_mega_kernel && mega_dynamic_smem_bytes > 0) {
-            AT_CUDA_CHECK(cudaFuncSetAttribute(dsv4CpDistributedPrefillMegaAttentionKernel<float>,
-                                               cudaFuncAttributeMaxDynamicSharedMemorySize,
-                                               static_cast<int>(mega_dynamic_smem_bytes)));
+            if (host_use_grouped_attention) {
+                AT_CUDA_CHECK(cudaFuncSetAttribute(dsv4CpDistributedPrefillMegaAttentionKernel<float, true>,
+                                                   cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                                   static_cast<int>(mega_dynamic_smem_bytes)));
+            } else {
+                AT_CUDA_CHECK(cudaFuncSetAttribute(dsv4CpDistributedPrefillMegaAttentionKernel<float, false>,
+                                                   cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                                   static_cast<int>(mega_dynamic_smem_bytes)));
+            }
         }
-        cudaError_t occ_err = cudaOccupancyMaxActiveBlocksPerMultiprocessor(
-            &mega_active_blocks_per_sm,
-            dsv4CpDistributedPrefillMegaAttentionKernel<float>,
-            static_cast<int>(block.x),
-            mega_dynamic_smem_bytes);
+        cudaError_t occ_err =
+            host_use_grouped_attention ?
+                cudaOccupancyMaxActiveBlocksPerMultiprocessor(&mega_active_blocks_per_sm,
+                                                              dsv4CpDistributedPrefillMegaAttentionKernel<float, true>,
+                                                              static_cast<int>(block.x),
+                                                              mega_dynamic_smem_bytes) :
+                cudaOccupancyMaxActiveBlocksPerMultiprocessor(&mega_active_blocks_per_sm,
+                                                              dsv4CpDistributedPrefillMegaAttentionKernel<float, false>,
+                                                              static_cast<int>(block.x),
+                                                              mega_dynamic_smem_bytes);
         if (occ_err != cudaSuccess || mega_active_blocks_per_sm <= 0) {
             mega_active_blocks_per_sm = 1;
         }
     } else if (q.scalar_type() == torch::kBFloat16) {
         if (use_mega_kernel && mega_dynamic_smem_bytes > 0) {
-            AT_CUDA_CHECK(cudaFuncSetAttribute(dsv4CpDistributedPrefillMegaAttentionKernel<c10::BFloat16>,
-                                               cudaFuncAttributeMaxDynamicSharedMemorySize,
-                                               static_cast<int>(mega_dynamic_smem_bytes)));
+            if (host_use_grouped_attention) {
+                AT_CUDA_CHECK(cudaFuncSetAttribute(dsv4CpDistributedPrefillMegaAttentionKernel<c10::BFloat16, true>,
+                                                   cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                                   static_cast<int>(mega_dynamic_smem_bytes)));
+            } else {
+                AT_CUDA_CHECK(cudaFuncSetAttribute(dsv4CpDistributedPrefillMegaAttentionKernel<c10::BFloat16, false>,
+                                                   cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                                   static_cast<int>(mega_dynamic_smem_bytes)));
+            }
         }
-        cudaError_t occ_err = cudaOccupancyMaxActiveBlocksPerMultiprocessor(
-            &mega_active_blocks_per_sm,
-            dsv4CpDistributedPrefillMegaAttentionKernel<c10::BFloat16>,
-            static_cast<int>(block.x),
-            mega_dynamic_smem_bytes);
+        cudaError_t occ_err =
+            host_use_grouped_attention ?
+                cudaOccupancyMaxActiveBlocksPerMultiprocessor(&mega_active_blocks_per_sm,
+                                                              dsv4CpDistributedPrefillMegaAttentionKernel<c10::BFloat16, true>,
+                                                              static_cast<int>(block.x),
+                                                              mega_dynamic_smem_bytes) :
+                cudaOccupancyMaxActiveBlocksPerMultiprocessor(&mega_active_blocks_per_sm,
+                                                              dsv4CpDistributedPrefillMegaAttentionKernel<c10::BFloat16, false>,
+                                                              static_cast<int>(block.x),
+                                                              mega_dynamic_smem_bytes);
         if (occ_err != cudaSuccess || mega_active_blocks_per_sm <= 0) {
             mega_active_blocks_per_sm = 1;
         }
@@ -9156,13 +9193,24 @@ torch::Tensor launchDsv4CpDistributedPrefillAttention(const torch::Tensor& q,
     if (q.scalar_type() == torch::kFloat32) {
         if (dsv4CpAttentionDebugSyncEnabled()) {
             cudaFuncAttributes attr{};
-            cudaError_t attr_err = cudaFuncGetAttributes(&attr, dsv4CpDistributedPrefillMegaAttentionKernel<float>);
+            cudaError_t attr_err =
+                host_use_grouped_attention ?
+                    cudaFuncGetAttributes(&attr, dsv4CpDistributedPrefillMegaAttentionKernel<float, true>) :
+                    cudaFuncGetAttributes(&attr, dsv4CpDistributedPrefillMegaAttentionKernel<float, false>);
             int active_blocks = -1;
-            cudaError_t occ_err = cudaOccupancyMaxActiveBlocksPerMultiprocessor(
-                &active_blocks, dsv4CpDistributedPrefillMegaAttentionKernel<float>, static_cast<int>(block.x), 0);
+            cudaError_t occ_err =
+                host_use_grouped_attention ?
+                    cudaOccupancyMaxActiveBlocksPerMultiprocessor(&active_blocks,
+                                                                  dsv4CpDistributedPrefillMegaAttentionKernel<float, true>,
+                                                                  static_cast<int>(block.x),
+                                                                  0) :
+                    cudaOccupancyMaxActiveBlocksPerMultiprocessor(&active_blocks,
+                                                                  dsv4CpDistributedPrefillMegaAttentionKernel<float, false>,
+                                                                  static_cast<int>(block.x),
+                                                                  0);
             std::fprintf(stderr,
                          "[DSV4 CP Attention Cuda] mega kernel<float> attr_err=%s occ_err=%s max_threads=%d "
-                         "shared=%zu regs=%d const=%zu local=%zu active_blocks=%d block=%u grid=%u\n",
+                         "shared=%zu regs=%d const=%zu local=%zu active_blocks=%d block=%u grid=%u grouped_only=%d\n",
                          cudaGetErrorString(attr_err),
                          cudaGetErrorString(occ_err),
                          attr.maxThreadsPerBlock,
@@ -9172,85 +9220,93 @@ torch::Tensor launchDsv4CpDistributedPrefillAttention(const torch::Tensor& q,
                          attr.localSizeBytes,
                          active_blocks,
                          block.x,
-                         grid.x);
+                         grid.x,
+                         host_use_grouped_attention ? 1 : 0);
             std::fflush(stderr);
         }
         if (use_mega_kernel) {
-            dsv4CpDistributedPrefillMegaAttentionKernel<float><<<grid, block, mega_dynamic_smem_bytes, stream>>>(
-                q.data_ptr<float>(),
-                gathered_kv.data_ptr<float>(),
-                indexer_q.data_ptr<float>(),
-                gathered_indexer_k.data_ptr<float>(),
-                attn_sink.data_ptr<float>(),
-                req_id_per_token.data_ptr<int64_t>(),
-                position_ids.data_ptr<int64_t>(),
-                prefix_lengths.data_ptr<int64_t>(),
-                input_lengths.data_ptr<int64_t>(),
-                local_rows.data_ptr<int64_t>(),
-                output.data_ptr<float>(),
-                static_cast<int>(local_rows.size(0)),
-                static_cast<int>(H),
-                static_cast<int>(D),
-                attention_kv_len,
-                static_cast<int>(gathered_kv.size(2)),
-                static_cast<int>(indexer_q.size(1)),
-                static_cast<int>(indexer_q.size(2)),
-                attention_indexer_len,
-                static_cast<int>(logical_batch),
-                static_cast<int>(compress_ratio),
-                static_cast<int>(window_size),
-                static_cast<int>(compressed_topk),
-                csa_indexer_k_cache_ptr,
-                csa_indexer_weights_ptr,
-                csa_indexer_cu_lens_ptr,
-                csa_indexer_total_len,
-                csa_indexer_k_pool_ptr,
-                csa_indexer_block_table_ptr,
-                csa_indexer_seq_lens_ptr,
-                csa_indexer_pool_block_size,
-                csa_indexer_pool_block_stride,
-                csa_indexer_block_table_stride,
-                attention_cmp_k_cache_ptr,
-                attention_cmp_cu_lens_ptr,
-                attention_cmp_k_pool_ptr,
-                attention_cmp_block_table_ptr,
-                attention_cmp_seq_lens_ptr,
-                attention_cmp_pool_block_size,
-                attention_cmp_pool_block_stride,
-                attention_cmp_block_table_stride,
-                attention_swa_k_cache_ptr,
-                attention_swa_cu_lens_ptr,
-                attention_swa_k_pool_ptr,
-                attention_swa_slot_mapping_ptr,
-                attention_swa_gather_lens_ptr,
-                attention_swa_pool_block_size,
-                attention_swa_pool_block_stride,
-                attention_swa_slot_mapping_stride,
-                kv_unpad_restore_ptr,
-                kv_cu_lens_ptr,
-                symm_buffer_ptrs_for_mega,
-                use_symm_direct_fresh_kv ? 1 : 0,
-                per_rank_buffer_bytes,
-                symm_fresh_payload_offset,
-                symm_l_local,
-                use_symm_direct_indexer_k ? 1 : 0,
-                symm_indexer_payload_offset,
-                symm_indexer_l_local,
-                symm_scratch_payload_offset,
-                mega_splitk_scratch_offset,
-                csa_score_prebuild_payload_offset,
-                mega_swa_writer,
-                mega_csa_indexer_compressor_writer,
-                mega_main_compressor_writer,
-                mega_launch_epoch,
-                static_cast<int>(cp_rank),
-                static_cast<int>(cp_size),
-                symm_signal_pads_for_mega,
-                enable_grid_side_effects,
-                enable_split_k_attention,
-                splitk_keys_per_block,
-                csa_score_prebuild_stride,
+#define DSV4_LAUNCH_MEGA_FLOAT(GROUPED_ONLY)                                                                            \
+            dsv4CpDistributedPrefillMegaAttentionKernel<float, GROUPED_ONLY><<<grid, block, mega_dynamic_smem_bytes, stream>>>( \
+                q.data_ptr<float>(),                                                                                   \
+                gathered_kv.data_ptr<float>(),                                                                         \
+                indexer_q.data_ptr<float>(),                                                                           \
+                gathered_indexer_k.data_ptr<float>(),                                                                  \
+                attn_sink.data_ptr<float>(),                                                                           \
+                req_id_per_token.data_ptr<int64_t>(),                                                                  \
+                position_ids.data_ptr<int64_t>(),                                                                      \
+                prefix_lengths.data_ptr<int64_t>(),                                                                    \
+                input_lengths.data_ptr<int64_t>(),                                                                     \
+                local_rows.data_ptr<int64_t>(),                                                                        \
+                output.data_ptr<float>(),                                                                              \
+                static_cast<int>(local_rows.size(0)),                                                                  \
+                static_cast<int>(H),                                                                                   \
+                static_cast<int>(D),                                                                                   \
+                attention_kv_len,                                                                                      \
+                static_cast<int>(gathered_kv.size(2)),                                                                 \
+                static_cast<int>(indexer_q.size(1)),                                                                   \
+                static_cast<int>(indexer_q.size(2)),                                                                   \
+                attention_indexer_len,                                                                                 \
+                static_cast<int>(logical_batch),                                                                       \
+                static_cast<int>(compress_ratio),                                                                      \
+                static_cast<int>(window_size),                                                                         \
+                static_cast<int>(compressed_topk),                                                                     \
+                csa_indexer_k_cache_ptr,                                                                               \
+                csa_indexer_weights_ptr,                                                                               \
+                csa_indexer_cu_lens_ptr,                                                                               \
+                csa_indexer_total_len,                                                                                 \
+                csa_indexer_k_pool_ptr,                                                                                \
+                csa_indexer_block_table_ptr,                                                                           \
+                csa_indexer_seq_lens_ptr,                                                                              \
+                csa_indexer_pool_block_size,                                                                           \
+                csa_indexer_pool_block_stride,                                                                         \
+                csa_indexer_block_table_stride,                                                                        \
+                attention_cmp_k_cache_ptr,                                                                             \
+                attention_cmp_cu_lens_ptr,                                                                             \
+                attention_cmp_k_pool_ptr,                                                                              \
+                attention_cmp_block_table_ptr,                                                                         \
+                attention_cmp_seq_lens_ptr,                                                                            \
+                attention_cmp_pool_block_size,                                                                         \
+                attention_cmp_pool_block_stride,                                                                       \
+                attention_cmp_block_table_stride,                                                                      \
+                attention_swa_k_cache_ptr,                                                                             \
+                attention_swa_cu_lens_ptr,                                                                             \
+                attention_swa_k_pool_ptr,                                                                              \
+                attention_swa_slot_mapping_ptr,                                                                        \
+                attention_swa_gather_lens_ptr,                                                                         \
+                attention_swa_pool_block_size,                                                                         \
+                attention_swa_pool_block_stride,                                                                       \
+                attention_swa_slot_mapping_stride,                                                                     \
+                kv_unpad_restore_ptr,                                                                                  \
+                kv_cu_lens_ptr,                                                                                        \
+                symm_buffer_ptrs_for_mega,                                                                             \
+                use_symm_direct_fresh_kv ? 1 : 0,                                                                      \
+                per_rank_buffer_bytes,                                                                                 \
+                symm_fresh_payload_offset,                                                                             \
+                symm_l_local,                                                                                          \
+                use_symm_direct_indexer_k ? 1 : 0,                                                                     \
+                symm_indexer_payload_offset,                                                                           \
+                symm_indexer_l_local,                                                                                  \
+                symm_scratch_payload_offset,                                                                           \
+                mega_splitk_scratch_offset,                                                                            \
+                csa_score_prebuild_payload_offset,                                                                     \
+                mega_swa_writer,                                                                                       \
+                mega_csa_indexer_compressor_writer,                                                                    \
+                mega_main_compressor_writer,                                                                           \
+                mega_launch_epoch,                                                                                     \
+                static_cast<int>(cp_rank),                                                                             \
+                static_cast<int>(cp_size),                                                                             \
+                symm_signal_pads_for_mega,                                                                             \
+                enable_grid_side_effects,                                                                              \
+                enable_split_k_attention,                                                                              \
+                splitk_keys_per_block,                                                                                 \
+                csa_score_prebuild_stride,                                                                             \
                 mega_return_after_stage);
+            if (host_use_grouped_attention) {
+                DSV4_LAUNCH_MEGA_FLOAT(true);
+            } else {
+                DSV4_LAUNCH_MEGA_FLOAT(false);
+            }
+#undef DSV4_LAUNCH_MEGA_FLOAT
         } else {
             dsv4CpDistributedPrefillAttentionKernel<float><<<legacy_grid, block, 0, stream>>>(
                 q.data_ptr<float>(),
@@ -9308,13 +9364,19 @@ torch::Tensor launchDsv4CpDistributedPrefillAttention(const torch::Tensor& q,
         if (dsv4CpAttentionDebugSyncEnabled()) {
             cudaFuncAttributes attr{};
             cudaError_t attr_err =
-                cudaFuncGetAttributes(&attr, dsv4CpDistributedPrefillMegaAttentionKernel<c10::BFloat16>);
+                host_use_grouped_attention ?
+                    cudaFuncGetAttributes(&attr, dsv4CpDistributedPrefillMegaAttentionKernel<c10::BFloat16, true>) :
+                    cudaFuncGetAttributes(&attr, dsv4CpDistributedPrefillMegaAttentionKernel<c10::BFloat16, false>);
             int active_blocks = -1;
-            cudaError_t occ_err = cudaOccupancyMaxActiveBlocksPerMultiprocessor(
-                &active_blocks, dsv4CpDistributedPrefillMegaAttentionKernel<c10::BFloat16>, static_cast<int>(block.x), 0);
+            cudaError_t occ_err =
+                host_use_grouped_attention ?
+                    cudaOccupancyMaxActiveBlocksPerMultiprocessor(
+                        &active_blocks, dsv4CpDistributedPrefillMegaAttentionKernel<c10::BFloat16, true>, static_cast<int>(block.x), 0) :
+                    cudaOccupancyMaxActiveBlocksPerMultiprocessor(
+                        &active_blocks, dsv4CpDistributedPrefillMegaAttentionKernel<c10::BFloat16, false>, static_cast<int>(block.x), 0);
             std::fprintf(stderr,
                          "[DSV4 CP Attention Cuda] mega kernel<bf16> attr_err=%s occ_err=%s max_threads=%d "
-                         "shared=%zu regs=%d const=%zu local=%zu active_blocks=%d block=%u grid=%u\n",
+                         "shared=%zu regs=%d const=%zu local=%zu active_blocks=%d block=%u grid=%u grouped_only=%d\n",
                          cudaGetErrorString(attr_err),
                          cudaGetErrorString(occ_err),
                          attr.maxThreadsPerBlock,
@@ -9324,85 +9386,93 @@ torch::Tensor launchDsv4CpDistributedPrefillAttention(const torch::Tensor& q,
                          attr.localSizeBytes,
                          active_blocks,
                          block.x,
-                         grid.x);
+                         grid.x,
+                         host_use_grouped_attention ? 1 : 0);
             std::fflush(stderr);
         }
         if (use_mega_kernel) {
-            dsv4CpDistributedPrefillMegaAttentionKernel<c10::BFloat16><<<grid, block, mega_dynamic_smem_bytes, stream>>>(
-                q.data_ptr<c10::BFloat16>(),
-                gathered_kv.data_ptr<c10::BFloat16>(),
-                indexer_q.data_ptr<c10::BFloat16>(),
-                gathered_indexer_k.data_ptr<c10::BFloat16>(),
-                attn_sink.data_ptr<float>(),
-                req_id_per_token.data_ptr<int64_t>(),
-                position_ids.data_ptr<int64_t>(),
-                prefix_lengths.data_ptr<int64_t>(),
-                input_lengths.data_ptr<int64_t>(),
-                local_rows.data_ptr<int64_t>(),
-                output.data_ptr<c10::BFloat16>(),
-                static_cast<int>(local_rows.size(0)),
-                static_cast<int>(H),
-                static_cast<int>(D),
-                attention_kv_len,
-                static_cast<int>(gathered_kv.size(2)),
-                static_cast<int>(indexer_q.size(1)),
-                static_cast<int>(indexer_q.size(2)),
-                attention_indexer_len,
-                static_cast<int>(logical_batch),
-                static_cast<int>(compress_ratio),
-                static_cast<int>(window_size),
-                static_cast<int>(compressed_topk),
-                csa_indexer_k_cache_ptr,
-                csa_indexer_weights_ptr,
-                csa_indexer_cu_lens_ptr,
-                csa_indexer_total_len,
-                csa_indexer_k_pool_ptr,
-                csa_indexer_block_table_ptr,
-                csa_indexer_seq_lens_ptr,
-                csa_indexer_pool_block_size,
-                csa_indexer_pool_block_stride,
-                csa_indexer_block_table_stride,
-                attention_cmp_k_cache_ptr,
-                attention_cmp_cu_lens_ptr,
-                attention_cmp_k_pool_ptr,
-                attention_cmp_block_table_ptr,
-                attention_cmp_seq_lens_ptr,
-                attention_cmp_pool_block_size,
-                attention_cmp_pool_block_stride,
-                attention_cmp_block_table_stride,
-                attention_swa_k_cache_ptr,
-                attention_swa_cu_lens_ptr,
-                attention_swa_k_pool_ptr,
-                attention_swa_slot_mapping_ptr,
-                attention_swa_gather_lens_ptr,
-                attention_swa_pool_block_size,
-                attention_swa_pool_block_stride,
-                attention_swa_slot_mapping_stride,
-                kv_unpad_restore_ptr,
-                kv_cu_lens_ptr,
-                symm_buffer_ptrs_for_mega,
-                use_symm_direct_fresh_kv ? 1 : 0,
-                per_rank_buffer_bytes,
-                symm_fresh_payload_offset,
-                symm_l_local,
-                use_symm_direct_indexer_k ? 1 : 0,
-                symm_indexer_payload_offset,
-                symm_indexer_l_local,
-                symm_scratch_payload_offset,
-                mega_splitk_scratch_offset,
-                csa_score_prebuild_payload_offset,
-                mega_swa_writer,
-                mega_csa_indexer_compressor_writer,
-                mega_main_compressor_writer,
-                mega_launch_epoch,
-                static_cast<int>(cp_rank),
-                static_cast<int>(cp_size),
-                symm_signal_pads_for_mega,
-                enable_grid_side_effects,
-                enable_split_k_attention,
-                splitk_keys_per_block,
-                csa_score_prebuild_stride,
+#define DSV4_LAUNCH_MEGA_BF16(GROUPED_ONLY)                                                                            \
+            dsv4CpDistributedPrefillMegaAttentionKernel<c10::BFloat16, GROUPED_ONLY><<<grid, block, mega_dynamic_smem_bytes, stream>>>( \
+                q.data_ptr<c10::BFloat16>(),                                                                          \
+                gathered_kv.data_ptr<c10::BFloat16>(),                                                                \
+                indexer_q.data_ptr<c10::BFloat16>(),                                                                  \
+                gathered_indexer_k.data_ptr<c10::BFloat16>(),                                                         \
+                attn_sink.data_ptr<float>(),                                                                          \
+                req_id_per_token.data_ptr<int64_t>(),                                                                 \
+                position_ids.data_ptr<int64_t>(),                                                                     \
+                prefix_lengths.data_ptr<int64_t>(),                                                                   \
+                input_lengths.data_ptr<int64_t>(),                                                                    \
+                local_rows.data_ptr<int64_t>(),                                                                       \
+                output.data_ptr<c10::BFloat16>(),                                                                     \
+                static_cast<int>(local_rows.size(0)),                                                                 \
+                static_cast<int>(H),                                                                                  \
+                static_cast<int>(D),                                                                                  \
+                attention_kv_len,                                                                                     \
+                static_cast<int>(gathered_kv.size(2)),                                                                \
+                static_cast<int>(indexer_q.size(1)),                                                                  \
+                static_cast<int>(indexer_q.size(2)),                                                                  \
+                attention_indexer_len,                                                                                \
+                static_cast<int>(logical_batch),                                                                      \
+                static_cast<int>(compress_ratio),                                                                     \
+                static_cast<int>(window_size),                                                                        \
+                static_cast<int>(compressed_topk),                                                                    \
+                csa_indexer_k_cache_ptr,                                                                              \
+                csa_indexer_weights_ptr,                                                                              \
+                csa_indexer_cu_lens_ptr,                                                                              \
+                csa_indexer_total_len,                                                                                \
+                csa_indexer_k_pool_ptr,                                                                               \
+                csa_indexer_block_table_ptr,                                                                          \
+                csa_indexer_seq_lens_ptr,                                                                             \
+                csa_indexer_pool_block_size,                                                                          \
+                csa_indexer_pool_block_stride,                                                                        \
+                csa_indexer_block_table_stride,                                                                       \
+                attention_cmp_k_cache_ptr,                                                                            \
+                attention_cmp_cu_lens_ptr,                                                                            \
+                attention_cmp_k_pool_ptr,                                                                             \
+                attention_cmp_block_table_ptr,                                                                        \
+                attention_cmp_seq_lens_ptr,                                                                           \
+                attention_cmp_pool_block_size,                                                                        \
+                attention_cmp_pool_block_stride,                                                                      \
+                attention_cmp_block_table_stride,                                                                     \
+                attention_swa_k_cache_ptr,                                                                            \
+                attention_swa_cu_lens_ptr,                                                                            \
+                attention_swa_k_pool_ptr,                                                                             \
+                attention_swa_slot_mapping_ptr,                                                                       \
+                attention_swa_gather_lens_ptr,                                                                        \
+                attention_swa_pool_block_size,                                                                        \
+                attention_swa_pool_block_stride,                                                                      \
+                attention_swa_slot_mapping_stride,                                                                    \
+                kv_unpad_restore_ptr,                                                                                 \
+                kv_cu_lens_ptr,                                                                                       \
+                symm_buffer_ptrs_for_mega,                                                                            \
+                use_symm_direct_fresh_kv ? 1 : 0,                                                                     \
+                per_rank_buffer_bytes,                                                                                \
+                symm_fresh_payload_offset,                                                                            \
+                symm_l_local,                                                                                         \
+                use_symm_direct_indexer_k ? 1 : 0,                                                                    \
+                symm_indexer_payload_offset,                                                                          \
+                symm_indexer_l_local,                                                                                 \
+                symm_scratch_payload_offset,                                                                          \
+                mega_splitk_scratch_offset,                                                                           \
+                csa_score_prebuild_payload_offset,                                                                    \
+                mega_swa_writer,                                                                                      \
+                mega_csa_indexer_compressor_writer,                                                                   \
+                mega_main_compressor_writer,                                                                          \
+                mega_launch_epoch,                                                                                    \
+                static_cast<int>(cp_rank),                                                                            \
+                static_cast<int>(cp_size),                                                                            \
+                symm_signal_pads_for_mega,                                                                            \
+                enable_grid_side_effects,                                                                             \
+                enable_split_k_attention,                                                                             \
+                splitk_keys_per_block,                                                                                \
+                csa_score_prebuild_stride,                                                                            \
                 mega_return_after_stage);
+            if (host_use_grouped_attention) {
+                DSV4_LAUNCH_MEGA_BF16(true);
+            } else {
+                DSV4_LAUNCH_MEGA_BF16(false);
+            }
+#undef DSV4_LAUNCH_MEGA_BF16
         } else {
             dsv4CpDistributedPrefillAttentionKernel<c10::BFloat16><<<legacy_grid, block, 0, stream>>>(
                 q.data_ptr<c10::BFloat16>(),
