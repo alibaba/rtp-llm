@@ -5,6 +5,7 @@
 #define private public
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
 #include "rtp_llm/cpp/model_rpc/LocalRpcServer.h"
+#include "rtp_llm/cpp/model_rpc/PrefillRpcServer.h"
 #include "rtp_llm/cpp/model_rpc/QueryConverter.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.grpc.pb.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
@@ -14,6 +15,32 @@ using namespace std;
 namespace rtp_llm {
 
 class QueryConverterTest: public DeviceTestBase {};
+
+TEST(PrefillRpcServerTest, ThinkModeBudgetUsesPdSeparationWhenMaxNewTokensIsOne) {
+    GenerateConfigPB generate_config;
+    generate_config.set_max_new_tokens(1);
+    generate_config.set_num_beams(1);
+    generate_config.set_num_return_sequences(1);
+    generate_config.set_can_use_pd_separation(true);
+    generate_config.set_in_think_mode(true);
+    generate_config.set_max_thinking_tokens(131072);
+
+    EXPECT_EQ(PrefillRpcServer::effectiveOutputTokenBudget(generate_config), 131073);
+    EXPECT_TRUE(PrefillRpcServer::shouldUsePdSeparation(generate_config));
+}
+
+TEST(PrefillRpcServerTest, SingleTokenRequestWithoutPositiveThinkBudgetBypassesPdSeparation) {
+    GenerateConfigPB generate_config;
+    generate_config.set_max_new_tokens(1);
+    generate_config.set_num_beams(1);
+    generate_config.set_num_return_sequences(1);
+    generate_config.set_can_use_pd_separation(true);
+    generate_config.set_in_think_mode(true);
+    generate_config.set_max_thinking_tokens(-1);
+
+    EXPECT_EQ(PrefillRpcServer::effectiveOutputTokenBudget(generate_config), 1);
+    EXPECT_FALSE(PrefillRpcServer::shouldUsePdSeparation(generate_config));
+}
 
 TEST_F(QueryConverterTest, testTransInput) {
     GenerateInputPB input;
