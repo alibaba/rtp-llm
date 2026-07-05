@@ -1355,6 +1355,75 @@ __device__ __forceinline__ float dsv4MegaAttentionKeyTileFallbackAt(const scalar
 }
 
 template<typename scalar_t>
+__device__ __forceinline__ bool dsv4MegaTryLoadFreshDirectKeyTile(const int* __restrict__ key_is_compressed,
+                                                                  const int* __restrict__ key_pos,
+                                                                  int key_count,
+                                                                  int req,
+                                                                  int prefix_len,
+                                                                  int D,
+                                                                  int L,
+                                                                  int KH,
+                                                                  const int64_t* __restrict__ kv_unpad_restore,
+                                                                  const int64_t* __restrict__ kv_cu_lens,
+                                                                  const uint8_t* const* __restrict__ symm_buffer_ptrs,
+                                                                  int use_symm_direct_fresh,
+                                                                  int64_t per_rank_buffer_bytes,
+                                                                  int64_t fresh_payload_offset,
+                                                                  int symm_l_local,
+                                                                  float* __restrict__ key_tile_shared) {
+    if (D != kSwaHeadDim || KH != 1 || key_count <= 0 || !use_symm_direct_fresh || symm_buffer_ptrs == nullptr
+        || kv_unpad_restore == nullptr || kv_cu_lens == nullptr || symm_l_local <= 0) {
+        return false;
+    }
+
+    const int tid = static_cast<int>(threadIdx.x);
+    __shared__ const scalar_t* fresh_rows[kMegaAttentionGroupedKeyTile];
+    __shared__ int all_fresh_direct;
+
+    unsigned int fresh_mask = 0u;
+    if (tid < kMegaAttentionGroupedKeyTile) {
+        const int key_i = tid;
+        const scalar_t* row_ptr = nullptr;
+        if (key_i < key_count && !key_is_compressed[key_i] && key_pos[key_i] >= prefix_len) {
+            const int fresh_pos = key_pos[key_i] - prefix_len;
+            const int64_t global_row = kv_cu_lens[req] + fresh_pos;
+            const int64_t gathered_row = kv_unpad_restore[global_row];
+            const int owner = static_cast<int>(gathered_row / symm_l_local);
+            const int local_row = static_cast<int>(gathered_row - static_cast<int64_t>(owner) * symm_l_local);
+            if (gathered_row >= 0 && gathered_row < L && owner >= 0 && owner < 8 && local_row >= 0
+                && local_row < symm_l_local) {
+                const int64_t elem_offset = static_cast<int64_t>(local_row) * kSwaHeadDim;
+                const int64_t byte_offset = static_cast<int64_t>(owner) * per_rank_buffer_bytes
+                                            + fresh_payload_offset
+                                            + elem_offset * static_cast<int64_t>(sizeof(scalar_t));
+                row_ptr = reinterpret_cast<const scalar_t*>(symm_buffer_ptrs[owner] + byte_offset);
+                fresh_mask = 1u << key_i;
+            }
+        }
+        fresh_rows[key_i] = row_ptr;
+    }
+    fresh_mask = __reduce_or_sync(0xffffffffu, fresh_mask);
+    if (tid == 0) {
+        const unsigned int expected_mask = (1u << key_count) - 1u;
+        all_fresh_direct = (fresh_mask & expected_mask) == expected_mask ? 1 : 0;
+    }
+    __syncthreads();
+    if (!all_fresh_direct) {
+        return false;
+    }
+
+    const int total = key_count * kSwaHeadDim;
+    for (int idx = tid; idx < total; idx += static_cast<int>(blockDim.x)) {
+        const int key_i = idx / kSwaHeadDim;
+        const int d = idx - key_i * kSwaHeadDim;
+        key_tile_shared[static_cast<int64_t>(key_i) * kSwaHeadDim + d] =
+            to_float_device(fresh_rows[key_i][d]);
+    }
+    __syncthreads();
+    return true;
+}
+
+template<typename scalar_t>
 __device__ __forceinline__ void dsv4MegaLoadAttentionKeyTile(const scalar_t* __restrict__ kv,
                                                              const uint8_t* __restrict__ cmp_cache,
                                                              const int64_t* __restrict__ cmp_cu_lens,
@@ -1388,6 +1457,24 @@ __device__ __forceinline__ void dsv4MegaLoadAttentionKeyTile(const scalar_t* __r
                                                              int64_t fresh_payload_offset,
                                                              int symm_l_local,
                                                              float* __restrict__ key_tile_shared) {
+    if (dsv4MegaTryLoadFreshDirectKeyTile<scalar_t>(key_is_compressed,
+                                                   key_pos,
+                                                   key_count,
+                                                   req,
+                                                   prefix_len,
+                                                   D,
+                                                   L,
+                                                   KH,
+                                                   kv_unpad_restore,
+                                                   kv_cu_lens,
+                                                   symm_buffer_ptrs,
+                                                   use_symm_direct_fresh,
+                                                   per_rank_buffer_bytes,
+                                                   fresh_payload_offset,
+                                                   symm_l_local,
+                                                   key_tile_shared)) {
+        return;
+    }
     const int tid = static_cast<int>(threadIdx.x);
     __shared__ float packed_scales[kMegaAttentionGroupedScaleSlots];
     __shared__ const uint8_t* packed_data_rows[kMegaAttentionGroupedKeyTile];
