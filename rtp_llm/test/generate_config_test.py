@@ -4,20 +4,21 @@ from unittest import TestCase, main
 
 from transformers import AutoTokenizer
 
-from rtp_llm.ops import SpecialTokens
-from rtp_llm.frontend.tokenizer_factory.tokenizers.tokenization_qwen import (
-    QWenTokenizer,
-)
-from rtp_llm.openai.api_datatype import ChatCompletionRequest, GenerateConfig
-from rtp_llm.openai.openai_endpoint import OpenaiEndpoint
-from rtp_llm.pipeline.pipeline import Pipeline
+from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.config.py_config_modules import (
     GenerateEnvConfig,
     PyMiscellaneousConfig,
     RenderConfig,
     VitConfig,
 )
-from rtp_llm.config.model_config import ModelConfig
+from rtp_llm.frontend.tokenizer_factory.tokenizers.tokenization_qwen import (
+    QWenTokenizer,
+)
+from rtp_llm.openai.api_datatype import ChatCompletionRequest, GenerateConfig
+from rtp_llm.openai.openai_endpoint import OpenaiEndpoint
+from rtp_llm.ops import SpecialTokens
+from rtp_llm.pipeline.pipeline import Pipeline
+
 
 class GenerateConfigTest(TestCase):
     def __init__(self, *args: Any, **kwargs: Any):
@@ -249,7 +250,6 @@ class OpenaiGenerateConfigTest(TestCase):
             **kwargs,
         )
 
-
     def _generate_config_with_stop_word(
         self,
         model_stop_word_str: Optional[List[str]] = None,
@@ -259,6 +259,8 @@ class OpenaiGenerateConfigTest(TestCase):
         req_stop: Optional[List[str]] = None,
         req_config_stop_word_str: Optional[List[str]] = None,
         req_config_stop_word_list: Optional[List[List[int]]] = None,
+        req_top_k: Optional[int] = None,
+        req_do_sample: Optional[bool] = None,
     ):
         special_tokens = SpecialTokens()
         if model_stop_word_str is not None:
@@ -268,13 +270,9 @@ class OpenaiGenerateConfigTest(TestCase):
 
         generate_env_config = GenerateEnvConfig()
         if env_stop_word_str is not None:
-            generate_env_config.stop_words_str = (
-                env_stop_word_str
-            )
+            generate_env_config.stop_words_str = env_stop_word_str
         if env_stop_word_list is not None:
-            generate_env_config.stop_words_list = (
-                env_stop_word_list
-            )
+            generate_env_config.stop_words_list = env_stop_word_list
 
         # Create ModelConfig object
         model_config = ModelConfig()
@@ -294,7 +292,12 @@ class OpenaiGenerateConfigTest(TestCase):
             backend_rpc_server_visitor=None,
         )
 
-        request = ChatCompletionRequest(messages=[])
+        request_kwargs = {"messages": []}
+        if req_top_k is not None:
+            request_kwargs["top_k"] = req_top_k
+        if req_do_sample is not None:
+            request_kwargs["do_sample"] = req_do_sample
+        request = ChatCompletionRequest(**request_kwargs)
         if req_stop is not None:
             request.stop = req_stop
         if req_config_stop_word_str is not None:
@@ -506,6 +509,14 @@ class OpenaiGenerateConfigTest(TestCase):
                 [21912, 2936, 1140],
             ],
         )
+
+    def test_openai_top_level_sampling_config(self):
+        config = self._generate_config_with_stop_word(
+            req_top_k=1,
+            req_do_sample=False,
+        )
+        self.assertEqual(config.top_k, 1)
+        self.assertEqual(config.do_sample, False)
 
 
 if __name__ == "__main__":

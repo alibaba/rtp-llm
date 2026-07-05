@@ -33,7 +33,7 @@ protected:
 
 TEST_F(OpenaiEndpointTest, Constructor_TokenizerIsNull) {
     ModelConfig model_config;
-    auto openai_endpoint = std::make_shared<OpenaiEndpoint>(nullptr, nullptr, model_config);
+    auto        openai_endpoint = std::make_shared<OpenaiEndpoint>(nullptr, nullptr, model_config);
     EXPECT_TRUE(openai_endpoint->stop_word_ids_list_.empty());
     EXPECT_TRUE(openai_endpoint->stop_words_list_.empty());
 }
@@ -102,12 +102,14 @@ TEST_F(OpenaiEndpointTest, ExtractGenerationConfig) {
     EXPECT_CALL(*mock_render_, get_all_extra_stop_word_ids_list).WillOnce(Return(std::vector<std::vector<int>>()));
 
     ModelConfig model_config;
-    auto                      openai_endpoint = std::make_shared<OpenaiEndpoint>(tokenizer_, render_, model_config);
+    auto        openai_endpoint = std::make_shared<OpenaiEndpoint>(tokenizer_, render_, model_config);
 
     ChatCompletionRequest req;
     req.stream      = false;
     req.temperature = 52.1;
     req.top_p       = 12.34;
+    req.top_k       = 1;
+    req.do_sample   = false;
     req.max_tokens  = 100;
     req.stop        = "hello world";
     req.seed        = 10;
@@ -122,6 +124,8 @@ TEST_F(OpenaiEndpointTest, ExtractGenerationConfig) {
     EXPECT_EQ(config->is_streaming, true);  // always true
     EXPECT_NEAR(config->temperature, req.temperature.value(), 1e-6);
     EXPECT_NEAR(config->top_p, req.top_p.value(), 1e-6);
+    EXPECT_EQ(config->top_k, req.top_k.value());
+    EXPECT_EQ(config->do_sample, req.do_sample.value());
     EXPECT_EQ(config->max_new_tokens, req.max_tokens.value());
     EXPECT_EQ(config->stop_words_str, stop_words_list);
     EXPECT_EQ(config->stop_words_list, tokenize_words_res);
@@ -131,13 +135,13 @@ TEST_F(OpenaiEndpointTest, ExtractGenerationConfig) {
 TEST_F(OpenaiEndpointTest, GetChatRender) {
     {
         ModelConfig model_config;
-        auto openai_endpoint = std::make_shared<OpenaiEndpoint>(nullptr, nullptr, model_config);
+        auto        openai_endpoint = std::make_shared<OpenaiEndpoint>(nullptr, nullptr, model_config);
         EXPECT_EQ(openai_endpoint->getChatRender(), nullptr);
     }
     {
         EXPECT_CALL(*mock_render_, get_all_extra_stop_word_ids_list).WillOnce(Return(std::vector<std::vector<int>>()));
         ModelConfig model_config;
-        auto openai_endpoint = std::make_shared<OpenaiEndpoint>(nullptr, render_, model_config);
+        auto        openai_endpoint = std::make_shared<OpenaiEndpoint>(nullptr, render_, model_config);
         EXPECT_EQ(openai_endpoint->getChatRender(), render_);
     }
 }

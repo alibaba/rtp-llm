@@ -128,6 +128,8 @@ class ChatCompletionRequest(BaseModel):
     tools: Optional[List[GPTToolDefinition]] = None
     temperature: Optional[float] = 0.7
     top_p: Optional[float] = 1.0
+    top_k: Optional[int] = None
+    do_sample: Optional[bool] = None
     max_tokens: Optional[int] = None
     stop: Optional[Union[str, List[str]]] = Field(default_factory=list)
     stream: Optional[bool] = False

@@ -53,6 +53,12 @@ std::shared_ptr<GenerateConfig> OpenaiEndpoint::extract_generation_config(const 
     if (req.top_p.has_value()) {
         config.top_p = req.top_p.value();
     }
+    if (req.top_k.has_value()) {
+        config.top_k = req.top_k.value();
+    }
+    if (req.do_sample.has_value()) {
+        config.do_sample = req.do_sample.value();
+    }
     if (req.max_tokens.has_value()) {
         config.max_new_tokens = req.max_tokens.value();
     }

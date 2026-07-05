@@ -115,6 +115,8 @@ void ChatCompletionRequest::Jsonize(Jsonizable::JsonWrapper& json) {
     JSONIZE_OPTIONAL(functions);
     JSONIZE_OPTIONAL(temperature);
     JSONIZE_OPTIONAL(top_p);
+    JSONIZE_OPTIONAL(top_k);
+    JSONIZE_OPTIONAL(do_sample);
     JSONIZE_OPTIONAL(max_tokens);
 
     std::variant<std::string, std::vector<std::string>> stop_;

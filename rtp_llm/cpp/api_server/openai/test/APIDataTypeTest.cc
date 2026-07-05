@@ -181,6 +181,8 @@ TEST_F(APIDataTypeTest, testChatCompletionRequest) {
                                 {"name": "tom", "description": "hello world", "parameters": {"foo": "bar", "bar": "foo"}}],
                   "temperature": 0.8,
                   "top_p": 0.9,
+                  "top_k": 1,
+                  "do_sample": false,
                   "max_tokens": 100,
                   "stop": "xxx",
                   "stream": true,
@@ -202,6 +204,10 @@ TEST_F(APIDataTypeTest, testChatCompletionRequest) {
     ASSERT_EQ(std::get<std::string>(obj.messages[0].content), "who are you");
     ASSERT_EQ(obj.messages[1].role, "system");
     ASSERT_EQ(std::get<std::string>(obj.messages[1].content), "you are a English teacher");
+    ASSERT_TRUE(obj.top_k.has_value());
+    ASSERT_EQ(obj.top_k.value(), 1);
+    ASSERT_TRUE(obj.do_sample.has_value());
+    ASSERT_FALSE(obj.do_sample.value());
 }
 
 }  // namespace rtp_llm

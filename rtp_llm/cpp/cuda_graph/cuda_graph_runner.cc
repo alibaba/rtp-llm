@@ -117,8 +117,20 @@ void CudaGraphRunner::prepareInputs(const PyModelInputs& inputs, CudaGraphState&
         }
     };
 
-    // clear kv_cache_kernel_block_id_device, otherwise it will cause the cache block pollution
-    py_model_inputs_.attention_inputs.kv_cache_kernel_block_id_device.fill_(0);
+    // Hybrid cache: collect per-group D2D strided copies.
+    const bool has_hybrid_cache = !inputs.attention_inputs.kv_cache_kernel_block_id_device_by_group.empty()
+                                  && !inputs.attention_inputs.kv_cache_kernel_block_id_host_by_group.empty()
+                                  && !py_model_inputs_.attention_inputs.kv_cache_kernel_block_id_device_by_group.empty()
+                                  && !py_model_inputs_.attention_inputs.kv_cache_kernel_block_id_host_by_group.empty();
+    size_t hybrid_cache_group = 0;
+
+    // clear kv_cache_kernel_block_id_device, otherwise it will cause the cache block pollution.
+    // In hybrid mode the legacy 2-D field may alias a per-group tensor after Python
+    // select_block_map_for_layer() mutates it during capture; per-group copies below
+    // are the source of truth.
+    if (!has_hybrid_cache) {
+        py_model_inputs_.attention_inputs.kv_cache_kernel_block_id_device.fill_(0);
+    }
 
     // NOTE: kv_cache_block_id_{host,device} are physical block IDs dedicated for cache store
     // (see OpDefs.h). They are NOT consumed by any GPU attention kernel during CUDA graph replay;
@@ -141,9 +153,13 @@ void CudaGraphRunner::prepareInputs(const PyModelInputs& inputs, CudaGraphState&
     tryAddD2DCopy(inputs.attention_inputs.input_lengths_d,
                   py_model_inputs_.attention_inputs.input_lengths_d,
                   state.current_batch_size * sizeof(int));
-    // Strided 2D D2D copy for flat kv_cache_block_id
-    tryAddStridedD2DCopy(inputs.attention_inputs.kv_cache_kernel_block_id_device,
-                         py_model_inputs_.attention_inputs.kv_cache_kernel_block_id_device);
+    // Strided 2D D2D copy for flat kv_cache_block_id. Skip it for hybrid KV
+    // cache: the legacy field can alias one group tensor, so copying it in the
+    // same fused kernel as per-group block maps can race on the same destination.
+    if (!has_hybrid_cache) {
+        tryAddStridedD2DCopy(inputs.attention_inputs.kv_cache_kernel_block_id_device,
+                             py_model_inputs_.attention_inputs.kv_cache_kernel_block_id_device);
+    }
 
     if (!is_prefill_cuda_graph_mode_) {
         // D2D copies — collected for single batched kernel launch
@@ -167,13 +183,6 @@ void CudaGraphRunner::prepareInputs(const PyModelInputs& inputs, CudaGraphState&
                           state.current_seq_len * sizeof(int));
         }
     }
-
-    // Hybrid cache: collect per-group D2D strided copies
-    const bool has_hybrid_cache = !inputs.attention_inputs.kv_cache_kernel_block_id_device_by_group.empty()
-                                  && !inputs.attention_inputs.kv_cache_kernel_block_id_host_by_group.empty()
-                                  && !py_model_inputs_.attention_inputs.kv_cache_kernel_block_id_device_by_group.empty()
-                                  && !py_model_inputs_.attention_inputs.kv_cache_kernel_block_id_host_by_group.empty();
-    size_t hybrid_cache_group = 0;
 
     if (has_hybrid_cache) {
         RTP_LLM_CHECK_WITH_INFO(
@@ -214,9 +223,12 @@ void CudaGraphRunner::prepareInputs(const PyModelInputs& inputs, CudaGraphState&
                        py_model_inputs_.attention_inputs.prefix_lengths,
                        state.current_batch_size * sizeof(int));
 
-    // Common H2H strided copies for kv_cache block tables (both decode & prefill)
-    stridedCopyHost(inputs.attention_inputs.kv_cache_kernel_block_id_host,
-                    py_model_inputs_.attention_inputs.kv_cache_kernel_block_id_host);
+    // Common H2H strided copies for kv_cache block tables (both decode & prefill).
+    // Same aliasing rule as the device copy above.
+    if (!has_hybrid_cache) {
+        stridedCopyHost(inputs.attention_inputs.kv_cache_kernel_block_id_host,
+                        py_model_inputs_.attention_inputs.kv_cache_kernel_block_id_host);
+    }
 
     optimizedCopyAsync(inputs.attention_inputs.kv_cache_layer_to_group,
                        py_model_inputs_.attention_inputs.kv_cache_layer_to_group,
@@ -254,7 +266,8 @@ void CudaGraphRunner::prepareInputs(const PyModelInputs& inputs, CudaGraphState&
         }
 
         int last_valid_q = state.current_seq_len;
-        int last_valid_kv = last_valid_q
+        int last_valid_kv =
+            last_valid_q
             + inputs.attention_inputs.prefix_lengths.slice(0, 0, state.current_batch_size).sum().item<int>();
         py_model_inputs_.attention_inputs.cu_seqlens_host.slice(0, state.current_batch_size + 1, max_bs_ + 1)
             .fill_(last_valid_q);
@@ -606,9 +619,8 @@ void CudaGraphRunner::initCapture() {
         logCudaGraphPoolMemory("before_capture");
 
         if (is_prefill_cuda_graph_mode_) {
-            RTP_LLM_CHECK_WITH_INFO(
-                isEmbeddingStylePrefillCudaGraph() || isMtpDraftPrefillCudaGraph(),
-                "prefill cuda graph: expected embedding-style or MTP draft layout");
+            RTP_LLM_CHECK_WITH_INFO(isEmbeddingStylePrefillCudaGraph() || isMtpDraftPrefillCudaGraph(),
+                                    "prefill cuda graph: expected embedding-style or MTP draft layout");
             capturePrefill();
         } else {
             captureDecode();
@@ -661,7 +673,7 @@ void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
         {
             cuda_graph::graphCaptureBegin(graph, shared_graph_pool_);
             cuda_graph::GraphNcclCaptureContext capture_ctx;
-            CudaGraphCaptureGuard capture_guard(&capture_ctx);
+            CudaGraphCaptureGuard               capture_guard(&capture_ctx);
             try {
                 auto py_outputs_obj = py_forward_method_(inputs, attn_pyobj);
                 outputs             = py_outputs_obj.cast<PyModelOutputs>();
