@@ -7164,8 +7164,12 @@ __global__ __launch_bounds__(kMegaBlockThreads, 1) void dsv4CpDistributedPrefill
                                   launch_epoch);
         return;
     }
-    const int heads_per_task = use_grouped_attention ? kMegaAttentionHeadsPerCta : 1;
-    const int head_task_count = use_grouped_attention ? H / kMegaAttentionHeadsPerCta : H;
+    const int grouped_heads_per_task =
+        (!enable_split_k_attention && use_grouped_attention && (H % (2 * kMegaAttentionHeadsPerCta)) == 0) ?
+            2 * kMegaAttentionHeadsPerCta :
+            kMegaAttentionHeadsPerCta;
+    const int heads_per_task = use_grouped_attention ? grouped_heads_per_task : 1;
+    const int head_task_count = use_grouped_attention ? H / heads_per_task : H;
     const int task_count = R * head_task_count;
     uint8_t* splitk_base =
         enable_split_k_attention && local_scratch_base != nullptr ?
@@ -7539,16 +7543,24 @@ __global__ __launch_bounds__(kMegaBlockThreads, 1) void dsv4CpDistributedPrefill
             const int warp_id = tid / kMegaAttentionWarpSize;
             const int lane_id = tid & (kMegaAttentionWarpSize - 1);
             const int head = h + warp_id;
+            const int head_second = head + kMegaAttentionHeadsPerCta;
+            const int use_dual_head_task = heads_per_task == 2 * kMegaAttentionHeadsPerCta ? 1 : 0;
             float q_values[kMegaAttentionDimsPerWarp];
             float acc[kMegaAttentionDimsPerWarp];
+            float q_values_second[kMegaAttentionDimsPerWarp];
+            float acc_second[kMegaAttentionDimsPerWarp];
 #pragma unroll
             for (int chunk = 0; chunk < kMegaAttentionDimsPerWarp; ++chunk) {
                 const int d = lane_id + chunk * kMegaAttentionWarpSize;
                 q_values[chunk] = q_at(q, row, head, d, H, D);
                 acc[chunk] = 0.0f;
+                q_values_second[chunk] = use_dual_head_task ? q_at(q, row, head_second, d, H, D) : 0.0f;
+                acc_second[chunk] = 0.0f;
             }
             float online_max = attn_sink[head];
             float online_denom = 1.0f;
+            float online_max_second = use_dual_head_task ? attn_sink[head_second] : 0.0f;
+            float online_denom_second = 1.0f;
 
             int tile_key_pos[kMegaAttentionGroupedKeyTile];
             int tile_key_is_compressed[kMegaAttentionGroupedKeyTile];
@@ -7595,6 +7607,16 @@ __global__ __launch_bounds__(kMegaBlockThreads, 1) void dsv4CpDistributedPrefill
                                                     online_denom,                                                        \
                                                     acc,                                                                 \
                                                     grouped_tile_weights);                                                \
+            if (use_dual_head_task) {                                                                                    \
+                __syncthreads();                                                                                         \
+                dsv4MegaConsumeLoadedFullKeyTileGrouped(grouped_key_tile,                                                \
+                                                        q_values_second,                                                 \
+                                                        scale,                                                           \
+                                                        online_max_second,                                               \
+                                                        online_denom_second,                                             \
+                                                        acc_second,                                                      \
+                                                        grouped_tile_weights);                                           \
+            }                                                                                                            \
         } else {                                                                                                         \
             dsv4MegaConsumeLoadedKeyTileGrouped(grouped_key_tile,                                                        \
                                                 q_values,                                                                \
@@ -7603,6 +7625,16 @@ __global__ __launch_bounds__(kMegaBlockThreads, 1) void dsv4CpDistributedPrefill
                                                 online_max,                                                              \
                                                 online_denom,                                                            \
                                                 acc);                                                                    \
+            if (use_dual_head_task) {                                                                                    \
+                __syncthreads();                                                                                         \
+                dsv4MegaConsumeLoadedKeyTileGrouped(grouped_key_tile,                                                    \
+                                                    q_values_second,                                                     \
+                                                    KEY_COUNT,                                                           \
+                                                    scale,                                                               \
+                                                    online_max_second,                                                   \
+                                                    online_denom_second,                                                 \
+                                                    acc_second);                                                         \
+            }                                                                                                            \
         }                                                                                                                \
         __syncthreads();                                                                                                 \
     } while (0)
@@ -7640,6 +7672,10 @@ __global__ __launch_bounds__(kMegaBlockThreads, 1) void dsv4CpDistributedPrefill
                 const int d = lane_id + chunk * kMegaAttentionWarpSize;
                 output[(static_cast<int64_t>(local_row) * H + head) * D + d] =
                     from_float_device<scalar_t>(acc[chunk] / online_denom);
+                if (use_dual_head_task) {
+                    output[(static_cast<int64_t>(local_row) * H + head_second) * D + d] =
+                        from_float_device<scalar_t>(acc_second[chunk] / online_denom_second);
+                }
             }
 #undef DSV4_MEGA_CONSUME_GROUPED_TILE
             continue;
