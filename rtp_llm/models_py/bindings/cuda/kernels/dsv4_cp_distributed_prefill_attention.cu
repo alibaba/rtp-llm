@@ -1278,6 +1278,10 @@ __device__ __forceinline__ float attention_key_at(const scalar_t* kv,
         }
         return kv_flat_at(kv, gathered_row, h, d, KH, D);
     }
+    if (use_symm_direct_fresh && symm_buffer_ptrs != nullptr) {
+        return symm_4d_at<scalar_t>(
+            symm_buffer_ptrs, per_rank_buffer_bytes, fresh_payload_offset, symm_l_local, KH, D, req, key_idx, h, d);
+    }
     return kv_at(kv, req, key_idx, h, d, L, KH, D);
 }
 
@@ -8703,9 +8707,6 @@ torch::Tensor launchDsv4CpDistributedPrefillAttention(const torch::Tensor& q,
                                              || mega_csa_indexer_compressor_writer.enabled
                                              || mega_main_compressor_writer.enabled);
     auto output = torch::empty({local_rows.size(0), H, D}, q.options());
-    if (local_rows.size(0) == 0 && !needs_mega_side_effects) {
-        return output;
-    }
         const uint8_t* csa_indexer_k_cache_ptr =
             has_csa_fp8_indexer ? csa_indexer_k_cache->data_ptr<uint8_t>() : nullptr;
         const float* csa_indexer_weights_ptr =
@@ -9024,6 +9025,9 @@ torch::Tensor launchDsv4CpDistributedPrefillAttention(const torch::Tensor& q,
             0;
     const int enable_split_k_attention =
         allow_split_k_attention && splitk_max_keys >= kMegaSplitKMinKeys ? 1 : 0;
+    if (local_rows.size(0) == 0 && !needs_mega_side_effects && !enable_split_k_attention) {
+        return output;
+    }
     int splitk_keys_per_block = kMegaSplitKKeysPerBlock;
     if (splitk_max_keys >= 2048) {
         splitk_keys_per_block = 256;
