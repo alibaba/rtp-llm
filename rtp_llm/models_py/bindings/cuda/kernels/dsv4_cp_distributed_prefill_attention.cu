@@ -103,6 +103,8 @@ constexpr int kMegaIndexerHeads = 64;
 constexpr int kMegaIndexerHeadsPerWarpPartial = kMegaAttentionWarpSize / kMegaIndexerCandidateHeadLanes;
 constexpr int kMegaIndexerWarpsPerCandidate = kMegaIndexerHeads / kMegaIndexerHeadsPerWarpPartial;
 constexpr int kMegaIndexerScorerFloatSlots = kMegaIndexerCandidateTile * kMegaIndexerWarpsPerCandidate;
+constexpr int kMegaWorstSlotWarpKeySlots =
+    (kMegaBlockThreads / kMegaAttentionWarpSize) * kMegaIndexerCandidateTile;
 constexpr int kMegaIndexerMetadataBytes =
     ((kMegaIndexerCandidateTile * static_cast<int>(sizeof(const uint8_t*))
       + kMegaIndexerCandidateTile * static_cast<int>(sizeof(float)) + 7)
@@ -122,6 +124,9 @@ static_assert(kMegaIndexerCandidateTile
                       + (kMegaBlockThreads / kMegaAttentionWarpSize) * kMegaIndexerCandidateTile
                   <= kMegaBlockThreads,
               "CSA worst-slot tile scratch must fit in reduce_indices_second without aliasing the tile list");
+static_assert(kMegaWorstSlotWarpKeySlots * static_cast<int>(sizeof(uint64_t))
+                      <= kMegaReduceBufSlots * static_cast<int>(sizeof(float)),
+              "CSA worst-slot key scratch must fit in the reduce buffer");
 constexpr unsigned int kMegaCompressedDoneFlag = 0x80000000u;
 constexpr unsigned int kMegaCompressedCountMask = 0x7fffffffu;
 constexpr int kMegaCsaScorePrebuildBarrier = 17;
@@ -565,6 +570,21 @@ __device__ __forceinline__ bool dsv4MegaTopKBetter(float lhs_score, int lhs_idx,
     return lhs_score > rhs_score || (lhs_score == rhs_score && lhs_idx < rhs_idx);
 }
 
+__device__ __forceinline__ uint32_t dsv4MegaOrderedFloatKey(float score) {
+    const uint32_t bits = __float_as_uint(score == 0.0f ? 0.0f : score);
+    return (bits & 0x80000000u) != 0 ? ~bits : (bits ^ 0x80000000u);
+}
+
+__device__ __forceinline__ uint64_t dsv4MegaTopKBetterKey(float score, int idx) {
+    const uint64_t score_key = static_cast<uint64_t>(dsv4MegaOrderedFloatKey(score));
+    const uint32_t idx_key = 0xffffffffu - static_cast<uint32_t>(idx);
+    return (score_key << 32) | static_cast<uint64_t>(idx_key);
+}
+
+__device__ __forceinline__ bool dsv4MegaTopKKeyWorse(uint64_t lhs_key, uint64_t rhs_key) {
+    return lhs_key < rhs_key;
+}
+
 __device__ __forceinline__ void dsv4MegaInsertWorstCandidateList(int slot,
                                                                  float score,
                                                                  int idx,
@@ -600,6 +620,39 @@ __device__ __forceinline__ void dsv4MegaInsertWorstCandidateList(int slot,
     slots[insert_pos] = slot;
     scores[insert_pos] = score;
     indices[insert_pos] = idx;
+}
+
+__device__ __forceinline__ void dsv4MegaInsertWorstCandidateKeyList(int slot,
+                                                                    uint64_t key,
+                                                                    int* __restrict__ slots,
+                                                                    uint64_t* __restrict__ keys,
+                                                                    int limit) {
+    if (slot < 0 || limit <= 0) {
+        return;
+    }
+    int insert_pos = -1;
+#pragma unroll
+    for (int i = 0; i < kMegaIndexerCandidateTile; ++i) {
+        if (i >= limit) {
+            break;
+        }
+        if (slots[i] < 0 || dsv4MegaTopKKeyWorse(key, keys[i])) {
+            insert_pos = i;
+            break;
+        }
+    }
+    if (insert_pos < 0) {
+        return;
+    }
+#pragma unroll
+    for (int i = kMegaIndexerCandidateTile - 1; i > 0; --i) {
+        if (i < limit && i > insert_pos) {
+            slots[i] = slots[i - 1];
+            keys[i] = keys[i - 1];
+        }
+    }
+    slots[insert_pos] = slot;
+    keys[insert_pos] = key;
 }
 
 __device__ __forceinline__ void dsv4MegaInsertWorstCandidate(int slot,
@@ -710,34 +763,32 @@ __device__ __forceinline__ void dsv4MegaFindWorstTopKSlotsTile(const int* __rest
                                                                int requested_slots,
                                                                int* __restrict__ warp_slots,
                                                                int* __restrict__ worst_slots,
-                                                               float* __restrict__ warp_scores) {
+                                                               uint64_t* __restrict__ warp_keys) {
     const int tid = static_cast<int>(threadIdx.x);
     const int lane = tid & (kMegaAttentionWarpSize - 1);
     const int warp_id = tid / kMegaAttentionWarpSize;
     const int num_warps = (static_cast<int>(blockDim.x) + kMegaAttentionWarpSize - 1) / kMegaAttentionWarpSize;
     const int limit = min_int(min_int(requested_slots, kMegaIndexerCandidateTile), k_eff);
     int slots[kMegaIndexerCandidateTile];
-    float scores[kMegaIndexerCandidateTile];
-    int indices[kMegaIndexerCandidateTile];
+    uint64_t keys[kMegaIndexerCandidateTile];
 #pragma unroll
     for (int i = 0; i < kMegaIndexerCandidateTile; ++i) {
         slots[i] = -1;
-        scores[i] = 3.4028234663852886e38F;
-        indices[i] = -2147483647;
+        keys[i] = 0ull;
     }
     for (int i = tid; i < k_eff; i += static_cast<int>(blockDim.x)) {
         const int idx = scratch_indices[i];
-        dsv4MegaInsertWorstCandidateList(i, scratch_scores[i], idx, slots, scores, indices, limit);
+        const uint64_t key = dsv4MegaTopKBetterKey(scratch_scores[i], idx);
+        dsv4MegaInsertWorstCandidateKeyList(i, key, slots, keys, limit);
     }
 #pragma unroll
     for (int offset = kMegaAttentionWarpSize / 2; offset > 0; offset >>= 1) {
 #pragma unroll
         for (int i = 0; i < kMegaIndexerCandidateTile; ++i) {
             const int rhs_slot = __shfl_down_sync(0xffffffffu, slots[i], offset);
-            const float rhs_score = __shfl_down_sync(0xffffffffu, scores[i], offset);
-            const int rhs_idx = __shfl_down_sync(0xffffffffu, indices[i], offset);
+            const uint64_t rhs_key = __shfl_down_sync(0xffffffffu, keys[i], offset);
             if (lane + offset < kMegaAttentionWarpSize) {
-                dsv4MegaInsertWorstCandidateList(rhs_slot, rhs_score, rhs_idx, slots, scores, indices, limit);
+                dsv4MegaInsertWorstCandidateKeyList(rhs_slot, rhs_key, slots, keys, limit);
             }
         }
     }
@@ -747,29 +798,26 @@ __device__ __forceinline__ void dsv4MegaFindWorstTopKSlotsTile(const int* __rest
             const int out = warp_id * kMegaIndexerCandidateTile + i;
             if (i < limit) {
                 warp_slots[out] = slots[i];
-                warp_scores[out] = scores[i];
+                warp_keys[out] = keys[i];
             }
         }
     }
     __syncthreads();
     if (tid == 0) {
         int merged_slots[kMegaIndexerCandidateTile];
-        float merged_scores[kMegaIndexerCandidateTile];
-        int merged_indices[kMegaIndexerCandidateTile];
+        uint64_t merged_keys[kMegaIndexerCandidateTile];
 #pragma unroll
         for (int i = 0; i < kMegaIndexerCandidateTile; ++i) {
             merged_slots[i] = -1;
-            merged_scores[i] = 3.4028234663852886e38F;
-            merged_indices[i] = -2147483647;
+            merged_keys[i] = 0ull;
         }
         for (int w = 0; w < num_warps; ++w) {
 #pragma unroll
             for (int i = 0; i < kMegaIndexerCandidateTile; ++i) {
                 if (i < limit) {
                     const int slot = warp_slots[w * kMegaIndexerCandidateTile + i];
-                    const int idx = slot >= 0 ? scratch_indices[slot] : -2147483647;
-                    dsv4MegaInsertWorstCandidateList(
-                        slot, warp_scores[w * kMegaIndexerCandidateTile + i], idx, merged_slots, merged_scores, merged_indices, limit);
+                    dsv4MegaInsertWorstCandidateKeyList(
+                        slot, warp_keys[w * kMegaIndexerCandidateTile + i], merged_slots, merged_keys, limit);
                 }
             }
         }
@@ -3162,7 +3210,7 @@ __device__ __forceinline__ int dsv4MegaBuildCompressedIndicesForRow(const scalar
                                                    tile_valid_count,
                                                    reduce_indices_second + kMegaIndexerCandidateTile,
                                                    reduce_indices,
-                                                   reduce_buf);
+                                                   reinterpret_cast<uint64_t*>(reduce_buf));
                     if (tid == 0) {
                         int sorted_tile_count = min_int(tile_valid_count, k_eff);
                         dsv4MegaSelectBestTileLanes(
@@ -3652,7 +3700,7 @@ __device__ __forceinline__ int dsv4MegaBuildCompressedIndicesFromScores(const in
                                            tile_valid_count,
                                            reduce_indices_second + kMegaIndexerCandidateTile,
                                            reduce_indices,
-                                           reduce_buf);
+                                           reinterpret_cast<uint64_t*>(reduce_buf));
             if (tid == 0) {
                 int sorted_tile_count = min_int(tile_valid_count, k_eff);
                 dsv4MegaSelectBestTileLanes(
@@ -7048,7 +7096,7 @@ __global__ __launch_bounds__(kMegaBlockThreads, 1) void dsv4CpDistributedPrefill
     __shared__ int   reduce_indices[kMegaBlockThreads];
     __shared__ int   reduce_indices_second[kMegaBlockThreads];
     __shared__ float compressed_scores[kMaxCompressedTopK];
-    __shared__ float reduce_buf[kMegaReduceBufSlots];
+    __shared__ __align__(8) float reduce_buf[kMegaReduceBufSlots];
     __shared__ float reduce_result[kMegaReduceResultSlots];
     __shared__ float tile_logits[kMegaAttentionKeyTile];
     __shared__ float q_shared[kSwaHeadDim];
