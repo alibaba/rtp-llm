@@ -3,6 +3,7 @@
 #include "gtest/gtest.h"
 
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -14,6 +15,7 @@
 #include <vector>
 
 #include <errno.h>
+#include <poll.h>
 #include <signal.h>
 #include <sys/socket.h>
 #include <sys/un.h>
@@ -22,6 +24,8 @@
 
 namespace rtp_llm {
 namespace {
+
+constexpr char kExpectedLinkProbeToken = 0x5a;
 
 std::string makeTempBase() {
     std::string       pattern = "/tmp/cpu_tp_broadcaster_test.XXXXXX";
@@ -121,6 +125,67 @@ int fakePeerSendRank(const std::string& base, int peer_rank) {
     int rc = writeAllRaw(fd, &peer_rank, sizeof(peer_rank)) == static_cast<ssize_t>(sizeof(peer_rank)) ? 0 : 1;
     ::close(fd);
     return rc;
+}
+
+int connectPeerAndReadProbe(const std::string& base, int peer_rank, std::string& error) {
+    int fd = connectWithRetry(socketPath(base));
+    if (fd < 0) {
+        error = std::string("fake peer connect failed: ") + std::strerror(errno);
+        return -1;
+    }
+    if (writeAllRaw(fd, &peer_rank, sizeof(peer_rank)) != static_cast<ssize_t>(sizeof(peer_rank))) {
+        error = "fake peer handshake write failed";
+        ::close(fd);
+        return -1;
+    }
+    char probe = 0;
+    if (readAllRaw(fd, &probe, sizeof(probe)) != static_cast<ssize_t>(sizeof(probe))
+        || probe != kExpectedLinkProbeToken) {
+        error = "fake peer link probe read failed";
+        ::close(fd);
+        return -1;
+    }
+    return fd;
+}
+
+void peerReadOneInt(const std::string& base, int& observed, std::string& error) {
+    int fd = connectPeerAndReadProbe(base, 1, error);
+    if (fd < 0) {
+        return;
+    }
+    if (readAllRaw(fd, &observed, sizeof(observed)) != static_cast<ssize_t>(sizeof(observed))) {
+        error = "fake peer payload read failed";
+    }
+    ::close(fd);
+}
+
+void peerHoldUnreadPayload(const std::string& base,
+                           std::atomic<bool>& payload_ready,
+                           std::atomic<bool>& release_peer,
+                           std::string&       error) {
+    int fd = connectPeerAndReadProbe(base, 1, error);
+    if (fd < 0) {
+        return;
+    }
+    while (!release_peer.load(std::memory_order_acquire)) {
+        struct pollfd pfd {};
+        pfd.fd     = fd;
+        pfd.events = POLLIN;
+        int rc     = ::poll(&pfd, 1, 10);
+        if (rc > 0 && (pfd.revents & POLLIN)) {
+            payload_ready.store(true, std::memory_order_release);
+            break;
+        }
+        if (rc < 0 && errno != EINTR) {
+            error = std::string("fake peer poll failed: ") + std::strerror(errno);
+            ::close(fd);
+            return;
+        }
+    }
+    while (!release_peer.load(std::memory_order_acquire)) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    ::close(fd);
 }
 
 int fakeServerWrongProbe(const std::string& base) {
@@ -370,31 +435,77 @@ TEST(CpuTpBroadcasterTest, AllowsCrossThreadBroadcastAndResetWhenIdle) {
     auto& bcast = CpuTpBroadcaster::instance();
     bcast.reset();
 
-    const std::string base = makeTempBase();
-    bcast.initialize(0, 1, base);
+    const std::string base     = makeTempBase();
+    int               observed = 0;
+    std::string       peer_error;
+    std::thread       peer_thread([&] { peerReadOneInt(base, observed, peer_error); });
+    bcast.initialize(0, 2, base);
 
     std::string broadcast_error;
     std::thread broadcast_thread([&] {
         try {
             int value = 7;
             bcast.broadcast(&value, sizeof(value), 0);
-        } catch (const std::exception& e) {
-            broadcast_error = e.what();
-        }
+        } catch (const std::exception& e) { broadcast_error = e.what(); }
     });
     broadcast_thread.join();
+    peer_thread.join();
     EXPECT_TRUE(broadcast_error.empty()) << broadcast_error;
+    EXPECT_TRUE(peer_error.empty()) << peer_error;
+    EXPECT_EQ(observed, 7);
 
     std::string reset_error;
     std::thread reset_thread([&] {
         try {
             bcast.reset();
-        } catch (const std::exception& e) {
-            reset_error = e.what();
-        }
+        } catch (const std::exception& e) { reset_error = e.what(); }
     });
     reset_thread.join();
     EXPECT_TRUE(reset_error.empty()) << reset_error;
+
+    bcast.reset();
+    cleanupTempBase(base);
+}
+
+TEST(CpuTpBroadcasterTest, ResetRejectsInFlightBroadcast) {
+    auto& bcast = CpuTpBroadcaster::instance();
+    bcast.reset();
+
+    const std::string base = makeTempBase();
+    std::atomic<bool> payload_ready{false};
+    std::atomic<bool> release_peer{false};
+    std::string       peer_error;
+    std::thread       peer_thread([&] { peerHoldUnreadPayload(base, payload_ready, release_peer, peer_error); });
+    bcast.initialize(0, 2, base);
+
+    std::string broadcast_error;
+    std::thread broadcast_thread([&] {
+        try {
+            std::vector<char> payload(64 * 1024 * 1024, 0x7f);
+            bcast.broadcast(payload.data(), payload.size(), 0);
+        } catch (const std::exception& e) { broadcast_error = e.what(); }
+    });
+
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (!payload_ready.load(std::memory_order_acquire) && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+
+    std::string reset_error;
+    if (payload_ready.load(std::memory_order_acquire)) {
+        try {
+            bcast.reset();
+        } catch (const std::exception& e) { reset_error = e.what(); }
+    }
+
+    release_peer.store(true, std::memory_order_release);
+    peer_thread.join();
+    broadcast_thread.join();
+
+    EXPECT_TRUE(peer_error.empty()) << peer_error;
+    EXPECT_TRUE(payload_ready.load(std::memory_order_acquire)) << "fake peer did not observe broadcast payload";
+    EXPECT_NE(reset_error.find("reset called while broadcastCPU is in progress"), std::string::npos) << reset_error;
+    EXPECT_FALSE(broadcast_error.empty());
 
     bcast.reset();
     cleanupTempBase(base);

@@ -41,6 +41,36 @@ _initialized: bool = False  # Track if we've initialized (to prevent double init
 _cpu_tp_broadcaster_base_path: Optional[str] = None
 _cpu_tp_broadcaster_nccl_init_port: Optional[int] = None
 
+_PARALLELISM_CONFIG_FIELDS = (
+    "tp_size",
+    "ep_size",
+    "dp_size",
+    "pp_size",
+    "world_size",
+    "world_rank",
+    "local_world_size",
+    "local_rank",
+    "ffn_sp_size",
+    "tp_rank",
+    "ep_rank",
+    "dp_rank",
+    "ffn_tp_size",
+    "ffn_tp_rank",
+    "enable_sp",
+    "use_ub_comm",
+    "ffn_disaggregate_config",
+    "prefill_cp_config",
+)
+
+
+def _copy_parallelism_config(
+    parallelism_config: ParallelismConfig,
+) -> ParallelismConfig:
+    copied = ParallelismConfig()
+    for field in _PARALLELISM_CONFIG_FIELDS:
+        setattr(copied, field, getattr(parallelism_config, field))
+    return copied
+
 
 def _should_init_cpu_tp_broadcaster(
     parallelism_config: ParallelismConfig,
@@ -49,8 +79,19 @@ def _should_init_cpu_tp_broadcaster(
     local_world_size = parallelism_config.local_world_size
     if tp_size <= 1 or local_world_size <= 0:
         return False
-    # UDS cannot cross nodes. With contiguous rank layout, TP groups are local
-    # only when each host's local rank block is exactly divisible by tp_size.
+    expected_tp_rank = parallelism_config.world_rank % tp_size
+    expected_dp_rank = parallelism_config.world_rank // tp_size
+    if (parallelism_config.tp_rank, parallelism_config.dp_rank) != (
+        expected_tp_rank,
+        expected_dp_rank,
+    ):
+        return False
+    if parallelism_config.local_rank != (
+        parallelism_config.world_rank % local_world_size
+    ):
+        return False
+    # UDS cannot cross nodes. Under the TP-innermost contiguous rank layout
+    # used by _create_process_groups, every host block must align to tp_size.
     return tp_size <= local_world_size and local_world_size % tp_size == 0
 
 
@@ -71,6 +112,7 @@ def _make_cpu_tp_broadcaster_base_path(
             os.environ.get("TMPDIR", "/tmp"), f"rtp_llm_{os.getuid()}"
         )
     os.makedirs(base_dir, mode=0o700, exist_ok=True)
+    os.chmod(base_dir, 0o700)
     base_path = os.path.join(
         base_dir, f"rtp_llm_tp_{session_id}_dp{parallelism_config.dp_rank}"
     )
@@ -117,27 +159,31 @@ def _init_cpu_tp_broadcaster_if_needed(librtp_compute_ops) -> None:
     )
 
 
-def _normalize_parallelism_ranks(parallelism_config: ParallelismConfig) -> None:
+def _normalize_parallelism_ranks(
+    parallelism_config: ParallelismConfig,
+) -> ParallelismConfig:
     # Process-group construction below uses this world-rank layout. Keep the
-    # explicit config fields in sync for callsites that only fill sizes/ranks.
+    # caller object immutable and fail fast on explicit incompatible layouts.
+    normalized_config = _copy_parallelism_config(parallelism_config)
     if parallelism_config.tp_size > 0:
         old_tp_rank = parallelism_config.tp_rank
         old_dp_rank = parallelism_config.dp_rank
         tp_rank = parallelism_config.world_rank % parallelism_config.tp_size
         dp_rank = parallelism_config.world_rank // parallelism_config.tp_size
-        if (old_tp_rank, old_dp_rank) != (tp_rank, dp_rank):
-            logging.warning(
-                "Normalize ParallelismConfig ranks from tp_rank=%s, dp_rank=%s "
-                "to tp_rank=%s, dp_rank=%s for world_rank=%s, tp_size=%s",
-                old_tp_rank,
-                old_dp_rank,
-                tp_rank,
-                dp_rank,
-                parallelism_config.world_rank,
-                parallelism_config.tp_size,
+        old_ranks = (old_tp_rank, old_dp_rank)
+        new_ranks = (tp_rank, dp_rank)
+        default_unset = old_ranks == (0, 0) and parallelism_config.world_rank != 0
+        if old_ranks != new_ranks and not default_unset:
+            raise ValueError(
+                "ParallelismConfig ranks must match TP-innermost layout: "
+                f"got tp_rank={old_tp_rank}, dp_rank={old_dp_rank}, "
+                f"expected tp_rank={tp_rank}, dp_rank={dp_rank} for "
+                f"world_rank={parallelism_config.world_rank}, "
+                f"tp_size={parallelism_config.tp_size}"
             )
-        parallelism_config.tp_rank = tp_rank
-        parallelism_config.dp_rank = dp_rank
+        normalized_config.tp_rank = tp_rank
+        normalized_config.dp_rank = dp_rank
+    return normalized_config
 
 
 def init_distributed_environment(
@@ -173,14 +219,14 @@ def init_distributed_environment(
         )
         # Still need to create groups if they don't exist
         if not _group_map:
-            _normalize_parallelism_ranks(parallelism_config)
+            parallelism_config = _normalize_parallelism_ranks(parallelism_config)
             _create_process_groups(parallelism_config, backend, timedelta(days=36500))
             _register_process_groups_to_cpp()
         if rocm_rccl.is_available_runtime() and parallelism_config.tp_size > 1:
             rocm_rccl.prepare_comm_if_needed(parallelism_config, _get_group(Group.TP))
         return
 
-    _normalize_parallelism_ranks(parallelism_config)
+    parallelism_config = _normalize_parallelism_ranks(parallelism_config)
 
     assert backend in ["nccl"], "backend current only supports nccl"
     ip = nccl_comm_config.nccl_ip
