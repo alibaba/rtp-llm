@@ -84,6 +84,8 @@ inline void setCurrentThreadDeviceIfNeeded(int device_id) {
 
     // Thread-pool workers may serve different cache stores over time; a new
     // device_id intentionally retargets the current thread instead of no-oping.
+    // Callers must not bypass this helper to change the same worker thread's
+    // current device, unless they restore it before returning to pinned work.
     // The default stream is restored on every call because same-device tasks
     // may follow work that temporarily changed PyTorch's current stream.
     detail::setCurrentThreadDeviceIfNeededImpl(
