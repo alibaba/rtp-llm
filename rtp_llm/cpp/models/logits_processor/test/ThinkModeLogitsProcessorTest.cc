@@ -659,6 +659,31 @@ TEST_F(SamplerTest, testUpdateStatusAllowsPartialCommitWindow) {
     EXPECT_EQ(processor.thinkEndTokensStatus()[0], 1);
 }
 
+TEST_F(SamplerTest, testThinkContentTokenLenCountsOnlyAfterThink) {
+    std::vector<int>             end_think_token_ids = {8, 9};
+    StreamThinkInfo              info(true,
+                                      32000,
+                                      {7},
+                                      end_think_token_ids,
+                                      0,
+                                      0,
+                                      false,
+                                      std::make_shared<StringContainDFA<size_t, int>>(end_think_token_ids));
+    std::vector<StreamThinkInfo> infos = {info};
+    ThinkModeLogitsProcessor     processor(infos);
+
+    EXPECT_EQ(processor.thinkContentTokenLen(), 0);
+
+    processor.updateStatus(torch::tensor({{8}}, torch::kInt32), /*num_new_tokens=*/1);
+    EXPECT_EQ(processor.thinkContentTokenLen(), 0);
+
+    processor.updateStatus(torch::tensor({{9}}, torch::kInt32), /*num_new_tokens=*/1);
+    EXPECT_EQ(processor.thinkContentTokenLen(), 0);
+
+    processor.updateStatus(torch::tensor({{42}}, torch::kInt32), /*num_new_tokens=*/1);
+    EXPECT_EQ(processor.thinkContentTokenLen(), 1);
+}
+
 #undef EXPECT_SIMILAR
 
 }  // namespace rtp_llm

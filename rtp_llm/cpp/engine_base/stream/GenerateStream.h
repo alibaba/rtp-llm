@@ -279,6 +279,7 @@ public:
     size_t                      curBlocksNum() const;
 
     bool needFinish();
+    bool needFinishByThinkContentTokens() const;
     bool needFinishBySPTokens();
     void matchEosToken();
     void matchEosToken(int batch_id);

@@ -37,6 +37,9 @@ public:
     virtual int64_t acceptedTokenLen() const {
         return 0;
     }
+    virtual int64_t thinkContentTokenLen() const {
+        return -1;
+    }
     void          memFill(const torch::Tensor& new_tokens_logits, size_t vocab_size, size_t index);
     void          maskLogits(torch::Tensor& new_token_logits, const torch::Tensor& vocab_mask);
     torch::Tensor generateVocabMask(size_t                                  batch_size,

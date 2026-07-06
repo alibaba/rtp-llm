@@ -26,7 +26,7 @@ bool transitionToAfterThinkIfClosed(StreamThinkInfo& info) {
     if (!info.dfa_ptr || !info.dfa_ptr->isFinished()) {
         return false;
     }
-    info.process_state = ThinkProcessState::AFTER_THINK;
+    info.markAfterThink();
     return true;
 }
 
@@ -177,7 +177,7 @@ void advanceThinkStateForSpec(StreamThinkInfo& info, int32_t token_id) {
 
     info.dfa_ptr->next(token_id);
     if (info.dfa_ptr->isFinished()) {
-        info.process_state = ThinkProcessState::AFTER_THINK;
+        info.markAfterThink();
     } else if (thinkEndCloseInProgress(info)) {
         info.process_state = ThinkProcessState::CLOSING_THINK;
     } else if (info.process_state == ThinkProcessState::CLOSING_THINK) {
@@ -279,7 +279,7 @@ void ReasoningGrammarLogitsProcessor::updateStatus(const torch::Tensor& new_toke
             if (think_info_.dfa_ptr) {
                 think_info_.dfa_ptr->next(token_id);
                 if (think_info_.dfa_ptr->isFinished()) {
-                    think_info_.process_state = ThinkProcessState::AFTER_THINK;
+                    think_info_.markAfterThink();
                 } else if (thinkEndCloseInProgress(think_info_)) {
                     think_info_.process_state = ThinkProcessState::CLOSING_THINK;
                 } else if (think_info_.process_state == ThinkProcessState::CLOSING_THINK) {
@@ -379,6 +379,11 @@ int ReasoningGrammarLogitsProcessor::tryAcceptAndFillBitmask(const SpecLogitsPro
 int64_t ReasoningGrammarLogitsProcessor::acceptedTokenLen() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return think_info_.current_output_length;
+}
+
+int64_t ReasoningGrammarLogitsProcessor::thinkContentTokenLen() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return think_info_.contentTokenLen();
 }
 
 bool ReasoningGrammarLogitsProcessor::applyReasoningOrGrammarMaskLocked(const SamplerInputs& inputs, size_t batch_idx) {
