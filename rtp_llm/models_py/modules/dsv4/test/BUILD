@@ -228,6 +228,17 @@ py_test(
 )
 
 py_test(
+    name = "test_fused_rmsnorm_fp8_quant",
+    srcs = ["test_fused_rmsnorm_fp8_quant.py"],
+    deps = [
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm:testlib",
+    ],
+    tags = ["SM100_ARM"],
+    exec_properties = {"gpu": "SM100_ARM", "gpu_count": "1"},
+)
+
+py_test(
     name = "test_rope_only",
     srcs = ["test_rope_only.py"],
     deps = [

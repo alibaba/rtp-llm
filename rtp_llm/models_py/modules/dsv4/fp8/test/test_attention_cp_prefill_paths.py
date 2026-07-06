@@ -220,6 +220,47 @@ class AttentionSwaAsyncGatherTest(unittest.TestCase):
         self.assertIsNone(qkv.q)
         self.assertIsNotNone(qkv.kv_full)
 
+    def test_prefill_compute_qkv_reuses_shared_input_quant(self) -> None:
+        seq: list = []
+        layer = self._make_qkv_layer(seq)
+        common = _make_common(cp_on=False, device=torch.device("cuda"))
+
+        class FakeQuantLinear:
+            def __init__(self, name: str, out_features: int):
+                self.name = name
+                self.K = 4
+                self.scale_ue8m0 = True
+                self.out_features = out_features
+
+            def quantize_input(self, x):
+                seq.append(f"quant_{self.name}")
+                return ("fp8", "scale")
+
+            def forward_quantized(self, q, s):
+                seq.append(f"gemm_{self.name}_{q}_{s}")
+                return torch.zeros(3, self.out_features, dtype=torch.bfloat16)
+
+        layer.wq_a = FakeQuantLinear("wq_a", 6)
+        layer.wkv = FakeQuantLinear("wkv", 6)
+
+        with patch.object(attention_mod, "fused_rmsnorm_rope", lambda t, *a, **k: t):
+            qkv = layer._prefill_compute_qkv(
+                torch.zeros(3, 4, dtype=torch.bfloat16),
+                common,
+            )
+
+        self.assertEqual(
+            seq,
+            [
+                "quant_wq_a",
+                "gemm_wq_a_fp8_scale",
+                "gemm_wkv_fp8_scale",
+            ],
+        )
+        self.assertIsNone(qkv.q)
+        self.assertEqual(tuple(qkv.qr.shape), (3, 6))
+        self.assertEqual(tuple(qkv.kv_full.shape), (3, 6))
+
     def test_materialize_prefill_q_reuses_wq_b_output_for_rope(self) -> None:
         # The deferred q_lora_b + RoPE now live in _materialize_prefill_q, which
         # writes wq_b straight into the workspace Q slice and RoPEs it in-place.

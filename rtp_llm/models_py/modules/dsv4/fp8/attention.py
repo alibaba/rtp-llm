@@ -36,7 +36,9 @@ from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig
 from rtp_llm.models_py.modules.dsv4._fused_inv_rope_fp8_quant_triton import (
     fused_inv_rope_fp8_quant,
 )
-
+from rtp_llm.models_py.modules.dsv4._fused_rmsnorm_fp8_quant_triton import (
+    rmsnorm_fp8_quant_ue8m0,
+)
 # Audit §7.4 P0 (row 1) + §7.3.4: fused RMSNorm + partial RoPE, single
 # Triton launch.  Covers every Q/KV decode + prefill site.  Standalone
 # (no-RoPE) RMSNorm sites (``_rmsnorm_weighted``) use the framework C++
@@ -1926,6 +1928,59 @@ class AttentionFP8(nn.Module):
             return y.view(*shape[:-1], y.shape[-1])
         return layer(x, out=out) if out is not None else layer(x)
 
+    def _can_reuse_qkv_input_quant(self) -> bool:
+        return (
+            hasattr(self.wq_a, "quantize_input")
+            and hasattr(self.wq_a, "forward_quantized")
+            and hasattr(self.wkv, "forward_quantized")
+            and getattr(self.wq_a, "K", None) == getattr(self.wkv, "K", None)
+            and getattr(self.wq_a, "scale_ue8m0", None)
+            == getattr(self.wkv, "scale_ue8m0", None)
+        )
+
+    def can_fuse_prefill_attn_norm_input_quant(
+        self, x: torch.Tensor, norm_weight: torch.Tensor
+    ) -> bool:
+        return (
+            self._can_reuse_qkv_input_quant()
+            and getattr(self.wq_a, "scale_ue8m0", False)
+            and x.dim() == 2
+            and x.dtype == torch.bfloat16
+            and x.is_cuda
+            and x.is_contiguous()
+            and norm_weight.dtype == torch.bfloat16
+            and norm_weight.is_cuda
+            and norm_weight.is_contiguous()
+            and norm_weight.shape == (x.shape[-1],)
+            and x.shape[-1] % 128 == 0
+        )
+
+    def prefill_fused_attn_norm_input_quant(
+        self,
+        x: torch.Tensor,
+        norm_weight: torch.Tensor,
+        norm_eps: float,
+    ) -> Tuple[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+        with record_function_range("dsv4.fp8.attn.qkv.fused_attn_norm_input_quant"):
+            x_norm, x_fp8, x_scale = rmsnorm_fp8_quant_ue8m0(
+                x,
+                norm_weight,
+                eps=norm_eps,
+                group_size=128,
+                clamp_eps=1.0e-4,
+                out_norm=x,
+            )
+        return x_norm, (x_fp8, x_scale)
+
+    def _lin_from_shared_quant(
+        self,
+        layer: nn.Module,
+        quantized_input: Tuple[torch.Tensor, torch.Tensor],
+        shape: torch.Size,
+    ) -> torch.Tensor:
+        y = layer.forward_quantized(*quantized_input)
+        return y.view(*shape[:-1], y.shape[-1])
+
     def _wo_a_einsum_from_fp8(
         self, o_fp8: torch.Tensor, o_scale: torch.Tensor, B: int, S: int
     ) -> torch.Tensor:
@@ -2479,6 +2534,37 @@ class AttentionFP8(nn.Module):
             self._kv_cache = prev_kv
             self._block_tables_by_type = prev_bt
 
+    def forward_with_shared_input_quant(
+        self,
+        x: torch.Tensor,
+        positions: torch.Tensor,
+        shared_input_quant: Tuple[torch.Tensor, torch.Tensor],
+        kv_cache: Optional[Any] = None,
+        block_tables_by_type: Optional[Dict[int, torch.Tensor]] = None,
+    ) -> torch.Tensor:
+        prev_kv = self._kv_cache
+        prev_bt = self._block_tables_by_type
+        if kv_cache is not None:
+            self._kv_cache = kv_cache
+        if block_tables_by_type is not None:
+            self._block_tables_by_type = block_tables_by_type
+        try:
+            with record_function_range("dsv4.fp8.attn.set_pool_context"):
+                self._set_compressor_pool_context()
+            try:
+                with record_function_range(
+                    f"dsv4.fp8.attn.L{self.layer_id:02d}.prefill"
+                ):
+                    return self._forward_prefill(
+                        x, positions, shared_input_quant=shared_input_quant
+                    )
+            finally:
+                with record_function_range("dsv4.fp8.attn.clear_pool_context"):
+                    self._clear_compressor_pool_context()
+        finally:
+            self._kv_cache = prev_kv
+            self._block_tables_by_type = prev_bt
+
     # ------------------------------------------------------------------
     # CP-overlap orchestration helpers (Phase-Z; env-default-off)
     # ------------------------------------------------------------------
@@ -2551,7 +2637,10 @@ class AttentionFP8(nn.Module):
             wait_fn(pending)
 
     def _forward_prefill(
-        self, x: torch.Tensor, positions: torch.Tensor
+        self,
+        x: torch.Tensor,
+        positions: torch.Tensor,
+        shared_input_quant: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
     ) -> torch.Tensor:
         """Prefill body. ``x`` is flat ``[T, dim]``; output flat ``[T, dim]``.
 
@@ -2577,7 +2666,9 @@ class AttentionFP8(nn.Module):
         with record_function_range("dsv4.fp8.attn.prefill.common_setup"):
             common = self._prefill_common_setup(x, positions)
         with record_function_range("dsv4.fp8.attn.prefill.compute_qkv"):
-            qkv = self._prefill_compute_qkv(x, common)
+            qkv = self._prefill_compute_qkv(
+                x, common, shared_input_quant=shared_input_quant
+            )
 
         # Phase-Z overlap dispatch: hoist the SWA write into the orchestrator
         # so it can run on the default stream while the compressor NCCL
@@ -3057,7 +3148,10 @@ class AttentionFP8(nn.Module):
 
         async_workspace_reads = self._should_async_workspace_reads_for_prefill(common)
         with record_function_range("dsv4.fp8.attn.workspace.alloc"):
-            workspace = torch.zeros(
+            # E5b: combined indices only address rows written by compressed-K
+            # gather, SWA-prefix gather, or fresh-K overlay; keep this
+            # uninitialized to avoid a full workspace memset per layer.
+            workspace = torch.empty(
                 (B, wm.M, D), dtype=torch.bfloat16, device=qkv.q.device
             )
 
@@ -3582,7 +3676,8 @@ class AttentionFP8(nn.Module):
             int(wm.swa_gather_lens.max().item()) if wm.swa_gather_lens.numel() else 0
         )
         local_M = local_N + gather_len_max
-        workspace = torch.zeros(
+        # E5b: raw-Q merge builds compact topk over written local rows only.
+        workspace = torch.empty(
             (B, local_M, D), dtype=torch.bfloat16, device=qkv.q.device
         )
 
@@ -3858,13 +3953,17 @@ class AttentionFP8(nn.Module):
                 0,
                 position_ids_eff.to(device=self.freqs_cis.device, dtype=torch.long),
             )
-            topk_idxs = _get_window_topk_idxs_varlen(
-                win,
-                cu_seqlens_for_k,
-                position_ids_eff,
-                prefix_lengths,
-                req_id_per_token,
-            )  # [T_total, win]
+            from rtp_llm.models_py.modules.dsv4.fp8 import _swa_ops_triton as _swa_ops
+
+            topk_idxs, topk_length_kv_full = (
+                _swa_ops.compute_window_topk_and_length_varlen(
+                    win,
+                    cu_seqlens_for_k,
+                    position_ids_eff,
+                    prefix_lengths,
+                    req_id_per_token,
+                )
+            )
             any_cont = bool((prefix_lengths > 0).any().item())
 
         with record_function_range("dsv4.fp8.meta.swa_varlen"):
@@ -3878,6 +3977,7 @@ class AttentionFP8(nn.Module):
                 prefix_lengths=prefix_lengths,
                 position_ids=position_ids,
                 req_id_per_token=req_id_per_token,
+                topk_length_kv_full=topk_length_kv_full,
             )
 
         # Bind freqs_cis to this layer's compressor / indexer chain
@@ -4218,6 +4318,7 @@ class AttentionFP8(nn.Module):
             HCA_STATE,
             SWA_KV,
         )
+        from rtp_llm.models_py.modules.dsv4.fp8 import _swa_ops_triton as _swa_ops
 
         if self._kv_cache is None or self._block_tables_by_type is None:
             return None
@@ -4315,31 +4416,20 @@ class AttentionFP8(nn.Module):
                 )
                 B = int(S_i32.shape[0])
                 seq_len_full = int(cp_ctx_local.seq_len_full)
-                cum_after = torch.cumsum(S_i32, 0).to(torch.int32)  # [B]
-                cum_starts = torch.cat(
-                    [
-                        torch.zeros(1, dtype=torch.int32, device=device),
-                        cum_after[:-1],
-                    ]
-                )  # [B] each req's start in [0, seq_len_full)
-                g_arange32 = torch.arange(
-                    seq_len_full, device=device, dtype=torch.int32
-                )
-                # req_id[g] = searchsorted(cum_after, g, right=True).
-                # torch.bucketize(input, boundaries, right=True) returns the
-                # count of cumulative ends <= g for ascending boundaries.
-                req_id_per_token_eff = torch.bucketize(
-                    g_arange32, cum_after, right=True
-                ).to(torch.int64)
-                # Clamp in case of float rounding edge: every g < seq_len_full
-                # must map to a valid req index in [0, B).
-                req_id_per_token_eff.clamp_(max=B - 1)
-                cum_starts_l64 = cum_starts.to(torch.int64)
-                sp_l64_b = prefix_lengths.to(device=device, dtype=torch.long)
-                position_ids_eff = (
-                    g_arange32.to(torch.int64)
-                    - cum_starts_l64.gather(0, req_id_per_token_eff)
-                ) + sp_l64_b.gather(0, req_id_per_token_eff)
+                if cp_ctx_local.cu_seqlens_global is not None:
+                    cu_seqlens_full_eff = _flat_1d(
+                        cp_ctx_local.cu_seqlens_global.to(
+                            device=device, dtype=torch.int32
+                        )
+                    ).contiguous()
+                else:
+                    cum_after = torch.cumsum(S_i32, 0).to(torch.int32)
+                    cu_seqlens_full_eff = torch.cat(
+                        [
+                            torch.zeros(1, dtype=torch.int32, device=device),
+                            cum_after,
+                        ]
+                    ).contiguous()
             else:
                 position_ids_eff = _flat_1d(
                     position_ids.to(device=device, dtype=torch.int64)
@@ -4368,21 +4458,28 @@ class AttentionFP8(nn.Module):
             swa_bt_int32 = swa_bt[:B].to(device=device, dtype=torch.int32).contiguous()
             cmp_bt_int32 = cmp_bt[:B].to(device=device, dtype=torch.int32).contiguous()
 
-            # Per-token scatter target — pre-baked elementwise on the
-            # builder side so ``_attn_via_workspace`` is kernel-only.
-            # Under CP these come from the synthesised global streams above
-            # so the resulting ``new_k_slot_in_flat`` matches
-            # ``qkv.kv_full.size(0) == seq_len_full``.
-            sp_l64 = prefix_lengths.to(device=device, dtype=torch.long)
-            req_l64 = req_id_per_token_eff
-            pos_l64 = position_ids_eff
-            P_per_req_l64 = P_per_req.to(torch.long)  # [B]
-            new_k_slot_in_flat = (
-                req_l64 * M
-                + N
-                + P_per_req_l64.gather(0, req_l64)
-                + (pos_l64 - sp_l64.gather(0, req_l64))
-            ).contiguous()
+            # Per-token scatter target — pre-baked once so
+            # ``_attn_via_workspace`` is kernel-only.  E6c uses a single
+            # Triton metadata kernel instead of a chain of arange/bucketize/
+            # gather/arithmetic PyTorch kernels.
+            if cp_active:
+                new_k_slot_in_flat = _swa_ops.compute_swa_slot_in_flat_from_cu(
+                    cu_seqlens_full_eff,
+                    prefix_lengths.to(device=device)[:B],
+                    num_tokens=seq_len_full,
+                    M=M,
+                    window_size=win,
+                    base_offset=N,
+                )
+            else:
+                new_k_slot_in_flat = _swa_ops.compute_swa_slot_in_flat(
+                    position_ids_eff,
+                    req_id_per_token_eff,
+                    prefix_lengths.to(device=device),
+                    M=M,
+                    window_size=win,
+                    base_offset=N,
+                )
 
             T_total = seqlen
 
@@ -4628,6 +4725,7 @@ class AttentionFP8(nn.Module):
         prefix_lengths: torch.Tensor,
         position_ids: torch.Tensor,
         req_id_per_token: torch.Tensor,
+        topk_length_kv_full: Optional[torch.Tensor] = None,
     ) -> SwaPrefillMeta:
         """Varlen path: B>=1, per-request tensor plumbing.
 
@@ -4675,13 +4773,17 @@ class AttentionFP8(nn.Module):
         # topk_length when the typed pool/block-table path is unavailable
         # (warmup, reuse_cache=0, or request-level cache disabled) and they
         # fall back to direct BF16 kv_full attention.
-        sp_per_token = prefix_lengths.to(torch.int32).gather(
-            0, req_id_per_token.to(torch.int64)
-        )  # [T_total]
-        local_pos = position_ids.to(torch.int32) - sp_per_token  # [T_total]
-        topk_length_kv_full: Optional[torch.Tensor] = torch.clamp(
-            local_pos + 1, max=win
-        )
+        if topk_length_kv_full is None:
+            sp_per_token = prefix_lengths.to(torch.int32).gather(
+                0, req_id_per_token.to(torch.int64)
+            )  # [T_total]
+            local_pos = position_ids.to(torch.int32) - sp_per_token  # [T_total]
+            topk_length_kv_full = torch.clamp(local_pos + 1, max=win)
+        else:
+            assert topk_length_kv_full.numel() == num_tokens, (
+                "topk_length_kv_full token count mismatch: "
+                f"{topk_length_kv_full.shape} vs {num_tokens}"
+            )
 
         # Warmup short-circuit — pool not bound, no Group-1 / Group-2 to build.
         bt = (
@@ -4877,26 +4979,15 @@ class AttentionFP8(nn.Module):
                     prefix_lengths=prefix_lengths,
                 )
 
-                full_req_ids = torch.repeat_interleave(
-                    torch.arange(write_B, device=device, dtype=torch.long),
+                slot_in_flat = _swa_ops.compute_swa_slot_in_flat_from_cu(
                     _flat_1d(
-                        cp_ctx.input_lengths_global.to(device=device, dtype=torch.long)
+                        cp_ctx.cu_seqlens_global.to(device=device, dtype=torch.int32)
                     ),
+                    prefix_lengths.to(device=device)[:write_B],
+                    num_tokens=cp_ctx.seq_len_full,
+                    M=M,
+                    window_size=win,
                 )
-                full_prefix = prefix_lengths.to(device=device, dtype=torch.long)[
-                    :write_B
-                ]
-                full_starts = cp_ctx.cu_seqlens_global.to(
-                    device=device, dtype=torch.long
-                )[:-1]
-                g_arange = torch.arange(
-                    cp_ctx.seq_len_full, device=device, dtype=torch.long
-                )
-                local_pos = g_arange - full_starts.gather(0, full_req_ids)
-                P_b_full = torch.clamp_max(full_prefix, win - 1)
-                slot_in_flat = (
-                    full_req_ids * M + P_b_full.gather(0, full_req_ids) + local_pos
-                ).contiguous()
             else:
                 topk_indices_empty = torch.empty(
                     (num_tokens, 0), dtype=torch.int32, device=device
@@ -4913,19 +5004,15 @@ class AttentionFP8(nn.Module):
                     N=0,
                 )
                 # Pre-bake the per-token scatter index for ``via_concat``
-                # step-2. All inputs are layer-invariant (per-batch tensors
-                # + window_size + M); building once here keeps the attn
-                # helper free of casts / gathers / arith on every cont
-                # layer.
-                prefix_l64 = prefix_lengths.to(device=device, dtype=torch.long)
-                req_id_l64 = req_id_per_token.to(device=device, dtype=torch.long)
-                pos_l64 = position_ids.to(device=device, dtype=torch.long)
-                P_b = torch.clamp_max(prefix_l64, win - 1)
-                slot_in_flat = (
-                    req_id_l64 * M
-                    + P_b.gather(0, req_id_l64)
-                    + (pos_l64 - prefix_l64.gather(0, req_id_l64))
-                ).contiguous()
+                # step-2. E6c fuses the casts/gathers/arithmetic into one
+                # Triton metadata kernel.
+                slot_in_flat = _swa_ops.compute_swa_slot_in_flat(
+                    position_ids.to(device=device),
+                    req_id_per_token.to(device=device),
+                    prefix_lengths.to(device=device),
+                    M=M,
+                    window_size=win,
+                )
             prefix_len_max = 1
         else:
             cache_seq_lens = None
@@ -4956,7 +5043,12 @@ class AttentionFP8(nn.Module):
             cache_compaction=cache_compaction,
         )
 
-    def _prefill_compute_qkv(self, x: torch.Tensor, common: PrefillMeta) -> PrefillQKV:
+    def _prefill_compute_qkv(
+        self,
+        x: torch.Tensor,
+        common: PrefillMeta,
+        shared_input_quant: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+    ) -> PrefillQKV:
         """Q/KV path — RMSNorm + LoRA Q + KV linears + fused RMSNorm-RoPE.
 
         Internally uses ``[1, T, ...]`` so ``fused_rmsnorm_rope`` sees the
@@ -4965,6 +5057,13 @@ class AttentionFP8(nn.Module):
         """
         x_3d = x.unsqueeze(0)
         rd = common.rd
+        if self._can_reuse_qkv_input_quant():
+            if shared_input_quant is None:
+                with record_function_range("dsv4.fp8.attn.qkv.shared_input_quant"):
+                    x_2d = x_3d.reshape(-1, x_3d.shape[-1])
+                    shared_input_quant = self.wq_a.quantize_input(x_2d)
+        else:
+            shared_input_quant = None
 
         def compute_qr() -> torch.Tensor:
             # q_lora_a + norm only — small ``[1, T, q_lora_rank]`` (fed to the
@@ -4972,13 +5071,24 @@ class AttentionFP8(nn.Module):
             # ``_materialize_prefill_q`` so the 16 GiB Q buffer can reuse the
             # union workspace storage after the compressors finish.
             with record_function_range("dsv4.fp8.attn.qkv.q_lora_a_norm"):
+                if shared_input_quant is not None:
+                    q_proj = self._lin_from_shared_quant(
+                        self.wq_a, shared_input_quant, x_3d.shape
+                    )
+                else:
+                    q_proj = self._lin(self.wq_a, x_3d)
                 return self._rmsnorm_weighted(
-                    self._lin(self.wq_a, x_3d), self.q_norm
+                    q_proj, self.q_norm
                 )  # [1, T, q_lora_rank]
 
         def compute_kv() -> torch.Tensor:
             with record_function_range("dsv4.fp8.attn.qkv.kv_proj_rope"):
-                kv_in = self._lin(self.wkv, x_3d)
+                if shared_input_quant is not None:
+                    kv_in = self._lin_from_shared_quant(
+                        self.wkv, shared_input_quant, x_3d.shape
+                    )
+                else:
+                    kv_in = self._lin(self.wkv, x_3d)
                 return fused_rmsnorm_rope(
                     kv_in, self.kv_norm, common.freqs_cis, rd, eps=self.eps
                 )
@@ -5207,8 +5317,8 @@ class AttentionFP8(nn.Module):
         assert common.use_varlen, "DSV4 FP8 SWA concat requires varlen metadata"
         B = common.batch_size
 
-        # zero is necessary to avoid potential NaN values broadcast from uninitialized memory
-        workspace = torch.zeros(
+        # E5b: meta.combined_indices is built from valid prefix/new-K slots only.
+        workspace = torch.empty(
             (B, meta.M, D),
             dtype=torch.bfloat16,
             device=qkv.q.device,

@@ -17,6 +17,12 @@ py_test(
 )
 
 py_test(
+    name = "fp8_deepgemm_linear_quantized_input_contract_test",
+    srcs = ["fp8_deepgemm_linear_quantized_input_contract_test.py"],
+    deps = py_test_deps,
+)
+
+py_test(
     name = "fp8_deepgemm_linear_sm100_test",
     srcs = [
         "fp8_deepgemm_linear_sm100_test.py",

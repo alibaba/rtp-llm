@@ -43,6 +43,7 @@ _DSV4_FP8_TESTS = [
     "test_swa_prefill_gather_lens",
     "test_swa_prefill_varlen",
     "test_swa_slot_mapping",
+    "test_swa_topk_meta_triton",
     "test_varlen_prefill_oracle",
     "test_workspace_prefill_varlen",
     "test_no_recompile",

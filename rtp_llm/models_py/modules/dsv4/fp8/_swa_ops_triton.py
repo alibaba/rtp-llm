@@ -125,6 +125,150 @@ def compute_prefill_gather_lens(
 
 
 # ---------------------------------------------------------------------------
+# 1b) Per-token flat SWA window indices + topk length
+# ---------------------------------------------------------------------------
+
+
+@triton.jit(do_not_specialize=["num_tokens"])
+def _compute_window_topk_and_length_varlen_kernel(
+    topk_idxs_ptr,  # [num_tokens, window_size] int32
+    topk_length_ptr,  # [num_tokens] int32
+    cu_seqlens_ptr,  # [B+1] int32
+    position_ids_ptr,  # [num_tokens] int32/int64
+    prefix_lengths_ptr,  # [B] int32
+    req_id_per_token_ptr,  # [num_tokens] int32
+    num_tokens,
+    window_size: tl.constexpr,
+    BLOCK_T: tl.constexpr,
+    BLOCK_W: tl.constexpr,
+):
+    """Build varlen SWA cold-path topk metadata in one launch.
+
+    For token ``t`` in request ``b``:
+
+      local_pos = position_ids[t] - prefix_lengths[b]
+      topk_length[t] = min(local_pos + 1, window_size)
+      topk_idxs[t, j] = cu_seqlens[b] + max(0, local_pos-window+1) + j
+                       or -1 when j exceeds the causal window.
+
+    This is the fused equivalent of ``_get_window_topk_idxs_varlen`` plus the
+    ``topk_length_kv_full`` math in ``_build_swa_prefill_meta_varlen``.
+    """
+    rows = tl.program_id(0) * BLOCK_T + tl.arange(0, BLOCK_T)
+    cols = tl.arange(0, BLOCK_W)
+    row_mask = rows < num_tokens
+    col_mask = cols < window_size
+
+    req = tl.load(req_id_per_token_ptr + rows, mask=row_mask, other=0).to(tl.int64)
+    pos = tl.load(position_ids_ptr + rows, mask=row_mask, other=0).to(tl.int32)
+    prefix = tl.load(prefix_lengths_ptr + req, mask=row_mask, other=0).to(tl.int32)
+    req_start = tl.load(cu_seqlens_ptr + req, mask=row_mask, other=0).to(tl.int32)
+
+    local_pos = pos - prefix
+    win_start = tl.maximum(local_pos - window_size + 1, 0)
+    topk_len = tl.minimum(local_pos + 1, window_size)
+    tl.store(topk_length_ptr + rows, topk_len, mask=row_mask)
+
+    idx = req_start[:, None] + win_start[:, None] + cols[None, :]
+    valid = (win_start[:, None] + cols[None, :]) <= local_pos[:, None]
+    out = tl.where(valid, idx, -1)
+    tl.store(
+        topk_idxs_ptr + rows[:, None] * window_size + cols[None, :],
+        out,
+        mask=row_mask[:, None] & col_mask[None, :],
+    )
+
+
+def compute_window_topk_and_length_varlen(
+    window_size: int,
+    cu_seqlens: torch.Tensor,
+    position_ids: torch.Tensor,
+    prefix_lengths: torch.Tensor,
+    req_id_per_token: torch.Tensor,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Return ``(topk_idxs, topk_length)`` for varlen SWA prefill.
+
+    ``topk_idxs`` matches ``_get_window_topk_idxs_varlen``'s int32
+    ``[num_tokens, window_size]`` flat-KV indices. ``topk_length`` matches the
+    per-token ``min(local_pos + 1, window_size)`` vector consumed by
+    ``flash_mla_sparse_fwd`` on the SWA ``kv_full`` fallback path.
+
+    CPU / unsupported inputs fall back to the same torch expression shape so
+    unit tests and dry paths can run without Triton.
+    """
+    window_size = int(window_size)
+    cu_seqlens = cu_seqlens.reshape(-1)
+    position_ids = position_ids.reshape(-1)
+    prefix_lengths = prefix_lengths.reshape(-1)
+    req_id_per_token = req_id_per_token.reshape(-1)
+    assert window_size >= 1
+    assert position_ids.numel() == req_id_per_token.numel()
+
+    device = position_ids.device
+    num_tokens = int(position_ids.numel())
+    topk_idxs = torch.empty(
+        (num_tokens, window_size), dtype=torch.int32, device=device
+    )
+    topk_length = torch.empty(num_tokens, dtype=torch.int32, device=device)
+    if num_tokens == 0:
+        return topk_idxs, topk_length
+
+    if not position_ids.is_cuda:
+        req_id_idx = req_id_per_token.to(device=device, dtype=torch.long)
+        cu_i32 = cu_seqlens.to(device=device, dtype=torch.int32)
+        prefix_i32 = prefix_lengths.to(device=device, dtype=torch.int32)
+        pos_i32 = position_ids.to(device=device, dtype=torch.int32)
+        prefix_per_token = prefix_i32.gather(0, req_id_idx)
+        req_start_in_flat = cu_i32.gather(0, req_id_idx)
+        local_query_pos = pos_i32 - prefix_per_token
+        offsets = torch.arange(window_size, device=device, dtype=torch.int32)
+        win_start = (local_query_pos.unsqueeze(1) - window_size + 1).clamp_min(0)
+        local_idx = win_start + offsets
+        topk_idxs.copy_(
+            torch.where(
+                local_idx > local_query_pos.unsqueeze(1),
+                torch.full_like(local_idx, -1),
+                req_start_in_flat.unsqueeze(1) + local_idx,
+            ).contiguous()
+        )
+        topk_length.copy_(torch.clamp(local_query_pos + 1, max=window_size))
+        return topk_idxs, topk_length
+
+    if cu_seqlens.dtype != torch.int32:
+        cu_seqlens = cu_seqlens.to(device=device, dtype=torch.int32).contiguous()
+    if prefix_lengths.dtype != torch.int32:
+        prefix_lengths = prefix_lengths.to(device=device, dtype=torch.int32).contiguous()
+    if req_id_per_token.dtype != torch.int32:
+        req_id_per_token = req_id_per_token.to(device=device, dtype=torch.int32).contiguous()
+    if not cu_seqlens.is_contiguous():
+        cu_seqlens = cu_seqlens.contiguous()
+    if not position_ids.is_contiguous():
+        position_ids = position_ids.contiguous()
+    if not prefix_lengths.is_contiguous():
+        prefix_lengths = prefix_lengths.contiguous()
+    if not req_id_per_token.is_contiguous():
+        req_id_per_token = req_id_per_token.contiguous()
+
+    block_t = 16
+    block_w = max(1, triton.next_power_of_2(window_size))
+    _compute_window_topk_and_length_varlen_kernel[
+        ((num_tokens + block_t - 1) // block_t,)
+    ](
+        topk_idxs,
+        topk_length,
+        cu_seqlens,
+        position_ids,
+        prefix_lengths,
+        req_id_per_token,
+        num_tokens,
+        window_size=window_size,
+        BLOCK_T=block_t,
+        BLOCK_W=block_w,
+    )
+    return topk_idxs, topk_length
+
+
+# ---------------------------------------------------------------------------
 # 2) Per-token SWA paged slot_mapping (write side)
 # ---------------------------------------------------------------------------
 
@@ -376,6 +520,179 @@ def compute_swa_cp_sliced_slot_mapping(
         BLOCK_M=BLOCK_M,
     )
     return slot_mapping
+
+
+# ---------------------------------------------------------------------------
+# 2b) Per-token workspace slot_in_flat metadata
+# ---------------------------------------------------------------------------
+
+
+@triton.jit(do_not_specialize=["num_tokens", "M", "base_offset"])
+def _compute_swa_slot_in_flat_kernel(
+    out_ptr,  # [num_tokens] int64
+    position_ids_ptr,  # [num_tokens] int64/int32 absolute positions
+    req_id_per_token_ptr,  # [num_tokens] int64/int32
+    prefix_lengths_ptr,  # [B] int64/int32
+    num_tokens,
+    M,
+    base_offset,
+    window_size: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+):
+    rows = tl.program_id(0).to(tl.int64) * BLOCK_M + tl.arange(0, BLOCK_M)
+    mask = rows < num_tokens
+    req = tl.load(req_id_per_token_ptr + rows, mask=mask, other=0).to(tl.int64)
+    pos = tl.load(position_ids_ptr + rows, mask=mask, other=0).to(tl.int64)
+    prefix = tl.load(prefix_lengths_ptr + req, mask=mask, other=0).to(tl.int64)
+    p = tl.minimum(prefix, window_size - 1)
+    slot = req * M + base_offset + p + (pos - prefix)
+    tl.store(out_ptr + rows, slot, mask=mask)
+
+
+def compute_swa_slot_in_flat(
+    position_ids: torch.Tensor,
+    req_id_per_token: torch.Tensor,
+    prefix_lengths: torch.Tensor,
+    *,
+    M: int,
+    window_size: int,
+    base_offset: int = 0,
+) -> torch.Tensor:
+    """Build ``req * M + base + min(prefix, win-1) + (pos-prefix)``.
+
+    This replaces a small eager chain of casts, gathers, arithmetic and
+    ``contiguous`` when building SWA workspace metadata.
+    """
+    position_ids = position_ids.reshape(-1)
+    req_id_per_token = req_id_per_token.reshape(-1)
+    prefix_lengths = prefix_lengths.reshape(-1)
+    assert position_ids.numel() == req_id_per_token.numel()
+    num_tokens = int(position_ids.numel())
+    device = position_ids.device
+    out = torch.empty(num_tokens, dtype=torch.long, device=device)
+    if num_tokens == 0:
+        return out
+
+    if not position_ids.is_cuda:
+        req = req_id_per_token.to(device=device, dtype=torch.long)
+        pos = position_ids.to(device=device, dtype=torch.long)
+        prefix = prefix_lengths.to(device=device, dtype=torch.long)
+        p = torch.clamp_max(prefix, int(window_size) - 1)
+        out.copy_(
+            (
+                req * int(M)
+                + int(base_offset)
+                + p.gather(0, req)
+                + (pos - prefix.gather(0, req))
+            ).contiguous()
+        )
+        return out
+
+    if not position_ids.is_contiguous():
+        position_ids = position_ids.contiguous()
+    if not req_id_per_token.is_contiguous():
+        req_id_per_token = req_id_per_token.contiguous()
+    if not prefix_lengths.is_contiguous():
+        prefix_lengths = prefix_lengths.contiguous()
+    block_m = 256
+    _compute_swa_slot_in_flat_kernel[(triton.cdiv(num_tokens, block_m),)](
+        out,
+        position_ids,
+        req_id_per_token,
+        prefix_lengths,
+        num_tokens,
+        int(M),
+        int(base_offset),
+        window_size=int(window_size),
+        BLOCK_M=block_m,
+    )
+    return out
+
+
+@triton.jit(do_not_specialize=["num_tokens", "M", "base_offset"])
+def _compute_swa_slot_in_flat_from_cu_kernel(
+    out_ptr,  # [num_tokens] int64
+    cu_seqlens_ptr,  # [B+1] int32/int64 full-view starts
+    prefix_lengths_ptr,  # [B] int32/int64
+    num_tokens,
+    M,
+    base_offset,
+    window_size: tl.constexpr,
+    NUM_REQS: tl.constexpr,
+    BLOCK_B: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+):
+    rows = tl.program_id(0).to(tl.int64) * BLOCK_M + tl.arange(0, BLOCK_M).to(tl.int64)
+    mask = rows < num_tokens
+    b = tl.arange(0, BLOCK_B)
+    ends = tl.load(
+        cu_seqlens_ptr + 1 + b,
+        mask=b < NUM_REQS,
+        other=num_tokens,
+    ).to(tl.int64)
+    req = tl.sum(tl.where(rows[:, None] >= ends[None, :], 1, 0), axis=1).to(tl.int64)
+    req = tl.minimum(req, NUM_REQS - 1)
+    start = tl.load(cu_seqlens_ptr + req, mask=mask, other=0).to(tl.int64)
+    prefix = tl.load(prefix_lengths_ptr + req, mask=mask, other=0).to(tl.int64)
+    p = tl.minimum(prefix, window_size - 1)
+    slot = req * M + base_offset + p + (rows - start)
+    tl.store(out_ptr + rows, slot, mask=mask)
+
+
+def compute_swa_slot_in_flat_from_cu(
+    cu_seqlens: torch.Tensor,
+    prefix_lengths: torch.Tensor,
+    *,
+    num_tokens: int,
+    M: int,
+    window_size: int,
+    base_offset: int = 0,
+) -> torch.Tensor:
+    """Build ``slot_in_flat`` for a full-view CP workspace from cu-seqlens."""
+    cu_seqlens = cu_seqlens.reshape(-1)
+    prefix_lengths = prefix_lengths.reshape(-1)
+    assert cu_seqlens.numel() == prefix_lengths.numel() + 1
+    num_tokens = int(num_tokens)
+    device = cu_seqlens.device
+    out = torch.empty(num_tokens, dtype=torch.long, device=device)
+    if num_tokens == 0:
+        return out
+
+    if not cu_seqlens.is_cuda:
+        cu = cu_seqlens.to(device=device, dtype=torch.long)
+        prefix = prefix_lengths.to(device=device, dtype=torch.long)
+        req = torch.bucketize(
+            torch.arange(num_tokens, device=device, dtype=torch.long),
+            cu[1:],
+            right=True,
+        ).clamp(max=prefix.numel() - 1)
+        p = torch.clamp_max(prefix, int(window_size) - 1)
+        local_pos = torch.arange(num_tokens, device=device, dtype=torch.long) - cu.gather(0, req)
+        out.copy_((req * int(M) + int(base_offset) + p.gather(0, req) + local_pos).contiguous())
+        return out
+
+    if not cu_seqlens.is_contiguous():
+        cu_seqlens = cu_seqlens.contiguous()
+    if not prefix_lengths.is_contiguous():
+        prefix_lengths = prefix_lengths.contiguous()
+    num_reqs = int(prefix_lengths.numel())
+    if num_reqs > 1024:
+        raise ValueError(f"num_reqs={num_reqs} exceeds compute_swa_slot_in_flat_from_cu limit")
+    block_b = max(1, triton.next_power_of_2(num_reqs))
+    block_m = 256
+    _compute_swa_slot_in_flat_from_cu_kernel[(triton.cdiv(num_tokens, block_m),)](
+        out,
+        cu_seqlens,
+        prefix_lengths,
+        num_tokens,
+        int(M),
+        int(base_offset),
+        window_size=int(window_size),
+        NUM_REQS=num_reqs,
+        BLOCK_B=block_b,
+        BLOCK_M=block_m,
+    )
+    return out
 
 
 # ---------------------------------------------------------------------------

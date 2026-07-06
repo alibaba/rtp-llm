@@ -640,6 +640,26 @@ def cp_wait_gather_full(handle: Any) -> torch.Tensor:
     raise TypeError(f"unsupported CP gather handle type: {type(handle)!r}")
 
 
+def _cp_all_gather_into_empty(tensor: torch.Tensor, group: Group) -> torch.Tensor:
+    """DSV4-local all-gather with an uninitialized output buffer.
+
+    ``torch.distributed.all_gather_into_tensor`` writes every output element.
+    The generic ``collective_torch.all_gather`` zero-initializes its output for
+    broader safety, but the CP varlen hot path does not need that memset.
+    """
+    if not torch.distributed.is_initialized():
+        return all_gather(tensor, group=group)
+    process_group = collective_torch._get_group(group)
+    world_size = torch.distributed.get_world_size(process_group)
+    gathered = torch.empty(
+        [world_size * tensor.shape[0]] + list(tensor.shape)[1:],
+        device=tensor.device,
+        dtype=tensor.dtype,
+    )
+    torch.distributed.all_gather_into_tensor(gathered, tensor, group=process_group)
+    return gathered
+
+
 def cp_all_gather_full_varlen(
     local_flat: torch.Tensor,
     cp_ctx: CPContext,
@@ -668,7 +688,7 @@ def cp_all_gather_full_varlen(
     trailing = local_flat.shape[1:]
     local_2d = local_flat.reshape(cp_ctx.chunk_length, -1).contiguous()
     with record_function_range(f"{profile_name}.launch"):
-        gathered = all_gather(local_2d, group=Group.TP)
+        gathered = _cp_all_gather_into_empty(local_2d, group=Group.TP)
     with record_function_range(f"{profile_name}.restore"):
         full = _cp_restore_gathered_full_2d(gathered, cp_ctx)
     return full.view((cp_ctx.seq_len_full,) + trailing)

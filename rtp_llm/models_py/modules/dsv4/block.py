@@ -392,13 +392,29 @@ class Block(nn.Module):
 
         residual = x
         x_pre, post, comb = attn_hc_pre(x)
-        x_pre = _prefill_fast_norm(self.attn_norm, x_pre)
-        attn_out = self.attn(
-            x_pre,
-            positions,
-            kv_cache=kv_cache,
-            block_tables_by_type=block_tables_by_type,
-        )
+        if self.attn.can_fuse_prefill_attn_norm_input_quant(
+            x_pre, self.attn_norm.weight.data
+        ):
+            x_pre, shared_input_quant = self.attn.prefill_fused_attn_norm_input_quant(
+                x_pre,
+                self.attn_norm.weight.data,
+                self.attn_norm.variance_epsilon,
+            )
+            attn_out = self.attn.forward_with_shared_input_quant(
+                x_pre,
+                positions,
+                shared_input_quant,
+                kv_cache=kv_cache,
+                block_tables_by_type=block_tables_by_type,
+            )
+        else:
+            x_pre = _prefill_fast_norm(self.attn_norm, x_pre)
+            attn_out = self.attn(
+                x_pre,
+                positions,
+                kv_cache=kv_cache,
+                block_tables_by_type=block_tables_by_type,
+            )
         x = attn_hc_post(attn_out, residual, post, comb)
         self._sync_after_first_cp_prefill_attention()
 
