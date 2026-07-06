@@ -3,6 +3,7 @@
 
 import contextlib
 import functools
+import hashlib
 import logging
 import os
 import sys
@@ -87,6 +88,35 @@ def assert_close(prefix, ref, tri, ratio, warning=False, err_atol=1e-6):
 SUPPRESS_LEVEL = int(os.getenv("GDN_RECOMPUTE_SUPPRESS_LEVEL", "0"))
 
 
+def _cpu_tensor_fingerprint(value: torch.Tensor) -> Optional[str]:
+    if value.device.type != "cpu":
+        return None
+    if value.numel() == 0:
+        return "empty"
+    data = value.detach().contiguous().view(torch.uint8).numpy().tobytes()
+    return hashlib.blake2b(data, digest_size=8).hexdigest()
+
+
+def _tensor_cache_key(value: Any) -> Any:
+    if isinstance(value, torch.Tensor):
+        return (
+            "tensor",
+            id(value),
+            value.data_ptr() if value.numel() else 0,
+            tuple(value.shape),
+            tuple(value.stride()),
+            str(value.dtype),
+            str(value.device),
+            getattr(value, "_version", None),
+            _cpu_tensor_fingerprint(value),
+        )
+    try:
+        hash(value)
+        return ("value", value)
+    except TypeError:
+        return ("object", id(value))
+
+
 def tensor_cache(fn: Callable[..., torch.Tensor]) -> Callable[..., torch.Tensor]:
     """
     A decorator that caches the most recent results of a function with tensor inputs.
@@ -100,30 +130,33 @@ def tensor_cache(fn: Callable[..., torch.Tensor]) -> Callable[..., torch.Tensor]
             A wrapped version of the input function with single-entry caching.
     """
 
-    cache_entries: Tuple[Optional[Tuple], Optional[Dict], Any] = []
+    cache_entries: Tuple[Tuple[Any, Any], Any] = []
     cache_size = 4
 
     @functools.wraps(fn)
     def wrapper(*args: Any, **kwargs: Any) -> Any:
         nonlocal cache_entries, cache_size
+        cache_key = (
+            tuple(_tensor_cache_key(arg) for arg in args),
+            tuple(
+                sorted(
+                    (key, _tensor_cache_key(value)) for key, value in kwargs.items()
+                )
+            ),
+        )
         for i, entry in enumerate(cache_entries):
-            last_args, last_kwargs, last_result = entry
-            if len(args) == len(last_args) and len(kwargs) == len(last_kwargs):
-                if all(a is b for a, b in zip(args, last_args)) and all(
-                    k in last_kwargs and v is last_kwargs[k] for k, v in kwargs.items()
-                ):
-                    cache_entries = (
-                        cache_entries[:i]
-                        + cache_entries[i + 1 :]
-                        + [(args, kwargs, last_result)]
-                    )
-                    return last_result
+            last_key, last_result = entry
+            if cache_key == last_key:
+                cache_entries = (
+                    cache_entries[:i] + cache_entries[i + 1 :] + [(cache_key, last_result)]
+                )
+                return last_result
 
         result = fn(*args, **kwargs)
 
         if len(cache_entries) >= cache_size:
             cache_entries = cache_entries[1:]
-        cache_entries.append((args, kwargs, result))
+        cache_entries.append((cache_key, result))
         return result
 
     return wrapper
