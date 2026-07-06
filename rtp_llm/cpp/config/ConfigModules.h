@@ -341,7 +341,6 @@ enum class PDFusionSchedulerMode {
 };
 
 PDFusionSchedulerMode parsePDFusionSchedulerMode(const std::string& mode);
-const char*           PDFusionSchedulerModeToString(PDFusionSchedulerMode mode);
 
 struct FIFOSchedulerConfig {
     int64_t max_context_batch_size = 1;
