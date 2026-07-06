@@ -45,6 +45,23 @@ from .prefill.topk_sparse import flash_prefill_with_gqa_share_sparse
 # flash_decode_with_trtllm_gen chunks beyond this internally, so the caller
 # does NOT need a max_q gate any more — any q_len works.
 
+# fmha_sm100 OnlyScore (flash_prefill_with_fmha step1) materializes a maxscore
+# buffer [num_idx_heads, max_k_tiles, total_q] and addresses it with int32. When
+# its element count exceeds 2**31, _fmha_sm100_plan degrades (max_k_tiles = -1)
+# and _fmha_sm100 returns maxscore=None -> flash_prefill_topk_to_block_tables
+# crashes on maxscore.transpose(). Detect that up front and route to the Triton
+# block-score path instead (64-bit indexing, no such buffer).
+_FMHA_MAXSCORE_INT32_LIMIT = 1 << 31
+
+
+def _fmha_onlyscore_overflows_int32(
+    num_idx_heads: int, max_seqlen_k: int, total_q: int
+) -> bool:
+    # mirror fmha_sm100 api.py: max_k_tiles = ceil(ceil(max_kv/128)/128)*128
+    n_blocks = (max_seqlen_k + 127) // 128
+    max_k_tiles = ((n_blocks + 127) // 128) * 128
+    return num_idx_heads * max_k_tiles * total_q > _FMHA_MAXSCORE_INT32_LIMIT
+
 
 def minimax_sparse_prefill(
     q: torch.Tensor,  # [total_extend_tokens, num_q_heads, qk_head_dim]
@@ -94,6 +111,17 @@ def minimax_sparse_prefill(
     # requests (verified bit-identical vs per-request runs), so it is NOT capped.
     # No per-call q_len cap — flash_prefill_with_fmha/decode chunk internally to stay
     # under CUDA's grid_dim_x = 65535 limit.
+    # fmha OnlyScore step1 would overflow its int32-indexed maxscore buffer on
+    # long context (num_idx_heads * max_k_tiles * total_q > 2**31) -> fall back to
+    # the Triton block-score path (use_fused below) to avoid the maxscore=None crash.
+    # total_q here is the EXTEND (reuse-after) query token count == idx_q.shape[0]
+    # == cu_seqlens[-1] == fmha nnz_qo/total_qo_len (the exact 3rd dim of the buffer
+    # that overflows). max_seqlen_k is the FULL KV len (prefix+extend, reuse-before),
+    # matching how fmha derives max_k_tiles -- so the product is same-source as fmha's.
+    total_q = idx_q.shape[0]
+    fmha_score_fits = not _fmha_onlyscore_overflows_int32(
+        num_idx_heads, max_seqlen_k, total_q
+    )
     use_trtllm = (
         workspace is not None
         and sparse_attn_plan is not None
@@ -101,6 +129,7 @@ def minimax_sparse_prefill(
         and disable_index_value
         and idx_sink is None
         and sink is None
+        and fmha_score_fits
     )
     if use_trtllm:
         sm_scale_v = sm_scale if sm_scale is not None else q.shape[-1] ** -0.5
