@@ -4,6 +4,7 @@
 #include "rtp_llm/cpp/utils/Logger.h"
 
 #include <chrono>
+#include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <thread>
@@ -19,9 +20,15 @@ namespace rtp_llm {
 
 namespace {
 
-constexpr int  kInitTimeoutMs             = 120 * 1000;
-constexpr int  kDefaultBroadcastTimeoutMs = 120 * 1000;
-constexpr char kLinkProbeToken            = 0x5a;
+constexpr int      kInitTimeoutMs             = 120 * 1000;
+constexpr int      kDefaultBroadcastTimeoutMs = 120 * 1000;
+constexpr char     kLinkProbeToken            = 0x5a;
+constexpr uint64_t kBroadcastFrameMagic       = 0x5254504c4c4d5450ULL;
+
+struct BroadcastFrameHeader {
+    uint64_t magic;
+    uint64_t nbytes;
+};
 
 int broadcastTimeoutMs() {
     const char* value = std::getenv("RTP_LLM_CPU_TP_BROADCASTER_BROADCAST_TIMEOUT_MS");
@@ -307,8 +314,8 @@ void CpuTpBroadcaster::initialize(int tp_rank, int tp_size, const std::string& b
             rc = ::listen(listen_fd_, tp_size - 1);
             RTP_LLM_CHECK_WITH_INFO(rc == 0, "CpuTpBroadcaster listen: %s", std::strerror(errno));
 
-            // Accept tp_size-1 peers during bootstrap only. Broadcast I/O is left
-            // unbounded because request-time waits are expected in the engine.
+            // Accept tp_size-1 peers during bootstrap only. Request-time
+            // broadcast I/O uses a configurable timeout.
             for (int i = 1; i < tp_size; ++i) {
                 int fd    = acceptWithTimeout(listen_fd_, kInitTimeoutMs);
                 int saved = errno;
@@ -369,7 +376,7 @@ void CpuTpBroadcaster::initialize(int tp_rank, int tp_size, const std::string& b
         std::strncpy(addr.sun_path, path.c_str(), sizeof(addr.sun_path) - 1);
 
         // Retry connect only during bootstrap to tolerate small rank scheduling
-        // skew; request-time broadcast I/O intentionally has no timeout.
+        // skew; request-time broadcast I/O uses a configurable timeout.
         constexpr int kSleepMs     = 50;
         constexpr int kMaxAttempts = kInitTimeoutMs / kSleepMs;
         int           fd           = -1;
@@ -459,8 +466,15 @@ void CpuTpBroadcaster::broadcast(void* buf, std::size_t nbytes, int root) {
     try {
         const int timeout_ms = broadcastTimeoutMs();
         if (tp_rank == 0) {
+            const BroadcastFrameHeader header{kBroadcastFrameMagic, static_cast<uint64_t>(nbytes)};
             for (int k = 1; k < tp_size; ++k) {
-                ssize_t n = writeAllWithTimeout(peer_fds[k], buf, nbytes, timeout_ms);
+                ssize_t n = writeAllWithTimeout(peer_fds[k], &header, sizeof(header), timeout_ms);
+                RTP_LLM_CHECK_WITH_INFO(n == static_cast<ssize_t>(sizeof(header)),
+                                        "CpuTpBroadcaster frame header write to rank %d failed after %d ms: %s",
+                                        k,
+                                        timeout_ms,
+                                        std::strerror(errno));
+                n = writeAllWithTimeout(peer_fds[k], buf, nbytes, timeout_ms);
                 RTP_LLM_CHECK_WITH_INFO(n == static_cast<ssize_t>(nbytes),
                                         "CpuTpBroadcaster write to rank %d (%zu bytes) failed after %d ms: %s",
                                         k,
@@ -469,7 +483,20 @@ void CpuTpBroadcaster::broadcast(void* buf, std::size_t nbytes, int root) {
                                         std::strerror(errno));
             }
         } else {
-            ssize_t n = readAllWithTimeout(peer_fds[0], buf, nbytes, timeout_ms);
+            BroadcastFrameHeader header{};
+            ssize_t              n = readAllWithTimeout(peer_fds[0], &header, sizeof(header), timeout_ms);
+            RTP_LLM_CHECK_WITH_INFO(n == static_cast<ssize_t>(sizeof(header)),
+                                    "CpuTpBroadcaster frame header read from rank 0 failed after %d ms: %s",
+                                    timeout_ms,
+                                    std::strerror(errno));
+            RTP_LLM_CHECK_WITH_INFO(header.magic == kBroadcastFrameMagic && header.nbytes == nbytes,
+                                    "CpuTpBroadcaster frame header mismatch: magic=%llu nbytes=%llu "
+                                    "expected_magic=%llu expected_nbytes=%zu",
+                                    static_cast<unsigned long long>(header.magic),
+                                    static_cast<unsigned long long>(header.nbytes),
+                                    static_cast<unsigned long long>(kBroadcastFrameMagic),
+                                    nbytes);
+            n = readAllWithTimeout(peer_fds[0], buf, nbytes, timeout_ms);
             RTP_LLM_CHECK_WITH_INFO(n == static_cast<ssize_t>(nbytes),
                                     "CpuTpBroadcaster read from rank 0 (%zu bytes) failed after %d ms: %s",
                                     nbytes,

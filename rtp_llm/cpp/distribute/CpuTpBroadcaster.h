@@ -26,7 +26,7 @@ public:
 
     // Blocking broadcast of `nbytes` bytes from `buf` originating at root.
     // root rank writes to all peer sockets; non-root reads from its peer-0 fd.
-    // Throws on transport error.
+    // Throws on transport error or frame-size mismatch.
     void broadcast(void* buf, std::size_t nbytes, int root);
 
     // Close all sockets and return the singleton to its initial state so a

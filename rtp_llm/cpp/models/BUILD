@@ -131,13 +131,16 @@ cc_library(
 
 cc_library(
     name = "models",
-    hdrs = glob([
-        "*.h",
-    ]),
-    srcs = glob([
-        "*.cc",
-    ]),
+    hdrs = glob(
+        ["*.h"],
+        exclude = ["ModelTypes.h"],
+    ),
+    srcs = glob(
+        ["*.cc"],
+        exclude = ["ModelTypes.cc"],
+    ),
     deps = [
+        ":model_types",
         ":sample_infos",
         ":logits_processor",
         ":dfa_utils",

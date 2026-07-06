@@ -5,6 +5,7 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -25,7 +26,13 @@
 namespace rtp_llm {
 namespace {
 
-constexpr char kExpectedLinkProbeToken = 0x5a;
+constexpr char     kExpectedLinkProbeToken      = 0x5a;
+constexpr uint64_t kExpectedBroadcastFrameMagic = 0x5254504c4c4d5450ULL;
+
+struct BroadcastFrameHeader {
+    uint64_t magic;
+    uint64_t nbytes;
+};
 
 std::string makeTempBase() {
     std::string       pattern = "/tmp/cpu_tp_broadcaster_test.XXXXXX";
@@ -153,6 +160,13 @@ void peerReadOneInt(const std::string& base, int& observed, std::string& error) 
     if (fd < 0) {
         return;
     }
+    BroadcastFrameHeader header{};
+    if (readAllRaw(fd, &header, sizeof(header)) != static_cast<ssize_t>(sizeof(header))
+        || header.magic != kExpectedBroadcastFrameMagic || header.nbytes != sizeof(observed)) {
+        error = "fake peer frame header read failed";
+        ::close(fd);
+        return;
+    }
     if (readAllRaw(fd, &observed, sizeof(observed)) != static_cast<ssize_t>(sizeof(observed))) {
         error = "fake peer payload read failed";
     }
@@ -229,6 +243,59 @@ int fakeServerWrongProbe(const std::string& base) {
     if (writeAllRaw(fd, &wrong_probe, sizeof(wrong_probe)) != static_cast<ssize_t>(sizeof(wrong_probe))) {
         rc = 1;
     }
+    ::close(fd);
+    ::close(listen_fd);
+    ::unlink(path.c_str());
+    return rc;
+}
+
+int fakeRootSendMismatchedFrame(const std::string& base) {
+    const std::string path = socketPath(base);
+    ::unlink(path.c_str());
+
+    int listen_fd = ::socket(AF_UNIX, SOCK_STREAM, 0);
+    if (listen_fd < 0) {
+        std::fprintf(stderr, "fake root socket failed: %s\n", std::strerror(errno));
+        return 1;
+    }
+
+    struct sockaddr_un addr{};
+    addr.sun_family = AF_UNIX;
+    std::strncpy(addr.sun_path, path.c_str(), sizeof(addr.sun_path) - 1);
+    if (::bind(listen_fd, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)) != 0) {
+        std::fprintf(stderr, "fake root bind failed: %s\n", std::strerror(errno));
+        ::close(listen_fd);
+        return 1;
+    }
+    if (::listen(listen_fd, 1) != 0) {
+        std::fprintf(stderr, "fake root listen failed: %s\n", std::strerror(errno));
+        ::close(listen_fd);
+        ::unlink(path.c_str());
+        return 1;
+    }
+
+    int fd = ::accept(listen_fd, nullptr, nullptr);
+    if (fd < 0) {
+        std::fprintf(stderr, "fake root accept failed: %s\n", std::strerror(errno));
+        ::close(listen_fd);
+        ::unlink(path.c_str());
+        return 1;
+    }
+
+    int peer_rank = -1;
+    int rc        = 0;
+    if (readAllRaw(fd, &peer_rank, sizeof(peer_rank)) != static_cast<ssize_t>(sizeof(peer_rank)) || peer_rank != 1) {
+        rc = 1;
+    }
+    if (writeAllRaw(fd, &kExpectedLinkProbeToken, sizeof(kExpectedLinkProbeToken))
+        != static_cast<ssize_t>(sizeof(kExpectedLinkProbeToken))) {
+        rc = 1;
+    }
+    const BroadcastFrameHeader bad_header{kExpectedBroadcastFrameMagic, sizeof(int) + 1};
+    if (writeAllRaw(fd, &bad_header, sizeof(bad_header)) != static_cast<ssize_t>(sizeof(bad_header))) {
+        rc = 1;
+    }
+
     ::close(fd);
     ::close(listen_fd);
     ::unlink(path.c_str());
@@ -382,6 +449,27 @@ TEST(CpuTpBroadcasterTest, NonRootRejectsBadLinkProbe) {
         auto& bcast = CpuTpBroadcaster::instance();
         bcast.reset();
         return expectThrowContains([&] { bcast.initialize(1, 2, base); }, "link probe read failed");
+    }));
+    expectChildrenOk(pids);
+    cleanupTempBase(base);
+}
+
+TEST(CpuTpBroadcasterTest, NonRootRejectsMismatchedFrameHeader) {
+    const std::string  base = makeTempBase();
+    std::vector<pid_t> pids;
+    pids.push_back(spawnChild([=] { return fakeRootSendMismatchedFrame(base); }));
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    pids.push_back(spawnChild([=] {
+        auto& bcast = CpuTpBroadcaster::instance();
+        bcast.reset();
+        bcast.initialize(1, 2, base);
+
+        int value = 0;
+        int rc    = expectThrowContains([&] { bcast.broadcast(&value, sizeof(value), 0); }, "frame header mismatch");
+        rc |= expectThrowContains([&] { bcast.broadcast(&value, sizeof(value), 0); },
+                                  "reset and reinitialize before reuse");
+        bcast.reset();
+        return rc;
     }));
     expectChildrenOk(pids);
     cleanupTempBase(base);
