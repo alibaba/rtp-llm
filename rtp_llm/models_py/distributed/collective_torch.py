@@ -135,9 +135,8 @@ def _make_cpu_tp_broadcaster_base_path(
 ) -> str:
     session_id = os.environ.get("RTP_LLM_CPU_TP_BROADCASTER_ID")
     if not session_id:
-        # RTP-LLM spawns all local ranks from one backend launcher, so ppid is
-        # shared for ranks that can enable the UDS broadcaster.
-        session_id = f"ppid{os.getppid()}_port{nccl_init_port}"
+        # nccl_init_port is shared by all ranks in this bootstrap.
+        session_id = f"port{nccl_init_port}"
     session_id = re.sub(r"[^A-Za-z0-9._-]", "_", session_id)
 
     base_dir = os.environ.get("RTP_LLM_CPU_TP_BROADCASTER_DIR")

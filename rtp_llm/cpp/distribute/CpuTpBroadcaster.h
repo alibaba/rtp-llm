@@ -51,6 +51,7 @@ private:
     bool              failed_                = false;
     int               tp_rank_               = 0;
     int               tp_size_               = 1;
+    int               broadcast_timeout_ms_  = 0;
     std::string       base_path_;
     int               listen_fd_ = -1;  // rank 0 only
     // peer_fds_[k] = fd connecting this rank to rank k. peer_fds_[tp_rank_] = -1.

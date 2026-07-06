@@ -111,6 +111,18 @@ class TestCpuTpBroadcasterBootstrap(unittest.TestCase):
             mode = stat.S_IMODE(os.stat(tmpdir).st_mode)
             self.assertEqual(mode, 0o700)
 
+    def test_make_cpu_tp_broadcaster_base_path_defaults_to_port_session(self):
+        parallelism_config = self._parallelism_config(tp_size=2, local_world_size=4)
+        with tempfile.TemporaryDirectory() as tmpdir, patch.dict(
+            os.environ,
+            {"RTP_LLM_CPU_TP_BROADCASTER_DIR": tmpdir},
+        ):
+            os.environ.pop("RTP_LLM_CPU_TP_BROADCASTER_ID", None)
+            base_path = ct._make_cpu_tp_broadcaster_base_path(parallelism_config, 12345)
+
+        self.assertIn("rtp_llm_tp_port12345_dp0", base_path)
+        self.assertNotIn("ppid", base_path)
+
     def test_make_cpu_tp_broadcaster_base_path_rejects_symlink_dir(self):
         parallelism_config = self._parallelism_config(tp_size=2, local_world_size=4)
         with tempfile.TemporaryDirectory() as tmpdir:

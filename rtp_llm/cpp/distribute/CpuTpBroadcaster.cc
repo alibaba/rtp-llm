@@ -263,6 +263,7 @@ void CpuTpBroadcaster::cleanupStateLocked() {
     base_path_.clear();
     tp_rank_               = 0;
     tp_size_               = 1;
+    broadcast_timeout_ms_  = kDefaultBroadcastTimeoutMs;
     broadcast_in_progress_ = false;
     failed_                = false;
     initialized_.store(false, std::memory_order_release);
@@ -310,6 +311,7 @@ void CpuTpBroadcaster::initialize(int tp_rank, int tp_size, const std::string& b
     tp_size_   = tp_size;
     base_path_ = base_path;
     peer_fds_.assign(tp_size, -1);
+    broadcast_timeout_ms_ = broadcastTimeoutMs();
 
     if (tp_rank == 0) {
         try {
@@ -448,8 +450,9 @@ void CpuTpBroadcaster::initialize(int tp_rank, int tp_size, const std::string& b
 }
 
 void CpuTpBroadcaster::broadcast(void* buf, std::size_t nbytes, int root) {
-    int              tp_rank = 0;
-    int              tp_size = 1;
+    int              tp_rank    = 0;
+    int              tp_size    = 1;
+    int              timeout_ms = 0;
     std::vector<int> peer_fds;
 
     {
@@ -473,6 +476,7 @@ void CpuTpBroadcaster::broadcast(void* buf, std::size_t nbytes, int root) {
         broadcast_in_progress_ = true;
         tp_rank                = tp_rank_;
         tp_size                = tp_size_;
+        timeout_ms             = broadcast_timeout_ms_;
         peer_fds               = peer_fds_;
     }
 
@@ -483,7 +487,6 @@ void CpuTpBroadcaster::broadcast(void* buf, std::size_t nbytes, int root) {
     };
 
     try {
-        const int timeout_ms = broadcastTimeoutMs();
         if (tp_rank == 0) {
             const BroadcastFrameHeader header{kBroadcastFrameMagic, static_cast<uint64_t>(nbytes)};
             for (int k = 1; k < tp_size; ++k) {
