@@ -42,7 +42,6 @@ public:
         return true;
     }
     int64_t acceptedTokenLen() const override;
-    int64_t thinkContentTokenLen() const override;
 
 private:
     bool applyReasoningOrGrammarMaskLocked(const SamplerInputs& inputs, size_t batch_idx);

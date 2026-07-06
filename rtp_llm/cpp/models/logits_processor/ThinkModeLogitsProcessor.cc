@@ -31,7 +31,7 @@ bool transitionToAfterThinkIfClosed(StreamThinkInfo& info) {
     if (!info.dfa_ptr || !info.dfa_ptr->isFinished()) {
         return false;
     }
-    info.markAfterThink();
+    info.process_state = ThinkProcessState::AFTER_THINK;
     return true;
 }
 
@@ -166,7 +166,7 @@ void advanceThinkStateForSpec(StreamThinkInfo& info, int32_t token_id) {
 
     info.dfa_ptr->next(token_id);
     if (info.dfa_ptr->isFinished()) {
-        info.markAfterThink();
+        info.process_state = ThinkProcessState::AFTER_THINK;
     } else if (thinkEndCloseInProgress(info)) {
         info.process_state = ThinkProcessState::CLOSING_THINK;
     } else if (info.process_state == ThinkProcessState::CLOSING_THINK) {
@@ -265,7 +265,7 @@ bool ThinkModeLogitsProcessor::forceThinkEndToken(const torch::Tensor& new_token
     info.pending_forced_think_end_token_ids.push_back(token_id);
     info.current_output_length += 1;
     if (info.dfa_ptr->isFinished()) {
-        info.markAfterThink();
+        info.process_state = ThinkProcessState::AFTER_THINK;
     } else {
         info.process_state = ThinkProcessState::CLOSING_THINK;
     }
@@ -325,7 +325,7 @@ void ThinkModeLogitsProcessor::updateStatus(const torch::Tensor& new_tokens, int
 
             info.dfa_ptr->next(current_token_id);
             if (info.dfa_ptr->isFinished()) {
-                info.markAfterThink();
+                info.process_state = ThinkProcessState::AFTER_THINK;
             } else if (thinkEndCloseInProgress(info)) {
                 info.process_state = ThinkProcessState::CLOSING_THINK;
             } else if (info.process_state == ThinkProcessState::CLOSING_THINK) {
@@ -351,14 +351,6 @@ int64_t ThinkModeLogitsProcessor::acceptedTokenLen() const {
         return 0;
     }
     return snapshot->info.current_output_length;
-}
-
-int64_t ThinkModeLogitsProcessor::thinkContentTokenLen() const {
-    auto snapshot = std::atomic_load_explicit(&spec_snapshot_, std::memory_order_acquire);
-    if (!snapshot || !snapshot->eligible) {
-        return -1;
-    }
-    return snapshot->info.contentTokenLen();
 }
 
 int ThinkModeLogitsProcessor::tryAcceptAndFillBitmask(const SpecLogitsProcessorRequest& request) {

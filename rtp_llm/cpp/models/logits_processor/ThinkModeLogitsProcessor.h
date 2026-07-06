@@ -3,9 +3,7 @@
 #include "rtp_llm/cpp/models/logits_processor/BaseLogitsProcessor.h"
 #include "rtp_llm/cpp/models/logits_processor/DFAUtil.h"
 #include "rtp_llm/cpp/models/logits_processor/SpecLogitsProcessor.h"
-#include <algorithm>
 #include <atomic>
-#include <cstdint>
 #include <memory>
 #include <mutex>
 
@@ -29,7 +27,6 @@ struct StreamThinkInfo {
     std::shared_ptr<StringContainDFA<size_t, int>> dfa_ptr;
     std::vector<int>                               pending_forced_think_end_token_ids;
     ThinkProcessState                              process_state = ThinkProcessState::NO_THINK;
-    int32_t                                        after_think_output_length = -1;
 
     StreamThinkInfo() = default;
 
@@ -65,26 +62,10 @@ struct StreamThinkInfo {
         think_info.is_beam_search                     = is_beam_search;
         think_info.pending_forced_think_end_token_ids = pending_forced_think_end_token_ids;
         think_info.process_state                      = process_state;
-        think_info.after_think_output_length          = after_think_output_length;
         if (dfa_ptr) {
             think_info.dfa_ptr = std::make_shared<StringContainDFA<size_t, int>>(*dfa_ptr);
         }
         return think_info;
-    }
-
-    void markAfterThink() {
-        process_state              = ThinkProcessState::AFTER_THINK;
-        after_think_output_length  = current_output_length;
-    }
-
-    int64_t contentTokenLen() const {
-        if (process_state == ThinkProcessState::NO_THINK) {
-            return current_output_length;
-        }
-        if (process_state != ThinkProcessState::AFTER_THINK || after_think_output_length < 0) {
-            return 0;
-        }
-        return std::max<int64_t>(0, static_cast<int64_t>(current_output_length) - after_think_output_length);
     }
 };
 
@@ -105,14 +86,13 @@ public:
                                                                        int32_t                        num);
 
 public:
-    void process(const SamplerInputs& inputs, size_t start_idx, size_t finish_idx) override;
-    void updateMultiSeqStatus(const std::vector<int>& src_batch_indices) override;
-    void updateStatus(const torch::Tensor& new_tokens, int32_t num_new_tokens) override;
-    bool isSpecVerifyEligible() const override;
-    int  tryAcceptAndFillBitmask(const SpecLogitsProcessorRequest& request) override;
-    bool isStateful() const override;
+    void    process(const SamplerInputs& inputs, size_t start_idx, size_t finish_idx) override;
+    void    updateMultiSeqStatus(const std::vector<int>& src_batch_indices) override;
+    void    updateStatus(const torch::Tensor& new_tokens, int32_t num_new_tokens) override;
+    bool    isSpecVerifyEligible() const override;
+    int     tryAcceptAndFillBitmask(const SpecLogitsProcessorRequest& request) override;
+    bool    isStateful() const override;
     int64_t acceptedTokenLen() const override;
-    int64_t thinkContentTokenLen() const override;
 
 private:
     bool forceThinkEndToken(const torch::Tensor& new_tokens_logits, StreamThinkInfo& info, size_t vocab_size);

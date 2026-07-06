@@ -451,11 +451,17 @@ def _apply_request_overrides(
             generate_config.thinking = True
     if not runtime.phase2_enabled:
         total_completion_budget = bool(sampling.max_new_tokens_from_completion_alias)
+        if (
+            not total_completion_budget
+            and sampling.max_total_tokens is not None
+            and sampling.max_total_tokens > 0
+            and sampling.max_new_tokens == sampling.max_total_tokens
+        ):
+            total_completion_budget = True
         if total_completion_budget:
-            # ``max_completion_tokens`` is the sole total completion budget: a
-            # separately-supplied ``max_tokens`` (parsed into ``max_total_tokens``)
-            # must NOT clip it. Plain ``max_tokens`` remains a backend/content
-            # budget and is allowed to stack with a thinking budget.
+            # ``max_completion_tokens`` (or ``max_tokens`` acting as the total
+            # completion budget) is the sole budget: a separately-supplied
+            # ``max_tokens`` (parsed into ``max_total_tokens``) must NOT clip it.
             # ``codec.to_generate_config`` applies that legacy clip for DSV4;
             # neutralize it here on the non-phase2 (e.g. GLM5) path only.
             generate_config.max_new_tokens = int(sampling.max_new_tokens)

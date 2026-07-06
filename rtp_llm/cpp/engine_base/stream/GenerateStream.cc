@@ -695,17 +695,14 @@ size_t GenerateStream::maxTokenNum() const {
     }
 
     const auto& generate_config = generate_input_->generate_config;
-    // max_new_tokens budgets the content (non-thinking) output. A finite thinking
-    // budget is accounted separately, so the total output budget is content + thinking.
-    // A negative max_thinking_tokens means thinking can run until the model context
-    // limit; content is still capped separately by needFinishByThinkContentTokens().
+    // max_new_tokens budgets the content (non-thinking) output. When an explicit
+    // thinking budget is set (in_think_mode with max_thinking_tokens > 0), thinking
+    // tokens are accounted separately, so the total output budget is content +
+    // thinking. A non-positive max_thinking_tokens (e.g. -1) means thinking shares
+    // the max_new_tokens budget and nothing extra is added.
     int max_output_tokens = generate_config->max_new_tokens;
-    if (generate_config->in_think_mode) {
-        if (generate_config->max_thinking_tokens > 0) {
-            max_output_tokens += generate_config->max_thinking_tokens;
-        } else if (generate_config->max_thinking_tokens < 0) {
-            max_output_tokens = max_seq_len_ > inputLength() ? max_seq_len_ - inputLength() : 0;
-        }
+    if (generate_config->in_think_mode && generate_config->max_thinking_tokens > 0) {
+        max_output_tokens += generate_config->max_thinking_tokens;
     }
 
     return std::min(max_seq_len_ > reserve_tokens ? max_seq_len_ - reserve_tokens : 0,
@@ -713,24 +710,7 @@ size_t GenerateStream::maxTokenNum() const {
 }
 
 bool GenerateStream::needFinish() {
-    return seqLength() >= maxTokenNum() || needFinishByThinkContentTokens() || needFinishBySPTokens();
-}
-
-bool GenerateStream::needFinishByThinkContentTokens() const {
-    const auto& config = generate_input_->generate_config;
-    if (!config->in_think_mode || config->max_thinking_tokens == 0 || config->max_new_tokens <= 0) {
-        return false;
-    }
-    for (const auto& processor : logits_processor_list_) {
-        if (processor == nullptr) {
-            continue;
-        }
-        const auto content_token_len = processor->thinkContentTokenLen();
-        if (content_token_len >= config->max_new_tokens) {
-            return true;
-        }
-    }
-    return false;
+    return seqLength() >= maxTokenNum() || needFinishBySPTokens();
 }
 
 bool GenerateStream::needFinishBySPTokens() {
@@ -900,15 +880,6 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
                           nxt_cached_len + 1);
     }
 
-    const int committed_num_new_tokens = std::max(0, seqLength() - old_seq_length);
-    if (committed_num_new_tokens > 0) {
-        updateLogitProcessorStatus(new_tokens, committed_num_new_tokens, torch::Tensor(), true);
-        validateStatefulLogitsProcessorState();
-        if (hasError()) {
-            return;
-        }
-    }
-
     // update normal output buffer
     updateOutput({new_tokens,
                   num_new_tokens,
@@ -922,6 +893,12 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
                   torch::Tensor(),
                   update_info.update_remote_generate,
                   update_info.force_update_info});
+
+    const int committed_num_new_tokens = std::max(0, seqLength() - old_seq_length);
+    if (committed_num_new_tokens > 0) {
+        updateLogitProcessorStatus(new_tokens, committed_num_new_tokens, torch::Tensor(), true);
+    }
+    validateStatefulLogitsProcessorState();
 }
 
 void GenerateStream::update(const StreamUpdateInfo& update_info) {
@@ -961,22 +938,22 @@ void GenerateStream::update(const StreamUpdateInfo& update_info) {
 
     resizeSubGenerateStatus(update_info.new_tokens.size(0));
 
+    // TODO(xinfei.sxf) fix this (update_queue)
+    updateOutput(update_info);
+
+    bool is_done = getStatus() == StreamState::FINISHED;
+
     const int committed_num_new_tokens = std::max(0, seqLength() - old_seq_length);
     if (committed_num_new_tokens > 0) {
         updateLogitProcessorStatus(update_info.new_tokens,
                                    committed_num_new_tokens,
                                    update_info.src_batch_indices,
-                                   /*stateful_only=*/false);
+                                   /*stateful_only=*/is_done);
         validateStatefulLogitsProcessorState();
         if (hasError()) {
             return;
         }
     }
-
-    // TODO(xinfei.sxf) fix this (update_queue)
-    updateOutput(update_info);
-
-    bool is_done = getStatus() == StreamState::FINISHED;
 
     if (!is_done || reuseCache()) {
         // kv cache blocks must be updated if REUSE_CACHE is on, even the stream is done
