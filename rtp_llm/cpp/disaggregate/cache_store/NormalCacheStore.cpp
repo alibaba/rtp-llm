@@ -99,6 +99,7 @@ bool NormalCacheStore::init(const CacheStoreInitParams& params) {
                         store_task.second.first(false, CacheStoreErrorCode::StoreFailed);
                     }
                     store_tasks_.clear();
+                    std::this_thread::sleep_for(std::chrono::seconds(1));
                     continue;
                 }
             }
