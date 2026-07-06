@@ -6,6 +6,9 @@
 #include "autil/EnvUtil.h"
 #include <cuda_runtime.h>
 
+#include <atomic>
+#include <future>
+
 namespace rtp_llm {
 
 class NormalCacheStoreTest: public CacheStoreTestBase {
@@ -189,6 +192,53 @@ TEST_F(NormalCacheStoreTest, testStore_storeToBufferStoreFailed) {
     cache_store1_->store(store_cache, store_callback);
     mutex.lock();
     mutex.unlock();
+}
+
+TEST_F(NormalCacheStoreTest, testStore_devicePinFailureDrainsQueuedStores) {
+    int device_count = 0;
+    if (cudaGetDeviceCount(&device_count) != cudaSuccess) {
+        GTEST_SKIP() << "CUDA device count unavailable";
+    }
+
+    CacheStoreInitParams params;
+    params.listen_port   = autil::NetUtil::randomPort();
+    params.enable_metric = false;
+    params.memory_util   = memory_util_;
+    params.device_id     = device_count;
+
+    auto cache_store = NormalCacheStore::createNormalCacheStore(params);
+    ASSERT_TRUE(cache_store);
+
+    auto make_store_buffer = [this](const std::string& request_id, const std::string& block_key) {
+        auto store_buffer = std::make_shared<RequestBlockBuffer>(request_id);
+        store_buffer->addBlock(block_buffer_util_->makeBlockBuffer(block_key, 16, '0', false));
+        return store_buffer;
+    };
+
+    auto store_buffer1 = make_store_buffer("pin-fail-request-1", "a");
+    auto store_buffer2 = make_store_buffer("pin-fail-request-2", "b");
+    ASSERT_TRUE(store_buffer1->isValid());
+    ASSERT_TRUE(store_buffer2->isValid());
+
+    std::atomic<int>   callback_count{0};
+    std::atomic<int>   failed_count{0};
+    std::promise<void> done;
+    auto               future   = done.get_future();
+    auto               callback = [&](bool ok, CacheStoreErrorCode ec) {
+        if (!ok && ec == CacheStoreErrorCode::StoreFailed) {
+            failed_count.fetch_add(1);
+        }
+        if (callback_count.fetch_add(1) + 1 == 2) {
+            done.set_value();
+        }
+    };
+
+    cache_store->store(store_buffer1, callback);
+    cache_store->store(store_buffer2, callback);
+
+    ASSERT_EQ(std::future_status::ready, future.wait_for(std::chrono::seconds(5)));
+    ASSERT_EQ(2, callback_count.load());
+    ASSERT_EQ(2, failed_count.load());
 }
 
 TEST_F(NormalCacheStoreTest, testLoad_Success) {
