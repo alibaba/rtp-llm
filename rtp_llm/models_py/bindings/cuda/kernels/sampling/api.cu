@@ -65,6 +65,7 @@ torch::Tensor prepare_optional_param(const std::optional<torch::Tensor>& maybe_p
     TORCH_CHECK(
         param.numel() == batch_size, name, " length must match batch_size, got ", param.numel(), " vs ", batch_size);
 
+    // Return the input tensor directly when it already matches; callers must clone before any in-place mutation.
     if (param.device() == device && param.scalar_type() == dtype && param.is_contiguous()) {
         return param;
     }

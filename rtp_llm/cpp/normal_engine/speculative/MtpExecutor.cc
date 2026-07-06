@@ -160,7 +160,7 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
 
     const auto max_sampler_batch_size = (propose_params->gen_num_per_circle + 1)
                                         * static_cast<size_t>(std::max(1, params.concurrency_config.concurrency_limit));
-    sampler_.reset(new Sampler(SamplerInitParams{max_sampler_batch_size}));
+    sampler_.reset(new Sampler(SamplerInitParams{max_sampler_batch_size, true}));
 
     // Optional per-layer cache buffers from KVCacheManager::allLayerCacheBase().
     std::optional<CacheLayerLayout> kv_cache_layer_layout = std::nullopt;

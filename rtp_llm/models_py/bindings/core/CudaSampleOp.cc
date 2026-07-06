@@ -130,6 +130,10 @@ std::pair<torch::Tensor, torch::Tensor> makeSamplingSeedOffsetTensors(const std:
                                                                       int64_t                           batch_size,
                                                                       int                               increment,
                                                                       GreedySamplingBuffers* sampling_buffers) {
+    RTP_LLM_CHECK_WITH_INFO(generators.size() >= static_cast<size_t>(batch_size),
+                            "sampling generators size [%lu] is smaller than batch size [%ld]",
+                            generators.size(),
+                            batch_size);
     const bool    use_persistent_buffers = sampling_buffers != nullptr;
     auto          options                = torch::TensorOptions().dtype(torch::kInt64).pinned_memory(true);
     torch::Tensor seed_h;
@@ -145,6 +149,7 @@ std::pair<torch::Tensor, torch::Tensor> makeSamplingSeedOffsetTensors(const std:
     auto off_ptr  = offset_h.data_ptr<int64_t>();
 
     for (int64_t i = 0; i < batch_size; ++i) {
+        // Undefined generator entries intentionally use PyTorch's default CUDA generator.
         auto generator      = (i < static_cast<int64_t>(generators.size()) && generators[i].defined()) ?
                                   std::make_optional(generators[i]) :
                                   std::nullopt;
