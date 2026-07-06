@@ -1599,16 +1599,22 @@ __device__ __forceinline__ void dsv4MegaLoadAttentionKeyTile(const scalar_t* __r
         const int nope_groups = kSwaNopeDim / kSwaQuantBlock;
         const int fp8_total = key_count * nope_groups * kSwaQuantBlock;
         if (all_packed_full_tile) {
-            for (int idx = tid; idx < fp8_total; idx += static_cast<int>(blockDim.x)) {
-                const int lane = idx % kSwaQuantBlock;
-                const int group_linear = idx / kSwaQuantBlock;
-                const int key_i = group_linear / nope_groups;
-                const int scale_i = group_linear - key_i * nope_groups;
-                const int d = scale_i * kSwaQuantBlock + lane;
-                const uint8_t* data_ptr = packed_data_rows[key_i];
-                const float scale_value = packed_scales[key_i * kSwaScaleBytes + scale_i];
-                key_tile_shared[static_cast<int64_t>(key_i) * kSwaHeadDim + d] =
-                    fp8_e4m3_to_float(data_ptr[d], scale_value);
+            const int warp_id = tid / kMegaAttentionWarpSize;
+            const int lane = tid & (kMegaAttentionWarpSize - 1);
+            if (warp_id < kSwaNopeTiles) {
+                const int scale_i = warp_id;
+                const int d_base = scale_i * kSwaQuantBlock;
+#pragma unroll
+                for (int key_i = 0; key_i < kMegaAttentionGroupedKeyTile; ++key_i) {
+                    const uint8_t* data_ptr = packed_data_rows[key_i];
+                    const float scale_value = packed_scales[key_i * kSwaScaleBytes + scale_i];
+                    float* key_row = key_tile_shared + static_cast<int64_t>(key_i) * kSwaHeadDim;
+#pragma unroll
+                    for (int half = 0; half < 2; ++half) {
+                        const int d = d_base + half * kMegaAttentionWarpSize + lane;
+                        key_row[d] = fp8_e4m3_to_float(data_ptr[d], scale_value);
+                    }
+                }
             }
             constexpr int rope_pairs_per_key = (kSwaHeadDim - kSwaNopeDim) / 2;
             const int rope_pair_total = key_count * rope_pairs_per_key;
