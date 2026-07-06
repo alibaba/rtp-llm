@@ -1,6 +1,7 @@
 from typing import List
 
 from rtp_llm.config.py_config_modules import VitConfig
+from rtp_llm.metrics.kmonitor_metric_reporter import GaugeMetrics
 from rtp_llm.multimodal.multimodal_mixins.base_multimodal_mixin import (
     BaseMultiModalMixin,
     BaseVitWeights,
@@ -32,6 +33,11 @@ from rtp_llm.multimodal.multimodal_mixins.qwen2_vl.image_processing_qwen2_vl imp
 )
 from rtp_llm.multimodal.multimodal_mixins.qwen2_vl.modeling_qwen2_vl import (
     Qwen2VisionTransformerPretrainedModel,
+)
+from rtp_llm.multimodal.vit_metrics import (
+    record_vit_preprocess_value,
+    video_resized_pixel_count,
+    vit_preprocess_timer,
 )
 
 IMAGE_FACTOR = 28
@@ -124,7 +130,9 @@ class Qwen2_VLImageEmbedding(MultiModalEmbeddingInterface):
 
     @staticmethod
     def load_image(data, configs, **kwargs):
-        image = Image.open(data).convert("RGB")
+        tags = kwargs.get("vit_metrics_tags", {"model": "qwen2_vl", "mm_type": "image"})
+        with vit_preprocess_timer(GaugeMetrics.VIT_IMAGE_DECODE_RT_US_METRIC, tags):
+            image = Image.open(data).convert("RGB")
         size_factor = IMAGE_FACTOR
         if configs.height != -1 and configs.width != -1:
             resized_height, resized_width = smart_resize(
@@ -143,7 +151,13 @@ class Qwen2_VLImageEmbedding(MultiModalEmbeddingInterface):
                 min_pixels=min_pixels,
                 max_pixels=max_pixels,
             )
-        image = image.resize((resized_width, resized_height))
+        with vit_preprocess_timer(GaugeMetrics.VIT_IMAGE_RESIZE_RT_US_METRIC, tags):
+            image = image.resize((resized_width, resized_height))
+        record_vit_preprocess_value(
+            GaugeMetrics.VIT_RESIZED_PIXEL_COUNT_METRIC,
+            resized_width * resized_height,
+            tags,
+        )
         return image
 
     @staticmethod
@@ -153,24 +167,30 @@ class Qwen2_VLImageEmbedding(MultiModalEmbeddingInterface):
                 "decord is required for video processing in Qwen2-VL. "
                 "Install it with `pip install decord`."
             )
-        vr = VideoReader(data, ctx=cpu(0), num_threads=1)
-        frames = len(vr)
+        tags = kwargs.get("vit_metrics_tags", {"model": "qwen2_vl", "mm_type": "video"})
+        with vit_preprocess_timer(GaugeMetrics.VIT_IMAGE_DECODE_RT_US_METRIC, tags):
+            vr = VideoReader(data, ctx=cpu(0), num_threads=1)
+            frames = len(vr)
 
-        fps = FPS if configs.fps == -1 else configs.fps
-        size_factor = FRAME_FACTOR
-        nframes = frames / vr.get_avg_fps() * fps
-        nframes = round_by_factor(nframes, size_factor)
-        min_frames = FPS_MIN_FRAMES if configs.min_frames == -1 else configs.min_frames
-        if nframes < min_frames:
-            nframes = ceil_by_factor(min_frames, size_factor)
-        max_frames = FPS_MAX_FRAMES if configs.max_frames == -1 else configs.max_frames
-        if nframes > max_frames:
-            nframes = floor_by_factor(max_frames, size_factor)
+            fps = FPS if configs.fps == -1 else configs.fps
+            size_factor = FRAME_FACTOR
+            nframes = frames / vr.get_avg_fps() * fps
+            nframes = round_by_factor(nframes, size_factor)
+            min_frames = (
+                FPS_MIN_FRAMES if configs.min_frames == -1 else configs.min_frames
+            )
+            if nframes < min_frames:
+                nframes = ceil_by_factor(min_frames, size_factor)
+            max_frames = (
+                FPS_MAX_FRAMES if configs.max_frames == -1 else configs.max_frames
+            )
+            if nframes > max_frames:
+                nframes = floor_by_factor(max_frames, size_factor)
 
-        idx = torch.linspace(0, frames - 1, nframes).round().long().tolist()
-        height, width = vr[0].shape[:2]
-        video = torch.tensor(vr.get_batch(idx).asnumpy()).permute(0, 3, 1, 2)
-        del vr
+            idx = torch.linspace(0, frames - 1, nframes).round().long().tolist()
+            height, width = vr[0].shape[:2]
+            video = torch.tensor(vr.get_batch(idx).asnumpy()).permute(0, 3, 1, 2)
+            del vr
 
         if configs.height != -1 and configs.width != -1:
             resized_height, resized_width = smart_resize(
@@ -197,12 +217,18 @@ class Qwen2_VLImageEmbedding(MultiModalEmbeddingInterface):
                 max_pixels=max_pixels,
             )
 
-        video = transforms.functional.resize(
-            video,
-            [resized_height, resized_width],
-            interpolation=InterpolationMode.BICUBIC,
-            antialias=True,
-        ).float()
+        with vit_preprocess_timer(GaugeMetrics.VIT_IMAGE_RESIZE_RT_US_METRIC, tags):
+            video = transforms.functional.resize(
+                video,
+                [resized_height, resized_width],
+                interpolation=InterpolationMode.BICUBIC,
+                antialias=True,
+            ).float()
+        record_vit_preprocess_value(
+            GaugeMetrics.VIT_RESIZED_PIXEL_COUNT_METRIC,
+            video_resized_pixel_count(video.shape[0], resized_height, resized_width),
+            tags,
+        )
         return video
 
     def get_position_ids(self, grid_thw: torch.Tensor = None) -> torch.Tensor:
@@ -252,18 +278,33 @@ class Qwen2_VLImageEmbedding(MultiModalEmbeddingInterface):
         assert len(mm_inputs) == 1
         mm_input = mm_inputs[0]
         mm_type = mm_input.mm_type
-        data = get_bytes_io_from_url(mm_input.url, vit_config.download_headers)
         if mm_type == MMUrlType.DEFAULT or mm_type == MMUrlType.IMAGE:
+            tags = {"model": "qwen2_vl", "mm_type": "image"}
+            with vit_preprocess_timer(GaugeMetrics.VIT_IMAGE_FETCH_RT_US_METRIC, tags):
+                data = get_bytes_io_from_url(mm_input.url, vit_config.download_headers)
             data = Qwen2_VLImageEmbedding.load_image(
-                data, mm_input.mm_preprocess_config
+                data,
+                mm_input.mm_preprocess_config,
+                vit_metrics_tags=tags,
             )
-            res = processor(images=data, videos=None, return_tensors="pt")
+            with vit_preprocess_timer(
+                GaugeMetrics.VIT_IMAGE_PROCESSOR_RT_US_METRIC, tags
+            ):
+                res = processor(images=data, videos=None, return_tensors="pt")
             return res["pixel_values"], res["image_grid_thw"]
         elif mm_type == MMUrlType.VIDEO:
+            tags = {"model": "qwen2_vl", "mm_type": "video"}
+            with vit_preprocess_timer(GaugeMetrics.VIT_IMAGE_FETCH_RT_US_METRIC, tags):
+                data = get_bytes_io_from_url(mm_input.url, vit_config.download_headers)
             data = Qwen2_VLImageEmbedding.load_video(
-                data, mm_input.mm_preprocess_config
+                data,
+                mm_input.mm_preprocess_config,
+                vit_metrics_tags=tags,
             )
-            res = processor(images=None, videos=data, return_tensors="pt")
+            with vit_preprocess_timer(
+                GaugeMetrics.VIT_IMAGE_PROCESSOR_RT_US_METRIC, tags
+            ):
+                res = processor(images=None, videos=data, return_tensors="pt")
             return res["pixel_values_videos"], res["video_grid_thw"]
         else:
             raise ValueError(f"unknown mm url type: {mm_type}")

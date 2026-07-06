@@ -26,6 +26,8 @@ from rtp_llm.multimodal.multimodal_util import get_bytes_io_from_url
 from rtp_llm.ops import MMPreprocessConfig, MultimodalInput
 from rtp_llm.utils.base_model_datatypes import MMUrlType
 from rtp_llm.utils.flash_attn_utils import can_use_flash_attn
+from rtp_llm.utils.database import CkptDatabase
+
 
 default_attn_impl = "sdpa"
 try:
@@ -149,6 +151,20 @@ class Qwen3_5MoeVitWeight(BaseVitWeights):
         self._ckpt_prefix = "model.visual."
         self._ft_prefix = "self.mm_part.visual."
 
+    def detect_ckpt_prefix(self, tensor_names: List[str]):
+        suffix = "blocks.0.norm1.weight"
+        suffix_with_visual = "visual." + suffix
+        for name in tensor_names:
+            if name.endswith(suffix_with_visual):
+                # Extract the prefix ending at the visual module closest to the anchor.
+                self._ckpt_prefix = name[: -len(suffix)]
+                break
+        else:
+            raise ValueError(
+                f"Qwen3_5MoeVitWeight: cannot determine visual prefix, no key ending "
+                f"with {suffix_with_visual!r} in {len(tensor_names)} ckpt keys"
+            )
+
 
 class Qwen3_5MoeMixin(Qwen3_VLMixin):
     def _init_multimodal(self):
@@ -156,6 +172,11 @@ class Qwen3_5MoeMixin(Qwen3_VLMixin):
         self.mm_related_params.vit_weights = Qwen3_5MoeVitWeight(
             {"vit": self.mm_part.visual}
         )
+
+    def _prepare_vit_weights(self, database: CkptDatabase) -> None:
+        vit_weights = self.mm_related_params.vit_weights
+        if isinstance(vit_weights, Qwen3_5MoeVitWeight):
+            vit_weights.detect_ckpt_prefix(database.get_pretrain_tensor_names())
 
     @classmethod
     def _get_mm_module(cls, mm_related_params: VitParameters, vit_config: VitConfig):

@@ -57,3 +57,23 @@ py_test(
         "//rtp_llm:testlib",
     ],
 )
+
+py_test(
+    name = "vit_metrics_test",
+    srcs = [
+        "vit_metrics_test.py",
+    ],
+    deps = [
+        "//rtp_llm:testlib",
+    ],
+)
+
+py_test(
+    name = "qwen35_prefix_detection_test",
+    srcs = [
+        "qwen35_prefix_detection_test.py",
+    ],
+    deps = [
+        "//rtp_llm:testlib",
+    ],
+)
