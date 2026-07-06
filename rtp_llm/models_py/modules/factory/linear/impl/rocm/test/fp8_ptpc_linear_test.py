@@ -16,6 +16,11 @@ except ImportError:
     AITER_AVAILABLE = False
 
 
+class _FP8PTPCQuantConfig:
+    def get_method(self):
+        return "FP8_PER_CHANNEL_COMPRESSED"
+
+
 def run_torch(x, weight, x_scale, w_scale, bias=None, dtype=torch.bfloat16):
     x = x.to(dtypes.fp32) * x_scale
     weight = weight.to(dtypes.fp32) * w_scale
@@ -288,6 +293,67 @@ class RocmFp8PTPCLinearWithSwizzleTest(unittest.TestCase):
         self.assertEqual(linear.weight.stride(), (1, self.hidden_size))
         self.assertEqual(linear.weight.shape, (self.hidden_size, self.output_size))
 
+    def test_factory_selects_fp8_ptpc_strategy_by_swizzle_config(self):
+        from rtp_llm.models_py.kernels.rocm.fp8_kernel import rocm_per_token_quant_fp8
+        from rtp_llm.models_py.modules.factory import LinearFactory
+        from rtp_llm.models_py.modules.factory.linear.impl.rocm.fp8_ptpc_linear import (
+            RocmFp8PTPCLinearNoSwizzle,
+            RocmFp8PTPCLinearWithSwizzle,
+        )
+        from rtp_llm.ops import HWKernelConfig
+
+        weight_q, weight_scales = rocm_per_token_quant_fp8(self.weight_bf16)
+        scale_b = weight_scales.T.contiguous()
+        weight_no_swizzle = shuffle_weight(weight_q, layout=(16, 16)).T.contiguous()
+        weight_with_swizzle = swizzle_tensor(weight_q, False).T
+        quant_config = _FP8PTPCQuantConfig()
+
+        original_strategies = list(LinearFactory._strategies)
+        try:
+            LinearFactory.clear()
+            LinearFactory.register(RocmFp8PTPCLinearWithSwizzle)
+            LinearFactory.register(RocmFp8PTPCLinearNoSwizzle)
+
+            hw_config = HWKernelConfig()
+            hw_config.use_swizzleA = True
+            linear = LinearFactory.create_linear(
+                weight_with_swizzle, self.bias, scale_b, quant_config, hw_config
+            )
+            self.assertIsInstance(linear, RocmFp8PTPCLinearWithSwizzle)
+
+            hw_config = HWKernelConfig()
+            hw_config.use_swizzleA = False
+            linear = LinearFactory.create_linear(
+                weight_no_swizzle, self.bias, scale_b, quant_config, hw_config
+            )
+            self.assertIsInstance(linear, RocmFp8PTPCLinearNoSwizzle)
+        finally:
+            LinearFactory.clear()
+            for strategy in original_strategies:
+                LinearFactory.register(strategy)
+
+    def test_forward_matches_dequant_reference(self):
+        from rtp_llm.models_py.kernels.rocm.fp8_kernel import rocm_per_token_quant_fp8
+
+        linear = self._make_linear()
+        output = linear(self.input_bf16)
+
+        input_q, input_scales = rocm_per_token_quant_fp8(self.input_bf16, eps=1e-10)
+        weight_q, weight_scales = rocm_per_token_quant_fp8(self.weight_bf16)
+        ref = run_torch(
+            input_q,
+            weight_q,
+            input_scales.to(torch.float32),
+            weight_scales,
+            bias=self.bias,
+            dtype=torch.bfloat16,
+        )
+
+        self.assertEqual(output.shape, (self.batch_size, self.output_size))
+        self.assertFalse(torch.isnan(output).any())
+        self.assertFalse(torch.isinf(output).any())
+        torch.testing.assert_close(output, ref, atol=5e-2, rtol=5e-2)
+
     def test_scale_b_normalize_accepts_common_shapes(self):
         from rtp_llm.models_py.modules.factory.linear.impl.rocm.fp8_ptpc_linear import (
             RocmFp8PTPCLinearWithSwizzle,
@@ -346,16 +412,6 @@ class RocmFp8PTPCLinearWithSwizzleTest(unittest.TestCase):
             RocmFp8PTPCLinearWithSwizzle._epilogue_name(False, True, False),
             "none",
         )
-
-    def test_forward_with_deferred_bias_preserves_eager_bias_path(self):
-        linear = self._make_linear()
-        output, output_bias = linear.forward_with_deferred_bias(self.input_bf16)
-        ref = linear(self.input_bf16)
-        self.assertEqual(output.shape, (self.batch_size, self.output_size))
-        self.assertIsNone(output_bias)
-        torch.testing.assert_close(output, ref, atol=0, rtol=0)
-        self.assertFalse(torch.isnan(output).any())
-        self.assertFalse(torch.isinf(output).any())
 
     def test_forward_with_bias_gelu_matches_gelu_of_biased_forward(self):
         linear = self._make_linear()

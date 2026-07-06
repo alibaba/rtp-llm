@@ -4,7 +4,7 @@ Defines the unified interface for all Linear strategies.
 """
 
 from abc import ABC, abstractmethod
-from typing import Optional, Tuple
+from typing import Optional
 
 import torch
 import torch.nn.functional as F
@@ -62,7 +62,7 @@ class LinearBase(nn.Module, ABC):
             weight_scales: Weight scales tensor
             input_scales: Input scales tensor
             bias: Bias tensor
-            quant_config: Quantization configuration (required)ers
+            quant_config: Quantization configuration (required)
             weight_scale_2: Second weight scale tensor (for FP4, can be None)
         """
         super().__init__()
@@ -88,16 +88,6 @@ class LinearBase(nn.Module, ABC):
             Output tensor
         """
         pass
-
-    def forward_with_deferred_bias(
-        self, input: torch.Tensor
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
-        """Forward pass for callers that can consume a deferred output bias.
-
-        Backends that cannot defer bias keep the existing eager behavior by
-        returning the regular output and ``None`` for the deferred bias.
-        """
-        return self.forward(input), None
 
     def forward_with_bias_gelu(self, input: torch.Tensor) -> torch.Tensor:
         """Forward pass followed by GELU.

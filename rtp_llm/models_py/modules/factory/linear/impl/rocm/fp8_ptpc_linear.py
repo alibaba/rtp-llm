@@ -219,10 +219,10 @@ class RocmFp8PTPCLinearWithSwizzle(RocmFp8PTPCLinearBase):
         target = payload.get("target", {})
         arch_prefix = str(target.get("arch_prefix", ""))
         hip_prefix = str(target.get("torch_hip_prefix", ""))
-        aiter_version = str(target.get("aiter_version", ""))
+        aiter_version_prefix = str(target.get("aiter_version_prefix", ""))
 
         try:
-            props = torch.cuda.get_device_properties(0)
+            props = torch.cuda.get_device_properties(torch.cuda.current_device())
             gpu_arch = str(getattr(props, "gcnArchName", ""))
         except Exception:
             gpu_arch = ""
@@ -235,7 +235,10 @@ class RocmFp8PTPCLinearWithSwizzle(RocmFp8PTPCLinearBase):
         return (
             (not arch_prefix or gpu_arch.startswith(arch_prefix))
             and (not hip_prefix or torch_hip.startswith(hip_prefix))
-            and (not aiter_version or installed_aiter == aiter_version)
+            and (
+                not aiter_version_prefix
+                or installed_aiter.startswith(aiter_version_prefix)
+            )
         )
 
     @staticmethod
@@ -318,13 +321,6 @@ class RocmFp8PTPCLinearWithSwizzle(RocmFp8PTPCLinearBase):
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         return self._forward_hipb(input, add_bias=True)
-
-    def forward_with_deferred_bias(
-        self, input: torch.Tensor
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
-        # Preserve pre-refactor numerics: keep bias fused in hipBLASLt instead
-        # of moving it into the following AddBiasResLayerNorm.
-        return self._forward_hipb(input, add_bias=True), None
 
     def forward_with_bias_gelu(self, input: torch.Tensor) -> torch.Tensor:
         if self.bias is None:

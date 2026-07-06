@@ -1,4 +1,4 @@
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional
 
 import torch
 import torch.nn as nn
@@ -38,7 +38,6 @@ class CausalAttention(nn.Module):
         self.num_key_value_groups = attn_config.head_num // attn_config.kv_head_num
         self.head_dim = attn_config.size_per_head
         self.q_size = attn_config.head_num * self.head_dim
-        self.kv_size = attn_config.kv_head_num * self.head_dim
 
         self.qkv_proj = LinearFactory.create_linear_from_weights(
             weights,
@@ -73,14 +72,13 @@ class CausalAttention(nn.Module):
                 layernorm_eps,
             )
 
-    def _forward_impl(
+    def forward(
         self,
         hidden_states: torch.Tensor,
         fmha_impl: FMHAImplBase,
         kv_cache: Optional[LayerKVCache],
         gate: Optional[torch.Tensor] = None,
-        defer_output_bias: bool = False,
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+    ) -> torch.Tensor:
         input_shape = hidden_states.shape[:-1]
         qkv = self.qkv_proj(hidden_states)
         if self.qk_fuse_norm is not None:
@@ -89,38 +87,7 @@ class CausalAttention(nn.Module):
         attn_output = attn_output.reshape(*input_shape, -1).contiguous()
         if gate is not None:
             attn_output = attn_output * torch.sigmoid(gate)
-
-        output_bias = None
-        if defer_output_bias and self.tp_size == 1:
-            output, output_bias = self.o_proj.forward_with_deferred_bias(attn_output)
-        else:
-            output = self.o_proj(attn_output)
-
+        output = self.o_proj(attn_output)
         if self.tp_size > 1:
             output = all_reduce(output, group=Group.TP)
-        return output, output_bias
-
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-        fmha_impl: FMHAImplBase,
-        kv_cache: Optional[LayerKVCache],
-        gate: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
-        output, _ = self._forward_impl(
-            hidden_states, fmha_impl, kv_cache, gate, defer_output_bias=False
-        )
         return output
-
-    def forward_defer_output_bias(
-        self,
-        hidden_states: torch.Tensor,
-        fmha_impl: FMHAImplBase,
-        kv_cache: Optional[LayerKVCache],
-        gate: Optional[torch.Tensor] = None,
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
-        """Same as forward() but returns o_proj's bias separately so the caller
-        can fuse it into a following residual-add+LayerNorm."""
-        return self._forward_impl(
-            hidden_states, fmha_impl, kv_cache, gate, defer_output_bias=True
-        )

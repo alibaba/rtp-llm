@@ -1,4 +1,4 @@
-from typing import Tuple, Union
+from typing import Tuple
 
 import torch
 import torch.nn.functional as F
@@ -16,8 +16,10 @@ from rtp_llm.models_py.modules.base.common.norm import (
 )
 from rtp_llm.ops.compute_ops import rtp_llm_ops
 
-# aiter layernorm2d_fwd_with_add is validated for the VisionBert-style 2D
-# path; broader hidden sizes keep the legacy fused_add_layernorm behavior.
+# Fast-path guard for VisionBert-style AddBiasResLayerNorm. The aiter
+# fused-add 2D kernel was validated for request-sized batches with hidden <=
+# 768; broader hidden sizes stay on legacy fused_add_layernorm to preserve the
+# existing ROCm LayerNorm test coverage.
 _LAYER_NORM2D_MIN_TOKENS = 32
 _LAYER_NORM2D_MAX_HIDDEN = 768
 
@@ -84,7 +86,7 @@ class AddBiasResLayerNorm(BaseAddBiasResLayerNorm):
         hidden_states: torch.Tensor,
         residual: torch.Tensor,
         bias: torch.Tensor,
-    ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+    ) -> torch.Tensor:
         use_layernorm2d_with_add = (
             hidden_states.dim() == 2
             and residual.dim() == 2

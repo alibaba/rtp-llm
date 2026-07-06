@@ -62,38 +62,28 @@ class BertDecoderLayer(nn.Module):
             eps=config.layernorm_eps,
         )
 
-    @staticmethod
-    def _layernorm_bias(
-        bias: Optional[torch.Tensor], hidden_states: torch.Tensor
-    ) -> torch.Tensor:
-        if bias is None:
-            return torch.empty(0)
-        if bias.dtype != hidden_states.dtype:
-            return bias.to(hidden_states.dtype)
-        return bias
-
     def forward(
         self,
         hidden_states: torch.Tensor,
         fmha_impl: FMHAImplBase,
         kv_cache: Optional[LayerKVCache] = None,
     ) -> torch.Tensor:
+        empty_bias = torch.empty(
+            0, device=hidden_states.device, dtype=hidden_states.dtype
+        )
+
         residual = hidden_states
-        # Self Attention — defer o_proj bias so AddBiasResLayerNorm can fuse it
-        hidden_states, attention_bias = self.self_attn.forward_defer_output_bias(
+        hidden_states = self.self_attn(
             hidden_states=hidden_states,
             fmha_impl=fmha_impl,
             kv_cache=kv_cache,
         )
-        hidden_states = self.input_layernorm(
-            hidden_states, residual, self._layernorm_bias(attention_bias, hidden_states)
-        )
+        hidden_states = self.input_layernorm(hidden_states, residual, empty_bias)
 
-        # Fully Connected — defer down_proj bias for the same reason.
         residual = hidden_states
-        hidden_states, mlp_bias = self.mlp.forward_defer_output_bias(hidden_states)
+        hidden_states = self.mlp(hidden_states)
         hidden_states = self.post_attention_layernorm(
-            hidden_states, residual, self._layernorm_bias(mlp_bias, hidden_states)
+            hidden_states, residual, empty_bias
         )
         return hidden_states
 
