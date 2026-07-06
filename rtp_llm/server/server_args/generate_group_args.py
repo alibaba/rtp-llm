@@ -63,6 +63,14 @@ def init_generate_group_args(parser, generate_env_config):
         help="深度思考模式的起始标签",
     )
     generate_group.add_argument(
+        "--think_terminate_token_id",
+        env_name="THINK_TERMINATE_TOKEN_ID",
+        bind_to=(generate_env_config, "think_terminate_token_id"),
+        type=int,
+        default=1,
+        help="思考阶段被特殊 token 立刻终止时的 token id(DSV4 默认为 1);<=0 表示禁用该路径",
+    )
+    generate_group.add_argument(
         "--generation_config_path",
         env_name="GENERATION_CONFIG_PATH",
         bind_to=(generate_env_config, 'generation_config_path'),

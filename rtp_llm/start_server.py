@@ -20,23 +20,62 @@ from rtp_llm.config.server_config_setup import setup_and_configure_server
 from rtp_llm.ops import RoleType, VitSeparation
 from rtp_llm.server.server_args.server_args import setup_args
 from rtp_llm.utils.concurrency_controller import init_controller
-from rtp_llm.utils.process_manager import ProcessManager
+from rtp_llm.utils.process_manager import (
+    DEFER_FIRST_SIGTERM_ENV,
+    DEFER_FIRST_SIGTERM_SECONDS_ENV,
+    DEFER_FIRST_SIGTERM_VALUE,
+    ProcessManager,
+)
 
 setup_logging()
+
+
+def _install_hot_hook_runtime(role: str) -> None:
+    try:
+        from rtp_llm.utils.hot_hook_runtime import install_if_enabled
+
+        if install_if_enabled():
+            logging.info("RTP hot hook runtime installed for %s", role)
+    except Exception as e:
+        logging.error("failed to install RTP hot hook runtime for %s: %s", role, e)
 
 
 def check_server_health(server_port):
     try:
         response = requests.get(f"http://localhost:{server_port}/health", timeout=60)
-        if response.status_code == 200 and response.json().get("status", "") == "ok":
+        health_ok = False
+        if response.status_code == 200:
+            try:
+                health_body = response.json()
+                if isinstance(health_body, dict):
+                    health_ok = health_body.get("status", "") == "ok"
+                elif isinstance(health_body, str):
+                    health_ok = health_body == "ok"
+            except ValueError:
+                health_ok = response.text.strip() == "ok"
+        if health_ok:
             logging.info(
                 f"{server_port}/health, response status_code = {response.status_code}, text = {response.text}, len = {len(response.text)}"
             )
             return True
-        else:
-            return False
+        return False
     except BaseException as e:
         return False
+
+
+def _backend_deferred_sigterm_seconds(py_env_configs: PyEnvConfigs) -> str:
+    timeout = ProcessManager.normalize_shutdown_timeout_seconds(
+        py_env_configs.server_config.shutdown_timeout
+    )
+    return str(ProcessManager.deferred_group_shutdown_timeout_seconds(timeout))
+
+
+def _sync_server_shutdown_timeout(py_env_configs: PyEnvConfigs):
+    py_env_configs.server_config.shutdown_timeout = (
+        ProcessManager.sync_shutdown_timeout_env(
+            py_env_configs.server_config.shutdown_timeout
+        )
+    )
 
 
 @timer_wrapper(description="start backend server")
@@ -56,12 +95,29 @@ def start_backend_server_impl(
     pipe_reader, pipe_writer = torch.multiprocessing.Pipe(duplex=False)
     logging.info(f"[PROCESS_SPAWN]Start backend server process outer")
 
-    backend_process = torch.multiprocessing.Process(
-        target=start_backend_server,
-        args=(global_controller, py_env_configs, pipe_writer),
-        name="backend_manager",
+    old_defer = os.environ.get(DEFER_FIRST_SIGTERM_ENV)
+    old_defer_seconds = os.environ.get(DEFER_FIRST_SIGTERM_SECONDS_ENV)
+    _sync_server_shutdown_timeout(py_env_configs)
+    os.environ[DEFER_FIRST_SIGTERM_ENV] = DEFER_FIRST_SIGTERM_VALUE
+    os.environ[DEFER_FIRST_SIGTERM_SECONDS_ENV] = _backend_deferred_sigterm_seconds(
+        py_env_configs
     )
-    backend_process.start()
+    try:
+        backend_process = torch.multiprocessing.Process(
+            target=start_backend_server,
+            args=(global_controller, py_env_configs, pipe_writer),
+            name="backend_manager",
+        )
+        backend_process.start()
+    finally:
+        if old_defer is None:
+            os.environ.pop(DEFER_FIRST_SIGTERM_ENV, None)
+        else:
+            os.environ[DEFER_FIRST_SIGTERM_ENV] = old_defer
+        if old_defer_seconds is None:
+            os.environ.pop(DEFER_FIRST_SIGTERM_SECONDS_ENV, None)
+        else:
+            os.environ[DEFER_FIRST_SIGTERM_SECONDS_ENV] = old_defer_seconds
     pipe_writer.close()  # Parent process closes write end
 
     # Create check_ready_fn for pipe-based health check
@@ -324,7 +380,92 @@ def start_frontend_server_impl(
     return frontend_processes
 
 
+@timer_wrapper(description="start dash_sc server")
+def start_dash_sc_server_impl(
+    global_controller,
+    py_env_configs: PyEnvConfigs,
+    process_manager=None,
+):
+    from rtp_llm.start_dash_sc_server import start_dash_sc_server
+
+    dash_sc_processes = []
+    dash_sc_pipe_readers = []
+
+    frontend_server_count = py_env_configs.server_config.frontend_server_count
+    pc = py_env_configs.parallelism_config
+    local_world_size = pc.world_size
+    if "LOCAL_WORLD_SIZE" in os.environ:
+        local_world_size = int(os.environ["LOCAL_WORLD_SIZE"])
+
+    for rank in range(local_world_size):
+        for i in range(frontend_server_count):
+            if rank == 0 or (pc.world_rank + rank) % pc.tp_size == 0:
+                pipe_reader, pipe_writer = torch.multiprocessing.Pipe(duplex=False)
+                logging.info(
+                    f"[PROCESS_SPAWN]Start dash_sc server process rank_{rank}_server_{i} outer"
+                )
+                process = torch.multiprocessing.Process(
+                    target=start_dash_sc_server,
+                    args=(rank, i, global_controller, py_env_configs, pipe_writer),
+                    name=f"dash_sc_server_{rank}_{i}",
+                )
+                process.start()
+                pipe_writer.close()
+                dash_sc_processes.append(process)
+                dash_sc_pipe_readers.append(pipe_reader)
+            else:
+                logging.info(f"rank {pc.world_rank + rank} skipping dash_sc startup")
+
+    if process_manager and dash_sc_processes:
+        startup_status = {"remaining": set(range(len(dash_sc_pipe_readers)))}
+
+        def check_dash_sc_ready():
+            if not startup_status["remaining"]:
+                return True
+            done_now = []
+            for idx in list(startup_status["remaining"]):
+                reader = dash_sc_pipe_readers[idx]
+                try:
+                    if not reader.poll(timeout=0):
+                        continue
+                    msg = reader.recv()
+                except EOFError:
+                    raise Exception(
+                        f"DashSc server rank_idx={idx} pipe closed unexpectedly"
+                    )
+                if msg.get("status") == "success":
+                    logging.info(
+                        f"DashSc server rank_idx={idx} ready: {msg.get('message', '')}"
+                    )
+                    done_now.append(idx)
+                    try:
+                        reader.close()
+                    except Exception:
+                        pass
+                else:
+                    error_msg = msg.get("message", "Unknown error")
+                    traceback_info = msg.get("traceback", "")
+                    if traceback_info:
+                        logging.error(f"DashSc server traceback: {traceback_info}")
+                    raise Exception(
+                        f"DashSc server rank_idx={idx} start failed: {error_msg}"
+                    )
+            for idx in done_now:
+                startup_status["remaining"].discard(idx)
+            return not startup_status["remaining"]
+
+        process_manager.register_health_check(
+            processes=dash_sc_processes,
+            process_name="dash_sc_server",
+            check_ready_fn=check_dash_sc_ready,
+            retry_interval_seconds=1,
+        )
+
+    return dash_sc_processes
+
+
 def main():
+    _install_hot_hook_runtime("main")
     py_env_configs: PyEnvConfigs = setup_args()
     setup_and_configure_server(py_env_configs)
     start_server(py_env_configs)
@@ -346,6 +487,7 @@ def start_server(py_env_configs: PyEnvConfigs):
         py_env_configs.concurrency_config,
         dp_size=py_env_configs.parallelism_config.dp_size,
     )
+    _sync_server_shutdown_timeout(py_env_configs)
 
     # Create process manager with config values
     process_manager = ProcessManager(
@@ -369,7 +511,7 @@ def start_server(py_env_configs: PyEnvConfigs):
     try:
         if py_env_configs.role_config.role_type == RoleType.VIT:
             vit_processes = start_vit_server_impl(py_env_configs, process_manager)
-            process_manager.add_processes(vit_processes)
+            process_manager.add_processes(vit_processes, shutdown_group="frontend")
 
         if (
             py_env_configs.role_config.role_type != RoleType.FRONTEND
@@ -379,14 +521,22 @@ def start_server(py_env_configs: PyEnvConfigs):
             backend_process = start_backend_server_impl(
                 global_controller, py_env_configs, process_manager
             )
-            process_manager.add_process(backend_process)
+            process_manager.add_process(backend_process, shutdown_group="backend")
 
         if py_env_configs.role_config.role_type != RoleType.VIT:
             # vit has its own frontend server
             frontend_process = start_frontend_server_impl(
                 global_controller, py_env_configs, process_manager
             )
-            process_manager.add_processes(frontend_process)
+            process_manager.add_processes(frontend_process, shutdown_group="frontend")
+
+            dash_sc_processes = start_dash_sc_server_impl(
+                global_controller, py_env_configs, process_manager
+            )
+            if dash_sc_processes:
+                process_manager.add_processes(
+                    dash_sc_processes, shutdown_group="frontend"
+                )
 
         if not process_manager.run_health_checks():
             logging.error("[START_SERVER] Health checks failed")
@@ -394,7 +544,8 @@ def start_server(py_env_configs: PyEnvConfigs):
 
     except Exception as e:
         logging.error(f"start failed, trace: {traceback.format_exc()}")
-        process_manager.graceful_shutdown()
+        if not process_manager.shutdown_requested:
+            process_manager.request_failure_shutdown()
     finally:
         process_manager.monitor_and_release_processes()
 

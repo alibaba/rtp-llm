@@ -44,6 +44,11 @@ rtp_llm/test-data/*
 
 model_rpc_service_pb2.py
 model_rpc_service_pb2_grpc.py
+rtp_llm/dash_sc/proto/__init__.py
+rtp_llm/dash_sc/proto/model_config_pb2.py
+rtp_llm/dash_sc/proto/model_config_pb2_grpc.py
+rtp_llm/dash_sc/proto/predict_v2_pb2.py
+rtp_llm/dash_sc/proto/predict_v2_pb2_grpc.py
 rtp_llm/cpp/deep_gemm/cutlass_hdr
 
 cuda_profiler*.json
