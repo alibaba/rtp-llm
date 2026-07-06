@@ -168,7 +168,7 @@ void peerHoldUnreadPayload(const std::string& base,
         return;
     }
     while (!release_peer.load(std::memory_order_acquire)) {
-        struct pollfd pfd {};
+        struct pollfd pfd{};
         pfd.fd     = fd;
         pfd.events = POLLIN;
         int rc     = ::poll(&pfd, 1, 10);
@@ -403,9 +403,8 @@ TEST(CpuTpBroadcasterTest, NonRootFailsFastOnNonRetryableConnectError) {
         EXPECT_NE(msg.find("failed:"), std::string::npos) << msg;
         EXPECT_EQ(msg.find("failed after"), std::string::npos) << msg;
     }
-    const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                                std::chrono::steady_clock::now() - start)
-                                .count();
+    const auto elapsed_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
     EXPECT_LT(elapsed_ms, 1000);
     bcast.reset();
 
@@ -446,7 +445,9 @@ TEST(CpuTpBroadcasterTest, AllowsCrossThreadBroadcastAndResetWhenIdle) {
         try {
             int value = 7;
             bcast.broadcast(&value, sizeof(value), 0);
-        } catch (const std::exception& e) { broadcast_error = e.what(); }
+        } catch (const std::exception& e) {
+            broadcast_error = e.what();
+        }
     });
     broadcast_thread.join();
     peer_thread.join();
@@ -458,7 +459,9 @@ TEST(CpuTpBroadcasterTest, AllowsCrossThreadBroadcastAndResetWhenIdle) {
     std::thread reset_thread([&] {
         try {
             bcast.reset();
-        } catch (const std::exception& e) { reset_error = e.what(); }
+        } catch (const std::exception& e) {
+            reset_error = e.what();
+        }
     });
     reset_thread.join();
     EXPECT_TRUE(reset_error.empty()) << reset_error;
@@ -483,7 +486,9 @@ TEST(CpuTpBroadcasterTest, ResetRejectsInFlightBroadcast) {
         try {
             std::vector<char> payload(64 * 1024 * 1024, 0x7f);
             bcast.broadcast(payload.data(), payload.size(), 0);
-        } catch (const std::exception& e) { broadcast_error = e.what(); }
+        } catch (const std::exception& e) {
+            broadcast_error = e.what();
+        }
     });
 
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
@@ -495,7 +500,9 @@ TEST(CpuTpBroadcasterTest, ResetRejectsInFlightBroadcast) {
     if (payload_ready.load(std::memory_order_acquire)) {
         try {
             bcast.reset();
-        } catch (const std::exception& e) { reset_error = e.what(); }
+        } catch (const std::exception& e) {
+            reset_error = e.what();
+        }
     }
 
     release_peer.store(true, std::memory_order_release);
@@ -506,6 +513,46 @@ TEST(CpuTpBroadcasterTest, ResetRejectsInFlightBroadcast) {
     EXPECT_TRUE(payload_ready.load(std::memory_order_acquire)) << "fake peer did not observe broadcast payload";
     EXPECT_NE(reset_error.find("reset called while broadcastCPU is in progress"), std::string::npos) << reset_error;
     EXPECT_FALSE(broadcast_error.empty());
+
+    bcast.reset();
+    cleanupTempBase(base);
+}
+
+TEST(CpuTpBroadcasterTest, BroadcastTimeoutRequiresResetBeforeReuse) {
+    auto& bcast = CpuTpBroadcaster::instance();
+    bcast.reset();
+    ::setenv("RTP_LLM_CPU_TP_BROADCASTER_BROADCAST_TIMEOUT_MS", "50", 1);
+
+    const std::string base = makeTempBase();
+    std::atomic<bool> payload_ready{false};
+    std::atomic<bool> release_peer{false};
+    std::string       peer_error;
+    std::thread       peer_thread([&] { peerHoldUnreadPayload(base, payload_ready, release_peer, peer_error); });
+    bcast.initialize(0, 2, base);
+
+    std::string broadcast_error;
+    try {
+        std::vector<char> payload(64 * 1024 * 1024, 0x7f);
+        bcast.broadcast(payload.data(), payload.size(), 0);
+    } catch (const std::exception& e) {
+        broadcast_error = e.what();
+    }
+
+    std::string retry_error;
+    try {
+        int value = 1;
+        bcast.broadcast(&value, sizeof(value), 0);
+    } catch (const std::exception& e) {
+        retry_error = e.what();
+    }
+
+    release_peer.store(true, std::memory_order_release);
+    peer_thread.join();
+    ::unsetenv("RTP_LLM_CPU_TP_BROADCASTER_BROADCAST_TIMEOUT_MS");
+
+    EXPECT_TRUE(peer_error.empty()) << peer_error;
+    EXPECT_NE(broadcast_error.find("failed after 50 ms"), std::string::npos) << broadcast_error;
+    EXPECT_NE(retry_error.find("reset and reinitialize before reuse"), std::string::npos) << retry_error;
 
     bcast.reset();
     cleanupTempBase(base);

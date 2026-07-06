@@ -4,6 +4,7 @@
 #include "rtp_llm/cpp/utils/Logger.h"
 
 #include <chrono>
+#include <cstdlib>
 #include <cstring>
 #include <thread>
 
@@ -18,8 +19,22 @@ namespace rtp_llm {
 
 namespace {
 
-constexpr int  kInitTimeoutMs  = 120 * 1000;
-constexpr char kLinkProbeToken = 0x5a;
+constexpr int  kInitTimeoutMs             = 120 * 1000;
+constexpr int  kDefaultBroadcastTimeoutMs = 120 * 1000;
+constexpr char kLinkProbeToken            = 0x5a;
+
+int broadcastTimeoutMs() {
+    const char* value = std::getenv("RTP_LLM_CPU_TP_BROADCASTER_BROADCAST_TIMEOUT_MS");
+    if (value == nullptr || *value == '\0') {
+        return kDefaultBroadcastTimeoutMs;
+    }
+    char* end    = nullptr;
+    long  parsed = std::strtol(value, &end, 10);
+    if (end == value || *end != '\0' || parsed <= 0 || parsed > 24L * 60 * 60 * 1000) {
+        return kDefaultBroadcastTimeoutMs;
+    }
+    return static_cast<int>(parsed);
+}
 
 std::string makeUdsPath(const std::string& base, int rank) {
     return base + "_" + std::to_string(rank) + ".sock";
@@ -112,11 +127,11 @@ int acceptWithTimeout(int listen_fd, int timeout_ms) {
     return -1;
 }
 
-ssize_t sendNoSignal(int fd, const void* buf, std::size_t nbytes) {
+ssize_t sendNoSignal(int fd, const void* buf, std::size_t nbytes, int extra_flags = 0) {
 #ifdef MSG_NOSIGNAL
-    return ::send(fd, buf, nbytes, MSG_NOSIGNAL);
+    return ::send(fd, buf, nbytes, MSG_NOSIGNAL | extra_flags);
 #else
-    return ::send(fd, buf, nbytes, 0);
+    return ::send(fd, buf, nbytes, extra_flags);
 #endif
 }
 
@@ -149,9 +164,12 @@ ssize_t writeAllWithTimeout(int fd, const void* buf, std::size_t nbytes, int tim
         if (!waitWritableUntil(fd, deadline)) {
             return -1;
         }
-        ssize_t n = sendNoSignal(fd, p, left);
+        ssize_t n = sendNoSignal(fd, p, left, MSG_DONTWAIT);
         if (n < 0) {
             if (errno == EINTR) {
+                continue;
+            }
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
                 continue;
             }
             return -1;
@@ -174,36 +192,18 @@ ssize_t readAllWithTimeout(int fd, void* buf, std::size_t nbytes, int timeout_ms
         if (!waitReadableUntil(fd, deadline)) {
             return -1;
         }
-        ssize_t n = ::read(fd, p, left);
+        ssize_t n = ::recv(fd, p, left, MSG_DONTWAIT);
         if (n < 0) {
             if (errno == EINTR) {
+                continue;
+            }
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
                 continue;
             }
             return -1;
         }
         if (n == 0) {
             errno = ECONNRESET;
-            return -1;
-        }
-        p += n;
-        left -= n;
-    }
-    return static_cast<ssize_t>(nbytes);
-}
-
-ssize_t readAll(int fd, void* buf, std::size_t nbytes) {
-    char*       p    = static_cast<char*>(buf);
-    std::size_t left = nbytes;
-    while (left > 0) {
-        ssize_t n = ::read(fd, p, left);
-        if (n < 0) {
-            if (errno == EINTR) {
-                continue;
-            }
-            return -1;
-        }
-        if (n == 0) {
-            // peer closed prematurely
             return -1;
         }
         p += n;
@@ -238,6 +238,7 @@ void CpuTpBroadcaster::cleanupStateLocked() {
     tp_rank_               = 0;
     tp_size_               = 1;
     broadcast_in_progress_ = false;
+    failed_                = false;
     initialized_.store(false, std::memory_order_release);
 }
 
@@ -269,6 +270,7 @@ void CpuTpBroadcaster::initialize(int tp_rank, int tp_size, const std::string& b
     }
 
     broadcast_in_progress_ = false;
+    failed_                = false;
     if (tp_size <= 1) {
         // Single-rank no-op; broadcast() short-circuits.
         tp_rank_   = tp_rank;
@@ -431,6 +433,9 @@ void CpuTpBroadcaster::broadcast(void* buf, std::size_t nbytes, int root) {
         if (tp_size_ <= 1 || nbytes == 0) {
             return;
         }
+        RTP_LLM_CHECK_WITH_INFO(!failed_,
+                                "CpuTpBroadcaster::broadcast called after a failed broadcast; "
+                                "reset and reinitialize before reuse");
         RTP_LLM_CHECK_WITH_INFO(root == 0, "CpuTpBroadcaster supports only root=0 (star topology); got %d", root);
         RTP_LLM_CHECK_WITH_INFO(!broadcast_in_progress_,
                                 "CpuTpBroadcaster::broadcast does not support concurrent or re-entrant "
@@ -445,33 +450,37 @@ void CpuTpBroadcaster::broadcast(void* buf, std::size_t nbytes, int root) {
         peer_fds               = peer_fds_;
     }
 
-    auto finish_broadcast = [this]() {
+    auto finish_broadcast = [this](bool failed) {
         std::lock_guard<std::mutex> lock(mu_);
+        failed_                = failed_ || failed;
         broadcast_in_progress_ = false;
     };
 
     try {
+        const int timeout_ms = broadcastTimeoutMs();
         if (tp_rank == 0) {
             for (int k = 1; k < tp_size; ++k) {
-                ssize_t n = writeAll(peer_fds[k], buf, nbytes);
+                ssize_t n = writeAllWithTimeout(peer_fds[k], buf, nbytes, timeout_ms);
                 RTP_LLM_CHECK_WITH_INFO(n == static_cast<ssize_t>(nbytes),
-                                        "CpuTpBroadcaster write to rank %d (%zu bytes) failed: %s",
+                                        "CpuTpBroadcaster write to rank %d (%zu bytes) failed after %d ms: %s",
                                         k,
                                         nbytes,
+                                        timeout_ms,
                                         std::strerror(errno));
             }
         } else {
-            ssize_t n = readAll(peer_fds[0], buf, nbytes);
+            ssize_t n = readAllWithTimeout(peer_fds[0], buf, nbytes, timeout_ms);
             RTP_LLM_CHECK_WITH_INFO(n == static_cast<ssize_t>(nbytes),
-                                    "CpuTpBroadcaster read from rank 0 (%zu bytes) failed: %s",
+                                    "CpuTpBroadcaster read from rank 0 (%zu bytes) failed after %d ms: %s",
                                     nbytes,
+                                    timeout_ms,
                                     std::strerror(errno));
         }
     } catch (...) {
-        finish_broadcast();
+        finish_broadcast(true);
         throw;
     }
-    finish_broadcast();
+    finish_broadcast(false);
 }
 
 }  // namespace rtp_llm

@@ -13,7 +13,8 @@ namespace rtp_llm {
 // Python initializes this during distributed bootstrap, while the C++ engine
 // thread performs request-time broadcasts. Calls may cross threads, but
 // broadcastCPU is still serialized: no concurrent or re-entrant broadcasts, and
-// reset must not race with an in-flight broadcast.
+// reset must not race with an in-flight broadcast. Any transport failure makes
+// the instance unusable until reset() closes the stream state.
 class CpuTpBroadcaster {
 public:
     static CpuTpBroadcaster& instance();
@@ -47,6 +48,7 @@ private:
     std::mutex        mu_;
     std::atomic<bool> initialized_{false};
     bool              broadcast_in_progress_ = false;
+    bool              failed_                = false;
     int               tp_rank_               = 0;
     int               tp_size_               = 1;
     std::string       base_path_;

@@ -32,3 +32,22 @@ cc_test(
     },
     exec_properties = {'gpu':'H20'},
 )
+
+cc_test(
+    name = "tp_sync_model_inputs_cpu_smoke_test",
+    srcs = [
+        "TpSyncModelInputsTest.cc",
+    ],
+    data = [],
+    copts = test_copts,
+    deps = [
+        "//rtp_llm/cpp/models:model_types",
+        "//rtp_llm/cpp/distribute:cpu_tp_broadcaster",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ] + torch_deps(),
+    env = {
+        "TEST_USING_DEVICE": "CUDA",
+    },
+    exec_properties = {'gpu':'H20'},
+)

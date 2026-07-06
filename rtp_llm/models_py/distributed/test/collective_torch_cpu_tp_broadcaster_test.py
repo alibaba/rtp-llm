@@ -2,6 +2,7 @@ import os
 import stat
 import sys
 import tempfile
+import types
 import unittest
 from unittest.mock import patch
 
@@ -28,16 +29,26 @@ class _FakeIncompleteDestroyLibrtpComputeOps:
         self.clear_calls += 1
 
 
+class _FakeProcessGroup:
+    def __init__(self, size):
+        self._size = size
+
+    def size(self):
+        return self._size
+
+
 class TestCpuTpBroadcasterBootstrap(unittest.TestCase):
     def setUp(self):
         self._old_parallelism_config = ct._parallelism_config
         self._old_base_path = ct._cpu_tp_broadcaster_base_path
         self._old_nccl_init_port = ct._cpu_tp_broadcaster_nccl_init_port
+        self._old_initialized = ct._initialized
 
     def tearDown(self):
         ct._parallelism_config = self._old_parallelism_config
         ct._cpu_tp_broadcaster_base_path = self._old_base_path
         ct._cpu_tp_broadcaster_nccl_init_port = self._old_nccl_init_port
+        ct._initialized = self._old_initialized
 
     def _parallelism_config(
         self,
@@ -80,26 +91,6 @@ class TestCpuTpBroadcasterBootstrap(unittest.TestCase):
         mismatched_config.tp_rank = 1
         self.assertFalse(ct._should_init_cpu_tp_broadcaster(mismatched_config))
 
-    def test_normalize_parallelism_ranks_uses_copy_and_rejects_mismatch(self):
-        parallelism_config = self._parallelism_config(
-            tp_size=2, local_world_size=4, world_rank=3, local_rank=3
-        )
-        parallelism_config.tp_rank = 0
-        parallelism_config.dp_rank = 0
-
-        normalized = ct._normalize_parallelism_ranks(parallelism_config)
-
-        self.assertIsNot(normalized, parallelism_config)
-        self.assertEqual((normalized.tp_rank, normalized.dp_rank), (1, 1))
-        self.assertEqual(
-            (parallelism_config.tp_rank, parallelism_config.dp_rank), (0, 0)
-        )
-
-        parallelism_config.tp_rank = 0
-        parallelism_config.dp_rank = 1
-        with self.assertRaisesRegex(ValueError, "TP-innermost layout"):
-            ct._normalize_parallelism_ranks(parallelism_config)
-
     def test_make_cpu_tp_broadcaster_base_path_chmods_existing_dir(self):
         parallelism_config = self._parallelism_config(tp_size=2, local_world_size=4)
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -115,6 +106,39 @@ class TestCpuTpBroadcasterBootstrap(unittest.TestCase):
 
             mode = stat.S_IMODE(os.stat(tmpdir).st_mode)
             self.assertEqual(mode, 0o700)
+
+    def test_init_cpu_tp_broadcaster_skips_when_tp_group_eligibility_diverges(self):
+        fake_ops = _FakeLibrtpComputeOps()
+        ct._parallelism_config = self._parallelism_config(tp_size=2, local_world_size=4)
+        ct._cpu_tp_broadcaster_nccl_init_port = 12345
+        ct._initialized = True
+
+        def fake_all_gather_object(output, value, group):
+            output[:] = [True, False]
+
+        with tempfile.TemporaryDirectory() as tmpdir, patch.dict(
+            os.environ,
+            {
+                "RTP_LLM_CPU_TP_BROADCASTER_DIR": tmpdir,
+                "RTP_LLM_CPU_TP_BROADCASTER_ID": "unit-test",
+            },
+        ), patch(
+            "rtp_llm.models_py.distributed.collective_torch.torch.distributed.is_initialized",
+            return_value=True,
+        ), patch(
+            "rtp_llm.models_py.distributed.collective_torch._get_group",
+            return_value=_FakeProcessGroup(2),
+        ), patch(
+            "rtp_llm.models_py.distributed.collective_torch.torch.distributed.all_gather_object",
+            side_effect=fake_all_gather_object,
+        ), patch(
+            "logging.warning"
+        ) as mock_warning:
+            ct._init_cpu_tp_broadcaster_if_needed(fake_ops)
+
+        self.assertIsNone(ct._cpu_tp_broadcaster_base_path)
+        self.assertEqual(fake_ops.init_calls, [])
+        self.assertIn("inconsistent eligibility", mock_warning.call_args.args[0])
 
     def test_skip_cpu_tp_broadcaster_tp1_with_long_uds_path(self):
         fake_ops = _FakeLibrtpComputeOps()
@@ -205,8 +229,16 @@ class TestCpuTpBroadcasterBootstrap(unittest.TestCase):
 
     def test_destroy_distributed_environment_requires_matching_cpp_symbols(self):
         fake_ops = _FakeIncompleteDestroyLibrtpComputeOps()
+        fake_arch = types.ModuleType("rtp_llm.models_py.utils.arch")
+        fake_arch.is_cuda = lambda: False
 
-        with patch.dict(sys.modules, {"librtp_compute_ops": fake_ops}), patch(
+        with patch.dict(
+            sys.modules,
+            {
+                "librtp_compute_ops": fake_ops,
+                "rtp_llm.models_py.utils.arch": fake_arch,
+            },
+        ), patch(
             "rtp_llm.models_py.distributed.collective_torch.torch.distributed.get_rank",
             return_value=0,
         ), patch(
@@ -214,9 +246,6 @@ class TestCpuTpBroadcasterBootstrap(unittest.TestCase):
             return_value=False,
         ), patch(
             "rtp_llm.models_py.distributed.collective_torch.rocm_rccl.is_available_runtime",
-            return_value=False,
-        ), patch(
-            "rtp_llm.models_py.utils.arch.is_cuda",
             return_value=False,
         ):
             with self.assertRaises(AttributeError):
