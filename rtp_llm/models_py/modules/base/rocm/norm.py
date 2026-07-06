@@ -16,6 +16,11 @@ from rtp_llm.models_py.modules.base.common.norm import (
 )
 from rtp_llm.ops.compute_ops import rtp_llm_ops
 
+# aiter layernorm2d_fwd_with_add is validated for the VisionBert-style 2D
+# path; broader hidden sizes keep the legacy fused_add_layernorm behavior.
+_LAYER_NORM2D_MIN_TOKENS = 32
+_LAYER_NORM2D_MAX_HIDDEN = 768
+
 
 class LayerNorm(BaseLayerNorm):
     def __init__(self, weight: torch.Tensor, beta: torch.Tensor, eps: float = 1e-6):
@@ -80,7 +85,14 @@ class AddBiasResLayerNorm(BaseAddBiasResLayerNorm):
         residual: torch.Tensor,
         bias: torch.Tensor,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
-        if hidden_states.dim() != 2 or residual.dim() != 2:
+        use_layernorm2d_with_add = (
+            hidden_states.dim() == 2
+            and residual.dim() == 2
+            and hidden_states.shape == residual.shape
+            and hidden_states.shape[0] > _LAYER_NORM2D_MIN_TOKENS
+            and hidden_states.shape[-1] <= _LAYER_NORM2D_MAX_HIDDEN
+        )
+        if not use_layernorm2d_with_add:
             if bias.numel() == 0:
                 bias = torch.zeros(
                     hidden_states.shape[-1],
