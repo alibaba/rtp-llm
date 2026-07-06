@@ -1,11 +1,11 @@
-"""Benchmark and correctness test: old path (mxfp8_quant_act + pack_mxfp8_scale) vs new path (_mxfp8_quant_act_v2).
+"""Benchmark and correctness test: old path (mxfp8_quant_act + pack_mxfp8_scale) vs new path (mxfp8_quant_act_packed).
 
 Old path (production before optimization):
     q, s_fp32 = mxfp8_quant_act(x)        # fp32 power-of-two scale
     s_packed = pack_mxfp8_scale(s_fp32)   # int32 packed for DeepGEMM
 
 New path (optimized):
-    q, s_packed = _mxfp8_quant_act_v2(x)  # directly outputs int32 packed scale
+    q, s_packed = mxfp8_quant_act_packed(x)  # FlashInfer quant + packed int32 scale
 
 Usage:
     python rtp_llm/models_py/kernels/cuda/test/test_mxfp8_quant_benchmark.py
@@ -41,10 +41,10 @@ def _old_path(x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
 
 
 def _new_path(x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-    """New optimized path: _mxfp8_quant_act_v2 directly outputs packed int32."""
-    from rtp_llm.models_py.kernels.cuda.mxfp8_ops import _mxfp8_quant_act_v2
+    """New optimized path: FlashInfer quant directly outputs packed int32."""
+    from rtp_llm.models_py.kernels.cuda.mxfp8_ops import mxfp8_quant_act_packed
 
-    return _mxfp8_quant_act_v2(x)
+    return mxfp8_quant_act_packed(x)
 
 
 def _unpack_int32_to_fp32(s_packed: torch.Tensor, M: int, K: int) -> torch.Tensor:
