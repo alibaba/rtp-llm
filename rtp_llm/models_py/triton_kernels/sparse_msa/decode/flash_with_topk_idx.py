@@ -331,6 +331,113 @@ def _decode_score_kernel_paged(
         )
 
 
+_HEUR_decode_index_score_kernel = {
+    "BATCH_SIZE_BUCKET": lambda args: triton.next_power_of_2(args["batch_size"]),
+}
+
+
+@triton.heuristics(_HEUR_decode_index_score_kernel)
+@triton.autotune(
+    configs=[
+        triton.Config({}, num_warps=nw, num_stages=ns)
+        for nw in [4, 8, 16]
+        for ns in [1, 2, 3]
+    ],
+    key=[
+        "BATCH_SIZE_BUCKET",
+        "num_idx_heads",
+        "head_dim",
+        "BLOCK_SIZE_K",
+        "BLOCK_SIZE_Q",
+    ],
+)
+@triton.jit(do_not_specialize=["num_kv_chunks", "decode_query_len"])
+def _decode_index_score_kernel(
+    q_ptr,  # idx_q: [total_q, num_idx_heads, head_dim]
+    ik_cache_ptr,  # index-K cache: [num_blocks, block_size, head_dim]
+    score_ptr,  # [num_idx_heads, total_q, max_block]
+    block_table_ptr,  # [num_reqs, max_blocks]
+    seq_lens,  # [num_reqs]
+    batch_size,
+    num_idx_heads: tl.constexpr,
+    head_dim: tl.constexpr,
+    init_blocks,
+    local_blocks,
+    decode_query_len,
+    stride_q_n,
+    stride_q_h,
+    stride_q_d,
+    stride_ik_blk,
+    stride_ik_pos,
+    stride_ik_d,
+    stride_s_h,
+    stride_s_n,
+    stride_s_k,
+    stride_bt_b,
+    BATCH_SIZE_BUCKET: tl.constexpr,
+    BLOCK_SIZE_K: tl.constexpr,
+    BLOCK_SIZE_Q: tl.constexpr,
+    num_kv_chunks,
+):
+    BLOCK_SIZE_HQ: tl.constexpr = num_idx_heads * BLOCK_SIZE_Q
+    pid_r = tl.program_id(0)
+    pid_c = tl.program_id(1)
+    hq_offsets = tl.arange(0, BLOCK_SIZE_HQ)
+    h_offsets = hq_offsets // BLOCK_SIZE_Q
+    q_offsets = hq_offsets % BLOCK_SIZE_Q
+    q_mask = q_offsets < decode_query_len
+    q_ids = pid_r * decode_query_len + q_offsets
+
+    seq_len = tl.load(seq_lens + pid_r)
+    query_pos = seq_len - decode_query_len + q_offsets
+    kv_len = tl.maximum(query_pos + 1, 0)
+    num_blocks_q = (kv_len + BLOCK_SIZE_K - 1) // BLOCK_SIZE_K
+    kv_len_max = tl.max(tl.where(q_mask, kv_len, 0), axis=0)
+    num_blocks = (kv_len_max + BLOCK_SIZE_K - 1) // BLOCK_SIZE_K
+
+    chunk_size_blocks = (num_blocks + num_kv_chunks - 1) // num_kv_chunks
+    chunk_start_block = pid_c * chunk_size_blocks
+    chunk_end_block = tl.minimum(chunk_start_block + chunk_size_blocks, num_blocks)
+    if chunk_start_block >= chunk_end_block:
+        return
+
+    off_k = tl.arange(0, BLOCK_SIZE_K)
+    off_d = tl.arange(0, head_dim)
+    bt_row = block_table_ptr + pid_r * stride_bt_b
+    local_start = tl.maximum(0, num_blocks_q - local_blocks)
+    q = tl.load(
+        q_ptr
+        + q_ids[None, :] * stride_q_n
+        + h_offsets[None, :] * stride_q_h
+        + off_d[:, None] * stride_q_d,
+        mask=q_mask[None, :],
+        other=0.0,
+    )
+
+    for blk in tl.range(chunk_start_block, chunk_end_block):
+        page = tl.load(bt_row + blk).to(tl.int64)
+        pos = blk * BLOCK_SIZE_K + off_k
+        pos_mask = pos[:, None] < kv_len[None, :]
+        k = tl.load(
+            ik_cache_ptr
+            + page * stride_ik_blk
+            + off_k[:, None] * stride_ik_pos
+            + off_d * stride_ik_d,
+        )
+        kq = tl.dot(k, q, out_dtype=tl.float32)
+        kq = tl.where(pos_mask & q_mask[None, :], kq, float("-inf"))
+        score = tl.max(kq, axis=0)
+        is_visible_block = blk < num_blocks_q
+        is_init = (blk < init_blocks) & is_visible_block
+        is_local = (blk >= local_start) & is_visible_block
+        score = tl.where(is_local, 1e29, tl.where(is_init, 1e30, score))
+        tl.store(
+            score_ptr + h_offsets * stride_s_h + q_ids * stride_s_n + blk * stride_s_k,
+            score,
+            mask=q_mask,
+        )
+
+
 _HEUR_decode_score_attn_kernel = {
     "BLOCK_SIZE_H": lambda args: max(
         16, triton.next_power_of_2(args["gqa_group_size"])
@@ -1066,6 +1173,25 @@ def _topk_index_merge_kernel(
     tl.store(tif_ptrs, topk_idx_final.to(ti_final_ptr.dtype.element_ty))
 
 
+def _minimax_decode_topk(
+    score: torch.Tensor,
+    seq_lens: torch.Tensor,
+    block_size: int,
+    topk: int,
+) -> torch.Tensor:
+    from rtp_llm.ops.compute_ops import rtp_llm_ops
+
+    topk_idx = torch.empty(
+        (score.shape[0], score.shape[1], topk),
+        device=score.device,
+        dtype=torch.int32,
+    )
+    rtp_llm_ops.minimax_decode_topk(
+        score, seq_lens, topk_idx, int(block_size), int(topk)
+    )
+    return topk_idx
+
+
 @torch.no_grad()
 def flash_decode_with_topk_idx_paged(
     q: torch.Tensor,  # [batch_size, num_heads, head_dim]
@@ -1106,9 +1232,10 @@ def flash_decode_with_topk_idx_paged(
     max_seqblock = triton.cdiv(max_kv_len, block_size)
     TARGET_GRID = 4096
     MAX_NUM_KV_CHUNKS = 256
+    chunk_divisor = batch_size
     target = max(
         1,
-        min(MAX_NUM_KV_CHUNKS, TARGET_GRID // max(1, batch_size * num_kv_heads)),
+        min(MAX_NUM_KV_CHUNKS, TARGET_GRID // max(1, chunk_divisor)),
     )
     NUM_KV_CHUNKS = 1 << (target.bit_length() - 1)
     # Paged score kernels write every valid KV block that topk scans. Capacity
@@ -1119,35 +1246,67 @@ def flash_decode_with_topk_idx_paged(
         device=q.device,
     )
 
-    grid = (batch_size * NUM_KV_CHUNKS, num_kv_heads)
-    _decode_score_kernel_paged[grid](
-        q,
-        k_paged,
-        block_table,
-        score,
-        seq_lens,
-        batch_size,
-        gqa_group_size,
-        head_dim,
-        num_phys_blocks,
-        block_size,
-        sm_scale,
-        init_blocks,
-        local_blocks,
-        q.stride(0),
-        q.stride(1),
-        q.stride(2),
-        k_paged.stride(0),
-        k_paged.stride(1),
-        k_paged.stride(2),
-        block_table.stride(0),
-        block_table.stride(1),
-        score.stride(0),
-        score.stride(1),
-        score.stride(2),
-        NUM_KV_CHUNKS=NUM_KV_CHUNKS,
-        SCORE_TYPE=score_type,
-    )
+    if score_type == "max":
+        grid = (batch_size, NUM_KV_CHUNKS)
+        _decode_index_score_kernel[grid](
+            q,
+            k_paged,
+            score,
+            block_table,
+            seq_lens,
+            batch_size,
+            num_q_heads,
+            head_dim,
+            init_blocks,
+            local_blocks,
+            1,
+            q.stride(0),
+            q.stride(1),
+            q.stride(2),
+            k_paged.stride(0),
+            k_paged.stride(1),
+            k_paged.stride(2),
+            score.stride(0),
+            score.stride(1),
+            score.stride(2),
+            block_table.stride(0),
+            BLOCK_SIZE_K=block_size,
+            BLOCK_SIZE_Q=1,
+            num_kv_chunks=NUM_KV_CHUNKS,
+        )
+    else:
+        grid = (batch_size * NUM_KV_CHUNKS, num_kv_heads)
+        _decode_score_kernel_paged[grid](
+            q,
+            k_paged,
+            block_table,
+            score,
+            seq_lens,
+            batch_size,
+            gqa_group_size,
+            head_dim,
+            num_phys_blocks,
+            block_size,
+            sm_scale,
+            init_blocks,
+            local_blocks,
+            q.stride(0),
+            q.stride(1),
+            q.stride(2),
+            k_paged.stride(0),
+            k_paged.stride(1),
+            k_paged.stride(2),
+            block_table.stride(0),
+            block_table.stride(1),
+            score.stride(0),
+            score.stride(1),
+            score.stride(2),
+            NUM_KV_CHUNKS=NUM_KV_CHUNKS,
+            SCORE_TYPE=score_type,
+        )
+
+    if score.shape[2] <= 4096 and topk <= 32:
+        return None, _minimax_decode_topk(score, seq_lens, block_size, topk)
 
     topk_idx = torch.empty(
         (num_q_heads, batch_size, topk),
