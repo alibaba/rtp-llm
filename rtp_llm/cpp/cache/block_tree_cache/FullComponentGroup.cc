@@ -19,6 +19,21 @@ void FullComponentGroup::finalizeMatchResult(BlockTreeMatchResult& result) {
     // Handled at BlockTreeCache level.
 }
 
+void FullComponentGroup::updateOnInsertOverlap(TreeNode* node, GroupSlot& slot) {
+    // After a child with device data is inserted, the parent may no longer be a DeviceLeaf.
+    // If so, it must be removed from the device_heap to maintain Leaf-only eviction semantics.
+    // Failing to do this would allow a non-leaf node to be evicted, breaking the prefix chain.
+    if (slot.in_device_heap && device_heap) {
+        if (!isLeafAtTier(node, component_group_id, Tier::DEVICE)) {
+            device_heap->invalidate(node);
+            slot.in_device_heap = false;
+        } else {
+            // Still a leaf (new child may not have device data for this group) → update hotness
+            device_heap->onAccess(node);
+        }
+    }
+}
+
 void FullComponentGroup::tryAddToDeviceHeap(TreeNode* node) {
     if (!device_heap)
         return;

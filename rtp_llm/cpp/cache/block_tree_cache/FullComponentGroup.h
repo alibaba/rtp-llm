@@ -16,6 +16,9 @@ public:
     std::unique_ptr<MatchValidator> createMatchValidator() override;
     void                            finalizeMatchResult(BlockTreeMatchResult& result) override;
 
+    // Full-specific: on insert overlap, invalidate parent from heap if no longer a Leaf.
+    void updateOnInsertOverlap(TreeNode* node, GroupSlot& slot) override;
+
     // Full-specific: only DeviceLeaf nodes enter heap.
     void tryAddToDeviceHeap(TreeNode* node) override;
     // Full-specific: only HostLeaf/DiskLeaf nodes enter heap.

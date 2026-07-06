@@ -5,10 +5,12 @@
 #include <string>
 #include <vector>
 
+#include "rtp_llm/cpp/cache/BlockPool.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/EvictionHeap.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/TransferDescriptor.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/TreeNode.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/copy_engine/DiskBlockPool.h"
 #include "rtp_llm/cpp/cache/spec/CacheGroupType.h"
 
 namespace rtp_llm {
@@ -137,8 +139,31 @@ public:
         }
     }
 
+    // ---- Per-group pool injection and access ----
+    void setHostPool(BlockPoolPtr pool) { host_pool_ = std::move(pool); }
+    void setDiskPool(std::shared_ptr<DiskBlockPool> pool) { disk_pool_ = std::move(pool); }
+
+    BlockPoolPtr hostPool() const { return host_pool_; }
+    std::shared_ptr<DiskBlockPool> diskPool() const { return disk_pool_; }
+
+    // Pool usage queries for watermark checking
+    size_t hostPoolUsed() const {
+        return host_pool_ ? (host_pool_->totalBlocksNum() - host_pool_->freeBlocksNum()) : 0;
+    }
+    size_t hostPoolCapacity() const {
+        return host_pool_ ? host_pool_->totalBlocksNum() : 0;
+    }
+    size_t diskPoolUsed() const {
+        return disk_pool_ ? (disk_pool_->totalSlots() - disk_pool_->freeSlots()) : 0;
+    }
+    size_t diskPoolCapacity() const {
+        return disk_pool_ ? disk_pool_->totalSlots() : 0;
+    }
+
 protected:
-    IsBlockEvictableFn is_block_evictable_;
+    IsBlockEvictableFn             is_block_evictable_;
+    BlockPoolPtr                   host_pool_;
+    std::shared_ptr<DiskBlockPool> disk_pool_;
 };
 
 using ComponentGroupPtr = std::shared_ptr<ComponentGroup>;
