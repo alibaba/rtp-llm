@@ -1853,8 +1853,6 @@ __device__ __forceinline__ void dsv4MegaConsumeLoadedFullKeyTileGrouped(
 
     float old_scale = 0.0f;
     float tile_scale = 0.0f;
-    float new_max = 0.0f;
-    float new_denom = 0.0f;
     if (lane == 0) {
         float tile_denom = 0.0f;
 #pragma unroll
@@ -1864,18 +1862,17 @@ __device__ __forceinline__ void dsv4MegaConsumeLoadedFullKeyTileGrouped(
             tile_weights[weight_idx] = rel_weight;
             tile_denom += rel_weight;
         }
-        new_max = fmaxf(online_max, tile_max);
-        old_scale = online_denom > 0.0f ? expf(online_max - new_max) : 0.0f;
-        tile_scale = expf(tile_max - new_max);
-        new_denom = online_denom * old_scale + tile_denom * tile_scale;
+        const float merged_max = fmaxf(online_max, tile_max);
+        old_scale = online_denom > 0.0f ? expf(online_max - merged_max) : 0.0f;
+        tile_scale = expf(tile_max - merged_max);
+        online_denom = online_denom * old_scale + tile_denom * tile_scale;
+        online_max = merged_max;
     }
     __syncwarp();
-    new_max = __shfl_sync(0xffffffffu, new_max, 0);
     old_scale = __shfl_sync(0xffffffffu, old_scale, 0);
     tile_scale = __shfl_sync(0xffffffffu, tile_scale, 0);
-    new_denom = __shfl_sync(0xffffffffu, new_denom, 0);
-    online_max = new_max;
-    online_denom = new_denom;
+    online_max = __shfl_sync(0xffffffffu, online_max, 0);
+    online_denom = __shfl_sync(0xffffffffu, online_denom, 0);
 #pragma unroll
     for (int chunk = 0; chunk < kMegaAttentionDimsPerWarp; ++chunk) {
         acc[chunk] *= old_scale;
@@ -1936,12 +1933,8 @@ __device__ __forceinline__ void dsv4MegaConsumeLoadedFullKeyTileGroupedDual(
 
     float old_scale = 0.0f;
     float tile_scale = 0.0f;
-    float new_max = 0.0f;
-    float new_denom = 0.0f;
     float old_scale_second = 0.0f;
     float tile_scale_second = 0.0f;
-    float new_max_second = 0.0f;
-    float new_denom_second = 0.0f;
     if (lane == 0) {
         float tile_denom = 0.0f;
         float tile_denom_second = 0.0f;
@@ -1955,30 +1948,28 @@ __device__ __forceinline__ void dsv4MegaConsumeLoadedFullKeyTileGroupedDual(
             tile_denom += rel_weight;
             tile_denom_second += rel_weight_second;
         }
-        new_max = fmaxf(online_max, tile_max);
-        old_scale = online_denom > 0.0f ? expf(online_max - new_max) : 0.0f;
-        tile_scale = expf(tile_max - new_max);
-        new_denom = online_denom * old_scale + tile_denom * tile_scale;
+        const float merged_max = fmaxf(online_max, tile_max);
+        old_scale = online_denom > 0.0f ? expf(online_max - merged_max) : 0.0f;
+        tile_scale = expf(tile_max - merged_max);
+        online_denom = online_denom * old_scale + tile_denom * tile_scale;
+        online_max = merged_max;
 
-        new_max_second = fmaxf(online_max_second, tile_max_second);
+        const float merged_max_second = fmaxf(online_max_second, tile_max_second);
         old_scale_second =
-            online_denom_second > 0.0f ? expf(online_max_second - new_max_second) : 0.0f;
-        tile_scale_second = expf(tile_max_second - new_max_second);
-        new_denom_second = online_denom_second * old_scale_second + tile_denom_second * tile_scale_second;
+            online_denom_second > 0.0f ? expf(online_max_second - merged_max_second) : 0.0f;
+        tile_scale_second = expf(tile_max_second - merged_max_second);
+        online_denom_second = online_denom_second * old_scale_second + tile_denom_second * tile_scale_second;
+        online_max_second = merged_max_second;
     }
     __syncwarp();
-    new_max = __shfl_sync(0xffffffffu, new_max, 0);
     old_scale = __shfl_sync(0xffffffffu, old_scale, 0);
     tile_scale = __shfl_sync(0xffffffffu, tile_scale, 0);
-    new_denom = __shfl_sync(0xffffffffu, new_denom, 0);
-    new_max_second = __shfl_sync(0xffffffffu, new_max_second, 0);
+    online_max = __shfl_sync(0xffffffffu, online_max, 0);
+    online_denom = __shfl_sync(0xffffffffu, online_denom, 0);
     old_scale_second = __shfl_sync(0xffffffffu, old_scale_second, 0);
     tile_scale_second = __shfl_sync(0xffffffffu, tile_scale_second, 0);
-    new_denom_second = __shfl_sync(0xffffffffu, new_denom_second, 0);
-    online_max = new_max;
-    online_denom = new_denom;
-    online_max_second = new_max_second;
-    online_denom_second = new_denom_second;
+    online_max_second = __shfl_sync(0xffffffffu, online_max_second, 0);
+    online_denom_second = __shfl_sync(0xffffffffu, online_denom_second, 0);
 #pragma unroll
     for (int chunk = 0; chunk < kMegaAttentionDimsPerWarp; ++chunk) {
         acc[chunk] *= old_scale;
