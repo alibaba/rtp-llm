@@ -334,11 +334,21 @@ struct BatchDecodeSchedulerConfig {
     std::string to_string() const;
 };
 
+enum class PDFusionSchedulerMode {
+    DEFAULT = 0,
+    RATIO   = 1,
+    UNKNOWN = 2,
+};
+
+PDFusionSchedulerMode parsePDFusionSchedulerMode(const std::string& mode);
+const char*           PDFusionSchedulerModeToString(PDFusionSchedulerMode mode);
+
 struct FIFOSchedulerConfig {
     int64_t max_context_batch_size = 1;
     int64_t max_batch_tokens_size  = 0;
-    // PDFUSION scheduler mode. Empty string keeps the default FIFO/decode-first scheduler.
-    // Set to "ratio" to use PDFusionRatioScheduler and enable decode_prefill_ratio.
+    // PDFUSION scheduler mode. Supported values:
+    //   ""      -> default FIFO/decode-first scheduler
+    //   "ratio" -> PDFusionRatioScheduler with decode_prefill_ratio
     std::string pdfusion_scheduler_mode = "";
     // PDFusionRatioScheduler cadence knob, as a decode:prefill round ratio string.
     //   "N"   -> 1 prefill : N decode (decode-heavy); "1" = strict alternation.

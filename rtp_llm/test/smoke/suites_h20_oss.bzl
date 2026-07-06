@@ -247,7 +247,7 @@ def h20_oss_suites():
             smoke_test(
                 name="h20_pdfusion_ratio_force_batch",
                 task_info="data/model/qwen25/q_r_pdfusion_ratio_force_batch.json",
-                smoke_args="--pdfusion_scheduler_mode ratio --decode_prefill_ratio 1 --warm_up 0 --seq_size_per_block 16 --act_type FP16",
+                smoke_args="--pdfusion_scheduler_mode ratio --decode_prefill_ratio 1 --warm_up 0 --seq_size_per_block 16 --max_batch_tokens_size 8192 --act_type FP16",
                 gpu_type=["H20"],
                 concurrency_test=True,
             ),
