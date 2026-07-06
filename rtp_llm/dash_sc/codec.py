@@ -511,23 +511,16 @@ def _parse_max_token_limits(
     max_new_tokens = _DEFAULT_MAX_NEW_TOKENS
     max_new_tokens_from_completion_alias = False
     max_total_tokens: int | None = None
-    ds_attrs = ds_attrs if ds_attrs is not None else parse_ds_header_attributes(request)
 
     v = _parse_optional_scalar_int(request, "max_tokens")
     if v is None:
         v = _parse_optional_parameter_int(request, "max_tokens")
-    if v is None:
-        v = _parse_optional_int_value(_lookup_ds_request_control(ds_attrs, "max_tokens"))
     if v is not None and v > 0:
         max_total_tokens = v
 
     v = _parse_optional_scalar_int(request, "max_completion_tokens")
     if v is None:
         v = _parse_optional_parameter_int(request, "max_completion_tokens")
-    if v is None:
-        v = _parse_optional_int_value(
-            _lookup_ds_request_control(ds_attrs, "max_completion_tokens")
-        )
     if v is not None:
         if v > 0:
             max_new_tokens = v
@@ -542,23 +535,16 @@ def _parse_max_token_limits(
             v = _parse_optional_scalar_int(request, "max_tokens")
         else:
             v = legacy_max_new_tokens
-        if v is None and legacy_max_new_tokens is None:
-            v = _parse_optional_int_value(
-                _lookup_ds_request_control(ds_attrs, "max_tokens")
-            )
         if v is None:
             legacy_max_new_tokens = _parse_optional_parameter_int(
                 request, "max_new_tokens"
             )
             v = legacy_max_new_tokens
         if v is None:
-            legacy_max_new_tokens = _parse_optional_int_value(
-                _lookup_ds_request_control(ds_attrs, "max_new_tokens")
-            )
-            v = legacy_max_new_tokens
-        if v is None:
             v = _parse_optional_parameter_int(request, "max_tokens")
         if legacy_max_new_tokens is not None and legacy_max_new_tokens <= 0:
+            if ds_attrs is None:
+                ds_attrs = parse_ds_header_attributes(request)
             if _is_openai_compatible_request(request, ds_attrs):
                 pass
             else:

@@ -385,8 +385,8 @@ ThinkModeLogitsProcessorPtr ThinkModeLogitsProcessor::fromGenerateInput(std::sha
     auto generate_config         = generate_input->generate_config;
     auto end_think_token_ids     = generate_config->end_think_token_ids;
     bool has_think_boundary_mask = !generate_config->begin_think_token_ids.empty() || !end_think_token_ids.empty();
-    bool track_think_state =
-        generate_config->in_think_mode && generate_config->max_thinking_tokens != 0 && !end_think_token_ids.empty();
+    bool has_think_budget =
+        generate_config->in_think_mode && generate_config->max_thinking_tokens > 0 && !end_think_token_ids.empty();
     if (!has_think_boundary_mask) {
         return nullptr;
     }
@@ -394,7 +394,7 @@ ThinkModeLogitsProcessorPtr ThinkModeLogitsProcessor::fromGenerateInput(std::sha
     auto processor_ptr = std::make_shared<ThinkModeLogitsProcessor>();
     for (size_t i = 0; i < num; i++) {
         std::shared_ptr<StringContainDFA<size_t, int>> dfa_ptr;
-        if (track_think_state) {
+        if (has_think_budget) {
             dfa_ptr = std::make_shared<StringContainDFA<size_t, int>>(end_think_token_ids);
         }
         StreamThinkInfo              think_info(generate_config->in_think_mode,
