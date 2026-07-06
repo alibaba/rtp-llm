@@ -25,7 +25,7 @@
 #include <pybind11/functional.h>
 
 #if USING_CUDA
-using DeviceGuard = at::cuda::CUDAGuard;
+using DeviceGuard = c10::cuda::CUDAGuard;
 #elif USING_ROCM
 using DeviceGuard = c10::hip::HIPGuardMasqueradingAsCUDA;
 #endif
@@ -396,9 +396,9 @@ void execNoBlockCopy(const CopyParams& params) {
     const auto& src = params.src;
     const auto& dst = params.dst;
 #if USING_CUDA
-    const auto copy_device = getCopyDevice(dst, src);
-    check_cuda_value(cudaSetDevice(copy_device));
-    auto stream = getNoBlockCopyStream(copy_device).stream();
+    const auto  copy_device = getCopyDevice(dst, src);
+    DeviceGuard device_guard(copy_device);
+    auto        stream = getNoBlockCopyStream(copy_device).stream();
     check_cuda_value(cudaMemcpyAsync(dst.data_ptr(), src.data_ptr(), src.nbytes(), cudaMemcpyDefault, stream));
     check_cuda_value(cudaStreamSynchronize(stream));
     check_cuda_error();
