@@ -344,6 +344,28 @@ class ServerArgsSetTest(TestCase):
         self.assertEqual(cfg.vit_config.gpu_max_batch_size, 8)
         self.assertEqual(cfg.vit_config.gpu_batch_wait_ms, 500)
 
+    def test_repetition_detection_config(self):
+        """Test that repetition detection args bind to PyEnvConfigs."""
+        sys.argv = [
+            "prog",
+            "--tool_call_loop_threshold",
+            "7",
+            "--tool_call_loop_begin_marker",
+            "<tool_call>",
+            "--tool_call_loop_end_marker",
+            "</tool_call>",
+        ]
+
+        import rtp_llm.server.server_args.server_args
+
+        importlib.reload(rtp_llm.server.server_args.server_args)
+        py_env_configs = rtp_llm.server.server_args.server_args.setup_args()
+
+        cfg = py_env_configs.repetition_detection_config
+        self.assertEqual(cfg.tool_call_loop_threshold, 7)
+        self.assertEqual(cfg.tool_call_loop_begin_marker, "<tool_call>")
+        self.assertEqual(cfg.tool_call_loop_end_marker, "</tool_call>")
+
 
 if __name__ == "__main__":
     main()

@@ -1,6 +1,6 @@
 import logging
 import time
-from typing import AsyncGenerator, List, Optional
+from typing import TYPE_CHECKING, AsyncGenerator, List, Optional
 
 import torch
 
@@ -14,8 +14,19 @@ from rtp_llm.ops import SpeculativeExecutionConfig, VitSeparation, get_block_cac
 from rtp_llm.server.host_service import HostService, HostServiceArgs
 from rtp_llm.server.master_client import FlexlbResponse, MasterClient
 from rtp_llm.server.misc import format_exception
-from rtp_llm.utils.base_model_datatypes import GenerateInput, GenerateOutputs
+from rtp_llm.server.request_headers import (
+    extract_correlation_request_id,
+    extract_trace_id,
+)
+from rtp_llm.utils.base_model_datatypes import (
+    GenerateInput,
+    GenerateOutputs,
+    RequestInfo,
+)
 from rtp_llm.utils.time_util import Timer
+
+if TYPE_CHECKING:
+    from rtp_llm.config.py_config_modules import PyEnvConfigs
 
 route_logger = logging.getLogger("route_logger")
 
@@ -32,6 +43,7 @@ class BackendRPCServerVisitor:
         vit_separation: Optional[VitSeparation] = None,  # Optional VitSeparation
         server_config=None,
         master_config=None,
+        source_role: str = "frontend",
     ) -> None:
         """Initialize BackendRPCServerVisitor.
 
@@ -45,11 +57,14 @@ class BackendRPCServerVisitor:
             vit_separation: Optional VitSeparation for multimodal models
             server_config: Optional ServerConfig for master configuration
             master_config: Optional MasterConfig for master client configuration
+            source_role: Caller role used for request-info correlation fields.
         """
         self.max_seq_len = max_seq_len
         self.seq_size_per_block = seq_size_per_block
         self.pd_sep_config = pd_sep_config
         self.sp_config = sp_config
+        self.source_role = source_role
+        self.source_ip = str(getattr(server_config, "ip", "") or "")
         assert self.max_seq_len > 0
 
         # Get max_rpc_timeout_ms and decode_entrance from pd_sep_config
@@ -288,6 +303,38 @@ class BackendRPCServerVisitor:
                 "speculative decoding does not support return_all_probs",
             )
 
+    def fill_request_info(self, input: GenerateInput) -> None:
+        if getattr(input, "request_info", None) is None:
+            input.request_info = RequestInfo()
+
+        request_info = input.request_info
+        if not request_info.source_role:
+            request_info.source_role = self.source_role
+
+        source_role = (request_info.source_role or self.source_role).lower()
+        if source_role == "dash":
+            if not request_info.dash_ip:
+                request_info.dash_ip = self.source_ip
+        elif not request_info.frontend_ip:
+            request_info.frontend_ip = self.source_ip
+
+        trace_id = str(
+            getattr(input.generate_config, "trace_id", "")
+            or extract_trace_id(getattr(input, "headers", None))
+            or ""
+        )
+        if not request_info.trace_id:
+            request_info.trace_id = trace_id
+        if not getattr(input.generate_config, "trace_id", "") and request_info.trace_id:
+            input.generate_config.trace_id = request_info.trace_id
+
+        if not request_info.request_id:
+            request_info.request_id = (
+                extract_correlation_request_id(getattr(input, "headers", None))
+                or request_info.trace_id
+                or str(input.request_id)
+            )
+
     def _validate_input(self, input: GenerateInput) -> None:
         if input.prompt_length <= 0:
             raise FtRuntimeException(
@@ -309,6 +356,7 @@ class BackendRPCServerVisitor:
     async def enqueue(
         self, input: GenerateInput
     ) -> AsyncGenerator[GenerateOutputs, None]:
+        self.fill_request_info(input)
         self._validate_input(input)
         self.check_sp_supported(input)
 
@@ -320,6 +368,7 @@ class BackendRPCServerVisitor:
     @torch.inference_mode()
     async def batch_enqueue(self, inputs: list[GenerateInput]) -> list[GenerateOutputs]:
         for input in inputs:
+            self.fill_request_info(input)
             self._validate_input(input)
             self.check_sp_supported(input)
 
@@ -340,3 +389,49 @@ class BackendRPCServerVisitor:
                 logging.warning(f"role {role} not in available roles {roles}")
                 return False
         return True
+
+
+def create_backend_rpc_server_visitor(
+    py_env_configs: "PyEnvConfigs",
+    model_config,
+    source_role: str = "frontend",
+) -> "BackendRPCServerVisitor":
+    """Build a `BackendRPCServerVisitor` from `PyEnvConfigs` + a lightweight `ModelConfig`.
+
+    Used by both `FrontendWorker` (historically inline) and `DashScApp` (independent
+    process) so they open equivalent channels to the backend without dragging in the
+    tokenizer/pipeline machinery. `model_config` only needs `max_seq_len` and
+    `attn_config.tokens_per_block`; produce it via `ModelFactory.create_model_config`.
+    """
+    from rtp_llm.config.engine_config import EngineConfig
+    from rtp_llm.distribute.distributed_server import (
+        get_dp_addrs_from_world_info,
+        get_world_info,
+    )
+
+    engine_config = EngineConfig.create(py_env_configs, nccl_comm_config=None)
+    world_info = get_world_info(
+        server_config=py_env_configs.server_config,
+        distribute_config=py_env_configs.distribute_config,
+        parallelism_config=py_env_configs.parallelism_config,
+    )
+    addresses = get_dp_addrs_from_world_info(
+        world_info=world_info,
+        parallelism_config=engine_config.parallelism_config,
+    )
+    vit_separation = None
+    if py_env_configs.vit_config:
+        vit_separation = py_env_configs.vit_config.vit_separation
+
+    return BackendRPCServerVisitor(
+        max_seq_len=model_config.max_seq_len,
+        seq_size_per_block=model_config.attn_config.tokens_per_block,
+        pd_sep_config=engine_config.pd_sep_config,
+        addresses=addresses,
+        sp_config=py_env_configs.sp_config,
+        grpc_config=py_env_configs.grpc_config,
+        vit_separation=vit_separation,
+        server_config=py_env_configs.server_config,
+        master_config=py_env_configs.master_config,
+        source_role=source_role,
+    )

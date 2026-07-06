@@ -18,6 +18,7 @@ from rtp_llm.ops import (
     ArpcConfig,
     CacheStoreConfig,
     ConcurrencyConfig,
+    DashScGrpcConfig,
     DeviceResourceConfig,
     FfnDisAggregateConfig,
     FMHAConfig,
@@ -68,6 +69,7 @@ class EngineConfig:
     misc_config: MiscellaneousConfig
     arpc_config: ArpcConfig
     grpc_config: GrpcConfig
+    dash_sc_grpc_config: DashScGrpcConfig
     load_config: LoadConfig
 
     def to_string(self) -> str:
@@ -173,6 +175,12 @@ class EngineConfig:
         else:
             lines.append(str(self.arpc_config))
 
+        lines.append("\n[DashScGrpcConfig]")
+        if hasattr(self.dash_sc_grpc_config, "to_string"):
+            lines.append(self.dash_sc_grpc_config.to_string())
+        else:
+            lines.append(str(self.dash_sc_grpc_config))
+
         lines.append("\n[LoadConfig]")
         if hasattr(self.load_config, "to_string"):
             lines.append(self.load_config.to_string())
@@ -226,6 +234,7 @@ class EngineConfig:
         cache_store_config = py_env_configs.cache_store_config
         arpc_config = py_env_configs.arpc_config
         grpc_config = py_env_configs.grpc_config
+        dash_sc_grpc_config = py_env_configs.dash_sc_grpc_config
         load_config = py_env_configs.load_config
 
         # role_config.role_type property automatically converts string to RoleType enum
@@ -263,6 +272,7 @@ class EngineConfig:
             misc_config=misc_config,
             arpc_config=arpc_config,
             grpc_config=grpc_config,
+            dash_sc_grpc_config=dash_sc_grpc_config,
             load_config=load_config,
         )
 

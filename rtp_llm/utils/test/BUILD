@@ -50,6 +50,17 @@ py_test(
 )
 
 py_test(
+    name = "hot_hook_runtime_test",
+    srcs = [
+        "hot_hook_runtime_test.py",
+        "hot_hook_target.py",
+    ],
+    deps = [
+        "//rtp_llm:utils",
+    ],
+)
+
+py_test(
     name = "process_manager_test",
     srcs = [
         "process_manager_test.py",
