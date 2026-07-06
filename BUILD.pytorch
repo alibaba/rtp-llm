@@ -8,6 +8,11 @@ config_setting(
     values = {"define": "using_rocm=true"},
 )
 
+config_setting(
+    name = "using_xpu",
+    values = {"define": "using_xpu=true"},
+)
+
 cc_library(
     name = "torch",
     srcs = [
@@ -46,6 +51,10 @@ cc_library(
             # "torch/lib/libhip*.so*",
             # "torch/lib/lib*amd*.so*",
         ]),
+        "@//:using_xpu": [
+            "torch/lib/libtorch_xpu.so",
+            "torch/lib/libc10_xpu.so",
+        ],
         "//conditions:default": [],
     }),
     hdrs = glob([
@@ -54,10 +63,16 @@ cc_library(
         "torch/include/**/*.cuh",
         "torch/include/**/*.hpp",
     ], exclude=["torch/include/google/**"]),
-    deps = [
-        "@local_config_python//:python_headers",
-        "@local_config_python//:python_lib",
-    ],
+    deps = select({
+        "@//:using_xpu": [
+            "@local_config_xpu//:python_headers",
+            "@local_config_xpu//:python_lib",
+        ],
+        "//conditions:default": [
+            "@local_config_python//:python_headers",
+            "@local_config_python//:python_lib",
+        ],
+    }),
     strip_include_prefix = "torch/include",
     visibility = ["//visibility:public"],
 )
@@ -67,9 +82,10 @@ cc_library(
     hdrs = glob([
         "torch/include/torch/csrc/api/include/**/*.h",
     ]),
-    deps = [
-        "@local_config_python//:python_headers",
-    ],
+    deps = select({
+        "@//:using_xpu": ["@local_config_xpu//:python_headers"],
+        "//conditions:default": ["@local_config_python//:python_headers"],
+    }),
     strip_include_prefix = "torch/include/torch/csrc/api/include",
     visibility = ["//visibility:public"],
 )
@@ -103,8 +119,9 @@ cc_library(
         ],
         "//conditions:default": [],
     }),
-    deps = [
-        "@local_config_python//:python_headers",
-    ],
+    deps = select({
+        "@//:using_xpu": ["@local_config_xpu//:python_headers"],
+        "//conditions:default": ["@local_config_python//:python_headers"],
+    }),
     visibility = ["//visibility:public"],
 )

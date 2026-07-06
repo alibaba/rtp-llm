@@ -68,6 +68,29 @@ class AutoModel:
             model_config=model_config,
         )
 
+        # XPU only supports MHA attention (initRuntime forces MlaOpsType::MHA).
+        # The runtime is initialized after the model is built, so its resolved
+        # type would arrive too late; pin MHA here so MLA/DeepSeek models are
+        # constructed with the attention type the XPU runtime will actually use.
+        from rtp_llm.device.device_impl import _is_xpu_device
+        if _is_xpu_device():
+            from rtp_llm.ops import MlaOpsType
+            if model_config.mla_ops_type != MlaOpsType.MHA:
+                logging.info(
+                    "XPU only supports MHA; overriding mla_ops_type %s -> MHA",
+                    model_config.mla_ops_type)
+                model_config.mla_ops_type = MlaOpsType.MHA
+
+        # Bind the current process to its target GPU BEFORE creating/loading
+        # the model. Otherwise model weights default to device 0 while the C++
+        # runtime (init_exec_ctx below) binds to world_rank % local_world_size,
+        # so on multi-GPU nodes Python weights and the runtime land on different
+        # devices.
+        pc = engine_config.parallelism_config
+        device_id = pc.world_rank % pc.local_world_size
+        from rtp_llm.device.device_impl import gpu_set_device
+        gpu_set_device(device_id)
+
         # Create model using ModelFactory
         self.gpt_model = ModelFactory._create_model(
             model_config=model_config,
@@ -82,14 +105,14 @@ class AutoModel:
         self.model = self.gpt_model.py_model
         self.model_config = self.gpt_model.model_config
 
-        pc = engine_config.parallelism_config
         init_exec_ctx(
-            device_id=pc.world_rank % pc.local_world_size,
+            device_id=device_id,
             trace_memory=engine_config.profiling_debug_logging_config.trace_memory,
             enable_comm_overlap=engine_config.device_resource_config.enable_comm_overlap,
             mla_ops_type=int(model_config.mla_ops_type),
         )
-        self.device = "cuda"
+        from rtp_llm.device.device_impl import get_device_string
+        self.device = get_device_string()
 
         # init kv cache and bind it to py model
         self.tokens_per_block = self.model_config.attn_config.tokens_per_block
@@ -140,13 +163,20 @@ class AutoModel:
             CacheGroupType.FULL for _ in range(self.layer_num)
         ]
 
-        per_layer_shape = [
-            self.block_nums,
-            2,
-            self.kv_head_num,
-            self.tokens_per_block,
-            self.size_per_head,
-        ]
+        # KV cache layout differs by device:
+        #   CUDA/ROCm: [num_blocks, 2, kv_heads, tokens_per_block, head_dim]
+        #   XPU:       [num_blocks, 2, tokens_per_block, kv_heads, head_dim]
+        from rtp_llm.device.device_impl import _is_xpu_device
+        if _is_xpu_device():
+            per_layer_shape = [
+                self.block_nums, 2,
+                self.tokens_per_block, self.kv_head_num, self.size_per_head,
+            ]
+        else:
+            per_layer_shape = [
+                self.block_nums, 2,
+                self.kv_head_num, self.tokens_per_block, self.size_per_head,
+            ]
         self.kv_cache.kv_cache_base_by_layer = [
             torch.zeros(per_layer_shape, dtype=self.compute_dtype, device=self.device)
             for _ in range(self.layer_num)
@@ -202,7 +232,9 @@ class AutoModel:
         # sequence_lengths is index, so minus 1
         attention_inputs.sequence_lengths = torch.tensor(
             [sequence_length - 1], dtype=torch.int32
-        ).pin_memory()
+        )
+        if self.device == "cuda":
+            attention_inputs.sequence_lengths = attention_inputs.sequence_lengths.pin_memory()
         attention_inputs.kv_cache_block_id_device = torch.tensor(
             [[i for i in range(1, need_block_nums + 1)]],
             dtype=torch.int32,

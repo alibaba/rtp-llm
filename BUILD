@@ -69,6 +69,11 @@ config_setting(
     values = {"define": "using_cpu=true"},
 )
 
+config_setting(
+    name = "using_xpu",
+    values = {"define": "using_xpu=true"},
+)
+
 selects.config_setting_group(
     name = "using_cuda12_9",
     match_any = [

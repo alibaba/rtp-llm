@@ -4,12 +4,13 @@
 
 namespace rtp_llm {
 
+
 void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallelism_config) {
     if (parallelism_config.tp_size <= 1) {
         return;
     }
     const size_t shape_hints_size = GptModelInputIndex::gptModelInputLength;
-    auto         shape_hints_t    = torch::empty({(int64_t)shape_hints_size}, torch::kInt32).pin_memory();
+    auto         shape_hints_t    = maybePinMemory(torch::empty({(int64_t)shape_hints_size}, torch::kInt32));
     auto         shape_hints_ptr  = shape_hints_t.data_ptr<int32_t>();
     shape_hints_ptr[GptModelInputIndex::comboTokens] = inputs.combo_tokens.defined() ? inputs.combo_tokens.numel() : 0;
     shape_hints_ptr[GptModelInputIndex::inputLengths] =
@@ -83,7 +84,7 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     }
     const size_t mm_features_num = shape_hints_ptr[GptModelInputIndex::mmFeaturesNum];
     if (mm_features_num) {
-        mm_features_shape_t   = torch::empty({(int64_t)mm_features_num}, torch::kInt32).pin_memory();
+        mm_features_shape_t   = maybePinMemory(torch::empty({(int64_t)mm_features_num}, torch::kInt32));
         mm_features_shape_ptr = mm_features_shape_t.data_ptr<int32_t>();
         for (size_t i = 0; i < mm_features_num; ++i) {
             mm_features_shape_ptr[i] =
@@ -98,7 +99,7 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     // so we send its element count first ("先传shape") and allocate a 1-D buffer on non-root.
     const size_t mm_extra_input_num = (size_t)shape_hints_ptr[GptModelInputIndex::mmHasExtraInput];
     if (mm_extra_input_num) {
-        mm_extra_input_shape_t   = torch::empty({(int64_t)mm_extra_input_num}, torch::kInt64).pin_memory();
+        mm_extra_input_shape_t   = maybePinMemory(torch::empty({(int64_t)mm_extra_input_num}, torch::kInt64));
         mm_extra_input_shape_ptr = mm_extra_input_shape_t.data_ptr<int64_t>();
         for (size_t i = 0; i < mm_extra_input_num; ++i) {
             mm_extra_input_shape_ptr[i] =
@@ -126,13 +127,13 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
         auto torch_dtype = dataTypeToTorchType(dtype);
         auto options     = torch::TensorOptions(torch_dtype);
         if (atype == rtp_llm::AllocationType::DEVICE) {
-            options = options.device(torch::kCUDA);
+            options = options.device(getTorchDevice());
         }
         std::vector<int64_t> dims64(dims.begin(), dims.end());
         auto                 tensor = torch::empty(dims64, options);
         // NCCL broadcast requires pinned memory for CPU buffers
         if (atype != rtp_llm::AllocationType::DEVICE) {
-            tensor = tensor.pin_memory();
+            tensor = maybePinMemory(tensor);
         }
         return tensor;
     };
@@ -200,7 +201,7 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
             for (auto mm_index = 0; mm_index < mm_features_num; ++mm_index) {
                 mm_features.emplace_back(torch::empty({(int64_t)mm_features_shape_ptr[mm_index],
                                                        (int64_t)shape_hints_ptr[GptModelInputIndex::mmFeaturesSize]},
-                                                      torch::TensorOptions().dtype(mm_dtype).device(torch::kCUDA)));
+                                                      torch::TensorOptions().dtype(mm_dtype).device(getTorchDevice())));
             }
             inputs.multimodal_features = std::move(mm_features);
         }
@@ -211,7 +212,7 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
             for (size_t i = 0; i < mm_extra_input_num; ++i) {
                 mm_extra_input.emplace_back(
                     torch::empty({(int64_t)mm_extra_input_shape_ptr[i]},
-                                 torch::TensorOptions().dtype(extra_dtype).device(torch::kCUDA)));
+                                 torch::TensorOptions().dtype(extra_dtype).device(getTorchDevice())));
             }
             inputs.mm_extra_input = std::move(mm_extra_input);
         }
@@ -289,7 +290,7 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
 
     for (auto* tp : tensor_ptrs) {
         auto nb = static_cast<int64_t>(tp->nbytes());
-        if (tp->is_cuda()) {
+        if (tp->is_cuda() || tp->is_xpu()) {
             gpu_entries.push_back({tp, gpu_total_bytes, nb});
             gpu_total_bytes += align_up(nb, kPackAlignment);
         } else {
@@ -305,7 +306,7 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     torch::Tensor cpu_packed, gpu_packed;
 
     if (cpu_total_bytes > 0) {
-        cpu_packed = torch::empty({cpu_total_bytes}, torch::kUInt8).pin_memory();
+        cpu_packed = maybePinMemory(torch::empty({cpu_total_bytes}, torch::kUInt8));
         if (is_root) {
             auto* base = static_cast<uint8_t*>(cpu_packed.data_ptr());
             for (auto& e : cpu_entries) {
@@ -316,7 +317,7 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     }
 
     if (gpu_total_bytes > 0) {
-        gpu_packed = torch::empty({gpu_total_bytes}, torch::TensorOptions(torch::kUInt8).device(torch::kCUDA));
+        gpu_packed = torch::empty({gpu_total_bytes}, torch::TensorOptions(torch::kUInt8).device(getTorchDevice()));
         if (is_root) {
             for (auto& e : gpu_entries) {
                 auto contig    = e.tensor->contiguous();

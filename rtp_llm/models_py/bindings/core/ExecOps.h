@@ -58,7 +58,26 @@ void cudaProfilerEnd();
 // ===================================================================
 
 ExecStatus    getGpuExecStatus();
-torch::Device getTorchCudaDevice();
+
+inline torch::Device getTorchDevice() {
+#if USING_XPU
+    return torch::Device(torch::kXPU, static_cast<c10::DeviceIndex>(getDeviceId()));
+#elif USING_CUDA || USING_ROCM
+    return torch::Device(torch::kCUDA);
+#else
+    return torch::Device(torch::kCPU);
+#endif
+}
+inline torch::Device getTorchCudaDevice() { return getTorchDevice(); }
+
+inline torch::Tensor maybePinMemory(torch::Tensor t) {
+#if !USING_XPU
+    return t.pin_memory();
+#else
+    return t;
+#endif
+}
+
 void          setTraceMemory(bool trace_memory);
 
 // ===================================================================

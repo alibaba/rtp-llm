@@ -121,6 +121,9 @@ void registerPyOpDefs(pybind11::module& m) {
         .def_readwrite("cache_store_inputs", &PyAttentionInputs::cache_store_inputs)
         .def_readwrite("context_parallel_info", &PyAttentionInputs::context_parallel_info)
         .def_readwrite("combo_position_ids", &PyAttentionInputs::combo_position_ids)
+#if USING_XPU
+        .def_readwrite("position_ids", &PyAttentionInputs::position_ids)
+#endif
         .def("__repr__", [](const PyAttentionInputs& self) { return "PyAttentionInputs"; })
         .def_readwrite("prefill_cuda_graph_copy_params", &PyAttentionInputs::prefill_cuda_graph_copy_params)
         .def_readwrite("headwise_config", &PyAttentionInputs::headwise_config)

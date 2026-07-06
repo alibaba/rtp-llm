@@ -38,12 +38,18 @@ void BlockPool::validateConfig() const {
 
 void BlockPool::initializeCacheBuffer() {
     if (allocation_type_ == AllocationType::HOST) {
-        cache_aligned_buffer_ = torch::empty({static_cast<int64_t>(config_.total_size_bytes)},
-                                             torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCPU))
-                                    .pin_memory();
+        auto host_buffer = torch::empty({static_cast<int64_t>(config_.total_size_bytes)},
+                                        torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCPU));
+#if USING_XPU
+        // XPU has no CUDA-style host-pinned memory; keep a plain pageable CPU
+        // buffer to avoid a no-op / failing pin_memory() call.
+        cache_aligned_buffer_ = host_buffer;
+#else
+        cache_aligned_buffer_ = host_buffer.pin_memory();
+#endif
     } else {
         cache_aligned_buffer_ = torch::empty({static_cast<int64_t>(config_.total_size_bytes)},
-                                             torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA));
+                                             torch::TensorOptions().dtype(torch::kUInt8).device(getTorchDevice()));
     }
     cache_base_ptr_ = cache_aligned_buffer_.data_ptr();
     RTP_LLM_CHECK_WITH_INFO(cache_base_ptr_ != nullptr, "block pool allocate cache aligned buffer is null");
@@ -500,7 +506,7 @@ BlockPool::convertIndexToBuffer(int layer_id, int block_id, int partition_count,
 }
 
 MemoryType BlockPool::where() const {
-    return cache_aligned_buffer_.is_cuda() ? MemoryType::MEMORY_GPU : MemoryType::MEMORY_CPU;
+    return (cache_aligned_buffer_.is_cuda() || cache_aligned_buffer_.is_xpu()) ? MemoryType::MEMORY_GPU : MemoryType::MEMORY_CPU;
 }
 
 void BlockPool::checkLayoutValidity(int layout_id) const {

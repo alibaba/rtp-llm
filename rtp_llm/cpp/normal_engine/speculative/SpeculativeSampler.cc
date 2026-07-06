@@ -34,14 +34,14 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
                                      const std::list<GenerateStreamPtr>& streams,
                                      SamplerOutput&                      draft_sampler_output,
                                      SamplerOutput&                      target_sampler_output) const {
-    torch::Device target_device = getTorchCudaDevice();
+    torch::Device target_device = getTorchDevice();
     torch::Device host_device   = torch::Device(torch::kCPU);
 
     int batch_size = streams.size();
 
     // target_sampler_output.token_ids may be a CUDA tensor (Sampler keeps it on GPU to avoid
     // D2H sync during sampling). Move to CPU once here for data_ptr access.
-    const torch::Tensor target_token_ids_cpu = target_sampler_output.token_ids.is_cuda() ?
+    const torch::Tensor target_token_ids_cpu = (target_sampler_output.token_ids.is_cuda() || target_sampler_output.token_ids.is_xpu()) ?
                                                    target_sampler_output.token_ids.to(host_device, true) :
                                                    target_sampler_output.token_ids;
     const int*          new_all_token_ids    = target_token_ids_cpu.data_ptr<int32_t>();
