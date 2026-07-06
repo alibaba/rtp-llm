@@ -145,6 +145,12 @@ void NormalCacheStore::store(const std::shared_ptr<RequestBlockBuffer>& request_
 
     auto collector = std::make_shared<CacheStoreStoreMetricsCollector>(
         metrics_reporter_, request_block_buffer->getBlocksCount(), request_block_buffer->getBlocksSize());
+    auto queue_failure_callback = [callback, collector](bool success, CacheStoreErrorCode ec) {
+        if (!success) {
+            collector->markEnd(false);
+        }
+        callback(success, ec);
+    };
     // task 只在threadpool中运行, threadpool退出前会清理所有running task, 用this是安全的
     auto task = [this, request_block_buffer, callback, collector]() {
         if (!pinCacheStoreDevice(this->device_id_, "store task")) {
@@ -156,7 +162,7 @@ void NormalCacheStore::store(const std::shared_ptr<RequestBlockBuffer>& request_
     };
 
     std::unique_lock<std::shared_mutex> lock(store_tasks_mutex_);
-    store_tasks_[request_block_buffer] = {callback, task};
+    store_tasks_[request_block_buffer] = {queue_failure_callback, task};
 }
 
 std::shared_ptr<StoreContext>
