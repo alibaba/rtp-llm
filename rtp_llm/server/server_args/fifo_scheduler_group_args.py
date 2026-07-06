@@ -28,6 +28,7 @@ def init_fifo_scheduler_group_args(parser, fifo_scheduler_config):
         env_name="PDFUSION_SCHEDULER_MODE",
         bind_to=[(fifo_scheduler_config, "pdfusion_scheduler_mode")],
         type=str,
+        choices=["", "ratio"],
         default="",
         help="PDFUSION 调度器选择。默认空字符串使用 decode-first FIFO 调度；显式设置为 'ratio' 时启用 "
         "PDFusionRatioScheduler，并使用 decode_prefill_ratio 控制 prefill/decode 轮次比例。",

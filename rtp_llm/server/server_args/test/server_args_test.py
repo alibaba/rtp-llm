@@ -287,6 +287,16 @@ class ServerArgsSetTest(TestCase):
             "1/3",
         )
 
+    def test_pdfusion_scheduler_mode_rejects_unknown_value(self):
+        """Test that pdfusion_scheduler_mode only accepts fixed scheduler patterns."""
+        sys.argv = ["prog", "--pdfusion_scheduler_mode", "ratioo"]
+
+        import rtp_llm.server.server_args.server_args
+
+        importlib.reload(rtp_llm.server.server_args.server_args)
+        with self.assertRaises(SystemExit):
+            rtp_llm.server.server_args.server_args.setup_args()
+
 
 if __name__ == "__main__":
     main()

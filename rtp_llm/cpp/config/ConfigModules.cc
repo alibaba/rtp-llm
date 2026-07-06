@@ -351,6 +351,29 @@ std::string BatchDecodeSchedulerConfig::to_string() const {
 }
 
 // FIFOSchedulerConfig
+PDFusionSchedulerMode parsePDFusionSchedulerMode(const std::string& mode) {
+    if (mode.empty()) {
+        return PDFusionSchedulerMode::DEFAULT;
+    }
+    if (mode == "ratio") {
+        return PDFusionSchedulerMode::RATIO;
+    }
+    return PDFusionSchedulerMode::UNKNOWN;
+}
+
+const char* PDFusionSchedulerModeToString(PDFusionSchedulerMode mode) {
+    switch (mode) {
+        case PDFusionSchedulerMode::DEFAULT:
+            return "";
+        case PDFusionSchedulerMode::RATIO:
+            return "ratio";
+        case PDFusionSchedulerMode::UNKNOWN:
+            return "unknown";
+        default:
+            return "unknown";
+    }
+}
+
 std::string FIFOSchedulerConfig::to_string() const {
     std::ostringstream oss;
     oss << "max_context_batch_size: " << max_context_batch_size << "\n"
