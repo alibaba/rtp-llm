@@ -5829,6 +5829,22 @@ class DistributedAttentionTorchrunCandidateTest(unittest.TestCase):
         torch.cuda.synchronize()
         self.assertTrue(torch.isfinite(actual.float()).all().item())
 
+    def test_torchrun_symm_mem_csa_4k_packed_pool_ncu_fixture(self) -> None:
+        """NCU-only CSA fixture matching online packed-pool/symmetric-memory inputs."""
+        if os.environ.get("DSV4_DIST_ATTN_NCU_PACKED_POOL", "0") != "1":
+            self.skipTest("packed-pool NCU fixture is enabled only for profiling runs")
+        env_name = "DSV4_DIST_ATTN_TEST_CSA_TOTAL_TOKENS"
+        old_value = os.environ.get(env_name)
+        if old_value is None:
+            os.environ[env_name] = "4100"
+        try:
+            self.test_torchrun_symm_mem_csa_e2e_4k_shape_contract()
+        finally:
+            if old_value is None:
+                os.environ.pop(env_name, None)
+            else:
+                os.environ[env_name] = old_value
+
 
 if __name__ == "__main__":
     unittest.main()
