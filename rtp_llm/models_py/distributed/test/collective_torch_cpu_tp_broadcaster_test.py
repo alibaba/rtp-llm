@@ -13,12 +13,16 @@ from rtp_llm.ops import ParallelismConfig
 class _FakeLibrtpComputeOps:
     def __init__(self, init_error=None):
         self.init_calls = []
+        self.destroy_calls = 0
         self.init_error = init_error
 
     def init_cpu_tp_broadcaster(self, tp_rank, tp_size, base_path):
         if self.init_error is not None:
             raise self.init_error
         self.init_calls.append((tp_rank, tp_size, base_path))
+
+    def destroy_cpu_tp_broadcaster(self):
+        self.destroy_calls += 1
 
 
 class _FakeIncompleteDestroyLibrtpComputeOps:
@@ -161,6 +165,45 @@ class TestCpuTpBroadcasterBootstrap(unittest.TestCase):
         self.assertEqual(fake_ops.init_calls, [])
         self.assertIn("inconsistent eligibility", mock_warning.call_args.args[0])
 
+    def test_init_cpu_tp_broadcaster_destroys_when_actual_init_diverges(self):
+        fake_ops = _FakeLibrtpComputeOps()
+        ct._parallelism_config = self._parallelism_config(tp_size=2, local_world_size=4)
+        ct._cpu_tp_broadcaster_nccl_init_port = 12345
+        ct._initialized = True
+        gather_calls = []
+
+        def fake_all_gather_object(output, value, group):
+            gather_calls.append(value)
+            output[:] = [True, True] if len(gather_calls) == 1 else [True, False]
+
+        with tempfile.TemporaryDirectory() as tmpdir, patch.dict(
+            os.environ,
+            {
+                "RTP_LLM_CPU_TP_BROADCASTER_DIR": tmpdir,
+                "RTP_LLM_CPU_TP_BROADCASTER_ID": "unit-test",
+            },
+        ), patch(
+            "rtp_llm.models_py.distributed.collective_torch.torch.distributed.is_initialized",
+            return_value=True,
+        ), patch(
+            "rtp_llm.models_py.distributed.collective_torch._get_group",
+            return_value=_FakeProcessGroup(2),
+        ), patch(
+            "rtp_llm.models_py.distributed.collective_torch.torch.distributed.all_gather_object",
+            side_effect=fake_all_gather_object,
+        ), patch(
+            "logging.warning"
+        ) as mock_warning:
+            ct._init_cpu_tp_broadcaster_if_needed(fake_ops)
+
+        self.assertIsNone(ct._cpu_tp_broadcaster_base_path)
+        self.assertEqual(len(fake_ops.init_calls), 1)
+        self.assertEqual(fake_ops.destroy_calls, 1)
+        self.assertIn(
+            "inconsistent initialized state",
+            mock_warning.call_args.args[0],
+        )
+
     def test_skip_cpu_tp_broadcaster_tp1_with_long_uds_path(self):
         fake_ops = _FakeLibrtpComputeOps()
         ct._parallelism_config = self._parallelism_config(tp_size=1, local_world_size=8)
@@ -273,6 +316,8 @@ class TestCpuTpBroadcasterBootstrap(unittest.TestCase):
                 ct.destroy_distributed_environment()
 
         self.assertEqual(fake_ops.clear_calls, 1)
+        self.assertFalse(ct._initialized)
+        self.assertIsNone(ct._parallelism_config)
 
 
 if __name__ == "__main__":

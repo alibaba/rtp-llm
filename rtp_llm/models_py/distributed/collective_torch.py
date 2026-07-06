@@ -99,6 +99,36 @@ def _should_init_cpu_tp_broadcaster_for_group(
     return False
 
 
+def _cpu_tp_broadcaster_initialized_for_group(actual_initialized: bool) -> bool:
+    if _parallelism_config is None or _parallelism_config.tp_size <= 1:
+        return actual_initialized
+    if not torch.distributed.is_initialized() or not _initialized:
+        return actual_initialized
+
+    try:
+        tp_group = _get_group(Group.TP)
+        group_size = tp_group.size()
+        group_initialized: List[bool] = [False] * group_size
+        torch.distributed.all_gather_object(
+            group_initialized, bool(actual_initialized), group=tp_group
+        )
+    except Exception as e:
+        logging.warning(
+            "Skip CpuTpBroadcaster init: failed to confirm TP group init: %s",
+            e,
+        )
+        return False
+
+    if all(group_initialized):
+        return True
+    if any(group_initialized):
+        logging.warning(
+            "Skip CpuTpBroadcaster init: inconsistent initialized state across TP group: %s",
+            group_initialized,
+        )
+    return False
+
+
 def _make_cpu_tp_broadcaster_base_path(
     parallelism_config: ParallelismConfig,
     nccl_init_port: int,
@@ -149,6 +179,8 @@ def _init_cpu_tp_broadcaster_if_needed(librtp_compute_ops) -> None:
         logging.warning("Skip CpuTpBroadcaster init: nccl_init_port is unknown")
         return
 
+    base_path = None
+    actual_initialized = False
     try:
         base_path = _make_cpu_tp_broadcaster_base_path(
             _parallelism_config, _cpu_tp_broadcaster_nccl_init_port
@@ -158,11 +190,15 @@ def _init_cpu_tp_broadcaster_if_needed(librtp_compute_ops) -> None:
             _parallelism_config.tp_size,
             base_path,
         )
+        actual_initialized = True
     except Exception as e:
         logging.warning(
             "Failed to initialize CpuTpBroadcaster, fallback to NCCL broadcast: %s",
             e,
         )
+    # Runtime broadcasts must be all UDS or all NCCL across the TP group.
+    if not _cpu_tp_broadcaster_initialized_for_group(actual_initialized):
+        librtp_compute_ops.destroy_cpu_tp_broadcaster()
         return
     _cpu_tp_broadcaster_base_path = base_path
     logging.info(
@@ -581,6 +617,7 @@ def destroy_distributed_environment():
 
         destroy_user_buffers_communicator()
 
+    cleanup_error = None
     try:
         import librtp_compute_ops
 
@@ -590,22 +627,24 @@ def destroy_distributed_environment():
         librtp_compute_ops.destroy_cpu_tp_broadcaster()
     except ImportError:
         pass
+    except Exception as e:
+        cleanup_error = e
+    finally:
+        # Always reset Python-side distributed state before surfacing skew.
+        if rocm_rccl.is_available_runtime():
+            rocm_rccl.destroy_capture_comm()
 
-    # Clean up ROCm RCCL capture comm before destroying process groups,
-    # so that re-init will bootstrap a fresh communicator instead of
-    # reusing the stale one from the destroyed environment.
-    if rocm_rccl.is_available_runtime():
-        rocm_rccl.destroy_capture_comm()
-
-    if torch.distributed.is_initialized():
-        torch.distributed.destroy_process_group()
-    _group_map.clear()
-    logging.info(f"[rank: {rank}] Distributed environment destroyed")
-    _parallelism_config = None
-    _cpu_tp_broadcaster_base_path = None
-    _cpu_tp_broadcaster_nccl_init_port = None
-    _initialized = False
-    gc.collect()
+        if torch.distributed.is_initialized():
+            torch.distributed.destroy_process_group()
+        _group_map.clear()
+        logging.info(f"[rank: {rank}] Distributed environment destroyed")
+        _parallelism_config = None
+        _cpu_tp_broadcaster_base_path = None
+        _cpu_tp_broadcaster_nccl_init_port = None
+        _initialized = False
+        gc.collect()
+    if cleanup_error is not None:
+        raise cleanup_error
 
 
 def _get_group(group: Group) -> torch.distributed.ProcessGroup:
