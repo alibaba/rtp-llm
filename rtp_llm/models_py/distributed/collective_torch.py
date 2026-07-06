@@ -4,6 +4,7 @@ import gc
 import logging
 import os
 import re
+import stat
 from datetime import timedelta
 from enum import Enum
 from typing import Dict, List, Optional, Union
@@ -115,6 +116,14 @@ def _make_cpu_tp_broadcaster_base_path(
             os.environ.get("TMPDIR", "/tmp"), f"rtp_llm_{os.getuid()}"
         )
     os.makedirs(base_dir, mode=0o700, exist_ok=True)
+    base_dir_stat = os.lstat(base_dir)
+    if not stat.S_ISDIR(base_dir_stat.st_mode):
+        raise ValueError(f"CpuTpBroadcaster directory is not safe: {base_dir}")
+    if base_dir_stat.st_uid != os.getuid():
+        raise PermissionError(
+            f"CpuTpBroadcaster directory is not owned by current user: {base_dir}"
+        )
+    # Validate before chmod: the default /tmp path is predictable.
     os.chmod(base_dir, 0o700)
     base_path = os.path.join(
         base_dir, f"rtp_llm_tp_{session_id}_dp{parallelism_config.dp_rank}"

@@ -490,10 +490,6 @@ void execBroadcastCpu(const BroadcastParams& params, bool allow_fallback) {
     }
 }
 
-bool isCpuTpBroadcasterInitialized() {
-    return CpuTpBroadcaster::instance().isInitialized();
-}
-
 AllReduceOutput execAllReduce(const AllReduceParams& params) {
     py::function fn;
     {

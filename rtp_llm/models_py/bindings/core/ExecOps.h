@@ -100,7 +100,6 @@ void execBroadcast(const BroadcastParams& params);
 // broadcastCPU may run from the C++ engine thread after Python initializes the
 // broadcaster, but it must not run concurrently or re-entrantly.
 void            execBroadcastCpu(const BroadcastParams& params, bool allow_fallback = true);
-bool            isCpuTpBroadcasterInitialized();
 AllReduceOutput execAllReduce(const AllReduceParams& params);
 void            execAllGather(const AllGatherParams& params);
 void            execSyncCommunication(bool timeout = true);

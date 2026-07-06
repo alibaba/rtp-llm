@@ -107,6 +107,27 @@ class TestCpuTpBroadcasterBootstrap(unittest.TestCase):
             mode = stat.S_IMODE(os.stat(tmpdir).st_mode)
             self.assertEqual(mode, 0o700)
 
+    def test_make_cpu_tp_broadcaster_base_path_rejects_symlink_dir(self):
+        parallelism_config = self._parallelism_config(tp_size=2, local_world_size=4)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = os.path.join(tmpdir, "target")
+            link = os.path.join(tmpdir, "link")
+            os.mkdir(target)
+            os.chmod(target, 0o755)
+            os.symlink(target, link)
+            with patch.dict(
+                os.environ,
+                {
+                    "RTP_LLM_CPU_TP_BROADCASTER_DIR": link,
+                    "RTP_LLM_CPU_TP_BROADCASTER_ID": "unit-test",
+                },
+            ):
+                with self.assertRaisesRegex(ValueError, "not safe"):
+                    ct._make_cpu_tp_broadcaster_base_path(parallelism_config, 12345)
+
+            mode = stat.S_IMODE(os.stat(target).st_mode)
+            self.assertEqual(mode, 0o755)
+
     def test_init_cpu_tp_broadcaster_skips_when_tp_group_eligibility_diverges(self):
         fake_ops = _FakeLibrtpComputeOps()
         ct._parallelism_config = self._parallelism_config(tp_size=2, local_world_size=4)
