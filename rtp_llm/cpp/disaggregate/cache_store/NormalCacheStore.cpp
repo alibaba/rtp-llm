@@ -7,6 +7,7 @@
 
 #include <cstring>
 #include <exception>
+#include <vector>
 
 namespace rtp_llm {
 
@@ -94,11 +95,18 @@ bool NormalCacheStore::init(const CacheStoreInitParams& params) {
             if (!device_pinned) {
                 device_pinned = pinCacheStoreDevice(this->device_id_, "check task");
                 if (!device_pinned) {
-                    std::unique_lock<std::shared_mutex> lock(store_tasks_mutex_);
-                    for (auto& store_task : this->store_tasks_) {
-                        store_task.second.first(false, CacheStoreErrorCode::StoreFailed);
+                    std::vector<CacheStoreStoreDoneCallback> failed_callbacks;
+                    {
+                        std::unique_lock<std::shared_mutex> lock(store_tasks_mutex_);
+                        failed_callbacks.reserve(store_tasks_.size());
+                        for (auto& store_task : this->store_tasks_) {
+                            failed_callbacks.push_back(store_task.second.first);
+                        }
+                        store_tasks_.clear();
                     }
-                    store_tasks_.clear();
+                    for (auto& callback : failed_callbacks) {
+                        callback(false, CacheStoreErrorCode::StoreFailed);
+                    }
                     std::this_thread::sleep_for(std::chrono::seconds(1));
                     continue;
                 }
