@@ -13,6 +13,9 @@ namespace rtp_llm {
 
 namespace {
 
+constexpr size_t kMaxDevicePinFailuresBeforeDrain = 3;
+constexpr int    kDevicePinRetryBackoffMs         = 1000;
+
 bool pinCacheStoreDevice(int device_id, const char* context) {
     try {
         setCurrentThreadDeviceIfNeeded(device_id);
@@ -89,12 +92,19 @@ bool NormalCacheStore::init(const CacheStoreInitParams& params) {
     }
 
     auto check_task_readiness = [this]() {
-        bool device_pinned = false;
+        bool   device_pinned       = false;
+        size_t device_pin_failures = 0;
         while (!thread_pool_close_) {
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
             if (!device_pinned) {
                 device_pinned = pinCacheStoreDevice(this->device_id_, "check task");
                 if (!device_pinned) {
+                    ++device_pin_failures;
+                    if (device_pin_failures < kMaxDevicePinFailuresBeforeDrain) {
+                        std::this_thread::sleep_for(std::chrono::milliseconds(kDevicePinRetryBackoffMs));
+                        continue;
+                    }
+
                     std::vector<CacheStoreStoreDoneCallback> failed_callbacks;
                     {
                         std::unique_lock<std::shared_mutex> lock(store_tasks_mutex_);
@@ -104,10 +114,16 @@ bool NormalCacheStore::init(const CacheStoreInitParams& params) {
                         }
                         store_tasks_.clear();
                     }
+                    if (!failed_callbacks.empty()) {
+                        RTP_LLM_LOG_WARNING(
+                            "normal cache store drop %zu queued store tasks after %zu device pin failures",
+                            failed_callbacks.size(),
+                            device_pin_failures);
+                    }
                     for (auto& callback : failed_callbacks) {
                         callback(false, CacheStoreErrorCode::StoreFailed);
                     }
-                    std::this_thread::sleep_for(std::chrono::seconds(1));
+                    std::this_thread::sleep_for(std::chrono::milliseconds(kDevicePinRetryBackoffMs));
                     continue;
                 }
             }

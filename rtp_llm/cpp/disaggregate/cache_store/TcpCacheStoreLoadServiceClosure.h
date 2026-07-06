@@ -19,7 +19,7 @@ public:
                                     CacheLoadResponse*                                           response,
                                     CacheStoreLoadDoneCallback                                   callback,
                                     const std::shared_ptr<CacheStoreClientLoadMetricsCollector>& collector,
-                                    int                                                          device_id = -1):
+                                    int                                                          device_id):
         memory_util_(memory_util),
         request_block_buffer_(request_block_buffer),
         controller_(controller),

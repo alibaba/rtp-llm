@@ -30,7 +30,7 @@ TcpCacheStoreLoadServiceClosure* TcpCacheStoreLoadServiceClosureTest::makeClosur
     response->set_error_code(resp_ec);
 
     return new TcpCacheStoreLoadServiceClosure(
-        memory_util_, request_buffer, controller, request, response, callback, collector);
+        memory_util_, request_buffer, controller, request, response, callback, collector, -1);
 }
 
 TEST_F(TcpCacheStoreLoadServiceClosureTest, testRun_Success) {

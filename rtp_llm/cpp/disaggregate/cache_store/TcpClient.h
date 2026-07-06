@@ -14,7 +14,7 @@ public:
 public:
     bool                                  init(int io_thread_count);
     std::shared_ptr<arpc::RPCChannelBase> getChannel(const std::string& ip, uint32_t port);
-    std::shared_ptr<TransferConnection> getTransferConnection(const std::string& ip, uint32_t port, int device_id = -1);
+    std::shared_ptr<TransferConnection>   getTransferConnection(const std::string& ip, uint32_t port, int device_id);
 
 private:
     void                                  stop();

@@ -14,7 +14,7 @@ public:
                         BlockReadRequest*                                    request,
                         BlockReadResponse*                                   response,
                         arpc::ANetRPCController*                             controller,
-                        int                                                  device_id = -1);
+                        int                                                  device_id);
     ~TcpBlockReadClosure();
 
 public:

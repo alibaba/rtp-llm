@@ -14,7 +14,7 @@ public:
                              const std::shared_ptr<TimerManager>&             timer_manager,
                              const std::shared_ptr<LockedBlockBufferManager>& locked_block_buffer_manager,
                              const std::shared_ptr<TcpClient>&                tcp_client,
-                             int                                              device_id = -1);
+                             int                                              device_id);
     virtual ~TcpCacheStoreServiceImpl() = default;
 
 protected:

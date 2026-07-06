@@ -9,7 +9,7 @@ namespace rtp_llm {
 
 class TcpTransferConnection: public TransferConnection {
 public:
-    TcpTransferConnection(const std::shared_ptr<arpc::RPCChannelBase>& channel, int device_id = -1);
+    TcpTransferConnection(const std::shared_ptr<arpc::RPCChannelBase>& channel, int device_id);
 
 public:
     void read(const std::vector<std::shared_ptr<BlockBuffer>>&     local_blocks,
