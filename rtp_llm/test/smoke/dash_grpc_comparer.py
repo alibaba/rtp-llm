@@ -17,6 +17,7 @@ fields:
 """
 from __future__ import annotations
 
+import json
 import struct
 from typing import Any, Dict, List, Optional
 
@@ -51,8 +52,53 @@ class DashSmokeResponse(BaseModel):
     response: str
     finish_reason: Optional[int] = None
     generated_ids: List[int] = []
+    prompt_token_ids: List[int] = []
     prompt_token_num: Optional[int] = None
     prompt_cached_token_num: Optional[int] = None
+
+
+def _int32_values(out: Any, raw: bytes) -> List[int]:
+    if out.datatype != "INT32":
+        return []
+    numel = 1
+    shape = list(out.shape)
+    for dim in shape:
+        numel *= max(0, int(dim))
+    if shape:
+        count = min(numel, len(raw) // 4)
+    else:
+        count = len(raw) // 4
+    if count <= 0:
+        return []
+    return list(struct.unpack("<%di" % count, raw[: count * 4]))
+
+
+def _response_format_type(generate_config: Dict[str, Any]) -> Optional[str]:
+    response_format = generate_config.get("response_format")
+    if isinstance(response_format, str):
+        try:
+            response_format = json.loads(response_format)
+        except json.JSONDecodeError:
+            return None
+    if isinstance(response_format, list) and response_format:
+        response_format = response_format[0]
+    if not isinstance(response_format, dict):
+        return None
+    return response_format.get("type")
+
+
+def _has_json_object(text: str) -> bool:
+    decoder = json.JSONDecoder()
+    for index, char in enumerate(text):
+        if char != "{":
+            continue
+        try:
+            parsed, _ = decoder.raw_decode(text[index:])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, dict):
+            return True
+    return False
 
 
 def _build_sampling_params(gc: Dict[str, Any]) -> SamplingParams:
@@ -121,6 +167,30 @@ class DashGrpcComparer(BaseComparer):
                 QueryStatus.COMPARE_FAILED,
                 f"dash finish_reason mismatch: expect={expect.finish_reason} actual={actual.finish_reason}",
             )
+        if expect.generated_ids and expect.generated_ids != actual.generated_ids:
+            raise SmokeException(
+                QueryStatus.COMPARE_FAILED,
+                f"dash generated_ids mismatch: expect={expect.generated_ids} actual={actual.generated_ids}",
+            )
+        if expect.prompt_token_ids and expect.prompt_token_ids != actual.prompt_token_ids:
+            raise SmokeException(
+                QueryStatus.COMPARE_FAILED,
+                f"dash prompt_token_ids mismatch: expect={expect.prompt_token_ids} actual={actual.prompt_token_ids}",
+            )
+        if expect.prompt_token_num is not None and expect.prompt_token_num != actual.prompt_token_num:
+            raise SmokeException(
+                QueryStatus.COMPARE_FAILED,
+                f"dash prompt_token_num mismatch: expect={expect.prompt_token_num} actual={actual.prompt_token_num}",
+            )
+        if (
+            expect.prompt_cached_token_num is not None
+            and expect.prompt_cached_token_num != actual.prompt_cached_token_num
+        ):
+            raise SmokeException(
+                QueryStatus.COMPARE_FAILED,
+                "dash prompt_cached_token_num mismatch: "
+                f"expect={expect.prompt_cached_token_num} actual={actual.prompt_cached_token_num}",
+            )
 
     # override — DashSc bypasses HTTP entirely, so BaseComparer.run's HTTP
     # ``server_manager.visit`` path doesn't apply. We override ``run`` rather
@@ -166,6 +236,7 @@ class DashGrpcComparer(BaseComparer):
             last_finish: Optional[int] = None
             prompt_token_num: Optional[int] = None
             prompt_cached_token_num: Optional[int] = None
+            prompt_token_ids: Optional[List[int]] = None
             for resp in stub.ModelStreamInfer(iter([request])):
                 if resp.error_message:
                     raise SmokeException(
@@ -180,15 +251,25 @@ class DashGrpcComparer(BaseComparer):
                         continue
                     raw = infer.raw_output_contents[i]
                     if out.name == "generated_ids" and out.datatype == "INT32":
-                        n = len(raw) // 4
-                        if n:
-                            generated_ids.extend(struct.unpack("<%di" % n, raw))
+                        generated_ids.extend(_int32_values(out, raw))
+                    elif out.name == "prompt_token_ids" and out.datatype == "INT32":
+                        ids = _int32_values(out, raw)
+                        if prompt_token_ids is None:
+                            prompt_token_ids = ids
+                        elif ids and ids != prompt_token_ids:
+                            raise SmokeException(
+                                QueryStatus.COMPARE_FAILED,
+                                "dash prompt_token_ids changed across stream chunks: "
+                                f"first={prompt_token_ids} current={ids}",
+                            )
                     elif out.name == "finish_reason":
                         last_finish = decode_finish_reason(out, raw)
                     elif out.name == "prompt_token_num" and out.datatype == "INT32" and len(raw) >= 4:
-                        prompt_token_num = struct.unpack("<i", raw[:4])[0]
+                        values = _int32_values(out, raw)
+                        prompt_token_num = values[0] if values else None
                     elif out.name == "prompt_cached_token_num" and out.datatype == "INT32" and len(raw) >= 4:
-                        prompt_cached_token_num = struct.unpack("<i", raw[:4])[0]
+                        values = _int32_values(out, raw)
+                        prompt_cached_token_num = values[0] if values else None
         finally:
             channel.close()
 
@@ -197,10 +278,28 @@ class DashGrpcComparer(BaseComparer):
             response=response_text,
             finish_reason=last_finish,
             generated_ids=generated_ids,
+            prompt_token_ids=prompt_token_ids or [],
             prompt_token_num=prompt_token_num,
             prompt_cached_token_num=prompt_cached_token_num,
         )
         self.tracer.actual_result = actual
+
+        if query_info.return_input_ids and actual.prompt_token_ids != input_ids:
+            raise SmokeException(
+                QueryStatus.COMPARE_FAILED,
+                "dash return_input_ids mismatch: "
+                f"expect request input_ids={input_ids} actual={actual.prompt_token_ids}",
+            )
+        if actual.prompt_token_num is not None and actual.prompt_token_num != len(input_ids):
+            raise SmokeException(
+                QueryStatus.COMPARE_FAILED,
+                f"dash prompt_token_num mismatch: expect={len(input_ids)} actual={actual.prompt_token_num}",
+            )
+        if _response_format_type(query_info.generate_config) == "json_object" and not _has_json_object(actual.response):
+            raise SmokeException(
+                QueryStatus.COMPARE_FAILED,
+                f"dash response_format=json_object did not produce a JSON object: {actual.response!r}",
+            )
 
         expect: DashSmokeResponse = self.format_result(self.qr_info["result"])
         self.tracer.expect_result = expect

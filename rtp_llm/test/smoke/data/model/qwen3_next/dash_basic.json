@@ -16,7 +16,80 @@
             },
             "result": {
                 "response": "\n\nThis is a simple example of a web application built with the\n[Fl",
-                "finish_reason": 1
+                "finish_reason": 1,
+                "prompt_token_num": 4,
+                "prompt_cached_token_num": 0
+            }
+        },
+        {
+            "endpoint": "dash://ModelStreamInfer",
+            "query": {
+                "prompt": "DashSC return_input_ids check.",
+                "generate_config": {
+                    "max_new_tokens": 8,
+                    "top_k": 1,
+                    "temperature": 1.0
+                },
+                "return_input_ids": true,
+                "request_id": "smoke_dash_return_input_ids"
+            },
+            "result": {
+                "response": "\n\n\nThis PR adds a check to the",
+                "finish_reason": 1,
+                "prompt_token_ids": [
+                    40860,
+                    3423,
+                    460,
+                    5715,
+                    7824,
+                    1716,
+                    13
+                ],
+                "prompt_token_num": 7,
+                "prompt_cached_token_num": 0
+            }
+        },
+        {
+            "endpoint": "dash://ModelStreamInfer",
+            "query": {
+                "prompt": "Complete this sentence: DashSC gRPC inference is",
+                "generate_config": {
+                    "max_new_tokens": 8,
+                    "max_new_think_tokens": 0,
+                    "top_k": 1,
+                    "temperature": 1.0
+                },
+                "enable_thinking": false,
+                "request_id": "smoke_dash_disable_thinking"
+            },
+            "result": {
+                "response": " a high-performance, low-latency inference",
+                "finish_reason": 1,
+                "prompt_token_num": 10,
+                "prompt_cached_token_num": 0
+            }
+        },
+        {
+            "endpoint": "dash://ModelStreamInfer",
+            "query": {
+                "prompt": "Return one JSON object with keys status and path. Use status ok and path dash_sc.",
+                "generate_config": {
+                    "max_new_tokens": 32,
+                    "max_new_think_tokens": 0,
+                    "top_k": 1,
+                    "temperature": 1.0,
+                    "response_format": {
+                        "type": "json_object"
+                    }
+                },
+                "enable_thinking": false,
+                "request_id": "smoke_dash_json_object"
+            },
+            "result": {
+                "response": "\n\n<think>\n\n</think>\n\n{\n  \"status\": \"ok\",\n  \"path\": \"dash_sc\"\n}<|endoftext|><|im_start|><|im_start|>assistant\n<think>\n\n",
+                "finish_reason": 1,
+                "prompt_token_num": 18,
+                "prompt_cached_token_num": 0
             }
         }
     ]
