@@ -154,13 +154,18 @@ TEST_F(CacheStoreAsyncWriterTest, AsyncExecution) {
 
 TEST_F(CacheStoreAsyncWriterTest, AsyncExecutionWithDeviceId) {
 #if USING_CUDA || USING_ROCM
-    if (gpuDeviceCountForTest() < 2) {
+    const int device_count = gpuDeviceCountForTest();
+    if (device_count < 2) {
         GTEST_SKIP() << "Need at least two GPU devices to prove non-default device pinning";
     }
 
     ScopedDeviceResetForTest reset_device;
-    constexpr int            kMainThreadDevice = 0;
-    constexpr int            kWriterDevice     = 1;
+    const int                kMainThreadDevice = device_count > 2 ? 1 : 0;
+    // Two-device hosts cannot use both a nonzero parent and a non-default writer.
+    // Prefer writer=1 there so the assertion is not satisfied by the runtime default.
+    const int kWriterDevice = device_count > 2 ? 2 : 1;
+    ASSERT_NE(kMainThreadDevice, kWriterDevice);
+    ASSERT_GT(kWriterDevice, 0);
     ASSERT_TRUE(setDeviceForTest(kMainThreadDevice));
     ASSERT_EQ(kMainThreadDevice, currentDeviceForTest());
 
