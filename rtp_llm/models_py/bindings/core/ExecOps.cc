@@ -376,21 +376,6 @@ void setTraceMemory(bool trace_memory) {
 
 // === Copy ops ===
 
-namespace {
-#if USING_CUDA
-// CopyParams is single-copy specific; share only the stream pool with multi-copy.
-int getCopyDevice(const torch::Tensor& dst, const torch::Tensor& src) {
-    if (dst.is_cuda()) {
-        return static_cast<int>(dst.get_device());
-    }
-    if (src.is_cuda()) {
-        return static_cast<int>(src.get_device());
-    }
-    return static_cast<int>(at::cuda::current_device());
-}
-#endif
-}  // anonymous namespace
-
 void execNoBlockCopy(const CopyParams& params) {
     params.check();
     const auto& src = params.src;

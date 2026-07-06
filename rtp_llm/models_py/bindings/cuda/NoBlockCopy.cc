@@ -8,23 +8,6 @@
 
 namespace rtp_llm {
 
-namespace {
-
-int getCopyDevice(const MultiCopyParams& params) {
-    if (params.multi_dst.empty()) {
-        return static_cast<int>(at::cuda::current_device());
-    }
-    if (params.multi_dst[0].is_cuda()) {
-        return static_cast<int>(params.multi_dst[0].get_device());
-    }
-    if (params.multi_src[0].is_cuda()) {
-        return static_cast<int>(params.multi_src[0].get_device());
-    }
-    return static_cast<int>(at::cuda::current_device());
-}
-
-}  // namespace
-
 void execNoBlockCopy(const MultiCopyParams& params) {
     RTP_LLM_CHECK_WITH_INFO(params.multi_src.size() == params.multi_dst.size(),
                             "multi_src.size(%zu) != multi_dst.size(%zu)",
@@ -33,7 +16,8 @@ void execNoBlockCopy(const MultiCopyParams& params) {
 
     const bool has_cuda_tensor =
         !params.multi_dst.empty() && (params.multi_dst[0].is_cuda() || params.multi_src[0].is_cuda());
-    const int            copy_device = getCopyDevice(params);
+    const int copy_device =
+        params.multi_dst.empty() ? getCopyDevice(-1, -1) : getCopyDevice(params.multi_dst[0], params.multi_src[0]);
     c10::cuda::CUDAGuard device_guard(copy_device);
 
     auto stream = getNoBlockCopyStream(copy_device).stream();

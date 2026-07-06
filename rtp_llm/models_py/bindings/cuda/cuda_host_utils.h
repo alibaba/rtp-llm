@@ -67,6 +67,14 @@ int                        getComputeCapabilityMinor(int device_id = -1);
 std::pair<int, int>        getComputeCapability(int device_id = -1);
 #if USING_CUDA
 at::cuda::CUDAStream getNoBlockCopyStream(int device_id);
+int                  getCopyDevice(int dst_device_id, int src_device_id);
+
+template<typename TensorT>
+int getCopyDevice(const TensorT& dst, const TensorT& src) {
+    const auto dst_device_id = dst.is_cuda() ? static_cast<int>(dst.get_device()) : -1;
+    const auto src_device_id = src.is_cuda() ? static_cast<int>(src.get_device()) : -1;
+    return getCopyDevice(dst_device_id, src_device_id);
+}
 #endif
 
 struct CaptureCheck {

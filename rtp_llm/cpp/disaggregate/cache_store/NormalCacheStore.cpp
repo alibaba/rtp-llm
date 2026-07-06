@@ -6,8 +6,26 @@
 #include "autil/LockFreeThreadPool.h"
 
 #include <cstring>
+#include <exception>
 
 namespace rtp_llm {
+
+namespace {
+
+bool pinCacheStoreDevice(int device_id, const char* context) {
+    try {
+        setCurrentThreadDeviceIfNeeded(device_id);
+        return true;
+    } catch (const std::exception& e) {
+        RTP_LLM_LOG_WARNING("normal cache store %s device pin failed, error is %s", context, e.what());
+        return false;
+    } catch (...) {
+        RTP_LLM_LOG_WARNING("normal cache store %s device pin failed with unknown error", context);
+        return false;
+    }
+}
+
+}  // namespace
 
 NormalCacheStore::~NormalCacheStore() {
     if (thread_pool_) {
@@ -70,9 +88,20 @@ bool NormalCacheStore::init(const CacheStoreInitParams& params) {
     }
 
     auto check_task_readiness = [this]() {
-        setCurrentThreadDeviceIfNeeded(this->device_id_);
+        bool device_pinned = false;
         while (!thread_pool_close_) {
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            if (!device_pinned) {
+                device_pinned = pinCacheStoreDevice(this->device_id_, "check task");
+                if (!device_pinned) {
+                    std::unique_lock<std::shared_mutex> lock(store_tasks_mutex_);
+                    for (auto& store_task : this->store_tasks_) {
+                        store_task.second.first(false, CacheStoreErrorCode::StoreFailed);
+                    }
+                    store_tasks_.clear();
+                    continue;
+                }
+            }
             std::unique_lock<std::shared_mutex> lock(store_tasks_mutex_);
             for (auto it = this->store_tasks_.begin(); it != this->store_tasks_.end();) {
                 auto& [buffer, item]   = *it;
@@ -118,7 +147,11 @@ void NormalCacheStore::store(const std::shared_ptr<RequestBlockBuffer>& request_
         metrics_reporter_, request_block_buffer->getBlocksCount(), request_block_buffer->getBlocksSize());
     // task 只在threadpool中运行, threadpool退出前会清理所有running task, 用this是安全的
     auto task = [this, request_block_buffer, callback, collector]() {
-        setCurrentThreadDeviceIfNeeded(this->device_id_);
+        if (!pinCacheStoreDevice(this->device_id_, "store task")) {
+            collector->markEnd(false);
+            callback(false, CacheStoreErrorCode::StoreFailed);
+            return;
+        }
         this->runStoreTask(request_block_buffer, callback, collector);
     };
 
@@ -197,7 +230,11 @@ void NormalCacheStore::load(const std::shared_ptr<RequestBlockBuffer>& request_b
                  collector,
                  partition_count,
                  partition_id]() {
-        setCurrentThreadDeviceIfNeeded(this->device_id_);
+        if (!pinCacheStoreDevice(this->device_id_, "load task")) {
+            collector->markEnd(false);
+            callback(false, CacheStoreErrorCode::LoadErrorUnknown);
+            return;
+        }
         this->runLoadTask(
             request_block_buffer, callback, ip, port, rdma_port, timeout_ms, collector, partition_count, partition_id);
     };

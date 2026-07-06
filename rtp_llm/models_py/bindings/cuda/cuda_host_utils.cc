@@ -123,6 +123,16 @@ at::cuda::CUDAStream getNoBlockCopyStream(int device_id) {
     }
     return stream->second;
 }
+
+int getCopyDevice(int dst_device_id, int src_device_id) {
+    if (dst_device_id >= 0) {
+        return dst_device_id;
+    }
+    if (src_device_id >= 0) {
+        return src_device_id;
+    }
+    return static_cast<int>(at::cuda::current_device());
+}
 #endif
 
 int get_sm() {
