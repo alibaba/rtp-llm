@@ -169,6 +169,7 @@ class OpenaiEndpoint(object):
     ) -> GenerateConfig:
         # TODO(wangyin): implement this
         config = request.extra_configs or GenerateConfig()
+        extend_fields = request.extend_fields or {}
         if request.trace_id != None:
             config.trace_id = request.trace_id
         if request.stream == True:
@@ -183,6 +184,10 @@ class OpenaiEndpoint(object):
             config.do_sample = request.do_sample
         if request.max_tokens != None:
             config.max_new_tokens = request.max_tokens
+        elif extend_fields.get("max_tokens") != None:
+            config.max_new_tokens = int(extend_fields["max_tokens"])
+        elif extend_fields.get("max_new_tokens") != None:
+            config.max_new_tokens = int(extend_fields["max_new_tokens"])
         if request.n != None:
             config.num_return_sequences = request.n
         request_stop_words_list = request.stop if request.stop != None else []

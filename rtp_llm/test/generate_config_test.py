@@ -261,6 +261,8 @@ class OpenaiGenerateConfigTest(TestCase):
         req_config_stop_word_list: Optional[List[List[int]]] = None,
         req_top_k: Optional[int] = None,
         req_do_sample: Optional[bool] = None,
+        req_max_tokens: Optional[int] = None,
+        req_extend_fields: Optional[dict] = None,
     ):
         special_tokens = SpecialTokens()
         if model_stop_word_str is not None:
@@ -297,6 +299,10 @@ class OpenaiGenerateConfigTest(TestCase):
             request_kwargs["top_k"] = req_top_k
         if req_do_sample is not None:
             request_kwargs["do_sample"] = req_do_sample
+        if req_max_tokens is not None:
+            request_kwargs["max_tokens"] = req_max_tokens
+        if req_extend_fields is not None:
+            request_kwargs["extend_fields"] = req_extend_fields
         request = ChatCompletionRequest(**request_kwargs)
         if req_stop is not None:
             request.stop = req_stop
@@ -517,6 +523,34 @@ class OpenaiGenerateConfigTest(TestCase):
         )
         self.assertEqual(config.top_k, 1)
         self.assertEqual(config.do_sample, False)
+
+    def test_openai_extend_fields_max_tokens_fallback(self):
+        config = self._generate_config_with_stop_word(
+            req_extend_fields={"max_tokens": 123}
+        )
+        self.assertEqual(config.max_new_tokens, 123)
+
+    def test_openai_extend_fields_max_new_tokens_fallback(self):
+        config = self._generate_config_with_stop_word(
+            req_extend_fields={"max_new_tokens": "456"}
+        )
+        self.assertEqual(config.max_new_tokens, 456)
+
+    def test_openai_top_level_max_tokens_overrides_extend_fields(self):
+        config = self._generate_config_with_stop_word(
+            req_max_tokens=12,
+            req_extend_fields={"max_tokens": 123},
+        )
+        self.assertEqual(config.max_new_tokens, 12)
+
+    def test_openai_camel_extend_fields_alias(self):
+        request = ChatCompletionRequest(
+            **{
+                "messages": [],
+                "extendFields": {"max_tokens": 789},
+            }
+        )
+        self.assertEqual(request.extend_fields, {"max_tokens": 789})
 
 
 if __name__ == "__main__":

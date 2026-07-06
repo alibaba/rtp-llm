@@ -2,7 +2,7 @@ import time
 from enum import Enum
 from typing import Any, Dict, List, Optional, Union
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from rtp_llm.config.generate_config import GenerateConfig
 from rtp_llm.utils.base_model_datatypes import AuxInfo
@@ -153,15 +153,25 @@ class ChatCompletionRequest(BaseModel):
     user_template: Optional[str] = None
     debug_info: Optional[bool] = False
     aux_info: Optional[bool] = True
-    extend_fields: Optional[Dict[str, Any]] = (
-        None  # This field is not effective, only for logging.
-    )
+    # Mostly used for logging; OpenAIEndpoint also accepts max_tokens/max_new_tokens
+    # from here as a compatibility fallback for gateway-transformed requests.
+    extend_fields: Optional[Dict[str, Any]] = None
     master_info: Optional[Dict[str, Any]] = None
     chat_template_kwargs: Optional[Dict[str, Any]] = None
 
     @staticmethod
     def is_openai_request(request: Dict[str, Any]):
         return "messages" in request
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_compat_fields(cls, data):
+        if not isinstance(data, dict):
+            return data
+        if "extend_fields" not in data and "extendFields" in data:
+            data = dict(data)
+            data["extend_fields"] = data["extendFields"]
+        return data
 
     def get_chat_template_kwargs(self):
         if (
