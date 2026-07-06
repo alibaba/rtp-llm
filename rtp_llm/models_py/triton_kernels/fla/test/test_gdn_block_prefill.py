@@ -245,6 +245,56 @@ class BlockTest(unittest.TestCase):
                                 ssm_state_dtype,
                             )
 
+    def test_store_ssm_state_writes_first_chunk_boundary_for_small_blocks(self):
+        device = torch.device("cuda")
+        seq_size_per_block = 16
+        chunk_size = 64
+        input_len = 128
+        head_num = 1
+        v_size = 8
+        k_size = 8
+
+        block_num = input_len // seq_size_per_block
+        block_map = torch.arange(block_num, dtype=torch.int32, device=device).view(1, block_num)
+        prefix_lengths = torch.tensor([0], dtype=torch.int32, device=device)
+        cu_seq_len = torch.tensor([0, input_len], dtype=torch.int32, device=device)
+
+        ssm_states = torch.full(
+            (block_num, head_num, v_size, k_size),
+            -1.0,
+            dtype=torch.float32,
+            device=device,
+        )
+        h = torch.zeros(
+            input_len // chunk_size,
+            head_num,
+            v_size,
+            k_size,
+            dtype=INTERMEDIATE_DTYPE,
+            device=device,
+        )
+        h[1].fill_(3.0)
+        final_states = torch.full(
+            (1, head_num, v_size, k_size),
+            7.0,
+            dtype=INTERMEDIATE_DTYPE,
+            device=device,
+        )
+
+        store_ssm_state_to_block_map(
+            h,
+            final_states,
+            prefix_lengths,
+            cu_seq_len,
+            block_map,
+            ssm_states,
+            seq_size_per_block,
+            chunk_size,
+        )
+
+        torch.testing.assert_close(ssm_states[3], h[1])
+        torch.testing.assert_close(ssm_states[7], final_states[0])
+
 
 if __name__ == "__main__":
     unittest.main()

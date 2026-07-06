@@ -452,6 +452,31 @@ TEST_F(HybridTypeKVCacheAllocatorTest, CreateConfigPadsHybridPhysicalStrideWhenL
     EXPECT_EQ(config.block_size_bytes, config.kv_block_size_bytes + config.kv_scale_size_bytes);
 }
 
+TEST_F(HybridTypeKVCacheAllocatorTest, CreateConfigClampsLinearStepToFlaStateChunkStride) {
+    auto model_cfg = makeHybridConfigWithFullStrideAtLeastLinear();
+    model_cfg.attn_config.tokens_per_block = 16;
+
+    ParallelismConfig parallelism_cfg;
+    parallelism_cfg.tp_size = 1;
+
+    RuntimeConfig runtime_cfg;
+    KVCacheConfig kv_cache_cfg;
+    kv_cache_cfg.seq_size_per_block        = 16;
+    kv_cache_cfg.kernel_seq_size_per_block = 16;
+    kv_cache_cfg.linear_step               = 1;
+    kv_cache_cfg.test_block_num            = 8;
+
+    auto config = CacheConfigCreator::createConfig(model_cfg, parallelism_cfg, runtime_cfg, kv_cache_cfg, std::nullopt);
+
+    EXPECT_EQ(config.seq_size_per_block, 16u);
+    EXPECT_EQ(config.linear_step, 4);
+
+    kv_cache_cfg.linear_step = 8;
+    config = CacheConfigCreator::createConfig(model_cfg, parallelism_cfg, runtime_cfg, kv_cache_cfg, std::nullopt);
+
+    EXPECT_EQ(config.linear_step, 8);
+}
+
 TEST_F(HybridTypeKVCacheAllocatorTest, JointReuseMatchesForCompactAndPaddedHybridPhysicalStrides) {
     const auto compact_config = makeHybridCacheConfigByCreateConfig(makeHybridConfigWithFullStrideAtLeastLinear());
     const auto padded_config  = makeHybridCacheConfigByCreateConfig(makeHybridConfigWithLinearStrideLargerThanFull());

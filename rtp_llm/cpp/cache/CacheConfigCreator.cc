@@ -1,5 +1,6 @@
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
 
+#include <algorithm>
 #include <numeric>
 
 #include "rtp_llm/cpp/cache/HybridConfigCreator.h"
@@ -12,6 +13,8 @@ namespace rtp_llm {
 
 namespace {
 
+constexpr int kLinearAttentionStateChunkSize = 64;
+
 void finalizeKernelBlockConfig(CacheConfig& config, const KVCacheConfig& kv_cache_config) {
     if (kv_cache_config.kernel_seq_size_per_block > 0) {
         const size_t kernel_seq_size_per_block = static_cast<size_t>(kv_cache_config.kernel_seq_size_per_block);
@@ -23,6 +26,29 @@ void finalizeKernelBlockConfig(CacheConfig& config, const KVCacheConfig& kv_cach
     } else {
         config.kernel_seq_size_per_block = config.seq_size_per_block;
     }
+}
+
+int minLinearStepForStateChunk(size_t seq_size_per_block) {
+    RTP_LLM_CHECK_WITH_INFO(seq_size_per_block > 0, "seq_size_per_block must be positive");
+    const auto block_size = static_cast<int>(seq_size_per_block);
+    return kLinearAttentionStateChunkSize / std::gcd(kLinearAttentionStateChunkSize, block_size);
+}
+
+void finalizeLinearStepConfig(CacheConfig& config, const KVCacheConfig& kv_cache_config) {
+    int linear_step = std::max(1, kv_cache_config.linear_step);
+    if (config.linear_group_num > 0) {
+        const int min_step = minLinearStepForStateChunk(config.seq_size_per_block);
+        if (linear_step < min_step) {
+            RTP_LLM_LOG_INFO("Raise linear_step from %d to %d for hybrid linear attention: "
+                             "SSM state is materialized every %d tokens, seq_size_per_block=%zu",
+                             linear_step,
+                             min_step,
+                             kLinearAttentionStateChunkSize,
+                             config.seq_size_per_block);
+        }
+        linear_step = std::max(linear_step, min_step);
+    }
+    config.linear_step = linear_step;
 }
 
 void finalizePhysicalStrides(CacheConfig& config) {
@@ -79,8 +105,8 @@ CacheConfig CacheConfigCreator::createConfig(const ModelConfig&                 
     CacheConfig config    = CacheConfigCreator::createBasicConfig(model_config, parallelism_config);
     uint32_t    block_num = 0;
 
-    config.linear_step = kv_cache_config.linear_step;
     finalizeKernelBlockConfig(config, kv_cache_config);
+    finalizeLinearStepConfig(config, kv_cache_config);
     finalizePhysicalStrides(config);
 
     if (kv_cache_config.test_block_num > 0) {
@@ -124,6 +150,8 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
 
     finalizeKernelBlockConfig(score_config, kv_cache_config);
     finalizeKernelBlockConfig(propose_config, kv_cache_config);
+    finalizeLinearStepConfig(score_config, kv_cache_config);
+    finalizeLinearStepConfig(propose_config, kv_cache_config);
     finalizePhysicalStrides(score_config);
     finalizePhysicalStrides(propose_config);
 
@@ -160,7 +188,7 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
     RTP_LLM_CHECK_WITH_INFO(block_num > 0, "kv cache needs at least 1 block but %zu", block_num);
 
     CacheConfig config      = score_config;
-    config.linear_step      = std::max(1, kv_cache_config.linear_step);
+    config.linear_step      = std::max(score_config.linear_step, propose_config.linear_step);
     config.layer_all_num    = total_layer_num;
     config.block_size_bytes = total_block_size_bytes;
     // config.block_size       = config.block_size_bytes / rtp_llm::getTypeSize(config.dtype);
