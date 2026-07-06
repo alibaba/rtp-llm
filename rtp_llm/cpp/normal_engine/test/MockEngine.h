@@ -65,9 +65,7 @@ rtp_llm::EngineInitParams createEngineInitParams(const CustomConfig&     config,
     runtime_config.fifo_scheduler_config.max_context_batch_size = 128;
     runtime_config.fifo_scheduler_config.max_batch_tokens_size  = 4096;
     model_config.attn_config.kv_cache_dtype =
-        config.kv_cache_data_type == DataType::TYPE_INT8 ?
-            KvCacheDataType::INT8 :
-            (config.kv_cache_data_type == DataType::TYPE_FP8_E4M3 ? KvCacheDataType::FP8 : KvCacheDataType::BASE);
+        config.kv_cache_data_type == DataType::TYPE_FP8_E4M3 ? KvCacheDataType::FP8 : KvCacheDataType::BASE;
     model_config.special_tokens.eos_token_id = -1;  // never eos
 
     const size_t inter_size = 512;
