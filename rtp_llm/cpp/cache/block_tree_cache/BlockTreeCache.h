@@ -79,8 +79,6 @@ public:
     BlockTreeCache(std::unique_ptr<BlockTree>        tree,
                    std::vector<ComponentGroupPtr>    component_groups,
                    std::vector<Component>            components,
-                   BlockPoolPtr                      host_pool                 = nullptr,
-                   std::shared_ptr<DiskBlockPool>    disk_pool                 = nullptr,
                    int                               eviction_thread_pool_size = 2,
                    std::shared_ptr<StorageBackend>   storage_backend           = nullptr,
                    bool                              enable_device_cache       = true,
@@ -178,14 +176,6 @@ public:
         return storage_backend_;
     }
 
-    // Pool accessors (L2 / L3 tier resources owned by BlockTreeCache)
-    BlockPoolPtr hostPool() const {
-        return host_pool_;
-    }
-    std::shared_ptr<DiskBlockPool> diskPool() const {
-        return disk_pool_;
-    }
-
     // Tier enable queries
     bool isDeviceCacheEnabled() const {
         return enable_device_cache_;
@@ -214,6 +204,10 @@ private:
     void             checkWatermark();
     void             checkTierWatermark(Tier tier);
 
+    // Per-group pool access helpers
+    BlockPoolPtr               hostPoolForGroup(int component_group_id) const;
+    std::shared_ptr<DiskBlockPool> diskPoolForGroup(int component_group_id) const;
+
     struct LoadBackItem {
         TreeNode*                 node{nullptr};
         int                       group_id{-1};
@@ -226,8 +220,6 @@ private:
     std::vector<ComponentGroupPtr>             component_groups_;
     std::vector<Component>                     components_;
     CopyEnginePtr                              copy_engine_;
-    BlockPoolPtr                               host_pool_;
-    std::shared_ptr<DiskBlockPool>             disk_pool_;
     std::shared_ptr<StorageBackend>            storage_backend_;
     std::shared_ptr<autil::LockFreeThreadPool> thread_pool_;
     std::shared_ptr<BroadcastManager>          broadcast_manager_;
