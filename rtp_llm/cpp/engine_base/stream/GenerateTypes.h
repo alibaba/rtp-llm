@@ -13,6 +13,14 @@
 
 namespace rtp_llm {
 
+struct RequestInfo {
+    std::string frontend_ip;
+    std::string dash_ip;
+    std::string trace_id;
+    std::string request_id;
+    std::string source_role;
+};
+
 class GenerateInput {
 public:
     int inputLength() {
@@ -56,6 +64,7 @@ public:
 
 public:
     int64_t                         request_id = 0;
+    RequestInfo                     request_info;
     std::shared_ptr<GenerateConfig> generate_config;
     torch::Tensor                   input_ids;
     bool                            need_release_resource = true;

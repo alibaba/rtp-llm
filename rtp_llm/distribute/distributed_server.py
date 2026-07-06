@@ -86,6 +86,33 @@ def get_world_info(
     )
 
 
+def get_dp_addrs_from_world_info(
+    world_info: WorldInfo, parallelism_config: ParallelismConfig
+) -> list[str]:
+    """RPC addresses for DP fan-out: one per DP group (tp_rank==0 per group), or a
+    single serving rank when FFN disaggregate is enabled.
+
+    Pure function over WorldInfo / ParallelismConfig — shared by FrontendWorker and
+    any other caller that needs to address the backend model_rpc servers (e.g.
+    DashScApp building its own BackendRPCServerVisitor).
+    """
+    ffn_disaggregate_config = parallelism_config.ffn_disaggregate_config
+    if ffn_disaggregate_config.enable_ffn_disaggregate:
+        serving_ranks = (
+            ffn_disaggregate_config.attention_tp_size
+            * ffn_disaggregate_config.attention_dp_size
+        )
+        members = world_info.members[:serving_ranks]
+    else:
+        members = [
+            member
+            for member in world_info.members
+            if (member.world_rank % parallelism_config.tp_size) == 0
+        ]
+
+    return [f"{member.ip}:{member.rpc_server_port}" for member in members]
+
+
 def get_local_world_info(
     server_config: ServerConfig,
     distribute_config: DistributeConfig,
