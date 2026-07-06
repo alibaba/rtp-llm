@@ -21,7 +21,7 @@ namespace rtp_llm {
 namespace {
 
 constexpr int      kInitTimeoutMs             = 120 * 1000;
-constexpr int      kDefaultBroadcastTimeoutMs = 120 * 1000;
+constexpr int      kDefaultBroadcastTimeoutMs = 0;  // Match NCCL: idle TP workers may wait indefinitely.
 constexpr char     kLinkProbeToken            = 0x5a;
 constexpr uint64_t kBroadcastFrameMagic       = 0x5254504c4c4d5450ULL;
 
@@ -37,7 +37,7 @@ int broadcastTimeoutMs() {
     }
     char* end    = nullptr;
     long  parsed = std::strtol(value, &end, 10);
-    if (end == value || *end != '\0' || parsed <= 0 || parsed > 24L * 60 * 60 * 1000) {
+    if (end == value || *end != '\0' || parsed < 0 || parsed > 24L * 60 * 60 * 1000) {
         return kDefaultBroadcastTimeoutMs;
     }
     return static_cast<int>(parsed);
@@ -70,15 +70,19 @@ bool isRetryableConnectError(int err) {
 }
 
 bool waitFdUntil(int fd, short events, std::chrono::steady_clock::time_point deadline) {
+    const bool no_timeout = deadline == std::chrono::steady_clock::time_point::max();
     while (true) {
-        const auto now = std::chrono::steady_clock::now();
-        if (now >= deadline) {
-            errno = ETIMEDOUT;
-            return false;
+        int remaining_ms = -1;
+        if (!no_timeout) {
+            const auto now = std::chrono::steady_clock::now();
+            if (now >= deadline) {
+                errno = ETIMEDOUT;
+                return false;
+            }
+            remaining_ms =
+                static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now).count());
         }
 
-        const auto remaining_ms =
-            static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now).count());
         struct pollfd pfd{};
         pfd.fd     = fd;
         pfd.events = events;
@@ -166,7 +170,8 @@ ssize_t writeAll(int fd, const void* buf, std::size_t nbytes) {
 ssize_t writeAllWithTimeout(int fd, const void* buf, std::size_t nbytes, int timeout_ms) {
     const char* p        = static_cast<const char*>(buf);
     std::size_t left     = nbytes;
-    const auto  deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+    const auto  deadline = timeout_ms <= 0 ? std::chrono::steady_clock::time_point::max() :
+                                             std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
     while (left > 0) {
         if (!waitWritableUntil(fd, deadline)) {
             return -1;
@@ -194,7 +199,8 @@ ssize_t writeAllWithTimeout(int fd, const void* buf, std::size_t nbytes, int tim
 ssize_t readAllWithTimeout(int fd, void* buf, std::size_t nbytes, int timeout_ms) {
     char*       p        = static_cast<char*>(buf);
     std::size_t left     = nbytes;
-    const auto  deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+    const auto  deadline = timeout_ms <= 0 ? std::chrono::steady_clock::time_point::max() :
+                                             std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
     while (left > 0) {
         if (!waitReadableUntil(fd, deadline)) {
             return -1;
