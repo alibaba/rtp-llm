@@ -1,6 +1,7 @@
 #pragma once
 
-#include "rtp_llm/cpp/utils/AssertUtils.h"
+#include <stdexcept>
+#include <string>
 #include <utility>
 
 #if USING_CUDA
@@ -60,11 +61,15 @@ inline void setCurrentThreadDeviceContext(int device_id) {
 
 #if USING_CUDA
     auto err = cudaSetDevice(device_id);
-    RTP_LLM_CHECK_WITH_INFO(err == cudaSuccess, "cudaSetDevice(%d) failed: %s", device_id, cudaGetErrorString(err));
+    if (err != cudaSuccess) {
+        throw std::runtime_error("cudaSetDevice(" + std::to_string(device_id) + ") failed: " + cudaGetErrorString(err));
+    }
     at::cuda::set_device(device_id);
 #elif USING_ROCM
     auto err = hipSetDevice(device_id);
-    RTP_LLM_CHECK_WITH_INFO(err == hipSuccess, "hipSetDevice(%d) failed: %s", device_id, hipGetErrorString(err));
+    if (err != hipSuccess) {
+        throw std::runtime_error("hipSetDevice(" + std::to_string(device_id) + ") failed: " + hipGetErrorString(err));
+    }
     c10::hip::set_device(device_id);
 #else
     // CPU-only builds intentionally no-op; production cache-store builds pin to a GPU backend.
@@ -89,12 +94,16 @@ inline int getCurrentThreadDeviceContext() {
 #if USING_CUDA
     int  device_id = -1;
     auto err       = cudaGetDevice(&device_id);
-    RTP_LLM_CHECK_WITH_INFO(err == cudaSuccess, "cudaGetDevice failed: %s", cudaGetErrorString(err));
+    if (err != cudaSuccess) {
+        throw std::runtime_error(std::string("cudaGetDevice failed: ") + cudaGetErrorString(err));
+    }
     return device_id;
 #elif USING_ROCM
     int  device_id = -1;
     auto err       = hipGetDevice(&device_id);
-    RTP_LLM_CHECK_WITH_INFO(err == hipSuccess, "hipGetDevice failed: %s", hipGetErrorString(err));
+    if (err != hipSuccess) {
+        throw std::runtime_error(std::string("hipGetDevice failed: ") + hipGetErrorString(err));
+    }
     return device_id;
 #else
     return -1;
