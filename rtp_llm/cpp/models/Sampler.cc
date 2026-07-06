@@ -71,15 +71,31 @@ GreedySamplingBuffers& Sampler::nextGreedySamplingBuffers(size_t batch_size) {
 
 void Sampler::markGreedySamplingBufferReady() {
     if (current_greedy_sampling_slot_ != nullptr) {
-        auto* slot                    = current_greedy_sampling_slot_;
-        current_greedy_sampling_slot_ = nullptr;
-        slot->ready_event             = runtimeCreateEvent();
+        auto* slot = current_greedy_sampling_slot_;
+        try {
+            slot->ready_event             = runtimeCreateEvent();
+            current_greedy_sampling_slot_ = nullptr;
+        } catch (...) {
+            current_greedy_sampling_slot_ = nullptr;
+            slot->ready_event.reset();
+            runtimeSyncAndCheck();
+            throw;
+        }
     }
 }
 
 SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
     RTP_LLM_PROFILE_SCOPE("sampler.forward");
+    RTP_LLM_CHECK_WITH_INFO(!forward_in_progress_.exchange(true),
+                            "Sampler::forward is single-threaded and must not be called concurrently or reentrantly");
+    struct SamplerForwardGuard {
+        std::atomic<bool>& forward_in_progress;
+        ~SamplerForwardGuard() {
+            forward_in_progress.store(false);
+        }
+    } sampler_forward_guard{forward_in_progress_};
+
     // Helper: narrow a tensor if defined, else return undefined tensor
     auto mayNarrow = [](const torch::Tensor& t, int64_t offset, int64_t size) -> torch::Tensor {
         return t.defined() ? t.narrow(0, offset, size) : torch::Tensor();

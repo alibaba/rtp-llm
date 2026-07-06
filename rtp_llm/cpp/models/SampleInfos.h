@@ -12,7 +12,8 @@ typedef std::shared_ptr<LogitsProcessorStates> LogitsProcessorStatesPtr;
 
 struct SamplerInitParams {
     // max_batch_size is an initial capacity. Set fixed_max_batch_size=false when callers can legally
-    // fan out beyond that capacity, e.g. num_return_sequences or variable beam requests.
+    // fan out beyond that capacity, e.g. num_return_sequences or variable beam requests. When
+    // max_batch_size == 0, fixed_max_batch_size is ignored and buffers grow dynamically.
     size_t max_batch_size       = 0;
     bool   fixed_max_batch_size = true;
 };

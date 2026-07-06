@@ -46,6 +46,12 @@ TEST_F(SamplerTest, testDynamicGreedySamplingBuffersGrow) {
     sampler.markGreedySamplingBufferReady();
 }
 
+TEST_F(SamplerTest, testFixedGreedySamplingBuffersRejectGrow) {
+    Sampler sampler(SamplerInitParams{1, true});
+
+    EXPECT_THROW(sampler.ensureGreedySamplingBuffers(2), rtp_llm::RTPException);
+}
+
 TEST_F(SamplerTest, testGeneralSampling) {
     size_t batch_size = 5;
     size_t vocab_size = 8;

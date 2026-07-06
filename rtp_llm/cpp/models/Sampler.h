@@ -4,11 +4,14 @@
 #include "rtp_llm/cpp/models/SampleInfos.h"
 #include "rtp_llm/models_py/bindings/core/Types.h"
 #include <array>
+#include <atomic>
 #include <memory>
 
 namespace rtp_llm {
 // Sampler would split logits into appropriate groups (mostly, based on beam size)
-// and calls device sampling apis (greedy, beam search, etc) for each group
+// and calls device sampling apis (greedy, beam search, etc) for each group.
+// Sampler owns rotating host buffers, so forward() is intentionally single-threaded
+// and non-reentrant per Sampler instance.
 class Sampler {
 public:
     Sampler(const SamplerInitParams& params);
@@ -38,6 +41,7 @@ private:
     size_t                                                           greedy_sampling_buffer_index_ = 0;
     GreedySamplingBufferSlot*                                        current_greedy_sampling_slot_ = nullptr;
     std::array<GreedySamplingBufferSlot, kGreedySamplingBufferSlots> greedy_sampling_buffer_slots_;
+    std::atomic<bool>                                                forward_in_progress_{false};
 };
 
 }  // namespace rtp_llm
