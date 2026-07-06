@@ -22,6 +22,7 @@ namespace {
 
 constexpr int      kInitTimeoutMs             = 120 * 1000;
 constexpr int      kDefaultBroadcastTimeoutMs = 0;  // Match NCCL: idle TP workers may wait indefinitely.
+constexpr int      kBroadcastStallWarnMs      = 30 * 1000;
 constexpr char     kLinkProbeToken            = 0x5a;
 constexpr uint64_t kBroadcastFrameMagic       = 0x5254504c4c4d5450ULL;
 
@@ -71,8 +72,9 @@ bool isRetryableConnectError(int err) {
 
 bool waitFdUntil(int fd, short events, std::chrono::steady_clock::time_point deadline) {
     const bool no_timeout = deadline == std::chrono::steady_clock::time_point::max();
+    const auto start      = std::chrono::steady_clock::now();
     while (true) {
-        int remaining_ms = -1;
+        int remaining_ms = kBroadcastStallWarnMs;
         if (!no_timeout) {
             const auto now = std::chrono::steady_clock::now();
             if (now >= deadline) {
@@ -105,6 +107,17 @@ bool waitFdUntil(int fd, short events, std::chrono::steady_clock::time_point dea
             continue;
         }
         if (rc == 0) {
+            if (no_timeout) {
+                const auto waited_ms =
+                    std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start)
+                        .count();
+                RTP_LLM_LOG_WARNING("CpuTpBroadcaster broadcast I/O still waiting after %lld ms "
+                                    "(fd=%d events=0x%x timeout disabled)",
+                                    static_cast<long long>(waited_ms),
+                                    fd,
+                                    static_cast<unsigned int>(events));
+                continue;
+            }
             errno = ETIMEDOUT;
             return false;
         }
