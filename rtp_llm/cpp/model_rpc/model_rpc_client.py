@@ -10,7 +10,6 @@ from grpc import StatusCode
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.generate_config import RoleType
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
-    CancelRequestPB,
     ErrorDetailsPB,
     FetchRequestPB,
     GenerateInputPB,
@@ -558,15 +557,3 @@ class ModelRpcClient(object):
             )
             if response_iterator and should_cancel:
                 response_iterator.cancel()
-            if use_fetch_response and stub is not None and should_cancel:
-                try:
-                    await stub.Cancel(
-                        CancelRequestPB(request_id=input_pb.request_id),
-                        timeout=5.0,
-                    )
-                except Exception:
-                    logging.debug(
-                        "request: [%s] best-effort Cancel failed",
-                        input_pb.request_id,
-                        exc_info=True,
-                    )

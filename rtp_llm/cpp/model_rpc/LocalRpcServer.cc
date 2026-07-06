@@ -138,7 +138,8 @@ grpc::Status LocalRpcServer::pollStreamOutput(grpc::ServerContext*             c
         if (!writer->Write(outputs_pb)) {
             stream->reportError(ErrorCode::CANCELLED, "write outputs pb failed");
             RTP_LLM_LOG_WARNING("request [%s] write outputs pb failed", request_key.c_str());
-            return grpc::Status(grpc::StatusCode::INTERNAL, "request write outputs pb failed");
+            // WriterInterface uses false to signal that its downstream consumer has closed or cancelled.
+            return grpc::Status(grpc::StatusCode::CANCELLED, "request output consumer closed");
         }
         if (stream->hasEvent(StreamEvents::NeedRemoteGenerate)) {
             break;

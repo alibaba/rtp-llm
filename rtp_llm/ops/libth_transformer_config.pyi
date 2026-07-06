@@ -1318,9 +1318,6 @@ class NormType:
 
 
 class PDSepConfig:
-    batch_dispatch_timeout_ms: int
-    batch_load_timeout_ms: int
-    batch_prepare_timeout_ms: int
     cache_store_connect_port: int
     cache_store_listen_port: int
     cache_store_rdma_connect_port: int
@@ -1337,6 +1334,8 @@ class PDSepConfig:
     prefill_max_wait_timeout_ms: int
     prefill_retry_timeout_ms: int
     prefill_retry_times: int
+    prefill_slot_pool_size: int
+    prefill_stop_stream_wait_timeout_ms: int
     rdma_connect_retry_times: int
     remote_rpc_server_port: int
     role_type: RoleType
