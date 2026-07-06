@@ -546,27 +546,11 @@ class OpenaiGenerateConfigTest(TestCase):
 
         config = self._extract_openai_generation_config(request, generate_env_config)
 
-        self.assertEqual(config.max_new_tokens, 90)
+        self.assertEqual(config.max_new_tokens, 100)
         self.assertEqual(config.max_thinking_tokens, 10)
         self.assertTrue(config.in_think_mode)
 
-    def test_openai_max_tokens_only_limits_content_when_thinking_budget_is_set(self):
-        generate_env_config = GenerateEnvConfig()
-        generate_env_config.think_mode = 1
-        generate_env_config.think_end_token_id = 102
-        request = ChatCompletionRequest(
-            messages=[],
-            max_tokens=200,
-            thinking_budget=10,
-            enable_thinking=True,
-        )
-
-        config = self._extract_openai_generation_config(request, generate_env_config)
-
-        self.assertEqual(config.max_new_tokens, 200)
-        self.assertEqual(config.max_thinking_tokens, 10)
-
-    def test_openai_max_completion_tokens_ignores_max_tokens_content_cap(self):
+    def test_openai_max_completion_tokens_respects_max_tokens_total_cap(self):
         generate_env_config = GenerateEnvConfig()
         generate_env_config.think_mode = 1
         generate_env_config.think_end_token_id = 102
@@ -580,7 +564,7 @@ class OpenaiGenerateConfigTest(TestCase):
 
         config = self._extract_openai_generation_config(request, generate_env_config)
 
-        self.assertEqual(config.max_new_tokens, 90)
+        self.assertEqual(config.max_new_tokens, 100)
         self.assertEqual(config.max_thinking_tokens, 10)
 
     def test_openai_max_completion_tokens_does_not_add_default_thinking_budget(self):
@@ -596,7 +580,7 @@ class OpenaiGenerateConfigTest(TestCase):
         config = self._extract_openai_generation_config(request, generate_env_config)
 
         self.assertEqual(config.max_new_tokens, 100)
-        self.assertEqual(config.max_thinking_tokens, -1)
+        self.assertEqual(config.max_thinking_tokens, 32000)
         self.assertTrue(config.in_think_mode)
 
     def test_request_level_thinking_adds_think_end_tokens_when_env_mode_off(self):

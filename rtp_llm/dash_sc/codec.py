@@ -610,14 +610,7 @@ class SamplingParams:
         if request_max_think is None:
             max_thinking_tokens = 32000
         elif request_max_think < 0:
-            # Unlimited think: ``-1`` sentinel (NOT a huge finite value). The C++
-            # engine treats ``max_thinking_tokens <= 0`` as "no think force-end"
-            # AND, crucially, ``GenerateStream::maxTokenNum`` only adds a *finite*
-            # think budget on top of ``max_new_tokens``. Using ``INT32_MAX`` here
-            # would make the total output budget effectively unbounded
-            # (``max_new_tokens + INT32_MAX`` -> clamped to ``max_seq_len``),
-            # letting unlimited-think requests overshoot ``max_new_tokens``.
-            max_thinking_tokens = -1
+            max_thinking_tokens = _INT32_MAX
         else:
             max_thinking_tokens = request_max_think
         backend_max_new_tokens = self.max_new_tokens

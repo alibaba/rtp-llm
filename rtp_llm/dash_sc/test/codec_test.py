@@ -700,9 +700,9 @@ class DashScGrpcRequestTest(TestCase):
         _add_tensor(req, "max_new_think_tokens", "INT32", [1], struct.pack("<i", 0))
         _add_tensor(req, "max_think_length", "INT32", [1], struct.pack("<i", -1))
         sp = parse_sampling_params(req)
-        # raw value stored; to_generate_config maps negative (unlimited think) → -1
+        # raw value stored; to_generate_config maps negative → INT32_MAX
         self.assertEqual(sp.max_new_think_tokens, -1)
-        self.assertEqual(sp.to_generate_config().max_thinking_tokens, -1)
+        self.assertEqual(sp.to_generate_config().max_thinking_tokens, 2_147_483_647)
 
     def test_build_request_writes_thinking_controls(self) -> None:
         req = build_model_infer_request(

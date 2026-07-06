@@ -694,19 +694,8 @@ size_t GenerateStream::maxTokenNum() const {
         }
     }
 
-    const auto& generate_config = generate_input_->generate_config;
-    // max_new_tokens budgets the content (non-thinking) output. When an explicit
-    // thinking budget is set (in_think_mode with max_thinking_tokens > 0), thinking
-    // tokens are accounted separately, so the total output budget is content +
-    // thinking. A non-positive max_thinking_tokens (e.g. -1) means thinking shares
-    // the max_new_tokens budget and nothing extra is added.
-    int max_output_tokens = generate_config->max_new_tokens;
-    if (generate_config->in_think_mode && generate_config->max_thinking_tokens > 0) {
-        max_output_tokens += generate_config->max_thinking_tokens;
-    }
-
     return std::min(max_seq_len_ > reserve_tokens ? max_seq_len_ - reserve_tokens : 0,
-                    max_output_tokens + generate_input_->inputLength());
+                    generate_input_->generate_config->max_new_tokens + generate_input_->inputLength());
 }
 
 bool GenerateStream::needFinish() {
