@@ -2,8 +2,10 @@
 #include <cstddef>
 #include <memory>
 #include <ATen/Generator.h>
-#if defined(USING_CUDA) || defined(USING_ROCM)
+#if USING_CUDA || USING_ROCM
 #include <ATen/cuda/CUDAGeneratorImpl.h>
+#elif USING_XPU
+#include <ATen/xpu/XPUGeneratorImpl.h>
 #endif
 #include "autil/EnvUtil.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
@@ -90,8 +92,10 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
         generate_input_, init_batch_size, maxBatchSize(), special_tokens_.eos_token_id);
 
     if (generateConfig()->random_seed.has_value()) {
-#if defined(USING_CUDA) || defined(USING_ROCM)
+#if USING_CUDA || USING_ROCM
         generator_ = torch::make_generator<torch::CUDAGeneratorImpl>();
+#elif USING_XPU
+        generator_ = torch::make_generator<at::XPUGeneratorImpl>();
 #else
         generator_ = torch::make_generator<torch::CPUGeneratorImpl>();
 #endif
@@ -888,7 +892,7 @@ void GenerateStream::updateLogitProcessorStatus(const StreamUpdateInfo& update_i
 
 void GenerateStream::setLoss(const torch::Tensor& loss) {
     RTP_LLM_PROFILE_FUNCTION();
-    auto loss_cpu  = loss.is_cuda() ? loss.cpu() : loss;
+    auto loss_cpu  = (loss.is_cuda() || loss.is_xpu()) ? loss.cpu() : loss;
     auto loss_size = loss_cpu.numel();
     RTP_LLM_CHECK(loss_index_ + loss_size < inputLength());
     memcpy(loss_.data_ptr<float>() + loss_index_, loss_cpu.data_ptr<float>(), loss_size * sizeof(float));
@@ -897,7 +901,7 @@ void GenerateStream::setLoss(const torch::Tensor& loss) {
 
 void GenerateStream::setSoftmaxProbs(const torch::Tensor& softmax_probs, int start_pos) {
     RTP_LLM_PROFILE_FUNCTION();
-    auto probs_cpu = softmax_probs.is_cuda() ? softmax_probs.cpu() : softmax_probs;
+    auto probs_cpu = (softmax_probs.is_cuda() || softmax_probs.is_xpu()) ? softmax_probs.cpu() : softmax_probs;
     RTP_LLM_CHECK(probs_cpu.dim() == 2);
     RTP_LLM_CHECK(probs_cpu.size(0) == currentBatchSize());
     auto num_probs = probs_cpu.size(1);

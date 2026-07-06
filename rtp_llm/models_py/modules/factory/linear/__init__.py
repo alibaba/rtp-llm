@@ -18,7 +18,10 @@ __all__ = ["LinearFactory", "LinearBase"]
 
 device_type = get_device_type()
 try:
-    if device_type == DeviceType.ROCm:
+    if device_type == DeviceType.Xpu:
+        # Import to trigger XPU Linear strategy registration
+        import rtp_llm.models_py.modules.factory.linear.impl.xpu  # noqa: F401
+    elif device_type == DeviceType.ROCm:
         # Import to trigger ROCm Linear strategy registration
         import rtp_llm.models_py.modules.factory.linear.impl.rocm  # noqa: F401
     else:

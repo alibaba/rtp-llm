@@ -265,10 +265,9 @@ def set_parallelism_config(
     world_size = parallelism_config.world_size
     need_local = world_size > 1 and parallelism_config.local_world_size == 1
     if need_local:
-        if torch.cuda.is_available():
-            n = min(torch.cuda.device_count(), world_size)
-        else:
-            n = world_size
+        from rtp_llm.device.device_impl import gpu_device_count
+        dev_count = gpu_device_count()
+        n = min(dev_count, world_size) if dev_count > 0 else world_size
         parallelism_config.local_world_size = max(n, 1)
 
     # Resolve and validate parallelism configuration.
@@ -409,19 +408,55 @@ def setup_default_args(py_env_configs):
         logging.info(
             "[MI308X] set SEQ_SIZE_PER_BLOCK 16 by default, as it just support 16 now."
         )
-    if (
-        os.path.exists("/dev/alixpu")
-        and py_env_configs.kv_cache_config.seq_size_per_block == 0
-    ):
-        py_env_configs.kv_cache_config.seq_size_per_block = 256
-        logging.info("set SEQ_SIZE_PER_BLOCK 256 by default")
+    if py_env_configs.kv_cache_config.seq_size_per_block == 0:
+        from rtp_llm.device.device_impl import _is_xpu_device
+
+        if _is_xpu_device():
+            # Robust XPU detection (torch.xpu) instead of relying solely on the
+            # container device node, which may move/disappear.  The page size
+            # depends on the XPU attention backend, not just "is it XPU":
+            #   * Ali XPU custom attention supports 256.
+            #   * Generic Intel XPU uses the vllm fmha kernel, which rejects 256
+            #     ("Unsupported page size for fmha") and needs <= 64.
+            # Resolve via an explicit, logged decision (never a silent fallback):
+            #   1) XPU_SEQ_SIZE_PER_BLOCK env override, if set.
+            #   2) Ali XPU hardware signal (/dev/alixpu device node) -> 256.
+            #   3) Safe default for generic Intel XPU -> 64.
+            xpu_override = os.environ.get("XPU_SEQ_SIZE_PER_BLOCK")
+            if xpu_override:
+                try:
+                    seq_size = int(xpu_override)
+                except ValueError:
+                    raise ValueError(
+                        "XPU_SEQ_SIZE_PER_BLOCK must be a positive integer, "
+                        f"got {xpu_override!r}")
+                if seq_size <= 0 or (seq_size & (seq_size - 1)) != 0:
+                    raise ValueError(
+                        "XPU_SEQ_SIZE_PER_BLOCK must be a positive power of two "
+                        "(e.g. 64 for generic Intel XPU, 256 for Ali XPU), "
+                        f"got {seq_size}")
+                logging.info(
+                    "set SEQ_SIZE_PER_BLOCK %d from XPU_SEQ_SIZE_PER_BLOCK", seq_size)
+            elif os.path.exists("/dev/alixpu"):
+                seq_size = 256
+                logging.info(
+                    "set SEQ_SIZE_PER_BLOCK 256 for Ali XPU (custom attention)")
+            else:
+                seq_size = 64
+                logging.info(
+                    "set SEQ_SIZE_PER_BLOCK 64 for generic Intel XPU "
+                    "(vllm fmha does not support 256); override with "
+                    "XPU_SEQ_SIZE_PER_BLOCK if your backend supports a larger page")
+            py_env_configs.kv_cache_config.seq_size_per_block = seq_size
+
     if py_env_configs.kv_cache_config.seq_size_per_block == 0:
         py_env_configs.kv_cache_config.seq_size_per_block = 64
 
     # Set NCCL_P2P_DISABLE for RTX GPUs or when CUDA is not available
     # Frontend doesn't need this setting
     if py_env_configs.role_config.role_type != RoleType.FRONTEND:
-        if torch.cuda.is_available():
+        from rtp_llm.device.device_impl import _is_cuda_device
+        if _is_cuda_device():
             if (
                 "NCCL_P2P_DISABLE" not in os.environ
                 and "RTX" in torch.cuda.get_device_name(0)
@@ -512,9 +547,12 @@ def fetch_model_files_to_local(py_env_configs: PyEnvConfigs):
 
 
 def setup_cuda_device_and_accl_env(local_rank: int) -> None:
-    """Apply CUDA device and ACCL env side effects (same as ParallelInfo.from_params)."""
-    if torch.cuda.is_available():
-        torch.cuda.set_device(local_rank)
+    """Apply CUDA/XPU device and ACCL env side effects (same as ParallelInfo.from_params)."""
+    # Route through gpu_set_device so an explicit RTP_LLM_DEVICE_TYPE override
+    # (e.g. cuda/rocm/ppu on a mixed XPU+CUDA host) is honored instead of
+    # unconditionally preferring XPU when torch.xpu happens to be available.
+    from rtp_llm.device.device_impl import gpu_set_device
+    gpu_set_device(local_rank)
 
     if os.environ.get("ACCL_SELECT_PATH") == "1":
         select_port = str(local_rank % 2)
@@ -553,6 +591,14 @@ def setup_and_configure_server(py_env_configs: PyEnvConfigs):
         py_env_configs: PyEnvConfigs object to configure
     """
     setup_default_args(py_env_configs)
+    # Fail-fast: reject unsupported XPU configurations before downloading model files.
+    if py_env_configs.sp_config.type != SpeculativeType.NONE:
+        from rtp_llm.device.device_impl import _is_xpu_device
+        if _is_xpu_device():
+            raise ValueError(
+                "Speculative decoding is not supported on XPU. "
+                "Disable speculative decoding (sp_config.type = NONE) "
+                "when running on Intel GPU.")
     fetch_model_files_to_local(py_env_configs)
     ll_num_max_token = py_env_configs.concurrency_config.concurrency_limit
     sp_type = py_env_configs.sp_config.type  # Get SpeculativeType enum value
