@@ -435,16 +435,8 @@ struct PDSepConfig {
     int64_t  max_rpc_timeout_ms              = 2 * 3600 * 1000;  // 2h default
     int64_t  worker_port_offset              = 0;
     bool     decode_entrance                 = false;
-    int64_t  batch_dispatch_timeout_ms       = 60000;  // 60s, cross-DP dispatch
-    int64_t  batch_prepare_timeout_ms        = 10000;  // 10s, prepareAllocateResource
-    int64_t  batch_load_timeout_ms           = 10000;  // 10s, remoteLoadCacheStart
-
     // ========== Prefill Thread Pool Configuration ==========
-    // enqueue pool size (L1 DP dispatch, fast ms-level). 0 = use formula default.
-    int64_t prefill_enqueue_pool_size = 0;
-    // worker lambda pool size (heavy EnqueueGroup coordination, I/O-bound). 0 = use formula default.
-    int64_t prefill_worker_lambda_pool_size = 0;
-    // slot pool size (L2 Prepare + L3 Load + L4 Finish). 0 = use formula default.
+    // slot pool size (Prepare + async response runners). 0 = use formula default.
     int64_t prefill_slot_pool_size = 0;
     // Max wait time in stopStream() for Engine Loop to call finish_internal().
     // When GenerateDone is set and stream has no error, stopStream() waits up to

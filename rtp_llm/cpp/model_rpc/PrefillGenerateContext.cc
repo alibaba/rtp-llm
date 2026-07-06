@@ -109,7 +109,7 @@ grpc::Status PrefillGenerateContext::closeGrpcStream() {
         return last_grpc_stream_closed_status;
     }
     grpc_stream_closed = true;
-    if (cancelled() && client_context) {
+    if ((cancelled() || isRequestCancelled()) && client_context) {
         client_context->TryCancel();
     }
     if (client_stream) {
@@ -132,6 +132,11 @@ void PrefillGenerateContext::reset() {
     client_stream.reset();
     grpc_stream_closed             = false;
     last_grpc_stream_closed_status = grpc::Status::OK;
+}
+
+bool PrefillGenerateContext::isRequestCancelled() const {
+    // cancel state for Async BatchRequest
+    return GenerateContext::isRequestCancelled() || (cancel_state && cancel_state->load());
 }
 
 void PrefillGenerateContext::nextStage() {
