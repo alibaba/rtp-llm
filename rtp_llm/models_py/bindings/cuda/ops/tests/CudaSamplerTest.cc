@@ -567,6 +567,35 @@ TEST_F(CudaSamplerTest, testFlashinferKernelTopK1) {
     ASSERT_EQ(output_token_ids_host[23], 7);
 }
 
+TEST_F(CudaSamplerTest, testFlashinferSeedOffsetSameAcrossBatchRows) {
+    constexpr int64_t batch_size = 4;
+    constexpr int64_t vocab_size = 6;
+    auto              probs      = cudaTensor(
+        {
+            0.04, 0.08, 0.12, 0.18, 0.24, 0.34, 0.04, 0.08, 0.12, 0.18, 0.24, 0.34,
+            0.04, 0.08, 0.12, 0.18, 0.24, 0.34, 0.04, 0.08, 0.12, 0.18, 0.24, 0.34,
+        },
+        {batch_size, vocab_size});
+    auto int_options  = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+    auto bool_options = torch::TensorOptions().dtype(torch::kBool).device(torch::kCUDA);
+    auto seed_options = torch::TensorOptions().dtype(torch::kInt64).device(torch::kCUDA);
+    auto output       = torch::empty({batch_size}, int_options);
+    auto valid        = torch::empty({batch_size}, bool_options);
+    auto seed         = torch::full({batch_size}, 20260706, seed_options);
+    auto offset       = torch::full({batch_size}, 128, seed_options);
+    auto stream       = at::cuda::getCurrentCUDAStream().stream();
+
+    rtp_llm::top_k_sampling_from_probs(
+        probs, output, valid, std::nullopt, std::nullopt, 0, true, seed, 0, offset, 0, (int64_t)stream);
+    cudaDeviceSynchronize();
+
+    assertAllValid(valid);
+    auto output_host = toHostInt(output);
+    for (int64_t i = 1; i < batch_size; ++i) {
+        ASSERT_EQ(output_host[0], output_host[i]);
+    }
+}
+
 TEST_F(CudaSamplerTest, testFlashinferKernelTopK) {
     size_t batch_size = 4;
     auto   logits_t   = cudaTensor(
@@ -583,7 +612,7 @@ TEST_F(CudaSamplerTest, testFlashinferKernelTopK) {
     auto sequence_lengths_t = cudaIntTensor({5, 5, 5, 5}, {4});
     auto input_lengths_t    = cudaIntTensor({-1, -1, -1, -1}, {4});
 
-    auto top_k_t      = pinnedIntTensor({1, 1, 0, 2});
+    auto top_k_t      = pinnedIntTensor({1, 1, 3, 2});
     auto top_p_t      = pinnedFloatTensor({1.0, 1.0, 1.0, 1.0});
     auto temperture_t = pinnedFloatTensor({1.0, 10.0, 1.0, 10.0});
 
@@ -623,7 +652,7 @@ TEST_F(CudaSamplerTest, testFlashinferKernelTopK) {
     auto output_token_ids_host = toHostInt(output_token_ids_t);
     ASSERT_EQ(output_token_ids_host[5], 5);
     ASSERT_EQ(output_token_ids_host[11], 2);
-    assertTokenIn(output_token_ids_host, 17, {0, 1, 2, 3, 4, 5, 6, 7, 8, 9});
+    assertTokenIn(output_token_ids_host, 17, {5, 7, 8});
     assertTokenIn(output_token_ids_host, 23, {7, 8});
 }
 

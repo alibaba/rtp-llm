@@ -158,9 +158,12 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
                                              params.eplb_config);
     }
 
-    const auto max_sampler_batch_size = (propose_params->gen_num_per_circle + 1)
-                                        * static_cast<size_t>(std::max(1, params.concurrency_config.concurrency_limit));
-    sampler_.reset(new Sampler(SamplerInitParams{max_sampler_batch_size, true}));
+    const auto initial_sampler_batch_size =
+        (propose_params->gen_num_per_circle + 1)
+        * static_cast<size_t>(std::max(1, params.concurrency_config.concurrency_limit));
+    // Speculative decoding preallocates the expected fanout, but request-level return sequences or
+    // variable beams may still increase sampler rows. Keep the safe dynamic growth path enabled.
+    sampler_.reset(new Sampler(SamplerInitParams{initial_sampler_batch_size, false}));
 
     // Optional per-layer cache buffers from KVCacheManager::allLayerCacheBase().
     std::optional<CacheLayerLayout> kv_cache_layer_layout = std::nullopt;

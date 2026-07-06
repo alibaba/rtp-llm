@@ -30,6 +30,20 @@ TEST_F(SamplerTest, testDynamicGreedySamplingBuffersGrow) {
         ASSERT_GE(slot.buffers.offset_host.numel(), 2);
         ASSERT_GE(slot.buffers.output_ids_ptrs_host.numel(), 2);
     }
+
+    GreedySamplingBuffers* used_slots[Sampler::kGreedySamplingBufferSlots] = {};
+    for (size_t i = 0; i < Sampler::kGreedySamplingBufferSlots; ++i) {
+        auto& buffers = sampler.nextGreedySamplingBuffers(2);
+        used_slots[i] = &buffers;
+        ASSERT_EQ(&sampler.greedy_sampling_buffer_slots_[i].buffers, &buffers);
+        sampler.markGreedySamplingBufferReady();
+        ASSERT_TRUE(sampler.greedy_sampling_buffer_slots_[i].ready_event);
+    }
+
+    auto& reused_buffers = sampler.nextGreedySamplingBuffers(2);
+    ASSERT_EQ(used_slots[0], &reused_buffers);
+    ASSERT_FALSE(sampler.greedy_sampling_buffer_slots_[0].ready_event);
+    sampler.markGreedySamplingBufferReady();
 }
 
 TEST_F(SamplerTest, testGeneralSampling) {
