@@ -140,6 +140,12 @@ class ChatCompletionRequest(BaseModel):
     logprobs_mode: Optional[Literal["original", "default"]] = None
     top_logprobs: Optional[int] = None
     prompt_logprobs: Optional[int] = None
+    # Compatibility-only sentinel: GenerateConfig.validate() rejects this until
+    # structured output is implemented by the backend.
+    response_format: Optional[Union[str, Dict[str, Any]]] = Field(
+        default=None,
+        description="Currently unsupported; structured-output requests are rejected.",
+    )
 
     # ---- These functions are not implemented yet.
     # presence_penalty: Optional[float] = 0.0

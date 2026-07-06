@@ -7,7 +7,7 @@ import signal
 import socket
 import threading
 import time
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Union
 
 from anyio import CapacityLimiter
 from anyio.lowlevel import RunVar
@@ -26,10 +26,12 @@ from uvicorn.loops.auto import auto_loop_setup
 from rtp_llm.config.engine_config import EngineConfig
 from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.config.uvicorn_config import get_uvicorn_logging_config
-from rtp_llm.distribute.distributed_server import get_world_info
+from rtp_llm.distribute.distributed_server import (
+    get_dp_addrs_from_world_info,
+    get_world_info,
+)
 from rtp_llm.embedding.embedding_type import TYPE_STR, EmbeddingType
 from rtp_llm.frontend.frontend_server import FrontendServer
-from rtp_llm.frontend.frontend_worker import get_dp_addrs_from_world_info
 from rtp_llm.frontend.shutdown_manager import FrontendShutdownManager
 from rtp_llm.openai.api_datatype import (
     BatchChatCompletionRequest,
@@ -98,11 +100,10 @@ class GracefulShutdownServer(Server):
         self._pre_stop_timer: Optional[threading.Timer] = None
 
     def install_pre_stop_drain_signal_handler(self) -> None:
-        pre_stop_signal = getattr(signal, "SIGUSR1", None)
-        if pre_stop_signal is None:
+        if os.name != "posix":
             return
         try:
-            signal.signal(pre_stop_signal, self.handle_pre_stop_drain_signal)
+            signal.signal(signal.SIGUSR1, self.handle_pre_stop_drain_signal)
         except ValueError:
             logging.warning(
                 "Frontend pre-stop drain signal handler not installed "
@@ -226,9 +227,37 @@ class GracefulShutdownServer(Server):
         try:
             await super().shutdown(sockets)
         finally:
-            await self.frontend_server.close()
-            if self.grpc_client is not None:
-                await self.grpc_client.close()
+            try:
+                await self._close_with_remaining_shutdown_budget(
+                    "frontend server", self.frontend_server.close
+                )
+            finally:
+                if self.grpc_client is not None:
+                    await self._close_with_remaining_shutdown_budget(
+                        "gRPC client", self.grpc_client.close
+                    )
+
+    async def _close_with_remaining_shutdown_budget(
+        self, name: str, close: Callable[[], Awaitable[None]]
+    ) -> None:
+        remaining = self._remaining_shutdown_timeout_after_pre_stop()
+        try:
+            close_awaitable = close()
+            if remaining is None:
+                await close_awaitable
+            else:
+                await asyncio.wait_for(close_awaitable, timeout=max(0.0, remaining))
+        except asyncio.TimeoutError:
+            if remaining is None:
+                logging.warning("Timed out closing %s", name, exc_info=True)
+            else:
+                logging.warning(
+                    "Timed out closing %s after remaining shutdown budget %.3fs",
+                    name,
+                    max(0.0, remaining),
+                )
+        except Exception as e:
+            logging.warning("Failed to close %s: %s", name, e, exc_info=True)
 
 
 class FrontendApp(object):

@@ -131,9 +131,9 @@ class FrontendServer(object):
             )
             self.is_embedding = True
 
-    def stop(self):
+    async def close(self) -> None:
         if self._frontend_worker is not None:
-            self._frontend_worker.stop()
+            await self._frontend_worker.close()
 
     async def embedding(self, request: Dict[str, Any], raw_request: Request):
         start_time = time.time()

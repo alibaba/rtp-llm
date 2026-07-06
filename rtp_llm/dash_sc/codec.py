@@ -24,7 +24,8 @@ from rtp_llm.dash_sc.structural_tag import (
     structural_tag_from_response_format,
     validate_structural_tag_shape,
 )
-from rtp_llm.utils.base_model_datatypes import GenerateOutputs
+from rtp_llm.config.generate_config import GenerateConfig
+from rtp_llm.utils.base_model_datatypes import GenerateOutput, GenerateOutputs
 
 _INT32_MAX = 2_147_483_647
 _DEFAULT_MAX_NEW_TOKENS = 32000
@@ -508,6 +509,11 @@ def _parse_grammar_controls(
     if guided_response_format is not None:
         response_format = guided_response_format
 
+    # ``{"type": "text"}`` is the OpenAI-compatible spelling of the default
+    # unconstrained mode. Do not carry it as an unsupported grammar sentinel.
+    if response_format == {"type": "text"}:
+        response_format = None
+
     if json_format_value is None:
         json_format_value = _parse_optional_bool(
             _lookup_ds_request_control(ds_attrs, "json_format")
@@ -716,6 +722,9 @@ class SamplingParams:
             max_thinking_tokens=max_thinking_tokens,
             return_input_ids=return_input_ids,
             is_streaming=True,
+            # Preserve the parsed controls as rejection sentinels. Both the DashSC
+            # boundary and GenerateConfig.validate() fail before Model RPC until
+            # the backend can carry and execute the corresponding grammar state.
             response_format=self.response_format,
             json_format=self.json_format,
             structural_tag=self.structural_tag,
@@ -730,12 +739,27 @@ class SamplingParams:
 def parse_input_ids_from_request(request) -> list[int] | None:
     """Read ``input_ids`` (INT32 / INT64, little-endian).
 
-    Returns ``None`` if tensor missing, index mismatch, or unsupported datatype.
+    A request represents one prompt, so accept the native ``[tokens]`` shape and
+    the Triton-compatible single-batch ``[1, tokens]`` shape only. Returns
+    ``None`` when tensor metadata and raw contents do not describe that contract.
     """
     inp, raw = _find_input_raw(request, "input_ids")
     if inp is None or raw is None:
         return None
-    return _parse_int_tensor_flat(inp, raw)
+    input_ids = _parse_int_tensor_flat(inp, raw)
+    if input_ids is None:
+        return None
+
+    shape = list(inp.shape)
+    if len(shape) == 1:
+        token_count = shape[0]
+    elif len(shape) == 2 and shape[0] == 1:
+        token_count = shape[1]
+    else:
+        return None
+    if token_count < 0 or token_count != len(input_ids):
+        return None
+    return input_ids
 
 
 def parse_sampling_params(
@@ -977,11 +1001,7 @@ def _append_prompt_token_ids_output(
     prompt_token_ids: list[int],
 ) -> None:
     """``prompt_token_ids``: INT32 little-endian, shape ``[1, len]``."""
-    raw = (
-        struct.pack("<%di" % len(prompt_token_ids), *prompt_token_ids)
-        if prompt_token_ids
-        else struct.pack("<i", 0)
-    )
+    raw = struct.pack("<%di" % len(prompt_token_ids), *prompt_token_ids)
     out = infer.outputs.add()
     out.name = "prompt_token_ids"
     out.datatype = "INT32"
@@ -993,18 +1013,8 @@ def _append_generated_ids_output(
     infer: predict_v2_pb2.ModelInferResponse,
     generated_ids: list[int],
 ) -> None:
-    """``generated_ids``: INT32 little-endian, shape ``[1, len]``.
-
-    When empty, a 4-byte filler (single INT32 ``0``) is appended because
-    ``raw_input_contents`` indices must stay aligned with ``outputs``. The consumer
-    side (access_log ``_scan_response_outputs``) checks declared ``shape`` so the
-    filler byte does not leak into token accumulators.
-    """
-    raw = (
-        struct.pack("<%di" % len(generated_ids), *generated_ids)
-        if generated_ids
-        else struct.pack("<i", 0)
-    )
+    """``generated_ids``: INT32 little-endian, shape ``[1, len]``."""
+    raw = struct.pack("<%di" % len(generated_ids), *generated_ids)
     out = infer.outputs.add()
     out.name = "generated_ids"
     out.datatype = "INT32"
@@ -1019,8 +1029,8 @@ def prepend_to_generated_ids_tensor(
     """Prepend ``token_ids`` to the already-appended ``generated_ids`` tensor on ``infer``.
 
     Returns ``False`` and leaves ``infer`` untouched when ``token_ids`` is empty, when
-    ``generated_ids`` is absent, or when its declared shape is a zero-length / filler
-    payload (``shape[-1] <= 0``). On success, re-packs the raw bytes as
+    ``generated_ids`` is absent, or when its declared shape is zero-length
+    (``shape[-1] <= 0``). On success, re-packs the raw bytes as
     ``token_ids + existing_ids`` (INT32 little-endian) and updates ``shape`` to
     ``[1, len(token_ids) + cur_len]``.
     """
@@ -1074,7 +1084,7 @@ def _append_finished_output(
 def _append_dashllm_limit_parameters(
     infer: predict_v2_pb2.ModelInferResponse,
     *,
-    generate_config: Any = None,
+    generate_config: GenerateConfig | None = None,
     eos_token_id: int | None = None,
     max_token_id: int | None = None,
     generate_think_token_num: int | None = None,
@@ -1082,9 +1092,9 @@ def _append_dashllm_limit_parameters(
     """Mirror dashllm response parameters consumed by dashscope-serving."""
     if generate_config is not None:
         infer.parameters["max_new_tokens"].int64_param = int(
-            getattr(generate_config, "max_new_tokens", 0) or 0
+            generate_config.max_new_tokens
         )
-        max_think = int(getattr(generate_config, "max_thinking_tokens", 0) or 0)
+        max_think = int(generate_config.max_thinking_tokens)
         if max_think > 0:
             infer.parameters["max_new_think_tokens"].int64_param = max_think
 
@@ -1128,11 +1138,11 @@ def _append_prompt_cache_usage_parameters(
 
 def _append_aux_info_metrics_outputs(
     infer: predict_v2_pb2.ModelInferResponse,
-    out_py: Any,
+    out_py: GenerateOutput,
     prompt_token_fallback: int = 0,
 ) -> None:
     """``prompt_token_num`` = AuxInfo.input_len; ``prompt_cached_token_num`` = AuxInfo.reuse_len."""
-    ax = getattr(out_py, "aux_info", None)
+    ax = out_py.aux_info
     input_len = int(ax.input_len) if ax is not None else int(prompt_token_fallback)
     reuse_len = int(ax.reuse_len) if ax is not None else 0
     _append_int32_scalar_output(infer, "prompt_token_num", input_len)
@@ -1148,7 +1158,7 @@ def build_stream_response_from_generate_outputs(
     request_input_ids: list[int] | None = None,
     return_input_ids: bool = False,
     is_streaming: bool = True,
-    generate_config: Any = None,
+    generate_config: GenerateConfig | None = None,
     eos_token_id: int | None = None,
     max_token_id: int | None = None,
     generate_think_token_num: int | None = None,
@@ -1260,8 +1270,7 @@ def build_dash_error_response(
     infer.id = str(request_id)
     infer.model_name = model_name
 
-    # Do not append empty generated_ids/token_ids: Dash raw decode would see
-    # the filler 0 used by _append_generated_ids_output([]).
+    # A terminal business error has no token tensor; only append terminal metadata.
     _append_finish_reason_output(
         infer,
         finished=True,

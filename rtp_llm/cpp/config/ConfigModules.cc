@@ -424,18 +424,6 @@ std::string ArpcConfig::to_string() const {
     return oss.str();
 }
 
-static int parse_optional_root_int_json(const std::string& json_str, const char* key, int default_value) {
-    try {
-        std::string pat = std::string("\"") + key + "\"\\s*:\\s*(\\d+)";
-        std::regex  re(pat);
-        std::smatch m;
-        if (std::regex_search(json_str, m, re) && m.size() > 1) {
-            return std::stoi(m[1].str());
-        }
-    } catch (...) {}
-    return default_value;
-}
-
 static void parse_grpc_client_server_maps_json(const std::string&          json_str,
                                                std::map<std::string, int>& client_config,
                                                std::map<std::string, int>& server_config) {
@@ -511,7 +499,6 @@ DashScGrpcConfig::DashScGrpcConfig(const std::string& json_str) {
 std::string DashScGrpcConfig::to_string() const {
     std::ostringstream oss;
     append_grpc_maps_to_stream(oss, *this);
-    oss << "max_server_workers: " << max_server_workers << "\n";
     return oss.str();
 }
 
@@ -521,10 +508,7 @@ void DashScGrpcConfig::from_json(const std::string& json_str) {
     }
     client_config.clear();
     server_config.clear();
-    max_server_workers = 4;
     parse_grpc_client_server_maps_json(json_str, client_config, server_config);
-    int mw             = parse_optional_root_int_json(json_str, "max_server_workers", 4);
-    max_server_workers = mw > 0 ? mw : 4;
 }
 
 // FfnDisAggregateConfig

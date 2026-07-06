@@ -180,16 +180,15 @@ class _FakeContext:
 
 
 def _make_record(*, raw_mode: bool = False, **overrides) -> GrpcAccessRecord:
-    rec = GrpcAccessRecord(
+    values = dict(
         method="ModelStreamInfer",
         stream_type="bidi_stream",
         peer="ipv4:1.2.3.4:5678",
         start_ts=time.time(),
         raw_mode=raw_mode,
     )
-    for key, val in overrides.items():
-        setattr(rec, key, val)
-    return rec
+    values.update(overrides)
+    return GrpcAccessRecord(**values)
 
 
 # ---------------------------------------------------------------------------

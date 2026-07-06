@@ -649,49 +649,6 @@ rename_wheel(
     src = ":rtp_llm_frontend_whl",
 )
 
-# Standalone DashSc gRPC server wheel: dash_sc proto + dash_sc_grpc_server, no full frontend app.
-# Run: python -m rtp_llm.dash_sc.server [--port 8000] or: rtp-llm-dash-sc-grpc [--port 8000]
-py_library(
-    name = "dash_sc_grpc_standalone_lib",
-    srcs = ["__init__.py"],
-    deps = [
-        "//rtp_llm/dash_sc:dash_sc_grpc_server",
-    ],
-    visibility = ["//visibility:private"],
-)
-
-py_package(
-    name = "dash_sc_grpc_standalone_package",
-    deps = [":dash_sc_grpc_standalone_lib"],
-    packages = ["rtp_llm"],
-)
-
-whl_reqs_dash_sc_grpc = [
-    "grpcio>=1.57.0",
-    "protobuf>=4.25",
-]
-
-py_wheel(
-    name = "rtp_llm_dash_sc_grpc_whl",
-    distribution = "rtp_llm_dash_sc_grpc",
-    python_tag = "py3",
-    tags = ["manual", "local", "no-remote"],
-    version = RELEASE_VERSION,
-    entry_points = {
-        "console_scripts": [
-            "rtp-llm-dash-sc-grpc = rtp_llm.dash_sc.server:main",
-        ]
-    },
-    deps = [":dash_sc_grpc_standalone_package"],
-    requires = whl_reqs_dash_sc_grpc,
-)
-
-rename_wheel(
-    name = "rtp_llm_dash_sc_grpc",
-    package_name = "rtp_llm_dash_sc_grpc-%s" % RELEASE_VERSION,
-    src = ":rtp_llm_dash_sc_grpc_whl",
-)
-
 # target for wheel
 py_wheel(
     name = "rtp_llm_whl",

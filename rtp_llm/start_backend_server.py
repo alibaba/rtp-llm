@@ -69,7 +69,7 @@ def local_rank_start(
     deferred_sigterm_timer = None
     shutdown_pending = False
 
-    def deferred_sigterm_delay_seconds() -> float:
+    def deferred_sigterm_delay_seconds() -> Optional[float]:
         raw = os.environ.get(DEFER_FIRST_SIGTERM_SECONDS_ENV, "")
         try:
             delay_s = (
@@ -79,6 +79,8 @@ def local_rank_start(
             )
         except ValueError:
             delay_s = float(py_env_configs.server_config.shutdown_timeout)
+        if delay_s == -1:
+            return None
         if delay_s <= 0:
             delay_s = 600.0
         return delay_s
@@ -110,6 +112,12 @@ def local_rank_start(
             if not deferred_sigterm_seen:
                 deferred_sigterm_seen = True
                 delay_s = deferred_sigterm_delay_seconds()
+                if delay_s is None:
+                    logging.info(
+                        "Local rank deferring first SIGTERM indefinitely; waiting for "
+                        "parent-staged backend shutdown"
+                    )
+                    return
                 logging.info(
                     "Local rank deferring first SIGTERM for %.3fs; waiting for "
                     "parent-staged backend shutdown",

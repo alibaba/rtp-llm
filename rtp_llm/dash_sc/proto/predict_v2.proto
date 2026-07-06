@@ -1622,7 +1622,6 @@ message TraceSettingResponse
   //@@
   map<string, SettingValue> settings = 1;
 }
-
 //@@
 //@@.. cpp:var:: message LogSettingsRequest
 //@@
@@ -1696,4 +1695,3 @@ message LogSettingsResponse
   //@@
   map<string, SettingValue> settings = 1;
 }
-

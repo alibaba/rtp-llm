@@ -62,29 +62,24 @@ def trans_input(input_py: GenerateInput):
     input_pb.request_id = input_py.request_id
     input_pb.token_ids.extend(input_py.token_ids.reshape(-1).tolist())
     input_pb.batch_group_size = input_py.batch_group_size
-    if hasattr(input_py, "batch_group_id") and input_py.batch_group_id != -1:
+    if input_py.batch_group_id != -1:
         input_pb.batch_group_id.value = input_py.batch_group_id
 
-    request_info = getattr(input_py, "request_info", None)
-    if request_info is not None:
-        input_pb.request_info.frontend_ip = (
-            getattr(request_info, "frontend_ip", "") or ""
-        )
-        input_pb.request_info.dash_ip = getattr(request_info, "dash_ip", "") or ""
-        input_pb.request_info.trace_id = getattr(request_info, "trace_id", "") or ""
-        input_pb.request_info.request_id = getattr(request_info, "request_id", "") or ""
-        input_pb.request_info.source_role = (
-            getattr(request_info, "source_role", "") or ""
-        )
+    request_info = input_py.request_info
+    input_pb.request_info.frontend_ip = request_info.frontend_ip
+    input_pb.request_info.dash_ip = request_info.dash_ip
+    input_pb.request_info.trace_id = request_info.trace_id
+    input_pb.request_info.request_id = request_info.request_id
+    input_pb.request_info.source_role = request_info.source_role
     if not input_pb.request_info.trace_id:
         input_pb.request_info.trace_id = str(
             input_py.generate_config.trace_id
-            or extract_trace_id(getattr(input_py, "headers", None))
+            or extract_trace_id(input_py.headers)
             or ""
         )
     if not input_pb.request_info.request_id:
         input_pb.request_info.request_id = extract_correlation_request_id(
-            getattr(input_py, "headers", None)
+            input_py.headers
         ) or str(input_pb.request_info.trace_id or input_py.request_id)
 
     trans_multimodal_input(input_py, input_pb, input_py.generate_config)
@@ -481,6 +476,9 @@ class ModelRpcClient(object):
             options=self._options, cleanup_interval=60  # clean up every minute
         )
         logging.info(f"addresses: {self._addresses}")
+
+    async def close(self) -> None:
+        await self._channel_pool.close()
 
     def _compute_grpc_timeout(self, timeout_ms) -> float:
         rpc_timeout_ms = (

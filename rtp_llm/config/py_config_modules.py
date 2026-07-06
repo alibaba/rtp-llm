@@ -97,6 +97,19 @@ class ServerConfig:
         """Update rank_id in place; server_port-related properties reflect new values."""
         self.rank_id = local_rank
 
+    def validate_port_layout(self, *, dash_sc_enabled: bool) -> None:
+        if (
+            dash_sc_enabled
+            and self.worker_info_port_num < MIN_WORKER_INFO_PORT_NUM
+        ):
+            raise ValueError(
+                "worker_info_port_num must be at least "
+                f"{MIN_WORKER_INFO_PORT_NUM} when DashSc gRPC is enabled; "
+                f"got {self.worker_info_port_num}. DashSc uses port offset "
+                f"{DASH_SC_GRPC_SERVER_PORT_OFFSET}, which overlaps the next "
+                "rank's port block with a smaller stride."
+            )
+
     # update_from_args 方法已不再需要
     # 配置绑定现在通过声明式 bind_to 参数在 add_argument 时自动处理
 

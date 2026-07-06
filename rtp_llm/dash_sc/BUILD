@@ -1,5 +1,5 @@
 # BUILD for rtp_llm/dash_sc: Python frontend gRPC (same pattern as model_rpc).
-load("//bazel:arch_select.bzl", "requirement")
+load("@arch_config//:arch_select.bzl", "requirement")
 
 requirement(["grpcio"])
 
@@ -22,7 +22,6 @@ py_library(
         "client.py",
         "codec.py",
         "grpc_metrics.py",
-        "json_format_e2e_smoke.py",
         "inference/__init__.py",
         "inference/__main__.py",
         "inference/servicer.py",
@@ -33,6 +32,7 @@ py_library(
         "proxy/servicer.py",
         "repetition_monitor.py",
         "server.py",
+        "servicer_base.py",
         "status.py",
         "structural_tag.py",
         "think.py",
@@ -50,11 +50,4 @@ py_library(
         "//rtp_llm/metrics:metrics",
         "//rtp_llm:utils",
     ],
-)
-
-py_binary(
-    name = "json_format_e2e_smoke",
-    srcs = ["json_format_e2e_smoke.py"],
-    main = "json_format_e2e_smoke.py",
-    visibility = ["//visibility:public"],
 )

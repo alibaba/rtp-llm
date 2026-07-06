@@ -13,12 +13,13 @@ import json
 import logging
 import struct
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import torch
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.generate_config import RoleAddr
+from rtp_llm.cpp.model_rpc.model_rpc_client import ModelRpcClient
 from rtp_llm.dash_sc.access_log import DASH_SC_GRPC_ACCESS_LOGGER_NAME
 from rtp_llm.dash_sc.access_record import GrpcAccessRecord
 from rtp_llm.dash_sc.codec import (
@@ -43,6 +44,8 @@ from rtp_llm.dash_sc.inference.servicer import (
 )
 from rtp_llm.dash_sc.proto import predict_v2_pb2
 from rtp_llm.ops import RoleType
+from rtp_llm.server.backend_rpc_server_visitor import BackendRPCServerVisitor
+from rtp_llm.server.master_client import MasterClient
 from rtp_llm.utils.base_model_datatypes import AuxInfo, GenerateOutput, GenerateOutputs
 
 
@@ -131,6 +134,11 @@ class DashErrorSpecForFtExceptionTest(unittest.TestCase):
             (ExceptionType.GENERATE_TIMEOUT, DASH_ERROR_TIMEOUT),
             (ExceptionType.OUT_OF_VOCAB_RANGE, DASH_ERROR_INVALID_OUTPUT),
             (ExceptionType.CANCELLED_ERROR, DASH_ERROR_ABORT),
+            (
+                ExceptionType.P2P_CONNECTOR_WORKER_HANDLE_READ_CANCELLED,
+                DASH_ERROR_ABORT,
+            ),
+            (ExceptionType.P2P_CONNECTOR_WORKER_READ_CANCELLED, DASH_ERROR_ABORT),
         )
         for exception_type, expected in cases:
             with self.subTest(exception_type=exception_type):
@@ -157,6 +165,9 @@ class _FakeTokenizer:
     def __init__(self, mapping: dict[str, list[int]]):
         self._mapping = mapping
         self.encode_calls: list[tuple[str, bool]] = []
+
+    def __len__(self) -> int:
+        return self.vocab_size
 
     def encode(self, text, add_special_tokens=True):
         self.encode_calls.append((text, add_special_tokens))
@@ -226,6 +237,20 @@ def _assert_parameter_error_response(
         expected_message_part,
         payload["status_message"],
     )
+    testcase.assertEqual(_finish_reason(resp), LLMFinishReason.STOP_ENGINE_PARAM)
+    testcase.assertEqual(_gen_ids(resp), [])
+
+
+def _assert_unsupported_error_response(
+    testcase, resp, expected_message_part: str
+) -> None:
+    testcase.assertFalse(resp.error_message)
+    infer = resp.infer_response
+    testcase.assertEqual(infer.parameters["error_no"].int64_param, 8)
+    payload = json.loads(infer.parameters["error_msg"].string_param)
+    testcase.assertEqual(payload["status_code"], 422)
+    testcase.assertEqual(payload["status_name"], "InvalidParameter")
+    testcase.assertIn(expected_message_part, payload["status_message"])
     testcase.assertEqual(_finish_reason(resp), LLMFinishReason.STOP_ENGINE_PARAM)
     testcase.assertEqual(_gen_ids(resp), [])
 
@@ -650,9 +675,7 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
             iter_real_model_stream_infer(
                 req,
                 [7, 8, 128821],
-                SamplingParams(
-                    response_format=json.dumps({"type": "json_object"}),
-                ),
+                SamplingParams(),
                 OtherParams(enable_thinking=True),
                 visitor,
                 rtp_llm_request_id=100,
@@ -687,14 +710,6 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         )
         phase2_input_ids = visitor.generate_inputs[1].token_ids.cpu().int().tolist()
         self.assertEqual(phase2_input_ids, [7, 8, 128821, 271, 128822, 271])
-        self.assertEqual(
-            json.loads(visitor.generate_inputs[0].generate_config.response_format),
-            {"type": "json_object"},
-        )
-        self.assertEqual(
-            json.loads(visitor.generate_inputs[1].generate_config.response_format),
-            {"type": "json_object"},
-        )
         self.assertFalse(visitor.generate_inputs[1].generate_config.in_think_mode)
         self.assertEqual(len(visitor.generate_inputs[0].generate_config.role_addrs), 1)
         self.assertEqual(visitor.generate_inputs[1].generate_config.role_addrs, [])
@@ -1601,6 +1616,30 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
         _add_input_tensor(req, "input_ids", "INT32", [1], struct.pack("<i", 42))
         return req
 
+    async def test_close_releases_owned_backend_rpc_resources_once(self) -> None:
+        channel_pool = MagicMock()
+        channel_pool.close = AsyncMock()
+        model_rpc_client = ModelRpcClient.__new__(ModelRpcClient)
+        model_rpc_client._channel_pool = channel_pool
+
+        session = MagicMock()
+        session.closed = False
+        session.close = AsyncMock()
+        master_client = MasterClient.__new__(MasterClient)
+        master_client._session = session
+
+        backend_visitor = BackendRPCServerVisitor.__new__(BackendRPCServerVisitor)
+        backend_visitor.model_rpc_client = model_rpc_client
+        backend_visitor.master_client = master_client
+        servicer = DashScInferenceServicer(backend_visitor=backend_visitor)
+
+        await servicer.close()
+        await servicer.close()
+
+        channel_pool.close.assert_awaited_once_with()
+        session.close.assert_awaited_once_with()
+        self.assertIsNone(servicer._backend_visitor)
+
     async def test_fake_mode_returns_incremented_ids(self) -> None:
         servicer = DashScInferenceServicer(backend_visitor=None)
         req = self._valid_infer_request()
@@ -1614,6 +1653,43 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
             for i in range(len(infer.outputs))
         }
         self.assertEqual(_unpack_int32_le(by_name["generated_ids"]), [142])
+
+    async def test_successful_single_request_ends_without_reading_another(self) -> None:
+        servicer = DashScInferenceServicer(backend_visitor=None)
+        first = self._valid_infer_request()
+
+        async def one_request():
+            yield first
+            self.fail("server requested a second frame after terminal response")
+
+        responses = await _drain(
+            servicer.ModelStreamInfer(one_request(), MagicMock())
+        )
+
+        self.assertEqual(len(responses), 1)
+        self.assertEqual(responses[0].infer_response.id, "srv-1")
+
+    async def test_multiple_return_sequences_are_rejected_before_enqueue(
+        self,
+    ) -> None:
+        visitor = _FakeVisitor(_FakeAsyncStream([]))
+        servicer = DashScInferenceServicer(backend_visitor=visitor)
+        req = self._valid_infer_request()
+        _add_input_tensor(
+            req,
+            "num_return_sequences",
+            "INT32",
+            [1],
+            struct.pack("<i", 2),
+        )
+
+        responses = await _drain(
+            servicer.ModelStreamInfer(_areq_iter([req]), MagicMock())
+        )
+
+        self.assertEqual(visitor.enqueue_called, 0)
+        self.assertEqual(len(responses), 1)
+        _assert_parameter_error_response(self, responses[0], "only one return sequence")
 
     async def test_access_log_records_input_and_generated_ids(self) -> None:
         # Frontend struct path: the emitted access line carries the real token
@@ -2034,7 +2110,7 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(generate_config.in_think_mode)
         self.assertEqual(generate_config.max_thinking_tokens, 32000)
 
-    async def test_dash_generation_json_object_with_enable_thinking_keeps_both_constraints(
+    async def test_dash_generation_response_format_is_rejected_as_unsupported(
         self,
     ) -> None:
         visitor = _FakeVisitor(_FakeAsyncStream([]))
@@ -2052,17 +2128,30 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
             {"type": "json_object"}
         )
 
+        responses = await _drain(
+            servicer.ModelStreamInfer(_areq_iter([req]), MagicMock())
+        )
+
+        self.assertEqual(visitor.enqueue_called, 0)
+        self.assertEqual(len(responses), 1)
+        _assert_unsupported_error_response(self, responses[0], "response_format")
+
+    async def test_dash_generation_plain_text_response_format_is_accepted(
+        self,
+    ) -> None:
+        visitor = _FakeVisitor(_FakeAsyncStream([]))
+        servicer = DashScInferenceServicer(backend_visitor=visitor)
+        req = self._valid_infer_request()
+        req.parameters["response_format"].string_param = json.dumps(
+            {"type": "text"}
+        )
+
         await _drain(servicer.ModelStreamInfer(_areq_iter([req]), MagicMock()))
 
         self.assertEqual(visitor.enqueue_called, 1)
-        generate_config = visitor.last_generate_input.generate_config
-        self.assertTrue(generate_config.in_think_mode)
-        self.assertEqual(generate_config.end_think_token_ids, [128822, 271])
-        self.assertEqual(
-            json.loads(generate_config.response_format), {"type": "json_object"}
-        )
+        self.assertIsNone(visitor.last_generate_input.generate_config.response_format)
 
-    async def test_dash_generation_guided_json_with_enable_thinking_sets_response_format(
+    async def test_dash_generation_guided_json_is_rejected_as_unsupported(
         self,
     ) -> None:
         schema = {
@@ -2085,19 +2174,31 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
             [schema], ensure_ascii=False
         )
 
-        await _drain(servicer.ModelStreamInfer(_areq_iter([req]), MagicMock()))
-
-        self.assertEqual(visitor.enqueue_called, 1)
-        generate_config = visitor.last_generate_input.generate_config
-        self.assertTrue(generate_config.in_think_mode)
-        self.assertEqual(generate_config.end_think_token_ids, [128822, 271])
-        self.assertEqual(
-            json.loads(generate_config.response_format),
-            {"type": "json_schema", "json_schema": {"schema": schema}},
+        responses = await _drain(
+            servicer.ModelStreamInfer(_areq_iter([req]), MagicMock())
         )
-        self.assertIsNone(generate_config.json_schema)
 
-    async def test_dash_generation_tool_call_structural_tag_reaches_generate_config(
+        self.assertEqual(visitor.enqueue_called, 0)
+        self.assertEqual(len(responses), 1)
+        _assert_unsupported_error_response(self, responses[0], "guided_json")
+
+    async def test_dash_generation_json_format_is_rejected_as_unsupported(
+        self,
+    ) -> None:
+        visitor = _FakeVisitor(_FakeAsyncStream([]))
+        servicer = DashScInferenceServicer(backend_visitor=visitor)
+        req = self._valid_infer_request()
+        req.parameters["json_format"].bool_param = True
+
+        responses = await _drain(
+            servicer.ModelStreamInfer(_areq_iter([req]), MagicMock())
+        )
+
+        self.assertEqual(visitor.enqueue_called, 0)
+        self.assertEqual(len(responses), 1)
+        _assert_unsupported_error_response(self, responses[0], "json_format")
+
+    async def test_dash_generation_structural_tag_is_rejected_as_unsupported(
         self,
     ) -> None:
         tag = {
@@ -2124,13 +2225,15 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
             tag, ensure_ascii=False
         )
 
-        await _drain(servicer.ModelStreamInfer(_areq_iter([req]), MagicMock()))
+        responses = await _drain(
+            servicer.ModelStreamInfer(_areq_iter([req]), MagicMock())
+        )
 
-        self.assertEqual(visitor.enqueue_called, 1)
-        generate_config = visitor.last_generate_input.generate_config
-        self.assertEqual(json.loads(generate_config.structural_tag), tag)
-        self.assertIsNone(generate_config.response_format)
-        self.assertFalse(generate_config.json_format)
+        self.assertEqual(visitor.enqueue_called, 0)
+        self.assertEqual(len(responses), 1)
+        _assert_unsupported_error_response(
+            self, responses[0], "tool_call_structural_tag"
+        )
 
     async def test_dash_generation_budget_aliases_without_enable_thinking_keep_thinking(
         self,
@@ -2265,6 +2368,20 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
             visitor.last_generate_input.headers,
             {"user_id": "u1", "x-dashscope-apikeyid": "ak1"},
         )
+
+    async def test_short_upstream_timeout_keeps_engine_deadline_shorter(self) -> None:
+        visitor = _FakeVisitor(_FakeAsyncStream([]))
+        servicer = DashScInferenceServicer(backend_visitor=visitor)
+        request = self._valid_infer_request()
+        request.parameters["ds_header_attributes"].string_param = json.dumps(
+            {"x-dashscope-inner-timeout": 1}
+        )
+
+        await _drain(servicer.ModelStreamInfer(_areq_iter([request]), MagicMock()))
+
+        generate_config = visitor.last_generate_input.generate_config
+        self.assertEqual(generate_config.timeout_ms, 850)
+        self.assertEqual(generate_config.ttft_timeout_ms, 850)
 
 
 if __name__ == "__main__":

@@ -322,9 +322,6 @@ def _sampling_to_dict(sampling) -> dict[str, Any]:
     return d
 
 
-_CONTEXT_ATTR = "_dash_sc_forward_access_record"
-
-
 @dataclasses.dataclass
 class GrpcAccessRecord:
     """Mutable per-RPC access record for the dash-sc forward path."""
@@ -501,16 +498,18 @@ class GrpcAccessRecord:
         """
         return self._repetition_monitor
 
-    def record_request_frame(self, request) -> None:
+    def record_request_frame(
+        self, request: predict_v2_pb2.ModelInferRequest
+    ) -> None:
         """Capture transport-level request metadata."""
         if request is None:
             return
         if self.first_request_ts is None:
             self.first_request_ts = time.time()
-        request_id = getattr(request, "id", None)
+        request_id = request.id
         if request_id and self.request_id is None:
             self.request_id = str(request_id)
-        model_name = getattr(request, "model_name", None)
+        model_name = request.model_name
         if model_name and self.model_name is None:
             self.model_name = str(model_name)
         controls = self.request_controls
@@ -520,9 +519,11 @@ class GrpcAccessRecord:
         if "parameters" not in controls and "ds_header_attributes" not in controls:
             controls.update(self._build_request_controls(request))
 
-    def _build_request_controls(self, request) -> dict[str, Any]:
+    def _build_request_controls(
+        self, request: predict_v2_pb2.ModelInferRequest
+    ) -> dict[str, Any]:
         parameters: dict[str, Any] = {}
-        for key, param in getattr(request, "parameters", {}).items():
+        for key, param in request.parameters.items():
             if str(key) == "ds_header_attributes":
                 continue
             parameters[str(key)] = _proto_parameter_value(key, param)
@@ -852,6 +853,10 @@ class GrpcAccessRecord:
                 "multi_token_frame_count": self.multi_token_frame_count,
                 "max_tokens_per_frame": self.max_tokens_per_frame,
                 "generate_config": self.generate_config,
+                # Full token-id sequences are an intentional part of the
+                # frontend access-log contract for exact request replay and
+                # production diagnosis. Do not truncate, sample, hash, or
+                # default-disable them without changing that contract.
                 "input_ids": self.input_ids,
                 "generated_ids": self.generated_ids or None,
             }
@@ -863,7 +868,7 @@ class GrpcAccessRecord:
 
     def attach_to_context(self, context) -> bool:
         try:
-            setattr(context, _CONTEXT_ATTR, self)
+            context._dash_sc_forward_access_record = self
             return True
         except Exception:
             return False
@@ -871,6 +876,6 @@ class GrpcAccessRecord:
     @staticmethod
     def from_context(context) -> Optional["GrpcAccessRecord"]:
         try:
-            return getattr(context, _CONTEXT_ATTR, None)
-        except Exception:
+            return context._dash_sc_forward_access_record
+        except AttributeError:
             return None

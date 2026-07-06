@@ -321,7 +321,6 @@ PYBIND11_MODULE(libth_transformer_config, m) {
     pybind11::class_<DashScGrpcConfig>(m, "DashScGrpcConfig")
         .def(pybind11::init<>())
         .def(pybind11::init<const std::string&>(), pybind11::arg("json_str"))
-        .def_readwrite("max_server_workers", &DashScGrpcConfig::max_server_workers)
         .def("to_string", &DashScGrpcConfig::to_string)
         .def("from_json", &DashScGrpcConfig::from_json)
         .def("get_client_config", &DashScGrpcConfig::get_client_config)
@@ -336,16 +335,15 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                 for (const auto& pair : self.get_server_config()) {
                     server_dict[py::str(pair.first)] = pair.second;
                 }
-                return py::make_tuple(client_dict, server_dict, self.max_server_workers);
+                return py::make_tuple(client_dict, server_dict);
             },
             [](py::tuple t) {
-                if (t.size() != 2 && t.size() != 3)
+                if (t.size() != 2)
                     throw std::runtime_error("Invalid DashScGrpcConfig state!");
                 DashScGrpcConfig c;
                 try {
-                    py::dict           client_dict = t[0].cast<py::dict>();
-                    py::dict           server_dict = t[1].cast<py::dict>();
-                    int                mw          = (t.size() == 3) ? t[2].cast<int>() : 4;
+                    py::dict client_dict = t[0].cast<py::dict>();
+                    py::dict server_dict = t[1].cast<py::dict>();
                     std::ostringstream oss;
                     oss << "{\"client_config\": {";
                     bool first = true;
@@ -363,7 +361,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                         first = false;
                         oss << "\"" << py::str(item.first).cast<std::string>() << "\": " << py::cast<int>(item.second);
                     }
-                    oss << "}, \"max_server_workers\": " << (mw > 0 ? mw : 4) << "}";
+                    oss << "}}";
                     c.from_json(oss.str());
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("DashScGrpcConfig unpickle error: ") + e.what());

@@ -1,4 +1,5 @@
 import importlib
+import json
 import os
 import sys
 from unittest import TestCase, main
@@ -365,6 +366,21 @@ class ServerArgsSetTest(TestCase):
         self.assertEqual(cfg.tool_call_loop_threshold, 7)
         self.assertEqual(cfg.tool_call_loop_begin_marker, "<tool_call>")
         self.assertEqual(cfg.tool_call_loop_end_marker, "</tool_call>")
+
+    def test_dash_sc_default_allows_large_requests_on_both_ends(self):
+        from rtp_llm.server.server_args.grpc_group_args import (
+            default_dash_sc_grpc_config_json,
+        )
+
+        config = json.loads(default_dash_sc_grpc_config_json())
+        expected = 1024 * 1024 * 1024
+        self.assertEqual(
+            config["client_config"]["grpc.max_receive_message_length"], expected
+        )
+        self.assertEqual(
+            config["server_config"]["grpc.max_receive_message_length"],
+            64 * 1024 * 1024,
+        )
 
 
 if __name__ == "__main__":

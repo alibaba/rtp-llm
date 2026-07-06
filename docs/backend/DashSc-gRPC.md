@@ -8,7 +8,7 @@ DashSc gRPC 在进程内提供 **predict_v2 协议**（`predict_v2.proto`）的 
 |------|------|
 | Proto | `rtp_llm/dash_sc/proto/predict_v2.proto`（及 `model_config.proto`） |
 | 服务名 | `GRPCInferenceService` |
-| RPC | `ModelStreamInfer`（客户端发送一个或多个 `ModelInferRequest`，服务端流式返回 `ModelStreamInferResponse`） |
+| RPC | `ModelStreamInfer`（每条双向流发送一个 `ModelInferRequest`，服务端流式返回 `ModelStreamInferResponse`） |
 | 地址 | `0.0.0.0:<dash_sc_grpc_server_port>`（与下面端口计算一致） |
 
 任意支持同一 `.proto` 的 gRPC 客户端均可调用；仓库内自带 Python 客户端（见下文）。
@@ -22,7 +22,7 @@ DashSc gRPC 在进程内提供 **predict_v2 协议**（`predict_v2.proto`）的 
 
 ### 升级注意：`worker_info_port_num` 默认值 8 → 9（破坏性）
 
-为在每台 worker 的端口块内为 DashSc gRPC 预留 **base + 8** 且不与其他 rank 重叠，**`--worker_info_port_num` / `WORKER_INFO_PORT_NUM` 的默认值由 8 改为 9**。此前**未显式配置**该参数且使用 **多 rank / 分布式** 的部署，`rank ≥ 1` 的 **base 端口会整体偏移**，需同步改服务发现、防火墙或运维文档；若必须维持旧步进，可显式指定 `--worker_info_port_num 8`（须自行评估是否与新端口占用冲突）。
+为在每台 worker 的端口块内为 DashSc gRPC 预留 **base + 8** 且不与其他 rank 重叠，**`--worker_info_port_num` / `WORKER_INFO_PORT_NUM` 的默认值和最小值均为 9**。使用旧步进 8 会让当前 rank 的 DashSc gRPC 与下一 rank 的 HTTP 服务占用同一端口，因此非 VIT 部署会在启动任何服务进程前拒绝小于 9 的配置。多 rank / 分布式部署需同步更新服务发现、防火墙和运维文档。
 
 详见：[Breaking changes / `worker_info_port_num`](../release/breaking-changes.md)（含英文 Summary，便于写 release notes）。
 
@@ -48,14 +48,12 @@ DashSc gRPC 在进程内提供 **predict_v2 协议**（`predict_v2.proto`）的 
 python -m rtp_llm.dash_sc.server --port 8000
 ```
 
-可选：与主服务相同形状的 JSON，覆盖通道选项与线程池（见下节）：
+可选：与主服务相同形状的 JSON，覆盖客户端/服务端通道选项（见下节）：
 
 ```bash
 python -m rtp_llm.dash_sc.server --port 8000 \
-  --dash_sc_grpc_config_json '{"client_config":{},"server_config":{},"max_server_workers":4}'
+  --dash_sc_grpc_config_json '{"client_config":{},"server_config":{}}'
 ```
-
-若使用 Bazel 打出的 **`rtp_llm_dash_sc_grpc` wheel**，入口点为：`rtp-llm-dash-sc-grpc`（等价于上述模块的 `main`）。
 
 ## 配置：`--dash_sc_grpc_config_json` / `DASH_SC_GRPC_CONFIG_JSON`
 
@@ -68,7 +66,6 @@ JSON 结构（逻辑上）包含：
 
 - **`client_config`**：键为 gRPC channel option 名，值为整数（Python 客户端建连时使用）。
 - **`server_config`**：服务端 `grpc.server(..., options=...)` 的选项。
-- **`max_server_workers`**：服务端 `ThreadPoolExecutor` 大小，须 **> 0**（默认一般为 **4**）。
 
 主程序解析后写入 `DashScGrpcConfig`（C++/pybind 与 Python 侧一致）。
 
@@ -88,72 +85,11 @@ python -m rtp_llm.dash_sc.client \
 
 DeepSeek-V4 的 dash-sc 请求是预 tokenized wire。Python 客户端只做 raw-token 调试：`tokenizer.encode(prompt)` 后发送 `input_ids`。真实 chat prompt 渲染、工具调用语义和 reasoning 参数归一化应由 OpenAI / DashScope 前端链路完成，dash-sc gRPC 层只承接已编码的 `input_ids` 和 generation 参数。
 
-### DeepSeek-V4 tool-call guided decoding
+`ModelStreamInfer` 的协议约定是一条双向流承载一个 `ModelInferRequest`；收到终止响应后服务端结束响应流，下一次请求需新建流。
 
-DashSc gRPC 支持把上游传入的 tool-call 结构化约束下沉到 RTP `GenerateConfig.structural_tag`：
+### 结构化输出
 
-- 直接参数：`request.parameters["tool_call_structural_tag"]`
-- 兼容别名：`request.parameters["structural_tag"]`
-- DashScope header 兼容：`ds_header_attributes.parameters.tool_call_structural_tag` / `structural_tag`
-
-若 DashScope 侧把 tag 包成数组（例如 `["{...structural_tag...}", ...]`），dash-sc 与 dashllm 保持一致：非空 list 一律取第一个元素，空 list 视为未设置。dash-sc codec 做轻量 shape 校验，并仅对 DashScope tool-call wrapper `sequence(const_string, tags_with_separator, const_string)` 做窄适配，转换成 xgrammar 可编译的 `tag(begin, content, end)`；其它 grammar 语义仍由 C++ xgrammar backend 编译判断。
-
-客户端调试可用：
-
-```bash
-python -m rtp_llm.dash_sc.client \
-  --grpc_addr 127.0.0.1:<dash_sc_grpc_server_port> \
-  --ckpt_path /mnt/nas1/hf/DeepSeek-V4-Flash \
-  --model_type deepseek_v4 \
-  --prompt "<already-rendered-prompt-or-raw-debug-text>" \
-  --tool_call_structural_tag '<structural_tag_json>' \
-  --max_new_tokens 64 \
-  --temperature 0 \
-  --top_k 1 \
-  --enable_thinking false
-```
-
-`<structural_tag_json>` 必须是 xgrammar 当前支持的新格式，顶层包含 `format` 字段；不支持的 DSL 结构会由 C++ grammar backend 返回 `Invalid structural tag error`：
-
-```json
-{
-  "format": {
-    "type": "triggered_tags",
-    "triggers": ["<｜DSML｜invoke"],
-    "tags": [
-      {
-        "type": "tag",
-        "begin": "<｜DSML｜invoke name=\"get_weather\">",
-        "content": {
-          "type": "json_schema",
-          "json_schema": {
-            "type": "object",
-            "properties": {"city": {"type": "string"}},
-            "required": ["city"]
-          }
-        },
-        "end": "</｜DSML｜invoke>"
-      }
-    ]
-  }
-}
-```
-
-2026-06-12 在 DeepSeek-V4-Flash PD 服务上做过精确 gRPC 校验，非模糊包含匹配：`input_len=295`，`output_len=47`，`finish_reason=0`，`generated_ids` 全量等于 smoke golden，decoded 输出为：
-
-```text
-
-
-好的，我来查询杭州的天气情况。
-
-<｜DSML｜tool_calls>
-<｜DSML｜invoke name="get_weather">{
-  "city": "杭州"
-}</｜DSML｜invoke>
-</｜DSML｜tool_calls><｜end▁of▁sentence｜>
-```
-
-对应 smoke 用例在 `internal_source/rtp_llm/test/smoke/data/model/deepseek_v4/q_r_v4_flash_sm100_arm_fp8.json`，通过 `result.generated_ids` 做全量精确比较。
+DashSc gRPC 暂未支持结构化输出。`response_format`、`guided_json`、`json_format`、`tool_call_structural_tag` 和 `structural_tag` 请求会在进入 Model RPC 前返回 unsupported 错误，不会按普通采样请求静默执行。该能力需要补齐 Model RPC 字段与序列化、`QueryConverter`、C++ grammar backend 和真实端到端测试后再开放。
 
 仓库内还提供 Bash 封装（**必须用 bash**）：
 
