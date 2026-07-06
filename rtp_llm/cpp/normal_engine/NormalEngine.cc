@@ -154,6 +154,10 @@ void NormalEngine::initScheduler() {
                                                     metrics_reporter_));
         RTP_LLM_LOG_INFO("create pdfusion ratio scheduler done");
     } else {
+        if (runtime_config.fifo_scheduler_config.pdfusion_scheduler_mode == "ratio") {
+            RTP_LLM_LOG_WARNING("pdfusion_scheduler_mode [ratio] is ignored because role_type [%d] is not PDFUSION",
+                                static_cast<int>(pd_sep_config.role_type));
+        }
         scheduler_.reset(new FIFOScheduler(runtime_config,
                                            model_config_,
                                            pd_sep_config,
