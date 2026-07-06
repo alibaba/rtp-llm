@@ -16,23 +16,39 @@ namespace rtp_llm {
 
 namespace detail {
 
-template<typename SetDeviceContext, typename SetDefaultStream>
+template<typename SetDeviceContext, typename SetDefaultStream, typename GetCurrentDevice>
 inline void setCurrentThreadDeviceIfNeededImpl(int                device_id,
                                                int&               current_device,
                                                SetDeviceContext&& set_device_context,
-                                               SetDefaultStream&& set_default_stream) {
+                                               SetDefaultStream&& set_default_stream,
+                                               GetCurrentDevice&& get_current_device) {
     if (device_id < 0) {
         return;
     }
 
-    const bool device_changed = current_device != device_id;
-    if (device_changed) {
+    bool need_set_device = current_device != device_id;
+    if (!need_set_device) {
+        need_set_device = std::forward<GetCurrentDevice>(get_current_device)() != device_id;
+    }
+    if (need_set_device) {
         std::forward<SetDeviceContext>(set_device_context)(device_id);
     }
 
     std::forward<SetDefaultStream>(set_default_stream)(device_id);
     // Cache only fully successful backend setup so failures still retry later.
     current_device = device_id;
+}
+
+template<typename SetDeviceContext, typename SetDefaultStream>
+inline void setCurrentThreadDeviceIfNeededImpl(int                device_id,
+                                               int&               current_device,
+                                               SetDeviceContext&& set_device_context,
+                                               SetDefaultStream&& set_default_stream) {
+    detail::setCurrentThreadDeviceIfNeededImpl(device_id,
+                                               current_device,
+                                               std::forward<SetDeviceContext>(set_device_context),
+                                               std::forward<SetDefaultStream>(set_default_stream),
+                                               [&current_device]() { return current_device; });
 }
 
 }  // namespace detail
@@ -69,6 +85,22 @@ inline void setCurrentThreadDefaultStream(int device_id) {
 #endif
 }
 
+inline int getCurrentThreadDeviceContext() {
+#if USING_CUDA
+    int  device_id = -1;
+    auto err       = cudaGetDevice(&device_id);
+    RTP_LLM_CHECK_WITH_INFO(err == cudaSuccess, "cudaGetDevice failed: %s", cudaGetErrorString(err));
+    return device_id;
+#elif USING_ROCM
+    int  device_id = -1;
+    auto err       = hipGetDevice(&device_id);
+    RTP_LLM_CHECK_WITH_INFO(err == hipSuccess, "hipGetDevice failed: %s", hipGetErrorString(err));
+    return device_id;
+#else
+    return -1;
+#endif
+}
+
 inline void setCurrentThreadDevice(int device_id) {
     setCurrentThreadDeviceContext(device_id);
     setCurrentThreadDefaultStream(device_id);
@@ -84,15 +116,16 @@ inline void setCurrentThreadDeviceIfNeeded(int device_id) {
 
     // Thread-pool workers may serve different cache stores over time; a new
     // device_id intentionally retargets the current thread instead of no-oping.
-    // Callers must not bypass this helper to change the same worker thread's
-    // current device, unless they restore it before returning to pinned work.
+    // Cache hits still verify the actual runtime device so a direct
+    // cudaSetDevice/hipSetDevice from shared worker code is corrected here.
     // The default stream is restored on every call because same-device tasks
     // may follow work that temporarily changed PyTorch's current stream.
     detail::setCurrentThreadDeviceIfNeededImpl(
         device_id,
         current_device,
         [](int device) { setCurrentThreadDeviceContext(device); },
-        [](int device) { setCurrentThreadDefaultStream(device); });
+        [](int device) { setCurrentThreadDefaultStream(device); },
+        []() { return getCurrentThreadDeviceContext(); });
 #else
     // CPU-only builds intentionally no-op; production cache-store builds pin to a GPU backend.
 #endif

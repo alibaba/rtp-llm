@@ -63,6 +63,23 @@ TEST(DevicePinTest, CachedDeviceIdSkipsRepeatedSetDevice) {
     ASSERT_EQ(0, cached_device);
 }
 
+TEST(DevicePinTest, CachedDeviceMismatchRepinsThread) {
+    int              cached_device = 0;
+    std::vector<int> set_devices;
+    std::vector<int> stream_devices;
+
+    detail::setCurrentThreadDeviceIfNeededImpl(
+        0,
+        cached_device,
+        [&set_devices](int device) { set_devices.push_back(device); },
+        [&stream_devices](int device) { stream_devices.push_back(device); },
+        []() { return 1; });
+
+    ASSERT_EQ((std::vector<int>{0}), set_devices);
+    ASSERT_EQ((std::vector<int>{0}), stream_devices);
+    ASSERT_EQ(0, cached_device);
+}
+
 TEST(DevicePinTest, DifferentDeviceIdRetargetsThread) {
     int              cached_device = 0;
     std::vector<int> set_devices;
