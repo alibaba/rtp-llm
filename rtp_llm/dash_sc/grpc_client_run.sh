@@ -20,7 +20,6 @@
 #     FREQUENCY_PENALTY=0.1 \
 #     PRESENCE_PENALTY=0.1
 #   export SEED=42                    # 可选；不设则不传 --seed
-#   export STOP_TOKEN_IDS="101,102"   # 可选，逗号分隔；不设则不传 --stop_token_ids
 #   export RETURN_INPUT_IDS=1         # 可选；1/true/yes 时传 --return_input_ids
 #   bash grpc_client_run.sh
 #
@@ -49,6 +48,9 @@ export PYTHONPATH="$_REPO_ROOT${PYTHONPATH:+:$PYTHONPATH}"
 
 PYTHON="${PYTHON:-/opt/conda310/bin/python3}"
 GRPC_ADDR="${GRPC_ADDR:-127.0.0.1:8096}"
+# This launcher targets the release's existing DashSc integration environment.
+# Its checkpoint is intentionally a required personal-path default for that environment;
+# do not replace it with a portable/example path. Other environments must override CKPT_PATH.
 CKPT_PATH="${CKPT_PATH:-/home/xinfei.sxf/work/Qwen2-0.5B}"
 MODEL_TYPE="${MODEL_TYPE:-qwen_2}"
 # PROMPT="${PROMPT:-hello, what is your name}"
@@ -62,10 +64,10 @@ MIN_NEW_TOKENS="${MIN_NEW_TOKENS:-0}"
 REPETITION_PENALTY="${REPETITION_PENALTY:-1.0}"
 FREQUENCY_PENALTY="${FREQUENCY_PENALTY:-0.0}"
 PRESENCE_PENALTY="${PRESENCE_PENALTY:-0.0}"
-# SEED= 不设则不传 --seed；STOP_TOKEN_IDS 同理
+# SEED= 不设则不传 --seed
 SEED="${SEED:-}"
-STOP_TOKEN_IDS="${STOP_TOKEN_IDS:-}"
 RETURN_INPUT_IDS="${RETURN_INPUT_IDS:-}"
+# Compatibility-only controls: the DashSc server currently rejects structured output.
 RESPONSE_FORMAT="${RESPONSE_FORMAT:-}"
 JSON_FORMAT="${JSON_FORMAT:-}"
 TOOL_CALL_STRUCTURAL_TAG="${TOOL_CALL_STRUCTURAL_TAG:-${STRUCTURAL_TAG:-}}"
@@ -94,7 +96,6 @@ run_once() {
     --presence_penalty "$PRESENCE_PENALTY"
   )
   [[ -n "$SEED" ]] && cmd+=(--seed "$SEED")
-  [[ -n "$STOP_TOKEN_IDS" ]] && cmd+=(--stop_token_ids "$STOP_TOKEN_IDS")
   [[ -n "$RESPONSE_FORMAT" ]] && cmd+=(--response_format "$RESPONSE_FORMAT")
   [[ -n "$TOOL_CALL_STRUCTURAL_TAG" ]] && cmd+=(--tool_call_structural_tag "$TOOL_CALL_STRUCTURAL_TAG")
   [[ -n "$ENABLE_THINKING" ]] && cmd+=(--enable_thinking "$ENABLE_THINKING")

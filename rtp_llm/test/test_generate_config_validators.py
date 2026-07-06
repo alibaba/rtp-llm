@@ -22,12 +22,45 @@
 import logging
 import unittest
 
+from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.generate_config import (
     GenerateConfig,
     _DIVERGE_START_COMBO_WARN_THRESHOLD,  # pyright: ignore[reportPrivateUsage]
     _MAX_DIVERGE_DEPTH,  # pyright: ignore[reportPrivateUsage]
     _reset_sanitize_warn_state,  # pyright: ignore[reportPrivateUsage]
 )
+
+
+class TestStructuredOutputUnsupported(unittest.TestCase):
+
+    def test_all_structured_output_controls_fail_before_backend_rpc(self):
+        cases = {
+            "json_format": True,
+            "response_format": {"type": "json_object"},
+            "json_schema": {"type": "object"},
+            "regex": "a+",
+            "ebnf": "root ::= 'a'",
+            "structural_tag": {"format": {}},
+        }
+        for name, value in cases.items():
+            with self.subTest(name=name):
+                config = GenerateConfig(**{name: value})
+                with self.assertRaises(FtRuntimeException) as raised:
+                    config.validate()
+                self.assertEqual(
+                    raised.exception.exception_type,
+                    ExceptionType.UNSUPPORTED_OPERATION,
+                )
+                self.assertIn(name, raised.exception.message)
+                self.assertIn("not supported yet", raised.exception.message)
+
+    def test_default_structured_output_controls_remain_valid(self):
+        GenerateConfig().validate()
+
+    def test_plain_text_response_format_remains_valid(self):
+        for value in ({"type": "text"}, '{"type":"text"}', "text"):
+            with self.subTest(value=value):
+                GenerateConfig(response_format=value).validate()
 
 
 class TestClampDivergeStartCombo(unittest.TestCase):

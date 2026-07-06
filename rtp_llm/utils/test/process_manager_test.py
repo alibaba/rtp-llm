@@ -105,6 +105,11 @@ class TestProcessManager(unittest.TestCase):
         self.assertFalse(self.manager.shutdown_requested)
         self.assertFalse(self.manager.failure_detected)
 
+    def test_init_preserves_infinite_shutdown_timeout(self):
+        manager = ProcessManager(shutdown_timeout=-1)
+        self.assertEqual(manager.shutdown_timeout, -1)
+        self.assertIsNone(manager._make_deadline(manager.shutdown_timeout))
+
     def test_add_single_process(self):
         """Test adding a single process"""
         proc = multiprocessing.Process(target=dummy_worker)
@@ -236,6 +241,7 @@ class TestProcessManager(unittest.TestCase):
                 self.name = name
                 self.pid = len(events) + 100
                 self._alive = True
+                self._popen = None
 
             def is_alive(self):
                 return self._alive
@@ -264,6 +270,7 @@ class TestProcessManager(unittest.TestCase):
                 self.name = name
                 self.pid = pid
                 self._alive = True
+                self._popen = None
 
             def is_alive(self):
                 return self._alive
@@ -905,6 +912,7 @@ class _FakeProc:
         self.pid = type(self)._next_pid
         self.name = name
         self._alive = alive
+        self._popen = None
         self._dies_on_terminate = dies_on_terminate
         self._dies_after = dies_after  # absolute time after which is_alive flips False
         self._exitcode = exitcode  # value reported once dead
@@ -976,6 +984,28 @@ class TestFailureShutdownPaths(unittest.TestCase):
         self.assertFalse(manager.is_deferred_sigterm_pending())
         self.assertFalse(manager.failure_detected)
 
+    def test_infinite_timeout_defers_first_sigterm_without_fallback_timer(self):
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    DEFER_FIRST_SIGTERM_ENV: DEFER_FIRST_SIGTERM_VALUE,
+                    DEFER_FIRST_SIGTERM_SECONDS_ENV: "-1",
+                },
+            ),
+            patch("rtp_llm.utils.process_manager.threading.Timer") as timer_cls,
+        ):
+            manager = ProcessManager(
+                shutdown_timeout=-1,
+                monitor_interval=0.01,
+                allow_defer_first_sigterm=True,
+            )
+            manager._signal_handler(signal.SIGTERM, None)
+
+        timer_cls.assert_not_called()
+        self.assertFalse(manager.shutdown_requested)
+        self.assertTrue(manager.is_deferred_sigterm_pending())
+
     def test_deferred_backend_group_gets_staged_sigint(self):
         """Parent-staged backend shutdown must not look like duplicate
         cgroup SIGTERM noise to backend children."""
@@ -995,6 +1025,43 @@ class TestFailureShutdownPaths(unittest.TestCase):
             self.manager._sigterm_deferred_groups()
 
         self.assertEqual(signals, [(123456, signal.SIGINT)])
+
+    def test_failure_shutdown_sends_sigint_to_deferred_backend_group(self):
+        """A frontend/DashSc crash must wake the nested backend manager.
+
+        The backend manager deliberately defers its first SIGTERM, so failure
+        shutdown uses the explicit SIGINT handoff for that direct child while
+        ordinary frontend children still receive SIGTERM.
+        """
+
+        class FakeProcess:
+            _popen = object()
+
+            def __init__(self, name, pid):
+                self.name = name
+                self.pid = pid
+
+            def is_alive(self):
+                return True
+
+        frontend = FakeProcess("frontend", 123456)
+        backend = FakeProcess("backend", 123457)
+        self.manager.add_process(frontend, shutdown_group="frontend")
+        self.manager.add_process(backend, shutdown_group="backend")
+
+        signals = []
+        with patch(
+            "os.kill", side_effect=lambda pid, sig: signals.append((pid, sig))
+        ):
+            self.manager._terminate_processes(drain_timeout=0, staged=False)
+
+        self.assertEqual(
+            signals,
+            [
+                (frontend.pid, signal.SIGTERM),
+                (backend.pid, signal.SIGINT),
+            ],
+        )
 
     def test_backend_shutdown_lingers_after_frontend_drain(self):
         events = []
@@ -1208,8 +1275,15 @@ class TestFailureShutdownPaths(unittest.TestCase):
             self.assertEqual(ProcessManager.sync_shutdown_timeout_env(123), 123)
             self.assertEqual(os.environ[SHUTDOWN_TIMEOUT_ENV], "123")
 
-            self.assertEqual(ProcessManager.sync_shutdown_timeout_env(-1), 600)
-            self.assertEqual(os.environ[SHUTDOWN_TIMEOUT_ENV], "600")
+            self.assertEqual(ProcessManager.sync_shutdown_timeout_env(-1), -1)
+            self.assertEqual(os.environ[SHUTDOWN_TIMEOUT_ENV], "-1")
+
+    def test_shutdown_timeout_normalization_only_coerces_invalid_values(self):
+        self.assertEqual(ProcessManager.normalize_shutdown_timeout_seconds(-1), -1)
+        self.assertEqual(ProcessManager.normalize_shutdown_timeout_seconds(0), 600)
+        self.assertEqual(ProcessManager.normalize_shutdown_timeout_seconds(-2), 600)
+        self.assertEqual(ProcessManager.normalize_shutdown_timeout_seconds("bad"), 600)
+        self.assertIsNone(ProcessManager.deferred_group_shutdown_timeout_seconds(-1))
 
     def test_deferred_group_budget_includes_stop_timeout_headroom(self):
         """Parent backend wait must outlive the C++ gRPC stop timeout."""
@@ -1673,6 +1747,16 @@ class TestFailureShutdownPaths(unittest.TestCase):
         with patch("os._exit") as mock_exit:
             self.manager.monitor_and_release_processes()
             mock_exit.assert_not_called()
+
+    def test_unrequested_clean_child_exit_still_exits_parent_nonzero(self):
+        """Exit code 0 is only graceful after the parent requested shutdown."""
+        self.manager.add_process(_FakeProc("frontend", alive=False, exitcode=0))
+
+        with patch("os._exit") as mock_exit:
+            self.manager.monitor_and_release_processes()
+
+        self.assertTrue(self.manager.failure_detected)
+        mock_exit.assert_called_once_with(1)
 
     # --- normal SIGTERM with alive backend keeps -1 semantics ---------------
 
