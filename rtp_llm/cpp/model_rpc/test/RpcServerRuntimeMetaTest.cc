@@ -4,40 +4,44 @@
 
 namespace rtp_llm::test {
 
-TEST(RpcServerRuntimeMetaTest, EnqueuePendingReportsPendingPhase) {
-    RpcServerRuntimeMeta meta;
+namespace {
 
-    meta.enqueuePending(/*request_id=*/101, /*input_length=*/2048);
+class RuntimeMetaTestStream: public GenerateStream {
+public:
+    explicit RuntimeMetaTestStream(const std::shared_ptr<GenerateInput>& input):
+        GenerateStream(input, modelConfig(), RuntimeConfig{}, ResourceContext{}, nullptr) {}
+
+    ErrorResult<GenerateOutputs> nextOutput() override {
+        return ErrorResult<GenerateOutputs>(GenerateOutputs{});
+    }
+
+    void updateOutput(const StreamUpdateInfo&) override {}
+
+private:
+    static ModelConfig modelConfig() {
+        ModelConfig config;
+        config.max_seq_len = 4096;
+        return config;
+    }
+};
+
+}  // namespace
+
+TEST(RpcServerRuntimeMetaTest, EnqueueReadsBatchIdFromStreamInput) {
+    RpcServerRuntimeMeta meta;
+    auto                 input = std::make_shared<GenerateInput>();
+    input->request_id          = 101;
+    input->group_id            = 77;
+    input->generate_config     = std::make_shared<GenerateConfig>();
+    input->input_ids           = torch::tensor({1, 2, 3}, torch::kInt32);
+    auto stream                = std::make_shared<RuntimeMetaTestStream>(input);
+
+    meta.enqueue(input->request_id, stream);
 
     auto info = meta.getEngineScheduleInfo(/*latest_finished_version=*/-1);
     ASSERT_EQ(info.running_task_info_list.size(), 1);
-    EXPECT_TRUE(info.finished_task_info_list.empty());
     EXPECT_EQ(info.running_task_info_list[0].request_id, 101);
-    EXPECT_EQ(info.running_task_info_list[0].input_length, 2048);
-    EXPECT_EQ(info.running_task_info_list[0].prefix_length, 0);
-    EXPECT_EQ(info.running_task_info_list[0].phase, TaskPhase::PENDING);
-}
-
-TEST(RpcServerRuntimeMetaTest, FinishTaskMovesPendingToFinishedWithErrorDetails) {
-    RpcServerRuntimeMeta meta;
-
-    meta.enqueuePending(/*request_id=*/202, /*input_length=*/1024);
-    meta.finishTask(/*request_id=*/202,
-                    /*input_length=*/1024,
-                    /*prefix_length=*/128,
-                    /*error_code=*/13,
-                    /*error_message=*/"decode alloc failed");
-
-    auto info = meta.getEngineScheduleInfo(/*latest_finished_version=*/-1);
-    EXPECT_TRUE(info.running_task_info_list.empty());
-    ASSERT_EQ(info.finished_task_info_list.size(), 1);
-    const auto& finished = info.finished_task_info_list[0];
-    EXPECT_EQ(finished.request_id, 202);
-    EXPECT_EQ(finished.input_length, 1024);
-    EXPECT_EQ(finished.prefix_length, 128);
-    EXPECT_EQ(finished.error_code, 13);
-    EXPECT_EQ(finished.error_message, "decode alloc failed");
-    EXPECT_GE(info.latest_finished_version, 0);
+    EXPECT_EQ(info.running_task_info_list[0].batch_id, 77);
 }
 
 TEST(RpcServerRuntimeMetaTest, FinishTaskWithoutPendingStillReportsFailure) {

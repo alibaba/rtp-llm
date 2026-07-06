@@ -1,11 +1,11 @@
 """
 Integration tests for PDSepConfig and RuntimeConfig pickle serialization.
 
-These tests verify the backward-compatible pickle support added in Task 4 Phase A:
+These tests verify the backward-compatible pickle support:
 1. PDSepConfig.prefill_stop_stream_wait_timeout_ms field exists and is read/write accessible
-2. PDSepConfig pickle round-trip with all 27 fields preserves values
-3. Legacy 20-item PDSepConfig state (pre-batch-timeout era) can be deserialized,
-   with missing fields using their default values
+2. PDSepConfig pickle round-trip with all 22 fields preserves values
+3. Legacy PDSepConfig states (25/26/27-item with removed batch coordination settings)
+   can be deserialized, with missing fields using their default values
 4. Legacy 13-item RuntimeConfig state (pre-specify_gpu_arch era) can be deserialized,
    with missing fields using their default values
 
@@ -16,7 +16,7 @@ Running prerequisites:
   or:
     python -m unittest rtp_llm.test.test_pdsep_config_pickle
 
-PDSepConfig __getstate__ field layout (27 items):
+PDSepConfig __getstate__ field layout (22 items):
   0:  role_type                          (RoleType)
   1:  cache_store_rdma_mode              (bool)
   2:  cache_store_listen_port            (int64)
@@ -28,7 +28,7 @@ PDSepConfig __getstate__ field layout (27 items):
   8:  prefill_retry_timeout_ms           (int64)
   9:  prefill_max_wait_timeout_ms        (int64)
   10: decode_retry_times                 (int64)
-  11: decode_retry_timeout_ms            (int64)
+  11: decode_retry_timeout_ms           (int64)
   12: decode_retry_interval_ms           (int64)
   13: decode_polling_kv_cache_step_ms    (int64)
   14: decode_polling_call_prefill_ms     (int64)
@@ -37,14 +37,14 @@ PDSepConfig __getstate__ field layout (27 items):
   17: max_rpc_timeout_ms                 (int64)
   18: worker_port_offset                 (int64)
   19: decode_entrance                    (bool)
-  -- minimum 20 (legacy baseline) --
-  20: batch_dispatch_timeout_ms          (int64)   [if size >= 23]
-  21: batch_prepare_timeout_ms           (int64)   [if size >= 23]
-  22: batch_load_timeout_ms              (int64)   [if size >= 23]
-  23: prefill_enqueue_pool_size          (int64)   [if size >= 26]
-  24: prefill_worker_lambda_pool_size    (int64)   [if size >= 26]
-  25: prefill_slot_pool_size             (int64)   [if size >= 26]
-  26: prefill_stop_stream_wait_timeout_ms (int64)  [if size >= 27]
+  -- minimum 20 (legacy baseline, no longer accepted; must be 22 or >= 25) --
+  20: prefill_slot_pool_size             (int64)
+  21: prefill_stop_stream_wait_timeout_ms (int64)
+
+  Legacy formats with removed batch coordination settings (25-27 items) are
+  accepted for backward compatibility. The removed fields were:
+    batch_dispatch_timeout_ms, batch_prepare_timeout_ms, batch_load_timeout_ms,
+    prefill_enqueue_pool_size, prefill_worker_lambda_pool_size
 
 RuntimeConfig __getstate__ field layout (14 items):
   0:  max_generate_batch_size       (int64)
@@ -117,14 +117,22 @@ class TestPDSepConfigPickle(unittest.TestCase):
         cfg.prefill_stop_stream_wait_timeout_ms = 12345
         self.assertEqual(cfg.prefill_stop_stream_wait_timeout_ms, 12345)
 
-    # -- A2: full 27-item round-trip --
+    def test_prefill_slot_pool_size_exists(self):
+        """prefill_slot_pool_size field exists, has default 0, and is writable."""
+        cfg = PDSepConfig()
+        self.assertTrue(hasattr(cfg, "prefill_slot_pool_size"))
+        self.assertEqual(cfg.prefill_slot_pool_size, 0)
 
-    def test_pickle_roundtrip_27_fields(self):
-        """Full 27-item pickle round-trip preserves all field values."""
+        cfg.prefill_slot_pool_size = 42
+        self.assertEqual(cfg.prefill_slot_pool_size, 42)
+
+    # -- A2: full 22-item round-trip --
+
+    def test_pickle_roundtrip_22_fields(self):
+        """Full 22-item pickle round-trip preserves all field values."""
         cfg = PDSepConfig()
         cfg.prefill_stop_stream_wait_timeout_ms = 9999
         cfg.prefill_slot_pool_size = 42
-        cfg.batch_dispatch_timeout_ms = 7777
         cfg.decode_entrance = True
         cfg.load_cache_timeout_ms = 123456
 
@@ -133,107 +141,99 @@ class TestPDSepConfigPickle(unittest.TestCase):
 
         self.assertEqual(restored.prefill_stop_stream_wait_timeout_ms, 9999)
         self.assertEqual(restored.prefill_slot_pool_size, 42)
-        self.assertEqual(restored.batch_dispatch_timeout_ms, 7777)
         self.assertTrue(restored.decode_entrance)
         self.assertEqual(restored.load_cache_timeout_ms, 123456)
 
-    def test_pickle_state_has_27_items(self):
-        """__getstate__ produces exactly 27 items."""
+    def test_pickle_state_has_22_items(self):
+        """__getstate__ produces exactly 22 items."""
         cfg = PDSepConfig()
         state = cfg.__reduce_ex__(2)[2]
-        self.assertEqual(len(state), 27)
+        self.assertEqual(len(state), 22)
 
-    # -- A2: legacy 20-item deserialization --
+    # -- A3: legacy 27-item deserialization (with removed batch coordination settings) --
 
-    def test_unpickle_legacy_20_items(self):
-        """Legacy 20-item tuple (pre-batch-timeout) deserializes; missing fields use defaults."""
+    def test_unpickle_legacy_27_items(self):
+        """Legacy 27-item tuple (with removed batch coordination settings) deserializes correctly."""
         cfg = PDSepConfig()
-        state = cfg.__reduce_ex__(2)[2]
+        current_state = cfg.__reduce_ex__(2)[2]  # 22 items
 
-        # Truncate to 20 items (the original baseline before batch timeout fields)
-        legacy_state = tuple(state[:20])
+        # Build a 27-item legacy state by inserting the 5 removed fields at indices 20-24
+        legacy_state = list(current_state[:20])
+        legacy_state.extend(
+            [60000, 10000, 10000, 0, 0]
+        )  # removed batch coordination settings
+        legacy_state.extend(
+            current_state[20:]
+        )  # prefill_slot_pool_size, prefill_stop_stream_wait_timeout_ms
 
-        restored = _unpickle_from_state(PDSepConfig, legacy_state)
+        restored = _unpickle_from_state(PDSepConfig, tuple(legacy_state))
 
-        # Fields 0-19 are preserved (all defaults since we used a fresh PDSepConfig)
+        # Fields 0-19 should be preserved (all defaults since we used a fresh PDSepConfig)
         self.assertFalse(restored.decode_entrance)  # field 19
 
-        # Fields 20-22 (batch timeouts) should use defaults
-        self.assertEqual(restored.batch_dispatch_timeout_ms, 60000)
-        self.assertEqual(restored.batch_prepare_timeout_ms, 10000)
-        self.assertEqual(restored.batch_load_timeout_ms, 10000)
-
-        # Fields 23-25 (prefill pools) should use defaults
-        self.assertEqual(restored.prefill_enqueue_pool_size, 0)
-        self.assertEqual(restored.prefill_worker_lambda_pool_size, 0)
+        # prefill_slot_pool_size should be preserved (from legacy index 25)
         self.assertEqual(restored.prefill_slot_pool_size, 0)
 
-        # Field 26 (prefill_stop_stream_wait_timeout_ms) should use default
+        # prefill_stop_stream_wait_timeout_ms should be preserved (from legacy index 26)
         self.assertEqual(restored.prefill_stop_stream_wait_timeout_ms, 2000)
 
-    def test_unpickle_legacy_20_items_with_custom_values(self):
-        """Legacy 20-item tuple with custom values preserves them; missing fields get defaults."""
+    def test_unpickle_legacy_27_items_with_custom_values(self):
+        """Legacy 27-item tuple with custom values preserves them."""
         cfg = PDSepConfig()
-        state = cfg.__reduce_ex__(2)[2]
+        current_state = cfg.__reduce_ex__(2)[2]  # 22 items
 
-        # Modify some fields in the 20-item legacy state
-        legacy_state = list(state[:20])
+        legacy_state = list(current_state[:20])
+        legacy_state.extend(
+            [60000, 10000, 10000, 0, 0]
+        )  # removed batch coordination settings
+        legacy_state.extend(
+            [99, 8888]
+        )  # prefill_slot_pool_size, prefill_stop_stream_wait_timeout_ms
         legacy_state[16] = 99999  # load_cache_timeout_ms
         legacy_state[19] = True  # decode_entrance
 
         restored = _unpickle_from_state(PDSepConfig, tuple(legacy_state))
 
-        # Modified fields should be preserved
         self.assertEqual(restored.load_cache_timeout_ms, 99999)
         self.assertTrue(restored.decode_entrance)
-
-        # Missing fields should use defaults
-        self.assertEqual(restored.batch_dispatch_timeout_ms, 60000)
-        self.assertEqual(restored.prefill_slot_pool_size, 0)
-        self.assertEqual(restored.prefill_stop_stream_wait_timeout_ms, 2000)
-
-    # -- Additional boundary tests --
-
-    def test_unpickle_legacy_23_items(self):
-        """23-item tuple (with batch timeouts, without prefill pools) deserializes correctly."""
-        cfg = PDSepConfig()
-        state = cfg.__reduce_ex__(2)[2]
-
-        legacy_state = tuple(state[:23])
-        restored = _unpickle_from_state(PDSepConfig, legacy_state)
-
-        # Fields 20-22 should be preserved
-        self.assertEqual(restored.batch_dispatch_timeout_ms, 60000)
-        self.assertEqual(restored.batch_prepare_timeout_ms, 10000)
-        self.assertEqual(restored.batch_load_timeout_ms, 10000)
-
-        # Fields 23-26 should use defaults
-        self.assertEqual(restored.prefill_enqueue_pool_size, 0)
-        self.assertEqual(restored.prefill_worker_lambda_pool_size, 0)
-        self.assertEqual(restored.prefill_slot_pool_size, 0)
-        self.assertEqual(restored.prefill_stop_stream_wait_timeout_ms, 2000)
+        self.assertEqual(restored.prefill_slot_pool_size, 99)
+        self.assertEqual(restored.prefill_stop_stream_wait_timeout_ms, 8888)
 
     def test_unpickle_legacy_26_items(self):
-        """26-item tuple (with prefill pools, without stop_stream_wait) deserializes correctly."""
+        """26-item tuple (with batch config + prefill_slot_pool_size, without stop_stream_wait) deserializes."""
         cfg = PDSepConfig()
-        state = cfg.__reduce_ex__(2)[2]
+        current_state = cfg.__reduce_ex__(2)[2]  # 22 items
 
-        legacy_state = tuple(state[:26])
-        restored = _unpickle_from_state(PDSepConfig, legacy_state)
+        legacy_state = list(current_state[:20])
+        legacy_state.extend(
+            [60000, 10000, 10000, 0, 0]
+        )  # removed batch coordination settings
+        legacy_state.append(42)  # prefill_slot_pool_size at index 25
 
-        # Field 25 should be preserved
-        self.assertEqual(restored.prefill_slot_pool_size, 0)
+        restored = _unpickle_from_state(PDSepConfig, tuple(legacy_state))
 
-        # Field 26 should use default
+        self.assertEqual(restored.prefill_slot_pool_size, 42)
+        # prefill_stop_stream_wait_timeout_ms should use default (omitted in legacy format)
         self.assertEqual(restored.prefill_stop_stream_wait_timeout_ms, 2000)
 
+    # -- A4: invalid sizes --
+
     def test_unpickle_too_short_raises(self):
-        """Tuple with fewer than 20 items raises an error."""
+        """Tuple with fewer than 22 items (and < 25) raises an error."""
         cfg = PDSepConfig()
         state = cfg.__reduce_ex__(2)[2]
 
-        # 19 items - below the minimum of 20
-        short_state = tuple(state[:19])
+        # 20 items - below the minimum of 22 (or >= 25 for legacy)
+        short_state = tuple(state[:20])
+        with self.assertRaises(Exception):
+            _unpickle_from_state(PDSepConfig, short_state)
+
+    def test_unpickle_21_items_raises(self):
+        """21-item tuple raises an error (not 22, not >= 25)."""
+        cfg = PDSepConfig()
+        state = cfg.__reduce_ex__(2)[2]
+
+        short_state = tuple(state[:21])
         with self.assertRaises(Exception):
             _unpickle_from_state(PDSepConfig, short_state)
 
