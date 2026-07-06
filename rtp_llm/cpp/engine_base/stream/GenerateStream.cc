@@ -62,7 +62,7 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
         loss_ = torch::zeros({(int64_t)inputLength() - 1}, torch::kFloat32);
     }
     if (generate_input_->generate_config->return_softmax_probs) {
-        softmax_probs_ = torch::zeros({(int64_t)init_batch_size, (int64_t)max_seq_len_}, torch::kFloat32);
+        softmax_probs_ = torch::zeros({(int64_t)maxBatchSize(), (int64_t)max_seq_len_}, torch::kFloat32);
     }
     if (generate_input_->generate_config->return_all_hidden_states) {
         setReturnLastHiddenStates(true);
@@ -175,9 +175,12 @@ rtp_llm::SpecialTokens GenerateStream::specialTokens() const {
 int GenerateStream::batchSize(int output_len) const {
     if (generate_input_->generate_config->hasNumBeams()) {
         return numBeams(output_len);
-    } else {
-        return std::max(numReturnSequences(), 1);
     }
+    // The prompt is executed once; num_return_sequences fans out from the first sampling step.
+    if (output_len == 0 && !perf_test_) {
+        return 1;
+    }
+    return std::max(numReturnSequences(), 1);
 }
 
 int GenerateStream::currentBatchSize() const {
@@ -860,7 +863,7 @@ bool GenerateStream::updateKvCacheBlocks(const torch::Tensor& src_batch_indices)
 
 void GenerateStream::updateLogitProcessorMultiSeqStatus(const torch::Tensor& src_batch_indices) {
     RTP_LLM_PROFILE_FUNCTION();
-    if (!src_batch_indices.defined() || !hasNumBeams()) {
+    if (!src_batch_indices.defined()) {
         return;
     }
 

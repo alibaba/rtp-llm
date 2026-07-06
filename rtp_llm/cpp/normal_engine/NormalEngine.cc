@@ -169,7 +169,8 @@ absl::StatusOr<GenerateStreamPtr> NormalEngine::preRun(const std::shared_ptr<Gen
                                                          resource_context_,
                                                          nullptr,
                                                          0,
-                                                         mode == preRunMode::prefill_warm_up);
+                                                         mode == preRunMode::prefill_warm_up
+                                                             || mode == preRunMode::decode_warm_up);
     if (mode == preRunMode::decode_warm_up) {
         stream->setIsContextStream(false);
         size_t seq_size_per_block = model_config_.attn_config.tokens_per_block;

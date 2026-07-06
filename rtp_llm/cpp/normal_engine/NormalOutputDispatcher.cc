@@ -16,26 +16,32 @@ absl::Status NormalOutputDispatcher::dispatch(const StreamGroups& stream_groups,
     const auto&  sampler_output       = merge_outputs.sampler_output;
     const size_t total_batch_size_out = stream_groups.totalSamplerBatchSizeOut();
     RTP_LLM_CHECK(total_batch_size_out == (size_t)sampler_output.token_ids.size(0));
+    if (sampler_output.success.defined()) {
+        RTP_LLM_CHECK(stream_groups.totalSamplerBatchSizeIn() == (size_t)sampler_output.success.size(0));
+    }
     // token_ids and success may be CUDA tensors (Sampler keeps them on GPU to avoid D2H sync during sampling).
     // Move to CPU once here so dispatchSingleStream can use data_ptr safely.
     const torch::Tensor token_ids_cpu =
         sampler_output.token_ids.defined() ? sampler_output.token_ids.cpu() : torch::Tensor();
     RTP_LLM_LOG_DEBUG("new_all_token_ids = [%s]", tensorDebugStringWithData<int32_t>(token_ids_cpu).c_str());
     const torch::Tensor success_cpu = sampler_output.success.defined() ? sampler_output.success.cpu() : torch::Tensor();
-    int                 batch_idx_in     = 0;
-    int                 batch_idx_out    = 0;
-    int                 token_offset     = 0;
-    bool                return_all_probs = stream_groups.needReturnAllProbs() != ReturnAllProbsMode::NONE;
-    auto                new_tokens_all   = torch::empty({(int64_t)total_batch_size_out, 1}, torch::kInt32);
+    int                 batch_idx_in         = 0;
+    int                 sampler_batch_idx_in = 0;
+    int                 batch_idx_out        = 0;
+    int                 token_offset         = 0;
+    bool                return_all_probs     = stream_groups.needReturnAllProbs() != ReturnAllProbsMode::NONE;
+    auto                new_tokens_all       = torch::empty({(int64_t)total_batch_size_out, 1}, torch::kInt32);
 
     for (auto& stream : stream_groups.allStreams()) {
-        auto cur_batch_size  = stream->currentBatchSize();
-        auto next_batch_size = stream->nextBatchSize();
-        auto token_size      = stream->currentExecuteTokenSize();
+        auto cur_batch_size     = stream->currentBatchSize();
+        auto sampler_batch_size = stream->needTilingForSampling() ? stream->nextBatchSize() : cur_batch_size;
+        auto next_batch_size    = stream->nextBatchSize();
+        auto token_size         = stream->currentExecuteTokenSize();
 
         dispatchSingleStream(stream,
                              merge_outputs,
                              batch_idx_in,
+                             sampler_batch_idx_in,
                              batch_idx_out,
                              token_offset,
                              return_all_probs,
@@ -44,6 +50,7 @@ absl::Status NormalOutputDispatcher::dispatch(const StreamGroups& stream_groups,
                              success_cpu);
 
         batch_idx_in += cur_batch_size;
+        sampler_batch_idx_in += sampler_batch_size;
         batch_idx_out += next_batch_size;
         token_offset += token_size;
     }
@@ -55,6 +62,7 @@ absl::Status NormalOutputDispatcher::dispatch(const StreamGroups& stream_groups,
 void NormalOutputDispatcher::dispatchSingleStream(GenerateStreamPtr    stream,
                                                   const MergedOutput&  merge_outputs,
                                                   int                  batch_idx_in,
+                                                  int                  sampler_batch_idx_in,
                                                   int                  batch_idx_out,
                                                   int                  token_offset,
                                                   bool                 return_all_probs,
@@ -67,9 +75,10 @@ void NormalOutputDispatcher::dispatchSingleStream(GenerateStreamPtr    stream,
     const auto&  new_all_token_ids = token_ids_cpu;
     const size_t token_stride      = new_all_token_ids.size(1);
 
-    auto cur_batch_size  = stream->currentBatchSize();
-    auto next_batch_size = stream->nextBatchSize();
-    auto token_size      = stream->currentExecuteTokenSize();
+    auto cur_batch_size     = stream->currentBatchSize();
+    auto sampler_batch_size = stream->needTilingForSampling() ? stream->nextBatchSize() : cur_batch_size;
+    auto next_batch_size    = stream->nextBatchSize();
+    auto token_size         = stream->currentExecuteTokenSize();
 
     auto batch_new_all_token_ids = new_all_token_ids.narrow(0, batch_idx_out, next_batch_size);
 
@@ -148,8 +157,8 @@ void NormalOutputDispatcher::dispatchSingleStream(GenerateStreamPtr    stream,
         }
     }
 
-    for (int i = 0; i < cur_batch_size; ++i) {
-        if (success_cpu.defined() && !(success_cpu.data_ptr<bool>()[batch_idx_in + i])) {
+    for (int i = 0; i < sampler_batch_size; ++i) {
+        if (success_cpu.defined() && !(success_cpu.data_ptr<bool>()[sampler_batch_idx_in + i])) {
             stream->reportError(ErrorCode::UNKNOWN_ERROR, "sampler generate token id failed");
         }
     }

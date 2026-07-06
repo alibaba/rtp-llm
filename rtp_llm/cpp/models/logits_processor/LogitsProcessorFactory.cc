@@ -23,13 +23,17 @@ LogitsProcessorFactory::createLogitsProcessors(std::shared_ptr<GenerateInput> ge
         result.push_back(std::static_pointer_cast<BaseLogitsProcessor>(think_processor));
     }
 
-    auto tree_processor = TreeLogitsProcessor::fromGenerateInput(generate_input, init_batch_size);
+    const bool need_return_sequence_tiling =
+        !generate_input->generate_config->hasNumBeams() && max_batch_size > init_batch_size;
+    const int32_t state_batch_size = need_return_sequence_tiling ? max_batch_size : init_batch_size;
+
+    auto tree_processor = TreeLogitsProcessor::fromGenerateInput(generate_input, state_batch_size);
     if (tree_processor != nullptr) {
         result.push_back(std::static_pointer_cast<BaseLogitsProcessor>(tree_processor));
     }
 
     // 生成式推荐：combo 粒度去重 + 曝光过滤
-    auto rec_processor = RecommendationLogitsProcessor::fromGenerateInput(generate_input, init_batch_size);
+    auto rec_processor = RecommendationLogitsProcessor::fromGenerateInput(generate_input, state_batch_size);
     if (rec_processor != nullptr) {
         result.push_back(std::static_pointer_cast<BaseLogitsProcessor>(rec_processor));
     }
