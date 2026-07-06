@@ -1,6 +1,7 @@
 #include "rtp_llm/cpp/disaggregate/cache_store/TcpCacheStoreLoadServiceClosure.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/MemoryUtil.h"
+#include <exception>
 #include <torch/torch.h>
 #include "rtp_llm/cpp/disaggregate/cache_store/CacheStoreUtil.h"
 #include "rtp_llm/cpp/utils/DevicePin.h"
@@ -21,8 +22,18 @@ TcpCacheStoreLoadServiceClosure::~TcpCacheStoreLoadServiceClosure() {
 }
 
 void TcpCacheStoreLoadServiceClosure::Run() {
-    setCurrentThreadDeviceIfNeeded(device_id_);
     collector_->markRequestCallEnd(currentTimeUs() - response_->response_send_start_time_us());
+    try {
+        setCurrentThreadDeviceIfNeeded(device_id_);
+    } catch (const std::exception& e) {
+        RTP_LLM_LOG_WARNING("cache load request device pin failed, error is %s", e.what());
+        end(false, CacheStoreErrorCode::LoadErrorUnknown);
+        return;
+    } catch (...) {
+        RTP_LLM_LOG_WARNING("cache load request device pin failed with unknown error");
+        end(false, CacheStoreErrorCode::LoadErrorUnknown);
+        return;
+    }
 
     if (controller_->Failed()) {
         RTP_LLM_LOG_WARNING("cache load request failed, controller err is %d", controller_->GetErrorCode());

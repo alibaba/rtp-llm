@@ -31,12 +31,14 @@ void execNoBlockCopy(const MultiCopyParams& params) {
                             params.multi_src.size(),
                             params.multi_dst.size());
 
+    const bool has_cuda_tensor =
+        !params.multi_dst.empty() && (params.multi_dst[0].is_cuda() || params.multi_src[0].is_cuda());
     const int            copy_device = getCopyDevice(params);
     c10::cuda::CUDAGuard device_guard(copy_device);
 
     auto stream = getNoBlockCopyStream(copy_device).stream();
 
-    if (params.split_kv_layer_num > 0) {
+    if (params.split_kv_layer_num > 0 && has_cuda_tensor) {
         if (splitKvMultiCopy(params.multi_src,
                              params.multi_dst,
                              params.split_kv_layer_num,
