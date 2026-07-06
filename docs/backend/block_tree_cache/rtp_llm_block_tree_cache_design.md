@@ -170,8 +170,8 @@ KVCacheManager
 │   ├── Component[] (纯描述性对象：MemoryBlockLayerTagSlot 布局 + 所属 group + type)
 │   │
 │   ├── ThreadPool ★ 异步淘汰任务线程池（执行 EvictionTask：数据搬运 + write-through）
-│   ├── HostBlockPool (CPU 物理内存池，合并 ComponentGroup，DSV4: 2 个 pool)
-│   ├── DiskBlockPool (磁盘池，镜像 HostBlockPool)
+│   ├── host_pool_ (BlockPool, AllocationType::HOST，CPU 物理内存池，同 group 多 device block 打包为 1 个 host block)
+│   ├── DiskBlockPool (磁盘池，镜像 host_pool_)
 │   ├── CopyEngine (GPU↔CPU↔Disk 数据搬运，依赖 MemoryBlockLayerTagSlot 计算 offset)
 │   ├── BroadcastManager (TP 广播，从 KVCacheMemoryConnector 移入)
 │   └── StorageBackend ★ 新接口（可插拔远端后端）
