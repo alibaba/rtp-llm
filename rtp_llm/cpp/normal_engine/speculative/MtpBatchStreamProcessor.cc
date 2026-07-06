@@ -8,6 +8,44 @@
 
 namespace rtp_llm {
 
+void MtpBatchStreamProcessor::expandTargetVerifyPositionIds(const StreamGroups& stream_groups,
+                                                            GptModelInputs&     model_input) const {
+    if (!model_input.combo_position_ids.defined()) {
+        return;
+    }
+
+    const size_t position_id_len_factor = model_input_gatherer_config_.position_id_len_factor;
+    const size_t batch_size = model_input.combo_position_ids.numel() / position_id_len_factor;
+    auto target_combo_position_ids =
+        torch::empty({(int64_t)(batch_size * (propose_step_ + 1) * position_id_len_factor)}, torch::kInt32)
+            .pin_memory();
+
+    int* dst_position_ids = target_combo_position_ids.data_ptr<int>();
+    if (stream_groups.empty()) {
+        // Non-driver TP ranks only need a correctly shaped placeholder here; draftModelDecode broadcasts rank0's
+        // stream-derived combo_position_ids into this storage before target verify.
+        target_combo_position_ids.zero_();
+        model_input.combo_position_ids = std::move(target_combo_position_ids);
+        return;
+    }
+
+    size_t batch_idx = 0;
+    // Speculative decoding rejects num_return_sequences > 1 and beam search before this path.
+    for (const auto& stream : stream_groups.allStreams()) {
+        int* base_position_ids = dst_position_ids + batch_idx * (propose_step_ + 1) * position_id_len_factor;
+        stream->generateNextPositionId(base_position_ids);
+        for (int step = 0; step < propose_step_ + 1; ++step) {
+            int* step_position_ids = base_position_ids + step * position_id_len_factor;
+            for (size_t dim = 0; dim < position_id_len_factor; ++dim) {
+                step_position_ids[dim] = base_position_ids[dim] + step;
+            }
+        }
+        batch_idx++;
+    }
+
+    model_input.combo_position_ids = std::move(target_combo_position_ids);
+}
+
 absl::Status MtpBatchStreamProcessor::dispatchPrefill(const StreamGroups& stream_groups,
                                                       const MergedOutput& prefill_output,
                                                       const MergedOutput& propose_output) const {
@@ -190,6 +228,8 @@ void MtpBatchStreamProcessor::prepareOneStepSpecDecodeModelInput(const StreamGro
         batch_idx++;
     }
 
+    expandTargetVerifyPositionIds(stream_groups, model_input);
+
     // update model_input
     model_input.combo_tokens       = std::move(target_combo_tokens);
     model_input.prefix_lengths     = target_prefix_lengths;
@@ -217,13 +257,27 @@ void MtpBatchStreamProcessor::updateDecodeDraftModelInput(GptModelInputs&       
     // here combo_tokens is a device buffer
     model_input.combo_tokens = draft_token_ids.reshape({batch_size});
 
+    if (model_input.combo_position_ids.defined()) {
+        const size_t position_id_len_factor = model_input_gatherer_config_.position_id_len_factor;
+        auto         next_position_ids =
+            torch::empty({(int64_t)(batch_size * position_id_len_factor)}, torch::kInt32).pin_memory();
+        int* dst_position_ids = next_position_ids.data_ptr<int>();
+        const auto src_position_ids = model_input.combo_position_ids.cpu().contiguous();
+        const int* src              = src_position_ids.data_ptr<int>();
+        for (int64_t i = 0; i < next_position_ids.numel(); ++i) {
+            dst_position_ids[i] = src[i] + 1;
+        }
+        model_input.combo_position_ids = std::move(next_position_ids);
+    }
+
     model_input.sequence_lengths = model_input.sequence_lengths.cpu().clone().pin_memory();
     for (int i = 0; i < batch_size; i++) {
         model_input.sequence_lengths.data_ptr<int>()[i]++;
     }
 }
 
-void MtpBatchStreamProcessor::updatePrefillPostDraftModelInput(GptModelInputs&        model_input,
+void MtpBatchStreamProcessor::updatePrefillPostDraftModelInput(const StreamGroups&    stream_groups,
+                                                               GptModelInputs&        model_input,
                                                                const GptModelOutputs& model_output,
                                                                const SamplerOutput&   sampler_output) {
     model_input.last_hidden_states = model_output.all_hidden_states;
@@ -240,17 +294,58 @@ void MtpBatchStreamProcessor::updatePrefillPostDraftModelInput(GptModelInputs&  
     int* combo_tokens  = model_input.combo_tokens.data_ptr<int>();
 
     int offset = 0;
+    int* combo_position_ids =
+        model_input.combo_position_ids.defined() ? model_input.combo_position_ids.data_ptr<int>() : nullptr;
+    const size_t position_id_len_factor = model_input_gatherer_config_.position_id_len_factor;
+    auto all_streams = stream_groups.allStreams();
+    auto stream_it = all_streams.begin();
+    // Speculative decoding rejects num_return_sequences > 1 and beam search before this path.
     for (int i = 0; i < batch_size; i++) {
         // should shift one token for combo_tokens
         int input_length = input_lengths[i];
-        memcpy(combo_tokens + offset, combo_tokens + offset + 1, (input_length - 1) * sizeof(int));
+        memmove(combo_tokens + offset, combo_tokens + offset + 1, (input_length - 1) * sizeof(int));
 
         // set new token id
         int new_token_id = new_all_token_ids_cpu.data_ptr<int>()[i * token_stride + token_stride - 1];
         combo_tokens[offset + input_length - 1] = new_token_id;
 
+        if (combo_position_ids != nullptr) {
+            int* stream_position_ids = combo_position_ids + offset * position_id_len_factor;
+            memmove(stream_position_ids,
+                    stream_position_ids + position_id_len_factor,
+                    (input_length - 1) * position_id_len_factor * sizeof(int));
+            int* new_position_ids = stream_position_ids + (input_length - 1) * position_id_len_factor;
+            (*stream_it)->generateNextPositionId(new_position_ids);
+        }
         offset += input_length;
+        ++stream_it;
     }
+}
+
+torch::Tensor MtpBatchStreamProcessor::compactAcceptedPositionIds(const torch::Tensor&    combo_position_ids,
+                                                                  const std::vector<int>& accept_lens,
+                                                                  size_t total_accept_len) const {
+    if (!combo_position_ids.defined()) {
+        return torch::Tensor();
+    }
+
+    const size_t position_id_len_factor = model_input_gatherer_config_.position_id_len_factor;
+    auto         compact_position_ids =
+        torch::empty({(int64_t)(total_accept_len * position_id_len_factor)}, torch::kInt32).pin_memory();
+    const int* src_position_ids = combo_position_ids.data_ptr<int>();
+    int*       dst_position_ids = compact_position_ids.data_ptr<int>();
+
+    int token_offset = 0;
+    for (size_t i = 0; i < accept_lens.size(); ++i) {
+        for (int step = 0; step < accept_lens[i]; ++step) {
+            memcpy(dst_position_ids + (token_offset + step) * position_id_len_factor,
+                   src_position_ids + (i * (propose_step_ + 1) + step) * position_id_len_factor,
+                   position_id_len_factor * sizeof(int));
+        }
+        token_offset += accept_lens[i];
+    }
+
+    return compact_position_ids;
 }
 
 void MtpBatchStreamProcessor::updateDecodePostDraftModelInput(
@@ -292,6 +387,10 @@ void MtpBatchStreamProcessor::updateDecodePostDraftModelInput(
     hidden_states_d_t              = torch::cat(hidden_states_list).contiguous();
     model_input.last_hidden_states = hidden_states_d_t;
     model_input.lm_output_indexes  = std::move(lm_output_indexes);
+    auto compact_position_ids = compactAcceptedPositionIds(model_input.combo_position_ids, accept_lens, total_accept_len);
+    if (compact_position_ids.defined()) {
+        model_input.combo_position_ids = std::move(compact_position_ids);
+    }
 }
 
 void MtpBatchStreamProcessor::updateOneStepDraftSamplerOutput(const StreamGroups& stream_groups,
