@@ -846,7 +846,9 @@ def _silu_and_mul_post_quant_dense_packed_kernel(
             if GEMM1_ALPHA > 0:
                 gate = tl.minimum(gate, GEMM1_CLAMP_LIMIT)
                 up = tl.clamp(up, -GEMM1_CLAMP_LIMIT, GEMM1_CLAMP_LIMIT)
-                gate_up_bf16 = (gate * tl.sigmoid(gate * GEMM1_ALPHA) * (up + 1)).to(tl.bfloat16)
+                gate_up_bf16 = (gate * tl.sigmoid(gate * GEMM1_ALPHA) * (up + 1)).to(
+                    tl.bfloat16
+                )
             else:
                 silu_gate = gate / (1 + tl.exp(-gate))
                 gate_up_bf16 = (silu_gate * up).to(tl.bfloat16)
@@ -878,7 +880,9 @@ def _silu_and_mul_post_quant_dense_packed_kernel(
         if GEMM1_ALPHA > 0:
             gate = tl.minimum(gate, GEMM1_CLAMP_LIMIT)
             up = tl.clamp(up, -GEMM1_CLAMP_LIMIT, GEMM1_CLAMP_LIMIT)
-            gate_up_bf16 = (gate * tl.sigmoid(gate * GEMM1_ALPHA) * (up + 1)).to(tl.bfloat16)
+            gate_up_bf16 = (gate * tl.sigmoid(gate * GEMM1_ALPHA) * (up + 1)).to(
+                tl.bfloat16
+            )
         else:
             silu_gate = gate / (1 + tl.exp(-gate))
             gate_up_bf16 = (silu_gate * up).to(tl.bfloat16)
@@ -953,17 +957,25 @@ def silu_and_mul_per_token_group_fp8_quant_dense_packed_fwd(
 
     if T >= _SILU_MUL_FP8_QUANT_M_THRESHOLD:
         if gemm1_alpha > 0:
-            from rtp_llm.models_py.triton_kernels.common.swiglu_oai import swiglu_oai_torch
-            activated = swiglu_oai_torch(input, gemm1_alpha, gemm1_clamp_limit, gate_first=True)
+            from rtp_llm.models_py.triton_kernels.common.swiglu_oai import (
+                swiglu_oai_torch,
+            )
+
+            activated = swiglu_oai_torch(
+                input, gemm1_alpha, gemm1_clamp_limit, gate_first=True
+            )
         else:
             from rtp_llm.models_py.modules.base import FusedSiluAndMul
+
             activated = FusedSiluAndMul()(input)
         if mxfp8_mode:
-            from rtp_llm.models_py.kernels.cuda.mxfp8_ops import mxfp8_quant_act
-            return mxfp8_quant_act(activated)
+            from rtp_llm.models_py.kernels.cuda.mxfp8_ops import mxfp8_quant_act_packed
+
+            return mxfp8_quant_act_packed(activated)
         from rtp_llm.models_py.kernels.cuda.fp8_kernel import (
             sgl_per_token_group_quant_fp8,
         )
+
         return sgl_per_token_group_quant_fp8(
             activated,
             group_size=quant_group_size,
@@ -975,7 +987,9 @@ def silu_and_mul_per_token_group_fp8_quant_dense_packed_fwd(
     output = torch.empty((T, size_n), dtype=torch.float8_e4m3fn, device=input.device)
     if mxfp8_mode:
         output_scale = torch.empty(
-            (T, num_groups), dtype=torch.float32, device=input.device,
+            (T, num_groups),
+            dtype=torch.float32,
+            device=input.device,
         )
     else:
         output_scale = create_per_token_group_quant_fp8_output_scale(

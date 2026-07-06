@@ -26,6 +26,69 @@ _FP8_E4M3_MAX = torch.finfo(torch.float8_e4m3fn).max
 
 
 @triton.jit
+def _pack_flashinfer_mxfp8_scale_kernel(
+    scale_u8_ptr,
+    packed_ptr,
+    M: tl.constexpr,
+    K_GROUPS: tl.constexpr,
+    K_PACKED: tl.constexpr,
+    ALIGNED_MN: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_K_PACKED: tl.constexpr,
+):
+    pid_m = tl.program_id(0)
+    pid_k = tl.program_id(1)
+    offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    offs_kp = pid_k * BLOCK_K_PACKED + tl.arange(0, BLOCK_K_PACKED)
+    shifts = tl.arange(0, 4) * 8
+    offs_g = offs_kp[:, None] * 4 + tl.arange(0, 4)[None, :]
+    mask = (offs_m[:, None, None] < M) & (offs_g[None, :, :] < K_GROUPS)
+    vals = tl.load(
+        scale_u8_ptr + offs_m[:, None, None] * K_GROUPS + offs_g[None, :, :],
+        mask=mask,
+        other=0,
+    ).to(tl.int32)
+    packed = tl.sum(vals << shifts[None, None, :], axis=2).to(tl.int32)
+    tl.store(
+        packed_ptr + offs_m[:, None] + offs_kp[None, :] * ALIGNED_MN,
+        packed,
+        mask=(offs_m[:, None] < M) & (offs_kp[None, :] < K_PACKED),
+    )
+
+
+def pack_flashinfer_mxfp8_scale_triton(
+    scale_u8: torch.Tensor, M: int, K: int
+) -> torch.Tensor:
+    """Pack FlashInfer uint8 UE8M0 scales into DeepGEMM's int32 TMA layout."""
+    assert scale_u8.dtype == torch.uint8
+    assert scale_u8.numel() == M * (K // MX_BLOCK)
+    import deep_gemm
+
+    k_groups = K // MX_BLOCK
+    assert k_groups % 4 == 0
+    k_packed = k_groups // 4
+    aligned_mn = deep_gemm.get_tma_aligned_size(M, 4)
+    storage = torch.empty(
+        (k_packed, aligned_mn), device=scale_u8.device, dtype=torch.int32
+    )
+    packed = storage.transpose(0, 1)
+    grid = (triton.cdiv(M, 64), triton.cdiv(k_packed, 32))
+    with torch.cuda.device(scale_u8.device):
+        _pack_flashinfer_mxfp8_scale_kernel[grid](
+            scale_u8,
+            packed,
+            M=M,
+            K_GROUPS=k_groups,
+            K_PACKED=k_packed,
+            ALIGNED_MN=aligned_mn,
+            BLOCK_M=64,
+            BLOCK_K_PACKED=32,
+            num_warps=8,
+        )
+    return packed[:M, :]
+
+
+@triton.jit
 def _mxfp8_quant_act_kernel(
     x_ptr,
     q_ptr,

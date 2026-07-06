@@ -59,6 +59,14 @@ py_test (
 )
 
 py_test (
+    name = "mxfp8_quant_act_packed_test",
+    srcs = ["mxfp8_quant_act_packed_test.py"],
+    deps = py_test_deps,
+    tags = ["open_skip", "H20"],
+    exec_properties = {'gpu':'H20'},
+)
+
+py_test (
     name = "fp8_quant_gemm_microbench",
     srcs = ["fp8_quant_gemm_microbench.py"],
     deps = py_test_deps,
