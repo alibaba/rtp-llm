@@ -7732,10 +7732,11 @@ __global__ __launch_bounds__(kMegaBlockThreads, 1) void dsv4CpDistributedPrefill
             float online_max_second = use_dual_head_task ? attn_sink[head_second] : 0.0f;
             float online_denom_second = 1.0f;
 
-            int tile_key_pos[kMegaAttentionGroupedKeyTile];
-            int tile_key_is_compressed[kMegaAttentionGroupedKeyTile];
+            int* tile_key_pos = reduce_indices;
+            int* tile_key_is_compressed = reduce_indices_second;
 #define DSV4_MEGA_CONSUME_GROUPED_TILE(KEY_COUNT)                                                                        \
     do {                                                                                                                 \
+        __syncthreads();                                                                                                 \
         dsv4MegaLoadAttentionKeyTile<scalar_t>(kv,                                                                      \
                                                attention_cmp_k_cache,                                                    \
                                                attention_cmp_cu_lens,                                                    \
@@ -7810,33 +7811,25 @@ __global__ __launch_bounds__(kMegaBlockThreads, 1) void dsv4CpDistributedPrefill
                                                     acc_second);                                                         \
             }                                                                                                            \
         }                                                                                                                \
-        __syncthreads();                                                                                                 \
     } while (0)
             for (int i = 0; i < compressed_count;) {
-                int tile_count = 0;
-#pragma unroll
-                for (int key_i = 0; key_i < kMegaAttentionGroupedKeyTile; ++key_i) {
-                    if (i + key_i < compressed_count) {
-                        const int cmp_idx =
-                            sequential_compressed_count >= 0 ? i + key_i : row_compressed_indices[i + key_i];
-                        tile_key_pos[key_i] = use_compressed_cache ? cmp_idx : (cmp_idx + 1) * effective_compress_ratio - 1;
-                        tile_key_is_compressed[key_i] = use_compressed_cache ? 1 : 0;
-                        ++tile_count;
-                    }
+                const int tile_count = min_int(kMegaAttentionGroupedKeyTile, compressed_count - i);
+                if (tid < tile_count) {
+                    const int key_i = tid;
+                    const int cmp_idx =
+                        sequential_compressed_count >= 0 ? i + key_i : row_compressed_indices[i + key_i];
+                    tile_key_pos[key_i] = use_compressed_cache ? cmp_idx : (cmp_idx + 1) * effective_compress_ratio - 1;
+                    tile_key_is_compressed[key_i] = use_compressed_cache ? 1 : 0;
                 }
                 DSV4_MEGA_CONSUME_GROUPED_TILE(tile_count);
                 i += tile_count;
             }
             for (int pos = swa_start; pos < swa_end;) {
-                int tile_count = 0;
-#pragma unroll
-                for (int key_i = 0; key_i < kMegaAttentionGroupedKeyTile; ++key_i) {
-                    const int key_pos = pos + key_i;
-                    if (key_pos < swa_end) {
-                        tile_key_pos[key_i] = key_pos;
-                        tile_key_is_compressed[key_i] = 0;
-                        ++tile_count;
-                    }
+                const int tile_count = min_int(kMegaAttentionGroupedKeyTile, swa_end - pos);
+                if (tid < tile_count) {
+                    const int key_i = tid;
+                    tile_key_pos[key_i] = pos + key_i;
+                    tile_key_is_compressed[key_i] = 0;
                 }
                 DSV4_MEGA_CONSUME_GROUPED_TILE(tile_count);
                 pos += tile_count;
