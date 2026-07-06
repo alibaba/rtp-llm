@@ -1,8 +1,7 @@
 #include "rtp_llm/cpp/disaggregate/cache_store/TcpCacheStoreServiceImpl.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
-#include "rtp_llm/cpp/utils/DevicePin.h"
+#include "rtp_llm/cpp/disaggregate/cache_store/CacheStoreDevicePin.h"
 #include "rtp_llm/cpp/utils/Logger.h"
-#include <exception>
 #include <torch/torch.h>
 #include "rtp_llm/cpp/disaggregate/cache_store/TcpCacheStoreServiceImplContext.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/CacheTransferServiceImplContext.h"
@@ -96,15 +95,7 @@ void TcpCacheStoreServiceImpl::blockReadImpl(::google::protobuf::RpcController* 
                                              const ::BlockReadRequest*          request,
                                              BlockReadResponse*                 response,
                                              ::google::protobuf::Closure*       done) {
-    try {
-        setCurrentThreadDeviceIfNeeded(device_id_);
-    } catch (const std::exception& e) {
-        RTP_LLM_LOG_WARNING("cache store service block read device pin failed, error is %s", e.what());
-        response->set_error_code(KvCacheStoreServiceErrorCode::EC_FAILED_INTERNAL);
-        done->Run();
-        return;
-    } catch (...) {
-        RTP_LLM_LOG_WARNING("cache store service block read device pin failed with unknown error");
+    if (!tryPinThreadDevice(device_id_, "cache store service block read")) {
         response->set_error_code(KvCacheStoreServiceErrorCode::EC_FAILED_INTERNAL);
         done->Run();
         return;

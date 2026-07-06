@@ -1,8 +1,7 @@
 #include "rtp_llm/cpp/disaggregate/cache_store/TcpBlockReadClosure.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
-#include "rtp_llm/cpp/utils/DevicePin.h"
+#include "rtp_llm/cpp/disaggregate/cache_store/CacheStoreDevicePin.h"
 #include "rtp_llm/cpp/utils/Logger.h"
-#include <exception>
 #include <torch/torch.h>
 
 #include "rtp_llm/cpp/disaggregate/cache_store/CacheStoreUtil.h"
@@ -31,14 +30,7 @@ TcpBlockReadClosure::~TcpBlockReadClosure() {
 }
 
 void TcpBlockReadClosure::Run() {
-    try {
-        setCurrentThreadDeviceIfNeeded(device_id_);
-    } catch (const std::exception& e) {
-        RTP_LLM_LOG_WARNING("tcp transfer connection device pin failed, error is %s", e.what());
-        end(false, CacheStoreErrorCode::LoadErrorUnknown);
-        return;
-    } catch (...) {
-        RTP_LLM_LOG_WARNING("tcp transfer connection device pin failed with unknown error");
+    if (!tryPinThreadDevice(device_id_, "tcp transfer connection")) {
         end(false, CacheStoreErrorCode::LoadErrorUnknown);
         return;
     }

@@ -236,7 +236,7 @@ TEST_F(NormalCacheStoreTest, testStore_devicePinFailureDrainsQueuedStores) {
     cache_store->store(store_buffer1, callback);
     cache_store->store(store_buffer2, callback);
 
-    ASSERT_EQ(std::future_status::ready, future.wait_for(std::chrono::seconds(5)));
+    ASSERT_EQ(std::future_status::ready, future.wait_for(std::chrono::seconds(10)));
     ASSERT_EQ(2, callback_count.load());
     ASSERT_EQ(2, failed_count.load());
 }

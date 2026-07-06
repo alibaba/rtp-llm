@@ -1,12 +1,11 @@
 #include "rtp_llm/cpp/disaggregate/cache_store/NormalCacheStore.h"
+#include "rtp_llm/cpp/disaggregate/cache_store/CacheStoreDevicePin.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/Interface.h"
-#include "rtp_llm/cpp/utils/DevicePin.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
 #include "autil/LockFreeThreadPool.h"
 
 #include <cstring>
-#include <exception>
 #include <vector>
 
 namespace rtp_llm {
@@ -15,19 +14,6 @@ namespace {
 
 constexpr size_t kMaxDevicePinFailuresBeforeDrain = 3;
 constexpr int    kDevicePinRetryBackoffMs         = 1000;
-
-bool pinCacheStoreDevice(int device_id, const char* context) {
-    try {
-        setCurrentThreadDeviceIfNeeded(device_id);
-        return true;
-    } catch (const std::exception& e) {
-        RTP_LLM_LOG_WARNING("normal cache store %s device pin failed, error is %s", context, e.what());
-        return false;
-    } catch (...) {
-        RTP_LLM_LOG_WARNING("normal cache store %s device pin failed with unknown error", context);
-        return false;
-    }
-}
 
 }  // namespace
 
@@ -97,7 +83,7 @@ bool NormalCacheStore::init(const CacheStoreInitParams& params) {
         while (!thread_pool_close_) {
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
             if (!device_pinned) {
-                device_pinned = pinCacheStoreDevice(this->device_id_, "check task");
+                device_pinned = tryPinThreadDevice(this->device_id_, "normal cache store check task");
                 if (!device_pinned) {
                     ++device_pin_failures;
                     if (device_pin_failures < kMaxDevicePinFailuresBeforeDrain) {
@@ -178,7 +164,7 @@ void NormalCacheStore::store(const std::shared_ptr<RequestBlockBuffer>& request_
     };
     // task 只在threadpool中运行, threadpool退出前会清理所有running task, 用this是安全的
     auto task = [this, request_block_buffer, callback, collector]() {
-        if (!pinCacheStoreDevice(this->device_id_, "store task")) {
+        if (!tryPinThreadDevice(this->device_id_, "normal cache store store task")) {
             collector->markEnd(false);
             callback(false, CacheStoreErrorCode::StoreFailed);
             return;
@@ -261,7 +247,7 @@ void NormalCacheStore::load(const std::shared_ptr<RequestBlockBuffer>& request_b
                  collector,
                  partition_count,
                  partition_id]() {
-        if (!pinCacheStoreDevice(this->device_id_, "load task")) {
+        if (!tryPinThreadDevice(this->device_id_, "normal cache store load task")) {
             collector->markEnd(false);
             callback(false, CacheStoreErrorCode::LoadErrorUnknown);
             return;
