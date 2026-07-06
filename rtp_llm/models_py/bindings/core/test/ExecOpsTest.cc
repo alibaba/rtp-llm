@@ -1,9 +1,98 @@
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/CacheStore.h"
+#include "rtp_llm/cpp/distribute/CpuTpBroadcaster.h"
 #include <gtest/gtest.h>
 
+#include <chrono>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <functional>
+#include <stdexcept>
+#include <string>
+#include <thread>
+#include <vector>
+
+#include <errno.h>
+#include <sys/wait.h>
+#include <unistd.h>
+
 using namespace rtp_llm;
+
+namespace {
+
+std::string makeCpuTpBroadcasterBase() {
+    std::string       pattern = "/tmp/exec_broadcast_cpu_test.XXXXXX";
+    std::vector<char> buf(pattern.begin(), pattern.end());
+    buf.push_back('\0');
+    char* dir = ::mkdtemp(buf.data());
+    if (dir == nullptr) {
+        throw std::runtime_error(std::string("mkdtemp failed: ") + std::strerror(errno));
+    }
+    return std::string(dir) + "/bcast";
+}
+
+void cleanupCpuTpBroadcasterBase(const std::string& base) {
+    for (int rank = 0; rank <= 2; ++rank) {
+        ::unlink((base + "_" + std::to_string(rank) + ".sock").c_str());
+    }
+    const auto slash = base.rfind('/');
+    if (slash != std::string::npos) {
+        ::rmdir(base.substr(0, slash).c_str());
+    }
+}
+
+pid_t spawnExecOpsChild(const std::function<int()>& fn) {
+    pid_t pid = ::fork();
+    if (pid == 0) {
+        ::alarm(30);
+        try {
+            int rc = fn();
+            std::fflush(stdout);
+            std::fflush(stderr);
+            ::_exit(rc);
+        } catch (const std::exception& e) {
+            std::fprintf(stderr, "child exception: %s\n", e.what());
+            std::fflush(stderr);
+            ::_exit(1);
+        } catch (...) {
+            std::fprintf(stderr, "child unknown exception\n");
+            std::fflush(stderr);
+            ::_exit(1);
+        }
+    }
+    return pid;
+}
+
+void expectExecOpsChildrenOk(const std::vector<pid_t>& pids) {
+    for (pid_t pid : pids) {
+        ASSERT_GT(pid, 0);
+        int   status = 0;
+        pid_t waited = ::waitpid(pid, &status, 0);
+        ASSERT_EQ(waited, pid);
+        ASSERT_TRUE(WIFEXITED(status)) << "child " << pid << " terminated by signal";
+        EXPECT_EQ(WEXITSTATUS(status), 0) << "child " << pid << " failed";
+    }
+}
+
+int execBroadcastCpuChild(int rank, const std::string& base) {
+    auto& bcast = CpuTpBroadcaster::instance();
+    bcast.reset();
+    bcast.initialize(rank, 2, base);
+
+    auto                       tensor = rank == 0 ? torch::tensor({7, 8, 9}, torch::TensorOptions(torch::kInt32)) :
+                                                    torch::zeros({3}, torch::TensorOptions(torch::kInt32));
+    std::vector<torch::Tensor> buffers{tensor};
+    BroadcastParams            params{buffers, 0};
+    execBroadcastCpu(params, false);
+
+    const bool ok = torch::equal(tensor, torch::tensor({7, 8, 9}, torch::TensorOptions(torch::kInt32)));
+    bcast.reset();
+    return ok ? 0 : 1;
+}
+
+}  // namespace
 
 // MockCacheStore: captures every store() call (request-id + block count).
 class MockCacheStore: public rtp_llm::CacheStore {
@@ -255,6 +344,24 @@ TEST_F(ExecOpsTest, testRuntimeMaskLogits) {
 
     ASSERT_NO_THROW(runtimeMaskLogits(logits, mask));
     runtimeSyncAndCheck();
+}
+
+TEST_F(ExecOpsTest, testExecBroadcastCpuUsesInitializedBroadcasterTp2) {
+    const std::string  base = makeCpuTpBroadcasterBase();
+    std::vector<pid_t> pids;
+    pids.push_back(spawnExecOpsChild([=] { return execBroadcastCpuChild(0, base); }));
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    pids.push_back(spawnExecOpsChild([=] { return execBroadcastCpuChild(1, base); }));
+    expectExecOpsChildrenOk(pids);
+    cleanupCpuTpBroadcasterBase(base);
+}
+
+TEST_F(ExecOpsTest, testExecBroadcastCpuRejectsUninitializedWithoutFallback) {
+    CpuTpBroadcaster::instance().reset();
+    auto                       tensor = torch::zeros({3}, torch::TensorOptions(torch::kInt32));
+    std::vector<torch::Tensor> buffers{tensor};
+    BroadcastParams            params{buffers, 0};
+    EXPECT_ANY_THROW(execBroadcastCpu(params, false));
 }
 
 // Layer 0 maps to group 0 (LINEAR).
