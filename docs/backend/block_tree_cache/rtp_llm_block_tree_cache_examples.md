@@ -191,7 +191,7 @@ evict(DEVICE) on node N, target group = 0 (compressed, REUSABLE)
 |  |                                                                   |  |
 |  |  GroupSlot[g]:                                                    |  |
 |  |    .device_blocks[] --> independent Device BlockPools             |  |
-|  |    .host_block ------> HostBlockPool (merged packed block)        |  |
+|  |    .host_block ------> host_pool_ (BlockPool-Host, merged packed block) |  |
 |  |    .disk_slot -------> DiskBlockPool                              |  |
 |  +-------------------------------------------------------------------+  |
 |         |                                                               |
