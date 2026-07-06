@@ -9,7 +9,6 @@ import torch
 from rtp_llm.config.kv_cache_config import KVCacheConfig
 from rtp_llm.config.py_config_modules import (
     MIN_WORKER_INFO_PORT_NUM,
-    WORKER_INFO_PORT_NUM,
     LoadConfig,
     PyEnvConfigs,
     ServerConfig,
@@ -176,10 +175,7 @@ class EngineConfig:
             lines.append(str(self.arpc_config))
 
         lines.append("\n[DashScGrpcConfig]")
-        if hasattr(self.dash_sc_grpc_config, "to_string"):
-            lines.append(self.dash_sc_grpc_config.to_string())
-        else:
-            lines.append(str(self.dash_sc_grpc_config))
+        lines.append(self.dash_sc_grpc_config.to_string())
 
         lines.append("\n[LoadConfig]")
         if hasattr(self.load_config, "to_string"):
@@ -345,7 +341,9 @@ def setup_pd_sep_config(
         distribute_config.cache_store_rdma_connect_port
     )
     pd_sep_config.remote_rpc_server_port = distribute_config.remote_rpc_server_port
-    pd_sep_config.worker_port_offset = WORKER_INFO_PORT_NUM
+    # The CLI/env stride is the single authority for both local and remote
+    # rank port derivation. A module constant here would split custom layouts.
+    pd_sep_config.worker_port_offset = server_config.worker_info_port_num
 
     # Override with values from other sources
     if pd_sep_config.role_type in [RoleType.PREFILL, RoleType.DECODE]:

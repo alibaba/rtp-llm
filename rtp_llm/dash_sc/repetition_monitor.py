@@ -11,7 +11,7 @@ import dataclasses
 import importlib
 import logging
 import time
-from typing import Any, Optional, Sequence
+from typing import Any, Callable, Optional, Sequence
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -31,6 +31,7 @@ class NativeModuleStatus:
     available: bool
     module: Optional[Any] = None
     module_name: Optional[str] = None
+    check_tool_call_loop: Optional[Callable[..., Any]] = None
     error: Optional[str] = None
 
 
@@ -49,15 +50,27 @@ def _resolve_native_status() -> NativeModuleStatus:
             break
         except Exception as e:
             errors.append(f"{name}: {type(e).__name__}: {e}")
-    if module is not None and not hasattr(module, _NATIVE_TRACKER_REQUIRED_API):
+    callback = None
+    if module is not None:
+        try:
+            callback = module.check_tool_call_loop
+        except AttributeError:
+            pass
+    if module is not None and not callable(callback):
         errors.append(f"{module_name}: missing API {_NATIVE_TRACKER_REQUIRED_API}")
         module = None
         module_name = None
+        callback = None
     if module is None:
         error = "; ".join(errors) or "module not found"
         _LOGGER.warning("native repetition monitor unavailable: %s", error)
         return NativeModuleStatus(available=False, error=error)
-    return NativeModuleStatus(available=True, module=module, module_name=module_name)
+    return NativeModuleStatus(
+        available=True,
+        module=module,
+        module_name=module_name,
+        check_tool_call_loop=callback,
+    )
 
 
 def native_online_repetition_status() -> NativeModuleStatus:
@@ -154,9 +167,11 @@ def detect_tool_call_loop(
     status = native_online_repetition_status()
     if not status.available:
         return None
+    if status.check_tool_call_loop is None:
+        raise RuntimeError("native repetition monitor has no check_tool_call_loop callback")
 
     marker_begin_ids, marker_end_ids = _build_native_tool_call_marker_ids(markers)
-    result = status.module.check_tool_call_loop(
+    result = status.check_tool_call_loop(
         input_ids,
         output_ids,
         marker_begin_ids,

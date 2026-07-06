@@ -8,6 +8,7 @@ from unittest import TestCase, main
 
 import torch
 
+from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.dash_sc.client import build_model_infer_request
 from rtp_llm.dash_sc.codec import (
     DashErrorSpec,
@@ -34,6 +35,25 @@ def _unpack_int32_le(raw: bytes) -> list[int]:
 
 def _unpack_int64_le(raw: bytes) -> list[int]:
     return [int(x) for x in struct.unpack("<%dq" % (len(raw) // 8), raw)]
+
+
+def _assert_raw_payload_lengths_match_metadata(
+    test_case: TestCase,
+    infer: predict_v2_pb2.ModelInferResponse,
+) -> None:
+    """Lock the Triton raw tensor contract: dtype x shape determines byte length."""
+    element_bytes = {"BOOL": 1, "INT32": 4, "INT64": 8}
+    test_case.assertEqual(len(infer.outputs), len(infer.raw_output_contents))
+    for out, raw in zip(infer.outputs, infer.raw_output_contents):
+        numel = 1
+        for dim in out.shape:
+            numel *= int(dim)
+        test_case.assertIn(out.datatype, element_bytes)
+        test_case.assertEqual(
+            len(raw),
+            numel * element_bytes[out.datatype],
+            msg=f"raw payload length mismatch for {out.name}",
+        )
 
 
 def _tool_call_structural_tag() -> dict:
@@ -125,6 +145,24 @@ class DashScGrpcRequestTest(TestCase):
         _add_tensor(req, "input_ids", "INT64", [2], raw)
         self.assertEqual(parse_input_ids_from_request(req), [7, -1])
 
+    def test_parse_input_ids_single_batch_shape(self) -> None:
+        req = predict_v2_pb2.ModelInferRequest()
+        raw = struct.pack("<2i", 7, 8)
+        _add_tensor(req, "input_ids", "INT32", [1, 2], raw)
+        self.assertEqual(parse_input_ids_from_request(req), [7, 8])
+
+    def test_parse_input_ids_rejects_shape_content_mismatch(self) -> None:
+        req = predict_v2_pb2.ModelInferRequest()
+        raw = struct.pack("<2i", 7, 8)
+        _add_tensor(req, "input_ids", "INT32", [3], raw)
+        self.assertIsNone(parse_input_ids_from_request(req))
+
+    def test_parse_input_ids_rejects_multiple_batches(self) -> None:
+        req = predict_v2_pb2.ModelInferRequest()
+        raw = struct.pack("<2i", 7, 8)
+        _add_tensor(req, "input_ids", "INT32", [2, 1], raw)
+        self.assertIsNone(parse_input_ids_from_request(req))
+
     def test_parse_input_ids_missing_tensor(self) -> None:
         req = predict_v2_pb2.ModelInferRequest()
         self.assertIsNone(parse_input_ids_from_request(req))
@@ -190,16 +228,31 @@ class DashScGrpcRequestTest(TestCase):
         )
         sp = parse_sampling_params(req)
         self.assertEqual(json.loads(sp.response_format), {"type": "json_object"})
+        config = sp.to_generate_config()
+        self.assertEqual(json.loads(config.response_format), {"type": "json_object"})
+        with self.assertRaises(FtRuntimeException) as raised:
+            config.validate()
         self.assertEqual(
-            json.loads(sp.to_generate_config().response_format), {"type": "json_object"}
+            raised.exception.exception_type, ExceptionType.UNSUPPORTED_OPERATION
         )
+
+        req = predict_v2_pb2.ModelInferRequest()
+        req.parameters["response_format"].string_param = json.dumps(
+            {"type": "text"}
+        )
+        config = parse_sampling_params(req).to_generate_config()
+        self.assertIsNone(config.response_format)
+        config.validate()
 
         req = predict_v2_pb2.ModelInferRequest()
         req.parameters["json_format"].bool_param = True
         config = parse_sampling_params(req).to_generate_config()
         self.assertTrue(config.json_format)
-        config.validate()
-        self.assertEqual(config.json_schema, '{"type":"object"}')
+        with self.assertRaises(FtRuntimeException) as raised:
+            config.validate()
+        self.assertEqual(
+            raised.exception.exception_type, ExceptionType.UNSUPPORTED_OPERATION
+        )
 
     def test_build_model_infer_request_carries_response_format(self) -> None:
         req = build_model_infer_request(
@@ -752,6 +805,17 @@ class DashScGrpcRequestTest(TestCase):
         self.assertEqual(sp.stop_words_list, ((1, 2), (3, 4)))
         self.assertEqual(sp.stop_words_list_py(), [[1, 2], [3, 4]])
 
+    def test_client_rejects_request_level_stop_words(self) -> None:
+        with self.assertRaisesRegex(
+            ValueError, "request-level stop_words_list is unsupported"
+        ):
+            build_model_infer_request(
+                request_id="test",
+                model_name="default",
+                input_ids=[1, 2],
+                sampling=SamplingParams(stop_words_list=((1,), (2, 3))),
+            )
+
     def test_sampling_params_n_alias(self) -> None:
         sp = SamplingParams(num_return_sequences=5)
         self.assertEqual(sp.n, 5)
@@ -947,6 +1011,7 @@ class BuildStreamResponseFromGenerateOutputsTest(TestCase):
         self.assertEqual(by_name["finished"], b"\x01")
         self.assertNotIn("generated_ids", by_name)
         self.assertNotIn("token_ids", by_name)
+        _assert_raw_payload_lengths_match_metadata(self, infer)
 
     def test_dash_error_status_code_is_json_number(self) -> None:
         for status_code in (400, 413, 422, 500, 503, 504):
@@ -1103,6 +1168,26 @@ class BuildStreamResponseFromGenerateOutputsTest(TestCase):
         }
         self.assertEqual(_unpack_int32_le(by_name["prompt_token_ids"]), [1, 2, 3])
         self.assertEqual(list(infer.outputs[0].shape), [1, 3])
+        _assert_raw_payload_lengths_match_metadata(self, infer)
+
+    def test_empty_prompt_and_generated_ids_use_zero_length_payloads(self) -> None:
+        out = GenerateOutput(output_ids=None, finished=True, aux_info=AuxInfo())
+        resp = build_stream_response_from_generate_outputs(
+            dash_sc_request_id="r",
+            model_name="m",
+            go=GenerateOutputs(generate_outputs=[out]),
+            request_log_tag=stream_log_tag(request_id_numeric=1, trace_id="r"),
+            request_input_ids=[],
+            return_input_ids=True,
+        )
+        infer = resp.infer_response
+        by_name = {
+            infer.outputs[i].name: infer.raw_output_contents[i]
+            for i in range(len(infer.outputs))
+        }
+        self.assertEqual(by_name["prompt_token_ids"], b"")
+        self.assertEqual(by_name["generated_ids"], b"")
+        _assert_raw_payload_lengths_match_metadata(self, infer)
 
     def test_missing_output_ids_empty_generated(self) -> None:
         out = GenerateOutput(output_ids=None, finished=False, aux_info=AuxInfo())
@@ -1118,8 +1203,9 @@ class BuildStreamResponseFromGenerateOutputsTest(TestCase):
             infer.outputs[i].name: infer.raw_output_contents[i]
             for i in range(len(infer.outputs))
         }
-        self.assertEqual(by_name["generated_ids"], struct.pack("<i", 0))
+        self.assertEqual(by_name["generated_ids"], b"")
         self.assertEqual(list(infer.outputs[0].shape), [1, 0])
+        _assert_raw_payload_lengths_match_metadata(self, infer)
 
 
 class PrependToGeneratedIdsTensorTest(TestCase):

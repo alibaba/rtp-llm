@@ -21,7 +21,6 @@ from rtp_llm.server.request_headers import (
 from rtp_llm.utils.base_model_datatypes import (
     GenerateInput,
     GenerateOutputs,
-    RequestInfo,
 )
 from rtp_llm.utils.time_util import Timer
 
@@ -64,7 +63,7 @@ class BackendRPCServerVisitor:
         self.pd_sep_config = pd_sep_config
         self.sp_config = sp_config
         self.source_role = source_role
-        self.source_ip = str(getattr(server_config, "ip", "") or "")
+        self.source_ip = str(server_config.ip if server_config is not None else "")
         assert self.max_seq_len > 0
 
         # Get max_rpc_timeout_ms and decode_entrance from pd_sep_config
@@ -95,6 +94,12 @@ class BackendRPCServerVisitor:
             server_config=server_config,
             master_config=master_config,
         )
+
+    async def close(self) -> None:
+        try:
+            await self.model_rpc_client.close()
+        finally:
+            await self.master_client.close()
 
     @staticmethod
     def get_backend_role_list(
@@ -304,9 +309,6 @@ class BackendRPCServerVisitor:
             )
 
     def fill_request_info(self, input: GenerateInput) -> None:
-        if getattr(input, "request_info", None) is None:
-            input.request_info = RequestInfo()
-
         request_info = input.request_info
         if not request_info.source_role:
             request_info.source_role = self.source_role
@@ -319,18 +321,18 @@ class BackendRPCServerVisitor:
             request_info.frontend_ip = self.source_ip
 
         trace_id = str(
-            getattr(input.generate_config, "trace_id", "")
-            or extract_trace_id(getattr(input, "headers", None))
+            input.generate_config.trace_id
+            or extract_trace_id(input.headers)
             or ""
         )
         if not request_info.trace_id:
             request_info.trace_id = trace_id
-        if not getattr(input.generate_config, "trace_id", "") and request_info.trace_id:
+        if not input.generate_config.trace_id and request_info.trace_id:
             input.generate_config.trace_id = request_info.trace_id
 
         if not request_info.request_id:
             request_info.request_id = (
-                extract_correlation_request_id(getattr(input, "headers", None))
+                extract_correlation_request_id(input.headers)
                 or request_info.trace_id
                 or str(input.request_id)
             )

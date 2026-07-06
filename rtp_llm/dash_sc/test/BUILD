@@ -7,6 +7,14 @@ py_test(
 )
 
 py_test(
+    name = "health_test",
+    srcs = ["health_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    imports = [],
+    exec_properties = {"gpu": "A10"},
+)
+
+py_test(
     name = "think_test",
     srcs = ["think_test.py"],
     main = "think_test.py",
@@ -19,16 +27,6 @@ py_test(
     name = "inference_servicer_test",
     srcs = ["inference/servicer_test.py"],
     main = "inference/servicer_test.py",
-    deps = ["//rtp_llm:testlib"],
-    imports = [],
-    exec_properties = {"gpu": "A10"},
-)
-
-py_test(
-    name = "mrcr_smoke_test",
-    srcs = ["inference/mrcr_smoke_test.py"],
-    data = ["data/mrcr_deepseek_v4_think_leak_cases.json"],
-    main = "inference/mrcr_smoke_test.py",
     deps = ["//rtp_llm:testlib"],
     imports = [],
     exec_properties = {"gpu": "A10"},

@@ -156,6 +156,24 @@ class HotHookRuntimeTest(unittest.TestCase):
         self.assertEqual(1, len(dumps))
         self.assertEqual(15, hot_hook_target.other_line_target(5))
 
+    def test_dump_path_bounds_long_utf8_components(self):
+        runtime = hot_hook_runtime.HotHookRuntime()
+        runtime.dump_dir = str(self.root / "long_path_dumps")
+        runtime.case = "case/" + "长" * 200
+        context = hot_hook_runtime.HookContext(
+            runtime=runtime,
+            kind="line",
+            target="/remote/execution/root/" + "长路径/" * 100 + "target.py:11",
+            event="line",
+            hook_config={},
+        )
+
+        path = Path(context.dump("tensor" * 100, {"value": 1}))
+
+        self.assertTrue(path.is_file())
+        self.assertLessEqual(len(path.parent.name.encode("utf-8")), 100)
+        self.assertLessEqual(len(path.name.encode("utf-8")), 255)
+
     def test_line_hook_file_suffix_matches_loaded_module_path(self):
         line_no = hot_hook_target.line_target.__code__.co_firstlineno + 2
         self._install(

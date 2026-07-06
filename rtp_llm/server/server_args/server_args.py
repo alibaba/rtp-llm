@@ -133,7 +133,9 @@ class EnvArgumentGroup:
         self,
         *args,
         env_name: Optional[str] = None,
-        bind_to: Optional[Union[Tuple[Any, str], str]] = None,
+        bind_to: Optional[
+            Union[Tuple[Any, str], str, List[Union[Tuple[Any, str], str]]]
+        ] = None,
         **kwargs,
     ) -> argparse.Action:
         """
@@ -142,7 +144,8 @@ class EnvArgumentGroup:
         Args:
             *args: 标准 argparse add_argument 参数
             env_name: 环境变量名称（保留用于兼容，但不再自动更新到 os.environ）
-            bind_to: 配置绑定目标，可以是 (config_obj, 'attr_name') 或 'path.to.attr' 字符串
+            bind_to: 配置绑定目标，可以是 (config_obj, 'attr_name')、
+                'path.to.attr' 字符串或这些目标的列表
             **kwargs: 其他 argparse add_argument 参数
         """
         if "metavar" not in kwargs and "type" in kwargs:
@@ -186,7 +189,11 @@ class EnvArgumentParser(argparse.ArgumentParser):
         self._root_config = root_config
 
     def _register_config_binding(
-        self, action: argparse.Action, bind_to: Union[Tuple[Any, str], str]
+        self,
+        action: argparse.Action,
+        bind_to: Union[
+            Tuple[Any, str], str, List[Union[Tuple[Any, str], str]]
+        ],
     ) -> None:
         """注册参数到配置对象的绑定关系"""
         binding = ConfigBinding(action, bind_to)
@@ -482,7 +489,11 @@ def init_all_group_args(
     init_role_group_args(parser, py_env_configs.role_config)
     init_rpc_discovery_group_args(parser)
     init_scheduler_group_args(parser, py_env_configs.runtime_config)
-    init_server_group_args(parser, py_env_configs.server_config)
+    init_server_group_args(
+        parser,
+        py_env_configs.server_config,
+        py_env_configs.distribute_config,
+    )
     init_speculative_decoding_group_args(parser, py_env_configs.sp_config)
     init_vit_group_args(parser, py_env_configs.vit_config)
     init_jit_group_args(parser, py_env_configs.jit_config)
