@@ -78,6 +78,14 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         help="是否开启FP8的KV_CACHE",
     )
     kv_cache_group.add_argument(
+        "--rocm_atom_dsv4_indexer_fp8_kv_cache",
+        env_name="ROCM_ATOM_DSV4_INDEXER_FP8_KV_CACHE",
+        bind_to=(kv_cache_config, "rocm_atom_dsv4_indexer_fp8_kv_cache"),
+        type=int,
+        default=0,
+        help="ROCm ATOM DSV4 plugin 专用: 单独使用 144B FP8 INDEXER_KV layout",
+    )
+    kv_cache_group.add_argument(
         "--kv_cache_mem_mb",
         env_name="KV_CACHE_MEM_MB",
         bind_to=(kv_cache_config, "kv_cache_mem_mb"),

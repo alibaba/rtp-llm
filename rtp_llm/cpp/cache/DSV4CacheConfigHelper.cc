@@ -4,6 +4,9 @@
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
+#include <cstdlib>
+#include <string>
+
 namespace rtp_llm {
 
 namespace {
@@ -22,11 +25,18 @@ constexpr uint32_t kDsv4SwaWindowEntries = 128;
 // UE8M0 scales = 584B; indexer is 128B fp8 + 4B fp32 scale = 132B).
 // Selected at runtime from ``attn_config.kv_cache_dtype`` -- see
 // ``buildDSV4PoolDescs``.
-constexpr uint32_t kDsv4KvEntryBytesBf16      = 1024;
-constexpr uint32_t kDsv4IndexerEntryBytesBf16 = 256;
-constexpr uint32_t kDsv4KvEntryBytesFp8       = 584;
-constexpr uint32_t kDsv4IndexerEntryBytesFp8  = 132;
-constexpr size_t   kDsv4PoolNum               = 7;
+constexpr uint32_t kDsv4KvEntryBytesBf16         = 1024;
+constexpr uint32_t kDsv4IndexerEntryBytesBf16    = 256;
+constexpr uint32_t kDsv4KvEntryBytesFp8          = 584;
+constexpr uint32_t kDsv4IndexerEntryBytesFp8     = 132;
+constexpr uint32_t kDsv4AtomIndexerEntryBytesFp8 = 144;
+constexpr size_t   kDsv4PoolNum                  = 7;
+
+enum class DSV4IndexerKVLayout {
+    BF16,
+    RTP_FP8,
+    ROCM_ATOM_FP8,
+};
 
 struct DSV4LayerSets {
     std::vector<int> csa_layers;
@@ -75,6 +85,70 @@ const char* dsv4RegionName(KVCacheRegionName region_name) {
             return "REGION_COUNT";
     }
     return "UNKNOWN";
+}
+
+const char* dsv4IndexerKVLayoutName(DSV4IndexerKVLayout layout) {
+    switch (layout) {
+        case DSV4IndexerKVLayout::BF16:
+            return "BF16";
+        case DSV4IndexerKVLayout::RTP_FP8:
+            return "RTP_FP8_132B";
+        case DSV4IndexerKVLayout::ROCM_ATOM_FP8:
+            return "ROCM_ATOM_FP8_144B";
+    }
+    return "UNKNOWN";
+}
+
+bool externalModelPackagesContainAtomPlugin() {
+    const char* packages = std::getenv("RTP_LLM_EXTERNAL_MODEL_PACKAGES");
+    return packages != nullptr && std::string(packages).find("atom.plugin.rtpllm.models") != std::string::npos;
+}
+
+bool isDeepSeekV4Model(const ModelConfig& model_config) {
+    return model_config.model_type == "deepseek_v4";
+}
+
+DSV4IndexerKVLayout resolveIndexerKVLayout(const ModelConfig&     model_config,
+                                           const AttentionConfigs& attn,
+                                           const KVCacheConfig&    kv_cache_config) {
+    if (attn.kv_cache_dtype == KvCacheDataType::FP8) {
+        if (kv_cache_config.rocm_atom_dsv4_indexer_fp8_kv_cache) {
+            RTP_LLM_LOG_WARNING("ROCm ATOM DSV4 144B INDEXER_KV request is ignored because global fp8_kv_cache is "
+                                "enabled; using RTP native 132B FP8 indexer layout.");
+        }
+        return DSV4IndexerKVLayout::RTP_FP8;
+    }
+
+    if (!kv_cache_config.rocm_atom_dsv4_indexer_fp8_kv_cache) {
+        return DSV4IndexerKVLayout::BF16;
+    }
+
+#if defined(USING_ROCM)
+    RTP_LLM_CHECK_WITH_INFO(isDeepSeekV4Model(model_config),
+                            "ROCm ATOM DSV4 144B INDEXER_KV requires model_type=deepseek_v4, got %s",
+                            model_config.model_type.c_str());
+    RTP_LLM_CHECK_WITH_INFO(externalModelPackagesContainAtomPlugin(),
+                            "ROCm ATOM DSV4 144B INDEXER_KV requires RTP_LLM_EXTERNAL_MODEL_PACKAGES to contain "
+                            "atom.plugin.rtpllm.models");
+    return DSV4IndexerKVLayout::ROCM_ATOM_FP8;
+#else
+    RTP_LLM_CHECK_WITH_INFO(false,
+                            "rocm_atom_dsv4_indexer_fp8_kv_cache is ROCm ATOM plugin only and must not be enabled "
+                            "on CUDA/NV native DSV4");
+    return DSV4IndexerKVLayout::BF16;
+#endif
+}
+
+uint32_t indexerKVEntryBytesForLayout(DSV4IndexerKVLayout layout) {
+    switch (layout) {
+        case DSV4IndexerKVLayout::BF16:
+            return kDsv4IndexerEntryBytesBf16;
+        case DSV4IndexerKVLayout::RTP_FP8:
+            return kDsv4IndexerEntryBytesFp8;
+        case DSV4IndexerKVLayout::ROCM_ATOM_FP8:
+            return kDsv4AtomIndexerEntryBytesFp8;
+    }
+    return kDsv4IndexerEntryBytesBf16;
 }
 
 inline uint32_t alignUpToMultiple(uint32_t value, uint32_t multiple) {
@@ -190,6 +264,7 @@ DSV4LayerSets classifyDSV4Layers(const std::vector<int>& compress_ratios) {
 
 std::vector<DSV4PoolDesc> buildDSV4PoolDescs(const DSV4LayerSets&     sets,
                                              const ModelConfig&       model_config,
+                                             const KVCacheConfig&     kv_cache_config,
                                              uint32_t                 kernel_tokens_per_block,
                                              uint32_t                 physical_tokens_per_block,
                                              const ParallelismConfig& parallelism_config,
@@ -204,7 +279,13 @@ std::vector<DSV4PoolDesc> buildDSV4PoolDescs(const DSV4LayerSets&     sets,
 
     const bool     fp8_kv              = (attn.kv_cache_dtype == KvCacheDataType::FP8);
     const uint32_t kv_entry_bytes      = fp8_kv ? kDsv4KvEntryBytesFp8 : kDsv4KvEntryBytesBf16;
-    const uint32_t indexer_entry_bytes = fp8_kv ? kDsv4IndexerEntryBytesFp8 : kDsv4IndexerEntryBytesBf16;
+    const auto     indexer_layout      = resolveIndexerKVLayout(model_config, attn, kv_cache_config);
+    const uint32_t indexer_entry_bytes = indexerKVEntryBytesForLayout(indexer_layout);
+    RTP_LLM_LOG_INFO("DSV4 INDEXER_KV layout=%s entry_elems=%u global_fp8_kv=%d rocm_atom_indexer_fp8=%d",
+                     dsv4IndexerKVLayoutName(indexer_layout),
+                     indexer_entry_bytes,
+                     fp8_kv,
+                     kv_cache_config.rocm_atom_dsv4_indexer_fp8_kv_cache);
 
     const uint32_t csa_state_eb =
         maybeAdjustFixedEntriesForCpSharding(computeStateRing(kCsaCompressRatio, kCsaOverlap, gen_num_per_cycle),
@@ -345,7 +426,13 @@ void DSV4CacheConfigHelper::applyConfig(CacheConfig&             config,
 
     const auto sets = classifyDSV4Layers(model_config.attn_config.layer_compress_ratios);
     const auto pools = buildDSV4PoolDescs(
-        sets, model_config, kernel_tokens_per_block, physical_tokens_per_block, parallelism_config, gen_num_per_cycle);
+        sets,
+        model_config,
+        kv_cache_config,
+        kernel_tokens_per_block,
+        physical_tokens_per_block,
+        parallelism_config,
+        gen_num_per_cycle);
     RTP_LLM_CHECK_WITH_INFO(pools.size() == kDsv4PoolNum, "DSV4 must produce %zu pools", kDsv4PoolNum);
 
     config.layer_num                                = static_cast<uint32_t>(sets.all_layers.size());

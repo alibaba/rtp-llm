@@ -200,6 +200,11 @@ struct KVCacheConfig {
     // CPU BlockPool for INDEXER_STATE / CSA_STATE / HCA_STATE / SWA_KV.
     bool dsv4_fixed_pool_use_memory = false;
 
+    // ROCm ATOM plugin only: allocate DSV4 INDEXER_KV in ATOM's FP8 144B
+    // layout while leaving main KV pools in the base dtype. CUDA/NV native
+    // DSV4 keeps its existing 132B FP8 indexer layout.
+    int rocm_atom_dsv4_indexer_fp8_kv_cache = 0;
+
     // Remote connector configuration fields
     bool        reco_enable_vipserver                = false;
     std::string reco_vipserver_domain                = "";

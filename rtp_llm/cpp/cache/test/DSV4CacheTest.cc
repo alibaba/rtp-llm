@@ -1,4 +1,5 @@
 #include <gtest/gtest.h>
+#include <cstdlib>
 #include <optional>
 #include <string>
 #include <vector>
@@ -24,12 +25,41 @@ namespace test {
 
 namespace {
 
-constexpr int      kDsv4PoolNum           = 7;
-constexpr uint32_t kDsv4TokensPerBlock    = 128;
-constexpr uint32_t kDsv4KvEntryBytes      = 1024;
-constexpr uint32_t kDsv4IndexerEntryBytes = 256;
-constexpr uint32_t kDsv4Fp8KvEntryBytes   = 584;
-constexpr uint32_t kDsv4FixedPoolBlocks   = 256;
+constexpr int      kDsv4PoolNum                  = 7;
+constexpr uint32_t kDsv4TokensPerBlock           = 128;
+constexpr uint32_t kDsv4KvEntryBytes             = 1024;
+constexpr uint32_t kDsv4IndexerEntryBytes        = 256;
+constexpr uint32_t kDsv4Fp8KvEntryBytes          = 584;
+constexpr uint32_t kDsv4Fp8IndexerEntryBytes     = 132;
+constexpr uint32_t kDsv4AtomFp8IndexerEntryBytes = 144;
+constexpr uint32_t kDsv4FixedPoolBlocks          = 256;
+
+class ScopedEnvVar {
+public:
+    ScopedEnvVar(const char* name, const char* value): name_(name) {
+        const char* old_value = std::getenv(name_);
+        if (old_value != nullptr) {
+            old_value_ = old_value;
+        }
+        if (value != nullptr) {
+            setenv(name_, value, 1);
+        } else {
+            unsetenv(name_);
+        }
+    }
+
+    ~ScopedEnvVar() {
+        if (old_value_.has_value()) {
+            setenv(name_, old_value_->c_str(), 1);
+        } else {
+            unsetenv(name_);
+        }
+    }
+
+private:
+    const char*                name_;
+    std::optional<std::string> old_value_;
+};
 
 }  // namespace
 
@@ -42,6 +72,7 @@ static KVCacheConfig makeDsv4KvCacheConfig(uint32_t fixed_pool_blocks = kDsv4Fix
 
 static ModelConfig makeProModelConfig() {
     ModelConfig mc;
+    mc.model_type                   = "deepseek_v4";
     mc.num_layers                   = 61;
     mc.hidden_size                  = 7168;
     mc.attn_config.head_num         = 128;
@@ -66,6 +97,7 @@ static ModelConfig makeProModelConfig() {
 
 static ModelConfig makeFlashModelConfig() {
     ModelConfig mc;
+    mc.model_type                   = "deepseek_v4";
     mc.num_layers                   = 43;
     mc.hidden_size                  = 4096;
     mc.attn_config.head_num         = 64;
@@ -224,6 +256,59 @@ TEST(HybridPoolConfigCreatorTest, Fp8BlockSizeBytesUsePaddedPhysicalStride) {
     EXPECT_EQ(config.group_kv_block_stride_bytes[1], config.cache_specs[1]->block_size_bytes());
     EXPECT_EQ(config.group_kv_block_stride_bytes[6], config.cache_specs[6]->block_size_bytes());
 }
+
+TEST(HybridPoolConfigCreatorTest, GlobalFp8KeepsRtpNativeIndexerWhenRocmAtomFlagSet) {
+    ScopedEnvVar     atom_packages("RTP_LLM_EXTERNAL_MODEL_PACKAGES", "atom.plugin.rtpllm.models");
+    ParallelismConfig pc;
+    auto              mc          = makeProModelConfig();
+    mc.attn_config.kv_cache_dtype = KvCacheDataType::FP8;
+    auto              kv_cache_config = makeDsv4KvCacheConfig();
+    kv_cache_config.rocm_atom_dsv4_indexer_fp8_kv_cache = 1;
+
+    auto config = HybridPoolConfigCreator::createConfig(mc, pc, kv_cache_config, false, 0);
+
+    ASSERT_EQ(config.cache_specs.size(), 7u);
+    EXPECT_EQ(config.cache_specs[0]->block_size_bytes(), 19008u);
+    EXPECT_EQ(config.cache_specs[2]->block_size_bytes(), 32u * kDsv4Fp8IndexerEntryBytes);
+}
+
+#if defined(USING_ROCM)
+TEST(HybridPoolConfigCreatorTest, RocmAtomIndexerUses144BWithoutChangingMainKvPools) {
+    ScopedEnvVar     atom_packages("RTP_LLM_EXTERNAL_MODEL_PACKAGES", "atom.plugin.rtpllm.models");
+    ParallelismConfig pc;
+    auto              mc              = makeProModelConfig();
+    auto              kv_cache_config = makeDsv4KvCacheConfig();
+    kv_cache_config.rocm_atom_dsv4_indexer_fp8_kv_cache = 1;
+
+    auto config = HybridPoolConfigCreator::createConfig(mc, pc, kv_cache_config, false, 0);
+
+    ASSERT_EQ(config.cache_specs.size(), 7u);
+    EXPECT_EQ(config.cache_specs[0]->block_size_bytes(), 32u * kDsv4KvEntryBytes);
+    EXPECT_EQ(config.cache_specs[2]->block_size_bytes(), 32u * kDsv4AtomFp8IndexerEntryBytes);
+    EXPECT_EQ(config.cache_specs[6]->block_size_bytes(), kDsv4TokensPerBlock * kDsv4KvEntryBytes);
+}
+
+TEST(HybridPoolConfigCreatorTest, RocmAtomIndexerRequiresDeepSeekV4ModelType) {
+    ScopedEnvVar     atom_packages("RTP_LLM_EXTERNAL_MODEL_PACKAGES", "atom.plugin.rtpllm.models");
+    ParallelismConfig pc;
+    auto              mc              = makeProModelConfig();
+    auto              kv_cache_config = makeDsv4KvCacheConfig();
+    mc.model_type = "deepseek_v3";
+    kv_cache_config.rocm_atom_dsv4_indexer_fp8_kv_cache = 1;
+
+    EXPECT_THROW((void)HybridPoolConfigCreator::createConfig(mc, pc, kv_cache_config, false, 0), std::exception);
+}
+#else
+TEST(HybridPoolConfigCreatorTest, RocmAtomIndexerFlagIsRejectedOnNonRocmBuilds) {
+    ScopedEnvVar     atom_packages("RTP_LLM_EXTERNAL_MODEL_PACKAGES", "atom.plugin.rtpllm.models");
+    ParallelismConfig pc;
+    auto              mc              = makeProModelConfig();
+    auto              kv_cache_config = makeDsv4KvCacheConfig();
+    kv_cache_config.rocm_atom_dsv4_indexer_fp8_kv_cache = 1;
+
+    EXPECT_THROW((void)HybridPoolConfigCreator::createConfig(mc, pc, kv_cache_config, false, 0), std::exception);
+}
+#endif
 
 TEST(HybridPoolConfigCreatorTest, DecoupledPhysicalAndKernelBlockSizeUsesPerGroupBpk) {
     ParallelismConfig pc;
