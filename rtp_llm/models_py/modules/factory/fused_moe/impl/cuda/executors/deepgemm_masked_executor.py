@@ -55,6 +55,9 @@ class DeepGemmMaskedExecutor(FusedMoeExpertExecutor):
         quant_method = resolver.get_quant_method(config)
         checker.check(quant_method in [None, "FP8_PER_BLOCK"])
         checker.check(get_sm()[0] >= 9)
+        from rtp_llm.models_py.utils.arch import is_sm12x
+
+        checker.check(not is_sm12x())
 
     def __init__(
         self,
