@@ -310,10 +310,13 @@ def _topk_to_block_table_kernel(
         return
     off_k = tl.arange(0, BLOCK_SIZE_K)
     off_t = tl.arange(0, BLOCK_SIZE_T)
+    # int64 base offset: score is [num_idx_heads, total_q, max_seqblock_k], so the
+    # per-head slab (total_q * max_seqblock_k) times pid_h overflows int32 for long
+    # context. Promote the n/head terms to int64 before scaling by the strides.
     s_ptrs = (
         s_ptr
-        + (seq_start + pid_q * sample_interval) * stride_s_n
-        + pid_h * stride_s_h
+        + (seq_start + pid_q * sample_interval).to(tl.int64) * stride_s_n
+        + pid_h.to(tl.int64) * stride_s_h
         + off_k * stride_s_k
     )
     topk_score = tl.full((BLOCK_SIZE_K,), -1e30, dtype=tl.float32)

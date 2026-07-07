@@ -135,8 +135,13 @@ def _flash_attn_fwd_with_block_score_kernel(
         return
     block_num = (seq_len + block_size - 1) // block_size
     # init qkv pointer
+    # int64 base offsets: for long context the per-head slab
+    # (total_q * max_seqblock_k) times the head index (pid_h) overflows int32,
+    # so promote seq_start/pid_h to int64 before scaling by the strides.
+    seq_start_i64 = seq_start.to(tl.int64)
+    pid_h_i64 = pid_h.to(tl.int64)
     q_ptrs = tl.make_block_ptr(
-        base=q_ptr + seq_start * stride_q_n + pid_h * stride_q_h,
+        base=q_ptr + seq_start_i64 * stride_q_n + pid_h_i64 * stride_q_h,
         shape=(q_len, qk_head_dim),
         strides=(stride_q_n, stride_q_d),
         offsets=(pid_q * BLOCK_SIZE_Q, 0),
@@ -144,7 +149,7 @@ def _flash_attn_fwd_with_block_score_kernel(
         order=(1, 0),
     )
     s_ptrs = tl.make_block_ptr(
-        base=score_ptr + seq_start * stride_s_q + pid_h * stride_s_h,
+        base=score_ptr + seq_start_i64 * stride_s_q + pid_h_i64 * stride_s_h,
         shape=(q_len, block_num),
         strides=(stride_s_q, stride_s_k),
         offsets=(pid_q * BLOCK_SIZE_Q, 0),
@@ -276,7 +281,7 @@ def _flash_attn_fwd_with_block_score_kernel(
         acc_o = acc_o * tl.exp2(m_i - lse_i)[:, None]
         # save output
         o_ptrs = tl.make_block_ptr(
-            base=o_ptr + seq_start * stride_o_n + pid_h * stride_o_h,
+            base=o_ptr + seq_start_i64 * stride_o_n + pid_h_i64 * stride_o_h,
             shape=(q_len, v_head_dim),
             strides=(stride_o_n, stride_o_d),
             offsets=(pid_q * BLOCK_SIZE_Q, 0),
