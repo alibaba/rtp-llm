@@ -1,3 +1,4 @@
+import os
 import unittest
 from unittest.mock import patch
 
@@ -12,14 +13,23 @@ except ModuleNotFoundError as exc:
 
 BlockCandidateConfig = topology_kv_candidate_schedule.BlockCandidateConfig
 benchmark_decode_attention = topology_kv_candidate_schedule.benchmark_decode_attention
-block_schedule_to_token_indices = topology_kv_candidate_schedule.block_schedule_to_token_indices
+block_schedule_to_token_indices = (
+    topology_kv_candidate_schedule.block_schedule_to_token_indices
+)
 build_key_block_centroids = topology_kv_candidate_schedule.build_key_block_centroids
-build_block_candidate_schedule = topology_kv_candidate_schedule.build_block_candidate_schedule
-build_topology_candidate_token_indices = topology_kv_candidate_schedule.build_topology_candidate_token_indices
+build_block_candidate_schedule = (
+    topology_kv_candidate_schedule.build_block_candidate_schedule
+)
+build_topology_candidate_token_indices = (
+    topology_kv_candidate_schedule.build_topology_candidate_token_indices
+)
 dense_decode_attention = topology_kv_candidate_schedule.dense_decode_attention
 format_benchmark_results = topology_kv_candidate_schedule.format_benchmark_results
 run_decode_attention_grid = topology_kv_candidate_schedule.run_decode_attention_grid
 sparse_decode_attention = topology_kv_candidate_schedule.sparse_decode_attention
+_RUN_MANUAL_BENCHMARK_TESTS = (
+    os.environ.get("RTP_LLM_RUN_MANUAL_BENCHMARK_TESTS") == "1"
+)
 
 
 class TopologyKVCandidateScheduleTest(unittest.TestCase):
@@ -215,7 +225,9 @@ class TopologyKVCandidateScheduleTest(unittest.TestCase):
 
         self.assertEqual(token_indices.tolist(), [7])
 
-    def test_topology_candidate_indices_keep_latest_tokens_for_partial_block_budget(self):
+    def test_topology_candidate_indices_keep_latest_tokens_for_partial_block_budget(
+        self,
+    ):
         key = torch.arange(16, dtype=torch.float32).view(1, 1, 8, 2)
 
         token_indices = build_topology_candidate_token_indices(
@@ -226,7 +238,9 @@ class TopologyKVCandidateScheduleTest(unittest.TestCase):
 
         self.assertEqual(token_indices.tolist(), [7, 6, 0])
 
-    def test_topology_candidate_indices_return_requested_count_for_partial_final_block(self):
+    def test_topology_candidate_indices_return_requested_count_for_partial_final_block(
+        self,
+    ):
         key = torch.arange(20, dtype=torch.float32).view(1, 1, 10, 2)
 
         token_indices = build_topology_candidate_token_indices(
@@ -316,7 +330,10 @@ class TopologyKVCandidateScheduleTest(unittest.TestCase):
         after = torch.random.get_rng_state()
         self.assertTrue(torch.equal(before, after))
 
-    @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required for speed testing")
+    @unittest.skipUnless(
+        _RUN_MANUAL_BENCHMARK_TESTS and torch.cuda.is_available(),
+        "CUDA manual benchmark tests are disabled",
+    )
     def test_sparse_attention_cuda_benchmark_runs_with_topology_schedule(self):
         result = benchmark_decode_attention(
             seq_len=16384,

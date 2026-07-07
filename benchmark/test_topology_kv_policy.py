@@ -1,4 +1,5 @@
 import importlib.util
+import os
 import sys
 import types
 import unittest
@@ -34,6 +35,9 @@ TopologyKvPolicyConfig = topology_kv_policy.TopologyKvPolicyConfig
 apply_topology_kv_policy = topology_kv_policy.apply_topology_kv_policy
 dense_decode_attention = topology_kv_candidate_schedule.dense_decode_attention
 sparse_decode_attention = topology_kv_candidate_schedule.sparse_decode_attention
+_RUN_MANUAL_BENCHMARK_TESTS = (
+    os.environ.get("RTP_LLM_RUN_MANUAL_BENCHMARK_TESTS") == "1"
+)
 
 
 def _load_indexer_for_unit_test():
@@ -100,6 +104,7 @@ def _load_indexer_for_unit_test():
 indexer_module = _load_indexer_for_unit_test()
 Indexer = indexer_module.Indexer
 _topology_env_int = indexer_module._topology_env_int
+_topology_env_float = indexer_module._topology_env_float
 
 
 class _PrefillCpConfig:
@@ -135,10 +140,11 @@ def _make_indexer(topk_result, *, cp_enabled=False):
     indexer.topology_sink_blocks = 1
     indexer.topology_local_blocks = 1
     indexer.topology_witness_blocks = 0
+    indexer.topology_max_policy_tokens = 8192
+    indexer.topology_max_structural_fraction = 0.5
+    indexer.topology_coordinate_mismatch_action = "fallback_disabled"
     indexer.topology_stable_scaffold = None
     indexer.topology_output_contract = None
-    indexer.latest_topology_kv_counters = None
-    indexer.latest_topology_kv_fingerprint = None
     indexer.blocksize = 4
     indexer.parallelism_config = SimpleNamespace(
         prefill_cp_config=_PrefillCpConfig(cp_enabled)
@@ -187,10 +193,11 @@ class TopologyKvPolicyTest(unittest.TestCase):
 
         self.assertEqual(result.topk_indices.shape, topk.shape)
         self.assertEqual(result.topk_indices.dtype, topk.dtype)
-        self.assertIn(0, result.topk_indices[0].tolist())
+        self.assertIn(3, result.topk_indices[0].tolist())
         self.assertIn(7, result.topk_indices[0].tolist())
         self.assertGreater(result.counters.compressed_tokens_represented, 0)
         self.assertGreater(result.counters.unselected_stable_tokens, 0)
+        self.assertGreater(result.counters.learned_kept_tokens, 0)
 
     def test_fingerprint_changes_when_output_contract_changes(self):
         topk = torch.tensor([[7, 6, 5, 4]], dtype=torch.int32)
@@ -269,6 +276,26 @@ class TopologyKvPolicyTest(unittest.TestCase):
         self.assertEqual(len(values), len(set(values)))
         self.assertTrue(all(value < 8 for value in values))
         self.assertEqual(result.counters.compressed_tokens_represented, 0)
+        self.assertGreater(result.counters.learned_kept_tokens, 0)
+
+    def test_structural_fraction_keeps_part_of_learned_budget(self):
+        topk = torch.tensor([[11, 10, 9, 8]], dtype=torch.int32)
+        lengths = torch.tensor([12], dtype=torch.int32)
+        config = TopologyKvPolicyConfig(
+            policy="topology_sparse_merge",
+            sink_blocks=1,
+            local_blocks=1,
+            witness_blocks=0,
+            block_size=4,
+            max_structural_fraction=0.5,
+        )
+
+        result = apply_topology_kv_policy(topk, lengths, config=config)
+
+        values = result.topk_indices[0].tolist()
+        self.assertEqual(len([value for value in values if value in {3, 11}]), 2)
+        self.assertGreaterEqual(result.counters.learned_kept_tokens, 2)
+        self.assertGreaterEqual(result.counters.learned_evicted_tokens, 0)
 
     def test_rejects_unknown_policy_name(self):
         with self.assertRaisesRegex(ValueError, "unknown topology KV policy"):
@@ -302,6 +329,106 @@ class TopologyKvPolicyTest(unittest.TestCase):
                 topk_indices_offset=topk_indices_offset,
             )
 
+    def test_can_fallback_when_learned_coordinates_do_not_match_contract(self):
+        topk = torch.tensor([[7, 6, 5, 4]], dtype=torch.int32)
+        lengths = torch.tensor([8], dtype=torch.int32)
+        config = TopologyKvPolicyConfig(
+            policy="topology_sparse_merge",
+            sink_blocks=1,
+            local_blocks=1,
+            witness_blocks=0,
+            block_size=4,
+            coordinate_mismatch_action="fallback_disabled",
+        )
+
+        result = apply_topology_kv_policy(
+            topk,
+            lengths,
+            config=config,
+            row_starts=torch.tensor([10], dtype=torch.int32),
+            topk_indices_offset=torch.tensor([100], dtype=torch.int32),
+        )
+
+        self.assertIs(result.topk_indices, topk)
+        self.assertEqual(result.counters.coordinate_mismatch_fallbacks, 1)
+
+    def test_ragged_coordinates_use_topk_offset_not_row_start_plus_offset(self):
+        topk = torch.tensor([[107, 106, 105, 104]], dtype=torch.int32)
+        lengths = torch.tensor([8], dtype=torch.int32)
+        config = TopologyKvPolicyConfig(
+            policy="topology_sparse_merge",
+            sink_blocks=1,
+            local_blocks=1,
+            witness_blocks=0,
+            block_size=4,
+        )
+
+        result = apply_topology_kv_policy(
+            topk,
+            lengths,
+            config=config,
+            row_starts=torch.tensor([10], dtype=torch.int32),
+            topk_indices_offset=torch.tensor([100], dtype=torch.int32),
+        )
+
+        values = [value for value in result.topk_indices[0].tolist() if value >= 0]
+        self.assertTrue(all(100 <= value < 108 for value in values))
+
+    def test_bypasses_python_policy_when_prefill_length_exceeds_limit(self):
+        topk = torch.tensor([[7, 6, 5, 4]], dtype=torch.int32)
+        lengths = torch.tensor([8], dtype=torch.int32)
+        config = TopologyKvPolicyConfig(
+            policy="topology_sparse_merge",
+            sink_blocks=1,
+            local_blocks=1,
+            witness_blocks=0,
+            block_size=4,
+            max_policy_tokens=4,
+        )
+
+        result = apply_topology_kv_policy(topk, lengths, config=config)
+
+        self.assertIs(result.topk_indices, topk)
+        self.assertEqual(result.counters.policy_bypassed, 1)
+
+    def test_rejects_row_start_shape_mismatch(self):
+        topk = torch.tensor([[7, 6, 5, 4]], dtype=torch.int32)
+        lengths = torch.tensor([8], dtype=torch.int32)
+        config = TopologyKvPolicyConfig(
+            policy="topology_sparse_merge",
+            sink_blocks=1,
+            local_blocks=1,
+            witness_blocks=0,
+            block_size=4,
+        )
+
+        with self.assertRaisesRegex(ValueError, "row_starts must have shape"):
+            apply_topology_kv_policy(
+                topk,
+                lengths,
+                config=config,
+                row_starts=torch.tensor([0, 1], dtype=torch.int32),
+            )
+
+    def test_rejects_topk_offset_shape_mismatch(self):
+        topk = torch.tensor([[7, 6, 5, 4]], dtype=torch.int32)
+        lengths = torch.tensor([8], dtype=torch.int32)
+        config = TopologyKvPolicyConfig(
+            policy="topology_sparse_merge",
+            sink_blocks=1,
+            local_blocks=1,
+            witness_blocks=0,
+            block_size=4,
+        )
+
+        with self.assertRaisesRegex(ValueError, "topk_indices_offset must have shape"):
+            apply_topology_kv_policy(
+                topk,
+                lengths,
+                config=config,
+                topk_indices_offset=torch.tensor([0, 1], dtype=torch.int32),
+            )
+
     def test_indexer_compute_topk_decode_bypasses_token_space_policy(self):
         topk = torch.tensor([[7, 6, 5, 4]], dtype=torch.int32)
         indexer = _make_indexer(topk)
@@ -317,7 +444,7 @@ class TopologyKvPolicyTest(unittest.TestCase):
         self.assertIsNone(indexer.latest_topology_kv_counters)
 
     def test_indexer_compute_topk_ragged_requires_offset_absolute_coordinates(self):
-        topk = torch.tensor([[117, 116, 115, 114]], dtype=torch.int32)
+        topk = torch.tensor([[107, 106, 105, 104]], dtype=torch.int32)
         indexer = _make_indexer(topk)
         fmha_params = SimpleNamespace(
             expanded_seq_lens=torch.tensor([8]),
@@ -332,10 +459,10 @@ class TopologyKvPolicyTest(unittest.TestCase):
 
         self.assertEqual(indexer.indexer_op.called, "ragged")
         values = [value for value in result[0].tolist() if value >= 0]
-        self.assertTrue(all(110 <= value < 118 for value in values))
+        self.assertTrue(all(100 <= value < 108 for value in values))
 
     def test_indexer_compute_topk_cp_requires_offset_absolute_coordinates(self):
-        topk = torch.tensor([[117, 116, 115, 114]], dtype=torch.int32)
+        topk = torch.tensor([[107, 106, 105, 104]], dtype=torch.int32)
         indexer = _make_indexer(topk, cp_enabled=True)
         fmha_params = SimpleNamespace()
         attention_inputs = SimpleNamespace(is_prefill=True)
@@ -355,7 +482,26 @@ class TopologyKvPolicyTest(unittest.TestCase):
 
         self.assertEqual(indexer.indexer_op.called, "cp")
         values = [value for value in result[0].tolist() if value >= 0]
-        self.assertTrue(all(110 <= value < 118 for value in values))
+        self.assertTrue(all(100 <= value < 108 for value in values))
+
+    def test_indexer_falls_back_when_real_op_coordinates_do_not_match_policy(self):
+        topk = torch.tensor([[117, 116, 115, 114]], dtype=torch.int32)
+        indexer = _make_indexer(topk)
+        fmha_params = SimpleNamespace(
+            expanded_seq_lens=torch.tensor([8]),
+            ks=torch.tensor([10]),
+            topk_indices_offset=torch.tensor([100]),
+        )
+        attention_inputs = SimpleNamespace(is_prefill=True)
+
+        result = indexer._compute_topk(
+            None, None, None, fmha_params, attention_inputs, None
+        )
+
+        self.assertIs(result, topk)
+        self.assertEqual(
+            indexer.latest_topology_kv_counters.coordinate_mismatch_fallbacks, 1
+        )
 
     def test_indexer_has_disabled_by_default_topology_kv_gate(self):
         source = INDEXER_PATH.read_text(encoding="utf-8")
@@ -374,7 +520,20 @@ class TopologyKvPolicyTest(unittest.TestCase):
             ):
                 _topology_env_int("RTP_LLM_TOPOLOGY_SINK_BLOCKS", 1)
 
-    @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required for policy e2e")
+    def test_indexer_topology_env_float_reports_bad_value(self):
+        with unittest.mock.patch.dict(
+            "os.environ", {"RTP_LLM_TOPOLOGY_MAX_STRUCTURAL_FRACTION": "many"}
+        ):
+            with self.assertRaisesRegex(
+                ValueError,
+                "RTP_LLM_TOPOLOGY_MAX_STRUCTURAL_FRACTION must be a float",
+            ):
+                _topology_env_float("RTP_LLM_TOPOLOGY_MAX_STRUCTURAL_FRACTION", 0.5)
+
+    @unittest.skipUnless(
+        _RUN_MANUAL_BENCHMARK_TESTS and torch.cuda.is_available(),
+        "CUDA manual benchmark tests are disabled",
+    )
     def test_cuda_policy_output_runs_sparse_decode_attention_e2e(self):
         device = torch.device("cuda")
         seq_len = 64

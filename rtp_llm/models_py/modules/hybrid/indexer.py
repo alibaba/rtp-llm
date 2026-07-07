@@ -1,4 +1,6 @@
 import os
+import weakref
+from types import SimpleNamespace
 from typing import Any, Dict, Optional, Tuple
 
 import torch
@@ -15,6 +17,8 @@ from rtp_llm.ops import AttentionConfigs, HWKernelConfig, ParallelismConfig
 from rtp_llm.ops.compute_ops import KVCache
 from rtp_llm.utils.model_weight import W
 
+_TOPOLOGY_KV_STATE = weakref.WeakKeyDictionary()
+
 
 def _topology_env_int(name: str, default: int) -> int:
     value = os.getenv(name)
@@ -24,6 +28,16 @@ def _topology_env_int(name: str, default: int) -> int:
         return int(value)
     except ValueError as exc:
         raise ValueError(f"{name} must be an integer, got {value!r}") from exc
+
+
+def _topology_env_float(name: str, default: float) -> float:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    try:
+        return float(value)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be a float, got {value!r}") from exc
 
 
 class Indexer(nn.Module):
@@ -68,10 +82,17 @@ class Indexer(nn.Module):
         self.topology_witness_blocks = _topology_env_int(
             "RTP_LLM_TOPOLOGY_WITNESS_BLOCKS", 1
         )
+        self.topology_max_policy_tokens = _topology_env_int(
+            "RTP_LLM_TOPOLOGY_MAX_POLICY_TOKENS", 8192
+        )
+        self.topology_max_structural_fraction = _topology_env_float(
+            "RTP_LLM_TOPOLOGY_MAX_STRUCTURAL_FRACTION", 0.5
+        )
+        self.topology_coordinate_mismatch_action = os.getenv(
+            "RTP_LLM_TOPOLOGY_COORDINATE_MISMATCH_ACTION", "fallback_disabled"
+        )
         self.topology_stable_scaffold = os.getenv("RTP_LLM_TOPOLOGY_STABLE_SCAFFOLD")
         self.topology_output_contract = os.getenv("RTP_LLM_TOPOLOGY_OUTPUT_CONTRACT")
-        self.latest_topology_kv_counters = None
-        self.latest_topology_kv_fingerprint = None
         self.indexer_size = self.index_head_dim / 2 + self.index_head_dim / 128 * 2
         self.is_neox_style = attn_config.rope_config.indexer_is_neox_style
         self.parallelism_config = parallelism_config
@@ -129,6 +150,16 @@ class Indexer(nn.Module):
 
     def _is_sparse_prefill_cp(self, attention_inputs: Any) -> bool:
         return bool(attention_inputs.is_prefill) and self._prefill_cp_enabled()
+
+    @property
+    def latest_topology_kv_counters(self):
+        state = _TOPOLOGY_KV_STATE.get(self)
+        return state.counters if state is not None else None
+
+    @property
+    def latest_topology_kv_fingerprint(self):
+        state = _TOPOLOGY_KV_STATE.get(self)
+        return state.stable_fingerprint if state is not None else None
 
     # TODO: fuse kernel here
     def _get_logits_head_gate(
@@ -204,12 +235,20 @@ class Indexer(nn.Module):
     ) -> Optional[torch.Tensor]:
         if self.topology_kv_policy == "disabled" or topk_result is None:
             return topk_result
+        if (
+            topk_result.is_cuda
+            and os.getenv("RTP_LLM_TOPOLOGY_KV_ALLOW_CUDA_SYNC") != "1"
+        ):
+            return topk_result
         config = TopologyKvPolicyConfig(
             policy=self.topology_kv_policy,
             sink_blocks=self.topology_sink_blocks,
             local_blocks=self.topology_local_blocks,
             witness_blocks=self.topology_witness_blocks,
             block_size=self.blocksize,
+            max_policy_tokens=self.topology_max_policy_tokens,
+            max_structural_fraction=self.topology_max_structural_fraction,
+            coordinate_mismatch_action=self.topology_coordinate_mismatch_action,
         )
         result = apply_topology_kv_policy(
             topk_result,
@@ -221,8 +260,10 @@ class Indexer(nn.Module):
             output_contract=self.topology_output_contract,
             previous_fingerprint=self.latest_topology_kv_fingerprint,
         )
-        self.latest_topology_kv_counters = result.counters
-        self.latest_topology_kv_fingerprint = result.stable_fingerprint
+        _TOPOLOGY_KV_STATE[self] = SimpleNamespace(
+            counters=result.counters,
+            stable_fingerprint=result.stable_fingerprint,
+        )
         return result.topk_indices
 
     def _compute_topk(
