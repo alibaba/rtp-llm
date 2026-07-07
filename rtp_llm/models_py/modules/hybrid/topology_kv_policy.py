@@ -5,10 +5,10 @@ The policy is an opt-in post-processing layer for indexer top-k results. Learned
 attention coordinate system. For ragged and CP-prefill paths,
 `topk_indices_offset` defines the valid absolute interval for each row:
 `[offset, offset + length)`. `row_starts` scopes the logits read before top-k
-selection and is validated for row alignment, but it is not added to returned
-top-k coordinates. Negative values are padding. Non-padding learned indices
-outside that interval fail fast because silently dropping them can hide a
-coordinate-system mismatch.
+selection and is validated only as a row-count alignment guard; it is not added
+to returned top-k coordinates. Negative values are padding. Non-padding learned
+indices outside that interval fail fast because silently dropping them can hide
+a coordinate-system mismatch.
 
 `stable_scaffold` and `output_contract` describe repeated prompt structure such
 as system instructions, tool schemas, and response contracts. Their fingerprint
@@ -48,7 +48,7 @@ SUPPORTED_TOPOLOGY_KV_POLICIES = frozenset(
 
 
 def normalize_topology_kv_policy(policy: str) -> TopologyKvPolicy:
-    normalized = policy.strip()
+    normalized = policy.strip().lower()
     if normalized not in SUPPORTED_TOPOLOGY_KV_POLICIES:
         raise ValueError(f"unknown topology KV policy: {policy}")
     return normalized  # type: ignore[return-value]
@@ -66,7 +66,7 @@ class TopologyKvPolicyConfig:
     coordinate_mismatch_action: CoordinateMismatchAction = "raise"
 
     def __post_init__(self) -> None:
-        normalize_topology_kv_policy(self.policy)
+        object.__setattr__(self, "policy", normalize_topology_kv_policy(self.policy))
         if self.coordinate_mismatch_action not in {"raise", "fallback_disabled"}:
             raise ValueError(
                 "coordinate_mismatch_action must be 'raise' or 'fallback_disabled'"
@@ -334,8 +334,8 @@ def apply_topology_kv_policy(
 
     Returned indices use the same absolute sparse-attention coordinate system as
     the input `topk_indices`. `topk_indices_offset` derives the row-local valid
-    interval. `row_starts` is validated for row alignment but is not added to
-    returned coordinates.
+    interval. `row_starts` is validated only as a row-count alignment guard and
+    is not added to returned coordinates.
     """
 
     started = time.perf_counter()

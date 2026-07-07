@@ -347,6 +347,17 @@ class TopologyKvPolicyTest(unittest.TestCase):
                 block_size=4,
             )
 
+    def test_normalizes_policy_name_case(self):
+        config = TopologyKvPolicyConfig(
+            policy="Topology_Sparse_Merge",
+            sink_blocks=1,
+            local_blocks=1,
+            witness_blocks=0,
+            block_size=4,
+        )
+
+        self.assertEqual(config.policy, "topology_sparse_merge")
+
     def test_rejects_learned_topk_outside_absolute_contract(self):
         topk = torch.tensor([[7, 6, 5, 4]], dtype=torch.int32)
         lengths = torch.tensor([8], dtype=torch.int32)
