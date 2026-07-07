@@ -44,12 +44,24 @@ def build_key_block_centroids(key: torch.Tensor, block_size: int) -> torch.Tenso
     else:
         raise ValueError("key must have shape [batch, heads, seq, dim], [heads, seq, dim], or [seq, dim]")
 
-    seq_len = normalized_key.shape[2]
-    centroids = []
-    for start in range(0, seq_len, block_size):
-        end = min(start + block_size, seq_len)
-        centroids.append(normalized_key[:, :, start:end, :].mean(dim=(0, 1, 2)))
-    return torch.stack(centroids, dim=0)
+    batch, heads, seq_len, dim = normalized_key.shape
+    block_count = (seq_len + block_size - 1) // block_size
+    padded_len = block_count * block_size
+    if padded_len != seq_len:
+        padding = normalized_key.new_zeros(batch, heads, padded_len - seq_len, dim)
+        normalized_key = torch.cat([normalized_key, padding], dim=2)
+
+    blocks = normalized_key.reshape(batch, heads, block_count, block_size, dim)
+    block_sums = blocks.sum(dim=(0, 1, 3))
+    token_counts = torch.full(
+        (block_count,),
+        block_size,
+        dtype=block_sums.dtype,
+        device=block_sums.device,
+    )
+    token_counts[-1] = seq_len - (block_count - 1) * block_size
+    denominator = token_counts.unsqueeze(1) * batch * heads
+    return block_sums / denominator
 
 
 def block_schedule_to_token_indices(
@@ -249,12 +261,15 @@ def build_topology_candidate_token_indices(
         block_size=block_size,
     )
     sink_blocks = 0 if max_candidate_blocks == 1 else 1
+    remaining_blocks = max_candidate_blocks - sink_blocks
+    local_blocks = min(2, remaining_blocks)
+    salience_blocks = max(0, remaining_blocks - local_blocks)
     centroids = build_key_block_centroids(key, block_size=block_size)
     config = BlockCandidateConfig(
         block_size=block_size,
         sink_blocks=sink_blocks,
-        local_blocks=min(2, max_candidate_blocks),
-        salience_blocks=max_candidate_blocks,
+        local_blocks=local_blocks,
+        salience_blocks=salience_blocks,
         max_candidate_blocks=max_candidate_blocks,
     )
     query_block = centroids.shape[0] - 1
@@ -288,6 +303,13 @@ def sparse_decode_attention(
     value: torch.Tensor,
     candidate_indices: torch.Tensor,
 ) -> torch.Tensor:
+    """Run decode attention over one shared candidate token list.
+
+    `candidate_indices` must be flat `[tokens]` or rectangular `[1, tokens]`.
+    Per-batch or per-head candidate schedules are intentionally not supported by
+    this benchmark helper.
+    """
+
     if query.ndim != 4 or key.ndim != 4 or value.ndim != 4:
         raise ValueError("query, key, and value must have shape [batch, heads, seq, dim]")
     if query.shape[2] != 1:
@@ -297,7 +319,13 @@ def sparse_decode_attention(
     if query.shape[:2] != key.shape[:2] or query.shape[-1] != key.shape[-1]:
         raise ValueError("query, key, and value batch/head/head_dim must match")
 
-    indices = candidate_indices.reshape(-1).to(device=key.device, dtype=torch.long)
+    if candidate_indices.ndim == 1:
+        indices = candidate_indices
+    elif candidate_indices.ndim == 2 and candidate_indices.shape[0] == 1:
+        indices = candidate_indices.reshape(-1)
+    else:
+        raise ValueError("candidate_indices must have shape [tokens] or [1, tokens]")
+    indices = indices.to(device=key.device, dtype=torch.long)
     indices = indices[indices >= 0]
     if indices.numel() == 0:
         raise ValueError("candidate_indices must select at least one token")

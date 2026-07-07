@@ -85,6 +85,15 @@ class TopologyKVCandidateScheduleTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "duplicate tokens"):
             sparse_decode_attention(query, key, value, candidate_indices)
 
+    def test_sparse_attention_rejects_ambiguous_candidate_index_shape(self):
+        query = torch.randn(1, 2, 1, 16)
+        key = torch.randn(1, 2, 128, 16)
+        value = torch.randn(1, 2, 128, 16)
+        candidate_indices = torch.tensor([[0, 1], [2, 3]])
+
+        with self.assertRaisesRegex(ValueError, r"\[tokens\] or \[1, tokens\]"):
+            sparse_decode_attention(query, key, value, candidate_indices)
+
     def test_key_block_centroids_average_batch_heads_and_tail_blocks(self):
         key = torch.tensor(
             [
