@@ -17,7 +17,8 @@ public:
                            const ModelSpecificConfig&             model_specific_config,
                            const std::shared_ptr<KVCacheManager>& cache_manager,
                            const kmonitor::MetricsReporterPtr     metrics_reporter = nullptr,
-                           const int                              max_score_len    = 1);
+                           const int                              max_score_len    = 1,
+                           bool                                   enable_batch_cache_reuse = false);
 
     ~FIFOScheduler() override;
 
@@ -37,6 +38,12 @@ private:
     void accountBatchMetrics(const GenerateStreamPtr& new_stream);
     bool waitPredicate() override;
     void onRunningStream(const GenerateStreamPtr& stream) override;
+    int64_t nextBatchEpoch() override;
+
+    std::atomic<int64_t> batch_epoch_counter_{0};
+
+    // Feature toggle: when false, epoch is always 0 (no batch-level cache reuse)
+    bool enable_batch_cache_reuse_ = false;
 
     // TODO @wangyin support different beams run togather
 };

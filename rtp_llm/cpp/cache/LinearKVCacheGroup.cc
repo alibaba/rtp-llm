@@ -59,16 +59,16 @@ NeedBlocksInfo LinearKVCacheGroup::getNeedBlocks(
     return info;
 }
 
-MatchResult LinearKVCacheGroup::matchSingleKey(CacheKeyType cache_key) const {
+MatchResult LinearKVCacheGroup::matchSingleKey(CacheKeyType cache_key, int64_t current_batch_epoch) const {
     MatchResult result;
-    auto        matched = block_cache_->match(cache_key, group_id_);
+    auto        matched = block_cache_->match(cache_key, group_id_, current_batch_epoch);
     if (!isNullBlockIdx(matched.matched_index)) {
         result.block_indices = {matched.matched_index};
     }
     return result;
 }
 
-MatchResult LinearKVCacheGroup::match(const CacheKeysType& cache_keys) {
+MatchResult LinearKVCacheGroup::match(const CacheKeysType& cache_keys, int64_t current_batch_epoch) {
     return {};
 }
 
@@ -138,7 +138,8 @@ bool LinearKVCacheGroup::malloc(BlockIds& block_ids, int seq_len, bool enable_re
 
 void LinearKVCacheGroup::insertIntoCache(const CacheKeysType&    cache_keys,
                                          const BlockIndicesType& block_indices,
-                                         bool                    is_resident) {
+                                         bool                    is_resident,
+                                         int64_t                 epoch) {
     if (cache_keys.empty() || block_indices.empty()) {
         return;
     }
@@ -153,9 +154,10 @@ void LinearKVCacheGroup::insertIntoCache(const CacheKeysType&    cache_keys,
         item.group_id    = group_id_;
         item.block_index = b;
         item.is_resident = is_resident;
-        if (block_cache_->put(item)) {
-            block_pool_->blockCacheReference(b);
-        }
+        item.epoch       = epoch;
+
+        auto result = block_cache_->put(item);
+        handlePutResult(result, b);
     }
 }
 

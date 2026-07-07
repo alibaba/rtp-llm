@@ -8,6 +8,7 @@
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorAsyncContext.h"
 #include "rtp_llm/cpp/config/RoleTypes.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
+#include <sstream>
 #include <thread>
 #include <torch/extension.h>
 
@@ -128,7 +129,7 @@ static bool applyP2PSideChannelToStream(const std::shared_ptr<FusedAsyncReadCont
 
     // Apply side-channel data to GenerateStream
     // 1. First token: append to stream
-    if (payload->first_token_id > 0) {
+    if (payload->has_data) {
         stream->setIsContextStream(false);
         stream->step();
         auto new_tokens                   = torch::zeros({(int64_t)stream->nextBatchSize(), 1}, torch::kInt32);
@@ -328,6 +329,7 @@ absl::Status StreamCacheResource::initKVBlock(size_t reserve_step) {
     malloc_info.batch_kv_cache_resource = batch_kv_cache_resource_;
     malloc_info.complete_token_ids      = stream_->completeTokenIdsPtr();
     malloc_info.request_id              = stream_->streamId();
+    malloc_info.epoch                   = resource_context_.enable_reuse_cache_in_batch ? stream_->batchEpoch() : 0;
     malloc_info.verbose                 = malloc_failed_times_ >= 10 ? malloc_failed_times_ % 100 == 0 : true;
 
     const bool is_hybrid       = resource_context_.cache_manager->cacheConfig().groupNums() > 1;
@@ -356,6 +358,8 @@ absl::Status StreamCacheResource::initKVBlock(size_t reserve_step) {
         stream_->setInitialReuseLength(result.reuse_len);
         stream_->setLocalReuseLength(result.reuse_len);
     }
+    // NOTE: connector loads run asynchronously via GenerateStateMachine
+    // (WAITING -> LOADING_CACHE -> WAITING -> RUNNING). Do not block here.
     return absl::OkStatus();
 }
 
@@ -367,12 +371,13 @@ absl::Status StreamCacheResource::incrKVBlock(size_t reserve_step) {
     }
 
     MallocInfo malloc_info;
-    malloc_info.batch_kv_cache_resource      = batch_kv_cache_resource_;
-    malloc_info.complete_token_ids           = stream_->completeTokenIdsPtr();
-    malloc_info.request_id                   = stream_->streamId();
-    malloc_info.verbose                      = malloc_failed_times_ >= 10 ? malloc_failed_times_ % 100 == 0 : true;
-    malloc_info.reuse_cache                  = reuseCache();
-    malloc_info.enable_device_cache          = reuseCache() && enableDeviceCache();
+    malloc_info.batch_kv_cache_resource = batch_kv_cache_resource_;
+    malloc_info.complete_token_ids      = stream_->completeTokenIdsPtr();
+    malloc_info.request_id              = stream_->streamId();
+    malloc_info.epoch                   = resource_context_.enable_reuse_cache_in_batch ? stream_->batchEpoch() : 0;
+    malloc_info.verbose                 = malloc_failed_times_ >= 10 ? malloc_failed_times_ % 100 == 0 : true;
+    malloc_info.reuse_cache             = reuseCache();
+    malloc_info.enable_device_cache     = reuseCache() && enableDeviceCache();
     malloc_info.enable_remove_skipped_blocks = true;
 
     malloc_info.complete_token_ids->setReserveStep(reserve_step);
@@ -417,6 +422,10 @@ bool StreamCacheResource::asyncLoadCache() {
     meta->fillRoutingContext(stream_);  // Fill routing context once from GenerateStream
     auto connector_context = std::make_shared<KVCacheConnectorReadWriteContextImpl>(batch_kv_cache_resource_, meta);
     load_cache_context_    = resource_context_.cache_manager->asyncLoadCache(connector_context);
+    if (!load_cache_context_) {
+        load_cache_once_.store(false, std::memory_order_release);
+        return false;
+    }
     return load_cache_context_ != nullptr;
 }
 
@@ -427,8 +436,6 @@ bool StreamCacheResource::loadCacheDone() {
     if (!load_cache_context_->done()) {
         return false;  // coordinator 后台线程尚未处理完
     }
-    // 加载完成（无论成功失败），更新 reuse lengths
-    waitLoadCacheDone(load_cache_context_);
     if (!load_cache_context_->success()) {
         // 区分匹配失败和传输失败
         auto      read_context = std::dynamic_pointer_cast<FusedAsyncReadContext>(load_cache_context_);
@@ -446,8 +453,6 @@ bool StreamCacheResource::loadCacheDone() {
             // 如果匹配到了块（matched_blocks > 0），说明是传输失败，需要重试，否则是匹配失败，不重试
             if (matched_blocks > 0) {
                 should_retry = true;
-                // 即使传输失败，也更新已匹配到的 reuse lengths
-                updateReuseLengthsFromContext(read_context);
                 RTP_LLM_LOG_WARNING(
                     "load cache failed (matched %zu blocks but transfer failed), retry count: %d/%d, stream: [%ld]",
                     matched_blocks,
@@ -476,6 +481,7 @@ bool StreamCacheResource::loadCacheDone() {
                 return true;
             }
             load_cache_retry_count_++;
+            load_cache_once_.store(false, std::memory_order_release);
             asyncLoadCache();
             return false;  // 失败重试
         } else {
@@ -483,6 +489,7 @@ bool StreamCacheResource::loadCacheDone() {
             return true;
         }
     }
+    waitLoadCacheDone(load_cache_context_);
     load_cache_context_.reset();
     return true;
 }
@@ -725,5 +732,66 @@ void StreamCacheResource::holdKVCacheForPDSep() {
 
 void StreamCacheResource::releaseKVCacheForPDSep() {
     pd_kvcache_ref_.reset();
+}
+
+void StreamCacheResource::insertIntoCache() {
+    if (!resource_context_.cache_manager) {
+        return;
+    }
+    if (!reuseCache() || !resource_context_.enable_reuse_cache_in_batch) {
+        return;
+    }
+    if (batch_kv_cache_resource_->curBlocksNum() == 0) {
+        return;
+    }
+    // By design, enable_reuse_cache_in_batch publishes batch-local full-attention
+    // KV blocks before this stream enters RUNNING. Same-batch siblings may then
+    // reuse those blocks in the same forward pass, relying on the NormalEngine
+    // invariant that per-layer K/V stores for a shared block happen before any
+    // sibling attention read in that layer. This feature is disabled by default
+    // and does not support hybrid/linear-attention state cache.
+    // Refuse to insert batch-local entries without a real batch identity:
+    // batchEpoch() == 0 means the scheduler hasn't called setBatchEpoch() yet,
+    // and inserting at epoch=0 here would silently promote batch-local data
+    // into the global prefix cache, polluting other streams.
+    const int64_t batch_epoch = stream_->batchEpoch();
+    if (batch_epoch <= 0) {
+        RTP_LLM_LOG_WARNING("insertIntoCache called before scheduler assigned batch_epoch (stream=%ld); skipping",
+                            stream_->streamId());
+        return;
+    }
+    const size_t token_len       = static_cast<size_t>(stream_->completeTokenIdsPtr()->seqLength());
+    const size_t full_blocks_num = token_len / static_cast<size_t>(seqSizePerBlock());
+    // Hot-path optimization: insert downstream only reads cache_keys +
+    // per-group block_indices. prefixCopy duplicates only full block entries
+    // and skips layer_block_ids rebuild, avoiding ~100KB of per-stream memcpy
+    // on the scheduler hot path while keeping partial tail blocks out of cache.
+    const size_t n_blocks = std::min(batch_kv_cache_resource_->cacheKeys(0).size(), full_blocks_num);
+    if (n_blocks == 0) {
+        return;
+    }
+    BatchKVCacheResourcePtr insert_resource = batch_kv_cache_resource_->prefixCopy(n_blocks);
+    InsertInfo              insert_info{insert_resource, stream_->completeTokenIdsPtr(), false};
+    insert_info.epoch            = batch_epoch;
+    insert_info.cacheable_blocks = n_blocks;
+    // Lifecycle note: prefix-length batch-local entries inserted here are NOT
+    // explicitly promoted to epoch=0 when the stream finishes. tryReleaseKVBlock
+    // re-inserts a full-length entry with epoch=0 (different cache_key, so it
+    // does not replace this one), and the leftover epoch>0 entry is reclaimed
+    // lazily by BlockCache::pop's Phase-1 path (which preferentially evicts
+    // non-resident epoch>0 entries under memory pressure). This is an
+    // intentional trade-off — eager remove+re-insert would add a write per
+    // stream-finish for marginal benefit, since the stale entry is invisible
+    // to other batches anyway (different epoch) and reclaimed before any
+    // global entries are evicted.
+    resource_context_.cache_manager->insertIntoCache(insert_info);
+}
+
+std::string StreamCacheResource::debugString() const {
+    std::stringstream ss;
+    ss << "StreamCacheResource { stream_id: " << stream_->streamId()
+       << ", need_release_resource: " << need_release_resource_ << ", " << batch_kv_cache_resource_->debugString()
+       << " }";
+    return ss.str();
 }
 }  // namespace rtp_llm
