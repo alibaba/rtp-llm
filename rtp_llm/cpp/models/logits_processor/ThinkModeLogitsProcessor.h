@@ -23,6 +23,7 @@ struct StreamThinkInfo {
     std::vector<int>                               end_think_token_ids;
     int32_t                                        input_length;
     int32_t                                        current_output_length;
+    int32_t                                        think_output_length = -1;
     bool                                           is_beam_search;
     std::shared_ptr<StringContainDFA<size_t, int>> dfa_ptr;
     std::vector<int>                               pending_forced_think_end_token_ids;
@@ -59,6 +60,7 @@ struct StreamThinkInfo {
         think_info.end_think_token_ids                = end_think_token_ids;
         think_info.input_length                       = input_length;
         think_info.current_output_length              = current_output_length;
+        think_info.think_output_length                = think_output_length;
         think_info.is_beam_search                     = is_beam_search;
         think_info.pending_forced_think_end_token_ids = pending_forced_think_end_token_ids;
         think_info.process_state                      = process_state;
@@ -93,6 +95,7 @@ public:
     int     tryAcceptAndFillBitmask(const SpecLogitsProcessorRequest& request) override;
     bool    isStateful() const override;
     int64_t acceptedTokenLen() const override;
+    int64_t finishedThinkOutputLen() const;
 
 private:
     bool forceThinkEndToken(const torch::Tensor& new_tokens_logits, StreamThinkInfo& info, size_t vocab_size);

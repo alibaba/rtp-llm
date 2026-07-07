@@ -24,8 +24,10 @@ TEST(PrefillRpcServerTest, ThinkModeBudgetUsesPdSeparationWhenMaxNewTokensIsOne)
     generate_config.set_can_use_pd_separation(true);
     generate_config.set_in_think_mode(true);
     generate_config.set_max_thinking_tokens(131072);
+    generate_config.add_end_think_token_ids(8);
+    generate_config.add_end_think_token_ids(9);
 
-    EXPECT_EQ(PrefillRpcServer::effectiveOutputTokenBudget(generate_config), 131073);
+    EXPECT_EQ(PrefillRpcServer::effectiveOutputTokenBudget(generate_config), 131075);
     EXPECT_TRUE(PrefillRpcServer::shouldUsePdSeparation(generate_config));
 }
 
