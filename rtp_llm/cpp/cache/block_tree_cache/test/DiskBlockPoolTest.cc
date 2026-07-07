@@ -9,7 +9,7 @@
 
 #include "gtest/gtest.h"
 
-namespace rtp_llm::block_tree_cache {
+namespace rtp_llm {
 namespace {
 
 std::string testFilePath(const std::string& name) {
@@ -260,7 +260,7 @@ TEST(DiskBlockPoolTest, BatchReadWriteUsesBlockOrder) {
 
     auto blocks_opt = pool.malloc(3);
     ASSERT_TRUE(blocks_opt.has_value());
-    const BlockIds blocks = *blocks_opt;
+    const BlockIdList blocks = *blocks_opt;
     ASSERT_EQ(blocks.size(), 3u);
 
     std::vector<unsigned char> buf_a(pool.strideBytes(), 'A');
@@ -316,9 +316,9 @@ TEST(DiskBlockPoolTest, IoErrorStatusIsMapped) {
     EXPECT_EQ(pool.read(*block, data.data(), data.size()), BlockIOStatus::PARTIAL_FAILURE);
 
     std::vector<const void*> srcs = {data.data()};
-    EXPECT_EQ(pool.write(BlockIds{*block}, srcs, pool.strideBytes()), BlockIOStatus::PARTIAL_FAILURE);
+    EXPECT_EQ(pool.write(BlockIdList{*block}, srcs, pool.strideBytes()), BlockIOStatus::PARTIAL_FAILURE);
     std::vector<void*> dsts = {data.data()};
-    EXPECT_EQ(pool.read(BlockIds{*block}, dsts, pool.strideBytes()), BlockIOStatus::PARTIAL_FAILURE);
+    EXPECT_EQ(pool.read(BlockIdList{*block}, dsts, pool.strideBytes()), BlockIOStatus::PARTIAL_FAILURE);
 }
 
-}  // namespace rtp_llm::block_tree_cache
+}  // namespace rtp_llm

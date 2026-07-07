@@ -14,14 +14,14 @@
 #include "rtp_llm/cpp/cache/MemoryLayoutStrategy.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/IBlockPool.h"
 
-namespace rtp_llm::block_tree_cache {
+namespace rtp_llm {
 
 // Config for the v4 device (GPU) block pool. Mirrors rtp_llm::BlockPoolConfig
 // (rtp_llm/cpp/cache/BlockPoolConfig.h) but derives BlockPoolConfigBase so it plugs
 // into the v4 IBlockPool lifecycle. physical_block_count (inherited from
 // BlockPoolConfigBase) is reconciled against memory_layouts[*].block_num by
-// normalizeConfig() - see BlockPool.cc.
-struct BlockPoolConfig: public BlockPoolConfigBase {
+// normalizeConfig() - see DeviceBlockPool.cc.
+struct DeviceBlockPoolConfig: public BlockPoolConfigBase {
     size_t                          total_size_bytes{0};
     std::vector<MemoryLayoutConfig> memory_layouts;
     AllocationType                  allocation_type{AllocationType::DEVICE};
@@ -35,18 +35,18 @@ struct DeviceBlockBuffer {
     size_t       bytes;
 };
 
-// BlockPool is the v4 device (GPU) block pool. It reuses the backing-allocation and
-// MemoryLayoutStrategy machinery of the existing rtp_llm::BlockPool
+// DeviceBlockPool is the v4 device (GPU) block pool. It reuses the backing-allocation and
+// MemoryLayoutStrategy machinery of the legacy monolithic device pool
 // (rtp_llm/cpp/cache/BlockPool.{h,cc}) - a single contiguous backing tensor sliced per
 // MemoryLayoutConfig into per-layer KV (and optional scale) tensors - but lives in the
-// rtp_llm::block_tree_cache namespace and derives IBlockPool instead of rtp_llm::BlockPool,
-// so all malloc/free/incRef/decRef/refCount/metrics lifecycle comes from IBlockPool
-// unchanged. blockSizeBytes/blockStrideBytes accessors from the old pool are
-// intentionally not exposed here.
-class BlockPool: public IBlockPool {
+// flat rtp_llm namespace and derives IBlockPool, so all
+// malloc/free/incRef/decRef/refCount/metrics lifecycle comes from IBlockPool unchanged.
+// The raw byte-size accessors of the legacy pool are intentionally not re-exposed here;
+// callers use blockBuffers() instead.
+class DeviceBlockPool: public IBlockPool {
 public:
-    explicit BlockPool(std::shared_ptr<const BlockPoolConfig> config);
-    ~BlockPool() override;
+    explicit DeviceBlockPool(std::shared_ptr<const DeviceBlockPoolConfig> config);
+    ~DeviceBlockPool() override;
 
     // Validates the config (memory_layouts non-empty, per-layout block_num/layer_num/
     // kv_block_pool_size_bytes invariants), allocates the backing buffer (device, pinned
@@ -73,9 +73,9 @@ private:
     // the IBlockPool base constructor runs (it requires physical_block_count > 1 and
     // seeds free blocks immediately from it). Returns a copy of config with
     // physical_block_count normalized to the computed value.
-    static std::shared_ptr<const BlockPoolConfig> normalizeConfig(const std::shared_ptr<const BlockPoolConfig>& config);
+    static std::shared_ptr<const DeviceBlockPoolConfig> normalizeConfig(const std::shared_ptr<const DeviceBlockPoolConfig>& config);
 
-    const BlockPoolConfig& config() const;
+    const DeviceBlockPoolConfig& config() const;
 
     // init() helpers, adapted from rtp_llm::BlockPool's backing-allocation + layout-
     // strategy initialization (rtp_llm/cpp/cache/BlockPool.cc).
@@ -109,4 +109,4 @@ private:
     std::vector<std::pair<int, int>> global_layer_to_local_;
 };
 
-}  // namespace rtp_llm::block_tree_cache
+}  // namespace rtp_llm

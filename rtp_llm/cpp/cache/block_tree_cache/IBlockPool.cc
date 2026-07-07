@@ -3,7 +3,7 @@
 #include <algorithm>
 #include <sstream>
 
-namespace rtp_llm::block_tree_cache {
+namespace rtp_llm {
 
 namespace {
 
@@ -67,11 +67,11 @@ std::optional<BlockIdxType> IBlockPool::malloc() {
     return (*blocks)[0];
 }
 
-std::optional<BlockIds> IBlockPool::malloc(size_t n) {
+std::optional<BlockIdList> IBlockPool::malloc(size_t n) {
     std::lock_guard<std::mutex> lock(mutex_);
     checkInitializedNoLock();
     if (n == 0) {
-        return BlockIds{};
+        return BlockIdList{};
     }
     if (availableFreeBlocksNoLock() < n) {
         return std::nullopt;
@@ -81,7 +81,7 @@ std::optional<BlockIds> IBlockPool::malloc(size_t n) {
         refillAscendingFreeBlocksNoLock();
     }
 
-    BlockIds result;
+    BlockIdList result;
     result.reserve(n);
     for (size_t i = 0; i < n; ++i) {
         result.push_back(popFreeBlockNoLock());
@@ -97,10 +97,10 @@ std::optional<BlockIds> IBlockPool::malloc(size_t n) {
 }
 
 void IBlockPool::free(BlockIdxType block) {
-    free(BlockIds{block});
+    free(BlockIdList{block});
 }
 
-void IBlockPool::free(const BlockIds& blocks) {
+void IBlockPool::free(const BlockIdList& blocks) {
     std::lock_guard<std::mutex> lock(mutex_);
     checkInitializedNoLock();
     if (blocks.empty()) {
@@ -130,10 +130,10 @@ void IBlockPool::free(const BlockIds& blocks) {
 }
 
 void IBlockPool::incRef(BlockIdxType block) {
-    incRef(BlockIds{block});
+    incRef(BlockIdList{block});
 }
 
-void IBlockPool::incRef(const BlockIds& blocks) {
+void IBlockPool::incRef(const BlockIdList& blocks) {
     std::lock_guard<std::mutex> lock(mutex_);
     checkInitializedNoLock();
     if (blocks.empty()) {
@@ -168,10 +168,10 @@ bool IBlockPool::tryIncRefIf(BlockIdxType block, uint32_t expected_refcount) {
 }
 
 void IBlockPool::decRef(BlockIdxType block) {
-    decRef(BlockIds{block});
+    decRef(BlockIdList{block});
 }
 
-void IBlockPool::decRef(const BlockIds& blocks) {
+void IBlockPool::decRef(const BlockIdList& blocks) {
     std::lock_guard<std::mutex> lock(mutex_);
     checkInitializedNoLock();
     if (blocks.empty()) {
@@ -269,8 +269,8 @@ void IBlockPool::checkAllocatedNoLock(BlockIdxType block) const {
                              config_->pool_name.c_str());
 }
 
-void IBlockPool::checkUniqueBlocksNoLock(const BlockIds& blocks) const {
-    BlockIds sorted_blocks(blocks.begin(), blocks.end());
+void IBlockPool::checkUniqueBlocksNoLock(const BlockIdList& blocks) const {
+    BlockIdList sorted_blocks(blocks.begin(), blocks.end());
     std::sort(sorted_blocks.begin(), sorted_blocks.end());
     RTP_LLM_CHECK_WITH_INFO(std::adjacent_find(sorted_blocks.begin(), sorted_blocks.end()) == sorted_blocks.end(),
                              "duplicate block id in batch operation for pool [%s]",
@@ -282,7 +282,7 @@ size_t IBlockPool::availableFreeBlocksNoLock() const {
 }
 
 void IBlockPool::refillAscendingFreeBlocksNoLock() {
-    BlockIds merged(free_blocks_.begin() + free_head_, free_blocks_.end());
+    BlockIdList merged(free_blocks_.begin() + free_head_, free_blocks_.end());
     merged.insert(merged.end(), released_blocks_.begin(), released_blocks_.end());
     std::sort(merged.begin(), merged.end());
     merged.erase(std::unique(merged.begin(), merged.end()), merged.end());
@@ -313,4 +313,4 @@ void IBlockPool::pushFreeBlockNoLock(BlockIdxType block) {
     }
 }
 
-}  // namespace rtp_llm::block_tree_cache
+}  // namespace rtp_llm

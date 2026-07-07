@@ -7,7 +7,7 @@
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
-namespace rtp_llm::block_tree_cache {
+namespace rtp_llm {
 
 HostBlockPool::HostBlockPool(std::shared_ptr<const HostBlockPoolConfig> config): IBlockPool(config) {
     RTP_LLM_CHECK(config != nullptr);
@@ -99,4 +99,4 @@ std::string HostBlockPool::debugString() const {
     return oss.str();
 }
 
-}  // namespace rtp_llm::block_tree_cache
+}  // namespace rtp_llm

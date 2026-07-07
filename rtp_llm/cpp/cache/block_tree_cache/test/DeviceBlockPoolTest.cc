@@ -1,4 +1,4 @@
-#include "rtp_llm/cpp/cache/block_tree_cache/BlockPool.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/DeviceBlockPool.h"
 
 #include <memory>
 
@@ -11,10 +11,10 @@
 #include "rtp_llm/cpp/cache/BlockPoolConfigHelper.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 
-namespace rtp_llm::block_tree_cache {
+namespace rtp_llm {
 namespace {
 
-std::shared_ptr<BlockPoolConfig> makeConfig() {
+std::shared_ptr<DeviceBlockPoolConfig> makeConfig() {
     constexpr int    kLayerNum       = 4;
     constexpr int    kBlockNum       = 10;
     constexpr size_t kTokensPerBlock = 1;
@@ -26,7 +26,7 @@ std::shared_ptr<BlockPoolConfig> makeConfig() {
                                                                                /*size_per_head=*/64);
     rtp_llm::BlockPoolConfig old_cfg = rtp_llm::BlockPoolConfigHelper::createConfig(cache_config);
 
-    auto config                     = std::make_shared<BlockPoolConfig>();
+    auto config                     = std::make_shared<DeviceBlockPoolConfig>();
     config->pool_type               = BlockPoolType::DEVICE;
     config->pool_name               = "device";
     config->physical_block_count    = old_cfg.block_num;
@@ -41,9 +41,9 @@ std::shared_ptr<BlockPoolConfig> makeConfig() {
 
 }  // namespace
 
-TEST(BlockPoolTest, InitKeepsBlockZeroInvalid) {
+TEST(DeviceBlockPoolTest, InitKeepsBlockZeroInvalid) {
     auto      config = makeConfig();
-    BlockPool pool(config);
+    DeviceBlockPool pool(config);
 
     ASSERT_TRUE(pool.init());
     EXPECT_FALSE(pool.isAllocated(0));
@@ -55,9 +55,9 @@ TEST(BlockPoolTest, InitKeepsBlockZeroInvalid) {
     EXPECT_NE(*block, 0);
 }
 
-TEST(BlockPoolTest, BlockBuffersCarryBlockIdxAndBytes) {
+TEST(DeviceBlockPoolTest, BlockBuffersCarryBlockIdxAndBytes) {
     auto      config = makeConfig();
-    BlockPool pool(config);
+    DeviceBlockPool pool(config);
     ASSERT_TRUE(pool.init());
 
     auto block = pool.malloc();
@@ -73,9 +73,9 @@ TEST(BlockPoolTest, BlockBuffersCarryBlockIdxAndBytes) {
     }
 }
 
-TEST(BlockPoolTest, PartitionedBlockBuffersCarryBlockIdx) {
+TEST(DeviceBlockPoolTest, PartitionedBlockBuffersCarryBlockIdx) {
     auto      config = makeConfig();
-    BlockPool pool(config);
+    DeviceBlockPool pool(config);
     ASSERT_TRUE(pool.init());
 
     auto block = pool.malloc();
@@ -90,9 +90,9 @@ TEST(BlockPoolTest, PartitionedBlockBuffersCarryBlockIdx) {
     }
 }
 
-TEST(BlockPoolTest, LifecycleUsesIBlockPoolSemantics) {
+TEST(DeviceBlockPoolTest, LifecycleUsesIBlockPoolSemantics) {
     auto      config = makeConfig();
-    BlockPool pool(config);
+    DeviceBlockPool pool(config);
     ASSERT_TRUE(pool.init());
 
     auto block = pool.malloc();
@@ -109,4 +109,4 @@ TEST(BlockPoolTest, LifecycleUsesIBlockPoolSemantics) {
     EXPECT_FALSE(pool.isAllocated(*block));
 }
 
-}  // namespace rtp_llm::block_tree_cache
+}  // namespace rtp_llm

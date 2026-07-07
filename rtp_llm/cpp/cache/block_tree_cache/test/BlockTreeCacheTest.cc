@@ -6,25 +6,28 @@
 
 #include <torch/torch.h>
 
-#include "rtp_llm/cpp/cache/BlockPool.h"
-#include "rtp_llm/cpp/cache/BlockPoolConfigHelper.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCache.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/copy_engine/CopyEngine.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/copy_engine/DiskBlockPool.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/host/HostBlockPool.h"
 #include "rtp_llm/cpp/model_rpc/BroadcastManager.h"
 
 namespace rtp_llm {
 namespace {
 
-// Helper: create a HOST BlockPool with the given block_size and usable_count.
-static std::shared_ptr<BlockPool> makeHostPool(size_t block_size, size_t usable_count) {
-    auto cfg = BlockPoolConfigHelper::createConfig(
-        /*layer_num=*/1,
-        static_cast<uint32_t>(usable_count + 1),
-        static_cast<uint32_t>(block_size),
-        rtp_llm::TYPE_INT8);
-    auto pool = std::make_shared<BlockPool>(cfg, AllocationType::HOST);
-    return pool;
+// Helper: create a v4 HostBlockPool with the given payload_bytes and usable_count.
+// IBlockPool reserves block 0, so physical_block_count = usable_count + 1. The pool
+// is returned uninitialized; callers invoke init() (which is not double-call guarded).
+static std::shared_ptr<HostBlockPool> makeHostPool(size_t payload_bytes, size_t usable_count) {
+    auto config                     = std::make_shared<HostBlockPoolConfig>();
+    config->pool_type               = BlockPoolType::HOST;
+    config->pool_name               = "block_tree_cache_host";
+    config->physical_block_count    = usable_count + 1;
+    config->free_block_order_policy = FreeBlockOrderPolicy::ANY_ORDER;
+    config->payload_bytes           = payload_bytes;
+    config->stride_bytes            = ((payload_bytes + 4095) / 4096) * 4096;
+    config->enable_pinned           = true;
+    config->alignment               = 4096;
+    return std::make_shared<HostBlockPool>(config);
 }
 
 // Helper to build a simple single-group BlockTreeCache for testing.
@@ -761,7 +764,20 @@ TEST_F(BlockTreeCacheTest, DeviceBufferResolverEnablesD2HCopy) {
     // Verify host block content: should be 0xAA pattern
     auto host_block = find.matched_node->group_slots[0].host_block;
     ASSERT_FALSE(isNullBlockIdx(host_block));
-    void* host_addr = host_pool->convertIndexToAddr(0, host_block).kv_addr;
+
+    // Task 7 lifecycle semantics: a tree-visible host block is held by the cache with
+    // exactly one reference (onEvictionComplete's cache-hold incRef); it is allocated.
+    EXPECT_TRUE(host_pool->isAllocated(host_block));
+    EXPECT_EQ(host_pool->refCount(host_block), 1u);
+
+    // Temporary-protection refcount: a load-back / lock would incRef above the cache
+    // hold and decRef back, never dropping the cache's own reference.
+    host_pool->incRef(host_block);
+    EXPECT_GT(host_pool->refCount(host_block), 1u);
+    host_pool->decRef(host_block);
+    EXPECT_EQ(host_pool->refCount(host_block), 1u);
+
+    void* host_addr = host_pool->blockBuffer(host_block).addr;
     ASSERT_NE(host_addr, nullptr);
     auto* bytes = static_cast<const uint8_t*>(host_addr);
     EXPECT_EQ(bytes[0], 0xAA);

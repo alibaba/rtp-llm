@@ -5,7 +5,7 @@
 #include <string>
 #include <vector>
 
-namespace rtp_llm::block_tree_cache {
+namespace rtp_llm {
 
 enum class DiskBlockIOStatus {
     OK,
@@ -86,4 +86,4 @@ private:
     bool        buffered_io_{true};
 };
 
-}  // namespace rtp_llm::block_tree_cache
+}  // namespace rtp_llm

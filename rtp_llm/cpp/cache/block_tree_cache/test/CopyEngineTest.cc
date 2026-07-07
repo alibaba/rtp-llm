@@ -7,29 +7,35 @@
 #include <cuda_runtime.h>
 #include <torch/torch.h>
 
-#include "rtp_llm/cpp/cache/BlockPool.h"
-#include "rtp_llm/cpp/cache/BlockPoolConfigHelper.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/copy_engine/CopyEngine.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/host/DiskBlockPool.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/host/HostBlockPool.h"
 
 namespace rtp_llm {
 namespace {
 
-// Helper: create a HOST BlockPool with the given block_size and usable_count.
-// BlockPool reserves block 0, so we allocate usable_count+1 total blocks.
-static std::shared_ptr<BlockPool> makeHostPool(size_t block_size, size_t usable_count) {
-    auto cfg = BlockPoolConfigHelper::createConfig(
-        /*layer_num=*/1,
-        static_cast<uint32_t>(usable_count + 1),
-        static_cast<uint32_t>(block_size),
-        rtp_llm::TYPE_INT8);
-    auto pool = std::make_shared<BlockPool>(cfg, AllocationType::HOST);
+// Helper: create a v4 HostBlockPool with the given payload_bytes and usable_count.
+// IBlockPool reserves block 0, so physical_block_count = usable_count + 1.
+static std::shared_ptr<HostBlockPool> makeHostPool(size_t payload_bytes, size_t usable_count) {
+    auto config                     = std::make_shared<HostBlockPoolConfig>();
+    config->pool_type               = BlockPoolType::HOST;
+    config->pool_name               = "copy_engine_host";
+    config->physical_block_count    = usable_count + 1;
+    config->free_block_order_policy = FreeBlockOrderPolicy::ANY_ORDER;
+    config->payload_bytes           = payload_bytes;
+    config->stride_bytes            = ((payload_bytes + 4095) / 4096) * 4096;
+    config->enable_pinned           = true;
+    config->alignment               = 4096;
+
+    auto pool = std::make_shared<HostBlockPool>(config);
+    RTP_LLM_CHECK(pool->init());
     return pool;
 }
 
 // Helper: allocate one block from pool, return NULL_BLOCK_IDX if pool is full.
-static BlockIdxType poolMalloc(BlockPool& pool) {
-    auto alloc = pool.malloc(1);
-    return alloc.empty() ? NULL_BLOCK_IDX : alloc[0];
+static BlockIdxType poolMalloc(IBlockPool& pool) {
+    auto block = pool.malloc();
+    return block.has_value() ? *block : NULL_BLOCK_IDX;
 }
 
 // Real CUDA device memory: allocates GPU buffers via torch and provides
@@ -134,7 +140,6 @@ protected:
 
         // Create host pool (BlockPool HOST) — 10 usable blocks
         host_pool_ = makeHostPool(host_block_size_, 10);
-        ASSERT_TRUE(host_pool_->init());
 
         copy_engine_ = std::make_shared<CopyEngine>();
 
@@ -147,7 +152,7 @@ protected:
 
     std::vector<MemoryBlockLayerTagSlot> slots_;
     size_t                               host_block_size_;
-    std::shared_ptr<BlockPool>           host_pool_;
+    std::shared_ptr<HostBlockPool>      host_pool_;
     std::shared_ptr<CopyEngine>          copy_engine_;
     std::vector<BlockIdxType>            device_blocks_;
     CudaDeviceMemory                     cuda_device_;
@@ -157,7 +162,6 @@ protected:
 
 TEST(BlockPoolHostTest, InitAndAlloc) {
     auto pool = makeHostPool(1024, 4);
-    ASSERT_TRUE(pool->init());
     // totalBlocksNum returns usable block count (config_.block_num - 1)
     EXPECT_EQ(pool->totalBlocksNum(), 4u);
     EXPECT_EQ(pool->freeBlocksNum(), 4u);
@@ -170,14 +174,13 @@ TEST(BlockPoolHostTest, InitAndAlloc) {
     EXPECT_NE(b2, NULL_BLOCK_IDX);
     EXPECT_NE(b1, b2);
 
-    pool->requestFree(b1);
-    // After 2 mallocs (free=2) then 1 requestFree → free=3
+    pool->free(b1);
+    // After 2 mallocs (free=2) then 1 free() → free=3
     EXPECT_EQ(pool->freeBlocksNum(), 3u);
 }
 
 TEST(BlockPoolHostTest, ExhaustPool) {
     auto pool = makeHostPool(256, 2);
-    ASSERT_TRUE(pool->init());
 
     BlockIdxType b1 = poolMalloc(*pool);
     BlockIdxType b2 = poolMalloc(*pool);
@@ -190,10 +193,9 @@ TEST(BlockPoolHostTest, ExhaustPool) {
 
 TEST(BlockPoolHostTest, BlockAddr) {
     auto pool = makeHostPool(128, 3);
-    ASSERT_TRUE(pool->init());
 
     BlockIdxType b    = poolMalloc(*pool);
-    void*        addr = pool->convertIndexToAddr(0, b).kv_addr;
+    void*        addr = pool->blockBuffer(b).addr;
     EXPECT_NE(addr, nullptr);
 
     // Write and read back
@@ -209,10 +211,9 @@ TEST(BlockPoolHostTest, PinnedMemory) {
     }
     // BlockPool HOST uses pin_memory() by default (env RTP_LLM_PIN_HOST_BLOCK_POOL)
     auto pool = makeHostPool(4096, 2);
-    ASSERT_TRUE(pool->init());
 
     BlockIdxType b    = poolMalloc(*pool);
-    void*        addr = pool->convertIndexToAddr(0, b).kv_addr;
+    void*        addr = pool->blockBuffer(b).addr;
     EXPECT_NE(addr, nullptr);
 }
 
@@ -232,7 +233,7 @@ TEST_F(CopyEngineTest, DeviceToHostPacking) {
     ASSERT_TRUE(ok);
 
     // Verify packed layout in host block (host memory is directly readable)
-    const uint8_t* host_data = static_cast<const uint8_t*>(host_pool_->convertIndexToAddr(0, host_block).kv_addr);
+    const uint8_t* host_data = static_cast<const uint8_t*>(host_pool_->blockBuffer(host_block).addr);
     ASSERT_NE(host_data, nullptr);
 
     // First 100 bytes should be 0xAA (layer 0)
@@ -248,7 +249,7 @@ TEST_F(CopyEngineTest, DeviceToHostPacking) {
         EXPECT_EQ(host_data[i], 0xCC) << "byte " << i;
     }
 
-    host_pool_->requestFree(host_block);
+    host_pool_->free(host_block);
 }
 
 TEST_F(CopyEngineTest, HostToDeviceUnpacking) {
@@ -287,7 +288,7 @@ TEST_F(CopyEngineTest, HostToDeviceUnpacking) {
     for (size_t i = 0; i < 150; ++i)
         EXPECT_EQ(d2[i], 0x33);
 
-    host_pool_->requestFree(host_block);
+    host_pool_->free(host_block);
 }
 
 TEST_F(CopyEngineTest, RoundTripSequentialData) {
@@ -325,7 +326,7 @@ TEST_F(CopyEngineTest, RoundTripSequentialData) {
         EXPECT_EQ(d2[i], static_cast<uint8_t>(i & 0xFF));
     }
 
-    host_pool_->requestFree(host_block);
+    host_pool_->free(host_block);
 }
 
 TEST_F(CopyEngineTest, NullDeviceBlockSkipped) {
@@ -339,7 +340,7 @@ TEST_F(CopyEngineTest, NullDeviceBlockSkipped) {
 
     ASSERT_TRUE(copy_engine_->deviceToHost(blocks, host_block, slots_, resolver, *host_pool_));
 
-    const uint8_t* host_data = static_cast<const uint8_t*>(host_pool_->convertIndexToAddr(0, host_block).kv_addr);
+    const uint8_t* host_data = static_cast<const uint8_t*>(host_pool_->blockBuffer(host_block).addr);
     // Layer 0: 0xAA
     for (size_t i = 0; i < 100; ++i)
         EXPECT_EQ(host_data[i], 0xAA);
@@ -350,13 +351,18 @@ TEST_F(CopyEngineTest, NullDeviceBlockSkipped) {
     for (size_t i = 300; i < 450; ++i)
         EXPECT_EQ(host_data[i], 0xCC);
 
-    host_pool_->requestFree(host_block);
+    host_pool_->free(host_block);
 }
 
 TEST_F(CopyEngineTest, InvalidHostBlockFails) {
     auto resolver = cuda_device_.makeResolver();
     EXPECT_FALSE(copy_engine_->deviceToHost(device_blocks_, NULL_BLOCK_IDX, slots_, resolver, *host_pool_));
     EXPECT_FALSE(copy_engine_->deviceToHost(device_blocks_, 999, slots_, resolver, *host_pool_));
+}
+
+TEST_F(CopyEngineTest, DeviceToHostRejectsUnallocatedHostBlock) {
+    auto resolver = cuda_device_.makeResolver();
+    EXPECT_FALSE(copy_engine_->deviceToHost(device_blocks_, 1, slots_, resolver, *host_pool_));
 }
 
 TEST_F(CopyEngineTest, MismatchedSlotCountFails) {
@@ -366,7 +372,7 @@ TEST_F(CopyEngineTest, MismatchedSlotCountFails) {
     std::vector<BlockIdxType> wrong_blocks = {1, 2};  // 2 blocks but 3 slots
     EXPECT_FALSE(copy_engine_->deviceToHost(wrong_blocks, host_block, slots_, resolver, *host_pool_));
 
-    host_pool_->requestFree(host_block);
+    host_pool_->free(host_block);
 }
 
 TEST_F(CopyEngineTest, ComputeHostBlockSize) {
@@ -392,7 +398,6 @@ protected:
         host_block_size_ = CopyEngine::computeHostBlockSize(slots_);  // 384
 
         host_pool_ = makeHostPool(host_block_size_, 4);
-        ASSERT_TRUE(host_pool_->init());
 
         // Create a temp directory for disk pool
         char  tmpdir_template[] = "/tmp/copy_engine_test_XXXXXX";
@@ -401,17 +406,21 @@ protected:
         test_tmpdir_ = tmpdir;
 
         // Create a disk pool in the temp directory
-        DiskBlockPoolConfig disk_config;
-        disk_config.work_dir   = test_tmpdir_;
-        disk_config.local_rank = 0;
-        disk_config.world_rank = 0;
+        auto disk_config                     = std::make_shared<DiskBlockPoolConfig>();
+        disk_config->pool_type               = BlockPoolType::DISK;
+        disk_config->pool_name               = "copy_engine_disk";
+        disk_config->free_block_order_policy = FreeBlockOrderPolicy::ASCENDING_ORDER;
+        disk_config->work_dir                = test_tmpdir_;
+        disk_config->local_rank              = 0;
+        disk_config->world_rank              = 0;
         // Ensure enough space: align block size up to 4096, then multiply by slot count
-        size_t aligned_block_size    = ((host_block_size_ + 4095) / 4096) * 4096;
-        disk_config.disk_size_bytes  = aligned_block_size * 8;  // 8 slots
-        disk_config.block_size_bytes = host_block_size_;
-        disk_config.buffered_io      = true;
+        size_t aligned_block_size            = ((host_block_size_ + 4095) / 4096) * 4096;
+        disk_config->disk_size_bytes         = aligned_block_size * 8;  // 8 slots
+        disk_config->payload_bytes           = host_block_size_;
+        disk_config->stride_bytes            = aligned_block_size;
+        disk_config->buffered_io             = true;
 
-        disk_pool_ = std::make_shared<DiskBlockPool>(std::move(disk_config));
+        disk_pool_ = std::make_shared<DiskBlockPool>(disk_config);
         ASSERT_TRUE(disk_pool_->init()) << "DiskBlockPool init failed in " << test_tmpdir_;
 
         copy_engine_ = std::make_shared<CopyEngine>();
@@ -421,7 +430,8 @@ protected:
         disk_pool_.reset();
         if (!test_tmpdir_.empty()) {
             std::string cmd = "rm -rf " + test_tmpdir_;
-            static_cast<void>(::system(cmd.c_str()));
+            int         rc  = ::system(cmd.c_str());
+            (void)rc;
         }
     }
 
@@ -429,7 +439,7 @@ protected:
 
     std::vector<MemoryBlockLayerTagSlot> slots_;
     size_t                               host_block_size_;
-    std::shared_ptr<BlockPool>           host_pool_;
+    std::shared_ptr<HostBlockPool>      host_pool_;
     std::shared_ptr<DiskBlockPool>       disk_pool_;
     std::shared_ptr<CopyEngine>          copy_engine_;
 };
@@ -438,7 +448,7 @@ TEST_F(CopyEngineDiskTest, HostToDiskRoundTrip) {
     // Fill host block with pattern
     BlockIdxType host_block = poolMalloc(*host_pool_);
     ASSERT_NE(host_block, NULL_BLOCK_IDX);
-    uint8_t* host_data = static_cast<uint8_t*>(host_pool_->convertIndexToAddr(0, host_block).kv_addr);
+    uint8_t* host_data = static_cast<uint8_t*>(host_pool_->blockBuffer(host_block).addr);
     for (size_t i = 0; i < host_block_size_; ++i) {
         host_data[i] = static_cast<uint8_t>(i & 0xFF);
     }
@@ -461,8 +471,8 @@ TEST_F(CopyEngineDiskTest, HostToDiskRoundTrip) {
         EXPECT_EQ(host_data[i], static_cast<uint8_t>(i & 0xFF)) << "byte " << i;
     }
 
-    host_pool_->requestFree(host_block);
-    disk_pool_->requestFree(disk_slot);
+    host_pool_->free(host_block);
+    disk_pool_->free(disk_slot);
 }
 
 TEST_F(CopyEngineDiskTest, FullPipeline_D2H_H2Disk_Disk2H_H2D) {
@@ -497,7 +507,7 @@ TEST_F(CopyEngineDiskTest, FullPipeline_D2H_H2Disk_Disk2H_H2D) {
     ASSERT_TRUE(disk_slot_opt.has_value());
     int32_t disk_slot = disk_slot_opt.value();
     ASSERT_TRUE(copy_engine_->hostToDisk(host_block_1, disk_slot, *host_pool_, *disk_pool_));
-    host_pool_->requestFree(host_block_1);
+    host_pool_->free(host_block_1);
 
     // Step 3: Disk2H
     BlockIdxType host_block_2 = poolMalloc(*host_pool_);
@@ -520,8 +530,15 @@ TEST_F(CopyEngineDiskTest, FullPipeline_D2H_H2Disk_Disk2H_H2D) {
         EXPECT_EQ(d1[i], static_cast<uint8_t>(i * 3 & 0xFF));
     }
 
-    host_pool_->requestFree(host_block_2);
-    disk_pool_->requestFree(disk_slot);
+    host_pool_->free(host_block_2);
+    disk_pool_->free(disk_slot);
+}
+
+TEST_F(CopyEngineDiskTest, HostToDiskRejectsUnallocatedDiskBlock) {
+    BlockIdxType host_block = poolMalloc(*host_pool_);
+    ASSERT_NE(host_block, NULL_BLOCK_IDX);
+    EXPECT_FALSE(copy_engine_->hostToDisk(host_block, 1, *host_pool_, *disk_pool_));
+    host_pool_->free(host_block);
 }
 
 }  // namespace

@@ -11,9 +11,9 @@
 #include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 
-namespace rtp_llm::block_tree_cache {
+namespace rtp_llm {
 
-using BlockIds = std::vector<BlockIdxType>;
+using BlockIdList = std::vector<BlockIdxType>;
 
 enum class FreeBlockOrderPolicy {
     ANY_ORDER,
@@ -49,16 +49,16 @@ public:
     virtual std::string debugString() const;
 
     std::optional<BlockIdxType> malloc();
-    std::optional<BlockIds>     malloc(size_t n);
+    std::optional<BlockIdList>     malloc(size_t n);
 
     void free(BlockIdxType block);
-    void free(const BlockIds& blocks);
+    void free(const BlockIdList& blocks);
 
     void     incRef(BlockIdxType block);
-    void     incRef(const BlockIds& blocks);
+    void     incRef(const BlockIdList& blocks);
     bool     tryIncRefIf(BlockIdxType block, uint32_t expected_refcount);
     void     decRef(BlockIdxType block);
-    void     decRef(const BlockIds& blocks);
+    void     decRef(const BlockIdList& blocks);
     uint32_t refCount(BlockIdxType block) const;
 
     bool validBlock(BlockIdxType block) const;
@@ -87,7 +87,7 @@ private:
     bool validBlockNoLock(BlockIdxType block) const;
     void checkInitializedNoLock() const;
     void checkAllocatedNoLock(BlockIdxType block) const;
-    void checkUniqueBlocksNoLock(const BlockIds& blocks) const;
+    void checkUniqueBlocksNoLock(const BlockIdList& blocks) const;
 
     size_t       availableFreeBlocksNoLock() const;
     void         refillAscendingFreeBlocksNoLock();
@@ -109,4 +109,4 @@ private:
     size_t                                     active_tree_cached_blocks_num_{0};
 };
 
-}  // namespace rtp_llm::block_tree_cache
+}  // namespace rtp_llm

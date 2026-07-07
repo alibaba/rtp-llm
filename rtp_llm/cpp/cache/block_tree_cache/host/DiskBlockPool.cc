@@ -5,7 +5,7 @@
 
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 
-namespace rtp_llm::block_tree_cache {
+namespace rtp_llm {
 
 namespace {
 
@@ -130,7 +130,7 @@ BlockIOStatus DiskBlockPool::write(BlockIdxType block, const void* src, size_t b
     return mapStatus(io_->write(blockOffset(block), src, bytes));
 }
 
-BlockIOStatus DiskBlockPool::read(const BlockIds& blocks, const std::vector<void*>& dsts, size_t bytes_per_block) {
+BlockIOStatus DiskBlockPool::read(const BlockIdList& blocks, const std::vector<void*>& dsts, size_t bytes_per_block) {
     RTP_LLM_CHECK(initialized());
     RTP_LLM_CHECK_WITH_INFO(blocks.size() == dsts.size(),
                              "disk block pool [%s] batch read blocks/dsts size mismatch, blocks=[%zu] dsts=[%zu]",
@@ -155,7 +155,7 @@ BlockIOStatus DiskBlockPool::read(const BlockIds& blocks, const std::vector<void
 }
 
 BlockIOStatus
-DiskBlockPool::write(const BlockIds& blocks, const std::vector<const void*>& srcs, size_t bytes_per_block) {
+DiskBlockPool::write(const BlockIdList& blocks, const std::vector<const void*>& srcs, size_t bytes_per_block) {
     RTP_LLM_CHECK(initialized());
     RTP_LLM_CHECK_WITH_INFO(blocks.size() == srcs.size(),
                              "disk block pool [%s] batch write blocks/srcs size mismatch, blocks=[%zu] srcs=[%zu]",
@@ -203,4 +203,4 @@ std::string DiskBlockPool::debugString() const {
     return oss.str();
 }
 
-}  // namespace rtp_llm::block_tree_cache
+}  // namespace rtp_llm

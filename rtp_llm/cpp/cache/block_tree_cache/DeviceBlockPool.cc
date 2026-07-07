@@ -1,4 +1,4 @@
-#include "rtp_llm/cpp/cache/block_tree_cache/BlockPool.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/DeviceBlockPool.h"
 
 #include <cstdlib>
 #include <cstring>
@@ -14,7 +14,7 @@
 #include <cuda_runtime.h>
 #endif
 
-namespace rtp_llm::block_tree_cache {
+namespace rtp_llm {
 
 namespace {
 
@@ -42,7 +42,7 @@ const char* memoryTypeName(MemoryType memory_type) {
 
 }  // namespace
 
-std::shared_ptr<const BlockPoolConfig> BlockPool::normalizeConfig(const std::shared_ptr<const BlockPoolConfig>& config) {
+std::shared_ptr<const DeviceBlockPoolConfig> DeviceBlockPool::normalizeConfig(const std::shared_ptr<const DeviceBlockPoolConfig>& config) {
     RTP_LLM_CHECK(config != nullptr);
     RTP_LLM_CHECK(config->pool_type == BlockPoolType::DEVICE);
     RTP_LLM_CHECK(config->free_block_order_policy == FreeBlockOrderPolicy::ANY_ORDER);
@@ -87,22 +87,22 @@ std::shared_ptr<const BlockPoolConfig> BlockPool::normalizeConfig(const std::sha
                             config->pool_name.c_str(),
                             computed_physical_block_count);
 
-    auto normalized                  = std::make_shared<BlockPoolConfig>(*config);
+    auto normalized                  = std::make_shared<DeviceBlockPoolConfig>(*config);
     normalized->physical_block_count = computed_physical_block_count;
     return normalized;
 }
 
-BlockPool::BlockPool(std::shared_ptr<const BlockPoolConfig> config): IBlockPool(normalizeConfig(config)) {}
+DeviceBlockPool::DeviceBlockPool(std::shared_ptr<const DeviceBlockPoolConfig> config): IBlockPool(normalizeConfig(config)) {}
 
-BlockPool::~BlockPool() {
+DeviceBlockPool::~DeviceBlockPool() {
     cache_aligned_buffer_ = torch::Tensor();
 }
 
-const BlockPoolConfig& BlockPool::config() const {
-    return configAs<BlockPoolConfig>(BlockPoolType::DEVICE);
+const DeviceBlockPoolConfig& DeviceBlockPool::config() const {
+    return configAs<DeviceBlockPoolConfig>(BlockPoolType::DEVICE);
 }
 
-bool BlockPool::init() {
+bool DeviceBlockPool::init() {
     RTP_LLM_CHECK(!initialized());
     const auto& cfg = config();
 
@@ -113,7 +113,7 @@ bool BlockPool::init() {
     markInitialized();
 
     RTP_LLM_LOG_INFO(
-        "block_tree_cache::BlockPool init success: pool_name=%s memory_layouts=%zu total_layers=%zu "
+        "block_tree_cache::DeviceBlockPool init success: pool_name=%s memory_layouts=%zu total_layers=%zu "
         "total_size=%zu bytes physical_block_count=%zu",
         cfg.pool_name.c_str(),
         cfg.memory_layouts.size(),
@@ -129,10 +129,10 @@ bool BlockPool::init() {
 // (rtp_llm::block_tree_cache::HostBlockPool already covers host backing), so only the
 // DEVICE allocation_type path (plain CUDA tensor, pinned-CPU-backed, or cudaMalloc-backed)
 // is kept.
-void BlockPool::initializeCacheBuffer() {
+void DeviceBlockPool::initializeCacheBuffer() {
     const auto& cfg = config();
     RTP_LLM_CHECK_WITH_INFO(cfg.allocation_type == AllocationType::DEVICE,
-                            "block_tree_cache::BlockPool [%s] only supports AllocationType::DEVICE",
+                            "block_tree_cache::DeviceBlockPool [%s] only supports AllocationType::DEVICE",
                             cfg.pool_name.c_str());
     RTP_LLM_CHECK_WITH_INFO(
         cfg.total_size_bytes > 0, "device block pool [%s] total_size_bytes must be > 0", cfg.pool_name.c_str());
@@ -153,7 +153,7 @@ void BlockPool::initializeCacheBuffer() {
     const bool           is_cuda   = cache_aligned_buffer_.is_cuda();
     const bool           is_pinned = !is_cuda && cache_aligned_buffer_.is_pinned();
     static constexpr double kBytesPerMB = 1024.0 * 1024.0;
-    RTP_LLM_LOG_INFO("block_tree_cache::BlockPool backing selected: pool_name=%s allocation_type=%s "
+    RTP_LLM_LOG_INFO("block_tree_cache::DeviceBlockPool backing selected: pool_name=%s allocation_type=%s "
                      "actual_backing=%s is_cuda=%d is_pinned=%d ptr=%p total_size=%zu bytes total_size_mb=%.2f "
                      "memory_layouts=%zu",
                      cfg.pool_name.c_str(),
@@ -167,7 +167,7 @@ void BlockPool::initializeCacheBuffer() {
                      cfg.memory_layouts.size());
 }
 
-void BlockPool::initializePinnedCpuBuffer(const char* log_context) {
+void DeviceBlockPool::initializePinnedCpuBuffer(const char* log_context) {
     const auto& cfg = config();
     RTP_LLM_LOG_WARNING(
         "%s, pool_name=%s, total_size=%zu bytes", log_context, cfg.pool_name.c_str(), cfg.total_size_bytes);
@@ -184,7 +184,7 @@ void BlockPool::initializePinnedCpuBuffer(const char* log_context) {
     }
 }
 
-void BlockPool::initializeCudaMallocBuffer() {
+void DeviceBlockPool::initializeCudaMallocBuffer() {
 #if USING_CUDA
     const auto& cfg = config();
     RTP_LLM_CHECK_WITH_INFO(
@@ -235,7 +235,7 @@ void BlockPool::initializeCudaMallocBuffer() {
 #endif
 }
 
-void BlockPool::initializeLayerMappings() {
+void DeviceBlockPool::initializeLayerMappings() {
     const auto& cfg = config();
     size_t      total_layers = 0;
     for (const auto& layout_cfg : cfg.memory_layouts) {
@@ -244,7 +244,7 @@ void BlockPool::initializeLayerMappings() {
     global_layer_to_local_.assign(total_layers, {-1, -1});
 }
 
-void BlockPool::initializeLayoutStrategies() {
+void DeviceBlockPool::initializeLayoutStrategies() {
     const auto&   cfg         = config();
     torch::Tensor full_tensor = cache_aligned_buffer_;
 
@@ -257,7 +257,7 @@ void BlockPool::initializeLayoutStrategies() {
     }
 }
 
-void BlockPool::processMemoryLayout(size_t layout_idx, const torch::Tensor& full_tensor, size_t& global_layer_begin) {
+void DeviceBlockPool::processMemoryLayout(size_t layout_idx, const torch::Tensor& full_tensor, size_t& global_layer_begin) {
     const auto& layout_cfg = config().memory_layouts[layout_idx];
 
     torch::Tensor kv_cache_tensor = createTensor(full_tensor,
@@ -277,7 +277,7 @@ void BlockPool::processMemoryLayout(size_t layout_idx, const torch::Tensor& full
     initializeLayoutStrategy(layout_idx, layout_cfg, kv_cache_tensor, kv_scale_tensor);
     processLayerTensors(layout_idx, layout_cfg, global_layer_begin);
 
-    RTP_LLM_LOG_INFO("block_tree_cache::BlockPool MemoryLayout[%zu] initialized: pool_name=%s layer_num=%u "
+    RTP_LLM_LOG_INFO("block_tree_cache::DeviceBlockPool MemoryLayout[%zu] initialized: pool_name=%s layer_num=%u "
                      "block_num=%u kv_off=%zu kv_bytes=%zu scale_off=%zu scale_bytes=%zu",
                      layout_idx,
                      config().pool_name.c_str(),
@@ -289,7 +289,7 @@ void BlockPool::processMemoryLayout(size_t layout_idx, const torch::Tensor& full
                      layout_cfg.kv_scale_pool_size_bytes);
 }
 
-torch::Tensor BlockPool::createTensor(
+torch::Tensor DeviceBlockPool::createTensor(
     const torch::Tensor& full_tensor, int64_t offset, int64_t size, size_t layout_idx, const std::string& tensor_type) {
     RTP_LLM_CHECK_WITH_INFO(offset >= 0 && size >= 0 && offset + size <= full_tensor.numel(),
                             "layout[%zu] %s tensor out of range: off=%ld bytes=%ld full=%ld",
@@ -301,7 +301,7 @@ torch::Tensor BlockPool::createTensor(
     return full_tensor.narrow(0, offset, size);
 }
 
-void BlockPool::initializeLayoutStrategy(size_t                    layout_idx,
+void DeviceBlockPool::initializeLayoutStrategy(size_t                    layout_idx,
                                          const MemoryLayoutConfig& layout_cfg,
                                          torch::Tensor&            kv_cache_tensor,
                                          torch::Tensor&            kv_scale_tensor) {
@@ -318,7 +318,7 @@ void BlockPool::initializeLayoutStrategy(size_t                    layout_idx,
         layout_idx);
 }
 
-void BlockPool::processLayerTensors(size_t                    layout_idx,
+void DeviceBlockPool::processLayerTensors(size_t                    layout_idx,
                                     const MemoryLayoutConfig& layout_cfg,
                                     size_t&                   global_layer_begin) {
     // Unlike rtp_llm::BlockPool, this v4 pool does not keep the global layer -> KV
@@ -332,7 +332,7 @@ void BlockPool::processLayerTensors(size_t                    layout_idx,
     }
 }
 
-std::pair<int, int> BlockPool::mapGlobalLayerIdToLocal(int global_layer_id) const {
+std::pair<int, int> DeviceBlockPool::mapGlobalLayerIdToLocal(int global_layer_id) const {
     if (global_layer_id < 0 || static_cast<size_t>(global_layer_id) >= global_layer_to_local_.size()) {
         RTP_LLM_LOG_ERROR("Global layer_id %d out of range (total layers: %zu), pool_name=%s",
                           global_layer_id,
@@ -343,7 +343,7 @@ std::pair<int, int> BlockPool::mapGlobalLayerIdToLocal(int global_layer_id) cons
     return global_layer_to_local_[static_cast<size_t>(global_layer_id)];
 }
 
-void BlockPool::checkLayoutValidity(int layout_id) const {
+void DeviceBlockPool::checkLayoutValidity(int layout_id) const {
     RTP_LLM_CHECK_WITH_INFO(layout_id >= 0 && static_cast<size_t>(layout_id) < layout_strategies_.size(),
                             "Memory layout ID %d out of range (max: %zu)",
                             layout_id,
@@ -351,7 +351,7 @@ void BlockPool::checkLayoutValidity(int layout_id) const {
 }
 
 std::vector<DeviceBlockBuffer>
-BlockPool::toDeviceBlockBuffers(const std::vector<BlockInfo>& infos, BlockIdxType block) const {
+DeviceBlockPool::toDeviceBlockBuffers(const std::vector<BlockInfo>& infos, BlockIdxType block) const {
     std::vector<DeviceBlockBuffer> buffers;
     buffers.reserve(infos.size());
     for (const auto& info : infos) {
@@ -360,7 +360,7 @@ BlockPool::toDeviceBlockBuffers(const std::vector<BlockInfo>& infos, BlockIdxTyp
     return buffers;
 }
 
-std::vector<DeviceBlockBuffer> BlockPool::blockBuffers(int layer_id, BlockIdxType block) const {
+std::vector<DeviceBlockBuffer> DeviceBlockPool::blockBuffers(int layer_id, BlockIdxType block) const {
     RTP_LLM_CHECK(initialized());
     RTP_LLM_CHECK(isAllocated(block));
 
@@ -371,7 +371,7 @@ std::vector<DeviceBlockBuffer> BlockPool::blockBuffers(int layer_id, BlockIdxTyp
 }
 
 std::vector<DeviceBlockBuffer>
-BlockPool::blockBuffers(int layer_id, BlockIdxType block, int partition_count, int partition_id) const {
+DeviceBlockPool::blockBuffers(int layer_id, BlockIdxType block, int partition_count, int partition_id) const {
     RTP_LLM_CHECK(initialized());
     RTP_LLM_CHECK(isAllocated(block));
 
@@ -382,19 +382,19 @@ BlockPool::blockBuffers(int layer_id, BlockIdxType block, int partition_count, i
     return toDeviceBlockBuffers(infos, block);
 }
 
-MemoryType BlockPool::where() const {
+MemoryType DeviceBlockPool::where() const {
     if (cache_aligned_buffer_.is_cuda()) {
         return MemoryType::MEMORY_GPU;
     }
     return cache_aligned_buffer_.is_pinned() ? MemoryType::MEMORY_CPU_PINNED : MemoryType::MEMORY_CPU;
 }
 
-std::string BlockPool::debugString() const {
+std::string DeviceBlockPool::debugString() const {
     std::ostringstream oss;
-    oss << "block_tree_cache::BlockPool{" << IBlockPool::debugString() << ", pool_name=" << config().pool_name
+    oss << "DeviceBlockPool{" << IBlockPool::debugString() << ", pool_name=" << config().pool_name
         << ", memory_layouts=" << config().memory_layouts.size() << ", total_size_bytes=" << config().total_size_bytes
         << ", where=" << memoryTypeName(where()) << "}";
     return oss.str();
 }
 
-}  // namespace rtp_llm::block_tree_cache
+}  // namespace rtp_llm

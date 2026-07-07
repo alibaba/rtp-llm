@@ -8,7 +8,7 @@
 
 #include "rtp_llm/cpp/cache/block_tree_cache/IBlockPool.h"
 
-namespace rtp_llm::block_tree_cache {
+namespace rtp_llm {
 
 struct HostBlockPoolConfig: public BlockPoolConfigBase {
     size_t payload_bytes{0};
@@ -60,4 +60,4 @@ private:
     bool          pinned_{false};
 };
 
-}  // namespace rtp_llm::block_tree_cache
+}  // namespace rtp_llm

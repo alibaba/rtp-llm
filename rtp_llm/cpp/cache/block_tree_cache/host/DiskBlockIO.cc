@@ -8,7 +8,7 @@
 
 #include "rtp_llm/cpp/utils/Logger.h"
 
-namespace rtp_llm::block_tree_cache {
+namespace rtp_llm {
 namespace {
 
 constexpr size_t kDirectIOAlignment = 4096;
@@ -230,4 +230,4 @@ std::string PosixDiskBlockIO::debugString() const {
     return oss.str();
 }
 
-}  // namespace rtp_llm::block_tree_cache
+}  // namespace rtp_llm

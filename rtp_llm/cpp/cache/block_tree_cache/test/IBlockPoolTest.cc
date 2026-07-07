@@ -4,7 +4,7 @@
 
 #include "gtest/gtest.h"
 
-namespace rtp_llm::block_tree_cache {
+namespace rtp_llm {
 namespace {
 
 struct TestPoolConfig: public BlockPoolConfigBase {
@@ -93,17 +93,17 @@ TEST(IBlockPoolTest, AscendingOrderReturnsSortedBlockIds) {
 
     auto blocks = pool.malloc(3);
     ASSERT_TRUE(blocks.has_value());
-    ASSERT_EQ(*blocks, (BlockIds{1, 2, 3}));
-    pool.free(BlockIds{2});
+    ASSERT_EQ(*blocks, (BlockIdList{1, 2, 3}));
+    pool.free(BlockIdList{2});
 
     auto more = pool.malloc(2);
     ASSERT_TRUE(more.has_value());
-    EXPECT_EQ(*more, (BlockIds{4, 5}));
+    EXPECT_EQ(*more, (BlockIdList{4, 5}));
 
-    pool.free(BlockIds{1, 3});
+    pool.free(BlockIdList{1, 3});
     auto afterMerge = pool.malloc(2);
     ASSERT_TRUE(afterMerge.has_value());
-    EXPECT_EQ(*afterMerge, (BlockIds{1, 2}));
+    EXPECT_EQ(*afterMerge, (BlockIdList{1, 2}));
 }
 
-}  // namespace rtp_llm::block_tree_cache
+}  // namespace rtp_llm

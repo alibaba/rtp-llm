@@ -86,7 +86,7 @@ pool_test_copts = [
 ] + copts()
 
 pool_test_deps = [
-    "//rtp_llm/cpp/cache/block_tree_cache:block_tree_cache_pool",
+    "//rtp_llm/cpp/cache/block_tree_cache",
     "//rtp_llm/cpp/cache/test:cache_config_test_utils",
     "//rtp_llm/cpp/config:config_modules",
     "//rtp_llm/cpp/config:model_config",
@@ -120,11 +120,11 @@ cc_test(
 )
 
 cc_test(
-    name = "block_pool_test",
-    srcs = ["BlockPoolTest.cc"],
+    name = "device_block_pool_test",
+    srcs = ["DeviceBlockPoolTest.cc"],
     copts = pool_test_copts,
     # Uses only the lightweight cache_config_test_utils (already in pool_test_deps) +
-    # BlockPoolConfigHelper (via block_tree_cache_pool); deliberately avoids
+    # the merged block_tree_cache pool sources; deliberately avoids
     # block_pool_test_helper, which pulls the heavy //rtp_llm/cpp/cache monolith.
     deps = pool_test_deps,
     env = {},

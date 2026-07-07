@@ -10,6 +10,36 @@
 
 namespace rtp_llm {
 
+namespace {
+
+bool validAllocatedHostBlock(HostBlockPool& host_pool, BlockIdxType host_block) {
+    return !isNullBlockIdx(host_block) && host_block > 0 && host_pool.isAllocated(host_block);
+}
+
+bool validAllocatedDiskBlock(DiskBlockPool& disk_pool, BlockIdxType disk_block) {
+    return !isNullBlockIdx(disk_block) && disk_block > 0 && disk_pool.isAllocated(disk_block);
+}
+
+const char* blockIOStatusName(BlockIOStatus status) {
+    switch (status) {
+        case BlockIOStatus::OK:
+            return "OK";
+        case BlockIOStatus::INVALID_BLOCK:
+            return "INVALID_BLOCK";
+        case BlockIOStatus::INVALID_SIZE:
+            return "INVALID_SIZE";
+        case BlockIOStatus::ALIGNMENT_ERROR:
+            return "ALIGNMENT_ERROR";
+        case BlockIOStatus::IO_ERROR:
+            return "IO_ERROR";
+        case BlockIOStatus::PARTIAL_FAILURE:
+            return "PARTIAL_FAILURE";
+    }
+    return "UNKNOWN";
+}
+
+}  // namespace
+
 size_t CopyEngine::computeHostBlockSize(const std::vector<MemoryBlockLayerTagSlot>& slots) {
     size_t total = 0;
     for (const auto& slot : slots) {
@@ -24,9 +54,9 @@ bool CopyEngine::deviceToHost(const std::vector<BlockIdxType>&            device
                               BlockIdxType                                host_block,
                               const std::vector<MemoryBlockLayerTagSlot>& slots,
                               const DeviceBufferResolver&                 resolver,
-                              BlockPool&                                  host_pool) {
-    if (host_block < 1 || host_block > static_cast<BlockIdxType>(host_pool.totalBlocksNum())) {
-        RTP_LLM_LOG_WARNING("CopyEngine::deviceToHost: invalid host block %d", host_block);
+                              HostBlockPool&                              host_pool) {
+    if (!validAllocatedHostBlock(host_pool, host_block)) {
+        RTP_LLM_LOG_WARNING("CopyEngine::deviceToHost: invalid or unallocated host block %d", host_block);
         return false;
     }
     if (device_blocks.size() != slots.size()) {
@@ -35,7 +65,7 @@ bool CopyEngine::deviceToHost(const std::vector<BlockIdxType>&            device
         return false;
     }
 
-    void* host_base = host_pool.convertIndexToAddr(0, host_block).kv_addr;
+    void* host_base = host_pool.blockBuffer(host_block).addr;
     if (!host_base) {
         RTP_LLM_LOG_WARNING("CopyEngine::deviceToHost: null host address for block %d", host_block);
         return false;
@@ -140,9 +170,9 @@ bool CopyEngine::hostToDevice(BlockIdxType                                host_b
                               const std::vector<BlockIdxType>&            device_blocks,
                               const std::vector<MemoryBlockLayerTagSlot>& slots,
                               const DeviceBufferResolver&                 resolver,
-                              BlockPool&                                  host_pool) {
-    if (host_block < 1 || host_block > static_cast<BlockIdxType>(host_pool.totalBlocksNum())) {
-        RTP_LLM_LOG_WARNING("CopyEngine::hostToDevice: invalid host block %d", host_block);
+                              HostBlockPool&                              host_pool) {
+    if (!validAllocatedHostBlock(host_pool, host_block)) {
+        RTP_LLM_LOG_WARNING("CopyEngine::hostToDevice: invalid or unallocated host block %d", host_block);
         return false;
     }
     if (device_blocks.size() != slots.size()) {
@@ -151,7 +181,7 @@ bool CopyEngine::hostToDevice(BlockIdxType                                host_b
         return false;
     }
 
-    const void* host_base = host_pool.convertIndexToAddr(0, host_block).kv_addr;
+    const void* host_base = host_pool.blockBuffer(host_block).addr;
     if (!host_base) {
         RTP_LLM_LOG_WARNING("CopyEngine::hostToDevice: null host address for block %d", host_block);
         return false;
@@ -247,57 +277,55 @@ bool CopyEngine::hostToDevice(BlockIdxType                                host_b
 // ---- Host <-> Disk ----
 
 bool CopyEngine::hostToDisk(BlockIdxType   host_block,
-                            int32_t        disk_slot,
-                            BlockPool&     host_pool,
+                            BlockIdxType   disk_block,
+                            HostBlockPool& host_pool,
                             DiskBlockPool& disk_pool) {
-    if (host_block < 1 || host_block > static_cast<BlockIdxType>(host_pool.totalBlocksNum())) {
-        RTP_LLM_LOG_WARNING("CopyEngine::hostToDisk: invalid host block %d", host_block);
+    if (!validAllocatedHostBlock(host_pool, host_block)) {
+        RTP_LLM_LOG_WARNING("CopyEngine::hostToDisk: invalid or unallocated host block %d", host_block);
         return false;
     }
-    if (!disk_pool.validSlot(disk_slot)) {
-        RTP_LLM_LOG_WARNING("CopyEngine::hostToDisk: invalid disk slot %d", disk_slot);
+    if (!validAllocatedDiskBlock(disk_pool, disk_block)) {
+        RTP_LLM_LOG_WARNING("CopyEngine::hostToDisk: invalid or unallocated disk block %d", disk_block);
         return false;
     }
 
-    const void*  host_base      = host_pool.convertIndexToAddr(0, host_block).kv_addr;
-    const size_t host_blk_bytes = host_pool.kvBlockStrideBytes();
-    const size_t bytes          = std::min(host_blk_bytes, disk_pool.blockSizeBytes());
-
-    bool ok = disk_pool.write(disk_slot, host_base, bytes);
-    if (ok) {
-        RTP_LLM_LOG_DEBUG(
-            "CopyEngine::hostToDisk: wrote host_block=%d -> disk_slot=%d, bytes=%zu", host_block, disk_slot, bytes);
-    } else {
-        RTP_LLM_LOG_WARNING("CopyEngine::hostToDisk: write failed, host=%d, disk=%d", host_block, disk_slot);
+    const void*  host_base = host_pool.blockBuffer(host_block).addr;
+    const size_t bytes     = std::min(host_pool.strideBytes(), disk_pool.strideBytes());
+    const auto   status    = disk_pool.write(disk_block, host_base, bytes);
+    if (status != BlockIOStatus::OK) {
+        RTP_LLM_LOG_WARNING("CopyEngine::hostToDisk: write failed, host=%d, disk=%d, status=%s",
+                            host_block,
+                            disk_block,
+                            blockIOStatusName(status));
+        return false;
     }
-    return ok;
+    return true;
 }
 
-bool CopyEngine::diskToHost(int32_t        disk_slot,
+bool CopyEngine::diskToHost(BlockIdxType   disk_block,
                             BlockIdxType   host_block,
-                            BlockPool&     host_pool,
+                            HostBlockPool& host_pool,
                             DiskBlockPool& disk_pool) {
-    if (host_block < 1 || host_block > static_cast<BlockIdxType>(host_pool.totalBlocksNum())) {
-        RTP_LLM_LOG_WARNING("CopyEngine::diskToHost: invalid host block %d", host_block);
+    if (!validAllocatedHostBlock(host_pool, host_block)) {
+        RTP_LLM_LOG_WARNING("CopyEngine::diskToHost: invalid or unallocated host block %d", host_block);
         return false;
     }
-    if (!disk_pool.validSlot(disk_slot)) {
-        RTP_LLM_LOG_WARNING("CopyEngine::diskToHost: invalid disk slot %d", disk_slot);
+    if (!validAllocatedDiskBlock(disk_pool, disk_block)) {
+        RTP_LLM_LOG_WARNING("CopyEngine::diskToHost: invalid or unallocated disk block %d", disk_block);
         return false;
     }
 
-    void*        host_base      = host_pool.convertIndexToAddr(0, host_block).kv_addr;
-    const size_t host_blk_bytes = host_pool.kvBlockStrideBytes();
-    const size_t bytes          = std::min(host_blk_bytes, disk_pool.blockSizeBytes());
-
-    bool ok = disk_pool.read(disk_slot, host_base, bytes);
-    if (ok) {
-        RTP_LLM_LOG_DEBUG(
-            "CopyEngine::diskToHost: read disk_slot=%d -> host_block=%d, bytes=%zu", disk_slot, host_block, bytes);
-    } else {
-        RTP_LLM_LOG_WARNING("CopyEngine::diskToHost: read failed, disk=%d, host=%d", disk_slot, host_block);
+    void*        host_base = host_pool.blockBuffer(host_block).addr;
+    const size_t bytes     = std::min(host_pool.strideBytes(), disk_pool.strideBytes());
+    const auto   status    = disk_pool.read(disk_block, host_base, bytes);
+    if (status != BlockIOStatus::OK) {
+        RTP_LLM_LOG_WARNING("CopyEngine::diskToHost: read failed, disk=%d, host=%d, status=%s",
+                            disk_block,
+                            host_block,
+                            blockIOStatusName(status));
+        return false;
     }
-    return ok;
+    return true;
 }
 
 }  // namespace rtp_llm

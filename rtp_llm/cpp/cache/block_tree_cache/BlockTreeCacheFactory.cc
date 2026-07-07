@@ -1,12 +1,11 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCacheFactory.h"
 
-#include "rtp_llm/cpp/cache/BlockPool.h"
-#include "rtp_llm/cpp/cache/BlockPoolConfigHelper.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTree.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/FullComponentGroup.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/LinearComponentGroup.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/SWAComponentGroup.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/copy_engine/DiskBlockPool.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/host/DiskBlockPool.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/host/HostBlockPool.h"
 #include "rtp_llm/cpp/model_rpc/BroadcastManager.h"
 
 namespace rtp_llm {
@@ -45,52 +44,62 @@ createComponentGroup(int group_id, CacheGroupType type, int seq_size_per_block, 
     return group;
 }
 
-// Create Host BlockPool for L2 memory cache.
-BlockPoolPtr createHostPool(const CacheConfig& cache_config, size_t host_block_count) {
-    if (host_block_count == 0) {
+// Alignment for host/disk pool block strides (page-aligned for pinned host + O_DIRECT disk).
+constexpr size_t kBlockTreeCachePoolAlignment = 4096;
+
+size_t alignUp(size_t value, size_t alignment) {
+    return ((value + alignment - 1) / alignment) * alignment;
+}
+
+// Create v4 HostBlockPool for L2 memory cache.
+// usable_block_count is the number of blocks usable by the tree (excluding the
+// reserved block 0); physical_block_count is usable_block_count + 1.
+std::shared_ptr<HostBlockPool> createHostPool(size_t payload_bytes, size_t usable_block_count) {
+    if (payload_bytes == 0 || usable_block_count == 0) {
         return nullptr;
     }
 
-    // Use BlockPoolConfigHelper to create a proper host pool config.
-    // The host pool mirrors the device pool layout but uses HOST allocation.
-    auto config      = BlockPoolConfigHelper::createConfig(cache_config);
-    config.pool_name = "block_tree_cache_host";
-    config.block_num = static_cast<uint32_t>(host_block_count);
+    auto config                     = std::make_shared<HostBlockPoolConfig>();
+    config->pool_type               = BlockPoolType::HOST;
+    config->pool_name               = "block_tree_host";
+    config->physical_block_count    = usable_block_count + 1;
+    config->free_block_order_policy = FreeBlockOrderPolicy::ANY_ORDER;
+    config->payload_bytes           = payload_bytes;
+    config->stride_bytes            = alignUp(payload_bytes, kBlockTreeCachePoolAlignment);
+    config->enable_pinned           = true;
+    config->alignment               = kBlockTreeCachePoolAlignment;
 
-    // Scale pool sizes proportionally to block count ratio.
-    const double ratio = static_cast<double>(host_block_count) / static_cast<double>(cache_config.block_num);
-    for (auto& layout : config.memory_layouts) {
-        layout.block_num                = static_cast<uint32_t>(host_block_count);
-        layout.kv_block_pool_size_bytes = static_cast<size_t>(layout.kv_block_pool_size_bytes * ratio);
-        layout.kv_scale_pool_size_bytes = static_cast<size_t>(layout.kv_scale_pool_size_bytes * ratio);
-        layout.total_size_bytes         = layout.kv_block_pool_size_bytes + layout.kv_scale_pool_size_bytes;
-    }
-    config.total_size_bytes = 0;
-    for (const auto& layout : config.memory_layouts) {
-        config.total_size_bytes += layout.total_size_bytes;
-    }
-
-    auto pool = std::make_shared<BlockPool>(config, AllocationType::HOST);
+    auto pool = std::make_shared<HostBlockPool>(config);
     if (!pool->init()) {
-        RTP_LLM_LOG_ERROR("Failed to initialize host BlockPool for BlockTreeCache");
+        RTP_LLM_LOG_ERROR("Failed to initialize HostBlockPool for BlockTreeCache");
         return nullptr;
     }
     return pool;
 }
 
-// Create DiskBlockPool for L3 disk cache.
-std::shared_ptr<DiskBlockPool> createDiskPool(const KVCacheConfig& kv_cache_config, size_t block_size_bytes) {
-    if (kv_cache_config.memory_cache_disk_size_mb <= 0 || kv_cache_config.memory_cache_disk_paths.empty()) {
+// Create v4 DiskBlockPool for L3 disk cache.
+// physical_block_count is derived inside DiskBlockPool::normalizeConfig from
+// disk_size_bytes / stride_bytes, so it is not set here.
+std::shared_ptr<DiskBlockPool>
+createDiskPool(const KVCacheConfig& kv_cache_config, size_t payload_bytes, int64_t world_rank, int64_t local_rank) {
+    if (kv_cache_config.memory_cache_disk_size_mb <= 0 || kv_cache_config.memory_cache_disk_paths.empty()
+        || payload_bytes == 0) {
         return nullptr;
     }
 
-    DiskBlockPoolConfig disk_config;
-    disk_config.work_dir         = kv_cache_config.memory_cache_disk_paths;
-    disk_config.disk_size_bytes  = static_cast<size_t>(kv_cache_config.memory_cache_disk_size_mb) * 1024 * 1024;
-    disk_config.block_size_bytes = block_size_bytes;
-    disk_config.buffered_io      = kv_cache_config.memory_cache_disk_buffered_io;
+    auto config                     = std::make_shared<DiskBlockPoolConfig>();
+    config->pool_type               = BlockPoolType::DISK;
+    config->pool_name               = "block_tree_disk";
+    config->free_block_order_policy = FreeBlockOrderPolicy::ASCENDING_ORDER;
+    config->work_dir                = kv_cache_config.memory_cache_disk_paths;
+    config->local_rank              = local_rank;
+    config->world_rank              = world_rank;
+    config->disk_size_bytes         = static_cast<size_t>(kv_cache_config.memory_cache_disk_size_mb) * 1024UL * 1024UL;
+    config->payload_bytes           = payload_bytes;
+    config->stride_bytes            = alignUp(payload_bytes, kBlockTreeCachePoolAlignment);
+    config->buffered_io             = kv_cache_config.memory_cache_disk_buffered_io;
 
-    auto pool = std::make_shared<DiskBlockPool>(std::move(disk_config));
+    auto pool = std::make_shared<DiskBlockPool>(config);
     if (!pool->init()) {
         RTP_LLM_LOG_ERROR("Failed to initialize DiskBlockPool for BlockTreeCache");
         return nullptr;
@@ -103,6 +112,8 @@ std::shared_ptr<DiskBlockPool> createDiskPool(const KVCacheConfig& kv_cache_conf
 BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       cache_config,
                                        const KVCacheConfig&                     kv_cache_config,
                                        const std::shared_ptr<KVCacheAllocator>& allocator,
+                                       int64_t                                  world_rank,
+                                       int64_t                                  local_rank,
                                        const SWAGroupConfig&                    swa_configs,
                                        std::shared_ptr<StorageBackend>          storage_backend,
                                        std::shared_ptr<BroadcastManager>        broadcast_manager) {
@@ -132,22 +143,24 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
     // 3. Create Components (empty for now; will be populated when CopyEngine needs them).
     std::vector<Component> components;
 
+    // Block payload size (raw KV bytes per block); stride is page-aligned inside the pools.
+    const size_t payload_bytes = cache_config.kv_block_size_bytes;
+
     // 4. Compute Host pool block count and create pool if memory cache enabled.
-    BlockPoolPtr host_pool = nullptr;
-    if (kv_cache_config.enable_memory_cache && kv_cache_config.memory_cache_size_mb > 0) {
-        // Compute host block count: memory_cache_size_mb * 1MB / block_size_bytes.
-        const size_t block_size_bytes = cache_config.kv_block_size_bytes;
-        if (block_size_bytes > 0) {
-            const size_t host_block_count =
-                static_cast<size_t>(kv_cache_config.memory_cache_size_mb) * 1024 * 1024 / block_size_bytes;
-            host_pool = createHostPool(cache_config, host_block_count);
-        }
+    std::shared_ptr<HostBlockPool> host_pool = nullptr;
+    if (kv_cache_config.enable_memory_cache && kv_cache_config.memory_cache_size_mb > 0 && payload_bytes > 0) {
+        // usable_block_count = memory_cache_size_bytes / stride_bytes (page-aligned).
+        const size_t stride_bytes = alignUp(payload_bytes, kBlockTreeCachePoolAlignment);
+        const size_t memory_cache_size_bytes =
+            static_cast<size_t>(kv_cache_config.memory_cache_size_mb) * 1024 * 1024;
+        const size_t usable_block_count = memory_cache_size_bytes / stride_bytes;
+        host_pool                       = createHostPool(payload_bytes, usable_block_count);
     }
 
     // 5. Create DiskBlockPool if disk cache enabled.
     std::shared_ptr<DiskBlockPool> disk_pool = nullptr;
     if (kv_cache_config.enable_memory_cache_disk && kv_cache_config.memory_cache_disk_size_mb > 0) {
-        disk_pool = createDiskPool(kv_cache_config, cache_config.kv_block_size_bytes);
+        disk_pool = createDiskPool(kv_cache_config, payload_bytes, world_rank, local_rank);
     }
 
     // 6. Set host_pool and disk_pool on each ComponentGroup.

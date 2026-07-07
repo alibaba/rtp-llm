@@ -10,7 +10,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/host/DiskBlockIO.h"
 #include "rtp_llm/cpp/cache/connector/memory/CacheBlockKind.h"
 
-namespace rtp_llm::block_tree_cache {
+namespace rtp_llm {
 
 enum class BlockIOStatus {
     OK,
@@ -61,8 +61,8 @@ public:
     // Batch read/write. Every block is validated (isAllocated) and bytes_per_block is
     // validated against strideBytes() before any I/O is issued; on success the
     // underlying DiskBlockIO batch call is driven in blocks[] order.
-    BlockIOStatus read(const BlockIds& blocks, const std::vector<void*>& dsts, size_t bytes_per_block);
-    BlockIOStatus write(const BlockIds& blocks, const std::vector<const void*>& srcs, size_t bytes_per_block);
+    BlockIOStatus read(const BlockIdList& blocks, const std::vector<void*>& dsts, size_t bytes_per_block);
+    BlockIOStatus write(const BlockIdList& blocks, const std::vector<const void*>& srcs, size_t bytes_per_block);
 
     size_t              payloadBytes() const;
     size_t              strideBytes() const;
@@ -87,4 +87,4 @@ private:
     std::string                  file_path_;
 };
 
-}  // namespace rtp_llm::block_tree_cache
+}  // namespace rtp_llm

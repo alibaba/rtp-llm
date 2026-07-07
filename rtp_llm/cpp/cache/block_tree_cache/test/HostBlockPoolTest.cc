@@ -5,7 +5,7 @@
 
 #include "gtest/gtest.h"
 
-namespace rtp_llm::block_tree_cache {
+namespace rtp_llm {
 namespace {
 
 std::shared_ptr<HostBlockPoolConfig> makeConfig(size_t physical_block_count = 4,
@@ -153,4 +153,4 @@ TEST(HostBlockPoolTest, LifecycleComesFromIBlockPool) {
     EXPECT_FALSE(pool.isAllocated(*block));
 }
 
-}  // namespace rtp_llm::block_tree_cache
+}  // namespace rtp_llm
