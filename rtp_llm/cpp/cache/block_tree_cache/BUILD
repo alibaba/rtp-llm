@@ -53,10 +53,12 @@ cc_library(
     srcs = [
         "IBlockPool.cc",
         "host/HostBlockPool.cc",
+        "host/DiskBlockIO.cc",
     ],
     hdrs = [
         "IBlockPool.h",
         "host/HostBlockPool.h",
+        "host/DiskBlockIO.h",
     ],
     copts = copts(),
     visibility = ["//visibility:public"],
