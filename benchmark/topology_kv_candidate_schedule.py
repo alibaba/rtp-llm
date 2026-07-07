@@ -1,7 +1,8 @@
 import argparse
+import heapq
 import time
 from dataclasses import dataclass
-from typing import Iterable, List, Sequence
+from typing import Iterable, List, Sequence, Set
 
 import torch
 import torch.nn.functional as F
@@ -115,13 +116,14 @@ def _validate_config(config: BlockCandidateConfig) -> None:
         raise ValueError("max_candidate_blocks must be positive")
 
 
-def _append_unique(target: List[int], values: Iterable[int], limit: int) -> None:
+def _append_unique(target: List[int], seen: Set[int], values: Iterable[int], limit: int) -> None:
     for value in values:
-        if value < 0 or value in target:
+        if value < 0 or value in seen:
             continue
         if len(target) >= limit:
             return
         target.append(value)
+        seen.add(value)
 
 
 def _build_drift_score_values(key_block_centroids: torch.Tensor) -> List[float]:
@@ -147,19 +149,27 @@ def _build_candidate_row(
     drift_score_values: Sequence[float],
 ) -> List[int]:
     row: List[int] = []
+    seen: Set[int] = set()
     limit = config.max_candidate_blocks
 
-    _append_unique(row, [query_block], limit)
+    _append_unique(row, seen, [query_block], limit)
 
     sink_end = min(config.sink_blocks, query_block + 1)
-    _append_unique(row, range(sink_end), limit)
+    _append_unique(row, seen, range(sink_end), limit)
 
     local_start = max(0, query_block - config.local_blocks + 1)
-    _append_unique(row, range(query_block, local_start - 1, -1), limit)
+    _append_unique(row, seen, range(query_block, local_start - 1, -1), limit)
 
-    eligible = [block for block in range(query_block + 1) if block not in row]
-    eligible.sort(key=lambda block: (-drift_score_values[block], block))
-    _append_unique(row, eligible[: config.salience_blocks], limit)
+    remaining = limit - len(row)
+    salience_limit = min(config.salience_blocks, remaining)
+    if salience_limit > 0:
+        eligible = (block for block in range(query_block + 1) if block not in seen)
+        salient = heapq.nsmallest(
+            salience_limit,
+            eligible,
+            key=lambda block: (-drift_score_values[block], block),
+        )
+        _append_unique(row, seen, salient, limit)
 
     row = sorted(row)
     row.extend([-1] * (limit - len(row)))
@@ -172,16 +182,40 @@ def _prioritize_latest_blocks_for_partial_budget(
     local_blocks: int,
 ) -> List[int]:
     valid_row = [block for block in row if block >= 0]
+    valid_blocks = set(valid_row)
     local_start = max(0, query_block - local_blocks + 1)
     local_row = [
         block
         for block in range(query_block, local_start - 1, -1)
-        if block in valid_row
+        if block in valid_blocks
     ]
-    other_row = [block for block in valid_row if block not in local_row]
+    local_blocks_seen = set(local_row)
+    other_row = [block for block in valid_row if block not in local_blocks_seen]
     ordered_row = local_row + other_row
     ordered_row.extend([-1] * (len(row) - len(ordered_row)))
     return ordered_row
+
+
+def _block_row_to_priority_token_indices(
+    row: Sequence[int],
+    query_block: int,
+    local_blocks: int,
+    block_size: int,
+    seq_len: int,
+    device: torch.device,
+) -> torch.Tensor:
+    local_start = max(0, query_block - local_blocks + 1)
+    tokens = []
+    for block in row:
+        if block < 0:
+            continue
+        start = block * block_size
+        end = min(start + block_size, seq_len)
+        block_tokens = range(start, end)
+        if local_start <= block <= query_block:
+            block_tokens = range(end - 1, start - 1, -1)
+        tokens.extend(block_tokens)
+    return torch.tensor(tokens, dtype=torch.long, device=device)
 
 
 def _candidate_block_budget_for_tokens(seq_len: int, selected_tokens: int, block_size: int) -> int:
@@ -296,12 +330,14 @@ def build_topology_candidate_token_indices(
             query_block,
             config.local_blocks,
         )
-    token_indices = block_schedule_to_token_indices(
-        torch.tensor([row], dtype=torch.long, device=centroids.device),
+    token_indices = _block_row_to_priority_token_indices(
+        row,
+        query_block=query_block,
+        local_blocks=config.local_blocks,
         block_size=block_size,
         seq_len=seq_len,
-    ).reshape(-1)
-    token_indices = token_indices[token_indices >= 0]
+        device=centroids.device,
+    )
     if token_indices.numel() == 0:
         raise ValueError("topology schedule did not select any tokens")
     if token_indices.numel() < selected_tokens:

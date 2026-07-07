@@ -202,7 +202,7 @@ class TopologyKVCandidateScheduleTest(unittest.TestCase):
             block_size=2,
         )
 
-        self.assertEqual(token_indices.tolist(), [0, 1, 6, 7])
+        self.assertEqual(token_indices.tolist(), [0, 1, 7, 6])
 
     def test_topology_candidate_indices_keep_latest_block_with_one_block_budget(self):
         key = torch.arange(16, dtype=torch.float32).view(1, 1, 8, 2)
@@ -213,7 +213,7 @@ class TopologyKVCandidateScheduleTest(unittest.TestCase):
             block_size=2,
         )
 
-        self.assertEqual(token_indices.tolist(), [6])
+        self.assertEqual(token_indices.tolist(), [7])
 
     def test_topology_candidate_indices_keep_latest_tokens_for_partial_block_budget(self):
         key = torch.arange(16, dtype=torch.float32).view(1, 1, 8, 2)
@@ -224,7 +224,7 @@ class TopologyKVCandidateScheduleTest(unittest.TestCase):
             block_size=2,
         )
 
-        self.assertEqual(token_indices.tolist(), [6, 7, 0])
+        self.assertEqual(token_indices.tolist(), [7, 6, 0])
 
     def test_topology_candidate_indices_return_requested_count_for_partial_final_block(self):
         key = torch.arange(20, dtype=torch.float32).view(1, 1, 10, 2)
@@ -236,7 +236,7 @@ class TopologyKVCandidateScheduleTest(unittest.TestCase):
         )
 
         self.assertEqual(len(token_indices), 8)
-        self.assertEqual(token_indices.tolist(), [8, 9, 4, 5, 6, 7, 0, 1])
+        self.assertEqual(token_indices.tolist(), [9, 8, 7, 6, 5, 4, 0, 1])
 
     def test_topology_candidate_indices_accept_2d_and_3d_inputs(self):
         key_2d = torch.arange(16, dtype=torch.float32).view(8, 2)
@@ -248,7 +248,7 @@ class TopologyKVCandidateScheduleTest(unittest.TestCase):
                 selected_tokens=1,
                 block_size=2,
             ).tolist(),
-            [6],
+            [7],
         )
         self.assertEqual(
             build_topology_candidate_token_indices(
@@ -256,7 +256,7 @@ class TopologyKVCandidateScheduleTest(unittest.TestCase):
                 selected_tokens=1,
                 block_size=2,
             ).tolist(),
-            [6],
+            [7],
         )
 
     def test_benchmark_grid_and_markdown_format_are_reproducible(self):

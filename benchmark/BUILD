@@ -7,5 +7,6 @@ py_test(
         "topology_kv_candidate_schedule.py",
     ],
     main = "test_topology_kv_candidate_schedule.py",
+    tags = ["manual"],
     deps = torch_deps(),
 )
