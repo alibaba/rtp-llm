@@ -31,6 +31,10 @@ except (ImportError, AttributeError, ValueError) as _e:
     logging.warning(f"flash_mla not available: {_e}. Requires CUDA >= 12.9")
 
 from rtp_llm.models_py.modules.factory.attention import common
+from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl._sparse_prefill_fp8_pack import (
+    resolve_sparse_attn_dtype,
+    sparse_prefill_fp8_from_paged_cache,
+)
 from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.mla_kv_cache_write_op import (
     MlaKVCacheWriteOp,
 )
@@ -43,6 +47,9 @@ from rtp_llm.models_py.triton_kernels.sparse_mla.block_index_to_global import (
 )
 from rtp_llm.models_py.triton_kernels.sparse_mla.fused_qk_rope_cat_cache_mla import (
     fused_qk_rope_cat_cache_mla,
+)
+from rtp_llm.models_py.triton_kernels.sparse_mla.sparse_fp8_prefill_pack import (
+    BYTES_PER_TOKEN as _FP8_BYTES_PER_TOKEN,
 )
 from rtp_llm.models_py.utils.fuse_config import fuse_kernels_enabled
 from rtp_llm.ops import (
@@ -249,9 +256,14 @@ class _GatherWorkspace:
     """Transient buffers for the gather + sparse_fwd prefill path.
 
     Allocated per-forward in plan(); reused across all layers in that forward.
+    fused_kv layout depends on RTP_LLM_GLM5_SPARSE_ATTN_DTYPE:
+      - bf16 mode: [total_kv_len, kv_lora_rank + qk_rope_head_dim] bf16
+        (dequant target for cp_gather_and_upconvert_fp8_kv_cache_v2)
+      - fp8 mode:  [total_kv_len, 656] uint8 (per-tensor FP8 packed layout,
+        written by paged_fp8_gather_pack)
     """
 
-    fused_kv: torch.Tensor  # [total_kv_len, kv_lora_rank + rope], bf16
+    fused_kv: torch.Tensor
     workspace_starts: torch.Tensor  # [batch_size], int32, indptr[:-1]
     seq_lens: torch.Tensor  # [batch_size], int32, indptr diff
     total_kv_len: int
@@ -360,6 +372,9 @@ class SparseMlaFp8Op(SparseMlaOp):
         prefill_ragged_kv_len_indptr_d = [0, kv_len_0, kv_len_0+kv_len_1, ...].
         The buffer can be longer than the actual batch, hence the [:batch+1] slice.
         Returns None if total_kv_len == 0 (no prefill tokens).
+
+        In fp8 mode the BF16 workspace is skipped — the direct paged Triton
+        gather+repack allocates its own [total_kv_len, 656] uint8 output.
         """
         assert self.mla_params is not None and self.block_table is not None
         batch_size = int(self.block_table.shape[0])
@@ -367,12 +382,20 @@ class SparseMlaFp8Op(SparseMlaOp):
         total_kv_len = int(indptr[batch_size].item())
         if total_kv_len == 0:
             return None
-        return _GatherWorkspace(
-            fused_kv=torch.empty(
+        if resolve_sparse_attn_dtype() == "fp8":
+            fused_kv = torch.empty(
+                (total_kv_len, _FP8_BYTES_PER_TOKEN),
+                dtype=torch.uint8,
+                device=self.block_table.device,
+            )
+        else:
+            fused_kv = torch.empty(
                 (total_kv_len, self.kv_lora_rank + self.qk_rope_head_dim),
                 dtype=torch.bfloat16,
                 device=self.block_table.device,
-            ),
+            )
+        return _GatherWorkspace(
+            fused_kv=fused_kv,
             workspace_starts=indptr[:batch_size],
             seq_lens=indptr[1:] - indptr[:batch_size],
             total_kv_len=total_kv_len,
@@ -397,7 +420,12 @@ class SparseMlaFp8Op(SparseMlaOp):
         kv_cache_fp8: torch.Tensor,
         topk_indices: torch.Tensor,
     ) -> torch.Tensor:
-        """gather + flash_mla_sparse_fwd (prefill fast path)."""
+        """gather + flash_mla_sparse_fwd (prefill fast path).
+
+        fp8 mode goes paged→packed directly via one Triton gather+repack pass
+        (no BF16 midpoint, no Python amax); bf16 mode keeps the two-step
+        upconvert + flash_mla_sparse_fwd flow.
+        """
         ws = self._gather
         assert (
             ws is not None
@@ -410,7 +438,31 @@ class SparseMlaFp8Op(SparseMlaOp):
         if src.ndim == 4:
             src = src.squeeze(2)
 
-        # FP8 paged → BF16 contiguous workspace
+        # Request-local topk → workspace offset (ws_starts[req] + local_pos).
+        # -1 is a valid padding value for flash_mla_sparse_fwd; adding offsets
+        # to it would turn it into a stale index, so mask first.
+        offsets = ws.workspace_starts[self.mla_params.batch_indice_d]
+        topk_2d = _topk_2d(topk_indices)
+        padding_mask = topk_2d < 0
+        raw_global = topk_2d + offsets.unsqueeze(1)
+        global_indices = raw_global.masked_fill(padding_mask, -1).unsqueeze(1)
+
+        if resolve_sparse_attn_dtype() == "fp8":
+            return sparse_prefill_fp8_from_paged_cache(
+                q_bf16=q,
+                paged_u8=src,
+                block_table=self.block_table,
+                workspace_starts=ws.workspace_starts,
+                seq_lens=ws.seq_lens,
+                batch_size=ws.batch_size,
+                total_kv_len=ws.total_kv_len,
+                tokens_per_block=self.token_per_block,
+                global_indices=global_indices,
+                sm_scale=self.scale,
+                d_v=self.kv_lora_rank,
+                packed_kv_workspace=ws.fused_kv,
+            )
+
         rtp_llm_ops.cp_gather_and_upconvert_fp8_kv_cache_v2(
             src,
             ws.fused_kv,
@@ -420,14 +472,6 @@ class SparseMlaFp8Op(SparseMlaOp):
             ws.batch_size,
             ws.total_kv_len,
         )
-
-        # Request-local topk → workspace offset (ws_starts[req] + local_pos)
-        offsets = ws.workspace_starts[self.mla_params.batch_indice_d]
-        topk_2d = _topk_2d(topk_indices)
-        padding_mask = topk_2d < 0
-        raw_global = topk_2d + offsets.unsqueeze(1)
-        global_indices = raw_global.masked_fill(padding_mask, -1).unsqueeze(1)
-
         out, _, _ = flash_mla_sparse_fwd(
             q,
             ws.fused_kv.unsqueeze(1),  # [total_kv_len, 1, dim]

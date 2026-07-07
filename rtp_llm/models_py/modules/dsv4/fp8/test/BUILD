@@ -86,6 +86,14 @@ py_test(
 )
 
 py_test(
+    name = "test_flash_mla_sparse_prefill_fp8",
+    srcs = ["test_flash_mla_sparse_prefill_fp8.py"],
+    deps = _DSV4_FP8_TEST_DEPS,
+    tags = ["SM100_X86"],
+    exec_properties = {"gpu": "SM100_X86", "gpu_count": "1"},
+)
+
+py_test(
     name = "test_compressor_cp_merged_gather",
     srcs = ["test_compressor_cp_merged_gather.py"],
     deps = _DSV4_FP8_TEST_DEPS,

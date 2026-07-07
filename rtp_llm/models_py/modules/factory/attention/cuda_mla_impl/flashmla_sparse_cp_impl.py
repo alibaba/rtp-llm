@@ -37,9 +37,16 @@ from rtp_llm.models_py.modules.factory.attention.cuda_cp_impl.prefill_mha.cp_uti
 from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.triton_kv_scatter import (
     triton_kv_scatter,
 )
+from rtp_llm.models_py.triton_kernels.sparse_mla.sparse_fp8_prefill_pack import (
+    BYTES_PER_TOKEN as _FP8_BYTES_PER_TOKEN,
+)
 from rtp_llm.ops import AttentionConfigs, FMHAConfig, FMHAType, ParallelismConfig
 from rtp_llm.ops.compute_ops import KVCache, PyAttentionInputs, rtp_llm_ops
 
+from ._sparse_prefill_fp8_pack import (
+    resolve_sparse_attn_dtype,
+    sparse_prefill_fp8_from_paged_cache,
+)
 from .flashmla_sparse_impl import (
     SparseMlaFp8DecodeParams,
     SparseMlaFp8Op,
@@ -792,22 +799,33 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
                 )
 
     def _build_gather_workspace(self) -> Optional[_GatherWorkspace]:
-        """Allocate the BF16 workspace from prefill_ragged_kv_len_indptr_d.
+        """Allocate the fused_kv workspace from prefill_ragged_kv_len_indptr_d.
 
         CP's prepare() sets input_lengths = prefill_actual_input_lengths, so the
-        indptr reflects per-request full KV length (same as non-CP impl)."""
+        indptr reflects per-request full KV length (same as non-CP impl).
+
+        Buffer shape/dtype follows RTP_LLM_GLM5_SPARSE_ATTN_DTYPE (see
+        _GatherWorkspace docstring)."""
         assert self.mla_params is not None and self.block_table is not None
         batch_size = int(self.block_table.shape[0])
         indptr = self.mla_params.prefill_ragged_kv_len_indptr_d[: batch_size + 1]
         total_kv_len = int(indptr[batch_size].item())
         if total_kv_len == 0:
             return None
-        return _GatherWorkspace(
-            fused_kv=torch.empty(
+        if resolve_sparse_attn_dtype() == "fp8":
+            fused_kv = torch.empty(
+                (total_kv_len, _FP8_BYTES_PER_TOKEN),
+                dtype=torch.uint8,
+                device=self.block_table.device,
+            )
+        else:
+            fused_kv = torch.empty(
                 (total_kv_len, self.kv_lora_rank + self.qk_rope_head_dim),
                 dtype=torch.bfloat16,
                 device=self.block_table.device,
-            ),
+            )
+        return _GatherWorkspace(
+            fused_kv=fused_kv,
             workspace_starts=indptr[:batch_size],
             seq_lens=indptr[1:] - indptr[:batch_size],
             total_kv_len=total_kv_len,
@@ -1024,9 +1042,45 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
     ) -> torch.Tensor:
         """gather + flash_mla_sparse_fwd. After CP all-gather/restore/write, the paged
         cache has the full per-request KV; the only CP-specific bit is using
-        precomputed_req_ids (req id per global q token) for the offset lookup."""
+        precomputed_req_ids (req id per global q token) for the offset lookup.
+
+        fp8 mode is a bf16 variant of the non-sharded path (direct paged→packed
+        Triton pipeline instead of BF16 workspace + cp_gather_and_upconvert).
+        """
         ws = self._gather
         assert ws is not None and self.precomputed_req_ids is not None
+
+        fp8_mode = resolve_sparse_attn_dtype() == "fp8"
+        offsets = ws.workspace_starts[self.precomputed_req_ids]
+        topk_2d = _topk_2d(topk)
+        # FIX: topk_2d contains -1 as padding (invalid KV position).
+        # Adding offsets to -1 turns it into a large positive index that
+        # points into another request's KV region in fused_kv, causing
+        # cross-request KV pollution → gibberish / repeat output.
+        # Preserve -1 so flash_mla_sparse_fwd skips these positions.
+        padding_mask = topk_2d < 0
+        raw_global = topk_2d + offsets.unsqueeze(1)
+        global_indices = raw_global.masked_fill(padding_mask, -1).unsqueeze(1)
+
+        if fp8_mode:
+            src = _as_uint8(kv_cache.kv_cache_base)
+            if src.ndim == 4:
+                src = src.squeeze(2)
+            return sparse_prefill_fp8_from_paged_cache(
+                q_bf16=q0,
+                paged_u8=src,
+                block_table=self.block_table,
+                workspace_starts=ws.workspace_starts,
+                seq_lens=ws.seq_lens,
+                batch_size=ws.batch_size,
+                total_kv_len=ws.total_kv_len,
+                tokens_per_block=self.token_per_block,
+                global_indices=global_indices,
+                sm_scale=self.scale,
+                d_v=self.kv_lora_rank,
+                packed_kv_workspace=ws.fused_kv,
+            )
+
         if self.kv_cache_sharded:
             self._gather_sharded_kv_cache(kv_cache)
         else:
@@ -1042,16 +1096,6 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
                 ws.batch_size,
                 ws.total_kv_len,
             )
-        offsets = ws.workspace_starts[self.precomputed_req_ids]
-        topk_2d = _topk_2d(topk)
-        # FIX: topk_2d contains -1 as padding (invalid KV position).
-        # Adding offsets to -1 turns it into a large positive index that
-        # points into another request's KV region in fused_kv, causing
-        # cross-request KV pollution → gibberish / repeat output.
-        # Preserve -1 so flash_mla_sparse_fwd skips these positions.
-        padding_mask = topk_2d < 0
-        raw_global = topk_2d + offsets.unsqueeze(1)
-        global_indices = raw_global.masked_fill(padding_mask, -1).unsqueeze(1)
         out, _, _ = flash_mla_sparse_fwd(
             q0,
             ws.fused_kv.unsqueeze(1),
