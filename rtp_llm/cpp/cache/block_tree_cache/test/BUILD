@@ -93,7 +93,7 @@ pool_test_deps = [
     "//rtp_llm/cpp/utils:core_utils",
     "@com_google_googletest//:gtest",
     "@com_google_googletest//:gtest_main",
-] + torch_deps()
+] + cuda13_torch_link_deps + torch_deps()
 
 cc_test(
     name = "i_block_pool_test",

@@ -42,7 +42,7 @@ protected:
         std::vector<ComponentGroupPtr> groups = {full_group};
         std::vector<Component>         components;
 
-        cache_ = std::make_unique<BlockTreeCache>(std::move(tree), std::move(groups), std::move(components), 2);
+        cache_ = std::make_unique<BlockTreeCache>(std::move(tree), std::move(groups), std::move(components));
     }
 
     std::unique_ptr<BlockTreeCache> cache_;
@@ -279,13 +279,15 @@ TEST_F(BlockTreeCacheTest, EvictWithCopyEngineAllocatesHostBlock) {
     full->setHostPool(host_pool);
     std::vector<ComponentGroupPtr> groups = {full};
 
+    BlockTreeCacheConfig ce_cfg;
+    ce_cfg.eviction_thread_pool_size = 2;
+    ce_cfg.enable_device_cache       = true;
+    ce_cfg.enable_memory_cache       = true;
+
     auto ce_cache = std::make_unique<BlockTreeCache>(std::move(tree),
                                                      std::move(groups),
                                                      std::vector<Component>{},
-                                                     2,
-                                                     nullptr,
-                                                     /*enable_device=*/true,
-                                                     /*enable_memory=*/true);
+                                                     std::move(ce_cfg));
 
     std::vector<std::vector<GroupSlot>> slots(1, std::vector<GroupSlot>(1));
     slots[0][0].device_blocks = {42};
@@ -318,13 +320,15 @@ TEST_F(BlockTreeCacheTest, SequentialEvictionAllocatesMultipleHostBlocks) {
     std::vector<ComponentGroupPtr> groups = {full};
 
     // No Host pool, Host disabled → direct release on eviction
+    BlockTreeCacheConfig seq_cfg;
+    seq_cfg.eviction_thread_pool_size = 2;
+    seq_cfg.enable_device_cache       = true;
+    seq_cfg.enable_memory_cache       = false;
+
     auto ce_cache = std::make_unique<BlockTreeCache>(std::move(tree),
                                                      std::move(groups),
                                                      std::vector<Component>{},
-                                                     2,
-                                                     nullptr,
-                                                     /*enable_device=*/true,
-                                                     /*enable_memory=*/false);
+                                                     std::move(seq_cfg));
 
     std::vector<std::vector<GroupSlot>> slots(3, std::vector<GroupSlot>(1));
     slots[0][0].device_blocks = {42};
@@ -353,13 +357,15 @@ TEST_F(BlockTreeCacheTest, ReusableEvictionAllocatesHostBlock) {
     full->setHostPool(host_pool);
     std::vector<ComponentGroupPtr> groups = {full};
 
+    BlockTreeCacheConfig reuse_cfg;
+    reuse_cfg.eviction_thread_pool_size = 2;
+    reuse_cfg.enable_device_cache       = true;
+    reuse_cfg.enable_memory_cache       = true;
+
     auto ce_cache = std::make_unique<BlockTreeCache>(std::move(tree),
                                                      std::move(groups),
                                                      std::vector<Component>{},
-                                                     2,
-                                                     nullptr,
-                                                     /*enable_device=*/true,
-                                                     /*enable_memory=*/true);
+                                                     std::move(reuse_cfg));
 
     std::vector<std::vector<GroupSlot>> slots(1, std::vector<GroupSlot>(1));
     slots[0][0].device_blocks = {42};
@@ -385,15 +391,17 @@ TEST_F(BlockTreeCacheTest, DiskRequiresHostValidation) {
     std::vector<ComponentGroupPtr> groups = {full};
 
     // disk=true, host=false should throw
+    BlockTreeCacheConfig throw_cfg;
+    throw_cfg.eviction_thread_pool_size = 2;
+    throw_cfg.enable_device_cache       = true;
+    throw_cfg.enable_memory_cache       = false;
+    throw_cfg.enable_disk_cache         = true;
+    throw_cfg.enable_remote_cache       = false;
+
     EXPECT_THROW(std::make_unique<BlockTreeCache>(std::move(tree),
                                                   std::move(groups),
                                                   std::vector<Component>{},
-                                                  2,
-                                                  nullptr,
-                                                  /*enable_device=*/true,
-                                                  /*enable_memory=*/false,
-                                                  /*enable_disk=*/true,
-                                                  /*enable_remote=*/false),
+                                                  std::move(throw_cfg)),
                  std::invalid_argument);
 }
 
@@ -405,7 +413,7 @@ TEST_F(BlockTreeCacheTest, EvictDisabledTierReturnsZero) {
     std::vector<ComponentGroupPtr> groups = {full};
 
     // Device enabled, Host disabled (default)
-    auto cache = std::make_unique<BlockTreeCache>(std::move(tree), std::move(groups), std::vector<Component>{}, 2);
+    auto cache = std::make_unique<BlockTreeCache>(std::move(tree), std::move(groups), std::vector<Component>{}, BlockTreeCacheConfig{.eviction_thread_pool_size = 2});
 
     std::vector<std::vector<GroupSlot>> slots(1, std::vector<GroupSlot>(1));
     slots[0][0].device_blocks = {42};
@@ -428,7 +436,7 @@ TEST_F(BlockTreeCacheTest, HostDisabledDirectRelease) {
     std::vector<ComponentGroupPtr> groups = {full};
 
     // Host disabled (default): Device eviction → direct release
-    auto cache = std::make_unique<BlockTreeCache>(std::move(tree), std::move(groups), std::vector<Component>{}, 2);
+    auto cache = std::make_unique<BlockTreeCache>(std::move(tree), std::move(groups), std::vector<Component>{}, BlockTreeCacheConfig{.eviction_thread_pool_size = 2});
 
     std::vector<std::vector<GroupSlot>> slots(1, std::vector<GroupSlot>(1));
     slots[0][0].device_blocks = {42};
@@ -450,15 +458,16 @@ TEST_F(BlockTreeCacheTest, TierEnableQueries) {
     full->component_group_id              = 0;
     std::vector<ComponentGroupPtr> groups = {full};
 
+    BlockTreeCacheConfig cfg;
+    cfg.enable_device_cache = true;
+    cfg.enable_memory_cache = true;
+    cfg.enable_disk_cache   = true;
+    cfg.enable_remote_cache = true;
+
     auto cache = std::make_unique<BlockTreeCache>(std::move(tree),
                                                   std::move(groups),
                                                   std::vector<Component>{},
-                                                  2,
-                                                  nullptr,
-                                                  /*enable_device=*/true,
-                                                  /*enable_memory=*/true,
-                                                  /*enable_disk=*/true,
-                                                  /*enable_remote=*/true);
+                                                  std::move(cfg));
 
     EXPECT_TRUE(cache->isDeviceCacheEnabled());
     EXPECT_TRUE(cache->isMemoryCacheEnabled());
@@ -575,8 +584,12 @@ TEST_F(BlockTreeCacheTest, NodeEntersHostHeapAfterDemotion) {
     full->setHostPool(host_pool);
     std::vector<ComponentGroupPtr> groups = {full};
 
+    BlockTreeCacheConfig cfg;
+    cfg.enable_device_cache = true;
+    cfg.enable_memory_cache = true;
+
     auto cache = std::make_unique<BlockTreeCache>(
-        std::move(tree), std::move(groups), std::vector<Component>{}, 2, nullptr, true, true);
+        std::move(tree), std::move(groups), std::vector<Component>{}, std::move(cfg));
 
     std::vector<std::vector<GroupSlot>> slots(1, std::vector<GroupSlot>(1));
     slots[0][0].device_blocks = {42};
@@ -647,8 +660,12 @@ TEST_F(BlockTreeCacheTest, CopyFailureDoesNotUpdateSlot) {
     comp.memory_block_layer_tag_slots = {{0, "kv", 128}};
     std::vector<Component> components = {comp};
 
+    BlockTreeCacheConfig cfg;
+    cfg.enable_device_cache = true;
+    cfg.enable_memory_cache = true;
+
     auto cache = std::make_unique<BlockTreeCache>(
-        std::move(tree), std::move(groups), std::move(components), 2, nullptr, true, true);
+        std::move(tree), std::move(groups), std::move(components), std::move(cfg));
 
     std::vector<std::vector<GroupSlot>> slots(1, std::vector<GroupSlot>(1));
     slots[0][0].device_blocks = {42};
@@ -741,8 +758,12 @@ TEST_F(BlockTreeCacheTest, DeviceBufferResolverEnablesD2HCopy) {
     std::vector<ComponentGroupPtr> groups     = {full};
     std::vector<Component>         components = {comp};
 
+    BlockTreeCacheConfig cfg;
+    cfg.enable_device_cache = true;
+    cfg.enable_memory_cache = true;
+
     auto cache = std::make_unique<BlockTreeCache>(
-        std::move(tree), std::move(groups), std::move(components), 2, nullptr, true, true);
+        std::move(tree), std::move(groups), std::move(components), std::move(cfg));
 
     // Inject the real resolver
     cache->setDeviceBufferResolver(device_mem.makeResolver());
@@ -840,15 +861,14 @@ TEST_F(BlockTreeCacheTest, BroadcastManagerStoredCorrectly) {
     full->component_group_id              = 0;
     std::vector<ComponentGroupPtr> groups = {full};
 
+    BlockTreeCacheConfig cfg;
+    cfg.enable_device_cache = true;
+
     auto cache = std::make_unique<BlockTreeCache>(std::move(tree),
                                                   std::move(groups),
                                                   std::vector<Component>{},
-                                                  2,
+                                                  std::move(cfg),
                                                   nullptr,
-                                                  true,
-                                                  false,
-                                                  false,
-                                                  false,
                                                   broadcast_mgr);
 
     // Verify BroadcastManager is stored (access via internal member)

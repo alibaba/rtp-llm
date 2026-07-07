@@ -17,7 +17,7 @@ protected:
         auto linear                           = std::make_shared<LinearComponentGroup>();
         linear->component_group_id            = 2;
         std::vector<ComponentGroupPtr> groups = {full, swa, linear};
-        cache_ = std::make_unique<BlockTreeCache>(std::move(tree), std::move(groups), std::vector<Component>{}, 2);
+        cache_ = std::make_unique<BlockTreeCache>(std::move(tree), std::move(groups), std::vector<Component>{}, BlockTreeCacheConfig{.eviction_thread_pool_size = 2});
     }
 
     void insertPath(const CacheKeysType& keys, BlockIdxType full_b, BlockIdxType swa_b, BlockIdxType lin_b) {
@@ -180,7 +180,7 @@ TEST_F(FullSWALinearEvictionTest, SWAEvictionCascadesToLinear) {
     linear->component_group_id            = 1;
     std::vector<ComponentGroupPtr> groups = {swa, linear};
     auto                           swa_lin_cache =
-        std::make_unique<BlockTreeCache>(std::move(tree), std::move(groups), std::vector<Component>{}, 2);
+        std::make_unique<BlockTreeCache>(std::move(tree), std::move(groups), std::vector<Component>{}, BlockTreeCacheConfig{.eviction_thread_pool_size = 2});
 
     std::vector<std::vector<GroupSlot>> slots(2, std::vector<GroupSlot>(2));
     slots[0][0].device_blocks = {20};

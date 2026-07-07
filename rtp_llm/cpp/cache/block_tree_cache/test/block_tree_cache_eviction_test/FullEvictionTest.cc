@@ -13,7 +13,7 @@ protected:
         auto full                             = std::make_shared<FullComponentGroup>();
         full->component_group_id              = 0;
         std::vector<ComponentGroupPtr> groups = {full};
-        cache_ = std::make_unique<BlockTreeCache>(std::move(tree), std::move(groups), std::vector<Component>{}, 2);
+        cache_ = std::make_unique<BlockTreeCache>(std::move(tree), std::move(groups), std::vector<Component>{}, BlockTreeCacheConfig{.eviction_thread_pool_size = 2});
     }
 
     // Insert a path with given device block for group 0.

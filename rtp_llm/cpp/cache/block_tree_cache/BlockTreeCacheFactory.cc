@@ -169,19 +169,19 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
         group->setDiskPool(disk_pool);
     }
 
-    // 7. Determine eviction thread pool size (default = 2).
-    const int eviction_thread_pool_size = 2;
+    // 7. Build BlockTreeCacheConfig.
+    BlockTreeCacheConfig config;
+    config.enable_device_cache = kv_cache_config.enable_device_cache;
+    config.enable_memory_cache = kv_cache_config.enable_memory_cache;
+    config.enable_disk_cache   = kv_cache_config.enable_memory_cache_disk;
+    config.enable_remote_cache = kv_cache_config.enable_remote_cache;
 
     // 8. Assemble and return BlockTreeCache.
     auto cache = std::make_shared<BlockTreeCache>(std::move(tree),
                                                   std::move(component_groups),
                                                   std::move(components),
-                                                  eviction_thread_pool_size,
+                                                  std::move(config),
                                                   storage_backend,
-                                                  kv_cache_config.enable_device_cache,
-                                                  kv_cache_config.enable_memory_cache,
-                                                  kv_cache_config.enable_memory_cache_disk,
-                                                  kv_cache_config.enable_remote_cache,
                                                   broadcast_manager);
 
     RTP_LLM_LOG_INFO("Created BlockTreeCache: groups=%d, host_pool=%s, disk_pool=%s, "

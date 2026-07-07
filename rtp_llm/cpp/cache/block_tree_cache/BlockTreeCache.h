@@ -30,15 +30,33 @@ struct CacheStats {
     size_t disk_heap_total_size{0};
 };
 
-// Configuration for BlockTreeCache L2 (Host) and L3 (Disk) tier pools.
-// Capacity is derived from KVCacheConfig as described in the design doc:
-//   L2 Host blocks = memory_cache_size_mb * 1MB / block_size_bytes
-//   L3 Disk blocks = memory_cache_disk_size_mb * 1MB / block_size_bytes
+// Unified configuration for BlockTreeCache behavior and pool sizing.
 struct BlockTreeCacheConfig {
-    // L2 Host pool configuration
+    // ---- Tier enable flags ----
+    bool enable_device_cache{true};
+    bool enable_memory_cache{false};
+    bool enable_disk_cache{false};
+    bool enable_remote_cache{false};
+
+    // ---- Per-tier watermark ----
+    struct TierWatermark {
+        double ratio{0.0};   // watermark ratio (0.0 = disabled)
+        size_t capacity{0};  // total block count (used for legacy DEVICE mode only)
+    };
+    TierWatermark watermark_device;
+    TierWatermark watermark_host;
+    TierWatermark watermark_disk;
+
+    // ---- Load-back control ----
+    bool enable_load_back{false};
+
+    // ---- Eviction thread pool ----
+    int eviction_thread_pool_size{2};
+
+    // ---- L2 Host pool sizing ----
     int64_t memory_cache_size_mb{0};  // 0 = disabled
 
-    // L3 Disk pool configuration
+    // ---- L3 Disk pool sizing ----
     int64_t     memory_cache_disk_size_mb{0};  // 0 = disabled
     std::string memory_cache_disk_path;
     bool        memory_cache_disk_buffered_io{true};
@@ -46,23 +64,32 @@ struct BlockTreeCacheConfig {
     // Block size (from CacheConfig), used to compute pool block count
     size_t block_size_bytes{0};
 
-    // Tier enable flags
-    bool enable_device_cache{true};
-    bool enable_memory_cache{false};
-    bool enable_disk_cache{false};
-    bool enable_remote_cache{false};
+    // ---- Query helpers ----
+    bool isTierEnabled(Tier tier) const {
+        switch (tier) {
+            case Tier::DEVICE: return enable_device_cache;
+            case Tier::HOST:   return enable_memory_cache;
+            case Tier::DISK:   return enable_disk_cache;
+            case Tier::REMOTE: return enable_remote_cache;
+            default:           return false;
+        }
+    }
 
-    // Eviction thread pool
-    int eviction_thread_pool_size{2};
+    TierWatermark watermarkForTier(Tier tier) const {
+        switch (tier) {
+            case Tier::DEVICE: return watermark_device;
+            case Tier::HOST:   return watermark_host;
+            case Tier::DISK:   return watermark_disk;
+            default:           return {};
+        }
+    }
 
-    // Compute the number of host blocks from config.
     size_t hostBlockCount() const {
         if (memory_cache_size_mb <= 0 || block_size_bytes == 0)
             return 0;
         return static_cast<size_t>(memory_cache_size_mb) * 1024 * 1024 / block_size_bytes;
     }
 
-    // Compute the disk pool total size in bytes.
     size_t diskPoolSizeBytes() const {
         if (memory_cache_disk_size_mb <= 0)
             return 0;
@@ -76,16 +103,14 @@ struct BlockTreeCacheConfig {
 // Each storage tier (Device/Host/Disk/Remote) can be independently enabled/disabled.
 class BlockTreeCache {
 public:
+    using TierWatermark = BlockTreeCacheConfig::TierWatermark;
+
     BlockTreeCache(std::unique_ptr<BlockTree>        tree,
                    std::vector<ComponentGroupPtr>    component_groups,
                    std::vector<Component>            components,
-                   int                               eviction_thread_pool_size = 2,
-                   std::shared_ptr<StorageBackend>   storage_backend           = nullptr,
-                   bool                              enable_device_cache       = true,
-                   bool                              enable_memory_cache       = false,
-                   bool                              enable_disk_cache         = false,
-                   bool                              enable_remote_cache       = false,
-                   std::shared_ptr<BroadcastManager> broadcast_manager         = nullptr);
+                   BlockTreeCacheConfig              config            = {},
+                   std::shared_ptr<StorageBackend>   storage_backend   = nullptr,
+                   std::shared_ptr<BroadcastManager> broadcast_manager = nullptr);
 
     ~BlockTreeCache();
 
@@ -100,37 +125,21 @@ public:
     void setIsBlockEvictable(IsBlockEvictableFn fn);
 
     // Release path-lock references acquired during match().
-    // Must be called by the request owner when matched blocks are no longer needed.
-    // Iterates device_blocks and uses the corresponding device pool for reference counting.
     void releaseMatchedBlocks(const std::vector<BlockIdxType>& block_indices);
 
-    // Per-tier watermark configuration.
-    struct TierWatermark {
-        double ratio{0.0};   // watermark ratio (0.0 = disabled)
-        size_t capacity{0};  // total block count for this tier
-    };
-
-    // Backward-compatible: sets Device tier watermark only.
+    // ---- Configuration mutators (for runtime adjustment) ----
     void setWatermark(double ratio, size_t device_capacity) {
-        watermark_device_ = {ratio, device_capacity};
+        config_.watermark_device = {ratio, device_capacity};
     }
-
-    // Per-tier watermark setter (DEVICE / HOST / DISK).
     void setTierWatermark(Tier tier, double ratio, size_t capacity) {
         switch (tier) {
-            case Tier::DEVICE:
-                watermark_device_ = {ratio, capacity};
-                break;
-            case Tier::HOST:
-                watermark_host_ = {ratio, capacity};
-                break;
-            case Tier::DISK:
-                watermark_disk_ = {ratio, capacity};
-                break;
-            default:
-                break;
+            case Tier::DEVICE: config_.watermark_device = {ratio, capacity}; break;
+            case Tier::HOST:   config_.watermark_host   = {ratio, capacity}; break;
+            case Tier::DISK:   config_.watermark_disk   = {ratio, capacity}; break;
+            default: break;
         }
     }
+    void setEnableLoadBack(bool enable) { config_.enable_load_back = enable; }
 
     // Phase 4: DeviceBufferResolver injection for real D2H copy.
     // When set, performEvictionCopy uses this resolver instead of placeholder.
@@ -141,11 +150,6 @@ public:
     //   };
     void setDeviceBufferResolver(DeviceBufferResolver resolver) {
         device_buffer_resolver_ = std::move(resolver);
-    }
-
-    // Phase 2: load_back enable flag
-    void setEnableLoadBack(bool enable) {
-        enable_load_back_ = enable;
     }
 
     // Device block allocator for load_back (allocates GPU blocks to receive H2D data).
@@ -172,36 +176,46 @@ public:
     }
 
     // Tier enable queries
-    bool isDeviceCacheEnabled() const {
-        return enable_device_cache_;
-    }
-    bool isMemoryCacheEnabled() const {
-        return enable_memory_cache_;
-    }
-    bool isDiskCacheEnabled() const {
-        return enable_disk_cache_;
-    }
-    bool isRemoteCacheEnabled() const {
-        return enable_remote_cache_;
-    }
+    bool isDeviceCacheEnabled() const { return config_.enable_device_cache; }
+    bool isMemoryCacheEnabled() const { return config_.enable_memory_cache; }
+    bool isDiskCacheEnabled() const { return config_.enable_disk_cache; }
+    bool isRemoteCacheEnabled() const { return config_.enable_remote_cache; }
+
+    const BlockTreeCacheConfig& config() const { return config_; }
 
 private:
     void             performEvictionCopy(EvictionResult er);
-    void             onEvictionComplete(const EvictionResult& er);
-    void             cascadeEviction(TreeNode* node, int source_group_id, Tier tier);
+    // Eviction completion. cascade_with_copy controls cascade behavior:
+    //   true  — lower-priority groups' data is copied to the next tier synchronously.
+    //   false — lower-priority groups' data is released directly without copy.
+    void             onEvictionComplete(const EvictionResult& er, bool cascade_with_copy);
+    void             cascadeEviction(TreeNode* node, int source_group_id, Tier tier,
+                                     bool cascade_with_copy);
+    // Executes a tier-to-tier copy for the given group. Returns true on success.
+    bool             executeTierCopy(int component_group_id, Tier source_tier, Tier target_tier,
+                                     const std::vector<BlockIdxType>& source_blocks,
+                                     BlockIdxType target_block);
+    // Releases blocks back to the appropriate pool for the given group and tier.
+    void             releaseBlocksFromPool(int component_group_id, Tier tier,
+                                           const std::vector<BlockIdxType>& blocks);
+    // Frees a single pre-allocated target block back to its pool.
+    void             freeTargetBlock(int component_group_id, Tier target_tier, BlockIdxType block);
+    // Sets the target slot data after a successful copy and adds to the corresponding heap.
+    void             setTargetSlot(ComponentGroupPtr& group, GroupSlot& slot,
+                                   TreeNode* node, Tier target_tier, BlockIdxType target_block);
+    void             finalizeEviction(TreeNode* node);
     bool             shouldDeleteNode(const TreeNode* node) const;
     std::vector<int> allGroupIds() const;
     std::vector<int> reusableGroupIds() const;
     std::vector<int> groupsBelowPriority(int source_group_id) const;
-    bool             isTierEnabled(Tier tier) const;
     void             taskStarted();
     void             taskFinished();
     void             checkWatermark();
     void             checkTierWatermark(Tier tier);
-    TierWatermark    watermarkForTier(Tier tier) const;
     size_t           computeGroupExcess(const ComponentGroup& group, Tier tier, double ratio) const;
     void             allocateTargetBlock(EvictionResult& er);
     void             submitEviction(EvictionResult& er);
+    Tier             nextLowerTier(Tier tier) const;
 
     // Per-group pool access helpers
     std::shared_ptr<HostBlockPool> hostPoolForGroup(int component_group_id) const;
@@ -215,6 +229,7 @@ private:
     };
     void performLoadBack(std::vector<LoadBackItem> items, std::shared_ptr<AsyncContext> ctx);
 
+    BlockTreeCacheConfig                       config_;
     std::unique_ptr<BlockTree>                 tree_;
     std::vector<ComponentGroupPtr>             component_groups_;
     std::vector<Component>                     components_;
@@ -223,27 +238,9 @@ private:
     std::shared_ptr<autil::LockFreeThreadPool> thread_pool_;
     std::shared_ptr<BroadcastManager>          broadcast_manager_;
 
-
-
-    // Phase 2: load_back enable flag
-    bool enable_load_back_{false};
-
-    // Device block allocator for load_back
+    // Runtime-injected collaborators
     DeviceBlockAllocator device_block_allocator_;
-
-    // Phase 4: DeviceBufferResolver for real D2H copy
     DeviceBufferResolver device_buffer_resolver_;
-
-    // Per-tier watermark mechanism
-    TierWatermark watermark_device_;
-    TierWatermark watermark_host_;
-    TierWatermark watermark_disk_;
-
-    // Tier enable flags (design doc section 2.7)
-    bool enable_device_cache_{true};
-    bool enable_memory_cache_{false};
-    bool enable_disk_cache_{false};
-    bool enable_remote_cache_{false};
 
     std::atomic<int>        pending_tasks_{0};
     std::mutex              wait_mutex_;
