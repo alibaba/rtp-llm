@@ -141,6 +141,27 @@ class TopologyKVCandidateScheduleTest(unittest.TestCase):
 
         self.assertEqual(token_indices.tolist(), [6])
 
+    def test_topology_candidate_indices_accept_2d_and_3d_inputs(self):
+        key_2d = torch.arange(16, dtype=torch.float32).view(8, 2)
+        key_3d = key_2d.unsqueeze(0)
+
+        self.assertEqual(
+            build_topology_candidate_token_indices(
+                key_2d,
+                selected_tokens=1,
+                block_size=2,
+            ).tolist(),
+            [6],
+        )
+        self.assertEqual(
+            build_topology_candidate_token_indices(
+                key_3d,
+                selected_tokens=1,
+                block_size=2,
+            ).tolist(),
+            [6],
+        )
+
     def test_benchmark_grid_and_markdown_format_are_reproducible(self):
         results = run_decode_attention_grid(
             seq_lens=[128],

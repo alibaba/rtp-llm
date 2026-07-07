@@ -138,6 +138,7 @@ def build_block_candidate_schedule(
                 ),
             ]
         )
+    drift_score_values = drift_scores.detach().cpu().tolist()
 
     rows: List[List[int]] = []
     for query_block in range(block_count):
@@ -151,7 +152,7 @@ def build_block_candidate_schedule(
         _append_unique(row, range(query_block, local_start - 1, -1), limit)
 
         eligible = [block for block in range(query_block + 1) if block not in row]
-        eligible.sort(key=lambda block: (-float(drift_scores[block]), block))
+        eligible.sort(key=lambda block: (-drift_score_values[block], block))
         _append_unique(row, eligible[: config.salience_blocks], limit)
 
         row = sorted(row)
@@ -188,7 +189,15 @@ def build_topology_candidate_token_indices(
     if selected_tokens <= 0:
         raise ValueError("selected_tokens must be positive")
 
-    seq_len = key.shape[2]
+    if key.ndim == 4:
+        seq_len = key.shape[2]
+    elif key.ndim == 3:
+        seq_len = key.shape[1]
+    elif key.ndim == 2:
+        seq_len = key.shape[0]
+    else:
+        raise ValueError("key must have shape [batch, heads, seq, dim], [heads, seq, dim], or [seq, dim]")
+
     max_candidate_blocks = max(1, (selected_tokens + block_size - 1) // block_size)
     sink_blocks = 0 if max_candidate_blocks == 1 else 1
     centroids = build_key_block_centroids(key, block_size=block_size)
