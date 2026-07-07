@@ -52,10 +52,8 @@ static CacheConfig makeTinyHybridConfig() {
     full_spec->seq_size_per_block = static_cast<uint32_t>(config.seq_size_per_block);
 
     // Order matters: linear groups first, then full groups (as in CacheConfigCreator).
-    config.fromGroupedSpecs({linear_spec, full_spec},
-                            {{0, 1}, {2, 3}},
-                            {CacheGroupType::LINEAR, CacheGroupType::FULL},
-                            {"linear", "full"});
+    config.fromGroupedSpecs(
+        {linear_spec, full_spec}, {{0, 1}, {2, 3}}, {CacheGroupType::LINEAR, CacheGroupType::FULL}, {"linear", "full"});
 
     // Physical block strides: take max between full and linear.
     config.kv_block_stride_bytes = std::max(full_spec->block_size_bytes(), linear_spec->block_size_bytes());
@@ -99,7 +97,11 @@ static CacheConfig makeTinyHybridMtpConfigByCreateSpConfig() {
     score_model_cfg.linear_attention_config.linear_num_key_heads   = 2;
     score_model_cfg.linear_attention_config.linear_num_value_heads = 2;
     setHybridAttentionKvCacheSpecs(score_model_cfg);
-    setDefaultKvCacheSpec(propose_model_cfg);
+    // Propose model must use compatible tags so mergeMTPModule can match groups.
+    // Use a single "full" layer to match the score model's "full" group.
+    propose_model_cfg.hybrid_attention_config.enable_hybrid_attention = true;
+    propose_model_cfg.hybrid_attention_config.hybrid_attention_types  = {HybridAttentionType::NONE};
+    setHybridAttentionKvCacheSpecs(propose_model_cfg);
 
     ParallelismConfig parallelism_cfg;
     parallelism_cfg.tp_size = 1;
@@ -141,9 +143,7 @@ static CompleteTokenIdsPtr makeCompleteTokenIds(int batch_size, int seq_length, 
 static BatchKVCacheResourcePtr makeBatchResource(int batch_size, const CacheConfig& config, CacheKeysType keys) {
     auto res = std::make_shared<BatchKVCacheResource>();
     res->resetBatchSize(batch_size);
-    res->initGroups(config.groupNums(),
-                    static_cast<int>(config.layer_all_num),
-                    config.layerGroupIdsSnapshot());
+    res->initGroups(config.groupNums(), static_cast<int>(config.layer_all_num), config.layerGroupIdsSnapshot());
     for (int b = 0; b < batch_size; ++b) {
         res->setBatchCacheKeys(b, keys);
     }
@@ -435,7 +435,7 @@ TEST_F(HybridTypeKVCacheAllocatorTest, IncrDecrKVCacheRefReferencesOnlyMatchedVa
     ASSERT_EQ(blocks.size(), 4u);
     EXPECT_EQ(allocator->freeBlocksNum(), free_before - 4);
 
-    KVCacheResource resource;
+    KVCacheResource             resource;
     std::vector<CacheGroupType> group_types = {CacheGroupType::LINEAR, CacheGroupType::FULL};
     resource.initGroups(/*group_nums=*/2,
                         /*layer_num=*/static_cast<int>(config.layer_all_num),
