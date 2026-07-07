@@ -123,9 +123,10 @@ cc_test(
     name = "block_pool_test",
     srcs = ["BlockPoolTest.cc"],
     copts = pool_test_copts,
-    deps = pool_test_deps + [
-        "//rtp_llm/cpp/cache/test:block_pool_test_helper",
-    ],
+    # Uses only the lightweight cache_config_test_utils (already in pool_test_deps) +
+    # BlockPoolConfigHelper (via block_tree_cache_pool); deliberately avoids
+    # block_pool_test_helper, which pulls the heavy //rtp_llm/cpp/cache monolith.
+    deps = pool_test_deps,
     env = {},
     exec_properties = {"gpu": "H20"},
 )
