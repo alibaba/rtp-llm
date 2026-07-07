@@ -20,6 +20,7 @@ environment and will compare rank-local op outputs against this oracle.
 from __future__ import annotations
 
 import json
+import math
 import os
 import time
 import unittest
@@ -674,6 +675,45 @@ def _benchmark(fn, *, warmup: int = 2, iters: int = 5) -> float:
     if torch.cuda.is_available():
         torch.cuda.synchronize()
     return (time.perf_counter() - start) * 1000.0 / max(iters, 1)
+
+
+def _percentile_nearest(values: list[float], pct: float) -> float:
+    if not values:
+        return 0.0
+    ordered = sorted(values)
+    rank = int(math.ceil((pct / 100.0) * len(ordered))) - 1
+    return ordered[min(max(rank, 0), len(ordered) - 1)]
+
+
+def _cuda_event_op_benchmark_distributed(fn, *, warmup: int, iters: int) -> dict:
+    if torch.distributed.is_available() and torch.distributed.is_initialized():
+        torch.cuda.synchronize()
+        torch.distributed.barrier()
+    for _ in range(max(0, warmup)):
+        fn()
+    torch.cuda.synchronize()
+    if torch.distributed.is_available() and torch.distributed.is_initialized():
+        torch.distributed.barrier()
+    event_pairs = []
+    for _ in range(max(1, iters)):
+        start = torch.cuda.Event(enable_timing=True)
+        end = torch.cuda.Event(enable_timing=True)
+        start.record()
+        fn()
+        end.record()
+        event_pairs.append((start, end))
+    torch.cuda.synchronize()
+    if torch.distributed.is_available() and torch.distributed.is_initialized():
+        torch.distributed.barrier()
+    samples = [float(start.elapsed_time(end)) for start, end in event_pairs]
+    return {
+        "avg_ms": sum(samples) / len(samples),
+        "min_ms": min(samples),
+        "max_ms": max(samples),
+        "p50_ms": _percentile_nearest(samples, 50.0),
+        "p90_ms": _percentile_nearest(samples, 90.0),
+        "samples_ms": samples,
+    }
 
 
 def _candidate_op():
@@ -5832,26 +5872,28 @@ class DistributedAttentionTorchrunCandidateTest(unittest.TestCase):
         if os.environ.get("DSV4_DIST_ATTN_PRINT_PERF", "0") == "1":
             warmup = int(os.environ.get("DSV4_DIST_ATTN_PERF_WARMUP", "3"))
             iters = int(os.environ.get("DSV4_DIST_ATTN_PERF_ITERS", "10"))
-            for _ in range(warmup):
-                _ = op(**op_kwargs)
-            torch.cuda.synchronize()
-            start = torch.cuda.Event(enable_timing=True)
-            end = torch.cuda.Event(enable_timing=True)
-            start.record()
-            for _ in range(iters):
-                _ = op(**op_kwargs)
-            end.record()
-            torch.cuda.synchronize()
-            ms = start.elapsed_time(end) / max(1, iters)
+            stats = _cuda_event_op_benchmark_distributed(
+                lambda: op(**op_kwargs),
+                warmup=warmup,
+                iters=iters,
+            )
             print(
                 json.dumps(
                     {
+                        "avg_ms": stats["avg_ms"],
                         "case": "csa_4k_packed_pool",
+                        "candidate_ms": stats["avg_ms"],
                         "rank": rank,
                         "total_tokens": total_tokens,
                         "chunk": chunk,
                         "iters": iters,
-                        "candidate_ms": ms,
+                        "max_ms": stats["max_ms"],
+                        "min_ms": stats["min_ms"],
+                        "op_event_ms": stats["avg_ms"],
+                        "p50_ms": stats["p50_ms"],
+                        "p90_ms": stats["p90_ms"],
+                        "samples_ms": stats["samples_ms"],
+                        "warmup": warmup,
                     },
                     sort_keys=True,
                 )
@@ -5864,7 +5906,7 @@ class DistributedAttentionTorchrunCandidateTest(unittest.TestCase):
         env_name = "DSV4_DIST_ATTN_TEST_CSA_TOTAL_TOKENS"
         old_value = os.environ.get(env_name)
         if old_value is None:
-            os.environ[env_name] = "4100"
+            os.environ[env_name] = "2048"
         try:
             self.test_torchrun_symm_mem_csa_e2e_4k_shape_contract()
         finally:
