@@ -452,6 +452,26 @@ class IndexerOp(nn.Module):
             self.scale_fmt,  # "ue8m0" for power-of-2 scaling
         )
 
+    def quant_k_cp_only(
+        self,
+        key: torch.Tensor,
+        kv_cache: KVCache,
+        slot_mapping: torch.Tensor,
+        kv_restore_unpad_indices: torch.Tensor,
+    ) -> None:
+        assert kv_cache is not None, "kv_cache is required"
+        gathered_key = all_gather(key.contiguous(), group=Group.TP).reshape(
+            -1, key.size(-1)
+        )
+        restored_key = gathered_key[kv_restore_unpad_indices]
+        rtp_llm_ops.indexer_k_quant_and_cache(
+            restored_key,
+            self._kv_cache_blocks(kv_cache),
+            slot_mapping,
+            self.block_size,
+            self.scale_fmt,
+        )
+
     def quant_q_k(
         self,
         query: torch.Tensor,
