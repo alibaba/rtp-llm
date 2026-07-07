@@ -20,8 +20,10 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CopyOnWriteArrayList;
@@ -137,9 +139,9 @@ class FlexlbBatchSchedulerTest {
         assertEquals(77, inputs.get(0).getGenerateConfig().getGroupTimeout().getValue());
         assertEquals(2, inputs.get(0).getGenerateConfig().getRoleAddrsCount());
         assertEquals(EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL,
-                inputs.get(0).getGenerateConfig().getRoleAddrs(0).getRole());
+                inputs.get(0).getGenerateConfig().getRoleAddrs(0).getRoleType());
         assertEquals(EngineRpcService.RoleTypePB.ROLE_TYPE_DECODE,
-                inputs.get(0).getGenerateConfig().getRoleAddrs(1).getRole());
+                inputs.get(0).getGenerateConfig().getRoleAddrs(1).getRoleType());
     }
 
     @Test
@@ -518,6 +520,57 @@ class FlexlbBatchSchedulerTest {
         Response response = future.get(1, TimeUnit.SECONDS);
         assertFalse(response.isSuccess());
         // No exception thrown — passes
+    }
+
+    // ==================== BatchIdGenerator Snowflake uniqueness ====================
+
+    @Test
+    void batchIdGeneratorProducesUniqueIds() {
+        BatchIdGenerator gen = new BatchIdGenerator("10.0.0.1", 7001);
+        Set<Long> ids = new HashSet<>();
+        // 4000 is safely below the 12-bit sequence limit (4096 per ms per master),
+        // matching the Python request_id design guarantee.
+        for (int i = 0; i < 4000; i++) {
+            long id = gen.nextBatchId();
+            assertTrue(id > 0, "batch_id must be positive (not -1 default)");
+            ids.add(id);
+        }
+        assertEquals(4000, ids.size(), "All batch IDs must be unique within a single ms window");
+    }
+
+    @Test
+    void batchIdGeneratorDifferentiatesMasters() {
+        // Two masters with different IP:port should produce non-overlapping IDs
+        BatchIdGenerator gen1 = new BatchIdGenerator("10.0.0.1", 7001);
+        BatchIdGenerator gen2 = new BatchIdGenerator("10.0.0.2", 7001);
+
+        // Even if called at the same millisecond, master_id bits differ
+        Set<Long> ids1 = new HashSet<>();
+        Set<Long> ids2 = new HashSet<>();
+        for (int i = 0; i < 100; i++) {
+            ids1.add(gen1.nextBatchId());
+            ids2.add(gen2.nextBatchId());
+        }
+        // No overlap between two different masters
+        ids1.retainAll(ids2);
+        assertTrue(ids1.isEmpty(), "Different masters must not produce overlapping batch IDs");
+    }
+
+    @Test
+    void batchIdGeneratorSurvivesRestart() {
+        // A new generator instance (simulating restart) produces IDs
+        // with higher timestamps, never colliding with old ones
+        BatchIdGenerator gen1 = new BatchIdGenerator("10.0.0.1", 7001);
+        long id1 = gen1.nextBatchId();
+
+        // Simulate restart — new instance, same IP:port
+        BatchIdGenerator gen2 = new BatchIdGenerator("10.0.0.1", 7001);
+        long id2 = gen2.nextBatchId();
+
+        // Timestamp portion should be >= id1's timestamp (time only moves forward)
+        long ts1 = id1 >>> 24;
+        long ts2 = id2 >>> 24;
+        assertTrue(ts2 >= ts1, "Restarted generator must not produce IDs with older timestamps");
     }
 
     private static EngineRpcService.EnqueueBatchResponsePB ackFor(EngineRpcService.EnqueueBatchRequestPB request) {

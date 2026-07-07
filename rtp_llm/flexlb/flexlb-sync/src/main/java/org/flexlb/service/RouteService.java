@@ -49,11 +49,12 @@ public class RouteService {
         balanceContext.setConfig(flexlbConfig);
 
         Mono<Response> resultMono;
+        ScheduleModeEnum mode = balanceContext.getScheduleMode();
         if (shouldUseFlexlbBatch(balanceContext, flexlbConfig)) {
             CompletableFuture<Response> future = flexlbBatchScheduler.submit(balanceContext);
             balanceContext.setFuture(future);
             resultMono = Mono.fromFuture(future);
-        } else if (flexlbConfig.isEnableQueueing()) {
+        } else if (mode == ScheduleModeEnum.QUEUE || flexlbConfig.isEnableQueueing()) {
             resultMono = queueManager.tryRouteAsync(balanceContext);  // Use async queuing mechanism
         } else {
             resultMono = Mono.fromCallable(() -> router.route(balanceContext));  // Direct routing without queuing
@@ -74,7 +75,7 @@ public class RouteService {
     public void cancel(BalanceContext balanceContext) {
         FlexlbConfig flexlbConfig = configService.loadBalanceConfig();
         balanceContext.cancel();
-        if (flexlbConfig.isEnableQueueing()) {
+        if (flexlbConfig.isEnableQueueing() || balanceContext.getScheduleMode() == ScheduleModeEnum.QUEUE) {
             CompletableFuture<Response> future = balanceContext.getFuture();
             if (future != null) {
                 future.completeExceptionally(new CancellationException("Request cancelled by client"));
@@ -102,6 +103,9 @@ public class RouteService {
             return true;
         }
         if (mode == ScheduleModeEnum.DIRECT) {
+            return false;
+        }
+        if (mode == ScheduleModeEnum.QUEUE) {
             return false;
         }
         // AUTO: use batch when config enables it and request characteristics match

@@ -23,6 +23,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.stream.Collectors;
 
 public class PrefillEndpoint extends WorkerEndpoint {
 
@@ -34,6 +35,13 @@ public class PrefillEndpoint extends WorkerEndpoint {
     private volatile WorkerBatcher batcher;
     private final InflightEvictor<Long, BatchInflight> batchEvictor;
     private final BatchSchedulerReporter reporter;
+
+    /**
+     * Engine-reported waiting queue length from the latest WorkerStatus update.
+     * Reflects requests queued on the engine side that the master hasn't
+     * dispatched yet (e.g. legacy traffic from other masters).
+     */
+    private volatile long engineWaitingQueryLen = 0;
 
     public PrefillEndpoint(WorkerStatus status, FlexlbConfig config,
                            BatchDecisionHandler handler,
@@ -116,6 +124,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
     @Override
     public void onWorkerStatusUpdate(WorkerStatus ws, WorkerStatusResponse resp) {
         super.onWorkerStatusUpdate(ws, resp);
+        engineWaitingQueryLen = resp.getWaitingQueryLen();
         calibrate(resp.getFinishedTaskInfo(), resp.getRunningTaskInfo());
     }
 
@@ -163,10 +172,34 @@ public class PrefillEndpoint extends WorkerEndpoint {
 
         // Phase 2: any success request → remove entire batch, report predicted vs actual timing
         for (long batchId : batchesWithSuccess) {
-            BatchInflight batch = inflightBatches.remove(batchId);
-            if (batch != null) {
-                reportBatchCompletion(batchId, batch, finishedTaskInfo);
+            BatchInflight batch = inflightBatches.get(batchId);
+            if (batch == null) {
+                continue;
             }
+            // Defense-in-depth: verify that at least one success task's requestId
+            // belongs to this local batch. Mismatch indicates a stale engine report
+            // from a previous master epoch with the same batchId.
+            Set<Long> localRequestIds = batch.requests().stream()
+                    .map(BatchItem::requestId)
+                    .collect(Collectors.toSet());
+            boolean owned = false;
+            if (finishedTaskInfo != null) {
+                for (TaskInfo task : finishedTaskInfo.values()) {
+                    if (task.getBatchId() == batchId
+                            && task.getErrorCode() == 0
+                            && localRequestIds.contains(task.getRequestId())) {
+                        owned = true;
+                        break;
+                    }
+                }
+            }
+            if (!owned) {
+                logger.warn("Prefill calibrate: batchId={} has success but no matching requestId in local batch. "
+                        + "Likely stale report from previous master epoch. Skipping removal.", batchId);
+                continue;
+            }
+            inflightBatches.remove(batchId);
+            reportBatchCompletion(batchId, batch, finishedTaskInfo);
         }
 
         // Phase 3: fail-only batches → repack survivors
@@ -175,13 +208,32 @@ public class PrefillEndpoint extends WorkerEndpoint {
             if (batchesWithSuccess.contains(batchId)) {
                 continue;
             }
-            if (!inflightBatches.containsKey(batchId)) {
+            BatchInflight batch = inflightBatches.get(batchId);
+            if (batch == null) {
                 continue;
             }
-
-            List<TaskInfo> failedTasks = entry.getValue();
+            // Defense-in-depth: verify failed tasks belong to this local batch
+            Set<Long> localRequestIds = batch.requests().stream()
+                    .map(BatchItem::requestId)
+                    .collect(Collectors.toSet());
+            List<TaskInfo> foreignTasks = new ArrayList<>();
+            List<TaskInfo> localFailedTasks = new ArrayList<>();
+            for (TaskInfo t : entry.getValue()) {
+                if (localRequestIds.contains(t.getRequestId())) {
+                    localFailedTasks.add(t);
+                } else {
+                    foreignTasks.add(t);
+                }
+            }
+            if (!foreignTasks.isEmpty()) {
+                logger.warn("Prefill calibrate: batchId={} has {} failed tasks with foreign requestIds. "
+                        + "Skipping repack for foreign tasks.", batchId, foreignTasks.size());
+            }
+            if (localFailedTasks.isEmpty()) {
+                continue;
+            }
             Set<Long> failedIds = new HashSet<>();
-            for (TaskInfo t : failedTasks) {
+            for (TaskInfo t : localFailedTasks) {
                 if (!isCancelError(t)) {
                     logger.warn("Prefill calibrate: batch failure batchId={} reqId={} error={}",
                             batchId, t.getRequestId(), t.getErrorMessage());
@@ -238,9 +290,11 @@ public class PrefillEndpoint extends WorkerEndpoint {
 
     /**
      * Real pending count: total requests the engine will face.
+     * Includes master-tracked inflight + batcher queue + engine-reported
+     * waiting queue (e.g. traffic from other sources).
      */
     public long realPendingCount() {
-        return getInflightRequestCount() + batcher.queueSize();
+        return getInflightRequestCount() + batcher.queueSize() + engineWaitingQueryLen;
     }
 
     // ==================== Wait Time ====================

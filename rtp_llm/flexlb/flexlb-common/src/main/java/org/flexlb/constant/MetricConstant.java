@@ -46,7 +46,7 @@ public class MetricConstant {
      */
     public static final String ENGINE_BALANCING_MASTER_ALL_QPS = "app.engine.balancing.master.all.qps";
 
-    public static final String ENGINE_BALANCING_MASTER_SCHEDULE_RT = "app.engine.balancing.master.all.rt";
+    public static final String ENGINE_BALANCING_MASTER_ALL_RT = "app.engine.balancing.master.all.rt";
 
     public static final String ENGINE_BALANCING_MASTER_SELECT_DETAIL = "app.engine.balancing.master.select.detail";
 
@@ -312,6 +312,26 @@ public class MetricConstant {
      */
     public static final String GRPC_CHANNEL_POOL_SIZE = "app.grpc.channel.pool.size";
 
+    /**
+     * gRPC call duration in milliseconds
+     */
+    public static final String GRPC_CALL_DURATION = "app.grpc.call.duration";
+
+    /**
+     * gRPC response body size in bytes
+     */
+    public static final String GRPC_RESPONSE_SIZE = "app.grpc.response.size";
+
+    /**
+     * gRPC call count
+     */
+    public static final String GRPC_CALL_COUNT = "app.grpc.call.count";
+
+    /**
+     * gRPC connection duration in microseconds
+     */
+    public static final String GRPC_CONNECTION_DURATION = "app.grpc.connection.duration";
+
     /* ------------------------ Request Queue Monitoring -------------------------- */
 
     /**
@@ -379,7 +399,7 @@ public class MetricConstant {
     /**
      * Graceful online/offline lifecycle events
      */
-    public static final String LIFECYCLE_EVENT_METRIC = "graceful.lifecycle.event";
+    public static final String GRACEFUL_LIFECYCLE_EVENT = "app.graceful.lifecycle.event";
 
     /* ------------------------ Request Forwarding Monitoring -------------------------- */
 

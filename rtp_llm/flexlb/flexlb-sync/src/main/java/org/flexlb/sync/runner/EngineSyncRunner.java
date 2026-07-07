@@ -218,7 +218,6 @@ public class EngineSyncRunner implements Runnable {
     }
 
     private void ensureEndpoint(String ipPort, WorkerStatus workerStatus) {
-        String ip = workerStatus.getIp();
         int httpPort = workerStatus.getPort();
         int grpcPort = CommonUtils.toGrpcPort(httpPort);
         workerStatus.setGrpcPort(grpcPort);

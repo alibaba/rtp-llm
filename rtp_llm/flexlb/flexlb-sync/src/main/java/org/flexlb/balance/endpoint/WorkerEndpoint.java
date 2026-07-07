@@ -3,6 +3,8 @@ package org.flexlb.balance.endpoint;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusResponse;
 
+import java.util.concurrent.atomic.AtomicLong;
+
 /**
  * Primary abstraction for a remote inference worker.
  * Holds only a mutable {@link WorkerStatus} reference — all state
@@ -15,6 +17,18 @@ public abstract class WorkerEndpoint {
 
     // ---- the sole mutable holding ----
     protected volatile WorkerStatus status;
+
+    /**
+     * Last time this endpoint was selected by a scheduling strategy.
+     * Used for CAS-based fairness across concurrent requests.
+     * Lives on the endpoint (not WorkerStatus) because {@code status} is replaced
+     * on every sync cycle, which would lose the CAS state.
+     */
+    protected final AtomicLong lastSelectedTime = new AtomicLong(-1);
+
+    public AtomicLong getLastSelectedTime() {
+        return lastSelectedTime;
+    }
 
     protected WorkerEndpoint(WorkerStatus status) {
         this.status = status;

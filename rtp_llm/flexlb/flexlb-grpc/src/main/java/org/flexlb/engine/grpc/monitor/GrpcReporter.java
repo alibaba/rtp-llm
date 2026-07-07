@@ -8,7 +8,11 @@ import org.springframework.stereotype.Component;
 
 import javax.annotation.PostConstruct;
 
+import static org.flexlb.constant.MetricConstant.GRPC_CALL_COUNT;
+import static org.flexlb.constant.MetricConstant.GRPC_CALL_DURATION;
 import static org.flexlb.constant.MetricConstant.GRPC_CHANNEL_POOL_SIZE;
+import static org.flexlb.constant.MetricConstant.GRPC_CONNECTION_DURATION;
+import static org.flexlb.constant.MetricConstant.GRPC_RESPONSE_SIZE;
 
 /**
  * Reporter for gRPC channel pool metrics
@@ -21,12 +25,6 @@ public class GrpcReporter {
     public GrpcReporter(FlexMonitor monitor) {
         this.monitor = monitor;
     }
-
-    // gRPC call related metric constants
-    private static final String GRPC_CALL_DURATION = "grpc.call.duration";
-    private static final String GRPC_RESPONSE_SIZE = "grpc.response.size";
-    private static final String GRPC_CALL_COUNT = "grpc.call.count";
-    private static final String GRPC_CONNECTION_DURATION = "grpc.connection.duration";
 
     @PostConstruct
     public void init() {
@@ -45,7 +43,7 @@ public class GrpcReporter {
     public void reportChannelPoolSize(int channelPoolSize) {
         monitor.report(GRPC_CHANNEL_POOL_SIZE, FlexMetricTags.of("type", "grpc"), channelPoolSize);
     }
-    
+
     /**
      * Report gRPC call metrics
      *
@@ -71,7 +69,7 @@ public class GrpcReporter {
         // Report call count
         monitor.report(GRPC_CALL_COUNT, tags, 1);
     }
-    
+
     /**
      * Report gRPC connection duration
      *

@@ -19,6 +19,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -196,6 +197,42 @@ class PrefillEndpointTest {
         BatchInflight batch = endpoint.getInflightBatches().get(1L);
         assertNotNull(batch);
         assertTrue(batch.progressBaseMs() > 0, "Running batch should have its progress anchor updated");
+    }
+
+    @Test
+    void calibrateDoesNotRemoveBatchWithForeignRequestId() {
+        // Commit batch with requestId=100
+        BatchItem item = createBatchItem(100L, 500, 200);
+        endpoint.commitBatch(1L, 100, List.of(item));
+        assertEquals(1, endpoint.getInflightBatchCount());
+
+        // Engine reports success for batchId=1 but with requestId=999 (foreign)
+        Map<String, TaskInfo> finished = new HashMap<>();
+        TaskInfo foreignTask = new TaskInfo();
+        foreignTask.setBatchId(1L);
+        foreignTask.setRequestId(999L);
+        foreignTask.setErrorCode(0);
+        finished.put("999", foreignTask);
+
+        endpoint.calibrate(finished, new HashMap<>());
+        // Batch should NOT be removed — requestId doesn't match
+        assertEquals(1, endpoint.getInflightBatchCount());
+    }
+
+    @Test
+    void calibrateRemovesBatchWithMatchingRequestId() {
+        BatchItem item = createBatchItem(100L, 500, 200);
+        endpoint.commitBatch(1L, 100, List.of(item));
+
+        Map<String, TaskInfo> finished = new HashMap<>();
+        TaskInfo task = new TaskInfo();
+        task.setBatchId(1L);
+        task.setRequestId(100L);
+        task.setErrorCode(0);
+        finished.put("100", task);
+
+        endpoint.calibrate(finished, new HashMap<>());
+        assertEquals(0, endpoint.getInflightBatchCount());
     }
 
     // ---- estimated waiting time ----

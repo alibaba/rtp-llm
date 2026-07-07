@@ -46,7 +46,8 @@ class GrpcWorkerStatusCheckRunnerTest {
         workerStatus.setPort(8080);
 
         EngineRpcService.WorkerStatusPB workerStatusPB = EngineRpcService.WorkerStatusPB.newBuilder()
-                .setRole(EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL)
+                .setRole(RoleType.PREFILL.getCode())
+                .setRoleType(EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL)
                 .setAvailableConcurrency(10)
                 .setRunningQueryLen(5)
                 .setWaitingQueryLen(3)
@@ -94,7 +95,8 @@ class GrpcWorkerStatusCheckRunnerTest {
                 .setPhase(EngineRpcService.TaskPhase.TASK_PHASE_RECEIVED)
                 .build();
         EngineRpcService.WorkerStatusPB workerStatusPB = EngineRpcService.WorkerStatusPB.newBuilder()
-                .setRole(EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL)
+                .setRole(RoleType.PREFILL.getCode())
+                .setRoleType(EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL)
                 .setStatusVersion(100L)
                 .setAlive(true)
                 .addRunningTaskInfo(taskInfo)

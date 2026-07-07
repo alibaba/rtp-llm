@@ -207,7 +207,8 @@ def trans_input(input_py: GenerateInput):
 
     for role_addr in input_py.generate_config.role_addrs:
         role_addr_pb = RoleAddrPB()
-        role_addr_pb.role = trans_role_type(role_addr.role)
+        role_addr_pb.role = role_addr.role.name
+        role_addr_pb.role_type = trans_role_type(role_addr.role)
         role_addr_pb.ip = role_addr.ip
         role_addr_pb.http_port = role_addr.http_port
         role_addr_pb.grpc_port = role_addr.grpc_port

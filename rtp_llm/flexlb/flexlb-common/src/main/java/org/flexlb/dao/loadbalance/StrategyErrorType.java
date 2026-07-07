@@ -17,6 +17,7 @@ public enum StrategyErrorType {
     NO_DECODE_WORKER(8403, true),
     NO_PDFUSION_WORKER(8404, true),
     NO_VIT_WORKER(8405, true),
+    NO_FRONTEND_WORKER(8407, true),
     INVALID_REQUEST(8406, false),
 
     // queue error

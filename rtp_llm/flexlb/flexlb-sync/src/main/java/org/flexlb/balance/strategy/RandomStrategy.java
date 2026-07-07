@@ -26,7 +26,7 @@ import java.util.Map;
 import java.util.concurrent.ThreadLocalRandom;
 
 @Component("randomStrategy")
-public class RandomStrategy implements LoadBalancer {
+public class RandomStrategy implements LoadBalanceStrategy {
     private static final org.slf4j.Logger logger = LoggerFactory.getLogger(RandomStrategy.class);
 
     private final EngineWorkerStatus engineWorkerStatus;

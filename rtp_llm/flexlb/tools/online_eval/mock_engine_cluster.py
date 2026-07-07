@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import logging
 import os
 import signal
 from pathlib import Path
@@ -36,47 +37,124 @@ def parse_args() -> argparse.Namespace:
         "--env-file", default="rtp_llm/flexlb/tools/online_eval/run/flexlb_env.txt"
     )
     parser.add_argument("--snapshot-interval-s", type=float, default=5.0)
+    parser.add_argument(
+        "--per-engine-perf",
+        default=None,
+        help="JSON list of per-engine performance overrides, e.g. "
+        '[{"name":"prefill-0","prefill_ms":200}]',
+    )
     return parser.parse_args()
 
 
+def build_per_engine_perf(
+    base_cfg: dict, per_engine_json: str | None
+) -> dict[str, PerformanceModel]:
+    """Parse --per-engine-perf JSON into {engine_name: PerformanceModel}.
+
+    Supports two formats:
+    1. JSON list:  [{"name":"prefill-0","prefill_ms":200}]
+    2. JSON dict:  {"prefill-0": {"prefill_fixed_ms": 100}, "prefill-1": {"prefill_fixed_ms": 200}}
+    """
+    if not per_engine_json:
+        return {}
+    import copy
+
+    parsed = json.loads(per_engine_json)
+    result: dict[str, PerformanceModel] = {}
+
+    if isinstance(parsed, dict):
+        # Dict format: {engine_name: {override_keys}}
+        for name, overrides in parsed.items():
+            if not name or not isinstance(overrides, dict):
+                continue
+            cfg = copy.deepcopy(base_cfg)
+            if "prefill_fixed_ms" in overrides:
+                cfg.setdefault("prefill", {})["fixed_ms"] = overrides[
+                    "prefill_fixed_ms"
+                ]
+            if "decode_scale" in overrides:
+                cfg.setdefault("decode", {})["scale"] = overrides["decode_scale"]
+            for key in ("prefill", "decode", "sleep_scale", "block_size"):
+                if key in overrides:
+                    if isinstance(cfg.get(key), dict) and isinstance(
+                        overrides[key], dict
+                    ):
+                        cfg[key].update(overrides[key])
+                    else:
+                        cfg[key] = overrides[key]
+            result[name] = PerformanceModel(cfg)
+    elif isinstance(parsed, list):
+        # List format (existing): [{"name": "prefill-0", "prefill_ms": 200}]
+        for entry in parsed:
+            name = entry.get("name")
+            if not name:
+                continue
+            cfg = copy.deepcopy(base_cfg)
+            if "prefill_ms" in entry:
+                cfg.setdefault("prefill", {})["fixed_ms"] = entry["prefill_ms"]
+            for key in ("prefill", "decode", "sleep_scale", "block_size"):
+                if key in entry:
+                    if isinstance(cfg.get(key), dict) and isinstance(entry[key], dict):
+                        cfg[key].update(entry[key])
+                    else:
+                        cfg[key] = entry[key]
+            result[name] = PerformanceModel(cfg)
+    return result
+
+
 async def main() -> None:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(name)s] %(levelname)s %(message)s",
+    )
     args = parse_args()
     pb2, pb2_grpc = ensure_proto_modules()
     perf_cfg = load_performance_config(args.performance)
     perf_cfg.setdefault("block_size", args.block_size)
     performance = PerformanceModel(perf_cfg)
-    cluster = MockEngineCluster(pb2, pb2_grpc, performance)
+    per_engine_perf = build_per_engine_perf(perf_cfg, args.per_engine_perf)
+    cluster = MockEngineCluster(
+        pb2, pb2_grpc, performance, base_http_port=args.base_grpc_port - 1
+    )
 
     port = args.base_grpc_port
     for i in range(args.n_prefill):
+        name = f"prefill-{i}"
         await cluster.add_engine(
-            name=f"prefill-{i}",
+            name=name,
             role="prefill",
             host=args.host,
             port=port,
             cache_capacity_blocks=args.prefill_cache_blocks,
             total_kv_tokens=args.prefill_total_kv_tokens,
             block_size=args.block_size,
+            performance_override=per_engine_perf.get(name),
         )
         port += 1
     for i in range(args.n_decode):
+        name = f"decode-{i}"
         await cluster.add_engine(
-            name=f"decode-{i}",
+            name=name,
             role="decode",
             host=args.host,
             port=port,
             cache_capacity_blocks=args.decode_cache_blocks,
             total_kv_tokens=args.decode_total_kv_tokens,
             block_size=args.block_size,
+            performance_override=per_engine_perf.get(name),
         )
         port += 1
 
+    http_port = args.base_grpc_port - 1
+    await cluster.start_http_server(http_port)
     await write_outputs(cluster, args)
     print(
-        f"mock engine cluster started: {args.n_prefill} prefill, {args.n_decode} decode"
+        f"mock engine cluster started: {args.n_prefill} prefill, "
+        f"{args.n_decode} decode"
     )
     print(f"endpoint file: {args.endpoint_file}")
     print(f"flexlb env file: {args.env_file}")
+    print(f"http control API on port {http_port}")
     print("press Ctrl-C to stop")
 
     stop_event = asyncio.Event()
@@ -129,12 +207,28 @@ async def snapshot_loop(cluster: MockEngineCluster, interval_s: float) -> None:
     while True:
         await asyncio.sleep(interval_s)
         snapshot = await cluster.snapshot()
-        compact = [
-            f"{e['name']} running={e['running']} completed={e['completed']} "
-            f"cache={e['cache_keys']} avail_kv={e['available_kv_tokens']}"
-            for e in snapshot["engines"]
-        ]
-        print(" | ".join(compact), flush=True)
+        # per-engine detailed log
+        for e in snapshot["engines"]:
+            rpc = e.get("rpc_counts", {})
+            print(
+                f"[{e['name']}] role={e['role']} running={e['running']} "
+                f"accepted={e['accepted']} completed={e['completed']} "
+                f"cancelled={e.get('cancelled_count', 0)} "
+                f"rpc={rpc} "
+                f"cache={e['cache_keys']} avail_kv={e['available_kv_tokens']}",
+                flush=True,
+            )
+        # cluster summary
+        total_running = sum(e["running"] for e in snapshot["engines"])
+        total_accepted = sum(e["accepted"] for e in snapshot["engines"])
+        total_completed = sum(e["completed"] for e in snapshot["engines"])
+        total_cancelled = sum(e.get("cancelled_count", 0) for e in snapshot["engines"])
+        print(
+            f"[CLUSTER] engines={len(snapshot['engines'])} "
+            f"total_running={total_running} total_accepted={total_accepted} "
+            f"total_completed={total_completed} total_cancelled={total_cancelled}",
+            flush=True,
+        )
 
 
 if __name__ == "__main__":

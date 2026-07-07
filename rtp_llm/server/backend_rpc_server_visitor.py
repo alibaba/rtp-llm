@@ -2,7 +2,7 @@ import asyncio
 import logging
 import os
 import time
-from typing import TYPE_CHECKING, AsyncGenerator, List, Optional
+from typing import TYPE_CHECKING, AsyncGenerator, List, Optional, Set
 
 import torch
 
@@ -33,6 +33,12 @@ if TYPE_CHECKING:
     from rtp_llm.config.py_config_modules import PyEnvConfigs
 
 route_logger = logging.getLogger("route_logger")
+
+
+def get_role_names(role_addrs: List[RoleAddr]) -> Set[str]:
+    """Return the set of human-readable role names from a list of RoleAddr."""
+    return {role_addr.role.name for role_addr in role_addrs}
+
 
 PD_ROUTE_RETRY_ON_UNAVAILABLE_ENV = "RTP_LLM_PD_ROUTE_RETRY_ON_UNAVAILABLE"
 DEFAULT_PD_ROUTE_RETRY_ON_UNAVAILABLE = 3
@@ -472,10 +478,7 @@ class BackendRPCServerVisitor:
                 aux_info["role_addrs"] = [
                     role_addr.model_dump(mode="json") for role_addr in role_addrs
                 ]
-                roles = {
-                    str(getattr(role_addr.role, "name", role_addr.role))
-                    for role_addr in role_addrs
-                }
+                roles = get_role_names(role_addrs)
                 aux_info["pd_sep"] = {"PREFILL", "DECODE"}.issubset(roles)
             e.aux_info = aux_info
 

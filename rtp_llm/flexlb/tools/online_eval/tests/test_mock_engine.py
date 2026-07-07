@@ -115,7 +115,8 @@ class MockEngineGrpcTest(unittest.IsolatedAsyncioTestCase):
             ),
         )
         config.role_addrs.add(
-            role=self.pb2.ROLE_TYPE_DECODE,
+            role="DECODE",
+            role_type=self.pb2.ROLE_TYPE_DECODE,
             ip=self.decode.host,
             http_port=self.decode.http_port,
             grpc_port=self.decode.grpc_port,

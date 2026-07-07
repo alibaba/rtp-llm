@@ -5,7 +5,7 @@ import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.route.RoleType;
 
-public interface LoadBalancer {
+public interface LoadBalanceStrategy {
 
     ServerStatus select(BalanceContext context, RoleType roleType, String group);
 

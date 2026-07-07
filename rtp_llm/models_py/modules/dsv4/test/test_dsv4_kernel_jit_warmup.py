@@ -11,6 +11,8 @@ from unittest import mock
 import torch
 import torch.nn as nn
 
+from rtp_llm.ops import RoleType
+
 _THIS = os.path.dirname(os.path.abspath(__file__))
 _REPO = os.path.abspath(os.path.join(_THIS, "..", "..", "..", "..", ".."))
 if _REPO not in sys.path:
@@ -73,7 +75,7 @@ class Dsv4KernelJitWarmupTest(unittest.TestCase):
             resolve_dense_gemm_warmup_max_m(
                 max_seq_len=1048576,
                 max_batch_size=1024,
-                role_type_name="PREFILL",
+                role_type_name=RoleType.PREFILL,
                 is_speculative=True,
                 gen_num_per_cycle=4,
             ),
@@ -85,7 +87,7 @@ class Dsv4KernelJitWarmupTest(unittest.TestCase):
             resolve_dense_gemm_warmup_max_m(
                 max_seq_len=1048576,
                 max_batch_size=1024,
-                role_type_name="PREFILL",
+                role_type_name=RoleType.PREFILL,
                 prefill_chunk_size=16384,
                 max_tokens_per_rank=65536,
                 is_speculative=True,
@@ -99,7 +101,7 @@ class Dsv4KernelJitWarmupTest(unittest.TestCase):
             resolve_dense_gemm_warmup_max_m(
                 max_seq_len=1048576,
                 max_batch_size=1024,
-                role_type_name="PREFILL",
+                role_type_name=RoleType.PREFILL,
                 max_tokens_per_rank=65536,
             ),
             65536,
@@ -114,7 +116,7 @@ class Dsv4KernelJitWarmupTest(unittest.TestCase):
             resolve_dense_gemm_warmup_max_m(
                 max_seq_len=1048576,
                 max_batch_size=1024,
-                role_type_name="PREFILL",
+                role_type_name=RoleType.PREFILL,
                 cp_size=4,
                 cp_enabled=True,
             ),
@@ -124,7 +126,7 @@ class Dsv4KernelJitWarmupTest(unittest.TestCase):
             resolve_dense_gemm_warmup_max_m(
                 max_seq_len=1048577,
                 max_batch_size=1024,
-                role_type_name="PREFILL",
+                role_type_name=RoleType.PREFILL,
                 cp_size=4,
                 cp_enabled=True,
             ),
@@ -137,7 +139,7 @@ class Dsv4KernelJitWarmupTest(unittest.TestCase):
             resolve_dense_gemm_warmup_max_m(
                 max_seq_len=1048576,
                 max_batch_size=1024,
-                role_type_name="DECODE",
+                role_type_name=RoleType.DECODE,
                 is_speculative=True,
                 gen_num_per_cycle=4,
             ),
@@ -149,7 +151,7 @@ class Dsv4KernelJitWarmupTest(unittest.TestCase):
             resolve_dense_gemm_warmup_max_m(
                 max_seq_len=1048576,
                 max_batch_size=1024,
-                role_type_name="DECODE",
+                role_type_name=RoleType.DECODE,
                 is_speculative=True,
                 gen_num_per_cycle=4,
             ),
@@ -161,7 +163,7 @@ class Dsv4KernelJitWarmupTest(unittest.TestCase):
             resolve_dense_gemm_warmup_max_m(
                 max_seq_len=1048576,
                 max_batch_size=1024,
-                role_type_name="DECODE",
+                role_type_name=RoleType.DECODE,
             ),
             1024,
         )

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import signal
 import struct
 import time
@@ -21,6 +22,8 @@ from .rt_model import (
 )
 
 SENTINEL = object()
+
+logger = logging.getLogger("mock_engine")
 
 
 def now_ms() -> int:
@@ -101,6 +104,7 @@ class MockEngineState:
         total_kv_tokens: int,
         block_size: int,
         cluster: "MockEngineCluster",
+        performance_override: PerformanceModel | None = None,
     ):
         self.pb2 = pb2
         self.name = name
@@ -108,11 +112,12 @@ class MockEngineState:
         self.host = host
         self.grpc_port = grpc_port
         self.http_port = http_port
-        self.performance = performance
+        self.performance = performance_override or performance
         self.cache = LruBlockCache(cache_capacity_blocks, block_size)
         self.total_kv_tokens = int(total_kv_tokens)
         self.block_size = block_size
         self.cluster = cluster
+        self.inject_config: dict = {}
 
         self._lock = asyncio.Lock()
         self._running: Dict[int, TaskRuntime] = {}
@@ -125,6 +130,29 @@ class MockEngineState:
         self._active_kv_tokens = 0
         self._accepted = 0
         self._completed = 0
+        self._rpc_counts: Dict[str, int] = {
+            "enqueue_batch": 0,
+            "generate_stream": 0,
+            "fetch_response": 0,
+            "cancel": 0,
+        }
+        self._cancelled_count = 0
+        self._request_lifecycle: Dict[int, dict] = {}
+        self._injected_queue_depth = 0
+
+    def set_injection(self, config: dict) -> None:
+        """Set error-injection / timeout-simulation config.
+
+        Supported keys:
+          enqueue_error  – enqueue_batch returns empty-successes response
+          fetch_error    – fetch_response yields one frame then raises grpc.RpcError
+          generate_error – generate_stream raises grpc.RpcError immediately
+          no_respond     – prefill/decode sleep but never queue responses (stream hangs)
+        """
+        self.inject_config = dict(config)
+
+    def clear_injection(self) -> None:
+        self.inject_config = {}
 
     @property
     def ip_port(self) -> str:
@@ -135,7 +163,22 @@ class MockEngineState:
         return f"{self.host}:{self.http_port}"
 
     async def enqueue_batch(self, request) -> object:
+        self._rpc_counts["enqueue_batch"] += 1
         batch_id = int(request.batch_id)
+        rids = [
+            int(item.input.request_id)
+            for slot in request.dp_slots
+            for item in slot.requests
+        ]
+        logger.info(
+            "EnqueueBatch arrived engine=%s batch_id=%d rids=%s n=%d",
+            self.name,
+            batch_id,
+            rids,
+            len(rids),
+        )
+        if self.inject_config.get("enqueue_error"):
+            return self.pb2.EnqueueBatchResponsePB(batch_id=batch_id)
         inputs = []
         for slot in request.dp_slots:
             for item in slot.requests:
@@ -149,6 +192,25 @@ class MockEngineState:
         return response
 
     async def generate_stream(self, input_pb):
+        self._rpc_counts["generate_stream"] += 1
+        request_id = int(input_pb.request_id)
+        role_addrs_count = len(input_pb.generate_config.role_addrs)
+        logger.info(
+            "GenerateStreamCall arrived engine=%s rid=%d role_addrs=%d tokens=%d output_len=%d",
+            self.name,
+            request_id,
+            role_addrs_count,
+            len(input_pb.token_ids),
+            input_pb.generate_config.max_new_tokens,
+        )
+        if self.inject_config.get("generate_error"):
+            import grpc
+
+            raise grpc.RpcError("injected generate_error")
+        if self.inject_config.get("enqueue_error"):
+            import grpc
+
+            raise grpc.RpcError("injected enqueue_error")
         request_id = int(input_pb.request_id)
         queue = self._response_queues.setdefault(request_id, asyncio.Queue())
         if self.role == "decode":
@@ -159,11 +221,31 @@ class MockEngineState:
             yield output
 
     async def fetch_response(self, request_id: int):
+        self._rpc_counts["fetch_response"] += 1
+        logger.info(
+            "FetchResponse arrived engine=%s rid=%d", self.name, int(request_id)
+        )
         self._response_queues.setdefault(int(request_id), asyncio.Queue())
+        if self.inject_config.get("fetch_error"):
+            import grpc
+
+            yield self._output_pb(
+                int(request_id), finished=False, token_id=101, output_len=1
+            )
+            raise grpc.RpcError("injected fetch_error")
         async for output in self._read_response_queue(int(request_id)):
             yield output
 
     async def cancel(self, request_id: int) -> None:
+        self._rpc_counts["cancel"] += 1
+        self._cancelled_count += 1
+        was_running = int(request_id) in self._running
+        logger.info(
+            "Cancel arrived engine=%s rid=%d was_running=%s",
+            self.name,
+            int(request_id),
+            was_running,
+        )
         async with self._lock:
             self._cancelled.add(int(request_id))
             self._running.pop(int(request_id), None)
@@ -176,9 +258,12 @@ class MockEngineState:
         latest = int(getattr(request, "latest_finished_version", -1))
         async with self._lock:
             status = self.pb2.WorkerStatusPB(
-                role=self._role_pb(),
+                role=self.role.upper(),
+                role_type=self._role_pb(),
                 available_concurrency=max(0, 4096 - len(self._running)),
-                waiting_query_len=0,
+                waiting_query_len=(
+                    self._injected_queue_depth if self._injected_queue_depth > 0 else 0
+                ),
                 running_query_len=len(self._running),
                 step_latency_ms=0.0,
                 iterate_count=self._completed,
@@ -235,7 +320,27 @@ class MockEngineState:
                 ),
                 "status_version": self._status_version,
                 "cache_version": self._cache_version,
+                "inject_config": dict(self.inject_config),
+                "rpc_counts": dict(self._rpc_counts),
+                "cancelled_count": self._cancelled_count,
+                "cancelled_rids": sorted(self._cancelled),
+                "request_lifecycle": {
+                    str(k): v for k, v in self._request_lifecycle.items()
+                },
             }
+
+    def _prune_lifecycle(self) -> None:
+        """Keep _request_lifecycle bounded; evict oldest 20% when over 10000 entries."""
+        if len(self._request_lifecycle) > 10000:
+            oldest_keys = sorted(
+                self._request_lifecycle.keys(),
+                key=lambda k: self._request_lifecycle[k].get("arrived_ms", 0),
+            )[:2000]
+            for k in oldest_keys:
+                del self._request_lifecycle[k]
+
+    async def get_request_lifecycle_snapshot(self) -> dict:
+        return dict(self._request_lifecycle)
 
     async def _run_prefill_batch(self, batch_id: int, inputs: List[object]) -> None:
         if not inputs:
@@ -257,6 +362,18 @@ class MockEngineState:
                     dp_rank=0,
                 )
                 self._running[shape.request_id] = task
+            arrived_ms = int(time.time() * 1000)
+            for shape in shapes:
+                self._request_lifecycle[shape.request_id] = {
+                    "rid": shape.request_id,
+                    "method": "enqueue_batch" if batch_id >= 0 else "generate_stream",
+                    "batch_id": batch_id,
+                    "arrived_ms": arrived_ms,
+                    "running_ms": arrived_ms,
+                    "end_ms": 0,
+                    "end_state": "running",
+                }
+            self._prune_lifecycle()
             self._status_version += 1
 
         prefill_ms = self.performance.prefill_ms(shapes)
@@ -272,7 +389,18 @@ class MockEngineState:
                 self._finish_task(task)
                 if self.cache.admit(shape.block_keys):
                     self._cache_version += 1
+            end_ms_lc = int(time.time() * 1000)
+            for rid in [s.request_id for s in shapes]:
+                lc = self._request_lifecycle.get(rid)
+                if lc:
+                    lc["end_ms"] = end_ms_lc
+                    lc["end_state"] = (
+                        "cancelled" if rid in self._cancelled else "completed"
+                    )
             self._status_version += 1
+
+        if self.inject_config.get("no_respond"):
+            return
 
         decode_tasks = []
         for input_pb, shape in zip(inputs, shapes):
@@ -310,11 +438,25 @@ class MockEngineState:
                 phase=self.pb2.TASK_PHASE_RUNNING,
                 start_ms=start,
             )
+            arrived_ms = int(time.time() * 1000)
+            self._request_lifecycle[shape.request_id] = {
+                "rid": shape.request_id,
+                "method": "enqueue_batch" if batch_id >= 0 else "generate_stream",
+                "batch_id": batch_id,
+                "arrived_ms": arrived_ms,
+                "running_ms": arrived_ms,
+                "end_ms": 0,
+                "end_state": "running",
+            }
+            self._prune_lifecycle()
             self._status_version += 1
 
         first_step_ms = self.performance.first_decode_step_ms(active_batch)
         await asyncio.sleep(self.performance.sleep_seconds(first_step_ms))
-        if shape.request_id not in self._cancelled:
+        if (
+            not self.inject_config.get("no_respond")
+            and shape.request_id not in self._cancelled
+        ):
             await queue.put(
                 self._output_pb(
                     shape.request_id, finished=False, token_id=101, output_len=1
@@ -334,7 +476,17 @@ class MockEngineState:
                 self._finish_task(task)
             if self.cache.admit(shape.block_keys):
                 self._cache_version += 1
+            end_ms_lc = int(time.time() * 1000)
+            lc = self._request_lifecycle.get(shape.request_id)
+            if lc:
+                lc["end_ms"] = end_ms_lc
+                lc["end_state"] = (
+                    "cancelled" if shape.request_id in self._cancelled else "completed"
+                )
             self._status_version += 1
+
+        if self.inject_config.get("no_respond"):
+            return
 
         if shape.request_id not in self._cancelled:
             await queue.put(
@@ -537,13 +689,22 @@ class MockRpcServicer:
 
 
 class MockEngineCluster:
-    def __init__(self, pb2, pb2_grpc, performance: PerformanceModel):
+    def __init__(
+        self,
+        pb2,
+        pb2_grpc,
+        performance: PerformanceModel,
+        *,
+        base_http_port: int = 0,
+    ):
         self.pb2 = pb2
         self.pb2_grpc = pb2_grpc
         self.performance = performance
         self.states: List[MockEngineState] = []
         self._by_grpc_addr: Dict[str, MockEngineState] = {}
         self._servers = []
+        self._base_http_port = base_http_port
+        self._http_runner = None
 
     async def add_engine(
         self,
@@ -555,6 +716,7 @@ class MockEngineCluster:
         cache_capacity_blocks: int,
         total_kv_tokens: int,
         block_size: int,
+        performance_override: PerformanceModel | None = None,
     ) -> MockEngineState:
         import grpc
 
@@ -573,6 +735,7 @@ class MockEngineCluster:
             grpc_port=port,
             http_port=http_port,
             performance=self.performance,
+            performance_override=performance_override,
             cache_capacity_blocks=cache_capacity_blocks,
             total_kv_tokens=total_kv_tokens,
             block_size=block_size,
@@ -595,14 +758,142 @@ class MockEngineCluster:
 
     def resolve_decode(self, input_pb) -> Optional[MockEngineState]:
         for role_addr in input_pb.generate_config.role_addrs:
-            if role_addr.role == self.pb2.ROLE_TYPE_DECODE:
+            if role_addr.role_type == self.pb2.ROLE_TYPE_DECODE:
                 return self._by_grpc_addr.get(f"{role_addr.ip}:{role_addr.grpc_port}")
         decodes = [s for s in self.states if s.role == "decode"]
         if not decodes:
             return None
         return decodes[int(input_pb.request_id) % len(decodes)]
 
+    async def start_http_server(self, port: int | None = None) -> None:
+        """Start a lightweight aiohttp control API alongside the gRPC servers."""
+        from aiohttp import web
+
+        port = port or self._base_http_port
+        if port <= 0:
+            return
+        app = web.Application()
+        app.router.add_get("/snapshot", self._http_snapshot)
+        app.router.add_post("/inject", self._http_inject)
+        app.router.add_post("/clear_inject", self._http_clear_inject)
+        app.router.add_get("/health", self._http_health)
+        app.router.add_get("/requests", self._http_requests)
+        app.router.add_post("/set_perf", self._http_set_perf)
+        app.router.add_post("/set_kv_pressure", self._http_set_kv_pressure)
+        app.router.add_post("/set_queue_depth", self._http_set_queue_depth)
+        self._http_runner = web.AppRunner(app)
+        await self._http_runner.setup()
+        site = web.TCPSite(self._http_runner, "0.0.0.0", port)
+        await site.start()
+
+    async def _http_snapshot(self, request) -> object:
+        from aiohttp import web
+
+        return web.json_response(await self.snapshot())
+
+    async def _http_inject(self, request) -> object:
+        from aiohttp import web
+
+        body = await request.json()
+        engine_name = body.get("engine")
+        config = body.get("config", {})
+        engine = self._find_engine(engine_name)
+        if engine is None:
+            return web.json_response(
+                {"error": f"engine '{engine_name}' not found"}, status=404
+            )
+        engine.set_injection(config)
+        return web.json_response({"status": "ok", "engine": engine_name})
+
+    async def _http_clear_inject(self, request) -> object:
+        from aiohttp import web
+
+        body = await request.json()
+        engine_name = body.get("engine")
+        engine = self._find_engine(engine_name)
+        if engine is None:
+            return web.json_response(
+                {"error": f"engine '{engine_name}' not found"}, status=404
+            )
+        engine.clear_injection()
+        return web.json_response({"status": "ok", "engine": engine_name})
+
+    async def _http_health(self, request) -> object:
+        from aiohttp import web
+
+        return web.json_response({"status": "ok"})
+
+    async def _http_requests(self, request):
+        from aiohttp import web
+
+        result = {}
+        for state in self.states:
+            result[state.name] = await state.get_request_lifecycle_snapshot()
+        return web.json_response(result)
+
+    async def _http_set_perf(self, request):
+        """POST /set_perf — modify prefill_ms / decode_ms for a specific engine.
+        Body: {"engine": "prefill-0", "prefill_fixed_ms": 200.0, "decode_scale": 2.0}
+        """
+        from aiohttp import web
+
+        data = await request.json()
+        engine_name = data.get("engine", "")
+        for state in self.states:
+            if state.name == engine_name:
+                if "prefill_fixed_ms" in data:
+                    state.performance.prefill_fixed_ms = float(data["prefill_fixed_ms"])
+                if "decode_scale" in data:
+                    state.performance.decode_scale = float(data["decode_scale"])
+                return web.json_response({"status": "ok", "engine": engine_name})
+        return web.json_response(
+            {"status": "not_found", "engine": engine_name}, status=404
+        )
+
+    async def _http_set_kv_pressure(self, request):
+        """POST /set_kv_pressure — set decode engine _active_kv_tokens.
+        Body: {"engine": "decode-0", "active_kv_tokens": 999000}
+        """
+        from aiohttp import web
+
+        data = await request.json()
+        engine_name = data.get("engine", "")
+        for state in self.states:
+            if state.name == engine_name:
+                state._active_kv_tokens = int(data.get("active_kv_tokens", 0))
+                state._status_version += 1
+                return web.json_response({"status": "ok", "engine": engine_name})
+        return web.json_response(
+            {"status": "not_found", "engine": engine_name}, status=404
+        )
+
+    async def _http_set_queue_depth(self, request):
+        """POST /set_queue_depth — set prefill engine reported waiting_queue_len.
+        Body: {"engine": "prefill-0", "queue_depth": 50000}
+        """
+        from aiohttp import web
+
+        data = await request.json()
+        engine_name = data.get("engine", "")
+        for state in self.states:
+            if state.name == engine_name:
+                state._injected_queue_depth = int(data.get("queue_depth", 0))
+                state._status_version += 1
+                return web.json_response({"status": "ok", "engine": engine_name})
+        return web.json_response(
+            {"status": "not_found", "engine": engine_name}, status=404
+        )
+
+    def _find_engine(self, name: str) -> Optional[MockEngineState]:
+        for state in self.states:
+            if state.name == name:
+                return state
+        return None
+
     async def stop(self) -> None:
+        if self._http_runner is not None:
+            await self._http_runner.cleanup()
+            self._http_runner = None
         for server in self._servers:
             await server.stop(grace=1)
         self._servers.clear()

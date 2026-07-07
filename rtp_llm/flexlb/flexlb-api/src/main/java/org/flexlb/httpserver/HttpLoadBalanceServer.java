@@ -1,5 +1,9 @@
 package org.flexlb.httpserver;
 
+import org.flexlb.balance.endpoint.DecodeEndpoint;
+import org.flexlb.balance.endpoint.EndpointRegistry;
+import org.flexlb.balance.endpoint.PrefillEndpoint;
+import org.flexlb.balance.scheduler.FlexlbBatchScheduler;
 import org.flexlb.balance.scheduler.QueueManager;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.TrafficPolicyConfig;
@@ -25,7 +29,9 @@ import org.springframework.web.reactive.function.server.ServerRequest;
 import org.springframework.web.reactive.function.server.ServerResponse;
 import reactor.core.publisher.Mono;
 
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.function.Function;
 
@@ -37,13 +43,19 @@ public class HttpLoadBalanceServer {
     private final LBStatusConsistencyService lbStatusConsistencyService;
     private final QueueManager queueManager;
     private final ConfigService configService;
+    private final FlexlbBatchScheduler batchScheduler;
+    private final EndpointRegistry endpointRegistry;
 
     public HttpLoadBalanceServer(LBStatusConsistencyService lbStatusConsistencyService,
                                  QueueManager queueManager,
-                                 ConfigService configService) {
+                                 ConfigService configService,
+                                 FlexlbBatchScheduler batchScheduler,
+                                 EndpointRegistry endpointRegistry) {
         this.lbStatusConsistencyService = lbStatusConsistencyService;
         this.queueManager = queueManager;
         this.configService = configService;
+        this.batchScheduler = batchScheduler;
+        this.endpointRegistry = endpointRegistry;
     }
 
     @Bean
@@ -61,6 +73,8 @@ public class HttpLoadBalanceServer {
                         this::updateTrafficPolicy)
                 .GET("/rtp_llm/queue_snapshot", accept(MediaType.APPLICATION_JSON),
                         this::queueSnapshot)
+                .GET("/rtp_llm/inflight_status", accept(MediaType.APPLICATION_JSON),
+                        this::inflightStatus)
                 .build();
     }
 
@@ -176,6 +190,40 @@ public class HttpLoadBalanceServer {
                     .body(Mono.just(response), QueueSnapshotResponse.class);
         } catch (Exception e) {
             Logger.error("queueSnapshot error", e);
+            return ServerResponse.status(500)
+                    .contentType(MediaType.APPLICATION_JSON)
+                    .body(Mono.just(e.getMessage()), String.class);
+        }
+    }
+
+    public Mono<ServerResponse> inflightStatus(ServerRequest request) {
+        try {
+            Map<String, Object> result = new LinkedHashMap<>();
+            result.put("scheduler_inflight", batchScheduler.getInflightSize());
+
+            List<Map<String, Object>> prefillList = new ArrayList<>();
+            for (Map.Entry<String, PrefillEndpoint> entry : endpointRegistry.getPrefillEndpoints().entrySet()) {
+                Map<String, Object> ep = new LinkedHashMap<>();
+                ep.put("ip_port", entry.getKey());
+                ep.put("inflight_batches", entry.getValue().getInflightBatchCount());
+                prefillList.add(ep);
+            }
+            result.put("prefill_endpoints", prefillList);
+
+            List<Map<String, Object>> decodeList = new ArrayList<>();
+            for (Map.Entry<String, DecodeEndpoint> entry : endpointRegistry.getDecodeEndpoints().entrySet()) {
+                Map<String, Object> ep = new LinkedHashMap<>();
+                ep.put("ip_port", entry.getKey());
+                ep.put("inflight_requests", entry.getValue().getInflightCount());
+                decodeList.add(ep);
+            }
+            result.put("decode_endpoints", decodeList);
+
+            return ServerResponse.ok()
+                    .contentType(MediaType.APPLICATION_JSON)
+                    .body(Mono.just(result), Map.class);
+        } catch (Exception e) {
+            Logger.error("inflightStatus error", e);
             return ServerResponse.status(500)
                     .contentType(MediaType.APPLICATION_JSON)
                     .body(Mono.just(e.getMessage()), String.class);

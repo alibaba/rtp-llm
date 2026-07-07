@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/model_rpc/QueryConverter.h"
+#include "rtp_llm/cpp/config/RoleTypes.h"
 
 #include "RPCPool.h"
 #include "rtp_llm/models_py/bindings/core/Types.h"
@@ -88,7 +89,7 @@ std::shared_ptr<GenerateConfig> QueryConverter::transGenerateConfig(const Genera
 
     for (const auto& role_addr : config_proto->role_addrs()) {
         generate_config->role_addrs.emplace_back(
-            RoleType(role_addr.role()), role_addr.ip(), role_addr.http_port(), role_addr.grpc_port());
+            stringToRoleType(role_addr.role()), role_addr.ip(), role_addr.http_port(), role_addr.grpc_port());
     }
 
     generate_config->reuse_cache         = config_proto->reuse_cache();
@@ -161,7 +162,7 @@ std::vector<RoleAddr> QueryConverter::getRoleAddrs(const GenerateConfigPB* confi
     std::vector<RoleAddr> role_addrs;
     for (const auto& role_addr : config_proto->role_addrs()) {
         role_addrs.emplace_back(
-            RoleType(role_addr.role()), role_addr.ip(), role_addr.http_port(), role_addr.grpc_port());
+            stringToRoleType(role_addr.role()), role_addr.ip(), role_addr.http_port(), role_addr.grpc_port());
     }
     return role_addrs;
 }

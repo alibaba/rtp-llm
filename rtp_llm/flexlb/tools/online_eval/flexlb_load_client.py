@@ -40,7 +40,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--max-concurrency", type=int, default=1024)
     parser.add_argument(
-        "--schedule-mode", choices=["auto", "batch", "direct"], default="batch"
+        "--schedule-mode", choices=["auto", "batch", "direct", "queue"], default="batch"
     )
     parser.add_argument("--timeout-ms", type=int, default=30000)
     parser.add_argument("--sla-ttft-ms", type=float, default=500.0)
@@ -258,6 +258,7 @@ class LoadClient:
         for status in response.server_status:
             input_pb.generate_config.role_addrs.add(
                 role=status.role,
+                role_type=status.role_type,
                 ip=status.server_ip,
                 http_port=status.http_port,
                 grpc_port=status.grpc_port,
@@ -265,7 +266,7 @@ class LoadClient:
 
     def _role_addr(self, response, role: int) -> str:
         for status in response.server_status:
-            if status.role == role and status.server_ip:
+            if status.role_type == role and status.server_ip:
                 return f"{status.server_ip}:{status.grpc_port}"
         return ""
 
@@ -293,6 +294,7 @@ class LoadClient:
             "auto": self.pb2.FLEXLB_SCHEDULE_AUTO,
             "batch": self.pb2.FLEXLB_SCHEDULE_BATCH,
             "direct": self.pb2.FLEXLB_SCHEDULE_DIRECT,
+            "queue": self.pb2.FLEXLB_SCHEDULE_QUEUE,
         }[self.args.schedule_mode]
 
     async def _write_summary(self, elapsed_s: float) -> None:

@@ -1,8 +1,18 @@
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
-from pydantic import BaseModel, ConfigDict, model_validator
+from pydantic import BaseModel, ConfigDict, field_validator
 
 from rtp_llm.config.generate_config import RoleType
+
+
+def _coerce_role_type(value: Union[int, str, RoleType]) -> RoleType:
+    if isinstance(value, int):
+        return RoleType(value)
+    if isinstance(value, RoleType):
+        return value
+    if isinstance(value, str):
+        return getattr(RoleType, value.upper())
+    raise ValueError(f"Invalid role: {value}, expected int, str, or RoleType")
 
 
 class WorkerStatusRequest(BaseModel):
@@ -33,7 +43,9 @@ class ProfileMeta(BaseModel):
 
 
 class WorkStatus(BaseModel):
-    role: str  # prefill, decode, vit
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    role: RoleType  # prefill, decode, vit
     server_port: Optional[int] = None
     http_port: Optional[int] = None
     grpc_port: Optional[int] = None
@@ -49,6 +61,11 @@ class WorkStatus(BaseModel):
     latest_finished_version: Optional[int] = -1  # 最新完成任务的版本
 
     profile_meta: Optional[ProfileMeta] = None  # 统计的处理数据
+
+    @field_validator("role", mode="before")
+    @classmethod
+    def validate_role(cls, v):
+        return _coerce_role_type(v)
 
 
 class DebugInfo(BaseModel):
@@ -70,21 +87,10 @@ class ServerStatus(BaseModel):
     grpc_port: int
     debug_info: Optional[DebugInfo] = None
 
-    @model_validator(mode="before")
-    def validate_role(cls, values: Dict[str, Any]):
-        role = values.get("role")
-        if isinstance(role, int):
-            values["role"] = RoleType(role)
-        elif isinstance(role, RoleType):
-            pass  # already correct
-        elif isinstance(role, str):
-            try:
-                values["role"] = getattr(RoleType, role.upper())
-            except AttributeError:
-                raise ValueError(f"Invalid role: {role}") from None
-        else:
-            raise ValueError(f"Invalid role: {role}, expected int, str, or RoleType")
-        return values
+    @field_validator("role", mode="before")
+    @classmethod
+    def validate_role(cls, v):
+        return _coerce_role_type(v)
 
 
 class ScheduleMeta(BaseModel):

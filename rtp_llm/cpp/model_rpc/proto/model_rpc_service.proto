@@ -34,10 +34,11 @@ enum RoleTypePB {
 }
 
 message RoleAddrPB {
-    RoleTypePB role = 1;
+    string role = 1;              // 字符串角色名，如 "PREFILL"，向后兼容
     string ip = 2;
     int32 http_port = 3;
     int32 grpc_port = 4;
+    RoleTypePB role_type = 5;    // 类型安全的枚举字段
 }
 
 message GenerateConfigPB {
@@ -428,7 +429,7 @@ message UpdateWeightsRequestPB {
 }
 
 message WorkerStatusPB {
-    RoleTypePB role = 1;
+    string role = 1;              // 字符串角色名，如 "PREFILL"，向后兼容
     int32 available_concurrency = 2;
     repeated TaskInfoPB running_task_info = 3;
     repeated TaskInfoPB finished_task_list = 4;
@@ -445,6 +446,9 @@ message WorkerStatusPB {
     int64 dp_rank = 16;
     int64 available_kv_cache = 17;
     int64 total_kv_cache = 18;
+    reserved 19;
+    reserved "role_str";
+    RoleTypePB role_type = 20;   // 类型安全的枚举字段
 }
 
 message EmbeddingInputPB {
@@ -743,6 +747,7 @@ enum FlexlbScheduleModePB {
     FLEXLB_SCHEDULE_AUTO = 0;
     FLEXLB_SCHEDULE_BATCH = 1;
     FLEXLB_SCHEDULE_DIRECT = 2;
+    FLEXLB_SCHEDULE_QUEUE = 3;
 }
 
 message FlexlbScheduleRequestPB {
@@ -762,10 +767,11 @@ message FlexlbScheduleRequestPB {
 }
 
 message FlexlbServerStatusPB {
-    RoleTypePB role = 1;
+    string role = 1;              // 字符串角色名，如 "PREFILL"，向后兼容
     string server_ip = 2;
     int32 http_port = 3;
     int32 grpc_port = 4;
+    RoleTypePB role_type = 5;    // 类型安全的枚举字段
 }
 
 message FlexlbScheduleResponsePB {

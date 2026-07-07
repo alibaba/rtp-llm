@@ -555,24 +555,6 @@ std::string FfnDisAggregateConfig::to_string() const {
     return oss.str();
 }
 
-// Helper function to convert RoleType enum to string
-static std::string roleTypeToString(RoleType role_type) {
-    switch (role_type) {
-        case RoleType::PDFUSION:
-            return "PDFUSION";
-        case RoleType::PREFILL:
-            return "PREFILL";
-        case RoleType::DECODE:
-            return "DECODE";
-        case RoleType::VIT:
-            return "VIT";
-        case RoleType::FRONTEND:
-            return "FRONTEND";
-        default:
-            return "UNKNOWN(" + std::to_string(static_cast<int>(role_type)) + ")";
-    }
-}
-
 // PDSepConfig
 std::string PDSepConfig::to_string() const {
     std::ostringstream oss;

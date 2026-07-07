@@ -29,7 +29,7 @@ import java.util.Set;
 import java.util.concurrent.ThreadLocalRandom;
 
 @Component("costBasedDecodeStrategy")
-public class CostBasedDecodeStrategy implements LoadBalancer {
+public class CostBasedDecodeStrategy implements LoadBalanceStrategy {
 
     private final EngineWorkerStatus engineWorkerStatus;
     private final double decayFactor;

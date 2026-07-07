@@ -13,7 +13,8 @@ public enum RoleType {
     PDFUSION("PDFUSION", "Prefill-Decode Fusion"),
     PREFILL("PREFILL", "Prefill"),
     DECODE("DECODE", "Decode"),
-    VIT("VIT", "Vision Transformer");
+    VIT("VIT", "Vision Transformer"),
+    FRONTEND("FRONTEND", "Frontend");
 
     @JsonValue
     private final String code;
@@ -47,10 +48,18 @@ public enum RoleType {
         }
         // Compat: strip proto prefix ("ROLE_TYPE_PREFILL" -> "PREFILL")
         if (value.startsWith("ROLE_TYPE_")) {
-            return RoleType.valueOf(value.substring(10));
+            try {
+                return RoleType.valueOf(value.substring(10));
+            } catch (IllegalArgumentException e) {
+                return null;
+            }
         }
         // Fallback: try enum name
-        return RoleType.valueOf(value);
+        try {
+            return RoleType.valueOf(value);
+        } catch (IllegalArgumentException e) {
+            return null;
+        }
     }
 
     /**
@@ -74,6 +83,7 @@ public enum RoleType {
             case DECODE -> StrategyErrorType.NO_DECODE_WORKER;
             case PDFUSION -> StrategyErrorType.NO_PDFUSION_WORKER;
             case VIT -> StrategyErrorType.NO_VIT_WORKER;
+            case FRONTEND -> StrategyErrorType.NO_FRONTEND_WORKER;
         };
     }
 

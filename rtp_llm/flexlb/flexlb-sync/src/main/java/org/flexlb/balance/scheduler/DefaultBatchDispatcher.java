@@ -5,8 +5,10 @@ import com.google.protobuf.InvalidProtocolBufferException;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.config.ConfigService;
 import org.flexlb.dao.loadbalance.ServerStatus;
+import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineGrpcClient;
 import org.flexlb.engine.grpc.EngineRpcService;
+import org.flexlb.engine.grpc.RoleTypeProtoConverter;
 import org.flexlb.util.Logger;
 
 import org.springframework.stereotype.Component;
@@ -238,14 +240,10 @@ public class DefaultBatchDispatcher implements BatchDispatcher {
         if (serverStatus == null) {
             return;
         }
-        EngineRpcService.RoleTypePB role = switch (serverStatus.getRole()) {
-            case PREFILL -> EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL;
-            case DECODE -> EngineRpcService.RoleTypePB.ROLE_TYPE_DECODE;
-            case PDFUSION -> EngineRpcService.RoleTypePB.ROLE_TYPE_PDFUSION;
-            case VIT -> EngineRpcService.RoleTypePB.ROLE_TYPE_VIT;
-        };
+        RoleType role = serverStatus.getRole();
         config.addRoleAddrs(EngineRpcService.RoleAddrPB.newBuilder()
-                .setRole(role)
+                .setRole(role.getCode())
+                .setRoleType(RoleTypeProtoConverter.toProto(role))
                 .setIp(serverStatus.getServerIp())
                 .setHttpPort(serverStatus.getHttpPort())
                 .setGrpcPort(serverStatus.getGrpcPort())

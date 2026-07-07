@@ -19,6 +19,7 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2_grpc import FlexlbService
 from rtp_llm.metrics import kmonitor
 from rtp_llm.metrics.kmonitor_metric_reporter import AccMetrics
 from rtp_llm.server.host_service import HostService
+from rtp_llm.server.worker_status import _coerce_role_type
 from rtp_llm.utils.base_model_datatypes import GenerateInput
 
 route_logger = logging.getLogger("route_logger")
@@ -29,6 +30,30 @@ DEFAULT_REQUEST_PRIORITY = 100
 # This is NOT the same as the backend engine offset (HTTP+1)—see CommonConstants.GRPC_PORT_OFFSET.
 FLEXLB_GRPC_PORT_OFFSET = 2
 BEARER_PREFIX = "Bearer "
+
+
+def _resolve_role_from_server_status(s) -> RoleType:
+    """Determine RoleType from a FlexlbServerStatusPB using two-level fallback.
+
+    Mirrors Java EngineStatusConverter.convertToWorkerStatusResponse:
+    1) role_type (enum f5) — preferred, type-safe field.
+    2) role (string f1) — backward-compatible string role.
+    3) Default to PDFUSION.
+    """
+    # 1) role_type (enum) — preferred, type-safe field
+    if s.role_type:
+        try:
+            return _coerce_role_type(s.role_type)
+        except (AttributeError, ValueError):
+            pass
+    # 2) role (string) — backward-compatible string role
+    if s.role:
+        try:
+            return _coerce_role_type(s.role)
+        except (AttributeError, ValueError):
+            pass
+    # 3) Default to PDFUSION
+    return RoleType.PDFUSION
 
 
 @dataclass
@@ -285,7 +310,7 @@ class MasterClient:
 
         role_addrs = [
             RoleAddr(
-                role=RoleType(s.role),
+                role=_resolve_role_from_server_status(s),
                 ip=s.server_ip,
                 http_port=s.http_port,
                 grpc_port=s.grpc_port,

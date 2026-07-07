@@ -23,6 +23,8 @@ import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
 import javax.annotation.PreDestroy;
+import java.net.InetAddress;
+import java.net.UnknownHostException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -31,7 +33,6 @@ import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * Coordinates batch scheduling for FlexLB disaggregated inference.
@@ -60,7 +61,7 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
     final BatchDispatcher dispatcher;
     final BatchSchedulerReporter reporter;
     final Map<Long, InflightEntry> inflight = new ConcurrentHashMap<>();
-    final AtomicLong batchIdGenerator = new AtomicLong(0);
+    final BatchIdGenerator batchIdGenerator;
     private final InflightEvictor<Long, InflightEntry> inflightEvictor
             = new InflightEvictor<>(inflight, entry -> {
                 synchronized (entry) {
@@ -84,6 +85,27 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
         this.endpointRegistry = endpointRegistry;
         this.dispatcher = dispatcher;
         this.reporter = reporter;
+        // Initialize Snowflake batch ID generator with master identity
+        this.batchIdGenerator = new BatchIdGenerator(detectLocalIp(), detectPort());
+        Logger.info("BatchIdGenerator initialized with Snowflake pattern (masterId from localIp:port)");
+    }
+
+    private static String detectLocalIp() {
+        try {
+            return InetAddress.getLocalHost().getHostAddress();
+        } catch (UnknownHostException e) {
+            Logger.warn("Failed to detect local IP, using 127.0.0.1 as fallback", e);
+            return "127.0.0.1";
+        }
+    }
+
+    private static int detectPort() {
+        String portStr = System.getProperty("server.port", "7001");
+        try {
+            return Integer.parseInt(portStr);
+        } catch (NumberFormatException e) {
+            return 7001;
+        }
     }
 
     // ==================== Request submission ====================
@@ -168,10 +190,24 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
             entry.cancelled.set(true);
             if (!entry.ackFinished) {
                 completeCancelled(entry);
-            } else if (!entry.item.future().isDone()) {
+            } else {
+                // Always rollback decode reservation on cancel.
+                // rollbackOnce is idempotent (compareAndSet), safe even if
+                // already rolled back by onFailure or onWorkerStatusUpdate.
+                // Previously, when ackFinished=true and future.isDone()=true,
+                // rollback was skipped — leaking the decode KV reservation
+                // until TTL eviction (300s). This especially affected error
+                // scenarios (no_respond / enqueue_error) where the engine
+                // never reports finishedTaskInfo, so calibrate cannot clean up.
                 rollbackOnce(entry);
+                if (!entry.item.future().isDone()) {
+                    Response errorResp = new Response();
+                    errorResp.setSuccess(false);
+                    errorResp.setCode(StrategyErrorType.REQUEST_CANCELLED.getErrorCode());
+                    errorResp.setErrorMessage("Request cancelled by client");
+                    entry.item.future().complete(errorResp);
+                }
             }
-            // If ackFinished and future already done (success), skip rollback
         }
         cancelPrefill(entry);
         // Remove this request from PrefillEndpoint.inflightBatches to prevent
@@ -218,6 +254,10 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
         inflight.remove(requestId);
     }
 
+    public int getInflightSize() {
+        return inflight.size();
+    }
+
     // ==================== Inflight TTL cleanup ====================
 
     @Scheduled(fixedRate = 60000L)
@@ -230,8 +270,11 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
 
     @Override
     public void onExpired(BatchItem head) {
-        removeInflight(head.requestId());
+        InflightEntry entry = inflight.remove(head.requestId());
         rollback(head);
+        if (entry != null) {
+            repackPrefillBatch(entry);
+        }
         if (!head.future().isDone()) {
             Response errorResp = new Response();
             errorResp.setSuccess(false);
@@ -295,7 +338,7 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
 
         // [SYNC] Compute prediction and commit only active items to endpoint
         long predMs = 0;
-        long batchId = batchIdGenerator.incrementAndGet();
+        long batchId = batchIdGenerator.nextBatchId();
         if (prefillEp != null) {
             PrefillTimePredictor predictor = prefillEp.getPredictor();
             predMs = predictor.predictBatchMs(active);
@@ -367,6 +410,7 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
             synchronized (entry) {
                 entry.ackFinished = true;
                 rollbackOnce(entry);
+                repackPrefillBatch(entry);
                 if (!item.future().isDone()) {
                     Response errorResp = new Response();
                     errorResp.setSuccess(false);

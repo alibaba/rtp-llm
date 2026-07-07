@@ -29,7 +29,7 @@ import java.util.List;
 import java.util.Map;
 
 @Component("costBasedPrefillStrategy")
-public class CostBasedPrefillStrategy implements LoadBalancer {
+public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
 
     private final EngineWorkerStatus engineWorkerStatus;
     private final CacheAwareService cacheAwareService;

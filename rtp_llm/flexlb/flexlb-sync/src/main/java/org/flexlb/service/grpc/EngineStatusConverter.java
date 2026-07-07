@@ -3,9 +3,12 @@ package org.flexlb.service.grpc;
 import org.flexlb.dao.master.CacheStatus;
 import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatusResponse;
+import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineRpcService;
 import org.flexlb.engine.grpc.RoleTypeProtoConverter;
 import org.flexlb.enums.TaskPhase;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.util.HashMap;
 import java.util.List;
@@ -17,14 +20,31 @@ import java.util.Set;
  */
 public class EngineStatusConverter {
 
+    private static final Logger logger = LoggerFactory.getLogger(EngineStatusConverter.class);
+
     /**
      * Convert WorkerStatusPB to WorkerStatusResponse
      */
     public static WorkerStatusResponse convertToWorkerStatusResponse(EngineRpcService.WorkerStatusPB workerStatusPB) {
         WorkerStatusResponse response = new WorkerStatusResponse();
 
-        // Convert proto enum to RoleType
-        response.setRole(RoleTypeProtoConverter.fromProto(workerStatusPB.getRole()));
+        // Determine role using a two-level fallback:
+        // 1) role_type (f20 enum) — preferred, type-safe field.
+        // 2) role (f1 string) — backward-compatible string role, e.g. "PREFILL".
+        // 3) Default to PDFUSION if nothing yields a valid role.
+        RoleType role = RoleTypeProtoConverter.fromProto(workerStatusPB.getRoleType());
+        if (role == null) {
+            String roleCode = workerStatusPB.getRole();
+            if (roleCode != null && !roleCode.isEmpty()) {
+                role = RoleType.fromString(roleCode);
+            }
+        }
+        if (role == null) {
+            logger.warn("Failed to determine role from WorkerStatusPB: role_type={}, role='{}'",
+                    workerStatusPB.getRoleType(), workerStatusPB.getRole());
+            role = RoleType.PDFUSION;
+        }
+        response.setRole(role);
         response.setAvailableConcurrency(workerStatusPB.getAvailableConcurrency());
         response.setRunningQueryLen(workerStatusPB.getRunningQueryLen());
         response.setWaitingQueryLen(workerStatusPB.getWaitingQueryLen());

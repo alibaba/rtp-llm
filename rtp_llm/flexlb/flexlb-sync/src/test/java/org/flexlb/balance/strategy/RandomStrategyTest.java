@@ -227,7 +227,7 @@ class RandomStrategyTest {
 
     @Test
     void should_register_strategy_in_factory() {
-        RandomStrategy strategyFromFactory = (RandomStrategy) LoadBalanceStrategyFactory.getLoadBalancer(LoadBalanceStrategyEnum.RANDOM);
+        RandomStrategy strategyFromFactory = (RandomStrategy) LoadBalanceStrategyFactory.getLoadBalanceStrategy(LoadBalanceStrategyEnum.RANDOM);
         assertNotNull(strategyFromFactory);
         assertSame(randomStrategy, strategyFromFactory);
     }
@@ -265,7 +265,6 @@ class RandomStrategyTest {
             }
         }
 
-        int expectedCountPerWorker = totalRuns / 3;
         double tolerance = 0.10;
 
         for (String ip : selectionCount.keySet()) {

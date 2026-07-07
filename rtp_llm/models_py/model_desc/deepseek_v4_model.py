@@ -54,6 +54,7 @@ from rtp_llm.models_py.modules.dsv4.moe.moe_layer import (
 )
 from rtp_llm.models_py.modules.dsv4.prefill.forward import forward_prefill
 from rtp_llm.models_py.modules.dsv4.transformer import V4Args, V4Transformer
+from rtp_llm.ops import RoleType
 
 
 def _materialize_meta_buffers(module: torch.nn.Module, device: str) -> int:
@@ -224,7 +225,7 @@ class Dsv4SharedRuntimeBufferStore:
 def _args_from_model_config(
     model_config: ModelConfig, max_generate_batch_size: int = 4
 ) -> V4Args:
-    from rtp_llm.ops import KvCacheDataType
+    from rtp_llm.ops import KvCacheDataType, RoleType
 
     attn_config = model_config.attn_config
     rope_config = attn_config.rope_config
@@ -915,7 +916,9 @@ class DeepSeekV4Model(GptModelBase):
                 _dense_gemm_max_m = resolve_dense_gemm_warmup_max_m(
                     max_seq_len=int(self._v4_args.max_seq_len),
                     max_batch_size=int(self._v4_args.max_batch_size),
-                    role_type_name="DECODE" if self._is_decode_role else "PREFILL",
+                    role_type_name=(
+                        RoleType.DECODE if self._is_decode_role else RoleType.PREFILL
+                    ),
                     prefill_chunk_size=_dense_gemm_prefill_chunk_size,
                     max_tokens_per_rank=int(self._v4_args.max_tokens_per_rank),
                     is_speculative=self._is_speculative,

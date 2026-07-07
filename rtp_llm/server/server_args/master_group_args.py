@@ -1,3 +1,6 @@
+from .util import str2bool
+
+
 def init_master_group_args(parser, master_config):
     master_group = parser.add_argument_group("Master Configuration")
 
@@ -53,7 +56,7 @@ def init_master_group_args(parser, master_config):
         "--master_disable_domain_fallback",
         env_name="MASTER_DISABLE_DOMAIN_FALLBACK",
         bind_to=(master_config, "disable_domain_fallback"),
-        type=bool,
+        type=str2bool,
         default=False,
         help="When True, disable domain fallback routing when master is unavailable or not configured. "
         "Requests will fail with ROUTE_ERROR instead of falling back to VipServer domain routing.",

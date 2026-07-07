@@ -1801,7 +1801,7 @@ grpc::Status PrefillRpcServer::EnqueueGroup(grpc::ServerContext*         context
                     return status.error_code() == grpc::StatusCode::CANCELLED ? ErrorCode::CANCELLED :
                                                                                 ErrorCode::UNKNOWN_ERROR;
                 };
-                auto fail_slot = [&](LocalSlot& slot, const grpc::Status& status) {
+                auto fail_slot = [this, grpc_status_to_stream_error](LocalSlot& slot, const grpc::Status& status) {
                     int64_t input_length  = slot.input ? slot.input->token_ids_size() : 0;
                     int64_t prefix_length = 0;
                     if (slot.prefill_context && slot.prefill_context->getStream()) {
@@ -1827,7 +1827,7 @@ grpc::Status PrefillRpcServer::EnqueueGroup(grpc::ServerContext*         context
                     slot.entry.reset();
                 };
 
-                auto start_finish_worker = [&](LocalSlot& slot) {
+                auto start_finish_worker = [this, fail_slot](LocalSlot& slot) {
                     auto entry                               = slot.entry;
                     auto writer                              = std::make_shared<ResponseBufferWriter>(entry);
                     slot.prefill_context->rpc_context.writer = writer.get();
@@ -1913,14 +1913,18 @@ grpc::Status PrefillRpcServer::EnqueueGroup(grpc::ServerContext*         context
                                 "EnqueueGroup request [%ld] finishStream done, ok=%d", request_id, finish_status.ok());
                         };
 
-                        // Non-blocking submit: if pool is full, fall back to detached thread
-                        // to avoid deadlock (L3 → L4 on same pool, see plan §3.2).
+                        // Non-blocking submit: if pool is full, fail the slot with UNAVAILABLE.
                         auto error = slot_worker_pool_->pushTask(std::move(finish_lambda));
                         if (error != autil::ThreadPoolBase::ERROR_NONE) {
                             slot_pool_metrics_.rejected++;
                             slot_pool_metrics_.fallback++;
-                            std::thread fallback_thread(std::move(finish_lambda));
-                            fallback_thread.detach();
+                            // Pool saturated: fail the slot cleanly instead of detaching a thread.
+                            // Previously used std::thread::detach() which risks UAF if the server
+                            // is destroyed while the thread is still running (it captures `this`).
+                            // tryStartAsyncResponseWorker() already incremented response_worker_count_,
+                            // so we must call finishAsyncResponseWorker() to decrement it.
+                            finishAsyncResponseWorker();
+                            fail_slot(slot, grpc::Status(grpc::StatusCode::UNAVAILABLE, "slot worker pool saturated"));
                         }
                     } catch (const std::exception& e) {
                         finishAsyncResponseWorker();

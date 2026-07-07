@@ -137,9 +137,9 @@ public class FlexlbConfig {
     private int scheduleWorkerSize = Runtime.getRuntime().availableProcessors();
 
     /**
-     * Resource availability check interval (milliseconds, default 10ms)
+     * Resource availability check interval (milliseconds, default 1000ms)
      */
-    private long resourceCheckIntervalMs = 10;
+    private long resourceCheckIntervalMs = 1000;
 
     /**
      * Prefill maximum queue size
@@ -310,6 +310,29 @@ public class FlexlbConfig {
     private double costHotspotMultiplier = 3.0;
 
     private double costImbalanceMultiplier = 3.0;
+
+    // ========== ShortestTTFT Strategy Configuration ==========
+
+    /** Candidate pool mode: "RATIO" (floor(workerCount * ratio)) or "FIXED" (absolute size). */
+    private String shortestTtftCandidatePoolMode = "RATIO";
+
+    /** Ratio of workers in candidate pool (RATIO mode only, 0 < ratio <= 1.0). */
+    private double shortestTtftCandidatePoolRatio = 0.3;
+
+    /** Minimum candidate pool size (RATIO mode only). */
+    private int shortestTtftCandidatePoolMinSize = 1;
+
+    /** Fixed candidate pool size (FIXED mode only). */
+    private int shortestTtftCandidatePoolSize = 1;
+
+    public int resolveShortestTtftCandidateCount(int workerCount) {
+        if ("FIXED".equalsIgnoreCase(shortestTtftCandidatePoolMode)) {
+            return Math.max(1, Math.min(shortestTtftCandidatePoolSize, workerCount));
+        }
+        // RATIO mode
+        return Math.max(1, Math.max(shortestTtftCandidatePoolMinSize,
+                (int) Math.floor(workerCount * shortestTtftCandidatePoolRatio)));
+    }
 
     /**
      * Configurable prefill-time prediction formula.

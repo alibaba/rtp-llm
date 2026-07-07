@@ -8,6 +8,7 @@
 #include "rtp_llm/cpp/model_rpc/QueryConverter.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
 #include "rtp_llm/cpp/config/EplbConfig.h"
+#include "rtp_llm/cpp/config/RoleTypes.h"
 #include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/distribute/RpcCpuTpBroadcaster.h"
 
@@ -244,7 +245,8 @@ grpc::Status LocalRpcServer::GetWorkerStatus(grpc::ServerContext*   context,
     RTP_LLM_LOG_DEBUG("getWorkerStatusInfo took %ld us", request_after_ws_time_us - request_begin_time_us);
 
     const auto& engine_schedule_info = status_info.engine_schedule_info;
-    response->set_role(static_cast<RoleTypePB>(status_info.role));
+    response->set_role(roleTypeToString(status_info.role));
+    response->set_role_type(static_cast<RoleTypePB>(status_info.role));
 
     for (const auto& task : engine_schedule_info.running_task_info_list) {
         TaskInfoPB* task_info = response->add_running_task_info();

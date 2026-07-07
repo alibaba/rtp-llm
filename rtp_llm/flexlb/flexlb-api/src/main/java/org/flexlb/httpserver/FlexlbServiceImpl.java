@@ -131,6 +131,7 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
         return switch (mode) {
             case FLEXLB_SCHEDULE_BATCH -> ScheduleModeEnum.BATCH;
             case FLEXLB_SCHEDULE_DIRECT -> ScheduleModeEnum.DIRECT;
+            case FLEXLB_SCHEDULE_QUEUE -> ScheduleModeEnum.QUEUE;
             default -> config.getDefaultScheduleModeEnum();
         };
     }
@@ -154,10 +155,11 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
         if (response.getServerStatus() != null) {
             for (ServerStatus ss : response.getServerStatus()) {
                 builder.addServerStatus(EngineRpcService.FlexlbServerStatusPB.newBuilder()
-                        .setRole(RoleTypeProtoConverter.toProto(ss.getRole()))
+                        .setRole(ss.getRole().getCode())
                         .setServerIp(ss.getServerIp() != null ? ss.getServerIp() : "")
                         .setHttpPort(ss.getHttpPort())
                         .setGrpcPort(ss.getGrpcPort())
+                        .setRoleType(RoleTypeProtoConverter.toProto(ss.getRole()))
                         .build());
             }
         }

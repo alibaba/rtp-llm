@@ -11,7 +11,9 @@ public enum LoadBalanceStrategyEnum {
 
     COST_BASED_PREFILL("CostBasedPrefill"),
 
-    COST_BASED_DECODE("CostBasedDecode")
+    COST_BASED_DECODE("CostBasedDecode"),
+
+    SHORTEST_TTFT("ShortestTtft")
 
     ;
     private final String name;

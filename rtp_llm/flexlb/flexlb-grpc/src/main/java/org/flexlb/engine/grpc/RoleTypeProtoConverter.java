@@ -23,6 +23,7 @@ public final class RoleTypeProtoConverter {
             case ROLE_TYPE_PREFILL -> RoleType.PREFILL;
             case ROLE_TYPE_DECODE -> RoleType.DECODE;
             case ROLE_TYPE_VIT -> RoleType.VIT;
+            case ROLE_TYPE_FRONTEND -> RoleType.FRONTEND;
             default -> null;
         };
     }
@@ -36,6 +37,7 @@ public final class RoleTypeProtoConverter {
             case PREFILL -> EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL;
             case DECODE -> EngineRpcService.RoleTypePB.ROLE_TYPE_DECODE;
             case VIT -> EngineRpcService.RoleTypePB.ROLE_TYPE_VIT;
+            case FRONTEND -> EngineRpcService.RoleTypePB.ROLE_TYPE_FRONTEND;
         };
     }
 }

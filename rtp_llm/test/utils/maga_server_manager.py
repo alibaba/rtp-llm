@@ -222,6 +222,11 @@ class MagaServerManager(object):
                 "failed to disable core dumps for server subprocesses: %s", e
             )
 
+        logging.info(
+            "[%s] CUDA_VISIBLE_DEVICES for subprocess: %s",
+            self._role_name,
+            current_env.get("CUDA_VISIBLE_DEVICES", "<not set>"),
+        )
         p = subprocess.Popen(
             ["/opt/conda310/bin/python", "-m", "rtp_llm.start_server"] + parsed_args,
             env=current_env,
