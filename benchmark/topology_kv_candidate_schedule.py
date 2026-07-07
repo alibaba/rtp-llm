@@ -66,22 +66,16 @@ def block_schedule_to_token_indices(
     if block_schedule.ndim != 2:
         raise ValueError("block_schedule must have shape [rows, candidate_blocks]")
 
-    rows = []
     width = block_schedule.shape[1] * block_size
-    for schedule_row in block_schedule.tolist():
-        token_row: List[int] = []
-        for block in schedule_row:
-            if block < 0:
-                token_row.extend([-1] * block_size)
-                continue
-            start = block * block_size
-            end = min(start + block_size, seq_len)
-            token_row.extend(range(start, end))
-            token_row.extend([-1] * (block_size - max(0, end - start)))
-        token_row = token_row[:width]
-        token_row.extend([-1] * (width - len(token_row)))
-        rows.append(token_row)
-    return torch.tensor(rows, dtype=torch.long, device=block_schedule.device)
+    block_offsets = torch.arange(block_size, device=block_schedule.device)
+    token_indices = block_schedule.unsqueeze(-1) * block_size + block_offsets
+    valid_tokens = (block_schedule.unsqueeze(-1) >= 0) & (token_indices < seq_len)
+    token_indices = torch.where(
+        valid_tokens,
+        token_indices,
+        torch.full_like(token_indices, -1),
+    )
+    return token_indices.reshape(block_schedule.shape[0], width)
 
 
 def _validate_config(config: BlockCandidateConfig) -> None:
@@ -119,8 +113,8 @@ def build_block_candidate_schedule(
     The schedule is intentionally backend-neutral: each row contains request-local
     block ids and is padded with -1. Candidate priority is sink blocks, local
     causal blocks, then high-drift blocks. The high-drift score is a cheap
-    0D-persistence proxy: blocks where the centroid moves sharply from the
-    previous block are treated as stable witnesses worth replaying.
+    change-point proxy: blocks where the centroid moves sharply from the
+    previous block are treated as distinctive witness blocks worth replaying.
     """
 
     _validate_config(config)
@@ -196,12 +190,13 @@ def build_topology_candidate_token_indices(
 
     seq_len = key.shape[2]
     max_candidate_blocks = max(1, (selected_tokens + block_size - 1) // block_size)
+    sink_blocks = 0 if max_candidate_blocks == 1 else 1
     centroids = build_key_block_centroids(key, block_size=block_size)
     schedule = build_block_candidate_schedule(
         centroids,
         BlockCandidateConfig(
             block_size=block_size,
-            sink_blocks=min(1, max_candidate_blocks),
+            sink_blocks=sink_blocks,
             local_blocks=min(2, max_candidate_blocks),
             salience_blocks=max_candidate_blocks,
             max_candidate_blocks=max_candidate_blocks,
@@ -237,6 +232,8 @@ def sparse_decode_attention(
     indices = indices[indices >= 0]
     if indices.numel() == 0:
         raise ValueError("candidate_indices must select at least one token")
+    if torch.unique(indices).numel() != indices.numel():
+        raise ValueError("candidate_indices must not contain duplicate tokens")
     if int(indices.max()) >= key.shape[2]:
         raise ValueError("candidate_indices contain tokens outside key/value length")
 

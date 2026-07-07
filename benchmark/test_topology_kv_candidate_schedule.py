@@ -70,6 +70,15 @@ class TopologyKVCandidateScheduleTest(unittest.TestCase):
 
         torch.testing.assert_close(sparse, dense, rtol=1e-5, atol=1e-5)
 
+    def test_sparse_attention_rejects_duplicate_candidate_indices(self):
+        query = torch.randn(1, 2, 1, 16)
+        key = torch.randn(1, 2, 128, 16)
+        value = torch.randn(1, 2, 128, 16)
+        candidate_indices = torch.tensor([[0, 1, 1, 2]])
+
+        with self.assertRaisesRegex(ValueError, "duplicate tokens"):
+            sparse_decode_attention(query, key, value, candidate_indices)
+
     def test_key_block_centroids_average_batch_heads_and_tail_blocks(self):
         key = torch.tensor(
             [
@@ -120,6 +129,17 @@ class TopologyKVCandidateScheduleTest(unittest.TestCase):
         )
 
         self.assertEqual(token_indices.tolist(), [0, 1, 6, 7])
+
+    def test_topology_candidate_indices_keep_latest_block_with_one_block_budget(self):
+        key = torch.arange(16, dtype=torch.float32).view(1, 1, 8, 2)
+
+        token_indices = build_topology_candidate_token_indices(
+            key,
+            selected_tokens=1,
+            block_size=2,
+        )
+
+        self.assertEqual(token_indices.tolist(), [6])
 
     def test_benchmark_grid_and_markdown_format_are_reproducible(self):
         results = run_decode_attention_grid(
