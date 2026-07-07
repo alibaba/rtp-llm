@@ -46,3 +46,35 @@ cc_library(
         "@havenask//aios/autil:thread",
     ] + torch_deps() + no_block_copy_link_deps(),
 )
+
+cc_library(
+    name = "block_tree_cache_pool",
+    srcs = [
+        "IBlockPool.cc",
+        "BlockPool.cc",
+        "host/HostBlockPool.cc",
+        "host/DiskBlockIO.cc",
+        "host/DiskBlockPool.cc",
+    ],
+    hdrs = [
+        "IBlockPool.h",
+        "BlockPool.h",
+        "host/HostBlockPool.h",
+        "host/DiskBlockIO.h",
+        "host/DiskBlockPool.h",
+    ],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+    deps = [
+        "//rtp_llm/cpp/cache:block_pool",
+        "//rtp_llm/cpp/cache:cache_types",
+        "//rtp_llm/cpp/utils:core_utils",
+    ] + torch_deps() + select({
+        "@//:using_cuda": [
+            "//rtp_llm/models_py/bindings/cuda:cuda_host_utils",
+            "@local_config_cuda//cuda:cuda_headers",
+            "@local_config_cuda//cuda:cudart",
+        ],
+        "//conditions:default": [],
+    }),
+)

@@ -80,3 +80,52 @@ cc_test(
     deps = test_deps,
     env = {},
 )
+
+pool_test_copts = [
+    "-fno-access-control",
+] + copts()
+
+pool_test_deps = [
+    "//rtp_llm/cpp/cache/block_tree_cache:block_tree_cache_pool",
+    "//rtp_llm/cpp/cache/test:cache_config_test_utils",
+    "//rtp_llm/cpp/config:config_modules",
+    "//rtp_llm/cpp/config:model_config",
+    "//rtp_llm/cpp/utils:core_utils",
+    "@com_google_googletest//:gtest",
+    "@com_google_googletest//:gtest_main",
+] + torch_deps()
+
+cc_test(
+    name = "i_block_pool_test",
+    srcs = ["IBlockPoolTest.cc"],
+    copts = pool_test_copts,
+    deps = pool_test_deps,
+    env = {},
+)
+
+cc_test(
+    name = "host_block_pool_test",
+    srcs = ["HostBlockPoolTest.cc"],
+    copts = pool_test_copts,
+    deps = pool_test_deps,
+    env = {},
+)
+
+cc_test(
+    name = "disk_block_pool_test",
+    srcs = ["DiskBlockPoolTest.cc"],
+    copts = pool_test_copts,
+    deps = pool_test_deps,
+    env = {},
+)
+
+cc_test(
+    name = "block_pool_test",
+    srcs = ["BlockPoolTest.cc"],
+    copts = pool_test_copts,
+    deps = pool_test_deps + [
+        "//rtp_llm/cpp/cache/test:block_pool_test_helper",
+    ],
+    env = {},
+    exec_properties = {"gpu": "H20"},
+)
