@@ -10,3 +10,11 @@ py_test(
     tags = ["manual"],
     deps = torch_deps(),
 )
+
+py_test(
+    name = "topology_kv_policy_test",
+    srcs = ["test_topology_kv_policy.py"],
+    main = "test_topology_kv_policy.py",
+    tags = ["manual"],
+    deps = torch_deps(),
+)

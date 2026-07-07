@@ -1,3 +1,4 @@
+import os
 from typing import Any, Dict, Optional, Tuple
 
 import torch
@@ -5,6 +6,10 @@ from torch import nn
 
 from rtp_llm.models_py.modules import IndexerOp, LayerNorm
 from rtp_llm.models_py.modules.factory import LinearFactory
+from rtp_llm.models_py.modules.hybrid.topology_kv_policy import (
+    TopologyKvPolicyConfig,
+    apply_topology_kv_policy,
+)
 from rtp_llm.ops import AttentionConfigs, HWKernelConfig, ParallelismConfig
 from rtp_llm.ops.compute_ops import KVCache
 from rtp_llm.utils.model_weight import W
@@ -42,6 +47,18 @@ class Indexer(nn.Module):
         self.softmax_scale = self.index_head_dim**-0.5
         self.weights_scale = self.index_n_heads**-0.5
         self.blocksize = attn_config.kernel_tokens_per_block  # page size, typically 64
+        self.topology_kv_policy = os.getenv(
+            "RTP_LLM_TOPOLOGY_KV_POLICY", "disabled"
+        ).strip()
+        self.topology_sink_blocks = int(os.getenv("RTP_LLM_TOPOLOGY_SINK_BLOCKS", "1"))
+        self.topology_local_blocks = int(os.getenv("RTP_LLM_TOPOLOGY_LOCAL_BLOCKS", "1"))
+        self.topology_witness_blocks = int(
+            os.getenv("RTP_LLM_TOPOLOGY_WITNESS_BLOCKS", "1")
+        )
+        self.topology_stable_scaffold = os.getenv("RTP_LLM_TOPOLOGY_STABLE_SCAFFOLD")
+        self.topology_output_contract = os.getenv("RTP_LLM_TOPOLOGY_OUTPUT_CONTRACT")
+        self.latest_topology_kv_counters = None
+        self.latest_topology_kv_fingerprint = None
         self.indexer_size = self.index_head_dim / 2 + self.index_head_dim / 128 * 2
         self.is_neox_style = attn_config.rope_config.indexer_is_neox_style
         self.parallelism_config = parallelism_config
@@ -160,8 +177,38 @@ class Indexer(nn.Module):
                 kv_cache,
                 fmha_params.slot_mapping,
                 cp_params.kv_restore_unpad_indices,
-            )
+        )
         return self.indexer_op.quant_q_k(query, key, kv_cache, fmha_params.slot_mapping)
+
+    def _apply_topology_kv_policy(
+        self,
+        topk_result: Optional[torch.Tensor],
+        lengths: torch.Tensor,
+        row_starts: Optional[torch.Tensor] = None,
+        topk_indices_offset: Optional[torch.Tensor] = None,
+    ) -> Optional[torch.Tensor]:
+        if self.topology_kv_policy == "disabled" or topk_result is None:
+            return topk_result
+        config = TopologyKvPolicyConfig(
+            policy=self.topology_kv_policy,
+            sink_blocks=self.topology_sink_blocks,
+            local_blocks=self.topology_local_blocks,
+            witness_blocks=self.topology_witness_blocks,
+            block_size=self.blocksize,
+        )
+        result = apply_topology_kv_policy(
+            topk_result,
+            lengths,
+            config=config,
+            row_starts=row_starts,
+            topk_indices_offset=topk_indices_offset,
+            stable_scaffold=self.topology_stable_scaffold,
+            output_contract=self.topology_output_contract,
+            previous_fingerprint=self.latest_topology_kv_fingerprint,
+        )
+        self.latest_topology_kv_counters = result.counters
+        self.latest_topology_kv_fingerprint = result.stable_fingerprint
+        return result.topk_indices
 
     def _compute_topk(
         self,
@@ -173,12 +220,16 @@ class Indexer(nn.Module):
         cp_params: Optional[Any],
     ) -> torch.Tensor:
         if not attention_inputs.is_prefill:
-            return self.indexer_op._get_topk_paged(
+            topk_result = self.indexer_op._get_topk_paged(
                 q_fp8, weights, kv_cache, fmha_params, attention_inputs
+            )
+            return self._apply_topology_kv_policy(
+                topk_result,
+                fmha_params.expanded_seq_lens,
             )
         if self._prefill_cp_enabled():
             assert cp_params is not None
-            return self.indexer_op._get_topk_ragged_cp(
+            topk_result = self.indexer_op._get_topk_ragged_cp(
                 q_fp8,
                 weights,
                 kv_cache,
@@ -192,8 +243,20 @@ class Indexer(nn.Module):
                 cp_params.precomputed_lengths,
                 cp_params.precomputed_topk_off,
             )
-        return self.indexer_op._get_topk_ragged(
+            return self._apply_topology_kv_policy(
+                topk_result,
+                cp_params.precomputed_lengths,
+                row_starts=cp_params.precomputed_ks,
+                topk_indices_offset=cp_params.precomputed_topk_off,
+            )
+        topk_result = self.indexer_op._get_topk_ragged(
             q_fp8, weights, kv_cache, fmha_params, attention_inputs
+        )
+        return self._apply_topology_kv_policy(
+            topk_result,
+            fmha_params.expanded_seq_lens,
+            row_starts=fmha_params.ks,
+            topk_indices_offset=fmha_params.topk_indices_offset,
         )
 
     def forward(

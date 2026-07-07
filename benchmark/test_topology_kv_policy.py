@@ -13,6 +13,7 @@ MODULE_PATH = (
     / "hybrid"
     / "topology_kv_policy.py"
 )
+INDEXER_PATH = MODULE_PATH.with_name("indexer.py")
 
 spec = importlib.util.spec_from_file_location("topology_kv_policy", MODULE_PATH)
 topology_kv_policy = importlib.util.module_from_spec(spec)
@@ -146,6 +147,14 @@ class TopologyKvPolicyTest(unittest.TestCase):
         self.assertEqual(len(values), len(set(values)))
         self.assertTrue(all(value < 8 for value in values))
         self.assertEqual(result.counters.compressed_tokens_represented, 0)
+
+    def test_indexer_has_disabled_by_default_topology_kv_gate(self):
+        source = INDEXER_PATH.read_text(encoding="utf-8")
+
+        self.assertIn("RTP_LLM_TOPOLOGY_KV_POLICY", source)
+        self.assertIn("latest_topology_kv_counters", source)
+        self.assertIn("_apply_topology_kv_policy", source)
+        self.assertIn("apply_topology_kv_policy", source)
 
 
 if __name__ == "__main__":
