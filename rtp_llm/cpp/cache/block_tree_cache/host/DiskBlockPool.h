@@ -83,7 +83,6 @@ private:
 
     static BlockIOStatus mapStatus(DiskBlockIOStatus status);
 
-private:
     std::unique_ptr<DiskBlockIO> io_;
     std::string                  file_path_;
 };

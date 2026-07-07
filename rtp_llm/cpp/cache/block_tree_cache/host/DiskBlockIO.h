@@ -80,7 +80,6 @@ private:
     // filesystem.
     DiskBlockIOStatus validate(uint64_t offset, const void* buffer, size_t bytes) const;
 
-private:
     int         fd_{-1};
     std::string file_path_;
     size_t      bytes_{0};

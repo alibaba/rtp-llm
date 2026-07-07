@@ -106,7 +106,7 @@ DiskBlockIOStatus PosixDiskBlockIO::validate(uint64_t offset, const void* buffer
         }
     }
 
-    if (offset + bytes > bytes_) {
+    if (offset > bytes_ || bytes > bytes_ - offset) {
         RTP_LLM_LOG_ERROR("disk block io out of preallocated range, file=%s, offset=%lu, bytes=%zu, capacity=%zu",
                           file_path_.c_str(),
                           offset,

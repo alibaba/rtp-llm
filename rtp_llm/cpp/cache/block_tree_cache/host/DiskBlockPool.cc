@@ -10,8 +10,10 @@ namespace rtp_llm::block_tree_cache {
 namespace {
 
 std::string buildFilePath(const DiskBlockPoolConfig& cfg) {
+    const std::string pool_name = cfg.pool_name.empty() ? std::string("unnamed") : cfg.pool_name;
     std::ostringstream oss;
-    oss << cfg.work_dir << "/disk_block_pool_r" << cfg.world_rank << "_l" << cfg.local_rank << ".bin";
+    oss << cfg.work_dir << "/disk_block_pool_" << pool_name << "_r" << cfg.world_rank << "_l" << cfg.local_rank
+        << ".bin";
     return oss.str();
 }
 

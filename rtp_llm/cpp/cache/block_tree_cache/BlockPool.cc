@@ -103,6 +103,7 @@ const BlockPoolConfig& BlockPool::config() const {
 }
 
 bool BlockPool::init() {
+    RTP_LLM_CHECK(!initialized());
     const auto& cfg = config();
 
     initializeCacheBuffer();

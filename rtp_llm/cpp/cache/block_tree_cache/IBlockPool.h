@@ -45,7 +45,7 @@ class IBlockPool {
 public:
     virtual ~IBlockPool() = default;
 
-    const std::string& poolName() const;
+    const std::string&  poolName() const;
     virtual std::string debugString() const;
 
     std::optional<BlockIdxType> malloc();
@@ -97,16 +97,16 @@ private:
 private:
     std::shared_ptr<const BlockPoolConfigBase> config_;
     mutable std::mutex                         mutex_;
-    bool                                        initialized_{false};
-    std::vector<uint8_t>                        allocated_;
-    std::vector<uint32_t>                       refcounts_;
-    std::vector<BlockIdxType>                   free_blocks_;
-    std::vector<BlockIdxType>                   released_blocks_;
-    size_t                                      free_head_{0};
-    size_t                                      used_blocks_num_{0};
-    size_t                                      unreferenced_blocks_num_{0};
-    size_t                                      tree_cached_blocks_num_{0};
-    size_t                                      active_tree_cached_blocks_num_{0};
+    bool                                       initialized_{false};
+    std::vector<uint8_t>                       allocated_;
+    std::vector<uint32_t>                      refcounts_;
+    std::vector<BlockIdxType>                  free_blocks_;
+    std::vector<BlockIdxType>                  released_blocks_;
+    size_t                                     free_head_{0};
+    size_t                                     used_blocks_num_{0};
+    size_t                                     unreferenced_blocks_num_{0};
+    size_t                                     tree_cached_blocks_num_{0};
+    size_t                                     active_tree_cached_blocks_num_{0};
 };
 
 }  // namespace rtp_llm::block_tree_cache
