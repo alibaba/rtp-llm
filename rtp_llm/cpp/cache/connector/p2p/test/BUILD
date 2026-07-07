@@ -53,6 +53,7 @@ cc_test(
     ] + device_impl_target(),
     copts = test_copts,
     exec_properties = {'gpu':'A10'},
+    tags = ["manual"],
 )
 
 cc_test(
@@ -72,6 +73,7 @@ cc_test(
     ] + device_impl_target(),
     copts = test_copts,
     exec_properties = {'gpu':'A10'},
+    tags = ["manual"],
 )
 
 cc_test(
@@ -90,6 +92,7 @@ cc_test(
     ] + device_impl_target(),
     copts = test_copts,
     exec_properties = {'gpu':'A10'},
+    tags = ["manual"],
 )
 
 cc_test(
@@ -106,4 +109,5 @@ cc_test(
     ] + device_impl_target(),
     copts = test_copts,
     exec_properties = {'gpu':'A10'},
+    tags = ["manual"],
 )

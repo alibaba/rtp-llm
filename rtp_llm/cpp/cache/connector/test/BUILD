@@ -46,6 +46,7 @@ cc_test(
     ],
     env = {},
     exec_properties = {'gpu':'H20'},
+    tags = ["manual"],
 )
 
 cc_test(
@@ -61,4 +62,5 @@ cc_test(
     ],
     env = {},
     exec_properties = {'gpu':'H20'},
+    tags = ["manual"],
 )

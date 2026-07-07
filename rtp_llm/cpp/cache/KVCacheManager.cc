@@ -10,7 +10,8 @@
 #include "rtp_llm/cpp/cache/allocator/HybridTypeKVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/allocator/SingleTypeKVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/SharedBlockCache.h"
-#include "rtp_llm/cpp/cache/connector/KVCacheConnectorCoordinator.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCacheFactory.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/StorageBackend.h"
 #include "rtp_llm/cpp/cache/KVCacheHashUtil.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
@@ -39,19 +40,18 @@ GlobalCacheMetricsSnapshot collectGlobalCacheMetrics(const KVCacheAllocatorPtr& 
     snapshot.request_ref_blocks   = allocator->requestRefBlocksNum();
     snapshot.connector_ref_blocks = allocator->connectorRefBlocksNum();
 
-    auto& collector = snapshot.collector;
+    auto& collector                         = snapshot.collector;
     collector.kv_cache_item_num             = shared_cache ? static_cast<int64_t>(shared_cache->size()) : 0;
     collector.kv_cache_left_seq             = static_cast<int64_t>(allocator->availableTokensNum());
     collector.kv_cache_available_blocks     = static_cast<int64_t>(snapshot.available_blocks);
     collector.kv_cache_request_ref_blocks   = static_cast<int64_t>(snapshot.request_ref_blocks);
     collector.kv_cache_connector_ref_blocks = static_cast<int64_t>(snapshot.connector_ref_blocks);
     collector.kv_cache_free_blocks          = static_cast<int64_t>(allocator->freeBlocksNum());
-    collector.kv_cache_used_ratio =
-        (snapshot.total_blocks == 0) ?
-            0.0f :
-            static_cast<float>(100.0 * (snapshot.total_blocks - snapshot.available_blocks)
-                               / static_cast<double>(snapshot.total_blocks));
-    collector.mr_cost_time_ms = allocator->getMrCostTimeMs();
+    collector.kv_cache_used_ratio           = (snapshot.total_blocks == 0) ?
+                                                  0.0f :
+                                                  static_cast<float>(100.0 * (snapshot.total_blocks - snapshot.available_blocks)
+                                                           / static_cast<double>(snapshot.total_blocks));
+    collector.mr_cost_time_ms               = allocator->getMrCostTimeMs();
 
     return snapshot;
 }
@@ -153,21 +153,21 @@ KVCacheManager::~KVCacheManager() {
         metrics_reporter_thread_.join();
     }
     allocator_.reset();
-    coordinator_.reset();
+    block_tree_cache_.reset();
 }
 
 // 初始化和配置相关
 
 bool KVCacheManager::init() {
-    RTP_LLM_CHECK_WITH_INFO(!allocator_ && !coordinator_ && !metrics_reporter_thread_.joinable(),
+    RTP_LLM_CHECK_WITH_INFO(!allocator_ && !block_tree_cache_ && !metrics_reporter_thread_.joinable(),
                             "KVCacheManager::init called more than once");
     RTP_LLM_CHECK_WITH_INFO(config_.groupNums() > 0, "cache specs must not be empty");
 
     auto shared_cache = std::make_shared<SharedBlockCache>();
     shared_cache->setPrefixTreeEnabled(kv_cache_config_.enable_gpu_prefix_tree);
     const bool enable_independent_group_eviction = kv_cache_config_.enable_memory_cache
-                                                  && kv_cache_config_.enable_prefix_tree_memory_cache
-                                                  && kv_cache_config_.enable_independent_group_eviction;
+                                                   && kv_cache_config_.enable_prefix_tree_memory_cache
+                                                   && kv_cache_config_.enable_independent_group_eviction;
 
     const bool is_hybrid = config_.groupNums() > 1;
     if (config_.use_independent_block_pools) {
@@ -201,7 +201,8 @@ bool KVCacheManager::init() {
         metrics_reporter_thread_ = std::thread(&KVCacheManager::reportMetricsLoop, this);
     }
 
-    initConnectorCoordinator();
+    // Create BlockTreeCache (unified tier management, replaces coordinator).
+    block_tree_cache_ = createBlockTreeCache(config_, kv_cache_config_, allocator_);
     return true;
 }
 
@@ -214,9 +215,8 @@ const CacheConfig& KVCacheManager::getMTPModuleCacheConfig(int mtp_module_id) co
                             "Invalid mtp_module_id: %d, must be in range [0, %zu)",
                             mtp_module_id,
                             config_.mtp_sub_configs.size());
-    RTP_LLM_CHECK_WITH_INFO(config_.mtp_sub_configs[mtp_module_id] != nullptr,
-                            "mtp_sub_configs[%d] is null",
-                            mtp_module_id);
+    RTP_LLM_CHECK_WITH_INFO(
+        config_.mtp_sub_configs[mtp_module_id] != nullptr, "mtp_sub_configs[%d] is null", mtp_module_id);
     return *config_.mtp_sub_configs[mtp_module_id];
 }
 
@@ -302,8 +302,7 @@ BlockAddrInfo KVCacheManager::convertIndexToAddr(int block_index, int layer_id, 
     return allocator_->convertIndexToAddr(layer_id, group_id, block_index);
 }
 
-std::vector<BlockInfo>
-KVCacheManager::convertIndexToBuffer(int block_index, int layer_id, int group_id) const {
+std::vector<BlockInfo> KVCacheManager::convertIndexToBuffer(int block_index, int layer_id, int group_id) const {
     return allocator_->convertIndexToBuffer(layer_id, group_id, block_index);
 }
 
@@ -343,10 +342,10 @@ CacheLayerLayout KVCacheManager::getMainModelCacheLayerLayout() const {
         layout.layers_to_scale_buffer_ptrs.resize(config_.layer_num);
     }
 
-    const auto layer_group_ids      = config_.layerGroupIdsSnapshot();
-    const auto layer_tag_to_gid     = config_.layerTagToGroupIdSnapshot();
-    layout.group_types              = config_.groupTypesSnapshot();
-    layout.group_tags               = config_.groupTagsSnapshot();
+    const auto layer_group_ids  = config_.layerGroupIdsSnapshot();
+    const auto layer_tag_to_gid = config_.layerTagToGroupIdSnapshot();
+    layout.group_types          = config_.groupTypesSnapshot();
+    layout.group_tags           = config_.groupTagsSnapshot();
     layout.layer_tag_to_group_id.resize(config_.layer_num);
     layout.group_seq_size_per_block = config_.group_seq_size_per_block;
     layout.layer_group_types.resize(config_.layer_num, CacheGroupType::FULL);
@@ -408,8 +407,8 @@ CacheLayerLayout KVCacheManager::getMTPModuleCacheLayerLayout(int mtp_module_id)
     const auto& mtp_sub_config = config_.mtp_sub_configs[mtp_module_id];
     RTP_LLM_CHECK_WITH_INFO(mtp_sub_config != nullptr, "mtp_sub_configs[%d] is null", mtp_module_id);
     const uint32_t mtp_layer_num = mtp_sub_config->layer_num;
-    const int      mtp_global_layer_base = static_cast<int>(config_.layer_num)
-                                      + mtp_module_id * static_cast<int>(mtp_layer_num);
+    const int      mtp_global_layer_base =
+        static_cast<int>(config_.layer_num) + mtp_module_id * static_cast<int>(mtp_layer_num);
     std::vector<int> global_layer_for_local(mtp_layer_num, -1);
     for (size_t local_gid = 0; local_gid < static_cast<size_t>(mtp_sub_config->groupNums()); ++local_gid) {
         for (int global_layer_id : mtp_sub_config->layerIdsForGroup(local_gid)) {
@@ -467,8 +466,8 @@ CacheLayerLayout KVCacheManager::getMTPModuleCacheLayerLayout(int mtp_module_id)
         }
 
         for (size_t local_gid = 0; local_gid < group_count; ++local_gid) {
-            const auto& tag        = mtp_sub_config->tagForGroup(local_gid);
-            const int   global_gid = config_.groupIdForTag(tag);
+            const auto& tag          = mtp_sub_config->tagForGroup(local_gid);
+            const int   global_gid   = config_.groupIdForTag(tag);
             const auto& group_layers = mtp_sub_config->layerIdsForGroup(local_gid);
             if (std::find(group_layers.begin(), group_layers.end(), global_layer_id) == group_layers.end()) {
                 continue;
@@ -552,12 +551,7 @@ KVCacheInfo KVCacheManager::getKVCacheInfo(int64_t latest_version, bool need_cac
             all_keys.insert(device_cache_keys.begin(), device_cache_keys.end());
             info.version = shared_cache->version();
         }
-        // memory cache keys
-        RTP_LLM_CHECK_WITH_INFO(coordinator_ != nullptr,
-                                "getKVCacheInfo called before KVCacheManager coordinator initialized");
-        const auto mem_cache_keys = coordinator_->memoryCacheKeys();
-        all_keys.insert(mem_cache_keys.begin(), mem_cache_keys.end());
-
+        // device cache keys only (memory/remote cache keys handled by BlockTreeCache storage backend)
         info.cached_keys.assign(all_keys.begin(), all_keys.end());
     }
 
@@ -591,7 +585,10 @@ std::shared_ptr<CacheStore> KVCacheManager::getCacheStore() const {
 }
 
 bool KVCacheManager::hasActiveConnectors() const {
-    return coordinator_ && coordinator_->hasActiveConnectors();
+    // BlockTreeCache tier checks: active when memory/disk/remote tiers are enabled.
+    return block_tree_cache_
+           && (block_tree_cache_->isMemoryCacheEnabled() || block_tree_cache_->isDiskCacheEnabled()
+               || block_tree_cache_->isRemoteCacheEnabled());
 }
 
 // PD separation: increment KV cache reference count
@@ -601,7 +598,8 @@ KVCacheManager::incrKVCacheRef(const KVCacheResource& resource, const CacheKeysT
 }
 
 bool KVCacheManager::hasP2PConnector() const {
-    return coordinator_ && coordinator_->hasP2PConnector();
+    // P2P connector not yet migrated to BlockTreeCache.
+    return false;
 }
 
 // 异步连接器操作
@@ -609,40 +607,35 @@ bool KVCacheManager::hasP2PConnector() const {
 std::shared_ptr<AsyncContext>
 KVCacheManager::asyncLoadCache(const std::shared_ptr<KVCacheConnectorReadWriteContext>& connector_context) {
     RTP_LLM_PROFILE_FUNCTION();
-    RTP_LLM_CHECK_WITH_INFO(coordinator_ != nullptr, "asyncLoadCache called before KVCacheManager initialized");
-    return coordinator_->asyncRead(connector_context);
+    // BlockTreeCache: load from storage backend if available.
+    if (block_tree_cache_ && block_tree_cache_->storageBackend()) {
+        // TODO: implement storage backend batch read integration.
+        return nullptr;
+    }
+    return nullptr;
 }
 
 std::shared_ptr<AsyncContext>
 KVCacheManager::asyncStoreCache(const std::shared_ptr<KVCacheConnectorReadWriteContext>& connector_context) {
     RTP_LLM_PROFILE_FUNCTION();
-    RTP_LLM_CHECK_WITH_INFO(coordinator_ != nullptr, "asyncStoreCache called before KVCacheManager initialized");
-    return coordinator_->asyncWrite(connector_context);
+    // BlockTreeCache: store to storage backend if available.
+    if (block_tree_cache_ && block_tree_cache_->storageBackend()) {
+        // TODO: implement storage backend batch write integration.
+        return nullptr;
+    }
+    return nullptr;
 }
 
 bool KVCacheManager::executeFunction(const FunctionRequestPB& request, FunctionResponsePB& response) {
-    RTP_LLM_CHECK_WITH_INFO(coordinator_ != nullptr, "executeFunction called before KVCacheManager initialized");
-    return coordinator_->executeFunction(request, response);
+    // Remote/P2P connectors not yet migrated to BlockTreeCache.
+    return false;
 }
 
-void KVCacheManager::initConnectorCoordinator() {
-    RTP_LLM_LOG_INFO(
-        "init connector coordinator, cache config: [%s], kv cache config: [%s], runtime config: [%s], parallelism config: [%s], sp config: [%s]",
-        config_.debugString().c_str(),
-        kv_cache_config_.to_string().c_str(),
-        runtime_config_.to_string().c_str(),
-        parallelism_config_.to_string().c_str(),
-        sp_config_.to_string().c_str());
-    coordinator_ = std::make_shared<KVCacheConnectorCoordinator>(config_,
-                                                                 kv_cache_config_,
-                                                                 runtime_config_,
-                                                                 parallelism_config_,
-                                                                 sp_config_,
-                                                                 allocator_,
-                                                                 metrics_reporter_,
-                                                                 pd_sep_config_,
-                                                                 cache_store_config_);
-    RTP_LLM_CHECK_WITH_INFO(coordinator_->init(), "connector coordinator init failed");
+void KVCacheManager::handleRead(const P2PConnectorStartLoadRequestPB& request,
+                                P2PConnectorStartLoadResponsePB&      response,
+                                std::function<bool()>                 is_cancelled) {
+    // P2P connector not yet migrated to BlockTreeCache; no-op.
+    RTP_LLM_LOG_WARNING("handleRead called but P2P connector is not yet migrated to BlockTreeCache");
 }
 
 void KVCacheManager::allocateAndSync() {
@@ -672,8 +665,8 @@ void KVCacheManager::allocateAndSync() {
 void KVCacheManager::reportMetricsLoop() {
     RTP_LLM_PROFILE_FUNCTION();
     kmonitor::MetricsTags tags;
-    constexpr auto kLogInterval  = std::chrono::minutes(1);
-    auto           last_log_time = std::chrono::steady_clock::now() - kLogInterval;
+    constexpr auto        kLogInterval  = std::chrono::minutes(1);
+    auto                  last_log_time = std::chrono::steady_clock::now() - kLogInterval;
     while (!stop_.load(std::memory_order_relaxed)) {
         if (!metrics_reporter_ || !allocator_) {
             std::this_thread::sleep_for(std::chrono::seconds(1));
@@ -698,18 +691,11 @@ void KVCacheManager::reportMetricsLoop() {
     }
 }
 
-void KVCacheManager::handleRead(const P2PConnectorStartLoadRequestPB& request,
-                                P2PConnectorStartLoadResponsePB&      response,
-                                std::function<bool()>                 is_cancelled) {
-    RTP_LLM_CHECK_WITH_INFO(coordinator_ != nullptr, "handleRead called before KVCacheManager initialized");
-    coordinator_->handleRead(request, response, is_cancelled);
-}
-
 // Write one KV block (optionally per-layer) from host/device tensors for test
 bool KVCacheManager::writeKVBlockForTest(int                  block_index,
-                                          int                  layer_id,
-                                          const torch::Tensor& k_buffer,
-                                          const torch::Tensor& v_buffer) {
+                                         int                  layer_id,
+                                         const torch::Tensor& k_buffer,
+                                         const torch::Tensor& v_buffer) {
     // Basic size/type validation to prevent out-of-bounds copy
     auto&  spec             = config_.specForGroup(0);
     size_t expected_k_bytes = spec->k_block_size_bytes();
@@ -739,11 +725,12 @@ bool KVCacheManager::writeKVBlockForTest(int                  block_index,
                         size_t               copy_bytes) -> bool {
         const size_t dst_bytes = dst_block.size_bytes;
         if (dst_bytes < dst_byte_offset + copy_bytes) {
-            RTP_LLM_LOG_ERROR("dst block bytes[%zu] < dst_offset[%zu] + copy bytes[%zu] in writeKVBlockForTest(layer=%d)",
-                              dst_bytes,
-                              dst_byte_offset,
-                              copy_bytes,
-                              layer_id);
+            RTP_LLM_LOG_ERROR(
+                "dst block bytes[%zu] < dst_offset[%zu] + copy bytes[%zu] in writeKVBlockForTest(layer=%d)",
+                dst_bytes,
+                dst_byte_offset,
+                copy_bytes,
+                layer_id);
             return false;
         }
 
@@ -771,7 +758,9 @@ bool KVCacheManager::writeKVBlockForTest(int                  block_index,
     return true;
 }
 
-bool KVCacheManager::writeKVBlockForTest(int block_index, const torch::Tensor& k_buffer, const torch::Tensor& v_buffer) {
+bool KVCacheManager::writeKVBlockForTest(int                  block_index,
+                                         const torch::Tensor& k_buffer,
+                                         const torch::Tensor& v_buffer) {
     if (block_index < 0 || block_index >= config_.block_num) {
         RTP_LLM_LOG_WARNING("Invalid block_index: %d, valid range: [0, %d)", block_index, config_.block_num);
         return false;

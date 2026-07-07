@@ -133,18 +133,6 @@ cc_library(
 )
 
 cc_test(
-    name = "block_cache_test",
-    srcs = [
-        "BlockCacheTest.cc",
-    ],
-    data = [],
-    copts = test_copts,
-    deps = block_cache_test_deps,
-    env = {},
-    exec_properties = {'gpu':'H20'},
-)
-
-cc_test(
     name = "shared_block_cache_test",
     srcs = [
         "SharedBlockCacheTest.cc",
@@ -220,8 +208,6 @@ cc_test(
     deps = test_deps + [
         ":block_pool_test_helper",
         "//rtp_llm/cpp/cache/test/mock:mock_allocator_lib",
-        "//rtp_llm/cpp/cache/connector/test/mock:connector_mock_files_lib",
-        "//rtp_llm/cpp/cache/connector/memory:memory_connector",
     ],
     env = {},
     exec_properties = {'gpu':'H20'},

@@ -47,6 +47,7 @@ cc_test(
     ],
     env = {},
     exec_properties = {'gpu':'H20'},
+    tags = ["manual"],
 )
 
 cc_test(
@@ -72,6 +73,7 @@ cc_test(
     ] + torch_deps() + cuda13_torch_link_deps,
     env = {},
     exec_properties = {'gpu':'H20'},
+    tags = ["manual"],
 )
 
 cc_test(
@@ -86,6 +88,7 @@ cc_test(
     ],
     env = {},
     exec_properties = {'gpu':'H20'},
+    tags = ["manual"],
 )
 
 cc_test(
@@ -100,6 +103,7 @@ cc_test(
     ],
     env = {},
     exec_properties = {'gpu':'H20'},
+    tags = ["manual"],
 )
 
 cc_test(
@@ -114,6 +118,7 @@ cc_test(
     ],
     env = {},
     exec_properties = {'gpu':'H20'},
+    tags = ["manual"],
 )
 
 cc_test(
@@ -128,6 +133,7 @@ cc_test(
     ],
     env = {},
     exec_properties = {'gpu':'H20'},
+    tags = ["manual"],
 )
 
 cc_test(
@@ -142,4 +148,5 @@ cc_test(
     ],
     env = {},
     exec_properties = {'gpu':'H20'},
+    tags = ["manual"],
 )

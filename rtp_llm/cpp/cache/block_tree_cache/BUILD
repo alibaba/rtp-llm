@@ -6,6 +6,7 @@ cc_library(
     srcs = [
         "BlockTree.cc",
         "BlockTreeCache.cc",
+        "BlockTreeCacheFactory.cc",
         "ComponentGroup.cc",
         "EvictionHeap.cc",
         "FullComponentGroup.cc",
@@ -18,6 +19,7 @@ cc_library(
     hdrs = [
         "BlockTree.h",
         "BlockTreeCache.h",
+        "BlockTreeCacheFactory.h",
         "ComponentGroup.h",
         "EvictionHeap.h",
         "EvictionTask.h",
@@ -38,7 +40,9 @@ cc_library(
         "//rtp_llm/cpp/cache:cache_group_type",
         "//rtp_llm/cpp/cache:batch_kv_cache_resource",
         "//rtp_llm/cpp/cache:block_pool",
+        "//rtp_llm/cpp/cache:kv_cache_allocator_hdr",
         "//rtp_llm/cpp/cache/connector:connector_base",
+        "//rtp_llm/cpp/config:config_modules",
         "//rtp_llm/cpp/model_rpc:broadcast_manager",
         "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/models_py/bindings:no_block_copy_hdr",

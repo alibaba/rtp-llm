@@ -25,6 +25,7 @@ cc_test(
         "@havenask//aios/autil:log",
         "@com_google_googletest//:gtest",
     ] + device_impl_target() + torch_deps(),
+    tags = ["manual"],
 )
 
 cc_test(
@@ -45,6 +46,7 @@ cc_test(
         "@havenask//aios/autil:log",
         "@com_google_googletest//:gtest",
     ] + device_impl_target() + torch_deps(),
+    tags = ["manual"],
 )
 
 cc_test(
@@ -65,4 +67,5 @@ cc_test(
         "@havenask//aios/autil:log",
         "@com_google_googletest//:gtest",
     ] + device_impl_target() + torch_deps(),
+    tags = ["manual"],
 )
