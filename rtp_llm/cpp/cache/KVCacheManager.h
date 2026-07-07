@@ -94,6 +94,7 @@ public:
     size_t                  totalBlocksNum() const;
     size_t                  maxAvailableTokensNum() const;
     KVCacheInfo             getKVCacheInfo(int64_t latest_version, bool need_cache_keys) const;
+    void                    refreshKVCacheInfoSnapshot();
 
     // 系统资源管理
     void regUserMr(size_t model_id, std::shared_ptr<CacheStore> cache_store = nullptr);
@@ -138,10 +139,11 @@ public:
     }
 
 private:
-    void initConnectorCoordinator();
-    void allocateAndSync();
-    void reportMetricsLoop();
-    void reportPrefillCacheHitMetrics(const MallocInfo& malloc_info, bool is_first_malloc);
+    void        initConnectorCoordinator();
+    void        allocateAndSync();
+    void        reportMetricsLoop();
+    KVCacheInfo buildKVCacheInfo(int64_t latest_version, bool need_cache_keys) const;
+    void        reportPrefillCacheHitMetrics(const MallocInfo& malloc_info, bool is_first_malloc);
 
     // 成员变量
     CacheConfig         config_;
@@ -163,6 +165,9 @@ private:
     std::thread       metrics_reporter_thread_;
 
     std::shared_ptr<KVCacheConnectorCoordinator> coordinator_;
+
+    mutable std::mutex                 cache_status_snapshot_mutex_;
+    std::shared_ptr<const KVCacheInfo> cache_status_snapshot_;
 
     mutable std::mutex          cache_store_mutex_;
     std::shared_ptr<CacheStore> cache_store_;

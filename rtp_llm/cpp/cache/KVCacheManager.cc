@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <chrono>
 #include <limits>
+#include <cstdlib>
+#include <cstring>
 #include <unordered_set>
 
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
@@ -613,6 +615,29 @@ size_t KVCacheManager::maxAvailableTokensNum() const {
 }
 
 KVCacheInfo KVCacheManager::getKVCacheInfo(int64_t latest_version, bool need_cache_keys) const {
+    if (need_cache_keys && cacheStatusSnapshotEnabled()) {
+        std::shared_ptr<const KVCacheInfo> snapshot;
+        {
+            std::lock_guard<std::mutex> lock(cache_status_snapshot_mutex_);
+            snapshot = cache_status_snapshot_;
+        }
+        if (snapshot) {
+            return *snapshot;
+        }
+    }
+    return buildKVCacheInfo(latest_version, need_cache_keys);
+}
+
+void KVCacheManager::refreshKVCacheInfoSnapshot() {
+    if (!allocator_ || !cacheStatusSnapshotEnabled()) {
+        return;
+    }
+    auto snapshot = std::make_shared<KVCacheInfo>(buildKVCacheInfo(/*latest_version=*/-1, /*need_cache_keys=*/true));
+    std::lock_guard<std::mutex> lock(cache_status_snapshot_mutex_);
+    cache_status_snapshot_ = std::move(snapshot);
+}
+
+KVCacheInfo KVCacheManager::buildKVCacheInfo(int64_t latest_version, bool need_cache_keys) const {
     KVCacheInfo info;
 
     if (!allocator_) {
@@ -627,7 +652,7 @@ KVCacheInfo KVCacheManager::getKVCacheInfo(int64_t latest_version, bool need_cac
         auto                      shared_cache = allocator_->sharedBlockCache();
         if (shared_cache) {
             device_cache_keys = shared_cache->allCacheKeys();
-            info.version = shared_cache->version();
+            info.version      = shared_cache->version();
         }
         // memory cache keys
         const auto mem_cache_keys = coordinator_->memoryCacheKeysForStatus();
