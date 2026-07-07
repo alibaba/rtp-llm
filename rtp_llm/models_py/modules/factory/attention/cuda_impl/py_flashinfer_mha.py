@@ -14,10 +14,10 @@ from rtp_llm.models_py.modules.factory.attention.cuda_impl.flashinfer_rotary_emb
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.kv_cache_write_op import (
     KVCacheWriteOp,
 )
+from rtp_llm.models_py.modules.factory.attention.cuda_impl.utils import is_sm10x
 from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashinfer_mla import (
     check_attention_inputs,
 )
-from rtp_llm.models_py.utils.arch import is_sm_100
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import FMHAImplBase
 from rtp_llm.ops import (
     AttentionConfigs,
@@ -577,14 +577,14 @@ class PyFlashinferPagedPrefillImpl(PyFlashinferPrefillImplBase):
         """Check if paged prefill implementation is supported.
 
         Returns True if:
-        1. Not running on datacenter Blackwell (sm_100). sm_120 consumer
-           Blackwell is supported by FlashInfer and has no sm_120a TRT-LLM
-           Gen cubin, so it relies on this paged FlashInfer path.
+        1. Not running on SM10x datacenter Blackwell, where TRTLLMGen is preferred.
+           SM12x consumer Blackwell keeps this FlashInfer paged fallback because
+           TRTLLMGen/XQA do not have sm_120a support in this build.
         2. The underlying paged FMHA op supports the inputs
         3. MhaRotaryEmbeddingOp supports the inputs
         """
         return (
-            not is_sm_100()
+            not is_sm10x()
             and PyFlashinferPrefillPagedAttnOp.support(attn_inputs)
             and attn_configs.rope_config.style != RopeStyle.Mrope
         )
