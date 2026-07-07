@@ -90,6 +90,8 @@ cc_library(
         "//rtp_llm/cpp/model_rpc:rpc_error_code",
         "//rtp_llm/cpp/cache/connector/p2p/transfer:basic_types",
         "//rtp_llm/cpp/engine_base/stream:complete_token_ids",
+        "//rtp_llm/cpp/utils:deferred_completion_queue_drainer",
+        "//rtp_llm/cpp/utils:grpc_address_util",
         "//rtp_llm/cpp/utils:time_util",
         "@havenask//aios/autil:thread",
     ],
@@ -109,6 +111,7 @@ cc_library(
         "P2PConnector.cc",
     ],
     hdrs = [
+        "DecodeTargetWriteLease.h",
         "P2PConnectorAsyncContext.h",
         "P2PConnectorConfig.h",
         "P2PConnectorScheduler.h",

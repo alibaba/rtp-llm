@@ -18,8 +18,9 @@ public:
               uint32_t worker_thread_count,
               uint32_t listen_port,
               bool     enable_metric,
-              uint32_t anet_rpc_thread_num = 3,
-              uint32_t anet_rpc_queue_num  = 100);
+              uint32_t anet_rpc_thread_num    = 3,
+              uint32_t anet_rpc_queue_num     = 100,
+              uint32_t worker_queue_size      = 500);
     /// @brief 注册 RPC 服务（须在 start() 之前调用）
     bool registerService(RPCService* rpc_service);
     /// @brief 启动监听并开始处理请求

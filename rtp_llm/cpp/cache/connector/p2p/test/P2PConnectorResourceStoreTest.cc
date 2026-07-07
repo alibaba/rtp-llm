@@ -75,11 +75,11 @@ TEST_F(P2PConnectorResourceStoreTest, StealResource_NotFound) {
 }
 
 TEST_F(P2PConnectorResourceStoreTest, StealResource_CanOnlyStealOnce) {
-    std::string unique_key = "test_key_2";
-    int64_t     request_id = 1002;
+    std::string unique_key  = "test_key_2";
+    int64_t     request_id  = 1002;
     int64_t     deadline_ms = getDeadlineMs();
-    auto        meta       = createMockMeta(unique_key, request_id, deadline_ms);
-    auto        resource   = createMockKVCacheResource();
+    auto        meta        = createMockMeta(unique_key, request_id, deadline_ms);
+    auto        resource    = createMockKVCacheResource();
 
     stream_store_->addResource(meta, resource);
 
@@ -341,6 +341,415 @@ TEST_F(P2PConnectorResourceStoreTest, ResourceTimeout_AutoRemoval) {
     // Resource should have been removed due to timeout
     auto entry = stream_store_->waitAndStealResource(unique_key, currentTimeMs() + 10);
     EXPECT_EQ(entry, nullptr);
+}
+
+TEST_F(P2PConnectorResourceStoreTest, SideChannelTimeout_AutoRemoval) {
+    const std::string unique_key  = "test_side_channel_timeout";
+    const int64_t     deadline_ms = currentTimeMs() + 50;
+
+    P2PConnectorResourceEntry::SideChannelData side_data;
+    side_data.has_first_token = true;
+    side_data.first_token_id  = 42;
+    stream_store_->notifySideChannelReady(unique_key, deadline_ms, side_data);
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(250));
+
+    P2PConnectorResourceEntry::SideChannelData consumed_data;
+    EXPECT_FALSE(stream_store_->consumeSideChannelData(unique_key, consumed_data));
+}
+
+TEST_F(P2PConnectorResourceStoreTest, ClearSideChannelData_RemovesIndependentEntry) {
+    const std::string unique_key  = "test_side_channel_clear";
+    const int64_t     deadline_ms = getDeadlineMs(5000);
+
+    P2PConnectorResourceEntry::SideChannelData side_data;
+    side_data.has_first_token = true;
+    side_data.first_token_id  = 7;
+    stream_store_->notifySideChannelReady(unique_key, deadline_ms, side_data);
+    stream_store_->clearSideChannelData(unique_key);
+
+    P2PConnectorResourceEntry::SideChannelData consumed_data;
+    EXPECT_FALSE(stream_store_->consumeSideChannelData(unique_key, consumed_data));
+}
+
+// Regression: 5/25 .199 prefill produced 50 "side-channel timeout" WARNs at
+// 22:08-22:14 that all traced back to a cancel burst at 21:08 — handleRead
+// cancelled the keys, but the engine still produced first-tokens shortly
+// after and called notifySideChannelReady, which wrote to side_channel_data_map_
+// with no consumer. Those entries sat for a full 1h business deadline before
+// checkTimeout reaped them. After the fix, notifySideChannelReady checks
+// cancelled_keys_ and skips the write so nothing leaks into the map.
+TEST_F(P2PConnectorResourceStoreTest, NotifySideChannelReady_SkipsWriteIfKeyAlreadyCancelled) {
+    const std::string unique_key = "test_notify_after_cancel_skips_write";
+
+    stream_store_->markCancelled(unique_key);
+
+    P2PConnectorResourceEntry::SideChannelData side_data;
+    side_data.has_first_token = true;
+    side_data.first_token_id  = 42;
+    stream_store_->notifySideChannelReady(unique_key, currentTimeMs() + 5000, side_data);
+
+    P2PConnectorResourceEntry::SideChannelData consumed;
+    EXPECT_FALSE(stream_store_->consumeSideChannelData(unique_key, consumed))
+        << "Side-channel entry should not be written when key is already cancelled, "
+        << "otherwise it leaks into side_channel_data_map_ and produces a 1h-delayed "
+        << "timeout WARN at checkTimeout() (see 5/25 .199 incident).";
+}
+
+// Counter-check: when the key was never cancelled, notifySideChannelReady
+// still writes normally (otherwise the cancellation check has overshot).
+TEST_F(P2PConnectorResourceStoreTest, NotifySideChannelReady_WritesNormallyWhenNotCancelled) {
+    const std::string unique_key = "test_notify_without_cancel_writes_normally";
+
+    P2PConnectorResourceEntry::SideChannelData side_data;
+    side_data.has_first_token = true;
+    side_data.first_token_id  = 99;
+    stream_store_->notifySideChannelReady(unique_key, currentTimeMs() + 5000, side_data);
+
+    P2PConnectorResourceEntry::SideChannelData consumed;
+    ASSERT_TRUE(stream_store_->consumeSideChannelData(unique_key, consumed));
+    EXPECT_TRUE(consumed.has_first_token);
+    EXPECT_EQ(consumed.first_token_id, 99);
+}
+
+TEST_F(P2PConnectorResourceStoreTest, StolenEntry_NotifySideChannelWithAbsoluteDeadline_PreservesData) {
+    const std::string unique_key  = "test_side_channel_after_steal";
+    const int64_t     request_id  = 1010;
+    const int64_t     deadline_ms = currentTimeMs() + 1000;
+    auto              meta        = createMockMeta(unique_key, request_id, deadline_ms);
+    auto              resource    = createMockKVCacheResource();
+
+    ASSERT_TRUE(stream_store_->addResource(meta, resource));
+    auto entry = stream_store_->waitAndStealResource(unique_key, currentTimeMs() + 100);
+    ASSERT_NE(entry, nullptr);
+
+    P2PConnectorResourceEntry::SideChannelData side_data;
+    side_data.has_first_token = true;
+    side_data.first_token_id  = 88;
+    stream_store_->notifySideChannelReady(unique_key, deadline_ms, side_data);
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(250));
+
+    P2PConnectorResourceEntry::SideChannelData consumed_data;
+    ASSERT_TRUE(stream_store_->consumeSideChannelData(unique_key, consumed_data));
+    EXPECT_TRUE(consumed_data.has_first_token);
+    EXPECT_EQ(consumed_data.first_token_id, 88);
+}
+
+// ==================== markCancelled 测试 ====================
+
+// markCancelled when resource is already in store → removes it immediately so blocks are freed
+TEST_F(P2PConnectorResourceStoreTest, MarkCancelled_ResourceAlreadyInStore_RemovesImmediately) {
+    const std::string unique_key  = "test_cancel_existing";
+    const int64_t     request_id  = 3001;
+    const int64_t     deadline_ms = getDeadlineMs(5000);
+    auto              meta        = createMockMeta(unique_key, request_id, deadline_ms);
+    auto              resource    = createMockKVCacheResource();
+
+    ASSERT_TRUE(stream_store_->addResource(meta, resource));
+
+    // Cancel while resource is sitting in store
+    stream_store_->markCancelled(unique_key);
+
+    // Resource should be gone — steal fails immediately
+    auto entry = stream_store_->waitAndStealResource(unique_key, currentTimeMs() + 50);
+    EXPECT_EQ(entry, nullptr);
+}
+
+// markCancelled before resource arrives → addResource rejects the resource on arrival
+TEST_F(P2PConnectorResourceStoreTest, MarkCancelled_ResourceNotYetInStore_RejectsSubsequentAdd) {
+    const std::string unique_key  = "test_cancel_before_add";
+    const int64_t     request_id  = 3002;
+    const int64_t     deadline_ms = getDeadlineMs(5000);
+    auto              meta        = createMockMeta(unique_key, request_id, deadline_ms);
+    auto              resource    = createMockKVCacheResource();
+
+    // Cancel before prefill adds the resource
+    stream_store_->markCancelled(unique_key);
+
+    // Resource arrives later (prefill finished inference after decode already timed out)
+    bool added = stream_store_->addResource(meta, resource);
+    EXPECT_FALSE(added);
+
+    // Resource should not be stealable
+    auto entry = stream_store_->waitAndStealResource(unique_key, currentTimeMs() + 50);
+    EXPECT_EQ(entry, nullptr);
+}
+
+// markCancelled is idempotent and does not block subsequent keys with different names
+TEST_F(P2PConnectorResourceStoreTest, MarkCancelled_DoesNotAffectOtherKeys) {
+    const std::string key_cancelled = "test_cancel_only_this";
+    const std::string key_normal    = "test_cancel_other_key";
+    const int64_t     request_id    = 3003;
+    const int64_t     deadline_ms   = getDeadlineMs(5000);
+    auto              meta          = createMockMeta(key_normal, request_id, deadline_ms);
+    auto              resource      = createMockKVCacheResource();
+
+    stream_store_->markCancelled(key_cancelled);
+
+    // A different key should still work normally
+    ASSERT_TRUE(stream_store_->addResource(meta, resource));
+    auto entry = stream_store_->waitAndStealResource(key_normal, currentTimeMs() + 200);
+    ASSERT_NE(entry, nullptr);
+    EXPECT_EQ(entry->request_id, request_id);
+}
+
+// After markCancelled rejects addResource(), the cancel record is consumed and the key can be reused
+TEST_F(P2PConnectorResourceStoreTest, MarkCancelled_CancelRecordConsumedAfterRejection) {
+    const std::string unique_key  = "test_cancel_record_consumed";
+    const int64_t     request_id  = 3004;
+    const int64_t     deadline_ms = getDeadlineMs(5000);
+    auto              meta        = createMockMeta(unique_key, request_id, deadline_ms);
+    auto              resource    = createMockKVCacheResource();
+
+    stream_store_->markCancelled(unique_key);
+
+    // First add is rejected (consumes the cancel record)
+    EXPECT_FALSE(stream_store_->addResource(meta, resource));
+
+    // Second add for the same key (e.g. a new request with the same key) succeeds
+    ASSERT_TRUE(stream_store_->addResource(meta, resource));
+    auto entry = stream_store_->waitAndStealResource(unique_key, currentTimeMs() + 200);
+    ASSERT_NE(entry, nullptr);
+}
+
+// ==================== Hold-ms Deadline Tests ====================
+// These tests verify the current contract: stream-store entries are capped by
+// prefill_resource_hold_ms so prefill does not pin KV blocks for the full
+// business deadline when decode never starts loading them.
+
+class P2PConnectorResourceStoreHoldMsTest: public ::testing::Test {
+protected:
+    void SetUp() override {
+        // hold_ms=100, cancelled_keys_ttl=2000, check_interval=50
+        stream_store_ = std::make_unique<P2PConnectorResourceStore>(nullptr,
+                                                                    /*timeout_check_interval_ms=*/50,
+                                                                    /*prefill_resource_hold_ms=*/100,
+                                                                    /*cancelled_keys_ttl_ms=*/2000);
+        ASSERT_TRUE(stream_store_->init());
+    }
+
+    void TearDown() override {
+        stream_store_.reset();
+    }
+
+    int64_t getDeadlineMs(int64_t offset_ms = 60000) {
+        return currentTimeMs() + offset_ms;
+    }
+
+    std::shared_ptr<MockMeta> createMockMeta(const std::string& unique_key, int64_t request_id, int64_t deadline_ms) {
+        auto meta = std::make_shared<MockMeta>();
+        meta->setUniqueKey(unique_key);
+        meta->setRequestId(request_id);
+        meta->setDeadlineMs(deadline_ms);
+        meta->setPrefillAddr("127.0.0.1", 12345);
+        meta->setPrefillTpSize(1);
+        return meta;
+    }
+
+    KVCacheResourcePtr createMockKVCacheResource() {
+        return std::make_shared<KVCacheResource>();
+    }
+
+protected:
+    std::unique_ptr<P2PConnectorResourceStore> stream_store_;
+};
+
+// Verify that addResource caps deadline to currentTimeMs() + hold_ms.
+TEST_F(P2PConnectorResourceStoreHoldMsTest, AddResource_CapsDeadlineToPrefillHoldMs) {
+    const std::string unique_key  = "hold_ms_cap_test";
+    const int64_t     request_id  = 4001;
+    const int64_t     deadline_ms = getDeadlineMs(7200000);  // 2 hours from now — exceeds hold_ms cap
+    auto              meta        = createMockMeta(unique_key, request_id, deadline_ms);
+    auto              resource    = createMockKVCacheResource();
+    const int64_t     add_start_ms = currentTimeMs();
+
+    ASSERT_TRUE(stream_store_->addResource(meta, resource));
+
+    auto entry = stream_store_->waitAndStealResource(unique_key, currentTimeMs() + 200);
+    ASSERT_NE(entry, nullptr);
+    // Should be capped to roughly hold_ms from add time, not the full 2h deadline.
+    EXPECT_LT(entry->deadline_ms, deadline_ms);
+    EXPECT_NEAR(entry->deadline_ms, add_start_ms + 100, 100);
+}
+
+// Resource expires after its deadline and becomes a cancelled_keys_ tombstone
+TEST_F(P2PConnectorResourceStoreHoldMsTest, ResourceExpiresAfterHoldMs_BecomesTombstone) {
+    const std::string unique_key  = "hold_ms_expire_test";
+    const int64_t     request_id  = 4002;
+    const int64_t     deadline_ms = currentTimeMs() + 100;  // short deadline
+    auto              meta        = createMockMeta(unique_key, request_id, deadline_ms);
+    auto              resource    = createMockKVCacheResource();
+
+    ASSERT_TRUE(stream_store_->addResource(meta, resource));
+
+    // Wait for deadline (100ms) + check interval (50ms) + margin
+    std::this_thread::sleep_for(std::chrono::milliseconds(250));
+
+    // Resource should be gone from store
+    auto entry = stream_store_->waitAndStealResource(unique_key, currentTimeMs() + 50);
+    EXPECT_EQ(entry, nullptr);
+
+    // Key should be marked as cancelled (tombstone)
+    EXPECT_TRUE(stream_store_->isMarkedCancelled(unique_key));
+}
+
+// Late-arriving decode gets immediate nullptr because resource already expired
+TEST_F(P2PConnectorResourceStoreHoldMsTest, LateDecodeGetsImmediateRejection) {
+    const std::string unique_key  = "hold_ms_late_decode";
+    const int64_t     request_id  = 4003;
+    const int64_t     deadline_ms = currentTimeMs() + 100;  // short deadline
+    auto              meta        = createMockMeta(unique_key, request_id, deadline_ms);
+    auto              resource    = createMockKVCacheResource();
+
+    ASSERT_TRUE(stream_store_->addResource(meta, resource));
+
+    // Wait for resource to expire
+    std::this_thread::sleep_for(std::chrono::milliseconds(250));
+
+    // Late decode tries to wait — should return nullptr almost immediately
+    // because cancelled_keys_ wakes it
+    const auto start   = currentTimeMs();
+    auto       entry   = stream_store_->waitAndStealResource(unique_key, currentTimeMs() + 5000);
+    const auto elapsed = currentTimeMs() - start;
+
+    EXPECT_EQ(entry, nullptr);
+    EXPECT_LT(elapsed, 100);  // Should return quickly, not wait 5s
+}
+
+// Tombstone is cleaned up after cancelled_keys_ttl_ms
+TEST_F(P2PConnectorResourceStoreHoldMsTest, TombstoneCleanedUpAfterTTL) {
+    const std::string unique_key  = "hold_ms_ttl_cleanup";
+    const int64_t     request_id  = 4004;
+
+    // Use a store with very short TTL for this test
+    auto short_ttl_store = std::make_unique<P2PConnectorResourceStore>(
+        nullptr, /*timeout_check_interval_ms=*/50, /*prefill_resource_hold_ms=*/50, /*cancelled_keys_ttl_ms=*/200);
+    ASSERT_TRUE(short_ttl_store->init());
+
+    const int64_t deadline_ms = currentTimeMs() + 50;  // short deadline matching store's check interval
+    auto short_meta = std::make_shared<MockMeta>();
+    short_meta->setUniqueKey(unique_key);
+    short_meta->setRequestId(request_id);
+    short_meta->setDeadlineMs(deadline_ms);
+    short_meta->setPrefillAddr("127.0.0.1", 12345);
+    short_meta->setPrefillTpSize(1);
+
+    auto resource = createMockKVCacheResource();
+    ASSERT_TRUE(short_ttl_store->addResource(short_meta, resource));
+
+    // Wait for deadline expiry → tombstone created
+    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+    EXPECT_TRUE(short_ttl_store->isMarkedCancelled(unique_key));
+
+    // Wait for TTL expiry → tombstone cleaned
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    EXPECT_FALSE(short_ttl_store->isMarkedCancelled(unique_key));
+}
+
+// Resource that is stolen before hold_ms expires does NOT create a tombstone
+TEST_F(P2PConnectorResourceStoreHoldMsTest, StolenBeforeExpiry_NoTombstone) {
+    const std::string unique_key  = "hold_ms_stolen_early";
+    const int64_t     request_id  = 4005;
+    const int64_t     deadline_ms = getDeadlineMs(3600000);
+    auto              meta        = createMockMeta(unique_key, request_id, deadline_ms);
+    auto              resource    = createMockKVCacheResource();
+
+    ASSERT_TRUE(stream_store_->addResource(meta, resource));
+
+    // Steal immediately (before hold_ms expires)
+    auto entry = stream_store_->waitAndStealResource(unique_key, currentTimeMs() + 200);
+    ASSERT_NE(entry, nullptr);
+
+    // Wait past hold_ms
+    std::this_thread::sleep_for(std::chrono::milliseconds(250));
+
+    // No tombstone should exist — resource was consumed normally
+    EXPECT_FALSE(stream_store_->isMarkedCancelled(unique_key));
+}
+
+// ==================== notifySideChannelReady cancelled-key tests ====================
+
+TEST_F(P2PConnectorResourceStoreTest, NotifySideChannelReady_SkipsWhenKeyCancelled) {
+    const std::string unique_key = "test_notify_skip_cancelled";
+
+    // Mark key as cancelled before notifying side channel
+    stream_store_->markCancelled(unique_key);
+
+    P2PConnectorResourceEntry::SideChannelData side_data;
+    side_data.has_first_token = true;
+    side_data.first_token_id  = 99;
+    stream_store_->notifySideChannelReady(unique_key, getDeadlineMs(5000), side_data);
+
+    // Side-channel data should NOT have been written
+    P2PConnectorResourceEntry::SideChannelData consumed_data;
+    EXPECT_FALSE(stream_store_->consumeSideChannelData(unique_key, consumed_data));
+}
+
+TEST_F(P2PConnectorResourceStoreTest, NotifySideChannelReady_WritesWhenKeyNotCancelled) {
+    const std::string unique_key  = "test_notify_writes_normal";
+    const int64_t     deadline_ms = getDeadlineMs(5000);
+
+    P2PConnectorResourceEntry::SideChannelData side_data;
+    side_data.has_first_token = true;
+    side_data.first_token_id  = 77;
+    stream_store_->notifySideChannelReady(unique_key, deadline_ms, side_data);
+
+    // Side-channel data should be consumable
+    P2PConnectorResourceEntry::SideChannelData consumed_data;
+    ASSERT_TRUE(stream_store_->consumeSideChannelData(unique_key, consumed_data));
+    EXPECT_TRUE(consumed_data.has_first_token);
+    EXPECT_EQ(consumed_data.first_token_id, 77);
+}
+
+TEST_F(P2PConnectorResourceStoreTest, NotifySideChannelReady_UsesCappedDeadlineFromResourceEntry) {
+    const std::string unique_key  = "test_notify_capped_deadline";
+    const int64_t     request_id  = 5001;
+    const int64_t     deadline_ms = getDeadlineMs(3600000);  // 1h business deadline
+    auto              meta        = createMockMeta(unique_key, request_id, deadline_ms);
+    auto              resource    = createMockKVCacheResource();
+
+    ASSERT_TRUE(stream_store_->addResource(meta, resource));
+
+    // Notify with the 1h business deadline — should be overridden by the
+    // resource entry's capped deadline (default hold_ms = 60s)
+    P2PConnectorResourceEntry::SideChannelData side_data;
+    side_data.has_first_token = true;
+    side_data.first_token_id  = 55;
+    stream_store_->notifySideChannelReady(unique_key, deadline_ms, side_data);
+
+    P2PConnectorResourceEntry::SideChannelData consumed_data;
+    ASSERT_TRUE(stream_store_->consumeSideChannelData(unique_key, consumed_data));
+    EXPECT_EQ(consumed_data.first_token_id, 55);
+}
+
+// ==================== checkTimeout side-channel cleanup tests ====================
+
+// Verify that checkTimeout cleans up side-channel data when resource expires
+TEST_F(P2PConnectorResourceStoreHoldMsTest, ResourceExpiry_AlsoCleansSideChannelData) {
+    const std::string unique_key  = "hold_ms_side_channel_cleanup";
+    const int64_t     request_id  = 6001;
+    const int64_t     deadline_ms = currentTimeMs() + 100;  // short deadline
+    auto              meta        = createMockMeta(unique_key, request_id, deadline_ms);
+    auto              resource    = createMockKVCacheResource();
+
+    ASSERT_TRUE(stream_store_->addResource(meta, resource));
+
+    // Notify side channel (before resource expires)
+    P2PConnectorResourceEntry::SideChannelData side_data;
+    side_data.has_first_token = true;
+    side_data.first_token_id  = 66;
+    stream_store_->notifySideChannelReady(unique_key, deadline_ms, side_data);
+
+    // Wait for deadline (100ms) + check interval (50ms) + margin
+    std::this_thread::sleep_for(std::chrono::milliseconds(250));
+
+    // Resource should be expired
+    EXPECT_TRUE(stream_store_->isMarkedCancelled(unique_key));
+
+    // Side-channel data should also be cleaned up
+    P2PConnectorResourceEntry::SideChannelData consumed_data;
+    EXPECT_FALSE(stream_store_->consumeSideChannelData(unique_key, consumed_data));
 }
 
 }  // namespace rtp_llm

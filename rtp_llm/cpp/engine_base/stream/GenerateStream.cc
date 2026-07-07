@@ -507,7 +507,19 @@ void GenerateStream::reportEventWithoutLock(StreamEvents::EventType event,
 
 void GenerateStream::reportError(ErrorCode error_code, const std::string& error_msg) {
     std::lock_guard<std::mutex> lock(*mutex_);
+    reportErrorWithoutLock(error_code, error_msg);
+}
+
+void GenerateStream::reportErrorWithoutLock(ErrorCode error_code, const std::string& error_msg) {
     generate_status_->reportEvent(StreamEvents::Error, error_code, error_msg);
+    // Wake any consumer parked on a derived-class wait primitive (e.g. NormalGenerateStream's
+    // generate_outputs_queue_.waitNotEmpty()), so the error is observed immediately rather
+    // than after the cv timeout. Lock order: *mutex_ -> queue._cond is preserved here.
+    onErrorReported();
+    // Wake waiters parked on cv_ (e.g. waitForRemoteGenerate). Without this, an error
+    // reported before any state transition leaves the waiter blocked until the next
+    // moveToNext() call (which may not happen if the stream never enters the scheduler).
+    cv_->notify_all();
 }
 
 bool GenerateStream::hasEvent(StreamEvents::EventType event) const {
@@ -653,9 +665,19 @@ void GenerateStream::matchEosToken(int batch_id) {
 
 bool GenerateStream::waitForRemoteGenerate() {
     std::unique_lock<std::mutex> lock(*mutex_);
-    // Wait until stream status -> NeedRemoteGenerate
-    cv_->wait(lock, [this] { return generate_status_->hasEvent(StreamEvents::NeedRemoteGenerate); });
-    // If stream status is abnormal, log the error info
+    // Predicate must wake on three terminal conditions, not only NeedRemoteGenerate:
+    //   1. NeedRemoteGenerate fired (normal flow — first-token produced, ready for handoff)
+    //   2. Stream errored (e.g. enqueue rejected by checkInputLength, mid-wait cancel)
+    //   3. State machine reached FINISHED (terminal state, no more progress possible)
+    // Without (2)/(3), a stream that gets reportError'd before producing the first token
+    // (e.g. checkInputLength rejection silently dropped + Error event set + moveToNext
+    // → FINISHED, but NeedRemoteGenerate never set) blocks here until the gRPC client
+    // deadline (up to 1h). Mirrors the same fix already applied to nextOutput()'s waiter.
+    cv_->wait(lock, [this] {
+        return generate_status_->hasEvent(StreamEvents::NeedRemoteGenerate)
+               || generate_status_->error_info.hasError()
+               || generate_status_->getStatus() == StreamState::FINISHED;
+    });
     if (hasError()) {
         RTP_LLM_LOG_WARNING("waitForRemoteGenerate exits due to stream [%ld] error: %s",
                             streamId(),
@@ -725,8 +747,7 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
                                      hasNumBeams(),
                                      streamId(),
                                      error_token_id)) {
-        reportEventWithoutLock(StreamEvents::Error,
-                               ErrorCode::OUT_OF_VOCAB_RANGE,
+        reportErrorWithoutLock(ErrorCode::OUT_OF_VOCAB_RANGE,
                                "output token id:" + std::to_string(error_token_id)
                                    + " out of vocab size: " + std::to_string(vocab_size_));
         return;
@@ -737,6 +758,7 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
     int* spec_tokens       = sp_output_buffer_->tokens.data_ptr<int>();
     spec_tokens[0]         = target_last_token;
     spec_tokens[1]         = update_info.draft_token;
+    contain_propose_token_ = true;
     propose_token_         = {target_last_token, update_info.draft_token};
 
     sp_output_buffer_->hidden_states = update_info.draft_hidden_states;
@@ -789,6 +811,11 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
 void GenerateStream::update(const StreamUpdateInfo& update_info) {
     RTP_LLM_PROFILE_FUNCTION();
     std::lock_guard<std::mutex> lock(*mutex_);
+    updateWithoutLock(update_info);
+}
+
+void GenerateStream::updateWithoutLock(const StreamUpdateInfo& update_info) {
+    RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_LOG_DEBUG("stream [%ld] update", streamId());
     *is_context_stream_ = false;
     if (hasError() && !update_info.force_update_info) {
@@ -808,8 +835,7 @@ void GenerateStream::update(const StreamUpdateInfo& update_info) {
                                      hasNumBeams(),
                                      streamId(),
                                      error_token_id)) {
-        reportEventWithoutLock(StreamEvents::Error,
-                               ErrorCode::OUT_OF_VOCAB_RANGE,
+        reportErrorWithoutLock(ErrorCode::OUT_OF_VOCAB_RANGE,
                                "output token id:" + std::to_string(error_token_id)
                                    + " out of vocab size: " + std::to_string(vocab_size_));
         return;
@@ -832,7 +858,7 @@ void GenerateStream::update(const StreamUpdateInfo& update_info) {
         // kv cache blocks must be updated if REUSE_CACHE is on, even the stream is done
         auto update_res = updateKvCacheBlocks(update_info.src_batch_indices);
         if (!update_res) {
-            reportEventWithoutLock(StreamEvents::Error, ErrorCode::MALLOC_FAILED, "update kv cache blocks failed");
+            reportErrorWithoutLock(ErrorCode::MALLOC_FAILED, "update kv cache blocks failed");
             return;
         }
     }

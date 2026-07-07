@@ -31,6 +31,13 @@ public:
     ErrorResult<GenerateOutputs> nextOutput() override;
     void                         updateOutput(const StreamUpdateInfo& update_info) override;
 
+protected:
+    // Wake nextOutput()'s waitNotEmpty so the consumer observes the error
+    // without waiting up to SynchronizedQueue::DEF_WAIT_TIME (1s).
+    void onErrorReported() override {
+        generate_outputs_queue_.wakeup();
+    }
+
 private:
     GenerateOutputs prepareGenerateOutput(const StreamUpdateInfo& update_info);
     void            enqueueGenerateOutput(GenerateOutputs&& generate_results);

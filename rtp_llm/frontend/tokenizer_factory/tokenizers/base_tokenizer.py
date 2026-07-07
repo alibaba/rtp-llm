@@ -28,6 +28,15 @@ class BaseTokenizer:
         tokenizer_config = self._load_tokenizer_config(tokenizer_path)
         extra_kwargs = self._transformers_v5_kwargs(tokenizer_config, tokenizer_obj)
         extra_kwargs.update(self._additional_kwargs(tokenizer_config))
+        if (
+            tokenizer_config.get("tokenizer_class") == "TokenizersBackend"
+            and tokenizer_obj is not None
+        ):
+            self.tokenizer = self._load_tokenizers_backend_tokenizer(
+                tokenizer_path, tokenizer_config, tokenizer_obj
+            )
+            self._fix_post_processor(tokenizer_obj, extra_kwargs)
+            return
         try:
             self.tokenizer = AutoTokenizer.from_pretrained(
                 tokenizer_path,
@@ -47,6 +56,44 @@ class BaseTokenizer:
     def _additional_kwargs(self, tokenizer_config: Dict[str, Any]) -> Dict[str, Any]:
         """Hook for subclasses to inject extra kwargs before from_pretrained."""
         return {}
+
+    @staticmethod
+    def _load_tokenizers_backend_tokenizer(
+        tokenizer_path: str, tokenizer_config: Dict[str, Any], tokenizer_obj
+    ):
+        """Load tokenizer.json directly when tokenizer_config names TokenizersBackend.
+
+        Transformers 5.x can emit tokenizer_config.json with
+        tokenizer_class="TokenizersBackend", but AutoTokenizer cannot import that
+        pseudo class. tokenizer.json already contains the backend tokenizer, so
+        wrapping it as PreTrainedTokenizerFast preserves the intended behavior.
+        """
+        from transformers import PreTrainedTokenizerFast
+
+        kwargs: Dict[str, Any] = {}
+        for key in (
+            "bos_token",
+            "eos_token",
+            "unk_token",
+            "pad_token",
+            "sep_token",
+            "cls_token",
+            "mask_token",
+            "additional_special_tokens",
+            "model_max_length",
+        ):
+            if key in tokenizer_config:
+                kwargs[key] = tokenizer_config[key]
+
+        chat_template = tokenizer_config.get("chat_template")
+        chat_template_path = os.path.join(tokenizer_path, "chat_template.jinja")
+        if chat_template is None and os.path.exists(chat_template_path):
+            with open(chat_template_path) as f:
+                chat_template = f.read()
+        if chat_template is not None:
+            kwargs["chat_template"] = chat_template
+
+        return PreTrainedTokenizerFast(tokenizer_object=tokenizer_obj, **kwargs)
 
     @staticmethod
     def _load_tokenizer_config(tokenizer_path: str) -> Dict[str, Any]:

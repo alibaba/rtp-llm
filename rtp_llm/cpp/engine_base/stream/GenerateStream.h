@@ -15,6 +15,7 @@
 #include "rtp_llm/cpp/models/position_ids/PositionIdsGenerator.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
 #include <iterator>
+#include <limits>
 #include <mutex>
 #include <optional>
 
@@ -36,6 +37,7 @@ struct StreamUpdateInfo {
     const torch::Tensor all_hidden_states;
     bool                update_remote_generate = true;
     bool                force_update_info      = false;
+    bool                skip_finish_check      = false;
 };
 
 struct StreamSpecUpdateInfo {
@@ -124,6 +126,7 @@ public:
 
     virtual void updateOutput(const StreamUpdateInfo& update_info) = 0;
     void         update(const StreamUpdateInfo& update_info);
+    void         updateWithoutLock(const StreamUpdateInfo& update_info);
     void         specUpdate(const StreamSpecUpdateInfo& update_info);
     bool         updateKvCacheBlocks(const torch::Tensor& src_batch_indices);
 
@@ -239,8 +242,9 @@ public:
                                 ErrorCode               error_code = ErrorCode::NONE_ERROR,
                                 const std::string&      error_msg  = "");
 
-    void         reportError(ErrorCode error_code = ErrorCode::NONE_ERROR, const std::string& error_msg = "");
-    bool         hasEvent(StreamEvents::EventType event) const;
+    void reportError(ErrorCode error_code = ErrorCode::NONE_ERROR, const std::string& error_msg = "");
+    void reportErrorWithoutLock(ErrorCode error_code = ErrorCode::NONE_ERROR, const std::string& error_msg = "");
+    bool hasEvent(StreamEvents::EventType event) const;
     virtual bool hasError() const;
     ErrorInfo    statusInfo();
     std::string  stopReason();
@@ -507,8 +511,14 @@ public:
     }
 
     int64_t deadlineMs() const {
-        auto deadline_ms = generate_input_->generate_config->timeout_ms + begin_time_us_ / 1000;
-        return deadline_ms;
+        // generate_config->timeout_ms defaults to -1 ("no business deadline").
+        // In that case we return INT64_MAX so callers can treat it as
+        // "deadline never reached" without special-casing the negative value.
+        const int timeout_ms = generate_input_->generate_config->timeout_ms;
+        if (timeout_ms <= 0) {
+            return std::numeric_limits<int64_t>::max();
+        }
+        return static_cast<int64_t>(timeout_ms) + begin_time_us_ / 1000;
     }
 
     std::pair<std::string, uint32_t> prefillAddr() const;
@@ -541,6 +551,12 @@ protected:
 
     void reportStreamMetrics();
     void reportCacheReuseMetrics() const;
+
+    // Hook fired right after the stream is flipped into Error via reportError*.
+    // Default no-op; derived streams override to wake whatever wait primitive
+    // their consumer (e.g. nextOutput) is parked on, so the consumer doesn't
+    // sleep until the cv timeout to observe the error.
+    virtual void onErrorReported() {}
 
 protected:
     uint64_t                              stream_magic_ = STREAM_MAGIC;

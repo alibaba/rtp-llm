@@ -4,6 +4,7 @@
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.grpc.pb.h"
 #include <atomic>
+#include <mutex>
 
 namespace rtp_llm {
 
@@ -26,11 +27,13 @@ public:
     void setStartLoadApplicationError(ErrorCodePB code, const std::string& message = "");
     void setRpcResponseStatus(const ::grpc::Status& status);
     void setFirstGenerateTokenId(int64_t token_id);
+    void setUseLegacyStartLoadResponse(bool use_legacy);
     void setGenerateStreamCallSuccess(bool success);
 
     // 调用计数相关方法
     int  getBroadcastTpCallCount() const;
     int  getBroadcastTpCancelCallCount() const;
+    P2PConnectorBroadcastTpRequestPB getLastBroadcastTpRequest() const;
     int  getStartLoadCallCount() const;
     int  getGenerateStreamCallCount() const;
     void resetCallCounts();
@@ -39,6 +42,7 @@ private:
     int              sleep_millis_{0};
     bool             p2p_response_success_{true};
     bool             start_load_response_success_{true};
+    bool             use_legacy_start_load_response_{false};
     ErrorCodePB      start_load_app_error_pb_{ErrorCodePB::NONE_ERROR};
     std::string      start_load_app_error_message_;
     bool             generate_stream_call_success_{true};
@@ -46,6 +50,8 @@ private:
     ::grpc::Status   rpc_response_status_{::grpc::Status::OK};
     std::atomic<int> broadcast_tp_call_count_{0};
     std::atomic<int> broadcast_tp_cancel_call_count_{0};
+    mutable std::mutex              last_broadcast_tp_request_mutex_;
+    P2PConnectorBroadcastTpRequestPB last_broadcast_tp_request_;
     std::atomic<int> start_load_call_count_{0};
     std::atomic<int> generate_stream_call_count_{0};
 };
