@@ -208,41 +208,6 @@ int dsv4CpAttentionMegaSplitKAutoMinKeys(int compress_ratio) {
     return static_cast<int>(std::min<long>(value, std::numeric_limits<int>::max()));
 }
 
-int dsv4CpAttentionMegaReturnAfterStageCode() {
-    const char* raw = std::getenv("DSV4_CP_ATTENTION_MEGA_RETURN_AFTER_STAGE");
-    if (raw == nullptr || raw[0] == '\0') {
-        return 0;
-    }
-    if (std::strcmp(raw, "after_release") == 0) {
-        return 1;
-    }
-    if (std::strcmp(raw, "after_csa_score_prebuild") == 0) {
-        return 2;
-    }
-    if (std::strcmp(raw, "after_compressed_prebuild") == 0) {
-        return 3;
-    }
-    if (std::strcmp(raw, "after_swa_writer") == 0) {
-        return 4;
-    }
-    if (std::strcmp(raw, "after_csa_indexer_compressor") == 0) {
-        return 5;
-    }
-    if (std::strcmp(raw, "after_main_compressor") == 0) {
-        return 6;
-    }
-    if (std::strcmp(raw, "after_fresh_stage") == 0) {
-        return 7;
-    }
-    if (std::strcmp(raw, "after_indexer_stage") == 0) {
-        return 8;
-    }
-    if (std::strcmp(raw, "before_side_effects") == 0) {
-        return 9;
-    }
-    return 0;
-}
-
 __host__ __device__ __forceinline__ int64_t alignUpInt64(int64_t value, int64_t alignment) {
     return ((value + alignment - 1) / alignment) * alignment;
 }
@@ -4956,78 +4921,6 @@ __device__ __forceinline__ void dsv4MegaResidentGridCpBarrier(uint8_t* grid_sync
     }
 }
 
-template<typename scalar_t>
-__device__ __forceinline__ void dsv4MegaZeroOutputAndDone(scalar_t* __restrict__ output,
-                                                          int R,
-                                                          int H,
-                                                          int D,
-                                                          uint8_t* local_scratch_base,
-                                                          uint32_t* const* __restrict__ symm_signal_pads,
-                                                          int cp_rank,
-                                                          int cp_size,
-                                                          int rank_side_effect_barriers,
-                                                          unsigned long long launch_epoch) {
-    const int64_t total = static_cast<int64_t>(R) * H * D;
-    const int64_t stride = static_cast<int64_t>(gridDim.x) * blockDim.x;
-    for (int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x; idx < total; idx += stride) {
-        output[idx] = from_float_device<scalar_t>(0.0f);
-    }
-    if (rank_side_effect_barriers) {
-        dsv4MegaResidentGridCpBarrier(local_scratch_base,
-                                      19,
-                                      symm_signal_pads,
-                                      cp_rank,
-                                      cp_size,
-                                      kMegaKernelDoneChannel,
-                                      launch_epoch);
-    }
-}
-
-template<typename scalar_t>
-__device__ __forceinline__ bool dsv4MegaMaybeReturnAfterSideEffectStage(int stage_code,
-                                                                        int target_stage,
-                                                                        scalar_t* __restrict__ output,
-                                                                        int R,
-                                                                        int H,
-                                                                        int D,
-                                                                        uint8_t* local_scratch_base,
-                                                                        uint32_t* const* __restrict__ symm_signal_pads,
-                                                                        int cp_rank,
-                                                                        int cp_size,
-                                                                        int grid_parallel_side_effects,
-                                                                        int rank_side_effect_barriers,
-                                                                        unsigned long long launch_epoch,
-                                                                        int grid_barrier_id) {
-    if (stage_code != target_stage) {
-        return false;
-    }
-    if (grid_parallel_side_effects) {
-        dsv4MegaGridBarrier(local_scratch_base, grid_barrier_id, launch_epoch);
-    } else {
-        __syncthreads();
-    }
-    if (rank_side_effect_barriers) {
-        dsv4MegaResidentGridCpBarrier(local_scratch_base,
-                                      21,
-                                      symm_signal_pads,
-                                      cp_rank,
-                                      cp_size,
-                                      kMegaSideEffectReleaseChannel,
-                                      launch_epoch);
-    }
-    dsv4MegaZeroOutputAndDone(output,
-                              R,
-                              H,
-                              D,
-                              local_scratch_base,
-                              symm_signal_pads,
-                              cp_rank,
-                              cp_size,
-                              rank_side_effect_barriers,
-                              launch_epoch);
-    return true;
-}
-
 __device__ __forceinline__ unsigned long long*
 dsv4MegaLocalPhasePtr(const uint8_t* const* __restrict__ symm_buffer_ptrs,
                       int64_t per_rank_buffer_bytes,
@@ -6784,8 +6677,7 @@ __global__ __launch_bounds__(kMegaBlockThreads, 1) void dsv4CpDistributedPrefill
                                                         int enable_grid_side_effects,
                                                         int enable_split_k_attention,
                                                         int splitk_keys_per_block,
-                                                        int csa_score_prebuild_stride,
-                                                        int mega_return_after_stage) {
+                                                        int csa_score_prebuild_stride) {
 		    const int tid = threadIdx.x;
             if (static_cast<int>(blockDim.x) != kMegaBlockThreads) {
                 if (tid == 0) {
@@ -6822,20 +6714,6 @@ __global__ __launch_bounds__(kMegaBlockThreads, 1) void dsv4CpDistributedPrefill
         alignUpInt64(main_compressor_scratch_payload_offset + main_compressor_writer.kv_bytes
                          + main_compressor_writer.score_bytes,
                      kMegaPayloadAlignBytes);
-    if (mega_return_after_stage == 9) {
-        dsv4MegaZeroOutputAndDone(output,
-                                  R,
-                                  H,
-                                  D,
-                                  local_scratch_base,
-                                  symm_signal_pads,
-                                  cp_rank,
-                                  cp_size,
-                                  rank_side_effect_barriers,
-                                  launch_epoch);
-        return;
-    }
-
     if (grid_parallel_side_effects || blockIdx.x == 0) {
         dsv4MegaWriteSwaCachePhase(swa_writer,
                                    symm_buffer_ptrs,
@@ -6849,22 +6727,6 @@ __global__ __launch_bounds__(kMegaBlockThreads, 1) void dsv4CpDistributedPrefill
                                    local_scratch_base,
                                    launch_epoch,
                                    0);
-        if (dsv4MegaMaybeReturnAfterSideEffectStage(mega_return_after_stage,
-                                                    4,
-                                                    output,
-                                                    R,
-                                                    H,
-                                                    D,
-                                                    local_scratch_base,
-                                                    symm_signal_pads,
-                                                    cp_rank,
-                                                    cp_size,
-                                                    grid_parallel_side_effects,
-                                                    rank_side_effect_barriers,
-                                                    launch_epoch,
-                                                    23)) {
-            return;
-        }
         dsv4MegaRunCompressorBf16Phase(csa_indexer_compressor_writer,
                                        symm_buffer_ptrs,
                                        symm_per_rank_buffer_bytes,
@@ -6877,22 +6739,6 @@ __global__ __launch_bounds__(kMegaBlockThreads, 1) void dsv4CpDistributedPrefill
                                        local_scratch_base,
                                        launch_epoch,
                                        2);
-        if (dsv4MegaMaybeReturnAfterSideEffectStage(mega_return_after_stage,
-                                                    5,
-                                                    output,
-                                                    R,
-                                                    H,
-                                                    D,
-                                                    local_scratch_base,
-                                                    symm_signal_pads,
-                                                    cp_rank,
-                                                    cp_size,
-                                                    grid_parallel_side_effects,
-                                                    rank_side_effect_barriers,
-                                                    launch_epoch,
-                                                    23)) {
-            return;
-        }
         dsv4MegaRunCompressorBf16Phase(main_compressor_writer,
                                        symm_buffer_ptrs,
                                        symm_per_rank_buffer_bytes,
@@ -6905,22 +6751,6 @@ __global__ __launch_bounds__(kMegaBlockThreads, 1) void dsv4CpDistributedPrefill
                                        local_scratch_base,
                                        launch_epoch,
                                        7);
-        if (dsv4MegaMaybeReturnAfterSideEffectStage(mega_return_after_stage,
-                                                    6,
-                                                    output,
-                                                    R,
-                                                    H,
-                                                    D,
-                                                    local_scratch_base,
-                                                    symm_signal_pads,
-                                                    cp_rank,
-                                                    cp_size,
-                                                    grid_parallel_side_effects,
-                                                    rank_side_effect_barriers,
-                                                    launch_epoch,
-                                                    23)) {
-            return;
-        }
         if (use_symm_direct_fresh) {
             const int64_t payload_bytes = static_cast<int64_t>(symm_l_local) * KH * D * sizeof(scalar_t);
             if (grid_parallel_side_effects) {
@@ -6948,22 +6778,6 @@ __global__ __launch_bounds__(kMegaBlockThreads, 1) void dsv4CpDistributedPrefill
                                    symm_signal_pads,
                                    0);
             }
-        }
-        if (dsv4MegaMaybeReturnAfterSideEffectStage(mega_return_after_stage,
-                                                    7,
-                                                    output,
-                                                    R,
-                                                    H,
-                                                    D,
-                                                    local_scratch_base,
-                                                    symm_signal_pads,
-                                                    cp_rank,
-                                                    cp_size,
-                                                    grid_parallel_side_effects,
-                                                    rank_side_effect_barriers,
-                                                    launch_epoch,
-                                                    23)) {
-            return;
         }
         if (use_symm_direct_indexer) {
             const int64_t indexer_payload_bytes =
@@ -6994,22 +6808,6 @@ __global__ __launch_bounds__(kMegaBlockThreads, 1) void dsv4CpDistributedPrefill
                                    1);
             }
         }
-        if (dsv4MegaMaybeReturnAfterSideEffectStage(mega_return_after_stage,
-                                                    8,
-                                                    output,
-                                                    R,
-                                                    H,
-                                                    D,
-                                                    local_scratch_base,
-                                                    symm_signal_pads,
-                                                    cp_rank,
-                                                    cp_size,
-                                                    grid_parallel_side_effects,
-                                                    rank_side_effect_barriers,
-                                                    launch_epoch,
-                                                    23)) {
-            return;
-        }
         if (grid_parallel_side_effects) {
             dsv4MegaGridBarrier(local_scratch_base, 16, launch_epoch);
         }
@@ -7027,19 +6825,6 @@ __global__ __launch_bounds__(kMegaBlockThreads, 1) void dsv4CpDistributedPrefill
                                       launch_epoch);
     }
     dsv4MegaWaitLocalPhase(symm_buffer_ptrs, symm_per_rank_buffer_bytes, cp_rank, launch_epoch);
-    if (mega_return_after_stage == 1) {
-        dsv4MegaZeroOutputAndDone(output,
-                                  R,
-                                  H,
-                                  D,
-                                  local_scratch_base,
-                                  symm_signal_pads,
-                                  cp_rank,
-                                  cp_size,
-                                  rank_side_effect_barriers,
-                                  launch_epoch);
-        return;
-    }
 
     __shared__ int   compressed_indices[kMaxCompressedTopK];
     __shared__ int   reduce_indices[kMegaBlockThreads];
@@ -7135,19 +6920,6 @@ __global__ __launch_bounds__(kMegaBlockThreads, 1) void dsv4CpDistributedPrefill
                                                      indexer_metadata_storage,
                                                      reduce_result);
         dsv4MegaGridBarrier(local_scratch_base, kMegaCsaScorePrebuildBarrier, launch_epoch);
-    }
-    if (mega_return_after_stage == 2) {
-        dsv4MegaZeroOutputAndDone(output,
-                                  R,
-                                  H,
-                                  D,
-                                  local_scratch_base,
-                                  symm_signal_pads,
-                                  cp_rank,
-                                  cp_size,
-                                  rank_side_effect_barriers,
-                                  launch_epoch);
-        return;
     }
     if (prebuild_compressed_indices) {
         for (int prebuild_row = static_cast<int>(blockIdx.x); prebuild_row < R; prebuild_row += static_cast<int>(gridDim.x)) {
@@ -7261,19 +7033,6 @@ __global__ __launch_bounds__(kMegaBlockThreads, 1) void dsv4CpDistributedPrefill
             }
         }
         dsv4MegaGridBarrier(local_scratch_base, kMegaCompressedIndexPrebuildBarrier, launch_epoch);
-    }
-    if (mega_return_after_stage == 3) {
-        dsv4MegaZeroOutputAndDone(output,
-                                  R,
-                                  H,
-                                  D,
-                                  local_scratch_base,
-                                  symm_signal_pads,
-                                  cp_rank,
-                                  cp_size,
-                                  rank_side_effect_barriers,
-                                  launch_epoch);
-        return;
     }
     const int grouped_heads_per_task =
         (!effective_enable_split_k_attention && use_grouped_attention && (H % (2 * kMegaAttentionHeadsPerCta)) == 0) ?
@@ -9426,7 +9185,6 @@ torch::Tensor launchDsv4CpDistributedPrefillAttention(const torch::Tensor& q,
         enable_csa_score_prebuild ? static_cast<int>(csa_score_prebuild_stride_host) : 0;
     const int64_t csa_score_prebuild_payload_offset =
         enable_csa_score_prebuild ? csa_score_prebuild_offset : 0;
-    const int mega_return_after_stage = dsv4CpAttentionMegaReturnAfterStageCode();
     const bool serialize_mega_side_effects_without_grid_barrier =
         needs_mega_side_effects && !use_symm_backend;
     const int64_t mega_grid_limit =
@@ -9574,8 +9332,7 @@ torch::Tensor launchDsv4CpDistributedPrefillAttention(const torch::Tensor& q,
                 enable_grid_side_effects,                                                                              \
                 enable_split_k_attention,                                                                              \
                 splitk_keys_per_block,                                                                                 \
-                csa_score_prebuild_stride,                                                                             \
-                mega_return_after_stage);
+                csa_score_prebuild_stride);
             if (host_use_grouped_attention) {
                 DSV4_LAUNCH_MEGA_FLOAT(true);
             } else {
@@ -9768,8 +9525,7 @@ torch::Tensor launchDsv4CpDistributedPrefillAttention(const torch::Tensor& q,
                 enable_grid_side_effects,                                                                             \
                 enable_split_k_attention,                                                                             \
                 splitk_keys_per_block,                                                                                \
-                csa_score_prebuild_stride,                                                                            \
-                mega_return_after_stage);
+                csa_score_prebuild_stride);
             if (host_use_grouped_attention) {
                 if (!enable_split_k_attention && compress_ratio == 128) {
                     DSV4_LAUNCH_MEGA_BF16(true, 128, false);
