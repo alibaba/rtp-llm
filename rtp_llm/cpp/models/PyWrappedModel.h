@@ -152,8 +152,17 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
 
     if (params.kv_cache_layer_layout.has_value()) {
         torch_ext::KVCache kv_cache;
-        kv_cache.seq_size_per_block        = params.description.attention_conf.tokens_per_block;
-        kv_cache.kernel_seq_size_per_block = params.description.attention_conf.kernel_tokens_per_block;
+        // Source physical cache geometry from CacheConfig-derived init params,
+        // not the model-static attention config.
+        RTP_LLM_CHECK_WITH_INFO(params.tokens_per_block > 0 && params.kernel_tokens_per_block > 0
+                                    && params.tokens_per_block % params.kernel_tokens_per_block == 0,
+                                "GptModelInitParams must carry valid tokens_per_block / kernel_tokens_per_block "
+                                "from CacheConfig before constructing PyWrappedModel KVCache; got tokens_per_block=%zu "
+                                "kernel_tokens_per_block=%zu",
+                                params.tokens_per_block,
+                                params.kernel_tokens_per_block);
+        kv_cache.seq_size_per_block        = params.tokens_per_block;
+        kv_cache.kernel_seq_size_per_block = params.kernel_tokens_per_block;
         const auto& layout                 = params.kv_cache_layer_layout.value();
         kv_cache.kv_cache_base_by_layer.reserve(layout.layers_to_kv_buffer_ptrs.size());
         kv_cache.num_kv_heads  = params.description.attention_conf.kv_head_num;
@@ -169,8 +178,17 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
             kv_cache.kv_scale_base_by_layer.push_back(t);
         }
 
-        kv_cache.layer_attn_types = layout.layer_attn_types;
-        init_resources.kv_cache   = kv_cache;
+        kv_cache.layer_attn_types   = layout.layer_attn_types;
+        kv_cache.layer_to_group_ids = layout.layer_to_group_ids;
+        kv_cache.group_types        = layout.group_types;
+        kv_cache.group_tags         = layout.group_tags;
+        for (auto sz : layout.group_seq_size_per_block) {
+            kv_cache.group_seq_size_per_block.push_back(static_cast<int>(sz));
+        }
+        kv_cache.layer_tag_to_group_id        = layout.layer_tag_to_group_id;
+        kv_cache.kv_cache_base_by_layer_group = layout.layers_to_kv_buffer_ptrs_by_group;
+        kv_cache.kv_scale_base_by_layer_group = layout.layers_to_scale_buffer_ptrs_by_group;
+        init_resources.kv_cache     = kv_cache;
     }
 
     py::object py_init_result;

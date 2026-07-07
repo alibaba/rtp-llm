@@ -577,21 +577,25 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
     const int peer_cnt = static_cast<int>(load_context.peer_addrs.size());
     RTP_LLM_CHECK_WITH_INFO(peer_cnt > 0, "peer_addrs is empty");
 
-    const bool   use_mla       = cache_config.use_mla;
-    const bool   use_hybrid    = cache_config.groupNums() > 1;
-    const auto&  spec          = cache_config.cache_specs[0];
-    const size_t k_total_bytes = spec->k_block_size_bytes();
-    const size_t v_total_bytes = spec->v_block_size_bytes();
+    const bool use_mla    = cache_config.use_mla;
+    const bool use_hybrid = cache_config.groupNums() > 1;
 
     if (!use_mla && peer_cnt > 1) {
-        RTP_LLM_CHECK_WITH_INFO(k_total_bytes % static_cast<size_t>(peer_cnt) == 0,
-                                "k_block bytes[%zu] not divisible by peer_cnt[%d]",
-                                k_total_bytes,
-                                peer_cnt);
-        RTP_LLM_CHECK_WITH_INFO(v_total_bytes % static_cast<size_t>(peer_cnt) == 0,
-                                "v_block bytes[%zu] not divisible by peer_cnt[%d]",
-                                v_total_bytes,
-                                peer_cnt);
+        for (size_t layer_id = 0; layer_id < layer_num; layer_id++) {
+            const size_t gid =
+                use_hybrid ? static_cast<size_t>(cache_config.groupIdFor(static_cast<int>(layer_id))) : 0;
+            const auto&  spec          = cache_config.specForGroup(gid);
+            const size_t k_total_bytes = spec->k_block_size_bytes();
+            const size_t v_total_bytes = spec->v_block_size_bytes();
+            RTP_LLM_CHECK_WITH_INFO(k_total_bytes % static_cast<size_t>(peer_cnt) == 0,
+                                    "k_block bytes[%zu] not divisible by peer_cnt[%d]",
+                                    k_total_bytes,
+                                    peer_cnt);
+            RTP_LLM_CHECK_WITH_INFO(v_total_bytes % static_cast<size_t>(peer_cnt) == 0,
+                                    "v_block bytes[%zu] not divisible by peer_cnt[%d]",
+                                    v_total_bytes,
+                                    peer_cnt);
+        }
     }
 
     auto cancel_check_func  = [&load_context]() -> bool { return load_context.server_context->IsCancelled(); };
@@ -606,13 +610,7 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
             auto request_key = std::to_string(load_context.request_id) + "-" + std::to_string(layer_id);
             auto load_layer_cache =
                 std::make_shared<RequestBlockBuffer>(std::to_string(load_context.request_id), request_key);
-            size_t gid = 0;
-            if (use_hybrid && layer_id < cache_config.layer_to_group_id.size()) {
-                const int mapped_gid = cache_config.layer_to_group_id[layer_id];
-                if (mapped_gid >= 0) {
-                    gid = static_cast<size_t>(mapped_gid);
-                }
-            }
+            size_t gid = use_hybrid ? static_cast<size_t>(cache_config.groupIdFor(static_cast<int>(layer_id))) : 0;
             RTP_LLM_CHECK_WITH_INFO(gid < load_context.block_ids_by_group.size(),
                                     "group id out of range: gid=%zu group_num=%zu",
                                     gid,
@@ -626,13 +624,7 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
             std::vector<size_t> block_pos_list;
             block_pos_list.reserve(block_num);
             if (use_hybrid && block_num > 0) {
-                CacheGroupType group_type = CacheGroupType::FULL;
-                if (layer_id < cache_config.layer_to_group_id.size() && !cache_config.group_types.empty()) {
-                    const int gid = cache_config.layer_to_group_id[layer_id];
-                    if (gid >= 0 && static_cast<size_t>(gid) < cache_config.group_types.size()) {
-                        group_type = cache_config.group_types[static_cast<size_t>(gid)];
-                    }
-                }
+                CacheGroupType group_type = cache_config.typeForGroup(gid);
                 if (group_type == CacheGroupType::LINEAR) {
                     block_pos_list.push_back(block_num - 1);
 
@@ -707,22 +699,14 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                                             "mtp layer_num mismatch: engine=" + std::to_string(layer_num)
                                                 + " cache_cfg=" + std::to_string(mtp_cache_cfg.layer_num)
                                                 + " (mtp_model_id=" + std::to_string(mtp_model_id) + ")");
-                    RTP_LLM_CHECK_WITH_INFO(
-                        !mtp_cache_cfg.global_layer_ids.empty(),
-                        "mtp_cache_cfg.global_layer_ids is empty (mtp_model_id=" + std::to_string(mtp_model_id) + ")");
-
                     for (size_t layer_id = 0; layer_id < layer_num; layer_id++) {
                         auto request_key = std::to_string(load_context.request_id) + "-" + std::to_string(layer_id);
                         auto load_layer_cache =
                             std::make_shared<RequestBlockBuffer>(std::to_string(load_context.request_id), request_key);
-                        size_t     gid            = 0;
                         const bool mtp_use_hybrid = mtp_cache_cfg.groupNums() > 1;
-                        if (mtp_use_hybrid && layer_id < mtp_cache_cfg.layer_to_group_id.size()) {
-                            const int mapped_gid = mtp_cache_cfg.layer_to_group_id[layer_id];
-                            if (mapped_gid >= 0) {
-                                gid = static_cast<size_t>(mapped_gid);
-                            }
-                        }
+                        size_t     gid            = mtp_use_hybrid
+                                                      ? static_cast<size_t>(mtp_cache_cfg.groupIdFor(static_cast<int>(layer_id)))
+                                                      : 0;
                         RTP_LLM_CHECK_WITH_INFO(gid < load_context.block_ids_by_group.size(),
                                                 "mtp group id out of range: gid=%zu group_num=%zu",
                                                 gid,
@@ -733,21 +717,15 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                         auto        block_num = block_ids.size();
                         size_t      model_id  = mtp_base_model_id;
 
-                        // Use per-module global_layer_ids for address lookup.
-                        const int global_layer_id = mtp_cache_cfg.global_layer_ids[0][layer_id];
+                        const int global_layer_id = static_cast<int>(maga_init_params_.model_config_.num_layers)
+                                                    + static_cast<int>(mtp_model_id) * static_cast<int>(layer_num)
+                                                    + static_cast<int>(layer_id);
 
                         // Hybrid cache: Linear group only needs the last block; Full group needs all blocks.
                         std::vector<size_t> block_pos_list;
                         block_pos_list.reserve(block_num);
                         if (mtp_use_hybrid && block_num > 0) {
-                            CacheGroupType group_type = CacheGroupType::FULL;
-                            if (layer_id < mtp_cache_cfg.layer_to_group_id.size()
-                                && !mtp_cache_cfg.group_types.empty()) {
-                                const int gid = mtp_cache_cfg.layer_to_group_id[layer_id];
-                                if (gid >= 0 && static_cast<size_t>(gid) < mtp_cache_cfg.group_types.size()) {
-                                    group_type = mtp_cache_cfg.group_types[static_cast<size_t>(gid)];
-                                }
-                            }
+                            CacheGroupType group_type = mtp_cache_cfg.typeForGroup(gid);
                             if (group_type == CacheGroupType::LINEAR) {
                                 block_pos_list.push_back(block_num - 1);
 

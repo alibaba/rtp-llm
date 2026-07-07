@@ -66,6 +66,17 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
 
     sampler_.reset(new Sampler(SamplerInitParams{}));
 
+    const auto tokens_per_block = cache_manager ? cache_manager->cacheConfig().seq_size_per_block :
+                                                params.model_config_.attn_config.tokens_per_block;
+    const auto kernel_tokens_per_block = [&]() {
+        if (cache_manager) {
+            const auto kernel_seq_size_per_block = cache_manager->cacheConfig().kernel_seq_size_per_block;
+            return kernel_seq_size_per_block > 0 ? kernel_seq_size_per_block : tokens_per_block;
+        }
+        const auto kernel_tokens_per_block = params.model_config_.attn_config.kernel_tokens_per_block;
+        return kernel_tokens_per_block > 0 ? kernel_tokens_per_block : tokens_per_block;
+    }();
+
     GptModelInitParams model_init_params(
         {params.gpt_weights,
          genModelDescription(params.model_config_, params.parallelism_config, params.eplb_config, params.moe_config),
@@ -84,8 +95,8 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
          mla_ops_type,
          params.model_config_.max_seq_len,
          params.model_config_.hidden_size,
-         params.model_config_.attn_config.tokens_per_block,
-         params.model_config_.attn_config.kernel_tokens_per_block,
+         tokens_per_block,
+         kernel_tokens_per_block,
          kv_cache_group_num,
          kv_cache_layer_to_group,
          cache_manager});

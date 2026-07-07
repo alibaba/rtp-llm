@@ -10,7 +10,11 @@ from rtp_llm.models.qwen3_next.qwen3_next_weight import (
     Qwen35DenseWeight,
     Qwen35MoeWeight,
 )
-from rtp_llm.ops import HybridAttentionType
+from rtp_llm.ops import (
+    KVCacheSpecType,
+    HybridAttentionType,
+    KVCacheSpecDesc,
+)
 
 
 class Qwen3NextBase(BaseModel):
@@ -135,6 +139,30 @@ class Qwen3NextBase(BaseModel):
         config.linear_attention_config.linear_value_head_dim = config_json[
             "linear_value_head_dim"
         ]
+
+    @classmethod
+    def _post_build_model_config(cls, model_config: ModelConfig) -> None:
+        full_desc = KVCacheSpecDesc()
+        full_desc.tag = "full"
+        full_desc.cache_type = KVCacheSpecType.MHA
+
+        linear_descs: dict[int, KVCacheSpecDesc] = {}
+        linear_phase = 0
+        layer_descs = []
+        for attn_type in model_config.hybrid_attention_config.hybrid_attention_types:
+            if attn_type == HybridAttentionType.LINEAR:
+                desc = linear_descs.get(linear_phase)
+                if desc is None:
+                    desc = KVCacheSpecDesc()
+                    desc.tag = f"linear{linear_phase}"
+                    desc.cache_type = KVCacheSpecType.LINEAR
+                    linear_descs[linear_phase] = desc
+                layer_descs.append([desc])
+                linear_phase += 1
+            else:
+                layer_descs.append([full_desc])
+                linear_phase = 0
+        model_config.kv_cache_spec_descs = layer_descs
 
 
 class Qwen3Next(Qwen3NextBase):

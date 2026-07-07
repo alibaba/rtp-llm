@@ -21,33 +21,33 @@ void CudaGraphRunner::capturePrefill() {
         // Prefill-specific settings, one the first seq is valid, the post ones are all empty
         if (isEmbeddingStylePrefillCudaGraph()) {
             // embedding model, without kv cache
-            inputs.attention_inputs.prefix_lengths.fill_(0);
+            inputs.attentionInputs().prefix_lengths.fill_(0);
             // Must set cu_seqlens/cu_kv_seqlens/input_lengths to match actual seq_len,
             // otherwise FlashInfer plans for max_seq_len tokens but q/k/v only have seq_len tokens
-            inputs.attention_inputs.cu_seqlens[0] = 0;
-            inputs.attention_inputs.cu_seqlens[1] = seq_len;
-            inputs.attention_inputs.cu_seqlens_device.copy_(inputs.attention_inputs.cu_seqlens, false);
-            inputs.attention_inputs.input_lengths[0] = seq_len;
+            inputs.attentionInputs().cu_seqlens[0] = 0;
+            inputs.attentionInputs().cu_seqlens[1] = seq_len;
+            inputs.attentionInputs().cu_seqlens_device.copy_(inputs.attentionInputs().cu_seqlens, false);
+            inputs.attentionInputs().input_lengths[0] = seq_len;
         } else {
             // Draft model prefill: distribute seq_len tokens across batches (max num_tokens_per_bs_ each).
-            // All max_bs_ batches get prefix to ensure buffer allocation covers worst-case replay.
+            // All max_bs_ batches get the largest legal prefix to ensure buffer allocation covers worst-case replay.
             int active_bs  = (seq_len + num_tokens_per_bs_ - 1) / num_tokens_per_bs_;
-            int prefix_len = max_seq_len_;
+            int prefix_len = max_seq_len_ > num_tokens_per_bs_ ? max_seq_len_ - num_tokens_per_bs_ : 0;
 
-            // All batches get prefix_len to maximize buffer allocation during capture.
+            // Active batches must satisfy prefix_len + input_len <= max_seq_len_.
             // Active batches get real input tokens, inactive batches get 0 input tokens.
-            inputs.attention_inputs.input_lengths.fill_(0);
-            inputs.attention_inputs.prefix_lengths.fill_(prefix_len);
-            auto& input_lengths = inputs.attention_inputs.input_lengths;
+            inputs.attentionInputs().input_lengths.fill_(0);
+            inputs.attentionInputs().prefix_lengths.fill_(prefix_len);
+            auto& input_lengths = inputs.attentionInputs().input_lengths;
             for (int b = 0; b < active_bs; b++) {
                 int tokens       = (b < active_bs - 1) ? num_tokens_per_bs_ : (seq_len - b * num_tokens_per_bs_);
                 input_lengths[b] = tokens;
             }
 
             // Build cu_seqlens and cu_kv_seqlens as cumulative sums
-            auto cu_seqlens_host    = inputs.attention_inputs.cu_seqlens;
-            auto cu_kv_seqlens_host = inputs.attention_inputs.cu_kv_seqlens_device.cpu();
-            auto prefix_lengths     = inputs.attention_inputs.prefix_lengths;
+            auto cu_seqlens_host    = inputs.attentionInputs().cu_seqlens;
+            auto cu_kv_seqlens_host = inputs.attentionInputs().cu_kv_seqlens_device.cpu();
+            auto prefix_lengths     = inputs.attentionInputs().prefix_lengths;
 
             cu_seqlens_host[0]    = 0;
             cu_kv_seqlens_host[0] = 0;
@@ -57,13 +57,17 @@ void CudaGraphRunner::capturePrefill() {
                     cu_kv_seqlens_host[b].item<int>() + input_lengths[b].item<int>() + prefix_lengths[b].item<int>();
             }
 
-            inputs.attention_inputs.cu_seqlens_device.copy_(cu_seqlens_host);
-            inputs.attention_inputs.cu_kv_seqlens_device.copy_(cu_kv_seqlens_host);
+            inputs.attentionInputs().cu_seqlens_device.copy_(cu_seqlens_host);
+            inputs.attentionInputs().cu_kv_seqlens_device.copy_(cu_kv_seqlens_host);
         }
 
-        inputs.attention_inputs.context_total_kv_length = seq_len;
-        inputs.attention_inputs.prefill_cuda_graph_copy_params =
-            capture_mem_hold_.py_model_inputs_.attention_inputs.prefill_cuda_graph_copy_params;
+        inputs.attentionInputs().context_total_kv_length = seq_len;
+        inputs.attentionInputs().prefill_cuda_graph_copy_params =
+            capture_mem_hold_.py_model_inputs_.attentionInputs().prefill_cuda_graph_copy_params;
+        inputs.attn_inputs_list = torch_ext::makePyAttentionInputsByGroup(
+            inputs.attentionInputs(),
+            torch_ext::collectPyAttentionInputsGroupBlockTables(inputs.attn_inputs_list),
+            torch_ext::collectPyAttentionInputsGroupHostBlockTables(inputs.attn_inputs_list));
         if (inputs.bert_embedding_inputs.position_encoding.numel() > 0) {
             inputs.bert_embedding_inputs.combo_position_ids =
                 inputs.bert_embedding_inputs.combo_position_ids.slice(0, 0, seq_len);
@@ -73,8 +77,13 @@ void CudaGraphRunner::capturePrefill() {
         graph_instances_[seq_len].mem_hold_ = createCaptureMemoryHold(inputs, max_bs_ * num_tokens_per_bs_);
         graph_instances_[seq_len].mem_hold_.attn_pyobj_ =
             py_attn_pyobj_method_(graph_instances_[seq_len].mem_hold_.py_model_inputs_, true);
-        graph_instances_[seq_len].mem_hold_.decoder_layer_hidden_states_ =
-            graph_instances_[seq_len].mem_hold_.decoder_layer_hidden_states_.slice(0, 0, seq_len);
+        // Draft prefill graph mode routes through forward_decode whose output is
+        // always [max_bs_ * num_tokens_per_bs_, dim]. Only embedding-style
+        // prefill has a per-seq_len output shape.
+        if (isEmbeddingStylePrefillCudaGraph()) {
+            graph_instances_[seq_len].mem_hold_.decoder_layer_hidden_states_ =
+                graph_instances_[seq_len].mem_hold_.decoder_layer_hidden_states_.slice(0, 0, seq_len);
+        }
         capturePrefillOneSeqLen(seq_len);
         cuda_graph::finish_capture_session();
         replayAndSyncCheck(seq_len, "seq len");

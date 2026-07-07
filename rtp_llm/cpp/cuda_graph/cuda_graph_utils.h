@@ -26,44 +26,43 @@ public:
 
     CaptureMemoryHold(at::Tensor hidden_states, torch_ext::PyModelInputs& inputs, bool is_embedding):
         decoder_layer_hidden_states_(hidden_states) {
-        py_model_inputs_.attention_inputs.input_lengths    = inputs.attention_inputs.input_lengths;
-        py_model_inputs_.attention_inputs.input_lengths_device   = inputs.attention_inputs.input_lengths_device;
-        py_model_inputs_.attention_inputs.sequence_lengths       = inputs.attention_inputs.sequence_lengths;
-        py_model_inputs_.attention_inputs.kv_cache_kernel_block_id_device =
-            inputs.attention_inputs.kv_cache_kernel_block_id_device;
-        py_model_inputs_.attention_inputs.kv_cache_kernel_block_id =
-            inputs.attention_inputs.kv_cache_kernel_block_id;
-        py_model_inputs_.attention_inputs.kv_cache_block_id_device = inputs.attention_inputs.kv_cache_block_id_device;
-        py_model_inputs_.attention_inputs.kv_cache_block_id   = inputs.attention_inputs.kv_cache_block_id;
-        py_model_inputs_.attention_inputs.kv_cache_kernel_block_id_device_by_group =
-            inputs.attention_inputs.kv_cache_kernel_block_id_device_by_group;
-        py_model_inputs_.attention_inputs.kv_cache_kernel_block_id_by_group =
-            inputs.attention_inputs.kv_cache_kernel_block_id_by_group;
-        py_model_inputs_.attention_inputs.kv_cache_layer_to_group = inputs.attention_inputs.kv_cache_layer_to_group;
-        py_model_inputs_.attention_inputs.prefix_lengths          = inputs.attention_inputs.prefix_lengths;
-        py_model_inputs_.attention_inputs.prefix_lengths_device   = inputs.attention_inputs.prefix_lengths_device;
-        py_model_inputs_.attention_inputs.combo_position_ids      = inputs.attention_inputs.combo_position_ids;
+        py_model_inputs_.attentionInputs().input_lengths    = inputs.attentionInputs().input_lengths;
+        py_model_inputs_.attentionInputs().input_lengths_device   = inputs.attentionInputs().input_lengths_device;
+        py_model_inputs_.attentionInputs().sequence_lengths       = inputs.attentionInputs().sequence_lengths;
+        py_model_inputs_.attentionInputs().kv_cache_kernel_block_id_device =
+            inputs.attentionInputs().kv_cache_kernel_block_id_device;
+        py_model_inputs_.attentionInputs().kv_cache_kernel_block_id =
+            inputs.attentionInputs().kv_cache_kernel_block_id;
+        py_model_inputs_.attentionInputs().kv_cache_block_id_device = inputs.attentionInputs().kv_cache_block_id_device;
+        py_model_inputs_.attentionInputs().kv_cache_block_id   = inputs.attentionInputs().kv_cache_block_id;
+        py_model_inputs_.attentionInputs().kv_cache_layer_to_group = inputs.attentionInputs().kv_cache_layer_to_group;
+        py_model_inputs_.attentionInputs().prefix_lengths          = inputs.attentionInputs().prefix_lengths;
+        py_model_inputs_.attentionInputs().prefix_lengths_device   = inputs.attentionInputs().prefix_lengths_device;
+        py_model_inputs_.attentionInputs().combo_position_ids      = inputs.attentionInputs().combo_position_ids;
         py_model_inputs_.input_ids                                = inputs.input_ids;
         py_model_inputs_.combo_position_ids                       = inputs.combo_position_ids;
 
         // for spec
         py_model_inputs_.input_hiddens                            = inputs.input_hiddens;
-        py_model_inputs_.attention_inputs.cu_seqlens_device       = inputs.attention_inputs.cu_seqlens_device;
-        py_model_inputs_.attention_inputs.cu_seqlens         = inputs.attention_inputs.cu_seqlens;
-        py_model_inputs_.attention_inputs.cu_kv_seqlens_device    = inputs.attention_inputs.cu_kv_seqlens_device;
-        py_model_inputs_.attention_inputs.padding_offset          = inputs.attention_inputs.padding_offset;
-        py_model_inputs_.attention_inputs.is_prefill              = inputs.attention_inputs.is_prefill;
-        py_model_inputs_.attention_inputs.is_target_verify        = inputs.attention_inputs.is_target_verify;
-        py_model_inputs_.attention_inputs.dtype                   = inputs.attention_inputs.dtype;
-        py_model_inputs_.attention_inputs.context_total_kv_length = inputs.attention_inputs.context_total_kv_length;
+        py_model_inputs_.attentionInputs().cu_seqlens_device       = inputs.attentionInputs().cu_seqlens_device;
+        py_model_inputs_.attentionInputs().cu_seqlens         = inputs.attentionInputs().cu_seqlens;
+        py_model_inputs_.attentionInputs().cu_kv_seqlens_device    = inputs.attentionInputs().cu_kv_seqlens_device;
+        py_model_inputs_.attentionInputs().padding_offset          = inputs.attentionInputs().padding_offset;
+        py_model_inputs_.attentionInputs().is_prefill              = inputs.attentionInputs().is_prefill;
+        py_model_inputs_.attentionInputs().is_target_verify        = inputs.attentionInputs().is_target_verify;
+        py_model_inputs_.attentionInputs().dtype                   = inputs.attentionInputs().dtype;
+        py_model_inputs_.attentionInputs().context_total_kv_length = inputs.attentionInputs().context_total_kv_length;
 
-        py_model_inputs_.attention_inputs.prefill_cuda_graph_copy_params =
-            inputs.attention_inputs.prefill_cuda_graph_copy_params;
+        py_model_inputs_.attentionInputs().prefill_cuda_graph_copy_params =
+            inputs.attentionInputs().prefill_cuda_graph_copy_params;
         py_model_inputs_.bert_embedding_inputs                      = inputs.bert_embedding_inputs;
-        py_model_inputs_.attention_inputs.is_s_padded               = inputs.attention_inputs.is_s_padded;
-        py_model_inputs_.attention_inputs.decode_cu_seqlens_device  = inputs.attention_inputs.decode_cu_seqlens_device;
-        py_model_inputs_.attention_inputs.decode_cu_seqlens    = inputs.attention_inputs.decode_cu_seqlens;
-        py_model_inputs_.attention_inputs.sequence_lengths_plus_1_device = inputs.attention_inputs.sequence_lengths_plus_1_device;
+        py_model_inputs_.attentionInputs().is_s_padded               = inputs.attentionInputs().is_s_padded;
+        py_model_inputs_.attentionInputs().decode_cu_seqlens_device  = inputs.attentionInputs().decode_cu_seqlens_device;
+        py_model_inputs_.attentionInputs().decode_cu_seqlens    = inputs.attentionInputs().decode_cu_seqlens;
+        py_model_inputs_.attentionInputs().sequence_lengths_plus_1_device = inputs.attentionInputs().sequence_lengths_plus_1_device;
+        py_model_inputs_.attn_inputs_list = inputs.attn_inputs_list.empty() ?
+            torch_ext::makePyAttentionInputsByGroup(py_model_inputs_.attentionInputs()) :
+            inputs.attn_inputs_list;
     }
 
 public:

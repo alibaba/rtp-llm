@@ -11,7 +11,7 @@ namespace rtp_llm {
 /*----------------------------------------------- P2PConnectorAsyncMatchContext
  * -------------------------------------------------*/
 size_t P2PConnectorAsyncMatchContext::matchedBlockCount() const {
-    auto& layer_block_ids = resource_->layerBlocks();
+    auto layer_block_ids = resource_->layerBlocks();
     if (!layer_block_ids.empty() && layer_block_ids.at(0)) {
         return layer_block_ids.at(0)->blocksNum();
     }

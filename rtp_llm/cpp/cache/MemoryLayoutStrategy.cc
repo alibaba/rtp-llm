@@ -5,6 +5,58 @@
 
 namespace rtp_llm {
 
+
+namespace {
+
+KVPartitionBytes splitKVPartitionBytes(size_t      full_block_bytes,
+                                       size_t      k_block_bytes,
+                                       size_t      v_block_bytes,
+                                       int         heads,
+                                       int         partition_count,
+                                       int         partition_id,
+                                       const char* debug_name) {
+    RTP_LLM_CHECK_WITH_INFO(partition_count > 0, "partition_count must be > 0");
+    RTP_LLM_CHECK_WITH_INFO(partition_id >= 0 && partition_id < partition_count,
+                            "partition_id out of range: %d / %d",
+                            partition_id,
+                            partition_count);
+    RTP_LLM_CHECK_WITH_INFO(heads > 0, "heads must be > 0, got=%d (%s)", heads, debug_name);
+    RTP_LLM_CHECK_WITH_INFO(k_block_bytes + v_block_bytes == full_block_bytes,
+                            "block bytes mismatch (%s): full=%zu k_partition=%zu v_partition=%zu",
+                            debug_name,
+                            full_block_bytes,
+                            k_block_bytes,
+                            v_block_bytes);
+    RTP_LLM_CHECK_WITH_INFO(k_block_bytes % static_cast<size_t>(heads) == 0,
+                            "k_block_bytes must be divisible by heads (%s): k_partition=%zu heads=%d",
+                            debug_name,
+                            k_block_bytes,
+                            heads);
+    RTP_LLM_CHECK_WITH_INFO(v_block_bytes % static_cast<size_t>(heads) == 0,
+                            "v_block_bytes must be divisible by heads (%s): v_partition=%zu heads=%d",
+                            debug_name,
+                            v_block_bytes,
+                            heads);
+    RTP_LLM_CHECK_WITH_INFO(heads % partition_count == 0,
+                            "heads must be divisible by partition_count (%s): heads=%d partition_count=%d",
+                            debug_name,
+                            heads,
+                            partition_count);
+
+    const size_t k_partition_bytes_per_head = k_block_bytes / static_cast<size_t>(heads);
+    const size_t v_partition_bytes_per_head = v_block_bytes / static_cast<size_t>(heads);
+    const int    head_cnt                   = heads / partition_count;
+    const int    head_begin                 = partition_id * head_cnt;
+
+    const size_t k_partition_off = static_cast<size_t>(head_begin) * k_partition_bytes_per_head;
+    const size_t v_partition_off = k_block_bytes + static_cast<size_t>(head_begin) * v_partition_bytes_per_head;
+    const size_t k_partition_sz  = static_cast<size_t>(head_cnt) * k_partition_bytes_per_head;
+    const size_t v_partition_sz  = static_cast<size_t>(head_cnt) * v_partition_bytes_per_head;
+    return {k_partition_off, k_partition_sz, v_partition_off, v_partition_sz};
+}
+
+}  // namespace
+
 // Initialization function
 bool MemoryLayoutStrategy::init(const MemoryLayoutConfig& config,
                                 torch::Tensor&            kv_cache_tensor,
@@ -242,7 +294,7 @@ std::vector<BlockInfo> MemoryLayoutStrategy::createPartitionedBlockInfo(int laye
 
     const int heads = static_cast<int>(config_.local_head_num_kv);
 
-    auto kv_parts = MHAKVCacheSpec::splitKVPartitionBytes(static_cast<size_t>(config_.kv_block_stride_bytes),
+    auto kv_parts = splitKVPartitionBytes(static_cast<size_t>(config_.kv_block_stride_bytes),
                                                           static_cast<size_t>(config_.kv_block_stride_bytes / 2),
                                                           static_cast<size_t>(config_.kv_block_stride_bytes / 2),
                                                           heads,
@@ -255,7 +307,7 @@ std::vector<BlockInfo> MemoryLayoutStrategy::createPartitionedBlockInfo(int laye
     if (config_.hasScale()) {
         auto& layer_scale_tensor = layer_kv_scale_tensors_[layer_id];
         void* scale_addr         = getBlockPtr(layer_scale_tensor, block_id);
-        auto  sc_parts     = MHAKVCacheSpec::splitKVPartitionBytes(static_cast<size_t>(config_.kv_scale_stride_bytes),
+        auto  sc_parts     = splitKVPartitionBytes(static_cast<size_t>(config_.kv_scale_stride_bytes),
                                                               static_cast<size_t>(config_.kv_scale_stride_bytes / 2),
                                                               static_cast<size_t>(config_.kv_scale_stride_bytes / 2),
                                                               heads,

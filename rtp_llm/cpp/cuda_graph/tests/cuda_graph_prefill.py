@@ -206,8 +206,11 @@ class TestCudaGraphPrefill(unittest.TestCase):
                 attention_inputs.input_lengths, cu_seqlens
             )
 
-        inputs.attention_inputs = attention_inputs
-        return inputs
+        return PyModelInputs(
+            input_ids=inputs.input_ids,
+            input_hiddens=inputs.input_hiddens,
+            attn_inputs_list=[attention_inputs],
+        )
 
     def _test_single(self, batch_size: int):
         max_seq_len = self.max_seq_len

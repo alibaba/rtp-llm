@@ -148,8 +148,11 @@ class TestCudaGraphDecodePadding(unittest.TestCase):
         # For decode mode: each batch has 1 token, so total = batch_size
         attention_inputs.context_total_kv_length = batch_size * num_tokens_per_bs
         attention_inputs.total_tokens = batch_size * num_tokens_per_bs
-        inputs.attention_inputs = attention_inputs
-        return inputs
+        return PyModelInputs(
+            input_ids=inputs.input_ids,
+            input_hiddens=inputs.input_hiddens,
+            attn_inputs_list=[attention_inputs],
+        )
 
     def _test_single(self, batch_size: int):
         inputs = self.build_inputs(

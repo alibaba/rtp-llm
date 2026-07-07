@@ -7,7 +7,7 @@ from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_factory_register import register_model
 from rtp_llm.models.base_model import BaseModel
 from rtp_llm.models.kimi_linear.kimi_linear_weight import KimiLinearWeight
-from rtp_llm.ops import HybridAttentionType
+from rtp_llm.ops import HybridAttentionType, KVCacheSpecDesc, KVCacheSpecType, MlaOpsType
 
 
 class KimiLinear(BaseModel):
@@ -167,6 +167,51 @@ class KimiLinear(BaseModel):
         config.linear_attention_config.linear_num_key_heads = num_heads
         config.linear_attention_config.linear_num_value_heads = num_heads
         config.linear_attention_config.linear_conv_kernel_dim = conv_kernel_size
+
+    @classmethod
+    def _post_build_model_config(cls, model_config: ModelConfig) -> None:
+        if model_config.kv_cache_spec_descs:
+            return
+
+        full_desc = KVCacheSpecDesc()
+        full_desc.tag = "full"
+        if model_config.attn_config.use_mla and model_config.mla_ops_type != MlaOpsType.MHA:
+            full_desc.cache_type = KVCacheSpecType.MLA
+        else:
+            full_desc.cache_type = KVCacheSpecType.MHA
+
+        hybrid_attention_types = (
+            model_config.hybrid_attention_config.hybrid_attention_types
+        )
+        linear_count = sum(
+            attn_type == HybridAttentionType.LINEAR
+            for attn_type in hybrid_attention_types
+        )
+        full_count = len(hybrid_attention_types) - linear_count
+
+        linear_descs: dict[int, KVCacheSpecDesc] = {}
+
+        def get_linear_desc(linear_phase: int) -> KVCacheSpecDesc:
+            if full_count == 0:
+                linear_phase = 0
+            desc = linear_descs.get(linear_phase)
+            if desc is None:
+                desc = KVCacheSpecDesc()
+                desc.tag = "linear" if full_count == 0 else f"linear{linear_phase}"
+                desc.cache_type = KVCacheSpecType.LINEAR
+                linear_descs[linear_phase] = desc
+            return desc
+
+        layer_descs = []
+        linear_phase = 0
+        for attn_type in hybrid_attention_types:
+            if attn_type == HybridAttentionType.LINEAR:
+                layer_descs.append([get_linear_desc(linear_phase)])
+                linear_phase += 1
+            else:
+                layer_descs.append([full_desc])
+                linear_phase = 0
+        model_config.kv_cache_spec_descs = layer_descs
 
     def support_cuda_graph(self) -> bool:
         return True

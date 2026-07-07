@@ -6,6 +6,7 @@ from torch import Tensor, nn
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.device.device_type import DeviceType, get_device_type
 from rtp_llm.model_loader.model_weight_info import ModelWeights
+from rtp_llm.models_py.model_desc.block_map import get_attn_inputs_list
 from rtp_llm.models_py.modules import AttnImplFactory
 from rtp_llm.ops import DeviceResourceConfig
 from rtp_llm.ops.compute_ops import (
@@ -94,15 +95,28 @@ class GptModelBase(nn.Module):
     def prepare_fmha_impl(
         self, inputs: PyModelInputs, is_cuda_graph: bool = False
     ) -> Any:
-        fmha_impl = AttnImplFactory.get_fmha_impl(
+        attn_inputs_list = get_attn_inputs_list(inputs)
+        if len(attn_inputs_list) > 1:
+            return [
+                AttnImplFactory.get_fmha_impl(
+                    self.config,
+                    self.parallelism_config,
+                    self.weight,
+                    group_attn_inputs,
+                    self.fmha_config,
+                    is_cuda_graph,
+                )
+                for group_attn_inputs in attn_inputs_list
+            ]
+
+        return AttnImplFactory.get_fmha_impl(
             self.config,
             self.parallelism_config,
             self.weight,
-            inputs.attention_inputs,
+            attn_inputs_list[0],
             self.fmha_config,
             is_cuda_graph,
         )
-        return fmha_impl
 
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
         raise NotImplementedError("forward method must be implemented in subclass")

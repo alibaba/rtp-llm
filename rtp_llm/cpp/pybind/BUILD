@@ -34,9 +34,10 @@ cc_library(
     ],
     deps = [
         ":py_utils",
+        "//rtp_llm/cpp/cache:cache_types",
         "//rtp_llm/cpp/multimodal_processor:multimodal_input_class",
         "//rtp_llm/cpp/config:config_modules",
-        "//rtp_llm/cpp/config:model_config",  # Add ModelConfig implementation
+        "//rtp_llm/cpp/config:model_config",
         "//rtp_llm/cpp/model_utils:model_utils",
         "//rtp_llm/cpp/config:eplb_config",
         "//rtp_llm/cpp/utils:core_utils",
@@ -57,6 +58,8 @@ cc_library(
     }),
     hdrs = [],
     deps = [
+        "//rtp_llm/cpp/cache:batch_kv_cache_resource",
+        "//rtp_llm/cpp/cache:block_info",
         "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/cpp/utils:debug_utils",
         "//rtp_llm/cpp/utils:device_perf_wrapper",

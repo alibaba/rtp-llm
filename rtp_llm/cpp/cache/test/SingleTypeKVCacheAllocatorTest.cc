@@ -94,8 +94,8 @@ BatchKVCacheResourcePtr createBatchKVCacheResource(int batch_size, int layer_num
     auto resource = std::make_shared<BatchKVCacheResource>();
     resource->resetBatchSize(batch_size);
     for (int i = 0; i < batch_size; ++i) {
-        std::vector<int> layer_to_group_id(layer_num, 0);
-        resource->initBatchGroups(i, 1, layer_num, layer_to_group_id);
+        std::vector<std::vector<int>> layer_group_ids(static_cast<size_t>(layer_num), std::vector<int>{0});
+        resource->initBatchGroups(i, 1, layer_num, layer_group_ids);
         resource->setBatchBlocks(i, 0, std::vector<int>(block_num_per_batch));
         resource->setBatchCacheKeys(i, CacheKeysType(block_num_per_batch, static_cast<CacheKeyType>(i * 100)));
     }
@@ -448,7 +448,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, ConvertToGlobalLayerIdSingleWithMtp) {
     EXPECT_EQ(allocator_->convertToGlobalLayerId(/*model_id=*/0, /*local_layer_id=*/2),
               std::numeric_limits<uint32_t>::max());
 
-    // mtp sub-models map via sub_cfg->global_layer_ids[0]
+    // mtp sub-models map via sub_cfg->topology layer ids[0]
     EXPECT_EQ(allocator_->convertToGlobalLayerId(/*model_id=*/1, /*local_layer_id=*/0), 2u);
     EXPECT_EQ(allocator_->convertToGlobalLayerId(/*model_id=*/2, /*local_layer_id=*/0), 3u);
     EXPECT_EQ(allocator_->convertToGlobalLayerId(/*model_id=*/1, /*local_layer_id=*/1),
@@ -477,7 +477,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, LayerCacheBase) {
     auto layout = allocator_->allLayerCacheBase();
     EXPECT_EQ(layout.layers_to_kv_buffer_ptrs.size(), config.layer_num);
     EXPECT_EQ(layout.layers_to_scale_buffer_ptrs.size(), config.layer_num);
-    EXPECT_EQ((std::vector<int>(4, 0)), layout.layer_to_groups);
+    EXPECT_EQ((std::vector<std::vector<int>>(4, std::vector<int>{0})), layout.layer_to_group_ids);
 
     for (size_t i = 0; i < layout.layers_to_kv_buffer_ptrs.size(); ++i) {
         EXPECT_TRUE(layout.layers_to_kv_buffer_ptrs[i].defined());
@@ -494,7 +494,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, BlockCopySingle) {
     int src_block = 0;
     int dst_block = 1;
 
-    auto&  spec         = config.cache_specs[0];
+    auto&  spec         = config.specForGroup(0);
     size_t k_block_size = spec->k_block_size();
     size_t v_block_size = spec->v_block_size();
 
@@ -550,7 +550,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, BlockBatchCopyVector) {
     copy_mapping.push_back({2, 3});
     copy_mapping.push_back({4, 5});
 
-    auto&  spec         = config.cache_specs[0];
+    auto&  spec         = config.specForGroup(0);
     size_t k_block_size = spec->k_block_size();
     size_t v_block_size = spec->v_block_size();
 
@@ -616,7 +616,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, BlockBatchCopyPointers) {
 
     BlockIdPair pairs[] = {{0, 1}, {2, 3}};
 
-    auto&  spec         = config.cache_specs[0];
+    auto&  spec         = config.specForGroup(0);
     size_t k_block_size = spec->k_block_size();
     size_t v_block_size = spec->v_block_size();
 
@@ -665,7 +665,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, BlockBatchCopyBuffer) {
     std::vector<int32_t> data   = {0, 1, 2, 3, 4, 5};  // 3 pairs: (0->1, 2->3, 4->5)
     auto                 tensor = torch::from_blob(data.data(), {3, 2}, torch::kInt32).clone();
 
-    auto&  spec         = config.cache_specs[0];
+    auto&  spec         = config.specForGroup(0);
     size_t k_block_size = spec->k_block_size();
     size_t v_block_size = spec->v_block_size();
 
@@ -740,7 +740,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, IncrKVCacheRefReferencesMatchedBlocksOnly
     EXPECT_EQ(allocator_->freeBlocksNum(), total_free_before - 4);
 
     KVCacheResource resource;
-    resource.initGroups(1, config.layer_all_num, config.layer_to_group_id);
+    resource.initGroups(1, config.layer_all_num, config.layerGroupIdsSnapshot());
 
     resource.cacheKeys() = CacheKeysType{100, 101, 102, 103};
     resource.mutableBlockIds(0).assign(BlockIndicesType{blocks[0], blocks[1], 0, blocks[2]});
@@ -774,7 +774,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, IncrKVCacheRefEmptyInputNoEffect) {
     EXPECT_EQ(allocator_->freeBlocksNum(), total_free_before - 2);
 
     KVCacheResource resource;
-    resource.initGroups(1, config.layer_all_num, config.layer_to_group_id);
+    resource.initGroups(1, config.layer_all_num, config.layerGroupIdsSnapshot());
     resource.cacheKeys() = CacheKeysType{100, 101};
     resource.mutableBlockIds(0).assign(BlockIndicesType{blocks[0], blocks[1]});
 

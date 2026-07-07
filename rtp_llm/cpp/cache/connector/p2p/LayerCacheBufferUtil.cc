@@ -8,7 +8,7 @@ std::vector<std::shared_ptr<LayerCacheBuffer>>
 LayerCacheBufferUtil::convert(KVCacheResource& resource, int batch_id, int start_block_idx, int block_count) {
     std::vector<std::shared_ptr<LayerCacheBuffer>> layer_cache_buffers;
 
-    const auto& layer_block_ids = resource.layerBlocks();
+    const auto layer_block_ids = resource.layerBlocks();
     for (size_t i = 0; i < layer_block_ids.size(); ++i) {
         auto layer_cache_buffer = convertLayer(resource, batch_id, i, start_block_idx, block_count);
         if (layer_cache_buffer) {
@@ -20,7 +20,7 @@ LayerCacheBufferUtil::convert(KVCacheResource& resource, int batch_id, int start
 
 std::shared_ptr<LayerCacheBuffer> LayerCacheBufferUtil::convertLayer(
     KVCacheResource& resource, int batch_id, int layer_id, int start_block_idx, int block_count) {
-    const auto& layer_block_ids = resource.layerBlocks();
+    const auto  layer_block_ids = resource.layerBlocks();
     const auto& cache_keys      = resource.cacheKeys();
 
     if (layer_id < 0 || static_cast<size_t>(layer_id) >= layer_block_ids.size()) {

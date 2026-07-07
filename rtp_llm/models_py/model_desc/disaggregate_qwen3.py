@@ -7,6 +7,7 @@ from torch import nn
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.distributed.collective_torch import Group, recv, send
+from rtp_llm.models_py.model_desc.block_map import get_attn_inputs_list
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.modules import (
     AttnImplFactory,
@@ -474,7 +475,7 @@ class Qwen3AttnModel(DisaggregateModelBase):
                     self.config,
                     self.parallelism_config,
                     self.weight,
-                    mirco_batch_input.attention_inputs,
+                    get_attn_inputs_list(mirco_batch_input)[0],
                     self.fmha_config,
                 )
                 out = layer(

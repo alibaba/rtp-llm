@@ -396,31 +396,27 @@ private:
         }
         item->set_mem_block(static_cast<int>(mem_block_index));
     }
-    LayerBlockIds makeLayerBlockIds(const std::vector<std::vector<BlockIdxType>>& per_layer_block_indices,
-                                    size_t                                        cache_keys_num) const {
-        LayerBlockIds lbs;
-        const size_t  layer_num = cache_config_.layer_num;
-        lbs.reserve(layer_num);
-
-        for (size_t layer = 0; layer < layer_num; ++layer) {
-            auto ptr = std::make_shared<BlockIds>();
-            if (layer < per_layer_block_indices.size()) {
-                ptr->assign(per_layer_block_indices[layer]);
-            }
-            if (ptr->blocks().size() < cache_keys_num) {
-                ptr->resize(cache_keys_num, NULL_BLOCK_IDX);
-            }
-            lbs.emplace_back(std::move(ptr));
+    BlockIndicesType makeGroupBlockIndices(const std::vector<std::vector<BlockIdxType>>& per_layer_block_indices,
+                                           size_t                                        cache_keys_num) const {
+        BlockIndicesType block_indices;
+        if (!per_layer_block_indices.empty()) {
+            block_indices = per_layer_block_indices.front();
         }
-        return lbs;
+        if (block_indices.size() < cache_keys_num) {
+            block_indices.resize(cache_keys_num, NULL_BLOCK_IDX);
+        }
+        return block_indices;
     }
     std::shared_ptr<KVCacheResource>
     makeCacheResource(const CacheKeysType&                          cache_keys,
                       const std::vector<std::vector<BlockIdxType>>& per_layer_block_indices,
                       size_t                                        reuse_len = 0) const {
-        auto res             = std::make_shared<KVCacheResource>();
-        res->cache_keys      = cache_keys;
-        res->layer_block_ids = makeLayerBlockIds(per_layer_block_indices, cache_keys.size());
+        auto res = std::make_shared<KVCacheResource>();
+        res->cacheKeys() = cache_keys;
+        const size_t                  layer_num = static_cast<size_t>(cache_config_.layer_all_num);
+        std::vector<std::vector<int>> layer_to_group_ids(layer_num, std::vector<int>{0});
+        res->initGroups(/*group_num=*/1, static_cast<int>(layer_num), layer_to_group_ids);
+        res->mutableBlockIds(0).assign(makeGroupBlockIndices(per_layer_block_indices, cache_keys.size()));
         // reuse_len in these tests means "GPU already-reused prefix length".
         // KVCacheResource::reuseBlockNum() is derived from (device + memory + remote),
         // so set device reuse here to make asyncMatch/asyncRead semantics consistent.
@@ -799,13 +795,12 @@ TEST_F(KVCacheMemoryConnectorTest, asyncRead_InvalidInputs_ReturnNullOrThrow) {
         connector_->asyncRead(res_empty_keys, nullptr, nullptr, /*start_read_block_index=*/0, /*read_block_num=*/0);
     EXPECT_EQ(ctx1, nullptr);
 
-    // empty layer_block_ids
+    // uninitialized legacy layer view
     // NOTE: asyncRead always skips the last cache_key (cache_keys.size() - 1), so keep size >= 2 here.
-    auto res_empty_lbs = makeCacheResource(/*cache_keys=*/{1, 2}, /*per_layer_block_indices=*/{{1, 2}});
-    res_empty_lbs->layer_block_ids.clear();
-    auto ctx2 =
-        connector_->asyncRead(res_empty_lbs, nullptr, nullptr, /*start_read_block_index=*/0, /*read_block_num=*/1);
-    EXPECT_EQ(ctx2, nullptr);
+    auto res_empty_lbs = std::make_shared<KVCacheResource>();
+    res_empty_lbs->cacheKeys() = {1, 2};
+    EXPECT_ANY_THROW((void)connector_->asyncRead(
+        res_empty_lbs, nullptr, nullptr, /*start_read_block_index=*/0, /*read_block_num=*/1));
 }
 
 TEST_F(KVCacheMemoryConnectorTest, asyncRead_ReturnNull_WhenReuseLenGEKeys) {
@@ -1128,11 +1123,11 @@ TEST_F(KVCacheMemoryConnectorTest, asyncWrite_InvalidInputs_ReturnNullOrThrow) {
     auto ctx1           = connector_->asyncWrite(res_empty_keys, meta);
     EXPECT_EQ(ctx1, nullptr);
 
-    // empty layer_block_ids
-    auto res_empty_lbs = makeCacheResource(/*cache_keys=*/{1}, /*lbs=*/{{1}});
-    res_empty_lbs->layer_block_ids.clear();
-    auto ctx2 = connector_->asyncWrite(res_empty_lbs, meta);
-    EXPECT_EQ(ctx2, nullptr);
+    // uninitialized legacy layer view
+    auto res_empty_lbs = std::make_shared<KVCacheResource>();
+    res_empty_lbs->cacheKeys() = {1};
+    res_empty_lbs->setLastBlockAligned(true);
+    EXPECT_ANY_THROW((void)connector_->asyncWrite(res_empty_lbs, meta));
 }
 
 TEST_F(KVCacheMemoryConnectorTest, asyncWrite_ReturnNull_WhenAllKeysInCache) {

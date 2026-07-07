@@ -24,6 +24,25 @@ using namespace std;
 
 namespace rtp_llm {
 
+namespace {
+
+std::vector<torch::Tensor> getKVCacheKernelBlockTablesByGroup(const GptModelInputs& inputs) {
+    if (!inputs.kv_cache_kernel_block_id.defined()) {
+        return {};
+    }
+    RTP_LLM_CHECK_WITH_INFO(inputs.kv_cache_kernel_block_id.dim() == 3,
+                            "kv_cache_kernel_block_id shape should be 3-D (group, batch, blocks)");
+    const size_t               group = inputs.kv_cache_kernel_block_id.size(0);
+    std::vector<torch::Tensor> by_group;
+    by_group.reserve(group);
+    for (size_t g = 0; g < group; ++g) {
+        by_group.push_back(inputs.kv_cache_kernel_block_id[g]);
+    }
+    return by_group;
+}
+
+}  // namespace
+
 torch::Tensor PyWrappedModel::tensorHoldHostAndToCuda(const torch::Tensor& tensor) {
     if (tensor.device().is_cuda()) {
         return tensor;
@@ -138,7 +157,7 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
 
         py_attn_inputs.context_total_kv_length = cu_kv_seqlens[context_batch_size].item<int>();
         py_attn_inputs.total_tokens            = cu_seqlens[batch_size].item<int>();
-        py_attn_inputs.cu_seqlens         = cu_seqlens;
+        py_attn_inputs.cu_seqlens              = cu_seqlens;
         py_attn_inputs.cu_seqlens_device       = tensorHoldHostAndToCuda(cu_seqlens);
         py_attn_inputs.cu_kv_seqlens_device    = tensorHoldHostAndToCuda(cu_kv_seqlens);
     } else {
@@ -154,7 +173,7 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
                           py_attn_inputs.sequence_lengths.size(0) + 1,
                           1,
                           torch::TensorOptions(torch::kInt32).device(torch::kCPU).pinned_memory(true));
-        py_attn_inputs.decode_cu_seqlens   = decode_cu_seqlens;
+        py_attn_inputs.decode_cu_seqlens        = decode_cu_seqlens;
         py_attn_inputs.decode_cu_seqlens_device = tensorHoldHostAndToCuda(decode_cu_seqlens);
     }
 
@@ -182,27 +201,15 @@ void PyWrappedModel::setupKVCacheForAttentionInputs(torch_ext::PyAttentionInputs
     if (!inputs.kv_cache_kernel_block_id.defined()) {
         return;
     }
-    RTP_LLM_CHECK_WITH_INFO(inputs.kv_cache_kernel_block_id.dim() == 3, "kv_cache_kernel_block_id shape should be 3");
-    // New layout: [group, batch, kernel_blocks]
-    // build per-group contiguous 2-D tables on device.
-    const size_t group = inputs.kv_cache_kernel_block_id.size(0);
-
-    py_attn_inputs.kv_cache_kernel_block_id_by_group.clear();
-    py_attn_inputs.kv_cache_kernel_block_id_device_by_group.clear();
-    py_attn_inputs.kv_cache_kernel_block_id_by_group.reserve(group);
-    py_attn_inputs.kv_cache_kernel_block_id_device_by_group.reserve(group);
-
-    for (size_t g = 0; g < group; ++g) {
-        // group view: [batch, kernel_blocks] on HOST
-        auto group_view = inputs.kv_cache_kernel_block_id[g];
-        py_attn_inputs.kv_cache_kernel_block_id_by_group.push_back(group_view);
-        py_attn_inputs.kv_cache_kernel_block_id_device_by_group.push_back(tensorHoldHostAndToCuda(group_view));
+    const auto by_group = getKVCacheKernelBlockTablesByGroup(inputs);
+    if (by_group.empty()) {
+        return;
     }
 
-    // Legacy 2-D fields default to group 0.
-    // NOTE: keep host/device 2-D fields consistent to avoid shape mismatch in CUDA graph replay path.
-    py_attn_inputs.kv_cache_kernel_block_id_device = py_attn_inputs.kv_cache_kernel_block_id_device_by_group[0];
-    py_attn_inputs.kv_cache_kernel_block_id   = py_attn_inputs.kv_cache_kernel_block_id_by_group[0];
+    // Group tables are carried by PyModelInputs.attn_inputs_list. The singular
+    // fields preserve the group-0/common attention metadata.
+    py_attn_inputs.kv_cache_kernel_block_id        = by_group[0];
+    py_attn_inputs.kv_cache_kernel_block_id_device = tensorHoldHostAndToCuda(by_group[0]);
 }
 
 // Helper function to build BertEmbeddingInputs from GptModelInputs
@@ -349,13 +356,27 @@ GptModelOutputs PyWrappedModel::forwardMicroBatched(const GptModelInputs& inputs
         torch::Tensor token_ids = micro_inputs.combo_tokens.clone().cuda();
         torch::Tensor input_hiddens =
             inputs.last_hidden_states.defined() ? inputs.last_hidden_states : torch::empty({0});
-        input_list.emplace_back(PyModelInputs{token_ids,
-                                              input_hiddens,
-                                              combo_position_ids,
-                                              embedding_inputs,
-                                              multimodal_inputs,
-                                              py_attn_inputs,
-                                              bert_embedding_inputs});
+        auto                           by_group = getKVCacheKernelBlockTablesByGroup(micro_inputs);
+        std::vector<PyAttentionInputs> attn_inputs_list;
+        if (by_group.empty()) {
+            attn_inputs_list = torch_ext::makePyAttentionInputsByGroup(py_attn_inputs);
+        } else {
+            std::vector<torch::Tensor> device_by_group;
+            device_by_group.reserve(by_group.size());
+            for (const auto& group_table : by_group) {
+                device_by_group.push_back(tensorHoldHostAndToCuda(group_table));
+            }
+            attn_inputs_list = torch_ext::makePyAttentionInputsByGroup(py_attn_inputs, device_by_group, by_group);
+        }
+        auto py_model_inputs             = PyModelInputs(token_ids,
+                                             input_hiddens,
+                                             combo_position_ids,
+                                             embedding_inputs,
+                                             multimodal_inputs,
+                                             bert_embedding_inputs,
+                                             std::move(py_attn_inputs));
+        py_model_inputs.attn_inputs_list = std::move(attn_inputs_list);
+        input_list.emplace_back(std::move(py_model_inputs));
     }
 
     if (!inputs.warmup && inputs.pd_separation) {
@@ -498,16 +519,30 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         calculatePaddingOffset(attention_inputs);
         attention_inputs.padding_offset = tensorHoldHostAndToCuda(attention_inputs.padding_offset);
 
-        // launch fused copy
+        auto                           by_group = getKVCacheKernelBlockTablesByGroup(inputs);
+        std::vector<PyAttentionInputs> attn_inputs_list;
+        if (by_group.empty()) {
+            attn_inputs_list = torch_ext::makePyAttentionInputsByGroup(attention_inputs);
+        } else {
+            std::vector<torch::Tensor> device_by_group;
+            device_by_group.reserve(by_group.size());
+            for (const auto& group_table : by_group) {
+                device_by_group.push_back(tensorHoldHostAndToCuda(group_table));
+            }
+            attn_inputs_list = torch_ext::makePyAttentionInputsByGroup(attention_inputs, device_by_group, by_group);
+        }
+        auto py_model_inputs             = PyModelInputs(token_ids,
+                                             input_hiddens,
+                                             combo_position_ids,
+                                             embedding_inputs,
+                                             multimodal_inputs,
+                                             bert_embedding_inputs,
+                                             std::move(attention_inputs));
+        py_model_inputs.attn_inputs_list = std::move(attn_inputs_list);
+
+        // launch fused copy after all tensorHoldHostAndToCuda calls above have queued their H2D copies
         fusedCopy(d2d_copies_);
 
-        auto           py_model_inputs = PyModelInputs({token_ids,
-                                                        input_hiddens,
-                                                        combo_position_ids,
-                                                        embedding_inputs,
-                                                        multimodal_inputs,
-                                                        attention_inputs,
-                                                        bert_embedding_inputs});
         PyModelOutputs py_model_outputs;
         torch::Tensor  hidden_states;
 
@@ -519,11 +554,11 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             DevicePerfWrapper wrapper(enable_device_perf_, "cuda graph python forward");
             RTP_LLM_LOG_DEBUG(
                 "[PyWrappedModel] using CUDA graph forward, is_target_verify=%d, is_prefill=%d, graph_bs=%d",
-                py_model_inputs.attention_inputs.is_target_verify,
-                py_model_inputs.attention_inputs.is_prefill,
+                py_model_inputs.attentionInputs().is_target_verify,
+                py_model_inputs.attentionInputs().is_prefill,
                 graph_state.current_real_graph_bs);
-            py_model_inputs.attention_inputs.is_s_padded = true;
-            py_model_outputs                             = graph_runner_->forward(py_model_inputs, graph_state);
+            py_model_inputs.attentionInputs().is_s_padded = true;
+            py_model_outputs                              = graph_runner_->forward(py_model_inputs, graph_state);
             RTP_LLM_LOG_DEBUG("[PyWrappedModel] CUDA graph forward completed");
             hidden_states = py_model_outputs.hidden_states.clone();
         } else {
@@ -531,8 +566,8 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             RTP_LLM_PROFILE_SCOPE("py_model.forward(normal)");
             DevicePerfWrapper wrapper(enable_device_perf_, "normal forward");
             RTP_LLM_LOG_DEBUG("[PyWrappedModel] using normal forward, is_target_verify=%d, is_prefill=%d",
-                              py_model_inputs.attention_inputs.is_target_verify,
-                              py_model_inputs.attention_inputs.is_prefill);
+                              py_model_inputs.attentionInputs().is_target_verify,
+                              py_model_inputs.attentionInputs().is_prefill);
             held_attn_pyobj_      = py_model_.attr("prepare_fmha_impl")(py_model_inputs, false);
             auto py_model_forward = py_model_.attr("forward");
             auto outputs          = py_model_forward(py_model_inputs, held_attn_pyobj_);

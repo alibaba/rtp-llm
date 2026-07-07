@@ -95,26 +95,26 @@ void debugPrintPyModelInputs(const torch_ext::PyModelInputs& inputs) {
     }
 
     std::cout << "--- attention_inputs ---" << std::endl;
-    std::cout << "  is_prefill: " << inputs.attention_inputs.is_prefill << std::endl;
+    std::cout << "  is_prefill: " << inputs.attentionInputs().is_prefill << std::endl;
 
-    printTensorInfo("prefix_lengths", inputs.attention_inputs.prefix_lengths);
-    printTensorInfo("sequence_lengths", inputs.attention_inputs.sequence_lengths);
-    printTensorInfo("input_lengths", inputs.attention_inputs.input_lengths);
-    printTensorInfo("kv_cache_block_id", inputs.attention_inputs.kv_cache_block_id, 40);
-    printTensorInfo("kv_cache_block_id_device", inputs.attention_inputs.kv_cache_block_id_device, 40);
-    printTensorInfo("cu_seqlens_device", inputs.attention_inputs.cu_seqlens_device);
-    printTensorInfo("cu_seqlens_host", inputs.attention_inputs.cu_seqlens);
-    printTensorInfo("cu_kv_seqlens_device", inputs.attention_inputs.cu_kv_seqlens_device);
-    printTensorInfo("sequence_lengths_plus_1_device", inputs.attention_inputs.sequence_lengths_plus_1_device);
-    printTensorInfo("decode_cu_seqlens_device", inputs.attention_inputs.decode_cu_seqlens_device);
-    printTensorInfo("padding_offset", inputs.attention_inputs.padding_offset);
+    printTensorInfo("prefix_lengths", inputs.attentionInputs().prefix_lengths);
+    printTensorInfo("sequence_lengths", inputs.attentionInputs().sequence_lengths);
+    printTensorInfo("input_lengths", inputs.attentionInputs().input_lengths);
+    printTensorInfo("kv_cache_block_id", inputs.attentionInputs().kv_cache_block_id, 40);
+    printTensorInfo("kv_cache_block_id_device", inputs.attentionInputs().kv_cache_block_id_device, 40);
+    printTensorInfo("cu_seqlens_device", inputs.attentionInputs().cu_seqlens_device);
+    printTensorInfo("cu_seqlens_host", inputs.attentionInputs().cu_seqlens);
+    printTensorInfo("cu_kv_seqlens_device", inputs.attentionInputs().cu_kv_seqlens_device);
+    printTensorInfo("sequence_lengths_plus_1_device", inputs.attentionInputs().sequence_lengths_plus_1_device);
+    printTensorInfo("decode_cu_seqlens_device", inputs.attentionInputs().decode_cu_seqlens_device);
+    printTensorInfo("padding_offset", inputs.attentionInputs().padding_offset);
 
-    std::cout << "  context_total_kv_length: " << inputs.attention_inputs.context_total_kv_length << std::endl;
-    std::cout << "  total_tokens: " << inputs.attention_inputs.total_tokens << std::endl;
+    std::cout << "  context_total_kv_length: " << inputs.attentionInputs().context_total_kv_length << std::endl;
+    std::cout << "  total_tokens: " << inputs.attentionInputs().total_tokens << std::endl;
 
     std::cout << "  prefill_cuda_graph_copy_params: ";
-    if (inputs.attention_inputs.prefill_cuda_graph_copy_params.has_value()) {
-        const auto& p = inputs.attention_inputs.prefill_cuda_graph_copy_params.value();
+    if (inputs.attentionInputs().prefill_cuda_graph_copy_params.has_value()) {
+        const auto& p = inputs.attentionInputs().prefill_cuda_graph_copy_params.value();
         std::cout << "set" << std::endl;
         std::cout << "    max_seq_len: " << p.max_seq_len << ", max_batch_size: " << p.max_batch_size << std::endl;
         std::cout << "    cuda_graph_prefill_batch_size: defined=" << p.cuda_graph_prefill_batch_size.defined();

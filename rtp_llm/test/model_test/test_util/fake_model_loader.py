@@ -124,6 +124,7 @@ class FakeModelLoader(object):
             profiling_debug_logging_config=ProfilingDebugLoggingConfig(),
             embedding_config=None,  # Fake loader doesn't need embedding_config
         )
+        model_cls._post_build_model_config(config)
         config.render_config = RenderConfig()
         config.generate_env_config = GenerateEnvConfig()
 

@@ -313,7 +313,7 @@ def print_py_model_inputs_full(
     print(
         f"  input_hiddens: defined={m.input_hiddens is not None} sizes=[{sizes(m.input_hiddens)}]"
     )
-    a = m.attention_inputs
+    a = m.attn_inputs_list[0]
     print(
         f"  attention_inputs (scalars): is_prefill={a.is_prefill} is_s_padded={a.is_s_padded} "
         f"is_cuda_graph={getattr(a, 'is_cuda_graph', 'N/A')} "

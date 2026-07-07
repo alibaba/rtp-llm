@@ -1,145 +1,117 @@
 #pragma once
 
+#include <algorithm>
 #include <memory>
+#include <numeric>
 #include <sstream>
 #include <string>
 
 #include "rtp_llm/cpp/cache/KVCacheSpecBase.h"
-#include "rtp_llm/cpp/config/ConfigModules.h"
-#include "rtp_llm/models_py/bindings/core/Types.h"
-#include "rtp_llm/cpp/model_utils/AttentionConfig.h"
+#include "rtp_llm/cpp/cache/KVCacheSpecDesc.h"
 
 namespace rtp_llm {
 
 struct MHAKVCacheSpec: public KVCacheSpec {
-    uint32_t size_per_head;
-
-    MHAKVCacheSpec() = default;
-
-    MHAKVCacheSpec(const AttentionConfigs& attn_config, const ParallelismConfig& parallelism_config) {
-        type              = KVCacheSpecType::MultiHeadAttention;
-        layer_num         = 1;  // Will be set by caller
-
-        // TODO(xinfei.sxf): 这里的head_num_kv分配逻辑需要和ModelConfig::getAttentionConfigs里保持一致，目前这里还是单独计算的
-        local_head_num_kv = static_cast<uint32_t>(
-            (attn_config.kv_head_num % parallelism_config.get_attn_tp_size() == 0) ?
-                attn_config.kv_head_num / parallelism_config.get_attn_tp_size() :
-                attn_config.kv_head_num / std::gcd(attn_config.kv_head_num, parallelism_config.get_attn_tp_size())
-        );
-        seq_size_per_block = static_cast<uint32_t>(attn_config.tokens_per_block);
-        size_per_head      = static_cast<uint32_t>(attn_config.size_per_head);
+    MHAKVCacheSpec() {
+        type = KVCacheSpecType::MultiHeadAttention;
     }
 
-    // TODO(xinfei.sxf) 下面的函数名字统一掉
+    static KVCacheSpecPtr build(const KVCacheSpecDesc& desc, const SpecBuildContext& ctx) {
+        RTP_LLM_CHECK_WITH_INFO(ctx.attn_config != nullptr,
+                                "KVCacheSpecDesc tag=%s cache_type=%d requires SpecBuildContext.attn_config",
+                                desc.tag.c_str(),
+                                static_cast<int>(desc.cache_type));
+        RTP_LLM_CHECK_WITH_INFO(ctx.parallelism_config != nullptr,
+                                "KVCacheSpecDesc tag=%s cache_type=%d requires SpecBuildContext.parallelism_config",
+                                desc.tag.c_str(),
+                                static_cast<int>(desc.cache_type));
+
+        const auto& attn = *ctx.attn_config;
+        RTP_LLM_CHECK_WITH_INFO(attn.kv_head_num > 0,
+                                "MHA KVCacheSpecDesc tag=%s requires positive attn_config.kv_head_num",
+                                desc.tag.c_str());
+        RTP_LLM_CHECK_WITH_INFO(attn.size_per_head > 0,
+                                "MHA KVCacheSpecDesc tag=%s requires positive attn_config.size_per_head",
+                                desc.tag.c_str());
+
+        auto spec                = std::make_shared<MHAKVCacheSpec>();
+        spec->tag                = desc.tag;
+        spec->seq_size_per_block = ctx.seq_size_per_block == 0 ? 1 : ctx.seq_size_per_block;
+        spec->dtype_             = desc.dtype != DataType::TYPE_INVALID ? desc.dtype : ctx.dtype;
+        RTP_LLM_CHECK_WITH_INFO(spec->dtype_ != DataType::TYPE_INVALID,
+                                "KVCacheSpecDesc tag=%s cache_type=%d requires valid dtype",
+                                desc.tag.c_str(),
+                                static_cast<int>(desc.cache_type));
+
+        const auto     attn_tp        = std::max<int64_t>(1, ctx.parallelism_config->get_attn_tp_size());
+        const uint32_t tp             = static_cast<uint32_t>(attn_tp);
+        const uint32_t kv             = static_cast<uint32_t>(attn.kv_head_num);
+        const uint32_t local_kv_heads = (kv % tp == 0) ? kv / tp : kv / std::gcd(kv, tp);
+
+        spec->per_token_k_elems       = static_cast<size_t>(local_kv_heads) * attn.size_per_head;
+        if (spec->dtype_ == DataType::TYPE_INT8 || spec->dtype_ == DataType::TYPE_FP8_E4M3) {
+            spec->per_token_k_scale_bytes = static_cast<size_t>(local_kv_heads) * sizeof(float);
+        }
+        return spec;
+    }
+
     size_t block_size() const override {
-        return 2 * local_head_num_kv * size_per_head * seq_size_per_block;
+        return k_block_size() + v_block_size();
     }
+
     size_t k_block_size() const override {
-        return local_head_num_kv * size_per_head * seq_size_per_block;
+        return per_token_k_elems * seq_size_per_block;
     }
+
     size_t v_block_size() const override {
-        return local_head_num_kv * size_per_head * seq_size_per_block;
+        return per_token_k_elems * seq_size_per_block;
     }
 
     size_t block_size_bytes() const override {
-        return block_size() * rtp_llm::getTypeSize(dtype);
+        return k_block_size_bytes() + v_block_size_bytes();
     }
+
     size_t k_block_size_bytes() const override {
-        return k_block_size() * rtp_llm::getTypeSize(dtype);
+        return k_block_size() * getTypeSize(dtype_);
     }
+
     size_t v_block_size_bytes() const override {
-        return v_block_size() * rtp_llm::getTypeSize(dtype);
-    }
-
-    // Scale-related methods for MHA (only MHA supports scales for now)
-    size_t scale_size_per_block() const {
-        // For INT8 or FP8, we need scales for both K and V
-        if (dtype == rtp_llm::TYPE_INT8 || dtype == rtp_llm::TYPE_FP8_E4M3) {
-            return 2 * local_head_num_kv * seq_size_per_block;  // K and V scales
-        }
-        return 0;  // No scales for other data types
-    }
-
-    size_t scale_size_bytes_per_block() const {
-        return scale_size_per_block() * sizeof(float);
+        return v_block_size() * getTypeSize(dtype_);
     }
 
     size_t scale_block_size_bytes() const override {
-        return scale_size_bytes_per_block();
+        return k_scale_block_size_bytes() + v_scale_block_size_bytes();
     }
 
     size_t k_scale_block_size_bytes() const override {
-        return scale_size_bytes_per_block() / 2;
+        return per_token_k_scale_bytes * seq_size_per_block;
     }
 
     size_t v_scale_block_size_bytes() const override {
-        return scale_size_bytes_per_block() / 2;
+        return per_token_k_scale_bytes * seq_size_per_block;
     }
 
-    // Static helper function to split KV partition bytes for MHA
-    static KVPartitionBytes splitKVPartitionBytes(size_t      full_block_bytes,
-                                                  size_t      k_block_bytes,
-                                                  size_t      v_block_bytes,
-                                                  int         heads,
-                                                  int         partition_count,
-                                                  int         partition_id,
-                                                  const char* debug_name) {
-        RTP_LLM_CHECK_WITH_INFO(partition_count > 0, "partition_count must be > 0");
-        RTP_LLM_CHECK_WITH_INFO(partition_id >= 0 && partition_id < partition_count,
-                                "partition_id out of range: %d / %d",
-                                partition_id,
-                                partition_count);
-        RTP_LLM_CHECK_WITH_INFO(heads > 0, "heads must be > 0, got=%d (%s)", heads, debug_name);
-        RTP_LLM_CHECK_WITH_INFO(k_block_bytes + v_block_bytes == full_block_bytes,
-                                "block bytes mismatch (%s): full=%zu k_partition=%zu v_partition=%zu",
-                                debug_name,
-                                full_block_bytes,
-                                k_block_bytes,
-                                v_block_bytes);
-        RTP_LLM_CHECK_WITH_INFO(k_block_bytes % static_cast<size_t>(heads) == 0,
-                                "k_block_bytes must be divisible by heads (%s): k_partition=%zu heads=%d",
-                                debug_name,
-                                k_block_bytes,
-                                heads);
-        RTP_LLM_CHECK_WITH_INFO(v_block_bytes % static_cast<size_t>(heads) == 0,
-                                "v_block_bytes must be divisible by heads (%s): v_partition=%zu heads=%d",
-                                debug_name,
-                                v_block_bytes,
-                                heads);
-        RTP_LLM_CHECK_WITH_INFO(heads % partition_count == 0,
-                                "heads must be divisible by partition_count (%s): heads=%d partition_count=%d",
-                                debug_name,
-                                heads,
-                                partition_count);
+    rtp_llm::DataType memoryLayoutDType() const override {
+        return dtype_;
+    }
 
-        const size_t k_partition_bytes_per_head = k_block_bytes / static_cast<size_t>(heads);
-        const size_t v_partition_bytes_per_head = v_block_bytes / static_cast<size_t>(heads);
-
-        // Compute [head_begin, head_cnt] for this partition_id (equal split).
-        const int head_cnt   = heads / partition_count;
-        const int head_begin = partition_id * head_cnt;
-
-        const size_t k_partition_off = static_cast<size_t>(head_begin) * k_partition_bytes_per_head;
-        const size_t v_partition_off = k_block_bytes + static_cast<size_t>(head_begin) * v_partition_bytes_per_head;
-        const size_t k_partition_sz  = static_cast<size_t>(head_cnt) * k_partition_bytes_per_head;
-        const size_t v_partition_sz  = static_cast<size_t>(head_cnt) * v_partition_bytes_per_head;
-        return {k_partition_off, k_partition_sz, v_partition_off, v_partition_sz};
+    KVCacheSpecPtr clone() const override {
+        return std::make_shared<MHAKVCacheSpec>(*this);
     }
 
     std::string debugString(size_t indent = 0) const override {
-        const std::string indent_str = std::string(indent, ' ');
-        const std::string indent1    = indent_str + "  ";
-
         std::ostringstream os;
+        os << std::string(indent, ' ') << "MHAKVCacheSpec{\n";
         os << commonDebugString(indent);
-        os << indent1 << "size_per_head=" << size_per_head << "\n";
-        os << indent1 << "scale_size_per_block=" << scale_size_per_block() << "\n";
-        os << indent1 << "scale_size_bytes_per_block=" << scale_size_bytes_per_block() << "\n";
-        os << indent1 << "scale_block_size_bytes=" << scale_block_size_bytes() << "\n";
-        os << indent1 << "k_scale_block_size_bytes=" << k_scale_block_size_bytes() << "\n";
-        os << indent1 << "v_scale_block_size_bytes=" << v_scale_block_size_bytes() << "\n";
+        os << std::string(indent, ' ') << "}\n";
         return os.str();
     }
+
+private:
+    DataType dtype_ = DataType::TYPE_INVALID;
+
+    size_t per_token_k_elems       = 0;
+    size_t per_token_k_scale_bytes = 0;
 };
 
 }  // namespace rtp_llm

@@ -168,6 +168,17 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
     auto target_cache_layer_layout = cache_manager->getMainModelCacheLayerLayout();
     auto draft_cache_layer_layout  = cache_manager->getMTPModuleCacheLayerLayout(0);
 
+    const auto target_tokens_per_block = cache_manager ? cache_manager->cacheConfig().seq_size_per_block :
+                                                       params.model_config_.attn_config.tokens_per_block;
+    const auto target_kernel_tokens_per_block = [&]() {
+        if (cache_manager) {
+            const auto kernel_seq_size_per_block = cache_manager->cacheConfig().kernel_seq_size_per_block;
+            return kernel_seq_size_per_block > 0 ? kernel_seq_size_per_block : target_tokens_per_block;
+        }
+        const auto kernel_tokens_per_block = params.model_config_.attn_config.kernel_tokens_per_block;
+        return kernel_tokens_per_block > 0 ? kernel_tokens_per_block : target_tokens_per_block;
+    }();
+
     GptModelInitParams model_init_params(
         {params.gpt_weights,
          genModelDescription(params.model_config_, params.parallelism_config, params.eplb_config, params.moe_config),
@@ -183,8 +194,8 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
          mla_ops_type,
          params.model_config_.max_seq_len,
          params.model_config_.hidden_size,
-         params.model_config_.attn_config.tokens_per_block,
-         params.model_config_.attn_config.kernel_tokens_per_block,
+         target_tokens_per_block,
+         target_kernel_tokens_per_block,
          kv_cache_group_num,
          kv_cache_layer_to_group,
          cache_manager});
@@ -197,7 +208,7 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
     if (!params.py_model.is_none()) {
         RTP_LLM_LOG_INFO("init executor with python model");
         model_.reset(new PyWrappedModel(
-            model_init_params, params.py_model, false, true, target_cache_layer_layout.layer_to_groups));
+            model_init_params, params.py_model, false, true));
     }
 
     // when warmup, cache manager maybe nullptr
@@ -213,6 +224,17 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
     cudaProfilerBegin();
 
     for (auto& mtp_params : *propose_params->mtp_model_params_) {
+        const auto draft_tokens_per_block = cache_manager ? cache_manager->cacheConfig().seq_size_per_block :
+                                                          mtp_params->model_config_.attn_config.tokens_per_block;
+        const auto draft_kernel_tokens_per_block = [&]() {
+            if (cache_manager) {
+                const auto kernel_seq_size_per_block = cache_manager->cacheConfig().kernel_seq_size_per_block;
+                return kernel_seq_size_per_block > 0 ? kernel_seq_size_per_block : draft_tokens_per_block;
+            }
+            const auto kernel_tokens_per_block = mtp_params->model_config_.attn_config.kernel_tokens_per_block;
+            return kernel_tokens_per_block > 0 ? kernel_tokens_per_block : draft_tokens_per_block;
+        }();
+
         auto model_params =
             GptModelInitParams({mtp_params->gpt_weights,
                                 Executor::genModelDescription(mtp_params->model_config_,
@@ -231,15 +253,15 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
                                 mla_ops_type,
                                 mtp_params->model_config_.max_seq_len,
                                 mtp_params->model_config_.hidden_size,
-                                mtp_params->model_config_.attn_config.tokens_per_block,
-                                mtp_params->model_config_.attn_config.kernel_tokens_per_block,
+                                draft_tokens_per_block,
+                                draft_kernel_tokens_per_block,
                                 kv_cache_group_num,
                                 kv_cache_layer_to_group,
                                 cache_manager});
         if (!params.py_sp_model.is_none()) {
             RTP_LLM_LOG_INFO("[speculative decoding] using py model");
             draft_model_.reset(new PyWrappedModel(
-                model_params, params.py_sp_model, false, false, draft_cache_layer_layout.layer_to_groups));
+                model_params, params.py_sp_model, false, false));
             // Create separate model for speculative prefill with CUDA graph if enabled (from params)
             const bool enable_cuda_graph = params.hw_kernel_config.enable_cuda_graph;
             RTP_LLM_LOG_INFO(
@@ -249,23 +271,26 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
                 RTP_LLM_LOG_INFO(
                     "[speculative decoding] creating separate prefill draft model with CUDA graph support");
                 sp_prefill_draft_model_.reset(new PyWrappedModel(
-                    model_params, params.py_sp_model, true, false, draft_cache_layer_layout.layer_to_groups));
+                    model_params, params.py_sp_model, true, false));
             }
         }
         break;  // NOTE: only support one mtp model now
     }
 
-    target_kv_cache_layer_to_group =
-        torch::empty({(int64_t)target_cache_layer_layout.layers_to_kv_buffer_ptrs.size()}, torch::kInt32);
-    draft_kv_cache_layer_to_group =
-        torch::empty({(int64_t)draft_cache_layer_layout.layers_to_kv_buffer_ptrs.size()}, torch::kInt32);
-
-    memcpy(target_kv_cache_layer_to_group.data_ptr<int>(),
-           target_cache_layer_layout.layer_to_groups.data(),
-           target_cache_layer_layout.layer_to_groups.size() * sizeof(int));
-    memcpy(draft_kv_cache_layer_to_group.data_ptr<int>(),
-           draft_cache_layer_layout.layer_to_groups.data(),
-           draft_cache_layer_layout.layer_to_groups.size() * sizeof(int));
+    auto buildLayerToGroupTensor = [](const std::vector<std::vector<int>>& layer_to_group_ids) -> torch::Tensor {
+        auto t   = torch::empty({(int64_t)layer_to_group_ids.size()}, torch::kInt32);
+        auto ptr = t.data_ptr<int>();
+        for (size_t i = 0; i < layer_to_group_ids.size(); ++i) {
+            RTP_LLM_CHECK_WITH_INFO(layer_to_group_ids[i].size() <= 1,
+                                    "mtp layer %zu owns %zu cache groups; layer-to-group tensor expects one primary group",
+                                    i,
+                                    layer_to_group_ids[i].size());
+            ptr[i] = layer_to_group_ids[i].empty() ? 0 : layer_to_group_ids[i].front();
+        }
+        return t;
+    };
+    target_kv_cache_layer_to_group = buildLayerToGroupTensor(target_cache_layer_layout.layer_to_group_ids);
+    draft_kv_cache_layer_to_group  = buildLayerToGroupTensor(draft_cache_layer_layout.layer_to_group_ids);
 }
 
 /*

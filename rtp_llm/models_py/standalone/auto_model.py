@@ -234,7 +234,7 @@ class AutoModel:
         attention_inputs = self._prepare_prefill_attention_inputs(input_length)
         model_inputs = PyModelInputs(
             input_ids=input_ids,
-            attention_inputs=attention_inputs,
+            attn_inputs_list=[attention_inputs],
         )
         model_outputs = self.model.forward(model_inputs)
         next_token_id = self._sample_next_token(model_outputs, sampling_params)
@@ -252,7 +252,7 @@ class AutoModel:
             )
             model_inputs = PyModelInputs(
                 input_ids=next_token_id,
-                attention_inputs=attention_inputs,
+                attn_inputs_list=[attention_inputs],
             )
             model_outputs = self.model.forward(model_inputs)
             next_token_id = self._sample_next_token(model_outputs, sampling_params)

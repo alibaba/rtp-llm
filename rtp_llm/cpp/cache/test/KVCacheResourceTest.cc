@@ -59,12 +59,25 @@ TEST(KVCacheResourceTest, InitGroups_RespectsGroupTypesAndBlocksPerKvBlock) {
     KVCacheResource resource;
     resource.initGroups(/*group_num=*/2,
                         /*layer_num=*/3,
-                        /*layer_to_group_id=*/{0, 1, 0},
+                        /*layer_group_ids=*/{{0}, {1}, {0}},
                         /*kernel_blocks_per_kv_block=*/4,
                         /*group_types=*/{CacheGroupType::FULL, CacheGroupType::LINEAR});
 
     ASSERT_EQ(resource.groupNums(), 2);
-    ASSERT_EQ(resource.layerBlocks().size(), 3u);
+    EXPECT_ANY_THROW((void)resource.layerBlocks());
+    ASSERT_EQ(resource.layerGroupBlocks().size(), 3u);
+
+    KVCacheResource single_group_resource;
+    single_group_resource.initGroups(/*group_num=*/1,
+                                     /*layer_num=*/3,
+                                     /*layer_group_ids=*/{{0}, {0}, {0}},
+                                     /*kernel_blocks_per_kv_block=*/4,
+                                     /*group_types=*/{CacheGroupType::FULL});
+    auto layer_blocks = single_group_resource.layerBlocks();
+    ASSERT_EQ(layer_blocks.size(), 3u);
+    ASSERT_EQ(layer_blocks[0], single_group_resource.groupBlocks()[0]);
+    ASSERT_EQ(layer_blocks[1], single_group_resource.groupBlocks()[0]);
+    ASSERT_EQ(layer_blocks[2], single_group_resource.groupBlocks()[0]);
 
     auto& g0 = resource.mutableBlockIds(0);
     auto& g1 = resource.mutableBlockIds(1);
@@ -98,7 +111,7 @@ TEST(BatchKVCacheResourceTest, BasicBatchOperations_WorkAsExpected) {
     batch.resetBatchSize(2);
     batch.initGroups(/*group_nums=*/2,
                      /*layer_num=*/3,
-                     /*layer_to_group_id=*/{0, 1, 0},
+                     /*layer_group_ids=*/{{0}, {1}, {0}},
                      /*kernel_blocks_per_kv_block=*/4,
                      /*group_types=*/{CacheGroupType::FULL, CacheGroupType::LINEAR});
 
@@ -139,7 +152,7 @@ TEST(BatchKVCacheResourceTest, BasicBatchOperations_WorkAsExpected) {
     KVCacheResource moved;
     moved.initGroups(/*group_num=*/1,
                      /*layer_num=*/1,
-                     /*layer_to_group_id=*/{0},
+                     /*layer_group_ids=*/{{0}},
                      /*kernel_blocks_per_kv_block=*/2,
                      /*group_types=*/{CacheGroupType::FULL});
     moved.mutableBlockIds(0).add(BlockIndicesType{3});

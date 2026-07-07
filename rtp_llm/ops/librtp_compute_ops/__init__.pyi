@@ -177,6 +177,8 @@ class ParamsBase:
         """
 
 class PyAttentionInputs:
+    cache_group_id: int
+    cache_group_tag: str
     cache_store_inputs: PyCacheStoreInputs | None
     combo_position_ids: torch.Tensor
     context_parallel_info: PyContextParallelParams | None
@@ -192,9 +194,7 @@ class PyAttentionInputs:
     is_s_padded: bool
     is_target_verify: bool
     kv_cache_block_id_device: torch.Tensor
-    kv_cache_kernel_block_id_device_by_group: list[torch.Tensor]
     kv_cache_block_id: torch.Tensor
-    kv_cache_kernel_block_id_by_group: list[torch.Tensor]
     kv_cache_kernel_block_id_device: torch.Tensor
     kv_cache_kernel_block_id: torch.Tensor
     kv_cache_layer_to_group: torch.Tensor
@@ -268,17 +268,17 @@ class PyModelInputs:
         combo_position_ids: torch.Tensor = ...,
         embedding_inputs: PyEmbeddingInputs = ...,
         multimodal_inputs: PyMultimodalInputs = ...,
-        attention_inputs: PyAttentionInputs = ...,
         bert_embedding_inputs: BertEmbeddingInputs = ...,
+        attn_inputs_list: list[PyAttentionInputs] = ...,
     ) -> None: ...
     @property
-    def attention_inputs(self) -> PyAttentionInputs:
+    def attn_inputs_list(self) -> list[PyAttentionInputs]:
         """
-        Attention inputs structure
+        Per-cache-group attention inputs
         """
 
-    @attention_inputs.setter
-    def attention_inputs(self, arg0: PyAttentionInputs) -> None: ...
+    @attn_inputs_list.setter
+    def attn_inputs_list(self, arg0: list[PyAttentionInputs]) -> None: ...
     @property
     def bert_embedding_inputs(self) -> BertEmbeddingInputs:
         """

@@ -11,6 +11,7 @@
 #include "rtp_llm/cpp/model_utils/layernorm_types.h"
 #include "rtp_llm/cpp/config/ModelConfig.h"
 #include "rtp_llm/cpp/config/EplbConfig.h"
+#include "rtp_llm/cpp/cache/KVCacheSpecDesc.h"
 #include "rtp_llm/cpp/model_utils/RopeCache.h"
 #include "pybind11/pybind11.h"
 #include "pybind11/cast.h"
@@ -112,6 +113,11 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .value("STATS", EplbMode::STATS)
         .value("EPLB", EplbMode::EPLB)
         .value("ALL", EplbMode::ALL);
+
+    py::enum_<KVCacheSpecType>(m, "KVCacheSpecType")
+        .value("MHA", KVCacheSpecType::MultiHeadAttention)
+        .value("MLA", KVCacheSpecType::MultiHeadLatentAttention)
+        .value("LINEAR", KVCacheSpecType::LinearAttention);
 
     py::enum_<CPRotateMethod>(m, "CPRotateMethod")
         .value("DISABLED", CPRotateMethod::DISABLED)
@@ -1454,6 +1460,12 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("include_sep_tokens", &MMModelConfig::include_sep_tokens)
         .def_readwrite("mm_position_ids_style", &MMModelConfig::mm_position_ids_style);
 
+    py::class_<KVCacheSpecDesc>(m, "KVCacheSpecDesc")
+        .def(py::init<>())
+        .def_readwrite("tag", &KVCacheSpecDesc::tag)
+        .def_readwrite("cache_type", &KVCacheSpecDesc::cache_type)
+        .def_readwrite("dtype", &KVCacheSpecDesc::dtype);
+
     // Register ModelConfig
     py::class_<ModelConfig>(m, "ModelConfig")
         .def(py::init<>())
@@ -1468,6 +1480,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("special_tokens", &ModelConfig::special_tokens)
         .def_readwrite("quant_algo", &ModelConfig::quant_algo)
         .def_readwrite("eplb_config", &ModelConfig::eplb_config)
+        .def_readwrite("kv_cache_spec_descs", &ModelConfig::kv_cache_spec_descs)
         // task_type is defined as property below
         .def_readwrite("ckpt_path", &ModelConfig::ckpt_path)
         .def_readwrite("tokenizer_path", &ModelConfig::tokenizer_path)
