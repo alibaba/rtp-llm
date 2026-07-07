@@ -6516,7 +6516,11 @@ __global__ void dsv4CpDistributedPrefillAttentionKernel(const scalar_t* __restri
 }
 
 
-template<typename scalar_t, bool GroupedOnly = false, int StaticCompressRatio = 0, bool StaticSplitK = true>
+template<typename scalar_t,
+         bool GroupedOnly = false,
+         int StaticCompressRatio = 0,
+         bool StaticSplitK = true,
+         bool StaticDualHeadTask = false>
 __global__ __launch_bounds__(kMegaBlockThreads, 1) void dsv4CpDistributedPrefillMegaAttentionKernel(const scalar_t* __restrict__ q,
                                                         const scalar_t* __restrict__ kv,
                                                         const scalar_t* __restrict__ indexer_q,
@@ -7302,7 +7306,8 @@ __global__ __launch_bounds__(kMegaBlockThreads, 1) void dsv4CpDistributedPrefill
             const int lane_id = tid & (kMegaAttentionWarpSize - 1);
             const int head = h + warp_id;
             const int head_second = head + kMegaAttentionHeadsPerCta;
-            const int use_dual_head_task = heads_per_task == 2 * kMegaAttentionHeadsPerCta ? 1 : 0;
+            const int use_dual_head_task =
+                StaticDualHeadTask ? 1 : (heads_per_task == 2 * kMegaAttentionHeadsPerCta ? 1 : 0);
             float q_values[kMegaAttentionDimsPerWarp];
             float acc[kMegaAttentionDimsPerWarp];
             float q_values_second[kMegaAttentionDimsPerWarp];
@@ -8925,6 +8930,10 @@ torch::Tensor launchDsv4CpDistributedPrefillAttention(const torch::Tensor& q,
         (!enable_split_k_attention && host_use_grouped_attention && (H % (2 * kMegaAttentionHeadsPerCta)) == 0) ?
             2 * kMegaAttentionHeadsPerCta :
             kMegaAttentionHeadsPerCta;
+    const bool host_static_dual_head_task =
+        host_use_grouped_attention && !enable_split_k_attention
+        && host_grouped_heads_per_task == 2 * kMegaAttentionHeadsPerCta
+        && compress_ratio == 128;
     const int64_t host_head_task_count =
         host_use_grouped_attention ? H / host_grouped_heads_per_task : H;
     const int64_t semantic_task_count = local_rows.size(0) * host_head_task_count;
@@ -8967,7 +8976,11 @@ torch::Tensor launchDsv4CpDistributedPrefillAttention(const torch::Tensor& q,
     } else if (q.scalar_type() == torch::kBFloat16) {
         if (use_mega_kernel && mega_dynamic_smem_bytes > 0) {
             if (host_use_grouped_attention) {
-                if (!enable_split_k_attention && compress_ratio == 128) {
+                if (host_static_dual_head_task && compress_ratio == 128) {
+                    AT_CUDA_CHECK(cudaFuncSetAttribute(dsv4CpDistributedPrefillMegaAttentionKernel<c10::BFloat16, true, 128, false, true>,
+                                                       cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                                       static_cast<int>(mega_dynamic_smem_bytes)));
+                } else if (!enable_split_k_attention && compress_ratio == 128) {
                     AT_CUDA_CHECK(cudaFuncSetAttribute(dsv4CpDistributedPrefillMegaAttentionKernel<c10::BFloat16, true, 128, false>,
                                                        cudaFuncAttributeMaxDynamicSharedMemorySize,
                                                        static_cast<int>(mega_dynamic_smem_bytes)));
@@ -8988,7 +9001,13 @@ torch::Tensor launchDsv4CpDistributedPrefillAttention(const torch::Tensor& q,
         }
         cudaError_t occ_err = cudaSuccess;
         if (host_use_grouped_attention) {
-            if (!enable_split_k_attention && compress_ratio == 128) {
+            if (host_static_dual_head_task && compress_ratio == 128) {
+                occ_err = cudaOccupancyMaxActiveBlocksPerMultiprocessor(
+                    &mega_active_blocks_per_sm,
+                    dsv4CpDistributedPrefillMegaAttentionKernel<c10::BFloat16, true, 128, false, true>,
+                    static_cast<int>(block.x),
+                    mega_dynamic_smem_bytes);
+            } else if (!enable_split_k_attention && compress_ratio == 128) {
                 occ_err = cudaOccupancyMaxActiveBlocksPerMultiprocessor(
                     &mega_active_blocks_per_sm,
                     dsv4CpDistributedPrefillMegaAttentionKernel<c10::BFloat16, true, 128, false>,
@@ -9285,7 +9304,15 @@ torch::Tensor launchDsv4CpDistributedPrefillAttention(const torch::Tensor& q,
             int active_blocks = -1;
             cudaError_t occ_err = cudaSuccess;
             if (host_use_grouped_attention) {
-                if (!enable_split_k_attention && compress_ratio == 128) {
+                if (host_static_dual_head_task && compress_ratio == 128) {
+                    attr_err = cudaFuncGetAttributes(
+                        &attr, dsv4CpDistributedPrefillMegaAttentionKernel<c10::BFloat16, true, 128, false, true>);
+                    occ_err = cudaOccupancyMaxActiveBlocksPerMultiprocessor(
+                        &active_blocks,
+                        dsv4CpDistributedPrefillMegaAttentionKernel<c10::BFloat16, true, 128, false, true>,
+                        static_cast<int>(block.x),
+                        0);
+                } else if (!enable_split_k_attention && compress_ratio == 128) {
                     attr_err = cudaFuncGetAttributes(
                         &attr, dsv4CpDistributedPrefillMegaAttentionKernel<c10::BFloat16, true, 128, false>);
                     occ_err = cudaOccupancyMaxActiveBlocksPerMultiprocessor(
@@ -9336,8 +9363,8 @@ torch::Tensor launchDsv4CpDistributedPrefillAttention(const torch::Tensor& q,
             std::fflush(stderr);
         }
         if (use_mega_kernel) {
-#define DSV4_LAUNCH_MEGA_BF16(GROUPED_ONLY, STATIC_COMPRESS_RATIO, STATIC_SPLIT_K)                                      \
-            dsv4CpDistributedPrefillMegaAttentionKernel<c10::BFloat16, GROUPED_ONLY, STATIC_COMPRESS_RATIO, STATIC_SPLIT_K> \
+#define DSV4_LAUNCH_MEGA_BF16(GROUPED_ONLY, STATIC_COMPRESS_RATIO, STATIC_SPLIT_K, STATIC_DUAL_HEAD_TASK)               \
+            dsv4CpDistributedPrefillMegaAttentionKernel<c10::BFloat16, GROUPED_ONLY, STATIC_COMPRESS_RATIO, STATIC_SPLIT_K, STATIC_DUAL_HEAD_TASK> \
                 <<<grid, block, mega_dynamic_smem_bytes, stream>>>(                                                     \
                 q.data_ptr<c10::BFloat16>(),                                                                          \
                 gathered_kv.data_ptr<c10::BFloat16>(),                                                                \
@@ -9413,15 +9440,17 @@ torch::Tensor launchDsv4CpDistributedPrefillAttention(const torch::Tensor& q,
                 splitk_keys_per_block,                                                                                \
                 csa_score_prebuild_stride);
             if (host_use_grouped_attention) {
-                if (!enable_split_k_attention && compress_ratio == 128) {
-                    DSV4_LAUNCH_MEGA_BF16(true, 128, false);
+                if (host_static_dual_head_task && compress_ratio == 128) {
+                    DSV4_LAUNCH_MEGA_BF16(true, 128, false, true);
+                } else if (!enable_split_k_attention && compress_ratio == 128) {
+                    DSV4_LAUNCH_MEGA_BF16(true, 128, false, false);
                 } else if (!enable_split_k_attention && compress_ratio == 4) {
-                    DSV4_LAUNCH_MEGA_BF16(true, 4, false);
+                    DSV4_LAUNCH_MEGA_BF16(true, 4, false, false);
                 } else {
-                    DSV4_LAUNCH_MEGA_BF16(true, 0, true);
+                    DSV4_LAUNCH_MEGA_BF16(true, 0, true, false);
                 }
             } else {
-                DSV4_LAUNCH_MEGA_BF16(false, 0, true);
+                DSV4_LAUNCH_MEGA_BF16(false, 0, true, false);
             }
 #undef DSV4_LAUNCH_MEGA_BF16
         } else {
