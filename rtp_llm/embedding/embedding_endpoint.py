@@ -94,12 +94,25 @@ class EmbeddingEndpoint(object):
         def as_dict(value):
             return value if isinstance(value, dict) else {}
 
+        def as_bool(value, default=False):
+            if isinstance(value, bool):
+                return value
+            if isinstance(value, str):
+                return value.lower() in ("true", "1", "yes")
+            return bool(value) if value is not None else default
+
+        def as_int(value, default=1):
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                return default
+
         extra_configs = as_dict(request.get("extra_configs"))
         generate_config = as_dict(request.get("generate_config"))
         config = {**extra_configs, **generate_config}
         return {
-            "gen_timeline": bool(config.get("gen_timeline", False)),
-            "profile_step": int(config.get("profile_step", 1)),
+            "gen_timeline": as_bool(config.get("gen_timeline", False)),
+            "profile_step": as_int(config.get("profile_step", 1)),
             "profile_trace_name": str(config.get("profile_trace_name", "")),
         }
 
