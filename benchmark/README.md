@@ -71,7 +71,7 @@ Omit `--device` to use `auto`, which selects CUDA when available and CPU
 otherwise.
 
 Example WSL output on an RTX 4060 Laptop GPU, matching the script's Markdown
-table format:
+table format with one leading pipe per row:
 
 ```text
 | seq_len | selected_tokens | dense_sdpa_ms | sparse_selected_ms | speedup |

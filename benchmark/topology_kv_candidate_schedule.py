@@ -128,8 +128,6 @@ def _append_unique(target: List[int], seen: Set[int], values: Iterable[int], lim
 
 def _build_drift_score_values(key_block_centroids: torch.Tensor) -> List[float]:
     drift_centroids = key_block_centroids.detach()
-    if drift_centroids.device.type != "cpu":
-        drift_centroids = drift_centroids.to("cpu")
     if drift_centroids.shape[0] == 1:
         drift_scores = torch.zeros(1, device=drift_centroids.device)
     else:
@@ -143,7 +141,7 @@ def _build_drift_score_values(key_block_centroids: torch.Tensor) -> List[float]:
                 ),
             ]
         )
-    return drift_scores.tolist()
+    return drift_scores.cpu().tolist()
 
 
 def _build_candidate_row(
@@ -236,11 +234,12 @@ def build_block_candidate_schedule(
     """Build rectangular causal candidate block rows from key-block centroids.
 
     The schedule is intentionally backend-neutral: each row contains request-local
-    block ids and is padded with -1. Candidate priority is the query block, sink
-    blocks, remaining local causal blocks, then high-drift blocks. The high-drift
-    score is a cheap change-point proxy: blocks where the centroid moves sharply
-    from the previous block are treated as distinctive witness blocks worth
-    replaying.
+    block ids and is padded with -1. Selection priority is the query block, sink
+    blocks, remaining local causal blocks, then high-drift blocks; returned rows
+    are sorted by block id before padding for stable rectangular expansion. The
+    high-drift score is a cheap change-point proxy: blocks where the centroid
+    moves sharply from the previous block are treated as distinctive witness
+    blocks worth replaying.
     """
 
     _validate_config(config)
