@@ -21,6 +21,18 @@ cc_library(
 )
 
 cc_library(
+    name = "nccl_window_mem",
+    srcs = ["NcclWindowMem.cc"],
+    deps = torch_deps() + [
+        "@local_config_cuda//cuda:cuda_headers",
+    ],
+    copts = copts(),
+    linkopts = ["-lnccl"],
+    visibility = ["//visibility:public"],
+    alwayslink = 1,
+)
+
+cc_library(
     name = "register_ops_hdr",
     hdrs = [
         "RegisterOps.h",

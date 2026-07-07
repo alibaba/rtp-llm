@@ -11,6 +11,10 @@
 #if USING_CUDA || USING_ROCM
 #endif
 
+namespace torch_ext {
+void registerPyNcclWindowMem(pybind11::module& m);
+}
+
 namespace rtp_llm {
 void registerExecCtxOps(pybind11::module& m);
 using namespace torch_ext;
@@ -21,6 +25,9 @@ PYBIND11_MODULE(librtp_compute_ops, m) {
 #endif
 
     registerPyOpDefs(m);
+#if USING_CUDA
+    torch_ext::registerPyNcclWindowMem(m);
+#endif
 
     py::module rtp_ops_m = m.def_submodule("rtp_llm_ops", "rtp llm custom ops");
     registerPyModuleOps(rtp_ops_m);

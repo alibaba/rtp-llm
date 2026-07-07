@@ -36,6 +36,7 @@ _initialized: bool = False  # Track if we've initialized (to prevent double init
 _cpu_tp_broadcaster_base_path: Optional[str] = None
 _rocm_rccl = None
 _symm_mem = None
+_nccl_window_mem = None
 
 
 def _get_rocm_rccl():
@@ -57,6 +58,15 @@ def _get_symm_mem():
 
         _symm_mem = symm_mem
     return _symm_mem
+
+
+def _get_nccl_window_mem():
+    global _nccl_window_mem
+    if _nccl_window_mem is None:
+        from rtp_llm.models_py.distributed import nccl_window_mem
+
+        _nccl_window_mem = nccl_window_mem
+    return _nccl_window_mem
 
 
 def _make_cpu_tp_broadcaster_base_path(
@@ -556,6 +566,9 @@ def destroy_distributed_environment():
     from rtp_llm.models_py.utils.arch import is_cuda
 
     if is_cuda():
+        nccl_window_mem = _get_nccl_window_mem()
+        nccl_window_mem.destroy_nccl_window_communicators()
+
         from rtp_llm.models_py.distributed.user_buffers import (
             destroy_user_buffers_communicator,
         )

@@ -36,6 +36,16 @@ py_test(
 )
 
 py_test(
+    name = "nccl_window_mem_test",
+    srcs = ["nccl_window_mem_test.py"],
+    deps = [
+        "//rtp_llm:testlib",
+        "//rtp_llm/models_py/distributed:nccl_window_mem",
+    ],
+    timeout = "short",
+)
+
+py_test(
    name = "user_buffers_test",
    srcs = ["user_buffers_test.py"],
    deps = [

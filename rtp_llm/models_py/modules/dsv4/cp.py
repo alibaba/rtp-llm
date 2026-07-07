@@ -253,12 +253,23 @@ class CudaAsyncCPGatherImpl:
         try:
             with torch.cuda.stream(gather_stream):
                 with record_function_range(f"{profile_name}.launch"):
-                    work = torch.distributed.all_gather_into_tensor(
-                        gathered,
+                    work = None
+                    window_result = None
+                    nccl_window_mem = collective_torch._get_nccl_window_mem()
+                    window_result = nccl_window_mem.try_window_allgather(
                         local_2d,
-                        group=process_group,
-                        async_op=True,
+                        process_group,
+                        key=f"dsv4_cp_{cp_role}",
                     )
+                    if window_result is not None:
+                        gathered = window_result
+                    else:
+                        work = torch.distributed.all_gather_into_tensor(
+                            gathered,
+                            local_2d,
+                            group=process_group,
+                            async_op=True,
+                        )
                     completion_event = torch.cuda.Event()
                     completion_event.record(gather_stream)
         except Exception as exc:
@@ -286,7 +297,8 @@ class CudaAsyncCPGatherImpl:
         current_stream = torch.cuda.current_stream(handle.gathered.device)
         with record_function_range(f"{handle.profile_name}.wait_host"):
             current_stream.wait_event(handle.completion_event)
-            handle.work.wait()
+            if handle.work is not None:
+                handle.work.wait()
         # Restore destination: the per-forward workspace restore scratch
         # (non-prefix path) instead of a fresh per-layer ``index_select``
         # output. The prefix fast-path returns a view of ``gathered`` and

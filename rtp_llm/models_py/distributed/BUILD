@@ -10,6 +10,16 @@ py_library(
         "symm_mem.py",
     ],
     deps = [
+        ":nccl_window_mem",
+        "//rtp_llm:torch",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+py_library(
+    name = "nccl_window_mem",
+    srcs = ["nccl_window_mem.py"],
+    deps = [
         "//rtp_llm:torch",
     ],
     visibility = ["//visibility:public"],
