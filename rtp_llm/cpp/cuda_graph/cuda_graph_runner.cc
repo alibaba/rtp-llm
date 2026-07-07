@@ -44,6 +44,26 @@ void optimizedCopyAsync(const torch::Tensor& src, torch::Tensor& dst, size_t siz
     }
 }
 
+bool hasHybridBlockMaps(const PyAttentionInputs& attn_inputs) {
+    return !attn_inputs.kv_cache_kernel_block_id_device_by_group.empty()
+           && !attn_inputs.kv_cache_kernel_block_id_host_by_group.empty();
+}
+
+void selectActiveHybridBlockMapForGroup(PyAttentionInputs& attn_inputs, int32_t group_id) {
+    if (group_id < 0 || !hasHybridBlockMaps(attn_inputs)) {
+        return;
+    }
+
+    const auto group = static_cast<size_t>(group_id);
+    RTP_LLM_CHECK_WITH_INFO(group < attn_inputs.kv_cache_kernel_block_id_device_by_group.size(),
+                            "full kv cache group id out of range for device block map");
+    RTP_LLM_CHECK_WITH_INFO(group < attn_inputs.kv_cache_kernel_block_id_host_by_group.size(),
+                            "full kv cache group id out of range for host block map");
+
+    attn_inputs.kv_cache_kernel_block_id_device = attn_inputs.kv_cache_kernel_block_id_device_by_group[group];
+    attn_inputs.kv_cache_kernel_block_id_host   = attn_inputs.kv_cache_kernel_block_id_host_by_group[group];
+}
+
 void CudaGraphRunner::prepareInputs(const PyModelInputs& inputs, CudaGraphState& state) {
     RTP_LLM_PROFILE_SCOPE("cuda_graph.prepareInputs");
     // 1. non spec cuda graph:
@@ -280,6 +300,7 @@ void CudaGraphRunner::prepareInputs(const PyModelInputs& inputs, CudaGraphState&
     // launch prepare_cuda_graph when attention inputs are ready
     {
         RTP_LLM_PROFILE_SCOPE("cuda_graph.prepareInputs(prepare_cuda_graph)");
+        selectActiveHybridBlockMapForGroup(py_model_inputs_.attention_inputs, full_kv_cache_group_id_);
         attn_pyobj.attr("prepare_cuda_graph")(py_model_inputs_.attention_inputs);
     }
 }
@@ -480,6 +501,7 @@ void CudaGraphRunner::initCaptureAttentionInputs(PyModelInputs& inputs, int max_
             inputs.attention_inputs.kv_cache_kernel_block_id_host_by_group.push_back(
                 torch::zeros({int(max_bs_), max_blocks}, options_cpu_int32_).pin_memory());
         }
+        selectActiveHybridBlockMapForGroup(inputs.attention_inputs, full_kv_cache_group_id_);
     }
 
     // prefix_lengths [batch_size, int32] (for attention `prepare`)
@@ -774,6 +796,7 @@ void CudaGraphRunner::prepareCaptureInputs(PyModelInputs& inputs, int batch_size
             inputs.attention_inputs.kv_cache_kernel_block_id_host_by_group.push_back(
                 cap_attn.kv_cache_kernel_block_id_host_by_group[g].slice(0, 0, batch_size));
         }
+        selectActiveHybridBlockMapForGroup(inputs.attention_inputs, full_kv_cache_group_id_);
     }
 
     // Common direct assignments (no slice needed)

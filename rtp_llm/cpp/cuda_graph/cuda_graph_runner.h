@@ -35,7 +35,8 @@ public:
         decode_capture_batch_sizes_(graph_params.decode_capture_batch_sizes),
         model_data_type_(graph_params.model_data_type),
         kv_cache_layer_to_group_(graph_params.kv_cache_layer_to_group),
-        kv_cache_group_num_(graph_params.kv_cache_group_num) {
+        kv_cache_group_num_(graph_params.kv_cache_group_num),
+        full_kv_cache_group_id_(graph_params.full_kv_cache_group_id) {
         py::gil_scoped_acquire gil;
         if (!py_instance_ || py_instance_.is_none()) {
             throw std::runtime_error("CudaGraphRunner constructor: Python instance is null or none.");
@@ -51,7 +52,7 @@ public:
         options_cuda_float_ = torch::TensorOptions().dtype(model_data_type_).device(torch::kCUDA).requires_grad(false);
         RTP_LLM_LOG_INFO("Initialize CudaGraphRunner with parameters below: \n \
             enable_cuda_graph_: %d, max_bs_: %d, enable_cuda_graph_debug_mode_: %d, max_seq_len_: %d, kernel_seq_size_per_block_: %d, \
-            hidden_size_: %d, num_tokens_per_bs_: %d, is_prefill_cuda_graph_mode_: %d, is_target_verify_: %d",
+            hidden_size_: %d, num_tokens_per_bs_: %d, is_prefill_cuda_graph_mode_: %d, is_target_verify_: %d, full_kv_cache_group_id_: %d",
                          enable_cuda_graph_,
                          max_bs_,
                          enable_cuda_graph_debug_mode_,
@@ -60,7 +61,8 @@ public:
                          hidden_size_,
                          num_tokens_per_bs_,
                          is_prefill_cuda_graph_mode_,
-                         is_target_verify_);
+                         is_target_verify_,
+                         full_kv_cache_group_id_);
     }
 
     ~CudaGraphRunner() {
@@ -151,6 +153,7 @@ private:
 
     std::vector<int32_t> kv_cache_layer_to_group_;
     int32_t              kv_cache_group_num_ = 0;
+    int32_t              full_kv_cache_group_id_ = -1;
 
     // event to record forward done
     torch::Event forward_event_ = cuda_graph::makeGraphEvent();

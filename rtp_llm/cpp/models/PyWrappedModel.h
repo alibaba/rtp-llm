@@ -173,6 +173,16 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
     py_model_                 = py_instance;
     auto py_initialize_method = py_model_.attr("initialize");
     py_init_result            = py_initialize_method(init_resources);
+    int32_t full_kv_cache_group_id = -1;
+    if (params.kv_cache_layer_layout.has_value()) {
+        const auto& layout = params.kv_cache_layer_layout.value();
+        for (size_t i = 0; i < layout.group_types.size(); ++i) {
+            if (layout.group_types[i] == CacheGroupType::FULL) {
+                full_kv_cache_group_id = static_cast<int32_t>(i);
+                break;
+            }
+        }
+    }
     if (enable_cuda_graph_) {
 #if USING_CUDA || USING_ROCM
         c10::ScalarType dtype = dataTypeToTorchType(description_.data_type);
@@ -191,6 +201,7 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         graph_params.prefill_capture_seq_lens     = params.hw_kernel_config.prefill_capture_seq_lens;
         graph_params.decode_capture_batch_sizes   = params.hw_kernel_config.decode_capture_batch_sizes;
         graph_params.kv_cache_group_num           = params.kv_cache_group_num;
+        graph_params.full_kv_cache_group_id       = full_kv_cache_group_id;
 
         if (kv_cache_layer_to_group.size() > 0) {
             graph_params.kv_cache_layer_to_group = kv_cache_layer_to_group;
