@@ -351,10 +351,22 @@ std::string BatchDecodeSchedulerConfig::to_string() const {
 }
 
 // FIFOSchedulerConfig
+PDFusionSchedulerMode parsePDFusionSchedulerMode(const std::string& mode) {
+    if (mode.empty()) {
+        return PDFusionSchedulerMode::DEFAULT;
+    }
+    if (mode == "ratio") {
+        return PDFusionSchedulerMode::RATIO;
+    }
+    return PDFusionSchedulerMode::UNKNOWN;
+}
+
 std::string FIFOSchedulerConfig::to_string() const {
     std::ostringstream oss;
     oss << "max_context_batch_size: " << max_context_batch_size << "\n"
-        << "max_batch_tokens_size: " << max_batch_tokens_size;
+        << "max_batch_tokens_size: " << max_batch_tokens_size << "\n"
+        << "pdfusion_scheduler_mode: " << pdfusion_scheduler_mode << "\n"
+        << "decode_prefill_ratio: " << decode_prefill_ratio;
     return oss.str();
 }
 
