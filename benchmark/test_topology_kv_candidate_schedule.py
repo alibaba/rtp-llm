@@ -131,12 +131,12 @@ class TopologyKVCandidateScheduleTest(unittest.TestCase):
     @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required for speed testing")
     def test_sparse_attention_cuda_benchmark_is_faster_than_dense_sdpa(self):
         result = benchmark_decode_attention(
-            seq_len=8192,
+            seq_len=16384,
             selected_tokens=512,
             heads=16,
             head_dim=64,
-            rounds=25,
-            warmup=10,
+            rounds=60,
+            warmup=20,
             dtype=torch.float16,
             device="cuda",
         )

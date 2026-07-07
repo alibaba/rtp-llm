@@ -51,20 +51,23 @@ or indexer path and model-quality validation.
 
 ```bash
 python benchmark/topology_kv_candidate_schedule.py \
-  --seq-len 8192 \
-  --selected-tokens 256 512 1024 \
+  --seq-len 16384 \
+  --selected-tokens 128 256 512 1024 \
   --heads 16 \
   --head-dim 64 \
-  --rounds 50 \
+  --rounds 60 \
   --warmup 20 \
   --device cuda
 ```
 
-Example output:
+Example WSL output on an RTX 4060 Laptop GPU:
 
 ```text
 | seq_len | selected_tokens | dense_sdpa_ms | sparse_selected_ms | speedup |
 | ---: | ---: | ---: | ---: | ---: |
-| 8192 | 256 | 0.3740 | 0.0998 | 3.75x |
+| 16384 | 128 | 0.2867 | 0.1166 | 2.46x |
+| 16384 | 256 | 0.2857 | 0.1106 | 2.58x |
+| 16384 | 512 | 0.2853 | 0.1165 | 2.45x |
+| 16384 | 1024 | 0.2912 | 0.1346 | 2.16x |
 ```
 
