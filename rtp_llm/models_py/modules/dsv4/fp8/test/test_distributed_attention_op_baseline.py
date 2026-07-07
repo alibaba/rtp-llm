@@ -5747,21 +5747,21 @@ class DistributedAttentionTorchrunCandidateTest(unittest.TestCase):
             cp_rank=rank,
             spec=spec,
         )
-        actual = op(
-            local_q,
-            local_kv.view(1, chunk, 1, head_dim).contiguous(),
-            local_indexer_q,
-            torch.empty(1, 1, index_heads, index_dim, dtype=local_q.dtype, device=device),
-            torch.zeros(n_heads, dtype=torch.float32, device=device),
-            req_ids,
-            positions,
-            prefix_lengths,
-            input_lengths,
-            local_rows,
-            4,
-            512,
-            512,
-            compressed_region_width,
+        op_kwargs = dict(
+            q=local_q,
+            kv=local_kv.view(1, chunk, 1, head_dim).contiguous(),
+            indexer_q=local_indexer_q,
+            indexer_k=torch.empty(1, 1, index_heads, index_dim, dtype=local_q.dtype, device=device),
+            attn_sink=torch.zeros(n_heads, dtype=torch.float32, device=device),
+            req_id_per_token=req_ids,
+            position_ids=positions,
+            prefix_lengths=prefix_lengths,
+            input_lengths=input_lengths,
+            local_rows=local_rows,
+            compress_ratio=4,
+            window_size=512,
+            compressed_topk=512,
+            compressed_region_width=compressed_region_width,
             **buffer.op_kwargs(cp_rank=rank),
             swa_k=local_kv.contiguous(),
             swa_k_cache=swa_pool,
@@ -5825,9 +5825,37 @@ class DistributedAttentionTorchrunCandidateTest(unittest.TestCase):
             kv_unpad_restore=kv_unpad_restore,
             kv_cu_lens=kv_cu_lens,
         )
+        actual = op(**op_kwargs)
         self.assertEqual(tuple(actual.shape), (chunk, n_heads, head_dim))
         torch.cuda.synchronize()
         self.assertTrue(torch.isfinite(actual.float()).all().item())
+        if os.environ.get("DSV4_DIST_ATTN_PRINT_PERF", "0") == "1":
+            warmup = int(os.environ.get("DSV4_DIST_ATTN_PERF_WARMUP", "3"))
+            iters = int(os.environ.get("DSV4_DIST_ATTN_PERF_ITERS", "10"))
+            for _ in range(warmup):
+                _ = op(**op_kwargs)
+            torch.cuda.synchronize()
+            start = torch.cuda.Event(enable_timing=True)
+            end = torch.cuda.Event(enable_timing=True)
+            start.record()
+            for _ in range(iters):
+                _ = op(**op_kwargs)
+            end.record()
+            torch.cuda.synchronize()
+            ms = start.elapsed_time(end) / max(1, iters)
+            print(
+                json.dumps(
+                    {
+                        "case": "csa_4k_packed_pool",
+                        "rank": rank,
+                        "total_tokens": total_tokens,
+                        "chunk": chunk,
+                        "iters": iters,
+                        "candidate_ms": ms,
+                    },
+                    sort_keys=True,
+                )
+            )
 
     def test_torchrun_symm_mem_csa_4k_packed_pool_ncu_fixture(self) -> None:
         """NCU-only CSA fixture matching online packed-pool/symmetric-memory inputs."""
