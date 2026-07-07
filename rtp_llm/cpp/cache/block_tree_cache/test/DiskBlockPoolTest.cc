@@ -1,6 +1,8 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/host/DiskBlockIO.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/host/DiskBlockPool.h"
 
 #include <cstdio>
+#include <memory>
 #include <string>
 #include <sys/stat.h>
 #include <vector>
@@ -128,6 +130,195 @@ TEST(DiskBlockIOTest, BatchReadWriteLoopsAllRequests) {
 
     io.close();
     ::remove(path.c_str());
+}
+
+namespace {
+
+// physical_block_count = disk_size_bytes / stride_bytes = 4, so totalBlocksNum() (which
+// excludes reserved block 0) is 3.
+std::shared_ptr<DiskBlockPoolConfig> makeDiskConfig(const std::string& work_dir,
+                                                     size_t             disk_size_bytes = 4 * 4096,
+                                                     size_t             stride_bytes    = 4096,
+                                                     size_t             payload_bytes   = 1024,
+                                                     bool               buffered_io     = true) {
+    auto config                     = std::make_shared<DiskBlockPoolConfig>();
+    config->pool_type               = BlockPoolType::DISK;
+    config->pool_name                = "disk";
+    config->free_block_order_policy = FreeBlockOrderPolicy::ASCENDING_ORDER;
+    config->work_dir                = work_dir;
+    config->local_rank              = 0;
+    config->world_rank              = 0;
+    config->disk_size_bytes         = disk_size_bytes;
+    config->payload_bytes           = payload_bytes;
+    config->stride_bytes            = stride_bytes;
+    config->buffered_io             = buffered_io;
+    return config;
+}
+
+// A DiskBlockIO stub whose read/write always report PARTIAL_FAILURE, used to prove
+// that DiskBlockPool surfaces the underlying DiskBlockIOStatus -> BlockIOStatus
+// mapping faithfully instead of only ever returning OK/error-from-real-IO.
+class FailingDiskBlockIO: public DiskBlockIO {
+public:
+    DiskBlockIOStatus openAndPreallocate(const std::string&, size_t, bool) override {
+        return DiskBlockIOStatus::OK;
+    }
+    DiskBlockIOStatus read(uint64_t, void*, size_t) override {
+        return DiskBlockIOStatus::PARTIAL_FAILURE;
+    }
+    DiskBlockIOStatus write(uint64_t, const void*, size_t) override {
+        return DiskBlockIOStatus::PARTIAL_FAILURE;
+    }
+    DiskBlockIOStatus read(const std::vector<DiskRead>&) override {
+        return DiskBlockIOStatus::PARTIAL_FAILURE;
+    }
+    DiskBlockIOStatus write(const std::vector<DiskWrite>&) override {
+        return DiskBlockIOStatus::PARTIAL_FAILURE;
+    }
+    void close() override {}
+    std::string debugString() const override {
+        return "FailingDiskBlockIO";
+    }
+};
+
+}  // namespace
+
+TEST(DiskBlockPoolTest, InitPreallocatesFileAndSkipsOffsetZero) {
+    auto          config = makeDiskConfig(::testing::TempDir());
+    DiskBlockPool pool(config);
+    ASSERT_TRUE(pool.init());
+
+    struct stat st {};
+    ASSERT_EQ(::stat(pool.filePath().c_str(), &st), 0);
+    EXPECT_GE(static_cast<size_t>(st.st_size), config->disk_size_bytes);
+
+    // physical_block_count(4) - reserved block 0 = 3 usable blocks.
+    EXPECT_EQ(pool.totalBlocksNum(), 3u);
+    EXPECT_EQ(pool.blockOffset(0), 0u);
+
+    auto block = pool.malloc();
+    ASSERT_TRUE(block.has_value());
+    EXPECT_EQ(*block, 1);
+    EXPECT_EQ(pool.blockOffset(*block), pool.strideBytes());
+
+    ::remove(pool.filePath().c_str());
+}
+
+TEST(DiskBlockPoolTest, MallocReturnsAscendingBlocks) {
+    auto          config = makeDiskConfig(::testing::TempDir());
+    DiskBlockPool pool(config);
+    ASSERT_TRUE(pool.init());
+
+    auto b1 = pool.malloc();
+    auto b2 = pool.malloc();
+    auto b3 = pool.malloc();
+    ASSERT_TRUE(b1.has_value());
+    ASSERT_TRUE(b2.has_value());
+    ASSERT_TRUE(b3.has_value());
+    EXPECT_EQ(*b1, 1);
+    EXPECT_EQ(*b2, 2);
+    EXPECT_EQ(*b3, 3);
+
+    ::remove(pool.filePath().c_str());
+}
+
+TEST(DiskBlockPoolTest, ReadWriteRequireAllocatedBlock) {
+    auto          config = makeDiskConfig(::testing::TempDir());
+    DiskBlockPool pool(config);
+    ASSERT_TRUE(pool.init());
+
+    auto block = pool.malloc();
+    ASSERT_TRUE(block.has_value());
+
+    std::vector<unsigned char> data(pool.strideBytes(), 0x5a);
+    EXPECT_EQ(pool.write(*block, data.data(), data.size()), BlockIOStatus::OK);
+
+    std::vector<unsigned char> read_buf(pool.strideBytes(), 0);
+    EXPECT_EQ(pool.read(*block, read_buf.data(), read_buf.size()), BlockIOStatus::OK);
+    EXPECT_EQ(read_buf, data);
+
+    // bytes > stride_bytes -> INVALID_SIZE.
+    std::vector<unsigned char> too_big(pool.strideBytes() + 1, 0);
+    EXPECT_EQ(pool.write(*block, too_big.data(), too_big.size()), BlockIOStatus::INVALID_SIZE);
+
+    // A valid, in-range block index that was never malloc'd -> INVALID_BLOCK.
+    const BlockIdxType unallocated = *block + 1;
+    EXPECT_EQ(pool.write(unallocated, data.data(), data.size()), BlockIOStatus::INVALID_BLOCK);
+    EXPECT_EQ(pool.read(unallocated, read_buf.data(), read_buf.size()), BlockIOStatus::INVALID_BLOCK);
+
+    // Once freed, the same block index becomes unallocated again.
+    pool.free(*block);
+    EXPECT_EQ(pool.write(*block, data.data(), data.size()), BlockIOStatus::INVALID_BLOCK);
+
+    ::remove(pool.filePath().c_str());
+}
+
+TEST(DiskBlockPoolTest, BatchReadWriteUsesBlockOrder) {
+    auto          config = makeDiskConfig(::testing::TempDir());
+    DiskBlockPool pool(config);
+    ASSERT_TRUE(pool.init());
+
+    auto blocks_opt = pool.malloc(3);
+    ASSERT_TRUE(blocks_opt.has_value());
+    const BlockIds blocks = *blocks_opt;
+    ASSERT_EQ(blocks.size(), 3u);
+
+    std::vector<unsigned char> buf_a(pool.strideBytes(), 'A');
+    std::vector<unsigned char> buf_b(pool.strideBytes(), 'B');
+    std::vector<unsigned char> buf_c(pool.strideBytes(), 'C');
+    std::vector<const void*>   srcs = {buf_a.data(), buf_b.data(), buf_c.data()};
+    ASSERT_EQ(pool.write(blocks, srcs, pool.strideBytes()), BlockIOStatus::OK);
+
+    std::vector<unsigned char> read_a(pool.strideBytes(), 0);
+    std::vector<unsigned char> read_b(pool.strideBytes(), 0);
+    std::vector<unsigned char> read_c(pool.strideBytes(), 0);
+    std::vector<void*>         dsts = {read_a.data(), read_b.data(), read_c.data()};
+    ASSERT_EQ(pool.read(blocks, dsts, pool.strideBytes()), BlockIOStatus::OK);
+    EXPECT_EQ(read_a, buf_a);
+    EXPECT_EQ(read_b, buf_b);
+    EXPECT_EQ(read_c, buf_c);
+
+    // Directly reading each block by index proves the batch call mapped
+    // (block, buffer) pairs to (offset, buffer) in blocks[] order, not some other
+    // order.
+    const std::vector<unsigned char>* expected[] = {&buf_a, &buf_b, &buf_c};
+    for (size_t i = 0; i < blocks.size(); ++i) {
+        std::vector<unsigned char> check(pool.strideBytes(), 0);
+        ASSERT_EQ(pool.read(blocks[i], check.data(), check.size()), BlockIOStatus::OK);
+        EXPECT_EQ(check, *expected[i]);
+    }
+
+    ::remove(pool.filePath().c_str());
+}
+
+TEST(DiskBlockPoolTest, BlockZeroReadWriteReturnsInvalidBlock) {
+    auto          config = makeDiskConfig(::testing::TempDir());
+    DiskBlockPool pool(config);
+    ASSERT_TRUE(pool.init());
+
+    std::vector<unsigned char> data(pool.strideBytes(), 0x11);
+    EXPECT_EQ(pool.write(0, data.data(), data.size()), BlockIOStatus::INVALID_BLOCK);
+    EXPECT_EQ(pool.read(0, data.data(), data.size()), BlockIOStatus::INVALID_BLOCK);
+
+    ::remove(pool.filePath().c_str());
+}
+
+TEST(DiskBlockPoolTest, IoErrorStatusIsMapped) {
+    auto          config = makeDiskConfig(::testing::TempDir());
+    DiskBlockPool pool(config, std::make_unique<FailingDiskBlockIO>());
+    ASSERT_TRUE(pool.init());
+
+    auto block = pool.malloc();
+    ASSERT_TRUE(block.has_value());
+
+    std::vector<unsigned char> data(pool.strideBytes(), 0);
+    EXPECT_EQ(pool.write(*block, data.data(), data.size()), BlockIOStatus::PARTIAL_FAILURE);
+    EXPECT_EQ(pool.read(*block, data.data(), data.size()), BlockIOStatus::PARTIAL_FAILURE);
+
+    std::vector<const void*> srcs = {data.data()};
+    EXPECT_EQ(pool.write(BlockIds{*block}, srcs, pool.strideBytes()), BlockIOStatus::PARTIAL_FAILURE);
+    std::vector<void*> dsts = {data.data()};
+    EXPECT_EQ(pool.read(BlockIds{*block}, dsts, pool.strideBytes()), BlockIOStatus::PARTIAL_FAILURE);
 }
 
 }  // namespace rtp_llm::block_tree_cache

@@ -54,17 +54,20 @@ cc_library(
         "IBlockPool.cc",
         "host/HostBlockPool.cc",
         "host/DiskBlockIO.cc",
+        "host/DiskBlockPool.cc",
     ],
     hdrs = [
         "IBlockPool.h",
         "host/HostBlockPool.h",
         "host/DiskBlockIO.h",
+        "host/DiskBlockPool.h",
     ],
     copts = copts(),
     visibility = ["//visibility:public"],
     deps = [
         "//rtp_llm/cpp/cache:block_pool",
         "//rtp_llm/cpp/cache:cache_types",
+        "//rtp_llm/cpp/cache/connector/memory:memory_connector",
         "//rtp_llm/cpp/utils:core_utils",
     ] + torch_deps() + select({
         "@//:using_cuda": [
