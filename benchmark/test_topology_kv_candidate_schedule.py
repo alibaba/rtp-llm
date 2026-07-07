@@ -1,19 +1,25 @@
 import unittest
+from unittest.mock import patch
 
 import torch
 
-from benchmark.topology_kv_candidate_schedule import (
-    BlockCandidateConfig,
-    benchmark_decode_attention,
-    block_schedule_to_token_indices,
-    build_key_block_centroids,
-    build_block_candidate_schedule,
-    build_topology_candidate_token_indices,
-    dense_decode_attention,
-    format_benchmark_results,
-    run_decode_attention_grid,
-    sparse_decode_attention,
-)
+try:
+    import benchmark.topology_kv_candidate_schedule as topology_kv_candidate_schedule
+except ModuleNotFoundError as exc:
+    if exc.name not in {"benchmark", "benchmark.topology_kv_candidate_schedule"}:
+        raise
+    import topology_kv_candidate_schedule
+
+BlockCandidateConfig = topology_kv_candidate_schedule.BlockCandidateConfig
+benchmark_decode_attention = topology_kv_candidate_schedule.benchmark_decode_attention
+block_schedule_to_token_indices = topology_kv_candidate_schedule.block_schedule_to_token_indices
+build_key_block_centroids = topology_kv_candidate_schedule.build_key_block_centroids
+build_block_candidate_schedule = topology_kv_candidate_schedule.build_block_candidate_schedule
+build_topology_candidate_token_indices = topology_kv_candidate_schedule.build_topology_candidate_token_indices
+dense_decode_attention = topology_kv_candidate_schedule.dense_decode_attention
+format_benchmark_results = topology_kv_candidate_schedule.format_benchmark_results
+run_decode_attention_grid = topology_kv_candidate_schedule.run_decode_attention_grid
+sparse_decode_attention = topology_kv_candidate_schedule.sparse_decode_attention
 
 
 class TopologyKVCandidateScheduleTest(unittest.TestCase):
@@ -152,6 +158,18 @@ class TopologyKVCandidateScheduleTest(unittest.TestCase):
 
         self.assertEqual(token_indices.tolist(), [6, 7, 0])
 
+    def test_topology_candidate_indices_return_requested_count_for_partial_final_block(self):
+        key = torch.arange(20, dtype=torch.float32).view(1, 1, 10, 2)
+
+        token_indices = build_topology_candidate_token_indices(
+            key,
+            selected_tokens=8,
+            block_size=4,
+        )
+
+        self.assertEqual(len(token_indices), 8)
+        self.assertEqual(token_indices.tolist(), [8, 9, 4, 5, 6, 7, 0, 1])
+
     def test_topology_candidate_indices_accept_2d_and_3d_inputs(self):
         key_2d = torch.arange(16, dtype=torch.float32).view(8, 2)
         key_3d = key_2d.unsqueeze(0)
@@ -191,6 +209,26 @@ class TopologyKVCandidateScheduleTest(unittest.TestCase):
         self.assertIn("| seq_len | selected_tokens | dense_sdpa_ms |", table)
         self.assertIn("| 128 | 32 |", table)
         self.assertIn("| 128 | 64 |", table)
+
+    def test_benchmark_decode_attention_allows_zero_sparse_timing(self):
+        with patch.object(
+            topology_kv_candidate_schedule.time,
+            "perf_counter",
+            side_effect=[0.0, 0.001, 0.001, 0.001],
+        ):
+            result = benchmark_decode_attention(
+                seq_len=8,
+                selected_tokens=8,
+                heads=1,
+                head_dim=8,
+                rounds=1,
+                warmup=0,
+                dtype=torch.float32,
+                device="cpu",
+            )
+
+        self.assertEqual(result.sparse_ms, 0.0)
+        self.assertEqual(result.speedup, float("inf"))
 
     @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required for speed testing")
     def test_sparse_attention_cuda_benchmark_runs_with_topology_schedule(self):

@@ -46,9 +46,15 @@ metadata:
 The CUDA benchmark compares PyTorch dense SDPA decode attention against a
 selected-token decode path that builds topology-derived candidate token indices,
 gathers candidate K/V rows, and runs SDPA over only those selected tokens.
+Sparse timing includes candidate K/V gather and SDPA only; topology schedule
+construction runs once before the timed loops and is not included in speedup.
 Report the result as a benchmark signal only; end-to-end model speedup still
 requires integration with the runtime sparse MLA or indexer path and
 model-quality validation.
+
+Run the CPU regression tests from the repository root with
+`bazel test //benchmark:topology_kv_candidate_schedule_test` or
+`python -m unittest benchmark.test_topology_kv_candidate_schedule`.
 
 ```bash
 python benchmark/topology_kv_candidate_schedule.py \

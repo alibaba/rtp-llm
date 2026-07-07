@@ -162,6 +162,14 @@ def _prioritize_latest_blocks_for_partial_budget(
     return ordered_row
 
 
+def _candidate_block_budget_for_tokens(seq_len: int, selected_tokens: int, block_size: int) -> int:
+    block_count = (seq_len + block_size - 1) // block_size
+    final_block_tokens = seq_len % block_size or block_size
+    padding_tokens = block_size - final_block_tokens
+    blocks = (selected_tokens + padding_tokens + block_size - 1) // block_size
+    return max(1, min(block_count, blocks))
+
+
 def build_block_candidate_schedule(
     key_block_centroids: torch.Tensor,
     config: BlockCandidateConfig,
@@ -221,6 +229,8 @@ def build_topology_candidate_token_indices(
 ) -> torch.Tensor:
     if selected_tokens <= 0:
         raise ValueError("selected_tokens must be positive")
+    if block_size <= 0:
+        raise ValueError("block_size must be positive")
 
     if key.ndim == 4:
         seq_len = key.shape[2]
@@ -230,8 +240,14 @@ def build_topology_candidate_token_indices(
         seq_len = key.shape[0]
     else:
         raise ValueError("key must have shape [batch, heads, seq, dim], [heads, seq, dim], or [seq, dim]")
+    if selected_tokens > seq_len:
+        raise ValueError("selected_tokens must not exceed seq_len")
 
-    max_candidate_blocks = max(1, (selected_tokens + block_size - 1) // block_size)
+    max_candidate_blocks = _candidate_block_budget_for_tokens(
+        seq_len=seq_len,
+        selected_tokens=selected_tokens,
+        block_size=block_size,
+    )
     sink_blocks = 0 if max_candidate_blocks == 1 else 1
     centroids = build_key_block_centroids(key, block_size=block_size)
     config = BlockCandidateConfig(
@@ -247,7 +263,7 @@ def build_topology_candidate_token_indices(
         config,
         _build_drift_score_values(centroids),
     )
-    if selected_tokens % block_size != 0:
+    if selected_tokens % block_size != 0 or seq_len % block_size != 0:
         row = _prioritize_latest_blocks_for_partial_budget(
             row,
             query_block,
@@ -261,6 +277,8 @@ def build_topology_candidate_token_indices(
     token_indices = token_indices[token_indices >= 0]
     if token_indices.numel() == 0:
         raise ValueError("topology schedule did not select any tokens")
+    if token_indices.numel() < selected_tokens:
+        raise ValueError("topology schedule selected fewer tokens than requested")
     return token_indices[:selected_tokens]
 
 
@@ -335,11 +353,12 @@ def benchmark_decode_attention(
     if benchmark_device.type == "cuda":
         torch.cuda.synchronize(benchmark_device)
     sparse_ms = (time.perf_counter() - sparse_start) * 1000 / rounds
+    speedup = dense_ms / sparse_ms if sparse_ms > 0 else float("inf")
 
     return DecodeBenchmarkResult(
         dense_ms=dense_ms,
         sparse_ms=sparse_ms,
-        speedup=dense_ms / sparse_ms,
+        speedup=speedup,
         seq_len=seq_len,
         selected_tokens=selected_tokens,
     )
