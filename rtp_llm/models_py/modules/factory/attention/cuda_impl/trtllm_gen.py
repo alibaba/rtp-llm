@@ -8,6 +8,7 @@ import triton.language as tl
 from rtp_llm.models_py.modules.factory.attention import common
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.utils import is_blackwell
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import FMHAImplBase
+from rtp_llm.models_py.utils.arch import is_sm12x
 from rtp_llm.ops import AttentionConfigs, FMHAType, ParallelismConfig
 from rtp_llm.ops.compute_ops import (
     FusedRopeKVCacheDecodeOp,
@@ -331,6 +332,13 @@ class FlashInferTRTLLMPrefillOp(object):
         release_trt_workspace_buffer(self.workspace_buffer)
 
     def support(self, attention_inputs: PyAttentionInputs):
+        # TllmGenFmhaRunner cubin covers sm_90a / sm_100a only; sm_120a
+        # (Blackwell consumer, e.g. RTX 5000 Pro) has no binding and the
+        # runner throws "Unsupported architecture" (fmhaRunner.cuh:37) on
+        # forward. Fall through so dispatch picks the paged
+        # PyFlashinferPagedPrefillImpl instead.
+        if is_sm12x():
+            return False
         return (
             is_blackwell()
             and attention_inputs.is_prefill
@@ -439,6 +447,13 @@ class FlashInferTRTLLMDecodeOp(object):
 
     def support(self, attention_inputs: PyAttentionInputs):
         if not is_blackwell():
+            return False
+        # TllmGenFmhaRunner cubin covers sm_90a / sm_100a only; sm_120a
+        # (Blackwell consumer, e.g. RTX 5000 Pro) has no binding and the
+        # runner throws "Unsupported architecture" (fmhaRunner.cuh:37) on
+        # the first decode forward. Fall through so dispatch picks the
+        # ragged PyFlashinferPaged path instead.
+        if is_sm12x():
             return False
         # Note: this max q length is used for mtp decode verification.
         decode_kernel_max_q_len = 11
