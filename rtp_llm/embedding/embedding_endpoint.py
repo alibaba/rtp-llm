@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import re
 from typing import Any, Dict, Optional, Tuple
 
 import grpc
@@ -113,7 +114,9 @@ class EmbeddingEndpoint(object):
         return {
             "gen_timeline": as_bool(config.get("gen_timeline", False)),
             "profile_step": as_int(config.get("profile_step", 1)),
-            "profile_trace_name": str(config.get("profile_trace_name", "")),
+            "profile_trace_name": re.sub(
+                r"[^A-Za-z0-9_-]", "", str(config.get("profile_trace_name", ""))
+            ),
         }
 
     async def generate_embeddings(
