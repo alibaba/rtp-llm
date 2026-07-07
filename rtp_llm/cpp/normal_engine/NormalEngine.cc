@@ -16,6 +16,9 @@
 #include "rtp_llm/cpp/normal_engine/speculative/MtpExecutor.h"
 #include <algorithm>
 #include <chrono>
+#include <cstdlib>
+#include <cstring>
+#include <list>
 #include <memory>
 #include <thread>
 #include <random>
@@ -55,6 +58,20 @@ bool shouldUseCudaMallocKVCacheBacking(const PDSepConfig& pd_sep_config, const C
                                         || pd_sep_config.remote_rpc_server_port > 0;
     return pd_role && pd_sep_config.cache_store_rdma_mode
            && (cache_store_config.cache_store_rdma_mode || has_cache_store_server);
+}
+
+bool cacheStatusSnapshotEnabled() {
+    const char* env = std::getenv("RTP_LLM_CACHE_STATUS_SNAPSHOT");
+    return env != nullptr && std::strcmp(env, "1") == 0;
+}
+
+bool shouldRefreshCacheStatusSnapshot(RoleType role_type, const std::list<GenerateStreamPtr>& streams) {
+    if (!cacheStatusSnapshotEnabled() || (role_type != RoleType::PREFILL && role_type != RoleType::PDFUSION)) {
+        return false;
+    }
+    return std::any_of(streams.begin(), streams.end(), [](const GenerateStreamPtr& stream) {
+        return stream && !stream->isFakeStream() && stream->isContextStream();
+    });
 }
 }  // anonymous namespace
 
@@ -566,7 +583,13 @@ absl::Status NormalEngine::step() {
     }
     {
         RTP_LLM_PROFILE_SCOPE_DYNAMIC("engine.normal.execute(stream_size=%zu)", streams.size());
+        const bool refresh_cache_status_snapshot =
+            resource_context_.cache_manager && shouldRefreshCacheStatusSnapshot(pd_sep_config.role_type, streams);
         status = executor_->process(streams, tps_schedule_time_us);
+        if (status.ok() && refresh_cache_status_snapshot) {
+            RTP_LLM_PROFILE_SCOPE("engine.normal.refresh_cache_status_snapshot");
+            resource_context_.cache_manager->refreshKVCacheInfoSnapshot();
+        }
     }
 
     // loop() is a no-sleep tight loop and with TP>1 every iteration enters
