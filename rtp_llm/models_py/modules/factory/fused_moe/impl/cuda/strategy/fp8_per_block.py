@@ -19,6 +19,46 @@ from rtp_llm.models_py.modules.factory.fused_moe.utils.config_resolver import (
 )
 
 
+class CudaSm120Fp8GroupedGemmNoDPStrategy(MoeStrategy):
+    """sm_120 FP8 PerBlock single GPU strategy using Triton batched grouped GEMM.
+
+    Replaces the per-expert CUTLASS loop with a Triton FP8 blockwise batched
+    grouped GEMM, mirroring the SM9x DeepGemmHybridExecutor masked path.
+    Higher priority than CudaSm120Fp8PerBlockNoDPStrategy so auto-selection
+    picks this path on sm_120.
+    """
+
+    @classmethod
+    def check_conditions(cls, checker: Any, config: MoEConfigAdapter) -> None:
+        from rtp_llm.models_py.utils.arch import is_sm12x
+
+        resolver = MoeConfigResolver()
+        quant_method = resolver.get_quant_method(config)
+        checker.check(quant_method == "FP8_PER_BLOCK")
+        checker.check(is_sm12x())
+        checker.check(
+            config.moe_strategy == "sm120_fp8_grouped" or config.moe_strategy == "auto"
+        )
+
+    def get_attributes(self) -> StrategyAttributes:
+        from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.sm120_fp8_grouped_gemm_executor import (
+            Sm120Fp8GroupedGemmExecutor,
+        )
+        from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.routers.pure_tp_router import (
+            PureTpRouterFp8PerBlock,
+        )
+
+        quant_config = FusedMoEQuantConfig(
+            quant_dtype=torch.float8_e4m3fn,
+            block_shape=[128, 128],
+        )
+        return StrategyAttributes(
+            router_class=PureTpRouterFp8PerBlock,
+            executor_class=Sm120Fp8GroupedGemmExecutor,
+            quant_config=quant_config,
+        )
+
+
 class CudaFp8PerBlockNoDPStrategy(MoeStrategy):
     """CUDA FP8 PerBlock single GPU strategy"""
 

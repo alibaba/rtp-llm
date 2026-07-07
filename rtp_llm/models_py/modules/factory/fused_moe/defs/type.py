@@ -36,3 +36,4 @@ class ExecutorType(Enum):
     )
     TRTLLM_FP4 = 7  # TRTLLM FP4 executor (specialized)
     CUTEDSL_FP4 = 8  # CuteDSL FP4 executor (FP4 optimized)
+    SM120_FP8_GROUPED = 9  # SM120 Triton FP8 blockwise batched grouped GEMM
