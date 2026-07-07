@@ -45,13 +45,21 @@ def build_key_block_centroids(key: torch.Tensor, block_size: int) -> torch.Tenso
         raise ValueError("key must have shape [batch, heads, seq, dim], [heads, seq, dim], or [seq, dim]")
 
     batch, heads, seq_len, dim = normalized_key.shape
+    if seq_len <= 0:
+        raise ValueError("key sequence length must be positive")
+
     block_count = (seq_len + block_size - 1) // block_size
     padded_len = block_count * block_size
     if padded_len != seq_len:
         padding = normalized_key.new_zeros(batch, heads, padded_len - seq_len, dim)
         normalized_key = torch.cat([normalized_key, padding], dim=2)
 
-    blocks = normalized_key.reshape(batch, heads, block_count, block_size, dim).float()
+    accumulation_key = (
+        normalized_key.float()
+        if normalized_key.dtype in (torch.float16, torch.bfloat16)
+        else normalized_key
+    )
+    blocks = accumulation_key.reshape(batch, heads, block_count, block_size, dim)
     block_sums = blocks.sum(dim=(0, 1, 3))
     token_counts = torch.full(
         (block_count,),
@@ -357,10 +365,26 @@ def benchmark_decode_attention(
         raise ValueError("rounds must be positive and warmup must be non-negative")
 
     benchmark_device = torch.device(device)
-    torch.manual_seed(0)
-    query = torch.randn(1, heads, 1, head_dim, device=benchmark_device, dtype=dtype)
-    key = torch.randn(1, heads, seq_len, head_dim, device=benchmark_device, dtype=dtype)
-    value = torch.randn(1, heads, seq_len, head_dim, device=benchmark_device, dtype=dtype)
+    generator = torch.Generator(device=benchmark_device)
+    generator.manual_seed(0)
+    query = torch.randn(
+        1, heads, 1, head_dim,
+        device=benchmark_device,
+        dtype=dtype,
+        generator=generator,
+    )
+    key = torch.randn(
+        1, heads, seq_len, head_dim,
+        device=benchmark_device,
+        dtype=dtype,
+        generator=generator,
+    )
+    value = torch.randn(
+        1, heads, seq_len, head_dim,
+        device=benchmark_device,
+        dtype=dtype,
+        generator=generator,
+    )
     candidate_indices = build_topology_candidate_token_indices(
         key,
         selected_tokens=selected_tokens,

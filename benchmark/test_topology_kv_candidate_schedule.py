@@ -148,6 +148,12 @@ class TopologyKVCandidateScheduleTest(unittest.TestCase):
         torch.testing.assert_close(build_key_block_centroids(key_2d, 2), expected)
         torch.testing.assert_close(build_key_block_centroids(key_3d, 2), expected)
 
+    def test_key_block_centroids_reject_empty_sequence(self):
+        key = torch.empty(1, 1, 0, 16)
+
+        with self.assertRaisesRegex(ValueError, "sequence length must be positive"):
+            build_key_block_centroids(key, block_size=4)
+
     def test_key_block_centroids_accumulate_half_precision_in_fp32(self):
         key = torch.tensor(
             [[1024.0], [1025.0], [1026.0], [1027.0]],
@@ -158,6 +164,20 @@ class TopologyKVCandidateScheduleTest(unittest.TestCase):
 
         self.assertEqual(centroids.dtype, torch.float32)
         torch.testing.assert_close(centroids, torch.tensor([[1025.5]]))
+
+    def test_key_block_centroids_preserve_float64_accumulation(self):
+        key = torch.tensor(
+            [[1024.0], [1025.0], [1026.0], [1027.0]],
+            dtype=torch.float64,
+        )
+
+        centroids = build_key_block_centroids(key, block_size=4)
+
+        self.assertEqual(centroids.dtype, torch.float64)
+        torch.testing.assert_close(
+            centroids,
+            torch.tensor([[1025.5]], dtype=torch.float64),
+        )
 
     def test_block_schedule_to_token_indices_expands_blocks_and_masks_tail(self):
         schedule = torch.tensor([[0, 2, -1]])
@@ -277,6 +297,24 @@ class TopologyKVCandidateScheduleTest(unittest.TestCase):
 
         self.assertEqual(result.sparse_ms, 0.0)
         self.assertEqual(result.speedup, float("inf"))
+
+    def test_benchmark_decode_attention_does_not_mutate_global_rng(self):
+        torch.manual_seed(123)
+        before = torch.random.get_rng_state()
+
+        benchmark_decode_attention(
+            seq_len=64,
+            selected_tokens=32,
+            heads=2,
+            head_dim=16,
+            rounds=1,
+            warmup=0,
+            dtype=torch.float32,
+            device="cpu",
+        )
+
+        after = torch.random.get_rng_state()
+        self.assertTrue(torch.equal(before, after))
 
     @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required for speed testing")
     def test_sparse_attention_cuda_benchmark_runs_with_topology_schedule(self):
