@@ -31,12 +31,15 @@ using SWAGroupConfig = std::unordered_map<int, int>;
 // - cache_config: cache topology (groups, layers, block sizes)
 // - kv_cache_config: tier enable flags and sizing
 // - allocator: existing KVCacheAllocator (used to derive device pool info)
+// - world_rank / local_rank: used to build per-rank unique disk pool file paths
 // - swa_configs: optional sliding_window_size per SWA group
 // - storage_backend: optional remote storage backend
 // - broadcast_manager: optional multi-node broadcast manager
 BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       cache_config,
                                        const KVCacheConfig&                     kv_cache_config,
                                        const std::shared_ptr<KVCacheAllocator>& allocator,
+                                       int64_t                                  world_rank        = 0,
+                                       int64_t                                  local_rank        = 0,
                                        const SWAGroupConfig&                    swa_configs       = {},
                                        std::shared_ptr<StorageBackend>          storage_backend   = nullptr,
                                        std::shared_ptr<BroadcastManager>        broadcast_manager = nullptr);

@@ -134,7 +134,7 @@ public:
 
     // Phase 4: DeviceBufferResolver injection for real D2H copy.
     // When set, performEvictionCopy uses this resolver instead of placeholder.
-    // Typical implementation wraps BlockPool::convertIndexToBuffer:
+    // Typical implementation wraps DeviceBlockPool::blockBuffers:
     //   auto resolver = [&pool](int layer_id, BlockIdxType block_idx) -> BlockInfo {
     //       auto bufs = pool->convertIndexToBuffer(layer_id, block_idx);
     //       return bufs.empty() ? BlockInfo{} : bufs[0];
@@ -204,7 +204,7 @@ private:
     void             submitEviction(EvictionResult& er);
 
     // Per-group pool access helpers
-    BlockPoolPtr               hostPoolForGroup(int component_group_id) const;
+    std::shared_ptr<HostBlockPool> hostPoolForGroup(int component_group_id) const;
     std::shared_ptr<DiskBlockPool> diskPoolForGroup(int component_group_id) const;
 
     struct LoadBackItem {

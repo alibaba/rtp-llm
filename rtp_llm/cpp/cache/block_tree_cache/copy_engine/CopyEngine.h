@@ -9,14 +9,17 @@
 #include <utility>
 #include <vector>
 
-#include "rtp_llm/cpp/cache/BlockPool.h"
+#include "rtp_llm/cpp/cache/BlockInfo.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/TransferDescriptor.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/TreeNode.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/copy_engine/DiskBlockPool.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/host/DiskBlockPool.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/host/HostBlockPool.h"
 
 namespace rtp_llm {
 
-// Resolves a (layer_id, device_block_idx) to a raw buffer pointer.
+// Function that resolves a (layer_id, device_block_idx) to a raw buffer pointer + size.
+// For GPU: wraps DeviceBlockPool::blockBuffers.
+// For testing: wraps a simple CPU buffer map.
 using DeviceBufferResolver = std::function<BlockInfo(int layer_id, BlockIdxType device_block_idx)>;
 
 enum class TransferPriority {
@@ -85,13 +88,23 @@ private:
 
 struct CopyEngineTransferResources {
     DeviceBufferResolver device_buffer_resolver;
-    std::function<std::vector<MemoryBlockLayerTagSlot>(int component_group_id)> layer_slots_resolver;
-    std::function<BlockPoolPtr(int component_group_id)>                         host_pool_resolver;
+    std::function<std::vector<MemoryBlockLayerTagSlot>(int component_group_id)>  layer_slots_resolver;
+    std::function<std::shared_ptr<HostBlockPool>(int component_group_id)>        host_pool_resolver;
     std::function<std::shared_ptr<DiskBlockPool>(int component_group_id)>        disk_pool_resolver;
 };
 
-// CopyEngine does not own tier pools; BlockTreeCache provides them through
-// CopyEngineTransferResources or compatibility helper parameters.
+// CopyEngine: stateless data-movement utility between Device/Host/Disk tiers,
+// plus a synchronous submit() facade (TransferHandle/CopyResult).
+//
+// D2H (deviceToHost): packs multiple device blocks into one host block,
+//   using MemoryBlockLayerTagSlot layout to compute byte offsets.
+// H2D (hostToDevice): unpacks one host block into multiple device blocks.
+// H2Disk (hostToDisk): writes host block to a disk block.
+// Disk2H (diskToHost): reads disk block into a host block.
+//
+// Pool ownership: CopyEngine does NOT own any pool.  HostBlockPool and
+// DiskBlockPool are owned by BlockTreeCache (L2/L3 tier resources) and
+// provided through CopyEngineTransferResources or compatibility helper parameters.
 class CopyEngine {
 public:
     CopyEngine()  = default;
@@ -109,17 +122,21 @@ public:
                       BlockIdxType                                host_block,
                       const std::vector<MemoryBlockLayerTagSlot>& slots,
                       const DeviceBufferResolver&                 resolver,
-                      BlockPool&                                  host_pool);
+                      HostBlockPool&                              host_pool);
 
     bool hostToDevice(BlockIdxType                                host_block,
                       const std::vector<BlockIdxType>&            device_blocks,
                       const std::vector<MemoryBlockLayerTagSlot>& slots,
                       const DeviceBufferResolver&                 resolver,
-                      BlockPool&                                  host_pool);
+                      HostBlockPool&                              host_pool);
 
-    bool hostToDisk(BlockIdxType host_block, int32_t disk_slot, BlockPool& host_pool, DiskBlockPool& disk_pool);
+    // ---- Host <-> Disk ----
 
-    bool diskToHost(int32_t disk_slot, BlockIdxType host_block, BlockPool& host_pool, DiskBlockPool& disk_pool);
+    // Write host block to disk block.
+    bool hostToDisk(BlockIdxType host_block, BlockIdxType disk_block, HostBlockPool& host_pool, DiskBlockPool& disk_pool);
+
+    // Read disk block into host block.
+    bool diskToHost(BlockIdxType disk_block, BlockIdxType host_block, HostBlockPool& host_pool, DiskBlockPool& disk_pool);
 
     static size_t computeHostBlockSize(const std::vector<MemoryBlockLayerTagSlot>& slots);
 
@@ -130,7 +147,7 @@ private:
     void       completeRequest(const std::shared_ptr<TransferHandle::State>& state, CopyResult result);
 
     std::vector<MemoryBlockLayerTagSlot> resolveLayerSlots(int component_group_id) const;
-    BlockPoolPtr                         resolveHostPool(int component_group_id) const;
+    std::shared_ptr<HostBlockPool>       resolveHostPool(int component_group_id) const;
     std::shared_ptr<DiskBlockPool>       resolveDiskPool(int component_group_id) const;
     DeviceBufferResolver                 resolveDeviceBufferResolver() const;
 

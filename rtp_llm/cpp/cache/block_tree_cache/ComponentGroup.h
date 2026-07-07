@@ -10,7 +10,8 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/EvictionHeap.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/TransferDescriptor.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/TreeNode.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/copy_engine/DiskBlockPool.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/host/DiskBlockPool.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/host/HostBlockPool.h"
 #include "rtp_llm/cpp/cache/spec/CacheGroupType.h"
 
 namespace rtp_llm {
@@ -141,11 +142,11 @@ public:
 
     // ---- Per-group pool injection and access ----
     void setDevicePools(std::vector<BlockPoolPtr> pools) { device_pools_ = std::move(pools); }
-    void setHostPool(BlockPoolPtr pool) { host_pool_ = std::move(pool); }
+    void setHostPool(std::shared_ptr<HostBlockPool> pool) { host_pool_ = std::move(pool); }
     void setDiskPool(std::shared_ptr<DiskBlockPool> pool) { disk_pool_ = std::move(pool); }
 
     const std::vector<BlockPoolPtr>& devicePools() const { return device_pools_; }
-    BlockPoolPtr hostPool() const { return host_pool_; }
+    std::shared_ptr<HostBlockPool> hostPool() const { return host_pool_; }
     std::shared_ptr<DiskBlockPool> diskPool() const { return disk_pool_; }
 
     // Device pool usage queries for watermark checking
@@ -187,10 +188,10 @@ public:
         return host_pool_ ? host_pool_->totalBlocksNum() : 0;
     }
     size_t diskPoolUsed() const {
-        return disk_pool_ ? (disk_pool_->totalSlots() - disk_pool_->freeSlots()) : 0;
+        return disk_pool_ ? (disk_pool_->totalBlocksNum() - disk_pool_->freeBlocksNum()) : 0;
     }
     size_t diskPoolCapacity() const {
-        return disk_pool_ ? disk_pool_->totalSlots() : 0;
+        return disk_pool_ ? disk_pool_->totalBlocksNum() : 0;
     }
 
     // ---- Device block reference counting via pools ----
@@ -212,7 +213,7 @@ public:
 protected:
     IsBlockEvictableFn             is_block_evictable_;
     std::vector<BlockPoolPtr>      device_pools_;
-    BlockPoolPtr                   host_pool_;
+    std::shared_ptr<HostBlockPool> host_pool_;
     std::shared_ptr<DiskBlockPool> disk_pool_;
 };
 

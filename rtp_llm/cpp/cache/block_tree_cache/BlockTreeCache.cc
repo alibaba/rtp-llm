@@ -361,7 +361,7 @@ bool BlockTreeCache::isTierEnabled(Tier tier) const {
     }
 }
 
-BlockPoolPtr BlockTreeCache::hostPoolForGroup(int component_group_id) const {
+std::shared_ptr<HostBlockPool> BlockTreeCache::hostPoolForGroup(int component_group_id) const {
     auto gid = static_cast<size_t>(component_group_id);
     return gid < component_groups_.size() ? component_groups_[gid]->hostPool() : nullptr;
 }
@@ -519,9 +519,9 @@ void BlockTreeCache::performEvictionCopy(EvictionResult er) {
             // Rollback: free allocated target block, restore source tier heap
             if (!isNullBlockIdx(er.target_block)) {
                 if (er.target_tier == Tier::HOST && hp) {
-                    hp->requestFree(er.target_block);
+                    hp->free(er.target_block);
                 } else if (er.target_tier == Tier::DISK && dp) {
-                    dp->blockCacheFree(er.target_block);
+                    dp->free(er.target_block);
                 }
             }
             auto gid = static_cast<size_t>(er.component_group_id);
@@ -585,7 +585,7 @@ void BlockTreeCache::onEvictionComplete(const EvictionResult& er) {
         if (hp) {
             for (auto block : er.blocks_to_release) {
                 if (!isNullBlockIdx(block)) {
-                    hp->requestFree(block);
+                    hp->free(block);
                 }
             }
         }
@@ -594,7 +594,7 @@ void BlockTreeCache::onEvictionComplete(const EvictionResult& er) {
         if (dp) {
             for (auto block : er.blocks_to_release) {
                 if (!isNullBlockIdx(block)) {
-                    dp->blockCacheFree(block);
+                    dp->free(block);
                 }
             }
         }
@@ -604,11 +604,19 @@ void BlockTreeCache::onEvictionComplete(const EvictionResult& er) {
     if (er.target_tier == Tier::HOST && er.source_tier == Tier::DEVICE) {
         if (!isNullBlockIdx(er.target_block)) {
             slot.host_block = er.target_block;
+            // Establish cache hold: block becomes tree-visible (refcount 0 -> 1).
+            if (auto hp = group->hostPool()) {
+                hp->incRef(er.target_block);
+            }
             group->tryAddToHostHeap(er.node);
         }
     } else if (er.target_tier == Tier::DISK && er.source_tier == Tier::HOST) {
         if (!isNullBlockIdx(er.target_block)) {
             slot.disk_slot = er.target_block;
+            // Establish cache hold: block becomes tree-visible (refcount 0 -> 1).
+            if (auto dp = group->diskPool()) {
+                dp->incRef(er.target_block);
+            }
             group->tryAddToDiskHeap(er.node);
         }
     }
@@ -690,12 +698,12 @@ void BlockTreeCache::cascadeEviction(TreeNode* node, int source_group_id, Tier t
             } else if (tier == Tier::HOST && lower_group->hostPool()) {
                 for (auto b : blocks_to_free) {
                     if (!isNullBlockIdx(b))
-                        lower_group->hostPool()->requestFree(b);
+                        lower_group->hostPool()->free(b);
                 }
             } else if (tier == Tier::DISK && lower_group->diskPool()) {
                 for (auto b : blocks_to_free) {
                     if (!isNullBlockIdx(b))
-                        lower_group->diskPool()->blockCacheFree(b);
+                        lower_group->diskPool()->free(b);
                 }
             }
 
@@ -894,9 +902,9 @@ void BlockTreeCache::performLoadBack(std::vector<LoadBackItem> items, std::share
         } else if (item.source_tier == Tier::DISK && hp && dp) {
             // Disk → GPU (cross-layer: Disk → temp Host → GPU, Host not cached)
             BlockIdxType temp_host = NULL_BLOCK_IDX;
-            auto         alloc     = hp->malloc(1);
-            if (!alloc.empty())
-                temp_host = alloc[0];
+            auto         alloc     = hp->malloc();
+            if (alloc.has_value())
+                temp_host = alloc.value();
 
             if (!isNullBlockIdx(temp_host)) {
                 bool d2h_ok = copy_engine_->diskToHost(slot.disk_slot, temp_host, *hp, *dp);
@@ -904,7 +912,7 @@ void BlockTreeCache::performLoadBack(std::vector<LoadBackItem> items, std::share
                     copy_ok = copy_engine_->hostToDevice(
                         temp_host, item.allocated_device_blocks, layer_slots, resolver, *hp);
                 }
-                hp->requestFree(temp_host);  // Release temp buffer
+                hp->free(temp_host);  // Release temp buffer
             }
             if (!copy_ok) {
                 RTP_LLM_LOG_WARNING("BlockTreeCache::performLoadBack: Disk2D FAILED "
@@ -1014,8 +1022,8 @@ void BlockTreeCache::allocateTargetBlock(EvictionResult& er) {
     if (er.target_tier == Tier::HOST) {
         auto pool = hostPoolForGroup(er.component_group_id);
         if (pool) {
-            auto alloc      = pool->malloc(1);
-            er.target_block = alloc.empty() ? NULL_BLOCK_IDX : alloc[0];
+            auto slot       = pool->malloc();
+            er.target_block = slot.has_value() ? slot.value() : NULL_BLOCK_IDX;
         }
     } else if (er.target_tier == Tier::DISK) {
         auto pool = diskPoolForGroup(er.component_group_id);

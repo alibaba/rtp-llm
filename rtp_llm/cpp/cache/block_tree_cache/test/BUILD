@@ -80,3 +80,53 @@ cc_test(
     deps = test_deps,
     env = {},
 )
+
+pool_test_copts = [
+    "-fno-access-control",
+] + copts()
+
+pool_test_deps = [
+    "//rtp_llm/cpp/cache/block_tree_cache",
+    "//rtp_llm/cpp/cache/test:cache_config_test_utils",
+    "//rtp_llm/cpp/config:config_modules",
+    "//rtp_llm/cpp/config:model_config",
+    "//rtp_llm/cpp/utils:core_utils",
+    "@com_google_googletest//:gtest",
+    "@com_google_googletest//:gtest_main",
+] + torch_deps()
+
+cc_test(
+    name = "i_block_pool_test",
+    srcs = ["IBlockPoolTest.cc"],
+    copts = pool_test_copts,
+    deps = pool_test_deps,
+    env = {},
+)
+
+cc_test(
+    name = "host_block_pool_test",
+    srcs = ["HostBlockPoolTest.cc"],
+    copts = pool_test_copts,
+    deps = pool_test_deps,
+    env = {},
+)
+
+cc_test(
+    name = "disk_block_pool_test",
+    srcs = ["DiskBlockPoolTest.cc"],
+    copts = pool_test_copts,
+    deps = pool_test_deps,
+    env = {},
+)
+
+cc_test(
+    name = "device_block_pool_test",
+    srcs = ["DeviceBlockPoolTest.cc"],
+    copts = pool_test_copts,
+    # Uses only the lightweight cache_config_test_utils (already in pool_test_deps) +
+    # the merged block_tree_cache pool sources; deliberately avoids
+    # block_pool_test_helper, which pulls the heavy //rtp_llm/cpp/cache monolith.
+    deps = pool_test_deps,
+    env = {},
+    exec_properties = {"gpu": "H20"},
+)
