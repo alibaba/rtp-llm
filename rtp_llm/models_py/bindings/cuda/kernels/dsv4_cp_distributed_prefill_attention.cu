@@ -4752,7 +4752,6 @@ __device__ __forceinline__ void dsv4MegaInlineSignalPadBarrier(uint32_t* const* 
     }
     if (signal_pads == nullptr) {
         if (threadIdx.x == 0) {
-            printf("DSV4 mega attention requires signal pads for in-kernel CP barrier\n");
             asm("trap;");
         }
         __syncthreads();
@@ -4765,16 +4764,10 @@ __device__ __forceinline__ void dsv4MegaInlineSignalPadBarrier(uint32_t* const* 
         uint32_t* local_signal = signal_pads[cp_rank] + static_cast<int64_t>(channel) * cp_size + peer;
         if (!signal_pad_try_put<cuda::std::memory_order_release>(
                 peer_signal, static_cast<unsigned long long>(kSymmMemBarrierTimeoutCycles))) {
-            printf("DSV4 mega inline signal put timeout: rank=%d peer=%d channel=%d\n", cp_rank, peer, channel);
             asm("trap;");
         }
         if (!signal_pad_try_wait<cuda::std::memory_order_acquire>(
                 local_signal, static_cast<unsigned long long>(kSymmMemBarrierTimeoutCycles))) {
-            printf("DSV4 mega inline signal wait timeout: rank=%d peer=%d channel=%d value=%u\n",
-                   cp_rank,
-                   peer,
-                   channel,
-                   *local_signal);
             asm("trap;");
         }
     }
@@ -4903,14 +4896,6 @@ __device__ __forceinline__ void dsv4MegaWaitLocalPhase(const uint8_t* const* __r
             break;
         }
         if (clock64() - start > static_cast<unsigned long long>(kSymmMemBarrierTimeoutCycles)) {
-            if (threadIdx.x == 0) {
-                printf("DSV4 mega local phase wait timeout: block=%d rank=%d epoch=%llu seen=%llu complement=%llu\n",
-                       static_cast<int>(blockIdx.x),
-                       cp_rank,
-                       launch_epoch,
-                       seen,
-                       seen_complement);
-            }
             asm("trap;");
         }
     }
@@ -6608,15 +6593,10 @@ __global__ __launch_bounds__(kMegaBlockThreads, 1) void dsv4CpDistributedPrefill
                                                         int enable_split_k_attention,
                                                         int splitk_keys_per_block,
                                                         int csa_score_prebuild_stride) {
-		    const int tid = threadIdx.x;
-            if (static_cast<int>(blockDim.x) != kMegaBlockThreads) {
-                if (tid == 0) {
-                    printf("DSV4 mega attention launched with unsupported blockDim.x=%d expected=%d\n",
-                           static_cast<int>(blockDim.x),
-                           kMegaBlockThreads);
-                }
-                asm("trap;");
-            }
+    const int tid = threadIdx.x;
+    if (static_cast<int>(blockDim.x) != kMegaBlockThreads) {
+        asm("trap;");
+    }
     const int effective_compress_ratio = StaticCompressRatio > 0 ? StaticCompressRatio : compress_ratio;
     const int effective_enable_split_k_attention = StaticSplitK ? enable_split_k_attention : 0;
     extern __shared__ unsigned char mega_dynamic_smem[];
@@ -6790,13 +6770,6 @@ __global__ __launch_bounds__(kMegaBlockThreads, 1) void dsv4CpDistributedPrefill
         && (H % kMegaAttentionHeadsPerCta) == 0 && static_cast<int>(blockDim.x) == kMegaBlockThreads;
     if constexpr (GroupedOnly) {
         if (!runtime_grouped_attention) {
-            if (tid == 0) {
-                printf("DSV4 grouped-only mega attention launched with unsupported shape: H=%d D=%d KH=%d block=%d\n",
-                       H,
-                       D,
-                       KH,
-                       static_cast<int>(blockDim.x));
-            }
             asm("trap;");
         }
     }
@@ -7037,13 +7010,6 @@ __global__ __launch_bounds__(kMegaBlockThreads, 1) void dsv4CpDistributedPrefill
                     unsigned long long meta_value = meta_ref.load(cuda::std::memory_order_acquire);
                     if ((meta_value & 0xffffffff00000000ull) != compressed_epoch_prefix
                         || (meta_value & kMegaCompressedDoneFlag) == 0) {
-                        if (threadIdx.x == 0) {
-                            printf("DSV4 split-K compressed-index meta not ready: block=%d row=%d epoch=%u meta=%llu\n",
-                                   static_cast<int>(blockIdx.x),
-                                   split_local_row,
-                                   compressed_epoch,
-                                   meta_value);
-                        }
                         asm("trap;");
                     }
                     split_compressed_count = static_cast<int>(meta_value & kMegaCompressedCountMask);
@@ -7275,16 +7241,9 @@ __global__ __launch_bounds__(kMegaBlockThreads, 1) void dsv4CpDistributedPrefill
 		                break;
 		            }
 		            if (clock64() - start > static_cast<unsigned long long>(kSymmMemBarrierTimeoutCycles)) {
-		                if (tid == 0) {
-		                    printf("DSV4 mega compressed-index wait timeout: block=%d row=%d epoch=%u meta=%llu\n",
-		                           static_cast<int>(blockIdx.x),
-		                           local_row,
-		                           compressed_epoch,
-		                           compressed_meta_value);
-		                }
 		                asm("trap;");
-			            }
-			        }
+		            }
+		        }
 			        compressed_count = static_cast<int>(compressed_meta_value & kMegaCompressedCountMask);
 			    } else {
 			        compressed_count = dsv4MegaBuildCompressedIndicesForRow<scalar_t>(indexer_q,
