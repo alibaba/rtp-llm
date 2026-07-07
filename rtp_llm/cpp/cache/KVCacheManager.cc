@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdlib>
+#include <cstring>
 #include <unordered_set>
 
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
@@ -53,6 +55,11 @@ GlobalCacheMetricsSnapshot collectGlobalCacheMetrics(const KVCacheAllocatorPtr& 
     collector.mr_cost_time_ms               = allocator->getMrCostTimeMs();
 
     return snapshot;
+}
+
+bool cacheStatusSnapshotEnabled() {
+    const char* env = std::getenv("RTP_LLM_CACHE_STATUS_SNAPSHOT");
+    return env != nullptr && std::strcmp(env, "1") == 0;
 }
 
 void logGlobalCacheMetrics(const GlobalCacheMetricsSnapshot& snapshot) {
@@ -551,6 +558,29 @@ size_t KVCacheManager::maxAvailableTokensNum() const {
 }
 
 KVCacheInfo KVCacheManager::getKVCacheInfo(int64_t latest_version, bool need_cache_keys) const {
+    if (need_cache_keys && cacheStatusSnapshotEnabled()) {
+        std::shared_ptr<const KVCacheInfo> snapshot;
+        {
+            std::lock_guard<std::mutex> lock(cache_status_snapshot_mutex_);
+            snapshot = cache_status_snapshot_;
+        }
+        if (snapshot) {
+            return *snapshot;
+        }
+    }
+    return buildKVCacheInfo(latest_version, need_cache_keys);
+}
+
+void KVCacheManager::refreshKVCacheInfoSnapshot() {
+    if (!allocator_ || !cacheStatusSnapshotEnabled()) {
+        return;
+    }
+    auto snapshot = std::make_shared<KVCacheInfo>(buildKVCacheInfo(/*latest_version=*/-1, /*need_cache_keys=*/true));
+    std::lock_guard<std::mutex> lock(cache_status_snapshot_mutex_);
+    cache_status_snapshot_ = std::move(snapshot);
+}
+
+KVCacheInfo KVCacheManager::buildKVCacheInfo(int64_t latest_version, bool need_cache_keys) const {
     KVCacheInfo info;
     info.version = latest_version;
 

@@ -1,10 +1,12 @@
 #include <gtest/gtest.h>
 
 #include <chrono>
+#include <cstdlib>
 #include <memory>
 #include <optional>
 #include <algorithm>
 #include <limits>
+#include <string>
 #include <thread>
 
 #include "kmonitor/client/MetricsReporter.h"
@@ -30,12 +32,37 @@ namespace test {
 
 namespace {
 constexpr int kDsv4PoolNum = 7;
-}
+
+class ScopedEnvVar {
+public:
+    ScopedEnvVar(const char* name, const char* value): name_(name) {
+        const char* old_value = std::getenv(name_);
+        if (old_value != nullptr) {
+            old_value_ = old_value;
+            had_value_ = true;
+        }
+        setenv(name_, value, 1);
+    }
+
+    ~ScopedEnvVar() {
+        if (had_value_) {
+            setenv(name_, old_value_.c_str(), 1);
+        } else {
+            unsetenv(name_);
+        }
+    }
+
+private:
+    const char* name_;
+    std::string old_value_;
+    bool        had_value_ = false;
+};
+}  // namespace
 
 class KVCacheManagerTest: public ::testing::Test {
 protected:
     void SetUp() override {
-        old_core_dump_on_exception_                 = StaticConfig::user_ft_core_dump_on_exception;
+        old_core_dump_on_exception_                  = StaticConfig::user_ft_core_dump_on_exception;
         StaticConfig::user_ft_core_dump_on_exception = false;
         rtp_llm::initLogger();
         createDevice();
@@ -125,8 +152,9 @@ static CacheConfig makeCompactDSV4ManagerConfig(uint32_t block_num = 16) {
     KVCacheConfig     kv_cache_config;
     kv_cache_config.seq_size_per_block     = 128;
     kv_cache_config.dsv4_fixed_pool_blocks = block_num;
-    auto              config = HybridPoolConfigCreator::createConfig(makeDSV4ManagerFlashModelConfig(), pc, kv_cache_config, false, 0);
-    config.block_num         = block_num;
+    auto config =
+        HybridPoolConfigCreator::createConfig(makeDSV4ManagerFlashModelConfig(), pc, kv_cache_config, false, 0);
+    config.block_num = block_num;
     config.group_block_nums.assign(config.groupNums(), block_num);
     return config;
 }
@@ -140,23 +168,21 @@ static int dsv4ActiveTailBlocks(const CacheConfig& config, int gid) {
     return isHcaStateGroup(config, gid) ? 1 : 2;
 }
 
-static void expectDsv4SwaAllocatedBlocks(const CacheConfig& config,
+static void expectDsv4SwaAllocatedBlocks(const CacheConfig&      config,
                                          const BlockIndicesType& blocks,
-                                         int gid,
-                                         const std::string& label,
-                                         bool enable_reuse_cache = false) {
-    const int active_tail_blocks = dsv4ActiveTailBlocks(config, gid);
-    const int tail_begin         = std::max(static_cast<int>(blocks.size()) - active_tail_blocks, 0);
-    const int linear_step        = std::max(1, config.linear_step);
-    const bool effective_reuse   = enable_reuse_cache && !isHcaStateGroup(config, gid);
+                                         int                     gid,
+                                         const std::string&      label,
+                                         bool                    enable_reuse_cache = false) {
+    const int  active_tail_blocks = dsv4ActiveTailBlocks(config, gid);
+    const int  tail_begin         = std::max(static_cast<int>(blocks.size()) - active_tail_blocks, 0);
+    const int  linear_step        = std::max(1, config.linear_step);
+    const bool effective_reuse    = enable_reuse_cache && !isHcaStateGroup(config, gid);
     for (int i = 0; i < static_cast<int>(blocks.size()); ++i) {
         const bool should_allocate = i >= tail_begin || (effective_reuse && ((i + 1) % linear_step == 0));
         if (should_allocate) {
-            EXPECT_FALSE(isNullBlockIdx(blocks[static_cast<size_t>(i)]))
-                << label << " group " << gid << " pos " << i;
+            EXPECT_FALSE(isNullBlockIdx(blocks[static_cast<size_t>(i)])) << label << " group " << gid << " pos " << i;
         } else {
-            EXPECT_TRUE(isNullBlockIdx(blocks[static_cast<size_t>(i)]))
-                << label << " group " << gid << " pos " << i;
+            EXPECT_TRUE(isNullBlockIdx(blocks[static_cast<size_t>(i)])) << label << " group " << gid << " pos " << i;
         }
     }
 }
@@ -168,8 +194,9 @@ static CacheConfig makeDSV4ConfigWithConcurrencyPool(uint32_t full_block_num, ui
     KVCacheConfig     kv_cache_config;
     kv_cache_config.seq_size_per_block     = 128;
     kv_cache_config.dsv4_fixed_pool_blocks = 2u * swa_batch_size;
-    auto              config = HybridPoolConfigCreator::createConfig(makeDSV4ManagerFlashModelConfig(), pc, kv_cache_config, false, 0);
-    config.block_num         = full_block_num;
+    auto config =
+        HybridPoolConfigCreator::createConfig(makeDSV4ManagerFlashModelConfig(), pc, kv_cache_config, false, 0);
+    config.block_num = full_block_num;
     for (int gid = 0; gid < config.groupNums(); ++gid) {
         config.group_block_nums[gid] = (gid < 3) ? full_block_num : (2u * swa_batch_size);
     }
@@ -181,7 +208,7 @@ makeProductionDSV4Config(uint32_t full_block_num, uint32_t max_concurrency, uint
     ParallelismConfig pc;
     RuntimeConfig     runtime_config;
     KVCacheConfig     kv_cache_config;
-    kv_cache_config.seq_size_per_block                         = 128;
+    kv_cache_config.seq_size_per_block                          = 128;
     kv_cache_config.test_block_num                              = full_block_num;
     kv_cache_config.dsv4_fixed_pool_blocks                      = fixed_pool_blocks;
     runtime_config.max_generate_batch_size                      = max_concurrency;
@@ -271,14 +298,14 @@ TEST_F(KVCacheManagerTest, DSV4IndependentPoolsFixedBackingFollowsMemorySwitch) 
         kv_cache_config.dsv4_fixed_pool_use_memory = fixed_pool_use_memory;
         config.fixed_pool_uses_pinned_cpu =
             fixed_pool_use_memory && (config.state_block_size_bytes > 0 || config.swa_block_size_bytes > 0);
-        auto cache_manager      = std::make_shared<KVCacheManager>(config,
-                                                               /*warmup=*/false,
-                                                               nullptr,
-                                                               kv_cache_config,
-                                                               ParallelismConfig{},
-                                                               RuntimeConfig{},
-                                                               SpeculativeExecutionConfig{},
-                                                               pd_sep_config);
+        auto cache_manager = std::make_shared<KVCacheManager>(config,
+                                                              /*warmup=*/false,
+                                                              nullptr,
+                                                              kv_cache_config,
+                                                              ParallelismConfig{},
+                                                              RuntimeConfig{},
+                                                              SpeculativeExecutionConfig{},
+                                                              pd_sep_config);
         ASSERT_TRUE(cache_manager->init());
 
         auto allocator = std::dynamic_pointer_cast<HybridPoolKVCacheAllocator>(cache_manager->allocator_);
@@ -287,9 +314,9 @@ TEST_F(KVCacheManagerTest, DSV4IndependentPoolsFixedBackingFollowsMemorySwitch) 
 
         for (size_t gid = 0; gid < allocator->groupBlockPools().size(); ++gid) {
             const auto region_name = config.group_region_names[gid];
-            const auto expected =
-                (fixed_pool_use_memory && isDsv4FixedRegion(region_name)) ? MemoryType::MEMORY_CPU_PINNED :
-                                                                             MemoryType::MEMORY_GPU;
+            const auto expected    = (fixed_pool_use_memory && isDsv4FixedRegion(region_name)) ?
+                                         MemoryType::MEMORY_CPU_PINNED :
+                                         MemoryType::MEMORY_GPU;
             EXPECT_EQ(allocator->groupBlockPools()[gid]->where(), expected)
                 << "role=" << static_cast<int>(role_type) << " gid=" << gid
                 << " region=" << static_cast<int>(region_name);
@@ -1002,6 +1029,64 @@ TEST_F(KVCacheManagerTest, GetKVCacheInfo_MergesDeviceAndMemoryKeys_Dedup) {
     EXPECT_EQ(got, expected);
 }
 
+TEST_F(KVCacheManagerTest, GetKVCacheInfo_UsesSnapshotForCacheKeysWhenEnabled) {
+    ScopedEnvVar snapshot_env("RTP_LLM_CACHE_STATUS_SNAPSHOT", "1");
+
+    auto          cache_config = makeSimpleMhaCacheConfig(1, 8, 2, rtp_llm::DataType::TYPE_INT8);
+    KVCacheConfig kv_cache_config;
+    kv_cache_config.enable_memory_cache = false;
+    kv_cache_config.reuse_cache         = false;
+
+    auto kv_cache_manager = std::make_shared<KVCacheManager>(cache_config, false, nullptr, kv_cache_config);
+    ASSERT_TRUE(kv_cache_manager->init());
+
+    auto shared_cache = kv_cache_manager->allocator_->sharedBlockCache();
+    ASSERT_NE(shared_cache, nullptr);
+
+    std::vector<BlockIdxType> group_slots(1);
+    group_slots[0] = 1;
+    shared_cache->put(10, group_slots, false);
+    group_slots[0] = 2;
+    shared_cache->put(11, group_slots, false);
+
+    kv_cache_manager->refreshKVCacheInfoSnapshot();
+
+    auto first = kv_cache_manager->getKVCacheInfo(/*latest_version=*/-1, /*need_cache_keys=*/true);
+    ASSERT_GE(first.version, 0);
+    auto first_keys = first.cached_keys;
+    std::sort(first_keys.begin(), first_keys.end());
+    EXPECT_EQ(first_keys, (std::vector<CacheKeyType>{10, 11}));
+
+    group_slots[0] = 3;
+    shared_cache->put(12, group_slots, false);
+
+    auto unchanged = kv_cache_manager->getKVCacheInfo(first.version, /*need_cache_keys=*/true);
+    EXPECT_EQ(unchanged.version, first.version);
+    auto unchanged_keys = unchanged.cached_keys;
+    std::sort(unchanged_keys.begin(), unchanged_keys.end());
+    EXPECT_EQ(unchanged_keys, (std::vector<CacheKeyType>{10, 11}));
+
+    auto stale = kv_cache_manager->getKVCacheInfo(first.version - 1, /*need_cache_keys=*/true);
+    EXPECT_EQ(stale.version, first.version);
+    auto stale_keys = stale.cached_keys;
+    std::sort(stale_keys.begin(), stale_keys.end());
+    EXPECT_EQ(stale_keys, (std::vector<CacheKeyType>{10, 11}));
+
+    kv_cache_manager->refreshKVCacheInfoSnapshot();
+
+    auto updated = kv_cache_manager->getKVCacheInfo(first.version, /*need_cache_keys=*/true);
+    EXPECT_GT(updated.version, first.version);
+    auto updated_keys = updated.cached_keys;
+    std::sort(updated_keys.begin(), updated_keys.end());
+    EXPECT_EQ(updated_keys, (std::vector<CacheKeyType>{10, 11, 12}));
+
+    auto current = kv_cache_manager->getKVCacheInfo(updated.version, /*need_cache_keys=*/true);
+    EXPECT_EQ(current.version, updated.version);
+    auto current_keys = current.cached_keys;
+    std::sort(current_keys.begin(), current_keys.end());
+    EXPECT_EQ(current_keys, (std::vector<CacheKeyType>{10, 11, 12}));
+}
+
 TEST_F(KVCacheManagerTest, GetKVCacheInfo_UsesSmallestHybridPoolTokenCapacity) {
     auto cache_config = makeDSV4ConfigWithConcurrencyPool(/*full_block_num=*/16, /*swa_batch_size=*/3);
 
@@ -1043,7 +1128,7 @@ TEST_F(KVCacheManagerTest, MaxAvailableTokensNumUsesCPVirtualBlockSizeForHybridP
     ASSERT_NE(hybrid_allocator, nullptr);
 
     const size_t physical_capacity = hybrid_allocator->maxAvailableTokensNum();
-    auto cp_slot_mapper =
+    auto         cp_slot_mapper =
         std::make_shared<CPSlotMapper>(/*cp_rank=*/0, /*cp_size=*/2, static_cast<int>(cache_config.seq_size_per_block));
     kv_cache_manager->cp_slot_mapper_ = cp_slot_mapper;
     hybrid_allocator->setCPSlotMapper(cp_slot_mapper);
@@ -1521,8 +1606,8 @@ TEST_F(KVCacheManagerTest, DSV4InitThenIncrWithRemoveSkippedBlocksFullLifecycle)
     // Record SWA tail blocks after incr1 for the next step.
     std::vector<BlockIdxType> swa_new_C(4);
     for (int idx = 0; idx < 4; ++idx) {
-        int gid         = 3 + idx;
-        swa_new_C[idx]  = resource->blocks(0, gid)[4];
+        int gid        = 3 + idx;
+        swa_new_C[idx] = resource->blocks(0, gid)[4];
     }
 
     // --- Phase 3: Second incrKVBlock (5 → 6 blocks) — triggers removeSkippedBlocks ---
