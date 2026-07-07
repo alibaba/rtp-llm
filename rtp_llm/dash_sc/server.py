@@ -19,13 +19,11 @@ import grpc
 from rtp_llm.dash_sc.access_log import (
     DASH_SC_GRPC_ACCESS_LOG_FILENAME,
     DASH_SC_GRPC_QUERY_LOG_FILENAME,
-    DashScGrpcAccessLogAioInterceptor,
     init_dash_sc_grpc_access_logger,
     init_dash_sc_grpc_query_logger,
 )
 from rtp_llm.dash_sc.proto import predict_v2_pb2_grpc
 from rtp_llm.dash_sc.proxy.servicer import DashScProxyServicer
-from rtp_llm.dash_sc.repetition_monitor import RequestRepetitionMonitorConfig
 
 
 def _resolve_dash_sc_grpc_config(dash_sc_grpc_config):
@@ -124,7 +122,6 @@ class DashScGrpcServer:
         log_path: str = "",
         backup_count: int = 0,
         rank_id: Optional[int] = None,
-        repetition_monitor_config: Optional[RequestRepetitionMonitorConfig] = None,
     ) -> grpc.aio.Server:
         """Bind + start the aio gRPC server. Must be awaited on the owning loop.
 
@@ -135,8 +132,8 @@ class DashScGrpcServer:
 
         ``log_path`` / ``backup_count`` / ``rank_id`` / ``server_id`` configure
         the access log file (``<log_path>/dash_sc_grpc_access_r{rank}_s{server}.log``).
-        Empty ``log_path`` -> no file handler (the interceptor still runs so
-        tests see logger calls).
+        Empty ``log_path`` -> no file handler (the servicers still call the
+        emit functions, so tests see logger calls).
         """
         if self._server is not None:
             logging.warning("[DashScGrpc] server already started")
@@ -178,21 +175,16 @@ class DashScGrpcServer:
                     DASH_SC_GRPC_QUERY_LOG_FILENAME, rank_id, server_id_int
                 ),
             )
-        # ``raw_mode`` is purely a servicer-shape property: the proxy ships
-        # opaque proto frames end-to-end, so the access record keeps compact
-        # forward summary counters instead of frontend-only struct details.
-        # Inferring it from ``isinstance`` keeps the two concerns coupled
-        # without reintroducing an env-var probe here.
-        is_proxy = isinstance(servicer, DashScProxyServicer)
-        if is_proxy:
+        # The shared access-log interceptor is gone: each servicer owns its
+        # access-log lifecycle inline in ``ModelStreamInfer``, with its
+        # rank/server identity injected at construction by ``DashScApp``. The
+        # server only opens the proxy's lazy outbound channel cache.
+        if isinstance(servicer, DashScProxyServicer):
             await servicer.open()
-        interceptor = DashScGrpcAccessLogAioInterceptor(
-            rank_id=rank_id,
-            server_id=server_id_int,
-            raw_mode=is_proxy,
-            repetition_monitor_config=repetition_monitor_config,
-        )
-        interceptors = [interceptor]
+        # The only interceptor left is the graceful pre-stop drain (the shared
+        # access-log interceptor was dissolved into the servicers), and it is
+        # installed only when the caller wired a ``shutdown_manager``.
+        interceptors: list[grpc.aio.ServerInterceptor] = []
         if shutdown_manager is not None:
             interceptors.append(DashScGrpcDrainAioInterceptor(shutdown_manager))
         # Deliberately no ``maximum_concurrent_rpcs`` — under grpc.aio concurrent
@@ -201,10 +193,7 @@ class DashScGrpcServer:
         # are in flight). Backpressure comes from the backend visitor's own
         # concurrency instead. ``DashScGrpcConfig.max_server_workers`` is
         # retained on the C++ struct for wire compatibility but ignored here.
-        server = grpc.aio.server(
-            options=opts,
-            interceptors=interceptors,
-        )
+        server = grpc.aio.server(options=opts, interceptors=interceptors)
 
         predict_v2_pb2_grpc.add_GRPCInferenceServiceServicer_to_server(servicer, server)
         server.add_insecure_port(f"0.0.0.0:{port}")
@@ -229,7 +218,6 @@ class DashScGrpcServer:
         log_path: str = "",
         backup_count: int = 0,
         rank_id: Optional[int] = None,
-        repetition_monitor_config: Optional[RequestRepetitionMonitorConfig] = None,
         startup_timeout_s: float = _DEFAULT_DASH_SC_GRPC_STARTUP_TIMEOUT_S,
     ) -> None:
         """Schedule ``start()`` on ``loop`` and block until it returns or raises.
@@ -249,7 +237,6 @@ class DashScGrpcServer:
                 log_path=log_path,
                 backup_count=backup_count,
                 rank_id=rank_id,
-                repetition_monitor_config=repetition_monitor_config,
             ),
             loop,
         )
