@@ -192,7 +192,8 @@ BlockTreeMatchResult BlockTreeCache::match(const CacheKeysType& cache_keys) {
     }
 
     // Phase 2: path lock — per-group reference strategy (SWA uses window lock)
-    if (reference_blocks_) {
+    // Use device_pools_ for per-block reference counting
+    {
         std::vector<TreeNode*> match_path(find_result.path.begin(),
                                           find_result.path.begin() + static_cast<ptrdiff_t>(valid_matched_blocks));
 
@@ -205,7 +206,7 @@ BlockTreeMatchResult BlockTreeCache::match(const CacheKeysType& cache_keys) {
                 if (gid < node->group_slots.size()) {
                     auto& slot = node->group_slots[gid];
                     if (slot.has_device_value()) {
-                        reference_blocks_(slot.device_blocks);
+                        group->referenceDeviceBlocks(slot.device_blocks);
                     }
                 }
             }
@@ -401,50 +402,7 @@ int BlockTreeCache::evict(size_t num_blocks, Tier tier) {
                               tierName(er.target_tier),
                               er.node ? er.node->cache_key : 0);
 
-            if (er.target_tier == Tier::NONE || !isTierEnabled(er.target_tier)) {
-                // Target tier disabled or direct release: synchronous
-                if (!isTierEnabled(er.target_tier) && er.target_tier != Tier::NONE) {
-                    RTP_LLM_LOG_DEBUG("BlockTreeCache::evict: target tier %s disabled, "
-                                      "downgrading to direct release, group[%d] node_key=%ld",
-                                      tierName(er.target_tier),
-                                      er.component_group_id,
-                                      er.node ? er.node->cache_key : 0);
-                }
-                onEvictionComplete(er);
-            } else {
-                // Allocate target block for REUSABLE tier demotion
-                if (er.target_tier == Tier::HOST) {
-                    auto pool = hostPoolForGroup(er.component_group_id);
-                    if (pool) {
-                        auto alloc      = pool->malloc(1);
-                        er.target_block = alloc.empty() ? NULL_BLOCK_IDX : alloc[0];
-                    }
-                } else if (er.target_tier == Tier::DISK) {
-                    auto pool = diskPoolForGroup(er.component_group_id);
-                    if (pool) {
-                        auto slot = pool->malloc();
-                        if (slot.has_value()) {
-                            er.target_block = slot.value();
-                        }
-                    }
-                }
-
-                // Phase 2+3: async data copy + completion callback via autil thread pool
-                taskStarted();
-                auto* work_item = new autil::LambdaWorkItem([this, er]() { performEvictionCopy(er); });
-                auto  err       = thread_pool_->pushWorkItem(work_item);
-                if (err != autil::ThreadPool::ERROR_NONE) {
-                    RTP_LLM_LOG_WARNING("BlockTreeCache::evict: pushWorkItem failed (err=%d), "
-                                        "falling back to synchronous completion",
-                                        static_cast<int>(err));
-                    work_item->destroy();
-                    // Synchronous fallback: evict() already holds mutex_, so we cannot
-                    // call performEvictionCopy() (which would try to re-acquire mutex_).
-                    // Directly complete the eviction without data copy.
-                    onEvictionComplete(er);
-                    taskFinished();
-                }
-            }
+            submitEviction(er);
 
             total_evicted++;
             break;
@@ -620,8 +578,8 @@ void BlockTreeCache::onEvictionComplete(const EvictionResult& er) {
     group->evictFromTier(er.node, slot, er.source_tier);
 
     // Release source blocks back to their pools (design doc §2.7 Phase 3)
-    if (er.source_tier == Tier::DEVICE && release_blocks_ && !er.blocks_to_release.empty()) {
-        release_blocks_(er.blocks_to_release);
+    if (er.source_tier == Tier::DEVICE && !er.blocks_to_release.empty()) {
+        group->releaseDeviceBlocks(er.blocks_to_release);
     } else if (er.source_tier == Tier::HOST && !er.blocks_to_release.empty()) {
         auto hp = hostPoolForGroup(er.component_group_id);
         if (hp) {
@@ -727,8 +685,8 @@ void BlockTreeCache::cascadeEviction(TreeNode* node, int source_group_id, Tier t
             lower_group->evictFromTier(node, slot, tier);
 
             // Release blocks back to the lower_group's own pool
-            if (tier == Tier::DEVICE && release_blocks_) {
-                release_blocks_(blocks_to_free);
+            if (tier == Tier::DEVICE) {
+                lower_group->releaseDeviceBlocks(blocks_to_free);
             } else if (tier == Tier::HOST && lower_group->hostPool()) {
                 for (auto b : blocks_to_free) {
                     if (!isNullBlockIdx(b))
@@ -828,9 +786,33 @@ void BlockTreeCache::setIsBlockEvictable(IsBlockEvictableFn fn) {
     }
 }
 
+// TODO: 和match部分要同步fix，当前没有
 void BlockTreeCache::releaseMatchedBlocks(const std::vector<BlockIdxType>& block_indices) {
-    if (release_blocks_ && !block_indices.empty()) {
-        release_blocks_(block_indices);
+    if (block_indices.empty())
+        return;
+
+    // Find FULL group (block_indices are from this group's device_blocks)
+    ComponentGroupPtr full_group;
+    for (auto& g : component_groups_) {
+        if (g->group_type == CacheGroupType::FULL) {
+            full_group = g;
+            break;
+        }
+    }
+    if (!full_group || full_group->devicePools().empty())
+        return;
+
+    const auto& pools = full_group->devicePools();
+    size_t num_pools = pools.size();
+
+    // block_indices is laid out as [node0.pool0, node0.pool1, ..., node1.pool0, ...]
+    for (size_t i = 0; i < block_indices.size(); ++i) {
+        if (isNullBlockIdx(block_indices[i]))
+            continue;
+        size_t pool_idx = i % num_pools;
+        if (pool_idx < pools.size() && pools[pool_idx]) {
+            pools[pool_idx]->blockCacheFree(block_indices[i]);
+        }
     }
 }
 
@@ -934,9 +916,9 @@ void BlockTreeCache::performLoadBack(std::vector<LoadBackItem> items, std::share
 
         if (!copy_ok) {
             all_ok = false;
-            // Rollback: release allocated device blocks
-            if (release_blocks_ && !item.allocated_device_blocks.empty()) {
-                release_blocks_(item.allocated_device_blocks);
+            // Rollback: release allocated device blocks via per-pool reference counting
+            if (!item.allocated_device_blocks.empty() && gid < component_groups_.size()) {
+                component_groups_[gid]->releaseDeviceBlocks(item.allocated_device_blocks);
             }
         }
     }
@@ -964,10 +946,8 @@ void BlockTreeCache::performLoadBack(std::vector<LoadBackItem> items, std::share
                 }
                 // Add to device heap if it qualifies as DeviceLeaf
                 group->tryAddToDeviceHeap(item.node);
-                // Add path lock reference
-                if (reference_blocks_) {
-                    reference_blocks_(item.allocated_device_blocks);
-                }
+                // Add path lock reference via device pools
+                group->referenceDeviceBlocks(item.allocated_device_blocks);
             } else {
                 // Copy failed: clear device_blocks from slot
                 slot.device_blocks.clear();
@@ -981,166 +961,91 @@ void BlockTreeCache::performLoadBack(std::vector<LoadBackItem> items, std::share
 }
 
 void BlockTreeCache::checkWatermark() {
-    checkTierWatermark(Tier::DEVICE);
-    checkTierWatermark(Tier::HOST);
-    checkTierWatermark(Tier::DISK);
+    for (auto tier : {Tier::DEVICE, Tier::HOST, Tier::DISK}) {
+        checkTierWatermark(tier);
+    }
 }
 
 void BlockTreeCache::checkTierWatermark(Tier tier) {
-    // Select watermark config for this tier
-    TierWatermark wm;
-    switch (tier) {
-        case Tier::DEVICE:
-            wm = watermark_device_;
-            break;
-        case Tier::HOST:
-            wm = watermark_host_;
-            break;
-        case Tier::DISK:
-            wm = watermark_disk_;
-            break;
-        default:
-            return;
-    }
+    auto wm = watermarkForTier(tier);
     if (wm.ratio <= 0.0 || !isTierEnabled(tier))
         return;
 
-    if (tier == Tier::DEVICE) {
-        // DEVICE has no per-group pool; use external capacity from watermark config
-        if (wm.capacity == 0)
-            return;
-        size_t used = 0;
-        // TODO: add device block pool....
-        for (const auto& g : component_groups_) {
-            auto* heap = g->heapForTier(tier);
-            if (heap)
-                used += heap->size();
-        }
-        size_t threshold = static_cast<size_t>(wm.capacity * wm.ratio);
-        if (used <= threshold)
-            return;
-
-        size_t excess = used - threshold;
-        RTP_LLM_LOG_INFO("BlockTreeCache::checkTierWatermark: tier=DEVICE used=%zu > threshold=%zu "
-                         "(ratio=%.2f, capacity=%zu), evicting %zu blocks",
-                         used, threshold, wm.ratio, wm.capacity, excess);
-
-        for (size_t attempt = 0; attempt < excess; ++attempt) {
-            bool found = false;
-            for (auto& group : component_groups_) {
-                auto er = group->driveEviction(1, tier);
-                if (!er.has_value())
-                    continue;
-
-                found = true;
-                if (er->target_tier != Tier::NONE && !isTierEnabled(er->target_tier)) {
-                    er->target_tier = Tier::NONE;
-                }
-
-                if (er->target_tier == Tier::NONE) {
-                    onEvictionComplete(*er);
-                } else {
-                    // Allocate target block from per-group pool
-                    if (er->target_tier == Tier::HOST) {
-                        auto pool = hostPoolForGroup(er->component_group_id);
-                        if (pool) {
-                            auto alloc       = pool->malloc(1);
-                            er->target_block = alloc.empty() ? NULL_BLOCK_IDX : alloc[0];
-                        }
-                    } else if (er->target_tier == Tier::DISK) {
-                        auto pool = diskPoolForGroup(er->component_group_id);
-                        if (pool) {
-                            auto slot = pool->malloc();
-                            if (slot.has_value())
-                                er->target_block = slot.value();
-                        }
-                    }
-                    taskStarted();
-                    auto  captured_er = *er;
-                    auto* work_item =
-                        new autil::LambdaWorkItem([this, captured_er]() { performEvictionCopy(captured_er); });
-                    auto err = thread_pool_->pushWorkItem(work_item);
-                    if (err != autil::ThreadPool::ERROR_NONE) {
-                        work_item->destroy();
-                        onEvictionComplete(*er);
-                        taskFinished();
-                    }
-                }
-                break;
-            }
-            if (!found)
-                break;
-        }
-        return;
-    }
-
-    // HOST / DISK: per-group pool-based watermark
     for (auto& group : component_groups_) {
-        size_t capacity = 0, used = 0;
-        if (tier == Tier::HOST) {
-            capacity = group->hostPoolCapacity();
-            used     = group->hostPoolUsed();
-        } else {
-            capacity = group->diskPoolCapacity();
-            used     = group->diskPoolUsed();
-        }
-        if (capacity == 0)
+        size_t excess = computeGroupExcess(*group, tier, wm.ratio);
+        if (excess == 0)
             continue;
 
-        size_t threshold = static_cast<size_t>(capacity * wm.ratio);
-        if (used <= threshold)
-            continue;
+        RTP_LLM_LOG_INFO("BlockTreeCache::checkTierWatermark: tier=%s group[%d] "
+                         "excess=%zu (ratio=%.2f), evicting",
+                         tierName(tier), group->component_group_id, excess, wm.ratio);
 
-        size_t excess = used - threshold;
-        RTP_LLM_LOG_INFO("BlockTreeCache::checkTierWatermark: tier=%s group[%d] used=%zu > threshold=%zu "
-                         "(ratio=%.2f, capacity=%zu), evicting %zu blocks",
-                         tierName(tier),
-                         group->component_group_id,
-                         used,
-                         threshold,
-                         wm.ratio,
-                         capacity,
-                         excess);
-
-        for (size_t attempt = 0; attempt < excess; ++attempt) {
+        for (size_t i = 0; i < excess; ++i) {
             auto er = group->driveEviction(1, tier);
             if (!er.has_value())
                 break;
-
-            if (er->target_tier != Tier::NONE && !isTierEnabled(er->target_tier)) {
-                er->target_tier = Tier::NONE;
-            }
-
-            if (er->target_tier == Tier::NONE) {
-                onEvictionComplete(*er);
-            } else {
-                // Allocate target block from per-group pool
-                if (er->target_tier == Tier::HOST) {
-                    auto pool = group->hostPool();
-                    if (pool) {
-                        auto alloc       = pool->malloc(1);
-                        er->target_block = alloc.empty() ? NULL_BLOCK_IDX : alloc[0];
-                    }
-                } else if (er->target_tier == Tier::DISK) {
-                    auto pool = group->diskPool();
-                    if (pool) {
-                        auto slot = pool->malloc();
-                        if (slot.has_value())
-                            er->target_block = slot.value();
-                    }
-                }
-                taskStarted();
-                auto  captured_er = *er;
-                auto* work_item =
-                    new autil::LambdaWorkItem([this, captured_er]() { performEvictionCopy(captured_er); });
-                auto err = thread_pool_->pushWorkItem(work_item);
-                if (err != autil::ThreadPool::ERROR_NONE) {
-                    work_item->destroy();
-                    onEvictionComplete(*er);
-                    taskFinished();
-                }
-            }
+            submitEviction(*er);
         }
+    }
+}
+
+BlockTreeCache::TierWatermark BlockTreeCache::watermarkForTier(Tier tier) const {
+    switch (tier) {
+        case Tier::DEVICE: return watermark_device_;
+        case Tier::HOST:   return watermark_host_;
+        case Tier::DISK:   return watermark_disk_;
+        default:           return {};
+    }
+}
+
+size_t BlockTreeCache::computeGroupExcess(const ComponentGroup& group, Tier tier, double ratio) const {
+    if (tier == Tier::DEVICE) {
+        return group.devicePoolMaxExcess(ratio);
+    }
+    size_t capacity = (tier == Tier::HOST) ? group.hostPoolCapacity() : group.diskPoolCapacity();
+    if (capacity == 0)
+        return 0;
+    size_t used      = (tier == Tier::HOST) ? group.hostPoolUsed() : group.diskPoolUsed();
+    size_t threshold = static_cast<size_t>(capacity * ratio);
+    return (used > threshold) ? (used - threshold) : 0;
+}
+
+void BlockTreeCache::allocateTargetBlock(EvictionResult& er) {
+    if (er.target_tier == Tier::HOST) {
+        auto pool = hostPoolForGroup(er.component_group_id);
+        if (pool) {
+            auto alloc      = pool->malloc(1);
+            er.target_block = alloc.empty() ? NULL_BLOCK_IDX : alloc[0];
+        }
+    } else if (er.target_tier == Tier::DISK) {
+        auto pool = diskPoolForGroup(er.component_group_id);
+        if (pool) {
+            auto slot = pool->malloc();
+            if (slot.has_value())
+                er.target_block = slot.value();
+        }
+    }
+}
+
+void BlockTreeCache::submitEviction(EvictionResult& er) {
+    if (er.target_tier != Tier::NONE && !isTierEnabled(er.target_tier)) {
+        er.target_tier = Tier::NONE;
+    }
+
+    if (er.target_tier == Tier::NONE) {
+        onEvictionComplete(er);
+        return;
+    }
+
+    allocateTargetBlock(er);
+
+    taskStarted();
+    auto* work_item = new autil::LambdaWorkItem([this, er]() { performEvictionCopy(er); });
+    auto  err       = thread_pool_->pushWorkItem(work_item);
+    if (err != autil::ThreadPool::ERROR_NONE) {
+        work_item->destroy();
+        onEvictionComplete(er);
+        taskFinished();
     }
 }
 

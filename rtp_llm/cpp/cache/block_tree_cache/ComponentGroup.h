@@ -140,13 +140,46 @@ public:
     }
 
     // ---- Per-group pool injection and access ----
+    void setDevicePools(std::vector<BlockPoolPtr> pools) { device_pools_ = std::move(pools); }
     void setHostPool(BlockPoolPtr pool) { host_pool_ = std::move(pool); }
     void setDiskPool(std::shared_ptr<DiskBlockPool> pool) { disk_pool_ = std::move(pool); }
 
+    const std::vector<BlockPoolPtr>& devicePools() const { return device_pools_; }
     BlockPoolPtr hostPool() const { return host_pool_; }
     std::shared_ptr<DiskBlockPool> diskPool() const { return disk_pool_; }
 
-    // Pool usage queries for watermark checking
+    // Device pool usage queries for watermark checking
+    size_t devicePoolCount() const { return device_pools_.size(); }
+
+    // Returns true if any device pool's usage exceeds capacity * ratio
+    bool anyDevicePoolExceedsRatio(double ratio) const {
+        for (const auto& pool : device_pools_) {
+            if (!pool) continue;
+            size_t capacity = pool->totalBlocksNum();
+            if (capacity == 0) continue;
+            size_t used = capacity - pool->freeBlocksNum();
+            size_t threshold = static_cast<size_t>(capacity * ratio);
+            if (used > threshold) return true;
+        }
+        return false;
+    }
+
+    // Returns the maximum excess across all device pools
+    size_t devicePoolMaxExcess(double ratio) const {
+        size_t max_excess = 0;
+        for (const auto& pool : device_pools_) {
+            if (!pool) continue;
+            size_t capacity = pool->totalBlocksNum();
+            if (capacity == 0) continue;
+            size_t used = capacity - pool->freeBlocksNum();
+            size_t threshold = static_cast<size_t>(capacity * ratio);
+            if (used > threshold)
+                max_excess = std::max(max_excess, used - threshold);
+        }
+        return max_excess;
+    }
+
+    // Host/Disk pool usage queries for watermark checking
     size_t hostPoolUsed() const {
         return host_pool_ ? (host_pool_->totalBlocksNum() - host_pool_->freeBlocksNum()) : 0;
     }
@@ -160,8 +193,25 @@ public:
         return disk_pool_ ? disk_pool_->totalSlots() : 0;
     }
 
+    // ---- Device block reference counting via pools ----
+    void referenceDeviceBlocks(const std::vector<BlockIdxType>& device_blocks) const {
+        for (size_t i = 0; i < device_blocks.size() && i < device_pools_.size(); ++i) {
+            if (device_pools_[i] && !isNullBlockIdx(device_blocks[i])) {
+                device_pools_[i]->blockCacheReference(device_blocks[i]);
+            }
+        }
+    }
+    void releaseDeviceBlocks(const std::vector<BlockIdxType>& device_blocks) const {
+        for (size_t i = 0; i < device_blocks.size() && i < device_pools_.size(); ++i) {
+            if (device_pools_[i] && !isNullBlockIdx(device_blocks[i])) {
+                device_pools_[i]->blockCacheFree(device_blocks[i]);
+            }
+        }
+    }
+
 protected:
     IsBlockEvictableFn             is_block_evictable_;
+    std::vector<BlockPoolPtr>      device_pools_;
     BlockPoolPtr                   host_pool_;
     std::shared_ptr<DiskBlockPool> disk_pool_;
 };

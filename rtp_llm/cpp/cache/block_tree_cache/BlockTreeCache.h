@@ -97,16 +97,11 @@ public:
     CacheStats getStats() const;
     void       waitForPendingTasks();
 
-    // Phase 2: Reference counting callbacks
-    using ReferenceBlocksFn = std::function<void(const std::vector<BlockIdxType>&)>;
     void setIsBlockEvictable(IsBlockEvictableFn fn);
-    void setReferenceBlocksCallbacks(ReferenceBlocksFn ref_fn, ReferenceBlocksFn release_fn) {
-        reference_blocks_ = std::move(ref_fn);
-        release_blocks_   = std::move(release_fn);
-    }
 
     // Release path-lock references acquired during match().
     // Must be called by the request owner when matched blocks are no longer needed.
+    // Iterates device_blocks and uses the corresponding device pool for reference counting.
     void releaseMatchedBlocks(const std::vector<BlockIdxType>& block_indices);
 
     // Per-tier watermark configuration.
@@ -203,6 +198,10 @@ private:
     void             taskFinished();
     void             checkWatermark();
     void             checkTierWatermark(Tier tier);
+    TierWatermark    watermarkForTier(Tier tier) const;
+    size_t           computeGroupExcess(const ComponentGroup& group, Tier tier, double ratio) const;
+    void             allocateTargetBlock(EvictionResult& er);
+    void             submitEviction(EvictionResult& er);
 
     // Per-group pool access helpers
     BlockPoolPtr               hostPoolForGroup(int component_group_id) const;
@@ -224,9 +223,7 @@ private:
     std::shared_ptr<autil::LockFreeThreadPool> thread_pool_;
     std::shared_ptr<BroadcastManager>          broadcast_manager_;
 
-    // Phase 2: Reference counting & path lock callbacks
-    ReferenceBlocksFn reference_blocks_;
-    ReferenceBlocksFn release_blocks_;
+
 
     // Phase 2: load_back enable flag
     bool enable_load_back_{false};
