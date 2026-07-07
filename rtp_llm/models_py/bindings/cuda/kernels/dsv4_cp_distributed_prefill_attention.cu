@@ -2887,7 +2887,6 @@ __device__ __forceinline__ int dsv4MegaBuildCompressedIndicesForRow(const scalar
                                                                      int64_t symm_indexer_payload_offset,
                                                                      int symm_indexer_l_local,
                                                                      int compressed_stride,
-                                                                     unsigned int compressed_epoch,
                                                                      unsigned long long compressed_epoch_prefix,
                                                                      unsigned long long* __restrict__ compressed_meta,
                                                                      int* __restrict__ row_compressed_indices_base,
@@ -3462,7 +3461,6 @@ __device__ __forceinline__ int dsv4MegaBuildCompressedIndicesFromScores(const in
                                                                         const int32_t* __restrict__ csa_indexer_block_table,
                                                                         const int32_t* __restrict__ csa_indexer_seq_lens,
                                                                         int compressed_stride,
-                                                                        unsigned int compressed_epoch,
                                                                         unsigned long long compressed_epoch_prefix,
                                                                         unsigned long long* __restrict__ compressed_meta,
                                                                         int* __restrict__ row_compressed_indices_base,
@@ -6763,8 +6761,8 @@ __global__ __launch_bounds__(kMegaBlockThreads, 1) void dsv4CpDistributedPrefill
                      kMegaPayloadAlignBytes);
     int* row_compressed_indices_base =
         scratch_work_base == nullptr ? nullptr : reinterpret_cast<int*>(scratch_work_base + compressed_indices_offset);
-    const unsigned int compressed_epoch = static_cast<unsigned int>(launch_epoch & 0xffffffffull);
-    const unsigned long long compressed_epoch_prefix = static_cast<unsigned long long>(compressed_epoch) << 32;
+    const unsigned long long compressed_epoch_prefix =
+        static_cast<unsigned long long>(static_cast<unsigned int>(launch_epoch & 0xffffffffull)) << 32;
 
     const bool runtime_grouped_attention =
         D == kSwaHeadDim && KH == 1 && H >= kMegaAttentionHeadsPerCta
@@ -6878,7 +6876,6 @@ __global__ __launch_bounds__(kMegaBlockThreads, 1) void dsv4CpDistributedPrefill
                                                                    csa_indexer_block_table,
                                                                    csa_indexer_seq_lens,
                                                                    compressed_stride,
-                                                                   compressed_epoch,
                                                                    compressed_epoch_prefix,
                                                                    compressed_meta,
                                                                    row_compressed_indices_base,
@@ -6920,7 +6917,6 @@ __global__ __launch_bounds__(kMegaBlockThreads, 1) void dsv4CpDistributedPrefill
                                                                          symm_indexer_payload_offset,
                                                                          symm_indexer_l_local,
                                                                          compressed_stride,
-                                                                         compressed_epoch,
                                                                          compressed_epoch_prefix,
                                                                          compressed_meta,
                                                                          row_compressed_indices_base,
@@ -7220,7 +7216,6 @@ __global__ __launch_bounds__(kMegaBlockThreads, 1) void dsv4CpDistributedPrefill
 			                                                                 symm_indexer_payload_offset,
 			                                                                 symm_indexer_l_local,
 			                                                                 compressed_stride,
-			                                                                 compressed_epoch,
 			                                                                 compressed_epoch_prefix,
 			                                                                 compressed_meta,
 	                                                                 row_compressed_indices_base,
@@ -7277,7 +7272,6 @@ __global__ __launch_bounds__(kMegaBlockThreads, 1) void dsv4CpDistributedPrefill
 			                                                                          symm_indexer_payload_offset,
 			                                                                          symm_indexer_l_local,
 			                                                                          compressed_stride,
-			                                                                          compressed_epoch,
 			                                                                          compressed_epoch_prefix,
 			                                                                          nullptr,
 			                                                                          nullptr,
