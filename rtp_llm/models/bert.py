@@ -35,6 +35,7 @@ class Bert(BaseModel):
         config.has_pre_decoder_layernorm = True
         config.layernorm_type = "post_layernorm"
         config.attn_config.is_causal = False
+        config.attn_config.need_rope_kv_cache = False
         # hugggingface
         config_path = os.path.join(ckpt_path, "config.json")
         if not os.path.exists(config_path):

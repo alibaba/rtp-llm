@@ -8,6 +8,7 @@
 #define private public
 #define protected public
 #include "rtp_llm/cpp/engine_base/schedulers/FIFOScheduler.h"
+#include "rtp_llm/cpp/engine_base/schedulers/PDFusionRatioScheduler.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/engine_base/stream/StreamCacheResource.h"
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
@@ -61,6 +62,20 @@ protected:
         ParallelismConfig   parallelism_config;
         ModelSpecificConfig model_specific_config;
         return std::make_shared<FIFOScheduler>(
+            runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager_);
+    }
+
+    std::shared_ptr<PDFusionRatioScheduler> createPDFusionRatioScheduler() {
+        ModelConfig model_config;
+        model_config.max_seq_len = 8192;
+        RuntimeConfig runtime_config;
+        runtime_config.max_generate_batch_size                     = 100;
+        runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8192;
+        PDSepConfig pd_sep_config;
+        pd_sep_config.role_type = RoleType::PDFUSION;
+        ParallelismConfig   parallelism_config;
+        ModelSpecificConfig model_specific_config;
+        return std::make_shared<PDFusionRatioScheduler>(
             runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager_);
     }
 
@@ -186,6 +201,47 @@ TEST_F(FIFOSchedulerAsyncCacheTest, testEvaluateLoadingCache_LoadDone_MovesToRun
     ASSERT_EQ(scheduler->runningStreamsSize(), 1);
 }
 
+TEST_F(FIFOSchedulerAsyncCacheTest, testPDFusionLoadingCacheLifecyclePromotesToDecode) {
+    setupMockCoordinator();
+
+    auto mock_ctx = std::make_shared<NiceMock<MockAsyncContext>>();
+    ON_CALL(*mock_ctx, done()).WillByDefault(Return(true));
+    ON_CALL(*mock_ctx, success()).WillByDefault(Return(true));
+    ON_CALL(*mock_ctx, waitDone()).WillByDefault(Return());
+    EXPECT_CALL(*mock_coord_, asyncRead(_)).WillOnce(Return(std::static_pointer_cast<AsyncContext>(mock_ctx)));
+
+    auto scheduler = createPDFusionRatioScheduler();
+    auto stream    = createStream({1, 2, 3}, /*reuse_cache=*/true, /*enable_memory_cache=*/true);
+
+    ASSERT_TRUE(scheduler->enqueue(stream).ok());
+
+    auto loading = scheduler->schedule();
+    ASSERT_TRUE(loading.ok());
+    ASSERT_EQ(loading.value().size(), 0);
+    ASSERT_EQ(stream->getStatus(), StreamState::LOADING_CACHE);
+    ASSERT_EQ(scheduler->loading_cache_streams_.size(), 1);
+    ASSERT_EQ(scheduler->waitingStreamsSize(), 0);
+    ASSERT_EQ(scheduler->pendingDecodeStreamsSize(), 0);
+
+    auto prefill = scheduler->schedule();
+    ASSERT_TRUE(prefill.ok());
+    ASSERT_EQ(prefill.value().size(), 1);
+    ASSERT_EQ(prefill.value().front().get(), stream.get());
+    ASSERT_EQ(stream->getStatus(), StreamState::RUNNING);
+    ASSERT_EQ(scheduler->loading_cache_streams_.size(), 0);
+    ASSERT_EQ(scheduler->waitingStreamsSize(), 0);
+    ASSERT_EQ(scheduler->runningStreamsSize(), 0);
+    ASSERT_EQ(scheduler->pendingDecodeStreamsSize(), 1);
+
+    stream->setSeqLength(stream->seqLength() + 1);
+    auto decode = scheduler->schedule();
+    ASSERT_TRUE(decode.ok());
+    ASSERT_EQ(decode.value().size(), 1);
+    ASSERT_EQ(decode.value().front().get(), stream.get());
+    ASSERT_EQ(scheduler->runningStreamsSize(), 1);
+    ASSERT_EQ(scheduler->pendingDecodeStreamsSize(), 0);
+}
+
 // ============================================================================
 // 4. evaluateLoadingCacheStreams: stream with error during loading -> evicted
 // ============================================================================
@@ -259,6 +315,45 @@ TEST_F(FIFOSchedulerAsyncCacheTest, testLoadingCacheStreams_CountedInBatchLimit)
     // With max=2, only 2 streams should be scheduled (into LOADING_CACHE)
     // The 3rd stream should remain in waiting
     ASSERT_LE(result.value().size(), 2);
+}
+
+TEST_F(FIFOSchedulerAsyncCacheTest, testPDFusionLoadingCacheStreamsCountTowardBatchLimit) {
+    setupMockCoordinator();
+
+    ModelConfig model_config;
+    model_config.max_seq_len = 8192;
+    RuntimeConfig runtime_config;
+    runtime_config.max_generate_batch_size                     = 2;
+    runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8192;
+    PDSepConfig pd_sep_config;
+    pd_sep_config.role_type = RoleType::PDFUSION;
+    ParallelismConfig   parallelism_config;
+    ModelSpecificConfig model_specific_config;
+    auto                scheduler = std::make_shared<PDFusionRatioScheduler>(
+        runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager_);
+
+    auto pending_ctx = createPendingAsyncContext();
+    EXPECT_CALL(*mock_coord_, asyncRead(_)).WillRepeatedly(Return(std::static_pointer_cast<AsyncContext>(pending_ctx)));
+
+    auto stream1 = createStream({1}, /*reuse_cache=*/true, /*enable_memory_cache=*/true);
+    auto stream2 = createStream({2}, /*reuse_cache=*/true, /*enable_memory_cache=*/true);
+    auto stream3 = createStream({3}, /*reuse_cache=*/true, /*enable_memory_cache=*/true);
+
+    ASSERT_TRUE(scheduler->enqueue(stream1).ok());
+    ASSERT_TRUE(scheduler->enqueue(stream2).ok());
+    ASSERT_TRUE(scheduler->enqueue(stream3).ok());
+
+    auto first = scheduler->schedule();
+    ASSERT_TRUE(first.ok());
+    ASSERT_EQ(first.value().size(), 0);
+    ASSERT_EQ(scheduler->loading_cache_streams_.size(), 2);
+    ASSERT_EQ(scheduler->waitingStreamsSize(), 1);
+
+    auto second = scheduler->schedule();
+    ASSERT_TRUE(second.ok());
+    ASSERT_EQ(second.value().size(), 0);
+    ASSERT_EQ(scheduler->loading_cache_streams_.size(), 2);
+    ASSERT_EQ(scheduler->waitingStreamsSize(), 1);
 }
 
 // ============================================================================

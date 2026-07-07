@@ -93,9 +93,14 @@ class DenseMLP(nn.Module):
         )
 
     def forward(self, x: torch.Tensor, skip_allreduce: bool = False) -> torch.Tensor:
-        up = self.up_proj(x)
-        activated = self.act_fn(up)
+        if not self.is_gated and self.activation_type == ActivationType.Gelu:
+            activated = self.up_proj.forward_with_bias_gelu(x)
+        else:
+            up = self.up_proj(x)
+            activated = self.act_fn(up)
+
+        ffn_tp_size = self.parallelism_config.get_ffn_tp_size()
         output = self.down_proj(activated)
-        if not skip_allreduce and self.parallelism_config.get_ffn_tp_size() > 1:
+        if not skip_allreduce and ffn_tp_size > 1:
             output = all_reduce(output, group=Group.TP)
         return output

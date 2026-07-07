@@ -35,6 +35,8 @@ class QueryInfo(BaseModel):
     images: Optional[Union[List[List[str]], List[str]]] = None
     generate_config: GenerateConfig = GenerateConfig()
     yield_generator: bool = False
+    batch_group_size: int = 1
+    batch_group_id: int = -1
 
     def check_vaild(self):
         if self.prompt is None and self.prompt_batch is None:

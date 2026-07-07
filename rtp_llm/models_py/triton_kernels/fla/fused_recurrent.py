@@ -44,8 +44,8 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
     sequence_lengths,
     max_block_size: tl.int32,
     scale,
-    N: tl.constexpr,  # num of sequences
-    T: tl.constexpr,  # num of tokens
+    N,  # num of sequences
+    T,  # num of tokens
     B: tl.constexpr,
     H: tl.constexpr,
     HV: tl.constexpr,
@@ -402,6 +402,7 @@ def fused_recurrent_gated_delta_rule(
         # a proper V-first contiguous tensor has stride(-2) == K and stride(-1) == 1.
         if V == K and initial_state.stride(-2) == 1 and initial_state.stride(-1) == V:
             import warnings
+
             warnings.warn(
                 f"initial_state appears to be a transposed K-first view "
                 f"(stride(-2)=1, stride(-1)={V}) rather than a true V-first layout. "
