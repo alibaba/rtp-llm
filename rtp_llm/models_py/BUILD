@@ -67,6 +67,15 @@ py_library(
 # Export sitecustomize.py for test targets to fix nvidia-cutlass-dsl import
 exports_files(["modules/factory/sitecustomize.py"])
 
+filegroup(
+    name = "topology_kv_policy_runfiles",
+    srcs = [
+        "modules/hybrid/indexer.py",
+        "modules/hybrid/topology_kv_policy.py",
+    ],
+    visibility = ["//visibility:public"],
+)
+
 py_library(
     name = "modules_cuda",
     srcs = glob([

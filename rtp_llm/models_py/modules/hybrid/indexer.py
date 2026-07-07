@@ -269,6 +269,8 @@ class Indexer(nn.Module):
         attention_inputs: Any,
         cp_params: Optional[Any],
     ) -> torch.Tensor:
+        # Topology KV policy is intentionally prefill-only; decode keeps the
+        # original paged top-k path unchanged because it returns page-table IDs.
         if not attention_inputs.is_prefill:
             return self.indexer_op._get_topk_paged(
                 q_fp8, weights, kv_cache, fmha_params, attention_inputs

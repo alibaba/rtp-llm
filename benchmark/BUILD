@@ -12,7 +12,11 @@ py_test(
 
 py_test(
     name = "topology_kv_policy_test",
-    srcs = ["test_topology_kv_policy.py"],
+    srcs = [
+        "test_topology_kv_policy.py",
+        "topology_kv_candidate_schedule.py",
+    ],
+    data = ["//rtp_llm/models_py:topology_kv_policy_runfiles"],
     main = "test_topology_kv_policy.py",
     deps = torch_deps(),
 )
@@ -32,8 +36,12 @@ py_test(
 
 py_test(
     name = "topology_kv_policy_cuda_manual_test",
-    srcs = ["test_topology_kv_policy.py"],
+    srcs = [
+        "test_topology_kv_policy.py",
+        "topology_kv_candidate_schedule.py",
+    ],
     args = ["-k", "cuda"],
+    data = ["//rtp_llm/models_py:topology_kv_policy_runfiles"],
     env = {"RTP_LLM_RUN_MANUAL_BENCHMARK_TESTS": "1"},
     main = "test_topology_kv_policy.py",
     tags = ["manual"],
