@@ -197,8 +197,8 @@ class TestCudaGraphPrefill(unittest.TestCase):
                 total_seq_len += input_lengths_data[i]
 
         cu_seqlens[batch_size] = total_seq_len
-        attention_inputs.cu_seqlens_device = cu_seqlens
-        attention_inputs.cu_kv_seqlens_device = cu_seqlens.clone()
+        attention_inputs.cu_seqlens = cu_seqlens
+        attention_inputs.cu_kv_seqlens = cu_seqlens.clone()
         attention_inputs.context_total_kv_length = total_seq_len
         attention_inputs.total_tokens = total_seq_len
         if not use_max_padded_mode:

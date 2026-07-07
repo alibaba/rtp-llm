@@ -174,7 +174,7 @@ class KimiLinearKDAPrefill(KimiLinearKDABase):
         attn_inputs: PyAttentionInputs,
         metadata: Optional[CausalConv1dMetadata] = None,
     ) -> torch.Tensor:
-        cu_seqlen_without_padding = attn_inputs.cu_seqlens_device
+        cu_seqlen_without_padding = attn_inputs.cu_seqlens
         conv_states = (
             self._get_conv_states(kv_cache_tensor).transpose(1, 2)
             if kv_cache_tensor is not None
@@ -188,7 +188,7 @@ class KimiLinearKDAPrefill(KimiLinearKDABase):
             query_start_loc=cu_seqlen_without_padding,
             block_map=attn_inputs.kv_cache_kernel_block_id_device,
             seq_size_per_block=seq_size_per_block,
-            prefix_lengths=attn_inputs.prefix_lengths_device,
+            prefix_lengths=attn_inputs.prefix_lengths_d,
             metadata=metadata,
         ).transpose(0, 1)
         return out
@@ -215,7 +215,7 @@ class KimiLinearKDAPrefill(KimiLinearKDABase):
             else None
         )
         context_batch_size = attn_inputs.input_lengths.shape[0]
-        cu_seqlens_without_padding = attn_inputs.cu_seqlens_device
+        cu_seqlens_without_padding = attn_inputs.cu_seqlens
         initial_states: Optional[torch.Tensor] = None
         if ssm_states is not None:
             initial_states = torch.empty(
@@ -227,7 +227,7 @@ class KimiLinearKDAPrefill(KimiLinearKDABase):
                 dtype=self.ssm_state_dtype,
             )
             load_initial_state_from_block_map(
-                attn_inputs.prefix_lengths_device,
+                attn_inputs.prefix_lengths_d,
                 attn_inputs.kv_cache_kernel_block_id_device,
                 ssm_states,
                 initial_states,
@@ -288,7 +288,7 @@ class KimiLinearKDAPrefill(KimiLinearKDABase):
             store_ssm_state_to_block_map(
                 h_for_store,
                 final_state,
-                attn_inputs.prefix_lengths_device,
+                attn_inputs.prefix_lengths_d,
                 cu_seqlens_without_padding,
                 attn_inputs.kv_cache_kernel_block_id_device,
                 ssm_states,
@@ -333,7 +333,7 @@ class KimiLinearKDAPrefill(KimiLinearKDABase):
             compute_ops.write_cache_store(
                 attn_inputs.input_lengths,
                 attn_inputs.prefix_lengths,
-                attn_inputs.kv_cache_block_id,
+                attn_inputs.kv_cache_block_id_host,
                 attn_inputs.cache_store_inputs,
                 kv_cache,
             )
@@ -365,7 +365,7 @@ class KimiLinearKDADecode(KimiLinearKDABase):
             cache_seqlens=None,
             block_map=attn_inputs.kv_cache_kernel_block_id_device,
             seq_size_per_block=seq_size_per_block,
-            sequence_lengths=attn_inputs.sequence_lengths_plus_1_device,
+            sequence_lengths=attn_inputs.sequence_lengths_plus_1_d,
         )
         out = out.transpose(1, 2).reshape(origin_shape)
         return out
@@ -426,7 +426,7 @@ class KimiLinearKDADecode(KimiLinearKDABase):
             use_gate_in_kernel=True,
             block_map=attn_inputs.kv_cache_kernel_block_id_device,
             seq_size_per_block=seq_size_per_block,
-            sequence_lengths=attn_inputs.sequence_lengths_plus_1_device,
+            sequence_lengths=attn_inputs.sequence_lengths_plus_1_d,
         )
 
         res = core_attn_out.reshape(
@@ -783,7 +783,7 @@ class KimiLinearModel(GptModelBase):
         prefill_conv1d_meta = None
         is_target_verify = attention_inputs.is_target_verify
         if attention_inputs.is_prefill and not is_target_verify:
-            cu_seqlen_without_padding = attention_inputs.cu_seqlens_device
+            cu_seqlen_without_padding = attention_inputs.cu_seqlens
             prefill_conv1d_meta = prepare_causal_conv1d_metadata(
                 query_start_loc=cu_seqlen_without_padding,
                 device=hidden_states.device,

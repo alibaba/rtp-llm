@@ -323,24 +323,24 @@ def print_py_model_inputs_full(
     print_tensor_int("input_lengths", getattr(a, "input_lengths", None), 32)
     print_tensor_int("sequence_lengths", getattr(a, "sequence_lengths", None), 32)
     print_tensor_int("prefix_lengths", getattr(a, "prefix_lengths", None), 32)
-    print_tensor_int("cu_seqlens_device", getattr(a, "cu_seqlens_device", None), 32)
-    print_tensor_int("cu_kv_seqlens_device", getattr(a, "cu_kv_seqlens_device", None), 32)
+    print_tensor_int("cu_seqlens", getattr(a, "cu_seqlens", None), 32)
+    print_tensor_int("cu_kv_seqlens", getattr(a, "cu_kv_seqlens", None), 32)
     print_tensor_int(
-        "decode_cu_seqlens", getattr(a, "decode_cu_seqlens", None), 32
+        "decode_cu_seqlens_host", getattr(a, "decode_cu_seqlens_host", None), 32
     )
     print_tensor_int("padding_offset", getattr(a, "padding_offset", None), 256)
     print(
-        f"  attention_inputs.kv_cache_block_id: defined={a.kv_cache_block_id is not None} sizes=[{sizes(a.kv_cache_block_id)}]"
+        f"  attention_inputs.kv_cache_block_id_host: defined={a.kv_cache_block_id_host is not None} sizes=[{sizes(a.kv_cache_block_id_host)}]"
     )
     print(
         f"  attention_inputs.kv_cache_block_id_device: defined={a.kv_cache_block_id_device is not None} sizes=[{sizes(a.kv_cache_block_id_device)}]"
     )
-    print_tensor_int("prefix_lengths_device", getattr(a, "prefix_lengths_device", None), 32)
+    print_tensor_int("prefix_lengths_d", getattr(a, "prefix_lengths_d", None), 32)
     print_tensor_int(
-        "sequence_lengths_plus_1_device", getattr(a, "sequence_lengths_plus_1_device", None), 32
+        "sequence_lengths_plus_1_d", getattr(a, "sequence_lengths_plus_1_d", None), 32
     )
-    print_tensor_int("input_lengths_device", getattr(a, "input_lengths_device", None), 32)
-    print_tensor_int("decode_cu_seqlens_device", getattr(a, "decode_cu_seqlens_device", None), 32)
+    print_tensor_int("input_lengths_d", getattr(a, "input_lengths_d", None), 32)
+    print_tensor_int("decode_cu_seqlens_d", getattr(a, "decode_cu_seqlens_d", None), 32)
     dtype_obj = getattr(a, "dtype", None)
     if dtype_obj is not None:
         try:

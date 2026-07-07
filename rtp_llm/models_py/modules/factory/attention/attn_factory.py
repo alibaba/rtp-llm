@@ -44,7 +44,7 @@ def get_mla_impl(
         # TODO: support fast path for cp prefill
         use_fast_path = (
             attn_inputs.is_prefill
-            and attn_inputs.cu_kv_seqlens_device.max().item() <= attn_configs.indexer_topk
+            and attn_inputs.cu_kv_seqlens.max().item() <= attn_configs.indexer_topk
             and not (
                 parallelism_config and parallelism_config.prefill_cp_config.is_enabled()
             )

@@ -99,7 +99,7 @@ class PCPAll2AllAttnOp:
 
     def prepare(self, attention_inputs: PyAttentionInputs) -> ParamsBase:
         """Prepare for ALLTOALL rotation method (Ring Attention)."""
-        cu_seqlens = attention_inputs.cu_seqlens_device[
+        cu_seqlens = attention_inputs.cu_seqlens[
             : attention_inputs.input_lengths.size(0) + 1
         ]
         prefill_cp_chunk_lengths = self.cp_info.prefill_cp_chunk_lengths
@@ -147,7 +147,7 @@ class PCPAll2AllAttnOp:
             self.attn_inputs.prefix_lengths,
             self.attn_inputs.sequence_lengths,
             self.cp_info.prefill_actual_input_lengths_cpu,
-            self.attn_inputs.kv_cache_kernel_block_id,
+            self.attn_inputs.kv_cache_kernel_block_id_host,
             self.attn_configs.kernel_tokens_per_block,
         )
 

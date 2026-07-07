@@ -89,12 +89,18 @@ class BaseMultiModalMixin:
         load_method: LoadMethod,
         vit_config: VitConfig,
         ckpt_path: str,
+        injected_vit_module: Optional[torch.nn.Module] = None,
     ) -> None:
         self.compute_dtype = compute_dtype
         self.mm_related_params = mm_related_params
         self.vit_config = vit_config
         self.load_method = load_method
         self.ckpt_path = ckpt_path
+        # 新 loader（py-model）模式：vit 已由新 loader 加载进 py_model.visual，
+        # 这里直接复用该模块（同进程 LOCAL 模式）。子类 _init_multimodal 读取它，
+        # 并保持 mm_related_params.vit_weights 为 None —— 从而跳过下面的
+        # CkptDatabase + weight_info（旧 loader 加载方式），不重复读权重、不重复占显存。
+        self._injected_vit_module = injected_vit_module
 
         with torch.device(device):
             torch_default_dtype = torch.get_default_dtype()

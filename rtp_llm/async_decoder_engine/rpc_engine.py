@@ -53,12 +53,27 @@ class LanguageCppEngine(BaseEngine):
                 or engine_config.pd_sep_config.role_type == RoleType.PDFUSION
             )
         ):
+            # 新 loader（py-model）LOCAL 模式：vit 已由新 loader 加载进
+            # py_model.visual。部分 wrapper 暴露 .vit，Qwen3-VL 直接把 visual
+            # 作为可执行视觉塔；两种都注入 mm 流水线复用，避免旧 loader
+            # （CkptDatabase + weight_info）再加载一份 vit、重复占显存。
+            py_model = getattr(self.model, "py_model", None)
+            visual = getattr(py_model, "visual", None)
+            injected_vit = getattr(visual, "vit", visual)
+            if injected_vit is not None:
+                logging.info(
+                    "Inject new-loader visual module into multimodal mixin: "
+                    "type=%s module=%s",
+                    type(injected_vit).__name__,
+                    type(injected_vit).__module__,
+                )
             self.mm_process_engine = (
                 MultimodalMixinFactory.create_multimodal_process_engine(
                     model_config=self.model.model_config,
                     engine_config=engine_config,
                     vit_config=self.model.vit_config,
                     device=f"cuda:{engine_config.parallelism_config.local_rank}",
+                    injected_vit_module=injected_vit,
                 )
             )
         self.rtp_llm_op_ = RtpLLMOp(

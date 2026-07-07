@@ -6,6 +6,7 @@ from torch import Tensor, nn
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.device.device_type import DeviceType, get_device_type
 from rtp_llm.model_loader.model_weight_info import ModelWeights
+from rtp_llm.models_py.module_base import RtpModule
 from rtp_llm.models_py.modules import AttnImplFactory
 from rtp_llm.ops import DeviceResourceConfig
 from rtp_llm.ops.compute_ops import (
@@ -17,13 +18,13 @@ from rtp_llm.ops.compute_ops import (
 from rtp_llm.utils.model_weight import W
 
 
-class GptModelBase(nn.Module):
+class GptModelBase(RtpModule):
     def __init__(
         self,
         config: ModelConfig,
         parallelism_config,
-        weight: ModelWeights,
-        max_generate_batch_size: int,
+        weight: Optional[ModelWeights] = None,
+        max_generate_batch_size: int = 0,
         fmha_config=None,  # Optional FMHAConfig
         py_hw_kernel_config=None,  # Optional HWKernelConfig
         device_resource_config: Optional[

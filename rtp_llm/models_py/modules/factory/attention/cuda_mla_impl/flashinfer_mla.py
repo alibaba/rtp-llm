@@ -73,8 +73,8 @@ def check_attention_inputs(attention_inputs: PyAttentionInputs) -> None:
     default_tensors = {
         "prefix_lengths": torch.empty(0, dtype=dtype, device=device),
         "sequence_lengths": torch.empty(0, dtype=dtype, device=device),
-        "kv_cache_block_id": torch.empty(0, dtype=dtype, device=device),
-        "kv_cache_kernel_block_id": torch.empty(0, dtype=dtype, device=device),
+        "kv_cache_block_id_host": torch.empty(0, dtype=dtype, device=device),
+        "kv_cache_kernel_block_id_host": torch.empty(0, dtype=dtype, device=device),
     }
 
     for attr_name, default_tensor in default_tensors.items():
@@ -501,6 +501,8 @@ class MlaFlashInferDecodeOp(object):
 
         q_nope = q_nope.view(-1, self.num_heads, self.qk_nope_head_dim)
         q_pe = q_pe.view(-1, self.num_heads, self.qk_rope_head_dim)
+        if q_nope.shape[0] == 0:
+            return q_nope.new_empty((0, self.num_heads, self.kv_lora_rank))
 
         q_nope = torch.bmm(q_nope.transpose(0, 1), k_weight)
         q_nope = q_nope.transpose(0, 1)
@@ -508,6 +510,8 @@ class MlaFlashInferDecodeOp(object):
         compressed_kv, k_pe = torch.split(
             compressed_kv, [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1
         )
+        q_nope = q_nope.contiguous()
+        q_pe = q_pe.contiguous()
 
         attn_output = torch.empty_like(q_nope)
         self.mla_wrapper.run(q_nope, q_pe, compressed_kv, k_pe, attn_output)

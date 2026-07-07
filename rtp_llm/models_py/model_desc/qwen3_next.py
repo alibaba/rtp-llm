@@ -185,10 +185,10 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
         attn_inputs: PyAttentionInputs,
         metadata: Optional[CausalConv1dMetadata] = None,
     ) -> torch.Tensor:
-        # cu_seqlen_without_padding = attn_inputs.cu_seqlens_device[
+        # cu_seqlen_without_padding = attn_inputs.cu_seqlens[
         #     : attn_inputs.input_lengths.size(0) + 1
         # ]
-        cu_seqlen_without_padding = attn_inputs.cu_seqlens_device
+        cu_seqlen_without_padding = attn_inputs.cu_seqlens
         conv_states = (
             self._get_conv_states(kv_cache_tensor).transpose(1, 2)
             if kv_cache_tensor is not None
@@ -202,7 +202,7 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
             query_start_loc=cu_seqlen_without_padding,
             block_map=attn_inputs.kv_cache_kernel_block_id_device,
             seq_size_per_block=seq_size_per_block,
-            prefix_lengths=attn_inputs.prefix_lengths_device,
+            prefix_lengths=attn_inputs.prefix_lengths_d,
             metadata=metadata,
         ).transpose(0, 1)
         return out
@@ -223,8 +223,8 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
             else None
         )
         context_batch_size = attn_inputs.input_lengths.shape[0]
-        # cu_seqlens_without_padding = attn_inputs.cu_seqlens_device[: context_batch_size + 1]
-        cu_seqlens_without_padding = attn_inputs.cu_seqlens_device
+        # cu_seqlens_without_padding = attn_inputs.cu_seqlens[: context_batch_size + 1]
+        cu_seqlens_without_padding = attn_inputs.cu_seqlens
         initial_states: Optional[torch.Tensor] = None
         if ssm_states is not None:
             initial_states = torch.empty(
@@ -237,7 +237,7 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
             )
 
             load_initial_state_from_block_map(
-                attn_inputs.prefix_lengths_device,
+                attn_inputs.prefix_lengths_d,
                 attn_inputs.kv_cache_kernel_block_id_device,
                 ssm_states,
                 initial_states,
@@ -286,7 +286,7 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
                 g,
                 beta,
                 prefix_lengths=(
-                    attn_inputs.prefix_lengths_device if ssm_states is not None else None
+                    attn_inputs.prefix_lengths_d if ssm_states is not None else None
                 ),
                 block_map=(
                     attn_inputs.kv_cache_kernel_block_id_device
@@ -318,7 +318,7 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
             store_ssm_state_to_block_map(
                 h,
                 final_state,
-                attn_inputs.prefix_lengths_device,
+                attn_inputs.prefix_lengths_d,
                 cu_seqlens_without_padding,
                 attn_inputs.kv_cache_kernel_block_id_device,
                 ssm_states,
@@ -358,7 +358,7 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
             compute_ops.write_cache_store(
                 attn_inputs.input_lengths,
                 attn_inputs.prefix_lengths,
-                attn_inputs.kv_cache_block_id,
+                attn_inputs.kv_cache_block_id_host,
                 attn_inputs.cache_store_inputs,
                 kv_cache,
             )
@@ -390,7 +390,7 @@ class Qwen3NextGatedDeltaNetDecode(Qwen3NextGatedDeltaNetBase):
             cache_seqlens=None,
             block_map=attn_inputs.kv_cache_kernel_block_id_device,
             seq_size_per_block=seq_size_per_block,
-            sequence_lengths=attn_inputs.sequence_lengths_plus_1_device,
+            sequence_lengths=attn_inputs.sequence_lengths_plus_1_d,
         )
         out = out.transpose(1, 2).reshape(origin_shape)
         return out
@@ -442,7 +442,7 @@ class Qwen3NextGatedDeltaNetDecode(Qwen3NextGatedDeltaNetBase):
             inplace_final_state=True,
             block_map=attn_inputs.kv_cache_kernel_block_id_device,
             seq_size_per_block=seq_size_per_block,
-            sequence_lengths=attn_inputs.sequence_lengths_plus_1_device,
+            sequence_lengths=attn_inputs.sequence_lengths_plus_1_d,
             use_qk_l2norm_in_kernel=True,
         )
         res = core_attn_out.reshape(
@@ -740,7 +740,7 @@ class Qwen3NextGatedDeltaNet(nn.Module):
             query_start_loc=full_cu,
             block_map=attention_inputs.kv_cache_kernel_block_id_device,
             seq_size_per_block=seq_size_per_block,
-            prefix_lengths=attention_inputs.prefix_lengths_device,
+            prefix_lengths=attention_inputs.prefix_lengths_d,
             metadata=full_conv_meta,
         ).transpose(0, 1)
 
@@ -762,7 +762,7 @@ class Qwen3NextGatedDeltaNet(nn.Module):
                 dtype=gdn.ssm_state_dtype,
             )
             load_initial_state_from_block_map(
-                attention_inputs.prefix_lengths_device,
+                attention_inputs.prefix_lengths_d,
                 attention_inputs.kv_cache_kernel_block_id_device,
                 ssm_states,
                 initial_states,
@@ -804,7 +804,7 @@ class Qwen3NextGatedDeltaNet(nn.Module):
                 g,
                 beta,
                 prefix_lengths=(
-                    attention_inputs.prefix_lengths_device
+                    attention_inputs.prefix_lengths_d
                     if ssm_states is not None
                     else None
                 ),
@@ -839,7 +839,7 @@ class Qwen3NextGatedDeltaNet(nn.Module):
             store_ssm_state_to_block_map(
                 h,
                 final_state,
-                attention_inputs.prefix_lengths_device,
+                attention_inputs.prefix_lengths_d,
                 full_cu,
                 attention_inputs.kv_cache_kernel_block_id_device,
                 ssm_states,
@@ -1147,11 +1147,11 @@ class Qwen3NextModel(GptModelBase):
                     cp_write_cache_store_impl = WriteCacheStoreOp(
                         cp_info.prefill_actual_input_lengths_cpu,
                         attention_inputs.prefix_lengths,
-                        attention_inputs.kv_cache_block_id,
+                        attention_inputs.kv_cache_block_id_host,
                         attention_inputs.cache_store_inputs,
                     )
             else:
-                cu_seqlen_without_padding = attention_inputs.cu_seqlens_device
+                cu_seqlen_without_padding = attention_inputs.cu_seqlens
                 prefill_conv1d_meta = prepare_causal_conv1d_metadata(
                     query_start_loc=cu_seqlen_without_padding,
                     device=hidden_states.device,

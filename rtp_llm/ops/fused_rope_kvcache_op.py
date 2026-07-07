@@ -41,8 +41,8 @@ class FusedRopeKVCachePrefillOpBase:
 
     def prepare(self, attn_inputs: PyAttentionInputs) -> FusedRopeAttnParams:
         if (
-            attn_inputs.kv_cache_kernel_block_id is not None
-            and attn_inputs.kv_cache_kernel_block_id.numel() > 0
+            attn_inputs.kv_cache_kernel_block_id_host is not None
+            and attn_inputs.kv_cache_kernel_block_id_host.numel() > 0
         ):
             kv_cache_offset = convert_offset_to_block_array(
                 attn_inputs.kv_cache_kernel_block_id_device
@@ -60,8 +60,8 @@ class FusedRopeKVCachePrefillOpBase:
             kv_cache_offset_h,
             attn_inputs.padding_offset,
             position_ids,
-            attn_inputs.cu_seqlens_device,
-            attn_inputs.cu_kv_seqlens_device,
+            attn_inputs.cu_seqlens,
+            attn_inputs.cu_kv_seqlens,
             attn_inputs.input_lengths,
             attn_inputs.prefix_lengths,
             attn_inputs.sequence_lengths,
@@ -240,8 +240,8 @@ class FusedRopeKVCacheDecodeOp:
 
     def prepare(self, attn_inputs: PyAttentionInputs) -> FusedRopeAttnParams:
         assert (
-            attn_inputs.kv_cache_kernel_block_id is not None
-            and attn_inputs.kv_cache_kernel_block_id.numel() > 0
+            attn_inputs.kv_cache_kernel_block_id_host is not None
+            and attn_inputs.kv_cache_kernel_block_id_host.numel() > 0
         )
         kv_cache_offset = convert_offset_to_block_array(
             attn_inputs.kv_cache_kernel_block_id_device
@@ -252,8 +252,8 @@ class FusedRopeKVCacheDecodeOp:
             kv_cache_offset_h,
             attn_inputs.padding_offset,
             attn_inputs.combo_position_ids,
-            attn_inputs.cu_seqlens_device,
-            attn_inputs.cu_kv_seqlens_device,
+            attn_inputs.cu_seqlens,
+            attn_inputs.cu_kv_seqlens,
             attn_inputs.input_lengths,
             attn_inputs.prefix_lengths,
             attn_inputs.sequence_lengths,

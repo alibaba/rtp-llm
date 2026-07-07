@@ -28,6 +28,24 @@ class NewMlaRotaryEmbeddingOp(object):
         fmha_params: rtp_llm_ops.SparseMlaParams,
         precomputed_pos_ids: torch.Tensor = None,
     ):
+        pos_ids = (
+            precomputed_pos_ids
+            if precomputed_pos_ids is not None
+            else fmha_params.positions_d
+        )
+
+        if query.shape[0] == 0 and key.shape[0] > 0:
+            dummy_query = torch.empty_like(key.unsqueeze(1))
+            rope._apply_rope_pos_ids_cos_sin_cache(
+                q=dummy_query,
+                k=key.unsqueeze(1),
+                q_rope=dummy_query,
+                k_rope=key.unsqueeze(1),
+                cos_sin_cache=self.cos_sin_cache,
+                pos_ids=pos_ids,
+                interleave=not self.is_neox_style,
+            )
+            return
 
         rope._apply_rope_pos_ids_cos_sin_cache(
             q=query,
@@ -35,10 +53,6 @@ class NewMlaRotaryEmbeddingOp(object):
             q_rope=query,
             k_rope=key.unsqueeze(1),
             cos_sin_cache=self.cos_sin_cache,
-            pos_ids=(
-                precomputed_pos_ids
-                if precomputed_pos_ids is not None
-                else fmha_params.positions_d
-            ),
+            pos_ids=pos_ids,
             interleave=not self.is_neox_style,
         )

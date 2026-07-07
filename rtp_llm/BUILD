@@ -62,13 +62,15 @@ xft_dep = select({
 arch_dep = select({
     "@//:using_arm": [],
     "@//:using_cuda12_arm": [],
-    "//conditions:default": [":decord", ":av"],
+    # NOTE: decord/av (video decode) temporarily removed to unblock build —
+    # the pip hub wasn't generating their spokes. Re-add once pip deps fixed.
+    "//conditions:default": [],
 })
 
 arch_with_version_dep = select({
     "@//:using_arm": [],
     "@//:using_cuda12_arm": [],
-    "//conditions:default": ["decord==0.6.0", "av==16.1.0"],
+    "//conditions:default": [],
 })
 
 requirement([
@@ -104,8 +106,6 @@ requirement([
     "orjson",
     "xfastertransformer_devel",
     "xfastertransformer_devel_icx",
-    "decord",
-    "av",
     # add qwen agent package
     "pydantic",
     "json5",
@@ -571,7 +571,7 @@ whl_reqs = [
     "sympy",
     "typing-extensions",
     "importlib_metadata",
-    "transformers==5.2.0",
+    "transformers==4.57.1",
     "sentencepiece==0.2.0",
     "fastapi==0.115.6",
     "grpcio-tools==1.57.0",
@@ -597,7 +597,7 @@ whl_reqs = [
     "pydantic",
     "timm==0.9.12",
     "onnx",
-    "sentence-transformers==5.2.0",
+    "sentence-transformers==2.7.0",
     # "xfastertransformer_devel==1.8.1.1",
     # "xfastertransformer_devel_icx==1.8.1.1",
     "grpcio==1.62.0",

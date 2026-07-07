@@ -5,7 +5,6 @@
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
 #include "rtp_llm/cpp/utils/StatusUtil.h"
 #include "rtp_llm/cpp/engine_base/schedulers/FIFOScheduler.h"
-#include "rtp_llm/cpp/engine_base/schedulers/PDFusionRatioScheduler.h"
 #include "rtp_llm/cpp/engine_base/schedulers/BatchDecodeScheduler.h"
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
 #include "rtp_llm/cpp/engine_base/system_prompt/SystemPromptConstructor.h"
@@ -113,7 +112,6 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
     releaseHostMemoryCache();
 
     initScheduler();
-    step_profiler_.configureFromConfig(profiling_debug_logging_config);
     (void)startLoop();
 }
 
@@ -139,34 +137,11 @@ void NormalEngine::initExecutor(const EngineInitParams&                        p
 }
 
 void NormalEngine::initScheduler() {
-    const auto pdfusion_scheduler_mode =
-        parsePDFusionSchedulerMode(runtime_config.fifo_scheduler_config.pdfusion_scheduler_mode);
-    if (pdfusion_scheduler_mode == PDFusionSchedulerMode::UNKNOWN) {
-        RTP_LLM_LOG_WARNING("unknown pdfusion_scheduler_mode [%s], expected '' or 'ratio'; mode will be ignored",
-                            runtime_config.fifo_scheduler_config.pdfusion_scheduler_mode.c_str());
-    }
     if (runtime_config.use_batch_decode_scheduler) {
         scheduler_.reset(new BatchDecodeScheduler(
             runtime_config, resource_context_.cache_manager, metrics_reporter_, parallelism_config.dp_rank));
         RTP_LLM_LOG_INFO("create batch decode scheduler done");
-    } else if (pdfusion_scheduler_mode == PDFusionSchedulerMode::RATIO
-               && pd_sep_config.role_type == RoleType::PDFUSION) {
-        RTP_LLM_CHECK_WITH_INFO(parallelism_config.dp_size <= 1,
-                                "PDFusionRatioScheduler does not support dp_size > 1 yet, dp_size=%ld",
-                                parallelism_config.dp_size);
-        scheduler_.reset(new PDFusionRatioScheduler(runtime_config,
-                                                    model_config_,
-                                                    pd_sep_config,
-                                                    parallelism_config,
-                                                    model_specific_config,
-                                                    resource_context_.cache_manager,
-                                                    metrics_reporter_));
-        RTP_LLM_LOG_INFO("create pdfusion ratio scheduler done");
     } else {
-        if (pdfusion_scheduler_mode == PDFusionSchedulerMode::RATIO) {
-            RTP_LLM_LOG_WARNING("pdfusion_scheduler_mode [ratio] is ignored because role_type [%d] is not PDFUSION",
-                                static_cast<int>(pd_sep_config.role_type));
-        }
         scheduler_.reset(new FIFOScheduler(runtime_config,
                                            model_config_,
                                            pd_sep_config,
@@ -486,23 +461,30 @@ absl::Status NormalEngine::step() {
     int64_t      step_begin_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
     absl::Status status             = absl::OkStatus();
 
-    // Per-request timeline: if any stream requested gen_timeline and no session is
-    // active yet, configure the profiler so the next stepScope() captures THIS step.
+    // If any stream in this batch requested gen_timeline AND no profiling session is
+    // already active, configure + tick BEFORE process() so the profiler is up before
+    // the actual work runs. This guarantees the trace captures THIS step's work, not
+    // the next step's. If a session is already active (e.g. external StartProfile RPC),
+    // skip — first-come-first-served.
     if (!step_profiler_.enabled()) {
         for (const auto& stream : streams) {
             if (stream && stream->genTimeline()) {
                 const auto& cfg = stream->generateConfig();
                 step_profiler_.configure(true, cfg->profile_trace_name, 0, cfg->profile_step);
+                step_profiler_.tick();  // start profiler now (start_step=0)
                 break;
             }
         }
     }
 
     {
-        [[maybe_unused]] auto profile_step = step_profiler_.stepScope();
         RTP_LLM_PROFILE_SCOPE_DYNAMIC("engine.normal.execute(stream_size=%zu)", streams.size());
         status = executor_->process(streams);
     }
+
+    // tick profiler after process() to count this step (and stop when num_steps reached).
+    // All TP ranks synchronize inside process() via NCCL, so stop happens at aligned points.
+    step_profiler_.tick();
 
     // report step metrics
     if (parallelism_config.tp_rank == 0) {

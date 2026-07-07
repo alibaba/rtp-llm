@@ -906,6 +906,10 @@ class RocmImpl(GpuImpl):
 
         if do_weight_shuffle:
             x_ = shuffle_weight(x_, (16, 16))
+            # AITER fused_moe selects the preshuffled kernel path from this
+            # tensor attribute. shuffle_weight() returns a new tensor, so set
+            # it explicitly after the layout transform.
+            x_.is_shuffled = True
 
         # Quark MXFP4 stores MoE scales as uint8 E8M0 blocks. Detect that
         # directly from the actual tensor instead of relying on the startup

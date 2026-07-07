@@ -249,7 +249,7 @@ public:
     StreamState moveToNext();
 
     virtual StreamState getStatus() const;
-    bool                isFinished() const;  // Returns true if stream is finished
+    bool                isFinished() const;  // Returns true if stream is active (no error and not finished)
     bool                isActive() const;    // Returns true if stream is active (no error and not finished)
     bool                isSubGenerateDoneWithoutLock(int batch_id) const;
 

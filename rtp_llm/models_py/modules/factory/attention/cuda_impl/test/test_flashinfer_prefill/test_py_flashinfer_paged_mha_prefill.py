@@ -73,16 +73,16 @@ class TestPyFlashinferPrefillPagedAttnOp(BaseAttentionTest):
         kv_cache_block_id = self._create_kv_cache_block_ids(
             batch_size, sequence_lengths, seq_size_per_block
         )
-        attn_inputs.kv_cache_block_id = kv_cache_block_id
+        attn_inputs.kv_cache_block_id_host = kv_cache_block_id
         attn_inputs.kv_cache_block_id_device = kv_cache_block_id.to(self.device)
-        attn_inputs.kv_cache_kernel_block_id = kv_cache_block_id
+        attn_inputs.kv_cache_kernel_block_id_host = kv_cache_block_id
         attn_inputs.kv_cache_kernel_block_id_device = kv_cache_block_id.to(self.device)
 
         # Create cu_seqlens (cumulative input lengths, NOT sequence lengths!)
         cu_seqlens = [0]
         for input_len in input_lengths:
             cu_seqlens.append(cu_seqlens[-1] + input_len)
-        attn_inputs.cu_seqlens_device = torch.tensor(
+        attn_inputs.cu_seqlens = torch.tensor(
             cu_seqlens, dtype=torch.int32, device=self.device
         )
 
@@ -240,7 +240,7 @@ class TestPyFlashinferPrefillPagedAttnOp(BaseAttentionTest):
 
         # Compute reference outputs using flashinfer's reference
         ref_output = compute_flashinfer_prefill_reference(
-            q, k, v, attn_inputs.cu_seqlens_device, causal=True
+            q, k, v, attn_inputs.cu_seqlens, causal=True
         )
 
         # Compare outputs

@@ -45,23 +45,6 @@ public:
         return status.load(std::memory_order_acquire);
     }
 
-    // 检查是否即将进入 FINISHED 状态
-    // 保证当相应事件发生时，即使状态转移还没有被 moveToNext() 触发，也能获取最新的 FINISHED 状态
-    // 注意：此方法非线程安全，外部应当仅通过GenerateStream在持锁路径下调用
-    bool checkFinished() const {
-        const auto committed = status.load(std::memory_order_acquire);
-        if (committed == StreamState::FINISHED) {
-            return true;
-        }
-        if (events_.has(StreamEvents::Error)) {
-            return true;
-        }
-        if (committed == StreamState::RUNNING && events_.has(StreamEvents::GenerateDone)) {
-            return true;
-        }
-        return false;
-    }
-
     void setReserveStep(size_t reserve_step) {
         reserve_step_ = reserve_step;
     }

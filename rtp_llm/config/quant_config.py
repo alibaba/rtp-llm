@@ -95,6 +95,12 @@ class QuantizationConfig(ABC):
     def group_size(self) -> int:
         return self._group_size
 
+    def get_runtime_method_key(self) -> str:
+        # Empty string => the new loader has no quant method registered for this config;
+        # _get_quant_type() will treat it as "none" (unquantized fallback).
+        # Subclasses meant to be loadable via NewModelLoader override this.
+        return ""
+
     @classmethod
     def load_from_ckpt(cls, ckpt_path: str) -> Optional["QuantizationConfig"]:
         """
@@ -204,9 +210,7 @@ class QuantizationConfig(ABC):
                 # Kimi-K2.5 routed-expert MoE: int4 g32 symmetric, dyn fp8 act.
                 group_size = int(weights_config.get("group_size", 32))
                 ignore_patterns = quant_config.get("ignore", [])
-                quant_method = (
-                    CompressedW4A8Int4PerChannelQuantConfig.get_method()
-                )
+                quant_method = CompressedW4A8Int4PerChannelQuantConfig.get_method()
                 return CompressedW4A8Int4PerChannelQuantConfig.from_config(
                     {
                         "bits": bits,
@@ -229,12 +233,12 @@ class QuantizationConfig(ABC):
             ):
                 quant_method = Fp8PerChannelQuarkQuantConfig.get_method()
             if (
-                quark_weights_config["dtype"] == "fp4" 
+                quark_weights_config["dtype"] == "fp4"
                 and quark_weights_config["qscheme"] == "per_group"
             ):
                 quant_method = MXFp4QuarkQuantConfig.get_method()
                 group_size = quark_weights_config["group_size"]
-                
+
         if quant_method == "modelopt":
             config_groups = quant_config["config_groups"]
             weights_config = config_groups["group_0"]["weights"]
@@ -244,14 +248,17 @@ class QuantizationConfig(ABC):
             group_size = weights_config["group_size"]
             if (
                 weights_config["type"] == "float"
-                and bits == 4 and activation_bits == 4
+                and bits == 4
+                and activation_bits == 4
                 and group_size == 16
             ):
                 quant_method = ModelOptFp4Config.get_method()
                 mixed_attention = False
                 text_config = config_json.get("text_config", None)
                 if text_config is not None:
-                    full_attention_interval = text_config.get("full_attention_interval", 0)
+                    full_attention_interval = text_config.get(
+                        "full_attention_interval", 0
+                    )
                     if full_attention_interval != 0:
                         mixed_attention = True
                 return ModelOptFp4Config.from_config(
@@ -263,7 +270,6 @@ class QuantizationConfig(ABC):
                         "mixed_attention": mixed_attention,
                     }
                 )
-            
 
         result = cls.from_config(
             {
@@ -333,6 +339,9 @@ class Fp8PerTensorQuantConfig(QuantizationConfig):
     def get_supported_kv_cache_dtypes(self) -> List[torch.dtype]:
         return [torch.float8_e4m3fn]
 
+    def get_runtime_method_key(self) -> str:
+        return "fp8_online" if not self.is_quanted() else "fp8"
+
     @classmethod
     def _from_config(cls, config: Dict[str, Any]) -> "QuantizationConfig":
         return Fp8PerTensorQuantConfig(**config)
@@ -367,6 +376,9 @@ class Fp8DynamicPerTensorQuantConfig(QuantizationConfig):
 
     def get_supported_kv_cache_dtypes(self) -> List[torch.dtype]:
         return [torch.float8_e4m3fn, torch.float16, torch.bfloat16]
+
+    def get_runtime_method_key(self) -> str:
+        return "fp8_online" if not self.is_quanted() else "fp8"
 
     @classmethod
     def _from_config(cls, config: Dict[str, Any]) -> "QuantizationConfig":
@@ -403,6 +415,12 @@ class Fp8BlockWiseQuantConfig(QuantizationConfig):
 
     def get_supported_kv_cache_dtypes(self) -> List[torch.dtype]:
         return [torch.float16, torch.bfloat16, torch.float8_e4m3fn]
+
+    def get_runtime_method_key(self) -> str:
+        # Online path: BF16 ckpt -> 128x128 block-quantized fp8 at load time.
+        # Already-quantized FP8_PER_BLOCK ckpts (is_quanted=True) load via the
+        # "fp8_block" LinearMethod (fp8 weight + weight_scale_inv, DeepGEMM).
+        return "fp8_block_online" if not self.is_quanted() else "fp8_block"
 
     @classmethod
     def _from_config(cls, config: Dict[str, Any]) -> "QuantizationConfig":
@@ -456,6 +474,15 @@ class Fp8PerTensorCompressedQuantConfig(CompressedTensorsQuantConfig):
     def is_dynamic(self) -> bool:
         return self._dynamic
 
+    def get_runtime_method_key(self) -> str:
+        # Pre-quantized compressed-tensors FP8 ckpts (is_quanted=True) — the
+        # ckpt ships fp8 weights + per-tensor weight_scale, so route to the
+        # already-quantized "fp8" method (Fp8LinearMethod for dense linear,
+        # "fp8_per_tensor" family for MoE). The online (BF16->FP8) variant
+        # is unreachable here because compressed-tensors only emits this
+        # config from `load_from_ckpt` when is_quanted=True.
+        return "fp8" if self.is_quanted() else "fp8_online"
+
     @classmethod
     def _from_config(cls, config: Dict[str, Any]) -> "QuantizationConfig":
         return Fp8PerTensorCompressedQuantConfig(**config)
@@ -482,6 +509,11 @@ class Fp8PerChannelCompressedQuantConfig(CompressedTensorsQuantConfig):
     def get_supported_kv_cache_dtypes(self) -> List[torch.dtype]:
         return [torch.float16, torch.bfloat16, torch.float8_e4m3fn]
 
+    def get_runtime_method_key(self) -> str:
+        # Online path: BF16 ckpt -> per-output-channel fp8 at load time.
+        # Pre-quantized compressed-tensors ckpts (is_quanted=True) use fp8_per_channel method.
+        return "fp8_per_channel_online" if not self.is_quanted() else "fp8_per_channel"
+
     @classmethod
     def _from_config(cls, config: Dict[str, Any]) -> "QuantizationConfig":
         return Fp8PerChannelCompressedQuantConfig(**config)
@@ -489,7 +521,11 @@ class Fp8PerChannelCompressedQuantConfig(CompressedTensorsQuantConfig):
 
 class QuarkQuantConfig(QuantizationConfig):
     def __init__(
-        self, bits: int = 0, group_size: int = 0, is_quanted: bool = False, **kwargs: Any
+        self,
+        bits: int = 0,
+        group_size: int = 0,
+        is_quanted: bool = False,
+        **kwargs: Any,
     ):
         super().__init__(bits=bits, group_size=group_size, is_quanted=is_quanted)
 
@@ -530,9 +566,16 @@ class Fp8PerChannelQuarkQuantConfig(QuarkQuantConfig):
     def get_supported_kv_cache_dtypes(self) -> List[torch.dtype]:
         return [torch.float16, torch.bfloat16, torch.float8_e4m3fn]
 
+    def get_runtime_method_key(self) -> str:
+        # Same online quantization algorithm as the compressed-tensors variant;
+        # the two configs differ only in metadata format used to read scales
+        # from a pre-quantized ckpt, which is irrelevant in the online path.
+        return "fp8_per_channel_online" if not self.is_quanted() else ""
+
     @classmethod
     def _from_config(cls, config: Dict[str, Any]) -> "QuantizationConfig":
         return Fp8PerChannelQuarkQuantConfig(**config)
+
 
 class MXFp4QuarkQuantConfig(QuarkQuantConfig):
     def __init__(
@@ -646,6 +689,10 @@ class AWQConfig(QuantizationConfig):
     def get_method(cls) -> str:
         return "awq"
 
+    def get_runtime_method_key(self) -> str:
+        # 新 loader 据此从 _LINEAR_METHOD_REGISTRY 找 AWQLinearMethod。
+        return "awq"
+
     @classmethod
     def get_algo(cls) -> str:
         return "awq"
@@ -689,7 +736,7 @@ class ModelOptFp4Config(QuantizationConfig):
 
     def __init__(self, bits: int, group_size: int, is_quanted: bool, **kwargs: Any):
         super().__init__(bits=bits, group_size=group_size, is_quanted=is_quanted)
-        self.mixed_attention = kwargs.get('mixed_attention', False)
+        self.mixed_attention = kwargs.get("mixed_attention", False)
 
     @classmethod
     def get_method(cls) -> str:
@@ -730,6 +777,9 @@ class W4a8Int4PerChannelQuantConfig(QuantizationConfig):
     @classmethod
     def get_algo(cls) -> str:
         return "w4a8_int4_per_channel"
+
+    def get_runtime_method_key(self) -> str:
+        return "W4A8_INT4_PER_CHANNEL"
 
     def get_supported_compute_dtypes(self) -> List[torch.dtype]:
         return [torch.float16, torch.bfloat16]
@@ -780,6 +830,9 @@ class CompressedW4A8Int4PerChannelQuantConfig(QuantizationConfig):
         # C++ reuses the existing W4A8 INT4 algo enum; group_size discriminates.
         return "w4a8_int4_per_channel"
 
+    def get_runtime_method_key(self) -> str:
+        return "W4A8_INT4_PER_CHANNEL_COMPRESSED"
+
     @property
     def weight_pack_suffix(self) -> str:
         return self._weight_pack_suffix
@@ -822,9 +875,7 @@ DEFAULT_MODELOPT_FP4_QUANT_CONFIG = ModelOptFp4Config(
 )
 
 DEFAULT_W4A8_INT4_PER_CHANNEL_QUANT_CONFIG = W4a8Int4PerChannelQuantConfig(
-    bits=4,
-    group_size=128,
-    is_quanted=False
+    bits=4, group_size=128, is_quanted=False
 )
 
 DEFAULT_COMPRESSED_W4A8_INT4_PER_CHANNEL_QUANT_CONFIG = (

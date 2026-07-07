@@ -2,7 +2,6 @@ from rtp_llm.utils.import_util import has_internal_source
 
 from .chatglm4_renderer import ChatGlm4Renderer
 from .chatglm45_renderer import ChatGlm45Renderer
-from .chatglm47_renderer import ChatGlm47Renderer
 from .deepseek_vl2_renderer import DeepSeekVLV2Renderer
 from .deepseekv31_renderer import DeepseekV31Renderer
 from .deepseekv32_renderer import DeepseekV32Renderer

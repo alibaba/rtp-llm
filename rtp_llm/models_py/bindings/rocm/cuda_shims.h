@@ -32,6 +32,14 @@ static inline __device__ __host__ __nv_bfloat16 __ldg(const __nv_bfloat16* ptr) 
     return *ptr;
 }
 
+static inline __device__ amd_bfloat16 __shfl(amd_bfloat16 var, int src_lane, int width = warpSize) {
+    return amd_bfloat16(__ushort_as_bfloat16(static_cast<unsigned short>(__shfl(static_cast<int>(__bfloat16_as_ushort(var)), src_lane, width))));
+}
+
+static inline __device__ amd_bfloat16 __shfl_xor(amd_bfloat16 var, int lane_mask, int width = warpSize) {
+    return amd_bfloat16(__ushort_as_bfloat16(static_cast<unsigned short>(__shfl_xor(static_cast<int>(__bfloat16_as_ushort(var)), lane_mask, width))));
+}
+
 template<typename T>
 __device__ inline T __shfl_xor_sync(unsigned mask, T var, int laneMask, int width = 32) {
     (void)mask;

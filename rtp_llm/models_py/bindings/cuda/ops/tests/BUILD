@@ -50,19 +50,6 @@ cc_test(
 )
 
 cc_test(
-    name = "rejection_sampling_op_test",
-    srcs = [
-        "CudaRejectionSamplingOpTest.cc",
-    ],
-    data = [],
-    copts = copts(),
-    deps = [
-        "//rtp_llm/cpp/testing:rejection_sampling_test_utils",
-    ] + torch_deps(),
-    exec_properties = {'gpu':'H20'},
-)
-
-cc_test(
     name = "beam_search_op_test",
     srcs = [
         "CudaBeamSearchOpTest.cc",

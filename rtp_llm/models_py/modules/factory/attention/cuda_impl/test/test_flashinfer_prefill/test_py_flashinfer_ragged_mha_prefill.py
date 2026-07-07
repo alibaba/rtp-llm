@@ -141,7 +141,7 @@ class TestPyFlashinferPrefillAttnOp(BaseAttentionTest):
 
         # Compute reference outputs using flashinfer's single_prefill_with_kv_cache
         ref_output = compute_flashinfer_prefill_reference(
-            q, k, v, attn_inputs.cu_seqlens_device, causal=True
+            q, k, v, attn_inputs.cu_seqlens, causal=True
         )
 
         # Compare outputs

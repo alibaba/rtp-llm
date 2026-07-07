@@ -55,6 +55,18 @@ def vit_start_server(
         app.start(grpc_port, http_port)
         return
 
+    # 新 loader（USE_NEW_LOADER=1）下，独立 vit server 进程没有 py_model，
+    # 用新 loader 方式（迭代 safetensors → load_weights，无 CkptDatabase）单独建+加载 vit，
+    # 注入 mm 流水线，使 vision 在独立 server 里也走新 loader 加载哲学。
+    # 非新 loader / 未注册 model_type → 返回 None → 回退旧 CkptDatabase 加载。
+    from rtp_llm.models_py.new_models.vit_only_loader import build_new_loader_vit
+
+    injected_vit = build_new_loader_vit(model_config, device="cuda")
+    if injected_vit is not None:
+        logging.info(
+            f"[VIT_SERVER_{server_id}] vit source: new-loader (reuse load_weights path)"
+        )
+
     vit_process_engine = MultimodalMixinFactory.create_multimodal_process_engine(
         model_config=model_config,
         engine_config=engine_config,
@@ -62,6 +74,7 @@ def vit_start_server(
         device="cuda",  # VIT always runs on a single GPU regardless of worker count
         server_id=server_id,
         is_proxy_mode=is_proxy_mode,
+        injected_vit_module=injected_vit,
     )
 
     logging.info(

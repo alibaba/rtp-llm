@@ -3,7 +3,12 @@ import logging
 from librtp_compute_ops import *
 from librtp_compute_ops.rtp_llm_ops import *
 
-from rtp_llm.models_py.utils.arch import is_cuda
+# Import is_cuda from the low-level device module, NOT via
+# rtp_llm.models_py.utils.arch — the latter re-exports it but triggers
+# models_py/__init__ to eagerly import the whole model zoo (new_models ->
+# GPU attention impls -> compute_ops), creating a circular import when
+# compute_ops is itself mid-initialization. device_type is a leaf (os/enum/torch).
+from rtp_llm.device.device_type import is_cuda
 
 if is_cuda():
     logging.info("Use rtp_kernel FusedRopeKVCacheOp on CUDA device.")

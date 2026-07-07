@@ -363,7 +363,7 @@ class IndexerOp(nn.Module):
             weights: Weights tensor [num_tokens, index_n_heads, 1]
             kv_cache: KV cache object
             fmha_params: FMHA parameters with expanded_seq_lens, etc.
-            attention_inputs: Attention inputs with decode_cu_seqlens_device, kv_cache_kernel_block_id_device
+            attention_inputs: Attention inputs with decode_cu_seqlens_d, kv_cache_kernel_block_id_device
 
         Returns:
             TopK indices tensor
@@ -406,13 +406,13 @@ class IndexerOp(nn.Module):
             fmha_params.expanded_seq_lens.device == logits.device
         ), "expanded_seq_lens must be on the same device as logits"
         assert (
-            attention_inputs.decode_cu_seqlens_device.device == logits.device
+            attention_inputs.decode_cu_seqlens_d.device == logits.device
         ), "cu_seqlens must be on the same device as logits"
 
         topk_result = fast_topk_transform_fused(
             score=logits,
             lengths=fmha_params.expanded_seq_lens,  # expanded_seq_lens
-            cu_seqlens_q=attention_inputs.decode_cu_seqlens_device,  # bs + 1
+            cu_seqlens_q=attention_inputs.decode_cu_seqlens_d,  # bs + 1
             topk=self.index_topk,
             row_starts=None,
         )
@@ -463,7 +463,7 @@ class IndexerOp(nn.Module):
             k_fp8,  # output [num_tokens, index_head_dim]
             k_scale,  # output [num_tokens, scale_size]
             attention_inputs.kv_cache_kernel_block_id_device,  # [batch_size, num_blocks]
-            attention_inputs.cu_kv_seqlens_device,
+            attention_inputs.cu_kv_seqlens,
         )
 
         # Compute logits

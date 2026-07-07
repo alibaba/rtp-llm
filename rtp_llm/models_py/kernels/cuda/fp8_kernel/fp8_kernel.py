@@ -185,6 +185,15 @@ def scaled_fp8_per_token_quant(
     input: torch.Tensor,
     output: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
+    if "per_token_quant_fp8" not in globals():
+        from rtp_llm.models_py.kernels.rocm.fp8_kernel import rocm_per_token_quant_fp8
+
+        rocm_output, rocm_scale = rocm_per_token_quant_fp8(input.contiguous())
+        if output is not None:
+            output.copy_(rocm_output)
+            rocm_output = output
+        return rocm_output, rocm_scale
+
     scale = torch.zeros(input.size(0), device=input.device, dtype=torch.float32)
     if output is not None:
         assert output.dtype == torch.float8_e4m3fn
@@ -216,7 +225,7 @@ def cutlass_moe_mm_fp8_scaled(
 ) -> None:
 
     assert per_act_token == True
-    assert per_out_ch == False
+    assert per_out_ch in (True, False)
 
     E, N, _ = w.shape
     M, K = aq.shape
@@ -315,6 +324,7 @@ def block_quant_dequant(
     """
     block_n, block_k = block_size[0], block_size[1]
     *_, n, k = x_q_block.shape
+    x_s = _maybe_decode_mxfp8_e8m0_scale(x_s, block_size)
 
     # ... n_scale k_scale -> ... (n_scale block_n) (k_scale block_k)
     x_scale_repeat = x_s.repeat_interleave(block_n, dim=-2).repeat_interleave(
@@ -343,6 +353,38 @@ def per_block_cast_to_fp8(
     return x_scaled.view_as(x_padded)[:m, :n].contiguous(), sf.view(
         x_view.size(0), x_view.size(2)
     )
+
+
+def _maybe_decode_mxfp8_e8m0_scale(
+    scale: torch.Tensor, block_size: List[int]
+) -> torch.Tensor:
+    """Decode MXFP8 E8M0 scale codes to fp32 scales.
+
+    MiniMax-M3 MXFP8 checkpoints store ``weight_scale_inv`` for [1, 32]
+    blocks as E8M0 exponent bytes. Some load paths stage those bytes in fp32
+    buffers, so detect by both block size and value range instead of dtype
+    alone. Regular fp32 block scales are small positive real values and are
+    returned unchanged.
+    """
+    if list(block_size) != [1, 32]:
+        return scale
+    if scale.dtype == torch.uint8:
+        code = scale
+    elif scale.is_floating_point():
+        max_v = float(scale.max().item()) if scale.numel() else 0.0
+        min_v = float(scale.min().item()) if scale.numel() else 0.0
+        if not (0.0 <= min_v and max_v <= 255.0 and max_v > 16.0):
+            return scale
+        code = scale
+    else:
+        return scale
+
+    code_f = code.to(torch.float32)
+    decoded = torch.pow(
+        torch.tensor(2.0, device=code_f.device, dtype=torch.float32),
+        code_f - 127.0,
+    )
+    return torch.where(code_f == 0, torch.zeros_like(decoded), decoded)
 
 
 def quant_weight_ue8m0(
@@ -374,9 +416,9 @@ def quant_weight_ue8m0(
 def requant_weight_ue8m0(
     weight: torch.Tensor,
     weight_scale_inv: torch.Tensor,
+    weight_block_size: List[int] = [128, 128],
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    weight_block_size = [128, 128]
-
+    target_block_size = [128, 128]
     weight_dequant = block_quant_dequant(
         weight,
         weight_scale_inv,
@@ -385,7 +427,7 @@ def requant_weight_ue8m0(
     )
     out_w, out_s = quant_weight_ue8m0(
         weight_dequant=weight_dequant,
-        weight_block_size=weight_block_size,
+        weight_block_size=target_block_size,
     )
     out_s = _transform_scale_ue8m0(out_s, mn=out_w.shape[-2])
     return out_w, out_s

@@ -53,6 +53,8 @@ class DeepEpLowLatencyRouter(FusedMoeDataRouter):
         checker.check(get_sm()[0] >= 9)
         checker.check(resolver.is_ep_enabled(config))
         checker.check(resolver.use_low_latency(config))
+        checker.check(config.moe_config.use_deepep_moe)
+        checker.check(not resolver.use_all_gather(config))
         checker.check(DeepEPWrapper.supported())
 
     def __init__(

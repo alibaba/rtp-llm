@@ -78,7 +78,6 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
     is_context_stream_  = std::make_shared<bool>();
     *is_context_stream_ = true;
     generate_status_    = std::make_shared<GenerateStateMachine>(stream_cache_resource_);
-    sub_generate_status_.reserve(maxBatchSize());
     sub_generate_status_.clear();
     resizeSubGenerateStatus(init_batch_size);
 
@@ -114,7 +113,10 @@ const CacheKeysType& GenerateStream::cacheKeys(int32_t batch_id) const {
 absl::Status GenerateStream::initKVBlock() {
     RTP_LLM_PROFILE_FUNCTION();
     std::lock_guard<std::mutex> lock(*mutex_);
-    auto                        ret = stream_cache_resource_->initKVBlock(reserve_step_);
+    if (generate_status_->status == StreamState::WAITING) {
+        wait_time_us_ = autil::TimeUtility::currentTimeInMicroSeconds() - begin_time_us_;
+    }
+    auto ret = stream_cache_resource_->initKVBlock(reserve_step_);
     if (!ret.ok()) {
         RTP_LLM_LOG_WARNING("GenerateStream::initKVBlock: initKVBlock failed, stream_id: %lld", streamId());
     }
@@ -535,16 +537,10 @@ void GenerateStream::setReserveStep(size_t reserve_step) {
 StreamState GenerateStream::moveToNext() {
     checkTimeout();
     std::lock_guard<std::mutex> lock(*mutex_);
-    const auto                  old_status = getStatus();
-    StreamState                 state      = generate_status_->moveToNext();
-    const auto                  new_status = getStatus();
-
-    if (old_status == StreamState::WAITING && new_status != StreamState::WAITING) {
-        wait_time_us_ = autil::TimeUtility::currentTimeInMicroSeconds() - begin_time_us_;
-    }
+    StreamState                 state = generate_status_->moveToNext();
 
     // notify one thread waiting for stream completion
-    if (new_status == StreamState::FINISHED) {
+    if (getStatus() == StreamState::FINISHED) {
         cv_->notify_one();
     }
     return state;
@@ -820,15 +816,13 @@ void GenerateStream::update(const StreamUpdateInfo& update_info) {
     // TODO(xinfei.sxf) fix this (update_queue)
     updateOutput(update_info);
 
-    // checkFinished() 已将本轮 updateOutput 中上报的 GenerateDone/Error 事件应用到状态上，
-    // 即使 moveToNext() 还未被调度器轮询，这里也能拿到与事件一致的"已完成"判断。
-    bool is_done = generate_status_->checkFinished();
+    bool is_done = getStatus() == StreamState::FINISHED;
 
     if (!is_done) {
         updateLogitProcessorStatus(update_info);
     }
 
-    if (!is_done || stream_cache_resource_->reuseCache()) {
+    if (!is_done || reuseCache()) {
         // kv cache blocks must be updated if REUSE_CACHE is on, even the stream is done
         auto update_res = updateKvCacheBlocks(update_info.src_batch_indices);
         if (!update_res) {
