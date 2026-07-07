@@ -13,7 +13,7 @@ class BlockCandidateConfig:
     block_size: int
     sink_blocks: int
     local_blocks: int
-    salience_blocks: int
+    drift_blocks: int
     max_candidate_blocks: int
 
 
@@ -104,7 +104,7 @@ def _validate_config(config: BlockCandidateConfig) -> None:
         "block_size": config.block_size,
         "sink_blocks": config.sink_blocks,
         "local_blocks": config.local_blocks,
-        "salience_blocks": config.salience_blocks,
+        "drift_blocks": config.drift_blocks,
         "max_candidate_blocks": config.max_candidate_blocks,
     }
     for name, value in fields.items():
@@ -127,20 +127,23 @@ def _append_unique(target: List[int], seen: Set[int], values: Iterable[int], lim
 
 
 def _build_drift_score_values(key_block_centroids: torch.Tensor) -> List[float]:
-    if key_block_centroids.shape[0] == 1:
-        drift_scores = torch.zeros(1, device=key_block_centroids.device)
+    drift_centroids = key_block_centroids.detach()
+    if drift_centroids.device.type != "cpu":
+        drift_centroids = drift_centroids.to("cpu")
+    if drift_centroids.shape[0] == 1:
+        drift_scores = torch.zeros(1, device=drift_centroids.device)
     else:
-        first_score = torch.zeros(1, device=key_block_centroids.device)
+        first_score = torch.zeros(1, device=drift_centroids.device)
         drift_scores = torch.cat(
             [
                 first_score,
                 torch.linalg.vector_norm(
-                    key_block_centroids[1:] - key_block_centroids[:-1],
+                    drift_centroids[1:] - drift_centroids[:-1],
                     dim=1,
                 ),
             ]
         )
-    return drift_scores.detach().cpu().tolist()
+    return drift_scores.tolist()
 
 
 def _build_candidate_row(
@@ -161,15 +164,15 @@ def _build_candidate_row(
     _append_unique(row, seen, range(query_block, local_start - 1, -1), limit)
 
     remaining = limit - len(row)
-    salience_limit = min(config.salience_blocks, remaining)
-    if salience_limit > 0:
+    drift_limit = min(config.drift_blocks, remaining)
+    if drift_limit > 0:
         eligible = (block for block in range(query_block + 1) if block not in seen)
-        salient = heapq.nsmallest(
-            salience_limit,
+        drift_blocks = heapq.nsmallest(
+            drift_limit,
             eligible,
             key=lambda block: (-drift_score_values[block], block),
         )
-        _append_unique(row, seen, salient, limit)
+        _append_unique(row, seen, drift_blocks, limit)
 
     row = sorted(row)
     row.extend([-1] * (limit - len(row)))
@@ -308,14 +311,14 @@ def build_topology_candidate_token_indices(
     sink_blocks = 0 if max_candidate_blocks == 1 else 1
     remaining_blocks = max_candidate_blocks - sink_blocks
     local_blocks = min(2, remaining_blocks)
-    salience_blocks = max(0, remaining_blocks - local_blocks)
+    drift_blocks = max(0, remaining_blocks - local_blocks)
     centroids = build_key_block_centroids(key, block_size=block_size)
     drift_score_values = _build_drift_score_values(centroids)
     config = BlockCandidateConfig(
         block_size=block_size,
         sink_blocks=sink_blocks,
         local_blocks=local_blocks,
-        salience_blocks=salience_blocks,
+        drift_blocks=drift_blocks,
         max_candidate_blocks=max_candidate_blocks,
     )
     query_block = centroids.shape[0] - 1
@@ -486,6 +489,15 @@ def run_decode_attention_grid(
     return results
 
 
+def resolve_benchmark_device(requested_device: str) -> torch.device:
+    if requested_device == "auto":
+        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    benchmark_device = torch.device(requested_device)
+    if benchmark_device.type == "cuda" and not torch.cuda.is_available():
+        raise RuntimeError("CUDA benchmark requested but CUDA is not available")
+    return benchmark_device
+
+
 def format_benchmark_results(results: Sequence[DecodeBenchmarkResult]) -> str:
     lines = [
         "| seq_len | selected_tokens | dense_sdpa_ms | sparse_selected_ms | speedup |",
@@ -509,11 +521,10 @@ def main() -> None:
     parser.add_argument("--head-dim", type=int, default=64)
     parser.add_argument("--rounds", type=int, default=50)
     parser.add_argument("--warmup", type=int, default=20)
-    parser.add_argument("--device", type=str, default="cuda")
+    parser.add_argument("--device", type=str, default="auto")
     args = parser.parse_args()
 
-    if args.device.startswith("cuda") and not torch.cuda.is_available():
-        raise RuntimeError("CUDA benchmark requested but CUDA is not available")
+    benchmark_device = resolve_benchmark_device(args.device)
 
     results = run_decode_attention_grid(
         seq_lens=[args.seq_len],
@@ -522,8 +533,8 @@ def main() -> None:
         head_dim=args.head_dim,
         rounds=args.rounds,
         warmup=args.warmup,
-        dtype=torch.float16 if args.device.startswith("cuda") else torch.float32,
-        device=args.device,
+        dtype=torch.float16 if benchmark_device.type == "cuda" else torch.float32,
+        device=str(benchmark_device),
     )
     print(format_benchmark_results(results))
 

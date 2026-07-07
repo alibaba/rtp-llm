@@ -18,6 +18,7 @@ build_block_candidate_schedule = topology_kv_candidate_schedule.build_block_cand
 build_topology_candidate_token_indices = topology_kv_candidate_schedule.build_topology_candidate_token_indices
 dense_decode_attention = topology_kv_candidate_schedule.dense_decode_attention
 format_benchmark_results = topology_kv_candidate_schedule.format_benchmark_results
+resolve_benchmark_device = topology_kv_candidate_schedule.resolve_benchmark_device
 run_decode_attention_grid = topology_kv_candidate_schedule.run_decode_attention_grid
 sparse_decode_attention = topology_kv_candidate_schedule.sparse_decode_attention
 
@@ -38,7 +39,7 @@ class TopologyKVCandidateScheduleTest(unittest.TestCase):
             block_size=64,
             sink_blocks=1,
             local_blocks=2,
-            salience_blocks=2,
+            drift_blocks=2,
             max_candidate_blocks=5,
         )
 
@@ -54,7 +55,7 @@ class TopologyKVCandidateScheduleTest(unittest.TestCase):
             block_size=32,
             sink_blocks=1,
             local_blocks=2,
-            salience_blocks=2,
+            drift_blocks=2,
             max_candidate_blocks=5,
         )
 
@@ -70,7 +71,7 @@ class TopologyKVCandidateScheduleTest(unittest.TestCase):
             block_size=32,
             sink_blocks=5,
             local_blocks=1,
-            salience_blocks=0,
+            drift_blocks=0,
             max_candidate_blocks=5,
         )
 
@@ -84,7 +85,7 @@ class TopologyKVCandidateScheduleTest(unittest.TestCase):
             block_size=32,
             sink_blocks=5,
             local_blocks=0,
-            salience_blocks=0,
+            drift_blocks=0,
             max_candidate_blocks=5,
         )
 
@@ -315,6 +316,23 @@ class TopologyKVCandidateScheduleTest(unittest.TestCase):
 
         after = torch.random.get_rng_state()
         self.assertTrue(torch.equal(before, after))
+
+    def test_auto_device_falls_back_to_cpu_without_cuda(self):
+        with patch.object(
+            topology_kv_candidate_schedule.torch.cuda,
+            "is_available",
+            return_value=False,
+        ):
+            self.assertEqual(resolve_benchmark_device("auto"), torch.device("cpu"))
+
+    def test_explicit_cuda_device_requires_cuda(self):
+        with patch.object(
+            topology_kv_candidate_schedule.torch.cuda,
+            "is_available",
+            return_value=False,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "CUDA benchmark requested"):
+                resolve_benchmark_device("cuda")
 
     @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required for speed testing")
     def test_sparse_attention_cuda_benchmark_runs_with_topology_schedule(self):

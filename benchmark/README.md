@@ -67,7 +67,11 @@ python benchmark/topology_kv_candidate_schedule.py \
   --device cuda
 ```
 
-Example WSL output on an RTX 4060 Laptop GPU:
+Omit `--device` to use `auto`, which selects CUDA when available and CPU
+otherwise.
+
+Example WSL output on an RTX 4060 Laptop GPU, matching the script's Markdown
+table format:
 
 ```text
 | seq_len | selected_tokens | dense_sdpa_ms | sparse_selected_ms | speedup |
