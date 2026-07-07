@@ -52,9 +52,11 @@ cc_library(
     # Sources are added incrementally as each v4 pool task lands so every commit builds.
     srcs = [
         "IBlockPool.cc",
+        "host/HostBlockPool.cc",
     ],
     hdrs = [
         "IBlockPool.h",
+        "host/HostBlockPool.h",
     ],
     copts = copts(),
     visibility = ["//visibility:public"],
