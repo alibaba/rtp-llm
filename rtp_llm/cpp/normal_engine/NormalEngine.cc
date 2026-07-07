@@ -5,6 +5,7 @@
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
 #include "rtp_llm/cpp/utils/StatusUtil.h"
 #include "rtp_llm/cpp/engine_base/schedulers/FIFOScheduler.h"
+#include "rtp_llm/cpp/engine_base/schedulers/PDFusionRatioScheduler.h"
 #include "rtp_llm/cpp/engine_base/schedulers/BatchDecodeScheduler.h"
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
 #include "rtp_llm/cpp/engine_base/system_prompt/SystemPromptConstructor.h"
@@ -138,11 +139,34 @@ void NormalEngine::initExecutor(const EngineInitParams&                        p
 }
 
 void NormalEngine::initScheduler() {
+    const auto pdfusion_scheduler_mode =
+        parsePDFusionSchedulerMode(runtime_config.fifo_scheduler_config.pdfusion_scheduler_mode);
+    if (pdfusion_scheduler_mode == PDFusionSchedulerMode::UNKNOWN) {
+        RTP_LLM_LOG_WARNING("unknown pdfusion_scheduler_mode [%s], expected '' or 'ratio'; mode will be ignored",
+                            runtime_config.fifo_scheduler_config.pdfusion_scheduler_mode.c_str());
+    }
     if (runtime_config.use_batch_decode_scheduler) {
         scheduler_.reset(new BatchDecodeScheduler(
             runtime_config, resource_context_.cache_manager, metrics_reporter_, parallelism_config.dp_rank));
         RTP_LLM_LOG_INFO("create batch decode scheduler done");
+    } else if (pdfusion_scheduler_mode == PDFusionSchedulerMode::RATIO
+               && pd_sep_config.role_type == RoleType::PDFUSION) {
+        RTP_LLM_CHECK_WITH_INFO(parallelism_config.dp_size <= 1,
+                                "PDFusionRatioScheduler does not support dp_size > 1 yet, dp_size=%ld",
+                                parallelism_config.dp_size);
+        scheduler_.reset(new PDFusionRatioScheduler(runtime_config,
+                                                    model_config_,
+                                                    pd_sep_config,
+                                                    parallelism_config,
+                                                    model_specific_config,
+                                                    resource_context_.cache_manager,
+                                                    metrics_reporter_));
+        RTP_LLM_LOG_INFO("create pdfusion ratio scheduler done");
     } else {
+        if (pdfusion_scheduler_mode == PDFusionSchedulerMode::RATIO) {
+            RTP_LLM_LOG_WARNING("pdfusion_scheduler_mode [ratio] is ignored because role_type [%d] is not PDFUSION",
+                                static_cast<int>(pd_sep_config.role_type));
+        }
         scheduler_.reset(new FIFOScheduler(runtime_config,
                                            model_config_,
                                            pd_sep_config,
