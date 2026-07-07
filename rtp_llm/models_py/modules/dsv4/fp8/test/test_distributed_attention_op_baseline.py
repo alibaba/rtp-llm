@@ -5636,20 +5636,20 @@ class DistributedAttentionTorchrunCandidateTest(unittest.TestCase):
             cp_rank=rank,
             spec=spec,
         )
-        actual = op(
-            local_q,
-            local_kv.view(1, chunk, 1, head_dim).contiguous(),
-            local_q[:, :1, :1].contiguous(),
-            torch.empty(1, 1, 1, 1, dtype=local_q.dtype, device=device),
-            torch.zeros(n_heads, dtype=torch.float32, device=device),
-            req_ids,
-            positions,
-            prefix_lengths,
-            input_lengths,
-            local_rows,
-            128,
-            512,
-            4,
+        op_kwargs = dict(
+            q=local_q,
+            kv=local_kv.view(1, chunk, 1, head_dim).contiguous(),
+            indexer_q=local_q[:, :1, :1].contiguous(),
+            indexer_k=torch.empty(1, 1, 1, 1, dtype=local_q.dtype, device=device),
+            attn_sink=torch.zeros(n_heads, dtype=torch.float32, device=device),
+            req_id_per_token=req_ids,
+            position_ids=positions,
+            prefix_lengths=prefix_lengths,
+            input_lengths=input_lengths,
+            local_rows=local_rows,
+            compress_ratio=128,
+            window_size=512,
+            compressed_topk=4,
             **buffer.op_kwargs(cp_rank=rank),
             swa_k=local_kv.contiguous(),
             swa_k_cache=swa_pool,
@@ -5686,9 +5686,39 @@ class DistributedAttentionTorchrunCandidateTest(unittest.TestCase):
             kv_unpad_restore=kv_unpad_restore,
             kv_cu_lens=kv_cu_lens,
         )
+        actual = op(**op_kwargs)
         self.assertEqual(tuple(actual.shape), (chunk, n_heads, head_dim))
         torch.cuda.synchronize()
         self.assertTrue(torch.isfinite(actual.float()).all().item())
+        if os.environ.get("DSV4_DIST_ATTN_PRINT_PERF", "0") == "1":
+            warmup = int(os.environ.get("DSV4_DIST_ATTN_PERF_WARMUP", "3"))
+            iters = int(os.environ.get("DSV4_DIST_ATTN_PERF_ITERS", "10"))
+            stats = _cuda_event_op_benchmark_distributed(
+                lambda: op(**op_kwargs),
+                warmup=warmup,
+                iters=iters,
+            )
+            print(
+                json.dumps(
+                    {
+                        "avg_ms": stats["avg_ms"],
+                        "case": "hca_layer0_shape",
+                        "candidate_ms": stats["avg_ms"],
+                        "chunk": chunk,
+                        "iters": iters,
+                        "max_ms": stats["max_ms"],
+                        "min_ms": stats["min_ms"],
+                        "op_event_ms": stats["avg_ms"],
+                        "p50_ms": stats["p50_ms"],
+                        "p90_ms": stats["p90_ms"],
+                        "rank": rank,
+                        "samples_ms": stats["samples_ms"],
+                        "total_tokens": total_tokens,
+                        "warmup": warmup,
+                    },
+                    sort_keys=True,
+                )
+            )
 
     def test_torchrun_symm_mem_csa_e2e_4k_shape_contract(self) -> None:
         """Production CSA shape smoke: direct fresh KV plus CSA side effects.
