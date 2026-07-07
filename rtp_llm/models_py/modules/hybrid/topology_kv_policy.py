@@ -161,12 +161,12 @@ def _structural_tokens(
 
 
 def _merge_row(
-    learned_row: torch.Tensor,
+    learned_values: list[int],
     structural: list[int],
     local_start: int,
     local_length: int,
 ) -> list[int]:
-    budget = learned_row.numel()
+    budget = len(learned_values)
     selected: list[int] = []
     seen: set[int] = set()
     local_end = local_start + local_length
@@ -178,8 +178,7 @@ def _merge_row(
             if len(selected) == budget:
                 return selected
 
-    for raw_value in learned_row.detach().cpu().tolist():
-        value = int(raw_value)
+    for value in learned_values:
         if value < 0:
             continue
         if local_start <= value < local_end and value not in seen:
@@ -194,22 +193,21 @@ def _merge_row(
 
 
 def _validate_learned_row_coordinates(
-    learned_row: torch.Tensor,
+    learned_values: list[int],
     *,
     row_idx: int,
     local_start: int,
     local_length: int,
 ) -> None:
     local_end = local_start + local_length
-    valid_values = learned_row[learned_row >= 0]
-    if valid_values.numel() == 0:
-        return
-    invalid = (valid_values < local_start) | (valid_values >= local_end)
-    if bool(invalid.any().item()):
-        first_invalid = int(valid_values[invalid][0].item())
+    for value in learned_values:
+        if value < 0:
+            continue
+        if local_start <= value < local_end:
+            continue
         raise ValueError(
             "learned topk index outside valid topology KV range: "
-            f"row={row_idx}, value={first_invalid}, expected absolute index in "
+            f"row={row_idx}, value={value}, expected absolute index in "
             f"[{local_start}, {local_end})"
         )
 
@@ -256,6 +254,7 @@ def apply_topology_kv_policy(
     if lengths.ndim != 1 or lengths.numel() != topk_indices.size(0):
         raise ValueError("lengths must have shape [rows]")
 
+    topk_cpu = topk_indices.detach().cpu()
     lengths_cpu = lengths.detach().cpu()
     starts_cpu = (
         row_starts.detach().cpu()
@@ -267,8 +266,12 @@ def apply_topology_kv_policy(
         if topk_indices_offset is not None
         else torch.zeros_like(lengths_cpu)
     )
-    raw_selected_before = int((topk_indices >= 0).sum().item())
-    rows = []
+    raw_selected_before = int((topk_cpu >= 0).sum().item())
+    topk_values = [[int(value) for value in row] for row in topk_cpu.tolist()]
+    length_values = [int(value) for value in lengths_cpu.tolist()]
+    start_values = [int(value) for value in starts_cpu.tolist()]
+    offset_values = [int(value) for value in offsets_cpu.tolist()]
+    rows: list[list[int]] = []
 
     compressed_tokens = 0
     compression_hits = 0
@@ -278,10 +281,9 @@ def apply_topology_kv_policy(
         if previous_fingerprint and previous_fingerprint == fingerprint:
             compression_hits = 1
 
-    for row_idx in range(topk_indices.size(0)):
-        row_start = int(starts_cpu[row_idx].item())
-        row_length = int(lengths_cpu[row_idx].item())
-        offset = int(offsets_cpu[row_idx].item())
+    for row_idx, (row_start, row_length, offset) in enumerate(
+        zip(start_values, length_values, offset_values)
+    ):
         drift_row = (
             block_drift_scores[row_idx]
             if block_drift_scores is not None and block_drift_scores.ndim == 2
@@ -289,26 +291,28 @@ def apply_topology_kv_policy(
         )
         structural = _structural_tokens(row_length, config, drift_row)
         structural = [token + row_start + offset for token in structural]
-        learned = (
-            topk_indices.new_full(topk_indices[row_idx].shape, -1)
+        learned_values = (
+            [-1] * topk_indices.size(1)
             if config.policy == "topology_only"
-            else topk_indices[row_idx]
+            else topk_values[row_idx]
         )
         _validate_learned_row_coordinates(
-            learned,
+            learned_values,
             row_idx=row_idx,
             local_start=row_start + offset,
             local_length=row_length,
         )
         rows.append(
-            torch.tensor(
-                _merge_row(learned, structural, row_start + offset, row_length),
-                dtype=topk_indices.dtype,
+            _merge_row(
+                learned_values,
+                structural,
+                row_start + offset,
+                row_length,
             )
         )
 
-    merged = torch.stack(rows, dim=0).to(device=topk_indices.device)
-    raw_selected_after = int((merged >= 0).sum().item())
+    merged = torch.tensor(rows, dtype=topk_indices.dtype, device=topk_indices.device)
+    raw_selected_after = sum(1 for row in rows for value in row if value >= 0)
     counters = TopologyKvCounters(
         raw_selected_tokens=raw_selected_after,
         compressed_tokens_represented=compressed_tokens,

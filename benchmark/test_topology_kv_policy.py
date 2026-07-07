@@ -88,7 +88,7 @@ def _load_indexer_for_unit_test():
         indexer_module = importlib.util.module_from_spec(indexer_spec)
         assert indexer_spec.loader is not None
         indexer_spec.loader.exec_module(indexer_module)
-        return indexer_module.Indexer
+        return indexer_module
     finally:
         for name, previous in previous_modules.items():
             if previous is None:
@@ -97,7 +97,9 @@ def _load_indexer_for_unit_test():
                 sys.modules[name] = previous
 
 
-Indexer = _load_indexer_for_unit_test()
+indexer_module = _load_indexer_for_unit_test()
+Indexer = indexer_module.Indexer
+_topology_env_int = indexer_module._topology_env_int
 
 
 class _PrefillCpConfig:
@@ -362,6 +364,15 @@ class TopologyKvPolicyTest(unittest.TestCase):
         self.assertIn("latest_topology_kv_counters", source)
         self.assertIn("_apply_topology_kv_policy", source)
         self.assertIn("apply_topology_kv_policy", source)
+
+    def test_indexer_topology_env_int_reports_bad_value(self):
+        with unittest.mock.patch.dict(
+            "os.environ", {"RTP_LLM_TOPOLOGY_SINK_BLOCKS": "true"}
+        ):
+            with self.assertRaisesRegex(
+                ValueError, "RTP_LLM_TOPOLOGY_SINK_BLOCKS must be an integer"
+            ):
+                _topology_env_int("RTP_LLM_TOPOLOGY_SINK_BLOCKS", 1)
 
     @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required for policy e2e")
     def test_cuda_policy_output_runs_sparse_decode_attention_e2e(self):

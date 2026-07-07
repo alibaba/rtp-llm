@@ -16,6 +16,16 @@ from rtp_llm.ops.compute_ops import KVCache
 from rtp_llm.utils.model_weight import W
 
 
+def _topology_env_int(name: str, default: int) -> int:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    try:
+        return int(value)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be an integer, got {value!r}") from exc
+
+
 class Indexer(nn.Module):
     """
     Indexer for DeepSeek-V3.2 DSA (DeepSeek Sparse Attention) mechanism.
@@ -51,12 +61,12 @@ class Indexer(nn.Module):
         self.topology_kv_policy = normalize_topology_kv_policy(
             os.getenv("RTP_LLM_TOPOLOGY_KV_POLICY", "disabled")
         )
-        self.topology_sink_blocks = int(os.getenv("RTP_LLM_TOPOLOGY_SINK_BLOCKS", "1"))
-        self.topology_local_blocks = int(
-            os.getenv("RTP_LLM_TOPOLOGY_LOCAL_BLOCKS", "1")
+        self.topology_sink_blocks = _topology_env_int("RTP_LLM_TOPOLOGY_SINK_BLOCKS", 1)
+        self.topology_local_blocks = _topology_env_int(
+            "RTP_LLM_TOPOLOGY_LOCAL_BLOCKS", 1
         )
-        self.topology_witness_blocks = int(
-            os.getenv("RTP_LLM_TOPOLOGY_WITNESS_BLOCKS", "1")
+        self.topology_witness_blocks = _topology_env_int(
+            "RTP_LLM_TOPOLOGY_WITNESS_BLOCKS", 1
         )
         self.topology_stable_scaffold = os.getenv("RTP_LLM_TOPOLOGY_STABLE_SCAFFOLD")
         self.topology_output_contract = os.getenv("RTP_LLM_TOPOLOGY_OUTPUT_CONTRACT")
