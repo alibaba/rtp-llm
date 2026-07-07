@@ -20,6 +20,7 @@ from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import (
 
 MX_BLOCK = 32
 _FP8_E4M3_MAX = torch.finfo(torch.float8_e4m3fn).max
+_FLASHINFER_CUTE_DSL_MAX_NUMEL = 2**31 - 1
 
 
 def ue8m0_uint8_to_fp32(scale_u8: torch.Tensor) -> torch.Tensor:
@@ -47,6 +48,14 @@ def mxfp8_quant_act_eager(x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
     return q.view(M, K).to(torch.float8_e4m3fn).contiguous(), scale.contiguous()
 
 
+def _mxfp8_quant_flashinfer_backend(x: torch.Tensor) -> str:
+    # cute-dsl is faster for normal decode/prefill shapes, but it is not safe
+    # once flattened input offsets exceed the 32-bit element-indexing range.
+    if x.numel() > _FLASHINFER_CUTE_DSL_MAX_NUMEL:
+        return "cuda"
+    return "cute-dsl"
+
+
 def mxfp8_quant_act_packed(x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
     """Dynamic MXFP8 quant for DeepGEMM packed-scale consumers.
 
@@ -67,7 +76,7 @@ def mxfp8_quant_act_packed(x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]
         x,
         is_sf_swizzled_layout=False,
         alignment=MX_BLOCK,
-        backend="cute-dsl",
+        backend=_mxfp8_quant_flashinfer_backend(x),
     )
     from rtp_llm.models_py.triton_kernels.moe.mxfp8_kernels import (
         pack_flashinfer_mxfp8_scale_triton,
