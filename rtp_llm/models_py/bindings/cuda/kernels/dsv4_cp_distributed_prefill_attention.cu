@@ -3314,7 +3314,6 @@ __device__ __forceinline__ int dsv4MegaBuildCompressedIndicesForRow(const scalar
                            | (static_cast<unsigned int>(compressed_count) & kMegaCompressedCountMask),
                        cuda::std::memory_order_release);
     }
-    __syncthreads();
     return compressed_count;
 }
 
@@ -3499,7 +3498,6 @@ __device__ __forceinline__ int dsv4MegaBuildCompressedIndicesFromScores(const in
             meta_ref.store(compressed_epoch_prefix | kMegaCompressedDoneFlag,
                            cuda::std::memory_order_release);
         }
-        __syncthreads();
         return 0;
     }
     const float* row_scores = score_matrix + static_cast<int64_t>(local_row) * score_stride;
@@ -3644,7 +3642,6 @@ __device__ __forceinline__ int dsv4MegaBuildCompressedIndicesFromScores(const in
                            | (static_cast<unsigned int>(k_eff) & kMegaCompressedCountMask),
                        cuda::std::memory_order_release);
     }
-    __syncthreads();
     return k_eff;
 }
 
