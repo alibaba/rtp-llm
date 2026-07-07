@@ -104,6 +104,64 @@ def _append_unique(target: List[int], values: Iterable[int], limit: int) -> None
         target.append(value)
 
 
+def _build_drift_score_values(key_block_centroids: torch.Tensor) -> List[float]:
+    if key_block_centroids.shape[0] == 1:
+        drift_scores = torch.zeros(1, device=key_block_centroids.device)
+    else:
+        first_score = torch.zeros(1, device=key_block_centroids.device)
+        drift_scores = torch.cat(
+            [
+                first_score,
+                torch.linalg.vector_norm(
+                    key_block_centroids[1:] - key_block_centroids[:-1],
+                    dim=1,
+                ),
+            ]
+        )
+    return drift_scores.detach().cpu().tolist()
+
+
+def _build_candidate_row(
+    query_block: int,
+    config: BlockCandidateConfig,
+    drift_score_values: Sequence[float],
+) -> List[int]:
+    row: List[int] = []
+    limit = config.max_candidate_blocks
+
+    sink_end = min(config.sink_blocks, query_block + 1)
+    _append_unique(row, range(sink_end), limit)
+
+    local_start = max(0, query_block - config.local_blocks + 1)
+    _append_unique(row, range(query_block, local_start - 1, -1), limit)
+
+    eligible = [block for block in range(query_block + 1) if block not in row]
+    eligible.sort(key=lambda block: (-drift_score_values[block], block))
+    _append_unique(row, eligible[: config.salience_blocks], limit)
+
+    row = sorted(row)
+    row.extend([-1] * (limit - len(row)))
+    return row
+
+
+def _prioritize_latest_blocks_for_partial_budget(
+    row: Sequence[int],
+    query_block: int,
+    local_blocks: int,
+) -> List[int]:
+    valid_row = [block for block in row if block >= 0]
+    local_start = max(0, query_block - local_blocks + 1)
+    local_row = [
+        block
+        for block in range(query_block, local_start - 1, -1)
+        if block in valid_row
+    ]
+    other_row = [block for block in valid_row if block not in local_row]
+    ordered_row = local_row + other_row
+    ordered_row.extend([-1] * (len(row) - len(ordered_row)))
+    return ordered_row
+
+
 def build_block_candidate_schedule(
     key_block_centroids: torch.Tensor,
     config: BlockCandidateConfig,
@@ -125,39 +183,11 @@ def build_block_candidate_schedule(
     if block_count == 0:
         raise ValueError("key_block_centroids must not be empty")
 
-    if block_count == 1:
-        drift_scores = torch.zeros(1, device=key_block_centroids.device)
-    else:
-        first_score = torch.zeros(1, device=key_block_centroids.device)
-        drift_scores = torch.cat(
-            [
-                first_score,
-                torch.linalg.vector_norm(
-                    key_block_centroids[1:] - key_block_centroids[:-1],
-                    dim=1,
-                ),
-            ]
-        )
-    drift_score_values = drift_scores.detach().cpu().tolist()
+    drift_score_values = _build_drift_score_values(key_block_centroids)
 
     rows: List[List[int]] = []
     for query_block in range(block_count):
-        row: List[int] = []
-        limit = config.max_candidate_blocks
-
-        sink_end = min(config.sink_blocks, query_block + 1)
-        _append_unique(row, range(sink_end), limit)
-
-        local_start = max(0, query_block - config.local_blocks + 1)
-        _append_unique(row, range(query_block, local_start - 1, -1), limit)
-
-        eligible = [block for block in range(query_block + 1) if block not in row]
-        eligible.sort(key=lambda block: (-drift_score_values[block], block))
-        _append_unique(row, eligible[: config.salience_blocks], limit)
-
-        row = sorted(row)
-        row.extend([-1] * (limit - len(row)))
-        rows.append(row)
+        rows.append(_build_candidate_row(query_block, config, drift_score_values))
 
     return torch.tensor(rows, dtype=torch.long, device=key_block_centroids.device)
 
@@ -201,18 +231,27 @@ def build_topology_candidate_token_indices(
     max_candidate_blocks = max(1, (selected_tokens + block_size - 1) // block_size)
     sink_blocks = 0 if max_candidate_blocks == 1 else 1
     centroids = build_key_block_centroids(key, block_size=block_size)
-    schedule = build_block_candidate_schedule(
-        centroids,
-        BlockCandidateConfig(
-            block_size=block_size,
-            sink_blocks=sink_blocks,
-            local_blocks=min(2, max_candidate_blocks),
-            salience_blocks=max_candidate_blocks,
-            max_candidate_blocks=max_candidate_blocks,
-        ),
+    config = BlockCandidateConfig(
+        block_size=block_size,
+        sink_blocks=sink_blocks,
+        local_blocks=min(2, max_candidate_blocks),
+        salience_blocks=max_candidate_blocks,
+        max_candidate_blocks=max_candidate_blocks,
     )
+    query_block = centroids.shape[0] - 1
+    row = _build_candidate_row(
+        query_block,
+        config,
+        _build_drift_score_values(centroids),
+    )
+    if selected_tokens % block_size != 0:
+        row = _prioritize_latest_blocks_for_partial_budget(
+            row,
+            query_block,
+            config.local_blocks,
+        )
     token_indices = block_schedule_to_token_indices(
-        schedule[-1:].contiguous(),
+        torch.tensor([row], dtype=torch.long, device=centroids.device),
         block_size=block_size,
         seq_len=seq_len,
     ).reshape(-1)

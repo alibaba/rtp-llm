@@ -141,6 +141,17 @@ class TopologyKVCandidateScheduleTest(unittest.TestCase):
 
         self.assertEqual(token_indices.tolist(), [6])
 
+    def test_topology_candidate_indices_keep_latest_tokens_for_partial_block_budget(self):
+        key = torch.arange(16, dtype=torch.float32).view(1, 1, 8, 2)
+
+        token_indices = build_topology_candidate_token_indices(
+            key,
+            selected_tokens=3,
+            block_size=2,
+        )
+
+        self.assertEqual(token_indices.tolist(), [6, 7, 0])
+
     def test_topology_candidate_indices_accept_2d_and_3d_inputs(self):
         key_2d = torch.arange(16, dtype=torch.float32).view(8, 2)
         key_3d = key_2d.unsqueeze(0)
