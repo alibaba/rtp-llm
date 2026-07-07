@@ -421,7 +421,7 @@ protected:
         disk_pool_.reset();
         if (!test_tmpdir_.empty()) {
             std::string cmd = "rm -rf " + test_tmpdir_;
-            ::system(cmd.c_str());
+            static_cast<void>(::system(cmd.c_str()));
         }
     }
 
