@@ -64,6 +64,20 @@ class TopologyKVCandidateScheduleTest(unittest.TestCase):
         self.assertEqual(schedule[1].tolist(), [0, 1, -1, -1, -1])
         self.assertEqual(schedule[2].tolist(), [0, 1, 2, -1, -1])
 
+    def test_schedule_keeps_query_block_when_sink_budget_would_fill_row(self):
+        centroids = torch.eye(6)
+        config = BlockCandidateConfig(
+            block_size=32,
+            sink_blocks=5,
+            local_blocks=1,
+            salience_blocks=0,
+            max_candidate_blocks=5,
+        )
+
+        schedule = build_block_candidate_schedule(centroids, config)
+
+        self.assertEqual(schedule[5].tolist(), [0, 1, 2, 3, 5])
+
     def test_sparse_attention_matches_dense_when_all_tokens_are_selected(self):
         torch.manual_seed(0)
         query = torch.randn(1, 2, 1, 16)

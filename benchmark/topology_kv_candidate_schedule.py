@@ -141,6 +141,9 @@ def _build_candidate_row(
     row: List[int] = []
     limit = config.max_candidate_blocks
 
+    if config.local_blocks > 0:
+        _append_unique(row, [query_block], limit)
+
     sink_end = min(config.sink_blocks, query_block + 1)
     _append_unique(row, range(sink_end), limit)
 
@@ -189,10 +192,11 @@ def build_block_candidate_schedule(
     """Build rectangular causal candidate block rows from key-block centroids.
 
     The schedule is intentionally backend-neutral: each row contains request-local
-    block ids and is padded with -1. Candidate priority is sink blocks, local
-    causal blocks, then high-drift blocks. The high-drift score is a cheap
-    change-point proxy: blocks where the centroid moves sharply from the
-    previous block are treated as distinctive witness blocks worth replaying.
+    block ids and is padded with -1. Candidate priority is the newest local
+    block, sink blocks, remaining local causal blocks, then high-drift blocks.
+    The high-drift score is a cheap change-point proxy: blocks where the centroid
+    moves sharply from the previous block are treated as distinctive witness
+    blocks worth replaying.
     """
 
     _validate_config(config)
