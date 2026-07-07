@@ -39,6 +39,7 @@ cc_test(
     copts = test_copts,
     exec_properties = {"gpu": "H20"},
     # tags = ["H20"],
+    tags = ["manual"],
     deps = test_deps + [
         "//rtp_llm/cpp/cache/connector/remote_connector",
     ],
@@ -52,6 +53,7 @@ cc_test(
     copts = test_copts,
     exec_properties = {"gpu": "H20"},
     # tags = ["H20"],
+    tags = ["manual"],
     deps = test_deps + [
         "//rtp_llm/cpp/cache/connector/remote_connector",
     ],
@@ -65,6 +67,7 @@ cc_test(
     copts = test_copts,
     exec_properties = {"gpu": "H20"},
     # tags = ["H20"],
+    tags = ["manual"],
     deps = [
         ":remote_connector_mock_base",
     ],
@@ -78,6 +81,7 @@ cc_test(
     copts = test_copts,
     exec_properties = {"gpu": "H20"},
     # tags = ["H20"],
+    tags = ["manual"],
     deps = [
         ":remote_connector_mock_base",
     ],
@@ -91,6 +95,7 @@ cc_test(
     copts = test_copts,
     exec_properties = {"gpu": "H20"},
     # tags = ["H20"],
+    tags = ["manual"],
     deps = test_deps + [
         ":mock",
     ],

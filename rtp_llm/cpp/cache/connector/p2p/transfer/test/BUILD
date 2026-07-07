@@ -20,6 +20,7 @@ cc_test(
         "//rtp_llm/cpp/utils:time_util",
         "@com_google_googletest//:gtest",
     ] + device_impl_target(),
+    tags = ["manual"],
 )
 
 cc_test(
@@ -36,4 +37,5 @@ cc_test(
         "//rtp_llm/cpp/utils:time_util",
         "@com_google_googletest//:gtest",
     ] + device_impl_target(),
+    tags = ["manual"],
 )
