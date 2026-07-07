@@ -51,7 +51,7 @@ def build_key_block_centroids(key: torch.Tensor, block_size: int) -> torch.Tenso
         padding = normalized_key.new_zeros(batch, heads, padded_len - seq_len, dim)
         normalized_key = torch.cat([normalized_key, padding], dim=2)
 
-    blocks = normalized_key.reshape(batch, heads, block_count, block_size, dim)
+    blocks = normalized_key.reshape(batch, heads, block_count, block_size, dim).float()
     block_sums = blocks.sum(dim=(0, 1, 3))
     token_counts = torch.full(
         (block_count,),
@@ -141,8 +141,7 @@ def _build_candidate_row(
     row: List[int] = []
     limit = config.max_candidate_blocks
 
-    if config.local_blocks > 0:
-        _append_unique(row, [query_block], limit)
+    _append_unique(row, [query_block], limit)
 
     sink_end = min(config.sink_blocks, query_block + 1)
     _append_unique(row, range(sink_end), limit)
@@ -192,11 +191,11 @@ def build_block_candidate_schedule(
     """Build rectangular causal candidate block rows from key-block centroids.
 
     The schedule is intentionally backend-neutral: each row contains request-local
-    block ids and is padded with -1. Candidate priority is the newest local
-    block, sink blocks, remaining local causal blocks, then high-drift blocks.
-    The high-drift score is a cheap change-point proxy: blocks where the centroid
-    moves sharply from the previous block are treated as distinctive witness
-    blocks worth replaying.
+    block ids and is padded with -1. Candidate priority is the query block, sink
+    blocks, remaining local causal blocks, then high-drift blocks. The high-drift
+    score is a cheap change-point proxy: blocks where the centroid moves sharply
+    from the previous block are treated as distinctive witness blocks worth
+    replaying.
     """
 
     _validate_config(config)
@@ -269,6 +268,7 @@ def build_topology_candidate_token_indices(
     local_blocks = min(2, remaining_blocks)
     salience_blocks = max(0, remaining_blocks - local_blocks)
     centroids = build_key_block_centroids(key, block_size=block_size)
+    drift_score_values = _build_drift_score_values(centroids)
     config = BlockCandidateConfig(
         block_size=block_size,
         sink_blocks=sink_blocks,
@@ -280,7 +280,7 @@ def build_topology_candidate_token_indices(
     row = _build_candidate_row(
         query_block,
         config,
-        _build_drift_score_values(centroids),
+        drift_score_values,
     )
     if selected_tokens % block_size != 0 or seq_len % block_size != 0:
         row = _prioritize_latest_blocks_for_partial_budget(

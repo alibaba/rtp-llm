@@ -78,6 +78,20 @@ class TopologyKVCandidateScheduleTest(unittest.TestCase):
 
         self.assertEqual(schedule[5].tolist(), [0, 1, 2, 3, 5])
 
+    def test_schedule_keeps_query_block_when_local_blocks_are_disabled(self):
+        centroids = torch.eye(6)
+        config = BlockCandidateConfig(
+            block_size=32,
+            sink_blocks=5,
+            local_blocks=0,
+            salience_blocks=0,
+            max_candidate_blocks=5,
+        )
+
+        schedule = build_block_candidate_schedule(centroids, config)
+
+        self.assertEqual(schedule[5].tolist(), [0, 1, 2, 3, 5])
+
     def test_sparse_attention_matches_dense_when_all_tokens_are_selected(self):
         torch.manual_seed(0)
         query = torch.randn(1, 2, 1, 16)
@@ -133,6 +147,17 @@ class TopologyKVCandidateScheduleTest(unittest.TestCase):
 
         torch.testing.assert_close(build_key_block_centroids(key_2d, 2), expected)
         torch.testing.assert_close(build_key_block_centroids(key_3d, 2), expected)
+
+    def test_key_block_centroids_accumulate_half_precision_in_fp32(self):
+        key = torch.tensor(
+            [[1024.0], [1025.0], [1026.0], [1027.0]],
+            dtype=torch.float16,
+        )
+
+        centroids = build_key_block_centroids(key, block_size=4)
+
+        self.assertEqual(centroids.dtype, torch.float32)
+        torch.testing.assert_close(centroids, torch.tensor([[1025.5]]))
 
     def test_block_schedule_to_token_indices_expands_blocks_and_masks_tail(self):
         schedule = torch.tensor([[0, 2, -1]])
