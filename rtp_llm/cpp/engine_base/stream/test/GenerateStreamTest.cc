@@ -8,6 +8,7 @@
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
 #include "rtp_llm/cpp/testing/TestBase.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
+#include "rtp_llm/cpp/models/logits_processor/ThinkModeLogitsProcessor.h"
 
 using namespace std;
 
@@ -24,10 +25,13 @@ public:
             /*layer_num=*/3, /*block_num=*/9, /*tokens_per_block=*/2, rtp_llm::DataType::TYPE_INT8);
     }
 
-    GenerateStreamPtr createContextStream(std::vector<int> input_ids) {
-        std::shared_ptr<GenerateInput>  generate_input(new GenerateInput());
-        std::shared_ptr<GenerateConfig> generate_config(new GenerateConfig());
-        ResourceContext                 resource_context;
+    GenerateStreamPtr createContextStream(std::vector<int>                input_ids,
+                                          std::shared_ptr<GenerateConfig> generate_config = nullptr) {
+        std::shared_ptr<GenerateInput> generate_input(new GenerateInput());
+        ResourceContext                resource_context;
+        if (generate_config == nullptr) {
+            generate_config.reset(new GenerateConfig());
+        }
         generate_input->generate_config = generate_config;
         generate_input->input_ids =
             torch::tensor(std::vector<int32_t>(input_ids.begin(), input_ids.end()), torch::kInt32);

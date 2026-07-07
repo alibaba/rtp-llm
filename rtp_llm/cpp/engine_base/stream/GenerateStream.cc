@@ -15,6 +15,7 @@
 #include "rtp_llm/models_py/bindings/core/Types.h"
 #include "rtp_llm/cpp/config/ModelConfig.h"
 #include "rtp_llm/cpp/models/logits_processor/LogitsProcessorFactory.h"
+#include "rtp_llm/cpp/models/logits_processor/ThinkModeLogitsProcessor.h"
 #include "rtp_llm/cpp/utils/LinearBlocksUtil.h"
 
 using namespace std;
@@ -25,6 +26,11 @@ namespace {
 
 bool useStreamAsyncReserveTokens() {
     static const bool enabled = autil::EnvUtil::getEnv("RTP_LLM_STREAM_ASYNC", false);
+    return enabled;
+}
+
+bool maxTokensExcludeThinking() {
+    static const bool enabled = autil::EnvUtil::getEnv("RTP_LLM_MAX_TOKENS_EXCLUDE_THINKING", false);
     return enabled;
 }
 
@@ -764,8 +770,27 @@ size_t GenerateStream::maxTokenNum() const {
         }
     }
 
-    return std::min(max_seq_len_ > reserve_tokens ? max_seq_len_ - reserve_tokens : 0,
-                    generate_input_->generate_config->max_new_tokens + generate_input_->inputLength());
+    const auto& config              = generate_input_->generate_config;
+    int64_t     output_token_budget = config->max_new_tokens;
+    if (maxTokensExcludeThinking() && config->in_think_mode && config->max_thinking_tokens > 0) {
+        int64_t think_output_budget = config->max_thinking_tokens + config->end_think_token_ids.size();
+        for (const auto& processor : logits_processor_list_) {
+            auto think_processor = std::dynamic_pointer_cast<ThinkModeLogitsProcessor>(processor);
+            if (think_processor == nullptr) {
+                continue;
+            }
+            const auto finished_think_len = think_processor->finishedThinkOutputLen();
+            if (finished_think_len >= 0) {
+                think_output_budget = std::min<int64_t>(think_output_budget, finished_think_len);
+            }
+            break;
+        }
+        output_token_budget += think_output_budget;
+    }
+
+    const size_t physical_token_cap = max_seq_len_ > reserve_tokens ? max_seq_len_ - reserve_tokens : 0;
+    const auto   logical_token_cap  = static_cast<int64_t>(inputLength()) + output_token_budget;
+    return std::min<size_t>(physical_token_cap, logical_token_cap > 0 ? static_cast<size_t>(logical_token_cap) : 0);
 }
 
 bool GenerateStream::needFinish() {

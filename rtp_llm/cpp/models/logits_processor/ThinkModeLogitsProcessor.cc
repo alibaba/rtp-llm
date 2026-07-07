@@ -27,11 +27,18 @@ bool isActiveThinkState(const StreamThinkInfo& info) {
     return info.process_state == ThinkProcessState::IN_THINK || info.process_state == ThinkProcessState::CLOSING_THINK;
 }
 
+void markAfterThink(StreamThinkInfo& info) {
+    info.process_state = ThinkProcessState::AFTER_THINK;
+    if (info.think_output_length < 0) {
+        info.think_output_length = info.current_output_length;
+    }
+}
+
 bool transitionToAfterThinkIfClosed(StreamThinkInfo& info) {
     if (!info.dfa_ptr || !info.dfa_ptr->isFinished()) {
         return false;
     }
-    info.process_state = ThinkProcessState::AFTER_THINK;
+    markAfterThink(info);
     return true;
 }
 
@@ -166,7 +173,7 @@ void advanceThinkStateForSpec(StreamThinkInfo& info, int32_t token_id) {
 
     info.dfa_ptr->next(token_id);
     if (info.dfa_ptr->isFinished()) {
-        info.process_state = ThinkProcessState::AFTER_THINK;
+        markAfterThink(info);
     } else if (thinkEndCloseInProgress(info)) {
         info.process_state = ThinkProcessState::CLOSING_THINK;
     } else if (info.process_state == ThinkProcessState::CLOSING_THINK) {
@@ -265,7 +272,7 @@ bool ThinkModeLogitsProcessor::forceThinkEndToken(const torch::Tensor& new_token
     info.pending_forced_think_end_token_ids.push_back(token_id);
     info.current_output_length += 1;
     if (info.dfa_ptr->isFinished()) {
-        info.process_state = ThinkProcessState::AFTER_THINK;
+        markAfterThink(info);
     } else {
         info.process_state = ThinkProcessState::CLOSING_THINK;
     }
@@ -325,7 +332,7 @@ void ThinkModeLogitsProcessor::updateStatus(const torch::Tensor& new_tokens, int
 
             info.dfa_ptr->next(current_token_id);
             if (info.dfa_ptr->isFinished()) {
-                info.process_state = ThinkProcessState::AFTER_THINK;
+                markAfterThink(info);
             } else if (thinkEndCloseInProgress(info)) {
                 info.process_state = ThinkProcessState::CLOSING_THINK;
             } else if (info.process_state == ThinkProcessState::CLOSING_THINK) {
@@ -351,6 +358,15 @@ int64_t ThinkModeLogitsProcessor::acceptedTokenLen() const {
         return 0;
     }
     return snapshot->info.current_output_length;
+}
+
+int64_t ThinkModeLogitsProcessor::finishedThinkOutputLen() const {
+    auto snapshot = std::atomic_load_explicit(&spec_snapshot_, std::memory_order_acquire);
+    if (!snapshot || !snapshot->eligible || snapshot->info.process_state != ThinkProcessState::AFTER_THINK) {
+        return -1;
+    }
+    return snapshot->info.think_output_length >= 0 ? snapshot->info.think_output_length :
+                                                     snapshot->info.current_output_length;
 }
 
 int ThinkModeLogitsProcessor::tryAcceptAndFillBitmask(const SpecLogitsProcessorRequest& request) {
