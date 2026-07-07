@@ -550,43 +550,6 @@ __device__ __forceinline__ bool dsv4MegaTopKKeyWorse(uint64_t lhs_key, uint64_t 
     return lhs_key < rhs_key;
 }
 
-__device__ __forceinline__ void dsv4MegaInsertWorstCandidateList(int slot,
-                                                                 float score,
-                                                                 int idx,
-                                                                 int* __restrict__ slots,
-                                                                 float* __restrict__ scores,
-                                                                 int* __restrict__ indices,
-                                                                 int limit) {
-    if (slot < 0 || limit <= 0) {
-        return;
-    }
-    int insert_pos = -1;
-#pragma unroll
-    for (int i = 0; i < kMegaIndexerCandidateTile; ++i) {
-        if (i >= limit) {
-            break;
-        }
-        if (slots[i] < 0 || dsv4MegaTopKWorse(score, idx, scores[i], indices[i])) {
-            insert_pos = i;
-            break;
-        }
-    }
-    if (insert_pos < 0) {
-        return;
-    }
-#pragma unroll
-    for (int i = kMegaIndexerCandidateTile - 1; i > 0; --i) {
-        if (i < limit && i > insert_pos) {
-            slots[i] = slots[i - 1];
-            scores[i] = scores[i - 1];
-            indices[i] = indices[i - 1];
-        }
-    }
-    slots[insert_pos] = slot;
-    scores[insert_pos] = score;
-    indices[insert_pos] = idx;
-}
-
 __device__ __forceinline__ void dsv4MegaInsertWorstCandidateKeyList(int slot,
                                                                     uint64_t key,
                                                                     int* __restrict__ slots,
