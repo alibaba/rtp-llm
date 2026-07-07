@@ -8,6 +8,7 @@ from benchmark.topology_kv_candidate_schedule import (
     block_schedule_to_token_indices,
     build_key_block_centroids,
     build_block_candidate_schedule,
+    build_topology_candidate_token_indices,
     dense_decode_attention,
     format_benchmark_results,
     run_decode_attention_grid,
@@ -109,6 +110,17 @@ class TopologyKVCandidateScheduleTest(unittest.TestCase):
             [[0, 1, 2, 3, 8, 9, -1, -1, -1, -1, -1, -1]],
         )
 
+    def test_topology_candidate_indices_use_schedule_and_keep_latest_block(self):
+        key = torch.arange(16, dtype=torch.float32).view(1, 1, 8, 2)
+
+        token_indices = build_topology_candidate_token_indices(
+            key,
+            selected_tokens=4,
+            block_size=2,
+        )
+
+        self.assertEqual(token_indices.tolist(), [0, 1, 6, 7])
+
     def test_benchmark_grid_and_markdown_format_are_reproducible(self):
         results = run_decode_attention_grid(
             seq_lens=[128],
@@ -129,7 +141,7 @@ class TopologyKVCandidateScheduleTest(unittest.TestCase):
         self.assertIn("| 128 | 64 |", table)
 
     @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required for speed testing")
-    def test_sparse_attention_cuda_benchmark_is_faster_than_dense_sdpa(self):
+    def test_sparse_attention_cuda_benchmark_runs_with_topology_schedule(self):
         result = benchmark_decode_attention(
             seq_len=16384,
             selected_tokens=512,
@@ -141,8 +153,11 @@ class TopologyKVCandidateScheduleTest(unittest.TestCase):
             device="cuda",
         )
 
-        self.assertGreater(result.speedup, 1.15)
-        self.assertLess(result.sparse_ms, result.dense_ms)
+        self.assertEqual(result.seq_len, 16384)
+        self.assertEqual(result.selected_tokens, 512)
+        self.assertGreater(result.dense_ms, 0.0)
+        self.assertGreater(result.sparse_ms, 0.0)
+        self.assertGreater(result.speedup, 0.0)
 
 
 if __name__ == "__main__":

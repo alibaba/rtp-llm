@@ -154,7 +154,7 @@ def build_block_candidate_schedule(
         _append_unique(row, range(sink_end), limit)
 
         local_start = max(0, query_block - config.local_blocks + 1)
-        _append_unique(row, range(local_start, query_block + 1), limit)
+        _append_unique(row, range(query_block, local_start - 1, -1), limit)
 
         eligible = [block for block in range(query_block + 1) if block not in row]
         eligible.sort(key=lambda block: (-float(drift_scores[block]), block))
@@ -183,10 +183,39 @@ def _sparse_decode_attention_impl(
 ) -> torch.Tensor:
     selected_key = key.index_select(2, indices)
     selected_value = value.index_select(2, indices)
-    scores = torch.matmul(query, selected_key.transpose(-2, -1))
-    scores = scores * (query.shape[-1] ** -0.5)
-    probs = torch.softmax(scores, dim=-1)
-    return torch.matmul(probs, selected_value)
+    return F.scaled_dot_product_attention(query, selected_key, selected_value, is_causal=False)
+
+
+def build_topology_candidate_token_indices(
+    key: torch.Tensor,
+    selected_tokens: int,
+    block_size: int = 64,
+) -> torch.Tensor:
+    if selected_tokens <= 0:
+        raise ValueError("selected_tokens must be positive")
+
+    seq_len = key.shape[2]
+    max_candidate_blocks = max(1, (selected_tokens + block_size - 1) // block_size)
+    centroids = build_key_block_centroids(key, block_size=block_size)
+    schedule = build_block_candidate_schedule(
+        centroids,
+        BlockCandidateConfig(
+            block_size=block_size,
+            sink_blocks=min(1, max_candidate_blocks),
+            local_blocks=min(2, max_candidate_blocks),
+            salience_blocks=max_candidate_blocks,
+            max_candidate_blocks=max_candidate_blocks,
+        ),
+    )
+    token_indices = block_schedule_to_token_indices(
+        schedule[-1:].contiguous(),
+        block_size=block_size,
+        seq_len=seq_len,
+    ).reshape(-1)
+    token_indices = token_indices[token_indices >= 0]
+    if token_indices.numel() == 0:
+        raise ValueError("topology schedule did not select any tokens")
+    return token_indices[:selected_tokens]
 
 
 def sparse_decode_attention(
@@ -233,12 +262,9 @@ def benchmark_decode_attention(
     query = torch.randn(1, heads, 1, head_dim, device=device, dtype=dtype)
     key = torch.randn(1, heads, seq_len, head_dim, device=device, dtype=dtype)
     value = torch.randn(1, heads, seq_len, head_dim, device=device, dtype=dtype)
-    candidate_indices = torch.linspace(
-        0,
-        seq_len - 1,
-        selected_tokens,
-        device=device,
-        dtype=torch.long,
+    candidate_indices = build_topology_candidate_token_indices(
+        key,
+        selected_tokens=selected_tokens,
     )
 
     for _ in range(warmup):

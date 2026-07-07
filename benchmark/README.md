@@ -44,10 +44,11 @@ metadata:
   sharply between neighboring blocks.
 
 The CUDA benchmark compares PyTorch dense SDPA decode attention against a
-selected-token decode path that gathers candidate K/V rows and runs attention
-over only those selected tokens. Report the result as a benchmark signal only;
-end-to-end model speedup still requires integration with the runtime sparse MLA
-or indexer path and model-quality validation.
+selected-token decode path that builds topology-derived candidate token indices,
+gathers candidate K/V rows, and runs SDPA over only those selected tokens.
+Report the result as a benchmark signal only; end-to-end model speedup still
+requires integration with the runtime sparse MLA or indexer path and
+model-quality validation.
 
 ```bash
 python benchmark/topology_kv_candidate_schedule.py \
@@ -65,9 +66,9 @@ Example WSL output on an RTX 4060 Laptop GPU:
 ```text
 | seq_len | selected_tokens | dense_sdpa_ms | sparse_selected_ms | speedup |
 | ---: | ---: | ---: | ---: | ---: |
-| 16384 | 128 | 0.2867 | 0.1166 | 2.46x |
-| 16384 | 256 | 0.2857 | 0.1106 | 2.58x |
-| 16384 | 512 | 0.2853 | 0.1165 | 2.45x |
-| 16384 | 1024 | 0.2912 | 0.1346 | 2.16x |
+| 16384 | 128 | 0.2827 | 0.0324 | 8.72x |
+| 16384 | 256 | 0.2845 | 0.0578 | 4.92x |
+| 16384 | 512 | 0.2826 | 0.0745 | 3.79x |
+| 16384 | 1024 | 0.2834 | 0.1320 | 2.15x |
 ```
 
