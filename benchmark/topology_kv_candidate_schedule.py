@@ -29,8 +29,8 @@ def build_key_block_centroids(key: torch.Tensor, block_size: int) -> torch.Tenso
     """Average K-cache vectors into block centroids.
 
     Accepts `[batch, heads, seq, dim]`, `[heads, seq, dim]`, or `[seq, dim]`.
-    Batch and head lanes are averaged so the returned centroids describe the
-    request-local token geometry independently of lane count.
+    Batch and head lanes are both averaged; the benchmark uses batch=1 so the
+    returned centroids describe one request's token geometry.
     """
 
     if block_size <= 0:
@@ -197,6 +197,8 @@ def dense_decode_attention(
     key: torch.Tensor,
     value: torch.Tensor,
 ) -> torch.Tensor:
+    # q_len=1 decode already has no future query positions. `is_causal=True`
+    # would mask as if this query were at position 0 without an offset mask.
     return F.scaled_dot_product_attention(query, key, value, is_causal=False)
 
 
@@ -208,6 +210,7 @@ def _sparse_decode_attention_impl(
 ) -> torch.Tensor:
     selected_key = key.index_select(2, indices)
     selected_value = value.index_select(2, indices)
+    # See dense_decode_attention: selected decode rows use explicit candidates.
     return F.scaled_dot_product_attention(query, selected_key, selected_value, is_causal=False)
 
 
@@ -303,10 +306,11 @@ def benchmark_decode_attention(
     if rounds <= 0 or warmup < 0:
         raise ValueError("rounds must be positive and warmup must be non-negative")
 
+    benchmark_device = torch.device(device)
     torch.manual_seed(0)
-    query = torch.randn(1, heads, 1, head_dim, device=device, dtype=dtype)
-    key = torch.randn(1, heads, seq_len, head_dim, device=device, dtype=dtype)
-    value = torch.randn(1, heads, seq_len, head_dim, device=device, dtype=dtype)
+    query = torch.randn(1, heads, 1, head_dim, device=benchmark_device, dtype=dtype)
+    key = torch.randn(1, heads, seq_len, head_dim, device=benchmark_device, dtype=dtype)
+    value = torch.randn(1, heads, seq_len, head_dim, device=benchmark_device, dtype=dtype)
     candidate_indices = build_topology_candidate_token_indices(
         key,
         selected_tokens=selected_tokens,
@@ -315,21 +319,21 @@ def benchmark_decode_attention(
     for _ in range(warmup):
         dense_decode_attention(query, key, value)
         _sparse_decode_attention_impl(query, key, value, candidate_indices)
-    if device.startswith("cuda"):
-        torch.cuda.synchronize()
+    if benchmark_device.type == "cuda":
+        torch.cuda.synchronize(benchmark_device)
 
     dense_start = time.perf_counter()
     for _ in range(rounds):
         dense_decode_attention(query, key, value)
-    if device.startswith("cuda"):
-        torch.cuda.synchronize()
+    if benchmark_device.type == "cuda":
+        torch.cuda.synchronize(benchmark_device)
     dense_ms = (time.perf_counter() - dense_start) * 1000 / rounds
 
     sparse_start = time.perf_counter()
     for _ in range(rounds):
         _sparse_decode_attention_impl(query, key, value, candidate_indices)
-    if device.startswith("cuda"):
-        torch.cuda.synchronize()
+    if benchmark_device.type == "cuda":
+        torch.cuda.synchronize(benchmark_device)
     sparse_ms = (time.perf_counter() - sparse_start) * 1000 / rounds
 
     return DecodeBenchmarkResult(
