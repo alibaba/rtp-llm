@@ -28,4 +28,3 @@ class ChatGlm47Renderer(ChatGlm45Renderer):
 
 
 register_renderer("glm47_moe", ChatGlm47Renderer)
-register_renderer("glm4_moe_lite", ChatGlm47Renderer)

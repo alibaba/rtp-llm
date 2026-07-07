@@ -137,6 +137,11 @@ class QWen3_VL_MOE(Qwen3Moe):
             content = reader.read()
             config_json = json.loads(content)
         QWen3_VL._from_config_json(config, config_json)
+        # Store vision_config into mm_related_params.config so that the new-loader
+        # Qwen3VLVisionTransformer._get_vit_config() can read actual ViT dimensions
+        # (hidden_size, depth, num_heads, etc.) instead of falling back to defaults.
+        if "vision_config" in config_json:
+            config.mm_related_params.config.update(config_json["vision_config"])
         Qwen2Moe.load_moe_config(config, config_json["text_config"])
         config.moe_style = 1
         return config

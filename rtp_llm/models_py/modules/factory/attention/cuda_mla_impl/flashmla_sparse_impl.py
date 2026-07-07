@@ -361,7 +361,7 @@ class SparseMlaImpl(MlaImplBase):
                 f"Unsupported kv_cache_dtype: {attn_configs.kv_cache_dtype}"
             )
         self.fmha_impl = fmha_impl_cls(
-            attn_configs.head_num,
+            self.num_heads,
             attn_configs.kv_lora_rank,
             attn_configs.rope_head_dim,
             attn_configs.nope_head_dim,
@@ -458,6 +458,14 @@ class SparseMlaImpl(MlaImplBase):
         if q_nope.shape[0] == 0:
             return q_transformed
         k_weight = self.weights[layer_id][W.mla_kc]
+        if k_weight.shape[0] != self.num_heads:
+            if self.num_heads % k_weight.shape[0] != 0:
+                raise RuntimeError(
+                    f"Invalid MLA kc head count: {k_weight.shape[0]} vs {self.num_heads}"
+                )
+            k_weight = k_weight.repeat_interleave(
+                self.num_heads // k_weight.shape[0], dim=0
+            )
         out_nope = q_transformed[..., : self.kv_lora_rank].transpose(0, 1)
         torch.bmm(q_nope.transpose(0, 1), k_weight, out=out_nope)  # type: ignore
         return q_transformed
@@ -476,6 +484,14 @@ class SparseMlaImpl(MlaImplBase):
             Final output tensor with shape [*, num_heads, nope_head_dim]
         """
         v_weight = self.weights[layer_id][W.mla_vc]
+        if v_weight.shape[0] != self.num_heads:
+            if self.num_heads % v_weight.shape[0] != 0:
+                raise RuntimeError(
+                    f"Invalid MLA vc head count: {v_weight.shape[0]} vs {self.num_heads}"
+                )
+            v_weight = v_weight.repeat_interleave(
+                self.num_heads // v_weight.shape[0], dim=0
+            )
         output = torch.bmm(attn_output.transpose(0, 1), v_weight)
         output = output.transpose(0, 1)
         return output

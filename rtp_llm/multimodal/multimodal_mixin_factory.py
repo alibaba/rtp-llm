@@ -19,6 +19,7 @@ class MultimodalMixinFactory:
         engine_config: EngineConfig,
         vit_config: VitConfig,
         device: str = "cuda:0",
+        injected_vit_module=None,
     ) -> BaseMultiModalMixin:
         if not model_config.mm_model_config.is_multimodal:
             logging.info("No multimodal model, skip create multimodal mixin")
@@ -31,6 +32,7 @@ class MultimodalMixinFactory:
             engine_config.load_config.load_method,
             vit_config,
             model_config.ckpt_path,
+            injected_vit_module=injected_vit_module,
         )
 
     @staticmethod
@@ -41,12 +43,14 @@ class MultimodalMixinFactory:
         device: str = "cuda:0",
         server_id: int = 0,
         is_proxy_mode: bool = False,
+        injected_vit_module=None,
     ) -> MMProcessEngine:
         mm_mixin = MultimodalMixinFactory._create_multimodal_mixin(
             model_config=model_config,
             engine_config=engine_config,
             vit_config=vit_config,
             device=device,
+            injected_vit_module=injected_vit_module,
         )
         return MMProcessEngine(
             mm_mixin.mm_part,

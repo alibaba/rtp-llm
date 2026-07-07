@@ -52,16 +52,23 @@ if not hasattr(tl, "wrap_triton"):
 
 
 class Qwen3_VLImageEmbedding(Qwen2_5_VLImageEmbedding):
-    def __init__(self, mm_related_params: VitParameters):
+    def __init__(self, mm_related_params: VitParameters, vit_module=None):
         self.mm_processor = AutoProcessor.from_pretrained(
             mm_related_params.config["ckpt_path"]
         )
         self.mm_processor.image_processor = Qwen2VLImageProcessor.from_pretrained(
             mm_related_params.config["ckpt_path"]
         )
-        config_hf = Qwen3VLConfig.from_pretrained(mm_related_params.config["ckpt_path"])
-        config_hf.vision_config._attn_implementation = default_attn_impl
-        self.visual = Qwen3VLVisionModel._from_config(config_hf.vision_config)
+        if vit_module is not None:
+            # 新 loader（LOCAL）模式：直接复用 py_model.visual 已加载好的 vit，
+            # 不再 _from_config 建第二份、也不再走 CkptDatabase 读权重。
+            self.visual = vit_module
+        else:
+            config_hf = Qwen3VLConfig.from_pretrained(
+                mm_related_params.config["ckpt_path"]
+            )
+            config_hf.vision_config._attn_implementation = default_attn_impl
+            self.visual = Qwen3VLVisionModel._from_config(config_hf.vision_config)
         self.spatial_merge_size = self.visual.spatial_merge_size
 
     @property
@@ -180,9 +187,7 @@ class Qwen3_VLImageEmbedding(Qwen2_5_VLImageEmbedding):
     def embedding(self, data, **kwargs):
         pixel_values = data[0].to(self._device).to(self._data_type)
         grid_thw = data[1].to(self._device)
-        vision_output = self.visual(pixel_values, grid_thw=grid_thw)
-        embeds = vision_output.pooler_output
-        deepstack_embeds = vision_output.deepstack_features
+        embeds, deepstack_embeds = self.visual(pixel_values, grid_thw=grid_thw)
         split_sizes = (grid_thw.prod(-1) // self.visual.spatial_merge_size**2).tolist()
         embeds = torch.split(embeds, split_sizes)
         pos_id = self.get_position_ids(grid_thw)[0]
@@ -207,9 +212,7 @@ class Qwen3_VLImageEmbedding(Qwen2_5_VLImageEmbedding):
             torch.concat(pixel_values_list, dim=0).to(self._device).to(self._data_type)
         )
         grid_thw = torch.concat(grid_thw_list, dim=0).to(self._device)
-        vision_output = self.visual(pixel_values, grid_thw=grid_thw)
-        embeds = vision_output.pooler_output
-        deepstack_embeds = vision_output.deepstack_features
+        embeds, deepstack_embeds = self.visual(pixel_values, grid_thw=grid_thw)
         split_sizes = (grid_thw.prod(-1) // self.visual.spatial_merge_size**2).tolist()
         embeds = torch.split(embeds, split_sizes)
         pos_id = self.get_position_ids(grid_thw)
@@ -230,10 +233,25 @@ class Qwen3VLVitWeight(BaseVitWeights):
 
 class Qwen3_VLMixin(Qwen2_5_VLMixin):
     def _init_multimodal(self):
-        self.mm_part = Qwen3_VLImageEmbedding(self.mm_related_params)
-        self.mm_related_params.vit_weights = Qwen3VLVitWeight(
-            {"vit": self.mm_part.visual}
+        injected = getattr(self, "_injected_vit_module", None)
+        logging.info(
+            "[Qwen3_VLMixin] vit source: %s",
+            (
+                "REUSE py_model.visual (new loader)"
+                if injected is not None
+                else "build+CkptDatabase (old loader)"
+            ),
         )
+        self.mm_part = Qwen3_VLImageEmbedding(
+            self.mm_related_params, vit_module=injected
+        )
+        if injected is None:
+            # 旧 loader：登记 vit_weights → base mixin 走 CkptDatabase 加载 vit 权重。
+            self.mm_related_params.vit_weights = Qwen3VLVitWeight(
+                {"vit": self.mm_part.visual}
+            )
+        # injected 非空（新 loader LOCAL）时不设 vit_weights → base mixin 跳过旧加载方式，
+        # vit 权重已由新 loader 灌进 py_model.visual，此处直接复用。
 
     @classmethod
     def _get_mm_module(cls, mm_related_params: VitParameters, vit_config: VitConfig):

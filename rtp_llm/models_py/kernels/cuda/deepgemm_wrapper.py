@@ -386,6 +386,18 @@ def fp8_gemm_nt(
     Returns:
         None
     """
+    if (
+        output.numel() == 0
+        or a[0].shape[-2] == 0
+        or a[0].shape[-1] == 0
+        or b[0].shape[-2] == 0
+        or b[0].shape[-1] == 0
+    ):
+        output.zero_()
+        if c is not None and output.numel() > 0:
+            output.add_(c)
+        return
+
     global _fp8_gemm_nt_impl
     if _fp8_gemm_nt_impl is None:
         return _missing_deep_gemm()

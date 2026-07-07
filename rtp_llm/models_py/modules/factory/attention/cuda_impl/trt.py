@@ -33,7 +33,7 @@ class TRTMHAImpl(FMHAImplBase):
         # Store input info
         self.attn_inputs = attn_inputs
         self.input_lengths = attn_inputs.input_lengths
-        self.cu_seq_lens = attn_inputs.cu_seqlens_device
+        self.cu_seq_lens = attn_inputs.cu_seqlens
 
         # Only TRTMHAImpl uses prefill_cuda_graph_copy_params
         self.prefill_cuda_graph_copy_params = attn_inputs.prefill_cuda_graph_copy_params
@@ -136,7 +136,7 @@ class TRTPagedMHAImpl(FMHAImplBase):
         # Store input info
         self.attn_inputs = attn_inputs
         self.input_lengths = attn_inputs.input_lengths
-        self.cu_seq_lens = attn_inputs.cu_seqlens_device
+        self.cu_seq_lens = attn_inputs.cu_seqlens
 
         # Create params
         self.fmha_params = self.fmha_impl.prepare(attn_inputs)

@@ -1,4 +1,8 @@
-from typing import Any, Dict, Optional
+import json
+import os
+from typing import Any, Dict, List
+
+from transformers import AutoTokenizer, PreTrainedTokenizerFast
 
 from rtp_llm.frontend.tokenizer_factory.tokenizer_factory_register import (
     register_tokenizer,
@@ -186,17 +190,69 @@ class QWenTokenizer(BaseTokenizer):
 
 
 class QWenV2Tokenizer(BaseTokenizer):
-    def init_tokenizer(
-        self, tokenizer_path: str, config_json: Optional[Dict[str, Any]] = None
-    ):
-        config_json = config_json or {}
-        super().init_tokenizer(tokenizer_path, config_json)
-        if not self.tokenizer.chat_template and self._is_qwen35_config(
-            config_json, tokenizer_path
-        ):
-            self.tokenizer.chat_template = _QWEN35_DEFAULT_CHAT_TEMPLATE
+    def init_tokenizer(self, tokenizer_path: str, config_json: Dict[str, Any] = {}):
+        try:
+            self.tokenizer = AutoTokenizer.from_pretrained(
+                tokenizer_path, verbose=False, trust_remote_code=True
+            )
+        except ValueError as e:
+            if "TokenizersBackend" not in str(e):
+                raise
+            self.tokenizer = self._load_fast_tokenizer_from_tokenizer_json(
+                tokenizer_path, config_json
+            )
         self.tokenizer.im_start_id = self.tokenizer.encode("<|im_start|>")[0]
         self.tokenizer.im_end_id = self.tokenizer.encode("<|im_end|>")[0]
+
+    def _load_fast_tokenizer_from_tokenizer_json(
+        self, tokenizer_path: str, config_json: Dict[str, Any]
+    ):
+        tokenizer_config = {}
+        tokenizer_config_path = os.path.join(tokenizer_path, "tokenizer_config.json")
+        if os.path.exists(tokenizer_config_path):
+            with open(tokenizer_config_path, "r", encoding="utf-8") as reader:
+                tokenizer_config = json.load(reader)
+
+        tokenizer_file = os.path.join(tokenizer_path, "tokenizer.json")
+        tokenizer_kwargs = {
+            key: tokenizer_config[key]
+            for key in [
+                "bos_token",
+                "eos_token",
+                "unk_token",
+                "pad_token",
+                "additional_special_tokens",
+                "model_max_length",
+            ]
+            if key in tokenizer_config
+        }
+        tokenizer = PreTrainedTokenizerFast(
+            tokenizer_file=tokenizer_file, **tokenizer_kwargs
+        )
+        chat_template = self._load_chat_template(
+            tokenizer_path, tokenizer_config, config_json
+        )
+        if chat_template:
+            tokenizer.chat_template = chat_template
+        return tokenizer
+
+    def _load_chat_template(
+        self,
+        tokenizer_path: str,
+        tokenizer_config: Dict[str, Any],
+        config_json: Dict[str, Any],
+    ):
+        if tokenizer_config.get("chat_template"):
+            return tokenizer_config["chat_template"]
+
+        chat_template_path = os.path.join(tokenizer_path, "chat_template.jinja")
+        if os.path.exists(chat_template_path):
+            with open(chat_template_path, "r", encoding="utf-8") as reader:
+                return reader.read()
+
+        if self._is_qwen35_config(config_json, tokenizer_path):
+            return _QWEN35_DEFAULT_CHAT_TEMPLATE
+        return None
 
     def _is_qwen35_config(self, config_json: Dict[str, Any], tokenizer_path: str):
         text_config = config_json.get("text_config", {})

@@ -33,6 +33,7 @@ from rtp_llm.models_py.triton_kernels.common.activation import (
     silu_and_mul,
     silu_and_mul_masked_post_quant_packed_fwd,
     silu_mul_masked_fp8_post_quant_fwd,
+    swigluoai_mul_fp8_quant_deep_gemm_masked,
 )
 from rtp_llm.models_py.triton_kernels.moe.ep_kernels import (
     ep_gather,
@@ -49,6 +50,21 @@ from rtp_llm.utils.model_weight import W
 
 def align_up_math(n: int, alignment: int = 128) -> int:
     return int(math.ceil(n / alignment)) * alignment
+
+
+def _is_swigluoai(activation: str) -> bool:
+    return str(activation).lower() in ("swigluoai", "swiglu_oai")
+
+
+def _swigluoai_up_gate(
+    upgate: torch.Tensor,
+    alpha: float = 1.702,
+    limit: float = 7.0,
+) -> torch.Tensor:
+    hidden = upgate.shape[-1] // 2
+    up = upgate[..., :hidden].float().clamp(min=-limit, max=limit)
+    gate = upgate[..., hidden:].float().clamp(max=limit)
+    return (gate * torch.sigmoid(alpha * gate) * (up + 1.0)).to(upgate.dtype)
 
 
 class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
@@ -122,6 +138,11 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
         self.w2_weight_fp8 = (
             self.w2_weight,
             self.w2_weight_scale_inv,
+        )
+        self.scale_ue8m0 = (
+            is_deep_gemm_e8m0_used()
+            and self.w13_weight_scale_inv.dtype == torch.int32
+            and self.w2_weight_scale_inv.dtype == torch.int32
         )
 
         self.num_gemm_sms = get_num_device_sms()
@@ -212,7 +233,7 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
                         device=hidden_states_fp8_device,
                         dtype=torch.int,
                     ).transpose(1, 2)
-                    if is_deep_gemm_e8m0_used()
+                    if self.scale_ue8m0
                     else torch.empty(
                         (
                             self.num_experts_per_partition,
@@ -237,7 +258,7 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
                 ),
                 input_tensor[1],
                 output_index,
-                scale_ue8m0=is_deep_gemm_e8m0_used(),
+                scale_ue8m0=self.scale_ue8m0,
             )
             dispose_tensor(hidden_states_fp8)
 
@@ -253,7 +274,7 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
                 upgate_output,
                 num_recv_tokens_per_expert,
                 expected_m,
-                disable_ue8m0_cast=not is_deep_gemm_e8m0_used(),
+                disable_ue8m0_cast=not self.scale_ue8m0,
             )
 
             del input_tensor
@@ -269,8 +290,9 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
             sm_major = torch.cuda.get_device_capability()[0]
             if (
                 sm_major == 10
-                and is_deep_gemm_e8m0_used()
+                and self.scale_ue8m0
                 and self.N % (self.DEEPGEMM_BLOCK_SHAPE[0] * 2 * 4) == 0
+                and not _is_swigluoai(activation)
             ):
                 # Create packed scale tensor with proper layout for deep_gemm
                 # Shape: (E, T, G // 4) where G = hidden_dim // 2 // group_size
@@ -300,16 +322,26 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
                     device=hidden_states_fp8_device,
                     dtype=torch.float32,
                 )
-                # SiLU Activation
-                silu_mul_masked_fp8_post_quant_fwd(
-                    input=upgate_output,
-                    output=down_input,
-                    output_scale=down_input_scale,
-                    quant_group_size=self.DEEPGEMM_BLOCK_SHAPE[0],
-                    masked_m=num_recv_tokens_per_expert,
-                    expected_m=expected_m,
-                    scale_ue8m0=is_deep_gemm_e8m0_used(),
-                )
+                if _is_swigluoai(activation):
+                    down_input, down_input_scale = (
+                        swigluoai_mul_fp8_quant_deep_gemm_masked(
+                            upgate_output,
+                            num_recv_tokens_per_expert,
+                            group_size=self.DEEPGEMM_BLOCK_SHAPE[0],
+                            use_ue8m0=self.scale_ue8m0,
+                        )
+                    )
+                else:
+                    # SiLU Activation
+                    silu_mul_masked_fp8_post_quant_fwd(
+                        input=upgate_output,
+                        output=down_input,
+                        output_scale=down_input_scale,
+                        quant_group_size=self.DEEPGEMM_BLOCK_SHAPE[0],
+                        masked_m=num_recv_tokens_per_expert,
+                        expected_m=expected_m,
+                        scale_ue8m0=self.scale_ue8m0,
+                    )
 
             # Free upgate_output
             dispose_tensor(upgate_output)
@@ -329,7 +361,7 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
                 down_output,
                 num_recv_tokens_per_expert,
                 expected_m,
-                disable_ue8m0_cast=not is_deep_gemm_e8m0_used(),
+                disable_ue8m0_cast=not self.scale_ue8m0,
             )
 
             # Free down_input and down_input_scale
@@ -430,7 +462,7 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
                     device=hidden_states_fp8.device,
                     dtype=torch.int,
                 ).transpose(0, 1)
-                if is_deep_gemm_e8m0_used()
+                if self.scale_ue8m0
                 else torch.empty(
                     (all_tokens, K // self.BLOCK_SIZE),
                     device=hidden_states_fp8.device,
@@ -459,7 +491,7 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
             input_tensor[1],
             m_indices,
             output_index,
-            scale_ue8m0=is_deep_gemm_e8m0_used(),
+            scale_ue8m0=self.scale_ue8m0,
         )
         m_indices.clamp_(min=0, max=self.num_experts_per_partition - 1)
         dispose_tensor(hidden_states_fp8)
@@ -468,14 +500,14 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
             device=hidden_states_fp8_device,
             dtype=torch.bfloat16,
         )
-        if not is_deep_gemm_e8m0_used():
+        if not self.scale_ue8m0:
             input_tensor[1] = tma_align_input_scale(input_tensor[1])
         m_grouped_fp8_gemm_nt_contiguous(
             (input_tensor[0], input_tensor[1]),
             self.w13_weight_fp8,
             gateup_output,
             m_indices,
-            disable_ue8m0_cast=not is_deep_gemm_e8m0_used(),
+            disable_ue8m0_cast=not self.scale_ue8m0,
         )
         del input_tensor
         down_input = torch.empty(
@@ -487,32 +519,35 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
             dtype=torch.bfloat16,
         )
         gateup_output = gateup_output.view(-1, N)
-        silu_and_mul(down_input, gateup_output)
+        if _is_swigluoai(activation):
+            down_input.copy_(_swigluoai_up_gate(gateup_output))
+        else:
+            silu_and_mul(down_input, gateup_output)
         del gateup_output
         down_output = torch.empty(
             (all_tokens, K),
             device=hidden_states_fp8_device,
             dtype=torch.bfloat16,
         )
-        if is_deep_gemm_e8m0_used():
+        if self.scale_ue8m0:
             down_input_fp8, down_input_scale = sgl_per_token_group_quant_fp8(
                 down_input,
                 group_size=self.BLOCK_SIZE,
                 column_major_scales=True,
                 scale_tma_aligned=True,
-                scale_ue8m0=is_deep_gemm_e8m0_used(),
+                scale_ue8m0=self.scale_ue8m0,
             )
         else:
             down_input_fp8, down_input_scale = trt_fp8_quantize_128(down_input, False)
         del down_input
-        if not is_deep_gemm_e8m0_used():
+        if not self.scale_ue8m0:
             down_input_scale = tma_align_input_scale(down_input_scale)
         m_grouped_fp8_gemm_nt_contiguous(
             (down_input_fp8, down_input_scale),
             self.w2_weight_fp8,
             down_output,
             m_indices,
-            disable_ue8m0_cast=not is_deep_gemm_e8m0_used(),
+            disable_ue8m0_cast=not self.scale_ue8m0,
         )
         del down_input_fp8, down_input_scale
         gather_out = torch.empty(

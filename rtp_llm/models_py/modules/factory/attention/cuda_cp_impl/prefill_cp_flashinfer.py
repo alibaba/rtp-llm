@@ -150,7 +150,7 @@ class CPFlashInferImpl(FMHAImplBase):
             self.write_cache_store_impl = WriteCacheStoreOp(
                 attn_inputs.context_parallel_info.prefill_actual_input_lengths_cpu,
                 attn_inputs.prefix_lengths,
-                attn_inputs.kv_cache_block_id,
+                attn_inputs.kv_cache_block_id_host,
                 attn_inputs.cache_store_inputs,
             )
         else:

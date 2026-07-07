@@ -102,8 +102,8 @@ void RtpEmbeddingOp::init(py::object model,
             mm_processor_.reset(new LocalMultimodalProcessor(
                 mm_process_engine, params.model_config_.mm_model_config, params.model_config_.max_seq_len));
         } else if (vit_config_cpp.vit_separation == VitSeparation::VIT_SEPARATION_REMOTE) {
-            mm_processor_.reset(new RemoteMultimodalProcessor(
-                params.model_config_.mm_model_config, params.model_config_.max_seq_len, params.metrics_reporter));
+            mm_processor_.reset(
+                new RemoteMultimodalProcessor(params.model_config_.mm_model_config, params.model_config_.max_seq_len));
         } else {
             RTP_LLM_LOG_WARNING("Skip init mm_processor");
         }

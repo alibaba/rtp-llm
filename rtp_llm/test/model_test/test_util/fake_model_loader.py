@@ -11,8 +11,10 @@ from rtp_llm.config.py_config_modules import (
     RenderConfig,
 )
 from rtp_llm.model_factory import ModelFactory
+from rtp_llm.model_loader.load_config import LoadMethod
 from rtp_llm.models.base_model import BaseModel
 from rtp_llm.ops import (
+    DeviceResourceConfig,
     FMHAConfig,
     HWKernelConfig,
     MoeConfig,
@@ -127,6 +129,10 @@ class FakeModelLoader(object):
         config.render_config = RenderConfig()
         config.generate_env_config = GenerateEnvConfig()
 
+        # BaseModel.__init__ requires load_method + device_resource_config.
+        # load_method honors the LOAD_METHOD env (auto|scratch|fastsafetensors).
+        load_method = LoadMethod(os.environ.get("LOAD_METHOD", "auto"))
+
         model = model_cls(
             model_config=config,
             parallelism_config=parallelism_config,
@@ -134,9 +140,11 @@ class FakeModelLoader(object):
             kv_cache_config=kv_cache_config,
             fmha_config=fmha_config,
             moe_config=moe_config,
+            load_method=load_method,
             max_generate_batch_size=0,
             vit_config=None,
             merge_lora=False,
+            device_resource_config=DeviceResourceConfig(),
         )
         model.load()
         return model

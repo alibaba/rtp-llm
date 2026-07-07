@@ -1,0 +1,975 @@
+import inspect
+import logging
+import os
+import re
+from typing import Any, Dict, Iterator, List, Optional, Tuple
+
+import torch
+import torch.nn as nn
+
+logger = logging.getLogger(__name__)
+
+
+class LoadMethod:
+    AUTO = "auto"
+    SCRATCH = "scratch"
+    FASTSAFETENSORS = "fastsafetensors"
+
+
+class LoadConfig:
+
+    def __init__(
+        self,
+        tp_size: int = 1,
+        tp_rank: int = 0,
+        ep_size: int = 1,
+        ep_rank: int = 0,
+        quant_type: str = "none",
+        compute_dtype: torch.dtype = torch.float16,
+        device: str = "cuda",
+        load_method: str = LoadMethod.AUTO,
+        **kwargs,
+    ):
+        self.tp_size = tp_size
+        self.tp_rank = tp_rank
+        self.ep_size = ep_size
+        self.ep_rank = ep_rank
+        self.quant_type = quant_type
+        self.compute_dtype = compute_dtype
+        self.device = device
+        self.load_method = load_method
+        for k, v in kwargs.items():
+            setattr(self, k, v)
+
+    @property
+    def quant_config(self):
+        try:
+            from rtp_llm.models_py.quant_methods.base import QuantizationConfig
+
+            # 走法1:把旧 config/quant_config.py 解析出的富对象透传为 source_config，
+            # 供新 loader 的 method 读取 dynamic / ignore / group_size 等结构化字段，
+            # 而不在新 loader 重复解析 ckpt。base_model 经 quant_source_config 注入。
+            return QuantizationConfig(
+                quant_type=self.quant_type,
+                source_config=getattr(self, "quant_source_config", None),
+            )
+        except ImportError:
+            return None
+
+
+class _WeightsFilter:
+
+    def __init__(self, exclude_patterns: Optional[List[str]] = None):
+        self._exclude_patterns = exclude_patterns or []
+        self._compiled = None
+        if self._exclude_patterns:
+            import re
+
+            self._compiled = re.compile("|".join(self._exclude_patterns))
+
+    def apply(
+        self, weights_iter: Iterator[Tuple[str, torch.Tensor]]
+    ) -> Iterator[Tuple[str, torch.Tensor]]:
+        if not self._exclude_patterns or self._compiled is None:
+            yield from weights_iter
+            return
+        for name, tensor in weights_iter:
+            if self.should_load(name):
+                yield name, tensor
+
+    def should_load(self, name: str) -> bool:
+        if not self._exclude_patterns or self._compiled is None:
+            return True
+        return self._compiled.search(name) is None
+
+
+def _discover_ckpt_files(model_path: str) -> List[str]:
+    try:
+        from rtp_llm.models_py import weight_mapper
+
+        if hasattr(weight_mapper, "discover_ckpt_files"):
+            return weight_mapper.discover_ckpt_files(model_path)
+    except ImportError:
+        pass
+    import glob
+
+    # Match weight_mapper.discover_ckpt_files priority: prefer safetensors,
+    # then bin, then pt — and return the first non-empty group rather than
+    # mixing formats. Mixing co-located safetensors and bin would double-load
+    # the same weights through two paths.
+    for ext in ("*.safetensors", "*.bin", "*.pt"):
+        found = sorted(glob.glob(os.path.join(model_path, ext)))
+        if found:
+            if ext == "*.bin":
+                found = [f for f in found if "optimizer" not in os.path.basename(f)]
+            return found
+    return []
+
+
+def _evict_page_cache(ckpt_files: List[str]):
+    total = 0
+    for path in ckpt_files:
+        try:
+            size = os.path.getsize(path)
+            fd = os.open(path, os.O_RDONLY)
+            try:
+                os.posix_fadvise(fd, 0, size, os.POSIX_FADV_DONTNEED)
+                total += size
+            finally:
+                os.close(fd)
+        except (OSError, AttributeError):
+            pass
+    logger.info(
+        f"Evicted page cache for {len(ckpt_files)} files " f"({total / 1024**3:.2f} GB)"
+    )
+
+
+def _get_all_weights(
+    ckpt_files: List[str], device: str = "cpu", name_filter: Optional[Any] = None
+) -> Iterator[Tuple[str, torch.Tensor]]:
+    if name_filter is None:
+        try:
+            from rtp_llm.models_py import weight_mapper
+
+            if hasattr(weight_mapper, "get_all_weights"):
+                count = 0
+                logger.info(
+                    "Begin streaming weights via weight_mapper: files=%d device=%s",
+                    len(ckpt_files),
+                    device,
+                )
+                for name, tensor in weight_mapper.get_all_weights(
+                    ckpt_files, device=device
+                ):
+                    count += 1
+                    if count == 1 or count % 500 == 0:
+                        logger.info(
+                            "Streaming weight #%d: %s shape=%s dtype=%s",
+                            count,
+                            name,
+                            tuple(tensor.shape),
+                            tensor.dtype,
+                        )
+                    yield name, tensor
+                logger.info("Finished streaming %d weights via weight_mapper", count)
+                return
+        except ImportError:
+            pass
+    else:
+        logger.info(
+            "Begin streaming weights with name filter: files=%d device=%s",
+            len(ckpt_files),
+            device,
+        )
+
+    def _should_load(name: str) -> bool:
+        return name_filter is None or name_filter.should_load(name)
+
+    count = 0
+    skipped = 0
+    for ckpt_file in ckpt_files:
+        logger.info("Loading checkpoint file: %s", ckpt_file)
+        if ckpt_file.endswith(".safetensors"):
+            if name_filter is None:
+                from safetensors.torch import load_file as safetensors_load
+
+                state_dict = safetensors_load(ckpt_file, device=device)
+                logger.info(
+                    "Loaded checkpoint file: %s tensors=%d",
+                    ckpt_file,
+                    len(state_dict),
+                )
+                items = state_dict.items()
+                for idx, (name, tensor) in enumerate(items, start=1):
+                    count += 1
+                    if count == 1 or count % 500 == 0:
+                        logger.info(
+                            "Streaming weight #%d: %s shape=%s dtype=%s",
+                            count,
+                            name,
+                            tuple(tensor.shape),
+                            tensor.dtype,
+                        )
+                    yield name, tensor
+            else:
+                from safetensors import safe_open
+
+                with safe_open(ckpt_file, framework="pt", device=device) as f:
+                    keys = list(f.keys())
+                    for name in keys:
+                        if not _should_load(name):
+                            skipped += 1
+                            continue
+                        tensor = f.get_tensor(name)
+                        count += 1
+                        if count == 1 or count % 500 == 0:
+                            logger.info(
+                                "Streaming filtered weight #%d: %s shape=%s dtype=%s "
+                                "(skipped=%d)",
+                                count,
+                                name,
+                                tuple(tensor.shape),
+                                tensor.dtype,
+                                skipped,
+                            )
+                        yield name, tensor
+                logger.info(
+                    "Scanned checkpoint file: %s yielded=%d skipped=%d",
+                    ckpt_file,
+                    count,
+                    skipped,
+                )
+        else:
+            # weights_only=True forbids arbitrary pickle payloads — torch.load
+            # otherwise allows arbitrary code execution on untrusted .pt/.bin
+            # files. Modern HF ckpts and the {state_dict, model} containers
+            # below are pure tensor dicts and load fine under this flag.
+            state_dict = torch.load(ckpt_file, map_location=device, weights_only=True)
+            if "state_dict" in state_dict:
+                state_dict = state_dict["state_dict"]
+            elif "model" in state_dict:
+                state_dict = state_dict["model"]
+            logger.info(
+                "Loaded checkpoint file: %s tensors=%d", ckpt_file, len(state_dict)
+            )
+            for name, tensor in state_dict.items():
+                if not _should_load(name):
+                    skipped += 1
+                    continue
+                count += 1
+                if count == 1 or count % 500 == 0:
+                    logger.info(
+                        "Streaming filtered weight #%d: %s shape=%s dtype=%s "
+                        "(skipped=%d)",
+                        count,
+                        name,
+                        tuple(tensor.shape),
+                        tensor.dtype,
+                        skipped,
+                    )
+                yield name, tensor
+    logger.info("Finished streaming %d weights (skipped=%d)", count, skipped)
+
+
+def _get_fastsafetensors_weights(
+    ckpt_files: List[str], device: str
+) -> Iterator[Tuple[str, torch.Tensor]]:
+    # Apply monkey patch to bypass KeyError: 'data_offsets' for non-tensor metadata keys
+    try:
+        import fastsafetensors.common
+
+        orig_init = fastsafetensors.common.SafeTensorsMetadata.__init__
+
+        def patched_init(self, *args, **kwargs):
+            new_args = list(args)
+
+            def _clean_and_replace(obj):
+                if hasattr(obj, "items"):
+                    has_bad = False
+                    cleaned = {}
+                    for k, v in obj.items():
+                        try:
+                            if hasattr(v, "__getitem__") and "data_offsets" in v:
+                                cleaned[k] = v
+                            else:
+                                has_bad = True
+                        except Exception:
+                            has_bad = True
+                    if has_bad:
+                        return cleaned
+                return obj
+
+            for i in range(len(new_args)):
+                new_args[i] = _clean_and_replace(new_args[i])
+            for k in list(kwargs.keys()):
+                kwargs[k] = _clean_and_replace(kwargs[k])
+
+            return orig_init(self, *new_args, **kwargs)
+
+        fastsafetensors.common.SafeTensorsMetadata.__init__ = patched_init
+    except Exception as patch_err:
+        logging.warning(f"Failed to apply MonkeyPatch to fastsafetensors: {patch_err}")
+
+    from fastsafetensors import ParallelLoader, SingleGroup
+    from safetensors import safe_open
+
+    from rtp_llm.model_loader.per_expert_parallel_loader import PerExpertParallelLoader
+
+    if torch.distributed.is_available() and torch.distributed.is_initialized():
+        pg = torch.distributed.group.WORLD
+    else:
+        pg = SingleGroup()
+
+    stacked_key_config = {}
+    if ckpt_files:
+        try:
+            with safe_open(ckpt_files[0], framework="pt") as f:
+                for key in f.keys():
+                    if (
+                        "mlp.experts.gate_up_proj" in key
+                        or "mlp.experts.down_proj" in key
+                    ) and "experts.weight" not in key:
+                        slice_ = f.get_slice(key)
+                        if len(slice_.shape) == 3:
+                            template = key.replace(
+                                "experts.gate_up_proj",
+                                "experts.{expert_id}.gate_up_proj",
+                            ).replace(
+                                "experts.down_proj", "experts.{expert_id}.down_proj"
+                            )
+                            stacked_key_config[key] = template
+        except Exception as e:
+            logging.warning(
+                f"Failed to auto-detect stacked keys for PerExpertParallelLoader: {e}"
+            )
+
+    loader_kwargs = dict(
+        pg=pg,
+        hf_weights_files=sorted(ckpt_files),
+        use_tqdm_on_load=True,
+        device=device,
+        bbuf_size_kb=1024
+        * 256,  # Optimized from 2GB to 256MB to save GPU memory headroom
+        use_shm=True,
+    )
+
+    if stacked_key_config:
+        logging.info(
+            f"FST per-expert parallel loader enabled for {len(stacked_key_config)} stacked keys: {list(stacked_key_config.keys())}"
+        )
+        loader = PerExpertParallelLoader(stacked_key_config, **loader_kwargs)
+    else:
+        loader = ParallelLoader(**loader_kwargs)
+
+    try:
+        yield from loader.iterate_weights()
+    finally:
+        inner = getattr(loader, "loader", None)
+        if inner is not None and hasattr(inner, "close"):
+            inner.close()
+
+
+_EP_EXPERT_RE = re.compile(r"experts\.(\d+)\.")
+
+
+class _ExpertRangeFilter:
+    """Drop weights for experts outside [start_expert, end_expert).
+
+    Replaces the previous N-alternation regex (one branch per excluded expert),
+    which compiled and matched in O(num_experts) per weight — costly for
+    256/512-expert MoE ckpts. Here we run one O(1) re.search per weight name
+    against a single fixed pattern and bound-check the captured expert id.
+    """
+
+    def __init__(self, start_expert: int, end_expert: int):
+        self.start_expert = start_expert
+        self.end_expert = end_expert
+
+    def apply(
+        self, weights_iter: Iterator[Tuple[str, torch.Tensor]]
+    ) -> Iterator[Tuple[str, torch.Tensor]]:
+        for name, tensor in weights_iter:
+            if self.should_load(name):
+                yield name, tensor
+
+    def should_load(self, name: str) -> bool:
+        m = _EP_EXPERT_RE.search(name)
+        if m is None:
+            # Not an expert-scoped weight (e.g. shared attn / norm); keep.
+            return True
+        expert_id = int(m.group(1))
+        return self.start_expert <= expert_id < self.end_expert
+
+
+def _create_ep_filter(ep_size: int, ep_rank: int, num_experts: int):
+    if num_experts == 0:
+        return _WeightsFilter()
+    experts_per_rank = num_experts // ep_size
+    start_expert = ep_rank * experts_per_rank
+    end_expert = start_expert + experts_per_rank
+    return _ExpertRangeFilter(start_expert, end_expert)
+
+
+class NewModelLoader:
+
+    def __init__(
+        self,
+        model_config: Any,
+        load_config: Optional[LoadConfig] = None,
+        model_path: Optional[str] = None,
+        device: str = "cuda",
+    ):
+        self.model_config = model_config
+        self.load_config = load_config if load_config is not None else LoadConfig()
+        self.model_path = model_path
+        self.device = device
+        self._ckpt_files_cache: Optional[List[str]] = None
+
+    def load(self) -> nn.Module:
+        method = self._resolve_load_method()
+        logger.info(f"NewModelLoader using load method: {method}")
+        if method == LoadMethod.FASTSAFETENSORS:
+            try:
+                model = self._load_via_fastsafetensors()
+            except Exception as e:
+                logger.warning(
+                    f"fastsafetensors load failed ({e}), automatically falling back to scratch load path..."
+                )
+                model = self._load_via_scratch()
+        else:
+            model = self._load_via_scratch()
+        # [DUMP_WEIGHTS] temporary debug hook — set DUMP_WEIGHTS=/path to enable
+        import os as _o
+
+        _dd = _o.environ.get("DUMP_WEIGHTS")
+        if _dd:
+            import hashlib as _h
+            import json as _j
+
+            tp_rank = getattr(self.load_config, "tp_rank", 0)
+            out = {}
+            for name, p in model.named_parameters():
+                t = p.detach()
+                f32 = t.to(torch.float32).cpu().contiguous()
+                out[name] = {
+                    "src": "new_loader",
+                    "shape": list(t.shape),
+                    "dtype": str(t.dtype),
+                    "mean": float(f32.mean()),
+                    "std": float(f32.std()),
+                    "absmax": float(f32.abs().max()),
+                    "md5": _h.md5(f32.numpy().tobytes()).hexdigest(),
+                }
+            for name, b in model.named_buffers():
+                t = b.detach()
+                f32 = t.to(torch.float32).cpu().contiguous()
+                out[f"buffer:{name}"] = {
+                    "src": "new_loader",
+                    "shape": list(t.shape),
+                    "dtype": str(t.dtype),
+                    "mean": float(f32.mean()),
+                    "std": float(f32.std()),
+                    "absmax": float(f32.abs().max()),
+                    "md5": _h.md5(f32.numpy().tobytes()).hexdigest(),
+                }
+            _o.makedirs(_dd, exist_ok=True)
+            with open(f"{_dd}/rank{tp_rank}.json", "w") as f:
+                _j.dump(out, f, indent=2, sort_keys=True)
+            logger.info(
+                f"[DUMP_WEIGHTS] new_loader dumped {len(out)} tensors to {_dd}/rank{tp_rank}.json"
+            )
+        _slice_dir = _o.environ.get("DUMP_TENSOR_SLICES")
+        if _slice_dir:
+            import json as _j
+
+            def _tensor_slice_info(t):
+                flat = t.detach().reshape(-1)
+                n = flat.numel()
+                if n == 0:
+                    return {
+                        "shape": list(t.shape),
+                        "dtype": str(t.dtype),
+                        "samples": [],
+                    }
+                idx = set(range(min(16, n)))
+                mid = n // 2
+                idx.update(range(max(0, mid - 8), min(n, mid + 8)))
+                idx.update(range(max(0, n - 16), n))
+                if n > 32:
+                    step = max(1, n // 32)
+                    idx.update(range(0, n, step))
+                idx = sorted(idx)
+                vals = flat[idx].to(torch.float32).cpu().tolist()
+                coord_samples = []
+                shape = list(t.shape)
+                if shape:
+                    choices = []
+                    for dim in shape:
+                        dim_choices = {0, dim // 2, dim - 1}
+                        if dim > 1:
+                            dim_choices.add(1)
+                            dim_choices.add(dim - 2)
+                        choices.append(sorted(x for x in dim_choices if 0 <= x < dim))
+                    coords = [[]]
+                    for dim_choices in choices:
+                        coords = [
+                            prefix + [x] for prefix in coords for x in dim_choices
+                        ]
+                    if len(coords) > 160:
+                        step = max(1, len(coords) // 160)
+                        coords = coords[::step][:160]
+                    coord_values = [t[tuple(c)] for c in coords]
+                    coord_values = (
+                        torch.stack([v.reshape(()) for v in coord_values])
+                        .to(torch.float32)
+                        .cpu()
+                        .tolist()
+                    )
+                    coord_samples = [
+                        {"idx": c, "value": v} for c, v in zip(coords, coord_values)
+                    ]
+                return {
+                    "shape": shape,
+                    "dtype": str(t.dtype),
+                    "idx": idx,
+                    "samples": vals,
+                    "coord_samples": coord_samples,
+                }
+
+            tp_rank = getattr(self.load_config, "tp_rank", 0)
+            out = {}
+            for name, p in model.named_parameters():
+                out[name] = _tensor_slice_info(p)
+            for name, b in model.named_buffers():
+                out[f"buffer:{name}"] = _tensor_slice_info(b)
+            _o.makedirs(_slice_dir, exist_ok=True)
+            with open(f"{_slice_dir}/rank{tp_rank}.json", "w") as f:
+                _j.dump(out, f, separators=(",", ":"), sort_keys=True)
+            logger.info(
+                f"[DUMP_TENSOR_SLICES] new_loader dumped {len(out)} tensors to {_slice_dir}/rank{tp_rank}.json"
+            )
+        return model
+
+    def _load_via_scratch(self) -> nn.Module:
+        import time
+
+        logger.info("Starting model loading (scratch path)...")
+        model = self._create_model()
+        ep_filter = self._create_ep_filter()
+        weights_iter = _get_all_weights(
+            self._discover_ckpt_files_cached(), device="cpu", name_filter=ep_filter
+        )
+        if ep_filter is not None:
+            weights_iter = ep_filter.apply(weights_iter)
+
+        t0 = time.time()
+        model.load_weights(weights_iter)
+        logger.info(f"model.load_weights() took {time.time() - t0:.2f}s")
+
+        t1 = time.time()
+        logger.info(f"Moving model to device: {self.device}")
+        model.to(self.device)
+        logger.info(f"model.to({self.device}) took {time.time() - t1:.2f}s")
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+        self._run_post_load_hooks(model)
+        self._log_peak_gpu_memory()
+        return model
+
+    def _load_via_fastsafetensors(self) -> nn.Module:
+        import time
+
+        logger.info("Starting model loading (fastsafetensors path)...")
+
+        target_device = self._resolve_target_device()
+
+        t0 = time.time()
+        with torch.device("meta"):
+            model = self._create_model()
+        model.to_empty(device=target_device)
+        logger.info(
+            f"meta create + to_empty({target_device}) " f"took {time.time() - t0:.2f}s"
+        )
+
+        weights_iter = _get_fastsafetensors_weights(
+            self._discover_ckpt_files_cached(), device=target_device
+        )
+        weights_iter = self._apply_ep_filter(weights_iter)
+
+        t1 = time.time()
+        model.load_weights(weights_iter)
+        logger.info(f"model.load_weights() took {time.time() - t1:.2f}s")
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+        self._run_post_load_hooks(model)
+        self._log_peak_gpu_memory()
+        return model
+
+    def _run_post_load_hooks(self, model: nn.Module):
+        import time
+
+        t0 = time.time()
+        count = 0
+        for module in model.modules():
+            setattr(
+                module,
+                "_new_loader_force_cpu_load_weights",
+                bool(getattr(self.load_config, "force_cpu_load_weights", False)),
+            )
+            if hasattr(module, "process_weights_after_loading"):
+                module.process_weights_after_loading()
+                count += 1
+        logger.info(
+            f"Post-load hooks ran on {count} modules in {time.time() - t0:.2f}s"
+        )
+
+    def _log_peak_gpu_memory(self):
+        if not torch.cuda.is_available():
+            return
+        try:
+            allocated = torch.cuda.max_memory_allocated()
+            reserved = torch.cuda.max_memory_reserved()
+            gib = 1024**3
+            logger.info(
+                f"Peak GPU memory after loading: "
+                f"allocated={allocated / gib:.2f} GiB, "
+                f"reserved={reserved / gib:.2f} GiB"
+            )
+        except Exception:
+            pass
+
+    def _resolve_target_device(self) -> str:
+        device = str(self.device)
+        if not device.startswith("cuda"):
+            return device
+        if ":" in device:
+            return device
+        if torch.distributed.is_available() and torch.distributed.is_initialized():
+            return f"cuda:{torch.distributed.get_rank()}"
+        return f"cuda:{torch.cuda.current_device()}"
+
+    def _resolve_load_method(self) -> str:
+        load_method = getattr(self.load_config, "load_method", LoadMethod.AUTO)
+        load_method = (load_method or LoadMethod.AUTO).lower()
+        if load_method == LoadMethod.AUTO:
+            env = os.environ.get("LOAD_METHOD", "").strip().lower()
+            if env in (LoadMethod.SCRATCH, LoadMethod.FASTSAFETENSORS):
+                load_method = env
+                logger.info(f"LOAD_METHOD env: {load_method}")
+
+        if load_method == LoadMethod.FASTSAFETENSORS:
+            ok, reason = self._fastsafetensors_eligible()
+            if not ok:
+                if reason == "insufficient GPU free memory":
+                    ckpt_files = self._discover_ckpt_files_cached()
+                    sizes = [os.path.getsize(f) for f in ckpt_files]
+                    total = sum(sizes)
+                    tp_size = max(getattr(self.load_config, "tp_size", 1), 1)
+                    ep_size = max(getattr(self.load_config, "ep_size", 1), 1)
+                    rank_share = total / max(tp_size, ep_size)
+
+                    is_quant = getattr(
+                        self.load_config, "quant_source_config", None
+                    ) is not None and getattr(
+                        self.load_config.quant_source_config, "is_quanted", False
+                    )
+                    if not is_quant:
+                        is_quant = (
+                            getattr(self.model_config, "quantization", None) is not None
+                        )
+                    if is_quant:
+                        rank_share /= 2.0
+
+                    free_bytes, _ = torch.cuda.mem_get_info()
+                    if free_bytes < rank_share:
+                        raise RuntimeError(
+                            f"fastsafetensors load requested but unavailable: {reason} "
+                            f"(free={free_bytes/1024**3:.1f}GiB < rank_share={rank_share/1024**3:.1f}GiB)"
+                        )
+                    else:
+                        logger.warning(
+                            f"fastsafetensors headroom is negative, but free memory ({free_bytes/1024**3:.1f}GiB) "
+                            f"is sufficient to hold rank_share ({rank_share/1024**3:.1f}GiB). Proceeding anyway."
+                        )
+                else:
+                    raise RuntimeError(
+                        f"fastsafetensors load requested but unavailable: {reason}"
+                    )
+            return LoadMethod.FASTSAFETENSORS
+        return LoadMethod.SCRATCH
+
+    def _fastsafetensors_eligible(self) -> Tuple[bool, str]:
+        try:
+            import fastsafetensors  # noqa: F401
+        except ImportError:
+            return False, "fastsafetensors module not installed"
+        if not torch.cuda.is_available():
+            return False, "cuda not available"
+        if not str(self.device).startswith("cuda"):
+            return False, f"device {self.device} is not cuda"
+
+        ckpt_files = self._discover_ckpt_files_cached()
+        if not ckpt_files:
+            return False, "no checkpoint files discovered"
+        if not all(f.endswith(".safetensors") for f in ckpt_files):
+            return False, "not all checkpoint files are safetensors"
+
+        sizes = [os.path.getsize(f) for f in ckpt_files]
+        max_file = max(sizes)
+        total = sum(sizes)
+        tp_size = max(getattr(self.load_config, "tp_size", 1), 1)
+        ep_size = max(getattr(self.load_config, "ep_size", 1), 1)
+        rank_share = total / max(tp_size, ep_size)
+
+        is_quant = getattr(
+            self.load_config, "quant_source_config", None
+        ) is not None and getattr(
+            self.load_config.quant_source_config, "is_quanted", False
+        )
+        if not is_quant:
+            is_quant = getattr(self.model_config, "quantization", None) is not None
+        if is_quant:
+            rank_share /= 2.0
+
+        try:
+            free_bytes, _ = torch.cuda.mem_get_info()
+        except Exception as e:
+            return False, f"cuda mem_get_info failed: {e}"
+
+        headroom = free_bytes - rank_share - 3 * max_file
+        gib = 1024**3
+        logger.info(
+            f"fastsafetensors capacity: free={free_bytes/gib:.1f}GiB, "
+            f"rank_share={rank_share/gib:.1f}GiB, "
+            f"max_file={max_file/gib:.1f}GiB, "
+            f"headroom={headroom/gib:.1f}GiB"
+        )
+        if headroom <= 0:
+            return False, "insufficient GPU free memory"
+        return True, "ok"
+
+    def _discover_ckpt_files_cached(self) -> List[str]:
+        if self._ckpt_files_cache is not None:
+            return self._ckpt_files_cache
+        model_path = self._resolve_model_path()
+        if not os.path.isdir(model_path):
+            raise NotADirectoryError(f"model_path is not a directory: {model_path}")
+        ckpt_files = _discover_ckpt_files(model_path)
+        if not ckpt_files:
+            raise FileNotFoundError(f"No checkpoint files found in: {model_path}")
+        logger.info(f"Found {len(ckpt_files)} checkpoint file(s) in {model_path}")
+        if os.environ.get("DROP_PAGE_CACHE", "0") == "1":
+            _evict_page_cache(ckpt_files)
+        self._ckpt_files_cache = ckpt_files
+        return ckpt_files
+
+    def _create_model(self) -> nn.Module:
+        from rtp_llm.models_py.registry import MODEL_REGISTRY
+
+        model_type = self._get_model_type()
+        if model_type not in MODEL_REGISTRY:
+            # Provide helpful diagnostic when registry is empty or model missing
+            diag = ""
+            if not MODEL_REGISTRY:
+                try:
+                    from rtp_llm.models_py import _IMPORT_ERRORS
+
+                    if _IMPORT_ERRORS:
+                        diag = (
+                            " Model import errors during initialization: "
+                            + "; ".join(f"{k}: {v}" for k, v in _IMPORT_ERRORS.items())
+                        )
+                except (ImportError, AttributeError):
+                    diag = " (Package initialization may have failed entirely.)"
+            raise ValueError(
+                f"Model type '{model_type}' not found in registry. "
+                f"Available: {list(MODEL_REGISTRY.keys())}.{diag}"
+            )
+        model_cls = MODEL_REGISTRY[model_type]
+        logger.info(
+            "NewModelLoader registry hit: model_type=%s cls=%s module=%s file=%s",
+            model_type,
+            model_cls.__qualname__,
+            model_cls.__module__,
+            inspect.getfile(model_cls),
+        )
+        model = model_cls(self.model_config, self.load_config)
+        logger.info(f"Created model: {model_cls.__name__} (type={model_type})")
+        return model
+
+    def _get_model_type(self) -> str:
+        if hasattr(self.model_config, "model_type"):
+            return self.model_config.model_type
+        elif isinstance(self.model_config, dict):
+            return self.model_config.get("model_type", "")
+        raise ValueError("Cannot determine model_type from model_config.")
+
+    def _resolve_model_path(self) -> str:
+        if self.model_path:
+            return self.model_path
+        if hasattr(self.model_config, "model_path"):
+            if self.model_config.model_path:
+                return self.model_config.model_path
+        if isinstance(self.model_config, dict):
+            path = self.model_config.get("model_path", "")
+            if path:
+                return path
+        raise ValueError("model_path is required for weight loading.")
+
+    def _apply_ep_filter(self, weights_iter):
+        ep_filter = self._create_ep_filter()
+        if ep_filter is None:
+            return weights_iter
+        return ep_filter.apply(weights_iter)
+
+    def _create_ep_filter(self):
+        ep_size = getattr(self.load_config, "ep_size", 1)
+        ep_rank = getattr(self.load_config, "ep_rank", 0)
+        if ep_size <= 1:
+            return None
+        # Single source of truth: model_config.expert_num. Same convention as
+        # the legacy loader (model_loader/ffn_weight.py) and every MoE executor
+        # under models_py/modules/factory/fused_moe/. dense models lack this
+        # attr, getattr default 0 short-circuits _create_ep_filter to a no-op.
+        num_experts = getattr(self.model_config, "expert_num", 0)
+        if num_experts == 0:
+            return None
+        return _create_ep_filter(ep_size, ep_rank, num_experts)
+
+    # ------------------------------------------------------------------ #
+    #  LoRA support
+    # ------------------------------------------------------------------ #
+
+    def load_lora_weights(self, adapter_name: str, lora_path: str, device: str = "cpu"):
+        """Load HF-format LoRA adapter weights independently of the legacy loader.
+
+        Reads adapter_config.json for rank/alpha, then loads adapter_model
+        checkpoint, maps HF module names to engine-internal W.* names, applies
+        TP slicing, and returns a LoRAWeights object ready for the C++ runtime.
+        """
+        from rtp_llm.lora.lora_weights import LoRAWeights
+        from rtp_llm.utils.model_weight import W
+
+        lora_config = self._read_lora_config(lora_path)
+        rank = lora_config["rank"]
+        lora_alpha = lora_config["lora_alpha"]
+
+        num_layers = getattr(self.model_config, "num_layers", 0)
+        if num_layers == 0:
+            num_layers = getattr(self.model_config, "num_hidden_layers", 0)
+        lora_weights = LoRAWeights(num_layers)
+        lora_weights.set_lora_rank(rank)
+
+        tp_size = getattr(self.load_config, "tp_size", 1)
+        tp_rank = getattr(self.load_config, "tp_rank", 0)
+        compute_dtype = getattr(self.load_config, "compute_dtype", torch.float16)
+
+        state_dict = self._load_lora_state_dict(lora_path, device)
+
+        for hf_name, tensor in state_dict.items():
+            parsed = _parse_hf_lora_name(hf_name)
+            if parsed is None:
+                continue
+            layer_id, hf_module, ab_suffix = parsed
+
+            if layer_id >= num_layers:
+                continue
+
+            engine_name = _HF_TO_ENGINE_LORA.get(hf_module)
+            if engine_name is None:
+                logger.warning(f"LoRA: unmapped module '{hf_module}', skipping")
+                continue
+
+            tensor = tensor.to(compute_dtype)
+
+            # TP slicing
+            if tp_size > 1:
+                split_rule = _LORA_TP_RULES.get((hf_module, ab_suffix))
+                if split_rule is not None:
+                    tensor = _tp_slice(tensor, tp_size, tp_rank, split_rule)
+
+            full_name = f"{engine_name}.{ab_suffix}"
+            lora_weights.set_layer_weight(False, layer_id, full_name, tensor)
+
+        lora_weights.apply_scale(lora_alpha / rank)
+        logger.info(
+            f"Loaded LoRA '{adapter_name}' from {lora_path}: "
+            f"rank={rank}, alpha={lora_alpha}, layers={num_layers}"
+        )
+        return lora_weights
+
+    @staticmethod
+    def _read_lora_config(lora_path: str) -> dict:
+        import json
+
+        config_path = os.path.join(lora_path, "adapter_config.json")
+        if not os.path.exists(config_path):
+            raise FileNotFoundError(
+                f"LoRA adapter_config.json not found: {config_path}"
+            )
+        with open(config_path) as f:
+            cfg = json.load(f)
+        return {
+            "rank": cfg["r"],
+            "lora_alpha": cfg["lora_alpha"],
+        }
+
+    @staticmethod
+    def _load_lora_state_dict(lora_path: str, device: str) -> dict:
+        for filename in (
+            "adapter_model.safetensors",
+            "adapter_model.bin",
+            "adapter_model.pt",
+        ):
+            filepath = os.path.join(lora_path, filename)
+            if os.path.exists(filepath):
+                if filepath.endswith(".safetensors"):
+                    from safetensors.torch import load_file
+
+                    return load_file(filepath, device=device)
+                else:
+                    return torch.load(filepath, map_location=device, weights_only=True)
+        raise FileNotFoundError(f"No adapter model file found in {lora_path}")
+
+
+# ------------------------------------------------------------------ #
+#  LoRA name mapping and TP slicing helpers
+# ------------------------------------------------------------------ #
+
+_HF_LORA_PATTERN = re.compile(
+    r"base_model\.model\.model\.layers\.(\d+)\.(.*)\.(lora_A|lora_B)\.weight"
+)
+
+
+def _parse_hf_lora_name(name: str):
+    """Parse HF LoRA tensor name -> (layer_id, hf_module, 'lora_A'|'lora_B')."""
+    m = _HF_LORA_PATTERN.match(name)
+    if m is None:
+        return None
+    return int(m.group(1)), m.group(2), m.group(3)
+
+
+# HF module path -> engine internal W.* name
+_HF_TO_ENGINE_LORA = {
+    "self_attn.q_proj": "self_attention_weights.query_weight.kernel",
+    "self_attn.k_proj": "self_attention_weights.query_weight.kernel",
+    "self_attn.v_proj": "self_attention_weights.query_weight.kernel",
+    "self_attn.o_proj": "self_attention_weights.attention_output_weight.kernel",
+    "mlp.gate_proj": "ffn_weights.intermediate_weight.kernel",
+    "mlp.up_proj": "ffn_weights.intermediate_weight3.kernel",
+    "mlp.down_proj": "ffn_weights.intermediate_weight2.kernel",
+}
+
+
+# TP slicing rules: (hf_module, ab_suffix) -> (dim, "split"|"identity")
+# Column-parallel projections (q/k/v/gate/up): lora_B sliced on dim=-1
+# Row-parallel projections (o/down): lora_A sliced on dim=0
+_LORA_TP_RULES: Dict[tuple, tuple] = {
+    # q/k/v: lora_B output-dim split
+    ("self_attn.q_proj", "lora_B"): (-1, "split"),
+    ("self_attn.k_proj", "lora_B"): (-1, "split"),
+    ("self_attn.v_proj", "lora_B"): (-1, "split"),
+    # o_proj: lora_A input-dim split
+    ("self_attn.o_proj", "lora_A"): (0, "split"),
+    # gate/up: lora_B output-dim split
+    ("mlp.gate_proj", "lora_B"): (-1, "split"),
+    ("mlp.up_proj", "lora_B"): (-1, "split"),
+    # down: lora_A input-dim split
+    ("mlp.down_proj", "lora_A"): (0, "split"),
+}
+
+
+def _tp_slice(
+    tensor: torch.Tensor, tp_size: int, tp_rank: int, rule: tuple
+) -> torch.Tensor:
+    dim, action = rule
+    if action != "split":
+        return tensor
+    size = tensor.shape[dim]
+    chunk_size = size // tp_size
+    start = tp_rank * chunk_size
+    return tensor.narrow(dim, start, chunk_size).contiguous()

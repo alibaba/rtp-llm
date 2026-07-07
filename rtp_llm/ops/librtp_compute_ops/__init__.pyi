@@ -181,10 +181,9 @@ class PyAttentionInputs:
     combo_position_ids: torch.Tensor
     context_parallel_info: PyContextParallelParams | None
     context_total_kv_length: int
-    cu_kv_seqlens_device: torch.Tensor
-    cu_seqlens_device: torch.Tensor
+    cu_kv_seqlens: torch.Tensor
     cu_seqlens: torch.Tensor
-    decode_cu_seqlens_device: torch.Tensor
+    decode_cu_seqlens_d: torch.Tensor
     dtype: TypeMeta
     input_lengths: torch.Tensor
     is_cuda_graph: bool
@@ -193,26 +192,27 @@ class PyAttentionInputs:
     is_target_verify: bool
     kv_cache_block_id_device: torch.Tensor
     kv_cache_kernel_block_id_device_by_group: list[torch.Tensor]
-    kv_cache_block_id: torch.Tensor
-    kv_cache_kernel_block_id_by_group: list[torch.Tensor]
+    kv_cache_block_id_host: torch.Tensor
+    kv_cache_kernel_block_id_host_by_group: list[torch.Tensor]
     kv_cache_kernel_block_id_device: torch.Tensor
-    kv_cache_kernel_block_id: torch.Tensor
+    kv_cache_kernel_block_id_host: torch.Tensor
+    kv_cache_block_id_host_by_group: list[torch.Tensor]
     kv_cache_layer_to_group: torch.Tensor
     padding_offset: torch.Tensor
     prefill_cuda_graph_copy_params: PyPrefillCudaGaphCopyParams | None
     prefix_lengths: torch.Tensor
     sequence_lengths: torch.Tensor
-    sequence_lengths_plus_1_device: torch.Tensor
+    sequence_lengths_plus_1_d: torch.Tensor
     total_tokens: int
     headwise_config: dict | None
     def __init__(self) -> None: ...
     def __repr__(self) -> str: ...
     def __copy__(self) -> PyAttentionInputs: ...
-    decode_cu_seqlens: torch.Tensor
+    decode_cu_seqlens_host: torch.Tensor
     @property
-    def input_lengths_device(self) -> torch.Tensor: ...
+    def input_lengths_d(self) -> torch.Tensor: ...
     @property
-    def prefix_lengths_device(self) -> torch.Tensor: ...
+    def prefix_lengths_d(self) -> torch.Tensor: ...
 
 class PyCacheStoreInputs:
     def __init__(self) -> None: ...

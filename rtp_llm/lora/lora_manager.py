@@ -26,8 +26,12 @@ class LoraManager:
         self.device: str = f"cuda:{local_rank}"
         assert isinstance(self.engine_, LanguageCppEngine)
         self.lora_cpp_wrapper_ = self.engine_.rtp_llm_op_.ft_op
-        assert isinstance(self.engine_.model.model_weights_loader, ModelLoader)
-        self.weights_loader_ = self.engine_.model.model_weights_loader
+        loader = self.engine_.model.model_weights_loader
+        assert hasattr(loader, "load_lora_weights"), (
+            f"model_weights_loader ({type(loader).__name__}) must implement "
+            f"load_lora_weights(adapter_name, lora_path, device)"
+        )
+        self.weights_loader_ = loader
         with Timer() as timer:
             model_lora_infos = self.engine_.model.model_config.lora_infos
             if model_lora_infos is not None and len(model_lora_infos) > 1:

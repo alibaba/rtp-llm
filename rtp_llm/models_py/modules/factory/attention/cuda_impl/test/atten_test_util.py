@@ -149,8 +149,8 @@ def gen_attention_inputs(
         device=torch.device("cpu"),
     ).pin_memory()
     cu_seqlens[1:] = attention_inputs.input_lengths.cumsum(0)
-    attention_inputs.cu_seqlens_device = cu_seqlens
-    attention_inputs.cu_kv_seqlens_device = cu_seqlens
+    attention_inputs.cu_seqlens = cu_seqlens
+    attention_inputs.cu_kv_seqlens = cu_seqlens
     max_seq_len = attention_inputs.input_lengths.max().item()
     max_block_size = max_seq_len // page_size + 1
     # Ensure we have enough pages in cache
@@ -167,7 +167,7 @@ def gen_attention_inputs(
         .pin_memory()
     )
     attention_inputs.kv_cache_block_id_device = block_tables
-    attention_inputs.kv_cache_block_id = block_tables
+    attention_inputs.kv_cache_block_id_host = block_tables
     attention_inputs.kv_cache_kernel_block_id_device = block_tables
-    attention_inputs.kv_cache_kernel_block_id = block_tables
+    attention_inputs.kv_cache_kernel_block_id_host = block_tables
     return attention_inputs

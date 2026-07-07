@@ -47,6 +47,8 @@ class DeepepNormalRouterBase(FusedMoeDataRouter):
         checker.check(get_sm()[0] >= 9)
         checker.check(resolver.is_ep_enabled(config))
         checker.check(not resolver.use_low_latency(config))
+        checker.check(config.moe_config.use_deepep_moe)
+        checker.check(not resolver.use_all_gather(config))
         checker.check(DeepEPWrapper.supported())
 
     def __init__(
@@ -68,6 +70,13 @@ class DeepepNormalRouterBase(FusedMoeDataRouter):
         self.num_dispatchers = config.world_size // config.tp_size
         self.rank_expert_offset = self.ep_rank * self.expert_num_per_rank
         self.top_k = config.moe_topk_group
+        source_block_size = getattr(
+            config.quant_config, "weight_block_size", [128, 128]
+        )
+        self.scale_ue8m0 = is_deep_gemm_e8m0_used() and list(source_block_size) == [
+            128,
+            128,
+        ]
         deepep_config = DeepepWrapperConfig.from_config_adapter(self.config)
         self.deepep_buffer_wrapper = DeepEPWrapper.get_instance(deepep_config)
         assert (
@@ -257,13 +266,13 @@ class DeepepNormalRouterBase(FusedMoeDataRouter):
     def _do_quant_fp8_per_block(
         self, a1: torch.Tensor
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
-        if is_deep_gemm_e8m0_used():
+        if self.scale_ue8m0:
             return sgl_per_token_group_quant_fp8(
                 a1,
                 128,
                 column_major_scales=True,
                 scale_tma_aligned=True,
-                scale_ue8m0=True,
+                scale_ue8m0=self.scale_ue8m0,
             )
         else:
             return trt_fp8_quantize_128(a1, False)
@@ -305,7 +314,14 @@ class DeepepNormalRouterFp8PerTensor(DeepepNormalRouterBase):
         resolver = MoeConfigResolver()
         quant_method = resolver.get_quant_method(config)
         checker.check(
-            quant_method in ["FP8_PER_TENSOR_COMPRESSED", "FP8_DYNAMIC_PER_TENSOR"]
+            quant_method
+            in [
+                "FP8_PER_TENSOR_COMPRESSED",
+                "FP8_DYNAMIC_PER_TENSOR",
+                "FP8_PER_CHANNEL_COMPRESSED",
+                "FP8_PER_CHANNEL_QUARK",
+                "FP8_PER_CHANNEL_QUARK_COMPRESSED",
+            ]
         )
 
 

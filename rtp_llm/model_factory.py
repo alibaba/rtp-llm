@@ -338,6 +338,33 @@ class ModelFactory:
         # Set model_name to engine_config.runtime_config.model_name (for backward compatibility)
         engine_config.runtime_config.model_name = model_config.model_name
 
+        # Some new-loader MoE checkpoints must not stay on the implicit
+        # use_all_gather path. Their fused MoE strategy selects DeepEP normal
+        # in EP topology, so keep backend initialization in sync with strategy
+        # selection.
+        explicit_disable_deepep = os.environ.get("USE_DEEPEP_MOE", "").lower() in (
+            "0",
+            "false",
+            "off",
+            "no",
+        )
+        if (
+            model_config.model_type in ("glm_5", "minimax_m3_vl")
+            and model_config.expert_num > 0
+            and engine_config.parallelism_config.world_size > 1
+            and engine_config.parallelism_config.ep_size > 1
+            and not explicit_disable_deepep
+        ):
+            if engine_config.moe_config.use_all_gather:
+                logging.info(
+                    "%s detected with expert_num=%s in EP topology; "
+                    "disabling use_all_gather and enabling DeepEP MoE backend",
+                    model_config.model_type,
+                    model_config.expert_num,
+                )
+                engine_config.moe_config.use_all_gather = False
+            engine_config.moe_config.use_deepep_moe = True
+
     @staticmethod
     def create_propose_model_config(
         engine_config: EngineConfig,

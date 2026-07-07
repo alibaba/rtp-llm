@@ -26,10 +26,26 @@ from rtp_llm.models_py.triton_kernels.common.activation import (
     silu_and_mul_masked_post_quant_packed_fwd,
     silu_mul_masked_bf16_no_post_quant_fwd,
     silu_mul_masked_fp8_post_quant_fwd,
+    swigluoai_mul_fp8_quant_deep_gemm_masked,
 )
 from rtp_llm.models_py.utils.arch import get_num_device_sms, get_sm
 from rtp_llm.models_py.utils.memory import dispose_tensor
 from rtp_llm.utils.model_weight import W
+
+
+def _is_swigluoai(activation: str) -> bool:
+    return str(activation).lower() in ("swigluoai", "swiglu_oai")
+
+
+def _swigluoai_up_gate(
+    upgate: torch.Tensor,
+    alpha: float = 1.702,
+    limit: float = 7.0,
+) -> torch.Tensor:
+    hidden = upgate.shape[-1] // 2
+    up = upgate[..., :hidden].float().clamp(min=-limit, max=limit)
+    gate = upgate[..., hidden:].float().clamp(max=limit)
+    return (gate * torch.sigmoid(alpha * gate) * (up + 1.0)).to(upgate.dtype)
 
 
 class DeepGemmMaskedExecutor(FusedMoeExpertExecutor):
@@ -153,6 +169,7 @@ class DeepGemmMaskedExecutor(FusedMoeExpertExecutor):
         expected_m: int,
         expert_x_scale: Optional[torch.Tensor] = None,
         down_output: Optional[torch.Tensor] = None,
+        activation: str = "SiGLU",
     ) -> torch.Tensor:
         """Forward masked grouped FFN.
         Args:
@@ -220,6 +237,7 @@ class DeepGemmMaskedExecutor(FusedMoeExpertExecutor):
                     sm_major == 10
                     and is_deep_gemm_e8m0_used()
                     and self._N % (self.DEEPGEMM_BLOCK_SHAPE[0] * 2 * 4) == 0
+                    and not _is_swigluoai(activation)
                 ):
                     # Create packed scale tensor with proper layout for deep_gemm
                     # Shape: (E, T, G // 4) where G = hidden_dim // 2 // group_size
@@ -249,16 +267,26 @@ class DeepGemmMaskedExecutor(FusedMoeExpertExecutor):
                         device=device,
                         dtype=torch.float32,
                     )
-                    # SiLU Activation
-                    silu_mul_masked_fp8_post_quant_fwd(
-                        input=upgate_output,
-                        output=down_input,
-                        output_scale=down_input_scale,
-                        quant_group_size=self.DEEPGEMM_BLOCK_SHAPE[0],
-                        masked_m=masked_m[start_idx:end_idx],
-                        expected_m=expected_m,
-                        scale_ue8m0=is_deep_gemm_e8m0_used(),
-                    )
+                    if _is_swigluoai(activation):
+                        down_input, down_input_scale = (
+                            swigluoai_mul_fp8_quant_deep_gemm_masked(
+                                upgate_output,
+                                masked_m[start_idx:end_idx],
+                                group_size=self.DEEPGEMM_BLOCK_SHAPE[0],
+                                use_ue8m0=is_deep_gemm_e8m0_used(),
+                            )
+                        )
+                    else:
+                        # SiLU Activation
+                        silu_mul_masked_fp8_post_quant_fwd(
+                            input=upgate_output,
+                            output=down_input,
+                            output_scale=down_input_scale,
+                            quant_group_size=self.DEEPGEMM_BLOCK_SHAPE[0],
+                            masked_m=masked_m[start_idx:end_idx],
+                            expected_m=expected_m,
+                            scale_ue8m0=is_deep_gemm_e8m0_used(),
+                        )
 
                 # Free upgate_output
                 dispose_tensor(upgate_output)
@@ -318,14 +346,17 @@ class DeepGemmMaskedExecutor(FusedMoeExpertExecutor):
                     dtype=torch.bfloat16,
                 )
 
-                # SiLU Activation
-                silu_mul_masked_bf16_no_post_quant_fwd(
-                    input=upgate_output,
-                    output=down_input,
-                    masked_m=masked_m[start_idx:end_idx],
-                    expected_m=expected_m,
-                    group_size=self.DEEPGEMM_BLOCK_SHAPE[0],
-                )
+                if _is_swigluoai(activation):
+                    down_input.copy_(_swigluoai_up_gate(upgate_output))
+                else:
+                    # SiLU Activation
+                    silu_mul_masked_bf16_no_post_quant_fwd(
+                        input=upgate_output,
+                        output=down_input,
+                        masked_m=masked_m[start_idx:end_idx],
+                        expected_m=expected_m,
+                        group_size=self.DEEPGEMM_BLOCK_SHAPE[0],
+                    )
 
                 # Free upgate_output
                 dispose_tensor(upgate_output)
@@ -356,6 +387,7 @@ class DeepGemmMaskedExecutor(FusedMoeExpertExecutor):
         masked_m: torch.Tensor,
         expected_m: int,
         expert_x_scale: Optional[torch.Tensor] = None,
+        activation: str = "SiGLU",
     ) -> CombineForwardPayload:
         """Execute normal masked grouped FFN.
         Args:
@@ -375,6 +407,7 @@ class DeepGemmMaskedExecutor(FusedMoeExpertExecutor):
             expected_m,
             expert_x_scale=expert_x_scale,
             down_output=None,
+            activation=activation,
         )
 
         # Return combine forward payload
@@ -426,7 +459,7 @@ class DeepGemmMaskedExecutor(FusedMoeExpertExecutor):
 
         # Normal execution
         combine_payload = self._normal_execute(
-            expert_x, masked_m, expected_m, expert_x_scale
+            expert_x, masked_m, expected_m, expert_x_scale, activation=activation
         )
 
         return combine_payload
@@ -466,7 +499,9 @@ class DeepGemmMaskedExecutor(FusedMoeExpertExecutor):
         )
 
         # Normal execution
-        combine_payload = self._normal_execute(expert_x, masked_m, expected_m)
+        combine_payload = self._normal_execute(
+            expert_x, masked_m, expected_m, activation=activation
+        )
 
         return combine_payload
 

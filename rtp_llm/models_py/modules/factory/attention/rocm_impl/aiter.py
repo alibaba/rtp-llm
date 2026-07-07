@@ -156,7 +156,7 @@ class FMHAParams(ParamsBase):
     ):
         self.sequence_lengths = sequence_lengths
         self.input_lengths = input_lengths
-        self.kv_cache_block_id = kv_cache_block_id_host
+        self.kv_cache_block_id_host = kv_cache_block_id_host
         if kv_cache_block_id_device is not None:
             self.kv_cache_block_id_device = kv_cache_block_id_device
         if self.seq_lens is not None and self.sequence_lengths is not None:
@@ -678,10 +678,10 @@ def _infer_cuda_graph_device(
     fallback_tensor: Optional[torch.Tensor],
 ) -> torch.device:
     candidates = [
-        getattr(attn_inputs, "input_lengths_device", None),
-        getattr(attn_inputs, "prefix_lengths_device", None),
-        getattr(attn_inputs, "decode_cu_seqlens_device", None),
-        getattr(attn_inputs, "sequence_lengths_plus_1_device", None),
+        getattr(attn_inputs, "input_lengths_d", None),
+        getattr(attn_inputs, "prefix_lengths_d", None),
+        getattr(attn_inputs, "decode_cu_seqlens_d", None),
+        getattr(attn_inputs, "sequence_lengths_plus_1_d", None),
         getattr(attn_inputs, "kv_cache_kernel_block_id_device", None),
         getattr(attn_inputs, "kv_cache_block_id_device", None),
         getattr(fmha_params, "cu_seqlens_q", None),
@@ -1538,8 +1538,8 @@ class AiterPrefillImplPaged(FMHAImplBase):
         fmha_params = self.fmha_params
         expected_batch = fmha_params.cu_seqlens_q.numel() - 1
 
-        live_cu_seqlens_q = getattr(attn_inputs, "cu_seqlens_device", None)
-        live_cu_seqlens_k = getattr(attn_inputs, "cu_kv_seqlens_device", None)
+        live_cu_seqlens_q = getattr(attn_inputs, "cu_seqlens", None)
+        live_cu_seqlens_k = getattr(attn_inputs, "cu_kv_seqlens", None)
         use_live_cu_seqlens = (
             live_cu_seqlens_q is not None
             and live_cu_seqlens_k is not None
@@ -1679,7 +1679,7 @@ class AiterDecodeImplBase(FMHAImplBase):
         self.fmha_params.fillParams(
             attn_inputs.sequence_lengths,
             attn_inputs.input_lengths,
-            attn_inputs.kv_cache_kernel_block_id,
+            attn_inputs.kv_cache_kernel_block_id_host,
             attn_inputs.kv_cache_kernel_block_id_device,
         )
         if attn_inputs.kv_cache_kernel_block_id_device is not None:

@@ -1,14 +1,11 @@
 #include "rtp_llm/models_py/bindings/core/OpData.h"
 #include "rtp_llm/models_py/bindings/core/CommonDefines.h"
 
-#include <limits>
-
 #if USING_CUDA
 #include <ATen/cuda/CUDAContext.h>
 #include "rtp_llm/models_py/bindings/cuda/cuda_host_utils.h"
 #include "rtp_llm/models_py/bindings/common/kernels/sampling_penalty_kernels.h"
 #include "rtp_llm/models_py/bindings/common/kernels/banRepeatNgram.h"
-#include "rtp_llm/models_py/bindings/cuda/kernels/speculative_sampling/sampling.h"
 #include "rtp_llm/cpp/utils/DebugUtils.h"
 #include "rtp_llm/models_py/bindings/cuda/kernels/sampling/sampling.h"
 #include "3rdparty/flashinfer/flashinfer.h"
@@ -20,93 +17,6 @@
 using namespace std;
 
 namespace rtp_llm {
-
-namespace {
-
-struct RejectionSamplingLaunchConfig {
-    int batch_size;
-    int num_speculative_tokens;
-    int target_vocab_size;
-    int target_token_stride;
-};
-
-void checkRejectionSamplingTensor(const torch::Tensor& tensor, const char* name, c10::ScalarType dtype, int64_t dim) {
-    RTP_LLM_CHECK_WITH_INFO(tensor.defined(), "%s must be defined", name);
-    RTP_LLM_CHECK_WITH_INFO(tensor.is_cuda(), "%s must be on CUDA/HIP device", name);
-    RTP_LLM_CHECK_WITH_INFO(tensor.scalar_type() == dtype, "%s dtype mismatch", name);
-    RTP_LLM_CHECK_WITH_INFO(tensor.dim() == dim,
-                            "%s must be %ld-D, got %ld-D",
-                            name,
-                            static_cast<long>(dim),
-                            static_cast<long>(tensor.dim()));
-    RTP_LLM_CHECK_WITH_INFO(tensor.is_contiguous(), "%s must be contiguous", name);
-}
-
-void checkSameDevice(const torch::Tensor& tensor, const char* name, const c10::Device& device) {
-    RTP_LLM_CHECK_WITH_INFO(tensor.device() == device, "%s must be on the same device as draft_probs_d", name);
-}
-
-RejectionSamplingLaunchConfig validateRejectionSamplingParams(const RejectionSamplingParams& params) {
-    checkRejectionSamplingTensor(params.draft_probs_d, "draft_probs_d", torch::kFloat32, 3);
-    const auto device = params.draft_probs_d.device();
-
-    checkRejectionSamplingTensor(params.draft_token_ids_d, "draft_token_ids_d", torch::kInt32, 2);
-    checkRejectionSamplingTensor(params.uniform_samples_d, "uniform_samples_d", torch::kFloat32, 2);
-    checkRejectionSamplingTensor(params.target_probs_d, "target_probs_d", torch::kFloat32, 3);
-    checkRejectionSamplingTensor(params.target_token_ids_d, "target_token_ids_d", torch::kInt32, 2);
-    checkRejectionSamplingTensor(params.output_token_ids_d, "output_token_ids_d", torch::kInt32, 2);
-    checkRejectionSamplingTensor(params.output_accepted_token_num_d, "output_accepted_token_num_d", torch::kInt32, 1);
-    checkRejectionSamplingTensor(params.do_sample_d, "do_sample_d", torch::kBool, 1);
-
-    checkSameDevice(params.draft_token_ids_d, "draft_token_ids_d", device);
-    checkSameDevice(params.uniform_samples_d, "uniform_samples_d", device);
-    checkSameDevice(params.target_probs_d, "target_probs_d", device);
-    checkSameDevice(params.target_token_ids_d, "target_token_ids_d", device);
-    checkSameDevice(params.output_token_ids_d, "output_token_ids_d", device);
-    checkSameDevice(params.output_accepted_token_num_d, "output_accepted_token_num_d", device);
-    checkSameDevice(params.do_sample_d, "do_sample_d", device);
-
-    const int64_t batch_size             = params.draft_probs_d.size(0);
-    const int64_t num_speculative_tokens = params.draft_probs_d.size(1);
-    const int64_t target_vocab_size      = params.draft_probs_d.size(2);
-    const int64_t target_token_stride    = params.target_token_ids_d.size(1);
-
-    RTP_LLM_CHECK_WITH_INFO(target_vocab_size > 0, "target_vocab_size must be positive");
-    RTP_LLM_CHECK_WITH_INFO(target_token_stride > 0, "target_token_ids_d stride dimension must be positive");
-    RTP_LLM_CHECK_WITH_INFO(batch_size <= std::numeric_limits<int>::max(), "batch_size too large");
-    RTP_LLM_CHECK_WITH_INFO(num_speculative_tokens <= std::numeric_limits<int>::max(),
-                            "num_speculative_tokens too large");
-    RTP_LLM_CHECK_WITH_INFO(target_vocab_size <= std::numeric_limits<int>::max(), "target_vocab_size too large");
-    RTP_LLM_CHECK_WITH_INFO(target_token_stride <= std::numeric_limits<int>::max(), "target_token_stride too large");
-
-    const int64_t target_token_rows = batch_size * (num_speculative_tokens + 1);
-
-    RTP_LLM_CHECK_WITH_INFO(params.draft_token_ids_d.size(0) == batch_size, "draft_token_ids_d shape[0] mismatch");
-    RTP_LLM_CHECK_WITH_INFO(params.draft_token_ids_d.size(1) == num_speculative_tokens,
-                            "draft_token_ids_d shape[1] mismatch");
-    RTP_LLM_CHECK_WITH_INFO(params.uniform_samples_d.size(0) == batch_size, "uniform_samples_d shape[0] mismatch");
-    RTP_LLM_CHECK_WITH_INFO(params.uniform_samples_d.size(1) == num_speculative_tokens + 1,
-                            "uniform_samples_d shape[1] mismatch");
-    RTP_LLM_CHECK_WITH_INFO(params.target_probs_d.size(0) == batch_size, "target_probs_d shape[0] mismatch");
-    RTP_LLM_CHECK_WITH_INFO(params.target_probs_d.size(1) == num_speculative_tokens + 1,
-                            "target_probs_d shape[1] mismatch");
-    RTP_LLM_CHECK_WITH_INFO(params.target_probs_d.size(2) == target_vocab_size, "target_probs_d shape[2] mismatch");
-    RTP_LLM_CHECK_WITH_INFO(params.target_token_ids_d.size(0) == target_token_rows,
-                            "target_token_ids_d shape[0] mismatch");
-    RTP_LLM_CHECK_WITH_INFO(params.output_token_ids_d.size(0) == batch_size, "output_token_ids_d shape[0] mismatch");
-    RTP_LLM_CHECK_WITH_INFO(params.output_token_ids_d.size(1) == num_speculative_tokens + 1,
-                            "output_token_ids_d shape[1] mismatch");
-    RTP_LLM_CHECK_WITH_INFO(params.output_accepted_token_num_d.size(0) == batch_size,
-                            "output_accepted_token_num_d shape[0] mismatch");
-    RTP_LLM_CHECK_WITH_INFO(params.do_sample_d.size(0) == batch_size, "do_sample_d shape[0] mismatch");
-
-    return {static_cast<int>(batch_size),
-            static_cast<int>(num_speculative_tokens),
-            static_cast<int>(target_vocab_size),
-            static_cast<int>(target_token_stride)};
-}
-
-}  // anonymous namespace
 
 #if USING_CUDA
 
@@ -377,25 +287,6 @@ void chainSpeculativeSampling(const SpeculativeSamplingParams& params) {
                                int64_t(stream));
 }
 
-void rejectionSampling(const RejectionSamplingParams& params) {
-    auto config = validateRejectionSamplingParams(params);
-    auto stream = at::cuda::getCurrentCUDAStream().stream();
-
-    check_cuda_value(invokeRejectionSampling(params.draft_probs_d.data_ptr<float>(),
-                                             params.draft_token_ids_d.data_ptr<int32_t>(),
-                                             params.uniform_samples_d.data_ptr<float>(),
-                                             params.target_probs_d.data_ptr<float>(),
-                                             params.target_token_ids_d.data_ptr<int32_t>(),
-                                             config.target_token_stride,
-                                             params.output_token_ids_d.data_ptr<int32_t>(),
-                                             params.output_accepted_token_num_d.data_ptr<int32_t>(),
-                                             params.do_sample_d.data_ptr<bool>(),
-                                             config.batch_size,
-                                             config.num_speculative_tokens,
-                                             config.target_vocab_size,
-                                             stream));
-}
-
 #else  // !USING_CUDA — ROCm platform
 
 }  // namespace rtp_llm — temporarily close for includes
@@ -632,21 +523,6 @@ void chain_speculative_sampling(at::Tensor draft_probs,
                                 bool       deterministic,
                                 int64_t    hip_stream);
 
-template<typename DType, typename IdType>
-hipError_t invokeRejectionSampling(DType*      draft_probs,
-                                   IdType*     draft_token_ids,
-                                   DType*      uniform_samples,
-                                   DType*      target_probs,
-                                   IdType*     target_token_ids,
-                                   int         target_token_stride,
-                                   IdType*     output_token_ids,
-                                   IdType*     output_accepted_token_num,
-                                   bool*       do_sample,
-                                   int         batch_size,
-                                   int         num_speculative_tokens,
-                                   int         target_vocab_size,
-                                   hipStream_t stream);
-
 namespace rtp_llm {
 
 void chainSpeculativeSampling(const SpeculativeSamplingParams& params) {
@@ -660,26 +536,6 @@ void chainSpeculativeSampling(const SpeculativeSamplingParams& params) {
                                  params.output_emitted_token_num_d,
                                  true,
                                  int64_t(stream));
-}
-
-void rejectionSampling(const RejectionSamplingParams& params) {
-    auto config = validateRejectionSamplingParams(params);
-    auto stream = at::hip::getCurrentHIPStream().stream();
-
-    hipError_t err = ::invokeRejectionSampling(params.draft_probs_d.data_ptr<float>(),
-                                               params.draft_token_ids_d.data_ptr<int32_t>(),
-                                               params.uniform_samples_d.data_ptr<float>(),
-                                               params.target_probs_d.data_ptr<float>(),
-                                               params.target_token_ids_d.data_ptr<int32_t>(),
-                                               config.target_token_stride,
-                                               params.output_token_ids_d.data_ptr<int32_t>(),
-                                               params.output_accepted_token_num_d.data_ptr<int32_t>(),
-                                               params.do_sample_d.data_ptr<bool>(),
-                                               config.batch_size,
-                                               config.num_speculative_tokens,
-                                               config.target_vocab_size,
-                                               stream);
-    RTP_LLM_CHECK_WITH_INFO(err == hipSuccess, "invokeRejectionSampling failed: %s", hipGetErrorString(err));
 }
 
 #endif  // USING_CUDA

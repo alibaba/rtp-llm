@@ -340,17 +340,17 @@ class TestMhaRotaryEmbeddingOp(unittest.TestCase):
         attn_inputs.dtype = get_typemeta(qkv)
 
         # Create cu_seqlens: cumulative sequence lengths [0, num_tokens]
-        attn_inputs.cu_seqlens_device = torch.tensor(
+        attn_inputs.cu_seqlens = torch.tensor(
             [0, num_tokens], dtype=torch.int32, device=self.device
         )
-        attn_inputs.cu_kv_seqlens_device = attn_inputs.cu_seqlens_device.clone()
+        attn_inputs.cu_kv_seqlens = attn_inputs.cu_seqlens.clone()
 
         # Set KV cache block IDs (shape: [batch_size, max_blocks_per_seq])
         # For batch_size=1, reshape kv_page_indices from [num_pages] to [1, num_pages]
         kv_cache_block_id = kv_page_indices.unsqueeze(0).cpu()  # [1, num_pages]
-        attn_inputs.kv_cache_block_id = kv_cache_block_id
+        attn_inputs.kv_cache_block_id_host = kv_cache_block_id
         attn_inputs.kv_cache_block_id_device = kv_cache_block_id.to(self.device)
-        attn_inputs.kv_cache_kernel_block_id = kv_cache_block_id
+        attn_inputs.kv_cache_kernel_block_id_host = kv_cache_block_id
         attn_inputs.kv_cache_kernel_block_id_device = kv_cache_block_id.to(self.device)
 
         # Prepare params

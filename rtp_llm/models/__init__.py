@@ -28,12 +28,12 @@ if platform.processor() != "aarch64":
     from .qwen_v2_audio import QWenV2Audio
     from .qwen3_vl import QWen3_VL
     from .qwen3_vl_moe import QWen3_VL_MOE
+    from .minimax_m3_vl import MiniMax_M3_VL
 
 from rtp_llm.utils.import_util import has_internal_source
 
 from .bert import Bert
 from .glm4_moe import Glm4Moe
-from .glm4_moe_lite import Glm4MoeLite
 from .jina_bert.jina_bert import JinaBert
 from .kimi_linear.kimi_linear import KimiLinear
 from .megatron_bert import MegatronBert

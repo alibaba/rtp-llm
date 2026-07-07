@@ -2,9 +2,7 @@ from math import prod
 from typing import Any, Callable, Dict, Optional
 
 import torch
-from rtp_kernel.fp8_group_gemm import (
-    get_cutlass_batched_moe_mm_data,
-)
+from rtp_kernel.fp8_group_gemm import get_cutlass_batched_moe_mm_data
 
 from rtp_llm.models_py.kernels.cuda.fp8_kernel import (
     cutlass_moe_mm_fp8_scaled,
@@ -28,8 +26,8 @@ from rtp_llm.models_py.triton_kernels.common.activation import (
 )
 from rtp_llm.models_py.triton_kernels.moe.ep_kernels import (
     cutlass_moe_pre_reorder,
-    post_reorder_triton_kernel,
     get_cutlass_moe_mm_without_permute_info,
+    post_reorder_triton_kernel,
 )
 from rtp_llm.utils.model_weight import W
 
@@ -51,7 +49,14 @@ class CutlassExpertsFp8(FusedMoeExpertExecutor):
         resolver = MoeConfigResolver()
         quant_method = resolver.get_quant_method(config)
         checker.check(
-            quant_method in ["FP8_PER_TENSOR_COMPRESSED", "FP8_DYNAMIC_PER_TENSOR"]
+            quant_method
+            in [
+                "FP8_PER_TENSOR_COMPRESSED",
+                "FP8_DYNAMIC_PER_TENSOR",
+                "FP8_PER_CHANNEL_COMPRESSED",
+                "FP8_PER_CHANNEL_QUARK",
+                "FP8_PER_CHANNEL_QUARK_COMPRESSED",
+            ]
         )
 
     def __init__(
@@ -65,7 +70,10 @@ class CutlassExpertsFp8(FusedMoeExpertExecutor):
         # Update quant_config with FP8-specific settings
         self.quant_config.quant_dtype = torch.float8_e4m3fn
         self.quant_config.per_act_token_quant = True
-        self.quant_config.per_out_ch_quant = False
+        w1_scale = weights[W.moe_s1]
+        self.quant_config.per_out_ch_quant = (
+            w1_scale.dim() > 1 and w1_scale.size(-1) > 1
+        )
         self.quant_config.block_shape = None
 
         self.num_experts = config.expert_num
@@ -306,7 +314,14 @@ class CutlassBatchedExpertsFp8(FusedMoeExpertExecutor):
         resolver = MoeConfigResolver()
         quant_method = resolver.get_quant_method(config)
         checker.check(
-            quant_method in ["FP8_PER_TENSOR_COMPRESSED", "FP8_DYNAMIC_PER_TENSOR"]
+            quant_method
+            in [
+                "FP8_PER_TENSOR_COMPRESSED",
+                "FP8_DYNAMIC_PER_TENSOR",
+                "FP8_PER_CHANNEL_COMPRESSED",
+                "FP8_PER_CHANNEL_QUARK",
+                "FP8_PER_CHANNEL_QUARK_COMPRESSED",
+            ]
         )
 
     def __init__(
@@ -320,7 +335,10 @@ class CutlassBatchedExpertsFp8(FusedMoeExpertExecutor):
         # Update quant_config with FP8-specific settings
         self.quant_config.quant_dtype = torch.float8_e4m3fn
         self.quant_config.per_act_token_quant = True
-        self.quant_config.per_out_ch_quant = False
+        w1_scale = weights[W.moe_s1]
+        self.quant_config.per_out_ch_quant = (
+            w1_scale.dim() > 1 and w1_scale.size(-1) > 1
+        )
         self.quant_config.block_shape = None
 
         self.num_experts = config.expert_num
