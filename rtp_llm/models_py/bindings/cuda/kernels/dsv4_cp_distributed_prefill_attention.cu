@@ -388,11 +388,6 @@ __device__ __forceinline__ void dsv4MegaGridBarrier(uint8_t* scratch_base, int b
         return;
     }
     if (barrier_id < 0 || barrier_id >= kMegaGridBarrierLogicalSlots) {
-        if (threadIdx.x == 0) {
-            printf("DSV4 mega grid barrier id out of range: block=%d barrier=%d\n",
-                   static_cast<int>(blockIdx.x),
-                   barrier_id);
-        }
         asm("trap;");
     }
     auto* counters = reinterpret_cast<unsigned int*>(scratch_base);
@@ -413,11 +408,6 @@ __device__ __forceinline__ void dsv4MegaGridBarrier(uint8_t* scratch_base, int b
     const unsigned long long start_epoch = clock64();
     while (epoch_ref.load(cuda::std::memory_order_acquire) != epoch) {
         if (clock64() - start_epoch > static_cast<unsigned long long>(kSymmMemBarrierTimeoutCycles)) {
-            if (threadIdx.x == 0) {
-                printf("DSV4 mega grid barrier epoch timeout: block=%d barrier=%d\n",
-                       static_cast<int>(blockIdx.x),
-                       barrier_id);
-            }
             asm("trap;");
         }
     }
@@ -437,11 +427,6 @@ __device__ __forceinline__ void dsv4MegaGridBarrier(uint8_t* scratch_base, int b
     const unsigned long long start_release = clock64();
     while (epoch_ref.load(cuda::std::memory_order_acquire) != epoch + 1) {
         if (clock64() - start_release > static_cast<unsigned long long>(kSymmMemBarrierTimeoutCycles)) {
-            if (threadIdx.x == 0) {
-                printf("DSV4 mega grid barrier release timeout: block=%d barrier=%d\n",
-                       static_cast<int>(blockIdx.x),
-                       barrier_id);
-            }
             asm("trap;");
         }
     }
@@ -459,12 +444,6 @@ __device__ __forceinline__ void dsv4MegaSplitKGroupBarrier(uint8_t* scratch_base
         return;
     }
     if (barrier_id < 0 || barrier_id >= kMegaSplitKGroupBarrierSlots) {
-        if (threadIdx.x == 0) {
-            printf("DSV4 split-K group barrier id out of range: block=%d group=%d barrier=%d\n",
-                   static_cast<int>(blockIdx.x),
-                   physical_group,
-                   barrier_id);
-        }
         asm("trap;");
     }
     const int role = static_cast<int>(blockIdx.x) - physical_group * kMegaSplitKGroupSize;
@@ -489,12 +468,6 @@ __device__ __forceinline__ void dsv4MegaSplitKGroupBarrier(uint8_t* scratch_base
     const unsigned long long start_epoch = clock64();
     while (epoch_ref.load(cuda::std::memory_order_acquire) != epoch) {
         if (clock64() - start_epoch > static_cast<unsigned long long>(kSymmMemBarrierTimeoutCycles)) {
-            if (threadIdx.x == 0) {
-                printf("DSV4 split-K group barrier epoch timeout: block=%d group=%d barrier=%d\n",
-                       static_cast<int>(blockIdx.x),
-                       physical_group,
-                       barrier_id);
-            }
             asm("trap;");
         }
     }
@@ -514,12 +487,6 @@ __device__ __forceinline__ void dsv4MegaSplitKGroupBarrier(uint8_t* scratch_base
     const unsigned long long start_release = clock64();
     while (epoch_ref.load(cuda::std::memory_order_acquire) != epoch + 1) {
         if (clock64() - start_release > static_cast<unsigned long long>(kSymmMemBarrierTimeoutCycles)) {
-            if (threadIdx.x == 0) {
-                printf("DSV4 split-K group barrier release timeout: block=%d group=%d barrier=%d\n",
-                       static_cast<int>(blockIdx.x),
-                       physical_group,
-                       barrier_id);
-            }
             asm("trap;");
         }
     }
