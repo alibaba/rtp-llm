@@ -1,0 +1,44 @@
+{
+    "model_type": "qwen_3_moe",
+    "model_path": "/mnt/nas1/hf/Qwen3-30B-A3B-Instruct-2507-FP8",
+    "query_result": [
+        {
+            "query": {
+                "prompt": "$prompt:s1",
+                "generate_config": {
+                    "max_new_tokens": 32,
+                    "temperature": 0.0,
+                    "top_p": 0.1,
+                    "top_k": 1
+                }
+            },
+            "result": {
+                "response": " explain in simple terms\n\nSure! Let's break down the **CAP Theorem** in simple terms.\n\n---\n\n### 🌐 What is CAP Theorem?\n\n"
+            }
+        },
+        {
+            "query": {
+                "prompt_batch": [
+                    "$prompt:s1",
+                    "$prompt:s3"
+                ],
+                "generate_config": {
+                    "max_new_tokens": 32,
+                    "temperature": 0.0,
+                    "top_p": 0.1,
+                    "top_k": 1
+                }
+            },
+            "result": {
+                "response_batch": [
+                    {
+                        "response": " explain in simple terms\n\nSure! Let's break down the **CAP Theorem** in simple terms.\n\n---\n\n### 🌐 What is CAP Theorem?\n\n"
+                    },
+                    {
+                        "response": "\n\nThe error `NameError: name 'screen_manager' is not defined` means that you're trying to use a variable or object called `screen_manager`,"
+                    }
+                ]
+            }
+        }
+    ]
+}
