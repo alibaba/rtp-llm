@@ -474,9 +474,11 @@ void BlockTreeCache::performEvictionCopy(EvictionResult er) {
     if (copy_engine_ && er.node != nullptr && hp) {
         const auto& desc = er.transfer;
 
+        const auto* entry = desc.entries.empty() ? nullptr : &desc.entries.front();
+
         if (desc.source_tier == Tier::DEVICE && desc.target_tier == Tier::HOST) {
-            // D2H: use source_blocks from TransferDescriptor
-            if (!desc.source_blocks.empty() && !isNullBlockIdx(er.target_block)) {
+            // D2H: use device blocks from the first transfer entry.
+            if (entry && !entry->device_blocks.empty() && !isNullBlockIdx(er.target_block)) {
                 // Collect layer slots from component descriptors
                 auto                                 gid = static_cast<size_t>(er.component_group_id);
                 std::vector<MemoryBlockLayerTagSlot> layer_slots;
@@ -499,8 +501,7 @@ void BlockTreeCache::performEvictionCopy(EvictionResult er) {
                     device_buffer_resolver_ ?
                         device_buffer_resolver_ :
                         DeviceBufferResolver([](int, BlockIdxType) -> BlockInfo { return BlockInfo{}; });
-                copy_ok = copy_engine_->deviceToHost(
-                    desc.source_blocks[0], er.target_block, layer_slots, resolver, *hp);
+                copy_ok = copy_engine_->deviceToHost(entry->device_blocks, er.target_block, layer_slots, resolver, *hp);
                 if (!copy_ok) {
                     RTP_LLM_LOG_WARNING("BlockTreeCache::performEvictionCopy: D2H copy FAILED "
                                         "group[%d] node_key=%ld",
@@ -515,9 +516,8 @@ void BlockTreeCache::performEvictionCopy(EvictionResult er) {
                 }
             }
         } else if (desc.source_tier == Tier::HOST && desc.target_tier == Tier::DISK) {
-            if (dp && !desc.source_blocks.empty() && !desc.source_blocks[0].empty()
-                && !isNullBlockIdx(desc.source_blocks[0][0]) && !isNullBlockIdx(er.target_block)) {
-                copy_ok = copy_engine_->hostToDisk(desc.source_blocks[0][0], er.target_block, *hp, *dp);
+            if (dp && entry && !isNullBlockIdx(entry->host_block) && !isNullBlockIdx(er.target_block)) {
+                copy_ok = copy_engine_->hostToDisk(entry->host_block, er.target_block, *hp, *dp);
                 if (!copy_ok) {
                     RTP_LLM_LOG_WARNING("BlockTreeCache::performEvictionCopy: H2Disk copy FAILED "
                                         "group[%d] node_key=%ld",
@@ -528,14 +528,13 @@ void BlockTreeCache::performEvictionCopy(EvictionResult er) {
                                       "group[%d] node_key=%ld host=%d disk=%d",
                                       er.component_group_id,
                                       er.node->cache_key,
-                                      desc.source_blocks[0][0],
+                                      entry->host_block,
                                       er.target_block);
                 }
             }
         } else if (desc.source_tier == Tier::DISK && desc.target_tier == Tier::HOST) {
-            if (dp && !desc.source_blocks.empty() && !desc.source_blocks[0].empty()
-                && !isNullBlockIdx(desc.source_blocks[0][0]) && !isNullBlockIdx(er.target_block)) {
-                copy_ok = copy_engine_->diskToHost(desc.source_blocks[0][0], er.target_block, *hp, *dp);
+            if (dp && entry && !isNullBlockIdx(entry->disk_block) && !isNullBlockIdx(er.target_block)) {
+                copy_ok = copy_engine_->diskToHost(entry->disk_block, er.target_block, *hp, *dp);
                 if (!copy_ok) {
                     RTP_LLM_LOG_WARNING("BlockTreeCache::performEvictionCopy: Disk2H copy FAILED "
                                         "group[%d] node_key=%ld",
@@ -546,7 +545,7 @@ void BlockTreeCache::performEvictionCopy(EvictionResult er) {
                                       "group[%d] node_key=%ld disk=%d host=%d",
                                       er.component_group_id,
                                       er.node->cache_key,
-                                      desc.source_blocks[0][0],
+                                      entry->disk_block,
                                       er.target_block);
                 }
             }

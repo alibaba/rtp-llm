@@ -12,15 +12,20 @@ namespace rtp_llm {
 // Transfer descriptor for data migration between tiers.
 // Produced by ComponentGroup::buildTransfer(), consumed by CopyEngine (L1-L3)
 // and StorageBackend (L4).
+struct TransferEntry {
+    TreeNode*                 node{nullptr};
+    std::vector<BlockIdxType> device_blocks;
+    BlockIdxType              host_block{NULL_BLOCK_IDX};
+    BlockIdxType              disk_block{NULL_BLOCK_IDX};
+    std::string               storage_key;
+};
+
 struct TransferDescriptor {
     Tier source_tier{Tier::NONE};
     Tier target_tier{Tier::NONE};
     int  component_group_id{-1};
 
-    std::vector<TreeNode*>                 nodes;
-    std::vector<std::vector<BlockIdxType>> source_blocks;
-    std::vector<BlockIdxType>              target_blocks;
-    std::vector<std::string>               storage_keys;
+    std::vector<TransferEntry> entries;
 };
 
 }  // namespace rtp_llm

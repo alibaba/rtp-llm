@@ -130,33 +130,37 @@ std::optional<EvictionResult> ComponentGroup::driveEviction(int num_blocks, Tier
 TransferDescriptor ComponentGroup::buildTransfer(TreeNode* node, TransferType type) {
     TransferDescriptor desc;
     desc.component_group_id = component_group_id;
-    desc.nodes              = {node};
     auto& slot              = node->group_slots[static_cast<size_t>(component_group_id)];
+
+    TransferEntry entry;
+    entry.node = node;
 
     switch (type) {
         case TransferType::DEVICE_TO_HOST:
             desc.source_tier   = Tier::DEVICE;
             desc.target_tier   = Tier::HOST;
-            desc.source_blocks = {slot.device_blocks};
+            entry.device_blocks = slot.device_blocks;
             break;
         case TransferType::HOST_TO_DEVICE:
-            desc.source_tier   = Tier::HOST;
-            desc.target_tier   = Tier::DEVICE;
-            desc.source_blocks = {{slot.host_block}};
+            desc.source_tier = Tier::HOST;
+            desc.target_tier = Tier::DEVICE;
+            entry.host_block = slot.host_block;
             break;
         case TransferType::HOST_TO_DISK:
-            desc.source_tier   = Tier::HOST;
-            desc.target_tier   = Tier::DISK;
-            desc.source_blocks = {{slot.host_block}};
+            desc.source_tier = Tier::HOST;
+            desc.target_tier = Tier::DISK;
+            entry.host_block = slot.host_block;
             break;
         case TransferType::DISK_TO_HOST:
-            desc.source_tier   = Tier::DISK;
-            desc.target_tier   = Tier::HOST;
-            desc.source_blocks = {{slot.disk_slot}};
+            desc.source_tier = Tier::DISK;
+            desc.target_tier = Tier::HOST;
+            entry.disk_block = slot.disk_slot;
             break;
         default:
-            break;
+            return desc;
     }
+
+    desc.entries = {entry};
     return desc;
 }
 

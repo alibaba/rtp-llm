@@ -1,6 +1,8 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/copy_engine/CopyEngine.h"
 
+#include <condition_variable>
 #include <cstring>
+#include <utility>
 
 #include <torch/torch.h>
 
@@ -10,6 +12,339 @@
 
 namespace rtp_llm {
 
+namespace {
+
+CopyResult makeCopyResult(uint64_t request_id,
+                          CopyStatusCode status,
+                          size_t completed_entries,
+                          size_t failed_entries,
+                          std::string error_message = "") {
+    CopyResult result;
+    result.request_id      = request_id;
+    result.status          = status;
+    result.completed_entries = completed_entries;
+    result.failed_entries    = failed_entries;
+    result.error_message   = std::move(error_message);
+    return result;
+}
+
+bool isDeviceHostTransfer(Tier source_tier, Tier target_tier) {
+    return (source_tier == Tier::DEVICE && target_tier == Tier::HOST)
+           || (source_tier == Tier::HOST && target_tier == Tier::DEVICE);
+}
+
+bool hasValidHostBlock(const TransferEntry& entry) {
+    return !isNullBlockIdx(entry.host_block);
+}
+
+bool hasValidDiskBlock(const TransferEntry& entry) {
+    return !isNullBlockIdx(entry.disk_block);
+}
+
+}  // namespace
+
+struct TransferHandle::State {
+    explicit State(uint64_t id): request_id(id) {
+        result.request_id = id;
+    }
+
+    uint64_t request_id{0};
+    bool     done{false};
+
+    CopyResult                         result;
+    std::vector<CopyCompletionCallback> callbacks;
+
+    mutable std::mutex      mutex;
+    std::condition_variable cv;
+};
+
+uint64_t TransferHandle::requestId() const {
+    return state_ ? state_->request_id : 0;
+}
+
+void TransferHandle::wait() const {
+    auto state = state_;
+    if (!state) {
+        return;
+    }
+
+    std::unique_lock<std::mutex> lock(state->mutex);
+    state->cv.wait(lock, [&state] { return state->done; });
+}
+
+bool TransferHandle::done() const {
+    auto state = state_;
+    if (!state) {
+        return false;
+    }
+
+    std::lock_guard<std::mutex> lock(state->mutex);
+    return state->done;
+}
+
+CopyResult TransferHandle::result() const {
+    auto state = state_;
+    if (!state) {
+        return makeCopyResult(0, CopyStatusCode::INVALID_DESCRIPTOR, 0, 0, "invalid transfer handle");
+    }
+
+    wait();
+    std::lock_guard<std::mutex> lock(state->mutex);
+    return state->result;
+}
+
+void TransferHandle::onComplete(CopyCompletionCallback callback) const {
+    auto state = state_;
+    if (!state || !callback) {
+        return;
+    }
+
+    CopyResult completed_result;
+    bool       run_now = false;
+    {
+        std::lock_guard<std::mutex> lock(state->mutex);
+        if (state->done) {
+            completed_result = state->result;
+            run_now          = true;
+        } else {
+            state->callbacks.push_back(std::move(callback));
+        }
+    }
+
+    if (run_now) {
+        callback(completed_result);
+    }
+}
+
+CopyEngine::CopyEngine(CopyEngineTransferResources resources): resources_(std::move(resources)) {}
+
+TransferHandle CopyEngine::submit(const TransferDescriptor& desc, TransferSubmitOptions options) {
+    const uint64_t request_id = next_request_id_.fetch_add(1);
+    auto           state      = std::make_shared<TransferHandle::State>(request_id);
+
+    auto result = executeTransfer(desc, options, request_id);
+    completeRequest(state, std::move(result));
+    return TransferHandle(std::move(state));
+}
+
+void CopyEngine::setTransferResources(CopyEngineTransferResources resources) {
+    std::lock_guard<std::mutex> lock(resources_mutex_);
+    resources_ = std::move(resources);
+}
+
+std::vector<MemoryBlockLayerTagSlot> CopyEngine::resolveLayerSlots(int component_group_id) const {
+    std::function<std::vector<MemoryBlockLayerTagSlot>(int)> resolver;
+    {
+        std::lock_guard<std::mutex> lock(resources_mutex_);
+        resolver = resources_.layer_slots_resolver;
+    }
+    return resolver ? resolver(component_group_id) : std::vector<MemoryBlockLayerTagSlot>{};
+}
+
+BlockPoolPtr CopyEngine::resolveHostPool(int component_group_id) const {
+    std::function<BlockPoolPtr(int)> resolver;
+    {
+        std::lock_guard<std::mutex> lock(resources_mutex_);
+        resolver = resources_.host_pool_resolver;
+    }
+    return resolver ? resolver(component_group_id) : nullptr;
+}
+
+std::shared_ptr<DiskBlockPool> CopyEngine::resolveDiskPool(int component_group_id) const {
+    std::function<std::shared_ptr<DiskBlockPool>(int)> resolver;
+    {
+        std::lock_guard<std::mutex> lock(resources_mutex_);
+        resolver = resources_.disk_pool_resolver;
+    }
+    return resolver ? resolver(component_group_id) : nullptr;
+}
+
+DeviceBufferResolver CopyEngine::resolveDeviceBufferResolver() const {
+    std::lock_guard<std::mutex> lock(resources_mutex_);
+    return resources_.device_buffer_resolver;
+}
+
+void CopyEngine::completeRequest(const std::shared_ptr<TransferHandle::State>& state, CopyResult result) {
+    std::vector<CopyCompletionCallback> callbacks;
+    CopyResult                          completed_result;
+    {
+        std::lock_guard<std::mutex> lock(state->mutex);
+        state->result = std::move(result);
+        state->done   = true;
+        callbacks.swap(state->callbacks);
+        completed_result = state->result;
+    }
+
+    state->cv.notify_all();
+
+    for (const auto& callback : callbacks) {
+        callback(completed_result);
+    }
+}
+
+CopyResult CopyEngine::executeTransfer(const TransferDescriptor& desc,
+                                       const TransferSubmitOptions& options,
+                                       uint64_t request_id) {
+    if (desc.component_group_id < 0) {
+        return makeCopyResult(request_id, CopyStatusCode::INVALID_DESCRIPTOR, 0, 0, "missing component_group_id");
+    }
+
+    if (desc.source_tier == Tier::NONE || desc.target_tier == Tier::NONE || desc.source_tier == desc.target_tier) {
+        return makeCopyResult(request_id, CopyStatusCode::INVALID_DESCRIPTOR, 0, 0, "invalid transfer tier pair");
+    }
+
+    const size_t entry_count = desc.entries.size();
+    if (entry_count == 0) {
+        return makeCopyResult(request_id, CopyStatusCode::SIZE_MISMATCH, 0, 0, "transfer descriptor has no entries");
+    }
+
+    if (isDeviceHostTransfer(desc.source_tier, desc.target_tier)) {
+        auto slots     = resolveLayerSlots(desc.component_group_id);
+        auto resolver  = resolveDeviceBufferResolver();
+        auto host_pool = resolveHostPool(desc.component_group_id);
+        if (slots.empty() || !resolver || !host_pool) {
+            return makeCopyResult(
+                request_id, CopyStatusCode::INVALID_DESCRIPTOR, 0, 0, "missing device-host transfer resources");
+        }
+
+        if (desc.source_tier == Tier::DEVICE) {
+            size_t completed_entries = 0;
+            for (size_t entry_id = 0; entry_id < entry_count; ++entry_id) {
+                const auto& entry = desc.entries[entry_id];
+                if (!hasValidHostBlock(entry)) {
+                    const size_t failed_entries = entry_count - completed_entries;
+                    return makeCopyResult(request_id,
+                                          CopyStatusCode::INVALID_BLOCK,
+                                          completed_entries,
+                                          failed_entries,
+                                          "D2H descriptor has invalid host target block");
+                }
+                if (!deviceToHost(entry.device_blocks, entry.host_block, slots, resolver, *host_pool)) {
+                    const size_t failed_entries = entry_count - completed_entries;
+                    return makeCopyResult(request_id,
+                                          completed_entries > 0 && options.require_all_or_none ?
+                                              CopyStatusCode::PARTIAL_FAILURE :
+                                              CopyStatusCode::DEVICE_IO_ERROR,
+                                          completed_entries,
+                                          failed_entries,
+                                          "D2H copy failed");
+                }
+                ++completed_entries;
+            }
+            return makeCopyResult(request_id, CopyStatusCode::OK, completed_entries, 0);
+        }
+
+        size_t completed_entries = 0;
+        for (size_t entry_id = 0; entry_id < entry_count; ++entry_id) {
+            const auto& entry = desc.entries[entry_id];
+            if (!hasValidHostBlock(entry) || entry.device_blocks.empty()) {
+                const size_t failed_entries = entry_count - completed_entries;
+                return makeCopyResult(request_id,
+                                      CopyStatusCode::INVALID_BLOCK,
+                                      completed_entries,
+                                      failed_entries,
+                                      "H2D descriptor has invalid source or target block");
+            }
+            if (entry.device_blocks.size() != slots.size()) {
+                const size_t failed_entries = entry_count - completed_entries;
+                return makeCopyResult(request_id,
+                                      CopyStatusCode::SIZE_MISMATCH,
+                                      completed_entries,
+                                      failed_entries,
+                                      "H2D target block count mismatch");
+            }
+            if (!hostToDevice(entry.host_block, entry.device_blocks, slots, resolver, *host_pool)) {
+                const size_t failed_entries = entry_count - completed_entries;
+                return makeCopyResult(request_id,
+                                      completed_entries > 0 && options.require_all_or_none ?
+                                          CopyStatusCode::PARTIAL_FAILURE :
+                                          CopyStatusCode::DEVICE_IO_ERROR,
+                                      completed_entries,
+                                      failed_entries,
+                                      "H2D copy failed");
+            }
+            ++completed_entries;
+        }
+        return makeCopyResult(request_id, CopyStatusCode::OK, completed_entries, 0);
+    }
+
+    if (desc.source_tier == Tier::HOST && desc.target_tier == Tier::DISK) {
+        auto host_pool = resolveHostPool(desc.component_group_id);
+        auto disk_pool = resolveDiskPool(desc.component_group_id);
+        if (!host_pool || !disk_pool) {
+            return makeCopyResult(request_id,
+                                  CopyStatusCode::INVALID_DESCRIPTOR,
+                                  0,
+                                  entry_count,
+                                  "missing host-disk transfer resources");
+        }
+
+        size_t completed_entries = 0;
+        for (size_t entry_id = 0; entry_id < entry_count; ++entry_id) {
+            const auto& entry = desc.entries[entry_id];
+            if (!hasValidHostBlock(entry) || !hasValidDiskBlock(entry)) {
+                const size_t failed_entries = entry_count - completed_entries;
+                return makeCopyResult(request_id,
+                                      CopyStatusCode::INVALID_BLOCK,
+                                      completed_entries,
+                                      failed_entries,
+                                      "H2Disk descriptor has invalid source or target block");
+            }
+            if (!hostToDisk(entry.host_block, entry.disk_block, *host_pool, *disk_pool)) {
+                const size_t failed_entries = entry_count - completed_entries;
+                return makeCopyResult(request_id,
+                                      completed_entries > 0 && options.require_all_or_none ?
+                                          CopyStatusCode::PARTIAL_FAILURE :
+                                          CopyStatusCode::DISK_IO_ERROR,
+                                      completed_entries,
+                                      failed_entries,
+                                      "H2Disk copy failed");
+            }
+            ++completed_entries;
+        }
+        return makeCopyResult(request_id, CopyStatusCode::OK, completed_entries, 0);
+    }
+
+    if (desc.source_tier == Tier::DISK && desc.target_tier == Tier::HOST) {
+        auto host_pool = resolveHostPool(desc.component_group_id);
+        auto disk_pool = resolveDiskPool(desc.component_group_id);
+        if (!host_pool || !disk_pool) {
+            return makeCopyResult(request_id,
+                                  CopyStatusCode::INVALID_DESCRIPTOR,
+                                  0,
+                                  entry_count,
+                                  "missing disk-host transfer resources");
+        }
+
+        size_t completed_entries = 0;
+        for (size_t entry_id = 0; entry_id < entry_count; ++entry_id) {
+            const auto& entry = desc.entries[entry_id];
+            if (!hasValidDiskBlock(entry) || !hasValidHostBlock(entry)) {
+                const size_t failed_entries = entry_count - completed_entries;
+                return makeCopyResult(request_id,
+                                      CopyStatusCode::INVALID_BLOCK,
+                                      completed_entries,
+                                      failed_entries,
+                                      "Disk2H descriptor has invalid source or target block");
+            }
+            if (!diskToHost(entry.disk_block, entry.host_block, *host_pool, *disk_pool)) {
+                const size_t failed_entries = entry_count - completed_entries;
+                return makeCopyResult(request_id,
+                                      completed_entries > 0 && options.require_all_or_none ?
+                                          CopyStatusCode::PARTIAL_FAILURE :
+                                          CopyStatusCode::DISK_IO_ERROR,
+                                      completed_entries,
+                                      failed_entries,
+                                      "Disk2H copy failed");
+            }
+            ++completed_entries;
+        }
+        return makeCopyResult(request_id, CopyStatusCode::OK, completed_entries, 0);
+    }
+
+    return makeCopyResult(request_id, CopyStatusCode::INVALID_DESCRIPTOR, 0, 0, "unsupported transfer tier pair");
+}
+
 size_t CopyEngine::computeHostBlockSize(const std::vector<MemoryBlockLayerTagSlot>& slots) {
     size_t total = 0;
     for (const auto& slot : slots) {
@@ -17,8 +352,6 @@ size_t CopyEngine::computeHostBlockSize(const std::vector<MemoryBlockLayerTagSlo
     }
     return total;
 }
-
-// ---- Device <-> Host ----
 
 bool CopyEngine::deviceToHost(const std::vector<BlockIdxType>&            device_blocks,
                               BlockIdxType                                host_block,
@@ -41,7 +374,6 @@ bool CopyEngine::deviceToHost(const std::vector<BlockIdxType>&            device
         return false;
     }
 
-    // Detect whether we need real CUDA copy by checking the first valid device block.
     bool use_cuda_copy = false;
     for (size_t i = 0; i < slots.size(); ++i) {
         if (!isNullBlockIdx(device_blocks[i])) {
@@ -54,7 +386,6 @@ bool CopyEngine::deviceToHost(const std::vector<BlockIdxType>&            device
     }
 
     if (use_cuda_copy) {
-        // Real CUDA D2H path: build tensor pairs and call execNoBlockCopy.
         std::vector<torch::Tensor> dst_buffers;
         std::vector<torch::Tensor> src_buffers;
         auto                       cpu_opts = torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCPU);
@@ -85,8 +416,6 @@ bool CopyEngine::deviceToHost(const std::vector<BlockIdxType>&            device
             src_buffers.push_back(torch::from_blob(device_info.addr, {static_cast<int64_t>(copy_bytes)}, gpu_opts));
             dst_buffers.push_back(torch::from_blob(
                 static_cast<uint8_t*>(host_base) + byte_off, {static_cast<int64_t>(copy_bytes)}, cpu_opts));
-
-            // Zero-fill remaining host region if device buffer is smaller than stride
             if (copy_bytes < slot.stride_bytes) {
                 std::memset(
                     static_cast<uint8_t*>(host_base) + byte_off + copy_bytes, 0, slot.stride_bytes - copy_bytes);
@@ -99,7 +428,6 @@ bool CopyEngine::deviceToHost(const std::vector<BlockIdxType>&            device
             execNoBlockCopy(mc);
         }
     } else {
-        // CPU memcpy path (test/mock mode: is_cuda == false).
         size_t byte_off = 0;
         for (size_t i = 0; i < slots.size(); ++i) {
             const auto& slot         = slots[i];
@@ -157,7 +485,6 @@ bool CopyEngine::hostToDevice(BlockIdxType                                host_b
         return false;
     }
 
-    // Detect whether we need real CUDA copy by checking the first valid device block.
     bool use_cuda_copy = false;
     for (size_t i = 0; i < slots.size(); ++i) {
         if (!isNullBlockIdx(device_blocks[i])) {
@@ -170,7 +497,6 @@ bool CopyEngine::hostToDevice(BlockIdxType                                host_b
     }
 
     if (use_cuda_copy) {
-        // Real CUDA H2D path: build tensor pairs and call execNoBlockCopy.
         std::vector<torch::Tensor> dst_buffers;
         std::vector<torch::Tensor> src_buffers;
         auto                       cpu_opts = torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCPU);
@@ -211,7 +537,6 @@ bool CopyEngine::hostToDevice(BlockIdxType                                host_b
             execNoBlockCopy(mc);
         }
     } else {
-        // CPU memcpy path (test/mock mode: is_cuda == false).
         size_t byte_off = 0;
         for (size_t i = 0; i < slots.size(); ++i) {
             const auto& slot         = slots[i];
@@ -243,8 +568,6 @@ bool CopyEngine::hostToDevice(BlockIdxType                                host_b
         "CopyEngine::hostToDevice: unpacked host_block=%d into %zu device blocks", host_block, device_blocks.size());
     return true;
 }
-
-// ---- Host <-> Disk ----
 
 bool CopyEngine::hostToDisk(BlockIdxType   host_block,
                             int32_t        disk_slot,

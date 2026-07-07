@@ -510,9 +510,9 @@ TEST_F(BlockTreeCacheTest, SWABuildTransferSupportsHostToDisk) {
     auto desc = swa->buildTransfer(find.matched_node, TransferType::HOST_TO_DISK);
     EXPECT_EQ(desc.source_tier, Tier::HOST);
     EXPECT_EQ(desc.target_tier, Tier::DISK);
-    ASSERT_EQ(desc.source_blocks.size(), 1u);
-    ASSERT_EQ(desc.source_blocks[0].size(), 1u);
-    EXPECT_EQ(desc.source_blocks[0][0], 7);
+    ASSERT_EQ(desc.entries.size(), 1u);
+    EXPECT_EQ(desc.entries[0].node, find.matched_node);
+    EXPECT_EQ(desc.entries[0].host_block, 7);
 
     // Verify driveEviction(HOST) produces a valid transfer
     swa->device_heap->invalidate(find.matched_node);
