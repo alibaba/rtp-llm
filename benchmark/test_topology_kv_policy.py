@@ -142,6 +142,8 @@ def _make_indexer(topk_result, *, cp_enabled=False):
     indexer.topology_local_blocks = 1
     indexer.topology_witness_blocks = 0
     indexer.topology_max_policy_tokens = 8192
+    indexer.topology_max_topk_elements = 131072
+    indexer.topology_max_topk_width = 8192
     indexer.topology_max_structural_fraction = 0.5
     indexer.topology_coordinate_mismatch_action = "fallback_disabled"
     indexer.topology_stable_scaffold = None
@@ -357,6 +359,135 @@ class TopologyKvPolicyTest(unittest.TestCase):
         )
 
         self.assertEqual(config.policy, "topology_sparse_merge")
+
+    def test_normalizes_coordinate_mismatch_action_case(self):
+        config = TopologyKvPolicyConfig(
+            policy="topology_sparse_merge",
+            sink_blocks=1,
+            local_blocks=1,
+            witness_blocks=0,
+            block_size=4,
+            coordinate_mismatch_action="Fallback_Disabled",
+        )
+
+        self.assertEqual(config.coordinate_mismatch_action, "fallback_disabled")
+
+    def test_normalizes_coordinate_mismatch_action_whitespace(self):
+        config = TopologyKvPolicyConfig(
+            policy="topology_sparse_merge",
+            sink_blocks=1,
+            local_blocks=1,
+            witness_blocks=0,
+            block_size=4,
+            coordinate_mismatch_action=" Raise ",
+        )
+
+        self.assertEqual(config.coordinate_mismatch_action, "raise")
+
+    def test_rejects_unknown_coordinate_mismatch_action(self):
+        with self.assertRaisesRegex(ValueError, "coordinate_mismatch_action"):
+            TopologyKvPolicyConfig(
+                policy="topology_sparse_merge",
+                sink_blocks=1,
+                local_blocks=1,
+                witness_blocks=0,
+                block_size=4,
+                coordinate_mismatch_action="warn",
+            )
+
+    def test_rejects_non_integer_topk_indices(self):
+        topk = torch.tensor([[7.5, 6.0, 5.0, 4.0]], dtype=torch.float32)
+        lengths = torch.tensor([8], dtype=torch.int32)
+        config = TopologyKvPolicyConfig(
+            policy="topology_sparse_merge",
+            sink_blocks=1,
+            local_blocks=1,
+            witness_blocks=0,
+            block_size=4,
+        )
+
+        with self.assertRaisesRegex(ValueError, "topk_indices must use integer dtype"):
+            apply_topology_kv_policy(topk, lengths, config=config)
+
+    def test_bypasses_python_policy_when_topk_elements_exceed_limit(self):
+        topk = torch.tensor([[7, 6, 5, 4]], dtype=torch.int32)
+        lengths = torch.tensor([2], dtype=torch.int32)
+        config = TopologyKvPolicyConfig(
+            policy="topology_sparse_merge",
+            sink_blocks=1,
+            local_blocks=1,
+            witness_blocks=0,
+            block_size=4,
+            max_topk_elements=3,
+        )
+
+        result = apply_topology_kv_policy(topk, lengths, config=config)
+
+        self.assertIs(result.topk_indices, topk)
+        self.assertEqual(result.counters.policy_bypassed, 1)
+
+    def test_bypasses_python_policy_when_topk_width_exceeds_limit(self):
+        topk = torch.tensor([[7, 6, 5, 4]], dtype=torch.int32)
+        lengths = torch.tensor([2], dtype=torch.int32)
+        config = TopologyKvPolicyConfig(
+            policy="topology_sparse_merge",
+            sink_blocks=1,
+            local_blocks=1,
+            witness_blocks=0,
+            block_size=4,
+            max_topk_width=3,
+        )
+
+        result = apply_topology_kv_policy(topk, lengths, config=config)
+
+        self.assertIs(result.topk_indices, topk)
+        self.assertEqual(result.counters.policy_bypassed, 1)
+
+    def test_detaches_block_drift_scores_before_structural_selection(self):
+        topk = torch.tensor([[7, 6, 5, 4]], dtype=torch.int32)
+        lengths = torch.tensor([8], dtype=torch.int32)
+        drift_scores = torch.ones((1, 2), dtype=torch.float32, requires_grad=True)
+        config = TopologyKvPolicyConfig(
+            policy="topology_sparse_merge",
+            sink_blocks=1,
+            local_blocks=1,
+            witness_blocks=1,
+            block_size=4,
+        )
+        seen_requires_grad = []
+        original_structural_tokens = topology_kv_policy._structural_tokens
+
+        def _record_structural_tokens(length, config, drift_row, budget):
+            seen_requires_grad.append(
+                None if drift_row is None else drift_row.requires_grad
+            )
+            return original_structural_tokens(length, config, drift_row, budget)
+
+        with mock.patch.object(
+            topology_kv_policy, "_structural_tokens", _record_structural_tokens
+        ):
+            apply_topology_kv_policy(
+                topk,
+                lengths,
+                config=config,
+                block_drift_scores=drift_scores,
+            )
+
+        self.assertEqual(seen_requires_grad, [False])
+
+    def test_indexer_normalizes_coordinate_mismatch_action(self):
+        topk = torch.tensor([[7, 6, 5, 4]], dtype=torch.int32)
+        indexer = _make_indexer(topk)
+        indexer.topology_coordinate_mismatch_action = "FALLBACK_DISABLED"
+
+        result = indexer._apply_topology_kv_policy(
+            topk,
+            torch.tensor([8], dtype=torch.int32),
+            row_starts=torch.tensor([10], dtype=torch.int32),
+            topk_indices_offset=torch.tensor([100], dtype=torch.int32),
+        )
+
+        self.assertIs(result, topk)
 
     def test_rejects_learned_topk_outside_absolute_contract(self):
         topk = torch.tensor([[7, 6, 5, 4]], dtype=torch.int32)

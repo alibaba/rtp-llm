@@ -84,6 +84,12 @@ class Indexer(nn.Module):
         self.topology_max_policy_tokens = _topology_env_int(
             "RTP_LLM_TOPOLOGY_MAX_POLICY_TOKENS", 8192
         )
+        self.topology_max_topk_elements = _topology_env_int(
+            "RTP_LLM_TOPOLOGY_MAX_TOPK_ELEMENTS", 131072
+        )
+        self.topology_max_topk_width = _topology_env_int(
+            "RTP_LLM_TOPOLOGY_MAX_TOPK_WIDTH", 8192
+        )
         self.topology_max_structural_fraction = _topology_env_float(
             "RTP_LLM_TOPOLOGY_MAX_STRUCTURAL_FRACTION", 0.5
         )
@@ -246,6 +252,8 @@ class Indexer(nn.Module):
             witness_blocks=self.topology_witness_blocks,
             block_size=self.blocksize,
             max_policy_tokens=self.topology_max_policy_tokens,
+            max_topk_elements=self.topology_max_topk_elements,
+            max_topk_width=self.topology_max_topk_width,
             max_structural_fraction=self.topology_max_structural_fraction,
             coordinate_mismatch_action=self.topology_coordinate_mismatch_action,
         )

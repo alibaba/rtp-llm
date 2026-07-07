@@ -45,12 +45,25 @@ SUPPORTED_TOPOLOGY_KV_POLICIES = frozenset(
         "topology_only",
     }
 )
+SUPPORTED_COORDINATE_MISMATCH_ACTIONS = frozenset({"raise", "fallback_disabled"})
+INTEGER_TOPK_DTYPES = frozenset(
+    {torch.int8, torch.int16, torch.int32, torch.int64, torch.uint8}
+)
 
 
 def normalize_topology_kv_policy(policy: str) -> TopologyKvPolicy:
     normalized = policy.strip().lower()
     if normalized not in SUPPORTED_TOPOLOGY_KV_POLICIES:
         raise ValueError(f"unknown topology KV policy: {policy}")
+    return normalized  # type: ignore[return-value]
+
+
+def normalize_coordinate_mismatch_action(action: str) -> CoordinateMismatchAction:
+    normalized = action.strip().lower()
+    if normalized not in SUPPORTED_COORDINATE_MISMATCH_ACTIONS:
+        raise ValueError(
+            "coordinate_mismatch_action must be 'raise' or 'fallback_disabled'"
+        )
     return normalized  # type: ignore[return-value]
 
 
@@ -62,15 +75,18 @@ class TopologyKvPolicyConfig:
     witness_blocks: int
     block_size: int
     max_policy_tokens: int = 8192
+    max_topk_elements: int = 131072
+    max_topk_width: int = 8192
     max_structural_fraction: float = 0.5
     coordinate_mismatch_action: CoordinateMismatchAction = "raise"
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "policy", normalize_topology_kv_policy(self.policy))
-        if self.coordinate_mismatch_action not in {"raise", "fallback_disabled"}:
-            raise ValueError(
-                "coordinate_mismatch_action must be 'raise' or 'fallback_disabled'"
-            )
+        object.__setattr__(
+            self,
+            "coordinate_mismatch_action",
+            normalize_coordinate_mismatch_action(self.coordinate_mismatch_action),
+        )
         if self.block_size <= 0:
             raise ValueError("block_size must be positive")
         if self.sink_blocks < 0:
@@ -81,6 +97,10 @@ class TopologyKvPolicyConfig:
             raise ValueError("witness_blocks must be non-negative")
         if self.max_policy_tokens < 0:
             raise ValueError("max_policy_tokens must be non-negative")
+        if self.max_topk_elements < 0:
+            raise ValueError("max_topk_elements must be non-negative")
+        if self.max_topk_width < 0:
+            raise ValueError("max_topk_width must be non-negative")
         if not 0.0 < self.max_structural_fraction <= 1.0:
             raise ValueError("max_structural_fraction must be in (0, 1]")
 
@@ -345,6 +365,8 @@ def apply_topology_kv_policy(
         return _passthrough_result(topk_indices, fingerprint)
     if topk_indices.ndim != 2:
         raise ValueError("topk_indices must have shape [rows, topk]")
+    if topk_indices.dtype not in INTEGER_TOPK_DTYPES:
+        raise ValueError("topk_indices must use integer dtype")
     if lengths.ndim != 1 or lengths.numel() != topk_indices.size(0):
         raise ValueError("lengths must have shape [rows]")
     _validate_optional_row_tensor(row_starts, name="row_starts", rows=lengths.numel())
@@ -354,10 +376,17 @@ def apply_topology_kv_policy(
 
     lengths_cpu = lengths.detach().cpu()
     total_policy_tokens = int(lengths_cpu.sum().item())
-    if total_policy_tokens > config.max_policy_tokens:
+    if (
+        total_policy_tokens > config.max_policy_tokens
+        or topk_indices.numel() > config.max_topk_elements
+        or topk_indices.size(1) > config.max_topk_width
+    ):
         return _passthrough_result(topk_indices, fingerprint, policy_bypassed=1)
 
     topk_cpu = topk_indices.detach().cpu()
+    drift_scores_cpu = (
+        block_drift_scores.detach().cpu() if block_drift_scores is not None else None
+    )
     offsets_cpu = (
         topk_indices_offset.detach().cpu()
         if topk_indices_offset is not None
@@ -381,8 +410,8 @@ def apply_topology_kv_policy(
 
     for row_idx, (row_length, offset) in enumerate(zip(length_values, offset_values)):
         drift_row = (
-            block_drift_scores[row_idx]
-            if block_drift_scores is not None and block_drift_scores.ndim == 2
+            drift_scores_cpu[row_idx]
+            if drift_scores_cpu is not None and drift_scores_cpu.ndim == 2
             else None
         )
         local_start = offset
