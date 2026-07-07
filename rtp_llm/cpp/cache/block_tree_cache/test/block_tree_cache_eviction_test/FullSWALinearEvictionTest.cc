@@ -17,8 +17,7 @@ protected:
         auto linear                           = std::make_shared<LinearComponentGroup>();
         linear->component_group_id            = 2;
         std::vector<ComponentGroupPtr> groups = {full, swa, linear};
-        cache_                                = std::make_unique<BlockTreeCache>(
-            std::move(tree), std::move(groups), std::vector<Component>{}, nullptr, nullptr, 2);
+        cache_ = std::make_unique<BlockTreeCache>(std::move(tree), std::move(groups), std::vector<Component>{}, 2);
     }
 
     void insertPath(const CacheKeysType& keys, BlockIdxType full_b, BlockIdxType swa_b, BlockIdxType lin_b) {
@@ -174,14 +173,14 @@ TEST_F(FullSWALinearEvictionTest, ForkBothBranchesEvictable) {
 //   [200] all groups empty → deleted. [100] survives.
 // ---------------------------------------------------------------------------
 TEST_F(FullSWALinearEvictionTest, SWAEvictionCascadesToLinear) {
-    auto tree                                    = std::make_unique<BlockTree>(2);
-    auto swa                                     = std::make_shared<SWAComponentGroup>(128, 64);
-    swa->component_group_id                      = 0;
-    auto linear                                  = std::make_shared<LinearComponentGroup>();
-    linear->component_group_id                   = 1;
-    std::vector<ComponentGroupPtr> groups        = {swa, linear};
-    auto                           swa_lin_cache = std::make_unique<BlockTreeCache>(
-        std::move(tree), std::move(groups), std::vector<Component>{}, nullptr, nullptr, 2);
+    auto tree                             = std::make_unique<BlockTree>(2);
+    auto swa                              = std::make_shared<SWAComponentGroup>(128, 64);
+    swa->component_group_id               = 0;
+    auto linear                           = std::make_shared<LinearComponentGroup>();
+    linear->component_group_id            = 1;
+    std::vector<ComponentGroupPtr> groups = {swa, linear};
+    auto                           swa_lin_cache =
+        std::make_unique<BlockTreeCache>(std::move(tree), std::move(groups), std::vector<Component>{}, 2);
 
     std::vector<std::vector<GroupSlot>> slots(2, std::vector<GroupSlot>(2));
     slots[0][0].device_blocks = {20};
