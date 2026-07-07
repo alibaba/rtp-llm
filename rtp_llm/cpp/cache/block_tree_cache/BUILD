@@ -49,19 +49,12 @@ cc_library(
 
 cc_library(
     name = "block_tree_cache_pool",
+    # Sources are added incrementally as each v4 pool task lands so every commit builds.
     srcs = [
         "IBlockPool.cc",
-        "BlockPool.cc",
-        "host/HostBlockPool.cc",
-        "host/DiskBlockIO.cc",
-        "host/DiskBlockPool.cc",
     ],
     hdrs = [
         "IBlockPool.h",
-        "BlockPool.h",
-        "host/HostBlockPool.h",
-        "host/DiskBlockIO.h",
-        "host/DiskBlockPool.h",
     ],
     copts = copts(),
     visibility = ["//visibility:public"],
