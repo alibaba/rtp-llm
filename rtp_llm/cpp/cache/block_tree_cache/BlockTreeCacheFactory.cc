@@ -150,15 +150,19 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
         disk_pool = createDiskPool(kv_cache_config, cache_config.kv_block_size_bytes);
     }
 
-    // 6. Determine eviction thread pool size (default = 2).
+    // 6. Set host_pool and disk_pool on each ComponentGroup.
+    for (auto& group : component_groups) {
+        group->setHostPool(host_pool);
+        group->setDiskPool(disk_pool);
+    }
+
+    // 7. Determine eviction thread pool size (default = 2).
     const int eviction_thread_pool_size = 2;
 
-    // 7. Assemble and return BlockTreeCache.
+    // 8. Assemble and return BlockTreeCache.
     auto cache = std::make_shared<BlockTreeCache>(std::move(tree),
                                                   std::move(component_groups),
                                                   std::move(components),
-                                                  host_pool,
-                                                  disk_pool,
                                                   eviction_thread_pool_size,
                                                   storage_backend,
                                                   kv_cache_config.enable_device_cache,
