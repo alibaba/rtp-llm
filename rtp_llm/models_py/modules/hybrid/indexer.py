@@ -9,6 +9,7 @@ from rtp_llm.models_py.modules.factory import LinearFactory
 from rtp_llm.models_py.modules.hybrid.topology_kv_policy import (
     TopologyKvPolicyConfig,
     apply_topology_kv_policy,
+    normalize_topology_kv_policy,
 )
 from rtp_llm.ops import AttentionConfigs, HWKernelConfig, ParallelismConfig
 from rtp_llm.ops.compute_ops import KVCache
@@ -47,11 +48,13 @@ class Indexer(nn.Module):
         self.softmax_scale = self.index_head_dim**-0.5
         self.weights_scale = self.index_n_heads**-0.5
         self.blocksize = attn_config.kernel_tokens_per_block  # page size, typically 64
-        self.topology_kv_policy = os.getenv(
-            "RTP_LLM_TOPOLOGY_KV_POLICY", "disabled"
-        ).strip()
+        self.topology_kv_policy = normalize_topology_kv_policy(
+            os.getenv("RTP_LLM_TOPOLOGY_KV_POLICY", "disabled")
+        )
         self.topology_sink_blocks = int(os.getenv("RTP_LLM_TOPOLOGY_SINK_BLOCKS", "1"))
-        self.topology_local_blocks = int(os.getenv("RTP_LLM_TOPOLOGY_LOCAL_BLOCKS", "1"))
+        self.topology_local_blocks = int(
+            os.getenv("RTP_LLM_TOPOLOGY_LOCAL_BLOCKS", "1")
+        )
         self.topology_witness_blocks = int(
             os.getenv("RTP_LLM_TOPOLOGY_WITNESS_BLOCKS", "1")
         )
@@ -143,7 +146,9 @@ class Indexer(nn.Module):
         if self._prefill_cp_enabled():
             assert cp_params is not None
             query, key = self.indexer_op.apply_rope_and_rotate_q_k_cp(
-                q, k, cp_params.full_rope_pos_ids,
+                q,
+                k,
+                cp_params.full_rope_pos_ids,
             )
         else:
             positions = flashmla_params.positions_d
@@ -177,7 +182,7 @@ class Indexer(nn.Module):
                 kv_cache,
                 fmha_params.slot_mapping,
                 cp_params.kv_restore_unpad_indices,
-        )
+            )
         return self.indexer_op.quant_q_k(query, key, kv_cache, fmha_params.slot_mapping)
 
     def _apply_topology_kv_policy(
@@ -220,12 +225,8 @@ class Indexer(nn.Module):
         cp_params: Optional[Any],
     ) -> torch.Tensor:
         if not attention_inputs.is_prefill:
-            topk_result = self.indexer_op._get_topk_paged(
+            return self.indexer_op._get_topk_paged(
                 q_fp8, weights, kv_cache, fmha_params, attention_inputs
-            )
-            return self._apply_topology_kv_policy(
-                topk_result,
-                fmha_params.expanded_seq_lens,
             )
         if self._prefill_cp_enabled():
             assert cp_params is not None

@@ -1,25 +1,76 @@
+"""Topology-aware sparse KV candidate policy.
+
+The policy is an opt-in post-processing layer for indexer top-k results. Learned
+`topk_indices` must already be absolute token indices in the downstream sparse
+attention coordinate system. For ragged and CP-prefill paths, `row_starts` plus
+`topk_indices_offset` define the valid absolute interval for each row:
+`[row_start + offset, row_start + offset + length)`. Negative values are padding.
+Non-padding learned indices outside that interval fail fast because silently
+dropping them can hide a coordinate-system mismatch.
+
+`stable_scaffold` and `output_contract` describe repeated prompt structure such
+as system instructions, tool schemas, and response contracts. Their fingerprint
+is only an observability key for repeated stable regions; this module does not
+physically compress the KV cache. Counters report selected-token shape and how
+many stable tokens were represented by that fingerprint but not selected as raw
+top-k candidates.
+"""
+
 import hashlib
 import time
 from dataclasses import dataclass
-from typing import Optional
+from typing import Literal, Optional
 
 import torch
+
+TopologyKvPolicy = Literal[
+    "disabled",
+    "topology_sparse_merge",
+    "topology_compress_sparse",
+    "topology_only",
+]
+SUPPORTED_TOPOLOGY_KV_POLICIES = frozenset(
+    {
+        "disabled",
+        "topology_sparse_merge",
+        "topology_compress_sparse",
+        "topology_only",
+    }
+)
+
+
+def normalize_topology_kv_policy(policy: str) -> TopologyKvPolicy:
+    normalized = policy.strip()
+    if normalized not in SUPPORTED_TOPOLOGY_KV_POLICIES:
+        raise ValueError(f"unknown topology KV policy: {policy}")
+    return normalized  # type: ignore[return-value]
 
 
 @dataclass(frozen=True)
 class TopologyKvPolicyConfig:
-    policy: str
+    policy: TopologyKvPolicy
     sink_blocks: int
     local_blocks: int
     witness_blocks: int
     block_size: int
+
+    def __post_init__(self) -> None:
+        normalize_topology_kv_policy(self.policy)
+        if self.block_size <= 0:
+            raise ValueError("block_size must be positive")
+        if self.sink_blocks < 0:
+            raise ValueError("sink_blocks must be non-negative")
+        if self.local_blocks < 0:
+            raise ValueError("local_blocks must be non-negative")
+        if self.witness_blocks < 0:
+            raise ValueError("witness_blocks must be non-negative")
 
 
 @dataclass(frozen=True)
 class TopologyKvCounters:
     raw_selected_tokens: int
     compressed_tokens_represented: int
-    raw_kv_tokens_avoided: int
+    unselected_stable_tokens: int
     compression_hits: int
     schedule_ms: float
 
@@ -142,11 +193,32 @@ def _merge_row(
     return selected
 
 
+def _validate_learned_row_coordinates(
+    learned_row: torch.Tensor,
+    *,
+    row_idx: int,
+    local_start: int,
+    local_length: int,
+) -> None:
+    local_end = local_start + local_length
+    valid_values = learned_row[learned_row >= 0]
+    if valid_values.numel() == 0:
+        return
+    invalid = (valid_values < local_start) | (valid_values >= local_end)
+    if bool(invalid.any().item()):
+        first_invalid = int(valid_values[invalid][0].item())
+        raise ValueError(
+            "learned topk index outside valid topology KV range: "
+            f"row={row_idx}, value={first_invalid}, expected absolute index in "
+            f"[{local_start}, {local_end})"
+        )
+
+
 def _zero_counters(topk_indices: torch.Tensor) -> TopologyKvCounters:
     return TopologyKvCounters(
         raw_selected_tokens=int((topk_indices >= 0).sum().item()),
         compressed_tokens_represented=0,
-        raw_kv_tokens_avoided=0,
+        unselected_stable_tokens=0,
         compression_hits=0,
         schedule_ms=0.0,
     )
@@ -164,19 +236,21 @@ def apply_topology_kv_policy(
     block_drift_scores: Optional[torch.Tensor] = None,
     previous_fingerprint: Optional[str] = None,
 ) -> TopologyKvPolicyResult:
+    """Apply the topology policy to absolute learned top-k token indices.
+
+    Returned indices use the same absolute sparse-attention coordinate system as
+    the input `topk_indices`. `row_starts` and `topk_indices_offset` are only used
+    to derive the row-local valid interval; they are not subtracted from learned
+    values.
+    """
+
     started = time.perf_counter()
     fingerprint = _stable_fingerprint(stable_scaffold, output_contract)
 
     if config.policy == "disabled":
-        return TopologyKvPolicyResult(topk_indices, _zero_counters(topk_indices), fingerprint)
-    if config.policy not in {
-        "topology_sparse_merge",
-        "topology_compress_sparse",
-        "topology_only",
-    }:
-        return TopologyKvPolicyResult(topk_indices, _zero_counters(topk_indices), fingerprint)
-    if config.block_size <= 0:
-        raise ValueError("block_size must be positive")
+        return TopologyKvPolicyResult(
+            topk_indices, _zero_counters(topk_indices), fingerprint
+        )
     if topk_indices.ndim != 2:
         raise ValueError("topk_indices must have shape [rows, topk]")
     if lengths.ndim != 1 or lengths.numel() != topk_indices.size(0):
@@ -220,6 +294,12 @@ def apply_topology_kv_policy(
             if config.policy == "topology_only"
             else topk_indices[row_idx]
         )
+        _validate_learned_row_coordinates(
+            learned,
+            row_idx=row_idx,
+            local_start=row_start + offset,
+            local_length=row_length,
+        )
         rows.append(
             torch.tensor(
                 _merge_row(learned, structural, row_start + offset, row_length),
@@ -232,7 +312,7 @@ def apply_topology_kv_policy(
     counters = TopologyKvCounters(
         raw_selected_tokens=raw_selected_after,
         compressed_tokens_represented=compressed_tokens,
-        raw_kv_tokens_avoided=compressed_tokens,
+        unselected_stable_tokens=compressed_tokens,
         compression_hits=compression_hits,
         schedule_ms=(time.perf_counter() - started) * 1000,
     )
