@@ -3,6 +3,7 @@ import os
 import sys
 import types
 import unittest
+from unittest import mock
 from types import SimpleNamespace
 from pathlib import Path
 
@@ -295,7 +296,46 @@ class TopologyKvPolicyTest(unittest.TestCase):
         values = result.topk_indices[0].tolist()
         self.assertEqual(len([value for value in values if value in {3, 11}]), 2)
         self.assertGreaterEqual(result.counters.learned_kept_tokens, 2)
-        self.assertGreaterEqual(result.counters.learned_evicted_tokens, 0)
+        self.assertEqual(result.counters.learned_evicted_tokens, 1)
+
+    def test_merge_output_satisfies_sparse_kernel_layout_contract(self):
+        topk = torch.tensor(
+            [
+                [2, 2, -1, -1, -1],
+                [105, 104, 104, -1, -1],
+            ],
+            dtype=torch.int32,
+        )
+        lengths = torch.tensor([3, 6], dtype=torch.int32)
+        config = TopologyKvPolicyConfig(
+            policy="topology_sparse_merge",
+            sink_blocks=1,
+            local_blocks=1,
+            witness_blocks=0,
+            block_size=4,
+            max_structural_fraction=0.5,
+        )
+
+        result = apply_topology_kv_policy(
+            topk,
+            lengths,
+            config=config,
+            topk_indices_offset=torch.tensor([0, 100], dtype=torch.int32),
+        )
+
+        self.assertEqual(result.topk_indices.device.type, "cpu")
+        self.assertEqual(result.topk_indices.shape, topk.shape)
+        for row, start, length in zip(result.topk_indices.tolist(), [0, 100], [3, 6]):
+            seen_padding = False
+            valid_values = []
+            for value in row:
+                if value < 0:
+                    seen_padding = True
+                    continue
+                self.assertFalse(seen_padding, "valid index after padding")
+                self.assertTrue(start <= value < start + length)
+                valid_values.append(value)
+            self.assertEqual(len(valid_values), len(set(valid_values)))
 
     def test_rejects_unknown_policy_name(self):
         with self.assertRaisesRegex(ValueError, "unknown topology KV policy"):
@@ -441,7 +481,6 @@ class TopologyKvPolicyTest(unittest.TestCase):
 
         self.assertEqual(indexer.indexer_op.called, "decode")
         self.assertIs(result, topk)
-        self.assertIsNone(indexer.latest_topology_kv_counters)
 
     def test_indexer_compute_topk_ragged_requires_offset_absolute_coordinates(self):
         topk = torch.tensor([[107, 106, 105, 104]], dtype=torch.int32)
@@ -499,29 +538,75 @@ class TopologyKvPolicyTest(unittest.TestCase):
         )
 
         self.assertIs(result, topk)
-        self.assertEqual(
-            indexer.latest_topology_kv_counters.coordinate_mismatch_fallbacks, 1
+
+    def test_indexer_does_not_reuse_fingerprint_across_policy_calls(self):
+        topk = torch.tensor([[7, 6, 5, 4]], dtype=torch.int32)
+        indexer = _make_indexer(topk)
+        indexer.topology_kv_policy = "topology_compress_sparse"
+        indexer.topology_stable_scaffold = "stable"
+        indexer.topology_output_contract = "contract"
+        captured_previous = []
+        policy_result = topology_kv_policy.TopologyKvPolicyResult(
+            topk,
+            topology_kv_policy.TopologyKvCounters(
+                raw_selected_tokens=4,
+                compressed_tokens_represented=0,
+                unselected_stable_tokens=0,
+                learned_kept_tokens=0,
+                learned_evicted_tokens=0,
+                compression_hits=0,
+                coordinate_mismatch_fallbacks=0,
+                policy_bypassed=0,
+                schedule_ms=0.0,
+            ),
+            "fingerprint",
         )
+
+        def _fake_apply(*args, **kwargs):
+            captured_previous.append(kwargs.get("previous_fingerprint"))
+            return policy_result
+
+        with mock.patch.object(indexer_module, "apply_topology_kv_policy", _fake_apply):
+            first = indexer._apply_topology_kv_policy(topk, torch.tensor([8]))
+            second = indexer._apply_topology_kv_policy(topk, torch.tensor([8]))
+
+        self.assertIs(first, topk)
+        self.assertIs(second, topk)
+        self.assertEqual(captured_previous, [None, None])
+
+    def test_indexer_warns_once_when_cuda_policy_sync_is_not_enabled(self):
+        class _CudaTopk:
+            is_cuda = True
+
+        indexer_module._TOPOLOGY_KV_CUDA_SYNC_WARNING_EMITTED = False
+        topk = _CudaTopk()
+        indexer = _make_indexer(topk)
+
+        with mock.patch.dict("os.environ", {}, clear=True):
+            with mock.patch.object(indexer_module.logging, "warning") as warning:
+                first = indexer._apply_topology_kv_policy(topk, torch.tensor([8]))
+                second = indexer._apply_topology_kv_policy(topk, torch.tensor([8]))
+
+        self.assertIs(first, topk)
+        self.assertIs(second, topk)
+        warning.assert_called_once()
 
     def test_indexer_has_disabled_by_default_topology_kv_gate(self):
         source = INDEXER_PATH.read_text(encoding="utf-8")
 
         self.assertIn("RTP_LLM_TOPOLOGY_KV_POLICY", source)
-        self.assertIn("latest_topology_kv_counters", source)
         self.assertIn("_apply_topology_kv_policy", source)
         self.assertIn("apply_topology_kv_policy", source)
 
     def test_indexer_topology_env_int_reports_bad_value(self):
-        with unittest.mock.patch.dict(
-            "os.environ", {"RTP_LLM_TOPOLOGY_SINK_BLOCKS": "true"}
-        ):
+        with mock.patch.dict("os.environ", {"RTP_LLM_TOPOLOGY_SINK_BLOCKS": "true"}):
             with self.assertRaisesRegex(
                 ValueError, "RTP_LLM_TOPOLOGY_SINK_BLOCKS must be an integer"
             ):
                 _topology_env_int("RTP_LLM_TOPOLOGY_SINK_BLOCKS", 1)
 
     def test_indexer_topology_env_float_reports_bad_value(self):
-        with unittest.mock.patch.dict(
+        with mock.patch.dict(
             "os.environ", {"RTP_LLM_TOPOLOGY_MAX_STRUCTURAL_FRACTION": "many"}
         ):
             with self.assertRaisesRegex(

@@ -1,6 +1,5 @@
 import os
-import weakref
-from types import SimpleNamespace
+import logging
 from typing import Any, Dict, Optional, Tuple
 
 import torch
@@ -17,7 +16,7 @@ from rtp_llm.ops import AttentionConfigs, HWKernelConfig, ParallelismConfig
 from rtp_llm.ops.compute_ops import KVCache
 from rtp_llm.utils.model_weight import W
 
-_TOPOLOGY_KV_STATE = weakref.WeakKeyDictionary()
+_TOPOLOGY_KV_CUDA_SYNC_WARNING_EMITTED = False
 
 
 def _topology_env_int(name: str, default: int) -> int:
@@ -151,16 +150,6 @@ class Indexer(nn.Module):
     def _is_sparse_prefill_cp(self, attention_inputs: Any) -> bool:
         return bool(attention_inputs.is_prefill) and self._prefill_cp_enabled()
 
-    @property
-    def latest_topology_kv_counters(self):
-        state = _TOPOLOGY_KV_STATE.get(self)
-        return state.counters if state is not None else None
-
-    @property
-    def latest_topology_kv_fingerprint(self):
-        state = _TOPOLOGY_KV_STATE.get(self)
-        return state.stable_fingerprint if state is not None else None
-
     # TODO: fuse kernel here
     def _get_logits_head_gate(
         self, x: torch.Tensor, q_scale: torch.Tensor
@@ -239,6 +228,16 @@ class Indexer(nn.Module):
             topk_result.is_cuda
             and os.getenv("RTP_LLM_TOPOLOGY_KV_ALLOW_CUDA_SYNC") != "1"
         ):
+            global _TOPOLOGY_KV_CUDA_SYNC_WARNING_EMITTED
+            if not _TOPOLOGY_KV_CUDA_SYNC_WARNING_EMITTED:
+                logging.warning(
+                    "RTP_LLM_TOPOLOGY_KV_POLICY=%s is skipped for CUDA top-k "
+                    "indices because RTP_LLM_TOPOLOGY_KV_ALLOW_CUDA_SYNC is not "
+                    "set to 1. Enabling that flag allows an experimental host-sync "
+                    "Python policy path and is not intended for online hot paths.",
+                    self.topology_kv_policy,
+                )
+                _TOPOLOGY_KV_CUDA_SYNC_WARNING_EMITTED = True
             return topk_result
         config = TopologyKvPolicyConfig(
             policy=self.topology_kv_policy,
@@ -258,11 +257,6 @@ class Indexer(nn.Module):
             topk_indices_offset=topk_indices_offset,
             stable_scaffold=self.topology_stable_scaffold,
             output_contract=self.topology_output_contract,
-            previous_fingerprint=self.latest_topology_kv_fingerprint,
-        )
-        _TOPOLOGY_KV_STATE[self] = SimpleNamespace(
-            counters=result.counters,
-            stable_fingerprint=result.stable_fingerprint,
         )
         return result.topk_indices
 

@@ -16,6 +16,11 @@ is only an observability key for repeated stable regions; this module does not
 physically compress the KV cache. Counters report selected-token shape and how
 many stable tokens were represented by that fingerprint but not selected as raw
 top-k candidates.
+
+Merge modes intentionally change the sparse attention candidate set: structural
+tokens are admitted within a configured budget fraction and can reorder or evict
+learned top-k entries. `learned_kept_tokens` and `learned_evicted_tokens` expose
+that semantic change to callers.
 """
 
 import hashlib
@@ -221,16 +226,16 @@ def _merge_row(
             if len(selected) == structural_budget:
                 break
 
-    unique_valid_learned: list[int] = []
-    learned_seen: set[int] = set()
+    unique_valid_learned = {
+        value
+        for value in learned_values
+        if value >= 0 and local_start <= value < local_end
+    }
     for value in learned_values:
         if value < 0:
             continue
         if not local_start <= value < local_end:
             continue
-        if value not in learned_seen:
-            unique_valid_learned.append(value)
-            learned_seen.add(value)
         if value not in seen:
             selected.append(value)
             seen.add(value)
