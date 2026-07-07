@@ -66,13 +66,23 @@ def http_deps():
         build_file = clean_dep("@rtp_llm//:BUILD.pytorch"),
     )
 
+    http_archive(
+        name = "torch_2.3_py310_cpu_aarch64",
+        sha256 = "bef6996c27d8f6e92ea4e13a772d89611da0e103b48790de78131e308cf73076",
+        urls = [
+            "https://mirrors.aliyun.com/pytorch-wheels/cpu/torch-2.1.2-cp310-cp310-manylinux_2_17_aarch64.manylinux2014_aarch64.whl#sha256=bef6996c27d8f6e92ea4e13a772d89611da0e103b48790de78131e308cf73076",
+        ],
+        type = "zip",
+        build_file = clean_dep("@rtp_llm//:BUILD.pytorch"),
+    )
+
     # aiter C++ headers/runtime archive is kept in lock-step with the Python wheel
-    # pinned in requirements_lock_rocm.txt (0.1.13.dev14) to avoid ABI mismatch.
+    # in requirements_rocm.txt (0.1.17.dev79) to avoid ABI mismatch.
     http_archive(
         name = "aiter",
-        sha256 = "6f0f49ab55490acbce7bb40d147fdeb14418b447d9dfc4b9212dc23ca82b4a88",
+        sha256 = "23c2fd22ea8130aa70750dee3fb3dfe08a0bcb60592188a26d64d84b0b6caa25",
         urls = [
-            "https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis/AMD/RTP/aiter-0.1.13.dev14%2Bgfa35072d0.d20260402-cp310-cp310-linux_x86_64.whl",
+            "https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis/AMD/aiter/aiter-0.1.17.dev79%2Bg2570b35f9.d20260623-cp310-cp310-linux_x86_64.whl",
         ],
         type = "zip",
         build_file = clean_dep("@rtp_llm//:BUILD.aiter"),

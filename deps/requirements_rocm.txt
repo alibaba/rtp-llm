@@ -1,5 +1,7 @@
 -r requirements_base.txt
-aiter==0.1.13.dev14+gfa35072d0.d20260402
+# aiter/triton/triton-kernels are AMD custom wheels on sinian-metrics OSS;
+# reference them by URL at the versions upstream ships.
+aiter @ https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis/AMD/aiter/aiter-0.1.17.dev79%2Bg2570b35f9.d20260623-cp310-cp310-linux_x86_64.whl
 # Pinned explicitly: flydsl is a ROCm-only dep consumed by
 # //rtp_llm/models_py/triton_kernels:fla. It used to be pulled in transitively
 # via aiter; pin it directly so the lockfile keeps it regardless of aiter metadata.
@@ -11,4 +13,5 @@ pyrsmi==0.2.0
 pyyaml==6.0.2
 torch==2.9.1+git7e1940d
 torchvision==0.24.0+rocm7.2.0.gitb919bd0c
-triton==3.5.1+rocm7.2.0.gita272dfa8
+triton @ https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis/AMD/triton/triton-3.7.0%2Bamd.rocm7.2.0.gitd0d77a509-cp310-cp310-linux_x86_64.whl
+triton-kernels @ https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis/AMD/triton/triton_kernels-1.0.0%2Bamd.rocm7.2.0.gitd0d77a509-py3-none-any.whl

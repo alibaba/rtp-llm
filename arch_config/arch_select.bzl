@@ -56,7 +56,12 @@ def subscribe_deps():
 
 def whl_deps():
     return select({
-        "@rtp_llm//:using_rocm": ["pyrsmi==0.2.0", "amdsmi@https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis%2FAMD%2Famd_smi%2Fali%2Famd_smi.tar", "aiter@https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis/AMD/RTP/aiter-0.1.13.dev14%2Bgfa35072d0.d20260402-cp310-cp310-linux_x86_64.whl"],
+        "@rtp_llm//:using_rocm": [
+            "pyrsmi==0.2.0",
+            "amdsmi@https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis%2FAMD%2Famd_smi%2Fali%2Famd_smi.tar",
+            "aiter@https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis/AMD/aiter/aiter-0.1.17.dev79%2Bg2570b35f9.d20260623-cp310-cp310-linux_x86_64.whl",
+            "triton-kernels@https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis/AMD/triton/triton_kernels-1.0.0%2Bamd.rocm7.2.0.gitd0d77a509-py3-none-any.whl",
+        ],
         # aarch64 (arm) is intentionally on torch 2.9.0 while x86 stays on 2.8.0.
         # Keep each in lock-step with its lockfile: 2.9.0 <-> requirements_lock_cuda12_arm.txt,
         # 2.8.0 <-> requirements_lock_torch_gpu_cuda12_9.txt. Bump both together only

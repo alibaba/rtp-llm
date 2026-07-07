@@ -2,7 +2,7 @@ package(default_visibility = ["//visibility:public"])
 load("@rules_python//python:packaging.bzl", "py_package", "py_wheel")
 # make different torch for different device when in compiling
 load("//bazel:defs.bzl", "upload_pkg", "copy_target_to", "upload_wheel", "rename_wheel", "rename_wheel_aarch64")
-load("@arch_config//:arch_select.bzl", "requirement", "whl_deps", "internal_deps", "jit_deps", "triton_deps", "platform_deps")
+load("@arch_config//:arch_select.bzl", "requirement", "whl_deps", "internal_deps", "jit_deps", "platform_deps")
 load("//bazel:bundle.bzl", "bundle_files", "bundle_tar")
 
 load("@release_version//:defs.bzl", "RELEASE_VERSION")
@@ -90,6 +90,7 @@ requirement([
     "torch",
     "torchvision",
     "triton",
+    "triton-kernels",
     "numpy",
     "safetensors",
     "einops",
@@ -281,7 +282,7 @@ py_library(
         "@//:using_rocm": ["pyrsmi", "amdsmi"],
         "@//:using_cuda12_arm": [],
         "//conditions:default": []
-    }) + triton_deps(["triton"]) + internal_deps(),
+    }) + internal_deps(),
 )
 
 py_library(
@@ -506,6 +507,7 @@ py_library(
             ":embedding",
             "//rtp_llm/tools/convert:convert",
             ":aiter",
+            ":triton-kernels",
         ],
         "//conditions:default": [
             ":models",

@@ -394,8 +394,10 @@ class EplbMode:
     def value(self) -> int:
         ...
 class FIFOSchedulerConfig:
+    decode_prefill_ratio: str
     max_batch_tokens_size: int
     max_context_batch_size: int
+    pdfusion_scheduler_mode: str
     def __getstate__(self) -> tuple:
         ...
     def __init__(self) -> None:
