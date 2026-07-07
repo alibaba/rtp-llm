@@ -1,6 +1,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/host/HostBlockPool.h"
 
 #include <cstdint>
+#include <cstring>
 
 #include "gtest/gtest.h"
 
@@ -83,6 +84,54 @@ TEST(HostBlockPoolTest, PinnedFallbackDoesNotFailInit) {
     ASSERT_TRUE(block.has_value());
     auto buffer = pool.blockBuffer(*block);
     EXPECT_NE(buffer.addr, nullptr);
+}
+
+TEST(HostBlockPoolTest, HostBufferMemoryIsUsableAndDistinct) {
+    // Deterministic pageable path (enable_pinned=false) with small blocks.
+    auto          config = makeConfig(/*physical_block_count=*/4,
+                             /*payload_bytes=*/64,
+                             /*stride_bytes=*/256,
+                             /*enable_pinned=*/false,
+                             /*alignment=*/64);
+    HostBlockPool pool(config);
+    ASSERT_TRUE(pool.init());
+    EXPECT_FALSE(pool.isPinned());
+
+    auto block_a = pool.malloc();
+    auto block_b = pool.malloc();
+    ASSERT_TRUE(block_a.has_value());
+    ASSERT_TRUE(block_b.has_value());
+    ASSERT_NE(*block_a, *block_b);
+
+    auto buffer_a = pool.blockBuffer(*block_a);
+    auto buffer_b = pool.blockBuffer(*block_b);
+    ASSERT_NE(buffer_a.addr, nullptr);
+    ASSERT_NE(buffer_b.addr, nullptr);
+
+    const size_t payload_bytes = buffer_a.payload_bytes;
+    ASSERT_EQ(payload_bytes, buffer_b.payload_bytes);
+
+    constexpr uint8_t kPatternA = 0xAB;
+    constexpr uint8_t kPatternB = 0xCD;
+
+    // Write a distinct byte pattern across the full payload of each block. If addr
+    // were not real, writable host memory, these writes would crash or be silently
+    // dropped.
+    std::memset(buffer_a.addr, kPatternA, payload_bytes);
+    std::memset(buffer_b.addr, kPatternB, payload_bytes);
+
+    // Read back every byte of A: proves the write to A actually landed and that
+    // writing B did not alias/clobber A's payload region.
+    const auto* bytes_a = static_cast<const uint8_t*>(buffer_a.addr);
+    for (size_t i = 0; i < payload_bytes; ++i) {
+        ASSERT_EQ(bytes_a[i], kPatternA) << "mismatch at byte " << i << " of block A";
+    }
+
+    // Read back every byte of B: proves B's write landed independently of A.
+    const auto* bytes_b = static_cast<const uint8_t*>(buffer_b.addr);
+    for (size_t i = 0; i < payload_bytes; ++i) {
+        ASSERT_EQ(bytes_b[i], kPatternB) << "mismatch at byte " << i << " of block B";
+    }
 }
 
 TEST(HostBlockPoolTest, LifecycleComesFromIBlockPool) {
