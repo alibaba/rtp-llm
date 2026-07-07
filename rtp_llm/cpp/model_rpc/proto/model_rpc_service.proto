@@ -594,11 +594,37 @@ message RemoteBlockMaskPB {
     }
 }
 
+message KVSOperationRequestPB {
+    enum Operation {
+        READ = 0;
+        WRITE = 1;
+    }
+    message BufferSpec {
+        int32 layer_id = 1;
+        int32 group_id = 2;
+        int32 block_id = 3;
+        uint64 object_offset = 4;
+    }
+    message ObjectItem {
+        string object_key = 1;
+        repeated BufferSpec buffers = 2;
+    }
+    repeated ObjectItem items = 1;
+    string trace_id = 2;
+    Operation operation = 3;
+}
+
+message KVSOperationResponsePB {
+    bool success = 1;
+    string error_message = 2;
+}
+
 message FunctionRequestPB {
     oneof request {
         MemoryOperationRequestPB mem_request = 1;
         RemoteOperationRequestPB remote_request = 2;
         P2PConnectorBroadcastTpRequestPB p2p_request = 3;
+        KVSOperationRequestPB kvs_request = 4;
     }
 }
 
@@ -620,6 +646,7 @@ message FunctionResponsePB {
         MemoryOperationResponsePB mem_response = 1;
         RemoteOperationResponsePB remote_response = 2;
         P2PConnectorBroadcastTpResponsePB p2p_response = 3;
+        KVSOperationResponsePB kvs_response = 4;
     }
 }
 

@@ -137,6 +137,7 @@ std::string KVCacheConfig::to_string() const {
         << "enable_device_cache: " << enable_device_cache << "\n"
         << "enable_memory_cache: " << enable_memory_cache << "\n"
         << "enable_remote_cache: " << enable_remote_cache << "\n"
+        << "enable_kvs_cache: " << enable_kvs_cache << "\n"
         << "write_cache_sync: " << write_cache_sync << "\n"
         << "enable_tiered_memory_cache: " << enable_tiered_memory_cache << "\n"
         << "enable_gpu_prefix_tree: " << enable_gpu_prefix_tree << "\n"
@@ -145,7 +146,16 @@ std::string KVCacheConfig::to_string() const {
         << "prefix_tree_memory_state_swa_pool_ratio: " << prefix_tree_memory_state_swa_pool_ratio << "\n"
         << "enable_independent_group_eviction: " << enable_independent_group_eviction << "\n"
         << "device_cache_min_free_blocks: " << device_cache_min_free_blocks << "\n"
-        << "load_cache_retry_times: " << load_cache_retry_times << "\n";
+        << "load_cache_retry_times: " << load_cache_retry_times << "\n"
+        << "kvs_endpoint_url: " << kvs_endpoint_url << "\n"
+        << "kvs_socket_path: " << kvs_socket_path << "\n"
+        << "kvs_read_peer: " << kvs_read_peer << "\n"
+        << "kvs_timeout_ms: " << kvs_timeout_ms << "\n"
+        << "kvs_lease_term_sec: " << kvs_lease_term_sec << "\n"
+        << "kvs_object_namespace: " << kvs_object_namespace << "\n"
+        << "kvs_cache_key_version: " << kvs_cache_key_version << "\n"
+        << "kvs_worker_thread_num: " << kvs_worker_thread_num << "\n"
+        << "kvs_worker_queue_size: " << kvs_worker_queue_size << "\n";
     return oss.str();
 }
 

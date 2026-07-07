@@ -342,6 +342,45 @@ TEST_F(KVCacheConnectorCoordinatorTest, Init_ReturnTrue_WhenMemoryEnabled_HappyP
     coordinator->update_thread_.reset();  // break shared_ptr cycle from shared_from_this()
 }
 
+TEST_F(KVCacheConnectorCoordinatorTest, Init_AddsKVSConnector_WhenKVSEnabled) {
+    CacheConfig   cache_config;
+    KVCacheConfig kv_cache_config;
+    RuntimeConfig runtime_config;
+    cache_config.layer_num        = 1;
+    cache_config.layer_all_num    = 1;
+    cache_config.block_num        = 1;
+    cache_config.block_size_bytes = 1024;
+    cache_config.dtype            = rtp_llm::TYPE_FP16;
+    initSingleGroupConfig(cache_config);
+
+    kv_cache_config.reuse_cache      = true;
+    kv_cache_config.enable_kvs_cache = true;
+
+    auto allocator = std::make_shared<MockKVCacheAllocator>(cache_config);
+    {
+        auto pool_config = BlockPoolConfigHelper::createConfig(cache_config.layer_all_num,
+                                                               cache_config.block_num,
+                                                               cache_config.block_size_bytes,
+                                                               cache_config.dtype);
+        auto pool        = std::make_shared<BlockPool>(pool_config, AllocationType::HOST);
+        ASSERT_TRUE(pool->init());
+        allocator->block_pool_ = pool;
+    }
+
+    auto coordinator = std::make_shared<KVCacheConnectorCoordinator>(
+        cache_config, kv_cache_config, runtime_config, ParallelismConfig{}, SpeculativeExecutionConfig{}, allocator);
+
+    EXPECT_TRUE(coordinator->init());
+    ASSERT_NE(coordinator->update_thread_, nullptr);
+    ASSERT_EQ(coordinator->connectors_.size(), 1u);
+    ASSERT_NE(coordinator->kvs_connector_, nullptr);
+
+    coordinator->update_thread_->stop();
+    coordinator->update_thread_.reset();
+    coordinator->connectors_.clear();
+    coordinator->kvs_connector_.reset();
+}
+
 TEST_F(KVCacheConnectorCoordinatorTest, AsyncRead_ReturnNull_WhenStop) {
     CacheConfig cache_config;
     cache_config.layer_num        = 1;

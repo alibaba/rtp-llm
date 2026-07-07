@@ -384,6 +384,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("use_block_cache", &KVCacheConfig::use_block_cache)
         .def_readwrite("enable_memory_cache", &KVCacheConfig::enable_memory_cache)
         .def_readwrite("enable_memory_cache_sm_copy", &KVCacheConfig::enable_memory_cache_sm_copy)
+        .def_readwrite("enable_kvs_cache", &KVCacheConfig::enable_kvs_cache)
         .def_readwrite("write_cache_sync", &KVCacheConfig::write_cache_sync)
         .def_readwrite("enable_tiered_memory_cache", &KVCacheConfig::enable_tiered_memory_cache)
         .def_readwrite("enable_gpu_prefix_tree", &KVCacheConfig::enable_gpu_prefix_tree)
@@ -395,6 +396,15 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("enable_independent_group_eviction", &KVCacheConfig::enable_independent_group_eviction)
         .def_readwrite("device_cache_min_free_blocks", &KVCacheConfig::device_cache_min_free_blocks)
         .def_readwrite("load_cache_retry_times", &KVCacheConfig::load_cache_retry_times)
+        .def_readwrite("kvs_endpoint_url", &KVCacheConfig::kvs_endpoint_url)
+        .def_readwrite("kvs_socket_path", &KVCacheConfig::kvs_socket_path)
+        .def_readwrite("kvs_read_peer", &KVCacheConfig::kvs_read_peer)
+        .def_readwrite("kvs_timeout_ms", &KVCacheConfig::kvs_timeout_ms)
+        .def_readwrite("kvs_lease_term_sec", &KVCacheConfig::kvs_lease_term_sec)
+        .def_readwrite("kvs_object_namespace", &KVCacheConfig::kvs_object_namespace)
+        .def_readwrite("kvs_cache_key_version", &KVCacheConfig::kvs_cache_key_version)
+        .def_readwrite("kvs_worker_thread_num", &KVCacheConfig::kvs_worker_thread_num)
+        .def_readwrite("kvs_worker_queue_size", &KVCacheConfig::kvs_worker_queue_size)
         // Remote connector configuration fields
         .def_readwrite("reco_enable_vipserver", &KVCacheConfig::reco_enable_vipserver)
         .def_readwrite("reco_vipserver_domain", &KVCacheConfig::reco_vipserver_domain)
@@ -473,13 +483,23 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.enable_prefix_tree_memory_cache,
                                       self.enable_legacy_memory_connector_fallback,
                                       self.prefix_tree_memory_state_swa_pool_ratio,
-                                      self.enable_independent_group_eviction);
+                                      self.enable_independent_group_eviction,
+                                      self.enable_kvs_cache,
+                                      self.kvs_endpoint_url,
+                                      self.kvs_socket_path,
+                                      self.kvs_read_peer,
+                                      self.kvs_timeout_ms,
+                                      self.kvs_lease_term_sec,
+                                      self.kvs_object_namespace,
+                                      self.kvs_cache_key_version,
+                                      self.kvs_worker_thread_num,
+                                      self.kvs_worker_queue_size);
             },
             [](py::tuple t) {
                 const bool has_disk_fields =
                     t.size() >= 50 && py::isinstance<py::str>(t[9]);
                 const size_t min_size = has_disk_fields ? 54u : 49u;
-                const size_t max_size = has_disk_fields ? 56u : 51u;
+                const size_t max_size = has_disk_fields ? 66u : 61u;
                 if (t.size() < min_size || t.size() > max_size) {
                     throw std::runtime_error("Invalid state!");
                 }
@@ -547,8 +567,23 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     c.enable_legacy_memory_connector_fallback = t[extra_idx++].cast<bool>();
                     c.prefix_tree_memory_state_swa_pool_ratio = t[extra_idx++].cast<int64_t>();
                     c.enable_independent_group_eviction       = t[extra_idx++].cast<bool>();
+                    if (t.size() > extra_idx && py::isinstance<py::dict>(t[extra_idx])) {
+                        (void)t[extra_idx++].cast<std::map<std::string, uint32_t>>();
+                    }
                     if (t.size() > extra_idx) {
-                        (void)t[extra_idx].cast<std::map<std::string, uint32_t>>();
+                        if (t.size() - extra_idx != 10) {
+                            throw std::runtime_error("Invalid KVS state!");
+                        }
+                        c.enable_kvs_cache        = t[extra_idx++].cast<bool>();
+                        c.kvs_endpoint_url        = t[extra_idx++].cast<std::string>();
+                        c.kvs_socket_path         = t[extra_idx++].cast<std::string>();
+                        c.kvs_read_peer           = t[extra_idx++].cast<std::string>();
+                        c.kvs_timeout_ms          = t[extra_idx++].cast<int>();
+                        c.kvs_lease_term_sec      = t[extra_idx++].cast<int>();
+                        c.kvs_object_namespace    = t[extra_idx++].cast<std::string>();
+                        c.kvs_cache_key_version   = t[extra_idx++].cast<std::string>();
+                        c.kvs_worker_thread_num   = t[extra_idx++].cast<int>();
+                        c.kvs_worker_queue_size   = t[extra_idx++].cast<int>();
                     }
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("KVCacheConfig unpickle error: ") + e.what());

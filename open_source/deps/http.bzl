@@ -5,6 +5,15 @@ def clean_dep(dep):
 
 def http_deps():
     http_archive(
+        name = "v6d_kvs_sdk",
+        build_file = clean_dep("//3rdparty/v6d_kvs:BUILD"),
+        sha256 = "809e13b1ffca3d7ee4d664765c73bba58f9b1e857b8195891f92ca83af86cb08",
+        urls = [
+            "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/package/kvs/v6d-kvs-sdk-dev.tar.gz",
+        ],
+    )
+
+    http_archive(
         name = "rules_pkg",
         urls = [
             "https://mirror.bazel.build/github.com/bazelbuild/rules_pkg/releases/download/0.6.0/rules_pkg-0.6.0.tar.gz",

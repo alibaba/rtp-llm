@@ -7,6 +7,8 @@
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include "rtp_llm/cpp/cache/connector/KVCacheConnectorReadWriteContext.h"
+#include "rtp_llm/cpp/cache/connector/kvs/KVSClientBackend.h"
+#include "rtp_llm/cpp/cache/connector/kvs/KVSConnector.h"
 #include "rtp_llm/cpp/cache/connector/memory/KVCacheMemoryConnector.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnector.h"
 #include "rtp_llm/cpp/cache/connector/p2p/LayerBlockConverterImpl.h"
@@ -154,6 +156,7 @@ KVCacheConnectorCoordinator::~KVCacheConnectorCoordinator() {
     stop_.store(true);
     // release all connectors to make sure all async context done
     memory_connector_.reset();
+    kvs_connector_.reset();
     connectors_.clear();
     // connectors already released, all async context should be done
     autil::ScopedTime2 timer;
@@ -197,6 +200,10 @@ bool KVCacheConnectorCoordinator::init() {
         memory_connector_ = initMemoryConnector();
         connectors_.emplace_back(memory_connector_);
     }
+    if (kv_cache_config_.reuse_cache && kv_cache_config_.enable_kvs_cache) {
+        kvs_connector_ = initKVSConnector();
+        connectors_.emplace_back(kvs_connector_);
+    }
 #ifdef USE_REMOTE_KV_CACHE
     if (kv_cache_config_.reuse_cache && kv_cache_config_.enable_remote_cache) {
         remote_connector_ = initRemoteConnector();
@@ -208,6 +215,45 @@ bool KVCacheConnectorCoordinator::init() {
     }
     initUpdateThread();
     return true;
+}
+
+std::shared_ptr<KVSConnector> KVCacheConnectorCoordinator::initKVSConnector() {
+    KVSConnectorConfig config;
+    config.endpoint_url         = kv_cache_config_.kvs_endpoint_url;
+    config.socket_path          = kv_cache_config_.kvs_socket_path;
+    config.read_peer            = kv_cache_config_.kvs_read_peer;
+    config.timeout_ms           = kv_cache_config_.kvs_timeout_ms;
+    config.lease_term_sec       = kv_cache_config_.kvs_lease_term_sec;
+    config.object_namespace     = kv_cache_config_.kvs_object_namespace;
+    config.cache_key_version    = kv_cache_config_.kvs_cache_key_version;
+    config.worker_thread_num    = kv_cache_config_.kvs_worker_thread_num;
+    config.worker_queue_size    = kv_cache_config_.kvs_worker_queue_size;
+
+    auto backend = std::make_shared<KVSClientBackend>(config);
+    RTP_LLM_CHECK_WITH_INFO(backend->init(), "init KVS client backend failed");
+    KVSObjectStoreConfig store_config;
+    store_config.object_namespace  = config.object_namespace;
+    store_config.cache_key_version = config.cache_key_version;
+    auto store = std::make_shared<KVSObjectStore>(std::move(store_config), backend);
+
+    std::weak_ptr<KVCacheAllocator> allocator = allocator_;
+    KVSConnector::BlockBufferResolver block_buffer_resolver =
+        [allocator](int layer_id, int group_id, BlockIdxType block_id) -> std::vector<BlockInfo> {
+            auto locked_allocator = allocator.lock();
+            if (!locked_allocator || isNullBlockIdx(block_id)) {
+                return {};
+            }
+            return locked_allocator->convertIndexToBuffer(layer_id, group_id, block_id);
+        };
+
+    auto connector = std::make_shared<KVSConnector>(cache_config_,
+                                                     std::move(config),
+                                                     std::move(store),
+                                                     std::move(block_buffer_resolver),
+                                                     runtime_config_.worker_grpc_addrs,
+                                                     parallelism_config_.tp_size);
+    RTP_LLM_CHECK_WITH_INFO(connector->init(), "init KVS connector failed");
+    return connector;
 }
 
 void KVCacheConnectorCoordinator::initUpdateThread() {
@@ -480,6 +526,9 @@ bool KVCacheConnectorCoordinator::executeFunction(const FunctionRequestPB& reque
 #endif
         RTP_LLM_CHECK(false);
         return false;
+    } else if (request.has_kvs_request()) {
+        RTP_LLM_CHECK(kvs_connector_ != nullptr);
+        return kvs_connector_->executeWorkerPlan(request.kvs_request(), *(response.mutable_kvs_response()));
     } else if (request.has_p2p_request()) {
         if (!p2p_connector_) {
             RTP_LLM_LOG_WARNING("executeFunction: p2p_request received but P2P connector not initialized");

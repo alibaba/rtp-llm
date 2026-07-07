@@ -39,6 +39,86 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         help="控制是否启用Remote Cache的机制。设置为 True 启用 , False 关闭",
     )
     kv_cache_group.add_argument(
+        "--enable_kvs_cache",
+        env_name="ENABLE_KVS_CACHE",
+        bind_to=(kv_cache_config, "enable_kvs_cache"),
+        type=str2bool,
+        default=False,
+        help="控制是否启用KVS Cache connector。设置为 True 启用, False 关闭",
+    )
+    kv_cache_group.add_argument(
+        "--kvs_endpoint_url",
+        env_name="KVS_ENDPOINT_URL",
+        bind_to=(kv_cache_config, "kvs_endpoint_url"),
+        type=str,
+        default="",
+        help="KVS meta endpoint URL",
+    )
+    kv_cache_group.add_argument(
+        "--kvs_socket_path",
+        env_name="KVS_SOCKET_PATH",
+        bind_to=(kv_cache_config, "kvs_socket_path"),
+        type=str,
+        default="",
+        help="KVS local vineyard socket path",
+    )
+    kv_cache_group.add_argument(
+        "--kvs_read_peer",
+        env_name="KVS_READ_PEER",
+        bind_to=(kv_cache_config, "kvs_read_peer"),
+        type=str,
+        default="local",
+        help="KVS read peer, local or remote",
+    )
+    kv_cache_group.add_argument(
+        "--kvs_timeout_ms",
+        env_name="KVS_TIMEOUT_MS",
+        bind_to=(kv_cache_config, "kvs_timeout_ms"),
+        type=int,
+        default=12000,
+        help="KVS request timeout in milliseconds",
+    )
+    kv_cache_group.add_argument(
+        "--kvs_lease_term_sec",
+        env_name="KVS_LEASE_TERM_SEC",
+        bind_to=(kv_cache_config, "kvs_lease_term_sec"),
+        type=int,
+        default=60,
+        help="KVS lease term in seconds",
+    )
+    kv_cache_group.add_argument(
+        "--kvs_object_namespace",
+        env_name="KVS_OBJECT_NAMESPACE",
+        bind_to=(kv_cache_config, "kvs_object_namespace"),
+        type=str,
+        default="rtp_llm/kvs",
+        help="KVS object key namespace",
+    )
+    kv_cache_group.add_argument(
+        "--kvs_cache_key_version",
+        env_name="KVS_CACHE_KEY_VERSION",
+        bind_to=(kv_cache_config, "kvs_cache_key_version"),
+        type=str,
+        default="v1",
+        help="KVS object key version",
+    )
+    kv_cache_group.add_argument(
+        "--kvs_worker_thread_num",
+        env_name="KVS_WORKER_THREAD_NUM",
+        bind_to=(kv_cache_config, "kvs_worker_thread_num"),
+        type=int,
+        default=8,
+        help="KVS connector async worker thread count",
+    )
+    kv_cache_group.add_argument(
+        "--kvs_worker_queue_size",
+        env_name="KVS_WORKER_QUEUE_SIZE",
+        bind_to=(kv_cache_config, "kvs_worker_queue_size"),
+        type=int,
+        default=1024,
+        help="KVS connector async worker queue size",
+    )
+    kv_cache_group.add_argument(
         "--multi_task_prompt",
         env_name="MULTI_TASK_PROMPT",
         bind_to=(kv_cache_config, "multi_task_prompt"),

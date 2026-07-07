@@ -389,7 +389,7 @@ class FlashInferTRTLLMPrefillOp(object):
         bmm2_scale = 1.0
         if kv_cache:
             kv_cache.kv_cache_base = kv_cache.kv_cache_base.view(
-                kv_cache.kv_cache_base.shape[0],
+                -1,
                 2,
                 self.local_head_kv_num,
                 self.seq_size_per_block,
@@ -503,7 +503,7 @@ class FlashInferTRTLLMDecodeOp(object):
         # sink: additional value per head in the denominator of the softmax.
         if kv_cache:
             kv_cache.kv_cache_base = kv_cache.kv_cache_base.view(
-                kv_cache.kv_cache_base.shape[0],
+                -1,
                 2,
                 self.local_head_kv_num,
                 self.seq_size_per_block,

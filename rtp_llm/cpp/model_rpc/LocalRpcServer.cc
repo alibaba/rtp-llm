@@ -535,9 +535,8 @@ void LocalRpcServer::reportCacheStatusTime(int64_t request_begin_time_us) {
         return grpc::Status(grpc::StatusCode::INTERNAL, "cache manager is null");
     }
     if (!cache_manager->executeFunction(*request, *response)) {
-        RTP_LLM_LOG_WARNING("execute function failed, request: [%s]", request->DebugString().c_str());
-        const std::string error_msg = "execute function failed, request: [" + request->DebugString() + "]";
-        return grpc::Status(grpc::StatusCode::INTERNAL, error_msg);
+        RTP_LLM_LOG_WARNING("execute function failed, request case: %d", static_cast<int>(request->request_case()));
+        return grpc::Status(grpc::StatusCode::INTERNAL, "execute function failed");
     }
     return grpc::Status::OK;
 }

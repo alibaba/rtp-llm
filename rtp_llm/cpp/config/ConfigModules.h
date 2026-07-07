@@ -177,6 +177,7 @@ struct KVCacheConfig {
     // When true, memory-cache H2D/D2H may use split-KV SM scatter/gather (CUDA) when layout is eligible.
     bool    enable_memory_cache_sm_copy                  = false;
     bool    enable_remote_cache                          = false;
+    bool    enable_kvs_cache                             = false;
     bool    write_cache_sync                             = false;
     bool    enable_tiered_memory_cache                   = false;
     bool    enable_gpu_prefix_tree                       = true;
@@ -186,6 +187,17 @@ struct KVCacheConfig {
     bool    enable_independent_group_eviction            = false;
     int64_t device_cache_min_free_blocks                 = 0;
     int     load_cache_retry_times = 1;  // Maximum retry attempts for load cache transfer failures
+
+    // KVS connector configuration fields
+    std::string kvs_endpoint_url      = "";
+    std::string kvs_socket_path       = "";
+    std::string kvs_read_peer         = "local";
+    int         kvs_timeout_ms        = 12000;
+    int         kvs_lease_term_sec    = 60;
+    std::string kvs_object_namespace  = "rtp_llm/kvs";
+    std::string kvs_cache_key_version = "v1";
+    int         kvs_worker_thread_num = 8;
+    int         kvs_worker_queue_size = 1024;
 
     // Remote connector configuration fields
     bool        reco_enable_vipserver                = false;

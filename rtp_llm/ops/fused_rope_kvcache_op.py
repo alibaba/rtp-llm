@@ -111,7 +111,7 @@ class FusedRopeKVCachePrefillOpBase:
                 rope_cache.data if check_rope_cache(rope_config, rope_cache) else None
             ),
             padding_offset=params.padding_offset,
-            cp_position_ids=params.cp_position_ids,
+            position_ids=params.cp_position_ids,
             use_logn_attn=self.attn_configs.use_logn_attn,
             rope_style=rope_config.style,
             rope_dim=rope_config.dim,
@@ -183,6 +183,7 @@ class FusedRopeKVCacheDecodeOp:
         assert params.sequence_lengths.is_cuda, "sequence_lengths must be a CUDA tensor"
         return decode_fused_rope_kvcache(
             qkv,
+            params.cp_position_ids,
             params.sequence_lengths,
             params.sequence_lengths.size(0),
             self.attn_configs.head_num,
