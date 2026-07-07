@@ -257,7 +257,7 @@ def build_block_candidate_schedule(
     for query_block in range(block_count):
         rows.append(_build_candidate_row(query_block, config, drift_score_values))
 
-    return torch.tensor(rows, dtype=torch.long).to(device=key_block_centroids.device)
+    return torch.tensor(rows, dtype=torch.long, device=key_block_centroids.device)
 
 
 def dense_decode_attention(
