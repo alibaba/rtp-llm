@@ -3235,30 +3235,6 @@ __device__ __forceinline__ int dsv4MegaBuildCompressedIndicesForRow(const scalar
                             }
                         } else {
 #pragma unroll
-                            for (int sort_i = 1; sort_i < kMegaIndexerCandidateTile; ++sort_i) {
-                                if (sort_i < sorted_tile_count) {
-                                    const int tile_i = reduce_indices_second[sort_i];
-                                    const int candidate = c + tile_i;
-                                    const float score = reduce_result[tile_i];
-                                    int insert = sort_i;
-#pragma unroll
-                                    for (int scan = sort_i - 1; scan >= 0; --scan) {
-                                        if (scan < sorted_tile_count) {
-                                            const int scan_tile_i = reduce_indices_second[scan];
-                                            const int scan_candidate = c + scan_tile_i;
-                                            const float scan_score = reduce_result[scan_tile_i];
-                                            if (dsv4MegaTopKBetter(score, candidate, scan_score, scan_candidate)) {
-                                                reduce_indices_second[scan + 1] = scan_tile_i;
-                                                insert = scan;
-                                            } else {
-                                                break;
-                                            }
-                                        }
-                                    }
-                                    reduce_indices_second[insert] = tile_i;
-                                }
-                            }
-#pragma unroll
                             for (int tile_rank = 0; tile_rank < kMegaIndexerCandidateTile; ++tile_rank) {
                                 if (tile_rank >= sorted_tile_count) {
                                     break;
@@ -3706,30 +3682,6 @@ __device__ __forceinline__ int dsv4MegaBuildCompressedIndicesFromScores(const in
                 int replaced_slot = -1;
                 float replaced_score = kInvalidCompressorScore;
                 int replaced_idx = -2147483647;
-#pragma unroll
-                for (int sort_i = 1; sort_i < kMegaIndexerCandidateTile; ++sort_i) {
-                    if (sort_i < sorted_tile_count) {
-                        const int tile_i = reduce_indices_second[sort_i];
-                        const int candidate = c + tile_i;
-                        const float score = row_scores[candidate];
-                        int insert = sort_i;
-#pragma unroll
-                        for (int scan = sort_i - 1; scan >= 0; --scan) {
-                            if (scan < sorted_tile_count) {
-                                const int scan_tile_i = reduce_indices_second[scan];
-                                const int scan_candidate = c + scan_tile_i;
-                                const float scan_score = row_scores[scan_candidate];
-                                if (dsv4MegaTopKBetter(score, candidate, scan_score, scan_candidate)) {
-                                    reduce_indices_second[scan + 1] = scan_tile_i;
-                                    insert = scan;
-                                } else {
-                                    break;
-                                }
-                            }
-                        }
-                        reduce_indices_second[insert] = tile_i;
-                    }
-                }
 #pragma unroll
                 for (int tile_rank = 0; tile_rank < kMegaIndexerCandidateTile; ++tile_rank) {
                     if (tile_rank >= sorted_tile_count) {
