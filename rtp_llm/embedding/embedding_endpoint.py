@@ -74,12 +74,13 @@ class EmbeddingEndpoint(object):
         if isinstance(request, str):
             request = json.loads(request)
         try:
+            profile_config = self._extract_profile_config(request)
             formate_request = self.renderer.render_request(request)
             batch_input = self.renderer.create_input(formate_request)
         except Exception as e:
             raise FtRuntimeException(ExceptionType.ERROR_INPUT_FORMAT_ERROR, str(e))
         try:
-            batch_output = await self.generate_embeddings(batch_input)
+            batch_output = await self.generate_embeddings(batch_input, profile_config)
             response = await self.renderer.render_response(
                 formate_request, batch_input, batch_output
             )
@@ -88,14 +89,34 @@ class EmbeddingEndpoint(object):
             raise FtRuntimeException(ExceptionType.EXECUTION_EXCEPTION, str(e))
         return response, logable_response
 
-    async def generate_embeddings(self, input: EngineInputs):
+    @staticmethod
+    def _extract_profile_config(request: Dict[str, Any]) -> Dict[str, Any]:
+        def as_dict(value):
+            return value if isinstance(value, dict) else {}
+
+        extra_configs = as_dict(request.get("extra_configs"))
+        generate_config = as_dict(request.get("generate_config"))
+        config = {**extra_configs, **generate_config}
+        return {
+            "gen_timeline": bool(config.get("gen_timeline", False)),
+            "profile_step": int(config.get("profile_step", 1)),
+            "profile_trace_name": str(config.get("profile_trace_name", "")),
+        }
+
+    async def generate_embeddings(
+        self, input: EngineInputs, profile_config: Optional[Dict[str, Any]] = None
+    ):
         output = EngineOutputs(outputs=None, input_length=0)
-        await self.generate_embeddings_grpc(input, output)
+        await self.generate_embeddings_grpc(input, output, profile_config)
         return output
 
     async def generate_embeddings_grpc(
-        self, input: EngineInputs, output: EngineOutputs
+        self,
+        input: EngineInputs,
+        output: EngineOutputs,
+        profile_config: Optional[Dict[str, Any]] = None,
     ):
+        profile_config = profile_config or {}
         channel = grpc.aio.insecure_channel(self.address, options=self.options)
         stub = pb2_grpc.EmbeddingRpcServiceStub(channel)
         multimodal_features = []
@@ -133,6 +154,9 @@ class EmbeddingEndpoint(object):
             request_id=1,  # 唯一请求ID
             multimodal_features=multimodal_features,
             vit_role_addr=vit_role_addr,
+            gen_timeline=profile_config.get("gen_timeline", False),
+            profile_step=profile_config.get("profile_step", 1),
+            profile_trace_name=profile_config.get("profile_trace_name", ""),
         )
         try:
             response = await stub.embedding(request)

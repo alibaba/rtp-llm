@@ -64,7 +64,11 @@ grpc::Status EmbeddingRpcServiceImpl::embedding(grpc::ServerContext*    context,
         }
 
         // Stage 3: Embedding Decode
-        embedding_output = embedding_engine_->decode(embedding_input);
+        EmbeddingProfileConfig profile_config;
+        profile_config.gen_timeline       = request->gen_timeline();
+        profile_config.profile_step       = request->profile_step();
+        profile_config.profile_trace_name = request->profile_trace_name();
+        embedding_output                  = embedding_engine_->decode(embedding_input, profile_config);
 
         // Stage 4: Post Processing
         if (need_post_process_) {

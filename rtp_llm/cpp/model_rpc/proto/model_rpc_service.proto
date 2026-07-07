@@ -430,6 +430,9 @@ message EmbeddingInputPB {
     int64 request_id = 4;
     repeated MultimodalInputPB multimodal_features = 5;
     string vit_role_addr = 6;
+    bool gen_timeline = 7;
+    int32 profile_step = 8;
+    string profile_trace_name = 9;
 }
 
 message EmbeddingHealthRequestPB {
