@@ -226,6 +226,8 @@ bool RtpLLMSchedulerMetrics::init(kmonitor::MetricsGroupManager* manager) {
     REGISTER_GAUGE_MUTABLE_METRIC(running_stream_size_metric, "rtp_llm_running_stream_size");
     REGISTER_GAUGE_MUTABLE_METRIC(remote_running_stream_size_metric, "rtp_llm_remote_running_stream_size");
     REGISTER_GAUGE_MUTABLE_METRIC(loading_cache_stream_size_metric, "rtp_llm_loading_cache_stream_size");
+    REGISTER_GAUGE_MUTABLE_METRIC(pending_decode_stream_size_metric, "rtp_llm_pending_decode_stream_size");
+    REGISTER_GAUGE_MUTABLE_METRIC(decode_since_prefill_metric, "rtp_llm_decode_since_prefill");
     return true;
 }
 
@@ -234,6 +236,8 @@ void RtpLLMSchedulerMetrics::report(const kmonitor::MetricsTags* tags, RtpLLMSch
     REPORT_MUTABLE_METRIC(running_stream_size_metric, collector->running_stream_size);
     REPORT_MUTABLE_METRIC(remote_running_stream_size_metric, collector->remote_running_stream_size);
     REPORT_MUTABLE_METRIC(loading_cache_stream_size_metric, collector->loading_cache_stream_size);
+    REPORT_MUTABLE_METRIC(pending_decode_stream_size_metric, collector->pending_decode_stream_size);
+    REPORT_MUTABLE_METRIC(decode_since_prefill_metric, collector->decode_since_prefill);
 }
 
 bool RtpLLMEngineMetrics::init(kmonitor::MetricsGroupManager* manager) {
