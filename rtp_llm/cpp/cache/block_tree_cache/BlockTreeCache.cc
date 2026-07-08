@@ -118,7 +118,7 @@ BlockTreeMatchResult BlockTreeCache::match(const CacheKeysType& cache_keys) {
         return result;
     }
 
-    size_t    valid_matched_blocks = 0;
+    size_t    valid_matched_block_count = 0;
     TreeNode* best_match           = nullptr;
 
     std::vector<std::unique_ptr<MatchValidator>> validators;
@@ -131,24 +131,25 @@ BlockTreeMatchResult BlockTreeCache::match(const CacheKeysType& cache_keys) {
         TreeNode* node      = find_result.path[i];
         bool      all_valid = true;
 
-        // Run ALL validators (no short-circuit) — SWA validator is stateful.
-        // Only FULL validator gates match validity; SWA/LINEAR track state only.
+        // Run ALL validators without short-circuit because SWA validator keeps window state.
+        // A node is a reusable match boundary only when every group accepts it.
         for (size_t g = 0; g < component_groups_.size(); ++g) {
-            auto& slot  = node->group_slots[static_cast<size_t>(component_groups_[g]->component_group_id)];
-            bool  valid = validators[g]->validate(node, slot);
-            if (component_groups_[g]->group_type == CacheGroupType::FULL && !valid) {
+            const size_t group_id = static_cast<size_t>(component_groups_[g]->component_group_id);
+            GroupSlot&   slot     = node->group_slots[group_id];
+            const bool   valid    = validators[g]->validate(node, slot);
+            if (!valid) {
                 all_valid = false;
             }
         }
 
         if (all_valid) {
-            valid_matched_blocks = i + 1;
+            valid_matched_block_count = i + 1;
             best_match           = node;
         }
     }
 
     result.matched_node   = best_match;
-    result.matched_blocks = valid_matched_blocks;
+    result.matched_blocks = valid_matched_block_count;
 
     // Find FULL group's component_group_id for block_indices collection
     int full_group_id = -1;
@@ -161,7 +162,7 @@ BlockTreeMatchResult BlockTreeCache::match(const CacheKeysType& cache_keys) {
 
     if (full_group_id >= 0) {
         auto gidx = static_cast<size_t>(full_group_id);
-        for (size_t i = 0; i < valid_matched_blocks; ++i) {
+        for (size_t i = 0; i < valid_matched_block_count; ++i) {
             TreeNode* node = find_result.path[i];
             if (gidx < node->group_slots.size()) {
                 auto& slot = node->group_slots[gidx];
@@ -174,7 +175,7 @@ BlockTreeMatchResult BlockTreeCache::match(const CacheKeysType& cache_keys) {
         }
     }
 
-    for (size_t i = 0; i < valid_matched_blocks; ++i) {
+    for (size_t i = 0; i < valid_matched_block_count; ++i) {
         TreeNode* node = find_result.path[i];
         for (auto& group : component_groups_) {
             auto  gid  = static_cast<size_t>(group->component_group_id);
@@ -185,87 +186,14 @@ BlockTreeMatchResult BlockTreeCache::match(const CacheKeysType& cache_keys) {
         }
     }
 
-    // Phase 2: path lock — per-group reference strategy (SWA uses window lock)
-    // Use device_pools_ for per-block reference counting
-    {
-        std::vector<TreeNode*> match_path(find_result.path.begin(),
-                                          find_result.path.begin() + static_cast<ptrdiff_t>(valid_matched_blocks));
-
-        for (auto& group : component_groups_) {
-            size_t ref_count = group->computeReferenceCount(valid_matched_blocks, match_path);
-            size_t start_idx = (valid_matched_blocks > ref_count) ? (valid_matched_blocks - ref_count) : 0;
-            auto   gid       = static_cast<size_t>(group->component_group_id);
-            for (size_t i = start_idx; i < valid_matched_blocks; ++i) {
-                TreeNode* node = match_path[i];
-                if (gid < node->group_slots.size()) {
-                    auto& slot = node->group_slots[gid];
-                    if (slot.has_device_value()) {
-                        group->referenceDeviceBlocks(slot.device_blocks);
-                    }
-                }
-            }
-        }
-    }
+    std::vector<TreeNode*> match_path(
+        find_result.path.begin(), find_result.path.begin() + static_cast<ptrdiff_t>(valid_matched_block_count));
+    referenceMatchedDeviceBlocks(match_path);
 
     // Phase 2: load_back — detect and transfer Host/Disk data to GPU
     if (config_.enable_load_back && best_match != nullptr) {
         std::vector<LoadBackItem> lb_items;
-
-        for (size_t i = 0; i < valid_matched_blocks; ++i) {
-            TreeNode* node = find_result.path[i];
-            for (auto& group : component_groups_) {
-                auto  gid  = static_cast<size_t>(group->component_group_id);
-                auto& slot = node->group_slots[gid];
-
-                if (slot.has_device_value())
-                    continue;  // Already on GPU
-
-                Tier source = Tier::NONE;
-                if (slot.has_host_value()) {
-                    source = Tier::HOST;
-                } else if (slot.has_disk_value()) {
-                    source = Tier::DISK;
-                }
-                if (source == Tier::NONE)
-                    continue;
-
-                // Allocate device blocks (if allocator available)
-                std::vector<BlockIdxType> dev_blocks;
-                if (device_block_allocator_) {
-                    size_t count = group->component_indices.empty() ? 1 : group->component_indices.size();
-                    dev_blocks   = device_block_allocator_(group->component_group_id, count);
-                    if (dev_blocks.empty()) {
-                        RTP_LLM_LOG_WARNING("BlockTreeCache::match: load_back allocator failed "
-                                            "group[%d] node_key=%ld",
-                                            group->component_group_id,
-                                            node->cache_key);
-                        continue;
-                    }
-                    slot.device_blocks = dev_blocks;
-                }
-
-                lb_items.push_back({node, group->component_group_id, source, dev_blocks});
-
-                if (source == Tier::HOST) {
-                    result.host_load_back_blocks++;
-                } else {
-                    result.disk_load_back_blocks++;
-                }
-                result.load_back_blocks++;
-
-                // Add new device blocks to block_indices
-                for (auto b : dev_blocks) {
-                    if (b != NULL_BLOCK_IDX)
-                        result.block_indices.push_back(b);
-                }
-
-                RTP_LLM_LOG_DEBUG("BlockTreeCache::match: load_back from %s "
-                                  "group[%d] node_key=%ld",
-                                  tierName(source),
-                                  group->component_group_id,
-                                  node->cache_key);
-            }
-        }
+        prepareMatchedLoadBack(match_path, lb_items, result);
 
         // Submit async load_back task
         if (!lb_items.empty() && device_block_allocator_) {
@@ -293,7 +221,7 @@ BlockTreeMatchResult BlockTreeCache::match(const CacheKeysType& cache_keys) {
 
     RTP_LLM_LOG_DEBUG("BlockTreeCache::match: matched %zu blocks, %zu block_indices, "
                       "cache_keys=%zu, tree_nodes=%zu",
-                      valid_matched_blocks,
+                      valid_matched_block_count,
                       result.block_indices.size(),
                       cache_keys.size(),
                       tree_->nodeCount());
@@ -874,6 +802,93 @@ void BlockTreeCache::taskFinished() {
     if (remaining <= 0) {
         std::lock_guard<std::mutex> lock(wait_mutex_);
         wait_cv_.notify_all();
+    }
+}
+
+void BlockTreeCache::referenceMatchedDeviceBlocks(const std::vector<TreeNode*>& match_path) {
+    const size_t matched_block_count = match_path.size();
+    for (ComponentGroupPtr& group : component_groups_) {
+        const size_t ref_count = std::min(group->computeReferenceCount(matched_block_count, match_path), matched_block_count);
+        const size_t start_idx = matched_block_count - ref_count;
+        const size_t gid       = static_cast<size_t>(group->component_group_id);
+        for (size_t i = start_idx; i < matched_block_count; ++i) {
+            TreeNode* node = match_path[i];
+            if (gid >= node->group_slots.size()) {
+                continue;
+            }
+            GroupSlot& slot = node->group_slots[gid];
+            if (slot.has_device_value()) {
+                group->referenceDeviceBlocks(slot.device_blocks);
+            }
+        }
+    }
+}
+
+void BlockTreeCache::prepareMatchedLoadBack(const std::vector<TreeNode*>& match_path,
+                                            std::vector<LoadBackItem>&     lb_items,
+                                            BlockTreeMatchResult&          result) {
+    const size_t matched_block_count = match_path.size();
+    for (ComponentGroupPtr& group : component_groups_) {
+        const size_t ref_count = std::min(group->computeReferenceCount(matched_block_count, match_path), matched_block_count);
+        const size_t start_idx = matched_block_count - ref_count;
+        const size_t gid       = static_cast<size_t>(group->component_group_id);
+
+        for (size_t i = start_idx; i < matched_block_count; ++i) {
+            TreeNode* node = match_path[i];
+            if (gid >= node->group_slots.size()) {
+                continue;
+            }
+
+            GroupSlot& slot = node->group_slots[gid];
+            if (slot.has_device_value()) {
+                continue;
+            }
+
+            Tier source = Tier::NONE;
+            if (slot.has_host_value()) {
+                source = Tier::HOST;
+            } else if (slot.has_disk_value()) {
+                source = Tier::DISK;
+            }
+            if (source == Tier::NONE) {
+                continue;
+            }
+
+            std::vector<BlockIdxType> dev_blocks;
+            if (device_block_allocator_) {
+                const size_t count = group->component_indices.empty() ? 1 : group->component_indices.size();
+                dev_blocks         = device_block_allocator_(group->component_group_id, count);
+                if (dev_blocks.empty()) {
+                    RTP_LLM_LOG_WARNING("BlockTreeCache::match: load_back allocator failed "
+                                        "group[%d] node_key=%ld",
+                                        group->component_group_id,
+                                        node->cache_key);
+                    continue;
+                }
+                slot.device_blocks = dev_blocks;
+            }
+
+            lb_items.push_back(LoadBackItem{node, group->component_group_id, source, dev_blocks});
+
+            if (source == Tier::HOST) {
+                result.host_load_back_blocks++;
+            } else {
+                result.disk_load_back_blocks++;
+            }
+            result.load_back_blocks++;
+
+            for (BlockIdxType block : dev_blocks) {
+                if (block != NULL_BLOCK_IDX) {
+                    result.block_indices.push_back(block);
+                }
+            }
+
+            RTP_LLM_LOG_DEBUG("BlockTreeCache::match: load_back from %s "
+                              "group[%d] node_key=%ld",
+                              tierName(source),
+                              group->component_group_id,
+                              node->cache_key);
+        }
     }
 }
 

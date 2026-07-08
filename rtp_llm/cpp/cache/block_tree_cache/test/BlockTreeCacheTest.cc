@@ -569,6 +569,37 @@ TEST_F(BlockTreeCacheTest, MatchUsesFullGroupIdNotHardcodedZero) {
     EXPECT_EQ(result.block_indices[0], 42);
 }
 
+TEST_F(BlockTreeCacheTest, MatchRequiresSWAWindowAfterGap) {
+    std::unique_ptr<BlockTree> tree = std::make_unique<BlockTree>(2);
+
+    std::shared_ptr<FullComponentGroup> full = std::make_shared<FullComponentGroup>();
+    full->component_group_id = 0;
+
+    std::shared_ptr<SWAComponentGroup> swa = std::make_shared<SWAComponentGroup>(128, 64);
+    swa->component_group_id = 1;
+
+    std::vector<ComponentGroupPtr> groups = {full, swa};
+    std::unique_ptr<BlockTreeCache> cache =
+        std::make_unique<BlockTreeCache>(std::move(tree), std::move(groups), std::vector<Component>{});
+
+    std::vector<std::vector<GroupSlot>> slots(4, std::vector<GroupSlot>(2));
+    slots[0][0].device_blocks = {10};
+    slots[1][0].device_blocks = {11};
+    slots[2][0].device_blocks = {12};
+    slots[3][0].device_blocks = {13};
+    slots[0][1].device_blocks = {20};
+    slots[2][1].device_blocks = {22};
+    slots[3][1].device_blocks = {23};
+
+    cache->insert(nullptr, {100, 200, 300, 400}, slots);
+
+    BlockTreeMatchResult partial = cache->match({100, 200, 300});
+    EXPECT_EQ(partial.matched_blocks, 1u);
+
+    BlockTreeMatchResult restored = cache->match({100, 200, 300, 400});
+    EXPECT_EQ(restored.matched_blocks, 4u);
+}
+
 // ---------------------------------------------------------------------------
 // UT-6: Eviction with CopyEngine — D2H copy fails with placeholder resolver.
 // Issue 7 fix: copy failure triggers rollback (host_block freed).
@@ -803,6 +834,34 @@ TEST_F(BlockTreeCacheTest, DeviceBufferResolverEnablesD2HCopy) {
     auto* bytes = static_cast<const uint8_t*>(host_addr);
     EXPECT_EQ(bytes[0], 0xAA);
     EXPECT_EQ(bytes[127], 0xAA);
+}
+
+TEST_F(BlockTreeCacheTest, LoadBackOnlyReloadsSWAWindow) {
+    std::unique_ptr<BlockTree> tree = std::make_unique<BlockTree>(2);
+
+    std::shared_ptr<FullComponentGroup> full = std::make_shared<FullComponentGroup>();
+    full->component_group_id = 0;
+
+    std::shared_ptr<SWAComponentGroup> swa = std::make_shared<SWAComponentGroup>(128, 64);
+    swa->component_group_id = 1;
+
+    std::vector<ComponentGroupPtr> groups = {full, swa};
+    std::unique_ptr<BlockTreeCache> cache =
+        std::make_unique<BlockTreeCache>(std::move(tree), std::move(groups), std::vector<Component>{});
+    cache->setEnableLoadBack(true);
+
+    std::vector<std::vector<GroupSlot>> slots(4, std::vector<GroupSlot>(2));
+    for (size_t i = 0; i < slots.size(); ++i) {
+        slots[i][0].device_blocks = {static_cast<BlockIdxType>(10 + i)};
+        slots[i][1].host_block    = static_cast<BlockIdxType>(100 + i);
+    }
+
+    cache->insert(nullptr, {100, 200, 300, 400}, slots);
+
+    BlockTreeMatchResult result = cache->match({100, 200, 300, 400});
+    EXPECT_EQ(result.matched_blocks, 4u);
+    EXPECT_EQ(result.host_load_back_blocks, 2u);
+    EXPECT_EQ(result.load_back_blocks, 2u);
 }
 
 // ---------------------------------------------------------------------------

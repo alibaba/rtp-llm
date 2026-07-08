@@ -28,6 +28,10 @@ createComponentGroup(int group_id, CacheGroupType type, int seq_size_per_block, 
             if (it != swa_configs.end()) {
                 sliding_window_size = it->second;
             }
+            RTP_LLM_CHECK_WITH_INFO(
+                sliding_window_size >= 0, "SWA sliding_window_size must be non-negative, got %d", sliding_window_size);
+            RTP_LLM_CHECK_WITH_INFO(
+                seq_size_per_block > 0, "SWA seq_size_per_block must be positive, got %d", seq_size_per_block);
             group = std::make_shared<SWAComponentGroup>(sliding_window_size, seq_size_per_block);
             break;
         }

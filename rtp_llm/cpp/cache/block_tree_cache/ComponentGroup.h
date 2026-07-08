@@ -114,12 +114,9 @@ public:
     // ---- Leaf checks (used by FullComponentGroup and base tryAddTo*Heap) ----
     bool isLeafAtTier(const TreeNode* node, int group_id, Tier tier) const;
 
-    // ---- Reference count for path lock (per-group strategy) ----
-    // Returns number of nodes from path tail to lock.
-    // Default = matched_blocks (full path); SWA overrides for window lock.
-    virtual size_t computeReferenceCount(size_t matched_blocks, const std::vector<TreeNode*>& path) const {
-        return matched_blocks;
-    }
+    // ---- Reference count for path lock/load_back (per-group strategy) ----
+    // Returns number of nodes from path tail to process.
+    virtual size_t computeReferenceCount(size_t matched_block_count, const std::vector<TreeNode*>& path) const = 0;
 
     // ---- Reference counting callback (injected by BlockTreeCache) ----
     void setIsBlockEvictable(IsBlockEvictableFn fn) {

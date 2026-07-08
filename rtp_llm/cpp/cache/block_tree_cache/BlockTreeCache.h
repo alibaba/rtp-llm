@@ -227,6 +227,10 @@ private:
         Tier                      source_tier{Tier::NONE};
         std::vector<BlockIdxType> allocated_device_blocks;
     };
+    void referenceMatchedDeviceBlocks(const std::vector<TreeNode*>& match_path);
+    void prepareMatchedLoadBack(const std::vector<TreeNode*>& match_path,
+                                std::vector<LoadBackItem>&     lb_items,
+                                BlockTreeMatchResult&          result);
     void performLoadBack(std::vector<LoadBackItem> items, std::shared_ptr<AsyncContext> ctx);
 
     BlockTreeCacheConfig                       config_;

@@ -15,6 +15,7 @@ public:
 
     std::unique_ptr<MatchValidator> createMatchValidator() override;
     void                            finalizeMatchResult(BlockTreeMatchResult& result) override;
+    size_t computeReferenceCount(size_t matched_block_count, const std::vector<TreeNode*>& path) const override;
 
     // Full-specific: on insert overlap, invalidate parent from heap if no longer a Leaf.
     void updateOnInsertOverlap(TreeNode* node, GroupSlot& slot) override;

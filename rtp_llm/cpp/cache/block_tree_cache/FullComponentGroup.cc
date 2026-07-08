@@ -19,6 +19,10 @@ void FullComponentGroup::finalizeMatchResult(BlockTreeMatchResult& result) {
     // Handled at BlockTreeCache level.
 }
 
+size_t FullComponentGroup::computeReferenceCount(size_t matched_block_count, const std::vector<TreeNode*>&) const {
+    return matched_block_count;
+}
+
 void FullComponentGroup::updateOnInsertOverlap(TreeNode* node, GroupSlot& slot) {
     // After a child with device data is inserted, the parent may no longer be a DeviceLeaf.
     // If so, it must be removed from the device_heap to maintain Leaf-only eviction semantics.

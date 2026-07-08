@@ -79,34 +79,36 @@ TEST_F(SWAComponentGroupTest, WindowValidatorConnectedPath) {
     delete c;
 }
 
-TEST_F(SWAComponentGroupTest, WindowValidatorGapResetsCount) {
-    auto  validator     = group_->createMatchValidator();
-    auto* swa_validator = dynamic_cast<SWAMatchValidator*>(validator.get());
+TEST_F(SWAComponentGroupTest, WindowValidatorGapRequiresEnoughWindowAfterReset) {
+    std::unique_ptr<MatchValidator> validator = group_->createMatchValidator();
+    SWAMatchValidator* swa_validator = dynamic_cast<SWAMatchValidator*>(validator.get());
 
-    // Path: root → A (has data) → B (no data) → C (has data)
-    auto* a = makeNode(100);
-    auto* b = makeNode(200);
-    auto* c = makeNode(300);
+    TreeNode* a = makeNode(100);
+    TreeNode* b = makeNode(200);
+    TreeNode* c = makeNode(300);
+    TreeNode* d = makeNode(400);
     setDeviceBlock(a, 0, 10);
-    // B has no SWA data
     setDeviceBlock(c, 0, 30);
+    setDeviceBlock(d, 0, 40);
 
     EXPECT_TRUE(validator->validate(a, a->group_slots[0]));
     EXPECT_TRUE(swa_validator->connectedToRoot());
     EXPECT_EQ(swa_validator->accumulatedLength(), 64u);
 
-    // B: no data → gap
-    EXPECT_TRUE(validator->validate(b, b->group_slots[0]));
+    EXPECT_FALSE(validator->validate(b, b->group_slots[0]));
     EXPECT_FALSE(swa_validator->connectedToRoot());
     EXPECT_EQ(swa_validator->accumulatedLength(), 0u);
 
-    // C: has data → start counting from gap
-    EXPECT_TRUE(validator->validate(c, c->group_slots[0]));
+    EXPECT_FALSE(validator->validate(c, c->group_slots[0]));
     EXPECT_EQ(swa_validator->accumulatedLength(), 64u);
+
+    EXPECT_TRUE(validator->validate(d, d->group_slots[0]));
+    EXPECT_EQ(swa_validator->accumulatedLength(), 128u);
 
     delete a;
     delete b;
     delete c;
+    delete d;
 }
 
 TEST_F(SWAComponentGroupTest, WindowValidatorMultitierNoReset) {
@@ -134,6 +136,30 @@ TEST_F(SWAComponentGroupTest, WindowValidatorMultitierNoReset) {
     delete a;
     delete b;
     delete c;
+}
+
+TEST_F(SWAComponentGroupTest, ComputeReferenceCountCountsHostAndDiskBlocks) {
+    TreeNode* a = makeNode(100);
+    TreeNode* b = makeNode(200);
+    TreeNode* c = makeNode(300);
+    TreeNode* d = makeNode(400);
+
+    setHostBlock(a, 0, 10);
+    a->group_slots[0].disk_slot = 11;
+    setHostBlock(b, 0, 20);
+    b->group_slots[0].disk_slot = 21;
+    setHostBlock(c, 0, 30);
+    c->group_slots[0].disk_slot = 31;
+    setHostBlock(d, 0, 40);
+    d->group_slots[0].disk_slot = 41;
+
+    std::vector<TreeNode*> path = {a, b, c, d};
+    EXPECT_EQ(group_->computeReferenceCount(path.size(), path), 2u);
+
+    delete a;
+    delete b;
+    delete c;
+    delete d;
 }
 
 TEST_F(SWAComponentGroupTest, IndependentEvictionDoesNotAffectFull) {

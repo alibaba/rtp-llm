@@ -2,8 +2,8 @@
 
 namespace rtp_llm {
 
-SWAComponentGroup::SWAComponentGroup(int            sliding_window_size,
-                                     int            seq_size_per_block,
+SWAComponentGroup::SWAComponentGroup(size_t         sliding_window_size,
+                                     size_t         seq_size_per_block,
                                      EvictionPolicy device_policy,
                                      EvictionPolicy host_policy,
                                      EvictionPolicy disk_policy):
@@ -19,49 +19,56 @@ std::unique_ptr<MatchValidator> SWAComponentGroup::createMatchValidator() {
 }
 
 void SWAComponentGroup::tryAddToDeviceHeap(TreeNode* node) {
-    if (!device_heap)
+    if (!device_heap) {
         return;
+    }
     // SWA: any node with device data can enter heap (no Leaf requirement)
-    auto& slot = node->group_slots[static_cast<size_t>(component_group_id)];
+    const size_t group_id = component_group_id;
+    GroupSlot&   slot     = node->group_slots[group_id];
     if (slot.has_device_value() && !slot.in_device_heap) {
         device_heap->push(node, component_group_id);
         slot.in_device_heap = true;
     }
 }
 
-size_t SWAComponentGroup::computeReferenceCount(size_t matched_blocks, const std::vector<TreeNode*>& path) const {
-    if (sliding_window_size_ <= 0)
-        return matched_blocks;  // No window configured → full path
-    size_t count       = 0;
-    size_t accumulated = 0;
-    auto   gid         = static_cast<size_t>(component_group_id);
-    for (int i = static_cast<int>(matched_blocks) - 1; i >= 0; --i) {
-        if (gid < path[static_cast<size_t>(i)]->group_slots.size()
-            && path[static_cast<size_t>(i)]->group_slots[gid].has_device_value()) {
+size_t SWAComponentGroup::computeReferenceCount(size_t matched_block_count, const std::vector<TreeNode*>& path) const {
+    if (sliding_window_size_ == 0) {
+        return matched_block_count;  // No window configured → full path
+    }
+    const size_t group_id    = component_group_id;
+    size_t       count       = 0;
+    size_t       accumulated = 0;
+    for (size_t i = matched_block_count; i > 0; --i) {
+        const TreeNode* node = path[i - 1];
+        if (group_id < node->group_slots.size() && node->group_slots[group_id].has_any_value()) {
             count++;
-            accumulated += static_cast<size_t>(seq_size_per_block_);
-            if (accumulated >= static_cast<size_t>(sliding_window_size_))
+            accumulated += seq_size_per_block_;
+            if (accumulated >= sliding_window_size_) {
                 break;
+            }
         }
     }
     return count;
 }
 
 // SWAMatchValidator
-SWAMatchValidator::SWAMatchValidator(int sliding_window_size, int seq_size_per_block):
+SWAMatchValidator::SWAMatchValidator(size_t sliding_window_size, size_t seq_size_per_block):
     sliding_window_size_(sliding_window_size), seq_size_per_block_(seq_size_per_block) {}
 
 bool SWAMatchValidator::validate(const TreeNode* node, const GroupSlot& slot) {
-    bool has_swa_data = slot.has_any_value();
+    const bool has_swa_data = slot.has_any_value();
 
-    if (has_swa_data) {
-        accumulated_length_ += static_cast<size_t>(seq_size_per_block_);
-        return true;  // SWA validator tracks state only; match validity is gated by FULL group
+    if (!has_swa_data) {
+        connected_to_root_  = false;
+        accumulated_length_ = 0;
+        return false;
     }
-    // SWA data missing: break connection, reset accumulated length
-    connected_to_root_  = false;
-    accumulated_length_ = 0;
-    return true;  // SWA validator doesn't fail the match when data is missing (allows FULL-only matches)
+
+    accumulated_length_ += seq_size_per_block_;
+    if (connected_to_root_ || sliding_window_size_ == 0) {
+        return true;
+    }
+    return accumulated_length_ >= sliding_window_size_;
 }
 
 }  // namespace rtp_llm
