@@ -43,49 +43,54 @@ private:
     // Deadline (ms) for the best-effort slot-release RPC; keeps it off the critical path.
     int64_t                          rdma_release_timeout_ms_ = 1000;
 
-    // Best-effort: tell the encoder it can return the slot to its free list.
+    // Best-effort: tell the encoder it can return the slot(s) to its free list. One response may
+    // carry several slots (chunked output), so all handles are released in a single RPC.
     // This runs on the inference path, so the RPC is bounded by a short deadline: a slow
     // or hung encoder must never stall the request. Failure is logged only — the encoder's
-    // slot-GC timeout (mm_rdma_slot_gc_timeout_ms) reclaims the slot as a backstop.
+    // slot-GC timeout (mm_rdma_slot_gc_timeout_ms) reclaims the slots as a backstop.
     template<typename Stub>
-    void releaseRemoteSlot(Stub& stub, const std::string& handle) {
+    void releaseRemoteSlots(Stub& stub, const std::vector<std::string>& handles) {
+        if (handles.empty()) {
+            return;
+        }
         grpc::ClientContext rel_ctx;
         rel_ctx.set_deadline(std::chrono::system_clock::now()
                              + std::chrono::milliseconds(rdma_release_timeout_ms_));
         ReleaseEmbeddingPB rel;
-        rel.add_handle(handle);
+        for (const auto& handle : handles) {
+            rel.add_handle(handle);
+        }
         EmptyPB empty;
         auto    rel_status = stub->ReleaseMultimodalEmbedding(&rel_ctx, rel, &empty);
         if (!rel_status.ok()) {
-            // Not fatal: the encoder's timeout GC will reclaim the slot.
-            RTP_LLM_LOG_WARNING("ReleaseMultimodalEmbedding(handle=%s) failed: %s",
-                                handle.c_str(),
+            // Not fatal: the encoder's timeout GC will reclaim the slots.
+            RTP_LLM_LOG_WARNING("ReleaseMultimodalEmbedding(%zu handles) failed: %s",
+                                handles.size(),
                                 rel_status.error_message().c_str());
         }
     }
 
-    // Assemble a MultimodalOutput from the tensors pulled out of the single RDMA slot.
-    // `mm_tensors` is parallel to output_pb->output_rdma().tensors() (same order the encoder
-    // packed: embedding, optional pos_id, then per-image extra_input); we dispatch by role.
-    MultimodalOutput assembleRdmaOutput(const std::vector<torch::Tensor>& mm_tensors,
-                                        const MultimodalOutputPB*         output_pb) {
-        const auto& desc = output_pb->output_rdma();
-        RTP_LLM_CHECK_WITH_INFO(static_cast<int>(mm_tensors.size()) == desc.tensors_size(),
-                                "rdma read tensor count=%zu does not match manifest size=%d",
+    // Assemble a MultimodalOutput from the tensors pulled out of the RDMA slot(s). `mm_tensors`
+    // and `roles` are the concatenation, in order, of every chunk's read tensors and manifest
+    // roles (the order the encoder packed: embedding chunk(s), optional pos_id, then per-image
+    // extra_input). A large output is row-split across several slots, so there may be MORE THAN
+    // ONE EMBEDDING tensor — they are concatenated back along dim 0 here.
+    MultimodalOutput assembleRdmaOutput(const std::vector<torch::Tensor>&         mm_tensors,
+                                        const std::vector<MMRdmaTensorPB::Role>&  roles,
+                                        const MultimodalOutputPB*                 output_pb) {
+        RTP_LLM_CHECK_WITH_INFO(mm_tensors.size() == roles.size(),
+                                "rdma read tensor count=%zu does not match manifest role count=%zu",
                                 mm_tensors.size(),
-                                desc.tensors_size());
+                                roles.size());
 
-        torch::Tensor              mm_embedding;
-        bool                       has_embedding = false;
+        std::vector<torch::Tensor> embedding_chunks;
         torch::Tensor              mm_position_id;
         bool                       has_pos_id = false;
         std::vector<torch::Tensor> extra_inputs;
-        for (int i = 0; i < desc.tensors_size(); ++i) {
-            switch (desc.tensors(i).role()) {
+        for (size_t i = 0; i < roles.size(); ++i) {
+            switch (roles[i]) {
                 case MMRdmaTensorPB::EMBEDDING:
-                    RTP_LLM_CHECK_WITH_INFO(!has_embedding, "rdma manifest carries more than one embedding");
-                    mm_embedding  = mm_tensors[i];
-                    has_embedding = true;
+                    embedding_chunks.emplace_back(mm_tensors[i]);
                     break;
                 case MMRdmaTensorPB::POS_ID:
                     RTP_LLM_CHECK_WITH_INFO(!has_pos_id, "rdma manifest carries more than one pos_id");
@@ -100,10 +105,14 @@ private:
                     extra_inputs.emplace_back(mm_tensors[i]);
                     break;
                 default:
-                    RTP_LLM_CHECK_WITH_INFO(false, "rdma manifest has unknown tensor role %d", desc.tensors(i).role());
+                    RTP_LLM_CHECK_WITH_INFO(false, "rdma manifest has unknown tensor role %d", roles[i]);
             }
         }
-        RTP_LLM_CHECK_WITH_INFO(has_embedding, "rdma manifest has no embedding tensor");
+        RTP_LLM_CHECK_WITH_INFO(!embedding_chunks.empty(), "rdma manifest has no embedding tensor");
+        // One chunk in the common case; concatenate the row-splits back into the full embedding
+        // otherwise (chunk order is preserved by the caller, so the rows line up with split_size).
+        torch::Tensor mm_embedding =
+            embedding_chunks.size() == 1 ? embedding_chunks[0] : torch::cat(embedding_chunks, 0);
 
         std::vector<int64_t> split_sizes;
         for (auto split_size : output_pb->split_size()) {
@@ -160,12 +169,44 @@ private:
             return ErrorInfo(ErrorCode::MM_PROCESS_ERROR, status.error_message());
         }
 
-        // RDMA fast path: encoder returned a descriptor instead of inline output bytes.
-        if (rdma_transport_ != nullptr && output_pb.has_output_rdma()) {
-            const auto&                desc = output_pb.output_rdma();
-            std::vector<torch::Tensor> mm_tensors;
-            const bool                 read_ok = rdma_transport_->readEmbedding(desc, &mm_tensors);
-            releaseRemoteSlot(stub, desc.handle());  // either way, free the encoder slot
+        // RDMA fast path: encoder returned descriptor(s) instead of inline output bytes. The
+        // output lives in ONE slot (output_rdma) or, when it exceeds one slot, in several
+        // (output_rdma_chunks). Collect the descriptors and read every slot in order.
+        const bool has_rdma = output_pb.has_output_rdma() || output_pb.output_rdma_chunks_size() > 0;
+        if (rdma_transport_ != nullptr && has_rdma) {
+            std::vector<const MMRdmaDescPB*> descs;
+            if (output_pb.has_output_rdma()) {
+                descs.push_back(&output_pb.output_rdma());
+            } else {
+                for (const auto& d : output_pb.output_rdma_chunks()) {
+                    descs.push_back(&d);
+                }
+            }
+
+            // All slots were registered on the encoder before it replied, so every handle must be
+            // released regardless of read outcome (the encoder's GC timeout is only a backstop).
+            std::vector<std::string> handles;
+            handles.reserve(descs.size());
+            for (const auto* desc : descs) {
+                handles.push_back(desc->handle());
+            }
+
+            std::vector<torch::Tensor>        mm_tensors;
+            std::vector<MMRdmaTensorPB::Role> roles;
+            bool                              read_ok = true;
+            for (const auto* desc : descs) {
+                std::vector<torch::Tensor> chunk_tensors;
+                if (!rdma_transport_->readEmbedding(*desc, &chunk_tensors)) {
+                    read_ok = false;
+                    break;
+                }
+                for (int i = 0; i < desc->tensors_size(); ++i) {
+                    roles.push_back(desc->tensors(i).role());
+                }
+                mm_tensors.insert(mm_tensors.end(), chunk_tensors.begin(), chunk_tensors.end());
+            }
+            releaseRemoteSlots(stub, handles);  // either way, free the encoder slot(s)
+
             if (read_ok) {
                 // Benchmark hook: MM_RDMA_READ_ONLY=1 aborts the request right after a
                 // successful RDMA READ (already timed + logged as [MM-RDMA-BW]), so we can
@@ -179,15 +220,15 @@ private:
                 if (read_only) {
                     return ErrorInfo(ErrorCode::MM_PROCESS_ERROR, "MM_RDMA_READ_ONLY: aborted after rdma read");
                 }
-                return assembleRdmaOutput(mm_tensors, &output_pb);
+                return assembleRdmaOutput(mm_tensors, roles, &output_pb);
             }
             // RDMA read failed. As agreed, fall back to the inline-bytes path: re-issue the
             // request with support_rdma=false so the encoder returns the embedding as bytes
-            // instead of a descriptor. The slot from the failed attempt was already released
-            // above (and is GC-backed regardless).
-            RTP_LLM_LOG_WARNING("rdma read of multimodal embedding failed (handle=%s), "
+            // instead of descriptor(s). The slots from the failed attempt were already released
+            // above (and are GC-backed regardless).
+            RTP_LLM_LOG_WARNING("rdma read of multimodal embedding failed (%zu slot(s)), "
                                 "falling back to inline bytes",
-                                desc.handle().c_str());
+                                descs.size());
             request.set_support_rdma(false);
             MultimodalOutputPB  fallback_pb;
             grpc::ClientContext fallback_context;
@@ -199,7 +240,7 @@ private:
             }
             // With support_rdma=false the encoder must answer with inline bytes; a descriptor
             // here would mean a protocol violation we cannot consume.
-            if (fallback_pb.has_output_rdma()) {
+            if (fallback_pb.has_output_rdma() || fallback_pb.output_rdma_chunks_size() > 0) {
                 return ErrorInfo(ErrorCode::MM_PROCESS_ERROR,
                                  "rdma read failed and fallback response unexpectedly carried "
                                  "an rdma descriptor");
