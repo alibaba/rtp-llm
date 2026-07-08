@@ -5,6 +5,13 @@ import sys
 import time
 import traceback
 
+# Default the PyTorch caching allocator to expandable segments (must be set BEFORE `import torch`).
+# Rationale: warmup measures a single-shot forward peak; runtime accumulates reserved blocks +
+# fragmentation across many forwards. Under high-EP long-context load the reserved-but-unallocated
+# gap can grow to 1-2 GiB per rank, eating the safety headroom and causing OOM. Expandable segments
+# eliminate most of that fragmentation. `setdefault` lets users override via the env.
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+
 import requests
 import torch
 

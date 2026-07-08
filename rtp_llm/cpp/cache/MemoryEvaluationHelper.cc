@@ -11,6 +11,7 @@
 
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/cpp/utils/Logger.h"
+#include "autil/EnvUtil.h"
 #if USING_CUDA
 #include "rtp_llm/models_py/bindings/cuda/cuda_host_utils.h"
 #endif
@@ -46,25 +47,11 @@ size_t MemoryEvaluationHelper::getDefaultRuntimeMemorySize(const RuntimeConfig& 
     size_t reserve_runtime_mem_bytes = runtime_config.reserve_runtime_mem_mb * 1024 * 1024;
     RTP_LLM_LOG_INFO("RuntimeConfig has reserve_runtime_mem_mb=%ld", runtime_config.reserve_runtime_mem_mb);
 
-    // Reserve at least 5% of total GPU memory for runtime (forward pass intermediates, cublas workspace, etc.)
-    // with a minimum floor of 2048 MiB. This is needed because KV cache is pre-allocated as a fixed block,
-    // and the remaining GPU memory must be sufficient for model forward passes.
-    size_t                  total_gpu_bytes = 0;
-    [[maybe_unused]] size_t free_gpu_bytes  = 0;
-#if USING_CUDA
-    check_cuda_value(cudaMemGetInfo(&free_gpu_bytes, &total_gpu_bytes));
-#elif USING_ROCM
-    ROCM_CHECK(hipMemGetInfo(&free_gpu_bytes, &total_gpu_bytes));
-#endif
-    const auto minimal_runtime_bytes = std::max(2048L * 1024 * 1024, (long)(total_gpu_bytes * 0.05));
-    if (reserve_runtime_mem_bytes < minimal_runtime_bytes) {
-        RTP_LLM_LOG_INFO("tp_size %d needs at least %ld MiB memory for runtime by default, "
-                         "but only %ld MiB reserved memory set by config. adjust to minimal value.",
-                         parallelism_config.get_attn_tp_size(),
-                         minimal_runtime_bytes / 1024 / 1024,
-                         reserve_runtime_mem_bytes / 1024 / 1024);
-        reserve_runtime_mem_bytes = minimal_runtime_bytes;
-    }
+    // NOTE: the old "max(2048 MiB, 5% of total)" floor has been removed. Runtime headroom is now an
+    // additive safety margin on top of the measured forward peak (see RUNTIME_MEM_SAFETY_RATIO in
+    // getKVCacheMemorySize), so it no longer vanishes once the warmup peak exceeds the floor.
+    // reserve_runtime_mem_mb is kept only as an optional manual lower bound.
+    (void)parallelism_config;
 
     if (model_config.mm_model_config.is_multimodal) {
         const auto minimal_runtime_required = 2L * 1024 * 1024 * 1024;  // 2 GiB
@@ -85,8 +72,10 @@ size_t MemoryEvaluationHelper::getKVCacheMemorySize(const RuntimeConfig&        
                                                     const ParallelismConfig&                         parallelism_config,
                                                     const std::optional<WarmUpResult>&               warm_up_result,
                                                     const std::optional<SpeculativeExecutionConfig>& sp_config) {
-    size_t device_reserved_memory_bytes = getGpuExecStatus().device_memory_status.available_bytes;
-    size_t runtime_required_bytes       = 0;
+    const auto   gpu_mem                      = getGpuExecStatus().device_memory_status;
+    size_t       device_reserved_memory_bytes = gpu_mem.available_bytes;
+    const size_t total_gpu_bytes              = gpu_mem.used_bytes + gpu_mem.free_bytes;
+    size_t       runtime_required_bytes       = 0;
 
     if (kv_cache_config.kv_cache_mem_mb > 0) {
         RTP_LLM_LOG_INFO("KVCacheConfig explicitly specified kv cache memory size %ld MiB",
@@ -128,6 +117,23 @@ size_t MemoryEvaluationHelper::getKVCacheMemorySize(const RuntimeConfig&        
                      runtime_required_bytes / 1024 / 1024);
     runtime_required_bytes = std::max(sample_need_mem, runtime_required_bytes);
 
+    // NOTE: the MoE worst-case headroom is no longer an analytic term here. During warmup the MoE
+    // module (FusedMoe.forward, gated on is_trace_memory()) forces worst-case routing -- every rank
+    // dispatches ALL its tokens to a single rank's experts, so that rank receives the absolute
+    // per-rank max all_tokens = ep_size * T_local * top_k -- and its measured peak becomes the
+    // binding (min block_num) constraint. The warmup peak (warm_up_result->max_used_memory) thus
+    // ALREADY contains the skewed MoE activation. No model/kernel-specific per-token formula is
+    // needed; what the dummy can't model is left to the additive safety headroom below.
+
+    // Additive safety headroom for everything still un-modeled — mainly sustained NCCL/DeepEP
+    // dispatch buffers that a single warmup forward under-measures (warmup non_torch ~70 MiB vs
+    // runtime ~3.4 GiB per rank observed under long-context concurrent load), plus cuda-graph
+    // pool + allocator fragmentation. Empirically 5% is too tight for high-EP long-context;
+    // 10% clears real LongBench 40×63k stress on 4×H20 (see doc §8). Override via env.
+    const double safety_ratio          = autil::EnvUtil::getEnv("RUNTIME_MEM_SAFETY_RATIO", 0.10);
+    const size_t safety_headroom_bytes = static_cast<size_t>(total_gpu_bytes * safety_ratio);
+    runtime_required_bytes += safety_headroom_bytes;
+
     RTP_LLM_CHECK_WITH_INFO(device_reserved_memory_bytes > runtime_required_bytes,
                             "device reserved memory %ld  MiB is less than runtime required memory %ld MiB",
                             device_reserved_memory_bytes / 1024 / 1024,
@@ -135,6 +141,19 @@ size_t MemoryEvaluationHelper::getKVCacheMemorySize(const RuntimeConfig&        
 
     const auto kv_cache_mem_size = device_reserved_memory_bytes - runtime_required_bytes;
     RTP_LLM_LOG_INFO("cache config final decided kv cache memory size %ld MiB", kv_cache_mem_size / 1024 / 1024);
+    RTP_LLM_LOG_WARNING(
+        "[KV_ALLOC] warm_up=%d device_reserved=%ld MiB | runtime_required parts: torch=%ld MiB non_torch=%ld MiB "
+        "(warmup peak incl. worst-case MoE skew) safety_%.0f%%=%ld MiB | runtime_required=%ld MiB => "
+        "kv_cache_free=%ld MiB (%.2f GiB)",
+        warm_up_result.has_value(),
+        device_reserved_memory_bytes / 1024 / 1024,
+        warm_up_result ? warm_up_result->torch_peak_increase / 1024 / 1024 : 0,
+        warm_up_result ? warm_up_result->non_torch_increase / 1024 / 1024 : 0,
+        safety_ratio * 100,
+        safety_headroom_bytes / 1024 / 1024,
+        runtime_required_bytes / 1024 / 1024,
+        kv_cache_mem_size / 1024 / 1024,
+        kv_cache_mem_size / 1024.0 / 1024.0 / 1024.0);
     return kv_cache_mem_size;
 }
 

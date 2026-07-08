@@ -41,6 +41,7 @@ void             multiMergeCopy(const MultiMergeCopyParams& params);
 #include <cuda_runtime.h>
 #include <cuda_profiler_api.h>
 #include <ATen/cuda/CUDAContext.h>
+#include <c10/cuda/CUDACachingAllocator.h>
 #include "rtp_llm/models_py/bindings/cuda/cuda_host_utils.h"
 #elif USING_ROCM
 #include <hip/hip_runtime.h>
@@ -351,6 +352,17 @@ void cudaProfilerEnd() {
 
 // === Status queries ===
 
+namespace {
+// Gates forward peak-memory tracking; only enabled during warmup (setTraceMemory(true)).
+static bool g_trace_memory = false;
+#if USING_CUDA
+// Baselines snapshotted right after emptyCache()+resetPeakStats() in setTraceMemory(true).
+// Used to turn absolute readings into the forward's transient deltas (see getGpuExecStatus).
+static size_t g_reserved_baseline_bytes  = 0;  // torch reserved at baseline
+static size_t g_cuda_used_baseline_bytes = 0;  // device used (total-free) at baseline
+#endif
+}  // namespace
+
 ExecStatus getGpuExecStatus() {
     MemoryStatus mem;
     size_t       total_bytes = 0;
@@ -362,6 +374,37 @@ ExecStatus getGpuExecStatus() {
 #endif
     mem.used_bytes      = total_bytes - mem.free_bytes;
     mem.available_bytes = mem.free_bytes;
+#if USING_CUDA
+    if (g_trace_memory) {
+        // max_consumed_bytes = forward transient growth = torch_peak_increase + non_torch_increase
+        // (vLLM-style decomposition). available_bytes downstream already excludes the steady-state
+        // (weights/context), so we report only the growth on top of the baseline -- counting the
+        // baseline here too would double-subtract it from the KV cache budget.
+        const auto&  stats      = c10::cuda::CUDACachingAllocator::getDeviceStats(at::cuda::current_device());
+        const size_t torch_peak = static_cast<size_t>(stats.reserved_bytes[0].peak);  // [0] = AGGREGATE
+        const size_t torch_cur  = static_cast<size_t>(stats.reserved_bytes[0].current);
+        mem.allocated_bytes     = static_cast<size_t>(stats.allocated_bytes[0].current);
+
+        // (1) torch transient peak: activations / workspaces routed through the caching allocator.
+        const size_t torch_peak_increase =
+            torch_peak > g_reserved_baseline_bytes ? torch_peak - g_reserved_baseline_bytes : 0;
+
+        // (2) non-torch growth: NCCL / attention buffers / library scratch allocated OUTSIDE torch.
+        // Measured as the increase of (device_used - torch_reserved) since the baseline -- the part
+        // of device memory that the torch allocator does not account for. torch peak is a high-water
+        // mark while non-torch is read end-of-forward (these allocations are typically persistent),
+        // matching vLLM's accounting.
+        const size_t non_torch_now      = mem.used_bytes > torch_cur ? mem.used_bytes - torch_cur : 0;
+        const size_t non_torch_baseline = g_cuda_used_baseline_bytes > g_reserved_baseline_bytes ?
+                                              g_cuda_used_baseline_bytes - g_reserved_baseline_bytes :
+                                              0;
+        const size_t non_torch_increase = non_torch_now > non_torch_baseline ? non_torch_now - non_torch_baseline : 0;
+
+        mem.torch_peak_increase_bytes = torch_peak_increase;
+        mem.non_torch_increase_bytes  = non_torch_increase;
+        mem.max_consumed_bytes        = torch_peak_increase + non_torch_increase;
+    }
+#endif
     ExecStatus status;
     status.device_memory_status = mem;
     return status;
@@ -371,12 +414,31 @@ torch::Device getTorchCudaDevice() {
     return torch::Device(torch::kCUDA);
 }
 
-namespace {
-static bool g_trace_memory = false;
+bool isTraceMemory() {
+    return g_trace_memory;
 }
 
 void setTraceMemory(bool trace_memory) {
     g_trace_memory = trace_memory;
+#if USING_CUDA
+    if (trace_memory) {
+        // Release loader-cached free blocks so the baseline is pure steady-state (weights), then
+        // zero the peak high-water mark and snapshot the baselines. Without emptyCache, the forward
+        // could reuse cached free blocks without growing reserved, making the measured delta too
+        // small -> KV cache over-allocated -> runtime OOM.
+        c10::cuda::CUDACachingAllocator::emptyCache();
+        const auto device = at::cuda::current_device();
+        c10::cuda::CUDACachingAllocator::resetPeakStats(device);
+        g_reserved_baseline_bytes =
+            static_cast<size_t>(c10::cuda::CUDACachingAllocator::getDeviceStats(device).reserved_bytes[0].current);
+        size_t free_bytes = 0, total_bytes = 0;
+        check_cuda_value(cudaMemGetInfo(&free_bytes, &total_bytes));
+        g_cuda_used_baseline_bytes = total_bytes - free_bytes;  // for non_torch_increase
+    } else {
+        g_reserved_baseline_bytes  = 0;
+        g_cuda_used_baseline_bytes = 0;
+    }
+#endif
 }
 
 // === Copy ops ===
@@ -575,6 +637,7 @@ MlaOpsType initRuntime(size_t device_id, bool trace_memory, bool enable_comm_ove
 
 void registerExecCtxOps(pybind11::module& m) {
     m.def("get_device_id", &getDeviceId);
+    m.def("is_trace_memory", &isTraceMemory, "True while a warmup forward is being memory-traced.");
     m.def("preprocess_gemm_weight_by_key",
           &preprocessGemmWeightByKey,
           py::arg("key"),

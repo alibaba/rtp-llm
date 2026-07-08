@@ -248,20 +248,35 @@ WarmUpResult NormalEngine::prefillWarmUp(const EngineInitParams& params) {
     RTP_LLM_FAIL("prefillWarmUp is not supported on non-CUDA platforms");
     return {};
 #else
-    auto fake_input                                   = makeFakeInput((size_t)model_config_.max_seq_len - 1);
-    fake_input->generate_config->num_return_sequences = runtime_config.fifo_scheduler_config.max_context_batch_size;
+    const size_t max_seq_len = (size_t)model_config_.max_seq_len;
+    // Real per-forward prefill token budget is max_batch_tokens_size (FIFOScheduler's per-round cap),
+    // not max_context_batch_size × max_seq_len. Fall back to that default if it is unset (0).
+    size_t max_batch_tokens = (size_t)runtime_config.fifo_scheduler_config.max_batch_tokens_size;
+    if (max_batch_tokens == 0) {
+        max_batch_tokens = (size_t)runtime_config.fifo_scheduler_config.max_context_batch_size * max_seq_len;
+    }
+    // Cover the budget with full-length (max_seq_len) context streams; always at least one, since a
+    // single request runs whole up to max_seq_len regardless of the token budget.
+    const size_t num_seqs = std::max<size_t>(1, (max_batch_tokens + max_seq_len - 1) / max_seq_len);
+
+    auto fake_input                                   = makeFakeInput(max_seq_len - 1);
+    fake_input->generate_config->num_return_sequences = num_seqs;
     fake_input->generate_config->calculate_loss       = int(runtime_config.warm_up_with_loss);
     rtp_llm::setTraceMemory(true);
     executor_.reset(new NormalExecutor(
         params, nullptr, true, false, 0, mla_ops_type_, kv_cache_group_num_, kv_cache_layer_to_group_));
     THROW_IF_STATUSOR_ERROR(preRun(fake_input, preRunMode::prefill_warm_up));
-    const auto max_consumed = getGpuExecStatus().device_memory_status.max_consumed_bytes;
+    const auto peak_status  = getGpuExecStatus().device_memory_status;
+    const auto max_consumed = peak_status.max_consumed_bytes;
     rtp_llm::setTraceMemory(false);
     (void)executor_.reset(nullptr);
     cudaDeviceSynchronize();
     c10::cuda::CUDACachingAllocator::emptyCache();
     const auto device_status = getGpuExecStatus();
-    return WarmUpResult({device_status.device_memory_status.available_bytes, max_consumed});
+    return WarmUpResult({device_status.device_memory_status.available_bytes,
+                         max_consumed,
+                         peak_status.torch_peak_increase_bytes,
+                         peak_status.non_torch_increase_bytes});
 #endif
 }
 
@@ -288,13 +303,17 @@ WarmUpResult NormalEngine::decodeWarmUp(const EngineInitParams& params) {
     executor_.reset(new NormalExecutor(
         params, cache_manager, true, false, 0, mla_ops_type_, kv_cache_group_num_, kv_cache_layer_to_group_));
     THROW_IF_STATUSOR_ERROR(preRun(fake_input, preRunMode::decode_warm_up));
-    const auto max_consumed = getGpuExecStatus().device_memory_status.max_consumed_bytes;
+    const auto peak_status  = getGpuExecStatus().device_memory_status;
+    const auto max_consumed = peak_status.max_consumed_bytes;
     rtp_llm::setTraceMemory(false);
     (void)executor_.reset(nullptr);
     cudaDeviceSynchronize();
     c10::cuda::CUDACachingAllocator::emptyCache();
     const auto device_status = getGpuExecStatus();
-    return WarmUpResult({device_status.device_memory_status.available_bytes, max_consumed});
+    return WarmUpResult({device_status.device_memory_status.available_bytes,
+                         max_consumed,
+                         peak_status.torch_peak_increase_bytes,
+                         peak_status.non_torch_increase_bytes});
 #endif
 }
 

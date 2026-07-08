@@ -17,7 +17,11 @@ def _silu_and_mul_kernel(
     # Meta-parameter for tuning
     BLOCK_SIZE_N: tl.constexpr,
 ):
-    pid_b = tl.program_id(axis=0)  # Batch dimension
+    pid_b = tl.program_id(axis=0).to(
+        tl.int64
+    )  # Batch dimension (int64: pid_b*stride can
+    # exceed 2^31 elements when B*N is large, e.g. batch>=2 long-context MoE -> int32 overflow
+    # -> illegal memory access; other silu variants in this file already cast to int64)
     pid_n_block = tl.program_id(axis=1)  # N-dimension block
 
     input_row_start_ptr = input_ptr + pid_b * input_row_stride

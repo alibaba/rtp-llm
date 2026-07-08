@@ -57,6 +57,13 @@ CacheConfig CacheConfigCreator::createConfig(const ModelConfig&                 
     const auto kv_cache_seq_len = static_cast<size_t>(block_num) * config.seq_size_per_block;
     config.block_num            = static_cast<int>(block_num);
     RTP_LLM_LOG_INFO("kv cache block nums is %u, allows storing %ld tokens", block_num, kv_cache_seq_len);
+    RTP_LLM_LOG_WARNING(
+        "[KV_ALLOC] final block_num=%ld block_size=%ld MiB total_kv=%ld MiB (%.2f GiB), stores %ld tokens",
+        block_num,
+        config.block_size_bytes / 1024 / 1024,
+        static_cast<size_t>(block_num) * config.block_size_bytes / 1024 / 1024,
+        static_cast<size_t>(block_num) * config.block_size_bytes / 1024.0 / 1024.0 / 1024.0,
+        kv_cache_seq_len);
     if (kv_cache_seq_len < model_config.max_seq_len) {
         RTP_LLM_LOG_WARNING("kv cache block nums %u can only store %ld tokens, less than max_seq_len %ld, "
                             "this is dangerous, consider decrease max_seq_len",
