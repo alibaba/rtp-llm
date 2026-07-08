@@ -118,6 +118,25 @@ class RoutedExpertsStrategy(nn.Module):
         """Route + compute. Returns per-token routed-expert sum in fp32."""
         raise NotImplementedError
 
+    def can_use_gate_pack_static(self, gate) -> bool:
+        """Whether this strategy can use the MegaMoE gate-pack fast path.
+
+        The default strategy contract is "not supported"; Mega strategies
+        override it after checking env/static model properties.
+        """
+        return False
+
+    def forward_with_gate_pack(
+        self,
+        x: torch.Tensor,
+        gate,
+        input_ids: torch.Tensor | None,
+    ) -> torch.Tensor:
+        """Optional fast path that fuses router gate + MegaMoE input packing."""
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not support MegaMoE gate-pack"
+        )
+
     @classmethod
     def can_handle(cls, cfg: MoeCfg) -> bool:
         """Whether this strategy is applicable for ``cfg`` in the current
