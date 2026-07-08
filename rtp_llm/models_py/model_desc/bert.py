@@ -152,32 +152,34 @@ class BertModel(GptModelBase):
             attn_inputs = inputs.attention_inputs
             if attn_inputs.is_prefill:
                 # 段标记与 mask 全在 GPU 上向量化构建(无全量 input_ids D2H / mask H2D
-                # 往返); 仅 .any() 一次标量同步决定是否真有 B 段。
+                # 往返)。P1: 去掉原 `bool(uqi_segment_ids.any())` 那次 per-request
+                # GPU->CPU 标量同步 —— 无 B 段时 mask 全可见 = no-op, 结果不变;
+                # 无条件建 mask 既省一次同步(并发下打断流水线的元凶之一),
+                # 又不再 fallback 到 super() 的 TRT 路径。
                 uqi_segment_ids = derive_bert_uqi_segment_ids(
                     inputs.input_ids,
                     attn_inputs.cu_seqlens,
                     self.cls_uqi_token_id,
                 )
-                if bool(uqi_segment_ids.any()):  # 真有 B 段才接 block mask
-                    attn_configs = self.config.getAttentionConfigs(
-                        self.parallelism_config.get_attn_tp_size()
-                    )
-                    # FlashInfer custom_mask: 喂逻辑布尔 mask, 库内部按架构 swizzle/打包,
-                    # 硬件可移植 + fused-快 + 已 GPU 对拍 eager oracle 验证
-                    # (test_py_flashinfer_ragged_mha_prefill.test_block_mask_matches_eager_oracle)。
-                    from rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha import (
-                        PyFlashinferPrefillImpl,
-                    )
+                attn_configs = self.config.getAttentionConfigs(
+                    self.parallelism_config.get_attn_tp_size()
+                )
+                # FlashInfer custom_mask: 喂逻辑布尔 mask, 库内部按架构 swizzle/打包,
+                # 硬件可移植 + fused-快 + 已 GPU 对拍 eager oracle 验证
+                # (test_py_flashinfer_ragged_mha_prefill.test_block_mask_matches_eager_oracle)。
+                from rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha import (
+                    PyFlashinferPrefillImpl,
+                )
 
-                    custom_mask = build_bert_uqi_flashinfer_mask(
-                        uqi_segment_ids, attn_inputs.cu_seqlens
-                    )
-                    return PyFlashinferPrefillImpl(
-                        attn_configs,
-                        attn_inputs,
-                        self.parallelism_config,
-                        custom_mask=custom_mask,
-                    )
+                custom_mask = build_bert_uqi_flashinfer_mask(
+                    uqi_segment_ids, attn_inputs.cu_seqlens
+                )
+                return PyFlashinferPrefillImpl(
+                    attn_configs,
+                    attn_inputs,
+                    self.parallelism_config,
+                    custom_mask=custom_mask,
+                )
         return super().prepare_fmha_impl(inputs, is_cuda_graph)
 
     def forward(
