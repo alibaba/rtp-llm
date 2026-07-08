@@ -22,6 +22,7 @@ from rtp_llm.models_py.modules import (
 from rtp_llm.models_py.modules.factory.attention.block_mask import (
     build_bert_uqi_flashinfer_mask,
     build_bert_uqi_two_pass_schedule,
+    build_bert_uqi_two_pass_schedule_from_bounds,
     derive_bert_uqi_segment_ids,
     derive_bert_uqi_segment_ids_hostlen,
 )
@@ -241,13 +242,26 @@ class BertModel(GptModelBase):
         t0 = time.perf_counter() if perf is not None else 0.0
         batch_size = attn_inputs.input_lengths.size(0)
         cu_host = attn_inputs.cu_seqlens_host[: batch_size + 1]
-        cu_dev = attn_inputs.cu_seqlens[: batch_size + 1]
-        input_ids = inputs.input_ids[: int(cu_host[-1])]
-        seg_ids = derive_bert_uqi_segment_ids_hostlen(
-            input_ids, cu_dev, cu_host, self.cls_uqi_token_id
-        )
-        t1 = time.perf_counter() if perf is not None else 0.0
-        schedule = build_bert_uqi_two_pass_schedule(seg_ids, cu_dev, cu_host)
+        # 优先走 C++ 元数据路径: PyWrappedModel 已在 host token 上扫出段边界
+        # (uqi_b_starts/uqi_b_lens), schedule 全 host 构建 —— 零 GPU derive、
+        # 零 D2H 同步。旧 .so(字段为 None)回退 Python derive 路径。
+        uqi_b_lens = getattr(attn_inputs, "uqi_b_lens", None)
+        if uqi_b_lens is not None and uqi_b_lens.numel() >= batch_size:
+            t1 = time.perf_counter() if perf is not None else 0.0
+            schedule = build_bert_uqi_two_pass_schedule_from_bounds(
+                attn_inputs.uqi_b_starts[:batch_size],
+                uqi_b_lens[:batch_size],
+                cu_host,
+                inputs.input_ids.device,
+            )
+        else:
+            cu_dev = attn_inputs.cu_seqlens[: batch_size + 1]
+            input_ids = inputs.input_ids[: int(cu_host[-1])]
+            seg_ids = derive_bert_uqi_segment_ids_hostlen(
+                input_ids, cu_dev, cu_host, self.cls_uqi_token_id
+            )
+            t1 = time.perf_counter() if perf is not None else 0.0
+            schedule = build_bert_uqi_two_pass_schedule(seg_ids, cu_dev, cu_host)
         t2 = time.perf_counter() if perf is not None else 0.0
         if self._uqi_two_pass_op is None:
             attn_configs = self.config.getAttentionConfigs(

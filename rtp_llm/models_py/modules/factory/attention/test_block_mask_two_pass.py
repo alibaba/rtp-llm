@@ -176,6 +176,48 @@ class TestTwoPassSchedule(unittest.TestCase):
                 self.assertEqual(sched.qo_indptr_p1.tolist(), p1_ref, f"{modes}")
                 self.assertEqual(sched.b_rows.cpu().tolist(), brows_ref, f"{modes}")
 
+    def test_from_bounds_matches_derive_path(self):
+        """C++ 元数据路径(from_bounds)与 Python derive 路径逐字段等价。
+        bounds 按 C++ PyWrappedModel 扫描规则计算(首 CLS_UQI, 其后首 SEP 闭区间)。"""
+        def cpp_scan(ids, cu):
+            bs, bl = [], []
+            for i in range(len(cu) - 1):
+                seq = ids[cu[i]:cu[i + 1]]
+                s = seq.index(CLS_UQI) if CLS_UQI in seq else -1
+                if s < 0:
+                    bs.append(-1); bl.append(0)
+                    continue
+                e = len(seq)
+                for j in range(s, len(seq)):
+                    if seq[j] == SEP:
+                        e = j + 1
+                        break
+                bs.append(s); bl.append(e - s)
+            return (torch.tensor(bs, dtype=torch.int32),
+                    torch.tensor(bl, dtype=torch.int32))
+
+        for trial in range(30):
+            ids, cu = make_batch(self.rng, self.rng.randint(1, 8))
+            ids_dev, cu_dev, cu_host = self._tensors(ids, cu)
+            seg = bm.derive_bert_uqi_segment_ids_hostlen(ids_dev, cu_dev, cu_host, CLS_UQI, SEP)
+            ref = bm.build_bert_uqi_two_pass_schedule(seg, cu_dev, cu_host)
+            b_starts, b_lens = cpp_scan(ids, cu)
+            got = bm.build_bert_uqi_two_pass_schedule_from_bounds(
+                b_starts, b_lens, cu_host, self.dev)
+            self.assertEqual(got.has_b, ref.has_b, f"trial {trial}")
+            self.assertEqual(got.qo_indptr_p1.tolist(), ref.qo_indptr_p1.tolist(), f"trial {trial}")
+            if not ref.has_b:
+                self.assertIsNone(got.perm)
+                continue
+            self.assertEqual(got.qo_indptr_p2.tolist(), ref.qo_indptr_p2.tolist(), f"trial {trial}")
+            self.assertEqual(got.kv_indptr_p2.tolist(), ref.kv_indptr_p2.tolist(), f"trial {trial}")
+            self.assertEqual(got.perm.cpu().tolist(), ref.perm.cpu().tolist(), f"trial {trial}: perm")
+            self.assertEqual(got.inv_perm.cpu().tolist(), ref.inv_perm.cpu().tolist(), f"trial {trial}: inv")
+            self.assertEqual(got.b_rows.cpu().tolist(), ref.b_rows.cpu().tolist(), f"trial {trial}: b_rows")
+            for t in (got.qo_indptr_p1, got.qo_indptr_p2, got.kv_indptr_p2):
+                self.assertEqual(t.dtype, torch.int32)
+                self.assertEqual(t.device.type, "cpu")
+
     def test_single_seq_real_shape(self):
         # 线上真实形状: item(191) + query(4) + [CLS_UQI, profile, SEP] + vision(4)
         ids = [self.rng.randint(200, 30000) for _ in range(195)] + [2, 161, 102] + [-7] * 4

@@ -5,8 +5,10 @@
 #include "rtp_llm/cpp/utils/utils.h"
 #include "rtp_llm/cpp/model_utils/AttentionConfig.h"
 #include <cstdint>
+#include <cstdlib>
 #include <stdexcept>
 #include <mutex>
+#include <string>
 #include <vector>
 #include "rtp_llm/cpp/pybind/PyUtils.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
@@ -137,6 +139,58 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
         py_attn_inputs.cu_seqlens_host         = cu_seqlens;
         py_attn_inputs.cu_seqlens              = tensorHoldHostAndToCuda(cu_seqlens);
         py_attn_inputs.cu_kv_seqlens           = tensorHoldHostAndToCuda(cu_kv_seqlens);
+
+        // qui user-profile: 在 host token ids 上扫出画像段边界([CLS_UQI ... SEP] 闭区间),
+        // 作为元数据传给 Python bert.py —— 替代 Python 侧 GPU derive + b_lens D2H 同步。
+        // 语义与 block_mask.derive_bert_uqi_segment_ids 逐位一致; 纯 CPU 顺序扫描, ~us 级。
+        static const bool kUqiScanEnabled = []() {
+            const char* v = std::getenv("USE_VISION_BERT_UQI_BLOCK_MASK");
+            return v != nullptr && std::string(v) == "1";
+        }();
+        if (kUqiScanEnabled && inputs.combo_tokens.defined()
+            && inputs.combo_tokens.scalar_type() == torch::kInt32
+            && !inputs.combo_tokens.is_cuda()) {
+            static const int32_t kUqiClsTokenId = []() {
+                const char* v = std::getenv("VISION_BERT_CLS_UQI_TOKEN_ID");
+                return v != nullptr ? static_cast<int32_t>(atoi(v)) : 2;
+            }();
+            constexpr int32_t kUqiSepTokenId = 102;
+            const int32_t*    tok            = inputs.combo_tokens.data_ptr<int32_t>();
+            const int32_t*    lens           = py_attn_inputs.input_lengths.data_ptr<int32_t>();
+            const int64_t     ctx_batch      = static_cast<int64_t>(context_batch_size);
+            torch::Tensor     b_starts       = torch::empty({ctx_batch}, torch::kInt32);
+            torch::Tensor     b_lens         = torch::empty({ctx_batch}, torch::kInt32);
+            int32_t*          bs             = b_starts.data_ptr<int32_t>();
+            int32_t*          bl             = b_lens.data_ptr<int32_t>();
+            int64_t           off            = 0;
+            for (int64_t i = 0; i < ctx_batch; ++i) {
+                const int32_t n = lens[i];
+                int32_t       s = -1;
+                for (int32_t j = 0; j < n; ++j) {
+                    if (tok[off + j] == kUqiClsTokenId) {
+                        s = j;
+                        break;
+                    }
+                }
+                if (s >= 0) {
+                    int32_t e = n;  // 无 SEP 退化到序列尾
+                    for (int32_t j = s; j < n; ++j) {
+                        if (tok[off + j] == kUqiSepTokenId) {
+                            e = j + 1;  // 闭区间 [CLS_UQI, SEP]
+                            break;
+                        }
+                    }
+                    bs[i] = s;
+                    bl[i] = e - s;
+                } else {
+                    bs[i] = -1;
+                    bl[i] = 0;
+                }
+                off += n;
+            }
+            py_attn_inputs.uqi_b_starts = b_starts;
+            py_attn_inputs.uqi_b_lens   = b_lens;
+        }
     } else {
         py_attn_inputs.total_tokens = 0;
         py_attn_inputs.cu_seqlens_host =

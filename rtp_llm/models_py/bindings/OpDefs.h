@@ -190,6 +190,13 @@ struct PyAttentionInputs {
     torch::Tensor padding_offset;
     torch::Tensor position_ids;
 
+    // qui user-profile 段边界元数据 (CPU int32 [context_batch]; 未定义 = 特性关闭)。
+    // PyWrappedModel 在 host token ids 上扫描填充 (USE_VISION_BERT_UQI_BLOCK_MASK=1
+    // 时), Python bert.py 直接消费, 免去 GPU derive 与 D2H 同步。
+    // b_start=-1 且 b_len=0 表示该序列无画像段 (QI-only)。
+    torch::Tensor uqi_b_starts;
+    torch::Tensor uqi_b_lens;
+
     // for write cache store
     std::optional<PyCacheStoreInputs> cache_store_inputs;
 
