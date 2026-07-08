@@ -11,6 +11,7 @@
 #include "autil/LockFreeThreadPool.h"
 
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTree.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeEvictor.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/ComponentGroup.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/FullComponentGroup.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/LinearComponentGroup.h"
@@ -22,7 +23,6 @@
 namespace rtp_llm {
 
 class BroadcastManager;
-
 struct CacheStats {
     size_t tree_node_count{0};
     size_t device_heap_total_size{0};
@@ -49,6 +49,11 @@ struct BlockTreeCacheConfig {
 
     // ---- Load-back control ----
     bool enable_load_back{false};
+
+    // ---- Reverse (leaf) cascade eviction control ----
+    // When true, evicting any group on a leaf node cascades to all other groups,
+    // regardless of group priority.
+    bool enable_reverse_eviction{false};
 
     // ---- Eviction thread pool ----
     int eviction_thread_pool_size{2};
@@ -173,39 +178,11 @@ public:
     const BlockTreeCacheConfig& config() const { return config_; }
 
 private:
-    void             performEvictionCopy(EvictionResult er);
-    // Eviction completion. cascade_with_copy controls cascade behavior:
-    //   true  — lower-priority groups' data is copied to the next tier synchronously.
-    //   false — lower-priority groups' data is released directly without copy.
-    void             onEvictionComplete(const EvictionResult& er, bool cascade_with_copy);
-    void             cascadeEviction(TreeNode* node, int source_group_id, Tier tier,
-                                     bool cascade_with_copy);
-    // Executes a tier-to-tier copy for the given group. Returns true on success.
-    bool             executeTierCopy(TreeNode* node, int component_group_id, Tier source_tier, Tier target_tier,
-                                     const std::vector<BlockIdxType>& source_blocks,
-                                     BlockIdxType target_block);
-    // Releases blocks back to the appropriate pool for the given group and tier.
-    void             releaseBlocksFromPool(int component_group_id, Tier tier,
-                                           const std::vector<BlockIdxType>& blocks);
-    // Frees a single pre-allocated target block back to its pool.
-    void             freeTargetBlock(int component_group_id, Tier target_tier, BlockIdxType block);
-    // Sets the target slot data after a successful copy and adds to the corresponding heap.
-    void             setTargetSlot(ComponentGroupPtr& group, GroupSlot& slot,
-                                   TreeNode* node, Tier target_tier, BlockIdxType target_block);
-    void             finalizeEviction(TreeNode* node);
-    bool             shouldDeleteNode(const TreeNode* node) const;
-    std::vector<int> allGroupIds() const;
-    std::vector<int> reusableGroupIds() const;
-    std::vector<int> groupsBelowPriority(int source_group_id) const;
     void             taskStarted();
     void             taskFinished();
     void             checkWatermark();
-    void             checkTierWatermark(Tier tier);
-    size_t           computeGroupExcess(const ComponentGroup& group, Tier tier, double ratio) const;
-    void             allocateTargetBlock(EvictionResult& er);
-    void             submitEviction(EvictionResult& er);
-    Tier             nextLowerTier(Tier tier) const;
-    TransferDescriptor buildEvictionTransferDesc(const EvictionResult& er) const;
+    bool             submitEvictionLocked(EvictionMove& er);
+    void             performEvictionCopy(const BlockTreeEvictor::EvictionPlan& plan);
 
     // Per-group pool access helpers
     std::shared_ptr<HostBlockPool> hostPoolForGroup(int component_group_id) const;
@@ -231,6 +208,7 @@ private:
     std::shared_ptr<StorageBackend>            storage_backend_;
     std::shared_ptr<autil::LockFreeThreadPool> thread_pool_;
     std::shared_ptr<BroadcastManager>          broadcast_manager_;
+    BlockTreeEvictor                          evictor_;
 
     // Runtime-injected collaborators
     DeviceBlockAllocator device_block_allocator_;

@@ -48,15 +48,45 @@ void ComponentGroup::evictFromTier(TreeNode* node, GroupSlot& slot, Tier tier) {
     }
 }
 
-std::optional<EvictionResult> ComponentGroup::driveEviction(int num_blocks, Tier tier) {
+std::optional<EvictionMove> ComponentGroup::driveEviction(int num_blocks, Tier tier) {
     auto* heap = heapForTier(tier);
     if (!heap || heap->empty()) {
         return std::nullopt;
     }
 
+    std::vector<TreeNode*> skipped_nodes;
+    auto restore_skipped_nodes = [&]() {
+        for (TreeNode* node : skipped_nodes) {
+            if (node == nullptr)
+                continue;
+            auto gid = static_cast<size_t>(component_group_id);
+            if (gid >= node->group_slots.size())
+                continue;
+
+            auto& slot = node->group_slots[gid];
+            switch (tier) {
+                case Tier::DEVICE:
+                    slot.in_device_heap = false;
+                    tryAddToDeviceHeap(node);
+                    break;
+                case Tier::HOST:
+                    slot.in_host_heap = false;
+                    tryAddToHostHeap(node);
+                    break;
+                case Tier::DISK:
+                    slot.in_disk_heap = false;
+                    tryAddToDiskHeap(node);
+                    break;
+                default:
+                    break;
+            }
+        }
+    };
+
     while (!heap->empty()) {
         auto entry = heap->pop();
         if (!entry.has_value()) {
+            restore_skipped_nodes();
             return std::nullopt;
         }
 
@@ -87,11 +117,12 @@ std::optional<EvictionResult> ComponentGroup::driveEviction(int num_blocks, Tier
                     break;
             }
             if (!evictable) {
+                skipped_nodes.push_back(entry->node);
                 continue;  // skip this candidate, try next
             }
         }
 
-        EvictionResult result;
+        EvictionMove result;
         result.node               = entry->node;
         result.component_group_id = component_group_id;
         result.source_tier        = tier;
@@ -119,9 +150,11 @@ std::optional<EvictionResult> ComponentGroup::driveEviction(int num_blocks, Tier
                 return std::nullopt;
         }
 
+        restore_skipped_nodes();
         return result;
     }
 
+    restore_skipped_nodes();
     return std::nullopt;
 }
 

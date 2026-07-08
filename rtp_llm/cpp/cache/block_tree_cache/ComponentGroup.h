@@ -58,7 +58,9 @@ enum class TransferType {
     REMOTE_TO_DEVICE,
 };
 
-struct EvictionResult {
+// A single eviction unit selected from a component group. The same descriptor is
+// used for primary eviction and cascade eviction moves.
+struct EvictionMove {
     TreeNode*                 node{nullptr};
     int                       component_group_id{-1};
     Tier                      source_tier{Tier::NONE};
@@ -96,7 +98,7 @@ public:
 
     // ---- Evict (base class provides default; subclasses may override) ----
     virtual void                          evictFromTier(TreeNode* node, GroupSlot& slot, Tier tier);
-    virtual std::optional<EvictionResult> driveEviction(int num_blocks, Tier tier);
+    virtual std::optional<EvictionMove> driveEviction(int num_blocks, Tier tier);
 
     // ---- Transfer (base class provides default; subclasses may override) ----
     virtual TransferDescriptor buildTransfer(TreeNode* node, TransferType type);
