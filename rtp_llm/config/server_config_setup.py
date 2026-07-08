@@ -376,6 +376,22 @@ def setup_default_args(py_env_configs):
         py_env_configs.parallelism_config,
         py_prefill_cp_config=py_env_configs.prefill_cp_config,
     )
+
+    # Context-parallel prefill deadlocks with synchronous cache-store write:
+    # after the prefill forward, waitStoreCacheDone() blocks a CP rank so it never
+    # returns for the master's request broadcast, tripping the 10s broadcast
+    # watchdog (FATAL). Force async cache write when CP prefill is enabled -- the
+    # store still completes in the background.
+    if (
+        py_env_configs.parallelism_config.prefill_cp_config.is_enabled()
+        and py_env_configs.kv_cache_config.write_cache_sync
+    ):
+        py_env_configs.kv_cache_config.write_cache_sync = False
+        logging.warning(
+            "[CP] forcing write_cache_sync=False: synchronous cache-store write "
+            "deadlocks under context-parallel prefill; using async write instead."
+        )
+
     if not py_env_configs.model_args.tokenizer_path:
         py_env_configs.model_args.tokenizer_path = py_env_configs.model_args.ckpt_path
 
