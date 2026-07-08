@@ -1,6 +1,7 @@
 package org.flexlb.consistency;
 
 import org.flexlb.metric.MasterStatusProvider;
+import org.springframework.context.annotation.Lazy;
 import org.springframework.context.annotation.Primary;
 import org.springframework.stereotype.Component;
 
@@ -24,7 +25,7 @@ public class ZkMasterStatusProvider implements MasterStatusProvider {
 
     private final LBStatusConsistencyService lbStatusConsistencyService;
 
-    public ZkMasterStatusProvider(LBStatusConsistencyService lbStatusConsistencyService) {
+    public ZkMasterStatusProvider(@Lazy LBStatusConsistencyService lbStatusConsistencyService) {
         this.lbStatusConsistencyService = lbStatusConsistencyService;
     }
 
