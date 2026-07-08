@@ -32,8 +32,10 @@ from __future__ import annotations
 from typing import Dict
 
 import torch
+import torch.nn.functional as F
 
 from ...quant_layouts import FP4_BLOCK, prepare_fp4_weight_scale_for_deepgemm
+from ..._profiler import record_function_range
 from ..input_packer import get_mega_moe_input_packer
 from ..mega_fused_buf import (
     _get_or_create_mega_fused_buf,
@@ -43,7 +45,7 @@ from ..mega_fused_buf import (
 )
 from ..warmup_sync import sync_cuda_graph_warmup_ranks
 from .base import MoeCfg, register_strategy
-from .mega import MegaMoEStrategy, _mega_output_capacity
+from .mega import MegaMoEStrategy, _get_gate_pack_kernels, _mega_output_capacity
 
 
 @register_strategy
@@ -267,6 +269,100 @@ class MegaMoEFusedStrategy(MegaMoEStrategy):
         )
 
         y = self._mega_y[:T]
+        deep_gemm.fp8_fp4_mega_moe_fused(
+            y,
+            self._se_l1_fp8,
+            self._se_l1_sf,
+            self._se_l2_fp8,
+            self._se_l2_sf,
+            self._mid_fp8,
+            self._mid_sf,
+            (self._mega_l1_w, self._mega_l1_sf),
+            (self._mega_l2_w, self._mega_l2_sf),
+            buf,
+            recipe=(1, 1, FP4_BLOCK),
+            activation="swiglu",
+            activation_clamp=(
+                self.cfg.swiglu_limit if self.cfg.swiglu_limit > 0 else None
+            ),
+            fast_math=True,
+        )
+        return y
+
+    def forward_with_gate_pack(
+        self,
+        x: torch.Tensor,
+        gate,
+        input_ids: torch.Tensor | None,
+    ) -> torch.Tensor:
+        """Run MegaMoE fused with router gate + input pack fused together."""
+        kernels = _get_gate_pack_kernels()
+        if kernels is None:
+            raise RuntimeError(
+                "MegaMoE gate-pack was selected but kernels are unavailable"
+            )
+        (
+            fused_mega_moe_gate_pack_nonhash,
+            fused_mega_moe_gate_pack_hash,
+            _,
+        ) = kernels
+
+        T = x.size(0)
+        buf = self._mega_buf
+        if T > buf.num_max_tokens_per_rank:
+            raise RuntimeError(
+                f"Mega MoE fused input tokens={T} exceeds num_max_tokens_per_rank="
+                f"{buf.num_max_tokens_per_rank} (derived from max_seq_len / "
+                f"max_tokens_per_rank). Raise the budget at startup."
+            )
+        if T > self._mega_y.size(0):
+            raise RuntimeError(
+                f"Mega MoE fused output buffer rows={self._mega_y.size(0)} is "
+                f"smaller than input tokens={T}. This indicates inconsistent "
+                "aligned MegaMoE buffer sizing."
+            )
+
+        with record_function_range("dsv4.moe.gate_linear_bf16"):
+            scores_bf16 = F.linear(x, gate._weight_bf16())
+
+        with record_function_range("dsv4.moe.mega_gate_pack"):
+            if gate.hash:
+                assert input_ids is not None
+                fused_mega_moe_gate_pack_hash(
+                    x,
+                    scores_bf16.contiguous(),
+                    input_ids.reshape(-1).contiguous(),
+                    gate.tid2eid.contiguous(),
+                    buf.x[:T],
+                    buf.x_sf[:T],
+                    buf.topk_idx[:T],
+                    buf.topk_weights[:T],
+                    route_scale=float(gate.route_scale),
+                    norm_eps=1.0e-12,
+                )
+            else:
+                assert gate.bias is not None
+                fused_mega_moe_gate_pack_nonhash(
+                    x,
+                    scores_bf16.contiguous(),
+                    gate.bias.contiguous(),
+                    buf.x[:T],
+                    buf.x_sf[:T],
+                    buf.topk_idx[:T],
+                    buf.topk_weights[:T],
+                    route_scale=float(gate.route_scale),
+                    norm_eps=1.0e-12,
+                )
+
+        self._maybe_pre_kernel_barrier(T)
+        sync_cuda_graph_warmup_ranks(
+            f"dsv4.mega_moe_fused.layer{self.cfg.layer_id}.before_deepgemm",
+            x.device,
+        )
+
+        y = self._mega_y[:T]
+        import deep_gemm
+
         deep_gemm.fp8_fp4_mega_moe_fused(
             y,
             self._se_l1_fp8,
