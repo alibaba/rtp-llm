@@ -196,6 +196,17 @@ struct PyAttentionInputs {
     // b_start=-1 且 b_len=0 表示该序列无画像段 (QI-only)。
     torch::Tensor uqi_b_starts;
     torch::Tensor uqi_b_lens;
+    // C++ 预构建的两趟 attention schedule (Python 只剩 flashinfer plan):
+    // uqi_seg_indptr [2N+1] int32 CPU — [A_0][B_0]... 段前缀和 (pass1 indptr);
+    // uqi_b_indptr [N+1] int32 CPU — 画像段前缀和 (pass2 qo indptr);
+    // uqi_perm/uqi_inv_perm [total] int64 CPU — [A|B] 重排及逆;
+    // uqi_b_rows [total_b] int64 CPU — 重排布局下画像行号。
+    // 全 batch 无画像段时后三者未定义 (uqi_b_indptr 末位=0)。
+    torch::Tensor uqi_seg_indptr;
+    torch::Tensor uqi_b_indptr;
+    torch::Tensor uqi_perm;
+    torch::Tensor uqi_inv_perm;
+    torch::Tensor uqi_b_rows;
 
     // for write cache store
     std::optional<PyCacheStoreInputs> cache_store_inputs;

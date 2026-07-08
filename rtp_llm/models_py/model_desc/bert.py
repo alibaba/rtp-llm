@@ -20,6 +20,7 @@ from rtp_llm.models_py.modules import (
     MultimodalEmbeddingInjector,
 )
 from rtp_llm.models_py.modules.factory.attention.block_mask import (
+    BertUqiTwoPassSchedule,
     build_bert_uqi_flashinfer_mask,
     build_bert_uqi_two_pass_schedule,
     build_bert_uqi_two_pass_schedule_from_bounds,
@@ -242,11 +243,30 @@ class BertModel(GptModelBase):
         t0 = time.perf_counter() if perf is not None else 0.0
         batch_size = attn_inputs.input_lengths.size(0)
         cu_host = attn_inputs.cu_seqlens_host[: batch_size + 1]
-        # 优先走 C++ 元数据路径: PyWrappedModel 已在 host token 上扫出段边界
-        # (uqi_b_starts/uqi_b_lens), schedule 全 host 构建 —— 零 GPU derive、
-        # 零 D2H 同步。旧 .so(字段为 None)回退 Python derive 路径。
+        # 优先走 C++ 全 schedule 路径: PyWrappedModel 已在 host token 上扫出段
+        # 边界并预构建 perm/indptr/b_rows —— Python 侧只剩 flashinfer plan 与
+        # 两次小 H2D。次选 bounds(from_bounds host 构建), 旧 .so 回退 derive。
+        uqi_seg_indptr = getattr(attn_inputs, "uqi_seg_indptr", None)
         uqi_b_lens = getattr(attn_inputs, "uqi_b_lens", None)
-        if uqi_b_lens is not None and uqi_b_lens.numel() >= batch_size:
+        if uqi_seg_indptr is not None and uqi_seg_indptr.numel() == 2 * batch_size + 1:
+            t1 = time.perf_counter() if perf is not None else 0.0
+            if int(attn_inputs.uqi_b_indptr[batch_size]) == 0:
+                schedule = BertUqiTwoPassSchedule(
+                    has_b=False, perm=None, inv_perm=None, b_rows=None,
+                    qo_indptr_p1=cu_host, qo_indptr_p2=None, kv_indptr_p2=None,
+                )
+            else:
+                dev = inputs.input_ids.device
+                schedule = BertUqiTwoPassSchedule(
+                    has_b=True,
+                    perm=attn_inputs.uqi_perm.to(dev, non_blocking=True),
+                    inv_perm=attn_inputs.uqi_inv_perm.to(dev, non_blocking=True),
+                    b_rows=attn_inputs.uqi_b_rows.to(dev, non_blocking=True),
+                    qo_indptr_p1=uqi_seg_indptr,
+                    qo_indptr_p2=attn_inputs.uqi_b_indptr,
+                    kv_indptr_p2=cu_host,
+                )
+        elif uqi_b_lens is not None and uqi_b_lens.numel() >= batch_size:
             t1 = time.perf_counter() if perf is not None else 0.0
             schedule = build_bert_uqi_two_pass_schedule_from_bounds(
                 attn_inputs.uqi_b_starts[:batch_size],

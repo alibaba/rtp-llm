@@ -190,6 +190,55 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
             }
             py_attn_inputs.uqi_b_starts = b_starts;
             py_attn_inputs.uqi_b_lens   = b_lens;
+
+            // 顺手把两趟 attention 的 schedule 也在 C++ 建好 (闭式 permutation,
+            // 免 Python host 小算子开销): bert.py 直接消费, Python 侧只剩 plan。
+            torch::Tensor seg_indptr = torch::empty({2 * ctx_batch + 1}, torch::kInt32);
+            torch::Tensor b_indptr   = torch::empty({ctx_batch + 1}, torch::kInt32);
+            int32_t*      sip        = seg_indptr.data_ptr<int32_t>();
+            int32_t*      bip        = b_indptr.data_ptr<int32_t>();
+            sip[0]                   = 0;
+            bip[0]                   = 0;
+            for (int64_t i = 0; i < ctx_batch; ++i) {
+                const int32_t a = lens[i] - bl[i];
+                sip[2 * i + 1]  = sip[2 * i] + a;
+                sip[2 * i + 2]  = sip[2 * i + 1] + bl[i];
+                bip[i + 1]      = bip[i] + bl[i];
+            }
+            const int64_t total_b = bip[ctx_batch];
+            if (total_b > 0) {
+                torch::Tensor perm   = torch::empty({off}, torch::kInt64);
+                torch::Tensor inv    = torch::empty({off}, torch::kInt64);
+                torch::Tensor b_rows = torch::empty({total_b}, torch::kInt64);
+                int64_t*      pm     = perm.data_ptr<int64_t>();
+                int64_t*      iv     = inv.data_ptr<int64_t>();
+                int64_t*      br     = b_rows.data_ptr<int64_t>();
+                int64_t       base = 0, bc = 0;
+                for (int64_t i = 0; i < ctx_batch; ++i) {
+                    const int32_t n = lens[i], s = bs[i], l = bl[i], a = n - l;
+                    for (int32_t j = 0; j < n; ++j) {
+                        int64_t np;
+                        if (s >= 0 && j >= s && j < s + l) {
+                            np = a + (j - s);  // B 段 -> 序列尾
+                        } else if (s >= 0 && j >= s + l) {
+                            np = j - l;  // B 段之后的 A(如 vision) 前移
+                        } else {
+                            np = j;  // B 段之前的 A 原位
+                        }
+                        pm[base + np] = base + j;
+                        iv[base + j]  = base + np;
+                    }
+                    for (int32_t t = 0; t < l; ++t) {
+                        br[bc++] = base + a + t;
+                    }
+                    base += n;
+                }
+                py_attn_inputs.uqi_perm     = perm;
+                py_attn_inputs.uqi_inv_perm = inv;
+                py_attn_inputs.uqi_b_rows   = b_rows;
+            }
+            py_attn_inputs.uqi_seg_indptr = seg_indptr;
+            py_attn_inputs.uqi_b_indptr   = b_indptr;
         }
     } else {
         py_attn_inputs.total_tokens = 0;
