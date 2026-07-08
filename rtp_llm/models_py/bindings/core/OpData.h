@@ -278,6 +278,13 @@ struct FfnConfigs {
     std::optional<MoeConfigs> moe_configs = std::nullopt;
 };
 
+struct GreedySamplingBuffers {
+    torch::Tensor seed_host;
+    torch::Tensor offset_host;
+    torch::Tensor output_ids_ptrs_host;
+    size_t        max_batch_size = 0;
+};
+
 struct GreedyParams {
     torch::Tensor logits;            // [batch_size, vocab_size_padded], mutable for in-place penalty
     torch::Tensor input_lengths;     // [batch_size]
@@ -303,6 +310,7 @@ struct GreedyParams {
     std::optional<torch::Tensor> do_sample;
 
     std::vector<at::Generator> generator;
+    GreedySamplingBuffers*     sampling_buffers = nullptr;
 };
 
 struct GreedyOutput {
