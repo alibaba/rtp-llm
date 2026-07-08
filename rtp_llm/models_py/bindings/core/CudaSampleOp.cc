@@ -114,6 +114,55 @@ using SamplerT = float;
 
 namespace {
 
+torch::Tensor getSamplingHostBufferSlice(const torch::Tensor& buffer, int64_t batch_size, const char* buffer_name) {
+    RTP_LLM_CHECK_WITH_INFO(buffer.defined(), "%s is not initialized", buffer_name);
+    RTP_LLM_CHECK_WITH_INFO(buffer.device().is_cpu(), "%s must be a CPU tensor", buffer_name);
+    RTP_LLM_CHECK_WITH_INFO(buffer.scalar_type() == torch::kInt64, "%s must be an int64 tensor", buffer_name);
+    RTP_LLM_CHECK_WITH_INFO(buffer.numel() >= batch_size,
+                            "%s capacity [%ld] is smaller than batch size [%ld]",
+                            buffer_name,
+                            buffer.numel(),
+                            batch_size);
+    return buffer.narrow(0, 0, batch_size);
+}
+
+std::pair<torch::Tensor, torch::Tensor> makeSamplingSeedOffsetTensors(const std::vector<at::Generator>& generators,
+                                                                      int64_t                           batch_size,
+                                                                      int                               increment,
+                                                                      GreedySamplingBuffers* sampling_buffers) {
+    RTP_LLM_CHECK_WITH_INFO(generators.size() >= static_cast<size_t>(batch_size),
+                            "sampling generators size [%lu] is smaller than batch size [%ld]",
+                            generators.size(),
+                            batch_size);
+    const bool    use_persistent_buffers = sampling_buffers != nullptr;
+    auto          options                = torch::TensorOptions().dtype(torch::kInt64).pinned_memory(true);
+    torch::Tensor seed_h;
+    torch::Tensor offset_h;
+    if (use_persistent_buffers) {
+        seed_h   = getSamplingHostBufferSlice(sampling_buffers->seed_host, batch_size, "sampling seed buffer");
+        offset_h = getSamplingHostBufferSlice(sampling_buffers->offset_host, batch_size, "sampling offset buffer");
+    } else {
+        seed_h   = torch::empty({batch_size}, options);
+        offset_h = torch::empty({batch_size}, options);
+    }
+    auto seed_ptr = seed_h.data_ptr<int64_t>();
+    auto off_ptr  = offset_h.data_ptr<int64_t>();
+
+    for (int64_t i = 0; i < batch_size; ++i) {
+        // Undefined generator entries intentionally use PyTorch's default CUDA generator.
+        auto generator      = (i < static_cast<int64_t>(generators.size()) && generators[i].defined()) ?
+                                  std::make_optional(generators[i]) :
+                                  std::nullopt;
+        auto [seed, offset] = get_seed_and_offset(increment, generator);
+        seed_ptr[i]         = static_cast<int64_t>(seed);
+        off_ptr[i]          = static_cast<int64_t>(offset);
+    }
+
+    auto seed_d   = seed_h.to(torch::kCUDA, /*non_blocking=*/use_persistent_buffers).contiguous();
+    auto offset_d = offset_h.to(torch::kCUDA, /*non_blocking=*/use_persistent_buffers).contiguous();
+    return {seed_d, offset_d};
+}
+
 void processLogits(const GreedyParams&  params,
                    const torch::Tensor& device_tokens,
                    const torch::Tensor& transposed_tokens) {
@@ -185,12 +234,20 @@ void processLogits(const GreedyParams&  params,
                    [](auto s) { return s != 0; })) {
             auto no_repeat_ngram_size_gpu = no_repeat_ngram_size.to(torch::kCUDA, true);
             // Build array of pointers to each batch's token ids
-            auto output_ids_ptrs =
-                torch::empty({(int64_t)decoder_batch_size}, torch::TensorOptions().dtype(torch::kInt64)).pin_memory();
+            const bool    use_persistent_buffers = params.sampling_buffers != nullptr;
+            torch::Tensor output_ids_ptrs;
+            if (use_persistent_buffers) {
+                output_ids_ptrs = getSamplingHostBufferSlice(params.sampling_buffers->output_ids_ptrs_host,
+                                                             decoder_batch_size,
+                                                             "sampling output ids ptrs buffer");
+            } else {
+                output_ids_ptrs = torch::empty({(int64_t)decoder_batch_size},
+                                               torch::TensorOptions().dtype(torch::kInt64).pinned_memory(true));
+            }
             for (int64_t i = 0; i < (int64_t)decoder_batch_size; i++) {
                 output_ids_ptrs.data_ptr<int64_t>()[i] = (int64_t)(device_tokens.data_ptr<int32_t>() + i * (step + 1));
             }
-            auto output_ids_ptrs_gpu  = output_ids_ptrs.to(torch::kCUDA, true);
+            auto output_ids_ptrs_gpu  = output_ids_ptrs.to(torch::kCUDA, use_persistent_buffers);
             auto sequence_lengths_gpu = params.sequence_lengths.to(torch::kCUDA, true);
 
             tensorrt_llm::kernels::invokeBanRepeatNgram(params.logits.data_ptr<float>(),
@@ -226,16 +283,10 @@ static GreedyOutput flashinferSampleGreedy(const GreedyParams& params, const tor
     // [1, batch_size] — last row of transposed_tokens
     auto samples_t = transposed_tokens.slice(0, transposed_tokens.size(0) - 1, transposed_tokens.size(0));
 
-    torch::TensorOptions options          = torch::TensorOptions(probs_t.scalar_type()).device(torch::kCUDA);
-    constexpr bool       deterministic    = true;
-    constexpr int        max_top_k_rounds = 32;
-    auto                 uniform_samples  = torch::rand({max_top_k_rounds, (int)batch_size}, options);
-    for (int64_t i = 0; i < (int64_t)batch_size; i++) {
-        if (params.generator[i].defined()) {
-            uniform_samples.index({torch::indexing::Slice(), i}) =
-                torch::rand({max_top_k_rounds}, params.generator[i], nullopt, options);
-        }
-    }
+    constexpr bool deterministic       = true;
+    constexpr int  max_sampling_rounds = 32;
+    auto [seed_t, offset_t] =
+        makeSamplingSeedOffsetTensors(params.generator, batch_size, max_sampling_rounds, params.sampling_buffers);
 
     torch::Tensor success_t = success;
     torch::Tensor top_k_t   = params.top_k;
@@ -249,49 +300,81 @@ static GreedyOutput flashinferSampleGreedy(const GreedyParams& params, const tor
     }
 
     // top_k/top_p are CPU tensors with int32/float32 dtype
-    auto top_k_ptr = reinterpret_cast<uint32_t*>(params.top_k.data_ptr<int32_t>());
+    auto top_k_ptr = params.top_k.data_ptr<int32_t>();
     auto top_p_ptr = params.top_p.data_ptr<float>();
 
     std::transform(top_p_ptr, top_p_ptr + batch_size, top_p_ptr, [&](auto t) { return std::abs(t) < 1e-7 ? 1.0 : t; });
 
-    bool need_renorm_probs = output_all_probs_t.defined() && !params.return_original_all_probs;
+    const bool need_renorm_probs  = output_all_probs_t.defined() && !params.return_original_all_probs;
+    const bool all_top_k_one      = std::all_of(top_k_ptr, top_k_ptr + batch_size, [](auto t) { return t == 1; });
+    const bool all_top_k_no_limit = std::all_of(top_k_ptr, top_k_ptr + batch_size, [](auto t) { return t <= 0; });
+    const bool all_top_p_one =
+        std::all_of(top_p_ptr, top_p_ptr + batch_size, [](auto t) { return std::abs(t - 1.0f) < 1e-7; });
 
-    if (std::all_of(top_k_ptr, top_k_ptr + batch_size, [&](auto t) { return t == 1; })) {
+    if (all_top_k_one) {
         torch::Tensor selected_tokens = torch::argmax(probs_t, -1, /*keepdim=*/false);
         samples_t.copy_(selected_tokens, true);
         success = torch::Tensor();  // mark as undefined — all succeeded
         if (need_renorm_probs) {
             top_k_renorm_probs(probs_t, output_all_probs_t, top_k_t, 0, (int64_t)cur_stream);
         }
-    } else if (std::all_of(top_k_ptr, top_k_ptr + batch_size, [&](auto t) { return t <= 0; })) {
-        top_p_sampling_from_probs(
-            probs_t, uniform_samples, samples_t, success_t, top_p_t, 1.0, deterministic, (int64_t)cur_stream);
+    } else if (all_top_k_no_limit) {
+        top_p_sampling_from_probs(probs_t,
+                                  samples_t.squeeze(0),
+                                  success_t,
+                                  std::nullopt,
+                                  top_p_t,
+                                  1.0,
+                                  deterministic,
+                                  seed_t,
+                                  0,
+                                  offset_t,
+                                  0,
+                                  (int64_t)cur_stream);
         if (need_renorm_probs) {
             top_p_renorm_probs(probs_t, output_all_probs_t, top_p_t, 1.0, (int64_t)cur_stream);
         }
-    } else if (std::all_of(top_p_ptr, top_p_ptr + batch_size, [&](auto t) { return std::abs(t - 1.0f) < 1e-7; })) {
-        std::transform(top_k_ptr, top_k_ptr + batch_size, top_k_ptr, [&](auto t) { return t <= 0 ? 1 << 30 : t; });
-        top_k_sampling_from_probs(
-            probs_t, uniform_samples, samples_t, success_t, top_k_t, 0, deterministic, (int64_t)cur_stream);
-        if (need_renorm_probs) {
-            top_k_renorm_probs(probs_t, output_all_probs_t, top_k_t, 0, (int64_t)cur_stream);
-        }
     } else {
-        std::transform(top_k_ptr, top_k_ptr + batch_size, top_k_ptr, [&](auto t) { return t <= 0 ? 1 << 30 : t; });
-        top_k_top_p_sampling_from_probs(probs_t,
-                                        uniform_samples,
-                                        samples_t,
-                                        success_t,
-                                        top_k_t,
-                                        1.0,
-                                        top_p_t,
-                                        1.0,
-                                        deterministic,
-                                        (int64_t)cur_stream);
-        if (need_renorm_probs) {
-            torch::Tensor temp_t = torch::zeros_like(output_all_probs_t);
-            top_k_renorm_probs(probs_t, temp_t, top_k_t, 1.0, (int64_t)cur_stream);
-            top_p_renorm_probs(temp_t, output_all_probs_t, top_p_t, 1.0, (int64_t)cur_stream);
+        // top_k<=0 means "no limit" in RTP config. The combined FlashInfer
+        // kernel takes a top_k array, so normalize mixed batches after the
+        // pure top-p route has been selected.
+        std::transform(top_k_ptr, top_k_ptr + batch_size, top_k_ptr, [](auto t) { return t <= 0 ? 1 << 30 : t; });
+        if (all_top_p_one) {
+            top_k_sampling_from_probs(probs_t,
+                                      samples_t.squeeze(0),
+                                      success_t,
+                                      std::nullopt,
+                                      top_k_t,
+                                      0,
+                                      deterministic,
+                                      seed_t,
+                                      0,
+                                      offset_t,
+                                      0,
+                                      (int64_t)cur_stream);
+            if (need_renorm_probs) {
+                top_k_renorm_probs(probs_t, output_all_probs_t, top_k_t, 0, (int64_t)cur_stream);
+            }
+        } else {
+            top_k_top_p_sampling_from_probs(probs_t,
+                                            samples_t.squeeze(0),
+                                            success_t,
+                                            std::nullopt,
+                                            top_k_t,
+                                            0,
+                                            top_p_t,
+                                            1.0,
+                                            deterministic,
+                                            seed_t,
+                                            0,
+                                            offset_t,
+                                            0,
+                                            (int64_t)cur_stream);
+            if (need_renorm_probs) {
+                torch::Tensor temp_t = torch::zeros_like(output_all_probs_t);
+                top_k_renorm_probs(probs_t, temp_t, top_k_t, 1.0, (int64_t)cur_stream);
+                top_p_renorm_probs(temp_t, output_all_probs_t, top_p_t, 1.0, (int64_t)cur_stream);
+            }
         }
     }
 

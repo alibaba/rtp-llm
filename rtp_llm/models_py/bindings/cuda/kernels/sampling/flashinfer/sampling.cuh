@@ -733,6 +733,13 @@ __device__ __forceinline__ vec_t<DType, VEC_SIZE>
     }
 }
 
+__device__ __forceinline__ uint64_t SamplingPhiloxSubsequence(uint32_t bx, uint64_t* seed_arr, uint64_t* offset_arr) {
+    // A per-row seed/offset array means the caller has already assigned each
+    // row an independent RNG state. Mixing in the batch row again makes two
+    // independent requests with the same random_seed produce different samples.
+    return (seed_arr != nullptr || offset_arr != nullptr) ? 0 : static_cast<uint64_t>(bx);
+}
+
 template<uint32_t             BLOCK_THREADS,
          BlockScanAlgorithm   SCAN_ALGORITHM,
          BlockReduceAlgorithm REDUCE_ALGORITHM,
@@ -751,10 +758,11 @@ __global__ void SamplingFromLogitsKernel(DType*    logits,
     const uint32_t bx = blockIdx.x, tx = threadIdx.x;
 
     // Resolve seed/offset from tensor or scalar
-    uint64_t philox_seed   = seed_arr ? seed_arr[0] : seed_val;
-    uint64_t philox_offset = offset_arr ? offset_arr[0] : offset_val;
+    uint64_t philox_seed   = seed_arr ? seed_arr[bx] : seed_val;
+    uint64_t philox_offset = offset_arr ? offset_arr[bx] : offset_val;
 
-    const uint32_t row_idx = indices == nullptr ? bx : indices[bx];
+    const uint32_t row_idx          = indices == nullptr ? bx : indices[bx];
+    const uint64_t subsequence_base = SamplingPhiloxSubsequence(bx, seed_arr, offset_arr) * static_cast<uint64_t>(d);
     using SharedMem = typename BlockReduce<DataAndIndex<DType, IdType>, BLOCK_THREADS, REDUCE_ALGORITHM>::TempStorage;
     extern __shared__ __align__(alignof(SharedMem)) uint8_t smem_sampling_logit[];
     auto& temp_storage = reinterpret_cast<SharedMem&>(smem_sampling_logit);
@@ -768,7 +776,7 @@ __global__ void SamplingFromLogitsKernel(DType*    logits,
         }
 
         vec_t<DType, VEC_SIZE> gumbel_noise = GenerateGumbelNoise<DType, VEC_SIZE>(
-            philox_seed, philox_offset, static_cast<uint64_t>(bx * d + (i * BLOCK_THREADS + tx) * VEC_SIZE));
+            philox_seed, philox_offset, subsequence_base + (i * BLOCK_THREADS + tx) * VEC_SIZE);
         DataAndIndex<DType, IdType> cur_data[VEC_SIZE];
 #pragma unroll
         for (uint32_t j = 0; j < VEC_SIZE; ++j) {
@@ -806,10 +814,10 @@ __global__ void SamplingFromProbKernel(DType*    probs,
     const uint32_t             bx = blockIdx.x, tx = threadIdx.x;
 
     // Resolve seed/offset from tensor or scalar
-    uint64_t philox_seed   = seed_arr ? seed_arr[0] : seed_val;
-    uint64_t philox_offset = offset_arr ? offset_arr[0] : offset_val;
+    uint64_t philox_seed   = seed_arr ? seed_arr[bx] : seed_val;
+    uint64_t philox_offset = offset_arr ? offset_arr[bx] : offset_val;
 
-    curand_init(philox_seed, bx, philox_offset, &state);
+    curand_init(philox_seed, SamplingPhiloxSubsequence(bx, seed_arr, offset_arr), philox_offset, &state);
     const uint32_t row_idx = indices == nullptr ? bx : indices[bx];
 
     extern __shared__ __align__(alignof(SamplingTempStorage<BLOCK_THREADS, SCAN_ALGORITHM, REDUCE_ALGORITHM>))
@@ -875,15 +883,14 @@ __global__ void TopKSamplingFromProbKernel(DType*    probs,
                                            uint64_t  seed_val,
                                            uint64_t* offset_arr,
                                            uint64_t  offset_val) {
-    const uint32_t batch_size = gridDim.x;
     const uint32_t bx = blockIdx.x, tx = threadIdx.x;
 
     // Resolve seed/offset from tensor or scalar
-    uint64_t philox_seed   = seed_arr ? seed_arr[0] : seed_val;
-    uint64_t philox_offset = offset_arr ? offset_arr[0] : offset_val;
+    uint64_t philox_seed   = seed_arr ? seed_arr[bx] : seed_val;
+    uint64_t philox_offset = offset_arr ? offset_arr[bx] : offset_val;
 
     curandStatePhilox4_32_10_t state;
-    curand_init(philox_seed, bx, philox_offset, &state);
+    curand_init(philox_seed, SamplingPhiloxSubsequence(bx, seed_arr, offset_arr), philox_offset, &state);
     const uint32_t k       = top_k_arr == nullptr ? top_k_val : top_k_arr[bx];
     const uint32_t row_idx = indices == nullptr ? bx : indices[bx];
 
@@ -1014,15 +1021,14 @@ __global__ void TopPSamplingFromProbKernel(DType*    probs,
                                            uint64_t  seed_val,
                                            uint64_t* offset_arr,
                                            uint64_t  offset_val) {
-    const uint32_t batch_size = gridDim.x;
     const uint32_t bx = blockIdx.x, tx = threadIdx.x;
 
     // Resolve seed/offset from tensor or scalar
-    uint64_t philox_seed   = seed_arr ? seed_arr[0] : seed_val;
-    uint64_t philox_offset = offset_arr ? offset_arr[0] : offset_val;
+    uint64_t philox_seed   = seed_arr ? seed_arr[bx] : seed_val;
+    uint64_t philox_offset = offset_arr ? offset_arr[bx] : offset_val;
 
     curandStatePhilox4_32_10_t state;
-    curand_init(philox_seed, bx, philox_offset, &state);
+    curand_init(philox_seed, SamplingPhiloxSubsequence(bx, seed_arr, offset_arr), philox_offset, &state);
     const uint32_t row_idx = indices == nullptr ? bx : indices[bx];
     float          top_p   = (top_p_arr == nullptr) ? top_p_val : top_p_arr[row_idx];
 
@@ -1152,12 +1158,12 @@ __global__ void MinPSamplingFromProbKernel(DType*    probs,
     const uint32_t bx = blockIdx.x, tx = threadIdx.x;
 
     // Resolve seed/offset from tensor or scalar
-    uint64_t philox_seed   = seed_arr ? seed_arr[0] : seed_val;
-    uint64_t philox_offset = offset_arr ? offset_arr[0] : offset_val;
+    uint64_t philox_seed   = seed_arr ? seed_arr[bx] : seed_val;
+    uint64_t philox_offset = offset_arr ? offset_arr[bx] : offset_val;
 
     float                      p = (min_p_arr == nullptr) ? min_p_val : min_p_arr[bx];
     curandStatePhilox4_32_10_t state;
-    curand_init(philox_seed, bx, philox_offset, &state);
+    curand_init(philox_seed, SamplingPhiloxSubsequence(bx, seed_arr, offset_arr), philox_offset, &state);
     const uint32_t row_idx = indices == nullptr ? bx : indices[bx];
 
     extern __shared__ __align__(alignof(SamplingTempStorage<BLOCK_THREADS, SCAN_ALGORITHM, REDUCE_ALGORITHM>))
@@ -1256,15 +1262,14 @@ __global__ void TopKTopPSamplingFromProbKernel(DType*    probs,
                                                uint64_t  seed_val,
                                                uint64_t* offset_arr,
                                                uint64_t  offset_val) {
-    const uint32_t batch_size = gridDim.x;
     const uint32_t bx = blockIdx.x, tx = threadIdx.x;
 
     // Resolve seed/offset from tensor or scalar
-    uint64_t philox_seed   = seed_arr ? seed_arr[0] : seed_val;
-    uint64_t philox_offset = offset_arr ? offset_arr[0] : offset_val;
+    uint64_t philox_seed   = seed_arr ? seed_arr[bx] : seed_val;
+    uint64_t philox_offset = offset_arr ? offset_arr[bx] : offset_val;
 
     curandStatePhilox4_32_10_t state;
-    curand_init(philox_seed, bx, philox_offset, &state);
+    curand_init(philox_seed, SamplingPhiloxSubsequence(bx, seed_arr, offset_arr), philox_offset, &state);
     const uint32_t row_idx = indices == nullptr ? bx : indices[bx];
     const uint32_t k       = top_k_arr == nullptr ? top_k_val : top_k_arr[row_idx];
     const float    p       = top_p_arr == nullptr ? top_p_val : top_p_arr[row_idx];
@@ -1604,7 +1609,7 @@ cudaError_t TopKSamplingFromProb(T*           probs,
                                  IdType*      output,
                                  bool*        valid,
                                  IdType*      indices,
-                                 T*           top_k_arr,
+                                 IdType*      top_k_arr,
                                  uint32_t     batch_size,
                                  uint32_t     top_k_val,
                                  uint32_t     d,
