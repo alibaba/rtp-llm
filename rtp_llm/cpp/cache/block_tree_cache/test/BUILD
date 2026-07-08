@@ -118,6 +118,14 @@ cc_test(
 )
 
 cc_test(
+    name = "block_tree_cache_factory_test",
+    srcs = ["BlockTreeCacheFactoryTest.cc"],
+    copts = pool_test_copts,
+    deps = pool_test_deps,
+    env = {},
+)
+
+cc_test(
     name = "disk_block_pool_test",
     srcs = ["DiskBlockPoolTest.cc"],
     copts = pool_test_copts,

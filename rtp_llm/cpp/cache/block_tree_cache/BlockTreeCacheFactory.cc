@@ -1,5 +1,8 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCacheFactory.h"
 
+#include <cstdlib>
+#include <string>
+
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTree.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/FullComponentGroup.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/LinearComponentGroup.h"
@@ -70,7 +73,7 @@ std::shared_ptr<HostBlockPool> createHostPool(size_t payload_bytes, size_t usabl
     config->free_block_order_policy = FreeBlockOrderPolicy::ANY_ORDER;
     config->payload_bytes           = payload_bytes;
     config->stride_bytes            = alignUp(payload_bytes, kBlockTreeCachePoolAlignment);
-    config->enable_pinned           = true;
+    config->enable_pinned           = shouldPinHostBlockPool();
     config->alignment               = kBlockTreeCachePoolAlignment;
 
     auto pool = std::make_shared<HostBlockPool>(config);
@@ -113,6 +116,23 @@ createDiskPool(const KVCacheConfig& kv_cache_config, size_t payload_bytes, int64
 
 }  // namespace
 
+bool shouldPinHostBlockPool() {
+    const char* value = std::getenv("RTP_LLM_PIN_HOST_BLOCK_POOL");
+    if (value == nullptr) {
+        return true;
+    }
+    const std::string flag(value);
+    return flag != "0" && flag != "false" && flag != "FALSE" && flag != "off" && flag != "OFF";
+}
+
+size_t computeHostUsableBlockCount(size_t memory_cache_size_bytes, size_t stride_bytes) {
+    if (stride_bytes == 0) {
+        return 0;
+    }
+    const size_t total_block_count = memory_cache_size_bytes / stride_bytes;
+    return total_block_count > 0 ? total_block_count - 1 : 0;
+}
+
 BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       cache_config,
                                        const KVCacheConfig&                     kv_cache_config,
                                        const std::shared_ptr<KVCacheAllocator>& allocator,
@@ -153,12 +173,18 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
     // 4. Compute Host pool block count and create pool if memory cache enabled.
     std::shared_ptr<HostBlockPool> host_pool = nullptr;
     if (kv_cache_config.enable_memory_cache && kv_cache_config.memory_cache_size_mb > 0 && payload_bytes > 0) {
-        // usable_block_count = memory_cache_size_bytes / stride_bytes (page-aligned).
+        // usable_block_count = memory_cache_size_bytes / stride_bytes - 1: the reserved
+        // block 0 is counted within the configured budget so backing never exceeds it.
         const size_t stride_bytes = alignUp(payload_bytes, kBlockTreeCachePoolAlignment);
         const size_t memory_cache_size_bytes =
             static_cast<size_t>(kv_cache_config.memory_cache_size_mb) * 1024 * 1024;
-        const size_t usable_block_count = memory_cache_size_bytes / stride_bytes;
-        host_pool                       = createHostPool(payload_bytes, usable_block_count);
+        const size_t usable_block_count = computeHostUsableBlockCount(memory_cache_size_bytes, stride_bytes);
+        RTP_LLM_CHECK_WITH_INFO(usable_block_count > 0,
+                                "L2 memory cache enabled but memory_cache_size_mb=%ld is too small for block "
+                                "stride=%zu bytes (need at least 2 blocks including the reserved block 0)",
+                                kv_cache_config.memory_cache_size_mb,
+                                stride_bytes);
+        host_pool = createHostPool(payload_bytes, usable_block_count);
     }
 
     // 5. Create DiskBlockPool if disk cache enabled.

@@ -1,13 +1,67 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/host/HostBlockPool.h"
 
+#include <cerrno>
 #include <cstdint>
+#include <cstring>
 #include <exception>
 #include <sstream>
+
+#include <sys/mman.h>
+#include <unistd.h>
 
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
 namespace rtp_llm {
+
+namespace {
+
+// Exclude the host block pool backing from core dumps (mirrors the legacy BlockPool
+// behavior). Best-effort: failures and the absence of MADV_DONTDUMP only warn and never
+// fail initialization.
+void markHostBlockPoolDontDump(const char* pool_name, void* ptr, size_t size) {
+#ifdef MADV_DONTDUMP
+    if (ptr == nullptr || size == 0) {
+        return;
+    }
+
+    long page_size = sysconf(_SC_PAGESIZE);
+    if (page_size <= 0) {
+        page_size = 4096;
+    }
+
+    const auto begin         = reinterpret_cast<uintptr_t>(ptr);
+    const auto page_mask     = static_cast<uintptr_t>(page_size - 1);
+    const auto aligned_begin = begin & ~page_mask;
+    const auto aligned_end   = (begin + size + page_mask) & ~page_mask;
+    const auto aligned_size  = static_cast<size_t>(aligned_end - aligned_begin);
+
+    if (madvise(reinterpret_cast<void*>(aligned_begin), aligned_size, MADV_DONTDUMP) != 0) {
+        RTP_LLM_LOG_WARNING("madvise MADV_DONTDUMP failed for host block pool, pool_name=%s ptr=%p, size=%zu, "
+                            "error=%s",
+                            pool_name,
+                            ptr,
+                            size,
+                            std::strerror(errno));
+    } else {
+        RTP_LLM_LOG_INFO("madvise MADV_DONTDUMP success for host block pool, pool_name=%s ptr=%p, size=%zu, "
+                         "aligned_ptr=%p, aligned_size=%zu",
+                         pool_name,
+                         ptr,
+                         size,
+                         reinterpret_cast<void*>(aligned_begin),
+                         aligned_size);
+    }
+#else
+    RTP_LLM_LOG_WARNING(
+        "MADV_DONTDUMP is not defined, host block pool may be included in coredump, pool_name=%s ptr=%p, size=%zu",
+        pool_name,
+        ptr,
+        size);
+#endif
+}
+
+}  // namespace
 
 HostBlockPool::HostBlockPool(std::shared_ptr<const HostBlockPoolConfig> config): IBlockPool(config) {
     RTP_LLM_CHECK(config != nullptr);
@@ -66,6 +120,20 @@ bool HostBlockPool::init() {
 
     pinned_   = pinned;
     base_ptr_ = backing_.data_ptr();
+
+    markHostBlockPoolDontDump(cfg.pool_name.c_str(), base_ptr_, total_bytes);
+
+    static constexpr double kBytesPerMB = 1024.0 * 1024.0;
+    RTP_LLM_LOG_INFO("HostBlockPool backing selected: pool_name=%s payload_bytes=%zu stride_bytes=%zu "
+                     "physical_block_count=%zu total_size=%zu bytes total_size_mb=%.2f is_pinned=%d ptr=%p",
+                     cfg.pool_name.c_str(),
+                     cfg.payload_bytes,
+                     cfg.stride_bytes,
+                     cfg.physical_block_count,
+                     total_bytes,
+                     static_cast<double>(total_bytes) / kBytesPerMB,
+                     pinned_,
+                     base_ptr_);
 
     markInitialized();
     return true;

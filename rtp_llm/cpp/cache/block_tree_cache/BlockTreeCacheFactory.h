@@ -18,6 +18,16 @@ class StorageBackend;
 // Groups not present in this map use default (0 = no window).
 using SWAGroupConfig = std::unordered_map<int, int>;
 
+// Reads RTP_LLM_PIN_HOST_BLOCK_POOL to decide whether the L2 host block pool uses pinned
+// memory. Returns true when unset; returns false for "0"/"false"/"FALSE"/"off"/"OFF".
+bool shouldPinHostBlockPool();
+
+// Number of tree-usable host blocks for a given L2 memory-cache budget and page-aligned
+// stride. The reserved block 0 is counted *within* the budget, so this returns
+// max(0, memory_cache_size_bytes / stride_bytes - 1). Returns 0 when the budget cannot
+// hold at least two blocks (one reserved + one usable) or when stride_bytes is 0.
+size_t computeHostUsableBlockCount(size_t memory_cache_size_bytes, size_t stride_bytes);
+
 // Factory function: create a BlockTreeCache from existing CacheConfig + KVCacheConfig.
 //
 // This function:

@@ -43,6 +43,27 @@ TEST(HostBlockPoolTest, InitAllocatesHostBuffersAndSkipsBlockZero) {
     EXPECT_NE(*block, 0);
 }
 
+TEST(HostBlockPoolTest, InitWithDontDumpKeepsBufferUsable) {
+    // Pageable path: madvise(MADV_DONTDUMP) must not corrupt or unmap the backing.
+    auto          config = makeConfig(/*physical_block_count=*/4,
+                             /*payload_bytes=*/64,
+                             /*stride_bytes=*/4096,
+                             /*enable_pinned=*/false);
+    HostBlockPool pool(config);
+    ASSERT_TRUE(pool.init());
+
+    auto block = pool.malloc();
+    ASSERT_TRUE(block.has_value());
+    auto buffer = pool.blockBuffer(*block);
+    ASSERT_NE(buffer.addr, nullptr);
+
+    std::memset(buffer.addr, 0xAB, buffer.payload_bytes);
+    const auto* bytes = static_cast<const uint8_t*>(buffer.addr);
+    for (size_t i = 0; i < buffer.payload_bytes; ++i) {
+        EXPECT_EQ(bytes[i], 0xAB);
+    }
+}
+
 TEST(HostBlockPoolTest, BlockBufferReturnsBasePlusBlockStride) {
     auto          config = makeConfig();
     HostBlockPool pool(config);
