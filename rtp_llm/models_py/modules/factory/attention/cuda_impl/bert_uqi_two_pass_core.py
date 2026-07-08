@@ -44,7 +44,20 @@ def plan_two_pass(
         causal=False,
         q_data_type=q_data_type,
     )
-    # pass 2 走 run_b_rows_eager(纯 torch), 无需 plan —— wrapper_p2 仅为兼容保留。
+    # wrapper_p2=None => pass2 走 run_b_rows_eager(零 plan)。H20 实测: 合批
+    # 150-seq 下 eager 的 padded gather(~1.8ms) 贵过省下的 plan(0.33ms), 默认
+    # 保留 flashinfer pass2; eager 留给单请求/小批或无 flashinfer 的场景。
+    if schedule.has_b and wrapper_p2 is not None:
+        wrapper_p2.plan(
+            schedule.qo_indptr_p2,
+            schedule.kv_indptr_p2,
+            num_qo_heads,
+            num_kv_heads,
+            head_dim,
+            head_dim_vo=head_dim,
+            causal=False,
+            q_data_type=q_data_type,
+        )
 
 
 def run_b_rows_eager(
@@ -87,5 +100,8 @@ def run_two_pass(
     """Attention output in the PERMUTED layout, [total, num_qo_heads, head_dim]."""
     out = wrapper_p1.run(q, k, v)
     if schedule.has_b:
-        out[schedule.b_rows] = run_b_rows_eager(schedule, q, k, v)
+        if wrapper_p2 is not None:
+            out[schedule.b_rows] = wrapper_p2.run(q[schedule.b_rows], k, v)
+        else:
+            out[schedule.b_rows] = run_b_rows_eager(schedule, q, k, v)
     return out

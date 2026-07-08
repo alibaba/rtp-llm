@@ -79,7 +79,7 @@ class TestTwoPassParity(unittest.TestCase):
         cls.w_p2 = BatchPrefillWithRaggedKVCacheWrapper(ws(), backend="auto")
         cls.w_mask = BatchPrefillWithRaggedKVCacheWrapper(ws(), backend="auto")
 
-    def _case(self, rng, num_seq, modes, dtype, heads=4, kv_heads=4, dim=64):
+    def _case(self, rng, num_seq, modes, dtype, heads=4, kv_heads=4, dim=64, eager_p2=False):
         ids, cu = [], [0]
         for i in range(num_seq):
             seq = make_seq(rng, rng.randint(3, 96), modes[i % len(modes)])
@@ -102,8 +102,9 @@ class TestTwoPassParity(unittest.TestCase):
             qp, kp, vp = q[sched.perm], k[sched.perm], v[sched.perm]
         else:
             qp, kp, vp = q, k, v
-        core.plan_two_pass(self.w_p1, self.w_p2, sched, heads, kv_heads, dim, dtype)
-        out_p = core.run_two_pass(self.w_p1, self.w_p2, sched, qp, kp, vp)
+        w2 = None if eager_p2 else self.w_p2
+        core.plan_two_pass(self.w_p1, w2, sched, heads, kv_heads, dim, dtype)
+        out_p = core.run_two_pass(self.w_p1, w2, sched, qp, kp, vp)
         out_two = out_p[sched.inv_perm] if sched.has_b else out_p
 
         ref = eager_masked(q, k, v, seg, cu, scale)
@@ -116,12 +117,15 @@ class TestTwoPassParity(unittest.TestCase):
 
     def test_vs_eager_oracle(self):
         rng = random.Random(7)
-        for dtype in (torch.float16, torch.bfloat16):
-            for modes in (["mid"], ["mid", "none"], ["start", "nosep", "mid"],
-                          ["all_b", "none"], ["none"]):
-                for num_seq in (1, 4, 8):
-                    q, k, v, seg, cu_host, out, ref = self._case(rng, num_seq, modes, dtype)
-                    self._assert_close(out, ref, dtype, f"{dtype}/{modes}/{num_seq}")
+        for eager_p2 in (False, True):
+            for dtype in (torch.float16, torch.bfloat16):
+                for modes in (["mid"], ["mid", "none"], ["start", "nosep", "mid"],
+                              ["all_b", "none"], ["none"]):
+                    for num_seq in (1, 4, 8):
+                        q, k, v, seg, cu_host, out, ref = self._case(
+                            rng, num_seq, modes, dtype, eager_p2=eager_p2)
+                        self._assert_close(
+                            out, ref, dtype, f"p2eager={eager_p2}/{dtype}/{modes}/{num_seq}")
 
     def test_vs_custom_mask_path(self):
         """Two GPU impls (two-pass vs dense custom_mask) must agree tightly."""

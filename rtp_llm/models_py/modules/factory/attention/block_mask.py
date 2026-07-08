@@ -153,6 +153,9 @@ class BertUqiTwoPassSchedule:
     kv_pad_mask: Optional[torch.Tensor] = None  # [N, Lmax] bool device
     q_pad_idx: Optional[torch.Tensor] = None  # [N, Bmax] int64 device
     q_pad_mask: Optional[torch.Tensor] = None  # [N, Bmax] bool device
+    # pass1 的"非零段"版本(喂 TRT 等经典 varlen kernel 用, 剔除零宽段):
+    seg_lens_p1_nz: Optional[torch.Tensor] = None  # [M] int32 CPU
+    cu_p1_nz: Optional[torch.Tensor] = None  # [M+1] int32 CPU
 
 
 def derive_bert_uqi_segment_ids_hostlen(
@@ -219,6 +222,7 @@ def build_bert_uqi_two_pass_schedule(
         return BertUqiTwoPassSchedule(
             has_b=False, perm=None, inv_perm=None, b_rows=None,
             qo_indptr_p1=cu_i32_host, qo_indptr_p2=None, kv_indptr_p2=None,
+            seg_lens_p1_nz=torch.empty(0, dtype=torch.int32), cu_p1_nz=cu_i32_host,
         )
     cu_host = cu_seqlens_host.to(dtype=torch.long)
     lengths_host = cu_host[1:] - cu_host[:-1]
@@ -233,6 +237,7 @@ def build_bert_uqi_two_pass_schedule(
         return BertUqiTwoPassSchedule(
             has_b=False, perm=None, inv_perm=None, b_rows=None,
             qo_indptr_p1=cu_i32_host, qo_indptr_p2=None, kv_indptr_p2=None,
+            seg_lens_p1_nz=lengths_host.to(torch.int32), cu_p1_nz=cu_i32_host,
         )
     a_lens_host = lengths_host - b_lens_host
     seg_lens = torch.stack([a_lens_host, b_lens_host], dim=1).reshape(-1)  # [2N]
@@ -264,6 +269,10 @@ def build_bert_uqi_two_pass_schedule(
     q_pad_idx_h = torch.where(
         q_pad_mask_h, q_start[:, None] + bpos[None, :], torch.zeros((), dtype=torch.long)
     )
+    # 非零段版本(经典 varlen kernel 不吃零宽段; 剔除后仍是同一 token 划分)
+    seg_nz = seg_lens[seg_lens > 0]
+    cu_nz = torch.zeros(int(seg_nz.numel()) + 1, dtype=torch.int32)
+    cu_nz[1:] = seg_nz.cumsum(0).to(torch.int32)
     return BertUqiTwoPassSchedule(
         has_b=True, perm=perm, inv_perm=inv_perm, b_rows=b_rows,
         qo_indptr_p1=qo_p1, qo_indptr_p2=qo_p2, kv_indptr_p2=cu_i32_host,
@@ -271,4 +280,5 @@ def build_bert_uqi_two_pass_schedule(
         kv_pad_mask=kv_pad_mask_h.to(device, non_blocking=True),
         q_pad_idx=q_pad_idx_h.to(device, non_blocking=True),
         q_pad_mask=q_pad_mask_h.to(device, non_blocking=True),
+        seg_lens_p1_nz=seg_nz.to(torch.int32), cu_p1_nz=cu_nz,
     )
