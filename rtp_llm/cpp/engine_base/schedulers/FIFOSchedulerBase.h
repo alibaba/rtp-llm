@@ -62,6 +62,7 @@ protected:
     virtual void fillExtraMetrics(RtpLLMSchedulerMetricsCollector& collector) const {}
 
     bool   checkInputLength(const GenerateStreamPtr& stream);
+    bool   prepareRunningStream(const GenerateStreamPtr& stream);
     void   cancelStreams(std::list<GenerateStreamPtr>& streams);
     size_t evaluateAndUpdateStreams(std::list<GenerateStreamPtr>& streams);
     void   evaluateWaitingStreams(std::list<GenerateStreamPtr>& waiting_streams);

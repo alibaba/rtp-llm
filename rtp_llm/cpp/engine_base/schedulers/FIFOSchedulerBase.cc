@@ -2,6 +2,7 @@
 
 #include <chrono>
 #include <mutex>
+#include <sstream>
 
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/utils/Logger.h"
@@ -68,6 +69,18 @@ bool FIFOSchedulerBase::checkInputLength(const GenerateStreamPtr& stream) {
     return true;
 }
 
+bool FIFOSchedulerBase::prepareRunningStream(const GenerateStreamPtr& stream) {
+    if (stream->checkChunkWindowInvariant()) {
+        return true;
+    }
+    std::ostringstream error_msg;
+    error_msg << "[chunked_prefill] scheduler rejects stream[" << stream->streamId()
+              << "] because the current prefill window is not block-aligned";
+    stream->reportError(ErrorCode::UNKNOWN_ERROR, error_msg.str());
+    stream->moveToNext();
+    return false;
+}
+
 absl::Status FIFOSchedulerBase::enqueue(const GenerateStreamPtr& stream) {
     RTP_LLM_PROFILE_FUNCTION();
     if (!checkInputLength(stream)) {
@@ -108,6 +121,9 @@ size_t FIFOSchedulerBase::evaluateAndUpdateStreams(list<GenerateStreamPtr>& stre
         auto new_state = (*it)->moveToNext();
         if (new_state != state) {
             addStreamToNewState(*it, new_state);
+            it = streams.erase(it);
+            ++moved_count;
+        } else if (new_state == StreamState::RUNNING && !prepareRunningStream(*it)) {
             it = streams.erase(it);
             ++moved_count;
         } else {
@@ -187,6 +203,9 @@ void FIFOSchedulerBase::addStreamToNewState(const GenerateStreamPtr& stream, Str
             loading_cache_streams_.push_back(stream);
             break;
         case StreamState::RUNNING:
+            if (!prepareRunningStream(stream)) {
+                break;
+            }
             onRunningStream(stream);
             new_streams_.push_back(stream);
             break;

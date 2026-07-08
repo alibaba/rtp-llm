@@ -37,6 +37,8 @@ inline CacheConfig makeSimpleMhaCacheConfig(int               layer_num,
     spec->local_head_num_kv  = local_head_num_kv;
     spec->size_per_head      = size_per_head;
     config.cache_specs.push_back(spec);
+    config.group_types.push_back(CacheGroupType::FULL);
+    config.group_layer_num = layer_num;
 
     std::vector<int> layer_ids(layer_num);
     for (int i = 0; i < layer_num; ++i) {

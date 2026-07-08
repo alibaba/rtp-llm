@@ -218,7 +218,9 @@ size_t PDFusionRatioScheduler::promotePendingDecodeStreams() {
         auto& stream    = *it;
         auto  new_state = stream->moveToNext();
         if (new_state == StreamState::RUNNING) {
-            running_streams_.push_back(stream);
+            if (prepareRunningStream(stream)) {
+                running_streams_.push_back(stream);
+            }
         } else if (new_state != StreamState::FINISHED) {
             RTP_LLM_LOG_ERROR("Unexpected state %d when promoting pending decode stream [%ld]",
                               static_cast<int>(new_state),

@@ -86,6 +86,44 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
 
     setReturnAllProbs(generate_input_->generate_config->return_all_probs);
 
+    // Per-request chunked prefill activation. Only enabled on PREFILL / PDFUSION roles with none
+    // of the listed generate_config features, which would produce incomplete output under
+    // compute-then-discard.
+    {
+        const auto& fifo_cfg = runtime_config.fifo_scheduler_config;
+        if (fifo_cfg.prefill_chunk_size > 0
+            && (resource_context.role_type == RoleType::PREFILL
+                || resource_context.role_type == RoleType::PDFUSION)) {
+            const char* reject_reason = nullptr;
+            if (hasNumBeams()) {
+                reject_reason = "beam search (num_beams > 1)";
+            } else if (returnLogits()) {
+                reject_reason = "return_logits";
+            } else if (calculateLoss()) {
+                reject_reason = "calculate_loss";
+            } else if (generate_input_->generate_config->return_hidden_states) {
+                reject_reason = "return_hidden_states";
+            } else if (generate_input_->generate_config->return_all_hidden_states) {
+                reject_reason = "return_all_hidden_states";
+            } else if (getReturnAllProbs() != ReturnAllProbsMode::NONE) {
+                reject_reason = "return_all_probs != NONE";
+            } else if (multimodalFeaturesLength() != 0) {
+                reject_reason = "multimodal input";
+            }
+            if (reject_reason) {
+                reportEvent(StreamEvents::Error,
+                            ErrorCode::ERROR_GENERATE_CONFIG_FORMAT,
+                            "chunked prefill (prefill_chunk_size="
+                                + std::to_string(fifo_cfg.prefill_chunk_size)
+                                + ") is incompatible with " + reject_reason
+                                + "; disable chunked prefill at engine level or drop this option "
+                                  "from the request");
+                return;
+            }
+            setChunkSize((int)fifo_cfg.prefill_chunk_size);
+        }
+    }
+
     logits_processor_list_ = LogitsProcessorFactory::createLogitsProcessors(
         generate_input_, init_batch_size, maxBatchSize(), special_tokens_.eos_token_id);
 
@@ -298,6 +336,9 @@ int GenerateStream::seqSizePerBlock() const {
 }
 
 int GenerateStream::contextLength() const {
+    if (useChunkWindow()) {
+        return currentChunkLen();
+    }
     int begin_pos = prefixLength();
     int end_pos   = seqLength();
     return end_pos - begin_pos;
@@ -309,6 +350,69 @@ int GenerateStream::prefixLength() const {
 
 int GenerateStream::reuseLength() const {
     return reuse_length_;
+}
+
+// ---- chunked prefill ----
+bool GenerateStream::useChunkWindow() const {
+    // Gated on RUNNING: reuse_length_ is only finalized once the state machine leaves
+    // WAITING/LOADING_CACHE, so admission-time callers see whole-segment semantics.
+    return chunkedPrefillEnabled() && getStatus() == StreamState::RUNNING && isContextStream();
+}
+
+int GenerateStream::currentChunkLen() const {
+    int remaining = seqLength() - reuse_length_;
+    if (!chunkedPrefillEnabled() || chunk_size_ >= remaining) {
+        return remaining;  // not chunking / last chunk: take all that's left
+    }
+    return chunk_size_;
+}
+
+bool GenerateStream::isLastChunk() const {
+    return reuse_length_ + currentChunkLen() >= seqLength();
+}
+
+bool GenerateStream::isChunkedMiddleChunk() const {
+    // a context chunk that is NOT the final one → produces no sampled token / no output row
+    return useChunkWindow() && !isLastChunk();
+}
+
+bool GenerateStream::checkChunkWindowInvariant() const {
+    if (!useChunkWindow()) {
+        return true;
+    }
+    // Chunk starts must land on a KV block boundary; a misaligned reuse_length_ would make KV
+    // writes spill into the wrong block and silently corrupt other streams' cache. Return false
+    // instead of aborting so the caller can fail this one stream without killing the batch.
+    const int block_size = seqSizePerBlock();
+    if (reuse_length_ % block_size != 0) {
+        RTP_LLM_LOG_ERROR("[chunked_prefill] stream[%ld] reuse_length=%d not block-aligned "
+                          "(block_size=%d)",
+                          streamId(),
+                          reuse_length_,
+                          block_size);
+        return false;
+    }
+    return true;
+}
+
+void GenerateStream::advanceChunk() {
+    reuse_length_ += currentChunkLen();
+    if (!checkChunkWindowInvariant()) {
+        // reuse_length_ has already moved; leaving it as-is would poison every later chunk of
+        // this stream. Mark the stream errored so the engine drops it after this step.
+        reportEventWithoutLock(StreamEvents::Error,
+                               ErrorCode::UNKNOWN_ERROR,
+                               "[chunked_prefill] reuse_length not block-aligned after advance; "
+                               "this stream is errored (engine drops it next step) to protect "
+                               "other streams' KV cache");
+    }
+}
+
+int GenerateStream::nextChunkBoundaryToken() const {
+    // Absolute position right after the current chunk window. A middle chunk never reaches
+    // seqLength(), so boundary_pos is always a valid prompt-token index here.
+    const int boundary_pos = prefixLength() + contextLength();
+    return complete_token_ids_->contextTokens(0, boundary_pos, 1).at(0);
 }
 
 int GenerateStream::initialReuseLength() const {
@@ -443,10 +547,13 @@ vector<int> GenerateStream::textTokensMask() const {
 }
 
 torch::Tensor GenerateStream::generateContextPositionIds() {
-    context_position_ids_ = PositionIdsGenerator::generatePositionIds(generate_input_->inputLength(),
-                                                                      mm_position_ids_style_,
-                                                                      generate_input_->mm_locs,
-                                                                      generate_input_->mm_position_ids);
+    // Cache prompt-derived position ids; chunked prefill reuses them across chunks.
+    if (!context_position_ids_) {
+        context_position_ids_ = PositionIdsGenerator::generatePositionIds(generate_input_->inputLength(),
+                                                                          mm_position_ids_style_,
+                                                                          generate_input_->mm_locs,
+                                                                          generate_input_->mm_position_ids);
+    }
     return context_position_ids_.value();
 }
 
@@ -536,8 +643,12 @@ StreamState GenerateStream::moveToNext() {
     checkTimeout();
     std::lock_guard<std::mutex> lock(*mutex_);
     const auto                  old_status = getStatus();
-    StreamState                 state      = generate_status_->moveToNext();
-    const auto                  new_status = getStatus();
+    const bool                  keep_chunk_context = old_status == StreamState::RUNNING && chunkedPrefillEnabled()
+                                      && isContextStream() && !generate_status_->hasEvent(StreamEvents::Error)
+                                      && !generate_status_->hasEvent(StreamEvents::GenerateDone);
+    // Chunked context rounds must not take the decode-time KV growth path.
+    StreamState state = keep_chunk_context ? old_status : generate_status_->moveToNext();
+    const auto  new_status = getStatus();
 
     if (old_status == StreamState::WAITING && new_status != StreamState::WAITING) {
         wait_time_us_ = autil::TimeUtility::currentTimeInMicroSeconds() - begin_time_us_;
@@ -701,6 +812,12 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
     RTP_LLM_PROFILE_FUNCTION();
     std::lock_guard<std::mutex> lock(*mutex_);
     RTP_LLM_LOG_DEBUG("stream [%ld] spec update", streamId());
+    // Middle chunk: target/draft forward has written KV, but sampled/proposed tokens are not output.
+    // Discard them, advance the chunk window, and keep context mode; last chunk falls through.
+    if (isChunkedMiddleChunk()) {
+        advanceChunk();
+        return;
+    }
     *is_context_stream_ = false;
     if (hasError() && !update_info.force_update_info) {
         return;
@@ -790,6 +907,11 @@ void GenerateStream::update(const StreamUpdateInfo& update_info) {
     RTP_LLM_PROFILE_FUNCTION();
     std::lock_guard<std::mutex> lock(*mutex_);
     RTP_LLM_LOG_DEBUG("stream [%ld] update", streamId());
+    // Middle chunk: drop sampled token, advance window, stay in context; final chunk falls through.
+    if (isChunkedMiddleChunk()) {
+        advanceChunk();
+        return;
+    }
     *is_context_stream_ = false;
     if (hasError() && !update_info.force_update_info) {
         return;
@@ -968,8 +1090,10 @@ void GenerateStream::reportStreamMetrics() {
 void GenerateStream::reportCacheReuseMetrics() const {
     if (metrics_reporter_ && stream_cache_resource_->reuseCache()) {
         RtpLLMCacheReuseMetricsCollector collector;
-        collector.kv_cache_reuse_length = reuseLength();
-        collector.kv_cache_hit_rate     = inputLength() > 0 ? (reuseLength() * 100.0 / inputLength()) : 0.0;
+        // Metrics use frozen cache-hit length; reuse_length_ may advance after chunking starts.
+        const int cache_hit_len         = initialReuseLength();
+        collector.kv_cache_reuse_length = cache_hit_len;
+        collector.kv_cache_hit_rate     = inputLength() > 0 ? (cache_hit_len * 100.0 / inputLength()) : 0.0;
         kmonitor::MetricsTags tags;
         metrics_reporter_->report<RtpLLMCacheReuseMetrics, RtpLLMCacheReuseMetricsCollector>(&tags, &collector);
     }

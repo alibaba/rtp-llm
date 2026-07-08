@@ -225,13 +225,14 @@ void MtpBatchStreamProcessor::updateDecodeDraftModelInput(GptModelInputs&       
 
 void MtpBatchStreamProcessor::updatePrefillPostDraftModelInput(GptModelInputs&        model_input,
                                                                const GptModelOutputs& model_output,
-                                                               const SamplerOutput&   sampler_output) {
+                                                               const SamplerOutput&   sampler_output,
+                                                               const StreamGroups&    stream_groups) {
     model_input.last_hidden_states = model_output.all_hidden_states;
     const auto& new_all_token_ids  = sampler_output.token_ids;
 
     // set model_input.combo_tokens
-    const size_t batch_size   = new_all_token_ids.size(0);
-    const size_t token_stride = new_all_token_ids.size(1);
+    const size_t total_batch_size_out = new_all_token_ids.size(0);
+    const size_t token_stride         = new_all_token_ids.size(1);
     // token_ids may be a CUDA tensor; move to CPU for data_ptr access.
     const torch::Tensor new_all_token_ids_cpu =
         new_all_token_ids.is_cuda() ? new_all_token_ids.cpu() : new_all_token_ids;
@@ -239,18 +240,39 @@ void MtpBatchStreamProcessor::updatePrefillPostDraftModelInput(GptModelInputs&  
     int* input_lengths = model_input.input_lengths.data_ptr<int>();
     int* combo_tokens  = model_input.combo_tokens.data_ptr<int>();
 
-    int offset = 0;
-    for (int i = 0; i < batch_size; i++) {
-        // should shift one token for combo_tokens
-        int input_length = input_lengths[i];
-        memcpy(combo_tokens + offset, combo_tokens + offset + 1, (input_length - 1) * sizeof(int));
+    // Draft input is next-token shifted; a stream may expand to multiple sampler rows.
+    // Iterate rows via nextBatchSize(), not one row per stream.
+    auto all_streams = stream_groups.allStreams();
 
-        // set new token id
-        int new_token_id = new_all_token_ids_cpu.data_ptr<int>()[i * token_stride + token_stride - 1];
-        combo_tokens[offset + input_length - 1] = new_token_id;
+    size_t row_idx = 0;
+    int    offset  = 0;
+    for (auto& stream : all_streams) {
+        const int stream_rows = stream->nextBatchSize();
+        for (int row = 0; row < stream_rows; ++row, ++row_idx) {
+            RTP_LLM_CHECK_WITH_INFO(row_idx < total_batch_size_out,
+                                    "prefill draft input row index %zu exceeds sampler rows %zu",
+                                    row_idx,
+                                    total_batch_size_out);
+            int input_length = input_lengths[row_idx];
+            std::memmove(combo_tokens + offset, combo_tokens + offset + 1, (input_length - 1) * sizeof(int));
 
-        offset += input_length;
+            // Middle chunk tail is the next prompt token; other prefill tails use sampled token.
+            // Using sampled token at a chunk boundary would build draft KV from the wrong input.
+            int tail_token;
+            if (stream->isChunkedMiddleChunk()) {
+                tail_token = stream->nextChunkBoundaryToken();
+            } else {
+                tail_token = new_all_token_ids_cpu.data_ptr<int>()[row_idx * token_stride + token_stride - 1];
+            }
+            combo_tokens[offset + input_length - 1] = tail_token;
+
+            offset += input_length;
+        }
     }
+    RTP_LLM_CHECK_WITH_INFO(row_idx == total_batch_size_out,
+                            "prefill draft input row count %zu != sampler rows %zu",
+                            row_idx,
+                            total_batch_size_out);
 }
 
 void MtpBatchStreamProcessor::updateDecodePostDraftModelInput(
