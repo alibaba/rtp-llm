@@ -1,4 +1,6 @@
 import os
+import sys
+import time
 from typing import Any, Dict, Optional
 
 import torch
@@ -31,6 +33,39 @@ from rtp_llm.ops.compute_ops import (
     PyModelOutputs,
 )
 from rtp_llm.utils.model_weight import W
+
+
+class _UqiPerfCollector:
+    """VISION_BERT_UQI_PERF_LOG=1 时启用: 每 REPORT_EVERY 个 forward 把分段
+    耗时的 p50/p90 打到 stderr (进 server nohup 日志)。测量用, 常态关闭。"""
+
+    REPORT_EVERY = 100
+
+    def __init__(self):
+        self.rows = []
+
+    def add(self, **kw):
+        self.rows.append(kw)
+        if len(self.rows) >= self.REPORT_EVERY:
+            rows, self.rows = self.rows, []
+            keys = [k for k in rows[0] if k != "tokens"]
+            def pct(vals, q):
+                s = sorted(vals)
+                return s[min(len(s) - 1, int(len(s) * q / 100))]
+            parts = [
+                "%s p50=%.2f p90=%.2f" % (k, pct([r[k] for r in rows], 50), pct([r[k] for r in rows], 90))
+                for k in keys
+            ]
+            print(
+                "[UQI_PERF] n=%d tokens=%d | %s" % (len(rows), rows[-1]["tokens"], " | ".join(parts)),
+                file=sys.stderr,
+                flush=True,
+            )
+
+
+_UQI_PERF = (
+    _UqiPerfCollector() if os.environ.get("VISION_BERT_UQI_PERF_LOG", "0") == "1" else None
+)
 
 
 class BertDecoderLayer(nn.Module):
@@ -202,6 +237,8 @@ class BertModel(GptModelBase):
             BertUqiTwoPassImpl,
         )
 
+        perf = _UQI_PERF
+        t0 = time.perf_counter() if perf is not None else 0.0
         batch_size = attn_inputs.input_lengths.size(0)
         cu_host = attn_inputs.cu_seqlens_host[: batch_size + 1]
         cu_dev = attn_inputs.cu_seqlens[: batch_size + 1]
@@ -209,17 +246,30 @@ class BertModel(GptModelBase):
         seg_ids = derive_bert_uqi_segment_ids_hostlen(
             input_ids, cu_dev, cu_host, self.cls_uqi_token_id
         )
+        t1 = time.perf_counter() if perf is not None else 0.0
         schedule = build_bert_uqi_two_pass_schedule(seg_ids, cu_dev, cu_host)
+        t2 = time.perf_counter() if perf is not None else 0.0
         if self._uqi_two_pass_op is None:
             attn_configs = self.config.getAttentionConfigs(
                 self.parallelism_config.get_attn_tp_size()
             )
             self._uqi_two_pass_op = BertUqiTwoPassAttnOp(attn_configs)
-        return BertUqiTwoPassImpl(self._uqi_two_pass_op, attn_inputs, schedule)
+        impl = BertUqiTwoPassImpl(self._uqi_two_pass_op, attn_inputs, schedule)
+        if perf is not None:
+            t3 = time.perf_counter()
+            perf.prep_split = {
+                "p_derive": (t1 - t0) * 1e3,
+                "p_sched_sync": (t2 - t1) * 1e3,  # 含唯一 b_lens D2H 同步
+                "p_plans": (t3 - t2) * 1e3,
+            }
+        return impl
 
     def forward(
         self, inputs: PyModelInputs, fmha_impl: FMHAImplBase = None
     ) -> PyModelOutputs:
+        perf = _UQI_PERF  # VISION_BERT_UQI_PERF_LOG=1 时收集分段耗时(默认关, 零开销)
+        if perf is not None:
+            t0 = time.perf_counter()
         input_ids: torch.Tensor = inputs.input_ids
         bert_embedding_inputs = inputs.bert_embedding_inputs
         if bert_embedding_inputs.multimodal_features:
@@ -241,9 +291,13 @@ class BertModel(GptModelBase):
             bert_embedding_inputs.multimodal_features,
             bert_embedding_inputs.mm_features_locs,
         )
+        if perf is not None:
+            t_embed = time.perf_counter()
 
         if fmha_impl is None:
             fmha_impl = self.prepare_fmha_impl(inputs)
+        if perf is not None:
+            t_prep = time.perf_counter()
         # 两趟 attention 需要每条序列重排为 [A...|B...] (层栈前 permute 一次,
         # 层栈后逆 permute 回原布局; 位置信息已在 embedding 阶段加完, attention
         # 对 token 顺序等变, 数学上恒等)。uqi_perm=None => 恒等, 零开销。
@@ -258,4 +312,17 @@ class BertModel(GptModelBase):
             )
         if uqi_perm is not None:
             hidden_states = hidden_states.index_select(0, fmha_impl.uqi_inv_perm)
+        if perf is not None:
+            t_launch = time.perf_counter()
+            torch.cuda.synchronize()
+            t_done = time.perf_counter()
+            perf.add(
+                embed_enq=(t_embed - t0) * 1e3,
+                prepare=(t_prep - t_embed) * 1e3,
+                layers_enq=(t_launch - t_prep) * 1e3,
+                gpu_tail=(t_done - t_launch) * 1e3,
+                total=(t_done - t0) * 1e3,
+                tokens=int(input_ids.shape[0]),
+                **getattr(perf, "prep_split", {}),
+            )
         return PyModelOutputs(hidden_states, fmha_impl.fmha_params)
