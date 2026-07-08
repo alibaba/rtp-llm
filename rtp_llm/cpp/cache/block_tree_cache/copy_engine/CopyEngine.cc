@@ -7,7 +7,7 @@
 
 #include <torch/torch.h>
 
-#include "rtp_llm/cpp/cache/BlockPool.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/DeviceBlockPool.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/host/DiskBlockPool.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/host/HostBlockPool.h"
 #include "rtp_llm/cpp/utils/Logger.h"
@@ -49,7 +49,7 @@ bool CopyEngine::validAllocatedDiskBlock(DiskBlockPool& disk_pool, BlockIdxType 
     return !isNullBlockIdx(disk_block) && disk_block > 0 && disk_pool.isAllocated(disk_block);
 }
 
-bool CopyEngine::validDeviceBlock(BlockPool& device_pool, BlockIdxType device_block) {
+bool CopyEngine::validDeviceBlock(DeviceBlockPool& device_pool, BlockIdxType device_block) {
     return !isNullBlockIdx(device_block) && device_block > 0
            && static_cast<size_t>(device_block) <= device_pool.totalBlocksNum();
 }
@@ -121,15 +121,7 @@ void CopyEngine::executeDeviceHostCopyTiles(const std::vector<DeviceHostCopyTile
         if (tile.bytes == 0) {
             continue;
         }
-        if (!tile.device_is_cuda) {
-            if (device_to_host) {
-                std::memcpy(tile.host_addr, tile.device_addr, tile.bytes);
-            } else {
-                std::memcpy(tile.device_addr, tile.host_addr, tile.bytes);
-            }
-            continue;
-        }
-
+        // DeviceBlockPool is always CUDA-backed, so every device tile is a GPU<->CPU copy.
         if (device_to_host) {
             dst_buffers.push_back(byte_tensor(tile.host_addr, tile.bytes, cpu_device));
             src_buffers.push_back(byte_tensor(tile.device_addr, tile.bytes, gpu_device));
@@ -503,7 +495,7 @@ CopyStatus CopyEngine::deviceToHost(const std::vector<BlockIdxType>& device_bloc
         const auto& component    = layout.components[component_idx];
         const auto  device_block = device_blocks[component_idx];
 
-        BlockPool* device_pool = nullptr;
+        DeviceBlockPool* device_pool = nullptr;
         if (!isNullBlockIdx(device_block)) {
             device_pool = component.device_pool;
             if (!device_pool) {
@@ -530,20 +522,18 @@ CopyStatus CopyEngine::deviceToHost(const std::vector<BlockIdxType>& device_bloc
                 continue;
             }
 
-            auto   buffers           = device_pool->convertIndexToBuffer(slot.layer_id, device_block);
+            // DeviceBlockPool is always CUDA-backed, so the tile is device-side unconditionally.
+            auto   buffers           = device_pool->blockBuffers(slot.layer_id, device_block);
             size_t slot_device_bytes = 0;
             for (const auto& buffer : buffers) {
-                if (!buffer.addr || buffer.size_bytes == 0) {
+                if (!buffer.addr || buffer.bytes == 0) {
                     RTP_LLM_LOG_WARNING("CopyEngine::deviceToHost: null device buffer layer=%d block=%d",
                                         slot.layer_id,
                                         device_block);
                     return CopyStatus::DEVICE_IO_ERROR;
                 }
-                copy_tiles.push_back(DeviceHostCopyTile{slot_host_addr + slot_device_bytes,
-                                                        buffer.addr,
-                                                        buffer.size_bytes,
-                                                        buffer.is_cuda});
-                slot_device_bytes += buffer.size_bytes;
+                copy_tiles.push_back(DeviceHostCopyTile{slot_host_addr + slot_device_bytes, buffer.addr, buffer.bytes});
+                slot_device_bytes += buffer.bytes;
             }
 
             if (slot_device_bytes != slot.stride_bytes) {
@@ -599,7 +589,7 @@ CopyStatus CopyEngine::hostToDevice(BlockIdxType                     host_block,
         const auto& component    = layout.components[component_idx];
         const auto  device_block = device_blocks[component_idx];
 
-        BlockPool* device_pool = nullptr;
+        DeviceBlockPool* device_pool = nullptr;
         if (!isNullBlockIdx(device_block)) {
             device_pool = component.device_pool;
             if (!device_pool) {
@@ -625,20 +615,18 @@ CopyStatus CopyEngine::hostToDevice(BlockIdxType                     host_block,
                 continue;
             }
 
-            auto   buffers           = device_pool->convertIndexToBuffer(slot.layer_id, device_block);
+            // DeviceBlockPool is always CUDA-backed, so the tile is device-side unconditionally.
+            auto   buffers           = device_pool->blockBuffers(slot.layer_id, device_block);
             size_t slot_device_bytes = 0;
             for (const auto& buffer : buffers) {
-                if (!buffer.addr || buffer.size_bytes == 0) {
+                if (!buffer.addr || buffer.bytes == 0) {
                     RTP_LLM_LOG_WARNING("CopyEngine::hostToDevice: null device buffer layer=%d block=%d",
                                         slot.layer_id,
                                         device_block);
                     return CopyStatus::DEVICE_IO_ERROR;
                 }
-                copy_tiles.push_back(DeviceHostCopyTile{slot_host_addr + slot_device_bytes,
-                                                        buffer.addr,
-                                                        buffer.size_bytes,
-                                                        buffer.is_cuda});
-                slot_device_bytes += buffer.size_bytes;
+                copy_tiles.push_back(DeviceHostCopyTile{slot_host_addr + slot_device_bytes, buffer.addr, buffer.bytes});
+                slot_device_bytes += buffer.bytes;
             }
 
             if (slot_device_bytes != slot.stride_bytes) {

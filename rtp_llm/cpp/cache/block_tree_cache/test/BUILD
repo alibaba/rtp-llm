@@ -69,7 +69,10 @@ cc_test(
     name = "block_tree_cache_test",
     srcs = ["BlockTreeCacheTest.cc"],
     copts = test_copts,
-    deps = test_deps,
+    deps = test_deps + [
+        "//rtp_llm/cpp/cache/block_tree_cache:device_block_pool",
+        "//rtp_llm/cpp/cache/test:cache_config_test_utils",
+    ],
     env = {},
 )
 
@@ -88,9 +91,11 @@ pool_test_copts = [
 
 pool_test_deps = [
     "//rtp_llm/cpp/cache/block_tree_cache",
+    "//rtp_llm/cpp/cache/block_tree_cache:device_block_pool",
     "//rtp_llm/cpp/cache/test:cache_config_test_utils",
     "//rtp_llm/cpp/config:config_modules",
     "//rtp_llm/cpp/config:model_config",
+    "//rtp_llm/cpp/config:static_config",
     "//rtp_llm/cpp/utils:core_utils",
     "@com_google_googletest//:gtest",
     "@com_google_googletest//:gtest_main",

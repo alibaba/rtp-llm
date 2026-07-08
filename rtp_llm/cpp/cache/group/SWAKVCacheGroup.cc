@@ -158,13 +158,14 @@ bool SWAKVCacheGroup::malloc(BlockIds& block_ids, int seq_len, bool enable_reuse
 
     BlockIndicesType allocated_blocks;
     if (need_alloc_blocks > 0) {
-        allocated_blocks = block_pool_->malloc(need_alloc_blocks);
-        if (allocated_blocks.size() != static_cast<size_t>(need_alloc_blocks)) {
-            if (!allocated_blocks.empty()) {
-                block_pool_->requestFree(allocated_blocks);
-            }
+        auto allocated_opt = block_pool_->malloc(static_cast<size_t>(need_alloc_blocks));
+        // malloc(n) is atomic: it returns exactly n blocks or nullopt.
+        if (!allocated_opt.has_value() || allocated_opt->size() != static_cast<size_t>(need_alloc_blocks)) {
             return false;
         }
+        allocated_blocks = std::move(*allocated_opt);
+        // malloc() only reserves capacity at refCount 0; take the request holder ref to hold the blocks.
+        block_pool_->incRef(allocated_blocks);
     }
 
     BlockIndicesType new_ids;
@@ -212,7 +213,7 @@ void SWAKVCacheGroup::removeSkippedBlocks(BlockIds& block_ids, bool enable_reuse
         pos_to_remove.push_back(static_cast<size_t>(i));
     }
     if (!blocks_to_free.empty()) {
-        block_pool_->requestFree(blocks_to_free);
+        block_pool_->releaseRef(blocks_to_free);
         block_ids.remove(pos_to_remove);
     }
     checkSWATailBlockIds(block_ids, "SWAKVCacheGroup::removeSkippedBlocks");
@@ -225,7 +226,7 @@ void SWAKVCacheGroup::free(const BlockIndicesType& block_indices) {
     BlockIndicesType valid;
     filterValidBlocks(block_indices, valid);
     if (!valid.empty()) {
-        block_pool_->requestFree(valid);
+        block_pool_->releaseRef(valid);
     }
 }
 
@@ -234,7 +235,7 @@ void SWAKVCacheGroup::reference(BlockIds& block_ids, const BlockIndicesType& new
     BlockIndicesType valid;
     filterValidBlocks(new_block_indices, valid);
     if (!valid.empty()) {
-        block_pool_->requestReference(valid);
+        block_pool_->incRef(valid);
     }
 }
 

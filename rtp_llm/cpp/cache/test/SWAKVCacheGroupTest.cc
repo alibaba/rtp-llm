@@ -66,11 +66,11 @@ protected:
     void SetUp() override {
         old_core_dump_on_exception_                  = StaticConfig::user_ft_core_dump_on_exception;
         StaticConfig::user_ft_core_dump_on_exception = false;
-        block_pool_ = createBlockPool();
+        block_pool_ = createDeviceBlockPool();
         block_pool_->init();
-        total_blocks_                         = block_pool_->freeBlocksNum();
-        shared_cache_                         = std::make_shared<SharedBlockCache>();
-        std::vector<BlockPoolPtr> group_pools = {block_pool_};
+        total_blocks_                               = block_pool_->freeBlocksNum();
+        shared_cache_                               = std::make_shared<SharedBlockCache>();
+        std::vector<DeviceBlockPoolPtr> group_pools = {block_pool_};
         shared_cache_->init(1, group_pools);
     }
 
@@ -90,7 +90,7 @@ protected:
         return SWAKVCacheGroup({}, spec, block_pool_, 0, linear_step, shared_cache_.get());
     }
 
-    BlockPoolPtr        block_pool_;
+    DeviceBlockPoolPtr  block_pool_;
     SharedBlockCachePtr shared_cache_;
     size_t              total_blocks_ = 0;
     bool                old_core_dump_on_exception_{false};
@@ -468,7 +468,7 @@ TEST_F(SWAKVCacheGroupTest, RemoveSkippedBlocks_FreesNonTailReal) {
 }
 
 TEST_F(SWAKVCacheGroupTest, RemoveSkippedBlocks_WithStep_FreesNonStepBlocks) {
-    auto block_pool = createBlockPool();
+    auto block_pool = createDeviceBlockPool();
     ASSERT_TRUE(block_pool->init());
     ASSERT_EQ(block_pool->freeBlocksNum(), 9u);
 
@@ -476,9 +476,11 @@ TEST_F(SWAKVCacheGroupTest, RemoveSkippedBlocks_WithStep_FreesNonStepBlocks) {
     spec->seq_size_per_block = 4;
     SWAKVCacheGroup group({}, spec, block_pool, 0, 2);
 
-    // Start with 6 allocated blocks (no NULLs).
-    auto allocated = block_pool->malloc(6);
+    // Start with 6 allocated blocks (no NULLs). malloc() reserves capacity with refCount 0;
+    // incRef gives each a single holder so removeSkippedBlocks' releaseRef can free them.
+    auto allocated = block_pool->malloc(6).value();
     ASSERT_EQ(allocated.size(), 6u);
+    block_pool->incRef(allocated);
     BlockIds blocks;
     blocks.assign(allocated);
 
@@ -505,7 +507,7 @@ TEST_F(SWAKVCacheGroupTest, RemoveSkippedBlocks_WithStep_FreesNonStepBlocks) {
 }
 
 TEST_F(SWAKVCacheGroupTest, RemoveSkippedBlocks_HCAStateReuseEnabledKeepsTailOnly) {
-    auto block_pool = createBlockPool();
+    auto block_pool = createDeviceBlockPool();
     ASSERT_TRUE(block_pool->init());
     ASSERT_EQ(block_pool->freeBlocksNum(), 9u);
 
@@ -513,8 +515,9 @@ TEST_F(SWAKVCacheGroupTest, RemoveSkippedBlocks_HCAStateReuseEnabledKeepsTailOnl
     spec->skip_prefix_reuse = true;
     auto group = SWAKVCacheGroup({}, spec, block_pool, 5, /*linear_step=*/2, nullptr, nullptr, makePolicy(spec));
 
-    auto allocated = block_pool->malloc(6);
+    auto allocated = block_pool->malloc(6).value();
     ASSERT_EQ(allocated.size(), 6u);
+    block_pool->incRef(allocated);
     BlockIds blocks;
     blocks.assign(allocated);
 
@@ -530,7 +533,7 @@ TEST_F(SWAKVCacheGroupTest, RemoveSkippedBlocks_HCAStateReuseEnabledKeepsTailOnl
 }
 
 TEST_F(SWAKVCacheGroupTest, RemoveSkippedBlocks_WithReserveStep) {
-    auto block_pool = createBlockPool();
+    auto block_pool = createDeviceBlockPool();
     ASSERT_TRUE(block_pool->init());
     ASSERT_EQ(block_pool->freeBlocksNum(), 9u);
 
@@ -538,8 +541,9 @@ TEST_F(SWAKVCacheGroupTest, RemoveSkippedBlocks_WithReserveStep) {
     spec->seq_size_per_block = 4;
     SWAKVCacheGroup group({}, spec, block_pool, 0, 2);
 
-    auto allocated = block_pool->malloc(6);
+    auto allocated = block_pool->malloc(6).value();
     ASSERT_EQ(allocated.size(), 6u);
+    block_pool->incRef(allocated);
     BlockIds blocks;
     blocks.assign(allocated);
 
@@ -658,8 +662,9 @@ TEST_F(SWAKVCacheGroupTest, Malloc_FailsAtomicallyWithoutLeak) {
 
     // Hold 7 blocks so that only 2 free blocks remain. shared_cache_ is empty here, so
     // ensureFreeBlocks() cannot evict and refill the pool.
-    auto pre_alloc = block_pool_->malloc(7);
+    auto pre_alloc = block_pool_->malloc(7).value();
     ASSERT_EQ(pre_alloc.size(), 7u);
+    block_pool_->incRef(pre_alloc);
     const size_t free_before = block_pool_->freeBlocksNum();
     ASSERT_EQ(free_before, total_blocks_ - 7);
 
@@ -675,7 +680,7 @@ TEST_F(SWAKVCacheGroupTest, Malloc_FailsAtomicallyWithoutLeak) {
 
     // The pre-allocated blocks must still be releasable, proving that BlockPool ref
     // counters were not corrupted by the failed malloc path.
-    block_pool_->requestFree(pre_alloc);
+    block_pool_->releaseRef(pre_alloc);
     EXPECT_EQ(block_pool_->freeBlocksNum(), total_blocks_);
 }
 

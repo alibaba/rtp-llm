@@ -11,6 +11,7 @@
 #include <utility>
 
 #include "rtp_llm/cpp/cache/BlockPoolConfigHelper.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/DeviceBlockPool.h"
 #include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
@@ -97,10 +98,21 @@ bool HybridPoolKVCacheAllocator::doInit() {
         const auto& pool_config = group_pool_configs[static_cast<size_t>(gid)];
         const auto  group_type = config_.typeForGroup(static_cast<size_t>(gid));
 
-        auto group_pool = std::make_shared<BlockPool>(pool_config,
-                                                      allocation_type_,
-                                                      /*use_pinned_cpu_backing=*/false,
-                                                      use_cuda_malloc_block_pool_);
+        auto device_config                     = std::make_shared<DeviceBlockPoolConfig>();
+        device_config->pool_type               = BlockPoolType::DEVICE;
+        device_config->pool_name               = pool_config.pool_name;
+        device_config->physical_block_count    = pool_config.block_num;
+        // Device pools use ANY_ORDER (DeviceBlockPool::normalizeConfig enforces it); the physical
+        // block chosen is opaque to attention. Only the disk pool uses ASCENDING_ORDER.
+        device_config->free_block_order_policy = FreeBlockOrderPolicy::ANY_ORDER;
+        device_config->total_size_bytes        = pool_config.total_size_bytes;
+        device_config->memory_layouts          = pool_config.memory_layouts;
+        device_config->allocation_type         = allocation_type_;
+        device_config->use_pinned_cpu_backing  = false;
+        device_config->use_cuda_malloc_backing = use_cuda_malloc_block_pool_;
+
+        std::shared_ptr<const DeviceBlockPoolConfig> const_config = device_config;
+        auto group_pool = std::make_shared<DeviceBlockPool>(const_config);
         RTP_LLM_CHECK_WITH_INFO(
             group_pool->init(), "Failed to initialize block pool %s(group %d)", pool_config.pool_name.c_str(), gid);
 
@@ -168,19 +180,16 @@ int HybridPoolKVCacheAllocator::validateGroupIdForLayer(int layer_id, int group_
 void HybridPoolKVCacheAllocator::referenceBlocksInGroup(int                     gid,
                                                         const BlockIndicesType& blocks,
                                                         bool                    is_connector) const {
-    if (is_connector) {
-        group_block_pools_[static_cast<size_t>(gid)]->connectorReference(blocks);
-    } else {
-        group_block_pools_[static_cast<size_t>(gid)]->requestReference(blocks);
-    }
+    // Single-count pool: request and connector holders are the same reference category.
+    // is_connector is retained in the signature for call-site parity but no longer selects
+    // an independent counter.
+    (void)is_connector;
+    group_block_pools_[static_cast<size_t>(gid)]->incRef(blocks);
 }
 
 void HybridPoolKVCacheAllocator::freeBlocksInGroup(int gid, const BlockIndicesType& blocks, bool is_connector) {
-    if (is_connector) {
-        group_block_pools_[static_cast<size_t>(gid)]->connectorFree(blocks);
-    } else {
-        group_block_pools_[static_cast<size_t>(gid)]->requestFree(blocks);
-    }
+    (void)is_connector;
+    group_block_pools_[static_cast<size_t>(gid)]->releaseRef(blocks);
 }
 
 CacheLayerLayout HybridPoolKVCacheAllocator::allLayerCacheBase() const {
@@ -362,10 +371,20 @@ size_t HybridPoolKVCacheAllocator::freeBlocksNum() const {
     return total;
 }
 
+size_t HybridPoolKVCacheAllocator::perPoolAvailableBlocks(int gid) const {
+    if (gid < 0 || static_cast<size_t>(gid) >= group_block_pools_.size()
+        || !group_block_pools_[static_cast<size_t>(gid)]) {
+        return 0;
+    }
+    const size_t free_blocks = group_block_pools_[static_cast<size_t>(gid)]->freeBlocksNum();
+    const size_t evictable   = shared_block_cache_ ? shared_block_cache_->evictableBlocksNum(gid) : 0;
+    return free_blocks + evictable;
+}
+
 size_t HybridPoolKVCacheAllocator::availableBlocksNum() const {
     size_t total = 0;
-    for (const auto& pool : group_block_pools_) {
-        total += pool->availableBlocksNum();
+    for (int gid = 0; gid < static_cast<int>(group_block_pools_.size()); ++gid) {
+        total += perPoolAvailableBlocks(gid);
     }
     return total;
 }
@@ -455,40 +474,30 @@ void HybridPoolKVCacheAllocator::blockCacheFree(const BatchKVCacheResourcePtr& b
                 blocks_to_free.push_back(block_idx);
             }
             if (!blocks_to_free.empty()) {
-                group_block_pools_[static_cast<size_t>(gid)]->blockCacheFree(blocks_to_free);
+                group_block_pools_[static_cast<size_t>(gid)]->releaseRef(blocks_to_free);
             }
         }
     }
 }
 
 size_t HybridPoolKVCacheAllocator::requestRefBlocksNum() const {
-    size_t total = 0;
-    for (const auto& pool : group_block_pools_) {
-        total += pool->requestRefBlocksNum();
-    }
-    return total;
+    return 0;  // single-count pool: holder-type split is not recoverable
 }
 
 size_t HybridPoolKVCacheAllocator::connectorRefBlocksNum() const {
-    size_t total = 0;
-    for (const auto& pool : group_block_pools_) {
-        total += pool->connectorRefBlocksNum();
-    }
-    return total;
+    return 0;  // single-count pool: holder-type split is not recoverable
 }
 
 size_t HybridPoolKVCacheAllocator::blockCacheRefBlocksNum() const {
-    size_t total = 0;
-    for (const auto& pool : group_block_pools_) {
-        total += pool->blockCacheRefBlocksNum();
-    }
-    return total;
+    return 0;  // single-count pool: holder-type split is not recoverable
 }
 
 size_t HybridPoolKVCacheAllocator::notInUseBlocksNum() const {
     size_t total = 0;
     for (const auto& pool : group_block_pools_) {
-        total += pool->notInUseBlocksNum();
+        if (pool) {
+            total += pool->freeBlocksNum();  // conservative: excludes connector in-flight
+        }
     }
     return total;
 }
@@ -509,7 +518,7 @@ size_t HybridPoolKVCacheAllocator::minTokenCapacity(bool use_available_blocks, b
                 continue;
             }
             saw_group        = true;
-            const auto block = use_available_blocks ? group_block_pools_[gid]->availableBlocksNum() :
+            const auto block = use_available_blocks ? perPoolAvailableBlocks(static_cast<int>(gid)) :
                                                       group_block_pools_[gid]->totalBlocksNum();
             min_tokens       = std::min(min_tokens, block * logicalSeqSizePerBlockForCapacity(gid));
         }
@@ -564,7 +573,7 @@ KVCacheTokenCapacity HybridPoolKVCacheAllocator::tokenCapacity(size_t default_se
                 config_.group_seq_size_per_block[gid] :
                 default_seq_size_per_block;
         total_tokens     = std::min(total_tokens, pool->totalBlocksNum() * seq_size);
-        available_tokens = std::min(available_tokens, pool->availableBlocksNum() * seq_size);
+        available_tokens = std::min(available_tokens, perPoolAvailableBlocks(static_cast<int>(gid)) * seq_size);
         has_pool         = true;
     }
     return has_pool ? KVCacheTokenCapacity{total_tokens, available_tokens} : KVCacheTokenCapacity{};
@@ -584,10 +593,10 @@ std::vector<KVCachePoolMetricsSnapshot> HybridPoolKVCacheAllocator::poolMetricsS
         snapshot.pool_index           = gid;
         snapshot.pool_name            = pool->poolName();
         snapshot.total_blocks         = pool->totalBlocksNum();
-        snapshot.available_blocks     = pool->availableBlocksNum();
+        snapshot.available_blocks     = perPoolAvailableBlocks(static_cast<int>(gid));
         snapshot.free_blocks          = pool->freeBlocksNum();
-        snapshot.request_ref_blocks   = pool->requestRefBlocksNum();
-        snapshot.connector_ref_blocks = pool->connectorRefBlocksNum();
+        snapshot.request_ref_blocks   = 0;  // single-count pool: holder-type split is not recoverable
+        snapshot.connector_ref_blocks = 0;  // single-count pool: holder-type split is not recoverable
         snapshot.reserve_blocks       = reserveBlocksForPool(gid, reserve_blocks, total_reservable_available_blocks);
         snapshot.used_ratio           = (snapshot.total_blocks == 0) ?
                                             0.0f :
@@ -618,7 +627,7 @@ size_t HybridPoolKVCacheAllocator::totalReservableAvailableBlocks() const {
         if (!group_block_pools_[gid] || config_.usesExplicitIndependentBlocks(gid)) {
             continue;
         }
-        total += group_block_pools_[gid]->availableBlocksNum();
+        total += perPoolAvailableBlocks(static_cast<int>(gid));
     }
     return total;
 }
@@ -630,7 +639,7 @@ size_t HybridPoolKVCacheAllocator::reserveBlocksForPool(size_t gid,
         || total_reservable_available_blocks == 0) {
         return 0;
     }
-    return reserve_blocks * group_block_pools_[gid]->availableBlocksNum() / total_reservable_available_blocks;
+    return reserve_blocks * perPoolAvailableBlocks(static_cast<int>(gid)) / total_reservable_available_blocks;
 }
 
 bool HybridPoolKVCacheAllocator::hasAvailableBlocksForReserve(const MallocInfo& malloc_info,
@@ -660,7 +669,7 @@ bool HybridPoolKVCacheAllocator::hasAvailableBlocksForReserve(const MallocInfo& 
             continue;
         }
         const auto&  pool                 = group_block_pools_[static_cast<size_t>(gid)];
-        const size_t available_blocks     = pool->availableBlocksNum();
+        const size_t available_blocks     = perPoolAvailableBlocks(gid);
         const size_t total_blocks         = pool->totalBlocksNum();
         const size_t group_reserve_blocks =
             reserveBlocksForPool(static_cast<size_t>(gid), reserve_blocks, total_reservable_available_blocks);

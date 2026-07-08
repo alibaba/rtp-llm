@@ -10,7 +10,7 @@ class FullKVCacheGroup: public KVCacheGroup {
 public:
     FullKVCacheGroup(const LayerIdsType&          layer_ids,
 	                     std::shared_ptr<KVCacheSpec> kvcache_spec,
-	                     BlockPoolPtr                 block_pool,
+	                     DeviceBlockPoolPtr           block_pool,
 	                     int                          group_id,
 	                     SharedBlockCache*            shared_cache = nullptr,
 	                     const kmonitor::MetricsReporterPtr& metrics_reporter = nullptr,

@@ -12,7 +12,7 @@
 #include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/cache/BufferTypes.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
-#include "rtp_llm/cpp/cache/BlockPool.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/DeviceBlockPool.h"
 #include "rtp_llm/cpp/cache/SharedBlockCache.h"
 
 namespace rtp_llm {
@@ -26,7 +26,7 @@ class KVCacheGroup {
 public:
     KVCacheGroup(const LayerIdsType& layer_ids,
                  KVCacheSpecPtr      kvcache_spec,
-                 BlockPoolPtr        block_pool,
+                 DeviceBlockPoolPtr  block_pool,
                  int                 group_id,
                  CacheGroupPolicy    policy       = CacheGroupPolicy{},
                  SharedBlockCache*   shared_cache = nullptr,
@@ -64,6 +64,13 @@ public:
     std::vector<BlockInfo>
     convertIndexToBuffer(int layer_id, int block_id, int partition_count, int partition_id) const;
 
+    // Device-copy view over the same (layer, block) layout, backed by DeviceBlockPool.
+    // Unlike convertIndexToBuffer() (torch-free BlockInfo for transfer paths) this returns
+    // DeviceBlockBuffer for the allocator/device-copy fast path.
+    std::vector<DeviceBlockBuffer> blockBuffers(int layer_id, int block_id) const;
+    std::vector<DeviceBlockBuffer>
+    blockBuffers(int layer_id, int block_id, int partition_count, int partition_id) const;
+
     size_t freeBlocksNum() const;
     bool   ensureFreeBlocks(int need_blocks);
     int    seqSizePerBlock() const;
@@ -84,9 +91,9 @@ public:
     virtual bool usesPinnedCpuBacking() const;
 
 protected:
-    LayerIdsType      layer_ids_;
-    KVCacheSpecPtr    kvcache_spec_;
-    BlockPoolPtr      block_pool_;
+    LayerIdsType       layer_ids_;
+    KVCacheSpecPtr     kvcache_spec_;
+    DeviceBlockPoolPtr block_pool_;
     CacheGroupPolicy  policy_;
     SharedBlockCache* shared_cache_ = nullptr;
     kmonitor::MetricsReporterPtr metrics_reporter_ = nullptr;

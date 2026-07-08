@@ -153,6 +153,34 @@ std::vector<BlockInfo> KVCacheAllocator::convertIndexToBuffer(
     return convertIndexToBuffer(layer_id, block_id, partition_count, partition_id);
 }
 
+std::vector<DeviceBlockBuffer> KVCacheAllocator::blockBuffers(int layer_id, int block_id) const {
+    (void)layer_id;
+    (void)block_id;
+    RTP_LLM_FAIL("this allocator does not support the device block buffer view");
+    return {};
+}
+
+std::vector<DeviceBlockBuffer>
+KVCacheAllocator::blockBuffers(int layer_id, int block_id, int partition_count, int partition_id) const {
+    (void)layer_id;
+    (void)block_id;
+    (void)partition_count;
+    (void)partition_id;
+    RTP_LLM_FAIL("this allocator does not support the device block buffer view");
+    return {};
+}
+
+std::vector<DeviceBlockBuffer> KVCacheAllocator::blockBuffers(int layer_id, int group_id, int block_id) const {
+    (void)group_id;
+    return blockBuffers(layer_id, block_id);
+}
+
+std::vector<DeviceBlockBuffer> KVCacheAllocator::blockBuffers(
+    int layer_id, int group_id, int block_id, int partition_count, int partition_id) const {
+    (void)group_id;
+    return blockBuffers(layer_id, block_id, partition_count, partition_id);
+}
+
 BlockAddrInfo KVCacheAllocator::convertIndexToAddrByTag(int layer_id, const std::string& tag, int block_id) const {
     const int group_id = config_.groupIdForLayerTag(layer_id, tag);
     return convertIndexToAddr(layer_id, group_id, block_id);
@@ -248,7 +276,12 @@ int64_t KVCacheAllocator::getMrCostTimeMs() const {
 }
 
 size_t KVCacheAllocator::availableBlocksNum() const {
-    return block_pool_ ? block_pool_->availableBlocksNum() : 0;
+    if (!block_pool_) {
+        return 0;
+    }
+    const size_t free_blocks = block_pool_->freeBlocksNum();
+    const size_t evictable   = shared_block_cache_ ? shared_block_cache_->evictableBlocksNum(/*group_id=*/0) : 0;
+    return free_blocks + evictable;
 }
 
 BatchKVCacheResourcePtr KVCacheAllocator::popBlocksFromCache(size_t min_blocks_to_free) {
@@ -339,28 +372,28 @@ void KVCacheAllocator::blockCacheFree(const BatchKVCacheResourcePtr& batch_kv_ca
         }
     }
     if (!blocks_to_free.empty()) {
-        block_pool_->blockCacheFree(blocks_to_free);
+        block_pool_->releaseRef(blocks_to_free);
     }
 }
 
 size_t KVCacheAllocator::requestRefBlocksNum() const {
-    return block_pool_->requestRefBlocksNum();
+    return 0;  // single-count pool: holder-type split is not recoverable
 }
 
 size_t KVCacheAllocator::connectorRefBlocksNum() const {
-    return block_pool_->connectorRefBlocksNum();
+    return 0;  // single-count pool: holder-type split is not recoverable
 }
 
 size_t KVCacheAllocator::blockCacheRefBlocksNum() const {
-    return block_pool_ ? block_pool_->blockCacheRefBlocksNum() : 0;
+    return 0;  // single-count pool: holder-type split is not recoverable
 }
 
 size_t KVCacheAllocator::notInUseBlocksNum() const {
-    return block_pool_ ? block_pool_->notInUseBlocksNum() : 0;
+    return block_pool_ ? block_pool_->freeBlocksNum() : 0;  // conservative: excludes connector in-flight
 }
 
 size_t KVCacheAllocator::availableTokensNum() const {
-    return block_pool_ ? (block_pool_->availableBlocksNum() * logicalSeqSizePerBlockForCapacity(/*gid=*/0)) : 0;
+    return block_pool_ ? (availableBlocksNum() * logicalSeqSizePerBlockForCapacity(/*gid=*/0)) : 0;
 }
 
 size_t KVCacheAllocator::totalTokensNum() const {

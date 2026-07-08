@@ -773,7 +773,7 @@ void BlockTreeCache::releaseMatchedBlocks(const std::vector<BlockIdxType>& block
             continue;
         size_t pool_idx = i % num_pools;
         if (pool_idx < pools.size() && pools[pool_idx]) {
-            pools[pool_idx]->blockCacheFree(block_indices[i]);
+            pools[pool_idx]->releaseRef(block_indices[i]);
         }
     }
 }

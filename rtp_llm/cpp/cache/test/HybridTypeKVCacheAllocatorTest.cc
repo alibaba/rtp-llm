@@ -150,13 +150,17 @@ static BatchKVCacheResourcePtr makeBatchResource(int batch_size, const CacheConf
     return res;
 }
 
-static std::vector<BlockIdxType> allocateAndCache(BlockPoolPtr         block_pool,
+static std::vector<BlockIdxType> allocateAndCache(DeviceBlockPoolPtr   block_pool,
                                                   SharedBlockCachePtr  shared_cache,
                                                   int                  group_id,
                                                   int                  group_num,
                                                   const CacheKeysType& keys,
                                                   bool                 is_resident = true) {
-    auto blocks = block_pool->malloc(static_cast<int>(keys.size()));
+    // malloc() reserves at refCount 0 with no request ref; put() incRef's each slot, so the
+    // cache holds the only reference. Nothing left to requestFree.
+    auto blocks_opt = block_pool->malloc(keys.size());
+    EXPECT_TRUE(blocks_opt.has_value());
+    BlockIdList blocks = blocks_opt.value_or(BlockIdList{});
     EXPECT_EQ(blocks.size(), keys.size());
 
     for (size_t i = 0; i < keys.size(); ++i) {
@@ -164,19 +168,20 @@ static std::vector<BlockIdxType> allocateAndCache(BlockPoolPtr         block_poo
         group_slots[static_cast<size_t>(group_id)] = blocks[i];
         shared_cache->put(keys[i], group_slots, is_resident);
     }
-
-    // Drop request references so these blocks behave like "cached but available" blocks.
-    block_pool->requestFree(blocks);
     return blocks;
 }
 
-static std::vector<BlockIdxType> allocateAndCacheKeepAllocated(BlockPoolPtr         block_pool,
+static std::vector<BlockIdxType> allocateAndCacheKeepAllocated(DeviceBlockPoolPtr   block_pool,
                                                                SharedBlockCachePtr  shared_cache,
                                                                int                  group_id,
                                                                int                  group_num,
                                                                const CacheKeysType& keys,
                                                                bool                 is_resident = true) {
-    auto blocks = block_pool->malloc(static_cast<int>(keys.size()));
+    // malloc() reserves at refCount 0; put() incRef's them. Either way the blocks stay out of
+    // the free list, so a later malloc() cannot hand them back out.
+    auto blocks_opt = block_pool->malloc(keys.size());
+    EXPECT_TRUE(blocks_opt.has_value());
+    BlockIdList blocks = blocks_opt.value_or(BlockIdList{});
     EXPECT_EQ(blocks.size(), keys.size());
 
     for (size_t i = 0; i < keys.size(); ++i) {
@@ -431,8 +436,13 @@ TEST_F(HybridTypeKVCacheAllocatorTest, IncrDecrKVCacheRefReferencesOnlyMatchedVa
     ASSERT_NE(block_pool, nullptr);
 
     const size_t free_before = allocator->freeBlocksNum();
-    auto         blocks      = block_pool->malloc(4);
+    auto         blocks_opt  = block_pool->malloc(4);
+    ASSERT_TRUE(blocks_opt.has_value());
+    auto blocks = blocks_opt.value();
     ASSERT_EQ(blocks.size(), 4u);
+    // Single-count pool: malloc() reserves at refCount 0; take the request holder ref
+    // (legacy BlockPool::malloc did this implicitly). Does not change freeBlocksNum.
+    block_pool->incRef(blocks);
     EXPECT_EQ(allocator->freeBlocksNum(), free_before - 4);
 
     KVCacheResource             resource;
@@ -455,7 +465,7 @@ TEST_F(HybridTypeKVCacheAllocatorTest, IncrDecrKVCacheRefReferencesOnlyMatchedVa
     ASSERT_EQ(ref->blocks(0).size(), 2u);
     ASSERT_EQ(ref->blocks(1).size(), 2u);
 
-    block_pool->requestFree(blocks);
+    block_pool->releaseRef(blocks);
     EXPECT_EQ(allocator->freeBlocksNum(), free_before - 2) << "Only blocks[1] and blocks[3] should remain referenced";
 
     ref.reset();
@@ -472,8 +482,12 @@ TEST_F(HybridTypeKVCacheAllocatorTest, IncrKVCacheRefPreservesConnectorDummyTail
     ASSERT_NE(block_pool, nullptr);
 
     const size_t free_before = allocator->freeBlocksNum();
-    auto         blocks      = block_pool->malloc(2);
+    auto         blocks_opt  = block_pool->malloc(2);
+    ASSERT_TRUE(blocks_opt.has_value());
+    auto blocks = blocks_opt.value();
     ASSERT_EQ(blocks.size(), 2u);
+    // Single-count pool: take the request holder ref after reserve-only malloc().
+    block_pool->incRef(blocks);
 
     KVCacheResource resource;
     resource.initGroups(/*group_nums=*/2,
@@ -494,7 +508,7 @@ TEST_F(HybridTypeKVCacheAllocatorTest, IncrKVCacheRefPreservesConnectorDummyTail
     EXPECT_TRUE(isNullBlockIdx(ref->blocks(0)[2]));
     EXPECT_TRUE(isNullBlockIdx(ref->blocks(1)[2]));
 
-    block_pool->requestFree(blocks);
+    block_pool->releaseRef(blocks);
     EXPECT_EQ(allocator->freeBlocksNum(), free_before - 2);
 
     ref.reset();
@@ -591,7 +605,11 @@ TEST_F(HybridTypeKVCacheAllocatorTest, IncrMallocRollbackFreesPartiallyAllocated
     // Leave exactly 1 free block in pool, so linear allocates 1 and full fails on the next allocation.
     const size_t free_before_incr = block_pool->freeBlocksNum();
     ASSERT_GE(free_before_incr, 1u);
-    auto keep = block_pool->malloc(static_cast<int>(free_before_incr - 1));
+    auto keep_opt = block_pool->malloc(free_before_incr - 1);
+    ASSERT_TRUE(keep_opt.has_value());
+    auto keep = keep_opt.value();
+    // Single-count pool: hold the reserved blocks with a request ref (reserve-only malloc()).
+    block_pool->incRef(keep);
     ASSERT_EQ(block_pool->freeBlocksNum(), 1u);
 
     // Incr to seq_len=9 => 3 slots per group. Linear adds 2 slots but allocates only 1 real block; full needs 2.
@@ -611,7 +629,7 @@ TEST_F(HybridTypeKVCacheAllocatorTest, IncrMallocRollbackFreesPartiallyAllocated
     EXPECT_EQ(block_pool->freeBlocksNum(), 1u);
 
     // Cleanup.
-    block_pool->requestFree(keep);
+    block_pool->releaseRef(keep);
 }
 
 }  // namespace test

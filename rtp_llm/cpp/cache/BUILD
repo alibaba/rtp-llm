@@ -106,7 +106,6 @@ cc_library(
     srcs = [
         "BlockPool.cc",
         "MemoryLayoutStrategy.cc",
-        "SharedBlockCache.cc",
     ],
     hdrs = [
         "BlockPool.h",
@@ -115,7 +114,6 @@ cc_library(
         "BlockRefCounter.h",
         "MemoryLayoutStrategy.h",
         "MemoryLayoutConfig.h",
-        "SharedBlockCache.h",
     ],
     copts = copts(),
     visibility = ["//visibility:public"],
@@ -134,6 +132,31 @@ cc_library(
         ],
         "//conditions:default": [],
     }),
+)
+
+# SharedBlockCache holds device cache-item slots and now references DeviceBlockPool
+# (single-count incRef/releaseRef) instead of the legacy BlockPool. It lives in its own
+# target - separate from block_pool - so it can depend on
+# //rtp_llm/cpp/cache/block_tree_cache:device_block_pool without forming a cycle
+# (device_block_pool depends on block_pool for MemoryLayoutStrategy).
+cc_library(
+    name = "shared_block_cache",
+    srcs = [
+        "SharedBlockCache.cc",
+    ],
+    hdrs = [
+        "SharedBlockCache.h",
+    ],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+    deps = [
+        ":batch_kv_cache_resource",
+        ":cache_types",
+        "//rtp_llm/cpp/cache/block_tree_cache:device_block_pool",
+        "//rtp_llm/cpp/utils:lru_cache",
+        "//rtp_llm/cpp/utils:profiling_scope",
+        "//rtp_llm/cpp/utils:core_utils",
+    ] + torch_deps(),
 )
 
 cc_library(
@@ -170,6 +193,8 @@ cc_library(
     deps = [
         ":block_pool",
         ":cache_types",
+        ":shared_block_cache",
+        "//rtp_llm/cpp/cache/block_tree_cache:device_block_pool",
     ],
 )
 
@@ -183,6 +208,8 @@ cc_library(
     deps = [
         ":block_pool",
         ":cache_types",
+        ":shared_block_cache",
+        "//rtp_llm/cpp/cache/block_tree_cache:device_block_pool",
         "//rtp_llm/cpp/metrics:metrics",
     ] + torch_deps(),
 )

@@ -10,7 +10,7 @@
 
 #include "rtp_llm/cpp/utils/LRUCache.h"
 #include "rtp_llm/cpp/cache/Types.h"
-#include "rtp_llm/cpp/cache/BlockPool.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/DeviceBlockPool.h"
 #include "rtp_llm/cpp/cache/KVCacheResource.h"
 
 namespace rtp_llm {
@@ -70,7 +70,12 @@ public:
 public:
     explicit SharedBlockCache(): lru_cache_(kCacheMaxCapacity) {}
 
-    void init(int group_num, const std::vector<BlockPoolPtr>& group_pools);
+    void init(int group_num, const std::vector<DeviceBlockPoolPtr>& group_pools);
+
+    // Number of cache-only (refCount == 1) blocks in one group that can be evicted to
+    // satisfy a new allocation. O(cache) scan; a block in multiple cache items is
+    // over-counted, which is rare and acceptable.
+    size_t evictableBlocksNum(int group_id) const;
 
     void put(CacheKeyType cache_key, const std::vector<BlockIdxType>& group_slots, bool is_resident);
     void put(CacheKeyType                 cache_key,
@@ -172,8 +177,8 @@ private:
     bool               independent_group_eviction_enabled_{false};
     uint64_t           tree_access_seq_{0};
 
-    int                       group_num_ = 0;
-    std::vector<BlockPoolPtr> group_pools_;
+    int                             group_num_ = 0;
+    std::vector<DeviceBlockPoolPtr> group_pools_;
     std::unordered_map<NamespacedKey, PrefixTreeNode, NamespacedKeyHash> tree_nodes_;
     std::unordered_map<CacheKeyType, std::unordered_set<NamespacedKey, NamespacedKeyHash>> aliases_by_cache_key_;
     std::unordered_map<NamespacedKey, std::unordered_set<NamespacedKey, NamespacedKeyHash>, NamespacedKeyHash>

@@ -1687,11 +1687,12 @@ TEST_F(DSV4AllocatorTest, MallocAndFreeBlocks) {
     ASSERT_GT(free_before, 3u);
 
     // Direct block pool malloc/free
-    auto blocks = block_pool->malloc(3);
+    auto blocks = block_pool->malloc(3).value();
+    block_pool->incRef(blocks);  // single-count pool: malloc reserves with refCount 0, take a holder ref
     ASSERT_EQ(blocks.size(), 3u);
     EXPECT_EQ(allocator->freeBlocksNum(), free_before - 3);
 
-    block_pool->requestFree(blocks);
+    block_pool->releaseRef(blocks);
     EXPECT_EQ(allocator->freeBlocksNum(), free_before);
 }
 
@@ -1833,11 +1834,12 @@ TEST_F(DSV4AllocatorTest, FlashMallocAndFree) {
     size_t free_before = allocator->freeBlocksNum();
     ASSERT_GT(free_before, 5u);
 
-    auto blocks = block_pool->malloc(5);
+    auto blocks = block_pool->malloc(5).value();
+    block_pool->incRef(blocks);  // single-count pool: malloc reserves with refCount 0, take a holder ref
     ASSERT_EQ(blocks.size(), 5u);
     EXPECT_EQ(allocator->freeBlocksNum(), free_before - 5);
 
-    block_pool->requestFree(blocks);
+    block_pool->releaseRef(blocks);
     EXPECT_EQ(allocator->freeBlocksNum(), free_before);
 }
 
@@ -1864,7 +1866,8 @@ TEST_F(DSV4AllocatorTest, InsertIntoCacheAllGroups) {
 
     // Allocate 3 blocks per group (simulating 3 full blocks)
     for (int gid = 0; gid < 7; gid++) {
-        auto blocks = block_pool->malloc(3);
+        auto blocks = block_pool->malloc(3).value();
+        block_pool->incRef(blocks);  // single-count pool: malloc reserves with refCount 0, take a holder ref
         ASSERT_EQ(blocks.size(), 3u);
         batch_res->mutableBlockIds(0, gid).assign(BlockIndicesType(blocks.begin(), blocks.end()));
     }
@@ -1899,7 +1902,7 @@ TEST_F(DSV4AllocatorTest, InsertIntoCacheAllGroups) {
     // Free all blocks
     for (int gid = 0; gid < 7; gid++) {
         const auto& blocks = batch_res->blocks(0, gid);
-        block_pool->requestFree(blocks);
+        block_pool->releaseRef(blocks);
     }
 }
 
@@ -1924,7 +1927,8 @@ TEST_F(DSV4AllocatorTest, FlashInsertIntoCacheAllGroups) {
     batch_res->setBatchCacheKeys(0, keys);
 
     for (int gid = 0; gid < 7; gid++) {
-        auto blocks = block_pool->malloc(3);
+        auto blocks = block_pool->malloc(3).value();
+        block_pool->incRef(blocks);  // single-count pool: malloc reserves with refCount 0, take a holder ref
         ASSERT_EQ(blocks.size(), 3u);
         batch_res->mutableBlockIds(0, gid).assign(BlockIndicesType(blocks.begin(), blocks.end()));
     }
@@ -1955,7 +1959,7 @@ TEST_F(DSV4AllocatorTest, FlashInsertIntoCacheAllGroups) {
     }
 
     for (int gid = 0; gid < 7; gid++) {
-        block_pool->requestFree(batch_res->blocks(0, gid));
+        block_pool->releaseRef(batch_res->blocks(0, gid));
     }
 }
 
@@ -1977,7 +1981,8 @@ TEST_F(DSV4AllocatorTest, PrefixCacheReusePagedGroupsOnly) {
     CacheKeysType                          cached_keys = {100, 101, 102};
     std::vector<std::vector<BlockIdxType>> cached_blocks(group_num);
     for (int gid = 0; gid < group_num; gid++) {
-        auto blocks = block_pool->malloc(static_cast<int>(cached_keys.size()));
+        auto blocks = block_pool->malloc(static_cast<int>(cached_keys.size())).value();
+        block_pool->incRef(blocks);  // single-count pool: malloc reserves with refCount 0, take a holder ref
         ASSERT_EQ(blocks.size(), cached_keys.size());
         for (size_t i = 0; i < cached_keys.size(); ++i) {
             std::vector<BlockIdxType> group_slots(group_num, NULL_BLOCK_IDX);
@@ -1985,7 +1990,7 @@ TEST_F(DSV4AllocatorTest, PrefixCacheReusePagedGroupsOnly) {
             shared_cache->put(cached_keys[i], group_slots, true);
         }
         cached_blocks[gid] = blocks;
-        block_pool->requestFree(blocks);
+        block_pool->releaseRef(blocks);
     }
 
     // Now do a malloc with reuse enabled — keys {100,101,102,103}
@@ -2044,7 +2049,8 @@ TEST_F(DSV4AllocatorTest, PrefixCacheReuseRequiresSWATailHit) {
     CacheKeysType                          cached_keys = {100, 101, 102};
     std::vector<std::vector<BlockIdxType>> cached_blocks(3);
     for (int gid = 0; gid < 3; gid++) {
-        auto blocks = block_pool->malloc(static_cast<int>(cached_keys.size()));
+        auto blocks = block_pool->malloc(static_cast<int>(cached_keys.size())).value();
+        block_pool->incRef(blocks);  // single-count pool: malloc reserves with refCount 0, take a holder ref
         ASSERT_EQ(blocks.size(), cached_keys.size());
         for (size_t i = 0; i < cached_keys.size(); ++i) {
             std::vector<BlockIdxType> group_slots(group_num, NULL_BLOCK_IDX);
@@ -2052,7 +2058,7 @@ TEST_F(DSV4AllocatorTest, PrefixCacheReuseRequiresSWATailHit) {
             shared_cache->put(cached_keys[i], group_slots, true);
         }
         cached_blocks[gid] = blocks;
-        block_pool->requestFree(blocks);
+        block_pool->releaseRef(blocks);
     }
 
     auto batch_res = std::make_shared<BatchKVCacheResource>();
@@ -2096,7 +2102,8 @@ TEST_F(DSV4AllocatorTest, PrefixCacheReuseDoesNotRequireHCAStateHit) {
         if (config.tagForGroup(gid) == "hca_state") {
             continue;
         }
-        auto blocks = block_pool->malloc(static_cast<int>(cached_keys.size()));
+        auto blocks = block_pool->malloc(static_cast<int>(cached_keys.size())).value();
+        block_pool->incRef(blocks);  // single-count pool: malloc reserves with refCount 0, take a holder ref
         ASSERT_EQ(blocks.size(), cached_keys.size());
         for (size_t i = 0; i < cached_keys.size(); ++i) {
             if (config.typeForGroup(gid) != CacheGroupType::FULL && i + 1 < cached_keys.size()) {
@@ -2107,7 +2114,7 @@ TEST_F(DSV4AllocatorTest, PrefixCacheReuseDoesNotRequireHCAStateHit) {
             shared_cache->put(cached_keys[i], group_slots, true);
         }
         cached_blocks[gid] = blocks;
-        block_pool->requestFree(blocks);
+        block_pool->releaseRef(blocks);
     }
 
     auto batch_res = std::make_shared<BatchKVCacheResource>();
@@ -2150,7 +2157,8 @@ TEST_F(DSV4AllocatorTest, PrefixCacheReuseAcceptsSingleLatestSWATailHit) {
     constexpr int group_num   = 7;
     CacheKeysType cached_keys = {100, 101, 102};
     for (int gid = 0; gid < group_num; gid++) {
-        auto blocks = block_pool->malloc(static_cast<int>(cached_keys.size()));
+        auto blocks = block_pool->malloc(static_cast<int>(cached_keys.size())).value();
+        block_pool->incRef(blocks);  // single-count pool: malloc reserves with refCount 0, take a holder ref
         ASSERT_EQ(blocks.size(), cached_keys.size());
         for (size_t i = 0; i < cached_keys.size(); ++i) {
             if (config.typeForGroup(gid) != CacheGroupType::FULL && i + 1 < cached_keys.size()) {
@@ -2160,7 +2168,7 @@ TEST_F(DSV4AllocatorTest, PrefixCacheReuseAcceptsSingleLatestSWATailHit) {
             group_slots[gid] = blocks[i];
             shared_cache->put(cached_keys[i], group_slots, true);
         }
-        block_pool->requestFree(blocks);
+        block_pool->releaseRef(blocks);
     }
 
     auto batch_res = std::make_shared<BatchKVCacheResource>();
@@ -2200,7 +2208,8 @@ TEST_F(DSV4AllocatorTest, FlashPrefixCacheReusePagedGroupsOnly) {
     CacheKeysType                          cached_keys = {500, 501, 502};
     std::vector<std::vector<BlockIdxType>> cached_blocks(group_num);
     for (int gid = 0; gid < group_num; gid++) {
-        auto blocks = block_pool->malloc(static_cast<int>(cached_keys.size()));
+        auto blocks = block_pool->malloc(static_cast<int>(cached_keys.size())).value();
+        block_pool->incRef(blocks);  // single-count pool: malloc reserves with refCount 0, take a holder ref
         ASSERT_EQ(blocks.size(), cached_keys.size());
         for (size_t i = 0; i < cached_keys.size(); ++i) {
             std::vector<BlockIdxType> group_slots(group_num, NULL_BLOCK_IDX);
@@ -2208,7 +2217,7 @@ TEST_F(DSV4AllocatorTest, FlashPrefixCacheReusePagedGroupsOnly) {
             shared_cache->put(cached_keys[i], group_slots, true);
         }
         cached_blocks[gid] = blocks;
-        block_pool->requestFree(blocks);
+        block_pool->releaseRef(blocks);
     }
 
     auto batch_res = std::make_shared<BatchKVCacheResource>();
@@ -2345,25 +2354,27 @@ TEST_F(DSV4AllocatorTest, SWAGroupParticipatesInPrefixCacheReuse) {
 
     // Group 0 (CSA KV)
     {
-        auto blocks = block_pool->malloc(2);
+        auto blocks = block_pool->malloc(2).value();
+        block_pool->incRef(blocks);  // single-count pool: malloc reserves with refCount 0, take a holder ref
         for (size_t i = 0; i < 2; ++i) {
             std::vector<BlockIdxType> group_slots(group_num, NULL_BLOCK_IDX);
             group_slots[0] = blocks[i];
             shared_cache->put(cached_keys[i], group_slots, true);
         }
         csa_blocks = blocks;
-        block_pool->requestFree(blocks);
+        block_pool->releaseRef(blocks);
     }
     // Group 6 (SWA KV)
     {
-        auto blocks = block_pool->malloc(2);
+        auto blocks = block_pool->malloc(2).value();
+        block_pool->incRef(blocks);  // single-count pool: malloc reserves with refCount 0, take a holder ref
         for (size_t i = 0; i < 2; ++i) {
             std::vector<BlockIdxType> group_slots(group_num, NULL_BLOCK_IDX);
             group_slots[6] = blocks[i];
             shared_cache->put(cached_keys[i], group_slots, true);
         }
         swa_blocks = blocks;
-        block_pool->requestFree(blocks);
+        block_pool->releaseRef(blocks);
     }
 
     // Verify both groups have cache entries
@@ -2397,14 +2408,15 @@ TEST_F(DSV4AllocatorTest, SWAPrefixCacheRestoresTailReuse) {
     CacheKeysType                          cached_keys = {800, 801};
     std::vector<std::vector<BlockIdxType>> cached_blocks(group_num);
     for (int gid = 0; gid < group_num; gid++) {
-        auto blocks = block_pool->malloc(2);
+        auto blocks = block_pool->malloc(2).value();
+        block_pool->incRef(blocks);  // single-count pool: malloc reserves with refCount 0, take a holder ref
         for (size_t i = 0; i < 2; ++i) {
             std::vector<BlockIdxType> group_slots(group_num, NULL_BLOCK_IDX);
             group_slots[gid] = blocks[i];
             shared_cache->put(cached_keys[i], group_slots, true);
         }
         cached_blocks[gid] = blocks;
-        block_pool->requestFree(blocks);
+        block_pool->releaseRef(blocks);
     }
 
     // Malloc with reuse — keys {800, 801, 802}

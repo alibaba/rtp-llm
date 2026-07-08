@@ -21,7 +21,7 @@ protected:
 // ==================== Basic functionality tests ====================
 
 TEST_F(FullKVCacheGroupTest, NeedBlocksNumTest) {
-    auto block_pool = createBlockPool();
+    auto block_pool = createDeviceBlockPool();
     block_pool->init();
 
     auto spec                = std::make_shared<MHAKVCacheSpec>();
@@ -35,7 +35,7 @@ TEST_F(FullKVCacheGroupTest, NeedBlocksNumTest) {
 }
 
 TEST_F(FullKVCacheGroupTest, GetNeedBlocksTest) {
-    auto block_pool = createBlockPool();
+    auto block_pool = createDeviceBlockPool();
     ASSERT_TRUE(block_pool->init());
 
     auto spec                = std::make_shared<MHAKVCacheSpec>();
@@ -57,7 +57,7 @@ TEST_F(FullKVCacheGroupTest, GetNeedBlocksTest) {
 }
 
 TEST_F(FullKVCacheGroupTest, RemoveSkippedBlocksTest) {
-    auto block_pool = createBlockPool();
+    auto block_pool = createDeviceBlockPool();
     block_pool->init();
 
     auto spec                = std::make_shared<MHAKVCacheSpec>();
@@ -74,11 +74,11 @@ TEST_F(FullKVCacheGroupTest, RemoveSkippedBlocksTest) {
 
 TEST_F(FullKVCacheGroupTest, MatchTest) {
 
-    auto block_pool = createBlockPool();
+    auto block_pool = createDeviceBlockPool();
     block_pool->init();
 
-    auto                      shared_cache = std::make_shared<SharedBlockCache>();
-    std::vector<BlockPoolPtr> group_pools  = {block_pool};
+    auto                            shared_cache = std::make_shared<SharedBlockCache>();
+    std::vector<DeviceBlockPoolPtr> group_pools  = {block_pool};
     shared_cache->init(1, group_pools);
 
     auto spec                = std::make_shared<MHAKVCacheSpec>();
@@ -120,10 +120,10 @@ TEST_F(FullKVCacheGroupTest, MatchTest) {
 }
 
 TEST_F(FullKVCacheGroupTest, MallocFreeTest) {
-    auto block_pool = createBlockPool();
+    auto block_pool = createDeviceBlockPool();
     block_pool->init();
     ASSERT_EQ(block_pool->freeBlocksNum(), 9);
-    ASSERT_EQ(block_pool->availableBlocksNum(), 9);
+    ASSERT_EQ(block_pool->freeBlocksNum(), 9);
 
     auto spec                = std::make_shared<MHAKVCacheSpec>();
     spec->seq_size_per_block = 2;
@@ -135,7 +135,7 @@ TEST_F(FullKVCacheGroupTest, MallocFreeTest) {
 
     ASSERT_TRUE(group1.malloc(block_ids, 7));
     ASSERT_EQ(block_pool->freeBlocksNum(), 5);
-    ASSERT_EQ(block_pool->availableBlocksNum(), 5);
+    ASSERT_EQ(block_pool->freeBlocksNum(), 5);
     ASSERT_EQ(block_ids.blocks().size(), 4);
 
     BlockIndicesType expected_result = {1, 2, 3, 4};
@@ -143,10 +143,39 @@ TEST_F(FullKVCacheGroupTest, MallocFreeTest) {
 
     group1.free(block_ids.blocks());
     ASSERT_EQ(block_pool->freeBlocksNum(), 9);
-    ASSERT_EQ(block_pool->availableBlocksNum(), 9);
+    ASSERT_EQ(block_pool->freeBlocksNum(), 9);
 
     BlockIds block_ids2(/*kernel_blocks_per_kv_block=*/1);
     ASSERT_FALSE(group1.malloc(block_ids2, 180));
+}
+
+// Single-count co-hold: a block held by both a request (via group malloc) and a cache
+// holder (extra incRef) must survive the request release and only free on the final
+// releaseRef.
+TEST_F(FullKVCacheGroupTest, RequestReleaseKeepsCacheHeldBlock) {
+    auto block_pool = createDeviceBlockPool();
+    ASSERT_TRUE(block_pool->init());
+
+    auto spec                = std::make_shared<MHAKVCacheSpec>();
+    spec->seq_size_per_block = 2;
+
+    FullKVCacheGroup group1({}, spec, block_pool, 0);
+
+    BlockIds block_ids(/*kernel_blocks_per_kv_block=*/1);
+    ASSERT_TRUE(group1.malloc(block_ids, /*seq_len=*/2));
+    ASSERT_FALSE(block_ids.blocks().empty());
+    const auto block = block_ids.blocks()[0];
+    EXPECT_EQ(block_pool->refCount(block), 1u);  // request holder
+
+    block_pool->incRef(block);  // additional cache holder
+    EXPECT_EQ(block_pool->refCount(block), 2u);
+
+    group1.free(BlockIndicesType{block});  // release request holder
+    EXPECT_TRUE(block_pool->isAllocated(block));
+    EXPECT_EQ(block_pool->refCount(block), 1u);
+
+    block_pool->releaseRef(block);  // release cache holder
+    EXPECT_FALSE(block_pool->isAllocated(block));
 }
 
 }  // namespace test

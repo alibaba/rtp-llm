@@ -8,7 +8,7 @@
 
 namespace rtp_llm {
 
-void SharedBlockCache::init(int group_num, const std::vector<BlockPoolPtr>& group_pools) {
+void SharedBlockCache::init(int group_num, const std::vector<DeviceBlockPoolPtr>& group_pools) {
     std::lock_guard<std::mutex> lock(mu_);
     RTP_LLM_CHECK_WITH_INFO(static_cast<int>(group_pools.size()) == group_num,
                             "group_pools size %zu != group_num %d",
@@ -16,6 +16,26 @@ void SharedBlockCache::init(int group_num, const std::vector<BlockPoolPtr>& grou
                             group_num);
     group_num_   = group_num;
     group_pools_ = group_pools;
+}
+
+size_t SharedBlockCache::evictableBlocksNum(int group_id) const {
+    std::lock_guard<std::mutex> lock(mu_);
+    if (group_id < 0 || group_id >= group_num_ || group_pools_[static_cast<size_t>(group_id)] == nullptr) {
+        return 0;
+    }
+    const auto& pool  = group_pools_[static_cast<size_t>(group_id)];
+    size_t      count = 0;
+    for (const auto& kv : lru_cache_.items()) {
+        const UnifiedCacheItem& item = kv.second;
+        if (static_cast<size_t>(group_id) >= item.slots.size()) {
+            continue;
+        }
+        const BlockIdxType slot = item.slots[static_cast<size_t>(group_id)];
+        if (!isNullBlockIdx(slot) && pool->isAllocated(slot) && pool->refCount(slot) == 1) {
+            ++count;
+        }
+    }
+    return count;
 }
 
 void SharedBlockCache::put(CacheKeyType cache_key, const std::vector<BlockIdxType>& group_slots, bool is_resident) {
@@ -62,7 +82,7 @@ void SharedBlockCache::put(CacheKeyType                     cache_key,
                         matchable_slots.empty() || gid >= matchable_slots.size() ? true : matchable_slots[gid];
                     updated                  = true;
                     if (static_cast<int>(gid) < group_num_) {
-                        group_pools_[gid]->blockCacheReference(group_slots[gid]);
+                        group_pools_[gid]->incRef(group_slots[gid]);
                     }
                 } else if (!matchable_slots.empty() && gid < matchable_slots.size() && matchable_slots[gid]
                            && !existing_item.matchable_slots[gid]) {
@@ -108,7 +128,7 @@ void SharedBlockCache::put(CacheKeyType                     cache_key,
 
     for (int gid = 0; gid < static_cast<int>(group_slots.size()) && gid < group_num_; ++gid) {
         if (!isNullBlockIdx(group_slots[gid])) {
-            group_pools_[gid]->blockCacheReference(group_slots[gid]);
+            group_pools_[gid]->incRef(group_slots[gid]);
         }
     }
 }
@@ -380,7 +400,7 @@ size_t SharedBlockCache::evictAndFree(size_t min_blocks) {
 
         for (int gid = 0; gid < static_cast<int>(slots.size()) && gid < group_num_; ++gid) {
             if (!isNullBlockIdx(slots[gid])) {
-                group_pools_[gid]->blockCacheFree(slots[gid]);
+                group_pools_[gid]->releaseRef(slots[gid]);
                 freed++;
             }
         }
@@ -406,7 +426,7 @@ size_t SharedBlockCache::evictAndFreeForGroup(int group_id, size_t min_blocks, E
 
         for (int gid = 0; gid < static_cast<int>(slots.size()) && gid < group_num_; ++gid) {
             if (!isNullBlockIdx(slots[gid])) {
-                group_pools_[gid]->blockCacheFree(slots[gid]);
+                group_pools_[gid]->releaseRef(slots[gid]);
                 if (gid == group_id) {
                     freed++;
                 }

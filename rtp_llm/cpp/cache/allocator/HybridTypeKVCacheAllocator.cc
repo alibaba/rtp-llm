@@ -4,6 +4,7 @@
 #include <utility>
 
 #include "rtp_llm/cpp/cache/BlockPoolConfigHelper.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/DeviceBlockPool.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
 namespace rtp_llm {
@@ -17,9 +18,23 @@ HybridTypeKVCacheAllocator::HybridTypeKVCacheAllocator(const CacheConfig&       
 bool HybridTypeKVCacheAllocator::doInit() {
     RTP_LLM_CHECK_WITH_INFO(config_.groupNums() > 0, "no cache groups found in CacheConfig");
 
-    auto pool_config = BlockPoolConfigHelper::createConfig(config_);
-    block_pool_      = std::make_shared<BlockPool>(
-        pool_config, allocation_type_, /*use_pinned_cpu_backing=*/false, use_cuda_malloc_block_pool_);
+    BlockPoolConfig pool_config = BlockPoolConfigHelper::createConfig(config_);
+
+    auto device_config                     = std::make_shared<DeviceBlockPoolConfig>();
+    device_config->pool_type               = BlockPoolType::DEVICE;
+    device_config->pool_name               = pool_config.pool_name;
+    device_config->physical_block_count    = pool_config.block_num;
+    // Device pools use ANY_ORDER (DeviceBlockPool::normalizeConfig enforces it); the physical
+    // block chosen is opaque to attention. Only the disk pool uses ASCENDING_ORDER.
+    device_config->free_block_order_policy = FreeBlockOrderPolicy::ANY_ORDER;
+    device_config->total_size_bytes        = pool_config.total_size_bytes;
+    device_config->memory_layouts          = pool_config.memory_layouts;
+    device_config->allocation_type         = allocation_type_;
+    device_config->use_pinned_cpu_backing  = false;
+    device_config->use_cuda_malloc_backing = use_cuda_malloc_block_pool_;
+
+    std::shared_ptr<const DeviceBlockPoolConfig> const_config = device_config;
+    block_pool_                                               = std::make_shared<DeviceBlockPool>(const_config);
     RTP_LLM_CHECK_WITH_INFO(block_pool_->init(), "Failed to initialize block pool for HybridTypeKVCacheAllocator");
 
     const int group_nums = config_.groupNums();
@@ -28,7 +43,7 @@ bool HybridTypeKVCacheAllocator::doInit() {
     SharedBlockCache* shared_cache_raw = shared_block_cache_ ? shared_block_cache_.get() : nullptr;
 
     if (shared_block_cache_) {
-        std::vector<BlockPoolPtr> group_pools(static_cast<size_t>(group_nums), block_pool_);
+        std::vector<DeviceBlockPoolPtr> group_pools(static_cast<size_t>(group_nums), block_pool_);
         shared_block_cache_->init(group_nums, group_pools);
     }
 
@@ -74,21 +89,16 @@ bool HybridTypeKVCacheAllocator::doInit() {
 void HybridTypeKVCacheAllocator::referenceBlocksInGroup(int                     gid,
                                                         const BlockIndicesType& blocks,
                                                         bool                    is_connector) const {
+    // Single-count shared pool: request/connector holders share one reference category.
     (void)gid;
-    if (is_connector) {
-        block_pool_->connectorReference(blocks);
-    } else {
-        block_pool_->requestReference(blocks);
-    }
+    (void)is_connector;
+    block_pool_->incRef(blocks);
 }
 
 void HybridTypeKVCacheAllocator::freeBlocksInGroup(int gid, const BlockIndicesType& blocks, bool is_connector) {
     (void)gid;
-    if (is_connector) {
-        block_pool_->connectorFree(blocks);
-    } else {
-        block_pool_->requestFree(blocks);
-    }
+    (void)is_connector;
+    block_pool_->releaseRef(blocks);
 }
 
 CacheLayerLayout HybridTypeKVCacheAllocator::allLayerCacheBase() const {

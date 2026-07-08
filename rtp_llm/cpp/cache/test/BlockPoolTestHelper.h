@@ -4,6 +4,7 @@
 #include <numeric>
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/BlockPoolConfigHelper.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/DeviceBlockPool.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/config/ModelConfig.h"
@@ -95,11 +96,23 @@ inline void createDevice() {
                          rtp_llm::MlaOpsType::AUTO);
 }
 
-BlockPoolPtr createBlockPool() {
+// Build the DeviceBlockPool from the same test config, for the KVCacheGroup / allocator
+// tests (single-count incRef/releaseRef pool).
+inline DeviceBlockPoolPtr createDeviceBlockPool() {
     createDevice();
-    auto config     = createTestConfig();
-    auto block_pool = std::make_shared<BlockPool>(config);
-    return block_pool;
+    auto pool_config                       = createTestConfig();
+    auto device_config                     = std::make_shared<DeviceBlockPoolConfig>();
+    device_config->pool_type               = BlockPoolType::DEVICE;
+    device_config->pool_name               = pool_config.pool_name;
+    device_config->physical_block_count    = pool_config.block_num;
+    device_config->free_block_order_policy = FreeBlockOrderPolicy::ANY_ORDER;
+    device_config->total_size_bytes        = pool_config.total_size_bytes;
+    device_config->memory_layouts          = pool_config.memory_layouts;
+    device_config->allocation_type         = AllocationType::DEVICE;
+    device_config->use_pinned_cpu_backing  = false;
+    device_config->use_cuda_malloc_backing = false;
+    std::shared_ptr<const DeviceBlockPoolConfig> const_config = device_config;
+    return std::make_shared<DeviceBlockPool>(const_config);
 }
 
 }  // namespace rtp_llm

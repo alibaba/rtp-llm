@@ -95,16 +95,22 @@ BatchKVCacheResourcePtr makeBatchRes(int batch_size, const CacheConfig& config, 
 }
 
 // Cache (key, group-slot) pairs into SharedBlockCache and drop request refs so blocks are reusable.
-std::vector<BlockIdxType> seedCache(
-    BlockPoolPtr block_pool, SharedBlockCachePtr shared_cache, int group_num, int group_id, const CacheKeysType& keys) {
-    auto blocks = block_pool->malloc(static_cast<int>(keys.size()));
+std::vector<BlockIdxType> seedCache(DeviceBlockPoolPtr   block_pool,
+                                    SharedBlockCachePtr  shared_cache,
+                                    int                  group_num,
+                                    int                  group_id,
+                                    const CacheKeysType& keys) {
+    // malloc() reserves at refCount 0 with no request ref; put() incRef's each slot, so the
+    // cache holds the only reference. Nothing to requestFree.
+    auto blocks_opt = block_pool->malloc(keys.size());
+    EXPECT_TRUE(blocks_opt.has_value());
+    BlockIdList blocks = blocks_opt.value_or(BlockIdList{});
     EXPECT_EQ(blocks.size(), keys.size());
     for (size_t i = 0; i < keys.size(); ++i) {
         std::vector<BlockIdxType> group_slots(static_cast<size_t>(group_num), NULL_BLOCK_IDX);
         group_slots[static_cast<size_t>(group_id)] = blocks[i];
         shared_cache->put(keys[i], group_slots, true);
     }
-    block_pool->requestFree(blocks);
     return blocks;
 }
 

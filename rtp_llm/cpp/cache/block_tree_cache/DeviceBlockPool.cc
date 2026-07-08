@@ -9,6 +9,9 @@
 
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/Logger.h"
+#include "rtp_llm/cpp/utils/TimeUtil.h"
+#include "rtp_llm/cpp/disaggregate/cache_store/CacheStore.h"
+#include "rtp_llm/cpp/disaggregate/cache_store/MemoryUtil.h"
 
 #if USING_CUDA
 #include <cuda_runtime.h>
@@ -123,12 +126,7 @@ bool DeviceBlockPool::init() {
     return true;
 }
 
-// Adapted from rtp_llm::BlockPool::initializeCacheBuffer (rtp_llm/cpp/cache/BlockPool.cc).
-// The host-backed (pageable CPU with pin fallback + MADV_DONTDUMP) branch of the old
-// pool is intentionally dropped here: this class is the DEVICE pool of the v4 family
-// (rtp_llm::block_tree_cache::HostBlockPool already covers host backing), so only the
-// DEVICE allocation_type path (plain CUDA tensor, pinned-CPU-backed, or cudaMalloc-backed)
-// is kept.
+// Always CUDA-backed (plain CUDA tensor or cudaMalloc); host backing lives in HostBlockPool.
 void DeviceBlockPool::initializeCacheBuffer() {
     const auto& cfg = config();
     RTP_LLM_CHECK_WITH_INFO(cfg.allocation_type == AllocationType::DEVICE,
@@ -136,10 +134,11 @@ void DeviceBlockPool::initializeCacheBuffer() {
                             cfg.pool_name.c_str());
     RTP_LLM_CHECK_WITH_INFO(
         cfg.total_size_bytes > 0, "device block pool [%s] total_size_bytes must be > 0", cfg.pool_name.c_str());
+    RTP_LLM_CHECK_WITH_INFO(!cfg.use_pinned_cpu_backing,
+                            "DeviceBlockPool [%s] does not support pinned CPU backing; use HostBlockPool",
+                            cfg.pool_name.c_str());
 
-    if (cfg.use_pinned_cpu_backing) {
-        initializePinnedCpuBuffer("device block pool pinned CPU backing");
-    } else if (cfg.use_cuda_malloc_backing) {
+    if (cfg.use_cuda_malloc_backing) {
         initializeCudaMallocBuffer();
     } else {
         cache_aligned_buffer_ = torch::empty({static_cast<int64_t>(cfg.total_size_bytes)},
@@ -165,23 +164,6 @@ void DeviceBlockPool::initializeCacheBuffer() {
                      cfg.total_size_bytes,
                      static_cast<double>(cfg.total_size_bytes) / kBytesPerMB,
                      cfg.memory_layouts.size());
-}
-
-void DeviceBlockPool::initializePinnedCpuBuffer(const char* log_context) {
-    const auto& cfg = config();
-    RTP_LLM_LOG_WARNING(
-        "%s, pool_name=%s, total_size=%zu bytes", log_context, cfg.pool_name.c_str(), cfg.total_size_bytes);
-    auto cpu_buffer = torch::empty({static_cast<int64_t>(cfg.total_size_bytes)},
-                                   torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCPU));
-    try {
-        cache_aligned_buffer_ = cpu_buffer.pin_memory();
-    } catch (const std::exception& e) {
-        RTP_LLM_FAIL("%s pin failed, pool_name=%s total_size=%zu bytes, error=%s",
-                     log_context,
-                     cfg.pool_name.c_str(),
-                     cfg.total_size_bytes,
-                     e.what());
-    }
 }
 
 void DeviceBlockPool::initializeCudaMallocBuffer() {
@@ -321,14 +303,20 @@ void DeviceBlockPool::initializeLayoutStrategy(size_t                    layout_
 void DeviceBlockPool::processLayerTensors(size_t                    layout_idx,
                                     const MemoryLayoutConfig& layout_cfg,
                                     size_t&                   global_layer_begin) {
-    // Unlike rtp_llm::BlockPool, this v4 pool does not keep the global layer -> KV
-    // tensor mapping around (allLayerCacheBase()/allLayerScaleCacheBase() are not part
-    // of this class's interface); it only needs the global layer -> (layout_index,
-    // local_layer_id) mapping used by blockBuffers().
+    // Build the global layer -> (layout_index, local_layer_id) mapping used by blockBuffers()/
+    // convertIndexToBuffer(), and cache the per-global-layer KV / KV-scale tensor views.
+    auto&      strategy      = layout_strategies_[layout_idx];
+    const auto layer_tensors = strategy->getLayerCacheTensors();
+    const auto scale_tensors = strategy->getLayerScaleCacheTensors();
     for (size_t local_layer = 0; local_layer < static_cast<size_t>(layout_cfg.layer_num); ++local_layer) {
         const size_t global_layer = global_layer_begin + local_layer;
         RTP_LLM_CHECK_WITH_INFO(global_layer < global_layer_to_local_.size(), "global layer index out of range");
         global_layer_to_local_[global_layer] = {static_cast<int>(layout_idx), static_cast<int>(local_layer)};
+
+        global_layer_kv_tensors_.push_back(layer_tensors[local_layer]);
+        if (layout_cfg.hasScale()) {
+            global_layer_kv_scale_tensors_.push_back(scale_tensors[local_layer]);
+        }
     }
 }
 
@@ -360,26 +348,48 @@ DeviceBlockPool::toDeviceBlockBuffers(const std::vector<BlockInfo>& infos, Block
     return buffers;
 }
 
+std::vector<torch::Tensor> DeviceBlockPool::allLayerCacheBase() const {
+    return global_layer_kv_tensors_;
+}
+
+std::vector<torch::Tensor> DeviceBlockPool::allLayerScaleCacheBase() const {
+    return global_layer_kv_scale_tensors_;
+}
+
+BlockAddrInfo DeviceBlockPool::convertIndexToAddr(int layer_id, BlockIdxType block) const {
+    RTP_LLM_CHECK(initialized());
+    auto [layout_index, local_layer_id] = mapGlobalLayerIdToLocal(layer_id);
+    checkLayoutValidity(layout_index);
+    return layout_strategies_[static_cast<size_t>(layout_index)]->convertIndexToAddr(local_layer_id, block);
+}
+
+std::vector<BlockInfo> DeviceBlockPool::convertIndexToBuffer(int layer_id, BlockIdxType block) const {
+    RTP_LLM_CHECK(initialized());
+    auto [layout_index, local_layer_id] = mapGlobalLayerIdToLocal(layer_id);
+    checkLayoutValidity(layout_index);
+    return layout_strategies_[static_cast<size_t>(layout_index)]->convertIndexToBuffer(local_layer_id, block);
+}
+
+std::vector<BlockInfo>
+DeviceBlockPool::convertIndexToBuffer(int layer_id, BlockIdxType block, int partition_count, int partition_id) const {
+    RTP_LLM_CHECK(initialized());
+    auto [layout_index, local_layer_id] = mapGlobalLayerIdToLocal(layer_id);
+    checkLayoutValidity(layout_index);
+    return layout_strategies_[static_cast<size_t>(layout_index)]->convertIndexToBuffer(
+        local_layer_id, block, partition_count, partition_id);
+}
+
 std::vector<DeviceBlockBuffer> DeviceBlockPool::blockBuffers(int layer_id, BlockIdxType block) const {
     RTP_LLM_CHECK(initialized());
     RTP_LLM_CHECK(isAllocated(block));
-
-    auto [layout_index, local_layer_id] = mapGlobalLayerIdToLocal(layer_id);
-    checkLayoutValidity(layout_index);
-    auto infos = layout_strategies_[static_cast<size_t>(layout_index)]->convertIndexToBuffer(local_layer_id, block);
-    return toDeviceBlockBuffers(infos, block);
+    return toDeviceBlockBuffers(convertIndexToBuffer(layer_id, block), block);
 }
 
 std::vector<DeviceBlockBuffer>
 DeviceBlockPool::blockBuffers(int layer_id, BlockIdxType block, int partition_count, int partition_id) const {
     RTP_LLM_CHECK(initialized());
     RTP_LLM_CHECK(isAllocated(block));
-
-    auto [layout_index, local_layer_id] = mapGlobalLayerIdToLocal(layer_id);
-    checkLayoutValidity(layout_index);
-    auto infos = layout_strategies_[static_cast<size_t>(layout_index)]->convertIndexToBuffer(
-        local_layer_id, block, partition_count, partition_id);
-    return toDeviceBlockBuffers(infos, block);
+    return toDeviceBlockBuffers(convertIndexToBuffer(layer_id, block, partition_count, partition_id), block);
 }
 
 MemoryType DeviceBlockPool::where() const {
@@ -389,12 +399,112 @@ MemoryType DeviceBlockPool::where() const {
     return cache_aligned_buffer_.is_pinned() ? MemoryType::MEMORY_CPU_PINNED : MemoryType::MEMORY_CPU;
 }
 
+size_t DeviceBlockPool::getTotalSizeBytes() const {
+    return config().total_size_bytes;
+}
+
 std::string DeviceBlockPool::debugString() const {
     std::ostringstream oss;
     oss << "DeviceBlockPool{" << IBlockPool::debugString() << ", pool_name=" << config().pool_name
         << ", memory_layouts=" << config().memory_layouts.size() << ", total_size_bytes=" << config().total_size_bytes
         << ", where=" << memoryTypeName(where()) << "}";
     return oss.str();
+}
+
+void DeviceBlockPool::regUserMr(size_t model_id, std::shared_ptr<CacheStore> cache_store) {
+    if (cache_store) {
+        cache_store_ = std::move(cache_store);
+    }
+    if (cache_store_ && !kvcache_reg_mr_) {
+        RTP_LLM_LOG_INFO("start to register user mr, pool_name=%s", config().pool_name.c_str());
+        auto       memory_util = cache_store_->getMemoryUtil();
+        const bool gpu         = where() == MemoryType::MEMORY_GPU;
+
+        for (size_t layout_idx = 0; layout_idx < config().memory_layouts.size(); ++layout_idx) {
+            const auto& layout_cfg = config().memory_layouts[layout_idx];
+
+            registerUserMrForBuffer(memory_util,
+                                    layout_idx,
+                                    layout_cfg.kv_cache_offset_bytes,
+                                    layout_cfg.kv_block_pool_size_bytes,
+                                    layout_cfg.kv_block_stride_bytes,
+                                    gpu,
+                                    "kv");
+
+            if (layout_cfg.hasScale()) {
+                registerUserMrForBuffer(memory_util,
+                                        layout_idx,
+                                        layout_cfg.kv_scale_offset_bytes,
+                                        layout_cfg.kv_scale_pool_size_bytes,
+                                        layout_cfg.kv_scale_stride_bytes,
+                                        gpu,
+                                        "scale");
+            }
+        }
+        kvcache_reg_mr_ = true;
+    }
+}
+
+void DeviceBlockPool::deregUserMr() {
+    if (kvcache_reg_mr_ && cache_store_) {
+        RTP_LLM_LOG_INFO("start to deregister user mr, pool_name=%s", config().pool_name.c_str());
+        auto       memory_util = cache_store_->getMemoryUtil();
+        const bool gpu         = where() == MemoryType::MEMORY_GPU;
+
+        for (size_t layout_idx = 0; layout_idx < config().memory_layouts.size(); ++layout_idx) {
+            const auto& layout_cfg = config().memory_layouts[layout_idx];
+            deregisterUserMrForBuffer(memory_util, layout_idx, layout_cfg.kv_cache_offset_bytes, gpu, "kv");
+            if (layout_cfg.hasScale()) {
+                deregisterUserMrForBuffer(memory_util, layout_idx, layout_cfg.kv_scale_offset_bytes, gpu, "scale");
+            }
+        }
+        RTP_LLM_LOG_INFO("deregister user mr for block pool success, pool_name=%s", config().pool_name.c_str());
+        kvcache_reg_mr_ = false;
+    }
+}
+
+void DeviceBlockPool::registerUserMrForBuffer(std::shared_ptr<MemoryUtil> memory_util,
+                                              size_t                      layout_idx,
+                                              size_t                      offset_bytes,
+                                              size_t                      bytes,
+                                              size_t                      stride_bytes,
+                                              bool                        gpu,
+                                              const std::string&          buffer_type) {
+    void* base_ptr = static_cast<void*>(static_cast<char*>(cache_base_ptr_) + static_cast<ptrdiff_t>(offset_bytes));
+    auto  start_us = currentTimeUs();
+
+    if (!memory_util->regUserMr(base_ptr, bytes, gpu, stride_bytes)) {
+        RTP_LLM_FAIL("register user mr for block pool layout[%zu] %s buffer failed, pool_name=%s",
+                     layout_idx,
+                     buffer_type.c_str(),
+                     config().pool_name.c_str());
+    }
+
+    auto cost_ms = (currentTimeUs() - start_us) / 1000;
+    mr_cost_time_ms_ += cost_ms;
+
+    RTP_LLM_LOG_INFO("register user mr success: pool_name=%s layout[%zu] %s base=%p len=%zu aligned=%zu cost=%ld ms",
+                     config().pool_name.c_str(),
+                     layout_idx,
+                     buffer_type.c_str(),
+                     base_ptr,
+                     bytes,
+                     stride_bytes,
+                     cost_ms);
+}
+
+void DeviceBlockPool::deregisterUserMrForBuffer(std::shared_ptr<MemoryUtil> memory_util,
+                                                size_t                      layout_idx,
+                                                size_t                      offset_bytes,
+                                                bool                        gpu,
+                                                const std::string&          buffer_type) {
+    void* base_ptr = static_cast<void*>(static_cast<char*>(cache_base_ptr_) + static_cast<ptrdiff_t>(offset_bytes));
+    if (!memory_util->deregUserMr(base_ptr, gpu)) {
+        RTP_LLM_FAIL("deregister user mr for block pool layout[%zu] %s buffer failed, pool_name=%s",
+                     layout_idx,
+                     buffer_type.c_str(),
+                     config().pool_name.c_str());
+    }
 }
 
 }  // namespace rtp_llm

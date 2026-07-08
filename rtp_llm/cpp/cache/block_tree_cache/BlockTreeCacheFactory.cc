@@ -173,6 +173,22 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
         group->setDiskPool(disk_pool);
     }
 
+    // 6b. Inject allocator-owned device (GPU) block pools into each ComponentGroup.
+    // Independent multi-pool allocators expose per-group pools via groupBlockPools(); the
+    // single-pool allocators expose one pool via getDeviceBlockPool().
+    if (allocator) {
+        const auto& group_pools = allocator->groupBlockPools();
+        if (!group_pools.empty()) {
+            for (auto& group : component_groups) {
+                group->setDevicePools(group_pools);
+            }
+        } else if (auto device_pool = allocator->getDeviceBlockPool()) {
+            for (auto& group : component_groups) {
+                group->setDevicePools(std::vector<DeviceBlockPoolPtr>{device_pool});
+            }
+        }
+    }
+
     // 7. Build BlockTreeCacheConfig.
     BlockTreeCacheConfig config;
     config.enable_device_cache = kv_cache_config.enable_device_cache;

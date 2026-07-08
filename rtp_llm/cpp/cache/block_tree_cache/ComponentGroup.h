@@ -5,8 +5,8 @@
 #include <string>
 #include <vector>
 
-#include "rtp_llm/cpp/cache/BlockPool.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/DeviceBlockPool.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/EvictionHeap.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/TreeNode.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/copy_engine/TransferTypes.h"
@@ -136,11 +136,11 @@ public:
     }
 
     // ---- Per-group pool injection and access ----
-    void setDevicePools(std::vector<BlockPoolPtr> pools) { device_pools_ = std::move(pools); }
+    void setDevicePools(std::vector<DeviceBlockPoolPtr> pools) { device_pools_ = std::move(pools); }
     void setHostPool(std::shared_ptr<HostBlockPool> pool) { host_pool_ = std::move(pool); }
     void setDiskPool(std::shared_ptr<DiskBlockPool> pool) { disk_pool_ = std::move(pool); }
 
-    const std::vector<BlockPoolPtr>& devicePools() const { return device_pools_; }
+    const std::vector<DeviceBlockPoolPtr>& devicePools() const { return device_pools_; }
     std::shared_ptr<HostBlockPool> hostPool() const { return host_pool_; }
     std::shared_ptr<DiskBlockPool> diskPool() const { return disk_pool_; }
 
@@ -190,26 +190,28 @@ public:
     }
 
     // ---- Device block reference counting via pools ----
+    // A cache-category holder is added with incRef() and released with releaseRef(), which
+    // returns capacity only when the refcount reaches 0.
     void referenceDeviceBlocks(const std::vector<BlockIdxType>& device_blocks) const {
         for (size_t i = 0; i < device_blocks.size() && i < device_pools_.size(); ++i) {
             if (device_pools_[i] && !isNullBlockIdx(device_blocks[i])) {
-                device_pools_[i]->blockCacheReference(device_blocks[i]);
+                device_pools_[i]->incRef(device_blocks[i]);
             }
         }
     }
     void releaseDeviceBlocks(const std::vector<BlockIdxType>& device_blocks) const {
         for (size_t i = 0; i < device_blocks.size() && i < device_pools_.size(); ++i) {
             if (device_pools_[i] && !isNullBlockIdx(device_blocks[i])) {
-                device_pools_[i]->blockCacheFree(device_blocks[i]);
+                device_pools_[i]->releaseRef(device_blocks[i]);
             }
         }
     }
 
 protected:
-    IsBlockEvictableFn             is_block_evictable_;
-    std::vector<BlockPoolPtr>      device_pools_;
-    std::shared_ptr<HostBlockPool> host_pool_;
-    std::shared_ptr<DiskBlockPool> disk_pool_;
+    IsBlockEvictableFn              is_block_evictable_;
+    std::vector<DeviceBlockPoolPtr> device_pools_;
+    std::shared_ptr<HostBlockPool>  host_pool_;
+    std::shared_ptr<DiskBlockPool>  disk_pool_;
 };
 
 using ComponentGroupPtr = std::shared_ptr<ComponentGroup>;

@@ -1,8 +1,11 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/IBlockPool.h"
 
 #include <algorithm>
+#include <memory>
 
 #include "gtest/gtest.h"
+
+#include "rtp_llm/cpp/config/StaticConfig.h"
 
 namespace rtp_llm {
 namespace {
@@ -24,6 +27,13 @@ public:
         return true;
     }
 };
+
+std::shared_ptr<TestPool> makeInitializedPool(size_t physical_block_count) {
+    auto pool = std::make_shared<TestPool>(
+        std::make_shared<TestPoolConfig>("test", physical_block_count, FreeBlockOrderPolicy::ANY_ORDER));
+    pool->init();
+    return pool;
+}
 
 }  // namespace
 
@@ -104,6 +114,51 @@ TEST(IBlockPoolTest, AscendingOrderReturnsSortedBlockIds) {
     auto afterMerge = pool.malloc(2);
     ASSERT_TRUE(afterMerge.has_value());
     EXPECT_EQ(*afterMerge, (BlockIdList{1, 2}));
+}
+
+TEST(IBlockPoolTest, ReleaseRefDoesNotFreeWhileAnotherHolderExists) {
+    auto pool  = makeInitializedPool(/*physical_block_count=*/4);
+    auto block = pool->malloc();
+    ASSERT_TRUE(block.has_value());
+
+    // malloc() only reserves capacity; owners must explicitly take refs.
+    pool->incRef(*block);  // cache holder
+    pool->incRef(*block);  // request holder
+    EXPECT_EQ(pool->refCount(*block), 2u);
+
+    pool->releaseRef(*block);
+    EXPECT_TRUE(pool->isAllocated(*block));
+    EXPECT_EQ(pool->refCount(*block), 1u);
+
+    pool->releaseRef(*block);
+    EXPECT_FALSE(pool->isAllocated(*block));
+}
+
+TEST(IBlockPoolTest, ReleaseRefFreesSingleRequestHolder) {
+    auto pool  = makeInitializedPool(/*physical_block_count=*/4);
+    auto block = pool->malloc();
+    ASSERT_TRUE(block.has_value());
+
+    pool->incRef(*block);  // request holder
+    pool->releaseRef(*block);
+
+    EXPECT_FALSE(pool->isAllocated(*block));
+}
+
+TEST(IBlockPoolTest, ReleaseRefRejectsUnheldAllocatedBlock) {
+    auto pool  = makeInitializedPool(/*physical_block_count=*/4);
+    auto block = pool->malloc();
+    ASSERT_TRUE(block.has_value());
+    EXPECT_EQ(pool->refCount(*block), 0u);
+
+    // RTP_LLM_CHECK aborts unless core-dump-on-exception is disabled; flip it so the
+    // guard is observable as a throw in this test env.
+    const bool old_core_dump                     = StaticConfig::user_ft_core_dump_on_exception;
+    StaticConfig::user_ft_core_dump_on_exception = false;
+    EXPECT_ANY_THROW(pool->releaseRef(*block));
+    StaticConfig::user_ft_core_dump_on_exception = old_core_dump;
+
+    EXPECT_TRUE(pool->isAllocated(*block));
 }
 
 }  // namespace rtp_llm

@@ -11,7 +11,7 @@
 
 namespace rtp_llm {
 
-class BlockPool;
+class DeviceBlockPool;
 class DiskBlockPool;
 class HostBlockPool;
 enum class BlockIOStatus;
@@ -32,7 +32,7 @@ private:
     struct ResolvedComponentLayout {
         int                                  component_index{-1};
         int                                  device_pool_index{-1};
-        BlockPool*                           device_pool{nullptr};
+        DeviceBlockPool*                     device_pool{nullptr};
         std::vector<MemoryBlockLayerTagSlot> layer_slots;
     };
 
@@ -75,7 +75,6 @@ private:
         void*  host_addr{nullptr};
         void*  device_addr{nullptr};
         size_t bytes{0};
-        bool   device_is_cuda{false};
     };
 
     struct HostZeroTile {
@@ -86,7 +85,7 @@ private:
     static bool        isDeviceHostTransfer(Tier source_tier, Tier target_tier);
     static bool        validAllocatedHostBlock(HostBlockPool& host_pool, BlockIdxType host_block);
     static bool        validAllocatedDiskBlock(DiskBlockPool& disk_pool, BlockIdxType disk_block);
-    static bool        validDeviceBlock(BlockPool& device_pool, BlockIdxType device_block);
+    static bool        validDeviceBlock(DeviceBlockPool& device_pool, BlockIdxType device_block);
     static CopyStatus  blockIOStatusToCopyStatus(BlockIOStatus status);
     static const char* blockIOStatusName(BlockIOStatus status);
     static bool        hasAnyLayerSlot(const std::vector<ResolvedComponentLayout>& layouts);

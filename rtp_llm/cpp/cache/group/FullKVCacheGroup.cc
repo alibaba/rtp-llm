@@ -33,11 +33,13 @@ bool FullKVCacheGroup::malloc(BlockIds& block_ids, int seq_len, bool enable_reus
         }
     }
 
-    auto result = block_pool_->malloc(need_blocks_num);
-    if (result.empty()) {
+    auto result = block_pool_->malloc(static_cast<size_t>(need_blocks_num));
+    if (!result.has_value() || result->empty()) {
         return false;
     }
-    block_ids.add(result);
+    // malloc() only reserves capacity at refCount 0; take the request holder ref to hold the blocks.
+    block_pool_->incRef(*result);
+    block_ids.add(*result);
     return true;
 }
 
@@ -67,13 +69,13 @@ void FullKVCacheGroup::free(const BlockIndicesType& block_indices) {
         return;
     }
 
-    block_pool_->requestFree(block_indices);
+    block_pool_->releaseRef(block_indices);
     RTP_LLM_LOG_DEBUG("Freed %zu blocks", block_indices.size());
 }
 
 void FullKVCacheGroup::reference(BlockIds& block_ids, const BlockIndicesType& new_block_indices) {
     block_ids.add(new_block_indices);
-    block_pool_->requestReference(new_block_indices);
+    block_pool_->incRef(new_block_indices);
 }
 
 void FullKVCacheGroup::removeSkippedBlocks(BlockIds& /*block_ids*/, bool /*enable_reuse_cache*/, int /*reserve_step*/) {

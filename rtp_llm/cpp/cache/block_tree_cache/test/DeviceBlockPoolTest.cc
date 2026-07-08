@@ -10,6 +10,7 @@
 // remote_kv_cache_manager dependency that does not link in the CUDA-12 toolchain).
 #include "rtp_llm/cpp/cache/BlockPoolConfigHelper.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
+#include "rtp_llm/cpp/config/StaticConfig.h"
 
 namespace rtp_llm {
 namespace {
@@ -90,6 +91,25 @@ TEST(DeviceBlockPoolTest, PartitionedBlockBuffersCarryBlockIdx) {
     }
 }
 
+TEST(DeviceBlockPoolTest, LifecycleStartsAllocatedBlockWithZeroRefCount) {
+    auto config = makeConfig();
+    DeviceBlockPool pool(config);
+    ASSERT_TRUE(pool.init());
+
+    auto block = pool.malloc();
+    ASSERT_TRUE(block.has_value());
+    EXPECT_TRUE(pool.isAllocated(*block));
+    EXPECT_EQ(pool.refCount(*block), 0u);
+
+    pool.incRef(*block);
+    pool.decRef(*block);
+    EXPECT_EQ(pool.refCount(*block), 0u);
+    EXPECT_TRUE(pool.isAllocated(*block));
+
+    pool.free(*block);
+    EXPECT_FALSE(pool.isAllocated(*block));
+}
+
 TEST(DeviceBlockPoolTest, LifecycleUsesIBlockPoolSemantics) {
     auto      config = makeConfig();
     DeviceBlockPool pool(config);
@@ -107,6 +127,63 @@ TEST(DeviceBlockPoolTest, LifecycleUsesIBlockPoolSemantics) {
 
     pool.free(*block);
     EXPECT_FALSE(pool.isAllocated(*block));
+}
+
+TEST(DeviceBlockPoolTest, ExposesAllocatorFacingLayerTensorsAndDeviceBlockViews) {
+    auto config = makeConfig();
+    DeviceBlockPool pool(config);
+    ASSERT_TRUE(pool.init());
+
+    auto cache_tensors = pool.allLayerCacheBase();
+    ASSERT_FALSE(cache_tensors.empty());
+    EXPECT_TRUE(cache_tensors[0].defined());
+
+    auto block = pool.malloc();
+    ASSERT_TRUE(block.has_value());
+    auto addr = pool.convertIndexToAddr(/*layer_id=*/0, *block);
+    EXPECT_NE(addr.kv_addr, nullptr);
+
+    auto buffers = pool.blockBuffers(/*layer_id=*/0, *block);
+    ASSERT_FALSE(buffers.empty());
+    EXPECT_NE(buffers[0].addr, nullptr);
+    EXPECT_GT(buffers[0].bytes, 0u);
+    EXPECT_EQ(buffers[0].block, *block);
+
+    auto infos = pool.convertIndexToBuffer(/*layer_id=*/0, *block);
+    ASSERT_EQ(infos.size(), buffers.size());
+    EXPECT_EQ(infos[0].addr, buffers[0].addr);
+    EXPECT_EQ(infos[0].size_bytes, buffers[0].bytes);
+    EXPECT_TRUE(infos[0].is_cuda);
+}
+
+TEST(DeviceBlockPoolTest, RejectsPinnedCpuBacking) {
+    auto config                    = makeConfig();
+    config->use_pinned_cpu_backing = true;
+
+    // RTP_LLM_CHECK aborts instead of throwing when core-dump-on-exception is enabled
+    // (the default in this test env); flip it so the rejection is observable as a throw.
+    const bool old_core_dump                     = StaticConfig::user_ft_core_dump_on_exception;
+    StaticConfig::user_ft_core_dump_on_exception = false;
+
+    DeviceBlockPool pool(config);
+    EXPECT_ANY_THROW((void)pool.init());
+
+    StaticConfig::user_ft_core_dump_on_exception = old_core_dump;
+}
+
+TEST(DeviceBlockPoolTest, RegUserMrWithoutCacheStoreIsNoOp) {
+    auto            config = makeConfig();
+    DeviceBlockPool pool(config);
+    ASSERT_TRUE(pool.init());
+
+    // No cache store wired: MR registration must be a no-op, not a crash.
+    pool.regUserMr(/*model_id=*/0, /*cache_store=*/nullptr);
+    EXPECT_EQ(pool.getMrCostTimeMs(), 0);
+
+    // Idempotent / safe to call again and to deregister when nothing was registered.
+    pool.regUserMr(/*model_id=*/0, /*cache_store=*/nullptr);
+    pool.deregUserMr();
+    EXPECT_EQ(pool.getMrCostTimeMs(), 0);
 }
 
 }  // namespace rtp_llm

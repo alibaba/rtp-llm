@@ -2,9 +2,13 @@
 
 #include <thread>
 
+#include "rtp_llm/cpp/cache/BlockPoolConfigHelper.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCache.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/DeviceBlockPool.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/FullComponentGroup.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/copy_engine/CopyEngine.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/host/HostBlockPool.h"
+#include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/model_rpc/BroadcastManager.h"
 
 namespace rtp_llm {
@@ -24,6 +28,66 @@ static std::shared_ptr<HostBlockPool> makeHostPool(size_t payload_bytes, size_t 
     config->enable_pinned           = true;
     config->alignment               = 4096;
     return std::make_shared<HostBlockPool>(config);
+}
+
+// Helper: build an initialized DeviceBlockPool from the lightweight cache-config test
+// helpers. Device pools use ANY_ORDER (DeviceBlockPool::normalizeConfig enforces it).
+static DeviceBlockPoolPtr makeDevicePool() {
+    constexpr int    kLayerNum       = 4;
+    constexpr int    kBlockNum       = 10;
+    constexpr size_t kTokensPerBlock = 1;
+    CacheConfig      cache_config    = test::makeSimpleMhaCacheConfig(kLayerNum,
+                                                             kBlockNum,
+                                                             kTokensPerBlock,
+                                                             TYPE_FP16,
+                                                             /*local_head_num_kv=*/1,
+                                                             /*size_per_head=*/64);
+    BlockPoolConfig  old_cfg         = BlockPoolConfigHelper::createConfig(cache_config);
+
+    auto config                     = std::make_shared<DeviceBlockPoolConfig>();
+    config->pool_type               = BlockPoolType::DEVICE;
+    config->pool_name               = "block_tree_cache_device";
+    config->physical_block_count    = old_cfg.block_num;
+    config->free_block_order_policy = FreeBlockOrderPolicy::ANY_ORDER;
+    config->total_size_bytes        = old_cfg.total_size_bytes;
+    config->memory_layouts          = old_cfg.memory_layouts;
+    config->allocation_type         = AllocationType::DEVICE;
+    config->use_pinned_cpu_backing  = false;
+    config->use_cuda_malloc_backing = false;
+
+    auto pool = std::make_shared<DeviceBlockPool>(config);
+    pool->init();
+    return pool;
+}
+
+// referenceDeviceBlocks() must add exactly one cache-category holder (incRef) and
+// releaseDeviceBlocks() must release it (releaseRef), returning capacity at refcount 0.
+TEST(BlockTreeCacheComponentGroupTest, DevicePoolLifecycleUsesSingleCountRefcount) {
+    auto pool = makeDevicePool();
+    ASSERT_NE(pool, nullptr);
+
+    FullComponentGroup group;
+    group.component_group_id = 0;
+    group.setDevicePools({pool});
+    EXPECT_EQ(group.devicePoolCount(), 1u);
+
+    // malloc reserves capacity only; the block starts at refCount 0. The exact index is not
+    // asserted: ANY_ORDER makes the choice opaque, which is the correct device-pool behavior.
+    auto blocks_opt = pool->malloc(1);
+    ASSERT_TRUE(blocks_opt.has_value());
+    ASSERT_EQ(blocks_opt->size(), 1u);
+    const BlockIdxType block = (*blocks_opt)[0];
+    EXPECT_TRUE(pool->isAllocated(block));
+    EXPECT_EQ(pool->refCount(block), 0u);
+
+    // Cache holder acquired via ComponentGroup -> pool incRef.
+    group.referenceDeviceBlocks({block});
+    EXPECT_EQ(pool->refCount(block), 1u);
+    EXPECT_TRUE(pool->isAllocated(block));
+
+    // Cache holder released via ComponentGroup -> pool releaseRef; at 0 the block is freed.
+    group.releaseDeviceBlocks({block});
+    EXPECT_FALSE(pool->isAllocated(block));
 }
 
 // Helper to build a simple single-group BlockTreeCache for testing.

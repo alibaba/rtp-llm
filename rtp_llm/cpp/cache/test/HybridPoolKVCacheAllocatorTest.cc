@@ -337,34 +337,35 @@ private:
 static BlockIdxType
 seedNonResidentCacheItem(const HybridPoolKVCacheAllocatorPtr& allocator, int gid, CacheKeyType key) {
     auto pool   = allocator->groupBlockPools()[static_cast<size_t>(gid)];
-    auto blocks = pool->malloc(1);
+    auto blocks = pool->malloc(1).value();
     EXPECT_EQ(blocks.size(), 1u);
+    // Replicate the legacy malloc request ref (single-count malloc leaves refCount 0);
+    // the subsequent releaseRef must have a prior holder or it aborts.
+    pool->incRef(blocks);
     auto                      shared_cache = allocator->sharedBlockCache();
     std::vector<BlockIdxType> group_slots(allocator->groupBlockPools().size(), NULL_BLOCK_IDX);
     group_slots[static_cast<size_t>(gid)] = blocks[0];
     shared_cache->put(key, group_slots, false);
-    // SharedBlockCache::put() internally calls pool->blockCacheReference()
-    pool->requestFree(blocks);
+    // SharedBlockCache::put() internally calls pool->incRef() (the cache holder), so after
+    // releasing the request holder the block stays allocated with refCount 1 (cache-held).
+    pool->releaseRef(blocks);
     return blocks[0];
 }
 
+// Single-count DeviceBlockPool exposes only free/total block counts (the legacy per-pool
+// request/connector/blockCache ref-count columns and availableBlocksNum() are gone; the
+// three-way holder split is not recoverable at the pool). Each independent pool still
+// reports its own free/total, which is what these rollback checks rely on.
 struct PoolCounters {
     size_t free_blocks;
-    size_t available_blocks;
-    size_t request_refs;
-    size_t block_cache_refs;
-    size_t connector_refs;
+    size_t total_blocks;
 };
 
 static std::vector<PoolCounters> snapshotPoolCounters(const HybridPoolKVCacheAllocatorPtr& allocator) {
     std::vector<PoolCounters> counters;
     counters.reserve(allocator->groupBlockPools().size());
     for (const auto& pool : allocator->groupBlockPools()) {
-        counters.push_back({pool->freeBlocksNum(),
-                            pool->availableBlocksNum(),
-                            pool->requestRefBlocksNum(),
-                            pool->blockCacheRefBlocksNum(),
-                            pool->connectorRefBlocksNum()});
+        counters.push_back({pool->freeBlocksNum(), pool->totalBlocksNum()});
     }
     return counters;
 }
@@ -375,10 +376,7 @@ static void expectPoolCountersEq(const HybridPoolKVCacheAllocatorPtr& allocator,
     for (size_t gid = 0; gid < expected.size(); ++gid) {
         const auto& pool = allocator->groupBlockPools()[gid];
         EXPECT_EQ(pool->freeBlocksNum(), expected[gid].free_blocks) << "gid=" << gid;
-        EXPECT_EQ(pool->availableBlocksNum(), expected[gid].available_blocks) << "gid=" << gid;
-        EXPECT_EQ(pool->requestRefBlocksNum(), expected[gid].request_refs) << "gid=" << gid;
-        EXPECT_EQ(pool->blockCacheRefBlocksNum(), expected[gid].block_cache_refs) << "gid=" << gid;
-        EXPECT_EQ(pool->connectorRefBlocksNum(), expected[gid].connector_refs) << "gid=" << gid;
+        EXPECT_EQ(pool->totalBlocksNum(), expected[gid].total_blocks) << "gid=" << gid;
     }
 }
 
@@ -493,35 +491,55 @@ TEST_F(HybridPoolKVCacheAllocatorTest, RequestAndConnectorRefAggregateAcrossGrou
     auto pool1 = allocator->groupBlockPools()[1];
 
     const size_t free_total_before = allocator->freeBlocksNum();
-    auto         g0_blocks         = pool0->malloc(2);
-    auto         g1_blocks         = pool1->malloc(3);
+    auto         g0_blocks         = pool0->malloc(2).value();
+    auto         g1_blocks         = pool1->malloc(3).value();
     ASSERT_EQ(g0_blocks.size(), 2u);
     ASSERT_EQ(g1_blocks.size(), 3u);
+    // Single-count malloc reserves capacity only (refCount 0); take one holder per block to
+    // occupy them (replicates the legacy auto request ref).
+    pool0->incRef(g0_blocks);
+    pool1->incRef(g1_blocks);
 
-    EXPECT_EQ(allocator->requestRefBlocksNum(), 5u);
+    EXPECT_EQ(allocator->requestRefBlocksNum(), 0u);
+    EXPECT_EQ(allocator->connectorRefBlocksNum(), 0u);
     EXPECT_EQ(allocator->freeBlocksNum(), free_total_before - 5u);
     EXPECT_EQ(allocator->availableBlocksNum(), free_total_before - 5u);
+    for (auto b : g0_blocks) {
+        EXPECT_EQ(pool0->refCount(b), 1u);
+    }
+    for (auto b : g1_blocks) {
+        EXPECT_EQ(pool1->refCount(b), 1u);
+    }
 
-    // Mark some blocks as connector-referenced (simulating cache transfer).
-    pool0->connectorReference(g0_blocks[0]);
-    pool1->connectorReference(g1_blocks[0]);
-    EXPECT_EQ(allocator->connectorRefBlocksNum(), 2u);
+    // Take a SECOND holder on one block per group (what a connector transfer would do in the
+    // single-count model: another incRef on the same block).
+    pool0->incRef(g0_blocks[0]);
+    pool1->incRef(g1_blocks[0]);
+    EXPECT_EQ(pool0->refCount(g0_blocks[0]), 2u);
+    EXPECT_EQ(pool1->refCount(g1_blocks[0]), 2u);
+    EXPECT_EQ(allocator->connectorRefBlocksNum(), 0u);
 
-    pool0->requestFree(g0_blocks);
-    pool1->requestFree(g1_blocks);
+    // Release the first (request) holder on every block.
+    pool0->releaseRef(g0_blocks);
+    pool1->releaseRef(g1_blocks);
     EXPECT_EQ(allocator->requestRefBlocksNum(), 0u);
 
-    // Connector still holds 2 blocks → freeBlocksNum (set of returnable
-    // ids) drops by 2; notInUseBlocksNum counts blocks not held by *request*
-    // or *block cache* refs, so connector-held blocks still count as "not
-    // in use" → equals the full pool total.
+    // The two doubly-held blocks stay allocated (refCount drops to 1); the rest are freed.
+    EXPECT_TRUE(pool0->isAllocated(g0_blocks[0]));
+    EXPECT_TRUE(pool1->isAllocated(g1_blocks[0]));
+    EXPECT_EQ(pool0->refCount(g0_blocks[0]), 1u);
+    EXPECT_EQ(pool1->refCount(g1_blocks[0]), 1u);
     EXPECT_EQ(allocator->freeBlocksNum(), free_total_before - 2u);
-    EXPECT_EQ(allocator->notInUseBlocksNum(), free_total_before);
+    // notInUseBlocksNum == Σ freeBlocksNum in the single-count model, so held blocks are excluded.
+    EXPECT_EQ(allocator->notInUseBlocksNum(), free_total_before - 2u);
 
-    pool0->connectorFree(g0_blocks[0]);
-    pool1->connectorFree(g1_blocks[0]);
-    EXPECT_EQ(allocator->connectorRefBlocksNum(), 0u);
+    // Release the second holder → blocks are fully freed and availability is restored.
+    pool0->releaseRef(g0_blocks[0]);
+    pool1->releaseRef(g1_blocks[0]);
+    EXPECT_FALSE(pool0->isAllocated(g0_blocks[0]));
+    EXPECT_FALSE(pool1->isAllocated(g1_blocks[0]));
     EXPECT_EQ(allocator->freeBlocksNum(), free_total_before);
+    EXPECT_EQ(allocator->availableBlocksNum(), free_total_before);
     EXPECT_EQ(allocator->notInUseBlocksNum(), free_total_before);
 }
 
@@ -530,11 +548,26 @@ TEST_F(HybridPoolKVCacheAllocatorTest, BlockCacheRefAggregatesAcrossGroups) {
     auto allocator = makeAllocator(config);
     ASSERT_TRUE(allocator->init());
 
-    seedNonResidentCacheItem(allocator, /*gid=*/0, /*key=*/100);
-    seedNonResidentCacheItem(allocator, /*gid=*/1, /*key=*/200);
-    seedNonResidentCacheItem(allocator, /*gid=*/1, /*key=*/201);
+    const size_t available_before = allocator->availableBlocksNum();
+    const size_t free_before      = allocator->freeBlocksNum();
 
-    EXPECT_EQ(allocator->blockCacheRefBlocksNum(), 3u);
+    const auto b0 = seedNonResidentCacheItem(allocator, /*gid=*/0, /*key=*/100);
+    const auto b1 = seedNonResidentCacheItem(allocator, /*gid=*/1, /*key=*/200);
+    const auto b2 = seedNonResidentCacheItem(allocator, /*gid=*/1, /*key=*/201);
+
+    auto pool0 = allocator->groupBlockPools()[0];
+    auto pool1 = allocator->groupBlockPools()[1];
+    // 3 blocks are cache-held across the two groups: each is held only by the cache (refCount 1).
+    EXPECT_EQ(pool0->refCount(b0), 1u);
+    EXPECT_EQ(pool1->refCount(b1), 1u);
+    EXPECT_EQ(pool1->refCount(b2), 1u);
+
+    EXPECT_EQ(allocator->blockCacheRefBlocksNum(), 0u);
+
+    // Cache-only (refCount==1) blocks stay evictable, so they remain available even though
+    // they are no longer free; 3 blocks moved from free to cache-evictable.
+    EXPECT_EQ(allocator->freeBlocksNum(), free_before - 3u);
+    EXPECT_EQ(allocator->availableBlocksNum(), available_before);
 }
 
 // ---------------------------------------------------------------------------
@@ -649,7 +682,11 @@ TEST_F(HybridPoolKVCacheAllocatorTest, PopBlocksFromCacheReturnsEvictedBatchAcro
     auto g0_block_for_100 = seedNonResidentCacheItem(allocator, /*gid=*/0, /*key=*/100);
     auto g1_block_for_100 = seedNonResidentCacheItem(allocator, /*gid=*/1, /*key=*/100);
     auto g1_block_for_200 = seedNonResidentCacheItem(allocator, /*gid=*/1, /*key=*/200);
-    EXPECT_EQ(allocator->blockCacheRefBlocksNum(), 3u);
+    EXPECT_EQ(allocator->blockCacheRefBlocksNum(), 0u);
+    // The 3 seeded blocks are cache-held (refCount 1) across the two group pools.
+    EXPECT_EQ(allocator->groupBlockPools()[0]->refCount(g0_block_for_100), 1u);
+    EXPECT_EQ(allocator->groupBlockPools()[1]->refCount(g1_block_for_100), 1u);
+    EXPECT_EQ(allocator->groupBlockPools()[1]->refCount(g1_block_for_200), 1u);
 
     auto evicted = allocator->popBlocksFromCache(/*min_blocks_to_free=*/3);
     ASSERT_NE(evicted, nullptr);
@@ -708,18 +745,25 @@ TEST_F(HybridPoolKVCacheAllocatorTest, BlockCacheFreeReleasesEvictedBatchAcrossG
     auto allocator = makeAllocator(config);
     ASSERT_TRUE(allocator->init());
 
-    seedNonResidentCacheItem(allocator, /*gid=*/0, /*key=*/100);
-    seedNonResidentCacheItem(allocator, /*gid=*/1, /*key=*/200);
-    EXPECT_EQ(allocator->blockCacheRefBlocksNum(), 2u);
+    const auto b0    = seedNonResidentCacheItem(allocator, /*gid=*/0, /*key=*/100);
+    const auto b1    = seedNonResidentCacheItem(allocator, /*gid=*/1, /*key=*/200);
+    auto       pool0 = allocator->groupBlockPools()[0];
+    auto       pool1 = allocator->groupBlockPools()[1];
+    EXPECT_EQ(allocator->blockCacheRefBlocksNum(), 0u);
+    EXPECT_EQ(pool0->refCount(b0), 1u);
+    EXPECT_EQ(pool1->refCount(b1), 1u);
 
     const size_t free_before = allocator->freeBlocksNum();
     auto         evicted     = allocator->popBlocksFromCache(/*min_blocks_to_free=*/2);
     ASSERT_NE(evicted, nullptr);
-    // Eviction releases the LRU entries from BlockCache; the underlying blocks
-    // are still referenced by blockCacheRef. Releasing those refs is what
-    // blockCacheFree() does.
+    // Eviction removes the LRU entries from BlockCache; the underlying blocks are still held
+    // (refCount 1). Releasing those holders is what blockCacheFree() does.
+    EXPECT_TRUE(pool0->isAllocated(b0));
+    EXPECT_TRUE(pool1->isAllocated(b1));
     allocator->blockCacheFree(evicted);
     EXPECT_EQ(allocator->blockCacheRefBlocksNum(), 0u);
+    EXPECT_FALSE(pool0->isAllocated(b0));
+    EXPECT_FALSE(pool1->isAllocated(b1));
     EXPECT_EQ(allocator->freeBlocksNum(), free_before + 2u);
 }
 
@@ -735,17 +779,23 @@ TEST_F(HybridPoolKVCacheAllocatorTest, BlockCacheFreeIgnoresDuplicateAndNullBloc
     auto allocator = makeAllocator(config);
     ASSERT_TRUE(allocator->init());
 
-    auto seeded = seedNonResidentCacheItem(allocator, /*gid=*/1, /*key=*/300);
-    EXPECT_EQ(allocator->blockCacheRefBlocksNum(), 1u);
+    auto         seeded     = seedNonResidentCacheItem(allocator, /*gid=*/1, /*key=*/300);
+    auto         pool1      = allocator->groupBlockPools()[1];
+    const size_t free_before = allocator->freeBlocksNum();
+    EXPECT_EQ(allocator->blockCacheRefBlocksNum(), 0u);
+    EXPECT_EQ(pool1->refCount(seeded), 1u);
 
     auto batch = std::make_shared<BatchKVCacheResource>();
     batch->resetBatchSize(1);
     batch->initGroups(config.groupNums(), static_cast<int>(config.layer_all_num), config.layerGroupIdsSnapshot());
-    // Same block listed twice in the same group should only be released once;
-    // NULL_BLOCK_IDX entries should be skipped.
+    // Same block listed twice in the same group should only be released once (releaseRef
+    // aborts at refCount 0); NULL_BLOCK_IDX entries should be skipped.
     batch->mutableBlockIds(0, /*gid=*/1).assign(BlockIndicesType{seeded, seeded, NULL_BLOCK_IDX});
     EXPECT_NO_THROW(allocator->blockCacheFree(batch));
     EXPECT_EQ(allocator->blockCacheRefBlocksNum(), 0u);
+    // The single cache holder was released exactly once, freeing the block.
+    EXPECT_FALSE(pool1->isAllocated(seeded));
+    EXPECT_EQ(allocator->freeBlocksNum(), free_before + 1u);
 }
 
 // ---------------------------------------------------------------------------
@@ -886,7 +936,12 @@ TEST_F(HybridPoolKVCacheAllocatorTest, InitMallocRollbackReleasesDeviceReuseRefe
     ASSERT_FALSE(isNullBlockIdx(linear_cached));
     ASSERT_FALSE(isNullBlockIdx(full_cached));
     ASSERT_EQ(allocator->requestRefBlocksNum(), 0u);
-    ASSERT_EQ(allocator->blockCacheRefBlocksNum(), 2u);
+    ASSERT_EQ(allocator->blockCacheRefBlocksNum(), 0u);
+    auto pool0 = allocator->groupBlockPools()[0];
+    auto pool1 = allocator->groupBlockPools()[1];
+    // The 2 device-reuse (cache) blocks are held by the cache (refCount 1).
+    ASSERT_EQ(pool0->refCount(linear_cached), 1u);
+    ASSERT_EQ(pool1->refCount(full_cached), 1u);
 
     const size_t available_before = allocator->availableBlocksNum();
     const auto   counters_before  = snapshotPoolCounters(allocator);
@@ -907,7 +962,12 @@ TEST_F(HybridPoolKVCacheAllocatorTest, InitMallocRollbackReleasesDeviceReuseRefe
     EXPECT_EQ(batch_res->blocksNum(0, /*gid=*/0), 0u);
     EXPECT_EQ(batch_res->blocksNum(0, /*gid=*/1), 0u);
     EXPECT_EQ(allocator->requestRefBlocksNum(), 0u);
-    EXPECT_EQ(allocator->blockCacheRefBlocksNum(), 2u);
+    EXPECT_EQ(allocator->blockCacheRefBlocksNum(), 0u);
+    // Reserve-reject rolls back request refs but keeps the device-reuse (cache) refs: the 2
+    // cached blocks survive (still refCount 1) and availability is unchanged.
+    EXPECT_EQ(pool0->refCount(linear_cached), 1u);
+    EXPECT_EQ(pool1->refCount(full_cached), 1u);
+    EXPECT_EQ(allocator->availableBlocksNum(), available_before);
     expectPoolCountersEq(allocator, counters_before);
 }
 
@@ -1237,8 +1297,11 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4SharedBlockCacheIsUnifiedAcrossGroups
 
     // Inserting a cache item for one group is visible via the shared cache.
     auto pool0  = allocator->groupBlockPools()[0];
-    auto blocks = pool0->malloc(1);
+    auto blocks = pool0->malloc(1).value();
     ASSERT_EQ(blocks.size(), 1u);
+    // Single-count malloc reserves capacity only; take the request holder before put()'s
+    // cache holder, so the later releaseRef has a prior holder.
+    pool0->incRef(blocks);
     std::vector<BlockIdxType> group_slots(allocator->groupBlockPools().size(), NULL_BLOCK_IDX);
     group_slots[0] = blocks[0];
     shared_cache->put(/*cache_key=*/42, group_slots, /*is_resident=*/false);
@@ -1247,8 +1310,26 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4SharedBlockCacheIsUnifiedAcrossGroups
     // The same cache is returned by the allocator accessor.
     EXPECT_EQ(allocator->sharedBlockCache(), shared_cache);
 
-    // Clean up.
-    pool0->requestFree(blocks);
+    // Clean up: release the request holder (the cache holder from put() keeps the block).
+    pool0->releaseRef(blocks);
+}
+
+// Single-count co-hold invariant: a block co-held by a request holder and a cache holder is
+// not freed when the request holder is released; only releasing the last holder frees it.
+TEST_F(HybridPoolKVCacheAllocatorTest, RequestReleaseDoesNotFreeCachedBlock) {
+    auto config    = makeTinyMultiPoolHybridConfig();
+    auto allocator = makeAllocator(config);
+    ASSERT_TRUE(allocator->init());
+    auto pool  = allocator->groupBlockPools()[0];
+    auto block = pool->malloc().value();
+    pool->incRef(block);  // cache holder
+    pool->incRef(block);  // request holder
+    EXPECT_EQ(pool->refCount(block), 2u);
+    pool->releaseRef(block);  // release request holder
+    EXPECT_TRUE(pool->isAllocated(block));
+    EXPECT_EQ(pool->refCount(block), 1u);
+    pool->releaseRef(block);  // release cache holder
+    EXPECT_FALSE(pool->isAllocated(block));
 }
 
 TEST_F(HybridPoolKVCacheAllocatorTest, DSV4CPShardedInsertThenReuseSamePrefix) {

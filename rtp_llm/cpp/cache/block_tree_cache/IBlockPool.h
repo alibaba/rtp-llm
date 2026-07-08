@@ -61,6 +61,12 @@ public:
     void     decRef(const BlockIdList& blocks);
     uint32_t refCount(BlockIdxType block) const;
 
+    // Release one holder: decrement one reference and, only when the refcount reaches 0,
+    // return the block's capacity to the free list. Category releases must use this rather
+    // than free() directly. Requires refcount > 0.
+    void releaseRef(BlockIdxType block);
+    void releaseRef(const BlockIdList& blocks);
+
     bool validBlock(BlockIdxType block) const;
     bool isAllocated(BlockIdxType block) const;
 
@@ -93,6 +99,12 @@ private:
     void         refillAscendingFreeBlocksNoLock();
     BlockIdxType popFreeBlockNoLock();
     void         pushFreeBlockNoLock(BlockIdxType block);
+
+    // Single-block primitives shared by decRef/free/releaseRef (one source of truth for
+    // refcount and metrics). Callers must hold mutex_ and have validated the block is
+    // allocated (and, for decRefOneNoLock, that refcount > 0).
+    void decRefOneNoLock(BlockIdxType block);
+    void freeAllocatedBlockNoLock(BlockIdxType block);
 
 private:
     std::shared_ptr<const BlockPoolConfigBase> config_;

@@ -739,8 +739,13 @@ TEST_F(SingleTypeKVCacheAllocatorTest, IncrKVCacheRefReferencesMatchedBlocksOnly
     ASSERT_NE(block_pool, nullptr);
 
     const size_t total_free_before = allocator_->freeBlocksNum();
-    auto         blocks            = block_pool->malloc(4);
+    auto         blocks_opt        = block_pool->malloc(4);
+    ASSERT_TRUE(blocks_opt.has_value());
+    auto blocks = *blocks_opt;
     ASSERT_EQ(blocks.size(), 4);
+    // Single-count pool: malloc() reserves capacity with refCount 0. Add one ref to replicate
+    // the legacy malloc(int) auto request-ref that requestFree()/releaseRef() later drops.
+    block_pool->incRef(blocks);
     EXPECT_EQ(allocator_->freeBlocksNum(), total_free_before - 4);
 
     KVCacheResource resource;
@@ -756,7 +761,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, IncrKVCacheRefReferencesMatchedBlocksOnly
     // Validate: incrKVCacheRef propagates reuseBlockNum to returned resource.
     EXPECT_EQ(ref_resource->reuseBlockNum(), resource.reuseBlockNum());
 
-    block_pool->requestFree(blocks);
+    block_pool->releaseRef(blocks);
     EXPECT_EQ(allocator_->freeBlocksNum(), total_free_before - 2);  // blocks[1] & blocks[2] are still referenced
     // incrKVCacheRef returns a resource with a custom deleter that calls decrKVCacheRef().
     // Release it to drop ref-counts and unblock the pending frees.
@@ -773,8 +778,12 @@ TEST_F(SingleTypeKVCacheAllocatorTest, IncrKVCacheRefPreservesConnectorDummyTail
     ASSERT_NE(block_pool, nullptr);
 
     const size_t total_free_before = allocator_->freeBlocksNum();
-    auto         blocks            = block_pool->malloc(2);
+    auto         blocks_opt        = block_pool->malloc(2);
+    ASSERT_TRUE(blocks_opt.has_value());
+    auto blocks = *blocks_opt;
     ASSERT_EQ(blocks.size(), 2);
+    // Single-count pool: replicate the legacy malloc(int) auto request-ref.
+    block_pool->incRef(blocks);
 
     KVCacheResource resource;
     resource.initGroups(1, config.layer_all_num, config.layerGroupIdsSnapshot());
@@ -789,7 +798,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, IncrKVCacheRefPreservesConnectorDummyTail
     EXPECT_EQ(ref_resource->cacheKeys(), (CacheKeysType{101, 103, 999}));
     EXPECT_EQ(ref_resource->blocks(0), (BlockIndicesType{blocks[0], blocks[1], NULL_BLOCK_IDX}));
 
-    block_pool->requestFree(blocks);
+    block_pool->releaseRef(blocks);
     EXPECT_EQ(allocator_->freeBlocksNum(), total_free_before - 2);
 
     ref_resource.reset();
@@ -805,8 +814,12 @@ TEST_F(SingleTypeKVCacheAllocatorTest, IncrKVCacheRefEmptyInputNoEffect) {
     ASSERT_NE(block_pool, nullptr);
 
     const size_t total_free_before = allocator_->freeBlocksNum();
-    auto         blocks            = block_pool->malloc(2);
+    auto         blocks_opt        = block_pool->malloc(2);
+    ASSERT_TRUE(blocks_opt.has_value());
+    auto blocks = *blocks_opt;
     ASSERT_EQ(blocks.size(), 2);
+    // Single-count pool: replicate the legacy malloc(int) auto request-ref.
+    block_pool->incRef(blocks);
     EXPECT_EQ(allocator_->freeBlocksNum(), total_free_before - 2);
 
     KVCacheResource resource;
@@ -817,7 +830,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, IncrKVCacheRefEmptyInputNoEffect) {
     auto ref_resource = allocator_->incrKVCacheRef(resource, CacheKeysType{});
     ASSERT_EQ(ref_resource, nullptr);
 
-    block_pool->requestFree(blocks);
+    block_pool->releaseRef(blocks);
     EXPECT_EQ(allocator_->freeBlocksNum(), total_free_before);
 }
 

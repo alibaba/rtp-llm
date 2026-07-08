@@ -46,7 +46,7 @@ public:
     int64_t                 getMrCostTimeMs() const override;
 
     // Per-pool access for diagnostics / per-pool metrics reporting.
-    const std::vector<BlockPoolPtr>& groupBlockPools() const {
+    const std::vector<DeviceBlockPoolPtr>& groupBlockPools() const override {
         return group_block_pools_;
     }
 
@@ -63,8 +63,13 @@ private:
     size_t totalReservableAvailableBlocks() const;
     size_t reserveBlocksForPool(size_t gid, size_t reserve_blocks, size_t total_reservable_available_blocks) const;
 
-    std::vector<BlockPoolPtr> group_block_pools_;
-    RoleType                  role_type_{RoleType::PDFUSION};
+    // available = free + cache-evictable (cache-only, refCount==1). Single-count pools
+    // cannot report this alone (holder type is not distinguishable at the pool), so the
+    // allocator combines pool free blocks with SharedBlockCache's evictable count.
+    size_t perPoolAvailableBlocks(int gid) const;
+
+    std::vector<DeviceBlockPoolPtr> group_block_pools_;
+    RoleType                        role_type_{RoleType::PDFUSION};
 };
 
 using HybridPoolKVCacheAllocatorPtr = std::shared_ptr<HybridPoolKVCacheAllocator>;

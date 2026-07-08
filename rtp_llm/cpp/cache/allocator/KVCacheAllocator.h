@@ -10,7 +10,7 @@
 #include "kmonitor/client/MetricsReporter.h"
 #include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
-#include "rtp_llm/cpp/cache/BlockPool.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/DeviceBlockPool.h"
 #include "rtp_llm/cpp/cache/SharedBlockCache.h"
 #include "rtp_llm/cpp/cache/BufferTypes.h"
 
@@ -81,9 +81,29 @@ public:
     virtual void blockBatchCopy(const BlockIdPair* copy_mapping_begin, const BlockIdPair* copy_mapping_end);
     virtual void blockBatchCopy(const torch::Tensor& copy_mapping);
 
-    BlockPoolPtr getBlockPool() const {
+    DeviceBlockPoolPtr getBlockPool() const {
         return block_pool_;
     }
+
+    // The single allocator-owned device pool; allocators that own multiple independent pools
+    // leave block_pool_ null and expose them via groupBlockPools() instead.
+    virtual DeviceBlockPoolPtr getDeviceBlockPool() const {
+        return block_pool_;
+    }
+
+    virtual const std::vector<DeviceBlockPoolPtr>& groupBlockPools() const {
+        static const std::vector<DeviceBlockPoolPtr> empty;
+        return empty;
+    }
+
+    // Device-copy view of one (layer[, group], block). Fail-fast defaults so mocks and
+    // transfer-facing test doubles stay concrete; device-copy allocators override as needed.
+    virtual std::vector<DeviceBlockBuffer> blockBuffers(int layer_id, int block_id) const;
+    virtual std::vector<DeviceBlockBuffer>
+    blockBuffers(int layer_id, int block_id, int partition_count, int partition_id) const;
+    virtual std::vector<DeviceBlockBuffer> blockBuffers(int layer_id, int group_id, int block_id) const;
+    virtual std::vector<DeviceBlockBuffer>
+    blockBuffers(int layer_id, int group_id, int block_id, int partition_count, int partition_id) const;
 
     SharedBlockCachePtr sharedBlockCache() const {
         return shared_block_cache_;
@@ -149,7 +169,7 @@ protected:
 
     CacheConfig                        config_;
     AllocationType                     allocation_type_;
-    BlockPoolPtr                       block_pool_;
+    DeviceBlockPoolPtr                 block_pool_;
     SharedBlockCachePtr                shared_block_cache_;
     std::shared_ptr<CPSlotMapper>      cp_slot_mapper_;
     const kmonitor::MetricsReporterPtr metrics_reporter_           = nullptr;

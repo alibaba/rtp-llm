@@ -117,16 +117,8 @@ void IBlockPool::free(const BlockIdList& blocks) {
     }
 
     for (const auto block : blocks) {
-        if (refcounts_[block] == 0) {
-            unreferenced_blocks_num_ -= 1;
-        } else {
-            tree_cached_blocks_num_ -= 1;
-        }
-        allocated_[block] = 0;
-        refcounts_[block] = 0;
-        pushFreeBlockNoLock(block);
+        freeAllocatedBlockNoLock(block);
     }
-    used_blocks_num_ -= blocks.size();
 }
 
 void IBlockPool::incRef(BlockIdxType block) {
@@ -186,11 +178,34 @@ void IBlockPool::decRef(const BlockIdList& blocks) {
                                  config_->pool_name.c_str());
     }
     for (const auto block : blocks) {
-        const uint32_t old_rc = refcounts_[block];
-        const uint32_t new_rc = old_rc - 1;
-        refcounts_[block]     = new_rc;
-        adjustRefCountMetricsNoLock(
-            old_rc, new_rc, unreferenced_blocks_num_, tree_cached_blocks_num_, active_tree_cached_blocks_num_);
+        decRefOneNoLock(block);
+    }
+}
+
+void IBlockPool::releaseRef(BlockIdxType block) {
+    releaseRef(BlockIdList{block});
+}
+
+void IBlockPool::releaseRef(const BlockIdList& blocks) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    checkInitializedNoLock();
+    if (blocks.empty()) {
+        return;
+    }
+    checkUniqueBlocksNoLock(blocks);
+    for (const auto block : blocks) {
+        checkAllocatedNoLock(block);
+        RTP_LLM_CHECK_WITH_INFO(refcounts_[block] > 0,
+                                 "cannot releaseRef block [%d] of pool [%s] with refcount 0",
+                                 block,
+                                 config_->pool_name.c_str());
+    }
+    // Only the last holder returns capacity to the free list.
+    for (const auto block : blocks) {
+        decRefOneNoLock(block);
+        if (refcounts_[block] == 0) {
+            freeAllocatedBlockNoLock(block);
+        }
     }
 }
 
@@ -311,6 +326,26 @@ void IBlockPool::pushFreeBlockNoLock(BlockIdxType block) {
     } else {
         free_blocks_.push_back(block);
     }
+}
+
+void IBlockPool::decRefOneNoLock(BlockIdxType block) {
+    const uint32_t old_rc = refcounts_[block];
+    const uint32_t new_rc = old_rc - 1;
+    refcounts_[block]     = new_rc;
+    adjustRefCountMetricsNoLock(
+        old_rc, new_rc, unreferenced_blocks_num_, tree_cached_blocks_num_, active_tree_cached_blocks_num_);
+}
+
+void IBlockPool::freeAllocatedBlockNoLock(BlockIdxType block) {
+    if (refcounts_[block] == 0) {
+        unreferenced_blocks_num_ -= 1;
+    } else {
+        tree_cached_blocks_num_ -= 1;
+    }
+    allocated_[block] = 0;
+    refcounts_[block] = 0;
+    pushFreeBlockNoLock(block);
+    used_blocks_num_ -= 1;
 }
 
 }  // namespace rtp_llm

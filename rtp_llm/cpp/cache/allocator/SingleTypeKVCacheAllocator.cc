@@ -6,6 +6,7 @@
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 #include "rtp_llm/cpp/cache/BlockPoolConfigHelper.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/DeviceBlockPool.h"
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
 
@@ -75,11 +76,23 @@ bool SingleTypeKVCacheAllocator::doInit() {
                                 || spec->type == rtp_llm::KVCacheSpecType::MultiHeadLatentAttention,
                             "SingleTypeKVCacheAllocator only support Full Attention");
 
-    BlockPoolConfig pool_config;
+    BlockPoolConfig pool_config = BlockPoolConfigHelper::createConfig(config_);
 
-    pool_config = BlockPoolConfigHelper::createConfig(config_);
-    block_pool_ = std::make_shared<BlockPool>(
-        pool_config, allocation_type_, /*use_pinned_cpu_backing=*/false, use_cuda_malloc_block_pool_);
+    auto device_config                     = std::make_shared<DeviceBlockPoolConfig>();
+    device_config->pool_type               = BlockPoolType::DEVICE;
+    device_config->pool_name               = pool_config.pool_name;
+    device_config->physical_block_count    = pool_config.block_num;
+    // Device pools use ANY_ORDER (DeviceBlockPool::normalizeConfig enforces it); the physical
+    // block chosen is opaque to attention. Only the disk pool uses ASCENDING_ORDER.
+    device_config->free_block_order_policy = FreeBlockOrderPolicy::ANY_ORDER;
+    device_config->total_size_bytes        = pool_config.total_size_bytes;
+    device_config->memory_layouts          = pool_config.memory_layouts;
+    device_config->allocation_type         = allocation_type_;
+    device_config->use_pinned_cpu_backing  = false;
+    device_config->use_cuda_malloc_backing = use_cuda_malloc_block_pool_;
+
+    std::shared_ptr<const DeviceBlockPoolConfig> const_config = device_config;
+    block_pool_                                               = std::make_shared<DeviceBlockPool>(const_config);
     if (!block_pool_->init()) {
         RTP_LLM_LOG_ERROR("Failed to initialize block pool for SingleTypeKVCacheAllocator");
         return false;
@@ -88,7 +101,7 @@ bool SingleTypeKVCacheAllocator::doInit() {
     SharedBlockCache* shared_cache_raw = shared_block_cache_ ? shared_block_cache_.get() : nullptr;
 
     if (shared_block_cache_) {
-        std::vector<BlockPoolPtr> group_pools = {block_pool_};
+        std::vector<DeviceBlockPoolPtr> group_pools = {block_pool_};
         shared_block_cache_->init(1, group_pools);
     }
 
@@ -407,11 +420,9 @@ std::shared_ptr<KVCacheResource> SingleTypeKVCacheAllocator::incrKVCacheRef(cons
         return nullptr;
     }
 
-    if (is_connector) {
-        block_pool_->connectorReference(referenced_blocks);
-    } else {
-        block_pool_->requestReference(referenced_blocks);
-    }
+    // Single-count pool: request and connector holders share one reference category
+    // (is_connector still distinguishes the release path via the deleter above).
+    block_pool_->incRef(referenced_blocks);
     selected_resource->mutableBlockIds(0).assign(std::move(selected_blocks));
     selected_resource->setCacheKeys(std::move(selected_cache_keys));
     selected_resource->setBlockDependencies(std::move(selected_dependencies));
@@ -430,11 +441,9 @@ void SingleTypeKVCacheAllocator::decrKVCacheRef(const KVCacheResource& kvcache_r
         }
     }
     if (!blocks_to_free.empty()) {
-        if (is_connector) {
-            block_pool_->connectorFree(blocks_to_free);
-        } else {
-            block_pool_->requestFree(blocks_to_free);
-        }
+        // Single-count pool: both request and connector releases decrement one holder.
+        (void)is_connector;
+        block_pool_->releaseRef(blocks_to_free);
     }
 }
 

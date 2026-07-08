@@ -6,6 +6,7 @@
 #include <string>
 
 #include "rtp_llm/cpp/cache/BlockPool.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/DeviceBlockPool.h"
 #include "rtp_llm/cpp/cache/group/SWAKVCacheGroup.h"
 
 namespace rtp_llm {
@@ -63,9 +64,26 @@ BlockPoolConfig makeHostBlockPoolConfig() {
     return config;
 }
 
-BlockPoolPtr createHostBlockPool() {
-    auto block_pool = std::make_shared<BlockPool>(makeHostBlockPoolConfig(), AllocationType::HOST);
-    RTP_LLM_CHECK_WITH_INFO(block_pool->init(), "init host block pool failed");
+// SWAKVCacheGroup only accepts a DeviceBlockPoolPtr, and DeviceBlockPool's init() rejects any
+// allocation_type other than DEVICE. This test exercises only the SWA tail-block placement
+// pattern (which slots are NULL vs REAL) and the free path, both memory-medium-agnostic.
+DeviceBlockPoolPtr createHostBlockPool() {
+    auto pool_config = makeHostBlockPoolConfig();
+
+    auto device_config                     = std::make_shared<DeviceBlockPoolConfig>();
+    device_config->pool_type               = BlockPoolType::DEVICE;
+    device_config->pool_name               = pool_config.pool_name;
+    device_config->physical_block_count    = pool_config.block_num;
+    device_config->free_block_order_policy = FreeBlockOrderPolicy::ANY_ORDER;
+    device_config->total_size_bytes        = pool_config.total_size_bytes;
+    device_config->memory_layouts          = pool_config.memory_layouts;
+    device_config->allocation_type         = AllocationType::DEVICE;
+    device_config->use_pinned_cpu_backing  = false;
+    device_config->use_cuda_malloc_backing = false;
+
+    std::shared_ptr<const DeviceBlockPoolConfig> const_config = device_config;
+    auto block_pool = std::make_shared<DeviceBlockPool>(const_config);
+    RTP_LLM_CHECK_WITH_INFO(block_pool->init(), "init device block pool failed");
     return block_pool;
 }
 

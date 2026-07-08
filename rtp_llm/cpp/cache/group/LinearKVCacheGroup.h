@@ -12,7 +12,7 @@ class LinearKVCacheGroup: public KVCacheGroup {
 public:
     LinearKVCacheGroup(const LayerIdsType&          layer_ids,
                        std::shared_ptr<KVCacheSpec> kvcache_spec,
-                       BlockPoolPtr                 block_pool,
+                       DeviceBlockPoolPtr           block_pool,
                        int                          group_id,
                        int                          linear_step      = 0,
                        SharedBlockCache*            shared_cache     = nullptr,

@@ -924,7 +924,8 @@ TEST_F(KVCacheManagerTest, GetKVCacheInfo_UsesSmallestHybridPoolTokenCapacity) {
                 cache_config.group_seq_size_per_block[gid] :
                 cache_config.seq_size_per_block;
         expected_total_tokens     = std::min(expected_total_tokens, pools[gid]->totalBlocksNum() * seq_size);
-        expected_available_tokens = std::min(expected_available_tokens, pools[gid]->availableBlocksNum() * seq_size);
+        // DeviceBlockPool has no availableBlocksNum(); in unit tests (no eviction) available == free.
+        expected_available_tokens = std::min(expected_available_tokens, pools[gid]->freeBlocksNum() * seq_size);
     }
 
     auto info = kv_cache_manager->getKVCacheInfo(/*latest_version=*/-1, /*need_cache_keys=*/false);

@@ -7,7 +7,7 @@
 #include <cuda_runtime.h>
 #include <torch/torch.h>
 
-#include "rtp_llm/cpp/cache/BlockPool.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/DeviceBlockPool.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/FullComponentGroup.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/copy_engine/CopyEngine.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/host/DiskBlockPool.h"
@@ -40,23 +40,26 @@ static BlockIdxType poolMalloc(IBlockPool& pool) {
     return block.has_value() ? *block : NULL_BLOCK_IDX;
 }
 
-static BlockIdxType poolMalloc(BlockPool& pool) {
-    auto blocks = pool.malloc(1);
-    return blocks.empty() ? NULL_BLOCK_IDX : blocks.front();
-}
-
 struct DeviceLayerBufferSpec {
     size_t kv_bytes{0};
     size_t scale_bytes{0};
 };
 
-static BlockPoolPtr makeDevicePool(const std::vector<DeviceLayerBufferSpec>& specs,
-                                   size_t                                    usable_count,
-                                   const std::string&                         pool_name) {
+// Build a DeviceBlockPool with the given per-layer layout. Device pools use ANY_ORDER
+// (normalizeConfig enforces it).
+static DeviceBlockPoolPtr makeDevicePool(const std::vector<DeviceLayerBufferSpec>& specs,
+                                         size_t                                    usable_count,
+                                         const std::string&                        pool_name) {
     const auto physical_block_count = usable_count + 1;
-    BlockPoolConfig config;
-    config.pool_name = pool_name;
-    config.block_num = static_cast<uint32_t>(physical_block_count);
+
+    auto config                     = std::make_shared<DeviceBlockPoolConfig>();
+    config->pool_type               = BlockPoolType::DEVICE;
+    config->pool_name               = pool_name;
+    config->physical_block_count    = physical_block_count;
+    config->free_block_order_policy = FreeBlockOrderPolicy::ANY_ORDER;
+    config->allocation_type         = AllocationType::DEVICE;
+    config->use_pinned_cpu_backing  = false;
+    config->use_cuda_malloc_backing = false;
 
     size_t offset = 0;
     for (const auto& spec : specs) {
@@ -83,65 +86,65 @@ static BlockPoolPtr makeDevicePool(const std::vector<DeviceLayerBufferSpec>& spe
         layout.local_head_num_kv          = 1;
         layout.seq_size_per_block         = 1;
         layout.kernel_blocks_per_kv_block = 1;
-        config.memory_layouts.push_back(layout);
+        config->memory_layouts.push_back(layout);
     }
-    config.total_size_bytes = offset;
+    config->total_size_bytes = offset;
 
-    auto pool = std::make_shared<BlockPool>(config, AllocationType::DEVICE);
+    auto pool = std::make_shared<DeviceBlockPool>(config);
     RTP_LLM_CHECK(pool->init());
     return pool;
 }
 
-static torch::Tensor makePoolByteTensor(void* addr, size_t bytes, bool is_cuda) {
-    auto device = is_cuda ? torch::Device(torch::kCUDA) : torch::Device(torch::kCPU);
+// DeviceBlockPool backing is always CUDA, so the byte view is unconditionally a CUDA tensor.
+static torch::Tensor makePoolByteTensor(void* addr, size_t bytes) {
     return torch::from_blob(
-        addr, {static_cast<int64_t>(bytes)}, torch::TensorOptions().dtype(torch::kUInt8).device(device));
+        addr, {static_cast<int64_t>(bytes)}, torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA));
 }
 
-static void fillDeviceLayer(const BlockPoolPtr&                     pool,
+static void fillDeviceLayer(const DeviceBlockPoolPtr&                     pool,
                             int                                    layer_id,
                             BlockIdxType                           block,
                             const std::vector<uint8_t>&             patterns) {
-    auto buffers = pool->convertIndexToBuffer(layer_id, block);
+    auto buffers = pool->blockBuffers(layer_id, block);
     ASSERT_EQ(buffers.size(), patterns.size());
     for (size_t i = 0; i < buffers.size(); ++i) {
-        makePoolByteTensor(buffers[i].addr, buffers[i].size_bytes, buffers[i].is_cuda).fill_(patterns[i]);
+        makePoolByteTensor(buffers[i].addr, buffers[i].bytes).fill_(patterns[i]);
     }
     if (pool->where() == MemoryType::MEMORY_GPU) {
         cudaDeviceSynchronize();
     }
 }
 
-static void fillDeviceLayerSequential(const BlockPoolPtr&                     pool,
+static void fillDeviceLayerSequential(const DeviceBlockPoolPtr&                     pool,
                                       int                                    layer_id,
                                       BlockIdxType                           block) {
-    auto buffers = pool->convertIndexToBuffer(layer_id, block);
+    auto buffers = pool->blockBuffers(layer_id, block);
     for (const auto& buffer : buffers) {
-        std::vector<uint8_t> cpu_data(buffer.size_bytes);
-        for (size_t i = 0; i < buffer.size_bytes; ++i) {
+        std::vector<uint8_t> cpu_data(buffer.bytes);
+        for (size_t i = 0; i < buffer.bytes; ++i) {
             cpu_data[i] = static_cast<uint8_t>(i & 0xFF);
         }
         auto cpu_tensor =
-            torch::from_blob(cpu_data.data(), {static_cast<int64_t>(buffer.size_bytes)}, torch::kUInt8).clone();
-        makePoolByteTensor(buffer.addr, buffer.size_bytes, buffer.is_cuda).copy_(cpu_tensor);
+            torch::from_blob(cpu_data.data(), {static_cast<int64_t>(buffer.bytes)}, torch::kUInt8).clone();
+        makePoolByteTensor(buffer.addr, buffer.bytes).copy_(cpu_tensor);
     }
     if (pool->where() == MemoryType::MEMORY_GPU) {
         cudaDeviceSynchronize();
     }
 }
 
-static std::vector<uint8_t> readDeviceLayer(const BlockPoolPtr& pool, int layer_id, BlockIdxType block) {
+static std::vector<uint8_t> readDeviceLayer(const DeviceBlockPoolPtr& pool, int layer_id, BlockIdxType block) {
     if (pool->where() == MemoryType::MEMORY_GPU) {
         cudaDeviceSynchronize();
     }
 
     std::vector<uint8_t> out;
-    auto                 buffers = pool->convertIndexToBuffer(layer_id, block);
+    auto                 buffers = pool->blockBuffers(layer_id, block);
     for (const auto& buffer : buffers) {
-        auto tensor = makePoolByteTensor(buffer.addr, buffer.size_bytes, buffer.is_cuda);
-        auto cpu    = buffer.is_cuda ? tensor.cpu() : tensor;
+        auto  tensor = makePoolByteTensor(buffer.addr, buffer.bytes);
+        auto  cpu    = tensor.cpu();
         auto* ptr    = cpu.data_ptr<uint8_t>();
-        out.insert(out.end(), ptr, ptr + buffer.size_bytes);
+        out.insert(out.end(), ptr, ptr + buffer.bytes);
     }
     return out;
 }
@@ -161,7 +164,7 @@ static Component makeComponent(int component_id,
 
 static ComponentGroupPtr makeGroup(int group_id,
                                    std::vector<int> component_indices,
-                                   std::vector<BlockPoolPtr> device_pools,
+                                   std::vector<DeviceBlockPoolPtr> device_pools,
                                    std::shared_ptr<HostBlockPool> host_pool,
                                    std::shared_ptr<DiskBlockPool> disk_pool = nullptr) {
     auto group                  = std::make_shared<FullComponentGroup>();
@@ -296,7 +299,7 @@ protected:
     size_t                               host_block_size_;
     std::shared_ptr<HostBlockPool>      host_pool_;
     std::shared_ptr<CopyEngine>          copy_engine_;
-    BlockPoolPtr                         device_pool_;
+    DeviceBlockPoolPtr                  device_pool_;
     BlockIdxType                         device_block_;
     std::vector<BlockIdxType>            device_blocks_;
     Component                            component_;
@@ -542,7 +545,7 @@ TEST_F(CopyEngineTest, SubmitHostToDeviceIndependentDescriptors) {
 
     host_pool_->free(host_block_1);
     host_pool_->free(host_block_2);
-    device_pool_->requestFree(second_device_block);
+    device_pool_->free(second_device_block);
 }
 
 TEST_F(CopyEngineTest, SubmitUsesComponentOrdinalForMultipleDevicePools) {
@@ -577,8 +580,8 @@ TEST_F(CopyEngineTest, SubmitUsesComponentOrdinalForMultipleDevicePools) {
     for (size_t i = 64; i < 160; ++i) EXPECT_EQ(host_data[i], 0xB2);
 
     host_pool->free(host_block);
-    pool0->requestFree(block0);
-    pool1->requestFree(block1);
+    pool0->free(block0);
+    pool1->free(block1);
 }
 
 TEST_F(CopyEngineTest, SubmitCopiesAllBuffersReturnedByDeviceBlockPool) {
@@ -686,7 +689,7 @@ protected:
     std::shared_ptr<HostBlockPool>      host_pool_;
     std::shared_ptr<DiskBlockPool>       disk_pool_;
     std::shared_ptr<CopyEngine>          copy_engine_;
-    BlockPoolPtr                         device_pool_;
+    DeviceBlockPoolPtr                  device_pool_;
     BlockIdxType                         device_block_;
     Component                            component_;
     ComponentGroupPtr                    component_group_;
@@ -752,9 +755,9 @@ TEST_F(CopyEngineDiskTest, FullPipeline_D2H_H2Disk_Disk2H_H2D) {
         for (size_t i = 0; i < 256; ++i)
             cpu_data[i] = static_cast<uint8_t>(i * 3 & 0xFF);
         auto cpu_tensor = torch::from_blob(cpu_data.data(), {256}, torch::kUInt8).clone();
-        auto buffers    = device_pool_->convertIndexToBuffer(1, device_block_);
+        auto buffers    = device_pool_->blockBuffers(1, device_block_);
         ASSERT_EQ(buffers.size(), 1u);
-        makePoolByteTensor(buffers[0].addr, buffers[0].size_bytes, buffers[0].is_cuda).copy_(cpu_tensor);
+        makePoolByteTensor(buffers[0].addr, buffers[0].bytes).copy_(cpu_tensor);
         cudaDeviceSynchronize();
     }
 

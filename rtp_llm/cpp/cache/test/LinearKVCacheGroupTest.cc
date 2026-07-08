@@ -27,7 +27,7 @@ static std::shared_ptr<LinearKVCacheSpec> makeLinearSpec(uint32_t seq_size_per_b
 class LinearKVCacheGroupTest: public ::testing::Test {};
 
 TEST_F(LinearKVCacheGroupTest, DefaultPolicyDrivesBehaviorInterfaces) {
-    auto block_pool = createBlockPool();
+    auto block_pool = createDeviceBlockPool();
     ASSERT_TRUE(block_pool->init());
 
     auto               spec = makeLinearSpec(/*seq_size_per_block=*/4);
@@ -44,7 +44,7 @@ TEST_F(LinearKVCacheGroupTest, DefaultPolicyDrivesBehaviorInterfaces) {
 }
 
 TEST_F(LinearKVCacheGroupTest, GetNeedBlocksReuseDisabledCountsLastTwoTailAndReserveStep) {
-    auto block_pool = createBlockPool();
+    auto block_pool = createDeviceBlockPool();
     ASSERT_TRUE(block_pool->init());
 
     auto               spec = makeLinearSpec(/*seq_size_per_block=*/4);
@@ -60,7 +60,7 @@ TEST_F(LinearKVCacheGroupTest, GetNeedBlocksReuseDisabledCountsLastTwoTailAndRes
 }
 
 TEST_F(LinearKVCacheGroupTest, GetNeedBlocksReuseEnabledUsesSparseCountingAndReserveStep) {
-    auto block_pool = createBlockPool();
+    auto block_pool = createDeviceBlockPool();
     ASSERT_TRUE(block_pool->init());
 
     auto               spec = makeLinearSpec(/*seq_size_per_block=*/4);
@@ -76,7 +76,7 @@ TEST_F(LinearKVCacheGroupTest, GetNeedBlocksReuseEnabledUsesSparseCountingAndRes
 }
 
 TEST_F(LinearKVCacheGroupTest, MallocAllocatesStepHitsAndTailWhenReuseEnabled) {
-    auto block_pool = createBlockPool();
+    auto block_pool = createDeviceBlockPool();
     ASSERT_TRUE(block_pool->init());
     ASSERT_EQ(block_pool->freeBlocksNum(), 9u);
 
@@ -98,7 +98,7 @@ TEST_F(LinearKVCacheGroupTest, MallocAllocatesStepHitsAndTailWhenReuseEnabled) {
 }
 
 TEST_F(LinearKVCacheGroupTest, MallocAllocatesLastTwoTailBlocksWhenReuseDisabled) {
-    auto block_pool = createBlockPool();
+    auto block_pool = createDeviceBlockPool();
     ASSERT_TRUE(block_pool->init());
     ASSERT_EQ(block_pool->freeBlocksNum(), 9u);
 
@@ -119,7 +119,7 @@ TEST_F(LinearKVCacheGroupTest, MallocAllocatesLastTwoTailBlocksWhenReuseDisabled
 }
 
 TEST_F(LinearKVCacheGroupTest, MallocAllocatesReserveTailBlocksWhenReuseDisabled) {
-    auto block_pool = createBlockPool();
+    auto block_pool = createDeviceBlockPool();
     ASSERT_TRUE(block_pool->init());
     ASSERT_EQ(block_pool->freeBlocksNum(), 9u);
 
@@ -142,7 +142,7 @@ TEST_F(LinearKVCacheGroupTest, MallocAllocatesReserveTailBlocksWhenReuseDisabled
 }
 
 TEST_F(LinearKVCacheGroupTest, MallocBackfillsExistingNullReadSlot) {
-    auto block_pool = createBlockPool();
+    auto block_pool = createDeviceBlockPool();
     ASSERT_TRUE(block_pool->init());
     ASSERT_EQ(block_pool->freeBlocksNum(), 9u);
 
@@ -150,8 +150,11 @@ TEST_F(LinearKVCacheGroupTest, MallocBackfillsExistingNullReadSlot) {
     LinearKVCacheGroup group(/*layer_ids=*/{}, spec, block_pool, /*group_id=*/0, /*linear_step=*/2);
     ASSERT_TRUE(group.init());
 
-    auto allocated = block_pool->malloc(2);
+    auto allocated = block_pool->malloc(2).value();
     ASSERT_EQ(allocated.size(), 2u);
+    // New pool malloc reserves capacity at refCount 0; take a request ref so these
+    // pre-existing request blocks are held while the group backfills the read slot.
+    block_pool->incRef(allocated);
 
     BlockIds blocks;
     blocks.assign(BlockIndicesType{allocated[0], NULL_BLOCK_IDX, allocated[1]});
@@ -174,7 +177,7 @@ TEST_F(LinearKVCacheGroupTest, MallocMaterializesCausalConvReadSlotAtBoundaries)
 
     for (bool enable_reuse_cache : {false, true}) {
         for (int seq_len : seq_lens) {
-            auto block_pool = createBlockPool();
+            auto block_pool = createDeviceBlockPool();
             ASSERT_TRUE(block_pool->init());
 
             auto               spec = makeLinearSpec(/*seq_size_per_block=*/4);
@@ -196,7 +199,7 @@ TEST_F(LinearKVCacheGroupTest, MallocMaterializesCausalConvReadSlotAtBoundaries)
 TEST_F(LinearKVCacheGroupTest, GetNeedBlocksMatchesMallocForReserveSteps) {
     for (bool enable_reuse_cache : {false, true}) {
         for (int reserve_step : {0, 1, 2, 3}) {
-            auto block_pool = createBlockPool();
+            auto block_pool = createDeviceBlockPool();
             ASSERT_TRUE(block_pool->init());
 
             auto               spec = makeLinearSpec(/*seq_size_per_block=*/4);
@@ -226,7 +229,7 @@ TEST_F(LinearKVCacheGroupTest, GetNeedBlocksMatchesMallocForReserveSteps) {
 }
 
 TEST_F(LinearKVCacheGroupTest, RemoveSkippedBlocksFreesNonStepBlocksButKeepsLastTwo) {
-    auto block_pool = createBlockPool();
+    auto block_pool = createDeviceBlockPool();
     ASSERT_TRUE(block_pool->init());
     ASSERT_EQ(block_pool->freeBlocksNum(), 9u);
 
@@ -235,8 +238,11 @@ TEST_F(LinearKVCacheGroupTest, RemoveSkippedBlocksFreesNonStepBlocksButKeepsLast
     ASSERT_TRUE(group.init());
 
     // Start with 6 allocated blocks (no NULLs) to test the pruning logic.
-    auto allocated = block_pool->malloc(6);
+    auto allocated = block_pool->malloc(6).value();
     ASSERT_EQ(allocated.size(), 6u);
+    // Hold a request ref on each block; removeSkippedBlocks() releases pruned blocks via
+    // releaseRef(), which requires refCount > 0 (new pool malloc leaves them at 0).
+    block_pool->incRef(allocated);
     BlockIds blocks;
     blocks.assign(allocated);
 
@@ -257,15 +263,15 @@ TEST_F(LinearKVCacheGroupTest, RemoveSkippedBlocksFreesNonStepBlocksButKeepsLast
 }
 
 TEST_F(LinearKVCacheGroupTest, PutIntoCacheSkipsNullBlocks) {
-    auto block_pool = createBlockPool();
+    auto block_pool = createDeviceBlockPool();
     ASSERT_TRUE(block_pool->init());
 
     auto                      shared_cache = std::make_shared<SharedBlockCache>();
-    std::vector<BlockPoolPtr> group_pools(4, block_pool);
+    std::vector<DeviceBlockPoolPtr> group_pools(4, block_pool);
     shared_cache->init(4, group_pools);
 
-    auto block1 = block_pool->malloc(1)[0];
-    auto block2 = block_pool->malloc(1)[0];
+    auto block1 = block_pool->malloc(1).value()[0];
+    auto block2 = block_pool->malloc(1).value()[0];
 
     // Only put entries with non-NULL blocks (simulating allocator-level filtering)
     std::vector<BlockIdxType> slots1(4, NULL_BLOCK_IDX);
@@ -283,11 +289,11 @@ TEST_F(LinearKVCacheGroupTest, PutIntoCacheSkipsNullBlocks) {
 }
 
 TEST_F(LinearKVCacheGroupTest, MatchSingleKeyReturnsMatchedBlockOrEmpty) {
-    auto block_pool = createBlockPool();
+    auto block_pool = createDeviceBlockPool();
     ASSERT_TRUE(block_pool->init());
 
     auto                      shared_cache = std::make_shared<SharedBlockCache>();
-    std::vector<BlockPoolPtr> group_pools(8, block_pool);
+    std::vector<DeviceBlockPoolPtr> group_pools(8, block_pool);
     shared_cache->init(8, group_pools);
 
     auto               spec = makeLinearSpec(/*seq_size_per_block=*/4);
@@ -295,7 +301,7 @@ TEST_F(LinearKVCacheGroupTest, MatchSingleKeyReturnsMatchedBlockOrEmpty) {
     ASSERT_TRUE(group.init());
 
     // Allocate a block, then put it into cache for group_id=7.
-    auto blocks = block_pool->malloc(1);
+    auto blocks = block_pool->malloc(1).value();
     ASSERT_EQ(blocks.size(), 1u);
 
     std::vector<BlockIdxType> group_slots(8, NULL_BLOCK_IDX);
@@ -311,7 +317,7 @@ TEST_F(LinearKVCacheGroupTest, MatchSingleKeyReturnsMatchedBlockOrEmpty) {
 }
 
 TEST_F(LinearKVCacheGroupTest, MallocNoNewBlocksReturnsTrueAndKeepsState) {
-    auto block_pool = createBlockPool();
+    auto block_pool = createDeviceBlockPool();
     ASSERT_TRUE(block_pool->init());
     ASSERT_EQ(block_pool->freeBlocksNum(), 9u);
 
@@ -331,12 +337,14 @@ TEST_F(LinearKVCacheGroupTest, MallocNoNewBlocksReturnsTrueAndKeepsState) {
 }
 
 TEST_F(LinearKVCacheGroupTest, MallocFailsWhenBlockPoolExhausted) {
-    auto block_pool = createBlockPool();
+    auto block_pool = createDeviceBlockPool();
     ASSERT_TRUE(block_pool->init());
     ASSERT_EQ(block_pool->freeBlocksNum(), 9u);
 
     // Exhaust all free blocks (block 0 is reserved).
-    auto all_blocks = block_pool->malloc(static_cast<int>(block_pool->freeBlocksNum()));
+    auto all_blocks = block_pool->malloc(block_pool->freeBlocksNum()).value();
+    // Hold a request ref so the cleanup releaseRef() below has a holder to drop.
+    block_pool->incRef(all_blocks);
     ASSERT_EQ(block_pool->freeBlocksNum(), 0u);
 
     auto               spec = makeLinearSpec(/*seq_size_per_block=*/4);
@@ -347,16 +355,16 @@ TEST_F(LinearKVCacheGroupTest, MallocFailsWhenBlockPoolExhausted) {
     EXPECT_FALSE(group.malloc(blocks, /*seq_len=*/4, /*enable_reuse_cache=*/false));
 
     // Cleanup to avoid leaking refs in the test process.
-    block_pool->requestFree(all_blocks);
+    block_pool->releaseRef(all_blocks);
 }
 
 TEST_F(LinearKVCacheGroupTest, MallocEnsuresFreeBlocksByEvictingCache) {
-    auto block_pool = createBlockPool();
+    auto block_pool = createDeviceBlockPool();
     ASSERT_TRUE(block_pool->init());
     ASSERT_EQ(block_pool->freeBlocksNum(), 9u);
 
     auto                      shared_cache = std::make_shared<SharedBlockCache>();
-    std::vector<BlockPoolPtr> group_pools  = {block_pool};
+    std::vector<DeviceBlockPoolPtr> group_pools  = {block_pool};
     shared_cache->init(1, group_pools);
 
     auto               spec = makeLinearSpec(/*seq_size_per_block=*/4);
@@ -364,14 +372,20 @@ TEST_F(LinearKVCacheGroupTest, MallocEnsuresFreeBlocksByEvictingCache) {
     ASSERT_TRUE(group.init());
 
     // Put one block into cache (non-resident) and release request reference so it becomes evictable.
-    auto cached = block_pool->malloc(1);
+    auto cached = block_pool->malloc(1).value();
     ASSERT_EQ(cached.size(), 1u);
+    // Take a request ref (new pool malloc leaves refCount 0). put() adds the cache ref
+    // (refCount 2); releasing the request ref drops it back to 1 so the block is held
+    // only by the cache and becomes evictable (eviction candidate requires refCount == 1).
+    block_pool->incRef(cached);
     std::vector<BlockIdxType> slots = {cached[0]};
     shared_cache->put(123, slots, /*is_resident=*/false);
-    block_pool->requestFree(cached);
+    block_pool->releaseRef(cached);
 
     // Exhaust the remaining free blocks so malloc must evict from cache to proceed.
-    auto occupied = block_pool->malloc(static_cast<int>(block_pool->freeBlocksNum()));
+    auto occupied = block_pool->malloc(block_pool->freeBlocksNum()).value();
+    // Hold a request ref so the cleanup releaseRef() below has a holder to drop.
+    block_pool->incRef(occupied);
     ASSERT_EQ(block_pool->freeBlocksNum(), 0u);
 
     BlockIds blocks;
@@ -381,11 +395,11 @@ TEST_F(LinearKVCacheGroupTest, MallocEnsuresFreeBlocksByEvictingCache) {
 
     // Cleanup to avoid leaking refs in the test process.
     group.free(blocks.blocks());
-    block_pool->requestFree(occupied);
+    block_pool->releaseRef(occupied);
 }
 
 TEST_F(LinearKVCacheGroupTest, RemoveSkippedBlocksWithReserveStepKeepsLastTwoAndReserveTail) {
-    auto block_pool = createBlockPool();
+    auto block_pool = createDeviceBlockPool();
     ASSERT_TRUE(block_pool->init());
     ASSERT_EQ(block_pool->freeBlocksNum(), 9u);
 
@@ -393,8 +407,11 @@ TEST_F(LinearKVCacheGroupTest, RemoveSkippedBlocksWithReserveStepKeepsLastTwoAnd
     LinearKVCacheGroup group(/*layer_ids=*/{}, spec, block_pool, /*group_id=*/0, /*linear_step=*/2);
     ASSERT_TRUE(group.init());
 
-    auto allocated = block_pool->malloc(6);
+    auto allocated = block_pool->malloc(6).value();
     ASSERT_EQ(allocated.size(), 6u);
+    // Hold a request ref on each block; removeSkippedBlocks() releases pruned blocks via
+    // releaseRef(), which requires refCount > 0 (new pool malloc leaves them at 0).
+    block_pool->incRef(allocated);
     BlockIds blocks;
     blocks.assign(allocated);  // no NULLs
 
@@ -414,7 +431,7 @@ TEST_F(LinearKVCacheGroupTest, RemoveSkippedBlocksWithReserveStepKeepsLastTwoAnd
 }
 
 TEST_F(LinearKVCacheGroupTest, FreeIgnoresEmptyOrAllNullBlocks) {
-    auto block_pool = createBlockPool();
+    auto block_pool = createDeviceBlockPool();
     ASSERT_TRUE(block_pool->init());
 
     auto               spec = makeLinearSpec(/*seq_size_per_block=*/4);
@@ -430,7 +447,7 @@ TEST_F(LinearKVCacheGroupTest, FreeIgnoresEmptyOrAllNullBlocks) {
 }
 
 TEST_F(LinearKVCacheGroupTest, ReferenceAppendsAndIncrementsRefCountForValidBlocks) {
-    auto block_pool = createBlockPool();
+    auto block_pool = createDeviceBlockPool();
     ASSERT_TRUE(block_pool->init());
     ASSERT_EQ(block_pool->freeBlocksNum(), 9u);
 
@@ -438,8 +455,10 @@ TEST_F(LinearKVCacheGroupTest, ReferenceAppendsAndIncrementsRefCountForValidBloc
     LinearKVCacheGroup group(/*layer_ids=*/{}, spec, block_pool, /*group_id=*/0, /*linear_step=*/2);
     ASSERT_TRUE(group.init());
 
-    auto blocks = block_pool->malloc(1);
+    auto blocks = block_pool->malloc(1).value();
     ASSERT_EQ(blocks.size(), 1u);
+    // New pool malloc reserves capacity at refCount 0; take the request ref (refCount 1).
+    block_pool->incRef(blocks);
     ASSERT_EQ(block_pool->freeBlocksNum(), 8u);
 
     BlockIds         dst;
@@ -450,11 +469,14 @@ TEST_F(LinearKVCacheGroupTest, ReferenceAppendsAndIncrementsRefCountForValidBloc
     EXPECT_TRUE(isNullBlockIdx(dst.blocks()[0]));
     EXPECT_EQ(dst.blocks()[1], blocks[0]);
 
-    // Because reference() adds an extra requestReference, it should take two requestFree calls to become free again.
+    // Block is now request-held (refCount 1) and reference() added an extra ref (refCount 2),
+    // so it should take two releaseRef calls to become free again.
     const size_t free_before = block_pool->freeBlocksNum();
-    block_pool->requestFree(blocks[0]);
+    ASSERT_EQ(block_pool->refCount(blocks[0]), 2u);
+    block_pool->releaseRef(blocks[0]);
+    EXPECT_EQ(block_pool->refCount(blocks[0]), 1u);
     EXPECT_EQ(block_pool->freeBlocksNum(), free_before);  // still referenced
-    block_pool->requestFree(blocks[0]);
+    block_pool->releaseRef(blocks[0]);
     EXPECT_EQ(block_pool->freeBlocksNum(), free_before + 1);
 }
 
