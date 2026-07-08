@@ -316,7 +316,7 @@ class GenerateConfigTest(TestCase):
         self.assertEqual(generate_config.in_think_mode, True)
         self.assertEqual(generate_config.end_think_token_ids, [102])
 
-    def test_thinking_budget_default_and_invalid_values(self):
+    def test_thinking_budget_default_and_non_positive_values(self):
         self.assertEqual(GenerateConfig().max_thinking_tokens, 131072)
         self.assertEqual(GenerateConfig().max_completion_tokens, 0)
 
@@ -326,8 +326,7 @@ class GenerateConfigTest(TestCase):
                 max_thinking_tokens=max_thinking_tokens,
                 end_think_token_ids=[102],
             )
-            with self.assertRaises(Exception):
-                generate_config.validate()
+            generate_config.validate()
 
     def test_thinking_requires_completion_budget_greater_than_thinking_budget(self):
         GenerateConfig(
@@ -489,7 +488,7 @@ class OpenaiGenerateConfigTest(TestCase):
 
         return openai_endpoint._extract_generation_config(request)
 
-    def test_extra_configs_max_thinking_tokens_zero_is_invalid(self):
+    def test_extra_configs_max_thinking_tokens_zero_is_allowed(self):
         generate_env_config = GenerateEnvConfig()
         generate_env_config.think_mode = 1
         generate_env_config.think_end_token_id = 102
@@ -503,8 +502,7 @@ class OpenaiGenerateConfigTest(TestCase):
         config = self._extract_openai_generation_config(request, generate_env_config)
 
         self.assertEqual(config.max_thinking_tokens, 0)
-        with self.assertRaises(Exception):
-            config.validate()
+        config.validate()
 
     def test_renderer_chat_constraints_are_applied_to_generate_config(self):
         class Renderer:
@@ -629,7 +627,7 @@ class OpenaiGenerateConfigTest(TestCase):
         self.assertEqual(config.max_thinking_tokens, 131072)
         self.assertTrue(config.in_think_mode)
 
-    def test_openai_negative_thinking_budget_is_invalid(self):
+    def test_openai_negative_thinking_budget_is_allowed(self):
         generate_env_config = GenerateEnvConfig()
         generate_env_config.think_mode = 1
         generate_env_config.think_end_token_id = 102
@@ -642,8 +640,7 @@ class OpenaiGenerateConfigTest(TestCase):
         config = self._extract_openai_generation_config(request, generate_env_config)
 
         self.assertEqual(config.max_thinking_tokens, -1)
-        with self.assertRaises(Exception):
-            config.validate()
+        config.validate()
 
     def test_request_level_thinking_adds_think_end_tokens_when_env_mode_off(self):
         generate_env_config = GenerateEnvConfig()

@@ -696,19 +696,17 @@ class DashScGrpcRequestTest(TestCase):
         sp = parse_sampling_params(req)
         self.assertEqual(sp.max_new_think_tokens, 0)
         self.assertEqual(sp.to_generate_config().max_thinking_tokens, 0)
-        with self.assertRaises(Exception):
-            sp.to_generate_config().validate()
+        sp.to_generate_config().validate()
 
     def test_parse_sampling_max_think_length_priority_and_negative(self) -> None:
         req = predict_v2_pb2.ModelInferRequest()
         _add_tensor(req, "max_new_think_tokens", "INT32", [1], struct.pack("<i", 0))
         _add_tensor(req, "max_think_length", "INT32", [1], struct.pack("<i", -1))
         sp = parse_sampling_params(req)
-        # raw value stored; validation rejects it before enqueue.
+        # raw value stored; non-positive values disable the backend thinking budget.
         self.assertEqual(sp.max_new_think_tokens, -1)
         self.assertEqual(sp.to_generate_config().max_thinking_tokens, -1)
-        with self.assertRaises(Exception):
-            sp.to_generate_config().validate()
+        sp.to_generate_config().validate()
 
     def test_build_request_writes_thinking_controls(self) -> None:
         req = build_model_infer_request(

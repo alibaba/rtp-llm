@@ -284,6 +284,39 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(_gen_ids(chunks[0]), [7, 8, 9])
         self.assertEqual(_finish_reason(chunks[0]), 1)
 
+    async def test_thinking_budget_finish_does_not_use_content_length_reason(
+        self,
+    ) -> None:
+        req = self._minimal_request()
+        out = GenerateOutput(
+            output_ids=torch.tensor([10, 11, 12, 13, 14], dtype=torch.int32),
+            finished=True,
+            aux_info=AuxInfo(input_len=2, reuse_len=0),
+        )
+        visitor = _FakeVisitor(
+            _FakeAsyncStream([GenerateOutputs(generate_outputs=[out])])
+        )
+        tok = _dsv4_tokenizer()
+        env_cfg = _GenerateEnvCfg()
+
+        chunks = await _drain(
+            iter_real_model_stream_infer(
+                req,
+                [1, 2, 128821],
+                SamplingParams(max_new_tokens=3, max_completion_tokens=20),
+                OtherParams(enable_thinking=True, max_new_think_tokens=5),
+                visitor,
+                rtp_llm_request_id=1,
+                tokenizer=tok,
+                generate_env_config=env_cfg,
+                think_runtime=build_think_runtime(tok, env_cfg, "deepseek_v4"),
+            )
+        )
+
+        self.assertEqual(len(chunks), 1)
+        self.assertEqual(_gen_ids(chunks[0]), [10, 11, 12, 13, 14])
+        self.assertEqual(_finish_reason(chunks[0]), 0)
+
     async def test_empty_list_yields_error_response(self) -> None:
         req = self._minimal_request()
         visitor = _FakeVisitor(_FakeAsyncStream([]))
@@ -372,7 +405,7 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(chunks), 1)
         self.assertIn("backend down", chunks[0].error_message)
 
-    async def test_no_thinking_budget_zero_rejected_before_enqueue(
+    async def test_no_thinking_budget_zero_passes_before_enqueue(
         self,
     ) -> None:
         req = self._minimal_request()
@@ -402,9 +435,10 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
 
         chunks = await _drain(servicer.ModelStreamInfer(_areq_iter([req]), MagicMock()))
 
-        self.assertEqual(visitor.enqueue_called, 0)
-        self.assertEqual(len(chunks), 1)
-        _assert_parameter_error_response(self, chunks[0], "max_new_think_tokens")
+        self.assertEqual(visitor.enqueue_called, 1)
+        self.assertEqual(
+            visitor.last_generate_input.generate_config.max_thinking_tokens, 0
+        )
 
     async def test_max_think_length_wins_final_config_over_max_new_think_tokens(
         self,

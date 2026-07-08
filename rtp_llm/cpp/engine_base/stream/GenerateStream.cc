@@ -710,7 +710,7 @@ size_t GenerateStream::maxTokenNum() const {
     int64_t think_output_budget = 0;
     if (config->max_completion_tokens > 0) {
         output_token_budget = config->max_completion_tokens;
-    } else if (config->in_think_mode) {
+    } else if (config->in_think_mode && config->max_thinking_tokens > 0) {
         think_output_budget = config->max_thinking_tokens + config->end_think_token_ids.size();
         for (const auto& processor : logits_processor_list_) {
             auto think_processor = std::dynamic_pointer_cast<ThinkModeLogitsProcessor>(processor);

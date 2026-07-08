@@ -346,8 +346,7 @@ class GenerateConfig(BaseModel):
                 f"max_completion_tokens {self.max_completion_tokens} is wrong data type",
             )
             check_with_info(
-                is_positive_integer(self.max_thinking_tokens)
-                and self.max_thinking_tokens > 0,
+                isinstance(self.max_thinking_tokens, int),
                 f"max_thinking_tokens {self.max_thinking_tokens} is wrong data type",
             )
             check_with_info(
@@ -410,15 +409,16 @@ class GenerateConfig(BaseModel):
                 is_list_positive_integer(self.begin_think_token_ids),
                 f"begin_think_token_ids {self.begin_think_token_ids} is wrong data type",
             )
-            if self.in_think_mode:
+            if self.in_think_mode and self.max_thinking_tokens > 0:
                 check_with_info(
                     self.max_completion_tokens == 0
-                    or self.max_completion_tokens > self.max_thinking_tokens,
+                    and self.max_completion_tokens > self.max_thinking_tokens,
                     "max_completion_tokens must be greater than max_thinking_tokens "
                     f"when thinking is enabled, got max_completion_tokens "
                     f"{self.max_completion_tokens}, max_thinking_tokens "
                     f"{self.max_thinking_tokens}",
                 )
+            if self.in_think_mode:
                 check_with_info(
                     is_list_positive_integer(self.end_think_token_ids),
                     f"end_think_token_ids {self.end_think_token_ids} is wrong data type",

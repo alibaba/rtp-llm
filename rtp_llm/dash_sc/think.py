@@ -123,8 +123,6 @@ def plan_dash_sc_thinking(
         return DashScThinkPlan.disabled(ids, "think_config_disabled")
     if enable_thinking is False:
         return DashScThinkPlan.disabled(ids, "enable_thinking_false")
-    if isinstance(max_new_think_tokens, int) and max_new_think_tokens <= 0:
-        raise ValueError("max_new_think_tokens must be greater than 0")
 
     bos_tokens = list(think_config.bos_tokens)
     empty_tokens = list(think_config.empty_tokens)

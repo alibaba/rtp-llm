@@ -453,11 +453,6 @@ def _invalid_positive_token_param_message(
     request_max_think = sampling.max_new_think_tokens
     if request_max_think is None:
         request_max_think = other.max_new_think_tokens
-    if request_max_think is not None and int(request_max_think) <= 0:
-        return (
-            f"invalid max_new_think_tokens: {request_max_think}; "
-            "must be greater than 0"
-        )
     thinking_enabled = other.enable_thinking is True or (
         other.enable_thinking is not False and request_max_think is not None
     )
@@ -468,7 +463,8 @@ def _invalid_positive_token_param_message(
             else int(request_max_think)
         )
         if (
-            int(sampling.max_completion_tokens) > 0
+            max_think > 0
+            and int(sampling.max_completion_tokens) > 0
             and int(sampling.max_completion_tokens) <= max_think
         ):
             return (
@@ -795,10 +791,16 @@ async def iter_real_model_stream_infer(
                 break
             cumulative_sent_ids.extend(ids_for_accounting)
             finish_reason_override = None
-            if (
-                out_py.finished
-                and max_new_tokens > 0
-                and len(cumulative_sent_ids) >= max_new_tokens
+            if out_py.finished and (
+                (
+                    max_completion_tokens > 0
+                    and len(cumulative_sent_ids) >= max_completion_tokens
+                )
+                or (
+                    not getattr(generate_config, "in_think_mode", False)
+                    and max_new_tokens > 0
+                    and len(cumulative_sent_ids) >= max_new_tokens
+                )
             ):
                 finish_reason_override = FINISH_REASON_LENGTH
             response = build_stream_response_from_generate_outputs(
