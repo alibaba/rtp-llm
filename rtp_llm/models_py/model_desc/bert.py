@@ -19,7 +19,9 @@ from rtp_llm.models_py.modules import (
 )
 from rtp_llm.models_py.modules.factory.attention.block_mask import (
     build_bert_uqi_flashinfer_mask,
+    build_bert_uqi_two_pass_schedule,
     derive_bert_uqi_segment_ids,
+    derive_bert_uqi_segment_ids_hostlen,
 )
 from rtp_llm.ops import HWKernelConfig, ParallelismConfig
 from rtp_llm.ops.compute_ops import (
@@ -143,6 +145,12 @@ class BertModel(GptModelBase):
         self.cls_uqi_token_id = int(
             os.environ.get("VISION_BERT_CLS_UQI_TOKEN_ID", "2")
         )
+        # 两趟 native attention (无 custom_mask, 免同步 plan, 常驻 wrapper)。
+        # 默认开; =0 回退旧 dense-mask 路径 (A/B 对比用)。
+        self.use_uqi_two_pass = (
+            os.environ.get("VISION_BERT_UQI_TWO_PASS", "1") == "1"
+        )
+        self._uqi_two_pass_op = None  # 常驻 op(双 wrapper), 首请求惰性创建
 
     def prepare_fmha_impl(
         self, inputs: PyModelInputs, is_cuda_graph: bool = False
@@ -151,6 +159,8 @@ class BertModel(GptModelBase):
         if self.use_user_profile_mask and not is_cuda_graph:
             attn_inputs = inputs.attention_inputs
             if attn_inputs.is_prefill:
+                if self.use_uqi_two_pass:
+                    return self._prepare_uqi_two_pass_impl(inputs, attn_inputs)
                 # 段标记与 mask 全在 GPU 上向量化构建(无全量 input_ids D2H / mask H2D
                 # 往返)。P1: 去掉原 `bool(uqi_segment_ids.any())` 那次 per-request
                 # GPU->CPU 标量同步 —— 无 B 段时 mask 全可见 = no-op, 结果不变;
@@ -182,6 +192,31 @@ class BertModel(GptModelBase):
                 )
         return super().prepare_fmha_impl(inputs, is_cuda_graph)
 
+    def _prepare_uqi_two_pass_impl(
+        self, inputs: PyModelInputs, attn_inputs: Any
+    ) -> Any:
+        """两趟 native attention: 无 custom_mask (保 FA3), plan 吃 host indptr
+        (免同步), wrapper 常驻复用。唯一 D2H = schedule 里 [N] int 的 b_lens。"""
+        from rtp_llm.models_py.modules.factory.attention.cuda_impl.bert_uqi_two_pass import (
+            BertUqiTwoPassAttnOp,
+            BertUqiTwoPassImpl,
+        )
+
+        batch_size = attn_inputs.input_lengths.size(0)
+        cu_host = attn_inputs.cu_seqlens_host[: batch_size + 1]
+        cu_dev = attn_inputs.cu_seqlens[: batch_size + 1]
+        input_ids = inputs.input_ids[: int(cu_host[-1])]
+        seg_ids = derive_bert_uqi_segment_ids_hostlen(
+            input_ids, cu_dev, cu_host, self.cls_uqi_token_id
+        )
+        schedule = build_bert_uqi_two_pass_schedule(seg_ids, cu_dev, cu_host)
+        if self._uqi_two_pass_op is None:
+            attn_configs = self.config.getAttentionConfigs(
+                self.parallelism_config.get_attn_tp_size()
+            )
+            self._uqi_two_pass_op = BertUqiTwoPassAttnOp(attn_configs)
+        return BertUqiTwoPassImpl(self._uqi_two_pass_op, attn_inputs, schedule)
+
     def forward(
         self, inputs: PyModelInputs, fmha_impl: FMHAImplBase = None
     ) -> PyModelOutputs:
@@ -209,10 +244,18 @@ class BertModel(GptModelBase):
 
         if fmha_impl is None:
             fmha_impl = self.prepare_fmha_impl(inputs)
+        # 两趟 attention 需要每条序列重排为 [A...|B...] (层栈前 permute 一次,
+        # 层栈后逆 permute 回原布局; 位置信息已在 embedding 阶段加完, attention
+        # 对 token 顺序等变, 数学上恒等)。uqi_perm=None => 恒等, 零开销。
+        uqi_perm = getattr(fmha_impl, "uqi_perm", None)
+        if uqi_perm is not None:
+            hidden_states = hidden_states.index_select(0, uqi_perm)
         for i, decoder_layer in enumerate(self.layers[: self.layer_num]):
             hidden_states = decoder_layer(
                 hidden_states,
                 fmha_impl,
                 kv_cache=self.kv_cache.get_layer_cache(i) if self.kv_cache else None,
             )
+        if uqi_perm is not None:
+            hidden_states = hidden_states.index_select(0, fmha_impl.uqi_inv_perm)
         return PyModelOutputs(hidden_states, fmha_impl.fmha_params)
