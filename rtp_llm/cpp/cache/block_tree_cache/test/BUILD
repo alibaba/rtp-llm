@@ -79,6 +79,7 @@ cc_test(
     copts = test_copts,
     deps = test_deps,
     env = {},
+    exec_properties = {"gpu": "H20"},
 )
 
 pool_test_copts = [

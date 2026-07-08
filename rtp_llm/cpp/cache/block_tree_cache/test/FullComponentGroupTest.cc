@@ -180,10 +180,9 @@ TEST_F(FullComponentGroupTest, BuildTransferD2H) {
     EXPECT_EQ(desc.source_tier, Tier::DEVICE);
     EXPECT_EQ(desc.target_tier, Tier::HOST);
     EXPECT_EQ(desc.component_group_id, 0);
-    ASSERT_EQ(desc.entries.size(), 1u);
-    EXPECT_EQ(desc.entries[0].node, node);
-    ASSERT_EQ(desc.entries[0].device_blocks.size(), 1u);
-    EXPECT_EQ(desc.entries[0].device_blocks[0], 42);
+    EXPECT_EQ(desc.node, node);
+    ASSERT_EQ(desc.device_blocks.size(), 1u);
+    EXPECT_EQ(desc.device_blocks[0], 42);
 
     delete node;
 }

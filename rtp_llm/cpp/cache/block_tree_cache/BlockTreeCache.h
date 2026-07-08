@@ -16,8 +16,8 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/LinearComponentGroup.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/SWAComponentGroup.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/StorageBackend.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/TransferDescriptor.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/copy_engine/CopyEngine.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/copy_engine/TransferTypes.h"
 
 namespace rtp_llm {
 
@@ -99,7 +99,7 @@ struct BlockTreeCacheConfig {
 
 // BlockTreeCache: eviction workflow coordinator.
 // Owns BlockTree, ComponentGroups, BlockPool-HOST (L2), DiskBlockPool (L3),
-// CopyEngine (stateless data-movement utility), StorageBackend, thread pool.
+// CopyEngine (schema-aware data-movement utility), StorageBackend, thread pool.
 // Each storage tier (Device/Host/Disk/Remote) can be independently enabled/disabled.
 class BlockTreeCache {
 public:
@@ -141,17 +141,6 @@ public:
     }
     void setEnableLoadBack(bool enable) { config_.enable_load_back = enable; }
 
-    // Phase 4: DeviceBufferResolver injection for real D2H copy.
-    // When set, performEvictionCopy uses this resolver instead of placeholder.
-    // Typical implementation wraps DeviceBlockPool::blockBuffers:
-    //   auto resolver = [&pool](int layer_id, BlockIdxType block_idx) -> BlockInfo {
-    //       auto bufs = pool->convertIndexToBuffer(layer_id, block_idx);
-    //       return bufs.empty() ? BlockInfo{} : bufs[0];
-    //   };
-    void setDeviceBufferResolver(DeviceBufferResolver resolver) {
-        device_buffer_resolver_ = std::move(resolver);
-    }
-
     // Device block allocator for load_back (allocates GPU blocks to receive H2D data).
     using DeviceBlockAllocator = std::function<std::vector<BlockIdxType>(int component_group_id, size_t count)>;
     void setDeviceBlockAllocator(DeviceBlockAllocator fn) {
@@ -192,7 +181,7 @@ private:
     void             cascadeEviction(TreeNode* node, int source_group_id, Tier tier,
                                      bool cascade_with_copy);
     // Executes a tier-to-tier copy for the given group. Returns true on success.
-    bool             executeTierCopy(int component_group_id, Tier source_tier, Tier target_tier,
+    bool             executeTierCopy(TreeNode* node, int component_group_id, Tier source_tier, Tier target_tier,
                                      const std::vector<BlockIdxType>& source_blocks,
                                      BlockIdxType target_block);
     // Releases blocks back to the appropriate pool for the given group and tier.
@@ -216,6 +205,7 @@ private:
     void             allocateTargetBlock(EvictionResult& er);
     void             submitEviction(EvictionResult& er);
     Tier             nextLowerTier(Tier tier) const;
+    TransferDescriptor buildEvictionTransferDesc(const EvictionResult& er) const;
 
     // Per-group pool access helpers
     std::shared_ptr<HostBlockPool> hostPoolForGroup(int component_group_id) const;
@@ -244,7 +234,6 @@ private:
 
     // Runtime-injected collaborators
     DeviceBlockAllocator device_block_allocator_;
-    DeviceBufferResolver device_buffer_resolver_;
 
     std::atomic<int>        pending_tasks_{0};
     std::mutex              wait_mutex_;

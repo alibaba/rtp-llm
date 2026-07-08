@@ -2,54 +2,59 @@
 
 #include <condition_variable>
 #include <cstring>
+#include <mutex>
 #include <utility>
 
 #include <torch/torch.h>
 
-#include "rtp_llm/cpp/utils/AssertUtils.h"
+#include "rtp_llm/cpp/cache/BlockPool.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/host/DiskBlockPool.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/host/HostBlockPool.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/models_py/bindings/NoBlockCopy.h"
 
 namespace rtp_llm {
 
-namespace {
+CopyEngine::CopyEngine(const std::vector<ComponentGroupPtr>& component_groups,
+                       const std::vector<Component>&         components):
+    components_(components) {
+    component_groups_.reserve(component_groups.size());
+    for (const auto& group : component_groups) {
+        component_groups_.push_back(group);
+    }
+}
 
-CopyResult makeCopyResult(uint64_t request_id,
-                          CopyStatusCode status,
-                          size_t completed_entries,
-                          size_t failed_entries,
-                          std::string error_message = "") {
+CopyResult CopyEngine::makeCopyResult(uint64_t request_id,
+                                      CopyStatus status,
+                                      size_t completed_entries,
+                                      size_t failed_entries) {
     CopyResult result;
-    result.request_id      = request_id;
-    result.status          = status;
+    result.request_id        = request_id;
+    result.status            = status;
     result.completed_entries = completed_entries;
     result.failed_entries    = failed_entries;
-    result.error_message   = std::move(error_message);
     return result;
 }
 
-bool isDeviceHostTransfer(Tier source_tier, Tier target_tier) {
+bool CopyEngine::isDeviceHostTransfer(Tier source_tier, Tier target_tier) {
     return (source_tier == Tier::DEVICE && target_tier == Tier::HOST)
            || (source_tier == Tier::HOST && target_tier == Tier::DEVICE);
 }
 
-bool hasValidHostBlock(const TransferEntry& entry) {
-    return !isNullBlockIdx(entry.host_block);
-}
-
-bool hasValidDiskBlock(const TransferEntry& entry) {
-    return !isNullBlockIdx(entry.disk_block);
-}
-
-bool validAllocatedHostBlock(HostBlockPool& host_pool, BlockIdxType host_block) {
+bool CopyEngine::validAllocatedHostBlock(HostBlockPool& host_pool, BlockIdxType host_block) {
     return !isNullBlockIdx(host_block) && host_block > 0 && host_pool.isAllocated(host_block);
 }
 
-bool validAllocatedDiskBlock(DiskBlockPool& disk_pool, BlockIdxType disk_block) {
+bool CopyEngine::validAllocatedDiskBlock(DiskBlockPool& disk_pool, BlockIdxType disk_block) {
     return !isNullBlockIdx(disk_block) && disk_block > 0 && disk_pool.isAllocated(disk_block);
 }
 
-const char* blockIOStatusName(BlockIOStatus status) {
+bool CopyEngine::validDeviceBlock(BlockPool& device_pool, BlockIdxType device_block) {
+    return !isNullBlockIdx(device_block) && device_block > 0
+           && static_cast<size_t>(device_block) <= device_pool.totalBlocksNum();
+}
+
+const char* CopyEngine::blockIOStatusName(BlockIOStatus status) {
     switch (status) {
         case BlockIOStatus::OK:
             return "OK";
@@ -67,7 +72,177 @@ const char* blockIOStatusName(BlockIOStatus status) {
     return "UNKNOWN";
 }
 
-}  // namespace
+CopyStatus CopyEngine::blockIOStatusToCopyStatus(BlockIOStatus status) {
+    switch (status) {
+        case BlockIOStatus::OK:
+            return CopyStatus::OK;
+        case BlockIOStatus::INVALID_BLOCK:
+        case BlockIOStatus::INVALID_SIZE:
+        case BlockIOStatus::ALIGNMENT_ERROR:
+            return CopyStatus::INVALID_ARGS;
+        case BlockIOStatus::IO_ERROR:
+            return CopyStatus::DISK_IO_ERROR;
+        case BlockIOStatus::PARTIAL_FAILURE:
+            return CopyStatus::PARTIAL_FAILURE;
+    }
+    return CopyStatus::DISK_IO_ERROR;
+}
+
+bool CopyEngine::hasAnyLayerSlot(const std::vector<ResolvedComponentLayout>& layouts) {
+    for (const auto& layout : layouts) {
+        if (!layout.layer_slots.empty()) {
+            return true;
+        }
+    }
+    return false;
+}
+
+size_t CopyEngine::computeLayoutsBlockSize(const std::vector<ResolvedComponentLayout>& layouts) {
+    size_t total = 0;
+    for (const auto& layout : layouts) {
+        for (const auto& slot : layout.layer_slots) {
+            total += slot.stride_bytes;
+        }
+    }
+    return total;
+}
+
+void CopyEngine::executeDeviceHostCopyTiles(const std::vector<DeviceHostCopyTile>& tiles, bool device_to_host) {
+    std::vector<torch::Tensor> dst_buffers;
+    std::vector<torch::Tensor> src_buffers;
+    auto                       cpu_device = torch::Device(torch::kCPU);
+    auto                       gpu_device = torch::Device(torch::kCUDA);
+    auto                       byte_tensor = [](void* addr, size_t bytes, torch::Device device) {
+        return torch::from_blob(
+            addr, {static_cast<int64_t>(bytes)}, torch::TensorOptions().dtype(torch::kUInt8).device(device));
+    };
+
+    for (const auto& tile : tiles) {
+        if (tile.bytes == 0) {
+            continue;
+        }
+        if (!tile.device_is_cuda) {
+            if (device_to_host) {
+                std::memcpy(tile.host_addr, tile.device_addr, tile.bytes);
+            } else {
+                std::memcpy(tile.device_addr, tile.host_addr, tile.bytes);
+            }
+            continue;
+        }
+
+        if (device_to_host) {
+            dst_buffers.push_back(byte_tensor(tile.host_addr, tile.bytes, cpu_device));
+            src_buffers.push_back(byte_tensor(tile.device_addr, tile.bytes, gpu_device));
+        } else {
+            dst_buffers.push_back(byte_tensor(tile.device_addr, tile.bytes, gpu_device));
+            src_buffers.push_back(byte_tensor(tile.host_addr, tile.bytes, cpu_device));
+        }
+    }
+
+    if (!dst_buffers.empty()) {
+        MultiCopyParams mc{dst_buffers, src_buffers};
+        execNoBlockCopy(mc);
+    }
+}
+
+CopyStatus CopyEngine::resolveGroupPools(int component_group_id, ResolvedGroupLayout* out) const {
+    if (!out) {
+        RTP_LLM_LOG_WARNING("CopyEngine::resolveGroupPools: null output layout");
+        return CopyStatus::INVALID_ARGS;
+    }
+    *out = ResolvedGroupLayout{};
+
+    if (component_group_id < 0 || static_cast<size_t>(component_group_id) >= component_groups_.size()) {
+        RTP_LLM_LOG_WARNING("CopyEngine::resolveGroupPools: invalid component_group_id=%d", component_group_id);
+        return CopyStatus::INVALID_ARGS;
+    }
+
+    const auto& group = component_groups_[static_cast<size_t>(component_group_id)];
+    if (!group) {
+        RTP_LLM_LOG_WARNING("CopyEngine::resolveGroupPools: null component group %d", component_group_id);
+        return CopyStatus::INVALID_ARGS;
+    }
+    if (group->component_group_id != component_group_id) {
+        RTP_LLM_LOG_WARNING("CopyEngine::resolveGroupPools: group id mismatch vector_index=%d group_id=%d",
+                            component_group_id,
+                            group->component_group_id);
+        return CopyStatus::INVALID_ARGS;
+    }
+
+    out->component_group_id = component_group_id;
+    out->host_pool          = group->hostPool().get();
+    out->disk_pool          = group->diskPool().get();
+    return CopyStatus::OK;
+}
+
+CopyStatus CopyEngine::resolveGroupLayout(int component_group_id, ResolvedGroupLayout* out) const {
+    auto status = resolveGroupPools(component_group_id, out);
+    if (status != CopyStatus::OK) {
+        return status;
+    }
+
+    const auto& group = component_groups_[static_cast<size_t>(component_group_id)];
+    const auto& pools = group->devicePools();
+    out->components.reserve(group->component_indices.size());
+
+    for (int component_index : group->component_indices) {
+        if (component_index < 0 || static_cast<size_t>(component_index) >= components_.size()) {
+            RTP_LLM_LOG_WARNING("CopyEngine::resolveGroupLayout: invalid component_index=%d group=%d",
+                                component_index,
+                                component_group_id);
+            return CopyStatus::INVALID_ARGS;
+        }
+
+        const auto& component = components_[static_cast<size_t>(component_index)];
+        if (component.component_group_id != component_group_id) {
+            RTP_LLM_LOG_WARNING("CopyEngine::resolveGroupLayout: component[%d] belongs to group %d, expected %d",
+                                component_index,
+                                component.component_group_id,
+                                component_group_id);
+            return CopyStatus::INVALID_ARGS;
+        }
+        if (component.device_pool_index < 0 || static_cast<size_t>(component.device_pool_index) >= pools.size()) {
+            RTP_LLM_LOG_WARNING("CopyEngine::resolveGroupLayout: invalid device_pool_index=%d component=%d group=%d",
+                                component.device_pool_index,
+                                component_index,
+                                component_group_id);
+            return CopyStatus::INVALID_ARGS;
+        }
+        const auto& pool = pools[static_cast<size_t>(component.device_pool_index)];
+        if (!pool) {
+            RTP_LLM_LOG_WARNING("CopyEngine::resolveGroupLayout: null device pool %d component=%d group=%d",
+                                component.device_pool_index,
+                                component_index,
+                                component_group_id);
+            return CopyStatus::INVALID_ARGS;
+        }
+
+        ResolvedComponentLayout layout;
+        layout.component_index    = component_index;
+        layout.device_pool_index  = component.device_pool_index;
+        layout.device_pool        = pool.get();
+        layout.layer_slots        = component.memory_block_layer_tag_slots;
+        out->components.push_back(std::move(layout));
+    }
+
+    return CopyStatus::OK;
+}
+
+CopyStatus CopyEngine::validateDeviceHostLayout(const ResolvedGroupLayout& layout) const {
+    if (!layout.host_pool) {
+        RTP_LLM_LOG_WARNING("CopyEngine::validateDeviceHostLayout: missing host_pool group=%d",
+                            layout.component_group_id);
+        return CopyStatus::INVALID_ARGS;
+    }
+    if (layout.components.empty() || !hasAnyLayerSlot(layout.components)) {
+        RTP_LLM_LOG_WARNING("CopyEngine::validateDeviceHostLayout: missing components group=%d",
+                            layout.component_group_id);
+        return CopyStatus::INVALID_ARGS;
+    }
+    return CopyStatus::OK;
+}
+
+// ---- TransferHandle ----
 
 struct TransferHandle::State {
     explicit State(uint64_t id): request_id(id) {
@@ -77,7 +252,7 @@ struct TransferHandle::State {
     uint64_t request_id{0};
     bool     done{false};
 
-    CopyResult                         result;
+    CopyResult                          result;
     std::vector<CopyCompletionCallback> callbacks;
 
     mutable std::mutex      mutex;
@@ -111,7 +286,10 @@ bool TransferHandle::done() const {
 CopyResult TransferHandle::result() const {
     auto state = state_;
     if (!state) {
-        return makeCopyResult(0, CopyStatusCode::INVALID_DESCRIPTOR, 0, 0, "invalid transfer handle");
+        RTP_LLM_LOG_WARNING("TransferHandle::result: invalid transfer handle");
+        CopyResult result;
+        result.status = CopyStatus::INVALID_ARGS;
+        return result;
     }
 
     wait();
@@ -142,52 +320,15 @@ void TransferHandle::onComplete(CopyCompletionCallback callback) const {
     }
 }
 
-CopyEngine::CopyEngine(CopyEngineTransferResources resources): resources_(std::move(resources)) {}
+// ---- CopyEngine: submit / execute ----
 
-TransferHandle CopyEngine::submit(const TransferDescriptor& desc, TransferSubmitOptions options) {
+TransferHandle CopyEngine::submit(const TransferDescriptor& desc) {
     const uint64_t request_id = next_request_id_.fetch_add(1);
     auto           state      = std::make_shared<TransferHandle::State>(request_id);
 
-    auto result = executeTransfer(desc, options, request_id);
+    auto result = execute(desc, request_id);
     completeRequest(state, std::move(result));
     return TransferHandle(std::move(state));
-}
-
-void CopyEngine::setTransferResources(CopyEngineTransferResources resources) {
-    std::lock_guard<std::mutex> lock(resources_mutex_);
-    resources_ = std::move(resources);
-}
-
-std::vector<MemoryBlockLayerTagSlot> CopyEngine::resolveLayerSlots(int component_group_id) const {
-    std::function<std::vector<MemoryBlockLayerTagSlot>(int)> resolver;
-    {
-        std::lock_guard<std::mutex> lock(resources_mutex_);
-        resolver = resources_.layer_slots_resolver;
-    }
-    return resolver ? resolver(component_group_id) : std::vector<MemoryBlockLayerTagSlot>{};
-}
-
-std::shared_ptr<HostBlockPool> CopyEngine::resolveHostPool(int component_group_id) const {
-    std::function<std::shared_ptr<HostBlockPool>(int)> resolver;
-    {
-        std::lock_guard<std::mutex> lock(resources_mutex_);
-        resolver = resources_.host_pool_resolver;
-    }
-    return resolver ? resolver(component_group_id) : nullptr;
-}
-
-std::shared_ptr<DiskBlockPool> CopyEngine::resolveDiskPool(int component_group_id) const {
-    std::function<std::shared_ptr<DiskBlockPool>(int)> resolver;
-    {
-        std::lock_guard<std::mutex> lock(resources_mutex_);
-        resolver = resources_.disk_pool_resolver;
-    }
-    return resolver ? resolver(component_group_id) : nullptr;
-}
-
-DeviceBufferResolver CopyEngine::resolveDeviceBufferResolver() const {
-    std::lock_guard<std::mutex> lock(resources_mutex_);
-    return resources_.device_buffer_resolver;
 }
 
 void CopyEngine::completeRequest(const std::shared_ptr<TransferHandle::State>& state, CopyResult result) {
@@ -208,168 +349,120 @@ void CopyEngine::completeRequest(const std::shared_ptr<TransferHandle::State>& s
     }
 }
 
-CopyResult CopyEngine::executeTransfer(const TransferDescriptor& desc,
-                                       const TransferSubmitOptions& options,
-                                       uint64_t request_id) {
+CopyResult CopyEngine::execute(const TransferDescriptor& desc, uint64_t request_id) {
     if (desc.component_group_id < 0) {
-        return makeCopyResult(request_id, CopyStatusCode::INVALID_DESCRIPTOR, 0, 0, "missing component_group_id");
+        RTP_LLM_LOG_WARNING("CopyEngine::execute: missing component_group_id");
+        return makeCopyResult(request_id, CopyStatus::INVALID_ARGS, 0, 0);
     }
-
     if (desc.source_tier == Tier::NONE || desc.target_tier == Tier::NONE || desc.source_tier == desc.target_tier) {
-        return makeCopyResult(request_id, CopyStatusCode::INVALID_DESCRIPTOR, 0, 0, "invalid transfer tier pair");
+        RTP_LLM_LOG_WARNING("CopyEngine::execute: invalid transfer tier pair source=%s target=%s",
+                            tierName(desc.source_tier),
+                            tierName(desc.target_tier));
+        return makeCopyResult(request_id, CopyStatus::INVALID_ARGS, 0, 0);
     }
 
-    const size_t entry_count = desc.entries.size();
-    if (entry_count == 0) {
-        return makeCopyResult(request_id, CopyStatusCode::SIZE_MISMATCH, 0, 0, "transfer descriptor has no entries");
-    }
-
+    ResolvedGroupLayout layout;
     if (isDeviceHostTransfer(desc.source_tier, desc.target_tier)) {
-        auto slots     = resolveLayerSlots(desc.component_group_id);
-        auto resolver  = resolveDeviceBufferResolver();
-        auto host_pool = resolveHostPool(desc.component_group_id);
-        if (slots.empty() || !resolver || !host_pool) {
-            return makeCopyResult(
-                request_id, CopyStatusCode::INVALID_DESCRIPTOR, 0, 0, "missing device-host transfer resources");
+        auto validation = resolveGroupLayout(desc.component_group_id, &layout);
+        if (validation != CopyStatus::OK) {
+            return makeCopyResult(request_id, validation, 0, 1);
         }
+        validation = validateDeviceHostLayout(layout);
+        if (validation != CopyStatus::OK) {
+            return makeCopyResult(request_id, validation, 0, 1);
+        }
+    } else if (desc.source_tier == Tier::HOST && desc.target_tier == Tier::DISK) {
+        auto validation = resolveGroupPools(desc.component_group_id, &layout);
+        if (validation != CopyStatus::OK) {
+            return makeCopyResult(request_id, validation, 0, 1);
+        }
+        if (!layout.host_pool) {
+            RTP_LLM_LOG_WARNING("CopyEngine::execute: missing host_pool for host-disk transfer");
+            return makeCopyResult(request_id, CopyStatus::INVALID_ARGS, 0, 1);
+        }
+        if (!layout.disk_pool) {
+            RTP_LLM_LOG_WARNING("CopyEngine::execute: missing disk_pool for host-disk transfer");
+            return makeCopyResult(request_id, CopyStatus::INVALID_ARGS, 0, 1);
+        }
+    } else if (desc.source_tier == Tier::DISK && desc.target_tier == Tier::HOST) {
+        auto validation = resolveGroupPools(desc.component_group_id, &layout);
+        if (validation != CopyStatus::OK) {
+            return makeCopyResult(request_id, validation, 0, 1);
+        }
+        if (!layout.host_pool) {
+            RTP_LLM_LOG_WARNING("CopyEngine::execute: missing host_pool for disk-host transfer");
+            return makeCopyResult(request_id, CopyStatus::INVALID_ARGS, 0, 1);
+        }
+        if (!layout.disk_pool) {
+            RTP_LLM_LOG_WARNING("CopyEngine::execute: missing disk_pool for disk-host transfer");
+            return makeCopyResult(request_id, CopyStatus::INVALID_ARGS, 0, 1);
+        }
+    } else {
+        RTP_LLM_LOG_WARNING("CopyEngine::execute: unsupported transfer tier pair source=%s target=%s",
+                            tierName(desc.source_tier),
+                            tierName(desc.target_tier));
+        return makeCopyResult(request_id, CopyStatus::INVALID_ARGS, 0, 1);
+    }
 
-        if (desc.source_tier == Tier::DEVICE) {
-            size_t completed_entries = 0;
-            for (size_t entry_id = 0; entry_id < entry_count; ++entry_id) {
-                const auto& entry = desc.entries[entry_id];
-                if (!hasValidHostBlock(entry)) {
-                    const size_t failed_entries = entry_count - completed_entries;
-                    return makeCopyResult(request_id,
-                                          CopyStatusCode::INVALID_BLOCK,
-                                          completed_entries,
-                                          failed_entries,
-                                          "D2H descriptor has invalid host target block");
-                }
-                if (!deviceToHost(entry.device_blocks, entry.host_block, slots, resolver, *host_pool)) {
-                    const size_t failed_entries = entry_count - completed_entries;
-                    return makeCopyResult(request_id,
-                                          completed_entries > 0 && options.require_all_or_none ?
-                                              CopyStatusCode::PARTIAL_FAILURE :
-                                              CopyStatusCode::DEVICE_IO_ERROR,
-                                          completed_entries,
-                                          failed_entries,
-                                          "D2H copy failed");
-                }
-                ++completed_entries;
-            }
-            return makeCopyResult(request_id, CopyStatusCode::OK, completed_entries, 0);
+    if (desc.source_tier == Tier::DEVICE && desc.target_tier == Tier::HOST) {
+        if (isNullBlockIdx(desc.host_block)) {
+            RTP_LLM_LOG_WARNING("CopyEngine::execute: D2H descriptor has invalid host target block");
+            return makeCopyResult(request_id, CopyStatus::INVALID_ARGS, 0, 1);
         }
+        if (desc.device_blocks.size() != layout.components.size()) {
+            RTP_LLM_LOG_WARNING("CopyEngine::execute: D2H device_blocks(%zu) does not match components(%zu)",
+                                desc.device_blocks.size(),
+                                layout.components.size());
+            return makeCopyResult(request_id, CopyStatus::INVALID_ARGS, 0, 1);
+        }
+        auto status = deviceToHost(desc.device_blocks, desc.host_block, layout);
+        return status == CopyStatus::OK ? makeCopyResult(request_id, CopyStatus::OK, 1, 0) :
+                                          makeCopyResult(request_id, status, 0, 1);
+    }
 
-        size_t completed_entries = 0;
-        for (size_t entry_id = 0; entry_id < entry_count; ++entry_id) {
-            const auto& entry = desc.entries[entry_id];
-            if (!hasValidHostBlock(entry) || entry.device_blocks.empty()) {
-                const size_t failed_entries = entry_count - completed_entries;
-                return makeCopyResult(request_id,
-                                      CopyStatusCode::INVALID_BLOCK,
-                                      completed_entries,
-                                      failed_entries,
-                                      "H2D descriptor has invalid source or target block");
-            }
-            if (entry.device_blocks.size() != slots.size()) {
-                const size_t failed_entries = entry_count - completed_entries;
-                return makeCopyResult(request_id,
-                                      CopyStatusCode::SIZE_MISMATCH,
-                                      completed_entries,
-                                      failed_entries,
-                                      "H2D target block count mismatch");
-            }
-            if (!hostToDevice(entry.host_block, entry.device_blocks, slots, resolver, *host_pool)) {
-                const size_t failed_entries = entry_count - completed_entries;
-                return makeCopyResult(request_id,
-                                      completed_entries > 0 && options.require_all_or_none ?
-                                          CopyStatusCode::PARTIAL_FAILURE :
-                                          CopyStatusCode::DEVICE_IO_ERROR,
-                                      completed_entries,
-                                      failed_entries,
-                                      "H2D copy failed");
-            }
-            ++completed_entries;
+    if (desc.source_tier == Tier::HOST && desc.target_tier == Tier::DEVICE) {
+        if (isNullBlockIdx(desc.host_block) || desc.device_blocks.empty()) {
+            RTP_LLM_LOG_WARNING("CopyEngine::execute: H2D descriptor has invalid source or target block");
+            return makeCopyResult(request_id, CopyStatus::INVALID_ARGS, 0, 1);
         }
-        return makeCopyResult(request_id, CopyStatusCode::OK, completed_entries, 0);
+        if (desc.device_blocks.size() != layout.components.size()) {
+            RTP_LLM_LOG_WARNING("CopyEngine::execute: H2D device_blocks(%zu) does not match components(%zu)",
+                                desc.device_blocks.size(),
+                                layout.components.size());
+            return makeCopyResult(request_id, CopyStatus::INVALID_ARGS, 0, 1);
+        }
+        auto status = hostToDevice(desc.host_block, desc.device_blocks, layout);
+        return status == CopyStatus::OK ? makeCopyResult(request_id, CopyStatus::OK, 1, 0) :
+                                          makeCopyResult(request_id, status, 0, 1);
     }
 
     if (desc.source_tier == Tier::HOST && desc.target_tier == Tier::DISK) {
-        auto host_pool = resolveHostPool(desc.component_group_id);
-        auto disk_pool = resolveDiskPool(desc.component_group_id);
-        if (!host_pool || !disk_pool) {
-            return makeCopyResult(request_id,
-                                  CopyStatusCode::INVALID_DESCRIPTOR,
-                                  0,
-                                  entry_count,
-                                  "missing host-disk transfer resources");
+        if (isNullBlockIdx(desc.host_block) || isNullBlockIdx(desc.disk_block)) {
+            RTP_LLM_LOG_WARNING("CopyEngine::execute: H2Disk descriptor has invalid source or target block");
+            return makeCopyResult(request_id, CopyStatus::INVALID_ARGS, 0, 1);
         }
-
-        size_t completed_entries = 0;
-        for (size_t entry_id = 0; entry_id < entry_count; ++entry_id) {
-            const auto& entry = desc.entries[entry_id];
-            if (!hasValidHostBlock(entry) || !hasValidDiskBlock(entry)) {
-                const size_t failed_entries = entry_count - completed_entries;
-                return makeCopyResult(request_id,
-                                      CopyStatusCode::INVALID_BLOCK,
-                                      completed_entries,
-                                      failed_entries,
-                                      "H2Disk descriptor has invalid source or target block");
-            }
-            if (!hostToDisk(entry.host_block, entry.disk_block, *host_pool, *disk_pool)) {
-                const size_t failed_entries = entry_count - completed_entries;
-                return makeCopyResult(request_id,
-                                      completed_entries > 0 && options.require_all_or_none ?
-                                          CopyStatusCode::PARTIAL_FAILURE :
-                                          CopyStatusCode::DISK_IO_ERROR,
-                                      completed_entries,
-                                      failed_entries,
-                                      "H2Disk copy failed");
-            }
-            ++completed_entries;
-        }
-        return makeCopyResult(request_id, CopyStatusCode::OK, completed_entries, 0);
+        auto status = hostToDisk(desc.host_block, desc.disk_block, *layout.host_pool, *layout.disk_pool);
+        return status == CopyStatus::OK ? makeCopyResult(request_id, CopyStatus::OK, 1, 0) :
+                                          makeCopyResult(request_id, status, 0, 1);
     }
 
     if (desc.source_tier == Tier::DISK && desc.target_tier == Tier::HOST) {
-        auto host_pool = resolveHostPool(desc.component_group_id);
-        auto disk_pool = resolveDiskPool(desc.component_group_id);
-        if (!host_pool || !disk_pool) {
-            return makeCopyResult(request_id,
-                                  CopyStatusCode::INVALID_DESCRIPTOR,
-                                  0,
-                                  entry_count,
-                                  "missing disk-host transfer resources");
+        if (isNullBlockIdx(desc.disk_block) || isNullBlockIdx(desc.host_block)) {
+            RTP_LLM_LOG_WARNING("CopyEngine::execute: Disk2H descriptor has invalid source or target block");
+            return makeCopyResult(request_id, CopyStatus::INVALID_ARGS, 0, 1);
         }
-
-        size_t completed_entries = 0;
-        for (size_t entry_id = 0; entry_id < entry_count; ++entry_id) {
-            const auto& entry = desc.entries[entry_id];
-            if (!hasValidDiskBlock(entry) || !hasValidHostBlock(entry)) {
-                const size_t failed_entries = entry_count - completed_entries;
-                return makeCopyResult(request_id,
-                                      CopyStatusCode::INVALID_BLOCK,
-                                      completed_entries,
-                                      failed_entries,
-                                      "Disk2H descriptor has invalid source or target block");
-            }
-            if (!diskToHost(entry.disk_block, entry.host_block, *host_pool, *disk_pool)) {
-                const size_t failed_entries = entry_count - completed_entries;
-                return makeCopyResult(request_id,
-                                      completed_entries > 0 && options.require_all_or_none ?
-                                          CopyStatusCode::PARTIAL_FAILURE :
-                                          CopyStatusCode::DISK_IO_ERROR,
-                                      completed_entries,
-                                      failed_entries,
-                                      "Disk2H copy failed");
-            }
-            ++completed_entries;
-        }
-        return makeCopyResult(request_id, CopyStatusCode::OK, completed_entries, 0);
+        auto status = diskToHost(desc.disk_block, desc.host_block, *layout.host_pool, *layout.disk_pool);
+        return status == CopyStatus::OK ? makeCopyResult(request_id, CopyStatus::OK, 1, 0) :
+                                          makeCopyResult(request_id, status, 0, 1);
     }
 
-    return makeCopyResult(request_id, CopyStatusCode::INVALID_DESCRIPTOR, 0, 0, "unsupported transfer tier pair");
+    RTP_LLM_LOG_WARNING("CopyEngine::execute: unsupported transfer tier pair source=%s target=%s",
+                        tierName(desc.source_tier),
+                        tierName(desc.target_tier));
+    return makeCopyResult(request_id, CopyStatus::INVALID_ARGS, 0, 0);
 }
+
+// ---- Tier-pair primitives ----
 
 size_t CopyEngine::computeHostBlockSize(const std::vector<MemoryBlockLayerTagSlot>& slots) {
     size_t total = 0;
@@ -379,272 +472,264 @@ size_t CopyEngine::computeHostBlockSize(const std::vector<MemoryBlockLayerTagSlo
     return total;
 }
 
-bool CopyEngine::deviceToHost(const std::vector<BlockIdxType>&            device_blocks,
-                              BlockIdxType                                host_block,
-                              const std::vector<MemoryBlockLayerTagSlot>& slots,
-                              const DeviceBufferResolver&                 resolver,
-                              HostBlockPool&                              host_pool) {
+CopyStatus CopyEngine::deviceToHost(const std::vector<BlockIdxType>& device_blocks,
+                                    BlockIdxType                     host_block,
+                                    const ResolvedGroupLayout&       layout) const {
+    auto& host_pool = *layout.host_pool;
     if (!validAllocatedHostBlock(host_pool, host_block)) {
         RTP_LLM_LOG_WARNING("CopyEngine::deviceToHost: invalid or unallocated host block %d", host_block);
-        return false;
-    }
-    if (device_blocks.size() != slots.size()) {
-        RTP_LLM_LOG_WARNING(
-            "CopyEngine::deviceToHost: device_blocks(%zu) != slots(%zu)", device_blocks.size(), slots.size());
-        return false;
+        return CopyStatus::INVALID_ARGS;
     }
 
     void* host_base = host_pool.blockBuffer(host_block).addr;
     if (!host_base) {
         RTP_LLM_LOG_WARNING("CopyEngine::deviceToHost: null host address for block %d", host_block);
-        return false;
+        return CopyStatus::DEVICE_IO_ERROR;
     }
 
-    bool use_cuda_copy = false;
-    for (size_t i = 0; i < slots.size(); ++i) {
-        if (!isNullBlockIdx(device_blocks[i])) {
-            BlockInfo info = resolver(slots[i].layer_id, device_blocks[i]);
-            if (info.is_cuda) {
-                use_cuda_copy = true;
+    const size_t required_host_bytes = computeLayoutsBlockSize(layout.components);
+    if (required_host_bytes != host_pool.payloadBytes()) {
+        RTP_LLM_LOG_WARNING("CopyEngine::deviceToHost: component layout bytes %zu != host payload bytes %zu",
+                            required_host_bytes,
+                            host_pool.payloadBytes());
+        return CopyStatus::INVALID_ARGS;
+    }
+
+    std::vector<DeviceHostCopyTile> copy_tiles;
+    std::vector<HostZeroTile>       zero_tiles;
+
+    size_t host_offset = 0;
+    for (size_t component_idx = 0; component_idx < layout.components.size(); ++component_idx) {
+        const auto& component    = layout.components[component_idx];
+        const auto  device_block = device_blocks[component_idx];
+
+        BlockPool* device_pool = nullptr;
+        if (!isNullBlockIdx(device_block)) {
+            device_pool = component.device_pool;
+            if (!device_pool) {
+                RTP_LLM_LOG_WARNING("CopyEngine::deviceToHost: invalid device_pool_index %d",
+                                    component.device_pool_index);
+                return CopyStatus::INVALID_ARGS;
             }
-            break;
+            if (!validDeviceBlock(*device_pool, device_block)) {
+                RTP_LLM_LOG_WARNING("CopyEngine::deviceToHost: invalid or unallocated device block %d", device_block);
+                return CopyStatus::INVALID_ARGS;
+            }
         }
-    }
 
-    if (use_cuda_copy) {
-        std::vector<torch::Tensor> dst_buffers;
-        std::vector<torch::Tensor> src_buffers;
-        auto                       cpu_opts = torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCPU);
-        auto                       gpu_opts = torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA);
+        for (const auto& slot : component.layer_slots) {
+            if (slot.stride_bytes == 0) {
+                RTP_LLM_LOG_WARNING("CopyEngine::deviceToHost: zero-sized layer slot layer=%d", slot.layer_id);
+                return CopyStatus::INVALID_ARGS;
+            }
 
-        size_t byte_off = 0;
-        for (size_t i = 0; i < slots.size(); ++i) {
-            const auto& slot         = slots[i];
-            const auto  device_block = device_blocks[i];
-
+            auto* slot_host_addr = static_cast<uint8_t*>(host_base) + host_offset;
             if (isNullBlockIdx(device_block)) {
-                std::memset(static_cast<uint8_t*>(host_base) + byte_off, 0, slot.stride_bytes);
-                byte_off += slot.stride_bytes;
+                zero_tiles.push_back(HostZeroTile{slot_host_addr, slot.stride_bytes});
+                host_offset += slot.stride_bytes;
                 continue;
             }
 
-            BlockInfo device_info = resolver(slot.layer_id, device_block);
-            if (!device_info.addr || device_info.size_bytes == 0) {
-                RTP_LLM_LOG_WARNING("CopyEngine::deviceToHost: null device buffer at slot %zu "
-                                    "(layer=%d, block=%d)",
-                                    i,
+            auto   buffers           = device_pool->convertIndexToBuffer(slot.layer_id, device_block);
+            size_t slot_device_bytes = 0;
+            for (const auto& buffer : buffers) {
+                if (!buffer.addr || buffer.size_bytes == 0) {
+                    RTP_LLM_LOG_WARNING("CopyEngine::deviceToHost: null device buffer layer=%d block=%d",
+                                        slot.layer_id,
+                                        device_block);
+                    return CopyStatus::DEVICE_IO_ERROR;
+                }
+                copy_tiles.push_back(DeviceHostCopyTile{slot_host_addr + slot_device_bytes,
+                                                        buffer.addr,
+                                                        buffer.size_bytes,
+                                                        buffer.is_cuda});
+                slot_device_bytes += buffer.size_bytes;
+            }
+
+            if (slot_device_bytes != slot.stride_bytes) {
+                RTP_LLM_LOG_WARNING("CopyEngine::deviceToHost: device bytes %zu != slot stride %zu layer=%d block=%d",
+                                    slot_device_bytes,
+                                    slot.stride_bytes,
                                     slot.layer_id,
                                     device_block);
-                return false;
+                return CopyStatus::INVALID_ARGS;
             }
-
-            const size_t copy_bytes = std::min(device_info.size_bytes, slot.stride_bytes);
-            src_buffers.push_back(torch::from_blob(device_info.addr, {static_cast<int64_t>(copy_bytes)}, gpu_opts));
-            dst_buffers.push_back(torch::from_blob(
-                static_cast<uint8_t*>(host_base) + byte_off, {static_cast<int64_t>(copy_bytes)}, cpu_opts));
-            if (copy_bytes < slot.stride_bytes) {
-                std::memset(
-                    static_cast<uint8_t*>(host_base) + byte_off + copy_bytes, 0, slot.stride_bytes - copy_bytes);
-            }
-            byte_off += slot.stride_bytes;
-        }
-
-        if (!dst_buffers.empty()) {
-            MultiCopyParams mc{dst_buffers, src_buffers};
-            execNoBlockCopy(mc);
-        }
-    } else {
-        size_t byte_off = 0;
-        for (size_t i = 0; i < slots.size(); ++i) {
-            const auto& slot         = slots[i];
-            const auto  device_block = device_blocks[i];
-
-            if (isNullBlockIdx(device_block)) {
-                std::memset(static_cast<uint8_t*>(host_base) + byte_off, 0, slot.stride_bytes);
-                byte_off += slot.stride_bytes;
-                continue;
-            }
-
-            BlockInfo device_info = resolver(slot.layer_id, device_block);
-            if (!device_info.addr || device_info.size_bytes == 0) {
-                RTP_LLM_LOG_WARNING("CopyEngine::deviceToHost: null device buffer at slot %zu "
-                                    "(layer=%d, block=%d)",
-                                    i,
-                                    slot.layer_id,
-                                    device_block);
-                return false;
-            }
-
-            const size_t copy_bytes = std::min(device_info.size_bytes, slot.stride_bytes);
-            std::memcpy(static_cast<uint8_t*>(host_base) + byte_off, device_info.addr, copy_bytes);
-
-            if (copy_bytes < slot.stride_bytes) {
-                std::memset(
-                    static_cast<uint8_t*>(host_base) + byte_off + copy_bytes, 0, slot.stride_bytes - copy_bytes);
-            }
-            byte_off += slot.stride_bytes;
+            host_offset += slot.stride_bytes;
         }
     }
 
-    RTP_LLM_LOG_DEBUG("CopyEngine::deviceToHost: packed %zu slots into host_block=%d", slots.size(), host_block);
-    return true;
+    for (const auto& zero_tile : zero_tiles) {
+        std::memset(zero_tile.host_addr, 0, zero_tile.bytes);
+    }
+    executeDeviceHostCopyTiles(copy_tiles, /*device_to_host=*/true);
+
+    RTP_LLM_LOG_DEBUG("CopyEngine::deviceToHost: packed %zu components into host_block=%d",
+                      layout.components.size(),
+                      host_block);
+    return CopyStatus::OK;
 }
 
-bool CopyEngine::hostToDevice(BlockIdxType                                host_block,
-                              const std::vector<BlockIdxType>&            device_blocks,
-                              const std::vector<MemoryBlockLayerTagSlot>& slots,
-                              const DeviceBufferResolver&                 resolver,
-                              HostBlockPool&                              host_pool) {
+CopyStatus CopyEngine::hostToDevice(BlockIdxType                     host_block,
+                                    const std::vector<BlockIdxType>& device_blocks,
+                                    const ResolvedGroupLayout&       layout) const {
+    auto& host_pool = *layout.host_pool;
     if (!validAllocatedHostBlock(host_pool, host_block)) {
         RTP_LLM_LOG_WARNING("CopyEngine::hostToDevice: invalid or unallocated host block %d", host_block);
-        return false;
-    }
-    if (device_blocks.size() != slots.size()) {
-        RTP_LLM_LOG_WARNING(
-            "CopyEngine::hostToDevice: device_blocks(%zu) != slots(%zu)", device_blocks.size(), slots.size());
-        return false;
+        return CopyStatus::INVALID_ARGS;
     }
 
     const void* host_base = host_pool.blockBuffer(host_block).addr;
     if (!host_base) {
         RTP_LLM_LOG_WARNING("CopyEngine::hostToDevice: null host address for block %d", host_block);
-        return false;
+        return CopyStatus::DEVICE_IO_ERROR;
     }
 
-    bool use_cuda_copy = false;
-    for (size_t i = 0; i < slots.size(); ++i) {
-        if (!isNullBlockIdx(device_blocks[i])) {
-            BlockInfo info = resolver(slots[i].layer_id, device_blocks[i]);
-            if (info.is_cuda) {
-                use_cuda_copy = true;
+    const size_t required_host_bytes = computeLayoutsBlockSize(layout.components);
+    if (required_host_bytes != host_pool.payloadBytes()) {
+        RTP_LLM_LOG_WARNING("CopyEngine::hostToDevice: component layout bytes %zu != host payload bytes %zu",
+                            required_host_bytes,
+                            host_pool.payloadBytes());
+        return CopyStatus::INVALID_ARGS;
+    }
+
+    std::vector<DeviceHostCopyTile> copy_tiles;
+
+    size_t host_offset = 0;
+    for (size_t component_idx = 0; component_idx < layout.components.size(); ++component_idx) {
+        const auto& component    = layout.components[component_idx];
+        const auto  device_block = device_blocks[component_idx];
+
+        BlockPool* device_pool = nullptr;
+        if (!isNullBlockIdx(device_block)) {
+            device_pool = component.device_pool;
+            if (!device_pool) {
+                RTP_LLM_LOG_WARNING("CopyEngine::hostToDevice: invalid device_pool_index %d",
+                                    component.device_pool_index);
+                return CopyStatus::INVALID_ARGS;
             }
-            break;
+            if (!validDeviceBlock(*device_pool, device_block)) {
+                RTP_LLM_LOG_WARNING("CopyEngine::hostToDevice: invalid or unallocated device block %d", device_block);
+                return CopyStatus::INVALID_ARGS;
+            }
         }
-    }
 
-    if (use_cuda_copy) {
-        std::vector<torch::Tensor> dst_buffers;
-        std::vector<torch::Tensor> src_buffers;
-        auto                       cpu_opts = torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCPU);
-        auto                       gpu_opts = torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA);
+        for (const auto& slot : component.layer_slots) {
+            if (slot.stride_bytes == 0) {
+                RTP_LLM_LOG_WARNING("CopyEngine::hostToDevice: zero-sized layer slot layer=%d", slot.layer_id);
+                return CopyStatus::INVALID_ARGS;
+            }
 
-        size_t byte_off = 0;
-        for (size_t i = 0; i < slots.size(); ++i) {
-            const auto& slot         = slots[i];
-            const auto  device_block = device_blocks[i];
-
+            auto* slot_host_addr = const_cast<uint8_t*>(static_cast<const uint8_t*>(host_base) + host_offset);
             if (isNullBlockIdx(device_block)) {
-                byte_off += slot.stride_bytes;
+                host_offset += slot.stride_bytes;
                 continue;
             }
 
-            BlockInfo device_info = resolver(slot.layer_id, device_block);
-            if (!device_info.addr || device_info.size_bytes == 0) {
-                RTP_LLM_LOG_WARNING("CopyEngine::hostToDevice: null device buffer at slot %zu "
-                                    "(layer=%d, block=%d)",
-                                    i,
+            auto   buffers           = device_pool->convertIndexToBuffer(slot.layer_id, device_block);
+            size_t slot_device_bytes = 0;
+            for (const auto& buffer : buffers) {
+                if (!buffer.addr || buffer.size_bytes == 0) {
+                    RTP_LLM_LOG_WARNING("CopyEngine::hostToDevice: null device buffer layer=%d block=%d",
+                                        slot.layer_id,
+                                        device_block);
+                    return CopyStatus::DEVICE_IO_ERROR;
+                }
+                copy_tiles.push_back(DeviceHostCopyTile{slot_host_addr + slot_device_bytes,
+                                                        buffer.addr,
+                                                        buffer.size_bytes,
+                                                        buffer.is_cuda});
+                slot_device_bytes += buffer.size_bytes;
+            }
+
+            if (slot_device_bytes != slot.stride_bytes) {
+                RTP_LLM_LOG_WARNING("CopyEngine::hostToDevice: device bytes %zu != slot stride %zu layer=%d block=%d",
+                                    slot_device_bytes,
+                                    slot.stride_bytes,
                                     slot.layer_id,
                                     device_block);
-                return false;
+                return CopyStatus::INVALID_ARGS;
             }
-
-            const size_t copy_bytes = std::min(device_info.size_bytes, slot.stride_bytes);
-            src_buffers.push_back(torch::from_blob(
-                const_cast<void*>(static_cast<const void*>(static_cast<const uint8_t*>(host_base) + byte_off)),
-                {static_cast<int64_t>(copy_bytes)},
-                cpu_opts));
-            dst_buffers.push_back(torch::from_blob(device_info.addr, {static_cast<int64_t>(copy_bytes)}, gpu_opts));
-
-            byte_off += slot.stride_bytes;
-        }
-
-        if (!dst_buffers.empty()) {
-            MultiCopyParams mc{dst_buffers, src_buffers};
-            execNoBlockCopy(mc);
-        }
-    } else {
-        size_t byte_off = 0;
-        for (size_t i = 0; i < slots.size(); ++i) {
-            const auto& slot         = slots[i];
-            const auto  device_block = device_blocks[i];
-
-            if (isNullBlockIdx(device_block)) {
-                byte_off += slot.stride_bytes;
-                continue;
-            }
-
-            BlockInfo device_info = resolver(slot.layer_id, device_block);
-            if (!device_info.addr || device_info.size_bytes == 0) {
-                RTP_LLM_LOG_WARNING("CopyEngine::hostToDevice: null device buffer at slot %zu "
-                                    "(layer=%d, block=%d)",
-                                    i,
-                                    slot.layer_id,
-                                    device_block);
-                return false;
-            }
-
-            const size_t copy_bytes = std::min(device_info.size_bytes, slot.stride_bytes);
-            std::memcpy(device_info.addr, static_cast<const uint8_t*>(host_base) + byte_off, copy_bytes);
-
-            byte_off += slot.stride_bytes;
+            host_offset += slot.stride_bytes;
         }
     }
+
+    executeDeviceHostCopyTiles(copy_tiles, /*device_to_host=*/false);
 
     RTP_LLM_LOG_DEBUG(
-        "CopyEngine::hostToDevice: unpacked host_block=%d into %zu device blocks", host_block, device_blocks.size());
-    return true;
+        "CopyEngine::hostToDevice: unpacked host_block=%d into %zu components", host_block, device_blocks.size());
+    return CopyStatus::OK;
 }
 
-bool CopyEngine::hostToDisk(BlockIdxType   host_block,
-                            BlockIdxType   disk_block,
-                            HostBlockPool& host_pool,
-                            DiskBlockPool& disk_pool) {
+CopyStatus CopyEngine::hostToDisk(BlockIdxType   host_block,
+                                  BlockIdxType   disk_block,
+                                  HostBlockPool& host_pool,
+                                  DiskBlockPool& disk_pool) const {
     if (!validAllocatedHostBlock(host_pool, host_block)) {
         RTP_LLM_LOG_WARNING("CopyEngine::hostToDisk: invalid or unallocated host block %d", host_block);
-        return false;
+        return CopyStatus::INVALID_ARGS;
     }
     if (!validAllocatedDiskBlock(disk_pool, disk_block)) {
         RTP_LLM_LOG_WARNING("CopyEngine::hostToDisk: invalid or unallocated disk block %d", disk_block);
-        return false;
+        return CopyStatus::INVALID_ARGS;
+    }
+    if (host_pool.payloadBytes() != disk_pool.payloadBytes()) {
+        RTP_LLM_LOG_WARNING("CopyEngine::hostToDisk: host payload bytes %zu != disk payload bytes %zu",
+                            host_pool.payloadBytes(),
+                            disk_pool.payloadBytes());
+        return CopyStatus::INVALID_ARGS;
     }
 
     const void*  host_base = host_pool.blockBuffer(host_block).addr;
-    const size_t bytes     = std::min(host_pool.strideBytes(), disk_pool.strideBytes());
+    if (!host_base) {
+        RTP_LLM_LOG_WARNING("CopyEngine::hostToDisk: null host buffer");
+        return CopyStatus::DISK_IO_ERROR;
+    }
+    const size_t bytes     = host_pool.payloadBytes();
     const auto   status    = disk_pool.write(disk_block, host_base, bytes);
     if (status != BlockIOStatus::OK) {
         RTP_LLM_LOG_WARNING("CopyEngine::hostToDisk: write failed, host=%d, disk=%d, status=%s",
                             host_block,
                             disk_block,
                             blockIOStatusName(status));
-        return false;
+        return blockIOStatusToCopyStatus(status);
     }
-    return true;
+    return CopyStatus::OK;
 }
 
-bool CopyEngine::diskToHost(BlockIdxType   disk_block,
-                            BlockIdxType   host_block,
-                            HostBlockPool& host_pool,
-                            DiskBlockPool& disk_pool) {
+CopyStatus CopyEngine::diskToHost(BlockIdxType   disk_block,
+                                  BlockIdxType   host_block,
+                                  HostBlockPool& host_pool,
+                                  DiskBlockPool& disk_pool) const {
     if (!validAllocatedHostBlock(host_pool, host_block)) {
         RTP_LLM_LOG_WARNING("CopyEngine::diskToHost: invalid or unallocated host block %d", host_block);
-        return false;
+        return CopyStatus::INVALID_ARGS;
     }
     if (!validAllocatedDiskBlock(disk_pool, disk_block)) {
         RTP_LLM_LOG_WARNING("CopyEngine::diskToHost: invalid or unallocated disk block %d", disk_block);
-        return false;
+        return CopyStatus::INVALID_ARGS;
+    }
+    if (host_pool.payloadBytes() != disk_pool.payloadBytes()) {
+        RTP_LLM_LOG_WARNING("CopyEngine::diskToHost: host payload bytes %zu != disk payload bytes %zu",
+                            host_pool.payloadBytes(),
+                            disk_pool.payloadBytes());
+        return CopyStatus::INVALID_ARGS;
     }
 
     void*        host_base = host_pool.blockBuffer(host_block).addr;
-    const size_t bytes     = std::min(host_pool.strideBytes(), disk_pool.strideBytes());
+    if (!host_base) {
+        RTP_LLM_LOG_WARNING("CopyEngine::diskToHost: null host buffer");
+        return CopyStatus::DISK_IO_ERROR;
+    }
+    const size_t bytes     = host_pool.payloadBytes();
     const auto   status    = disk_pool.read(disk_block, host_base, bytes);
     if (status != BlockIOStatus::OK) {
         RTP_LLM_LOG_WARNING("CopyEngine::diskToHost: read failed, disk=%d, host=%d, status=%s",
                             disk_block,
                             host_block,
                             blockIOStatusName(status));
-        return false;
+        return blockIOStatusToCopyStatus(status);
     }
-    return true;
+    return CopyStatus::OK;
 }
 
 }  // namespace rtp_llm

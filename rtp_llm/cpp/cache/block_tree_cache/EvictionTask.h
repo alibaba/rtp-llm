@@ -3,8 +3,6 @@
 #include <cstdint>
 #include <string>
 
-#include "rtp_llm/cpp/cache/block_tree_cache/TransferDescriptor.h"
-
 namespace rtp_llm {
 
 // EvictionTask state machine for tracking async eviction lifecycle.

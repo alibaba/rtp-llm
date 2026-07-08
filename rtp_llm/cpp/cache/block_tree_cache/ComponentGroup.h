@@ -8,8 +8,8 @@
 #include "rtp_llm/cpp/cache/BlockPool.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/EvictionHeap.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/TransferDescriptor.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/TreeNode.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/copy_engine/TransferTypes.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/host/DiskBlockPool.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/host/HostBlockPool.h"
 #include "rtp_llm/cpp/cache/spec/CacheGroupType.h"
@@ -58,13 +58,11 @@ enum class TransferType {
     REMOTE_TO_DEVICE,
 };
 
-// Eviction result from ComponentGroup::driveEviction().
 struct EvictionResult {
     TreeNode*                 node{nullptr};
     int                       component_group_id{-1};
     Tier                      source_tier{Tier::NONE};
     Tier                      target_tier{Tier::NONE};
-    TransferDescriptor        transfer;
     std::vector<BlockIdxType> blocks_to_release;
     BlockIdxType              target_block{NULL_BLOCK_IDX};
 };

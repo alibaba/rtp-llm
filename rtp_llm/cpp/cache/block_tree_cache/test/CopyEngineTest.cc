@@ -1,14 +1,14 @@
 #include <gtest/gtest.h>
 
-#include <algorithm>
 #include <cstring>
-#include <unordered_map>
 #include <utility>
 #include <vector>
 
 #include <cuda_runtime.h>
 #include <torch/torch.h>
 
+#include "rtp_llm/cpp/cache/BlockPool.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/FullComponentGroup.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/copy_engine/CopyEngine.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/host/DiskBlockPool.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/host/HostBlockPool.h"
@@ -40,125 +40,168 @@ static BlockIdxType poolMalloc(IBlockPool& pool) {
     return block.has_value() ? *block : NULL_BLOCK_IDX;
 }
 
-// Real CUDA device memory: allocates GPU buffers via torch and provides
-// fill/readback utilities for test verification.
-// Total GPU memory usage is kept minimal (< 2KB) to avoid OOM.
-class CudaDeviceMemory {
-public:
-    void allocate(int layer_id, BlockIdxType block_idx, size_t size_bytes) {
-        auto key      = makeKey(layer_id, block_idx);
-        auto gpu_opts = torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA, 0);
-        tensors_[key] = torch::zeros({static_cast<int64_t>(size_bytes)}, gpu_opts);
-    }
+static BlockIdxType poolMalloc(BlockPool& pool) {
+    auto blocks = pool.malloc(1);
+    return blocks.empty() ? NULL_BLOCK_IDX : blocks.front();
+}
 
-    // Fill GPU buffer with a repeating byte pattern.
-    void fill(int layer_id, BlockIdxType block_idx, uint8_t pattern) {
-        auto key = makeKey(layer_id, block_idx);
-        auto it  = tensors_.find(key);
-        if (it != tensors_.end()) {
-            it->second.fill_(pattern);
-            // Ensure fill_ (default stream) completes before subsequent copies
-            // executed on the CopyEngine's dedicated no-block-copy stream.
-            cudaDeviceSynchronize();
+struct DeviceLayerBufferSpec {
+    size_t kv_bytes{0};
+    size_t scale_bytes{0};
+};
+
+static BlockPoolPtr makeDevicePool(const std::vector<DeviceLayerBufferSpec>& specs,
+                                   size_t                                    usable_count,
+                                   const std::string&                         pool_name) {
+    const auto physical_block_count = usable_count + 1;
+    BlockPoolConfig config;
+    config.pool_name = pool_name;
+    config.block_num = static_cast<uint32_t>(physical_block_count);
+
+    size_t offset = 0;
+    for (const auto& spec : specs) {
+        MemoryLayoutConfig layout;
+        layout.layer_num                = 1;
+        layout.block_num                = static_cast<uint32_t>(physical_block_count);
+        layout.dtype                    = TYPE_INT8;
+        layout.kv_cache_offset_bytes    = offset;
+        layout.kv_block_stride_bytes    = spec.kv_bytes;
+        layout.kv_block_pool_size_bytes = physical_block_count * spec.kv_bytes;
+        layout.block_stride_bytes       = spec.kv_bytes + spec.scale_bytes;
+        layout.total_size_bytes         = layout.kv_block_pool_size_bytes;
+        offset += layout.kv_block_pool_size_bytes;
+
+        if (spec.scale_bytes > 0) {
+            layout.enable_kv_scale          = true;
+            layout.kv_scale_offset_bytes    = offset;
+            layout.kv_scale_stride_bytes    = spec.scale_bytes;
+            layout.kv_scale_pool_size_bytes = physical_block_count * spec.scale_bytes;
+            layout.total_size_bytes += layout.kv_scale_pool_size_bytes;
+            offset += layout.kv_scale_pool_size_bytes;
         }
-    }
 
-    // Fill GPU buffer with sequential pattern (0, 1, 2, ..., wrapping at 255).
-    void fillSequential(int layer_id, BlockIdxType block_idx) {
-        auto key = makeKey(layer_id, block_idx);
-        auto it  = tensors_.find(key);
-        if (it != tensors_.end()) {
-            int64_t              size = it->second.numel();
-            std::vector<uint8_t> cpu_data(static_cast<size_t>(size));
-            for (int64_t i = 0; i < size; ++i) {
-                cpu_data[i] = static_cast<uint8_t>(i & 0xFF);
-            }
-            auto cpu_tensor = torch::from_blob(cpu_data.data(), {size}, torch::kUInt8).clone();
-            it->second.copy_(cpu_tensor);
-            cudaDeviceSynchronize();
-        }
+        layout.local_head_num_kv          = 1;
+        layout.seq_size_per_block         = 1;
+        layout.kernel_blocks_per_kv_block = 1;
+        config.memory_layouts.push_back(layout);
     }
+    config.total_size_bytes = offset;
 
-    // Copy GPU buffer back to CPU for verification.
-    std::vector<uint8_t> readBack(int layer_id, BlockIdxType block_idx) {
-        auto key = makeKey(layer_id, block_idx);
-        auto it  = tensors_.find(key);
-        if (it == tensors_.end())
-            return {};
-        // Ensure prior GPU work (e.g. execNoBlockCopy on its own stream) is
-        // visible before the D2H readback.
+    auto pool = std::make_shared<BlockPool>(config, AllocationType::DEVICE);
+    RTP_LLM_CHECK(pool->init());
+    return pool;
+}
+
+static torch::Tensor makePoolByteTensor(void* addr, size_t bytes, bool is_cuda) {
+    auto device = is_cuda ? torch::Device(torch::kCUDA) : torch::Device(torch::kCPU);
+    return torch::from_blob(
+        addr, {static_cast<int64_t>(bytes)}, torch::TensorOptions().dtype(torch::kUInt8).device(device));
+}
+
+static void fillDeviceLayer(const BlockPoolPtr&                     pool,
+                            int                                    layer_id,
+                            BlockIdxType                           block,
+                            const std::vector<uint8_t>&             patterns) {
+    auto buffers = pool->convertIndexToBuffer(layer_id, block);
+    ASSERT_EQ(buffers.size(), patterns.size());
+    for (size_t i = 0; i < buffers.size(); ++i) {
+        makePoolByteTensor(buffers[i].addr, buffers[i].size_bytes, buffers[i].is_cuda).fill_(patterns[i]);
+    }
+    if (pool->where() == MemoryType::MEMORY_GPU) {
         cudaDeviceSynchronize();
-        auto    cpu_tensor = it->second.cpu();
-        auto*   ptr        = cpu_tensor.data_ptr<uint8_t>();
-        int64_t n          = cpu_tensor.numel();
-        return std::vector<uint8_t>(ptr, ptr + n);
     }
+}
 
-    void* devicePtr(int layer_id, BlockIdxType block_idx) {
-        auto key = makeKey(layer_id, block_idx);
-        auto it  = tensors_.find(key);
-        return it != tensors_.end() ? it->second.data_ptr() : nullptr;
-    }
-
-    size_t size(int layer_id, BlockIdxType block_idx) const {
-        auto key = makeKey(layer_id, block_idx);
-        auto it  = tensors_.find(key);
-        return it != tensors_.end() ? static_cast<size_t>(it->second.numel()) : 0;
-    }
-
-    // Create a DeviceBufferResolver that returns real CUDA pointers.
-    DeviceBufferResolver makeResolver() {
-        return [this](int layer_id, BlockIdxType block_idx) -> BlockInfo {
-            BlockInfo info;
-            info.is_cuda      = true;
-            info.device_index = 0;
-            info.addr         = devicePtr(layer_id, block_idx);
-            info.size_bytes   = size(layer_id, block_idx);
-            return info;
-        };
-    }
-
-private:
-    static uint64_t makeKey(int layer_id, BlockIdxType block_idx) {
-        return (static_cast<uint64_t>(layer_id) << 32) | static_cast<uint64_t>(block_idx);
-    }
-
-    std::unordered_map<uint64_t, torch::Tensor> tensors_;
-};
-
-// Fixture for CopyEngine tests with real CUDA memory.
-class CopyEngineTest: public ::testing::Test {
-protected:
-    void SetUp() override {
-        ASSERT_TRUE(torch::cuda::is_available()) << "CUDA not available, cannot run GPU tests";
-
-        // 3 layers with different strides: 100, 200, 150 bytes
-        slots_ = {
-            {0, "layer_0", 100},
-            {1, "layer_1", 200},
-            {2, "layer_2", 150},
-        };
-        host_block_size_ = CopyEngine::computeHostBlockSize(slots_);  // 450
-
-        // Create host pool (BlockPool HOST) — 10 usable blocks
-        host_pool_ = makeHostPool(host_block_size_, 10);
-
-        copy_engine_ = std::make_shared<CopyEngine>();
-
-        // Allocate real CUDA device memory for 3 device blocks (indices 1, 2, 3)
-        device_blocks_ = {1, 2, 3};
-        for (size_t i = 0; i < slots_.size(); ++i) {
-            cuda_device_.allocate(slots_[i].layer_id, device_blocks_[i], slots_[i].stride_bytes);
+static void fillDeviceLayerSequential(const BlockPoolPtr&                     pool,
+                                      int                                    layer_id,
+                                      BlockIdxType                           block) {
+    auto buffers = pool->convertIndexToBuffer(layer_id, block);
+    for (const auto& buffer : buffers) {
+        std::vector<uint8_t> cpu_data(buffer.size_bytes);
+        for (size_t i = 0; i < buffer.size_bytes; ++i) {
+            cpu_data[i] = static_cast<uint8_t>(i & 0xFF);
         }
+        auto cpu_tensor =
+            torch::from_blob(cpu_data.data(), {static_cast<int64_t>(buffer.size_bytes)}, torch::kUInt8).clone();
+        makePoolByteTensor(buffer.addr, buffer.size_bytes, buffer.is_cuda).copy_(cpu_tensor);
+    }
+    if (pool->where() == MemoryType::MEMORY_GPU) {
+        cudaDeviceSynchronize();
+    }
+}
+
+static std::vector<uint8_t> readDeviceLayer(const BlockPoolPtr& pool, int layer_id, BlockIdxType block) {
+    if (pool->where() == MemoryType::MEMORY_GPU) {
+        cudaDeviceSynchronize();
     }
 
-    std::vector<MemoryBlockLayerTagSlot> slots_;
-    size_t                               host_block_size_;
-    std::shared_ptr<HostBlockPool>      host_pool_;
-    std::shared_ptr<CopyEngine>          copy_engine_;
-    std::vector<BlockIdxType>            device_blocks_;
-    CudaDeviceMemory                     cuda_device_;
-};
+    std::vector<uint8_t> out;
+    auto                 buffers = pool->convertIndexToBuffer(layer_id, block);
+    for (const auto& buffer : buffers) {
+        auto tensor = makePoolByteTensor(buffer.addr, buffer.size_bytes, buffer.is_cuda);
+        auto cpu    = buffer.is_cuda ? tensor.cpu() : tensor;
+        auto* ptr    = cpu.data_ptr<uint8_t>();
+        out.insert(out.end(), ptr, ptr + buffer.size_bytes);
+    }
+    return out;
+}
+
+static Component makeComponent(int component_id,
+                               int component_group_id,
+                               const std::vector<MemoryBlockLayerTagSlot>& slots,
+                               int device_pool_index = 0) {
+    Component component;
+    component.component_id                 = component_id;
+    component.component_group_id           = component_group_id;
+    component.type                         = CacheGroupType::FULL;
+    component.memory_block_layer_tag_slots = slots;
+    component.device_pool_index            = device_pool_index;
+    return component;
+}
+
+static ComponentGroupPtr makeGroup(int group_id,
+                                   std::vector<int> component_indices,
+                                   std::vector<BlockPoolPtr> device_pools,
+                                   std::shared_ptr<HostBlockPool> host_pool,
+                                   std::shared_ptr<DiskBlockPool> disk_pool = nullptr) {
+    auto group                  = std::make_shared<FullComponentGroup>();
+    group->component_group_id   = group_id;
+    group->group_type           = CacheGroupType::FULL;
+    group->component_indices    = std::move(component_indices);
+    group->setDevicePools(std::move(device_pools));
+    group->setHostPool(std::move(host_pool));
+    group->setDiskPool(std::move(disk_pool));
+    return group;
+}
+
+static TransferDescriptor makeDescriptor(Tier                             source_tier,
+                                         Tier                             target_tier,
+                                         const std::vector<BlockIdxType>& device_blocks,
+                                         BlockIdxType                     host_block = NULL_BLOCK_IDX,
+                                         BlockIdxType                     disk_block = NULL_BLOCK_IDX,
+                                         int                              group_id   = 0) {
+    if (source_tier == Tier::DEVICE && target_tier == Tier::HOST) {
+        return TransferDescriptor::deviceToHost(nullptr, group_id, device_blocks, host_block);
+    }
+    if (source_tier == Tier::HOST && target_tier == Tier::DEVICE) {
+        return TransferDescriptor::hostToDevice(nullptr, group_id, host_block, device_blocks);
+    }
+    if (source_tier == Tier::HOST && target_tier == Tier::DISK) {
+        return TransferDescriptor::hostToDisk(nullptr, group_id, host_block, disk_block);
+    }
+    if (source_tier == Tier::DISK && target_tier == Tier::HOST) {
+        return TransferDescriptor::diskToHost(nullptr, group_id, disk_block, host_block);
+    }
+
+    TransferDescriptor desc;
+    desc.component_group_id = group_id;
+    desc.source_tier        = source_tier;
+    desc.target_tier        = target_tier;
+    desc.device_blocks      = device_blocks;
+    desc.host_block         = host_block;
+    desc.disk_block         = disk_block;
+    return desc;
+}
 
 // ---- BlockPool HOST tests ----
 
@@ -219,173 +262,237 @@ TEST(BlockPoolHostTest, PinnedMemory) {
     EXPECT_NE(addr, nullptr);
 }
 
-// ---- CopyEngine DeviceToHost / HostToDevice tests (real CUDA) ----
+// ---- CopyEngine submit() tests (real CUDA) ----
 
-TEST_F(CopyEngineTest, DeviceToHostPacking) {
-    // Fill device blocks with distinct patterns
-    cuda_device_.fill(0, 1, 0xAA);  // layer 0 → 100 bytes of 0xAA
-    cuda_device_.fill(1, 2, 0xBB);  // layer 1 → 200 bytes of 0xBB
-    cuda_device_.fill(2, 3, 0xCC);  // layer 2 → 150 bytes of 0xCC
+class CopyEngineTest: public ::testing::Test {
+protected:
+    void SetUp() override {
+        ASSERT_TRUE(torch::cuda::is_available()) << "CUDA not available, cannot run GPU tests";
+
+        // 3 layers with different strides: 100, 200, 150 bytes
+        slots_ = {
+            {0, "layer_0", 100},
+            {1, "layer_1", 200},
+            {2, "layer_2", 150},
+        };
+        host_block_size_ = CopyEngine::computeHostBlockSize(slots_);  // 450
+
+        // Create host pool — 10 usable blocks
+        host_pool_ = makeHostPool(host_block_size_, 10);
+
+        device_pool_ = makeDevicePool({{100, 0}, {200, 0}, {150, 0}}, 10, "copy_engine_device");
+        device_block_ = poolMalloc(*device_pool_);
+        ASSERT_NE(device_block_, NULL_BLOCK_IDX);
+        device_blocks_ = {device_block_};
+
+        component_      = makeComponent(0, 0, slots_);
+        component_group_ = makeGroup(0, {0}, {device_pool_}, host_pool_);
+        copy_engine_ =
+            std::make_shared<CopyEngine>(std::vector<ComponentGroupPtr>{component_group_},
+                                         std::vector<Component>{component_});
+    }
+
+    std::vector<MemoryBlockLayerTagSlot> slots_;
+    size_t                               host_block_size_;
+    std::shared_ptr<HostBlockPool>      host_pool_;
+    std::shared_ptr<CopyEngine>          copy_engine_;
+    BlockPoolPtr                         device_pool_;
+    BlockIdxType                         device_block_;
+    std::vector<BlockIdxType>            device_blocks_;
+    Component                            component_;
+    ComponentGroupPtr                    component_group_;
+};
+
+TEST_F(CopyEngineTest, SubmitDeviceToHostPacking) {
+    fillDeviceLayer(device_pool_, 0, device_block_, {0xAA});
+    fillDeviceLayer(device_pool_, 1, device_block_, {0xBB});
+    fillDeviceLayer(device_pool_, 2, device_block_, {0xCC});
 
     BlockIdxType host_block = poolMalloc(*host_pool_);
     ASSERT_NE(host_block, NULL_BLOCK_IDX);
 
-    auto resolver = cuda_device_.makeResolver();
-    bool ok       = copy_engine_->deviceToHost(device_blocks_, host_block, slots_, resolver, *host_pool_);
-    ASSERT_TRUE(ok);
+    auto desc  = makeDescriptor(Tier::DEVICE, Tier::HOST, device_blocks_, host_block);
+    auto result = copy_engine_->submit(desc).result();
+    ASSERT_TRUE(result.ok());
+    EXPECT_EQ(result.completed_entries, 1u);
 
-    // Verify packed layout in host block (host memory is directly readable)
     const uint8_t* host_data = static_cast<const uint8_t*>(host_pool_->blockBuffer(host_block).addr);
-    ASSERT_NE(host_data, nullptr);
-
-    // First 100 bytes should be 0xAA (layer 0)
-    for (size_t i = 0; i < 100; ++i) {
+    for (size_t i = 0; i < 100; ++i)
         EXPECT_EQ(host_data[i], 0xAA) << "byte " << i;
-    }
-    // Next 200 bytes should be 0xBB (layer 1)
-    for (size_t i = 100; i < 300; ++i) {
+    for (size_t i = 100; i < 300; ++i)
         EXPECT_EQ(host_data[i], 0xBB) << "byte " << i;
-    }
-    // Last 150 bytes should be 0xCC (layer 2)
-    for (size_t i = 300; i < 450; ++i) {
+    for (size_t i = 300; i < 450; ++i)
         EXPECT_EQ(host_data[i], 0xCC) << "byte " << i;
-    }
 
     host_pool_->free(host_block);
 }
 
-TEST_F(CopyEngineTest, HostToDeviceUnpacking) {
-    // First, pack into host (D2H)
-    cuda_device_.fill(0, 1, 0x11);
-    cuda_device_.fill(1, 2, 0x22);
-    cuda_device_.fill(2, 3, 0x33);
+TEST_F(CopyEngineTest, SubmitHostToDeviceUnpacking) {
+    fillDeviceLayer(device_pool_, 0, device_block_, {0x11});
+    fillDeviceLayer(device_pool_, 1, device_block_, {0x22});
+    fillDeviceLayer(device_pool_, 2, device_block_, {0x33});
 
     BlockIdxType host_block = poolMalloc(*host_pool_);
     ASSERT_NE(host_block, NULL_BLOCK_IDX);
 
-    auto resolver = cuda_device_.makeResolver();
-    ASSERT_TRUE(copy_engine_->deviceToHost(device_blocks_, host_block, slots_, resolver, *host_pool_));
+    // Pack D2H first
+    auto d2h_desc  = makeDescriptor(Tier::DEVICE, Tier::HOST, device_blocks_, host_block);
+    ASSERT_TRUE(copy_engine_->submit(d2h_desc).result().ok());
 
     // Clear device buffers
-    cuda_device_.fill(0, 1, 0x00);
-    cuda_device_.fill(1, 2, 0x00);
-    cuda_device_.fill(2, 3, 0x00);
+    fillDeviceLayer(device_pool_, 0, device_block_, {0x00});
+    fillDeviceLayer(device_pool_, 1, device_block_, {0x00});
+    fillDeviceLayer(device_pool_, 2, device_block_, {0x00});
 
-    // Unpack host → device (H2D)
-    ASSERT_TRUE(copy_engine_->hostToDevice(host_block, device_blocks_, slots_, resolver, *host_pool_));
+    // Unpack H2D
+    auto h2d_desc  = makeDescriptor(Tier::HOST, Tier::DEVICE, device_blocks_, host_block);
+    ASSERT_TRUE(copy_engine_->submit(h2d_desc).result().ok());
 
-    // Verify device buffers restored (read back from GPU)
-    auto d0 = cuda_device_.readBack(0, 1);
-    auto d1 = cuda_device_.readBack(1, 2);
-    auto d2 = cuda_device_.readBack(2, 3);
-
+    auto d0 = readDeviceLayer(device_pool_, 0, device_block_);
+    auto d1 = readDeviceLayer(device_pool_, 1, device_block_);
+    auto d2 = readDeviceLayer(device_pool_, 2, device_block_);
     ASSERT_EQ(d0.size(), 100u);
     ASSERT_EQ(d1.size(), 200u);
     ASSERT_EQ(d2.size(), 150u);
-
-    for (size_t i = 0; i < 100; ++i)
-        EXPECT_EQ(d0[i], 0x11);
-    for (size_t i = 0; i < 200; ++i)
-        EXPECT_EQ(d1[i], 0x22);
-    for (size_t i = 0; i < 150; ++i)
-        EXPECT_EQ(d2[i], 0x33);
+    for (size_t i = 0; i < 100; ++i) EXPECT_EQ(d0[i], 0x11);
+    for (size_t i = 0; i < 200; ++i) EXPECT_EQ(d1[i], 0x22);
+    for (size_t i = 0; i < 150; ++i) EXPECT_EQ(d2[i], 0x33);
 
     host_pool_->free(host_block);
 }
 
-TEST_F(CopyEngineTest, RoundTripSequentialData) {
-    // Fill with sequential data for precise byte-level verification
-    cuda_device_.fillSequential(0, 1);
-    cuda_device_.fill(1, 2, 0x5A);
-    cuda_device_.fillSequential(2, 3);
+TEST_F(CopyEngineTest, SubmitRoundTripSequentialData) {
+    fillDeviceLayerSequential(device_pool_, 0, device_block_);
+    fillDeviceLayer(device_pool_, 1, device_block_, {0x5A});
+    fillDeviceLayerSequential(device_pool_, 2, device_block_);
 
     BlockIdxType host_block = poolMalloc(*host_pool_);
     ASSERT_NE(host_block, NULL_BLOCK_IDX);
-    auto resolver = cuda_device_.makeResolver();
 
-    ASSERT_TRUE(copy_engine_->deviceToHost(device_blocks_, host_block, slots_, resolver, *host_pool_));
+    auto d2h_desc = makeDescriptor(Tier::DEVICE, Tier::HOST, device_blocks_, host_block);
+    ASSERT_TRUE(copy_engine_->submit(d2h_desc).result().ok());
 
     const uint8_t* host_data = static_cast<const uint8_t*>(host_pool_->blockBuffer(host_block).addr);
-    ASSERT_NE(host_data, nullptr);
-
-    for (size_t i = 0; i < slots_[0].stride_bytes; ++i) {
+    for (size_t i = 0; i < slots_[0].stride_bytes; ++i)
         EXPECT_EQ(host_data[i], static_cast<uint8_t>(i & 0xFF));
-    }
-    for (size_t i = 0; i < slots_[1].stride_bytes; ++i) {
+    for (size_t i = 0; i < slots_[1].stride_bytes; ++i)
         EXPECT_EQ(host_data[slots_[0].stride_bytes + i], 0x5A);
-    }
-    const size_t layer_2_offset = slots_[0].stride_bytes + slots_[1].stride_bytes;
-    for (size_t i = 0; i < slots_[2].stride_bytes; ++i) {
-        EXPECT_EQ(host_data[layer_2_offset + i], static_cast<uint8_t>(i & 0xFF));
-    }
+    const size_t off2 = slots_[0].stride_bytes + slots_[1].stride_bytes;
+    for (size_t i = 0; i < slots_[2].stride_bytes; ++i)
+        EXPECT_EQ(host_data[off2 + i], static_cast<uint8_t>(i & 0xFF));
 
-    cuda_device_.fill(0, 1, 0x00);
-    cuda_device_.fill(1, 2, 0x00);
-    cuda_device_.fill(2, 3, 0x00);
-    ASSERT_TRUE(copy_engine_->hostToDevice(host_block, device_blocks_, slots_, resolver, *host_pool_));
+    fillDeviceLayer(device_pool_, 0, device_block_, {0x00});
+    fillDeviceLayer(device_pool_, 1, device_block_, {0x00});
+    fillDeviceLayer(device_pool_, 2, device_block_, {0x00});
+    auto h2d_desc = makeDescriptor(Tier::HOST, Tier::DEVICE, device_blocks_, host_block);
+    ASSERT_TRUE(copy_engine_->submit(h2d_desc).result().ok());
 
-    auto d0 = cuda_device_.readBack(0, 1);
-    auto d1 = cuda_device_.readBack(1, 2);
-    auto d2 = cuda_device_.readBack(2, 3);
-    ASSERT_EQ(d0.size(), slots_[0].stride_bytes);
-    ASSERT_EQ(d1.size(), slots_[1].stride_bytes);
-    ASSERT_EQ(d2.size(), slots_[2].stride_bytes);
-
-    for (size_t i = 0; i < slots_[0].stride_bytes; ++i) {
+    auto d0 = readDeviceLayer(device_pool_, 0, device_block_);
+    auto d1 = readDeviceLayer(device_pool_, 1, device_block_);
+    auto d2 = readDeviceLayer(device_pool_, 2, device_block_);
+    for (size_t i = 0; i < slots_[0].stride_bytes; ++i)
         EXPECT_EQ(d0[i], static_cast<uint8_t>(i & 0xFF));
-    }
-    for (auto byte : d1) {
-        EXPECT_EQ(byte, 0x5A);
-    }
-    for (size_t i = 0; i < slots_[2].stride_bytes; ++i) {
+    for (auto byte : d1) EXPECT_EQ(byte, 0x5A);
+    for (size_t i = 0; i < slots_[2].stride_bytes; ++i)
         EXPECT_EQ(d2[i], static_cast<uint8_t>(i & 0xFF));
-    }
 
     host_pool_->free(host_block);
 }
 
-TEST_F(CopyEngineTest, NullDeviceBlockSkipped) {
-    // device_blocks[1] is NULL → that slot should be zero-filled in host
-    std::vector<BlockIdxType> blocks = {1, NULL_BLOCK_IDX, 3};
-    cuda_device_.fill(0, 1, 0xAA);
-    cuda_device_.fill(2, 3, 0xCC);
+TEST_F(CopyEngineTest, SubmitNullDeviceComponentZeroFillsAllSlots) {
+    std::vector<BlockIdxType> blocks = {NULL_BLOCK_IDX};
 
     BlockIdxType host_block = poolMalloc(*host_pool_);
-    auto         resolver   = cuda_device_.makeResolver();
-
-    ASSERT_TRUE(copy_engine_->deviceToHost(blocks, host_block, slots_, resolver, *host_pool_));
+    auto desc  = makeDescriptor(Tier::DEVICE, Tier::HOST, blocks, host_block);
+    ASSERT_TRUE(copy_engine_->submit(desc).result().ok());
 
     const uint8_t* host_data = static_cast<const uint8_t*>(host_pool_->blockBuffer(host_block).addr);
-    // Layer 0: 0xAA
-    for (size_t i = 0; i < 100; ++i)
-        EXPECT_EQ(host_data[i], 0xAA);
-    // Layer 1: zero-filled (null device block)
-    for (size_t i = 100; i < 300; ++i)
-        EXPECT_EQ(host_data[i], 0x00);
-    // Layer 2: 0xCC
-    for (size_t i = 300; i < 450; ++i)
-        EXPECT_EQ(host_data[i], 0xCC);
+    for (size_t i = 0; i < host_block_size_; ++i) EXPECT_EQ(host_data[i], 0x00);
 
     host_pool_->free(host_block);
 }
 
-TEST_F(CopyEngineTest, InvalidHostBlockFails) {
-    auto resolver = cuda_device_.makeResolver();
-    EXPECT_FALSE(copy_engine_->deviceToHost(device_blocks_, NULL_BLOCK_IDX, slots_, resolver, *host_pool_));
-    EXPECT_FALSE(copy_engine_->deviceToHost(device_blocks_, 999, slots_, resolver, *host_pool_));
+TEST_F(CopyEngineTest, SubmitInvalidHostBlockReturnsStructuredFailure) {
+    auto desc  = makeDescriptor(Tier::DEVICE, Tier::HOST, device_blocks_, NULL_BLOCK_IDX);
+    auto result = copy_engine_->submit(desc).result();
+    EXPECT_FALSE(result.ok());
+    EXPECT_EQ(result.status, CopyStatus::INVALID_ARGS);
 }
 
-TEST_F(CopyEngineTest, DeviceToHostRejectsUnallocatedHostBlock) {
-    auto resolver = cuda_device_.makeResolver();
-    EXPECT_FALSE(copy_engine_->deviceToHost(device_blocks_, 1, slots_, resolver, *host_pool_));
+TEST_F(CopyEngineTest, SubmitRejectsUnallocatedHostBlock) {
+    auto desc  = makeDescriptor(Tier::DEVICE, Tier::HOST, device_blocks_, 1);
+    auto result = copy_engine_->submit(desc).result();
+    EXPECT_FALSE(result.ok());
+    EXPECT_EQ(result.status, CopyStatus::INVALID_ARGS);
 }
 
-TEST_F(CopyEngineTest, MismatchedSlotCountFails) {
+TEST_F(CopyEngineTest, SubmitMismatchedSlotCountFails) {
     BlockIdxType host_block = poolMalloc(*host_pool_);
-    auto         resolver   = cuda_device_.makeResolver();
+    std::vector<BlockIdxType> wrong_blocks = {device_block_, device_block_};
+    auto desc  = makeDescriptor(Tier::DEVICE, Tier::HOST, wrong_blocks, host_block);
+    auto result = copy_engine_->submit(desc).result();
+    EXPECT_FALSE(result.ok());
+    EXPECT_EQ(result.status, CopyStatus::INVALID_ARGS);
+    host_pool_->free(host_block);
+}
 
-    std::vector<BlockIdxType> wrong_blocks = {1, 2};  // 2 blocks but 3 slots
-    EXPECT_FALSE(copy_engine_->deviceToHost(wrong_blocks, host_block, slots_, resolver, *host_pool_));
+TEST_F(CopyEngineTest, SubmitInvalidDescriptorReturnsStructuredFailure) {
+    TransferDescriptor desc;
+    desc.source_tier = Tier::DEVICE;
+    desc.target_tier = Tier::HOST;
+    // No component_group_id.
+    auto result = copy_engine_->submit(desc).result();
+    EXPECT_FALSE(result.ok());
+    EXPECT_EQ(result.status, CopyStatus::INVALID_ARGS);
+}
+
+TEST_F(CopyEngineTest, SubmitMissingDevicePoolFails) {
+    BlockIdxType host_block = poolMalloc(*host_pool_);
+    auto desc  = makeDescriptor(Tier::DEVICE, Tier::HOST, device_blocks_, host_block);
+    auto group = makeGroup(0, {0}, {}, host_pool_);
+    auto copy_engine = std::make_shared<CopyEngine>(std::vector<ComponentGroupPtr>{group},
+                                                    std::vector<Component>{component_});
+    auto result = copy_engine->submit(desc).result();
+    EXPECT_FALSE(result.ok());
+    EXPECT_EQ(result.status, CopyStatus::INVALID_ARGS);
+    host_pool_->free(host_block);
+}
+
+TEST_F(CopyEngineTest, SubmitDeviceTransferWithEmptyComponentsFails) {
+    BlockIdxType host_block = poolMalloc(*host_pool_);
+    auto desc  = makeDescriptor(Tier::DEVICE, Tier::HOST, device_blocks_, host_block);
+    auto group = makeGroup(0, {}, {device_pool_}, host_pool_);
+    auto copy_engine = std::make_shared<CopyEngine>(std::vector<ComponentGroupPtr>{group}, std::vector<Component>{});
+    auto result = copy_engine->submit(desc).result();
+    EXPECT_FALSE(result.ok());
+    EXPECT_EQ(result.status, CopyStatus::INVALID_ARGS);
+    host_pool_->free(host_block);
+}
+
+TEST_F(CopyEngineTest, SubmitReturnsCompletedHandle) {
+    fillDeviceLayer(device_pool_, 0, device_block_, {0xAA});
+    fillDeviceLayer(device_pool_, 1, device_block_, {0xBB});
+    fillDeviceLayer(device_pool_, 2, device_block_, {0xCC});
+
+    BlockIdxType host_block = poolMalloc(*host_pool_);
+    auto desc = makeDescriptor(Tier::DEVICE, Tier::HOST, device_blocks_, host_block);
+
+    auto handle = copy_engine_->submit(desc);
+    ASSERT_TRUE(handle.valid());
+    EXPECT_TRUE(handle.done());
+    handle.wait();
+
+    bool callback_called = false;
+    handle.onComplete([&](const CopyResult& result) {
+        callback_called = true;
+        EXPECT_TRUE(result.ok());
+        EXPECT_EQ(result.completed_entries, 1u);
+    });
+    EXPECT_TRUE(callback_called);
+
+    auto result = handle.result();
+    EXPECT_TRUE(result.ok());
+    EXPECT_EQ(result.request_id, handle.requestId());
 
     host_pool_->free(host_block);
 }
@@ -399,188 +506,118 @@ TEST_F(CopyEngineTest, ComputeHostBlockSize) {
     EXPECT_EQ(CopyEngine::computeHostBlockSize(test_slots), 600u);
 }
 
-class CpuDeviceMemory {
-public:
-    void allocate(int layer_id, BlockIdxType block_idx, size_t size_bytes) {
-        buffers_[makeKey(layer_id, block_idx)] = std::vector<uint8_t>(size_bytes, 0);
-    }
+TEST_F(CopyEngineTest, SubmitHostToDeviceIndependentDescriptors) {
+    BlockIdxType second_device_block = poolMalloc(*device_pool_);
+    ASSERT_NE(second_device_block, NULL_BLOCK_IDX);
+    std::vector<BlockIdxType> second_device_blocks = {second_device_block};
 
-    void fill(int layer_id, BlockIdxType block_idx, uint8_t pattern) {
-        auto& buffer = buffers_[makeKey(layer_id, block_idx)];
-        std::fill(buffer.begin(), buffer.end(), pattern);
-    }
+    BlockIdxType host_block_1 = poolMalloc(*host_pool_);
+    auto* host_data_1 = static_cast<uint8_t*>(host_pool_->blockBuffer(host_block_1).addr);
+    std::memset(host_data_1, 0x12, slots_[0].stride_bytes);
+    std::memset(host_data_1 + slots_[0].stride_bytes, 0x34, slots_[1].stride_bytes);
+    std::memset(host_data_1 + slots_[0].stride_bytes + slots_[1].stride_bytes, 0x9A, slots_[2].stride_bytes);
 
-    std::vector<uint8_t> read(int layer_id, BlockIdxType block_idx) const {
-        auto it = buffers_.find(makeKey(layer_id, block_idx));
-        return it == buffers_.end() ? std::vector<uint8_t>{} : it->second;
-    }
+    BlockIdxType host_block_2 = poolMalloc(*host_pool_);
+    auto* host_data_2 = static_cast<uint8_t*>(host_pool_->blockBuffer(host_block_2).addr);
+    std::memset(host_data_2, 0x56, slots_[0].stride_bytes);
+    std::memset(host_data_2 + slots_[0].stride_bytes, 0x78, slots_[1].stride_bytes);
+    std::memset(host_data_2 + slots_[0].stride_bytes + slots_[1].stride_bytes, 0xBC, slots_[2].stride_bytes);
 
-    DeviceBufferResolver makeResolver() {
-        return [this](int layer_id, BlockIdxType block_idx) -> BlockInfo {
-            auto it = buffers_.find(makeKey(layer_id, block_idx));
-            if (it == buffers_.end()) {
-                return BlockInfo{};
-            }
-            BlockInfo info;
-            info.is_cuda    = false;
-            info.addr       = it->second.data();
-            info.size_bytes = it->second.size();
-            return info;
-        };
-    }
+    auto result_1 =
+        copy_engine_->submit(makeDescriptor(Tier::HOST, Tier::DEVICE, device_blocks_, host_block_1)).result();
+    ASSERT_TRUE(result_1.ok());
+    EXPECT_EQ(result_1.completed_entries, 1u);
 
-private:
-    static uint64_t makeKey(int layer_id, BlockIdxType block_idx) {
-        return (static_cast<uint64_t>(layer_id) << 32) | static_cast<uint64_t>(block_idx);
-    }
+    auto result_2 =
+        copy_engine_->submit(makeDescriptor(Tier::HOST, Tier::DEVICE, second_device_blocks, host_block_2)).result();
+    ASSERT_TRUE(result_2.ok());
+    EXPECT_EQ(result_2.completed_entries, 1u);
 
-    std::unordered_map<uint64_t, std::vector<uint8_t>> buffers_;
-};
+    for (auto byte : readDeviceLayer(device_pool_, 0, device_block_)) EXPECT_EQ(byte, 0x12);
+    for (auto byte : readDeviceLayer(device_pool_, 1, device_block_)) EXPECT_EQ(byte, 0x34);
+    for (auto byte : readDeviceLayer(device_pool_, 2, device_block_)) EXPECT_EQ(byte, 0x9A);
+    for (auto byte : readDeviceLayer(device_pool_, 0, second_device_block)) EXPECT_EQ(byte, 0x56);
+    for (auto byte : readDeviceLayer(device_pool_, 1, second_device_block)) EXPECT_EQ(byte, 0x78);
+    for (auto byte : readDeviceLayer(device_pool_, 2, second_device_block)) EXPECT_EQ(byte, 0xBC);
 
-class CopyEngineFacadeCpuTest: public ::testing::Test {
-protected:
-    void SetUp() override {
-        slots_ = {
-            {0, "layer_0", 64},
-            {1, "layer_1", 32},
-        };
-        host_pool_ = makeHostPool(CopyEngine::computeHostBlockSize(slots_), 4);
-        ASSERT_TRUE(host_pool_->init());
-
-        device_blocks_ = {11, 12};
-        cpu_device_.allocate(0, device_blocks_[0], slots_[0].stride_bytes);
-        cpu_device_.allocate(1, device_blocks_[1], slots_[1].stride_bytes);
-
-        CopyEngineTransferResources resources;
-        resources.device_buffer_resolver = cpu_device_.makeResolver();
-        resources.layer_slots_resolver   = [this](int) { return slots_; };
-        resources.host_pool_resolver     = [this](int) { return host_pool_; };
-        copy_engine_                     = std::make_shared<CopyEngine>(std::move(resources));
-    }
-
-    TransferDescriptor makeDescriptor(Tier source_tier, Tier target_tier) {
-        TransferDescriptor desc;
-        desc.component_group_id = 0;
-        desc.source_tier        = source_tier;
-        desc.target_tier        = target_tier;
-        return desc;
-    }
-
-    std::vector<MemoryBlockLayerTagSlot> slots_;
-    std::shared_ptr<HostBlockPool>       host_pool_;
-    std::shared_ptr<CopyEngine>          copy_engine_;
-    std::vector<BlockIdxType>            device_blocks_;
-    CpuDeviceMemory                      cpu_device_;
-};
-
-TEST_F(CopyEngineFacadeCpuTest, SubmitDeviceToHostReturnsCompletedHandle) {
-    cpu_device_.fill(0, device_blocks_[0], 0x4A);
-    cpu_device_.fill(1, device_blocks_[1], 0x7B);
-
-    BlockIdxType host_block = poolMalloc(*host_pool_);
-    ASSERT_NE(host_block, NULL_BLOCK_IDX);
-
-    auto          desc = makeDescriptor(Tier::DEVICE, Tier::HOST);
-    TransferEntry entry;
-    entry.device_blocks = device_blocks_;
-    entry.host_block    = host_block;
-    desc.entries        = {entry};
-
-    auto handle = copy_engine_->submit(desc);
-    ASSERT_TRUE(handle.valid());
-    handle.wait();
-    EXPECT_TRUE(handle.done());
-
-    bool callback_called = false;
-    handle.onComplete([&](const CopyResult& result) {
-        callback_called = true;
-        EXPECT_TRUE(result.ok());
-        EXPECT_EQ(result.completed_entries, 1u);
-    });
-    EXPECT_TRUE(callback_called);
-
-    auto result = handle.result();
-    EXPECT_TRUE(result.ok());
-    EXPECT_EQ(result.request_id, handle.requestId());
-    EXPECT_EQ(result.completed_entries, 1u);
-    EXPECT_EQ(result.failed_entries, 0u);
-
-    const uint8_t* host_data = static_cast<const uint8_t*>(host_pool_->blockBuffer(host_block).addr);
-    for (size_t i = 0; i < slots_[0].stride_bytes; ++i) {
-        EXPECT_EQ(host_data[i], 0x4A);
-    }
-    for (size_t i = slots_[0].stride_bytes; i < CopyEngine::computeHostBlockSize(slots_); ++i) {
-        EXPECT_EQ(host_data[i], 0x7B);
-    }
-
-    host_pool_->free(host_block);
+    host_pool_->free(host_block_1);
+    host_pool_->free(host_block_2);
+    device_pool_->requestFree(second_device_block);
 }
 
-TEST_F(CopyEngineFacadeCpuTest, SubmitHostToDeviceSupportsBatchEntries) {
-    BlockIdxType host_block = poolMalloc(*host_pool_);
-    ASSERT_NE(host_block, NULL_BLOCK_IDX);
-    auto* host_data = static_cast<uint8_t*>(host_pool_->blockBuffer(host_block).addr);
-    std::memset(host_data, 0x12, slots_[0].stride_bytes);
-    std::memset(host_data + slots_[0].stride_bytes, 0x34, slots_[1].stride_bytes);
+TEST_F(CopyEngineTest, SubmitUsesComponentOrdinalForMultipleDevicePools) {
+    std::vector<MemoryBlockLayerTagSlot> comp0_slots = {{0, "comp0", 64}};
+    std::vector<MemoryBlockLayerTagSlot> comp1_slots = {{0, "comp1", 96}};
+    auto host_pool = makeHostPool(160, 2);
+    auto pool0     = makeDevicePool({{64, 0}}, 4, "copy_engine_multi_pool_0");
+    auto pool1     = makeDevicePool({{96, 0}}, 4, "copy_engine_multi_pool_1");
+    auto block0    = poolMalloc(*pool0);
+    auto block1    = poolMalloc(*pool1);
+    ASSERT_NE(block0, NULL_BLOCK_IDX);
+    ASSERT_NE(block1, NULL_BLOCK_IDX);
 
-    std::vector<BlockIdxType> second_device_blocks = {21, 22};
-    cpu_device_.allocate(0, second_device_blocks[0], slots_[0].stride_bytes);
-    cpu_device_.allocate(1, second_device_blocks[1], slots_[1].stride_bytes);
+    fillDeviceLayer(pool0, 0, block0, {0xA1});
+    fillDeviceLayer(pool1, 0, block1, {0xB2});
 
-    BlockIdxType second_host_block = poolMalloc(*host_pool_);
-    ASSERT_NE(second_host_block, NULL_BLOCK_IDX);
-    auto* second_host_data = static_cast<uint8_t*>(host_pool_->blockBuffer(second_host_block).addr);
-    std::memset(second_host_data, 0x56, slots_[0].stride_bytes);
-    std::memset(second_host_data + slots_[0].stride_bytes, 0x78, slots_[1].stride_bytes);
+    std::vector<Component> components = {
+        makeComponent(0, 0, comp0_slots, 0),
+        makeComponent(1, 0, comp1_slots, 1),
+    };
+    auto group = makeGroup(0, {0, 1}, {pool0, pool1}, host_pool);
+    auto copy_engine =
+        std::make_shared<CopyEngine>(std::vector<ComponentGroupPtr>{group}, components);
 
-    auto          desc = makeDescriptor(Tier::HOST, Tier::DEVICE);
-    TransferEntry first_entry;
-    first_entry.host_block    = host_block;
-    first_entry.device_blocks = device_blocks_;
-    TransferEntry second_entry;
-    second_entry.host_block    = second_host_block;
-    second_entry.device_blocks = second_device_blocks;
-    desc.entries              = {first_entry, second_entry};
-
-    auto result = copy_engine_->submit(desc).result();
+    auto host_block = poolMalloc(*host_pool);
+    auto desc       = makeDescriptor(Tier::DEVICE, Tier::HOST, {block0, block1}, host_block);
+    auto result     = copy_engine->submit(desc).result();
     ASSERT_TRUE(result.ok());
-    EXPECT_EQ(result.completed_entries, 2u);
 
-    auto d0 = cpu_device_.read(0, device_blocks_[0]);
-    auto d1 = cpu_device_.read(1, device_blocks_[1]);
-    ASSERT_EQ(d0.size(), slots_[0].stride_bytes);
-    ASSERT_EQ(d1.size(), slots_[1].stride_bytes);
-    for (auto byte : d0) {
-        EXPECT_EQ(byte, 0x12);
-    }
-    for (auto byte : d1) {
-        EXPECT_EQ(byte, 0x34);
-    }
+    const auto* host_data = static_cast<const uint8_t*>(host_pool->blockBuffer(host_block).addr);
+    for (size_t i = 0; i < 64; ++i) EXPECT_EQ(host_data[i], 0xA1);
+    for (size_t i = 64; i < 160; ++i) EXPECT_EQ(host_data[i], 0xB2);
 
-    auto d2 = cpu_device_.read(0, second_device_blocks[0]);
-    auto d3 = cpu_device_.read(1, second_device_blocks[1]);
-    ASSERT_EQ(d2.size(), slots_[0].stride_bytes);
-    ASSERT_EQ(d3.size(), slots_[1].stride_bytes);
-    for (auto byte : d2) {
-        EXPECT_EQ(byte, 0x56);
-    }
-    for (auto byte : d3) {
-        EXPECT_EQ(byte, 0x78);
-    }
-
-    host_pool_->free(host_block);
-    host_pool_->free(second_host_block);
+    host_pool->free(host_block);
+    pool0->requestFree(block0);
+    pool1->requestFree(block1);
 }
 
-TEST(CopyEngineFacadeTest, SubmitInvalidDescriptorReturnsStructuredFailure) {
-    CopyEngine         copy_engine;
-    TransferDescriptor desc;
-    desc.source_tier = Tier::DEVICE;
-    desc.target_tier = Tier::HOST;
+TEST_F(CopyEngineTest, SubmitCopiesAllBuffersReturnedByDeviceBlockPool) {
+    std::vector<MemoryBlockLayerTagSlot> slots = {{0, "fp8_kv", 80}};
+    auto host_pool  = makeHostPool(CopyEngine::computeHostBlockSize(slots), 2);
+    auto scale_pool = makeDevicePool({{64, 16}}, 4, "copy_engine_scale_device");
+    auto block      = poolMalloc(*scale_pool);
+    ASSERT_NE(block, NULL_BLOCK_IDX);
 
-    auto result = copy_engine.submit(desc).result();
-    EXPECT_FALSE(result.ok());
-    EXPECT_EQ(result.status, CopyStatusCode::INVALID_DESCRIPTOR);
+    fillDeviceLayer(scale_pool, 0, block, {0x4A, 0x7B});
+
+    auto component   = makeComponent(0, 0, slots);
+    auto group       = makeGroup(0, {0}, {scale_pool}, host_pool);
+    auto copy_engine = std::make_shared<CopyEngine>(std::vector<ComponentGroupPtr>{group},
+                                                    std::vector<Component>{component});
+    auto host_block  = poolMalloc(*host_pool);
+    auto d2h_desc    = makeDescriptor(Tier::DEVICE, Tier::HOST, {block}, host_block);
+    auto d2h_result  = copy_engine->submit(d2h_desc).result();
+    ASSERT_TRUE(d2h_result.ok());
+
+    const auto* host_data = static_cast<const uint8_t*>(host_pool->blockBuffer(host_block).addr);
+    for (size_t i = 0; i < 64; ++i) EXPECT_EQ(host_data[i], 0x4A);
+    for (size_t i = 64; i < 80; ++i) EXPECT_EQ(host_data[i], 0x7B);
+
+    auto* mutable_host_data = static_cast<uint8_t*>(host_pool->blockBuffer(host_block).addr);
+    std::memset(mutable_host_data, 0x11, 64);
+    std::memset(mutable_host_data + 64, 0x22, 16);
+
+    fillDeviceLayer(scale_pool, 0, block, {0x00, 0x00});
+    auto h2d_desc   = makeDescriptor(Tier::HOST, Tier::DEVICE, {block}, host_block);
+    auto h2d_result = copy_engine->submit(h2d_desc).result();
+    ASSERT_TRUE(h2d_result.ok());
+
+    auto device_bytes = readDeviceLayer(scale_pool, 0, block);
+    ASSERT_EQ(device_bytes.size(), 80u);
+    for (size_t i = 0; i < 64; ++i) EXPECT_EQ(device_bytes[i], 0x11);
+    for (size_t i = 64; i < 80; ++i) EXPECT_EQ(device_bytes[i], 0x22);
+
+    host_pool->free(host_block);
 }
 
 // ---- Host ↔ Disk roundtrip tests ----
@@ -622,7 +659,15 @@ protected:
         disk_pool_ = std::make_shared<DiskBlockPool>(disk_config);
         ASSERT_TRUE(disk_pool_->init()) << "DiskBlockPool init failed in " << test_tmpdir_;
 
-        copy_engine_ = std::make_shared<CopyEngine>();
+        device_pool_  = makeDevicePool({{128, 0}, {256, 0}}, 4, "copy_engine_disk_device");
+        device_block_ = poolMalloc(*device_pool_);
+        ASSERT_NE(device_block_, NULL_BLOCK_IDX);
+
+        component_       = makeComponent(0, 0, slots_);
+        component_group_ = makeGroup(0, {0}, {device_pool_}, host_pool_, disk_pool_);
+        copy_engine_ =
+            std::make_shared<CopyEngine>(std::vector<ComponentGroupPtr>{component_group_},
+                                         std::vector<Component>{component_});
     }
 
     void TearDown() override {
@@ -641,35 +686,57 @@ protected:
     std::shared_ptr<HostBlockPool>      host_pool_;
     std::shared_ptr<DiskBlockPool>       disk_pool_;
     std::shared_ptr<CopyEngine>          copy_engine_;
+    BlockPoolPtr                         device_pool_;
+    BlockIdxType                         device_block_;
+    Component                            component_;
+    ComponentGroupPtr                    component_group_;
 };
 
-// TODO: Rewrite this as submit(HOST -> DISK) + submit(DISK -> HOST) facade coverage.
-TEST_F(CopyEngineDiskTest, HostToDiskRoundTrip) {
-    // Fill host block with pattern
+TEST_F(CopyEngineDiskTest, SubmitHostToDiskRoundTrip) {
     BlockIdxType host_block = poolMalloc(*host_pool_);
     ASSERT_NE(host_block, NULL_BLOCK_IDX);
     uint8_t* host_data = static_cast<uint8_t*>(host_pool_->blockBuffer(host_block).addr);
-    for (size_t i = 0; i < host_block_size_; ++i) {
+    for (size_t i = 0; i < host_block_size_; ++i)
         host_data[i] = static_cast<uint8_t>(i & 0xFF);
-    }
 
-    // Write to disk
     auto disk_slot_opt = disk_pool_->malloc();
     ASSERT_TRUE(disk_slot_opt.has_value());
     int32_t disk_slot = disk_slot_opt.value();
 
-    ASSERT_TRUE(copy_engine_->hostToDisk(host_block, disk_slot, *host_pool_, *disk_pool_));
+    // H2Disk
+    auto h2d_desc = makeDescriptor(Tier::HOST, Tier::DISK, {}, host_block, disk_slot);
+    ASSERT_TRUE(copy_engine_->submit(h2d_desc).result().ok());
 
-    // Clear host block
+    // Clear host
     std::memset(host_data, 0, host_block_size_);
 
-    // Read back from disk
-    ASSERT_TRUE(copy_engine_->diskToHost(disk_slot, host_block, *host_pool_, *disk_pool_));
+    // Disk2H
+    auto d2h_desc = makeDescriptor(Tier::DISK, Tier::HOST, {}, host_block, disk_slot);
+    ASSERT_TRUE(copy_engine_->submit(d2h_desc).result().ok());
 
-    // Verify data restored
-    for (size_t i = 0; i < host_block_size_; ++i) {
+    for (size_t i = 0; i < host_block_size_; ++i)
         EXPECT_EQ(host_data[i], static_cast<uint8_t>(i & 0xFF)) << "byte " << i;
-    }
+
+    host_pool_->free(host_block);
+    disk_pool_->free(disk_slot);
+}
+
+TEST_F(CopyEngineDiskTest, SubmitHostToDiskDoesNotRequireComponents) {
+    auto group = makeGroup(0, {0}, {}, host_pool_, disk_pool_);
+    auto copy_engine = std::make_shared<CopyEngine>(std::vector<ComponentGroupPtr>{group}, std::vector<Component>{});
+
+    BlockIdxType host_block = poolMalloc(*host_pool_);
+    ASSERT_NE(host_block, NULL_BLOCK_IDX);
+    auto* host_data = static_cast<uint8_t*>(host_pool_->blockBuffer(host_block).addr);
+    std::memset(host_data, 0x5C, host_block_size_);
+
+    auto disk_slot_opt = disk_pool_->malloc();
+    ASSERT_TRUE(disk_slot_opt.has_value());
+    auto disk_slot = disk_slot_opt.value();
+
+    auto desc = makeDescriptor(Tier::HOST, Tier::DISK, {}, host_block, disk_slot);
+    auto result = copy_engine->submit(desc).result();
+    EXPECT_TRUE(result.ok());
 
     host_pool_->free(host_block);
     disk_pool_->free(disk_slot);
@@ -677,68 +744,63 @@ TEST_F(CopyEngineDiskTest, HostToDiskRoundTrip) {
 
 // TODO: Move this L1/L2/L3 pipeline coverage out of CopyEngine unit tests.
 TEST_F(CopyEngineDiskTest, FullPipeline_D2H_H2Disk_Disk2H_H2D) {
-    // Full pipeline: Device → Host → Disk → Host → Device (real CUDA)
-    CudaDeviceMemory          cuda_device;
-    std::vector<BlockIdxType> device_blocks = {1, 2};
-    cuda_device.allocate(0, 1, 128);
-    cuda_device.allocate(1, 2, 256);
+    std::vector<BlockIdxType> device_blocks = {device_block_};
 
-    // Fill with sequential data on GPU
-    cuda_device.fillSequential(0, 1);
-    // Fill layer 1 with pattern: i*3 & 0xFF
+    fillDeviceLayerSequential(device_pool_, 0, device_block_);
     {
         std::vector<uint8_t> cpu_data(256);
         for (size_t i = 0; i < 256; ++i)
             cpu_data[i] = static_cast<uint8_t>(i * 3 & 0xFF);
         auto cpu_tensor = torch::from_blob(cpu_data.data(), {256}, torch::kUInt8).clone();
-        // Get the internal tensor and copy
-        auto gpu_opts   = torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA, 0);
-        auto gpu_tensor = torch::from_blob(cuda_device.devicePtr(1, 2), {256}, gpu_opts);
-        gpu_tensor.copy_(cpu_tensor);
+        auto buffers    = device_pool_->convertIndexToBuffer(1, device_block_);
+        ASSERT_EQ(buffers.size(), 1u);
+        makePoolByteTensor(buffers[0].addr, buffers[0].size_bytes, buffers[0].is_cuda).copy_(cpu_tensor);
+        cudaDeviceSynchronize();
     }
-
-    auto resolver = cuda_device.makeResolver();
 
     // Step 1: D2H
     BlockIdxType host_block_1 = poolMalloc(*host_pool_);
-    ASSERT_TRUE(copy_engine_->deviceToHost(device_blocks, host_block_1, slots_, resolver, *host_pool_));
+    auto d2h_desc = makeDescriptor(Tier::DEVICE, Tier::HOST, device_blocks, host_block_1);
+    ASSERT_TRUE(copy_engine_->submit(d2h_desc).result().ok());
 
     // Step 2: H2Disk
     auto disk_slot_opt = disk_pool_->malloc();
     ASSERT_TRUE(disk_slot_opt.has_value());
     int32_t disk_slot = disk_slot_opt.value();
-    ASSERT_TRUE(copy_engine_->hostToDisk(host_block_1, disk_slot, *host_pool_, *disk_pool_));
+    auto h2disk_desc = makeDescriptor(Tier::HOST, Tier::DISK, {}, host_block_1, disk_slot);
+    ASSERT_TRUE(copy_engine_->submit(h2disk_desc).result().ok());
     host_pool_->free(host_block_1);
 
     // Step 3: Disk2H
     BlockIdxType host_block_2 = poolMalloc(*host_pool_);
     ASSERT_NE(host_block_2, NULL_BLOCK_IDX);
-    ASSERT_TRUE(copy_engine_->diskToHost(disk_slot, host_block_2, *host_pool_, *disk_pool_));
+    auto disk2h_desc = makeDescriptor(Tier::DISK, Tier::HOST, {}, host_block_2, disk_slot);
+    ASSERT_TRUE(copy_engine_->submit(disk2h_desc).result().ok());
 
-    // Step 4: H2D (clear device first)
-    cuda_device.fill(0, 1, 0x00);
-    cuda_device.fill(1, 2, 0x00);
-    ASSERT_TRUE(copy_engine_->hostToDevice(host_block_2, device_blocks, slots_, resolver, *host_pool_));
+    // Step 4: H2D
+    fillDeviceLayer(device_pool_, 0, device_block_, {0x00});
+    fillDeviceLayer(device_pool_, 1, device_block_, {0x00});
+    auto h2d_desc = makeDescriptor(Tier::HOST, Tier::DEVICE, device_blocks, host_block_2);
+    ASSERT_TRUE(copy_engine_->submit(h2d_desc).result().ok());
 
-    // Verify full roundtrip (read back from GPU)
-    auto d0 = cuda_device.readBack(0, 1);
-    auto d1 = cuda_device.readBack(1, 2);
-
-    for (size_t i = 0; i < 128; ++i) {
+    auto d0 = readDeviceLayer(device_pool_, 0, device_block_);
+    auto d1 = readDeviceLayer(device_pool_, 1, device_block_);
+    for (size_t i = 0; i < 128; ++i)
         EXPECT_EQ(d0[i], static_cast<uint8_t>(i & 0xFF));
-    }
-    for (size_t i = 0; i < 256; ++i) {
+    for (size_t i = 0; i < 256; ++i)
         EXPECT_EQ(d1[i], static_cast<uint8_t>(i * 3 & 0xFF));
-    }
 
     host_pool_->free(host_block_2);
     disk_pool_->free(disk_slot);
 }
 
-TEST_F(CopyEngineDiskTest, HostToDiskRejectsUnallocatedDiskBlock) {
+TEST_F(CopyEngineDiskTest, SubmitHostToDiskRejectsUnallocatedDiskBlock) {
     BlockIdxType host_block = poolMalloc(*host_pool_);
     ASSERT_NE(host_block, NULL_BLOCK_IDX);
-    EXPECT_FALSE(copy_engine_->hostToDisk(host_block, 1, *host_pool_, *disk_pool_));
+    auto desc = makeDescriptor(Tier::HOST, Tier::DISK, {}, host_block, 1);
+    auto result = copy_engine_->submit(desc).result();
+    EXPECT_FALSE(result.ok());
+    EXPECT_EQ(result.status, CopyStatus::INVALID_ARGS);
     host_pool_->free(host_block);
 }
 

@@ -101,14 +101,12 @@ std::optional<EvictionResult> ComponentGroup::driveEviction(int num_blocks, Tier
                 result.target_tier       = Tier::HOST;
                 auto& slot               = entry->node->group_slots[static_cast<size_t>(component_group_id)];
                 result.blocks_to_release = slot.device_blocks;
-                result.transfer          = buildTransfer(entry->node, TransferType::DEVICE_TO_HOST);
                 break;
             }
             case Tier::HOST: {
                 result.target_tier       = Tier::DISK;
                 auto& slot               = entry->node->group_slots[static_cast<size_t>(component_group_id)];
                 result.blocks_to_release = {slot.host_block};
-                result.transfer          = buildTransfer(entry->node, TransferType::HOST_TO_DISK);
                 break;
             }
             case Tier::DISK: {
@@ -128,40 +126,20 @@ std::optional<EvictionResult> ComponentGroup::driveEviction(int num_blocks, Tier
 }
 
 TransferDescriptor ComponentGroup::buildTransfer(TreeNode* node, TransferType type) {
-    TransferDescriptor desc;
-    desc.component_group_id = component_group_id;
-    auto& slot              = node->group_slots[static_cast<size_t>(component_group_id)];
-
-    TransferEntry entry;
-    entry.node = node;
+    auto& slot = node->group_slots[static_cast<size_t>(component_group_id)];
 
     switch (type) {
         case TransferType::DEVICE_TO_HOST:
-            desc.source_tier   = Tier::DEVICE;
-            desc.target_tier   = Tier::HOST;
-            entry.device_blocks = slot.device_blocks;
-            break;
+            return TransferDescriptor::deviceToHost(node, component_group_id, slot.device_blocks, NULL_BLOCK_IDX);
         case TransferType::HOST_TO_DEVICE:
-            desc.source_tier = Tier::HOST;
-            desc.target_tier = Tier::DEVICE;
-            entry.host_block = slot.host_block;
-            break;
+            return TransferDescriptor::hostToDevice(node, component_group_id, slot.host_block, slot.device_blocks);
         case TransferType::HOST_TO_DISK:
-            desc.source_tier = Tier::HOST;
-            desc.target_tier = Tier::DISK;
-            entry.host_block = slot.host_block;
-            break;
+            return TransferDescriptor::hostToDisk(node, component_group_id, slot.host_block, NULL_BLOCK_IDX);
         case TransferType::DISK_TO_HOST:
-            desc.source_tier = Tier::DISK;
-            desc.target_tier = Tier::HOST;
-            entry.disk_block = slot.disk_slot;
-            break;
+            return TransferDescriptor::diskToHost(node, component_group_id, slot.disk_slot, NULL_BLOCK_IDX);
         default:
-            return desc;
+            return {};
     }
-
-    desc.entries = {entry};
-    return desc;
 }
 
 bool ComponentGroup::isLeafAtTier(const TreeNode* node, int group_id, Tier tier) const {

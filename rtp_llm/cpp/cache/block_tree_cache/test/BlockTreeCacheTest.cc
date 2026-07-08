@@ -1,10 +1,6 @@
 #include <gtest/gtest.h>
 
-#include <cstring>
 #include <thread>
-#include <unordered_map>
-
-#include <torch/torch.h>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCache.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/copy_engine/CopyEngine.h"
@@ -522,9 +518,8 @@ TEST_F(BlockTreeCacheTest, SWABuildTransferSupportsHostToDisk) {
     auto desc = swa->buildTransfer(find.matched_node, TransferType::HOST_TO_DISK);
     EXPECT_EQ(desc.source_tier, Tier::HOST);
     EXPECT_EQ(desc.target_tier, Tier::DISK);
-    ASSERT_EQ(desc.entries.size(), 1u);
-    EXPECT_EQ(desc.entries[0].node, find.matched_node);
-    EXPECT_EQ(desc.entries[0].host_block, 7);
+    EXPECT_EQ(desc.node, find.matched_node);
+    EXPECT_EQ(desc.host_block, 7);
 
     // Verify driveEviction(HOST) produces a valid transfer
     swa->device_heap->invalidate(find.matched_node);
@@ -537,8 +532,8 @@ TEST_F(BlockTreeCacheTest, SWABuildTransferSupportsHostToDisk) {
     ASSERT_TRUE(er.has_value());
     EXPECT_EQ(er->source_tier, Tier::HOST);
     EXPECT_EQ(er->target_tier, Tier::DISK);
-    EXPECT_EQ(er->transfer.source_tier, Tier::HOST);
-    EXPECT_EQ(er->transfer.target_tier, Tier::DISK);
+    ASSERT_EQ(er->blocks_to_release.size(), 1u);
+    EXPECT_EQ(er->blocks_to_release[0], 7);
 }
 
 // ---------------------------------------------------------------------------
@@ -702,7 +697,7 @@ TEST_F(BlockTreeCacheTest, CopyFailureDoesNotUpdateSlot) {
     slots[0][0].device_blocks = {42};
     cache->insert(nullptr, {100}, slots);
 
-    // Evict: DeviceBufferResolver returns empty -> D2H copy should fail
+    // Evict: v4 device_pools are not populated yet -> D2H copy should fail.
     // After fix: host_block should NOT be set, node stays in device heap
     cache->evict(1, Tier::DEVICE);
     cache->waitForPendingTasks();
@@ -712,128 +707,6 @@ TEST_F(BlockTreeCacheTest, CopyFailureDoesNotUpdateSlot) {
         // Copy failed -> host_block should remain invalid
         EXPECT_FALSE(find.matched_node->group_slots[0].has_host_value());
     }
-}
-
-// ---------------------------------------------------------------------------
-// Real CUDA device memory for DeviceBufferResolver tests.
-// Allocates GPU buffers via torch; total GPU usage < 1KB.
-// ---------------------------------------------------------------------------
-class CudaDeviceMemory {
-public:
-    void allocate(int layer_id, BlockIdxType block_idx, size_t size_bytes) {
-        auto key      = makeKey(layer_id, block_idx);
-        auto gpu_opts = torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA, 0);
-        tensors_[key] = torch::zeros({static_cast<int64_t>(size_bytes)}, gpu_opts);
-    }
-    void fill(int layer_id, BlockIdxType block_idx, uint8_t pattern) {
-        auto key = makeKey(layer_id, block_idx);
-        auto it  = tensors_.find(key);
-        if (it != tensors_.end()) {
-            it->second.fill_(pattern);
-        }
-    }
-    void* devicePtr(int layer_id, BlockIdxType block_idx) {
-        auto key = makeKey(layer_id, block_idx);
-        auto it  = tensors_.find(key);
-        return it != tensors_.end() ? it->second.data_ptr() : nullptr;
-    }
-    size_t size(int layer_id, BlockIdxType block_idx) const {
-        auto key = makeKey(layer_id, block_idx);
-        auto it  = tensors_.find(key);
-        return it != tensors_.end() ? static_cast<size_t>(it->second.numel()) : 0;
-    }
-    DeviceBufferResolver makeResolver() {
-        return [this](int layer_id, BlockIdxType block_idx) -> BlockInfo {
-            BlockInfo info;
-            info.is_cuda      = true;
-            info.device_index = 0;
-            info.addr         = devicePtr(layer_id, block_idx);
-            info.size_bytes   = size(layer_id, block_idx);
-            return info;
-        };
-    }
-
-private:
-    static uint64_t makeKey(int layer_id, BlockIdxType block_idx) {
-        return (static_cast<uint64_t>(layer_id) << 32) | static_cast<uint64_t>(block_idx);
-    }
-    std::unordered_map<uint64_t, torch::Tensor> tensors_;
-};
-
-// ---------------------------------------------------------------------------
-// Test: DeviceBufferResolver — D2H copy succeeds with real CUDA resolver
-// ---------------------------------------------------------------------------
-TEST_F(BlockTreeCacheTest, DeviceBufferResolverEnablesD2HCopy) {
-    ASSERT_TRUE(torch::cuda::is_available()) << "CUDA not available";
-
-    // Set up host pool with pinned memory for async DMA
-    auto host_pool = makeHostPool(512, 4);
-    ASSERT_TRUE(host_pool->init());
-
-    // Set up real CUDA device memory: layer 0 block 42 = 128 bytes filled with 0xAA
-    CudaDeviceMemory device_mem;
-    device_mem.allocate(0, 42, 128);
-    device_mem.fill(0, 42, 0xAA);
-
-    // Create component with matching layer slot
-    Component comp;
-    comp.component_id                 = 0;
-    comp.component_group_id           = 0;
-    comp.memory_block_layer_tag_slots = {{0, "kv", 128}};
-
-    auto tree                = std::make_unique<BlockTree>(1);
-    auto full                = std::make_shared<FullComponentGroup>();
-    full->component_group_id = 0;
-    full->component_indices  = {0};
-    full->setHostPool(host_pool);
-    std::vector<ComponentGroupPtr> groups     = {full};
-    std::vector<Component>         components = {comp};
-
-    BlockTreeCacheConfig cfg;
-    cfg.enable_device_cache = true;
-    cfg.enable_memory_cache = true;
-
-    auto cache = std::make_unique<BlockTreeCache>(
-        std::move(tree), std::move(groups), std::move(components), std::move(cfg));
-
-    // Inject the real resolver
-    cache->setDeviceBufferResolver(device_mem.makeResolver());
-
-    std::vector<std::vector<GroupSlot>> slots(1, std::vector<GroupSlot>(1));
-    slots[0][0].device_blocks = {42};
-    cache->insert(nullptr, {100}, slots);
-
-    // Evict D2H — should succeed with real resolver
-    cache->evict(1, Tier::DEVICE);
-    cache->waitForPendingTasks();
-
-    // Verify: node now has host data, device data cleared
-    auto find = cache->tree()->findNode({100});
-    ASSERT_NE(find.matched_node, nullptr);
-    EXPECT_TRUE(find.matched_node->group_slots[0].has_host_value());
-    EXPECT_FALSE(find.matched_node->group_slots[0].has_device_value());
-
-    // Verify host block content: should be 0xAA pattern
-    auto host_block = find.matched_node->group_slots[0].host_block;
-    ASSERT_FALSE(isNullBlockIdx(host_block));
-
-    // Task 7 lifecycle semantics: a tree-visible host block is held by the cache with
-    // exactly one reference (onEvictionComplete's cache-hold incRef); it is allocated.
-    EXPECT_TRUE(host_pool->isAllocated(host_block));
-    EXPECT_EQ(host_pool->refCount(host_block), 1u);
-
-    // Temporary-protection refcount: a load-back / lock would incRef above the cache
-    // hold and decRef back, never dropping the cache's own reference.
-    host_pool->incRef(host_block);
-    EXPECT_GT(host_pool->refCount(host_block), 1u);
-    host_pool->decRef(host_block);
-    EXPECT_EQ(host_pool->refCount(host_block), 1u);
-
-    void* host_addr = host_pool->blockBuffer(host_block).addr;
-    ASSERT_NE(host_addr, nullptr);
-    auto* bytes = static_cast<const uint8_t*>(host_addr);
-    EXPECT_EQ(bytes[0], 0xAA);
-    EXPECT_EQ(bytes[127], 0xAA);
 }
 
 TEST_F(BlockTreeCacheTest, LoadBackOnlyReloadsSWAWindow) {
