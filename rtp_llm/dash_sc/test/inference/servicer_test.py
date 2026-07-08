@@ -2123,6 +2123,40 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(generate_config.in_think_mode)
         self.assertEqual(generate_config.max_thinking_tokens, 10)
 
+    async def test_header_max_completion_tokens_prevents_zero_budget_repro(
+        self,
+    ) -> None:
+        visitor = _FakeVisitor(_FakeAsyncStream([]))
+        tok = _dsv4_tokenizer()
+        env_cfg = _GenerateEnvCfg()
+        servicer = DashScInferenceServicer(
+            backend_visitor=visitor,
+            tokenizer=tok,
+            generate_env_config=env_cfg,
+            think_runtime=build_think_runtime(tok, env_cfg, "deepseek_v4"),
+        )
+        req = self._valid_infer_request()
+        req.parameters["max_new_tokens"].int64_param = 40
+        req.parameters["enable_thinking"].bool_param = True
+        req.parameters["ds_header_attributes"].string_param = json.dumps(
+            {
+                "body": {
+                    "max_tokens": 20,
+                    "max_completion_tokens": 50,
+                    "thinking_budget": 10,
+                }
+            }
+        )
+
+        await _drain(servicer.ModelStreamInfer(_areq_iter([req]), MagicMock()))
+
+        self.assertEqual(visitor.enqueue_called, 1)
+        generate_config = visitor.last_generate_input.generate_config
+        self.assertEqual(generate_config.max_new_tokens, 40)
+        self.assertEqual(generate_config.max_completion_tokens, 50)
+        self.assertTrue(generate_config.in_think_mode)
+        self.assertEqual(generate_config.max_thinking_tokens, 10)
+
     async def test_real_mode_request_id_matches_generate_request_id(self) -> None:
         """Backend ``GenerateInput.request_id`` follows the same snowflake scheme as HTTP path."""
         from rtp_llm.frontend import request_id_generator as rig

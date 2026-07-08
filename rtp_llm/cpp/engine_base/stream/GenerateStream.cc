@@ -702,7 +702,7 @@ size_t GenerateStream::maxTokenNum() const {
     if (config->in_think_mode) {
         RTP_LLM_CHECK_WITH_INFO(config->max_thinking_tokens > 0, "max_thinking_tokens must be greater than 0");
         RTP_LLM_CHECK_WITH_INFO(
-            config->max_completion_tokens > config->max_thinking_tokens,
+            config->max_completion_tokens == 0 || config->max_completion_tokens > config->max_thinking_tokens,
             "max_completion_tokens must be greater than max_thinking_tokens when thinking is enabled");
     }
 

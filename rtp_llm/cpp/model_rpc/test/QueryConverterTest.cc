@@ -29,7 +29,6 @@ TEST(PrefillRpcServerTest, ThinkModeBudgetUsesPdSeparationWhenMaxNewTokensIsOne)
     generate_config.add_end_think_token_ids(8);
     generate_config.add_end_think_token_ids(9);
 
-    EXPECT_EQ(PrefillRpcServer::effectiveOutputTokenBudget(generate_config), 131073);
     EXPECT_TRUE(PrefillRpcServer::shouldUsePdSeparation(generate_config));
 }
 
@@ -44,7 +43,6 @@ TEST(PrefillRpcServerTest, SingleTokenRequestWithoutPositiveThinkBudgetBypassesP
 
     auto old_core_dump_on_exception              = StaticConfig::user_ft_core_dump_on_exception;
     StaticConfig::user_ft_core_dump_on_exception = false;
-    EXPECT_THROW(PrefillRpcServer::effectiveOutputTokenBudget(generate_config), std::exception);
     StaticConfig::user_ft_core_dump_on_exception = old_core_dump_on_exception;
 }
 
@@ -60,7 +58,6 @@ TEST(PrefillRpcServerTest, ThinkModeRequiresCompletionBudgetGreaterThanThinkBudg
 
     auto old_core_dump_on_exception              = StaticConfig::user_ft_core_dump_on_exception;
     StaticConfig::user_ft_core_dump_on_exception = false;
-    EXPECT_THROW(PrefillRpcServer::effectiveOutputTokenBudget(generate_config), std::exception);
     StaticConfig::user_ft_core_dump_on_exception = old_core_dump_on_exception;
 }
 

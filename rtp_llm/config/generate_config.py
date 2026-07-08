@@ -412,7 +412,8 @@ class GenerateConfig(BaseModel):
             )
             if self.in_think_mode:
                 check_with_info(
-                    self.max_completion_tokens > self.max_thinking_tokens,
+                    self.max_completion_tokens == 0
+                    or self.max_completion_tokens > self.max_thinking_tokens,
                     "max_completion_tokens must be greater than max_thinking_tokens "
                     f"when thinking is enabled, got max_completion_tokens "
                     f"{self.max_completion_tokens}, max_thinking_tokens "

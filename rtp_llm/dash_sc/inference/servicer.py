@@ -467,7 +467,10 @@ def _invalid_positive_token_param_message(
             if request_max_think is None
             else int(request_max_think)
         )
-        if int(sampling.max_completion_tokens) <= max_think:
+        if (
+            int(sampling.max_completion_tokens) > 0
+            and int(sampling.max_completion_tokens) <= max_think
+        ):
             return (
                 "invalid max_completion_tokens: "
                 f"{sampling.max_completion_tokens}; must be greater than "

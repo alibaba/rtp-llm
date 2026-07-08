@@ -530,12 +530,24 @@ def _parse_max_token_limits(
         v = _parse_optional_scalar_int(request, "max_new_tokens")
     if v is None:
         v = _parse_optional_parameter_int(request, "max_new_tokens")
+    if v is None:
+        v = _parse_optional_int_value(
+            _lookup_ds_request_control(ds_attrs or {}, "max_tokens")
+        )
+    if v is None:
+        v = _parse_optional_int_value(
+            _lookup_ds_request_control(ds_attrs or {}, "max_new_tokens")
+        )
     if v is not None:
         max_new_tokens = v
 
     v = _parse_optional_scalar_int(request, "max_completion_tokens")
     if v is None:
         v = _parse_optional_parameter_int(request, "max_completion_tokens")
+    if v is None:
+        v = _parse_optional_int_value(
+            _lookup_ds_request_control(ds_attrs or {}, "max_completion_tokens")
+        )
     if v is not None:
         max_completion_tokens = v
 

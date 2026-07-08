@@ -576,6 +576,28 @@ class DashScGrpcRequestTest(TestCase):
         self.assertEqual(sp.max_new_tokens, 64)
         self.assertEqual(sp.max_completion_tokens, 0)
 
+    def test_parse_sampling_reads_token_limits_from_ds_header_attributes(
+        self,
+    ) -> None:
+        req = predict_v2_pb2.ModelInferRequest()
+        _add_tensor(req, "max_new_tokens", "INT32", [1], struct.pack("<i", 40))
+        req.parameters["ds_header_attributes"].string_param = json.dumps(
+            {
+                "body": {
+                    "max_tokens": 20,
+                    "max_completion_tokens": 50,
+                    "thinking_budget": 10,
+                }
+            }
+        )
+
+        sp = parse_sampling_params(req)
+        other = parse_other_params(req)
+
+        self.assertEqual(sp.max_new_tokens, 40)
+        self.assertEqual(sp.max_completion_tokens, 50)
+        self.assertEqual(other.max_new_think_tokens, 10)
+
     def test_parse_sampling_top_p_as_int32(self) -> None:
         req = predict_v2_pb2.ModelInferRequest()
         _add_tensor(req, "top_p", "INT32", [1], struct.pack("<i", 1))
