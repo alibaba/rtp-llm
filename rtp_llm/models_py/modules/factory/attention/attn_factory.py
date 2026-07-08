@@ -119,6 +119,21 @@ def _get_blocked_backends(fmha_config: FMHAConfig) -> set:
     return _expand_flashinfer_alias(blocked)
 
 
+def _blocklist_known_names() -> set:
+    """Valid names for the GLOBAL disable_attn_backends blocklist.
+
+    disable_attn_backends applies to both prefill and decode, so its validity is
+    the UNION of both MHA registries (plus the pseudo/alias names). Validating a
+    global blocklist against only the current stage's registry would wrongly
+    reject a decode-only name during a prefill call (and vice versa).
+    """
+    names = {
+        getattr(impl, "NAME", None) for impl in (*PREFILL_MHA_IMPS, *DECODE_MHA_IMPS)
+    }
+    names.discard(None)
+    return _expand_flashinfer_alias(names | {"auto", "none", "flashinfer"})
+
+
 def _is_fmha_impl_disabled_legacy(impl_class: type, fmha_config: FMHAConfig) -> bool:
     """Legacy boolean flag check. Only called when effective_backend == "auto"."""
     # Global FMHA switch: when false, disable all MHA implementations.
@@ -224,11 +239,15 @@ def get_fmha_impl(
                 f"Unknown attention backend {backend_name!r}. "
                 f"Registered backends: {sorted(registered_names)}"
             )
+    # disable_attn_backends is a GLOBAL blocklist (applies to both prefill and
+    # decode), so validate it against the union of both registries (see
+    # _blocklist_known_names).
+    blocklist_known_names = _blocklist_known_names()
     for blocked_name in blocked:
-        if blocked_name not in known_names:
+        if blocked_name not in blocklist_known_names:
             raise ValueError(
                 f"Unknown attention backend in disable_attn_backends: {blocked_name!r}. "
-                f"Registered backends: {sorted(registered_names)}"
+                f"Valid backends (prefill+decode): {sorted(blocklist_known_names)}"
             )
 
     if backends == ["auto"]:

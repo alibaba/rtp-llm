@@ -20,6 +20,7 @@ from rtp_llm.models_py.modules.factory.attention.attn_factory import (
     DECODE_MLA_IMPS,
     PREFILL_MHA_IMPS,
     PREFILL_MLA_IMPS,
+    _blocklist_known_names,
 )
 
 
@@ -90,3 +91,33 @@ def test_no_duplicate_class_objects_within_registry(registry_name, registry):
         + ". Look for a stray `.append(...)` / `.extend([...])` in "
         + "rtp_llm/models_py/modules/factory/attention/__init__.py."
     )
+
+
+def test_disable_attn_backends_blocklist_spans_both_stages():
+    """disable_attn_backends is a GLOBAL blocklist, so its validity set must be
+    the union of prefill+decode registries.
+
+    Regression guard: get_fmha_impl previously validated the blocklist against
+    only the current stage's registry, so a decode-only backend name in
+    disable_attn_backends raised "Unknown attention backend" during a prefill
+    call (and vice versa) — rejecting a legitimate global config.
+    """
+    prefill_names = {getattr(c, "NAME", None) for c in PREFILL_MHA_IMPS} - {None}
+    decode_names = {getattr(c, "NAME", None) for c in DECODE_MHA_IMPS} - {None}
+    known = _blocklist_known_names()
+
+    # Every backend from EITHER stage is a valid global-blocklist entry.
+    for name in prefill_names | decode_names:
+        assert name in known, (
+            f"{name!r} is registered (prefill or decode) but not accepted in the "
+            f"disable_attn_backends blocklist; known={sorted(known)}"
+        )
+
+    # Explicitly cover the cross-stage cases the bug regressed on.
+    decode_only = decode_names - prefill_names
+    prefill_only = prefill_names - decode_names
+    for name in decode_only | prefill_only:
+        assert name in known, (
+            f"cross-stage backend {name!r} must be blocklist-valid regardless of "
+            f"the current stage"
+        )
