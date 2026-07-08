@@ -82,8 +82,11 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
 
     def _trans_output_rdma(self, res: MMEmbeddingRes):
         """Export the whole output of one request (embedding + pos_id + every extra_input)
-        through a single RDMA slot and return a descriptor-bearing MultimodalOutputPB. Only
-        split_size stays inline. Returns None to signal fallback to the inline-bytes path.
+        through one or more RDMA slots and return a descriptor-bearing MultimodalOutputPB. Only
+        split_size stays inline. When the output fits one slot it is carried in output_rdma;
+        when it is larger than one slot (mm_rdma_max_slot_bytes) the encoder splits it and the
+        descriptors are carried in output_rdma_chunks. Returns None to signal fallback to the
+        inline-bytes path.
         """
         if self._rdma is None or not res.embeddings:
             return None
@@ -108,14 +111,26 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
         if nbytes < self._rdma_min_bytes:
             return None
 
-        desc_bytes = self._rdma.export_embedding(emb, pos, extras)
-        if not desc_bytes:
+        # export_embedding returns a list of serialized MMRdmaDescPB (one per RDMA slot): a single
+        # element for the common fits-in-one-slot case, N when the output was chunked, and an empty
+        # list on failure (-> fall back to inline bytes).
+        desc_bytes_list = self._rdma.export_embedding(emb, pos, extras)
+        if not desc_bytes_list:
             return None
-        desc = MMRdmaDescPB()
-        desc.ParseFromString(desc_bytes)
+        descs = []
+        for desc_bytes in desc_bytes_list:
+            if not desc_bytes:
+                return None
+            desc = MMRdmaDescPB()
+            desc.ParseFromString(desc_bytes)
+            descs.append(desc)
 
         output_pb = MultimodalOutputPB(split_size=[e.shape[0] for e in res.embeddings])
-        output_pb.output_rdma.CopyFrom(desc)
+        if len(descs) == 1:
+            output_pb.output_rdma.CopyFrom(descs[0])
+        else:
+            for desc in descs:
+                output_pb.output_rdma_chunks.add().CopyFrom(desc)
         return output_pb
 
     def AsyncSubmitEmbedding(self, multimodal_inputs: MultimodalInputsPB, context):

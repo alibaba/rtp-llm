@@ -289,6 +289,15 @@ def init_vit_group_args(parser, vit_config):
         default=8 * 1024 * 1024 * 1024,
         help="encoder 侧在途（已注册未释放）embedding slot 的总字节软上限，超过则该次回退 bytes；0 表示不限制",
     )
+    vit_group.add_argument(
+        "--mm_rdma_max_slot_bytes",
+        env_name="MM_RDMA_MAX_SLOT_BYTES",
+        bind_to=(vit_config, "mm_rdma_max_slot_bytes"),
+        type=int,
+        default=2000 * 1024 * 1024,
+        help="encoder 侧单个 RDMA slot 的字节上限（RDMA 显存池单次分配硬上限约 2GiB）。"
+        "请求输出超过该值时，自动切成多个 <= 该值的 slot/描述符分块传输，而非回退 bytes。须 <= 2GiB",
+    )
     # ---- GPU embedding batch scheduler (MMScheduler) ----
     vit_group.add_argument(
         "--use_gpu_batch",
