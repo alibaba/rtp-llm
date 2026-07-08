@@ -13,8 +13,8 @@ cuda12 = [
     "auto_gptq",
     "autoawq>=0.2.9",
     "datasets==3.1.0",
-    "deep-ep @ http://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu126/deep_ep-1.2.1%2B29d31c0-cp310-cp310-linux_x86_64.whl",
-    "deep_gemm @ http://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu126/deep_gemm-2.2.0%2B9b680f4-cp310-cp310-linux_x86_64.whl",
+    "deep-ep @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu126/deep_ep-1.2.1%2B29d31c0-cp310-cp310-linux_x86_64.whl",
+    "deep_gemm @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu126/deep_gemm-2.2.0%2B9b680f4-cp310-cp310-linux_x86_64.whl",
     "nvidia-nvshmem-cu12==3.4.5",
 ]
 

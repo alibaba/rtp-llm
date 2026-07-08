@@ -202,26 +202,20 @@ class ServerArgsSetTest(TestCase):
 
     def test_pdfusion_scheduler_mode_config(self):
         """Test that pdfusion_scheduler_mode is opt-in and decode_prefill_ratio is configurable."""
-        sys.argv = ["prog"]
-
-        import rtp_llm.server.server_args.server_args
-
-        importlib.reload(rtp_llm.server.server_args.server_args)
-        py_env_configs = rtp_llm.server.server_args.server_args.setup_args()
+        py_env_configs = self._setup_args(args=[])
         self.assertEqual(
             py_env_configs.runtime_config.fifo_scheduler_config.pdfusion_scheduler_mode,
             "",
         )
 
-        sys.argv = [
-            "prog",
-            "--pdfusion_scheduler_mode",
-            "ratio",
-            "--decode_prefill_ratio",
-            "1/3",
-        ]
-        importlib.reload(rtp_llm.server.server_args.server_args)
-        py_env_configs = rtp_llm.server.server_args.server_args.setup_args()
+        py_env_configs = self._setup_args(
+            args=[
+                "--pdfusion_scheduler_mode",
+                "ratio",
+                "--decode_prefill_ratio",
+                "1/3",
+            ]
+        )
         self.assertEqual(
             py_env_configs.runtime_config.fifo_scheduler_config.pdfusion_scheduler_mode,
             "ratio",
@@ -233,13 +227,8 @@ class ServerArgsSetTest(TestCase):
 
     def test_pdfusion_scheduler_mode_rejects_unknown_value(self):
         """Test that pdfusion_scheduler_mode only accepts fixed scheduler patterns."""
-        sys.argv = ["prog", "--pdfusion_scheduler_mode", "ratioo"]
-
-        import rtp_llm.server.server_args.server_args
-
-        importlib.reload(rtp_llm.server.server_args.server_args)
         with self.assertRaises(SystemExit):
-            rtp_llm.server.server_args.server_args.setup_args()
+            self._setup_args(args=["--pdfusion_scheduler_mode", "ratioo"])
 
 
 if __name__ == "__main__":
