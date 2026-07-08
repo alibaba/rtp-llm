@@ -32,6 +32,7 @@ inline void extractMMRdmaVitConfig(const py::object& vit_config, VitConfig& cfg)
     cfg.mm_rdma_release_timeout_ms = get_i64("mm_rdma_release_timeout_ms", cfg.mm_rdma_release_timeout_ms);
     cfg.mm_rdma_slot_gc_timeout_ms = get_i64("mm_rdma_slot_gc_timeout_ms", cfg.mm_rdma_slot_gc_timeout_ms);
     cfg.mm_rdma_max_inflight_bytes = get_i64("mm_rdma_max_inflight_bytes", cfg.mm_rdma_max_inflight_bytes);
+    cfg.mm_rdma_max_slot_bytes     = get_i64("mm_rdma_max_slot_bytes", cfg.mm_rdma_max_slot_bytes);
 }
 
 }  // namespace rtp_llm

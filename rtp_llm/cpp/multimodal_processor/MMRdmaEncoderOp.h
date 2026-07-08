@@ -29,19 +29,26 @@ public:
         return transport_ != nullptr;
     }
 
-    // Pack the whole output of one request into a single RDMA slot: the (concat-ed) embedding,
-    // the optional (concat-ed) position ids, and the per-image extra_input tensors, in that
-    // order. Returns a serialized MMRdmaDescPB (slot info + per-tensor manifest); an empty
-    // string => failure, in which case the caller falls back to the inline-bytes path.
-    py::bytes exportEmbedding(torch::Tensor                embedding,
-                              std::optional<torch::Tensor> pos_id,
-                              std::vector<torch::Tensor>   extra_inputs);
+    // Pack the whole output of one request (the concat-ed embedding, the optional concat-ed
+    // position ids, and the per-image extra_input tensors, in that order) into one or more RDMA
+    // slots and return one serialized MMRdmaDescPB per slot. A single RDMA slot is capped at
+    // ~2GiB (mm_rdma_max_slot_bytes / the mempool's kmax_single_alloc_size), so when the output
+    // is larger the embedding is row-split and the tensors are greedily packed across multiple
+    // slots — the LLM concatenates the EMBEDDING chunks back in order. Returns a 1-element list
+    // for the common (fits-in-one-slot) case, N elements when chunked, and an EMPTY list on
+    // failure, in which case the caller falls back to the inline-bytes path.
+    std::vector<py::bytes> exportEmbedding(torch::Tensor                embedding,
+                                           std::optional<torch::Tensor> pos_id,
+                                           std::vector<torch::Tensor>   extra_inputs);
 
     // Return slots backing the given handles to the pool. Best-effort.
     void release(const std::vector<std::string>& handles);
 
 private:
     std::shared_ptr<MMRdmaTransport> transport_;
+    // Upper bound (bytes) on ONE RDMA slot; outputs larger than this are split across slots.
+    // 0 => unbounded (single slot, legacy behavior).
+    int64_t max_slot_bytes_ = 0;
 };
 
 void registerMMRdmaEncoderOp(py::module& m);
