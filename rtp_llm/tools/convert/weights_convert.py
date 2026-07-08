@@ -249,7 +249,6 @@ class WeightConverter:
         kv_cache_config = KVCacheConfig()
         kv_cache_config.seq_size_per_block = 64
         kv_cache_config.fp8_kv_cache = int(env_params.get("FP8_KV_CACHE", 0))
-        kv_cache_config.int8_kv_cache = int(env_params.get("INT8_KV_CACHE", 0))
 
         quantization_config = QuantizationConfig()
         quantization_config.quantization = quantization

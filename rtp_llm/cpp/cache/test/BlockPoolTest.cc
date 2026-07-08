@@ -42,7 +42,7 @@ static rtp_llm::ModelConfig makeTestModelConfig(uint32_t num_layers) {
     m.attn_config.tokens_per_block = 4;
     m.attn_config.kv_head_num      = 2;
     m.attn_config.size_per_head    = 1;
-    m.attn_config.kv_cache_dtype   = KvCacheDataType::INT8;  // enable kv-scale
+    m.attn_config.kv_cache_dtype   = KvCacheDataType::FP8;  // enable quantized kv cache
     m.attn_config.kv_lora_rank     = 0;
     m.attn_config.rope_head_dim    = 0;
     m.attn_config.head_num         = 2;

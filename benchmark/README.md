@@ -7,12 +7,12 @@ wget https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered/r
 # launch start server
 # please use GUARANTE_GENERATE_MEM to avoid lack of memory error when generate
 # WEIGHT_TYPE can choose int8, fp16, bf16, fp32
-# INT8_KV_CACHE mean use int8 store kv cache, default fp16
+# Use FP8_KV_CACHE=1 to store KV cache in FP8, default fp16
 export TOKENIZER_PATH=/path/to/tokenizer
 export CHECKPOINT_PATH=/path/to/model
 export GUARANTE_GENERATE_MEM=1
 export WEIGHT_TYPE=fp16
-export INT8_KV_CACHE=0
+export FP8_KV_CACHE=0
 python3 -m rtp_llm.start_server
 
 # benchmark service
