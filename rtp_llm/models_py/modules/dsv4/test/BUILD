@@ -184,6 +184,14 @@ py_test(
 )
 
 py_test(
+    name = "test_mega_moe_gate_pack",
+    srcs = ["test_mega_moe_gate_pack.py"],
+    deps = ["//rtp_llm/models_py:dsv4_fused_kernel_sources"],
+    tags = ["SM100_ARM"],
+    exec_properties = {"gpu": "SM100_ARM", "gpu_count": "1"},
+)
+
+py_test(
     name = "test_dsv4_kernel_jit_warmup",
     srcs = ["test_dsv4_kernel_jit_warmup.py"],
     deps = [

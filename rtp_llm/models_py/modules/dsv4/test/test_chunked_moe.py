@@ -109,6 +109,30 @@ class _FakeStrategy(nn.Module):
         return x.float() * 2.0
 
 
+class _FakeGatePackStrategy(_FakeStrategy):
+    def __init__(self, cap: int) -> None:
+        super().__init__(cap)
+        self.gate_pack_token_chunks: list[int] = []
+        self.gate_pack_input_id_chunks: list[torch.Tensor] = []
+
+    def can_use_gate_pack_static(self, gate) -> bool:
+        del gate
+        return True
+
+    def forward_with_gate_pack(
+        self,
+        x: torch.Tensor,
+        gate,
+        input_ids: torch.Tensor,
+    ) -> torch.Tensor:
+        del gate
+        self.gate_pack_token_chunks.append(x.size(0))
+        self.gate_pack_input_id_chunks.append(input_ids.detach().clone())
+        if x.size(0) > self.cap:
+            raise RuntimeError(f"chunk overflow: {x.size(0)} > {self.cap}")
+        return x.float() * 2.0
+
+
 def _fake_moe(dim: int, cap: int, is_decode_role: bool = False) -> MoE:
     moe = MoE.__new__(MoE)
     nn.Module.__init__(moe)
@@ -116,10 +140,12 @@ def _fake_moe(dim: int, cap: int, is_decode_role: bool = False) -> MoE:
     moe.dim = dim
     moe.max_tokens_per_rank = cap
     moe._is_decode_role = is_decode_role
+    moe._routed_includes_shared = False
     moe.gate = _FakeGate()
     moe.shared_experts = nn.Identity()
     moe._shared_executor = _FakeSharedExecutor()
     moe._strategy = _FakeStrategy(cap)
+    moe._gate_pack_static = False
     return moe
 
 
@@ -341,6 +367,43 @@ class ChunkedMoETest(unittest.TestCase):
 
         self.assertEqual(moe.gate.token_chunks, [7])
         self.assertTrue(torch.allclose(out, x * 3.0 + 1.0))
+
+    def test_nonfused_gate_pack_keeps_shared_expert_add(self):
+        moe = _fake_moe(dim=2, cap=8)
+        moe._strategy = _FakeGatePackStrategy(cap=8)
+        moe._gate_pack_static = True
+        x = torch.randn(7, 2)
+        input_ids = torch.arange(100, 107, dtype=torch.long)
+
+        out = moe(x, input_ids)
+
+        self.assertEqual(moe.gate.token_chunks, [])
+        self.assertEqual(moe._strategy.gate_pack_token_chunks, [7])
+        self.assertEqual(moe._shared_executor.token_chunks, [7])
+        self.assertEqual(
+            moe._strategy.gate_pack_input_id_chunks[0].tolist(),
+            input_ids.tolist(),
+        )
+        self.assertTrue(torch.allclose(out, x * 3.0 + 1.0))
+
+    def test_nonfused_gate_pack_chunking_preserves_order(self):
+        moe = _fake_moe(dim=2, cap=4)
+        moe._strategy = _FakeGatePackStrategy(cap=4)
+        moe._gate_pack_static = True
+        x = torch.arange(11 * 2, dtype=torch.float32).view(11, 2)
+        input_ids = torch.arange(200, 211, dtype=torch.long)
+
+        out = moe(x, input_ids)
+
+        self.assertEqual(moe.gate.token_chunks, [])
+        self.assertEqual(moe._strategy.gate_pack_token_chunks, [4, 4, 3])
+        self.assertEqual(moe._shared_executor.token_chunks, [4, 4, 3])
+        chunks = [c.tolist() for c in moe._strategy.gate_pack_input_id_chunks]
+        self.assertEqual(
+            chunks,
+            [[200, 201, 202, 203], [204, 205, 206, 207], [208, 209, 210]],
+        )
+        self.assertTrue(torch.equal(out, x * 3.0 + 1.0))
 
     def test_env_can_disable_chunking(self):
         moe = _fake_moe(dim=2, cap=4)
