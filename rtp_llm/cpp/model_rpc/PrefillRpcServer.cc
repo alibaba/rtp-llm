@@ -2274,7 +2274,11 @@ grpc::Status
 PrefillRpcServer::RemoteFinish(grpc::ServerContext* context, const RemoteFinishRequestPB* request, EmptyPB* response) {
     RTP_LLM_PROFILE_FUNCTION();
     auto request_id = request->request_id();
-    resource_.cache_store->markRequestEnd(std::to_string(request_id));
+    // In mock mode, resource_.cache_store is nullptr (MockCacheStore is not a NormalCacheStore).
+    // markRequestEnd is a NormalCacheStore-specific cleanup method that is not needed in mock mode.
+    if (resource_.cache_store) {
+        resource_.cache_store->markRequestEnd(std::to_string(request_id));
+    }
     return grpc::Status::OK;
 }
 

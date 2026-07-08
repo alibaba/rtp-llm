@@ -50,9 +50,20 @@ class DecodeResourceMeasureTest {
         config.setDecodeConcurrencyLimit(2);
         DecodeResourceMeasure measure = new DecodeResourceMeasure(configService);
         DecodeEndpoint endpoint = createAliveDecodeEndpoint();
-        endpoint.getStatus().setRunningTaskList(taskMap(1L, 2L));
-
+        endpoint.reserve(1L, 0);
+        endpoint.reserve(2L, 0);
+        // getTotalLoad() = confirmedRunningCount(0) + inflightRequests.size(2) = 2, limit = 2, 2 >= 2 → unavailable
         assertFalse(measure.isResourceAvailable(endpoint));
+    }
+
+    @Test
+    void worker_should_be_available_when_inflight_below_concurrency_limit() {
+        config.setDecodeConcurrencyLimit(3);
+        DecodeResourceMeasure measure = new DecodeResourceMeasure(configService);
+        DecodeEndpoint endpoint = createAliveDecodeEndpoint();
+        endpoint.reserve(1L, 0);
+        // getTotalLoad() = confirmedRunningCount(0) + inflightRequests.size(1) = 1, limit = 3, 1 < 3 → available
+        assertTrue(measure.isResourceAvailable(endpoint));
     }
 
     @Test

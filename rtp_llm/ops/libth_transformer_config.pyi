@@ -216,6 +216,7 @@ class CPRotateMethod:
 
 class CacheStoreConfig:
     cache_store_rdma_mode: bool
+    cache_store_mock_mode: bool
     wrr_available_ratio: int
     rank_factor: int
     thread_count: int

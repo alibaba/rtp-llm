@@ -1146,8 +1146,15 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
             return ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED, "invalid peer ip");
         }
 
+        // Prefer cache_store_ (set in both normal and mock modes via initCacheStore).
+        // Fall back to resource_.cache_store for test compatibility where only
+        // resource_.cache_store is set directly.
+        std::shared_ptr<CacheStore> effective_cache_store = cache_store_;
+        if (!effective_cache_store) {
+            effective_cache_store = resource_.cache_store;
+        }
         auto layer_cache_load_context =
-            resource_.cache_store->loadBuffers(layer_caches,
+            effective_cache_store->loadBuffers(layer_caches,
                                                ip_parts[0],
                                                autil::StringUtil::strToInt32WithDefault(ip_parts[1].c_str(), 0),
                                                autil::StringUtil::strToInt32WithDefault(ip_parts[2].c_str(), 0),

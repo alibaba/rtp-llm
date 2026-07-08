@@ -144,7 +144,9 @@ void PrefillGenerateContext::markRequestEnd() {
         real_id = stream_->streamId();
     }
     if (!resource->isTensorParallel()) {
-        resource->cache_store->markRequestEnd(std::to_string(real_id));
+        if (resource->cache_store) {
+            resource->cache_store->markRequestEnd(std::to_string(real_id));
+        }
         return;
     }
     const auto&           prefill_workers = resource->grpc_workers;

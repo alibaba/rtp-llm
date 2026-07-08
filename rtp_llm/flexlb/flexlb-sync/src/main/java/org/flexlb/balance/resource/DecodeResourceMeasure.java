@@ -48,7 +48,7 @@ public class DecodeResourceMeasure implements ResourceMeasure {
         if (endpoint == null || !endpoint.getStatus().isAlive()) {
             return false;
         }
-        long concurrency = calculateDecodeConcurrency(endpoint.getStatus());
+        long concurrency = endpoint.getTotalLoad();
         if (concurrencyLimit > 0 && concurrency >= concurrencyLimit) {
             Logger.warn("Decode worker {} resource unavailable: concurrency={}, limit={}",
                     endpoint.ipPort(), concurrency, concurrencyLimit);

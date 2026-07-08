@@ -876,6 +876,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
     py::class_<CacheStoreConfig>(m, "CacheStoreConfig")
         .def(py::init<>())
         .def_readwrite("cache_store_rdma_mode", &CacheStoreConfig::cache_store_rdma_mode)
+        .def_readwrite("cache_store_mock_mode", &CacheStoreConfig::cache_store_mock_mode)
         .def_readwrite("wrr_available_ratio", &CacheStoreConfig::wrr_available_ratio)
         .def_readwrite("rank_factor", &CacheStoreConfig::rank_factor)
         .def_readwrite("thread_count", &CacheStoreConfig::thread_count)

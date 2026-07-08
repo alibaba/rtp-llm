@@ -336,6 +336,7 @@ struct VitConfig {
 
 struct CacheStoreConfig {
     bool    cache_store_rdma_mode               = false;
+    bool    cache_store_mock_mode               = false;
     int     wrr_available_ratio                 = 80;
     int     rank_factor                         = 0;
     int     thread_count                        = 32;

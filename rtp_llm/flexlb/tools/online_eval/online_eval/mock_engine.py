@@ -705,6 +705,7 @@ class MockEngineCluster:
         self._servers = []
         self._base_http_port = base_http_port
         self._http_runner = None
+        self._stopped: set[str] = set()
 
     async def add_engine(
         self,
@@ -765,6 +766,63 @@ class MockEngineCluster:
             return None
         return decodes[int(input_pb.request_id) % len(decodes)]
 
+    async def stop_engine(self, name: str) -> bool:
+        """Stop a single engine's gRPC server with grace=0 (simulates process kill).
+
+        The MockEngineState object persists; only the gRPC server is stopped.
+        Returns True if the engine was found and stopped (or already stopped).
+        """
+        for i, state in enumerate(self.states):
+            if state.name == name:
+                if name in self._stopped:
+                    logger.info("Engine %s already stopped", name)
+                    return True
+                server = self._servers[i]
+                await server.stop(grace=0)
+                self._stopped.add(name)
+                logger.info("Engine %s stopped (gRPC server killed)", name)
+                return True
+        return False
+
+    async def restart_engine(self, name: str) -> bool:
+        """Restart a stopped engine's gRPC server on the same port.
+
+        Creates a new grpc.aio.server, rebinds to the original port, and starts it.
+        The MockEngineState (counters, cache, etc.) persists across restart.
+        Returns True if the engine was found and restarted (or already running).
+        """
+        import grpc
+
+        for i, state in enumerate(self.states):
+            if state.name == name:
+                if name not in self._stopped:
+                    logger.info("Engine %s already running", name)
+                    return True
+                server = grpc.aio.server(
+                    options=[
+                        ("grpc.max_send_message_length", 64 * 1024 * 1024),
+                        ("grpc.max_receive_message_length", 64 * 1024 * 1024),
+                    ]
+                )
+                servicer = MockRpcServicer(state, self.pb2)
+                self.pb2_grpc.add_RpcServiceServicer_to_server(servicer, server)
+                bound = server.add_insecure_port(f"{state.host}:{state.grpc_port}")
+                if bound <= 0:
+                    raise RuntimeError(
+                        f"failed to rebind {state.host}:{state.grpc_port}"
+                    )
+                await server.start()
+                self._servers[i] = server
+                self._stopped.discard(name)
+                logger.info(
+                    "Engine %s restarted (gRPC server on %s:%d)",
+                    name,
+                    state.host,
+                    state.grpc_port,
+                )
+                return True
+        return False
+
     async def start_http_server(self, port: int | None = None) -> None:
         """Start a lightweight aiohttp control API alongside the gRPC servers."""
         from aiohttp import web
@@ -781,6 +839,8 @@ class MockEngineCluster:
         app.router.add_post("/set_perf", self._http_set_perf)
         app.router.add_post("/set_kv_pressure", self._http_set_kv_pressure)
         app.router.add_post("/set_queue_depth", self._http_set_queue_depth)
+        app.router.add_post("/stop_engine", self._http_stop_engine)
+        app.router.add_post("/start_engine", self._http_start_engine)
         self._http_runner = web.AppRunner(app)
         await self._http_runner.setup()
         site = web.TCPSite(self._http_runner, "0.0.0.0", port)
@@ -884,6 +944,40 @@ class MockEngineCluster:
             {"status": "not_found", "engine": engine_name}, status=404
         )
 
+    async def _http_stop_engine(self, request) -> object:
+        """POST /stop_engine — stop a single engine's gRPC server (simulates kill).
+        Body: {"engine": "prefill-0"}
+        """
+        from aiohttp import web
+
+        body = await request.json()
+        engine_name = body.get("engine", "")
+        if not self._find_engine(engine_name):
+            return web.json_response(
+                {"error": f"engine '{engine_name}' not found"}, status=404
+            )
+        await self.stop_engine(engine_name)
+        return web.json_response(
+            {"status": "ok", "engine": engine_name, "action": "stopped"}
+        )
+
+    async def _http_start_engine(self, request) -> object:
+        """POST /start_engine — restart a stopped engine's gRPC server.
+        Body: {"engine": "prefill-0"}
+        """
+        from aiohttp import web
+
+        body = await request.json()
+        engine_name = body.get("engine", "")
+        if not self._find_engine(engine_name):
+            return web.json_response(
+                {"error": f"engine '{engine_name}' not found"}, status=404
+            )
+        await self.restart_engine(engine_name)
+        return web.json_response(
+            {"status": "ok", "engine": engine_name, "action": "started"}
+        )
+
     def _find_engine(self, name: str) -> Optional[MockEngineState]:
         for state in self.states:
             if state.name == name:
@@ -899,7 +993,12 @@ class MockEngineCluster:
         self._servers.clear()
 
     async def snapshot(self) -> dict:
-        return {"engines": [await state.snapshot() for state in self.states]}
+        engines = []
+        for state in self.states:
+            snap = await state.snapshot()
+            snap["stopped"] = state.name in self._stopped
+            engines.append(snap)
+        return {"engines": engines}
 
     def service_discovery_env(self, prefill_domain: str, decode_domain: str) -> dict:
         prefill = ",".join(s.ip_port for s in self.states if s.role == "prefill")

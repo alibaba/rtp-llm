@@ -51,13 +51,29 @@ public class DecodeEndpoint extends WorkerEndpoint {
 
         // Phase 1: process running requests — KV_ALLOCATED or RUNNING means the engine
         // has taken ownership, so we can release our inflight reservation.
+        //
+        // Two-pass to avoid transient undercount: if we remove from inflightRequests before
+        // updating confirmedRunningCount, a task transitioning from inflight to confirmed
+        // is briefly counted in neither, which could allow oversubscription. By updating
+        // the count first and removing second, the transient window overcounts (conservative).
         int kvAllocatedRequests = 0;
+        if (runningTaskInfo != null) {
+            // First pass: count and update confirmedRunningCount
+            for (TaskInfo task : runningTaskInfo.values()) {
+                TaskPhase phase = task.getPhase();
+                if (phase == TaskPhase.KV_ALLOCATED || phase == TaskPhase.RUNNING) {
+                    kvAllocatedRequests++;
+                }
+            }
+        }
+        this.confirmedRunningCount = kvAllocatedRequests;
+
+        // Second pass: remove confirmed tasks from inflightRequests
         if (runningTaskInfo != null) {
             for (TaskInfo task : runningTaskInfo.values()) {
                 TaskPhase phase = task.getPhase();
                 if (phase == TaskPhase.KV_ALLOCATED || phase == TaskPhase.RUNNING) {
                     inflightRequests.remove(task.getRequestId());
-                    kvAllocatedRequests++;
                 }
             }
         }
@@ -85,8 +101,6 @@ public class DecodeEndpoint extends WorkerEndpoint {
                 }
             }
         }
-
-        this.confirmedRunningCount = kvAllocatedRequests;
     }
 
     // ==================== KV Cache 三视图 ====================

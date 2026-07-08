@@ -418,6 +418,20 @@ public class FlexlbConfig {
 
     private long prefillLbTimeoutMs = 5000;
 
+    /**
+     * gRPC executor thread pool core size.
+     * Env var: FLEXLB_GRPC_EXECUTOR_CORE_SIZE
+     * Default: 16
+     */
+    private int flexlbGrpcExecutorCoreSize = 16;
+
+    /**
+     * gRPC executor thread pool max size.
+     * Env var: FLEXLB_GRPC_EXECUTOR_MAX_SIZE
+     * Default: 64
+     */
+    private int flexlbGrpcExecutorMaxSize = 64;
+
     // ========== Decode Load Balance Hard Filter Configuration ==========
 
     private double decodeHotspotMultiplier = 3.0;

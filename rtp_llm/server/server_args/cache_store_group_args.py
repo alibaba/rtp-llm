@@ -14,6 +14,14 @@ def init_cache_store_group_args(parser, cache_store_config):
         default=False,
         help="控制 cache store 是否使用 RDMA 模式。",
     )
+    cache_store_group.add_argument(
+        "--cache_store_mock_mode",
+        env_name="CACHE_STORE_MOCK_MODE",
+        bind_to=(cache_store_config, "cache_store_mock_mode"),
+        type=str2bool,
+        default=False,
+        help="启用 mock KV 传输模式：store()/load() 立即返回成功，不传输实际 KV 数据，用于本地 TCP KV 传输瓶颈下的稳定性验证。",
+    )
 
     cache_store_group.add_argument(
         "--wrr_available_ratio",

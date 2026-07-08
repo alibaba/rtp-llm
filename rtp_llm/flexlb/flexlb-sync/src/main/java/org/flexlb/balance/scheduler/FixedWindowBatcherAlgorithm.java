@@ -10,15 +10,20 @@ import java.util.List;
 import java.util.concurrent.TimeUnit;
 
 /**
- * Fixed-window batching algorithm with optional predictor-based early dispatch.
+ * Fixed-window batching algorithm with batch-full early dispatch and optional
+ * predictor-based early dispatch.
  *
  * <h3>Algorithm</h3>
  * <ol>
- *   <li>If the head request has waited {@code flexlbBatchFixedWaitMs} or longer,
- *       dispatch whatever has accumulated (up to batch size / capacity limits).</li>
- *   <li>Otherwise, if {@code flexlbBatchPredictThresholdMs > 0} and the
- *       predictor estimates the accumulated batch will take at least that long,
- *       dispatch immediately ("early dispatch").</li>
+ *   <li>Engine backpressure: if inflight batches ≥ max, park briefly.</li>
+ *   <li>Batch full: if queue size ≥ {@code flexlbBatchSizeMax}, dispatch
+ *       immediately without waiting for the window to expire.</li>
+ *   <li>Fixed window timeout: if the head request has waited
+ *       {@code flexlbBatchFixedWaitMs} or longer, dispatch whatever has
+ *       accumulated (up to batch size limit).</li>
+ *   <li>Predictor-based early dispatch: if {@code flexlbBatchPredictThresholdMs > 0}
+ *       and the predictor estimates the accumulated batch will take at least
+ *       that long, dispatch immediately.</li>
  *   <li>Otherwise park briefly and retry.</li>
  * </ol>
  *
@@ -26,7 +31,8 @@ import java.util.concurrent.TimeUnit;
  * <ul>
  *   <li>No SLO deadline tracking — does not read {@code BatchItem.deadlineMs()}.</li>
  *   <li>No EMA arrival rate estimation.</li>
- *   <li>No request dropping — oversized requests are skipped, never expired.</li>
+ *   <li>No token capacity filtering — frontend is expected to pre-filter
+ *       oversized requests.</li>
  *   <li>No inflight-batch backpressure check.</li>
  * </ul>
  */
@@ -71,7 +77,6 @@ public class FixedWindowBatcherAlgorithm implements BatcherAlgorithm {
         long elapsedMs = ctx.now() - head.enqueuedAtMs();
         long fixedWaitMs = ctx.cfg().getFlexlbBatchFixedWaitMs();
         int batchMaxCount = Math.max(1, ctx.cfg().getFlexlbBatchSizeMax());
-        long batchMaxTokens = ctx.cfg().getFlexlbBatchMaxCapacity();
         long predictThresholdMs = ctx.cfg().getFlexlbBatchPredictThresholdMs();
 
         // 0. Engine backpressure: park if the prefill worker already has too
@@ -83,57 +88,50 @@ public class FixedWindowBatcherAlgorithm implements BatcherAlgorithm {
             return;
         }
 
-        // 1. Fixed window timeout → must dispatch
+        // 1. Queue size >= batchMaxCount → dispatch immediately (batch full)
+        if (ctx.size() >= batchMaxCount) {
+            List<BatchItem> picked = pickFirstN(ctx, batchMaxCount);
+            dispatch(ctx, picked, "batch_full");
+            return;
+        }
+
+        // 2. Queue size < batchMaxCount → check window timeout
         if (elapsedMs >= fixedWaitMs) {
-            List<BatchItem> picked = pickUpTo(ctx, batchMaxCount, batchMaxTokens);
-            if (picked.isEmpty() && !ctx.isEmpty()) {
-                // All items exceed maxTokens — force-dispatch the head to avoid busy-wait
-                BatchItem forced = ctx.peek();
-                if (forced != null) {
-                    picked = List.of(forced);
-                }
-            }
+            List<BatchItem> picked = pickFirstN(ctx, batchMaxCount);
             if (!picked.isEmpty()) {
                 dispatch(ctx, picked, "fixed_window_timeout");
             }
             return;
         }
 
-        // 2. Predictor-based early dispatch
+        // 3. Predictor-based early dispatch
         if (predictThresholdMs > 0) {
             PrefillTimePredictor predictor = ctx.prefillEp().getPredictor();
-            List<BatchItem> candidates = pickUpTo(ctx, batchMaxCount, batchMaxTokens);
+            List<BatchItem> candidates = pickFirstN(ctx, batchMaxCount);
             if (!candidates.isEmpty() && predictor.predictBatchMs(candidates) >= predictThresholdMs) {
                 dispatch(ctx, candidates, "predict_threshold");
                 return;
             }
         }
 
-        // 3. Park
+        // 4. Park
         TimeUnit.MILLISECONDS.sleep(1);
     }
 
     // ==================== Internal helpers ====================
 
     /**
-     * Pick up to {@code maxCount} items from the queue, respecting
-     * {@code maxTokens} (total token) limit. Items that would exceed
-     * the capacity are skipped, not dropped.
+     * Pick the first {@code maxCount} items from the queue in sorted order.
+     * No token capacity filtering — frontend is expected to pre-filter
+     * oversized requests.
      */
-    private static List<BatchItem> pickUpTo(BatcherContext ctx, int maxCount, long maxTokens) {
+    private static List<BatchItem> pickFirstN(BatcherContext ctx, int maxCount) {
         List<BatchItem> picked = new ArrayList<>();
-        long sumTokens = 0;
-
         for (BatchItem item : ctx.sortedItems()) {
             if (picked.size() >= maxCount) {
                 break;
             }
-            long nextTokens = sumTokens + item.seqLen();
-            if (nextTokens > maxTokens) {
-                continue;  // skip, don't drop
-            }
             picked.add(item);
-            sumTokens = nextTokens;
         }
         return picked;
     }
