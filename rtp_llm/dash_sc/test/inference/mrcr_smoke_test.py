@@ -310,7 +310,12 @@ class DeepSeekV4MrcrSmokeTest(unittest.IsolatedAsyncioTestCase):
                 iter_real_model_stream_infer(
                     req,
                     case["input_ids_tail"],
-                    SamplingParams(max_new_tokens=384000, top_p=1.0, temperature=1.0),
+                    SamplingParams(
+                        max_new_tokens=384000,
+                        max_completion_tokens=500000,
+                        top_p=1.0,
+                        temperature=1.0,
+                    ),
                     OtherParams(enable_thinking=True),
                     visitor,
                     rtp_llm_request_id=i,
@@ -340,18 +345,7 @@ class DeepSeekV4MrcrSmokeTest(unittest.IsolatedAsyncioTestCase):
                 "sampling": SamplingParams(max_new_tokens=16),
                 "other": OtherParams(enable_thinking=False),
                 "expected_in_think_mode": False,
-                "expected_max_thinking_tokens": 0,
-            },
-            {
-                "name": "max_new_think_tokens_zero",
-                "input_ids": [2001, 2002] + tok.encode("<think>\n"),
-                "sampling": SamplingParams(
-                    max_new_tokens=16,
-                    max_new_think_tokens=0,
-                ),
-                "other": OtherParams(),
-                "expected_in_think_mode": False,
-                "expected_max_thinking_tokens": 0,
+                "expected_max_thinking_tokens": 131072,
             },
             {
                 "name": "input_ends_with_end_think",
@@ -359,13 +353,14 @@ class DeepSeekV4MrcrSmokeTest(unittest.IsolatedAsyncioTestCase):
                 "sampling": SamplingParams(max_new_tokens=16),
                 "other": OtherParams(enable_thinking=False),
                 "expected_in_think_mode": False,
-                "expected_max_thinking_tokens": 0,
+                "expected_max_thinking_tokens": 131072,
             },
             {
                 "name": "enable_thinking_true",
                 "input_ids": [4001, 4002] + tok.encode("<think>\n"),
                 "sampling": SamplingParams(
                     max_new_tokens=16,
+                    max_completion_tokens=16,
                     max_new_think_tokens=8,
                 ),
                 "other": OtherParams(enable_thinking=True),

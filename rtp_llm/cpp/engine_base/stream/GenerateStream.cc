@@ -29,11 +29,6 @@ bool useStreamAsyncReserveTokens() {
     return enabled;
 }
 
-bool maxTokensExcludeThinking() {
-    static const bool enabled = autil::EnvUtil::getEnv("RTP_LLM_MAX_TOKENS_EXCLUDE_THINKING", false);
-    return enabled;
-}
-
 }  // namespace
 
 GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
@@ -700,22 +695,35 @@ size_t GenerateStream::maxTokenNum() const {
         }
     }
 
-    const auto& config              = generate_input_->generate_config;
-    int64_t     output_token_budget = config->max_new_tokens;
-    if (maxTokensExcludeThinking() && config->in_think_mode && config->max_thinking_tokens > 0) {
-        int64_t think_output_budget = config->max_thinking_tokens + config->end_think_token_ids.size();
+    const auto& config = generate_input_->generate_config;
+    RTP_LLM_CHECK_WITH_INFO(config->max_new_tokens > 0, "max_new_tokens must be greater than 0");
+    RTP_LLM_CHECK_WITH_INFO(config->max_completion_tokens >= 0,
+                            "max_completion_tokens must be greater than or equal to 0");
+    if (config->in_think_mode) {
+        RTP_LLM_CHECK_WITH_INFO(config->max_thinking_tokens > 0, "max_thinking_tokens must be greater than 0");
+        RTP_LLM_CHECK_WITH_INFO(
+            config->max_completion_tokens > config->max_thinking_tokens,
+            "max_completion_tokens must be greater than max_thinking_tokens when thinking is enabled");
+    }
+
+    int64_t output_token_budget = config->max_new_tokens;
+    int64_t think_output_budget = 0;
+    if (config->max_completion_tokens > 0) {
+        content_token_budget = config->max_completion_tokens;
+    } else if (config->in_think_mode) {
+        think_output_budget = config->max_thinking_tokens + config->end_think_token_ids.size();
         for (const auto& processor : logits_processor_list_) {
             auto think_processor = std::dynamic_pointer_cast<ThinkModeLogitsProcessor>(processor);
             if (think_processor == nullptr) {
                 continue;
             }
             const auto finished_think_len = think_processor->finishedThinkOutputLen();
-            if (finished_think_len >= 0) {
+            if (finished_think_len > 0) {
                 think_output_budget = std::min<int64_t>(think_output_budget, finished_think_len);
             }
             break;
         }
-        output_token_budget += think_output_budget;
+        output_token_budget = think_output_budget + content_token_budget;
     }
 
     const size_t physical_token_cap = max_seq_len_ > reserve_tokens ? max_seq_len_ - reserve_tokens : 0;

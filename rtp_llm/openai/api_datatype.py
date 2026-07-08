@@ -260,13 +260,6 @@ class ChatCompletionRequest(BaseModel):
         )
 
     def disable_thinking(self):
-        if self.thinking_budget == 0:
-            return True
-        if (
-            self.extra_configs is not None
-            and self.extra_configs.max_thinking_tokens == 0
-        ):
-            return True
         if self.enable_thinking is False:
             return True
         chat_template_kwargs = self.get_chat_template_kwargs()

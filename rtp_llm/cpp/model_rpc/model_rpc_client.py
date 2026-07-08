@@ -96,6 +96,9 @@ def trans_input(input_py: GenerateInput):
 
     generate_config_pb = input_pb.generate_config
     generate_config_pb.max_new_tokens = input_py.generate_config.max_new_tokens
+    generate_config_pb.max_completion_tokens = (
+        input_py.generate_config.max_completion_tokens
+    )
     generate_config_pb.max_thinking_tokens = (
         input_py.generate_config.max_thinking_tokens
     )

@@ -70,7 +70,6 @@ _EMPTY_THINK_BODY = "\n"
 # default in ``GenerateEnvConfig.think_terminate_token_id`` (single source of truth
 # for production; this constant exists so unit tests don't have to repeat it).
 _DEFAULT_TERMINATE_TOKEN_ID = 1
-_INT32_MAX = 2_147_483_647
 _FINISH_REASON_NOT_FINISHED = 2
 _PARTIAL_RESPONSE_METADATA = (("x-dashscope-partialresponse", "true"),)
 
@@ -385,23 +384,6 @@ async def _close_async_stream_if_possible(stream: Any, tag: str) -> None:
         logging.warning("[DashScGrpc] [%s] phase-1 stream close failed: %s", tag, e)
 
 
-def _phase2_max_new_tokens_for_completion_alias(
-    sampling: SamplingParams,
-    generate_think_token_num: Optional[int],
-) -> int:
-    max_new_tokens = int(sampling.max_new_tokens)
-    if (
-        sampling.max_total_tokens is not None
-        and sampling.max_total_tokens > 0
-        and generate_think_token_num is not None
-    ):
-        max_new_tokens = min(
-            max_new_tokens,
-            max(0, int(sampling.max_total_tokens) - int(generate_think_token_num)),
-        )
-    return max_new_tokens
-
-
 def _clone_generate_config(generate_config: GenerateConfig) -> GenerateConfig:
     cloned_config = generate_config.model_copy(deep=True)
     # Phase-2 must re-enter routing; copied role_addrs would bypass FlexLB master.
@@ -425,17 +407,12 @@ def _apply_request_overrides(
     if request_max_think is None:
         request_max_think = other.max_new_think_tokens
     if request_max_think is not None:
-        max_think = int(request_max_think)
-        generate_config.max_thinking_tokens = _INT32_MAX if max_think < 0 else max_think
-    # Only the selected budget disables thinking; ``max_think_length`` may
-    # intentionally override a zero ``max_new_think_tokens`` alias.
-    disable_by_budget = request_max_think == 0
+        generate_config.max_thinking_tokens = int(request_max_think)
     # DashLLM/sglang-compatible Dash requests stay in chat mode unless the
     # caller explicitly asks for thinking or a request-scoped think budget.
     disable_by_default = other.enable_thinking is None and request_max_think is None
-    if other.enable_thinking is False or disable_by_budget or disable_by_default:
+    if other.enable_thinking is False or disable_by_default:
         generate_config.in_think_mode = False
-        generate_config.max_thinking_tokens = 0
         if hasattr(generate_config, "thinking"):
             generate_config.thinking = False
     elif (other.enable_thinking is True or request_max_think is not None) and (
@@ -460,6 +437,43 @@ def _apply_request_overrides(
         kwargs = dict(getattr(generate_config, "chat_template_kwargs", None) or {})
         kwargs["reasoning_effort"] = other.reasoning_effort
         generate_config.chat_template_kwargs = kwargs
+
+
+def _invalid_positive_token_param_message(
+    sampling: SamplingParams, other: OtherParams
+) -> str | None:
+    if int(sampling.max_new_tokens) <= 0:
+        return f"invalid max_tokens: {sampling.max_new_tokens}; must be greater than 0"
+    if int(sampling.max_completion_tokens) < 0:
+        return (
+            f"invalid max_completion_tokens: {sampling.max_completion_tokens}; "
+            "must be greater than or equal to 0"
+        )
+
+    request_max_think = sampling.max_new_think_tokens
+    if request_max_think is None:
+        request_max_think = other.max_new_think_tokens
+    if request_max_think is not None and int(request_max_think) <= 0:
+        return (
+            f"invalid max_new_think_tokens: {request_max_think}; "
+            "must be greater than 0"
+        )
+    thinking_enabled = other.enable_thinking is True or (
+        other.enable_thinking is not False and request_max_think is not None
+    )
+    if thinking_enabled:
+        max_think = (
+            int(GenerateConfig().max_thinking_tokens)
+            if request_max_think is None
+            else int(request_max_think)
+        )
+        if int(sampling.max_completion_tokens) <= max_think:
+            return (
+                "invalid max_completion_tokens: "
+                f"{sampling.max_completion_tokens}; must be greater than "
+                f"max_new_think_tokens {max_think} when thinking is enabled"
+            )
+    return None
 
 
 # ----------------------------------------------------------------------------
@@ -576,6 +590,13 @@ async def iter_real_model_stream_infer(
         term_id = runtime.terminate_token_id
         think_close_token_id = runtime.close_token_id
         max_new_tokens = int(getattr(generate_config, "max_new_tokens", 0) or 0)
+        max_completion_tokens = int(
+            getattr(generate_config, "max_completion_tokens", 0) or 0
+        )
+        if max_completion_tokens > 0 and not getattr(
+            generate_config, "in_think_mode", False
+        ):
+            max_new_tokens = min(max_new_tokens, max_completion_tokens)
         matched_think_bos_ids = matched_echo_ids or _matched_echo_prefix_ids(
             input_ids_list, list(runtime.bos_tokens)
         )
@@ -696,13 +717,6 @@ async def iter_real_model_stream_infer(
                     ids_for_accounting
                 )
                 will_do_phase2 = True
-                if sampling.max_new_tokens_from_completion_alias:
-                    will_do_phase2 = (
-                        _phase2_max_new_tokens_for_completion_alias(
-                            sampling, generate_think_token_num
-                        )
-                        > 0
-                    )
                 cumulative_sent_ids.extend(ids_for_accounting)
                 # Yield thinking content (always intermediate)
                 if generated_ids:
@@ -870,12 +884,6 @@ async def iter_real_model_stream_infer(
             phase2_config.in_think_mode = False
             if hasattr(phase2_config, "thinking"):
                 phase2_config.thinking = False
-            if sampling.max_new_tokens_from_completion_alias:
-                phase2_config.max_new_tokens = (
-                    _phase2_max_new_tokens_for_completion_alias(
-                        sampling, generate_think_token_num
-                    )
-                )
             # trace_id stays equal across phases so the dashscope log search
             # aggregates both halves under a single trace; phase distinction is
             # carried by request_log_tag (phase=2) and by the ``-2`` suffix on
@@ -916,6 +924,19 @@ async def iter_real_model_stream_infer(
                 phase2_max_new_tokens = int(
                     getattr(phase2_config, "max_new_tokens", 0) or 0
                 )
+                phase2_max_completion_tokens = int(
+                    getattr(phase2_config, "max_completion_tokens", 0) or 0
+                )
+                if phase2_max_completion_tokens > 0:
+                    think_tokens = (
+                        int(generate_think_token_num)
+                        if generate_think_token_num is not None
+                        else 0
+                    )
+                    phase2_max_new_tokens = min(
+                        phase2_max_new_tokens,
+                        max(0, phase2_max_completion_tokens - think_tokens),
+                    )
                 finish_reason_override = None
                 if (
                     resp_out.finished
@@ -1351,17 +1372,15 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
                     await _send_partial_response_metadata(context)
                     partial_metadata_sent = True
 
-                if sampling is not None and sampling.max_new_tokens <= 0:
-                    param_name = (
-                        "max_completion_tokens"
-                        if getattr(
-                            sampling, "max_new_tokens_from_completion_alias", False
-                        )
-                        else "max_new_tokens"
-                    )
+                invalid_message = (
+                    _invalid_positive_token_param_message(sampling, other)
+                    if sampling is not None and other is not None
+                    else None
+                )
+                if invalid_message is not None:
                     resp = build_parameter_error_response(
                         str(request.id),
-                        f"invalid {param_name}: {sampling.max_new_tokens}; must be greater than 0",
+                        invalid_message,
                     )
                     self._record_and_report_chunk(
                         record,

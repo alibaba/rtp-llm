@@ -936,12 +936,14 @@ grpc::Status PrefillRpcServer::GenerateStreamCall(grpc::ServerContext*          
     auto        pd_separation                 = shouldUsePdSeparation(generate_config);
     if (prefillTraceLogEnabled()) {
         RTP_LLM_LOG_INFO("Prefill request trace: event=recv request_id=%ld pd_separation=%d token_ids=%d "
-                         "max_new_tokens=%d in_think_mode=%d max_thinking_tokens=%d effective_output_token_budget=%ld "
+                         "max_new_tokens=%d max_completion_tokens=%d in_think_mode=%d max_thinking_tokens=%d "
+                         "effective_output_token_budget=%ld "
                          "num_beams=%d num_return_sequences=%d can_use_pd_separation=%d timeout_ms=%ld",
                          request->request_id(),
                          pd_separation,
                          request->token_ids_size(),
                          generate_config.max_new_tokens(),
+                         generate_config.max_completion_tokens(),
                          generate_config.in_think_mode(),
                          generate_config.max_thinking_tokens(),
                          static_cast<long>(effective_output_token_budget),
@@ -1014,9 +1016,26 @@ grpc::Status PrefillRpcServer::GenerateStreamCall(grpc::ServerContext*          
 }
 
 int64_t PrefillRpcServer::effectiveOutputTokenBudget(const GenerateConfigPB& generate_config) {
-    int64_t output_token_budget = generate_config.max_new_tokens();
-    if (generate_config.in_think_mode() && generate_config.max_thinking_tokens() > 0) {
-        output_token_budget += generate_config.max_thinking_tokens();
+    RTP_LLM_CHECK_WITH_INFO(generate_config.max_new_tokens() > 0, "max_new_tokens must be greater than 0");
+    RTP_LLM_CHECK_WITH_INFO(generate_config.max_completion_tokens() >= 0,
+                            "max_completion_tokens must be greater than or equal to 0");
+    int64_t content_token_budget = generate_config.max_new_tokens();
+    int64_t think_token_budget   = 0;
+    if (generate_config.in_think_mode()) {
+        RTP_LLM_CHECK_WITH_INFO(generate_config.max_thinking_tokens() > 0,
+                                "max_thinking_tokens must be greater than 0");
+        RTP_LLM_CHECK_WITH_INFO(
+            generate_config.max_completion_tokens() > generate_config.max_thinking_tokens(),
+            "max_completion_tokens must be greater than max_thinking_tokens when thinking is enabled");
+        think_token_budget = generate_config.max_thinking_tokens();
+        content_token_budget =
+            std::min<int64_t>(content_token_budget, generate_config.max_completion_tokens() - think_token_budget);
+    } else if (generate_config.max_completion_tokens() > 0) {
+        content_token_budget = std::min<int64_t>(content_token_budget, generate_config.max_completion_tokens());
+    }
+    int64_t output_token_budget = think_token_budget + content_token_budget;
+    if (generate_config.max_completion_tokens() > 0) {
+        output_token_budget = std::min<int64_t>(output_token_budget, generate_config.max_completion_tokens());
     }
     return output_token_budget;
 }

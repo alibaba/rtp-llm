@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import struct
 from collections.abc import Iterator
 from dataclasses import dataclass, field
@@ -25,8 +26,20 @@ from rtp_llm.dash_sc.structural_tag import (
 )
 from rtp_llm.utils.base_model_datatypes import GenerateOutputs
 
-_INT32_MAX = 2_147_483_647
-_DEFAULT_MAX_NEW_TOKENS = 32000
+
+def _env_int(env_name: str, default: int) -> int:
+    value = os.environ.get(env_name)
+    if value is None:
+        return default
+    try:
+        return int(value)
+    except ValueError:
+        return default
+
+
+_DEFAULT_MAX_NEW_TOKENS = _env_int("MAX_NEW_TOKENS", 131072)
+_DEFAULT_MAX_COMPLETION_TOKENS = _env_int("MAX_COMPLETION_TOKENS", 0)
+_DEFAULT_MAX_THINKING_TOKENS = _env_int("MAX_THINKING_TOKENS", 131072)
 
 FINISH_REASON_LENGTH = 1
 FINISH_REASON_STOP_ENGINE_PARAM = 8
@@ -499,60 +512,34 @@ def _parse_stop_words_list_input(request) -> tuple[tuple[int, ...], ...] | None:
 # ----------------------------------------------------------------------------
 
 
-def parse_max_new_tokens_for_proxy(request) -> tuple[int, bool]:
+def parse_max_new_tokens_for_proxy(request) -> tuple[int, int]:
     """Read only max-token controls; proxy hot path must not parse grammar."""
-    max_new_tokens, from_completion_alias, _ = _parse_max_token_limits(request)
-    return max_new_tokens, from_completion_alias
+    return _parse_max_token_limits(request)
 
 
 def _parse_max_token_limits(
     request, ds_attrs: dict[str, Any] | None = None
-) -> tuple[int, bool, int | None]:
+) -> tuple[int, int]:
     max_new_tokens = _DEFAULT_MAX_NEW_TOKENS
-    max_new_tokens_from_completion_alias = False
-    max_total_tokens: int | None = None
+    max_completion_tokens = _DEFAULT_MAX_COMPLETION_TOKENS
 
     v = _parse_optional_scalar_int(request, "max_tokens")
     if v is None:
         v = _parse_optional_parameter_int(request, "max_tokens")
-    if v is not None and v > 0:
-        max_total_tokens = v
+    if v is None:
+        v = _parse_optional_scalar_int(request, "max_new_tokens")
+    if v is None:
+        v = _parse_optional_parameter_int(request, "max_new_tokens")
+    if v is not None:
+        max_new_tokens = v
 
     v = _parse_optional_scalar_int(request, "max_completion_tokens")
     if v is None:
         v = _parse_optional_parameter_int(request, "max_completion_tokens")
     if v is not None:
-        if v > 0:
-            max_new_tokens = v
-        else:
-            # Preserve the invalid alias value so dash-sc can reject it before
-            # it reaches the engine as max_new_tokens=0/-1 and becomes a 500.
-            max_new_tokens = v
-        max_new_tokens_from_completion_alias = True
-    else:
-        legacy_max_new_tokens = _parse_optional_scalar_int(request, "max_new_tokens")
-        if legacy_max_new_tokens is None:
-            v = _parse_optional_scalar_int(request, "max_tokens")
-        else:
-            v = legacy_max_new_tokens
-        if v is None:
-            legacy_max_new_tokens = _parse_optional_parameter_int(
-                request, "max_new_tokens"
-            )
-            v = legacy_max_new_tokens
-        if v is None:
-            v = _parse_optional_parameter_int(request, "max_tokens")
-        if legacy_max_new_tokens is not None and legacy_max_new_tokens <= 0:
-            if ds_attrs is None:
-                ds_attrs = parse_ds_header_attributes(request)
-            if _is_openai_compatible_request(request, ds_attrs):
-                pass
-            else:
-                max_new_tokens = v if v is not None else max_new_tokens
-        elif v is not None:
-            max_new_tokens = v
+        max_completion_tokens = v
 
-    return max_new_tokens, max_new_tokens_from_completion_alias, max_total_tokens
+    return max_new_tokens, max_completion_tokens
 
 
 @dataclass(frozen=True)
@@ -573,8 +560,7 @@ class SamplingParams:
     """Sampling / generation options from ``request.inputs`` (+ legacy ``top_k`` in ``request.parameters``)."""
 
     max_new_tokens: int = _DEFAULT_MAX_NEW_TOKENS
-    max_new_tokens_from_completion_alias: bool = False
-    max_total_tokens: int | None = None
+    max_completion_tokens: int = _DEFAULT_MAX_COMPLETION_TOKENS
     num_return_sequences: int = 0
     top_p: float = 1.0
     top_k: int = 0
@@ -607,24 +593,14 @@ class SamplingParams:
         request_max_think = self.max_new_think_tokens
         if request_max_think is None and other is not None:
             request_max_think = other.max_new_think_tokens
-        if request_max_think is None:
-            max_thinking_tokens = 32000
-        elif request_max_think < 0:
-            max_thinking_tokens = _INT32_MAX
-        else:
-            max_thinking_tokens = request_max_think
-        backend_max_new_tokens = self.max_new_tokens
-        if (
-            other is not None
-            and self.max_new_tokens_from_completion_alias
-            and backend_max_new_tokens > 0
-        ):
-            if self.max_total_tokens is not None and self.max_total_tokens > 0:
-                backend_max_new_tokens = min(
-                    backend_max_new_tokens, int(self.max_total_tokens)
-                )
+        max_thinking_tokens = (
+            _DEFAULT_MAX_THINKING_TOKENS
+            if request_max_think is None
+            else int(request_max_think)
+        )
         return GenerateConfig(
-            max_new_tokens=backend_max_new_tokens,
+            max_new_tokens=self.max_new_tokens,
+            max_completion_tokens=self.max_completion_tokens,
             num_return_sequences=self.num_return_sequences,
             top_k=self.top_k,
             top_p=self.top_p,
@@ -665,8 +641,8 @@ def parse_sampling_params(
 ) -> SamplingParams:
     """Read sampling fields from ``request.inputs``.
 
-    Tensor names: ``max_completion_tokens`` (or legacy ``max_new_tokens`` /
-    ``max_tokens``), ``num_return_sequences`` (or DashScope alias ``n``),
+    Tensor names: ``max_tokens`` (or legacy ``max_new_tokens``),
+    ``max_completion_tokens``, ``num_return_sequences`` (or DashScope alias ``n``),
     ``top_p``, ``top_k``, ``stop_words_list``, ``temperature``,
     ``min_new_tokens`` (or DashScope alias ``min_length``), ``seed``,
     ``repetition_penalty``, ``frequency_penalty``, ``presence_penalty``,
@@ -687,11 +663,7 @@ def parse_sampling_params(
     max_new_think_tokens: int | None = None
     stop_words_list: tuple[tuple[int, ...], ...] = tuple()
     ds_attrs = ds_attrs if ds_attrs is not None else parse_ds_header_attributes(request)
-    (
-        max_new_tokens,
-        max_new_tokens_from_completion_alias,
-        max_total_tokens,
-    ) = _parse_max_token_limits(request, ds_attrs)
+    max_new_tokens, max_completion_tokens = _parse_max_token_limits(request, ds_attrs)
 
     v = _parse_optional_scalar_int(request, "num_return_sequences")
     if v is None:
@@ -753,8 +725,7 @@ def parse_sampling_params(
 
     return SamplingParams(
         max_new_tokens=max_new_tokens,
-        max_new_tokens_from_completion_alias=max_new_tokens_from_completion_alias,
-        max_total_tokens=max_total_tokens,
+        max_completion_tokens=max_completion_tokens,
         num_return_sequences=num_return_sequences,
         top_p=top_p,
         top_k=top_k,
@@ -1006,8 +977,11 @@ def _append_dashllm_limit_parameters(
         infer.parameters["max_new_tokens"].int64_param = int(
             getattr(generate_config, "max_new_tokens", 0) or 0
         )
+        infer.parameters["max_completion_tokens"].int64_param = int(
+            getattr(generate_config, "max_completion_tokens", 0) or 0
+        )
         max_think = int(getattr(generate_config, "max_thinking_tokens", 0) or 0)
-        if max_think > 0:
+        if getattr(generate_config, "in_think_mode", False) and max_think > 0:
             infer.parameters["max_new_think_tokens"].int64_param = max_think
 
     stop_id = _first_int(eos_token_id)
