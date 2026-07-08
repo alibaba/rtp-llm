@@ -195,8 +195,6 @@ class AiterPrefillAttnOp:
 
     @staticmethod
     def _get_kv_cache_torch_dtype(kv_cache_dtype, base_dtype):
-        if kv_cache_dtype == KvCacheDataType.INT8:
-            return torch.int8
         if kv_cache_dtype == KvCacheDataType.FP8:
             return torch.float8_e4m3fn
         return base_dtype

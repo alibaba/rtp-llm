@@ -148,8 +148,6 @@ class XQADecodeImpl(FMHAImplBase):
     ) -> bool:
         if attn_inputs.is_prefill:
             return False
-        if attn_configs.kv_cache_dtype == KvCacheDataType.INT8:
-            return False
         if torch.cuda.get_device_capability()[0] not in [9, 10, 12]:
             return False
         group_size = attn_configs.head_num // attn_configs.kv_head_num
