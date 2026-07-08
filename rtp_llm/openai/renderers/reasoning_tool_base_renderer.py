@@ -1,4 +1,3 @@
-import functools
 import json
 import logging
 import os
@@ -378,7 +377,7 @@ class ReasoningToolBaseRenderer(CustomChatRenderer, ABC):
             return await self._create_empty_delta(status.output.aux_info)
         status.update_output(
             output,
-            functools.partial(self._check_finish_reason, max_new_tokens=max_new_tokens),
+            self._make_check_finish_reason(status.request, max_new_tokens),
             self._remove_stop_word_ids,
         )
 
