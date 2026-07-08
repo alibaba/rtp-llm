@@ -44,10 +44,7 @@ def plan_two_pass(
         causal=False,
         q_data_type=q_data_type,
     )
-    # wrapper_p2=None => pass2 走 run_b_rows_eager(零 plan)。H20 实测: 合批
-    # 150-seq 下 eager 的 padded gather(~1.8ms) 贵过省下的 plan(0.33ms), 默认
-    # 保留 flashinfer pass2; eager 留给单请求/小批或无 flashinfer 的场景。
-    if schedule.has_b and wrapper_p2 is not None:
+    if schedule.has_b:
         wrapper_p2.plan(
             schedule.qo_indptr_p2,
             schedule.kv_indptr_p2,
@@ -60,38 +57,9 @@ def plan_two_pass(
         )
 
 
-def run_b_rows_eager(
-    schedule: Any,
-    q: torch.Tensor,  # [total, h, d] PERMUTED layout
-    k: torch.Tensor,  # [total, kvh, d] PERMUTED layout
-    v: torch.Tensor,  # [total, kvh, d] PERMUTED layout
-) -> torch.Tensor:
-    """pass 2 的 plan-free 实现: B 查询(每序列 ~几个 token)对全序列 attention。
-
-    纯 torch, 无 flashinfer plan/wrapper: B 段极小, padded 批量 einsum 即可
-    (bf16 matmul 默认 fp32 累加, 数值口径与 kernel 相当)。GQA 时按组广播 kv。
-    Returns: [total_b, h, d], 行序与 schedule.b_rows 一致(按序列、段内顺序)。
-    """
-    h = q.shape[1]
-    kvh = k.shape[1]
-    kh = k[schedule.kv_pad_idx]  # [N, Lmax, kvh, d]
-    vh = v[schedule.kv_pad_idx]
-    qb = q[schedule.q_pad_idx]  # [N, Bmax, h, d]
-    if kvh != h:  # GQA: 广播 kv 头到 q 头
-        rep = h // kvh
-        kh = kh.repeat_interleave(rep, dim=2)
-        vh = vh.repeat_interleave(rep, dim=2)
-    scale = q.shape[-1] ** -0.5
-    lg = torch.einsum("nbhd,nlhd->nbhl", qb, kh) * scale  # [N, Bmax, h, Lmax]
-    lg = lg.masked_fill(~schedule.kv_pad_mask[:, None, None, :], float("-inf"))
-    p = lg.float().softmax(-1).to(q.dtype)
-    out = torch.einsum("nbhl,nlhd->nbhd", p, vh)  # [N, Bmax, h, d]
-    return out[schedule.q_pad_mask]  # [total_b, h, d] 按 (seq, within) 序
-
-
 def run_two_pass(
     wrapper_p1: Any,
-    wrapper_p2: Any,  # 兼容旧签名; eager pass2 后不再使用, 传 None 即可
+    wrapper_p2: Any,
     schedule: Any,
     q: torch.Tensor,  # [total, num_qo_heads, head_dim], PERMUTED layout
     k: torch.Tensor,  # [total, num_kv_heads, head_dim], PERMUTED layout
@@ -100,8 +68,7 @@ def run_two_pass(
     """Attention output in the PERMUTED layout, [total, num_qo_heads, head_dim]."""
     out = wrapper_p1.run(q, k, v)
     if schedule.has_b:
-        if wrapper_p2 is not None:
-            out[schedule.b_rows] = wrapper_p2.run(q[schedule.b_rows], k, v)
-        else:
-            out[schedule.b_rows] = run_b_rows_eager(schedule, q, k, v)
+        q_b = q[schedule.b_rows]
+        out_b = wrapper_p2.run(q_b, k, v)
+        out[schedule.b_rows] = out_b
     return out

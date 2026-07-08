@@ -146,16 +146,6 @@ class BertUqiTwoPassSchedule:
     qo_indptr_p1: torch.Tensor  # int32 CPU: [2N+1] if has_b else [N+1] (=cu_seqlens_host)
     qo_indptr_p2: Optional[torch.Tensor]  # [N+1] int32 CPU
     kv_indptr_p2: Optional[torch.Tensor]  # [N+1] int32 CPU (= cu_seqlens_host)
-    # eager pass-2 的 padded 索引(全 host 构建后 H2D, 形状 host 已知, 零同步)。
-    # kv_pad_idx/[mask]: [N, Lmax] 每序列 kv 行号(PERMUTED 布局)/有效位;
-    # q_pad_idx/[mask]:  [N, Bmax] 每序列 B 查询行号/有效位。
-    kv_pad_idx: Optional[torch.Tensor] = None  # [N, Lmax] int64 device
-    kv_pad_mask: Optional[torch.Tensor] = None  # [N, Lmax] bool device
-    q_pad_idx: Optional[torch.Tensor] = None  # [N, Bmax] int64 device
-    q_pad_mask: Optional[torch.Tensor] = None  # [N, Bmax] bool device
-    # pass1 的"非零段"版本(喂 TRT 等经典 varlen kernel 用, 剔除零宽段):
-    seg_lens_p1_nz: Optional[torch.Tensor] = None  # [M] int32 CPU
-    cu_p1_nz: Optional[torch.Tensor] = None  # [M+1] int32 CPU
 
 
 def derive_bert_uqi_segment_ids_hostlen(
@@ -222,7 +212,6 @@ def build_bert_uqi_two_pass_schedule(
         return BertUqiTwoPassSchedule(
             has_b=False, perm=None, inv_perm=None, b_rows=None,
             qo_indptr_p1=cu_i32_host, qo_indptr_p2=None, kv_indptr_p2=None,
-            seg_lens_p1_nz=torch.empty(0, dtype=torch.int32), cu_p1_nz=cu_i32_host,
         )
     cu_host = cu_seqlens_host.to(dtype=torch.long)
     lengths_host = cu_host[1:] - cu_host[:-1]
@@ -237,7 +226,6 @@ def build_bert_uqi_two_pass_schedule(
         return BertUqiTwoPassSchedule(
             has_b=False, perm=None, inv_perm=None, b_rows=None,
             qo_indptr_p1=cu_i32_host, qo_indptr_p2=None, kv_indptr_p2=None,
-            seg_lens_p1_nz=lengths_host.to(torch.int32), cu_p1_nz=cu_i32_host,
         )
     a_lens_host = lengths_host - b_lens_host
     seg_lens = torch.stack([a_lens_host, b_lens_host], dim=1).reshape(-1)  # [2N]
@@ -255,30 +243,7 @@ def build_bert_uqi_two_pass_schedule(
     within = torch.arange(total_b) - qo_p2[:-1].to(torch.long)[seq_of_b]
     b_rows_host = cu_host[:-1][seq_of_b] + a_lens_host[seq_of_b] + within
     b_rows = b_rows_host.to(device, non_blocking=True)
-    # eager pass-2 padded 索引 (host 构建, 形状由 host 长度决定, 零同步)
-    l_max = int(lengths_host.max())
-    b_max = int(b_lens_host.max())
-    pos = torch.arange(l_max)
-    kv_pad_mask_h = pos[None, :] < lengths_host[:, None]  # [N, Lmax]
-    kv_pad_idx_h = cu_host[:-1, None] + torch.minimum(
-        pos[None, :], (lengths_host - 1)[:, None]
-    )  # pad 槽 clamp 到序列内(反正被 mask), 保证 gather 不越界
-    bpos = torch.arange(b_max)
-    q_pad_mask_h = bpos[None, :] < b_lens_host[:, None]  # [N, Bmax]
-    q_start = cu_host[:-1] + a_lens_host
-    q_pad_idx_h = torch.where(
-        q_pad_mask_h, q_start[:, None] + bpos[None, :], torch.zeros((), dtype=torch.long)
-    )
-    # 非零段版本(经典 varlen kernel 不吃零宽段; 剔除后仍是同一 token 划分)
-    seg_nz = seg_lens[seg_lens > 0]
-    cu_nz = torch.zeros(int(seg_nz.numel()) + 1, dtype=torch.int32)
-    cu_nz[1:] = seg_nz.cumsum(0).to(torch.int32)
     return BertUqiTwoPassSchedule(
         has_b=True, perm=perm, inv_perm=inv_perm, b_rows=b_rows,
         qo_indptr_p1=qo_p1, qo_indptr_p2=qo_p2, kv_indptr_p2=cu_i32_host,
-        kv_pad_idx=kv_pad_idx_h.to(device, non_blocking=True),
-        kv_pad_mask=kv_pad_mask_h.to(device, non_blocking=True),
-        q_pad_idx=q_pad_idx_h.to(device, non_blocking=True),
-        q_pad_mask=q_pad_mask_h.to(device, non_blocking=True),
-        seg_lens_p1_nz=seg_nz.to(torch.int32), cu_p1_nz=cu_nz,
     )

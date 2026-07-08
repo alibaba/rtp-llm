@@ -185,12 +185,6 @@ class BertModel(GptModelBase):
         self.use_uqi_two_pass = (
             os.environ.get("VISION_BERT_UQI_TWO_PASS", "1") == "1"
         )
-        # pass1 kernel 选择: 默认 0 = FlashInfer ragged(FA3, H20 实测大批下比
-        # TRT v2 fused 快 ~3ms/150seq); =1 走工厂默认(TRT, 零 plan) —— 留给
-        # sm120 等 FA3 不可用的架构上 A/B(生产卡待验证)。
-        self.use_uqi_pass1_factory = (
-            os.environ.get("VISION_BERT_UQI_PASS1_FACTORY", "0") == "1"
-        )
         self._uqi_two_pass_op = None  # 常驻 op(双 wrapper), 首请求惰性创建
 
     def prepare_fmha_impl(
@@ -255,26 +249,12 @@ class BertModel(GptModelBase):
         t1 = time.perf_counter() if perf is not None else 0.0
         schedule = build_bert_uqi_two_pass_schedule(seg_ids, cu_dev, cu_host)
         t2 = time.perf_counter() if perf is not None else 0.0
-        attn_configs = self.config.getAttentionConfigs(
-            self.parallelism_config.get_attn_tp_size()
-        )
-        if self.use_uqi_pass1_factory:
-            from rtp_llm.models_py.modules.factory.attention.cuda_impl.bert_uqi_two_pass import (
-                BertUqiFactoryTwoPassImpl,
+        if self._uqi_two_pass_op is None:
+            attn_configs = self.config.getAttentionConfigs(
+                self.parallelism_config.get_attn_tp_size()
             )
-
-            impl = BertUqiFactoryTwoPassImpl(
-                attn_configs, attn_inputs, schedule, self.parallelism_config
-            )
-        else:
-            if self._uqi_two_pass_op is None:
-                pass2_eager = (
-                    os.environ.get("VISION_BERT_UQI_PASS2_EAGER", "0") == "1"
-                )
-                self._uqi_two_pass_op = BertUqiTwoPassAttnOp(
-                    attn_configs, pass2_eager=pass2_eager
-                )
-            impl = BertUqiTwoPassImpl(self._uqi_two_pass_op, attn_inputs, schedule)
+            self._uqi_two_pass_op = BertUqiTwoPassAttnOp(attn_configs)
+        impl = BertUqiTwoPassImpl(self._uqi_two_pass_op, attn_inputs, schedule)
         if perf is not None:
             t3 = time.perf_counter()
             perf.prep_split = {
