@@ -709,7 +709,7 @@ size_t GenerateStream::maxTokenNum() const {
     int64_t output_token_budget = config->max_new_tokens;
     int64_t think_output_budget = 0;
     if (config->max_completion_tokens > 0) {
-        content_token_budget = config->max_completion_tokens;
+        output_token_budget = config->max_completion_tokens;
     } else if (config->in_think_mode) {
         think_output_budget = config->max_thinking_tokens + config->end_think_token_ids.size();
         for (const auto& processor : logits_processor_list_) {
@@ -723,7 +723,7 @@ size_t GenerateStream::maxTokenNum() const {
             }
             break;
         }
-        output_token_budget = think_output_budget + content_token_budget;
+        output_token_budget = think_output_budget + output_token_budget;
     }
 
     const size_t physical_token_cap = max_seq_len_ > reserve_tokens ? max_seq_len_ - reserve_tokens : 0;
