@@ -350,6 +350,7 @@ class MasterService:
                 return {
                     "real_master_host": result.get("real_master_host"),
                     "queue_length": result.get("queue_length", 0),
+                    "ready": result.get("ready", True),
                 }
         except Exception as e:
             route_logger.debug(f"Heartbeat failed for {master_addr}: {e}")
@@ -368,6 +369,12 @@ class MasterService:
         heartbeat_info = host_health_map[host_addr]
 
         if result is not None:
+            if not result.get("ready", True):
+                route_logger.info(
+                    f"Host {host_addr} not ready (sync warmup), "
+                    f"keeping current health status"
+                )
+                return
             heartbeat_info.mark_success(
                 real_master_host=result.get("real_master_host"),
                 queue_length=result.get("queue_length", 0),

@@ -130,6 +130,9 @@ class MockEngineState:
         self._active_kv_tokens = 0
         self._accepted = 0
         self._completed = 0
+        self._max_prefill_concurrency = 1
+        self._prefill_semaphore = asyncio.Semaphore(self._max_prefill_concurrency)
+        self._prefill_waiting = 0
         self._rpc_counts: Dict[str, int] = {
             "enqueue_batch": 0,
             "generate_stream": 0,
@@ -260,9 +263,12 @@ class MockEngineState:
             status = self.pb2.WorkerStatusPB(
                 role=self.role.upper(),
                 role_type=self._role_pb(),
-                available_concurrency=max(0, 4096 - len(self._running)),
-                waiting_query_len=(
-                    self._injected_queue_depth if self._injected_queue_depth > 0 else 0
+                available_concurrency=max(
+                    0, self._max_prefill_concurrency - len(self._running)
+                ),
+                waiting_query_len=max(
+                    self._injected_queue_depth if self._injected_queue_depth > 0 else 0,
+                    self._prefill_waiting,
                 ),
                 running_query_len=len(self._running),
                 step_latency_ms=0.0,
@@ -377,7 +383,10 @@ class MockEngineState:
             self._status_version += 1
 
         prefill_ms = self.performance.prefill_ms(shapes)
-        await asyncio.sleep(self.performance.sleep_seconds(prefill_ms))
+        self._prefill_waiting += 1
+        async with self._prefill_semaphore:
+            self._prefill_waiting -= 1
+            await asyncio.sleep(self.performance.sleep_seconds(prefill_ms))
         end = now_ms()
 
         async with self._lock:
@@ -893,7 +902,7 @@ class MockEngineCluster:
 
     async def _http_set_perf(self, request):
         """POST /set_perf — modify prefill_ms / decode_ms for a specific engine.
-        Body: {"engine": "prefill-0", "prefill_fixed_ms": 200.0, "decode_scale": 2.0}
+        Body: {"engine": "prefill-0", "prefill_fixed_ms": 200.0, "decode_scale": 2.0, "max_prefill_concurrency": 2}
         """
         from aiohttp import web
 
@@ -905,6 +914,11 @@ class MockEngineCluster:
                     state.performance.prefill_fixed_ms = float(data["prefill_fixed_ms"])
                 if "decode_scale" in data:
                     state.performance.decode_scale = float(data["decode_scale"])
+                if "max_prefill_concurrency" in data:
+                    new_max = int(data["max_prefill_concurrency"])
+                    state._max_prefill_concurrency = new_max
+                    state._prefill_semaphore = asyncio.Semaphore(new_max)
+                    state._status_version += 1
                 return web.json_response({"status": "ok", "engine": engine_name})
         return web.json_response(
             {"status": "not_found", "engine": engine_name}, status=404

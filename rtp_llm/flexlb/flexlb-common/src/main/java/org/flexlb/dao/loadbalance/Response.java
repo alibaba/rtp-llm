@@ -35,6 +35,9 @@ public class Response {
     @JsonProperty("worker_summary")
     private Map<String, WorkerRoleSummary> workerSummary;
 
+    @JsonProperty("ready")
+    private boolean ready = true;
+
     public static Response error(StrategyErrorType strategyErrorType) {
         Response result = new Response();
         result.setSuccess(false);

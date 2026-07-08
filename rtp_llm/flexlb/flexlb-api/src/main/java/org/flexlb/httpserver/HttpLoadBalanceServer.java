@@ -20,6 +20,7 @@ import org.flexlb.domain.consistency.SyncLBStatusReq;
 import org.flexlb.domain.consistency.SyncLBStatusResp;
 import org.flexlb.sync.status.EngineWorkerStatus;
 import org.flexlb.sync.status.ModelWorkerStatus;
+import org.flexlb.sync.synchronizer.MasterEngineSynchronizer;
 import org.flexlb.util.Logger;
 import org.springframework.context.annotation.Bean;
 import org.springframework.http.MediaType;
@@ -45,17 +46,21 @@ public class HttpLoadBalanceServer {
     private final ConfigService configService;
     private final FlexlbBatchScheduler batchScheduler;
     private final EndpointRegistry endpointRegistry;
+    private final MasterEngineSynchronizer masterEngineSynchronizer;
 
     public HttpLoadBalanceServer(LBStatusConsistencyService lbStatusConsistencyService,
                                  QueueManager queueManager,
                                  ConfigService configService,
                                  FlexlbBatchScheduler batchScheduler,
-                                 EndpointRegistry endpointRegistry) {
+                                 EndpointRegistry endpointRegistry,
+                                 @org.springframework.beans.factory.annotation.Autowired(required = false)
+                                 MasterEngineSynchronizer masterEngineSynchronizer) {
         this.lbStatusConsistencyService = lbStatusConsistencyService;
         this.queueManager = queueManager;
         this.configService = configService;
         this.batchScheduler = batchScheduler;
         this.endpointRegistry = endpointRegistry;
+        this.masterEngineSynchronizer = masterEngineSynchronizer;
     }
 
     @Bean
@@ -137,6 +142,7 @@ public class HttpLoadBalanceServer {
                     result.setCode(200);
                     result.setSuccess(true);
                     result.setWorkerSummary(buildWorkerSummary());
+                    result.setReady(masterEngineSynchronizer == null || masterEngineSynchronizer.isReady());
                     return ServerResponse.ok()
                             .contentType(MediaType.APPLICATION_JSON)
                             .body(Mono.just(result), Response.class);

@@ -42,6 +42,7 @@ public class MasterEngineSynchronizer extends AbstractEngineStatusSynchronizer {
     private final long syncRequestTimeoutMs;
     private final LongAdder syncCount = new LongAdder();
     private final Long syncEngineStatusInterval;
+    private volatile int completedSyncCount = 0;
 
     public MasterEngineSynchronizer(WorkerAddressService workerAddressService,
                                     EngineHealthReporter engineHealthReporter,
@@ -115,8 +116,17 @@ public class MasterEngineSynchronizer extends AbstractEngineStatusSynchronizer {
                     }
                 }
             }
+            completedSyncCount++;
         } catch (Exception e) {
             logger.error("sync engine prefill status error", e);
         }
+    }
+
+    public boolean isReady() {
+        return completedSyncCount > 0;
+    }
+
+    public int getCompletedSyncCount() {
+        return completedSyncCount;
     }
 }

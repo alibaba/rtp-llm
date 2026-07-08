@@ -42,7 +42,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--schedule-mode", choices=["auto", "batch", "direct", "queue"], default="batch"
     )
-    parser.add_argument("--timeout-ms", type=int, default=30000)
+    parser.add_argument("--timeout-ms", type=int, default=3600000)
     parser.add_argument("--sla-ttft-ms", type=float, default=500.0)
     parser.add_argument(
         "--zero-output-policy", choices=["skip", "one", "default100"], default="skip"
@@ -54,6 +54,15 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--model", default="engine_service")
     parser.add_argument("--api-key", default="")
+    parser.add_argument(
+        "--enable-fallback",
+        action="store_true",
+        help="on Schedule failure, try domain fallback direct to Engine",
+    )
+    parser.add_argument(
+        "--endpoints-file",
+        help="path to endpoints.json for prefill/decode engine addresses",
+    )
     return parser.parse_args()
 
 
@@ -69,6 +78,12 @@ class LoadClient:
         self._write_lock = asyncio.Lock()
         self._results: List[dict] = []
         self._channels: Dict[str, object] = {}
+        self._fallback_prefill_addrs: List[str] = []
+        self._fallback_decode_addrs: List[str] = []
+        self._fallback_prefill_rr = 0
+        self._fallback_decode_rr = 0
+        if getattr(args, "endpoints_file", None):
+            self._load_fallback_endpoints(args.endpoints_file)
 
     async def close(self) -> None:
         for channel in self._channels.values():
@@ -85,7 +100,7 @@ class LoadClient:
         )
         if not requests:
             raise RuntimeError("no replayable requests loaded")
-        print(f"loaded {len(requests)} requests from {self.args.trace}")
+        print(f"loaded {len(requests)} requests from {self.args.trace}", flush=True)
 
         self.per_request_path.write_text("", encoding="utf-8")
         sem = asyncio.Semaphore(self.args.max_concurrency)
@@ -147,6 +162,8 @@ class LoadClient:
             "prefill": "",
             "decode": "",
             "error": "",
+            "route_path": "master",
+            "wall_clock_ts": 0.0,
         }
 
         try:
@@ -185,12 +202,138 @@ class LoadClient:
                 result["ttft_ms"] = round((first_frame_s - started) * 1000.0, 3)
             result["total_ms"] = round((end - started) * 1000.0, 3)
             result["status"] = "ok"
+            result["route_path"] = "master"
+            result["wall_clock_ts"] = time.time()
             return result
         except Exception as exc:
+            if self.args.enable_fallback and self._fallback_prefill_addrs:
+                try:
+                    return await self._try_fallback(req, result, started)
+                except Exception as fb_exc:
+                    result["status"] = "exception"
+                    result["error"] = f"master={exc!r}; fallback={fb_exc!r}"
+                    result["route_path"] = "fallback"
+                    result["total_ms"] = round((time.monotonic() - started) * 1000.0, 3)
+                    result["wall_clock_ts"] = time.time()
+                    return result
             result["status"] = "exception"
             result["error"] = repr(exc)
             result["total_ms"] = round((time.monotonic() - started) * 1000.0, 3)
             return result
+
+    def _load_fallback_endpoints(self, path: str) -> None:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+        prefill_domain = data.get("prefill_domain", "")
+        decode_domain = data.get("decode_domain", "")
+        env = data.get("env", {})
+
+        prefill_key = f"DOMAIN_ADDRESS:{prefill_domain}"
+        decode_key = f"DOMAIN_ADDRESS:{decode_domain}"
+        if prefill_key in env:
+            self._fallback_prefill_addrs = [
+                a.strip() for a in env[prefill_key].split(",") if a.strip()
+            ]
+        if decode_key in env:
+            self._fallback_decode_addrs = [
+                a.strip() for a in env[decode_key].split(",") if a.strip()
+            ]
+
+        if not self._fallback_prefill_addrs:
+            self._fallback_prefill_addrs = [
+                e["grpc_addr"]
+                for e in data.get("engines", [])
+                if e.get("role") == "prefill" and e.get("grpc_addr")
+            ]
+        if not self._fallback_decode_addrs:
+            self._fallback_decode_addrs = [
+                e["grpc_addr"]
+                for e in data.get("engines", [])
+                if e.get("role") == "decode" and e.get("grpc_addr")
+            ]
+
+        if self._fallback_prefill_addrs:
+            print(
+                f"fallback prefill addrs: {self._fallback_prefill_addrs}",
+                flush=True,
+            )
+        if self._fallback_decode_addrs:
+            print(
+                f"fallback decode addrs: {self._fallback_decode_addrs}",
+                flush=True,
+            )
+
+    def _round_robin_prefill_addr(self) -> str:
+        addrs = self._fallback_prefill_addrs
+        if not addrs:
+            raise RuntimeError("no fallback prefill addresses available")
+        addr = addrs[self._fallback_prefill_rr % len(addrs)]
+        self._fallback_prefill_rr += 1
+        return addr
+
+    def _round_robin_decode_addr(self) -> str:
+        addrs = self._fallback_decode_addrs
+        if not addrs:
+            return ""
+        addr = addrs[self._fallback_decode_rr % len(addrs)]
+        self._fallback_decode_rr += 1
+        return addr
+
+    async def _try_fallback(
+        self,
+        req: ReplayRequest,
+        result: dict,
+        started: float,
+    ) -> dict:
+        prefill_addr = self._round_robin_prefill_addr()
+        decode_addr = self._round_robin_decode_addr()
+
+        fb_input = self._build_generate_input(req)
+        del fb_input.generate_config.role_addrs[:]
+        p_host, p_port = prefill_addr.rsplit(":", 1)
+        fb_input.generate_config.role_addrs.add(
+            role="PREFILL",
+            role_type=self.pb2.ROLE_TYPE_PREFILL,
+            ip=p_host,
+            http_port=0,
+            grpc_port=int(p_port),
+        )
+        if decode_addr:
+            d_host, d_port = decode_addr.rsplit(":", 1)
+            fb_input.generate_config.role_addrs.add(
+                role="DECODE",
+                role_type=self.pb2.ROLE_TYPE_DECODE,
+                ip=d_host,
+                http_port=0,
+                grpc_port=int(d_port),
+            )
+
+        channel = await self._channel(prefill_addr)
+        stub = self.pb2_grpc.RpcServiceStub(channel)
+        stream = stub.GenerateStreamCall(
+            fb_input, timeout=self.args.timeout_ms / 1000.0
+        )
+
+        first_frame_s = None
+        terminal_s = None
+        async for output in stream:
+            now = time.monotonic()
+            if first_frame_s is None:
+                first_frame_s = now
+            if output.flatten_output.finished and any(output.flatten_output.finished):
+                terminal_s = now
+
+        end = terminal_s or time.monotonic()
+        result["schedule_ms"] = 0.0
+        result["ttft_ms"] = (
+            round((first_frame_s - started) * 1000.0, 3) if first_frame_s else 0.0
+        )
+        result["total_ms"] = round((end - started) * 1000.0, 3)
+        result["status"] = "ok"
+        result["prefill"] = prefill_addr
+        result["decode"] = decode_addr
+        result["route_path"] = "fallback"
+        result["wall_clock_ts"] = time.time()
+        return result
 
     async def _read_engine_stream(
         self, input_pb, schedule_response
@@ -325,6 +468,7 @@ class LoadClient:
             "prefill_balance": load_balance_summary(r["prefill"] for r in ok),
             "decode_balance": load_balance_summary(r["decode"] for r in ok),
             "status_counts": _count_by(self._results, "status"),
+            "route_path_counts": _count_by(self._results, "route_path"),
         }
         self.summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
         write_markdown_report(
