@@ -853,22 +853,26 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
     }
 
     if (isTpRank0() && stream_groups.totalContextBatchSize() > 0) {
+        auto        now_us = autil::TimeUtility::currentTimeInMicroSeconds();
         std::string details;
         for (auto& s : stream_groups.contextStreams()) {
-            char buf[256];
-            snprintf(buf,
-                     sizeof(buf),
-                     "{id=%ld trace_id=%s input=%d prefix=%d reuse=%d ctx=%d grp=%ld/%d tokens=%d timeout=%ld} ",
-                     s->streamId(),
-                     s->traceId().empty() ? "-" : s->traceId().c_str(),
-                     s->inputLength(),
-                     s->prefixLength(),
-                     s->reuseLength(),
-                     s->contextLength(),
-                     s->groupId(),
-                     s->groupSize(),
-                     s->currentExecuteTokenSize(),
-                     s->getTimeoutMs());
+            char    buf[256];
+            int64_t compute_ms = (now_us - s->beginTimeUs()) / 1000 - s->getTimeInfo().wait_time_us / 1000;
+            snprintf(
+                buf,
+                sizeof(buf),
+                "{id=%ld trace_id=%s input=%d prefix=%d reuse=%d ctx=%d grp=%ld/%d tokens=%d timeout=%ld compute_ms=%ld} ",
+                s->streamId(),
+                s->traceId().empty() ? "-" : s->traceId().c_str(),
+                s->inputLength(),
+                s->prefixLength(),
+                s->reuseLength(),
+                s->contextLength(),
+                s->groupId(),
+                s->groupSize(),
+                s->currentExecuteTokenSize(),
+                s->getTimeoutMs(),
+                compute_ms);
             details += buf;
         }
         RTP_LLM_LOG_INFO(
