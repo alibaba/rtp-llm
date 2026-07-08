@@ -133,7 +133,7 @@ aiohttp==3.14.1 \
     --hash=sha256:faccab372e66bc76d5731525e7f1143c922271725b9d38c9f97edcc66266b451 \
     --hash=sha256:fc0cacab7ba4e56f0f81c82a98c09bed2f39c940107b03a34b168bdf7597edd3
     # via
-    #   -r /home/admin/.cache/bazel/_bazel_admin/6728183ff00109d3491467cf3b221da1/external/rtp_deps/requirements_base.txt
+    #   -r requirements_base.txt
     #   dashscope
 aiosignal==1.4.0 \
     --hash=sha256:053243f8b92b990551949e63930a839ff0cf0b0ebbe0597b0f3fb19e1a0fe82e \
@@ -141,7 +141,7 @@ aiosignal==1.4.0 \
     # via aiohttp
 aiter @ https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis/AMD/aiter/aiter-0.1.17.dev79%2Bg2570b35f9.d20260623-cp310-cp310-linux_x86_64.whl \
     --hash=sha256:23c2fd22ea8130aa70750dee3fb3dfe08a0bcb60592188a26d64d84b0b6caa25
-    # via -r /home/admin/.cache/bazel/_bazel_admin/6728183ff00109d3491467cf3b221da1/external/rtp_deps/requirements_rocm.txt
+    # via -r requirements_rocm.txt
 aliyun-python-sdk-core==2.16.0 \
     --hash=sha256:651caad597eb39d4fad6cf85133dffe92837d53bdf62db9d8f37dab6508bb8f9
     # via
@@ -153,7 +153,7 @@ aliyun-python-sdk-kms==2.16.5 \
     # via oss2
 amdsmi @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/simple/amd-smi/amd_smi.tar ; platform_machine == "x86_64" \
     --hash=sha256:8a350c562cf6c63d562eef27b2511a8ea67adc056662c6cde85ab1312ecb22ff
-    # via -r /home/admin/.cache/bazel/_bazel_admin/6728183ff00109d3491467cf3b221da1/external/rtp_deps/requirements_rocm.txt
+    # via -r requirements_rocm.txt
 annotated-doc==0.0.4 \
     --hash=sha256:571ac1dc6991c450b25a9c2d84a3705e2ae7a53467b5d111c24fa8baabbed320 \
     --hash=sha256:fbcda96e87e9c92ad167c2e53839e57503ecfda18804ea28102353485033faa4
@@ -186,11 +186,11 @@ bitsandbytes==0.49.2 \
     --hash=sha256:2fc0830c5f7169be36e60e11f2be067c8f812dfcb829801a8703735842450750 \
     --hash=sha256:54b771f06e1a3c73af5c7f16ccf0fc23a846052813d4b008d10cb6e017dd1c8c \
     --hash=sha256:87be5975edeac5396d699ecbc39dfc47cf2c026daaf2d5852a94368611a6823f
-    # via -r /home/admin/.cache/bazel/_bazel_admin/6728183ff00109d3491467cf3b221da1/external/rtp_deps/requirements_base.txt
+    # via -r requirements_base.txt
 blobfile==3.2.0 \
     --hash=sha256:78514a9265b9aa7d4607042dc77c5e6461ab27036450ad8e1f6ef9a7f29bf958 \
     --hash=sha256:e5e4095477da9f09e2077f41320c006001b2102a61f07d41ceaaecdf5d9741d8
-    # via -r /home/admin/.cache/bazel/_bazel_admin/6728183ff00109d3491467cf3b221da1/external/rtp_deps/requirements_base.txt
+    # via -r requirements_base.txt
 certifi==2026.6.17 \
     --hash=sha256:024c88eeec92ca068db80f02b8b07c9cef7b9fe261d1d535abfd5abd6f6af432 \
     --hash=sha256:2227dcbaafe0d2f59279d1762ddddc37783ed4354594f194ffc31d20f41fc3db
@@ -427,7 +427,7 @@ click==8.4.2 \
 concurrent-log-handler==0.9.29 \
     --hash=sha256:0d6c077fbaef2dae49a25975dcf72a602fe0a6a4ce80a3b7c37696d37e10459a \
     --hash=sha256:bc37a76d3f384cbf4a98f693ebd770543edc0f4cd5c6ab6bc70e9e1d7d582265
-    # via -r /home/admin/.cache/bazel/_bazel_admin/6728183ff00109d3491467cf3b221da1/external/rtp_deps/requirements_base.txt
+    # via -r requirements_base.txt
 contourpy==1.3.2 \
     --hash=sha256:0475b1f6604896bc7c53bb070e355e9321e1bc0d381735421a2d2068ec56531f \
     --hash=sha256:106fab697af11456fcba3e352ad50effe493a90f893fca6c2ca5c033820cea92 \
@@ -489,7 +489,7 @@ contourpy==1.3.2 \
     # via matplotlib
 cpm-kernels==1.0.11 \
     --hash=sha256:eab7f211f3b3f6a0686ded4c15cd7d9158393cdf69a931fa5b96a5fbcd366822
-    # via -r /home/admin/.cache/bazel/_bazel_admin/6728183ff00109d3491467cf3b221da1/external/rtp_deps/requirements_base.txt
+    # via -r requirements_base.txt
 crcmod==1.7 \
     --hash=sha256:dc7051a0db5f2bd48665a990d3ec1cc305a466a77358ca4492826f41f283601e
     # via oss2
@@ -537,11 +537,11 @@ cycler==0.12.1 \
 dacite==1.9.2 \
     --hash=sha256:053f7c3f5128ca2e9aceb66892b1a3c8936d02c686e707bee96e19deef4bc4a0 \
     --hash=sha256:6ccc3b299727c7aa17582f0021f6ae14d5de47c7227932c47fec4cdfefd26f09
-    # via -r /home/admin/.cache/bazel/_bazel_admin/6728183ff00109d3491467cf3b221da1/external/rtp_deps/requirements_base.txt
+    # via -r requirements_base.txt
 dashscope==1.26.0 \
     --hash=sha256:2c806c6e735a47f1f31814e700f5cc073cd101a860302562bd8eaa210bdef991 \
     --hash=sha256:ddfbda55a0196ec4c1a3cfc6be610b53310dfdb95ed4a293f6cc699809500ba4
-    # via -r /home/admin/.cache/bazel/_bazel_admin/6728183ff00109d3491467cf3b221da1/external/rtp_deps/requirements_base.txt
+    # via -r requirements_base.txt
 decorator==5.3.1 \
     --hash=sha256:4cbcdd55a6efadb9dbea26b858f4fb3264567b52d69ca0d25b721b553f60ea82 \
     --hash=sha256:f47fe6fdbd2edd623ecfe36875d37aba411624e2670dd395dddae1358689bb3c
@@ -552,7 +552,7 @@ decord==0.6.0 ; platform_machine == "x86_64" \
     --hash=sha256:85ef90d2f872384657d7774cc486c237c5b12df62d4ac5cb5c8d6001fa611323 \
     --hash=sha256:9c20674964fb1490c677bd911d2023d2a09fec7a58a4bb0b7ddf1ccc269f107a \
     --hash=sha256:a0eb1258beade34dceb29d97856a7764d179db1b5182899b61874f3418a1abc8
-    # via -r /home/admin/.cache/bazel/_bazel_admin/6728183ff00109d3491467cf3b221da1/external/rtp_deps/requirements_base.txt
+    # via -r requirements_base.txt
 distro==1.9.0 \
     --hash=sha256:2fa77c6fd8940f116ee1d6b94a2f90b13b5ea8d019b98bc8bafdcabcdd9bdbed \
     --hash=sha256:7bffd925d65168f85027d8da9af6bddab658135b840670a223589bc0c8ef02b2
@@ -561,7 +561,7 @@ einops==0.8.2 \
     --hash=sha256:54058201ac7087911181bfec4af6091bb59380360f069276601256a76af08193 \
     --hash=sha256:609da665570e5e265e27283aab09e7f279ade90c4f01bcfca111f3d3e13f2827
     # via
-    #   -r /home/admin/.cache/bazel/_bazel_admin/6728183ff00109d3491467cf3b221da1/external/rtp_deps/requirements_base.txt
+    #   -r requirements_base.txt
     #   aiter
 exceptiongroup==1.3.1 \
     --hash=sha256:8b412432c6055b0b7d14c310000ae93352ed6754f70fa8f7c34141f91c4e3219 \
@@ -571,21 +571,21 @@ exceptiongroup==1.3.1 \
     #   pytest
 fast-safetensors==0.7.3+torch2.1.2.rocm ; platform_machine == "x86_64" \
     --hash=sha256:8c8b07ef55b6fc42151ef507e7993d44443fb66371919457b70987234dc47a34
-    # via -r /home/admin/.cache/bazel/_bazel_admin/6728183ff00109d3491467cf3b221da1/external/rtp_deps/requirements_rocm.txt
+    # via -r requirements_rocm.txt
 fastapi==0.115.6 \
     --hash=sha256:9ec46f7addc14ea472958a96aae5b5de65f39721a46aaf5705c480d9a8b76654 \
     --hash=sha256:e9240b29e36fa8f4bb7290316988e90c381e5092e0cbe84e7818cc3713bcf305
-    # via -r /home/admin/.cache/bazel/_bazel_admin/6728183ff00109d3491467cf3b221da1/external/rtp_deps/requirements_base.txt
+    # via -r requirements_base.txt
 fastsafetensors==0.1.19rc5+ali ; platform_machine == "x86_64" \
     --hash=sha256:0801d96f5e4318eae121c25bd6940968e10de73e9ce9d1fa0b5e0f6f9221aafe \
     --hash=sha256:681c5772c005032959c66ef24f7a1bd6972f2c7bc90d3d7e9a523d262f2597a1 \
     --hash=sha256:aafb2bc7492a5de970b03455e68b5c9e15034e5d31d86f4524523bee7d9ada29
-    # via -r /home/admin/.cache/bazel/_bazel_admin/6728183ff00109d3491467cf3b221da1/external/rtp_deps/requirements_rocm.txt
+    # via -r requirements_rocm.txt
 filelock==3.29.4 \
     --hash=sha256:10cdb3656fc44541cdf30652a93fb10ec6b05325620eb316bd26893e4201538a \
     --hash=sha256:dac1648087d5115554850d113e7dd8c83ab2d38e3435dde2d4f163847e57b767
     # via
-    #   -r /home/admin/.cache/bazel/_bazel_admin/6728183ff00109d3491467cf3b221da1/external/rtp_deps/requirements_base.txt
+    #   -r requirements_base.txt
     #   blobfile
     #   huggingface-hub
     #   torch
@@ -844,7 +844,7 @@ grpcio==1.62.0 \
     --hash=sha256:fc2836cb829895ee190813446dce63df67e6ed7b9bf76060262c55fcd097d270 \
     --hash=sha256:fcc98cff4084467839d0a20d16abc2a76005f3d1b38062464d088c07f500d170
     # via
-    #   -r /home/admin/.cache/bazel/_bazel_admin/6728183ff00109d3491467cf3b221da1/external/rtp_deps/requirements_base.txt
+    #   -r requirements_base.txt
     #   grpcio-tools
 grpcio-tools==1.57.0 \
     --hash=sha256:02d78c034109f46032c7217260066d49d41e6bcaf588fa28fa40fe2f83445347 \
@@ -892,7 +892,7 @@ grpcio-tools==1.57.0 \
     --hash=sha256:f64f8ab22d27d4a5693310748d35a696061c3b5c7b8c4fb4ab3b4bc1068b6b56 \
     --hash=sha256:f717cce5093e6b6049d9ea6d12fdf3658efdb1a80772f7737db1f8510b876df6 \
     --hash=sha256:fb81ff861692111fa81bd85f64584e624cb4013bd66fbce8a209b8893f5ce398
-    # via -r /home/admin/.cache/bazel/_bazel_admin/6728183ff00109d3491467cf3b221da1/external/rtp_deps/requirements_base.txt
+    # via -r requirements_base.txt
 h11==0.16.0 \
     --hash=sha256:4e35b956cf45792e4caa5885e69fba00bdbc6ffafbfa020300e549b208ee5ff1 \
     --hash=sha256:63cf8bbe7522de3bf65932fda1d9c2772064ffb3dae62d55932da54b31cb6c86
@@ -955,19 +955,19 @@ idna==3.18 \
 importlib-metadata==9.0.0 \
     --hash=sha256:2d21d1cc5a017bd0559e36150c21c830ab1dc304dedd1b7ea85d20f45ef3edd7 \
     --hash=sha256:a4f57ab599e6a2e3016d7595cfd72eb4661a5106e787a95bcc90c7105b831efc
-    # via -r /home/admin/.cache/bazel/_bazel_admin/6728183ff00109d3491467cf3b221da1/external/rtp_deps/requirements_base.txt
+    # via -r requirements_base.txt
 iniconfig==2.3.0 \
     --hash=sha256:c76315c77db068650d49c5b56314774a7804df16fee4402c1f19d6d15d8c4730 \
     --hash=sha256:f631c04d2c48c52b84d0d0549c99ff3859c98df65b3101406327ecc7d53fbf12
     # via pytest
 jieba==0.42.1 \
     --hash=sha256:055ca12f62674fafed09427f176506079bc135638a14e23e25be909131928db2
-    # via -r /home/admin/.cache/bazel/_bazel_admin/6728183ff00109d3491467cf3b221da1/external/rtp_deps/requirements_base.txt
+    # via -r requirements_base.txt
 jinja2==3.1.6 \
     --hash=sha256:0137fb05990d35f1275a587e9aee6d56da821fc83491a0fb838183be43f66d6d \
     --hash=sha256:85ece4451f492d0c13c5dd7c13a64681a86afae63a5f347908daf103ce6d2f67
     # via
-    #   -r /home/admin/.cache/bazel/_bazel_admin/6728183ff00109d3491467cf3b221da1/external/rtp_deps/requirements_base.txt
+    #   -r requirements_base.txt
     #   torch
 jiter==0.16.0 \
     --hash=sha256:0542a7189c26920778658fc8fcf2af8bae05bae9924577f71804acef37996536 \
@@ -1089,7 +1089,7 @@ joblib==1.5.3 \
 json5==0.15.0 \
     --hash=sha256:56636a30c0e8a4665fe2179c0212f32eae3796dea89ea6f649b9436ecdb39618 \
     --hash=sha256:7424d1f1eb1d56da6e3d70643f53619862b4ce81440bdb8ecfd6f875e5ba4a71
-    # via -r /home/admin/.cache/bazel/_bazel_admin/6728183ff00109d3491467cf3b221da1/external/rtp_deps/requirements_base.txt
+    # via -r requirements_base.txt
 kiwisolver==1.5.0 \
     --hash=sha256:012b1eb16e28718fa782b5e61dc6f2da1f0792ca73bd05d54de6cb9561665fc9 \
     --hash=sha256:01808c6d15f4c3e8559595d6d1fe6411c68e4a3822b4b9972b44473b24f4e679 \
@@ -1216,7 +1216,7 @@ lazy-loader==0.5 \
 librosa==0.11.0 \
     --hash=sha256:0b6415c4fd68bff4c29288abe67c6d80b587e0e1e2cfb0aad23e4559504a7fa1 \
     --hash=sha256:f5ed951ca189b375bbe2e33b2abd7e040ceeee302b9bbaeeffdfddb8d0ace908
-    # via -r /home/admin/.cache/bazel/_bazel_admin/6728183ff00109d3491467cf3b221da1/external/rtp_deps/requirements_base.txt
+    # via -r requirements_base.txt
 llvmlite==0.47.0 \
     --hash=sha256:003bcf7fa579e14db59c1a1e113f93ab8a06b56a4be31c7f08264d1d4072d077 \
     --hash=sha256:12a69d4bb05f402f30477e21eeabe81911e7c251cecb192bed82cd83c9db10d8 \
@@ -1341,7 +1341,7 @@ lru-dict==1.4.1 \
     --hash=sha256:ff3af42922205620fdc920dcdf580c4c16b32c84a537a03b04b523e5c641a8a9 \
     --hash=sha256:ffad2758ce21d8fd6f0ae2628b31330732db8429a4b5994d2e107bed0ee11e68 \
     --hash=sha256:ffbb4eedc45eb629ca073795c53bf8de935a39cb58014b6af3487098d2f19098
-    # via -r /home/admin/.cache/bazel/_bazel_admin/6728183ff00109d3491467cf3b221da1/external/rtp_deps/requirements_base.txt
+    # via -r requirements_base.txt
 lxml==6.1.1 \
     --hash=sha256:05a82eb6e1530a64f26225b55cbd178113bd0b5af1c2b625f25e5296742c26d2 \
     --hash=sha256:07a4a68e286ee7a1ed7dfb8af83e615757c0ccfe9f18c6b4ea6771388d9ba8c9 \
@@ -1629,7 +1629,7 @@ matplotlib==3.10.9 \
     --hash=sha256:f4399f64b3e94cd500195490972ae1ee81170df1636fa15364d157d5bdd7b921 \
     --hash=sha256:f76e640a5268850bfda54b5131b1b1941cc685e42c5fa98ed9f2d64038308cba \
     --hash=sha256:fd66508e8c6877d98e586654b608a0456db8d7e8a546eb1e2600efd957302358
-    # via -r /home/admin/.cache/bazel/_bazel_admin/6728183ff00109d3491467cf3b221da1/external/rtp_deps/requirements_base.txt
+    # via -r requirements_base.txt
 mdurl==0.1.2 \
     --hash=sha256:84008a41e51615a49fc9966191ff91509e3c40b939176e643fd50a5c2196b8f8 \
     --hash=sha256:bb413d29f5eea38f31dd4754dd7377d4465116fb207585f97bf925588687c1ba
@@ -1859,7 +1859,7 @@ multidict==6.7.1 \
 nest-asyncio==1.6.0 \
     --hash=sha256:6f172d5449aca15afd6c646851f4e31e02c598d553a667e38cafa997cfec55fe \
     --hash=sha256:87af6efd6b5e897c81050477ef65c62e2b2f35d51703cae01aff2905b1852e1c
-    # via -r /home/admin/.cache/bazel/_bazel_admin/6728183ff00109d3491467cf3b221da1/external/rtp_deps/requirements_base.txt
+    # via -r requirements_base.txt
 networkx==3.4.2 \
     --hash=sha256:307c3669428c5362aab27c8a1260aa8f47c4e91d3891f48be0141738d8d053e1 \
     --hash=sha256:df5d4365b724cf81b8c6a7312509d0c22386097011ad1abe274afd5e9d3bbc5f
@@ -1950,7 +1950,7 @@ numpy==1.26.4 \
     --hash=sha256:f870204a840a60da0b12273ef34f7051e98c3b5961b61b0c2c1be6dfd64fbcd3 \
     --hash=sha256:ffa75af20b44f8dba823498024771d5ac50620e6915abac414251bd971b4529f
     # via
-    #   -r /home/admin/.cache/bazel/_bazel_admin/6728183ff00109d3491467cf3b221da1/external/rtp_deps/requirements_base.txt
+    #   -r requirements_base.txt
     #   bitsandbytes
     #   contourpy
     #   decord
@@ -2002,11 +2002,11 @@ onnx==1.16.0 \
     --hash=sha256:e5752bbbd5717304a7643643dba383a2fb31e8eb0682f4e7b7d141206328a73b \
     --hash=sha256:ec22a43d74eb1f2303373e2fbe7fbcaa45fb225f4eb146edfed1356ada7a9aea \
     --hash=sha256:f51179d4af3372b4f3800c558d204b592c61e4b4a18b8f61e0eea7f46211221a
-    # via -r /home/admin/.cache/bazel/_bazel_admin/6728183ff00109d3491467cf3b221da1/external/rtp_deps/requirements_base.txt
+    # via -r requirements_base.txt
 openai==2.44.0 \
     --hash=sha256:0a2a3ab2e29aeda368700f662ff9ba0f9df17ba4c54577a64e08b8115a3cc0ad \
     --hash=sha256:68a5a5ffad82b8ff7d451c437529fb64f7c3b8123aaf0c021966a882d9e3947d
-    # via -r /home/admin/.cache/bazel/_bazel_admin/6728183ff00109d3491467cf3b221da1/external/rtp_deps/requirements_base.txt
+    # via -r requirements_base.txt
 orjson==3.11.9 \
     --hash=sha256:011382e2a60fda9d46f1cdee31068cfc52ffe952b587d683ec0463002802a0f4 \
     --hash=sha256:03db380e3780fa0015ed776a90f20e8e20bb11dde13b216ce19e5718e3dfba62 \
@@ -2082,10 +2082,10 @@ orjson==3.11.9 \
     --hash=sha256:f36b7f32c7c0db4a719f1fc5824db4a9c6f8bd1a354debb91faf26ebf3a4c71e \
     --hash=sha256:f5d89a2ed90731df3be64bab0aa44f78bff39fdc9d71c291f4a8023aa46425b7 \
     --hash=sha256:ffe02797b5e9f3a9d8292ddcd289b474ad13e81ad83cd1891a240811f1d2cb81
-    # via -r /home/admin/.cache/bazel/_bazel_admin/6728183ff00109d3491467cf3b221da1/external/rtp_deps/requirements_base.txt
+    # via -r requirements_base.txt
 oss2==2.19.1 \
     --hash=sha256:a8ab9ee7eb99e88a7e1382edc6ea641d219d585a7e074e3776e9dec9473e59c1
-    # via -r /home/admin/.cache/bazel/_bazel_admin/6728183ff00109d3491467cf3b221da1/external/rtp_deps/requirements_base.txt
+    # via -r requirements_base.txt
 packaging==26.2 \
     --hash=sha256:5fc45236b9446107ff2415ce77c807cee2862cb6fac22b8a73826d0693b0980e \
     --hash=sha256:ff452ff5a3e828ce110190feff1178bb1f2ea2281fa2075aadb987c2fb221661
@@ -2158,7 +2158,7 @@ pandas==2.3.3 \
 partial-json-parser==0.2.1.1.post7 \
     --hash=sha256:145119e5eabcf80cbb13844a6b50a85c68bf99d376f8ed771e2a3c3b03e653ae \
     --hash=sha256:86590e1ba6bcb6739a2dfc17d2323f028cb5884f4c6ce23db376999132c9a922
-    # via -r /home/admin/.cache/bazel/_bazel_admin/6728183ff00109d3491467cf3b221da1/external/rtp_deps/requirements_base.txt
+    # via -r requirements_base.txt
 pillow==12.2.0 \
     --hash=sha256:00a2865911330191c0b818c59103b58a5e697cae67042366970a6b6f1b20b7f9 \
     --hash=sha256:01afa7cf67f74f09523699b4e88c73fb55c13346d212a59a2db1f86b0a63e8c5 \
@@ -2253,7 +2253,7 @@ pillow==12.2.0 \
     --hash=sha256:fb043ee2f06b41473269765c2feae53fc2e2fbf96e5e22ca94fb5ad677856f06 \
     --hash=sha256:fc3d34d4a8fbec3e88a79b92e5465e0f9b842b628675850d860b8bd300b159f5
     # via
-    #   -r /home/admin/.cache/bazel/_bazel_admin/6728183ff00109d3491467cf3b221da1/external/rtp_deps/requirements_base.txt
+    #   -r requirements_base.txt
     #   matplotlib
     #   pillow-heif
     #   torchvision
@@ -2331,7 +2331,7 @@ pillow-avif-plugin==1.5.2 \
     --hash=sha256:f4b36cce231d6e0fa09972a1558eac18e94a29d83342129488f0a1fcb4509cb8 \
     --hash=sha256:f664451b1aeb1b7fd166981ddf5e4c5c2a85ccd6269a93d4f632247c71f5a87a \
     --hash=sha256:fd0f57440c803b298e32a0165a0e383919baa09f074d8726f257c5bd784fe5da
-    # via -r /home/admin/.cache/bazel/_bazel_admin/6728183ff00109d3491467cf3b221da1/external/rtp_deps/requirements_base.txt
+    # via -r requirements_base.txt
 pillow-heif==1.4.0 \
     --hash=sha256:08026afd5f90628e029fe88aaa222280428ba7cc485a7cae553e78f7bb289b74 \
     --hash=sha256:107d598a1b1694ba6f371927ffd6d72d6f9af2ca4082577d9edbfdeed465f940 \
@@ -2381,7 +2381,7 @@ pillow-heif==1.4.0 \
     --hash=sha256:e93b6f06b521f17c09a42b7ad21949e1e6af5382a5ac886f633a1dcea6646f6a \
     --hash=sha256:f75faab30c0b1f20d266e0c8a1a746f7aa56694baf3fd5cc4d86f2f242bb58de \
     --hash=sha256:ffbed970ea96485f96874604d3df298c06e89475dea09c217b8b901cc7ed7d1a
-    # via -r /home/admin/.cache/bazel/_bazel_admin/6728183ff00109d3491467cf3b221da1/external/rtp_deps/requirements_base.txt
+    # via -r requirements_base.txt
 platformdirs==4.10.0 \
     --hash=sha256:31e761a6a0ca04faf7353ea759bdba55652be214725111e5aac52dfa29d4bef7 \
     --hash=sha256:fb516cdb12eb0d857d0cd85a7c57cea4d060bee4578d6cf5a14dfdf8cbf8784a
@@ -2398,12 +2398,12 @@ portalocker==3.2.0 \
     --hash=sha256:1f3002956a54a8c3730586c5c77bf18fae4149e07eaf1c29fc3faf4d5a3f89ac \
     --hash=sha256:3cdc5f565312224bc570c49337bd21428bba0ef363bbcf58b9ef4a9f11779968
     # via
-    #   -r /home/admin/.cache/bazel/_bazel_admin/6728183ff00109d3491467cf3b221da1/external/rtp_deps/requirements_base.txt
+    #   -r requirements_base.txt
     #   concurrent-log-handler
 prettytable==3.18.0 \
     --hash=sha256:439217116152244369caf3d9f1caf2f9fe29b03bd79e88d2928c8e718c95d680 \
     --hash=sha256:b3346e0e6f79180833aebaac088ae926340586cf6d7d991b9eb125b65f72313a
-    # via -r /home/admin/.cache/bazel/_bazel_admin/6728183ff00109d3491467cf3b221da1/external/rtp_deps/requirements_base.txt
+    # via -r requirements_base.txt
 propcache==0.5.2 \
     --hash=sha256:01c4fc7480cd0598bb4b57022df55b9ca296da7fc5a8760bd8451a7e63a7d427 \
     --hash=sha256:04dc2390d9edbbaef7461f33322555976ffddf0b650a038649d026358714e6c5 \
@@ -2542,7 +2542,7 @@ protobuf==4.25.0 \
     --hash=sha256:cf21faba64cd2c9a3ed92b7a67f226296b10159dbb8fbc5e854fc90657d908e4 \
     --hash=sha256:d94a33db8b7ddbd0af7c467475fb9fde0c705fb315a8433c0e2020942b863a1f
     # via
-    #   -r /home/admin/.cache/bazel/_bazel_admin/6728183ff00109d3491467cf3b221da1/external/rtp_deps/requirements_base.txt
+    #   -r requirements_base.txt
     #   grpcio-tools
     #   onnx
 psutil==7.2.2 \
@@ -2568,7 +2568,7 @@ psutil==7.2.2 \
     --hash=sha256:eed63d3b4d62449571547b60578c5b2c4bcccc5387148db46e0c2313dad0ee00 \
     --hash=sha256:fd04ef36b4a6d599bbdb225dd1d3f51e00105f6d48a28f006da7f9822f2606d8
     # via
-    #   -r /home/admin/.cache/bazel/_bazel_admin/6728183ff00109d3491467cf3b221da1/external/rtp_deps/requirements_base.txt
+    #   -r requirements_base.txt
     #   aiter
 py-spy==0.4.2 \
     --hash=sha256:142887e984a4e541071c99a4401ff8c3770f255d329dbd0f64e8c1dd51882cce \
@@ -2579,7 +2579,7 @@ py-spy==0.4.2 \
     --hash=sha256:90e600b27bb6bb40479637baca5a5b4bc2ba3395c93d889e672315d93042c4ae \
     --hash=sha256:a0e6f6810ccf0fc5e64e85e0182a5b626c4496eec01b14fb8755154b363a4831 \
     --hash=sha256:aeb0323409199c785f730645e9f4bb7a7b9ca2c481f2c331a55642b5d13fa52f
-    # via -r /home/admin/.cache/bazel/_bazel_admin/6728183ff00109d3491467cf3b221da1/external/rtp_deps/requirements_base.txt
+    # via -r requirements_base.txt
 pyarrow==24.0.0 \
     --hash=sha256:02b001b3ed4723caa44f6cd1af2d5c86aa2cf9971dacc2ffa55b21237713dfba \
     --hash=sha256:04920d6a71aabd08a0417709efce97d45ea8e6fb733d9ca9ecffb13c67839f68 \
@@ -2639,7 +2639,7 @@ pybind11==3.0.4 \
 pybind11-stubgen==2.5.5 \
     --hash=sha256:10824cd2fc5cbbee032b8fb39e6f6c08de232deb309bc66d786a6c6e8a4601bd \
     --hash=sha256:758d6d6bbeefc62ad7f78d5e5bbf357ccf6af83cd4504f5f549403f452942708
-    # via -r /home/admin/.cache/bazel/_bazel_admin/6728183ff00109d3491467cf3b221da1/external/rtp_deps/requirements_base.txt
+    # via -r requirements_base.txt
 pycparser==3.0 \
     --hash=sha256:600f49d217304a5902ac3c37e1281c9fe94e4d0489de643a9504c5cdfdfc6b29 \
     --hash=sha256:b727414169a36b7d524c1c3e31839a521725078d7b2ff038656844266160a992
@@ -2734,7 +2734,7 @@ pydantic==2.13.4 \
     --hash=sha256:45a282cde31d808236fd7ea9d919b128653c8b38b393d1c4ab335c62924d9aba \
     --hash=sha256:c40756b57adaa8b1efeeced5c196f3f3b7c435f90e84ea7f443901bec8099ef6
     # via
-    #   -r /home/admin/.cache/bazel/_bazel_admin/6728183ff00109d3491467cf3b221da1/external/rtp_deps/requirements_base.txt
+    #   -r requirements_base.txt
     #   fastapi
     #   openai
 pydantic-core==2.46.4 \
@@ -2868,7 +2868,7 @@ pygments==2.20.0 \
 pynvml==13.0.1 \
     --hash=sha256:1245991d9db786b4d2f277ce66869bd58f38ac654e38c9397d18f243c8f6e48f \
     --hash=sha256:e2b20e0a501eeec951e2455b7ab444759cf048e0e13a57b08049fa2775266aa8
-    # via -r /home/admin/.cache/bazel/_bazel_admin/6728183ff00109d3491467cf3b221da1/external/rtp_deps/requirements_base.txt
+    # via -r requirements_base.txt
 pyodps==0.13.0 \
     --hash=sha256:0e312bb3eb68daebd4fdd3c4deb6f4ec551e4927d32ded4c3d8fa5849baf6f12 \
     --hash=sha256:11483be6723907d9f66b6e2a723dab139d969d31daf3bec8b20edb331e5caeea \
@@ -2924,11 +2924,11 @@ pyodps==0.13.0 \
     --hash=sha256:f7109aaaac1ca70bbffe701d9a6e41a17712ab6eb407596f6d0a6a52f4647608 \
     --hash=sha256:f7b902ef06f6743a41d9650f21bc885eb4851d3cfc07fe8c791c272069c41c63 \
     --hash=sha256:fac7410bd9ad55b7f8c3d28e8001b81a6e576f5c40738656e70fdacef0fc4a8c
-    # via -r /home/admin/.cache/bazel/_bazel_admin/6728183ff00109d3491467cf3b221da1/external/rtp_deps/requirements_base.txt
+    # via -r requirements_base.txt
 pyopenssl==24.1.0 \
     --hash=sha256:17ed5be5936449c5418d1cd269a1a9e9081bc54c17aed272b45856a3d3dc86ad \
     --hash=sha256:cabed4bfaa5df9f1a16c0ef64a0cb65318b5cd077a7eda7d6970131ca2f41a6f
-    # via -r /home/admin/.cache/bazel/_bazel_admin/6728183ff00109d3491467cf3b221da1/external/rtp_deps/requirements_base.txt
+    # via -r requirements_base.txt
 pyparsing==3.3.2 \
     --hash=sha256:850ba148bd908d7e2411587e247a1e4f0327839c40e2e5e6d05a007ecc69911d \
     --hash=sha256:c777f4d763f140633dcb6d8a3eda953bf7a214dc4eff598413c070bcdc117cbc
@@ -2936,7 +2936,7 @@ pyparsing==3.3.2 \
 pyrsmi==0.2.0 \
     --hash=sha256:594388e5e0e916555d8b92b8b73e38aa73903a9d03ad89c172fefa187fc3ea41 \
     --hash=sha256:b5b934e6b10ffaf0612271b98d732c99b94cca773e6e86003b6e938a53bd688f
-    # via -r /home/admin/.cache/bazel/_bazel_admin/6728183ff00109d3491467cf3b221da1/external/rtp_deps/requirements_rocm.txt
+    # via -r requirements_rocm.txt
 pytest==9.1.1 \
     --hash=sha256:1088fbde8f2b49d95a549a195707afa7a76a3ce9bcadc26b6d71f0ffda5fe313 \
     --hash=sha256:37a86b45efb9a47a61a36449063e8e18d0cab3161329fc099eb21783169c4f0c
@@ -3006,7 +3006,7 @@ pyyaml==6.0.2 \
     --hash=sha256:f753120cb8181e736c57ef7636e83f31b9c0d1722c516f7e86cf15b7aa57ff12 \
     --hash=sha256:ff3824dc5261f50c9b0dfb3be22b4567a6f938ccce4587b38952d85fd9e9afe4
     # via
-    #   -r /home/admin/.cache/bazel/_bazel_admin/6728183ff00109d3491467cf3b221da1/external/rtp_deps/requirements_rocm.txt
+    #   -r requirements_rocm.txt
     #   amdsmi
     #   huggingface-hub
     #   timm
@@ -3163,7 +3163,7 @@ safetensors==0.8.0 \
     --hash=sha256:fcdd41ec4628fee5799f807c73c353629130fbd942aa23d83c623dd6c9d52d78 \
     --hash=sha256:fd6f3f93c9a0a7cc2788ee63fb763353d4bd2e89b0751bc78fcf7dda00bea774
     # via
-    #   -r /home/admin/.cache/bazel/_bazel_admin/6728183ff00109d3491467cf3b221da1/external/rtp_deps/requirements_base.txt
+    #   -r requirements_base.txt
     #   timm
     #   transformers
 scikit-learn==1.7.2 \
@@ -3255,7 +3255,7 @@ scipy==1.15.3 \
 sentence-transformers==5.2.0 \
     --hash=sha256:aa57180f053687d29b08206766ae7db549be5074f61849def7b17bf0b8025ca2 \
     --hash=sha256:acaeb38717de689f3dab45d5e5a02ebe2f75960a4764ea35fea65f58a4d3019f
-    # via -r /home/admin/.cache/bazel/_bazel_admin/6728183ff00109d3491467cf3b221da1/external/rtp_deps/requirements_base.txt
+    # via -r requirements_base.txt
 sentencepiece==0.2.0 \
     --hash=sha256:0461324897735512a32d222e3d886e24ad6a499761952b6bda2a9ee6e4313ea5 \
     --hash=sha256:0993dbc665f4113017892f1b87c3904a44d0640eda510abcacdfb07f74286d36 \
@@ -3310,7 +3310,7 @@ sentencepiece==0.2.0 \
     --hash=sha256:f4d158189eb2ecffea3a51edf6d25e110b3678ec47f1a40f2d541eafbd8f6250 \
     --hash=sha256:fb89f811e5efd18bab141afc3fea3de141c3f69f3fe9e898f710ae7fe3aab251 \
     --hash=sha256:ff88712338b01031910e8e61e7239aff3ce8869ee31a47df63cb38aadd591bea
-    # via -r /home/admin/.cache/bazel/_bazel_admin/6728183ff00109d3491467cf3b221da1/external/rtp_deps/requirements_base.txt
+    # via -r requirements_base.txt
 setproctitle==1.3.7 \
     --hash=sha256:00afa6fc507967d8c9d592a887cdc6c1f5742ceac6a4354d111ca0214847732c \
     --hash=sha256:01f27b5b72505b304152cb0bd7ff410cc4f2d69ac70c21a7fdfa64400a68642d \
@@ -3409,7 +3409,7 @@ setproctitle==1.3.7 \
     --hash=sha256:fcb966a6c57cf07cc9448321a08f3be6b11b7635be502669bc1d8745115d7e7f \
     --hash=sha256:fe5ca35aeec6dc50cabab9bf2d12fbc9067eede7ff4fe92b8f5b99d92e21263f \
     --hash=sha256:ff3c1c32382fb71a200db8bab3df22f32e6ac7ec3170e92fa5b542cf42eed9a2
-    # via -r /home/admin/.cache/bazel/_bazel_admin/6728183ff00109d3491467cf3b221da1/external/rtp_deps/requirements_base.txt
+    # via -r requirements_base.txt
 shellingham==1.5.4 \
     --hash=sha256:7ecfff8f2fd72616f7481040475a65b2bf8af90a56c89140852d1120324e8686 \
     --hash=sha256:8dbca0739d487e5bd35ab3ca4b36e11c4078f3a234bfce294b0a0291363404de
@@ -3471,7 +3471,7 @@ sympy==1.14.0 \
     --hash=sha256:d3d3fe8df1e5a0b42f0e7bdf50541697dbe7d23746e894990c030e2b05e72517 \
     --hash=sha256:e091cc3e99d2141a0ba2847328f5479b05d94a6635cb96148ccb3f34671bd8f5
     # via
-    #   -r /home/admin/.cache/bazel/_bazel_admin/6728183ff00109d3491467cf3b221da1/external/rtp_deps/requirements_base.txt
+    #   -r requirements_base.txt
     #   torch
 threadpoolctl==3.6.0 \
     --hash=sha256:43a0b8fd5a2928500110039e43a5eed8480b918967083ea48dc3ab9f13c4a7fb \
@@ -3479,7 +3479,7 @@ threadpoolctl==3.6.0 \
     # via scikit-learn
 thrift==0.23.0 \
     --hash=sha256:5f43448a92c36ed6a450048355d10e231a1787e4c28965f08fabac0eb978914c
-    # via -r /home/admin/.cache/bazel/_bazel_admin/6728183ff00109d3491467cf3b221da1/external/rtp_deps/requirements_base.txt
+    # via -r requirements_base.txt
 tiktoken==0.7.0 \
     --hash=sha256:03c6c40ff1db0f48a7b4d2dafeae73a5607aacb472fa11f125e7baf9dce73704 \
     --hash=sha256:084cec29713bc9d4189a937f8a35dbdfa785bd1235a34c1124fe2323821ee93f \
@@ -3517,11 +3517,11 @@ tiktoken==0.7.0 \
     --hash=sha256:e215292e99cb41fbc96988ef62ea63bb0ce1e15f2c147a61acc319f8b4cbe5bf \
     --hash=sha256:e54be9a2cd2f6d6ffa3517b064983fb695c9a9d8aa7d574d1ef3c3f931a99225 \
     --hash=sha256:fffdcb319b614cf14f04d02a52e26b1d1ae14a570f90e9b55461a72672f7b13d
-    # via -r /home/admin/.cache/bazel/_bazel_admin/6728183ff00109d3491467cf3b221da1/external/rtp_deps/requirements_base.txt
+    # via -r requirements_base.txt
 timm==0.9.12 \
     --hash=sha256:2a828afac5b710a80ec66d0f85807e171e342faf5c0703b33102d8aa206f19dc \
     --hash=sha256:9121d1cf320f7f32490d893340fd33117bda0a0270eb8282dfd52ae5fd3e1af6
-    # via -r /home/admin/.cache/bazel/_bazel_admin/6728183ff00109d3491467cf3b221da1/external/rtp_deps/requirements_base.txt
+    # via -r requirements_base.txt
 tokenizers==0.22.2 \
     --hash=sha256:143b999bdc46d10febb15cbffb4207ddd1f410e2c755857b5a0797961bbdc113 \
     --hash=sha256:1a62ba2c5faa2dd175aaeed7b15abf18d20266189fb3406c5d0550dd34dd5f37 \
@@ -3600,7 +3600,7 @@ tomli==2.4.1 \
 torch==2.9.1+git7e1940d \
     --hash=sha256:521d1febc9bfebe44fb321727ad550dcaf05900dd917b20bed52fb307f43bf3a
     # via
-    #   -r /home/admin/.cache/bazel/_bazel_admin/6728183ff00109d3491467cf3b221da1/external/rtp_deps/requirements_rocm.txt
+    #   -r requirements_rocm.txt
     #   bitsandbytes
     #   fast-safetensors
     #   sentence-transformers
@@ -3609,7 +3609,7 @@ torch==2.9.1+git7e1940d \
 torchvision==0.24.0+rocm7.2.0.gitb919bd0c \
     --hash=sha256:a479330dee15ec287ed868f00d11da41b45b0395ff19fd7ab2823103c759a63e
     # via
-    #   -r /home/admin/.cache/bazel/_bazel_admin/6728183ff00109d3491467cf3b221da1/external/rtp_deps/requirements_rocm.txt
+    #   -r requirements_rocm.txt
     #   timm
 tqdm==4.68.3 \
     --hash=sha256:00dfa48452b6b6cfae3dd9885636c23d3422d1ec97c66d96818cbd5e0821d482 \
@@ -3623,14 +3623,14 @@ transformers==5.2.0 \
     --hash=sha256:0088b8b46ccc9eff1a1dca72b5d618a5ee3b1befc3e418c9512b35dea9f9a650 \
     --hash=sha256:9ecaf243dc45bee11a7d93f8caf03746accc0cb069181bbf4ad8566c53e854b4
     # via
-    #   -r /home/admin/.cache/bazel/_bazel_admin/6728183ff00109d3491467cf3b221da1/external/rtp_deps/requirements_base.txt
+    #   -r requirements_base.txt
     #   sentence-transformers
 triton @ https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis/AMD/triton/triton-3.7.0%2Bamd.rocm7.2.0.gitd0d77a509-cp310-cp310-linux_x86_64.whl \
     --hash=sha256:3a8acacdfb4723c8bb71844c427f4d3ce047658bf97fbdc23065c06205231687
-    # via -r /home/admin/.cache/bazel/_bazel_admin/6728183ff00109d3491467cf3b221da1/external/rtp_deps/requirements_rocm.txt
+    # via -r requirements_rocm.txt
 triton-kernels @ https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis/AMD/triton/triton_kernels-1.0.0%2Bamd.rocm7.2.0.gitd0d77a509-py3-none-any.whl \
     --hash=sha256:df8b42ebf098767c0d31a3916913bd7557a623903aefa26602e7c6818c34b84a
-    # via -r /home/admin/.cache/bazel/_bazel_admin/6728183ff00109d3491467cf3b221da1/external/rtp_deps/requirements_rocm.txt
+    # via -r requirements_rocm.txt
 typer==0.26.8 \
     --hash=sha256:3512ca79ac5c11113414b36e80281b872884477722440691c89d1112e321a49c \
     --hash=sha256:c244a6bd558886fe3f8780efb6bdd28bb9aff005a94eedebaa5cb32926fe2f7e
@@ -3646,7 +3646,7 @@ typing-extensions==4.15.0 \
     --hash=sha256:0cea48d173cc12fa28ecabc3b837ea3cf6f38c6d1136f85cbaaf598984861466 \
     --hash=sha256:f0fa19c6845758ab08074a0cfa8b7aecb71c999ca73d62883bc25cc018c4e548
     # via
-    #   -r /home/admin/.cache/bazel/_bazel_admin/6728183ff00109d3491467cf3b221da1/external/rtp_deps/requirements_base.txt
+    #   -r requirements_base.txt
     #   aiohttp
     #   aiosignal
     #   anyio
@@ -3680,7 +3680,7 @@ urllib3==2.7.0 \
 uvicorn==0.30.0 \
     --hash=sha256:78fa0b5f56abb8562024a59041caeb555c86e48d0efdd23c3fe7de7a4075bdab \
     --hash=sha256:f678dec4fa3a39706bbf49b9ec5fc40049d42418716cea52b53f07828a60aa37
-    # via -r /home/admin/.cache/bazel/_bazel_admin/6728183ff00109d3491467cf3b221da1/external/rtp_deps/requirements_base.txt
+    # via -r requirements_base.txt
 wcwidth==0.8.2 \
     --hash=sha256:91fbef97204b96a3d4d421609b80340b760cf33e26da123ff243d76b1fda8dda \
     --hash=sha256:d63947694a0539a1d51e01eda7caf800c291020e6cdd7e28ad7b14dd33ad4f85
@@ -3691,10 +3691,10 @@ websocket-client==1.9.0 \
     # via dashscope
 xfastertransformer-devel==1.8.1.1 ; platform_machine == "x86_64" \
     --hash=sha256:2344c92cbec175602895bfc76db862a7f724ab9ae0e4aa89bc1b462dfa25b2e9
-    # via -r /home/admin/.cache/bazel/_bazel_admin/6728183ff00109d3491467cf3b221da1/external/rtp_deps/requirements_base.txt
+    # via -r requirements_base.txt
 xfastertransformer-devel-icx==1.8.1.1 ; platform_machine == "x86_64" \
     --hash=sha256:dfd1714815d38dfea89532365fbe36d502f0bb3baf37c0b472c16743a8cbe352
-    # via -r /home/admin/.cache/bazel/_bazel_admin/6728183ff00109d3491467cf3b221da1/external/rtp_deps/requirements_base.txt
+    # via -r requirements_base.txt
 yarl==1.24.2 \
     --hash=sha256:0063adad533e57171b79db3943b229d40dfafeeee579767f96541f106bac5f1b \
     --hash=sha256:044a09d8401fcf8681977faef6d286b8ade1e2d2e9dceda175d1cfa5ca496f30 \
@@ -3811,5 +3811,5 @@ setuptools==60.5.0 \
     --hash=sha256:2404879cda71495fc4d5cbc445ed52fdaddf352b36e40be8dcc63147cb4edabe \
     --hash=sha256:68eb94073fc486091447fcb0501efd6560a0e5a1839ba249e5ff3c4c93f05f90
     # via
-    #   -r /home/admin/.cache/bazel/_bazel_admin/6728183ff00109d3491467cf3b221da1/external/rtp_deps/requirements_base.txt
+    #   -r requirements_base.txt
     #   grpcio-tools
