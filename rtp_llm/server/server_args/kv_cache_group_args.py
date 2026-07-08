@@ -55,14 +55,6 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         help="指定一个多任务提示字符串（multi-task prompt string），为多任务纯json字符串，类似于系统提示词。默认为空 ",
     )
     kv_cache_group.add_argument(
-        "--int8_kv_cache",
-        env_name="INT8_KV_CACHE",
-        bind_to=(kv_cache_config, "int8_kv_cache"),
-        type=int,
-        default=0,
-        help="是否开启INT8的KV_CACHE",
-    )
-    kv_cache_group.add_argument(
         "--fp8_kv_cache",
         env_name="FP8_KV_CACHE",
         bind_to=(kv_cache_config, "fp8_kv_cache"),
