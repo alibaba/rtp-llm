@@ -3299,6 +3299,25 @@ class AttentionFP8(nn.Module):
                 )
                 cmp_topk = cmp_topk_runtime
 
+            # Prepare FlashMLA's chunk/output objects before combine_topk. The
+            # combine kernel is queued behind the overlay writes on the same
+            # stream, so moving pure CPU/view/allocation work here lets it run
+            # while the GPU drains the pre-combine dependency chain.
+            kv_view = workspace.view(B * wm.M, 1, D)
+            q_chunk = dsv4_chunk_tokens_from_env(
+                "DSV4_FLASH_MLA_SPARSE_Q_CHUNK",
+                min_value=0,
+            )
+            s_q = qkv.q.shape[0]
+            out = torch.empty(s_q, self.dim, dtype=torch.bfloat16, device=qkv.q.device)
+            if q_chunk <= 0:
+                raise ValueError(
+                    "DSV4_FLASH_MLA_SPARSE_Q_CHUNK must be positive for workspace "
+                    "streaming output projection"
+                )
+            chunk_rows = min(q_chunk, s_q)
+            freqs_all = common.freqs_cis
+
             if common.cp_on:
                 # Phase F2/Phase-2: kernel ``combine_topk_swa_indices`` derives
                 # per-Q-row ``pos = start_pos + token_idx_in_query`` assuming Q
@@ -3326,7 +3345,8 @@ class AttentionFP8(nn.Module):
                 )
                 with record_function_range("dsv4.fp8.attn.workspace.combine_topk_cp"):
                     combined_indices, combined_lens = combine_topk_swa_indices_cp(
-                        **combine_kwargs
+                        **combine_kwargs,
+                        flash_mla_indices=True,
                     )
             else:
                 with record_function_range("dsv4.fp8.attn.workspace.combine_topk"):
@@ -3340,6 +3360,7 @@ class AttentionFP8(nn.Module):
                         topk=int(cmp_topk.shape[-1]),
                         M=wm.M,
                         N=wm.N,
+                        flash_mla_indices=True,
                     )
 
             post_gather_stream = None
@@ -3403,41 +3424,47 @@ class AttentionFP8(nn.Module):
             # buffer, avoiding the previous full [T, H, D] o3 allocation and copy.
             # Disallow the historical "0 disables chunking" escape hatch here:
             # this path's purpose is to avoid materializing full [T, H, D] attention.
-            kv_view = workspace.view(B * wm.M, 1, D)
-            indices_3d = combined_indices.unsqueeze(1)
-            q_chunk = dsv4_chunk_tokens_from_env(
-                "DSV4_FLASH_MLA_SPARSE_Q_CHUNK",
-                min_value=0,
-            )
-            s_q = qkv.q.shape[0]
-            out = torch.empty(s_q, self.dim, dtype=torch.bfloat16, device=qkv.q.device)
-            if q_chunk <= 0:
-                raise ValueError(
-                    "DSV4_FLASH_MLA_SPARSE_Q_CHUNK must be positive for workspace "
-                    "streaming output projection"
-                )
-            chunk_rows = min(q_chunk, s_q)
-            freqs_all = common.freqs_cis
-            for start in range(0, s_q, chunk_rows):
-                end = min(start + chunk_rows, s_q)
+            indices_3d = combined_indices
+            if chunk_rows >= s_q:
                 with record_function_range(
                     "dsv4.fp8.attn.workspace.flash_mla_sparse_fwd"
                 ):
                     o_part, _, _ = flash_mla_sparse_fwd(
-                        q=qkv.q[start:end],
+                        q=qkv.q,
                         kv=kv_view,
-                        indices=indices_3d[start:end],
+                        indices=indices_3d,
                         sm_scale=self.softmax_scale,
                         attn_sink=self.attn_sink,
-                        topk_length=combined_lens[start:end],
+                        topk_length=combined_lens,
                     )
                 with record_function_range("dsv4.fp8.attn.prefill.output_proj"):
                     self._prefill_output_proj_into(
                         o_part,
-                        freqs_all[start:end],
-                        out=out[start:end, :],
+                        freqs_all,
+                        out=out,
                     )
                 dispose_tensor(o_part)
+            else:
+                for start in range(0, s_q, chunk_rows):
+                    end = min(start + chunk_rows, s_q)
+                    with record_function_range(
+                        "dsv4.fp8.attn.workspace.flash_mla_sparse_fwd"
+                    ):
+                        o_part, _, _ = flash_mla_sparse_fwd(
+                            q=qkv.q[start:end],
+                            kv=kv_view,
+                            indices=indices_3d[start:end],
+                            sm_scale=self.softmax_scale,
+                            attn_sink=self.attn_sink,
+                            topk_length=combined_lens[start:end],
+                        )
+                    with record_function_range("dsv4.fp8.attn.prefill.output_proj"):
+                        self._prefill_output_proj_into(
+                            o_part,
+                            freqs_all[start:end],
+                            out=out[start:end, :],
+                        )
+                    dispose_tensor(o_part)
             self._prefill_output_all_reduce(out)
             return out
         finally:

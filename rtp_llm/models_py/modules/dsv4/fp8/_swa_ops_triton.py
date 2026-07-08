@@ -816,6 +816,8 @@ def combine_topk_swa_indices(
     topk: int,
     M: int,
     N: int,
+    *,
+    flash_mla_indices: bool = False,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Build ``(combined_indices, combined_lens)`` for ``flash_mla_sparse_fwd``.
 
@@ -849,8 +851,13 @@ def combine_topk_swa_indices(
         // _SPARSE_PREFILL_TOPK_ALIGNMENT
         * _SPARSE_PREFILL_TOPK_ALIGNMENT
     )
+    combined_indices_shape = (
+        (num_tokens, 1, combined_topk)
+        if flash_mla_indices
+        else (num_tokens, combined_topk)
+    )
     combined_indices = torch.full(
-        (num_tokens, combined_topk),
+        combined_indices_shape,
         fill_value=-1,
         dtype=torch.int32,
         device=topk_indices.device,
@@ -1012,6 +1019,8 @@ def combine_topk_swa_indices_cp(
     N: int,
     req_id_per_token: torch.Tensor | None = None,
     prefix_lengths: torch.Tensor | None = None,
+    *,
+    flash_mla_indices: bool = False,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """CP-aware fused combine for ``flash_mla_sparse_fwd``.
 
@@ -1032,8 +1041,13 @@ def combine_topk_swa_indices_cp(
         // _SPARSE_PREFILL_TOPK_ALIGNMENT
         * _SPARSE_PREFILL_TOPK_ALIGNMENT
     )
+    combined_indices_shape = (
+        (num_tokens, 1, combined_topk)
+        if flash_mla_indices
+        else (num_tokens, combined_topk)
+    )
     combined_indices = torch.empty(
-        (num_tokens, combined_topk),
+        combined_indices_shape,
         dtype=torch.int32,
         device=topk_indices.device,
     )
