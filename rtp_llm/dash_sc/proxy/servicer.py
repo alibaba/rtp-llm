@@ -48,15 +48,11 @@ def _is_stream_done(resp: predict_v2_pb2.ModelStreamInferResponse) -> bool:
 
 
 def _invalid_max_new_tokens_message(request) -> str | None:
-    max_new_tokens, max_completion_tokens = parse_max_new_tokens_for_proxy(request)
-    if max_new_tokens <= 0:
-        return f"invalid max_tokens: {max_new_tokens}; " "must be greater than 0"
-    if max_completion_tokens < 0:
-        return (
-            f"invalid max_completion_tokens: {max_completion_tokens}; "
-            "must be greater than or equal to 0"
-        )
-    return None
+    max_new_tokens, from_completion_alias = parse_max_new_tokens_for_proxy(request)
+    if max_new_tokens > 0:
+        return None
+    param_name = "max_completion_tokens" if from_completion_alias else "max_new_tokens"
+    return f"invalid {param_name}: {max_new_tokens}; " "must be greater than 0"
 
 
 class DashScProxyServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):

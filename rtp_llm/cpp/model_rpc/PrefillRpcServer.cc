@@ -931,19 +931,20 @@ grpc::Status PrefillRpcServer::GenerateStreamCall(grpc::ServerContext*          
                                                   grpc::ServerWriter<GenerateOutputsPB>* writer) {
     RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_LOG_DEBUG("request [%ld] start generate stream call", request->request_id());
-    const auto& generate_config = request->generate_config();
-    auto        pd_separation   = shouldUsePdSeparation(generate_config);
+    const auto& generate_config               = request->generate_config();
+    auto        effective_output_token_budget = effectiveOutputTokenBudget(generate_config);
+    auto        pd_separation                 = shouldUsePdSeparation(generate_config);
     if (prefillTraceLogEnabled()) {
         RTP_LLM_LOG_INFO("Prefill request trace: event=recv request_id=%ld pd_separation=%d token_ids=%d "
-                         "max_new_tokens=%d max_completion_tokens=%d in_think_mode=%d max_thinking_tokens=%d "
+                         "max_new_tokens=%d in_think_mode=%d max_thinking_tokens=%d effective_output_token_budget=%ld "
                          "num_beams=%d num_return_sequences=%d can_use_pd_separation=%d timeout_ms=%ld",
                          request->request_id(),
                          pd_separation,
                          request->token_ids_size(),
                          generate_config.max_new_tokens(),
-                         generate_config.max_completion_tokens(),
                          generate_config.in_think_mode(),
                          generate_config.max_thinking_tokens(),
+                         static_cast<long>(effective_output_token_budget),
                          generate_config.num_beams(),
                          generate_config.num_return_sequences(),
                          generate_config.can_use_pd_separation(),
@@ -1012,8 +1013,16 @@ grpc::Status PrefillRpcServer::GenerateStreamCall(grpc::ServerContext*          
     return grpc::Status::OK;
 }
 
+int64_t PrefillRpcServer::effectiveOutputTokenBudget(const GenerateConfigPB& generate_config) {
+    int64_t output_token_budget = generate_config.max_new_tokens();
+    if (generate_config.in_think_mode() && generate_config.max_thinking_tokens() > 0) {
+        output_token_budget += generate_config.max_thinking_tokens();
+    }
+    return output_token_budget;
+}
+
 bool PrefillRpcServer::shouldUsePdSeparation(const GenerateConfigPB& generate_config) {
-    return generate_config.in_think_mode() && generate_config.num_beams() <= 1
+    return effectiveOutputTokenBudget(generate_config) > 1 && generate_config.num_beams() <= 1
            && generate_config.variable_num_beams().size() == 0 && generate_config.num_return_sequences() <= 1
            && generate_config.can_use_pd_separation();
 }

@@ -15,8 +15,6 @@ _GRAMMAR_RESPONSE_FORMAT_TYPES = frozenset(
     {"json_schema", "json_object", "regex", "ebnf", "structural_tag"}
 )
 _JSON_OBJECT_SCHEMA: Dict[str, str] = {"type": "object"}
-_DEFAULT_MAX_THINKING_TOKENS = 131072
-_DEFAULT_MAX_TOKENS = 131072
 
 
 def _compact_json(value: Union[str, Dict[str, Any]]) -> str:
@@ -82,13 +80,10 @@ def _env_int(env_name: str, default: int) -> int:
 
 
 class GenerateConfig(BaseModel):
-    max_new_tokens: int = _env_int("MAX_NEW_TOKENS", _DEFAULT_MAX_TOKENS)
-    max_completion_tokens: int = _env_int("MAX_COMPLETION_TOKENS", 0)
+    max_new_tokens: int = _env_int("MAX_NEW_TOKENS", 32000)
     # only for qwen agent fncall check max input tokens
     max_input_tokens: int = _env_int("MAX_INPUT_TOKENS", 32000)
-    max_thinking_tokens: int = _env_int(
-        "MAX_THINKING_TOKENS", _DEFAULT_MAX_THINKING_TOKENS
-    )
+    max_thinking_tokens: int = _env_int("MAX_THINKING_TOKENS", 131073)
     in_think_mode: bool = (
         False  # same as `enable_thinking` in chat_template_kwargs, discard one in the future
     )
@@ -338,16 +333,8 @@ class GenerateConfig(BaseModel):
                 f"frequency_penalty {self.frequency_penalty} is wrong data type",
             )
             check_with_info(
-                is_positive_integer(self.max_new_tokens) and self.max_new_tokens > 0,
+                is_positive_integer(self.max_new_tokens),
                 f"max_new_tokens {self.max_new_tokens} is wrong data type",
-            )
-            check_with_info(
-                is_positive_integer(self.max_completion_tokens),
-                f"max_completion_tokens {self.max_completion_tokens} is wrong data type",
-            )
-            check_with_info(
-                isinstance(self.max_thinking_tokens, int),
-                f"max_thinking_tokens {self.max_thinking_tokens} is wrong data type",
             )
             check_with_info(
                 is_positive_integer(self.num_beams),
@@ -409,16 +396,11 @@ class GenerateConfig(BaseModel):
                 is_list_positive_integer(self.begin_think_token_ids),
                 f"begin_think_token_ids {self.begin_think_token_ids} is wrong data type",
             )
-            if self.in_think_mode and self.max_thinking_tokens > 0:
-                check_with_info(
-                    self.max_completion_tokens == 0
-                    and self.max_completion_tokens > self.max_thinking_tokens,
-                    "max_completion_tokens must be greater than max_thinking_tokens "
-                    f"when thinking is enabled, got max_completion_tokens "
-                    f"{self.max_completion_tokens}, max_thinking_tokens "
-                    f"{self.max_thinking_tokens}",
-                )
             if self.in_think_mode:
+                check_with_info(
+                    is_positive_integer(self.max_thinking_tokens),
+                    f"max_thinking_tokens {self.max_thinking_tokens} is wrong data type",
+                )
                 check_with_info(
                     is_list_positive_integer(self.end_think_token_ids),
                     f"end_think_token_ids {self.end_think_token_ids} is wrong data type",

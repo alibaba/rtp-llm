@@ -36,7 +36,9 @@ private:
     void         remoteGenerate(PrefillGenerateContext& prefill_context);
     void         pollRemoteOutput(PrefillGenerateContext& prefill_context);
     void         reportPrefillRecentCacheKeyMetricsOnce(PrefillGenerateContext& prefill_context);
-    static bool  shouldUsePdSeparation(const GenerateConfigPB& generate_config);
+
+    static int64_t effectiveOutputTokenBudget(const GenerateConfigPB& generate_config);
+    static bool    shouldUsePdSeparation(const GenerateConfigPB& generate_config);
 
 private:
     std::string                           decode_cluster_name_;

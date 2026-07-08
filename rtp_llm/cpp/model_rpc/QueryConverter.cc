@@ -15,7 +15,6 @@ std::shared_ptr<GenerateConfig> QueryConverter::transGenerateConfig(const Genera
     std::shared_ptr<GenerateConfig> generate_config = std::make_shared<GenerateConfig>();
     generate_config->global_request_id              = config_proto->global_request_id();
     generate_config->max_new_tokens                 = config_proto->max_new_tokens();
-    generate_config->max_completion_tokens          = config_proto->max_completion_tokens();
     generate_config->min_new_tokens                 = config_proto->min_new_tokens();
     generate_config->num_beams                      = config_proto->num_beams();
     generate_config->variable_num_beams.resize(config_proto->variable_num_beams_size());

@@ -292,7 +292,7 @@ class DeepseekV4RendererTest(TestCase):
 
         self.assertEqual(rendered.rendered_prompt, expected)
 
-    def test_zero_max_thinking_tokens_does_not_disable_thinking_render(self):
+    def test_zero_max_thinking_tokens_disables_thinking_render(self):
         messages = [{"role": "user", "content": "Hello"}]
         request = ChatCompletionRequest(
             messages=messages,
@@ -302,11 +302,7 @@ class DeepseekV4RendererTest(TestCase):
         )
 
         rendered = self.renderer.render_chat(request)
-        expected = _rtp_expected_prompt(
-            self.encoding,
-            messages,
-            thinking_mode="thinking",
-        )
+        expected = _rtp_expected_prompt(self.encoding, messages, thinking_mode="chat")
 
         self.assertEqual(rendered.rendered_prompt, expected)
 

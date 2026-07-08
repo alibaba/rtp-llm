@@ -59,9 +59,6 @@ std::shared_ptr<GenerateConfig> OpenaiEndpoint::extract_generation_config(const 
     if (req.max_tokens.has_value()) {
         config.max_new_tokens = req.max_tokens.value();
     }
-    if (req.max_completion_tokens.has_value()) {
-        config.max_completion_tokens = req.max_completion_tokens.value();
-    }
     config.num_return_sequences = req.n.value_or(1);
     std::vector<std::string> request_stop_words_list;
     if (req.stop.has_value()) {

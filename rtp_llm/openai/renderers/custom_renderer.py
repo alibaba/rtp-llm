@@ -371,18 +371,6 @@ class CustomChatRenderer:
     def getRequest(self, request: str) -> ChatCompletionRequest:
         return ChatCompletionRequest(**(json.loads(request)))
 
-    def _make_check_finish_reason(
-        self, request: ChatCompletionRequest, max_new_tokens: int
-    ):
-        max_completion_tokens = request.max_completion_tokens
-        if max_completion_tokens is None and request.extra_configs is not None:
-            max_completion_tokens = request.extra_configs.max_completion_tokens
-        return functools.partial(
-            self._check_finish_reason,
-            max_new_tokens=max_new_tokens,
-            max_completion_tokens=max_completion_tokens or 0,
-        )
-
     def _setup_chat_template(self, template_file_name: str = "chat_template.jinja"):
         """设置聊天模板, 兼容从文件读取chat_template的情况"""
         self.chat_template = self.tokenizer.chat_template
@@ -689,7 +677,7 @@ class CustomChatRenderer:
             return await self._create_empty_delta(status.output.aux_info)
         status.update_output(
             output,
-            self._make_check_finish_reason(status.request, max_new_tokens),
+            functools.partial(self._check_finish_reason, max_new_tokens=max_new_tokens),
             self._remove_stop_word_ids,
         )
         decoded_prev_token = self.tokenizer.decode(status.prev_token_id)
@@ -1126,7 +1114,7 @@ class CustomChatRenderer:
         status.update_output_sync(
             output_ids,
             input_len,
-            self._make_check_finish_reason(status.request, max_new_tokens),
+            functools.partial(self._check_finish_reason, max_new_tokens=max_new_tokens),
             self._remove_stop_word_ids,
         )
         decoded_prev_token = self.tokenizer.decode(status.prev_token_id)
@@ -1566,19 +1554,12 @@ class CustomChatRenderer:
         return chat_response.model_dump_json(exclude_none=True)
 
     def _check_finish_reason(
-        self,
-        token_ids: List[int],
-        input_token_length: int,
-        max_new_tokens: int = -1,
-        max_completion_tokens: int = 0,
+        self, token_ids: List[int], input_token_length: int, max_new_tokens: int = -1
     ) -> Optional[FinisheReason]:
         stop_word_ids_list_all = (
             self.get_all_extra_stop_word_ids_list() + self.stop_words_id_list
         )
-        if max_completion_tokens > 0:
-            if len(token_ids) >= max_completion_tokens:
-                return FinisheReason.length
-        elif max_new_tokens > 0 and len(token_ids) >= max_new_tokens:
+        if max_new_tokens > 0 and len(token_ids) >= max_new_tokens:
             return FinisheReason.length
         if len(token_ids) + input_token_length >= self.max_seq_len:
             return FinisheReason.length

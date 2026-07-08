@@ -30,16 +30,12 @@ class RemoveStopWordIdsTest(TestCase):
         # Create a minimal mock renderer with necessary attributes
         self.renderer = Mock(spec=CustomChatRenderer)
         self.renderer.eos_token_id = 2
-        self.renderer.max_seq_len = 1000
         self.renderer.stop_words_id_list = [[151643], [151644], [151645]]
         self.renderer.get_all_extra_stop_word_ids_list = Mock(return_value=[])
 
         # Bind the actual method to our mock
         self.renderer._remove_stop_word_ids = (
             CustomChatRenderer._remove_stop_word_ids.__get__(self.renderer)
-        )
-        self.renderer._check_finish_reason = (
-            CustomChatRenderer._check_finish_reason.__get__(self.renderer)
         )
 
     def test_truncate_at_eos(self):
@@ -71,24 +67,6 @@ class RemoveStopWordIdsTest(TestCase):
         output_ids = [100, 101, 102]
         result = self.renderer._remove_stop_word_ids(output_ids, [])
         self.assertEqual(result, [100, 101, 102])
-
-    def test_max_completion_tokens_reports_length_before_eos_stop(self):
-        result = self.renderer._check_finish_reason(
-            [100, 101, 2],
-            input_token_length=10,
-            max_new_tokens=100,
-            max_completion_tokens=3,
-        )
-        self.assertEqual(result, FinisheReason.length)
-
-    def test_max_completion_tokens_ignores_max_new_tokens(self):
-        result = self.renderer._check_finish_reason(
-            [100, 101, 102, 103, 104, 105, 106, 107, 108],
-            input_token_length=10,
-            max_new_tokens=8,
-            max_completion_tokens=16,
-        )
-        self.assertIsNone(result)
 
     def test_truncate_at_stop_word_sequence(self):
         # Stop word sequence in middle

@@ -8,7 +8,6 @@
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
 #include "rtp_llm/cpp/testing/TestBase.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
-#include "rtp_llm/cpp/config/StaticConfig.h"
 #include "rtp_llm/cpp/models/logits_processor/ThinkModeLogitsProcessor.h"
 
 using namespace std;
@@ -114,31 +113,17 @@ TEST_F(GenerateStreamTest, testGenerateStreamReuseCacheMethod) {
     ASSERT_TRUE(stream->reuseCache());
 }
 
-TEST_F(GenerateStreamTest, testMaxTokenNumUsesCompletionCapWhenNotThinking) {
+TEST_F(GenerateStreamTest, testMaxTokenNumExcludesThinkingTokens) {
     auto builder                  = GenerateStreamBuilder();
     auto config                   = std::make_shared<GenerateConfig>();
-    config->max_new_tokens        = 10;
-    config->max_completion_tokens = 4;
-    auto stream                   = builder.createContextStream({1, 2}, config);
-
-    ASSERT_EQ(stream->maxTokenNum(), 6);
-
-    config->max_completion_tokens = 0;
-    ASSERT_EQ(stream->maxTokenNum(), 12);
-}
-
-TEST_F(GenerateStreamTest, testMaxTokenNumSeparatesThinkingContentAndCompletionBudgets) {
-    auto builder                  = GenerateStreamBuilder();
-    auto config                   = std::make_shared<GenerateConfig>();
-    config->max_new_tokens        = 4;
-    config->max_completion_tokens = 8;
+    config->max_new_tokens        = 1;
     config->in_think_mode         = true;
     config->max_thinking_tokens   = 3;
     config->begin_think_token_ids = {7};
     config->end_think_token_ids   = {8, 9};
     auto stream                   = builder.createContextStream({1, 2}, config);
 
-    ASSERT_EQ(stream->maxTokenNum(), 10);
+    ASSERT_EQ(stream->maxTokenNum(), 8);
 
     auto processors = stream->getAllLogitsProcessorPtr();
     ASSERT_FALSE(processors.empty());
@@ -147,63 +132,7 @@ TEST_F(GenerateStreamTest, testMaxTokenNumSeparatesThinkingContentAndCompletionB
 
     think_processor->updateStatus(torch::tensor({{8, 9}}, torch::kInt32), 2);
     ASSERT_EQ(think_processor->finishedThinkOutputLen(), 2);
-    ASSERT_EQ(stream->maxTokenNum(), 8);
-}
-
-TEST_F(GenerateStreamTest, testThinkingModeRequiresCompletionBudgetAboveThinkBudget) {
-    auto builder                  = GenerateStreamBuilder();
-    auto config                   = std::make_shared<GenerateConfig>();
-    config->max_new_tokens        = 4;
-    config->max_completion_tokens = 3;
-    config->in_think_mode         = true;
-    config->max_thinking_tokens   = 3;
-    config->end_think_token_ids   = {8};
-    auto stream                   = builder.createContextStream({1, 2}, config);
-
-    auto old_core_dump_on_exception              = StaticConfig::user_ft_core_dump_on_exception;
-    StaticConfig::user_ft_core_dump_on_exception = false;
-    EXPECT_THROW(stream->maxTokenNum(), std::exception);
-    StaticConfig::user_ft_core_dump_on_exception = old_core_dump_on_exception;
-}
-
-TEST_F(GenerateStreamTest, testCompleteTokenIdsSkipUpdateWhenPastMaxTokenNum) {
-    auto builder = GenerateStreamBuilder();
-    auto stream  = builder.createContextStream({1, 2});
-    stream->setSeqLength(5);
-
-    int error_token_id = 0;
-    ASSERT_TRUE(stream->getCompleteTokenIds()->update(torch::tensor({{1065353216}}, torch::kInt32),
-                                                      0,
-                                                      1,
-                                                      stream->inputLength(),
-                                                      4,
-                                                      154880,
-                                                      false,
-                                                      0,
-                                                      error_token_id));
-    ASSERT_EQ(stream->seqLength(), 5);
-}
-
-TEST_F(GenerateStreamTest, testCompleteTokenIdsUsesTensorWidthWhenClipped) {
-    auto generate_input             = std::make_shared<GenerateInput>();
-    generate_input->generate_config = std::make_shared<GenerateConfig>();
-    generate_input->input_ids       = torch::tensor({1, 2}, torch::kInt32);
-
-    CompleteTokenIds token_ids(2, 2, 8, 1);
-    token_ids.init(generate_input);
-
-    int error_token_id = 0;
-    ASSERT_TRUE(token_ids.update(torch::tensor({{10, 11, 12}, {20, 21, 22}}, torch::kInt32),
-                                 0,
-                                 3,
-                                 generate_input->inputLength(),
-                                 4,
-                                 154880,
-                                 false,
-                                 0,
-                                 error_token_id));
-    ASSERT_EQ(token_ids.completeTokenIdsVec(0), std::vector<int>({1, 2, 10, 11}));
-    ASSERT_EQ(token_ids.completeTokenIdsVec(1), std::vector<int>({1, 2, 20, 21}));
+    ASSERT_EQ(stream->maxTokenNum(), 5);
 }
 
 // clearMtpAsyncDeviceState rejects stale epochs. A worker that

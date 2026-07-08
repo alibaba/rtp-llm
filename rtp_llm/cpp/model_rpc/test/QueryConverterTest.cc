@@ -4,7 +4,6 @@
 
 #define private public
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
-#include "rtp_llm/cpp/config/StaticConfig.h"
 #include "rtp_llm/cpp/model_rpc/LocalRpcServer.h"
 #include "rtp_llm/cpp/model_rpc/PrefillRpcServer.h"
 #include "rtp_llm/cpp/model_rpc/QueryConverter.h"
@@ -20,7 +19,6 @@ class QueryConverterTest: public DeviceTestBase {};
 TEST(PrefillRpcServerTest, ThinkModeBudgetUsesPdSeparationWhenMaxNewTokensIsOne) {
     GenerateConfigPB generate_config;
     generate_config.set_max_new_tokens(1);
-    generate_config.set_max_completion_tokens(131073);
     generate_config.set_num_beams(1);
     generate_config.set_num_return_sequences(1);
     generate_config.set_can_use_pd_separation(true);
@@ -29,6 +27,7 @@ TEST(PrefillRpcServerTest, ThinkModeBudgetUsesPdSeparationWhenMaxNewTokensIsOne)
     generate_config.add_end_think_token_ids(8);
     generate_config.add_end_think_token_ids(9);
 
+    EXPECT_EQ(PrefillRpcServer::effectiveOutputTokenBudget(generate_config), 131075);
     EXPECT_TRUE(PrefillRpcServer::shouldUsePdSeparation(generate_config));
 }
 
@@ -41,24 +40,8 @@ TEST(PrefillRpcServerTest, SingleTokenRequestWithoutPositiveThinkBudgetBypassesP
     generate_config.set_in_think_mode(true);
     generate_config.set_max_thinking_tokens(-1);
 
-    auto old_core_dump_on_exception              = StaticConfig::user_ft_core_dump_on_exception;
-    StaticConfig::user_ft_core_dump_on_exception = false;
-    StaticConfig::user_ft_core_dump_on_exception = old_core_dump_on_exception;
-}
-
-TEST(PrefillRpcServerTest, ThinkModeRequiresCompletionBudgetGreaterThanThinkBudget) {
-    GenerateConfigPB generate_config;
-    generate_config.set_max_new_tokens(10);
-    generate_config.set_max_completion_tokens(10);
-    generate_config.set_num_beams(1);
-    generate_config.set_num_return_sequences(1);
-    generate_config.set_can_use_pd_separation(true);
-    generate_config.set_in_think_mode(true);
-    generate_config.set_max_thinking_tokens(10);
-
-    auto old_core_dump_on_exception              = StaticConfig::user_ft_core_dump_on_exception;
-    StaticConfig::user_ft_core_dump_on_exception = false;
-    StaticConfig::user_ft_core_dump_on_exception = old_core_dump_on_exception;
+    EXPECT_EQ(PrefillRpcServer::effectiveOutputTokenBudget(generate_config), 1);
+    EXPECT_FALSE(PrefillRpcServer::shouldUsePdSeparation(generate_config));
 }
 
 TEST_F(QueryConverterTest, testTransInput) {
@@ -74,7 +57,6 @@ TEST_F(QueryConverterTest, testTransInput) {
     auto generate_config_pb = input.mutable_generate_config();
     generate_config_pb->set_min_new_tokens(4);
     generate_config_pb->set_max_new_tokens(5);
-    generate_config_pb->set_max_completion_tokens(6);
     generate_config_pb->set_num_beams(1);
     generate_config_pb->set_num_return_sequences(1);
     generate_config_pb->set_top_k(6);
@@ -105,7 +87,6 @@ TEST_F(QueryConverterTest, testTransInput) {
     auto generate_config = generate_input->generate_config;
     ASSERT_EQ(generate_config->min_new_tokens, 4);
     ASSERT_EQ(generate_config->max_new_tokens, 5);
-    ASSERT_EQ(generate_config->max_completion_tokens, 6);
     ASSERT_EQ(generate_config->num_beams, 1);
     ASSERT_EQ(generate_config->num_return_sequences, 1);
     ASSERT_EQ(generate_config->top_k, 6);

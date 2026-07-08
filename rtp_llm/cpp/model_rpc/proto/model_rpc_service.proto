@@ -105,7 +105,6 @@ message GenerateConfigPB {
     google.protobuf.StringValue ebnf = 61;
     google.protobuf.StringValue structural_tag = 62;
     google.protobuf.StringValue response_format = 63;
-    int32 max_completion_tokens = 64;
 }
 
 message MMPreprocessConfigPB {

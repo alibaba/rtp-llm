@@ -335,30 +335,21 @@ class ParameterValidationTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["header"]["status_code"], 400)
         self.assertEqual(payload["header"]["status_name"], "InvalidParameter")
 
-    async def test_max_completion_tokens_negative_rejected_without_forward(
+    async def test_max_completion_tokens_non_positive_rejected_without_forward(
         self,
     ) -> None:
-        req = _make_request("req1")
-        req.parameters["max_completion_tokens"].int64_param = -1
+        for value in (-1, 0):
+            with self.subTest(value=value):
+                req = _make_request("req1")
+                req.parameters["max_completion_tokens"].int64_param = value
 
-        responses = await _drain(
-            self.servicer.ModelStreamInfer(_request_gen(req), MagicMock())
-        )
+                responses = await _drain(
+                    self.servicer.ModelStreamInfer(_request_gen(req), MagicMock())
+                )
 
-        self._assert_parameter_error(responses)
-        self.mock_stub.ModelStreamInfer.assert_not_called()
-
-    async def test_max_completion_tokens_zero_forwarded(self) -> None:
-        self.mock_stub.ModelStreamInfer.return_value = _AsyncIter([_make_response()])
-        req = _make_request("req1")
-        req.parameters["max_completion_tokens"].int64_param = 0
-
-        responses = await _drain(
-            self.servicer.ModelStreamInfer(_request_gen(req), MagicMock())
-        )
-
-        self.assertEqual(len(responses), 1)
-        self.mock_stub.ModelStreamInfer.assert_called_once()
+                self._assert_parameter_error(responses)
+                self.mock_stub.ModelStreamInfer.assert_not_called()
+                self.mock_stub.reset_mock()
 
     async def test_max_new_tokens_non_positive_rejected_without_forward(
         self,

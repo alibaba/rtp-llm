@@ -117,7 +117,6 @@ void ChatCompletionRequest::Jsonize(Jsonizable::JsonWrapper& json) {
     JSONIZE_OPTIONAL(top_p);
     JSONIZE_OPTIONAL(top_k);
     JSONIZE_OPTIONAL(max_tokens);
-    JSONIZE_OPTIONAL(max_completion_tokens);
 
     std::variant<std::string, std::vector<std::string>> stop_;
     try {

@@ -7,25 +7,13 @@ backend ``GenerateInput`` is built.
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass, field
 from typing import Optional
 
 THINK_MODE_AUTO = "auto"
 THINK_MODE_FORCE = "force"
-
-
-def _env_int(env_name: str, default: int) -> int:
-    value = os.environ.get(env_name)
-    if value is None:
-        return default
-    try:
-        return int(value)
-    except ValueError:
-        return default
-
-
-DEFAULT_MAX_THINKING_TOKENS = _env_int("MAX_THINKING_TOKENS", 131072)
+DEFAULT_MAX_THINKING_TOKENS = 32000
+INT32_MAX = 2_147_483_647
 
 
 def normalize_think_mode(mode: object) -> str:
@@ -123,6 +111,8 @@ def plan_dash_sc_thinking(
         return DashScThinkPlan.disabled(ids, "think_config_disabled")
     if enable_thinking is False:
         return DashScThinkPlan.disabled(ids, "enable_thinking_false")
+    if isinstance(max_new_think_tokens, int) and max_new_think_tokens == 0:
+        return DashScThinkPlan.disabled(ids, "max_new_think_tokens_non_positive")
 
     bos_tokens = list(think_config.bos_tokens)
     empty_tokens = list(think_config.empty_tokens)
@@ -139,7 +129,9 @@ def plan_dash_sc_thinking(
         return DashScThinkPlan.disabled(ids, "empty_think_present_tail")
 
     if isinstance(max_new_think_tokens, int):
-        max_thinking_tokens = int(max_new_think_tokens)
+        max_thinking_tokens = (
+            INT32_MAX if max_new_think_tokens < 0 else int(max_new_think_tokens)
+        )
     else:
         max_thinking_tokens = int(default_max_thinking_tokens)
     bos_token_id = think_config.bos_token_id
