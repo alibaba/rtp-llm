@@ -105,6 +105,10 @@ message GenerateConfigPB {
     IntMatrix banned_combo_token_ids = 59;
     // 0=unset(fallback to bool return_all_probs), 1=NONE, 2=DEFAULT, 3=ORIGINAL
     int32 return_all_probs_mode = 60;
+    // 跨序列 combo 去重开关
+    bool enable_cross_sequence_ban = 61;
+    // 跨序列分叉起始商品位置
+    int32 cross_seq_diverge_start_combo = 62;
 }
 
 message MMPreprocessConfigPB {
