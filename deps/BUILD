@@ -48,7 +48,7 @@ compile_pip_requirements(
     name = "requirements_torch_gpu_cuda12_9",
     src = "requirements_torch_gpu_cuda12_9.txt",
     extra_args = PIP_CUDA_EXTRA_ARGS,
-    extra_data = ["//:requirements_base.txt"],
+    extra_data = [":requirements_base.txt"],
     requirements_txt = "requirements_lock_torch_gpu_cuda12_9.txt",
     tags = ["manual"],
 )
@@ -57,7 +57,7 @@ compile_pip_requirements(
     name = "requirements_cuda12_arm",
     src = "requirements_cuda12_arm.txt",
     extra_args = PIP_CUDA_EXTRA_ARGS,
-    extra_data = ["//:requirements_base.txt"],
+    extra_data = [":requirements_base.txt"],
     requirements_txt = "requirements_lock_cuda12_arm.txt",
     tags = ["manual"],
 )
@@ -66,7 +66,7 @@ compile_pip_requirements(
     name = "requirements_rocm",
     src = "requirements_rocm.txt",
     extra_args = PIP_ROCM_EXTRA_ARGS,
-    extra_data = ["//:requirements_base.txt"],
+    extra_data = [":requirements_base.txt"],
     requirements_txt = "requirements_lock_rocm.txt",
     tags = ["manual"],
 )
