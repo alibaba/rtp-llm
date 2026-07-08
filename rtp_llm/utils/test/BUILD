@@ -9,6 +9,16 @@ filegroup(
 )
 
 py_test(
+    name = "swizzle_utils_test",
+    srcs = [
+        "swizzle_utils_test.py",
+    ],
+    deps = [
+        "//rtp_llm:utils",
+    ],
+)
+
+py_test(
     name = "ckpt_database_test",
     srcs = [
         "ckpt_database_test.py",

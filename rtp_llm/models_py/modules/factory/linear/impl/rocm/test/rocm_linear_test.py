@@ -92,6 +92,39 @@ class LinearTest(TestCase):
             ):
                 self._run_linear_test(num_tokens, k, n, dtype, has_bias, has_swizzle)
 
+    # BA-shaped weights whose out-dim is NOT 16-aligned after TP split.
+    #   TP=4 -> 24, TP=8 -> 12. These crash swizzle_tensor (m % 16), so the
+    #   fix skips swizzle and routes them through NoSwizzle. This test locks in
+    #   that the NoSwizzle path (a) is the one picked for hw_kernel_config=None
+    #   and (b) computes the right numbers for these m values.
+    BA_UNALIGNED_K_N = [(5120, 24), (5120, 12)]
+
+    def test_ba_unaligned_falls_back_to_no_swizzle(self):
+        from rtp_llm.models_py.modules.factory.linear.impl.rocm import (
+            RocmF16LinearNoSwizzle,
+        )
+        from rtp_llm.models_py.utils.arch import is_hip
+
+        for num_tokens in self.NUM_TOKENS:
+            for (k, n) in self.BA_UNALIGNED_K_N:
+                with self.subTest(num_tokens=num_tokens, k=k, n=n):
+                    torch.manual_seed(0)
+                    w = torch.randn(k, n, dtype=torch.bfloat16)
+                    x = torch.randn(num_tokens, k, dtype=torch.bfloat16)
+                    ref = LinearTorch(w)(x)
+
+                    # Mirrors the fix contract: unaligned BA weight is left
+                    # un-swizzled and hw_kernel_config=None -> NoSwizzle.
+                    linear = LinearFactory.create_linear_from_weights(
+                        {"weight": w}, "weight", None, None, None, None
+                    )
+                    if is_hip():
+                        self.assertIsInstance(linear, RocmF16LinearNoSwizzle)
+                    out = linear(x)
+                    self.assertTrue(
+                        torch.allclose(ref, out, atol=1e-2, rtol=1e-2)
+                    )
+
 
 if __name__ == "__main__":
     main()

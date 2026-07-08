@@ -12,7 +12,7 @@ from rtp_llm.ops.compute_ops import (
     preprocess_weight_scale,
 )
 from rtp_llm.utils.model_weight import W
-from rtp_llm.utils.swizzle_utils import swizzle_tensor
+from rtp_llm.utils.swizzle_utils import swizzle_tensor, can_swizzle_kn
 
 
 def is_gfx950(arch_fallback: Optional[str] = None) -> bool:
@@ -932,6 +932,14 @@ class RocmImpl(GpuImpl):
             W.linear_attn_ba_w,
             W.linear_attn_out_w,
         ]:
+            # BA low-rank proj: TP split may leave the out-dim not 16-aligned
+            # (e.g. TP=4 -> 24). Skip swizzle when unaligned; in_proj_ba passes
+            # hw_kernel_config=None so dispatch picks NoSwizzle and the two sides
+            # stay consistent. Only BA is whitelisted: other keys have no
+            # dispatch fallback, so silently skipping their swizzle would be
+            # silent-wrong -- they keep the hard assert in swizzle_tensor.
+            if key == W.linear_attn_ba_w and not can_swizzle_kn(weight):
+                return weight
             if self.py_env_configs.py_hw_kernel_config.use_swizzleA:
                 if weight.dtype != torch.float8_e4m3fn:
                     weight = swizzle_tensor(weight.t(), False).t()
