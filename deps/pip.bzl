@@ -1,7 +1,7 @@
 load("@rules_python//python:pip.bzl", "pip_parse")
 
 # Index configuration (opensource side). Strict separation rule:
-#   - NO artlab.alibaba-inc.com (intranet-only host, not reachable from public)
+#   - NO internal-only package index (intranet host, not reachable from public)
 #   - rtp-opensource/rtp_llm/simple: RTP-LLM custom wheels (flash_attn, deep_gemm,
 #     deep_ep, flash_mla, flashinfer_*, rtp_kernel, aiter, ...) — single source of
 #     truth, shared with internal side
@@ -18,8 +18,8 @@ load("@rules_python//python:pip.bzl", "pip_parse")
 PIP_BASE_ARGS = [
     "--cache-dir=~/.cache/pip",
     # --index-url overrides the env's PIP_INDEX_URL (which intranet containers
-    # set to artlab via /etc/profile.d/alibaba_pypi_env.sh). Without this line,
-    # opensource pip-compile would silently pull from artlab — forbidden.
+    # may point at an internal-only index). Without this line, opensource
+    # pip-compile could silently pull from that internal index — forbidden.
     "--index-url=https://mirrors.aliyun.com/pypi/simple/",
     # Extra indexes (PEP 503), used for transitive resolution:
     "--extra-index-url=https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/simple/",
