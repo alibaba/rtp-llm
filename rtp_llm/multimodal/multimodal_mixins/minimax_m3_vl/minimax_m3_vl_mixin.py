@@ -22,10 +22,12 @@ GPU.
 
 import json
 import logging
+import math
 import os
 from typing import Any, List, Optional
 
 import torch
+import torchvision
 from PIL import Image
 from transformers import AutoConfig, AutoTokenizer
 
@@ -47,6 +49,7 @@ from .image_processor import (
     MiniMaxM3VLImageProcessor,
     compute_sampled_frame_indices,
     get_hw_multiple_of,
+    smart_resize,
 )
 from .minimax_m3_vl_vit import MiniMaxM3VLVisionTower, VisionConfig  # noqa: F401
 
@@ -165,34 +168,32 @@ class MiniMaxM3VLImageEmbedding(MultiModalEmbeddingInterface):
 
     @staticmethod
     def _preprocess_image(mm_input, vit_config, processor):
+        """Download + decode only.  The resize/normalize/patch-fold transforms
+        run later on GPU in ``embedding()`` — here we just decode to a raw uint8
+        CHW tensor and precompute the (device-independent, cheap) target size
+        from the per-request min/max pixels.
+
+        Returns ``(raw_chw_uint8, (target_h, target_w), None)`` where the ``None``
+        third element marks an image (no timestamps).
+        """
         data = get_bytes_io_from_url(mm_input.url, vit_config.download_headers)
         image = Image.open(data).convert("RGB")
+        raw = torchvision.transforms.functional.pil_to_tensor(image)  # uint8 [C,H,W]
 
-        forwarded = {
-            attr: getattr(processor, attr, None)
-            for attr in (
-                "do_resize",
-                "size",
-                "default_to_square",
-                "resample",
-                "do_rescale",
-                "rescale_factor",
-                "do_normalize",
-                "image_mean",
-                "image_std",
-                "do_convert_rgb",
-                "disable_grouping",
-                "input_data_format",
-                "device",
-            )
-        }
+        _, height, width = raw.shape
+        factor = processor.patch_size * processor.merge_size
+        min_pixels = processor.min_pixels
+        max_pixels = processor.max_pixels
         pre_cfg = mm_input.mm_preprocess_config
         if getattr(pre_cfg, "max_pixels", -1) > 0:
-            forwarded["max_pixels"] = int(pre_cfg.max_pixels)
+            max_pixels = int(pre_cfg.max_pixels)
         if getattr(pre_cfg, "min_pixels", -1) > 0:
-            forwarded["min_pixels"] = int(pre_cfg.min_pixels)
-        res = processor(images=[image], return_tensors="pt", **forwarded)
-        return res["pixel_values"], res["image_grid_thw"], None
+            min_pixels = int(pre_cfg.min_pixels)
+
+        target_h, target_w = smart_resize(
+            height, width, factor=factor, min_pixels=min_pixels, max_pixels=max_pixels
+        )
+        return raw, (target_h, target_w), None
 
     @staticmethod
     def _preprocess_video(mm_input, vit_config, processor, tokenizer, **kwargs):
@@ -217,73 +218,32 @@ class MiniMaxM3VLImageEmbedding(MultiModalEmbeddingInterface):
             total_frames, video_fps, target_fps, int(max_frames)
         )
 
-        frames_tensor = vr.get_batch(indices)  # (N, H, W, C) uint8 torch
-        frames_nchw = frames_tensor.permute(0, 3, 1, 2).float()  # (N, C, H, W)
+        # Decode the sampled frames only (the "load" step).  Resize/normalize/
+        # patch-fold happen on GPU in embedding(); here we just keep raw uint8
+        # frames + the cheap target size + timestamps.
+        frames_tensor = vr.get_batch(indices)  # (N, H, W, C) uint8 torch (CPU)
 
         patch_size = processor.patch_size
         merge_size = kwargs.get("merge_size", 2)
         temporal_patch_size = kwargs.get("temporal_patch_size", 2)
         factor = patch_size * merge_size
 
-        _, _, src_h, src_w = frames_nchw.shape
+        num_frames, src_h, src_w, _ = frames_tensor.shape
         # sglang uses get_hw_multiple_of with frame_max_size (longest-edge cap)
         frame_max_size = getattr(processor, "max_pixels", None)
         if frame_max_size and isinstance(frame_max_size, int):
             # Convert pixel budget to longest-edge estimate for
             # get_hw_multiple_of.  Fall back to ceil-align only.
-            import math
-
             edge = int(math.sqrt(frame_max_size))
             target_w, target_h = get_hw_multiple_of((src_w, src_h), factor, edge)
         else:
             target_w, target_h = get_hw_multiple_of((src_w, src_h), factor, None)
 
-        import torchvision
-
-        frames_resized = torchvision.transforms.functional.resize(
-            frames_nchw,
-            [target_h, target_w],
-            interpolation=torchvision.transforms.InterpolationMode.BICUBIC,
-        )
-
-        # (1, T, C, H, W)
-        video = frames_resized.unsqueeze(0)
-
-        video = video * processor.rescale_factor
-        mean = torch.tensor(processor.image_mean).view(1, 1, 3, 1, 1)
-        std = torch.tensor(processor.image_std).view(1, 1, 3, 1, 1)
-        video = (video - mean) / std
-
-        T = video.shape[1]
-        pad_n = (temporal_patch_size - T % temporal_patch_size) % temporal_patch_size
-        if pad_n:
-            tail = video[:, -1:].repeat(1, pad_n, 1, 1, 1)
-            video = torch.cat([video, tail], dim=1)
-
-        B, T_pad, channel, H, W = video.shape
-        grid_t = T_pad // temporal_patch_size
-        grid_h, grid_w = H // patch_size, W // patch_size
-
-        patches = video.view(
-            B,
-            grid_t,
-            temporal_patch_size,
-            channel,
-            grid_h // merge_size,
-            merge_size,
-            patch_size,
-            grid_w // merge_size,
-            merge_size,
-            patch_size,
-        )
-        patches = patches.permute(0, 1, 4, 7, 5, 8, 3, 2, 6, 9)
-        flatten = patches.reshape(
-            B,
-            grid_t * grid_h * grid_w,
-            channel * temporal_patch_size * patch_size * patch_size,
-        )
-        pixel_values = flatten.squeeze(0)
-        video_grid_thw = torch.tensor([[grid_t, grid_h, grid_w]], dtype=torch.long)
+        # grid_t after temporal padding (matches the fold done in _gpu_fold).
+        pad_n = (
+            temporal_patch_size - num_frames % temporal_patch_size
+        ) % temporal_patch_size
+        grid_t = (num_frames + pad_n) // temporal_patch_size
 
         # Compute per-temporal-group timestamp token IDs.
         timestamp_token_ids: List[List[int]] = []
@@ -294,7 +254,7 @@ class MiniMaxM3VLImageEmbedding(MultiModalEmbeddingInterface):
             ts_ids = tokenizer.encode(ts_text, add_special_tokens=False)
             timestamp_token_ids.append(ts_ids)
 
-        return pixel_values, video_grid_thw, timestamp_token_ids
+        return frames_tensor, (target_h, target_w), timestamp_token_ids
 
     def _lookup_word_embeddings(self, token_ids: torch.Tensor) -> torch.Tensor:
         """Index into the CPU word-embedding table and move result to GPU."""
@@ -360,19 +320,94 @@ class MiniMaxM3VLImageEmbedding(MultiModalEmbeddingInterface):
 
         return torch.cat(chunks, dim=0), ts_offset
 
+    def _gpu_fold(self, frames_nchw: torch.Tensor, target_hw) -> tuple:
+        """GPU resize + rescale + normalize + temporal-pad + patch-fold.
+
+        Takes raw decoded frames ``[N, C, H, W]`` (N=1 for images) on any device
+        and returns ``(pixel_values [total_patches, patch_dim], grid_thw [1,3])``.
+        The fold math is identical to the previous CPU preprocess; only the device
+        differs (torchvision bicubic runs on GPU when ``frames_nchw`` is on cuda).
+        """
+        device = self._device
+        dtype = self._data_type
+        p = self.mm_processor
+        patch_size = p.patch_size
+        merge_size = self.merge_size
+        temporal_patch_size = self.temporal_patch_size
+        target_h, target_w = target_hw
+
+        frames = frames_nchw.to(device=device).float()
+        frames = torchvision.transforms.functional.resize(
+            frames,
+            [target_h, target_w],
+            interpolation=torchvision.transforms.InterpolationMode.BICUBIC,
+        )
+
+        video = frames.unsqueeze(0)  # (1, T, C, H, W)
+        video = video * p.rescale_factor
+        mean = torch.tensor(p.image_mean, device=device).view(1, 1, 3, 1, 1)
+        std = torch.tensor(p.image_std, device=device).view(1, 1, 3, 1, 1)
+        video = (video - mean) / std
+
+        T = video.shape[1]
+        pad_n = (temporal_patch_size - T % temporal_patch_size) % temporal_patch_size
+        if pad_n:
+            tail = video[:, -1:].repeat(1, pad_n, 1, 1, 1)
+            video = torch.cat([video, tail], dim=1)
+
+        B, T_pad, channel, H, W = video.shape
+        grid_t = T_pad // temporal_patch_size
+        grid_h, grid_w = H // patch_size, W // patch_size
+
+        patches = video.view(
+            B,
+            grid_t,
+            temporal_patch_size,
+            channel,
+            grid_h // merge_size,
+            merge_size,
+            patch_size,
+            grid_w // merge_size,
+            merge_size,
+            patch_size,
+        )
+        patches = patches.permute(0, 1, 4, 7, 5, 8, 3, 2, 6, 9)
+        flatten = patches.reshape(
+            B,
+            grid_t * grid_h * grid_w,
+            channel * temporal_patch_size * patch_size * patch_size,
+        )
+        pixel_values = flatten.squeeze(0).to(dtype)
+        grid_thw = torch.tensor(
+            [[grid_t, grid_h, grid_w]], dtype=torch.long, device=device
+        )
+        return pixel_values, grid_thw
+
+    @staticmethod
+    def _raw_to_nchw(raw: torch.Tensor, is_video: bool) -> torch.Tensor:
+        """Normalize a raw decoded input to ``[N, C, H, W]``.
+
+        Image raw is ``[C, H, W]`` (from ``pil_to_tensor``); video raw is
+        ``[N, H, W, C]`` (from decord ``get_batch``).
+        """
+        if is_video:
+            return raw.permute(0, 3, 1, 2)  # NHWC -> NCHW
+        return raw.unsqueeze(0)  # [C,H,W] -> [1,C,H,W]
+
     @torch.inference_mode()
     def embedding(self, data, mm_type=None, **kwargs):
-        pixel_values, grid_thw, timestamp_token_ids = data
+        raw, target_hw, timestamp_token_ids = data
         device = self._device
         dtype = self._data_type
 
-        pixel_values = pixel_values.to(device=device, dtype=dtype)
-        grid_thw = grid_thw.to(device)
-        vit_feats = self.visual(pixel_values, grid_thw).to(dtype)
-
         self._ensure_bracket_embs_on_device()
 
-        if timestamp_token_ids is None:
+        is_video = timestamp_token_ids is not None
+        frames_nchw = self._raw_to_nchw(raw, is_video)
+        pixel_values, grid_thw = self._gpu_fold(frames_nchw, target_hw)
+        vit_feats = self.visual(pixel_values, grid_thw).to(dtype)
+
+        if not is_video:
             result = self._assemble_image(vit_feats)
         else:
             result, _ = self._assemble_video(vit_feats, grid_thw, timestamp_token_ids)
@@ -391,18 +426,22 @@ class MiniMaxM3VLImageEmbedding(MultiModalEmbeddingInterface):
         dtype = self._data_type
         self._ensure_bracket_embs_on_device()
 
-        # --- 1. Batch ViT forward ---
+        # --- 1. GPU transform (resize/normalize/fold) per item, then batch ViT ---
         all_pv: List[torch.Tensor] = []
         all_thw: List[torch.Tensor] = []
+        grids: List[torch.Tensor] = []
         split_sizes: List[int] = []
 
         # self.visual applies the spatial 2x2 merge (patch_merge_mlp), so its
         # output has pv.shape[0] // merge_size**2 rows per item. Split the batched
         # ViT output by the POST-merge count, not the pre-merge patch count.
         merge_length = self.merge_size**2
-        for pv, thw, _ in data_list:
-            all_pv.append(pv.to(device=device, dtype=dtype))
-            all_thw.append(thw.to(device))
+        for raw, target_hw, ts_info in data_list:
+            frames_nchw = self._raw_to_nchw(raw, ts_info is not None)
+            pv, thw = self._gpu_fold(frames_nchw, target_hw)
+            all_pv.append(pv)
+            all_thw.append(thw)
+            grids.append(thw)
             split_sizes.append(pv.shape[0] // merge_length)
 
         batched_pv = torch.cat(all_pv, dim=0)
@@ -428,7 +467,7 @@ class MiniMaxM3VLImageEmbedding(MultiModalEmbeddingInterface):
         results: List[tuple] = []
         ts_offset = 0
 
-        for i, (_, thw, ts_info) in enumerate(data_list):
+        for i, (_, _, ts_info) in enumerate(data_list):
             vit_feats = per_item_feats[i]
 
             if ts_info is None:
@@ -436,7 +475,7 @@ class MiniMaxM3VLImageEmbedding(MultiModalEmbeddingInterface):
             else:
                 emb, ts_offset = self._assemble_video(
                     vit_feats,
-                    thw,
+                    grids[i],
                     ts_info,
                     ts_embs_cache=ts_embs_all,
                     ts_offset=ts_offset,
