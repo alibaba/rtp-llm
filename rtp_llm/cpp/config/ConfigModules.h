@@ -367,6 +367,12 @@ struct VitConfig {
     // the cap, exportEmbedding fails and the request transparently falls back to bytes.
     // 0 disables the cap.
     int64_t mm_rdma_max_inflight_bytes = 8L * 1024 * 1024 * 1024;
+    // Encoder-side upper bound on ONE RDMA slot. The RDMA GPU mempool caps a single allocation
+    // at ~2GiB (power-of-2 bucketed, kmax_single_alloc_size). When a request's packed output
+    // exceeds this, the encoder splits it into multiple <= this-many-bytes slots/descriptors
+    // (output_rdma_chunks) instead of falling back to inline bytes. Must stay <= 2GiB; default
+    // leaves headroom below the 2GiB bucket for per-tensor alignment padding.
+    int64_t mm_rdma_max_slot_bytes = 2000L * 1024 * 1024;
 
     std::string to_string() const;
 };

@@ -276,6 +276,7 @@ class VitConfig:
         self.mm_rdma_release_timeout_ms: int = 1000
         self.mm_rdma_slot_gc_timeout_ms: int = 60 * 1000
         self.mm_rdma_max_inflight_bytes: int = 8 * 1024 * 1024 * 1024
+        self.mm_rdma_max_slot_bytes: int = 2000 * 1024 * 1024
         # ---- GPU embedding batch scheduler (MMScheduler) ----
         self.use_gpu_batch: bool = False
         self.gpu_batch_wait_ms: int = 10
@@ -336,6 +337,7 @@ class VitConfig:
             f"mm_rdma_release_timeout_ms: {self.mm_rdma_release_timeout_ms}\n"
             f"mm_rdma_slot_gc_timeout_ms: {self.mm_rdma_slot_gc_timeout_ms}\n"
             f"mm_rdma_max_inflight_bytes: {self.mm_rdma_max_inflight_bytes}\n"
+            f"mm_rdma_max_slot_bytes: {self.mm_rdma_max_slot_bytes}\n"
             f"use_gpu_batch: {self.use_gpu_batch}\n"
             f"gpu_batch_wait_ms: {self.gpu_batch_wait_ms}\n"
             f"gpu_max_batch_size: {self.gpu_max_batch_size}\n"

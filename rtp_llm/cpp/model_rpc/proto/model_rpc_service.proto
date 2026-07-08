@@ -151,7 +151,10 @@ message MMRdmaNicRKeyPB {
 // after a single one-sided READ pulls the whole slot.
 message MMRdmaTensorPB {
     enum Role {
-        EMBEDDING   = 0;   // concat-ed [total_tokens, hidden]; split by MultimodalOutputPB.split_size
+        EMBEDDING   = 0;   // a row-chunk of the concat-ed [total_tokens, hidden] embedding. A single
+                           // output may be split across multiple slots (see output_rdma_chunks); the
+                           // LLM concatenates every EMBEDDING chunk in descriptor+manifest order, then
+                           // splits by MultimodalOutputPB.split_size.
         POS_ID      = 1;   // concat-ed position ids; split by the same split_size
         EXTRA_INPUT = 2;   // one per image (e.g. deepstack); kept as an ordered list
     }
@@ -184,7 +187,14 @@ message MultimodalOutputPB {
     // RDMA fast-path: when set, the whole output (embedding + pos_id + extra_input) lives in
     // the RDMA slot described here and fields 1/2/3 are left empty. Only split_size (field 4)
     // stays inline — the LLM needs it to slice the RDMA-read embedding/pos_id per image.
+    // Used when the whole output fits in ONE slot (<= mm_rdma_max_slot_bytes).
     MMRdmaDescPB output_rdma = 5;
+    // RDMA fast-path, chunked: used instead of output_rdma when the output exceeds one slot
+    // (single-slot alloc is capped at ~2GiB by the RDMA mempool). Each entry describes one
+    // <=mm_rdma_max_slot_bytes slot; the LLM reads every chunk in order and concatenates the
+    // per-role tensors (see MMRdmaTensorPB.Role) before applying split_size. Exactly one of
+    // output_rdma / output_rdma_chunks is set on the RDMA path; both empty => inline bytes.
+    repeated MMRdmaDescPB output_rdma_chunks = 6;
 }
 
 message ReleaseEmbeddingPB {
