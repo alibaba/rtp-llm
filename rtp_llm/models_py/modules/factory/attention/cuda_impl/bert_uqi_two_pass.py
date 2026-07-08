@@ -45,7 +45,6 @@ class BertUqiTwoPassAttnOp(object):
 
     def __init__(self, attn_configs: AttentionConfigs) -> None:
         self.g_workspace_buffer_p1 = get_py_flashinfer_workspace_buffer()
-        self.g_workspace_buffer_p2 = get_py_flashinfer_workspace_buffer()
         self.local_head_num = attn_configs.head_num
         self.local_kv_head_num = attn_configs.kv_head_num
         self.head_dim_qk = attn_configs.size_per_head
@@ -54,15 +53,13 @@ class BertUqiTwoPassAttnOp(object):
         self.wrapper_p1 = BatchPrefillWithRaggedKVCacheWrapper(
             self.g_workspace_buffer_p1, backend="auto"
         )
-        self.wrapper_p2 = BatchPrefillWithRaggedKVCacheWrapper(
-            self.g_workspace_buffer_p2, backend="auto"
-        )
+        # pass 2 走 run_b_rows_eager(纯 torch, 零 plan), 不再需要第二个 wrapper
+        self.wrapper_p2 = None
         self.schedule: Optional[BertUqiTwoPassSchedule] = None
         self.fmha_params = rtp_llm_ops.FlashInferMlaAttnParams()
 
     def __del__(self):
         release_py_flashinfer_workspace_buffer(self.g_workspace_buffer_p1)
-        release_py_flashinfer_workspace_buffer(self.g_workspace_buffer_p2)
 
     def prepare(
         self, attn_inputs: PyAttentionInputs, schedule: BertUqiTwoPassSchedule
