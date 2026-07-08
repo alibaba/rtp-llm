@@ -1,3 +1,5 @@
+#include <stdexcept>
+
 #include "autil/StringUtil.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/api_server/openai/OpenaiEndpoint.h"
@@ -74,12 +76,29 @@ std::shared_ptr<GenerateConfig> OpenaiEndpoint::extract_generation_config(const 
     config.stop_words_str.insert(config.stop_words_str.begin(), stop_words_list_.begin(), stop_words_list_.end());
     config.stop_words_list.insert(
         config.stop_words_list.begin(), stop_word_ids_list_.begin(), stop_word_ids_list_.end());
-    if (chat_render_) {
-        auto request_stop_words_list_ids = chat_render_->tokenize_words(request_stop_words_list);
+    if (!request_stop_words_list.empty()) {
+        std::vector<std::vector<int>> request_stop_words_list_ids;
+        if (chat_render_) {
+            request_stop_words_list_ids = chat_render_->tokenize_words(request_stop_words_list);
+        } else if (tokenizer_) {
+            // No renderer available: fall back to the tokenizer for an equivalent
+            // token-id encoding so the request-level stop constraint still applies
+            // instead of being silently dropped.
+            request_stop_words_list_ids.reserve(request_stop_words_list.size());
+            for (const auto& word : request_stop_words_list) {
+                request_stop_words_list_ids.push_back(tokenizer_->encode(word));
+            }
+        } else {
+            // Neither renderer nor tokenizer can encode stop words; fail fast so the
+            // caller learns the constraint was rejected rather than silently ignored.
+            // std::runtime_error (not HttpApiServerException) avoids a cross-layer
+            // dependency from this low-level library; HttpApiServer maps it to an error.
+            throw std::runtime_error(
+                "request stop words provided but both chat_render and tokenizer are null; "
+                "cannot tokenize stop words");
+        }
         config.stop_words_list.insert(
             config.stop_words_list.begin(), request_stop_words_list_ids.begin(), request_stop_words_list_ids.end());
-    } else if (!request_stop_words_list.empty()) {
-        RTP_LLM_LOG_WARNING("chat_render is null, skip tokenizing request stop_words");
     }
     // if (req.chat_id.has_value()) {
     //     config.chat_id = req.chat_id.value();
@@ -102,7 +121,10 @@ std::shared_ptr<GenerateConfig> OpenaiEndpoint::extract_generation_config(const 
             config.sp_advice_prompt_token_ids = tokenizer_->encode(config.sp_advice_prompt);
         }
     } else if (config.select_tokens_str.empty() == false || config.sp_advice_prompt.empty() == false) {
-        RTP_LLM_LOG_WARNING("tokenizer is null, skip select_tokens and sp_advice_prompt encoding");
+        // select_tokens / sp_advice_prompt require token ids and have no non-tokenizer
+        // equivalent; fail fast rather than silently dropping the constraint.
+        throw std::runtime_error(
+            "select_tokens/sp_advice_prompt provided but tokenizer is null; cannot encode");
     }
     return std::make_shared<GenerateConfig>(config);
 }
