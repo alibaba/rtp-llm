@@ -928,14 +928,14 @@ def build_cp_full_prefill_positions(
         pos = torch.empty((0,), dtype=torch.long, device=device)
         req = torch.empty((0,), dtype=torch.long, device=device)
 
-    zero = torch.zeros(1, dtype=torch.int32, device=device)
+    zero = torch.zeros(1, dtype=torch.long, device=device)
     cu_seq = torch.cat(
-        [zero, torch.cumsum(lengths.to(torch.int32), dim=0)]
+        [zero, torch.cumsum(lengths.to(torch.long), dim=0)]
     ).contiguous()
     return (
         pos,
         req,
-        prefixes.to(device=device, dtype=torch.int32).contiguous(),
+        prefixes.to(device=device, dtype=torch.long).contiguous(),
         cu_seq,
     )
 

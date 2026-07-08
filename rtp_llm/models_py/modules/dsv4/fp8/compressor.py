@@ -348,6 +348,7 @@ class CompressorMeta:
     # otherwise the legacy scalar-seq_start path is used.
     #   seq_start_per_req[b] = abs position of req b's first new token (sp_b)
     #   cu_seq_per_req[b+1]  = end offset of req b in flat kv_flat axis
+    # Both are int64 per-request metadata for the fused writer raw path.
     seq_start_per_req: Optional[torch.Tensor] = None
     cu_seq_per_req: Optional[torch.Tensor] = None
     # Decode indexer hot path: per-token compressed length
@@ -1258,10 +1259,10 @@ class CompressorFP8(PoolBackedModule):
                     b_idx,
                     has_prefix=sp > 0,
                     seq_start_per_req=torch.tensor(
-                        [sp], dtype=torch.int32, device=device
+                        [sp], dtype=torch.long, device=device
                     ),
                     cu_seq_per_req=torch.tensor(
-                        [0, seqlen], dtype=torch.int32, device=device
+                        [0, seqlen], dtype=torch.long, device=device
                     ),
                 )
         # Varlen prefill carries per-request raw arrays, so ``_launch`` routes
@@ -1332,7 +1333,7 @@ class CompressorFP8(PoolBackedModule):
                     (bsz + 1) * q_len,
                     q_len,
                     device=device,
-                    dtype=torch.int32,
+                    dtype=torch.long,
                 )
                 meta = self.prepare_metadata(
                     positions,
@@ -1340,7 +1341,7 @@ class CompressorFP8(PoolBackedModule):
                     has_prefix=True,
                     is_batched=q_len > 1,
                     seq_start_per_req=position_ids_2d[:, 0]
-                    .to(torch.int32)
+                    .to(torch.long)
                     .contiguous(),
                     cu_seq_per_req=cu_seq_per_req,
                 )
@@ -1381,8 +1382,8 @@ def build_prefill_metadata(
         positions,
         b_idx,
         has_prefix=sp > 0,
-        seq_start_per_req=torch.tensor([sp], dtype=torch.int32, device=device),
-        cu_seq_per_req=torch.tensor([0, seqlen], dtype=torch.int32, device=device),
+        seq_start_per_req=torch.tensor([sp], dtype=torch.long, device=device),
+        cu_seq_per_req=torch.tensor([0, seqlen], dtype=torch.long, device=device),
     )
 
 
@@ -1413,8 +1414,8 @@ def build_prepare_metadata_args(
     so bisecting between the two stays bit-equal.
 
     ``seq_start_per_req`` accepts either ``sp_per_req`` (Attention) or
-    ``prefix_lengths`` (Indexer) — both index32-cast to the same int32
-    layout the compressor's varlen raw kernel consumes.
+    ``prefix_lengths`` (Indexer); both are forwarded as int64 per-request
+    metadata for the compressor varlen raw path.
     """
     if use_varlen:
         assert (
@@ -1432,10 +1433,10 @@ def build_prepare_metadata_args(
             .contiguous(),
             has_prefix=has_prefix,
             is_batched=True,
-            seq_start_per_req=seq_start_per_req.to(device=device, dtype=torch.int32)
+            seq_start_per_req=seq_start_per_req.to(device=device, dtype=torch.long)
             .reshape(-1)
             .contiguous(),
-            cu_seq_per_req=cu_seqlens.to(device=device, dtype=torch.int32)
+            cu_seq_per_req=cu_seqlens.to(device=device, dtype=torch.long)
             .reshape(-1)
             .contiguous(),
         )
@@ -1454,9 +1455,9 @@ def build_decode_metadata(
     compressor: "CompressorFP8", start_pos: torch.Tensor, bsz: int
 ) -> CompressorMeta:
     device = start_pos.device
-    positions = start_pos.to(device=device, dtype=torch.long).reshape(bsz)
+    positions = start_pos.to(device=device, dtype=torch.long).reshape(bsz).contiguous()
     b_idx = torch.arange(bsz, device=device, dtype=torch.long)
-    cu_seq_per_req = torch.arange(0, bsz + 1, device=device, dtype=torch.int64)
+    cu_seq_per_req = torch.arange(0, bsz + 1, device=device, dtype=torch.long)
     return compressor.prepare_metadata(
         positions,
         b_idx,

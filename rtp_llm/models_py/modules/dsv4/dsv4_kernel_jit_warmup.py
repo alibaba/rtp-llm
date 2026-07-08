@@ -748,10 +748,10 @@ def _warmup_fused_kv_compress_norm_rope_insert(
             kwargs = {}
             if batched:
                 kwargs["seq_start_per_req"] = torch.zeros(
-                    (1,), dtype=torch.int32, device=device
+                    (1,), dtype=torch.long, device=device
                 )
                 kwargs["cu_seq_per_req"] = torch.tensor(
-                    [0, n_raw], dtype=torch.int32, device=device
+                    [0, n_raw], dtype=torch.long, device=device
                 )
             run_fused_compress_kv_write(
                 state_cache=state_cache,

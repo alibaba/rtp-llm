@@ -297,6 +297,8 @@ class TestDecodeMetadataStartPos(unittest.TestCase):
         self.assertEqual(meta.position_ids_long[:2].tolist(), [4, 127])
         self.assertEqual(meta.req_id_per_token[:2].tolist(), [0, 1])
         self.assertEqual(meta.req_id_per_token_long[:2].tolist(), [0, 1])
+        self.assertEqual(meta.decode_seq_start_per_req.dtype, torch.int64)
+        self.assertEqual(meta.decode_cu_seq_per_req.dtype, torch.int64)
         self.assertEqual(meta.decode_seq_start_per_req[:2].tolist(), [4, 127])
         self.assertEqual(meta.decode_cu_seq_per_req[:3].tolist(), [0, 1, 2])
 
@@ -316,6 +318,8 @@ class TestDecodeMetadataStartPos(unittest.TestCase):
         self.assertEqual(meta.position_ids_long[:4].tolist(), [10, 11, 20, 21])
         self.assertEqual(meta.req_id_per_token[:4].tolist(), [0, 0, 1, 1])
         self.assertEqual(meta.req_id_per_token_long[:4].tolist(), [0, 0, 1, 1])
+        self.assertEqual(meta.decode_seq_start_per_req.dtype, torch.int64)
+        self.assertEqual(meta.decode_cu_seq_per_req.dtype, torch.int64)
         self.assertEqual(meta.decode_seq_start_per_req[:2].tolist(), [10, 20])
         self.assertEqual(meta.decode_cu_seq_per_req[:3].tolist(), [0, 2, 4])
         self.assertEqual(meta.compressed_lens[4][:2].tolist(), [3, 5])
@@ -570,6 +574,10 @@ class TestDecodeMetadataStartPos(unittest.TestCase):
             paged_pool_entries_per_block=entries_per_block,
             paged_pool_tokens_per_block=tokens_per_block,
         )
+        self.assertEqual(meta.decode_seq_start_per_req.dtype, torch.int64)
+        self.assertEqual(meta.decode_cu_seq_per_req.dtype, torch.int64)
+        self.assertEqual(meta.decode_seq_start_per_req[:2].tolist(), [2, 254])
+        self.assertEqual(meta.decode_cu_seq_per_req[:3].tolist(), [0, 3, 6])
 
         T = 2 * q_len
         positions = torch.tensor(

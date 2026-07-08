@@ -1037,7 +1037,7 @@ class BuildCompressorMetaTest(unittest.TestCase):
     def test_varlen_b2_threads_position_ids_and_req_id(self) -> None:
         """B==2 cold+cont: positions = position_ids.long(), b_idx =
         req_id_per_token.long(), is_batched=True, seq_start_per_req =
-        prefix_lengths.int32, cu_seq_per_req = cu_seqlens.int32."""
+        prefix_lengths.long, cu_seq_per_req = cu_seqlens.long."""
         stub = _make_no_bind_stub(win=8, compress_ratio=128, n_reqs=2)
         ret = self._call(
             stub,
@@ -1069,20 +1069,20 @@ class BuildCompressorMetaTest(unittest.TestCase):
             device=self.device,
         )
         self.assertTrue(torch.equal(call["b_idx"], expected_bidx))
-        # seq_start_per_req == prefix_lengths int32.
-        self.assertEqual(call["seq_start_per_req"].dtype, torch.int32)
+        # seq_start_per_req == prefix_lengths int64.
+        self.assertEqual(call["seq_start_per_req"].dtype, torch.int64)
         self.assertTrue(
             torch.equal(
                 call["seq_start_per_req"],
-                torch.tensor([0, 32], dtype=torch.int32, device=self.device),
+                torch.tensor([0, 32], dtype=torch.int64, device=self.device),
             )
         )
-        # cu_seq_per_req == cu_seqlens int32 = [0, 8, 14].
-        self.assertEqual(call["cu_seq_per_req"].dtype, torch.int32)
+        # cu_seq_per_req == cu_seqlens int64 = [0, 8, 14].
+        self.assertEqual(call["cu_seq_per_req"].dtype, torch.int64)
         self.assertTrue(
             torch.equal(
                 call["cu_seq_per_req"],
-                torch.tensor([0, 8, 14], dtype=torch.int32, device=self.device),
+                torch.tensor([0, 8, 14], dtype=torch.int64, device=self.device),
             )
         )
 
@@ -1116,8 +1116,8 @@ class BuildCompressorMetaTest(unittest.TestCase):
         self.assertEqual(call["is_batched"], True)
         self.assertIsNotNone(call["seq_start_per_req"])
         self.assertIsNotNone(call["cu_seq_per_req"])
-        self.assertEqual(call["seq_start_per_req"].dtype, torch.int32)
-        self.assertEqual(call["cu_seq_per_req"].dtype, torch.int32)
+        self.assertEqual(call["seq_start_per_req"].dtype, torch.int64)
+        self.assertEqual(call["cu_seq_per_req"].dtype, torch.int64)
         # B==1 collapse: positions == arange(sp, sp+S), b_idx == zeros(S)
         # — bit-equal to _build_prefill_positions(sp=4, bsz=1, seqlen=10).
         expected_pos = torch.arange(4, 14, dtype=torch.long, device=self.device)
@@ -1210,17 +1210,17 @@ class BuildCsaPrefillMetaTest(unittest.TestCase):
                 torch.zeros(10, dtype=torch.long, device=self.device),
             )
         )
-        # seq_start_per_req == [4], cu_seq_per_req == [0, 10] (both int32).
+        # seq_start_per_req == [4], cu_seq_per_req == [0, 10] (both int64).
         self.assertTrue(
             torch.equal(
                 cmp_call["seq_start_per_req"],
-                torch.tensor([4], dtype=torch.int32, device=self.device),
+                torch.tensor([4], dtype=torch.int64, device=self.device),
             )
         )
         self.assertTrue(
             torch.equal(
                 cmp_call["cu_seq_per_req"],
-                torch.tensor([0, 10], dtype=torch.int32, device=self.device),
+                torch.tensor([0, 10], dtype=torch.int64, device=self.device),
             )
         )
 
@@ -1285,18 +1285,18 @@ class BuildCsaPrefillMetaTest(unittest.TestCase):
             device=self.device,
         )
         self.assertTrue(torch.equal(cmp_call["b_idx"], expected_bidx))
-        # seq_start_per_req == prefix_lengths int32.
+        # seq_start_per_req == prefix_lengths int64.
         self.assertTrue(
             torch.equal(
                 cmp_call["seq_start_per_req"],
-                torch.tensor([0, 32], dtype=torch.int32, device=self.device),
+                torch.tensor([0, 32], dtype=torch.int64, device=self.device),
             )
         )
-        # cu_seq_per_req == cu_seqlens int32.
+        # cu_seq_per_req == cu_seqlens int64.
         self.assertTrue(
             torch.equal(
                 cmp_call["cu_seq_per_req"],
-                torch.tensor([0, 8, 14], dtype=torch.int32, device=self.device),
+                torch.tensor([0, 8, 14], dtype=torch.int64, device=self.device),
             )
         )
 
@@ -1382,13 +1382,13 @@ class BuildHcaPrefillMetaTest(unittest.TestCase):
         self.assertTrue(
             torch.equal(
                 cmp_call["seq_start_per_req"],
-                torch.tensor([256], dtype=torch.int32, device=self.device),
+                torch.tensor([256], dtype=torch.int64, device=self.device),
             )
         )
         self.assertTrue(
             torch.equal(
                 cmp_call["cu_seq_per_req"],
-                torch.tensor([0, 128], dtype=torch.int32, device=self.device),
+                torch.tensor([0, 128], dtype=torch.int64, device=self.device),
             )
         )
         # workspace_meta has dense_cmp_topk (HCA path).
@@ -1427,11 +1427,11 @@ class BuildHcaPrefillMetaTest(unittest.TestCase):
             device=self.device,
         )
         self.assertTrue(torch.equal(cmp_call["b_idx"], expected_bidx))
-        # seq_start_per_req = prefix_lengths int32.
+        # seq_start_per_req = prefix_lengths int64.
         self.assertTrue(
             torch.equal(
                 cmp_call["seq_start_per_req"],
-                torch.tensor([0, 256], dtype=torch.int32, device=self.device),
+                torch.tensor([0, 256], dtype=torch.int64, device=self.device),
             )
         )
         # workspace dense_cmp_topk: [192, 3] arange.

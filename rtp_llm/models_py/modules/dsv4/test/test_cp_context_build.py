@@ -524,8 +524,8 @@ def test_cp_full_prefill_positions_preserve_request_ids() -> None:
             ]
         ),
     )
-    assert torch.equal(seq_start, torch.tensor([10, 100], dtype=torch.int32))
-    assert torch.equal(cu_seq, torch.tensor([0, 8, 22], dtype=torch.int32))
+    assert torch.equal(seq_start, torch.tensor([10, 100], dtype=torch.long))
+    assert torch.equal(cu_seq, torch.tensor([0, 8, 22], dtype=torch.long))
 
 
 if __name__ == "__main__":

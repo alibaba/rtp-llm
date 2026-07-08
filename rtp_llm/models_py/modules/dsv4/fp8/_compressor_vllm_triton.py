@@ -232,9 +232,9 @@ def _fused_kv_compress_norm_rope_insert_sparse_attn(
     #   kv_raw[cu_seq_per_req[b] : cu_seq_per_req[b+1]] and cover abs
     #   positions [seq_start_per_req[b], seq_start_per_req[b]+req_n_raw).
     if BATCHED:
-        req_seq_start = tl.load(seq_start_per_req_ptr + req_idx)
-        req_cu_lo = tl.load(cu_seq_per_req_ptr + req_idx)
-        req_cu_hi = tl.load(cu_seq_per_req_ptr + req_idx + 1)
+        req_seq_start = tl.load(seq_start_per_req_ptr + req_idx).to(tl.int64)
+        req_cu_lo = tl.load(cu_seq_per_req_ptr + req_idx).to(tl.int64)
+        req_cu_hi = tl.load(cu_seq_per_req_ptr + req_idx + 1).to(tl.int64)
         req_n_raw = req_cu_hi - req_cu_lo
         flat_idx_in_req = pos - req_seq_start
         use_raw = mask_pos & (flat_idx_in_req >= 0) & (flat_idx_in_req < req_n_raw)
@@ -503,9 +503,9 @@ def _fused_kv_compress_norm_rope_insert_indexer_attn(
     #                                    block_table[req_idx])
     # Decode: disable_raw_path → n_raw == 0, every position → cache.
     if BATCHED:
-        req_seq_start = tl.load(seq_start_per_req_ptr + req_idx)
-        req_cu_lo = tl.load(cu_seq_per_req_ptr + req_idx)
-        req_cu_hi = tl.load(cu_seq_per_req_ptr + req_idx + 1)
+        req_seq_start = tl.load(seq_start_per_req_ptr + req_idx).to(tl.int64)
+        req_cu_lo = tl.load(cu_seq_per_req_ptr + req_idx).to(tl.int64)
+        req_cu_hi = tl.load(cu_seq_per_req_ptr + req_idx + 1).to(tl.int64)
         req_n_raw = req_cu_hi - req_cu_lo
         flat_idx_in_req = pos - req_seq_start
         use_raw = mask_pos & (flat_idx_in_req >= 0) & (flat_idx_in_req < req_n_raw)
@@ -839,8 +839,8 @@ def run_fused_compress_kv_write(
     # ``flat_idx`` so B>1 batched prefill keeps the raw fast path that
     # avoids state-cache readback. Scalar ``seq_start`` is
     # ignored in that mode.
-    seq_start_per_req: Optional[torch.Tensor] = None,  # [B] int32/int64
-    cu_seq_per_req: Optional[torch.Tensor] = None,  # [B+1] int32/int64
+    seq_start_per_req: Optional[torch.Tensor] = None,  # [B] int64
+    cu_seq_per_req: Optional[torch.Tensor] = None,  # [B+1] int64
     state_tokens_per_block: int,
 ) -> None:
     """Boundary-token compress→norm→rope→fp8 quant→KV-pool store.
@@ -876,11 +876,8 @@ def run_fused_compress_kv_write(
         and cu_seq_per_req is not None
     )
     if batched:
-        # Match the ``int32`` dtype the kernel expects (positions/req_idx
-        # are int32 throughout the wrapper) so the per-request loads stay
-        # in-register without an implicit promote.
-        seq_start_per_req = seq_start_per_req.to(torch.int32).contiguous()
-        cu_seq_per_req = cu_seq_per_req.to(torch.int32).contiguous()
+        seq_start_per_req = seq_start_per_req.contiguous()
+        cu_seq_per_req = cu_seq_per_req.contiguous()
     else:
         # Triton requires a non-None pointer arg even when BATCHED=False.
         # Pass ``positions`` as a stand-in — the kernel never reads from

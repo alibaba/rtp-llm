@@ -26,7 +26,10 @@ Run:
 from __future__ import annotations
 
 import unittest
+import sys
+from types import SimpleNamespace
 from typing import Optional
+from unittest import mock
 
 import torch
 
@@ -37,6 +40,7 @@ from rtp_llm.models_py.modules.dsv4.fp8.compressor import (
     CompressorFP8,
     CompressorMeta,
     _build_prefill_positions,
+    build_prefill_metadata,
     build_prepare_metadata_args,
 )
 
@@ -209,6 +213,94 @@ class CompressorPrepareMetadataVarlenTest(unittest.TestCase):
                 torch.zeros(S, dtype=torch.int64, device=self.device),
             )
         )
+        self.assertEqual(args["seq_start_per_req"].dtype, torch.int64)
+        self.assertEqual(args["cu_seq_per_req"].dtype, torch.int64)
+        self.assertTrue(
+            torch.equal(
+                args["seq_start_per_req"],
+                torch.tensor([12], dtype=torch.int64, device=self.device),
+            )
+        )
+        self.assertTrue(
+            torch.equal(
+                args["cu_seq_per_req"],
+                torch.tensor([0, S], dtype=torch.int64, device=self.device),
+            )
+        )
+
+    def test_build_prefill_metadata_uses_int64_seq_metadata(self) -> None:
+        stub = _make_stub(self.device, n_reqs=1)
+        meta = build_prefill_metadata(stub, sp=12, bsz=1, seqlen=5, device=self.device)
+        self.assertEqual(meta.seq_start_per_req.dtype, torch.int64)
+        self.assertEqual(meta.cu_seq_per_req.dtype, torch.int64)
+        self.assertTrue(
+            torch.equal(
+                meta.seq_start_per_req,
+                torch.tensor([12], dtype=torch.int64, device=self.device),
+            )
+        )
+        self.assertTrue(
+            torch.equal(
+                meta.cu_seq_per_req,
+                torch.tensor([0, 5], dtype=torch.int64, device=self.device),
+            )
+        )
+
+    def test_decode_q_len_gt1_uses_int64_seq_metadata(self) -> None:
+        class _FakeDecodeCompressor:
+            overlap = True
+            head_dim = 4
+            _state_pool_3d = object()
+            _kv_pool_view = object()
+            _kv_eb = 1
+            _wkv_wgate_fused = torch.empty((16, 8), dtype=torch.bfloat16)
+
+            def __init__(self):
+                self.meta_args = None
+
+            def prepare_metadata(self, *args, **kwargs):
+                self.meta_args = kwargs
+                return SimpleNamespace(is_batched=kwargs.get("is_batched", False))
+
+            def _launch(self, kv_flat, score_flat, meta, seq_start=None):
+                return None
+
+        fake = _FakeDecodeCompressor()
+        bsz, q_len, dim = 2, 3, 8
+        base = 2**31 + 17
+        x = torch.zeros((bsz, q_len, dim), dtype=torch.bfloat16)
+        start_pos = torch.tensor([base, base + 100], dtype=torch.int64)
+        position_ids = torch.stack(
+            [
+                torch.arange(base, base + q_len, dtype=torch.int64),
+                torch.arange(base + 100, base + 100 + q_len, dtype=torch.int64),
+            ],
+            dim=0,
+        )
+
+        def _fake_linear(inp, weight):
+            return torch.zeros((*inp.shape[:-1], 16), dtype=torch.bfloat16)
+
+        compressor_mod = sys.modules[CompressorFP8.__module__]
+        with mock.patch.object(
+            compressor_mod,
+            "_linear_bf16_bf16_fp32",
+            side_effect=_fake_linear,
+        ):
+            CompressorFP8.forward_decode_vectorized(
+                fake,
+                x,
+                start_pos,
+                position_ids=position_ids,
+            )
+
+        self.assertIsNotNone(fake.meta_args)
+        seq_start = fake.meta_args["seq_start_per_req"]
+        cu_seq = fake.meta_args["cu_seq_per_req"]
+        self.assertEqual(seq_start.dtype, torch.int64)
+        self.assertEqual(cu_seq.dtype, torch.int64)
+        self.assertTrue(torch.equal(seq_start, position_ids[:, 0].contiguous()))
+        self.assertTrue(torch.equal(cu_seq, torch.tensor([0, 3, 6], dtype=torch.int64)))
 
     # ------------------------------------------------------------------
     # B == 2: each token must read its own request's block_table row.
