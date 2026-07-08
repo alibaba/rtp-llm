@@ -101,7 +101,16 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
     }
     if (!params.py_model.is_none()) {
         RTP_LLM_LOG_INFO("init executor with python model");
-        model_.reset(new PyWrappedModel(model_init_params, params.py_model));
+        // Defer CUDA graph capture for the serving model so the engine can run the
+        // accuracy gate / backend selection before the graph is frozen; capture is
+        // then triggered via NormalEngine -> Executor::triggerInitCapture(). Warmup
+        // executors never capture (no kv layout), so deferral there is a harmless no-op.
+        model_.reset(new PyWrappedModel(model_init_params,
+                                        params.py_model,
+                                        /*is_prefill_cuda_graph_mode=*/false,
+                                        /*use_spec_decoding=*/false,
+                                        /*kv_cache_layer_to_group=*/{},
+                                        /*defer_capture=*/!warm_up_));
     } else if (test_model_factory) {
         RTP_LLM_LOG_INFO("init executor with test model factory");
         model_ = test_model_factory(model_init_params);

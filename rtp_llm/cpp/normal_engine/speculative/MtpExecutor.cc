@@ -202,6 +202,12 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
 
     if (!params.py_model.is_none()) {
         RTP_LLM_LOG_INFO("init executor with python model");
+        // The MTP / speculative decoding path does not participate in dynamic attention
+        // backend selection and needs no pre-capture gate/select window, so this model
+        // (and draft_model_ / sp_prefill_draft_model_ below) keep eager capture
+        // (defer_capture defaults to false, capturing inside the ctor) and do not implement
+        // triggerInitCapture() -- inheriting the Executor base no-op is correct here, since
+        // there is no deferred capture to trigger.
         model_.reset(new PyWrappedModel(
             model_init_params, params.py_model, false, true, target_cache_layer_layout.layer_to_groups));
     }

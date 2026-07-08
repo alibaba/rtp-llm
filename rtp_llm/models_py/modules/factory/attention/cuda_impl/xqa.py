@@ -84,6 +84,8 @@ class XQAImpl(FMHAImplBase):
     def support(
         cls, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
     ) -> bool:
+        if attn_configs.use_mla:
+            return False
         fmha_impl = XQAAttnOp(attn_configs)
         return fmha_impl.support(attn_inputs)
 
@@ -142,9 +144,13 @@ class XQADecodeImpl(FMHAImplBase):
     def support(
         cls, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
     ) -> bool:
+        if attn_configs.use_mla:
+            return False
         if attn_inputs.is_prefill:
             return False
-        if torch.cuda.get_device_capability()[0] not in [9, 10, 12]:
+        # XQA kernels are compiled with sm_90a (Hopper-specific);
+        # not forward-compatible with SM100/SM120.
+        if torch.cuda.get_device_capability()[0] != 9:
             return False
         group_size = attn_configs.head_num // attn_configs.kv_head_num
         return (
@@ -459,10 +465,12 @@ class XQAWrapper:
 
 def get_xqa_impl() -> Type[FMHAImplBase]:
     """
-    Select the appropriate XQA implementation based on CUDA version and flashinfer availability.
+    Return an additional XQA candidate to register in DECODE_MHA_IMPS.
 
-    Returns XQADecodeImpl if CUDA >= 12.8 and flashinfer.xqa is available,
-    otherwise falls back to XQAImpl.
+    On CUDA >= 12.8, returns XQADecodeImpl (FlashInfer XQA wrapper) so it is
+    appended as a lower-priority fallback behind XQAImpl (TRT-LLM XQA).
+    The actual decode backend is chosen later by get_fmha_impl() which iterates
+    the list in order — XQAImpl is checked first and wins on SM 9.0.
     """
     try:
         major, minor = map(int, torch.version.cuda.split(".")[:2])
@@ -470,18 +478,20 @@ def get_xqa_impl() -> Type[FMHAImplBase]:
             try:
                 from flashinfer.xqa import xqa
 
-                logging.info(
-                    "CUDA >= 12.8 and flashinfer.xqa available, using XQADecodeImpl"
+                logging.debug(
+                    "CUDA >= 12.8 and flashinfer.xqa available, registering XQADecodeImpl as fallback candidate"
                 )
                 return XQADecodeImpl
             except (ImportError, AttributeError) as e:
-                logging.info(
-                    f"CUDA >= 12.8 but flashinfer.xqa not available ({e}), falling back to XQAImpl"
+                logging.debug(
+                    f"CUDA >= 12.8 but flashinfer.xqa not available ({e}), skipping XQADecodeImpl"
                 )
                 return XQAImpl
         else:
-            logging.info(f"CUDA version {major}.{minor} < 12.8, using XQAImpl")
+            logging.debug(
+                f"CUDA version {major}.{minor} < 12.8, skipping XQADecodeImpl"
+            )
             return XQAImpl
     except Exception as e:
-        logging.warning(f"Failed to check CUDA version ({e}), using XQAImpl")
+        logging.warning(f"Failed to check CUDA version ({e}), skipping XQADecodeImpl")
         return XQAImpl

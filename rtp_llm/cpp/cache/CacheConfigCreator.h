@@ -33,14 +33,7 @@ public:
                                       bool                               is_eagle);
 
 private:
-    // Removed functions moved to MemoryEvaluationHelper:
-    // getDefaultRuntimeMemorySize
-    // getKVCacheMemorySize
-
-    // Removed functions moved to dedicated creators:
-    // createSingleConfig
-    // createHybridConfig
-    // splitIntoGroups (moved to HybridConfigCreator)
+    static size_t defaultKernelSeqSizePerBlock(size_t seq_size_per_block);
 };
 
 }  // namespace rtp_llm

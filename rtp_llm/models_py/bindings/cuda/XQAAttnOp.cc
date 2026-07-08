@@ -9,7 +9,9 @@ namespace rtp_llm {
 XQAAttnOp::XQAAttnOp(const AttentionConfigs& attn_configs): attn_configs_(attn_configs) {}
 
 bool XQAAttnOp::support(torch_ext::PyAttentionInputs attn_inputs) {
-    return get_sm() >= tensorrt_llm::kernels::kSM_90
+    // XQA kernels are compiled with --cuda-gpu-arch=sm_90a (Hopper-specific);
+    // they are not forward-compatible with SM100/SM120 (cudaErrorLaunchFailure).
+    return get_sm() == tensorrt_llm::kernels::kSM_90
            && supportXqa(DataType::TYPE_BF16,
                          DataType::TYPE_BF16,
                          DataType::TYPE_FP8_E4M3,
