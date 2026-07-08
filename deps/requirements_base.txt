@@ -34,11 +34,16 @@ prettytable
 protobuf==4.25
 psutil
 py-spy
-pydantic
+# Pinned to keep aarch64 in lockstep with x86/ROCm: the uv resolver used for the
+# cuda12_arm lock otherwise settled on older pydantic/pydantic-core than pip-compile
+# picks for x86/ROCm. Bump all three lockfiles together when raising this.
+pydantic==2.13.4
 pynvml
 pyodps
 pyOpenSSL==24.1.0
-safetensors
+# Pinned for cross-platform version parity (see pydantic note above).
+regex==2026.6.28
+safetensors==0.8.0
 sentence-transformers==5.2.0
 sentencepiece==0.2.0
 setproctitle
