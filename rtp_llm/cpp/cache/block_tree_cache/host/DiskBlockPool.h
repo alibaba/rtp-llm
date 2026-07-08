@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -8,6 +9,7 @@
 
 #include "rtp_llm/cpp/cache/block_tree_cache/IBlockPool.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/host/DiskBlockIO.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/host/DiskMountGuard.h"
 #include "rtp_llm/cpp/cache/connector/memory/CacheBlockKind.h"
 
 namespace rtp_llm {
@@ -29,6 +31,9 @@ struct DiskBlockPoolConfig: public BlockPoolConfigBase {
     size_t         payload_bytes{0};
     size_t         stride_bytes{0};
     bool           buffered_io{true};
+    // When true, init() manages work_dir as a disk mount via DiskMountGuard and places the
+    // backing file under the guard's work dir; when false, work_dir is used directly.
+    bool           manage_mount{false};
     CacheBlockKind pool_kind{CacheBlockKind::COMPLETE};
 };
 
@@ -66,6 +71,8 @@ public:
 
     size_t              payloadBytes() const;
     size_t              strideBytes() const;
+    size_t              readBytes() const;
+    size_t              writeBytes() const;
     uint64_t            blockOffset(BlockIdxType block) const;
     const std::string&  filePath() const;
 
@@ -85,6 +92,9 @@ private:
 
     std::unique_ptr<DiskBlockIO> io_;
     std::string                  file_path_;
+    std::unique_ptr<DiskMountGuard> mount_guard_;
+    std::atomic<size_t>          read_bytes_{0};
+    std::atomic<size_t>          write_bytes_{0};
 };
 
 }  // namespace rtp_llm

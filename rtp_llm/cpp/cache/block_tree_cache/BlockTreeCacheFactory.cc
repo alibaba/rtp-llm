@@ -3,6 +3,8 @@
 #include <cstdlib>
 #include <string>
 
+#include "rtp_llm/cpp/utils/StringUtil.h"
+
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTree.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/FullComponentGroup.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/LinearComponentGroup.h"
@@ -87,18 +89,24 @@ std::shared_ptr<HostBlockPool> createHostPool(size_t payload_bytes, size_t usabl
 // Create v4 DiskBlockPool for L3 disk cache.
 // physical_block_count is derived inside DiskBlockPool::normalizeConfig from
 // disk_size_bytes / stride_bytes, so it is not set here.
-std::shared_ptr<DiskBlockPool>
-createDiskPool(const KVCacheConfig& kv_cache_config, size_t payload_bytes, int64_t world_rank, int64_t local_rank) {
-    if (kv_cache_config.memory_cache_disk_size_mb <= 0 || kv_cache_config.memory_cache_disk_paths.empty()
-        || payload_bytes == 0) {
-        return nullptr;
-    }
+std::shared_ptr<DiskBlockPool> createDiskPool(const KVCacheConfig& kv_cache_config,
+                                              size_t               payload_bytes,
+                                              int64_t              world_rank,
+                                              int64_t              local_rank,
+                                              int64_t              local_world_size) {
+    RTP_LLM_CHECK_WITH_INFO(!kv_cache_config.memory_cache_disk_paths.empty(),
+                            "disk cache enabled but memory_cache_disk_paths is empty");
+    RTP_LLM_CHECK_WITH_INFO(payload_bytes > 0, "disk cache enabled but payload_bytes is 0");
+
+    const std::string mount_path =
+        resolveDiskMountPath(kv_cache_config.memory_cache_disk_paths, local_world_size, local_rank);
 
     auto config                     = std::make_shared<DiskBlockPoolConfig>();
     config->pool_type               = BlockPoolType::DISK;
     config->pool_name               = "block_tree_disk";
     config->free_block_order_policy = FreeBlockOrderPolicy::ASCENDING_ORDER;
-    config->work_dir                = kv_cache_config.memory_cache_disk_paths;
+    config->work_dir                = mount_path;
+    config->manage_mount            = true;
     config->local_rank              = local_rank;
     config->world_rank              = world_rank;
     config->disk_size_bytes         = static_cast<size_t>(kv_cache_config.memory_cache_disk_size_mb) * 1024UL * 1024UL;
@@ -133,11 +141,25 @@ size_t computeHostUsableBlockCount(size_t memory_cache_size_bytes, size_t stride
     return total_block_count > 0 ? total_block_count - 1 : 0;
 }
 
+std::string resolveDiskMountPath(const std::string& disk_paths_csv, int64_t local_world_size, int64_t local_rank) {
+    const auto paths = split(disk_paths_csv, ',');
+    RTP_LLM_CHECK_WITH_INFO(paths.size() == static_cast<size_t>(local_world_size),
+                            "disk cache path count must equal local_world_size, paths=%zu, local_world_size=%ld",
+                            paths.size(),
+                            local_world_size);
+    RTP_LLM_CHECK_WITH_INFO(local_rank >= 0 && local_rank < local_world_size,
+                            "disk cache invalid local_rank=%ld, local_world_size=%ld",
+                            local_rank,
+                            local_world_size);
+    return paths[static_cast<size_t>(local_rank)];
+}
+
 BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       cache_config,
                                        const KVCacheConfig&                     kv_cache_config,
                                        const std::shared_ptr<KVCacheAllocator>& allocator,
                                        int64_t                                  world_rank,
                                        int64_t                                  local_rank,
+                                       int64_t                                  local_world_size,
                                        const SWAGroupConfig&                    swa_configs,
                                        std::shared_ptr<StorageBackend>          storage_backend,
                                        std::shared_ptr<BroadcastManager>        broadcast_manager) {
@@ -190,7 +212,7 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
     // 5. Create DiskBlockPool if disk cache enabled.
     std::shared_ptr<DiskBlockPool> disk_pool = nullptr;
     if (kv_cache_config.enable_memory_cache_disk && kv_cache_config.memory_cache_disk_size_mb > 0) {
-        disk_pool = createDiskPool(kv_cache_config, payload_bytes, world_rank, local_rank);
+        disk_pool = createDiskPool(kv_cache_config, payload_bytes, world_rank, local_rank, local_world_size);
     }
 
     // 6. Set host_pool and disk_pool on each ComponentGroup.

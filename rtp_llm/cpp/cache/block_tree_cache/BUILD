@@ -48,6 +48,7 @@ cc_library(
         "copy_engine/CopyEngine.cc",
         "host/DiskBlockIO.cc",
         "host/DiskBlockPool.cc",
+        "host/DiskMountGuard.cc",
         "host/HostBlockPool.cc",
     ],
     hdrs = [
@@ -67,6 +68,7 @@ cc_library(
         "copy_engine/TransferTypes.h",
         "host/DiskBlockIO.h",
         "host/DiskBlockPool.h",
+        "host/DiskMountGuard.h",
         "host/HostBlockPool.h",
     ],
     copts = copts(),

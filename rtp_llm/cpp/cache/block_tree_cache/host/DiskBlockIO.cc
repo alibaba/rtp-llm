@@ -35,7 +35,7 @@ DiskBlockIOStatus PosixDiskBlockIO::openAndPreallocate(const std::string& file_p
     bytes_       = bytes;
     buffered_io_ = buffered_io;
 
-    int flags = O_CREAT | O_RDWR | O_CLOEXEC;
+    int flags = O_CREAT | O_EXCL | O_RDWR | O_CLOEXEC;
     if (!buffered_io_) {
 #ifdef O_DIRECT
         flags |= O_DIRECT;
@@ -45,7 +45,7 @@ DiskBlockIOStatus PosixDiskBlockIO::openAndPreallocate(const std::string& file_p
 #endif
     }
 
-    fd_ = ::open(file_path.c_str(), flags, 0644);
+    fd_ = ::open(file_path.c_str(), flags, 0600);
     if (fd_ < 0) {
         RTP_LLM_LOG_ERROR("open disk block file failed, file=%s, error=%s", file_path.c_str(), std::strerror(errno));
         return DiskBlockIOStatus::IO_ERROR;

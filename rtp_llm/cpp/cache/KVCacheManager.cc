@@ -202,8 +202,12 @@ bool KVCacheManager::init() {
     }
 
     // Create BlockTreeCache (unified tier management, replaces coordinator).
-    block_tree_cache_ = createBlockTreeCache(
-        config_, kv_cache_config_, allocator_, parallelism_config_.world_rank, parallelism_config_.local_rank);
+    block_tree_cache_ = createBlockTreeCache(config_,
+                                             kv_cache_config_,
+                                             allocator_,
+                                             parallelism_config_.world_rank,
+                                             parallelism_config_.local_rank,
+                                             parallelism_config_.local_world_size);
     return true;
 }
 

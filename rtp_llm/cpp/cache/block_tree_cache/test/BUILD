@@ -134,6 +134,14 @@ cc_test(
 )
 
 cc_test(
+    name = "disk_mount_guard_test",
+    srcs = ["DiskMountGuardTest.cc"],
+    copts = pool_test_copts,
+    deps = pool_test_deps,
+    env = {},
+)
+
+cc_test(
     name = "device_block_pool_test",
     srcs = ["DeviceBlockPoolTest.cc"],
     copts = pool_test_copts,

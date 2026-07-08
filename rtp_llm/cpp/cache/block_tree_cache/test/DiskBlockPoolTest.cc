@@ -49,6 +49,42 @@ TEST(DiskBlockIOTest, OpenPreallocateWriteReadAndClose) {
     ::remove(path.c_str());
 }
 
+TEST(DiskBlockIOTest, OpenIsExclusiveAndRejectsExistingFile) {
+    const std::string path = testFilePath("exclusive.bin");
+    ::remove(path.c_str());
+
+    PosixDiskBlockIO first;
+    ASSERT_EQ(first.openAndPreallocate(path, 4096, /*buffered_io=*/true), DiskBlockIOStatus::OK);
+
+    // A second exclusive create on the same, still-existing path must fail (O_EXCL).
+    PosixDiskBlockIO second;
+    EXPECT_EQ(second.openAndPreallocate(path, 4096, /*buffered_io=*/true), DiskBlockIOStatus::IO_ERROR);
+
+    first.close();
+    ::remove(path.c_str());
+
+    // After removal the exclusive create succeeds again.
+    PosixDiskBlockIO third;
+    EXPECT_EQ(third.openAndPreallocate(path, 4096, /*buffered_io=*/true), DiskBlockIOStatus::OK);
+    third.close();
+    ::remove(path.c_str());
+}
+
+TEST(DiskBlockIOTest, BackingFilePermissionsAre0600) {
+    const std::string path = testFilePath("perms.bin");
+    ::remove(path.c_str());
+
+    PosixDiskBlockIO io;
+    ASSERT_EQ(io.openAndPreallocate(path, 4096, /*buffered_io=*/true), DiskBlockIOStatus::OK);
+
+    struct stat st {};
+    ASSERT_EQ(::stat(path.c_str(), &st), 0);
+    EXPECT_EQ(st.st_mode & 0777, 0600u);
+
+    io.close();
+    ::remove(path.c_str());
+}
+
 TEST(DiskBlockIOTest, DirectIOAlignmentError) {
     const std::string path = testFilePath("direct_align.bin");
     ::remove(path.c_str());
@@ -303,6 +339,27 @@ TEST(DiskBlockPoolTest, BlockZeroReadWriteReturnsInvalidBlock) {
     ::remove(pool.filePath().c_str());
 }
 
+TEST(DiskBlockPoolTest, ManageMountCreatesGuardWorkDirAndBackingFile) {
+    const std::string mount = ::testing::TempDir() + std::string("/disk_pool_managed_mount");
+    ::mkdir(mount.c_str(), 0755);
+
+    auto config           = makeDiskConfig(mount);
+    config->manage_mount  = true;
+    DiskBlockPool pool(config);
+    ASSERT_TRUE(pool.init());
+
+    // Backing file must live inside the guard's rtp_llm_disk_kv work dir, not directly
+    // under the mount.
+    const std::string expected_dir = mount + "/rtp_llm_disk_kv/";
+    EXPECT_EQ(pool.filePath().rfind(expected_dir, 0), 0u);
+
+    struct stat st {};
+    ASSERT_EQ(::stat(pool.filePath().c_str(), &st), 0);
+    EXPECT_GE(static_cast<size_t>(st.st_size), config->disk_size_bytes);
+
+    ::remove(pool.filePath().c_str());
+}
+
 TEST(DiskBlockPoolTest, IoErrorStatusIsMapped) {
     auto          config = makeDiskConfig(::testing::TempDir());
     DiskBlockPool pool(config, std::make_unique<FailingDiskBlockIO>());
@@ -319,6 +376,54 @@ TEST(DiskBlockPoolTest, IoErrorStatusIsMapped) {
     EXPECT_EQ(pool.write(BlockIdList{*block}, srcs, pool.strideBytes()), BlockIOStatus::PARTIAL_FAILURE);
     std::vector<void*> dsts = {data.data()};
     EXPECT_EQ(pool.read(BlockIdList{*block}, dsts, pool.strideBytes()), BlockIOStatus::PARTIAL_FAILURE);
+}
+
+TEST(DiskBlockPoolTest, TracksReadWriteBytesOnSuccessOnly) {
+    auto          config = makeDiskConfig(::testing::TempDir());
+    DiskBlockPool pool(config);
+    ASSERT_TRUE(pool.init());
+    EXPECT_EQ(pool.readBytes(), 0u);
+    EXPECT_EQ(pool.writeBytes(), 0u);
+
+    auto block = pool.malloc();
+    ASSERT_TRUE(block.has_value());
+
+    std::vector<unsigned char> data(pool.strideBytes(), 0x33);
+    ASSERT_EQ(pool.write(*block, data.data(), data.size()), BlockIOStatus::OK);
+    EXPECT_EQ(pool.writeBytes(), data.size());
+
+    std::vector<unsigned char> read_buf(pool.strideBytes(), 0);
+    ASSERT_EQ(pool.read(*block, read_buf.data(), read_buf.size()), BlockIOStatus::OK);
+    EXPECT_EQ(pool.readBytes(), read_buf.size());
+
+    // A failed write (bytes > stride) must not advance the counter.
+    std::vector<unsigned char> too_big(pool.strideBytes() + 1, 0);
+    EXPECT_EQ(pool.write(*block, too_big.data(), too_big.size()), BlockIOStatus::INVALID_SIZE);
+    EXPECT_EQ(pool.writeBytes(), data.size());
+
+    ::remove(pool.filePath().c_str());
+}
+
+TEST(DiskBlockPoolTest, TracksBatchReadWriteBytes) {
+    auto          config = makeDiskConfig(::testing::TempDir());
+    DiskBlockPool pool(config);
+    ASSERT_TRUE(pool.init());
+
+    auto blocks_opt = pool.malloc(3);
+    ASSERT_TRUE(blocks_opt.has_value());
+    const BlockIdList blocks = *blocks_opt;
+
+    std::vector<unsigned char> buf(pool.strideBytes(), 'X');
+    std::vector<const void*>   srcs = {buf.data(), buf.data(), buf.data()};
+    ASSERT_EQ(pool.write(blocks, srcs, pool.strideBytes()), BlockIOStatus::OK);
+    EXPECT_EQ(pool.writeBytes(), pool.strideBytes() * blocks.size());
+
+    std::vector<unsigned char> r0(pool.strideBytes(), 0), r1(pool.strideBytes(), 0), r2(pool.strideBytes(), 0);
+    std::vector<void*>         dsts = {r0.data(), r1.data(), r2.data()};
+    ASSERT_EQ(pool.read(blocks, dsts, pool.strideBytes()), BlockIOStatus::OK);
+    EXPECT_EQ(pool.readBytes(), pool.strideBytes() * blocks.size());
+
+    ::remove(pool.filePath().c_str());
 }
 
 }  // namespace rtp_llm

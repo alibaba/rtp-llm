@@ -1,6 +1,7 @@
 #pragma once
 
 #include <memory>
+#include <string>
 #include <unordered_map>
 
 #include "rtp_llm/cpp/cache/CacheConfig.h"
@@ -28,6 +29,10 @@ bool shouldPinHostBlockPool();
 // hold at least two blocks (one reserved + one usable) or when stride_bytes is 0.
 size_t computeHostUsableBlockCount(size_t memory_cache_size_bytes, size_t stride_bytes);
 
+// Selects paths[local_rank] from a comma-separated list whose entry count must equal
+// local_world_size. Aborts via RTP_LLM_CHECK_WITH_INFO on count/range mismatch.
+std::string resolveDiskMountPath(const std::string& disk_paths_csv, int64_t local_world_size, int64_t local_rank);
+
 // Factory function: create a BlockTreeCache from existing CacheConfig + KVCacheConfig.
 //
 // This function:
@@ -41,7 +46,8 @@ size_t computeHostUsableBlockCount(size_t memory_cache_size_bytes, size_t stride
 // - cache_config: cache topology (groups, layers, block sizes)
 // - kv_cache_config: tier enable flags and sizing
 // - allocator: existing KVCacheAllocator (used to derive device pool info)
-// - world_rank / local_rank: used to build per-rank unique disk pool file paths
+// - world_rank / local_rank / local_world_size: select this rank's disk mount path and
+//   build per-rank unique backing files
 // - swa_configs: optional sliding_window_size per SWA group
 // - storage_backend: optional remote storage backend
 // - broadcast_manager: optional multi-node broadcast manager
@@ -50,6 +56,7 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
                                        const std::shared_ptr<KVCacheAllocator>& allocator,
                                        int64_t                                  world_rank        = 0,
                                        int64_t                                  local_rank        = 0,
+                                       int64_t                                  local_world_size  = 1,
                                        const SWAGroupConfig&                    swa_configs       = {},
                                        std::shared_ptr<StorageBackend>          storage_backend   = nullptr,
                                        std::shared_ptr<BroadcastManager>        broadcast_manager = nullptr);

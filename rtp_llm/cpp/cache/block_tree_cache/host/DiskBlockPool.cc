@@ -9,11 +9,10 @@ namespace rtp_llm {
 
 namespace {
 
-std::string buildFilePath(const DiskBlockPoolConfig& cfg) {
+std::string buildFilePath(const std::string& dir, const DiskBlockPoolConfig& cfg) {
     const std::string pool_name = cfg.pool_name.empty() ? std::string("unnamed") : cfg.pool_name;
     std::ostringstream oss;
-    oss << cfg.work_dir << "/disk_block_pool_" << pool_name << "_r" << cfg.world_rank << "_l" << cfg.local_rank
-        << ".bin";
+    oss << dir << "/disk_block_pool_" << pool_name << "_r" << cfg.world_rank << "_l" << cfg.local_rank << ".bin";
     return oss.str();
 }
 
@@ -88,7 +87,17 @@ bool DiskBlockPool::init() {
     RTP_LLM_CHECK_WITH_INFO(
         !cfg.work_dir.empty(), "disk block pool [%s] work_dir must not be empty", cfg.pool_name.c_str());
 
-    file_path_ = buildFilePath(cfg);
+    std::string effective_dir = cfg.work_dir;
+    if (cfg.manage_mount) {
+        mount_guard_ = std::make_unique<DiskMountGuard>();
+        RTP_LLM_CHECK_WITH_INFO(mount_guard_->init(cfg.work_dir),
+                                "disk block pool [%s] failed to init mount guard on [%s]",
+                                cfg.pool_name.c_str(),
+                                cfg.work_dir.c_str());
+        effective_dir = mount_guard_->workDir();
+    }
+
+    file_path_ = buildFilePath(effective_dir, cfg);
 
     if (io_ == nullptr) {
         io_ = std::make_unique<PosixDiskBlockIO>();
@@ -116,7 +125,11 @@ BlockIOStatus DiskBlockPool::read(BlockIdxType block, void* dst, size_t bytes) {
     if (bytes == 0 || bytes > strideBytes()) {
         return BlockIOStatus::INVALID_SIZE;
     }
-    return mapStatus(io_->read(blockOffset(block), dst, bytes));
+    const auto status = mapStatus(io_->read(blockOffset(block), dst, bytes));
+    if (status == BlockIOStatus::OK) {
+        read_bytes_.fetch_add(bytes, std::memory_order_relaxed);
+    }
+    return status;
 }
 
 BlockIOStatus DiskBlockPool::write(BlockIdxType block, const void* src, size_t bytes) {
@@ -127,7 +140,11 @@ BlockIOStatus DiskBlockPool::write(BlockIdxType block, const void* src, size_t b
     if (bytes == 0 || bytes > strideBytes()) {
         return BlockIOStatus::INVALID_SIZE;
     }
-    return mapStatus(io_->write(blockOffset(block), src, bytes));
+    const auto status = mapStatus(io_->write(blockOffset(block), src, bytes));
+    if (status == BlockIOStatus::OK) {
+        write_bytes_.fetch_add(bytes, std::memory_order_relaxed);
+    }
+    return status;
 }
 
 BlockIOStatus DiskBlockPool::read(const BlockIdList& blocks, const std::vector<void*>& dsts, size_t bytes_per_block) {
@@ -151,7 +168,11 @@ BlockIOStatus DiskBlockPool::read(const BlockIdList& blocks, const std::vector<v
     for (size_t i = 0; i < blocks.size(); ++i) {
         reads.push_back(DiskRead{blockOffset(blocks[i]), dsts[i], bytes_per_block});
     }
-    return mapStatus(io_->read(reads));
+    const auto status = mapStatus(io_->read(reads));
+    if (status == BlockIOStatus::OK) {
+        read_bytes_.fetch_add(bytes_per_block * blocks.size(), std::memory_order_relaxed);
+    }
+    return status;
 }
 
 BlockIOStatus
@@ -176,7 +197,11 @@ DiskBlockPool::write(const BlockIdList& blocks, const std::vector<const void*>& 
     for (size_t i = 0; i < blocks.size(); ++i) {
         writes.push_back(DiskWrite{blockOffset(blocks[i]), srcs[i], bytes_per_block});
     }
-    return mapStatus(io_->write(writes));
+    const auto status = mapStatus(io_->write(writes));
+    if (status == BlockIOStatus::OK) {
+        write_bytes_.fetch_add(bytes_per_block * blocks.size(), std::memory_order_relaxed);
+    }
+    return status;
 }
 
 size_t DiskBlockPool::payloadBytes() const {
@@ -185,6 +210,14 @@ size_t DiskBlockPool::payloadBytes() const {
 
 size_t DiskBlockPool::strideBytes() const {
     return config().stride_bytes;
+}
+
+size_t DiskBlockPool::readBytes() const {
+    return read_bytes_.load(std::memory_order_relaxed);
+}
+
+size_t DiskBlockPool::writeBytes() const {
+    return write_bytes_.load(std::memory_order_relaxed);
 }
 
 uint64_t DiskBlockPool::blockOffset(BlockIdxType block) const {
