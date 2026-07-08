@@ -44,10 +44,13 @@ def _safe_extractall(tar: tarfile.TarFile, dest_dir: str) -> None:
 
     for member in tar.getmembers():
         if not _within(member.name):
-            raise SmokeException(f"blocked unsafe path in tarball: {member.name!r}")
+            raise SmokeException(
+                QueryStatus.OTHERS, f"blocked unsafe path in tarball: {member.name!r}"
+            )
         if (member.islnk() or member.issym()) and not _within(member.linkname):
             raise SmokeException(
-                f"blocked unsafe link target in tarball: {member.linkname!r}"
+                QueryStatus.OTHERS,
+                f"blocked unsafe link target in tarball: {member.linkname!r}",
             )
     tar.extractall(path=dest_dir)
 
