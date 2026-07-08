@@ -42,7 +42,7 @@ cc_test(
     copts = test_copts,
     deps = [
         "//rtp_llm/cpp/models:model_types",
-        "//rtp_llm/cpp/distribute:cpu_tp_broadcaster",
+        "//rtp_llm/cpp/distribute:cpu_broadcaster",
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
     ] + torch_deps(),

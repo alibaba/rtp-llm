@@ -118,6 +118,7 @@ cc_library(
         ":stats",
         "//rtp_llm/cpp/cache:cache_types",
         "//rtp_llm/cpp/config:config_modules",
+        "//rtp_llm/cpp/distribute:cpu_broadcast_hdr",
         "//rtp_llm/cpp/engine_base/stream:complete_token_ids",
         "//rtp_llm/cpp/models/models_weight:weights_define",
         "//rtp_llm/models_py/bindings:op_defs",

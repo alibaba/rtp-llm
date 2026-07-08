@@ -95,6 +95,23 @@ class TestCpuTpBroadcasterBootstrap(unittest.TestCase):
         mismatched_config.tp_rank = 1
         self.assertFalse(ct._should_init_cpu_tp_broadcaster(mismatched_config))
 
+    def test_disable_env_skips_cpu_tp_broadcaster(self):
+        fake_ops = _FakeLibrtpComputeOps()
+        ct._parallelism_config = self._parallelism_config(tp_size=4, local_world_size=8)
+        ct._cpu_tp_broadcaster_nccl_init_port = 12345
+
+        with patch.dict(
+            os.environ,
+            {
+                "RTP_LLM_CPU_TP_BROADCASTER_DISABLE": "true",
+                "RTP_LLM_CPU_TP_BROADCASTER_DIR": "/tmp/" + "x" * 200,
+            },
+        ):
+            ct._init_cpu_tp_broadcaster_if_needed(fake_ops)
+
+        self.assertIsNone(ct._cpu_tp_broadcaster_base_path)
+        self.assertEqual(fake_ops.init_calls, [])
+
     def test_make_cpu_tp_broadcaster_base_path_chmods_existing_dir(self):
         parallelism_config = self._parallelism_config(tp_size=2, local_world_size=4)
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -122,6 +139,22 @@ class TestCpuTpBroadcasterBootstrap(unittest.TestCase):
 
         self.assertIn("rtp_llm_tp_port12345_dp0", base_path)
         self.assertNotIn("ppid", base_path)
+
+    def test_make_cpu_tp_broadcaster_base_path_checks_highest_rank_path(self):
+        parallelism_config = self._parallelism_config(tp_size=11, local_world_size=11)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fixed_path = os.path.join(tmpdir, "rtp_llm_tp__dp0") + "_10.sock"
+            session_len = ct._UDS_SUN_PATH_LIMIT - len(os.fsencode(fixed_path))
+            self.assertGreater(session_len, 0)
+            with patch.dict(
+                os.environ,
+                {
+                    "RTP_LLM_CPU_TP_BROADCASTER_DIR": tmpdir,
+                    "RTP_LLM_CPU_TP_BROADCASTER_ID": "a" * session_len,
+                },
+            ):
+                with self.assertRaisesRegex(ValueError, "UDS path too long"):
+                    ct._make_cpu_tp_broadcaster_base_path(parallelism_config, 12345)
 
     def test_make_cpu_tp_broadcaster_base_path_rejects_symlink_dir(self):
         parallelism_config = self._parallelism_config(tp_size=2, local_world_size=4)

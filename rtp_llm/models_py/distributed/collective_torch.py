@@ -24,6 +24,9 @@ _CPP_PARALLEL_MODE_TP = 0
 _CPP_PARALLEL_MODE_DP = 1
 _CPP_PARALLEL_MODE_DP_AND_TP = 2
 _UDS_SUN_PATH_LIMIT = 108
+_CPU_TP_BROADCASTER_DISABLE_ENV = "RTP_LLM_CPU_TP_BROADCASTER_DISABLE"
+_CPU_TP_BROADCASTER_DIR_ENV = "RTP_LLM_CPU_TP_BROADCASTER_DIR"
+_CPU_TP_BROADCASTER_ID_ENV = "RTP_LLM_CPU_TP_BROADCASTER_ID"
 
 
 class Group(Enum):
@@ -43,9 +46,16 @@ _cpu_tp_broadcaster_base_path: Optional[str] = None
 _cpu_tp_broadcaster_nccl_init_port: Optional[int] = None
 
 
+def _env_flag_enabled(name: str) -> bool:
+    value = os.environ.get(name)
+    return value is not None and value.lower() in ("1", "true", "yes", "on")
+
+
 def _should_init_cpu_tp_broadcaster(
     parallelism_config: ParallelismConfig,
 ) -> bool:
+    if _env_flag_enabled(_CPU_TP_BROADCASTER_DISABLE_ENV):
+        return False
     tp_size = parallelism_config.tp_size
     local_world_size = parallelism_config.local_world_size
     if tp_size <= 1 or local_world_size <= 0:
@@ -133,13 +143,13 @@ def _make_cpu_tp_broadcaster_base_path(
     parallelism_config: ParallelismConfig,
     nccl_init_port: int,
 ) -> str:
-    session_id = os.environ.get("RTP_LLM_CPU_TP_BROADCASTER_ID")
+    session_id = os.environ.get(_CPU_TP_BROADCASTER_ID_ENV)
     if not session_id:
         # nccl_init_port is shared by all ranks in this bootstrap.
         session_id = f"port{nccl_init_port}"
     session_id = re.sub(r"[^A-Za-z0-9._-]", "_", session_id)
 
-    base_dir = os.environ.get("RTP_LLM_CPU_TP_BROADCASTER_DIR")
+    base_dir = os.environ.get(_CPU_TP_BROADCASTER_DIR_ENV)
     if not base_dir:
         base_dir = os.path.join(
             os.environ.get("TMPDIR", "/tmp"), f"rtp_llm_{os.getuid()}"
@@ -157,11 +167,11 @@ def _make_cpu_tp_broadcaster_base_path(
     base_path = os.path.join(
         base_dir, f"rtp_llm_tp_{session_id}_dp{parallelism_config.dp_rank}"
     )
-    rank0_path = f"{base_path}_0.sock"
-    if len(os.fsencode(rank0_path)) >= _UDS_SUN_PATH_LIMIT:
+    max_rank_path = f"{base_path}_{max(0, parallelism_config.tp_size - 1)}.sock"
+    if len(os.fsencode(max_rank_path)) >= _UDS_SUN_PATH_LIMIT:
         raise ValueError(
-            f"CpuTpBroadcaster UDS path too long ({len(os.fsencode(rank0_path))} "
-            f"bytes, limit {_UDS_SUN_PATH_LIMIT - 1}): {rank0_path}"
+            f"CpuTpBroadcaster UDS path too long ({len(os.fsencode(max_rank_path))} "
+            f"bytes, limit {_UDS_SUN_PATH_LIMIT - 1}): {max_rank_path}"
         )
     return base_path
 

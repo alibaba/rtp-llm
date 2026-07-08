@@ -57,7 +57,8 @@ cc_library(
     }),
     hdrs = [],
     deps = [
-        "//rtp_llm/cpp/distribute:cpu_tp_broadcaster",
+        "//rtp_llm/cpp/distribute:cpu_broadcast",
+        "//rtp_llm/cpp/distribute:cpu_broadcaster",
         "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/cpp/utils:debug_utils",
         "//rtp_llm/cpp/utils:device_perf_wrapper",

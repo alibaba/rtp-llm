@@ -1,4 +1,4 @@
-#include "rtp_llm/cpp/distribute/CpuTpBroadcaster.h"
+#include "rtp_llm/cpp/distribute/CpuBroadcaster.h"
 
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/Logger.h"
@@ -85,7 +85,7 @@ bool waitFdUntil(int fd, short events, std::chrono::steady_clock::time_point dea
                 static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now).count());
         }
 
-        struct pollfd pfd{};
+        struct pollfd pfd {};
         pfd.fd     = fd;
         pfd.events = events;
         int rc     = ::poll(&pfd, 1, remaining_ms);
@@ -111,7 +111,7 @@ bool waitFdUntil(int fd, short events, std::chrono::steady_clock::time_point dea
                 const auto waited_ms =
                     std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start)
                         .count();
-                RTP_LLM_LOG_WARNING("CpuTpBroadcaster broadcast I/O still waiting after %lld ms "
+                RTP_LLM_LOG_WARNING("CpuBroadcaster broadcast I/O still waiting after %lld ms "
                                     "(fd=%d events=0x%x timeout disabled)",
                                     static_cast<long long>(waited_ms),
                                     fd,
@@ -240,17 +240,17 @@ ssize_t readAllWithTimeout(int fd, void* buf, std::size_t nbytes, int timeout_ms
 
 }  // namespace
 
-CpuTpBroadcaster& CpuTpBroadcaster::instance() {
-    static CpuTpBroadcaster i;
+CpuBroadcaster& CpuBroadcaster::instance() {
+    static CpuBroadcaster i;
     return i;
 }
 
-CpuTpBroadcaster::~CpuTpBroadcaster() {
+CpuBroadcaster::~CpuBroadcaster() {
     std::lock_guard<std::mutex> lock(mu_);
     cleanupStateLocked();
 }
 
-void CpuTpBroadcaster::cleanupStateLocked() {
+void CpuBroadcaster::cleanupStateLocked() {
     for (int& fd : peer_fds_) {
         closeFd(fd);
     }
@@ -261,92 +261,92 @@ void CpuTpBroadcaster::cleanupStateLocked() {
         my_uds_path_.clear();
     }
     base_path_.clear();
-    tp_rank_               = 0;
-    tp_size_               = 1;
+    rank_                  = 0;
+    world_size_            = 1;
     broadcast_timeout_ms_  = kDefaultBroadcastTimeoutMs;
     broadcast_in_progress_ = false;
     failed_                = false;
     initialized_.store(false, std::memory_order_release);
 }
 
-void CpuTpBroadcaster::reset() {
+void CpuBroadcaster::reset() {
     std::lock_guard<std::mutex> lock(mu_);
     if (initialized_.load(std::memory_order_acquire)) {
         RTP_LLM_CHECK_WITH_INFO(!broadcast_in_progress_,
-                                "CpuTpBroadcaster::reset called while broadcastCPU is in progress; "
+                                "CpuBroadcaster::reset called while broadcastCPU is in progress; "
                                 "concurrent broadcastCPU/reset is unsupported");
     }
     cleanupStateLocked();
 }
 
-void CpuTpBroadcaster::initialize(int tp_rank, int tp_size, const std::string& base_path) {
+void CpuBroadcaster::initialize(int rank, int world_size, const std::string& base_path) {
     std::lock_guard<std::mutex> lock(mu_);
 
     if (initialized_.load(std::memory_order_acquire)) {
-        if (tp_rank_ == tp_rank && tp_size_ == tp_size && base_path_ == base_path) {
+        if (rank_ == rank && world_size_ == world_size && base_path_ == base_path) {
             return;
         }
-        RTP_LLM_FAIL("CpuTpBroadcaster re-init mismatch: was rank=%d size=%d path=%s, "
+        RTP_LLM_FAIL("CpuBroadcaster re-init mismatch: was rank=%d size=%d path=%s, "
                      "now rank=%d size=%d path=%s",
-                     tp_rank_,
-                     tp_size_,
+                     rank_,
+                     world_size_,
                      base_path_.c_str(),
-                     tp_rank,
-                     tp_size,
+                     rank,
+                     world_size,
                      base_path.c_str());
     }
 
     broadcast_in_progress_ = false;
     failed_                = false;
-    if (tp_size <= 1) {
+    if (world_size <= 1) {
         // Single-rank no-op; broadcast() short-circuits.
-        tp_rank_   = tp_rank;
-        tp_size_   = tp_size;
-        base_path_ = base_path;
+        rank_       = rank;
+        world_size_ = world_size;
+        base_path_  = base_path;
         initialized_.store(true, std::memory_order_release);
         return;
     }
 
-    tp_rank_   = tp_rank;
-    tp_size_   = tp_size;
-    base_path_ = base_path;
-    peer_fds_.assign(tp_size, -1);
+    rank_       = rank;
+    world_size_ = world_size;
+    base_path_  = base_path;
+    peer_fds_.assign(world_size, -1);
     broadcast_timeout_ms_ = broadcastTimeoutMs();
 
-    if (tp_rank == 0) {
+    if (rank == 0) {
         try {
             const std::string path = makeUdsPath(base_path, 0);
             // Remove any stale socket left by a previous crashed run.
             ::unlink(path.c_str());
 
             listen_fd_ = ::socket(AF_UNIX, SOCK_STREAM, 0);
-            RTP_LLM_CHECK_WITH_INFO(listen_fd_ >= 0, "CpuTpBroadcaster socket: %s", std::strerror(errno));
+            RTP_LLM_CHECK_WITH_INFO(listen_fd_ >= 0, "CpuBroadcaster socket: %s", std::strerror(errno));
 
-            struct sockaddr_un addr{};
+            struct sockaddr_un addr {};
             addr.sun_family = AF_UNIX;
             RTP_LLM_CHECK_WITH_INFO(
-                path.size() < sizeof(addr.sun_path), "CpuTpBroadcaster UDS path too long: %s", path.c_str());
+                path.size() < sizeof(addr.sun_path), "CpuBroadcaster UDS path too long: %s", path.c_str());
             std::strncpy(addr.sun_path, path.c_str(), sizeof(addr.sun_path) - 1);
 
             int rc = ::bind(listen_fd_, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr));
-            RTP_LLM_CHECK_WITH_INFO(rc == 0, "CpuTpBroadcaster bind(%s): %s", path.c_str(), std::strerror(errno));
+            RTP_LLM_CHECK_WITH_INFO(rc == 0, "CpuBroadcaster bind(%s): %s", path.c_str(), std::strerror(errno));
             my_uds_path_ = path;
 
-            rc = ::listen(listen_fd_, tp_size - 1);
-            RTP_LLM_CHECK_WITH_INFO(rc == 0, "CpuTpBroadcaster listen: %s", std::strerror(errno));
+            rc = ::listen(listen_fd_, world_size - 1);
+            RTP_LLM_CHECK_WITH_INFO(rc == 0, "CpuBroadcaster listen: %s", std::strerror(errno));
 
-            // Accept tp_size-1 peers during bootstrap only. Request-time
+            // Accept world_size-1 peers during bootstrap only. Request-time
             // broadcast I/O uses a configurable timeout.
-            for (int i = 1; i < tp_size; ++i) {
+            for (int i = 1; i < world_size; ++i) {
                 int fd    = acceptWithTimeout(listen_fd_, kInitTimeoutMs);
                 int saved = errno;
                 RTP_LLM_CHECK_WITH_INFO(fd >= 0,
-                                        "CpuTpBroadcaster accept timed out after %d ms on %s while waiting for "
+                                        "CpuBroadcaster accept timed out after %d ms on %s while waiting for "
                                         "peer %d/%d: %s",
                                         kInitTimeoutMs,
                                         path.c_str(),
                                         i,
-                                        tp_size - 1,
+                                        world_size - 1,
                                         std::strerror(saved));
 
                 bool close_accepted = true;
@@ -355,15 +355,15 @@ void CpuTpBroadcaster::initialize(int tp_rank, int tp_size, const std::string& b
                     ssize_t n         = readAllWithTimeout(fd, &peer_rank, sizeof(peer_rank), kInitTimeoutMs);
                     saved             = errno;
                     RTP_LLM_CHECK_WITH_INFO(n == static_cast<ssize_t>(sizeof(peer_rank)),
-                                            "CpuTpBroadcaster handshake read failed after %d ms: %s",
+                                            "CpuBroadcaster handshake read failed after %d ms: %s",
                                             kInitTimeoutMs,
                                             std::strerror(saved));
-                    RTP_LLM_CHECK_WITH_INFO(peer_rank > 0 && peer_rank < tp_size,
-                                            "CpuTpBroadcaster bad peer_rank: %d (tp_size=%d)",
+                    RTP_LLM_CHECK_WITH_INFO(peer_rank > 0 && peer_rank < world_size,
+                                            "CpuBroadcaster bad peer_rank: %d (world_size=%d)",
                                             peer_rank,
-                                            tp_size);
+                                            world_size);
                     RTP_LLM_CHECK_WITH_INFO(
-                        peer_fds_[peer_rank] < 0, "CpuTpBroadcaster duplicate peer rank: %d", peer_rank);
+                        peer_fds_[peer_rank] < 0, "CpuBroadcaster duplicate peer rank: %d", peer_rank);
                     peer_fds_[peer_rank] = fd;
                     close_accepted       = false;
                 } catch (...) {
@@ -373,27 +373,27 @@ void CpuTpBroadcaster::initialize(int tp_rank, int tp_size, const std::string& b
                     throw;
                 }
             }
-            for (int peer_rank = 1; peer_rank < tp_size; ++peer_rank) {
+            for (int peer_rank = 1; peer_rank < world_size; ++peer_rank) {
                 ssize_t n = writeAllWithTimeout(
                     peer_fds_[peer_rank], &kLinkProbeToken, sizeof(kLinkProbeToken), kInitTimeoutMs);
                 int saved = errno;
                 RTP_LLM_CHECK_WITH_INFO(n == static_cast<ssize_t>(sizeof(kLinkProbeToken)),
-                                        "CpuTpBroadcaster link probe write to rank %d failed after %d ms: %s",
+                                        "CpuBroadcaster link probe write to rank %d failed after %d ms: %s",
                                         peer_rank,
                                         kInitTimeoutMs,
                                         std::strerror(saved));
             }
-            RTP_LLM_LOG_INFO("CpuTpBroadcaster rank 0: accepted %d peer(s) on %s", tp_size - 1, path.c_str());
+            RTP_LLM_LOG_INFO("CpuBroadcaster rank 0: accepted %d peer(s) on %s", world_size - 1, path.c_str());
         } catch (...) {
             cleanupRank0State(peer_fds_, listen_fd_, my_uds_path_);
             throw;
         }
     } else {
         const std::string  path = makeUdsPath(base_path, 0);
-        struct sockaddr_un addr{};
+        struct sockaddr_un addr {};
         addr.sun_family = AF_UNIX;
         RTP_LLM_CHECK_WITH_INFO(
-            path.size() < sizeof(addr.sun_path), "CpuTpBroadcaster UDS path too long: %s", path.c_str());
+            path.size() < sizeof(addr.sun_path), "CpuBroadcaster UDS path too long: %s", path.c_str());
         std::strncpy(addr.sun_path, path.c_str(), sizeof(addr.sun_path) - 1);
 
         // Retry connect only during bootstrap to tolerate small rank scheduling
@@ -403,7 +403,7 @@ void CpuTpBroadcaster::initialize(int tp_rank, int tp_size, const std::string& b
         int           fd           = -1;
         for (int attempt = 0; attempt < kMaxAttempts; ++attempt) {
             fd = ::socket(AF_UNIX, SOCK_STREAM, 0);
-            RTP_LLM_CHECK_WITH_INFO(fd >= 0, "CpuTpBroadcaster socket: %s", std::strerror(errno));
+            RTP_LLM_CHECK_WITH_INFO(fd >= 0, "CpuBroadcaster socket: %s", std::strerror(errno));
             int rc = ::connect(fd, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr));
             if (rc == 0) {
                 break;
@@ -412,10 +412,10 @@ void CpuTpBroadcaster::initialize(int tp_rank, int tp_size, const std::string& b
             ::close(fd);
             fd = -1;
             if (!isRetryableConnectError(saved)) {
-                RTP_LLM_FAIL("CpuTpBroadcaster connect(%s) failed: %s", path.c_str(), std::strerror(saved));
+                RTP_LLM_FAIL("CpuBroadcaster connect(%s) failed: %s", path.c_str(), std::strerror(saved));
             }
             if (attempt + 1 == kMaxAttempts) {
-                RTP_LLM_FAIL("CpuTpBroadcaster connect(%s) failed after %d attempts: %s",
+                RTP_LLM_FAIL("CpuBroadcaster connect(%s) failed after %d attempts: %s",
                              path.c_str(),
                              kMaxAttempts,
                              std::strerror(saved));
@@ -425,16 +425,16 @@ void CpuTpBroadcaster::initialize(int tp_rank, int tp_size, const std::string& b
 
         try {
             // Send our rank so the server can index peer_fds_ correctly.
-            int     my_rank = tp_rank;
+            int     my_rank = rank;
             ssize_t n       = writeAll(fd, &my_rank, sizeof(my_rank));
             RTP_LLM_CHECK_WITH_INFO(n == static_cast<ssize_t>(sizeof(my_rank)),
-                                    "CpuTpBroadcaster handshake write failed");
+                                    "CpuBroadcaster handshake write failed");
 
             char probe = 0;
             n          = readAllWithTimeout(fd, &probe, sizeof(probe), kInitTimeoutMs);
             int saved  = errno;
             RTP_LLM_CHECK_WITH_INFO(n == static_cast<ssize_t>(sizeof(probe)) && probe == kLinkProbeToken,
-                                    "CpuTpBroadcaster link probe read failed after %d ms: %s",
+                                    "CpuBroadcaster link probe read failed after %d ms: %s",
                                     kInitTimeoutMs,
                                     std::strerror(saved));
         } catch (...) {
@@ -443,39 +443,39 @@ void CpuTpBroadcaster::initialize(int tp_rank, int tp_size, const std::string& b
         }
 
         peer_fds_[0] = fd;
-        RTP_LLM_LOG_INFO("CpuTpBroadcaster rank %d: connected to rank 0 at %s", tp_rank, path.c_str());
+        RTP_LLM_LOG_INFO("CpuBroadcaster rank %d: connected to rank 0 at %s", rank, path.c_str());
     }
 
     initialized_.store(true, std::memory_order_release);
 }
 
-void CpuTpBroadcaster::broadcast(void* buf, std::size_t nbytes, int root) {
-    int              tp_rank    = 0;
-    int              tp_size    = 1;
+void CpuBroadcaster::broadcast(void* buf, std::size_t nbytes, int root) {
+    int              rank       = 0;
+    int              world_size = 1;
     int              timeout_ms = 0;
     std::vector<int> peer_fds;
 
     {
         std::lock_guard<std::mutex> lock(mu_);
         RTP_LLM_CHECK_WITH_INFO(initialized_.load(std::memory_order_acquire),
-                                "CpuTpBroadcaster::broadcast called before initialize");
-        if (tp_size_ <= 1 || nbytes == 0) {
+                                "CpuBroadcaster::broadcast called before initialize");
+        if (world_size_ <= 1 || nbytes == 0) {
             return;
         }
         RTP_LLM_CHECK_WITH_INFO(!failed_,
-                                "CpuTpBroadcaster::broadcast called after a failed broadcast; "
+                                "CpuBroadcaster::broadcast called after a failed broadcast; "
                                 "reset and reinitialize before reuse");
-        RTP_LLM_CHECK_WITH_INFO(root == 0, "CpuTpBroadcaster supports only root=0 (star topology); got %d", root);
+        RTP_LLM_CHECK_WITH_INFO(root == 0, "CpuBroadcaster supports only root=0 (star topology); got %d", root);
         RTP_LLM_CHECK_WITH_INFO(!broadcast_in_progress_,
-                                "CpuTpBroadcaster::broadcast does not support concurrent or re-entrant "
+                                "CpuBroadcaster::broadcast does not support concurrent or re-entrant "
                                 "broadcastCPU calls");
-        RTP_LLM_CHECK_WITH_INFO(static_cast<int>(peer_fds_.size()) == tp_size_,
-                                "CpuTpBroadcaster invalid peer fd state: size=%zu tp_size=%d",
+        RTP_LLM_CHECK_WITH_INFO(static_cast<int>(peer_fds_.size()) == world_size_,
+                                "CpuBroadcaster invalid peer fd state: size=%zu world_size=%d",
                                 peer_fds_.size(),
-                                tp_size_);
+                                world_size_);
         broadcast_in_progress_ = true;
-        tp_rank                = tp_rank_;
-        tp_size                = tp_size_;
+        rank                   = rank_;
+        world_size             = world_size_;
         timeout_ms             = broadcast_timeout_ms_;
         peer_fds               = peer_fds_;
     }
@@ -487,18 +487,18 @@ void CpuTpBroadcaster::broadcast(void* buf, std::size_t nbytes, int root) {
     };
 
     try {
-        if (tp_rank == 0) {
+        if (rank == 0) {
             const BroadcastFrameHeader header{kBroadcastFrameMagic, static_cast<uint64_t>(nbytes)};
-            for (int k = 1; k < tp_size; ++k) {
+            for (int k = 1; k < world_size; ++k) {
                 ssize_t n = writeAllWithTimeout(peer_fds[k], &header, sizeof(header), timeout_ms);
                 RTP_LLM_CHECK_WITH_INFO(n == static_cast<ssize_t>(sizeof(header)),
-                                        "CpuTpBroadcaster frame header write to rank %d failed after %d ms: %s",
+                                        "CpuBroadcaster frame header write to rank %d failed after %d ms: %s",
                                         k,
                                         timeout_ms,
                                         std::strerror(errno));
                 n = writeAllWithTimeout(peer_fds[k], buf, nbytes, timeout_ms);
                 RTP_LLM_CHECK_WITH_INFO(n == static_cast<ssize_t>(nbytes),
-                                        "CpuTpBroadcaster write to rank %d (%zu bytes) failed after %d ms: %s",
+                                        "CpuBroadcaster write to rank %d (%zu bytes) failed after %d ms: %s",
                                         k,
                                         nbytes,
                                         timeout_ms,
@@ -508,11 +508,11 @@ void CpuTpBroadcaster::broadcast(void* buf, std::size_t nbytes, int root) {
             BroadcastFrameHeader header{};
             ssize_t              n = readAllWithTimeout(peer_fds[0], &header, sizeof(header), timeout_ms);
             RTP_LLM_CHECK_WITH_INFO(n == static_cast<ssize_t>(sizeof(header)),
-                                    "CpuTpBroadcaster frame header read from rank 0 failed after %d ms: %s",
+                                    "CpuBroadcaster frame header read from rank 0 failed after %d ms: %s",
                                     timeout_ms,
                                     std::strerror(errno));
             RTP_LLM_CHECK_WITH_INFO(header.magic == kBroadcastFrameMagic && header.nbytes == nbytes,
-                                    "CpuTpBroadcaster frame header mismatch: magic=%llu nbytes=%llu "
+                                    "CpuBroadcaster frame header mismatch: magic=%llu nbytes=%llu "
                                     "expected_magic=%llu expected_nbytes=%zu",
                                     static_cast<unsigned long long>(header.magic),
                                     static_cast<unsigned long long>(header.nbytes),
@@ -520,7 +520,7 @@ void CpuTpBroadcaster::broadcast(void* buf, std::size_t nbytes, int root) {
                                     nbytes);
             n = readAllWithTimeout(peer_fds[0], buf, nbytes, timeout_ms);
             RTP_LLM_CHECK_WITH_INFO(n == static_cast<ssize_t>(nbytes),
-                                    "CpuTpBroadcaster read from rank 0 (%zu bytes) failed after %d ms: %s",
+                                    "CpuBroadcaster read from rank 0 (%zu bytes) failed after %d ms: %s",
                                     nbytes,
                                     timeout_ms,
                                     std::strerror(errno));

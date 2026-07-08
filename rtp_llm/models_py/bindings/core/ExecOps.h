@@ -93,13 +93,7 @@ void             execRejectionSampling(const RejectionSamplingParams& params);
 // PyTorch stream ordering so later GPU work can consume the buffer without a
 // device-wide sync. Communication errors must propagate as exceptions from the
 // callback.
-void execBroadcast(const BroadcastParams& params);
-// CPU metadata broadcast. Uses UDS when the CPU TP broadcaster is initialized;
-// otherwise allow_fallback controls whether regular execBroadcast fallback is
-// used. All ranks must call with identical tensor counts and byte sizes.
-// broadcastCPU may run from the C++ engine thread after Python initializes the
-// broadcaster, but it must not run concurrently or re-entrantly.
-void            execBroadcastCpu(const BroadcastParams& params, bool allow_fallback = true);
+void            execBroadcast(const BroadcastParams& params);
 AllReduceOutput execAllReduce(const AllReduceParams& params);
 void            execAllGather(const AllGatherParams& params);
 void            execSyncCommunication(bool timeout = true);

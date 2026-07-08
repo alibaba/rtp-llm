@@ -1,4 +1,4 @@
-#include "rtp_llm/cpp/distribute/CpuTpBroadcaster.h"
+#include "rtp_llm/cpp/distribute/CpuBroadcaster.h"
 
 #include "gtest/gtest.h"
 
@@ -35,7 +35,7 @@ struct BroadcastFrameHeader {
 };
 
 std::string makeTempBase() {
-    std::string       pattern = "/tmp/cpu_tp_broadcaster_test.XXXXXX";
+    std::string       pattern = "/tmp/cpu_broadcaster_test.XXXXXX";
     std::vector<char> buf(pattern.begin(), pattern.end());
     buf.push_back('\0');
     char* dir = ::mkdtemp(buf.data());
@@ -111,7 +111,7 @@ int connectWithRetry(const std::string& path) {
             return -1;
         }
 
-        struct sockaddr_un addr{};
+        struct sockaddr_un addr {};
         addr.sun_family = AF_UNIX;
         std::strncpy(addr.sun_path, path.c_str(), sizeof(addr.sun_path) - 1);
         if (::connect(fd, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)) == 0) {
@@ -182,7 +182,7 @@ void peerHoldUnreadPayload(const std::string& base,
         return;
     }
     while (!release_peer.load(std::memory_order_acquire)) {
-        struct pollfd pfd{};
+        struct pollfd pfd {};
         pfd.fd     = fd;
         pfd.events = POLLIN;
         int rc     = ::poll(&pfd, 1, 10);
@@ -212,7 +212,7 @@ int fakeServerWrongProbe(const std::string& base) {
         return 1;
     }
 
-    struct sockaddr_un addr{};
+    struct sockaddr_un addr {};
     addr.sun_family = AF_UNIX;
     std::strncpy(addr.sun_path, path.c_str(), sizeof(addr.sun_path) - 1);
     if (::bind(listen_fd, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)) != 0) {
@@ -259,7 +259,7 @@ int fakeRootSendMismatchedFrame(const std::string& base) {
         return 1;
     }
 
-    struct sockaddr_un addr{};
+    struct sockaddr_un addr {};
     addr.sun_family = AF_UNIX;
     std::strncpy(addr.sun_path, path.c_str(), sizeof(addr.sun_path) - 1);
     if (::bind(listen_fd, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)) != 0) {
@@ -359,7 +359,7 @@ void expectChildrenOk(const std::vector<pid_t>& pids) {
 }
 
 int happyPathChild(int rank, int tp_size, const std::string& base) {
-    auto& bcast = CpuTpBroadcaster::instance();
+    auto& bcast = CpuBroadcaster::instance();
     bcast.reset();
     bcast.initialize(rank, tp_size, base);
 
@@ -403,19 +403,19 @@ void runHappyPath(int tp_size) {
     cleanupTempBase(base, tp_size);
 }
 
-TEST(CpuTpBroadcasterTest, BroadcastHappyPathTp2) {
+TEST(CpuBroadcasterTest, BroadcastHappyPathTp2) {
     runHappyPath(2);
 }
 
-TEST(CpuTpBroadcasterTest, BroadcastHappyPathTp4) {
+TEST(CpuBroadcasterTest, BroadcastHappyPathTp4) {
     runHappyPath(4);
 }
 
-TEST(CpuTpBroadcasterTest, Rank0RejectsBadPeerRank) {
+TEST(CpuBroadcasterTest, Rank0RejectsBadPeerRank) {
     const std::string  base = makeTempBase();
     std::vector<pid_t> pids;
     pids.push_back(spawnChild([=] {
-        auto& bcast = CpuTpBroadcaster::instance();
+        auto& bcast = CpuBroadcaster::instance();
         bcast.reset();
         return expectThrowContains([&] { bcast.initialize(0, 2, base); }, "bad peer_rank");
     }));
@@ -425,11 +425,11 @@ TEST(CpuTpBroadcasterTest, Rank0RejectsBadPeerRank) {
     cleanupTempBase(base);
 }
 
-TEST(CpuTpBroadcasterTest, Rank0RejectsDuplicatePeerRank) {
+TEST(CpuBroadcasterTest, Rank0RejectsDuplicatePeerRank) {
     const std::string  base = makeTempBase();
     std::vector<pid_t> pids;
     pids.push_back(spawnChild([=] {
-        auto& bcast = CpuTpBroadcaster::instance();
+        auto& bcast = CpuBroadcaster::instance();
         bcast.reset();
         return expectThrowContains([&] { bcast.initialize(0, 3, base); }, "duplicate peer rank");
     }));
@@ -440,13 +440,13 @@ TEST(CpuTpBroadcasterTest, Rank0RejectsDuplicatePeerRank) {
     cleanupTempBase(base);
 }
 
-TEST(CpuTpBroadcasterTest, NonRootRejectsBadLinkProbe) {
+TEST(CpuBroadcasterTest, NonRootRejectsBadLinkProbe) {
     const std::string  base = makeTempBase();
     std::vector<pid_t> pids;
     pids.push_back(spawnChild([=] { return fakeServerWrongProbe(base); }));
     std::this_thread::sleep_for(std::chrono::milliseconds(20));
     pids.push_back(spawnChild([=] {
-        auto& bcast = CpuTpBroadcaster::instance();
+        auto& bcast = CpuBroadcaster::instance();
         bcast.reset();
         return expectThrowContains([&] { bcast.initialize(1, 2, base); }, "link probe read failed");
     }));
@@ -454,13 +454,13 @@ TEST(CpuTpBroadcasterTest, NonRootRejectsBadLinkProbe) {
     cleanupTempBase(base);
 }
 
-TEST(CpuTpBroadcasterTest, NonRootRejectsMismatchedFrameHeader) {
+TEST(CpuBroadcasterTest, NonRootRejectsMismatchedFrameHeader) {
     const std::string  base = makeTempBase();
     std::vector<pid_t> pids;
     pids.push_back(spawnChild([=] { return fakeRootSendMismatchedFrame(base); }));
     std::this_thread::sleep_for(std::chrono::milliseconds(20));
     pids.push_back(spawnChild([=] {
-        auto& bcast = CpuTpBroadcaster::instance();
+        auto& bcast = CpuBroadcaster::instance();
         bcast.reset();
         bcast.initialize(1, 2, base);
 
@@ -475,19 +475,19 @@ TEST(CpuTpBroadcasterTest, NonRootRejectsMismatchedFrameHeader) {
     cleanupTempBase(base);
 }
 
-TEST(CpuTpBroadcasterTest, NonRootFailsFastOnNonRetryableConnectError) {
+TEST(CpuBroadcasterTest, NonRootFailsFastOnNonRetryableConnectError) {
     const std::string base = makeTempBase();
     ASSERT_EQ(::symlink((base + "_0.sock").c_str(), socketPath(base).c_str()), 0);
 
-    auto& bcast = CpuTpBroadcaster::instance();
+    auto& bcast = CpuBroadcaster::instance();
     bcast.reset();
     const auto start = std::chrono::steady_clock::now();
     try {
         bcast.initialize(1, 2, base);
-        ADD_FAILURE() << "expected CpuTpBroadcaster connect failure";
+        ADD_FAILURE() << "expected CpuBroadcaster connect failure";
     } catch (const std::exception& e) {
         const std::string msg = e.what();
-        EXPECT_NE(msg.find("CpuTpBroadcaster connect("), std::string::npos) << msg;
+        EXPECT_NE(msg.find("CpuBroadcaster connect("), std::string::npos) << msg;
         EXPECT_NE(msg.find("failed:"), std::string::npos) << msg;
         EXPECT_EQ(msg.find("failed after"), std::string::npos) << msg;
     }
@@ -499,8 +499,8 @@ TEST(CpuTpBroadcasterTest, NonRootFailsFastOnNonRetryableConnectError) {
     cleanupTempBase(base);
 }
 
-TEST(CpuTpBroadcasterTest, ResetAllowsNewBasePath) {
-    auto& bcast = CpuTpBroadcaster::instance();
+TEST(CpuBroadcasterTest, ResetAllowsNewBasePath) {
+    auto& bcast = CpuBroadcaster::instance();
     bcast.reset();
 
     const std::string base1 = makeTempBase();
@@ -518,8 +518,8 @@ TEST(CpuTpBroadcasterTest, ResetAllowsNewBasePath) {
     cleanupTempBase(base2);
 }
 
-TEST(CpuTpBroadcasterTest, AllowsCrossThreadBroadcastAndResetWhenIdle) {
-    auto& bcast = CpuTpBroadcaster::instance();
+TEST(CpuBroadcasterTest, AllowsCrossThreadBroadcastAndResetWhenIdle) {
+    auto& bcast = CpuBroadcaster::instance();
     bcast.reset();
 
     const std::string base     = makeTempBase();
@@ -533,9 +533,7 @@ TEST(CpuTpBroadcasterTest, AllowsCrossThreadBroadcastAndResetWhenIdle) {
         try {
             int value = 7;
             bcast.broadcast(&value, sizeof(value), 0);
-        } catch (const std::exception& e) {
-            broadcast_error = e.what();
-        }
+        } catch (const std::exception& e) { broadcast_error = e.what(); }
     });
     broadcast_thread.join();
     peer_thread.join();
@@ -547,9 +545,7 @@ TEST(CpuTpBroadcasterTest, AllowsCrossThreadBroadcastAndResetWhenIdle) {
     std::thread reset_thread([&] {
         try {
             bcast.reset();
-        } catch (const std::exception& e) {
-            reset_error = e.what();
-        }
+        } catch (const std::exception& e) { reset_error = e.what(); }
     });
     reset_thread.join();
     EXPECT_TRUE(reset_error.empty()) << reset_error;
@@ -558,8 +554,8 @@ TEST(CpuTpBroadcasterTest, AllowsCrossThreadBroadcastAndResetWhenIdle) {
     cleanupTempBase(base);
 }
 
-TEST(CpuTpBroadcasterTest, ResetRejectsInFlightBroadcast) {
-    auto& bcast = CpuTpBroadcaster::instance();
+TEST(CpuBroadcasterTest, ResetRejectsInFlightBroadcast) {
+    auto& bcast = CpuBroadcaster::instance();
     bcast.reset();
 
     const std::string base = makeTempBase();
@@ -574,9 +570,7 @@ TEST(CpuTpBroadcasterTest, ResetRejectsInFlightBroadcast) {
         try {
             std::vector<char> payload(64 * 1024 * 1024, 0x7f);
             bcast.broadcast(payload.data(), payload.size(), 0);
-        } catch (const std::exception& e) {
-            broadcast_error = e.what();
-        }
+        } catch (const std::exception& e) { broadcast_error = e.what(); }
     });
 
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
@@ -588,9 +582,7 @@ TEST(CpuTpBroadcasterTest, ResetRejectsInFlightBroadcast) {
     if (payload_ready.load(std::memory_order_acquire)) {
         try {
             bcast.reset();
-        } catch (const std::exception& e) {
-            reset_error = e.what();
-        }
+        } catch (const std::exception& e) { reset_error = e.what(); }
     }
 
     release_peer.store(true, std::memory_order_release);
@@ -606,8 +598,8 @@ TEST(CpuTpBroadcasterTest, ResetRejectsInFlightBroadcast) {
     cleanupTempBase(base);
 }
 
-TEST(CpuTpBroadcasterTest, BroadcastTimeoutRequiresResetBeforeReuse) {
-    auto& bcast = CpuTpBroadcaster::instance();
+TEST(CpuBroadcasterTest, BroadcastTimeoutRequiresResetBeforeReuse) {
+    auto& bcast = CpuBroadcaster::instance();
     bcast.reset();
     ::setenv("RTP_LLM_CPU_TP_BROADCASTER_BROADCAST_TIMEOUT_MS", "50", 1);
 
@@ -622,17 +614,13 @@ TEST(CpuTpBroadcasterTest, BroadcastTimeoutRequiresResetBeforeReuse) {
     try {
         std::vector<char> payload(64 * 1024 * 1024, 0x7f);
         bcast.broadcast(payload.data(), payload.size(), 0);
-    } catch (const std::exception& e) {
-        broadcast_error = e.what();
-    }
+    } catch (const std::exception& e) { broadcast_error = e.what(); }
 
     std::string retry_error;
     try {
         int value = 1;
         bcast.broadcast(&value, sizeof(value), 0);
-    } catch (const std::exception& e) {
-        retry_error = e.what();
-    }
+    } catch (const std::exception& e) { retry_error = e.what(); }
 
     release_peer.store(true, std::memory_order_release);
     peer_thread.join();

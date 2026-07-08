@@ -1,7 +1,8 @@
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/CacheStore.h"
-#include "rtp_llm/cpp/distribute/CpuTpBroadcaster.h"
+#include "rtp_llm/cpp/distribute/CpuBroadcast.h"
+#include "rtp_llm/cpp/distribute/CpuBroadcaster.h"
 #include <gtest/gtest.h>
 
 #include <chrono>
@@ -22,7 +23,7 @@ using namespace rtp_llm;
 
 namespace {
 
-std::string makeCpuTpBroadcasterBase() {
+std::string makeCpuBroadcasterBase() {
     std::string       pattern = "/tmp/exec_broadcast_cpu_test.XXXXXX";
     std::vector<char> buf(pattern.begin(), pattern.end());
     buf.push_back('\0');
@@ -33,7 +34,7 @@ std::string makeCpuTpBroadcasterBase() {
     return std::string(dir) + "/bcast";
 }
 
-void cleanupCpuTpBroadcasterBase(const std::string& base) {
+void cleanupCpuBroadcasterBase(const std::string& base) {
     for (int rank = 0; rank <= 2; ++rank) {
         ::unlink((base + "_" + std::to_string(rank) + ".sock").c_str());
     }
@@ -77,7 +78,7 @@ void expectExecOpsChildrenOk(const std::vector<pid_t>& pids) {
 }
 
 int execBroadcastCpuChild(int rank, const std::string& base) {
-    auto& bcast = CpuTpBroadcaster::instance();
+    auto& bcast = CpuBroadcaster::instance();
     bcast.reset();
     bcast.initialize(rank, 2, base);
 
@@ -347,17 +348,17 @@ TEST_F(ExecOpsTest, testRuntimeMaskLogits) {
 }
 
 TEST_F(ExecOpsTest, testExecBroadcastCpuUsesInitializedBroadcasterTp2) {
-    const std::string  base = makeCpuTpBroadcasterBase();
+    const std::string  base = makeCpuBroadcasterBase();
     std::vector<pid_t> pids;
     pids.push_back(spawnExecOpsChild([=] { return execBroadcastCpuChild(0, base); }));
     std::this_thread::sleep_for(std::chrono::milliseconds(20));
     pids.push_back(spawnExecOpsChild([=] { return execBroadcastCpuChild(1, base); }));
     expectExecOpsChildrenOk(pids);
-    cleanupCpuTpBroadcasterBase(base);
+    cleanupCpuBroadcasterBase(base);
 }
 
 TEST_F(ExecOpsTest, testExecBroadcastCpuRejectsUninitializedWithoutFallback) {
-    CpuTpBroadcaster::instance().reset();
+    CpuBroadcaster::instance().reset();
     auto                       tensor = torch::zeros({3}, torch::TensorOptions(torch::kInt32));
     std::vector<torch::Tensor> buffers{tensor};
     BroadcastParams            params{buffers, 0};

@@ -1,4 +1,4 @@
-#include "rtp_llm/cpp/distribute/CpuTpBroadcaster.h"
+#include "rtp_llm/cpp/distribute/CpuBroadcaster.h"
 #include "rtp_llm/cpp/models/ModelTypes.h"
 
 #include "gtest/gtest.h"
@@ -43,7 +43,7 @@ thread_local int g_test_tp_rank = -1;
 }  // namespace
 
 void execBroadcast(const BroadcastParams& params) {
-    auto& bcast = CpuTpBroadcaster::instance();
+    auto& bcast = CpuBroadcaster::instance();
     for (auto& t : params.buffers) {
         auto host  = torch::empty({static_cast<int64_t>(t.nbytes())}, torch::kUInt8).pin_memory();
         auto bytes = torch::from_blob(
@@ -60,7 +60,7 @@ void execBroadcast(const BroadcastParams& params) {
 
 void execBroadcastCpu(const BroadcastParams& params, bool allow_fallback) {
     (void)allow_fallback;
-    auto& bcast = CpuTpBroadcaster::instance();
+    auto& bcast = CpuBroadcaster::instance();
     for (auto& t : params.buffers) {
         auto contig = t.contiguous();
         bcast.broadcast(contig.data_ptr(), contig.nbytes(), params.root);
@@ -178,9 +178,7 @@ bool probeCapability(const std::function<void()>& fn) {
         try {
             fn();
             ::_exit(0);
-        } catch (...) {
-            ::_exit(1);
-        }
+        } catch (...) { ::_exit(1); }
     }
     int status = 0;
     if (pid <= 0 || ::waitpid(pid, &status, 0) != pid) {
@@ -203,7 +201,7 @@ bool cudaAvailable() {
 
 int smokeChild(int rank, const std::string& base, bool include_gpu) {
     g_test_tp_rank = rank;
-    auto& bcast    = CpuTpBroadcaster::instance();
+    auto& bcast    = CpuBroadcaster::instance();
     bcast.reset();
     bcast.initialize(rank, 2, base);
 

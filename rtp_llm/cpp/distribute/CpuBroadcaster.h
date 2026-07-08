@@ -15,14 +15,14 @@ namespace rtp_llm {
 // broadcastCPU is still serialized: no concurrent or re-entrant broadcasts, and
 // reset must not race with an in-flight broadcast. Any transport failure makes
 // the instance unusable until reset() closes the stream state.
-class CpuTpBroadcaster {
+class CpuBroadcaster {
 public:
-    static CpuTpBroadcaster& instance();
+    static CpuBroadcaster& instance();
 
     // Bootstrap UDS endpoints. Call once per process. Subsequent calls with
-    // matching (tp_rank, tp_size, base_path) are no-ops; mismatched re-init
+    // matching (rank, world_size, base_path) are no-ops; mismatched re-init
     // throws.
-    void initialize(int tp_rank, int tp_size, const std::string& base_path);
+    void initialize(int rank, int world_size, const std::string& base_path);
 
     // Blocking broadcast of `nbytes` bytes from `buf` originating at root.
     // root rank writes to all peer sockets; non-root reads from its peer-0 fd.
@@ -38,10 +38,10 @@ public:
     }
 
 private:
-    CpuTpBroadcaster() = default;
-    ~CpuTpBroadcaster();
-    CpuTpBroadcaster(const CpuTpBroadcaster&)            = delete;
-    CpuTpBroadcaster& operator=(const CpuTpBroadcaster&) = delete;
+    CpuBroadcaster() = default;
+    ~CpuBroadcaster();
+    CpuBroadcaster(const CpuBroadcaster&) = delete;
+    CpuBroadcaster& operator=(const CpuBroadcaster&) = delete;
 
     void cleanupStateLocked();
 
@@ -49,12 +49,12 @@ private:
     std::atomic<bool> initialized_{false};
     bool              broadcast_in_progress_ = false;
     bool              failed_                = false;
-    int               tp_rank_               = 0;
-    int               tp_size_               = 1;
+    int               rank_                  = 0;
+    int               world_size_            = 1;
     int               broadcast_timeout_ms_  = 0;
     std::string       base_path_;
     int               listen_fd_ = -1;  // rank 0 only
-    // peer_fds_[k] = fd connecting this rank to rank k. peer_fds_[tp_rank_] = -1.
+    // peer_fds_[k] = fd connecting this rank to rank k. peer_fds_[rank_] = -1.
     std::vector<int> peer_fds_;
     std::string      my_uds_path_;  // path to unlink at shutdown (rank 0 only)
 };
