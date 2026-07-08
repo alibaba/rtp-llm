@@ -605,6 +605,8 @@ class MegaMoEStrategy(RoutedExpertsStrategy):
                 f"than input tokens={T}. This indicates inconsistent aligned "
                 "MegaMoE buffer sizing."
             )
+        y = self._mega_y[:T]
+        import deep_gemm
 
         with record_function_range("dsv4.moe.gate_linear_bf16"):
             scores_bf16 = F.linear(x, gate._weight_bf16())
@@ -643,9 +645,6 @@ class MegaMoEStrategy(RoutedExpertsStrategy):
             f"dsv4.mega_moe.layer{self.cfg.layer_id}.before_deepgemm",
             x.device,
         )
-
-        y = self._mega_y[:T]
-        import deep_gemm
 
         deep_gemm.fp8_fp4_mega_moe(
             y,
