@@ -280,23 +280,35 @@ public:
 
     absl::StatusOr<std::list<GenerateStreamPtr>> schedule() override {
         std::unique_lock<std::mutex> lock(lock_);
-        // Use a longer timeout when idle to avoid CPU spinning (enqueue() will notify on new requests)
-        auto timeout = waiting_streams_.empty() ? std::chrono::seconds(5) : kFlushTimeoutMs;
-        bool woken = cond_.wait_for(lock, timeout, [this] {
+        // Phase 1: park until there is any work at all. A long timeout avoids CPU spinning while
+        // fully idle; enqueue() notifies as soon as a request arrives, so we wake promptly on the
+        // first waiting stream rather than sleeping the whole interval.
+        cond_.wait_for(lock, std::chrono::seconds(5), [this] {
             return !waiting_streams_.empty() || running_streams_.size() > 0
                    || !loading_cache_streams_.empty();
         });
+
+        // Phase 2: we have a waiting batch that has not yet reached batch_size_ and nothing is
+        // running. Give it up to kFlushTimeoutMs to fill; wake early if it reaches batch_size_ or
+        // running/loading work appears. When the timer expires the predicate stays false and we
+        // fall through to flush a partial batch -- this is what keeps low-traffic or mixed
+        // ReturnAllProbsMode groups from waiting forever for a full batch_size_.
+        if (running_streams_.empty() && !waiting_streams_.empty()
+            && waiting_streams_.size() < batch_size_) {
+            cond_.wait_for(lock, kFlushTimeoutMs, [this] {
+                return waiting_streams_.size() >= batch_size_ || running_streams_.size() > 0
+                       || !loading_cache_streams_.empty();
+            });
+        }
 
         // 统一通过状态机驱动各队列中 stream 的状态转移
         // LOADING_CACHE -> DONE/WAITING: error / load cache done
         evaluateAndUpdateStreams(loading_cache_streams_);
         evaluateAndUpdateStreams(running_streams_);
 
-        // If no running work and there are waiting streams, schedule them.
-        // When the flush timeout fires (!woken), run a partial batch so low-traffic
-        // or mixed ReturnAllProbsMode groups never wait forever for batch_size_.
-        if (running_streams_.empty() && !waiting_streams_.empty()
-            && (waiting_streams_.size() >= batch_size_ || !woken)) {
+        // No running work but streams are waiting -> schedule them. By this point either the batch
+        // is full or the flush timeout elapsed, so a partial batch is intentional.
+        if (running_streams_.empty() && !waiting_streams_.empty()) {
             evaluateWaitingStreams();
             if (!running_streams_.empty()) {
                 initRunningStreams();
