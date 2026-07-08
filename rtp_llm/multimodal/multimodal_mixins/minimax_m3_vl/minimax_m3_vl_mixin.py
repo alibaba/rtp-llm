@@ -396,10 +396,14 @@ class MiniMaxM3VLImageEmbedding(MultiModalEmbeddingInterface):
         all_thw: List[torch.Tensor] = []
         split_sizes: List[int] = []
 
+        # self.visual applies the spatial 2x2 merge (patch_merge_mlp), so its
+        # output has pv.shape[0] // merge_size**2 rows per item. Split the batched
+        # ViT output by the POST-merge count, not the pre-merge patch count.
+        merge_length = self.merge_size**2
         for pv, thw, _ in data_list:
             all_pv.append(pv.to(device=device, dtype=dtype))
             all_thw.append(thw.to(device))
-            split_sizes.append(pv.shape[0])
+            split_sizes.append(pv.shape[0] // merge_length)
 
         batched_pv = torch.cat(all_pv, dim=0)
         batched_thw = torch.cat(all_thw, dim=0)
