@@ -1,12 +1,12 @@
 -r requirements_base.txt
-deep-ep==1.2.1.11+unknown.pai
-deep-gemm==2.1.1+local
-fast-hadamard-transform==1.0.4.post1
-fast-safetensors==0.7.3+torch2.1.2.cu121
-fastsafetensors==0.1.19rc5+ali
+deep-ep @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/simple/deep-ep/deep_ep-1.2.1.11%2Bunknown.pai-cp310-cp310-linux_aarch64.whl ; platform_machine == "aarch64"
+deep-gemm @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/simple/deep-gemm/deep_gemm-2.1.1%2Blocal-cp310-cp310-linux_aarch64.whl ; platform_machine == "aarch64"
+fast-hadamard-transform @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/simple/fast-hadamard-transform/fast_hadamard_transform-1.0.4.post1-cp310-cp310-linux_aarch64.whl ; platform_machine == "aarch64"
+fast-safetensors @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/simple/fast-safetensors/fast_safetensors-0.7.3%2Btorch2.1.2.cu121-cp310-cp310-linux_aarch64.whl ; platform_machine == "aarch64"
+fastsafetensors @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/simple/fastsafetensors/fastsafetensors-0.1.19rc5%2Bali-cp310-cp310-linux_aarch64.whl ; platform_machine == "aarch64"
 flash-attn @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/simple/flash-attn/flash_attn-2.8.3-cp310-cp310-manylinux_2_28_aarch64.whl ; platform_machine == "aarch64"
 flash-attn-3==3.0.0b1
-flash-mla==1.0.0+47c35a7
+flash-mla @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/simple/flash-mla/flash_mla-1.0.0%2B47c35a7-cp310-cp310-linux_aarch64.whl ; platform_machine == "aarch64"
 flashinfer-cubin @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/simple/flashinfer-cubin/flashinfer_cubin-0.6.6-py3-none-any.whl
 flashinfer-jit-cache==0.6.6
 flashinfer-python @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/simple/flashinfer-python/flashinfer_python-0.6.6-py3-none-any.whl
@@ -17,6 +17,6 @@ nvidia-cutlass-dsl==4.4.1
 # pins on the SAME source commit (currently 125c29e5) and bump + regenerate both
 # lockfiles together, otherwise a one-sided regen would silently ship mismatched
 # rtp-kernel builds across architectures.
-rtp-kernel==0.1.0+125c29e5.20260422155252
+rtp-kernel @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/simple/rtp-kernel/rtp_kernel-0.1.0%2B125c29e5.20260422155252-cp310-cp310-manylinux_2_28_aarch64.whl ; platform_machine == "aarch64"
 torch==2.9.0+cu129
 torchvision==0.24.0
