@@ -36,7 +36,6 @@ class BertDecoderLayer(nn.Module):
     ):
         super().__init__()
         attn_configs = config.getAttentionConfigs(parallelism_config.get_attn_tp_size())
-        attn_configs.need_rope_kv_cache = False
         self.self_attn = CausalAttention(
             attn_configs,
             parallelism_config,
@@ -69,20 +68,22 @@ class BertDecoderLayer(nn.Module):
         fmha_impl: FMHAImplBase,
         kv_cache: Optional[LayerKVCache] = None,
     ) -> torch.Tensor:
+        empty_bias = torch.empty(
+            0, device=hidden_states.device, dtype=hidden_states.dtype
+        )
+
         residual = hidden_states
-        # Self Attention
         hidden_states = self.self_attn(
             hidden_states=hidden_states,
             fmha_impl=fmha_impl,
             kv_cache=kv_cache,
         )
-        hidden_states = self.input_layernorm(hidden_states, residual, torch.empty(0))
+        hidden_states = self.input_layernorm(hidden_states, residual, empty_bias)
 
-        # Fully Connected
         residual = hidden_states
         hidden_states = self.mlp(hidden_states)
         hidden_states = self.post_attention_layernorm(
-            hidden_states, residual, torch.empty(0)
+            hidden_states, residual, empty_bias
         )
         return hidden_states
 
