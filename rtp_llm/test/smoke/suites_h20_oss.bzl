@@ -199,6 +199,13 @@ def h20_oss_suites():
                 },
                 gpu_type=["H20"],
             ),
+            smoke_test(
+                name="moe_fp8pt_deepep_dyn_decode",
+                task_info="data/model/qwen3_moe/q_r_fp8_per_tensor_dyn_decode_30b.json",
+                smoke_args="--reserver_runtime_mem_mb 20000 --warm_up 0 --act_type BF16 --enable_cuda_graph 1 --enable_dynamic_decode_backend 1 --use_deepep_moe 1 --use_deepep_low_latency 1 --dp_size 2 --ep_size 2",
+                envs=["ACCL_LOW_LATENCY_OPTIMIZE=1"],
+                gpu_type=["H20"],
+            ),
         ],
     )
 
@@ -247,6 +254,18 @@ def h20_oss_suites():
                 name="dense_pdfusion_ratio_prompt_batch_alternation",
                 task_info="data/model/qwen25/q_r_pdfusion_ratio_prompt_batch.json",
                 smoke_args="--warm_up 0 --seq_size_per_block 64 --act_type BF16 --disable_flash_infer 1 --pdfusion_scheduler_mode ratio --decode_prefill_ratio 3",
+                gpu_type=["H20"],
+            ),
+            smoke_test(
+                name="dense_fp8pb_dyn_decode",
+                task_info="data/model/qwen3/q_r_h20_dyn_decode.json",
+                smoke_args="--disable_flash_infer 1 --quantization FP8_PER_BLOCK --act_type BF16 --warm_up 0 --enable_cuda_graph 1 --enable_dynamic_decode_backend 1",
+                gpu_type=["H20"],
+            ),
+            smoke_test(
+                name="dense_fp8pb_tp2_dyn_decode",
+                task_info="data/model/qwen3/q_r_block_fp8_tp2_dyn_decode.json",
+                smoke_args="--disable_flash_infer 1 --act_type BF16 --reserver_runtime_mem_mb 8192 --tp_size 2 --warm_up 0 --enable_cuda_graph 1 --enable_dynamic_decode_backend 1",
                 gpu_type=["H20"],
             ),
         ],
@@ -299,7 +318,7 @@ def h20_oss_suites():
             smoke_test(
                 name="next_cudagraph_deepep",
                 task_info="data/model/qwen3_next/q_r_next_cuda_graph.json",
-                smoke_args="--act_type BF16 --seq_size_per_block 2048 --max_seq_len 128 --use_deepep_moe 1 --use_deepep_low_latency 1 --enable_cuda_graph 1 --warm_up 0  --concurrency_limit 8 --reserver_runtime_mem_mb 8192 --tp_size 2",
+                smoke_args="--act_type BF16 --seq_size_per_block 2048 --kernel_seq_size_per_block 128 --max_seq_len 128 --use_deepep_moe 1 --use_deepep_low_latency 1 --enable_cuda_graph 1 --warm_up 0  --concurrency_limit 8 --reserver_runtime_mem_mb 8192 --tp_size 2",
                 envs=["ACCL_LOW_LATENCY_OPTIMIZE=1"],
                 gpu_type=["H20"],
             ),
@@ -494,8 +513,8 @@ def h20_oss_suites():
                 name="qwen35_moe_vl_fp8",
                 task_info="data/model/qwen35/q_r_35b_moe_vl_fp8.json",
                 smoke_args = {
-                    "prefill": "--use_local 1 --role_type PREFILL --tp_size 2 --act_type BF16 --seq_size_per_block 2048 --max_seq_len 8192 --enable_cuda_graph 0 --warm_up 0 --concurrency_limit 8 --reserver_runtime_mem_mb 8192",
-                    "decode":  "--use_local 1 --role_type DECODE  --tp_size 2 --act_type BF16 --seq_size_per_block 2048 --max_seq_len 8192 --enable_cuda_graph 1 --warm_up 0 --concurrency_limit 8 --reserver_runtime_mem_mb 8192 --use_deepep_moe 1 --use_deepep_low_latency 1",
+                    "prefill": "--use_local 1 --role_type PREFILL --tp_size 2 --act_type BF16 --seq_size_per_block 2048 --kernel_seq_size_per_block 128 --max_seq_len 8192 --enable_cuda_graph 0 --warm_up 0 --concurrency_limit 8 --reserver_runtime_mem_mb 8192",
+                    "decode":  "--use_local 1 --role_type DECODE  --tp_size 2 --act_type BF16 --seq_size_per_block 2048 --kernel_seq_size_per_block 128 --max_seq_len 8192 --enable_cuda_graph 1 --warm_up 0 --concurrency_limit 8 --reserver_runtime_mem_mb 8192 --use_deepep_moe 1 --use_deepep_low_latency 1",
                 },
                 envs={
                     "prefill": ["ACCL_LOW_LATENCY_OPTIMIZE=1"],
