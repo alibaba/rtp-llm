@@ -322,3 +322,16 @@ py_test(
     imports=[],
     exec_properties={"gpu": "H20"},
 )
+
+# NOTE: 纯配置校验测试，但 generate_config.py 导入链拉起 rtp_llm.ops (CUDA .so)，import 阶段需 GPU 在场。
+# TODO(panyang): 拆分 rtp_llm.ops lazy-import 后移除 GPU 约束。
+py_test(
+    name = "test_generate_config_validators",
+    srcs = [
+        "test_generate_config_validators.py",
+    ],
+    deps = [
+        "//rtp_llm:testlib",
+    ],
+    exec_properties = {'gpu':'H20'},
+)
