@@ -1,5 +1,3 @@
-load("//:def.bzl", "copts", "cuda_copts")
-
 py_test(
     name = "test_embedding_profile_config",
     srcs = [
