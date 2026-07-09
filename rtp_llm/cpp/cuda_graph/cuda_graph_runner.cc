@@ -1,12 +1,14 @@
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_runner.h"
 
 #include <algorithm>
+#include <cstdint>
 #include <cstring>
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include "torch/csrc/autograd/generated/variable_factories.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 using namespace torch_ext;
+
 namespace rtp_llm {
 
 // clang-format off
@@ -42,6 +44,36 @@ void optimizedCopyAsync(const torch::Tensor& src, torch::Tensor& dst, size_t siz
     } else {
         cuda_graph::graphMemcpyAsync(dst.data_ptr(), src.data_ptr(), size, cuda_graph::GraphMemcpyKind::H2D, stream);
     }
+}
+
+void fillHostI32Range(torch::Tensor& tensor, int64_t begin, int64_t end, int32_t value) {
+    if (!tensor.defined() || tensor.is_cuda() || tensor.scalar_type() != torch::kInt32 || tensor.dim() != 1) {
+        return;
+    }
+    const int64_t size = tensor.size(0);
+    begin              = std::max<int64_t>(0, std::min<int64_t>(begin, size));
+    end                = std::max<int64_t>(begin, std::min<int64_t>(end, size));
+    auto* data         = tensor.data_ptr<int32_t>();
+    for (int64_t i = begin; i < end; ++i) {
+        data[i] = value;
+    }
+}
+
+void copyHostI32RangeToDevice(const torch::Tensor& host, torch::Tensor& device, int64_t begin, int64_t end) {
+    if (!host.defined() || !device.defined() || host.is_cuda() || !device.is_cuda()
+        || host.scalar_type() != torch::kInt32 || device.scalar_type() != torch::kInt32 || host.dim() != 1
+        || device.dim() != 1) {
+        return;
+    }
+    const int64_t size = std::min<int64_t>(host.size(0), device.size(0));
+    begin              = std::max<int64_t>(0, std::min<int64_t>(begin, size));
+    end                = std::max<int64_t>(begin, std::min<int64_t>(end, size));
+    if (begin == end) {
+        return;
+    }
+    auto src = host.slice(0, begin, end);
+    auto dst = device.slice(0, begin, end);
+    optimizedCopyAsync(src, dst, static_cast<size_t>(end - begin) * sizeof(int32_t));
 }
 
 bool hasHybridBlockMaps(const PyAttentionInputs& attn_inputs) {
@@ -216,8 +248,11 @@ void CudaGraphRunner::prepareInputs(const PyModelInputs& inputs, CudaGraphState&
                                            == hybrid_cache_group,
                                 "kv_cache_kernel_block_id_host_by_group size mismatch");
         for (size_t g = 0; g < hybrid_cache_group; ++g) {
-            py_model_inputs_.attention_inputs.kv_cache_kernel_block_id_device_by_group[g].fill_(0);
-            py_model_inputs_.attention_inputs.kv_cache_kernel_block_id_host_by_group[g].fill_(0);
+            // Non-full groups are consumed by linear/conv state kernels where -1 is the invalid block id.
+            const int32_t fill_value =
+                full_kv_cache_group_id_ >= 0 && static_cast<int32_t>(g) != full_kv_cache_group_id_ ? -1 : 0;
+            py_model_inputs_.attention_inputs.kv_cache_kernel_block_id_device_by_group[g].fill_(fill_value);
+            py_model_inputs_.attention_inputs.kv_cache_kernel_block_id_host_by_group[g].fill_(fill_value);
             tryAddStridedD2DCopy(inputs.attention_inputs.kv_cache_kernel_block_id_device_by_group[g],
                                  py_model_inputs_.attention_inputs.kv_cache_kernel_block_id_device_by_group[g]);
         }
@@ -258,6 +293,40 @@ void CudaGraphRunner::prepareInputs(const PyModelInputs& inputs, CudaGraphState&
         optimizedCopyAsync(inputs.attention_inputs.sequence_lengths,
                            py_model_inputs_.attention_inputs.sequence_lengths,
                            state.current_batch_size * sizeof(int));
+
+        const int64_t graph_bs   = py_model_inputs_.attention_inputs.input_lengths.defined() ?
+                                     py_model_inputs_.attention_inputs.input_lengths.size(0) :
+                                     state.current_real_graph_bs;
+        const int64_t current_bs = state.current_batch_size;
+        if (current_bs < graph_bs) {
+            // Decode graphs replay with graph_bs lanes. Mark inactive lanes as 0-token lanes before graph replay.
+            fillHostI32Range(py_model_inputs_.attention_inputs.input_lengths, current_bs, graph_bs, 0);
+            copyHostI32RangeToDevice(py_model_inputs_.attention_inputs.input_lengths,
+                                     py_model_inputs_.attention_inputs.input_lengths_d,
+                                     current_bs,
+                                     graph_bs);
+
+            fillHostI32Range(py_model_inputs_.attention_inputs.prefix_lengths, current_bs, graph_bs, 0);
+            copyHostI32RangeToDevice(py_model_inputs_.attention_inputs.prefix_lengths,
+                                     py_model_inputs_.attention_inputs.prefix_lengths_d,
+                                     current_bs,
+                                     graph_bs);
+
+            fillHostI32Range(py_model_inputs_.attention_inputs.sequence_lengths, current_bs, graph_bs, 0);
+            copyHostI32RangeToDevice(py_model_inputs_.attention_inputs.sequence_lengths,
+                                     py_model_inputs_.attention_inputs.sequence_lengths_plus_1_d,
+                                     current_bs,
+                                     graph_bs);
+
+            fillHostI32Range(py_model_inputs_.attention_inputs.decode_cu_seqlens_host,
+                             current_bs + 1,
+                             graph_bs + 1,
+                             static_cast<int32_t>(current_bs));
+            copyHostI32RangeToDevice(py_model_inputs_.attention_inputs.decode_cu_seqlens_host,
+                                     py_model_inputs_.attention_inputs.decode_cu_seqlens_d,
+                                     current_bs + 1,
+                                     graph_bs + 1);
+        }
     } else {
         optimizedCopyAsync(inputs.attention_inputs.padding_offset,
                            py_model_inputs_.attention_inputs.padding_offset,
@@ -529,6 +598,11 @@ void CudaGraphRunner::initCaptureAttentionInputs(PyModelInputs& inputs, int max_
     inputs.attention_inputs.dtype                     = model_data_type_;
     inputs.attention_inputs.is_s_padded               = true;
     inputs.attention_inputs.sequence_lengths_plus_1_d = torch::zeros({int(max_bs_)}, options_cuda_int32_);
+    inputs.attention_inputs.decode_cu_seqlens_host =
+        torch::arange(0,
+                      max_bs_ + 1,
+                      1,
+                      torch::TensorOptions(torch::kInt32).device(torch::kCPU).pinned_memory(true));
     inputs.attention_inputs.decode_cu_seqlens_d =
         torch::arange(0, max_bs_ + 1, 1, torch::TensorOptions(torch::kInt32).device(torch::kCUDA));
 }
@@ -779,6 +853,10 @@ void CudaGraphRunner::prepareCaptureInputs(PyModelInputs& inputs, int batch_size
         capture_mem_hold_.py_model_inputs_.attention_inputs.cu_kv_seqlens.slice(0, 0, batch_size + 1);
     inputs.attention_inputs.decode_cu_seqlens_d =
         capture_mem_hold_.py_model_inputs_.attention_inputs.decode_cu_seqlens_d.slice(0, 0, batch_size + 1);
+    inputs.attention_inputs.decode_cu_seqlens_host =
+        capture_mem_hold_.py_model_inputs_.attention_inputs.decode_cu_seqlens_host.defined() ?
+            capture_mem_hold_.py_model_inputs_.attention_inputs.decode_cu_seqlens_host.slice(0, 0, batch_size + 1) :
+            torch::Tensor();
     inputs.attention_inputs.sequence_lengths_plus_1_d =
         capture_mem_hold_.py_model_inputs_.attention_inputs.sequence_lengths_plus_1_d.slice(0, 0, batch_size);
 

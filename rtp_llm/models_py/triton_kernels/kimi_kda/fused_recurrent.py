@@ -78,6 +78,8 @@ def fused_recurrent_kda_fwd_kernel(
 
     if IS_CONTINUOUS_BATCHING:
         sequence_length = tl.load(sequence_lengths + i_n).to(tl.int64)
+        if sequence_length <= 0:
+            return
     else:
         sequence_length = 0
 

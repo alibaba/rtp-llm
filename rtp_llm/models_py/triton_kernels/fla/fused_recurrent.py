@@ -87,6 +87,8 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
 
     if IS_CONTINUOUS_BATCHING:
         sequence_length = tl.load(sequence_lengths + i_n).to(tl.int64)
+        if sequence_length <= 0:
+            return
     else:
         # not used
         sequence_length = 0

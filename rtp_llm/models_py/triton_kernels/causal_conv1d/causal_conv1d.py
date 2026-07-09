@@ -702,6 +702,8 @@ def _causal_conv1d_update_kernel(
     #     return
 
     sequence_length = tl.load(sequence_lengths_ptr + idx_seq).to(tl.int32)
+    if sequence_length <= 0:
+        return
     read_block_offset = cal_block_idx(sequence_length - 1, SEQ_SIZE_PER_BLOCK)
     read_block_id = tl.load(
         block_map_ptr + idx_seq * stride_block_map + read_block_offset
