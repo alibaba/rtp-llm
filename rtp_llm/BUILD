@@ -704,7 +704,7 @@ rename_wheel(
 
 rename_wheel(
     name = "rtp_llm_cuda12",
-    package_name = "rtp_llm-%s+cuda121" % RELEASE_VERSION,
+    package_name = "rtp_llm-%s+cuda129" % RELEASE_VERSION,
     src = ":rtp_llm_whl",
 )
 
