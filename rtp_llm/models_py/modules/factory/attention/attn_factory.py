@@ -111,12 +111,13 @@ def _is_fmha_impl_disabled(
     # FlashInfer implementations
     elif "FlashInfer" in impl_class_name or "Flashinfer" in impl_class_name:
         return fmha_config.disable_flash_infer
-    # Aiter ASM / Paged prefill
-    elif (
-        "AiterPrefillImplAsm" in impl_class_name
-        or "AiterPrefillImplPaged" in impl_class_name
-    ):
+    # Aiter ASM prefill
+    elif "AiterPrefillImplAsm" in impl_class_name:
         return not fmha_config.use_asm_pa
+    # Aiter paged prefill. Its short-query Triton kernel is an internal
+    # dispatch detail; USE_TRITON_PA only selects the standalone decode impl.
+    elif "AiterPrefillImplPaged" in impl_class_name:
+        return not fmha_config.use_aiter_pa
     # Aiter ASM decode — disabled when triton PA is enabled (triton PA takes priority)
     elif "AiterDecodeImplAsm" in impl_class_name:
         if fmha_config.use_triton_pa:

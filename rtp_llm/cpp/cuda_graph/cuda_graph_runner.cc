@@ -598,6 +598,9 @@ void CudaGraphRunner::initCaptureAttentionInputs(PyModelInputs& inputs, int max_
     inputs.attention_inputs.dtype                     = model_data_type_;
     inputs.attention_inputs.is_s_padded               = true;
     inputs.attention_inputs.sequence_lengths_plus_1_d = torch::zeros({int(max_bs_)}, options_cuda_int32_);
+    // Step=1 is intentional: when num_tokens_per_bs_ > 1 (target verify), is_prefill is set to true
+    // so the factory selects PREFILL impls (which use cu_seqlens, not decode_cu_seqlens).
+    // XQADecodeImpl/XQAWrapper (the consumers of decode_cu_seqlens_host) are never reached in that path.
     inputs.attention_inputs.decode_cu_seqlens_host =
         torch::arange(0,
                       max_bs_ + 1,
@@ -705,10 +708,15 @@ void CudaGraphRunner::initCapture() {
         initKernelInternalMemory();
 
         // get real output data type (params already prepared in attn impl __init__/create_params)
-        auto attn_pyobj = py_attn_pyobj_method_(capture_mem_hold_.py_model_inputs_, true);
-        RTP_LLM_LOG_INFO("initCapture forward for output datatype start");
-        py_forward_method_(capture_mem_hold_.py_model_inputs_, attn_pyobj);
-        RTP_LLM_LOG_INFO("initCapture forward for output datatype end");
+        try {
+            auto attn_pyobj = py_attn_pyobj_method_(capture_mem_hold_.py_model_inputs_, true);
+            RTP_LLM_LOG_INFO("initCapture forward for output datatype start");
+            py_forward_method_(capture_mem_hold_.py_model_inputs_, attn_pyobj);
+            RTP_LLM_LOG_INFO("initCapture forward for output datatype end");
+        } catch (const py::error_already_set& e) {
+            RTP_LLM_LOG_ERROR("initCapture forward for output datatype failed: %s", e.what());
+            throw;
+        }
         output = torch::zeros({max_num_token_, hidden_size_}, options_cuda_float_);
         capture_mem_hold_.setHiddenStates(output);
         initCaptureAttentionInputsPost();
