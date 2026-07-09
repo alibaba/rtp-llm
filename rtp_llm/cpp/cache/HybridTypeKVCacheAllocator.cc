@@ -159,9 +159,23 @@ MallocResult HybridTypeKVCacheAllocator::incrMalloc(const MallocInfo& malloc_inf
     for (int b = 0; b < batch_size; ++b) {
         for (int gid = 0; gid < kv_resource->groupNums(); ++gid) {
             auto& block_ids = kv_resource->mutableBlockIds(b, gid);
+            int   group_reserve_step = reserve_step;
+            const bool is_decode_boundary =
+                malloc_info.enable_remove_skipped_blocks && seq_len > 0 && seq_len % seqSizePerBlock() == 0;
+            if (is_decode_boundary) {
+                // Decode kernels write the current token before the next step reads it. At an exact
+                // block boundary the write target is the next logical block, so the block-map slot
+                // must exist before model forward. Full-attention groups need one reserve step.
+                group_reserve_step = std::max(group_reserve_step, 1);
+                if (std::find(linear_group_ids_.begin(), linear_group_ids_.end(), gid) != linear_group_ids_.end()) {
+                    // LinearKVCacheGroup interprets reserve_step as an extra sparse tail count
+                    // (reserve_step - 1), so 2 is required to materialize one write-ahead slot.
+                    group_reserve_step = std::max(group_reserve_step, 2);
+                }
+            }
 
             if (!kv_cache_groups_[static_cast<size_t>(gid)]->malloc(
-                    block_ids, seq_len, malloc_info.reuse_cache, reserve_step)) {
+                    block_ids, seq_len, malloc_info.reuse_cache, group_reserve_step)) {
                 all_success  = false;
                 failed_batch = b;
                 failed_group = gid;

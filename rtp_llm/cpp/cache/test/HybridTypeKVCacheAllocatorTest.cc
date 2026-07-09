@@ -970,7 +970,8 @@ TEST_F(HybridTypeKVCacheAllocatorTest, DecodeIncrMallocAppliesSparseCleanupOnLin
     batch_res->mutableBlockIds(0, gid_full).assign(full_alloc);
     ASSERT_GT(batch_res->curBlocksNum(), 0);
 
-    // seq_len=24 => 6 slots; current_blocks==6 so group malloc is a no-op and only cleanup runs.
+    // seq_len=24 => 6 full slots. Linear decode also needs one write-ahead slot
+    // for the updated state at logical block 6.
     auto token_ids = makeCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/24, /*seq_size_per_block=*/4);
 
     MallocInfo info{batch_res, token_ids};
@@ -980,22 +981,79 @@ TEST_F(HybridTypeKVCacheAllocatorTest, DecodeIncrMallocAppliesSparseCleanupOnLin
     auto result                       = allocator->malloc(info);
     ASSERT_TRUE(result.success);
 
-    // For step=2 and size=6: keep pos 1, 3 (step hits) and last two (4, 5); null pos 0, 2.
+    // For step=2 and size=7: keep pos 1, 3 (step hits) and last two (5, 6); null pos 0, 2, 4.
     const auto& linear_out = batch_res->blocks(0, gid_linear);
-    ASSERT_EQ(linear_out.size(), 6u);
+    ASSERT_EQ(linear_out.size(), 7u);
+    EXPECT_TRUE(isNullBlockIdx(linear_out[0]));
+    EXPECT_FALSE(isNullBlockIdx(linear_out[1]));
+    EXPECT_TRUE(isNullBlockIdx(linear_out[2]));
+    EXPECT_FALSE(isNullBlockIdx(linear_out[3]));
+    EXPECT_TRUE(isNullBlockIdx(linear_out[4]));
+    EXPECT_FALSE(isNullBlockIdx(linear_out[5]));
+    EXPECT_FALSE(isNullBlockIdx(linear_out[6]));
+
+    // Full group does not run sparse cleanup, but decode still needs a write-ahead
+    // block-map slot at the exact block boundary.
+    const auto& full_out = batch_res->blocks(0, gid_full);
+    ASSERT_EQ(full_out.size(), 7u);
+    for (size_t i = 0; i < full_alloc.size(); ++i) {
+        EXPECT_EQ(full_out[i], full_alloc[i]);
+    }
+    EXPECT_FALSE(isNullBlockIdx(full_out[6]));
+}
+
+TEST_F(HybridTypeKVCacheAllocatorTest, DecodeIncrMallocReservesWriteAheadBlockAtBoundary) {
+    auto config      = makeTinyHybridConfig();
+    config.block_num = 16;
+    auto allocator   = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
+    ASSERT_TRUE(allocator->init());
+
+    auto block_pool = allocator->getBlockPool();
+    ASSERT_NE(block_pool, nullptr);
+
+    const int gid_linear = 0;
+    const int gid_full   = 1;
+
+    auto linear_alloc = block_pool->malloc(4);
+    auto full_alloc   = block_pool->malloc(4);
+    ASSERT_EQ(linear_alloc.size(), 4u);
+    ASSERT_EQ(full_alloc.size(), 4u);
+
+    auto batch_res = makeBatchResource(/*batch_size=*/1,
+                                       /*group_nums=*/2,
+                                       /*layer_num=*/static_cast<int>(config.layer_all_num),
+                                       /*layer_to_group_id=*/config.layer_to_group_id,
+                                       CacheKeysType{});
+    batch_res->mutableBlockIds(0, gid_linear).assign(linear_alloc);
+    batch_res->mutableBlockIds(0, gid_full).assign(full_alloc);
+    ASSERT_GT(batch_res->curBlocksNum(), 0);
+
+    // qwen3-next decode kernels read state from logical block (seq_len - 1) / block_size
+    // and write the updated state to seq_len / block_size. At exact block boundaries,
+    // both full and linear groups need one more block-map slot before model forward.
+    auto token_ids = makeCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/16, /*seq_size_per_block=*/4);
+
+    MallocInfo info{batch_res, token_ids};
+    info.enable_device_cache          = false;
+    info.reuse_cache                  = true;
+    info.enable_remove_skipped_blocks = true;
+    auto result                       = allocator->malloc(info);
+    ASSERT_TRUE(result.success);
+
+    const auto& linear_out = batch_res->blocks(0, gid_linear);
+    ASSERT_EQ(linear_out.size(), 5u);
     EXPECT_TRUE(isNullBlockIdx(linear_out[0]));
     EXPECT_FALSE(isNullBlockIdx(linear_out[1]));
     EXPECT_TRUE(isNullBlockIdx(linear_out[2]));
     EXPECT_FALSE(isNullBlockIdx(linear_out[3]));
     EXPECT_FALSE(isNullBlockIdx(linear_out[4]));
-    EXPECT_FALSE(isNullBlockIdx(linear_out[5]));
 
-    // Full group is untouched by sparse cleanup.
     const auto& full_out = batch_res->blocks(0, gid_full);
-    ASSERT_EQ(full_out.size(), 6u);
-    for (size_t i = 0; i < full_out.size(); ++i) {
+    ASSERT_EQ(full_out.size(), 5u);
+    for (size_t i = 0; i < full_alloc.size(); ++i) {
         EXPECT_EQ(full_out[i], full_alloc[i]);
     }
+    EXPECT_FALSE(isNullBlockIdx(full_out[4]));
 }
 
 }  // namespace test

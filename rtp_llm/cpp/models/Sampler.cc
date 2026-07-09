@@ -68,6 +68,17 @@ bool samplerTraceMatches(const std::string& trace_id) {
     });
 }
 
+int samplerTraceMaxOutputLen() {
+    static const int max_output_len = [] {
+        const auto value = samplerTraceEnv("RTPLLM_SAMPLER_TRACE_MAX_OUTPUT_LEN");
+        if (value.empty()) {
+            return -1;
+        }
+        return std::atoi(value.c_str());
+    }();
+    return max_output_len;
+}
+
 std::string samplerTraceRankString() {
     auto rank = samplerTraceEnv("WORLD_RANK");
     if (rank.empty()) {
@@ -237,11 +248,16 @@ void samplerTraceLogRows(const char*          stage,
     const auto* presence_penalty    = inputs.presence_penalty.data_ptr<float>();
     const auto* frequency_penalty   = inputs.frequency_penalty.data_ptr<float>();
     const auto* do_sample           = inputs.do_sample.data_ptr<bool>();
+    const int   max_output_len      = samplerTraceMaxOutputLen();
     bool        wrote               = false;
     for (size_t i = 0; i < batch_size_in; ++i) {
         const auto global_idx = from_batch_idx_in + i;
         const auto trace_id   = global_idx < inputs.trace_ids.size() ? inputs.trace_ids[global_idx] : "";
         if (!samplerTraceMatches(trace_id)) {
+            continue;
+        }
+        const int32_t output_len = sequence_lengths[global_idx] - input_lengths[global_idx];
+        if (max_output_len >= 0 && output_len > max_output_len) {
             continue;
         }
         if (wrote) {
@@ -253,7 +269,7 @@ void samplerTraceLogRows(const char*          stage,
         const int64_t tail_end   = std::max<int64_t>(tail_begin, std::min<int64_t>(seq_len, inputs.step + 1));
         row << "{\"trace_id\":\"" << samplerTraceJsonEscape(trace_id) << "\",\"global_idx\":" << global_idx
             << ",\"local_idx\":" << i << ",\"input_len\":" << input_lengths[global_idx]
-            << ",\"seq_len\":" << seq_len << ",\"top_k\":" << top_k[global_idx]
+            << ",\"seq_len\":" << seq_len << ",\"output_len\":" << output_len << ",\"top_k\":" << top_k[global_idx]
             << ",\"top_p\":" << top_p[global_idx] << ",\"temperature\":" << temperature[global_idx]
             << ",\"repetition_penalty\":" << repetition_penalty[global_idx]
             << ",\"presence_penalty\":" << presence_penalty[global_idx]
@@ -270,6 +286,7 @@ void samplerTraceLogRows(const char*          stage,
     auto&                       os = samplerTraceOutputStream();
     if (os.good()) {
         os << row.str() << "\n";
+        os.flush();
     }
 }
 

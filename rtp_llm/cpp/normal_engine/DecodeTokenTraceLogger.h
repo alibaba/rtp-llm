@@ -8,6 +8,13 @@
 
 namespace rtp_llm {
 
+struct DecodeRepeatedSuffixInfo {
+    bool             matched      = false;
+    int              pattern_size = 0;
+    int              repeat_count = 0;
+    std::vector<int> pattern;
+};
+
 struct DecodeTokenTraceConfig {
     bool                     enabled              = false;
     std::vector<std::string> filters;
@@ -43,6 +50,9 @@ public:
                                  const torch::Tensor&  success_cpu);
 
     static std::string jsonEscape(const std::string& value);
+    static DecodeRepeatedSuffixInfo debugFindRepeatedSuffixForTest(const std::vector<int>& values,
+                                                                    int                    max_pattern_size,
+                                                                    int                    min_repeats);
 };
 
 }  // namespace rtp_llm

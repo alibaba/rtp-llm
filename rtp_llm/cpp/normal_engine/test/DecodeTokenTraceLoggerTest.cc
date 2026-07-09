@@ -42,4 +42,23 @@ TEST(DecodeTokenTraceLoggerTest, jsonEscapeHandlesControlCharacters) {
     EXPECT_EQ("a\\\\b\\\"c\\nd", DecodeTokenTraceLogger::jsonEscape("a\\b\"c\nd"));
 }
 
+TEST(DecodeTokenTraceLoggerTest, repeatedSuffixDetectorReportsAlternatingPattern) {
+    const std::vector<int> tokens = {42, 7, 59140, 220, 59140, 220, 59140, 220, 59140, 220};
+
+    auto info = DecodeTokenTraceLogger::debugFindRepeatedSuffixForTest(tokens, 8, 4);
+
+    ASSERT_TRUE(info.matched);
+    EXPECT_EQ(2, info.pattern_size);
+    EXPECT_EQ(4, info.repeat_count);
+    EXPECT_EQ((std::vector<int>{59140, 220}), info.pattern);
+}
+
+TEST(DecodeTokenTraceLoggerTest, repeatedSuffixDetectorIgnoresNonSuffixRepeats) {
+    const std::vector<int> tokens = {59140, 220, 59140, 220, 1, 2, 3, 4};
+
+    auto info = DecodeTokenTraceLogger::debugFindRepeatedSuffixForTest(tokens, 8, 4);
+
+    EXPECT_FALSE(info.matched);
+}
+
 }  // namespace rtp_llm

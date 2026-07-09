@@ -242,28 +242,39 @@ void updateStreamingSubsequenceCount(WatchState& state,
     }
 }
 
-bool hasRepeatedSuffix(const std::vector<int>& values, int max_pattern_size, int min_repeats) {
+DecodeRepeatedSuffixInfo findRepeatedSuffix(const std::vector<int>& values, int max_pattern_size, int min_repeats) {
+    DecodeRepeatedSuffixInfo info;
     if (min_repeats <= 1) {
-        return false;
+        return info;
     }
     for (int pattern_size = 1; pattern_size <= max_pattern_size; ++pattern_size) {
         const int need = pattern_size * min_repeats;
         if ((int)values.size() < need) {
             continue;
         }
-        const int start = values.size() - need;
-        bool      same  = true;
-        for (int i = start + pattern_size; i < (int)values.size(); ++i) {
-            if (values[i] != values[start + (i - start) % pattern_size]) {
-                same = false;
+        int repeat_count = 1;
+        for (int start = static_cast<int>(values.size()) - 2 * pattern_size; start >= 0; start -= pattern_size) {
+            bool same = true;
+            for (int offset = 0; offset < pattern_size; ++offset) {
+                if (values[start + offset] != values[values.size() - pattern_size + offset]) {
+                    same = false;
+                    break;
+                }
+            }
+            if (!same) {
                 break;
             }
+            ++repeat_count;
         }
-        if (same) {
-            return true;
+        if (repeat_count >= min_repeats) {
+            info.matched      = true;
+            info.pattern_size = pattern_size;
+            info.repeat_count = repeat_count;
+            info.pattern.assign(values.end() - pattern_size, values.end());
+            return info;
         }
     }
-    return false;
+    return info;
 }
 
 void appendBlockSlice(std::ostream& os, const BlockIndicesType& blocks, int begin, int end) {
@@ -450,6 +461,12 @@ std::string DecodeTokenTraceLogger::jsonEscape(const std::string& value) {
     return os.str();
 }
 
+DecodeRepeatedSuffixInfo DecodeTokenTraceLogger::debugFindRepeatedSuffixForTest(const std::vector<int>& values,
+                                                                                 int                    max_pattern_size,
+                                                                                 int                    min_repeats) {
+    return findRepeatedSuffix(values, max_pattern_size, min_repeats);
+}
+
 void DecodeTokenTraceLogger::logDispatchBatch(const StreamGroups&   stream_groups,
                                               const torch::Tensor& token_ids_cpu,
                                               const torch::Tensor& success_cpu) {
@@ -494,8 +511,7 @@ void DecodeTokenTraceLogger::logDispatchBatch(const StreamGroups&   stream_group
                                        state.token_tail.begin() + (state.token_tail.size() - cfg.bad_watch_tail_size));
             }
             const int cf_count = countSubsequence(state.token_tail, cf_pattern);
-            const bool repeated_suffix = hasRepeatedSuffix(state.token_tail, 8, 8);
-            const bool cf_total_repeat = state.cf_total >= cfg.bad_watch_min_cf;
+            const auto repeated_suffix = findRepeatedSuffix(state.token_tail, 8, 8);
             const int seq_size_per_block =
                 stream->seqSizePerBlock() > 0 ? stream->seqSizePerBlock() : std::max(1, stream->seqLength());
             const int read_logical_block =
@@ -521,18 +537,22 @@ void DecodeTokenTraceLogger::logDispatchBatch(const StreamGroups&   stream_group
                     state.history.pop_front();
                 }
             }
-            if (!state.triggered && (cf_total_repeat || cf_count >= cfg.bad_watch_min_cf || repeated_suffix)) {
+            const bool cf_tail_repeat = cf_count >= cfg.bad_watch_min_cf;
+            if (!state.triggered && (cf_tail_repeat || repeated_suffix.matched)) {
                 state.triggered = true;
                 std::ostringstream watch_row;
                 watch_row << "{\"ts_us\":" << autil::TimeUtility::currentTimeInMicroSeconds()
                           << ",\"pid\":" << ::getpid() << ",\"rank\":\"" << jsonEscape(rankString())
                           << "\",\"event\":\"decode_bad_watch_trigger\""
                           << ",\"reason\":\""
-                          << (cf_total_repeat ? "cf_total_repeat" :
-                              (cf_count >= cfg.bad_watch_min_cf ? "cf_tail_repeat" : "repeated_suffix"))
+                          << (cf_tail_repeat ? "cf_tail_repeat" : "repeated_suffix")
                           << "\",\"cf_count\":" << cf_count
                           << ",\"cf_total\":" << state.cf_total
-                          << ",\"total_decode_batch_size\":" << stream_groups.totalDecodeBatchSize()
+                          << ",\"repeat_pattern_size\":" << repeated_suffix.pattern_size
+                          << ",\"repeat_count\":" << repeated_suffix.repeat_count
+                          << ",\"repeat_pattern\":";
+                appendIntVector(watch_row, repeated_suffix.pattern);
+                watch_row << ",\"total_decode_batch_size\":" << stream_groups.totalDecodeBatchSize()
                           << ",\"total_context_batch_size\":" << stream_groups.totalContextBatchSize()
                           << ",\"total_sampler_batch_size_in\":" << stream_groups.totalSamplerBatchSizeIn()
                           << ",\"total_sampler_batch_size_out\":" << stream_groups.totalSamplerBatchSizeOut()
@@ -569,6 +589,7 @@ void DecodeTokenTraceLogger::logDispatchBatch(const StreamGroups&   stream_group
                 auto&                       os = badWatchOutputStream();
                 if (os.good()) {
                     os << watch_row.str() << "\n";
+                    os.flush();
                 }
             }
             batch_idx_in += cur_bs;
@@ -646,6 +667,7 @@ void DecodeTokenTraceLogger::logDispatchBatch(const StreamGroups&   stream_group
     auto&                       os = outputStream();
     if (os.good()) {
         os << row.str() << "\n";
+        os.flush();
     }
 }
 
