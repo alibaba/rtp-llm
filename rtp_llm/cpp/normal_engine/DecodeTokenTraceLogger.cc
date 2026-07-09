@@ -568,6 +568,8 @@ void DecodeTokenTraceLogger::logDispatchBatch(const StreamGroups&   stream_group
                           << ",\"write_logical_block\":" << write_logical_block
                           << ",\"current_batch_size\":" << cur_bs
                           << ",\"next_batch_size\":" << next_bs
+                          << ",\"batch_idx_in\":" << batch_idx_in
+                          << ",\"batch_idx_out\":" << batch_idx_out
                           << ",\"reuse_len\":" << stream->reuseLength()
                           << ",\"initial_reuse_len\":" << stream->initialReuseLength()
                           << ",\"local_reuse_len\":" << stream->localReuseLength()
@@ -584,6 +586,62 @@ void DecodeTokenTraceLogger::logDispatchBatch(const StreamGroups&   stream_group
                 appendWatchHistory(watch_row, state.history);
                 watch_row << ",\"kv_groups\":";
                 appendBlockGroups(watch_row, stream, cfg.max_blocks_per_group, read_logical_block, write_logical_block);
+                watch_row << ",\"peers\":[";
+                int  peer_batch_idx_in  = 0;
+                int  peer_batch_idx_out = 0;
+                bool wrote_peer         = false;
+                for (const auto& peer : all_streams) {
+                    const auto peer_cur_bs  = peer->currentBatchSize();
+                    const auto peer_next_bs = peer->nextBatchSize();
+                    if (wrote_peer) {
+                        watch_row << ",";
+                    }
+                    wrote_peer = true;
+                    std::vector<int> peer_new_tokens;
+                    peer_new_tokens.reserve(peer_next_bs);
+                    for (int i = 0; i < peer_next_bs; ++i) {
+                        const int token_row = peer_batch_idx_out + i;
+                        if (token_row >= 0 && token_row < token_ids_cpu.size(0)) {
+                            peer_new_tokens.push_back(token_ptr[token_row * token_stride + token_stride - 1]);
+                        }
+                    }
+                    const int peer_seq_size_per_block =
+                        peer->seqSizePerBlock() > 0 ? peer->seqSizePerBlock() : std::max(1, peer->seqLength());
+                    const int peer_read_logical_block =
+                        peer->seqLength() > 0 ? (peer->seqLength() - 1) / peer_seq_size_per_block : -1;
+                    const int peer_write_logical_block = peer->seqLength() / peer_seq_size_per_block;
+                    watch_row << "{\"target\":" << (peer.get() == stream.get() ? "true" : "false")
+                              << ",\"trace_id\":\"" << jsonEscape(peer->traceId()) << "\""
+                              << ",\"stream_id\":" << peer->streamId()
+                              << ",\"batch_idx_in\":" << peer_batch_idx_in
+                              << ",\"batch_idx_out\":" << peer_batch_idx_out
+                              << ",\"current_batch_size\":" << peer_cur_bs
+                              << ",\"next_batch_size\":" << peer_next_bs
+                              << ",\"seq_len\":" << peer->seqLength()
+                              << ",\"input_len\":" << peer->inputLength()
+                              << ",\"output_len\":" << peer->outputTokenLen()
+                              << ",\"iter_count\":" << peer->iterCount()
+                              << ",\"seq_size_per_block\":" << peer_seq_size_per_block
+                              << ",\"read_logical_block\":" << peer_read_logical_block
+                              << ",\"write_logical_block\":" << peer_write_logical_block
+                              << ",\"reuse_len\":" << peer->reuseLength()
+                              << ",\"initial_reuse_len\":" << peer->initialReuseLength()
+                              << ",\"local_reuse_len\":" << peer->localReuseLength()
+                              << ",\"memory_reuse_len\":" << peer->memoryReuseLength()
+                              << ",\"cur_blocks_num\":" << peer->curBlocksNum()
+                              << ",\"new_tokens\":";
+                    appendIntVector(watch_row, peer_new_tokens);
+                    if (success_ptr != nullptr && peer_batch_idx_in < success_cpu.numel()) {
+                        watch_row << ",\"success\":" << (success_ptr[peer_batch_idx_in] ? "true" : "false");
+                    }
+                    watch_row << ",\"kv_groups\":";
+                    appendBlockGroups(
+                        watch_row, peer, cfg.max_blocks_per_group, peer_read_logical_block, peer_write_logical_block);
+                    watch_row << "}";
+                    peer_batch_idx_in += peer_cur_bs;
+                    peer_batch_idx_out += peer_next_bs;
+                }
+                watch_row << "]";
                 watch_row << "}";
                 std::lock_guard<std::mutex> lock(outputMutex());
                 auto&                       os = badWatchOutputStream();
