@@ -398,12 +398,8 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         del layer._down_ch_scales
 
     def _online_per_tensor(self, layer):
-        from rtp_llm.models_py.quant_methods.fp8 import (
-            _resolve_per_tensor_quant,
-            cpu_per_tensor_quant_like_legacy,
-        )
+        from rtp_llm.models_py.quant_methods.fp8 import cpu_per_tensor_quant_like_legacy
 
-        per_tensor_quant = _resolve_per_tensor_quant()
         E = layer.num_local_experts
         device = layer.w13.data.device
         new_w13 = torch.empty_like(layer.w13.data, dtype=_runtime_fp8_dtype())
@@ -411,13 +407,14 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         force_cpu_quant = bool(
             getattr(layer, "_new_loader_force_cpu_load_weights", False)
         )
+        if force_cpu_quant:
+            quant = cpu_per_tensor_quant_like_legacy
+        else:
+            from rtp_llm.models_py.quant_methods.fp8 import _resolve_per_tensor_quant
+
+            quant = _resolve_per_tensor_quant()
 
         for e in range(E):
-            quant = (
-                cpu_per_tensor_quant_like_legacy
-                if force_cpu_quant
-                else per_tensor_quant
-            )
             qw, sc = quant(layer.w13.data[e].contiguous())
             new_w13[e].copy_(qw)
             layer.w13_scale[e] = sc.view(-1)[0]

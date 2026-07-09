@@ -481,6 +481,37 @@ class TestFp8MoEAlreadyQuantizedLoad(unittest.TestCase):
         self.assertEqual(layer.w13.device.type, "cpu")
         self.assertEqual(layer.w2.device.type, "cpu")
 
+    def test_online_per_tensor_moe_force_cpu_does_not_resolve_cuda_quant(self):
+        layer = self._make_moe("fp8_online")
+        layer._new_loader_force_cpu_load_weights = True
+        for name in (
+            "0.gate_proj.weight",
+            "0.up_proj.weight",
+            "0.down_proj.weight",
+        ):
+            layer.load_weights({name: torch.zeros(4, 4, dtype=torch.bfloat16)})
+
+        def fake_cpu_quant(weight):
+            return (
+                torch.zeros_like(weight, dtype=fp8_moe._runtime_fp8_dtype()),
+                torch.ones(1, dtype=torch.float32),
+            )
+
+        with mock.patch.object(BaseMoEExperts, "_maybe_build_fused_moe", return_value=None), \
+             mock.patch(
+                 "rtp_llm.models_py.quant_methods.fp8._resolve_per_tensor_quant",
+                 side_effect=ImportError("missing cuda quant kernel"),
+             ), \
+             mock.patch(
+                 "rtp_llm.models_py.quant_methods.fp8.cpu_per_tensor_quant_like_legacy",
+                 side_effect=fake_cpu_quant,
+             ) as cpu_quant:
+            layer.process_weights_after_loading()
+
+        self.assertEqual(cpu_quant.call_count, 2)
+        self.assertEqual(layer.w13.dtype, fp8_moe._runtime_fp8_dtype())
+        self.assertEqual(layer.w2.dtype, fp8_moe._runtime_fp8_dtype())
+
     def test_online_block_moe_rejects_force_cpu_post_load(self):
         layer = self._make_moe("fp8_block_online")
         layer._new_loader_force_cpu_load_weights = True
