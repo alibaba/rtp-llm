@@ -17,6 +17,17 @@ py_test(
 )
 
 py_test(
+    name = "test_attn_factory",
+    srcs = ["test_attn_factory.py"],
+    deps = [
+        "//rtp_llm/models_py:models",
+        "//rtp_llm:config",
+        "//rtp_llm:testlib",
+    ],
+    tags = ["rocm"],
+)
+
+py_test(
     name = "test_aiter_prefill_op",
     srcs = ["test_aiter_prefill_op.py"],
     deps = [

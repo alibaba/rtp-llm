@@ -31,6 +31,7 @@ from rtp_llm.ops.compute_ops import (
     LayerKVCache,
     ParamsBase,
     PyAttentionInputs,
+    get_scalar_type,
     paged_attention_atrex,
 )
 
@@ -902,6 +903,7 @@ def _run_triton_paged_attention(
     num_kv_heads: int,
     context_partition_size: int,
     kv_scale_buf: Optional[torch.Tensor] = None,
+    workspace: Optional[dict] = None,
 ) -> torch.Tensor:
     key_cache = paged_kv_cache.select(1, 0)
     value_cache = paged_kv_cache.select(1, 1)
@@ -915,17 +917,32 @@ def _run_triton_paged_attention(
         kv_sizes[0], kv_sizes[1], kv_sizes[2] // x, kv_sizes[3], x
     )
 
+    has_kv_scale_base = kv_scale_base is not None and (
+        not isinstance(kv_scale_base, torch.Tensor) or kv_scale_base.numel() > 0
+    )
     key_scale, value_scale = None, None
-    if kv_scale_base is not None:
-        kv_b = kv_scale_buf
-        if kv_b is None or kv_b.device != query.device:
-            kv_b = torch.ones(1, dtype=torch.float32, device=query.device)
-        key_scale = kv_b
-        value_scale = kv_b
+    query_is_fp8 = query.dtype in (torch.float8_e4m3fnuz, torch.float8_e4m3fn)
+    if has_kv_scale_base or query_is_fp8:
+        if kv_scale_buf is None:
+            raise ValueError(
+                "kv_scale_buf is required for Triton paged attention "
+                "when KV or query scales are needed; "
+                "ensure FMHAParams was created with alloc_scale=True"
+            )
+        if kv_scale_buf.dtype != torch.float32:
+            raise ValueError(f"kv_scale_buf must be float32, got {kv_scale_buf.dtype}")
+        if kv_scale_buf.device != query.device:
+            raise ValueError(
+                f"kv_scale_buf must be on query device {query.device}, "
+                f"got {kv_scale_buf.device}"
+            )
+        if kv_scale_buf.numel() == 0:
+            raise ValueError("kv_scale_buf must not be empty")
+        if has_kv_scale_base:
+            key_scale = kv_scale_buf
+            value_scale = kv_scale_buf
 
-    num_query_heads = query.shape[1]
     head_size = query.shape[2]
-    query_group_size = num_query_heads // num_kv_heads
 
     query_dtype = query.dtype
     compute_type = (
@@ -939,77 +956,58 @@ def _run_triton_paged_attention(
         )
         else query_dtype
     )
-    output_dtype = (
-        torch.bfloat16
-        if query_dtype
-        in (
-            torch.float8_e4m3fnuz,
-            torch.float8_e4m3fn,
-        )
-        else query_dtype
-    )
 
     softmax_scale = 1.0 / (head_size**0.5)
     max_context_partition_num = (
         max_seq_len + context_partition_size - 1
     ) // context_partition_size
-    equivalent_query_group_size = query_length * query_group_size
 
-    output = torch.empty(
-        (num_seqs * query_length, num_query_heads, head_size),
-        dtype=output_dtype,
-        device=query.device,
-    )
-    exp_sums = torch.zeros(
-        (
+    if workspace is None:
+        num_query_heads = query.shape[1]
+        query_group_size = num_query_heads // num_kv_heads
+        output_dtype = (
+            torch.bfloat16
+            if query_dtype
+            in (
+                torch.float8_e4m3fnuz,
+                torch.float8_e4m3fn,
+            )
+            else query_dtype
+        )
+        equivalent_query_group_size = query_length * query_group_size
+        output_shape = (num_seqs * query_length, num_query_heads, head_size)
+        workspace_shape = (
             num_seqs,
             num_kv_heads,
             max_context_partition_num,
             equivalent_query_group_size,
-        ),
-        dtype=torch.float32,
-        device=query.device,
-    )
-    max_logits = torch.full(
-        (
-            num_seqs,
-            num_kv_heads,
-            max_context_partition_num,
-            equivalent_query_group_size,
-        ),
-        -float("inf"),
-        dtype=torch.float32,
-        device=query.device,
-    )
-    temporary_output = torch.zeros(
-        (
-            num_seqs,
-            num_kv_heads,
-            max_context_partition_num,
-            equivalent_query_group_size,
-            head_size,
-        ),
-        dtype=output_dtype,
-        device=query.device,
-    )
-
-    context_lengths = seq_lens.to(dtype=torch.int32, device=query.device)
-    block_tables = block_tables_id_device.to(dtype=torch.int32, device=query.device)
-
-    if query.dtype in (torch.float8_e4m3fnuz, torch.float8_e4m3fn):
-        q_b = kv_scale_buf
-        if q_b is None or q_b.device != query.device:
-            q_b = torch.ones(1, device=query.device, dtype=torch.float32)
-        query_scale = q_b
+        )
+        temporary_shape = (*workspace_shape, head_size)
+        output = torch.empty(output_shape, dtype=output_dtype, device=query.device)
+        exp_sums = torch.zeros(
+            workspace_shape, dtype=torch.float32, device=query.device
+        )
+        max_logits = torch.full(
+            workspace_shape, -float("inf"), dtype=torch.float32, device=query.device
+        )
+        temporary_output = torch.zeros(
+            temporary_shape, dtype=output_dtype, device=query.device
+        )
     else:
-        query_scale = None
+        output = workspace["output"]
+        exp_sums = workspace["exp_sums"]
+        max_logits = workspace["max_logits"]
+        temporary_output = workspace["temporary_output"]
+
+    block_tables = block_tables_id_device
+    query_scale = kv_scale_buf if query_is_fp8 else None
 
     pa_decode_gluon_aot(
         output=output,
         query=query,
         key_cache=key_cache,
         value_cache=value_cache,
-        context_lengths=context_lengths,
+        context_lengths=seq_lens,
         block_tables=block_tables,
         softmax_scale=softmax_scale,
         query_length=query_length,
@@ -1035,6 +1033,7 @@ class AiterPrefillAttnOpTriton:
         self.head_num_kv = attn_configs.kv_head_num
         self.context_partition_size = 256
         self.alloc_scale = attn_configs.kv_cache_dtype == KvCacheDataType.FP8
+        self.enable_cuda_graph = False
 
     def support(self, attn_inputs: PyAttentionInputs) -> bool:
         has_prefix = (
@@ -1045,12 +1044,111 @@ class AiterPrefillAttnOpTriton:
         return has_prefix
 
     def prepare(self, attn_inputs: PyAttentionInputs):
+        self.enable_cuda_graph = bool(getattr(attn_inputs, "is_cuda_graph", False))
         fmha_params = FMHAParams(
             attn_inputs=attn_inputs,
             is_prefill=True,
             alloc_scale=self.alloc_scale,
         )
+
+        if self.enable_cuda_graph:
+            block_table = getattr(attn_inputs, "kv_cache_kernel_block_id_device", None)
+            if block_table is None:
+                block_table = getattr(attn_inputs, "kv_cache_block_id_device", None)
+            graph_device = _infer_cuda_graph_device(
+                attn_inputs, fmha_params, block_table
+            )
+            fmha_params.graph_device = graph_device
+
+            self._allocate_graph_workspace(
+                fmha_params,
+                fmha_params.cu_seqlens_q.shape[0] - 1,
+                fmha_params.max_seqlen_q,
+                fmha_params.max_seqlen_k,
+                get_scalar_type(attn_inputs.dtype),
+                fmha_params.graph_device,
+            )
+            self.prepare_cuda_graph(fmha_params, attn_inputs)
+        else:
+            fmha_params.compact_indices = self._calc_compact_indices(fmha_params)
+
         return fmha_params
+
+    def _graph_output_dtype(self, dtype: torch.dtype) -> torch.dtype:
+        return (
+            torch.bfloat16
+            if dtype in (torch.float8_e4m3fnuz, torch.float8_e4m3fn)
+            else dtype
+        )
+
+    def _allocate_graph_workspace(
+        self,
+        fmha_params: FMHAParams,
+        num_seqs: int,
+        query_length: int,
+        max_seq_len: int,
+        attn_dtype: torch.dtype,
+        device: torch.device,
+    ) -> None:
+        output_dtype = self._graph_output_dtype(attn_dtype)
+        query_group_size = self.head_num // self.head_num_kv
+        max_context_partition_num = (
+            max_seq_len + self.context_partition_size - 1
+        ) // self.context_partition_size
+        equivalent_query_group_size = query_length * query_group_size
+        output_shape = (num_seqs * query_length, self.head_num, self.head_dim)
+        compact_output_shape = (fmha_params.token_q_num, self.head_num, self.head_dim)
+        workspace_shape = (
+            num_seqs,
+            self.head_num_kv,
+            max_context_partition_num,
+            equivalent_query_group_size,
+        )
+        temporary_shape = (*workspace_shape, self.head_dim)
+
+        fmha_params.attention_output = torch.empty(
+            output_shape, dtype=output_dtype, device=device
+        )
+        fmha_params.compact_output = torch.empty(
+            compact_output_shape, dtype=output_dtype, device=device
+        )
+        fmha_params.exp_sums = torch.full(
+            workspace_shape, 0.0, dtype=torch.float32, device=device
+        )
+        fmha_params.max_logits = torch.full(
+            workspace_shape, -float("inf"), dtype=torch.float32, device=device
+        )
+        fmha_params.temporary_output = torch.full(
+            temporary_shape, 0.0, dtype=output_dtype, device=device
+        )
+        fmha_params.compact_indices = torch.full(
+            (fmha_params.token_q_num,), 0, dtype=torch.int32, device=device
+        )
+
+    def _calc_compact_indices(self, fmha_params: FMHAParams):
+        cu_seqlens_q = fmha_params.cu_seqlens_q
+        max_seqlen_q = fmha_params.max_seqlen_q
+        device = cu_seqlens_q.device
+
+        num_seqs = cu_seqlens_q.shape[0] - 1
+        q_lens = cu_seqlens_q[1:] - cu_seqlens_q[:-1]
+
+        seq_ids = torch.arange(num_seqs, device=device).repeat_interleave(q_lens)
+        within_seq_pos = (
+            torch.arange(fmha_params.token_q_num, device=device) - cu_seqlens_q[seq_ids]
+        )
+        return (
+            seq_ids * max_seqlen_q + (max_seqlen_q - q_lens[seq_ids]) + within_seq_pos
+        )
+
+    def prepare_cuda_graph(
+        self, fmha_params: FMHAParams, attn_inputs: PyAttentionInputs
+    ) -> None:
+        compact_indices = self._calc_compact_indices(fmha_params)
+        fmha_params.compact_indices.fill_(0)
+        fmha_params.compact_indices[: compact_indices.shape[0]].copy_(
+            compact_indices, non_blocking=True
+        )
 
     def forward(self, qkv, kv_cache, fmha_params) -> torch.Tensor:
         block_tables_id_device = fmha_params.kv_cache_block_id_device
@@ -1058,17 +1156,20 @@ class AiterPrefillAttnOpTriton:
             block_tables_id_device.shape[0] if block_tables_id_device is not None else 1
         )
         query = qkv[0]
-        token_num = query.shape[0]
-        device = query.device
 
-        # cu_seqlens are already on GPU from FMHAParams.__init__
-        cu_seqlens_q = fmha_params.cu_seqlens_q
-        q_lens = (cu_seqlens_q[1:] - cu_seqlens_q[:-1]).to(torch.int32)
         max_q_len = fmha_params.max_seqlen_q
+        token_num = query.shape[0]
         real_token_num = fmha_params.token_q_num
+        seq_lens = fmha_params.prefill_seqlen_k_int32
 
-        cu_seqlens_k = fmha_params.cu_seqlens_k
-        seq_lens = cu_seqlens_k[1:] - cu_seqlens_k[:-1]
+        workspace = None
+        if self.enable_cuda_graph:
+            workspace = {
+                "output": fmha_params.attention_output,
+                "exp_sums": fmha_params.exp_sums,
+                "max_logits": fmha_params.max_logits,
+                "temporary_output": fmha_params.temporary_output,
+            }
 
         output = _run_triton_paged_attention(
             query,
@@ -1082,19 +1183,18 @@ class AiterPrefillAttnOpTriton:
             self.head_num_kv,
             self.context_partition_size,
             kv_scale_buf=fmha_params.kv_scale,
+            workspace=workspace,
         )
 
-        if token_num != real_token_num:
-            seq_ids = torch.arange(num_seqs, device=device).repeat_interleave(q_lens)
-            within_seq_pos = (
-                torch.arange(real_token_num, device=device) - cu_seqlens_q[seq_ids]
+        if self.enable_cuda_graph:
+            torch.index_select(
+                output, 0, fmha_params.compact_indices, out=fmha_params.compact_output
             )
-            dst_indices = (
-                seq_ids * max_q_len + (max_q_len - q_lens[seq_ids]) + within_seq_pos
-            )
-            output = output[dst_indices]
-
-        return output.view(real_token_num, -1)
+            return fmha_params.compact_output
+        else:
+            if token_num != real_token_num:
+                output = output[fmha_params.compact_indices]
+            return output.view(real_token_num, -1)
 
 
 class AiterDecodeAttnOpBase:
@@ -1534,6 +1634,7 @@ class AiterPrefillImplPaged(FMHAImplBase):
 
         self.attn_inputs = attn_inputs
         self.fmha_params = self.batch_prefill_impl.prepare(attn_inputs)
+        self.triton_fmha_params = self.triton_prefill_impl.prepare(attn_inputs)
         self.rope_params = self.rope_kvcache_impl.prepare(attn_inputs)
         self.write_cache_store_impl = common.create_write_cache_store_impl(attn_inputs)
 
@@ -1546,13 +1647,34 @@ class AiterPrefillImplPaged(FMHAImplBase):
             return False
         return int(pl.max().item()) > 0
 
-    def _update_prefill_params_for_cuda_graph(
-        self, attn_inputs: PyAttentionInputs
-    ) -> None:
-        input_lengths = attn_inputs.input_lengths
+    def _copy_padded_int32(self, dst: torch.Tensor, src: torch.Tensor) -> None:
+        """Copy src into dst and pad the tail with the last copied value."""
+        src = src.to(device=dst.device, dtype=torch.int32)
+        if src.numel() > dst.numel():
+            raise ValueError(
+                f"source tensor is larger than destination: {src.numel()} > {dst.numel()}"
+            )
+        dst[: src.numel()].copy_(src, non_blocking=True)
+        if src.numel() < dst.numel():
+            pad_value = (
+                src[-1]
+                if src.numel() > 0
+                else torch.zeros((), dtype=torch.int32, device=dst.device)
+            )
+            dst[src.numel() :].fill_(int(pad_value.item()))
 
-        fmha_params = self.fmha_params
+    def _refresh_prefill_fmha_params_for_cuda_graph(
+        self, fmha_params: Any, attn_inputs: PyAttentionInputs
+    ) -> None:
+        """Refresh graph-captured prefill metadata in-place.
+
+        CUDA/HIP graph replay captures tensor addresses. Any tensor consumed by an
+        attention kernel must keep capture-time storage and receive new values via
+        copy_ before replay.
+        """
         expected_batch = fmha_params.cu_seqlens_q.numel() - 1
+        if expected_batch < 0:
+            raise ValueError("cu_seqlens_q must have at least one element")
 
         live_cu_seqlens_q = getattr(attn_inputs, "cu_seqlens_device", None)
         live_cu_seqlens_k = getattr(attn_inputs, "cu_kv_seqlens_device", None)
@@ -1564,78 +1686,99 @@ class AiterPrefillImplPaged(FMHAImplBase):
         )
 
         if use_live_cu_seqlens:
-            fmha_params.cu_seqlens_q.copy_(
-                live_cu_seqlens_q.to(
-                    device=fmha_params.cu_seqlens_q.device, dtype=torch.int32
-                )
-            )
-            fmha_params.cu_seqlens_k.copy_(
-                live_cu_seqlens_k.to(
-                    device=fmha_params.cu_seqlens_k.device, dtype=torch.int32
-                )
-            )
-            q_lengths = fmha_params.cu_seqlens_q[1:] - fmha_params.cu_seqlens_q[:-1]
-            kv_lengths = fmha_params.cu_seqlens_k[1:] - fmha_params.cu_seqlens_k[:-1]
-            prefix_lengths = kv_lengths - q_lengths
+            cu_q_host = live_cu_seqlens_q.to(dtype=torch.int32, device="cpu")
+            cu_k_host = live_cu_seqlens_k.to(dtype=torch.int32, device="cpu")
+            q_lens_host = cu_q_host[1:] - cu_q_host[:-1]
+            kv_lens_host = cu_k_host[1:] - cu_k_host[:-1]
+            prefix_host = kv_lens_host - q_lens_host
         else:
-            q_lengths = input_lengths.to(
-                device=fmha_params.cu_seqlens_q.device, dtype=torch.int32
-            )
-            fmha_params.cu_seqlens_q.zero_()
-            fmha_params.cu_seqlens_q[1:].copy_(torch.cumsum(q_lengths, dim=0))
+            input_lengths = attn_inputs.input_lengths
+            if input_lengths.numel() > expected_batch:
+                raise ValueError(
+                    "Aiter prefill CUDA graph replay batch mismatch: "
+                    f"capture={expected_batch}, replay={input_lengths.numel()}"
+                )
 
-            prefix_lengths = getattr(attn_inputs, "prefix_lengths", None)
-            if prefix_lengths is None:
-                prefix_lengths = torch.zeros_like(q_lengths)
-            else:
-                if prefix_lengths.shape[0] != expected_batch:
+            q_lens_host = torch.zeros(expected_batch, dtype=torch.int32)
+            if input_lengths.numel() > 0:
+                q_lens_host[: input_lengths.numel()].copy_(
+                    input_lengths.to(dtype=torch.int32, device="cpu")
+                )
+
+            prefix_src = getattr(attn_inputs, "prefix_lengths", None)
+            prefix_host = torch.zeros(expected_batch, dtype=torch.int32)
+            if prefix_src is not None and prefix_src.numel() > 0:
+                if prefix_src.numel() != input_lengths.numel():
                     raise ValueError(
-                        "AiterPrefillImplPaged CUDA graph replay prefix length mismatch: "
-                        f"capture={expected_batch}, replay={prefix_lengths.shape[0]}"
+                        "Aiter prefill CUDA graph replay prefix/input length mismatch: "
+                        f"input={input_lengths.numel()}, prefix={prefix_src.numel()}"
                     )
-                prefix_lengths = prefix_lengths.to(
-                    device=fmha_params.cu_seqlens_k.device, dtype=torch.int32
+                if prefix_src.numel() > expected_batch:
+                    raise ValueError(
+                        "Aiter prefill CUDA graph replay prefix length mismatch: "
+                        f"capture={expected_batch}, replay={prefix_src.numel()}"
+                    )
+                prefix_host[: prefix_src.numel()].copy_(
+                    prefix_src.to(dtype=torch.int32, device="cpu")
                 )
+            kv_lens_host = q_lens_host + prefix_host
 
-            kv_lengths = q_lengths + prefix_lengths
-            fmha_params.cu_seqlens_k.zero_()
-            fmha_params.cu_seqlens_k[1:].copy_(torch.cumsum(kv_lengths, dim=0))
+            cu_q_host = torch.zeros(expected_batch + 1, dtype=torch.int32)
+            cu_k_host = torch.zeros(expected_batch + 1, dtype=torch.int32)
+            if expected_batch > 0:
+                cu_q_host[1:] = torch.cumsum(q_lens_host, dim=0)
+                cu_k_host[1:] = torch.cumsum(kv_lens_host, dim=0)
 
-        fmha_params.prefix_lengths = prefix_lengths
+        self._copy_padded_int32(fmha_params.cu_seqlens_q, cu_q_host)
+        self._copy_padded_int32(fmha_params.cu_seqlens_k, cu_k_host)
 
-        q_lens = input_lengths
-        pl_src = getattr(attn_inputs, "prefix_lengths", None)
-        if pl_src is not None and pl_src.numel() >= expected_batch:
-            p_lens = pl_src[:expected_batch]
-        else:
-            p_lens = torch.zeros_like(q_lens)
-        kv_lens = q_lens + p_lens.to(dtype=q_lens.dtype)
-        fmha_params.max_seq_len = int(q_lens.max()) if expected_batch > 0 else 0
+        kv_lens = kv_lens_host.to(device=fmha_params.cu_seqlens_k.device)
+        prefill_seqlen_k = getattr(fmha_params, "prefill_seqlen_k_int32", None)
+        if (
+            prefill_seqlen_k is None
+            or prefill_seqlen_k.numel() != expected_batch
+            or prefill_seqlen_k.device != fmha_params.cu_seqlens_k.device
+        ):
+            raise ValueError(
+                "Aiter prefill CUDA graph params must own a stable "
+                "prefill_seqlen_k_int32 tensor"
+            )
+        prefill_seqlen_k.copy_(kv_lens, non_blocking=True)
+
+        fmha_params.prefix_lengths = prefix_host.to(
+            device=fmha_params.cu_seqlens_q.device
+        )
+        fmha_params.max_seq_len = (
+            int(q_lens_host.max().item()) if expected_batch > 0 else 0
+        )
         fmha_params.max_seqlen_q = fmha_params.max_seq_len
-        fmha_params.max_seqlen_k = int(kv_lens.max()) if expected_batch > 0 else 0
-        fmha_params.token_q_num = int(q_lens.sum())
-        fmha_params.token_kv_num = int(kv_lens.sum())
-
-        # Sync prefill_seqlen_k_int32 from updated cu_seqlens_k so that
-        # CUDA graph replay does not reuse stale seqlen_k values.
-        fmha_params.prefill_seqlen_k_int32 = (
-            fmha_params.cu_seqlens_k[1:] - fmha_params.cu_seqlens_k[:-1]
-        ).to(torch.int32)
+        fmha_params.max_seqlen_k = (
+            int(kv_lens_host.max().item()) if expected_batch > 0 else 0
+        )
+        fmha_params.token_q_num = int(q_lens_host.sum().item())
+        fmha_params.token_kv_num = int(kv_lens_host.sum().item())
 
         kv_block_id = getattr(attn_inputs, "kv_cache_kernel_block_id_device", None)
         if kv_block_id is None:
             kv_block_id = getattr(attn_inputs, "kv_cache_block_id_device", None)
         if kv_block_id is None:
             raise ValueError(
-                "AiterPrefillImplPaged.prepare_cuda_graph requires kv cache block ids"
+                "Aiter prefill CUDA graph replay requires kv cache block ids"
             )
         fmha_params.kv_cache_block_id_device = kv_block_id
 
     def prepare_cuda_graph(self, attn_inputs: PyAttentionInputs):
         self.attn_inputs = attn_inputs
-        self._update_prefill_params_for_cuda_graph(attn_inputs)
 
+        self._refresh_prefill_fmha_params_for_cuda_graph(self.fmha_params, attn_inputs)
         self.batch_prefill_impl.prepare_cuda_graph(self.fmha_params, attn_inputs)
+
+        self._refresh_prefill_fmha_params_for_cuda_graph(
+            self.triton_fmha_params, attn_inputs
+        )
+        self.triton_prefill_impl.prepare_cuda_graph(
+            self.triton_fmha_params, attn_inputs
+        )
 
         prepare_in_place = getattr(self.rope_params, "prepare_in_place", None)
         if callable(prepare_in_place):
@@ -1651,11 +1794,7 @@ class AiterPrefillImplPaged(FMHAImplBase):
         batch_size = cu_seqlens_q.shape[0] - 1
         max_q_len = int(self.fmha_params.max_seqlen_q) if batch_size > 0 else 0
         token_num = int(self.fmha_params.token_q_num) if batch_size > 0 else 0
-        use_triton = (
-            False
-            if self.batch_prefill_impl.enable_cuda_graph
-            else (batch_size > 0 and 0 < max_q_len <= 4)
-        )
+        use_triton = batch_size > 0 and 0 < max_q_len <= 4
 
         if self.need_rope_kv_cache:
             self.rope_kvcache_impl.pad_query = (
@@ -1678,7 +1817,7 @@ class AiterPrefillImplPaged(FMHAImplBase):
 
         if use_triton:
             return self.triton_prefill_impl.forward(
-                fmha_input, kv_cache, self.fmha_params
+                fmha_input, kv_cache, self.triton_fmha_params
             )
         else:
             return self.batch_prefill_impl.forward(

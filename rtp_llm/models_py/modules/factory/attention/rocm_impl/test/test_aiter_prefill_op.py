@@ -38,10 +38,12 @@ try:
     from rtp_llm.models_py.modules.factory.attention.rocm_impl.aiter import (
         AiterPrefillAttnOp,
         AiterPrefillAttnOpPaged,
+        AiterPrefillAttnOpTriton,
         AiterPrefillImplAsm,
         AiterPrefillImplNonAsm,
         AiterPrefillImplPaged,
         FMHAParams,
+        _run_triton_paged_attention,
     )
     from rtp_llm.ops import (
         AttentionConfigs,
@@ -502,8 +504,8 @@ class TestAiterPrefillImplPagedSupport(unittest.TestCase):
 
 
 @unittest.skipUnless(_OPS_IMPORTABLE, "Requires AiterPrefillImplPaged module")
-class TestUpdatePrefillParamsForCudaGraph(unittest.TestCase):
-    """Unit tests for AiterPrefillImplPaged._update_prefill_params_for_cuda_graph.
+class TestRefreshPrefillParamsForCudaGraph(unittest.TestCase):
+    """Unit tests for AiterPrefillImplPaged CUDA graph metadata refresh.
 
     Uses a lightweight stub to bypass the heavy __init__ chain (aiter, RoPE, etc.).
     Only exercises the cu_seqlens/prefix/scalar reconstruction logic.
@@ -523,8 +525,10 @@ class TestUpdatePrefillParamsForCudaGraph(unittest.TestCase):
             token_q_num=0,
             token_kv_num=0,
             kv_cache_block_id_device=None,
+            prefill_seqlen_k_int32=torch.zeros(batch_size, dtype=torch.int32),
         )
-        stub = SimpleNamespace(fmha_params=fmha_params)
+        stub = object.__new__(AiterPrefillImplPaged)
+        stub.fmha_params = fmha_params
         return stub
 
     def _make_attn_inputs(
@@ -550,7 +554,7 @@ class TestUpdatePrefillParamsForCudaGraph(unittest.TestCase):
         return inputs
 
     def _call_update(self, stub, attn_inputs):
-        AiterPrefillImplPaged._update_prefill_params_for_cuda_graph(stub, attn_inputs)
+        stub._refresh_prefill_fmha_params_for_cuda_graph(stub.fmha_params, attn_inputs)
 
     def test_rebuild_from_input_lengths_no_prefix(self):
         """Rebuild cu_seqlens from input_lengths, no prefix."""
@@ -648,6 +652,258 @@ class TestUpdatePrefillParamsForCudaGraph(unittest.TestCase):
         )
         with self.assertRaises(ValueError):
             self._call_update(stub, inputs)
+
+
+@unittest.skipUnless(_OPS_IMPORTABLE, "Requires AiterPrefillImplPaged module")
+class TestAiterPrefillImplPagedCudaGraphDispatch(unittest.TestCase):
+    """Unit tests for small-q dispatch under CUDA graph."""
+
+    def _make_stub(self, graph_prepared: bool):
+        from types import SimpleNamespace
+
+        calls = []
+        fmha_params = SimpleNamespace(
+            cu_seqlens_q=torch.tensor([0, 4, 8], dtype=torch.int32),
+            max_seqlen_q=4,
+            token_q_num=8,
+            cuda_graph_prepared=graph_prepared,
+        )
+        batch_impl = SimpleNamespace(enable_cuda_graph=True)
+        triton_impl = SimpleNamespace()
+        triton_fmha_params = SimpleNamespace()
+
+        def batch_forward(qkv, kv_cache, params):
+            calls.append("batch")
+            return torch.full((8, 1), 1.0)
+
+        def triton_forward(qkv, kv_cache, params):
+            calls.append("triton")
+            self.assertIs(params, triton_fmha_params)
+            return torch.full((8, 1), 2.0)
+
+        batch_impl.forward = batch_forward
+        triton_impl.forward = triton_forward
+
+        stub = SimpleNamespace(
+            fmha_params=fmha_params,
+            need_rope_kv_cache=False,
+            write_cache_store_impl=None,
+            attn_inputs=SimpleNamespace(is_prefill=True, cache_store_inputs=None),
+            head_num_kv=1,
+            tokens_per_block=16,
+            head_dim=1,
+            batch_prefill_impl=batch_impl,
+            triton_prefill_impl=triton_impl,
+            triton_fmha_params=triton_fmha_params,
+        )
+        kv_cache = SimpleNamespace(
+            kv_cache_base=torch.empty(1, 2, 1, 16, 1),
+        )
+        qkv = (torch.empty(8, 1, 1),)
+        return stub, qkv, kv_cache, calls
+
+    def test_cuda_graph_uses_triton_when_small_q_and_graph_prepared(self):
+        stub, qkv, kv_cache, calls = self._make_stub(graph_prepared=True)
+
+        out = AiterPrefillImplPaged.forward(stub, qkv, kv_cache)
+
+        self.assertEqual(calls, ["triton"])
+        self.assertTrue(torch.equal(out, torch.full((8, 1), 2.0)))
+
+    def test_cuda_graph_uses_triton_when_small_q_even_without_batch_graph_workspace(
+        self,
+    ):
+        stub, qkv, kv_cache, calls = self._make_stub(graph_prepared=False)
+
+        out = AiterPrefillImplPaged.forward(stub, qkv, kv_cache)
+
+        self.assertEqual(calls, ["triton"])
+        self.assertTrue(torch.equal(out, torch.full((8, 1), 2.0)))
+
+
+@unittest.skipUnless(_OPS_IMPORTABLE, "Requires AiterPrefillAttnOpTriton module")
+class TestAiterPrefillAttnOpTritonCudaGraphWorkspace(unittest.TestCase):
+    """Unit tests for CUDA graph workspace ownership."""
+
+    def test_graph_workspace_buffers_are_allocated_on_fmha_params_without_scale_buffer(
+        self,
+    ):
+        from types import SimpleNamespace
+
+        cfg = _make_attn_configs(head_num=4, head_num_kv=2, head_dim=8)
+        op = AiterPrefillAttnOpTriton(cfg)
+        fmha_params = SimpleNamespace(token_q_num=8)
+
+        op._allocate_graph_workspace(
+            fmha_params,
+            num_seqs=2,
+            query_length=4,
+            max_seq_len=16,
+            attn_dtype=torch.float16,
+            device=torch.device("cpu"),
+        )
+
+        self.assertEqual(fmha_params.attention_output.shape, (8, 4, 8))
+        self.assertEqual(fmha_params.compact_output.shape, (8, 4, 8))
+        self.assertEqual(fmha_params.exp_sums.shape, (2, 2, 1, 8))
+        self.assertEqual(fmha_params.max_logits.shape, (2, 2, 1, 8))
+        self.assertEqual(fmha_params.temporary_output.shape, (2, 2, 1, 8, 8))
+        self.assertEqual(fmha_params.compact_indices.shape, (8,))
+        self.assertFalse(hasattr(fmha_params, "kv_scale"))
+        self.assertFalse(hasattr(op, "_graph_output"))
+
+    def test_forward_uses_prepared_graph_workspace_without_allocation(self):
+        from types import SimpleNamespace
+        from unittest.mock import patch
+
+        cfg = _make_attn_configs(head_num=4, head_num_kv=2, head_dim=8)
+        op = AiterPrefillAttnOpTriton(cfg)
+        op.enable_cuda_graph = True
+        query = torch.empty(8, 4, 8, dtype=torch.float16)
+        workspace = {
+            "output": torch.empty(8, 4, 8, dtype=torch.float16),
+            "exp_sums": torch.empty(2, 2, 1, 8, dtype=torch.float32),
+            "max_logits": torch.empty(2, 2, 1, 8, dtype=torch.float32),
+            "temporary_output": torch.empty(2, 2, 1, 8, 8, dtype=torch.float16),
+        }
+        compact_output = torch.empty(8, 4, 8, dtype=torch.float16)
+        fmha_params = SimpleNamespace(
+            kv_cache_block_id_device=torch.zeros(2, 1, dtype=torch.int32),
+            cu_seqlens_q=torch.tensor([0, 4, 8], dtype=torch.int32),
+            cu_seqlens_k=torch.tensor([0, 7, 13], dtype=torch.int32),
+            prefill_seqlen_k_int32=torch.tensor([7, 6], dtype=torch.int32),
+            max_seqlen_q=4,
+            max_seqlen_k=7,
+            token_q_num=8,
+            kv_scale=None,
+            attention_output=workspace["output"],
+            exp_sums=workspace["exp_sums"],
+            max_logits=workspace["max_logits"],
+            temporary_output=workspace["temporary_output"],
+            compact_indices=torch.arange(8, dtype=torch.int32),
+            compact_output=compact_output,
+        )
+        kv_cache = SimpleNamespace(
+            kv_cache_base=torch.empty(1, 2, 2, 16, 8, dtype=torch.float16),
+            kv_scale_base=None,
+        )
+
+        kernel_path = (
+            "rtp_llm.models_py.modules.factory.attention.rocm_impl.aiter."
+            "_run_triton_paged_attention"
+        )
+        with patch.object(
+            op,
+            "_allocate_graph_workspace",
+            side_effect=AssertionError("forward must not allocate graph workspace"),
+        ), patch(kernel_path, return_value=workspace["output"]) as run_attention:
+            out = op.forward((query,), kv_cache, fmha_params)
+
+        self.assertEqual(out.data_ptr(), compact_output.data_ptr())
+        call_workspace = run_attention.call_args.kwargs["workspace"]
+        for name, tensor in workspace.items():
+            self.assertIs(call_workspace[name], tensor)
+
+    @unittest.skipUnless(_is_rocm(), "Requires ROCm GPU")
+    def test_prepare_cuda_graph_refreshes_triton_lengths_in_place(self):
+        from types import SimpleNamespace
+
+        cfg = _make_attn_configs(head_num=4, head_num_kv=2, head_dim=8)
+        op = AiterPrefillAttnOpTriton(cfg)
+        device = torch.device("cuda")
+        fmha_params = SimpleNamespace(
+            cu_seqlens_q=torch.zeros(4, dtype=torch.int32, device=device),
+            cu_seqlens_k=torch.zeros(4, dtype=torch.int32, device=device),
+            prefill_seqlen_k_int32=torch.full(
+                (3,), -1, dtype=torch.int32, device=device
+            ),
+            compact_indices=torch.full((6,), -1, dtype=torch.int32, device=device),
+            graph_device=device,
+            token_q_num=6,
+            max_seqlen_q=2,
+            max_seqlen_k=9,
+        )
+        prefill_ptr = fmha_params.prefill_seqlen_k_int32.data_ptr()
+        block_ids = torch.zeros(3, 2, dtype=torch.int32, device=device)
+        attn_inputs = SimpleNamespace(
+            input_lengths=torch.tensor([2, 1, 0], dtype=torch.int32),
+            prefix_lengths=torch.tensor([5, 6, 7], dtype=torch.int32),
+            kv_cache_kernel_block_id_device=block_ids,
+        )
+
+        wrapper = object.__new__(AiterPrefillImplPaged)
+        wrapper._refresh_prefill_fmha_params_for_cuda_graph(fmha_params, attn_inputs)
+        op.prepare_cuda_graph(fmha_params, attn_inputs)
+
+        self.assertEqual(fmha_params.prefill_seqlen_k_int32.data_ptr(), prefill_ptr)
+        self.assertEqual(fmha_params.cu_seqlens_q.cpu().tolist(), [0, 2, 3, 3])
+        self.assertEqual(fmha_params.cu_seqlens_k.cpu().tolist(), [0, 7, 14, 21])
+        self.assertEqual(fmha_params.prefill_seqlen_k_int32.cpu().tolist(), [7, 7, 7])
+        self.assertEqual(fmha_params.max_seqlen_q, 2)
+        self.assertEqual(fmha_params.max_seqlen_k, 7)
+        self.assertEqual(fmha_params.token_q_num, 3)
+        self.assertEqual(fmha_params.token_kv_num, 21)
+        self.assertEqual(
+            fmha_params.kv_cache_block_id_device.data_ptr(), block_ids.data_ptr()
+        )
+        self.assertEqual(fmha_params.compact_indices.cpu().tolist(), [0, 1, 3, 0, 0, 0])
+
+    def test_triton_paged_attention_requires_caller_scale_when_kv_scale_base_exists(
+        self,
+    ):
+        query = torch.empty(1, 1, 8, dtype=torch.float16)
+        paged_kv_cache = torch.empty(1, 2, 1, 16, 8, dtype=torch.float16)
+        kv_scale_base = torch.empty(1, dtype=torch.float32)
+        seq_lens = torch.ones(1, dtype=torch.int32)
+        block_tables = torch.zeros(1, 1, dtype=torch.int32)
+
+        with self.assertRaisesRegex(ValueError, "kv_scale_buf.*required"):
+            _run_triton_paged_attention(
+                query=query,
+                paged_kv_cache=paged_kv_cache,
+                kv_scale_base=kv_scale_base,
+                num_seqs=1,
+                query_length=1,
+                seq_lens=seq_lens,
+                block_tables_id_device=block_tables,
+                max_seq_len=1,
+                num_kv_heads=1,
+                context_partition_size=256,
+                kv_scale_buf=None,
+            )
+
+    def test_triton_paged_attention_allows_empty_kv_scale_base_without_scale_buffer(
+        self,
+    ):
+        from unittest.mock import patch
+
+        query = torch.empty(1, 1, 8, dtype=torch.float16)
+        paged_kv_cache = torch.empty(1, 2, 1, 16, 8, dtype=torch.float16)
+        kv_scale_base = torch.empty(0, dtype=torch.float32)
+        seq_lens = torch.ones(1, dtype=torch.int32)
+        block_tables = torch.zeros(1, 1, dtype=torch.int32)
+
+        kernel_path = (
+            "rtp_llm.models_py.modules.factory.attention.rocm_impl.aiter."
+            "pa_decode_gluon_aot"
+        )
+        with patch(kernel_path) as kernel:
+            _run_triton_paged_attention(
+                query=query,
+                paged_kv_cache=paged_kv_cache,
+                kv_scale_base=kv_scale_base,
+                num_seqs=1,
+                query_length=1,
+                seq_lens=seq_lens,
+                block_tables_id_device=block_tables,
+                max_seq_len=1,
+                num_kv_heads=1,
+                context_partition_size=256,
+                kv_scale_buf=None,
+            )
+
+        self.assertIsNone(kernel.call_args.kwargs["key_scale"])
+        self.assertIsNone(kernel.call_args.kwargs["value_scale"])
 
 
 @unittest.skipUnless(_OPS_IMPORTABLE, "Requires AiterPrefillAttnOp module")
