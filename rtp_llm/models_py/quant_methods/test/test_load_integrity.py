@@ -147,6 +147,43 @@ class TestWeightMapperStreaming(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "LoRA TP slice.*divisible"):
             _tp_slice(torch.zeros(5, 4), tp_size=2, tp_rank=0, rule=(0, "split"))
 
+    def test_scratch_ep_filter_expands_stacked_moe_to_local_experts(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = os.path.join(tmpdir, "stacked.pt")
+            gate_up = torch.arange(4 * 2 * 3, dtype=torch.float32).reshape(4, 2, 3)
+            down = torch.arange(4 * 3 * 2, dtype=torch.float32).reshape(4, 3, 2)
+            gate_scale = torch.arange(4 * 2, dtype=torch.float32).reshape(4, 2)
+            torch.save(
+                {
+                    "model.layers.0.mlp.experts.gate_up_proj": gate_up,
+                    "model.layers.0.mlp.experts.down_proj": down,
+                    "model.layers.0.mlp.experts.gate_up_proj.weight_scale_inv": gate_scale,
+                    "model.layers.0.input_layernorm.weight": torch.ones(2),
+                },
+                path,
+            )
+            ep_filter = _create_ep_filter(ep_size=2, ep_rank=1, num_experts=4)
+            loaded = list(_get_all_weights([path], device="cpu", name_filter=ep_filter))
+
+        self.assertEqual(
+            [name for name, _ in loaded],
+            [
+                "model.layers.0.mlp.experts.2.gate_up_proj.weight",
+                "model.layers.0.mlp.experts.3.gate_up_proj.weight",
+                "model.layers.0.mlp.experts.2.down_proj.weight",
+                "model.layers.0.mlp.experts.3.down_proj.weight",
+                "model.layers.0.mlp.experts.2.gate_up_proj.weight_scale_inv",
+                "model.layers.0.mlp.experts.3.gate_up_proj.weight_scale_inv",
+                "model.layers.0.input_layernorm.weight",
+            ],
+        )
+        torch.testing.assert_close(loaded[0][1], gate_up[2])
+        torch.testing.assert_close(loaded[1][1], gate_up[3])
+        torch.testing.assert_close(loaded[2][1], down[2])
+        torch.testing.assert_close(loaded[3][1], down[3])
+        torch.testing.assert_close(loaded[4][1], gate_scale[2])
+        torch.testing.assert_close(loaded[5][1], gate_scale[3])
+
 
 
     def test_fastsafetensors_path_normalizes_stacked_moe_names_before_load(self):
@@ -193,6 +230,69 @@ class TestWeightMapperStreaming(unittest.TestCase):
                 "model.layers.0.mlp.experts.0.down_proj.weight",
             ],
         )
+
+    def test_fastsafetensors_path_ep_filters_stacked_moe_before_load(self):
+        class CaptureModel(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.loaded = []
+
+            def to_empty(self, device):
+                return self
+
+            def load_weights(self, weights_iter):
+                self.loaded = list(weights_iter)
+
+        model = CaptureModel()
+        config = types.SimpleNamespace(model_type="dummy", num_layers=1, expert_num=4)
+        loader = NewModelLoader(
+            config,
+            LoadConfig(
+                compute_dtype=torch.float32,
+                device="cpu",
+                load_method="fastsafetensors",
+                ep_size=2,
+                ep_rank=1,
+            ),
+            model_path="/tmp/nonexistent",
+            device="cpu",
+        )
+        gate_up = torch.arange(4 * 2 * 3, dtype=torch.float32).reshape(4, 2, 3)
+        down = torch.arange(4 * 3 * 2, dtype=torch.float32).reshape(4, 3, 2)
+        gate_scale = torch.arange(4 * 2, dtype=torch.float32).reshape(4, 2)
+        with mock.patch.object(loader, "_create_model", return_value=model), \
+             mock.patch.object(loader, "_discover_ckpt_files_cached", return_value=["dummy.safetensors"]), \
+             mock.patch.object(loader, "_run_post_load_hooks", return_value=None), \
+             mock.patch.object(loader, "_log_peak_gpu_memory", return_value=None), \
+             mock.patch(
+                 "rtp_llm.models_py.model_loader._get_fastsafetensors_weights",
+                 return_value=iter(
+                     [
+                         ("model.layers.0.mlp.experts.gate_up_proj", gate_up),
+                         ("model.layers.0.mlp.experts.down_proj", down),
+                         ("model.layers.0.mlp.experts.gate_up_proj.weight_scale_inv", gate_scale),
+                     ]
+                 ),
+             ):
+            loaded_model = loader._load_via_fastsafetensors()
+        self.assertIs(loaded_model, model)
+        self.assertEqual(
+            [name for name, _ in model.loaded],
+            [
+                "model.layers.0.mlp.experts.2.gate_up_proj.weight",
+                "model.layers.0.mlp.experts.3.gate_up_proj.weight",
+                "model.layers.0.mlp.experts.2.down_proj.weight",
+                "model.layers.0.mlp.experts.3.down_proj.weight",
+                "model.layers.0.mlp.experts.2.gate_up_proj.weight_scale_inv",
+                "model.layers.0.mlp.experts.3.gate_up_proj.weight_scale_inv",
+            ],
+        )
+        torch.testing.assert_close(model.loaded[0][1], gate_up[2])
+        torch.testing.assert_close(model.loaded[1][1], gate_up[3])
+        torch.testing.assert_close(model.loaded[2][1], down[2])
+        torch.testing.assert_close(model.loaded[3][1], down[3])
+        torch.testing.assert_close(model.loaded[4][1], gate_scale[2])
+        torch.testing.assert_close(model.loaded[5][1], gate_scale[3])
 
     def test_load_config_device_cpu_is_used_by_scratch_loader(self):
         class CaptureModel(torch.nn.Module):

@@ -166,6 +166,14 @@ def _get_all_weights(
     def _should_load(name: str) -> bool:
         return name_filter is None or name_filter.should_load(name)
 
+    def _emit_filtered_item(
+        name: str, tensor: torch.Tensor
+    ) -> Iterator[Tuple[str, torch.Tensor]]:
+        if name_filter is not None and hasattr(name_filter, "filter_item"):
+            yield from name_filter.filter_item(name, tensor)
+        else:
+            yield name, tensor
+
     count = 0
     skipped = 0
     for ckpt_file in ckpt_files:
@@ -190,7 +198,7 @@ def _get_all_weights(
                             tensor.dtype,
                             skipped,
                         )
-                    yield name, tensor
+                    yield from _emit_filtered_item(name, tensor)
             logger.info(
                 "Scanned checkpoint file: %s yielded=%d skipped=%d",
                 ckpt_file,
@@ -225,7 +233,7 @@ def _get_all_weights(
                         tensor.dtype,
                         skipped,
                     )
-                yield name, tensor
+                yield from _emit_filtered_item(name, tensor)
     logger.info("Finished streaming %d weights (skipped=%d)", count, skipped)
 
 
@@ -352,6 +360,10 @@ def _normalize_fastsafetensors_stacked_moe_weights(
 
 
 _EP_EXPERT_RE = re.compile(r"experts\.(\d+)\.")
+_STACKED_EP_RE = re.compile(
+    r"^(?P<prefix>.*\.experts)\.(?P<proj>gate_up_proj|down_proj)"
+    r"(?:\.(?P<param>[^.]+))?$"
+)
 
 
 class _ExpertRangeFilter:
@@ -371,10 +383,42 @@ class _ExpertRangeFilter:
         self, weights_iter: Iterator[Tuple[str, torch.Tensor]]
     ) -> Iterator[Tuple[str, torch.Tensor]]:
         for name, tensor in weights_iter:
-            if self.should_load(name):
-                yield name, tensor
+            yield from self.filter_item(name, tensor)
+
+    def filter_item(
+        self, name: str, tensor: torch.Tensor
+    ) -> Iterator[Tuple[str, torch.Tensor]]:
+        stacked = _STACKED_EP_RE.match(name)
+        if stacked is not None:
+            yield from self._split_stacked_experts(stacked, name, tensor)
+            return
+        if self.should_load(name):
+            yield name, tensor
+
+    def _split_stacked_experts(
+        self, match: re.Match, name: str, tensor: torch.Tensor
+    ) -> Iterator[Tuple[str, torch.Tensor]]:
+        if not hasattr(tensor, "dim") or tensor.dim() == 0:
+            raise ValueError(
+                f"EP stacked MoE tensor {name!r} must have expert dimension at dim 0"
+            )
+        if tensor.shape[0] < self.end_expert:
+            raise ValueError(
+                f"EP stacked MoE tensor {name!r} has only {tensor.shape[0]} experts, "
+                f"but this rank needs [{self.start_expert}, {self.end_expert})"
+            )
+        prefix = match.group("prefix")
+        proj = match.group("proj")
+        param = match.group("param") or "weight"
+        for expert_id in range(self.start_expert, self.end_expert):
+            yield (
+                f"{prefix}.{expert_id}.{proj}.{param}",
+                tensor.select(0, expert_id).contiguous(),
+            )
 
     def should_load(self, name: str) -> bool:
+        if _STACKED_EP_RE.match(name) is not None:
+            return True
         m = _EP_EXPERT_RE.search(name)
         if m is None:
             # Not an expert-scoped weight (e.g. shared attn / norm); keep.
@@ -767,11 +811,15 @@ class NewModelLoader:
         ep_rank = getattr(self.load_config, "ep_rank", 0)
         if ep_size <= 1:
             return None
-        # Single source of truth: model_config.expert_num. Same convention as
-        # the legacy loader (model_loader/ffn_weight.py) and every MoE executor
-        # under models_py/modules/factory/fused_moe/. dense models lack this
-        # attr, getattr default 0 short-circuits _create_ep_filter to a no-op.
-        num_experts = getattr(self.model_config, "expert_num", 0)
+        # Prefer model_config.expert_num, matching the legacy loader and MoE
+        # executors. Accept num_experts as a compatibility alias for lightweight
+        # configs/tests that use HF-style naming. Dense models lack both attrs
+        # and short-circuit to a no-op filter.
+        num_experts = getattr(
+            self.model_config,
+            "expert_num",
+            getattr(self.model_config, "num_experts", 0),
+        )
         if num_experts == 0:
             return None
         return _create_ep_filter(ep_size, ep_rank, num_experts)
