@@ -458,13 +458,13 @@ TEST_F(SamplerTest, testZeroThinkBudgetMasksThinkEndTokenWithoutBeginTokenConfig
     EXPECT_EQ(0, sampler_inputs.logits[0][271].item<float>());
 }
 
-TEST_F(SamplerTest, testThinkingBudgetEnforceStartsAfterReasoningBudget) {
+TEST_F(SamplerTest, testThinkingBudgetIncludesThinkTags) {
     SamplerDataBuilder builder;
 
     auto generate_input                                    = std::make_shared<GenerateInput>();
     generate_input->generate_config                        = std::make_shared<GenerateConfig>();
     generate_input->generate_config->in_think_mode         = true;
-    generate_input->generate_config->max_thinking_tokens   = 3;
+    generate_input->generate_config->max_thinking_tokens   = 4;
     generate_input->generate_config->begin_think_token_ids = {7};
     generate_input->generate_config->end_think_token_ids   = {8, 9};
     generate_input->input_ids                              = torch::tensor({1, 2}, torch::kInt32);
@@ -474,7 +474,7 @@ TEST_F(SamplerTest, testThinkingBudgetEnforceStartsAfterReasoningBudget) {
 
     SamplerInputs sampler_inputs    = builder.allocate({1, 16, 8}, {processor}, {1});
     sampler_inputs.input_lengths    = torch::tensor({2}, torch::kInt32);
-    sampler_inputs.sequence_lengths = torch::tensor({4}, torch::kInt32);
+    sampler_inputs.sequence_lengths = torch::tensor({2}, torch::kInt32);
     processor->process(sampler_inputs, 0, 1);
 
     float neg_inf = -std::numeric_limits<float>::max();
@@ -484,7 +484,7 @@ TEST_F(SamplerTest, testThinkingBudgetEnforceStartsAfterReasoningBudget) {
 
     SamplerInputs enforce_inputs    = builder.allocate({1, 16, 8}, {processor}, {1});
     enforce_inputs.input_lengths    = torch::tensor({2}, torch::kInt32);
-    enforce_inputs.sequence_lengths = torch::tensor({5}, torch::kInt32);
+    enforce_inputs.sequence_lengths = torch::tensor({3}, torch::kInt32);
     processor->process(enforce_inputs, 0, 1);
 
     EXPECT_EQ(neg_inf, enforce_inputs.logits[0][7].item<float>());
@@ -536,7 +536,7 @@ TEST_F(SamplerTest, testForcedMultiTokenThinkEndAdvancesBeforeAsyncStatusUpdate)
 
     SamplerInputs first_inputs    = builder.allocate({1, 16, 8}, {processor}, {1});
     first_inputs.input_lengths    = torch::tensor({2}, torch::kInt32);
-    first_inputs.sequence_lengths = torch::tensor({5}, torch::kInt32);
+    first_inputs.sequence_lengths = torch::tensor({3}, torch::kInt32);
     processor->process(first_inputs, 0, 1);
 
     float neg_inf = -std::numeric_limits<float>::max();
@@ -545,7 +545,7 @@ TEST_F(SamplerTest, testForcedMultiTokenThinkEndAdvancesBeforeAsyncStatusUpdate)
 
     SamplerInputs second_inputs    = builder.allocate({1, 16, 8}, {processor}, {1});
     second_inputs.input_lengths    = torch::tensor({2}, torch::kInt32);
-    second_inputs.sequence_lengths = torch::tensor({6}, torch::kInt32);
+    second_inputs.sequence_lengths = torch::tensor({4}, torch::kInt32);
     processor->process(second_inputs, 0, 1);
 
     EXPECT_EQ(neg_inf, second_inputs.logits[0][8].item<float>());

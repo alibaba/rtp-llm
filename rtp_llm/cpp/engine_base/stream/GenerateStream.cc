@@ -703,17 +703,16 @@ size_t GenerateStream::maxTokenNum() const {
     const auto& config              = generate_input_->generate_config;
     int64_t     output_token_budget = config->max_new_tokens;
     if (maxTokensExcludeThinking() && config->in_think_mode && config->max_thinking_tokens > 0) {
-        int64_t think_output_budget = config->max_thinking_tokens + config->end_think_token_ids.size();
+        int64_t think_output_budget = config->max_thinking_tokens;
         for (const auto& processor : logits_processor_list_) {
-            auto think_processor = std::dynamic_pointer_cast<ThinkModeLogitsProcessor>(processor);
-            if (think_processor == nullptr) {
+            if (processor == nullptr) {
                 continue;
             }
-            const auto finished_think_len = think_processor->finishedThinkOutputLen();
+            const auto finished_think_len = processor->finishedThinkOutputLen();
             if (finished_think_len >= 0) {
                 think_output_budget = std::min<int64_t>(think_output_budget, finished_think_len);
+                break;
             }
-            break;
         }
         output_token_budget += think_output_budget;
     }

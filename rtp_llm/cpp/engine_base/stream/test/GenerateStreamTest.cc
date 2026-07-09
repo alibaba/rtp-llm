@@ -114,16 +114,17 @@ TEST_F(GenerateStreamTest, testGenerateStreamReuseCacheMethod) {
 }
 
 TEST_F(GenerateStreamTest, testMaxTokenNumExcludesThinkingTokens) {
-    auto builder                  = GenerateStreamBuilder();
-    auto config                   = std::make_shared<GenerateConfig>();
+    autil::EnvGuard guard("RTP_LLM_MAX_TOKENS_EXCLUDE_THINKING", "true");
+    auto            builder       = GenerateStreamBuilder();
+    auto            config        = std::make_shared<GenerateConfig>();
     config->max_new_tokens        = 1;
     config->in_think_mode         = true;
-    config->max_thinking_tokens   = 3;
+    config->max_thinking_tokens   = 5;
     config->begin_think_token_ids = {7};
     config->end_think_token_ids   = {8, 9};
     auto stream                   = builder.createContextStream({1, 2}, config);
 
-    ASSERT_EQ(stream->maxTokenNum(), 8);
+    ASSERT_EQ(stream->maxTokenNum(), 7);
 
     auto processors = stream->getAllLogitsProcessorPtr();
     ASSERT_FALSE(processors.empty());

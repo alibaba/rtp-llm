@@ -3,7 +3,9 @@
 #include "rtp_llm/cpp/models/logits_processor/BaseLogitsProcessor.h"
 #include "rtp_llm/cpp/models/logits_processor/DFAUtil.h"
 #include "rtp_llm/cpp/models/logits_processor/SpecLogitsProcessor.h"
+#include <algorithm>
 #include <atomic>
+#include <cstdint>
 #include <memory>
 #include <mutex>
 
@@ -15,6 +17,23 @@ enum class ThinkProcessState {
     CLOSING_THINK,
     AFTER_THINK,
 };
+
+inline int64_t thinkBodyTokenBudget(int max_thinking_tokens, size_t begin_tag_tokens, size_t end_tag_tokens) {
+    if (max_thinking_tokens <= 0) {
+        return 0;
+    }
+    return std::max<int64_t>(0,
+                             static_cast<int64_t>(max_thinking_tokens) - static_cast<int64_t>(begin_tag_tokens)
+                                 - static_cast<int64_t>(end_tag_tokens));
+}
+
+inline int64_t thinkGeneratedTokenBudget(int max_thinking_tokens, size_t begin_tag_tokens, size_t end_tag_tokens) {
+    if (max_thinking_tokens <= 0) {
+        return 0;
+    }
+    const int64_t generated_budget = static_cast<int64_t>(max_thinking_tokens) - static_cast<int64_t>(begin_tag_tokens);
+    return std::max<int64_t>(static_cast<int64_t>(end_tag_tokens), generated_budget);
+}
 
 struct StreamThinkInfo {
     bool                                           in_think_mode;
@@ -50,6 +69,24 @@ struct StreamThinkInfo {
         if (think_mode && max_thinking_tokens > 0 && dfa_ptr) {
             process_state = ThinkProcessState::IN_THINK;
         }
+    }
+
+    int64_t bodyTokenBudget() const {
+        return thinkBodyTokenBudget(max_thinking_tokens, begin_think_token_ids.size(), end_think_token_ids.size());
+    }
+
+    void markAfterThink() {
+        process_state = ThinkProcessState::AFTER_THINK;
+        if (think_output_length < 0) {
+            think_output_length = current_output_length;
+        }
+    }
+
+    int64_t finishedThinkOutputLen() const {
+        if (process_state != ThinkProcessState::AFTER_THINK) {
+            return -1;
+        }
+        return think_output_length >= 0 ? think_output_length : current_output_length;
     }
 
     StreamThinkInfo copy() const {
@@ -95,7 +132,7 @@ public:
     int     tryAcceptAndFillBitmask(const SpecLogitsProcessorRequest& request) override;
     bool    isStateful() const override;
     int64_t acceptedTokenLen() const override;
-    int64_t finishedThinkOutputLen() const;
+    int64_t finishedThinkOutputLen() const override;
 
 private:
     bool forceThinkEndToken(const torch::Tensor& new_tokens_logits, StreamThinkInfo& info, size_t vocab_size);
