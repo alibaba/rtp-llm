@@ -69,6 +69,13 @@ class TestPrepareConfig(unittest.TestCase):
         self.assertEqual(config.max_concurrency, 8)
         self.assertIsNone(config.test_config)
 
+    def test_grid_mode_explicit_max_seq_len_preserved(self):
+        with patch.object(sys, "argv", ["prog", "--max_seq_len", "409600"]):
+            args = _make_args(input_len="128", max_seq_len=409600)
+            config = _prepare_config(args, [])
+
+        self.assertEqual(config.max_seq_len, 409600)
+
     def test_grid_mode_auto_bs(self):
         with patch.object(sys, "argv", ["prog"]):
             args = _make_args(concurrency_limit=32)
