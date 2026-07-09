@@ -5,7 +5,7 @@
 namespace rtp_llm {
 
 TEST(DecodeTokenTraceLoggerTest, defaultConfigIsDisabled) {
-    auto config = DecodeTokenTraceConfig::fromValues(false, "", "", true, 16, false, "", 128, 4);
+    auto config = DecodeTokenTraceConfig::fromValues(false, "", "", true, 16, false, "", 128, 4, 128);
 
     EXPECT_FALSE(config.enabled);
     EXPECT_FALSE(config.bad_watch_enabled);
@@ -14,7 +14,7 @@ TEST(DecodeTokenTraceLoggerTest, defaultConfigIsDisabled) {
 
 TEST(DecodeTokenTraceLoggerTest, commaSeparatedFiltersMatchBySubstring) {
     auto config =
-        DecodeTokenTraceConfig::fromValues(true, "test3_bad_0040, test3_bad_0055", "", true, 16, false, "", 128, 4);
+        DecodeTokenTraceConfig::fromValues(true, "test3_bad_0040, test3_bad_0055", "", true, 16, false, "", 128, 4, 128);
 
     EXPECT_TRUE(config.matches("prefix_seq000375_test3_bad_0055_src"));
     EXPECT_TRUE(config.matches("prefix_seq001576_test3_bad_0040_src"));
@@ -22,19 +22,20 @@ TEST(DecodeTokenTraceLoggerTest, commaSeparatedFiltersMatchBySubstring) {
 }
 
 TEST(DecodeTokenTraceLoggerTest, emptyFilterMatchesAllWhenEnabled) {
-    auto config = DecodeTokenTraceConfig::fromValues(true, "", "", true, 16, false, "", 128, 4);
+    auto config = DecodeTokenTraceConfig::fromValues(true, "", "", true, 16, false, "", 128, 4, 128);
 
     EXPECT_TRUE(config.matches("any_trace"));
     EXPECT_TRUE(config.matches(""));
 }
 
 TEST(DecodeTokenTraceLoggerTest, badWatchConfigClampsMinimums) {
-    auto config = DecodeTokenTraceConfig::fromValues(false, "", "", true, 16, true, "/tmp/watch.jsonl", 1, 1);
+    auto config = DecodeTokenTraceConfig::fromValues(false, "", "", true, 16, true, "/tmp/watch.jsonl", 1, 1, -1);
 
     EXPECT_TRUE(config.bad_watch_enabled);
     EXPECT_EQ("/tmp/watch.jsonl", config.bad_watch_output_path);
     EXPECT_EQ(16, config.bad_watch_tail_size);
     EXPECT_EQ(2, config.bad_watch_min_cf);
+    EXPECT_EQ(0, config.bad_watch_history_size);
 }
 
 TEST(DecodeTokenTraceLoggerTest, jsonEscapeHandlesControlCharacters) {

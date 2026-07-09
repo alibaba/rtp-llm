@@ -18,6 +18,7 @@ struct DecodeTokenTraceConfig {
     std::string              bad_watch_output_path;
     int                      bad_watch_tail_size  = 128;
     int                      bad_watch_min_cf     = 4;
+    int                      bad_watch_history_size = 128;
 
     static DecodeTokenTraceConfig fromEnv();
     static DecodeTokenTraceConfig fromValues(bool               enabled,
@@ -28,7 +29,8 @@ struct DecodeTokenTraceConfig {
                                              bool               bad_watch_enabled,
                                              const std::string& bad_watch_output_path,
                                              int                bad_watch_tail_size,
-                                             int                bad_watch_min_cf);
+                                             int                bad_watch_min_cf,
+                                             int                bad_watch_history_size);
 
     bool matches(const std::string& trace_id) const;
 };

@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstdlib>
+#include <deque>
 #include <fstream>
 #include <mutex>
 #include <unordered_map>
@@ -9,6 +10,7 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
+#include <utility>
 
 #include "autil/TimeUtility.h"
 
@@ -166,11 +168,28 @@ void appendIntVector(std::ostream& os, const std::vector<int>& values) {
     os << "]";
 }
 
+struct WatchStep {
+    int              total_decode_batch_size  = 0;
+    int              total_context_batch_size = 0;
+    int              seq_len                  = 0;
+    int              output_len               = 0;
+    int              iter_count               = 0;
+    int              current_batch_size       = 0;
+    int              next_batch_size          = 0;
+    int              read_logical_block       = -1;
+    int              write_logical_block      = -1;
+    int              cf_total                 = 0;
+    std::vector<int> new_tokens;
+    std::vector<int> read_blocks;
+    std::vector<int> write_blocks;
+};
+
 struct WatchState {
-    std::vector<int> token_tail;
-    bool             triggered      = false;
-    int              cf_total       = 0;
-    size_t           cf_match_index = 0;
+    std::vector<int>   token_tail;
+    std::deque<WatchStep> history;
+    bool               triggered      = false;
+    int                cf_total       = 0;
+    size_t             cf_match_index = 0;
 };
 
 std::unordered_map<std::string, WatchState>& watchStates() {
@@ -301,6 +320,49 @@ void appendBlockGroups(std::ostream& os,
     os << "]";
 }
 
+std::vector<int> collectGroupBlocksAt(const GenerateStreamPtr& stream, int logical_block) {
+    std::vector<int> result;
+    if (logical_block < 0 || stream->curBlocksNum() <= 0) {
+        return result;
+    }
+    const auto& kv_cache   = stream->kvCache();
+    const int   group_nums = kv_cache.groupNums();
+    result.reserve(group_nums);
+    for (int group_id = 0; group_id < group_nums; ++group_id) {
+        const auto& blocks = kv_cache.blocks(0, group_id);
+        result.push_back(logical_block < static_cast<int>(blocks.size()) ? blocks[logical_block] : -999999);
+    }
+    return result;
+}
+
+void appendWatchHistory(std::ostream& os, const std::deque<WatchStep>& history) {
+    os << "[";
+    for (size_t i = 0; i < history.size(); ++i) {
+        if (i) {
+            os << ",";
+        }
+        const auto& step = history[i];
+        os << "{\"total_decode_batch_size\":" << step.total_decode_batch_size
+           << ",\"total_context_batch_size\":" << step.total_context_batch_size
+           << ",\"seq_len\":" << step.seq_len
+           << ",\"output_len\":" << step.output_len
+           << ",\"iter_count\":" << step.iter_count
+           << ",\"current_batch_size\":" << step.current_batch_size
+           << ",\"next_batch_size\":" << step.next_batch_size
+           << ",\"read_logical_block\":" << step.read_logical_block
+           << ",\"write_logical_block\":" << step.write_logical_block
+           << ",\"cf_total\":" << step.cf_total
+           << ",\"new_tokens\":";
+        appendIntVector(os, step.new_tokens);
+        os << ",\"read_blocks\":";
+        appendIntVector(os, step.read_blocks);
+        os << ",\"write_blocks\":";
+        appendIntVector(os, step.write_blocks);
+        os << "}";
+    }
+    os << "]";
+}
+
 }  // namespace
 
 DecodeTokenTraceConfig DecodeTokenTraceConfig::fromValues(bool               enabled,
@@ -311,7 +373,8 @@ DecodeTokenTraceConfig DecodeTokenTraceConfig::fromValues(bool               ena
                                                           bool               bad_watch_enabled,
                                                           const std::string& bad_watch_output_path,
                                                           int                bad_watch_tail_size,
-                                                          int                bad_watch_min_cf) {
+                                                          int                bad_watch_min_cf,
+                                                          int                bad_watch_history_size) {
     DecodeTokenTraceConfig cfg;
     cfg.enabled              = enabled;
     cfg.filters              = splitCsv(filter_csv);
@@ -322,6 +385,7 @@ DecodeTokenTraceConfig DecodeTokenTraceConfig::fromValues(bool               ena
     cfg.bad_watch_output_path = bad_watch_output_path;
     cfg.bad_watch_tail_size  = std::max(16, bad_watch_tail_size);
     cfg.bad_watch_min_cf     = std::max(2, bad_watch_min_cf);
+    cfg.bad_watch_history_size = std::max(0, bad_watch_history_size);
     return cfg;
 }
 
@@ -334,7 +398,8 @@ DecodeTokenTraceConfig DecodeTokenTraceConfig::fromEnv() {
                       getenvBool("RTPLLM_DECODE_BAD_WATCH", false),
                       defaultBadWatchOutputPath(),
                       getenvInt("RTPLLM_DECODE_BAD_WATCH_TAIL_SIZE", 128),
-                      getenvInt("RTPLLM_DECODE_BAD_WATCH_MIN_CF", 4));
+                      getenvInt("RTPLLM_DECODE_BAD_WATCH_MIN_CF", 4),
+                      getenvInt("RTPLLM_DECODE_BAD_WATCH_HISTORY_SIZE", 128));
 }
 
 bool DecodeTokenTraceConfig::matches(const std::string& trace_id) const {
@@ -431,13 +496,33 @@ void DecodeTokenTraceLogger::logDispatchBatch(const StreamGroups&   stream_group
             const int cf_count = countSubsequence(state.token_tail, cf_pattern);
             const bool repeated_suffix = hasRepeatedSuffix(state.token_tail, 8, 8);
             const bool cf_total_repeat = state.cf_total >= cfg.bad_watch_min_cf;
+            const int seq_size_per_block =
+                stream->seqSizePerBlock() > 0 ? stream->seqSizePerBlock() : std::max(1, stream->seqLength());
+            const int read_logical_block =
+                stream->seqLength() > 0 ? (stream->seqLength() - 1) / seq_size_per_block : -1;
+            const int write_logical_block = stream->seqLength() / seq_size_per_block;
+            if (cfg.bad_watch_history_size > 0) {
+                WatchStep step;
+                step.total_decode_batch_size  = stream_groups.totalDecodeBatchSize();
+                step.total_context_batch_size = stream_groups.totalContextBatchSize();
+                step.seq_len                  = stream->seqLength();
+                step.output_len               = stream->outputTokenLen();
+                step.iter_count               = stream->iterCount();
+                step.current_batch_size       = cur_bs;
+                step.next_batch_size          = next_bs;
+                step.read_logical_block       = read_logical_block;
+                step.write_logical_block      = write_logical_block;
+                step.cf_total                 = state.cf_total;
+                step.new_tokens               = new_tokens;
+                step.read_blocks              = collectGroupBlocksAt(stream, read_logical_block);
+                step.write_blocks             = collectGroupBlocksAt(stream, write_logical_block);
+                state.history.push_back(std::move(step));
+                while (static_cast<int>(state.history.size()) > cfg.bad_watch_history_size) {
+                    state.history.pop_front();
+                }
+            }
             if (!state.triggered && (cf_total_repeat || cf_count >= cfg.bad_watch_min_cf || repeated_suffix)) {
                 state.triggered = true;
-                const int seq_size_per_block =
-                    stream->seqSizePerBlock() > 0 ? stream->seqSizePerBlock() : std::max(1, stream->seqLength());
-                const int read_logical_block =
-                    stream->seqLength() > 0 ? (stream->seqLength() - 1) / seq_size_per_block : -1;
-                const int write_logical_block = stream->seqLength() / seq_size_per_block;
                 std::ostringstream watch_row;
                 watch_row << "{\"ts_us\":" << autil::TimeUtility::currentTimeInMicroSeconds()
                           << ",\"pid\":" << ::getpid() << ",\"rank\":\"" << jsonEscape(rankString())
@@ -475,6 +560,8 @@ void DecodeTokenTraceLogger::logDispatchBatch(const StreamGroups&   stream_group
                 }
                 watch_row << ",\"token_tail\":";
                 appendIntVector(watch_row, state.token_tail);
+                watch_row << ",\"history\":";
+                appendWatchHistory(watch_row, state.history);
                 watch_row << ",\"kv_groups\":";
                 appendBlockGroups(watch_row, stream, cfg.max_blocks_per_group, read_logical_block, write_logical_block);
                 watch_row << "}";
