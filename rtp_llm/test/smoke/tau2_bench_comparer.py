@@ -32,9 +32,12 @@ def _safe_extractall(tar: tarfile.TarFile, dest_dir: str) -> None:
     """Path-traversal-safe extraction for Python runtimes without tarfile's
     ``data`` filter (added in 3.12, backported to 3.10.12 / 3.11.4 / 3.9.17).
 
-    The tarball is downloaded from an external URL, so reject any member (or link
-    target) that would resolve outside ``dest_dir`` (``..`` traversal / absolute
-    paths) before extracting, instead of doing an unguarded extractall.
+    The tarball is downloaded from an external URL, so approximate the ``data``
+    filter's protections rather than falling back to an unguarded extractall:
+    reject any member that resolves outside ``dest_dir`` (``..`` traversal /
+    absolute paths); allow only regular files and directories (reject symlinks,
+    hardlinks and special files such as device/fifo/char/block); and drop archive
+    ownership and setuid/setgid/sticky bits before extracting the vetted members.
     """
     dest_root = os.path.realpath(dest_dir)
 
@@ -42,17 +45,27 @@ def _safe_extractall(tar: tarfile.TarFile, dest_dir: str) -> None:
         resolved = os.path.realpath(os.path.join(dest_dir, path))
         return resolved == dest_root or resolved.startswith(dest_root + os.sep)
 
+    safe_members = []
     for member in tar.getmembers():
         if not _within(member.name):
             raise SmokeException(
                 QueryStatus.OTHERS, f"blocked unsafe path in tarball: {member.name!r}"
             )
-        if (member.islnk() or member.issym()) and not _within(member.linkname):
+        # Allow only regular files and directories; reject links and special files.
+        # This is stricter than the data filter (which permits vetted links) but
+        # avoids replicating its full link-resolution logic on old runtimes.
+        if not (member.isreg() or member.isdir()):
             raise SmokeException(
                 QueryStatus.OTHERS,
-                f"blocked unsafe link target in tarball: {member.linkname!r}",
+                f"blocked non-regular tarball member: {member.name!r} (type {member.type!r})",
             )
-    tar.extractall(path=dest_dir)
+        # Do not preserve archive ownership; strip setuid/setgid/sticky and any
+        # group/other write bits, mirroring the data filter's sanitization.
+        member.uid = member.gid = 0
+        member.uname = member.gname = ""
+        member.mode = member.mode & 0o755
+        safe_members.append(member)
+    tar.extractall(path=dest_dir, members=safe_members)
 
 
 class Tau2BenchComparer(BaseComparer):
