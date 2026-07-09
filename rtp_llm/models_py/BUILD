@@ -47,6 +47,7 @@ py_library(
     ],
     deps = [
         ":utils",
+        "//rtp_llm:utils",
         "//rtp_llm/models_py/triton_kernels:triton_kernels",
         "//rtp_llm/models_py/distributed:deepep_wrapper",
         "//rtp_llm/models_py/distributed:moriep_wrapper",
@@ -101,7 +102,10 @@ py_library(
     srcs = glob([
         "kernels/*.py",
         "kernels/**/*.py",
-    ])
+    ]),
+    deps = [
+        "//rtp_llm:utils",
+    ],
 )
 
 py_library(

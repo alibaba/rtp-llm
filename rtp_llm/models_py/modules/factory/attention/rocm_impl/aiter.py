@@ -1,12 +1,9 @@
+import importlib
 import logging
 import math
 from typing import Any, List, Optional
 
-import aiter
 import torch
-from aiter_meta.csrc.cpp_itfs.pa_gluon_aot.pa_decode_gluon_aot import (
-    pa_decode_gluon_aot,
-)
 
 from rtp_llm.models_py.modules.factory.attention import common
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import FMHAImplBase
@@ -33,6 +30,14 @@ from rtp_llm.ops.compute_ops import (
     PyAttentionInputs,
     paged_attention_atrex,
 )
+from rtp_llm.utils.aiter_jit_patch import load_aiter
+
+load_aiter()
+_attention_ops = importlib.import_module("aiter.ops.attention")
+_mha_ops = importlib.import_module("aiter.ops.mha")
+pa_decode_gluon_aot = importlib.import_module(
+    "aiter_meta.csrc.cpp_itfs.pa_gluon_aot.pa_decode_gluon_aot"
+).pa_decode_gluon_aot
 
 
 def _mrope_interleaved_supported(attn_configs: AttentionConfigs) -> bool:
@@ -473,7 +478,7 @@ class AiterPrefillAttnOp:
             cu_seqlens_q = cu_seqlens_q.to(query.device, non_blocking=True)
         if cu_seqlens_k.device != query.device:
             cu_seqlens_k = cu_seqlens_k.to(query.device, non_blocking=True)
-        res = aiter.flash_attn_varlen_func(
+        res = _mha_ops.flash_attn_varlen_func(
             query,
             key,
             value,
@@ -560,7 +565,7 @@ class AiterPrefillAttnOp:
             k_descale = self._fp8_descale
             v_descale = self._fp8_descale
 
-        res = aiter.mha_batch_prefill_func(
+        res = _mha_ops.mha_batch_prefill_func(
             q_tensor,
             k_cache,
             v_cache,
@@ -597,7 +602,7 @@ class AiterPrefillAttnOp:
             # cu_seqlens are already on GPU from FMHAParams.__init__
             cu_seqlens_q = fmha_params.cu_seqlens_q
             cu_seqlens_k = fmha_params.cu_seqlens_k
-            res = aiter.flash_attn_varlen_fp8_pertensor_func(
+            res = _mha_ops.flash_attn_varlen_fp8_pertensor_func(
                 query,
                 key,
                 value,
@@ -877,7 +882,7 @@ class AiterPrefillAttnOpPaged:
                 k_descale = torch.ones(1, dtype=torch.float32, device=device)
                 v_descale = torch.ones(1, dtype=torch.float32, device=device)
 
-        res = aiter.mha_batch_prefill_func(
+        res = _mha_ops.mha_batch_prefill_func(
             q_tensor,
             key_cache,
             value_cache,
@@ -1189,7 +1194,7 @@ class AiterDecodeAttnOpAsm(AiterDecodeAttnOpBase):
             K_QScale = kv_cache.kv_scale_base.select(1, 0)
             V_QScale = kv_cache.kv_scale_base.select(1, 1)
         out_ = self._get_output(query)
-        output = aiter.pa_fwd_asm(
+        output = _attention_ops.pa_fwd_asm(
             query,  # [num_seqs, num_heads, head_size]
             key_cache,  # [num_blocks, num_kv_heads, block_size, head_size/x, x]
             value_cache,  # [num_blocks, num_kv_heads, block_size, head_size/x, x]
@@ -1327,7 +1332,7 @@ class AiterDecodeAttnOpNonAsm(AiterDecodeAttnOpBase):
             default_scale = self._get_default_scale(query)
             k_scale = K_QScale if kv_cache and K_QScale is not None else default_scale
             v_scale = V_QScale if kv_cache and V_QScale is not None else default_scale
-            aiter.paged_attention_rocm(
+            _attention_ops.paged_attention_rocm(
                 output,
                 exp_sums,
                 max_logits,

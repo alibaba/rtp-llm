@@ -1,9 +1,8 @@
 import copy
+import importlib
 from typing import Any, Dict, Optional
 
-import aiter
 import torch
-from aiter.fused_moe import fused_moe
 
 from rtp_llm.device.device_impl import is_gfx950
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
@@ -24,13 +23,20 @@ from rtp_llm.models_py.modules.factory.fused_moe.impl.rocm._utils import (
 from rtp_llm.models_py.modules.factory.fused_moe.utils.config_resolver import (
     MoeConfigResolver,
 )
+from rtp_llm.utils.aiter_jit_patch import load_aiter
 from rtp_llm.utils.model_weight import W
 
+load_aiter()
+fused_moe = importlib.import_module("aiter.fused_moe").fused_moe
+_aiter_enum = importlib.import_module("aiter.ops.enum")
+ActivationType = _aiter_enum.ActivationType
+QuantType = _aiter_enum.QuantType
 
-def _moe_activation_type(activation: str) -> aiter.ActivationType:
+
+def _moe_activation_type(activation: str) -> ActivationType:
     if activation in ("silu", "SiGLU"):
-        return aiter.ActivationType.Silu
-    return aiter.ActivationType.Gelu
+        return ActivationType.Silu
+    return ActivationType.Gelu
 
 
 def build_ep_expert_mask(
@@ -262,7 +268,7 @@ class RocmExpertsFp8PerChannel(FusedMoeExpertExecutor):
             self.w2,
             topk_weights,
             topk_ids,
-            quant_type=aiter.QuantType.per_Token,
+            quant_type=QuantType.per_Token,
             w1_scale=self.w1_scale,
             w2_scale=self.w2_scale,
             activation=_moe_activation_type(activation),
@@ -320,6 +326,7 @@ class RocmExpertsFp8PerBlock(FusedMoeExpertExecutor):
         self.expert_mask = build_ep_expert_mask(
             self.num_experts, self.ep_rank, self.ep_size, self.w1
         )
+
     @property
     def local_num_experts(self) -> int:
         return self.w1.size(0)
@@ -374,7 +381,7 @@ class RocmExpertsFp8PerBlock(FusedMoeExpertExecutor):
             self.w2,
             topk_weights,
             topk_ids,
-            quant_type=aiter.QuantType.per_128x128,
+            quant_type=QuantType.per_128x128,
             w1_scale=self.w1_scale,
             w2_scale=self.w2_scale,
             activation=_moe_activation_type(activation),
@@ -518,7 +525,7 @@ class RocmExpertsFp4PerGroup(FusedMoeExpertExecutor):
             w2,
             topk_weights,
             topk_ids,
-            quant_type=aiter.QuantType.per_1x32,
+            quant_type=QuantType.per_1x32,
             w1_scale=self.w1_scale,
             w2_scale=self.w2_scale,
             activation=_moe_activation_type(activation),
@@ -574,7 +581,9 @@ class RocmExpertsMXFp4(FusedMoeExpertExecutor):
         self.w2_scale = weights[W.moe_s2]
 
         self.hidden_size_raw = config.hidden_size
-        self.intermediate_size_raw = config.model_config.moe_inter_size // config.tp_size
+        self.intermediate_size_raw = (
+            config.model_config.moe_inter_size // config.tp_size
+        )
         packed_factor = 2 if self.w1.dtype == torch.uint8 else 1
         self.hidden_size_padded = self.w1.size(2) * packed_factor
         self.intermediate_size_padded = self.w2.size(1)
@@ -625,7 +634,7 @@ class RocmExpertsMXFp4(FusedMoeExpertExecutor):
             ), "Only support topk=1 when `apply_router_weight_on_input` is True"
             hidden_states = hidden_states * topk_weights.to(hidden_states.dtype)
             topk_weights = torch.ones_like(topk_weights, dtype=torch.float32)
-        
+
         # view w1 and w2 to float4_e2m1fn_x2 if they are uint8
         w1 = self.w1
         w2 = self.w2
@@ -648,7 +657,7 @@ class RocmExpertsMXFp4(FusedMoeExpertExecutor):
             w2,
             topk_weights,
             topk_ids,
-            quant_type=aiter.QuantType.per_1x32,
+            quant_type=QuantType.per_1x32,
             w1_scale=self.w1_scale,
             w2_scale=self.w2_scale,
             activation=_moe_activation_type(activation),

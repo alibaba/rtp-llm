@@ -4,8 +4,10 @@ from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.models.deepseek_v2 import DeepSeekV3Mtp
 from rtp_llm.models.hybrid_kv_cache import calculate_hybrid_group_layer_num
 from rtp_llm.models.kimi_linear.kimi_linear import KimiLinear
+from rtp_llm.models.qwen2_vl import QWen2_VL
 from rtp_llm.models.qwen3_next.qwen3_next import Qwen3Next
 from rtp_llm.models.qwen3_next.qwen3_next_mtp import Qwen3NextMTP
+from rtp_llm.models.qwen3_vl import QWen3_VL
 from rtp_llm.models.qwen_v2 import QwenV2MTP
 from rtp_llm.ops import HybridAttentionType, KVCacheSpecDesc, KVCacheSpecType
 
@@ -120,6 +122,77 @@ class HybridKVCacheSpecTest(TestCase):
 
         with self.assertRaisesRegex(ValueError, "Qwen3Next requires.*true"):
             Qwen3Next._parse_rope_config({"rope_parameters": rope_parameters}, config)
+
+    def test_qwen3_vl_defaults_to_interleaved_mrope_sections(self):
+        config = ModelConfig()
+        QWen3_VL._from_config_json(
+            config,
+            {
+                "vision_start_token_id": 1,
+                "vision_end_token_id": 2,
+                "text_config": {
+                    "intermediate_size": 256,
+                    "num_attention_heads": 2,
+                    "num_key_value_heads": 1,
+                    "head_dim": 128,
+                    "hidden_size": 256,
+                    "num_hidden_layers": 2,
+                    "vocab_size": 1024,
+                    "rope_scaling": {},
+                },
+            },
+        )
+
+        rope_config = config.attn_config.rope_config
+        self.assertTrue(rope_config.mrope_interleaved)
+        self.assertEqual(rope_config.index_factor, 3)
+        self.assertEqual(
+            [
+                rope_config.mrope_dim1,
+                rope_config.mrope_dim2,
+                rope_config.mrope_dim3,
+            ],
+            [24, 20, 20],
+        )
+        self.assertEqual(
+            rope_config.mrope_dim1
+            + rope_config.mrope_dim2
+            + rope_config.mrope_dim3,
+            rope_config.dim // 2,
+        )
+
+    def test_qwen2_vl_parses_explicit_mrope_layout(self):
+        config = ModelConfig()
+        QWen2_VL._from_hf(
+            config,
+            {
+                "vocab_size": 1024,
+                "num_attention_heads": 2,
+                "num_key_value_heads": 1,
+                "hidden_size": 256,
+                "head_dim": 128,
+                "num_hidden_layers": 2,
+                "intermediate_size": 256,
+                "rms_norm_eps": 1e-6,
+                "rope_theta": 1_000_000,
+                "rope_scaling": {
+                    "mrope_section": [20, 22, 22],
+                    "mrope_interleaved": True,
+                },
+            },
+        )
+
+        rope_config = config.attn_config.rope_config
+        self.assertTrue(rope_config.mrope_interleaved)
+        self.assertEqual(rope_config.index_factor, 3)
+        self.assertEqual(
+            [
+                rope_config.mrope_dim1,
+                rope_config.mrope_dim2,
+                rope_config.mrope_dim3,
+            ],
+            [20, 22, 22],
+        )
 
     def test_kimi_linear_uses_contiguous_tags_across_hybrid_cycles(self):
         tags = self._kimi_post_build_tags(

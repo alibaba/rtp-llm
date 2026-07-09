@@ -34,6 +34,26 @@ py_test(
     ],
 )
 
+py_test(
+    name = "flash_attn_utils_test",
+    srcs = [
+        "flash_attn_utils_test.py",
+    ],
+    deps = [
+        "//rtp_llm:utils",
+    ],
+)
+
+py_test(
+    name = "aiter_jit_patch_test",
+    srcs = [
+        "aiter_jit_patch_test.py",
+    ],
+    deps = [
+        "//rtp_llm:utils",
+    ],
+)
+
 
 py_test(
     name = "util_test",
