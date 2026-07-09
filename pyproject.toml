@@ -102,6 +102,13 @@ rtp_llm = [
     "test/**/*.yml",
     "test/**/*.sh",
     "test/**/*.jinja",
+    # Multimodal tests live under rtp_llm/multimodal/test (a pytest testpath) and load fixtures
+    # such as testdata/qwen2_vl/1.jpg + preprocessor_config.json; ship them so installed-wheel
+    # test runs can find them.
+    "multimodal/test/**/*.json",
+    "multimodal/test/**/*.jpg",
+    "multimodal/test/**/*.jpeg",
+    "multimodal/test/**/*.png",
 ]
 
 # ============================================================
@@ -204,7 +211,7 @@ testpaths = [
     "rtp_llm/distribute/test",
     "rtp_llm/server",
     "rtp_llm/frontend/test",
-    "rtp_llm/models/multimodal/test",
+    "rtp_llm/multimodal/test",
     "rtp_llm/models_py",
     "rtp_llm/cpp/models",
     "rtp_llm/cpp/model_rpc/test",

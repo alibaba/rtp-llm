@@ -124,6 +124,22 @@ class BuildPackagingContractTest(TestCase):
             offenders, [], f"Public platform extras must use https:// wheel URLs:\n{offenders}"
         )
 
+    def test_pytest_testpaths_all_exist(self):
+        """Every configured pytest testpath must exist.
+
+        A stale/typo'd testpath (e.g. rtp_llm/models/multimodal/test vs the real
+        rtp_llm/multimodal/test) is silently dropped by pytest, so those tests never run in CI.
+        Assert each path resolves so such drift fails loudly at contract-test time instead.
+        """
+        with open(PROJECT_ROOT / "pyproject.toml", "rb") as f:
+            pyproject = tomllib.load(f)
+
+        testpaths = pyproject["tool"]["pytest"]["ini_options"]["testpaths"]
+        missing = [p for p in testpaths if not (PROJECT_ROOT / p).exists()]
+        self.assertEqual(
+            missing, [], f"pyproject testpaths point at non-existent directories: {missing}"
+        )
+
     def test_pytest_entry_points_are_packaged_with_tests(self):
         with open(PROJECT_ROOT / "pyproject.toml", "rb") as f:
             pyproject = tomllib.load(f)
