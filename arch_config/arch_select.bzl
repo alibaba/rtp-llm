@@ -56,11 +56,20 @@ def subscribe_deps():
 
 def whl_deps():
     return select({
+        # Kept in sync with deps/requirements_rocm.txt and requirements_lock_rocm.txt:
+        # amdsmi is served from the rtp-opensource bucket (not sinian-metrics), and
+        # fast-safetensors/fastsafetensors/torch/torchvision/triton are pinned so the
+        # ROCm wheel's install_requires matches the CI/lockfile dependency set.
         "@rtp_llm//:using_rocm": [
             "pyrsmi==0.2.0",
-            "amdsmi@https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis%2FAMD%2Famd_smi%2Fali%2Famd_smi.tar",
+            "amdsmi@https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/simple/amd-smi/amd_smi.tar",
             "aiter@https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis/AMD/aiter/aiter-0.1.17.dev79%2Bg2570b35f9.d20260623-cp310-cp310-linux_x86_64.whl",
+            "triton@https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis/AMD/triton/triton-3.7.0%2Bamd.rocm7.2.0.gitd0d77a509-cp310-cp310-linux_x86_64.whl",
             "triton-kernels@https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis/AMD/triton/triton_kernels-1.0.0%2Bamd.rocm7.2.0.gitd0d77a509-py3-none-any.whl",
+            "fast-safetensors==0.7.3+torch2.1.2.rocm",
+            "fastsafetensors==0.1.19rc5+ali",
+            "torch==2.9.1+git7e1940d",
+            "torchvision==0.24.0+rocm7.2.0.gitb919bd0c",
         ],
         # aarch64 (arm) is intentionally on torch 2.9.0 while x86 stays on 2.8.0.
         # Keep each in lock-step with its lockfile: 2.9.0 <-> requirements_lock_cuda12_arm.txt,
