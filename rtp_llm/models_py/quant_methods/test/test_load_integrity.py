@@ -88,7 +88,7 @@ from rtp_llm.models_py.model_loader import (
 from rtp_llm.models_py.new_models.bert import BertForEmbedding, RobertaForEmbedding
 from rtp_llm.models_py.module_base import RtpModule
 from rtp_llm.models_py.quant_methods.base import QuantizationConfig
-from rtp_llm.models_py.quant_methods.fp8 import Fp8LinearMethod, _runtime_fp8_dtype
+from rtp_llm.models_py.quant_methods.fp8 import Fp8LinearMethod, Fp8OnlineLinearMethod, _runtime_fp8_dtype
 from rtp_llm.models_py.quant_methods.awq_triton import awq_dequantize_triton
 from rtp_llm.utils.model_weight import W
 
@@ -1594,6 +1594,13 @@ class TestBertNewLoaderCompatibility(unittest.TestCase):
         self.assertEqual(fallback.device, model.embeddings.word_embeddings_weight.device)
         self.assertEqual(fallback.dtype, model.embeddings.word_embeddings_weight.dtype)
 
+    def test_bert_newloader_fails_fast_for_tensor_parallel_until_partitioned(self):
+        with self.assertRaisesRegex(NotImplementedError, "tensor parallel"):
+            BertForEmbedding(
+                self._bert_config(),
+                LoadConfig(compute_dtype=torch.float32, device="cpu", tp_size=2, tp_rank=0),
+            )
+
 
 class TestAwqRegistrationSafety(unittest.TestCase):
     def test_awq_reference_path_is_not_registered_for_hot_forward(self):
@@ -1623,8 +1630,10 @@ class TestFp8ForwardInputLayout(unittest.TestCase):
             }
         )
         layer.process_weights_after_loading()
-        x = torch.randn(2, 4, 3).transpose(1, 2)
+        base = torch.randn(2, 3, 8)
+        x = base[:, :, ::2]
         self.assertFalse(x.is_contiguous())
+        self.assertFalse(x.reshape(-1, x.shape[-1]).is_contiguous())
 
         def fake_quant(inp):
             self.assertEqual(inp.shape, (6, 4))
@@ -1639,6 +1648,32 @@ class TestFp8ForwardInputLayout(unittest.TestCase):
             return_value=fake_quant,
         ), mock.patch.object(torch, "_scaled_mm", side_effect=fake_scaled_mm):
             out = layer(x)
+        self.assertEqual(out.shape, (2, 3, 3))
+
+    def test_fp8_online_per_tensor_accepts_stride_slice_input(self):
+        layer = types.SimpleNamespace(
+            prefix="fp8_online_linear",
+            weight=torch.empty(3, 4, dtype=_runtime_fp8_dtype()),
+            weight_scale=torch.ones(1, dtype=torch.float32),
+        )
+        base = torch.randn(2, 3, 8)
+        x = base[:, :, ::2]
+        self.assertFalse(x.is_contiguous())
+        self.assertFalse(x.reshape(-1, x.shape[-1]).is_contiguous())
+
+        def fake_quant(inp):
+            self.assertEqual(inp.shape, (6, 4))
+            self.assertTrue(inp.is_contiguous())
+            return inp.to(_runtime_fp8_dtype()), torch.ones(1, dtype=torch.float32)
+
+        def fake_scaled_mm(a, b, **kwargs):
+            return torch.zeros(a.shape[0], b.shape[1], dtype=torch.float32)
+
+        with mock.patch(
+            "rtp_llm.models_py.quant_methods.fp8._resolve_per_tensor_quant",
+            return_value=fake_quant,
+        ), mock.patch.object(torch, "_scaled_mm", side_effect=fake_scaled_mm):
+            out = Fp8OnlineLinearMethod().apply(layer, x)
         self.assertEqual(out.shape, (2, 3, 3))
 
 

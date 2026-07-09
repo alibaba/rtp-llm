@@ -324,6 +324,8 @@ class Fp8LinearMethod(QuantizeMethodBase):
     ) -> torch.Tensor:
         out_dtype = x.dtype
         input_2d = x.reshape(-1, x.shape[-1])
+        if not input_2d.is_contiguous():
+            input_2d = input_2d.contiguous()
         out_features = layer.weight.shape[0]
         output_shape = list(x.shape[:-1]) + [out_features]
 
@@ -456,6 +458,8 @@ class Fp8OnlineLinearMethod(QuantizeMethodBase):
     ) -> torch.Tensor:
         out_dtype = x.dtype
         input_2d = x.reshape(-1, x.shape[-1])
+        if not input_2d.is_contiguous():
+            input_2d = input_2d.contiguous()
         out_features = layer.weight.shape[0]
         output_shape = list(x.shape[:-1]) + [out_features]
 

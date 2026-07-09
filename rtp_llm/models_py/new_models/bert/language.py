@@ -160,6 +160,12 @@ class _BertNewLoaderBase(nn.Module):
             self.parallelism_config.ep_rank = getattr(load_config, "ep_rank", 0)
             self.parallelism_config.world_size = max(self.parallelism_config.tp_size, 1)
             self.parallelism_config.local_world_size = self.parallelism_config.world_size
+        if int(getattr(self.parallelism_config, "tp_size", 1) or 1) != 1:
+            raise NotImplementedError(
+                f"{self.__class__.__name__} newloader does not support tensor parallel "
+                "loading yet; tp_size > 1 would require rank-local BERT weight "
+                "partitioning before rebuilding ModelWeights"
+            )
         self.model = None
         self.weights = None
         self.embeddings = _BertEmbeddingParams()
