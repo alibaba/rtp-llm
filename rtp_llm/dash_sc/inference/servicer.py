@@ -426,7 +426,10 @@ def _apply_request_overrides(
         request_max_think = other.max_new_think_tokens
     if request_max_think is not None:
         max_think = int(request_max_think)
-        generate_config.max_thinking_tokens = _INT32_MAX if max_think < 0 else max_think
+        # Unlimited think -> ``-1`` sentinel (see codec.to_generate_config). The
+        # engine adds only a *finite* think budget to ``max_new_tokens`` in
+        # ``maxTokenNum``; a huge finite value would uncap the total output.
+        generate_config.max_thinking_tokens = -1 if max_think < 0 else max_think
     # Only the selected budget disables thinking; ``max_think_length`` may
     # intentionally override a zero ``max_new_think_tokens`` alias.
     disable_by_budget = request_max_think == 0

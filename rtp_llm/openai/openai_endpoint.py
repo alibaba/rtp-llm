@@ -46,8 +46,6 @@ from rtp_llm.utils.complete_response_async_generator import (
     CompleteResponseAsyncGenerator,
 )
 
-_INT32_MAX = 2_147_483_647
-
 
 def _positive_int_or_none(value: Optional[int]) -> Optional[int]:
     if value is None:
@@ -288,8 +286,7 @@ class OpenaiEndpoint(object):
         ):
             config.max_thinking_tokens = request.extra_configs.max_thinking_tokens
         if request.thinking_budget is not None:
-            budget = int(request.thinking_budget)
-            config.max_thinking_tokens = _INT32_MAX if budget < 0 else budget
+            config.max_thinking_tokens = int(request.thinking_budget)
         if request.enable_thinking_requested() and config.max_thinking_tokens != 0:
             config.in_think_mode = True
             self._ensure_think_end_token_ids(config)
@@ -297,12 +294,14 @@ class OpenaiEndpoint(object):
             config.in_think_mode = False
             config.max_thinking_tokens = 0
         max_completion_tokens = _positive_int_or_none(request.max_completion_tokens)
-        max_tokens_cap = _positive_int_or_none(request.max_tokens)
         if max_completion_tokens is not None:
-            backend_max_new_tokens = max_completion_tokens
-            if max_tokens_cap is not None:
-                backend_max_new_tokens = min(backend_max_new_tokens, max_tokens_cap)
-            config.max_new_tokens = backend_max_new_tokens
+            if request.thinking_budget is None:
+                config.max_new_tokens = max_completion_tokens
+                config.max_thinking_tokens = -1
+            else:
+                thinking_budget = int(request.thinking_budget)
+                config.max_thinking_tokens = thinking_budget
+                config.max_new_tokens = max_completion_tokens - thinking_budget
         elif request.max_tokens != None:
             config.max_new_tokens = request.max_tokens
         if request.debug_info:
