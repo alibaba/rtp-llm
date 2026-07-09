@@ -452,6 +452,50 @@ class TestFp8MoEAlreadyQuantizedLoad(unittest.TestCase):
         torch.testing.assert_close(actual_w13[0], expected_w13, rtol=0.1, atol=0.1)
         torch.testing.assert_close(actual_w2[0], expected_w2, rtol=0.1, atol=0.1)
 
+    def test_online_per_channel_moe_uses_runtime_fp8_dtype_range(self):
+        layer = self._make_moe("fp8_per_channel_online")
+        runtime_dtype = torch.float8_e4m3fnuz
+        fp8_max = float(torch.finfo(runtime_dtype).max)
+        gate = torch.tensor(
+            [[fp8_max, fp8_max / 2, -fp8_max, 0.0]] * 4, dtype=torch.bfloat16
+        )
+        up = torch.tensor(
+            [[fp8_max / 2, -fp8_max, fp8_max / 4, 0.0]] * 4,
+            dtype=torch.bfloat16,
+        )
+        down = torch.tensor(
+            [[fp8_max, -fp8_max, fp8_max / 4, 0.0]] * 4, dtype=torch.bfloat16
+        )
+        layer.load_weights({"0.gate_proj.weight": gate})
+        layer.load_weights({"0.up_proj.weight": up})
+        layer.load_weights({"0.down_proj.weight": down})
+
+        with mock.patch.object(
+            BaseMoEExperts, "_maybe_build_fused_moe", return_value=None
+        ), mock.patch(
+            "rtp_llm.models_py.quant_methods.fp8_moe._runtime_fp8_dtype",
+            return_value=runtime_dtype,
+        ):
+            layer.process_weights_after_loading()
+
+        self.assertEqual(layer.w13.dtype, runtime_dtype)
+        self.assertEqual(layer.w2.dtype, runtime_dtype)
+        expected_w13 = torch.cat([up.float(), gate.float()], dim=0)
+        min_scale = 1.0 / (fp8_max * 512.0)
+        expected_w13_scale = (expected_w13.abs().amax(dim=1) / fp8_max).clamp_min(
+            min_scale
+        )
+        expected_w2 = down.float().t().contiguous()
+        expected_w2_scale = (expected_w2.abs().amax(dim=1) / fp8_max).clamp_min(
+            min_scale
+        )
+        torch.testing.assert_close(layer.w13_scale[0], expected_w13_scale)
+        torch.testing.assert_close(layer.w2_scale[0], expected_w2_scale)
+        deq_w13 = layer.w13.float() * layer.w13_scale.view(1, -1, 1)
+        deq_w2 = layer.w2.float() * layer.w2_scale.view(1, -1, 1)
+        torch.testing.assert_close(deq_w13, expected_w13.unsqueeze(0), rtol=0, atol=1.0)
+        torch.testing.assert_close(deq_w2, expected_w2.unsqueeze(0), rtol=0, atol=1.0)
+
     def test_online_per_tensor_moe_allows_cpu_post_load_when_force_cpu_enabled(self):
         layer = self._make_moe("fp8_online")
         layer._new_loader_force_cpu_load_weights = True

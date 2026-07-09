@@ -21,9 +21,8 @@ from rtp_llm.utils.model_weight import W
 
 logger = logging.getLogger(__name__)
 
-# 与 BaseMoEExperts 一致的 fp8 常量（也可经 layer 取，这里就近定义保持自洽）。
-_FP8_E4M3_MAX: float = 448.0
-_FP8_MIN_SCALE: float = 1.0 / (448.0 * 512.0)
+def _fp8_min_scale(fp8_max: float) -> float:
+    return 1.0 / (fp8_max * 512.0)
 
 
 def _runtime_fp8_dtype() -> torch.dtype:
@@ -48,7 +47,7 @@ def _requant_per_tensor_to_runtime_fp8(
     scale_view = scale.float().view(-1, 1, 1)
     deq = weight.float() * scale_view
     fp8_max = float(torch.finfo(runtime_dtype).max)
-    new_scale = deq.abs().amax(dim=(1, 2)).clamp_min(_FP8_MIN_SCALE) / fp8_max
+    new_scale = deq.abs().amax(dim=(1, 2)).clamp_min(_fp8_min_scale(fp8_max)) / fp8_max
     requant = (deq / new_scale.view(-1, 1, 1)).to(runtime_dtype)
     return requant.contiguous(), new_scale.to(torch.float32).contiguous()
 
@@ -66,7 +65,7 @@ def _requant_per_channel_to_runtime_fp8(
         )
     deq = weight.float() * scale.float().unsqueeze(-1)
     fp8_max = float(torch.finfo(runtime_dtype).max)
-    new_scale = deq.abs().amax(dim=2).clamp_min(_FP8_MIN_SCALE) / fp8_max
+    new_scale = deq.abs().amax(dim=2).clamp_min(_fp8_min_scale(fp8_max)) / fp8_max
     requant = (deq / new_scale.unsqueeze(-1)).to(runtime_dtype)
     return requant.contiguous(), new_scale.to(torch.float32).contiguous()
 
@@ -134,7 +133,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         deq = deq * scale.float().reshape(e, out_blocks, 1, in_blocks, 1)
         fp8_max = float(torch.finfo(runtime_dtype).max)
         new_scale = (
-            deq.abs().amax(dim=(2, 4), keepdim=True).clamp_min(_FP8_MIN_SCALE)
+            deq.abs().amax(dim=(2, 4), keepdim=True).clamp_min(_fp8_min_scale(fp8_max))
             / fp8_max
         )
         requant = (deq / new_scale).to(runtime_dtype).reshape(e, out_dim, in_dim)
@@ -461,21 +460,23 @@ class Fp8MoEMethod(FusedMoEMethodBase):
     def _online_per_channel(self, layer):
         E = layer.num_local_experts
         device = layer.w13.data.device
-        new_w13 = torch.empty_like(layer.w13.data, dtype=_runtime_fp8_dtype())
-        new_w2 = torch.empty_like(layer.w2.data, dtype=_runtime_fp8_dtype())
-        fp8_max = _FP8_E4M3_MAX
+        runtime_dtype = _runtime_fp8_dtype()
+        new_w13 = torch.empty_like(layer.w13.data, dtype=runtime_dtype)
+        new_w2 = torch.empty_like(layer.w2.data, dtype=runtime_dtype)
+        fp8_max = float(torch.finfo(runtime_dtype).max)
+        min_scale = _fp8_min_scale(fp8_max)
 
         for e in range(E):
             w13_e = layer.w13.data[e].float()
             row_max = w13_e.abs().amax(dim=1)
-            row_scale = (row_max / fp8_max).clamp_min(_FP8_MIN_SCALE)
-            new_w13[e] = (w13_e / row_scale.unsqueeze(1)).to(_runtime_fp8_dtype())
+            row_scale = (row_max / fp8_max).clamp_min(min_scale)
+            new_w13[e] = (w13_e / row_scale.unsqueeze(1)).to(runtime_dtype)
             layer.w13_scale.data[e] = row_scale
 
             w2_e = layer.w2.data[e].float()
             row_max = w2_e.abs().amax(dim=1)
-            row_scale = (row_max / fp8_max).clamp_min(_FP8_MIN_SCALE)
-            new_w2[e] = (w2_e / row_scale.unsqueeze(1)).to(_runtime_fp8_dtype())
+            row_scale = (row_max / fp8_max).clamp_min(min_scale)
+            new_w2[e] = (w2_e / row_scale.unsqueeze(1)).to(runtime_dtype)
             layer.w2_scale.data[e] = row_scale
 
         layer.w13 = nn.Parameter(new_w13.to(device), requires_grad=False)

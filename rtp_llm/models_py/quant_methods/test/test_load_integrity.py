@@ -81,6 +81,7 @@ from rtp_llm.models_py.model_loader import (
     _create_ep_filter,
     _discover_ckpt_files,
     _get_all_weights,
+    _is_quantized_load,
     _normalize_fastsafetensors_stacked_moe_weights,
     _tp_slice,
 )
@@ -602,6 +603,57 @@ class TestFastSafetensorsFallbackSemantics(unittest.TestCase):
                 ok, reason = loader._fastsafetensors_eligible()
         self.assertFalse(ok)
         self.assertEqual(reason, "insufficient GPU free memory")
+
+    def test_quantized_load_treats_empty_defaults_as_unquantized(self):
+        load_config = LoadConfig(compute_dtype=torch.float32, device="cpu")
+        for value in (None, "", "none", "None", " null "):
+            with self.subTest(value=value):
+                self.assertFalse(
+                    _is_quantized_load(
+                        types.SimpleNamespace(quantization=value), load_config
+                    )
+                )
+
+    def test_quantized_load_detects_real_quantization_configs(self):
+        class FakeQuantConfig:
+            def __init__(self, quanted):
+                self.quanted = quanted
+
+            def is_quanted(self):
+                return self.quanted
+
+        self.assertTrue(
+            _is_quantized_load(
+                types.SimpleNamespace(quantization="fp8"),
+                LoadConfig(compute_dtype=torch.float32, device="cpu"),
+            )
+        )
+        self.assertTrue(
+            _is_quantized_load(
+                types.SimpleNamespace(quantization=""),
+                LoadConfig(
+                    compute_dtype=torch.float32,
+                    device="cpu",
+                    quant_source_config=FakeQuantConfig(True),
+                ),
+            )
+        )
+        self.assertTrue(
+            _is_quantized_load(
+                types.SimpleNamespace(
+                    quantization="", quant_config=FakeQuantConfig(True)
+                ),
+                LoadConfig(compute_dtype=torch.float32, device="cpu"),
+            )
+        )
+        self.assertFalse(
+            _is_quantized_load(
+                types.SimpleNamespace(
+                    quantization="", quant_config=FakeQuantConfig(False)
+                ),
+                LoadConfig(compute_dtype=torch.float32, device="cpu"),
+            )
+        )
 
     def test_explicit_config_fastsafetensors_failure_does_not_fallback(self):
         loader = self._new_loader(LoadMethod.FASTSAFETENSORS)

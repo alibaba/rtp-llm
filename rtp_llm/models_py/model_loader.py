@@ -466,7 +466,13 @@ def _is_quanted_config(source_config: Any) -> bool:
 def _is_quantized_load(model_config: Any, load_config: LoadConfig) -> bool:
     if _is_quanted_config(getattr(load_config, "quant_source_config", None)):
         return True
-    return getattr(model_config, "quantization", None) is not None
+    quant_config = getattr(model_config, "quant_config", None)
+    if _is_quanted_config(quant_config):
+        return True
+    quantization = getattr(model_config, "quantization", None)
+    if isinstance(quantization, str):
+        return quantization.strip().lower() not in ("", "none", "null")
+    return bool(quantization)
 
 
 class NewModelLoader:
