@@ -1012,8 +1012,25 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
             if (enable_cuda_graph && !disable_sp_prefill_cuda_graph) {
                 RTP_LLM_LOG_INFO(
                     "[speculative decoding] creating separate prefill draft model with CUDA graph support");
+                py::object sp_prefill_py_model = params.py_sp_model;
+                {
+                    py::gil_scoped_acquire gil;
+                    if (py::hasattr(params.py_sp_model, "clone_for_cuda_graph")) {
+                        try {
+                            sp_prefill_py_model = params.py_sp_model.attr("clone_for_cuda_graph")();
+                            RTP_LLM_LOG_INFO(
+                                "[speculative decoding] cloned py_sp_model for sp_prefill CUDA graph runtime state");
+                        } catch (const py::error_already_set& e) {
+                            RTP_LLM_LOG_ERROR("[speculative decoding] clone_for_cuda_graph failed:\n%s", e.what());
+                            throw;
+                        }
+                    } else {
+                        RTP_LLM_LOG_WARNING(
+                            "[speculative decoding] py_sp_model has no clone_for_cuda_graph(); sp_prefill CUDA graph will share Python runtime state with eager draft model");
+                    }
+                }
                 sp_prefill_draft_model_.reset(new PyWrappedModel(model_params,
-                                                                 params.py_sp_model,
+                                                                 sp_prefill_py_model,
                                                                  true,
                                                                  false,
                                                                  draft_cache_layer_layout.layer_to_groups,
