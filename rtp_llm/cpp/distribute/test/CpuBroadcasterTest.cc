@@ -27,6 +27,7 @@ namespace rtp_llm {
 namespace {
 
 constexpr char     kExpectedLinkProbeToken      = 0x5a;
+constexpr char     kExpectedBroadcastSuccess    = 0x6b;
 constexpr uint64_t kExpectedBroadcastFrameMagic = 0x5254504c4c4d5450ULL;
 
 struct BroadcastFrameHeader {
@@ -169,6 +170,13 @@ void peerReadOneInt(const std::string& base, int& observed, std::string& error) 
     }
     if (readAllRaw(fd, &observed, sizeof(observed)) != static_cast<ssize_t>(sizeof(observed))) {
         error = "fake peer payload read failed";
+        ::close(fd);
+        return;
+    }
+    char success_token = 0;
+    if (readAllRaw(fd, &success_token, sizeof(success_token)) != static_cast<ssize_t>(sizeof(success_token))
+        || success_token != kExpectedBroadcastSuccess) {
+        error = "fake peer success token read failed";
     }
     ::close(fd);
 }
@@ -571,6 +579,115 @@ TEST(CpuBroadcasterTest, RootWriteFailureClosesOtherPeers) {
         bcast.broadcast(&value, sizeof(value), 0);
     } catch (const std::exception& e) { retry_error = e.what(); }
     EXPECT_NE(retry_error.find("reset and reinitialize before reuse"), std::string::npos) << retry_error;
+
+    bcast.reset();
+    cleanupTempBase(base);
+}
+
+TEST(CpuBroadcasterTest, PayloadFailureDoesNotLetEarlierPeerReturn) {
+    auto& bcast = CpuBroadcaster::instance();
+    bcast.reset();
+
+    const std::string base = makeTempBase();
+
+    std::atomic<bool> rank1_ready{false};
+    std::atomic<bool> rank1_done{false};
+    std::atomic<bool> rank1_saw_close{false};
+    std::atomic<bool> rank2_closed{false};
+    std::atomic<int>  rank1_fd{-1};
+    std::string       rank1_error;
+    std::string       rank2_error;
+
+    std::thread rank1_thread([&] {
+        int fd = connectPeerAndReadProbe(base, 1, rank1_error);
+        if (fd < 0) {
+            rank1_done.store(true, std::memory_order_release);
+            return;
+        }
+        rank1_fd.store(fd, std::memory_order_release);
+        rank1_ready.store(true, std::memory_order_release);
+
+        BroadcastFrameHeader header{};
+        if (readAllRaw(fd, &header, sizeof(header)) != static_cast<ssize_t>(sizeof(header))
+            || header.magic != kExpectedBroadcastFrameMagic || header.nbytes != sizeof(int)) {
+            rank1_error = "rank1 frame header read failed";
+            ::close(fd);
+            rank1_done.store(true, std::memory_order_release);
+            return;
+        }
+        int observed = 0;
+        if (readAllRaw(fd, &observed, sizeof(observed)) != static_cast<ssize_t>(sizeof(observed)) || observed != 17) {
+            rank1_error = "rank1 payload read failed";
+            ::close(fd);
+            rank1_done.store(true, std::memory_order_release);
+            return;
+        }
+        char    success_token = 0;
+        ssize_t n             = readAllRaw(fd, &success_token, sizeof(success_token));
+        if (n < 0) {
+            rank1_saw_close.store(true, std::memory_order_release);
+        } else {
+            rank1_error = "rank1 unexpectedly received success token";
+        }
+        ::close(fd);
+        rank1_done.store(true, std::memory_order_release);
+    });
+
+    std::thread rank2_thread([&] {
+        int fd = connectPeerAndReadProbe(base, 2, rank2_error);
+        if (fd < 0) {
+            return;
+        }
+        ::shutdown(fd, SHUT_RDWR);
+        ::close(fd);
+        rank2_closed.store(true, std::memory_order_release);
+    });
+
+    bcast.initialize(0, 3, base);
+
+    const auto ready_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while ((!rank1_ready.load(std::memory_order_acquire) || !rank2_closed.load(std::memory_order_acquire))
+           && std::chrono::steady_clock::now() < ready_deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+
+    if (!rank1_ready.load(std::memory_order_acquire) || !rank2_closed.load(std::memory_order_acquire)) {
+        int fd = rank1_fd.load(std::memory_order_acquire);
+        if (fd >= 0) {
+            ::shutdown(fd, SHUT_RDWR);
+        }
+        rank1_thread.join();
+        rank2_thread.join();
+        bcast.reset();
+        cleanupTempBase(base);
+        FAIL() << "fake peers were not ready; rank1_error=" << rank1_error << " rank2_error=" << rank2_error;
+    }
+
+    std::string broadcast_error;
+    try {
+        int value = 17;
+        bcast.broadcast(&value, sizeof(value), 0);
+    } catch (const std::exception& e) { broadcast_error = e.what(); }
+
+    const auto close_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (!rank1_done.load(std::memory_order_acquire) && std::chrono::steady_clock::now() < close_deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    if (!rank1_done.load(std::memory_order_acquire)) {
+        int fd = rank1_fd.load(std::memory_order_acquire);
+        if (fd >= 0) {
+            ::shutdown(fd, SHUT_RDWR);
+        }
+    }
+
+    rank1_thread.join();
+    rank2_thread.join();
+
+    EXPECT_TRUE(rank1_error.empty()) << rank1_error;
+    EXPECT_TRUE(rank2_error.empty()) << rank2_error;
+    EXPECT_FALSE(broadcast_error.empty());
+    EXPECT_TRUE(rank1_done.load(std::memory_order_acquire));
+    EXPECT_TRUE(rank1_saw_close.load(std::memory_order_acquire));
 
     bcast.reset();
     cleanupTempBase(base);

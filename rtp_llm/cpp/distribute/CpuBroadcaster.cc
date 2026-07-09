@@ -24,6 +24,7 @@ constexpr int      kInitTimeoutMs             = 120 * 1000;
 constexpr int      kDefaultBroadcastTimeoutMs = 0;  // Match NCCL: idle TP workers may wait indefinitely.
 constexpr int      kBroadcastStallWarnMs      = 30 * 1000;
 constexpr char     kLinkProbeToken            = 0x5a;
+constexpr char     kBroadcastSuccessToken     = 0x6b;
 constexpr uint64_t kBroadcastFrameMagic       = 0x5254504c4c4d5450ULL;
 
 struct BroadcastFrameHeader {
@@ -528,6 +529,15 @@ void CpuBroadcaster::broadcast(void* buf, std::size_t nbytes, int root) {
                                         timeout_ms,
                                         std::strerror(errno));
             }
+            for (int k = 1; k < world_size; ++k) {
+                ssize_t n = writeAllWithTimeout(
+                    peer_fds[k], &kBroadcastSuccessToken, sizeof(kBroadcastSuccessToken), timeout_ms);
+                RTP_LLM_CHECK_WITH_INFO(n == static_cast<ssize_t>(sizeof(kBroadcastSuccessToken)),
+                                        "CpuBroadcaster success token write to rank %d failed after %d ms: %s",
+                                        k,
+                                        timeout_ms,
+                                        std::strerror(errno));
+            }
         } else {
             BroadcastFrameHeader header{};
             ssize_t              n = readAllWithTimeout(peer_fds[0], &header, sizeof(header), timeout_ms);
@@ -546,6 +556,13 @@ void CpuBroadcaster::broadcast(void* buf, std::size_t nbytes, int root) {
             RTP_LLM_CHECK_WITH_INFO(n == static_cast<ssize_t>(nbytes),
                                     "CpuBroadcaster read from rank 0 (%zu bytes) failed after %d ms: %s",
                                     nbytes,
+                                    timeout_ms,
+                                    std::strerror(errno));
+            char success_token = 0;
+            n                  = readAllWithTimeout(peer_fds[0], &success_token, sizeof(success_token), timeout_ms);
+            RTP_LLM_CHECK_WITH_INFO(n == static_cast<ssize_t>(sizeof(success_token))
+                                        && success_token == kBroadcastSuccessToken,
+                                    "CpuBroadcaster success token read from rank 0 failed after %d ms: %s",
                                     timeout_ms,
                                     std::strerror(errno));
         }
