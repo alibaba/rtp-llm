@@ -4,6 +4,7 @@ import logging
 import math
 import os
 import random
+import unittest
 from typing import List
 
 import torch
@@ -147,6 +148,52 @@ def test_fused_recurrent_continuous_batching(
                 int(block_map[bs, write_block_offset[bs] + seq])
             ]
     assert_close("ht", ref_ht, tri_ht, 0.005)
+
+
+class TestFusedRecurrentFinalStateBlockMap(unittest.TestCase):
+
+    def test_skip_negative_write_block_id(self):
+        device = "cuda"
+        dtype = torch.bfloat16
+        B, S, H, HV, D = 1, 1, 1, 1, 8
+        seq_size_per_block = 2
+
+        torch.manual_seed(7)
+        q = torch.randn(B, S, H, D, dtype=dtype, device=device)
+        k = torch.randn(B, S, H, D, dtype=dtype, device=device)
+        v = torch.randn(B, S, HV, D, dtype=dtype, device=device)
+        beta = torch.rand(B, S, HV, dtype=dtype, device=device).sigmoid()
+        g = F.logsigmoid(torch.rand(B, S, HV, dtype=torch.float32, device=device))
+
+        backing_state = torch.zeros(3, HV, D, D, dtype=torch.float32, device=device)
+        backing_state[0].fill_(1234.0)
+        initial_state = backing_state[1:]
+        initial_state[1].copy_(torch.randn(HV, D, D, dtype=torch.float32, device=device))
+
+        block_map = torch.tensor([[1, -1]], dtype=torch.int32, device=device)
+        sequence_lengths = torch.tensor([3], dtype=torch.int32, device=device)
+        guard_before = backing_state[0].clone()
+
+        fused_recurrent_gated_delta_rule(
+            q=q,
+            k=k,
+            v=v,
+            beta=beta,
+            g=g,
+            scale=1.0,
+            initial_state=initial_state,
+            block_map=block_map,
+            sequence_lengths=sequence_lengths,
+            seq_size_per_block=seq_size_per_block,
+            inplace_final_state=True,
+            use_qk_l2norm_in_kernel=False,
+        )
+        torch.cuda.synchronize()
+
+        self.assertTrue(
+            torch.equal(backing_state[0], guard_before),
+            "write_block_id=-1 must not write before the final-state cache",
+        )
 
 
 if __name__ == "__main__":

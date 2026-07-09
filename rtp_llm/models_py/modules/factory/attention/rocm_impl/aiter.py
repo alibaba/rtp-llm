@@ -153,6 +153,7 @@ class FMHAParams(ParamsBase):
         input_lengths,
         kv_cache_block_id_host=None,
         kv_cache_block_id_device=None,
+        sequence_lengths_plus_1_d=None,
     ):
         self.sequence_lengths = sequence_lengths
         self.input_lengths = input_lengths
@@ -160,7 +161,13 @@ class FMHAParams(ParamsBase):
         if kv_cache_block_id_device is not None:
             self.kv_cache_block_id_device = kv_cache_block_id_device
         if self.seq_lens is not None and self.sequence_lengths is not None:
-            self.seq_lens.copy_((self.sequence_lengths + 1).to(torch.device("cuda")))
+            if sequence_lengths_plus_1_d is not None:
+                self.seq_lens.copy_(sequence_lengths_plus_1_d.to(self.seq_lens.device))
+            else:
+                seq_lens = self.sequence_lengths + 1
+                if self.enable_cuda_graph and self.input_lengths is not None:
+                    seq_lens = seq_lens.masked_fill(self.input_lengths <= 0, 0)
+                self.seq_lens.copy_(seq_lens.to(self.seq_lens.device))
             if (
                 self.enable_cuda_graph
                 and self.graph_max_seq_len is not None
@@ -1681,6 +1688,7 @@ class AiterDecodeImplBase(FMHAImplBase):
             attn_inputs.input_lengths,
             attn_inputs.kv_cache_kernel_block_id_host,
             attn_inputs.kv_cache_kernel_block_id_device,
+            getattr(attn_inputs, "sequence_lengths_plus_1_d", None),
         )
         if attn_inputs.kv_cache_kernel_block_id_device is not None:
             update_kv_cache_offset = getattr(

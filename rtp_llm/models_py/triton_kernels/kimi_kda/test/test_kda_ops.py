@@ -134,6 +134,51 @@ def naive_recurrent_kda(q, k, v, g, beta, scale, initial_state, A_log, dt_bias):
 
 class TestKdaOps(unittest.TestCase):
 
+    def test_recurrent_decode_skips_negative_write_block_id(self):
+        B, S, local_h, local_k, local_v = 1, 1, 1, 8, 8
+        seq_size_per_block = 2
+
+        torch.manual_seed(11)
+        q = torch.randn(B, S, local_h, local_k, device=DEVICE, dtype=DTYPE)
+        k = torch.randn(B, S, local_h, local_k, device=DEVICE, dtype=DTYPE)
+        v = torch.randn(B, S, local_h, local_v, device=DEVICE, dtype=DTYPE)
+        g_raw = torch.randn(B, S, local_h, local_k, device=DEVICE, dtype=DTYPE)
+        beta = torch.randn(B, S, local_h, device=DEVICE, dtype=DTYPE).sigmoid()
+
+        backing_state = torch.zeros(
+            3, local_h, local_k, local_v, device=DEVICE, dtype=torch.float32
+        )
+        backing_state[0].fill_(1234.0)
+        initial_state = backing_state[1:]
+        initial_state[1].copy_(
+            torch.randn(local_h, local_k, local_v, device=DEVICE, dtype=torch.float32)
+        )
+
+        block_map = torch.tensor([[1, -1]], dtype=torch.int32, device=DEVICE)
+        sequence_lengths = torch.tensor([3], dtype=torch.int32, device=DEVICE)
+        guard_before = backing_state[0].clone()
+
+        fused_recurrent_kda(
+            q=q,
+            k=k,
+            v=v,
+            g=g_raw,
+            beta=beta,
+            initial_state=initial_state,
+            inplace_final_state=True,
+            use_qk_l2norm_in_kernel=False,
+            use_gate_in_kernel=False,
+            block_map=block_map,
+            sequence_lengths=sequence_lengths,
+            seq_size_per_block=seq_size_per_block,
+        )
+        torch.cuda.synchronize()
+
+        self.assertTrue(
+            torch.equal(backing_state[0], guard_before),
+            "write_block_id=-1 must not write before the final-state cache",
+        )
+
     def test_gate_vs_naive(self):
         _, _, _, g_raw, _, A_log, dt_bias, _ = make_kda_inputs(1, 8)
         g_flat = g_raw.reshape(8, H, K)

@@ -163,11 +163,14 @@ def fused_recurrent_kda_fwd_kernel(
             write_block_id = tl.load(
                 block_map + i_n * max_block_size + write_block_offset
             ).to(tl.int64)
-            p_ht = ht + write_block_id * stride_final_state_token
+            if write_block_id != -1:
+                p_ht = ht + write_block_id * stride_final_state_token
+                p_ht = p_ht + i_hv * K * V + o_k[:, None] * V + o_v[None, :]
+                tl.store(p_ht, b_h.to(p_ht.dtype.element_ty), mask=mask_h)
         else:
             p_ht = ht + (bos + i_t) * stride_final_state_token
-        p_ht = p_ht + i_hv * K * V + o_k[:, None] * V + o_v[None, :]
-        tl.store(p_ht, b_h.to(p_ht.dtype.element_ty), mask=mask_h)
+            p_ht = p_ht + i_hv * K * V + o_k[:, None] * V + o_v[None, :]
+            tl.store(p_ht, b_h.to(p_ht.dtype.element_ty), mask=mask_h)
 
         p_q += H * K
         p_k += H * K

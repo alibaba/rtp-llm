@@ -36,6 +36,7 @@ except ImportError:
 
 try:
     from rtp_llm.models_py.modules.factory.attention.rocm_impl.aiter import (
+        AiterDecodeImplBase,
         AiterPrefillAttnOp,
         AiterPrefillAttnOpPaged,
         AiterPrefillImplAsm,
@@ -581,6 +582,67 @@ class TestUpdatePrefillParamsForCudaGraph(unittest.TestCase):
         )
         with self.assertRaises(ValueError):
             self._call_update(stub, inputs)
+
+
+@unittest.skipUnless(_is_rocm(), "Requires ROCm GPU")
+@unittest.skipUnless(_OPS_IMPORTABLE, "Requires ROCm attention wrapper module")
+class TestAiterDecodeCudaGraphParams(unittest.TestCase):
+
+    def _make_decode_inputs(
+        self, sequence_lengths, input_lengths, sequence_lengths_plus_1
+    ):
+        attn_inputs = PyAttentionInputs()
+        attn_inputs.is_prefill = False
+        attn_inputs.is_cuda_graph = True
+        attn_inputs.sequence_lengths = torch.tensor(
+            sequence_lengths, dtype=torch.int32, device="cpu"
+        ).pin_memory()
+        attn_inputs.input_lengths = torch.tensor(
+            input_lengths, dtype=torch.int32, device="cpu"
+        ).pin_memory()
+        attn_inputs.sequence_lengths_plus_1_d = torch.tensor(
+            sequence_lengths_plus_1, dtype=torch.int32, device="cuda"
+        )
+        attn_inputs.kv_cache_kernel_block_id_host = torch.zeros(
+            len(sequence_lengths), 1, dtype=torch.int32, device="cpu"
+        ).pin_memory()
+        attn_inputs.kv_cache_kernel_block_id_device = torch.zeros(
+            len(sequence_lengths), 1, dtype=torch.int32, device="cuda"
+        )
+        return attn_inputs
+
+    def test_prepare_cuda_graph_preserves_zero_padded_seq_lens(self):
+        capture_inputs = self._make_decode_inputs(
+            [8, 8, 8, 8], [1, 1, 1, 1], [9, 9, 9, 9]
+        )
+        fmha_params = FMHAParams(
+            attn_inputs=capture_inputs,
+            is_prefill=False,
+            enable_cuda_graph=True,
+            graph_max_seq_len=128,
+        )
+        replay_inputs = self._make_decode_inputs(
+            [10, 0, 0, 0], [1, 0, 0, 0], [11, 0, 0, 0]
+        )
+
+        class _RopeParams:
+            def update_kv_cache_offset(self, _kv_cache_kernel_block_id_device):
+                pass
+
+        class _DecodeImpl(AiterDecodeImplBase):
+            def support(self, _attn_inputs):
+                return True
+
+            def forward(self, *_args, **_kwargs):
+                raise NotImplementedError
+
+        impl = _DecodeImpl()
+        impl.fmha_params = fmha_params
+        impl.rope_params = _RopeParams()
+        impl.prepare_cuda_graph(replay_inputs)
+        torch.cuda.synchronize()
+
+        self.assertEqual(fmha_params.seq_lens.cpu().tolist(), [11, 0, 0, 0])
 
 
 @unittest.skipUnless(_OPS_IMPORTABLE, "Requires AiterPrefillAttnOp module")
