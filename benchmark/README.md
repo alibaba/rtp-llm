@@ -53,7 +53,6 @@ requires integration with the runtime sparse MLA or indexer path and
 model-quality validation.
 
 Run the CPU regression tests from the repository root with
-`bazel test //benchmark:topology_kv_candidate_schedule_test` or
 `python -m unittest benchmark.test_topology_kv_candidate_schedule`.
 
 ```bash
@@ -81,4 +80,3 @@ table format with one leading pipe per row:
 | 16384 | 512 | 0.2814 | 0.0752 | 3.74x |
 | 16384 | 1024 | 0.2833 | 0.1298 | 2.18x |
 ```
-
