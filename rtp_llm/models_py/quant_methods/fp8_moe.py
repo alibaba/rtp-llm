@@ -220,8 +220,14 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 # Source MXFP8 scales can be much larger than the execution
                 # format. Keep them as plain CPU tensors so model.to(cuda)
                 # does not move all source scales before post-load requant.
-                layer.w13_scale = torch.zeros(E, 2 * nb, hb, dtype=torch.float32)
-                layer.w2_scale = torch.zeros(E, h_nb, k_nb, dtype=torch.float32)
+                # Explicit device is required because fastsafetensors creates
+                # the model under torch.device("meta") before to_empty().
+                layer.w13_scale = torch.zeros(
+                    E, 2 * nb, hb, dtype=torch.float32, device="cpu"
+                )
+                layer.w2_scale = torch.zeros(
+                    E, h_nb, k_nb, dtype=torch.float32, device="cpu"
+                )
 
         elif qf in (
             "fp8_per_tensor_online",
@@ -545,6 +551,11 @@ class Fp8MoEMethod(FusedMoEMethodBase):
 
         src_w13_scale = layer.w13_scale
         src_w2_scale = layer.w2_scale
+        if src_w13_scale.is_meta or src_w2_scale.is_meta:
+            raise RuntimeError(
+                "FP8 MoE custom block source scales must be materialized before "
+                "post-load requantization"
+            )
         new_w13_scale = []
         new_w2_scale = []
         device = layer.w13.device

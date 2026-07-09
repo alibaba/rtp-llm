@@ -462,6 +462,75 @@ class TestFp8MoEAlreadyQuantizedLoad(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "only supports"):
                 layer.process_weights_after_loading()
 
+    def test_custom_block_moe_source_scales_materialized_after_meta_to_empty(self):
+        qc = _make_qc("fp8_block")
+        qc.weight_block_size = [2, 4]
+        with torch.device("meta"):
+            layer = BaseMoEExperts(
+                num_experts=1,
+                hidden_size=4,
+                moe_intermediate_size=4,
+                tp_size=1,
+                tp_rank=0,
+                ep_size=1,
+                ep_rank=0,
+                params_dtype=torch.bfloat16,
+                model_config=type(
+                    "Cfg",
+                    (),
+                    {"data_type": "bf16", "quant_config": None, "exported_device": None},
+                )(),
+                parallelism_config=type("Parallel", (), {"dp_size": 1})(),
+                moe_config=type("MoeCfg", (), {})(),
+                quant_config=qc,
+                layer_idx=0,
+            )
+        layer.to_empty(device="cpu")
+        self.assertFalse(layer.w13_scale.is_meta)
+        self.assertFalse(layer.w2_scale.is_meta)
+        self.assertEqual(layer.w13_scale.device.type, "cpu")
+        self.assertEqual(layer.w2_scale.device.type, "cpu")
+
+        fp8_weight = torch.zeros(4, 4, dtype=torch.float8_e4m3fn)
+        layer.load_weights(
+            {
+                "0.gate_proj.weight": fp8_weight,
+                "0.gate_proj.weight_scale_inv": torch.ones(2, 1),
+                "0.up_proj.weight": fp8_weight,
+                "0.up_proj.weight_scale_inv": torch.ones(2, 1) * 2,
+                "0.down_proj.weight": fp8_weight,
+                "0.down_proj.weight_scale_inv": torch.ones(2, 1) * 3,
+            }
+        )
+        self.assertFalse(layer.w13_scale.is_meta)
+        self.assertFalse(layer.w2_scale.is_meta)
+
+        def fake_dequant(weight, scale, block_size, dtype):
+            self.assertFalse(scale.is_meta)
+            return torch.zeros_like(weight, dtype=torch.bfloat16)
+
+        def fake_cast(weight, use_ue8m0=False):
+            return (
+                torch.zeros_like(weight, dtype=fp8_moe._runtime_fp8_dtype()),
+                torch.ones(2, 1, dtype=torch.float32),
+            )
+
+        with mock.patch.object(BaseMoEExperts, "_maybe_build_fused_moe", return_value=None), \
+             mock.patch(
+                 "rtp_llm.models_py.kernels.cuda.fp8_kernel.fp8_kernel.block_quant_dequant",
+                 side_effect=fake_dequant,
+             ), \
+             mock.patch(
+                 "rtp_llm.models_py.kernels.cuda.fp8_kernel.fp8_kernel.per_block_cast_to_fp8",
+                 side_effect=fake_cast,
+             ):
+            layer.process_weights_after_loading()
+
+        self.assertFalse(layer.w13_scale.is_meta)
+        self.assertFalse(layer.w2_scale.is_meta)
+        self.assertEqual(layer.w13_scale.shape, (1, 2, 1))
+        self.assertEqual(layer.w2_scale.shape, (1, 2, 1))
+
 class TestFp8BlockLoad(unittest.TestCase):
     """Already-quantized FP8 per-block (128x128) -> {Col,Row,Merged,QKV}Parallel.
 
