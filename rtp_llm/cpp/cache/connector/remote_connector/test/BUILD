@@ -1,5 +1,5 @@
 load("//:def.bzl", "copts")
-load("@arch_config//:arch_select.bzl", "torch_deps")
+load("@rtp_llm//bazel:defs.bzl", "torch_deps")
 
 test_copts = [
     "-fno-access-control",
@@ -25,7 +25,7 @@ cc_test(
         "GroupPolicyTest.cc",
     ],
     copts = test_copts,
-    exec_properties = {"gpu": "H20"},
+    exec_properties = {"gpu": "A10"},
     # tags = ["H20"],
     deps = test_deps + [
         "//rtp_llm/cpp/cache/connector/remote_connector",
@@ -38,7 +38,7 @@ cc_test(
         "RemoteConnectorInternalTest.cc",
     ],
     copts = test_copts,
-    exec_properties = {"gpu": "H20"},
+    exec_properties = {"gpu": "A10"},
     # tags = ["H20"],
     deps = test_deps + [
         "//rtp_llm/cpp/cache/connector/remote_connector",
@@ -51,7 +51,7 @@ cc_test(
         "RemoteConnectorMockFullLinearTest.cc",
     ],
     copts = test_copts,
-    exec_properties = {"gpu": "H20"},
+    exec_properties = {"gpu": "A10"},
     # tags = ["H20"],
     deps = [
         ":remote_connector_mock_base",
@@ -64,7 +64,7 @@ cc_test(
         "RemoteConnectorMockOnlyFullTest.cc",
     ],
     copts = test_copts,
-    exec_properties = {"gpu": "H20"},
+    exec_properties = {"gpu": "A10"},
     # tags = ["H20"],
     deps = [
         ":remote_connector_mock_base",
@@ -77,7 +77,7 @@ cc_test(
         "ClientWrapperTest.cc",
     ],
     copts = test_copts,
-    exec_properties = {"gpu": "H20"},
+    exec_properties = {"gpu": "A10"},
     # tags = ["H20"],
     deps = test_deps + [
         ":mock",

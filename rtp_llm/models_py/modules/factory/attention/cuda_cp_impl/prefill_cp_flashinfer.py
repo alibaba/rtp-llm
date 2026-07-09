@@ -16,7 +16,7 @@ from rtp_llm.models_py.modules.factory.attention.cuda_cp_impl.prefill_mha.alltoa
     PCPAll2AllAttnOp,
 )
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import FMHAImplBase
-from rtp_llm.ops import AttentionConfigs, CPRotateMethod, FMHAType, ParallelismConfig
+from rtp_llm.ops import AttentionConfigs, CPRotateMethod, ParallelismConfig
 from rtp_llm.ops.compute_ops import (
     FusedRopeKVCachePrefillOpQKVOut,
     KVCache,
@@ -31,6 +31,7 @@ impl_map = {
 
 
 class CPFlashInferImpl(FMHAImplBase):
+    NAME = "cp_flashinfer"
     """
     FlashInfer Ragged KV Cache Prefill Attention Operator for Context Parallel MHA.
 
@@ -165,9 +166,6 @@ class CPFlashInferImpl(FMHAImplBase):
     @classmethod
     def support(cls, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs):
         return True
-
-    def fmha_type(self) -> FMHAType:
-        return FMHAType.CP_FLASH_INFER
 
     @classmethod
     def support_prefill_cp(cls) -> bool:

@@ -426,7 +426,7 @@ def start_backend_server(
     clear_jit_filelock()
 
     if not torch.cuda.is_available():
-        return local_rank_start(global_controller, py_env_configs)
+        return local_rank_start(global_controller, py_env_configs, 0, pipe_writer)
 
     pc = py_env_configs.parallelism_config
     if (

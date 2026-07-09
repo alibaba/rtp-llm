@@ -1,5 +1,5 @@
 load("//:def.bzl", "copts", "rocm_copts")
-load("@arch_config//:arch_select.bzl", "torch_deps")
+load("@rtp_llm//bazel:defs.bzl", "torch_deps")
 
 # --- Targets moved from cpp/rocm/ ---
 

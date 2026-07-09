@@ -1,5 +1,7 @@
 import logging
 
+import pytest
+
 logging.basicConfig(level=logging.INFO)
 import os
 from abc import ABC, abstractmethod
@@ -32,6 +34,8 @@ from rtp_llm.openai.renderers.qwen35_renderer import Qwen35Renderer
 from rtp_llm.openai.renderers.qwen_agent_renderer import QwenAgentRenderer
 from rtp_llm.openai.renderers.qwen_agent_tool_renderer import QwenAgentToolRenderer
 from rtp_llm.openai.renderers.qwen_renderer import QwenRenderer
+
+pytestmark = [pytest.mark.gpu(type="A10")]
 
 
 class _Qwen35ItemsTemplateTokenizer:

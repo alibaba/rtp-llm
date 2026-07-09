@@ -26,6 +26,8 @@ def get_preprocess_config(config):
         crop_positions = [float(x) for x in config.crop_positions.split(":")]
         if len(crop_positions) == 6:
             # input format: "w1:h1:w2:h2:h:w"
+            if crop_positions[4] == 0 or crop_positions[5] == 0:
+                raise ValueError("crop_positions h/w dimensions must be non-zero")
             crop_positions = [
                 crop_positions[0] / crop_positions[5],
                 crop_positions[1] / crop_positions[4],
@@ -94,6 +96,14 @@ class Conversation:
                             assert content_part.image_url != None
                             images.append(content_part.image_url.url)
                             mm_types.append(MMUrlType.IMAGE)
+                            if content_part.preprocess_config:
+                                preprocess_configs.append(
+                                    get_preprocess_config(content_part.preprocess_config)
+                                )
+                            else:
+                                preprocess_configs.append(
+                                    MMPreprocessConfig(-1, -1, -1, -1, -1, -1, -1, [], 30000)
+                                )
                             now_prompt = f"<image>\n" + now_prompt
                     chat_template_messages.append({"role": role, "content": now_prompt})
 
@@ -103,6 +113,7 @@ class Conversation:
                 ),
                 images,
                 mm_types,
+                preprocess_configs,
             )
 
         if messages[0].role != RoleEnum.system:
@@ -127,6 +138,10 @@ class Conversation:
                             preprocess_configs.append(
                                 get_preprocess_config(content_part.preprocess_config)
                             )
+                        else:
+                            preprocess_configs.append(
+                                MMPreprocessConfig(-1, -1, -1, -1, -1, -1, -1, [], 30000)
+                            )
                         now_prompt = now_prompt + self.image_sep
                     elif content_part.type == ContentPartTypeEnum.video_url:
                         assert content_part.video_url != None
@@ -135,6 +150,10 @@ class Conversation:
                         if content_part.preprocess_config:
                             preprocess_configs.append(
                                 get_preprocess_config(content_part.preprocess_config)
+                            )
+                        else:
+                            preprocess_configs.append(
+                                MMPreprocessConfig(-1, -1, -1, -1, -1, -1, -1, [], 30000)
                             )
                         now_prompt = now_prompt + self.image_sep
                 prompt += f"{self.roles[message.role]}" + self.connector[0] + now_prompt

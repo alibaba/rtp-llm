@@ -202,7 +202,7 @@ std::vector<MultimodalInput> QueryConverter::transMMInput(const MultimodalInputs
     return inputs_vec;
 }
 
-MultimodalInputsPB QueryConverter::transMMInputsPB(const std::vector<MultimodalInput> mm_inputs) {
+MultimodalInputsPB QueryConverter::transMMInputsPB(const std::vector<MultimodalInput>& mm_inputs) {
     MultimodalInputsPB mm_inputs_pb;
     for (auto& mm_input : mm_inputs) {
         auto now_input = mm_inputs_pb.add_multimodal_inputs();
@@ -228,7 +228,7 @@ void QueryConverter::transMMPreprocessConfig(MMPreprocessConfigPB* config_pb, co
     }
 }
 
-MultimodalOutput QueryConverter::transMMOutput(const MultimodalOutputPB* output_pb) {
+ErrorResult<MultimodalOutput> QueryConverter::transMMOutput(const MultimodalOutputPB* output_pb) {
     torch::Tensor mm_embedding        = transTensor(output_pb->multimodal_embedding()), mm_position_id;
     bool          contain_pos         = output_pb->has_multimodal_pos_id();
     bool          contain_extra_input = output_pb->multimodal_extra_input_size() > 0;
@@ -241,22 +241,36 @@ MultimodalOutput QueryConverter::transMMOutput(const MultimodalOutputPB* output_
         split_sizes.push_back(split_size);
     }
     const int64_t split_total = std::accumulate(split_sizes.begin(), split_sizes.end(), int64_t{0});
-    RTP_LLM_CHECK_WITH_INFO(!split_sizes.empty() && split_total == mm_embedding.size(0),
-                            "split_sizes sum=%ld does not match mm_embedding.size(0)=%ld",
-                            split_total,
-                            mm_embedding.size(0));
+    if (split_sizes.empty()) {
+        return ErrorInfo(ErrorCode::MM_PROCESS_ERROR,
+                         "remote multimodal response has empty split_size");
+    }
+    if (split_total != mm_embedding.size(0)) {
+        return ErrorInfo(ErrorCode::MM_PROCESS_ERROR,
+                         "split_sizes sum=" + std::to_string(split_total)
+                             + " does not match mm_embedding.size(0)="
+                             + std::to_string(mm_embedding.size(0)));
+    }
     mm_output.mm_features = mm_embedding.split(split_sizes, 0);
     if (contain_pos) {
-        RTP_LLM_CHECK_WITH_INFO(split_total == mm_position_id.size(0),
-                                "split_sizes sum=%ld does not match mm_position_id.size(0)=%ld",
-                                split_total,
-                                mm_position_id.size(0));
+        if (split_total != mm_position_id.size(0)) {
+            return ErrorInfo(ErrorCode::MM_PROCESS_ERROR,
+                             "split_sizes sum=" + std::to_string(split_total)
+                                 + " does not match mm_position_id.size(0)="
+                                 + std::to_string(mm_position_id.size(0)));
+        }
         mm_output.mm_position_ids = mm_position_id.split(split_sizes, 0);
     }
 
     if (contain_extra_input) {
         // Each extra-input is an opaque flat 1-D tensor (one per image), reshaped by the
         // model-specific consumer; no split needed here.
+        if (output_pb->multimodal_extra_input_size() != static_cast<int>(split_sizes.size())) {
+            return ErrorInfo(
+                ErrorCode::MM_PROCESS_ERROR,
+                "extra_input count=" + std::to_string(output_pb->multimodal_extra_input_size())
+                    + " does not match split_sizes count=" + std::to_string(split_sizes.size()));
+        }
         std::vector<torch::Tensor> extra_inputs;
         extra_inputs.reserve(output_pb->multimodal_extra_input_size());
         for (const auto& extra_input_pb : output_pb->multimodal_extra_input()) {

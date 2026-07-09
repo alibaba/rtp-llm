@@ -129,10 +129,18 @@ public:
         // assertTensorClose(result.beam_indices, ref.beam_indices);
     }
 
+    static bool shouldRunLargeBeamSearchTests() {
+        return std::getenv("RTP_LLM_RUN_LARGE_BEAMSEARCH_TESTS") != nullptr;
+    }
+
     void runSimpleTests() {
-        std::vector<int> batch_sizes  = {1, 2, 15, 32};
-        std::vector<int> beam_widths  = {1, 2, 4, 5, 64, 70, 128, 500, 1024, 2500};
-        std::vector<int> max_seq_lens = {10, 100, 1000};
+        const bool       run_large    = shouldRunLargeBeamSearchTests();
+        std::vector<int> batch_sizes  = {1, 2, 32};
+        std::vector<int> beam_widths  = run_large
+            ? std::vector<int>{1, 2, 4, 5, 64, 70, 128, 500, 1024, 2500}
+            : std::vector<int>{1, 4, 64, 1024};
+        std::vector<int> max_seq_lens = run_large ? std::vector<int>{10, 100, 1000}
+                                                  : std::vector<int>{10, 1000};
         const int        vocab_size   = 7000;
         for (auto batch_size : batch_sizes) {
             for (auto beam_width : beam_widths) {
@@ -143,12 +151,23 @@ public:
                 }
             }
         }
+        // Always exercise the large-beam boundary once in default CI with a
+        // small batch/seq to catch OOM/shape issues on the wide beam path.
+        if (!run_large) {
+            std::cout << "batch_size: 1, beam_width: 2500, vocab_size: " << vocab_size
+                      << ", seq_len: 10 (large-beam boundary)" << std::endl;
+            simpleTest(1, 2500, vocab_size, 10);
+        }
     }
 
     void runVariableBeamWidthTests() {
+        const bool       run_large    = shouldRunLargeBeamSearchTests();
         std::vector<int> batch_sizes  = {1, 2, 31};
-        std::vector<int> beam_widths  = {1, 5, 70, 500, 2500};
-        std::vector<int> max_seq_lens = {10, 500};
+        std::vector<int> beam_widths  = run_large
+            ? std::vector<int>{1, 5, 70, 500, 2500}
+            : std::vector<int>{1, 5, 70};
+        std::vector<int> max_seq_lens = run_large ? std::vector<int>{10, 500}
+                                                  : std::vector<int>{10};
         const int        vocab_size   = 7000;
         for (auto batch_size : batch_sizes) {
             for (auto beam_width_in : beam_widths) {

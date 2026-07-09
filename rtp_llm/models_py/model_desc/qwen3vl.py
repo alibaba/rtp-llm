@@ -90,19 +90,20 @@ class Qwen3VLModel(GptModelBase):
         inputs_embeds = self.embed_tokens(
             input_ids, position_ids, token_type_ids, text_tokens_mask
         )
-        hidden_states = self.multimodal_embedding_injector(
-            inputs_embeds, mm_features, mm_feature_locs
-        )
 
-        if fmha_impl is None:
-            fmha_impl = self.prepare_fmha_impl(inputs)
-
-        if mm_deepstack_embeds and mm_feature_locs is not None:
+        if mm_feature_locs is not None:
             cpu_locs = (
                 mm_feature_locs.to(device="cpu", dtype=torch.long).view(-1).tolist()
             )
         else:
             cpu_locs = []
+
+        hidden_states = self.multimodal_embedding_injector(
+            inputs_embeds, mm_features, cpu_locs
+        )
+
+        if fmha_impl is None:
+            fmha_impl = self.prepare_fmha_impl(inputs)
 
         for i, decoder_layer in enumerate(self.layers[: self.layer_num]):
             select_block_map_for_layer(inputs.attention_inputs, i)

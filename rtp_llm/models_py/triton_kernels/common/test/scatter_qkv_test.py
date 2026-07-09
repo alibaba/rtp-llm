@@ -134,7 +134,7 @@ class TestScatterQKV(unittest.TestCase):
     def test_input_assertions(self) -> None:
         """scatter_qkv must reject malformed inputs."""
         # 3D input
-        with self.assertRaises(AssertionError):
+        with self.assertRaises(ValueError):
             scatter_qkv(
                 torch.randn(2, 4096, 4096, dtype=torch.bfloat16, device=self.device),
                 8,
@@ -144,10 +144,10 @@ class TestScatterQKV(unittest.TestCase):
             )
         # Non-contiguous input
         x = torch.randn(15384, 8192, dtype=torch.bfloat16, device=self.device)
-        with self.assertRaises(AssertionError):
+        with self.assertRaises(ValueError):
             scatter_qkv(x[:, :4096], 8, 16, 128, 128)  # slice -> non-contig
         # Wrong last-dim
-        with self.assertRaises(AssertionError):
+        with self.assertRaises(ValueError):
             scatter_qkv(
                 torch.randn(4096, 4097, dtype=torch.bfloat16, device=self.device),
                 8,

@@ -16,7 +16,7 @@ from rtp_llm.models_py.modules.factory.attention.rocm_impl._attn_utils import (
     split_raw_qkv,
     unpad_kv_vectorized,
 )
-from rtp_llm.ops import AttentionConfigs, FMHAType, KvCacheDataType, ParallelismConfig
+from rtp_llm.ops import AttentionConfigs, KvCacheDataType, ParallelismConfig
 from rtp_llm.ops.compute_ops import (
     FusedRopeKVCacheDecodeOpAsm,
     FusedRopeKVCacheDecodeOpNonAsm,
@@ -1373,6 +1373,8 @@ class AiterDecodeAttnOpTriton(AiterDecodeAttnOpBase):
 class AiterPrefillImplAsm(FMHAImplBase):
     """Aiter prefill attention implementation using ASM."""
 
+    NAME = "aiter_asm"
+
     def __init__(
         self,
         attn_configs: AttentionConfigs,
@@ -1432,6 +1434,8 @@ class AiterPrefillImplAsm(FMHAImplBase):
 
 class AiterPrefillImplNonAsm(FMHAImplBase):
     """Aiter prefill attention implementation using non-ASM."""
+
+    NAME = "aiter"
 
     def __init__(
         self,
@@ -1496,6 +1500,8 @@ class AiterPrefillImplPaged(FMHAImplBase):
     - seq_len <= 4: Triton PA (short query optimization)
     - Otherwise: CK batch-prefill (general paged prefill)
     """
+
+    NAME = "aiter_paged"
 
     def __init__(
         self,
@@ -1693,6 +1699,8 @@ class AiterDecodeImplBase(FMHAImplBase):
 
 
 class AiterDecodeImplAsm(AiterDecodeImplBase):
+    NAME = "aiter_asm"
+
     def __init__(
         self,
         attn_configs: AttentionConfigs,
@@ -1740,6 +1748,8 @@ class AiterDecodeImplAsm(AiterDecodeImplBase):
 
 
 class AiterDecodeImplNonAsm(AiterDecodeImplBase):
+    NAME = "aiter"
+
     def __init__(
         self,
         attn_configs: AttentionConfigs,
@@ -1788,6 +1798,8 @@ class AiterDecodeImplNonAsm(AiterDecodeImplBase):
 
 class AiterDecodeImplTriton(AiterDecodeImplBase):
     """Aiter decode attention implementation using Triton."""
+
+    NAME = "aiter_triton"
 
     def __init__(
         self,

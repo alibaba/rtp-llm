@@ -45,6 +45,6 @@ cc_test(
         "CACHE_STORE_RDMA_MODE": "0",
     },
     copts = ["-fno-access-control"] + copts(),
-    exec_properties = {'gpu':'H20'},
+    exec_properties = {'gpu':'A10'},
 )
 

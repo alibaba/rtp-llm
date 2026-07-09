@@ -30,7 +30,10 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import StatusVersionPB
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2_grpc import (
     MultimodalRpcServiceStub,
 )
-from rtp_llm.server.vit_proxy_server import VitProxyServer
+from rtp_llm.server.vit_proxy_server import (
+    DEFAULT_PROXY_RPC_TIMEOUT_SECONDS,
+    VitProxyServer,
+)
 
 setup_logging()
 
@@ -74,10 +77,18 @@ def vit_proxy_start_server(
 
     # 创建并启动代理服务器（gRPC）
     load_balance_strategy = py_env_configs.vit_config.vit_proxy_load_balance_strategy
+    # Align proxy default timeout with VitConfig.mm_timeout_ms so the proxy does
+    # not give up earlier than the downstream worker's own deadline.
+    mm_timeout_ms = py_env_configs.vit_config.mm_timeout_ms
+    if mm_timeout_ms is None or mm_timeout_ms <= 0:
+        default_rpc_timeout_seconds = DEFAULT_PROXY_RPC_TIMEOUT_SECONDS
+    else:
+        default_rpc_timeout_seconds = mm_timeout_ms / 1000.0
     proxy_server = VitProxyServer(
         worker_addresses=worker_addresses,
         external_grpc_port=grpc_port,
         load_balance_strategy=load_balance_strategy,
+        default_rpc_timeout_seconds=default_rpc_timeout_seconds,
     )
     logging.info(f"[VIT_PROXY] Using load balance strategy: {load_balance_strategy}")
 

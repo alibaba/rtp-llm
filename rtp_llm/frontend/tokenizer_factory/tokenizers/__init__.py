@@ -76,4 +76,6 @@ from .llava_tokenizer import LlavaTokenizer
 from .qwen_tokenizer import QWenTokenizer, QWenV2Tokenizer
 
 if has_internal_source():
-    import internal_source.rtp_llm.tokenizers.internal_init
+    # Phase-25 namespace merge: rtp_llm.tokenizers resolves to
+    # internal_source/rtp_llm/tokenizers via the extended __path__ (no OSS counterpart).
+    from rtp_llm.tokenizers import internal_init  # noqa: F401

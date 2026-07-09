@@ -2,6 +2,7 @@
 import logging
 import os
 
+import pytest
 import torch
 import torch.distributed
 import torch.multiprocessing as mp
@@ -32,6 +33,8 @@ from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.routers.deepep_low_la
 from rtp_llm.ops import MoeConfig, NcclCommConfig, ParallelismConfig, RuntimeConfig
 from rtp_llm.test.utils.numeric_util import per_token_cast_back
 from rtp_llm.test.utils.port_util import PortManager, PortsContext
+
+pytestmark = [pytest.mark.gpu(type="H20", count=2)]
 
 NUM_TOKEN_PER_RANK = 64
 HIDDEN_SIZE = 7168
@@ -305,21 +308,23 @@ def test_deepep_low_latency_router():
     world_size = 2
     test_tp_sizes = [1, 2]
 
-    for use_fp8 in [True, False]:
-        for test_tp_size in test_tp_sizes:
-            logging.info(
-                f"test_deepep_low_latency_router: use_fp8: {use_fp8}, test_tp_size: {test_tp_size}, world_size: {world_size}"
-            )
-            mp.spawn(  # pyright: ignore[reportPrivateImportUsage]
-                _spawn_wrapper,
-                args=(use_fp8, world_size, test_tp_size, nccl_port),
-                nprocs=world_size,
-                join=True,
-            )
-
-    # Release locks after all tests complete
-    for lock in locks:
-        lock.__exit__(None, None, None)
+    try:
+        for use_fp8 in [True, False]:
+            for test_tp_size in test_tp_sizes:
+                logging.info(
+                    f"test_deepep_low_latency_router: use_fp8: {use_fp8}, test_tp_size: {test_tp_size}, world_size: {world_size}"
+                )
+                mp.spawn(  # pyright: ignore[reportPrivateImportUsage]
+                    _spawn_wrapper,
+                    args=(use_fp8, world_size, test_tp_size, nccl_port),
+                    nprocs=world_size,
+                    join=True,
+                )
+    finally:
+        # Release port locks even if mp.spawn raises, so the reserved ports
+        # are not leaked until the process exits.
+        for lock in locks:
+            lock.__exit__(None, None, None)
 
 
 if __name__ == "__main__":

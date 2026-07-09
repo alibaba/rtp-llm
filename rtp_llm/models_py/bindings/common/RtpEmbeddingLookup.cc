@@ -19,6 +19,7 @@ void embedding(at::Tensor&               output,
                std::optional<at::Tensor> text_tokens_mask) {
     CHECK_INPUT(input);
     CHECK_INPUT(weight);
+    CHECK_INPUT(output);
     auto device = input.device();
     CHECK_EQ(weight.device(), device);
     CHECK_DIM(1, input);   // input: (tokens)
@@ -32,6 +33,23 @@ void embedding(at::Tensor&               output,
     auto       tensor_data_or_null = [](const std::optional<at::Tensor>& t) -> const int* {
         return (t.has_value() && t.value().defined() && t.value().numel() > 0) ? t.value().data_ptr<int>() : nullptr;
     };
+
+    // Validate optional int tensors when they are actually provided.
+    auto validate_optional_int_tensor = [&](const std::optional<at::Tensor>& t, const char* name) {
+        if (!t.has_value() || !t.value().defined() || t.value().numel() == 0) {
+            return;
+        }
+        const auto& tensor = t.value();
+        CHECK_INPUT(tensor);
+        CHECK_EQ(tensor.device(), device);
+        CHECK_EQ(tensor.dtype(), at::kInt);
+        CHECK_DIM(1, tensor);
+        CHECK_EQ(tensor.size(0), tokens);
+    };
+    validate_optional_int_tensor(position_ids, "position_ids");
+    validate_optional_int_tensor(token_type_ids, "token_type_ids");
+    validate_optional_int_tensor(text_tokens_mask, "text_tokens_mask");
+
     auto* pos_ptr  = tensor_data_or_null(position_ids);
     auto* type_ptr = tensor_data_or_null(token_type_ids);
     auto* mask_ptr = tensor_data_or_null(text_tokens_mask);

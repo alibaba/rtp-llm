@@ -2,6 +2,7 @@ import multiprocessing as mp
 import random
 from typing import List
 
+import pytest
 import torch
 
 from rtp_llm.config.engine_config import EngineConfig
@@ -11,10 +12,14 @@ from rtp_llm.models_py.distributed.collective_torch import (
     destroy_distributed_environment,
     init_distributed_environment,
 )
-from rtp_llm.models_py.distributed.deepep_wrapper import (
-    DeepEPWrapper,
-    init_deepep_wrapper,
-)
+
+try:
+    from rtp_llm.models_py.distributed.deepep_wrapper import (
+        DeepEPWrapper,
+        init_deepep_wrapper,
+    )
+except ImportError as e:
+    pytest.skip(f"deep_ep unavailable: {e}", allow_module_level=True)
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
 )
@@ -28,6 +33,8 @@ from rtp_llm.ops import MoeConfig, NcclCommConfig, ParallelismConfig
 from rtp_llm.test.utils.port_util import PortManager
 
 import rtp_llm.ops.compute_ops as compute_ops  # isort:skip
+
+pytestmark = [pytest.mark.gpu(type="MI308X")]
 
 # from libth_transformer.rtp_llm_ops import trt_fp8_quantize_128  # isort:skip
 
@@ -173,7 +180,7 @@ def worker_function(
         destroy_distributed_environment()
 
 
-def test_single(world_size: int, use_fp8: bool):
+def run_single(world_size: int, use_fp8: bool):
     port_manager = PortManager()
     ports, locks = port_manager.get_consecutive_ports(1)
     nccl_port = ports[0]
@@ -236,7 +243,7 @@ if __name__ == "__main__":
     available_world_sizes = [ws for ws in [2, 4] if ws <= max_gpu_count]
     print(f"可用的world_size: {available_world_sizes}")
 
-    # 为每个world_size运行test_single函数
+    # 为每个world_size运行run_single函数
     for use_fp8 in [False]:
         for world_size in available_world_sizes:
-            test_single(world_size, use_fp8)
+            run_single(world_size, use_fp8)

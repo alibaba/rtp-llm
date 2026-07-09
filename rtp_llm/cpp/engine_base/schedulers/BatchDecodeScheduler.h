@@ -5,9 +5,11 @@
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cache/Types.h"
 #include <atomic>
+#include <map>
 #include <mutex>
 #include <condition_variable>
 #include <list>
+#include <unordered_set>
 
 namespace rtp_llm {
 
@@ -133,21 +135,103 @@ public:
     }
 
     void evaluateWaitingStreams() {
-        // 清理 waiting_streams_ 中有错误的 stream
-        waiting_streams_.remove_if([](const auto& s) { return s->hasError(); });
+        // 清理 waiting_streams_ 中有错误或已结束的 stream
+        waiting_streams_.remove_if([](const auto& s) {
+            return s->hasError() || s->getStatus() == StreamState::FINISHED;
+        });
+
+        // Group streams by ReturnAllProbsMode to avoid mixing DEFAULT and ORIGINAL
+        // in one batch.  NONE streams are wildcards and can join either group.
+        std::map<ReturnAllProbsMode, std::list<GenerateStreamPtr>> mode_groups;
+        for (auto& s : waiting_streams_) {
+            if (!s->hasError()) {
+                mode_groups[s->getReturnAllProbs()].push_back(s);
+            }
+        }
+
+        // Choose which concrete ReturnAllProbsMode group to serve this round.
+        //
+        // Default policy favours throughput: pick the non-NONE group with the
+        // most streams.  That alone can starve a minority mode (e.g. a few
+        // ORIGINAL requests stuck behind a steady stream of DEFAULT ones), so a
+        // fairness override kicks in: if any non-NONE group's oldest stream has
+        // waited longer than the starvation threshold, serve the group whose
+        // oldest stream arrived earliest.  This bounds each group's worst-case
+        // wait to ~starvation_threshold instead of "forever".
+        const int64_t now_us = autil::TimeUtility::currentTimeInMicroSeconds();
+        const int64_t starvation_threshold_us =
+            std::chrono::duration_cast<std::chrono::microseconds>(2 * kFlushTimeoutMs).count();
+
+        ReturnAllProbsMode selected_mode = ReturnAllProbsMode::NONE;
+        size_t             max_count     = 0;
+
+        ReturnAllProbsMode starved_mode       = ReturnAllProbsMode::NONE;
+        int64_t            starved_arrival_us = 0;
+        bool               has_starved        = false;
+        for (auto& [mode, streams] : mode_groups) {
+            if (mode == ReturnAllProbsMode::NONE || streams.empty()) {
+                continue;
+            }
+            // Groups are built by iterating waiting_streams_ in arrival order,
+            // so front() is the group's oldest stream.
+            const int64_t arrival_us = streams.front()->enqueueTime();
+            if (now_us - arrival_us > starvation_threshold_us
+                && (!has_starved || arrival_us < starved_arrival_us)) {
+                has_starved        = true;
+                starved_arrival_us = arrival_us;
+                starved_mode       = mode;
+            }
+        }
+
+        if (has_starved) {
+            selected_mode = starved_mode;
+            max_count     = mode_groups[selected_mode].size();
+        } else {
+            // Throughput default: the non-NONE group with the most streams.
+            for (auto& [mode, streams] : mode_groups) {
+                if (mode == ReturnAllProbsMode::NONE) {
+                    continue;
+                }
+                if (streams.size() > max_count) {
+                    max_count     = streams.size();
+                    selected_mode = mode;
+                }
+            }
+        }
+        auto& none_streams = mode_groups[ReturnAllProbsMode::NONE];
+        if (selected_mode == ReturnAllProbsMode::NONE && !none_streams.empty()) {
+            selected_mode = ReturnAllProbsMode::NONE;
+            max_count     = none_streams.size();
+        }
+
+        if (max_count == 0) {
+            return;
+        }
+
+        // Build the candidate list from the selected concrete mode plus all NONE
+        // streams.  This lets compatible wildcard requests batch together instead
+        // of being stranded in their own group.
+        std::list<GenerateStreamPtr> candidates;
+        if (selected_mode != ReturnAllProbsMode::NONE) {
+            auto& selected_group = mode_groups[selected_mode];
+            candidates.splice(candidates.end(), selected_group);
+        }
+        candidates.splice(candidates.end(), none_streams);
 
         std::list<GenerateStreamPtr> new_streams;
-        for (auto it = waiting_streams_.begin(); it != waiting_streams_.end(); it++) {
-            // 先检查是否有错误，避免错误请求占用资源
-            if (!(*it)->hasError()) {
-                new_streams.push_back(*it);
-            }
+        for (auto& s : candidates) {
+            new_streams.push_back(s);
             if (new_streams.size() >= batch_size_) {
                 break;
             }
         }
-        // 凑到batch_size_个stream再统一入队
-        if (new_streams.size() >= batch_size_) {
+        // Schedule any non-empty compatible group.  Waiting for a full batch
+        // would strand smaller groups (e.g., mixed DEFAULT/ORIGINAL all-probs
+        // modes) when the total never reaches batch_size_.  The caller wakes
+        // up at most every kFlushTimeoutMs to batch as much as possible while
+        // still flushing partial groups promptly.
+        bool should_schedule = !new_streams.empty();
+        if (should_schedule) {
             for (auto& stream : new_streams) {
                 stream->reportEvent(StreamEvents::CanRun);
                 // 忙等stream load cache done, 和原有SyncLoadCache逻辑等效
@@ -159,9 +243,15 @@ public:
             new_streams.remove_if([](const auto& s) { return s->getStatus() == StreamState::FINISHED; });
             running_streams_.insert(running_streams_.end(), new_streams.begin(), new_streams.end());
             // 从waiting_streams_中移除已调度的stream
+            // Use a set + single remove_if to avoid O(batch_size * waiting_size)
+            std::unordered_set<GenerateStream*> scheduled_ptrs;
+            scheduled_ptrs.reserve(new_streams.size());
             for (auto& stream : new_streams) {
-                waiting_streams_.remove(stream);
+                scheduled_ptrs.insert(stream.get());
             }
+            waiting_streams_.remove_if([&](const GenerateStreamPtr& s) {
+                return scheduled_ptrs.count(s.get()) > 0;
+            });
         }
     }
 
@@ -183,19 +273,42 @@ public:
         }
     }
 
+    // Maximum time a compatible group of waiting streams may sit before being
+    // scheduled as a partial batch.  Prevents mixed ReturnAllProbsMode groups
+    // (or low-traffic periods) from waiting forever for a full batch_size_.
+    static constexpr std::chrono::milliseconds kFlushTimeoutMs{100};
+
     absl::StatusOr<std::list<GenerateStreamPtr>> schedule() override {
         std::unique_lock<std::mutex> lock(lock_);
-        cond_.wait_for(lock, std::chrono::seconds(30), [this] {
-            return waiting_streams_.size() >= batch_size_ || running_streams_.size() > 0
+        // Phase 1: park until there is any work at all. A long timeout avoids CPU spinning while
+        // fully idle; enqueue() notifies as soon as a request arrives, so we wake promptly on the
+        // first waiting stream rather than sleeping the whole interval.
+        cond_.wait_for(lock, std::chrono::seconds(5), [this] {
+            return !waiting_streams_.empty() || running_streams_.size() > 0
                    || !loading_cache_streams_.empty();
         });
+
+        // Phase 2: we have a waiting batch that has not yet reached batch_size_ and nothing is
+        // running. Give it up to kFlushTimeoutMs to fill; wake early if it reaches batch_size_ or
+        // running/loading work appears. When the timer expires the predicate stays false and we
+        // fall through to flush a partial batch -- this is what keeps low-traffic or mixed
+        // ReturnAllProbsMode groups from waiting forever for a full batch_size_.
+        if (running_streams_.empty() && !waiting_streams_.empty()
+            && waiting_streams_.size() < batch_size_) {
+            cond_.wait_for(lock, kFlushTimeoutMs, [this] {
+                return waiting_streams_.size() >= batch_size_ || running_streams_.size() > 0
+                       || !loading_cache_streams_.empty();
+            });
+        }
 
         // 统一通过状态机驱动各队列中 stream 的状态转移
         // LOADING_CACHE -> DONE/WAITING: error / load cache done
         evaluateAndUpdateStreams(loading_cache_streams_);
         evaluateAndUpdateStreams(running_streams_);
 
-        if (running_streams_.empty() && waiting_streams_.size() >= batch_size_) {
+        // No running work but streams are waiting -> schedule them. By this point either the batch
+        // is full or the flush timeout elapsed, so a partial batch is intentional.
+        if (running_streams_.empty() && !waiting_streams_.empty()) {
             evaluateWaitingStreams();
             if (!running_streams_.empty()) {
                 initRunningStreams();

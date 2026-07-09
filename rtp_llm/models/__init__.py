@@ -1,3 +1,23 @@
+import os as _os
+
+# Phase-25 namespace merge: extend `rtp_llm.models.__path__` with the sibling
+# internal_source/rtp_llm/models tree so internal models (tbstars, flot,
+# mixtbstars, vision_bert, video_logics, etc.) are reachable as
+# `rtp_llm.models.X` without the `internal_source.` prefix.
+_internal_dir = _os.path.normpath(
+    _os.path.join(
+        _os.path.dirname(_os.path.abspath(__file__)),
+        "..",
+        "..",
+        "internal_source",
+        "rtp_llm",
+        "models",
+    )
+)
+if _os.path.isdir(_internal_dir) and _internal_dir not in __path__:
+    __path__.append(_internal_dir)
+del _os, _internal_dir
+
 import platform
 
 from .base_model import BaseModel
@@ -44,4 +64,6 @@ from .qwen_v2_moe import Qwen2Moe
 from .qwen_v3_moe import Qwen3Moe
 
 if has_internal_source():
-    import internal_source.rtp_llm.models.internal_init
+    # Phase-25: post-namespace-merge, internal_init is reachable via the
+    # extended path as `rtp_llm.models.internal_init`.
+    from rtp_llm.models import internal_init  # noqa: F401

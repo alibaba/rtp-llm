@@ -223,6 +223,13 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
             else None
         )
         context_batch_size = attn_inputs.input_lengths.shape[0]
+        # Validate on CPU once before entering the FlyDSL hot path; GPU tensors are
+        # assumed to have been produced from already-validated host lengths.
+        if not attn_inputs.input_lengths.is_cuda and (attn_inputs.input_lengths <= 0).any():
+            raise ValueError(
+                "FlyDSL GDN requires all input lengths > 0, but got "
+                f"{attn_inputs.input_lengths.tolist()}"
+            )
         # cu_seqlens_without_padding = attn_inputs.cu_seqlens_device[: context_batch_size + 1]
         cu_seqlens_without_padding = attn_inputs.cu_seqlens_device
         initial_states: Optional[torch.Tensor] = None
@@ -516,6 +523,7 @@ class Qwen3NextAttention(CausalAttention):
         layernorm_eps: float,
         quant_config: Optional[object] = None,
         hw_kernel_config: Optional["HWKernelConfig"] = None,
+        layer_idx: int = 0,
     ):
         super().__init__(
             attn_config,
@@ -524,6 +532,7 @@ class Qwen3NextAttention(CausalAttention):
             layernorm_eps,
             quant_config,
             hw_kernel_config=hw_kernel_config,
+            layer_idx=layer_idx,
         )
         # maybe fuse gate in qkv_proj later
         self.gate = LinearFactory.create_linear_from_weights(
@@ -951,6 +960,7 @@ class Qwen3NextDecoderLayer(nn.Module):
                 config.layernorm_eps,
                 config.quant_config,
                 hw_kernel_config=hw_kernel_config,
+                layer_idx=layer_idx,
             )
 
         if config.moe_style == 2:

@@ -4,6 +4,10 @@ import unittest
 from typing import Any, Optional
 from unittest.mock import MagicMock, patch
 
+import pytest
+
+pytestmark = [pytest.mark.gpu(type="H20")]
+
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.config.quant_config import (
     Fp8BlockWiseQuantConfig,
@@ -510,6 +514,26 @@ class TestCudaFp8PerTensorNoDPStrategy(unittest.TestCase):
         self.assertEqual(strategy.priority, expected_priority)
 
 
+# SKIP REASON (2026-05-01): The CudaW4a8Int4PerChannelNoDPStrategy lazily imports
+# `rtp_llm/models_py/modules/factory/fused_moe/impl/cuda/executors/cutlass_w4a8_moe.py`
+# inside `get_attributes()` (and `can_handle()` reads quant config which exercises
+# the same code path). That executor module top-level imports
+# `from rtp_kernel.w4a8_group_gemm import w4a8_group_gemm_ptpc, compute_reorder_stride`,
+# but the currently published wheel (`rtp_kernel_260317`, see
+# `_build/oss_optional_extras.toml`) was built 2026-03-17 and does NOT export
+# `compute_reorder_stride` — that symbol was added on 2026-04-22 in commit
+# `adc5f0d5f feat: support w4a8 shuffle` and the wheel hasn't been rebuilt
+# yet. Skip until the wheel pin is bumped to a release containing the new
+# symbols. Same root cause as the importorskip in
+# `rtp_llm/models_py/kernels/cuda/test/cutlass_w4a8_group_gemm_test.py`.
+@pytest.mark.skip(
+    reason=(
+        "rtp_kernel wheel pin (rtp_kernel_260317, built 2026-03-17) lacks "
+        "compute_reorder_stride which cutlass_w4a8_moe.py imports at top level. "
+        "Symbol added 2026-04-22 in commit adc5f0d5f but wheel not yet rebuilt. "
+        "Re-enable after bumping rtp_kernel pin in _build/oss_optional_extras.toml."
+    )
+)
 class TestCudaW4a8Int4PerChannelNoDPStrategy(unittest.TestCase):
     """Test CUDA W4A8 INT4 PerChannel single GPU strategy"""
 

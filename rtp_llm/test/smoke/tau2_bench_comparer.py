@@ -11,8 +11,8 @@ import tempfile
 import urllib.request
 from typing import Any, List, Optional
 
-from smoke.base_comparer import BaseComparer
-from smoke.common_def import ABS_PATH, REL_PATH, QueryStatus, SmokeException
+from rtp_llm.test.smoke.base_comparer import BaseComparer
+from rtp_llm.test.smoke.common_def import ABS_PATH, REL_PATH, QueryStatus, SmokeException
 
 TAU2_TARBALL_URL = os.environ.get(
     "TAU2_TARBALL_URL",
@@ -75,7 +75,7 @@ class Tau2BenchComparer(BaseComparer):
         logging.info(f"[TAU2] PASS: OVERALL score={score} >= threshold={threshold}")
 
     def _pip_install(self, args: List[str]) -> None:
-        cmd = [sys.executable, "-m", "pip", "install", "--quiet"] + args
+        cmd = [sys.executable, "-m", "pip", "install", "--compile", "--quiet"] + args
         logging.info(f"[TAU2] pip install: {' '.join(cmd)}")
         subprocess.run(cmd, check=True)
 
@@ -149,7 +149,17 @@ class Tau2BenchComparer(BaseComparer):
             urllib.request.urlretrieve(TAU2_TARBALL_URL, tarball_path)
             logging.info(f"[TAU2] extracting to {dest_dir}")
             with tarfile.open(tarball_path, "r:gz") as tar:
-                tar.extractall(path=dest_dir)
+                # filter="data" rejects unsafe members (absolute paths, ".."
+                # traversal, device/link files). Available in 3.12 and backported
+                # to 3.9.17+/3.10.12+/3.11.4+; fall back on older interpreters.
+                try:
+                    tar.extractall(path=dest_dir, filter="data")
+                except TypeError:
+                    logging.warning(
+                        "[TAU2] tarfile.extractall filter='data' unsupported on "
+                        "this Python; extracting without path-traversal filtering"
+                    )
+                    tar.extractall(path=dest_dir)
         finally:
             try:
                 os.remove(tarball_path)

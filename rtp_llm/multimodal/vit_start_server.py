@@ -1,5 +1,6 @@
 import logging
 
+import torch
 from setproctitle import setproctitle
 
 from rtp_llm.config.engine_config import EngineConfig
@@ -55,11 +56,13 @@ def vit_start_server(
         app.start(grpc_port, http_port)
         return
 
+    local_device_id = server_id % torch.cuda.device_count()
+    torch.cuda.set_device(local_device_id)
     vit_process_engine = MultimodalMixinFactory.create_multimodal_process_engine(
         model_config=model_config,
         engine_config=engine_config,
         vit_config=py_env_configs.vit_config,
-        device="cuda",  # VIT always runs on a single GPU regardless of worker count
+        device=f"cuda:{local_device_id}",
         server_id=server_id,
         is_proxy_mode=is_proxy_mode,
     )

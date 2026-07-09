@@ -127,19 +127,13 @@ public:
     }
 
     // NOTE: Aggregates by "max mode" across all streams in the batch
-    // (NONE < DEFAULT < ORIGINAL). When the batch contains any ORIGINAL
-    // stream, the sampler runs the ORIGINAL path for the entire batch and
-    // DEFAULT streams will receive un-renormalized raw probabilities. This
-    // is intentional: it avoids per-row branching inside the sampler kernel.
-    // Callers that cannot tolerate this implicit degradation must ensure
-    // streams with different modes are not scheduled into the same batch.
-    //
-    // CORRECTNESS RISK: bot-flagged P1 — when DEFAULT and ORIGINAL streams
-    // coexist in a batch, the DEFAULT-requesting consumer silently gets raw
-    // (un-softmaxed) probabilities. We emit a one-shot WARNING per process
-    // below so this isn't completely silent; long-term the scheduler should
-    // batch-partition by mode, or the sampler should branch per-row. See
-    // PR #349 review for context.
+    // (NONE < DEFAULT < ORIGINAL). The scheduler (FIFOScheduler /
+    // BatchDecodeScheduler) now partitions streams so that DEFAULT and
+    // ORIGINAL are not scheduled into the same batch; therefore mixed
+    // DEFAULT+ORIGINAL batches should not reach this path in normal
+    // operation. The one-shot warning below remains as a defensive guard for
+    // code paths that construct StreamGroups directly without scheduler
+    // partitioning.
     ReturnAllProbsMode needReturnAllProbs() const {
         // get the max return all probs mode from all streams
         ReturnAllProbsMode return_all_probs = ReturnAllProbsMode::NONE;

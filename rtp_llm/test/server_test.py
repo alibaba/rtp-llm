@@ -5,12 +5,16 @@ import sys
 from unittest import TestCase, main
 from unittest.mock import patch
 
+import pytest
+
+pytestmark = [pytest.mark.gpu(type="A10"), pytest.mark.manual]
+
 print(os.getcwd())
 print(
     "PYTHONPATH="
-    + os.environ["PYTHONPATH"]
+    + os.environ.get("PYTHONPATH", "")
     + " LD_LIBRARY_PATH="
-    + os.environ["LD_LIBRARY_PATH"]
+    + os.environ.get("LD_LIBRARY_PATH", "")
     + " "
     + sys.executable
     + " "

@@ -1,9 +1,9 @@
 load("//:def.bzl", "copts")
+load("@rtp_llm//bazel:defs.bzl", "torch_deps")
 load(
     "@arch_config//:arch_select.bzl",
     "no_block_copy_link_deps",
     "select_py_bindings",
-    "torch_deps",
 )
 
 package(default_visibility = ["//:__subpackages__"])

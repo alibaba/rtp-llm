@@ -3,13 +3,13 @@ from typing import Any, Dict
 
 import torch
 from pydantic import BaseModel
-from smoke.base_comparer import BaseComparer
-from smoke.common_def import QueryStatus, SmokeException
 
 from rtp_llm.models.downstream_modules.reranker.api_datatype import (
     VoyageRerankerRequest,
     VoyageRerankerResponse,
 )
+from rtp_llm.test.smoke.base_comparer import BaseComparer
+from rtp_llm.test.smoke.common_def import QueryStatus, SmokeException
 
 
 class RerankerComparer(BaseComparer):
@@ -32,12 +32,13 @@ class RerankerComparer(BaseComparer):
         rtol = 1e-2
         atol = 1e-2
         if len(expect_result.results) != len(actual_result.results):
-            raise Exception(
+            raise SmokeException(
+                QueryStatus.COMPARE_FAILED,
                 f"result len is not equal: {len(expect_result.results)} vs {len(actual_result.results)}"
             )
         for left, right in zip(expect_result.results, actual_result.results):
             if left.document != right.document or left.index != right.index:
-                raise Exception(f"document or index error: left:{left}, right:{right}")
+                raise SmokeException(QueryStatus.COMPARE_FAILED, f"document or index error: left:{left}, right:{right}")
             res = torch.isclose(
                 torch.tensor(left.relevance_score),
                 torch.tensor(right.relevance_score),

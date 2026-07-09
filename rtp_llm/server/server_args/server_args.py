@@ -162,13 +162,13 @@ class EnvArgumentGroup:
 
 
 class EnvArgumentParser(argparse.ArgumentParser):
-    _env_mappings: Dict[str, str] = {}
 
     def __init__(self, *args, env_prefix: str = "", **kwargs):
         self.env_prefix = env_prefix.upper()
         self._groups: Dict[str, EnvArgumentGroup] = {}
         self._config_bindings: List[ConfigBinding] = []  # 配置绑定列表
         self._root_config: Optional[Any] = None  # 根配置对象（PyEnvConfigs）
+        self._env_mappings: Dict[str, str] = {}
 
         super().__init__(*args, **kwargs)
 
@@ -234,7 +234,7 @@ class EnvArgumentParser(argparse.ArgumentParser):
         else:
             full_env_name = effective_env_name
 
-        EnvArgumentParser._env_mappings[action.dest] = full_env_name
+        self._env_mappings[action.dest] = full_env_name
 
     def parse_args(
         self,
@@ -395,14 +395,14 @@ class EnvArgumentParser(argparse.ArgumentParser):
             if group_name in self._groups:
                 group = self._groups[group_name]._group
                 for action in group._group_actions:
-                    if action.dest in EnvArgumentParser._env_mappings:
+                    if action.dest in self._env_mappings:
                         logging.info(
-                            f"{action.dest:<20} -> {EnvArgumentParser._env_mappings[action.dest]}"
+                            f"{action.dest:<20} -> {self._env_mappings[action.dest]}"
                         )
             else:
                 logging.info(f"Group '{group_name}' not found.")
         else:
-            for dest, env_name in EnvArgumentParser._env_mappings.items():
+            for dest, env_name in self._env_mappings.items():
                 logging.info(f"{dest:<20} -> {env_name}")
 
         logging.info("-" * 50)
@@ -412,11 +412,11 @@ class EnvArgumentParser(argparse.ArgumentParser):
             group = self._groups[group_name]._group
             mappings = {}
             for action in group._group_actions:
-                if action.dest in EnvArgumentParser._env_mappings:
-                    mappings[action.dest] = EnvArgumentParser._env_mappings[action.dest]
+                if action.dest in self._env_mappings:
+                    mappings[action.dest] = self._env_mappings[action.dest]
             return mappings
         else:
-            return EnvArgumentParser._env_mappings.copy()
+            return self._env_mappings.copy()
 
 
 def init_all_group_args(
@@ -481,19 +481,25 @@ def init_all_group_args(
     init_grpc_group_args(parser, py_env_configs.grpc_config)
 
 
-def setup_args() -> PyEnvConfigs:
+def setup_args(args: Optional[List[str]] = None) -> PyEnvConfigs:
+    """Parse server arguments into PyEnvConfigs.
+
+    Args:
+        args: Explicit argument list. ``None`` (default) reads ``sys.argv`` as
+              usual.  Pass ``[]`` to skip command-line parsing and rely solely
+              on environment variables — useful in tests run under pytest where
+              ``sys.argv`` contains pytest's own flags.
+    """
+    if args is None and os.environ.get("PYTEST_CURRENT_TEST"):
+        # Under pytest, sys.argv belongs to pytest itself.
+        # Use env/defaults unless callers explicitly pass server args.
+        args = []
+
     parser = EnvArgumentParser(description="RTP LLM")
 
-    # 先创建配置对象
     py_env_configs = PyEnvConfigs()
-
-    # 设置根配置对象，用于解析字符串路径形式的 bind_to
     parser.set_root_config(py_env_configs)
-
-    # 使用统一的函数初始化所有参数组，并绑定到配置对象
     init_all_group_args(parser, py_env_configs)
-
-    # 解析参数（会自动应用所有配置绑定）
-    parsed_args = parser.parse_args()
+    parsed_args = parser.parse_args(args=args)
 
     return py_env_configs

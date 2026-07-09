@@ -4,6 +4,10 @@ import sys
 from typing import Callable, Optional
 from unittest import SkipTest, TestCase, main
 
+import pytest
+
+pytestmark = [pytest.mark.gpu(type="H20")]
+
 import torch
 
 device = torch.device(f"cuda")

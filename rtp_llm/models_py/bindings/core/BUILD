@@ -1,5 +1,5 @@
-load("//:def.bzl", "rpm_library", "copts")
-load("@arch_config//:arch_select.bzl", "torch_deps")
+load("//:def.bzl", "copts")
+load("@rtp_llm//bazel:defs.bzl", "torch_deps")
 
 cc_library(
     name = "types_hdr",

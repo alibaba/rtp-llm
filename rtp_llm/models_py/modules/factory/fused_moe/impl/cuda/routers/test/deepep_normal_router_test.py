@@ -2,6 +2,7 @@ import multiprocessing as mp
 import random
 from typing import List
 
+import pytest
 import torch
 
 from rtp_llm.config.engine_config import EngineConfig
@@ -33,6 +34,8 @@ from rtp_llm.test.utils.numeric_util import per_token_cast_back
 from rtp_llm.test.utils.port_util import PortManager
 
 from rtp_llm.ops.compute_ops import trt_fp8_quantize_128  # isort:skip
+
+pytestmark = [pytest.mark.gpu(type="H20", count=2)]
 
 
 def init_router(
@@ -204,6 +207,12 @@ def worker_function(
         destroy_distributed_environment()
 
 
+@pytest.mark.parametrize(
+    "world_size,test_tp_size,use_fp8",
+    [
+        pytest.param(2, 2, True, id="ws2_tp2_fp8"),
+    ],
+)
 def test_single(world_size: int, test_tp_size: int, use_fp8: bool):
     port_manager = PortManager()
     ports, locks = port_manager.get_consecutive_ports(1)
@@ -215,31 +224,31 @@ def test_single(world_size: int, test_tp_size: int, use_fp8: bool):
     # 启动world_size个进程
     processes = []
     token_num_per_rank = [random.randint(4, 12) // 4 * 4 for _ in range(dp_size)]
-    for rank in range(world_size):
-        # Calculate parallelism config for this rank
-        parallelism_config = ParallelismConfig()
-        parallelism_config.tp_size = test_tp_size
-        parallelism_config.tp_rank = rank % test_tp_size
-        parallelism_config.ep_size = ep_size
-        parallelism_config.ep_rank = rank % ep_size
-        parallelism_config.dp_size = dp_size
-        parallelism_config.dp_rank = rank // test_tp_size
-        parallelism_config.world_size = world_size
-        parallelism_config.world_rank = rank
-        parallelism_config.local_world_size = world_size
+    try:
+        for rank in range(world_size):
+            # Calculate parallelism config for this rank
+            parallelism_config = ParallelismConfig()
+            parallelism_config.tp_size = test_tp_size
+            parallelism_config.tp_rank = rank % test_tp_size
+            parallelism_config.ep_size = ep_size
+            parallelism_config.ep_rank = rank % ep_size
+            parallelism_config.dp_size = dp_size
+            parallelism_config.dp_rank = rank // test_tp_size
+            parallelism_config.world_size = world_size
+            parallelism_config.world_rank = rank
+            parallelism_config.local_world_size = world_size
 
-        # 创建进程
-        p = mp.Process(
-            target=worker_function,
-            args=(rank, use_fp8, token_num_per_rank, parallelism_config, nccl_port),
-            kwargs={},
-        )
-        processes.append(p)
-        p.start()
-
-    # Release locks after all processes start
-    for lock in locks:
-        lock.__exit__(None, None, None)
+            p = mp.get_context("spawn").Process(
+                target=worker_function,
+                args=(rank, use_fp8, token_num_per_rank, parallelism_config, nccl_port),
+            )
+            processes.append(p)
+            p.start()
+    finally:
+        # Release locks once processes have started (or on failure mid-loop), so
+        # the reserved ports are not leaked if p.start() raises.
+        for lock in locks:
+            lock.__exit__(None, None, None)
 
     for p in processes:
         p.join(timeout=300)

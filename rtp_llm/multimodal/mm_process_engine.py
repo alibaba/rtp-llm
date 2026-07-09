@@ -209,24 +209,24 @@ class MultiprocessPreprocessExecutor(PreprocessExecutor):
         if work_item.embedding_result is not None:
             return
 
-        try:
-            work_item.future = self.pool.apply_async(
-                _worker_process_task, args=(work_item.mm_inputs,)
-            )
-            return
-        except (BrokenPipeError, OSError, EOFError) as e:
-            # multiprocessing.Pool surfaces broken state via these — rebuild and retry once.
-            # Keep both rebuild and the retry submission under _pool_lock so another thread
-            # cannot tear self.pool down between our rebuild and the apply_async call.
-            logging.error(f"Pool broken on submit, rebuilding: {e}", exc_info=True)
-            with self._pool_lock:
+        # Keep the entire apply_async (and rebuild+retry) inside _pool_lock so
+        # another thread cannot replace self.pool between our read and submit.
+        with self._pool_lock:
+            try:
+                work_item.future = self.pool.apply_async(
+                    _worker_process_task, args=(work_item.mm_inputs,)
+                )
+                return
+            except (BrokenPipeError, OSError, EOFError) as e:
+                # multiprocessing.Pool surfaces broken state via these — rebuild and retry once.
+                logging.error(f"Pool broken on submit, rebuilding: {e}", exc_info=True)
                 self._rebuild_pool()
                 work_item.future = self.pool.apply_async(
                     _worker_process_task, args=(work_item.mm_inputs,)
                 )
-        except Exception as e:
-            logging.error(f"Unexpected error during submission: {e}", exc_info=True)
-            raise
+            except Exception as e:
+                logging.error(f"Unexpected error during submission: {e}", exc_info=True)
+                raise
 
     def get_result(self, work_item: "MMWorkItem") -> None:
         if work_item.future is None:
@@ -340,7 +340,14 @@ class MMWorkItem:
         # proto3 default for unset int is 0; treat <= 0 as "not set" and fall back to the
         # caller-provided default (which comes from VitConfig.mm_timeout_ms, always initialized
         # at server startup via --mm_timeout_ms / MM_TIMEOUT_MS env, default 120000ms).
-        per_request_timeout = self.mm_inputs[0].mm_preprocess_config.mm_timeout_ms
+        # Use the maximum positive timeout across the batch to align with the remote
+        # gRPC deadline semantics (RemoteMultimodalProcessor uses max_timeout_ms).
+        positive_timeouts = [
+            mm_input.mm_preprocess_config.mm_timeout_ms
+            for mm_input in self.mm_inputs
+            if mm_input.mm_preprocess_config.mm_timeout_ms > 0
+        ]
+        per_request_timeout = max(positive_timeouts) if positive_timeouts else 0
         self.mm_timeout_ms = (
             per_request_timeout if per_request_timeout > 0 else mm_timeout_ms
         )
@@ -474,6 +481,13 @@ class MMProcessEngine:
         mm_preprocess_configs: List[Any],
     ) -> MMEmbeddingRes:
         """Process multimodal inputs from C++ interface."""
+        lengths = [len(urls), len(types), len(tensors), len(mm_preprocess_configs)]
+        if len(set(lengths)) != 1:
+            raise ValueError(
+                f"Multimodal C++ input list lengths must match: "
+                f"urls={lengths[0]}, types={lengths[1]}, tensors={lengths[2]}, "
+                f"mm_preprocess_configs={lengths[3]}"
+            )
         mm_inputs = [
             MultimodalInput(
                 url, MMUrlType(url_type), tensor, MMPreprocessConfig(*config)
@@ -586,15 +600,29 @@ class MMProcessEngine:
                         )
             kmonitor.report(GaugeMetrics.VIT_EMBEDDING_RT_METRIC, route_timer.cost_ms())
 
-            if batch_outputs is not None:
-                for (idx, work_item), result in zip(pending_items, batch_outputs):
-                    work_item.embedding_result = result
-                    if work_item.need_check_cache:
-                        vit_emb_cache_.insert_cache(work_item.cache_key, result)
-                    ordered_emb[idx] = result[0]
-                    ordered_pos[idx] = result[1]
-                    if len(result) > 2:
-                        ordered_tensor[idx] = result[2]
+            if batch_outputs is None:
+                raise ValueError(
+                    f"batched_embedding returned None for {len(pending_items)} pending items"
+                )
+            if len(batch_outputs) != len(pending_items):
+                raise ValueError(
+                    f"batched_embedding returned {len(batch_outputs)} results, "
+                    f"expected {len(pending_items)}"
+                )
+            for result in batch_outputs:
+                if result is None or len(result) < 2:
+                    raise ValueError(
+                        f"batched_embedding result missing embedding/position: {result}"
+                    )
+
+            for (idx, work_item), result in zip(pending_items, batch_outputs):
+                work_item.embedding_result = result
+                if work_item.need_check_cache:
+                    vit_emb_cache_.insert_cache(work_item.cache_key, result)
+                ordered_emb[idx] = result[0]
+                ordered_pos[idx] = result[1]
+                if len(result) > 2:
+                    ordered_tensor[idx] = result[2]
 
         for emb, pos, tensor in zip(ordered_emb, ordered_pos, ordered_tensor):
             emb_res.extend(self._maybe_tensor_to_list(emb, dim=2))

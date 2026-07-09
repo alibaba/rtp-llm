@@ -97,9 +97,44 @@ static void rejectMropeWithoutPositionIds(const RopeConfig& rope_config, const c
     }
 }
 
+// Runtime validation for Mrope combo_position_ids: fail fast instead of silently
+// passing nullptr / wrong positions to the kernel.
+static void validateMropePositionIds(const torch::Tensor& position_ids,
+                                     int                  token_num,
+                                     int                  index_factor,
+                                     const char*          where) {
+    if (!position_ids.defined()) {
+        throw std::runtime_error(std::string(where)
+                                 + ": RopeStyle::Mrope requires combo_position_ids, but none was provided.");
+    }
+    if (position_ids.dtype() != torch::kInt32) {
+        throw std::runtime_error(std::string(where) + ": RopeStyle::Mrope combo_position_ids must be int32, got "
+                                 + c10::toString(position_ids.dtype()) + ".");
+    }
+    if (!position_ids.is_cuda()) {
+        throw std::runtime_error(std::string(where)
+                                 + ": RopeStyle::Mrope combo_position_ids must reside on a CUDA device.");
+    }
+    if (!position_ids.is_contiguous()) {
+        throw std::runtime_error(std::string(where)
+                                 + ": RopeStyle::Mrope combo_position_ids must be contiguous.");
+    }
+    // token_num <= 0 means the caller only wants the defined/dtype/device/contiguous
+    // checks without the length assertion (e.g., prepare() before qkv is available).
+    if (token_num > 0) {
+        const int64_t expected = static_cast<int64_t>(token_num) * index_factor;
+        if (position_ids.numel() < expected) {
+            throw std::runtime_error(std::string(where) + ": RopeStyle::Mrope combo_position_ids numel ("
+                                     + std::to_string(position_ids.numel()) + ") is less than required ("
+                                     + std::to_string(expected) + ").");
+        }
+    }
+}
+
 FusedRopeKVCachePrefillOpBase::FusedRopeKVCachePrefillOpBase(const AttentionConfigs& attn_configs):
     attn_configs_(attn_configs) {
-    rejectMropeWithoutPositionIds(attn_configs.rope_config, "FusedRopeKVCachePrefillOp");
+    // Mrope rejection moved to prepare/forward — combo_position_ids may be
+    // available at runtime even though the ctor cannot inspect them.
 }
 
 FusedRopeKVCachePrefillOpAsm::FusedRopeKVCachePrefillOpAsm(const AttentionConfigs& attn_configs):
@@ -151,7 +186,14 @@ CKAttnPtr FusedRopeKVCachePrefillOpBase::prepare(torch_ext::PyAttentionInputs at
         attn_params->position_ids =
             attn_params->position_ids.to(torch::kCUDA, /*non_blocking=*/false, /*copy=*/true).contiguous();
     }
-    
+
+    if (attn_configs_.rope_config.style == RopeStyle::Mrope) {
+        // Length check is deferred to forward() where token_num is known from qkv without sync.
+        validateMropePositionIds(
+            attn_params->position_ids, 0, attn_configs_.rope_config.index_factor,
+            "FusedRopeKVCachePrefillOpBase::prepare");
+    }
+
     int max_prefix_length = 0;
     if (has_prefix && attn_params->prefix_lengths.defined() && attn_params->prefix_lengths.numel() > 0) {
         max_prefix_length = attn_params->prefix_lengths.max().item<int32_t>();
@@ -169,6 +211,12 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> FusedRopeKVCachePrefillO
     const int size_per_head     = attn_configs_.size_per_head;
     const int token_num         = qkv.size(0);
     const int batch_size        = params->cu_seqlens.size(0) - 1;
+
+    if (attn_configs_.rope_config.style == RopeStyle::Mrope) {
+        validateMropePositionIds(
+            params->position_ids, token_num, attn_configs_.rope_config.index_factor,
+            "FusedRopeKVCachePrefillOpBase::forward");
+    }
     const int seq_len =
         params->prefill_runtime_max_seq_len >= 0 ? params->prefill_runtime_max_seq_len : params->max_seq_len;
     const int max_prefix_length =
@@ -353,7 +401,8 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> FusedRopeKVCachePrefillO
 
 FusedRopeKVCacheDecodeOpBase::FusedRopeKVCacheDecodeOpBase(const AttentionConfigs& attn_configs):
     attn_configs_(attn_configs) {
-    rejectMropeWithoutPositionIds(attn_configs.rope_config, "FusedRopeKVCacheDecodeOp");
+    // Mrope rejection moved to prepare/forward — combo_position_ids may be
+    // available at runtime even though the ctor cannot inspect them.
 }
 
 FusedRopeKVCacheDecodeOpAsm::FusedRopeKVCacheDecodeOpAsm(const AttentionConfigs& attn_configs):
@@ -396,6 +445,13 @@ CKAttnPtr FusedRopeKVCacheDecodeOpBase::prepare(torch_ext::PyAttentionInputs att
     if (attn_params->position_ids.defined() && !attn_params->position_ids.is_cuda()) {
         attn_params->position_ids =
             attn_params->position_ids.to(torch::kCUDA, /*non_blocking=*/false, /*copy=*/true).contiguous();
+    }
+
+    if (attn_configs_.rope_config.style == RopeStyle::Mrope) {
+        validateMropePositionIds(attn_params->position_ids,
+                                 attn_inputs.sequence_lengths.size(0),
+                                 attn_configs_.rope_config.index_factor,
+                                 "FusedRopeKVCacheDecodeOpBase::prepare");
     }
 
     if (attn_inputs.kv_cache_kernel_block_id_device.defined()
@@ -454,10 +510,18 @@ torch::Tensor FusedRopeKVCacheDecodeOpBase::forward(const torch::Tensor&        
     // Always use aiter_pa for ROCm
     hipStream_t stream_ = GET_CURRENT_STREAM();
 
+    if (attn_configs_.rope_config.style == RopeStyle::Mrope) {
+        validateMropePositionIds(
+            params->position_ids, token_num, attn_configs_.rope_config.index_factor,
+            "FusedRopeKVCacheDecodeOpBase::forward");
+    }
+
     int* position_ids_ptr = nullptr;
     if (params->position_ids.defined()) {
         position_ids_ptr = params->position_ids.data_ptr<int>();
-    } else {
+    } else if (attn_configs_.rope_config.style != RopeStyle::Mrope) {
+        // Non-Mrope decode may fall back to sequence_lengths; Mrope must provide combo_position_ids
+        // (validated above).
         position_ids_ptr = params->sequence_lengths.data_ptr<int>();
     }
 

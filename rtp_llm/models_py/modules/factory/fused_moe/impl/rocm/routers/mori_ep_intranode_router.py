@@ -42,6 +42,12 @@ class MoriEpIntranodeRouter(FusedMoeDataRouter):
     ):
         super().__init__(config, quant_config)
 
+        if not MoriEPWrapper.is_initialized():
+            raise RuntimeError(
+                "MoriEpIntranodeRouter requires MoriEPWrapper to be initialized. "
+                "Call init_moriep_wrapper_from_config() before building the model."
+            )
+
         self.ep_size = config.ep_size
         self.ep_rank = config.ep_rank
         self.expert_num = config.expert_num
@@ -83,7 +89,7 @@ class MoriEpIntranodeRouter(FusedMoeDataRouter):
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
     ) -> ExpertForwardPayload:
-        logging.info(
+        logging.debug(
             f"[MoriEpIntranodeRouter] prepare called, tokens={a1.shape[0]}, ep_rank={self.ep_rank}"
         )
         if a1_scale is not None or a2_scale is not None:
@@ -216,8 +222,10 @@ class MoriEpIntranodeRouter(FusedMoeDataRouter):
         apply_router_weight_on_input: bool,
         extra_finalize_args: Optional[Dict[str, Any]],
     ) -> torch.Tensor:
-        logging.info(
-            f"[MoriEpIntranodeRouter] finalize called, ep_rank={self.ep_rank}, chunked={self._is_chunked}"
+        logging.debug(
+            "[MoriEpIntranodeRouter] finalize called, ep_rank=%s, chunked=%s",
+            self.ep_rank,
+            self._is_chunked,
         )
         fused_out = payload.fused_expert_output
 
@@ -232,6 +240,11 @@ class MoriEpIntranodeRouter(FusedMoeDataRouter):
     ) -> torch.Tensor:
         # Use the cached global dispatch_ids for combine, not the local_ids
         # that were set as expert_topk_ids for the fused_moe kernel.
+        # Guard against finalize being called without a preceding successful
+        # prepare (e.g. an exception aborted prepare but finalize still runs).
+        assert (
+            self._dispatch_ids is not None
+        ), "_finalize_single called before prepare populated _dispatch_ids"
         global_dispatch_ids = self._dispatch_ids
         if global_dispatch_ids.dtype != torch.int32:
             global_dispatch_ids = global_dispatch_ids.to(torch.int32)
@@ -255,6 +268,12 @@ class MoriEpIntranodeRouter(FusedMoeDataRouter):
         fused_out: torch.Tensor,
         extra_finalize_args: Optional[Dict[str, Any]],
     ) -> torch.Tensor:
+        # Guard against finalize being called without a preceding successful
+        # prepare (mirrors the _finalize_single defense).
+        assert (
+            self._chunk_dispatch_ids is not None
+            and len(self._chunk_dispatch_ids) > 0
+        ), "_finalize_chunked called before prepare populated _chunk_dispatch_ids"
         results = []
         offset = 0
 

@@ -5,9 +5,6 @@ from typing import Any, Dict, List
 
 import torch
 from pydantic import BaseModel
-from smoke.base_comparer import BaseComparer
-from smoke.common_def import ABS_PATH, REL_PATH, QueryStatus, SmokeException
-from smoke.utils import create_temporary_copy, save_hidden_states
 
 from rtp_llm.models.downstream_modules.embedding.api_datatype import (
     AllEmbeddingRequest,
@@ -19,6 +16,14 @@ from rtp_llm.models.downstream_modules.embedding.api_datatype import (
     OpenAIEmbeddingResponse,
     SparseEmbeddingRequest,
 )
+from rtp_llm.test.smoke.base_comparer import BaseComparer
+from rtp_llm.test.smoke.common_def import (
+    ABS_PATH,
+    REL_PATH,
+    QueryStatus,
+    SmokeException,
+)
+from rtp_llm.test.smoke.utils import create_temporary_copy, save_hidden_states
 
 EXPECT_EMBEDDING_PATH_KEY = "embedding_path"
 
@@ -71,7 +76,7 @@ class EmbeddingComparer(BaseComparer):
     def _compare_dict_result(self, expect: Dict[str, float], actual: Dict[str, float]):
         for key in expect.keys():
             if key not in actual:
-                raise Exception(f"failed to find {key} in actual response")
+                raise SmokeException(QueryStatus.COMPARE_FAILED, f"failed to find {key} in actual response")
             res = torch.isclose(
                 torch.tensor(expect[key]),
                 torch.tensor(actual[key]),
@@ -139,7 +144,9 @@ class EmbeddingComparer(BaseComparer):
         for index in range(len(actual.data)):
             if isinstance(expect.data[index].embedding, str):
                 pt_name = os.path.basename(expect.data[index].embedding)
-                torch.save(actual.data[index].embedding, os.path.join(rewrite_dir, pt_name))
+                torch.save(
+                    actual.data[index].embedding, os.path.join(rewrite_dir, pt_name)
+                )
 
     def _rewrite_query_info(self, query_info: OpenAIEmbeddingRequest):
         def _rewrite_content_part(part: ContentPart):
