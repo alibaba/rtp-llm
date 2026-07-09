@@ -32,8 +32,22 @@ cc_library(
 )
 
 cc_test(
+    name = "cache_store_tensor_utils_gtest",
+    srcs = ["CacheStoreTensorUtilsTest.cpp"],
+    deps = [
+        "//rtp_llm/cpp/disaggregate/cache_store:cache_store_base",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
+    copts = ["-fno-access-control"] + copts(),
+)
+
+cc_test(
     name = "cache_store_gtest",
-    srcs = glob(["*.cpp"], exclude = test_base_sources),
+    srcs = glob(
+        ["*.cpp"],
+        exclude = test_base_sources + ["CacheStoreTensorUtilsTest.cpp"],
+    ),
     deps = [
         "//rtp_llm/cpp/disaggregate/cache_store:cache_store",
         ":cache_store_test_base",
@@ -47,4 +61,3 @@ cc_test(
     copts = ["-fno-access-control"] + copts(),
     exec_properties = {'gpu':'H20'},
 )
-

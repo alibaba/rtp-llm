@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/disaggregate/cache_store/TcpBlockReadClosure.h"
+#include "rtp_llm/cpp/disaggregate/cache_store/CacheStoreTensorUtils.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include <torch/torch.h>
@@ -59,14 +60,12 @@ void TcpBlockReadClosure::Run() {
             return;
         }
 
-        auto dst_tensor = torch::from_blob(
-            unload_block->addr.get(),
-            {(int64_t)unload_block->len},
-            torch::TensorOptions().dtype(torch::kUInt8).device(unload_block->gpu_mem ? torch::kCUDA : torch::kCPU));
-        auto src_tensor = torch::from_blob(const_cast<char*>(block.content().data()),
-                                           {(int64_t)unload_block->len},
-                                           torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCPU));
-        execNoBlockCopy({dst_tensor, src_tensor});
+        cacheStoreCopyByteTensor(unload_block->addr.get(),
+                                 unload_block->len,
+                                 unload_block->gpu_mem,
+                                 const_cast<char*>(block.content().data()),
+                                 unload_block->len,
+                                 false);
     }
     end(true, CacheStoreErrorCode::None);
 }

@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/disaggregate/cache_store/TcpCacheStoreServiceImpl.h"
+#include "rtp_llm/cpp/disaggregate/cache_store/CacheStoreTensorUtils.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include <torch/torch.h>
@@ -112,16 +113,10 @@ void TcpCacheStoreServiceImpl::blockReadImpl(::google::protobuf::RpcController* 
             resp_block_info->set_addr(block_info.addr());
             resp_block_info->set_len(block_info.len());
 
-            auto src_tensor = torch::from_blob((void*)block_info.addr(),
-                                               {(int64_t)block_info.len()},
-                                               torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA));
-
             auto tmp_buffer = static_cast<char*>(malloc(block_info.len()));
-            auto dst_tensor = torch::from_blob(tmp_buffer,
-                                               {(int64_t)block_info.len()},
-                                               torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCPU));
 
-            execNoBlockCopy({dst_tensor, src_tensor});
+            cacheStoreCopyByteTensor(
+                tmp_buffer, block_info.len(), false, (void*)block_info.addr(), block_info.len(), block_buffer->gpu_mem);
             resp_block_info->set_content(tmp_buffer, block_info.len());
             free(tmp_buffer);
         }
