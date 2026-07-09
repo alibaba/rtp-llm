@@ -4,7 +4,7 @@
 #include <stdexcept>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeEvictor.h"
-#include "rtp_llm/cpp/cache/connector/AsyncContext.h"
+#include "rtp_llm/cpp/cache/AsyncContextStub.h"  // TODO(block_tree_cache refactor): restore connector/AsyncContext.h
 #include "rtp_llm/cpp/model_rpc/BroadcastManager.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/Logger.h"
@@ -85,12 +85,11 @@ BlockTreeCache::BlockTreeCache(std::unique_ptr<BlockTree>        tree,
                      config_.enable_disk_cache ? "on" : "off",
                      config_.enable_remote_cache ? "on" : "off");
     for (const auto& g : component_groups_) {
-        RTP_LLM_LOG_INFO(
-            "BlockTreeCache:   group[%d] type=%s host_pool=%s disk_pool=%s",
-            g->component_group_id,
-            cacheGroupTypeName(g->group_type),
-            g->hostPool() ? "enabled" : "null",
-            g->diskPool() ? "enabled" : "null");
+        RTP_LLM_LOG_INFO("BlockTreeCache:   group[%d] type=%s host_pool=%s disk_pool=%s",
+                         g->component_group_id,
+                         cacheGroupTypeName(g->group_type),
+                         g->hostPool() ? "enabled" : "null",
+                         g->diskPool() ? "enabled" : "null");
     }
 }
 
@@ -121,7 +120,7 @@ BlockTreeMatchResult BlockTreeCache::match(const CacheKeysType& cache_keys) {
     }
 
     size_t    valid_matched_block_count = 0;
-    TreeNode* best_match           = nullptr;
+    TreeNode* best_match                = nullptr;
 
     std::vector<std::unique_ptr<MatchValidator>> validators;
     validators.reserve(component_groups_.size());
@@ -146,7 +145,7 @@ BlockTreeMatchResult BlockTreeCache::match(const CacheKeysType& cache_keys) {
 
         if (all_valid) {
             valid_matched_block_count = i + 1;
-            best_match           = node;
+            best_match                = node;
         }
     }
 
@@ -188,8 +187,8 @@ BlockTreeMatchResult BlockTreeCache::match(const CacheKeysType& cache_keys) {
         }
     }
 
-    std::vector<TreeNode*> match_path(
-        find_result.path.begin(), find_result.path.begin() + static_cast<ptrdiff_t>(valid_matched_block_count));
+    std::vector<TreeNode*> match_path(find_result.path.begin(),
+                                      find_result.path.begin() + static_cast<ptrdiff_t>(valid_matched_block_count));
     referenceMatchedDeviceBlocks(match_path);
 
     // Phase 2: load_back — detect and transfer Host/Disk data to GPU
@@ -270,7 +269,6 @@ void BlockTreeCache::insert(TreeNode*                                  parent,
     checkWatermark();
 }
 
-
 std::shared_ptr<HostBlockPool> BlockTreeCache::hostPoolForGroup(int component_group_id) const {
     auto gid = static_cast<size_t>(component_group_id);
     return gid < component_groups_.size() ? component_groups_[gid]->hostPool() : nullptr;
@@ -345,8 +343,8 @@ void BlockTreeCache::releaseMatchedBlocks(const std::vector<BlockIdxType>& block
     if (!full_group || full_group->devicePools().empty())
         return;
 
-    const auto& pools = full_group->devicePools();
-    size_t num_pools = pools.size();
+    const auto& pools     = full_group->devicePools();
+    size_t      num_pools = pools.size();
 
     // block_indices is laid out as [node0.pool0, node0.pool1, ..., node1.pool0, ...]
     for (size_t i = 0; i < block_indices.size(); ++i) {
@@ -394,7 +392,8 @@ void BlockTreeCache::taskFinished() {
 void BlockTreeCache::referenceMatchedDeviceBlocks(const std::vector<TreeNode*>& match_path) {
     const size_t matched_block_count = match_path.size();
     for (ComponentGroupPtr& group : component_groups_) {
-        const size_t ref_count = std::min(group->computeReferenceCount(matched_block_count, match_path), matched_block_count);
+        const size_t ref_count =
+            std::min(group->computeReferenceCount(matched_block_count, match_path), matched_block_count);
         const size_t start_idx = matched_block_count - ref_count;
         const size_t gid       = static_cast<size_t>(group->component_group_id);
         for (size_t i = start_idx; i < matched_block_count; ++i) {
@@ -411,11 +410,12 @@ void BlockTreeCache::referenceMatchedDeviceBlocks(const std::vector<TreeNode*>& 
 }
 
 void BlockTreeCache::prepareMatchedLoadBack(const std::vector<TreeNode*>& match_path,
-                                            std::vector<LoadBackItem>&     lb_items,
-                                            BlockTreeMatchResult&          result) {
+                                            std::vector<LoadBackItem>&    lb_items,
+                                            BlockTreeMatchResult&         result) {
     const size_t matched_block_count = match_path.size();
     for (ComponentGroupPtr& group : component_groups_) {
-        const size_t ref_count = std::min(group->computeReferenceCount(matched_block_count, match_path), matched_block_count);
+        const size_t ref_count =
+            std::min(group->computeReferenceCount(matched_block_count, match_path), matched_block_count);
         const size_t start_idx = matched_block_count - ref_count;
         const size_t gid       = static_cast<size_t>(group->component_group_id);
 
@@ -516,8 +516,7 @@ void BlockTreeCache::performLoadBack(std::vector<LoadBackItem> items, std::share
 
             if (!isNullBlockIdx(temp_host)) {
                 // Step 1: Disk → temp Host
-                auto d2h_desc =
-                    TransferDescriptor::diskToHost(item.node, item.group_id, slot.disk_slot, temp_host);
+                auto d2h_desc = TransferDescriptor::diskToHost(item.node, item.group_id, slot.disk_slot, temp_host);
 
                 auto d2h_result = copy_engine_->submit(d2h_desc).result();
                 if (d2h_result.ok()) {
@@ -617,9 +616,7 @@ bool BlockTreeCache::submitEvictionLocked(EvictionMove& er) {
 
     auto plan_ptr = std::make_shared<BlockTreeEvictor::EvictionPlan>(std::move(*plan));
     taskStarted();
-    auto* work_item = new autil::LambdaWorkItem([this, plan_ptr]() {
-        performEvictionCopy(*plan_ptr);
-    });
+    auto* work_item = new autil::LambdaWorkItem([this, plan_ptr]() { performEvictionCopy(*plan_ptr); });
     auto  err       = thread_pool_->pushWorkItem(work_item);
     if (err != autil::ThreadPool::ERROR_NONE) {
         work_item->destroy();
@@ -631,8 +628,8 @@ bool BlockTreeCache::submitEvictionLocked(EvictionMove& er) {
 }
 
 void BlockTreeCache::performEvictionCopy(const BlockTreeEvictor::EvictionPlan& plan) {
-    auto copy_results = evictor_.performCopy(plan);
-    bool copy_ok      = copy_results.primary_success;
+    auto         copy_results     = evictor_.performCopy(plan);
+    bool         copy_ok          = copy_results.primary_success;
     CacheKeyType remote_cache_key = 0;
     int          remote_group_id  = -1;
     if (copy_ok && plan.primary.node != nullptr) {

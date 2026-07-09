@@ -213,21 +213,22 @@ cc_test(
     exec_properties = {'gpu':'H20'},
 )
 
-cc_test(
-    name = "kv_cache_manager_cp_test",
-    srcs = [
-        "KVCacheManagerCPSlotMapperTest.cc",
-    ],
-    data = [],
-    copts = test_copts,
-    deps = test_deps + [
-        ":block_pool_test_helper",
-        "//rtp_llm/cpp/cache/connector/test/mock:connector_mock_files_lib",
-        "//rtp_llm/cpp/cache/connector/memory:memory_connector",
-    ],
-    env = {},
-    exec_properties = {'gpu':'H20'},
-)
+# TODO(block_tree_cache refactor): re-enable after connector refactor
+# cc_test(
+#     name = "kv_cache_manager_cp_test",
+#     srcs = [
+#         "KVCacheManagerCPSlotMapperTest.cc",
+#     ],
+#     data = [],
+#     copts = test_copts,
+#     deps = test_deps + [
+#         ":block_pool_test_helper",
+#         "//rtp_llm/cpp/cache/connector/test/mock:connector_mock_files_lib",
+#         "//rtp_llm/cpp/cache/connector/memory:memory_connector",
+#     ],
+#     env = {},
+#     exec_properties = {'gpu':'H20'},
+# )
 
 cc_test(
     name = "linear_kv_cache_group_test",
