@@ -4,6 +4,7 @@
 #include <cstdlib>
 #include <fstream>
 #include <mutex>
+#include <unordered_map>
 #include <sstream>
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -107,6 +108,17 @@ std::string defaultOutputPath() {
     return oss.str();
 }
 
+std::string defaultBadWatchOutputPath() {
+    auto explicit_file = getenvString("RTPLLM_DECODE_BAD_WATCH_FILE");
+    if (!explicit_file.empty()) {
+        return explicit_file;
+    }
+    auto dir = getenvString("RTPLLM_DECODE_BAD_WATCH_DIR", "/tmp/rtpllm_decode_bad_watch");
+    std::ostringstream oss;
+    oss << dir << "/decode_bad_watch_rank" << rankString() << "_pid" << ::getpid() << ".jsonl";
+    return oss.str();
+}
+
 DecodeTokenTraceConfig& config() {
     static DecodeTokenTraceConfig cfg = DecodeTokenTraceConfig::fromEnv();
     return cfg;
@@ -130,6 +142,19 @@ std::ofstream& outputStream() {
     return stream;
 }
 
+std::ofstream& badWatchOutputStream() {
+    static std::ofstream stream;
+    static bool          initialized = false;
+    if (!initialized) {
+        initialized = true;
+        const auto& path = config().bad_watch_output_path;
+        if (!path.empty() && ensureDir(dirnameOf(path))) {
+            stream.open(path, std::ios::out | std::ios::app);
+        }
+    }
+    return stream;
+}
+
 void appendIntVector(std::ostream& os, const std::vector<int>& values) {
     os << "[";
     for (size_t i = 0; i < values.size(); ++i) {
@@ -139,6 +164,61 @@ void appendIntVector(std::ostream& os, const std::vector<int>& values) {
         os << values[i];
     }
     os << "]";
+}
+
+struct WatchState {
+    std::vector<int> token_tail;
+    bool             triggered = false;
+};
+
+std::unordered_map<std::string, WatchState>& watchStates() {
+    static std::unordered_map<std::string, WatchState> states;
+    return states;
+}
+
+int countSubsequence(const std::vector<int>& values, const std::vector<int>& pattern) {
+    if (pattern.empty() || values.size() < pattern.size()) {
+        return 0;
+    }
+    int count = 0;
+    for (size_t i = 0; i + pattern.size() <= values.size(); ++i) {
+        bool matched = true;
+        for (size_t j = 0; j < pattern.size(); ++j) {
+            if (values[i + j] != pattern[j]) {
+                matched = false;
+                break;
+            }
+        }
+        if (matched) {
+            ++count;
+            i += pattern.size() - 1;
+        }
+    }
+    return count;
+}
+
+bool hasRepeatedSuffix(const std::vector<int>& values, int max_pattern_size, int min_repeats) {
+    if (min_repeats <= 1) {
+        return false;
+    }
+    for (int pattern_size = 1; pattern_size <= max_pattern_size; ++pattern_size) {
+        const int need = pattern_size * min_repeats;
+        if ((int)values.size() < need) {
+            continue;
+        }
+        const int start = values.size() - need;
+        bool      same  = true;
+        for (int i = start + pattern_size; i < (int)values.size(); ++i) {
+            if (values[i] != values[start + (i - start) % pattern_size]) {
+                same = false;
+                break;
+            }
+        }
+        if (same) {
+            return true;
+        }
+    }
+    return false;
 }
 
 void appendBlockGroups(std::ostream& os, const GenerateStreamPtr& stream, int max_blocks_per_group) {
@@ -171,13 +251,21 @@ DecodeTokenTraceConfig DecodeTokenTraceConfig::fromValues(bool               ena
                                                           const std::string& filter_csv,
                                                           const std::string& output_path,
                                                           bool               capture_peers,
-                                                          int                max_blocks_per_group) {
+                                                          int                max_blocks_per_group,
+                                                          bool               bad_watch_enabled,
+                                                          const std::string& bad_watch_output_path,
+                                                          int                bad_watch_tail_size,
+                                                          int                bad_watch_min_cf) {
     DecodeTokenTraceConfig cfg;
     cfg.enabled              = enabled;
     cfg.filters              = splitCsv(filter_csv);
     cfg.output_path          = output_path;
     cfg.capture_peers        = capture_peers;
     cfg.max_blocks_per_group = std::max(0, max_blocks_per_group);
+    cfg.bad_watch_enabled    = bad_watch_enabled;
+    cfg.bad_watch_output_path = bad_watch_output_path;
+    cfg.bad_watch_tail_size  = std::max(16, bad_watch_tail_size);
+    cfg.bad_watch_min_cf     = std::max(2, bad_watch_min_cf);
     return cfg;
 }
 
@@ -186,7 +274,11 @@ DecodeTokenTraceConfig DecodeTokenTraceConfig::fromEnv() {
                       getenvString("RTPLLM_DECODE_TOKEN_TRACE_FILTER"),
                       defaultOutputPath(),
                       getenvBool("RTPLLM_DECODE_TOKEN_TRACE_CAPTURE_PEERS", true),
-                      getenvInt("RTPLLM_DECODE_TOKEN_TRACE_MAX_BLOCKS_PER_GROUP", 16));
+                      getenvInt("RTPLLM_DECODE_TOKEN_TRACE_MAX_BLOCKS_PER_GROUP", 16),
+                      getenvBool("RTPLLM_DECODE_BAD_WATCH", false),
+                      defaultBadWatchOutputPath(),
+                      getenvInt("RTPLLM_DECODE_BAD_WATCH_TAIL_SIZE", 128),
+                      getenvInt("RTPLLM_DECODE_BAD_WATCH_MIN_CF", 4));
 }
 
 bool DecodeTokenTraceConfig::matches(const std::string& trace_id) const {
@@ -240,19 +332,94 @@ std::string DecodeTokenTraceLogger::jsonEscape(const std::string& value) {
 void DecodeTokenTraceLogger::logDispatchBatch(const StreamGroups&   stream_groups,
                                               const torch::Tensor& token_ids_cpu,
                                               const torch::Tensor& success_cpu) {
-    if (!enabled() || !token_ids_cpu.defined() || token_ids_cpu.numel() == 0) {
+    const auto& cfg = config();
+    if ((!cfg.enabled && !cfg.bad_watch_enabled) || !token_ids_cpu.defined() || token_ids_cpu.numel() == 0) {
         return;
     }
 
     const auto all_streams = stream_groups.allStreams();
     bool       has_match   = false;
     for (const auto& stream : all_streams) {
-        if (config().matches(stream->traceId())) {
+        if (cfg.matches(stream->traceId())) {
             has_match = true;
             break;
         }
     }
-    if (!has_match) {
+    if (cfg.enabled && !has_match) {
+        return;
+    }
+
+    const auto token_stride = token_ids_cpu.size(1);
+    const auto* token_ptr   = token_ids_cpu.data_ptr<int32_t>();
+    const auto* success_ptr = success_cpu.defined() ? success_cpu.data_ptr<bool>() : nullptr;
+
+    if (cfg.bad_watch_enabled) {
+        int batch_idx_in  = 0;
+        int batch_idx_out = 0;
+        for (const auto& stream : all_streams) {
+            const auto cur_bs  = stream->currentBatchSize();
+            const auto next_bs = stream->nextBatchSize();
+            std::vector<int> new_tokens;
+            new_tokens.reserve(next_bs);
+            for (int i = 0; i < next_bs; ++i) {
+                new_tokens.push_back(token_ptr[(batch_idx_out + i) * token_stride + token_stride - 1]);
+            }
+            auto& state = watchStates()[stream->traceId()];
+            state.token_tail.insert(state.token_tail.end(), new_tokens.begin(), new_tokens.end());
+            if ((int)state.token_tail.size() > cfg.bad_watch_tail_size) {
+                state.token_tail.erase(state.token_tail.begin(),
+                                       state.token_tail.begin() + (state.token_tail.size() - cfg.bad_watch_tail_size));
+            }
+            const int cf_count = countSubsequence(state.token_tail, {27, 9500, 1419, 9500, 29});
+            const bool repeated_suffix = hasRepeatedSuffix(state.token_tail, 8, 8);
+            if (!state.triggered && (cf_count >= cfg.bad_watch_min_cf || repeated_suffix)) {
+                state.triggered = true;
+                std::ostringstream watch_row;
+                watch_row << "{\"ts_us\":" << autil::TimeUtility::currentTimeInMicroSeconds()
+                          << ",\"pid\":" << ::getpid() << ",\"rank\":\"" << jsonEscape(rankString())
+                          << "\",\"event\":\"decode_bad_watch_trigger\""
+                          << ",\"reason\":\"" << (cf_count >= cfg.bad_watch_min_cf ? "cf_repeat" : "repeated_suffix")
+                          << "\",\"cf_count\":" << cf_count
+                          << ",\"total_decode_batch_size\":" << stream_groups.totalDecodeBatchSize()
+                          << ",\"total_context_batch_size\":" << stream_groups.totalContextBatchSize()
+                          << ",\"total_sampler_batch_size_in\":" << stream_groups.totalSamplerBatchSizeIn()
+                          << ",\"total_sampler_batch_size_out\":" << stream_groups.totalSamplerBatchSizeOut()
+                          << ",\"max_seq_len\":" << stream_groups.maxSeqLen()
+                          << ",\"trace_id\":\"" << jsonEscape(stream->traceId()) << "\""
+                          << ",\"stream_id\":" << stream->streamId()
+                          << ",\"seq_len\":" << stream->seqLength()
+                          << ",\"input_len\":" << stream->inputLength()
+                          << ",\"output_len\":" << stream->outputTokenLen()
+                          << ",\"iter_count\":" << stream->iterCount()
+                          << ",\"current_batch_size\":" << cur_bs
+                          << ",\"next_batch_size\":" << next_bs
+                          << ",\"reuse_len\":" << stream->reuseLength()
+                          << ",\"initial_reuse_len\":" << stream->initialReuseLength()
+                          << ",\"local_reuse_len\":" << stream->localReuseLength()
+                          << ",\"memory_reuse_len\":" << stream->memoryReuseLength()
+                          << ",\"cur_blocks_num\":" << stream->curBlocksNum()
+                          << ",\"new_tokens\":";
+                appendIntVector(watch_row, new_tokens);
+                if (success_ptr != nullptr && batch_idx_in < success_cpu.numel()) {
+                    watch_row << ",\"success\":" << (success_ptr[batch_idx_in] ? "true" : "false");
+                }
+                watch_row << ",\"token_tail\":";
+                appendIntVector(watch_row, state.token_tail);
+                watch_row << ",\"kv_groups\":";
+                appendBlockGroups(watch_row, stream, cfg.max_blocks_per_group);
+                watch_row << "}";
+                std::lock_guard<std::mutex> lock(outputMutex());
+                auto&                       os = badWatchOutputStream();
+                if (os.good()) {
+                    os << watch_row.str() << "\n";
+                }
+            }
+            batch_idx_in += cur_bs;
+            batch_idx_out += next_bs;
+        }
+    }
+
+    if (!cfg.enabled || !has_match) {
         return;
     }
 
@@ -266,9 +433,6 @@ void DecodeTokenTraceLogger::logDispatchBatch(const StreamGroups&   stream_group
         << ",\"max_seq_len\":" << stream_groups.maxSeqLen()
         << ",\"cur_blocks_num\":" << stream_groups.curBlocksNum() << ",\"streams\":[";
 
-    const auto token_stride = token_ids_cpu.size(1);
-    const auto* token_ptr   = token_ids_cpu.data_ptr<int32_t>();
-    const auto* success_ptr = success_cpu.defined() ? success_cpu.data_ptr<bool>() : nullptr;
     int         batch_idx_in  = 0;
     int         batch_idx_out = 0;
     bool        wrote_stream  = false;

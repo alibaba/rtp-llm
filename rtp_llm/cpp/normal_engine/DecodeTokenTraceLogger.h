@@ -14,13 +14,21 @@ struct DecodeTokenTraceConfig {
     std::string              output_path;
     bool                     capture_peers        = true;
     int                      max_blocks_per_group = 16;
+    bool                     bad_watch_enabled    = false;
+    std::string              bad_watch_output_path;
+    int                      bad_watch_tail_size  = 128;
+    int                      bad_watch_min_cf     = 4;
 
     static DecodeTokenTraceConfig fromEnv();
     static DecodeTokenTraceConfig fromValues(bool               enabled,
                                              const std::string& filter_csv,
                                              const std::string& output_path,
                                              bool               capture_peers,
-                                             int                max_blocks_per_group);
+                                             int                max_blocks_per_group,
+                                             bool               bad_watch_enabled,
+                                             const std::string& bad_watch_output_path,
+                                             int                bad_watch_tail_size,
+                                             int                bad_watch_min_cf);
 
     bool matches(const std::string& trace_id) const;
 };
