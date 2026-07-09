@@ -742,6 +742,10 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
                 initial_states,
                 seq_size_per_block,
             )
+        g_for_trace = g.squeeze(0) if g.dim() == 3 and g.shape[0] == 1 else g
+        beta_for_trace = (
+            beta.squeeze(0) if beta.dim() == 3 and beta.shape[0] == 1 else beta
+        )
         _trace_prefill_cache_state(
             trace_ctx,
             "linear_prefill_after_load_state",
@@ -750,7 +754,7 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
             attention_inputs=attn_inputs,
             seq_size_per_block=seq_size_per_block,
             ssm_states=ssm_states,
-            tensors={"mixed_qkv": mixed_qkv, "g": g, "beta": beta},
+            tensors={"mixed_qkv": mixed_qkv, "g": g_for_trace, "beta": beta_for_trace},
             batch_tensors={"initial_state": initial_states},
         )
         # M >= 2048: scatter_qkv (Triton, SGLang port) avoids the .view() ->
@@ -1486,12 +1490,39 @@ class Qwen3NextGatedDeltaNet(nn.Module):
             attn_output = self.decode_gdn(
                 mixed_qkv, b, a, attention_inputs, kv_cache, attn_meta
             )
+        _trace_event(
+            trace_ctx,
+            "linear_raw_output",
+            layer_idx=layer_idx,
+            layer_type=HybridAttentionType.LINEAR,
+            group_id=group_id,
+            attention_inputs=attention_inputs,
+            tensors={"attn_output": attn_output, "z": z},
+        )
         attn_output = self.norm(
             attn_output.reshape(-1, self.head_v_dim), z.reshape(-1, self.head_v_dim)
         )
         # from [token * head, dim] -> [token, head * dim]
         attn_output = attn_output.reshape(-1, self.local_num_v_heads * self.head_v_dim)
+        _trace_event(
+            trace_ctx,
+            "linear_norm_output",
+            layer_idx=layer_idx,
+            layer_type=HybridAttentionType.LINEAR,
+            group_id=group_id,
+            attention_inputs=attention_inputs,
+            tensors={"attn_output": attn_output},
+        )
         attn_output = self.out_proj(attn_output)
+        _trace_event(
+            trace_ctx,
+            "linear_out_proj_output",
+            layer_idx=layer_idx,
+            layer_type=HybridAttentionType.LINEAR,
+            group_id=group_id,
+            attention_inputs=attention_inputs,
+            tensors={"attn_output": attn_output},
+        )
         if self.parallelism_config.get_attn_tp_size() > 1:
             attn_output = all_reduce(attn_output, group=Group.TP)
         _trace_event(
