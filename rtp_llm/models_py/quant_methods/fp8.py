@@ -414,7 +414,8 @@ class Fp8OnlineLinearMethod(QuantizeMethodBase):
 
     def process_weights_after_loading(self, layer):
         weight = layer.weight.data
-        assert weight.ndim == 2, f"expected 2D weight, got {weight.shape}"
+        if weight.ndim != 2:
+            raise ValueError(f"expected 2D weight, got {weight.shape}")
 
         weight = _require_cuda_weight_for_online_quant(
             layer, weight, type(self).__name__, allow_force_cpu=True
@@ -543,7 +544,8 @@ class Fp8PerChannelOnlineLinearMethod(QuantizeMethodBase):
         weight = _require_cuda_weight_for_online_quant(
             layer, weight, type(self).__name__
         )
-        assert weight.ndim == 2, f"expected 2D weight, got {weight.shape}"
+        if weight.ndim != 2:
+            raise ValueError(f"expected 2D weight, got {weight.shape}")
 
         # Treat weight rows as "tokens" → per-output-channel quant.
         # fp8_weight: [N, K] float8_e4m3fn, scale: [N, 1] float32.
@@ -778,7 +780,8 @@ class Fp8BlockOnlineLinearMethod(QuantizeMethodBase):
         weight = _require_cuda_weight_for_online_quant(
             layer, weight, type(self).__name__
         )
-        assert weight.ndim == 2, f"expected 2D weight, got {weight.shape}"
+        if weight.ndim != 2:
+            raise ValueError(f"expected 2D weight, got {weight.shape}")
 
         # Match the legacy W8A8 per-block online loader exactly. The CUDA helper
         # below is also DeepGEMM-derived, but the smoke baseline was produced by

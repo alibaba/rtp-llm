@@ -35,6 +35,7 @@ from rtp_llm.models_py.new_models.bert import BertForEmbedding, RobertaForEmbedd
 from rtp_llm.models_py.module_base import RtpModule
 from rtp_llm.models_py.quant_methods.base import QuantizationConfig
 from rtp_llm.models_py.quant_methods.fp8 import Fp8LinearMethod, _runtime_fp8_dtype
+from rtp_llm.models_py.quant_methods.awq_triton import awq_dequantize_triton
 
 # Register MoE quant methods for BaseMoEExperts tests.
 import rtp_llm.models_py.quant_methods.fp8_moe  # noqa: F401
@@ -60,6 +61,29 @@ class TestNewModelRegistry(unittest.TestCase):
             )
             model = loader._create_model()
             self.assertEqual(type(model).__name__, expected_name)
+
+
+class TestQuantMethodValidation(unittest.TestCase):
+    def test_awq_dequant_rejects_empty_scale_before_group_size_division(self):
+        with self.assertRaisesRegex(ValueError, "at least one group"):
+            awq_dequantize_triton(
+                torch.empty(4, 1, dtype=torch.int32),
+                torch.empty(0, 8, dtype=torch.float16),
+                torch.empty(0, 1, dtype=torch.int32),
+            )
+
+    def test_fp8_online_post_load_rejects_non_2d_weight(self):
+        layer = ColumnParallelLinear(
+            input_size=4,
+            output_size=4,
+            quant_config=_qc("fp8_online"),
+            prefix="fp8_online",
+            params_dtype=torch.float32,
+        )
+        layer.weight = torch.nn.Parameter(torch.zeros(2, 2, 2), requires_grad=False)
+        layer._new_loader_force_cpu_load_weights = True
+        with self.assertRaisesRegex(ValueError, "expected 2D weight"):
+            layer.quant_method.process_weights_after_loading(layer)
 
 
 class TestWeightMapperStreaming(unittest.TestCase):

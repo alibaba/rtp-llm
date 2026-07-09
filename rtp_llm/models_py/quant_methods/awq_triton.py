@@ -123,13 +123,35 @@ def awq_dequantize_triton(
     """qweight [K, N//8] int32 → 反量化权重 [K, N]（dtype 同 scales）。"""
     K = qweight.shape[0]
     M = scales.shape[1]
-    group_size = qweight.shape[0] // scales.shape[0]
 
-    assert K > 0 and M > 0
-    assert scales.shape[0] == K // group_size and scales.shape[1] == M
-    assert zeros.shape[0] == K // group_size and zeros.shape[1] == M // 8
-    assert group_size <= K
-    assert group_size in AWQ_TRITON_SUPPORTED_GROUP_SIZES or group_size == K
+    if K <= 0 or M <= 0:
+        raise ValueError(
+            f"AWQ dequant expects non-empty qweight/scales, got K={K}, M={M}"
+        )
+    if scales.shape[0] == 0:
+        raise ValueError(
+            f"AWQ scales must have at least one group, got {tuple(scales.shape)}"
+        )
+    group_size = qweight.shape[0] // scales.shape[0]
+    if group_size <= 0:
+        raise ValueError(
+            f"AWQ group_size computed as {group_size} from qweight "
+            f"{tuple(qweight.shape)} and scales {tuple(scales.shape)}"
+        )
+    if scales.shape[0] != K // group_size or scales.shape[1] != M:
+        raise ValueError(
+            f"AWQ scales shape {tuple(scales.shape)} is incompatible "
+            f"with qweight {tuple(qweight.shape)}"
+        )
+    if zeros.shape[0] != K // group_size or zeros.shape[1] != M // 8:
+        raise ValueError(
+            f"AWQ zeros shape {tuple(zeros.shape)} is incompatible "
+            f"with qweight {tuple(qweight.shape)}"
+        )
+    if group_size > K:
+        raise ValueError(f"AWQ group_size {group_size} exceeds K={K}")
+    if group_size not in AWQ_TRITON_SUPPORTED_GROUP_SIZES and group_size != K:
+        raise ValueError(f"AWQ group_size {group_size} is not supported")
 
     result = torch.empty(
         qweight.shape[0],
