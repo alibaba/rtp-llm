@@ -90,6 +90,7 @@ from rtp_llm.models_py.module_base import RtpModule
 from rtp_llm.models_py.quant_methods.base import QuantizationConfig
 from rtp_llm.models_py.quant_methods.fp8 import Fp8LinearMethod, _runtime_fp8_dtype
 from rtp_llm.models_py.quant_methods.awq_triton import awq_dequantize_triton
+from rtp_llm.utils.model_weight import W
 
 BaseMoEExperts = None
 
@@ -1516,6 +1517,22 @@ class TestBertNewLoaderCompatibility(unittest.TestCase):
         with mock.patch.object(RobertaForEmbedding, "_build_inner_model", return_value=None):
             model.load_weights(self._gamma_beta_weights("roberta"))
         self.assertTrue(torch.equal(model.embeddings.layernorm_bias, torch.full((4,), 3.0)))
+
+    def test_missing_token_type_embedding_fallback_inherits_target_device_and_dtype(self):
+        checkpoint = dict(self._gamma_beta_weights("bert"))
+        checkpoint.pop("bert.embeddings.token_type_embeddings.weight")
+        model = BertForEmbedding(self._bert_config(), LoadConfig(compute_dtype=torch.float32, device="cpu"))
+        with mock.patch.object(BertForEmbedding, "_build_inner_model", return_value=None):
+            model.load_weights(checkpoint)
+        fallback = model.weights.get_global_weight(W.token_type_embedding)
+        self.assertEqual(fallback.device, model.embeddings.word_embeddings_weight.device)
+        self.assertEqual(fallback.dtype, model.embeddings.word_embeddings_weight.dtype)
+
+        target_device = "cuda" if torch.cuda.is_available() else "meta"
+        model.to(target_device)
+        fallback = model.weights.get_global_weight(W.token_type_embedding)
+        self.assertEqual(fallback.device, model.embeddings.word_embeddings_weight.device)
+        self.assertEqual(fallback.dtype, model.embeddings.word_embeddings_weight.dtype)
 
 
 class TestAwqRegistrationSafety(unittest.TestCase):

@@ -193,9 +193,10 @@ class _BertNewLoaderBase(nn.Module):
             type_vocab_size = int(getattr(self.config, "type_vocab_size", 0) or 0)
             if type_vocab_size > 0:
                 hidden_size = int(getattr(self.config, "hidden_size"))
+                embedding_weight = weights.get_global_weight(W.embedding)
                 weights.set_global_weight(
                     W.token_type_embedding,
-                    torch.zeros(type_vocab_size, hidden_size, dtype=self.compute_dtype),
+                    embedding_weight.new_zeros((type_vocab_size, hidden_size)),
                 )
         put_global(W.pre_decoder_ln_gamma, "layernorm_weight")
         put_global(W.pre_decoder_ln_beta, "layernorm_bias")
