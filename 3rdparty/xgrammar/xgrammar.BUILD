@@ -1,4 +1,4 @@
-# xgrammar built from source (mlc-ai/xgrammar @ v0.1.32).
+# xgrammar built from source (mlc-ai/xgrammar @ v0.2.3).
 
 cc_library(
     name = "xgrammar_headers",
