@@ -2,6 +2,7 @@ import unittest
 from unittest.mock import patch
 
 from smoke.multi_inst_case_runner import _set_visible_devices
+from smoke.utils import resolve_prompt_refs
 
 from rtp_llm.test.utils.maga_server_manager import _apply_env_args
 
@@ -41,6 +42,17 @@ class MultiInstCaseRunnerTest(unittest.TestCase):
 
         self.assertNotIn("ROCR_VISIBLE_DEVICES", current_env)
         self.assertEqual("0,1", current_env["HIP_VISIBLE_DEVICES"])
+
+
+class PromptReferenceTest(unittest.TestCase):
+    @patch("smoke.utils._load_prompt_candidates", return_value={"long": "abc"})
+    def test_repeat_prompt_reference(self, _):
+        self.assertEqual("abcabcabc", resolve_prompt_refs("$prompt:long*3"))
+
+    @patch("smoke.utils._load_prompt_candidates", return_value={"long": "abc"})
+    def test_repeat_prompt_reference_requires_positive_count(self, _):
+        with self.assertRaisesRegex(ValueError, "must be positive"):
+            resolve_prompt_refs("$prompt:long*0")
 
 
 if __name__ == "__main__":

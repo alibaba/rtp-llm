@@ -38,6 +38,8 @@ def no_compare() -> bool:
 
 
 _PROMPT_CACHE = None
+_PROMPT_REF_RE = re.compile(r"^\$prompt:([^*]+?)(?:\*(\d+))?$")
+
 
 def _load_prompt_candidates():
     global _PROMPT_CACHE
@@ -50,20 +52,33 @@ def _load_prompt_candidates():
     with open(candidates_path, "r", encoding="utf-8") as f:
         data = json.load(f)
     _PROMPT_CACHE = {k: v["content"] for k, v in data.get("prompts", {}).items()}
-    logging.info("Loaded %d prompt candidates from %s", len(_PROMPT_CACHE), candidates_path)
+    logging.info(
+        "Loaded %d prompt candidates from %s", len(_PROMPT_CACHE), candidates_path
+    )
     return _PROMPT_CACHE
 
 
 def resolve_prompt_refs(obj: Any) -> Any:
-    """Recursively replace '$prompt:xxx' references with actual prompt content."""
+    """Resolve ``$prompt:id`` and optional ``$prompt:id*N`` references."""
     if isinstance(obj, str) and obj.startswith("$prompt:"):
-        pid = obj[len("$prompt:"):]
+        match = _PROMPT_REF_RE.fullmatch(obj)
+        if match is None:
+            raise ValueError(f"Invalid prompt reference: {obj!r}")
+        pid, repeat = match.groups()
         prompts = _load_prompt_candidates()
         if pid not in prompts:
-            raise ValueError(f"Unknown prompt candidate ID: '{pid}'. Available: {list(prompts.keys())}")
-        return prompts[pid]
+            raise ValueError(
+                f"Unknown prompt candidate ID: '{pid}'. Available: {list(prompts.keys())}"
+            )
+        repeat_count = int(repeat) if repeat is not None else 1
+        if repeat_count < 1:
+            raise ValueError(f"Prompt repeat count must be positive: {obj!r}")
+        return prompts[pid] * repeat_count
     elif isinstance(obj, dict):
-        return {k: (v if k == "_prompt_source" else resolve_prompt_refs(v)) for k, v in obj.items()}
+        return {
+            k: (v if k == "_prompt_source" else resolve_prompt_refs(v))
+            for k, v in obj.items()
+        }
     elif isinstance(obj, list):
         return [resolve_prompt_refs(v) for v in obj]
     return obj

@@ -1,0 +1,55 @@
+{
+    "model_type": "qwen35_dense",
+    "model_path": "/mnt/nas1/hf/Qwen3.5-27B",
+    "query_result": [
+        {
+            "query": {
+                "prompt_batch": [
+                    "$prompt:x2*30",
+                    "$prompt:x2*29",
+                    "$prompt:x2*29",
+                    "$prompt:x2*29"
+                ],
+                "generate_config": {
+                    "max_new_tokens": 1,
+                    "top_k": 1,
+                    "top_p": 0,
+                    "reuse_cache": false,
+                    "aux_info": true
+                }
+            },
+            "result": {
+                "response_batch": [
+                    {
+                        "response": "各位",
+                        "aux_info": {
+                            "input_len": 108360,
+                            "reuse_len": 0
+                        }
+                    },
+                    {
+                        "response": "各位",
+                        "aux_info": {
+                            "input_len": 104748,
+                            "reuse_len": 0
+                        }
+                    },
+                    {
+                        "response": "各位",
+                        "aux_info": {
+                            "input_len": 104748,
+                            "reuse_len": 0
+                        }
+                    },
+                    {
+                        "response": "各位",
+                        "aux_info": {
+                            "input_len": 104748,
+                            "reuse_len": 0
+                        }
+                    }
+                ]
+            }
+        }
+    ]
+}
