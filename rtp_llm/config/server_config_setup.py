@@ -436,6 +436,9 @@ def setup_default_args(py_env_configs):
         py_env_configs.role_config.role_type == RoleType.PREFILL
         or py_env_configs.role_config.role_type == RoleType.DECODE
     ):
+        py_env_configs.pd_separation_config.cache_store_rdma_mode = (
+            py_env_configs.cache_store_config.cache_store_rdma_mode
+        )
         if py_env_configs.pd_separation_config.cache_store_rdma_mode == True:
             # AcclBarex envs in cache store, can be replaced by user config
             if os.getenv("ACCL_MAX_USER_MR_GB") is None:

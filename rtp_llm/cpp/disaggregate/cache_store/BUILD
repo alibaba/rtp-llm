@@ -30,6 +30,7 @@ cc_library(
 )
 
 interface_includes = [
+    "CacheStoreTensorUtils.h",
     "CommonDefine.h",
     "CacheStore.h",
     "CacheStoreMetricsCollector.h",
