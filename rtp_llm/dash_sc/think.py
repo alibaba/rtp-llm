@@ -12,8 +12,7 @@ from typing import Optional
 
 THINK_MODE_AUTO = "auto"
 THINK_MODE_FORCE = "force"
-DEFAULT_MAX_THINKING_TOKENS = 32000
-INT32_MAX = 2_147_483_647
+_DEFAULT_MAX_THINKING_TOKENS = 131072
 
 
 def normalize_think_mode(mode: object) -> str:
@@ -87,7 +86,7 @@ class DashScThinkPlan:
     thinking: bool
     input_ids: list[int]
     echo_prefix_ids: list[int] = field(default_factory=list)
-    max_thinking_tokens: int = DEFAULT_MAX_THINKING_TOKENS
+    max_thinking_tokens: int = _DEFAULT_MAX_THINKING_TOKENS
     prompt_append_len: int = 0
     think_bos_tokens_len: int = 0
     prompt_metric_excluded_len: int = 0
@@ -104,7 +103,7 @@ def plan_dash_sc_thinking(
     think_config: Optional[DashScThinkConfig],
     enable_thinking: Optional[bool],
     max_new_think_tokens: Optional[int],
-    default_max_thinking_tokens: int = DEFAULT_MAX_THINKING_TOKENS,
+    default_max_thinking_tokens: int = _DEFAULT_MAX_THINKING_TOKENS,
 ) -> DashScThinkPlan:
     ids = list(input_ids)
     if think_config is None or not think_config.usable:
@@ -130,7 +129,9 @@ def plan_dash_sc_thinking(
 
     if isinstance(max_new_think_tokens, int):
         max_thinking_tokens = (
-            INT32_MAX if max_new_think_tokens < 0 else int(max_new_think_tokens)
+            _DEFAULT_MAX_THINKING_TOKENS
+            if max_new_think_tokens < 0
+            else int(max_new_think_tokens)
         )
     else:
         max_thinking_tokens = int(default_max_thinking_tokens)
