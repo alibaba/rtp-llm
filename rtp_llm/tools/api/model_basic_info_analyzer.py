@@ -178,7 +178,6 @@ def _load_as_ft_style(
     quantization_config.quantization = quantization
 
     kv_cache_config = KVCacheConfig()
-    kv_cache_config.int8_kv_cache = int(env_params.get("INT8_KV_CACHE", "0")) == 1
     kv_cache_config.fp8_kv_cache = int(env_params.get("FP8_KV_CACHE", "0")) == 1
 
     build_model_config(

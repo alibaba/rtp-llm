@@ -18,6 +18,40 @@ protected:
     std::unique_ptr<Sampler> sampler_;
 };
 
+TEST_F(SamplerTest, testDynamicGreedySamplingBuffersGrow) {
+    Sampler sampler(SamplerInitParams{1, false});
+
+    sampler.ensureGreedySamplingBuffers(2);
+
+    ASSERT_EQ(sampler.max_batch_size_, 2);
+    for (const auto& slot : sampler.greedy_sampling_buffer_slots_) {
+        ASSERT_EQ(slot.buffers.max_batch_size, 2);
+        ASSERT_GE(slot.buffers.seed_host.numel(), 2);
+        ASSERT_GE(slot.buffers.offset_host.numel(), 2);
+        ASSERT_GE(slot.buffers.output_ids_ptrs_host.numel(), 2);
+    }
+
+    GreedySamplingBuffers* used_slots[Sampler::kGreedySamplingBufferSlots] = {};
+    for (size_t i = 0; i < Sampler::kGreedySamplingBufferSlots; ++i) {
+        auto& buffers = sampler.nextGreedySamplingBuffers(2);
+        used_slots[i] = &buffers;
+        ASSERT_EQ(&sampler.greedy_sampling_buffer_slots_[i].buffers, &buffers);
+        sampler.markGreedySamplingBufferReady();
+        ASSERT_TRUE(sampler.greedy_sampling_buffer_slots_[i].ready_event);
+    }
+
+    auto& reused_buffers = sampler.nextGreedySamplingBuffers(2);
+    ASSERT_EQ(used_slots[0], &reused_buffers);
+    ASSERT_FALSE(sampler.greedy_sampling_buffer_slots_[0].ready_event);
+    sampler.markGreedySamplingBufferReady();
+}
+
+TEST_F(SamplerTest, testFixedGreedySamplingBuffersRejectGrow) {
+    Sampler sampler(SamplerInitParams{1, true});
+
+    EXPECT_THROW(sampler.ensureGreedySamplingBuffers(2), rtp_llm::RTPException);
+}
+
 TEST_F(SamplerTest, testGeneralSampling) {
     size_t batch_size = 5;
     size_t vocab_size = 8;
@@ -85,7 +119,7 @@ TEST_F(SamplerTest, testGeneralSampling) {
         torch::Tensor(),  // no_repeat_ngram_size
         torch::Tensor(),  // do_sample
         torch::Tensor(),  // finished_mask
-        false,  // return_original_all_probs
+        false,            // return_original_all_probs
         cum_log_probs.clone(),
         torch::Tensor(),  // all_probs
         generator,
