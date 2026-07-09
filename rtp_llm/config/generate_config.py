@@ -398,8 +398,7 @@ class GenerateConfig(BaseModel):
             )
             if self.in_think_mode:
                 check_with_info(
-                    isinstance(self.max_thinking_tokens, int)
-                    and self.max_thinking_tokens >= -1,
+                    is_positive_integer(self.max_thinking_tokens),
                     f"max_thinking_tokens {self.max_thinking_tokens} is wrong data type",
                 )
                 check_with_info(
