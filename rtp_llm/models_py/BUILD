@@ -137,6 +137,7 @@ py_library(
         "//rtp_llm:safetensors",
         "//rtp_llm:torch",
         "//rtp_llm:triton",
+        "//rtp_llm:utils",
         "//rtp_llm/model_loader:loader",
         "//rtp_llm/models_py/distributed:collective_torch",
     ],
