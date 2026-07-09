@@ -27,13 +27,24 @@ filegroup(
     visibility = ["//visibility:public"],
 )
 
+filegroup(
+    name = "rocm_fp8_ptpc_hipb_solutions",
+    srcs = [
+        "modules/factory/linear/impl/rocm/data/fp8_ptpc_hipb_solutions.json",
+    ],
+    visibility = ["//visibility:public"],
+)
+
 py_library(
     name = "modules",
     srcs = glob([
         "modules/*.py",
         "modules/**/*.py",
     ]),
-    data = [":cutlass_moe_config"],
+    data = [
+        ":cutlass_moe_config",
+        ":rocm_fp8_ptpc_hipb_solutions",
+    ],
     deps = [
         ":utils",
         "//rtp_llm/models_py/triton_kernels:triton_kernels",

@@ -232,10 +232,7 @@ std::shared_ptr<TRTAttn> prepareTrtAttnParams(const AttentionConfigs& configs,
         ele_size   = 1;
     } else
 #endif
-        if (configs.kv_cache_dtype == KvCacheDataType::INT8) {
-        cache_type = KvCacheDataType::INT8;
-        ele_size   = 1;
-    } else if (configs.kv_cache_dtype == KvCacheDataType::FP8) {
+        if (configs.kv_cache_dtype == KvCacheDataType::FP8) {
         cache_type = KvCacheDataType::FP8;
         ele_size   = 1;
     }

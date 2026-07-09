@@ -32,7 +32,7 @@ TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
     model_config.max_seq_len                = 2048;
     model_config.vocab_size                 = 2048;
     model_config.num_layers                 = 2;
-    model_config.attn_config.kv_cache_dtype = KvCacheDataType::INT8;
+    model_config.attn_config.kv_cache_dtype = KvCacheDataType::FP8;
     PDSepConfig                 pd_sep_config;
     ProfilingDebugLoggingConfig profiling_debug_logging_config;
     CacheConfig                 cache_config;
@@ -283,7 +283,7 @@ TEST_F(NormalBatchStreamProcessorTest, testMultimodalGatherBatch) {
     model_config.max_seq_len                   = 2048;
     model_config.vocab_size                    = 2048;
     model_config.num_layers                    = 2;
-    model_config.attn_config.kv_cache_dtype    = KvCacheDataType::INT8;
+    model_config.attn_config.kv_cache_dtype    = KvCacheDataType::FP8;
     model_config.mm_model_config.is_multimodal = true;
     PDSepConfig                 pd_sep_config;
     ProfilingDebugLoggingConfig profiling_debug_logging_config;

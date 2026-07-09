@@ -165,8 +165,12 @@ msgstr "随机种子"
 #: ../../backend/sampling_params.md
 msgid ""
 "Random seed control:<br>→ None: True random<br>→ Fixed value: "
-"Reproducible generation"
-msgstr "随机种子控制：<br>→ None: 真随机<br>→ 固定值: 可重现生成"
+"Reproducible for the same RTP-LLM version, backend, and sampling "
+"implementation. Exact token sequences may change after sampling kernel "
+"upgrades."
+msgstr ""
+"随机种子控制：<br>→ None: 真随机<br>→ 固定值: 在相同 RTP-LLM "
+"版本、后端和采样实现下可重现。采样内核升级后，精确 token 序列可能变化。"
 
 #: ../../backend/sampling_params.md:71
 msgid "<a id=\"返回控制参数\"></a>"
@@ -403,4 +407,3 @@ msgstr ""
 #: ../../backend/sampling_params.md:151
 msgid "`return_logits` only returns complete data in non-streaming mode"
 msgstr ""
-
