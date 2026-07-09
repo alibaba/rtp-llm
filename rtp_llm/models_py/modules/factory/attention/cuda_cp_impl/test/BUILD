@@ -10,6 +10,9 @@ flashinfer_deps = [
 py_library(
     name = "cp_test_utils",
     srcs = ["cp_test_utils.py"],
+    # Public so other test packages can reuse this CP test harness (mirrors
+    # py_standalone_testlib). Consumed cross-package by attention CP backend tests.
+    visibility = ["//visibility:public"],
     deps = py_test_deps + select({
         "@//:using_cuda12_9_x86": flashinfer_deps,
         "@//:cuda_pre_12_9": flashinfer_deps,
