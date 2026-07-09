@@ -26,6 +26,14 @@ LOG_PATH = "LOG_PATH"
 long_live_port_locks = []
 
 
+def _apply_env_args(current_env: Dict[str, str], env_args: Dict[str, Any]):
+    for k, v in env_args.items():
+        if v is None:
+            current_env.pop(k, None)
+        else:
+            current_env[k] = v
+
+
 class MagaServerManager(object):
     def __init__(
         self,
@@ -148,9 +156,7 @@ class MagaServerManager(object):
 
         role_log_name = self._role_name + "_logs"
         current_env: Dict[str, str] = os.environ.copy()
-        for k, v in self._env_args.items():
-            if v is not None:
-                current_env[k] = v
+        _apply_env_args(current_env, self._env_args)
 
         if model_type is not None:
             current_env[MODEL_TYPE] = model_type
