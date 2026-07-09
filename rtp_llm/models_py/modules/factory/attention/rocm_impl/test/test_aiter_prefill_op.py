@@ -113,6 +113,25 @@ def _make_rope_attn_configs(
     return cfg
 
 
+def _make_mrope_attn_configs(
+    head_num: int,
+    head_num_kv: int,
+    head_dim: int,
+    dtype: torch.dtype,
+    tokens_per_block: int = 16,
+):
+    cfg = _make_rope_attn_configs(
+        head_num, head_num_kv, head_dim, dtype, tokens_per_block
+    )
+    cfg.rope_config.style = RopeStyle.Mrope
+    cfg.rope_config.index_factor = 3
+    cfg.rope_config.mrope_dim1 = 3
+    cfg.rope_config.mrope_dim2 = 3
+    cfg.rope_config.mrope_dim3 = 2
+    cfg.rope_config.mrope_interleaved = True
+    return cfg
+
+
 def _make_rope_prefill_inputs(
     input_lengths: List[int], device: torch.device, dtype: torch.dtype
 ):
@@ -149,6 +168,23 @@ def _make_rope_prefill_inputs(
     return attn_inputs
 
 
+def _make_mrope_prefill_inputs(
+    input_lengths: List[int], device: torch.device, dtype: torch.dtype
+):
+    attn_inputs = _make_rope_prefill_inputs(input_lengths, device, dtype)
+    total_tokens = sum(input_lengths)
+    position_ids = torch.zeros(total_tokens, 3, dtype=torch.int32, device=device)
+    cursor = 0
+    for seq_len in input_lengths:
+        positions = torch.arange(seq_len, dtype=torch.int32, device=device)
+        position_ids[cursor : cursor + seq_len, 0] = positions
+        position_ids[cursor : cursor + seq_len, 1] = positions // 2
+        position_ids[cursor : cursor + seq_len, 2] = positions % 3
+        cursor += seq_len
+    attn_inputs.combo_position_ids = position_ids.contiguous()
+    return attn_inputs
+
+
 def _apply_base_rope(q: torch.Tensor, k: torch.Tensor, input_lengths: List[int]):
     """Torch reference for base RoPE (style=Base, base=10000) — matches the
     RopeConfig produced by _make_rope_attn_configs. Used to validate the C++
@@ -171,6 +207,37 @@ def _apply_base_rope(q: torch.Tensor, k: torch.Tensor, input_lengths: List[int])
         cos_b = cos.unsqueeze(1)
         sin_b = sin.unsqueeze(1)
         return torch.cat([lo * cos_b - hi * sin_b, hi * cos_b + lo * sin_b], dim=-1)
+
+    return rot(q).to(q.dtype), rot(k).to(k.dtype)
+
+
+def _apply_mrope(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    position_ids: torch.Tensor,
+    mrope_sections: List[int],
+):
+    """Torch reference for the ROCm interleaved MRoPE thread-to-axis mapping."""
+    head_dim = q.shape[-1]
+    half = head_dim // 2
+    pairs_per_bf16_vector = 4
+    assert sum(mrope_sections) * pairs_per_bf16_vector == half
+    section_offsets = torch.tensor(
+        [mrope_sections[0], sum(mrope_sections[:2])], device=q.device
+    )
+    pair_chunks = torch.arange(half, device=q.device) // pairs_per_bf16_vector
+    axes = (pair_chunks.unsqueeze(1) >= section_offsets).sum(dim=1)
+    positions = position_ids[:, axes].to(torch.float32)
+    inv_freq = 10000 ** (
+        -2.0 * torch.arange(half, dtype=torch.float32, device=q.device) / head_dim
+    )
+    angle = positions * inv_freq.unsqueeze(0)
+    cos = torch.cos(angle).unsqueeze(1)
+    sin = torch.sin(angle).unsqueeze(1)
+
+    def rot(x):
+        lo, hi = x[..., :half], x[..., half:]
+        return torch.cat([lo * cos - hi * sin, hi * cos + lo * sin], dim=-1)
 
     return rot(q).to(q.dtype), rot(k).to(k.dtype)
 
@@ -1256,6 +1323,62 @@ class TestAiterPrefillImplNoKvRopeRealOp(unittest.TestCase):
 
     def test_nonasm_no_kv_rope_real_op_matches_reference(self):
         self._check_real_no_kv_rope_path(AiterPrefillImplNonAsm)
+
+
+@unittest.skipUnless(_is_rocm(), "Requires ROCm GPU")
+@unittest.skipUnless(_AITER_AVAILABLE, "Requires aiter")
+@unittest.skipUnless(_OPS_IMPORTABLE, "Requires ROCm attention wrapper module")
+class TestAiterPrefillImplMropePositionIds(unittest.TestCase):
+    def setUp(self):
+        torch.manual_seed(1)
+        self.device = torch.device("cuda")
+        self.dtype = torch.bfloat16
+
+    def _check_mrope_matches_reference(self, impl_cls):
+        input_lengths = [5, 3]
+        head_num = 4
+        head_num_kv = 2
+        head_dim = 64
+        cfg = _make_mrope_attn_configs(
+            head_num=head_num,
+            head_num_kv=head_num_kv,
+            head_dim=head_dim,
+            dtype=self.dtype,
+        )
+        attn_inputs = _make_mrope_prefill_inputs(input_lengths, self.device, self.dtype)
+
+        impl = impl_cls(cfg, attn_inputs)
+        total_tokens = sum(input_lengths)
+        q = torch.randn(
+            total_tokens, head_num, head_dim, dtype=self.dtype, device=self.device
+        )
+        k = torch.randn(
+            total_tokens, head_num_kv, head_dim, dtype=self.dtype, device=self.device
+        )
+        v = torch.randn(
+            total_tokens, head_num_kv, head_dim, dtype=self.dtype, device=self.device
+        )
+
+        actual = impl.forward(_pack_qkv(q, k, v), kv_cache=None, layer_idx=0)
+        q_rope, k_rope = _apply_mrope(q, k, attn_inputs.combo_position_ids, [3, 3, 2])
+        ref = _sdpa_reference(
+            q_rope,
+            k_rope,
+            v,
+            attn_inputs.cu_seqlens_device,
+            attn_inputs.cu_kv_seqlens_device,
+            causal=True,
+        )
+
+        self.assertTrue(impl.rope_params.position_ids.defined())
+        self.assertEqual(tuple(impl.rope_params.position_ids.shape), (8, 3))
+        torch.testing.assert_close(actual, ref, atol=1e-2, rtol=1e-2)
+
+    def test_asm_mrope_matches_reference(self):
+        self._check_mrope_matches_reference(AiterPrefillImplAsm)
+
+    def test_nonasm_mrope_matches_reference(self):
+        self._check_mrope_matches_reference(AiterPrefillImplNonAsm)
 
 
 if __name__ == "__main__":

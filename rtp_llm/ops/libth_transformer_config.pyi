@@ -1367,6 +1367,7 @@ class RopeConfig:
     mrope_dim1: int
     mrope_dim2: int
     mrope_dim3: int
+    mrope_interleaved: bool
     mscale: float
     offset: int
     scale: float

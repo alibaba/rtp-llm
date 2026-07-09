@@ -1,6 +1,10 @@
 import time
 
 st = time.time()
+from rtp_llm.utils.aiter_jit_patch import install_aiter_jit_patch
+
+install_aiter_jit_patch()
+
 try:
     import triton
 except ImportError:
