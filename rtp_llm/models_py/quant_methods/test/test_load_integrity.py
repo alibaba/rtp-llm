@@ -9,6 +9,60 @@ from unittest import mock
 
 import torch
 
+try:
+    import librtp_compute_ops  # noqa: F401
+    import librtp_compute_ops.rtp_llm_ops  # noqa: F401
+except ImportError:
+    librtp_stub = types.ModuleType("librtp_compute_ops")
+    rtp_ops_stub = types.ModuleType("librtp_compute_ops.rtp_llm_ops")
+    compute_ops_stub = types.ModuleType("rtp_llm.ops.compute_ops")
+
+    class _MissingComputeOp:
+        def __init__(self, *args, **kwargs):
+            raise RuntimeError(
+                "librtp_compute_ops is unavailable in this CPU test environment"
+            )
+
+    class _RtpOpsStub:
+        def __getattr__(self, name):
+            if name.startswith("__"):
+                raise AttributeError(name)
+            return _MissingComputeOp
+
+    def _missing_compute_op(*args, **kwargs):
+        raise RuntimeError("librtp_compute_ops is unavailable in this CPU test environment")
+
+    def _compute_ops_getattr(name):
+        if name.startswith("__"):
+            raise AttributeError(name)
+        if name == "get_device_id":
+            return lambda: 0
+        if name == "rtp_llm_ops":
+            return _RtpOpsStub()
+        return _MissingComputeOp
+
+    librtp_stub.get_device_id = lambda: 0
+    librtp_stub.preprocess_gemm_weight_by_key = _missing_compute_op
+    librtp_stub.preprocess_weight_scale = _missing_compute_op
+    librtp_stub.rtp_llm_ops = rtp_ops_stub
+    def _rtp_ops_getattr(name):
+        if name.startswith("__"):
+            raise AttributeError(name)
+        return _MissingComputeOp
+
+    librtp_stub.__file__ = "<librtp_compute_ops test stub>"
+    rtp_ops_stub.__file__ = "<librtp_compute_ops.rtp_llm_ops test stub>"
+    compute_ops_stub.__file__ = "<rtp_llm.ops.compute_ops test stub>"
+    rtp_ops_stub.__getattr__ = _rtp_ops_getattr
+    compute_ops_stub.__getattr__ = _compute_ops_getattr
+    compute_ops_stub.get_device_id = lambda: 0
+    compute_ops_stub.preprocess_gemm_weight_by_key = _missing_compute_op
+    compute_ops_stub.preprocess_weight_scale = _missing_compute_op
+    compute_ops_stub.rtp_llm_ops = _RtpOpsStub()
+    sys.modules.setdefault("librtp_compute_ops", librtp_stub)
+    sys.modules.setdefault("librtp_compute_ops.rtp_llm_ops", rtp_ops_stub)
+    sys.modules.setdefault("rtp_llm.ops.compute_ops", compute_ops_stub)
+
 from rtp_llm.models_py.layers.attention import MMEncoderAttention
 from rtp_llm.models_py.layers.embedding import HiddenParallelEmbedding, ParallelLMHead, VocabParallelEmbedding
 from rtp_llm.models_py.layers.norm import LayerNorm, RMSNorm
@@ -19,7 +73,6 @@ from rtp_llm.models_py.layers.linear import (
     QKVParallelLinear,
     RowParallelLinear,
 )
-from rtp_llm.models_py.layers.moe_experts import BaseMoEExperts
 from rtp_llm.models_py import weight_mapper
 from rtp_llm.models_py.model_loader import (
     LoadConfig,
@@ -37,9 +90,20 @@ from rtp_llm.models_py.quant_methods.base import QuantizationConfig
 from rtp_llm.models_py.quant_methods.fp8 import Fp8LinearMethod, _runtime_fp8_dtype
 from rtp_llm.models_py.quant_methods.awq_triton import awq_dequantize_triton
 
-# Register MoE quant methods for BaseMoEExperts tests.
-import rtp_llm.models_py.quant_methods.fp8_moe  # noqa: F401
-import rtp_llm.models_py.quant_methods.w4a8_moe  # noqa: F401
+BaseMoEExperts = None
+
+
+def _ensure_moe_test_deps():
+    global BaseMoEExperts
+    if BaseMoEExperts is not None:
+        return
+    try:
+        from rtp_llm.models_py.layers.moe_experts import BaseMoEExperts as _BaseMoEExperts
+        import rtp_llm.models_py.quant_methods.fp8_moe  # noqa: F401
+        import rtp_llm.models_py.quant_methods.w4a8_moe  # noqa: F401
+    except Exception as exc:
+        raise unittest.SkipTest(f"MoE test dependencies unavailable: {exc}") from exc
+    BaseMoEExperts = _BaseMoEExperts
 
 
 def _qc(quant_type: str) -> QuantizationConfig:
@@ -938,6 +1002,9 @@ class TestLinearLoadCompleteness(unittest.TestCase):
 
 
 class TestMoELoadCompleteness(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        _ensure_moe_test_deps()
 
     def test_fastsafetensors_stacked_moe_names_are_normalized_to_expert_weights(self):
         gate_up = torch.arange(4 * 16, dtype=torch.float32).reshape(4, 16)
