@@ -23,7 +23,6 @@ static std::shared_ptr<HostBlockPool> makeHostPool(size_t payload_bytes, size_t 
     config->pool_type               = BlockPoolType::HOST;
     config->pool_name               = "copy_engine_host";
     config->physical_block_count    = usable_count + 1;
-    config->free_block_order_policy = FreeBlockOrderPolicy::ANY_ORDER;
     config->payload_bytes           = payload_bytes;
     config->stride_bytes            = ((payload_bytes + 4095) / 4096) * 4096;
     config->enable_pinned           = true;
@@ -45,8 +44,7 @@ struct DeviceLayerBufferSpec {
     size_t scale_bytes{0};
 };
 
-// Build a DeviceBlockPool with the given per-layer layout. Device pools use ANY_ORDER
-// (normalizeConfig enforces it).
+// Build a DeviceBlockPool with the given per-layer layout.
 static DeviceBlockPoolPtr makeDevicePool(const std::vector<DeviceLayerBufferSpec>& specs,
                                          size_t                                    usable_count,
                                          const std::string&                        pool_name) {
@@ -56,9 +54,7 @@ static DeviceBlockPoolPtr makeDevicePool(const std::vector<DeviceLayerBufferSpec
     config->pool_type               = BlockPoolType::DEVICE;
     config->pool_name               = pool_name;
     config->physical_block_count    = physical_block_count;
-    config->free_block_order_policy = FreeBlockOrderPolicy::ANY_ORDER;
     config->allocation_type         = AllocationType::DEVICE;
-    config->use_pinned_cpu_backing  = false;
     config->use_cuda_malloc_backing = false;
 
     size_t offset = 0;
@@ -648,7 +644,6 @@ protected:
         auto disk_config                     = std::make_shared<DiskBlockPoolConfig>();
         disk_config->pool_type               = BlockPoolType::DISK;
         disk_config->pool_name               = "copy_engine_disk";
-        disk_config->free_block_order_policy = FreeBlockOrderPolicy::ASCENDING_ORDER;
         disk_config->work_dir                = test_tmpdir_;
         disk_config->local_rank              = 0;
         disk_config->world_rank              = 0;

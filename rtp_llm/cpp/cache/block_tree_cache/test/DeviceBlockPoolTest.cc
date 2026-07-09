@@ -31,11 +31,37 @@ std::shared_ptr<DeviceBlockPoolConfig> makeConfig() {
     config->pool_type               = BlockPoolType::DEVICE;
     config->pool_name               = "device";
     config->physical_block_count    = old_cfg.block_num;
-    config->free_block_order_policy = FreeBlockOrderPolicy::ANY_ORDER;
     config->total_size_bytes        = old_cfg.total_size_bytes;
     config->memory_layouts          = old_cfg.memory_layouts;
     config->allocation_type         = AllocationType::DEVICE;
-    config->use_pinned_cpu_backing  = false;
+    config->use_cuda_malloc_backing = false;
+    return config;
+}
+
+std::shared_ptr<DeviceBlockPoolConfig> makeMixedScaleConfig() {
+    constexpr int    kBlockNum       = 8;
+    constexpr size_t kTokensPerBlock = 1;
+
+    rtp_llm::CacheConfig scaled_cfg = rtp_llm::test::makeSimpleMhaCacheConfig(
+        2, kBlockNum, kTokensPerBlock, rtp_llm::TYPE_INT8, 1, 64);
+    rtp_llm::CacheConfig plain_cfg = rtp_llm::test::makeSimpleMhaCacheConfig(
+        3, kBlockNum, kTokensPerBlock, rtp_llm::TYPE_FP16, 1, 64);
+
+    rtp_llm::BlockPoolConfig scaled_pool = rtp_llm::BlockPoolConfigHelper::createConfig(scaled_cfg);
+    rtp_llm::BlockPoolConfig plain_pool  = rtp_llm::BlockPoolConfigHelper::createConfig(plain_cfg);
+
+    MemoryLayoutConfig l0    = scaled_pool.memory_layouts[0];
+    MemoryLayoutConfig l1    = plain_pool.memory_layouts[0];
+    l1.kv_cache_offset_bytes = l0.total_size_bytes + l1.kv_cache_offset_bytes;
+    l1.kv_scale_offset_bytes = l0.total_size_bytes + l1.kv_scale_offset_bytes;
+
+    auto config                     = std::make_shared<DeviceBlockPoolConfig>();
+    config->pool_type               = BlockPoolType::DEVICE;
+    config->pool_name               = "mixed_scale_device";
+    config->physical_block_count    = l0.block_num;
+    config->total_size_bytes        = l0.total_size_bytes + l1.total_size_bytes;
+    config->memory_layouts          = {l0, l1};
+    config->allocation_type         = AllocationType::DEVICE;
     config->use_cuda_malloc_backing = false;
     return config;
 }
@@ -156,21 +182,6 @@ TEST(DeviceBlockPoolTest, ExposesAllocatorFacingLayerTensorsAndDeviceBlockViews)
     EXPECT_TRUE(infos[0].is_cuda);
 }
 
-TEST(DeviceBlockPoolTest, RejectsPinnedCpuBacking) {
-    auto config                    = makeConfig();
-    config->use_pinned_cpu_backing = true;
-
-    // RTP_LLM_CHECK aborts instead of throwing when core-dump-on-exception is enabled
-    // (the default in this test env); flip it so the rejection is observable as a throw.
-    const bool old_core_dump                     = StaticConfig::user_ft_core_dump_on_exception;
-    StaticConfig::user_ft_core_dump_on_exception = false;
-
-    DeviceBlockPool pool(config);
-    EXPECT_ANY_THROW((void)pool.init());
-
-    StaticConfig::user_ft_core_dump_on_exception = old_core_dump;
-}
-
 TEST(DeviceBlockPoolTest, RegUserMrWithoutCacheStoreIsNoOp) {
     auto            config = makeConfig();
     DeviceBlockPool pool(config);
@@ -184,6 +195,45 @@ TEST(DeviceBlockPoolTest, RegUserMrWithoutCacheStoreIsNoOp) {
     pool.regUserMr(/*model_id=*/0, /*cache_store=*/nullptr);
     pool.deregUserMr();
     EXPECT_EQ(pool.getMrCostTimeMs(), 0);
+}
+
+TEST(DeviceBlockPoolTest, AllLayerScaleCacheBaseStaysAlignedWithPartialScale) {
+    auto            config = makeMixedScaleConfig();
+    DeviceBlockPool pool(config);
+    ASSERT_TRUE(pool.init());
+
+    const auto kv_bases    = pool.allLayerCacheBase();
+    const auto scale_bases = pool.allLayerScaleCacheBase();
+
+    ASSERT_EQ(kv_bases.size(), 5u);
+    ASSERT_EQ(scale_bases.size(), 5u);
+
+    for (const auto& kv : kv_bases) {
+        EXPECT_TRUE(kv.defined());
+        EXPECT_GT(kv.numel(), 0);
+    }
+
+    EXPECT_TRUE(scale_bases[0].defined());
+    EXPECT_GT(scale_bases[0].numel(), 0);
+    EXPECT_TRUE(scale_bases[1].defined());
+    EXPECT_GT(scale_bases[1].numel(), 0);
+    EXPECT_FALSE(scale_bases[2].defined() && scale_bases[2].numel() > 0);
+    EXPECT_FALSE(scale_bases[3].defined() && scale_bases[3].numel() > 0);
+    EXPECT_FALSE(scale_bases[4].defined() && scale_bases[4].numel() > 0);
+}
+
+TEST(DeviceBlockPoolTest, MallocAllocatesLowestBlockFirst) {
+    auto            config = makeConfig();
+    DeviceBlockPool pool(config);
+    ASSERT_TRUE(pool.init());
+
+    auto b1 = pool.malloc();
+    auto b2 = pool.malloc();
+    auto b3 = pool.malloc();
+    ASSERT_TRUE(b1.has_value() && b2.has_value() && b3.has_value());
+    EXPECT_EQ(*b1, 1);
+    EXPECT_EQ(*b2, 2);
+    EXPECT_EQ(*b3, 3);
 }
 
 }  // namespace rtp_llm

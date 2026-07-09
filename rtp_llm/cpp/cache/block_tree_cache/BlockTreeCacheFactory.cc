@@ -72,7 +72,6 @@ std::shared_ptr<HostBlockPool> createHostPool(size_t payload_bytes, size_t usabl
     config->pool_type               = BlockPoolType::HOST;
     config->pool_name               = "block_tree_host";
     config->physical_block_count    = usable_block_count + 1;
-    config->free_block_order_policy = FreeBlockOrderPolicy::ANY_ORDER;
     config->payload_bytes           = payload_bytes;
     config->stride_bytes            = alignUp(payload_bytes, kBlockTreeCachePoolAlignment);
     config->enable_pinned           = shouldPinHostBlockPool();
@@ -104,7 +103,6 @@ std::shared_ptr<DiskBlockPool> createDiskPool(const KVCacheConfig& kv_cache_conf
     auto config                     = std::make_shared<DiskBlockPoolConfig>();
     config->pool_type               = BlockPoolType::DISK;
     config->pool_name               = "block_tree_disk";
-    config->free_block_order_policy = FreeBlockOrderPolicy::ASCENDING_ORDER;
     config->work_dir                = mount_path;
     config->manage_mount            = true;
     config->local_rank              = local_rank;

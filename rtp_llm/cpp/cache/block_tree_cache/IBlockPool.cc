@@ -76,8 +76,7 @@ std::optional<BlockIdList> IBlockPool::malloc(size_t n) {
     if (availableFreeBlocksNoLock() < n) {
         return std::nullopt;
     }
-    if (config_->free_block_order_policy == FreeBlockOrderPolicy::ASCENDING_ORDER
-        && free_blocks_.size() - free_head_ < n) {
+    if (free_blocks_.size() - free_head_ < n) {
         refillAscendingFreeBlocksNoLock();
     }
 
@@ -307,25 +306,15 @@ void IBlockPool::refillAscendingFreeBlocksNoLock() {
 }
 
 BlockIdxType IBlockPool::popFreeBlockNoLock() {
-    if (config_->free_block_order_policy == FreeBlockOrderPolicy::ASCENDING_ORDER) {
-        RTP_LLM_CHECK_WITH_INFO(
-            free_head_ < free_blocks_.size(), "no free block available in pool [%s]", config_->pool_name.c_str());
-        const BlockIdxType block = free_blocks_[free_head_];
-        ++free_head_;
-        return block;
-    }
-    RTP_LLM_CHECK_WITH_INFO(!free_blocks_.empty(), "no free block available in pool [%s]", config_->pool_name.c_str());
-    const BlockIdxType block = free_blocks_.back();
-    free_blocks_.pop_back();
+    RTP_LLM_CHECK_WITH_INFO(
+        free_head_ < free_blocks_.size(), "no free block available in pool [%s]", config_->pool_name.c_str());
+    const BlockIdxType block = free_blocks_[free_head_];
+    ++free_head_;
     return block;
 }
 
 void IBlockPool::pushFreeBlockNoLock(BlockIdxType block) {
-    if (config_->free_block_order_policy == FreeBlockOrderPolicy::ASCENDING_ORDER) {
-        released_blocks_.push_back(block);
-    } else {
-        free_blocks_.push_back(block);
-    }
+    released_blocks_.push_back(block);
 }
 
 void IBlockPool::decRefOneNoLock(BlockIdxType block) {

@@ -22,7 +22,6 @@ static std::shared_ptr<HostBlockPool> makeHostPool(size_t payload_bytes, size_t 
     config->pool_type               = BlockPoolType::HOST;
     config->pool_name               = "block_tree_cache_host";
     config->physical_block_count    = usable_count + 1;
-    config->free_block_order_policy = FreeBlockOrderPolicy::ANY_ORDER;
     config->payload_bytes           = payload_bytes;
     config->stride_bytes            = ((payload_bytes + 4095) / 4096) * 4096;
     config->enable_pinned           = true;
@@ -31,7 +30,7 @@ static std::shared_ptr<HostBlockPool> makeHostPool(size_t payload_bytes, size_t 
 }
 
 // Helper: build an initialized DeviceBlockPool from the lightweight cache-config test
-// helpers. Device pools use ANY_ORDER (DeviceBlockPool::normalizeConfig enforces it).
+// helpers.
 static DeviceBlockPoolPtr makeDevicePool() {
     constexpr int    kLayerNum       = 4;
     constexpr int    kBlockNum       = 10;
@@ -48,11 +47,9 @@ static DeviceBlockPoolPtr makeDevicePool() {
     config->pool_type               = BlockPoolType::DEVICE;
     config->pool_name               = "block_tree_cache_device";
     config->physical_block_count    = old_cfg.block_num;
-    config->free_block_order_policy = FreeBlockOrderPolicy::ANY_ORDER;
     config->total_size_bytes        = old_cfg.total_size_bytes;
     config->memory_layouts          = old_cfg.memory_layouts;
     config->allocation_type         = AllocationType::DEVICE;
-    config->use_pinned_cpu_backing  = false;
     config->use_cuda_malloc_backing = false;
 
     auto pool = std::make_shared<DeviceBlockPool>(config);

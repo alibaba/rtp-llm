@@ -24,13 +24,9 @@ bool HybridTypeKVCacheAllocator::doInit() {
     device_config->pool_type               = BlockPoolType::DEVICE;
     device_config->pool_name               = pool_config.pool_name;
     device_config->physical_block_count    = pool_config.block_num;
-    // Device pools use ANY_ORDER (DeviceBlockPool::normalizeConfig enforces it); the physical
-    // block chosen is opaque to attention. Only the disk pool uses ASCENDING_ORDER.
-    device_config->free_block_order_policy = FreeBlockOrderPolicy::ANY_ORDER;
     device_config->total_size_bytes        = pool_config.total_size_bytes;
     device_config->memory_layouts          = pool_config.memory_layouts;
     device_config->allocation_type         = allocation_type_;
-    device_config->use_pinned_cpu_backing  = false;
     device_config->use_cuda_malloc_backing = use_cuda_malloc_block_pool_;
 
     std::shared_ptr<const DeviceBlockPoolConfig> const_config = device_config;

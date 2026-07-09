@@ -11,11 +11,10 @@ namespace rtp_llm {
 namespace {
 
 struct TestPoolConfig: public BlockPoolConfigBase {
-    TestPoolConfig(std::string name, size_t blocks, FreeBlockOrderPolicy policy) {
-        pool_type               = BlockPoolType::HOST;
-        pool_name               = std::move(name);
-        physical_block_count    = blocks;
-        free_block_order_policy = policy;
+    TestPoolConfig(std::string name, size_t blocks) {
+        pool_type            = BlockPoolType::HOST;
+        pool_name            = std::move(name);
+        physical_block_count = blocks;
     }
 };
 
@@ -29,8 +28,7 @@ public:
 };
 
 std::shared_ptr<TestPool> makeInitializedPool(size_t physical_block_count) {
-    auto pool = std::make_shared<TestPool>(
-        std::make_shared<TestPoolConfig>("test", physical_block_count, FreeBlockOrderPolicy::ANY_ORDER));
+    auto pool = std::make_shared<TestPool>(std::make_shared<TestPoolConfig>("test", physical_block_count));
     pool->init();
     return pool;
 }
@@ -38,7 +36,7 @@ std::shared_ptr<TestPool> makeInitializedPool(size_t physical_block_count) {
 }  // namespace
 
 TEST(IBlockPoolTest, BlockZeroIsInvalidAndNeverAllocated) {
-    auto pool = TestPool(std::make_shared<TestPoolConfig>("test", 4, FreeBlockOrderPolicy::ANY_ORDER));
+    auto pool = TestPool(std::make_shared<TestPoolConfig>("test", 4));
     ASSERT_TRUE(pool.init());
 
     EXPECT_FALSE(pool.validBlock(NULL_BLOCK_IDX));
@@ -53,7 +51,7 @@ TEST(IBlockPoolTest, BlockZeroIsInvalidAndNeverAllocated) {
 }
 
 TEST(IBlockPoolTest, MallocReturnsAllocatedRefcountZeroBlocks) {
-    auto pool = TestPool(std::make_shared<TestPoolConfig>("test", 4, FreeBlockOrderPolicy::ANY_ORDER));
+    auto pool = TestPool(std::make_shared<TestPoolConfig>("test", 4));
     ASSERT_TRUE(pool.init());
 
     auto block = pool.malloc();
@@ -64,7 +62,7 @@ TEST(IBlockPoolTest, MallocReturnsAllocatedRefcountZeroBlocks) {
 }
 
 TEST(IBlockPoolTest, BatchMallocIsAtomic) {
-    auto pool = TestPool(std::make_shared<TestPoolConfig>("test", 4, FreeBlockOrderPolicy::ANY_ORDER));
+    auto pool = TestPool(std::make_shared<TestPoolConfig>("test", 4));
     ASSERT_TRUE(pool.init());
 
     auto first = pool.malloc(2);
@@ -77,7 +75,7 @@ TEST(IBlockPoolTest, BatchMallocIsAtomic) {
 }
 
 TEST(IBlockPoolTest, RefcountMetricsFollowSingleRefcountModel) {
-    auto pool = TestPool(std::make_shared<TestPoolConfig>("test", 4, FreeBlockOrderPolicy::ANY_ORDER));
+    auto pool = TestPool(std::make_shared<TestPoolConfig>("test", 4));
     ASSERT_TRUE(pool.init());
 
     auto block = pool.malloc();
@@ -98,7 +96,7 @@ TEST(IBlockPoolTest, RefcountMetricsFollowSingleRefcountModel) {
 }
 
 TEST(IBlockPoolTest, AscendingOrderReturnsSortedBlockIds) {
-    auto pool = TestPool(std::make_shared<TestPoolConfig>("test", 6, FreeBlockOrderPolicy::ASCENDING_ORDER));
+    auto pool = TestPool(std::make_shared<TestPoolConfig>("test", 6));
     ASSERT_TRUE(pool.init());
 
     auto blocks = pool.malloc(3);

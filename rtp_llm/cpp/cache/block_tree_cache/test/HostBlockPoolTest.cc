@@ -17,7 +17,6 @@ std::shared_ptr<HostBlockPoolConfig> makeConfig(size_t physical_block_count = 4,
     config->pool_type              = BlockPoolType::HOST;
     config->pool_name              = "host";
     config->physical_block_count   = physical_block_count;
-    config->free_block_order_policy = FreeBlockOrderPolicy::ANY_ORDER;
     config->payload_bytes          = payload_bytes;
     config->stride_bytes           = stride_bytes;
     config->enable_pinned          = enable_pinned;

@@ -105,11 +105,9 @@ inline DeviceBlockPoolPtr createDeviceBlockPool() {
     device_config->pool_type               = BlockPoolType::DEVICE;
     device_config->pool_name               = pool_config.pool_name;
     device_config->physical_block_count    = pool_config.block_num;
-    device_config->free_block_order_policy = FreeBlockOrderPolicy::ANY_ORDER;
     device_config->total_size_bytes        = pool_config.total_size_bytes;
     device_config->memory_layouts          = pool_config.memory_layouts;
     device_config->allocation_type         = AllocationType::DEVICE;
-    device_config->use_pinned_cpu_backing  = false;
     device_config->use_cuda_malloc_backing = false;
     std::shared_ptr<const DeviceBlockPoolConfig> const_config = device_config;
     return std::make_shared<DeviceBlockPool>(const_config);

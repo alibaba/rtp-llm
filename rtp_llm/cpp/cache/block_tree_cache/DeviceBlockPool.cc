@@ -48,7 +48,6 @@ const char* memoryTypeName(MemoryType memory_type) {
 std::shared_ptr<const DeviceBlockPoolConfig> DeviceBlockPool::normalizeConfig(const std::shared_ptr<const DeviceBlockPoolConfig>& config) {
     RTP_LLM_CHECK(config != nullptr);
     RTP_LLM_CHECK(config->pool_type == BlockPoolType::DEVICE);
-    RTP_LLM_CHECK(config->free_block_order_policy == FreeBlockOrderPolicy::ANY_ORDER);
     RTP_LLM_CHECK_WITH_INFO(
         !config->memory_layouts.empty(), "device block pool [%s] memory_layouts must not be empty",
         config->pool_name.c_str());
@@ -134,9 +133,6 @@ void DeviceBlockPool::initializeCacheBuffer() {
                             cfg.pool_name.c_str());
     RTP_LLM_CHECK_WITH_INFO(
         cfg.total_size_bytes > 0, "device block pool [%s] total_size_bytes must be > 0", cfg.pool_name.c_str());
-    RTP_LLM_CHECK_WITH_INFO(!cfg.use_pinned_cpu_backing,
-                            "DeviceBlockPool [%s] does not support pinned CPU backing; use HostBlockPool",
-                            cfg.pool_name.c_str());
 
     if (cfg.use_cuda_malloc_backing) {
         initializeCudaMallocBuffer();
@@ -218,12 +214,15 @@ void DeviceBlockPool::initializeCudaMallocBuffer() {
 }
 
 void DeviceBlockPool::initializeLayerMappings() {
-    const auto& cfg = config();
+    const auto& cfg          = config();
     size_t      total_layers = 0;
     for (const auto& layout_cfg : cfg.memory_layouts) {
         total_layers += static_cast<size_t>(layout_cfg.layer_num);
     }
     global_layer_to_local_.assign(total_layers, {-1, -1});
+    // 待删除: aligned/padded model-facing scale exposure, for legacy-L1 consumers.
+    global_layer_kv_tensors_.assign(total_layers, torch::Tensor());
+    global_layer_kv_scale_tensors_.assign(total_layers, torch::Tensor());
 }
 
 void DeviceBlockPool::initializeLayoutStrategies() {
@@ -313,9 +312,9 @@ void DeviceBlockPool::processLayerTensors(size_t                    layout_idx,
         RTP_LLM_CHECK_WITH_INFO(global_layer < global_layer_to_local_.size(), "global layer index out of range");
         global_layer_to_local_[global_layer] = {static_cast<int>(layout_idx), static_cast<int>(local_layer)};
 
-        global_layer_kv_tensors_.push_back(layer_tensors[local_layer]);
+        global_layer_kv_tensors_[global_layer] = layer_tensors[local_layer];
         if (layout_cfg.hasScale()) {
-            global_layer_kv_scale_tensors_.push_back(scale_tensors[local_layer]);
+            global_layer_kv_scale_tensors_[global_layer] = scale_tensors[local_layer];
         }
     }
 }

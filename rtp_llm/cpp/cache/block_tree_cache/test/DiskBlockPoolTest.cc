@@ -180,7 +180,6 @@ std::shared_ptr<DiskBlockPoolConfig> makeDiskConfig(const std::string& work_dir,
     auto config                     = std::make_shared<DiskBlockPoolConfig>();
     config->pool_type               = BlockPoolType::DISK;
     config->pool_name                = "disk";
-    config->free_block_order_policy = FreeBlockOrderPolicy::ASCENDING_ORDER;
     config->work_dir                = work_dir;
     config->local_rank              = 0;
     config->world_rank              = 0;

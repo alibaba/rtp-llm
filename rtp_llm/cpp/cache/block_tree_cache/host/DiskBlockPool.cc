@@ -22,7 +22,6 @@ std::shared_ptr<const DiskBlockPoolConfig>
 DiskBlockPool::normalizeConfig(const std::shared_ptr<const DiskBlockPoolConfig>& config) {
     RTP_LLM_CHECK(config != nullptr);
     RTP_LLM_CHECK(config->pool_type == BlockPoolType::DISK);
-    RTP_LLM_CHECK(config->free_block_order_policy == FreeBlockOrderPolicy::ASCENDING_ORDER);
     RTP_LLM_CHECK_WITH_INFO(
         config->stride_bytes > 0, "disk block pool [%s] stride_bytes must be > 0", config->pool_name.c_str());
 

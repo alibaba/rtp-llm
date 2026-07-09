@@ -66,7 +66,6 @@ void markHostBlockPoolDontDump(const char* pool_name, void* ptr, size_t size) {
 HostBlockPool::HostBlockPool(std::shared_ptr<const HostBlockPoolConfig> config): IBlockPool(config) {
     RTP_LLM_CHECK(config != nullptr);
     RTP_LLM_CHECK(config->pool_type == BlockPoolType::HOST);
-    RTP_LLM_CHECK(config->free_block_order_policy == FreeBlockOrderPolicy::ANY_ORDER);
 }
 
 HostBlockPool::~HostBlockPool() = default;

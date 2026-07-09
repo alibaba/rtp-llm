@@ -15,11 +15,6 @@ namespace rtp_llm {
 
 using BlockIdList = std::vector<BlockIdxType>;
 
-enum class FreeBlockOrderPolicy {
-    ANY_ORDER,
-    ASCENDING_ORDER,
-};
-
 enum class BlockPoolType {
     DEVICE,
     HOST,
@@ -29,10 +24,9 @@ enum class BlockPoolType {
 struct BlockPoolConfigBase {
     virtual ~BlockPoolConfigBase() = default;
 
-    BlockPoolType        pool_type{BlockPoolType::DEVICE};
-    std::string          pool_name;
-    size_t               physical_block_count{0};
-    FreeBlockOrderPolicy free_block_order_policy{FreeBlockOrderPolicy::ANY_ORDER};
+    BlockPoolType pool_type{BlockPoolType::DEVICE};
+    std::string   pool_name;
+    size_t        physical_block_count{0};
 };
 
 // IBlockPool is the abstract lifecycle base class shared by the device / host / disk
