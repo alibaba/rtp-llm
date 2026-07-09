@@ -89,6 +89,7 @@ _Q3N_TRACE_MAX_RECORDS = _env_int("RTPLLM_QWEN3_NEXT_TRACE_MAX_RECORDS", 0)
 _Q3N_TRACE_MAX_LANES = max(1, _env_int("RTPLLM_QWEN3_NEXT_TRACE_MAX_LANES", 4))
 _Q3N_TRACE_MAX_ELEMS = max(1, _env_int("RTPLLM_QWEN3_NEXT_TRACE_MAX_ELEMS", 8192))
 _Q3N_TRACE_SYNC = _env_flag("RTPLLM_QWEN3_NEXT_TRACE_SYNC_DEVICE", True)
+_Q3N_TRACE_PREFILL = _env_flag("RTPLLM_QWEN3_NEXT_TRACE_PREFILL", False)
 _Q3N_TRACE_TENSOR_MODE = os.environ.get(
     "RTPLLM_QWEN3_NEXT_TRACE_TENSOR_MODE", "summary"
 ).strip().lower()
@@ -161,18 +162,47 @@ def _trace_layer_enabled(layer_idx: int, layer_type: HybridAttentionType) -> boo
     return layer_type == HybridAttentionType.LINEAR
 
 
+def _trace_tensor_lanes(
+    attention_inputs: PyAttentionInputs, hidden_states: torch.Tensor, batch_size: int
+) -> dict[int, int]:
+    if not attention_inputs.is_prefill or attention_inputs.is_target_verify:
+        return {lane: lane for lane in range(batch_size)}
+    if (
+        attention_inputs.input_lengths is None
+        or not torch.is_tensor(attention_inputs.input_lengths)
+        or attention_inputs.input_lengths.numel() <= 0
+    ):
+        return {lane: lane for lane in range(batch_size)}
+    input_lengths = attention_inputs.input_lengths.detach()
+    if input_lengths.is_cuda:
+        if _Q3N_TRACE_SYNC:
+            torch.cuda.synchronize(input_lengths.device)
+        input_lengths = input_lengths.cpu()
+    cumsum = torch.cumsum(input_lengths.to(torch.int64), dim=0) - 1
+    max_row = int(hidden_states.shape[0]) - 1 if hidden_states.dim() > 0 else 0
+    tensor_lanes: dict[int, int] = {}
+    for lane in range(min(batch_size, cumsum.numel())):
+        tensor_lanes[lane] = max(0, min(max_row, int(cumsum[lane].item())))
+    return tensor_lanes
+
+
 def _make_trace_ctx(
     inputs: PyModelInputs, attention_inputs: PyAttentionInputs, hidden_states: torch.Tensor
 ) -> Optional[dict[str, Any]]:
     if not _Q3N_TRACE_ENABLED or _Q3N_TRACE_FILE is None:
         return None
-    if attention_inputs.is_prefill and not attention_inputs.is_target_verify:
+    if (
+        attention_inputs.is_prefill
+        and not attention_inputs.is_target_verify
+        and not _Q3N_TRACE_PREFILL
+    ):
         return None
     trace_ids = list(getattr(inputs, "trace_ids", []) or [])
-    batch_size = hidden_states.shape[0] if hidden_states.dim() else 1
+    batch_size = len(trace_ids) if trace_ids else (hidden_states.shape[0] if hidden_states.dim() else 1)
     lanes = _trace_selected_lanes(trace_ids, int(batch_size))
     if not lanes:
         return None
+    tensor_lanes = _trace_tensor_lanes(attention_inputs, hidden_states, int(batch_size))
     per_trace_step = _Q3N_TRACE_STATE["per_trace_step"]
     trace_steps = {}
     kept_lanes = []
@@ -189,6 +219,7 @@ def _make_trace_ctx(
     return {
         "trace_ids": trace_ids,
         "lanes": kept_lanes,
+        "tensor_lanes": tensor_lanes,
         "trace_steps": trace_steps,
         "is_prefill": bool(attention_inputs.is_prefill),
         "is_target_verify": bool(attention_inputs.is_target_verify),
@@ -308,6 +339,32 @@ def _block_id_for_lane(
     return seq_len_plus_1, logical_block, physical_block
 
 
+def _prefix_block_id_for_lane(
+    attention_inputs: PyAttentionInputs, lane: int, seq_size_per_block: int
+) -> tuple[Optional[int], Optional[int], Optional[int]]:
+    block_map = attention_inputs.kv_cache_kernel_block_id_device
+    prefix_len = _lane_int(attention_inputs.prefix_lengths, lane)
+    if (
+        block_map is None
+        or not torch.is_tensor(block_map)
+        or block_map.numel() == 0
+        or prefix_len is None
+        or prefix_len <= 0
+        or seq_size_per_block <= 0
+        or block_map.dim() < 2
+        or lane >= block_map.shape[0]
+    ):
+        return prefix_len, None, None
+    logical_block = max(0, (prefix_len - 1) // seq_size_per_block)
+    if logical_block >= block_map.shape[1]:
+        return prefix_len, logical_block, None
+    row = block_map.narrow(0, lane, 1).reshape(-1)
+    if row.is_cuda and _Q3N_TRACE_SYNC:
+        torch.cuda.synchronize(row.device)
+    physical_block = int(row.narrow(0, logical_block, 1).cpu().item())
+    return prefix_len, logical_block, physical_block
+
+
 def _trace_event(
     ctx: Optional[dict[str, Any]],
     event: str,
@@ -328,6 +385,7 @@ def _trace_event(
     for lane in ctx["lanes"]:
         trace_ids = ctx["trace_ids"]
         trace_id = trace_ids[lane] if lane < len(trace_ids) else ""
+        tensor_lane = int(ctx.get("tensor_lanes", {}).get(lane, lane))
         row = {
             "ts": time.time(),
             "pid": os.getpid(),
@@ -336,6 +394,7 @@ def _trace_event(
             "trace_id": trace_id,
             "trace_step": ctx["trace_steps"].get(lane),
             "lane": lane,
+            "tensor_lane": tensor_lane,
             "layer_idx": layer_idx,
             "layer_type": str(layer_type) if layer_type is not None else None,
             "group_id": group_id,
@@ -368,7 +427,8 @@ def _trace_event(
                 row["attention"]["current_physical_block"] = physical_block
         if tensors:
             row["tensors"] = {
-                name: _tensor_summary(value, lane) for name, value in tensors.items()
+                name: _tensor_summary(value, tensor_lane)
+                for name, value in tensors.items()
             }
         if extra:
             row["extra"] = extra
@@ -433,6 +493,67 @@ def _trace_cache_state(
             attention_inputs=attention_inputs,
             seq_size_per_block=seq_size_per_block,
             tensors=cache_tensors,
+        )
+
+
+def _trace_prefill_cache_state(
+    ctx: Optional[dict[str, Any]],
+    event: str,
+    *,
+    layer_idx: Optional[int],
+    group_id: Optional[int],
+    attention_inputs: PyAttentionInputs,
+    seq_size_per_block: int,
+    conv_states: Optional[torch.Tensor] = None,
+    ssm_states: Optional[torch.Tensor] = None,
+    tensors: Optional[dict[str, Any]] = None,
+    batch_tensors: Optional[dict[str, Any]] = None,
+) -> None:
+    if ctx is None:
+        return
+    for lane in ctx["lanes"]:
+        prefix_len, logical_block, physical_block = _prefix_block_id_for_lane(
+            attention_inputs, lane, seq_size_per_block
+        )
+        cache_tensors = dict(tensors or {})
+        for name, value in (batch_tensors or {}).items():
+            if torch.is_tensor(value) and value.dim() > 0 and lane < value.shape[0]:
+                cache_tensors[name] = value.narrow(0, lane, 1)
+            else:
+                cache_tensors[name] = value
+        if physical_block is not None:
+            if (
+                conv_states is not None
+                and torch.is_tensor(conv_states)
+                and 0 <= physical_block < conv_states.shape[0]
+            ):
+                cache_tensors["conv_state_prefix_block"] = conv_states.narrow(
+                    0, physical_block, 1
+                )
+            if (
+                ssm_states is not None
+                and torch.is_tensor(ssm_states)
+                and 0 <= physical_block < ssm_states.shape[0]
+            ):
+                cache_tensors["ssm_state_prefix_block"] = ssm_states.narrow(
+                    0, physical_block, 1
+                )
+        lane_ctx = dict(ctx)
+        lane_ctx["lanes"] = [lane]
+        _trace_event(
+            lane_ctx,
+            event,
+            layer_idx=layer_idx,
+            layer_type=HybridAttentionType.LINEAR,
+            group_id=group_id,
+            attention_inputs=attention_inputs,
+            seq_size_per_block=seq_size_per_block,
+            tensors=cache_tensors,
+            extra={
+                "prefix_len_for_state": prefix_len,
+                "prefix_logical_block": logical_block,
+                "prefix_physical_block": physical_block,
+            },
         )
 
 
@@ -589,6 +710,7 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
         kv_cache_tensor: Optional[torch.Tensor],
         seq_size_per_block: int,
         attn_inputs: PyAttentionInputs,
+        attn_meta: Optional[Qwen3NextMetadata] = None,
     ) -> torch.Tensor:
         g, beta = fused_gdn_gating(self.alog, a, b, self.dt_bias)
         ssm_states = (
@@ -596,6 +718,9 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
             if kv_cache_tensor is not None
             else None
         )
+        trace_ctx = attn_meta.trace_ctx if attn_meta is not None else None
+        layer_idx = getattr(attn_meta, "trace_layer_idx", None)
+        group_id = getattr(attn_meta, "trace_group_id", None)
         context_batch_size = attn_inputs.input_lengths.shape[0]
         # cu_seqlens_without_padding = attn_inputs.cu_seqlens[: context_batch_size + 1]
         cu_seqlens_without_padding = attn_inputs.cu_seqlens
@@ -617,6 +742,17 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
                 initial_states,
                 seq_size_per_block,
             )
+        _trace_prefill_cache_state(
+            trace_ctx,
+            "linear_prefill_after_load_state",
+            layer_idx=layer_idx,
+            group_id=group_id,
+            attention_inputs=attn_inputs,
+            seq_size_per_block=seq_size_per_block,
+            ssm_states=ssm_states,
+            tensors={"mixed_qkv": mixed_qkv, "g": g, "beta": beta},
+            batch_tensors={"initial_state": initial_states},
+        )
         # M >= 2048: scatter_qkv (Triton, SGLang port) avoids the .view() ->
         # .contiguous() copies that torch.split + view triggers. Below 2048,
         # kernel launch overhead beats the savings (microbench measured).
@@ -645,6 +781,20 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
             value = value.view(
                 1, value.shape[0], self.local_num_v_heads, self.head_v_dim
             )
+        _trace_prefill_cache_state(
+            trace_ctx,
+            "linear_prefill_before_chunk",
+            layer_idx=layer_idx,
+            group_id=group_id,
+            attention_inputs=attn_inputs,
+            seq_size_per_block=seq_size_per_block,
+            ssm_states=ssm_states,
+            tensors={
+                "query": query.squeeze(0),
+                "key": key.squeeze(0),
+                "value": value.squeeze(0),
+            },
+        )
         attn_out, h, final_state = chunk_gated_delta_rule(
             query,
             key,
@@ -655,6 +805,17 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
             output_final_state=True,
             cu_seqlens=cu_seqlens_without_padding,
             use_qk_l2norm_in_kernel=True,
+        )
+        _trace_prefill_cache_state(
+            trace_ctx,
+            "linear_prefill_after_chunk",
+            layer_idx=layer_idx,
+            group_id=group_id,
+            attention_inputs=attn_inputs,
+            seq_size_per_block=seq_size_per_block,
+            ssm_states=ssm_states,
+            tensors={"attn_out": attn_out.squeeze(0)},
+            batch_tensors={"final_state": final_state},
         )
         if ssm_states is not None:
             store_ssm_state_to_block_map(
@@ -667,6 +828,16 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
                 seq_size_per_block,
                 chunk_size=64,
             )
+        _trace_prefill_cache_state(
+            trace_ctx,
+            "linear_prefill_after_store_state",
+            layer_idx=layer_idx,
+            group_id=group_id,
+            attention_inputs=attn_inputs,
+            seq_size_per_block=seq_size_per_block,
+            ssm_states=ssm_states,
+            batch_tensors={"final_state": final_state},
+        )
         return attn_out.squeeze_(0)
 
     def forward(
@@ -685,6 +856,24 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
                 kv_cache.kv_cache_base.shape[0], -1
             )
             seq_size_per_block = kv_cache.seq_size_per_block
+        trace_ctx = attn_meta.trace_ctx
+        layer_idx = getattr(attn_meta, "trace_layer_idx", None)
+        group_id = getattr(attn_meta, "trace_group_id", None)
+        conv_states = (
+            self._get_conv_states(kv_cache_tensor)
+            if kv_cache_tensor is not None and trace_ctx is not None
+            else None
+        )
+        _trace_prefill_cache_state(
+            trace_ctx,
+            "linear_prefill_before_conv",
+            layer_idx=layer_idx,
+            group_id=group_id,
+            attention_inputs=attn_inputs,
+            seq_size_per_block=seq_size_per_block,
+            conv_states=conv_states,
+            tensors={"mixed_qkv": mixed_qkv, "b": b, "a": a},
+        )
         mixed_qkv = self._conv1d(
             mixed_qkv,
             kv_cache_tensor,
@@ -692,8 +881,18 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
             attn_inputs,
             metadata=attn_meta.get_prefill_conv1d_meta(),
         )
+        _trace_prefill_cache_state(
+            trace_ctx,
+            "linear_prefill_after_conv",
+            layer_idx=layer_idx,
+            group_id=group_id,
+            attention_inputs=attn_inputs,
+            seq_size_per_block=seq_size_per_block,
+            conv_states=conv_states,
+            tensors={"mixed_qkv": mixed_qkv},
+        )
         attn_out = self._fla(
-            mixed_qkv, b, a, kv_cache_tensor, seq_size_per_block, attn_inputs
+            mixed_qkv, b, a, kv_cache_tensor, seq_size_per_block, attn_inputs, attn_meta
         )
         if kv_cache is not None:
             # write kvcache to cache store

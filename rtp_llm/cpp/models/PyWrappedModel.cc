@@ -5,6 +5,9 @@
 #include "rtp_llm/cpp/utils/utils.h"
 #include "rtp_llm/cpp/model_utils/AttentionConfig.h"
 #include <cstdint>
+#include <algorithm>
+#include <cerrno>
+#include <cctype>
 #include <stdexcept>
 #include <mutex>
 #include <vector>
@@ -12,10 +15,17 @@
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
+#include <iomanip>
 #include <iostream>
 #include <numeric>
+#include <sstream>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <unistd.h>
 #include "rtp_llm/cpp/utils/DevicePerfWrapper.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
+#include "autil/TimeUtility.h"
 #if USING_CUDA
 #include <c10/cuda/CUDAStream.h>
 #endif
@@ -23,6 +33,366 @@
 using namespace std;
 
 namespace rtp_llm {
+
+namespace {
+
+std::string postLayerTraceEnv(const char* name, const std::string& default_value = "") {
+    const char* value = std::getenv(name);
+    return value == nullptr ? default_value : std::string(value);
+}
+
+bool postLayerTraceEnvFlag(const char* name, bool default_value = false) {
+    auto value = postLayerTraceEnv(name);
+    if (value.empty()) {
+        return default_value;
+    }
+    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+    });
+    return value == "1" || value == "true" || value == "yes" || value == "on";
+}
+
+int postLayerTraceEnvInt(const char* name, int default_value) {
+    const auto value = postLayerTraceEnv(name);
+    if (value.empty()) {
+        return default_value;
+    }
+    try {
+        return std::stoi(value);
+    } catch (...) {
+        return default_value;
+    }
+}
+
+std::vector<std::string> postLayerTraceSplitCsv(const std::string& value) {
+    std::vector<std::string> result;
+    std::stringstream        ss(value);
+    std::string              item;
+    while (std::getline(ss, item, ',')) {
+        auto begin = item.find_first_not_of(" \t\r\n");
+        if (begin == std::string::npos) {
+            continue;
+        }
+        auto end = item.find_last_not_of(" \t\r\n");
+        result.emplace_back(item.substr(begin, end - begin + 1));
+    }
+    return result;
+}
+
+std::string postLayerTraceRankString() {
+    auto rank = postLayerTraceEnv("WORLD_RANK");
+    if (rank.empty()) {
+        rank = postLayerTraceEnv("RANK");
+    }
+    if (rank.empty()) {
+        rank = postLayerTraceEnv("LOCAL_RANK", "0");
+    }
+    return rank;
+}
+
+bool postLayerTraceEnsureDir(const std::string& path) {
+    if (path.empty()) {
+        return true;
+    }
+    std::string current;
+    current.reserve(path.size());
+    for (size_t i = 0; i < path.size(); ++i) {
+        current.push_back(path[i]);
+        if (path[i] != '/' || current.size() == 1) {
+            continue;
+        }
+        if (::mkdir(current.c_str(), 0755) != 0 && errno != EEXIST) {
+            return false;
+        }
+    }
+    return ::mkdir(path.c_str(), 0755) == 0 || errno == EEXIST;
+}
+
+std::string postLayerTraceDirname(const std::string& path) {
+    auto pos = path.find_last_of('/');
+    if (pos == std::string::npos) {
+        return "";
+    }
+    if (pos == 0) {
+        return "/";
+    }
+    return path.substr(0, pos);
+}
+
+std::string postLayerTraceJsonEscape(const std::string& value) {
+    std::ostringstream os;
+    for (char c : value) {
+        switch (c) {
+            case '\\':
+                os << "\\\\";
+                break;
+            case '"':
+                os << "\\\"";
+                break;
+            case '\n':
+                os << "\\n";
+                break;
+            case '\r':
+                os << "\\r";
+                break;
+            case '\t':
+                os << "\\t";
+                break;
+            default:
+                if (static_cast<unsigned char>(c) < 0x20) {
+                    const char* hex = "0123456789abcdef";
+                    os << "\\u00" << hex[(c >> 4) & 0xf] << hex[c & 0xf];
+                } else {
+                    os << c;
+                }
+        }
+    }
+    return os.str();
+}
+
+uint64_t postLayerTraceFnv1a(const void* data, size_t bytes) {
+    constexpr uint64_t kOffset = 1469598103934665603ull;
+    constexpr uint64_t kPrime  = 1099511628211ull;
+    uint64_t           hash    = kOffset;
+    const auto*        ptr     = static_cast<const uint8_t*>(data);
+    for (size_t i = 0; i < bytes; ++i) {
+        hash ^= ptr[i];
+        hash *= kPrime;
+    }
+    return hash;
+}
+
+std::string postLayerTraceHex64(uint64_t value) {
+    std::ostringstream os;
+    os << std::hex << std::setw(16) << std::setfill('0') << value;
+    return os.str();
+}
+
+struct PostLayerTraceConfig {
+    bool                     enabled        = false;
+    std::vector<std::string> filters;
+    std::string              output_path;
+    int                      topk           = 8;
+    int                      max_output_len = -1;
+    int                      max_rows       = 8;
+};
+
+const PostLayerTraceConfig& postLayerTraceConfig() {
+    static const PostLayerTraceConfig cfg = [] {
+        PostLayerTraceConfig config;
+        config.enabled = postLayerTraceEnvFlag("RTPLLM_POST_LAYER_TRACE", false);
+        config.filters = postLayerTraceSplitCsv(postLayerTraceEnv("RTPLLM_POST_LAYER_TRACE_FILTER"));
+        config.topk    = std::max(1, postLayerTraceEnvInt("RTPLLM_POST_LAYER_TRACE_TOPK", 8));
+        config.max_output_len = postLayerTraceEnvInt("RTPLLM_POST_LAYER_TRACE_MAX_OUTPUT_LEN", -1);
+        config.max_rows       = std::max(1, postLayerTraceEnvInt("RTPLLM_POST_LAYER_TRACE_MAX_ROWS", 8));
+
+        config.output_path = postLayerTraceEnv("RTPLLM_POST_LAYER_TRACE_FILE");
+        if (config.output_path.empty()) {
+            auto dir = postLayerTraceEnv("RTPLLM_POST_LAYER_TRACE_DIR", "/tmp/rtpllm_post_layer_trace");
+            std::ostringstream oss;
+            oss << dir << "/post_layer_trace_rank" << postLayerTraceRankString() << "_pid" << ::getpid()
+                << ".jsonl";
+            config.output_path = oss.str();
+        }
+        return config;
+    }();
+    return cfg;
+}
+
+bool postLayerTraceMatches(const std::string& trace_id) {
+    const auto& cfg = postLayerTraceConfig();
+    if (!cfg.enabled) {
+        return false;
+    }
+    if (cfg.filters.empty()) {
+        return true;
+    }
+    return std::any_of(cfg.filters.begin(), cfg.filters.end(), [&](const std::string& filter) {
+        return trace_id.find(filter) != std::string::npos;
+    });
+}
+
+std::ofstream& postLayerTraceOutputStream() {
+    static std::ofstream stream;
+    static bool          initialized = false;
+    if (!initialized) {
+        initialized = true;
+        const auto& path = postLayerTraceConfig().output_path;
+        if (postLayerTraceEnsureDir(postLayerTraceDirname(path))) {
+            stream.open(path, std::ios::out | std::ios::app);
+        }
+    }
+    return stream;
+}
+
+std::mutex& postLayerTraceMutex() {
+    static std::mutex mutex;
+    return mutex;
+}
+
+void postLayerTraceAppendShape(std::ostream& os, const torch::Tensor& tensor) {
+    os << "[";
+    for (int i = 0; i < tensor.dim(); ++i) {
+        if (i != 0) {
+            os << ",";
+        }
+        os << tensor.size(i);
+    }
+    os << "]";
+}
+
+void postLayerTraceAppendStats(std::ostream& os, const char* name, const torch::Tensor& tensor) {
+    os << "\"" << name << "\":";
+    if (!tensor.defined()) {
+        os << "null";
+        return;
+    }
+
+    try {
+        torch::NoGradGuard no_grad;
+        auto cpu = tensor.detach().contiguous();
+        if (cpu.is_cuda()) {
+            cpu = cpu.to(torch::kCPU);
+        }
+
+        os << "{\"shape\":";
+        postLayerTraceAppendShape(os, tensor);
+        os << ",\"dtype\":\"" << postLayerTraceJsonEscape(c10::toString(tensor.scalar_type())) << "\"";
+        os << ",\"device\":\"" << (tensor.is_cuda() ? "cuda" : "cpu") << "\"";
+        os << ",\"numel\":" << tensor.numel();
+        os << ",\"nbytes\":" << cpu.nbytes();
+        os << ",\"byte_hash\":\"" << postLayerTraceHex64(postLayerTraceFnv1a(cpu.data_ptr(), cpu.nbytes())) << "\"";
+        if (cpu.numel() > 0) {
+            auto flat = cpu.reshape({cpu.numel()}).to(torch::kFloat32);
+            os << ",\"sum\":" << flat.sum().item<double>();
+            os << ",\"abs_sum\":" << flat.abs().sum().item<double>();
+            os << ",\"min\":" << flat.min().item<double>();
+            os << ",\"max\":" << flat.max().item<double>();
+            os << ",\"sample\":[";
+            const auto sample_count = std::min<int64_t>(flat.numel(), 8);
+            const auto* data        = flat.data_ptr<float>();
+            for (int64_t i = 0; i < sample_count; ++i) {
+                if (i != 0) {
+                    os << ",";
+                }
+                os << data[i];
+            }
+            os << "]";
+        }
+        os << "}";
+    } catch (const std::exception& e) {
+        os << "{\"error\":\"" << postLayerTraceJsonEscape(e.what()) << "\"}";
+    }
+}
+
+void postLayerTraceAppendTopK(std::ostream& os, const torch::Tensor& row, int topk) {
+    if (!row.defined() || row.numel() <= 0) {
+        os << "[]";
+        return;
+    }
+    auto       vals_inds = row.to(torch::kFloat32).topk(std::min<int64_t>(topk, row.numel()));
+    auto       vals_cpu  = std::get<0>(vals_inds).to(torch::kCPU).contiguous();
+    auto       inds_cpu  = std::get<1>(vals_inds).to(torch::kCPU).contiguous();
+    const auto* vals     = vals_cpu.data_ptr<float>();
+    const auto* inds     = inds_cpu.data_ptr<int64_t>();
+    os << "[";
+    for (int64_t i = 0; i < vals_cpu.numel(); ++i) {
+        if (i != 0) {
+            os << ",";
+        }
+        os << "{\"id\":" << inds[i] << ",\"value\":" << vals[i] << "}";
+    }
+    os << "]";
+}
+
+void postLayerTraceLogRows(const char*            stage,
+                           const GptModelInputs& inputs,
+                           const torch::Tensor&  final_hidden,
+                           const torch::Tensor&  last_hidden,
+                           const torch::Tensor&  logits,
+                           bool                  has_context_request,
+                           bool                  need_all_logits,
+                           bool                  skip_final_layernorm,
+                           size_t                token_num) {
+    const auto& cfg = postLayerTraceConfig();
+    if (!cfg.enabled || inputs.trace_ids.empty()) {
+        return;
+    }
+
+    const auto batch_size = static_cast<int64_t>(inputs.trace_ids.size());
+    const auto rows       = logits.defined() ? logits.size(0) : (last_hidden.defined() ? last_hidden.size(0) : 0);
+    if (rows <= 0) {
+        return;
+    }
+
+    const int32_t* input_lengths = inputs.input_lengths.defined() ? inputs.input_lengths.data_ptr<int32_t>() : nullptr;
+    const int32_t* sequence_lengths =
+        inputs.sequence_lengths.defined() && inputs.sequence_lengths.numel() > 0 ? inputs.sequence_lengths.data_ptr<int32_t>() :
+                                                                                  nullptr;
+    const int32_t* lm_indexes =
+        inputs.lm_output_indexes.defined() && inputs.lm_output_indexes.numel() > 0 ?
+            inputs.lm_output_indexes.data_ptr<int32_t>() :
+            nullptr;
+
+    std::ostringstream os;
+    os << "{\"ts_us\":" << autil::TimeUtility::currentTimeInMicroSeconds() << ",\"pid\":" << ::getpid()
+       << ",\"rank\":\"" << postLayerTraceJsonEscape(postLayerTraceRankString()) << "\""
+       << ",\"event\":\"post_layer_trace\",\"stage\":\"" << stage << "\""
+       << ",\"has_context_request\":" << (has_context_request ? "true" : "false")
+       << ",\"need_all_logits\":" << (need_all_logits ? "true" : "false")
+       << ",\"skip_final_layernorm\":" << (skip_final_layernorm ? "true" : "false")
+       << ",\"token_num\":" << token_num
+       << ",\"input_batch_size\":" << (inputs.input_lengths.defined() ? inputs.input_lengths.size(0) : 0)
+       << ",\"decode_batch_size\":" << (inputs.sequence_lengths.defined() ? inputs.sequence_lengths.size(0) : 0)
+       << ",\"logit_rows\":" << rows << ",\"rows\":[";
+
+    int emitted = 0;
+    for (int64_t row = 0; row < std::min<int64_t>(batch_size, rows); ++row) {
+        const auto& trace_id = inputs.trace_ids[row];
+        if (!postLayerTraceMatches(trace_id)) {
+            continue;
+        }
+        const int32_t input_len  = input_lengths && row < inputs.input_lengths.size(0) ? input_lengths[row] : -1;
+        const bool    has_seq    = sequence_lengths && row < inputs.sequence_lengths.size(0);
+        const int32_t seq_len    = has_seq ? sequence_lengths[row] : input_len;
+        const int32_t output_len = input_len >= 0 && seq_len >= input_len ? seq_len - input_len : -1;
+        if (cfg.max_output_len >= 0 && output_len > cfg.max_output_len) {
+            continue;
+        }
+        if (emitted != 0) {
+            os << ",";
+        }
+        ++emitted;
+        os << "{\"row\":" << row << ",\"trace_id\":\"" << postLayerTraceJsonEscape(trace_id) << "\""
+           << ",\"input_len\":" << input_len << ",\"seq_len\":" << seq_len << ",\"output_len\":" << output_len
+           << ",\"lm_output_index\":" << (lm_indexes && row < inputs.lm_output_indexes.size(0) ? lm_indexes[row] : -1)
+           << ",";
+        postLayerTraceAppendStats(os, "final_hidden_row", final_hidden.defined() ? final_hidden.select(0, row) : torch::Tensor());
+        os << ",";
+        postLayerTraceAppendStats(os, "last_hidden_row", last_hidden.defined() ? last_hidden.select(0, row) : torch::Tensor());
+        os << ",";
+        postLayerTraceAppendStats(os, "logits_row", logits.defined() ? logits.select(0, row) : torch::Tensor());
+        os << ",\"top_logits\":";
+        postLayerTraceAppendTopK(os, logits.defined() ? logits.select(0, row) : torch::Tensor(), cfg.topk);
+        os << "}";
+        if (emitted >= cfg.max_rows) {
+            break;
+        }
+    }
+    os << "]}";
+    if (emitted == 0) {
+        return;
+    }
+
+    std::lock_guard<std::mutex> lock(postLayerTraceMutex());
+    auto&                       out = postLayerTraceOutputStream();
+    if (out.good()) {
+        out << os.str() << "\n";
+        out.flush();
+    }
+}
+
+}  // namespace
 
 torch::Tensor PyWrappedModel::tensorHoldHostAndToCuda(const torch::Tensor& tensor) {
     if (tensor.device().is_cuda()) {
@@ -632,9 +1002,28 @@ GptModelOutputs PyWrappedModel::forwardPostLayers(torch::Tensor         hidden,
         torch::Tensor softmax_result_t;
         if (need_all_logits) {
             auto last_logits = torch::index_select(logits, 0, lm_output_indexes_device.to(torch::kLong));
+            auto indexed_hidden = torch::index_select(hidden, 0, lm_output_indexes_device.to(torch::kLong));
+            postLayerTraceLogRows("pre_sampler",
+                                  inputs,
+                                  indexed_hidden,
+                                  indexed_hidden,
+                                  last_logits,
+                                  has_context_request,
+                                  need_all_logits,
+                                  skip_final_layernorm,
+                                  token_num);
             return {last_logits, last_hidden, hidden, logits, softmax_result_t};
         }
 
+        postLayerTraceLogRows("pre_sampler",
+                              inputs,
+                              last_hidden,
+                              last_hidden,
+                              logits,
+                              has_context_request,
+                              need_all_logits,
+                              skip_final_layernorm,
+                              token_num);
         if (merged_eagle3_hidden.defined()) {
             hidden = merged_eagle3_hidden;
         }
