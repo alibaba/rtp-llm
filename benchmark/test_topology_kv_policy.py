@@ -300,6 +300,23 @@ class TopologyKvPolicyTest(unittest.TestCase):
         self.assertGreaterEqual(result.counters.learned_kept_tokens, 2)
         self.assertEqual(result.counters.learned_evicted_tokens, 1)
 
+    def test_topology_only_uses_full_structural_budget(self):
+        topk = torch.tensor([[-1, -1, -1, -1, -1, -1]], dtype=torch.int32)
+        lengths = torch.tensor([6], dtype=torch.int32)
+        config = TopologyKvPolicyConfig(
+            policy="topology_only",
+            sink_blocks=3,
+            local_blocks=0,
+            witness_blocks=0,
+            block_size=2,
+        )
+
+        result = apply_topology_kv_policy(topk, lengths, config=config)
+
+        values = [value for value in result.topk_indices[0].tolist() if value >= 0]
+        self.assertEqual(len(values), min(topk.size(1), int(lengths[0].item())))
+        self.assertEqual(set(values), set(range(6)))
+
     def test_merge_output_satisfies_sparse_kernel_layout_contract(self):
         topk = torch.tensor(
             [
@@ -406,8 +423,28 @@ class TopologyKvPolicyTest(unittest.TestCase):
             block_size=4,
         )
 
-        with self.assertRaisesRegex(ValueError, "topk_indices must use integer dtype"):
+        with self.assertRaisesRegex(
+            ValueError, "topk_indices must use int32 or int64 dtype"
+        ):
             apply_topology_kv_policy(topk, lengths, config=config)
+
+    def test_rejects_unsigned_or_narrow_topk_indices(self):
+        lengths = torch.tensor([8], dtype=torch.int32)
+        config = TopologyKvPolicyConfig(
+            policy="topology_sparse_merge",
+            sink_blocks=1,
+            local_blocks=1,
+            witness_blocks=0,
+            block_size=4,
+        )
+
+        for dtype in (torch.uint8, torch.int8, torch.int16):
+            with self.subTest(dtype=dtype):
+                topk = torch.tensor([[7, 6, 5, 4]], dtype=dtype)
+                with self.assertRaisesRegex(
+                    ValueError, "topk_indices must use int32 or int64 dtype"
+                ):
+                    apply_topology_kv_policy(topk, lengths, config=config)
 
     def test_bypasses_python_policy_when_topk_elements_exceed_limit(self):
         topk = torch.tensor([[7, 6, 5, 4]], dtype=torch.int32)

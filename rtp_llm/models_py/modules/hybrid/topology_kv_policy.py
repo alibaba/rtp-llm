@@ -46,9 +46,7 @@ SUPPORTED_TOPOLOGY_KV_POLICIES = frozenset(
     }
 )
 SUPPORTED_COORDINATE_MISMATCH_ACTIONS = frozenset({"raise", "fallback_disabled"})
-INTEGER_TOPK_DTYPES = frozenset(
-    {torch.int8, torch.int16, torch.int32, torch.int64, torch.uint8}
-)
+SUPPORTED_TOPK_DTYPES = frozenset({torch.int32, torch.int64})
 
 
 def normalize_topology_kv_policy(policy: str) -> TopologyKvPolicy:
@@ -365,8 +363,8 @@ def apply_topology_kv_policy(
         return _passthrough_result(topk_indices, fingerprint)
     if topk_indices.ndim != 2:
         raise ValueError("topk_indices must have shape [rows, topk]")
-    if topk_indices.dtype not in INTEGER_TOPK_DTYPES:
-        raise ValueError("topk_indices must use integer dtype")
+    if topk_indices.dtype not in SUPPORTED_TOPK_DTYPES:
+        raise ValueError("topk_indices must use int32 or int64 dtype")
     if lengths.ndim != 1 or lengths.numel() != topk_indices.size(0):
         raise ValueError("lengths must have shape [rows]")
     _validate_optional_row_tensor(row_starts, name="row_starts", rows=lengths.numel())
@@ -442,7 +440,7 @@ def apply_topology_kv_policy(
             structural,
             local_start,
             row_length,
-            config.max_structural_fraction,
+            1.0 if config.policy == "topology_only" else config.max_structural_fraction,
         )
         rows.append(row_result.values)
         learned_kept_tokens += row_result.learned_kept_tokens
