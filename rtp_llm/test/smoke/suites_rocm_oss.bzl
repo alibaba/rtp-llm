@@ -129,6 +129,15 @@ def rocm_oss_suites():
                 },
                 gpu_type=["MI308X-ROCM7"]
             ),
+            smoke_test(
+                name="rocm_pd_qwen35_fp8",
+                task_info="data/model/qwen3_next/q_r_next_fp8_tp2.json",
+                smoke_args={
+                    "prefill": "--load_cache_timeout_ms 120000 --warm_up 0 --act_type BF16 --seq_size_per_block 1024 --kernel_seq_size_per_block 16 --test_block_num 512 --max_seq_len 409600 --tp_size 1 --world_size 1 --ep_size 1 --use_triton_pa 1 --reserver_runtime_mem_mb 40480 --quantization FP8_PER_CHANNEL_COMPRESSED --use_swizzleA 1 --cache_store_rdma_mode 0 --use_local 1 --role_type PREFILL",
+                    "decode": "--load_cache_timeout_ms 120000 --warm_up 0 --act_type BF16 --seq_size_per_block 1024 --kernel_seq_size_per_block 16 --test_block_num 512 --max_seq_len 409600 --tp_size 1 --world_size 1 --ep_size 1 --use_triton_pa 1 --reserver_runtime_mem_mb 40480 --quantization FP8_PER_CHANNEL_COMPRESSED --use_swizzleA 1 --cache_store_rdma_mode 0 --use_local 1 --role_type DECODE",
+                },
+                gpu_type=["MI308X-ROCM7"],
+            ),
         ],
     )
 
