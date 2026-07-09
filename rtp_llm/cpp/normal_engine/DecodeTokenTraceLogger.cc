@@ -168,7 +168,9 @@ void appendIntVector(std::ostream& os, const std::vector<int>& values) {
 
 struct WatchState {
     std::vector<int> token_tail;
-    bool             triggered = false;
+    bool             triggered      = false;
+    int              cf_total       = 0;
+    size_t           cf_match_index = 0;
 };
 
 std::unordered_map<std::string, WatchState>& watchStates() {
@@ -195,6 +197,30 @@ int countSubsequence(const std::vector<int>& values, const std::vector<int>& pat
         }
     }
     return count;
+}
+
+void updateStreamingSubsequenceCount(WatchState& state,
+                                     const std::vector<int>& tokens,
+                                     const std::vector<int>& pattern) {
+    if (pattern.empty()) {
+        return;
+    }
+    for (const auto token : tokens) {
+        if (state.cf_match_index >= pattern.size()) {
+            state.cf_match_index = 0;
+        }
+        while (state.cf_match_index > 0 && token != pattern[state.cf_match_index]) {
+            state.cf_match_index = 0;
+        }
+        if (token != pattern[state.cf_match_index]) {
+            continue;
+        }
+        ++state.cf_match_index;
+        if (state.cf_match_index == pattern.size()) {
+            ++state.cf_total;
+            state.cf_match_index = 0;
+        }
+    }
 }
 
 bool hasRepeatedSuffix(const std::vector<int>& values, int max_pattern_size, int min_repeats) {
@@ -395,14 +421,17 @@ void DecodeTokenTraceLogger::logDispatchBatch(const StreamGroups&   stream_group
                 new_tokens.push_back(token_ptr[(batch_idx_out + i) * token_stride + token_stride - 1]);
             }
             auto& state = watchStates()[stream->traceId()];
+            static const std::vector<int> cf_pattern = {27, 9500, 1419, 9500, 29};
+            updateStreamingSubsequenceCount(state, new_tokens, cf_pattern);
             state.token_tail.insert(state.token_tail.end(), new_tokens.begin(), new_tokens.end());
             if ((int)state.token_tail.size() > cfg.bad_watch_tail_size) {
                 state.token_tail.erase(state.token_tail.begin(),
                                        state.token_tail.begin() + (state.token_tail.size() - cfg.bad_watch_tail_size));
             }
-            const int cf_count = countSubsequence(state.token_tail, {27, 9500, 1419, 9500, 29});
+            const int cf_count = countSubsequence(state.token_tail, cf_pattern);
             const bool repeated_suffix = hasRepeatedSuffix(state.token_tail, 8, 8);
-            if (!state.triggered && (cf_count >= cfg.bad_watch_min_cf || repeated_suffix)) {
+            const bool cf_total_repeat = state.cf_total >= cfg.bad_watch_min_cf;
+            if (!state.triggered && (cf_total_repeat || cf_count >= cfg.bad_watch_min_cf || repeated_suffix)) {
                 state.triggered = true;
                 const int seq_size_per_block =
                     stream->seqSizePerBlock() > 0 ? stream->seqSizePerBlock() : std::max(1, stream->seqLength());
@@ -413,8 +442,11 @@ void DecodeTokenTraceLogger::logDispatchBatch(const StreamGroups&   stream_group
                 watch_row << "{\"ts_us\":" << autil::TimeUtility::currentTimeInMicroSeconds()
                           << ",\"pid\":" << ::getpid() << ",\"rank\":\"" << jsonEscape(rankString())
                           << "\",\"event\":\"decode_bad_watch_trigger\""
-                          << ",\"reason\":\"" << (cf_count >= cfg.bad_watch_min_cf ? "cf_repeat" : "repeated_suffix")
+                          << ",\"reason\":\""
+                          << (cf_total_repeat ? "cf_total_repeat" :
+                              (cf_count >= cfg.bad_watch_min_cf ? "cf_tail_repeat" : "repeated_suffix"))
                           << "\",\"cf_count\":" << cf_count
+                          << ",\"cf_total\":" << state.cf_total
                           << ",\"total_decode_batch_size\":" << stream_groups.totalDecodeBatchSize()
                           << ",\"total_context_batch_size\":" << stream_groups.totalContextBatchSize()
                           << ",\"total_sampler_batch_size_in\":" << stream_groups.totalSamplerBatchSizeIn()
