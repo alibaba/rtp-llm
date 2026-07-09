@@ -1,17 +1,23 @@
 """ROCm FP8 DeepGEMM quantized Linear implementation"""
 
+import importlib
 import logging
 from typing import Optional
 
-import aiter
 import torch
 
 from rtp_llm.models_py.modules.factory.linear import LinearBase
+from rtp_llm.utils.aiter_jit_patch import load_aiter
 
 logger = logging.getLogger(__name__)
 
 from rtp_llm.models_py.kernels.rocm.fp8_kernel import rocm_per_token_group_quant_fp8
 from rtp_llm.ops import HWKernelConfig
+
+load_aiter()
+gemm_a8w8_blockscale_bpreshuffle = importlib.import_module(
+    "aiter.ops.gemm_op_a8w8"
+).gemm_a8w8_blockscale_bpreshuffle
 
 
 class RocmFp8DeepGEMMLinear(LinearBase):
@@ -86,7 +92,7 @@ class RocmFp8DeepGEMMLinear(LinearBase):
         x_scales = input_scales.transpose(0, 1).contiguous().view(*input_scales.shape)
         w_scales = self.weight_scales
 
-        output = aiter.gemm_a8w8_blockscale_bpreshuffle(
+        output = gemm_a8w8_blockscale_bpreshuffle(
             input_fp8,  # XQ
             self.weight,  # WQ (pre-shuffled layout)
             x_scales,  # x_scale (bpreshuffle layout)

@@ -259,6 +259,9 @@ class QWen2_VL(QWen_VL):
         rope_config.mrope_dim1 = mrope_section[0]
         rope_config.mrope_dim2 = mrope_section[1]
         rope_config.mrope_dim3 = mrope_section[2]
+        rope_config.mrope_interleaved = config_json.get("rope_scaling", {}).get(
+            "mrope_interleaved", False
+        )
         rope_config.dim = 128
 
     @staticmethod

@@ -116,6 +116,11 @@ private:
     bool tryGetRealGraphDecodeBatchSize(const PyModelInputs& inputs, CudaGraphState& state);
     /// Select graph key for prefill; false if capture_range_ empty or seq_len above max captured (lower_bound hit end).
     bool                    tryGetRealGraphPrefillSeqLen(const PyModelInputs& inputs, CudaGraphState& state);
+    bool                    validateComboPositionIds(const PyModelInputs&  inputs,
+                                                     const CudaGraphState& state,
+                                                     const torch::Tensor&  captured_position_ids,
+                                                     size_t&               copy_numel) const;
+    bool                    canReplaySelectedGraph(const PyModelInputs& inputs, const CudaGraphState& state) const;
     void                    initCaptureAttentionInputs(PyModelInputs& inputs, int max_bs, int num_tokens_per_bs);
     void                    initCaptureBertEmbeddingInputs(PyModelInputs& inputs, int max_bs, int max_num_token);
     void                    initCaptureAttentionInputsPost();

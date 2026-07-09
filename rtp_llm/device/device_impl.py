@@ -889,6 +889,9 @@ class RocmImpl(GpuImpl):
     def shuffle_moe_weight(
         self, x: torch.Tensor, datatype: torch.dtype, name: str
     ) -> torch.Tensor:
+        from rtp_llm.utils.aiter_jit_patch import load_aiter
+
+        load_aiter()
         from aiter.ops.shuffle import shuffle_weight
 
         is_gate = name in [W.moe_w1, W.moe_s1]
@@ -916,7 +919,9 @@ class RocmImpl(GpuImpl):
                 raise RuntimeError(
                     "Quark MXFP4 MoE scale shuffle requires gfx950 (MI355)."
                 )
+            load_aiter()
             from aiter.utility.fp4_utils import e8m0_shuffle
+
             if x_.dim() == 3:
                 s0, s1, _ = x_.shape
                 x_ = e8m0_shuffle(x_.contiguous().view(s0 * s1, -1)).view(s0, s1, -1)

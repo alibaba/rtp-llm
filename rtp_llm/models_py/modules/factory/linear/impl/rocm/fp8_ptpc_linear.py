@@ -1,5 +1,6 @@
 """ROCm FP8 PTPC (Per-Token Per-Channel) quantized Linear implementation."""
 
+import importlib
 import importlib.metadata as importlib_metadata
 import json
 import logging
@@ -7,14 +8,18 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Optional, Tuple
 
-import aiter
 import torch
 import torch.nn.functional as F
-from aiter.ops.gemm_op_a8w8 import gemm_a8w8_bpreshuffle_cktile
 
 from rtp_llm.models_py.kernels.rocm.fp8_kernel import rocm_per_token_quant_fp8
 from rtp_llm.models_py.modules.factory.linear import LinearBase
 from rtp_llm.ops import HWKernelConfig
+from rtp_llm.utils.aiter_jit_patch import load_aiter
+
+load_aiter()
+_gemm_ops = importlib.import_module("aiter.ops.gemm_op_a8w8")
+_gradlib_ops = importlib.import_module("aiter.ops.gradlib")
+gemm_a8w8_bpreshuffle_cktile = _gemm_ops.gemm_a8w8_bpreshuffle_cktile
 
 logger = logging.getLogger(__name__)
 
@@ -69,7 +74,7 @@ class RocmFp8PTPCLinearBase(LinearBase):
     @staticmethod
     @lru_cache(maxsize=1)
     def init_hipblas() -> None:
-        aiter.hipb_create_extension()
+        _gradlib_ops.hipb_create_extension()
 
     @staticmethod
     def _as_hipb_weight_view(weight: torch.Tensor) -> torch.Tensor:
@@ -164,7 +169,7 @@ class RocmFp8PTPCLinearNoSwizzle(RocmFp8PTPCLinearBase):
                 input_fp8, self.weight, input_scales, self.weight_scales, output
             )
         else:
-            output = aiter.gemm_a8w8_bpreshuffle(
+            output = _gemm_ops.gemm_a8w8_bpreshuffle(
                 input_fp8,
                 self.weight,
                 input_scales,
@@ -316,7 +321,7 @@ class RocmFp8PTPCLinearWithSwizzle(RocmFp8PTPCLinearBase):
         )
         if use_gelu:
             kwargs["use_gelu"] = True
-        output = aiter.hipb_mm(input_fp8, self.weight, solution_index, **kwargs)
+        output = _gradlib_ops.hipb_mm(input_fp8, self.weight, solution_index, **kwargs)
         return self._restore_dtype(output, original_dtype)
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:

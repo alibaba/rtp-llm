@@ -1,6 +1,6 @@
+import importlib
 from typing import Any, Dict, Optional
 
-import aiter
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -17,7 +17,12 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.quant_config import (
     FusedMoEQuantConfig,
 )
 from rtp_llm.models_py.modules.factory.fused_moe.defs.type import ExecutorType
+from rtp_llm.utils.aiter_jit_patch import load_aiter
 from rtp_llm.utils.model_weight import W
+
+load_aiter()
+_moe_ops = importlib.import_module("aiter.ops.moe_op")
+moe_sorting_fwd = importlib.import_module("aiter.ops.moe_sorting").moe_sorting_fwd
 
 BLOCK_SIZE_M = 32
 
@@ -118,7 +123,7 @@ class FusedMoeExecutor(FusedMoeExpertExecutor):
         num_valid_ids = torch.empty((2,), dtype=torch.int32, device=device)
         moe_buf = torch.empty((M, model_dim), dtype=moebuf_dtype, device=device)
 
-        aiter.moe_sorting_fwd(
+        moe_sorting_fwd(
             topk_ids=topk_ids,
             topk_weights=topk_weights,
             sorted_token_ids=sorted_ids,
@@ -202,7 +207,7 @@ class FusedMoeExecutor(FusedMoeExpertExecutor):
         a1_scale = None
         # act_op = 1 if activation == "silu" else 0  # 1 = silu_and_mul
 
-        aiter.ck_moe_stage1(
+        _moe_ops.ck_moe_stage1(
             hidden_states=a1,
             w1=self.w13_weight,
             w2=self.w2_weight,
@@ -224,7 +229,7 @@ class FusedMoeExecutor(FusedMoeExpertExecutor):
         fc2_scale = None
         a2_scale = None
 
-        aiter.ck_moe_stage2(
+        _moe_ops.ck_moe_stage2(
             inter_states=a2,  # [M*topk, inter_dim//2]
             w1=self.w13_weight,
             w2=self.w2_weight,
