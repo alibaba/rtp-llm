@@ -7,6 +7,22 @@ from rtp_llm.models_py.distributed.collective_torch import Group, all_gather, al
 from rtp_llm.models_py.quant_methods.base import QuantizationConfig, QuantizeMethodBase
 
 
+def _weight_name_segments(weight_name: str, prefix: str) -> List[str]:
+    segments = [segment for segment in weight_name.split(".") if segment]
+    prefix_segments = [segment for segment in prefix.split(".") if segment]
+    if prefix_segments and segments[: len(prefix_segments)] == prefix_segments:
+        return segments[len(prefix_segments) :]
+    return segments
+
+
+def _find_shard_segment(weight_name: str, prefix: str, shard_names: List[str]) -> int:
+    segments = _weight_name_segments(weight_name, prefix)
+    for idx, shard_name in enumerate(shard_names):
+        if shard_name in segments:
+            return idx
+    return -1
+
+
 class LinearBase(nn.Module):
 
     # FP8 per-block (DeepSeek-style) quantization block size, used when
@@ -647,10 +663,7 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
                 weight_slice.copy_(rescaled)
 
     def _get_shard_id(self, weight_name: str) -> int:
-        for idx, shard_name in enumerate(self.shard_names):
-            if shard_name in weight_name:
-                return idx
-        return -1
+        return _find_shard_segment(weight_name, self.prefix, self.shard_names)
 
     def _merged_shard_weight_slice(self, shard_id: int, shard_size: int) -> torch.Tensor:
         offset = shard_id * shard_size
@@ -745,11 +758,12 @@ class QKVParallelLinear(ColumnParallelLinear):
                 continue
 
             qkv_key = None
-            if "q_proj" in full_name:
+            qkv_shard_id = _find_shard_segment(full_name, self.prefix, self.shard_names)
+            if qkv_shard_id == 0:
                 qkv_key = "q"
-            elif "k_proj" in full_name:
+            elif qkv_shard_id == 1:
                 qkv_key = "k"
-            elif "v_proj" in full_name:
+            elif qkv_shard_id == 2:
                 qkv_key = "v"
 
             if qkv_key is None:

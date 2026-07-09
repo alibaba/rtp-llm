@@ -877,6 +877,35 @@ class TestLinearLoadCompleteness(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "up_proj|1"):
             layer.process_weights_after_loading()
 
+    def test_merged_fused_weight_name_uses_direct_path_not_shard_substring(self):
+        layer = MergedColumnParallelLinear(
+            input_size=4,
+            output_size=8,
+            quant_config=_qc("none"),
+            prefix="gate_up_proj",
+            shard_names=["gate_proj", "up_proj"],
+            params_dtype=torch.float32,
+        )
+        weight = torch.arange(32, dtype=torch.float32).view(8, 4)
+        layer.load_weights({"gate_up_proj.weight": weight})
+        layer.process_weights_after_loading()
+        self.assertTrue(torch.equal(layer.weight, weight))
+
+    def test_merged_fused_aux_name_uses_direct_path_not_shard_substring(self):
+        qc = _qc("fp8_block")
+        qc.weight_block_size = [4, 4]
+        layer = MergedColumnParallelLinear(
+            input_size=8,
+            output_size=8,
+            quant_config=qc,
+            prefix="gate_up_proj",
+            shard_names=["gate_proj", "up_proj"],
+            params_dtype=torch.float32,
+        )
+        scale = torch.arange(4, dtype=torch.float32).view(2, 2)
+        layer.load_weights({"gate_up_proj.weight_scale_inv": scale})
+        self.assertTrue(torch.equal(layer.weight_scale_inv, scale))
+
     def test_merged_shard_rejects_non_divisible_tp_checkpoint_dim(self):
         layer = MergedColumnParallelLinear(
             input_size=4,
@@ -890,6 +919,37 @@ class TestLinearLoadCompleteness(unittest.TestCase):
         )
         with self.assertRaisesRegex(ValueError, "divisible"):
             layer.load_weights({"gate_up_proj.gate_proj.weight": torch.zeros(5, 4)})
+
+    def test_qkv_fused_weight_name_uses_direct_path_not_shard_substring(self):
+        layer = QKVParallelLinear(
+            hidden_size=4,
+            num_heads=2,
+            num_kv_heads=1,
+            head_dim=2,
+            quant_config=_qc("none"),
+            prefix="qkv_proj",
+            params_dtype=torch.float32,
+        )
+        weight = torch.arange(32, dtype=torch.float32).view(8, 4)
+        layer.load_weights({"qkv_proj.weight": weight})
+        layer.process_weights_after_loading()
+        self.assertTrue(torch.equal(layer.weight, weight))
+
+    def test_qkv_fused_aux_name_uses_direct_path_not_shard_substring(self):
+        qc = _qc("fp8_block")
+        qc.weight_block_size = [4, 4]
+        layer = QKVParallelLinear(
+            hidden_size=4,
+            num_heads=2,
+            num_kv_heads=1,
+            head_dim=2,
+            quant_config=qc,
+            prefix="qkv_proj",
+            params_dtype=torch.float32,
+        )
+        scale = torch.arange(2, dtype=torch.float32).view(2, 1)
+        layer.load_weights({"qkv_proj.weight_scale_inv": scale})
+        self.assertTrue(torch.equal(layer.weight_scale_inv, scale))
 
     def test_qkv_missing_v_shard_fails(self):
         layer = QKVParallelLinear(
