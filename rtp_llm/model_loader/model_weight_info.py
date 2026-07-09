@@ -5,6 +5,7 @@ import logging
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
 
 import torch
+import re
 
 from rtp_llm.config.quant_config import (
     Fp8PerTensorQuantConfig,
