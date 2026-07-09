@@ -50,6 +50,8 @@ public class MetricConstant {
 
     public static final String ENGINE_BALANCING_MASTER_SELECT_DETAIL = "app.engine.balancing.master.select.detail";
 
+    public static final String ENGINE_BALANCING_MASTER_DISPATCH_REASON = "app.engine.balancing.master.dispatch.reason";
+
     /**
      * Batch dispatch size (number of requests per batch)
      */

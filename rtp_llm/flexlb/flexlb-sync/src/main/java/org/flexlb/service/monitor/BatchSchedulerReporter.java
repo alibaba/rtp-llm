@@ -23,7 +23,7 @@ import static org.flexlb.constant.MetricConstant.DECODE_INFLIGHT_COUNT;
 import static org.flexlb.constant.MetricConstant.DECODE_TOTAL_LOAD;
 import static org.flexlb.constant.MetricConstant.ENGINE_BALANCING_MASTER_BATCH_SIZE;
 import static org.flexlb.constant.MetricConstant.ENGINE_BALANCING_MASTER_BATCH_TOTAL_TOKENS;
-import static org.flexlb.constant.MetricConstant.ENGINE_BALANCING_MASTER_SELECT_DETAIL;
+import static org.flexlb.constant.MetricConstant.ENGINE_BALANCING_MASTER_DISPATCH_REASON;
 import static org.flexlb.constant.MetricConstant.ENGINE_LOCAL_TASK_MAP_SIZE;
 import static org.flexlb.constant.MetricConstant.ROUTING_QUEUE_LENGTH;
 import static org.flexlb.constant.MetricConstant.ROUTING_QUEUE_WAIT_TIME_MS;
@@ -31,10 +31,10 @@ import static org.flexlb.constant.MetricConstant.ROUTING_QUEUE_WAIT_TIME_MS;
 /**
  * Batch scheduling metrics reporter for FlexLB batch dispatch path.
  *
- * <p>Reuses existing dashboard metric keys so batch-path data appears
- * on the same Grafana panels as the non-batch path:
+ * <p>Batch-path metrics use independent metric names to avoid tag schema
+ * conflicts with the non-batch path:
  * queue (routing.queue.length + routing.queue.wait.time.ms),
- * dispatch reason (engine.balancing.master.select.detail),
+ * dispatch reason (engine.balancing.master.dispatch.reason),
  * inflight (health.check.local.task.map.size + health.check.running.task.info.size).
  */
 @Slf4j
@@ -54,8 +54,8 @@ public class BatchSchedulerReporter {
         monitor.register(ROUTING_QUEUE_LENGTH, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         monitor.register(ROUTING_QUEUE_WAIT_TIME_MS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
 
-        // Dispatch reason — same type as EngineHealthReporter
-        monitor.register(ENGINE_BALANCING_MASTER_SELECT_DETAIL, FlexMetricType.QPS, FlexPriorityType.PRECISE);
+        // Dispatch reason — independent metric for batch path
+        monitor.register(ENGINE_BALANCING_MASTER_DISPATCH_REASON, FlexMetricType.QPS, FlexPriorityType.PRECISE);
 
         // Batch size — gauge, reported per dispatch
         monitor.register(ENGINE_BALANCING_MASTER_BATCH_SIZE, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
@@ -106,14 +106,14 @@ public class BatchSchedulerReporter {
     // ==================== Dispatch reason metrics ====================
 
     /**
-     * Report batch dispatch reason via {@code engine.balancing.master.select.detail}.
+     * Report batch dispatch reason via {@code engine.balancing.master.dispatch.reason}.
      */
     public void reportDispatchReason(String role, String engineIp, String reason) {
         FlexMetricTags tags = FlexMetricTags.of(
                 "role", role,
                 "engineIp", engineIp,
                 "reason", reason);
-        monitor.report(ENGINE_BALANCING_MASTER_SELECT_DETAIL, tags, 1.0);
+        monitor.report(ENGINE_BALANCING_MASTER_DISPATCH_REASON, tags, 1.0);
     }
 
     // ==================== Inflight metrics ====================
