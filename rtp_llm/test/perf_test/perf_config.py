@@ -98,6 +98,12 @@ def parse_args() -> Tuple[argparse.Namespace, List[str]]:
     return args, remaining
 
 
+def _arg_was_explicit(argv: List[str], key: str) -> bool:
+    flag = f"--{key}"
+    prefix = f"--{key}="
+    return any(arg == flag or arg.startswith(prefix) for arg in argv)
+
+
 def _replace_cli_value(argv: List[str], key: str, new_value: str) -> None:
     flag = f"--{key}"
     prefix = f"--{key}="
@@ -174,6 +180,11 @@ def prepare_config(args: argparse.Namespace, remaining: List[str]) -> PerfTestCo
 
     # Grid mode
     input_len_list = [int(x) for x in args.input_len.split(",")]
+    needed_seq_len = max(input_len_list) + args.decode_test_length
+    if _arg_was_explicit(sys.argv[1:], "max_seq_len"):
+        max_seq_len = max(needed_seq_len, args.max_seq_len)
+    else:
+        max_seq_len = needed_seq_len
 
     # Prefill mode (partial=2): always BS=1, no need for large BS list
     if args.partial == 2:
@@ -194,6 +205,6 @@ def prepare_config(args: argparse.Namespace, remaining: List[str]) -> PerfTestCo
         all_seq_lens=input_len_list,
         batch_size_list=batch_size_list,
         input_len_list=input_len_list,
-        max_seq_len=max(input_len_list) + args.decode_test_length,
+        max_seq_len=max_seq_len,
         max_concurrency=effective_max_concurrency,
     )

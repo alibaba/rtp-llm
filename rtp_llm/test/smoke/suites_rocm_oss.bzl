@@ -88,6 +88,43 @@ def rocm_oss_suites():
         ],
     )
 
+    # ROCm Qwen3.5 (MI308X): compact online-shape coverage.
+    native.test_suite(
+        name = "smoke_rocm_qwen35",
+        tests = [
+            smoke_test(
+                name="rocm_qwen35_bf16_reuse",
+                task_info="data/model/qwen35/qwen35_bf16_rocm_reuse.json",
+                smoke_args="--warm_up 0 --act_type BF16 --seq_size_per_block 1024 --kernel_seq_size_per_block 16 --test_block_num 512 --max_seq_len 409600 --tp_size 1 --world_size 1 --use_asm_pa 1 --use_aiter_pa 1 --use_triton_pa 1 --reserver_runtime_mem_mb 40480 --reuse_cache 1 --enable_memory_cache 1 --memory_cache_size_mb 1024 --write_cache_sync 1",
+                gpu_type=["MI308X-ROCM7"],
+            ),
+            smoke_test(
+                name="rocm_qwen35_fp8_cg_reuse",
+                task_info="data/model/qwen35/qwen35_fp8_rocm_cg_reuse.json",
+                smoke_args="--warm_up 0 --act_type BF16 --seq_size_per_block 1024 --kernel_seq_size_per_block 16 --test_block_num 512 --max_seq_len 409600 --tp_size 1 --world_size 1 --use_asm_pa 1 --use_aiter_pa 1 --use_triton_pa 1 --reserver_runtime_mem_mb 40480 --quantization FP8_PER_CHANNEL_COMPRESSED --use_swizzleA 1 --reuse_cache 1 --enable_memory_cache 1 --memory_cache_size_mb 1024 --write_cache_sync 1 --enable_cuda_graph 1 --enable_cuda_graph_debug_mode 1 --decode_capture_config '1,2,3,4'",
+                gpu_type=["MI308X-ROCM7"],
+                data=native.glob(['data/model/qwen_vl/*.jpeg']),
+            ),
+            smoke_test(
+                name="rocm_qwen35_fp8_tp2_cg_reuse",
+                task_info="data/model/qwen35/qwen35_fp8_rocm_tp2_cg_reuse.json",
+                smoke_args="--warm_up 0 --act_type BF16 --seq_size_per_block 1024 --kernel_seq_size_per_block 16 --test_block_num 512 --max_seq_len 409600 --tp_size 2 --world_size 2 --ep_size 1 --use_asm_pa 1 --use_aiter_pa 1 --use_triton_pa 1 --reserver_runtime_mem_mb 40480 --quantization FP8_PER_CHANNEL_COMPRESSED --use_swizzleA 1 --reuse_cache 1 --enable_cuda_graph 1 --enable_cuda_graph_debug_mode 1 --decode_capture_config '1,2,3,4'",
+                gpu_type=["MI308X-ROCM7"],
+            ),
+            # Qwen3.5-27B TP2 packs 422604 tokens: the QKV source offset reaches
+            # 2163727360 and the FLA chunk-state offset reaches 2597191680.
+            smoke_test(
+                name="rocm_qwen35_27b_fp8_pd_tp2x2_cg_long_prefill",
+                task_info="data/model/qwen35/qwen35_27b_fp8_pd_tp2x2_cg_long_prefill.json",
+                smoke_args={
+                    "prefill": "--load_cache_timeout_ms 900000 --warm_up 0 --act_type BF16 --seq_size_per_block 1024 --kernel_seq_size_per_block 16 --test_block_num 512 --max_seq_len 131072 --max_context_batch_size 4 --max_batch_tokens_size 524288 --tp_size 2 --world_size 2 --ep_size 1 --use_asm_pa 1 --use_aiter_pa 1 --use_triton_pa 1 --reserver_runtime_mem_mb 40480 --quantization FP8_PER_CHANNEL_COMPRESSED --use_swizzleA 1 --reuse_cache 0 --concurrency_limit 4 --cache_store_rdma_mode 0 --use_local 1 --role_type PREFILL",
+                    "decode": "--load_cache_timeout_ms 900000 --warm_up 0 --act_type BF16 --seq_size_per_block 1024 --kernel_seq_size_per_block 16 --test_block_num 512 --max_seq_len 131072 --max_context_batch_size 4 --max_batch_tokens_size 524288 --tp_size 2 --world_size 2 --ep_size 1 --use_asm_pa 1 --use_aiter_pa 1 --use_triton_pa 1 --reserver_runtime_mem_mb 40480 --quantization FP8_PER_CHANNEL_COMPRESSED --use_swizzleA 1 --reuse_cache 0 --concurrency_limit 4 --cache_store_rdma_mode 0 --use_local 1 --enable_cuda_graph 1 --enable_cuda_graph_debug_mode 1 --decode_capture_config '1,2,3,4' --role_type DECODE",
+                },
+                gpu_type=["MI308X-ROCM7"],
+            ),
+        ],
+    )
+
 
     # ROCm Eagle (Qwen2-14B + draft)
     native.test_suite(
@@ -113,6 +150,15 @@ def rocm_oss_suites():
                 smoke_args= {
                     "prefill": "--test_block_num 10 --warm_up 0 --seq_size_per_block 16 --act_type bf16 --use_swizzleA 1 --use_asm_pa 1 --disable_flashinfer_native 1 --use_aiter_pa 1 --use_local 1 --role_type PREFILL --world_size 1",
                     "decode": "--test_block_num 10 --warm_up 0 --seq_size_per_block 16 --act_type bf16 --use_swizzleA 1 --use_asm_pa 1 --disable_flashinfer_native 1 --use_aiter_pa 1 --use_local 1 --role_type DECODE --world_size 1"
+                },
+                gpu_type=["MI308X-ROCM7"]
+            ),
+            smoke_test(
+                name="rocm_pd_qwen35_bf16_tp2_cg",
+                task_info="data/model/qwen35/qwen35_bf16_rocm.json",
+                smoke_args= {
+                    "prefill": "--load_cache_timeout_ms 120000 --warm_up 0 --act_type BF16 --seq_size_per_block 1024 --kernel_seq_size_per_block 16 --test_block_num 512 --max_seq_len 409600 --tp_size 2 --world_size 2 --use_asm_pa 1 --use_aiter_pa 1 --use_triton_pa 1 --reserver_runtime_mem_mb 40480 --cache_store_rdma_mode 0 --use_local 1 --role_type PREFILL",
+                    "decode": "--load_cache_timeout_ms 120000 --warm_up 0 --act_type BF16 --seq_size_per_block 1024 --kernel_seq_size_per_block 16 --test_block_num 512 --max_seq_len 409600 --tp_size 2 --world_size 2 --use_asm_pa 1 --use_aiter_pa 1 --use_triton_pa 1 --reserver_runtime_mem_mb 40480 --cache_store_rdma_mode 0 --use_local 1 --enable_cuda_graph 1 --enable_cuda_graph_debug_mode 1 --decode_capture_config '1,2,3,4' --role_type DECODE"
                 },
                 gpu_type=["MI308X-ROCM7"]
             ),
@@ -185,6 +231,19 @@ def rocm_oss_suites():
                 task_info="data/model/qwen3/ptpc_q_r_fp8_py.json",
                 gpu_type=["MI308X-ROCM7"],
                 smoke_args="--enable_cuda_graph 1 --reserver_runtime_mem_mb 107813 --use_aiter_pa 1 --seq_size_per_block 16 --fp8_kv_cache 1",
+            ),
+        ],
+    )
+
+    # ROCm VL (Qwen3-VL dense)
+    native.test_suite(
+        name = "smoke_rocm_vl",
+        tests = [
+            smoke_test(
+                name="rocm_qwen3_vl_cg",
+                task_info="data/model/qwen_vl/q_r_3.json",
+                smoke_args="--act_type BF16 --reserver_runtime_mem_mb 51200 --tp_size 1 --world_size 1 --enable_cuda_graph 1 --enable_cuda_graph_debug_mode 1 --decode_capture_config '1,2,3,4'",
+                gpu_type=["MI308X-ROCM7"],
             ),
         ],
     )

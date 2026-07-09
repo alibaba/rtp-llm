@@ -1,0 +1,86 @@
+{
+    "model_type": "qwen35_moe",
+    "model_path": "/mnt/nas1/hf/Qwen3.5-35B-A3B",
+    "query_result": [
+        {
+            "query": {
+                "prompt_batch": [
+                    "$prompt:s1",
+                    "$prompt:s1",
+                    "$prompt:s1"
+                ],
+                "generate_config": {
+                    "max_new_tokens": 10,
+                    "top_k": 1
+                }
+            },
+            "result": {
+                "response_batch": [
+                    {
+                        "response": "\n\nThe CAP theorem, also known as Brewer's",
+                        "response_alternatives": [
+                            "\n\nThe CAP Theorem, also known as Brewer",
+                            "\n\nThe CAP theorem, also known as Brewer's"
+                        ]
+                    },
+                    {
+                        "response": "\n\nThe CAP theorem, also known as Brewer's",
+                        "response_alternatives": [
+                            "\n\nThe CAP Theorem, also known as Brewer",
+                            "\n\nThe CAP theorem, also known as Brewer's"
+                        ]
+                    },
+                    {
+                        "response": "\n\nThe CAP theorem, also known as Brewer's",
+                        "response_alternatives": [
+                            "\n\nThe CAP Theorem, also known as Brewer",
+                            "\n\nThe CAP theorem, also known as Brewer's"
+                        ]
+                    }
+                ]
+            }
+        },
+        {
+            "query": {
+                "prompt": "$prompt:x2",
+                "generate_config": {
+                    "max_new_tokens": 5,
+                    "top_k": 1,
+                    "top_p": 0,
+                    "enable_device_cache": false,
+                    "enable_memory_cache": true
+                }
+            },
+            "result": {
+                "response": "\r\n\r\n——基本形成靠拢",
+                "aux_info": {
+                    "reuse_len": 0,
+                    "local_reuse_len": 0,
+                    "remote_reuse_len": 0,
+                    "memory_reuse_len": 0
+                }
+            }
+        },
+        {
+            "query": {
+                "prompt": "$prompt:x2",
+                "generate_config": {
+                    "max_new_tokens": 5,
+                    "top_k": 1,
+                    "top_p": 0,
+                    "enable_device_cache": false,
+                    "enable_memory_cache": true
+                }
+            },
+            "result": {
+                "response": "\r\n\r\n——基本形成靠拢",
+                "aux_info": {
+                    "reuse_len": 3072,
+                    "local_reuse_len": 3072,
+                    "remote_reuse_len": 0,
+                    "memory_reuse_len": 3072
+                }
+            }
+        }
+    ]
+}

@@ -18,6 +18,29 @@ filegroup(
     srcs = glob(["data/model/**/*.json"]),
 )
 
+py_test(
+    name = "multi_inst_case_runner_test",
+    srcs = glob(["*.py"]),
+    main = "multi_inst_case_runner_test.py",
+    imports = [".."],
+    deps = [
+        "//rtp_llm/test/utils:maga_server_manager",
+        "//rtp_llm:uvicorn",
+        "//rtp_llm:fastapi",
+        "//rtp_llm:psutil",
+        "//rtp_llm:tiktoken",
+        "//rtp_llm:testlib",
+        "//rtp_llm:pydantic",
+        "//rtp_llm:json5",
+        "//rtp_llm:dashscope",
+        "//rtp_llm:jieba",
+        "//rtp_llm:partial_json_parser",
+        "//rtp_llm:openai",
+        "//rtp_llm/test/utils:device_resource",
+        "//rtp_llm/test/utils:test_util",
+    ],
+)
+
 # ============================================================================
 # Open-source smoke test suites (platform-grouped)
 # ============================================================================
@@ -62,6 +85,8 @@ test_suite(
         ":smoke_rocm_basic",
         ":smoke_rocm_dense",
         ":smoke_rocm_moe",
+        ":smoke_rocm_qwen35",
+        ":smoke_rocm_vl",
         ":smoke_rocm_eagle",
         ":smoke_rocm_pd",
         ":smoke_rocm_embedding",
