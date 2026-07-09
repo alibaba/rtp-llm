@@ -27,7 +27,7 @@ from rtp_llm.dash_sc.structural_tag import (
 from rtp_llm.utils.base_model_datatypes import GenerateOutputs
 
 _DEFAULT_MAX_THINKING_TOKENS = 131072
-_DEFAULT_MAX_NEW_TOKENS = 32000
+_DEFAULT_MAX_NEW_TOKENS = 131072
 
 
 class LLMFinishReason(IntEnum):

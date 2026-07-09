@@ -28,10 +28,7 @@ bool isActiveThinkState(const StreamThinkInfo& info) {
 }
 
 void markAfterThink(StreamThinkInfo& info) {
-    info.process_state = ThinkProcessState::AFTER_THINK;
-    if (info.think_output_length < 0) {
-        info.think_output_length = info.current_output_length;
-    }
+    info.markAfterThink();
 }
 
 bool transitionToAfterThinkIfClosed(StreamThinkInfo& info) {
@@ -54,7 +51,7 @@ bool thinkBudgetExhausted(const SamplerInputs& inputs, size_t batch_idx, const S
     }
 
     const int observed_output_tokens = std::max(generatedTokens(inputs, batch_idx), info.current_output_length);
-    return observed_output_tokens >= info.max_thinking_tokens;
+    return observed_output_tokens >= info.bodyTokenBudget();
 }
 
 bool thinkEndCloseInProgress(const StreamThinkInfo& info) {
@@ -105,7 +102,7 @@ bool bitmaskAllowsToken(const int32_t* row, size_t words, int32_t token_id) {
 
 bool specThinkBudgetExhausted(const StreamThinkInfo& info) {
     return info.dfa_ptr && !info.end_think_token_ids.empty() && info.max_thinking_tokens > 0
-           && info.current_output_length >= info.max_thinking_tokens;
+           && info.current_output_length >= info.bodyTokenBudget();
 }
 
 bool forceThinkEndTokenInBitmask(int32_t* row, size_t words, const StreamThinkInfo& info) {
@@ -362,11 +359,10 @@ int64_t ThinkModeLogitsProcessor::acceptedTokenLen() const {
 
 int64_t ThinkModeLogitsProcessor::finishedThinkOutputLen() const {
     auto snapshot = std::atomic_load_explicit(&spec_snapshot_, std::memory_order_acquire);
-    if (!snapshot || !snapshot->eligible || snapshot->info.process_state != ThinkProcessState::AFTER_THINK) {
+    if (!snapshot || !snapshot->eligible) {
         return -1;
     }
-    return snapshot->info.think_output_length >= 0 ? snapshot->info.think_output_length :
-                                                     snapshot->info.current_output_length;
+    return snapshot->info.finishedThinkOutputLen();
 }
 
 int ThinkModeLogitsProcessor::tryAcceptAndFillBitmask(const SpecLogitsProcessorRequest& request) {

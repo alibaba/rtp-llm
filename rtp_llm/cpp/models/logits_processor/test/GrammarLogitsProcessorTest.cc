@@ -537,11 +537,12 @@ TEST(ReasoningGrammarLogitsProcessorTest, BudgetForceCloseThenGrammar) {
     auto matcher = backend.createMatcher(compiled, /*require_reasoning=*/false, std::nullopt);
     ReasoningGrammarLogitsProcessor processor(matcher,
                                               /*eos_token_id=*/0,
-                                              /*max_thinking_tokens=*/1,
+                                              /*max_thinking_tokens=*/4,
                                               {7},
                                               {8, 9},
                                               /*input_length=*/0);
 
+    EXPECT_EQ(processor.finishedThinkOutputLen(), -1);
     processor.updateStatus(torch::tensor({{5}}, torch::kInt32), 1);
 
     SamplerInputs inputs;
@@ -564,6 +565,7 @@ TEST(ReasoningGrammarLogitsProcessorTest, BudgetForceCloseThenGrammar) {
     EXPECT_EQ(inputs.logits[0][9].item<float>(), 1.0f);
 
     processor.updateStatus(torch::tensor({{9}}, torch::kInt32), 1);
+    EXPECT_EQ(processor.finishedThinkOutputLen(), 3);
     inputs.logits           = torch::zeros({1, 128}, torch::kFloat32);
     inputs.sequence_lengths = torch::tensor({3}, torch::kInt32);
     processor.process(inputs, 0, 1);
