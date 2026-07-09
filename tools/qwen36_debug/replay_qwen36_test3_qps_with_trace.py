@@ -20,6 +20,8 @@ def parse_wrapper_args() -> tuple[argparse.Namespace, list[str]]:
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--base-script", default=str(DEFAULT_BASE_SCRIPT))
     parser.add_argument("--trace-prefix", default=f"local_qwen36_{dt.datetime.now().strftime('%Y%m%d_%H%M%S')}")
+    parser.add_argument("--force-greedy", action="store_true")
+    parser.add_argument("--greedy-seed", type=int, default=7)
     args, remaining = parser.parse_known_args()
     return args, [sys.argv[0], *remaining]
 
@@ -37,6 +39,27 @@ def make_trace_id(trace_prefix: str, request: dict[str, Any], seq: int) -> str:
     request_id = str(request.get("id") or "unknown")
     source_request_id = str(request.get("source_request_id") or "unknown")
     return f"{trace_prefix}_seq{seq:06d}_{request_id}_src{source_request_id}"
+
+
+def force_greedy_requests(requests: list[dict[str, Any]], seed: int) -> None:
+    for request in requests:
+        payload = request.setdefault("payload", {})
+        payload["temperature"] = 0.0
+        payload["top_p"] = 1.0
+        payload["top_k"] = 1
+        payload["do_sample"] = False
+        payload["seed"] = seed
+        payload["frequency_penalty"] = 0.0
+        payload["presence_penalty"] = 0.0
+        payload["repetition_penalty"] = 1.0
+        request["payload_hash"] = f"greedy_{base_stable_hash(payload)}"
+
+
+def base_stable_hash(value: Any) -> str:
+    raw = json.dumps(value, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    import hashlib
+
+    return hashlib.sha256(raw).hexdigest()[:16]
 
 
 async def send_one_with_trace(base: Any, client: Any, args: argparse.Namespace, request: dict[str, Any], seq: int, trace_prefix: str) -> dict[str, Any]:
@@ -128,6 +151,8 @@ async def main_async() -> int:
         requests = base.load_requests(Path(args.requests_jsonl).expanduser())
     else:
         requests = base.materialize_requests(args)
+    if wrapper_args.force_greedy:
+        force_greedy_requests(requests, wrapper_args.greedy_seed)
 
     requests_path = (
         Path(args.write_requests_jsonl).expanduser()
@@ -141,6 +166,8 @@ async def main_async() -> int:
     run_context = vars(args)
     run_context["trace_prefix"] = wrapper_args.trace_prefix
     run_context["base_script"] = str(Path(wrapper_args.base_script).expanduser())
+    run_context["force_greedy"] = bool(wrapper_args.force_greedy)
+    run_context["greedy_seed"] = wrapper_args.greedy_seed
     (output_dir / "run_context.json").write_text(
         json.dumps(run_context, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )
