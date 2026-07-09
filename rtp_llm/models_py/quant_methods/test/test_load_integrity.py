@@ -598,8 +598,8 @@ class TestFastSafetensorsFallbackSemantics(unittest.TestCase):
             loader.model_path = tmpdir
             with mock.patch.dict(
                 sys.modules, {"fastsafetensors": types.ModuleType("fastsafetensors")}
-            ), mock.patch("torch.cuda.is_available", return_value=True), mock.patch(
-                "torch.cuda.mem_get_info", return_value=(3600, 10000)
+            ), mock.patch("torch.cuda.is_available", return_value=True), mock.patch.object(
+                loader, "_target_cuda_mem_get_info", return_value=(3600, 10000)
             ):
                 ok, reason = loader._fastsafetensors_eligible()
         self.assertFalse(ok)
