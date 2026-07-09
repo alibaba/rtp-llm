@@ -54,6 +54,9 @@ public:
 
     MemoryType where() const;
 
+    // Stable CUDA device index of the backing buffer. Returns -1 for non-CUDA builds.
+    int deviceIndex() const;
+
     // Per-(global) layer KV / KV-scale backing tensors for the allocator path, by global layer id.
     std::vector<torch::Tensor> allLayerCacheBase() const;
     std::vector<torch::Tensor> allLayerScaleCacheBase() const;

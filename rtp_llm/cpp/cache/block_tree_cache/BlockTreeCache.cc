@@ -498,14 +498,14 @@ void BlockTreeCache::performLoadBack(std::vector<LoadBackItem> items, std::share
             auto desc = TransferDescriptor::hostToDevice(
                 item.node, item.group_id, slot.host_block, item.allocated_device_blocks);
 
-            auto result = copy_engine_->submit(desc).result();
-            copy_ok     = result.ok();
+            auto status = copy_engine_->submit(desc).status();
+            copy_ok     = status == CopyStatus::OK;
             if (!copy_ok) {
                 RTP_LLM_LOG_WARNING("BlockTreeCache::performLoadBack: H2D FAILED "
                                     "group[%d] node_key=%ld status=%d",
                                     item.group_id,
                                     item.node->cache_key,
-                                    static_cast<int>(result.status));
+                                    static_cast<int>(status));
             }
         } else if (item.source_tier == Tier::DISK && hp && dp) {
             // Disk → GPU (cross-layer: Disk → temp Host → GPU, Host not cached)
@@ -518,27 +518,27 @@ void BlockTreeCache::performLoadBack(std::vector<LoadBackItem> items, std::share
                 // Step 1: Disk → temp Host
                 auto d2h_desc = TransferDescriptor::diskToHost(item.node, item.group_id, slot.disk_slot, temp_host);
 
-                auto d2h_result = copy_engine_->submit(d2h_desc).result();
-                if (d2h_result.ok()) {
+                auto d2h_status = copy_engine_->submit(d2h_desc).status();
+                if (d2h_status == CopyStatus::OK) {
                     // Step 2: temp Host → GPU
                     auto h2d_desc = TransferDescriptor::hostToDevice(
                         item.node, item.group_id, temp_host, item.allocated_device_blocks);
 
-                    auto h2d_result = copy_engine_->submit(h2d_desc).result();
-                    copy_ok         = h2d_result.ok();
+                    auto h2d_status = copy_engine_->submit(h2d_desc).status();
+                    copy_ok         = h2d_status == CopyStatus::OK;
                     if (!copy_ok) {
                         RTP_LLM_LOG_WARNING("BlockTreeCache::performLoadBack: Disk2D H2D step FAILED "
                                             "group[%d] node_key=%ld status=%d",
                                             item.group_id,
                                             item.node->cache_key,
-                                            static_cast<int>(h2d_result.status));
+                                            static_cast<int>(h2d_status));
                     }
                 } else {
                     RTP_LLM_LOG_WARNING("BlockTreeCache::performLoadBack: Disk2D D2H step FAILED "
                                         "group[%d] node_key=%ld status=%d",
                                         item.group_id,
                                         item.node->cache_key,
-                                        static_cast<int>(d2h_result.status));
+                                        static_cast<int>(d2h_status));
                 }
                 hp->free(temp_host);  // Release temp buffer
             }

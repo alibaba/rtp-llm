@@ -306,7 +306,7 @@ bool BlockTreeEvictor::executeTierCopy(const EvictionMove& move) {
         return false;
     }
 
-    return copy_engine_->submit(desc).result().ok();
+    return copy_engine_->submit(desc).ok();
 }
 
 EvictionMove BlockTreeEvictor::makeMove(TreeNode* node,

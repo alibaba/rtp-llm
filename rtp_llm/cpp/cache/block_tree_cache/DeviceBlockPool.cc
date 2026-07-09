@@ -398,6 +398,13 @@ MemoryType DeviceBlockPool::where() const {
     return cache_aligned_buffer_.is_pinned() ? MemoryType::MEMORY_CPU_PINNED : MemoryType::MEMORY_CPU;
 }
 
+int DeviceBlockPool::deviceIndex() const {
+    if (cache_aligned_buffer_.is_cuda()) {
+        return static_cast<int>(cache_aligned_buffer_.get_device());
+    }
+    return -1;
+}
+
 size_t DeviceBlockPool::getTotalSizeBytes() const {
     return config().total_size_bytes;
 }

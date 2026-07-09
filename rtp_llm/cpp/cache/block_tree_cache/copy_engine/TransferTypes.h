@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <functional>
 #include <memory>
 #include <string>
@@ -15,21 +16,16 @@ enum class CopyStatus {
     INVALID_ARGS,
     DEVICE_IO_ERROR,
     DISK_IO_ERROR,
-    PARTIAL_FAILURE,
 };
 
-struct CopyResult {
-    uint64_t   request_id{0};
-    CopyStatus status{CopyStatus::OK};
-    size_t     completed_entries{0};
-    size_t     failed_entries{0};
+using CopyCompletionCallback = std::function<void(CopyStatus)>;
 
-    bool ok() const {
-        return status == CopyStatus::OK;
-    }
+struct DeviceHostCopyOptions {
+    size_t staged_sm_min_tile_count{16};
+    size_t staged_sm_min_bytes{64 * 1024};
+    bool   staged_sm_copy_enabled{false};
+    bool   cuda_batch_copy_enabled{true};
 };
-
-using CopyCompletionCallback = std::function<void(const CopyResult&)>;
 
 class TransferHandle {
 public:
@@ -38,9 +34,12 @@ public:
     uint64_t   requestId() const;
     void       wait() const;
     bool       done() const;
-    CopyResult result() const;
-    void       onComplete(CopyCompletionCallback callback) const;
-    bool       valid() const {
+    CopyStatus status() const;
+    bool       ok() const {
+        return status() == CopyStatus::OK;
+    }
+    void onComplete(CopyCompletionCallback callback) const;
+    bool valid() const {
         return state_ != nullptr;
     }
 
