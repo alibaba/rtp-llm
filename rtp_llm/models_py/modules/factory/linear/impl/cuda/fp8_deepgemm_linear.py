@@ -229,7 +229,11 @@ class CudaFp8DeepGEMMLinear(LinearBase):
             output = torch.empty(M, self.N, dtype=torch.bfloat16, device=input.device)
         return output
 
-    def quantize_input(self, input: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    def quantize_input(
+        self,
+        input: torch.Tensor,
+        input_scales: Optional[torch.Tensor] = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         """Quantize a 2D BF16 input once for reuse across compatible FP8 GEMMs."""
         M, _ = self._validate_input(input)
         if input.dtype == torch.float8_e4m3fn:
@@ -308,10 +312,12 @@ class CudaFp8DeepGEMMLinear(LinearBase):
         return output
 
     def forward(
-        self, input: torch.Tensor, out: Optional[torch.Tensor] = None
+        self,
+        input: torch.Tensor,
+        out: Optional[torch.Tensor] = None,
+        input_scales: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        M, _ = self._validate_input(input)
-        input_fp8, input_scales = self.quantize_input(input)
+        input_fp8, input_scales = self.quantize_input(input, input_scales=input_scales)
 
         # Prepare output tensor
         return self.forward_quantized(input_fp8, input_scales, out=out)

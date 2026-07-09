@@ -33,6 +33,11 @@ size_t expectedCPShardedLocalBlocks(const CPSlotMapper& mapper, int seq_len, int
     return static_cast<size_t>((total_len + block_size - 1) / block_size);
 }
 
+bool cacheStatusSnapshotEnabled() {
+    const char* env = std::getenv("RTP_LLM_CACHE_STATUS_SNAPSHOT");
+    return env != nullptr && std::strcmp(env, "1") == 0;
+}
+
 }  // namespace
 
 KVCacheManager::KVCacheManager(const CacheConfig&                 config,

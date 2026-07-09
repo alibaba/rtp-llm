@@ -690,8 +690,12 @@ class GLM5MegaMoE(nn.Module):
             buf,
             recipe=(1, 1, FP4_BLOCK),
             activation="swiglu",
-            activation_clamp=None, #(self.cfg.swiglu_limit if self.cfg.swiglu_limit > 0 else None),
+            activation_clamp=None,  # (self.cfg.swiglu_limit if self.cfg.swiglu_limit > 0 else None),
             fast_math=False,
+        )
+        _sync_cuda_graph_warmup_ranks(
+            f"glm5.mega_moe.layer{self.cfg.layer_id}.after_deepgemm",
+            x.device,
         )
         return y
 

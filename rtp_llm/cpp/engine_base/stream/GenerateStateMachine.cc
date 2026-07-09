@@ -17,6 +17,10 @@ constexpr const char* kInitKVBlockMallocRetryTimesEnv     = "RTP_LLM_PREFILL_REU
 const bool kAsyncDebugEnabled = []() {
     const char* env = std::getenv("RTP_LLM_ASYNC_DEBUG");
     return env != nullptr && std::string(env) == "1";
+}();
+
+bool asyncDebugEnabled() {
+    return kAsyncDebugEnabled;
 }
 
 int initKVBlockMallocRetryTimes() {
