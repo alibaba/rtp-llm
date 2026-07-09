@@ -1,3 +1,4 @@
+import os
 import unittest
 from unittest import TestCase
 from unittest.mock import patch
@@ -152,6 +153,33 @@ class GenerateConfigTest(TestCase):
         self.assertEqual(py_env_configs.moe_config.use_deepep_low_latency, True)
         self.assertEqual(py_env_configs.moe_config.use_deepep_internode, False)
         self.assertEqual(py_env_configs.moe_config.ll_num_max_token, 160)
+
+    @patch.dict(
+        "os.environ",
+        {
+            "TP_SIZE": "2",
+            "PP_SIZE": "1",
+            "WORLD_SIZE": "2",
+            "WORLD_RANK": "0",
+            "LOCAL_WORLD_SIZE": "2",
+            "CONCURRENCY_LIMIT": "32",
+            "START_PORT": "20000",
+            "MODEL_TYPE": "fake_model",
+            "ROLE_TYPE": "DECODE",
+            "CACHE_STORE_RDMA_MODE": "0",
+            "USE_ALL_GATHER": "0",
+        },
+        clear=True,
+    )
+    def test_pd_cache_store_rdma_disabled_before_default_accl_env(self):
+        py_env_configs: PyEnvConfigs = setup_args()
+        setup_and_configure_server(py_env_configs)
+
+        self.assertEqual(
+            py_env_configs.pd_separation_config.cache_store_rdma_mode, False
+        )
+        self.assertIsNone(os.environ.get("ACCL_MAX_USER_MR_GB"))
+        self.assertIsNone(os.environ.get("ACCL_SOFT_TX_DEPTH"))
 
     @patch.dict(
         "os.environ",

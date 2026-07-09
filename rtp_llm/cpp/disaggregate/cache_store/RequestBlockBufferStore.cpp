@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/disaggregate/cache_store/RequestBlockBufferStore.h"
+#include "rtp_llm/cpp/disaggregate/cache_store/CacheStoreTensorUtils.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
@@ -179,15 +180,12 @@ bool RequestBlockBufferStore::copyBlock(const std::shared_ptr<BlockBuffer>& dst_
 
     RTP_LLM_INTERVAL_LOG(120, INFO, "copy block cache once, may affect performance");
 
-    execNoBlockCopy(
-        {torch::from_blob(
-             dst_block->addr.get(),
-             {(int64_t)dst_block->len},
-             torch::TensorOptions().dtype(torch::kUInt8).device(dst_block->gpu_mem ? torch::kCUDA : torch::kCPU)),
-         torch::from_blob(
-             src_block->addr.get(),
-             {(int64_t)src_block->len},
-             torch::TensorOptions().dtype(torch::kUInt8).device(src_block->gpu_mem ? torch::kCUDA : torch::kCPU))});
+    cacheStoreCopyByteTensor(dst_block->addr.get(),
+                             dst_block->len,
+                             dst_block->gpu_mem,
+                             src_block->addr.get(),
+                             src_block->len,
+                             src_block->gpu_mem);
     return true;
 }
 
