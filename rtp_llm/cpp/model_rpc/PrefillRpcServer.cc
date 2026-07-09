@@ -335,7 +335,7 @@ void PrefillRpcServer::enqueueRequest(PrefillGenerateContext& prefill_context) {
 void PrefillRpcServer::remoteLoadCacheStart(PrefillGenerateContext& prefill_context) {
     RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_LOG_DEBUG("request [%ld] remote load cache", prefill_context.request_id);
-    auto start_time_us = currentTimeUs();
+    auto start_time_us         = currentTimeUs();
     prefill_context.error_info = waitStreamBeforeRun(prefill_context.getStream());
     prefill_context.stat_info.remote_load_cache_wait_stream_rt_us += currentTimeUs() - start_time_us;
     if (prefill_context.error_info.hasError()) {
@@ -528,10 +528,9 @@ grpc::Status PrefillRpcServer::GenerateStreamCall(grpc::ServerContext*          
                                                   grpc::ServerWriter<GenerateOutputsPB>* writer) {
     RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_LOG_DEBUG("request [%ld] start generate stream call", request->request_id());
-    auto pd_separation = request->generate_config().max_new_tokens() > 1 && request->generate_config().num_beams() <= 1
-                         && request->generate_config().variable_num_beams().size() == 0
-                         && request->generate_config().num_return_sequences() <= 1
-                         && request->generate_config().can_use_pd_separation();
+    auto pd_separation =
+        request->generate_config().num_beams() <= 1 && request->generate_config().variable_num_beams().size() == 0
+        && request->generate_config().num_return_sequences() <= 1 && request->generate_config().can_use_pd_separation();
     if (prefillTraceLogEnabled()) {
         RTP_LLM_LOG_INFO(
             "Prefill request trace: event=recv request_id=%ld pd_separation=%d token_ids=%d "
