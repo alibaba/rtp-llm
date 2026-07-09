@@ -38,6 +38,7 @@ from rtp_llm.models_py.quant_methods.fp8 import Fp8LinearMethod, _runtime_fp8_dt
 
 # Register MoE quant methods for BaseMoEExperts tests.
 import rtp_llm.models_py.quant_methods.fp8_moe  # noqa: F401
+import rtp_llm.models_py.quant_methods.w4a8_moe  # noqa: F401
 
 
 def _qc(quant_type: str) -> QuantizationConfig:
@@ -967,6 +968,52 @@ class TestMoELoadCompleteness(unittest.TestCase):
         self.assertEqual(
             layer._loaded_keys, {(0, "gate_proj"), (0, "up_proj"), (0, "down_proj")}
         )
+
+    def test_w4a8_online_rejects_odd_hidden_or_intermediate_size(self):
+        with self.assertRaisesRegex(ValueError, "expects even H/M"):
+            BaseMoEExperts(
+                num_experts=2,
+                hidden_size=5,
+                moe_intermediate_size=8,
+                tp_size=1,
+                tp_rank=0,
+                ep_size=1,
+                ep_rank=0,
+                params_dtype=torch.float32,
+                model_config=types.SimpleNamespace(
+                    data_type="fp32", quant_config=None, exported_device=None
+                ),
+                parallelism_config=types.SimpleNamespace(dp_size=1),
+                moe_config=types.SimpleNamespace(),
+                quant_config=QuantizationConfig(
+                    quant_type="W4A8_INT4_PER_CHANNEL",
+                    source_config=types.SimpleNamespace(group_size=lambda: 1),
+                ),
+                layer_idx=0,
+            )
+
+    def test_w4a8_online_rejects_non_divisible_group_size(self):
+        with self.assertRaisesRegex(ValueError, "group_size=4.*divide"):
+            BaseMoEExperts(
+                num_experts=2,
+                hidden_size=8,
+                moe_intermediate_size=10,
+                tp_size=1,
+                tp_rank=0,
+                ep_size=1,
+                ep_rank=0,
+                params_dtype=torch.float32,
+                model_config=types.SimpleNamespace(
+                    data_type="fp32", quant_config=None, exported_device=None
+                ),
+                parallelism_config=types.SimpleNamespace(dp_size=1),
+                moe_config=types.SimpleNamespace(),
+                quant_config=QuantizationConfig(
+                    quant_type="W4A8_INT4_PER_CHANNEL",
+                    source_config=types.SimpleNamespace(group_size=lambda: 4),
+                ),
+                layer_idx=0,
+            )
 
     def _make_moe(self):
         return BaseMoEExperts(

@@ -21,10 +21,13 @@ def _group_size(source_config: Any, default: int = 128) -> int:
         return default
     group_size = getattr(source_config, "group_size", None)
     if callable(group_size):
-        return int(group_size())
-    if group_size is not None:
-        return int(group_size)
-    return default
+        group_size = group_size()
+    if group_size in (-1, 0, None):
+        return default
+    group_size = int(group_size)
+    if group_size <= 0:
+        raise ValueError(f"W4A8 INT4 group_size must be positive, got {group_size}")
+    return group_size
 
 
 @register_moe_quant_method(
@@ -62,13 +65,14 @@ class W4A8Int4MoEMethod(FusedMoEMethodBase):
         M = intermediate_size
         gs = self.group_size
 
+        if H % 2 != 0 or M % 2 != 0:
+            raise ValueError(f"W4A8 INT4 expects even H/M, got H={H}, M={M}")
+        if H % gs != 0 or M % gs != 0:
+            raise ValueError(
+                f"W4A8 INT4 group_size={gs} must divide H={H} and M={M}"
+            )
+
         if self.compressed:
-            if H % 2 != 0 or M % 2 != 0:
-                raise ValueError(f"W4A8 INT4 expects even H/M, got H={H}, M={M}")
-            if H % gs != 0 or M % gs != 0:
-                raise ValueError(
-                    f"W4A8 INT4 group_size={gs} must divide H={H} and M={M}"
-                )
             layer.w13 = nn.Parameter(
                 torch.empty(E, 2 * M, H // 2, dtype=torch.int8),
                 requires_grad=False,
