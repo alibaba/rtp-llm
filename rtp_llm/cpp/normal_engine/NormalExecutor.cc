@@ -320,7 +320,7 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
                 snprintf(
                     buf,
                     sizeof(buf),
-                    "{id=%ld trace_id=%s input=%d prefix=%d reuse=%d ctx=%d grp=%ld/%d tokens=%d timeout=%ld compute_ms=%ld} ",
+                    "{id=%ld trace_id=%s input=%d prefix=%d reuse=%d ctx=%d grp=%ld/%d tokens=%d timeout=%ld compute_ms=%ld global_start_time_us=%ld} ",
                     s->streamId(),
                     s->traceId().empty() ? "-" : s->traceId().c_str(),
                     s->inputLength(),
@@ -331,7 +331,8 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
                     s->groupSize(),
                     s->currentExecuteTokenSize(),
                     s->getTimeoutMs(),
-                    compute_ms);
+                    compute_ms,
+                    s->generateInput()->global_start_time_us);
                 details += buf;
             }
             RTP_LLM_LOG_INFO(

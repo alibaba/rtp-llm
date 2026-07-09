@@ -72,8 +72,9 @@ public:
     std::optional<torch::Tensor>                mm_locs;           // multimodal input locations
     std::optional<std::vector<torch::Tensor>>   mm_position_ids;
 
-    int     prefix_length = 0;
-    int64_t begin_time_us = 0;
+    int     prefix_length        = 0;
+    int64_t begin_time_us        = 0;
+    int64_t global_start_time_us = 0;
 
     // Batch grouping params
     int     group_size = 1;

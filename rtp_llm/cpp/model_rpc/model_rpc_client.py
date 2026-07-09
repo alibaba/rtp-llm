@@ -2,6 +2,7 @@ import functools
 import json
 import logging
 import os
+import time
 from typing import AsyncGenerator
 
 import grpc
@@ -64,6 +65,7 @@ def trans_input(input_py: GenerateInput):
     input_pb = GenerateInputPB()
     input_pb.request_id = input_py.request_id
     input_pb.token_ids.extend(input_py.token_ids.reshape(-1).tolist())
+    input_pb.start_time = int(time.time() * 1_000_000)
     input_pb.group_size = input_py.group_size
     if hasattr(input_py, "group_id") and input_py.group_id != -1:
         input_pb.group_id.value = input_py.group_id
