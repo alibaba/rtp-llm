@@ -25,7 +25,7 @@ from rtp_llm.dash_sc.structural_tag import (
 )
 from rtp_llm.utils.base_model_datatypes import GenerateOutputs
 
-_INT32_MAX = 2_147_483_647
+_DEFAULT_MAX_THINKING_TOKENS = 131072
 _DEFAULT_MAX_NEW_TOKENS = 32000
 
 FINISH_REASON_LENGTH = 1
@@ -608,9 +608,9 @@ class SamplingParams:
         if request_max_think is None and other is not None:
             request_max_think = other.max_new_think_tokens
         if request_max_think is None:
-            max_thinking_tokens = 32000
+            max_thinking_tokens = _DEFAULT_MAX_THINKING_TOKENS
         elif request_max_think < 0:
-            max_thinking_tokens = _INT32_MAX
+            max_thinking_tokens = _DEFAULT_MAX_THINKING_TOKENS
         else:
             max_thinking_tokens = request_max_think
         backend_max_new_tokens = self.max_new_tokens

@@ -46,7 +46,7 @@ from rtp_llm.utils.complete_response_async_generator import (
     CompleteResponseAsyncGenerator,
 )
 
-_INT32_MAX = 2_147_483_647
+_DEFAULT_MAX_THINKING_TOKENS = 131072
 
 
 def _positive_int_or_none(value: Optional[int]) -> Optional[int]:
@@ -289,7 +289,9 @@ class OpenaiEndpoint(object):
             config.max_thinking_tokens = request.extra_configs.max_thinking_tokens
         if request.thinking_budget is not None:
             budget = int(request.thinking_budget)
-            config.max_thinking_tokens = _INT32_MAX if budget < 0 else budget
+            config.max_thinking_tokens = (
+                _DEFAULT_MAX_THINKING_TOKENS if budget < 0 else budget
+            )
         if request.enable_thinking_requested() and config.max_thinking_tokens != 0:
             config.in_think_mode = True
             self._ensure_think_end_token_ids(config)

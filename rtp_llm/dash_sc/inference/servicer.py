@@ -70,7 +70,7 @@ _EMPTY_THINK_BODY = "\n"
 # default in ``GenerateEnvConfig.think_terminate_token_id`` (single source of truth
 # for production; this constant exists so unit tests don't have to repeat it).
 _DEFAULT_TERMINATE_TOKEN_ID = 1
-_INT32_MAX = 2_147_483_647
+_DEFAULT_MAX_THINKING_TOKENS = 131072
 _FINISH_REASON_NOT_FINISHED = 2
 _PARTIAL_RESPONSE_METADATA = (("x-dashscope-partialresponse", "true"),)
 
@@ -426,7 +426,9 @@ def _apply_request_overrides(
         request_max_think = other.max_new_think_tokens
     if request_max_think is not None:
         max_think = int(request_max_think)
-        generate_config.max_thinking_tokens = _INT32_MAX if max_think < 0 else max_think
+        generate_config.max_thinking_tokens = (
+            _DEFAULT_MAX_THINKING_TOKENS if max_think < 0 else max_think
+        )
     # Only the selected budget disables thinking; ``max_think_length`` may
     # intentionally override a zero ``max_new_think_tokens`` alias.
     disable_by_budget = request_max_think == 0

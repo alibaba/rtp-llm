@@ -83,7 +83,7 @@ class GenerateConfig(BaseModel):
     max_new_tokens: int = _env_int("MAX_NEW_TOKENS", 32000)
     # only for qwen agent fncall check max input tokens
     max_input_tokens: int = _env_int("MAX_INPUT_TOKENS", 32000)
-    max_thinking_tokens: int = _env_int("MAX_THINKING_TOKENS", 131073)
+    max_thinking_tokens: int = _env_int("MAX_THINKING_TOKENS", 131072)
     in_think_mode: bool = (
         False  # same as `enable_thinking` in chat_template_kwargs, discard one in the future
     )
