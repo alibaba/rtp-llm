@@ -120,6 +120,16 @@ class LinearBase(nn.Module):
         return [block_n, block_k]
 
     @staticmethod
+    def _check_fp8_block_aligned(start: int, size: int, block: int, what: str):
+        if start % block != 0 or size % block != 0:
+            raise ValueError(
+                f"{what} requires block-aligned shard boundaries, got "
+                f"start={start}, size={size}, block={block}. Non-aligned "
+                f"FP8 block scales would overlap checkpoint blocks and cannot "
+                f"be copied safely without requantization."
+            )
+
+    @staticmethod
     def _ceil_div(x: int, y: int) -> int:
         return (x + y - 1) // y
 
@@ -478,18 +488,32 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
                     continue
 
                 if param_name == "weight_scale_inv":
-                    # FP8 per-block scale grid [out_blocks, in_blocks]. Each
-                    # shard (gate/up) ships its own grid; place this shard's
-                    # block-rows at its block offset. shard_size is in weight
-                    # rows, so convert through the quant config's N block.
+                    # FP8 per-block scale grid [out_blocks, in_blocks]. Copying
+                    # a gate/up shard is only valid when the shard boundary is
+                    # aligned to the source block grid. Otherwise one source
+                    # scale block overlaps two local shards and must be
+                    # reconstructed by dequant+requant, which this path does not do.
                     block_n, _ = self._fp8_scale_block_size()
-                    blocks_per_shard = self._ceil_div(shard_size, block_n)
+                    shard_row_start = shard_id * shard_size
+                    self._check_fp8_block_aligned(
+                        shard_row_start,
+                        shard_size,
+                        block_n,
+                        f"FP8 block merged scale {self.prefix}.{self.shard_names[shard_id]}",
+                    )
+                    blocks_per_shard = shard_size // block_n
                     if (
                         self.tp_size > 1
                         and tensor.shape[0] == blocks_per_shard * self.tp_size
                     ):
                         start = self.tp_rank * blocks_per_shard
                         tensor = tensor.narrow(0, start, blocks_per_shard).contiguous()
+                    if tensor.shape[0] != blocks_per_shard:
+                        raise ValueError(
+                            f"Shape mismatch for merged {self.prefix}.{param_name} "
+                            f"shard={shard_id}: got block rows={tensor.shape[0]}, "
+                            f"expected {blocks_per_shard}"
+                        )
                     offset = shard_id * blocks_per_shard
                     param.data[offset : offset + blocks_per_shard].copy_(tensor)
                     self._mark_loaded((param_name, shard_id))
@@ -813,10 +837,18 @@ class QKVParallelLinear(ColumnParallelLinear):
         if param_name == "weight_scale_inv":
             # FP8 per-block grid for this q/k/v shard: TP-slice along the
             # output(head)-block dim, then place at the shard's block offset
-            # in the merged [total_blocks, in_blocks] grid. For GQA/MQA with
-            # fewer KV heads than TP ranks, mirror _split_qkv(): replicate the
-            # selected KV head's block instead of slicing past the ckpt tensor.
+            # in the merged [total_blocks, in_blocks] grid. Copying is only
+            # correct when both q/k/v boundaries and TP sub-shard boundaries
+            # align to block_n; otherwise a single source scale block would be
+            # shared by two local regions and must be rebuilt by requantization.
             block_n, _ = self._fp8_scale_block_size()
+            self._check_fp8_block_aligned(
+                offset,
+                size,
+                block_n,
+                f"FP8 block QKV scale {self.prefix}.{qkv_key}",
+            )
+            expected_blocks = size // block_n
             if self.tp_size > 1:
                 if num_heads < self.tp_size:
                     start_row = (self.tp_rank % num_heads) * self.head_dim
@@ -825,9 +857,21 @@ class QKVParallelLinear(ColumnParallelLinear):
                     heads_pp = num_heads // self.tp_size
                     rows = heads_pp * self.head_dim
                     start_row = self.tp_rank * rows
+                self._check_fp8_block_aligned(
+                    start_row,
+                    rows,
+                    block_n,
+                    f"FP8 block QKV TP scale {self.prefix}.{qkv_key}",
+                )
                 start_blk = start_row // block_n
-                block_count = max(1, self._ceil_div(rows, block_n))
+                block_count = rows // block_n
                 tensor = tensor.narrow(0, start_blk, block_count).contiguous()
+                expected_blocks = block_count
+            if tensor.shape[0] != expected_blocks:
+                raise ValueError(
+                    f"Shape mismatch for QKV {self.prefix}.{param_name}/{qkv_key}: "
+                    f"got block rows={tensor.shape[0]}, expected {expected_blocks}"
+                )
             off_blk = offset // block_n
             param.data[off_blk : off_blk + tensor.shape[0]].copy_(tensor)
             self._mark_loaded((param_name, qkv_key))

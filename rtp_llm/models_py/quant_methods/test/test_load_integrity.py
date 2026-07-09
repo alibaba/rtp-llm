@@ -694,6 +694,40 @@ class TestLinearLoadCompleteness(unittest.TestCase):
             layer.process_weights_after_loading()
 
 
+    def test_qkv_fp8_block_scale_rejects_non_aligned_tp_rows(self):
+        qc = _qc("fp8_block")
+        qc.weight_block_size = [128, 128]
+        layer = QKVParallelLinear(
+            hidden_size=384,
+            num_heads=6,
+            num_kv_heads=6,
+            head_dim=64,
+            tp_size=2,
+            tp_rank=0,
+            quant_config=qc,
+            prefix="qkv_proj",
+            params_dtype=torch.float32,
+        )
+        scale = torch.ones(3, 3, dtype=torch.float32)
+        with self.assertRaisesRegex(ValueError, "FP8 block QKV scale"):
+            layer.load_weights({"qkv_proj.q_proj.weight_scale_inv": scale})
+
+    def test_merged_fp8_block_scale_rejects_non_aligned_gate_up_boundary(self):
+        qc = _qc("fp8_block")
+        qc.weight_block_size = [128, 128]
+        layer = MergedColumnParallelLinear(
+            input_size=256,
+            output_size=384,
+            quant_config=qc,
+            prefix="gate_up_proj",
+            shard_names=["gate_proj", "up_proj"],
+            params_dtype=torch.float32,
+        )
+        scale = torch.ones(2, 2, dtype=torch.float32)
+        with self.assertRaisesRegex(ValueError, "FP8 block merged scale"):
+            layer.load_weights({"gate_up_proj.gate_proj.weight_scale_inv": scale})
+
+
     def test_row_parallel_adds_bias_after_all_reduce(self):
         layer = RowParallelLinear(
             input_size=4,
@@ -873,6 +907,28 @@ class TestMoELoadCompleteness(unittest.TestCase):
                 parallelism_config=types.SimpleNamespace(dp_size=1),
                 moe_config=types.SimpleNamespace(),
                 quant_config=_qc("none"),
+                layer_idx=0,
+            )
+
+    def test_moe_fp8_block_scale_rejects_non_aligned_tp_intermediate(self):
+        qc = _qc("fp8_block")
+        qc.weight_block_size = [128, 128]
+        with self.assertRaisesRegex(ValueError, "MoE FP8 block scale TP shard"):
+            BaseMoEExperts(
+                num_experts=1,
+                hidden_size=256,
+                moe_intermediate_size=384,
+                tp_size=2,
+                tp_rank=0,
+                ep_size=1,
+                ep_rank=0,
+                params_dtype=torch.float32,
+                model_config=types.SimpleNamespace(
+                    data_type="fp32", quant_config=None, exported_device=None
+                ),
+                parallelism_config=types.SimpleNamespace(dp_size=1),
+                moe_config=types.SimpleNamespace(),
+                quant_config=qc,
                 layer_idx=0,
             )
 

@@ -200,6 +200,15 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             layer.w2 = nn.Parameter(
                 torch.empty(E, H, M_tp, dtype=dt), requires_grad=False
             )
+            if layer.moe_expert_tp_size > 1 and (
+                M_tp % block_n != 0 or M_tp % block_k != 0
+            ):
+                raise ValueError(
+                    f"MoE FP8 block scale TP shard requires block-aligned "
+                    f"moe_intermediate per rank, got moe_inter_tp={M_tp}, "
+                    f"block_n={block_n}, block_k={block_k}, "
+                    f"tp_size={layer.moe_expert_tp_size}"
+                )
             nb = self._ceil_div(M_tp, block_n)
             hb = self._ceil_div(H, block_k)
             h_nb = self._ceil_div(H, block_n)
@@ -324,16 +333,39 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             layer, "_fp8_moe_weight_block_size", [layer._FP8_BLOCK_SIZE] * 2
         )
         nb = layer._n_scale_blocks_per_proj
+        shard_start = layer.moe_expert_tp_rank * layer.moe_inter_tp
         if proj in ("gate_proj", "up_proj"):
-            start_block = (layer.moe_expert_tp_rank * layer.moe_inter_tp) // block_n
+            self._check_block_aligned(
+                shard_start,
+                layer.moe_inter_tp,
+                block_n,
+                f"MoE FP8 block scale {proj} TP shard",
+            )
+            start_block = shard_start // block_n
             sliced = tensor.narrow(0, start_block, nb).contiguous()
             row_start = nb if proj == "gate_proj" else 0
             layer.w13_scale.data[expert_id, row_start : row_start + nb].copy_(sliced)
         elif proj == "down_proj":
-            start_block = (layer.moe_expert_tp_rank * layer.moe_inter_tp) // block_k
+            self._check_block_aligned(
+                shard_start,
+                layer.moe_inter_tp,
+                block_k,
+                "MoE FP8 block scale down_proj TP shard",
+            )
+            start_block = shard_start // block_k
             k_nb = getattr(layer, "_k_scale_blocks_per_proj", nb)
             sliced = tensor.narrow(1, start_block, k_nb).contiguous()
             layer.w2_scale.data[expert_id].copy_(sliced)
+
+    @staticmethod
+    def _check_block_aligned(start: int, size: int, block: int, what: str):
+        if start % block != 0 or size % block != 0:
+            raise ValueError(
+                f"{what} requires block-aligned shard boundaries, got "
+                f"start={start}, size={size}, block={block}. Non-aligned "
+                f"FP8 block scales would overlap checkpoint blocks and cannot "
+                f"be copied safely without requantization."
+            )
 
     # ------------------------------------------------------------------ #
     #  process_weights_after_loading ← _fuse_* / _online_quantize_*
