@@ -21,6 +21,13 @@ def sm100_suites():
                 gpu_type=["SM100_ARM"],
             ),
             smoke_test(
+                name="dense_tp1_sm100_dyn_decode",
+                task_info="data/model/qwen3/q_r_l20a_fp4_tp1_py.json",
+                smoke_args="--decode_capture_config '1,2' --warm_up 0 --enable_cuda_graph 1 --enable_dynamic_decode_backend 1 --act_type BF16 --tp_size 1 --world_size 1 --reserver_runtime_mem_mb 8192 --fp8_kv_cache 1 --seq_size_per_block 64 --concurrency_limit 64 --blockwise_use_fp8_kv_cache 1",
+                envs=["DYN_DECODE_THRESHOLD=1.0"],
+                gpu_type=["SM100_ARM"],
+            ),
+            smoke_test(
                 name="fp8_attention_sm100",
                 task_info="data/model/qwen3/q_r_block_fp8.json",
                 smoke_args="--act_type BF16 --seq_size_per_block 64 --fp8_kv_cache 1 --reserver_runtime_mem_mb 178125 --warm_up 0",
