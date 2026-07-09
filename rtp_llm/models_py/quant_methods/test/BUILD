@@ -24,3 +24,11 @@ py_test(
         "//rtp_llm/models_py/standalone:py_standalone_testlib",
     ],
 )
+
+py_test(
+    name = "test_new_weight_loader_imports",
+    srcs = ["test_new_weight_loader_imports.py"],
+    deps = [
+        "//rtp_llm/models_py:new_weight_loader",
+    ],
+)

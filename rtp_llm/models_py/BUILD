@@ -125,6 +125,21 @@ py_library(
         "new_models/*.py",
         "new_models/**/*.py",
     ]),
+    deps = [
+        ":kernels",
+        ":modules",
+        ":utils",
+        "//rtp_llm:_ft_pickler",
+        "//rtp_llm:config",
+        "//rtp_llm:device",
+        "//rtp_llm:lora",
+        "//rtp_llm:ops",
+        "//rtp_llm:safetensors",
+        "//rtp_llm:torch",
+        "//rtp_llm:triton",
+        "//rtp_llm/model_loader:loader",
+        "//rtp_llm/models_py/distributed:collective_torch",
+    ],
     visibility = ["//visibility:public"],
 )
 
