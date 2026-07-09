@@ -15,6 +15,13 @@ struct DecodeRepeatedSuffixInfo {
     std::vector<int> pattern;
 };
 
+struct DecodeBlockTraceInfo {
+    int model_read_logical_block  = -1;
+    int model_write_logical_block = -1;
+    int next_read_logical_block   = -1;
+    int next_write_logical_block  = -1;
+};
+
 struct DecodeTokenTraceConfig {
     bool                     enabled              = false;
     std::vector<std::string> filters;
@@ -53,6 +60,7 @@ public:
     static DecodeRepeatedSuffixInfo debugFindRepeatedSuffixForTest(const std::vector<int>& values,
                                                                     int                    max_pattern_size,
                                                                     int                    min_repeats);
+    static DecodeBlockTraceInfo debugComputeBlockTraceForTest(int seq_len, int seq_size_per_block);
 };
 
 }  // namespace rtp_llm

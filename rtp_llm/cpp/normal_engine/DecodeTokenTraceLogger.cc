@@ -168,6 +168,21 @@ void appendIntVector(std::ostream& os, const std::vector<int>& values) {
     os << "]";
 }
 
+DecodeBlockTraceInfo computeBlockTrace(int seq_len, int seq_size_per_block) {
+    DecodeBlockTraceInfo info;
+    if (seq_size_per_block <= 0) {
+        return info;
+    }
+    // logDispatchBatch runs after sampling and before stream->update(). For the
+    // token being dispatched now, Qwen3Next decode kernels saw sequence_lengths_plus_1=seq_len.
+    info.model_read_logical_block  = seq_len >= 2 ? (seq_len - 2) / seq_size_per_block : -1;
+    info.model_write_logical_block = seq_len >= 1 ? (seq_len - 1) / seq_size_per_block : -1;
+    // These are the blocks that the next decode forward will read/write after this token is appended.
+    info.next_read_logical_block  = seq_len >= 1 ? (seq_len - 1) / seq_size_per_block : -1;
+    info.next_write_logical_block = seq_len >= 1 ? seq_len / seq_size_per_block : -1;
+    return info;
+}
+
 struct WatchStep {
     int              total_decode_batch_size  = 0;
     int              total_context_batch_size = 0;
@@ -178,8 +193,14 @@ struct WatchStep {
     int              next_batch_size          = 0;
     int              read_logical_block       = -1;
     int              write_logical_block      = -1;
+    int              model_read_logical_block = -1;
+    int              model_write_logical_block = -1;
+    int              next_read_logical_block  = -1;
+    int              next_write_logical_block = -1;
     int              cf_total                 = 0;
     std::vector<int> new_tokens;
+    std::vector<int> model_read_blocks;
+    std::vector<int> model_write_blocks;
     std::vector<int> read_blocks;
     std::vector<int> write_blocks;
 };
@@ -362,9 +383,17 @@ void appendWatchHistory(std::ostream& os, const std::deque<WatchStep>& history) 
            << ",\"next_batch_size\":" << step.next_batch_size
            << ",\"read_logical_block\":" << step.read_logical_block
            << ",\"write_logical_block\":" << step.write_logical_block
+           << ",\"model_read_logical_block\":" << step.model_read_logical_block
+           << ",\"model_write_logical_block\":" << step.model_write_logical_block
+           << ",\"next_read_logical_block\":" << step.next_read_logical_block
+           << ",\"next_write_logical_block\":" << step.next_write_logical_block
            << ",\"cf_total\":" << step.cf_total
            << ",\"new_tokens\":";
         appendIntVector(os, step.new_tokens);
+        os << ",\"model_read_blocks\":";
+        appendIntVector(os, step.model_read_blocks);
+        os << ",\"model_write_blocks\":";
+        appendIntVector(os, step.model_write_blocks);
         os << ",\"read_blocks\":";
         appendIntVector(os, step.read_blocks);
         os << ",\"write_blocks\":";
@@ -467,6 +496,10 @@ DecodeRepeatedSuffixInfo DecodeTokenTraceLogger::debugFindRepeatedSuffixForTest(
     return findRepeatedSuffix(values, max_pattern_size, min_repeats);
 }
 
+DecodeBlockTraceInfo DecodeTokenTraceLogger::debugComputeBlockTraceForTest(int seq_len, int seq_size_per_block) {
+    return computeBlockTrace(seq_len, seq_size_per_block);
+}
+
 void DecodeTokenTraceLogger::logDispatchBatch(const StreamGroups&   stream_groups,
                                               const torch::Tensor& token_ids_cpu,
                                               const torch::Tensor& success_cpu) {
@@ -514,9 +547,9 @@ void DecodeTokenTraceLogger::logDispatchBatch(const StreamGroups&   stream_group
             const auto repeated_suffix = findRepeatedSuffix(state.token_tail, 8, 8);
             const int seq_size_per_block =
                 stream->seqSizePerBlock() > 0 ? stream->seqSizePerBlock() : std::max(1, stream->seqLength());
-            const int read_logical_block =
-                stream->seqLength() > 0 ? (stream->seqLength() - 1) / seq_size_per_block : -1;
-            const int write_logical_block = stream->seqLength() / seq_size_per_block;
+            const auto block_trace = computeBlockTrace(stream->seqLength(), seq_size_per_block);
+            const int  read_logical_block  = block_trace.next_read_logical_block;
+            const int  write_logical_block = block_trace.next_write_logical_block;
             if (cfg.bad_watch_history_size > 0) {
                 WatchStep step;
                 step.total_decode_batch_size  = stream_groups.totalDecodeBatchSize();
@@ -528,8 +561,14 @@ void DecodeTokenTraceLogger::logDispatchBatch(const StreamGroups&   stream_group
                 step.next_batch_size          = next_bs;
                 step.read_logical_block       = read_logical_block;
                 step.write_logical_block      = write_logical_block;
+                step.model_read_logical_block = block_trace.model_read_logical_block;
+                step.model_write_logical_block = block_trace.model_write_logical_block;
+                step.next_read_logical_block  = block_trace.next_read_logical_block;
+                step.next_write_logical_block = block_trace.next_write_logical_block;
                 step.cf_total                 = state.cf_total;
                 step.new_tokens               = new_tokens;
+                step.model_read_blocks        = collectGroupBlocksAt(stream, block_trace.model_read_logical_block);
+                step.model_write_blocks       = collectGroupBlocksAt(stream, block_trace.model_write_logical_block);
                 step.read_blocks              = collectGroupBlocksAt(stream, read_logical_block);
                 step.write_blocks             = collectGroupBlocksAt(stream, write_logical_block);
                 state.history.push_back(std::move(step));
@@ -566,6 +605,10 @@ void DecodeTokenTraceLogger::logDispatchBatch(const StreamGroups&   stream_group
                           << ",\"seq_size_per_block\":" << seq_size_per_block
                           << ",\"read_logical_block\":" << read_logical_block
                           << ",\"write_logical_block\":" << write_logical_block
+                          << ",\"model_read_logical_block\":" << block_trace.model_read_logical_block
+                          << ",\"model_write_logical_block\":" << block_trace.model_write_logical_block
+                          << ",\"next_read_logical_block\":" << block_trace.next_read_logical_block
+                          << ",\"next_write_logical_block\":" << block_trace.next_write_logical_block
                           << ",\"current_batch_size\":" << cur_bs
                           << ",\"next_batch_size\":" << next_bs
                           << ",\"batch_idx_in\":" << batch_idx_in
@@ -607,9 +650,9 @@ void DecodeTokenTraceLogger::logDispatchBatch(const StreamGroups&   stream_group
                     }
                     const int peer_seq_size_per_block =
                         peer->seqSizePerBlock() > 0 ? peer->seqSizePerBlock() : std::max(1, peer->seqLength());
-                    const int peer_read_logical_block =
-                        peer->seqLength() > 0 ? (peer->seqLength() - 1) / peer_seq_size_per_block : -1;
-                    const int peer_write_logical_block = peer->seqLength() / peer_seq_size_per_block;
+                    const auto peer_block_trace = computeBlockTrace(peer->seqLength(), peer_seq_size_per_block);
+                    const int  peer_read_logical_block  = peer_block_trace.next_read_logical_block;
+                    const int  peer_write_logical_block = peer_block_trace.next_write_logical_block;
                     watch_row << "{\"target\":" << (peer.get() == stream.get() ? "true" : "false")
                               << ",\"trace_id\":\"" << jsonEscape(peer->traceId()) << "\""
                               << ",\"stream_id\":" << peer->streamId()
@@ -624,6 +667,10 @@ void DecodeTokenTraceLogger::logDispatchBatch(const StreamGroups&   stream_group
                               << ",\"seq_size_per_block\":" << peer_seq_size_per_block
                               << ",\"read_logical_block\":" << peer_read_logical_block
                               << ",\"write_logical_block\":" << peer_write_logical_block
+                              << ",\"model_read_logical_block\":" << peer_block_trace.model_read_logical_block
+                              << ",\"model_write_logical_block\":" << peer_block_trace.model_write_logical_block
+                              << ",\"next_read_logical_block\":" << peer_block_trace.next_read_logical_block
+                              << ",\"next_write_logical_block\":" << peer_block_trace.next_write_logical_block
                               << ",\"reuse_len\":" << peer->reuseLength()
                               << ",\"initial_reuse_len\":" << peer->initialReuseLength()
                               << ",\"local_reuse_len\":" << peer->localReuseLength()
@@ -692,9 +739,9 @@ void DecodeTokenTraceLogger::logDispatchBatch(const StreamGroups&   stream_group
         }
         const int seq_size_per_block =
             stream->seqSizePerBlock() > 0 ? stream->seqSizePerBlock() : std::max(1, stream->seqLength());
-        const int read_logical_block =
-            stream->seqLength() > 0 ? (stream->seqLength() - 1) / seq_size_per_block : -1;
-        const int write_logical_block = stream->seqLength() / seq_size_per_block;
+        const auto block_trace = computeBlockTrace(stream->seqLength(), seq_size_per_block);
+        const int  read_logical_block  = block_trace.next_read_logical_block;
+        const int  write_logical_block = block_trace.next_write_logical_block;
         row << "{\"matched\":" << (matched ? "true" : "false") << ",\"trace_id\":\""
             << jsonEscape(stream->traceId()) << "\",\"stream_id\":" << stream->streamId()
             << ",\"is_context\":" << (stream->isContextStream() ? "true" : "false")
@@ -703,6 +750,10 @@ void DecodeTokenTraceLogger::logDispatchBatch(const StreamGroups&   stream_group
             << ",\"seq_size_per_block\":" << seq_size_per_block
             << ",\"read_logical_block\":" << read_logical_block
             << ",\"write_logical_block\":" << write_logical_block
+            << ",\"model_read_logical_block\":" << block_trace.model_read_logical_block
+            << ",\"model_write_logical_block\":" << block_trace.model_write_logical_block
+            << ",\"next_read_logical_block\":" << block_trace.next_read_logical_block
+            << ",\"next_write_logical_block\":" << block_trace.next_write_logical_block
             << ",\"current_batch_size\":" << cur_bs << ",\"next_batch_size\":" << next_bs
             << ",\"reuse_len\":" << stream->reuseLength()
             << ",\"initial_reuse_len\":" << stream->initialReuseLength()

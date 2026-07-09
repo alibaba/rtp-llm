@@ -61,4 +61,18 @@ TEST(DecodeTokenTraceLoggerTest, repeatedSuffixDetectorIgnoresNonSuffixRepeats) 
     EXPECT_FALSE(info.matched);
 }
 
+TEST(DecodeTokenTraceLoggerTest, blockTraceSeparatesModelStepFromNextStep) {
+    auto at_boundary = DecodeTokenTraceLogger::debugComputeBlockTraceForTest(10688, 64);
+    EXPECT_EQ(166, at_boundary.model_read_logical_block);
+    EXPECT_EQ(166, at_boundary.model_write_logical_block);
+    EXPECT_EQ(166, at_boundary.next_read_logical_block);
+    EXPECT_EQ(167, at_boundary.next_write_logical_block);
+
+    auto after_boundary = DecodeTokenTraceLogger::debugComputeBlockTraceForTest(10689, 64);
+    EXPECT_EQ(166, after_boundary.model_read_logical_block);
+    EXPECT_EQ(167, after_boundary.model_write_logical_block);
+    EXPECT_EQ(167, after_boundary.next_read_logical_block);
+    EXPECT_EQ(167, after_boundary.next_write_logical_block);
+}
+
 }  // namespace rtp_llm
