@@ -221,7 +221,24 @@ bool hasRepeatedSuffix(const std::vector<int>& values, int max_pattern_size, int
     return false;
 }
 
-void appendBlockGroups(std::ostream& os, const GenerateStreamPtr& stream, int max_blocks_per_group) {
+void appendBlockSlice(std::ostream& os, const BlockIndicesType& blocks, int begin, int end) {
+    os << "[";
+    begin = std::max(0, std::min<int>(begin, blocks.size()));
+    end   = std::max(begin, std::min<int>(end, blocks.size()));
+    for (int i = begin; i < end; ++i) {
+        if (i != begin) {
+            os << ",";
+        }
+        os << "{\"pos\":" << i << ",\"block\":" << blocks[i] << "}";
+    }
+    os << "]";
+}
+
+void appendBlockGroups(std::ostream& os,
+                       const GenerateStreamPtr& stream,
+                       int                      max_blocks_per_group,
+                       int                      read_logical_block  = -1,
+                       int                      write_logical_block = -1) {
     os << "[";
     if (stream->curBlocksNum() > 0) {
         const auto& kv_cache   = stream->kvCache();
@@ -239,7 +256,20 @@ void appendBlockGroups(std::ostream& os, const GenerateStreamPtr& stream, int ma
                 }
                 os << blocks[i];
             }
-            os << "],\"total\":" << blocks.size() << "}";
+            os << "],\"total\":" << blocks.size();
+
+            if (!blocks.empty()) {
+                const int tail_limit = std::min<int>(blocks.size(), std::max(0, max_blocks_per_group));
+                os << ",\"tail\":";
+                appendBlockSlice(os, blocks, static_cast<int>(blocks.size()) - tail_limit, static_cast<int>(blocks.size()));
+            }
+            if (read_logical_block >= 0 || write_logical_block >= 0) {
+                const int center_begin = std::max(0, std::min(read_logical_block, write_logical_block) - 4);
+                const int center_end   = std::max(read_logical_block, write_logical_block) + 5;
+                os << ",\"current_window\":";
+                appendBlockSlice(os, blocks, center_begin, center_end);
+            }
+            os << "}";
         }
     }
     os << "]";
@@ -374,6 +404,11 @@ void DecodeTokenTraceLogger::logDispatchBatch(const StreamGroups&   stream_group
             const bool repeated_suffix = hasRepeatedSuffix(state.token_tail, 8, 8);
             if (!state.triggered && (cf_count >= cfg.bad_watch_min_cf || repeated_suffix)) {
                 state.triggered = true;
+                const int seq_size_per_block =
+                    stream->seqSizePerBlock() > 0 ? stream->seqSizePerBlock() : std::max(1, stream->seqLength());
+                const int read_logical_block =
+                    stream->seqLength() > 0 ? (stream->seqLength() - 1) / seq_size_per_block : -1;
+                const int write_logical_block = stream->seqLength() / seq_size_per_block;
                 std::ostringstream watch_row;
                 watch_row << "{\"ts_us\":" << autil::TimeUtility::currentTimeInMicroSeconds()
                           << ",\"pid\":" << ::getpid() << ",\"rank\":\"" << jsonEscape(rankString())
@@ -391,6 +426,9 @@ void DecodeTokenTraceLogger::logDispatchBatch(const StreamGroups&   stream_group
                           << ",\"input_len\":" << stream->inputLength()
                           << ",\"output_len\":" << stream->outputTokenLen()
                           << ",\"iter_count\":" << stream->iterCount()
+                          << ",\"seq_size_per_block\":" << seq_size_per_block
+                          << ",\"read_logical_block\":" << read_logical_block
+                          << ",\"write_logical_block\":" << write_logical_block
                           << ",\"current_batch_size\":" << cur_bs
                           << ",\"next_batch_size\":" << next_bs
                           << ",\"reuse_len\":" << stream->reuseLength()
@@ -406,7 +444,7 @@ void DecodeTokenTraceLogger::logDispatchBatch(const StreamGroups&   stream_group
                 watch_row << ",\"token_tail\":";
                 appendIntVector(watch_row, state.token_tail);
                 watch_row << ",\"kv_groups\":";
-                appendBlockGroups(watch_row, stream, cfg.max_blocks_per_group);
+                appendBlockGroups(watch_row, stream, cfg.max_blocks_per_group, read_logical_block, write_logical_block);
                 watch_row << "}";
                 std::lock_guard<std::mutex> lock(outputMutex());
                 auto&                       os = badWatchOutputStream();
@@ -454,11 +492,19 @@ void DecodeTokenTraceLogger::logDispatchBatch(const StreamGroups&   stream_group
         for (int i = 0; i < next_bs; ++i) {
             new_tokens.push_back(token_ptr[(batch_idx_out + i) * token_stride + token_stride - 1]);
         }
+        const int seq_size_per_block =
+            stream->seqSizePerBlock() > 0 ? stream->seqSizePerBlock() : std::max(1, stream->seqLength());
+        const int read_logical_block =
+            stream->seqLength() > 0 ? (stream->seqLength() - 1) / seq_size_per_block : -1;
+        const int write_logical_block = stream->seqLength() / seq_size_per_block;
         row << "{\"matched\":" << (matched ? "true" : "false") << ",\"trace_id\":\""
             << jsonEscape(stream->traceId()) << "\",\"stream_id\":" << stream->streamId()
             << ",\"is_context\":" << (stream->isContextStream() ? "true" : "false")
             << ",\"seq_len\":" << stream->seqLength() << ",\"input_len\":" << stream->inputLength()
             << ",\"output_len\":" << stream->outputTokenLen() << ",\"iter_count\":" << stream->iterCount()
+            << ",\"seq_size_per_block\":" << seq_size_per_block
+            << ",\"read_logical_block\":" << read_logical_block
+            << ",\"write_logical_block\":" << write_logical_block
             << ",\"current_batch_size\":" << cur_bs << ",\"next_batch_size\":" << next_bs
             << ",\"reuse_len\":" << stream->reuseLength()
             << ",\"initial_reuse_len\":" << stream->initialReuseLength()
@@ -470,7 +516,7 @@ void DecodeTokenTraceLogger::logDispatchBatch(const StreamGroups&   stream_group
             row << ",\"success\":" << (success_ptr[batch_idx_in] ? "true" : "false");
         }
         row << ",\"kv_groups\":";
-        appendBlockGroups(row, stream, config().max_blocks_per_group);
+        appendBlockGroups(row, stream, config().max_blocks_per_group, read_logical_block, write_logical_block);
         row << "}";
         batch_idx_in += cur_bs;
         batch_idx_out += next_bs;
