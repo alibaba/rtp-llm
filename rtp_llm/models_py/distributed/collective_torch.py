@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import gc
+import hashlib
 import logging
 import os
 import re
@@ -44,6 +45,7 @@ _parallelism_config: Optional[ParallelismConfig] = None
 _initialized: bool = False  # Track if we've initialized (to prevent double init)
 _cpu_tp_broadcaster_base_path: Optional[str] = None
 _cpu_tp_broadcaster_nccl_init_port: Optional[int] = None
+_cpu_tp_broadcaster_nccl_master_addr: Optional[str] = None
 
 
 def _env_flag_enabled(name: str) -> bool:
@@ -139,14 +141,33 @@ def _cpu_tp_broadcaster_initialized_for_group(actual_initialized: bool) -> bool:
     return False
 
 
+def _make_cpu_tp_broadcaster_session_id(
+    parallelism_config: ParallelismConfig,
+    nccl_init_port: int,
+    nccl_master_addr: Optional[str],
+) -> str:
+    master_addr = nccl_master_addr or os.environ.get("MASTER_ADDR", "")
+    raw_key = (
+        f"master={master_addr}|port={nccl_init_port}|"
+        f"world={parallelism_config.world_size}|tp={parallelism_config.tp_size}"
+    )
+    digest = hashlib.sha256(raw_key.encode("utf-8")).hexdigest()[:12]
+    return (
+        f"port{nccl_init_port}_w{parallelism_config.world_size}"
+        f"_tp{parallelism_config.tp_size}_{digest}"
+    )
+
+
 def _make_cpu_tp_broadcaster_base_path(
     parallelism_config: ParallelismConfig,
     nccl_init_port: int,
+    nccl_master_addr: Optional[str] = None,
 ) -> str:
     session_id = os.environ.get(_CPU_TP_BROADCASTER_ID_ENV)
     if not session_id:
-        # nccl_init_port is shared by all ranks in this bootstrap.
-        session_id = f"port{nccl_init_port}"
+        session_id = _make_cpu_tp_broadcaster_session_id(
+            parallelism_config, nccl_init_port, nccl_master_addr
+        )
     session_id = re.sub(r"[^A-Za-z0-9._-]", "_", session_id)
 
     base_dir = os.environ.get(_CPU_TP_BROADCASTER_DIR_ENV)
@@ -192,7 +213,9 @@ def _init_cpu_tp_broadcaster_if_needed(librtp_compute_ops) -> None:
     actual_initialized = False
     try:
         base_path = _make_cpu_tp_broadcaster_base_path(
-            _parallelism_config, _cpu_tp_broadcaster_nccl_init_port
+            _parallelism_config,
+            _cpu_tp_broadcaster_nccl_init_port,
+            _cpu_tp_broadcaster_nccl_master_addr,
         )
         librtp_compute_ops.init_cpu_tp_broadcaster(
             _parallelism_config.tp_rank,
@@ -238,9 +261,11 @@ def init_distributed_environment(
     Raises:
         RuntimeError: If already initialized and not destroyed
     """
-    global _group_map, _parallelism_config, _initialized, _cpu_tp_broadcaster_nccl_init_port
+    global _group_map, _parallelism_config, _initialized
+    global _cpu_tp_broadcaster_nccl_init_port, _cpu_tp_broadcaster_nccl_master_addr
 
     _cpu_tp_broadcaster_nccl_init_port = nccl_init_port
+    _cpu_tp_broadcaster_nccl_master_addr = nccl_comm_config.nccl_ip
 
     # Check if already initialized (and not destroyed)
     if _initialized and torch.distributed.is_initialized():
@@ -612,7 +637,9 @@ def destroy_distributed_environment():
     After calling this function, init_distributed_environment() can be called again
     to reinitialize the distributed environment.
     """
-    global _group_map, _parallelism_config, _initialized, _cpu_tp_broadcaster_base_path, _cpu_tp_broadcaster_nccl_init_port
+    global _group_map, _parallelism_config, _initialized
+    global _cpu_tp_broadcaster_base_path, _cpu_tp_broadcaster_nccl_init_port
+    global _cpu_tp_broadcaster_nccl_master_addr
 
     rank = torch.distributed.get_rank()
     logging.info(f"[rank: {rank}] Destroying distributed environment")
@@ -650,6 +677,7 @@ def destroy_distributed_environment():
         _parallelism_config = None
         _cpu_tp_broadcaster_base_path = None
         _cpu_tp_broadcaster_nccl_init_port = None
+        _cpu_tp_broadcaster_nccl_master_addr = None
         _initialized = False
         gc.collect()
     if cleanup_error is not None:

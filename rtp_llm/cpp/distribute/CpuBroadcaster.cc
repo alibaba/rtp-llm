@@ -55,6 +55,13 @@ void closeFd(int& fd) {
     }
 }
 
+void shutdownAndCloseFd(int& fd) {
+    if (fd >= 0) {
+        ::shutdown(fd, SHUT_RDWR);
+        closeFd(fd);
+    }
+}
+
 void cleanupRank0State(std::vector<int>& peer_fds, int& listen_fd, std::string& uds_path) {
     for (int& fd : peer_fds) {
         closeFd(fd);
@@ -267,6 +274,19 @@ void CpuBroadcaster::cleanupStateLocked() {
     broadcast_in_progress_ = false;
     failed_                = false;
     initialized_.store(false, std::memory_order_release);
+}
+
+void CpuBroadcaster::markBroadcastFailedLocked() {
+    failed_                = true;
+    broadcast_in_progress_ = false;
+    for (int& fd : peer_fds_) {
+        shutdownAndCloseFd(fd);
+    }
+    closeFd(listen_fd_);
+    if (!my_uds_path_.empty()) {
+        ::unlink(my_uds_path_.c_str());
+        my_uds_path_.clear();
+    }
 }
 
 void CpuBroadcaster::reset() {
@@ -485,6 +505,10 @@ void CpuBroadcaster::broadcast(void* buf, std::size_t nbytes, int root) {
         failed_                = failed_ || failed;
         broadcast_in_progress_ = false;
     };
+    auto fail_broadcast = [this]() {
+        std::lock_guard<std::mutex> lock(mu_);
+        markBroadcastFailedLocked();
+    };
 
     try {
         if (rank == 0) {
@@ -526,7 +550,7 @@ void CpuBroadcaster::broadcast(void* buf, std::size_t nbytes, int root) {
                                     std::strerror(errno));
         }
     } catch (...) {
-        finish_broadcast(true);
+        fail_broadcast();
         throw;
     }
     finish_broadcast(false);

@@ -46,12 +46,14 @@ class TestCpuTpBroadcasterBootstrap(unittest.TestCase):
         self._old_parallelism_config = ct._parallelism_config
         self._old_base_path = ct._cpu_tp_broadcaster_base_path
         self._old_nccl_init_port = ct._cpu_tp_broadcaster_nccl_init_port
+        self._old_nccl_master_addr = ct._cpu_tp_broadcaster_nccl_master_addr
         self._old_initialized = ct._initialized
 
     def tearDown(self):
         ct._parallelism_config = self._old_parallelism_config
         ct._cpu_tp_broadcaster_base_path = self._old_base_path
         ct._cpu_tp_broadcaster_nccl_init_port = self._old_nccl_init_port
+        ct._cpu_tp_broadcaster_nccl_master_addr = self._old_nccl_master_addr
         ct._initialized = self._old_initialized
 
     def _parallelism_config(
@@ -128,17 +130,35 @@ class TestCpuTpBroadcasterBootstrap(unittest.TestCase):
             mode = stat.S_IMODE(os.stat(tmpdir).st_mode)
             self.assertEqual(mode, 0o700)
 
-    def test_make_cpu_tp_broadcaster_base_path_defaults_to_port_session(self):
+    def test_make_cpu_tp_broadcaster_base_path_defaults_to_job_session(self):
         parallelism_config = self._parallelism_config(tp_size=2, local_world_size=4)
         with tempfile.TemporaryDirectory() as tmpdir, patch.dict(
             os.environ,
             {"RTP_LLM_CPU_TP_BROADCASTER_DIR": tmpdir},
         ):
             os.environ.pop("RTP_LLM_CPU_TP_BROADCASTER_ID", None)
-            base_path = ct._make_cpu_tp_broadcaster_base_path(parallelism_config, 12345)
+            base_path = ct._make_cpu_tp_broadcaster_base_path(
+                parallelism_config, 12345, "10.0.0.1"
+            )
 
-        self.assertIn("rtp_llm_tp_port12345_dp0", base_path)
+        self.assertIn("rtp_llm_tp_port12345_w4_tp2_", base_path)
         self.assertNotIn("ppid", base_path)
+
+    def test_make_cpu_tp_broadcaster_base_path_distinguishes_master_addr(self):
+        parallelism_config = self._parallelism_config(tp_size=2, local_world_size=4)
+        with tempfile.TemporaryDirectory() as tmpdir, patch.dict(
+            os.environ,
+            {"RTP_LLM_CPU_TP_BROADCASTER_DIR": tmpdir},
+        ):
+            os.environ.pop("RTP_LLM_CPU_TP_BROADCASTER_ID", None)
+            base_path1 = ct._make_cpu_tp_broadcaster_base_path(
+                parallelism_config, 12345, "10.0.0.1"
+            )
+            base_path2 = ct._make_cpu_tp_broadcaster_base_path(
+                parallelism_config, 12345, "10.0.0.2"
+            )
+
+        self.assertNotEqual(base_path1, base_path2)
 
     def test_make_cpu_tp_broadcaster_base_path_checks_highest_rank_path(self):
         parallelism_config = self._parallelism_config(tp_size=11, local_world_size=11)

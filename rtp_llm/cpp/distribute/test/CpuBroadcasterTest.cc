@@ -475,6 +475,107 @@ TEST(CpuBroadcasterTest, NonRootRejectsMismatchedFrameHeader) {
     cleanupTempBase(base);
 }
 
+TEST(CpuBroadcasterTest, RootWriteFailureClosesOtherPeers) {
+    auto& bcast = CpuBroadcaster::instance();
+    bcast.reset();
+
+    const std::string base = makeTempBase();
+
+    std::atomic<bool> rank1_closed{false};
+    std::atomic<bool> rank2_ready{false};
+    std::atomic<bool> rank2_done{false};
+    std::atomic<bool> rank2_saw_close{false};
+    std::atomic<int>  rank2_fd{-1};
+    std::string       rank1_error;
+    std::string       rank2_error;
+
+    std::thread rank1_thread([&] {
+        int fd = connectPeerAndReadProbe(base, 1, rank1_error);
+        if (fd < 0) {
+            return;
+        }
+        ::shutdown(fd, SHUT_RDWR);
+        ::close(fd);
+        rank1_closed.store(true, std::memory_order_release);
+    });
+
+    std::thread rank2_thread([&] {
+        int fd = connectPeerAndReadProbe(base, 2, rank2_error);
+        if (fd < 0) {
+            rank2_done.store(true, std::memory_order_release);
+            return;
+        }
+        rank2_fd.store(fd, std::memory_order_release);
+        rank2_ready.store(true, std::memory_order_release);
+
+        BroadcastFrameHeader header{};
+        ssize_t              n = readAllRaw(fd, &header, sizeof(header));
+        if (n < 0) {
+            rank2_saw_close.store(true, std::memory_order_release);
+        } else {
+            rank2_error = "rank2 unexpectedly received a frame from failed root";
+        }
+        ::close(fd);
+        rank2_done.store(true, std::memory_order_release);
+    });
+
+    bcast.initialize(0, 3, base);
+
+    const auto ready_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while ((!rank1_closed.load(std::memory_order_acquire) || !rank2_ready.load(std::memory_order_acquire))
+           && std::chrono::steady_clock::now() < ready_deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+
+    if (!rank1_closed.load(std::memory_order_acquire) || !rank2_ready.load(std::memory_order_acquire)) {
+        int fd = rank2_fd.load(std::memory_order_acquire);
+        if (fd >= 0) {
+            ::shutdown(fd, SHUT_RDWR);
+        }
+        rank1_thread.join();
+        rank2_thread.join();
+        bcast.reset();
+        cleanupTempBase(base);
+        FAIL() << "fake peers were not ready; rank1_error=" << rank1_error << " rank2_error=" << rank2_error;
+    }
+
+    std::string broadcast_error;
+    try {
+        std::vector<char> payload(1024 * 1024, 0x55);
+        bcast.broadcast(payload.data(), payload.size(), 0);
+    } catch (const std::exception& e) { broadcast_error = e.what(); }
+
+    const auto close_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (!rank2_done.load(std::memory_order_acquire) && std::chrono::steady_clock::now() < close_deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    if (!rank2_done.load(std::memory_order_acquire)) {
+        int fd = rank2_fd.load(std::memory_order_acquire);
+        if (fd >= 0) {
+            ::shutdown(fd, SHUT_RDWR);
+        }
+    }
+
+    rank1_thread.join();
+    rank2_thread.join();
+
+    EXPECT_TRUE(rank1_error.empty()) << rank1_error;
+    EXPECT_TRUE(rank2_error.empty()) << rank2_error;
+    EXPECT_FALSE(broadcast_error.empty());
+    EXPECT_TRUE(rank2_done.load(std::memory_order_acquire));
+    EXPECT_TRUE(rank2_saw_close.load(std::memory_order_acquire));
+
+    std::string retry_error;
+    try {
+        int value = 1;
+        bcast.broadcast(&value, sizeof(value), 0);
+    } catch (const std::exception& e) { retry_error = e.what(); }
+    EXPECT_NE(retry_error.find("reset and reinitialize before reuse"), std::string::npos) << retry_error;
+
+    bcast.reset();
+    cleanupTempBase(base);
+}
+
 TEST(CpuBroadcasterTest, NonRootFailsFastOnNonRetryableConnectError) {
     const std::string base = makeTempBase();
     ASSERT_EQ(::symlink((base + "_0.sock").c_str(), socketPath(base).c_str()), 0);

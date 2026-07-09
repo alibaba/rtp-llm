@@ -14,7 +14,7 @@ namespace rtp_llm {
 // thread performs request-time broadcasts. Calls may cross threads, but
 // broadcastCPU is still serialized: no concurrent or re-entrant broadcasts, and
 // reset must not race with an in-flight broadcast. Any transport failure makes
-// the instance unusable until reset() closes the stream state.
+// the instance unusable until reset() rebuilds the stream state.
 class CpuBroadcaster {
 public:
     static CpuBroadcaster& instance();
@@ -44,6 +44,7 @@ private:
     CpuBroadcaster& operator=(const CpuBroadcaster&) = delete;
 
     void cleanupStateLocked();
+    void markBroadcastFailedLocked();
 
     std::mutex        mu_;
     std::atomic<bool> initialized_{false};
