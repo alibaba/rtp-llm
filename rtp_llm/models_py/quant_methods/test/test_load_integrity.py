@@ -203,6 +203,84 @@ class TestWeightMapperStreaming(unittest.TestCase):
         self.assertEqual(loader.device, "cpu")
         self.assertEqual(model.to_device, "cpu")
 
+    def test_force_cpu_scratch_runs_post_load_before_device_move(self):
+        class CaptureModel(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.events = []
+                self.child = torch.nn.Module()
+
+                def hook():
+                    self.events.append(
+                        (
+                            "hook",
+                            getattr(
+                                self.child,
+                                "_new_loader_force_cpu_load_weights",
+                                None,
+                            ),
+                        )
+                    )
+
+                self.child.process_weights_after_loading = hook
+
+            def load_weights(self, weights_iter):
+                list(weights_iter)
+
+            def to(self, device):
+                self.events.append(("to", device))
+                return self
+
+        model = CaptureModel()
+        loader = NewModelLoader(
+            types.SimpleNamespace(model_type="dummy", num_layers=1),
+            LoadConfig(
+                compute_dtype=torch.float32,
+                device="cuda",
+                force_cpu_load_weights=True,
+            ),
+            model_path="/tmp/nonexistent",
+        )
+        with mock.patch.object(
+            loader, "_create_model", return_value=model
+        ), mock.patch.object(
+            loader, "_discover_ckpt_files_cached", return_value=["dummy.safetensors"]
+        ), mock.patch(
+            "rtp_llm.models_py.model_loader._get_all_weights", return_value=iter([])
+        ), mock.patch.object(
+            loader, "_log_peak_gpu_memory", return_value=None
+        ), mock.patch(
+            "torch.cuda.is_available", return_value=False
+        ):
+            self.assertIs(loader._load_via_scratch(), model)
+        self.assertEqual(model.events, [("hook", True), ("to", "cuda")])
+
+    def test_auto_fastsafetensors_fallback_releases_before_scratch(self):
+        loader = NewModelLoader(
+            types.SimpleNamespace(model_type="dummy", num_layers=1),
+            LoadConfig(compute_dtype=torch.float32, device="cuda"),
+            model_path="/tmp/nonexistent",
+            device="cuda",
+        )
+        scratch_model = torch.nn.Module()
+        with mock.patch.object(
+            loader, "_resolve_load_method", return_value=(LoadMethod.FASTSAFETENSORS, False)
+        ), mock.patch.object(
+            loader, "_load_via_fastsafetensors", side_effect=RuntimeError("fast failed")
+        ), mock.patch(
+            "gc.collect"
+        ) as collect, mock.patch(
+            "torch.cuda.is_available", return_value=True
+        ), mock.patch(
+            "torch.cuda.empty_cache"
+        ) as empty_cache, mock.patch.object(
+            loader, "_load_via_scratch", return_value=scratch_model
+        ) as scratch:
+            self.assertIs(loader.load(), scratch_model)
+        collect.assert_called_once()
+        empty_cache.assert_called_once()
+        scratch.assert_called_once()
+
     def test_load_config_device_cpu_is_used_by_fastsafetensors_loader(self):
         class CaptureModel(torch.nn.Module):
             def __init__(self):
@@ -425,6 +503,25 @@ class TestFastSafetensorsFallbackSemantics(unittest.TestCase):
         eligible.assert_called_once()
         fast.assert_not_called()
         scratch.assert_called_once()
+
+    def test_force_cpu_auto_uses_scratch_without_fastsafetensors(self):
+        loader = self._new_loader(LoadMethod.AUTO)
+        loader.load_config.force_cpu_load_weights = True
+        scratch_model = torch.nn.Module()
+        with mock.patch.object(
+            loader, "_load_via_fastsafetensors"
+        ) as fast, mock.patch.object(
+            loader, "_load_via_scratch", return_value=scratch_model
+        ) as scratch:
+            self.assertIs(loader.load(), scratch_model)
+        fast.assert_not_called()
+        scratch.assert_called_once()
+
+    def test_force_cpu_explicit_fastsafetensors_fails_fast(self):
+        loader = self._new_loader(LoadMethod.FASTSAFETENSORS)
+        loader.load_config.force_cpu_load_weights = True
+        with self.assertRaisesRegex(RuntimeError, "force_cpu_load_weights"):
+            loader._resolve_load_method()
 
     def test_invalid_explicit_load_method_fails_fast(self):
         loader = self._new_loader("typo")

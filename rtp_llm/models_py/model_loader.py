@@ -443,24 +443,32 @@ class NewModelLoader:
     def load(self) -> nn.Module:
         method, explicit = self._resolve_load_method()
         logger.info(f"NewModelLoader using load method: {method}")
-        if method == LoadMethod.FASTSAFETENSORS:
-            try:
-                model = self._load_via_fastsafetensors()
-            except Exception as e:
-                if explicit:
-                    logger.error(
-                        "fastsafetensors load failed and fallback is disabled "
-                        "because the load method was explicitly requested: %s",
-                        e,
-                    )
-                    raise
-                logger.warning(
-                    f"fastsafetensors load failed ({e}), automatically falling back to scratch load path..."
+        if method != LoadMethod.FASTSAFETENSORS:
+            return self._load_via_scratch()
+
+        try:
+            return self._load_via_fastsafetensors()
+        except Exception as e:
+            if explicit:
+                logger.error(
+                    "fastsafetensors load failed and fallback is disabled "
+                    "because the load method was explicitly requested: %s",
+                    e,
                 )
-                model = self._load_via_scratch()
-        else:
-            model = self._load_via_scratch()
-        return model
+                raise
+            error_msg = str(e)
+
+        logger.warning(
+            "fastsafetensors load failed (%s), automatically falling back to "
+            "scratch load path after releasing failed fast-path resources...",
+            error_msg,
+        )
+        import gc
+
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        return self._load_via_scratch()
 
     def _load_via_scratch(self) -> nn.Module:
         import time
@@ -475,15 +483,31 @@ class NewModelLoader:
         model.load_weights(weights_iter)
         logger.info(f"model.load_weights() took {time.time() - t0:.2f}s")
 
-        t1 = time.time()
-        logger.info(f"Moving model to device: {self.device}")
-        model.to(self.device)
-        logger.info(f"model.to({self.device}) took {time.time() - t1:.2f}s")
+        if self.load_config.force_cpu_load_weights:
+            logger.warning(
+                "force_cpu_load_weights is enabled; running post-load hooks on CPU "
+                "before moving final weights to %s",
+                self.device,
+            )
+            self._run_post_load_hooks(model)
+            t1 = time.time()
+            logger.info(f"Moving post-load model to device: {self.device}")
+            model.to(self.device)
+            logger.info(f"model.to({self.device}) took {time.time() - t1:.2f}s")
+        else:
+            t1 = time.time()
+            logger.info(f"Moving model to device: {self.device}")
+            model.to(self.device)
+            logger.info(f"model.to({self.device}) took {time.time() - t1:.2f}s")
+
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
+            self._run_post_load_hooks(model)
 
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
-        self._run_post_load_hooks(model)
         self._log_peak_gpu_memory()
         return model
 
@@ -633,6 +657,8 @@ class NewModelLoader:
         return LoadMethod.SCRATCH, explicit
 
     def _fastsafetensors_eligible(self) -> Tuple[bool, str]:
+        if self.load_config.force_cpu_load_weights:
+            return False, "force_cpu_load_weights requires scratch CPU staging"
         try:
             import fastsafetensors  # noqa: F401
         except ImportError:

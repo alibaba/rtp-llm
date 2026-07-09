@@ -453,6 +453,12 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         layer.w2 = nn.Parameter(new_w2.to(device), requires_grad=False)
 
     def _online_per_block(self, layer):
+        if bool(getattr(layer, "_new_loader_force_cpu_load_weights", False)):
+            raise RuntimeError(
+                "fp8_per_block_online MoE requires CUDA/ROCm post-load "
+                "quantization; force_cpu_load_weights is only supported for "
+                "per-tensor fp8_online MoE."
+            )
         BS = layer._FP8_BLOCK_SIZE
         block_size = self._weight_block_size(layer)
         if block_size != [BS, BS]:

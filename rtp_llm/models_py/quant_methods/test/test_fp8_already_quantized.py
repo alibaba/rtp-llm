@@ -98,6 +98,28 @@ class TestFp8PerTensorLoad(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "requires weights to be on CUDA"):
             layer.process_weights_after_loading()
 
+    def test_online_quant_allows_cpu_post_load_when_force_cpu_enabled(self):
+        layer = ColumnParallelLinear(
+            input_size=4,
+            output_size=4,
+            quant_config=_make_qc("fp8_online"),
+            prefix="online",
+            params_dtype=torch.bfloat16,
+        )
+        layer.load_weights({"online.weight": torch.zeros(4, 4, dtype=torch.bfloat16)})
+        layer._new_loader_force_cpu_load_weights = True
+        with mock.patch(
+            "rtp_llm.models_py.quant_methods.fp8.cpu_per_tensor_quant_like_legacy",
+            return_value=(
+                torch.zeros(4, 4, dtype=fp8_moe._runtime_fp8_dtype()),
+                torch.ones(1, dtype=torch.float32),
+            ),
+        ) as cpu_quant:
+            layer.process_weights_after_loading()
+        cpu_quant.assert_called_once()
+        self.assertEqual(layer.weight.dtype, fp8_moe._runtime_fp8_dtype())
+        self.assertEqual(layer.weight.device.type, "cpu")
+
     def test_load_into_column_parallel(self):
         N, K = 16, 32
         qc = _make_qc("fp8")
@@ -430,6 +452,48 @@ class TestFp8MoEAlreadyQuantizedLoad(unittest.TestCase):
         torch.testing.assert_close(actual_w13[0], expected_w13, rtol=0.1, atol=0.1)
         torch.testing.assert_close(actual_w2[0], expected_w2, rtol=0.1, atol=0.1)
 
+    def test_online_per_tensor_moe_allows_cpu_post_load_when_force_cpu_enabled(self):
+        layer = self._make_moe("fp8_online")
+        layer._new_loader_force_cpu_load_weights = True
+        for name in (
+            "0.gate_proj.weight",
+            "0.up_proj.weight",
+            "0.down_proj.weight",
+        ):
+            layer.load_weights({name: torch.zeros(4, 4, dtype=torch.bfloat16)})
+
+        def fake_cpu_quant(weight):
+            return (
+                torch.zeros_like(weight, dtype=fp8_moe._runtime_fp8_dtype()),
+                torch.ones(1, dtype=torch.float32),
+            )
+
+        with mock.patch.object(BaseMoEExperts, "_maybe_build_fused_moe", return_value=None), \
+             mock.patch(
+                 "rtp_llm.models_py.quant_methods.fp8.cpu_per_tensor_quant_like_legacy",
+                 side_effect=fake_cpu_quant,
+             ) as cpu_quant:
+            layer.process_weights_after_loading()
+
+        self.assertEqual(cpu_quant.call_count, 2)
+        self.assertEqual(layer.w13.dtype, fp8_moe._runtime_fp8_dtype())
+        self.assertEqual(layer.w2.dtype, fp8_moe._runtime_fp8_dtype())
+        self.assertEqual(layer.w13.device.type, "cpu")
+        self.assertEqual(layer.w2.device.type, "cpu")
+
+    def test_online_block_moe_rejects_force_cpu_post_load(self):
+        layer = self._make_moe("fp8_block_online")
+        layer._new_loader_force_cpu_load_weights = True
+        for name in (
+            "0.gate_proj.weight",
+            "0.up_proj.weight",
+            "0.down_proj.weight",
+        ):
+            layer.load_weights({name: torch.zeros(4, 4, dtype=torch.bfloat16)})
+        with mock.patch.object(BaseMoEExperts, "_maybe_build_fused_moe", return_value=None):
+            with self.assertRaisesRegex(RuntimeError, "force_cpu_load_weights"):
+                layer.process_weights_after_loading()
+
     def test_online_block_moe_rejects_custom_block_size(self):
         qc = _make_qc("fp8_block_online")
         qc.weight_block_size = [2, 4]
@@ -542,6 +606,21 @@ class TestFp8BlockLoad(unittest.TestCase):
     """
 
     BLOCK = 128
+
+    def test_block_online_still_rejects_cpu_post_load_when_force_cpu_enabled(self):
+        layer = ColumnParallelLinear(
+            input_size=4,
+            output_size=4,
+            quant_config=_make_qc("fp8_block_online"),
+            prefix="online_block",
+            params_dtype=torch.bfloat16,
+        )
+        layer.load_weights(
+            {"online_block.weight": torch.zeros(4, 4, dtype=torch.bfloat16)}
+        )
+        layer._new_loader_force_cpu_load_weights = True
+        with self.assertRaisesRegex(RuntimeError, "requires weights to be on CUDA"):
+            layer.process_weights_after_loading()
 
     def test_load_into_column_parallel(self):
         N, K = 256, 256  # 2 blocks each
@@ -844,7 +923,6 @@ class TestFp8BlockLoad(unittest.TestCase):
         torch.testing.assert_close(
             layer.weight_scale_inv.detach(), expected, rtol=0, atol=0
         )
-
 
     def test_fp8_block_dequant_uses_custom_block_size(self):
         N, K = 4, 8

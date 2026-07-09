@@ -200,14 +200,25 @@ def _normalize_weight_block_size(layer, default_block: int) -> List[int]:
     return [block_n, block_k]
 
 
-def _require_cuda_weight_for_online_quant(layer, weight: torch.Tensor, method: str):
+def _require_cuda_weight_for_online_quant(
+    layer, weight: torch.Tensor, method: str, allow_force_cpu: bool = False
+):
     if weight.is_cuda:
         return weight
+    if allow_force_cpu and bool(
+        getattr(layer, "_new_loader_force_cpu_load_weights", False)
+    ):
+        return weight
+    cpu_hint = (
+        " or enable force_cpu_load_weights for CPU-side post-load quantization"
+        if allow_force_cpu
+        else " or use an already-quantized/non-online quant method for CPU load"
+    )
     raise RuntimeError(
         f"{method} requires weights to be on CUDA/ROCm before post-load "
         f"quantization, got device={weight.device} for prefix="
         f"{getattr(layer, 'prefix', '?')!r}. Set LoadConfig.device to a CUDA "
-        "device or use an already-quantized/non-online quant method for CPU load."
+        f"device{cpu_hint}."
     )
 
 
@@ -406,7 +417,7 @@ class Fp8OnlineLinearMethod(QuantizeMethodBase):
         assert weight.ndim == 2, f"expected 2D weight, got {weight.shape}"
 
         weight = _require_cuda_weight_for_online_quant(
-            layer, weight, type(self).__name__
+            layer, weight, type(self).__name__, allow_force_cpu=True
         )
         if bool(getattr(layer, "_new_loader_force_cpu_load_weights", False)):
             fp8_weight, scale = cpu_per_tensor_quant_like_legacy(weight)
