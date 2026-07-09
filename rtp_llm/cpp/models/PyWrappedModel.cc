@@ -48,6 +48,29 @@ torch::Tensor PyWrappedModel::tensorHoldHostAndToCuda(const torch::Tensor& tenso
     return cuda_tensor;
 }
 
+void PyWrappedModel::triggerInitCapture() {
+    if (!enable_cuda_graph_ || graph_runner_ == nullptr) {
+        // CUDA graph disabled / skipped (e.g. warmup, no kv layout): nothing to do.
+        return;
+    }
+    if (capture_done_) {
+        RTP_LLM_LOG_WARNING("PyWrappedModel::triggerInitCapture called but capture already done, skip");
+        return;
+    }
+#if USING_CUDA || USING_ROCM
+    // Mirror the guards the constructor held when it would have captured:
+    // InferenceMode for the capture forwards, GIL for the Python model calls.
+    c10::InferenceMode     inference_guard(true);
+    py::gil_scoped_acquire gil;
+    RTP_LLM_LOG_INFO("PyWrappedModel: triggering deferred CUDA graph capture");
+    graph_runner_->initCapture();
+    capture_done_ = true;
+    RTP_LLM_LOG_INFO("PyWrappedModel: deferred CUDA graph capture done");
+#else
+    RTP_LLM_CHECK_WITH_INFO(false, "CUDA/HIP Graph is only supported on CUDA/ROCm platform");
+#endif
+}
+
 void PyWrappedModel::releaseBuffers() {
     if (held_attn_pyobj_.ptr()) {
         py::gil_scoped_acquire gil;

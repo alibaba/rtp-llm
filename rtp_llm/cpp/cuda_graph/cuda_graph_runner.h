@@ -21,6 +21,7 @@ public:
     CudaGraphRunner(const GraphParams& graph_params, py::object py_instance):
         GraphBase(std::move(py_instance)),
         enable_cuda_graph_(graph_params.enable_cuda_graph),
+        enable_dynamic_decode_backend_(graph_params.enable_dynamic_decode_backend),
         is_prefill_cuda_graph_mode_(graph_params.is_prefill_cuda_graph_mode),
         is_target_verify_(graph_params.is_target_verify),
         capture_stream_(cuda_graph::graphGetStreamFromPool(true)),
@@ -46,8 +47,11 @@ public:
         max_bs_               = graph_params.max_context_batch_size;
         py_attn_pyobj_method_ = py_instance_.attr("prepare_fmha_impl");
         py_forward_method_    = py_instance_.attr("forward");
-        options_cuda_int32_   = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA).requires_grad(false);
-        options_cpu_int32_    = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCPU).requires_grad(false);
+        if (enable_dynamic_decode_backend_ && py::hasattr(py_instance_, "select_decode_backend")) {
+            py_select_method_ = py_instance_.attr("select_decode_backend");
+        }
+        options_cuda_int32_ = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA).requires_grad(false);
+        options_cpu_int32_  = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCPU).requires_grad(false);
         options_cuda_float_ = torch::TensorOptions().dtype(model_data_type_).device(torch::kCUDA).requires_grad(false);
         RTP_LLM_LOG_INFO("Initialize CudaGraphRunner with parameters below: \n \
             enable_cuda_graph_: %d, max_bs_: %d, enable_cuda_graph_debug_mode_: %d, max_seq_len_: %d, kernel_seq_size_per_block_: %d, \
@@ -120,7 +124,9 @@ private:
     void                    initCaptureAttentionInputsPost();
     py::object              py_forward_method_;
     py::object              py_attn_pyobj_method_;
+    py::object              py_select_method_;  // model.select_decode_backend (dynamic decode backend)
     bool                    enable_cuda_graph_{false};
+    bool                    enable_dynamic_decode_backend_{false};
     bool                    is_prefill_cuda_graph_mode_{false};
     bool                    is_target_verify_{false};
     cuda_graph::GraphStream capture_stream_;

@@ -110,7 +110,13 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
     }
     if (!params.py_model.is_none()) {
         RTP_LLM_LOG_INFO("init executor with python model");
-        model_.reset(new PyWrappedModel(model_init_params, params.py_model));
+        const bool defer_capture =
+            dynamic_decode_detail::shouldDeferCapture(warm_up_, params.hw_kernel_config, params.sp_config.type);
+        model_.reset(new PyWrappedModel(model_init_params,
+                                        params.py_model,
+                                        /*is_prefill_cuda_graph_mode=*/false,
+                                        /*use_spec_decoding=*/false,
+                                        defer_capture));
     } else if (test_model_factory) {
         RTP_LLM_LOG_INFO("init executor with test model factory");
         model_ = test_model_factory(model_init_params);

@@ -23,10 +23,15 @@ namespace W = rtp_llm::W;
 
 namespace rtp_llm {
 
+struct MockModelLifecycle {
+    size_t trigger_init_capture_count = 0;
+};
+
 // Mock model that returns random logits for testing NormalEngine without Python
 class MockModel: public ModelBase {
 public:
-    MockModel(size_t vocab_size): vocab_size_(vocab_size) {}
+    MockModel(size_t vocab_size, std::shared_ptr<MockModelLifecycle> lifecycle = nullptr):
+        vocab_size_(vocab_size), lifecycle_(std::move(lifecycle)) {}
 
     GptModelOutputs forward(const GptModelInputs& inputs) override {
         GptModelOutputs outputs;
@@ -37,14 +42,24 @@ public:
         return outputs;
     }
 
+    void triggerInitCapture() override {
+        if (lifecycle_) {
+            ++lifecycle_->trigger_init_capture_count;
+        }
+    }
+
 private:
-    size_t vocab_size_;
+    size_t                              vocab_size_;
+    std::shared_ptr<MockModelLifecycle> lifecycle_;
 };
 
 struct CustomConfig {
     bool                                    reuse_cache        = false;
     DataType                                kv_cache_data_type = DataType::TYPE_FP16;
     std::map<std::string, std::vector<int>> multi_task_prompt_tokens;
+    bool                                    enable_cuda_graph             = false;
+    bool                                    enable_dynamic_decode_backend = false;
+    SpeculativeType                         sp_type                       = SP_TYPE_NONE;
 };
 
 inline void setDefaultMhaKVCacheSpecDescs(rtp_llm::ModelConfig& model_config) {
@@ -143,6 +158,10 @@ rtp_llm::EngineInitParams createEngineInitParams(const CustomConfig&     config,
     rtp_llm::FfnDisAggregateConfig       ffn_disaggregate_config;
     rtp_llm::VitConfig                   vit_config;
 
+    hw_kernel_config.enable_cuda_graph             = config.enable_cuda_graph;
+    hw_kernel_config.enable_dynamic_decode_backend = config.enable_dynamic_decode_backend;
+    sp_config.type                                 = config.sp_type;
+
     rtp_llm::EngineInitParams rtp_llm_params(0,
                                              model_config,
                                              parallelism_config,
@@ -167,15 +186,16 @@ rtp_llm::EngineInitParams createEngineInitParams(const CustomConfig&     config,
     return rtp_llm_params;
 }
 
-std::shared_ptr<NormalEngine> createMockEngine(const CustomConfig& config) {
+std::shared_ptr<NormalEngine> createMockEngine(const CustomConfig&                        config,
+                                               const std::shared_ptr<MockModelLifecycle>& lifecycle = nullptr) {
     rtp_llm::ModelConfig   model_config;
     rtp_llm::RuntimeConfig runtime_config;
     rtp_llm::KVCacheConfig kv_cache_config;
     EngineInitParams rtp_llm_params = createEngineInitParams(config, model_config, runtime_config, kv_cache_config);
     // Set test model factory before engine construction so the model is available during startLoop()
     size_t vocab                       = model_config.vocab_size;
-    NormalExecutor::test_model_factory = [vocab](const GptModelInitParams&) {
-        return std::make_unique<MockModel>(vocab);
+    NormalExecutor::test_model_factory = [vocab, lifecycle](const GptModelInitParams&) {
+        return std::make_unique<MockModel>(vocab, lifecycle);
     };
     std::shared_ptr<NormalEngine> engine = make_shared<NormalEngine>(rtp_llm_params, nullptr);
     NormalExecutor::test_model_factory   = nullptr;

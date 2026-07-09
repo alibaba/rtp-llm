@@ -8,6 +8,9 @@ from flashinfer.prefill import (
 )
 
 from rtp_llm.models_py.modules.factory.attention import common
+from rtp_llm.models_py.modules.factory.attention.cuda_impl.benchmark_workspace import (
+    in_benchmark_workspace_scope,
+)
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.flashinfer_rotary_emb import (
     MhaRotaryEmbeddingOp,
 )
@@ -653,7 +656,15 @@ class PyFlashinferDecodeAttnOp(object):
         attn_configs: AttentionConfigs,
         attn_inputs: PyAttentionInputs,
     ) -> None:
-        self.g_workspace_buffer = get_py_flashinfer_workspace_buffer()
+        self._workspace_from_pool = not in_benchmark_workspace_scope()
+        if self._workspace_from_pool:
+            self.g_workspace_buffer = get_py_flashinfer_workspace_buffer()
+        else:
+            self.g_workspace_buffer = torch.zeros(
+                DEFAULT_PY_FLASHINFER_WORKSPACE_SIZE_MB * 1024 * 1024,
+                dtype=torch.uint8,
+                device="cuda",
+            )
         # attn_configs already has head_num and kv_head_num divided by tp_size
         self.local_head_num = attn_configs.head_num
         self.local_kv_head_num = attn_configs.kv_head_num
@@ -671,7 +682,12 @@ class PyFlashinferDecodeAttnOp(object):
         self.fmha_params = rtp_llm_ops.FlashInferMlaAttnParams()
 
     def __del__(self):
-        release_py_flashinfer_workspace_buffer(self.g_workspace_buffer)
+        workspace_buffer = getattr(self, "g_workspace_buffer", None)
+        if (
+            getattr(self, "_workspace_from_pool", False)
+            and workspace_buffer is not None
+        ):
+            release_py_flashinfer_workspace_buffer(workspace_buffer)
 
     def set_params(self, params: rtp_llm_ops.FlashInferMlaAttnParams) -> None:
         """Set the params object to be used by this op."""
