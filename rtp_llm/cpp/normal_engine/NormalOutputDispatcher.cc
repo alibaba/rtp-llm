@@ -1,5 +1,6 @@
 #include "rtp_llm/cpp/normal_engine/NormalOutputDispatcher.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
+#include "rtp_llm/cpp/normal_engine/DecodeTokenTraceLogger.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/TensorDebugUtils.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
@@ -22,6 +23,7 @@ absl::Status NormalOutputDispatcher::dispatch(const StreamGroups& stream_groups,
         sampler_output.token_ids.defined() ? sampler_output.token_ids.cpu() : torch::Tensor();
     RTP_LLM_LOG_DEBUG("new_all_token_ids = [%s]", tensorDebugStringWithData<int32_t>(token_ids_cpu).c_str());
     const torch::Tensor success_cpu = sampler_output.success.defined() ? sampler_output.success.cpu() : torch::Tensor();
+    DecodeTokenTraceLogger::logDispatchBatch(stream_groups, token_ids_cpu, success_cpu);
     int                 batch_idx_in     = 0;
     int                 batch_idx_out    = 0;
     int                 token_offset     = 0;

@@ -1,8 +1,22 @@
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_runner.h"
 
 #include <algorithm>
+#include <atomic>
+#include <cctype>
+#include <chrono>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
+#include <fstream>
+#include <iomanip>
+#include <limits>
+#include <mutex>
+#include <sstream>
+#include <string>
+#include <thread>
+#include <unistd.h>
+#include <sys/stat.h>
+#include <sys/types.h>
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include "torch/csrc/autograd/generated/variable_factories.h"
@@ -10,6 +24,390 @@
 using namespace torch_ext;
 
 namespace rtp_llm {
+
+namespace {
+
+std::atomic<uint64_t> g_decode_checksum_record_id{0};
+std::mutex            g_decode_checksum_mutex;
+
+bool envFlag(const char* name, bool default_value = false) {
+    const char* raw = std::getenv(name);
+    if (raw == nullptr) {
+        return default_value;
+    }
+    std::string value(raw);
+    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+    });
+    return !(value.empty() || value == "0" || value == "false" || value == "off" || value == "no");
+}
+
+int64_t envInt64(const char* name, int64_t default_value) {
+    const char* raw = std::getenv(name);
+    if (raw == nullptr || raw[0] == '\0') {
+        return default_value;
+    }
+    char* end = nullptr;
+    auto  v   = std::strtoll(raw, &end, 10);
+    return end == raw ? default_value : v;
+}
+
+std::string envString(const char* name, const std::string& default_value = "") {
+    const char* raw = std::getenv(name);
+    return raw == nullptr ? default_value : std::string(raw);
+}
+
+std::vector<std::string> splitCsv(const std::string& value) {
+    std::vector<std::string> out;
+    std::stringstream        ss(value);
+    std::string              item;
+    while (std::getline(ss, item, ',')) {
+        item.erase(item.begin(), std::find_if(item.begin(), item.end(), [](unsigned char c) {
+                       return !std::isspace(c);
+                   }));
+        item.erase(std::find_if(item.rbegin(),
+                                item.rend(),
+                                [](unsigned char c) {
+                                    return !std::isspace(c);
+                                })
+                       .base(),
+                   item.end());
+        if (!item.empty()) {
+            out.push_back(item);
+        }
+    }
+    return out;
+}
+
+void ensureDir(const std::string& dir) {
+    if (dir.empty()) {
+        return;
+    }
+    std::string current;
+    current.reserve(dir.size());
+    for (char c : dir) {
+        current.push_back(c);
+        if (c != '/') {
+            continue;
+        }
+        if (current.size() > 1) {
+            mkdir(current.c_str(), 0755);
+        }
+    }
+    mkdir(dir.c_str(), 0755);
+}
+
+std::string parentDir(const std::string& path) {
+    const auto pos = path.find_last_of('/');
+    if (pos == std::string::npos) {
+        return "";
+    }
+    if (pos == 0) {
+        return "/";
+    }
+    return path.substr(0, pos);
+}
+
+std::string jsonEscape(const std::string& value) {
+    std::ostringstream os;
+    for (char c : value) {
+        switch (c) {
+            case '\\':
+                os << "\\\\";
+                break;
+            case '"':
+                os << "\\\"";
+                break;
+            case '\n':
+                os << "\\n";
+                break;
+            case '\r':
+                os << "\\r";
+                break;
+            case '\t':
+                os << "\\t";
+                break;
+            default:
+                if (static_cast<unsigned char>(c) < 0x20) {
+                    os << "\\u" << std::hex << std::setw(4) << std::setfill('0') << static_cast<int>(c);
+                } else {
+                    os << c;
+                }
+        }
+    }
+    return os.str();
+}
+
+uint64_t fnv1a(const void* data, size_t bytes) {
+    constexpr uint64_t kOffset = 1469598103934665603ull;
+    constexpr uint64_t kPrime  = 1099511628211ull;
+    uint64_t           hash    = kOffset;
+    const auto*        ptr     = static_cast<const uint8_t*>(data);
+    for (size_t i = 0; i < bytes; ++i) {
+        hash ^= ptr[i];
+        hash *= kPrime;
+    }
+    return hash;
+}
+
+std::string hex64(uint64_t value) {
+    std::ostringstream os;
+    os << std::hex << std::setw(16) << std::setfill('0') << value;
+    return os.str();
+}
+
+struct DecodeChecksumConfig {
+    bool                     enabled{false};
+    bool                     sync_device{true};
+    int64_t                  every{1};
+    int64_t                  max_records{0};
+    int64_t                  max_lanes{8};
+    std::string              file;
+    std::vector<std::string> trace_filters;
+};
+
+const DecodeChecksumConfig& decodeChecksumConfig() {
+    static DecodeChecksumConfig config = [] {
+        DecodeChecksumConfig c;
+        c.enabled       = envFlag("RTPLLM_DECODE_CHECKSUM_DEBUG", false);
+        c.sync_device   = envFlag("RTPLLM_DECODE_CHECKSUM_SYNC_DEVICE", true);
+        c.every         = std::max<int64_t>(1, envInt64("RTPLLM_DECODE_CHECKSUM_EVERY", 1));
+        c.max_records   = envInt64("RTPLLM_DECODE_CHECKSUM_MAX_RECORDS", 0);
+        c.max_lanes     = envInt64("RTPLLM_DECODE_CHECKSUM_MAX_LANES", 8);
+        c.trace_filters = splitCsv(envString("RTPLLM_DECODE_CHECKSUM_TRACE_FILTER"));
+
+        c.file = envString("RTPLLM_DECODE_CHECKSUM_FILE");
+        if (c.file.empty()) {
+            auto dir = envString("RTPLLM_DECODE_CHECKSUM_DIR", "/tmp/rtpllm_decode_checksum");
+            ensureDir(dir);
+            auto rank = envString("WORLD_RANK", "unknown");
+            c.file    = dir + "/decode_checksum_rank" + rank + "_pid" + std::to_string(getpid()) + ".jsonl";
+        } else {
+            ensureDir(parentDir(c.file));
+        }
+        return c;
+    }();
+    return config;
+}
+
+bool traceSelected(const std::string& trace_id, const std::vector<std::string>& filters) {
+    if (filters.empty()) {
+        return true;
+    }
+    return std::any_of(filters.begin(), filters.end(), [&trace_id](const std::string& filter) {
+        return trace_id.find(filter) != std::string::npos;
+    });
+}
+
+std::vector<int64_t> selectedLanes(const std::vector<std::string>& trace_ids,
+                                   int64_t                         current_bs,
+                                   const DecodeChecksumConfig&     config) {
+    std::vector<int64_t> lanes;
+    const int64_t        limit = config.max_lanes <= 0 ? current_bs : std::min<int64_t>(current_bs, config.max_lanes);
+    for (int64_t lane = 0; lane < current_bs; ++lane) {
+        const std::string trace_id = lane < static_cast<int64_t>(trace_ids.size()) ? trace_ids[lane] : "";
+        if (!traceSelected(trace_id, config.trace_filters)) {
+            continue;
+        }
+        lanes.push_back(lane);
+        if (static_cast<int64_t>(lanes.size()) >= limit) {
+            break;
+        }
+    }
+    return lanes;
+}
+
+torch::Tensor selectLaneTensor(const torch::Tensor& tensor, int64_t lane) {
+    if (!tensor.defined() || tensor.numel() <= 0) {
+        return torch::Tensor();
+    }
+    if (tensor.dim() == 0) {
+        return tensor;
+    }
+    if (lane < 0 || lane >= tensor.size(0)) {
+        return torch::Tensor();
+    }
+    if (tensor.dim() == 1) {
+        return tensor.slice(0, lane, lane + 1);
+    }
+    return tensor.select(0, lane);
+}
+
+torch::Tensor sliceTensorRange(const torch::Tensor& tensor, int64_t begin, int64_t end) {
+    if (!tensor.defined() || tensor.numel() <= 0 || tensor.dim() == 0) {
+        return torch::Tensor();
+    }
+    begin = std::max<int64_t>(0, std::min<int64_t>(begin, tensor.size(0)));
+    end   = std::max<int64_t>(begin, std::min<int64_t>(end, tensor.size(0)));
+    if (begin == end) {
+        return torch::Tensor();
+    }
+    return tensor.slice(0, begin, end);
+}
+
+void appendShape(std::ostringstream& os, const torch::Tensor& tensor) {
+    os << "[";
+    for (int i = 0; i < tensor.dim(); ++i) {
+        if (i != 0) {
+            os << ",";
+        }
+        os << tensor.size(i);
+    }
+    os << "]";
+}
+
+void appendTensorStats(std::ostringstream& os, const std::string& name, const torch::Tensor& tensor) {
+    os << "\"" << name << "\":";
+    if (!tensor.defined()) {
+        os << "null";
+        return;
+    }
+
+    try {
+        torch::NoGradGuard no_grad;
+        auto cpu = tensor.detach().contiguous();
+        if (cpu.is_cuda()) {
+            cpu = cpu.to(torch::kCPU);
+        }
+
+        os << "{\"shape\":";
+        appendShape(os, tensor);
+        os << ",\"dtype\":\"" << jsonEscape(c10::toString(tensor.scalar_type())) << "\"";
+        os << ",\"device\":\"" << (tensor.is_cuda() ? "cuda" : "cpu") << "\"";
+        os << ",\"numel\":" << tensor.numel();
+        os << ",\"nbytes\":" << cpu.nbytes();
+        os << ",\"byte_hash\":\"" << hex64(fnv1a(cpu.data_ptr(), cpu.nbytes())) << "\"";
+
+        if (cpu.numel() > 0) {
+            auto flat = cpu.reshape({cpu.numel()}).to(torch::kFloat32);
+            os << ",\"sum\":" << flat.sum().item<double>();
+            os << ",\"abs_sum\":" << flat.abs().sum().item<double>();
+            os << ",\"min\":" << flat.min().item<double>();
+            os << ",\"max\":" << flat.max().item<double>();
+            os << ",\"sample\":[";
+            const auto sample_count = std::min<int64_t>(flat.numel(), 8);
+            const auto* data        = flat.data_ptr<float>();
+            for (int64_t i = 0; i < sample_count; ++i) {
+                if (i != 0) {
+                    os << ",";
+                }
+                os << data[i];
+            }
+            os << "]";
+        }
+        os << "}";
+    } catch (const std::exception& e) {
+        os << "{\"error\":\"" << jsonEscape(e.what()) << "\"}";
+    }
+}
+
+void appendLaneBlockMaps(std::ostringstream& os, const PyAttentionInputs& attention_inputs, int64_t lane) {
+    os << "\"block_maps\":[";
+    const auto group_count = attention_inputs.kv_cache_kernel_block_id_host_by_group.size();
+    for (size_t g = 0; g < group_count; ++g) {
+        if (g != 0) {
+            os << ",";
+        }
+        os << "{\"group\":" << g << ",";
+        appendTensorStats(os,
+                          "host",
+                          selectLaneTensor(attention_inputs.kv_cache_kernel_block_id_host_by_group[g], lane));
+        os << ",";
+        appendTensorStats(os,
+                          "device",
+                          selectLaneTensor(attention_inputs.kv_cache_kernel_block_id_device_by_group[g], lane));
+        os << "}";
+    }
+    os << "]";
+}
+
+void writeDecodeChecksumRecord(const char*            stage,
+                               const PyModelInputs&  original_inputs,
+                               const PyModelInputs&  graph_inputs,
+                               const torch::Tensor&  hidden_states,
+                               const CudaGraphState& state,
+                               int32_t               full_kv_cache_group_id) {
+    const auto& config = decodeChecksumConfig();
+    if (!config.enabled) {
+        return;
+    }
+
+    const uint64_t record_id = g_decode_checksum_record_id.fetch_add(1, std::memory_order_relaxed);
+    if (config.max_records > 0 && record_id >= static_cast<uint64_t>(config.max_records)) {
+        return;
+    }
+    if (record_id % static_cast<uint64_t>(config.every) != 0) {
+        return;
+    }
+
+    const auto lanes = selectedLanes(original_inputs.trace_ids, state.current_batch_size, config);
+    if (lanes.empty()) {
+        return;
+    }
+    if (config.sync_device) {
+        cuda_graph::graphDeviceSynchronize();
+    }
+
+    const auto now_us = std::chrono::duration_cast<std::chrono::microseconds>(
+                            std::chrono::system_clock::now().time_since_epoch())
+                            .count();
+
+    std::ostringstream os;
+    os << "{\"record_id\":" << record_id;
+    os << ",\"ts_us\":" << now_us;
+    os << ",\"pid\":" << getpid();
+    os << ",\"rank\":\"" << jsonEscape(envString("WORLD_RANK", "")) << "\"";
+    os << ",\"stage\":\"" << stage << "\"";
+    os << ",\"path\":\"cuda_graph_decode\"";
+    os << ",\"current_bs\":" << state.current_batch_size;
+    os << ",\"graph_bs\":" << state.current_real_graph_bs;
+    os << ",\"seq_len_sum\":" << state.seq_len_sum;
+    os << ",\"full_kv_cache_group_id\":" << full_kv_cache_group_id;
+    os << ",\"lane_count\":" << lanes.size();
+    os << ",\"lanes\":[";
+    for (size_t i = 0; i < lanes.size(); ++i) {
+        const int64_t     lane     = lanes[i];
+        const std::string trace_id = lane < static_cast<int64_t>(original_inputs.trace_ids.size()) ?
+                                         original_inputs.trace_ids[lane] :
+                                         "";
+        if (i != 0) {
+            os << ",";
+        }
+        os << "{\"lane\":" << lane;
+        os << ",\"trace_id\":\"" << jsonEscape(trace_id) << "\"";
+        os << ",";
+        appendTensorStats(os, "input_id", selectLaneTensor(graph_inputs.input_ids, lane));
+        os << ",";
+        appendTensorStats(os, "input_length", selectLaneTensor(graph_inputs.attention_inputs.input_lengths, lane));
+        os << ",";
+        appendTensorStats(os, "input_length_d", selectLaneTensor(graph_inputs.attention_inputs.input_lengths_d, lane));
+        os << ",";
+        appendTensorStats(os, "sequence_length", selectLaneTensor(graph_inputs.attention_inputs.sequence_lengths, lane));
+        os << ",";
+        appendTensorStats(
+            os, "sequence_length_plus_1_d", selectLaneTensor(graph_inputs.attention_inputs.sequence_lengths_plus_1_d, lane));
+        os << ",";
+        appendTensorStats(
+            os, "decode_cu_seqlens_host", sliceTensorRange(graph_inputs.attention_inputs.decode_cu_seqlens_host, lane, lane + 2));
+        os << ",";
+        appendTensorStats(
+            os, "decode_cu_seqlens_d", sliceTensorRange(graph_inputs.attention_inputs.decode_cu_seqlens_d, lane, lane + 2));
+        os << ",";
+        appendLaneBlockMaps(os, graph_inputs.attention_inputs, lane);
+        if (hidden_states.defined()) {
+            os << ",";
+            appendTensorStats(os, "hidden_state", selectLaneTensor(hidden_states, lane));
+        }
+        os << "}";
+    }
+    os << "]}\n";
+
+    std::lock_guard<std::mutex> lock(g_decode_checksum_mutex);
+    std::ofstream               out(config.file, std::ios::app);
+    out << os.str();
+}
+
+}  // namespace
 
 // clang-format off
 // CUDA Graph Mode Configuration Table:
@@ -389,6 +787,8 @@ PyModelOutputs CudaGraphRunner::forward(const PyModelInputs& inputs, CudaGraphSt
             graph_instances_[state.current_real_graph_seq_len].mem_hold_.decoder_layer_hidden_states_.slice(
                 0, 0, state.current_seq_len);
     } else {
+        auto& graph_inputs = graph_instances_[state.current_real_graph_bs].mem_hold_.py_model_inputs_;
+        writeDecodeChecksumRecord("before_replay", inputs, graph_inputs, torch::Tensor(), state, full_kv_cache_group_id_);
         {
             RTP_LLM_PROFILE_SCOPE("cuda_graph.forward(replayDecode)");
             replayDecode(state.current_real_graph_bs);
@@ -396,6 +796,8 @@ PyModelOutputs CudaGraphRunner::forward(const PyModelInputs& inputs, CudaGraphSt
         outputs.hidden_states =
             graph_instances_[state.current_real_graph_bs].mem_hold_.decoder_layer_hidden_states_.slice(
                 0, 0, state.seq_len_sum);
+        writeDecodeChecksumRecord(
+            "after_replay", inputs, graph_inputs, outputs.hidden_states, state, full_kv_cache_group_id_);
     }
     // record forward done event
     forward_event_.record(cuda_graph::graphGetCurrentStream());

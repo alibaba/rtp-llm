@@ -55,6 +55,7 @@ public:
     mutable torch::Tensor all_probs;      // shape: [batch_size, vocab_size]
 
     std::vector<at::Generator> generator;
+    std::vector<std::string>   trace_ids;
 };
 
 struct SamplerOutput {

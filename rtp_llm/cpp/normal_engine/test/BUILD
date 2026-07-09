@@ -56,6 +56,19 @@ cc_test(
 )
 
 cc_test(
+    name = "decode_token_trace_logger_test",
+    srcs = [
+        "DecodeTokenTraceLoggerTest.cc",
+    ],
+    copts = test_copts,
+    deps = [
+        "//rtp_llm/cpp/normal_engine:normal_engine",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+cc_test(
     name = "engine_test",
     srcs = glob([
         "EngineTest.cc",

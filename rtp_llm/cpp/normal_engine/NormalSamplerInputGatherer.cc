@@ -134,6 +134,7 @@ SamplerInputs NormalSamplerInputGatherer::allocateSamplerInputs(const StreamGrou
     sampler_inputs.token_ids =
         torch::empty({(int64_t)total_batch_size_in, (int64_t)(sampler_inputs.step + 1)}, torch::kInt32);
     sampler_inputs.generator.resize(total_batch_size_in);
+    sampler_inputs.trace_ids.resize(total_batch_size_in);
     return sampler_inputs;
 }
 
@@ -189,6 +190,7 @@ void NormalSamplerInputGatherer::fillSamplerCommonInputs(SamplerInputs&         
             }
             no_repeat_ngram_size[batch_idx]     = stream->generateConfig()->no_repeat_ngram_size.value_or(0);
             sampler_inputs.generator[batch_idx] = stream->getGenerator();
+            sampler_inputs.trace_ids[batch_idx] = stream->traceId();
             batch_idx += 1;
         }
     }

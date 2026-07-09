@@ -1,4 +1,4 @@
-load("//:def.bzl", "rpm_library", "copts")
+load("//:def.bzl", "rpm_library", "copts", "cc_test_wrapper")
 load("@arch_config//:arch_select.bzl", "torch_deps")
 
 cc_library(
@@ -290,6 +290,41 @@ cc_library(
 )
 
 cc_library(
+    name = "sample_greedy_test_ops",
+    srcs = ["CudaSampleOp.cc"],
+    deps = [
+        ":op_data",
+        ":common_defines",
+        "//rtp_llm/cpp/utils:debug_utils",
+        "//rtp_llm/models_py/bindings/common/kernels:kernels_sampling",
+    ] + torch_deps() + select({
+        "@//:using_cuda": [
+            "@local_config_cuda//cuda:cuda_headers",
+            "@local_config_cuda//cuda:cudart",
+        ],
+        "@//:using_rocm": [
+            "//rtp_llm/models_py/bindings/rocm/kernels/sampling:sampling",
+            "//rtp_llm/models_py/bindings/rocm:speculative_sampling",
+            "@local_config_rocm//rocm:rocm_headers",
+            "@local_config_rocm//rocm:rocm",
+        ],
+        "//conditions:default": [],
+    }),
+    copts = copts(),
+)
+
+cc_test_wrapper(
+    name = "sample_greedy_order_test",
+    srcs = ["SampleGreedyOrderTest.cc"],
+    deps = [
+        ":op_data",
+        ":sample_greedy_test_ops",
+        "@com_google_googletest//:gtest_main",
+    ] + torch_deps(),
+    copts = copts(),
+)
+
+cc_library(
     name = "cache_store_async_writer",
     hdrs = ["CacheStoreAsyncWriter.h"],
     srcs = ["CacheStoreAsyncWriter.cc"],
@@ -300,4 +335,3 @@ cc_library(
     visibility = ["//visibility:public"],
     copts = copts(),
 )
-

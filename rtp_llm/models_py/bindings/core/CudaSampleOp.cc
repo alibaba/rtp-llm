@@ -32,19 +32,6 @@ void processLogits(const GreedyParams&  params,
     const auto step               = params.step;
     auto       cur_stream         = at::cuda::getCurrentCUDAStream().stream();
 
-    if (std::any_of(params.temperature.data_ptr<float>(),
-                    params.temperature.data_ptr<float>() + batch_size,
-                    [&](auto t) { return t != 1.0f; })) {
-        auto temperature_gpu = params.temperature.to(torch::kCUDA, true);
-        invokeBatchApplyTemperaturePenalty(params.logits.data_ptr<float>(),
-                                           (float*)nullptr,  // embedding_bias
-                                           temperature_gpu.data_ptr<float>(),
-                                           batch_size,
-                                           vocab_size_padded,
-                                           vocab_size_padded,
-                                           cur_stream);
-    }
-
     if (params.repetition_penalty.has_value()) {
         RTP_LLM_CHECK(params.presence_penalty.has_value() && params.frequency_penalty.has_value());
         const auto& repetition_penalty = params.repetition_penalty.value();
@@ -116,6 +103,19 @@ void processLogits(const GreedyParams&  params,
                                                         step + 1,
                                                         cur_stream);
         }
+    }
+
+    if (std::any_of(params.temperature.data_ptr<float>(),
+                    params.temperature.data_ptr<float>() + batch_size,
+                    [&](auto t) { return t != 1.0f; })) {
+        auto temperature_gpu = params.temperature.to(torch::kCUDA, true);
+        invokeBatchApplyTemperaturePenalty(params.logits.data_ptr<float>(),
+                                           (float*)nullptr,  // embedding_bias
+                                           temperature_gpu.data_ptr<float>(),
+                                           batch_size,
+                                           vocab_size_padded,
+                                           vocab_size_padded,
+                                           cur_stream);
     }
 }
 
@@ -331,21 +331,7 @@ GreedyOutput sampleGreedy(const GreedyParams& params) {
     // [step + 1, batch_size]
     auto transposed_tokens = device_tokens.transpose(0, 1).contiguous();
 
-    // 1. Apply temperature penalty
-    if (std::any_of(params.temperature.data_ptr<float>(),
-                    params.temperature.data_ptr<float>() + batch_size,
-                    [&](auto t) { return t != 1.0f; })) {
-        auto temperature_gpu = params.temperature.to(torch::kCUDA);
-        invokeBatchApplyTemperaturePenalty(params.logits.data_ptr<float>(),
-                                           (float*)nullptr,  // embedding_bias
-                                           temperature_gpu.data_ptr<float>(),
-                                           batch_size,
-                                           vocab_size_padded,
-                                           vocab_size_padded,
-                                           cur_stream);
-    }
-
-    // 2. Apply repetition/presence/frequency penalty
+    // 1. Apply repetition/presence/frequency penalty
     if (params.repetition_penalty.has_value()) {
         RTP_LLM_CHECK(params.presence_penalty.has_value() && params.frequency_penalty.has_value());
         const auto& repetition_penalty = params.repetition_penalty.value();
@@ -384,6 +370,20 @@ GreedyOutput sampleGreedy(const GreedyParams& params) {
                                               step + 1,  // step
                                               cur_stream);
         }
+    }
+
+    // 2. Apply temperature after additive/multiplicative logits processors.
+    if (std::any_of(params.temperature.data_ptr<float>(),
+                    params.temperature.data_ptr<float>() + batch_size,
+                    [&](auto t) { return t != 1.0f; })) {
+        auto temperature_gpu = params.temperature.to(torch::kCUDA);
+        invokeBatchApplyTemperaturePenalty(params.logits.data_ptr<float>(),
+                                           (float*)nullptr,  // embedding_bias
+                                           temperature_gpu.data_ptr<float>(),
+                                           batch_size,
+                                           vocab_size_padded,
+                                           vocab_size_padded,
+                                           cur_stream);
     }
 
     // 3. Fast path for topk = 1

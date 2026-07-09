@@ -1,17 +1,279 @@
 #include "rtp_llm/cpp/models/Sampler.h"
 #include <cstring>
+#include <cstdlib>
+#include <fstream>
+#include <mutex>
+#include <sstream>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <unistd.h>
 #include "rtp_llm/cpp/utils/DebugUtils.h"
 #include "rtp_llm/cpp/models/logits_processor/BaseLogitsProcessor.h"
 #include "rtp_llm/cpp/models/logits_processor/LogitsProcessorStates.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include <unordered_set>
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
+#include "autil/TimeUtility.h"
 
 using namespace std;
 
 namespace rtp_llm {
 
 Sampler::Sampler(const SamplerInitParams& params) {}
+
+namespace {
+
+std::string samplerTraceEnv(const char* name, const std::string& default_value = "") {
+    const char* value = std::getenv(name);
+    return value == nullptr ? default_value : std::string(value);
+}
+
+bool samplerTraceEnabled() {
+    static const bool enabled = [] {
+        auto value = samplerTraceEnv("RTPLLM_SAMPLER_TRACE");
+        std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) { return std::tolower(c); });
+        return value == "1" || value == "true" || value == "yes" || value == "on";
+    }();
+    return enabled;
+}
+
+std::vector<std::string> samplerTraceFilters() {
+    static const std::vector<std::string> filters = [] {
+        std::vector<std::string> result;
+        std::stringstream        ss(samplerTraceEnv("RTPLLM_SAMPLER_TRACE_FILTER"));
+        std::string              item;
+        while (std::getline(ss, item, ',')) {
+            auto begin = item.find_first_not_of(" \t\r\n");
+            if (begin == std::string::npos) {
+                continue;
+            }
+            auto end = item.find_last_not_of(" \t\r\n");
+            result.emplace_back(item.substr(begin, end - begin + 1));
+        }
+        return result;
+    }();
+    return filters;
+}
+
+bool samplerTraceMatches(const std::string& trace_id) {
+    if (!samplerTraceEnabled()) {
+        return false;
+    }
+    const auto filters = samplerTraceFilters();
+    if (filters.empty()) {
+        return true;
+    }
+    return std::any_of(filters.begin(), filters.end(), [&](const std::string& filter) {
+        return trace_id.find(filter) != std::string::npos;
+    });
+}
+
+std::string samplerTraceRankString() {
+    auto rank = samplerTraceEnv("WORLD_RANK");
+    if (rank.empty()) {
+        rank = samplerTraceEnv("RANK");
+    }
+    if (rank.empty()) {
+        rank = samplerTraceEnv("LOCAL_RANK", "0");
+    }
+    return rank;
+}
+
+bool samplerTraceEnsureDir(const std::string& path) {
+    if (path.empty()) {
+        return true;
+    }
+    std::string current;
+    current.reserve(path.size());
+    for (size_t i = 0; i < path.size(); ++i) {
+        current.push_back(path[i]);
+        if (path[i] != '/' || current.size() == 1) {
+            continue;
+        }
+        if (::mkdir(current.c_str(), 0755) != 0 && errno != EEXIST) {
+            return false;
+        }
+    }
+    return ::mkdir(path.c_str(), 0755) == 0 || errno == EEXIST;
+}
+
+std::string samplerTraceDirname(const std::string& path) {
+    auto pos = path.find_last_of('/');
+    if (pos == std::string::npos) {
+        return "";
+    }
+    if (pos == 0) {
+        return "/";
+    }
+    return path.substr(0, pos);
+}
+
+std::string samplerTraceOutputPath() {
+    auto explicit_file = samplerTraceEnv("RTPLLM_SAMPLER_TRACE_FILE");
+    if (!explicit_file.empty()) {
+        return explicit_file;
+    }
+    auto dir = samplerTraceEnv("RTPLLM_SAMPLER_TRACE_DIR", "/tmp/rtpllm_sampler_trace");
+    std::ostringstream oss;
+    oss << dir << "/sampler_trace_rank" << samplerTraceRankString() << "_pid" << ::getpid() << ".jsonl";
+    return oss.str();
+}
+
+std::ofstream& samplerTraceOutputStream() {
+    static std::ofstream stream;
+    static bool          initialized = false;
+    if (!initialized) {
+        initialized = true;
+        const auto path = samplerTraceOutputPath();
+        if (samplerTraceEnsureDir(samplerTraceDirname(path))) {
+            stream.open(path, std::ios::out | std::ios::app);
+        }
+    }
+    return stream;
+}
+
+std::mutex& samplerTraceMutex() {
+    static std::mutex mutex;
+    return mutex;
+}
+
+std::string samplerTraceJsonEscape(const std::string& value) {
+    std::ostringstream os;
+    for (char c : value) {
+        switch (c) {
+            case '\\':
+                os << "\\\\";
+                break;
+            case '"':
+                os << "\\\"";
+                break;
+            case '\n':
+                os << "\\n";
+                break;
+            case '\r':
+                os << "\\r";
+                break;
+            case '\t':
+                os << "\\t";
+                break;
+            default:
+                if (static_cast<unsigned char>(c) < 0x20) {
+                    const char* hex = "0123456789abcdef";
+                    os << "\\u00" << hex[(c >> 4) & 0xf] << hex[c & 0xf];
+                } else {
+                    os << c;
+                }
+        }
+    }
+    return os.str();
+}
+
+bool samplerTraceChunkMatches(const SamplerInputs& inputs, size_t from_batch_idx_in, size_t batch_size_in) {
+    if (!samplerTraceEnabled()) {
+        return false;
+    }
+    for (size_t i = 0; i < batch_size_in; ++i) {
+        const auto idx = from_batch_idx_in + i;
+        const auto trace_id = idx < inputs.trace_ids.size() ? inputs.trace_ids[idx] : "";
+        if (samplerTraceMatches(trace_id)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void samplerTraceAppendTensorInts(std::ostream& os, const torch::Tensor& values) {
+    auto cpu = values.to(torch::kCPU).contiguous();
+    os << "[";
+    const auto* ptr = cpu.data_ptr<int32_t>();
+    for (int64_t i = 0; i < cpu.numel(); ++i) {
+        if (i) {
+            os << ",";
+        }
+        os << ptr[i];
+    }
+    os << "]";
+}
+
+void samplerTraceAppendTopK(std::ostream& os, const torch::Tensor& row, int64_t topn) {
+    const auto limit = std::min<int64_t>(std::max<int64_t>(1, topn), row.size(0));
+    auto       vals_inds = row.to(torch::kFloat32).topk(limit);
+    auto       vals_cpu  = std::get<0>(vals_inds).to(torch::kCPU).contiguous();
+    auto       inds_cpu  = std::get<1>(vals_inds).to(torch::kCPU).contiguous();
+    const auto* vals     = vals_cpu.data_ptr<float>();
+    const auto* inds     = inds_cpu.data_ptr<int64_t>();
+    os << "[";
+    for (int64_t i = 0; i < limit; ++i) {
+        if (i) {
+            os << ",";
+        }
+        os << "{\"id\":" << inds[i] << ",\"value\":" << vals[i] << "}";
+    }
+    os << "]";
+}
+
+void samplerTraceLogRows(const char*          stage,
+                         const SamplerInputs& inputs,
+                         size_t               from_batch_idx_in,
+                         size_t               batch_size_in,
+                         const torch::Tensor& logits,
+                         const torch::Tensor& token_ids) {
+    if (!samplerTraceChunkMatches(inputs, from_batch_idx_in, batch_size_in)) {
+        return;
+    }
+    const int topn = std::max(1, std::atoi(samplerTraceEnv("RTPLLM_SAMPLER_TRACE_TOPK", "8").c_str()));
+    std::ostringstream row;
+    row << "{\"ts_us\":" << autil::TimeUtility::currentTimeInMicroSeconds() << ",\"pid\":" << ::getpid()
+        << ",\"rank\":\"" << samplerTraceJsonEscape(samplerTraceRankString()) << "\",\"event\":\"sampler_trace\""
+        << ",\"stage\":\"" << stage << "\",\"from_batch_idx_in\":" << from_batch_idx_in
+        << ",\"batch_size_in\":" << batch_size_in << ",\"step\":" << inputs.step << ",\"rows\":[";
+
+    const auto* input_lengths       = inputs.input_lengths.data_ptr<int32_t>();
+    const auto* sequence_lengths    = inputs.sequence_lengths.data_ptr<int32_t>();
+    const auto* top_k               = inputs.top_k.data_ptr<int32_t>();
+    const auto* top_p               = inputs.top_p.data_ptr<float>();
+    const auto* temperature         = inputs.temperature.data_ptr<float>();
+    const auto* repetition_penalty  = inputs.repetition_penalty.data_ptr<float>();
+    const auto* presence_penalty    = inputs.presence_penalty.data_ptr<float>();
+    const auto* frequency_penalty   = inputs.frequency_penalty.data_ptr<float>();
+    const auto* do_sample           = inputs.do_sample.data_ptr<bool>();
+    bool        wrote               = false;
+    for (size_t i = 0; i < batch_size_in; ++i) {
+        const auto global_idx = from_batch_idx_in + i;
+        const auto trace_id   = global_idx < inputs.trace_ids.size() ? inputs.trace_ids[global_idx] : "";
+        if (!samplerTraceMatches(trace_id)) {
+            continue;
+        }
+        if (wrote) {
+            row << ",";
+        }
+        wrote = true;
+        const int32_t seq_len    = sequence_lengths[global_idx];
+        const int64_t tail_begin = std::max<int64_t>(0, std::min<int64_t>(seq_len, inputs.step + 1) - 16);
+        const int64_t tail_end   = std::max<int64_t>(tail_begin, std::min<int64_t>(seq_len, inputs.step + 1));
+        row << "{\"trace_id\":\"" << samplerTraceJsonEscape(trace_id) << "\",\"global_idx\":" << global_idx
+            << ",\"local_idx\":" << i << ",\"input_len\":" << input_lengths[global_idx]
+            << ",\"seq_len\":" << seq_len << ",\"top_k\":" << top_k[global_idx]
+            << ",\"top_p\":" << top_p[global_idx] << ",\"temperature\":" << temperature[global_idx]
+            << ",\"repetition_penalty\":" << repetition_penalty[global_idx]
+            << ",\"presence_penalty\":" << presence_penalty[global_idx]
+            << ",\"frequency_penalty\":" << frequency_penalty[global_idx]
+            << ",\"do_sample\":" << (do_sample[global_idx] ? "true" : "false") << ",\"token_tail\":";
+        samplerTraceAppendTensorInts(row, token_ids[i].slice(0, tail_begin, tail_end));
+        row << ",\"selected_token\":" << token_ids[i][inputs.step].item<int32_t>() << ",\"top_logits\":";
+        samplerTraceAppendTopK(row, logits[i], topn);
+        row << "}";
+    }
+    row << "]}";
+
+    std::lock_guard<std::mutex> lock(samplerTraceMutex());
+    auto&                       os = samplerTraceOutputStream();
+    if (os.good()) {
+        os << row.str() << "\n";
+    }
+}
+
+}  // namespace
 
 SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
@@ -109,8 +371,12 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
             auto do_sample            = mayOptNarrow(inputs.do_sample, from_batch_idx_in, batch_size_in);
             auto generator            = std::vector<at::Generator>{inputs.generator.begin() + from_batch_idx_in,
                                                                    inputs.generator.begin() + from_batch_idx_in + batch_size_in};
+            const bool trace_chunk     = samplerTraceChunkMatches(inputs, from_batch_idx_in, batch_size_in);
 
             RTP_LLM_PROFILE_SCOPE("sampler.forward.execSampleGreedy");
+            if (trace_chunk) {
+                samplerTraceLogRows("before", inputs, from_batch_idx_in, batch_size_in, logits, token_ids_in);
+            }
             auto greedy_output = execSampleGreedy(
                 {logits,
                  input_lengths,
@@ -129,6 +395,9 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
                  frequency_penalty,
                  do_sample,
                  generator});
+            if (trace_chunk) {
+                samplerTraceLogRows("after", inputs, from_batch_idx_in, batch_size_in, logits, token_ids_in);
+            }
             if (greedy_output.success.defined()) {
                 success.copy_(greedy_output.success);
                 // TODO(zhangjianning.zjn): would be better to eliminate the copy

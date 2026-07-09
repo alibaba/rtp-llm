@@ -244,6 +244,7 @@ struct PyModelInputs {
     torch::Tensor       input_hiddens;
     PyAttentionInputs   attention_inputs;
     BertEmbeddingInputs bert_embedding_inputs;
+    std::vector<std::string> trace_ids;
 };
 
 struct PyModelOutputs {

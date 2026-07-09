@@ -1,5 +1,10 @@
 import logging
+import hashlib
+import json
+import os
 import sys
+import time
+from pathlib import Path
 from typing import Any, Dict, Optional
 
 import torch
@@ -58,6 +63,379 @@ from rtp_llm.utils.swizzle_utils import can_swizzle_kn
 from rtp_llm.utils.util import to_torch_dtype
 
 
+def _env_flag(name: str, default: bool = False) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() in ("1", "true", "yes", "on")
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.environ.get(name, str(default)))
+    except ValueError:
+        return default
+
+
+_Q3N_TRACE_ENABLED = _env_flag("RTPLLM_QWEN3_NEXT_TRACE_DEBUG", False)
+_Q3N_TRACE_FILTERS = tuple(
+    item.strip()
+    for item in os.environ.get("RTPLLM_QWEN3_NEXT_TRACE_FILTER", "").split(",")
+    if item.strip()
+)
+_Q3N_TRACE_LAYERS_RAW = os.environ.get("RTPLLM_QWEN3_NEXT_TRACE_LAYERS", "linear").strip()
+_Q3N_TRACE_EVERY = max(1, _env_int("RTPLLM_QWEN3_NEXT_TRACE_EVERY", 1))
+_Q3N_TRACE_MAX_RECORDS = _env_int("RTPLLM_QWEN3_NEXT_TRACE_MAX_RECORDS", 0)
+_Q3N_TRACE_MAX_LANES = max(1, _env_int("RTPLLM_QWEN3_NEXT_TRACE_MAX_LANES", 4))
+_Q3N_TRACE_MAX_ELEMS = max(1, _env_int("RTPLLM_QWEN3_NEXT_TRACE_MAX_ELEMS", 8192))
+_Q3N_TRACE_SYNC = _env_flag("RTPLLM_QWEN3_NEXT_TRACE_SYNC_DEVICE", True)
+_Q3N_TRACE_TENSOR_MODE = os.environ.get(
+    "RTPLLM_QWEN3_NEXT_TRACE_TENSOR_MODE", "summary"
+).strip().lower()
+_Q3N_TRACE_METADATA_ONLY = _Q3N_TRACE_TENSOR_MODE in ("metadata", "meta", "none")
+_Q3N_TRACE_STATE = {"records": 0, "per_trace_step": {}}
+
+
+def _trace_file() -> Optional[Path]:
+    if not _Q3N_TRACE_ENABLED:
+        return None
+    explicit_file = os.environ.get("RTPLLM_QWEN3_NEXT_TRACE_FILE")
+    if explicit_file:
+        return Path(explicit_file)
+    trace_dir = Path(
+        os.environ.get("RTPLLM_QWEN3_NEXT_TRACE_DIR", "/tmp/rtpllm_qwen3_next_trace")
+    )
+    rank = (
+        os.environ.get("WORLD_RANK")
+        or os.environ.get("RANK")
+        or os.environ.get("LOCAL_RANK")
+        or "0"
+    )
+    return trace_dir / f"qwen3_next_trace_rank{rank}_pid{os.getpid()}.jsonl"
+
+
+_Q3N_TRACE_FILE = _trace_file()
+if _Q3N_TRACE_FILE is not None:
+    _Q3N_TRACE_FILE.parent.mkdir(parents=True, exist_ok=True)
+
+
+def _trace_layer_set() -> Optional[set[int]]:
+    if not _Q3N_TRACE_LAYERS_RAW or _Q3N_TRACE_LAYERS_RAW in ("*", "all"):
+        return None
+    if _Q3N_TRACE_LAYERS_RAW == "linear":
+        return set()
+    result: set[int] = set()
+    for item in _Q3N_TRACE_LAYERS_RAW.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        try:
+            result.add(int(item))
+        except ValueError:
+            continue
+    return result
+
+
+_Q3N_TRACE_LAYERS = _trace_layer_set()
+
+
+def _trace_selected_lanes(trace_ids: list[str], batch_size: int) -> list[int]:
+    lanes = []
+    for lane in range(min(batch_size, _Q3N_TRACE_MAX_LANES)):
+        trace_id = trace_ids[lane] if lane < len(trace_ids) else ""
+        if _Q3N_TRACE_FILTERS and not any(
+            needle in trace_id for needle in _Q3N_TRACE_FILTERS
+        ):
+            continue
+        lanes.append(lane)
+    return lanes
+
+
+def _trace_layer_enabled(layer_idx: int, layer_type: HybridAttentionType) -> bool:
+    if not _Q3N_TRACE_ENABLED:
+        return False
+    if _Q3N_TRACE_LAYERS is None:
+        return True
+    if _Q3N_TRACE_LAYERS:
+        return layer_idx in _Q3N_TRACE_LAYERS
+    return layer_type == HybridAttentionType.LINEAR
+
+
+def _make_trace_ctx(
+    inputs: PyModelInputs, attention_inputs: PyAttentionInputs, hidden_states: torch.Tensor
+) -> Optional[dict[str, Any]]:
+    if not _Q3N_TRACE_ENABLED or _Q3N_TRACE_FILE is None:
+        return None
+    if attention_inputs.is_prefill and not attention_inputs.is_target_verify:
+        return None
+    trace_ids = list(getattr(inputs, "trace_ids", []) or [])
+    batch_size = hidden_states.shape[0] if hidden_states.dim() else 1
+    lanes = _trace_selected_lanes(trace_ids, int(batch_size))
+    if not lanes:
+        return None
+    per_trace_step = _Q3N_TRACE_STATE["per_trace_step"]
+    trace_steps = {}
+    kept_lanes = []
+    for lane in lanes:
+        trace_id = trace_ids[lane] if lane < len(trace_ids) else ""
+        step = int(per_trace_step.get(trace_id, 0)) + 1
+        per_trace_step[trace_id] = step
+        if step % _Q3N_TRACE_EVERY != 0:
+            continue
+        trace_steps[lane] = step
+        kept_lanes.append(lane)
+    if not kept_lanes:
+        return None
+    return {
+        "trace_ids": trace_ids,
+        "lanes": kept_lanes,
+        "trace_steps": trace_steps,
+        "is_prefill": bool(attention_inputs.is_prefill),
+        "is_target_verify": bool(attention_inputs.is_target_verify),
+        "input_shape": list(hidden_states.shape),
+        "created_at": time.time(),
+    }
+
+
+def _tensor_summary(tensor: Any, lane: Optional[int] = None) -> dict[str, Any]:
+    if tensor is None or not torch.is_tensor(tensor):
+        return {"defined": False}
+    if not tensor.is_meta and tensor.numel() == 0:
+        return {
+            "defined": True,
+            "shape": list(tensor.shape),
+            "dtype": str(tensor.dtype),
+            "device": str(tensor.device),
+            "numel": 0,
+        }
+    selected = tensor
+    if lane is not None and tensor.dim() > 0 and lane < tensor.shape[0]:
+        selected = tensor.narrow(0, lane, 1)
+    selected = selected.detach()
+    if _Q3N_TRACE_METADATA_ONLY:
+        return {
+            "defined": True,
+            "mode": "metadata",
+            "shape": list(tensor.shape),
+            "selected_shape": list(selected.shape),
+            "stride": list(tensor.stride()),
+            "selected_stride": list(selected.stride()),
+            "storage_offset": int(selected.storage_offset()),
+            "dtype": str(tensor.dtype),
+            "device": str(tensor.device),
+            "layout": str(tensor.layout),
+            "numel": int(selected.numel()),
+            "data_ptr": int(selected.data_ptr()) if selected.numel() else 0,
+            "is_contiguous": bool(selected.is_contiguous()),
+        }
+    if selected.is_cuda and _Q3N_TRACE_SYNC:
+        torch.cuda.synchronize(selected.device)
+    flat = selected.reshape(-1)
+    truncated = int(max(0, flat.numel() - _Q3N_TRACE_MAX_ELEMS))
+    if flat.numel() > _Q3N_TRACE_MAX_ELEMS:
+        flat = flat[:_Q3N_TRACE_MAX_ELEMS]
+    if flat.is_floating_point():
+        cpu = flat.to(torch.float32).cpu()
+    else:
+        cpu = flat.cpu()
+    contiguous = cpu.contiguous()
+    raw = contiguous.numpy().tobytes()
+    summary = {
+        "defined": True,
+        "shape": list(tensor.shape),
+        "selected_shape": list(selected.shape),
+        "dtype": str(tensor.dtype),
+        "device": str(tensor.device),
+        "numel": int(selected.numel()),
+        "sample_numel": int(contiguous.numel()),
+        "truncated": truncated,
+        "sha256": hashlib.sha256(raw).hexdigest()[:16],
+        "head": contiguous[: min(8, contiguous.numel())].tolist(),
+    }
+    if contiguous.numel() and contiguous.is_floating_point():
+        finite = torch.isfinite(contiguous)
+        summary["nan_count"] = int(torch.isnan(contiguous).sum().item())
+        summary["inf_count"] = int(torch.isinf(contiguous).sum().item())
+        if bool(finite.any().item()):
+            finite_values = contiguous[finite]
+            summary["min"] = float(finite_values.min().item())
+            summary["max"] = float(finite_values.max().item())
+            summary["mean"] = float(finite_values.mean().item())
+    elif contiguous.numel():
+        summary["min"] = int(contiguous.min().item())
+        summary["max"] = int(contiguous.max().item())
+    return summary
+
+
+def _lane_int(tensor: torch.Tensor, lane: int) -> Optional[int]:
+    if tensor is None or not torch.is_tensor(tensor) or tensor.numel() == 0:
+        return None
+    if tensor.dim() == 0:
+        selected = tensor.detach()
+    elif lane < tensor.shape[0]:
+        selected = tensor.narrow(0, lane, 1).reshape(-1)[0].detach()
+    else:
+        return None
+    if _Q3N_TRACE_METADATA_ONLY and selected.is_cuda:
+        return None
+    if selected.is_cuda and _Q3N_TRACE_SYNC:
+        torch.cuda.synchronize(selected.device)
+    return int(selected.cpu().item())
+
+
+def _block_id_for_lane(
+    attention_inputs: PyAttentionInputs, lane: int, seq_size_per_block: int
+) -> tuple[Optional[int], Optional[int], Optional[int]]:
+    block_map = attention_inputs.kv_cache_kernel_block_id_device
+    seq_len_plus_1 = _lane_int(attention_inputs.sequence_lengths_plus_1_d, lane)
+    if (
+        block_map is None
+        or not torch.is_tensor(block_map)
+        or block_map.numel() == 0
+        or seq_len_plus_1 is None
+        or seq_size_per_block <= 0
+        or block_map.dim() < 2
+        or lane >= block_map.shape[0]
+    ):
+        return seq_len_plus_1, None, None
+    logical_block = max(0, (seq_len_plus_1 - 1) // seq_size_per_block)
+    if logical_block >= block_map.shape[1]:
+        return seq_len_plus_1, logical_block, None
+    row = block_map.narrow(0, lane, 1).reshape(-1)
+    if row.is_cuda and _Q3N_TRACE_SYNC:
+        torch.cuda.synchronize(row.device)
+    physical_block = int(row.narrow(0, logical_block, 1).cpu().item())
+    return seq_len_plus_1, logical_block, physical_block
+
+
+def _trace_event(
+    ctx: Optional[dict[str, Any]],
+    event: str,
+    *,
+    layer_idx: Optional[int] = None,
+    layer_type: Optional[HybridAttentionType] = None,
+    group_id: Optional[int] = None,
+    attention_inputs: Optional[PyAttentionInputs] = None,
+    seq_size_per_block: Optional[int] = None,
+    tensors: Optional[dict[str, Any]] = None,
+    extra: Optional[dict[str, Any]] = None,
+) -> None:
+    if ctx is None or _Q3N_TRACE_FILE is None:
+        return
+    if _Q3N_TRACE_MAX_RECORDS > 0 and _Q3N_TRACE_STATE["records"] >= _Q3N_TRACE_MAX_RECORDS:
+        return
+    rows = []
+    for lane in ctx["lanes"]:
+        trace_ids = ctx["trace_ids"]
+        trace_id = trace_ids[lane] if lane < len(trace_ids) else ""
+        row = {
+            "ts": time.time(),
+            "pid": os.getpid(),
+            "rank": os.environ.get("WORLD_RANK") or os.environ.get("RANK"),
+            "event": event,
+            "trace_id": trace_id,
+            "trace_step": ctx["trace_steps"].get(lane),
+            "lane": lane,
+            "layer_idx": layer_idx,
+            "layer_type": str(layer_type) if layer_type is not None else None,
+            "group_id": group_id,
+            "is_prefill": ctx["is_prefill"],
+            "is_target_verify": ctx["is_target_verify"],
+            "input_shape": ctx["input_shape"],
+        }
+        if attention_inputs is not None:
+            row["attention"] = {
+                "input_length": _lane_int(attention_inputs.input_lengths, lane),
+                "prefix_length": _lane_int(attention_inputs.prefix_lengths, lane),
+                "sequence_length": _lane_int(attention_inputs.sequence_lengths, lane),
+                "sequence_length_plus_1": _lane_int(
+                    attention_inputs.sequence_lengths_plus_1_d, lane
+                ),
+                "decode_cu_seqlens": _tensor_summary(
+                    attention_inputs.decode_cu_seqlens_d, lane
+                ),
+                "block_map": _tensor_summary(
+                    attention_inputs.kv_cache_kernel_block_id_device, lane
+                ),
+            }
+            if seq_size_per_block is not None:
+                seq_len, logical_block, physical_block = _block_id_for_lane(
+                    attention_inputs, lane, seq_size_per_block
+                )
+                row["attention"]["seq_size_per_block"] = seq_size_per_block
+                row["attention"]["current_seq_len_plus_1"] = seq_len
+                row["attention"]["current_logical_block"] = logical_block
+                row["attention"]["current_physical_block"] = physical_block
+        if tensors:
+            row["tensors"] = {
+                name: _tensor_summary(value, lane) for name, value in tensors.items()
+            }
+        if extra:
+            row["extra"] = extra
+        rows.append(row)
+        _Q3N_TRACE_STATE["records"] += 1
+        if (
+            _Q3N_TRACE_MAX_RECORDS > 0
+            and _Q3N_TRACE_STATE["records"] >= _Q3N_TRACE_MAX_RECORDS
+        ):
+            break
+    if not rows:
+        return
+    with _Q3N_TRACE_FILE.open("a", encoding="utf-8") as out:
+        for row in rows:
+            out.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
+
+
+def _trace_cache_state(
+    ctx: Optional[dict[str, Any]],
+    event: str,
+    *,
+    layer_idx: Optional[int],
+    group_id: Optional[int],
+    attention_inputs: PyAttentionInputs,
+    seq_size_per_block: int,
+    conv_states: Optional[torch.Tensor],
+    ssm_states: Optional[torch.Tensor],
+    tensors: Optional[dict[str, Any]] = None,
+) -> None:
+    if ctx is None:
+        return
+    for lane in ctx["lanes"]:
+        _, _, physical_block = _block_id_for_lane(
+            attention_inputs, lane, seq_size_per_block
+        )
+        cache_tensors = dict(tensors or {})
+        if physical_block is not None:
+            if (
+                conv_states is not None
+                and torch.is_tensor(conv_states)
+                and 0 <= physical_block < conv_states.shape[0]
+            ):
+                cache_tensors["conv_state_current_block"] = conv_states.narrow(
+                    0, physical_block, 1
+                )
+            if (
+                ssm_states is not None
+                and torch.is_tensor(ssm_states)
+                and 0 <= physical_block < ssm_states.shape[0]
+            ):
+                cache_tensors["ssm_state_current_block"] = ssm_states.narrow(
+                    0, physical_block, 1
+                )
+        lane_ctx = dict(ctx)
+        lane_ctx["lanes"] = [lane]
+        _trace_event(
+            lane_ctx,
+            event,
+            layer_idx=layer_idx,
+            layer_type=HybridAttentionType.LINEAR,
+            group_id=group_id,
+            attention_inputs=attention_inputs,
+            seq_size_per_block=seq_size_per_block,
+            tensors=cache_tensors,
+        )
+
+
 class Qwen3NextMetadata(object):
     def __init__(
         self,
@@ -78,6 +456,7 @@ class Qwen3NextMetadata(object):
         self.cp_local_extract_indices = cp_local_extract_indices
         self.cp_local_valid_mask = cp_local_valid_mask
         self.cp_write_cache_store_impl = cp_write_cache_store_impl
+        self.trace_ctx: Optional[dict[str, Any]] = None
 
     def get_prefill_conv1d_meta(self) -> Optional[CausalConv1dMetadata]:
         return self.prefill_conv1d_meta
@@ -430,12 +809,39 @@ class Qwen3NextGatedDeltaNetDecode(Qwen3NextGatedDeltaNetBase):
             kv_cache.kv_cache_base.shape[0], -1
         )
         is_target_verify = attn_meta.is_target_verify
+        trace_ctx = attn_meta.trace_ctx
+        layer_idx = getattr(attn_meta, "trace_layer_idx", None)
+        group_id = getattr(attn_meta, "trace_group_id", None)
+        conv_states = self._get_conv_states(kv_cache_tensor)
+        ssm_states = self._get_ssm_states(kv_cache_tensor)
+        _trace_cache_state(
+            trace_ctx,
+            "linear_decode_before_conv",
+            layer_idx=layer_idx,
+            group_id=group_id,
+            attention_inputs=attn_inputs,
+            seq_size_per_block=kv_cache.seq_size_per_block,
+            conv_states=conv_states,
+            ssm_states=ssm_states,
+            tensors={"mixed_qkv": mixed_qkv, "b": b, "a": a},
+        )
         mixed_qkv = self._conv1d(
             mixed_qkv,
             kv_cache_tensor,
             kv_cache.seq_size_per_block,
             attn_inputs,
             is_target_verify,
+        )
+        _trace_cache_state(
+            trace_ctx,
+            "linear_decode_after_conv",
+            layer_idx=layer_idx,
+            group_id=group_id,
+            attention_inputs=attn_inputs,
+            seq_size_per_block=kv_cache.seq_size_per_block,
+            conv_states=conv_states,
+            ssm_states=ssm_states,
+            tensors={"mixed_qkv": mixed_qkv},
         )
         attn_out = self._fla(
             mixed_qkv,
@@ -445,6 +851,17 @@ class Qwen3NextGatedDeltaNetDecode(Qwen3NextGatedDeltaNetBase):
             kv_cache.seq_size_per_block,
             attn_inputs,
             is_target_verify,
+        )
+        _trace_cache_state(
+            trace_ctx,
+            "linear_decode_after_fla",
+            layer_idx=layer_idx,
+            group_id=group_id,
+            attention_inputs=attn_inputs,
+            seq_size_per_block=kv_cache.seq_size_per_block,
+            conv_states=conv_states,
+            ssm_states=ssm_states,
+            tensors={"attn_out": attn_out},
         )
 
         return attn_out
@@ -840,6 +1257,24 @@ class Qwen3NextGatedDeltaNet(nn.Module):
         mixed_qkv, z, b, a = self.fix_query_key_value_ordering(
             projected_states_qkvz, projected_states_ba
         )
+        trace_ctx = attn_meta.trace_ctx
+        layer_idx = getattr(attn_meta, "trace_layer_idx", None)
+        group_id = getattr(attn_meta, "trace_group_id", None)
+        _trace_event(
+            trace_ctx,
+            "linear_project",
+            layer_idx=layer_idx,
+            layer_type=HybridAttentionType.LINEAR,
+            group_id=group_id,
+            attention_inputs=attention_inputs,
+            tensors={
+                "hidden_states": hidden_states,
+                "mixed_qkv": mixed_qkv,
+                "z": z,
+                "b": b,
+                "a": a,
+            },
+        )
         if attention_inputs.is_prefill and not attn_meta.is_target_verify:
             if attn_meta.is_cp_linear_attn:
                 return self._forward_cp_prefill(
@@ -860,6 +1295,15 @@ class Qwen3NextGatedDeltaNet(nn.Module):
         attn_output = self.out_proj(attn_output)
         if self.parallelism_config.get_attn_tp_size() > 1:
             attn_output = all_reduce(attn_output, group=Group.TP)
+        _trace_event(
+            trace_ctx,
+            "linear_output",
+            layer_idx=layer_idx,
+            layer_type=HybridAttentionType.LINEAR,
+            group_id=group_id,
+            attention_inputs=attention_inputs,
+            tensors={"attn_output": attn_output},
+        )
         return attn_output
 
 
@@ -1114,14 +1558,35 @@ class Qwen3NextModel(GptModelBase):
             cp_local_valid_mask=cp_local_valid_mask,
             cp_write_cache_store_impl=cp_write_cache_store_impl,
         )
+        trace_ctx = _make_trace_ctx(inputs, attention_inputs, hidden_states)
+        attn_meta.trace_ctx = trace_ctx
 
         if fmha_impl is None:
             fmha_impl = self.prepare_fmha_impl(inputs)
 
         residual = torch.zeros_like(hidden_states)
+        _trace_event(
+            trace_ctx,
+            "model_decode_start",
+            attention_inputs=attention_inputs,
+            tensors={"input_ids": input_ids, "hidden_states": hidden_states},
+        )
 
         for i, decoder_layer in enumerate(self.layers):
-            select_block_map_for_layer(attention_inputs, i)
+            group_id = select_block_map_for_layer(attention_inputs, i)
+            layer_type = decoder_layer.layer_type
+            attn_meta.trace_layer_idx = i
+            attn_meta.trace_group_id = group_id
+            if _trace_layer_enabled(i, layer_type):
+                _trace_event(
+                    trace_ctx,
+                    "layer_start",
+                    layer_idx=i,
+                    layer_type=layer_type,
+                    group_id=group_id,
+                    attention_inputs=attention_inputs,
+                    tensors={"hidden_states": hidden_states, "residual": residual},
+                )
             hidden_states, residual = decoder_layer(
                 hidden_states,
                 residual,
@@ -1130,6 +1595,22 @@ class Qwen3NextModel(GptModelBase):
                 attention_inputs=attention_inputs,
                 attn_meta=attn_meta,
             )
+            if _trace_layer_enabled(i, layer_type):
+                _trace_event(
+                    trace_ctx,
+                    "layer_end",
+                    layer_idx=i,
+                    layer_type=layer_type,
+                    group_id=group_id,
+                    attention_inputs=attention_inputs,
+                    tensors={"hidden_states": hidden_states, "residual": residual},
+                )
 
         hidden_states, residual = self.norm(hidden_states, residual)
+        _trace_event(
+            trace_ctx,
+            "model_decode_end",
+            attention_inputs=attention_inputs,
+            tensors={"hidden_states": hidden_states, "residual": residual},
+        )
         return PyModelOutputs(hidden_states, fmha_impl.fmha_params)

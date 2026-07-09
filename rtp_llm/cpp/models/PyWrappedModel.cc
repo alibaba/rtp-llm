@@ -447,6 +447,7 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         fusedCopy(d2d_copies_);
 
         auto py_model_inputs = PyModelInputs({token_ids, input_hiddens, attention_inputs, bert_embedding_inputs});
+        py_model_inputs.trace_ids = inputs.trace_ids;
         PyModelOutputs py_model_outputs;
         torch::Tensor  hidden_states;
 
