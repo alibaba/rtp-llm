@@ -84,6 +84,11 @@ public class MetricConstant {
     public static final String DECODE_TOTAL_LOAD = "app.flexlb.decode.total.load";
 
     /**
+     * FlexLB scheduler inflight KV cache reserved tokens per decode worker (local inflight reservation not yet confirmed by the engine)
+     */
+    public static final String DECODE_INFLIGHT_KV_RESERVED_TOKENS = "app.flexlb.decode.inflight.kv.reserved.tokens";
+
+    /**
      * Batch predicted execution time (formula estimate) in milliseconds
      */
     public static final String BATCH_PREDICTED_TIME_MS = "app.batch.predicted.time.ms";

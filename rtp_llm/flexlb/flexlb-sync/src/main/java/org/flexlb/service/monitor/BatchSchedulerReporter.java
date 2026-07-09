@@ -20,6 +20,7 @@ import static org.flexlb.constant.MetricConstant.CACHE_HIT_COUNT;
 import static org.flexlb.constant.MetricConstant.CACHE_HIT_RATIO;
 import static org.flexlb.constant.MetricConstant.CACHE_REQUEST_TOTAL;
 import static org.flexlb.constant.MetricConstant.DECODE_INFLIGHT_COUNT;
+import static org.flexlb.constant.MetricConstant.DECODE_INFLIGHT_KV_RESERVED_TOKENS;
 import static org.flexlb.constant.MetricConstant.DECODE_TOTAL_LOAD;
 import static org.flexlb.constant.MetricConstant.ENGINE_BALANCING_MASTER_BATCH_SIZE;
 import static org.flexlb.constant.MetricConstant.ENGINE_BALANCING_MASTER_BATCH_TOTAL_TOKENS;
@@ -71,13 +72,14 @@ public class BatchSchedulerReporter {
         // Decode inflight — per decode worker (FlexLB scheduler view)
         monitor.register(DECODE_INFLIGHT_COUNT, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         monitor.register(DECODE_TOTAL_LOAD, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        monitor.register(DECODE_INFLIGHT_KV_RESERVED_TOKENS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
 
         // Prediction accuracy — predicted vs actual engine execution time
         monitor.register(BATCH_PREDICTED_TIME_MS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         monitor.register(BATCH_ACTUAL_TIME_MS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         monitor.register(BATCH_PREDICT_GAP_MS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
 
-        log.info("BatchSchedulerReporter initialized (13 metrics)");
+        log.info("BatchSchedulerReporter initialized (14 metrics)");
     }
 
     // ==================== Queue metrics ====================
@@ -219,6 +221,17 @@ public class BatchSchedulerReporter {
                 "role", RoleType.DECODE.name(),
                 "engineIp", engineIp);
         monitor.report(DECODE_TOTAL_LOAD, tags, totalLoad);
+    }
+
+    /**
+     * Report per-decode-worker inflight KV cache reserved tokens (local inflight reservation not yet confirmed by the engine)
+     * via {@code flexlb.decode.inflight.kv.reserved.tokens}.
+     */
+    public void reportDecodeInflightKvReserved(String engineIp, long kvReservedTokens) {
+        FlexMetricTags tags = FlexMetricTags.of(
+                "role", RoleType.DECODE.name(),
+                "engineIp", engineIp);
+        monitor.report(DECODE_INFLIGHT_KV_RESERVED_TOKENS, tags, kvReservedTokens);
     }
 
     // ==================== Prediction accuracy metrics ====================

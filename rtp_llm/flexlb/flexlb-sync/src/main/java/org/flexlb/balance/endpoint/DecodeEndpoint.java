@@ -147,6 +147,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
     public void reportBatchMetrics(BatchSchedulerReporter reporter) {
         reporter.reportDecodeInflightCount(getIp(), getInflightCount());
         reporter.reportDecodeTotalLoad(getIp(), getTotalLoad());
+        reporter.reportDecodeInflightKvReserved(getIp(), inflightKvReserved());
     }
 
     /**
