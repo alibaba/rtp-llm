@@ -358,6 +358,15 @@ public class FlexlbConfig {
      */
     private String costFormula = "sum(computeTokens) + 0.3*sum(hitCacheTokens)";
 
+    /**
+     * Prefill time predictor type. Supported values:
+     * <ul>
+     *   <li>{@code formula} — Formula-driven predictor with configurable costFormula (default)</li>
+     *   <li>{@code learning} — Hardcoded linear regression predictor with online learning</li>
+     * </ul>
+     */
+    private String prefillPredictorType = "formula";
+
     // ========== SLO-Budget Batcher Configuration ==========
 
     private double flexlbBatchFillThreshold = 0.5;

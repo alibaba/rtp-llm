@@ -16,6 +16,7 @@ import org.flexlb.dao.master.CacheStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.LoadBalanceStrategyEnum;
 import org.flexlb.enums.ResourceMeasureIndicatorEnum;
+import org.flexlb.enums.ScheduleModeEnum;
 import org.flexlb.sync.status.EngineWorkerStatus;
 import org.flexlb.util.CommonUtils;
 import org.flexlb.util.Logger;
@@ -69,7 +70,7 @@ public class CostBasedDecodeStrategy implements LoadBalanceStrategy {
 
         if (selectedEndpoint != null) {
             long prefixLength = calcPrefixMatchLength(selectedEndpoint.getStatus().getCacheStatus(), balanceContext.getRequest().getBlockCacheKeys());
-            return buildServerStatus(selectedEndpoint, seqLen, prefixLength, roleType, balanceContext.getRequestId());
+            return buildServerStatus(selectedEndpoint, seqLen, prefixLength, roleType, balanceContext.getRequestId(), balanceContext.getScheduleMode());
         }
 
         Map<String, Integer> merged = new java.util.HashMap<>(filterResult.rejections());
@@ -247,10 +248,27 @@ public class CostBasedDecodeStrategy implements LoadBalanceStrategy {
                 .orElse(null);
     }
 
-    private ServerStatus buildServerStatus(DecodeEndpoint optimalEndpoint, long seqLen, long prefixLength, RoleType roleType, long requestId) {
+    private ServerStatus buildServerStatus(DecodeEndpoint optimalEndpoint, long seqLen, long prefixLength, RoleType roleType, long requestId, ScheduleModeEnum scheduleMode) {
         ServerStatus result = new ServerStatus();
         try {
-            optimalEndpoint.reserve(requestId, seqLen);
+            // Skip KV reservation for DIRECT and QUEUE paths.
+            //
+            // These paths do not track request lifecycle after routing succeeds:
+            //   - DIRECT: Master returns the response immediately, no inflight tracking.
+            //   - QUEUE:  RequestScheduler completes the future after routing, no release() on success/cancel.
+            //
+            // Reserved KV would only be cleaned by calibrate (~20ms cycle) or TTL eviction (300s).
+            // When the engine is overloaded and calibrate stalls, reservations pile up and drive
+            // available KV to zero, causing NO_AVAILABLE_WORKER cascade failures.
+            // The engine's own KV admission control serves as backstop.
+            //
+            // BATCH path keeps reserve because FlexlbBatchScheduler tracks lifecycle and calls
+            // de.release() on cancel/failure/expiry.
+            boolean skipReserve = scheduleMode == ScheduleModeEnum.DIRECT
+                    || scheduleMode == ScheduleModeEnum.QUEUE;
+            if (!skipReserve) {
+                optimalEndpoint.reserve(requestId, seqLen);
+            }
 
             result.setSuccess(true);
             result.setRole(roleType);

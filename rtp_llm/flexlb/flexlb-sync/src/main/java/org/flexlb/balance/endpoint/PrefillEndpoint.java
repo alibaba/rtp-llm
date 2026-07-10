@@ -4,6 +4,8 @@ import org.flexlb.balance.scheduler.BatchDecisionHandler;
 import org.flexlb.balance.scheduler.BatchItem;
 import org.flexlb.balance.scheduler.InflightEvictor;
 import org.flexlb.balance.scheduler.WorkerBatcher;
+import org.flexlb.balance.strategy.FormulaPredictor;
+import org.flexlb.balance.strategy.LearningPredictor;
 import org.flexlb.balance.strategy.PrefillTimePredictor;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.master.TaskInfo;
@@ -86,7 +88,10 @@ public class PrefillEndpoint extends WorkerEndpoint {
     }
 
     private static PrefillTimePredictor createPredictor(FlexlbConfig cfg) {
-        return new PrefillTimePredictor(cfg.getCostFormula());
+        if ("learning".equalsIgnoreCase(cfg.getPrefillPredictorType())) {
+            return new LearningPredictor();
+        }
+        return new FormulaPredictor(cfg.getCostFormula());
     }
 
     public void commitBatch(long batchId, long predictMs, List<BatchItem> requests) {

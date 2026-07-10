@@ -232,7 +232,7 @@ class CostBasedPrefillStrategyTest {
 
     @Test
     void predictorUsesFormula() {
-        PrefillTimePredictor predictor = new PrefillTimePredictor(
+        FormulaPredictor predictor = new FormulaPredictor(
                 "10 + 0.5*sum(computeTokens)"
                         + " + 0.001*sum(computeTokens^2)"
                         + " + 0.0005*sum(computeTokens * hitCacheTokens)"

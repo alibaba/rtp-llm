@@ -18,26 +18,26 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-class PrefillTimePredictorTest {
+class FormulaPredictorTest {
 
     // ---- formula parsing ----
 
     @Test
     void parseRejectsUnknownVariable() {
         assertThrows(IllegalArgumentException.class, () ->
-                new PrefillTimePredictor("unknown_var + 5"));
+                new FormulaPredictor("unknown_var + 5"));
     }
 
     @Test
     void parseRejectsMalformed() {
         assertThrows(IllegalArgumentException.class, () ->
-                new PrefillTimePredictor("sum(computeTokens) +"));
+                new FormulaPredictor("sum(computeTokens) +"));
     }
 
     @Test
     void parseRejectsShortLegacyVariables() {
         assertThrows(IllegalArgumentException.class, () ->
-                new PrefillTimePredictor("c + p + sum_c + n"));
+                new FormulaPredictor("c + p + sum_c + n"));
     }
 
     // ---- estimateMs (single request) ----
@@ -45,7 +45,7 @@ class PrefillTimePredictorTest {
     @Test
     void estimateMsEmptyFormula() {
         // "0" → always 0
-        PrefillTimePredictor p = new PrefillTimePredictor("0");
+        FormulaPredictor p = new FormulaPredictor("0");
         assertEquals(0, p.estimateMs(1000, 0));
         assertEquals(0, p.estimateMs(1000, 500));
     }
@@ -53,40 +53,40 @@ class PrefillTimePredictorTest {
     @Test
     void estimateMsConstantTerm() {
         // "50" → always 50
-        PrefillTimePredictor p = new PrefillTimePredictor("50");
+        FormulaPredictor p = new FormulaPredictor("50");
         assertEquals(50, p.estimateMs(100, 0));
         assertEquals(50, p.estimateMs(0, 0));
     }
 
     @Test
     void estimateMsLinearInComputeTokens() {
-        PrefillTimePredictor p = new PrefillTimePredictor("2*computeTokens");
+        FormulaPredictor p = new FormulaPredictor("2*computeTokens");
         assertEquals(2000, p.estimateMs(1500, 500));
         assertEquals(600, p.estimateMs(300, 0));
     }
 
     @Test
     void estimateMsQuadraticInComputeTokens() {
-        PrefillTimePredictor p = new PrefillTimePredictor("0.1*computeTokens^2");
+        FormulaPredictor p = new FormulaPredictor("0.1*computeTokens^2");
         assertEquals(1000, p.estimateMs(100, 0));
     }
 
     @Test
     void estimateMsInteractionTerm() {
-        PrefillTimePredictor p = new PrefillTimePredictor("0.5*computeTokens*hitCacheTokens");
+        FormulaPredictor p = new FormulaPredictor("0.5*computeTokens*hitCacheTokens");
         assertEquals(40000, p.estimateMs(600, 400));
     }
 
     @Test
     void estimateMsSumFunctionInSingleMode() {
-        PrefillTimePredictor p = new PrefillTimePredictor(
+        FormulaPredictor p = new FormulaPredictor(
                 "sum(computeTokens) + 0.3*sum(hitCacheTokens)");
         assertEquals(360, p.estimateMs(500, 200));
     }
 
     @Test
     void estimateMsHitCacheRequestCount() {
-        PrefillTimePredictor p = new PrefillTimePredictor(
+        FormulaPredictor p = new FormulaPredictor(
                 "sum(hitCacheTokens) + 100*sum(hasHitCache)");
 
         assertEquals(300, p.estimateMs(500, 200));
@@ -95,7 +95,7 @@ class PrefillTimePredictorTest {
 
     @Test
     void estimateMsReadablePositivePartFormula() {
-        PrefillTimePredictor p = new PrefillTimePredictor(
+        FormulaPredictor p = new FormulaPredictor(
                 "max(computeTokens - 2048, 0) + 2*max(computeTokens - 24576, 0)"
                         + " + sum(max(computeTokens - 2048, 0))"
                         + " + 3*sum(max(computeTokens - 24576, 0))");
@@ -107,7 +107,7 @@ class PrefillTimePredictorTest {
 
     @Test
     void estimateMsReadableTokenVariables() {
-        PrefillTimePredictor p = new PrefillTimePredictor(
+        FormulaPredictor p = new FormulaPredictor(
                 "inputTokens - hitCacheTokens + computeTokens + 10*hasHitCache");
 
         assertEquals(610, p.estimateMs(500, 200));
@@ -118,7 +118,7 @@ class PrefillTimePredictorTest {
     void estimateMsFullFormula() {
         // inputTokens=500, hitCacheTokens=200, computeTokens=300
         // = 10 + 30 + 900 + 60 + 100 + 5 = 1105
-        PrefillTimePredictor p = new PrefillTimePredictor(
+        FormulaPredictor p = new FormulaPredictor(
                 "10 + 0.1*sum(computeTokens)"
                         + " + 0.01*sum(computeTokens^2)"
                         + " + 0.001*sum(computeTokens * hitCacheTokens)"
@@ -129,13 +129,13 @@ class PrefillTimePredictorTest {
 
     @Test
     void estimateMsHitTokensCannotExceedTotal() {
-        PrefillTimePredictor p = new PrefillTimePredictor("2*computeTokens");
+        FormulaPredictor p = new FormulaPredictor("2*computeTokens");
         assertEquals(0, p.estimateMs(100, 500));
     }
 
     @Test
     void estimateMsLargeValuesNoOverflow() {
-        PrefillTimePredictor p = new PrefillTimePredictor(
+        FormulaPredictor p = new FormulaPredictor(
                 "100 + sum(computeTokens)"
                         + " + 0.001*sum(computeTokens^2)"
                         + " + 0.0001*sum(computeTokens * hitCacheTokens)"
@@ -149,13 +149,13 @@ class PrefillTimePredictorTest {
 
     @Test
     void predictBatchMsEmptyListReturnsZero() {
-        PrefillTimePredictor p = new PrefillTimePredictor("10 + sum(computeTokens) + 5*batchSize");
+        FormulaPredictor p = new FormulaPredictor("10 + sum(computeTokens) + 5*batchSize");
         assertEquals(0, p.predictBatchMs(List.of()));
     }
 
     @Test
     void predictBatchMsSingleItemMatchesEstimateMs() {
-        PrefillTimePredictor p = new PrefillTimePredictor(
+        FormulaPredictor p = new FormulaPredictor(
                 "10 + 0.1*sum(computeTokens)"
                         + " + 0.01*sum(computeTokens^2)"
                         + " + 0.001*sum(computeTokens * hitCacheTokens)"
@@ -177,7 +177,7 @@ class PrefillTimePredictorTest {
         // sum(computeTokens * hitCacheTokens)=80000, sum(hitCacheTokens)=300, batchSize=2
         // = 10 + 0.1*500 + 0.01*130000 + 0.001*80000 + 0.5*300 + 5*2
         // = 10 + 50 + 1300 + 80 + 150 + 10 = 1600
-        PrefillTimePredictor p = new PrefillTimePredictor(
+        FormulaPredictor p = new FormulaPredictor(
                 "10 + 0.1*sum(computeTokens)"
                         + " + 0.01*sum(computeTokens^2)"
                         + " + 0.001*sum(computeTokens * hitCacheTokens)"
@@ -193,7 +193,7 @@ class PrefillTimePredictorTest {
 
     @Test
     void predictBatchMsAggregatesHitCacheRequestCount() {
-        PrefillTimePredictor p = new PrefillTimePredictor(
+        FormulaPredictor p = new FormulaPredictor(
                 "sum(hitCacheTokens) + 100*sum(hasHitCache)");
 
         BatchItem item1 = batchItem(500, 200);
@@ -206,7 +206,7 @@ class PrefillTimePredictorTest {
 
     @Test
     void predictBatchMsAggregatesReadablePositivePartFormula() {
-        PrefillTimePredictor p = new PrefillTimePredictor(
+        FormulaPredictor p = new FormulaPredictor(
                 "sum(max(computeTokens - 2048, 0))"
                         + " + 2*sum(max(computeTokens - 24576, 0))");
 
@@ -219,7 +219,7 @@ class PrefillTimePredictorTest {
 
     @Test
     void predictBatchMsRecommendedFormulaUsesBatchBoundedCacheTerms() {
-        PrefillTimePredictor p = new PrefillTimePredictor(
+        FormulaPredictor p = new FormulaPredictor(
                 "174.374677211 + 52.642812003*log(batchSize + 1)"
                         + " + 0.000746856881262*sum(2048*log(1 + exp((computeTokens - 8192)/2048)))"
                         + " + 0.0074536400604*sum(4096*log(1 + exp((computeTokens - 24576)/4096)))"
@@ -247,7 +247,7 @@ class PrefillTimePredictorTest {
 
     @Test
     void predictBatchMsSumEvaluatesExpressionPerRequest() {
-        PrefillTimePredictor p = new PrefillTimePredictor(
+        FormulaPredictor p = new FormulaPredictor(
                 "sum(max(computeTokens - 2048, 0))");
 
         BatchItem item1 = batchItem(3000, 0); // max(3000-2048,0)=952
@@ -258,7 +258,7 @@ class PrefillTimePredictorTest {
 
     @Test
     void predictBatchMsBatchSizeAffectsResult() {
-        PrefillTimePredictor p = new PrefillTimePredictor("10*batchSize");
+        FormulaPredictor p = new FormulaPredictor("10*batchSize");
 
         BatchItem item = batchItem(100, 0);
         assertEquals(10, p.predictBatchMs(List.of(item)));
@@ -268,21 +268,21 @@ class PrefillTimePredictorTest {
 
     @Test
     void predictBatchMsZeroCacheHits() {
-        PrefillTimePredictor p = new PrefillTimePredictor("sum(computeTokens)");
+        FormulaPredictor p = new FormulaPredictor("sum(computeTokens)");
         BatchItem item = batchItem(500, 0);
         assertEquals(500, p.predictBatchMs(List.of(item)));
     }
 
     @Test
     void predictBatchMsAllCached() {
-        PrefillTimePredictor p = new PrefillTimePredictor("sum(computeTokens)");
+        FormulaPredictor p = new FormulaPredictor("sum(computeTokens)");
         BatchItem item = batchItem(500, 500);
         assertEquals(0, p.predictBatchMs(List.of(item)));
     }
 
     @Test
     void predictBatchMsLargeBatch() {
-        PrefillTimePredictor p = new PrefillTimePredictor(
+        FormulaPredictor p = new FormulaPredictor(
                 "100 + 0.5*sum(computeTokens) + 0.1*sum(hitCacheTokens) + 3*batchSize");
         List<BatchItem> items = new ArrayList<>();
         for (int i = 0; i < 100; i++) {
@@ -297,7 +297,7 @@ class PrefillTimePredictorTest {
     @Test
     void powerOperatorRightAssociative() {
         // 2^3^2 = 2^(3^2) = 2^9 = 512
-        PrefillTimePredictor p = new PrefillTimePredictor("2^3^2");
+        FormulaPredictor p = new FormulaPredictor("2^3^2");
         assertEquals(512, p.estimateMs(0, 0));
     }
 
@@ -305,20 +305,20 @@ class PrefillTimePredictorTest {
 
     @Test
     void sqrtFunction() {
-        PrefillTimePredictor p = new PrefillTimePredictor("sqrt(100)");
+        FormulaPredictor p = new FormulaPredictor("sqrt(100)");
         assertEquals(10, p.estimateMs(0, 0));
     }
 
     @Test
     void maxFunction() {
-        PrefillTimePredictor p = new PrefillTimePredictor("max(sum(computeTokens), 50)");
+        FormulaPredictor p = new FormulaPredictor("max(sum(computeTokens), 50)");
         assertEquals(100, p.estimateMs(100, 0));
         assertEquals(50, p.estimateMs(30, 0));
     }
 
     @Test
     void nestedFunctions() {
-        PrefillTimePredictor p = new PrefillTimePredictor(
+        FormulaPredictor p = new FormulaPredictor(
                 "sqrt(pow(sum(computeTokens), 2) + pow(sum(hitCacheTokens), 2))");
         // inputTokens=7, hitCacheTokens=4, computeTokens=3, sqrt(9+16) = 5
         assertEquals(5, p.estimateMs(7, 4));
@@ -328,7 +328,7 @@ class PrefillTimePredictorTest {
 
     @Test
     void parenthesesOverridePrecedence() {
-        PrefillTimePredictor p = new PrefillTimePredictor("(2 + 3) * 4");
+        FormulaPredictor p = new FormulaPredictor("(2 + 3) * 4");
         assertEquals(20, p.estimateMs(0, 0));
     }
 
@@ -337,7 +337,7 @@ class PrefillTimePredictorTest {
     @Test
     @DisplayName("learn method accepts batch items, predicted and actual time without error")
     void learnAcceptsBatchInfo() {
-        PrefillTimePredictor p = new PrefillTimePredictor("100");
+        FormulaPredictor p = new FormulaPredictor("100");
         List<BatchItem> items = List.of(
                 batchItem(100, 20),
                 batchItem(200, 50)
@@ -350,7 +350,7 @@ class PrefillTimePredictorTest {
     @Test
     @DisplayName("param() basic parsing returns initial value")
     void paramBasicParsing() {
-        PrefillTimePredictor p = new PrefillTimePredictor("param(w0, 100)");
+        FormulaPredictor p = new FormulaPredictor("param(w0, 100)");
         assertEquals(100, p.estimateMs(0, 0));
         assertEquals(100, p.estimateMs(500, 200));
     }
@@ -360,14 +360,14 @@ class PrefillTimePredictorTest {
     void paramInExpression() {
         // param(w0, 10) + param(w1, 0.5) * computeTokens
         // inputTokens=100, hitCache=0, computeTokens=100 → 10 + 0.5*100 = 60
-        PrefillTimePredictor p = new PrefillTimePredictor("param(w0, 10) + param(w1, 0.5) * computeTokens");
+        FormulaPredictor p = new FormulaPredictor("param(w0, 10) + param(w1, 0.5) * computeTokens");
         assertEquals(60, p.estimateMs(100, 0));
     }
 
     @Test
     @DisplayName("setParameter updates parameter value at runtime")
     void paramUpdateValue() {
-        PrefillTimePredictor p = new PrefillTimePredictor("param(w0, 10) + param(w1, 0.5) * computeTokens");
+        FormulaPredictor p = new FormulaPredictor("param(w0, 10) + param(w1, 0.5) * computeTokens");
         assertEquals(60, p.estimateMs(100, 0));
         p.setParameter("w1", 1.0);
         // 10 + 1.0*100 = 110
@@ -377,14 +377,14 @@ class PrefillTimePredictorTest {
     @Test
     @DisplayName("parameterNames returns all parameter names")
     void parameterNamesListing() {
-        PrefillTimePredictor p = new PrefillTimePredictor("param(w0, 1) + param(w1, 2) + param(w2, 3)");
+        FormulaPredictor p = new FormulaPredictor("param(w0, 1) + param(w1, 2) + param(w2, 3)");
         assertEquals(Set.of("w0", "w1", "w2"), p.parameterNames());
     }
 
     @Test
     @DisplayName("getParameters returns all parameter values")
     void getParametersMap() {
-        PrefillTimePredictor p = new PrefillTimePredictor("param(w0, 1) + param(w1, 2) + param(w2, 3)");
+        FormulaPredictor p = new FormulaPredictor("param(w0, 1) + param(w1, 2) + param(w2, 3)");
         assertEquals(Map.of("w0", 1.0, "w1", 2.0, "w2", 3.0), p.getParameters());
     }
 
@@ -393,7 +393,7 @@ class PrefillTimePredictorTest {
     void paramSameNameReused() {
         // param(w0, 1) * computeTokens + param(w0, 1) * hitCacheTokens
         // inputTokens=100, hitCache=50, computeTokens=50 → 1*50 + 1*50 = 100
-        PrefillTimePredictor p = new PrefillTimePredictor("param(w0, 1) * computeTokens + param(w0, 1) * hitCacheTokens");
+        FormulaPredictor p = new FormulaPredictor("param(w0, 1) * computeTokens + param(w0, 1) * hitCacheTokens");
         assertEquals(1, p.parameterNames().size());
         assertTrue(p.parameterNames().contains("w0"));
         assertEquals(100, p.estimateMs(100, 50));
@@ -405,7 +405,7 @@ class PrefillTimePredictorTest {
     @Test
     @DisplayName("formula without param() has no parameters")
     void noParametersFormula() {
-        PrefillTimePredictor p = new PrefillTimePredictor("sum(computeTokens)");
+        FormulaPredictor p = new FormulaPredictor("sum(computeTokens)");
         assertFalse(p.hasParameters());
         assertTrue(p.parameterNames().isEmpty());
     }
@@ -417,7 +417,7 @@ class PrefillTimePredictorTest {
         // item1: (500,200) → computeTokens=300
         // item2: (300,100) → computeTokens=200
         // sum(computeTokens) = 500 → 10 + 0.5*500 = 260
-        PrefillTimePredictor p = new PrefillTimePredictor("param(w0, 10) + param(w1, 0.5) * sum(computeTokens)");
+        FormulaPredictor p = new FormulaPredictor("param(w0, 10) + param(w1, 0.5) * sum(computeTokens)");
         BatchItem item1 = batchItem(500, 200);
         BatchItem item2 = batchItem(300, 100);
         assertEquals(260, p.predictBatchMs(List.of(item1, item2)));
@@ -426,7 +426,7 @@ class PrefillTimePredictorTest {
     @Test
     @DisplayName("getParameter on unknown parameter throws IllegalArgumentException")
     void unknownParameterThrows() {
-        PrefillTimePredictor p = new PrefillTimePredictor("param(w0, 100)");
+        FormulaPredictor p = new FormulaPredictor("param(w0, 100)");
         assertThrows(IllegalArgumentException.class, () -> p.getParameter("nonexistent"));
     }
 
@@ -434,7 +434,7 @@ class PrefillTimePredictorTest {
     @DisplayName("param() initial value can be an expression")
     void paramInitialValueExpression() {
         // param(w0, 2+3) * computeTokens → 5 * 100 = 500
-        PrefillTimePredictor p = new PrefillTimePredictor("param(w0, 2+3) * computeTokens");
+        FormulaPredictor p = new FormulaPredictor("param(w0, 2+3) * computeTokens");
         assertEquals(5.0, p.getParameter("w0"));
         assertEquals(500, p.estimateMs(100, 0));
     }
