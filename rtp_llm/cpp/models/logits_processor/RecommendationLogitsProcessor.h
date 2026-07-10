@@ -20,8 +20,7 @@ struct StreamRecommendationInfo {
     int32_t combo_token_size          = 0;
     int32_t input_length              = 0;
     int32_t current_output_length     = 0;
-    // 实际语义：hasNumBeams() || num_return_sequences > 1，控制 token 读取是否需要 full-position offset。
-    // 与 enable_cross_sequence_ban 不互斥（互斥的是 hasNumBeams()，见 fromGenerateInput）。
+    // 仅 beam search 使用 full-position token offset；num_return_sequences>1 仍按增量 token 读取。
     bool    needs_token_offset        = false;
     bool    enable_cross_sequence_ban = false;
     int32_t cross_seq_diverge_start_combo = 0;

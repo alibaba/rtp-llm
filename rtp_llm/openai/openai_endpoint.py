@@ -181,7 +181,7 @@ class OpenaiEndpoint(object):
         if request.max_tokens != None:
             config.max_new_tokens = request.max_tokens
         if request.n != None:
-            config.num_return_sequences = request.n
+            config.update({"num_return_sequences": request.n})
         request_stop_words_list = request.stop if request.stop != None else []
         if isinstance(request_stop_words_list, str):
             request_stop_words_list = [request_stop_words_list]
