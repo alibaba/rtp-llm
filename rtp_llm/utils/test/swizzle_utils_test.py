@@ -1,10 +1,8 @@
-"""Unit tests for swizzle alignment judgement (can_swizzle_kn).
+"""Unit tests for linear-weight swizzle policy.
 
-can_swizzle_kn is the single source of truth shared by the data side
-(device_impl skips swizzle for unaligned BA) and the dispatch side
-(qwen3_next in_proj_ba falls back to NoSwizzle). Its correctness is what
-prevents the Qwen3.5 MI308X TP=4 crash (BA out-dim 24, 24 % 16 != 0) while
-keeping the swizzle speedup on aligned shapes.
+The data side and Qwen3Next dispatch must agree on both shape support and the
+standalone quantized BA exception. Non-quantized fused projections retain the
+swizzle path when their shapes are aligned.
 
 Pure logic + shape math — no CUDA/ROCm needed.
 """
@@ -13,14 +11,28 @@ from unittest import TestCase, main
 
 import torch
 
-from rtp_llm.utils.swizzle_utils import can_swizzle_kn, swizzle_tensor
+from rtp_llm.utils.swizzle_utils import (
+    can_swizzle_kn,
+    should_swizzle_linear_attn_ba,
+    swizzle_tensor,
+)
 
 
 class CanSwizzleKnTest(TestCase):
+    def test_standalone_linear_attention_ba_uses_no_swizzle(self):
+        aligned_ba = torch.empty(5120, 48, dtype=torch.bfloat16)
+
+        self.assertFalse(
+            should_swizzle_linear_attn_ba(aligned_ba, allow_swizzle=False)
+        )
+        self.assertTrue(
+            should_swizzle_linear_attn_ba(aligned_ba, allow_swizzle=True)
+        )
+
     def test_ba_alignment_table_bf16(self):
         # BA local weight is (hidden=5120, out=(b+a)=96/TP). Only the out-dim
         # (n) alignment changes across TP; hidden (k=5120) is always %32.
-        #   TP=1 -> 96, TP=2 -> 48 : aligned  -> swizzle
+        #   TP=1 -> 96, TP=2 -> 48 : geometrically swizzle-compatible
         #   TP=4 -> 24, TP=8 -> 12 : unaligned -> fall back
         for tp, out in {1: 96, 2: 48, 4: 24, 8: 12}.items():
             w = torch.empty(5120, out, dtype=torch.bfloat16)

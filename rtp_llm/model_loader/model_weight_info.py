@@ -76,6 +76,29 @@ class ModelWeightInfo:
 
         return None
 
+    @staticmethod
+    def _iter_atomic_weights(weight: WeightModule):
+        if isinstance(weight, AtomicWeight):
+            yield weight
+        elif isinstance(weight, CompositeWeight):
+            for sub_weight in weight.sub_weights.values():
+                yield from ModelWeightInfo._iter_atomic_weights(sub_weight)
+
+    @staticmethod
+    def _configure_linear_attn_ba_swizzle(layer_weights) -> None:
+        weights = layer_weights if isinstance(layer_weights, list) else [layer_weights]
+        atomic_weights = [
+            atomic
+            for weight in weights
+            for atomic in ModelWeightInfo._iter_atomic_weights(weight)
+        ]
+        standalone_ba = any(
+            weight.name == W.linear_attn_qkvz_s for weight in atomic_weights
+        )
+        for weight in atomic_weights:
+            if weight.name == W.linear_attn_ba_w:
+                weight.allow_swizzle = not standalone_ba
+
     def to_quant_weight_info(self, quant_config: QuantizationConfig):
         if quant_config is None:
             raise ValueError("quant_config is None ")
@@ -95,6 +118,9 @@ class ModelWeightInfo:
                     layer_weights.append(layer_weight)
                 else:
                     layer_weights.append(weight.create(weight, quant_config))
+
+        for layer_weight in layer_weights or []:
+            self._configure_linear_attn_ba_swizzle(layer_weight)
 
         return ModelWeightInfo(weights, layer_weights)
 

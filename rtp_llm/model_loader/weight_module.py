@@ -325,6 +325,7 @@ class AtomicWeight(WeightModule):
         self.weights = weights
         self.process_fun = process_fun
         self.data_type = data_type
+        self.allow_swizzle = True
         super().__init__(name=name, **kwargs)
 
     def create_from(self, *args: Any, **kwargs: Any) -> "AtomicWeight":
@@ -649,7 +650,9 @@ class AtomicWeight(WeightModule):
         raw_tensor = tensor.get(self.name) if isinstance(tensor, dict) else tensor
         return {
             self.name: load_config.exported_device.maybe_rewrite_weight_by_key(
-                self.name, raw_tensor
+                self.name,
+                raw_tensor,
+                allow_swizzle=self.allow_swizzle,
             )
         }
 

@@ -58,3 +58,14 @@ def can_swizzle_kn(weight: torch.Tensor, dtype: torch.dtype = None) -> bool:
     k_div = 32 if MiK == 16 else 64
     k, n = weight.shape
     return (n % 16 == 0) and (k % k_div == 0)
+
+
+def should_swizzle_linear_attn_ba(
+    weight: torch.Tensor, allow_swizzle: bool
+) -> bool:
+    """Use swizzle only when BA is part of a fused projection.
+
+    Standalone Qwen3Next BA must use the regular hipBLASLt path because the
+    preshuffled path is numerically lane-dependent for this small projection.
+    """
+    return allow_swizzle and can_swizzle_kn(weight)
