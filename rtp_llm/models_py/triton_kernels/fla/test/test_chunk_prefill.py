@@ -210,7 +210,65 @@ def test_chunk_varlen(
     assert_close("ht", ref_ht, tri_ht, 0.005)
 
 
+def test_identical_short_varlen_lanes_are_bitwise_equal():
+    torch.manual_seed(42)
+    os.environ["TRITON_F32_DEFAULT"] = "ieee"
+
+    num_sequences = 31
+    sequence_length = 15
+    num_heads = 24
+    head_dim = 128
+
+    q = torch.randn(1, sequence_length, num_heads, head_dim, dtype=torch.bfloat16)
+    k = torch.randn(1, sequence_length, num_heads, head_dim, dtype=torch.bfloat16)
+    v = torch.randn(1, sequence_length, num_heads, head_dim, dtype=torch.bfloat16)
+    g = F.logsigmoid(
+        torch.randn(1, sequence_length, num_heads, dtype=torch.bfloat16)
+    )
+    beta = torch.sigmoid(
+        torch.randn(1, sequence_length, num_heads, dtype=torch.bfloat16)
+    )
+    h0 = torch.randn(1, num_heads, head_dim, head_dim, dtype=torch.bfloat16)
+
+    q, k, v, g, beta = [
+        tensor.repeat(1, num_sequences, *([1] * (tensor.ndim - 2))).to(device)
+        for tensor in (q, k, v, g, beta)
+    ]
+    h0 = h0.repeat(num_sequences, 1, 1, 1).to(device)
+    cu_seqlens = torch.arange(
+        0,
+        (num_sequences + 1) * sequence_length,
+        sequence_length,
+        dtype=torch.int32,
+        device=device,
+    )
+
+    output, _, final_state = chunk_gated_delta_rule(
+        q=q,
+        k=k,
+        v=v,
+        g=g,
+        beta=beta,
+        initial_state=h0,
+        output_final_state=True,
+        cu_seqlens=cu_seqlens,
+        use_qk_l2norm_in_kernel=True,
+    )
+
+    output = output.view(num_sequences, sequence_length, num_heads, head_dim)
+    expected_output = output[0:1].expand_as(output)
+    assert torch.equal(
+        output, expected_output
+    ), "identical varlen lanes produced different outputs"
+
+    expected_state = final_state[0:1].expand_as(final_state)
+    assert torch.equal(
+        final_state, expected_state
+    ), "identical varlen lanes produced different final states"
+
+
 if __name__ == "__main__":
+    test_identical_short_varlen_lanes_are_bitwise_equal()
     test_params = [
         # (H, D, mask_p, cu_seqlens, dtype, state_dtype)
         (4, 64, 0, [0, 15], torch.bfloat16),

@@ -1,9 +1,53 @@
 import unittest
+from types import SimpleNamespace
+from unittest import mock
 
 import torch
 
 
 class TestQwen3NextGraphProbe(unittest.TestCase):
+    def test_trace_context_is_only_exposed_to_selected_layer(self):
+        from rtp_llm.models_py.model_desc import qwen3_next
+
+        metadata = SimpleNamespace(trace_ctx=None)
+        trace_ctx = {"trace_ids": ["target"]}
+
+        with mock.patch.object(qwen3_next, "_Q3N_TRACE_ENABLED", True), mock.patch.object(
+            qwen3_next, "_Q3N_TRACE_LAYERS", {1}
+        ):
+            selected = qwen3_next._set_layer_trace_context(
+                metadata,
+                trace_ctx,
+                1,
+                qwen3_next.HybridAttentionType.LINEAR,
+            )
+            self.assertTrue(selected)
+            self.assertIs(metadata.trace_ctx, trace_ctx)
+
+            selected = qwen3_next._set_layer_trace_context(
+                metadata,
+                trace_ctx,
+                2,
+                qwen3_next.HybridAttentionType.LINEAR,
+            )
+            self.assertFalse(selected)
+            self.assertIsNone(metadata.trace_ctx)
+
+    def test_prefill_sequence_slice_uses_lane_cumulative_lengths(self):
+        from rtp_llm.models_py.model_desc import qwen3_next
+
+        attention_inputs = SimpleNamespace(
+            cu_seqlens_host=torch.tensor([0, 2, 5], dtype=torch.int32),
+            cu_seqlens=None,
+        )
+        packed = torch.arange(20).view(5, 4)
+
+        selected = qwen3_next._prefill_sequence_slice(
+            attention_inputs, packed, lane=1
+        )
+
+        torch.testing.assert_close(selected, packed[2:5])
+
     def test_stats_mask_nonfinite_values(self):
         from rtp_llm.models_py.model_desc.qwen3_next import _graph_probe_stats
 

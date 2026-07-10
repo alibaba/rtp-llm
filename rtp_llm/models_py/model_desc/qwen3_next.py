@@ -427,6 +427,17 @@ def _trace_layer_enabled(layer_idx: int, layer_type: HybridAttentionType) -> boo
     return layer_type == HybridAttentionType.LINEAR
 
 
+def _set_layer_trace_context(
+    attn_meta: Any,
+    trace_ctx: Optional[dict[str, Any]],
+    layer_idx: int,
+    layer_type: HybridAttentionType,
+) -> bool:
+    enabled = trace_ctx is not None and _trace_layer_enabled(layer_idx, layer_type)
+    attn_meta.trace_ctx = trace_ctx if enabled else None
+    return enabled
+
+
 def _trace_tensor_lanes(
     attention_inputs: PyAttentionInputs, hidden_states: torch.Tensor, batch_size: int
 ) -> dict[int, int]:
@@ -579,6 +590,28 @@ def _lane_int(tensor: torch.Tensor, lane: int) -> Optional[int]:
     return int(selected.cpu().item())
 
 
+def _prefill_sequence_slice(
+    attention_inputs: PyAttentionInputs, tensor: Any, lane: int
+) -> Optional[torch.Tensor]:
+    if tensor is None or not torch.is_tensor(tensor) or tensor.dim() == 0:
+        return None
+    cu_seqlens = getattr(attention_inputs, "cu_seqlens_host", None)
+    if cu_seqlens is None or not torch.is_tensor(cu_seqlens):
+        cu_seqlens = getattr(attention_inputs, "cu_seqlens", None)
+    if (
+        cu_seqlens is None
+        or not torch.is_tensor(cu_seqlens)
+        or lane < 0
+        or lane + 1 >= cu_seqlens.numel()
+    ):
+        return None
+    start = _lane_int(cu_seqlens, lane)
+    end = _lane_int(cu_seqlens, lane + 1)
+    if start is None or end is None or start < 0 or end < start or end > tensor.shape[0]:
+        return None
+    return tensor.narrow(0, start, end - start)
+
+
 def _block_id_for_lane(
     attention_inputs: PyAttentionInputs, lane: int, seq_size_per_block: int
 ) -> tuple[Optional[int], Optional[int], Optional[int]]:
@@ -695,6 +728,21 @@ def _trace_event(
                 name: _tensor_summary(value, tensor_lane)
                 for name, value in tensors.items()
             }
+        lane_selected_tensors = {}
+        if attention_inputs is not None and bool(
+            getattr(attention_inputs, "is_prefill", False)
+        ):
+            for name, value in (tensors or {}).items():
+                selected = _prefill_sequence_slice(attention_inputs, value, lane)
+                if selected is not None:
+                    lane_selected_tensors.setdefault(f"{name}_sequence", selected)
+        if lane_selected_tensors:
+            row.setdefault("tensors", {}).update(
+                {
+                    name: _tensor_summary(value)
+                    for name, value in lane_selected_tensors.items()
+                }
+            )
         if extra:
             row["extra"] = extra
         rows.append(row)
@@ -2455,7 +2503,10 @@ class Qwen3NextModel(GptModelBase):
             layer_type = decoder_layer.layer_type
             attn_meta.trace_layer_idx = i
             attn_meta.trace_group_id = group_id
-            if _trace_layer_enabled(i, layer_type):
+            layer_trace_enabled = trace_ctx is not None and _set_layer_trace_context(
+                attn_meta, trace_ctx, i, layer_type
+            )
+            if layer_trace_enabled:
                 _trace_event(
                     trace_ctx,
                     "layer_start",
@@ -2491,7 +2542,7 @@ class Qwen3NextModel(GptModelBase):
                         getattr(attention_inputs, "is_cuda_graph", False)
                     ),
                 )
-            if _trace_layer_enabled(i, layer_type):
+            if layer_trace_enabled:
                 _trace_event(
                     trace_ctx,
                     "layer_end",
@@ -2501,6 +2552,8 @@ class Qwen3NextModel(GptModelBase):
                     attention_inputs=attention_inputs,
                     tensors={"hidden_states": hidden_states, "residual": residual},
                 )
+
+        attn_meta.trace_ctx = trace_ctx
 
         hidden_states, residual = self.norm(hidden_states, residual)
         _trace_event(
