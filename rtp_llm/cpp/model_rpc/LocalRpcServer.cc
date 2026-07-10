@@ -1,5 +1,8 @@
-#include <memory>
 #include <chrono>
+#include <cstdlib>
+#include <cstring>
+#include <memory>
+#include <unordered_set>
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
@@ -84,10 +87,9 @@ grpc::Status LocalRpcServer::serializeErrorMsg(const string& request_key, ErrorI
     return serializeErrorMsg(request_key, RequestInfo(), error_info);
 }
 
-grpc::Status LocalRpcServer::serializeErrorMsg(const string&      request_key,
-                                               const RequestInfo& request_info,
-                                               ErrorInfo          error_info) {
-    const auto& error_msg = error_info.ToString();
+grpc::Status
+LocalRpcServer::serializeErrorMsg(const string& request_key, const RequestInfo& request_info, ErrorInfo error_info) {
+    const auto& error_msg       = error_info.ToString();
     const auto  request_log_tag = formatRequestLogTag(request_key, request_info);
     RTP_LLM_LOG_WARNING("%s, error code [%s], error message [%s]",
                         request_log_tag.c_str(),
@@ -158,7 +160,7 @@ grpc::Status LocalRpcServer::GenerateStreamCall(grpc::ServerContext*            
     RTP_LLM_LOG_DEBUG("receive request %ld", request_id);
     auto generate_context =
         GenerateContext(request_id, request->generate_config().timeout_ms(), context, metrics_reporter_, meta_);
-    auto input = QueryConverter::transQuery(request);
+    auto input                    = QueryConverter::transQuery(request);
     generate_context.request_info = input->request_info;
     if (applyTimelineGate(generate_context.request_key,
                           input->generate_config->gen_timeline,
@@ -361,11 +363,14 @@ size_t LocalRpcServer::onflightRequestNum() {
 EngineScheduleInfo LocalRpcServer::getEngineScheduleInfo(int64_t latest_finished_version) {
     EngineScheduleInfo                        info = meta_->getEngineScheduleInfo(latest_finished_version);
     std::vector<EngineScheduleInfo::TaskInfo> running_task_info_list = engine_->getScheduler().runningTaskList();
+    std::unordered_set<int64_t>               running_task_ids;
+    running_task_ids.reserve(running_task_info_list.size());
+    for (const auto& running_task : running_task_info_list) {
+        running_task_ids.insert(running_task.request_id);
+    }
     for (auto& task_info : info.running_task_info_list) {
-        for (auto& running_task : running_task_info_list) {
-            if (task_info.request_id == running_task.request_id) {
-                task_info.is_waiting = false;
-            }
+        if (running_task_ids.find(task_info.request_id) != running_task_ids.end()) {
+            task_info.is_waiting = false;
         }
     }
     auto last_schedule_time = engine_->getLastScheduleTime();
