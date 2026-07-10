@@ -1,6 +1,8 @@
 #pragma once
 
+#include <cstddef>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "torch/all.h"
@@ -61,6 +63,8 @@ public:
                                                                     int                    max_pattern_size,
                                                                     int                    min_repeats);
     static DecodeBlockTraceInfo debugComputeBlockTraceForTest(int seq_len, int seq_size_per_block);
+    static int debugComputeReuseTailLogicalBlockForTest(int reuse_len, int seq_size_per_block);
+    static std::pair<int, int> debugComputeBlockWindowForTest(int logical_block, std::size_t block_count);
 };
 
 }  // namespace rtp_llm

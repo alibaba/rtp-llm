@@ -2,8 +2,10 @@
 
 #include <algorithm>
 #include <cstdlib>
+#include <cstdint>
 #include <deque>
 #include <fstream>
+#include <limits>
 #include <mutex>
 #include <unordered_map>
 #include <sstream>
@@ -183,6 +185,25 @@ DecodeBlockTraceInfo computeBlockTrace(int seq_len, int seq_size_per_block) {
     return info;
 }
 
+int computeReuseTailLogicalBlock(int reuse_len, int seq_size_per_block) {
+    if (reuse_len <= 0 || seq_size_per_block <= 0) {
+        return -1;
+    }
+    return (reuse_len - 1) / seq_size_per_block;
+}
+
+std::pair<int, int> computeBlockWindow(int logical_block, std::size_t block_count) {
+    if (logical_block < 0) {
+        return {0, 0};
+    }
+    const int64_t count =
+        static_cast<int64_t>(std::min<std::size_t>(block_count, std::numeric_limits<int>::max()));
+    const int64_t center = logical_block;
+    const int64_t begin  = std::min(count, std::max<int64_t>(0, center - 2));
+    const int64_t end    = std::min(count, center + 3);
+    return {static_cast<int>(begin), static_cast<int>(std::max(begin, end))};
+}
+
 struct WatchStep {
     int              total_decode_batch_size  = 0;
     int              total_context_batch_size = 0;
@@ -316,6 +337,9 @@ void appendBlockGroups(std::ostream& os,
                        int                      max_blocks_per_group,
                        int                      read_logical_block  = -1,
                        int                      write_logical_block = -1) {
+    const int seq_size_per_block = stream->seqSizePerBlock();
+    const int reuse_tail_logical_block =
+        computeReuseTailLogicalBlock(stream->reuseLength(), seq_size_per_block);
     os << "[";
     if (stream->curBlocksNum() > 0) {
         const auto& kv_cache   = stream->kvCache();
@@ -345,6 +369,16 @@ void appendBlockGroups(std::ostream& os,
                 const int center_end   = std::max(read_logical_block, write_logical_block) + 5;
                 os << ",\"current_window\":";
                 appendBlockSlice(os, blocks, center_begin, center_end);
+            }
+            os << ",\"reuse_tail_logical_block\":" << reuse_tail_logical_block;
+            if (reuse_tail_logical_block >= 0) {
+                const int reuse_tail_block = reuse_tail_logical_block < static_cast<int>(blocks.size())
+                                                 ? blocks[reuse_tail_logical_block]
+                                                 : -999999;
+                os << ",\"reuse_tail_block\":" << reuse_tail_block;
+                os << ",\"reuse_tail_window\":";
+                const auto window = computeBlockWindow(reuse_tail_logical_block, blocks.size());
+                appendBlockSlice(os, blocks, window.first, window.second);
             }
             os << "}";
         }
@@ -498,6 +532,14 @@ DecodeRepeatedSuffixInfo DecodeTokenTraceLogger::debugFindRepeatedSuffixForTest(
 
 DecodeBlockTraceInfo DecodeTokenTraceLogger::debugComputeBlockTraceForTest(int seq_len, int seq_size_per_block) {
     return computeBlockTrace(seq_len, seq_size_per_block);
+}
+
+int DecodeTokenTraceLogger::debugComputeReuseTailLogicalBlockForTest(int reuse_len, int seq_size_per_block) {
+    return computeReuseTailLogicalBlock(reuse_len, seq_size_per_block);
+}
+
+std::pair<int, int> DecodeTokenTraceLogger::debugComputeBlockWindowForTest(int logical_block, std::size_t block_count) {
+    return computeBlockWindow(logical_block, block_count);
 }
 
 void DecodeTokenTraceLogger::logDispatchBatch(const StreamGroups&   stream_groups,

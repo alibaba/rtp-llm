@@ -1,5 +1,7 @@
 #include "rtp_llm/cpp/normal_engine/DecodeTokenTraceLogger.h"
 
+#include <limits>
+
 #include "gtest/gtest.h"
 
 namespace rtp_llm {
@@ -73,6 +75,22 @@ TEST(DecodeTokenTraceLoggerTest, blockTraceSeparatesModelStepFromNextStep) {
     EXPECT_EQ(167, after_boundary.model_write_logical_block);
     EXPECT_EQ(167, after_boundary.next_read_logical_block);
     EXPECT_EQ(167, after_boundary.next_write_logical_block);
+}
+
+TEST(DecodeTokenTraceLoggerTest, reuseTailUsesContainingLogicalBlock) {
+    EXPECT_EQ(-1, DecodeTokenTraceLogger::debugComputeReuseTailLogicalBlockForTest(0, 64));
+    EXPECT_EQ(-1, DecodeTokenTraceLogger::debugComputeReuseTailLogicalBlockForTest(64, 0));
+    EXPECT_EQ(0, DecodeTokenTraceLogger::debugComputeReuseTailLogicalBlockForTest(1, 64));
+    EXPECT_EQ(0, DecodeTokenTraceLogger::debugComputeReuseTailLogicalBlockForTest(64, 64));
+    EXPECT_EQ(1, DecodeTokenTraceLogger::debugComputeReuseTailLogicalBlockForTest(65, 64));
+    EXPECT_EQ(106, DecodeTokenTraceLogger::debugComputeReuseTailLogicalBlockForTest(6848, 64));
+}
+
+TEST(DecodeTokenTraceLoggerTest, blockWindowClampsWithoutIntegerOverflow) {
+    EXPECT_EQ((std::pair<int, int>{104, 109}), DecodeTokenTraceLogger::debugComputeBlockWindowForTest(106, 200));
+    EXPECT_EQ((std::pair<int, int>{128, 128}),
+              DecodeTokenTraceLogger::debugComputeBlockWindowForTest(std::numeric_limits<int>::max(), 128));
+    EXPECT_EQ((std::pair<int, int>{0, 0}), DecodeTokenTraceLogger::debugComputeBlockWindowForTest(-1, 128));
 }
 
 }  // namespace rtp_llm
