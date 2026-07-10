@@ -8,6 +8,7 @@ two original projections. This must be:
 """
 
 import unittest
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import torch
@@ -22,6 +23,198 @@ class TestQwen3NextQkvzBaFusion(unittest.TestCase):
         self.device = torch.device("cuda:0")
         torch.manual_seed(0)
         torch.cuda.manual_seed(0)
+
+    def test_weight_postprocess_forwards_explicit_swizzle_policy(self) -> None:
+        from rtp_llm.model_loader.weight_module import AtomicWeight
+
+        exported_device = MagicMock()
+        exported_device.maybe_rewrite_weight_by_key.side_effect = (
+            lambda _name, tensor, *, allow_swizzle: tensor
+        )
+        load_config = SimpleNamespace(
+            exported_device=exported_device, quant_algo=None
+        )
+        weight = torch.ones(2, 2, device=self.device)
+        weight_info = AtomicWeight("weight", [])
+        weight_info.allow_swizzle = False
+
+        processed = weight_info._postprocess(weight, str(self.device), load_config)
+
+        self.assertIs(processed["weight"], weight)
+        exported_device.maybe_rewrite_weight_by_key.assert_called_once_with(
+            "weight", weight, allow_swizzle=False
+        )
+
+    def test_rocm_standalone_ba_skip_is_byte_identical(self) -> None:
+        from rtp_llm.device.device_impl import RocmImpl
+        from rtp_llm.utils.model_weight import W
+
+        fake_impl = SimpleNamespace(
+            _is_gfx950=lambda: False,
+            py_env_configs=SimpleNamespace(
+                py_hw_kernel_config=SimpleNamespace(use_swizzleA=True)
+            ),
+        )
+        ba = torch.arange(5120 * 48, dtype=torch.float32).reshape(5120, 48)
+
+        rewritten = RocmImpl.maybe_rewrite_weight_by_key(
+            fake_impl,
+            W.linear_attn_ba_w,
+            ba,
+            allow_swizzle=False,
+        )
+
+        self.assertIs(rewritten, ba)
+        self.assertTrue(torch.equal(rewritten, ba))
+
+    def test_rocm_fused_ba_and_other_linear_keep_swizzle(self) -> None:
+        from rtp_llm.device.device_impl import RocmImpl
+        from rtp_llm.utils.model_weight import W
+        from rtp_llm.utils.swizzle_utils import swizzle_tensor
+
+        fake_impl = SimpleNamespace(
+            _is_gfx950=lambda: False,
+            py_env_configs=SimpleNamespace(
+                py_hw_kernel_config=SimpleNamespace(use_swizzleA=True)
+            ),
+        )
+        weight = torch.arange(128 * 32, dtype=torch.bfloat16).reshape(128, 32)
+        expected = swizzle_tensor(weight.t(), False).t()
+
+        fused_ba = RocmImpl.maybe_rewrite_weight_by_key(
+            fake_impl,
+            W.linear_attn_ba_w,
+            weight,
+            allow_swizzle=True,
+        )
+        other_linear = RocmImpl.maybe_rewrite_weight_by_key(
+            fake_impl,
+            W.linear_attn_out_w,
+            weight,
+            allow_swizzle=True,
+        )
+
+        self.assertTrue(torch.equal(fused_ba, expected))
+        self.assertTrue(torch.equal(other_linear, expected))
+
+    @staticmethod
+    def _find_atomic_weight(weights, name):
+        from rtp_llm.model_loader.weight_module import AtomicWeight, CompositeWeight
+
+        for weight in weights:
+            if isinstance(weight, AtomicWeight) and weight.name == name:
+                return weight
+            if isinstance(weight, CompositeWeight):
+                found = TestQwen3NextQkvzBaFusion._find_atomic_weight(
+                    weight.sub_weights.values(), name
+                )
+                if found is not None:
+                    return found
+        return None
+
+    @staticmethod
+    def _linear_attn_weight_info():
+        from rtp_llm.model_loader.linear_attn_weight import (
+            LinearAttnAtomicWeight,
+            LinearAttnConfig,
+        )
+        from rtp_llm.model_loader.model_weight_info import ModelWeightInfo
+        from rtp_llm.ops import LinearAttentionConfig
+        from rtp_llm.utils.model_weight import CkptWeightInfo, W, identity
+
+        config = LinearAttentionConfig()
+        config.linear_num_key_heads = 4
+        config.linear_num_value_heads = 8
+        config.linear_key_head_dim = 32
+        config.linear_value_head_dim = 32
+        linear_config = LinearAttnConfig(config)
+        prefix = "model.layers.{i}.linear_attn"
+        qkvz = LinearAttnAtomicWeight(
+            W.linear_attn_qkvz_w,
+            [
+                CkptWeightInfo(f"{prefix}.in_proj_qkv.weight"),
+                CkptWeightInfo(f"{prefix}.in_proj_z.weight"),
+            ],
+            identity,
+            linear_config,
+        )
+        ba = LinearAttnAtomicWeight(
+            W.linear_attn_ba_w,
+            [
+                CkptWeightInfo(f"{prefix}.in_proj_b.weight"),
+                CkptWeightInfo(f"{prefix}.in_proj_a.weight"),
+            ],
+            identity,
+            linear_config,
+        )
+        return ModelWeightInfo(weights=[], layer_weights=[[qkvz, ba]])
+
+    def test_fp8_qkvz_marks_only_standalone_ba_no_swizzle(self) -> None:
+        from rtp_llm.config.quant_config import Fp8PerChannelCompressedQuantConfig
+        from rtp_llm.utils.model_weight import W
+
+        converted = self._linear_attn_weight_info().to_quant_weight_info(
+            Fp8PerChannelCompressedQuantConfig(is_quanted=True)
+        )
+        self.assertIsNotNone(
+            self._find_atomic_weight(
+                converted.layer_weights[0], W.linear_attn_qkvz_s
+            )
+        )
+        ba = self._find_atomic_weight(
+            converted.layer_weights[0], W.linear_attn_ba_w
+        )
+        self.assertIsNotNone(ba)
+        self.assertFalse(ba.allow_swizzle)
+
+    def test_modelopt_mixed_bf16_qkvz_keeps_fused_ba_swizzle(self) -> None:
+        from rtp_llm.config.quant_config import ModelOptFp4Config
+        from rtp_llm.utils.model_weight import W
+
+        converted = self._linear_attn_weight_info().to_quant_weight_info(
+            ModelOptFp4Config(
+                bits=4,
+                group_size=16,
+                is_quanted=True,
+                mixed_attention=True,
+            )
+        )
+        self.assertIsNone(
+            self._find_atomic_weight(
+                converted.layer_weights[0], W.linear_attn_qkvz_s
+            )
+        )
+        ba = self._find_atomic_weight(
+            converted.layer_weights[0], W.linear_attn_ba_w
+        )
+        self.assertIsNotNone(ba)
+        self.assertTrue(ba.allow_swizzle)
+
+    def test_standalone_ba_update_forwards_no_swizzle_policy(self) -> None:
+        from rtp_llm.config.quant_config import Fp8PerChannelCompressedQuantConfig
+        from rtp_llm.utils.model_weight import W
+
+        converted = self._linear_attn_weight_info().to_quant_weight_info(
+            Fp8PerChannelCompressedQuantConfig(is_quanted=True)
+        )
+        ba = self._find_atomic_weight(
+            converted.layer_weights[0], W.linear_attn_ba_w
+        )
+        exported_device = MagicMock()
+        exported_device.maybe_rewrite_weight_by_key.side_effect = (
+            lambda _name, tensor, *, allow_swizzle: tensor
+        )
+        load_config = SimpleNamespace(
+            tp_size=1, exported_device=exported_device, quant_algo=None
+        )
+        weight = torch.ones(128, 16, dtype=torch.bfloat16, device=self.device)
+
+        updated = ba.update(weight, str(self.device), load_config)
+
+        self.assertIs(updated[W.linear_attn_ba_w], weight)
+        exported_device.maybe_rewrite_weight_by_key.assert_called_once_with(
+            W.linear_attn_ba_w, weight, allow_swizzle=False
+        )
 
     # ---- (1) low-level math equivalence ----
 
@@ -235,14 +428,13 @@ class TestQwen3NextQkvzBaFusion(unittest.TestCase):
             "unaligned BA must pass hw_kernel_config=None (NoSwizzle dispatch)",
         )
 
-    def test_in_proj_ba_keeps_swizzle_when_aligned(self) -> None:
-        """BA out-dim 16 (= 2*8, 16-aligned, mirrors TP=1/2): the swizzle
-        speedup is preserved — in_proj_ba keeps the real hw_kernel_config."""
-        hw, ba_cfg = self._ba_hw_kernel_config_in_fallback(num_v_heads=8)
-        self.assertIs(
+    def test_in_proj_ba_disables_swizzle_in_quantized_fallback(self) -> None:
+        """The standalone BF16 BA projection uses NoSwizzle when qkvz is
+        quantized, including aligned TP=1/2 shapes."""
+        _hw, ba_cfg = self._ba_hw_kernel_config_in_fallback(num_v_heads=8)
+        self.assertIsNone(
             ba_cfg,
-            hw,
-            "aligned BA must keep the real hw_kernel_config (WithSwizzle dispatch)",
+            "quantized fallback BA must use NoSwizzle even when aligned",
         )
 
     def test_input_project_helper_shapes(self) -> None:
