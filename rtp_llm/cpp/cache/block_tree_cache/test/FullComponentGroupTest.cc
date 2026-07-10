@@ -95,8 +95,8 @@ TEST_F(FullComponentGroupTest, DriveEvictionDevice) {
     EXPECT_EQ(result->node, a);
     EXPECT_EQ(result->source_tier, Tier::DEVICE);
     EXPECT_EQ(result->target_tier, Tier::HOST);  // REUSABLE → demote to host
-    EXPECT_EQ(result->blocks_to_release.size(), 1u);
-    EXPECT_EQ(result->blocks_to_release[0], 42);
+    EXPECT_EQ(result->source_blocks.size(), 1u);
+    EXPECT_EQ(result->source_blocks[0], 42);
 
     delete a;
 }

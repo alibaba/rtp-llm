@@ -34,7 +34,7 @@ TEST(BlockTreeTest, InsertSinglePath) {
     CacheKeysType keys  = {100, 200, 300};
     auto          slots = make2DSlots(1, 3, 42);
 
-    TreeNode* leaf = tree.insertNode(nullptr, keys, slots);
+    TreeNode* leaf = tree.insertNode(nullptr, keys, slots).leaf;
     ASSERT_NE(leaf, nullptr);
     EXPECT_EQ(leaf->cache_key, 300);
     EXPECT_EQ(leaf->group_slots[0].device_blocks[0], 44);  // start_block + 2
@@ -126,7 +126,7 @@ TEST(BlockTreeTest, RemoveEmptyAncestors) {
     // Insert root → 100 → 200 with empty group_slots (no data)
     tree.insertNode(nullptr, {100, 200}, makeEmpty2DSlots(2));
     // Insert root → 100 → 200 → 300 with data (existing 100, 200 not overwritten)
-    TreeNode* leaf = tree.insertNode(nullptr, {100, 200, 300}, make2DSlots(1, 3, 42));
+    TreeNode* leaf = tree.insertNode(nullptr, {100, 200, 300}, make2DSlots(1, 3, 42)).leaf;
     EXPECT_EQ(tree.nodeCount(), 3u);
 
     // Remove the leaf
@@ -153,7 +153,7 @@ TEST(BlockTreeTest, RemoveEmptyAncestorsStopsAtData) {
     // Insert 100 with data
     tree.insertNode(nullptr, {100}, make2DSlots(1, 1, 10));
     // Insert 100 → 200 with data (100 already exists, only 200 is new)
-    TreeNode* leaf = tree.insertNode(nullptr, {100, 200}, make2DSlots(1, 2, 20));
+    TreeNode* leaf = tree.insertNode(nullptr, {100, 200}, make2DSlots(1, 2, 20)).leaf;
 
     // Remove leaf 200
     tree.removeNode(leaf);
@@ -187,7 +187,7 @@ TEST(BlockTreeTest, RepeatedInsertDoesNotDuplicate) {
 
 TEST(BlockTreeTest, InsertEmptyKeys) {
     BlockTree tree(1);
-    TreeNode* node = tree.insertNode(nullptr, {}, {});
+    TreeNode* node = tree.insertNode(nullptr, {}, {}).leaf;
     EXPECT_EQ(node, tree.root());
     EXPECT_EQ(tree.nodeCount(), 0u);
 }
@@ -202,7 +202,7 @@ TEST(BlockTreeTest, InsertWithParent) {
     TreeNode* parent = find.matched_node;
     ASSERT_NE(parent, nullptr);
 
-    TreeNode* leaf = tree.insertNode(parent, {300}, make2DSlots(1, 1, 50));
+    TreeNode* leaf = tree.insertNode(parent, {300}, make2DSlots(1, 1, 50)).leaf;
     ASSERT_NE(leaf, nullptr);
     EXPECT_EQ(leaf->cache_key, 300);
     EXPECT_EQ(leaf->group_slots[0].device_blocks[0], 50);
@@ -223,7 +223,7 @@ TEST(BlockTreeTest, MultipleGroups) {
     slots[0][1].device_blocks = {20, 21};
     slots[0][2].device_blocks = {30};
 
-    TreeNode* leaf = tree.insertNode(nullptr, {100}, slots);
+    TreeNode* leaf = tree.insertNode(nullptr, {100}, slots).leaf;
     ASSERT_NE(leaf, nullptr);
     EXPECT_EQ(leaf->group_slots.size(), 3u);
     EXPECT_EQ(leaf->group_slots[0].device_blocks[0], 10);

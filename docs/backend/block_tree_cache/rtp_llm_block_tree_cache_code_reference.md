@@ -255,28 +255,34 @@ private:
 };
 ```
 
-### isEvictable（引用计数检查）
+### isSlotEvictable（引用计数检查）
 
-BlockTreeCache 通过 BlockPool 的引用计数来保护活跃 block 不被驱逐。引用计数 == 1 表示仅 BlockTreeCache 自身引用，可驱逐；> 1 表示还有 request / CopyEngine 在使用，不可驱逐。
+evictability 由 `ComponentGroup::isSlotEvictable(slot, tier)` 判定，`driveEviction` 弹出堆顶后调用它跳过不可淘汰候选。块 refCount == 1 表示仅 BlockTreeCache 持有 cache-hold，可淘汰；> 1 表示还有 request / match 保护 / CopyEngine 在用，不可淘汰。按 tier 只检查对应层的块（DEVICE 遍历多 pool，HOST/DISK 单块）；块为空或无 pool 拥有时视为可淘汰。
 
 ```cpp
-bool BlockTreeCache::isEvictable(TreeNode* node, int group_id) const {
-    const auto& slot = node->group_slots[group_id];
-    // 检查 device_blocks 引用计数
-    for (auto device_block : slot.device_blocks) {
-        if (!isNullBlockIdx(device_block) && device_pool_.refCount(device_block) > 1) {
-            return false;
+bool ComponentGroup::isSlotEvictable(const GroupSlot& slot, Tier tier) const {
+    auto pool_evictable = [](const auto& pool, BlockIdxType block) {
+        if (isNullBlockIdx(block) || !pool) {
+            return true;
         }
+        return pool->isAllocated(block) && pool->refCount(block) == 1;
+    };
+    switch (tier) {
+        case Tier::DEVICE:
+            for (size_t i = 0; i < slot.device_blocks.size(); ++i) {
+                const auto& pool = i < device_pools_.size() ? device_pools_[i] : nullptr;
+                if (!pool_evictable(pool, slot.device_blocks[i])) {
+                    return false;
+                }
+            }
+            return true;
+        case Tier::HOST:
+            return !slot.has_host_value() || pool_evictable(host_pool_, slot.host_block);
+        case Tier::DISK:
+            return !slot.has_disk_value() || pool_evictable(disk_pool_, slot.disk_slot);
+        default:
+            return false;
     }
-    // 检查 host_block 引用计数（Host 层淘汰/拷贝时可能活跃）
-    if (slot.has_host_value() && host_pool_.refCount(slot.host_block) > 1) {
-        return false;
-    }
-    // 检查 disk_slot 引用计数（Disk I/O 时可能活跃）
-    if (slot.has_disk_value() && disk_pool_.refCount(slot.disk_slot) > 1) {
-        return false;
-    }
-    return true;
 }
 ```
 

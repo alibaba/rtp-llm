@@ -31,41 +31,41 @@ protected:
 };
 
 // ---------------------------------------------------------------------------
-// Test: Full eviction cascades to SWA on same node.
+// Test: Full reclaim cascades to SWA on same node.
 //
-//   Before evict(1, DEVICE):              After evict + wait:
+//   Before reclaimBlocks(1, DEVICE):              After reclaim + wait:
 //   root → [100] F:{10} S:{20}            root → [100] F:{10} S:{20}
 //          → [200] F:{10} S:{20} ←leaf
 //   Full heap: {[200]}  SWA heap: {[200]}
 //   Total device heap: 2
 //
-//   Full[200] evicted → cascade clears SWA[200] device.
+//   Full[200] reclaimed → cascade clears SWA[200] device.
 //   Both REUSABLE groups empty → [200] deleted.
 //   [100] survives, Full[100] becomes leaf → enters Full heap.
 // ---------------------------------------------------------------------------
-TEST_F(FullSWAEvictionTest, FullEvictionCascadesToSWA) {
+TEST_F(FullSWAEvictionTest, FullReclaimCascadesToSWA) {
     insertPath({100, 200}, 10, 20);
 
     auto stats_before = cache_->getStats();
     EXPECT_EQ(stats_before.tree_node_count, 2u);
     EXPECT_EQ(stats_before.device_heap_total_size, 2u);  // 1 Full + 1 SWA
 
-    int evicted = cache_->evict(1, Tier::DEVICE);
-    EXPECT_EQ(evicted, 1);
+    int reclaimed = cache_->reclaimBlocks(1, Tier::DEVICE);
+    EXPECT_EQ(reclaimed, 1);
     cache_->waitForPendingTasks();
 
     EXPECT_EQ(cache_->getStats().tree_node_count, 1u);  // [100]
 }
 
 // ---------------------------------------------------------------------------
-// Test: SWA-only cache — sequential eviction drains chain.
+// Test: SWA-only cache — sequential reclaim drains chain.
 //
 //   SWA-only: root → [100] → [200] → [300]
 //   SWA heap: {[300]} (insert-leaf only)
 //
-//   After evict [300]: [200] promoted to heap (all groups now promote parents).
-//   After evict [200]: [100] promoted.
-//   After evict [100]: empty tree.
+//   After reclaim [300]: [200] promoted to heap (all groups now promote parents).
+//   After reclaim [200]: [100] promoted.
+//   After reclaim [100]: empty tree.
 // ---------------------------------------------------------------------------
 TEST_F(FullSWAEvictionTest, SWAOnlySequentialDrain) {
     auto tree                             = std::make_unique<BlockTree>(1);
@@ -82,36 +82,36 @@ TEST_F(FullSWAEvictionTest, SWAOnlySequentialDrain) {
 
     EXPECT_EQ(swa_cache->getStats().device_heap_total_size, 1u);  // [300]
 
-    // Evict [300] → [200] promoted
-    swa_cache->evict(1, Tier::DEVICE);
+    // Reclaim [300] → [200] promoted
+    swa_cache->reclaimBlocks(1, Tier::DEVICE);
     swa_cache->waitForPendingTasks();
     EXPECT_EQ(swa_cache->getStats().tree_node_count, 2u);
 
-    // Evict [200] → [100] promoted
-    swa_cache->evict(1, Tier::DEVICE);
+    // Reclaim [200] → [100] promoted
+    swa_cache->reclaimBlocks(1, Tier::DEVICE);
     swa_cache->waitForPendingTasks();
     EXPECT_EQ(swa_cache->getStats().tree_node_count, 1u);
 
-    // Evict [100] → empty
-    swa_cache->evict(1, Tier::DEVICE);
+    // Reclaim [100] → empty
+    swa_cache->reclaimBlocks(1, Tier::DEVICE);
     swa_cache->waitForPendingTasks();
     EXPECT_EQ(swa_cache->getStats().tree_node_count, 0u);
 }
 
 // ---------------------------------------------------------------------------
-// Test: Full+SWA — sequential Full eviction clears both via cascade.
+// Test: Full+SWA — sequential Full reclaim clears both via cascade.
 //
-//   Step 1: evict Full[200] → cascade SWA[200] → [200] deleted
-//   Step 2: evict Full[100] → cascade SWA[100] → [100] deleted
+//   Step 1: reclaim Full[200] → cascade SWA[200] → [200] deleted
+//   Step 2: reclaim Full[100] → cascade SWA[100] → [100] deleted
 // ---------------------------------------------------------------------------
-TEST_F(FullSWAEvictionTest, SequentialFullEvictionClearsBothGroups) {
+TEST_F(FullSWAEvictionTest, SequentialFullReclaimClearsBothGroups) {
     insertPath({100, 200}, 10, 20);
 
-    cache_->evict(1, Tier::DEVICE);
+    cache_->reclaimBlocks(1, Tier::DEVICE);
     cache_->waitForPendingTasks();
     EXPECT_EQ(cache_->getStats().tree_node_count, 1u);
 
-    cache_->evict(1, Tier::DEVICE);
+    cache_->reclaimBlocks(1, Tier::DEVICE);
     cache_->waitForPendingTasks();
     EXPECT_EQ(cache_->getStats().tree_node_count, 0u);
 }
@@ -123,7 +123,7 @@ TEST_F(FullSWAEvictionTest, SequentialFullEvictionClearsBothGroups) {
 //                → [300] F:{40} S:{50} ← leaf
 //   Full heap: {[200],[300]}  SWA heap: {[200],[300]}
 //
-//   After evicting both leaves, [100] becomes Full leaf → 3rd evict needed.
+//   After reclaiming both leaves, [100] becomes Full leaf → 3rd reclaim needed.
 // ---------------------------------------------------------------------------
 TEST_F(FullSWAEvictionTest, ForkBothBranchesEvictable) {
     insertPath({100, 200}, 10, 20);
@@ -132,15 +132,15 @@ TEST_F(FullSWAEvictionTest, ForkBothBranchesEvictable) {
     EXPECT_EQ(cache_->getStats().tree_node_count, 3u);
     EXPECT_EQ(cache_->getStats().device_heap_total_size, 4u);  // 2 Full + 2 SWA
 
-    cache_->evict(1, Tier::DEVICE);
+    cache_->reclaimBlocks(1, Tier::DEVICE);
     cache_->waitForPendingTasks();
     EXPECT_EQ(cache_->getStats().tree_node_count, 2u);
 
-    cache_->evict(1, Tier::DEVICE);
+    cache_->reclaimBlocks(1, Tier::DEVICE);
     cache_->waitForPendingTasks();
     EXPECT_EQ(cache_->getStats().tree_node_count, 1u);  // [100] survives
 
-    cache_->evict(1, Tier::DEVICE);
+    cache_->reclaimBlocks(1, Tier::DEVICE);
     cache_->waitForPendingTasks();
     EXPECT_EQ(cache_->getStats().tree_node_count, 0u);
 }

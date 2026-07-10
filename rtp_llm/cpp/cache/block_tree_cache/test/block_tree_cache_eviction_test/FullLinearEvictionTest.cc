@@ -31,39 +31,39 @@ protected:
 };
 
 // ---------------------------------------------------------------------------
-// Test: Full eviction cascades to Linear (Full > LINEAR priority).
+// Test: Full reclaim cascades to Linear (Full > LINEAR priority).
 //
-//   Before evict(1, DEVICE):             After evict + wait:
+//   Before reclaimBlocks(1, DEVICE):             After reclaim + wait:
 //   root → [100] F:{10} L:{30}           root → [100] F:{10} L:{30}
 //          → [200] F:{10} L:{30} ←leaf
 //   Full heap: {[200]}  Linear heap: {[200]}
 //   Total: 2
 //
-//   Evict Full[200] → cascade clears Linear[200] device.
+//   Reclaim Full[200] → cascade clears Linear[200] device.
 //   [200] both groups empty → deleted. [100] survives.
 // ---------------------------------------------------------------------------
-TEST_F(FullLinearEvictionTest, FullEvictionCascadesToLinear) {
+TEST_F(FullLinearEvictionTest, FullReclaimCascadesToLinear) {
     insertPath({100, 200}, 10, 30);
 
     auto stats0 = cache_->getStats();
     EXPECT_EQ(stats0.tree_node_count, 2u);
     EXPECT_EQ(stats0.device_heap_total_size, 2u);  // 1 Full + 1 Linear (leaf only)
 
-    cache_->evict(1, Tier::DEVICE);
+    cache_->reclaimBlocks(1, Tier::DEVICE);
     cache_->waitForPendingTasks();
 
     EXPECT_EQ(cache_->getStats().tree_node_count, 1u);  // [100] survives
 }
 
 // ---------------------------------------------------------------------------
-// Test: Linear-only cache — sequential eviction drains chain.
+// Test: Linear-only cache — sequential reclaim drains chain.
 //
 //   Linear-only: root → [100] → [200] → [300]
 //   Linear heap: {[300]} (insert-leaf only)
 //
-//   After evict [300]: [200] promoted (all groups promote parents).
-//   After evict [200]: [100] promoted.
-//   After evict [100]: empty tree.
+//   After reclaim [300]: [200] promoted (all groups promote parents).
+//   After reclaim [200]: [100] promoted.
+//   After reclaim [100]: empty tree.
 // ---------------------------------------------------------------------------
 TEST_F(FullLinearEvictionTest, LinearOnlySequentialDrain) {
     auto tree                             = std::make_unique<BlockTree>(1);
@@ -80,50 +80,50 @@ TEST_F(FullLinearEvictionTest, LinearOnlySequentialDrain) {
 
     EXPECT_EQ(lin_cache->getStats().device_heap_total_size, 1u);  // [300]
 
-    lin_cache->evict(1, Tier::DEVICE);
+    lin_cache->reclaimBlocks(1, Tier::DEVICE);
     lin_cache->waitForPendingTasks();
     EXPECT_EQ(lin_cache->getStats().tree_node_count, 2u);
 
-    lin_cache->evict(1, Tier::DEVICE);
+    lin_cache->reclaimBlocks(1, Tier::DEVICE);
     lin_cache->waitForPendingTasks();
     EXPECT_EQ(lin_cache->getStats().tree_node_count, 1u);
 
-    lin_cache->evict(1, Tier::DEVICE);
+    lin_cache->reclaimBlocks(1, Tier::DEVICE);
     lin_cache->waitForPendingTasks();
     EXPECT_EQ(lin_cache->getStats().tree_node_count, 0u);
 }
 
 // ---------------------------------------------------------------------------
-// Test: Full eviction clears both Full+Linear on single node.
+// Test: Full reclaim clears both Full+Linear on single node.
 //
 //   root → [100] F:{10} L:{30}
 //   Full heap: {[100]}  Linear heap: {[100]}
 //
-//   Evict Full[100] → cascade Linear[100] → both empty → deleted.
+//   Reclaim Full[100] → cascade Linear[100] → both empty → deleted.
 // ---------------------------------------------------------------------------
-TEST_F(FullLinearEvictionTest, FullEvictionClearsBothGroupsSingleNode) {
+TEST_F(FullLinearEvictionTest, FullReclaimClearsBothGroupsSingleNode) {
     insertPath({100}, 10, 30);
 
-    cache_->evict(1, Tier::DEVICE);
+    cache_->reclaimBlocks(1, Tier::DEVICE);
     cache_->waitForPendingTasks();
 
     EXPECT_EQ(cache_->getStats().tree_node_count, 0u);
 }
 
 // ---------------------------------------------------------------------------
-// Test: Sequential Full eviction drains 2-node chain (Full+Linear).
+// Test: Sequential Full reclaim drains 2-node chain (Full+Linear).
 //
-//   Step 1: evict Full[200] → cascade Linear[200] → deleted
-//   Step 2: evict Full[100] → cascade Linear[100] → deleted
+//   Step 1: reclaim Full[200] → cascade Linear[200] → deleted
+//   Step 2: reclaim Full[100] → cascade Linear[100] → deleted
 // ---------------------------------------------------------------------------
-TEST_F(FullLinearEvictionTest, SequentialFullEvictionDrainsChain) {
+TEST_F(FullLinearEvictionTest, SequentialFullReclaimDrainsChain) {
     insertPath({100, 200}, 10, 30);
 
-    cache_->evict(1, Tier::DEVICE);
+    cache_->reclaimBlocks(1, Tier::DEVICE);
     cache_->waitForPendingTasks();
     EXPECT_EQ(cache_->getStats().tree_node_count, 1u);
 
-    cache_->evict(1, Tier::DEVICE);
+    cache_->reclaimBlocks(1, Tier::DEVICE);
     cache_->waitForPendingTasks();
     EXPECT_EQ(cache_->getStats().tree_node_count, 0u);
 }

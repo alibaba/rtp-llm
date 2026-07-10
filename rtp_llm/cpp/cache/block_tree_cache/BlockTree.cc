@@ -52,15 +52,18 @@ BlockTreeFindResult BlockTree::findNode(const CacheKeysType& cache_keys) const {
     return result;
 }
 
-TreeNode* BlockTree::insertNode(TreeNode*                                  parent,
-                                const CacheKeysType&                       cache_keys,
-                                const std::vector<std::vector<GroupSlot>>& slots) {
+BlockTreeInsertResult BlockTree::insertNode(TreeNode*                                  parent,
+                                           const CacheKeysType&                       cache_keys,
+                                           const std::vector<std::vector<GroupSlot>>& slots) {
+    BlockTreeInsertResult result;
     if (cache_keys.empty()) {
-        return parent ? parent : root_.get();
+        result.leaf = parent ? parent : root_.get();
+        return result;
     }
     RTP_LLM_CHECK_WITH_INFO(slots.size() == cache_keys.size(),
                             "BlockTree::insertNode: slots.size() must equal cache_keys.size()");
 
+    result.inserted_mask.assign(cache_keys.size(), false);
     TreeNode* current = parent ? parent : root_.get();
 
     for (size_t i = 0; i < cache_keys.size(); ++i) {
@@ -77,10 +80,13 @@ TreeNode* BlockTree::insertNode(TreeNode*                                  paren
             if (!slots[i].empty()) {
                 current->group_slots = slots[i];
             }
+            result.inserted_mask[i] = true;
+            result.inserted_nodes.push_back(BlockTreeInsertedNode{current, i});
         }
     }
 
-    return current;
+    result.leaf = current;
+    return result;
 }
 
 void BlockTree::removeNode(TreeNode* node) {

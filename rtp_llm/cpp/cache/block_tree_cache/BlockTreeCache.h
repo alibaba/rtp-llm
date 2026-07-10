@@ -121,16 +121,15 @@ public:
 
     BlockTreeMatchResult match(const CacheKeysType& cache_keys);
     void insert(TreeNode* parent, const CacheKeysType& cache_keys, const std::vector<std::vector<GroupSlot>>& slots);
-    int  evict(size_t num_blocks, Tier tier = Tier::DEVICE);
+    // reclaimBlocks: directly reclaim (drop) blocks at the given tier, no demotion, no copy.
+    // Block content is discarded rather than moved down to a lower tier.
+    int  reclaimBlocks(size_t num_blocks, Tier tier = Tier::DEVICE);
 
-    bool       isEvictable(TreeNode* node, int group_id) const;
     CacheStats getStats() const;
     void       waitForPendingTasks();
 
-    void setIsBlockEvictable(IsBlockEvictableFn fn);
-
     // Release path-lock references acquired during match().
-    void releaseMatchedBlocks(const std::vector<BlockIdxType>& block_indices);
+    void releaseMatchedBlocks(const std::vector<GroupBlockSet>& sets);
 
     // ---- Configuration mutators (for runtime adjustment) ----
     void setWatermark(double ratio, size_t device_capacity) {
@@ -145,12 +144,6 @@ public:
         }
     }
     void setEnableLoadBack(bool enable) { config_.enable_load_back = enable; }
-
-    // Device block allocator for load_back (allocates GPU blocks to receive H2D data).
-    using DeviceBlockAllocator = std::function<std::vector<BlockIdxType>(int component_group_id, size_t count)>;
-    void setDeviceBlockAllocator(DeviceBlockAllocator fn) {
-        device_block_allocator_ = std::move(fn);
-    }
 
     // Accessors
     BlockTree* tree() const {
@@ -181,7 +174,7 @@ private:
     void             taskStarted();
     void             taskFinished();
     void             checkWatermark();
-    bool             submitEvictionLocked(EvictionMove& er);
+    bool             submitEvictionLocked(EvictionMove& eviction_move);
     void             performEvictionCopy(const BlockTreeEvictor::EvictionPlan& plan);
 
     // Per-group pool access helpers
@@ -192,9 +185,10 @@ private:
         TreeNode*                 node{nullptr};
         int                       group_id{-1};
         Tier                      source_tier{Tier::NONE};
-        std::vector<BlockIdxType> allocated_device_blocks;
+        std::vector<BlockIdxType> source_blocks;
+        std::vector<BlockIdxType> target_device_blocks;
     };
-    void referenceMatchedDeviceBlocks(const std::vector<TreeNode*>& match_path);
+    void referenceMatchedDeviceBlocks(const std::vector<TreeNode*>& match_path, BlockTreeMatchResult& result);
     void prepareMatchedLoadBack(const std::vector<TreeNode*>& match_path,
                                 std::vector<LoadBackItem>&     lb_items,
                                 BlockTreeMatchResult&          result);
@@ -209,9 +203,6 @@ private:
     std::shared_ptr<autil::LockFreeThreadPool> thread_pool_;
     std::shared_ptr<BroadcastManager>          broadcast_manager_;
     BlockTreeEvictor                          evictor_;
-
-    // Runtime-injected collaborators
-    DeviceBlockAllocator device_block_allocator_;
 
     std::atomic<int>        pending_tasks_{0};
     std::mutex              wait_mutex_;

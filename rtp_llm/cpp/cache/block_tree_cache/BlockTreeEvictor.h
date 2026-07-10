@@ -41,7 +41,7 @@ public:
     // lock-free I/O phases.
     std::optional<EvictionMove> chooseVictim(Tier tier);
     std::vector<EvictionMove>   chooseWatermarkVictims(ComponentGroup& group, Tier tier, double watermark_ratio);
-    std::optional<EvictionPlan>   buildPlan(EvictionMove er);
+    std::optional<EvictionPlan>   buildPlan(EvictionMove eviction_move);
     CopyResultSet                 performCopy(const EvictionPlan& plan);
     void                          complete(BlockTree& tree, const EvictionPlan& plan, const CopyResultSet& results);
     void                          rollbackPreparedPlan(const EvictionPlan& plan);
@@ -57,26 +57,17 @@ private:
                                          int source_group_id,
                                          Tier tier,
                                          bool enable_reverse_eviction) const;
-    bool executeTierCopy(const EvictionMove& move);
-    void releaseBlocks(int component_group_id, Tier tier, const std::vector<BlockIdxType>& blocks);
-    BlockIdxType allocateBlock(int component_group_id, Tier tier);
-    bool prepareMove(EvictionMove& move);
-    void reserveSourceHeap(const EvictionMove& move);
-    void restoreSourceHeap(const EvictionMove& move);
-    void releaseTargetBlock(const EvictionMove& move);
-    void setTargetSlot(ComponentGroupPtr& group,
-                       GroupSlot& slot,
-                       TreeNode* node,
-                       Tier target_tier,
-                       BlockIdxType target_block);
+    bool executeTierCopy(const EvictionMove& eviction_move);
+    bool prepareMove(EvictionMove& eviction_move);
+    void reserveSourceHeap(const EvictionMove& eviction_move);
+    void restoreSourceHeap(const EvictionMove& eviction_move);
+    void releaseTargetBlocks(const EvictionMove& eviction_move);
+    void applyMoveCompletion(ComponentGroupPtr& group, const EvictionMove& move);
     void finalizeEviction(BlockTree& tree, TreeNode* node);
     bool shouldDeleteNode(const BlockTree&                         tree,
                           const TreeNode*                          node) const;
     std::vector<int> reusableGroupIds() const;
     size_t computeGroupExcess(const ComponentGroup& group, Tier tier, double ratio) const;
-
-    std::shared_ptr<HostBlockPool> hostPoolForGroup(int component_group_id) const;
-    std::shared_ptr<DiskBlockPool> diskPoolForGroup(int component_group_id) const;
 
     std::vector<ComponentGroupPtr>&                         component_groups_;
     CopyEnginePtr                                           copy_engine_;

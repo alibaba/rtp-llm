@@ -17,6 +17,19 @@ struct BlockTreeFindResult {
     std::vector<TreeNode*> path;
 };
 
+// A node created (not reused) during insertNode, paired with its input index.
+struct BlockTreeInsertedNode {
+    TreeNode* node{nullptr};
+    size_t    input_index{0};
+};
+
+// Result of insertNode: which input slots were consumed by newly created nodes.
+struct BlockTreeInsertResult {
+    TreeNode*                          leaf{nullptr};
+    std::vector<BlockTreeInsertedNode> inserted_nodes;
+    std::vector<bool>                  inserted_mask;  // size == cache_keys.size()
+};
+
 // BlockTree: pure tree topology data structure.
 // Manages tree nodes with cache_key-based lookup. No eviction logic.
 // The tree owns all node memory. Raw pointers in TreeNode (parent/children)
@@ -33,8 +46,8 @@ public:
     // Insert nodes along the cache_keys path starting from parent (nullptr = root).
     // Existing nodes are reused, new nodes are created for unmatched suffix.
     // slots[i] provides the GroupSlot for the i-th node (cache_keys[i]).
-    // Returns the deepest node in the path.
-    TreeNode*
+    // Returns the deepest node plus which input slots were consumed by new nodes.
+    BlockTreeInsertResult
     insertNode(TreeNode* parent, const CacheKeysType& cache_keys, const std::vector<std::vector<GroupSlot>>& slots);
 
     // Remove a node from the tree. The node must have no children.

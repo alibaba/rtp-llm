@@ -10,8 +10,8 @@ namespace rtp_llm {
 
 bool BlockTreeEvictor::EvictionPlan::needsCopy() const {
     return primary.target_tier != Tier::NONE
-           || std::any_of(cascade_moves.begin(), cascade_moves.end(), [](const EvictionMove& move) {
-                  return move.target_tier != Tier::NONE;
+           || std::any_of(cascade_moves.begin(), cascade_moves.end(), [](const EvictionMove& cascade_move) {
+                  return cascade_move.target_tier != Tier::NONE;
               });
 }
 
@@ -60,19 +60,19 @@ void BlockTreeEvictor::buildGroupLayerTagSlots(const std::vector<Component>& com
 
 std::optional<EvictionMove> BlockTreeEvictor::chooseVictim(Tier tier) {
     for (auto& group : component_groups_) {
-        auto er = group->driveEviction(1, tier);
-        if (!er.has_value()) {
+        auto eviction_move = group->driveEviction(1, tier);
+        if (!eviction_move.has_value()) {
             continue;
         }
 
         RTP_LLM_LOG_DEBUG("BlockTreeEvictor::chooseVictim: selected candidate, "
                           "group[%d] type=%s tier=%s target=%s node_key=%ld",
-                          er->component_group_id,
+                          eviction_move->component_group_id,
                           cacheGroupTypeName(group->group_type),
-                          tierName(er->source_tier),
-                          tierName(er->target_tier),
-                          er->node ? er->node->cache_key : 0);
-        return er;
+                          tierName(eviction_move->source_tier),
+                          tierName(eviction_move->target_tier),
+                          eviction_move->node ? eviction_move->node->cache_key : 0);
+        return eviction_move;
     }
 
     return std::nullopt;
@@ -97,47 +97,48 @@ BlockTreeEvictor::chooseWatermarkVictims(ComponentGroup& group, Tier tier, doubl
 
     victims.reserve(excess);
     for (size_t i = 0; i < excess; ++i) {
-        auto er = group.driveEviction(1, tier);
-        if (er.has_value())
-            victims.push_back(*er);
+        auto eviction_move = group.driveEviction(1, tier);
+        if (eviction_move.has_value())
+            victims.push_back(*eviction_move);
         else
             break;
     }
     return victims;
 }
 
-std::optional<BlockTreeEvictor::EvictionPlan> BlockTreeEvictor::buildPlan(EvictionMove er) {
+std::optional<BlockTreeEvictor::EvictionPlan> BlockTreeEvictor::buildPlan(EvictionMove eviction_move) {
     EvictionPlan plan;
-    if (er.node == nullptr)
+    if (eviction_move.node == nullptr)
         return std::nullopt;
 
-    if (!prepareMove(er)) {
-        restoreSourceHeap(er);
-        releaseTargetBlock(er);
+    if (!prepareMove(eviction_move)) {
+        restoreSourceHeap(eviction_move);
+        releaseTargetBlocks(eviction_move);
         return std::nullopt;
     }
-    plan.primary = er;
+    plan.primary = eviction_move;
 
-    for (int cascade_group_id : selectCascadeGroups(er.node,
-                                                    er.component_group_id,
-                                                    er.source_tier,
+    for (int cascade_group_id : selectCascadeGroups(eviction_move.node,
+                                                    eviction_move.component_group_id,
+                                                    eviction_move.source_tier,
                                                     enable_reverse_eviction_)) {
-        auto move = makeMove(er.node, cascade_group_id, er.source_tier, er.target_tier);
-        if (move.blocks_to_release.empty())
+        auto cascade_move =
+            makeMove(eviction_move.node, cascade_group_id, eviction_move.source_tier, eviction_move.target_tier);
+        if (cascade_move.source_blocks.empty())
             continue;
 
-        if (!prepareMove(move)) {
-            restoreSourceHeap(move);
-            releaseTargetBlock(move);
+        if (!prepareMove(cascade_move)) {
+            restoreSourceHeap(cascade_move);
+            releaseTargetBlocks(cascade_move);
             RTP_LLM_LOG_WARNING("BlockTreeEvictor::buildPlan: cascade target alloc failed "
                                 "group[%d] tier %s->%s node_key=%ld, skipping",
                                 cascade_group_id,
-                                tierName(move.source_tier),
-                                tierName(move.target_tier),
-                                er.node->cache_key);
+                                tierName(cascade_move.source_tier),
+                                tierName(cascade_move.target_tier),
+                                eviction_move.node->cache_key);
             continue;
         }
-        plan.cascade_moves.push_back(std::move(move));
+        plan.cascade_moves.push_back(std::move(cascade_move));
     }
 
     return plan;
@@ -156,42 +157,40 @@ BlockTreeEvictor::CopyResultSet BlockTreeEvictor::performCopy(const EvictionPlan
                                 plan.primary.node ? plan.primary.node->cache_key : 0,
                                 tierName(plan.primary.source_tier),
                                 tierName(plan.primary.target_tier));
-            results.cascade_success = std::vector<bool>(plan.cascade_moves.size(), false);
+            results.cascade_success.assign(plan.cascade_moves.size(), false);
             return results;
         } else {
             RTP_LLM_LOG_DEBUG("BlockTreeEvictor::performCopy: primary copy OK "
-                              "group[%d] node_key=%ld %s->%s target_block=%d",
+                              "group[%d] node_key=%ld %s->%s",
                               plan.primary.component_group_id,
                               plan.primary.node ? plan.primary.node->cache_key : 0,
                               tierName(plan.primary.source_tier),
-                              tierName(plan.primary.target_tier),
-                              plan.primary.target_block);
+                              tierName(plan.primary.target_tier));
         }
     }
 
     results.cascade_success.reserve(plan.cascade_moves.size());
-    for (const auto& move : plan.cascade_moves) {
+    for (const auto& cascade_move : plan.cascade_moves) {
         bool copy_ok = true;
-        if (move.target_tier != Tier::NONE) {
-            copy_ok = executeTierCopy(move);
+        if (cascade_move.target_tier != Tier::NONE) {
+            copy_ok = executeTierCopy(cascade_move);
         }
         results.cascade_success.push_back(copy_ok);
 
         if (!copy_ok) {
             RTP_LLM_LOG_WARNING("BlockTreeEvictor::performCopy: cascade copy FAILED "
                                 "group[%d] node_key=%ld %s->%s",
-                                move.component_group_id,
-                                move.node ? move.node->cache_key : 0,
-                                tierName(move.source_tier),
-                                tierName(move.target_tier));
-        } else if (move.target_tier != Tier::NONE) {
+                                cascade_move.component_group_id,
+                                cascade_move.node ? cascade_move.node->cache_key : 0,
+                                tierName(cascade_move.source_tier),
+                                tierName(cascade_move.target_tier));
+        } else if (cascade_move.target_tier != Tier::NONE) {
             RTP_LLM_LOG_DEBUG("BlockTreeEvictor::performCopy: cascade copy OK "
-                              "group[%d] node_key=%ld %s->%s target_block=%d",
-                              move.component_group_id,
-                              move.node ? move.node->cache_key : 0,
-                              tierName(move.source_tier),
-                              tierName(move.target_tier),
-                              move.target_block);
+                              "group[%d] node_key=%ld %s->%s",
+                              cascade_move.component_group_id,
+                              cascade_move.node ? cascade_move.node->cache_key : 0,
+                              tierName(cascade_move.source_tier),
+                              tierName(cascade_move.target_tier));
         }
     }
     return results;
@@ -209,55 +208,65 @@ void BlockTreeEvictor::complete(BlockTree& tree, const EvictionPlan& plan, const
     auto primary_gid = static_cast<size_t>(plan.primary.component_group_id);
     if (primary_gid < component_groups_.size() && primary_gid < plan.primary.node->group_slots.size()) {
         auto& group = component_groups_[primary_gid];
-        auto& slot  = plan.primary.node->group_slots[primary_gid];
         RTP_LLM_LOG_DEBUG("BlockTreeEvictor::complete: primary group[%d] node_key=%ld source=%s target=%s",
                           plan.primary.component_group_id,
                           plan.primary.node->cache_key,
                           tierName(plan.primary.source_tier),
                           tierName(plan.primary.target_tier));
-        group->evictFromTier(plan.primary.node, slot, plan.primary.source_tier);
-        releaseBlocks(plan.primary.component_group_id, plan.primary.source_tier, plan.primary.blocks_to_release);
-        setTargetSlot(group, slot, plan.primary.node, plan.primary.target_tier, plan.primary.target_block);
+        applyMoveCompletion(group, plan.primary);
     }
 
     for (size_t i = 0; i < plan.cascade_moves.size(); ++i) {
-        const auto& move = plan.cascade_moves[i];
+        const auto& cascade_move = plan.cascade_moves[i];
         const bool  ok   = i < results.cascade_success.size() && results.cascade_success[i];
         if (!ok) {
-            releaseTargetBlock(move);
-            restoreSourceHeap(move);
+            releaseTargetBlocks(cascade_move);
+            restoreSourceHeap(cascade_move);
             continue;
         }
 
-        auto gid = static_cast<size_t>(move.component_group_id);
-        if (gid >= component_groups_.size() || move.node == nullptr || gid >= move.node->group_slots.size()) {
-            releaseTargetBlock(move);
+        auto gid = static_cast<size_t>(cascade_move.component_group_id);
+        if (gid >= component_groups_.size() || cascade_move.node == nullptr ||
+            gid >= cascade_move.node->group_slots.size()) {
+            releaseTargetBlocks(cascade_move);
             continue;
         }
 
         auto& group = component_groups_[gid];
-        auto& slot  = move.node->group_slots[gid];
 
         RTP_LLM_LOG_DEBUG("BlockTreeEvictor::complete: cascade group[%d] node_key=%ld source=%s target=%s",
-                          move.component_group_id,
-                          move.node->cache_key,
-                          tierName(move.source_tier),
-                          tierName(move.target_tier));
+                          cascade_move.component_group_id,
+                          cascade_move.node->cache_key,
+                          tierName(cascade_move.source_tier),
+                          tierName(cascade_move.target_tier));
 
-        group->evictFromTier(move.node, slot, move.source_tier);
-        releaseBlocks(move.component_group_id, move.source_tier, move.blocks_to_release);
-        setTargetSlot(group, slot, move.node, move.target_tier, move.target_block);
+        applyMoveCompletion(group, cascade_move);
     }
 
     finalizeEviction(tree, plan.primary.node);
 }
 
+// Move source blocks out of the slot, install target blocks (if demoting), and
+// release the source cache reference. Source blocks were held only by cache.
+void BlockTreeEvictor::applyMoveCompletion(ComponentGroupPtr& group, const EvictionMove& move) {
+    auto& slot         = move.node->group_slots[static_cast<size_t>(move.component_group_id)];
+    auto  source_block = group->getBlocks(slot, move.source_tier);
+    // Release source cache-hold (saved ids) before clearing the slot.
+    group->releaseBlocks(GroupBlockSet{move.component_group_id, move.source_tier, {source_block}});
+    group->evictFromTier(move.node, slot, move.source_tier);
+
+    if (move.target_tier != Tier::NONE) {
+        group->setBlocks(slot, move.target_tier, move.target_blocks);
+        group->tryAddToHeap(move.node, move.target_tier);
+    }
+}
+
 void BlockTreeEvictor::rollbackPreparedPlan(const EvictionPlan& plan) {
-    releaseTargetBlock(plan.primary);
+    releaseTargetBlocks(plan.primary);
     restoreSourceHeap(plan.primary);
-    for (const auto& move : plan.cascade_moves) {
-        releaseTargetBlock(move);
-        restoreSourceHeap(move);
+    for (const auto& cascade_move : plan.cascade_moves) {
+        releaseTargetBlocks(cascade_move);
+        restoreSourceHeap(cascade_move);
     }
 }
 
@@ -284,24 +293,32 @@ void BlockTreeEvictor::writeRemoteThrough(const std::shared_ptr<StorageBackend>&
     }
 }
 
-bool BlockTreeEvictor::executeTierCopy(const EvictionMove& move) {
-    if (!copy_engine_ || move.blocks_to_release.empty() || isNullBlockIdx(move.target_block))
+bool BlockTreeEvictor::executeTierCopy(const EvictionMove& eviction_move) {
+    if (!copy_engine_ || eviction_move.source_blocks.empty() || eviction_move.target_blocks.empty()
+        || isNullBlockIdx(eviction_move.target_blocks[0]))
         return false;
 
+    const BlockIdxType target = eviction_move.target_blocks[0];
     TransferDescriptor desc;
-    if (move.source_tier == Tier::DEVICE && move.target_tier == Tier::HOST) {
-        desc = TransferDescriptor::deviceToHost(
-            move.node, move.component_group_id, move.blocks_to_release, move.target_block);
-    } else if (move.source_tier == Tier::HOST && move.target_tier == Tier::DISK) {
-        if (isNullBlockIdx(move.blocks_to_release[0]))
+    if (eviction_move.source_tier == Tier::DEVICE && eviction_move.target_tier == Tier::HOST) {
+        desc = TransferDescriptor::deviceToHost(eviction_move.node,
+                                                eviction_move.component_group_id,
+                                                eviction_move.source_blocks,
+                                                target);
+    } else if (eviction_move.source_tier == Tier::HOST && eviction_move.target_tier == Tier::DISK) {
+        if (isNullBlockIdx(eviction_move.source_blocks[0]))
             return false;
-        desc = TransferDescriptor::hostToDisk(
-            move.node, move.component_group_id, move.blocks_to_release[0], move.target_block);
-    } else if (move.source_tier == Tier::DISK && move.target_tier == Tier::HOST) {
-        if (isNullBlockIdx(move.blocks_to_release[0]))
+        desc = TransferDescriptor::hostToDisk(eviction_move.node,
+                                              eviction_move.component_group_id,
+                                              eviction_move.source_blocks[0],
+                                              target);
+    } else if (eviction_move.source_tier == Tier::DISK && eviction_move.target_tier == Tier::HOST) {
+        if (isNullBlockIdx(eviction_move.source_blocks[0]))
             return false;
-        desc = TransferDescriptor::diskToHost(
-            move.node, move.component_group_id, move.blocks_to_release[0], move.target_block);
+        desc = TransferDescriptor::diskToHost(eviction_move.node,
+                                              eviction_move.component_group_id,
+                                              eviction_move.source_blocks[0],
+                                              target);
     } else {
         return false;
     }
@@ -310,65 +327,71 @@ bool BlockTreeEvictor::executeTierCopy(const EvictionMove& move) {
 }
 
 EvictionMove BlockTreeEvictor::makeMove(TreeNode* node,
-                                          int       component_group_id,
-                                          Tier      source_tier,
-                                          Tier      target_tier) const {
-    EvictionMove move;
-    move.node               = node;
-    move.component_group_id = component_group_id;
-    move.source_tier        = source_tier;
-    move.target_tier        = target_tier;
+                                         int       component_group_id,
+                                         Tier      source_tier,
+                                         Tier      target_tier) const {
+    EvictionMove eviction_move;
+    eviction_move.node               = node;
+    eviction_move.component_group_id = component_group_id;
+    eviction_move.source_tier        = source_tier;
+    eviction_move.target_tier        = target_tier;
 
     auto gid = static_cast<size_t>(component_group_id);
     if (node == nullptr || gid >= node->group_slots.size())
-        return move;
+        return eviction_move;
 
     const auto& slot = node->group_slots[gid];
     switch (source_tier) {
         case Tier::DEVICE:
             if (slot.has_device_value())
-                move.blocks_to_release = slot.device_blocks;
+                eviction_move.source_blocks = slot.device_blocks;
             break;
         case Tier::HOST:
             if (slot.has_host_value())
-                move.blocks_to_release = {slot.host_block};
+                eviction_move.source_blocks = {slot.host_block};
             break;
         case Tier::DISK:
             if (slot.has_disk_value())
-                move.blocks_to_release = {slot.disk_slot};
+                eviction_move.source_blocks = {slot.disk_slot};
             break;
         default:
             break;
     }
-    return move;
+    return eviction_move;
 }
 
-bool BlockTreeEvictor::prepareMove(EvictionMove& move) {
-    if (move.node == nullptr || move.blocks_to_release.empty())
+bool BlockTreeEvictor::prepareMove(EvictionMove& eviction_move) {
+    if (eviction_move.node == nullptr || eviction_move.source_blocks.empty())
         return false;
 
-    reserveSourceHeap(move);
-    if (move.target_tier != Tier::NONE) {
-        move.target_block = allocateBlock(move.component_group_id, move.target_tier);
-        if (isNullBlockIdx(move.target_block))
+    reserveSourceHeap(eviction_move);
+    if (eviction_move.target_tier != Tier::NONE) {
+        auto gid = static_cast<size_t>(eviction_move.component_group_id);
+        if (gid >= component_groups_.size())
             return false;
+        // cache self-allocated path: malloc + incRef, not yet written to slot/heap.
+        BlockIdxType target = component_groups_[gid]->allocateSingleBlock(eviction_move.target_tier);
+        if (isNullBlockIdx(target))
+            return false;
+        eviction_move.target_blocks = {target};
     }
 
     return true;
 }
 
-void BlockTreeEvictor::reserveSourceHeap(const EvictionMove& move) {
-    auto gid = static_cast<size_t>(move.component_group_id);
-    if (gid >= component_groups_.size() || move.node == nullptr || gid >= move.node->group_slots.size())
+void BlockTreeEvictor::reserveSourceHeap(const EvictionMove& eviction_move) {
+    auto gid = static_cast<size_t>(eviction_move.component_group_id);
+    if (gid >= component_groups_.size() || eviction_move.node == nullptr ||
+        gid >= eviction_move.node->group_slots.size())
         return;
 
     auto& group = component_groups_[gid];
-    auto& slot  = move.node->group_slots[gid];
-    if (auto* heap = group->heapForTier(move.source_tier)) {
-        heap->invalidate(move.node);
+    auto& slot  = eviction_move.node->group_slots[gid];
+    if (auto* heap = group->heapForTier(eviction_move.source_tier)) {
+        heap->invalidate(eviction_move.node);
     }
 
-    switch (move.source_tier) {
+    switch (eviction_move.source_tier) {
         case Tier::DEVICE:
             slot.in_device_heap = false;
             break;
@@ -383,78 +406,37 @@ void BlockTreeEvictor::reserveSourceHeap(const EvictionMove& move) {
     }
 }
 
-void BlockTreeEvictor::restoreSourceHeap(const EvictionMove& move) {
-    auto gid = static_cast<size_t>(move.component_group_id);
-    if (gid >= component_groups_.size() || move.node == nullptr) {
+void BlockTreeEvictor::restoreSourceHeap(const EvictionMove& eviction_move) {
+    auto gid = static_cast<size_t>(eviction_move.component_group_id);
+    if (gid >= component_groups_.size() || eviction_move.node == nullptr) {
         return;
     }
 
     auto& group = component_groups_[gid];
-    switch (move.source_tier) {
+    switch (eviction_move.source_tier) {
         case Tier::DEVICE:
-            group->tryAddToDeviceHeap(move.node);
+            group->tryAddToDeviceHeap(eviction_move.node);
             break;
         case Tier::HOST:
-            group->tryAddToHostHeap(move.node);
+            group->tryAddToHostHeap(eviction_move.node);
             break;
         case Tier::DISK:
-            group->tryAddToDiskHeap(move.node);
+            group->tryAddToDiskHeap(eviction_move.node);
             break;
         default:
             break;
     }
 }
 
-void BlockTreeEvictor::releaseTargetBlock(const EvictionMove& move) {
-    releaseBlocks(move.component_group_id, move.target_tier, {move.target_block});
-}
-
-void BlockTreeEvictor::releaseBlocks(int component_group_id,
-                                     Tier tier,
-                                     const std::vector<BlockIdxType>& blocks) {
-    if (blocks.empty())
+void BlockTreeEvictor::releaseTargetBlocks(const EvictionMove& eviction_move) {
+    if (eviction_move.target_blocks.empty())
         return;
-
-    auto gid = static_cast<size_t>(component_group_id);
+    auto gid = static_cast<size_t>(eviction_move.component_group_id);
     if (gid >= component_groups_.size())
         return;
-
     auto& group = component_groups_[gid];
-    if (tier == Tier::DEVICE) {
-        group->releaseDeviceBlocks(blocks);
-    } else if (tier == Tier::HOST) {
-        if (auto hp = group->hostPool()) {
-            for (auto b : blocks)
-                if (!isNullBlockIdx(b))
-                    hp->free(b);
-        }
-    } else if (tier == Tier::DISK) {
-        if (auto dp = group->diskPool()) {
-            for (auto b : blocks)
-                if (!isNullBlockIdx(b))
-                    dp->free(b);
-        }
-    }
-}
-
-void BlockTreeEvictor::setTargetSlot(ComponentGroupPtr& group,
-                                     GroupSlot&         slot,
-                                     TreeNode*          node,
-                                     Tier               target_tier,
-                                     BlockIdxType       target_block) {
-    if (isNullBlockIdx(target_block))
-        return;
-    if (target_tier == Tier::HOST) {
-        slot.host_block = target_block;
-        if (auto hp = group->hostPool())
-            hp->incRef(target_block);
-        group->tryAddToHostHeap(node);
-    } else if (target_tier == Tier::DISK) {
-        slot.disk_slot = target_block;
-        if (auto dp = group->diskPool())
-            dp->incRef(target_block);
-        group->tryAddToDiskHeap(node);
-    }
+    for (auto block : eviction_move.target_blocks)
+        group->releaseSingleBlock(eviction_move.target_tier, block);
 }
 
 void BlockTreeEvictor::finalizeEviction(BlockTree& tree, TreeNode* node) {
@@ -550,36 +532,6 @@ size_t BlockTreeEvictor::computeGroupExcess(const ComponentGroup& group, Tier ti
     size_t used      = (tier == Tier::HOST) ? group.hostPoolUsed() : group.diskPoolUsed();
     size_t threshold = static_cast<size_t>(capacity * ratio);
     return (used > threshold) ? (used - threshold) : 0;
-}
-
-std::shared_ptr<HostBlockPool> BlockTreeEvictor::hostPoolForGroup(int component_group_id) const {
-    auto gid = static_cast<size_t>(component_group_id);
-    return gid < component_groups_.size() ? component_groups_[gid]->hostPool() : nullptr;
-}
-
-std::shared_ptr<DiskBlockPool> BlockTreeEvictor::diskPoolForGroup(int component_group_id) const {
-    auto gid = static_cast<size_t>(component_group_id);
-    return gid < component_groups_.size() ? component_groups_[gid]->diskPool() : nullptr;
-}
-
-BlockIdxType BlockTreeEvictor::allocateBlock(int component_group_id, Tier tier) {
-    if (tier == Tier::HOST) {
-        auto pool = hostPoolForGroup(component_group_id);
-        if (!pool)
-            return NULL_BLOCK_IDX;
-        auto slot = pool->malloc();
-        return slot.has_value() ? slot.value() : NULL_BLOCK_IDX;
-    }
-
-    if (tier == Tier::DISK) {
-        auto pool = diskPoolForGroup(component_group_id);
-        if (!pool)
-            return NULL_BLOCK_IDX;
-        auto slot = pool->malloc();
-        return slot.has_value() ? slot.value() : NULL_BLOCK_IDX;
-    }
-
-    return NULL_BLOCK_IDX;
 }
 
 }  // namespace rtp_llm

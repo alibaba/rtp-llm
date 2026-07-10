@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <cstring>
 #include <thread>
 
 #include "rtp_llm/cpp/cache/BlockPoolConfigHelper.h"
@@ -7,6 +8,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/DeviceBlockPool.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/FullComponentGroup.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/copy_engine/CopyEngine.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/host/DiskBlockPool.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/host/HostBlockPool.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/model_rpc/BroadcastManager.h"
@@ -27,6 +29,88 @@ static std::shared_ptr<HostBlockPool> makeHostPool(size_t payload_bytes, size_t 
     config->enable_pinned           = true;
     config->alignment               = 4096;
     return std::make_shared<HostBlockPool>(config);
+}
+
+class MemoryDiskBlockIO: public DiskBlockIO {
+public:
+    DiskBlockIOStatus openAndPreallocate(const std::string&, size_t bytes, bool) override {
+        data_.assign(bytes, 0);
+        return DiskBlockIOStatus::OK;
+    }
+
+    DiskBlockIOStatus read(uint64_t offset, void* dst, size_t bytes) override {
+        if (offset + bytes > data_.size()) {
+            return DiskBlockIOStatus::INVALID_SIZE;
+        }
+        std::memcpy(dst, data_.data() + offset, bytes);
+        return DiskBlockIOStatus::OK;
+    }
+
+    DiskBlockIOStatus write(uint64_t offset, const void* src, size_t bytes) override {
+        if (offset + bytes > data_.size()) {
+            return DiskBlockIOStatus::INVALID_SIZE;
+        }
+        std::memcpy(data_.data() + offset, src, bytes);
+        return DiskBlockIOStatus::OK;
+    }
+
+    DiskBlockIOStatus read(const std::vector<DiskRead>& reads) override {
+        for (const auto& read_req : reads) {
+            auto status = read(read_req.offset, read_req.buffer, read_req.bytes);
+            if (status != DiskBlockIOStatus::OK) {
+                return status;
+            }
+        }
+        return DiskBlockIOStatus::OK;
+    }
+
+    DiskBlockIOStatus write(const std::vector<DiskWrite>& writes) override {
+        for (const auto& write_req : writes) {
+            auto status = write(write_req.offset, write_req.buffer, write_req.bytes);
+            if (status != DiskBlockIOStatus::OK) {
+                return status;
+            }
+        }
+        return DiskBlockIOStatus::OK;
+    }
+
+    void close() override {}
+
+    std::string debugString() const override {
+        return "MemoryDiskBlockIO";
+    }
+
+private:
+    std::vector<char> data_;
+};
+
+static std::shared_ptr<DiskBlockPool> makeDiskPool(size_t                       payload_bytes,
+                                                   size_t                       usable_count,
+                                                   std::unique_ptr<DiskBlockIO> io = nullptr) {
+    const size_t aligned_block_size = ((payload_bytes + 4095) / 4096) * 4096;
+
+    auto config                     = std::make_shared<DiskBlockPoolConfig>();
+    config->pool_type               = BlockPoolType::DISK;
+    config->pool_name               = "block_tree_cache_disk";
+    config->work_dir                = "/tmp";
+    config->local_rank              = 0;
+    config->world_rank              = 0;
+    config->disk_size_bytes         = aligned_block_size * (usable_count + 1);
+    config->payload_bytes           = payload_bytes;
+    config->stride_bytes            = aligned_block_size;
+    config->buffered_io             = true;
+
+    auto pool = std::make_shared<DiskBlockPool>(config, std::move(io));
+    RTP_LLM_CHECK(pool->init());
+    return pool;
+}
+
+static bool cudaAvailable() {
+    try {
+        return torch::cuda::is_available();
+    } catch (const std::exception&) {
+        return false;
+    }
 }
 
 // Helper: build an initialized DeviceBlockPool from the lightweight cache-config test
@@ -57,9 +141,69 @@ static DeviceBlockPoolPtr makeDevicePool() {
     return pool;
 }
 
+struct DeviceLayerBufferSpec {
+    size_t kv_bytes{0};
+    size_t scale_bytes{0};
+};
+
+static DeviceBlockPoolPtr makeDevicePool(const std::vector<DeviceLayerBufferSpec>& specs,
+                                         size_t                                    usable_count,
+                                         const std::string&                       pool_name) {
+    const auto physical_block_count = usable_count + 1;
+
+    auto config                     = std::make_shared<DeviceBlockPoolConfig>();
+    config->pool_type               = BlockPoolType::DEVICE;
+    config->pool_name               = pool_name;
+    config->physical_block_count    = physical_block_count;
+    config->allocation_type         = AllocationType::DEVICE;
+    config->use_cuda_malloc_backing = false;
+
+    size_t offset = 0;
+    for (const auto& spec : specs) {
+        MemoryLayoutConfig layout;
+        layout.layer_num                = 1;
+        layout.block_num                = static_cast<uint32_t>(physical_block_count);
+        layout.dtype                    = TYPE_INT8;
+        layout.kv_cache_offset_bytes    = offset;
+        layout.kv_block_stride_bytes    = spec.kv_bytes;
+        layout.kv_block_pool_size_bytes = physical_block_count * spec.kv_bytes;
+        layout.block_stride_bytes       = spec.kv_bytes + spec.scale_bytes;
+        layout.total_size_bytes         = layout.kv_block_pool_size_bytes;
+        offset += layout.kv_block_pool_size_bytes;
+
+        if (spec.scale_bytes > 0) {
+            layout.enable_kv_scale          = true;
+            layout.kv_scale_offset_bytes    = offset;
+            layout.kv_scale_stride_bytes    = spec.scale_bytes;
+            layout.kv_scale_pool_size_bytes = physical_block_count * spec.scale_bytes;
+            layout.total_size_bytes += layout.kv_scale_pool_size_bytes;
+            offset += layout.kv_scale_pool_size_bytes;
+        }
+
+        layout.local_head_num_kv          = 1;
+        layout.seq_size_per_block         = 1;
+        layout.kernel_blocks_per_kv_block = 1;
+        config->memory_layouts.push_back(layout);
+    }
+    config->total_size_bytes = offset;
+
+    auto pool = std::make_shared<DeviceBlockPool>(config);
+    RTP_LLM_CHECK(pool->init());
+    return pool;
+}
+
+static BlockIdxType poolMalloc(IBlockPool& pool) {
+    auto block = pool.malloc();
+    return block.has_value() ? *block : NULL_BLOCK_IDX;
+}
+
 // referenceDeviceBlocks() must add exactly one cache-category holder (incRef) and
 // releaseDeviceBlocks() must release it (releaseRef), returning capacity at refcount 0.
 TEST(BlockTreeCacheComponentGroupTest, DevicePoolLifecycleUsesSingleCountRefcount) {
+    if (!cudaAvailable()) {
+        GTEST_SKIP() << "CUDA not available";
+    }
+
     auto pool = makeDevicePool();
     ASSERT_NE(pool, nullptr);
 
@@ -169,7 +313,7 @@ TEST_F(BlockTreeCacheTest, InsertOverlappingPathUpdatesHeat) {
     EXPECT_EQ(stats.tree_node_count, 2u);
 }
 
-TEST_F(BlockTreeCacheTest, EvictDeviceLeaf) {
+TEST_F(BlockTreeCacheTest, ReclaimDeviceLeaf) {
     // Insert: root → 100 → 200 → 300
     std::vector<std::vector<GroupSlot>> slots(3, std::vector<GroupSlot>(1));
     slots[0][0].device_blocks = {42};
@@ -181,25 +325,25 @@ TEST_F(BlockTreeCacheTest, EvictDeviceLeaf) {
     auto stats = cache_->getStats();
     EXPECT_EQ(stats.device_heap_total_size, 1u);
 
-    int evicted = cache_->evict(1, Tier::DEVICE);
-    EXPECT_EQ(evicted, 1);
+    int reclaimed = cache_->reclaimBlocks(1, Tier::DEVICE);
+    EXPECT_EQ(reclaimed, 1);
 
     cache_->waitForPendingTasks();
 
-    // After eviction, the leaf's device_blocks should be cleared
-    // Check that match no longer finds device data for 300
+    // After reclaim, the leaf's device_blocks should be cleared.
+    // Check that match no longer finds device data for 300.
     auto result = cache_->match({100, 200, 300});
     // 300's group_slots[0] should have no device value
     // But 100 and 200 also have no device data (only 300 was given slots)
     // So match would fail at 100 (no data in any tier)
 }
 
-TEST_F(BlockTreeCacheTest, EvictEmptyTreeReturnsZero) {
-    int evicted = cache_->evict(1, Tier::DEVICE);
-    EXPECT_EQ(evicted, 0);
+TEST_F(BlockTreeCacheTest, ReclaimEmptyTreeReturnsZero) {
+    int reclaimed = cache_->reclaimBlocks(1, Tier::DEVICE);
+    EXPECT_EQ(reclaimed, 0);
 }
 
-TEST_F(BlockTreeCacheTest, CascadeEviction) {
+TEST_F(BlockTreeCacheTest, ReclaimCascadesToLowerPriorityGroup) {
     // Build a cache with Full + SWA groups
     auto tree = std::make_unique<BlockTree>(2);  // 2 component groups
 
@@ -221,9 +365,9 @@ TEST_F(BlockTreeCacheTest, CascadeEviction) {
 
     multi_cache->insert(nullptr, {100}, slots);
 
-    // Evict Full group at DEVICE → should cascade to SWA
-    int evicted = multi_cache->evict(1, Tier::DEVICE);
-    EXPECT_EQ(evicted, 1);
+    // Reclaim Full group at DEVICE → should cascade to SWA.
+    int reclaimed = multi_cache->reclaimBlocks(1, Tier::DEVICE);
+    EXPECT_EQ(reclaimed, 1);
 
     multi_cache->waitForPendingTasks();
 }
@@ -238,11 +382,11 @@ TEST_F(BlockTreeCacheTest, NodeDeletionWhenAllEmpty) {
     auto stats_before = cache_->getStats();
     EXPECT_EQ(stats_before.tree_node_count, 2u);
 
-    // Evict: the leaf (200) should be removed after eviction
-    cache_->evict(1, Tier::DEVICE);
+    // Reclaim: the leaf (200) should be removed after reclaim.
+    cache_->reclaimBlocks(1, Tier::DEVICE);
     cache_->waitForPendingTasks();
 
-    // After eviction and cleanup, tree might be smaller
+    // After reclaim and cleanup, tree might be smaller.
     auto stats_after = cache_->getStats();
     // Node 200 should be removed (all REUSABLE groups empty)
     // Node 100 should also be removed (empty ancestor)
@@ -320,14 +464,13 @@ TEST_F(BlockTreeCacheTest, ThreadSafety) {
 // CopyEngine integration tests
 // ---------------------------------------------------------------------------
 
-// Test: Eviction with CopyEngine — D2H copy fails (placeholder resolver),
-// so Issue 7 fix triggers rollback: host_block freed, node stays in device heap.
+// Test: reclaimBlocks directly drops device blocks even when host demotion is available.
 //
-//   Before evict:                             After evict + wait (rollback):
-//   root → [100] D={42} ← heap               root → [100] D={42} ← heap (restored)
+//   Before reclaim:                          After reclaim:
+//   root → [100] D={42} ← heap               empty tree
 //
-//   D2H copy fails → target host_block freed, source device heap restored.
-TEST_F(BlockTreeCacheTest, EvictWithCopyEngineAllocatesHostBlock) {
+//   No host block is allocated and no copy task is submitted.
+TEST_F(BlockTreeCacheTest, ReclaimBlocksDoesNotAllocateHostBlock) {
     auto host_pool = makeHostPool(256, 4);
     ASSERT_TRUE(host_pool->init());
     auto tree                = std::make_unique<BlockTree>(1);
@@ -353,30 +496,28 @@ TEST_F(BlockTreeCacheTest, EvictWithCopyEngineAllocatesHostBlock) {
     EXPECT_EQ(ce_cache->getStats().tree_node_count, 1u);
     EXPECT_EQ(host_pool->freeBlocksNum(), 4u);
 
-    ce_cache->evict(1, Tier::DEVICE);
+    EXPECT_EQ(ce_cache->reclaimBlocks(1, Tier::DEVICE), 1);
     ce_cache->waitForPendingTasks();
 
-    // D2H copy failed → rollback: host_block freed, node back in device heap
+    // Direct reclaim bypasses demotion/copy, so host capacity is unchanged.
     EXPECT_EQ(host_pool->freeBlocksNum(), 4u);
-    EXPECT_EQ(ce_cache->getStats().tree_node_count, 1u);
+    EXPECT_EQ(ce_cache->getStats().tree_node_count, 0u);
     auto find = ce_cache->tree()->findNode({100});
-    ASSERT_NE(find.matched_node, nullptr);
-    EXPECT_FALSE(find.matched_node->group_slots[0].has_host_value());
-    EXPECT_TRUE(find.matched_node->group_slots[0].has_device_value());
+    EXPECT_EQ(find.matched_node, nullptr);
 }
 
-// Test: Sequential eviction without Host pool — direct release path.
+// Test: Sequential direct reclaim without Host pool.
 //
 //   root → [100] → [200] → [300] all D={42}
-//   Host disabled → eviction target=NONE (direct release), synchronous.
-//   Sequential eviction drains all 3 nodes.
-TEST_F(BlockTreeCacheTest, SequentialEvictionAllocatesMultipleHostBlocks) {
+//   Host disabled → reclaim target=NONE (direct release), synchronous.
+//   Sequential reclaim drains all 3 nodes.
+TEST_F(BlockTreeCacheTest, SequentialReclaimDrainsChainWithoutHostBlocks) {
     auto tree                             = std::make_unique<BlockTree>(1);
     auto full                             = std::make_shared<FullComponentGroup>();
     full->component_group_id              = 0;
     std::vector<ComponentGroupPtr> groups = {full};
 
-    // No Host pool, Host disabled → direct release on eviction
+    // No Host pool, Host disabled → direct release on reclaim.
     BlockTreeCacheConfig seq_cfg;
     seq_cfg.eviction_thread_pool_size = 2;
     seq_cfg.enable_device_cache       = true;
@@ -393,18 +534,18 @@ TEST_F(BlockTreeCacheTest, SequentialEvictionAllocatesMultipleHostBlocks) {
     slots[2][0].device_blocks = {44};
     ce_cache->insert(nullptr, {100, 200, 300}, slots);
 
-    // Evict all 3 nodes sequentially (synchronous direct release)
+    // Reclaim all 3 nodes sequentially (synchronous direct release)
     for (int i = 0; i < 3; ++i) {
-        int evicted = ce_cache->evict(1, Tier::DEVICE);
-        EXPECT_EQ(evicted, 1) << "Eviction " << i << " should succeed";
+        int reclaimed = ce_cache->reclaimBlocks(1, Tier::DEVICE);
+        EXPECT_EQ(reclaimed, 1) << "Reclaim " << i << " should succeed";
         ce_cache->waitForPendingTasks();
     }
 
     EXPECT_EQ(ce_cache->getStats().tree_node_count, 0u);
 }
 
-// Test: REUSABLE eviction allocates host block when host is enabled.
-TEST_F(BlockTreeCacheTest, ReusableEvictionAllocatesHostBlock) {
+// Test: REUSABLE direct reclaim does not demote to host even when host is enabled.
+TEST_F(BlockTreeCacheTest, ReusableReclaimDoesNotAllocateHostBlock) {
     auto host_pool = makeHostPool(256, 4);
     ASSERT_TRUE(host_pool->init());
 
@@ -428,12 +569,11 @@ TEST_F(BlockTreeCacheTest, ReusableEvictionAllocatesHostBlock) {
     slots[0][0].device_blocks = {42};
     ce_cache->insert(nullptr, {100}, slots);
 
-    ce_cache->evict(1, Tier::DEVICE);
+    EXPECT_EQ(ce_cache->reclaimBlocks(1, Tier::DEVICE), 1);
     // Synchronous, no wait needed
 
-    // Host block allocated (REUSABLE eviction with host enabled)
-    EXPECT_EQ(host_pool->freeBlocksNum(), 3u);
-    EXPECT_EQ(ce_cache->getStats().tree_node_count, 1u);
+    EXPECT_EQ(host_pool->freeBlocksNum(), 4u);
+    EXPECT_EQ(ce_cache->getStats().tree_node_count, 0u);
 }
 
 // ---------------------------------------------------------------------------
@@ -462,8 +602,8 @@ TEST_F(BlockTreeCacheTest, DiskRequiresHostValidation) {
                  std::invalid_argument);
 }
 
-// Test: Evict on disabled tier returns 0.
-TEST_F(BlockTreeCacheTest, EvictDisabledTierReturnsZero) {
+// Test: reclaimBlocks on disabled tier returns 0.
+TEST_F(BlockTreeCacheTest, ReclaimDisabledTierReturnsZero) {
     auto tree                             = std::make_unique<BlockTree>(1);
     auto full                             = std::make_shared<FullComponentGroup>();
     full->component_group_id              = 0;
@@ -476,13 +616,13 @@ TEST_F(BlockTreeCacheTest, EvictDisabledTierReturnsZero) {
     slots[0][0].device_blocks = {42};
     cache->insert(nullptr, {100}, slots);
 
-    // Evict HOST tier — disabled → returns 0
-    EXPECT_EQ(cache->evict(1, Tier::HOST), 0);
-    // Evict DEVICE tier — enabled → returns 1
-    EXPECT_EQ(cache->evict(1, Tier::DEVICE), 1);
+    // Reclaim HOST tier — disabled → returns 0
+    EXPECT_EQ(cache->reclaimBlocks(1, Tier::HOST), 0);
+    // Reclaim DEVICE tier — enabled → returns 1
+    EXPECT_EQ(cache->reclaimBlocks(1, Tier::DEVICE), 1);
 }
 
-// Test: Host disabled → Device eviction does direct release (no D2H demotion).
+// Test: Host disabled → Device reclaim does direct release (no D2H demotion).
 TEST_F(BlockTreeCacheTest, HostDisabledDirectRelease) {
     auto host_pool = makeHostPool(256, 4);
     ASSERT_TRUE(host_pool->init());
@@ -492,14 +632,14 @@ TEST_F(BlockTreeCacheTest, HostDisabledDirectRelease) {
     full->component_group_id              = 0;
     std::vector<ComponentGroupPtr> groups = {full};
 
-    // Host disabled (default): Device eviction → direct release
+    // Host disabled (default): Device reclaim → direct release.
     auto cache = std::make_unique<BlockTreeCache>(std::move(tree), std::move(groups), std::vector<Component>{}, BlockTreeCacheConfig{.eviction_thread_pool_size = 2});
 
     std::vector<std::vector<GroupSlot>> slots(1, std::vector<GroupSlot>(1));
     slots[0][0].device_blocks = {42};
     cache->insert(nullptr, {100}, slots);
 
-    cache->evict(1, Tier::DEVICE);
+    cache->reclaimBlocks(1, Tier::DEVICE);
     cache->waitForPendingTasks();
 
     // No host block allocated (Host disabled → direct release)
@@ -551,8 +691,8 @@ TEST_F(BlockTreeCacheTest, NodeDeletedWhenAllGroupsEmpty) {
 
     EXPECT_EQ(cache->getStats().tree_node_count, 1u);
 
-    // Evict device data
-    cache->evict(1, Tier::DEVICE);
+    // Reclaim device data.
+    cache->reclaimBlocks(1, Tier::DEVICE);
     cache->waitForPendingTasks();
 
     // Node should be deleted: group empty
@@ -589,12 +729,12 @@ TEST_F(BlockTreeCacheTest, SWABuildTransferSupportsHostToDisk) {
     swa->host_heap->push(find.matched_node, 0);
     find.matched_node->group_slots[0].in_host_heap = true;
 
-    auto er = swa->driveEviction(1, Tier::HOST);
-    ASSERT_TRUE(er.has_value());
-    EXPECT_EQ(er->source_tier, Tier::HOST);
-    EXPECT_EQ(er->target_tier, Tier::DISK);
-    ASSERT_EQ(er->blocks_to_release.size(), 1u);
-    EXPECT_EQ(er->blocks_to_release[0], 7);
+    auto eviction_move = swa->driveEviction(1, Tier::HOST);
+    ASSERT_TRUE(eviction_move.has_value());
+    EXPECT_EQ(eviction_move->source_tier, Tier::HOST);
+    EXPECT_EQ(eviction_move->target_tier, Tier::DISK);
+    ASSERT_EQ(eviction_move->source_blocks.size(), 1u);
+    EXPECT_EQ(eviction_move->source_blocks[0], 7);
 }
 
 // ---------------------------------------------------------------------------
@@ -657,47 +797,101 @@ TEST_F(BlockTreeCacheTest, MatchRequiresSWAWindowAfterGap) {
 }
 
 // ---------------------------------------------------------------------------
-// UT-6: Eviction with CopyEngine — D2H copy fails with placeholder resolver.
-// Issue 7 fix: copy failure triggers rollback (host_block freed).
-// Node either stays in tree (rollback) or is deleted (sync fallback path).
+// UT-6: Watermark demotion with CopyEngine — D2H copy fails without component layout.
+// Copy failure rolls back: host_block is freed and the node stays in the device heap.
 // ---------------------------------------------------------------------------
-TEST_F(BlockTreeCacheTest, NodeEntersHostHeapAfterDemotion) {
+TEST_F(BlockTreeCacheTest, WatermarkDemotionCopyFailureRollsBack) {
+    if (!cudaAvailable()) {
+        GTEST_SKIP() << "CUDA not available";
+    }
+
     auto host_pool = makeHostPool(256, 8);
     ASSERT_TRUE(host_pool->init());
+    auto device_pool = makeDevicePool({{256, 0}}, 8, "watermark_failure_device");
+    auto device_block = poolMalloc(*device_pool);
+    ASSERT_NE(device_block, NULL_BLOCK_IDX);
 
     auto tree                = std::make_unique<BlockTree>(1);
     auto full                = std::make_shared<FullComponentGroup>();
     full->component_group_id = 0;
     full->setHostPool(host_pool);
+    full->setDevicePools({device_pool});
     std::vector<ComponentGroupPtr> groups = {full};
 
     BlockTreeCacheConfig cfg;
     cfg.enable_device_cache = true;
     cfg.enable_memory_cache = true;
+    cfg.watermark_device    = {0.01, 0};
 
     auto cache = std::make_unique<BlockTreeCache>(
         std::move(tree), std::move(groups), std::vector<Component>{}, std::move(cfg));
 
     std::vector<std::vector<GroupSlot>> slots(1, std::vector<GroupSlot>(1));
-    slots[0][0].device_blocks = {42};
+    slots[0][0].device_blocks = {device_block};
     cache->insert(nullptr, {100}, slots);
-
-    cache->evict(1, Tier::DEVICE);
     cache->waitForPendingTasks();
 
-    // D2H copy fails (placeholder resolver) -> host_block NOT set
     auto find = cache->tree()->findNode({100});
-    if (find.matched_node) {
-        EXPECT_FALSE(find.matched_node->group_slots[0].has_host_value());
-    }
-    // Host pool has no outstanding allocations (freed on rollback)
+    ASSERT_NE(find.matched_node, nullptr);
+    EXPECT_TRUE(find.matched_node->group_slots[0].has_device_value());
+    EXPECT_FALSE(find.matched_node->group_slots[0].has_host_value());
     EXPECT_EQ(host_pool->freeBlocksNum(), 8u);
+    EXPECT_EQ(cache->getStats().device_heap_total_size, 1u);
+}
+
+TEST_F(BlockTreeCacheTest, WatermarkDemotionCopiesHostBlockToDisk) {
+    auto host_pool = makeHostPool(256, 8);
+    ASSERT_TRUE(host_pool->init());
+
+    auto disk_pool = makeDiskPool(256, 8, std::make_unique<MemoryDiskBlockIO>());
+
+    auto tree                = std::make_unique<BlockTree>(1);
+    auto full                = std::make_shared<FullComponentGroup>();
+    full->component_group_id = 0;
+    full->setHostPool(host_pool);
+    full->setDiskPool(disk_pool);
+    auto host_block = full->allocateSingleBlock(Tier::HOST);
+    ASSERT_NE(host_block, NULL_BLOCK_IDX);
+    std::vector<ComponentGroupPtr> groups = {full};
+
+    BlockTreeCacheConfig cfg;
+    cfg.enable_device_cache = false;
+    cfg.enable_memory_cache = true;
+    cfg.enable_disk_cache   = true;
+    cfg.watermark_host      = {0.01, 0};
+
+    auto cache = std::make_unique<BlockTreeCache>(
+        std::move(tree), std::move(groups), std::vector<Component>{}, std::move(cfg));
+
+    std::vector<std::vector<GroupSlot>> slots(1, std::vector<GroupSlot>(1));
+    slots[0][0].host_block = host_block;
+    cache->insert(nullptr, {100}, slots);
+
+    auto before = cache->tree()->findNode({100});
+    ASSERT_NE(before.matched_node, nullptr);
+    full->tryAddToHostHeap(before.matched_node);
+    ASSERT_EQ(cache->getStats().host_heap_total_size, 1u);
+
+    std::vector<std::vector<GroupSlot>> trigger_slots(1, std::vector<GroupSlot>(1));
+    cache->insert(nullptr, {200}, trigger_slots);
+    cache->waitForPendingTasks();
+
+    auto find = cache->tree()->findNode({100});
+    ASSERT_NE(find.matched_node, nullptr);
+    const auto& slot = find.matched_node->group_slots[0];
+    EXPECT_FALSE(slot.has_host_value());
+    EXPECT_TRUE(slot.has_disk_value());
+    EXPECT_NE(slot.disk_slot, NULL_BLOCK_IDX);
+    EXPECT_EQ(host_pool->freeBlocksNum(), 8u);
+    EXPECT_EQ(disk_pool->freeBlocksNum(), 7u);
+    EXPECT_EQ(cache->getStats().host_heap_total_size, 0u);
+    EXPECT_EQ(cache->getStats().disk_heap_total_size, 1u);
 }
 
 // ---------------------------------------------------------------------------
-// UT-7: Cascade eviction - parent becomes device leaf after child eviction
+// UT-7: Cascade reclaim - parent becomes device leaf after child reclaim.
 // ---------------------------------------------------------------------------
-TEST_F(BlockTreeCacheTest, ParentBecomesDeviceLeafAfterChildEviction) {
+TEST_F(BlockTreeCacheTest, ParentBecomesDeviceLeafAfterChildReclaim) {
     auto tree                             = std::make_unique<BlockTree>(1);
     auto full                             = std::make_shared<FullComponentGroup>();
     full->component_group_id              = 0;
@@ -715,21 +909,21 @@ TEST_F(BlockTreeCacheTest, ParentBecomesDeviceLeafAfterChildEviction) {
     // Initially only C (leaf) is in heap
     EXPECT_EQ(cache->getStats().device_heap_total_size, 1u);
 
-    // Evict C -> B becomes DeviceLeaf -> enters heap
-    cache->evict(1, Tier::DEVICE);
+    // Reclaim C -> B becomes DeviceLeaf -> enters heap.
+    cache->reclaimBlocks(1, Tier::DEVICE);
     cache->waitForPendingTasks();
     EXPECT_EQ(cache->getStats().device_heap_total_size, 1u);
 
-    // Evict B -> A becomes DeviceLeaf -> enters heap
-    cache->evict(1, Tier::DEVICE);
+    // Reclaim B -> A becomes DeviceLeaf -> enters heap.
+    cache->reclaimBlocks(1, Tier::DEVICE);
     cache->waitForPendingTasks();
     EXPECT_EQ(cache->getStats().device_heap_total_size, 1u);
 }
 
 // ---------------------------------------------------------------------------
-// UT-9: CopyEngine failure does not update slot (Issue 7 fix)
+// UT-9: reclaimBlocks does not use CopyEngine, so no failed copy can update the slot.
 // ---------------------------------------------------------------------------
-TEST_F(BlockTreeCacheTest, CopyFailureDoesNotUpdateSlot) {
+TEST_F(BlockTreeCacheTest, ReclaimBlocksDoesNotUpdateHostSlot) {
     auto host_pool = makeHostPool(256, 4);
     ASSERT_TRUE(host_pool->init());
 
@@ -758,16 +952,12 @@ TEST_F(BlockTreeCacheTest, CopyFailureDoesNotUpdateSlot) {
     slots[0][0].device_blocks = {42};
     cache->insert(nullptr, {100}, slots);
 
-    // Evict: v4 device_pools are not populated yet -> D2H copy should fail.
-    // After fix: host_block should NOT be set, node stays in device heap
-    cache->evict(1, Tier::DEVICE);
+    EXPECT_EQ(cache->reclaimBlocks(1, Tier::DEVICE), 1);
     cache->waitForPendingTasks();
 
     auto find = cache->tree()->findNode({100});
-    if (find.matched_node) {
-        // Copy failed -> host_block should remain invalid
-        EXPECT_FALSE(find.matched_node->group_slots[0].has_host_value());
-    }
+    EXPECT_EQ(find.matched_node, nullptr);
+    EXPECT_EQ(host_pool->freeBlocksNum(), 4u);
 }
 
 TEST_F(BlockTreeCacheTest, LoadBackOnlyReloadsSWAWindow) {
@@ -810,23 +1000,23 @@ TEST_F(BlockTreeCacheTest, LoadBackDetectsHostData) {
     auto cache = std::make_unique<BlockTreeCache>(std::move(tree), std::move(groups), std::vector<Component>{});
     cache->setEnableLoadBack(true);
 
-    // Insert a node and manually set host data (simulating prior eviction)
+    // Insert a node and manually set host data (simulating prior demotion).
     std::vector<std::vector<GroupSlot>> slots(1, std::vector<GroupSlot>(1));
     slots[0][0].device_blocks = {42};
     cache->insert(nullptr, {100}, slots);
 
-    // Evict to host (no CopyEngine → direct release, node deleted)
+    // Reclaim without host demotion, then manually set up a host-only node.
     // Instead, manually set up a node with host_block but no device_blocks
-    cache->evict(1, Tier::DEVICE);
+    cache->reclaimBlocks(1, Tier::DEVICE);
     cache->waitForPendingTasks();
 
-    // After eviction without host enabled, node is deleted.
+    // After reclaim without host enabled, node is deleted.
     // Let's insert again and manually simulate host-only state
     std::vector<std::vector<GroupSlot>> slots2(1, std::vector<GroupSlot>(1));
     slots2[0][0].device_blocks = {55};
     cache->insert(nullptr, {200}, slots2);
 
-    // Manually set host_block and clear device_blocks to simulate evicted state
+    // Manually set host_block and clear device_blocks to simulate a demoted state.
     auto find = cache->tree()->findNode({200});
     ASSERT_NE(find.matched_node, nullptr);
     find.matched_node->group_slots[0].host_block = 7;

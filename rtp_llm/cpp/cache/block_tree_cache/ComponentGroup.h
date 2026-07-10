@@ -27,11 +27,25 @@ struct Component {
     int                                  device_pool_index{-1};
 };
 
+// Unified block set: a batch of blocks owned by one component group at one tier.
+// Self-describing layout: outer index is the cache_key (tree node), inner index
+// equals the device pool index, so release/reference needs no i % num_pools.
+struct GroupBlockSet {
+    int  component_group_id{-1};
+    Tier tier{Tier::DEVICE};
+    // per_node[k]    -> the k-th cache_key (tree node)
+    // per_node[k][p] -> device_pools_[p]; inner size == 1 for HOST/DISK.
+    std::vector<std::vector<BlockIdxType>> per_node;
+};
+
 // Match result returned by BlockTreeCache::match().
 struct BlockTreeMatchResult {
     TreeNode*        matched_node{nullptr};
     size_t           matched_blocks{0};
     BlockIndicesType block_indices;
+
+    // Structured match-protection references, one entry per group. Release basis.
+    std::vector<GroupBlockSet> matched_block_sets;
 
     std::shared_ptr<AsyncContext> async_context;
     size_t                        load_back_blocks{0};
@@ -65,12 +79,9 @@ struct EvictionMove {
     int                       component_group_id{-1};
     Tier                      source_tier{Tier::NONE};
     Tier                      target_tier{Tier::NONE};
-    std::vector<BlockIdxType> blocks_to_release;
-    BlockIdxType              target_block{NULL_BLOCK_IDX};
+    std::vector<BlockIdxType> source_blocks;
+    std::vector<BlockIdxType> target_blocks;
 };
-
-// Predicate: returns true if all blocks in the group are evictable (refcount == 1).
-using IsBlockEvictableFn = std::function<bool(BlockIdxType)>;
 
 // ComponentGroup: active management entity.
 class ComponentGroup {
@@ -117,11 +128,6 @@ public:
     // ---- Reference count for path lock/load_back (per-group strategy) ----
     // Returns number of nodes from path tail to process.
     virtual size_t computeReferenceCount(size_t matched_block_count, const std::vector<TreeNode*>& path) const = 0;
-
-    // ---- Reference counting callback (injected by BlockTreeCache) ----
-    void setIsBlockEvictable(IsBlockEvictableFn fn) {
-        is_block_evictable_ = std::move(fn);
-    }
 
     // ---- Heap access helpers ----
     EvictionHeap* heapForTier(Tier tier) {
@@ -209,8 +215,33 @@ public:
         }
     }
 
+    // ---- Unified structured block lifecycle (device multi-pool & match) ----
+    // count = number of cache_keys. DEVICE allocates count blocks per pool,
+    // organized into per_node[k][p]. Returns empty set on failure (rolled back).
+    GroupBlockSet allocateBlocks(Tier tier, size_t count);
+    // Release cache-holding references; inner index is the pool index.
+    void          releaseBlocks(const GroupBlockSet& set) const;
+    // Temporary external references, mainly for match result protection.
+    void          referenceBlocks(const GroupBlockSet& set) const;
+    void          unreferenceBlocks(const GroupBlockSet& set) const;
+
+    // Scalar helpers for single-pool tiers (HOST/DISK); DEVICE is multi-pool, use allocateBlocks.
+    BlockIdxType allocateSingleBlock(Tier tier);
+    void         releaseSingleBlock(Tier tier, BlockIdxType block) const;
+
+    // ---- Slot helpers ----
+    std::vector<BlockIdxType> getBlocks(const GroupSlot& slot, Tier tier) const;
+    void                      setBlocks(GroupSlot& slot, Tier tier, const std::vector<BlockIdxType>& blocks);
+
+    // ---- Evictability: block held only by the single cache reference ----
+    bool isSlotEvictable(const GroupSlot& slot, Tier tier) const;
+
+    // ---- Generic heap helpers (dispatch by tier) ----
+    void tryAddToHeap(TreeNode* node, Tier tier);
+    void invalidateHeap(TreeNode* node, Tier tier);
+    void clearHeapFlag(GroupSlot& slot, Tier tier);
+
 protected:
-    IsBlockEvictableFn              is_block_evictable_;
     std::vector<DeviceBlockPoolPtr> device_pools_;
     std::shared_ptr<HostBlockPool>  host_pool_;
     std::shared_ptr<DiskBlockPool>  disk_pool_;

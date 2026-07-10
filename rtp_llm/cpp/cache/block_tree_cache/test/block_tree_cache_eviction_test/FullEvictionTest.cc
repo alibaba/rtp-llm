@@ -45,19 +45,19 @@ TEST_F(FullEvictionTest, OnlyLeafEntersDeviceHeap) {
 }
 
 // ---------------------------------------------------------------------------
-// Test: Evict single leaf — async, node deleted, parent becomes leaf.
+// Test: Reclaim single leaf — node deleted, parent becomes leaf.
 //
-//   Before evict(DEVICE):                After evict(1) + wait:
+//   Before reclaimBlocks(DEVICE):                After reclaimBlocks(1) + wait:
 //   root → [100] → [200] → [300] ←heap   root → [100] → [200] ←new leaf, in heap
 //
-//   [300] evicted async: D cleared → empty → deleted.
+//   [300] reclaimed: D cleared → empty → deleted.
 //   [200] becomes leaf → tryAddToDeviceHeap → enters heap.
 // ---------------------------------------------------------------------------
-TEST_F(FullEvictionTest, EvictSingleLeafDeletesNodeAndPromotesParent) {
+TEST_F(FullEvictionTest, ReclaimSingleLeafDeletesNodeAndPromotesParent) {
     insertPath({100, 200, 300}, 10);
 
-    int evicted = cache_->evict(1, Tier::DEVICE);
-    EXPECT_EQ(evicted, 1);
+    int reclaimed = cache_->reclaimBlocks(1, Tier::DEVICE);
+    EXPECT_EQ(reclaimed, 1);
     cache_->waitForPendingTasks();
 
     auto stats = cache_->getStats();
@@ -66,15 +66,15 @@ TEST_F(FullEvictionTest, EvictSingleLeafDeletesNodeAndPromotesParent) {
 }
 
 // ---------------------------------------------------------------------------
-// Test: Parent becomes leaf after child eviction.
+// Test: Parent becomes leaf after child reclaim.
 //
-//   Before:                              After evict(1) + wait:
+//   Before:                              After reclaimBlocks(1) + wait:
 //   root → [100] → [200] → [300] ←heap   root → [100] → [200] ←heap
 // ---------------------------------------------------------------------------
 TEST_F(FullEvictionTest, ParentBecomesLeafAfterChildEviction) {
     insertPath({100, 200, 300}, 10);
 
-    cache_->evict(1, Tier::DEVICE);
+    cache_->reclaimBlocks(1, Tier::DEVICE);
     cache_->waitForPendingTasks();
 
     auto stats = cache_->getStats();
@@ -83,34 +83,34 @@ TEST_F(FullEvictionTest, ParentBecomesLeafAfterChildEviction) {
 }
 
 // ---------------------------------------------------------------------------
-// Test: Sequential eviction drains a 3-node chain.
+// Test: Sequential reclaim drains a 3-node chain.
 //
 //   Step 0: root → [100] → [200] → [300]  heap: {[300]}
-//   Step 1: evict [300] → deleted          heap: {[200]}
-//   Step 2: evict [200] → deleted          heap: {[100]}
-//   Step 3: evict [100] → deleted          heap: {}
+//   Step 1: reclaim [300] → deleted        heap: {[200]}
+//   Step 2: reclaim [200] → deleted        heap: {[100]}
+//   Step 3: reclaim [100] → deleted        heap: {}
 //   Final:  empty tree
 // ---------------------------------------------------------------------------
-TEST_F(FullEvictionTest, SequentialEvictionDrainsChain) {
+TEST_F(FullEvictionTest, SequentialReclaimDrainsChain) {
     insertPath({100, 200, 300}, 10);
 
-    // Step 1: evict [300]
-    EXPECT_EQ(cache_->evict(1, Tier::DEVICE), 1);
+    // Step 1: reclaim [300]
+    EXPECT_EQ(cache_->reclaimBlocks(1, Tier::DEVICE), 1);
     cache_->waitForPendingTasks();
     EXPECT_EQ(cache_->getStats().tree_node_count, 2u);
 
-    // Step 2: evict [200]
-    EXPECT_EQ(cache_->evict(1, Tier::DEVICE), 1);
+    // Step 2: reclaim [200]
+    EXPECT_EQ(cache_->reclaimBlocks(1, Tier::DEVICE), 1);
     cache_->waitForPendingTasks();
     EXPECT_EQ(cache_->getStats().tree_node_count, 1u);
 
-    // Step 3: evict [100]
-    EXPECT_EQ(cache_->evict(1, Tier::DEVICE), 1);
+    // Step 3: reclaim [100]
+    EXPECT_EQ(cache_->reclaimBlocks(1, Tier::DEVICE), 1);
     cache_->waitForPendingTasks();
     EXPECT_EQ(cache_->getStats().tree_node_count, 0u);
 
-    // No more to evict
-    EXPECT_EQ(cache_->evict(1, Tier::DEVICE), 0);
+    // No more to reclaim
+    EXPECT_EQ(cache_->reclaimBlocks(1, Tier::DEVICE), 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -120,7 +120,7 @@ TEST_F(FullEvictionTest, SequentialEvictionDrainsChain) {
 //                → [300] D={20} ← leaf, in heap
 //
 //   Both [200] and [300] are insert-leaves → both in heap.
-//   After evicting both leaves, [100] becomes leaf with data → 3rd evict needed.
+//   After reclaiming both leaves, [100] becomes leaf with data → 3rd reclaim needed.
 // ---------------------------------------------------------------------------
 TEST_F(FullEvictionTest, ForkBothLeavesEvictable) {
     insertPath({100, 200}, 10);
@@ -130,45 +130,45 @@ TEST_F(FullEvictionTest, ForkBothLeavesEvictable) {
     EXPECT_EQ(stats.tree_node_count, 3u);
     EXPECT_EQ(stats.device_heap_total_size, 2u);  // [200] and [300]
 
-    // Evict first leaf
-    cache_->evict(1, Tier::DEVICE);
+    // Reclaim first leaf
+    cache_->reclaimBlocks(1, Tier::DEVICE);
     cache_->waitForPendingTasks();
     EXPECT_EQ(cache_->getStats().tree_node_count, 2u);  // [100] + one leaf
 
-    // Evict second leaf
-    cache_->evict(1, Tier::DEVICE);
+    // Reclaim second leaf
+    cache_->reclaimBlocks(1, Tier::DEVICE);
     cache_->waitForPendingTasks();
     EXPECT_EQ(cache_->getStats().tree_node_count, 1u);  // [100] survives (has data)
 
-    // Evict [100] (now leaf after both children deleted)
-    cache_->evict(1, Tier::DEVICE);
+    // Reclaim [100] (now leaf after both children deleted)
+    cache_->reclaimBlocks(1, Tier::DEVICE);
     cache_->waitForPendingTasks();
     EXPECT_EQ(cache_->getStats().tree_node_count, 0u);
 }
 
 // ---------------------------------------------------------------------------
-// Test: Evict empty tree returns 0.
+// Test: Reclaim empty tree returns 0.
 // ---------------------------------------------------------------------------
-TEST_F(FullEvictionTest, EvictEmptyTreeReturnsZero) {
-    EXPECT_EQ(cache_->evict(1, Tier::DEVICE), 0);
+TEST_F(FullEvictionTest, ReclaimEmptyTreeReturnsZero) {
+    EXPECT_EQ(cache_->reclaimBlocks(1, Tier::DEVICE), 0);
 }
 
 // ---------------------------------------------------------------------------
-// Test: LRU ordering — oldest leaf evicted first.
+// Test: LRU ordering — oldest leaf reclaimed first.
 //
 //   Insert [100] D={10}, then [200] D={20}.
-//   Both are leaves (separate roots). LRU: evict [100] first.
+//   Both are leaves (separate roots). LRU: reclaim [100] first.
 // ---------------------------------------------------------------------------
-TEST_F(FullEvictionTest, LRUEvictsOldestLeafFirst) {
+TEST_F(FullEvictionTest, LRUReclaimsOldestLeafFirst) {
     insertPath({100}, 10);
     insertPath({200}, 20);
 
     EXPECT_EQ(cache_->getStats().device_heap_total_size, 2u);
 
-    cache_->evict(1, Tier::DEVICE);
+    cache_->reclaimBlocks(1, Tier::DEVICE);
     cache_->waitForPendingTasks();
 
-    // [100] was evicted (oldest). Only [200] remains.
+    // [100] was reclaimed (oldest). Only [200] remains.
     EXPECT_EQ(cache_->getStats().tree_node_count, 1u);
 
     auto result = cache_->match({200});

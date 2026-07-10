@@ -90,68 +90,45 @@ std::optional<EvictionMove> ComponentGroup::driveEviction(int num_blocks, Tier t
             return std::nullopt;
         }
 
-        // Check evictability (reference count) — skip if not evictable
-        if (is_block_evictable_) {
-            auto& slot      = entry->node->group_slots[static_cast<size_t>(component_group_id)];
-            bool  evictable = true;
-            switch (tier) {
-                case Tier::DEVICE:
-                    for (auto block : slot.device_blocks) {
-                        if (block != NULL_BLOCK_IDX && !is_block_evictable_(block)) {
-                            evictable = false;
-                            break;
-                        }
-                    }
-                    break;
-                case Tier::HOST:
-                    if (slot.has_host_value() && !is_block_evictable_(slot.host_block)) {
-                        evictable = false;
-                    }
-                    break;
-                case Tier::DISK:
-                    if (slot.has_disk_value() && !is_block_evictable_(slot.disk_slot)) {
-                        evictable = false;
-                    }
-                    break;
-                default:
-                    break;
-            }
-            if (!evictable) {
-                skipped_nodes.push_back(entry->node);
-                continue;  // skip this candidate, try next
-            }
+        // Skip if not evictable (evictable only when cache is the sole holder).
+        auto& slot = entry->node->group_slots[static_cast<size_t>(component_group_id)];
+        if (!isSlotEvictable(slot, tier)) {
+            skipped_nodes.push_back(entry->node);
+            continue;
         }
 
-        EvictionMove result;
-        result.node               = entry->node;
-        result.component_group_id = component_group_id;
-        result.source_tier        = tier;
+        EvictionMove eviction_move;
+        eviction_move.node               = entry->node;
+        eviction_move.component_group_id = component_group_id;
+        eviction_move.source_tier        = tier;
 
         switch (tier) {
             case Tier::DEVICE: {
-                result.target_tier       = Tier::HOST;
+                eviction_move.target_tier       = Tier::HOST;
                 auto& slot               = entry->node->group_slots[static_cast<size_t>(component_group_id)];
-                result.blocks_to_release = slot.device_blocks;
+                eviction_move.source_blocks = slot.device_blocks;
                 break;
             }
             case Tier::HOST: {
-                result.target_tier       = Tier::DISK;
+                eviction_move.target_tier       = Tier::DISK;
                 auto& slot               = entry->node->group_slots[static_cast<size_t>(component_group_id)];
-                result.blocks_to_release = {slot.host_block};
+                eviction_move.source_blocks = {slot.host_block};
                 break;
             }
             case Tier::DISK: {
-                result.target_tier       = Tier::NONE;
+                eviction_move.target_tier       = Tier::NONE;
                 auto& slot               = entry->node->group_slots[static_cast<size_t>(component_group_id)];
-                result.blocks_to_release = {slot.disk_slot};
+                eviction_move.source_blocks = {slot.disk_slot};
                 break;
             }
             default:
                 return std::nullopt;
         }
 
+        // Victim leaves the heap for good; keep its flag consistent.
+        clearHeapFlag(slot, tier);
         restore_skipped_nodes();
-        return result;
+        return eviction_move;
     }
 
     restore_skipped_nodes();
@@ -242,6 +219,235 @@ void ComponentGroup::tryAddToDiskHeap(TreeNode* node) {
     if (!slot.has_device_value() && !slot.has_host_value() && slot.has_disk_value() && !slot.in_disk_heap) {
         disk_heap->push(node, component_group_id);
         slot.in_disk_heap = true;
+    }
+}
+
+// ---- Unified structured block lifecycle ----
+
+GroupBlockSet ComponentGroup::allocateBlocks(Tier tier, size_t count) {
+    GroupBlockSet set{component_group_id, tier};
+    if (tier == Tier::DEVICE) {
+        set.per_node.resize(count);
+        for (size_t k = 0; k < count; ++k) {
+            set.per_node[k].resize(device_pools_.size(), NULL_BLOCK_IDX);
+            for (size_t p = 0; p < device_pools_.size(); ++p) {
+                if (!device_pools_[p]) {
+                    releaseBlocks(set);
+                    return {};
+                }
+                auto b = device_pools_[p]->malloc();
+                if (!b.has_value()) {
+                    releaseBlocks(set);
+                    return {};
+                }
+                device_pools_[p]->incRef(*b);
+                set.per_node[k][p] = *b;
+            }
+        }
+        return set;
+    }
+
+    set.per_node.resize(count);
+    for (size_t k = 0; k < count; ++k) {
+        BlockIdxType b = allocateSingleBlock(tier);
+        if (isNullBlockIdx(b)) {
+            releaseBlocks(set);
+            return {};
+        }
+        set.per_node[k] = {b};
+    }
+    return set;
+}
+
+void ComponentGroup::releaseBlocks(const GroupBlockSet& set) const {
+    switch (set.tier) {
+        case Tier::DEVICE:
+            for (const auto& node_blocks : set.per_node) {
+                for (size_t p = 0; p < node_blocks.size() && p < device_pools_.size(); ++p) {
+                    if (device_pools_[p] && !isNullBlockIdx(node_blocks[p])) {
+                        device_pools_[p]->releaseRef(node_blocks[p]);
+                    }
+                }
+            }
+            break;
+        case Tier::HOST:
+            if (host_pool_) {
+                for (const auto& node_blocks : set.per_node)
+                    for (auto b : node_blocks)
+                        if (!isNullBlockIdx(b))
+                            host_pool_->releaseRef(b);
+            }
+            break;
+        case Tier::DISK:
+            if (disk_pool_) {
+                for (const auto& node_blocks : set.per_node)
+                    for (auto b : node_blocks)
+                        if (!isNullBlockIdx(b))
+                            disk_pool_->releaseRef(b);
+            }
+            break;
+        default:
+            break;
+    }
+}
+
+void ComponentGroup::referenceBlocks(const GroupBlockSet& set) const {
+    switch (set.tier) {
+        case Tier::DEVICE:
+            for (const auto& node_blocks : set.per_node) {
+                for (size_t p = 0; p < node_blocks.size() && p < device_pools_.size(); ++p) {
+                    if (device_pools_[p] && !isNullBlockIdx(node_blocks[p])) {
+                        device_pools_[p]->incRef(node_blocks[p]);
+                    }
+                }
+            }
+            break;
+        case Tier::HOST:
+            if (host_pool_) {
+                for (const auto& node_blocks : set.per_node)
+                    for (auto b : node_blocks)
+                        if (!isNullBlockIdx(b))
+                            host_pool_->incRef(b);
+            }
+            break;
+        case Tier::DISK:
+            if (disk_pool_) {
+                for (const auto& node_blocks : set.per_node)
+                    for (auto b : node_blocks)
+                        if (!isNullBlockIdx(b))
+                            disk_pool_->incRef(b);
+            }
+            break;
+        default:
+            break;
+    }
+}
+
+void ComponentGroup::unreferenceBlocks(const GroupBlockSet& set) const {
+    releaseBlocks(set);
+}
+
+BlockIdxType ComponentGroup::allocateSingleBlock(Tier tier) {
+    // DEVICE spans multiple pools and has no scalar block: use allocateBlocks.
+    IBlockPool* pool = nullptr;
+    if (tier == Tier::HOST) {
+        pool = host_pool_.get();
+    } else if (tier == Tier::DISK) {
+        pool = disk_pool_.get();
+    }
+    if (!pool)
+        return NULL_BLOCK_IDX;
+    auto b = pool->malloc();
+    if (!b.has_value())
+        return NULL_BLOCK_IDX;
+    pool->incRef(*b);
+    return *b;
+}
+
+void ComponentGroup::releaseSingleBlock(Tier tier, BlockIdxType block) const {
+    if (isNullBlockIdx(block))
+        return;
+    if (tier == Tier::HOST) {
+        if (host_pool_)
+            host_pool_->releaseRef(block);
+    } else if (tier == Tier::DISK) {
+        if (disk_pool_)
+            disk_pool_->releaseRef(block);
+    }
+}
+
+std::vector<BlockIdxType> ComponentGroup::getBlocks(const GroupSlot& slot, Tier tier) const {
+    switch (tier) {
+        case Tier::DEVICE:
+            return slot.device_blocks;
+        case Tier::HOST:
+            return slot.has_host_value() ? std::vector<BlockIdxType>{slot.host_block} : std::vector<BlockIdxType>{};
+        case Tier::DISK:
+            return slot.has_disk_value() ? std::vector<BlockIdxType>{slot.disk_slot} : std::vector<BlockIdxType>{};
+        default:
+            return {};
+    }
+}
+
+void ComponentGroup::setBlocks(GroupSlot& slot, Tier tier, const std::vector<BlockIdxType>& blocks) {
+    switch (tier) {
+        case Tier::DEVICE:
+            slot.device_blocks = blocks;
+            break;
+        case Tier::HOST:
+            slot.host_block = blocks.empty() ? NULL_BLOCK_IDX : blocks[0];
+            break;
+        case Tier::DISK:
+            slot.disk_slot = blocks.empty() ? NULL_BLOCK_IDX : blocks[0];
+            break;
+        default:
+            break;
+    }
+}
+
+bool ComponentGroup::isSlotEvictable(const GroupSlot& slot, Tier tier) const {
+    // A block is evictable only when its sole holder is the cache reference
+    // (refCount == 1). When no pool owns the block, treat it as evictable.
+    auto pool_evictable = [](const auto& pool, BlockIdxType block) {
+        if (isNullBlockIdx(block) || !pool) {
+            return true;
+        }
+        return pool->isAllocated(block) && pool->refCount(block) == 1;
+    };
+
+    switch (tier) {
+        case Tier::DEVICE:
+            for (size_t i = 0; i < slot.device_blocks.size(); ++i) {
+                const auto& pool = i < device_pools_.size() ? device_pools_[i] : nullptr;
+                if (!pool_evictable(pool, slot.device_blocks[i])) {
+                    return false;
+                }
+            }
+            return true;
+        case Tier::HOST:
+            return !slot.has_host_value() || pool_evictable(host_pool_, slot.host_block);
+        case Tier::DISK:
+            return !slot.has_disk_value() || pool_evictable(disk_pool_, slot.disk_slot);
+        default:
+            return false;
+    }
+}
+
+void ComponentGroup::tryAddToHeap(TreeNode* node, Tier tier) {
+    switch (tier) {
+        case Tier::DEVICE:
+            tryAddToDeviceHeap(node);
+            break;
+        case Tier::HOST:
+            tryAddToHostHeap(node);
+            break;
+        case Tier::DISK:
+            tryAddToDiskHeap(node);
+            break;
+        default:
+            break;
+    }
+}
+
+void ComponentGroup::invalidateHeap(TreeNode* node, Tier tier) {
+    if (auto* heap = heapForTier(tier)) {
+        heap->invalidate(node);
+    }
+}
+
+void ComponentGroup::clearHeapFlag(GroupSlot& slot, Tier tier) {
+    switch (tier) {
+        case Tier::DEVICE:
+            slot.in_device_heap = false;
+            break;
+        case Tier::HOST:
+            slot.in_host_heap = false;
+            break;
+        case Tier::DISK:
+            slot.in_disk_heap = false;
+            break;
+        default:
+            break;
     }
 }
 
