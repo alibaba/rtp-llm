@@ -195,6 +195,11 @@
                 <artifactId>vipserver</artifactId>
                 <version>${project.version}</version>
             </dependency>
+            <dependency>
+                <groupId>org.flexlb</groupId>
+                <artifactId>dashscope-discovery</artifactId>
+                <version>${project.version}</version>
+            </dependency>
 
             <!-- util tools 依赖 start -->
             <dependency>

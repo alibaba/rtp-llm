@@ -21,9 +21,6 @@ public class ServiceRoute {
     @JsonProperty("role_endpoints")
     private List<GroupRoleEndPoint> roleEndpoints = new ArrayList<>();
 
-    @JsonProperty("load_balance")
-    private Boolean loadBalance;
-
     public List<Pair<String, Endpoint>> getAllEndpointsWithGroup(RoleType roleType) {
         List<Pair<String, Endpoint>> endpoints = new ArrayList<>();
         for (GroupRoleEndPoint groupRoleEndPoint : roleEndpoints) {

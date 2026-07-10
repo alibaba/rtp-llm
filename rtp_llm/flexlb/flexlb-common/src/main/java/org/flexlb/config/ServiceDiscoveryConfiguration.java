@@ -1,9 +1,10 @@
 package org.flexlb.config;
 
 import lombok.extern.slf4j.Slf4j;
-import org.flexlb.discovery.NoOpServiceDiscovery;
 import org.flexlb.discovery.ServiceDiscovery;
+import org.flexlb.discovery.StaticEnvironmentServiceDiscovery;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
@@ -16,15 +17,18 @@ import org.springframework.context.annotation.Configuration;
 @Configuration
 public class ServiceDiscoveryConfiguration {
     /**
-     * Create default ServiceDiscovery Bean
-     * Used when no other ServiceDiscovery implementation is available
+     * Create default service discovery backed by static environment variables.
      *
-     * @return NoOpServiceDiscovery instance
+     * @return StaticEnvironmentServiceDiscovery instance
      */
     @Bean
     @ConditionalOnMissingBean(ServiceDiscovery.class)
-    public ServiceDiscovery serviceDiscovery() {
-        log.info("Creating default NoOpServiceDiscovery (env-based discovery)");
-        return NoOpServiceDiscovery.getInstance();
+    @ConditionalOnProperty(
+            prefix = "flexlb.discovery",
+            name = "type",
+            havingValue = "static-env")
+    public ServiceDiscovery staticEnvironmentServiceDiscovery() {
+        log.info("Creating StaticEnvironmentServiceDiscovery (strategy=static-env)");
+        return StaticEnvironmentServiceDiscovery.getInstance();
     }
 }

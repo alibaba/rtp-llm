@@ -67,6 +67,11 @@
                     <groupId>org.flexlb</groupId>
                     <artifactId>vipserver</artifactId>
                 </dependency>
+                <!-- DashScope discovery - enabled with FLEXLB_DISCOVERY_TYPE=dashscope -->
+                <dependency>
+                    <groupId>org.flexlb</groupId>
+                    <artifactId>dashscope-discovery</artifactId>
+                </dependency>
             </dependencies>
         </profile>
     </profiles>

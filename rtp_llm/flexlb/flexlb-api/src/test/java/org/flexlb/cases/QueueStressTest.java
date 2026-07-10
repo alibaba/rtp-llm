@@ -52,8 +52,8 @@ public class QueueStressTest {
     public static QueueStressTest init(WebTestClient webClient, EnvironmentVariables environmentVariables,
                                        ConfigService configService
     ) {
-        environmentVariables.set("DOMAIN_ADDRESS:com.prefill.hosts.address", "127.0.0.100:8080,127.0.0.101:8080");
-        environmentVariables.set("DOMAIN_ADDRESS:com.decode.hosts.address", "127.0.0.102:8080,127.0.0.103:8080");
+        environmentVariables.set("FLEXLB_DISCOVERY_STATIC_HOSTS_COM_PREFILL_HOSTS_ADDRESS", "127.0.0.100:8080,127.0.0.101:8080");
+        environmentVariables.set("FLEXLB_DISCOVERY_STATIC_HOSTS_COM_DECODE_HOSTS_ADDRESS", "127.0.0.102:8080,127.0.0.103:8080");
         return new QueueStressTest(webClient, configService);
     }
 
