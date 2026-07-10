@@ -11,6 +11,7 @@
 #include "rtp_llm/cpp/models/logits_processor/BaseLogitsProcessor.h"
 #include "rtp_llm/cpp/models/logits_processor/LogitsProcessorStates.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
+#include <unordered_map>
 #include <unordered_set>
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include "autil/TimeUtility.h"
@@ -290,6 +291,294 @@ void samplerTraceLogRows(const char*          stage,
     }
 }
 
+bool samplerBadWatchEnabled() {
+    static const bool enabled = [] {
+        auto value = samplerTraceEnv("RTPLLM_SAMPLER_BAD_WATCH");
+        std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) { return std::tolower(c); });
+        return value == "1" || value == "true" || value == "yes" || value == "on";
+    }();
+    return enabled;
+}
+
+int samplerBadWatchEnvInt(const char* name, int default_value) {
+    const auto value = samplerTraceEnv(name);
+    if (value.empty()) {
+        return default_value;
+    }
+    try {
+        return std::stoi(value);
+    } catch (...) {
+        return default_value;
+    }
+}
+
+std::vector<std::string> samplerBadWatchFilters() {
+    static const std::vector<std::string> filters = [] {
+        std::vector<std::string> result;
+        std::stringstream        ss(samplerTraceEnv("RTPLLM_SAMPLER_BAD_WATCH_FILTER"));
+        std::string              item;
+        while (std::getline(ss, item, ',')) {
+            auto begin = item.find_first_not_of(" \t\r\n");
+            if (begin == std::string::npos) {
+                continue;
+            }
+            auto end = item.find_last_not_of(" \t\r\n");
+            result.emplace_back(item.substr(begin, end - begin + 1));
+        }
+        return result;
+    }();
+    return filters;
+}
+
+bool samplerBadWatchMatches(const std::string& trace_id) {
+    if (!samplerBadWatchEnabled()) {
+        return false;
+    }
+    const auto filters = samplerBadWatchFilters();
+    if (filters.empty()) {
+        return true;
+    }
+    return std::any_of(filters.begin(), filters.end(), [&](const std::string& filter) {
+        return trace_id.find(filter) != std::string::npos;
+    });
+}
+
+bool samplerBadWatchChunkMatches(const SamplerInputs& inputs, size_t from_batch_idx_in, size_t batch_size_in) {
+    if (!samplerBadWatchEnabled()) {
+        return false;
+    }
+    for (size_t i = 0; i < batch_size_in; ++i) {
+        const auto idx      = from_batch_idx_in + i;
+        const auto trace_id = idx < inputs.trace_ids.size() ? inputs.trace_ids[idx] : "";
+        if (samplerBadWatchMatches(trace_id)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+std::string samplerBadWatchOutputPath() {
+    auto explicit_file = samplerTraceEnv("RTPLLM_SAMPLER_BAD_WATCH_FILE");
+    if (!explicit_file.empty()) {
+        return explicit_file;
+    }
+    auto dir = samplerTraceEnv("RTPLLM_SAMPLER_BAD_WATCH_DIR", "/tmp/rtpllm_sampler_bad_watch");
+    std::ostringstream oss;
+    oss << dir << "/sampler_bad_watch_rank" << samplerTraceRankString() << "_pid" << ::getpid() << ".jsonl";
+    return oss.str();
+}
+
+std::ofstream& samplerBadWatchOutputStream() {
+    static std::ofstream stream;
+    static bool          initialized = false;
+    if (!initialized) {
+        initialized = true;
+        const auto path = samplerBadWatchOutputPath();
+        if (samplerTraceEnsureDir(samplerTraceDirname(path))) {
+            stream.open(path, std::ios::out | std::ios::app);
+        }
+    }
+    return stream;
+}
+
+std::mutex& samplerBadWatchMutex() {
+    static std::mutex mutex;
+    return mutex;
+}
+
+void samplerBadWatchAppendIntVector(std::ostream& os, const std::vector<int>& values) {
+    os << "[";
+    for (size_t i = 0; i < values.size(); ++i) {
+        if (i) {
+            os << ",";
+        }
+        os << values[i];
+    }
+    os << "]";
+}
+
+struct SamplerBadWatchRepeatedSuffixInfo {
+    bool             matched      = false;
+    int              pattern_size = 0;
+    int              repeat_count = 0;
+    std::vector<int> pattern;
+};
+
+SamplerBadWatchRepeatedSuffixInfo samplerBadWatchFindRepeatedSuffix(const std::vector<int>& values,
+                                                                     int                    max_pattern_size,
+                                                                     int                    min_repeats) {
+    SamplerBadWatchRepeatedSuffixInfo info;
+    if (min_repeats <= 1) {
+        return info;
+    }
+    for (int pattern_size = 1; pattern_size <= max_pattern_size; ++pattern_size) {
+        const int need = pattern_size * min_repeats;
+        if ((int)values.size() < need) {
+            continue;
+        }
+        int repeat_count = 1;
+        for (int start = static_cast<int>(values.size()) - 2 * pattern_size; start >= 0; start -= pattern_size) {
+            bool same = true;
+            for (int offset = 0; offset < pattern_size; ++offset) {
+                if (values[start + offset] != values[values.size() - pattern_size + offset]) {
+                    same = false;
+                    break;
+                }
+            }
+            if (!same) {
+                break;
+            }
+            ++repeat_count;
+        }
+        if (repeat_count >= min_repeats) {
+            info.matched      = true;
+            info.pattern_size = pattern_size;
+            info.repeat_count = repeat_count;
+            info.pattern.assign(values.end() - pattern_size, values.end());
+            return info;
+        }
+    }
+    return info;
+}
+
+struct SamplerBadWatchState {
+    std::vector<int> token_tail;
+    bool             triggered      = false;
+    int              cf_total       = 0;
+    size_t           cf_match_index = 0;
+};
+
+std::unordered_map<std::string, SamplerBadWatchState>& samplerBadWatchStates() {
+    static std::unordered_map<std::string, SamplerBadWatchState> states;
+    return states;
+}
+
+void samplerBadWatchUpdateCfCount(SamplerBadWatchState&    state,
+                                  int                      token,
+                                  const std::vector<int>&  pattern) {
+    if (pattern.empty()) {
+        return;
+    }
+    if (state.cf_match_index >= pattern.size()) {
+        state.cf_match_index = 0;
+    }
+    while (state.cf_match_index > 0 && token != pattern[state.cf_match_index]) {
+        state.cf_match_index = 0;
+    }
+    if (token != pattern[state.cf_match_index]) {
+        return;
+    }
+    ++state.cf_match_index;
+    if (state.cf_match_index == pattern.size()) {
+        ++state.cf_total;
+        state.cf_match_index = 0;
+    }
+}
+
+void samplerBadWatchMaybeLog(const SamplerInputs& inputs,
+                             size_t               from_batch_idx_in,
+                             size_t               batch_size_in,
+                             const torch::Tensor& logits,
+                             const torch::Tensor& token_ids) {
+    if (!samplerBadWatchChunkMatches(inputs, from_batch_idx_in, batch_size_in)) {
+        return;
+    }
+    const int tail_size        = std::max(16, samplerBadWatchEnvInt("RTPLLM_SAMPLER_BAD_WATCH_TAIL_SIZE", 160));
+    const int min_cf           = std::max(2, samplerBadWatchEnvInt("RTPLLM_SAMPLER_BAD_WATCH_MIN_CF", 4));
+    const int max_pattern_size = std::max(1, samplerBadWatchEnvInt("RTPLLM_SAMPLER_BAD_WATCH_MAX_PATTERN_SIZE", 8));
+    const int min_repeats      = std::max(2, samplerBadWatchEnvInt("RTPLLM_SAMPLER_BAD_WATCH_MIN_REPEATS", 8));
+    const int topn             = std::max(1, samplerBadWatchEnvInt("RTPLLM_SAMPLER_BAD_WATCH_TOPK", 8));
+
+    auto selected_cpu =
+        token_ids.slice(1, inputs.step, inputs.step + 1).squeeze(1).to(torch::kCPU).contiguous();
+    const auto* selected_ptr = selected_cpu.data_ptr<int32_t>();
+    const auto* input_lengths       = inputs.input_lengths.data_ptr<int32_t>();
+    const auto* sequence_lengths    = inputs.sequence_lengths.data_ptr<int32_t>();
+    const auto* top_k               = inputs.top_k.data_ptr<int32_t>();
+    const auto* top_p               = inputs.top_p.data_ptr<float>();
+    const auto* temperature         = inputs.temperature.data_ptr<float>();
+    const auto* repetition_penalty  = inputs.repetition_penalty.data_ptr<float>();
+    const auto* presence_penalty    = inputs.presence_penalty.data_ptr<float>();
+    const auto* frequency_penalty   = inputs.frequency_penalty.data_ptr<float>();
+    const auto* do_sample           = inputs.do_sample.data_ptr<bool>();
+
+    std::vector<int> chunk_selected;
+    chunk_selected.reserve(batch_size_in);
+    for (size_t i = 0; i < batch_size_in; ++i) {
+        chunk_selected.push_back(selected_ptr[i]);
+    }
+
+    static const std::vector<int> cf_pattern = {27, 9500, 1419, 9500, 29};
+    std::lock_guard<std::mutex> lock(samplerBadWatchMutex());
+    for (size_t i = 0; i < batch_size_in; ++i) {
+        const auto global_idx = from_batch_idx_in + i;
+        const auto trace_id   = global_idx < inputs.trace_ids.size() ? inputs.trace_ids[global_idx] : "";
+        if (!samplerBadWatchMatches(trace_id)) {
+            continue;
+        }
+        auto& state = samplerBadWatchStates()[trace_id];
+        const int token = selected_ptr[i];
+        samplerBadWatchUpdateCfCount(state, token, cf_pattern);
+        state.token_tail.push_back(token);
+        if ((int)state.token_tail.size() > tail_size) {
+            state.token_tail.erase(state.token_tail.begin(),
+                                   state.token_tail.begin() + (state.token_tail.size() - tail_size));
+        }
+        const auto repeated_suffix =
+            samplerBadWatchFindRepeatedSuffix(state.token_tail, max_pattern_size, min_repeats);
+        const bool cf_tail_repeat = state.cf_total >= min_cf;
+        if (state.triggered || (!cf_tail_repeat && !repeated_suffix.matched)) {
+            continue;
+        }
+        state.triggered = true;
+
+        const int32_t seq_len    = sequence_lengths[global_idx];
+        const int32_t input_len  = input_lengths[global_idx];
+        const int32_t output_len = seq_len >= input_len ? seq_len - input_len : -1;
+        std::ostringstream row;
+        row << "{\"ts_us\":" << autil::TimeUtility::currentTimeInMicroSeconds()
+            << ",\"pid\":" << ::getpid()
+            << ",\"rank\":\"" << samplerTraceJsonEscape(samplerTraceRankString()) << "\""
+            << ",\"event\":\"sampler_bad_watch_trigger\""
+            << ",\"reason\":\"" << (cf_tail_repeat ? "cf_tail_repeat" : "repeated_suffix") << "\""
+            << ",\"trace_id\":\"" << samplerTraceJsonEscape(trace_id) << "\""
+            << ",\"from_batch_idx_in\":" << from_batch_idx_in
+            << ",\"batch_size_in\":" << batch_size_in
+            << ",\"global_idx\":" << global_idx
+            << ",\"local_idx\":" << i
+            << ",\"step\":" << inputs.step
+            << ",\"input_len\":" << input_len
+            << ",\"seq_len\":" << seq_len
+            << ",\"output_len\":" << output_len
+            << ",\"top_k\":" << top_k[global_idx]
+            << ",\"top_p\":" << top_p[global_idx]
+            << ",\"temperature\":" << temperature[global_idx]
+            << ",\"repetition_penalty\":" << repetition_penalty[global_idx]
+            << ",\"presence_penalty\":" << presence_penalty[global_idx]
+            << ",\"frequency_penalty\":" << frequency_penalty[global_idx]
+            << ",\"do_sample\":" << (do_sample[global_idx] ? "true" : "false")
+            << ",\"selected_token\":" << token
+            << ",\"cf_total\":" << state.cf_total
+            << ",\"repeat_pattern_size\":" << repeated_suffix.pattern_size
+            << ",\"repeat_count\":" << repeated_suffix.repeat_count
+            << ",\"repeat_pattern\":";
+        samplerBadWatchAppendIntVector(row, repeated_suffix.pattern);
+        row << ",\"token_tail\":";
+        samplerBadWatchAppendIntVector(row, state.token_tail);
+        row << ",\"chunk_selected_tokens\":";
+        samplerBadWatchAppendIntVector(row, chunk_selected);
+        row << ",\"top_logits\":";
+        samplerTraceAppendTopK(row, logits[i], topn);
+        row << "}";
+
+        auto& os = samplerBadWatchOutputStream();
+        if (os.good()) {
+            os << row.str() << "\n";
+            os.flush();
+        }
+    }
+}
+
 }  // namespace
 
 SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
@@ -415,6 +704,7 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
             if (trace_chunk) {
                 samplerTraceLogRows("after", inputs, from_batch_idx_in, batch_size_in, logits, token_ids_in);
             }
+            samplerBadWatchMaybeLog(inputs, from_batch_idx_in, batch_size_in, logits, token_ids_in);
             if (greedy_output.success.defined()) {
                 success.copy_(greedy_output.success);
                 // TODO(zhangjianning.zjn): would be better to eliminate the copy
