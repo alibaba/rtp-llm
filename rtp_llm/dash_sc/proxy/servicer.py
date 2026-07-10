@@ -66,9 +66,26 @@ async def _close_request_iterator_quietly(request_iter) -> None:
         pass
 
 
-async def _abort_with_downstream_grpc_error(context, exc: grpc.aio.AioRpcError) -> None:
+def _append_downstream_frontend_addr(details: str, addr: Optional[str]) -> str:
+    if not addr:
+        return details
+    return f"{details}; downstream_frontend_addr={addr}"
+
+
+async def _abort_with_downstream_grpc_error(
+    context, exc: grpc.aio.AioRpcError, downstream_addr: Optional[str] = None
+) -> None:
     code = exc.code() or grpc.StatusCode.UNKNOWN
-    details = exc.details() or code.name
+    details = _append_downstream_frontend_addr(
+        exc.details() or code.name, downstream_addr
+    )
+    logging.warning(
+        "[DashScGrpc] proxy downstream grpc error: downstream_frontend_addr=%s "
+        "code=%s details=%s",
+        downstream_addr,
+        getattr(code, "name", str(code)),
+        details,
+    )
     await context.abort(code, details)
 
 
@@ -201,7 +218,9 @@ class DashScProxyServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
                 channel = await self._channel_pool.get(grpc_target)
             except RuntimeError as e:
                 record.mark_request_done("eof")
-                msg = "forward backend unavailable"
+                msg = _append_downstream_frontend_addr(
+                    "forward backend unavailable", grpc_target
+                )
                 logging.warning(
                     "[DashScGrpc] proxy channel unavailable: backend=%s error=%s",
                     grpc_target,
@@ -227,6 +246,16 @@ class DashScProxyServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
                 yield resp
         except BaseException as e:
             exc = e
+            if (
+                record.backend_addr
+                and isinstance(e, Exception)
+                and not isinstance(e, grpc.aio.AioRpcError)
+            ):
+                logging.exception(
+                    "[DashScGrpc] proxy failed after downstream frontend selected: "
+                    "downstream_frontend_addr=%s",
+                    record.backend_addr,
+                )
             raise
         finally:
             end_ts = record.resolve_status(context, exc)
@@ -270,7 +299,7 @@ class DashScProxyServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
         except grpc.aio.AioRpcError as e:
             access_record.mark_backend_error(e)
             access_record.mark_backend_done()
-            await _abort_with_downstream_grpc_error(context, e)
+            await _abort_with_downstream_grpc_error(context, e, addr)
             return
         except BaseException as e:
             access_record.mark_backend_error(e)
@@ -331,7 +360,7 @@ class DashScProxyServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
                 except Exception:
                     pass
         except grpc.aio.AioRpcError as e:
-            await _abort_with_downstream_grpc_error(context, e)
+            await _abort_with_downstream_grpc_error(context, e, addr)
         finally:
             # Safety net. ``_close_downstream`` is also exposed as a public-ish
             # static method so any future code path that wants to tear down
