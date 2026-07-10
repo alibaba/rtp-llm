@@ -113,6 +113,24 @@ py_library(
 )
 
 py_library(
+    name = "bert_model_desc",
+    srcs = [
+        "model_desc/bert.py",
+        "model_desc/module_base.py",
+    ],
+    deps = [
+        ":modules",
+        "//rtp_llm:config",
+        "//rtp_llm:device",
+        "//rtp_llm:ops",
+        "//rtp_llm:torch",
+        "//rtp_llm:utils",
+        "//rtp_llm/model_loader:loader",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+py_library(
     name = "new_weight_loader",
     srcs = glob([
         "__init__.py",
@@ -126,6 +144,7 @@ py_library(
         "new_models/**/*.py",
     ]),
     deps = [
+        ":bert_model_desc",
         ":kernels",
         ":modules",
         ":utils",
@@ -148,9 +167,13 @@ py_library(
     name = "models",
     srcs = glob([
         "model_desc/*.py",
-        "model_desc/cuda_graph/*.py"
+        "model_desc/cuda_graph/*.py",
+    ], exclude = [
+        "model_desc/bert.py",
+        "model_desc/module_base.py",
     ]),
     deps = [
+        ":bert_model_desc",
         ":utils",
         ":modules",
         ":kernels",
