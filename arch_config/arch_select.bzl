@@ -75,9 +75,9 @@ def whl_deps():
         # Keep each in lock-step with its lockfile: 2.9.0 <-> requirements_lock_cuda12_arm.txt,
         # 2.8.0 <-> requirements_lock_torch_gpu_cuda12_9.txt. Bump both together only
         # after regenerating the corresponding lockfile.
-        "@rtp_llm//:using_cuda12_arm": ["torch==2.9.0+cu129"],
+        "@rtp_llm//:using_cuda12_arm": ["torch==2.9.0+cu129", "torchvision==0.24.0"],
         # Default covers x86 cuda12_9 only.
-        "//conditions:default": ["torch==2.8.0+cu129"],
+        "//conditions:default": ["torch==2.8.0+cu129", "torchvision==0.23.0+cu129"],
     })
 
 def platform_deps():
