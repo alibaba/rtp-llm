@@ -1988,6 +1988,7 @@ class TestBertNewLoaderCompatibility(unittest.TestCase):
         model = BertForEmbedding(self._bert_config(), LoadConfig(compute_dtype=torch.float32, device="cpu"))
         with mock.patch.object(BertForEmbedding, "_build_inner_model", return_value=None):
             model.load_weights(self._gamma_beta_weights("bert"))
+            model.process_weights_after_loading()
         self.assertTrue(torch.equal(model.embeddings.layernorm_weight, torch.full((4,), 2.0)))
         self.assertTrue(torch.equal(model.layers[0].attention_output_layernorm_weight, torch.full((4,), 4.0)))
         self.assertTrue(torch.equal(model.layers[0].output_layernorm_bias, torch.full((4,), 7.0)))
@@ -1996,6 +1997,7 @@ class TestBertNewLoaderCompatibility(unittest.TestCase):
         model = RobertaForEmbedding(self._bert_config(), LoadConfig(compute_dtype=torch.float32, device="cpu"))
         with mock.patch.object(RobertaForEmbedding, "_build_inner_model", return_value=None):
             model.load_weights(self._gamma_beta_weights("roberta"))
+            model.process_weights_after_loading()
         self.assertTrue(torch.equal(model.embeddings.layernorm_bias, torch.full((4,), 3.0)))
 
     def test_missing_token_type_embedding_fallback_inherits_target_device_and_dtype(self):
@@ -2004,6 +2006,7 @@ class TestBertNewLoaderCompatibility(unittest.TestCase):
         model = BertForEmbedding(self._bert_config(), LoadConfig(compute_dtype=torch.float32, device="cpu"))
         with mock.patch.object(BertForEmbedding, "_build_inner_model", return_value=None):
             model.load_weights(checkpoint)
+            model.process_weights_after_loading()
         fallback = model.weights.get_global_weight(W.token_type_embedding)
         self.assertEqual(fallback.device, model.embeddings.word_embeddings_weight.device)
         self.assertEqual(fallback.dtype, model.embeddings.word_embeddings_weight.dtype)

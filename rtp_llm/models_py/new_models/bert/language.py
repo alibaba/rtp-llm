@@ -371,9 +371,11 @@ class _BertNewLoaderBase(nn.Module):
                 len(dropped),
                 dropped[:10],
             )
-        self.weights = self._create_model_weights()
-        self._add_custom_weights(self.weights)
-        self._build_inner_model()
+        self._loaded_tensor_count = loaded
+        self._custom_tensor_count = custom_loaded
+        self._dropped_tensor_count = len(dropped)
+        self.weights = None
+        self.model = None
         logger.info(
             "%s newloader streamed BERT-style weights into PyModel params: tensors=%d custom_tensors=%d dropped=%d",
             self.__class__.__name__,
@@ -381,6 +383,11 @@ class _BertNewLoaderBase(nn.Module):
             custom_loaded,
             len(dropped),
         )
+
+    def process_weights_after_loading(self):
+        self.weights = self._create_model_weights()
+        self._add_custom_weights(self.weights)
+        self._build_inner_model()
 
     def _apply(self, fn):
         super()._apply(fn)

@@ -65,6 +65,8 @@ def main():
     model = BertForEmbedding(_bert_config(), LoadConfig(compute_dtype=torch.float32, device="cpu"))
     with mock.patch.object(BertModel, "__init__", return_value=None) as build_inner:
         model.load_weights(_bert_weights())
+        assert not build_inner.called
+        model.process_weights_after_loading()
     assert build_inner.called
     assert isinstance(model.model, BertModel)
 
