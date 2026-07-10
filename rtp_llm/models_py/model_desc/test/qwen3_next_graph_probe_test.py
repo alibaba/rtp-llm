@@ -150,6 +150,97 @@ class TestQwen3NextGraphProbe(unittest.TestCase):
             probe.get_debug_status(),
         )
 
+    def test_records_selected_attention_stage_slots(self):
+        from rtp_llm.models_py.model_desc.qwen3_next import (
+            _CudaGraphLayerProbe,
+            _graph_probe_stats,
+        )
+
+        probe = _CudaGraphLayerProbe(
+            enabled=True,
+            layers=(6, 7),
+            layer_num=8,
+            stage_layer=7,
+        )
+        primary = torch.tensor([[1.0, 2.0], [3.0, 4.0]])
+        secondary = primary + 10
+
+        probe.record_stage(
+            7,
+            "attention_input",
+            primary,
+            secondary,
+            graph_bs=2,
+            is_cuda_graph=True,
+        )
+        probe.record_stage(
+            6,
+            "fmha_output",
+            primary + 100,
+            graph_bs=2,
+            is_cuda_graph=True,
+        )
+
+        buffer, slots = probe.get_capture(2)
+        slot = slots.index(probe.stage_slot_ids["attention_input"])
+        torch.testing.assert_close(buffer[slot, :, :6], _graph_probe_stats(primary))
+        torch.testing.assert_close(
+            buffer[slot, :, 6:], _graph_probe_stats(secondary)
+        )
+        self.assertEqual(0, torch.count_nonzero(buffer[slots.index(7)]).item())
+
+    def test_qwen3_next_attention_records_internal_stage_probe(self):
+        from types import SimpleNamespace
+
+        from rtp_llm.models_py.model_desc.qwen3_next import (
+            Qwen3NextAttention,
+            _CudaGraphLayerProbe,
+        )
+
+        class FakeFmha:
+            def forward(self, qkv, _kv_cache, _layer_idx):
+                return qkv + 3
+
+        attention = Qwen3NextAttention.__new__(Qwen3NextAttention)
+        torch.nn.Module.__init__(attention)
+        attention.qwen_layer_idx = 7
+        attention.layer_idx = 0
+        attention.tp_size = 1
+        attention.gate = torch.nn.Identity()
+        attention.qkv_proj = torch.nn.Identity()
+        attention.qk_fuse_norm = None
+        attention.o_proj = torch.nn.Identity()
+        probe = _CudaGraphLayerProbe(
+            enabled=True,
+            layers=(7,),
+            layer_num=8,
+            stage_layer=7,
+        )
+        hidden = torch.tensor([[1.0, 2.0], [3.0, 4.0]])
+
+        output = attention(
+            hidden_states=hidden,
+            fmha_impl=FakeFmha(),
+            kv_cache=None,
+            attention_inputs=SimpleNamespace(is_cuda_graph=True),
+            graph_probe=probe,
+            graph_probe_bs=2,
+        )
+
+        self.assertEqual((2, 2), tuple(output.shape))
+        buffer, slots = probe.get_capture(2)
+        for stage in (
+            "attention_gate",
+            "qkv_projected",
+            "qkv_normalized",
+            "fmha_output",
+            "gated_output",
+            "o_proj_output",
+            "attention_output",
+        ):
+            slot = slots.index(probe.stage_slot_ids[stage])
+            self.assertGreater(torch.count_nonzero(buffer[slot, :, :6]).item(), 0)
+
     def test_model_reports_probe_runtime_status(self):
         from rtp_llm.models_py.model_desc.qwen3_next import (
             Qwen3NextModel,

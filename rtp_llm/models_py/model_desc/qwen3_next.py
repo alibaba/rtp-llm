@@ -107,6 +107,20 @@ _Q3N_GRAPH_PROBE_LAYERS = tuple(
         if item.strip().lstrip("-").isdigit()
     )
 )
+_Q3N_GRAPH_PROBE_STAGE_LAYER = _env_int(
+    "RTPLLM_QWEN3_NEXT_GRAPH_PROBE_STAGE_LAYER", -1
+)
+_Q3N_GRAPH_PROBE_STAGE_NAMES = (
+    "attention_input",
+    "attention_gate",
+    "qkv_projected",
+    "qkv_normalized",
+    "fmha_output",
+    "gated_output",
+    "o_proj_output",
+    "attention_output",
+    "post_attention_norm",
+)
 
 
 def _graph_probe_stats(tensor: torch.Tensor) -> torch.Tensor:
@@ -158,14 +172,33 @@ class _CudaGraphLayerProbe:
         enabled: bool,
         layers: tuple[int, ...],
         layer_num: int,
+        stage_layer: int = -1,
     ):
         self.enabled = enabled
-        self.layers = tuple(
+        output_layers = tuple(
             layer
             for layer in dict.fromkeys(layers)
             if 0 <= layer < int(layer_num)
         )
-        self._layer_slots = {layer: slot for slot, layer in enumerate(self.layers)}
+        self.stage_layer = (
+            int(stage_layer) if 0 <= int(stage_layer) < int(layer_num) else -1
+        )
+        self.stage_slot_ids = (
+            {
+                name: -((self.stage_layer + 1) * 100 + index + 1)
+                for index, name in enumerate(_Q3N_GRAPH_PROBE_STAGE_NAMES)
+            }
+            if self.stage_layer >= 0
+            else {}
+        )
+        self.layers = output_layers + tuple(self.stage_slot_ids.values())
+        self._layer_slots = {
+            layer: slot for slot, layer in enumerate(output_layers)
+        }
+        self._stage_slots = {
+            name: len(output_layers) + index
+            for index, name in enumerate(self.stage_slot_ids)
+        }
         self._buffers: dict[int, torch.Tensor] = {}
         self._record_debug = {
             "attempts": 0,
@@ -191,29 +224,74 @@ class _CudaGraphLayerProbe:
     ) -> None:
         if not self.enabled or layer_idx not in self._layer_slots:
             return
+        self._record_slot(
+            self._layer_slots[layer_idx],
+            layer_idx,
+            hidden_states,
+            residual,
+            graph_bs=graph_bs,
+            is_cuda_graph=is_cuda_graph,
+        )
+
+    def stage_enabled(self, layer_idx: int) -> bool:
+        return self.enabled and int(layer_idx) == self.stage_layer
+
+    def record_stage(
+        self,
+        layer_idx: int,
+        stage: str,
+        primary: torch.Tensor,
+        secondary: Optional[torch.Tensor] = None,
+        *,
+        graph_bs: int,
+        is_cuda_graph: bool,
+    ) -> None:
+        if not self.stage_enabled(layer_idx) or stage not in self._stage_slots:
+            return
+        self._record_slot(
+            self._stage_slots[stage],
+            layer_idx,
+            primary,
+            secondary,
+            graph_bs=graph_bs,
+            is_cuda_graph=is_cuda_graph,
+        )
+
+    def _record_slot(
+        self,
+        slot: int,
+        layer_idx: int,
+        primary: torch.Tensor,
+        secondary: Optional[torch.Tensor],
+        *,
+        graph_bs: int,
+        is_cuda_graph: bool,
+    ) -> None:
         debug = self._record_debug
         debug["attempts"] += 1
         debug["last_layer_idx"] = int(layer_idx)
         debug["last_graph_bs"] = int(graph_bs)
         debug["last_token_rows"] = (
-            int(hidden_states.shape[0]) if hidden_states.dim() > 0 else -1
+            int(primary.shape[0]) if primary.dim() > 0 else -1
         )
         debug["last_residual_rows"] = (
-            int(residual.shape[0]) if residual.dim() > 0 else -1
+            int(secondary.shape[0])
+            if secondary is not None and secondary.dim() > 0
+            else -1
         )
         debug["last_is_cuda_graph"] = int(bool(is_cuda_graph))
         if not is_cuda_graph:
             debug["skipped_not_cuda_graph"] += 1
             return
-        if hidden_states.dim() == 0 or residual.dim() == 0:
+        if primary.dim() == 0 or (secondary is not None and secondary.dim() == 0):
             debug["skipped_invalid_tensor"] += 1
             return
         graph_bs = int(graph_bs)
-        token_rows = int(hidden_states.shape[0])
+        token_rows = int(primary.shape[0])
         if (
             graph_bs <= 0
             or token_rows <= 0
-            or residual.shape[0] != token_rows
+            or (secondary is not None and secondary.shape[0] != token_rows)
             or token_rows % graph_bs != 0
         ):
             debug["skipped_invalid_layout"] += 1
@@ -223,17 +301,16 @@ class _CudaGraphLayerProbe:
             buffer = torch.zeros(
                 (len(self.layers), graph_bs, len(self.field_names)),
                 dtype=torch.float32,
-                device=hidden_states.device,
+                device=primary.device,
             )
             self._buffers[graph_bs] = buffer
-        stats = torch.cat(
-            (
-                _graph_probe_stats(hidden_states.reshape(graph_bs, -1)),
-                _graph_probe_stats(residual.reshape(graph_bs, -1)),
-            ),
-            dim=1,
+        primary_stats = _graph_probe_stats(primary.reshape(graph_bs, -1))
+        secondary_stats = (
+            _graph_probe_stats(secondary.reshape(graph_bs, -1))
+            if secondary is not None
+            else torch.zeros_like(primary_stats)
         )
-        buffer[self._layer_slots[layer_idx]].copy_(stats)
+        buffer[slot].copy_(torch.cat((primary_stats, secondary_stats), dim=1))
         debug["recorded"] += 1
 
     def get_debug_status(self) -> dict[str, int]:
@@ -1253,6 +1330,7 @@ class Qwen3NextAttention(CausalAttention):
         layernorm_eps: float,
         quant_config: Optional[object] = None,
         hw_kernel_config: Optional["HWKernelConfig"] = None,
+        layer_idx: int = 0,
     ):
         super().__init__(
             attn_config,
@@ -1262,6 +1340,7 @@ class Qwen3NextAttention(CausalAttention):
             quant_config,
             hw_kernel_config=hw_kernel_config,
         )
+        self.qwen_layer_idx = int(layer_idx)
         # maybe fuse gate in qkv_proj later
         self.gate = LinearFactory.create_linear_from_weights(
             weights,
@@ -1279,9 +1358,44 @@ class Qwen3NextAttention(CausalAttention):
         kv_cache: Optional[LayerKVCache],
         attention_inputs: Optional[PyAttentionInputs],
         attn_meta: Qwen3NextMetadata = Qwen3NextMetadata(),
+        graph_probe: Optional[_CudaGraphLayerProbe] = None,
+        graph_probe_bs: int = 0,
     ) -> torch.Tensor:
         gate = self.gate(hidden_states)
-        attn_out = super().forward(hidden_states, fmha_impl, kv_cache, gate)
+        if graph_probe is None or not graph_probe.stage_enabled(self.qwen_layer_idx):
+            return super().forward(hidden_states, fmha_impl, kv_cache, gate)
+
+        is_cuda_graph = bool(
+            attention_inputs is not None
+            and getattr(attention_inputs, "is_cuda_graph", False)
+        )
+
+        def record(stage: str, tensor: torch.Tensor) -> None:
+            graph_probe.record_stage(
+                self.qwen_layer_idx,
+                stage,
+                tensor,
+                graph_bs=graph_probe_bs,
+                is_cuda_graph=is_cuda_graph,
+            )
+
+        record("attention_gate", gate)
+        input_shape = hidden_states.shape[:-1]
+        qkv = self.qkv_proj(hidden_states)
+        record("qkv_projected", qkv)
+        if self.qk_fuse_norm is not None:
+            qkv = self.qk_fuse_norm(qkv)
+        record("qkv_normalized", qkv)
+        attn_out = fmha_impl.forward(qkv, kv_cache, self.layer_idx)
+        attn_out = attn_out.reshape(*input_shape, -1).contiguous()
+        record("fmha_output", attn_out)
+        attn_out = attn_out * torch.sigmoid(gate)
+        record("gated_output", attn_out)
+        attn_out = self.o_proj(attn_out)
+        record("o_proj_output", attn_out)
+        if self.tp_size > 1:
+            attn_out = all_reduce(attn_out, group=Group.TP)
+        record("attention_output", attn_out)
         return attn_out
 
 
@@ -1728,6 +1842,7 @@ class Qwen3NextDecoderLayer(nn.Module):
                 config.layernorm_eps,
                 config.quant_config,
                 hw_kernel_config=hw_kernel_config,
+                layer_idx=layer_idx,
             )
 
         if config.moe_style == 2:
@@ -1764,18 +1879,61 @@ class Qwen3NextDecoderLayer(nn.Module):
         kv_cache: Optional[LayerKVCache] = None,
         attention_inputs: Optional[PyAttentionInputs] = None,
         attn_meta: Qwen3NextMetadata = Qwen3NextMetadata(),
+        graph_probe: Optional[_CudaGraphLayerProbe] = None,
+        graph_probe_bs: int = 0,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         hidden_states, residual = self.input_layernorm(hidden_states, residual)
 
-        hidden_states = self.self_attn(
-            hidden_states=hidden_states,
-            fmha_impl=fmha_impl,
-            kv_cache=kv_cache,
-            attention_inputs=attention_inputs,
-            attn_meta=attn_meta,
-        )
+        if graph_probe is None:
+            hidden_states = self.self_attn(
+                hidden_states=hidden_states,
+                fmha_impl=fmha_impl,
+                kv_cache=kv_cache,
+                attention_inputs=attention_inputs,
+                attn_meta=attn_meta,
+            )
+        else:
+            is_cuda_graph = bool(
+                attention_inputs is not None
+                and getattr(attention_inputs, "is_cuda_graph", False)
+            )
+            graph_probe.record_stage(
+                self.layer_idx,
+                "attention_input",
+                hidden_states,
+                residual,
+                graph_bs=graph_probe_bs,
+                is_cuda_graph=is_cuda_graph,
+            )
+            if self.layer_type == HybridAttentionType.LINEAR:
+                hidden_states = self.self_attn(
+                    hidden_states=hidden_states,
+                    fmha_impl=fmha_impl,
+                    kv_cache=kv_cache,
+                    attention_inputs=attention_inputs,
+                    attn_meta=attn_meta,
+                )
+            else:
+                hidden_states = self.self_attn(
+                    hidden_states=hidden_states,
+                    fmha_impl=fmha_impl,
+                    kv_cache=kv_cache,
+                    attention_inputs=attention_inputs,
+                    attn_meta=attn_meta,
+                    graph_probe=graph_probe,
+                    graph_probe_bs=graph_probe_bs,
+                )
 
         hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
+        if graph_probe is not None:
+            graph_probe.record_stage(
+                self.layer_idx,
+                "post_attention_norm",
+                hidden_states,
+                residual,
+                graph_bs=graph_probe_bs,
+                is_cuda_graph=is_cuda_graph,
+            )
 
         hidden_states = self.mlp(hidden_states)
 
@@ -1831,7 +1989,12 @@ class Qwen3NextModel(GptModelBase):
             weights.get_global_weight(W.final_ln_gamma), eps=model_config.layernorm_eps
         )
         self._cuda_graph_layer_probe = (
-            _CudaGraphLayerProbe(True, _Q3N_GRAPH_PROBE_LAYERS, self.layer_num)
+            _CudaGraphLayerProbe(
+                True,
+                _Q3N_GRAPH_PROBE_LAYERS,
+                self.layer_num,
+                stage_layer=_Q3N_GRAPH_PROBE_STAGE_LAYER,
+            )
             if _Q3N_GRAPH_PROBE_ENABLED
             else None
         )
@@ -2019,6 +2182,12 @@ class Qwen3NextModel(GptModelBase):
                     attention_inputs=attention_inputs,
                     tensors={"hidden_states": hidden_states, "residual": residual},
                 )
+            stage_probe = (
+                self._cuda_graph_layer_probe
+                if self._cuda_graph_layer_probe is not None
+                and self._cuda_graph_layer_probe.stage_enabled(i)
+                else None
+            )
             hidden_states, residual = decoder_layer(
                 hidden_states,
                 residual,
@@ -2026,6 +2195,8 @@ class Qwen3NextModel(GptModelBase):
                 kv_cache=self.kv_cache.get_layer_cache(i) if self.kv_cache else None,
                 attention_inputs=attention_inputs,
                 attn_meta=attn_meta,
+                graph_probe=stage_probe,
+                graph_probe_bs=graph_probe_bs,
             )
             if self._cuda_graph_layer_probe is not None:
                 self._cuda_graph_layer_probe.record(
