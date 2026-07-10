@@ -189,6 +189,78 @@ class TestQwen3NextGraphProbe(unittest.TestCase):
         )
         self.assertEqual(0, torch.count_nonzero(buffer[slots.index(7)]).item())
 
+    def test_attention_stage_slot_ids_remain_stable_when_linear_stages_are_added(self):
+        from rtp_llm.models_py.model_desc.qwen3_next import _CudaGraphLayerProbe
+
+        probe = _CudaGraphLayerProbe(
+            enabled=True,
+            layers=(2,),
+            layer_num=3,
+            stage_layer=2,
+        )
+
+        self.assertEqual(
+            {
+                "attention_input": -301,
+                "attention_gate": -302,
+                "qkv_projected": -303,
+                "qkv_normalized": -304,
+                "fmha_output": -305,
+                "gated_output": -306,
+                "o_proj_output": -307,
+                "attention_output": -308,
+                "post_attention_norm": -309,
+            },
+            {
+                stage: probe.stage_slot_ids[stage]
+                for stage in (
+                    "attention_input",
+                    "attention_gate",
+                    "qkv_projected",
+                    "qkv_normalized",
+                    "fmha_output",
+                    "gated_output",
+                    "o_proj_output",
+                    "attention_output",
+                    "post_attention_norm",
+                )
+            },
+        )
+
+        self.assertEqual(-316, probe.stage_slot_ids["linear_conv_state_input"])
+        self.assertEqual(-317, probe.stage_slot_ids["linear_ssm_state_input"])
+
+    def test_gathers_decode_cache_state_with_kernel_block_formula(self):
+        from rtp_llm.models_py.model_desc.qwen3_next import (
+            _gather_decode_cache_state_for_graph_probe,
+        )
+
+        states = torch.arange(30 * 2, dtype=torch.float32).reshape(30, 2)
+        block_map = torch.tensor(
+            [
+                [10, 11, 12],
+                [20, 21, 22],
+                [-1, -1, -1],
+                [0, 0, 0],
+            ],
+            dtype=torch.int32,
+        )
+        sequence_lengths_plus_1 = torch.tensor(
+            [66, 130, 0, 66], dtype=torch.int32
+        )
+
+        gathered = _gather_decode_cache_state_for_graph_probe(
+            states,
+            block_map,
+            sequence_lengths_plus_1,
+            seq_size_per_block=64,
+        )
+
+        torch.testing.assert_close(gathered[0], states[11])
+        torch.testing.assert_close(gathered[1], states[22])
+        torch.testing.assert_close(gathered[2], torch.zeros(2))
+        torch.testing.assert_close(gathered[3], torch.zeros(2))
+
     def test_qwen3_next_attention_records_internal_stage_probe(self):
         from types import SimpleNamespace
 
@@ -240,6 +312,242 @@ class TestQwen3NextGraphProbe(unittest.TestCase):
         ):
             slot = slots.index(probe.stage_slot_ids[stage])
             self.assertGreater(torch.count_nonzero(buffer[slot, :, :6]).item(), 0)
+
+    def test_qwen3_next_linear_attention_records_outer_stage_probe(self):
+        from types import SimpleNamespace
+
+        from rtp_llm.models_py.model_desc.qwen3_next import (
+            Qwen3NextGatedDeltaNet,
+            Qwen3NextMetadata,
+            _CudaGraphLayerProbe,
+        )
+
+        class Projection(torch.nn.Module):
+            def __init__(self, width):
+                super().__init__()
+                self.width = width
+
+            def forward(self, hidden_states):
+                base = hidden_states.sum(dim=-1, keepdim=True)
+                return base + torch.arange(
+                    1, self.width + 1, dtype=hidden_states.dtype
+                )
+
+        class Decode(torch.nn.Module):
+            def forward_with_graph_probe(
+                self,
+                mixed_qkv,
+                b,
+                a,
+                attention_inputs,
+                kv_cache,
+                attn_meta,
+                *,
+                graph_probe=None,
+                graph_probe_bs=0,
+            ):
+                self.graph_probe = graph_probe
+                self.graph_probe_bs = graph_probe_bs
+                return mixed_qkv[:, :1].reshape(-1, 1, 1)
+
+        class GatedNorm(torch.nn.Module):
+            def forward(self, value, gate):
+                return value + gate
+
+        linear = Qwen3NextGatedDeltaNet.__new__(Qwen3NextGatedDeltaNet)
+        torch.nn.Module.__init__(linear)
+        linear._qkvz_ba_fused = False
+        linear.in_proj_qkvz = Projection(4)
+        linear.in_proj_ba = Projection(2)
+        linear.head_k_dim = 1
+        linear.head_v_dim = 1
+        linear.local_num_k_heads = 1
+        linear.local_num_v_heads = 1
+        linear.decode_gdn = Decode()
+        linear.norm = GatedNorm()
+        linear.out_proj = torch.nn.Identity()
+        linear.parallelism_config = SimpleNamespace(get_attn_tp_size=lambda: 1)
+
+        probe = _CudaGraphLayerProbe(
+            enabled=True,
+            layers=(2,),
+            layer_num=3,
+            stage_layer=2,
+        )
+        attention_inputs = SimpleNamespace(
+            is_prefill=False,
+            is_target_verify=False,
+            is_cuda_graph=True,
+        )
+        metadata = Qwen3NextMetadata()
+        metadata.trace_layer_idx = 2
+        metadata.trace_group_id = 1
+        hidden = torch.tensor([[1.0, 2.0], [3.0, 4.0]])
+
+        output = linear(
+            hidden_states=hidden,
+            fmha_impl=None,
+            kv_cache=SimpleNamespace(),
+            attention_inputs=attention_inputs,
+            attn_meta=metadata,
+            graph_probe=probe,
+            graph_probe_bs=2,
+        )
+
+        self.assertEqual((2, 1), tuple(output.shape))
+        self.assertIs(probe, linear.decode_gdn.graph_probe)
+        self.assertEqual(2, linear.decode_gdn.graph_probe_bs)
+        buffer, slots = probe.get_capture(2)
+        for stage in (
+            "linear_projected",
+            "linear_fla_output",
+            "linear_norm_output",
+            "linear_o_proj_output",
+            "linear_attention_output",
+        ):
+            slot = slots.index(probe.stage_slot_ids[stage])
+            self.assertGreater(torch.count_nonzero(buffer[slot, :, :6]).item(), 0)
+
+    def test_qwen3_next_linear_attention_preserves_probe_disabled_fast_path(self):
+        from types import SimpleNamespace
+        from unittest.mock import patch
+
+        from rtp_llm.models_py.model_desc.qwen3_next import (
+            Qwen3NextGatedDeltaNet,
+            Qwen3NextMetadata,
+        )
+
+        class Projection(torch.nn.Module):
+            def __init__(self, width):
+                super().__init__()
+                self.width = width
+
+            def forward(self, hidden_states):
+                return hidden_states.sum(dim=-1, keepdim=True).expand(
+                    -1, self.width
+                )
+
+        class Decode(torch.nn.Module):
+            def forward(
+                self,
+                mixed_qkv,
+                b,
+                a,
+                attention_inputs,
+                kv_cache,
+                attn_meta,
+            ):
+                return mixed_qkv[:, :1].reshape(-1, 1, 1)
+
+        class GatedNorm(torch.nn.Module):
+            def forward(self, value, gate):
+                return value + gate
+
+        linear = Qwen3NextGatedDeltaNet.__new__(Qwen3NextGatedDeltaNet)
+        torch.nn.Module.__init__(linear)
+        linear._qkvz_ba_fused = False
+        linear.in_proj_qkvz = Projection(4)
+        linear.in_proj_ba = Projection(2)
+        linear.head_k_dim = 1
+        linear.head_v_dim = 1
+        linear.local_num_k_heads = 1
+        linear.local_num_v_heads = 1
+        linear.decode_gdn = Decode()
+        linear.norm = GatedNorm()
+        linear.out_proj = torch.nn.Identity()
+        linear.parallelism_config = SimpleNamespace(get_attn_tp_size=lambda: 1)
+        attention_inputs = SimpleNamespace(
+            is_prefill=False,
+            is_target_verify=False,
+            is_cuda_graph=True,
+        )
+        metadata = Qwen3NextMetadata()
+        metadata.trace_layer_idx = 2
+        metadata.trace_group_id = 1
+
+        with patch(
+            "rtp_llm.models_py.model_desc.qwen3_next._graph_probe_stats",
+            side_effect=AssertionError("disabled path must not reduce tensors"),
+        ):
+            output = linear(
+                hidden_states=torch.tensor([[1.0, 2.0], [3.0, 4.0]]),
+                fmha_impl=None,
+                kv_cache=SimpleNamespace(),
+                attention_inputs=attention_inputs,
+                attn_meta=metadata,
+            )
+
+        self.assertEqual((2, 1), tuple(output.shape))
+
+    def test_qwen3_next_linear_decode_records_conv_and_fla_stage_probe(self):
+        from types import SimpleNamespace
+
+        from rtp_llm.models_py.model_desc.qwen3_next import (
+            Qwen3NextGatedDeltaNetDecode,
+            Qwen3NextMetadata,
+            _CudaGraphLayerProbe,
+        )
+
+        class Decode(Qwen3NextGatedDeltaNetDecode):
+            def __init__(self):
+                torch.nn.Module.__init__(self)
+
+            def _get_conv_states(self, kv_cache_tensor):
+                return torch.ones((2, 1, 1))
+
+            def _get_ssm_states(self, kv_cache_tensor):
+                return torch.ones((2, 1, 1, 1))
+
+            def _conv1d(self, mixed_qkv, *args, **kwargs):
+                return mixed_qkv + 1
+
+            def _fla(self, mixed_qkv, *args, **kwargs):
+                return (mixed_qkv[:, :1] + 1).reshape(-1, 1, 1)
+
+        probe = _CudaGraphLayerProbe(
+            enabled=True,
+            layers=(2,),
+            layer_num=3,
+            stage_layer=2,
+        )
+        metadata = Qwen3NextMetadata()
+        metadata.trace_layer_idx = 2
+        metadata.trace_group_id = 1
+        attention_inputs = SimpleNamespace(
+            is_cuda_graph=True,
+            sequence_lengths_plus_1_d=torch.tensor([65, 65], dtype=torch.int32),
+            kv_cache_kernel_block_id_device=torch.tensor(
+                [[1], [2]], dtype=torch.int32
+            ),
+        )
+        kv_cache = SimpleNamespace(
+            kv_cache_base=torch.ones((2, 8)),
+            seq_size_per_block=1024,
+        )
+
+        output = Decode().forward_with_graph_probe(
+            torch.tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]),
+            torch.ones((2, 1)),
+            torch.ones((2, 1)),
+            attention_inputs,
+            kv_cache,
+            metadata,
+            graph_probe=probe,
+            graph_probe_bs=2,
+        )
+
+        self.assertEqual((2, 1, 1), tuple(output.shape))
+        buffer, slots = probe.get_capture(2)
+        for stage in (
+            "linear_conv_state_input",
+            "linear_ssm_state_input",
+            "linear_conv_output",
+        ):
+            slot = slots.index(probe.stage_slot_ids[stage])
+            self.assertGreater(torch.count_nonzero(buffer[slot, :, :6]).item(), 0)
+        fla_slot = slots.index(probe.stage_slot_ids["linear_fla_output"])
+        self.assertEqual(0, torch.count_nonzero(buffer[fla_slot]).item())
+        self.assertEqual(3, probe.get_debug_status()["recorded"])
 
     def test_model_reports_probe_runtime_status(self):
         from rtp_llm.models_py.model_desc.qwen3_next import (

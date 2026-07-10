@@ -120,6 +120,14 @@ _Q3N_GRAPH_PROBE_STAGE_NAMES = (
     "o_proj_output",
     "attention_output",
     "post_attention_norm",
+    "linear_projected",
+    "linear_conv_output",
+    "linear_fla_output",
+    "linear_norm_output",
+    "linear_o_proj_output",
+    "linear_attention_output",
+    "linear_conv_state_input",
+    "linear_ssm_state_input",
 )
 
 
@@ -149,6 +157,32 @@ def _graph_probe_stats(tensor: torch.Tensor) -> torch.Tensor:
         ),
         dim=1,
     )
+
+
+def _gather_decode_cache_state_for_graph_probe(
+    states: torch.Tensor,
+    block_map: torch.Tensor,
+    sequence_lengths_plus_1: torch.Tensor,
+    seq_size_per_block: int,
+) -> torch.Tensor:
+    sequence_lengths_plus_1 = sequence_lengths_plus_1.reshape(-1)
+    load_block_offsets = torch.div(
+        torch.clamp(sequence_lengths_plus_1 - 2, min=0),
+        int(seq_size_per_block),
+        rounding_mode="floor",
+    ).clamp(max=block_map.shape[1] - 1)
+    block_ids = block_map.gather(
+        1, load_block_offsets.to(torch.long).unsqueeze(1)
+    ).squeeze(1)
+    valid = (
+        (sequence_lengths_plus_1 > 1)
+        & (block_ids > 0)
+        & (block_ids < states.shape[0])
+    )
+    safe_block_ids = torch.where(valid, block_ids, torch.zeros_like(block_ids))
+    gathered = states.index_select(0, safe_block_ids.to(torch.long))
+    valid_shape = (valid.shape[0],) + (1,) * (gathered.dim() - 1)
+    return torch.where(valid.reshape(valid_shape), gathered, torch.zeros_like(gathered))
 
 
 class _CudaGraphLayerProbe:
@@ -1300,6 +1334,115 @@ class Qwen3NextGatedDeltaNetDecode(Qwen3NextGatedDeltaNetBase):
 
         return attn_out
 
+    def forward_with_graph_probe(
+        self,
+        mixed_qkv: torch.Tensor,
+        b: torch.Tensor,
+        a: torch.Tensor,
+        attn_inputs: PyAttentionInputs,
+        kv_cache: Optional[LayerKVCache],
+        attn_meta: Qwen3NextMetadata,
+        *,
+        graph_probe: _CudaGraphLayerProbe,
+        graph_probe_bs: int,
+    ) -> torch.Tensor:
+        assert kv_cache is not None, "kv_cache is required for decode"
+        assert (
+            kv_cache.kv_cache_base is not None
+        ), "kv_cache_tensor is required for decode"
+        kv_cache_tensor: torch.Tensor = kv_cache.kv_cache_base.reshape(
+            kv_cache.kv_cache_base.shape[0], -1
+        )
+        is_target_verify = attn_meta.is_target_verify
+        trace_ctx = attn_meta.trace_ctx
+        layer_idx = getattr(attn_meta, "trace_layer_idx", None)
+        group_id = getattr(attn_meta, "trace_group_id", None)
+        conv_states = self._get_conv_states(kv_cache_tensor)
+        ssm_states = self._get_ssm_states(kv_cache_tensor)
+        conv_state_input = _gather_decode_cache_state_for_graph_probe(
+            conv_states,
+            attn_inputs.kv_cache_kernel_block_id_device,
+            attn_inputs.sequence_lengths_plus_1_d,
+            kv_cache.seq_size_per_block,
+        )
+        graph_probe.record_stage(
+            layer_idx,
+            "linear_conv_state_input",
+            conv_state_input,
+            graph_bs=graph_probe_bs,
+            is_cuda_graph=bool(getattr(attn_inputs, "is_cuda_graph", False)),
+        )
+        _trace_cache_state(
+            trace_ctx,
+            "linear_decode_before_conv",
+            layer_idx=layer_idx,
+            group_id=group_id,
+            attention_inputs=attn_inputs,
+            seq_size_per_block=kv_cache.seq_size_per_block,
+            conv_states=conv_states,
+            ssm_states=ssm_states,
+            tensors={"mixed_qkv": mixed_qkv, "b": b, "a": a},
+        )
+        mixed_qkv = self._conv1d(
+            mixed_qkv,
+            kv_cache_tensor,
+            kv_cache.seq_size_per_block,
+            attn_inputs,
+            is_target_verify,
+        )
+        graph_probe.record_stage(
+            layer_idx,
+            "linear_conv_output",
+            mixed_qkv,
+            graph_bs=graph_probe_bs,
+            is_cuda_graph=bool(getattr(attn_inputs, "is_cuda_graph", False)),
+        )
+        ssm_state_input = _gather_decode_cache_state_for_graph_probe(
+            ssm_states,
+            attn_inputs.kv_cache_kernel_block_id_device,
+            attn_inputs.sequence_lengths_plus_1_d,
+            kv_cache.seq_size_per_block,
+        )
+        graph_probe.record_stage(
+            layer_idx,
+            "linear_ssm_state_input",
+            ssm_state_input,
+            graph_bs=graph_probe_bs,
+            is_cuda_graph=bool(getattr(attn_inputs, "is_cuda_graph", False)),
+        )
+        _trace_cache_state(
+            trace_ctx,
+            "linear_decode_after_conv",
+            layer_idx=layer_idx,
+            group_id=group_id,
+            attention_inputs=attn_inputs,
+            seq_size_per_block=kv_cache.seq_size_per_block,
+            conv_states=conv_states,
+            ssm_states=ssm_states,
+            tensors={"mixed_qkv": mixed_qkv},
+        )
+        attn_out = self._fla(
+            mixed_qkv,
+            b,
+            a,
+            kv_cache_tensor,
+            kv_cache.seq_size_per_block,
+            attn_inputs,
+            is_target_verify,
+        )
+        _trace_cache_state(
+            trace_ctx,
+            "linear_decode_after_fla",
+            layer_idx=layer_idx,
+            group_id=group_id,
+            attention_inputs=attn_inputs,
+            seq_size_per_block=kv_cache.seq_size_per_block,
+            conv_states=conv_states,
+            ssm_states=ssm_states,
+            tensors={"attn_out": attn_out},
+        )
+        return attn_out
+
     def _get_bs_from_attenion_input(
         self,
         mixed_qkv: torch.Tensor,
@@ -1716,7 +1859,20 @@ class Qwen3NextGatedDeltaNet(nn.Module):
         kv_cache: Optional[LayerKVCache],
         attention_inputs: Optional[PyAttentionInputs],
         attn_meta: Qwen3NextMetadata,
+        graph_probe: Optional[_CudaGraphLayerProbe] = None,
+        graph_probe_bs: int = 0,
     ) -> torch.Tensor:
+        if graph_probe is not None:
+            return self._forward_with_graph_probe(
+                hidden_states,
+                fmha_impl,
+                kv_cache,
+                attention_inputs,
+                attn_meta,
+                graph_probe=graph_probe,
+                graph_probe_bs=graph_probe_bs,
+            )
+
         assert attention_inputs is not None, "attention_inputs is required"
         assert (
             attention_inputs.is_target_verify
@@ -1770,7 +1926,6 @@ class Qwen3NextGatedDeltaNet(nn.Module):
         attn_output = self.norm(
             attn_output.reshape(-1, self.head_v_dim), z.reshape(-1, self.head_v_dim)
         )
-        # from [token * head, dim] -> [token, head * dim]
         attn_output = attn_output.reshape(-1, self.local_num_v_heads * self.head_v_dim)
         _trace_event(
             trace_ctx,
@@ -1793,6 +1948,132 @@ class Qwen3NextGatedDeltaNet(nn.Module):
         )
         if self.parallelism_config.get_attn_tp_size() > 1:
             attn_output = all_reduce(attn_output, group=Group.TP)
+        _trace_event(
+            trace_ctx,
+            "linear_output",
+            layer_idx=layer_idx,
+            layer_type=HybridAttentionType.LINEAR,
+            group_id=group_id,
+            attention_inputs=attention_inputs,
+            tensors={"attn_output": attn_output},
+        )
+        return attn_output
+
+    def _forward_with_graph_probe(
+        self,
+        hidden_states: torch.Tensor,
+        fmha_impl: FMHAImplBase,
+        kv_cache: Optional[LayerKVCache],
+        attention_inputs: Optional[PyAttentionInputs],
+        attn_meta: Qwen3NextMetadata,
+        *,
+        graph_probe: _CudaGraphLayerProbe,
+        graph_probe_bs: int,
+    ) -> torch.Tensor:
+        assert attention_inputs is not None, "attention_inputs is required"
+        assert (
+            attention_inputs.is_target_verify
+            or not attention_inputs.is_prefill
+            or attn_meta.get_prefill_conv1d_meta() is not None
+            or attn_meta.is_cp_linear_attn
+        ), "prefill_conv1d_meta is required for prefill"
+        projected_states_qkvz, projected_states_ba = self._input_project(hidden_states)
+        layer_idx = getattr(attn_meta, "trace_layer_idx", None)
+        is_cuda_graph = bool(getattr(attention_inputs, "is_cuda_graph", False))
+
+        def record(
+            stage: str,
+            primary: torch.Tensor,
+            secondary: Optional[torch.Tensor] = None,
+        ) -> None:
+            graph_probe.record_stage(
+                layer_idx,
+                stage,
+                primary,
+                secondary,
+                graph_bs=graph_probe_bs,
+                is_cuda_graph=is_cuda_graph,
+            )
+
+        record("linear_projected", projected_states_qkvz, projected_states_ba)
+        mixed_qkv, z, b, a = self.fix_query_key_value_ordering(
+            projected_states_qkvz, projected_states_ba
+        )
+        trace_ctx = attn_meta.trace_ctx
+        group_id = getattr(attn_meta, "trace_group_id", None)
+        _trace_event(
+            trace_ctx,
+            "linear_project",
+            layer_idx=layer_idx,
+            layer_type=HybridAttentionType.LINEAR,
+            group_id=group_id,
+            attention_inputs=attention_inputs,
+            tensors={
+                "hidden_states": hidden_states,
+                "mixed_qkv": mixed_qkv,
+                "z": z,
+                "b": b,
+                "a": a,
+            },
+        )
+        if attention_inputs.is_prefill and not attn_meta.is_target_verify:
+            if attn_meta.is_cp_linear_attn:
+                return self._forward_cp_prefill(
+                    mixed_qkv, z, b, a, attention_inputs, kv_cache, attn_meta
+                )
+            attn_output = self.prefill_gdn(
+                mixed_qkv, b, a, attention_inputs, kv_cache, attn_meta
+            )
+        else:
+            attn_output = self.decode_gdn.forward_with_graph_probe(
+                mixed_qkv,
+                b,
+                a,
+                attention_inputs,
+                kv_cache,
+                attn_meta,
+                graph_probe=graph_probe,
+                graph_probe_bs=graph_probe_bs,
+            )
+        record("linear_fla_output", attn_output, z)
+        _trace_event(
+            trace_ctx,
+            "linear_raw_output",
+            layer_idx=layer_idx,
+            layer_type=HybridAttentionType.LINEAR,
+            group_id=group_id,
+            attention_inputs=attention_inputs,
+            tensors={"attn_output": attn_output, "z": z},
+        )
+        attn_output = self.norm(
+            attn_output.reshape(-1, self.head_v_dim), z.reshape(-1, self.head_v_dim)
+        )
+        # from [token * head, dim] -> [token, head * dim]
+        attn_output = attn_output.reshape(-1, self.local_num_v_heads * self.head_v_dim)
+        record("linear_norm_output", attn_output)
+        _trace_event(
+            trace_ctx,
+            "linear_norm_output",
+            layer_idx=layer_idx,
+            layer_type=HybridAttentionType.LINEAR,
+            group_id=group_id,
+            attention_inputs=attention_inputs,
+            tensors={"attn_output": attn_output},
+        )
+        attn_output = self.out_proj(attn_output)
+        record("linear_o_proj_output", attn_output)
+        _trace_event(
+            trace_ctx,
+            "linear_out_proj_output",
+            layer_idx=layer_idx,
+            layer_type=HybridAttentionType.LINEAR,
+            group_id=group_id,
+            attention_inputs=attention_inputs,
+            tensors={"attn_output": attn_output},
+        )
+        if self.parallelism_config.get_attn_tp_size() > 1:
+            attn_output = all_reduce(attn_output, group=Group.TP)
+        record("linear_attention_output", attn_output)
         _trace_event(
             trace_ctx,
             "linear_output",
@@ -1912,6 +2193,8 @@ class Qwen3NextDecoderLayer(nn.Module):
                     kv_cache=kv_cache,
                     attention_inputs=attention_inputs,
                     attn_meta=attn_meta,
+                    graph_probe=graph_probe,
+                    graph_probe_bs=graph_probe_bs,
                 )
             else:
                 hidden_states = self.self_attn(
