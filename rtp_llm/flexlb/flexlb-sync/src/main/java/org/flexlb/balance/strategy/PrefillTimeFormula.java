@@ -1,5 +1,7 @@
 package org.flexlb.balance.strategy;
 
+import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -60,10 +62,12 @@ public final class PrefillTimeFormula {
 
     private final String source;
     private final Node root;
+    private final Map<String, ParameterNode> parameters;
 
-    private PrefillTimeFormula(String source, Node root) {
+    private PrefillTimeFormula(String source, Node root, Map<String, ParameterNode> parameters) {
         this.source = source;
         this.root = root;
+        this.parameters = parameters;
     }
 
     /**
@@ -76,10 +80,11 @@ public final class PrefillTimeFormula {
     }
 
     static PrefillTimeFormula parse(String formula, Predicate<String> supportedVariable) {
-        Parser parser = new Parser(formula, supportedVariable);
+        Map<String, ParameterNode> parameters = new LinkedHashMap<>();
+        Parser parser = new Parser(formula, supportedVariable, parameters);
         Node root = parser.parseExpression();
         parser.expectEnd();
-        return new PrefillTimeFormula(formula, root);
+        return new PrefillTimeFormula(formula, root, parameters);
     }
 
     /**
@@ -101,6 +106,38 @@ public final class PrefillTimeFormula {
     @Override
     public String toString() {
         return source;
+    }
+
+    // ---- parameter management ----
+
+    public double getParameter(String name) {
+        ParameterNode node = parameters.get(name);
+        if (node == null) {
+            throw new IllegalArgumentException("Unknown parameter: " + name);
+        }
+        return node.value();
+    }
+
+    public void setParameter(String name, double value) {
+        ParameterNode node = parameters.get(name);
+        if (node == null) {
+            throw new IllegalArgumentException("Unknown parameter: " + name);
+        }
+        node.setValue(value);
+    }
+
+    public Set<String> parameterNames() {
+        return Collections.unmodifiableSet(parameters.keySet());
+    }
+
+    public Map<String, Double> getParameters() {
+        Map<String, Double> result = new LinkedHashMap<>();
+        parameters.forEach((name, node) -> result.put(name, node.value()));
+        return result;
+    }
+
+    public boolean hasParameters() {
+        return !parameters.isEmpty();
     }
 
     // ---- AST nodes ----
@@ -186,16 +223,50 @@ public final class PrefillTimeFormula {
         }
     }
 
+    private static final class ParameterNode implements Node {
+        private final String name;
+        private volatile double value;
+
+        ParameterNode(String name, double initialValue) {
+            this.name = name;
+            this.value = initialValue;
+        }
+
+        @Override
+        public double evaluate(EvalContext ctx) {
+            return value;
+        }
+
+        public String name() {
+            return name;
+        }
+
+        public double value() {
+            return value;
+        }
+
+        public void setValue(double value) {
+            this.value = value;
+        }
+
+        @Override
+        public String toString() {
+            return "param(" + name + ", " + value + ")";
+        }
+    }
+
     // ---- Recursive-descent parser ----
 
     private static final class Parser {
         private final String input;
         private final Predicate<String> supportedVariable;
+        private final Map<String, ParameterNode> parameters;
         private int pos;
 
-        Parser(String input, Predicate<String> supportedVariable) {
+        Parser(String input, Predicate<String> supportedVariable, Map<String, ParameterNode> parameters) {
             this.input = input;
             this.supportedVariable = supportedVariable;
+            this.parameters = parameters;
         }
 
         // expression → term (('+' | '-') term)*
@@ -254,7 +325,7 @@ public final class PrefillTimeFormula {
             return parsePrimary();
         }
 
-        // primary → '(' expression ')' | function_call | number | variable
+        // primary → '(' expression ')' | function_call | param_call | number | variable
         Node parsePrimary() {
             skipWs();
             if (match('(')) {
@@ -269,7 +340,13 @@ public final class PrefillTimeFormula {
                 String name = parseIdentifier();
                 skipWs();
                 if (match('(')) {
+                    if (name.equals("param")) {
+                        return parseParamCall();
+                    }
                     return parseFuncCall(name);
+                }
+                if (name.equals("param")) {
+                    throw error("'param' must be used as param(name, initialValue)");
                 }
                 if (!supportedVariable.test(name)) {
                     throw error("Unknown variable: " + name);
@@ -280,6 +357,37 @@ public final class PrefillTimeFormula {
                 return parseNumber();
             }
             throw error("Expected number, variable, or '('");
+        }
+
+        // param(name, initialValue) → ParameterNode
+        Node parseParamCall() {
+            skipWs();
+            if (!hasNext() || !(Character.isLetter(peek()) || peek() == '_')) {
+                throw error("Expected parameter name in param()");
+            }
+            String paramName = parseIdentifier();
+            skipWs();
+            if (!match(',')) {
+                throw error("Expected ',' after parameter name in param()");
+            }
+            skipWs();
+            Node initialValueNode = parseExpression();
+            double initialValue = initialValueNode.evaluate(new EvalContext(Map.of(), null));
+            skipWs();
+            if (!match(')')) {
+                throw error("Expected ')' after param() arguments");
+            }
+            ParameterNode existing = parameters.get(paramName);
+            if (existing != null) {
+                if (existing.value() != initialValue) {
+                    throw error("Inconsistent initial value for parameter '" + paramName
+                            + "': " + existing.value() + " vs " + initialValue);
+                }
+                return existing;
+            }
+            ParameterNode node = new ParameterNode(paramName, initialValue);
+            parameters.put(paramName, node);
+            return node;
         }
 
         Node parseFuncCall(String name) {

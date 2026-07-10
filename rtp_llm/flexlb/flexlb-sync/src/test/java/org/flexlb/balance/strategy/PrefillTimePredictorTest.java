@@ -10,8 +10,11 @@ import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -340,6 +343,100 @@ class PrefillTimePredictorTest {
                 batchItem(200, 50)
         );
         p.learn(items, 150, 300);  // should not throw
+    }
+
+    // ---- param() learnable parameters ----
+
+    @Test
+    @DisplayName("param() basic parsing returns initial value")
+    void paramBasicParsing() {
+        PrefillTimePredictor p = new PrefillTimePredictor("param(w0, 100)");
+        assertEquals(100, p.estimateMs(0, 0));
+        assertEquals(100, p.estimateMs(500, 200));
+    }
+
+    @Test
+    @DisplayName("param() in expression with variables")
+    void paramInExpression() {
+        // param(w0, 10) + param(w1, 0.5) * computeTokens
+        // inputTokens=100, hitCache=0, computeTokens=100 → 10 + 0.5*100 = 60
+        PrefillTimePredictor p = new PrefillTimePredictor("param(w0, 10) + param(w1, 0.5) * computeTokens");
+        assertEquals(60, p.estimateMs(100, 0));
+    }
+
+    @Test
+    @DisplayName("setParameter updates parameter value at runtime")
+    void paramUpdateValue() {
+        PrefillTimePredictor p = new PrefillTimePredictor("param(w0, 10) + param(w1, 0.5) * computeTokens");
+        assertEquals(60, p.estimateMs(100, 0));
+        p.setParameter("w1", 1.0);
+        // 10 + 1.0*100 = 110
+        assertEquals(110, p.estimateMs(100, 0));
+    }
+
+    @Test
+    @DisplayName("parameterNames returns all parameter names")
+    void parameterNamesListing() {
+        PrefillTimePredictor p = new PrefillTimePredictor("param(w0, 1) + param(w1, 2) + param(w2, 3)");
+        assertEquals(Set.of("w0", "w1", "w2"), p.parameterNames());
+    }
+
+    @Test
+    @DisplayName("getParameters returns all parameter values")
+    void getParametersMap() {
+        PrefillTimePredictor p = new PrefillTimePredictor("param(w0, 1) + param(w1, 2) + param(w2, 3)");
+        assertEquals(Map.of("w0", 1.0, "w1", 2.0, "w2", 3.0), p.getParameters());
+    }
+
+    @Test
+    @DisplayName("same parameter name reused across formula shares one ParameterNode")
+    void paramSameNameReused() {
+        // param(w0, 1) * computeTokens + param(w0, 1) * hitCacheTokens
+        // inputTokens=100, hitCache=50, computeTokens=50 → 1*50 + 1*50 = 100
+        PrefillTimePredictor p = new PrefillTimePredictor("param(w0, 1) * computeTokens + param(w0, 1) * hitCacheTokens");
+        assertEquals(1, p.parameterNames().size());
+        assertTrue(p.parameterNames().contains("w0"));
+        assertEquals(100, p.estimateMs(100, 50));
+        // setParameter("w0", 2) → 2*50 + 2*50 = 200
+        p.setParameter("w0", 2.0);
+        assertEquals(200, p.estimateMs(100, 50));
+    }
+
+    @Test
+    @DisplayName("formula without param() has no parameters")
+    void noParametersFormula() {
+        PrefillTimePredictor p = new PrefillTimePredictor("sum(computeTokens)");
+        assertFalse(p.hasParameters());
+        assertTrue(p.parameterNames().isEmpty());
+    }
+
+    @Test
+    @DisplayName("param() works in batch mode with sum()")
+    void paramInBatchMode() {
+        // param(w0, 10) + param(w1, 0.5) * sum(computeTokens)
+        // item1: (500,200) → computeTokens=300
+        // item2: (300,100) → computeTokens=200
+        // sum(computeTokens) = 500 → 10 + 0.5*500 = 260
+        PrefillTimePredictor p = new PrefillTimePredictor("param(w0, 10) + param(w1, 0.5) * sum(computeTokens)");
+        BatchItem item1 = batchItem(500, 200);
+        BatchItem item2 = batchItem(300, 100);
+        assertEquals(260, p.predictBatchMs(List.of(item1, item2)));
+    }
+
+    @Test
+    @DisplayName("getParameter on unknown parameter throws IllegalArgumentException")
+    void unknownParameterThrows() {
+        PrefillTimePredictor p = new PrefillTimePredictor("param(w0, 100)");
+        assertThrows(IllegalArgumentException.class, () -> p.getParameter("nonexistent"));
+    }
+
+    @Test
+    @DisplayName("param() initial value can be an expression")
+    void paramInitialValueExpression() {
+        // param(w0, 2+3) * computeTokens → 5 * 100 = 500
+        PrefillTimePredictor p = new PrefillTimePredictor("param(w0, 2+3) * computeTokens");
+        assertEquals(5.0, p.getParameter("w0"));
+        assertEquals(500, p.estimateMs(100, 0));
     }
 
     // ---- helpers ----

@@ -5,6 +5,8 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
 
 /**
  * Prefill-time predictor driven by a user-configurable formula.
@@ -79,6 +81,28 @@ public class PrefillTimePredictor {
     public void learn(List<BatchItem> items, long predictedMs, long actualMs) {
         logger.debug("learn sample: batchSize={} predictedMs={} actualMs={}",
                 items != null ? items.size() : 0, predictedMs, actualMs);
+    }
+
+    // ---- parameter management (delegates to formula) ----
+
+    public double getParameter(String name) {
+        return formula.getParameter(name);
+    }
+
+    public void setParameter(String name, double value) {
+        formula.setParameter(name, value);
+    }
+
+    public Set<String> parameterNames() {
+        return formula.parameterNames();
+    }
+
+    public Map<String, Double> getParameters() {
+        return formula.getParameters();
+    }
+
+    public boolean hasParameters() {
+        return formula.hasParameters();
     }
 
     /** The parsed formula, for inspection. */
