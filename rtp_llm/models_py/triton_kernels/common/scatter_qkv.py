@@ -10,6 +10,8 @@ import torch
 import triton
 import triton.language as tl
 
+from rtp_llm.models_py.triton_kernels.common.offset import linear_offset_64
+
 
 @triton.jit
 def _scatter_qkv_kernel(
@@ -24,12 +26,12 @@ def _scatter_qkv_kernel(
     BLK_V: tl.constexpr,
 ):
     row = tl.program_id(0)
-    src = row * stride_src_row
+    src = linear_offset_64(row, stride_src_row)
 
     offs_qk = tl.arange(0, BLK_QK)
     mask_qk = offs_qk < K_DIM
-    q_dst = row * K_DIM + offs_qk
-    k_dst = row * K_DIM + offs_qk
+    q_dst = linear_offset_64(row, K_DIM) + offs_qk
+    k_dst = linear_offset_64(row, K_DIM) + offs_qk
     tl.store(
         q_ptr + q_dst, tl.load(src_ptr + src + offs_qk, mask=mask_qk), mask=mask_qk
     )
@@ -41,7 +43,7 @@ def _scatter_qkv_kernel(
 
     offs_v = tl.arange(0, BLK_V)
     mask_v = offs_v < V_DIM
-    v_dst = row * V_DIM + offs_v
+    v_dst = linear_offset_64(row, V_DIM) + offs_v
     tl.store(
         v_ptr + v_dst,
         tl.load(src_ptr + src + 2 * K_DIM + offs_v, mask=mask_v),
