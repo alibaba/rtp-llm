@@ -1,5 +1,8 @@
-#include <memory>
 #include <chrono>
+#include <cstdlib>
+#include <cstring>
+#include <memory>
+#include <unordered_set>
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
@@ -361,11 +364,14 @@ size_t LocalRpcServer::onflightRequestNum() {
 EngineScheduleInfo LocalRpcServer::getEngineScheduleInfo(int64_t latest_finished_version) {
     EngineScheduleInfo                        info = meta_->getEngineScheduleInfo(latest_finished_version);
     std::vector<EngineScheduleInfo::TaskInfo> running_task_info_list = engine_->getScheduler().runningTaskList();
+    std::unordered_set<int64_t>               running_task_ids;
+    running_task_ids.reserve(running_task_info_list.size());
+    for (const auto& running_task : running_task_info_list) {
+        running_task_ids.insert(running_task.request_id);
+    }
     for (auto& task_info : info.running_task_info_list) {
-        for (auto& running_task : running_task_info_list) {
-            if (task_info.request_id == running_task.request_id) {
-                task_info.is_waiting = false;
-            }
+        if (running_task_ids.find(task_info.request_id) != running_task_ids.end()) {
+            task_info.is_waiting = false;
         }
     }
     auto last_schedule_time = engine_->getLastScheduleTime();
