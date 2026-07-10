@@ -634,6 +634,9 @@ class PyFlashinferPrefillImpl(PyFlashinferPrefillImplBase):
 
         return qkv
 
+    def support_cuda_graph(self) -> bool:
+        return False
+
     @staticmethod
     def support(attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs) -> bool:
         """Check if ragged prefill implementation is supported.
