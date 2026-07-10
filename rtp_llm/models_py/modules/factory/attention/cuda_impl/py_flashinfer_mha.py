@@ -1,3 +1,4 @@
+import logging
 from typing import Any, Optional
 
 import torch
@@ -18,7 +19,7 @@ from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashinfer_mla im
     check_attention_inputs,
 )
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import FMHAImplBase
-from rtp_llm.models_py.utils.arch import is_sm10x
+from rtp_llm.models_py.utils.arch import is_sm10x, is_sm120
 from rtp_llm.ops import (
     AttentionConfigs,
     FMHAType,
@@ -36,12 +37,15 @@ from rtp_llm.ops.compute_ops import (
     rtp_llm_ops,
 )
 
+logger = logging.getLogger(__name__)
+
 # Constants
 DEFAULT_PY_FLASHINFER_WORKSPACE_SIZE_MB = 128
 
 # Global workspace buffer pool
 _g_py_flashinfer_workspace_pool: list[torch.Tensor] = []
 _g_py_flashinfer_pool_lock = __import__("threading").Lock()
+_cuda_core_host_replan_logged = False
 
 
 def get_py_flashinfer_workspace_buffer(device: str = "cuda") -> torch.Tensor:
@@ -63,6 +67,15 @@ def release_py_flashinfer_workspace_buffer(buffer: torch.Tensor) -> None:
     """Release a PyFlashInfer workspace buffer back to the pool."""
     with _g_py_flashinfer_pool_lock:
         _g_py_flashinfer_workspace_pool.append(buffer)
+
+
+def _configured_kv_cache_torch_dtype(
+    kv_cache_dtype: KvCacheDataType,
+) -> Optional[torch.dtype]:
+    """Return an explicit cache dtype when the config overrides activations."""
+    if kv_cache_dtype == KvCacheDataType.FP8:
+        return torch.float8_e4m3fn
+    return None
 
 
 class PyFlashinferPrefillPagedAttnOp(object):
@@ -661,6 +674,22 @@ class PyFlashinferDecodeAttnOp(object):
         self.head_dim_vo = attn_configs.size_per_head
         self.seq_size_per_block = attn_configs.kernel_tokens_per_block
         self.use_tensor_core = determine_use_tensor_core_from_configs(attn_configs)
+        # Qwen3-1.7B CUDA-core decode reproduced stale-plan replay hangs on
+        # sm_120. Tensor-core always replans; other CUDA-core devices keep the
+        # mainline replay contract.
+        cuda_core_replan = is_sm120()
+        self._replan_from_host = self.use_tensor_core or cuda_core_replan
+        global _cuda_core_host_replan_logged
+        if (
+            not self.use_tensor_core
+            and cuda_core_replan
+            and not _cuda_core_host_replan_logged
+        ):
+            logger.info(
+                "FlashInfer CUDA-core host replan enabled on sm_120 (device=%s)",
+                torch.cuda.get_device_capability(),
+            )
+            _cuda_core_host_replan_logged = True
         self.decode_wrapper = BatchDecodeWithPagedKVCacheWrapper(
             self.g_workspace_buffer,
             "HND",
@@ -669,6 +698,7 @@ class PyFlashinferDecodeAttnOp(object):
         self.kv_cache_dtype = attn_configs.kv_cache_dtype
         self.enable_cuda_graph = attn_inputs.is_cuda_graph
         self.fmha_params = rtp_llm_ops.FlashInferMlaAttnParams()
+        self._plan_copy_done_event: Optional[torch.cuda.Event] = None
 
     def __del__(self):
         release_py_flashinfer_workspace_buffer(self.g_workspace_buffer)
@@ -678,27 +708,27 @@ class PyFlashinferDecodeAttnOp(object):
         self.fmha_params = params
 
     def _get_kv_data_type(self, attn_inputs: PyAttentionInputs) -> torch.dtype:
-        if self.kv_cache_dtype == KvCacheDataType.FP8:
-            return torch.float8_e4m3fn
-        return get_scalar_type(attn_inputs.dtype)
+        return _configured_kv_cache_torch_dtype(self.kv_cache_dtype) or get_scalar_type(
+            attn_inputs.dtype
+        )
 
-    def _requires_fa2_cuda_graph_replan(self) -> bool:
-        # FlashInfer BatchDecode routes tensor-core decode through fa2 BatchPrefill.
-        # fa3 prefill paths do not need this replay-time plan refresh.
-        return self.use_tensor_core
+    def _uses_host_plan_inputs(self) -> bool:
+        """Whether replay must replan from reusable pinned host metadata."""
+        return self._replan_from_host
 
     def _plan_decode_wrapper(self, attn_inputs: PyAttentionInputs) -> None:
-        if self._requires_fa2_cuda_graph_replan():
+        use_host_plan_inputs = self._uses_host_plan_inputs()
+        if use_host_plan_inputs:
             page_indptr = self.fmha_params.decode_page_indptr_h
             page_indice = self.fmha_params.page_indice_h
             last_page_len = self.fmha_params.paged_kv_last_page_len_h
             plan_kwargs = {"non_blocking": True}
         else:
+            # Preserve the mainline CUDA-core contract on non-SM120 devices.
             page_indptr = self.fmha_params.decode_page_indptr_d
             page_indice = self.fmha_params.page_indice_d
             last_page_len = self.fmha_params.paged_kv_last_page_len_d
             plan_kwargs = {}
-
         self.decode_wrapper.plan(
             page_indptr,
             page_indice,
@@ -711,6 +741,18 @@ class PyFlashinferDecodeAttnOp(object):
             kv_data_type=self._get_kv_data_type(attn_inputs),
             **plan_kwargs,
         )
+        if use_host_plan_inputs:
+            if self._plan_copy_done_event is None:
+                self._plan_copy_done_event = torch.cuda.Event()
+            self._plan_copy_done_event.record(torch.cuda.current_stream())
+
+    def _wait_for_plan_copies(self) -> None:
+        """Do not overwrite reusable pinned plan inputs while H2D is pending."""
+        if (
+            self._plan_copy_done_event is not None
+            and not self._plan_copy_done_event.query()
+        ):
+            self._plan_copy_done_event.synchronize()
 
     def prepare(
         self,
@@ -722,6 +764,7 @@ class PyFlashinferDecodeAttnOp(object):
 
         forbid_realloc: True only when called from prepare_cuda_graph (replay); forbids buffer realloc.
         """
+        self._wait_for_plan_copies()
         self.fmha_params.fill_params(
             attn_inputs.prefix_lengths,
             attn_inputs.sequence_lengths,
@@ -756,6 +799,7 @@ class PyFlashinferDecodeAttnOp(object):
 
     def prepare_for_cuda_graph_replay(self, attn_inputs: PyAttentionInputs) -> None:
         """Refresh FlashInfer runtime buffers before replaying the captured graph."""
+        self._wait_for_plan_copies()
         self.fmha_params.fill_params(
             attn_inputs.prefix_lengths,
             attn_inputs.sequence_lengths,
@@ -764,7 +808,10 @@ class PyFlashinferDecodeAttnOp(object):
             self.seq_size_per_block,
             forbid_realloc=True,
         )
-        if self._requires_fa2_cuda_graph_replan():
+        # Tensor-core decode already replans on every replay. SM120 CUDA-core
+        # follows the same contract because its plan metadata changes with the
+        # runtime page table; other CUDA-core devices retain mainline behavior.
+        if self._uses_host_plan_inputs():
             self._plan_decode_wrapper(attn_inputs)
 
     def support(self, attn_inputs: PyAttentionInputs) -> bool:

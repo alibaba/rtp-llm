@@ -3,6 +3,7 @@ import math
 import sys
 import unittest
 from typing import List
+from unittest import mock
 
 import torch
 from attention_ref import compute_flashinfer_decode_reference
@@ -11,7 +12,10 @@ from base_attention_test import BaseAttentionTest, compare_tensors
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha import (
     PyFlashinferDecodeAttnOp,
 )
+from rtp_llm.models_py.utils.arch import is_sm120
+from rtp_llm.ops import KvCacheDataType
 from rtp_llm.ops.compute_ops import (
+    LayerKVCache,
     PyAttentionInputs,
     fill_mla_params,
     get_typemeta,
@@ -294,8 +298,9 @@ class TestPyFlashinferDecodeCudaGraph(BaseAttentionTest):
     Verifies the critical invariants that the C++ CUDA graph runner depends on:
     1. prepare() with is_cuda_graph=True sets _fixed_batch_size and wires up
        the decode_wrapper's internal buffers for graph capture.
-    2. prepare_for_cuda_graph_replay() refreshes both page tables and, only
-       for FlashInfer fa2, cached plan metadata without reallocating buffers.
+    2. prepare_for_cuda_graph_replay() refreshes page tables and the cached
+       plan metadata used by tensor-core decode and SM120 CUDA-core decode
+       without reallocating buffers.
 
     Full forward correctness under CUDA graph capture/replay cannot be tested
     at the Python UT level — that path is exercised by smoke tests with real
@@ -356,8 +361,8 @@ class TestPyFlashinferDecodeCudaGraph(BaseAttentionTest):
         self.assertTrue(attn_op.decode_wrapper._use_cuda_graph)
         logging.info("_fixed_batch_size correctly set after prepare()")
 
-    def test_replay_refreshes_plan_metadata(self):
-        """prepare_for_cuda_graph_replay() must refresh FlashInfer fa2 plan metadata."""
+    def test_tensor_core_replay_refreshes_plan_metadata(self):
+        """prepare_for_cuda_graph_replay() must refresh tensor-core plan metadata."""
         config = self._create_config()
         capture_bs = 8
         capture_seq_lens = [64, 128, 256, 512, 64, 128, 256, 512]
@@ -369,7 +374,6 @@ class TestPyFlashinferDecodeCudaGraph(BaseAttentionTest):
         )
         attn_op = PyFlashinferDecodeAttnOp(config.attn_configs, capture_inputs)
         self.assertTrue(attn_op.use_tensor_core)
-        self.assertTrue(attn_op._requires_fa2_cuda_graph_replan())
         fmha_params = rtp_llm_ops.FlashInferMlaAttnParams()
         attn_op.set_params(fmha_params)
         attn_op.prepare(capture_inputs)
@@ -411,9 +415,15 @@ class TestPyFlashinferDecodeCudaGraph(BaseAttentionTest):
             f"page_indptr={page_indptr.tolist()}"
         )
 
-    def test_non_fa2_replay_does_not_replan(self):
-        """Non-fa2 decode keeps the original replay contract: fill params only."""
-        config = self._create_config(head_num=32, head_num_kv=32)
+    def test_cuda_core_replay_refreshes_plan_metadata(self):
+        """CUDA-core decode must also refresh plan metadata for graph replay.
+
+        Qwen3-1.7B uses head_num/head_num_kv = 16/8, which selects this
+        non-tensor-core FlashInfer decode path.
+        """
+        if not is_sm120():
+            self.skipTest("SM120 CUDA-core replay requires an sm_120 device")
+        config = self._create_config(head_num=16, head_num_kv=8)
         capture_bs = 4
         capture_seq_lens = [64, 128, 256, 512]
 
@@ -424,7 +434,6 @@ class TestPyFlashinferDecodeCudaGraph(BaseAttentionTest):
         )
         attn_op = PyFlashinferDecodeAttnOp(config.attn_configs, capture_inputs)
         self.assertFalse(attn_op.use_tensor_core)
-        self.assertFalse(attn_op._requires_fa2_cuda_graph_replan())
         fmha_params = rtp_llm_ops.FlashInferMlaAttnParams()
         attn_op.set_params(fmha_params)
         attn_op.prepare(capture_inputs)
@@ -445,10 +454,18 @@ class TestPyFlashinferDecodeCudaGraph(BaseAttentionTest):
         )
         self.assertFalse(hasattr(attn_op.decode_wrapper, "_qo_indptr_buf"))
 
+        indptr_ptr = attn_op.decode_wrapper._paged_kv_indptr_buf.data_ptr()
+        indices_ptr = attn_op.decode_wrapper._paged_kv_indices_buf.data_ptr()
+        last_page_len_ptr = (
+            attn_op.decode_wrapper._paged_kv_last_page_len_buf.data_ptr()
+        )
+
+        original_plan = attn_op.decode_wrapper.plan
         plan_calls = []
 
         def counted_plan(*args, **kwargs):
             plan_calls.append((args, kwargs))
+            return original_plan(*args, **kwargs)
 
         attn_op.decode_wrapper.plan = counted_plan
 
@@ -460,12 +477,139 @@ class TestPyFlashinferDecodeCudaGraph(BaseAttentionTest):
         )
         attn_op.prepare_for_cuda_graph_replay(run_inputs)
 
-        self.assertEqual(len(plan_calls), 0)
+        self.assertEqual(len(plan_calls), 1)
+        plan_args, plan_kwargs = plan_calls[0]
+        self.assertFalse(plan_args[0].is_cuda)
+        self.assertFalse(plan_args[1].is_cuda)
+        self.assertFalse(plan_args[2].is_cuda)
+        self.assertTrue(plan_kwargs["non_blocking"])
+        self.assertEqual(plan_kwargs["q_data_type"], torch.float16)
+        self.assertEqual(plan_kwargs["kv_data_type"], torch.float16)
+
+        # CUDA graph replay relies on stable buffer addresses.
+        self.assertEqual(
+            attn_op.decode_wrapper._paged_kv_indptr_buf.data_ptr(), indptr_ptr
+        )
+        self.assertEqual(
+            attn_op.decode_wrapper._paged_kv_indices_buf.data_ptr(), indices_ptr
+        )
+        self.assertEqual(
+            attn_op.decode_wrapper._paged_kv_last_page_len_buf.data_ptr(),
+            last_page_len_ptr,
+        )
+
+    def test_tensor_core_replay_waits_for_pending_plan_copy(self):
+        """Tensor-core replay must not overwrite pinned inputs during H2D."""
+        config = self._create_config()
+        capture_bs = 4
+        capture_inputs = self._create_cuda_graph_inputs(
+            capture_bs,
+            [64, 128, 256, 512],
+            config.seq_size_per_block,
+        )
+        attn_op = PyFlashinferDecodeAttnOp(config.attn_configs, capture_inputs)
+        self.assertTrue(attn_op.use_tensor_core)
+        fmha_params = rtp_llm_ops.FlashInferMlaAttnParams()
+        attn_op.set_params(fmha_params)
+        attn_op.prepare(capture_inputs)
+        self.assertIsNotNone(attn_op._plan_copy_done_event)
+
+        pending_copy = mock.Mock()
+        pending_copy.query.return_value = False
+        attn_op._plan_copy_done_event = pending_copy
+
+        run_inputs = self._create_cuda_graph_inputs(
+            capture_bs,
+            [100, 200, 256, 512],
+            config.seq_size_per_block,
+        )
+        attn_op.prepare_for_cuda_graph_replay(run_inputs)
+
+        pending_copy.query.assert_called_once_with()
+        pending_copy.synchronize.assert_called_once_with()
+        pending_copy.record.assert_called_once()
+
+    @mock.patch(
+        "rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha.is_sm120",
+        return_value=False,
+    )
+    def test_non_sm120_cuda_core_keeps_mainline_replay_contract(self, _is_sm120):
+        """Non-SM120 CUDA-core decode keeps device plan inputs and no replan."""
+        config = self._create_config(head_num=16, head_num_kv=8)
+        capture_bs = 4
+        capture_inputs = self._create_cuda_graph_inputs(
+            capture_bs,
+            [64, 128, 256, 512],
+            config.seq_size_per_block,
+        )
+        attn_op = PyFlashinferDecodeAttnOp(config.attn_configs, capture_inputs)
+        self.assertFalse(attn_op.use_tensor_core)
+        fmha_params = rtp_llm_ops.FlashInferMlaAttnParams()
+        attn_op.set_params(fmha_params)
+        attn_op.prepare(capture_inputs)
+        self.assertIsNone(attn_op._plan_copy_done_event)
+
+        original_plan = attn_op.decode_wrapper.plan
+        plan_calls = []
+
+        def counted_plan(*args, **kwargs):
+            plan_calls.append((args, kwargs))
+            return original_plan(*args, **kwargs)
+
+        attn_op.decode_wrapper.plan = counted_plan
+        run_inputs = self._create_cuda_graph_inputs(
+            capture_bs,
+            [100, 200, 256, 512],
+            config.seq_size_per_block,
+        )
+        attn_op.prepare_for_cuda_graph_replay(run_inputs)
+
+        self.assertEqual(plan_calls, [])
+
+    @mock.patch(
+        "rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha.is_sm120",
+        return_value=True,
+    )
+    def test_sm120_cuda_core_uses_host_plan_contract(self, _is_sm120):
+        config = self._create_config(head_num=16, head_num_kv=8)
+        capture_bs = 4
+        capture_inputs = self._create_cuda_graph_inputs(
+            capture_bs,
+            [64, 128, 256, 512],
+            config.seq_size_per_block,
+        )
+        attn_op = PyFlashinferDecodeAttnOp(config.attn_configs, capture_inputs)
+        self.assertFalse(attn_op.use_tensor_core)
+        self.assertTrue(attn_op._uses_host_plan_inputs())
+        fmha_params = rtp_llm_ops.FlashInferMlaAttnParams()
+        attn_op.set_params(fmha_params)
+        attn_op.prepare(capture_inputs)
+
+        plan_calls = []
+        original_plan = attn_op.decode_wrapper.plan
+
+        def counted_plan(*args, **kwargs):
+            plan_calls.append((args, kwargs))
+            return original_plan(*args, **kwargs)
+
+        attn_op.decode_wrapper.plan = counted_plan
+        run_inputs = self._create_cuda_graph_inputs(
+            capture_bs,
+            [100, 200, 256, 512],
+            config.seq_size_per_block,
+        )
+        attn_op.prepare_for_cuda_graph_replay(run_inputs)
+
+        self.assertEqual(len(plan_calls), 1)
+        plan_args, plan_kwargs = plan_calls[0]
+        self.assertFalse(plan_args[0].is_cuda)
+        self.assertFalse(plan_args[1].is_cuda)
+        self.assertFalse(plan_args[2].is_cuda)
+        self.assertTrue(plan_kwargs["non_blocking"])
+        self.assertIsNotNone(attn_op._plan_copy_done_event)
 
     def test_replay_updates_page_tables(self):
         """Page table buffers must reflect the replay inputs, not capture inputs."""
-        import math
-
         config = self._create_config(seq_size_per_block=64)
         capture_bs = 4
         capture_seq_lens = [64, 128, 256, 512]
