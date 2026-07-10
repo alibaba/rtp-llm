@@ -16,8 +16,7 @@ from fastapi import Request as RawRequest
 from fastapi import status
 from fastapi.middleware import Middleware
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import ORJSONResponse
-from fastapi.responses import StreamingResponse
+from fastapi.responses import ORJSONResponse, StreamingResponse
 from typing_extensions import override
 from uvicorn import Config, Server
 from uvicorn.loops.auto import auto_loop_setup
@@ -95,6 +94,8 @@ class GracefulShutdownServer(Server):
         self.grpc_client = grpc_client
         self._pre_stop_lock = threading.RLock()
         self._pre_stop_timer: Optional[threading.Timer] = None
+        self._shutdown_requested = False
+        self._shutdown_timeout_budget = self.config.timeout_graceful_shutdown
 
     def install_pre_stop_drain_signal_handler(self) -> None:
         pre_stop_signal = getattr(signal, "SIGUSR1", None)
@@ -115,11 +116,13 @@ class GracefulShutdownServer(Server):
             sig_name = str(sig)
         self.shutdown_manager.start_unavailable(f"signal {sig_name}")
         logging.info(
-            "Frontend entering pre-stop unavailable state without uvicorn shutdown: "
+            "Frontend entering pre-stop unavailable state before uvicorn shutdown: "
             "signal=%s, active_requests=%s",
             sig_name,
             self.shutdown_manager.active_request_count(),
         )
+        if not self._schedule_shutdown_after_pre_stop(sig, frame, sig_name):
+            self._begin_shutdown(sig, frame, sig_name)
 
     @override
     def handle_exit(self, sig: int, frame) -> None:
@@ -136,6 +139,9 @@ class GracefulShutdownServer(Server):
             return False
         if self.should_exit:
             return False
+        return self._schedule_shutdown_after_pre_stop(sig, frame, sig_name)
+
+    def _schedule_shutdown_after_pre_stop(self, sig: int, frame, sig_name: str) -> bool:
         drain_seconds = self._effective_pre_stop_drain_seconds()
         if drain_seconds <= 0:
             return False
@@ -145,6 +151,8 @@ class GracefulShutdownServer(Server):
             return False
 
         with self._pre_stop_lock:
+            if self._shutdown_requested:
+                return True
             if self._pre_stop_timer is not None:
                 logging.info(
                     "Frontend received duplicate %s during pre-stop drain; "
@@ -164,22 +172,36 @@ class GracefulShutdownServer(Server):
             timer = threading.Timer(
                 remaining,
                 self._begin_shutdown,
-                args=(sig, frame, sig_name),
+                args=(sig, frame, sig_name, False),
             )
             timer.daemon = True
             self._pre_stop_timer = timer
             timer.start()
             return True
 
-    def _begin_shutdown(self, sig: int, frame, sig_name: str) -> None:
+    def _begin_shutdown(
+        self,
+        sig: int,
+        frame,
+        sig_name: str,
+        force_on_duplicate: bool = True,
+    ) -> None:
         with self._pre_stop_lock:
+            if self._shutdown_requested:
+                if force_on_duplicate:
+                    Server.handle_exit(self, sig, frame)
+                return
+            self._shutdown_requested = True
+            timer = self._pre_stop_timer
             self._pre_stop_timer = None
+        if timer is not None:
+            timer.cancel()
         self.shutdown_manager.start_draining(f"signal {sig_name}")
         self._limit_graceful_shutdown_to_remaining_budget()
         Server.handle_exit(self, sig, frame)
 
     def _remaining_shutdown_timeout_after_pre_stop(self) -> Optional[float]:
-        shutdown_timeout = self.config.timeout_graceful_shutdown
+        shutdown_timeout = self._shutdown_timeout_budget
         if shutdown_timeout is None or shutdown_timeout <= 0:
             return shutdown_timeout
         elapsed = self.shutdown_manager.drain_elapsed_seconds()
@@ -225,9 +247,30 @@ class GracefulShutdownServer(Server):
         try:
             await super().shutdown(sockets)
         finally:
-            await self.frontend_server.close()
+            await self._close_with_remaining_shutdown_budget(
+                "frontend server", self.frontend_server.close
+            )
             if self.grpc_client is not None:
-                await self.grpc_client.close()
+                await self._close_with_remaining_shutdown_budget(
+                    "gRPC client", self.grpc_client.close
+                )
+
+    async def _close_with_remaining_shutdown_budget(self, name, close) -> None:
+        remaining = self._remaining_shutdown_timeout_after_pre_stop()
+        try:
+            close_awaitable = close()
+            if remaining is None:
+                await close_awaitable
+            else:
+                await asyncio.wait_for(close_awaitable, timeout=max(0.0, remaining))
+        except asyncio.TimeoutError:
+            logging.warning(
+                "Timed out closing %s after remaining shutdown budget %.3fs",
+                name,
+                max(0.0, remaining),
+            )
+        except Exception as e:
+            logging.warning("Failed to close %s: %s", name, e, exc_info=True)
 
 
 class FrontendApp(object):

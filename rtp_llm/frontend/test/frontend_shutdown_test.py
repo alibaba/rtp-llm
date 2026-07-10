@@ -52,6 +52,11 @@ class FakeFrontendServer:
         self.close_called = True
 
 
+class HangingFrontendServer(FakeFrontendServer):
+    async def close(self):
+        await asyncio.Event().wait()
+
+
 class FakeGrpcClient:
     def __init__(self):
         self.calls = []
@@ -229,25 +234,30 @@ class FrontendShutdownManagerTest(unittest.TestCase):
         self.assertTrue(manager.is_draining())
         self.assertTrue(server.should_exit)
 
-    def test_pre_stop_signal_marks_unavailable_without_uvicorn_shutdown(self):
+    def test_pre_stop_signal_watchdog_starts_uvicorn_shutdown(self):
         manager = FrontendShutdownManager()
         server = GracefulShutdownServer(Config(lambda scope: None))
         server.set_server(FakeFrontendServer(), manager)
 
-        server.handle_pre_stop_drain_signal(signal.SIGUSR1, None)
+        with patch.dict(os.environ, {"FRONTEND_PRE_STOP_DRAIN_SECONDS": "0.01"}):
+            server.handle_pre_stop_drain_signal(signal.SIGUSR1, None)
+            self.assertTrue(manager.is_unavailable())
+            self.assertFalse(manager.is_draining())
+            self.assertFalse(server.should_exit)
+            self.assertTrue(self.wait_until(lambda: server.should_exit))
 
         self.assertTrue(manager.is_unavailable())
-        self.assertFalse(manager.is_draining())
-        self.assertFalse(server.should_exit)
+        self.assertTrue(manager.is_draining())
+        self.assertTrue(server.should_exit)
+        self.assertIsNone(server._pre_stop_timer)
 
     def test_sigterm_after_pre_stop_signal_waits_only_remaining_drain(self):
         manager = FrontendShutdownManager()
         server = GracefulShutdownServer(Config(lambda scope: None))
         server.set_server(FakeFrontendServer(), manager)
-        server.handle_pre_stop_drain_signal(signal.SIGUSR1, None)
-
         with patch.dict(os.environ, {"FRONTEND_PRE_STOP_DRAIN_SECONDS": "10"}):
             with patch.object(manager, "drain_elapsed_seconds", return_value=7.0):
+                server.handle_pre_stop_drain_signal(signal.SIGUSR1, None)
                 server.handle_exit(signal.SIGTERM, None)
 
         self.assertTrue(manager.is_unavailable())
@@ -325,6 +335,20 @@ class FrontendShutdownManagerTest(unittest.TestCase):
         self.assertTrue(server.should_exit)
         self.assertIsNone(server._pre_stop_timer)
 
+    def test_cancelled_watchdog_callback_does_not_force_exit(self):
+        manager = FrontendShutdownManager()
+        server = GracefulShutdownServer(Config(lambda scope: None))
+        server.set_server(FakeFrontendServer(), manager)
+
+        with patch.dict(os.environ, {"FRONTEND_PRE_STOP_DRAIN_SECONDS": "100"}):
+            server.handle_pre_stop_drain_signal(signal.SIGUSR1, None)
+            server.handle_exit(signal.SIGINT, None)
+            server._begin_shutdown(signal.SIGUSR1, None, "SIGUSR1", False)
+
+        self.assertTrue(server.should_exit)
+        self.assertFalse(server.force_exit)
+        self.assertIsNone(server._pre_stop_timer)
+
     def test_frontend_pre_stop_uses_frontend_env_before_shared_env(self):
         with patch.dict(
             os.environ,
@@ -373,8 +397,27 @@ class FrontendShutdownManagerTest(unittest.TestCase):
 
         with patch.object(manager, "drain_elapsed_seconds", return_value=7.0):
             server._limit_graceful_shutdown_to_remaining_budget()
+            self.assertEqual(server._remaining_shutdown_timeout_after_pre_stop(), 3.0)
 
         self.assertEqual(server.config.timeout_graceful_shutdown, 3.0)
+
+    def test_frontend_close_is_bounded_by_remaining_shutdown_budget(self):
+        manager = FrontendShutdownManager()
+        server = GracefulShutdownServer(
+            Config(lambda scope: None, timeout_graceful_shutdown=0.01)
+        )
+        frontend_server = HangingFrontendServer()
+        server.set_server(frontend_server, manager)
+        manager.start_draining("unit test")
+
+        start = time.monotonic()
+        asyncio.run(
+            server._close_with_remaining_shutdown_budget(
+                "frontend server", frontend_server.close
+            )
+        )
+
+        self.assertLess(time.monotonic() - start, 0.5)
 
 
 if __name__ == "__main__":

@@ -11,6 +11,7 @@ Standalone fake: ``python -m rtp_llm.dash_sc.server [--port PORT]``.
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import logging
 from typing import Any, Optional
 
@@ -283,8 +284,16 @@ class DashScGrpcServer:
                             exc_info=True,
                         )
 
+        fut = asyncio.run_coroutine_threadsafe(_do_stop(), loop)
+        stop_timeout = None if grace is None else max(0.0, float(grace))
         try:
-            asyncio.run_coroutine_threadsafe(_do_stop(), loop).result()
+            fut.result(timeout=stop_timeout)
+        except concurrent.futures.TimeoutError:
+            fut.cancel()
+            logging.warning(
+                "[DashScGrpc] stop timed out after %.3fs",
+                stop_timeout,
+            )
         except Exception as e:
             logging.warning(
                 "[DashScGrpc] stop scheduling failed: %s",

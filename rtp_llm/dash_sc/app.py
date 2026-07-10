@@ -372,6 +372,9 @@ class DashScApp:
         self._enqueue_loop_thread: Optional[threading.Thread] = None
         self._shutdown_event = threading.Event()
         self._shutdown_started_at: Optional[float] = None
+        self._shutdown_requested = False
+        self._pre_stop_lock = threading.RLock()
+        self._pre_stop_timer: Optional[threading.Timer] = None
         self._shutdown_manager = DashScShutdownManager()
         self._grpc_server = DashScGrpcServer(
             dash_sc_grpc_config=self.dash_sc_grpc_config
@@ -415,20 +418,15 @@ class DashScApp:
     def _install_signal_handlers(self) -> None:
         def _drain_only_handler(signum, frame):
             logging.info("[DashScApp] received pre-stop drain signal %s", signum)
-            self._shutdown_manager.start_unavailable(f"signal {signum}")
+            self._start_pre_stop_watchdog(signum)
 
         def _handler(signum, frame):
             logging.info("[DashScApp] received signal %s, shutting down", signum)
-            if self._shutdown_started_at is None:
-                self._shutdown_started_at = time.monotonic()
-            if (
+            keep_unavailable = (
                 signum == signal.SIGTERM
                 and self._effective_pre_stop_drain_seconds() > 0
-            ):
-                self._shutdown_manager.start_unavailable(f"signal {signum}")
-            else:
-                self._shutdown_manager.start_draining(f"signal {signum}")
-            self._shutdown_event.set()
+            )
+            self._begin_shutdown(signum, start_draining=not keep_unavailable)
 
         try:
             pre_stop_signal = getattr(signal, "SIGUSR1", None)
@@ -441,6 +439,52 @@ class DashScApp:
             logging.warning(
                 "[DashScApp] signal handlers not installed (not on main thread)"
             )
+
+    def _start_pre_stop_watchdog(self, signum: int) -> None:
+        self._shutdown_manager.start_unavailable(f"signal {signum}")
+        begin_shutdown_now = False
+        with self._pre_stop_lock:
+            if self._shutdown_requested or self._pre_stop_timer is not None:
+                return
+            if self._shutdown_started_at is None:
+                self._shutdown_started_at = time.monotonic()
+            drain_seconds = self._effective_pre_stop_drain_seconds()
+            elapsed = self._shutdown_manager.drain_elapsed_seconds()
+            remaining = max(0.0, drain_seconds - elapsed)
+            if remaining <= 0:
+                begin_shutdown_now = True
+            else:
+                logging.info(
+                    "[DashScApp] pre-stop watchdog will force shutdown in %.3fs",
+                    remaining,
+                )
+                timer = threading.Timer(
+                    remaining,
+                    self._begin_shutdown,
+                    args=(signum,),
+                )
+                timer.daemon = True
+                self._pre_stop_timer = timer
+                timer.start()
+        if begin_shutdown_now:
+            self._begin_shutdown(signum)
+
+    def _begin_shutdown(self, signum: int, start_draining: bool = True) -> None:
+        with self._pre_stop_lock:
+            if self._shutdown_requested:
+                return
+            self._shutdown_requested = True
+            timer = self._pre_stop_timer
+            self._pre_stop_timer = None
+            if self._shutdown_started_at is None:
+                self._shutdown_started_at = time.monotonic()
+        if timer is not None:
+            timer.cancel()
+        if start_draining:
+            self._shutdown_manager.start_draining(f"signal {signum}")
+        else:
+            self._shutdown_manager.start_unavailable(f"signal {signum}")
+        self._shutdown_event.set()
 
     def _close_servicer_on_loop(self, servicer: Any) -> None:
         loop = self._enqueue_loop

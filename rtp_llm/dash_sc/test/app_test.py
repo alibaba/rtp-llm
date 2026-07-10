@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import os
 import signal
 import threading
@@ -21,7 +22,7 @@ from rtp_llm.dash_sc.app import (
     _is_proxy_mode_enabled,
     _pre_stop_drain_seconds,
 )
-from rtp_llm.dash_sc.server import DashScGrpcDrainAioInterceptor
+from rtp_llm.dash_sc.server import DashScGrpcDrainAioInterceptor, DashScGrpcServer
 
 
 class _EnvCfg:
@@ -267,11 +268,15 @@ class PreStopDrainSecondsTest(TestCase):
 
         sleep.assert_not_called()
 
-    def test_pre_stop_signal_marks_unavailable_without_shutdown_event(self) -> None:
+    def test_pre_stop_signal_watchdog_releases_service_loop(self) -> None:
         app = bg_app.DashScApp.__new__(bg_app.DashScApp)
         app._shutdown_started_at = None
+        app._shutdown_requested = False
+        app._pre_stop_lock = threading.RLock()
+        app._pre_stop_timer = None
         app._shutdown_manager = DashScShutdownManager()
-        app._shutdown_event = Mock()
+        app._shutdown_event = threading.Event()
+        self.assertTrue(app._shutdown_manager.try_begin_request())
         handlers = {}
 
         class _ServerConfig:
@@ -285,18 +290,35 @@ class PreStopDrainSecondsTest(TestCase):
         with patch("rtp_llm.dash_sc.app.signal.signal", side_effect=capture_signal):
             app._install_signal_handlers()
 
-        handlers[signal.SIGUSR1](signal.SIGUSR1, None)
+        service_loop = threading.Thread(target=app._shutdown_event.wait, daemon=True)
+        service_loop.start()
+        with patch.dict(
+            os.environ,
+            {"DASH_SC_GRPC_PRE_STOP_DRAIN_SECONDS": "0.1"},
+            clear=True,
+        ):
+            handlers[signal.SIGUSR1](signal.SIGUSR1, None)
+            self.assertTrue(app._shutdown_manager.is_unavailable())
+            self.assertFalse(app._shutdown_manager.is_draining())
+            self.assertEqual(app._shutdown_manager.drain_reason(), "signal 10")
+            self.assertEqual(app._shutdown_manager.active_request_count(), 1)
+            self.assertFalse(app._shutdown_manager.try_begin_request())
+            self.assertEqual(app._shutdown_manager.finish_request(), 0)
+            service_loop.join(timeout=1.0)
 
-        self.assertFalse(app._shutdown_manager.is_draining())
+        self.assertFalse(service_loop.is_alive())
+        self.assertTrue(app._shutdown_manager.is_draining())
         self.assertTrue(app._shutdown_manager.is_unavailable())
-        self.assertIsNone(app._shutdown_started_at)
+        self.assertIsNotNone(app._shutdown_started_at)
         self.assertFalse(app._shutdown_manager.try_begin_request())
         self.assertEqual(app._shutdown_manager.active_request_count(), 0)
-        app._shutdown_event.set.assert_not_called()
 
     def test_sigterm_marks_unavailable_until_grpc_stop(self) -> None:
         app = bg_app.DashScApp.__new__(bg_app.DashScApp)
         app._shutdown_started_at = None
+        app._shutdown_requested = False
+        app._pre_stop_lock = threading.RLock()
+        app._pre_stop_timer = None
         app._shutdown_manager = DashScShutdownManager()
         app._shutdown_event = Mock()
         handlers = {}
@@ -321,6 +343,43 @@ class PreStopDrainSecondsTest(TestCase):
         self.assertFalse(app._shutdown_manager.is_draining())
         self.assertTrue(app._shutdown_manager.is_unavailable())
         self.assertIsNotNone(app._shutdown_started_at)
+        self.assertTrue(app._shutdown_requested)
+        self.assertIsNone(app._pre_stop_timer)
+        app._shutdown_event.set.assert_called_once()
+
+    def test_sigterm_cancels_pre_stop_watchdog(self) -> None:
+        app = bg_app.DashScApp.__new__(bg_app.DashScApp)
+        app._shutdown_started_at = None
+        app._shutdown_requested = False
+        app._pre_stop_lock = threading.RLock()
+        app._pre_stop_timer = None
+        app._shutdown_manager = DashScShutdownManager()
+        app._shutdown_event = Mock()
+        handlers = {}
+
+        class _ServerConfig:
+            shutdown_timeout = 30
+
+        app.server_config = _ServerConfig()
+
+        def capture_signal(sig, handler):
+            handlers[sig] = handler
+
+        with patch("rtp_llm.dash_sc.app.signal.signal", side_effect=capture_signal):
+            app._install_signal_handlers()
+
+        with patch.dict(
+            os.environ, {"DASH_SC_GRPC_PRE_STOP_DRAIN_SECONDS": "10"}, clear=True
+        ):
+            handlers[signal.SIGUSR1](signal.SIGUSR1, None)
+            watchdog = app._pre_stop_timer
+            self.assertIsNotNone(watchdog)
+            with patch.object(watchdog, "cancel", wraps=watchdog.cancel) as cancel:
+                handlers[signal.SIGTERM](signal.SIGTERM, None)
+
+        cancel.assert_called_once()
+        self.assertTrue(app._shutdown_requested)
+        self.assertIsNone(app._pre_stop_timer)
         app._shutdown_event.set.assert_called_once()
 
     def test_grpc_stop_marks_draining_after_pre_stop_window(self) -> None:
@@ -377,6 +436,30 @@ class PreStopDrainSecondsTest(TestCase):
         app._stop_enqueue_loop.assert_called_once()
 
 
+class DashScGrpcServerStopTest(TestCase):
+    def test_stop_wait_is_bounded_by_remaining_grace(self) -> None:
+        grpc_server = DashScGrpcServer()
+        grpc_server._server = Mock()
+        grpc_server._servicer = None
+        grpc_server._loop = Mock()
+        stop_future = Mock()
+        stop_future.result.side_effect = concurrent.futures.TimeoutError
+
+        def submit(coroutine, loop):
+            coroutine.close()
+            return stop_future
+
+        with patch(
+            "rtp_llm.dash_sc.server.asyncio.run_coroutine_threadsafe",
+            side_effect=submit,
+        ):
+            grpc_server.stop(grace=0.25)
+
+        stop_future.result.assert_called_once_with(timeout=0.25)
+        stop_future.cancel.assert_called_once()
+        self.assertFalse(grpc_server.is_running)
+
+
 class DashScShutdownManagerTest(TestCase):
     class _AbortContext:
         def __init__(self) -> None:
@@ -429,7 +512,7 @@ class DashScShutdownManagerTest(TestCase):
         async def continuation(_details):
             return grpc.unary_unary_rpc_method_handler(unary_handler)
 
-        manager.start_unavailable("unit test")
+        manager.start_unavailable("signal 10")
 
         async def run():
             handler = await interceptor.intercept_service(
@@ -442,7 +525,10 @@ class DashScShutdownManagerTest(TestCase):
 
         abort_args = asyncio.run(run())
         self.assertEqual(abort_args[0], grpc.StatusCode.UNAVAILABLE)
-        self.assertIn("dash_sc is unavailable", abort_args[1])
+        self.assertEqual(
+            abort_args[1],
+            "dash_sc is unavailable: reason=signal 10 active_requests=0",
+        )
         self.assertFalse(called)
         self.assertEqual(manager.active_request_count(), 0)
 
