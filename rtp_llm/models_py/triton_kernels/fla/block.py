@@ -5,6 +5,11 @@ import triton.language as tl
 from rtp_llm.models_py.triton_kernels.fla.index import prepare_chunk_indices
 
 
+@triton.jit
+def _linear_offset_64(index, stride):
+    return index.to(tl.int64) * stride
+
+
 @triton.jit(do_not_specialize=["max_block_size"])
 def load_initial_state_from_block_map_kernel(
     prefix_lengths: tl.tensor,
@@ -94,6 +99,57 @@ def load_initial_state_from_block_map(
     )
 
 
+@triton.jit
+def _store_ssm_state_block(
+    source_ptr,
+    dest_block_pos,
+    batch,
+    i_h,
+    v_offset,
+    block_map: tl.tensor,
+    ssm_states: tl.tensor,
+    max_block_size: tl.int32,
+    SSM_PER_HEAD: tl.constexpr,
+    V: tl.constexpr,
+    K: tl.constexpr,
+    BLOCK_V: tl.constexpr,
+    CONV_STRIDE_TOKEN: tl.constexpr,
+):
+    block_idx = tl.load(block_map + batch * max_block_size + dest_block_pos).to(
+        tl.int64
+    )
+
+    if block_idx > 0:
+        dest_ptr = (
+            ssm_states
+            + _linear_offset_64(block_idx, CONV_STRIDE_TOKEN)
+            + _linear_offset_64(i_h, SSM_PER_HEAD)
+        )
+
+        p_in = tl.make_block_ptr(
+            source_ptr,
+            (V, K),
+            (K, 1),
+            (v_offset, 0),
+            (BLOCK_V, K),
+            (1, 0),
+        )
+        p_out = tl.make_block_ptr(
+            dest_ptr,
+            (V, K),
+            (K, 1),
+            (v_offset, 0),
+            (BLOCK_V, K),
+            (1, 0),
+        )
+
+        tl.store(
+            p_out,
+            tl.load(p_in, boundary_check=(0, 1)).to(ssm_states.dtype.element_ty),
+            boundary_check=(0, 1),
+        )
+
+
 @triton.jit(do_not_specialize=["max_block_size"])
 def store_ssm_state_to_block_map_kernel(
     chunk_indices: tl.tensor,
@@ -126,56 +182,54 @@ def store_ssm_state_to_block_map_kernel(
     eos = tl.load(cu_seqlens + batch + 1).to(tl.int32)
     input_len = eos - bos
 
-    should_write = False
-    dest_block_pos = 0
-    source_ptr = final_states
-
-    # last chunk always record to final states
+    # Keep source pointers branch-local. Triton 3.7 cannot canonicalize a
+    # pointer phi whose branches use different offset widths.
     if (chunk + 1) * CHUNK_SIZE >= input_len:
-        source_ptr = final_states + batch * SSM_PER_BATCH + i_h * SSM_PER_HEAD
+        source_ptr = (
+            final_states
+            + _linear_offset_64(batch, SSM_PER_BATCH)
+            + _linear_offset_64(i_h, SSM_PER_HEAD)
+        )
         dest_block_pos = (prefix + input_len - 1) // SEQ_SIZE_PER_BLOCK
-        should_write = True
+        _store_ssm_state_block(
+            source_ptr,
+            dest_block_pos,
+            batch,
+            i_h,
+            v_offset,
+            block_map,
+            ssm_states,
+            max_block_size,
+            SSM_PER_HEAD,
+            V,
+            K,
+            BLOCK_V,
+            CONV_STRIDE_TOKEN,
+        )
     elif chunk > 0 and (chunk + 1) * CHUNK_SIZE % SEQ_SIZE_PER_BLOCK == 0:
+        source_ptr = (
+            h
+            + _linear_offset_64(i_c + 1, SSM_PER_BATCH)
+            + _linear_offset_64(i_h, SSM_PER_HEAD)
+        )
         dest_block_pos = (
             prefix + chunk * CHUNK_SIZE + CHUNK_SIZE - 1
         ) // SEQ_SIZE_PER_BLOCK
-        source_ptr = h + (i_c + 1) * SSM_PER_BATCH + i_h * SSM_PER_HEAD
-        should_write = True
-
-    if not should_write:
-        return
-
-    block_idx = tl.load(block_map + batch * max_block_size + dest_block_pos).to(
-        tl.int64
-    )
-
-    if block_idx <= 0:
-        return
-
-    dest_ptr = ssm_states + block_idx * CONV_STRIDE_TOKEN + i_h * SSM_PER_HEAD
-
-    p_in = tl.make_block_ptr(
-        source_ptr,
-        (V, K),
-        (K, 1),
-        (v_offset, 0),
-        (BLOCK_V, K),
-        (1, 0),
-    )
-    p_out = tl.make_block_ptr(
-        dest_ptr,
-        (V, K),
-        (K, 1),
-        (v_offset, 0),
-        (BLOCK_V, K),
-        (1, 0),
-    )
-
-    tl.store(
-        p_out,
-        tl.load(p_in, boundary_check=(0, 1)).to(ssm_states.dtype.element_ty),
-        boundary_check=(0, 1),
-    )
+        _store_ssm_state_block(
+            source_ptr,
+            dest_block_pos,
+            batch,
+            i_h,
+            v_offset,
+            block_map,
+            ssm_states,
+            max_block_size,
+            SSM_PER_HEAD,
+            V,
+            K,
+            BLOCK_V,
+            CONV_STRIDE_TOKEN,
+        )
 
 
 def store_ssm_state_to_block_map(
