@@ -5,14 +5,8 @@ from collections import deque
 from typing import Any, Callable, Tuple
 
 import torch
-import triton.language as tl
 
 _tma_keep_alive_buf = deque(maxlen=200)
-
-try:
-    make_tensor_descriptor = tl.make_tensor_descriptor
-except Exception:
-    make_tensor_descriptor = tl._experimental_make_tensor_descriptor
 
 
 def robust_allocator(size: int, alignment: int, stream: int = None):

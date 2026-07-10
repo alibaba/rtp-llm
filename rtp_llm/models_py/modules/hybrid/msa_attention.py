@@ -3007,7 +3007,7 @@ class MSAAttention(nn.Module):
             local_blocks=self.local_blocks,
             score_type=self.score_type,
             disable_index_value=self.disable_index_value,
-            workspace=MSAAttention._get_trtllm_workspace(device),
+            workspace=self._maybe_trtllm_workspace(device),
             index_score_plan=index_score_plan,
             sparse_attn_plan=sparse_attn_plan,
             kv_indices=kv_page_indices,

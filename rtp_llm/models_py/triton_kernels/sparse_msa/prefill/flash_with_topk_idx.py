@@ -503,7 +503,6 @@ def flash_prefill_with_topk_index(
     init_blocks: int = 1,
     local_blocks: int = 2,
     sm_scale: Optional[float] = None,
-    use_tma: bool = False,
     score_type: str = "max",
     disable_index_value: bool = False,
 ):

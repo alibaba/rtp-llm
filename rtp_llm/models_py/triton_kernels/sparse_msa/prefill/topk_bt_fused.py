@@ -410,7 +410,6 @@ def flash_prefill_topk_to_block_tables(
     idx_q: torch.Tensor,  # [total_q, num_idx_heads(=num_kv_heads), d]
     idx_k_cache: torch.Tensor,  # paged [max_slots, 1, d]
     req_to_token: torch.Tensor,
-    slot_ids: torch.Tensor,
     cu_seqlens: torch.Tensor,
     seq_lens: torch.Tensor,
     prefix_lens: torch.Tensor,
@@ -422,7 +421,6 @@ def flash_prefill_topk_to_block_tables(
     init_blocks: int = 0,
     local_blocks: int = 1,
     sm_scale=None,
-    score_type: str = "max",
     index_score_plan=None,
     kv_indices=None,
     emit_block_table: bool = True,
@@ -548,7 +546,6 @@ def flash_prefill_with_fmha(
     idx_q: torch.Tensor,  # [total_q, num_idx_heads, idx_head_dim]
     idx_k_cache: torch.Tensor,  # [max_slots, 1, idx_head_dim]
     req_to_token: torch.Tensor,
-    slot_ids: torch.Tensor,
     cu_seqlens: torch.Tensor,
     seq_lens: torch.Tensor,
     prefix_lens: torch.Tensor,
@@ -559,8 +556,6 @@ def flash_prefill_with_fmha(
     init_blocks: int,
     local_blocks: int,
     sm_scale: float,
-    workspace: torch.Tensor,
-    score_type: str = "max",
     index_score_plan=None,
     sparse_attn_plan=None,
     kv_indices=None,
@@ -599,7 +594,6 @@ def flash_prefill_with_fmha(
         idx_q=idx_q,
         idx_k_cache=idx_k_cache,
         req_to_token=req_to_token,
-        slot_ids=slot_ids,
         cu_seqlens=cu_seqlens,
         seq_lens=seq_lens,
         prefix_lens=prefix_lens,
@@ -610,7 +604,6 @@ def flash_prefill_with_fmha(
         num_pages=num_pages,
         init_blocks=init_blocks,
         local_blocks=local_blocks,
-        score_type=score_type,
         index_score_plan=index_score_plan,
         kv_indices=kv_indices,
         emit_block_table=False,
@@ -712,7 +705,6 @@ def flash_decode_with_trtllm_gen(
     idx_q: torch.Tensor,  # [total_q, num_idx_heads, idx_head_dim]
     idx_k_cache: torch.Tensor,  # [max_slots, 1, idx_head_dim]
     req_to_token: torch.Tensor,
-    slot_ids: torch.Tensor,
     cu_seqlens: torch.Tensor,
     seq_lens: torch.Tensor,
     prefix_lens: torch.Tensor,
@@ -724,7 +716,6 @@ def flash_decode_with_trtllm_gen(
     local_blocks: int,
     sm_scale: float,
     workspace: torch.Tensor,
-    score_type: str = "max",
     index_score_plan=None,
     kv_indices=None,
 ) -> torch.Tensor:
@@ -754,7 +745,6 @@ def flash_decode_with_trtllm_gen(
         idx_q=idx_q,
         idx_k_cache=idx_k_cache,
         req_to_token=req_to_token,
-        slot_ids=slot_ids,
         cu_seqlens=cu_seqlens,
         seq_lens=seq_lens,
         prefix_lens=prefix_lens,
@@ -765,7 +755,6 @@ def flash_decode_with_trtllm_gen(
         num_pages=num_pages,
         init_blocks=init_blocks,
         local_blocks=local_blocks,
-        score_type=score_type,
         index_score_plan=index_score_plan,
         kv_indices=kv_indices,
         emit_block_table=True,

@@ -140,7 +140,6 @@ def minimax_sparse_prefill(
             idx_q=idx_q,
             idx_k_cache=idx_k_cache,
             req_to_token=req_to_token,
-            slot_ids=slot_ids,
             cu_seqlens=cu_seqlens,
             seq_lens=seq_lens,
             prefix_lens=prefix_lens,
@@ -151,8 +150,6 @@ def minimax_sparse_prefill(
             init_blocks=init_blocks,
             local_blocks=local_blocks,
             sm_scale=sm_scale_v,
-            workspace=workspace,
-            score_type=score_type,
             index_score_plan=index_score_plan,
             sparse_attn_plan=sparse_attn_plan,
             kv_indices=kv_indices,
@@ -361,7 +358,6 @@ def minimax_sparse_decode(
             idx_q=idx_q,
             idx_k_cache=idx_k_cache,
             req_to_token=req_to_token,
-            slot_ids=slot_ids,
             cu_seqlens=cu_seqlens,
             seq_lens=seq_lens,
             prefix_lens=prefix_lens,
@@ -373,7 +369,6 @@ def minimax_sparse_decode(
             local_blocks=local_blocks,
             sm_scale=sm_scale_v,
             workspace=workspace,
-            score_type=score_type,
         )
         return None, o
 

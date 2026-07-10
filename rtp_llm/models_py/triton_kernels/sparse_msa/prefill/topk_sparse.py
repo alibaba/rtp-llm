@@ -95,7 +95,6 @@ def _gqa_share_sparse_fwd_kernel(
     BLOCK_SIZE_QH: tl.constexpr,
     # has sink
     HAS_SINK: tl.constexpr,
-    USE_TMA: tl.constexpr,
     # Skip the `(x + max_slots) % max_slots` safety wrap when the caller
     # guarantees slot_ids and req_to_token contain only valid non-negative
     # slots. The wrap is a non-trivial 128-element i64 mod on the hot path.
@@ -284,7 +283,6 @@ def flash_prefill_with_gqa_share_sparse(
     prefix_lens: torch.Tensor,
     max_seqlen_q: int,
     sm_scale: Optional[float] = None,
-    use_tma: bool = True,
     safe_slots: bool = False,
 ) -> torch.Tensor:
     triton.set_allocator(robust_allocator)
@@ -363,7 +361,6 @@ def flash_prefill_with_gqa_share_sparse(
         req_to_token.stride(0),
         BLOCK_SIZE_Q=BLOCK_SIZE_Q,
         BLOCK_SIZE_K=BLOCK_SIZE_K,
-        USE_TMA=use_tma,
         SAFE_SLOTS=safe_slots,
     )
     return o
