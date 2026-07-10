@@ -54,6 +54,13 @@ def sm120_suites():
                 gpu_type = ["RTX_5000_PRO"],
             ),
             smoke_test(
+                name = "dense_fp8pb_dynamic_cudagraph_sm120",
+                task_info = "data/model/qwen3/q_r_fp8pb_sm120.json",
+                envs = ["LOAD_PYTHON_MODEL=1"],
+                smoke_args = "--quantization FP8_PER_BLOCK --act_type BF16 --warm_up 0 --enable_cuda_graph 1",
+                gpu_type = ["RTX_5000_PRO"],
+            ),
+            smoke_test(
                 name = "dense_fp8pt_dynamic_sm120",
                 task_info = "data/model/qwen3/q_r_fp8pt_sm120.json",
                 envs = ["LOAD_PYTHON_MODEL=1"],
