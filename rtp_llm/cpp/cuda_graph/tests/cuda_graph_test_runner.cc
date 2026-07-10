@@ -44,7 +44,10 @@ public:
                      int64_t          max_seq_len,
                      int64_t          tokens_per_block,
                      int64_t          kernel_tokens_per_block,
-                     std::vector<int> decode_capture_batch_sizes) {
+                     std::vector<int> decode_capture_batch_sizes,
+                     int64_t          num_tokens_per_bs = 1,
+                     bool             is_target_verify  = false,
+                     bool             use_float32       = false) {
         reset_runner();
         GraphParams params;
         params.enable_cuda_graph_debug_mode = false;
@@ -52,9 +55,10 @@ public:
         params.max_seq_len                  = static_cast<int>(max_seq_len);
         params.tokens_per_block             = static_cast<int>(tokens_per_block);
         params.kernel_tokens_per_block      = static_cast<int>(kernel_tokens_per_block);
-        params.num_tokens_per_bs            = 1;
+        params.num_tokens_per_bs            = static_cast<int>(num_tokens_per_bs);
+        params.is_target_verify             = is_target_verify;
         params.hidden_size                  = static_cast<size_t>(hidden_size);
-        params.model_data_type              = c10::ScalarType::Half;
+        params.model_data_type              = use_float32 ? c10::ScalarType::Float : c10::ScalarType::Half;
         params.max_context_batch_size       = 128;
         params.decode_capture_batch_sizes   = std::move(decode_capture_batch_sizes);
         params.kv_cache_layer_to_group      = {};  // test: no hybrid kv cache
@@ -113,7 +117,10 @@ PYBIND11_MODULE(libtest_cuda_graph_runner, m) {
              py::arg("max_seq_len"),
              py::arg("tokens_per_block"),
              py::arg("kernel_tokens_per_block"),
-             py::arg("decode_capture_batch_sizes"))
+             py::arg("decode_capture_batch_sizes"),
+             py::arg("num_tokens_per_bs") = 1,
+             py::arg("is_target_verify")  = false,
+             py::arg("use_float32")       = false)
         .def("canRun", &CudaGraphTestRunner::canRun)
         .def("forward", &CudaGraphTestRunner::forward)
         .def("getCurrentRealGraphSize", &CudaGraphTestRunner::getCurrentRealGraphSize);

@@ -104,3 +104,37 @@ py_test(
     tags = ["H20"],
     exec_properties = {"gpu": "H20"},
 )
+
+py_test(
+    name = "qwen3_next_graph_probe_gpu_test",
+    srcs = ["qwen3_next_graph_probe_gpu_test.py"],
+    data = [
+        ":test_cuda_graph_runner",
+        "//:th_transformer",
+    ],
+    deps = [
+        "//rtp_llm/test/model_test/test_util:test_util",
+    ],
+    env = {"TEST_USING_DEVICE": "ROCM"},
+    tags = ["MI308X"],
+    exec_properties = {"gpu": "MI308X-ROCM7"},
+)
+
+py_test(
+    name = "qwen3_next_graph_probe_disabled_gpu_test",
+    srcs = ["qwen3_next_graph_probe_gpu_test.py"],
+    main = "qwen3_next_graph_probe_gpu_test.py",
+    data = [
+        ":test_cuda_graph_runner",
+        "//:th_transformer",
+    ],
+    deps = [
+        "//rtp_llm/test/model_test/test_util:test_util",
+    ],
+    env = {
+        "TEST_QWEN3_NEXT_GRAPH_PROBE_ENABLED": "0",
+        "TEST_USING_DEVICE": "ROCM",
+    },
+    tags = ["MI308X"],
+    exec_properties = {"gpu": "MI308X-ROCM7"},
+)

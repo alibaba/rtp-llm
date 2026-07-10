@@ -96,6 +96,160 @@ _Q3N_TRACE_TENSOR_MODE = os.environ.get(
 _Q3N_TRACE_METADATA_ONLY = _Q3N_TRACE_TENSOR_MODE in ("metadata", "meta", "none")
 _Q3N_TRACE_STATE = {"records": 0, "per_trace_step": {}}
 
+_Q3N_GRAPH_PROBE_ENABLED = _env_flag("RTPLLM_QWEN3_NEXT_GRAPH_PROBE", False)
+_Q3N_GRAPH_PROBE_LAYERS = tuple(
+    dict.fromkeys(
+        int(item.strip())
+        for item in os.environ.get(
+            "RTPLLM_QWEN3_NEXT_GRAPH_PROBE_LAYERS",
+            "0,8,16,24,32,40,48,56,63",
+        ).split(",")
+        if item.strip().lstrip("-").isdigit()
+    )
+)
+
+
+def _graph_probe_stats(tensor: torch.Tensor) -> torch.Tensor:
+    flat = tensor.reshape(tensor.shape[0], -1).to(torch.float32)
+    finite = torch.isfinite(flat)
+    safe = torch.where(finite, flat, torch.zeros_like(flat))
+    has_finite = finite.any(dim=1)
+    minimum = torch.where(
+        has_finite,
+        torch.where(finite, flat, torch.full_like(flat, float("inf"))).amin(dim=1),
+        torch.zeros_like(has_finite, dtype=torch.float32),
+    )
+    maximum = torch.where(
+        has_finite,
+        torch.where(finite, flat, torch.full_like(flat, float("-inf"))).amax(dim=1),
+        torch.zeros_like(has_finite, dtype=torch.float32),
+    )
+    return torch.stack(
+        (
+            safe.sum(dim=1),
+            safe.abs().sum(dim=1),
+            (safe * safe).sum(dim=1),
+            minimum,
+            maximum,
+            (~finite).sum(dim=1).to(torch.float32),
+        ),
+        dim=1,
+    )
+
+
+class _CudaGraphLayerProbe:
+    field_names = (
+        "sum",
+        "abs_sum",
+        "square_sum",
+        "min",
+        "max",
+        "nonfinite_count",
+        "residual_sum",
+        "residual_abs_sum",
+        "residual_square_sum",
+        "residual_min",
+        "residual_max",
+        "residual_nonfinite_count",
+    )
+
+    def __init__(
+        self,
+        enabled: bool,
+        layers: tuple[int, ...],
+        layer_num: int,
+    ):
+        self.enabled = enabled
+        self.layers = tuple(
+            layer
+            for layer in dict.fromkeys(layers)
+            if 0 <= layer < int(layer_num)
+        )
+        self._layer_slots = {layer: slot for slot, layer in enumerate(self.layers)}
+        self._buffers: dict[int, torch.Tensor] = {}
+        self._record_debug = {
+            "attempts": 0,
+            "recorded": 0,
+            "skipped_not_cuda_graph": 0,
+            "skipped_invalid_tensor": 0,
+            "skipped_invalid_layout": 0,
+            "last_layer_idx": -1,
+            "last_graph_bs": -1,
+            "last_token_rows": -1,
+            "last_residual_rows": -1,
+            "last_is_cuda_graph": -1,
+        }
+
+    def record(
+        self,
+        layer_idx: int,
+        hidden_states: torch.Tensor,
+        residual: torch.Tensor,
+        *,
+        graph_bs: int,
+        is_cuda_graph: bool,
+    ) -> None:
+        if not self.enabled or layer_idx not in self._layer_slots:
+            return
+        debug = self._record_debug
+        debug["attempts"] += 1
+        debug["last_layer_idx"] = int(layer_idx)
+        debug["last_graph_bs"] = int(graph_bs)
+        debug["last_token_rows"] = (
+            int(hidden_states.shape[0]) if hidden_states.dim() > 0 else -1
+        )
+        debug["last_residual_rows"] = (
+            int(residual.shape[0]) if residual.dim() > 0 else -1
+        )
+        debug["last_is_cuda_graph"] = int(bool(is_cuda_graph))
+        if not is_cuda_graph:
+            debug["skipped_not_cuda_graph"] += 1
+            return
+        if hidden_states.dim() == 0 or residual.dim() == 0:
+            debug["skipped_invalid_tensor"] += 1
+            return
+        graph_bs = int(graph_bs)
+        token_rows = int(hidden_states.shape[0])
+        if (
+            graph_bs <= 0
+            or token_rows <= 0
+            or residual.shape[0] != token_rows
+            or token_rows % graph_bs != 0
+        ):
+            debug["skipped_invalid_layout"] += 1
+            return
+        buffer = self._buffers.get(graph_bs)
+        if buffer is None:
+            buffer = torch.zeros(
+                (len(self.layers), graph_bs, len(self.field_names)),
+                dtype=torch.float32,
+                device=hidden_states.device,
+            )
+            self._buffers[graph_bs] = buffer
+        stats = torch.cat(
+            (
+                _graph_probe_stats(hidden_states.reshape(graph_bs, -1)),
+                _graph_probe_stats(residual.reshape(graph_bs, -1)),
+            ),
+            dim=1,
+        )
+        buffer[self._layer_slots[layer_idx]].copy_(stats)
+        debug["recorded"] += 1
+
+    def get_debug_status(self) -> dict[str, int]:
+        return dict(self._record_debug)
+
+    def get_buffer(self, graph_bs: int) -> Optional[torch.Tensor]:
+        return self._buffers.get(int(graph_bs))
+
+    def get_capture(
+        self, graph_bs: int
+    ) -> Optional[tuple[torch.Tensor, tuple[int, ...]]]:
+        buffer = self.get_buffer(graph_bs)
+        if buffer is None:
+            return None
+        return buffer, self.layers
+
 
 def _trace_file() -> Optional[Path]:
     if not _Q3N_TRACE_ENABLED:
@@ -1676,6 +1830,49 @@ class Qwen3NextModel(GptModelBase):
         self.norm = RMSResNorm(
             weights.get_global_weight(W.final_ln_gamma), eps=model_config.layernorm_eps
         )
+        self._cuda_graph_layer_probe = (
+            _CudaGraphLayerProbe(True, _Q3N_GRAPH_PROBE_LAYERS, self.layer_num)
+            if _Q3N_GRAPH_PROBE_ENABLED
+            else None
+        )
+
+    def get_cuda_graph_probe_buffer(
+        self, graph_bs: int
+    ) -> Optional[tuple[torch.Tensor, tuple[int, ...]]]:
+        if self._cuda_graph_layer_probe is None:
+            return None
+        return self._cuda_graph_layer_probe.get_capture(graph_bs)
+
+    def get_cuda_graph_probe_debug_status(self, graph_bs: int) -> dict[str, Any]:
+        probe = self._cuda_graph_layer_probe
+        if probe is None:
+            return {
+                "module_env_enabled": _Q3N_GRAPH_PROBE_ENABLED,
+                "probe_created": False,
+                "buffer_available": False,
+                "layers": (),
+                "buffer_bucket_bs": (),
+                "record_debug": {
+                    "attempts": 0,
+                    "recorded": 0,
+                    "skipped_not_cuda_graph": 0,
+                    "skipped_invalid_tensor": 0,
+                    "skipped_invalid_layout": 0,
+                    "last_layer_idx": -1,
+                    "last_graph_bs": -1,
+                    "last_token_rows": -1,
+                    "last_residual_rows": -1,
+                    "last_is_cuda_graph": -1,
+                },
+            }
+        return {
+            "module_env_enabled": _Q3N_GRAPH_PROBE_ENABLED,
+            "probe_created": True,
+            "buffer_available": probe.get_buffer(graph_bs) is not None,
+            "layers": probe.layers,
+            "buffer_bucket_bs": tuple(sorted(probe._buffers)),
+            "record_debug": probe.get_debug_status(),
+        }
 
     def _build_cp_linear_attn_metadata(
         self,
@@ -1741,6 +1938,11 @@ class Qwen3NextModel(GptModelBase):
         hidden_states = inputs_embeds
 
         attention_inputs: PyAttentionInputs = inputs.attention_inputs
+        graph_probe_bs = (
+            int(attention_inputs.input_lengths.size(0))
+            if self._cuda_graph_layer_probe is not None
+            else 0
+        )
         prefill_conv1d_meta = None
         is_target_verify = attention_inputs.is_target_verify
         is_cp = self.parallelism_config.prefill_cp_config.is_enabled()
@@ -1825,6 +2027,16 @@ class Qwen3NextModel(GptModelBase):
                 attention_inputs=attention_inputs,
                 attn_meta=attn_meta,
             )
+            if self._cuda_graph_layer_probe is not None:
+                self._cuda_graph_layer_probe.record(
+                    i,
+                    hidden_states,
+                    residual,
+                    graph_bs=graph_probe_bs,
+                    is_cuda_graph=bool(
+                        getattr(attention_inputs, "is_cuda_graph", False)
+                    ),
+                )
             if _trace_layer_enabled(i, layer_type):
                 _trace_event(
                     trace_ctx,

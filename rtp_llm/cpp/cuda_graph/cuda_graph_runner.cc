@@ -4,12 +4,14 @@
 #include <atomic>
 #include <cctype>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <iomanip>
 #include <limits>
+#include <memory>
 #include <mutex>
 #include <sstream>
 #include <string>
@@ -164,6 +166,7 @@ struct DecodeChecksumConfig {
     int64_t                  max_lanes{8};
     std::string              file;
     std::vector<std::string> trace_filters;
+    bool                     graph_probe_enabled{false};
 };
 
 const DecodeChecksumConfig& decodeChecksumConfig() {
@@ -175,6 +178,11 @@ const DecodeChecksumConfig& decodeChecksumConfig() {
         c.max_records   = envInt64("RTPLLM_DECODE_CHECKSUM_MAX_RECORDS", 0);
         c.max_lanes     = envInt64("RTPLLM_DECODE_CHECKSUM_MAX_LANES", 8);
         c.trace_filters = splitCsv(envString("RTPLLM_DECODE_CHECKSUM_TRACE_FILTER"));
+        c.graph_probe_enabled = c.enabled && envFlag("RTPLLM_QWEN3_NEXT_GRAPH_PROBE", false);
+
+        if (!c.enabled) {
+            return c;
+        }
 
         c.file = envString("RTPLLM_DECODE_CHECKSUM_FILE");
         if (c.file.empty()) {
@@ -256,6 +264,14 @@ void appendShape(std::ostringstream& os, const torch::Tensor& tensor) {
     os << "]";
 }
 
+void appendJsonFloat(std::ostringstream& os, double value) {
+    if (std::isfinite(value)) {
+        os << std::setprecision(std::numeric_limits<double>::max_digits10) << value;
+    } else {
+        os << "null";
+    }
+}
+
 void appendTensorStats(std::ostringstream& os, const std::string& name, const torch::Tensor& tensor) {
     os << "\"" << name << "\":";
     if (!tensor.defined()) {
@@ -280,10 +296,14 @@ void appendTensorStats(std::ostringstream& os, const std::string& name, const to
 
         if (cpu.numel() > 0) {
             auto flat = cpu.reshape({cpu.numel()}).to(torch::kFloat32);
-            os << ",\"sum\":" << flat.sum().item<double>();
-            os << ",\"abs_sum\":" << flat.abs().sum().item<double>();
-            os << ",\"min\":" << flat.min().item<double>();
-            os << ",\"max\":" << flat.max().item<double>();
+            os << ",\"sum\":";
+            appendJsonFloat(os, flat.sum().item<double>());
+            os << ",\"abs_sum\":";
+            appendJsonFloat(os, flat.abs().sum().item<double>());
+            os << ",\"min\":";
+            appendJsonFloat(os, flat.min().item<double>());
+            os << ",\"max\":";
+            appendJsonFloat(os, flat.max().item<double>());
             os << ",\"sample\":[";
             const auto sample_count = std::min<int64_t>(flat.numel(), 8);
             const auto* data        = flat.data_ptr<float>();
@@ -291,13 +311,274 @@ void appendTensorStats(std::ostringstream& os, const std::string& name, const to
                 if (i != 0) {
                     os << ",";
                 }
-                os << data[i];
+                appendJsonFloat(os, data[i]);
             }
             os << "]";
         }
         os << "}";
     } catch (const std::exception& e) {
         os << "{\"error\":\"" << jsonEscape(e.what()) << "\"}";
+    }
+}
+
+struct CudaGraphProbeDebugStatus {
+    struct RecordDebug {
+        int64_t attempts{0};
+        int64_t recorded{0};
+        int64_t skipped_not_cuda_graph{0};
+        int64_t skipped_invalid_tensor{0};
+        int64_t skipped_invalid_layout{0};
+        int64_t last_layer_idx{-1};
+        int64_t last_graph_bs{-1};
+        int64_t last_token_rows{-1};
+        int64_t last_residual_rows{-1};
+        int64_t last_is_cuda_graph{-1};
+    };
+
+    struct PythonStatus {
+        bool                 available{false};
+        bool                 module_env_enabled{false};
+        bool                 probe_created{false};
+        bool                 buffer_available{false};
+        std::vector<int64_t> layers;
+        std::vector<int64_t> buffer_bucket_bs;
+        RecordDebug          record_debug;
+    };
+
+    bool                 cpp_enabled{false};
+    bool                 has_buffer_getter{false};
+    bool                 has_status_getter{false};
+    std::string          reason{"not_collected"};
+    std::string          python_type;
+    std::string          error;
+    PythonStatus         python_status;
+};
+
+struct CudaGraphProbeCapture {
+    torch::Tensor                              buffer;
+    std::vector<int64_t>                       layers;
+    std::unique_ptr<CudaGraphProbeDebugStatus> status;
+};
+
+struct DecodeChecksumRecord {
+    bool     selected{false};
+    uint64_t id{0};
+};
+
+DecodeChecksumRecord nextDecodeChecksumRecord() {
+    const auto& config = decodeChecksumConfig();
+    if (!config.enabled) {
+        return {};
+    }
+
+    const uint64_t record_id = g_decode_checksum_record_id.fetch_add(1, std::memory_order_relaxed);
+    if (config.max_records > 0 && record_id >= static_cast<uint64_t>(config.max_records)) {
+        return {};
+    }
+    if (record_id % static_cast<uint64_t>(config.every) != 0) {
+        return {};
+    }
+    return {true, record_id};
+}
+
+void appendGraphProbe(std::ostringstream&            os,
+                      const CudaGraphProbeCapture&   graph_probe,
+                      int64_t                        lane) {
+    os << "\"graph_probe\":";
+    if (!graph_probe.buffer.defined() || graph_probe.buffer.dim() != 3 || lane < 0
+        || lane >= graph_probe.buffer.size(1)) {
+        os << "null";
+        return;
+    }
+
+    try {
+        auto cpu = graph_probe.buffer.select(1, lane).detach().to(torch::kCPU).to(torch::kFloat32).contiguous();
+        static const std::vector<std::string> fields = {
+            "sum",
+            "abs_sum",
+            "square_sum",
+            "min",
+            "max",
+            "nonfinite_count",
+            "residual_sum",
+            "residual_abs_sum",
+            "residual_square_sum",
+            "residual_min",
+            "residual_max",
+            "residual_nonfinite_count",
+        };
+
+        os << "{\"shape\":";
+        appendShape(os, cpu);
+        os << ",\"layers\":[";
+        for (int64_t slot = 0; slot < cpu.size(0); ++slot) {
+            if (slot != 0) {
+                os << ",";
+            }
+            os << graph_probe.layers[slot];
+        }
+        os << "],\"fields\":[";
+        for (size_t i = 0; i < fields.size(); ++i) {
+            if (i != 0) {
+                os << ",";
+            }
+            os << "\"" << fields[i] << "\"";
+        }
+        os << "],\"values\":[";
+        const auto* data = cpu.data_ptr<float>();
+        for (int64_t row = 0; row < cpu.size(0); ++row) {
+            if (row != 0) {
+                os << ",";
+            }
+            os << "[";
+            for (int64_t col = 0; col < cpu.size(1); ++col) {
+                if (col != 0) {
+                    os << ",";
+                }
+                appendJsonFloat(os, data[row * cpu.size(1) + col]);
+            }
+            os << "]";
+        }
+        os << "]}";
+    } catch (const std::exception& e) {
+        os << "{\"error\":\"" << jsonEscape(e.what()) << "\"}";
+    }
+}
+
+void appendInt64List(std::ostringstream& os, const std::vector<int64_t>& values) {
+    os << "[";
+    for (size_t i = 0; i < values.size(); ++i) {
+        if (i != 0) {
+            os << ",";
+        }
+        os << values[i];
+    }
+    os << "]";
+}
+
+void appendGraphProbeStatus(std::ostringstream& os, const CudaGraphProbeDebugStatus& status) {
+    os << "{\"reason\":\"" << jsonEscape(status.reason) << "\"";
+    os << ",\"cpp_enabled\":" << (status.cpp_enabled ? "true" : "false");
+    os << ",\"has_buffer_getter\":" << (status.has_buffer_getter ? "true" : "false");
+    os << ",\"has_status_getter\":" << (status.has_status_getter ? "true" : "false");
+    os << ",\"python_type\":\"" << jsonEscape(status.python_type) << "\"";
+    os << ",\"error\":";
+    if (status.error.empty()) {
+        os << "null";
+    } else {
+        os << "\"" << jsonEscape(status.error) << "\"";
+    }
+    os << ",\"python_status\":";
+    if (!status.python_status.available) {
+        os << "null";
+    } else {
+        os << "{\"module_env_enabled\":"
+           << (status.python_status.module_env_enabled ? "true" : "false");
+        os << ",\"probe_created\":" << (status.python_status.probe_created ? "true" : "false");
+        os << ",\"buffer_available\":"
+           << (status.python_status.buffer_available ? "true" : "false");
+        os << ",\"layers\":";
+        appendInt64List(os, status.python_status.layers);
+        os << ",\"buffer_bucket_bs\":";
+        appendInt64List(os, status.python_status.buffer_bucket_bs);
+        const auto& debug = status.python_status.record_debug;
+        os << ",\"record_debug\":{\"attempts\":" << debug.attempts;
+        os << ",\"recorded\":" << debug.recorded;
+        os << ",\"skipped_not_cuda_graph\":" << debug.skipped_not_cuda_graph;
+        os << ",\"skipped_invalid_tensor\":" << debug.skipped_invalid_tensor;
+        os << ",\"skipped_invalid_layout\":" << debug.skipped_invalid_layout;
+        os << ",\"last_layer_idx\":" << debug.last_layer_idx;
+        os << ",\"last_graph_bs\":" << debug.last_graph_bs;
+        os << ",\"last_token_rows\":" << debug.last_token_rows;
+        os << ",\"last_residual_rows\":" << debug.last_residual_rows;
+        os << ",\"last_is_cuda_graph\":" << debug.last_is_cuda_graph << "}";
+        os << "}";
+    }
+    os << "}";
+}
+
+CudaGraphProbeCapture getCudaGraphProbeBuffer(const py::object& py_instance, int64_t graph_bs) {
+    const auto& config = decodeChecksumConfig();
+    CudaGraphProbeCapture graph_probe;
+    if (!config.enabled) {
+        return graph_probe;
+    }
+    graph_probe.status = std::make_unique<CudaGraphProbeDebugStatus>();
+    auto& status       = *graph_probe.status;
+    status.cpp_enabled = config.graph_probe_enabled;
+    if (!config.graph_probe_enabled) {
+        status.reason = "cpp_disabled";
+        return graph_probe;
+    }
+
+    try {
+        status.python_type       = py::str(py::type::of(py_instance));
+        status.has_buffer_getter = py::hasattr(py_instance, "get_cuda_graph_probe_buffer");
+        status.has_status_getter = py::hasattr(py_instance, "get_cuda_graph_probe_debug_status");
+    } catch (const std::exception& e) {
+        status.reason = "python_introspection_error";
+        status.error  = e.what();
+        return graph_probe;
+    }
+
+    if (status.has_status_getter) {
+        try {
+            auto status_obj    = py_instance.attr("get_cuda_graph_probe_debug_status")(graph_bs);
+            auto python_status = status_obj.cast<py::dict>();
+            auto record_debug = python_status["record_debug"].cast<py::dict>();
+            status.python_status.available          = true;
+            status.python_status.module_env_enabled = python_status["module_env_enabled"].cast<bool>();
+            status.python_status.probe_created      = python_status["probe_created"].cast<bool>();
+            status.python_status.buffer_available   = python_status["buffer_available"].cast<bool>();
+            status.python_status.layers             = python_status["layers"].cast<std::vector<int64_t>>();
+            status.python_status.buffer_bucket_bs =
+                python_status["buffer_bucket_bs"].cast<std::vector<int64_t>>();
+            auto& debug                    = status.python_status.record_debug;
+            debug.attempts                 = record_debug["attempts"].cast<int64_t>();
+            debug.recorded                 = record_debug["recorded"].cast<int64_t>();
+            debug.skipped_not_cuda_graph   = record_debug["skipped_not_cuda_graph"].cast<int64_t>();
+            debug.skipped_invalid_tensor   = record_debug["skipped_invalid_tensor"].cast<int64_t>();
+            debug.skipped_invalid_layout   = record_debug["skipped_invalid_layout"].cast<int64_t>();
+            debug.last_layer_idx           = record_debug["last_layer_idx"].cast<int64_t>();
+            debug.last_graph_bs            = record_debug["last_graph_bs"].cast<int64_t>();
+            debug.last_token_rows          = record_debug["last_token_rows"].cast<int64_t>();
+            debug.last_residual_rows       = record_debug["last_residual_rows"].cast<int64_t>();
+            debug.last_is_cuda_graph       = record_debug["last_is_cuda_graph"].cast<int64_t>();
+        } catch (const std::exception& e) {
+            status.error = std::string("status_getter: ") + e.what();
+        }
+    }
+
+    if (!status.has_buffer_getter) {
+        status.reason = "buffer_getter_missing";
+        return graph_probe;
+    }
+    try {
+        auto result = py_instance.attr("get_cuda_graph_probe_buffer")(graph_bs);
+        if (result.is_none()) {
+            status.reason = "buffer_unavailable";
+            return graph_probe;
+        }
+        auto capture = result.cast<py::tuple>();
+        if (capture.size() != 2) {
+            throw std::runtime_error("CUDA graph probe getter must return (buffer, layers)");
+        }
+        graph_probe.buffer = capture[0].cast<torch::Tensor>();
+        graph_probe.layers = capture[1].cast<std::vector<int64_t>>();
+        if (!graph_probe.buffer.defined() || graph_probe.buffer.dim() != 3
+            || graph_probe.buffer.size(0) != static_cast<int64_t>(graph_probe.layers.size())) {
+            throw std::runtime_error("CUDA graph probe buffer and layer metadata disagree");
+        }
+        status.reason = "ready";
+        return graph_probe;
+    } catch (const std::exception& e) {
+        RTP_LLM_LOG_WARNING("Failed to get CUDA graph probe buffer: %s", e.what());
+        status.reason = "buffer_getter_error";
+        if (!status.error.empty()) {
+            status.error += "; ";
+        }
+        status.error += e.what();
+        return graph_probe;
     }
 }
 
@@ -321,22 +602,16 @@ void appendLaneBlockMaps(std::ostringstream& os, const PyAttentionInputs& attent
     os << "]";
 }
 
-void writeDecodeChecksumRecord(const char*            stage,
-                               const PyModelInputs&  original_inputs,
-                               const PyModelInputs&  graph_inputs,
-                               const torch::Tensor&  hidden_states,
-                               const CudaGraphState& state,
-                               int32_t               full_kv_cache_group_id) {
+void writeDecodeChecksumRecord(const DecodeChecksumRecord& record,
+                               const char*                  stage,
+                               const PyModelInputs&         original_inputs,
+                               const PyModelInputs&         graph_inputs,
+                               const torch::Tensor&         hidden_states,
+                               const CudaGraphProbeCapture& graph_probe,
+                               const CudaGraphState&        state,
+                               int32_t                      full_kv_cache_group_id) {
     const auto& config = decodeChecksumConfig();
-    if (!config.enabled) {
-        return;
-    }
-
-    const uint64_t record_id = g_decode_checksum_record_id.fetch_add(1, std::memory_order_relaxed);
-    if (config.max_records > 0 && record_id >= static_cast<uint64_t>(config.max_records)) {
-        return;
-    }
-    if (record_id % static_cast<uint64_t>(config.every) != 0) {
+    if (!record.selected) {
         return;
     }
 
@@ -353,7 +628,7 @@ void writeDecodeChecksumRecord(const char*            stage,
                             .count();
 
     std::ostringstream os;
-    os << "{\"record_id\":" << record_id;
+    os << "{\"record_id\":" << record.id;
     os << ",\"ts_us\":" << now_us;
     os << ",\"pid\":" << getpid();
     os << ",\"rank\":\"" << jsonEscape(envString("WORLD_RANK", "")) << "\"";
@@ -363,6 +638,10 @@ void writeDecodeChecksumRecord(const char*            stage,
     os << ",\"graph_bs\":" << state.current_real_graph_bs;
     os << ",\"seq_len_sum\":" << state.seq_len_sum;
     os << ",\"full_kv_cache_group_id\":" << full_kv_cache_group_id;
+    if (graph_probe.status) {
+        os << ",\"graph_probe_status\":";
+        appendGraphProbeStatus(os, *graph_probe.status);
+    }
     os << ",\"lane_count\":" << lanes.size();
     os << ",\"lanes\":[";
     for (size_t i = 0; i < lanes.size(); ++i) {
@@ -397,6 +676,10 @@ void writeDecodeChecksumRecord(const char*            stage,
         if (hidden_states.defined()) {
             os << ",";
             appendTensorStats(os, "hidden_state", selectLaneTensor(hidden_states, lane));
+        }
+        if (graph_probe.buffer.defined()) {
+            os << ",";
+            appendGraphProbe(os, graph_probe, lane);
         }
         os << "}";
     }
@@ -788,7 +1071,9 @@ PyModelOutputs CudaGraphRunner::forward(const PyModelInputs& inputs, CudaGraphSt
                 0, 0, state.current_seq_len);
     } else {
         auto& graph_inputs = graph_instances_[state.current_real_graph_bs].mem_hold_.py_model_inputs_;
-        writeDecodeChecksumRecord("before_replay", inputs, graph_inputs, torch::Tensor(), state, full_kv_cache_group_id_);
+        const auto checksum_record = nextDecodeChecksumRecord();
+        writeDecodeChecksumRecord(
+            checksum_record, "before_replay", inputs, graph_inputs, torch::Tensor(), {}, state, full_kv_cache_group_id_);
         {
             RTP_LLM_PROFILE_SCOPE("cuda_graph.forward(replayDecode)");
             replayDecode(state.current_real_graph_bs);
@@ -796,8 +1081,18 @@ PyModelOutputs CudaGraphRunner::forward(const PyModelInputs& inputs, CudaGraphSt
         outputs.hidden_states =
             graph_instances_[state.current_real_graph_bs].mem_hold_.decoder_layer_hidden_states_.slice(
                 0, 0, state.seq_len_sum);
-        writeDecodeChecksumRecord(
-            "after_replay", inputs, graph_inputs, outputs.hidden_states, state, full_kv_cache_group_id_);
+        CudaGraphProbeCapture graph_probe;
+        if (checksum_record.selected) {
+            graph_probe = getCudaGraphProbeBuffer(py_instance_, state.current_real_graph_bs);
+        }
+        writeDecodeChecksumRecord(checksum_record,
+                                  "after_replay",
+                                  inputs,
+                                  graph_inputs,
+                                  outputs.hidden_states,
+                                  graph_probe,
+                                  state,
+                                  full_kv_cache_group_id_);
     }
     // record forward done event
     forward_event_.record(cuda_graph::graphGetCurrentStream());

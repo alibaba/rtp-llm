@@ -59,6 +59,7 @@ public:
             inputs.attention_inputs.prefill_cuda_graph_copy_params;
         py_model_inputs_.bert_embedding_inputs                      = inputs.bert_embedding_inputs;
         py_model_inputs_.attention_inputs.is_s_padded               = inputs.attention_inputs.is_s_padded;
+        py_model_inputs_.attention_inputs.is_cuda_graph             = true;
         py_model_inputs_.attention_inputs.decode_cu_seqlens_d       = inputs.attention_inputs.decode_cu_seqlens_d;
         py_model_inputs_.attention_inputs.sequence_lengths_plus_1_d = inputs.attention_inputs.sequence_lengths_plus_1_d;
     }
