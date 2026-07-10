@@ -56,6 +56,10 @@ def _pd_debug_enabled() -> bool:
     return os.environ.get("RTP_LLM_PD_DEBUG", "0") == "1"
 
 
+def _identity_cpu_check_opt_enabled() -> bool:
+    return os.environ.get("RTP_LLM_CP_IDENTITY_CPU_CHECK_OPT", "1") != "0"
+
+
 def _rank_tag() -> str:
     return (
         f"rank={os.environ.get('RANK', os.environ.get('WORLD_RANK', '?'))} "
@@ -112,27 +116,63 @@ def _total_local_ids_are_identity(
     if local_tokens == 0:
         return True
 
-    padding_mask_cpu = padding_mask_cpu.reshape(-1).to(dtype=torch.int32)
-    kv_restore_cpu = kv_restore_cpu.reshape(-1).to(dtype=torch.long)
-    padded_total = int(padding_mask_cpu.numel())
+    if not _identity_cpu_check_opt_enabled():
+        padding_mask_cpu = padding_mask_cpu.reshape(-1).to(dtype=torch.int32)
+        kv_restore_cpu = kv_restore_cpu.reshape(-1).to(dtype=torch.long)
+        padded_total = int(padding_mask_cpu.numel())
+        if padded_total == 0:
+            return False
+
+        cpu_device = padding_mask_cpu.device
+        source_flat = torch.tensor(ordered_ids, dtype=torch.long, device=cpu_device)
+        source_flat += int(cp_rank) * int(local_tokens)
+        if bool(torch.any((source_flat < 0) | (source_flat >= padded_total)).item()):
+            return False
+
+        valid_restore = (kv_restore_cpu >= 0) & (kv_restore_cpu < padded_total)
+        inv_restore = torch.full(
+            (padded_total,), -1, dtype=torch.long, device=cpu_device
+        )
+        restore_positions = torch.arange(
+            padded_total, dtype=torch.long, device=cpu_device
+        )
+        inv_restore[kv_restore_cpu[valid_restore]] = restore_positions[valid_restore]
+
+        global_padded = inv_restore[source_flat]
+        if bool(
+            torch.any((global_padded < 0) | (global_padded >= padded_total)).item()
+        ):
+            return False
+        return bool(torch.all(padding_mask_cpu[global_padded] == 1).item())
+
+    padding_mask_list = (
+        padding_mask_cpu.reshape(-1).to(dtype=torch.int32, device="cpu").tolist()
+    )
+    kv_restore_list = (
+        kv_restore_cpu.reshape(-1).to(dtype=torch.long, device="cpu").tolist()
+    )
+    padded_total = len(padding_mask_list)
     if padded_total == 0:
         return False
 
-    cpu_device = padding_mask_cpu.device
-    source_flat = torch.tensor(ordered_ids, dtype=torch.long, device=cpu_device)
-    source_flat += int(cp_rank) * int(local_tokens)
-    if bool(torch.any((source_flat < 0) | (source_flat >= padded_total)).item()):
+    rank_offset = int(cp_rank) * int(local_tokens)
+    source_flat = [idx + rank_offset for idx in ordered_ids]
+    if any(idx < 0 or idx >= padded_total for idx in source_flat):
         return False
 
-    valid_restore = (kv_restore_cpu >= 0) & (kv_restore_cpu < padded_total)
-    inv_restore = torch.full((padded_total,), -1, dtype=torch.long, device=cpu_device)
-    restore_positions = torch.arange(padded_total, dtype=torch.long, device=cpu_device)
-    inv_restore[kv_restore_cpu[valid_restore]] = restore_positions[valid_restore]
+    inv_restore = [-1] * padded_total
+    for pos, restore_idx in enumerate(kv_restore_list):
+        restore_idx = int(restore_idx)
+        if 0 <= restore_idx < padded_total:
+            inv_restore[restore_idx] = pos
 
-    global_padded = inv_restore[source_flat]
-    if bool(torch.any((global_padded < 0) | (global_padded >= padded_total)).item()):
-        return False
-    return bool(torch.all(padding_mask_cpu[global_padded] == 1).item())
+    for source_idx in source_flat:
+        global_padded = inv_restore[source_idx]
+        if global_padded < 0 or global_padded >= padded_total:
+            return False
+        if int(padding_mask_list[global_padded]) != 1:
+            return False
+    return True
 
 
 def _copy_or_replace_graph_tensor(
@@ -328,6 +368,7 @@ def _scatter_actual_to_padded(
     padded: torch.Tensor,
     per_req_actual_local_kv_lens: torch.Tensor,
     per_req_padded_local_kv_lens: torch.Tensor,
+    dst_idx: Optional[torch.Tensor] = None,
 ) -> None:
     """Scatter packed actual-len rows into the per-request padded local layout.
 
@@ -350,8 +391,14 @@ def _scatter_actual_to_padded(
     total_actual = int(actual.shape[0])
     if total_actual == 0:
         return
+    if total_actual == int(padded.shape[0]):
+        padded.copy_(actual)
+        return
     if int(per_req_actual_local_kv_lens.numel()) == 1:
         padded[:total_actual].copy_(actual)
+        return
+    if dst_idx is not None:
+        padded.index_copy_(0, dst_idx, actual)
         return
 
     device = padded.device
@@ -662,42 +709,13 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
             self.indexer_cp_local_cu = asm.build_actual_local_cu_kv_seqlens(
                 self.indexer_cp_plan
             )
-            # Precompute scatter dst_idx for copy_actual_to_padded (B>1, has padding)
-            _plan = self.indexer_cp_plan
-            _B = int(_plan.per_req_actual_local_kv_lens.numel())
-            if (
-                _plan.total_actual_local_T > 0
-                and _B > 1
-                and _plan.total_actual_local_T != _plan.total_local_T
-            ):
-                _dev = block_table.device
-                _a_lens = _plan.per_req_actual_local_kv_lens
-                _p_lens = _plan.per_req_local_kv_lens
-                _req_ids = torch.repeat_interleave(
-                    torch.arange(_B, device=_dev, dtype=torch.int64),
-                    _a_lens,
-                    output_size=_plan.total_actual_local_T,
-                )
-                _a_cu = torch.zeros(_B, dtype=torch.int64, device=_dev)
-                _p_cu = torch.zeros(_B, dtype=torch.int64, device=_dev)
-                _a_cu[1:] = torch.cumsum(_a_lens[:-1], dim=0)
-                _p_cu[1:] = torch.cumsum(_p_lens[:-1], dim=0)
-                _in_req_pos = torch.arange(
-                    _plan.total_actual_local_T, device=_dev, dtype=torch.int64
-                ) - _a_cu.index_select(0, _req_ids)
-                self.indexer_copy_dst_idx = (
-                    _p_cu.index_select(0, _req_ids) + _in_req_pos
-                )
-                # Inverse map: for each padded row, which actual row maps to it (-1 = zero)
-                self.indexer_src_for_padded = torch.full(
-                    (_plan.total_local_T,), -1, dtype=torch.int64, device=_dev
-                )
-                self.indexer_src_for_padded[self.indexer_copy_dst_idx] = torch.arange(
-                    _plan.total_actual_local_T, device=_dev, dtype=torch.int64
-                )
-            else:
-                self.indexer_copy_dst_idx = None
-                self.indexer_src_for_padded = None
+            (
+                self.indexer_copy_dst_idx,
+                self.indexer_src_for_padded,
+            ) = asm.build_actual_to_padded_indices(
+                self.indexer_cp_plan,
+                device=block_table.device,
+            )
         else:
             self.sharded_slot_mapping = None
             self.sharded_local_kv_lens = None
@@ -939,8 +957,15 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
         assert ws is not None
         assert self.sharded_local_kv_lens is not None
         assert self.sharded_kv_restore_indices is not None
-        assert self.sharded_actual_local_kv_lens is not None
-        assert self.sharded_actual_workspace_starts is not None
+        actual_local_kv_lens = getattr(self, "sharded_actual_local_kv_lens", None)
+        actual_workspace_starts = getattr(self, "sharded_actual_workspace_starts", None)
+        actual_total_local_kv_len = getattr(
+            self, "sharded_actual_total_local_kv_len", 0
+        )
+        if actual_local_kv_lens is None or actual_workspace_starts is None:
+            actual_local_kv_lens = self.sharded_local_kv_lens
+            actual_workspace_starts = self.sharded_workspace_starts
+            actual_total_local_kv_len = self.sharded_total_local_kv_len
 
         src = _as_uint8(kv_cache.kv_cache_base)
         if src.ndim == 4:
@@ -958,9 +983,9 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
             device=ws.fused_kv.device,
         )
 
-        if self.sharded_actual_total_local_kv_len > 0:
+        if actual_total_local_kv_len > 0:
             actual_fused = torch.empty(
-                (self.sharded_actual_total_local_kv_len, ws.fused_kv.size(1)),
+                (actual_total_local_kv_len, ws.fused_kv.size(1)),
                 dtype=ws.fused_kv.dtype,
                 device=ws.fused_kv.device,
             )
@@ -968,16 +993,17 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
                 src,
                 actual_fused,
                 self.block_table.to(torch.int32),
-                self.sharded_actual_local_kv_lens,
-                self.sharded_actual_workspace_starts,
+                actual_local_kv_lens,
+                actual_workspace_starts,
                 ws.batch_size,
-                self.sharded_actual_total_local_kv_len,
+                actual_total_local_kv_len,
             )
             _scatter_actual_to_padded(
                 actual=actual_fused,
                 padded=local_fused,
-                per_req_actual_local_kv_lens=self.sharded_actual_local_kv_lens,
+                per_req_actual_local_kv_lens=actual_local_kv_lens,
                 per_req_padded_local_kv_lens=self.sharded_local_kv_lens,
+                dst_idx=getattr(self, "indexer_copy_dst_idx", None),
             )
 
         gathered = all_gather(local_fused.contiguous(), group=Group.TP).reshape(

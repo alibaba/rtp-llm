@@ -12,6 +12,7 @@ verified end-to-end without any kernel dependency.
 import importlib.util
 import sys
 import types
+from contextlib import contextmanager
 from pathlib import Path
 
 import torch
@@ -23,6 +24,18 @@ def _stub_distributed():
     mod_name = "rtp_llm.models_py.distributed.collective_torch"
     if mod_name in sys.modules:
         return
+    for p in (
+        "rtp_llm",
+        "rtp_llm.models_py",
+        "rtp_llm.models_py.distributed",
+        "rtp_llm.models_py.modules",
+        "rtp_llm.models_py.modules.dsv4",
+    ):
+        if p not in sys.modules:
+            parent = types.ModuleType(p)
+            parent.__path__ = []
+            sys.modules[p] = parent
+
     stub = types.ModuleType(mod_name)
 
     class _Group:
@@ -34,13 +47,16 @@ def _stub_distributed():
     stub.Group = _Group
     stub.all_gather = _fake_all_gather
     sys.modules[mod_name] = stub
-    for p in (
-        "rtp_llm",
-        "rtp_llm.models_py",
-        "rtp_llm.models_py.distributed",
-    ):
-        if p not in sys.modules:
-            sys.modules[p] = types.ModuleType(p)
+    sys.modules["rtp_llm.models_py.distributed"].collective_torch = stub
+
+    profiler = types.ModuleType("rtp_llm.models_py.modules.dsv4._profiler")
+
+    @contextmanager
+    def _record_function_range(name):
+        yield
+
+    profiler.record_function_range = _record_function_range
+    sys.modules["rtp_llm.models_py.modules.dsv4._profiler"] = profiler
 
 
 def _import_cp():

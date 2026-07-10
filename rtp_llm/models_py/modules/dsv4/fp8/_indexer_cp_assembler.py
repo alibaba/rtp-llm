@@ -28,8 +28,9 @@ can be unit-tested independently.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any, Optional, Tuple
 
 import torch
 
@@ -41,6 +42,10 @@ from rtp_llm.models_py.modules.dsv4.cp import (
     cp_actual_owned_kv_lens,
     cp_padded_local_kv_lens,
 )
+
+
+def _actual_to_padded_index_opt_enabled() -> bool:
+    return os.environ.get("RTP_LLM_CP_ACTUAL_TO_PADDED_INDEX_OPT", "1") != "0"
 
 
 @dataclass
@@ -145,6 +150,66 @@ def build_actual_local_cu_kv_seqlens(plan: IndexerCPChunkPlan) -> torch.Tensor:
     return cu
 
 
+def build_actual_to_padded_indices(
+    plan: IndexerCPChunkPlan,
+    device: Optional[torch.device] = None,
+) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
+    """Build reusable actual->padded scatter indices from small CPU metadata.
+
+    ``plan.per_req_*`` tensors are tiny request-length vectors. Building the
+    expanded row map with CUDA ``repeat_interleave`` is disproportionately
+    expensive on prefill batches because it can trigger host synchronization
+    and first-use CUDA kernel overhead. Construct the row map on CPU, then copy
+    the final compact index tensors to the target device once per plan.
+    """
+    total_actual = int(plan.total_actual_local_T)
+    total_padded = int(plan.total_local_T)
+    if not _actual_to_padded_index_opt_enabled():
+        return None, None
+    if total_actual == 0 or total_actual == total_padded:
+        return None, None
+    if int(plan.per_req_actual_local_kv_lens.numel()) == 1:
+        return None, None
+
+    target_device = device if device is not None else plan.per_req_local_kv_lens.device
+    actual_lens = (
+        plan.per_req_actual_local_kv_lens.detach()
+        .to(device="cpu", dtype=torch.int64)
+        .reshape(-1)
+    )
+    padded_lens = (
+        plan.per_req_local_kv_lens.detach()
+        .to(device="cpu", dtype=torch.int64)
+        .reshape(-1)
+    )
+
+    dst_cpu = torch.empty(total_actual, dtype=torch.int64)
+    out = 0
+    padded_base = 0
+    for actual_len_t, padded_len_t in zip(actual_lens, padded_lens):
+        actual_len = int(actual_len_t.item())
+        if actual_len > 0:
+            dst_cpu[out : out + actual_len] = torch.arange(
+                padded_base,
+                padded_base + actual_len,
+                dtype=torch.int64,
+            )
+            out += actual_len
+        padded_base += int(padded_len_t.item())
+
+    if out != total_actual:
+        raise RuntimeError(
+            f"built {out} actual->padded indices, expected {total_actual}"
+        )
+
+    src_cpu = torch.full((total_padded,), -1, dtype=torch.int64)
+    src_cpu[dst_cpu] = torch.arange(total_actual, dtype=torch.int64)
+    return (
+        dst_cpu.to(device=target_device, non_blocking=True),
+        src_cpu.to(device=target_device, non_blocking=True),
+    )
+
+
 def copy_actual_indexer_k_to_padded(
     *,
     plan: IndexerCPChunkPlan,
@@ -152,6 +217,7 @@ def copy_actual_indexer_k_to_padded(
     actual_k_scale: torch.Tensor,
     padded_k_quant: torch.Tensor,
     padded_k_scale: torch.Tensor,
+    dst_idx: Optional[torch.Tensor] = None,
 ) -> None:
     """Scatter compact actual rows into the padded per-rank local layout.
 
@@ -189,6 +255,12 @@ def copy_actual_indexer_k_to_padded(
     if int(plan.per_req_actual_local_kv_lens.numel()) == 1:
         padded_k_quant[:total_actual].copy_(actual_k_quant)
         padded_k_scale[:total_actual].copy_(actual_k_scale)
+        return
+    if dst_idx is not None:
+        padded_k_quant.view(torch.uint8).index_copy_(
+            0, dst_idx, actual_k_quant.view(torch.uint8)
+        )
+        padded_k_scale.index_copy_(0, dst_idx, actual_k_scale)
         return
 
     actual_lens = plan.per_req_actual_local_kv_lens.to(device=device, dtype=torch.int64)

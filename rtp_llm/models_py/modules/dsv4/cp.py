@@ -27,6 +27,7 @@ stashed on each module via ``_cp_ctx`` before ``forward`` runs.  A
 single-rank path unchanged.
 """
 
+import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Optional, Tuple, Union
 
@@ -43,6 +44,10 @@ if TYPE_CHECKING:
     from rtp_llm.models_py.modules.dsv4.prefill_workspace import PrefillWorkspace
 
 _DEFAULT_CP_PROFILE_NAME = "dsv4.cp.all_gather"
+
+
+def _restore_index_cpu_opt_enabled() -> bool:
+    return os.environ.get("RTP_LLM_CP_RESTORE_INDEX_CPU_OPT", "1") != "0"
 
 
 # CP gather roles — which workspace buffer backs a given compressor gather.
@@ -929,9 +934,7 @@ def build_cp_full_prefill_positions(
         req = torch.empty((0,), dtype=torch.long, device=device)
 
     zero = torch.zeros(1, dtype=torch.long, device=device)
-    cu_seq = torch.cat(
-        [zero, torch.cumsum(lengths.to(torch.long), dim=0)]
-    ).contiguous()
+    cu_seq = torch.cat([zero, torch.cumsum(lengths.to(torch.long), dim=0)]).contiguous()
     return (
         pos,
         req,
@@ -1214,8 +1217,6 @@ def build_kv_allgather_restore_indices(
             f"{tuple(per_req_total_kv_lens.shape)}"
         )
 
-    # Vectorized formulation (mirrors branch
-    # ``flashmla_sparse_cp_impl.py:565-572`` plan()).
     total_kv_lens = per_req_total_kv_lens.to(dtype=torch.int64, device=device)
     if int(total_kv_lens.numel()) == 0:
         return torch.empty(0, dtype=torch.int64, device=device)
@@ -1231,6 +1232,43 @@ def build_kv_allgather_restore_indices(
     if total_real == 0:
         return torch.empty(0, dtype=torch.int64, device=device)
 
+    if (
+        _restore_index_cpu_opt_enabled()
+        and int(total_kv_lens.numel()) > 1
+        and total_real <= 1_000_000
+    ):
+        lens_cpu = (
+            per_req_total_kv_lens.detach()
+            .to(device="cpu", dtype=torch.int64)
+            .reshape(-1)
+        )
+        local_cpu = cp_padded_local_kv_lens(lens_cpu, cp_size, block_size).contiguous()
+        total_local_cpu = int(local_cpu.sum().item())
+        restore_cpu = torch.empty(total_real, dtype=torch.int64)
+        out = 0
+        cu_offset = 0
+        for req_len_t, local_len_t in zip(lens_cpu, local_cpu):
+            req_len = int(req_len_t.item())
+            if req_len > 0:
+                positions = torch.arange(req_len, dtype=torch.int64)
+                global_block_idx = positions // block_size
+                token_in_block = positions % block_size
+                owner = global_block_idx % cp_size
+                local_block_idx = global_block_idx // cp_size
+                local_pos_in_req = local_block_idx * block_size + token_in_block
+                restore_cpu[out : out + req_len] = (
+                    owner * total_local_cpu + cu_offset + local_pos_in_req
+                )
+                out += req_len
+            cu_offset += int(local_len_t.item())
+        if out != total_real:
+            raise RuntimeError(
+                f"restore size {out} != sum(per_req_total_kv_lens) {total_real}"
+            )
+        return restore_cpu.to(device=device, non_blocking=True)
+
+    # Vectorized formulation (mirrors branch
+    # ``flashmla_sparse_cp_impl.py:565-572`` plan()).
     # Flat ``[total_real]`` arange of "logical token position within request".
     # Fully vectorized: positions_flat[i] = i - cu_starts[req_ids[i]] where
     # cu_starts is the exclusive prefix-sum of per-request lengths. Replaces

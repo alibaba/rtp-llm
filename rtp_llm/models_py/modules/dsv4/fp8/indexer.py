@@ -268,6 +268,7 @@ class _IndexerFP8PrefillMeta(NamedTuple):
     # with the rest of prefill metadata.
     indexer_cp_plan: Optional[Any]
     indexer_cp_local_cu: Optional[torch.Tensor]
+    indexer_copy_dst_idx: Optional[torch.Tensor]
 
 
 class IndexerFP8(PoolBackedModule):
@@ -475,6 +476,7 @@ class IndexerFP8(PoolBackedModule):
                 actual_k_scale=actual_s,
                 padded_k_quant=local_q,
                 padded_k_scale=local_s,
+                dst_idx=attention_inputs.indexer_copy_dst_idx,
             )
         if cp_gather_stream is not None and post_gather_stream is not None:
             pending = asm.start_assemble_indexer_k_async(
@@ -892,6 +894,7 @@ class IndexerFP8(PoolBackedModule):
 
         indexer_cp_plan: Optional[Any] = None
         indexer_cp_local_cu: Optional[torch.Tensor] = None
+        indexer_copy_dst_idx: Optional[torch.Tensor] = None
         if (
             cp_active
             and bool(getattr(cp_ctx, "kv_cache_sharded", False))
@@ -922,6 +925,10 @@ class IndexerFP8(PoolBackedModule):
                 )
                 indexer_cp_local_cu = asm.build_actual_local_cu_kv_seqlens(
                     indexer_cp_plan
+                )
+                indexer_copy_dst_idx, _ = asm.build_actual_to_padded_indices(
+                    indexer_cp_plan,
+                    device=device,
                 )
 
         # Hoist the nested CompressorFP8's slot-mapping metadata. The
@@ -1016,6 +1023,7 @@ class IndexerFP8(PoolBackedModule):
             compressor_meta=compressor_meta,
             indexer_cp_plan=indexer_cp_plan,
             indexer_cp_local_cu=indexer_cp_local_cu,
+            indexer_copy_dst_idx=indexer_copy_dst_idx,
         )
 
     # --------------------------------------------------------------

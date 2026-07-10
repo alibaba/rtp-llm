@@ -219,6 +219,43 @@ def test_copy_actual_indexer_k_to_padded_inserts_per_request_gaps():
     assert torch.equal(padded_s, expected_s)
 
 
+def test_copy_actual_indexer_k_to_padded_uses_precomputed_indices():
+    plan = A.build_indexer_cp_chunk_plan(
+        cp_ctx=_ctx(4, 3),
+        per_req_total_kv_lens=torch.tensor([25, 9, 64], dtype=torch.int64),
+        block_size=2,
+        owner_block_size=8,
+        device=torch.device("cpu"),
+    )
+    dst_idx, src_for_padded = A.build_actual_to_padded_indices(plan)
+    assert torch.equal(dst_idx, torch.tensor([0] + list(range(16, 32))))
+    assert src_for_padded.shape == (32,)
+    assert torch.equal(src_for_padded[dst_idx], torch.arange(17))
+
+    actual_q = torch.arange(17 * 2, dtype=torch.uint8).reshape(17, 2) + 1
+    actual_s = torch.arange(17, dtype=torch.uint8).reshape(17, 1) + 101
+    padded_q = torch.zeros((32, 2), dtype=torch.uint8)
+    padded_s = torch.zeros((32, 1), dtype=torch.uint8)
+
+    A.copy_actual_indexer_k_to_padded(
+        plan=plan,
+        actual_k_quant=actual_q,
+        actual_k_scale=actual_s,
+        padded_k_quant=padded_q,
+        padded_k_scale=padded_s,
+        dst_idx=dst_idx,
+    )
+
+    expected_q = torch.zeros((32, 2), dtype=torch.uint8)
+    expected_s = torch.zeros((32, 1), dtype=torch.uint8)
+    expected_q[0:1] = actual_q[0:1]
+    expected_s[0:1] = actual_s[0:1]
+    expected_q[16:32] = actual_q[1:17]
+    expected_s[16:32] = actual_s[1:17]
+    assert torch.equal(padded_q, expected_q)
+    assert torch.equal(padded_s, expected_s)
+
+
 def test_copy_actual_indexer_k_to_padded_single_request_prefix_copy():
     plan = A.build_indexer_cp_chunk_plan(
         cp_ctx=_ctx(4, 3),

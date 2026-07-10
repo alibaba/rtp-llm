@@ -68,6 +68,7 @@ def _make_indexer_stub(*, bind_pool: bool, device: torch.device) -> IndexerFP8:
     ind.index_topk = 4
     ind.n_heads = 32
     ind.head_dim = INDEXER_HEAD_DIM
+    ind.rope_head_dim = 64
     ind.compress_ratio = 4
     ind.freqs_cis = torch.zeros(1, dtype=torch.float32, device=device)
     ind._cp_ctx = None
@@ -104,6 +105,7 @@ def _make_meta(device: torch.device, *, T: int) -> _IndexerFP8PrefillMeta:
         compressor_meta=SimpleNamespace(),
         indexer_cp_plan=None,
         indexer_cp_local_cu=None,
+        indexer_copy_dst_idx=None,
     )
 
 
@@ -392,8 +394,8 @@ class IndexerFP8OverlapEntryPointsTest(unittest.TestCase):
 
         compute_q_calls = []
 
-        def fake_compute_q(qr_in, freqs):
-            compute_q_calls.append((qr_in, freqs))
+        def fake_compute_q(qr_in, freqs, **kwargs):
+            compute_q_calls.append((qr_in, freqs, kwargs))
             return torch.zeros(
                 2, ind.n_heads, ind.head_dim, dtype=torch.bfloat16, device=self.device
             )
@@ -409,13 +411,21 @@ class IndexerFP8OverlapEntryPointsTest(unittest.TestCase):
         import rtp_llm.models_py.modules.dsv4.fp8.indexer as indexer_mod
 
         saved_has = indexer_mod.has_fp8_mqa_logits
+        saved_quant = indexer_mod.indexer_q_rope_fp8_quant_fold
         # Also patch _kv_pool_view dim assertion: the 3D pool above (1,1,132)
         # already satisfies it, but be explicit.
         try:
             indexer_mod.has_fp8_mqa_logits = lambda: True  # type: ignore[assignment]
+            indexer_mod.indexer_q_rope_fp8_quant_fold = (  # type: ignore[assignment]
+                lambda *args, **kwargs: (
+                    torch.empty(0, dtype=torch.uint8, device=self.device),
+                    torch.empty(0, dtype=torch.uint8, device=self.device),
+                )
+            )
             out = ind.forward_with_pending_nested(x, qr, meta, nested_pending=pending)
         finally:
             indexer_mod.has_fp8_mqa_logits = saved_has  # type: ignore[assignment]
+            indexer_mod.indexer_q_rope_fp8_quant_fold = saved_quant  # type: ignore[assignment]
 
         # T==0 branch returns the empty-topk shape.
         self.assertEqual(tuple(out.shape), (2, 0))
