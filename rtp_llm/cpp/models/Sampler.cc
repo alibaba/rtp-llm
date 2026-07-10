@@ -224,6 +224,12 @@ void samplerTraceAppendTopK(std::ostream& os, const torch::Tensor& row, int64_t 
     os << "]";
 }
 
+std::string samplerTopKJson(const torch::Tensor& row, int64_t topn) {
+    std::ostringstream os;
+    samplerTraceAppendTopK(os, row, topn);
+    return os.str();
+}
+
 void samplerTraceLogRows(const char*          stage,
                          const SamplerInputs& inputs,
                          size_t               from_batch_idx_in,
@@ -448,9 +454,111 @@ struct SamplerBadWatchState {
     size_t           cf_match_index = 0;
 };
 
+struct SamplerPreprocessWatchSnapshot {
+    int64_t     step       = -1;
+    int32_t     input_len  = -1;
+    int32_t     seq_len    = -1;
+    int32_t     output_len = -1;
+    std::string raw_top_logits;
+};
+
 std::unordered_map<std::string, SamplerBadWatchState>& samplerBadWatchStates() {
     static std::unordered_map<std::string, SamplerBadWatchState> states;
     return states;
+}
+
+bool samplerPreprocessWatchEnabled() {
+    static const bool enabled = [] {
+        auto value = samplerTraceEnv("RTPLLM_SAMPLER_PREPROCESS_WATCH");
+        std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) { return std::tolower(c); });
+        return value == "1" || value == "true" || value == "yes" || value == "on";
+    }();
+    return enabled;
+}
+
+std::vector<std::string> samplerPreprocessWatchFilters() {
+    static const std::vector<std::string> filters = [] {
+        std::vector<std::string> result;
+        std::stringstream        ss(samplerTraceEnv("RTPLLM_SAMPLER_PREPROCESS_WATCH_FILTER"));
+        std::string              item;
+        while (std::getline(ss, item, ',')) {
+            auto begin = item.find_first_not_of(" \t\r\n");
+            if (begin == std::string::npos) {
+                continue;
+            }
+            auto end = item.find_last_not_of(" \t\r\n");
+            result.emplace_back(item.substr(begin, end - begin + 1));
+        }
+        if (result.empty()) {
+            return samplerBadWatchFilters();
+        }
+        return result;
+    }();
+    return filters;
+}
+
+bool samplerPreprocessWatchMatches(const std::string& trace_id) {
+    if (!samplerPreprocessWatchEnabled()) {
+        return false;
+    }
+    const auto filters = samplerPreprocessWatchFilters();
+    if (filters.empty()) {
+        return true;
+    }
+    return std::any_of(filters.begin(), filters.end(), [&](const std::string& filter) {
+        return trace_id.find(filter) != std::string::npos;
+    });
+}
+
+std::mutex& samplerPreprocessWatchMutex() {
+    static std::mutex mutex;
+    return mutex;
+}
+
+std::unordered_map<std::string, SamplerPreprocessWatchSnapshot>& samplerPreprocessWatchSnapshots() {
+    static std::unordered_map<std::string, SamplerPreprocessWatchSnapshot> snapshots;
+    return snapshots;
+}
+
+int samplerPreprocessWatchTopK() {
+    return std::max(1, samplerBadWatchEnvInt("RTPLLM_SAMPLER_PREPROCESS_WATCH_TOPK", 8));
+}
+
+void samplerPreprocessWatchCaptureRaw(const SamplerInputs& inputs) {
+    if (!samplerPreprocessWatchEnabled() || !inputs.logits.defined() || inputs.logits.dim() != 2) {
+        return;
+    }
+
+    const auto* input_lengths    = inputs.input_lengths.data_ptr<int32_t>();
+    const auto* sequence_lengths = inputs.sequence_lengths.data_ptr<int32_t>();
+    const int   topn             = samplerPreprocessWatchTopK();
+
+    std::lock_guard<std::mutex> lock(samplerPreprocessWatchMutex());
+    auto&                       snapshots = samplerPreprocessWatchSnapshots();
+    for (size_t i = 0; i < inputs.batch_size; ++i) {
+        const auto trace_id = i < inputs.trace_ids.size() ? inputs.trace_ids[i] : "";
+        if (!samplerPreprocessWatchMatches(trace_id)) {
+            continue;
+        }
+        const int32_t seq_len    = sequence_lengths[i];
+        const int32_t input_len  = input_lengths[i];
+        const int32_t output_len = seq_len >= input_len ? seq_len - input_len : -1;
+        snapshots[trace_id] = SamplerPreprocessWatchSnapshot{
+            (int64_t)inputs.step, input_len, seq_len, output_len, samplerTopKJson(inputs.logits[i], topn)};
+    }
+}
+
+std::optional<SamplerPreprocessWatchSnapshot> samplerPreprocessWatchLookup(const std::string& trace_id, int64_t step) {
+    if (!samplerPreprocessWatchEnabled()) {
+        return std::nullopt;
+    }
+    std::lock_guard<std::mutex> lock(samplerPreprocessWatchMutex());
+    auto&                       snapshots = samplerPreprocessWatchSnapshots();
+    auto                        iter      = snapshots.find(trace_id);
+    if (iter == snapshots.end() || iter->second.step != step) {
+        return std::nullopt;
+    }
+    return iter->second;
 }
 
 void samplerBadWatchUpdateCfCount(SamplerBadWatchState&    state,
@@ -567,8 +675,24 @@ void samplerBadWatchMaybeLog(const SamplerInputs& inputs,
         samplerBadWatchAppendIntVector(row, state.token_tail);
         row << ",\"chunk_selected_tokens\":";
         samplerBadWatchAppendIntVector(row, chunk_selected);
-        row << ",\"top_logits\":";
-        samplerTraceAppendTopK(row, logits[i], topn);
+        row << ",\"preprocess_watch_enabled\":" << (samplerPreprocessWatchEnabled() ? "true" : "false")
+            << ",\"logits_processor_state_present\":"
+            << (inputs.logits_processor_states_ptr != nullptr ? "true" : "false")
+            << ",\"logits_processor_count\":"
+            << (inputs.logits_processor_states_ptr != nullptr ? inputs.logits_processor_states_ptr->size() : 0);
+        const auto raw_snapshot = samplerPreprocessWatchLookup(trace_id, inputs.step);
+        if (raw_snapshot.has_value()) {
+            row << ",\"raw_preprocess_step\":" << raw_snapshot->step
+                << ",\"raw_preprocess_input_len\":" << raw_snapshot->input_len
+                << ",\"raw_preprocess_seq_len\":" << raw_snapshot->seq_len
+                << ",\"raw_preprocess_output_len\":" << raw_snapshot->output_len
+                << ",\"raw_preprocess_top_logits\":" << raw_snapshot->raw_top_logits;
+        } else {
+            row << ",\"raw_preprocess_top_logits\":null";
+        }
+        const auto post_top_logits = samplerTopKJson(logits[i], topn);
+        row << ",\"post_preprocess_top_logits\":" << post_top_logits;
+        row << ",\"top_logits\":" << post_top_logits;
         row << "}";
 
         auto& os = samplerBadWatchOutputStream();
@@ -594,6 +718,7 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
         return t.defined() ? std::optional<torch::Tensor>(t.narrow(0, offset, size)) : std::nullopt;
     };
 
+    samplerPreprocessWatchCaptureRaw(inputs);
     preprocessLogits(inputs);
 
     uint64_t max_seq_len   = inputs.token_ids.size(1);
