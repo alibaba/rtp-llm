@@ -356,8 +356,8 @@ class TestPyFlashinferDecodeCudaGraph(BaseAttentionTest):
         self.assertTrue(attn_op.decode_wrapper._use_cuda_graph)
         logging.info("_fixed_batch_size correctly set after prepare()")
 
-    def test_replay_refreshes_plan_metadata(self):
-        """prepare_for_cuda_graph_replay() must refresh FlashInfer fa2 plan metadata."""
+    def test_tensor_core_replay_refreshes_plan_metadata(self):
+        """prepare_for_cuda_graph_replay() must refresh tensor-core plan metadata."""
         config = self._create_config()
         capture_bs = 8
         capture_seq_lens = [64, 128, 256, 512, 64, 128, 256, 512]
@@ -369,7 +369,7 @@ class TestPyFlashinferDecodeCudaGraph(BaseAttentionTest):
         )
         attn_op = PyFlashinferDecodeAttnOp(config.attn_configs, capture_inputs)
         self.assertTrue(attn_op.use_tensor_core)
-        self.assertTrue(attn_op._requires_fa2_cuda_graph_replan())
+        self.assertTrue(attn_op._requires_cuda_graph_replan())
         fmha_params = rtp_llm_ops.FlashInferMlaAttnParams()
         attn_op.set_params(fmha_params)
         attn_op.prepare(capture_inputs)
@@ -411,9 +411,13 @@ class TestPyFlashinferDecodeCudaGraph(BaseAttentionTest):
             f"page_indptr={page_indptr.tolist()}"
         )
 
-    def test_non_fa2_replay_does_not_replan(self):
-        """Non-fa2 decode keeps the original replay contract: fill params only."""
-        config = self._create_config(head_num=32, head_num_kv=32)
+    def test_cuda_core_replay_refreshes_plan_metadata(self):
+        """CUDA-core decode must also refresh plan metadata for graph replay.
+
+        Qwen3-1.7B uses head_num/head_num_kv = 16/8, which selects this
+        non-tensor-core FlashInfer decode path.
+        """
+        config = self._create_config(head_num=16, head_num_kv=8)
         capture_bs = 4
         capture_seq_lens = [64, 128, 256, 512]
 
@@ -424,7 +428,7 @@ class TestPyFlashinferDecodeCudaGraph(BaseAttentionTest):
         )
         attn_op = PyFlashinferDecodeAttnOp(config.attn_configs, capture_inputs)
         self.assertFalse(attn_op.use_tensor_core)
-        self.assertFalse(attn_op._requires_fa2_cuda_graph_replan())
+        self.assertTrue(attn_op._requires_cuda_graph_replan())
         fmha_params = rtp_llm_ops.FlashInferMlaAttnParams()
         attn_op.set_params(fmha_params)
         attn_op.prepare(capture_inputs)
@@ -445,10 +449,18 @@ class TestPyFlashinferDecodeCudaGraph(BaseAttentionTest):
         )
         self.assertFalse(hasattr(attn_op.decode_wrapper, "_qo_indptr_buf"))
 
+        indptr_ptr = attn_op.decode_wrapper._paged_kv_indptr_buf.data_ptr()
+        indices_ptr = attn_op.decode_wrapper._paged_kv_indices_buf.data_ptr()
+        last_page_len_ptr = (
+            attn_op.decode_wrapper._paged_kv_last_page_len_buf.data_ptr()
+        )
+
+        original_plan = attn_op.decode_wrapper.plan
         plan_calls = []
 
         def counted_plan(*args, **kwargs):
             plan_calls.append((args, kwargs))
+            return original_plan(*args, **kwargs)
 
         attn_op.decode_wrapper.plan = counted_plan
 
@@ -460,7 +472,25 @@ class TestPyFlashinferDecodeCudaGraph(BaseAttentionTest):
         )
         attn_op.prepare_for_cuda_graph_replay(run_inputs)
 
-        self.assertEqual(len(plan_calls), 0)
+        self.assertEqual(len(plan_calls), 1)
+        plan_args, plan_kwargs = plan_calls[0]
+        self.assertTrue(plan_args[0].is_cuda)
+        self.assertTrue(plan_args[1].is_cuda)
+        self.assertTrue(plan_args[2].is_cuda)
+        self.assertEqual(plan_kwargs["q_data_type"], torch.float16)
+        self.assertEqual(plan_kwargs["kv_data_type"], torch.float16)
+
+        # CUDA graph replay relies on stable buffer addresses.
+        self.assertEqual(
+            attn_op.decode_wrapper._paged_kv_indptr_buf.data_ptr(), indptr_ptr
+        )
+        self.assertEqual(
+            attn_op.decode_wrapper._paged_kv_indices_buf.data_ptr(), indices_ptr
+        )
+        self.assertEqual(
+            attn_op.decode_wrapper._paged_kv_last_page_len_buf.data_ptr(),
+            last_page_len_ptr,
+        )
 
     def test_replay_updates_page_tables(self):
         """Page table buffers must reflect the replay inputs, not capture inputs."""
