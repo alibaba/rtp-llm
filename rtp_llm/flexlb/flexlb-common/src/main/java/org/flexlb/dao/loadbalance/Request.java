@@ -15,6 +15,13 @@ public class Request {
     @JsonProperty("block_cache_keys")
     private List<Long> blockCacheKeys;
 
+    @ToString.Exclude
+    @JsonProperty("input_ids")
+    private List<Long> inputIds;
+
+    @JsonProperty("block_size")
+    private long blockSize;
+
     @JsonProperty("seq_len")
     private long seqLen;
 

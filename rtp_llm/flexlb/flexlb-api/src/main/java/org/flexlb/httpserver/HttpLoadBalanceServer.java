@@ -46,19 +46,22 @@ public class HttpLoadBalanceServer {
     private final EngineHealthReporter engineHealthReporter;
     private final QueueManager queueManager;
     private final ActiveRequestCounter activeRequestCounter;
+    private final ScheduleRequestPreprocessor requestPreprocessor;
 
     public HttpLoadBalanceServer(GeneralHttpNettyService generalHttpNettyService,
                                  RouteService routeService,
                                  LBStatusConsistencyService lbStatusConsistencyService,
                                  EngineHealthReporter engineHealthReporter,
                                  QueueManager queueManager,
-                                 ActiveRequestCounter activeRequestCounter) {
+                                 ActiveRequestCounter activeRequestCounter,
+                                 ScheduleRequestPreprocessor requestPreprocessor) {
         this.generalHttpNettyService = generalHttpNettyService;
         this.routeService = routeService;
         this.lbStatusConsistencyService = lbStatusConsistencyService;
         this.engineHealthReporter = engineHealthReporter;
         this.queueManager = queueManager;
         this.activeRequestCounter = activeRequestCounter;
+        this.requestPreprocessor = requestPreprocessor;
     }
 
     @Bean
@@ -109,6 +112,7 @@ public class HttpLoadBalanceServer {
             return forwardRequestToMaster(ctx, req);
         }
 
+        requestPreprocessor.prepare(req);
         return routeService.route(ctx)
                 .flatMap(response -> handleRoutingResult(ctx, response))
                 .doOnCancel(() -> {
@@ -233,6 +237,7 @@ public class HttpLoadBalanceServer {
     }
 
     private Mono<ServerResponse> fallbackToLocalRouting(BalanceContext ctx) {
+        requestPreprocessor.prepare(ctx.getRequest());
         return routeService.route(ctx)
                 .flatMap(response -> handleRoutingResult(ctx, response))
                 .onErrorResume(e -> {
@@ -297,10 +302,19 @@ public class HttpLoadBalanceServer {
      * @return error response
      */
     private Mono<ServerResponse> handleRequestError(BalanceContext ctx, Throwable throwable) {
-        Logger.error("Request processing error", throwable);
         ctx.setSuccess(false);
         ctx.setErrorMessage(throwable.getMessage());
 
+        if (throwable instanceof IllegalArgumentException) {
+            Logger.warn("Invalid schedule request: {}", throwable.getMessage());
+            Response errorResponse = Response.error(StrategyErrorType.INVALID_REQUEST);
+            errorResponse.setErrorMessage(throwable.getMessage());
+            return ServerResponse.badRequest()
+                    .contentType(MediaType.APPLICATION_JSON)
+                    .bodyValue(errorResponse);
+        }
+
+        Logger.error("Request processing error", throwable);
         return ServerResponse.status(500)
                 .contentType(MediaType.APPLICATION_JSON)
                 .body(Mono.just(throwable.getMessage()), String.class);

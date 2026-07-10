@@ -132,7 +132,7 @@ public class RequestCancelTest {
                 {
                   "request_id": 12345,
                   "model": "engine_service",
-                  "block_ids": [
+                  "block_cache_keys": [
                     1001,
                     1002,
                     1003
