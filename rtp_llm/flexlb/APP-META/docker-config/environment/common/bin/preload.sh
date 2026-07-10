@@ -11,8 +11,8 @@ fi
 CURL_BIN=/usr/bin/curl
 SPACE_STR="........................................................................"
 
-OUTIF=`/sbin/route -n | tail -1  | sed -e 's/.* \([^ ]*$\)/\1/'`
-HTTP_IP="http://`/sbin/ifconfig | grep -A1 ${OUTIF} | grep inet | awk '{print $2}' | sed 's/addr://g'`:${CHECK_PORT}"
+# Lifecycle hooks are local-only and must not traverse the container network.
+HTTP_IP="http://127.0.0.1:${CHECK_PORT}"
 
 #####################################
 checkpage() {
