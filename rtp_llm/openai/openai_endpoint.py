@@ -6,6 +6,7 @@ from typing import Any, AsyncGenerator, List, Optional
 
 from fastapi import Request
 
+from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.generate_config import GenerateConfig, ReturnAllProbsMode
 from rtp_llm.config.model_args import ModelArgs
 from rtp_llm.config.model_config import ModelConfig
@@ -214,6 +215,19 @@ class OpenaiEndpoint(object):
                     config.return_all_probs = ReturnAllProbsMode.DEFAULT
         if request.logprobs or request.functions:
             config.is_streaming = True
+        if request.prompt_logprobs is not None:
+            if request.prompt_logprobs <= 0 or request.prompt_logprobs > 1024:
+                raise FtRuntimeException(
+                    ExceptionType.ERROR_INPUT_FORMAT_ERROR,
+                    f"prompt_logprobs must be in [1, 1024], got {request.prompt_logprobs}",
+                )
+            config.return_prompt_logits = True
+            config.prompt_logits_top_k = request.prompt_logprobs
+            config.enforce_prompt_scoring_constraints()
+            request.stream = False
+        if config.return_prompt_logits and request.prompt_logprobs is None:
+            config.validate()
+            request.stream = False
         config.convert_select_tokens(len(self.tokenizer), self.tokenizer)
 
         if (
@@ -410,6 +424,10 @@ class OpenaiEndpoint(object):
         debug_info: Optional[DebugInfo],
         tokenizer: Optional[Any] = None,
     ) -> CompleteResponseAsyncGenerator:
+        # prompt_logits is attached by renderer.generate_choice on the last StreamResponseObject;
+        # capture it here so collect_with_prompt_logits can attach it to the final ChatCompletionResponse.
+        captured_prompt_logits = {}
+
         async def response_generator():
             debug_info_responded = False
 
@@ -427,6 +445,9 @@ class OpenaiEndpoint(object):
                         for output_ids in response.extra_outputs.output_ids
                     ]
 
+                if response.prompt_logits is not None:
+                    captured_prompt_logits["data"] = response.prompt_logits
+
                 yield ChatCompletionStreamResponse(
                     choices=response.choices,
                     usage=response.usage,
@@ -436,13 +457,16 @@ class OpenaiEndpoint(object):
                 )
                 debug_info_responded = True
 
-        complete_response_collect_func = partial(
-            OpenaiEndpoint._collect_complete_response,
-            debug_info=debug_info,
-            tokenizer=tokenizer,
-        )
+        async def collect_with_prompt_logits(generator):
+            resp = await OpenaiEndpoint._collect_complete_response(
+                generator, debug_info=debug_info, tokenizer=tokenizer
+            )
+            if "data" in captured_prompt_logits:
+                resp.prompt_logprobs = captured_prompt_logits["data"]
+            return resp
+
         return CompleteResponseAsyncGenerator(
-            response_generator(), complete_response_collect_func
+            response_generator(), collect_with_prompt_logits
         )
 
     def _get_debug_info(
@@ -501,6 +525,12 @@ class OpenaiEndpoint(object):
 
         mm_inputs = rendered_input.multimodal_inputs
 
+        if generate_config.return_prompt_logits and mm_inputs:
+            raise FtRuntimeException(
+                ExceptionType.ERROR_INPUT_FORMAT_ERROR,
+                "prompt scoring does not support multimodal inputs",
+            )
+
         if generate_config.sp_advice_prompt != "":
             generate_config.sp_advice_prompt_token_ids = self.tokenizer.encode(
                 generate_config.sp_advice_prompt
@@ -533,6 +563,12 @@ class OpenaiEndpoint(object):
         rendered_input = self.render_chat(chat_request)
         generate_config = self._extract_generation_config(chat_request)
 
+        if generate_config.return_prompt_logits and rendered_input.multimodal_inputs:
+            raise FtRuntimeException(
+                ExceptionType.ERROR_INPUT_FORMAT_ERROR,
+                "prompt scoring does not support multimodal inputs",
+            )
+
         if generate_config.sp_advice_prompt != "":
             generate_config.sp_advice_prompt_token_ids = self.tokenizer.encode(
                 generate_config.sp_advice_prompt
@@ -558,15 +594,24 @@ class OpenaiEndpoint(object):
         async def _single_output_gen(out):
             yield out
 
-        merged_gen = await renderer._merge_non_streaming_outputs(
-            _single_output_gen(outputs)
-        )
+        output_generator = _single_output_gen(outputs)
+
+        prompt_logits_data = None
+        if generate_config.return_prompt_logits:
+            output_generator, prompt_logits_data = (
+                await renderer._extract_prompt_logits(output_generator)
+            )
+
+        merged_gen = await renderer._merge_non_streaming_outputs(output_generator)
         choice_generator = renderer.render_response_stream(
             merged_gen, chat_request, generate_config
         )
-        return await self._collect_complete_response(
+        resp = await self._collect_complete_response(
             choice_generator, None, self.tokenizer
         )
+        if prompt_logits_data is not None:
+            resp.prompt_logprobs = prompt_logits_data
+        return resp
 
     async def batch_chat_completion(self, base_request_id: int, batch_request) -> list:
         inputs = []

@@ -126,6 +126,7 @@ class GenerateOutput:
     loss: Optional[torch.Tensor] = None
     logits: Optional[torch.Tensor] = None
     all_probs: Optional[torch.Tensor] = None
+    prompt_logits: Optional[Dict[str, Any]] = None
 
     class Config:
         arbitrary_types_allowed = True
