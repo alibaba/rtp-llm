@@ -797,23 +797,23 @@ grpc::Status PrefillRpcServer::init(const EngineInitParams&                     
 }
 
 void PrefillRpcServer::initThreadPools() {
-    const auto& parallelism_config = maga_init_params_.parallelism_config;
-    const auto& scheduler_config   = maga_init_params_.runtime_config.fifo_scheduler_config;
-    const auto& pd_sep_config      = maga_init_params_.pd_sep_config;
-    const int   dp_size            = std::max(1, static_cast<int>(parallelism_config.dp_size));
-    const int   max_context_batch  = std::max(1, static_cast<int>(scheduler_config.max_context_batch_size));
+    const auto& pd_sep_config     = maga_init_params_.pd_sep_config;
+    const int   concurrency_limit = std::max(1, maga_init_params_.concurrency_config.concurrency_limit);
 
     // enqueue pool: L1 DP dispatch only (fast, ms-level, must never block)
     // Configurable via pd_sep_config.prefill_enqueue_pool_size (0 = use formula default)
     const int enqueue_threads = pd_sep_config.prefill_enqueue_pool_size > 0 ?
                                     static_cast<int>(pd_sep_config.prefill_enqueue_pool_size) :
-                                    std::max(4, dp_size * (dp_size <= 4 ? 4 : 2));
+                                    std::max(4, concurrency_limit * 4);
     const int enqueue_queue   = enqueue_threads * 2;
 
     enqueue_worker_pool_ =
         std::make_shared<autil::LockFreeThreadPool>(enqueue_threads, enqueue_queue, nullptr, "PrefillEnqueuePool");
     RTP_LLM_CHECK_WITH_INFO(enqueue_worker_pool_->start(), "PrefillRpcServer enqueue thread pool start failed");
-    RTP_LLM_LOG_INFO("PrefillRpcServer enqueue pool started: threads=%d queue=%d", enqueue_threads, enqueue_queue);
+    RTP_LLM_LOG_INFO("PrefillRpcServer enqueue pool started: threads=%d queue=%d (concurrency_limit=%d)",
+                     enqueue_threads,
+                     enqueue_queue,
+                     concurrency_limit);
     enqueue_pool_metrics_.thread_max = static_cast<size_t>(enqueue_threads);
     enqueue_pool_metrics_.queue_max  = static_cast<size_t>(enqueue_queue);
 
@@ -821,18 +821,16 @@ void PrefillRpcServer::initThreadPools() {
     // Configurable via pd_sep_config.prefill_worker_lambda_pool_size (0 = use formula default)
     const int worker_lambda_threads = pd_sep_config.prefill_worker_lambda_pool_size > 0 ?
                                           static_cast<int>(pd_sep_config.prefill_worker_lambda_pool_size) :
-                                          std::max(4, dp_size * max_context_batch * 4);
+                                          std::max(4, concurrency_limit * 4);
     const int worker_lambda_queue   = worker_lambda_threads * 4;
 
     worker_lambda_pool_ = std::make_shared<autil::LockFreeThreadPool>(
         worker_lambda_threads, worker_lambda_queue, nullptr, "PrefillWorkerPool");
     RTP_LLM_CHECK_WITH_INFO(worker_lambda_pool_->start(), "PrefillRpcServer worker lambda pool start failed");
-    RTP_LLM_LOG_INFO(
-        "PrefillRpcServer worker lambda pool started: threads=%d queue=%d (dp_size=%d max_context_batch=%d)",
-        worker_lambda_threads,
-        worker_lambda_queue,
-        dp_size,
-        max_context_batch);
+    RTP_LLM_LOG_INFO("PrefillRpcServer worker lambda pool started: threads=%d queue=%d (concurrency_limit=%d)",
+                     worker_lambda_threads,
+                     worker_lambda_queue,
+                     concurrency_limit);
     worker_lambda_pool_metrics_.thread_max = static_cast<size_t>(worker_lambda_threads);
     worker_lambda_pool_metrics_.queue_max  = static_cast<size_t>(worker_lambda_queue);
 
@@ -840,17 +838,16 @@ void PrefillRpcServer::initThreadPools() {
     // Configurable via pd_sep_config.prefill_slot_pool_size (0 = use formula default)
     const int slot_threads = pd_sep_config.prefill_slot_pool_size > 0 ?
                                  static_cast<int>(pd_sep_config.prefill_slot_pool_size) :
-                                 std::max(16, std::min(max_context_batch * 16, 128));
+                                 std::max(16, concurrency_limit * 8);
     const int slot_queue   = slot_threads * 8;
 
     slot_worker_pool_ =
         std::make_shared<autil::LockFreeThreadPool>(slot_threads, slot_queue, nullptr, "PrefillSlotPool");
     RTP_LLM_CHECK_WITH_INFO(slot_worker_pool_->start(), "PrefillRpcServer slot thread pool start failed");
-    RTP_LLM_LOG_INFO("PrefillRpcServer slot pool started: threads=%d queue=%d (dp_size=%d max_context_batch=%d)",
+    RTP_LLM_LOG_INFO("PrefillRpcServer slot pool started: threads=%d queue=%d (concurrency_limit=%d)",
                      slot_threads,
                      slot_queue,
-                     dp_size,
-                     max_context_batch);
+                     concurrency_limit);
     slot_pool_metrics_.thread_max = static_cast<size_t>(slot_threads);
     slot_pool_metrics_.queue_max  = static_cast<size_t>(slot_queue);
 }
