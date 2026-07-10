@@ -88,14 +88,24 @@ class BaseMoEExperts(nn.Module):
         moe_config: Any,
         quant_config: Optional[QuantizationConfig],
         layer_idx: int,
+        prefix: Optional[str] = None,
     ):
         super().__init__()
+        self.prefix = prefix or f"model.layers.{layer_idx}.mlp.experts"
 
-        # Resolve quant family from quant_config.
+        # Resolve quant family from quant_config. Ignored layers must use the
+        # unquantized method and must not require quantization auxiliary tensors.
+        ignored_by_quant_config = bool(
+            quant_config is not None and quant_config.is_layer_ignored(self.prefix)
+        )
         raw_qt = (
-            getattr(quant_config, "quant_type", "none")
-            if quant_config is not None
-            else "none"
+            "none"
+            if ignored_by_quant_config
+            else (
+                getattr(quant_config, "quant_type", "none")
+                if quant_config is not None
+                else "none"
+            )
         )
         full_map = {**self._BASE_QUANT_MAP, **self._EXTRA_QUANT_MAP}
         self._quant_family = full_map.get(raw_qt, "none")
@@ -170,7 +180,9 @@ class BaseMoEExperts(nn.Module):
         # methods own quantized loading. The built-in fallback is kept only for
         # unquantized weights when no method is registered.
         self.quant_method = (
-            quant_config.get_quant_method(self) if quant_config is not None else None
+            quant_config.get_quant_method(self, self.prefix)
+            if quant_config is not None
+            else None
         )
         if self.quant_method is None and self._quant_family != "none":
             raise ValueError(

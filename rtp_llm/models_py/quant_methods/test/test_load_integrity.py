@@ -1406,6 +1406,46 @@ class TestMoELoadCompleteness(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "auxiliary tensors"):
             layer.process_weights_after_loading()
 
+    def test_ignored_moe_layer_uses_unquantized_method_without_scale_tensors(self):
+        qc = QuantizationConfig(
+            quant_type="fp8",
+            ignored_layers=["model.layers.0.mlp.experts"],
+        )
+        layer = BaseMoEExperts(
+            num_experts=1,
+            hidden_size=4,
+            moe_intermediate_size=4,
+            tp_size=1,
+            tp_rank=0,
+            ep_size=1,
+            ep_rank=0,
+            params_dtype=torch.float32,
+            model_config=types.SimpleNamespace(
+                data_type="fp32", quant_config=None, exported_device=None
+            ),
+            parallelism_config=types.SimpleNamespace(dp_size=1),
+            moe_config=types.SimpleNamespace(),
+            quant_config=qc,
+            layer_idx=0,
+        )
+        self.assertEqual(layer._quant_family, "none")
+        self.assertEqual(layer._required_aux_param_names(), ())
+        self.assertFalse(hasattr(layer, "w13_scale"))
+        layer.load_weights(
+            {
+                "0.gate_proj.weight": torch.zeros(4, 4),
+                "0.up_proj.weight": torch.zeros(4, 4),
+                "0.down_proj.weight": torch.zeros(4, 4),
+            }
+        )
+        with mock.patch.object(BaseMoEExperts, "_maybe_build_fused_moe", return_value=None):
+            layer.process_weights_after_loading()
+        self.assertEqual(
+            layer._loaded_keys,
+            {(0, "gate_proj"), (0, "up_proj"), (0, "down_proj")},
+        )
+
+
 
 class TestAttentionConstructionIntegrity(unittest.TestCase):
     def test_mm_encoder_attention_rejects_hidden_not_divisible_by_heads(self):
