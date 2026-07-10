@@ -695,13 +695,14 @@ class PyFlashinferDecodeAttnOp(object):
             return torch.float8_e4m3fn
         return get_scalar_type(attn_inputs.dtype)
 
-    def _requires_fa2_cuda_graph_replan(self) -> bool:
-        # FlashInfer BatchDecode routes tensor-core decode through fa2 BatchPrefill.
-        # fa3 prefill paths do not need this replay-time plan refresh.
-        return self.use_tensor_core
+    def _requires_cuda_graph_replan(self) -> bool:
+        # FlashInfer plan_info is derived from runtime page tables/kv lengths.
+        # CUDA graph replay keeps wrapper buffer addresses fixed, but their
+        # contents and derived plan metadata must be refreshed before replay.
+        return True
 
     def _plan_decode_wrapper(self, attn_inputs: PyAttentionInputs) -> None:
-        if self._requires_fa2_cuda_graph_replan():
+        if self.use_tensor_core:
             page_indptr = self.fmha_params.decode_page_indptr_h
             page_indice = self.fmha_params.page_indice_h
             last_page_len = self.fmha_params.paged_kv_last_page_len_h
@@ -777,7 +778,7 @@ class PyFlashinferDecodeAttnOp(object):
             self.seq_size_per_block,
             forbid_realloc=True,
         )
-        if self._requires_fa2_cuda_graph_replan():
+        if self._requires_cuda_graph_replan():
             self._plan_decode_wrapper(attn_inputs)
 
     def support(self, attn_inputs: PyAttentionInputs) -> bool:
