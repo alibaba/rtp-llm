@@ -30,17 +30,21 @@ public:
                                           const RuntimeConfig&   runtime_config,
                                           const ResourceContext& resource_context,
                                           const vector<int>&     input_ids,
-                                          const int              block_id) {
+                                          const int              block_id,
+                                          const int              num_return_sequences = 1) {
         std::shared_ptr<GenerateInput> query = make_shared<GenerateInput>();
         query->input_ids       = torch::tensor(std::vector<int32_t>(input_ids.begin(), input_ids.end()), torch::kInt32);
         query->generate_config = make_shared<GenerateConfig>();
+        query->generate_config->num_return_sequences = num_return_sequences;
         GenerateStreamPtr stream =
             make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
         BatchKVCacheResource addr;
         // New (refactored) BatchKVCacheResource: [batch_id][group_id] -> block_indices
-        addr.resetBatchSize(1);
+        addr.resetBatchSize(num_return_sequences);
         addr.initGroups(1, 1, {0});
-        addr.setBatchBlocks(0, 0, {block_id});
+        for (int batch_id = 0; batch_id < num_return_sequences; ++batch_id) {
+            addr.setBatchBlocks(batch_id, 0, {block_id});
+        }
         stream->setKVCache(addr);
 
         auto        sp_output_buffer = std::make_shared<SpeculativeExecutorStreamOutput>();
@@ -123,6 +127,119 @@ TEST_F(MtpBatchStreamProcessorTest, testPrefillDispatch) {
 
     checkOutput(stream1, {2, 1}, {1, 2}, {0.2, 0.1, 0.3, 0.5}, {0.3, 0.4});
     checkOutput(stream2, {1, 2, 3}, {3, 0}, {0.3, 0.1, 0.4, 0.2}, {1.7, 1.8});
+}
+
+// Chunked prefill + speculative: a middle chunk's draft-input tail must be the NEXT prompt token
+// (complete_token_ids[prefix+ctxLen]), not the target-sampled token. Non-chunked rows in the
+// same batch still use their sampled tokens, including when one stream contributes multiple rows.
+TEST_F(MtpBatchStreamProcessorTest, testPrefillPostDraftInputChunkedMiddleChunkUsesNextPromptToken) {
+    ModelConfig                 model_config;
+    RuntimeConfig               runtime_config;
+    SpeculativeExecutionConfig  sp_config;
+    PDSepConfig                 pd_sep_config;
+    ProfilingDebugLoggingConfig profiling_debug_logging_config;
+    CacheConfig                 cache_config;
+    cache_config.group_types = {CacheGroupType::FULL};
+
+    model_config.max_seq_len    = 2048;
+    model_config.vocab_size     = 4096;
+    model_config.num_layers     = 1;
+    sp_config.gen_num_per_cycle = 1;
+
+    ResourceContext resource_context;
+
+    // Stream A: 18-token prompt, chunk_size=8 -> first chunk [0,8) is a middle chunk.
+    GenerateStreamPtr chunk_stream =
+        createContextStream(model_config,
+                            runtime_config,
+                            resource_context,
+                            {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18},
+                            1);
+    chunk_stream->setChunkSize(8);
+    ASSERT_TRUE(chunk_stream->isChunkedMiddleChunk());
+
+    // Stream B: short prompt, not chunked, two return rows -> both rows use sampled tokens.
+    GenerateStreamPtr plain_stream =
+        createContextStream(model_config, runtime_config, resource_context, {101, 102, 103}, 2, 2);
+    ASSERT_FALSE(plain_stream->isChunkedMiddleChunk());
+
+    std::list<GenerateStreamPtr> streams{chunk_stream, plain_stream};
+    StreamGroups                 stream_groups(streams);
+
+    MtpBatchStreamProcessor processor(
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
+
+    // model_input as the gatherer would produce: chunk tokens for A + two full rows for B.
+    GptModelInputs model_input;
+    model_input.combo_tokens =
+        torch::tensor({1, 2, 3, 4, 5, 6, 7, 8, 101, 102, 103, 101, 102, 103}, torch::kInt32);
+    model_input.input_lengths = torch::tensor({8, 3, 3}, torch::kInt32);
+
+    GptModelOutputs model_output;
+    model_output.all_hidden_states = torch::zeros({14, 2}, torch::kFloat32);
+
+    SamplerOutput sampler_output;
+    sampler_output.token_ids = torch::tensor({555, 999, 1000}, torch::kInt32).reshape({3, 1});
+
+    processor.updatePrefillPostDraftModelInput(model_input, model_output, sampler_output, stream_groups);
+
+    // A (middle chunk): shift left + tail = next prompt token complete_token_ids[8] = 9.
+    // B (plain rows):   shift left + tail = each row's sampled token.
+    vector<int> expected = {2, 3, 4, 5, 6, 7, 8, 9, 102, 103, 999, 102, 103, 1000};
+    EXPECT_EQ(expected, toVec<int>(model_input.combo_tokens));
+}
+
+// The final chunk of a chunked stream has no next prompt token, so it falls back to the
+// target-sampled first output token — same as non-chunked prefill.
+TEST_F(MtpBatchStreamProcessorTest, testPrefillPostDraftInputChunkedLastChunkUsesSampledToken) {
+    ModelConfig                 model_config;
+    RuntimeConfig               runtime_config;
+    SpeculativeExecutionConfig  sp_config;
+    PDSepConfig                 pd_sep_config;
+    ProfilingDebugLoggingConfig profiling_debug_logging_config;
+    CacheConfig                 cache_config;
+    cache_config.group_types = {CacheGroupType::FULL};
+
+    model_config.max_seq_len    = 2048;
+    model_config.vocab_size     = 4096;
+    model_config.num_layers     = 1;
+    sp_config.gen_num_per_cycle = 1;
+
+    ResourceContext resource_context;
+
+    // 18-token prompt, chunk_size=8, already advanced to the last chunk [16,18) via reuse_length.
+    GenerateStreamPtr chunk_stream =
+        createContextStream(model_config,
+                            runtime_config,
+                            resource_context,
+                            {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18},
+                            1);
+    chunk_stream->setChunkSize(8);
+    chunk_stream->setReuseLength(16);  // last chunk start (setReuseLength avoids the cache_manager path)
+    ASSERT_TRUE(chunk_stream->isLastChunk());
+    ASSERT_FALSE(chunk_stream->isChunkedMiddleChunk());
+
+    std::list<GenerateStreamPtr> streams{chunk_stream};
+    StreamGroups                 stream_groups(streams);
+
+    MtpBatchStreamProcessor processor(
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
+
+    GptModelInputs model_input;
+    model_input.combo_tokens  = torch::tensor({17, 18}, torch::kInt32);  // last chunk tokens [16,18)
+    model_input.input_lengths = torch::tensor({2}, torch::kInt32);
+
+    GptModelOutputs model_output;
+    model_output.all_hidden_states = torch::zeros({2, 2}, torch::kFloat32);
+
+    SamplerOutput sampler_output;
+    sampler_output.token_ids = torch::tensor({999}, torch::kInt32).reshape({1, 1});
+
+    processor.updatePrefillPostDraftModelInput(model_input, model_output, sampler_output, stream_groups);
+
+    // shift left + tail = sampled token 999 (no next prompt token on the last chunk).
+    vector<int> expected = {18, 999};
+    EXPECT_EQ(expected, toVec<int>(model_input.combo_tokens));
 }
 
 TEST_F(MtpBatchStreamProcessorTest, testDispatchDecodeStream) {
@@ -462,7 +579,7 @@ TEST_F(MtpBatchStreamProcessorTest, testUpdatePrefillPostDraftModelInput) {
     SamplerOutput sampler_output;
     sampler_output.token_ids = torch::tensor({1, -2, 2, 1, 2, 3}, torch::kInt32).reshape({2, 3});
 
-    processor.updatePrefillPostDraftModelInput(model_input, model_output, sampler_output);
+    processor.updatePrefillPostDraftModelInput(model_input, model_output, sampler_output, stream_groups);
 
     auto        combo_tokens        = model_input.combo_tokens;
     vector<int> expect_combo_tokens = {2, 2, 3};

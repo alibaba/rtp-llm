@@ -187,9 +187,13 @@ absl::StatusOr<GenerateStreamPtr> NormalEngine::preRun(const std::shared_ptr<Gen
                                                        preRunMode                            mode) {
     c10::InferenceMode inference_guard(true);
 
+    // Warmup/fake prefill keeps whole-segment semantics by disabling chunking locally.
+    RuntimeConfig stream_runtime_config = runtime_config;
+    stream_runtime_config.fifo_scheduler_config.prefill_chunk_size = 0;
+
     auto stream = std::make_shared<NormalGenerateStream>(generate_input,
                                                          model_config_,
-                                                         runtime_config,
+                                                         stream_runtime_config,
                                                          resource_context_,
                                                          nullptr,
                                                          0,

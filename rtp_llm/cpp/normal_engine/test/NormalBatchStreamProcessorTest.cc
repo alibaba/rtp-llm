@@ -1,6 +1,8 @@
 #include <memory>
 #include "torch/all.h"
 #include "gtest/gtest.h"
+#include "rtp_llm/cpp/cache/KVCacheManager.h"
+#include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 
 #define private public
 #include "rtp_llm/cpp/normal_engine/NormalBatchStreamProcessor.h"
@@ -22,6 +24,31 @@ std::vector<T> toVec(const torch::Tensor& t) {
 
 static torch::Tensor hostIntBuffer(std::vector<int32_t> data) {
     return torch::tensor(data, torch::kInt32);
+}
+
+static GenerateStreamPtr makeNormalStream(std::vector<int32_t>   input_ids,
+                                          const ModelConfig&     model_config,
+                                          const RuntimeConfig&   runtime_config,
+                                          const ResourceContext& resource_context) {
+    auto query             = make_shared<GenerateInput>();
+    query->input_ids       = hostIntBuffer(input_ids);
+    query->generate_config = make_shared<GenerateConfig>();
+    return make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
+}
+
+static void setKvCacheBlocks(const GenerateStreamPtr& stream, std::vector<int> blocks) {
+    BatchKVCacheResource kv_cache;
+    kv_cache.resetBatchSize(1);
+    kv_cache.initGroups(1, 3, {0, 0, 0});
+    kv_cache.setBatchBlocks(0, 0, blocks);
+    stream->setKVCache(kv_cache);
+    stream->setNeedReleaseResource(false);
+}
+
+static ResourceContext makeResourceContextWithCache(const CacheConfig& cache_config) {
+    ResourceContext resource_context;
+    resource_context.cache_manager = make_shared<KVCacheManager>(cache_config);
+    return resource_context;
 }
 
 class NormalBatchStreamProcessorTest: public DeviceTestBase {};
@@ -350,6 +377,180 @@ TEST_F(NormalBatchStreamProcessorTest, testMultimodalGatherBatch) {
         EXPECT_EQ(model_input.multimodal_features.value()[0].numel(), 3 * 10);
         EXPECT_EQ(model_input.multimodal_features.value()[1].numel(), 2 * 10);
     }
+}
+
+
+TEST_F(NormalBatchStreamProcessorTest, testChunkedPrefillPositionIdsCopyCurrentChunkOnly) {
+    ModelConfig model_config;
+    model_config.max_seq_len                 = 2048;
+    model_config.vocab_size                  = 2048;
+    model_config.num_layers                  = 2;
+    model_config.has_positional_encoding     = true;
+    PDSepConfig                 pd_sep_config;
+    ProfilingDebugLoggingConfig profiling_debug_logging_config;
+    CacheConfig cache_config = test::makeSimpleMhaCacheConfig(
+        /*layer_num=*/2, /*block_num=*/16, /*tokens_per_block=*/8, rtp_llm::DataType::TYPE_INT8);
+    ResourceContext resource_context       = makeResourceContextWithCache(cache_config);
+    RuntimeConfig   runtime_config;
+    NormalBatchStreamProcessor processor(
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, false);
+
+    auto chunk_stream = makeNormalStream({1, 2, 3, 4, 5, 6, 7, 8, 9,
+                                          10, 11, 12, 13, 14, 15, 16, 17, 18},
+                                         model_config,
+                                         runtime_config,
+                                         resource_context);
+    setKvCacheBlocks(chunk_stream, {1, 2, 3});
+    chunk_stream->setChunkSize(/*chunk_size=*/8);
+    // useChunkWindow() gates on RUNNING; force it here so advanceChunk() and
+    // isChunkedMiddleChunk() see the active window (the loop below sets it again, no harm).
+    chunk_stream->generate_status_->status = StreamState::RUNNING;
+    chunk_stream->advanceChunk();
+    ASSERT_TRUE(chunk_stream->isChunkedMiddleChunk());
+
+    auto next_stream = makeNormalStream({101, 102, 103}, model_config, runtime_config, resource_context);
+    setKvCacheBlocks(next_stream, {4});
+
+    std::list<GenerateStreamPtr> streams;
+    streams.emplace_back(chunk_stream);
+    streams.emplace_back(next_stream);
+    for (const auto& stream : streams) {
+        stream->generate_status_->status = StreamState::RUNNING;
+    }
+
+    StreamGroups stream_groups(streams);
+    auto         merge_input_status = processor.gatherModelInput(stream_groups);
+    ASSERT_TRUE(merge_input_status.ok()) << merge_input_status.status().ToString();
+
+    auto&       model_input        = merge_input_status.value();
+    vector<int> combo_tokens       = {9, 10, 11, 12, 13, 14, 15, 16, 101, 102, 103};
+    vector<int> input_lengths      = {8, 3};
+    vector<int> prefix_lengths     = {8, 0};
+    vector<int> combo_position_ids = {8, 9, 10, 11, 12, 13, 14, 15, 0, 1, 2};
+
+    EXPECT_EQ(combo_tokens, toVec<int>(model_input.combo_tokens));
+    EXPECT_EQ(input_lengths, toVec<int>(model_input.input_lengths));
+    EXPECT_EQ(prefix_lengths, toVec<int>(model_input.prefix_lengths));
+    EXPECT_EQ(combo_position_ids, toVec<int>(model_input.combo_position_ids));
+}
+
+TEST_F(NormalBatchStreamProcessorTest, testChunkedPrefillSamplerInputSkipsSamplingAndGenerator) {
+    ModelConfig model_config;
+    model_config.max_seq_len = 2048;
+    model_config.vocab_size  = 2048;
+    model_config.num_layers  = 2;
+    PDSepConfig                 pd_sep_config;
+    ProfilingDebugLoggingConfig profiling_debug_logging_config;
+    CacheConfig cache_config = test::makeSimpleMhaCacheConfig(
+        /*layer_num=*/2, /*block_num=*/16, /*tokens_per_block=*/8, rtp_llm::DataType::TYPE_INT8);
+    ResourceContext resource_context = makeResourceContextWithCache(cache_config);
+    RuntimeConfig   runtime_config;
+    NormalBatchStreamProcessor processor(
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, false);
+
+    auto chunk_query             = make_shared<GenerateInput>();
+    chunk_query->input_ids       = hostIntBuffer({10, 11, 12, 13, 14, 15, 16, 17, 18,
+                                                  19, 20, 21, 22, 23, 24, 25, 26, 27});
+    chunk_query->generate_config = make_shared<GenerateConfig>();
+    chunk_query->generate_config->do_sample   = true;
+    chunk_query->generate_config->random_seed = 123;
+    chunk_query->generate_config->top_k       = 7;
+    chunk_query->generate_config->top_p       = 0.7f;
+    auto chunk_stream = make_shared<NormalGenerateStream>(
+        chunk_query, model_config, runtime_config, resource_context, nullptr);
+    chunk_stream->setChunkSize(/*chunk_size=*/8);
+    chunk_stream->generate_status_->status = StreamState::RUNNING;
+    ASSERT_TRUE(chunk_stream->isChunkedMiddleChunk());
+
+    auto plain_query             = make_shared<GenerateInput>();
+    plain_query->input_ids       = hostIntBuffer({1, 2, 3});
+    plain_query->generate_config = make_shared<GenerateConfig>();
+    plain_query->generate_config->do_sample   = true;
+    plain_query->generate_config->random_seed = 456;
+    plain_query->generate_config->top_k       = 5;
+    plain_query->generate_config->top_p       = 0.5f;
+    auto plain_stream = make_shared<NormalGenerateStream>(
+        plain_query, model_config, runtime_config, resource_context, nullptr);
+    plain_stream->generate_status_->status = StreamState::RUNNING;
+
+    std::list<GenerateStreamPtr> streams{chunk_stream, plain_stream};
+    StreamGroups                 stream_groups(streams);
+
+    GptModelInputs  model_inputs;
+    GptModelOutputs model_output;
+    model_output.logits = torch::zeros({2, model_config.vocab_size}, torch::kFloat32);
+
+    auto sampler_input_status = processor.gatherSamplerInput(stream_groups, model_inputs, model_output);
+    ASSERT_TRUE(sampler_input_status.ok()) << sampler_input_status.status().ToString();
+    auto& sampler_inputs = sampler_input_status.value();
+
+    auto* do_sample = reinterpret_cast<bool*>(sampler_inputs.do_sample.data_ptr());
+    auto* top_k     = reinterpret_cast<uint32_t*>(sampler_inputs.top_k.data_ptr<int32_t>());
+    auto* top_p     = sampler_inputs.top_p.data_ptr<float>();
+
+    EXPECT_FALSE(do_sample[0]);
+    EXPECT_EQ(1, top_k[0]);
+    EXPECT_FLOAT_EQ(1.0f, top_p[0]);
+    EXPECT_FALSE(sampler_inputs.generator[0].defined());
+
+    EXPECT_TRUE(do_sample[1]);
+    EXPECT_EQ(5, top_k[1]);
+    EXPECT_FLOAT_EQ(0.5f, top_p[1]);
+    EXPECT_TRUE(sampler_inputs.generator[1].defined());
+}
+
+TEST_F(NormalBatchStreamProcessorTest, testChunkedPrefillDispatchKeepsSamplerSlotsAligned) {
+    ModelConfig model_config;
+    model_config.max_seq_len = 2048;
+    model_config.vocab_size  = 2048;
+    model_config.num_layers  = 2;
+    PDSepConfig                 pd_sep_config;
+    ProfilingDebugLoggingConfig profiling_debug_logging_config;
+    CacheConfig cache_config = test::makeSimpleMhaCacheConfig(
+        /*layer_num=*/2, /*block_num=*/16, /*tokens_per_block=*/8, rtp_llm::DataType::TYPE_INT8);
+    ResourceContext resource_context       = makeResourceContextWithCache(cache_config);
+    RuntimeConfig   runtime_config;
+    NormalBatchStreamProcessor processor(
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, false);
+
+    auto decode_stream1 = makeNormalStream({1, 2}, model_config, runtime_config, resource_context);
+    decode_stream1->setIsContextStream(false);
+
+    auto middle_chunk_stream = makeNormalStream({10, 11, 12, 13, 14, 15, 16, 17, 18,
+                                                 19, 20, 21, 22, 23, 24, 25, 26, 27},
+                                                model_config,
+                                                runtime_config,
+                                                resource_context);
+    middle_chunk_stream->setChunkSize(/*chunk_size=*/8);
+    middle_chunk_stream->generate_status_->status = StreamState::RUNNING;  // gate for useChunkWindow()
+    ASSERT_TRUE(middle_chunk_stream->isChunkedMiddleChunk());
+
+    auto decode_stream2 = makeNormalStream({5, 6}, model_config, runtime_config, resource_context);
+    decode_stream2->setIsContextStream(false);
+
+    std::list<GenerateStreamPtr> streams;
+    streams.emplace_back(decode_stream1);
+    streams.emplace_back(middle_chunk_stream);
+    streams.emplace_back(decode_stream2);
+    for (const auto& stream : streams) {
+        stream->generate_status_->status = StreamState::RUNNING;
+    }
+
+    StreamGroups stream_groups(streams);
+    ASSERT_EQ(stream_groups.totalSamplerBatchSizeOut(), 3);
+
+    MergedOutput merge_outputs;
+    merge_outputs.sampler_output.token_ids = torch::tensor({111, 222, 333}, torch::kInt32).reshape({3, 1});
+    auto status = processor.dispatch(stream_groups, merge_outputs);
+    ASSERT_TRUE(status.ok()) << status.ToString();
+
+    EXPECT_EQ(vector<int>({1, 2, 111}), decode_stream1->completeTokenIdsVec());
+    EXPECT_EQ(vector<int>({5, 6, 222}), decode_stream2->completeTokenIdsVec());
+    EXPECT_EQ(vector<int>({10, 11, 12, 13, 14, 15, 16, 17, 18,
+                           19, 20, 21, 22, 23, 24, 25, 26, 27}),
+              middle_chunk_stream->completeTokenIdsVec());
+    EXPECT_TRUE(middle_chunk_stream->isContextStream());
+    EXPECT_EQ(middle_chunk_stream->prefixLength(), 8);
 }
 
 }  // namespace rtp_llm

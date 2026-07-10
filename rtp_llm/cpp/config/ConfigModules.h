@@ -353,6 +353,9 @@ struct FIFOSchedulerConfig {
     //   "1/X" -> X prefill : 1 decode (prefill-heavy).
     //   invalid input falls back to "1".
     std::string decode_prefill_ratio = "1";
+    // Chunked prefill per-chunk token count: <=0 disables (default), >0 enables.
+    // Finalized at config injection: floor-aligned to seq_size_per_block with min one block.
+    int64_t     prefill_chunk_size     = 0;
     std::string to_string() const;
 };
 

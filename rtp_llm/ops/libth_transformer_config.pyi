@@ -398,6 +398,7 @@ class FIFOSchedulerConfig:
     max_batch_tokens_size: int
     max_context_batch_size: int
     pdfusion_scheduler_mode: str
+    prefill_chunk_size: int
     def __getstate__(self) -> tuple:
         ...
     def __init__(self) -> None:

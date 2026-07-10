@@ -341,12 +341,27 @@ def setup_pd_sep_config(
 def finalize_scheduler_config(
     fifo_scheduler_config: Any,  # FIFOSchedulerConfig
     max_seq_len: int,
+    use_mla: bool,
+    use_hybrid_attention: bool,
+    role_type: Any,
+    use_batch_decode_scheduler: bool = False,
+    seq_size_per_block: int = 0,
 ) -> None:
     """Finalize fifo_scheduler_config with computed values.
 
     Args:
         fifo_scheduler_config: FIFOSchedulerConfig instance to finalize
         max_seq_len: Maximum sequence length from model config
+        use_mla: `attn_config.use_mla`. Chunked KV write-back is not verified for MLA layouts;
+            hard-blocks chunked prefill.
+        use_hybrid_attention: `hybrid_attention_config.enable_hybrid_attention`. Cross-chunk
+            linear-state snapshot/restore is not implemented; hard-blocks chunked prefill.
+        role_type: engine role. Chunked prefill only applies to PREFILL / PDFUSION roles.
+            REQUIRED so a future caller cannot silently enable chunked prefill on the wrong role.
+        use_batch_decode_scheduler: BatchDecodeScheduler forces admitted streams onto the decode
+            path, so it is incompatible with chunked prefill.
+        seq_size_per_block: KV cache block size in tokens (for chunked prefill alignment check).
+            Optional: 0 skips the alignment normalization step; caller must ensure alignment.
     """
 
     # Set max_batch_tokens_size if not set from py_runtime_config
@@ -357,3 +372,53 @@ def finalize_scheduler_config(
     logging.info(
         f"max_batch_tokens_size: {fifo_scheduler_config.max_batch_tokens_size}"
     )
+
+    # Chunked prefill normalization + engine-level hard gates.
+    chunk_size = fifo_scheduler_config.prefill_chunk_size
+    if chunk_size <= 0:
+        return  # chunked prefill disabled; nothing to validate.
+
+    if role_type not in (RoleType.PREFILL, RoleType.PDFUSION):
+        logging.info(
+            f"prefill_chunk_size only applies to PREFILL / PDFUSION roles; "
+            f"disabling for role_type={role_type}"
+        )
+        fifo_scheduler_config.prefill_chunk_size = 0
+        return
+
+    if use_batch_decode_scheduler:
+        raise ValueError(
+            "prefill_chunk_size > 0 is not supported with use_batch_decode_scheduler=True; "
+            "BatchDecodeScheduler forces streams onto the decode path. Disable chunked prefill "
+            "or use the normal FIFO/PDFusion scheduler."
+        )
+
+    # Floor-align to a multiple of seq_size_per_block (min one block) so every chunk starts on
+    # a KV block boundary and stays within the activation-memory budget. Log a warning on adjust.
+    if seq_size_per_block > 0:
+        aligned = max(
+            seq_size_per_block,
+            (chunk_size // seq_size_per_block) * seq_size_per_block,
+        )
+        if aligned != chunk_size:
+            logging.warning(
+                f"prefill_chunk_size ({chunk_size}) is not a multiple of seq_size_per_block "
+                f"({seq_size_per_block}); adjusted to {aligned}"
+            )
+        chunk_size = aligned
+        fifo_scheduler_config.prefill_chunk_size = chunk_size
+
+    if use_mla:
+        raise ValueError(
+            "prefill_chunk_size > 0 is not supported for MLA models "
+            "(attn_config.use_mla=True); chunked KV write-back for the MLA layout is not "
+            "verified. Disable chunked prefill or use a non-MLA model."
+        )
+    if use_hybrid_attention:
+        raise ValueError(
+            "prefill_chunk_size > 0 is not supported for hybrid / linear-attention models "
+            "(hybrid_attention_config.enable_hybrid_attention=True); cross-chunk linear-state "
+            "snapshot/restore is not implemented. Disable chunked prefill or use a plain "
+            "attention model."
+        )
+    logging.info(f"chunked prefill enabled: prefill_chunk_size={chunk_size}")

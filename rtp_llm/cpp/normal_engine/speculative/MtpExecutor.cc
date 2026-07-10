@@ -49,8 +49,13 @@ static std::shared_ptr<NormalGenerateStream> makeFakeStream(int                 
     fake_input->begin_time_us                   = autil::TimeUtility::currentTimeInMicroSeconds();
     fake_input->fake_query                      = true;
 
+    // Fake stream is constructed before setIsFakeStream(), so disable chunked prefill locally.
+    // Keep MTP warmup/fake prefill whole-segment regardless of engine config.
+    RuntimeConfig fake_runtime_config                            = runtime_config;
+    fake_runtime_config.fifo_scheduler_config.prefill_chunk_size = 0;
+
     auto fake_stream = std::make_shared<NormalGenerateStream>(
-        fake_input, model_config, runtime_config, resource_context, nullptr, max_new_tokens);
+        fake_input, model_config, fake_runtime_config, resource_context, nullptr, max_new_tokens);
     fake_stream->setIsFakeStream(true);
     fake_stream->setMetricsReporter(nullptr);
     fake_stream->fakeInitKVBlock(reserved_blocks);
@@ -383,7 +388,8 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
             CHECK_AND_RETURN_REF(sampler_input,
                                  batch_stream_processor_->gatherSamplerInput(stream_groups, model_input, model_output));
             sampler_output = std::move(sampler_->forward(sampler_input));
-            batch_stream_processor_->updatePrefillPostDraftModelInput(model_input, model_output, sampler_output);
+            batch_stream_processor_->updatePrefillPostDraftModelInput(
+                model_input, model_output, sampler_output, stream_groups);
         }
     }
 

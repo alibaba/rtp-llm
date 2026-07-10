@@ -231,6 +231,14 @@ def h20_oss_suites():
                 smoke_args="--disable_flash_infer 1 --quantization FP8_PER_BLOCK --act_type BF16 --warm_up 0",
                 gpu_type=["H20"],
             ),
+            # Chunked prefill regression: mirrors dense_fp8pb_dynamic, but uses a separate
+            # golden because aux_info.iter_count includes extra prefill chunk rounds.
+            smoke_test(
+                name="dense_chunked_prefill",
+                task_info="data/model/qwen3/q_r_h20_chunked_prefill.json",
+                smoke_args="--disable_flash_infer 1 --quantization FP8_PER_BLOCK --act_type BF16 --warm_up 0 --seq_size_per_block 64 --prefill_chunk_size 64",
+                gpu_type=["H20"],
+            ),
             smoke_test(
                 name="dense_fp8pt_dynamic",
                 task_info="data/model/qwen3/q_r_h20_per_tensor_w13.json",

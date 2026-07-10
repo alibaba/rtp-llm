@@ -41,7 +41,8 @@ public:
 
     void updatePrefillPostDraftModelInput(GptModelInputs&        model_input,
                                           const GptModelOutputs& model_output,
-                                          const SamplerOutput&   sampler_output);
+                                          const SamplerOutput&   sampler_output,
+                                          const StreamGroups&    stream_groups);
 
     void updateDecodePostDraftModelInput(GptModelInputs&                              model_input,
                                          const GptModelOutputs&                       model_output,
