@@ -15,12 +15,14 @@ public final class BatchInflight implements InflightEvictor.TtlTracked {
     private final AtomicLong progressBaseMs;
     private volatile boolean running;
     private volatile long lastSeenMs;
+    private volatile long actualTimeMs = -1;
 
     public BatchInflight(long batchId, long predictTimeMs, List<BatchItem> requests) {
         this(batchId, predictTimeMs, requests, System.currentTimeMillis());
     }
 
-    private BatchInflight(long batchId, long predictTimeMs, List<BatchItem> requests, long nowMs) {
+    private BatchInflight(long batchId, long predictTimeMs,
+                          List<BatchItem> requests, long nowMs) {
         this(batchId, predictTimeMs, requests, nowMs, nowMs, false, nowMs);
     }
 
@@ -67,6 +69,21 @@ public final class BatchInflight implements InflightEvictor.TtlTracked {
 
     public long lastSeenMs() {
         return lastSeenMs;
+    }
+
+    /** Engine-reported actual execution time; -1 means not yet filled. */
+    public long actualTimeMs() {
+        return actualTimeMs;
+    }
+
+    /** Set the engine-reported actual execution time for this batch. */
+    public void setActualTimeMs(long actualTimeMs) {
+        this.actualTimeMs = actualTimeMs;
+    }
+
+    /** Whether a valid actual execution time has been recorded. */
+    public boolean hasActualTime() {
+        return actualTimeMs > 0;
     }
 
     public void markQueued(long statusMs) {

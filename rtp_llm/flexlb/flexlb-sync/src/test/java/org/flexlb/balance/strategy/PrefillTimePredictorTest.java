@@ -5,6 +5,7 @@ import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.DebugInfo;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.ServerStatus;
+import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
@@ -326,6 +327,19 @@ class PrefillTimePredictorTest {
     void parenthesesOverridePrecedence() {
         PrefillTimePredictor p = new PrefillTimePredictor("(2 + 3) * 4");
         assertEquals(20, p.estimateMs(0, 0));
+    }
+
+    // ---- learn (interface stub) ----
+
+    @Test
+    @DisplayName("learn method accepts batch items, predicted and actual time without error")
+    void learnAcceptsBatchInfo() {
+        PrefillTimePredictor p = new PrefillTimePredictor("100");
+        List<BatchItem> items = List.of(
+                batchItem(100, 20),
+                batchItem(200, 50)
+        );
+        p.learn(items, 150, 300);  // should not throw
     }
 
     // ---- helpers ----

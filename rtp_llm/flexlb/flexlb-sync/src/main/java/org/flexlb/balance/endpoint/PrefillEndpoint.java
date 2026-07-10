@@ -387,6 +387,10 @@ public class PrefillEndpoint extends WorkerEndpoint {
         logger.info("flexlb_batch_complete batch_id={} predicted_ms={} actual_ms={} gap_ms={} batch_size={} engine={}",
                 batchId, predictedMs, actualMs, gapMs, batch.requests().size(), getIp());
 
+        // Feed the actual-vs-predicted timing back into the predictor for future learning.
+        batch.setActualTimeMs(actualMs);
+        predictor.learn(batch.requests(), predictedMs, actualMs);
+
         if (reporter != null) {
             reporter.reportBatchPredictedTimeMs(RoleType.PREFILL.name(), getIp(), predictedMs);
             reporter.reportBatchActualTimeMs(RoleType.PREFILL.name(), getIp(), actualMs);
