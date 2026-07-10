@@ -73,7 +73,7 @@ class StrategyRegistry:
         if not candidates:
             logger.error(
                 f"No suitable MOE strategy found. Config details: "
-                f"quant_config={config.model_config.quant_config}, "
+                f"quant_config={config.quant_config}, "
                 f"ep_size={config.ep_size}, "
                 f"world_size={config.world_size}, "
                 f"tp_size={config.tp_size}, "

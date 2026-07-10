@@ -1,3 +1,4 @@
+import math
 from typing import Any, Dict, List, Optional
 
 import torch
@@ -701,21 +702,29 @@ class QKVParallelLinear(ColumnParallelLinear):
         self.num_kv_heads = num_kv_heads
         self.head_dim = head_dim
 
+        if num_heads <= 0 or num_kv_heads <= 0 or head_dim <= 0:
+            raise ValueError(
+                f"QKVParallelLinear requires positive head counts and head_dim, got "
+                f"num_heads={num_heads}, num_kv_heads={num_kv_heads}, "
+                f"head_dim={head_dim}, prefix={prefix!r}"
+            )
         if num_heads % tp_size != 0:
             raise ValueError(
                 f"QKVParallelLinear requires num_heads ({num_heads}) to be "
                 f"divisible by tp_size ({tp_size}) for prefix={prefix!r}"
             )
-        if num_kv_heads >= tp_size and num_kv_heads % tp_size != 0:
+
+        self.kv_tp_size = math.gcd(num_kv_heads, tp_size)
+        if self.kv_tp_size <= 0 or num_kv_heads % self.kv_tp_size != 0:
             raise ValueError(
-                f"QKVParallelLinear requires num_kv_heads ({num_kv_heads}) to be "
-                f"divisible by tp_size ({tp_size}) when num_kv_heads >= tp_size "
-                f"for prefix={prefix!r}; non-divisible grouped KV sharding is not "
-                "implemented in newloader yet"
+                f"QKVParallelLinear cannot form a valid KV TP group for "
+                f"num_kv_heads={num_kv_heads}, tp_size={tp_size}, prefix={prefix!r}"
             )
+        self.kv_replication_group_size = tp_size // self.kv_tp_size
+        self.kv_tp_rank = tp_rank // self.kv_replication_group_size
 
         self.num_heads_per_partition = num_heads // tp_size
-        self.num_kv_heads_per_partition = max(1, num_kv_heads // tp_size)
+        self.num_kv_heads_per_partition = num_kv_heads // self.kv_tp_size
 
         self.q_size = self.num_heads_per_partition * head_dim
         self.kv_size = self.num_kv_heads_per_partition * head_dim
@@ -767,33 +776,110 @@ class QKVParallelLinear(ColumnParallelLinear):
                 qkv_key = "v"
 
             if qkv_key is None:
-                # Non-q/k/v param (e.g. an already-merged ckpt or auxiliary
-                # tensor that maps directly onto a self.* param).
-                if param_name == "weight":
-                    self.weight.data.copy_(self._split_weight(tensor, dim=0))
-                    self._mark_loaded("weight")
-                else:
-                    param = getattr(self, param_name, None)
-                    if isinstance(param, nn.Parameter) and tensor.shape == param.shape:
-                        param.data.copy_(tensor)
-                        self._mark_loaded(param_name)
+                if self._dispatch_fused_qkv_param(param_name, tensor):
+                    continue
+                param = getattr(self, param_name, None)
+                if isinstance(param, nn.Parameter) and tensor.shape == param.shape:
+                    param.data.copy_(tensor)
+                    self._mark_loaded(param_name)
                 continue
 
             self._dispatch_qkv_shard(qkv_key, param_name, tensor)
 
-    def _dispatch_qkv_shard(self, qkv_key: str, param_name: str, tensor: torch.Tensor):
-        """Write a single q/k/v shard into the merged parameter at its offset."""
-        # Resolve per-shard size and offset in the merged QKV layout.
+    def _qkv_partition(self, qkv_key: str):
         if qkv_key == "q":
-            num_heads, size, offset = self.num_heads, self.q_size, 0
-        elif qkv_key == "k":
-            num_heads, size, offset = self.num_kv_heads, self.kv_size, self.q_size
-        else:  # "v"
-            num_heads, size, offset = (
+            return self.num_heads, self.q_size, 0, self.tp_size, self.tp_rank
+        if qkv_key == "k":
+            return (
+                self.num_kv_heads,
+                self.kv_size,
+                self.q_size,
+                self.kv_tp_size,
+                self.kv_tp_rank,
+            )
+        if qkv_key == "v":
+            return (
                 self.num_kv_heads,
                 self.kv_size,
                 self.q_size + self.kv_size,
+                self.kv_tp_size,
+                self.kv_tp_rank,
             )
+        raise ValueError(f"Unknown QKV shard key {qkv_key!r}")
+
+    def _split_fused_qkv_tensor(self, param_name: str, tensor: torch.Tensor):
+        q_rows = self.num_heads * self.head_dim
+        kv_rows = self.num_kv_heads * self.head_dim
+        if param_name in ("qweight", "qzeros", "scales"):
+            pf = 1 if param_name == "scales" else getattr(self.quant_method, "PACK_FACTOR", 8)
+            q_cols = q_rows // pf
+            kv_cols = kv_rows // pf
+            if tensor.dim() < 2 or tensor.shape[1] != q_cols + 2 * kv_cols:
+                return None
+            q = tensor.narrow(1, 0, q_cols)
+            k = tensor.narrow(1, q_cols, kv_cols)
+            v = tensor.narrow(1, q_cols + kv_cols, kv_cols)
+            return {"q": q, "k": k, "v": v}
+        if param_name == "weight_scale_inv":
+            block_n, _ = self._fp8_scale_block_size()
+            self._check_fp8_block_aligned(0, q_rows, block_n, f"FP8 block fused QKV scale {self.prefix}.q")
+            self._check_fp8_block_aligned(q_rows, kv_rows, block_n, f"FP8 block fused QKV scale {self.prefix}.k")
+            self._check_fp8_block_aligned(q_rows + kv_rows, kv_rows, block_n, f"FP8 block fused QKV scale {self.prefix}.v")
+            q_blocks = q_rows // block_n
+            kv_blocks = kv_rows // block_n
+            if tensor.shape[0] != q_blocks + 2 * kv_blocks:
+                return None
+            q = tensor.narrow(0, 0, q_blocks)
+            k = tensor.narrow(0, q_blocks, kv_blocks)
+            v = tensor.narrow(0, q_blocks + kv_blocks, kv_blocks)
+            return {"q": q, "k": k, "v": v}
+        total_rows = q_rows + 2 * kv_rows
+        if tensor.shape[0] != total_rows:
+            return None
+        q = tensor.narrow(0, 0, q_rows)
+        k = tensor.narrow(0, q_rows, kv_rows)
+        v = tensor.narrow(0, q_rows + kv_rows, kv_rows)
+        return {"q": q, "k": k, "v": v}
+
+    def _dispatch_fused_qkv_param(self, param_name: str, tensor: torch.Tensor) -> bool:
+        if param_name in ("weight_scale", "input_scale") and tensor.numel() == 1:
+            param = getattr(self, param_name, None)
+            if isinstance(param, nn.Parameter) and param.numel() == 1:
+                param.data.copy_(tensor.view_as(param))
+                self._mark_loaded(param_name)
+                return True
+
+        param = getattr(self, param_name, None)
+        if (
+            param_name == "weight_scale_inv"
+            and isinstance(param, nn.Parameter)
+            and tensor.shape == param.shape
+            and self.tp_size == 1
+        ):
+            param.data.copy_(tensor)
+            self._mark_loaded(param_name)
+            return True
+
+        if param_name not in (
+            "weight",
+            "bias",
+            "weight_scale",
+            "weight_scale_inv",
+            "qweight",
+            "qzeros",
+            "scales",
+        ):
+            return False
+        parts = self._split_fused_qkv_tensor(param_name, tensor)
+        if parts is None:
+            return False
+        for qkv_key, part in parts.items():
+            self._dispatch_qkv_shard(qkv_key, param_name, part.contiguous())
+        return True
+
+    def _dispatch_qkv_shard(self, qkv_key: str, param_name: str, tensor: torch.Tensor):
+        """Write a single q/k/v shard into the merged parameter at its offset."""
+        num_heads, size, offset, partition_world, partition_rank = self._qkv_partition(qkv_key)
 
         if param_name in ("qweight", "qzeros", "scales"):
             # AWQ(w4a16):输出维是 dim1;qweight/qzeros 以 pack_factor 压缩。
@@ -808,8 +894,8 @@ class QKVParallelLinear(ColumnParallelLinear):
             )
             cols = size // pf
             off_cols = offset // pf
-            if self.tp_size > 1 and tensor.shape[1] == cols * self.tp_size:
-                start = self.tp_rank * cols
+            if partition_world > 1 and tensor.shape[1] == cols * partition_world:
+                start = partition_rank * cols
                 tensor = tensor.narrow(1, start, cols).contiguous()
             if tensor.shape[1] != cols:
                 raise ValueError(
@@ -821,8 +907,14 @@ class QKVParallelLinear(ColumnParallelLinear):
             return
 
         if param_name == "weight":
-            split = self._split_qkv(tensor, num_heads, self.head_dim)
+            split = self._split_qkv(tensor, qkv_key)
             if (
+                split.dim() == 2
+                and self.weight.shape[0] >= offset + size
+                and self.weight.shape[1] == split.shape[1]
+            ):
+                self.weight.data[offset : offset + size].copy_(split)
+            elif (
                 split.dim() == 2
                 and self.weight.shape[0] == split.shape[1]
                 and self.weight.shape[1] >= offset + size
@@ -831,14 +923,18 @@ class QKVParallelLinear(ColumnParallelLinear):
                     split.t().contiguous()
                 )
             else:
-                self.weight.data[offset : offset + size].copy_(split)
+                raise ValueError(
+                    f"Shape mismatch for QKV {self.prefix}.weight/{qkv_key}: "
+                    f"weight shape={tuple(self.weight.shape)}, split shape={tuple(split.shape)}, "
+                    f"offset={offset}, size={size}"
+                )
             self._mark_loaded(("weight", qkv_key))
             return
 
         if param_name == "bias":
             if self.bias is None:
                 return
-            split = self._split_qkv(tensor, num_heads, self.head_dim)
+            split = self._split_qkv(tensor, qkv_key)
             self.bias.data[offset : offset + size].copy_(split)
             self._mark_loaded(("bias", qkv_key))
             return
@@ -863,14 +959,9 @@ class QKVParallelLinear(ColumnParallelLinear):
                 f"FP8 block QKV scale {self.prefix}.{qkv_key}",
             )
             expected_blocks = size // block_n
-            if self.tp_size > 1:
-                if num_heads < self.tp_size:
-                    start_row = (self.tp_rank % num_heads) * self.head_dim
-                    rows = self.head_dim
-                else:
-                    heads_pp = num_heads // self.tp_size
-                    rows = heads_pp * self.head_dim
-                    start_row = self.tp_rank * rows
+            if partition_world > 1:
+                rows = size
+                start_row = partition_rank * rows
                 self._check_fp8_block_aligned(
                     start_row,
                     rows,
@@ -908,7 +999,7 @@ class QKVParallelLinear(ColumnParallelLinear):
             return
 
         # Per-channel along output dim: TP-slice and write into [offset:offset+size).
-        split = self._split_qkv(tensor, num_heads, self.head_dim)
+        split = self._split_qkv(tensor, qkv_key)
         if split.shape[0] != size:
             raise ValueError(
                 f"Shape mismatch for QKV shard {self.prefix}.{param_name}/{qkv_key}: "
@@ -976,17 +1067,18 @@ class QKVParallelLinear(ColumnParallelLinear):
             return self.q_size, self.kv_size
         return self.q_size + self.kv_size, self.kv_size
 
-    def _split_qkv(
-        self, tensor: torch.Tensor, num_heads: int, head_dim: int
-    ) -> torch.Tensor:
-        if self.tp_size <= 1:
+    def _split_qkv(self, tensor: torch.Tensor, qkv_key: str) -> torch.Tensor:
+        num_heads, size_per_partition, _, partition_world, partition_rank = self._qkv_partition(qkv_key)
+        if partition_world <= 1:
             return tensor
-        if num_heads < self.tp_size:
-            # GQA/MQA: there are fewer KV heads than TP ranks. Replicate heads
-            # across ranks by cycling instead of slicing past the checkpoint tensor.
-            start = (self.tp_rank % num_heads) * head_dim
-            return tensor.narrow(0, start, head_dim).contiguous()
-        heads_per_partition = num_heads // self.tp_size
-        size_per_partition = heads_per_partition * head_dim
-        start = self.tp_rank * size_per_partition
+        if tensor.shape[0] == size_per_partition:
+            return tensor
+        full_size = num_heads * self.head_dim
+        if tensor.shape[0] != full_size:
+            raise ValueError(
+                f"Shape mismatch for QKV shard {self.prefix}.{qkv_key}: "
+                f"got dim-0={tensor.shape[0]}, expected local {size_per_partition} "
+                f"or full {full_size}"
+            )
+        start = partition_rank * size_per_partition
         return tensor.narrow(0, start, size_per_partition).contiguous()

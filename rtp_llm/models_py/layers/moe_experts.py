@@ -175,6 +175,10 @@ class BaseMoEExperts(nn.Module):
         self._parallelism_config = parallelism_config
         self._moe_config = moe_config
         self._quant_config = quant_config
+        self._ignored_by_quant_config = ignored_by_quant_config
+        self._effective_model_quant_config = (
+            None if ignored_by_quant_config else getattr(model_config, "quant_config", None)
+        )
 
         # Unified dispatch (symmetric with LinearBase): registered MoE quant
         # methods own quantized loading. The built-in fallback is kept only for
@@ -704,7 +708,7 @@ class BaseMoEExperts(nn.Module):
             model_config=self._model_config,
             parallelism_config=self._parallelism_config,
             moe_config=self._moe_config,
-            quant_config=getattr(self._model_config, "quant_config", None),
+            quant_config=self._effective_model_quant_config,
             enable_cuda_graph=False,
         )
         weights_dict = self._build_weights_dict()

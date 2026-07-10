@@ -91,6 +91,25 @@ from rtp_llm.models_py.quant_methods.base import QuantizationConfig
 from rtp_llm.models_py.quant_methods.fp8 import Fp8LinearMethod, Fp8OnlineLinearMethod, _runtime_fp8_dtype
 from rtp_llm.models_py.quant_methods.awq_triton import awq_dequantize_triton
 from rtp_llm.utils.model_weight import W
+from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import (
+    CombineForwardPayload,
+    ExpertForwardPayload,
+    FusedMoeDataRouter,
+    FusedMoeExpertExecutor,
+)
+from rtp_llm.models_py.modules.factory.fused_moe.defs.priority_attributes import (
+    StrategyAttributes,
+)
+from rtp_llm.models_py.modules.factory.fused_moe.defs.quant_config import (
+    FusedMoEQuantConfig,
+)
+from rtp_llm.models_py.modules.factory.fused_moe.defs.strategy_base import MoeStrategy
+from rtp_llm.models_py.modules.factory.fused_moe.defs.type import ExecutorType, RouterType
+from rtp_llm.models_py.modules.factory.fused_moe.factory import FusedMoeFactory
+from rtp_llm.models_py.modules.factory.fused_moe.strategy_registry import StrategyRegistry
+from rtp_llm.models_py.modules.factory.fused_moe.utils.config_resolver import (
+    MoeConfigResolver,
+)
 
 BaseMoEExperts = None
 
@@ -951,6 +970,96 @@ class TestLinearLoadCompleteness(unittest.TestCase):
         layer.load_weights({"qkv_proj.weight_scale_inv": scale})
         self.assertTrue(torch.equal(layer.weight_scale_inv, scale))
 
+    def test_qkv_fused_weight_splits_qkv_aware_for_each_tp_rank(self):
+        hidden_size = 4
+        num_heads = 4
+        num_kv_heads = 2
+        head_dim = 2
+        q_rows = num_heads * head_dim
+        kv_rows = num_kv_heads * head_dim
+        fused = torch.arange((q_rows + 2 * kv_rows) * hidden_size, dtype=torch.float32).view(
+            q_rows + 2 * kv_rows, hidden_size
+        )
+        q, k, v = torch.split(fused, [q_rows, kv_rows, kv_rows], dim=0)
+        for rank in range(2):
+            layer = QKVParallelLinear(
+                hidden_size=hidden_size,
+                num_heads=num_heads,
+                num_kv_heads=num_kv_heads,
+                head_dim=head_dim,
+                tp_size=2,
+                tp_rank=rank,
+                quant_config=_qc("none"),
+                prefix="qkv_proj",
+                params_dtype=torch.float32,
+            )
+            layer.load_weights({"qkv_proj.weight": fused})
+            expected = torch.cat(
+                [
+                    q.narrow(0, rank * 4, 4),
+                    k.narrow(0, rank * 2, 2),
+                    v.narrow(0, rank * 2, 2),
+                ],
+                dim=0,
+            )
+            self.assertTrue(torch.equal(layer.weight, expected))
+
+    def test_qkv_kv_heads_less_than_tp_use_gcd_replication_groups(self):
+        hidden_size = 3
+        num_heads = 8
+        num_kv_heads = 2
+        head_dim = 1
+        fused = torch.arange((num_heads + 2 * num_kv_heads) * hidden_size, dtype=torch.float32).view(
+            num_heads + 2 * num_kv_heads, hidden_size
+        )
+        q, k, v = torch.split(fused, [num_heads, num_kv_heads, num_kv_heads], dim=0)
+        for rank in range(8):
+            layer = QKVParallelLinear(
+                hidden_size=hidden_size,
+                num_heads=num_heads,
+                num_kv_heads=num_kv_heads,
+                head_dim=head_dim,
+                tp_size=8,
+                tp_rank=rank,
+                quant_config=_qc("none"),
+                prefix="qkv_proj",
+                params_dtype=torch.float32,
+            )
+            layer.load_weights({"qkv_proj.weight": fused})
+            kv_rank = rank // 4
+            expected = torch.cat(
+                [q.narrow(0, rank, 1), k.narrow(0, kv_rank, 1), v.narrow(0, kv_rank, 1)],
+                dim=0,
+            )
+            self.assertTrue(torch.equal(layer.weight, expected), msg=f"rank={rank}")
+
+    def test_qkv_fused_block_scale_splits_qkv_aware_for_tp(self):
+        qc = _qc("fp8_block")
+        qc.weight_block_size = [2, 4]
+        fused_scale = torch.arange(8, dtype=torch.float32).view(8, 1)
+        for rank in range(2):
+            layer = QKVParallelLinear(
+                hidden_size=4,
+                num_heads=4,
+                num_kv_heads=2,
+                head_dim=2,
+                tp_size=2,
+                tp_rank=rank,
+                quant_config=qc,
+                prefix="qkv_proj",
+                params_dtype=torch.float32,
+            )
+            layer.load_weights({"qkv_proj.weight_scale_inv": fused_scale})
+            expected = torch.cat(
+                [
+                    fused_scale.narrow(0, rank * 2, 2),
+                    fused_scale.narrow(0, 4 + rank, 1),
+                    fused_scale.narrow(0, 6 + rank, 1),
+                ],
+                dim=0,
+            )
+            self.assertTrue(torch.equal(layer.weight_scale_inv, expected), msg=f"rank={rank}")
+
     def test_qkv_missing_v_shard_fails(self):
         layer = QKVParallelLinear(
             hidden_size=4,
@@ -1026,19 +1135,22 @@ class TestLinearLoadCompleteness(unittest.TestCase):
             out = layer(x)
         torch.testing.assert_close(out, torch.full((1, 3), 7.0), rtol=0, atol=0)
 
-    def test_qkv_rejects_non_divisible_kv_heads(self):
-        with self.assertRaisesRegex(ValueError, "num_kv_heads"):
-            QKVParallelLinear(
-                hidden_size=8,
-                num_heads=8,
-                num_kv_heads=6,
-                head_dim=1,
-                tp_size=4,
-                tp_rank=0,
-                quant_config=_qc("none"),
-                prefix="qkv_proj",
-                params_dtype=torch.float32,
-            )
+    def test_qkv_allows_gcd_kv_group_when_kv_heads_not_divisible_by_tp(self):
+        layer = QKVParallelLinear(
+            hidden_size=8,
+            num_heads=8,
+            num_kv_heads=6,
+            head_dim=1,
+            tp_size=4,
+            tp_rank=3,
+            quant_config=_qc("none"),
+            prefix="qkv_proj",
+            params_dtype=torch.float32,
+        )
+        self.assertEqual(layer.kv_tp_size, 2)
+        self.assertEqual(layer.kv_replication_group_size, 2)
+        self.assertEqual(layer.kv_tp_rank, 1)
+        self.assertEqual(layer.num_kv_heads_per_partition, 3)
 
     def test_column_rejects_non_divisible_output_tp(self):
         with self.assertRaisesRegex(ValueError, "output_size.*divisible"):
@@ -1406,44 +1518,145 @@ class TestMoELoadCompleteness(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "auxiliary tensors"):
             layer.process_weights_after_loading()
 
-    def test_ignored_moe_layer_uses_unquantized_method_without_scale_tensors(self):
-        qc = QuantizationConfig(
-            quant_type="fp8",
-            ignored_layers=["model.layers.0.mlp.experts"],
-        )
-        layer = BaseMoEExperts(
-            num_experts=1,
-            hidden_size=4,
-            moe_intermediate_size=4,
-            tp_size=1,
-            tp_rank=0,
-            ep_size=1,
-            ep_rank=0,
-            params_dtype=torch.float32,
-            model_config=types.SimpleNamespace(
-                data_type="fp32", quant_config=None, exported_device=None
-            ),
-            parallelism_config=types.SimpleNamespace(dp_size=1),
-            moe_config=types.SimpleNamespace(),
-            quant_config=qc,
-            layer_idx=0,
-        )
-        self.assertEqual(layer._quant_family, "none")
-        self.assertEqual(layer._required_aux_param_names(), ())
-        self.assertFalse(hasattr(layer, "w13_scale"))
-        layer.load_weights(
-            {
-                "0.gate_proj.weight": torch.zeros(4, 4),
-                "0.up_proj.weight": torch.zeros(4, 4),
-                "0.down_proj.weight": torch.zeros(4, 4),
-            }
-        )
-        with mock.patch.object(BaseMoEExperts, "_maybe_build_fused_moe", return_value=None):
+    def test_ignored_moe_layer_uses_unquantized_runtime_strategy(self):
+        from rtp_llm.config.quant_config import Fp8PerTensorQuantConfig
+
+        class _FakeDevice:
+            def shuffle_moe_weight(self, tensor, data_type, name):
+                return tensor
+
+        class _ParallelConfig:
+            ep_size = 1
+            ep_rank = 0
+            dp_size = 1
+            dp_rank = 0
+            world_size = 1
+            local_rank = 0
+            tp_size = 1
+
+            def get_attn_tp_size(self):
+                return 1
+
+            def get_attn_tp_rank(self):
+                return 0
+
+        class _Router(FusedMoeDataRouter):
+            @classmethod
+            def router_type(cls):
+                return RouterType.BATCHED_DATA
+
+            @classmethod
+            def check_conditions(cls, checker, config):
+                pass
+
+            def prepare(self, a1, a1_scale, a2_scale, topk_weights, topk_ids):
+                return ExpertForwardPayload(expert_x=a1)
+
+            def finalize(
+                self,
+                payload,
+                topk_weights,
+                topk_ids,
+                apply_router_weight_on_input,
+                extra_finalize_args,
+            ):
+                return payload.fused_expert_output
+
+        class _Executor(FusedMoeExpertExecutor):
+            @classmethod
+            def executor_type(cls):
+                return ExecutorType.BATCHED_TRITON
+
+            def execute(
+                self,
+                payload,
+                activation,
+                expert_map,
+                a2_scale,
+                apply_router_weight_on_input,
+                extra_expert_args,
+            ):
+                return CombineForwardPayload(fused_expert_output=payload.expert_x)
+
+        class _NoQuantStrategy(MoeStrategy):
+            @classmethod
+            def check_conditions(cls, checker, config):
+                checker.check(
+                    not MoeConfigResolver.has_quantization(config),
+                    reason="ignored layer should resolve to no-quant runtime config",
+                )
+
+            def get_attributes(self):
+                return StrategyAttributes(_Router, _Executor, FusedMoEQuantConfig(quant_dtype=None))
+
+        class _QuantStrategy(_NoQuantStrategy):
+            @classmethod
+            def check_conditions(cls, checker, config):
+                checker.check(MoeConfigResolver.has_quantization(config), reason="quant config present")
+
+        registry = StrategyRegistry()
+        registry.register(_QuantStrategy())
+        registry.register(_NoQuantStrategy())
+        old_registry = FusedMoeFactory._registry
+        FusedMoeFactory.set_registry(registry)
+        try:
+            config_side_quant = Fp8PerTensorQuantConfig(is_quanted=True)
+            model_config = types.SimpleNamespace(
+                data_type="fp32",
+                quant_config=config_side_quant,
+                exported_device=_FakeDevice(),
+                expert_num=1,
+                moe_k=1,
+                moe_topk_group=1,
+                hidden_size=4,
+                attn_config=types.SimpleNamespace(head_num=1),
+                activation_type="SiGLU",
+            )
+            qc = QuantizationConfig(
+                quant_type="fp8",
+                ignored_layers=["model.layers.0.mlp.experts"],
+            )
+            layer = BaseMoEExperts(
+                num_experts=1,
+                hidden_size=4,
+                moe_intermediate_size=4,
+                tp_size=1,
+                tp_rank=0,
+                ep_size=1,
+                ep_rank=0,
+                params_dtype=torch.float32,
+                model_config=model_config,
+                parallelism_config=_ParallelConfig(),
+                moe_config=types.SimpleNamespace(
+                    ll_num_max_token=1,
+                    masked_max_token_num=1,
+                    moe_strategy="",
+                    use_mori_ep=False,
+                    use_deepep_moe=False,
+                    use_deepep_low_latency=False,
+                ),
+                quant_config=qc,
+                layer_idx=0,
+            )
+            self.assertEqual(layer._quant_family, "none")
+            self.assertIsNone(layer._effective_model_quant_config)
+            self.assertEqual(layer._required_aux_param_names(), ())
+            self.assertFalse(hasattr(layer, "w13_scale"))
+            layer.load_weights(
+                {
+                    "0.gate_proj.weight": torch.zeros(4, 4),
+                    "0.up_proj.weight": torch.zeros(4, 4),
+                    "0.down_proj.weight": torch.zeros(4, 4),
+                }
+            )
             layer.process_weights_after_loading()
-        self.assertEqual(
-            layer._loaded_keys,
-            {(0, "gate_proj"), (0, "up_proj"), (0, "down_proj")},
-        )
+            self.assertIsNone(layer.fused_moe.fused_experts.config.quant_config)
+            self.assertEqual(
+                layer._loaded_keys,
+                {(0, "gate_proj"), (0, "up_proj"), (0, "down_proj")},
+            )
+        finally:
+            FusedMoeFactory.set_registry(old_registry)
 
 
 

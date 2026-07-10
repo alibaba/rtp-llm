@@ -35,7 +35,7 @@ class MoeConfigResolver:
         Returns:
             Whether quantization is enabled
         """
-        return config.model_config.quant_config is not None
+        return config.quant_config is not None
 
     @staticmethod
     def is_bf16(config: MoEConfigAdapter) -> bool:
@@ -59,9 +59,9 @@ class MoeConfigResolver:
         Returns:
             Quantization method name, or None if quantization is not enabled
         """
-        if config.model_config.quant_config is None:
+        if config.quant_config is None:
             return None
-        return config.model_config.quant_config.get_method()
+        return config.quant_config.get_method()
 
     @staticmethod
     def is_ep_enabled(config: MoEConfigAdapter) -> bool:
