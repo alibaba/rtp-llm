@@ -524,6 +524,36 @@ int samplerPreprocessWatchTopK() {
     return std::max(1, samplerBadWatchEnvInt("RTPLLM_SAMPLER_PREPROCESS_WATCH_TOPK", 8));
 }
 
+bool samplerPreprocessWatchCaptureAll() {
+    static const bool enabled = [] {
+        auto value = samplerTraceEnv("RTPLLM_SAMPLER_PREPROCESS_WATCH_CAPTURE_ALL");
+        std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) { return std::tolower(c); });
+        return value == "1" || value == "true" || value == "yes" || value == "on";
+    }();
+    return enabled;
+}
+
+bool samplerPreprocessWatchNearTrigger(const std::string& trace_id) {
+    if (samplerPreprocessWatchCaptureAll()) {
+        return true;
+    }
+    const int min_cf           = std::max(2, samplerBadWatchEnvInt("RTPLLM_SAMPLER_BAD_WATCH_MIN_CF", 4));
+    const int max_pattern_size = std::max(1, samplerBadWatchEnvInt("RTPLLM_SAMPLER_BAD_WATCH_MAX_PATTERN_SIZE", 8));
+    const int min_repeats      = std::max(2, samplerBadWatchEnvInt("RTPLLM_SAMPLER_BAD_WATCH_MIN_REPEATS", 8));
+
+    std::lock_guard<std::mutex> lock(samplerBadWatchMutex());
+    auto&                       states = samplerBadWatchStates();
+    auto                        iter   = states.find(trace_id);
+    if (iter == states.end() || iter->second.triggered) {
+        return false;
+    }
+    const auto& state = iter->second;
+    if (state.cf_total >= min_cf - 1) {
+        return true;
+    }
+    return samplerBadWatchFindRepeatedSuffix(state.token_tail, max_pattern_size, min_repeats - 1).matched;
+}
+
 void samplerPreprocessWatchCaptureRaw(const SamplerInputs& inputs) {
     if (!samplerPreprocessWatchEnabled() || !inputs.logits.defined() || inputs.logits.dim() != 2) {
         return;
@@ -533,18 +563,21 @@ void samplerPreprocessWatchCaptureRaw(const SamplerInputs& inputs) {
     const auto* sequence_lengths = inputs.sequence_lengths.data_ptr<int32_t>();
     const int   topn             = samplerPreprocessWatchTopK();
 
-    std::lock_guard<std::mutex> lock(samplerPreprocessWatchMutex());
-    auto&                       snapshots = samplerPreprocessWatchSnapshots();
     for (size_t i = 0; i < inputs.batch_size; ++i) {
         const auto trace_id = i < inputs.trace_ids.size() ? inputs.trace_ids[i] : "";
         if (!samplerPreprocessWatchMatches(trace_id)) {
             continue;
         }
+        if (!samplerPreprocessWatchNearTrigger(trace_id)) {
+            continue;
+        }
         const int32_t seq_len    = sequence_lengths[i];
         const int32_t input_len  = input_lengths[i];
         const int32_t output_len = seq_len >= input_len ? seq_len - input_len : -1;
-        snapshots[trace_id] = SamplerPreprocessWatchSnapshot{
-            (int64_t)inputs.step, input_len, seq_len, output_len, samplerTopKJson(inputs.logits[i], topn)};
+        auto raw_top_logits = samplerTopKJson(inputs.logits[i], topn);
+        std::lock_guard<std::mutex> lock(samplerPreprocessWatchMutex());
+        samplerPreprocessWatchSnapshots()[trace_id] =
+            SamplerPreprocessWatchSnapshot{(int64_t)inputs.step, input_len, seq_len, output_len, raw_top_logits};
     }
 }
 
