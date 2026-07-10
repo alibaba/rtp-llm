@@ -29,7 +29,12 @@ def get_mla_impl(
 ) -> MlaImplBase:
 
     mla_impls = PREFILL_MLA_IMPS if attn_inputs.is_prefill else DECODE_MLA_IMPS
-    for impl in mla_impls:
+    # Honor attn_backend / disable_attn_backends for MLA too: resolve explicit
+    # backend selection (e.g. flashinfer_mla, sparse_mla), attn_backend=none and
+    # the blocklist via the same logic MHA uses, instead of blindly taking the
+    # first supported impl.
+    candidates = _select_attn_impls(mla_impls, fmha_config, attn_inputs.is_prefill)
+    for impl in candidates:
         # Check support before creating instance
         if not impl.support(attn_configs, attn_inputs):
             continue
@@ -122,16 +127,104 @@ def _get_blocked_backends(fmha_config: FMHAConfig) -> set:
 def _blocklist_known_names() -> set:
     """Valid names for the GLOBAL disable_attn_backends blocklist.
 
-    disable_attn_backends applies to both prefill and decode, so its validity is
-    the UNION of both MHA registries (plus the pseudo/alias names). Validating a
-    global blocklist against only the current stage's registry would wrongly
-    reject a decode-only name during a prefill call (and vice versa).
+    disable_attn_backends applies to both prefill and decode AND to both the MHA
+    and MLA registries, so its validity is the UNION of all four registries (plus
+    the pseudo/alias names). Validating a global blocklist against only the
+    current stage's / current attention-type's registry would wrongly reject a
+    name that is valid for another stage or for MLA (e.g. rejecting "sparse_mla"
+    during an MHA call, or a decode-only name during a prefill call).
     """
     names = {
-        getattr(impl, "NAME", None) for impl in (*PREFILL_MHA_IMPS, *DECODE_MHA_IMPS)
+        getattr(impl, "NAME", None)
+        for impl in (
+            *PREFILL_MHA_IMPS,
+            *DECODE_MHA_IMPS,
+            *PREFILL_MLA_IMPS,
+            *DECODE_MLA_IMPS,
+        )
     }
     names.discard(None)
     return _expand_flashinfer_alias(names | {"auto", "none", "flashinfer"})
+
+
+def _select_attn_impls(
+    impls: List[type],
+    fmha_config: Optional[FMHAConfig],
+    is_prefill: bool,
+) -> List[type]:
+    """Resolve which attention impl classes to try, in priority order.
+
+    Shared by the MHA and MLA registries so both honor the same backend config:
+      - ``attn_backend`` / ``prefill_attn_backend`` / ``decode_attn_backend``
+        (comma-separated ordered lists),
+      - ``attn_backend=none`` (disables attention -> raises),
+      - the global ``disable_attn_backends`` blocklist,
+      - validation of explicit / blocked backend names.
+
+    Returns the ordered list of candidate impl classes (blocklist already
+    applied). ``auto`` mode preserves registration order and lets callers apply
+    any additional per-impl gating (e.g. MHA legacy flags). Callers keep their
+    own instantiation/support logic.
+    """
+    if fmha_config is None:
+        backends = ["auto"]
+        blocked = set()
+    else:
+        backends = _get_effective_backends(fmha_config, is_prefill)
+        blocked = _get_blocked_backends(fmha_config)
+
+    if backends == ["none"]:
+        raise Exception("Attention is disabled (attn_backend=none)")
+
+    # Build registry metadata for the passed-in registry (MHA or MLA).
+    registered_names = set()
+    name_to_impls: Dict[str, List[type]] = {}
+    for impl in impls:
+        name = getattr(impl, "NAME", None)
+        if name:
+            registered_names.add(name)
+            name_to_impls.setdefault(name, []).append(impl)
+
+    # Public alias: "flashinfer" refers to the Python FlashInfer backend (MHA only).
+    if "py_flashinfer" in registered_names:
+        name_to_impls.setdefault("flashinfer", []).extend(
+            name_to_impls.get("py_flashinfer", [])
+        )
+    blocked = _expand_flashinfer_alias(blocked)
+
+    # Explicit attn_backend names are validated against THIS registry (selecting
+    # an MHA-only backend for an MLA model, or vice versa, should fail loudly).
+    known_names = registered_names | {"auto", "none", "flashinfer"}
+    for backend_name in backends:
+        if backend_name not in known_names:
+            raise ValueError(
+                f"Unknown attention backend {backend_name!r}. "
+                f"Registered backends: {sorted(registered_names)}"
+            )
+    # disable_attn_backends is GLOBAL: validate against the union of all registries.
+    blocklist_known_names = _blocklist_known_names()
+    for blocked_name in blocked:
+        if blocked_name not in blocklist_known_names:
+            raise ValueError(
+                f"Unknown attention backend in disable_attn_backends: {blocked_name!r}. "
+                f"Valid backends: {sorted(blocklist_known_names)}"
+            )
+
+    if backends == ["auto"]:
+        return [
+            impl
+            for impl in impls
+            if not (getattr(impl, "NAME", None) and getattr(impl, "NAME") in blocked)
+        ]
+    # Explicit backend list: iterate in user-specified order, resolving each name
+    # to its impl(s) and skipping blocked names.
+    candidates: List[type] = []
+    for backend_name in backends:
+        if backend_name in blocked:
+            continue
+        resolved_name = "py_flashinfer" if backend_name == "flashinfer" else backend_name
+        candidates.extend(name_to_impls.get(resolved_name, []))
+    return candidates
 
 
 def _is_fmha_impl_disabled_legacy(impl_class: type, fmha_config: FMHAConfig) -> bool:
@@ -205,79 +298,25 @@ def get_fmha_impl(
     attn_inputs.is_cuda_graph = is_cuda_graph
     mha_impls = PREFILL_MHA_IMPS if attn_inputs.is_prefill else DECODE_MHA_IMPS
 
-    if fmha_config is None:
-        backends = ["auto"]
-        blocked = set()
-    else:
-        backends = _get_effective_backends(fmha_config, attn_inputs.is_prefill)
-        blocked = _get_blocked_backends(fmha_config)
+    # Shared backend resolution (attn_backend / overrides / none / blocklist +
+    # name validation). Returns candidate impls in priority order.
+    is_auto = fmha_config is None or _get_effective_backends(
+        fmha_config, attn_inputs.is_prefill
+    ) == ["auto"]
+    candidates = _select_attn_impls(mha_impls, fmha_config, attn_inputs.is_prefill)
 
-    if backends == ["none"]:
-        raise Exception("Attention is disabled (attn_backend=none)")
-
-    # Build registry metadata and validate explicit backend names.
-    registered_names = set()
-    name_to_impls: Dict[str, List[type[FMHAImplBase]]] = {}
-    for impl in mha_impls:
-        name = getattr(impl, "NAME", None)
-        if name:
-            registered_names.add(name)
-            name_to_impls.setdefault(name, []).append(impl)
-
-    # Public alias: "flashinfer" refers to the Python FlashInfer backend.
-    if "py_flashinfer" in registered_names:
-        name_to_impls.setdefault("flashinfer", []).extend(
-            name_to_impls.get("py_flashinfer", [])
+    for impl in candidates:
+        # Legacy boolean flags (enable_xqa, use_asm_pa, …) only gate auto mode;
+        # an explicit backend selection bypasses them by design.
+        if is_auto and fmha_config and _is_fmha_impl_disabled_legacy(impl, fmha_config):
+            continue
+        instance = _try_instantiate(
+            impl, attn_configs, attn_inputs, parallelism_config, is_cuda_graph
         )
-    # Also expand the alias in the blocked set so auto mode honors it.
-    blocked = _expand_flashinfer_alias(blocked)
-    # Rebuild known_names after alias expansion.
-    known_names = registered_names | {"auto", "none", "flashinfer"}
-    for backend_name in backends:
-        if backend_name not in known_names:
-            raise ValueError(
-                f"Unknown attention backend {backend_name!r}. "
-                f"Registered backends: {sorted(registered_names)}"
-            )
-    # disable_attn_backends is a GLOBAL blocklist (applies to both prefill and
-    # decode), so validate it against the union of both registries (see
-    # _blocklist_known_names).
-    blocklist_known_names = _blocklist_known_names()
-    for blocked_name in blocked:
-        if blocked_name not in blocklist_known_names:
-            raise ValueError(
-                f"Unknown attention backend in disable_attn_backends: {blocked_name!r}. "
-                f"Valid backends (prefill+decode): {sorted(blocklist_known_names)}"
-            )
+        if instance is not None:
+            return instance
 
-    if backends == ["auto"]:
-        # Auto mode: iterate impls in registration order, check legacy flags + blocklist
-        for impl in mha_impls:
-            name = getattr(impl, "NAME", None)
-            if name and name in blocked:
-                continue
-            if fmha_config and _is_fmha_impl_disabled_legacy(impl, fmha_config):
-                continue
-            instance = _try_instantiate(
-                impl, attn_configs, attn_inputs, parallelism_config, is_cuda_graph
-            )
-            if instance is not None:
-                return instance
-    else:
-        # Explicit backend list: iterate in user-specified order.
-        # For each backend name, find all matching impls and try them.
-        for backend_name in backends:
-            if backend_name in blocked:
-                continue
-            resolved_name = "py_flashinfer" if backend_name == "flashinfer" else backend_name
-            for impl in name_to_impls.get(resolved_name, []):
-                instance = _try_instantiate(
-                    impl, attn_configs, attn_inputs, parallelism_config, is_cuda_graph
-                )
-                if instance is not None:
-                    return instance
-
-    raise Exception(f"can not find mha type for backends={backends}")
+    raise Exception("can not find mha type")
 
 
 class AttnImplFactory(object):

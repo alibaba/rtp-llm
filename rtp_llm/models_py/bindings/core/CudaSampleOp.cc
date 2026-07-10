@@ -719,12 +719,15 @@ GreedyOutput sampleGreedy(const GreedyParams& params) {
         } else {
             for (int64_t i = 0; i < (int64_t)batch_size; i++) {
                 auto row_dist = filtered_probs[i].unsqueeze(0);
+                // multinomial(row_dist, 1) is [1, 1]; squeeze(-1) leaves a [1] tensor. Write it into
+                // the length-1 slice samples_t[i:i+1] (also [1]); copying [1] into the 0-D scalar
+                // samples_t[i] fails the shape check and crashes seeded ROCm sampling.
                 if (params.generator[i].defined()) {
                     auto row_sample = torch::multinomial(row_dist, 1, /*replacement=*/false, params.generator[i]).squeeze(-1);
-                    samples_t[i].copy_(row_sample);
+                    samples_t.slice(0, i, i + 1).copy_(row_sample);
                 } else {
                     auto row_sample = torch::multinomial(row_dist, 1, /*replacement=*/false).squeeze(-1);
-                    samples_t[i].copy_(row_sample);
+                    samples_t.slice(0, i, i + 1).copy_(row_sample);
                 }
             }
         }
