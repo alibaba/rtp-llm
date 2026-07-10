@@ -652,7 +652,8 @@ class BaseMoEExperts(nn.Module):
         self._check_load_complete()
         if self.quant_method is not None:
             self.quant_method.process_weights_after_loading(self)
-            self._maybe_build_fused_moe()
+        if bool(getattr(self, "_new_loader_defer_moe_executor_build", False)):
+            self._new_loader_deferred_moe_executor = True
             return
         self._maybe_build_fused_moe()
 

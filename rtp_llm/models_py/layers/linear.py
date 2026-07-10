@@ -713,6 +713,12 @@ class QKVParallelLinear(ColumnParallelLinear):
                 f"QKVParallelLinear requires num_heads ({num_heads}) to be "
                 f"divisible by tp_size ({tp_size}) for prefix={prefix!r}"
             )
+        if num_heads % num_kv_heads != 0:
+            raise ValueError(
+                f"QKVParallelLinear requires num_heads ({num_heads}) to be "
+                f"divisible by num_kv_heads ({num_kv_heads}) for GQA, "
+                f"prefix={prefix!r}"
+            )
 
         self.kv_tp_size = math.gcd(num_kv_heads, tp_size)
         if self.kv_tp_size <= 0 or num_kv_heads % self.kv_tp_size != 0:
@@ -725,6 +731,12 @@ class QKVParallelLinear(ColumnParallelLinear):
 
         self.num_heads_per_partition = num_heads // tp_size
         self.num_kv_heads_per_partition = num_kv_heads // self.kv_tp_size
+        if self.num_heads_per_partition % self.num_kv_heads_per_partition != 0:
+            raise ValueError(
+                f"QKVParallelLinear requires local Q heads "
+                f"({self.num_heads_per_partition}) to be divisible by local KV "
+                f"heads ({self.num_kv_heads_per_partition}) for prefix={prefix!r}"
+            )
 
         self.q_size = self.num_heads_per_partition * head_dim
         self.kv_size = self.num_kv_heads_per_partition * head_dim

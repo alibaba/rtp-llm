@@ -499,6 +499,13 @@ class NewModelLoader:
         try:
             return self._load_via_fastsafetensors()
         except Exception as e:
+            if self._distributed_world_size() > 1:
+                logger.error(
+                    "fastsafetensors load failed under distributed loading; "
+                    "refusing per-rank fallback to avoid collective mismatch: %s",
+                    e,
+                )
+                raise
             if explicit:
                 logger.error(
                     "fastsafetensors load failed and fallback is disabled "
@@ -539,11 +546,12 @@ class NewModelLoader:
                 "before moving final weights to %s",
                 self.device,
             )
-            self._run_post_load_hooks(model)
+            self._run_post_load_hooks(model, defer_moe_executor_build=True)
             t1 = time.time()
             logger.info(f"Moving post-load model to device: {self.device}")
             model.to(self.device)
             logger.info(f"model.to({self.device}) took {time.time() - t1:.2f}s")
+            self._build_deferred_moe_executors(model)
         else:
             t1 = time.time()
             logger.info(f"Moving model to device: {self.device}")
@@ -593,7 +601,7 @@ class NewModelLoader:
         self._log_peak_gpu_memory()
         return model
 
-    def _run_post_load_hooks(self, model: nn.Module):
+    def _run_post_load_hooks(self, model: nn.Module, defer_moe_executor_build: bool = False):
         import time
 
         t0 = time.time()
@@ -604,12 +612,24 @@ class NewModelLoader:
                 "_new_loader_force_cpu_load_weights",
                 bool(self.load_config.force_cpu_load_weights),
             )
+            setattr(module, "_new_loader_defer_moe_executor_build", defer_moe_executor_build)
             if hasattr(module, "process_weights_after_loading"):
                 module.process_weights_after_loading()
                 count += 1
         logger.info(
             f"Post-load hooks ran on {count} modules in {time.time() - t0:.2f}s"
         )
+
+    def _build_deferred_moe_executors(self, model: nn.Module):
+        count = 0
+        for module in model.modules():
+            if bool(getattr(module, "_new_loader_deferred_moe_executor", False)):
+                setattr(module, "_new_loader_defer_moe_executor_build", False)
+                module._maybe_build_fused_moe()
+                module._new_loader_deferred_moe_executor = False
+                count += 1
+        if count:
+            logger.info("Built %d deferred MoE executor(s) after device migration", count)
 
     def _log_peak_gpu_memory(self):
         if not torch.cuda.is_available():
@@ -642,6 +662,20 @@ class NewModelLoader:
             with torch.cuda.device(target_device):
                 return torch.cuda.mem_get_info()
 
+    def _distributed_world_size(self) -> int:
+        if not (torch.distributed.is_available() and torch.distributed.is_initialized()):
+            return 1
+        return torch.distributed.get_world_size(torch.distributed.group.WORLD)
+
+    def _all_gather_load_decision(self, ok: bool, reason: str):
+        if self._distributed_world_size() <= 1:
+            return [(ok, reason)]
+        gathered = [None for _ in range(self._distributed_world_size())]
+        torch.distributed.all_gather_object(
+            gathered, (bool(ok), str(reason)), group=torch.distributed.group.WORLD
+        )
+        return gathered
+
     def _resolve_load_method(self) -> Tuple[str, bool]:
         configured = getattr(self.load_config, "load_method", LoadMethod.AUTO)
         load_method = (configured or LoadMethod.AUTO).lower()
@@ -660,10 +694,12 @@ class NewModelLoader:
                 logger.info(f"LOAD_METHOD env: {load_method}")
             else:
                 ok, reason = self._fastsafetensors_eligible()
-                if ok:
+                decisions = self._all_gather_load_decision(ok, reason)
+                if all(item[0] for item in decisions):
                     return LoadMethod.FASTSAFETENSORS, False
                 logger.info(
-                    "auto fastsafetensors unavailable: %s; using scratch", reason
+                    "auto fastsafetensors unavailable on at least one rank: %s; using scratch",
+                    decisions,
                 )
                 return LoadMethod.SCRATCH, False
 
@@ -676,6 +712,15 @@ class NewModelLoader:
 
         if load_method == LoadMethod.FASTSAFETENSORS:
             ok, reason = self._fastsafetensors_eligible()
+            decisions = self._all_gather_load_decision(ok, reason)
+            if not all(item[0] for item in decisions):
+                if len(decisions) > 1:
+                    reason = "; ".join(
+                        f"rank{idx}: {item[1]}"
+                        for idx, item in enumerate(decisions)
+                        if not item[0]
+                    )
+                ok = False
             if not ok:
                 if reason == "insufficient GPU free memory":
                     ckpt_files = self._discover_ckpt_files_cached()
@@ -887,9 +932,9 @@ class NewModelLoader:
                 logger.warning(f"LoRA: unmapped module '{hf_module}', skipping")
                 continue
 
-            tensor = tensor.to(compute_dtype)
+            tensor = tensor.to(compute_dtype).t().contiguous()
 
-            # TP slicing
+            # TP slicing uses the engine-internal transposed layout.
             if tp_size > 1:
                 split_rule = _LORA_TP_RULES.get((hf_module, ab_suffix))
                 if split_rule is not None:

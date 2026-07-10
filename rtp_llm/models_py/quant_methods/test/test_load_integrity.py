@@ -81,6 +81,7 @@ from rtp_llm.models_py.model_loader import (
     _create_ep_filter,
     _discover_ckpt_files,
     _get_all_weights,
+    _HF_TO_ENGINE_LORA,
     _is_quantized_load,
     _normalize_fastsafetensors_stacked_moe_weights,
     _tp_slice,
@@ -110,6 +111,7 @@ from rtp_llm.models_py.modules.factory.fused_moe.strategy_registry import Strate
 from rtp_llm.models_py.modules.factory.fused_moe.utils.config_resolver import (
     MoeConfigResolver,
 )
+from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import MoEConfigAdapter
 
 BaseMoEExperts = None
 
@@ -227,6 +229,47 @@ class TestWeightMapperStreaming(unittest.TestCase):
         self.assertEqual(len(loaded), 1)
         self.assertEqual(loaded[0][0], "x.weight")
         self.assertTrue(torch.equal(loaded[0][1], torch.ones(1)))
+
+    def test_lora_load_transposes_before_engine_tp_slice(self):
+        class FakeLoRAWeights:
+            instances = []
+
+            def __init__(self, num_layers):
+                self.num_layers = num_layers
+                self.weights = {}
+                FakeLoRAWeights.instances.append(self)
+
+            def set_lora_rank(self, rank):
+                self.rank = rank
+
+            def set_layer_weight(self, is_draft, layer_id, name, tensor):
+                self.weights[(layer_id, name)] = tensor.clone()
+
+            def apply_scale(self, scale):
+                self.scale = scale
+
+        loader = NewModelLoader(
+            types.SimpleNamespace(model_type="dummy", num_layers=1),
+            LoadConfig(compute_dtype=torch.float32, device="cpu", load_method=LoadMethod.SCRATCH),
+            model_path="/tmp/nonexistent",
+            device="cpu",
+        )
+        loader.load_config.tp_size = 2
+        loader.load_config.tp_rank = 1
+        hf_tensor = torch.arange(4 * 6, dtype=torch.float32).view(4, 6)
+        with mock.patch.object(
+            loader, "_read_lora_config", return_value={"rank": 4, "lora_alpha": 8}
+        ), mock.patch.object(
+            loader,
+            "_load_lora_state_dict",
+            return_value={"base_model.model.model.layers.0.mlp.gate_proj.lora_B.weight": hf_tensor},
+        ), mock.patch("rtp_llm.lora.lora_weights.LoRAWeights", FakeLoRAWeights):
+            result = loader.load_lora_weights("adapter", "/tmp/lora", device="cpu")
+        self.assertIs(result, FakeLoRAWeights.instances[-1])
+        engine_name = _HF_TO_ENGINE_LORA["mlp.gate_proj"] + ".lora_B"
+        expected = hf_tensor.t().contiguous().narrow(-1, 2, 2)
+        self.assertTrue(torch.equal(result.weights[(0, engine_name)], expected))
+        self.assertEqual(result.scale, 2.0)
 
     def test_lora_tp_slice_rejects_non_divisible_dim(self):
         with self.assertRaisesRegex(ValueError, "LoRA TP slice.*divisible"):
@@ -675,6 +718,53 @@ class TestFastSafetensorsFallbackSemantics(unittest.TestCase):
             )
         )
 
+    def test_moe_config_adapter_inherits_or_explicitly_overrides_quant_config(self):
+        class FakeQuant:
+            def get_method(self):
+                return "FP8"
+
+        class Parallel:
+            ep_size = 1
+            ep_rank = 0
+            dp_size = 1
+            dp_rank = 0
+            world_size = 1
+            local_rank = 0
+
+            def get_attn_tp_size(self):
+                return 1
+
+            def get_attn_tp_rank(self):
+                return 0
+
+        quant = FakeQuant()
+        model_config = types.SimpleNamespace(
+            quant_config=quant,
+            expert_num=1,
+            moe_k=1,
+            moe_topk_group=1,
+            hidden_size=4,
+            data_type="fp32",
+            attn_config=types.SimpleNamespace(head_num=1),
+            activation_type="SiGLU",
+        )
+        moe_config = types.SimpleNamespace(
+            ll_num_max_token=1,
+            masked_max_token_num=1,
+            moe_strategy="",
+            use_mori_ep=False,
+            use_deepep_moe=False,
+        )
+        inherited = MoEConfigAdapter(model_config, Parallel(), moe_config=moe_config)
+        self.assertIs(inherited.quant_config, quant)
+        self.assertTrue(MoeConfigResolver.has_quantization(inherited))
+        self.assertEqual(MoeConfigResolver.get_quant_method(inherited), "FP8")
+        explicit_none = MoEConfigAdapter(
+            model_config, Parallel(), moe_config=moe_config, quant_config=None
+        )
+        self.assertIsNone(explicit_none.quant_config)
+        self.assertFalse(MoeConfigResolver.has_quantization(explicit_none))
+
     def test_explicit_config_fastsafetensors_failure_does_not_fallback(self):
         loader = self._new_loader(LoadMethod.FASTSAFETENSORS)
         err = RuntimeError("fast path failed")
@@ -749,6 +839,33 @@ class TestFastSafetensorsFallbackSemantics(unittest.TestCase):
         ) as scratch:
             self.assertIs(loader.load(), scratch_model)
         scratch.assert_called_once()
+
+    def test_distributed_auto_uses_single_scratch_decision_if_any_rank_ineligible(self):
+        loader = self._new_loader(LoadMethod.AUTO)
+        scratch_model = torch.nn.Module()
+        with mock.patch.object(
+            loader, "_fastsafetensors_eligible", return_value=(True, "ok")
+        ), mock.patch.object(
+            loader,
+            "_all_gather_load_decision",
+            return_value=[(True, "ok"), (False, "rank1 cuda unavailable")],
+        ), mock.patch.object(loader, "_load_via_fastsafetensors") as fast, mock.patch.object(
+            loader, "_load_via_scratch", return_value=scratch_model
+        ) as scratch:
+            self.assertIs(loader.load(), scratch_model)
+        fast.assert_not_called()
+        scratch.assert_called_once()
+
+    def test_distributed_fastsafetensors_runtime_failure_does_not_local_fallback(self):
+        loader = self._new_loader(LoadMethod.AUTO)
+        with mock.patch.object(
+            loader, "_resolve_load_method", return_value=(LoadMethod.FASTSAFETENSORS, False)
+        ), mock.patch.object(loader, "_distributed_world_size", return_value=2), mock.patch.object(
+            loader, "_load_via_fastsafetensors", side_effect=RuntimeError("rank1 read failed")
+        ), mock.patch.object(loader, "_load_via_scratch") as scratch:
+            with self.assertRaisesRegex(RuntimeError, "rank1 read failed"):
+                loader.load()
+        scratch.assert_not_called()
 
     def test_auto_uses_scratch_when_fastsafetensors_is_not_eligible(self):
         loader = self._new_loader(LoadMethod.AUTO)
@@ -1135,22 +1252,36 @@ class TestLinearLoadCompleteness(unittest.TestCase):
             out = layer(x)
         torch.testing.assert_close(out, torch.full((1, 3), 7.0), rtol=0, atol=0)
 
-    def test_qkv_allows_gcd_kv_group_when_kv_heads_not_divisible_by_tp(self):
+    def test_qkv_rejects_illegal_gqa_head_ratio(self):
+        with self.assertRaisesRegex(ValueError, "num_heads.*num_kv_heads"):
+            QKVParallelLinear(
+                hidden_size=8,
+                num_heads=8,
+                num_kv_heads=6,
+                head_dim=1,
+                tp_size=4,
+                tp_rank=0,
+                quant_config=_qc("none"),
+                prefix="qkv_proj",
+                params_dtype=torch.float32,
+            )
+
+    def test_qkv_allows_valid_kv_heads_less_than_tp_gcd_group(self):
         layer = QKVParallelLinear(
             hidden_size=8,
             num_heads=8,
-            num_kv_heads=6,
+            num_kv_heads=2,
             head_dim=1,
-            tp_size=4,
-            tp_rank=3,
+            tp_size=8,
+            tp_rank=5,
             quant_config=_qc("none"),
             prefix="qkv_proj",
             params_dtype=torch.float32,
         )
         self.assertEqual(layer.kv_tp_size, 2)
-        self.assertEqual(layer.kv_replication_group_size, 2)
+        self.assertEqual(layer.kv_replication_group_size, 4)
         self.assertEqual(layer.kv_tp_rank, 1)
-        self.assertEqual(layer.num_kv_heads_per_partition, 3)
+        self.assertEqual(layer.num_kv_heads_per_partition, 1)
 
     def test_column_rejects_non_divisible_output_tp(self):
         with self.assertRaisesRegex(ValueError, "output_size.*divisible"):
@@ -1657,6 +1788,42 @@ class TestMoELoadCompleteness(unittest.TestCase):
             )
         finally:
             FusedMoeFactory.set_registry(old_registry)
+
+    def test_force_cpu_deferred_moe_executor_builds_after_device_migration(self):
+        class FakeLoader(NewModelLoader):
+            def _create_model(self_inner):
+                return torch.nn.Module()
+
+        class FakeMoe(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.weight = torch.nn.Parameter(torch.ones(1))
+                self.quant_method = None
+                self.built_device = None
+
+            def process_weights_after_loading(self):
+                if bool(getattr(self, "_new_loader_defer_moe_executor_build", False)):
+                    self._new_loader_deferred_moe_executor = True
+                    return
+                self._maybe_build_fused_moe()
+
+            def _maybe_build_fused_moe(self):
+                self.built_device = self.weight.device
+
+        model = torch.nn.Module()
+        model.moe = FakeMoe()
+        loader = NewModelLoader(
+            types.SimpleNamespace(model_type="dummy"),
+            LoadConfig(compute_dtype=torch.float32, device="cpu", force_cpu_load_weights=True),
+            model_path="/tmp/nonexistent",
+            device="cpu",
+        )
+        loader._run_post_load_hooks(model, defer_moe_executor_build=True)
+        self.assertIsNone(model.moe.built_device)
+        model.to("cpu")
+        loader._build_deferred_moe_executors(model)
+        self.assertEqual(model.moe.built_device.type, "cpu")
+
 
 
 

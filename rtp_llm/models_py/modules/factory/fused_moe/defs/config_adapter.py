@@ -5,6 +5,8 @@ This allows Router and Executor classes to work with specific config objects.
 
 from typing import Optional
 
+_UNSET_QUANT_CONFIG = object()
+
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.config.quant_config import QuantizationConfig
 from rtp_llm.ops import MoeConfig, ParallelismConfig
@@ -21,13 +23,17 @@ class MoEConfigAdapter:
         model_config: ModelConfig,
         parallelism_config: ParallelismConfig,
         moe_config: Optional[MoeConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: Optional[QuantizationConfig] = _UNSET_QUANT_CONFIG,
         enable_cuda_graph: bool = False,
     ):
         self.model_config = model_config
         self.parallelism_config = parallelism_config
         self.moe_config = moe_config or MoeConfig()
-        self.quant_config = quant_config
+        self.quant_config = (
+            getattr(model_config, "quant_config", None)
+            if quant_config is _UNSET_QUANT_CONFIG
+            else quant_config
+        )
 
         # Provide shortcut access to commonly used attributes
         self.ep_size = parallelism_config.ep_size
