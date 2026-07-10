@@ -66,8 +66,11 @@ protected:
             generator,
         });
 
-        auto out = execSampleGreedy(params);  // must not crash on ROCm
-        ASSERT_TRUE(out.success.defined());
+        // ROCm sampleGreedy returns an empty GreedyOutput{} by contract (success is not populated
+        // on this path), so we do NOT assert on success. Correctness is validated via the sampled
+        // token ids below; the .to(CPU) copy also forces a device sync that surfaces any kernel or
+        // shape-mismatch crash on this seeded path.
+        execSampleGreedy(params);  // must not crash on ROCm
 
         auto ids = token_ids.to(torch::kCPU);
         auto acc = ids.accessor<int, 2>();
