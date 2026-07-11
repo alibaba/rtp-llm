@@ -17,14 +17,29 @@ class _GpuModel(RtpModule):
         super().__init__()
         self.weight = nn.Parameter(torch.empty(2))
         self.register_buffer("scale", torch.empty(1), persistent=True)
-        self.validation_device = None
+        self.validation_devices = []
 
     def validate_weights_loaded(self, loaded_tensor_ids=None):
-        self.validation_device = self.scale.device.type
+        self.validation_devices.append(self.scale.device.type)
         super().validate_weights_loaded(loaded_tensor_ids)
 
 
 register_model("foundation_gpu_model")(_GpuModel)
+
+
+class _GpuAliasModel(RtpModule):
+    def __init__(self, model_config, load_config):
+        super().__init__()
+        same = torch.empty(1)
+        self.register_buffer("same", same, persistent=True)
+        self.register_buffer("same_alias", same, persistent=True)
+        self.child = RtpModule()
+        cross = torch.empty(1)
+        self.register_buffer("cross", cross, persistent=True)
+        self.child.register_buffer("cross_alias", cross, persistent=True)
+
+
+register_model("foundation_gpu_alias_model")(_GpuAliasModel)
 
 
 class FoundationGpuTest(unittest.TestCase):
@@ -40,7 +55,26 @@ class FoundationGpuTest(unittest.TestCase):
                 model_path=model_path,
             ).load()
         self.assertEqual(model.scale.device.type, "cuda")
-        self.assertEqual(model.validation_device, "cpu")
+        self.assertEqual(model.validation_devices, ["cpu", "cuda"])
+
+    def test_buffer_aliases_survive_device_migration(self):
+        with tempfile.TemporaryDirectory() as model_path:
+            save_file(
+                {"same_alias": torch.ones(1), "child.cross_alias": torch.ones(1)},
+                os.path.join(model_path, "model.safetensors"),
+            )
+            model = NewModelLoader(
+                types.SimpleNamespace(model_type="foundation_gpu_alias_model"),
+                NewLoaderConfig(device="cuda:0"),
+                model_path=model_path,
+            ).load()
+        self.assertIs(model.same, model.same_alias)
+        self.assertIs(model.cross, model.child.cross_alias)
+        with torch.inference_mode():
+            model.same.add_(1)
+            model.child.cross_alias.add_(2)
+        self.assertEqual(model.same_alias.item(), 2)
+        self.assertEqual(model.cross.item(), 3)
 
     def test_cross_device_copy_does_not_allocate_full_target_temporary(self):
         class CudaTarget(RtpModule):

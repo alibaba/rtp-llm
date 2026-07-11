@@ -370,6 +370,36 @@ class FoundationLoaderTest(unittest.TestCase):
             NewLoaderConfig(tp_size=0)
         with self.assertRaisesRegex(ValueError, "Invalid EP"):
             NewLoaderConfig(ep_size=2, ep_rank=2)
+        with self.assertRaisesRegex(ValueError, "Invalid device"):
+            NewLoaderConfig(device="not:a:device")
+
+    def test_device_override_is_visible_during_model_construction(self):
+        class DeviceAwareModel(RtpModule):
+            def __init__(self, model_config, load_config):
+                super().__init__()
+                self.config_device = load_config.device
+                self.workspace = torch.empty(1, device=load_config.device)
+                self.weight = nn.Parameter(torch.empty(1))
+
+        register_model("foundation_device_aware_model")(DeviceAwareModel)
+        config = types.SimpleNamespace(model_type="foundation_device_aware_model")
+        with tempfile.TemporaryDirectory() as model_path:
+            torch.save({"weight": torch.ones(1)}, os.path.join(model_path, "model.pt"))
+            model = NewModelLoader(
+                config,
+                NewLoaderConfig(device="meta"),
+                model_path=model_path,
+                device="cpu",
+            ).load()
+        self.assertEqual(model.config_device, "cpu")
+        self.assertEqual(model.workspace.device.type, "cpu")
+
+    def test_invalid_device_override_fails_before_model_creation(self):
+        config = types.SimpleNamespace(model_type="foundation_test_model")
+        with self.assertRaisesRegex(ValueError, "device override"):
+            NewModelLoader(config, NewLoaderConfig(device="cpu"), device="")
+        with self.assertRaisesRegex(ValueError, "Invalid device override"):
+            NewModelLoader(config, NewLoaderConfig(device="cpu"), device="not:a:device")
 
     def test_load_and_postprocess_run_in_inference_mode(self):
         class InferenceModel(RtpModule):

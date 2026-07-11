@@ -2,7 +2,7 @@ import inspect
 import logging
 import os
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 from typing import Any, Optional
 
@@ -51,6 +51,10 @@ class NewLoaderConfig:
             raise TypeError("compute_dtype must be a torch.dtype")
         if not isinstance(self.device, str) or not self.device.strip():
             raise ValueError("device must be a non-empty string")
+        try:
+            torch.device(self.device)
+        except (RuntimeError, ValueError) as exc:
+            raise ValueError(f"Invalid device {self.device!r}") from exc
 
 
 class NewModelLoader:
@@ -63,10 +67,19 @@ class NewModelLoader:
         model_path: Optional[str] = None,
         device: Optional[str] = None,
     ):
+        effective_config = load_config or NewLoaderConfig()
+        if device is not None:
+            if not isinstance(device, str) or not device.strip():
+                raise ValueError("device override must be a non-empty string")
+            try:
+                torch.device(device)
+            except (RuntimeError, ValueError) as exc:
+                raise ValueError(f"Invalid device override {device!r}") from exc
+            effective_config = replace(effective_config, device=device)
         self.model_config = model_config
-        self.load_config = load_config or NewLoaderConfig()
+        self.load_config = effective_config
         self.model_path = model_path
-        self.device = device if device is not None else self.load_config.device
+        self.device = self.load_config.device
         self._ckpt_files = None
 
     def _resolve_load_method(self) -> NewLoaderLoadMethod:
@@ -168,11 +181,38 @@ class NewModelLoader:
                 validator(loaded_tensor_ids)
 
     @staticmethod
-    def _run_post_load_hooks(model: nn.Module, force_cpu: bool) -> None:
-        modules = list(model.modules())
-        for module in modules:
-            setattr(module, "_new_loader_force_cpu_load_weights", force_cpu)
-        for module in modules:
+    def _collect_tensor_alias_groups(model: nn.Module):
+        aliases = {}
+        for module in model.modules():
+            for name, tensor in module.named_parameters(
+                recurse=False, remove_duplicate=False
+            ):
+                aliases.setdefault(("parameter", id(tensor)), []).append((module, name))
+            for name, tensor in module.named_buffers(
+                recurse=False, remove_duplicate=False
+            ):
+                if tensor is not None:
+                    aliases.setdefault(("buffer", id(tensor)), []).append((module, name))
+        return [
+            (kind, registrations)
+            for (kind, _), registrations in aliases.items()
+            if len(registrations) > 1
+        ]
+
+    @staticmethod
+    def _restore_tensor_aliases(alias_groups) -> None:
+        for kind, registrations in alias_groups:
+            storage_name = "_parameters" if kind == "parameter" else "_buffers"
+            first_module, first_name = registrations[0]
+            shared = getattr(first_module, storage_name)[first_name]
+            if shared is None:
+                raise RuntimeError(f"Shared {kind} {first_name!r} disappeared during migration")
+            for module, name in registrations[1:]:
+                getattr(module, storage_name)[name] = shared
+
+    @staticmethod
+    def _run_post_load_hooks(model: nn.Module) -> None:
+        for module in model.modules():
             hook = getattr(module, "process_weights_after_loading", None)
             if callable(hook):
                 hook()
@@ -190,6 +230,9 @@ class NewModelLoader:
         self._validate_loaded_weights(model)
         logger.info("Streamed checkpoint tensors in %.2fs", time.time() - started)
 
+        alias_groups = self._collect_tensor_alias_groups(model)
         model.to(self.device)
-        self._run_post_load_hooks(model, force_cpu=False)
+        self._restore_tensor_aliases(alias_groups)
+        self._validate_loaded_weights(model)
+        self._run_post_load_hooks(model)
         return model
