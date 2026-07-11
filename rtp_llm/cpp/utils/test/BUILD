@@ -72,3 +72,15 @@ cc_test(
         "TEST_USING_DEVICE": "CUDA",
     },
 )
+
+cc_test(
+    name = "decode_probe_trigger_test",
+    srcs = [
+        "DecodeProbeTriggerTest.cc",
+    ],
+    copts = test_copts,
+    deps = google_test_deps + ["//rtp_llm/cpp/utils:decode_probe_trigger"],
+    env = {
+        "TEST_USING_DEVICE": "CUDA",
+    },
+)

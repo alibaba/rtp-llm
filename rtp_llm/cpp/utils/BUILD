@@ -164,6 +164,21 @@ cc_library(
     visibility = ["//visibility:public"],
 )
 
+cc_library(
+    name = "decode_probe_trigger",
+    hdrs = [
+        "DecodeProbeTrigger.h",
+    ],
+    srcs = [
+        "DecodeProbeTrigger.cc",
+    ],
+    linkopts = [
+        "-lrt",
+    ],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+)
+
 # Lightweight tensor debug string utilities
 cc_library(
     name = "tensor_debug_utils",
