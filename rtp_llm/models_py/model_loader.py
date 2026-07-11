@@ -237,128 +237,6 @@ def _get_all_weights(
     logger.info("Finished streaming %d weights (skipped=%d)", count, skipped)
 
 
-def _get_fastsafetensors_weights(
-    ckpt_files: List[str], device: str
-) -> Iterator[Tuple[str, torch.Tensor]]:
-    # Apply monkey patch to bypass KeyError: 'data_offsets' for non-tensor metadata keys.
-    # Guard it so repeated model loads do not stack wrappers around the global class.
-    try:
-        import fastsafetensors.common
-
-        metadata_cls = fastsafetensors.common.SafeTensorsMetadata
-        if not getattr(metadata_cls, "_rtp_patched", False):
-            orig_init = metadata_cls.__init__
-
-            def patched_init(self, *args, **kwargs):
-                new_args = list(args)
-
-                def _clean_and_replace(obj):
-                    if hasattr(obj, "items"):
-                        has_bad = False
-                        cleaned = {}
-                        for k, v in obj.items():
-                            try:
-                                if hasattr(v, "__getitem__") and "data_offsets" in v:
-                                    cleaned[k] = v
-                                else:
-                                    has_bad = True
-                            except Exception:
-                                has_bad = True
-                        if has_bad:
-                            return cleaned
-                    return obj
-
-                for i in range(len(new_args)):
-                    new_args[i] = _clean_and_replace(new_args[i])
-                for k in list(kwargs.keys()):
-                    kwargs[k] = _clean_and_replace(kwargs[k])
-
-                return orig_init(self, *new_args, **kwargs)
-
-            metadata_cls.__init__ = patched_init
-            metadata_cls._rtp_patched = True
-    except Exception as patch_err:
-        logging.warning(f"Failed to apply MonkeyPatch to fastsafetensors: {patch_err}")
-
-
-    from fastsafetensors import ParallelLoader, SingleGroup
-    from safetensors import safe_open
-
-    from rtp_llm.model_loader.per_expert_parallel_loader import PerExpertParallelLoader
-
-    if torch.distributed.is_available() and torch.distributed.is_initialized():
-        pg = torch.distributed.group.WORLD
-    else:
-        pg = SingleGroup()
-
-    stacked_key_config = {}
-    if ckpt_files:
-        try:
-            with safe_open(ckpt_files[0], framework="pt") as f:
-                for key in f.keys():
-                    if (
-                        "mlp.experts.gate_up_proj" in key
-                        or "mlp.experts.down_proj" in key
-                    ) and "experts.weight" not in key:
-                        slice_ = f.get_slice(key)
-                        if len(slice_.shape) == 3:
-                            template = key.replace(
-                                "experts.gate_up_proj",
-                                "experts.{expert_id}.gate_up_proj",
-                            ).replace(
-                                "experts.down_proj", "experts.{expert_id}.down_proj"
-                            )
-                            stacked_key_config[key] = template
-        except Exception as e:
-            logging.warning(
-                f"Failed to auto-detect stacked keys for PerExpertParallelLoader: {e}"
-            )
-
-    loader_kwargs = dict(
-        pg=pg,
-        hf_weights_files=sorted(ckpt_files),
-        use_tqdm_on_load=True,
-        device=device,
-        bbuf_size_kb=1024
-        * 256,  # Optimized from 2GB to 256MB to save GPU memory headroom
-        use_shm=True,
-    )
-
-    if stacked_key_config:
-        logging.info(
-            f"FST per-expert parallel loader enabled for {len(stacked_key_config)} stacked keys: {list(stacked_key_config.keys())}"
-        )
-        loader = PerExpertParallelLoader(stacked_key_config, **loader_kwargs)
-    else:
-        loader = ParallelLoader(**loader_kwargs)
-
-    try:
-        yield from loader.iterate_weights()
-    finally:
-        inner = getattr(loader, "loader", None)
-        if inner is not None and hasattr(inner, "close"):
-            inner.close()
-
-
-_STACKED_EXPERT_RE = re.compile(
-    r"^(?P<prefix>.*\.experts)\.(?P<expert_id>\d+)\.(?P<proj>gate_up_proj|down_proj)$"
-)
-
-
-def _normalize_fastsafetensors_stacked_moe_weights(
-    weights_iter: Iterator[Tuple[str, torch.Tensor]]
-) -> Iterator[Tuple[str, torch.Tensor]]:
-    for name, tensor in weights_iter:
-        m = _STACKED_EXPERT_RE.match(name)
-        if m is None:
-            yield name, tensor
-            continue
-        prefix = m.group("prefix")
-        expert_id = m.group("expert_id")
-        proj = m.group("proj")
-        yield f"{prefix}.{expert_id}.{proj}.weight", tensor
-
-
 _EP_EXPERT_RE = re.compile(r"experts\.(\d+)\.")
 _STACKED_EP_RE = re.compile(
     r"^(?P<prefix>.*\.experts)\.(?P<proj>gate_up_proj|down_proj)"
@@ -491,40 +369,10 @@ class NewModelLoader:
         self._ckpt_files_cache: Optional[List[str]] = None
 
     def load(self) -> nn.Module:
-        method, explicit = self._resolve_load_method()
+        method, _ = self._resolve_load_method()
         logger.info(f"NewModelLoader using load method: {method}")
-        if method != LoadMethod.FASTSAFETENSORS:
-            return self._load_via_scratch()
-
-        try:
-            return self._load_via_fastsafetensors()
-        except Exception as e:
-            if self._distributed_world_size() > 1:
-                logger.error(
-                    "fastsafetensors load failed under distributed loading; "
-                    "refusing per-rank fallback to avoid collective mismatch: %s",
-                    e,
-                )
-                raise
-            if explicit:
-                logger.error(
-                    "fastsafetensors load failed and fallback is disabled "
-                    "because the load method was explicitly requested: %s",
-                    e,
-                )
-                raise
-            error_msg = str(e)
-
-        logger.warning(
-            "fastsafetensors load failed (%s), automatically falling back to "
-            "scratch load path after releasing failed fast-path resources...",
-            error_msg,
-        )
-        import gc
-
-        gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+        if method != LoadMethod.SCRATCH:
+            raise RuntimeError(f"Unsupported newloader load method after resolution: {method}")
         return self._load_via_scratch()
 
     def _load_via_scratch(self) -> nn.Module:
@@ -566,38 +414,6 @@ class NewModelLoader:
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
-        self._log_peak_gpu_memory()
-        return model
-
-    def _load_via_fastsafetensors(self) -> nn.Module:
-        import time
-
-        logger.info("Starting model loading (fastsafetensors path)...")
-
-        target_device = self._resolve_target_device()
-
-        t0 = time.time()
-        with torch.device("meta"):
-            model = self._create_model()
-        model.to_empty(device=target_device)
-        logger.info(
-            f"meta create + to_empty({target_device}) " f"took {time.time() - t0:.2f}s"
-        )
-
-        weights_iter = _get_fastsafetensors_weights(
-            self._discover_ckpt_files_cached(), device=target_device
-        )
-        weights_iter = _normalize_fastsafetensors_stacked_moe_weights(weights_iter)
-        weights_iter = self._apply_ep_filter(weights_iter)
-
-        t1 = time.time()
-        model.load_weights(weights_iter)
-        logger.info(f"model.load_weights() took {time.time() - t1:.2f}s")
-
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-
-        self._run_post_load_hooks(model)
         self._log_peak_gpu_memory()
         return model
 
@@ -654,27 +470,10 @@ class NewModelLoader:
             return device
         return f"cuda:{torch.cuda.current_device()}"
 
-    def _target_cuda_mem_get_info(self) -> Tuple[int, int]:
-        target_device = self._resolve_target_device()
-        try:
-            return torch.cuda.mem_get_info(target_device)
-        except TypeError:
-            with torch.cuda.device(target_device):
-                return torch.cuda.mem_get_info()
-
     def _distributed_world_size(self) -> int:
         if not (torch.distributed.is_available() and torch.distributed.is_initialized()):
             return 1
         return torch.distributed.get_world_size(torch.distributed.group.WORLD)
-
-    def _all_gather_load_decision(self, ok: bool, reason: str):
-        if self._distributed_world_size() <= 1:
-            return [(ok, reason)]
-        gathered = [None for _ in range(self._distributed_world_size())]
-        torch.distributed.all_gather_object(
-            gathered, (bool(ok), str(reason)), group=torch.distributed.group.WORLD
-        )
-        return gathered
 
     def _resolve_load_method(self) -> Tuple[str, bool]:
         configured = getattr(self.load_config, "load_method", LoadMethod.AUTO)
@@ -693,14 +492,9 @@ class NewModelLoader:
                 explicit = True
                 logger.info(f"LOAD_METHOD env: {load_method}")
             else:
-                ok, reason = self._fastsafetensors_eligible()
-                decisions = self._all_gather_load_decision(ok, reason)
-                if all(item[0] for item in decisions):
-                    return LoadMethod.FASTSAFETENSORS, False
-                logger.info(
-                    "auto fastsafetensors unavailable on at least one rank: %s; using scratch",
-                    decisions,
-                )
+                # Keep the core newloader PR on the scratch path. The
+                # fastsafetensors path needs a separate distributed failure/abort
+                # protocol before it can be safely enabled in auto mode.
                 return LoadMethod.SCRATCH, False
 
         if load_method not in (LoadMethod.SCRATCH, LoadMethod.FASTSAFETENSORS):
@@ -711,90 +505,11 @@ class NewModelLoader:
             )
 
         if load_method == LoadMethod.FASTSAFETENSORS:
-            ok, reason = self._fastsafetensors_eligible()
-            decisions = self._all_gather_load_decision(ok, reason)
-            if not all(item[0] for item in decisions):
-                if len(decisions) > 1:
-                    reason = "; ".join(
-                        f"rank{idx}: {item[1]}"
-                        for idx, item in enumerate(decisions)
-                        if not item[0]
-                    )
-                ok = False
-            if not ok:
-                if reason == "insufficient GPU free memory":
-                    ckpt_files = self._discover_ckpt_files_cached()
-                    sizes = [os.path.getsize(f) for f in ckpt_files]
-                    total = sum(sizes)
-                    tp_size = max(getattr(self.load_config, "tp_size", 1), 1)
-                    ep_size = max(getattr(self.load_config, "ep_size", 1), 1)
-                    rank_share = total / max(tp_size, ep_size)
-
-                    if _is_quantized_load(self.model_config, self.load_config):
-                        rank_share /= 2.0
-
-                    free_bytes, _ = self._target_cuda_mem_get_info()
-                    if free_bytes < rank_share:
-                        raise RuntimeError(
-                            f"fastsafetensors load requested but unavailable: {reason} "
-                            f"(free={free_bytes/1024**3:.1f}GiB < rank_share={rank_share/1024**3:.1f}GiB)"
-                        )
-                    else:
-                        logger.warning(
-                            f"fastsafetensors headroom is negative, but free memory ({free_bytes/1024**3:.1f}GiB) "
-                            f"is sufficient to hold rank_share ({rank_share/1024**3:.1f}GiB). Proceeding anyway."
-                        )
-                else:
-                    raise RuntimeError(
-                        f"fastsafetensors load requested but unavailable: {reason}"
-                    )
-            return LoadMethod.FASTSAFETENSORS, explicit
+            raise RuntimeError(
+                "fastsafetensors load_method is not enabled in the newloader core PR; "
+                "use scratch and submit fastsafetensors as a separate distributed-load PR."
+            )
         return LoadMethod.SCRATCH, explicit
-
-    def _fastsafetensors_eligible(self) -> Tuple[bool, str]:
-        if self.load_config.force_cpu_load_weights:
-            return False, "force_cpu_load_weights requires scratch CPU staging"
-        try:
-            import fastsafetensors  # noqa: F401
-        except ImportError:
-            return False, "fastsafetensors module not installed"
-        if not torch.cuda.is_available():
-            return False, "cuda not available"
-        if not str(self.device).startswith("cuda"):
-            return False, f"device {self.device} is not cuda"
-
-        ckpt_files = self._discover_ckpt_files_cached()
-        if not ckpt_files:
-            return False, "no checkpoint files discovered"
-        if not all(f.endswith(".safetensors") for f in ckpt_files):
-            return False, "not all checkpoint files are safetensors"
-
-        sizes = [os.path.getsize(f) for f in ckpt_files]
-        max_file = max(sizes)
-        total = sum(sizes)
-        tp_size = max(getattr(self.load_config, "tp_size", 1), 1)
-        ep_size = max(getattr(self.load_config, "ep_size", 1), 1)
-        rank_share = total / max(tp_size, ep_size)
-
-        if _is_quantized_load(self.model_config, self.load_config):
-            rank_share /= 2.0
-
-        try:
-            free_bytes, _ = self._target_cuda_mem_get_info()
-        except Exception as e:
-            return False, f"cuda mem_get_info failed: {e}"
-
-        headroom = free_bytes - rank_share - 3 * max_file
-        gib = 1024**3
-        logger.info(
-            f"fastsafetensors capacity: free={free_bytes/gib:.1f}GiB, "
-            f"rank_share={rank_share/gib:.1f}GiB, "
-            f"max_file={max_file/gib:.1f}GiB, "
-            f"headroom={headroom/gib:.1f}GiB"
-        )
-        if headroom <= 0:
-            return False, "insufficient GPU free memory"
-        return True, "ok"
 
     def _discover_ckpt_files_cached(self) -> List[str]:
         if self._ckpt_files_cache is not None:

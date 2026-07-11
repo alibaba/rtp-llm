@@ -83,7 +83,6 @@ from rtp_llm.models_py.model_loader import (
     _get_all_weights,
     _HF_TO_ENGINE_LORA,
     _is_quantized_load,
-    _normalize_fastsafetensors_stacked_moe_weights,
     _tp_slice,
 )
 from rtp_llm.models_py.new_models.bert import BertForEmbedding, RobertaForEmbedding
@@ -314,113 +313,7 @@ class TestWeightMapperStreaming(unittest.TestCase):
 
 
 
-    def test_fastsafetensors_path_normalizes_stacked_moe_names_before_load(self):
-        class CaptureModel(torch.nn.Module):
-            def __init__(self):
-                super().__init__()
-                self.loaded = []
 
-            def to_empty(self, device):
-                return self
-
-            def load_weights(self, weights_iter):
-                self.loaded = list(weights_iter)
-
-        model = CaptureModel()
-        config = types.SimpleNamespace(model_type="dummy", num_layers=1)
-        loader = NewModelLoader(
-            config,
-            LoadConfig(compute_dtype=torch.float32, device="cpu", load_method="fastsafetensors"),
-            model_path="/tmp/nonexistent",
-            device="cpu",
-        )
-        gate_up = torch.zeros(4, 16)
-        down = torch.zeros(8, 4)
-        with mock.patch.object(loader, "_create_model", return_value=model), \
-             mock.patch.object(loader, "_discover_ckpt_files_cached", return_value=["dummy.safetensors"]), \
-             mock.patch.object(loader, "_run_post_load_hooks", return_value=None), \
-             mock.patch.object(loader, "_log_peak_gpu_memory", return_value=None), \
-             mock.patch(
-                 "rtp_llm.models_py.model_loader._get_fastsafetensors_weights",
-                 return_value=iter(
-                     [
-                         ("model.layers.0.mlp.experts.0.gate_up_proj", gate_up),
-                         ("model.layers.0.mlp.experts.0.down_proj", down),
-                     ]
-                 ),
-             ):
-            loaded_model = loader._load_via_fastsafetensors()
-        self.assertIs(loaded_model, model)
-        self.assertEqual(
-            [name for name, _ in model.loaded],
-            [
-                "model.layers.0.mlp.experts.0.gate_up_proj.weight",
-                "model.layers.0.mlp.experts.0.down_proj.weight",
-            ],
-        )
-
-    def test_fastsafetensors_path_ep_filters_stacked_moe_before_load(self):
-        class CaptureModel(torch.nn.Module):
-            def __init__(self):
-                super().__init__()
-                self.loaded = []
-
-            def to_empty(self, device):
-                return self
-
-            def load_weights(self, weights_iter):
-                self.loaded = list(weights_iter)
-
-        model = CaptureModel()
-        config = types.SimpleNamespace(model_type="dummy", num_layers=1, expert_num=4)
-        loader = NewModelLoader(
-            config,
-            LoadConfig(
-                compute_dtype=torch.float32,
-                device="cpu",
-                load_method="fastsafetensors",
-                ep_size=2,
-                ep_rank=1,
-            ),
-            model_path="/tmp/nonexistent",
-            device="cpu",
-        )
-        gate_up = torch.arange(4 * 2 * 3, dtype=torch.float32).reshape(4, 2, 3)
-        down = torch.arange(4 * 3 * 2, dtype=torch.float32).reshape(4, 3, 2)
-        gate_scale = torch.arange(4 * 2, dtype=torch.float32).reshape(4, 2)
-        with mock.patch.object(loader, "_create_model", return_value=model), \
-             mock.patch.object(loader, "_discover_ckpt_files_cached", return_value=["dummy.safetensors"]), \
-             mock.patch.object(loader, "_run_post_load_hooks", return_value=None), \
-             mock.patch.object(loader, "_log_peak_gpu_memory", return_value=None), \
-             mock.patch(
-                 "rtp_llm.models_py.model_loader._get_fastsafetensors_weights",
-                 return_value=iter(
-                     [
-                         ("model.layers.0.mlp.experts.gate_up_proj", gate_up),
-                         ("model.layers.0.mlp.experts.down_proj", down),
-                         ("model.layers.0.mlp.experts.gate_up_proj.weight_scale_inv", gate_scale),
-                     ]
-                 ),
-             ):
-            loaded_model = loader._load_via_fastsafetensors()
-        self.assertIs(loaded_model, model)
-        self.assertEqual(
-            [name for name, _ in model.loaded],
-            [
-                "model.layers.0.mlp.experts.2.gate_up_proj.weight",
-                "model.layers.0.mlp.experts.3.gate_up_proj.weight",
-                "model.layers.0.mlp.experts.2.down_proj.weight",
-                "model.layers.0.mlp.experts.3.down_proj.weight",
-                "model.layers.0.mlp.experts.2.gate_up_proj.weight_scale_inv",
-                "model.layers.0.mlp.experts.3.gate_up_proj.weight_scale_inv",
-            ],
-        )
-        torch.testing.assert_close(model.loaded[0][1], gate_up[2])
-        torch.testing.assert_close(model.loaded[1][1], gate_up[3])
-        torch.testing.assert_close(model.loaded[2][1], down[2])
-        torch.testing.assert_close(model.loaded[3][1], down[3])
-        torch.testing.assert_close(model.loaded[4][1], gate_scale[2])
-        torch.testing.assert_close(model.loaded[5][1], gate_scale[3])
 
     def test_load_config_device_cpu_is_used_by_scratch_loader(self):
         class CaptureModel(torch.nn.Module):
@@ -508,118 +401,7 @@ class TestWeightMapperStreaming(unittest.TestCase):
             self.assertIs(loader._load_via_scratch(), model)
         self.assertEqual(model.events, [("hook", True), ("to", "cuda")])
 
-    def test_auto_fastsafetensors_fallback_releases_before_scratch(self):
-        loader = NewModelLoader(
-            types.SimpleNamespace(model_type="dummy", num_layers=1),
-            LoadConfig(compute_dtype=torch.float32, device="cuda"),
-            model_path="/tmp/nonexistent",
-            device="cuda",
-        )
-        scratch_model = torch.nn.Module()
-        with mock.patch.object(
-            loader, "_resolve_load_method", return_value=(LoadMethod.FASTSAFETENSORS, False)
-        ), mock.patch.object(
-            loader, "_load_via_fastsafetensors", side_effect=RuntimeError("fast failed")
-        ), mock.patch(
-            "gc.collect"
-        ) as collect, mock.patch(
-            "torch.cuda.is_available", return_value=True
-        ), mock.patch(
-            "torch.cuda.empty_cache"
-        ) as empty_cache, mock.patch.object(
-            loader, "_load_via_scratch", return_value=scratch_model
-        ) as scratch:
-            self.assertIs(loader.load(), scratch_model)
-        collect.assert_called_once()
-        empty_cache.assert_called_once()
-        scratch.assert_called_once()
 
-    def test_load_config_device_cpu_is_used_by_fastsafetensors_loader(self):
-        class CaptureModel(torch.nn.Module):
-            def __init__(self):
-                super().__init__()
-                self.to_empty_device = None
-
-            def to_empty(self, device):
-                self.to_empty_device = device
-                return self
-
-            def load_weights(self, weights_iter):
-                self.loaded = list(weights_iter)
-
-        model = CaptureModel()
-        loader = NewModelLoader(
-            types.SimpleNamespace(model_type="dummy", num_layers=1),
-            LoadConfig(
-                compute_dtype=torch.float32,
-                device="cpu",
-                load_method=LoadMethod.FASTSAFETENSORS,
-            ),
-            model_path="/tmp/nonexistent",
-        )
-        with mock.patch.object(
-            loader, "_create_model", return_value=model
-        ), mock.patch.object(
-            loader, "_discover_ckpt_files_cached", return_value=["dummy.safetensors"]
-        ), mock.patch.object(
-            loader, "_run_post_load_hooks", return_value=None
-        ), mock.patch.object(
-            loader, "_log_peak_gpu_memory", return_value=None
-        ), mock.patch(
-            "rtp_llm.models_py.model_loader._get_fastsafetensors_weights",
-            return_value=iter([]),
-        ):
-            self.assertIs(loader._load_via_fastsafetensors(), model)
-        self.assertEqual(loader.device, "cpu")
-        self.assertEqual(model.to_empty_device, "cpu")
-
-    def test_fastsafetensors_cuda_target_uses_current_device_not_global_rank(self):
-        class CaptureModel(torch.nn.Module):
-            def __init__(self):
-                super().__init__()
-                self.loaded = []
-                self.to_empty_device = None
-
-            def to_empty(self, device):
-                self.to_empty_device = device
-                return self
-
-            def load_weights(self, weights_iter):
-                self.loaded = list(weights_iter)
-
-        def fake_get_fastsafetensors_weights(ckpt_files, device):
-            self.assertEqual(device, "cuda:0")
-            return iter([("dummy.weight", torch.ones(1))])
-
-        model = CaptureModel()
-        config = types.SimpleNamespace(model_type="dummy", num_layers=1)
-        loader = NewModelLoader(
-            config,
-            LoadConfig(
-                compute_dtype=torch.float32,
-                device="cuda",
-                load_method="fastsafetensors",
-            ),
-            model_path="/tmp/nonexistent",
-            device="cuda",
-        )
-        with mock.patch.object(loader, "_create_model", return_value=model), \
-             mock.patch.object(loader, "_discover_ckpt_files_cached", return_value=["dummy.safetensors"]), \
-             mock.patch.object(loader, "_run_post_load_hooks", return_value=None), \
-             mock.patch.object(loader, "_log_peak_gpu_memory", return_value=None), \
-             mock.patch("torch.cuda.current_device", return_value=0), \
-             mock.patch("torch.distributed.is_available", return_value=True), \
-             mock.patch("torch.distributed.is_initialized", return_value=True), \
-             mock.patch("torch.distributed.get_rank", return_value=17), \
-             mock.patch(
-                 "rtp_llm.models_py.model_loader._get_fastsafetensors_weights",
-                 side_effect=fake_get_fastsafetensors_weights,
-             ):
-            loaded_model = loader._load_via_fastsafetensors()
-
-        self.assertIs(loaded_model, model)
-        self.assertEqual(model.to_empty_device, "cuda:0")
-        self.assertEqual([name for name, _ in model.loaded], ["dummy.weight"])
 
 
 class TestCheckpointDiscovery(unittest.TestCase):
@@ -646,26 +428,6 @@ class TestFastSafetensorsFallbackSemantics(unittest.TestCase):
             device="cuda",
         )
 
-    def test_is_quanted_method_false_uses_full_rank_share_for_memory_gate(self):
-        class NotQuantizedConfig:
-            def is_quanted(self):
-                return False
-
-        loader = self._new_loader(LoadMethod.FASTSAFETENSORS)
-        loader.load_config.quant_source_config = NotQuantizedConfig()
-        with tempfile.TemporaryDirectory() as tmpdir:
-            ckpt = os.path.join(tmpdir, "model.safetensors")
-            with open(ckpt, "wb") as f:
-                f.truncate(1000)
-            loader.model_path = tmpdir
-            with mock.patch.dict(
-                sys.modules, {"fastsafetensors": types.ModuleType("fastsafetensors")}
-            ), mock.patch("torch.cuda.is_available", return_value=True), mock.patch.object(
-                loader, "_target_cuda_mem_get_info", return_value=(3600, 10000)
-            ):
-                ok, reason = loader._fastsafetensors_eligible()
-        self.assertFalse(ok)
-        self.assertEqual(reason, "insufficient GPU free memory")
 
     def test_quantized_load_treats_empty_defaults_as_unquantized(self):
         load_config = LoadConfig(compute_dtype=torch.float32, device="cpu")
@@ -765,140 +527,33 @@ class TestFastSafetensorsFallbackSemantics(unittest.TestCase):
         self.assertIsNone(explicit_none.quant_config)
         self.assertFalse(MoeConfigResolver.has_quantization(explicit_none))
 
-    def test_explicit_config_fastsafetensors_failure_does_not_fallback(self):
+    def test_explicit_config_fastsafetensors_is_disabled_in_core_pr(self):
         loader = self._new_loader(LoadMethod.FASTSAFETENSORS)
-        err = RuntimeError("fast path failed")
-        with mock.patch.object(
-            loader, "_fastsafetensors_eligible", return_value=(True, "")
-        ), mock.patch.object(
-            loader, "_load_via_fastsafetensors", side_effect=err
-        ), mock.patch.object(
-            loader, "_load_via_scratch"
-        ) as scratch:
-            with self.assertRaisesRegex(RuntimeError, "fast path failed"):
+        with mock.patch.object(loader, "_load_via_scratch") as scratch:
+            with self.assertRaisesRegex(RuntimeError, "not enabled in the newloader core PR"):
                 loader.load()
         scratch.assert_not_called()
 
-    def test_env_fastsafetensors_failure_does_not_fallback(self):
+    def test_env_fastsafetensors_is_disabled_in_core_pr(self):
         loader = self._new_loader(LoadMethod.AUTO)
-        err = RuntimeError("env fast path failed")
-        with mock.patch.dict(
-            os.environ, {"LOAD_METHOD": LoadMethod.FASTSAFETENSORS}
-        ), mock.patch.object(
-            loader, "_fastsafetensors_eligible", return_value=(True, "")
-        ), mock.patch.object(
-            loader, "_load_via_fastsafetensors", side_effect=err
-        ), mock.patch.object(
+        with mock.patch.dict(os.environ, {"LOAD_METHOD": LoadMethod.FASTSAFETENSORS}), mock.patch.object(
             loader, "_load_via_scratch"
         ) as scratch:
-            with self.assertRaisesRegex(RuntimeError, "env fast path failed"):
+            with self.assertRaisesRegex(RuntimeError, "not enabled in the newloader core PR"):
                 loader.load()
         scratch.assert_not_called()
 
-    def test_auto_fastsafetensors_failure_can_fallback(self):
-        loader = self._new_loader(LoadMethod.AUTO)
-        scratch_model = torch.nn.Module()
-        with mock.patch.object(
-            loader,
-            "_resolve_load_method",
-            return_value=(LoadMethod.FASTSAFETENSORS, False),
-        ), mock.patch.object(
-            loader,
-            "_load_via_fastsafetensors",
-            side_effect=RuntimeError("auto fast path failed"),
-        ), mock.patch.object(
-            loader, "_load_via_scratch", return_value=scratch_model
-        ) as scratch:
-            self.assertIs(loader.load(), scratch_model)
-        scratch.assert_called_once()
 
-    def test_auto_selects_fastsafetensors_when_eligible_without_mocking_resolve(self):
-        loader = self._new_loader(LoadMethod.AUTO)
-        fast_model = torch.nn.Module()
-        with mock.patch.object(
-            loader, "_fastsafetensors_eligible", return_value=(True, "ok")
-        ) as eligible, mock.patch.object(
-            loader, "_load_via_fastsafetensors", return_value=fast_model
-        ) as fast, mock.patch.object(
-            loader, "_load_via_scratch"
-        ) as scratch:
-            self.assertIs(loader.load(), fast_model)
-        eligible.assert_called_once()
-        fast.assert_called_once()
-        scratch.assert_not_called()
 
-    def test_auto_fastsafetensors_failure_falls_back_without_mocking_resolve(self):
-        loader = self._new_loader(LoadMethod.AUTO)
-        scratch_model = torch.nn.Module()
-        with mock.patch.object(
-            loader, "_fastsafetensors_eligible", return_value=(True, "ok")
-        ), mock.patch.object(
-            loader, "_load_via_fastsafetensors", side_effect=RuntimeError("auto failed")
-        ), mock.patch.object(
-            loader, "_load_via_scratch", return_value=scratch_model
-        ) as scratch:
-            self.assertIs(loader.load(), scratch_model)
-        scratch.assert_called_once()
 
-    def test_distributed_auto_uses_single_scratch_decision_if_any_rank_ineligible(self):
-        loader = self._new_loader(LoadMethod.AUTO)
-        scratch_model = torch.nn.Module()
-        with mock.patch.object(
-            loader, "_fastsafetensors_eligible", return_value=(True, "ok")
-        ), mock.patch.object(
-            loader,
-            "_all_gather_load_decision",
-            return_value=[(True, "ok"), (False, "rank1 cuda unavailable")],
-        ), mock.patch.object(loader, "_load_via_fastsafetensors") as fast, mock.patch.object(
-            loader, "_load_via_scratch", return_value=scratch_model
-        ) as scratch:
-            self.assertIs(loader.load(), scratch_model)
-        fast.assert_not_called()
-        scratch.assert_called_once()
 
-    def test_distributed_fastsafetensors_runtime_failure_does_not_local_fallback(self):
-        loader = self._new_loader(LoadMethod.AUTO)
-        with mock.patch.object(
-            loader, "_resolve_load_method", return_value=(LoadMethod.FASTSAFETENSORS, False)
-        ), mock.patch.object(loader, "_distributed_world_size", return_value=2), mock.patch.object(
-            loader, "_load_via_fastsafetensors", side_effect=RuntimeError("rank1 read failed")
-        ), mock.patch.object(loader, "_load_via_scratch") as scratch:
-            with self.assertRaisesRegex(RuntimeError, "rank1 read failed"):
-                loader.load()
-        scratch.assert_not_called()
 
-    def test_auto_uses_scratch_when_fastsafetensors_is_not_eligible(self):
-        loader = self._new_loader(LoadMethod.AUTO)
-        scratch_model = torch.nn.Module()
-        with mock.patch.object(
-            loader, "_fastsafetensors_eligible", return_value=(False, "not eligible")
-        ) as eligible, mock.patch.object(
-            loader, "_load_via_fastsafetensors"
-        ) as fast, mock.patch.object(
-            loader, "_load_via_scratch", return_value=scratch_model
-        ) as scratch:
-            self.assertIs(loader.load(), scratch_model)
-        eligible.assert_called_once()
-        fast.assert_not_called()
-        scratch.assert_called_once()
 
-    def test_force_cpu_auto_uses_scratch_without_fastsafetensors(self):
-        loader = self._new_loader(LoadMethod.AUTO)
-        loader.load_config.force_cpu_load_weights = True
-        scratch_model = torch.nn.Module()
-        with mock.patch.object(
-            loader, "_load_via_fastsafetensors"
-        ) as fast, mock.patch.object(
-            loader, "_load_via_scratch", return_value=scratch_model
-        ) as scratch:
-            self.assertIs(loader.load(), scratch_model)
-        fast.assert_not_called()
-        scratch.assert_called_once()
 
     def test_force_cpu_explicit_fastsafetensors_fails_fast(self):
         loader = self._new_loader(LoadMethod.FASTSAFETENSORS)
         loader.load_config.force_cpu_load_weights = True
-        with self.assertRaisesRegex(RuntimeError, "force_cpu_load_weights"):
+        with self.assertRaisesRegex(RuntimeError, "not enabled in the newloader core PR"):
             loader._resolve_load_method()
 
     def test_invalid_explicit_load_method_fails_fast(self):
@@ -912,50 +567,11 @@ class TestFastSafetensorsFallbackSemantics(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "Unsupported LOAD_METHOD"):
                 loader._resolve_load_method()
 
-    def test_auto_load_method_env_keeps_auto_selection(self):
+    def test_auto_load_method_env_keeps_scratch_selection(self):
         loader = self._new_loader(LoadMethod.AUTO)
-        with mock.patch.dict(os.environ, {"LOAD_METHOD": LoadMethod.AUTO}), mock.patch.object(
-            loader, "_fastsafetensors_eligible", return_value=(True, "ok")
-        ):
-            self.assertEqual(
-                loader._resolve_load_method(), (LoadMethod.FASTSAFETENSORS, False)
-            )
+        with mock.patch.dict(os.environ, {"LOAD_METHOD": LoadMethod.AUTO}):
+            self.assertEqual(loader._resolve_load_method(), (LoadMethod.SCRATCH, False))
 
-    def test_fastsafetensors_memory_gate_uses_target_device(self):
-        loader = self._new_loader(LoadMethod.FASTSAFETENSORS)
-        loader.device = "cuda:1"
-        with tempfile.TemporaryDirectory() as tmpdir:
-            ckpt = os.path.join(tmpdir, "model.safetensors")
-            with open(ckpt, "wb") as f:
-                f.truncate(1000)
-            loader.model_path = tmpdir
-            with mock.patch.dict(
-                sys.modules, {"fastsafetensors": types.ModuleType("fastsafetensors")}
-            ), mock.patch("torch.cuda.is_available", return_value=True), mock.patch(
-                "torch.cuda.mem_get_info", return_value=(10000, 20000)
-            ) as mem_info:
-                ok, reason = loader._fastsafetensors_eligible()
-        self.assertTrue(ok, reason)
-        mem_info.assert_called_once_with("cuda:1")
-
-    def test_explicit_fastsafetensors_memory_recheck_uses_target_device(self):
-        loader = self._new_loader(LoadMethod.FASTSAFETENSORS)
-        loader.device = "cuda:1"
-        with tempfile.TemporaryDirectory() as tmpdir:
-            ckpt = os.path.join(tmpdir, "model.safetensors")
-            with open(ckpt, "wb") as f:
-                f.truncate(1000)
-            loader.model_path = tmpdir
-            with mock.patch.object(
-                loader,
-                "_fastsafetensors_eligible",
-                return_value=(False, "insufficient GPU free memory"),
-            ), mock.patch(
-                "torch.cuda.mem_get_info", return_value=(2000, 20000)
-            ) as mem_info:
-                method, explicit = loader._resolve_load_method()
-        self.assertEqual((method, explicit), (LoadMethod.FASTSAFETENSORS, True))
-        mem_info.assert_called_once_with("cuda:1")
 
 
 class TestRtpModuleDispatchIntegrity(unittest.TestCase):
@@ -1362,28 +978,6 @@ class TestMoELoadCompleteness(unittest.TestCase):
     def setUpClass(cls):
         _ensure_moe_test_deps()
 
-    def test_fastsafetensors_stacked_moe_names_are_normalized_to_expert_weights(self):
-        gate_up = torch.arange(4 * 16, dtype=torch.float32).reshape(4, 16)
-        down = torch.arange(8 * 4, dtype=torch.float32).reshape(8, 4)
-        items = list(
-            _normalize_fastsafetensors_stacked_moe_weights(
-                iter(
-                    [
-                        ("model.layers.0.mlp.experts.0.gate_up_proj", gate_up),
-                        ("model.layers.0.mlp.experts.0.down_proj", down),
-                    ]
-                )
-            )
-        )
-        self.assertEqual(
-            [name for name, _ in items],
-            [
-                "model.layers.0.mlp.experts.0.gate_up_proj.weight",
-                "model.layers.0.mlp.experts.0.down_proj.weight",
-            ],
-        )
-        self.assertIs(items[0][1], gate_up)
-        self.assertIs(items[1][1], down)
 
     def test_ep_filter_rejects_non_divisible_experts(self):
         with self.assertRaisesRegex(ValueError, "num_experts.*divisible"):
@@ -1511,66 +1105,7 @@ class TestMoELoadCompleteness(unittest.TestCase):
         torch.testing.assert_close(layer._gate_ch_scales[0], scale[0, :4])
         torch.testing.assert_close(layer._up_ch_scales[0], scale[0, 4:])
 
-    def test_stacked_moe_gate_up_scale_fastsafetensors_name_splits_gate_up(self):
-        layer = BaseMoEExperts(
-            num_experts=1,
-            hidden_size=4,
-            moe_intermediate_size=4,
-            tp_size=1,
-            tp_rank=0,
-            ep_size=1,
-            ep_rank=0,
-            params_dtype=torch.float32,
-            model_config=types.SimpleNamespace(
-                data_type="fp32", quant_config=None, exported_device=None
-            ),
-            parallelism_config=types.SimpleNamespace(dp_size=1),
-            moe_config=types.SimpleNamespace(),
-            quant_config=_qc("fp8_per_channel"),
-            layer_idx=0,
-        )
-        scale = torch.arange(8, dtype=torch.float32)
-        layer.load_weights({"0.gate_up_proj.weight_scale": scale})
-        torch.testing.assert_close(layer._gate_ch_scales[0], scale[:4])
-        torch.testing.assert_close(layer._up_ch_scales[0], scale[4:])
 
-    def test_moe_accepts_normalized_fastsafetensors_stacked_projection_names(self):
-        layer = BaseMoEExperts(
-            num_experts=1,
-            hidden_size=4,
-            moe_intermediate_size=8,
-            tp_size=1,
-            tp_rank=0,
-            ep_size=1,
-            ep_rank=0,
-            params_dtype=torch.float32,
-            model_config=types.SimpleNamespace(
-                data_type="fp32", quant_config=None, exported_device=None
-            ),
-            parallelism_config=types.SimpleNamespace(dp_size=1),
-            moe_config=types.SimpleNamespace(),
-            quant_config=_qc("none"),
-            layer_idx=0,
-        )
-        gate_up = torch.arange(4 * 16, dtype=torch.float32).reshape(4, 16)
-        down = torch.arange(8 * 4, dtype=torch.float32).reshape(8, 4)
-        for full_name, tensor in _normalize_fastsafetensors_stacked_moe_weights(
-            iter(
-                [
-                    ("model.layers.0.mlp.experts.0.gate_up_proj", gate_up),
-                    ("model.layers.0.mlp.experts.0.down_proj", down),
-                ]
-            )
-        ):
-            expert_name = full_name.split("experts.", 1)[1]
-            layer.load_weights({expert_name: tensor})
-        with mock.patch.object(
-            BaseMoEExperts, "_maybe_build_fused_moe", return_value=None
-        ):
-            layer.process_weights_after_loading()
-        self.assertEqual(
-            layer._loaded_keys, {(0, "gate_proj"), (0, "up_proj"), (0, "down_proj")}
-        )
 
     def test_w4a8_online_rejects_odd_hidden_or_intermediate_size(self):
         with self.assertRaisesRegex(ValueError, "expects even H/M"):
