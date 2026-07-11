@@ -334,25 +334,5 @@ class TopologyKVCandidateScheduleTest(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "CUDA benchmark requested"):
                 resolve_benchmark_device("cuda")
 
-    @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required for speed testing")
-    def test_sparse_attention_cuda_benchmark_runs_with_topology_schedule(self):
-        result = benchmark_decode_attention(
-            seq_len=16384,
-            selected_tokens=512,
-            heads=16,
-            head_dim=64,
-            rounds=60,
-            warmup=20,
-            dtype=torch.float16,
-            device="cuda",
-        )
-
-        self.assertEqual(result.seq_len, 16384)
-        self.assertEqual(result.selected_tokens, 512)
-        self.assertGreater(result.dense_ms, 0.0)
-        self.assertGreater(result.sparse_ms, 0.0)
-        self.assertGreater(result.speedup, 0.0)
-
-
 if __name__ == "__main__":
     unittest.main()

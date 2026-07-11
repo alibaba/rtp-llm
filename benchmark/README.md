@@ -52,8 +52,14 @@ Report the result as a benchmark signal only; end-to-end model speedup still
 requires integration with the runtime sparse MLA or indexer path and
 model-quality validation.
 
-Run the CPU regression tests from the repository root with
+The CPU scheduling and correctness regressions are part of the non-manual Bazel
+test set. Run them from the repository root with
+`bazel test //benchmark:topology_kv_candidate_schedule_cpu_test` or
 `python -m unittest benchmark.test_topology_kv_candidate_schedule`.
+
+The longer CUDA performance smoke remains opt-in so it does not add timing work
+to routine CI. Run it explicitly with
+`bazel test //benchmark:topology_kv_candidate_schedule_cuda_test --config=cuda12`.
 
 ```bash
 python benchmark/topology_kv_candidate_schedule.py \
