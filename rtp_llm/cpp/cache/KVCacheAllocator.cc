@@ -1,4 +1,3 @@
-#include <algorithm>
 #include <cstdint>
 #include <limits>
 #include <unordered_set>
@@ -110,15 +109,14 @@ uint32_t KVCacheAllocator::convertToGlobalLayerId(size_t model_id, int local_lay
         RTP_LLM_LOG_ERROR("convertToGlobalLayerId: mtp_sub_configs[%zu] is null", model_id - 1);
         return std::numeric_limits<uint32_t>::max();
     }
-    if (sub->global_layer_ids.empty()) {
-        RTP_LLM_LOG_ERROR("convertToGlobalLayerId: mtp_sub_configs[%zu] global_layer_ids is empty", model_id - 1);
+    if (local_layer_id < 0 || static_cast<size_t>(local_layer_id) >= sub->layer_num) {
+        RTP_LLM_LOG_ERROR("convertToGlobalLayerId: local_layer_id=%d is invalid", local_layer_id);
         return std::numeric_limits<uint32_t>::max();
     }
-    if (local_layer_id >= 0 && static_cast<size_t>(local_layer_id) < sub->global_layer_ids[0].size()) {
-        return sub->global_layer_ids[0][static_cast<size_t>(local_layer_id)];
-    }
-    RTP_LLM_LOG_ERROR("convertToGlobalLayerId: local_layer_id=%d is invalid", local_layer_id);
-    return std::numeric_limits<uint32_t>::max();
+
+    return static_cast<uint32_t>(static_cast<int>(config_.layer_num)
+                                 + static_cast<int>(model_id - 1) * static_cast<int>(sub->layer_num)
+                                 + local_layer_id);
 }
 
 void KVCacheAllocator::blockCopy(int src_block_index, int dest_block_index) {
@@ -158,15 +156,19 @@ void KVCacheAllocator::blockBatchCopy(const BlockIdPair* begin_ptr, const BlockI
         copy_params.reserve(static_cast<CopyType>(i), copy_nums[i]);
     }
 
-    auto&  spec                = config_.cache_specs[0];
-    size_t kv_block_size_bytes = spec->block_size_bytes();
+    // kv_cache_update_mapping is currently produced by single-group fork/update logic.
+    // A future multi-group producer should carry group ids and copy each group explicitly.
+    RTP_LLM_CHECK_WITH_INFO(
+        config_.groupNums() == 1, "blockBatchCopy currently expects a single cache group, got %d", config_.groupNums());
 
     for (auto it = begin_ptr; it != end_ptr; ++it) {
         auto [src_block_index, dest_block_index] = *it;
 
         for (int layer_id = 0; layer_id < config_.layer_num; layer_id++) {
-            auto src_addr_info = convertIndexToAddr(layer_id, src_block_index);
-            auto dst_addr_info = convertIndexToAddr(layer_id, dest_block_index);
+            const int group_id            = config_.groupIdFor(layer_id);
+            size_t    kv_block_size_bytes = config_.kvBlockStrideBytesForGroup(static_cast<size_t>(group_id));
+            auto      src_addr_info       = convertIndexToAddr(layer_id, src_block_index);
+            auto      dst_addr_info       = convertIndexToAddr(layer_id, dest_block_index);
 
             if (!src_addr_info.kv_addr || !dst_addr_info.kv_addr) {
                 RTP_LLM_LOG_ERROR("Failed to get block address for layer %d, src_block %d, dst_block %d",
@@ -181,7 +183,7 @@ void KVCacheAllocator::blockBatchCopy(const BlockIdPair* begin_ptr, const BlockI
             if (src_addr_info.kv_scale_addr && dst_addr_info.kv_scale_addr) {
                 copy_params.add(dst_addr_info.kv_scale_addr,
                                 src_addr_info.kv_scale_addr,
-                                static_cast<size_t>(config_.kv_scale_stride_bytes),
+                                config_.kvScaleStrideBytesForGroup(static_cast<size_t>(group_id)),
                                 copy_type);
             }
         }
@@ -219,7 +221,7 @@ BatchKVCacheResourcePtr KVCacheAllocator::popBlocksFromCache(size_t min_blocks_t
 
     auto batch_resource = std::make_shared<BatchKVCacheResource>();
     batch_resource->resetBatchSize(1);
-    batch_resource->initGroups(config_.groupNums(), static_cast<int>(config_.layer_all_num), config_.layer_to_group_id);
+    batch_resource->initGroups(config_.groupNums(), static_cast<int>(config_.layer_all_num), config_.layerGroupIdsSnapshot(), config_.kernelBlocksPerKvBlock(), config_.groupTypesSnapshot());
     batch_resource->setLastBlockAligned(true);
 
     for (int gid = 0; gid < config_.groupNums(); ++gid) {

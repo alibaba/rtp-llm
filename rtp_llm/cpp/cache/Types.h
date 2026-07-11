@@ -54,8 +54,15 @@ struct MallocInfo {
     bool                    verbose             = true;  // for failed log
     bool                    reuse_cache         = true;
     bool                    enable_device_cache = true;
-    // Sparse linear-block cleanup is only valid for incremental allocation.
+    // Sparse tail-group cleanup is only valid for incremental allocation.
+    // Prefill init keeps reused prefix slots intact because model-path kernels
+    // still read them by prefix_length.
     bool enable_remove_skipped_blocks = true;
+    // Override for incrMalloc's seqLength read; -1 = fall back to complete_token_ids->seqLength().
+    // Lets the state machine feed the publish-time value instead of racing with the async worker.
+    int incr_seq_len_override = -1;
+
+    int incrSeqLen() const;
 };
 
 struct MallocResult {

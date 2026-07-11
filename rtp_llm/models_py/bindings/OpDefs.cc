@@ -13,7 +13,9 @@ void registerPyOpDefs(pybind11::module& m) {
         .def_readwrite("kv_cache_base", &LayerKVCache::kv_cache_base, "Key/value cache tensor (per-layer view)")
         .def_readwrite("kv_scale_base", &LayerKVCache::kv_scale_base, "Key/value cache scale tensor")
         .def_readonly("seq_size_per_block", &LayerKVCache::seq_size_per_block, "Sequence size per block")
-        .def_readonly("layer_id", &LayerKVCache::layer_id, "Global layer id");
+        .def_readonly("layer_id", &LayerKVCache::layer_id, "Global layer id")
+        .def_readonly("group_id", &LayerKVCache::group_id, "Cache group id (-1 = default)")
+        .def_readonly("tag", &LayerKVCache::tag, "Cache group tag");
 
     pybind11::class_<KVCache>(m, "KVCache")
         .def(pybind11::init<>())
@@ -32,9 +34,32 @@ void registerPyOpDefs(pybind11::module& m) {
                        &KVCache::layer_attn_types,
                        "Per-layer attention type (CacheGroupType::FULL or LINEAR). "
                        "Empty = all layers treated as FULL (backward compatibility).")
+        .def_readwrite("group_types", &KVCache::group_types, "Per-group cache types (FULL, LINEAR).")
+        .def_readwrite("group_tags", &KVCache::group_tags, "Per-group tag names.")
+        .def_readwrite("layer_to_group_ids",
+                       &KVCache::layer_to_group_ids,
+                       "Per-layer group IDs from cache topology. "
+                       "Each entry is a list of group IDs the layer belongs to.")
+        .def_readwrite(
+            "layer_tag_to_group_id", &KVCache::layer_tag_to_group_id, "Per-layer mapping from tag name to group ID.")
+        .def_readwrite("kv_cache_base_by_layer_group",
+                       &KVCache::kv_cache_base_by_layer_group,
+                       "Per-layer per-group KV cache tensors.")
+        .def_readwrite("kv_scale_base_by_layer_group",
+                       &KVCache::kv_scale_base_by_layer_group,
+                       "Per-layer per-group KV scale tensors.")
         .def("get_layer_cache",
-             &KVCache::getLayerCache,
-             "Return a per-layer LayerKVCache for the given global layer id");
+             static_cast<LayerKVCache (KVCache::*)(int)>(&KVCache::getLayerCache),
+             "Return a per-layer LayerKVCache for the given global layer id")
+        .def("get_layer_cache",
+             static_cast<LayerKVCache (KVCache::*)(int, const std::string&)>(&KVCache::getLayerCache),
+             "Return a LayerKVCache for the given layer and tag")
+        .def("get_layer_cache_by_group",
+             &KVCache::getLayerCacheByGroup,
+             "Return a LayerKVCache for the given layer and group id")
+        .def("get_layer_caches",
+             &KVCache::getLayerCaches,
+             "Return all LayerKVCache objects for every group the layer owns");
 
     pybind11::class_<PyModelInitResources>(m, "PyModelInitResources")
         .def(pybind11::init<>())
@@ -184,6 +209,7 @@ void registerPyOpDefs(pybind11::module& m) {
         .def_readwrite("attention_inputs", &PyModelInputs::attention_inputs, "Attention inputs structure")
         .def_readwrite(
             "bert_embedding_inputs", &PyModelInputs::bert_embedding_inputs, "BERT embedding inputs structure");
+
 
     pybind11::class_<PyModelOutputs>(m, "PyModelOutputs")
         .def(pybind11::init<>(), "Default constructor")

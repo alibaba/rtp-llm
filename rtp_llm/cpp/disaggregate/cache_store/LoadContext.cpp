@@ -85,6 +85,18 @@ void SyncContext::waitDone() {
             auto error_code = ErrorCode::CACHE_STORE_LOAD_BUFFER_TIMEOUT;
             error_info_     = ErrorInfo(error_code, ErrorCodeToString(error_code));
             RTP_LLM_LOG_INFO("load context wait done on timeout");
+            for (const auto& request_block_buffer : request_block_buffers_) {
+                if (request_block_buffer == nullptr) {
+                    RTP_LLM_LOG_INFO("load context timeout expected block buffer: null");
+                    continue;
+                }
+                RTP_LLM_LOG_INFO("load context timeout expected block buffer: %s",
+                                 request_block_buffer->debugInfo().c_str());
+            }
+            auto cache_store = cache_store_.lock();
+            if (cache_store != nullptr) {
+                cache_store->debugInfo();
+            }
             return;
         }
 
