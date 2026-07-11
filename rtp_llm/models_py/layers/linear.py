@@ -238,6 +238,14 @@ class ColumnParallelLinear(LinearBase):
                     tensor = self._split_weight(tensor, dim=0)
             elif param_name == "weight_scale_inv":
                 if self.tp_size > 1:
+                    block_n, _ = self._fp8_scale_block_size()
+                    start = self.tp_rank * self.output_size_per_partition
+                    self._check_fp8_block_aligned(
+                        start,
+                        self.output_size_per_partition,
+                        block_n,
+                        f"FP8 block ColumnParallel scale {self.prefix}",
+                    )
                     tensor = self._split_weight(tensor, dim=0)
             elif param_name in ("scales", "zeros"):
                 if (
@@ -368,6 +376,14 @@ class RowParallelLinear(LinearBase):
                     tensor = self._split_weight(tensor, dim=-1)
             elif param_name == "weight_scale_inv":
                 if self.tp_size > 1:
+                    _, block_k = self._fp8_scale_block_size()
+                    start = self.tp_rank * self.input_size_per_partition
+                    self._check_fp8_block_aligned(
+                        start,
+                        self.input_size_per_partition,
+                        block_k,
+                        f"FP8 block RowParallel scale {self.prefix}",
+                    )
                     tensor = self._split_weight(tensor, dim=1)
             elif param_name == "g_idx":
                 if self.tp_size > 1:

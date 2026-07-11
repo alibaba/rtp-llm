@@ -277,10 +277,10 @@ class BaseMoEExperts(nn.Module):
             parts = name.split(".")
             base = parts[0]
             if base in ("gate_up_proj", "down_proj") and hasattr(tensor, "dim"):
-                if tensor.dim() == 3 and len(parts) == 1:
+                if tensor.dim() == 3 and (len(parts) == 1 or (len(parts) == 2 and parts[1] == "weight")):
                     self._load_stacked_experts(base, tensor)
                     continue
-                if len(parts) == 2 and tensor.shape[0] == self.num_experts:
+                if len(parts) == 2 and parts[1] != "weight" and tensor.shape[0] == self.num_experts:
                     self._load_stacked_expert_aux(base, parts[1], tensor)
                     continue
             if len(parts) < 3:

@@ -1,21 +1,30 @@
 """Smoke test for the public new_weight_loader Bazel target runfiles."""
 
+import tempfile
 import types
-from unittest import mock
 
 import torch
+from safetensors.torch import save_file
 
 
 def _bert_config():
-    return types.SimpleNamespace(
-        model_type="bert",
-        num_layers=1,
-        hidden_size=4,
-        inter_size=8,
-        type_vocab_size=2,
-        max_generate_batch_size=1,
-        quant_config=None,
-    )
+    from rtp_llm.config.model_config import ModelConfig
+
+    config = ModelConfig()
+    config.model_type = "bert"
+    config.num_layers = 1
+    config.vocab_size = 8
+    config.hidden_size = 4
+    config.inter_size = 8
+    config.type_vocab_size = 2
+    config.max_seq_len = 16
+    config.layernorm_eps = 1e-5
+    config.activation_type = "Gelu"
+    config.quant_config = None
+    config.attn_config.head_num = 1
+    config.attn_config.kv_head_num = 1
+    config.attn_config.size_per_head = 4
+    return config
 
 
 def _bert_weights():
@@ -53,6 +62,7 @@ def main():
     from rtp_llm.models_py.quant_methods import QuantizationConfig
     from rtp_llm.models_py.registry import list_models
     from rtp_llm.models_py.model_desc.bert import BertModel
+    from rtp_llm.ops import PyModelInitResources
 
     assert LoadMethod.AUTO == "auto"
     assert LoadConfig(device="cpu").device == "cpu"
@@ -62,13 +72,19 @@ def main():
     assert QuantizationConfig(quant_type="none").quant_type == "none"
     assert "bert" in list_models()
 
-    model = BertForEmbedding(_bert_config(), LoadConfig(compute_dtype=torch.float32, device="cpu"))
-    with mock.patch.object(BertModel, "__init__", return_value=None) as build_inner:
-        model.load_weights(_bert_weights())
-        assert not build_inner.called
-        model.process_weights_after_loading()
-    assert build_inner.called
+    with tempfile.TemporaryDirectory() as tmpdir:
+        save_file(_bert_weights(), f"{tmpdir}/model.safetensors")
+        loader = NewModelLoader(
+            _bert_config(),
+            LoadConfig(compute_dtype=torch.float32, device="cpu", load_method=LoadMethod.SCRATCH),
+            model_path=tmpdir,
+        )
+        model = loader.load()
+    assert isinstance(model, BertForEmbedding)
     assert isinstance(model.model, BertModel)
+    assert model.weights is not None
+    assert model.embeddings.word_embeddings_weight.device.type == "cpu"
+    assert model.initialize(PyModelInitResources())
 
 
 if __name__ == "__main__":

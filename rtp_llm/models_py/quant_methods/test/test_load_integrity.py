@@ -813,6 +813,41 @@ class TestLinearLoadCompleteness(unittest.TestCase):
             layer.process_weights_after_loading()
 
 
+
+    def test_column_fp8_block_scale_rejects_non_aligned_tp_rows(self):
+        qc = _qc("fp8_block")
+        qc.weight_block_size = [128, 128]
+        layer = ColumnParallelLinear(
+            input_size=256,
+            output_size=384,
+            tp_size=2,
+            tp_rank=0,
+            quant_config=qc,
+            prefix="fp8_col",
+            params_dtype=torch.float32,
+        )
+        # Scale grid has 3 rows, so a naive floor/ceil grid split looks possible,
+        # but the underlying 192-row TP shard cuts through 128-row FP8 blocks.
+        with self.assertRaisesRegex(ValueError, "FP8 block ColumnParallel scale"):
+            layer.load_weights({"fp8_col.weight_scale_inv": torch.ones(3, 2)})
+
+    def test_row_fp8_block_scale_rejects_non_aligned_tp_cols(self):
+        qc = _qc("fp8_block")
+        qc.weight_block_size = [128, 128]
+        layer = RowParallelLinear(
+            input_size=384,
+            output_size=256,
+            tp_size=2,
+            tp_rank=0,
+            quant_config=qc,
+            prefix="fp8_row",
+            params_dtype=torch.float32,
+        )
+        # Scale grid has 3 columns, but the underlying 192-column TP shard
+        # cuts through 128-column FP8 blocks.
+        with self.assertRaisesRegex(ValueError, "FP8 block RowParallel scale"):
+            layer.load_weights({"fp8_row.weight_scale_inv": torch.ones(2, 3)})
+
     def test_qkv_fp8_block_scale_rejects_non_aligned_tp_rows(self):
         qc = _qc("fp8_block")
         qc.weight_block_size = [128, 128]
@@ -1081,6 +1116,87 @@ class TestMoELoadCompleteness(unittest.TestCase):
         layer.load_weights({"0.gate_up_proj.weight": gate_up})
         torch.testing.assert_close(layer.w13[0, :2], gate_up[2:])
         torch.testing.assert_close(layer.w13[0, 2:], gate_up[:2])
+
+    def _make_stacked_suffix_moe(self, num_experts=2, ep_size=1, ep_rank=0):
+        return BaseMoEExperts(
+            num_experts=num_experts,
+            hidden_size=32,
+            moe_intermediate_size=32,
+            tp_size=1,
+            tp_rank=0,
+            ep_size=ep_size,
+            ep_rank=ep_rank,
+            params_dtype=torch.float32,
+            model_config=types.SimpleNamespace(
+                data_type="fp32",
+                quant_config=None,
+                exported_device=None,
+                expert_num=num_experts,
+                moe_k=1,
+                moe_topk_group=1,
+                hidden_size=32,
+                activation_type="Gelu",
+                attn_config=types.SimpleNamespace(head_num=1),
+            ),
+            parallelism_config=types.SimpleNamespace(
+                dp_size=1,
+                dp_rank=0,
+                ep_size=ep_size,
+                ep_rank=ep_rank,
+                tp_size=1,
+                tp_rank=0,
+                world_size=1,
+                local_rank=0,
+                get_attn_tp_size=lambda: 1,
+                get_attn_tp_rank=lambda: 0,
+            ),
+            moe_config=types.SimpleNamespace(
+                ll_num_max_token=1,
+                masked_max_token_num=1,
+                moe_strategy=0,
+                use_mori_ep=False,
+                use_deepep_moe=False,
+                use_all_gather=True,
+            ),
+            quant_config=_qc("none"),
+            layer_idx=0,
+        )
+
+    def test_stacked_moe_weight_suffix_loads_as_weight_for_single_ep_rank(self):
+        layer = self._make_stacked_suffix_moe(num_experts=2)
+        gate_up = torch.arange(2 * 32 * 64, dtype=torch.float32).reshape(2, 32, 64)
+        down = torch.arange(2 * 32 * 32, dtype=torch.float32).reshape(2, 32, 32)
+        layer.load_weights(
+            {
+                "gate_up_proj.weight": gate_up,
+                "down_proj.weight": down,
+            }
+        )
+        layer.process_weights_after_loading()
+        torch.testing.assert_close(layer.w13[0, :32], gate_up[0, :, 32:].t())
+        torch.testing.assert_close(layer.w13[0, 32:], gate_up[0, :, :32].t())
+        torch.testing.assert_close(layer.w2[0], down[0].t())
+        torch.testing.assert_close(layer.w13[1, :32], gate_up[1, :, 32:].t())
+        torch.testing.assert_close(layer.w13[1, 32:], gate_up[1, :, :32].t())
+        torch.testing.assert_close(layer.w2[1], down[1].t())
+
+    def test_stacked_moe_weight_suffix_loads_only_local_ep_range(self):
+        layer = self._make_stacked_suffix_moe(num_experts=4, ep_size=2, ep_rank=1)
+        gate_up = torch.arange(4 * 32 * 64, dtype=torch.float32).reshape(4, 32, 64)
+        down = torch.arange(4 * 32 * 32, dtype=torch.float32).reshape(4, 32, 32)
+        layer.load_weights(
+            {
+                "gate_up_proj.weight": gate_up,
+                "down_proj.weight": down,
+            }
+        )
+        layer._check_load_complete()
+        torch.testing.assert_close(layer.w13[0, :32], gate_up[2, :, 32:].t())
+        torch.testing.assert_close(layer.w13[0, 32:], gate_up[2, :, :32].t())
+        torch.testing.assert_close(layer.w2[0], down[2].t())
+        torch.testing.assert_close(layer.w13[1, :32], gate_up[3, :, 32:].t())
+        torch.testing.assert_close(layer.w13[1, 32:], gate_up[3, :, :32].t())
+        torch.testing.assert_close(layer.w2[1], down[3].t())
 
     def test_stacked_moe_gate_up_scale_scratch_name_splits_gate_up(self):
         layer = BaseMoEExperts(
