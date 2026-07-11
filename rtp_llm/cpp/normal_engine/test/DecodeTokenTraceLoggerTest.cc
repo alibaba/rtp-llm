@@ -1,6 +1,8 @@
 #include "rtp_llm/cpp/normal_engine/DecodeTokenTraceLogger.h"
 
+#include <cerrno>
 #include <cstdlib>
+#include <cstring>
 #include <limits>
 #include <string>
 
@@ -13,18 +15,71 @@
 namespace rtp_llm {
 namespace {
 
-void configureRetrospectiveProbeForTest() {
-    static const std::string shm_name = "/rtpllm_decode_token_trace_logger_test_" + std::to_string(::getpid());
-    static const bool initialized = [&] {
-        ::shm_unlink(shm_name.c_str());
-        setenv("RTPLLM_RETROSPECTIVE_PROBE_DEBUG", "1", 1);
-        setenv("RTPLLM_RETROSPECTIVE_PROBE_SHM_NAME", shm_name.c_str(), 1);
-        setenv("WORLD_RANK", "0", 1);
-        setenv("WORLD_SIZE", "1", 1);
-        return true;
-    }();
-    (void)initialized;
+bool unlinkSharedMemoryIfPresent(const std::string& name) {
+    return ::shm_unlink(name.c_str()) == 0 || errno == ENOENT;
 }
+
+class EnvironmentVariableGuard {
+public:
+    explicit EnvironmentVariableGuard(const char* name): name_(name) {}
+
+    void set(const char* value) {
+        const char* previous = std::getenv(name_.c_str());
+        was_set_             = previous != nullptr;
+        if (was_set_) {
+            previous_value_ = previous;
+        }
+        ASSERT_EQ(0, setenv(name_.c_str(), value, 1));
+    }
+
+    void restore() const {
+        if (was_set_) {
+            EXPECT_EQ(0, setenv(name_.c_str(), previous_value_.c_str(), 1));
+        } else {
+            EXPECT_EQ(0, unsetenv(name_.c_str()));
+        }
+    }
+
+private:
+    std::string name_;
+    std::string previous_value_;
+    bool        was_set_{false};
+};
+
+class RetrospectiveProbeTestEnvironment : public ::testing::Environment {
+public:
+    RetrospectiveProbeTestEnvironment(): debug_("RTPLLM_RETROSPECTIVE_PROBE_DEBUG"),
+                                         shm_name_env_("RTPLLM_RETROSPECTIVE_PROBE_SHM_NAME"),
+                                         world_rank_("WORLD_RANK"),
+                                         world_size_("WORLD_SIZE") {}
+
+    void SetUp() override {
+        shm_name_ = "/rtpllm_decode_token_trace_logger_test_" + std::to_string(::getpid());
+        ASSERT_TRUE(unlinkSharedMemoryIfPresent(shm_name_)) << std::strerror(errno);
+        debug_.set("1");
+        shm_name_env_.set(shm_name_.c_str());
+        world_rank_.set("0");
+        world_size_.set("1");
+    }
+
+    void TearDown() override {
+        EXPECT_TRUE(unlinkSharedMemoryIfPresent(shm_name_)) << std::strerror(errno);
+        world_size_.restore();
+        world_rank_.restore();
+        shm_name_env_.restore();
+        debug_.restore();
+    }
+
+private:
+    EnvironmentVariableGuard debug_;
+    EnvironmentVariableGuard shm_name_env_;
+    EnvironmentVariableGuard world_rank_;
+    EnvironmentVariableGuard world_size_;
+    std::string              shm_name_;
+};
+
+[[maybe_unused]] ::testing::Environment* const retrospective_probe_test_environment =
+    ::testing::AddGlobalTestEnvironment(new RetrospectiveProbeTestEnvironment);
 
 uint64_t expectAndAcknowledgeEvent(const std::string& trace_id, const std::string& reason, int sequence_length) {
     DecodeProbeTriggerEvent event;
@@ -104,7 +159,6 @@ TEST(DecodeTokenTraceLoggerTest, repeatedSuffixDetectorIgnoresNonSuffixRepeats) 
 }
 
 TEST(DecodeTokenTraceLoggerTest, CfPatternPublishesOneRetrospectiveEvent) {
-    configureRetrospectiveProbeForTest();
     const std::string trace_id = "cf_probe_trace";
     const std::vector<int> tokens = {
         27, 9500, 1419, 9500, 29, 27, 9500, 1419, 9500, 29,
@@ -118,7 +172,6 @@ TEST(DecodeTokenTraceLoggerTest, CfPatternPublishesOneRetrospectiveEvent) {
 }
 
 TEST(DecodeTokenTraceLoggerTest, GenericRepeatedSuffixPublishesOneEvent) {
-    configureRetrospectiveProbeForTest();
     const std::string trace_id = "repeated_suffix_probe_trace";
     const std::vector<int> tokens(8, 59140);
 
@@ -129,7 +182,6 @@ TEST(DecodeTokenTraceLoggerTest, GenericRepeatedSuffixPublishesOneEvent) {
 }
 
 TEST(DecodeTokenTraceLoggerTest, NormalFormatTagsDoNotPublishEvent) {
-    configureRetrospectiveProbeForTest();
     const std::vector<int> tokens = {27, 9500, 1419, 9500, 29, 42, 7, 59140, 220};
     const auto generation_before = currentTriggerGeneration();
 

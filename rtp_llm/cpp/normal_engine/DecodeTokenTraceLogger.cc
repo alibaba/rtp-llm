@@ -239,7 +239,7 @@ struct BadWatchUpdate {
     int                     cf_count = 0;
     DecodeRepeatedSuffixInfo repeated_suffix;
     bool                    triggered = false;
-    std::string             reason;
+    const char*             reason = "";
 };
 
 std::unordered_map<std::string, WatchState>& watchStates() {
@@ -327,6 +327,21 @@ DecodeRepeatedSuffixInfo findRepeatedSuffix(const std::vector<int>& values, int 
     return info;
 }
 
+void publishRetrospectiveTrigger(const std::string& trace_id, const char* reason, int sequence_length) noexcept {
+    if (!DecodeProbeTrigger::enabled()) {
+        return;
+    }
+    try {
+        DecodeProbeTriggerEvent event;
+        event.trace_id                 = trace_id;
+        event.reason                   = reason;
+        event.observed_sequence_length = sequence_length;
+        event.timestamp_us             = autil::TimeUtility::currentTimeInMicroSeconds();
+        DecodeProbeTrigger::publish(event);
+    } catch (...) {
+    }
+}
+
 BadWatchUpdate updateBadWatchState(WatchState&              state,
                                    const std::string&       trace_id,
                                    int                      sequence_length,
@@ -350,15 +365,7 @@ BadWatchUpdate updateBadWatchState(WatchState&              state,
         state.triggered = true;
         update.triggered = true;
         update.reason = cf_tail_repeat ? "cf_tail_repeat" : "repeated_suffix";
-
-        if (DecodeProbeTrigger::enabled()) {
-            DecodeProbeTriggerEvent event;
-            event.trace_id                 = trace_id;
-            event.reason                   = update.reason;
-            event.observed_sequence_length = sequence_length;
-            event.timestamp_us             = autil::TimeUtility::currentTimeInMicroSeconds();
-            DecodeProbeTrigger::publish(event);
-        }
+        publishRetrospectiveTrigger(trace_id, update.reason, sequence_length);
     }
     return update;
 }
