@@ -180,8 +180,11 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
         }
         if (shape_hints_ptr[GptModelInputIndex::mtpHiddenStates]) {
             auto hidden_states_dim0 = (size_t)shape_hints_ptr[GptModelInputIndex::comboTokens];
+            RTP_LLM_CHECK_WITH_INFO(hidden_states_dim0 > 0 && hidden_states_size % hidden_states_dim0 == 0,
+                                    "invalid mtp hidden size after TP sync: combo_tokens=%ld, hidden_numel=%ld",
+                                    hidden_states_dim0,
+                                    hidden_states_size);
             auto hidden_states_dim1 = (size_t)hidden_states_size / hidden_states_dim0;
-            RTP_LLM_CHECK(hidden_states_size % hidden_states_dim0 == 0);
             inputs.last_hidden_states =
                 allocBuf((rtp_llm::DataType)shape_hints_ptr[GptModelInputIndex::mtpHiddenStatesDtype],
                          {hidden_states_dim0, hidden_states_dim1},

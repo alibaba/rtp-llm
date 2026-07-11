@@ -164,7 +164,7 @@ class CPFlashInferImpl(FMHAImplBase):
 
     @classmethod
     def support(cls, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs):
-        return True
+        return attn_inputs.context_parallel_info is not None
 
     def fmha_type(self) -> FMHAType:
         return FMHAType.CP_FLASH_INFER
@@ -177,10 +177,10 @@ class CPFlashInferImpl(FMHAImplBase):
         self,
         qkv: torch.Tensor,
         kv_cache: Optional[KVCache],
-        need_rope_kv_cache: bool = True,
+        layer_idx: int = 0,
     ) -> torch.Tensor:
         assert self.rope_kvcache_impl is not None and self.rope_params is not None
-        if need_rope_kv_cache:
+        if self.need_rope_kv_cache:
             fmha_input = self.rope_kvcache_impl.forward(qkv, None, self.rope_params)
         else:
             fmha_input = qkv

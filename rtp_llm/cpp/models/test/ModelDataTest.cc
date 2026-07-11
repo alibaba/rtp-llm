@@ -3,6 +3,7 @@
 
 #include "rtp_llm/cpp/testing/TestBase.h"
 #include "rtp_llm/cpp/models/ModelTypes.h"
+#include "rtp_llm/cpp/models/PyWrappedModel.h"
 #include "rtp_llm/cpp/models/Sampler.h"
 
 using namespace std;
@@ -57,6 +58,46 @@ TEST_F(ModelDataTest, testConstruct) {
     builder.setSequenceLengths(sampler_inputs, sequence_lengths);
     auto sl = sampler_inputs.sequence_lengths;
     EXPECT_EQ(std::vector<int>(sl.data_ptr<int>(), sl.data_ptr<int>() + sl.numel()), std::vector<int>({1, 2, 3, 4}));
+}
+
+TEST_F(ModelDataTest, contextParallelFallsBackForUnsupportedInputs) {
+    GptModelInputs inputs;
+    inputs.prefix_lengths = torch::tensor({0}, torch::kInt32);
+    EXPECT_TRUE(PyWrappedModel::shouldUseContextParallel(inputs, true));
+    EXPECT_FALSE(PyWrappedModel::shouldUseContextParallel(inputs, false));
+
+    inputs.multimodal_features = std::vector<torch::Tensor>{torch::ones({1, 2})};
+    EXPECT_FALSE(PyWrappedModel::shouldUseContextParallel(inputs, true));
+
+    inputs                      = GptModelInputs{};
+    inputs.prefix_lengths       = torch::tensor({0}, torch::kInt32);
+    inputs.mm_extra_input       = std::vector<torch::Tensor>{torch::ones({2})};
+    EXPECT_FALSE(PyWrappedModel::shouldUseContextParallel(inputs, true));
+
+    inputs                      = GptModelInputs{};
+    inputs.prefix_lengths       = torch::tensor({0}, torch::kInt32);
+    inputs.mm_features_locs     = torch::tensor({0}, torch::kInt32);
+    EXPECT_FALSE(PyWrappedModel::shouldUseContextParallel(inputs, true));
+
+    inputs                      = GptModelInputs{};
+    inputs.prefix_lengths       = torch::tensor({0}, torch::kInt32);
+    inputs.text_tokens_mask     = torch::tensor({1}, torch::kInt32);
+    EXPECT_FALSE(PyWrappedModel::shouldUseContextParallel(inputs, true));
+
+    inputs                      = GptModelInputs{};
+    inputs.prefix_lengths       = torch::tensor({0}, torch::kInt32);
+    inputs.last_hidden_states   = torch::ones({4, 8});
+    EXPECT_FALSE(PyWrappedModel::shouldUseContextParallel(inputs, true));
+
+    inputs                      = GptModelInputs{};
+    inputs.prefix_lengths       = torch::tensor({0}, torch::kInt32);
+    inputs.combo_position_ids   = torch::tensor({0, 0, 0, 1, 1, 1}, torch::kInt32);
+    EXPECT_FALSE(PyWrappedModel::shouldUseContextParallel(inputs, true));
+
+    inputs                      = GptModelInputs{};
+    inputs.prefix_lengths       = torch::tensor({0}, torch::kInt32);
+    inputs.is_target_verify     = true;
+    EXPECT_FALSE(PyWrappedModel::shouldUseContextParallel(inputs, true));
 }
 
 }  // namespace rtp_llm

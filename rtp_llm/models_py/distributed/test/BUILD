@@ -12,6 +12,20 @@ py_test (
     exec_properties = {'gpu':'H20', 'gpu_count':'2'},
 )
 
+py_test(
+    name = "deepep_wrapper_config_test",
+    srcs = ["deepep_wrapper_config_test.py"],
+    deps = [
+        "//rtp_llm:config",
+        "//rtp_llm:testlib",
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm/models_py/distributed:collective_torch",
+    ],
+    env = {"GPU_COUNT": "1"},
+    tags = ["open_skip", "H20"],
+    exec_properties = {'gpu':'H20', 'gpu_count':'1'},
+)
+
 py_test (
     name = "moriep_test",
     srcs = ["moriep_test.py"],

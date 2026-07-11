@@ -35,6 +35,7 @@ def get_mla_impl(
 ) -> MlaImplBase:
 
     mla_impls = PREFILL_MLA_IMPS if attn_inputs.is_prefill else DECODE_MLA_IMPS
+    is_context_parallel = attn_inputs.context_parallel_info is not None
     for impl in mla_impls:
         # Check support before creating instance
         if not impl.support(attn_configs, attn_inputs):
@@ -45,13 +46,14 @@ def get_mla_impl(
         use_fast_path = (
             attn_inputs.is_prefill
             and attn_inputs.cu_kv_seqlens_device.max().item() <= attn_configs.indexer_topk
-            and not (
-                parallelism_config and parallelism_config.prefill_cp_config.is_enabled()
-            )
+            and not is_context_parallel
         )
 
+        parallelism_config_for_support = (
+            parallelism_config if is_context_parallel else None
+        )
         if not use_fast_path and not impl.support_parallelism_config(
-            parallelism_config
+            parallelism_config_for_support
         ):
             continue
 
@@ -149,6 +151,7 @@ def get_fmha_impl(
     attn_inputs.is_cuda_graph = is_cuda_graph
 
     mha_impls = PREFILL_MHA_IMPS if attn_inputs.is_prefill else DECODE_MHA_IMPS
+    is_context_parallel = attn_inputs.context_parallel_info is not None
 
     for impl in mha_impls:
         # Check if this FMHA implementation is disabled before creating instance
@@ -162,8 +165,10 @@ def get_fmha_impl(
         if not impl.support(attn_configs, attn_inputs):
             continue
 
-        # Check if implementation supports parallelism config
-        if not impl.support_parallelism_config(parallelism_config):
+        parallelism_config_for_support = (
+            parallelism_config if is_context_parallel else None
+        )
+        if not impl.support_parallelism_config(parallelism_config_for_support):
             continue
         try:
             instance = impl(attn_configs, attn_inputs, parallelism_config)
