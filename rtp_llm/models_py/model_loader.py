@@ -188,28 +188,31 @@ class NewModelLoader:
             for name, tensor in module.named_parameters(
                 recurse=False, remove_duplicate=False
             ):
-                aliases.setdefault(("parameter", id(tensor)), []).append((module, name))
+                aliases.setdefault(id(tensor), []).append(("parameter", module, name))
             for name, tensor in module.named_buffers(
                 recurse=False, remove_duplicate=False
             ):
                 if tensor is not None:
-                    aliases.setdefault(("buffer", id(tensor)), []).append((module, name))
-        return [
-            (kind, registrations)
-            for (kind, _), registrations in aliases.items()
-            if len(registrations) > 1
-        ]
+                    aliases.setdefault(id(tensor), []).append(("buffer", module, name))
+        return [registrations for registrations in aliases.values() if len(registrations) > 1]
 
     @staticmethod
     def _restore_tensor_aliases(alias_groups) -> None:
-        for kind, registrations in alias_groups:
-            storage_name = "_parameters" if kind == "parameter" else "_buffers"
-            first_module, first_name = registrations[0]
-            shared = getattr(first_module, storage_name)[first_name]
+        for registrations in alias_groups:
+            first_kind, first_module, first_name = registrations[0]
+            first_storage = (
+                first_module._parameters
+                if first_kind == "parameter"
+                else first_module._buffers
+            )
+            shared = first_storage[first_name]
             if shared is None:
-                raise RuntimeError(f"Shared {kind} {first_name!r} disappeared during migration")
-            for module, name in registrations[1:]:
-                getattr(module, storage_name)[name] = shared
+                raise RuntimeError(
+                    f"Shared {first_kind} {first_name!r} disappeared during migration"
+                )
+            for kind, module, name in registrations[1:]:
+                storage = module._parameters if kind == "parameter" else module._buffers
+                storage[name] = shared
 
     @staticmethod
     def _run_post_load_hooks(model: nn.Module) -> None:

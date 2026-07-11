@@ -37,6 +37,9 @@ class _GpuAliasModel(RtpModule):
         cross = torch.empty(1)
         self.register_buffer("cross", cross, persistent=True)
         self.child.register_buffer("cross_alias", cross, persistent=True)
+        mixed = nn.Parameter(torch.empty(1))
+        self.mixed_parameter = mixed
+        self.register_buffer("mixed_buffer", mixed, persistent=True)
 
 
 register_model("foundation_gpu_alias_model")(_GpuAliasModel)
@@ -60,7 +63,11 @@ class FoundationGpuTest(unittest.TestCase):
     def test_buffer_aliases_survive_device_migration(self):
         with tempfile.TemporaryDirectory() as model_path:
             save_file(
-                {"same_alias": torch.ones(1), "child.cross_alias": torch.ones(1)},
+                {
+                    "same_alias": torch.ones(1),
+                    "child.cross_alias": torch.ones(1),
+                    "mixed_buffer": torch.ones(1),
+                },
                 os.path.join(model_path, "model.safetensors"),
             )
             model = NewModelLoader(
@@ -70,11 +77,14 @@ class FoundationGpuTest(unittest.TestCase):
             ).load()
         self.assertIs(model.same, model.same_alias)
         self.assertIs(model.cross, model.child.cross_alias)
+        self.assertIs(model.mixed_parameter, model.mixed_buffer)
         with torch.inference_mode():
             model.same.add_(1)
             model.child.cross_alias.add_(2)
+            model.mixed_parameter.add_(3)
         self.assertEqual(model.same_alias.item(), 2)
         self.assertEqual(model.cross.item(), 3)
+        self.assertEqual(model.mixed_buffer.item(), 4)
 
     def test_cross_device_copy_does_not_allocate_full_target_temporary(self):
         class CudaTarget(RtpModule):
