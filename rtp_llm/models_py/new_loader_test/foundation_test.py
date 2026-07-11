@@ -372,6 +372,8 @@ class FoundationLoaderTest(unittest.TestCase):
             NewLoaderConfig(ep_size=2, ep_rank=2)
         with self.assertRaisesRegex(ValueError, "Invalid device"):
             NewLoaderConfig(device="not:a:device")
+        with self.assertRaisesRegex(ValueError, "cannot be meta"):
+            NewLoaderConfig(device="meta")
 
     def test_device_override_is_visible_during_model_construction(self):
         class DeviceAwareModel(RtpModule):
@@ -387,7 +389,7 @@ class FoundationLoaderTest(unittest.TestCase):
             torch.save({"weight": torch.ones(1)}, os.path.join(model_path, "model.pt"))
             model = NewModelLoader(
                 config,
-                NewLoaderConfig(device="meta"),
+                NewLoaderConfig(device="cuda:7"),
                 model_path=model_path,
                 device="cpu",
             ).load()
@@ -400,6 +402,8 @@ class FoundationLoaderTest(unittest.TestCase):
             NewModelLoader(config, NewLoaderConfig(device="cpu"), device="")
         with self.assertRaisesRegex(ValueError, "Invalid device override"):
             NewModelLoader(config, NewLoaderConfig(device="cpu"), device="not:a:device")
+        with self.assertRaisesRegex(ValueError, "cannot be meta"):
+            NewModelLoader(config, NewLoaderConfig(device="cpu"), device="meta")
 
     def test_load_and_postprocess_run_in_inference_mode(self):
         class InferenceModel(RtpModule):

@@ -16,6 +16,17 @@ from rtp_llm.models_py.registry import get_model_class, list_models
 logger = logging.getLogger(__name__)
 
 
+def _validate_runtime_device(device: str, label: str) -> None:
+    if not isinstance(device, str) or not device.strip():
+        raise ValueError(f"{label} must be a non-empty string")
+    try:
+        parsed = torch.device(device)
+    except (RuntimeError, ValueError) as exc:
+        raise ValueError(f"Invalid {label} {device!r}") from exc
+    if parsed.type == "meta":
+        raise ValueError(f"{label} cannot be meta; newloader requires materialized weights")
+
+
 class NewLoaderLoadMethod(str, Enum):
     AUTO = "auto"
     SCRATCH = "scratch"
@@ -49,12 +60,7 @@ class NewLoaderConfig:
             raise ValueError(f"Invalid EP partition: rank={self.ep_rank}, size={self.ep_size}")
         if not isinstance(self.compute_dtype, torch.dtype):
             raise TypeError("compute_dtype must be a torch.dtype")
-        if not isinstance(self.device, str) or not self.device.strip():
-            raise ValueError("device must be a non-empty string")
-        try:
-            torch.device(self.device)
-        except (RuntimeError, ValueError) as exc:
-            raise ValueError(f"Invalid device {self.device!r}") from exc
+        _validate_runtime_device(self.device, "device")
 
 
 class NewModelLoader:
@@ -69,12 +75,7 @@ class NewModelLoader:
     ):
         effective_config = load_config or NewLoaderConfig()
         if device is not None:
-            if not isinstance(device, str) or not device.strip():
-                raise ValueError("device override must be a non-empty string")
-            try:
-                torch.device(device)
-            except (RuntimeError, ValueError) as exc:
-                raise ValueError(f"Invalid device override {device!r}") from exc
+            _validate_runtime_device(device, "device override")
             effective_config = replace(effective_config, device=device)
         self.model_config = model_config
         self.load_config = effective_config
