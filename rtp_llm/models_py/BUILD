@@ -113,6 +113,22 @@ py_library(
 )
 
 py_library(
+    name = "new_weight_loader",
+    srcs = [
+        "__init__.py",
+        "model_loader.py",
+        "module_base.py",
+        "registry.py",
+        "weight_mapper.py",
+    ],
+    deps = [
+        "//rtp_llm:safetensors",
+        "//rtp_llm:torch",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+py_library(
     name = "models",
     srcs = glob([
         "model_desc/*.py",
