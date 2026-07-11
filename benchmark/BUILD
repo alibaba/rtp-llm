@@ -1,5 +1,3 @@
-load("@arch_config//:arch_select.bzl", "torch_deps")
-
 py_test(
     name = "topology_kv_candidate_schedule_cpu_test",
     srcs = [
@@ -7,7 +5,7 @@ py_test(
         "topology_kv_candidate_schedule.py",
     ],
     main = "test_topology_kv_candidate_schedule.py",
-    deps = torch_deps(),
+    deps = ["//rtp_llm:torch"],
 )
 
 py_test(
@@ -18,5 +16,5 @@ py_test(
     ],
     main = "test_topology_kv_candidate_schedule_cuda.py",
     tags = ["manual"],
-    deps = torch_deps(),
+    deps = ["//rtp_llm:torch"],
 )
