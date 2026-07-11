@@ -109,6 +109,11 @@ message GenerateConfigPB {
     bool enable_cross_sequence_ban = 61;
     // 跨序列分叉起始商品位置
     int32 cross_seq_diverge_start_combo = 62;
+    bool return_prompt_logits = 63;
+    int32 prompt_logits_top_k = 64;
+    int32 prompt_logits_start = 65;
+    int32 prompt_logits_end = 66;
+    bool return_target_logprob = 67;
 }
 
 message MMPreprocessConfigPB {
@@ -181,6 +186,14 @@ message AuxInfoPB {
     map<int32, int32> multimodal_lengths = 27;
 }
 
+message PromptLogitsOutputPB {
+    TensorPB topk_logprobs = 1;
+    TensorPB topk_token_ids = 2;
+    TensorPB target_logprobs = 3;
+    int32 start_pos = 4;
+    int32 end_pos = 5;
+}
+
 message FlattenOutputPB {
     repeated bool finished = 1;
     repeated AuxInfoPB aux_info = 2;
@@ -190,6 +203,7 @@ message FlattenOutputPB {
     TensorPB logits = 6;
     TensorPB all_probs = 7;
     TensorPB all_hidden_states = 8;
+    PromptLogitsOutputPB prompt_logits = 9;
 }
 
 message GenerateOutputsPB {

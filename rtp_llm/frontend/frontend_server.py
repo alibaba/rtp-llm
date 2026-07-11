@@ -292,6 +292,12 @@ class FrontendServer(object):
             return response
 
         try:
+            if request.prompt_logprobs is not None:
+                request.stream = False
+            elif request.extra_configs is not None and getattr(
+                request.extra_configs, "return_prompt_logits", False
+            ):
+                request.stream = False
             request_dict = request.model_dump(exclude_none=True)
             request_dict[request_id_field_name] = request_id
             rep = await self._infer_wrap(request_dict, raw_request, generate_call)
