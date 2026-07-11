@@ -182,39 +182,6 @@ class NewModelLoader:
                 validator(loaded_tensor_ids)
 
     @staticmethod
-    def _collect_tensor_alias_groups(model: nn.Module):
-        aliases = {}
-        for module in model.modules():
-            for name, tensor in module.named_parameters(
-                recurse=False, remove_duplicate=False
-            ):
-                aliases.setdefault(id(tensor), []).append(("parameter", module, name))
-            for name, tensor in module.named_buffers(
-                recurse=False, remove_duplicate=False
-            ):
-                if tensor is not None:
-                    aliases.setdefault(id(tensor), []).append(("buffer", module, name))
-        return [registrations for registrations in aliases.values() if len(registrations) > 1]
-
-    @staticmethod
-    def _restore_tensor_aliases(alias_groups) -> None:
-        for registrations in alias_groups:
-            first_kind, first_module, first_name = registrations[0]
-            first_storage = (
-                first_module._parameters
-                if first_kind == "parameter"
-                else first_module._buffers
-            )
-            shared = first_storage[first_name]
-            if shared is None:
-                raise RuntimeError(
-                    f"Shared {first_kind} {first_name!r} disappeared during migration"
-                )
-            for kind, module, name in registrations[1:]:
-                storage = module._parameters if kind == "parameter" else module._buffers
-                storage[name] = shared
-
-    @staticmethod
     def _run_post_load_hooks(model: nn.Module) -> None:
         for module in model.modules():
             hook = getattr(module, "process_weights_after_loading", None)
@@ -234,9 +201,7 @@ class NewModelLoader:
         self._validate_loaded_weights(model)
         logger.info("Streamed checkpoint tensors in %.2fs", time.time() - started)
 
-        alias_groups = self._collect_tensor_alias_groups(model)
         model.to(self.device)
-        self._restore_tensor_aliases(alias_groups)
         self._validate_loaded_weights(model)
         self._run_post_load_hooks(model)
         return model

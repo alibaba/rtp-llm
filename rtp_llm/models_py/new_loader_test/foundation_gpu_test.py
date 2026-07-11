@@ -40,6 +40,14 @@ class _GpuAliasModel(RtpModule):
         mixed = nn.Parameter(torch.empty(1))
         self.mixed_parameter = mixed
         self.register_buffer("mixed_buffer", mixed, persistent=True)
+        parent_first = nn.Parameter(torch.empty(1))
+        self.register_buffer("parent_buffer", parent_first, persistent=True)
+        self.child.parent_parameter = parent_first
+        self.left = RtpModule()
+        self.right = RtpModule()
+        sibling = nn.Parameter(torch.empty(1))
+        self.left.register_buffer("sibling_buffer", sibling, persistent=True)
+        self.right.sibling_parameter = sibling
 
 
 register_model("foundation_gpu_alias_model")(_GpuAliasModel)
@@ -67,6 +75,8 @@ class FoundationGpuTest(unittest.TestCase):
                     "same_alias": torch.ones(1),
                     "child.cross_alias": torch.ones(1),
                     "mixed_buffer": torch.ones(1),
+                    "parent_buffer": torch.ones(1),
+                    "left.sibling_buffer": torch.ones(1),
                 },
                 os.path.join(model_path, "model.safetensors"),
             )
@@ -78,6 +88,10 @@ class FoundationGpuTest(unittest.TestCase):
         self.assertIs(model.same, model.same_alias)
         self.assertIs(model.cross, model.child.cross_alias)
         self.assertIs(model.mixed_parameter, model.mixed_buffer)
+        self.assertIs(model.parent_buffer, model.child.parent_parameter)
+        self.assertIs(model.left.sibling_buffer, model.right.sibling_parameter)
+        self.assertIsInstance(model.child.parent_parameter, nn.Parameter)
+        self.assertIsInstance(model.right.sibling_parameter, nn.Parameter)
         with torch.inference_mode():
             model.same.add_(1)
             model.child.cross_alias.add_(2)
@@ -85,6 +99,12 @@ class FoundationGpuTest(unittest.TestCase):
         self.assertEqual(model.same_alias.item(), 2)
         self.assertEqual(model.cross.item(), 3)
         self.assertEqual(model.mixed_buffer.item(), 4)
+        with torch.inference_mode():
+            model.to(dtype=torch.float16)
+        self.assertIs(model.parent_buffer, model.child.parent_parameter)
+        self.assertIs(model.left.sibling_buffer, model.right.sibling_parameter)
+        self.assertIsInstance(model.child.parent_parameter, nn.Parameter)
+        self.assertIsInstance(model.right.sibling_parameter, nn.Parameter)
 
     def test_cross_device_copy_does_not_allocate_full_target_temporary(self):
         class CudaTarget(RtpModule):

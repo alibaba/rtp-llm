@@ -45,6 +45,47 @@ def collect_loaded_tensor_ids(module: nn.Module) -> set:
     return loaded_tensor_ids
 
 
+def _collect_tensor_alias_groups(module: nn.Module):
+    aliases = {}
+    for current in module.modules():
+        for name, tensor in current.named_parameters(
+            recurse=False, remove_duplicate=False
+        ):
+            aliases.setdefault(id(tensor), []).append(("parameter", current, name))
+        for name, tensor in current.named_buffers(
+            recurse=False, remove_duplicate=False
+        ):
+            if tensor is not None:
+                aliases.setdefault(id(tensor), []).append(("buffer", current, name))
+    return [registrations for registrations in aliases.values() if len(registrations) > 1]
+
+
+def _restore_tensor_aliases(alias_groups) -> None:
+    for registrations in alias_groups:
+        parameter_registrations = [item for item in registrations if item[0] == "parameter"]
+        for _, module, name in parameter_registrations:
+            if not isinstance(module._parameters[name], nn.Parameter):
+                raise RuntimeError(
+                    f"Parameter alias {type(module).__name__}.{name} lost Parameter type"
+                )
+        master_kind, master_module, master_name = (
+            parameter_registrations[0] if parameter_registrations else registrations[0]
+        )
+        master_storage = (
+            master_module._parameters
+            if master_kind == "parameter"
+            else master_module._buffers
+        )
+        shared = master_storage[master_name]
+        if shared is None:
+            raise RuntimeError(
+                f"Shared {master_kind} {master_name!r} disappeared during migration"
+            )
+        for kind, current, name in registrations:
+            storage = current._parameters if kind == "parameter" else current._buffers
+            storage[name] = shared
+
+
 class RtpModule(nn.Module):
     """Streaming checkpoint dispatcher for newloader model trees.
 
@@ -52,6 +93,12 @@ class RtpModule(nn.Module):
     override it to implement sharding or layout conversion and must then own
     their post-load completeness checks.
     """
+
+    def _apply(self, fn, recurse=True):
+        alias_groups = _collect_tensor_alias_groups(self)
+        result = super()._apply(fn, recurse=recurse)
+        _restore_tensor_aliases(alias_groups)
+        return result
 
     def _assign_weight(self, module: nn.Module, name: str, tensor: torch.Tensor) -> bool:
         if "." in name:
