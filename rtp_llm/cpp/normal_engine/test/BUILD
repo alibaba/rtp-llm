@@ -63,6 +63,7 @@ cc_test(
     copts = test_copts,
     deps = [
         "//rtp_llm/cpp/normal_engine:normal_engine",
+        "//rtp_llm/cpp/utils:decode_probe_trigger",
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
     ],

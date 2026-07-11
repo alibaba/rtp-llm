@@ -15,6 +15,7 @@
 #include <utility>
 
 #include "autil/TimeUtility.h"
+#include "rtp_llm/cpp/utils/DecodeProbeTrigger.h"
 
 namespace rtp_llm {
 namespace {
@@ -234,6 +235,13 @@ struct WatchState {
     size_t             cf_match_index = 0;
 };
 
+struct BadWatchUpdate {
+    int                     cf_count = 0;
+    DecodeRepeatedSuffixInfo repeated_suffix;
+    bool                    triggered = false;
+    std::string             reason;
+};
+
 std::unordered_map<std::string, WatchState>& watchStates() {
     static std::unordered_map<std::string, WatchState> states;
     return states;
@@ -317,6 +325,42 @@ DecodeRepeatedSuffixInfo findRepeatedSuffix(const std::vector<int>& values, int 
         }
     }
     return info;
+}
+
+BadWatchUpdate updateBadWatchState(WatchState&              state,
+                                   const std::string&       trace_id,
+                                   int                      sequence_length,
+                                   const std::vector<int>&  new_tokens,
+                                   int                      bad_watch_tail_size,
+                                   int                      bad_watch_min_cf) {
+    static const std::vector<int> cf_pattern = {27, 9500, 1419, 9500, 29};
+
+    updateStreamingSubsequenceCount(state, new_tokens, cf_pattern);
+    state.token_tail.insert(state.token_tail.end(), new_tokens.begin(), new_tokens.end());
+    if (static_cast<int>(state.token_tail.size()) > bad_watch_tail_size) {
+        state.token_tail.erase(state.token_tail.begin(),
+                               state.token_tail.begin() + (state.token_tail.size() - bad_watch_tail_size));
+    }
+
+    BadWatchUpdate update;
+    update.cf_count        = countSubsequence(state.token_tail, cf_pattern);
+    update.repeated_suffix = findRepeatedSuffix(state.token_tail, 8, 8);
+    const bool cf_tail_repeat = update.cf_count >= bad_watch_min_cf;
+    if (!state.triggered && (cf_tail_repeat || update.repeated_suffix.matched)) {
+        state.triggered = true;
+        update.triggered = true;
+        update.reason = cf_tail_repeat ? "cf_tail_repeat" : "repeated_suffix";
+
+        if (DecodeProbeTrigger::enabled()) {
+            DecodeProbeTriggerEvent event;
+            event.trace_id                 = trace_id;
+            event.reason                   = update.reason;
+            event.observed_sequence_length = sequence_length;
+            event.timestamp_us             = autil::TimeUtility::currentTimeInMicroSeconds();
+            DecodeProbeTrigger::publish(event);
+        }
+    }
+    return update;
 }
 
 void appendBlockSlice(std::ostream& os, const BlockIndicesType& blocks, int begin, int end) {
@@ -530,6 +574,17 @@ DecodeRepeatedSuffixInfo DecodeTokenTraceLogger::debugFindRepeatedSuffixForTest(
     return findRepeatedSuffix(values, max_pattern_size, min_repeats);
 }
 
+bool DecodeTokenTraceLogger::debugFeedBadWatchTokensForTest(const std::string&      trace_id,
+                                                             const std::vector<int>& token_ids_cpu,
+                                                             int                     sequence_length,
+                                                             int bad_watch_tail_size,
+                                                             int bad_watch_min_cf) {
+    auto& state = watchStates()[trace_id];
+    return updateBadWatchState(
+               state, trace_id, sequence_length, token_ids_cpu, bad_watch_tail_size, bad_watch_min_cf)
+        .triggered;
+}
+
 DecodeBlockTraceInfo DecodeTokenTraceLogger::debugComputeBlockTraceForTest(int seq_len, int seq_size_per_block) {
     return computeBlockTrace(seq_len, seq_size_per_block);
 }
@@ -578,15 +633,12 @@ void DecodeTokenTraceLogger::logDispatchBatch(const StreamGroups&   stream_group
                 new_tokens.push_back(token_ptr[(batch_idx_out + i) * token_stride + token_stride - 1]);
             }
             auto& state = watchStates()[stream->traceId()];
-            static const std::vector<int> cf_pattern = {27, 9500, 1419, 9500, 29};
-            updateStreamingSubsequenceCount(state, new_tokens, cf_pattern);
-            state.token_tail.insert(state.token_tail.end(), new_tokens.begin(), new_tokens.end());
-            if ((int)state.token_tail.size() > cfg.bad_watch_tail_size) {
-                state.token_tail.erase(state.token_tail.begin(),
-                                       state.token_tail.begin() + (state.token_tail.size() - cfg.bad_watch_tail_size));
-            }
-            const int cf_count = countSubsequence(state.token_tail, cf_pattern);
-            const auto repeated_suffix = findRepeatedSuffix(state.token_tail, 8, 8);
+            const auto watch_update = updateBadWatchState(state,
+                                                           stream->traceId(),
+                                                           stream->seqLength(),
+                                                           new_tokens,
+                                                           cfg.bad_watch_tail_size,
+                                                           cfg.bad_watch_min_cf);
             const int seq_size_per_block =
                 stream->seqSizePerBlock() > 0 ? stream->seqSizePerBlock() : std::max(1, stream->seqLength());
             const auto block_trace = computeBlockTrace(stream->seqLength(), seq_size_per_block);
@@ -618,21 +670,19 @@ void DecodeTokenTraceLogger::logDispatchBatch(const StreamGroups&   stream_group
                     state.history.pop_front();
                 }
             }
-            const bool cf_tail_repeat = cf_count >= cfg.bad_watch_min_cf;
-            if (!state.triggered && (cf_tail_repeat || repeated_suffix.matched)) {
-                state.triggered = true;
+            if (watch_update.triggered) {
                 std::ostringstream watch_row;
                 watch_row << "{\"ts_us\":" << autil::TimeUtility::currentTimeInMicroSeconds()
                           << ",\"pid\":" << ::getpid() << ",\"rank\":\"" << jsonEscape(rankString())
                           << "\",\"event\":\"decode_bad_watch_trigger\""
                           << ",\"reason\":\""
-                          << (cf_tail_repeat ? "cf_tail_repeat" : "repeated_suffix")
-                          << "\",\"cf_count\":" << cf_count
+                          << watch_update.reason
+                          << "\",\"cf_count\":" << watch_update.cf_count
                           << ",\"cf_total\":" << state.cf_total
-                          << ",\"repeat_pattern_size\":" << repeated_suffix.pattern_size
-                          << ",\"repeat_count\":" << repeated_suffix.repeat_count
+                          << ",\"repeat_pattern_size\":" << watch_update.repeated_suffix.pattern_size
+                          << ",\"repeat_count\":" << watch_update.repeated_suffix.repeat_count
                           << ",\"repeat_pattern\":";
-                appendIntVector(watch_row, repeated_suffix.pattern);
+                appendIntVector(watch_row, watch_update.repeated_suffix.pattern);
                 watch_row << ",\"total_decode_batch_size\":" << stream_groups.totalDecodeBatchSize()
                           << ",\"total_context_batch_size\":" << stream_groups.totalContextBatchSize()
                           << ",\"total_sampler_batch_size_in\":" << stream_groups.totalSamplerBatchSizeIn()

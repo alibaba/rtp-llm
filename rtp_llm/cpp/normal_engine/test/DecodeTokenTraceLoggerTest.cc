@@ -1,10 +1,50 @@
 #include "rtp_llm/cpp/normal_engine/DecodeTokenTraceLogger.h"
 
+#include <cstdlib>
 #include <limits>
+#include <string>
 
+#include <sys/mman.h>
+#include <unistd.h>
+
+#include "rtp_llm/cpp/utils/DecodeProbeTrigger.h"
 #include "gtest/gtest.h"
 
 namespace rtp_llm {
+namespace {
+
+void configureRetrospectiveProbeForTest() {
+    static const std::string shm_name = "/rtpllm_decode_token_trace_logger_test_" + std::to_string(::getpid());
+    static const bool initialized = [&] {
+        ::shm_unlink(shm_name.c_str());
+        setenv("RTPLLM_RETROSPECTIVE_PROBE_DEBUG", "1", 1);
+        setenv("RTPLLM_RETROSPECTIVE_PROBE_SHM_NAME", shm_name.c_str(), 1);
+        setenv("WORLD_RANK", "0", 1);
+        setenv("WORLD_SIZE", "1", 1);
+        return true;
+    }();
+    (void)initialized;
+}
+
+uint64_t expectAndAcknowledgeEvent(const std::string& trace_id, const std::string& reason, int sequence_length) {
+    DecodeProbeTriggerEvent event;
+    if (!DecodeProbeTrigger::peek(event)) {
+        ADD_FAILURE() << "expected a retrospective trigger event";
+        return 0;
+    }
+    EXPECT_EQ(trace_id, event.trace_id);
+    EXPECT_EQ(reason, event.reason);
+    EXPECT_EQ(sequence_length, event.observed_sequence_length);
+    EXPECT_TRUE(DecodeProbeTrigger::acknowledge(event.generation));
+    return event.generation;
+}
+
+uint64_t currentTriggerGeneration() {
+    DecodeProbeTriggerEvent event;
+    return DecodeProbeTrigger::peek(event) ? event.generation : 0;
+}
+
+}  // namespace
 
 TEST(DecodeTokenTraceLoggerTest, defaultConfigIsDisabled) {
     auto config = DecodeTokenTraceConfig::fromValues(false, "", "", true, 16, false, "", 128, 4, 128);
@@ -61,6 +101,40 @@ TEST(DecodeTokenTraceLoggerTest, repeatedSuffixDetectorIgnoresNonSuffixRepeats) 
     auto info = DecodeTokenTraceLogger::debugFindRepeatedSuffixForTest(tokens, 8, 4);
 
     EXPECT_FALSE(info.matched);
+}
+
+TEST(DecodeTokenTraceLoggerTest, CfPatternPublishesOneRetrospectiveEvent) {
+    configureRetrospectiveProbeForTest();
+    const std::string trace_id = "cf_probe_trace";
+    const std::vector<int> tokens = {
+        27, 9500, 1419, 9500, 29, 27, 9500, 1419, 9500, 29,
+        27, 9500, 1419, 9500, 29, 27, 9500, 1419, 9500, 29,
+    };
+
+    ASSERT_TRUE(DecodeTokenTraceLogger::debugFeedBadWatchTokensForTest(trace_id, tokens, 123));
+    const auto generation = expectAndAcknowledgeEvent(trace_id, "cf_tail_repeat", 123);
+    EXPECT_FALSE(DecodeTokenTraceLogger::debugFeedBadWatchTokensForTest(trace_id, tokens, 143));
+    EXPECT_EQ(generation, currentTriggerGeneration());
+}
+
+TEST(DecodeTokenTraceLoggerTest, GenericRepeatedSuffixPublishesOneEvent) {
+    configureRetrospectiveProbeForTest();
+    const std::string trace_id = "repeated_suffix_probe_trace";
+    const std::vector<int> tokens(8, 59140);
+
+    ASSERT_TRUE(DecodeTokenTraceLogger::debugFeedBadWatchTokensForTest(trace_id, tokens, 456));
+    const auto generation = expectAndAcknowledgeEvent(trace_id, "repeated_suffix", 456);
+    EXPECT_FALSE(DecodeTokenTraceLogger::debugFeedBadWatchTokensForTest(trace_id, tokens, 464));
+    EXPECT_EQ(generation, currentTriggerGeneration());
+}
+
+TEST(DecodeTokenTraceLoggerTest, NormalFormatTagsDoNotPublishEvent) {
+    configureRetrospectiveProbeForTest();
+    const std::vector<int> tokens = {27, 9500, 1419, 9500, 29, 42, 7, 59140, 220};
+    const auto generation_before = currentTriggerGeneration();
+
+    EXPECT_FALSE(DecodeTokenTraceLogger::debugFeedBadWatchTokensForTest("normal_format_trace", tokens, 64));
+    EXPECT_EQ(generation_before, currentTriggerGeneration());
 }
 
 TEST(DecodeTokenTraceLoggerTest, blockTraceSeparatesModelStepFromNextStep) {

@@ -62,6 +62,11 @@ public:
     static DecodeRepeatedSuffixInfo debugFindRepeatedSuffixForTest(const std::vector<int>& values,
                                                                     int                    max_pattern_size,
                                                                     int                    min_repeats);
+    static bool debugFeedBadWatchTokensForTest(const std::string&      trace_id,
+                                               const std::vector<int>& token_ids_cpu,
+                                               int                     sequence_length,
+                                               int                     bad_watch_tail_size = 128,
+                                               int                     bad_watch_min_cf    = 4);
     static DecodeBlockTraceInfo debugComputeBlockTraceForTest(int seq_len, int seq_size_per_block);
     static int debugComputeReuseTailLogicalBlockForTest(int reuse_len, int seq_size_per_block);
     static std::pair<int, int> debugComputeBlockWindowForTest(int logical_block, std::size_t block_count);
