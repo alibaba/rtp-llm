@@ -63,6 +63,16 @@ std::string envString(const char* name, const std::string& default_value = "") {
     return raw == nullptr ? default_value : std::string(raw);
 }
 
+std::string filenameComponent(std::string value) {
+    for (char& c : value) {
+        const auto ch = static_cast<unsigned char>(c);
+        if (!std::isalnum(ch) && c != '-' && c != '_' && c != '.') {
+            c = '_';
+        }
+    }
+    return value.empty() ? "unknown" : value;
+}
+
 std::vector<std::string> splitCsv(const std::string& value) {
     std::vector<std::string> out;
     std::stringstream        ss(value);
@@ -636,7 +646,357 @@ CudaGraphProbeCapture getCudaGraphProbeBuffer(const py::object& py_instance, int
             status.error += "; ";
         }
         status.error += e.what();
+        graph_probe.buffer = torch::Tensor();
+        graph_probe.layers.clear();
         return graph_probe;
+    }
+}
+
+struct CudaGraphProbeRingConfig {
+    bool        enabled{false};
+    int64_t     max_records{0};
+    int64_t     max_graph_bs{0};
+    int64_t     max_bytes{0};
+    int64_t     trigger_check_every{16};
+    std::string rank;
+    std::string trigger_file;
+    std::string output_stem;
+};
+
+const CudaGraphProbeRingConfig& cudaGraphProbeRingConfig() {
+    static const CudaGraphProbeRingConfig config = [] {
+        CudaGraphProbeRingConfig c;
+        c.enabled = envFlag("RTPLLM_CUDA_GRAPH_PROBE_RING_DEBUG", false)
+                    && envFlag("RTPLLM_QWEN3_NEXT_GRAPH_PROBE", false);
+        if (!c.enabled) {
+            return c;
+        }
+        c.max_records = std::max<int64_t>(1, envInt64("RTPLLM_CUDA_GRAPH_PROBE_RING_MAX_RECORDS", 50000));
+        c.max_graph_bs = std::max<int64_t>(1, envInt64("RTPLLM_CUDA_GRAPH_PROBE_RING_MAX_GRAPH_BS", 32));
+        c.max_bytes = std::max<int64_t>(1, envInt64("RTPLLM_CUDA_GRAPH_PROBE_RING_MAX_BYTES", 2LL << 30));
+        c.trigger_check_every =
+            std::max<int64_t>(1, envInt64("RTPLLM_CUDA_GRAPH_PROBE_RING_TRIGGER_CHECK_EVERY", 16));
+        const auto dir = envString("RTPLLM_CUDA_GRAPH_PROBE_RING_DIR", "/tmp/rtpllm_cuda_graph_probe_ring");
+        ensureDir(dir);
+        c.rank = filenameComponent(envString("WORLD_RANK", "unknown"));
+        const auto generation = std::chrono::duration_cast<std::chrono::microseconds>(
+                                    std::chrono::system_clock::now().time_since_epoch())
+                                    .count();
+        c.trigger_file = envString("RTPLLM_CUDA_GRAPH_PROBE_RING_TRIGGER_FILE", dir + "/dump.trigger");
+        c.output_stem = dir + "/cuda_graph_probe_ring_rank" + c.rank + "_pid" + std::to_string(getpid()) + "_gen"
+                        + std::to_string(generation);
+        return c;
+    }();
+    return config;
+}
+
+struct CudaGraphProbeRingMetadata {
+    uint64_t                 record_id{0};
+    int64_t                  current_bs{0};
+    int64_t                  graph_bs{0};
+    std::vector<std::string> trace_ids;
+    std::vector<int64_t>     input_lengths;
+    std::vector<int64_t>     sequence_lengths;
+};
+
+struct CudaGraphProbeBufferRef {
+    torch::Tensor        buffer;
+    std::vector<int64_t> layers;
+};
+
+struct CudaGraphProbeRingState {
+    torch::Tensor                           buffer;
+    std::vector<int64_t>                    layers;
+    std::vector<CudaGraphProbeRingMetadata> metadata;
+    std::unordered_map<int64_t, CudaGraphProbeBufferRef> graph_probes;
+    int64_t                                 ring_id{-1};
+    std::string                             tensor_file;
+    std::string                             metadata_file;
+    std::string                             completion_file;
+    uint64_t                                total_records{0};
+    bool                                    dumped{false};
+    bool                                    disabled{false};
+};
+
+std::unordered_map<const void*, CudaGraphProbeRingState> g_cuda_graph_probe_rings;
+std::atomic<int64_t>                                    g_cuda_graph_probe_ring_id{0};
+std::mutex                                              g_cuda_graph_probe_ring_mutex;
+
+CudaGraphProbeCapture getCudaGraphProbeBufferLight(const py::object& py_instance, int64_t graph_bs) {
+    CudaGraphProbeCapture graph_probe;
+    try {
+        if (!py::hasattr(py_instance, "get_cuda_graph_probe_buffer")) {
+            return graph_probe;
+        }
+        auto result = py_instance.attr("get_cuda_graph_probe_buffer")(graph_bs);
+        if (result.is_none()) {
+            return graph_probe;
+        }
+        auto capture = result.cast<py::tuple>();
+        if (capture.size() != 2) {
+            return graph_probe;
+        }
+        graph_probe.buffer = capture[0].cast<torch::Tensor>();
+        graph_probe.layers = capture[1].cast<std::vector<int64_t>>();
+        if (!graph_probe.buffer.defined() || graph_probe.buffer.dim() != 3
+            || graph_probe.buffer.size(0) != static_cast<int64_t>(graph_probe.layers.size())) {
+            return {};
+        }
+    } catch (const std::exception& e) {
+        RTP_LLM_LOG_WARNING("Failed to get lightweight CUDA graph probe buffer: %s", e.what());
+        return {};
+    }
+    return graph_probe;
+}
+
+std::vector<int64_t> hostTensorPrefix(const torch::Tensor& tensor, int64_t count) {
+    std::vector<int64_t> values;
+    values.reserve(count);
+    for (int64_t i = 0; i < count; ++i) {
+        int64_t value = 0;
+        values.push_back(hostScalarAt(tensor, i, value) ? value : -1);
+    }
+    return values;
+}
+
+void dumpCudaGraphProbeRing(CudaGraphProbeRingState& state) {
+    const auto valid_records = std::min<uint64_t>(state.total_records, state.buffer.size(0));
+    if (state.dumped || !state.buffer.defined() || valid_records == 0) {
+        return;
+    }
+    const auto tensor_tmp     = state.tensor_file + ".tmp";
+    const auto metadata_tmp   = state.metadata_file + ".tmp";
+    const auto completion_tmp = state.completion_file + ".tmp";
+    try {
+        cuda_graph::graphDeviceSynchronize();
+        const auto first_slot = state.total_records >= static_cast<uint64_t>(state.buffer.size(0))
+                                    ? state.total_records % state.buffer.size(0)
+                                    : 0;
+        torch::Tensor cpu;
+        if (first_slot == 0) {
+            cpu = state.buffer.narrow(0, 0, valid_records).to(torch::kCPU).contiguous();
+        } else {
+            cpu = torch::empty({static_cast<int64_t>(valid_records),
+                                state.buffer.size(1),
+                                state.buffer.size(2),
+                                state.buffer.size(3)},
+                               state.buffer.options().device(torch::kCPU));
+            const auto tail_records = state.buffer.size(0) - first_slot;
+            cpu.narrow(0, 0, tail_records).copy_(state.buffer.narrow(0, first_slot, tail_records));
+            cpu.narrow(0, tail_records, first_slot).copy_(state.buffer.narrow(0, 0, first_slot));
+        }
+        for (uint64_t i = 0; i < valid_records; ++i) {
+            const auto& record = state.metadata[(first_slot + i) % state.buffer.size(0)];
+            if (record.graph_bs < cpu.size(2)) {
+                cpu[i].narrow(1, record.graph_bs, cpu.size(2) - record.graph_bs).zero_();
+            }
+        }
+        std::ofstream tensor_out(tensor_tmp, std::ios::binary | std::ios::trunc);
+        tensor_out.write(static_cast<const char*>(cpu.data_ptr()), cpu.nbytes());
+        tensor_out.flush();
+        if (!tensor_out.good()) {
+            throw std::runtime_error("failed to write probe ring tensor file");
+        }
+        tensor_out.close();
+        if (tensor_out.fail()) {
+            throw std::runtime_error("failed to close probe ring tensor file");
+        }
+
+        std::ofstream out(metadata_tmp, std::ios::out | std::ios::trunc);
+        for (uint64_t i = 0; i < valid_records; ++i) {
+            const auto& record = state.metadata[(first_slot + i) % state.buffer.size(0)];
+            out << "{\"rank\":\"" << jsonEscape(cudaGraphProbeRingConfig().rank) << "\",\"pid\":" << getpid()
+                << ",\"runner_id\":" << state.ring_id << ",\"record_id\":" << record.record_id
+                << ",\"current_bs\":" << record.current_bs
+                << ",\"graph_bs\":" << record.graph_bs
+                << ",\"ring_max_graph_bs\":" << state.buffer.size(2)
+                << ",\"field_count\":" << state.buffer.size(3)
+                << ",\"dtype\":\"float32\",\"layers\":[";
+            for (size_t i = 0; i < state.layers.size(); ++i) {
+                out << (i == 0 ? "" : ",") << state.layers[i];
+            }
+            out << "],\"trace_ids\":[";
+            for (size_t i = 0; i < record.trace_ids.size(); ++i) {
+                out << (i == 0 ? "" : ",") << "\"" << jsonEscape(record.trace_ids[i]) << "\"";
+            }
+            out << "],\"input_lengths\":[";
+            for (size_t i = 0; i < record.input_lengths.size(); ++i) {
+                out << (i == 0 ? "" : ",") << record.input_lengths[i];
+            }
+            out << "],\"sequence_lengths\":[";
+            for (size_t i = 0; i < record.sequence_lengths.size(); ++i) {
+                out << (i == 0 ? "" : ",") << record.sequence_lengths[i];
+            }
+            out << "]}\n";
+        }
+        if (!out.good()) {
+            throw std::runtime_error("failed to write probe ring metadata file");
+        }
+        out.close();
+        if (out.fail()) {
+            throw std::runtime_error("failed to close probe ring metadata file");
+        }
+        if (rename(tensor_tmp.c_str(), state.tensor_file.c_str()) != 0
+            || rename(metadata_tmp.c_str(), state.metadata_file.c_str()) != 0) {
+            throw std::runtime_error("failed to publish probe ring data files");
+        }
+        std::ofstream completion_out(completion_tmp, std::ios::out | std::ios::trunc);
+        completion_out << "{\"records\":" << valid_records << ",\"tensor\":\""
+                       << jsonEscape(state.tensor_file) << "\",\"metadata\":\""
+                       << jsonEscape(state.metadata_file) << "\"}\n";
+        completion_out.flush();
+        if (!completion_out.good()) {
+            throw std::runtime_error("failed to write probe ring completion file");
+        }
+        completion_out.close();
+        if (completion_out.fail() || rename(completion_tmp.c_str(), state.completion_file.c_str()) != 0) {
+            throw std::runtime_error("failed to publish probe ring completion file");
+        }
+        state.dumped = true;
+        RTP_LLM_LOG_WARNING("Dumped CUDA graph probe ring records=%lu tensor=%s metadata=%s completion=%s",
+                            valid_records,
+                            state.tensor_file.c_str(),
+                            state.metadata_file.c_str(),
+                            state.completion_file.c_str());
+    } catch (const std::exception& e) {
+        unlink(tensor_tmp.c_str());
+        unlink(metadata_tmp.c_str());
+        unlink(completion_tmp.c_str());
+        RTP_LLM_LOG_WARNING("Failed to dump CUDA graph probe ring: %s", e.what());
+        throw;
+    }
+}
+
+void disableCudaGraphProbeRing(CudaGraphProbeRingState& state, const std::string& reason) {
+    state.buffer = torch::Tensor();
+    state.metadata.clear();
+    state.graph_probes.clear();
+    state.disabled = true;
+    RTP_LLM_LOG_WARNING("Disabled CUDA graph probe ring after capture failure: %s", reason.c_str());
+}
+
+bool validCudaGraphProbeCapture(const CudaGraphProbeCapture& graph_probe) {
+    return graph_probe.buffer.defined() && graph_probe.buffer.dim() == 3
+           && graph_probe.buffer.size(0) == static_cast<int64_t>(graph_probe.layers.size());
+}
+
+void releaseCudaGraphProbeRing(const void* runner_key) {
+    if (!cudaGraphProbeRingConfig().enabled) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(g_cuda_graph_probe_ring_mutex);
+    g_cuda_graph_probe_rings.erase(runner_key);
+}
+
+void captureCudaGraphProbeRing(const void*                  runner_key,
+                               const py::object&             py_instance,
+                               const CudaGraphProbeCapture& supplied_graph_probe,
+                               const PyModelInputs&         inputs,
+                               const CudaGraphState&        graph_state) {
+    const auto& config = cudaGraphProbeRingConfig();
+    if (!config.enabled) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(g_cuda_graph_probe_ring_mutex);
+    try {
+        auto& state = g_cuda_graph_probe_rings[runner_key];
+        if (state.dumped || state.disabled) {
+            return;
+        }
+        CudaGraphProbeCapture graph_probe;
+        graph_probe.buffer = supplied_graph_probe.buffer;
+        graph_probe.layers = supplied_graph_probe.layers;
+        if (validCudaGraphProbeCapture(graph_probe)) {
+            state.graph_probes[graph_state.current_real_graph_bs] = {graph_probe.buffer, graph_probe.layers};
+        } else {
+            if (graph_probe.buffer.defined()) {
+                RTP_LLM_LOG_WARNING("Ignoring malformed supplied CUDA graph probe buffer");
+                graph_probe.buffer = torch::Tensor();
+                graph_probe.layers.clear();
+            }
+            const auto iter = state.graph_probes.find(graph_state.current_real_graph_bs);
+            if (iter != state.graph_probes.end()) {
+                graph_probe.buffer = iter->second.buffer;
+                graph_probe.layers = iter->second.layers;
+            } else {
+                graph_probe = getCudaGraphProbeBufferLight(py_instance, graph_state.current_real_graph_bs);
+                if (validCudaGraphProbeCapture(graph_probe)) {
+                    state.graph_probes.emplace(graph_state.current_real_graph_bs,
+                                               CudaGraphProbeBufferRef{graph_probe.buffer, graph_probe.layers});
+                }
+            }
+        }
+        if (!validCudaGraphProbeCapture(graph_probe)) {
+            return;
+        }
+        if (!state.buffer.defined()) {
+            if (graph_probe.buffer.size(1) > config.max_graph_bs) {
+                RTP_LLM_LOG_WARNING("CUDA graph probe ring graph_bs=%ld exceeds configured max=%ld",
+                                    graph_probe.buffer.size(1),
+                                    config.max_graph_bs);
+                return;
+            }
+            const __int128 requested_bytes = static_cast<__int128>(config.max_records)
+                                               * graph_probe.buffer.size(0) * config.max_graph_bs
+                                               * graph_probe.buffer.size(2) * graph_probe.buffer.element_size();
+            if (requested_bytes > config.max_bytes) {
+                disableCudaGraphProbeRing(
+                    state,
+                    "requested GPU bytes exceed RTPLLM_CUDA_GRAPH_PROBE_RING_MAX_BYTES="
+                        + std::to_string(config.max_bytes));
+                return;
+            }
+            state.ring_id = g_cuda_graph_probe_ring_id.fetch_add(1, std::memory_order_relaxed);
+            const auto runner_suffix = "_runner" + std::to_string(state.ring_id);
+            state.tensor_file         = config.output_stem + runner_suffix + ".bin";
+            state.metadata_file       = config.output_stem + runner_suffix + ".jsonl";
+            state.completion_file     = config.output_stem + runner_suffix + ".complete";
+            state.layers = graph_probe.layers;
+            state.buffer = torch::empty({config.max_records,
+                                         graph_probe.buffer.size(0),
+                                         config.max_graph_bs,
+                                         graph_probe.buffer.size(2)},
+                                        graph_probe.buffer.options());
+            state.metadata.resize(config.max_records);
+        }
+        if (graph_probe.layers != state.layers || graph_probe.buffer.size(0) != state.buffer.size(1)
+            || graph_probe.buffer.size(2) != state.buffer.size(3)
+            || graph_probe.buffer.size(1) > state.buffer.size(2)) {
+            RTP_LLM_LOG_WARNING("CUDA graph probe ring layout changed; skipping record");
+            return;
+        }
+
+        const auto slot = state.total_records % config.max_records;
+        state.buffer[slot].narrow(1, 0, graph_probe.buffer.size(1)).copy_(graph_probe.buffer, true);
+        CudaGraphProbeRingMetadata metadata;
+        metadata.record_id        = state.total_records;
+        metadata.current_bs       = graph_state.current_batch_size;
+        metadata.graph_bs         = graph_state.current_real_graph_bs;
+        metadata.trace_ids.assign(inputs.trace_ids.begin(),
+                                  inputs.trace_ids.begin()
+                                      + std::min<int64_t>(inputs.trace_ids.size(), graph_state.current_batch_size));
+        metadata.input_lengths =
+            hostTensorPrefix(inputs.attention_inputs.input_lengths, graph_state.current_batch_size);
+        metadata.sequence_lengths =
+            hostTensorPrefix(inputs.attention_inputs.sequence_lengths, graph_state.current_batch_size);
+        state.metadata[slot] = std::move(metadata);
+        ++state.total_records;
+
+        if (state.total_records % config.trigger_check_every == 0
+            && access(config.trigger_file.c_str(), F_OK) == 0) {
+            dumpCudaGraphProbeRing(state);
+        }
+    } catch (const std::exception& e) {
+        auto iter = g_cuda_graph_probe_rings.find(runner_key);
+        if (iter != g_cuda_graph_probe_rings.end() && !iter->second.disabled) {
+            try {
+                cuda_graph::graphDeviceSynchronize();
+            } catch (...) {
+            }
+            disableCudaGraphProbeRing(iter->second, e.what());
+        } else {
+            RTP_LLM_LOG_WARNING("Failed to initialize CUDA graph probe ring: %s", e.what());
+        }
     }
 }
 
@@ -745,6 +1105,14 @@ void writeDecodeChecksumRecord(const DecodeChecksumRecord& record,
 }
 
 }  // namespace
+
+CudaGraphRunner::~CudaGraphRunner() {
+    releaseCudaGraphProbeRing(this);
+    RTP_LLM_LOG_INFO("Release CudaGraphRunner .....");
+    py::gil_scoped_acquire gil;
+    py_instance_.release();
+    RTP_LLM_LOG_INFO("Release CudaGraphRunner Successfully");
+}
 
 // clang-format off
 // CUDA Graph Mode Configuration Table:
@@ -1139,6 +1507,7 @@ PyModelOutputs CudaGraphRunner::forward(const PyModelInputs& inputs, CudaGraphSt
         if (checksum_record.selected) {
             graph_probe = getCudaGraphProbeBuffer(py_instance_, state.current_real_graph_bs);
         }
+        captureCudaGraphProbeRing(this, py_instance_, graph_probe, inputs, state);
         writeDecodeChecksumRecord(checksum_record,
                                   "after_replay",
                                   inputs,

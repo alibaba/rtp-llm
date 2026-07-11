@@ -65,12 +65,7 @@ public:
                          full_kv_cache_group_id_);
     }
 
-    ~CudaGraphRunner() {
-        RTP_LLM_LOG_INFO("Release CudaGraphRunner .....");
-        py::gil_scoped_acquire gil;
-        py_instance_.release();
-        RTP_LLM_LOG_INFO("Release CudaGraphRunner Successfully");
-    }
+    ~CudaGraphRunner() override;
     void           captureDecode();
     void           capturePrefill();
     void           captureDecodeOneBatchSize(int bs);

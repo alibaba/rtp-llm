@@ -2,6 +2,7 @@ import json
 import os
 import tempfile
 import unittest
+from pathlib import Path
 
 import torch
 
@@ -26,6 +27,7 @@ class _GraphProbeModel:
             layer_num=3,
         )
         self.debug_status_calls = 0
+        self.buffer_getter_calls = 0
 
     def prepare_fmha_impl(self, inputs, is_cuda_graph=False):
         inputs.attention_inputs.is_cuda_graph = is_cuda_graph
@@ -56,6 +58,7 @@ class _GraphProbeModel:
         return PyModelOutputs(hidden)
 
     def get_cuda_graph_probe_buffer(self, graph_bs):
+        self.buffer_getter_calls += 1
         return self.probe.get_capture(graph_bs)
 
     def get_cuda_graph_probe_debug_status(self, graph_bs):
@@ -73,6 +76,7 @@ class _GraphProbeModel:
 class TestQwen3NextGraphProbeGpu(unittest.TestCase):
     actual_bs = 21
     graph_bs = 24
+    ring_max_graph_bs = 32
     num_tokens_per_bs = 4
     hidden_size = 2
     max_seq_len = 16
@@ -84,6 +88,8 @@ class TestQwen3NextGraphProbeGpu(unittest.TestCase):
             prefix="qwen3_next_graph_probe_"
         )
         self.checksum_file = os.path.join(self.temp_dir.name, "checksum.jsonl")
+        self.ring_trigger_file = os.path.join(self.temp_dir.name, "ring.trigger")
+        os.environ["WORLD_RANK"] = "0"
         os.environ["RTPLLM_DECODE_CHECKSUM_DEBUG"] = "1"
         os.environ["RTPLLM_DECODE_CHECKSUM_SYNC_DEVICE"] = "1"
         os.environ["RTPLLM_DECODE_CHECKSUM_FILE"] = self.checksum_file
@@ -94,10 +100,31 @@ class TestQwen3NextGraphProbeGpu(unittest.TestCase):
         self.graph_probe_enabled = os.environ.get(
             "TEST_QWEN3_NEXT_GRAPH_PROBE_ENABLED", "1"
         ) == "1"
+        self.ring_only = os.environ.get(
+            "TEST_QWEN3_NEXT_GRAPH_PROBE_RING_ONLY", "0"
+        ) == "1"
+        self.ring_budget_reject = os.environ.get(
+            "TEST_QWEN3_NEXT_GRAPH_PROBE_RING_BUDGET_REJECT", "0"
+        ) == "1"
+        if self.ring_only or self.ring_budget_reject:
+            os.environ["RTPLLM_DECODE_CHECKSUM_DEBUG"] = "0"
         os.environ["RTPLLM_QWEN3_NEXT_GRAPH_PROBE"] = (
             "1" if self.graph_probe_enabled else "0"
         )
         os.environ["RTPLLM_QWEN3_NEXT_GRAPH_PROBE_LAYERS"] = "99,77"
+        os.environ["RTPLLM_CUDA_GRAPH_PROBE_RING_DEBUG"] = "1"
+        os.environ["RTPLLM_CUDA_GRAPH_PROBE_RING_DIR"] = self.temp_dir.name
+        os.environ["RTPLLM_CUDA_GRAPH_PROBE_RING_TRIGGER_FILE"] = (
+            self.ring_trigger_file
+        )
+        os.environ["RTPLLM_CUDA_GRAPH_PROBE_RING_MAX_RECORDS"] = "2"
+        os.environ["RTPLLM_CUDA_GRAPH_PROBE_RING_MAX_GRAPH_BS"] = str(
+            self.ring_max_graph_bs
+        )
+        os.environ["RTPLLM_CUDA_GRAPH_PROBE_RING_MAX_BYTES"] = (
+            "1" if self.ring_budget_reject else str(1 << 30)
+        )
+        os.environ["RTPLLM_CUDA_GRAPH_PROBE_RING_TRIGGER_CHECK_EVERY"] = "1"
 
         self.model = _GraphProbeModel()
         self.runner = CudaGraphRunner()
@@ -231,6 +258,15 @@ class TestQwen3NextGraphProbeGpu(unittest.TestCase):
             _graph_probe_stats((expected_residual + 1).reshape(self.actual_bs, -1)),
             equal_nan=True,
         )
+        if self.ring_only:
+            self._assert_ring_only_capture(inputs, replay_buffer.cpu().clone())
+            return
+        if self.ring_budget_reject:
+            self.runner.forward(inputs)
+            torch.cuda.synchronize()
+            self.assertFalse(list(Path(self.temp_dir.name).glob("*.bin")))
+            self.assertFalse(list(Path(self.temp_dir.name).glob("*.complete")))
+            return
 
         with open(self.checksum_file, encoding="utf-8") as checksum_stream:
             raw_records = [line for line in checksum_stream if line.strip()]
@@ -261,6 +297,7 @@ class TestQwen3NextGraphProbeGpu(unittest.TestCase):
             self.assertTrue(
                 all("graph_probe" not in lane for lane in after_replay["lanes"])
             )
+            self.assertFalse(list(Path(self.temp_dir.name).glob("*.complete")))
             return
         self.assertEqual(
             {
@@ -311,8 +348,11 @@ class TestQwen3NextGraphProbeGpu(unittest.TestCase):
         base_prefix = self.max_seq_len - self.num_tokens_per_bs
         inputs.attention_inputs.prefix_lengths[: self.actual_bs].fill_(base_prefix)
         inputs.attention_inputs.prefix_lengths[1] = base_prefix + 8
+        inputs.input_ids.add_(10)
         self.runner.forward(inputs)
         torch.cuda.synchronize()
+        replay_buffer, _ = self.model.get_cuda_graph_probe_buffer(self.graph_bs)
+        expected_ring_record_1 = replay_buffer.cpu().clone()
         self.assertEqual(status_calls + 1, self.model.debug_status_calls)
         with open(self.checksum_file, encoding="utf-8") as checksum_stream:
             records = [json.loads(line) for line in checksum_stream if line.strip()]
@@ -322,6 +362,67 @@ class TestQwen3NextGraphProbeGpu(unittest.TestCase):
             [expected_lanes, expected_lanes],
             [[lane["lane"] for lane in record["lanes"]] for record in records[-2:]],
         )
+        self.assertFalse(list(Path(self.temp_dir.name).glob("*.bin")))
+        self.assertFalse(list(Path(self.temp_dir.name).glob("*.jsonl.tmp")))
+
+        inputs.input_ids.add_(100)
+        Path(self.ring_trigger_file).touch()
+        self.runner.forward(inputs)
+        torch.cuda.synchronize()
+        replay_buffer, _ = self.model.get_cuda_graph_probe_buffer(self.graph_bs)
+        expected_ring_record_2 = replay_buffer.cpu().clone()
+        ring_tensor_files = list(
+            Path(self.temp_dir.name).glob(
+                f"cuda_graph_probe_ring_rank0_pid{os.getpid()}_gen*_runner0.bin"
+            )
+        )
+        ring_metadata_files = list(
+            Path(self.temp_dir.name).glob(
+                f"cuda_graph_probe_ring_rank0_pid{os.getpid()}_gen*_runner0.jsonl"
+            )
+        )
+        ring_completion_files = list(
+            Path(self.temp_dir.name).glob(
+                f"cuda_graph_probe_ring_rank0_pid{os.getpid()}_gen*_runner0.complete"
+            )
+        )
+        self.assertEqual(1, len(ring_tensor_files))
+        self.assertEqual(1, len(ring_metadata_files))
+        self.assertEqual(1, len(ring_completion_files))
+        self.assertFalse(list(Path(self.temp_dir.name).glob("*.tmp")))
+        ring = torch.from_file(
+            str(ring_tensor_files[0]),
+            shared=False,
+            size=2 * 2 * self.ring_max_graph_bs * 12,
+            dtype=torch.float32,
+        ).reshape(2, 2, self.ring_max_graph_bs, 12)
+        self.assertEqual((2, 2, self.ring_max_graph_bs, 12), tuple(ring.shape))
+        with ring_metadata_files[0].open(encoding="utf-8") as metadata_stream:
+            ring_metadata = [json.loads(line) for line in metadata_stream if line.strip()]
+        self.assertEqual(2, len(ring_metadata))
+        self.assertEqual([1, 2], [r["record_id"] for r in ring_metadata])
+        self.assertEqual([0, 0], [r["runner_id"] for r in ring_metadata])
+        self.assertEqual([2, 0], ring_metadata[0]["layers"])
+        self.assertEqual([self.actual_bs, self.actual_bs], [r["current_bs"] for r in ring_metadata])
+        self.assertEqual([self.graph_bs, self.graph_bs], [r["graph_bs"] for r in ring_metadata])
+        self.assertEqual(
+            [self.ring_max_graph_bs, self.ring_max_graph_bs],
+            [r["ring_max_graph_bs"] for r in ring_metadata],
+        )
+        self.assertEqual([12, 12], [r["field_count"] for r in ring_metadata])
+        self.assertEqual(["float32", "float32"], [r["dtype"] for r in ring_metadata])
+        completion = json.loads(ring_completion_files[0].read_text(encoding="utf-8"))
+        self.assertEqual(2, completion["records"])
+        torch.testing.assert_close(ring[0, :, : self.graph_bs], expected_ring_record_1)
+        torch.testing.assert_close(ring[1, :, : self.graph_bs], expected_ring_record_2)
+        self.assertTrue(
+            torch.equal(
+                ring[:, :, self.graph_bs :],
+                torch.zeros_like(ring[:, :, self.graph_bs :]),
+            )
+        )
+        with open(self.checksum_file, encoding="utf-8") as checksum_stream:
+            checksum_count_after_dump = sum(1 for line in checksum_stream if line.strip())
 
         status_calls = self.model.debug_status_calls
         inputs.attention_inputs.prefix_lengths[: self.actual_bs].fill_(base_prefix + 8)
@@ -329,7 +430,10 @@ class TestQwen3NextGraphProbeGpu(unittest.TestCase):
         torch.cuda.synchronize()
         self.assertEqual(status_calls, self.model.debug_status_calls)
         with open(self.checksum_file, encoding="utf-8") as checksum_stream:
-            self.assertEqual(4, sum(1 for line in checksum_stream if line.strip()))
+            self.assertEqual(
+                checksum_count_after_dump,
+                sum(1 for line in checksum_stream if line.strip()),
+            )
 
         inputs.attention_inputs.sequence_lengths = (
             inputs.attention_inputs.input_lengths[: self.actual_bs].clone().pin_memory()
@@ -340,7 +444,10 @@ class TestQwen3NextGraphProbeGpu(unittest.TestCase):
         torch.cuda.synchronize()
         self.assertEqual(status_calls + 1, self.model.debug_status_calls)
         with open(self.checksum_file, encoding="utf-8") as checksum_stream:
-            self.assertEqual(6, sum(1 for line in checksum_stream if line.strip()))
+            self.assertEqual(
+                checksum_count_after_dump + 2,
+                sum(1 for line in checksum_stream if line.strip()),
+            )
 
         inputs.attention_inputs.sequence_lengths.add_(1)
         status_calls = self.model.debug_status_calls
@@ -348,7 +455,56 @@ class TestQwen3NextGraphProbeGpu(unittest.TestCase):
         torch.cuda.synchronize()
         self.assertEqual(status_calls, self.model.debug_status_calls)
         with open(self.checksum_file, encoding="utf-8") as checksum_stream:
-            self.assertEqual(6, sum(1 for line in checksum_stream if line.strip()))
+            self.assertEqual(
+                checksum_count_after_dump + 2,
+                sum(1 for line in checksum_stream if line.strip()),
+            )
+
+    def _assert_ring_only_capture(self, inputs, expected_record_0):
+        self.assertFalse(Path(self.checksum_file).exists())
+        self.assertFalse(list(Path(self.temp_dir.name).glob("*.bin")))
+
+        inputs.input_ids.add_(10)
+        getter_calls = self.model.buffer_getter_calls
+        self.runner.forward(inputs)
+        torch.cuda.synchronize()
+        self.assertEqual(getter_calls, self.model.buffer_getter_calls)
+        expected_record_1 = self.model.get_cuda_graph_probe_buffer(
+            self.graph_bs
+        )[0].cpu().clone()
+
+        inputs.input_ids.add_(100)
+        Path(self.ring_trigger_file).touch()
+        getter_calls = self.model.buffer_getter_calls
+        self.runner.forward(inputs)
+        torch.cuda.synchronize()
+        self.assertEqual(getter_calls, self.model.buffer_getter_calls)
+        expected_record_2 = self.model.get_cuda_graph_probe_buffer(
+            self.graph_bs
+        )[0].cpu().clone()
+
+        tensor_file = next(Path(self.temp_dir.name).glob("*.bin"))
+        metadata_file = next(Path(self.temp_dir.name).glob("*.jsonl"))
+        ring = torch.from_file(
+            str(tensor_file),
+            shared=False,
+            size=2 * 2 * self.ring_max_graph_bs * 12,
+            dtype=torch.float32,
+        ).reshape(2, 2, self.ring_max_graph_bs, 12)
+        metadata = [
+            json.loads(line)
+            for line in metadata_file.read_text(encoding="utf-8").splitlines()
+        ]
+        self.assertEqual([1, 2], [record["record_id"] for record in metadata])
+        torch.testing.assert_close(ring[0, :, : self.graph_bs], expected_record_1)
+        torch.testing.assert_close(ring[1, :, : self.graph_bs], expected_record_2)
+        self.assertTrue(
+            torch.equal(
+                ring[:, :, self.graph_bs :],
+                torch.zeros_like(ring[:, :, self.graph_bs :]),
+            )
+        )
+        self.assertFalse(torch.equal(expected_record_0, expected_record_1))
 
 
 if __name__ == "__main__":
