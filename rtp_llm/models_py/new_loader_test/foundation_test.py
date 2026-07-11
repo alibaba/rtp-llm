@@ -197,6 +197,22 @@ class FoundationLoaderTest(unittest.TestCase):
                 NewModelLoader._validate_loaded_weights(model)
                 self.assertTrue(torch.equal(model.canonical, expected))
 
+    def test_non_recursive_apply_preserves_shared_parameter_identity(self):
+        class Parent(RtpModule):
+            def __init__(self):
+                super().__init__()
+                self.child = RtpModule()
+                shared = nn.Parameter(torch.ones(1, dtype=torch.float32))
+                self.parent_weight = shared
+                self.child.child_weight = shared
+
+        model = Parent()
+        with torch.no_grad():
+            model._apply(lambda tensor: tensor.to(dtype=torch.float64), recurse=False)
+        self.assertEqual(model.parent_weight.dtype, torch.float64)
+        self.assertEqual(model.child.child_weight.dtype, torch.float64)
+        self.assertIs(model.parent_weight, model.child.child_weight)
+
     def test_shared_parameter_crosses_custom_loader_boundary_both_directions(self):
         class CustomLeaf(RtpModule):
             def load_weights(self, weights):

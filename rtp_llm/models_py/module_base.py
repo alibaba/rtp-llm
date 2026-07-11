@@ -45,9 +45,10 @@ def collect_loaded_tensor_ids(module: nn.Module) -> set:
     return loaded_tensor_ids
 
 
-def _collect_tensor_alias_groups(module: nn.Module):
+def _collect_tensor_alias_groups(module: nn.Module, recurse: bool = True):
     aliases = {}
-    for current in module.modules():
+    modules = module.modules() if recurse else (module,)
+    for current in modules:
         for name, tensor in current.named_parameters(
             recurse=False, remove_duplicate=False
         ):
@@ -95,7 +96,7 @@ class RtpModule(nn.Module):
     """
 
     def _apply(self, fn, recurse=True):
-        alias_groups = _collect_tensor_alias_groups(self)
+        alias_groups = _collect_tensor_alias_groups(self, recurse=recurse)
         result = super()._apply(fn, recurse=recurse)
         _restore_tensor_aliases(alias_groups)
         return result
