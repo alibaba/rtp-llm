@@ -1,9 +1,22 @@
 import glob
+import json
 import os
 import re
 from typing import Dict, Iterator, List, Mapping, Optional, Tuple
 
 import torch
+
+
+_SAFETENSORS_INDEX = "model.safetensors.index.json"
+_PYTORCH_INDEX = "pytorch_model.bin.index.json"
+_EXCLUDED_WEIGHT_FILES = {
+    "adapter_model.bin",
+    "adapter_model.safetensors",
+    "optimizer.bin",
+    "pytorch_model.bin.index.json",
+    "model.safetensors.index.json",
+    "training_args.bin",
+}
 
 
 class WeightsMapper:
@@ -110,17 +123,81 @@ def get_all_weights(
             yield name, tensor
 
 
+def _files_from_index(model_path: str, index_name: str) -> Optional[List[str]]:
+    index_path = os.path.join(model_path, index_name)
+    if not os.path.isfile(index_path):
+        return None
+    try:
+        with open(index_path, encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"Failed to read checkpoint index {index_path}: {exc}") from exc
+    weight_map = payload.get("weight_map") if isinstance(payload, dict) else None
+    if not isinstance(weight_map, dict) or not weight_map:
+        raise ValueError(f"Checkpoint index {index_path} has no non-empty weight_map")
+
+    expected_suffix = ".safetensors" if index_name == _SAFETENSORS_INDEX else ".bin"
+    model_root = os.path.realpath(model_path)
+    files = []
+    seen = set()
+    for shard_name in weight_map.values():
+        if not isinstance(shard_name, str) or not shard_name.endswith(expected_suffix):
+            raise ValueError(
+                f"Checkpoint index {index_path} contains invalid shard {shard_name!r}"
+            )
+        shard_path = os.path.realpath(os.path.join(model_root, shard_name))
+        try:
+            inside_model = os.path.commonpath([model_root, shard_path]) == model_root
+        except ValueError:
+            inside_model = False
+        if not inside_model:
+            raise ValueError(
+                f"Checkpoint index {index_path} references a path outside model directory: "
+                f"{shard_name!r}"
+            )
+        if not _is_model_weight_file(shard_path):
+            raise ValueError(
+                f"Checkpoint index {index_path} references non-model file {shard_name!r}"
+            )
+        if not os.path.isfile(shard_path):
+            raise FileNotFoundError(
+                f"Checkpoint index {index_path} references missing shard {shard_name!r}"
+            )
+        if shard_path not in seen:
+            seen.add(shard_path)
+            files.append(shard_path)
+    return files
+
+
+def _is_model_weight_file(path: str) -> bool:
+    name = os.path.basename(path).lower()
+    if name in _EXCLUDED_WEIGHT_FILES:
+        return False
+    return not name.startswith(
+        (
+            "adapter_model",
+            "consolidated",
+            "optimizer",
+            "rng_state",
+            "scheduler",
+            "training_args",
+        )
+    )
+
+
 def discover_ckpt_files(model_path: str) -> List[str]:
     if not os.path.isdir(model_path):
         raise NotADirectoryError(f"Model path is not a directory: {model_path}")
+    for index_name in (_SAFETENSORS_INDEX, _PYTORCH_INDEX):
+        indexed_files = _files_from_index(model_path, index_name)
+        if indexed_files is not None:
+            return indexed_files
     for pattern in ("*.safetensors", "*.bin", "*.pt"):
-        files = sorted(glob.glob(os.path.join(model_path, pattern)))
-        if pattern == "*.bin":
-            files = [
-                path
-                for path in files
-                if "optimizer" not in os.path.basename(path).lower()
-            ]
+        files = [
+            path
+            for path in sorted(glob.glob(os.path.join(model_path, pattern)))
+            if _is_model_weight_file(path)
+        ]
         if files:
             return files
     return []

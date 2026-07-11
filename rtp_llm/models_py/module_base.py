@@ -1,5 +1,5 @@
 import logging
-from typing import Any, List, Optional
+from typing import Any, List
 
 import torch
 import torch.nn as nn
@@ -22,8 +22,12 @@ def _is_allowed_dropped_weight(name: str) -> bool:
     )
 
 
-def _mark_loaded(tensor: torch.Tensor) -> None:
-    setattr(tensor, "_rtp_weight_loaded", True)
+def _mark_loaded(module: nn.Module, name: str) -> None:
+    loaded = getattr(module, "_rtp_loaded_weight_names", None)
+    if loaded is None:
+        loaded = set()
+        setattr(module, "_rtp_loaded_weight_names", loaded)
+    loaded.add(name)
 
 
 class RtpModule(nn.Module):
@@ -33,12 +37,6 @@ class RtpModule(nn.Module):
     override it to implement sharding or layout conversion and must then own
     their post-load completeness checks.
     """
-
-    def _get_child_module(self, name: str) -> Optional[nn.Module]:
-        child = getattr(self, name, None)
-        if isinstance(child, nn.Module):
-            return child
-        return None
 
     def _assign_weight(self, module: nn.Module, name: str, tensor: torch.Tensor) -> bool:
         if "." in name:
@@ -65,8 +63,8 @@ class RtpModule(nn.Module):
                 f"expected {target.dtype}, got {tensor.dtype}"
             )
         with torch.no_grad():
-            target.copy_(tensor.to(device=target.device, dtype=target.dtype))
-        _mark_loaded(target)
+            target.copy_(tensor)
+        _mark_loaded(module, name)
         return True
 
     def _dispatch_to_module_list(
@@ -127,21 +125,22 @@ class RtpModule(nn.Module):
                 dropped[:10],
             )
 
-    def process_weights_after_loading(self) -> None:
+    def validate_weights_loaded(self) -> None:
         missing: List[str] = []
 
         def visit(module: nn.Module, prefix: str) -> None:
+            loaded = getattr(module, "_rtp_loaded_weight_names", set())
             for name, param in module.named_parameters(recurse=False):
                 if getattr(param, "_rtp_skip_load_check", False):
                     continue
-                if not getattr(param, "_rtp_weight_loaded", False):
+                if name not in loaded:
                     missing.append(prefix + name)
             for name, buffer in module.named_buffers(recurse=False):
                 if name in module._non_persistent_buffers_set or buffer is None:
                     continue
                 if getattr(buffer, "_rtp_skip_load_check", False):
                     continue
-                if not getattr(buffer, "_rtp_weight_loaded", False):
+                if name not in loaded:
                     missing.append(prefix + name)
             for name, child in module.named_children():
                 child_prefix = f"{prefix}{name}."
@@ -158,3 +157,6 @@ class RtpModule(nn.Module):
                 f"{self.__class__.__name__} is missing required checkpoint parameters: "
                 f"{sample}{suffix}"
             )
+
+    def process_weights_after_loading(self) -> None:
+        """Perform device-dependent layout conversion after integrity validation."""

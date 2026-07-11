@@ -1,3 +1,4 @@
+import json
 import os
 import sys
 import tempfile
@@ -8,7 +9,11 @@ import torch
 import torch.nn as nn
 from safetensors.torch import save_file
 
-from rtp_llm.models_py.model_loader import LoadConfig, LoadMethod, NewModelLoader
+from rtp_llm.models_py.model_loader import (
+    NewLoaderConfig,
+    NewLoaderLoadMethod,
+    NewModelLoader,
+)
 from rtp_llm.models_py.module_base import RtpModule
 from rtp_llm.models_py.registry import (
     get_model_class,
@@ -31,11 +36,15 @@ class _FoundationModel(RtpModule):
         self.layers = nn.ModuleList([_Block()])
         self.final = nn.Parameter(torch.empty(2))
         self.register_buffer("scale", torch.empty(1), persistent=True)
+        self.validation_device = None
         self.post_device = None
         self.post_count = 0
 
+    def validate_weights_loaded(self):
+        self.validation_device = self.scale.device.type
+        super().validate_weights_loaded()
+
     def process_weights_after_loading(self):
-        super().process_weights_after_loading()
         self.post_device = self.final.device.type
         self.post_count += 1
 
@@ -55,7 +64,7 @@ def _weights():
 class FoundationLoaderTest(unittest.TestCase):
     def _loader(self, model_path, **kwargs):
         config = types.SimpleNamespace(model_type="foundation_test_model")
-        load_config = LoadConfig(device="cpu", compute_dtype=torch.float32, **kwargs)
+        load_config = NewLoaderConfig(device="cpu", compute_dtype=torch.float32, **kwargs)
         return NewModelLoader(config, load_config, model_path=model_path)
 
     def test_real_safetensors_stream_load_and_postprocess(self):
@@ -99,11 +108,9 @@ class FoundationLoaderTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "Shape mismatch"):
                 self._loader(model_path).load()
 
-    def test_force_cpu_is_rejected_until_device_migration_is_supported(self):
-        with tempfile.TemporaryDirectory() as model_path:
-            save_file(_weights(), os.path.join(model_path, "model.safetensors"))
-            with self.assertRaisesRegex(RuntimeError, "force_cpu_load_weights.*foundation"):
-                self._loader(model_path, force_cpu_load_weights=True).load()
+    def test_force_cpu_is_not_exposed_by_foundation(self):
+        with self.assertRaisesRegex(TypeError, "force_cpu_load_weights"):
+            NewLoaderConfig(force_cpu_load_weights=True)
 
     def test_missing_persistent_buffer_fails(self):
         checkpoint = _weights()
@@ -125,25 +132,88 @@ class FoundationLoaderTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as model_path:
             save_file(_weights(), os.path.join(model_path, "model.safetensors"))
             with self.assertRaisesRegex(RuntimeError, "not part of.*foundation"):
-                self._loader(model_path, load_method=LoadMethod.FASTSAFETENSORS).load()
+                self._loader(
+                    model_path, load_method=NewLoaderLoadMethod.FASTSAFETENSORS
+                ).load()
 
     def test_invalid_load_method_is_rejected(self):
         with tempfile.TemporaryDirectory() as model_path:
             save_file(_weights(), os.path.join(model_path, "model.safetensors"))
-            with self.assertRaisesRegex(ValueError, "Unsupported load_method"):
-                self._loader(model_path, load_method="typo").load()
+            with self.assertRaisesRegex(ValueError, "Unsupported newloader load method"):
+                self._loader(model_path, load_method="typo")
 
     def test_non_string_load_method_is_rejected(self):
         with tempfile.TemporaryDirectory() as model_path:
             save_file(_weights(), os.path.join(model_path, "model.safetensors"))
-            with self.assertRaisesRegex(TypeError, "load_method must be a string"):
-                self._loader(model_path, load_method=object()).load()
+            with self.assertRaisesRegex(TypeError, "NewLoaderLoadMethod or str"):
+                self._loader(model_path, load_method=object())
 
     def test_optimizer_bin_does_not_hide_pt_checkpoint(self):
         with tempfile.TemporaryDirectory() as model_path:
             torch.save({}, os.path.join(model_path, "optimizer.bin"))
             torch.save(_weights(), os.path.join(model_path, "model.pt"))
             self.assertEqual(discover_ckpt_files(model_path), [os.path.join(model_path, "model.pt")])
+
+    def test_safetensors_index_selects_only_referenced_shards(self):
+        with tempfile.TemporaryDirectory() as model_path:
+            shard1 = os.path.join(model_path, "model-00001-of-00002.safetensors")
+            shard2 = os.path.join(model_path, "model-00002-of-00002.safetensors")
+            save_file({"first": torch.ones(1)}, shard1)
+            save_file({"second": torch.ones(1)}, shard2)
+            save_file({"duplicate": torch.ones(1)}, os.path.join(model_path, "consolidated.safetensors"))
+            save_file({"adapter": torch.ones(1)}, os.path.join(model_path, "adapter_model.safetensors"))
+            with open(os.path.join(model_path, "model.safetensors.index.json"), "w") as handle:
+                json.dump(
+                    {
+                        "weight_map": {
+                            "first": os.path.basename(shard1),
+                            "second": os.path.basename(shard2),
+                        }
+                    },
+                    handle,
+                )
+            self.assertEqual(discover_ckpt_files(model_path), [shard1, shard2])
+
+    def test_pytorch_index_excludes_training_and_adapter_files(self):
+        with tempfile.TemporaryDirectory() as model_path:
+            shard = os.path.join(model_path, "pytorch_model-00001-of-00001.bin")
+            torch.save({"weight": torch.ones(1)}, shard)
+            torch.save({}, os.path.join(model_path, "training_args.bin"))
+            torch.save({}, os.path.join(model_path, "adapter_model.bin"))
+            with open(os.path.join(model_path, "pytorch_model.bin.index.json"), "w") as handle:
+                json.dump({"weight_map": {"weight": os.path.basename(shard)}}, handle)
+            self.assertEqual(discover_ckpt_files(model_path), [shard])
+
+    def test_unindexed_discovery_excludes_non_model_files(self):
+        with tempfile.TemporaryDirectory() as model_path:
+            model_file = os.path.join(model_path, "model.safetensors")
+            save_file({"weight": torch.ones(1)}, model_file)
+            save_file({"other": torch.ones(1)}, os.path.join(model_path, "consolidated.safetensors"))
+            save_file({"adapter": torch.ones(1)}, os.path.join(model_path, "adapter_model.safetensors"))
+            torch.save({}, os.path.join(model_path, "training_args.bin"))
+            self.assertEqual(discover_ckpt_files(model_path), [model_file])
+
+    def test_checkpoint_index_cannot_escape_model_directory(self):
+        with tempfile.TemporaryDirectory() as parent:
+            model_path = os.path.join(parent, "model")
+            os.mkdir(model_path)
+            outside = os.path.join(parent, "outside.safetensors")
+            save_file({"weight": torch.ones(1)}, outside)
+            with open(os.path.join(model_path, "model.safetensors.index.json"), "w") as handle:
+                json.dump({"weight_map": {"weight": "../outside.safetensors"}}, handle)
+            with self.assertRaisesRegex(ValueError, "outside model directory"):
+                discover_ckpt_files(model_path)
+
+    def test_checkpoint_index_rejects_non_model_file(self):
+        with tempfile.TemporaryDirectory() as model_path:
+            adapter = os.path.join(model_path, "adapter_model.safetensors")
+            save_file({"weight": torch.ones(1)}, adapter)
+            with open(os.path.join(model_path, "model.safetensors.index.json"), "w") as handle:
+                json.dump(
+                    {"weight_map": {"weight": os.path.basename(adapter)}}, handle
+                )
+            with self.assertRaisesRegex(ValueError, "non-model file"):
+                discover_ckpt_files(model_path)
 
     def test_duplicate_tensor_across_shards_fails(self):
         with tempfile.TemporaryDirectory() as model_path:
@@ -172,9 +242,46 @@ class FoundationLoaderTest(unittest.TestCase):
 
     def test_partition_config_validation(self):
         with self.assertRaisesRegex(ValueError, "Invalid TP"):
-            LoadConfig(tp_size=0)
+            NewLoaderConfig(tp_size=0)
         with self.assertRaisesRegex(ValueError, "Invalid EP"):
-            LoadConfig(ep_size=2, ep_rank=2)
+            NewLoaderConfig(ep_size=2, ep_rank=2)
+
+    @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA or ROCm")
+    def test_persistent_buffer_marker_survives_device_migration(self):
+        with tempfile.TemporaryDirectory() as model_path:
+            save_file(_weights(), os.path.join(model_path, "model.safetensors"))
+            config = types.SimpleNamespace(model_type="foundation_test_model")
+            model = NewModelLoader(
+                config,
+                NewLoaderConfig(
+                    device="cuda:0",
+                    compute_dtype=torch.float32,
+                    load_method=NewLoaderLoadMethod.SCRATCH,
+                ),
+                model_path=model_path,
+            ).load()
+        self.assertEqual(model.scale.device.type, "cuda")
+        self.assertEqual(model.validation_device, "cpu")
+        self.assertEqual(model.post_count, 1)
+
+    @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA or ROCm")
+    def test_cross_device_copy_does_not_allocate_full_target_temporary(self):
+        class CudaTarget(RtpModule):
+            def __init__(self):
+                super().__init__()
+                self.weight = nn.Parameter(
+                    torch.empty(16 * 1024 * 1024, device="cuda", dtype=torch.float32)
+                )
+
+        model = CudaTarget()
+        source = torch.ones(model.weight.shape, dtype=torch.float32)
+        torch.cuda.synchronize()
+        torch.cuda.reset_peak_memory_stats()
+        baseline = torch.cuda.memory_allocated()
+        model.load_weights({"weight": source})
+        torch.cuda.synchronize()
+        extra_peak = torch.cuda.max_memory_allocated() - baseline
+        self.assertLess(extra_peak, 8 * 1024 * 1024)
 
 
 if __name__ == "__main__":

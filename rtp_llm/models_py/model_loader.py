@@ -2,61 +2,54 @@ import inspect
 import logging
 import os
 import time
+from dataclasses import dataclass
+from enum import Enum
 from typing import Any, Optional
 
 import torch
 import torch.nn as nn
 
-from rtp_llm.models_py import weight_mapper
+import rtp_llm.models_py.weight_mapper as weight_mapper
 from rtp_llm.models_py.registry import get_model_class, list_models
 
 logger = logging.getLogger(__name__)
 
 
-class LoadMethod:
+class NewLoaderLoadMethod(str, Enum):
     AUTO = "auto"
     SCRATCH = "scratch"
     FASTSAFETENSORS = "fastsafetensors"
 
 
-class LoadConfig:
-    def __init__(
-        self,
-        tp_size: int = 1,
-        tp_rank: int = 0,
-        ep_size: int = 1,
-        ep_rank: int = 0,
-        quant_type: str = "none",
-        compute_dtype: torch.dtype = torch.float16,
-        device: str = "cuda",
-        load_method: str = LoadMethod.AUTO,
-        quant_source_config: Any = None,
-        force_cpu_load_weights: bool = False,
-        parallelism_config: Any = None,
-        fmha_config: Any = None,
-        hw_kernel_config: Any = None,
-        device_resource_config: Any = None,
-        moe_config: Any = None,
-    ):
-        if tp_size <= 0 or not 0 <= tp_rank < tp_size:
-            raise ValueError(f"Invalid TP partition: rank={tp_rank}, size={tp_size}")
-        if ep_size <= 0 or not 0 <= ep_rank < ep_size:
-            raise ValueError(f"Invalid EP partition: rank={ep_rank}, size={ep_size}")
-        self.tp_size = tp_size
-        self.tp_rank = tp_rank
-        self.ep_size = ep_size
-        self.ep_rank = ep_rank
-        self.quant_type = quant_type
-        self.compute_dtype = compute_dtype
-        self.device = device
-        self.load_method = load_method
-        self.quant_source_config = quant_source_config
-        self.force_cpu_load_weights = force_cpu_load_weights
-        self.parallelism_config = parallelism_config
-        self.fmha_config = fmha_config
-        self.hw_kernel_config = hw_kernel_config
-        self.device_resource_config = device_resource_config
-        self.moe_config = moe_config
+@dataclass
+class NewLoaderConfig:
+    tp_size: int = 1
+    tp_rank: int = 0
+    ep_size: int = 1
+    ep_rank: int = 0
+    compute_dtype: torch.dtype = torch.float16
+    device: str = "cuda"
+    load_method: NewLoaderLoadMethod = NewLoaderLoadMethod.AUTO
+
+    def __post_init__(self) -> None:
+        if isinstance(self.load_method, str):
+            try:
+                self.load_method = NewLoaderLoadMethod(self.load_method.strip().lower())
+            except ValueError as exc:
+                raise ValueError(f"Unsupported newloader load method {self.load_method!r}") from exc
+        elif not isinstance(self.load_method, NewLoaderLoadMethod):
+            raise TypeError(
+                f"load_method must be NewLoaderLoadMethod or str, got "
+                f"{type(self.load_method).__name__}"
+            )
+        if self.tp_size <= 0 or not 0 <= self.tp_rank < self.tp_size:
+            raise ValueError(f"Invalid TP partition: rank={self.tp_rank}, size={self.tp_size}")
+        if self.ep_size <= 0 or not 0 <= self.ep_rank < self.ep_size:
+            raise ValueError(f"Invalid EP partition: rank={self.ep_rank}, size={self.ep_size}")
+        if not isinstance(self.compute_dtype, torch.dtype):
+            raise TypeError("compute_dtype must be a torch.dtype")
+        if not isinstance(self.device, str) or not self.device.strip():
+            raise ValueError("device must be a non-empty string")
 
 
 class NewModelLoader:
@@ -65,33 +58,32 @@ class NewModelLoader:
     def __init__(
         self,
         model_config: Any,
-        load_config: Optional[LoadConfig] = None,
+        load_config: Optional[NewLoaderConfig] = None,
         model_path: Optional[str] = None,
         device: Optional[str] = None,
     ):
         self.model_config = model_config
-        self.load_config = load_config or LoadConfig()
+        self.load_config = load_config or NewLoaderConfig()
         self.model_path = model_path
         self.device = device if device is not None else self.load_config.device
         self._ckpt_files = None
 
-    def _resolve_load_method(self) -> str:
-        raw_method = self.load_config.load_method or LoadMethod.AUTO
-        if not isinstance(raw_method, str):
-            raise TypeError(
-                f"load_method must be a string, got {type(raw_method).__name__}"
-            )
-        configured = raw_method.strip().lower()
-        if configured == LoadMethod.AUTO:
-            configured = os.environ.get("LOAD_METHOD", "").strip().lower()
-            configured = configured or LoadMethod.SCRATCH
-            if configured == LoadMethod.AUTO:
-                configured = LoadMethod.SCRATCH
-        if configured not in (LoadMethod.SCRATCH, LoadMethod.FASTSAFETENSORS):
-            raise ValueError(
-                f"Unsupported load_method {configured!r}; expected auto or scratch"
-            )
-        if configured == LoadMethod.FASTSAFETENSORS:
+    def _resolve_load_method(self) -> NewLoaderLoadMethod:
+        configured = self.load_config.load_method
+        if configured == NewLoaderLoadMethod.AUTO:
+            env_method = os.environ.get("LOAD_METHOD", "").strip().lower()
+            if env_method:
+                try:
+                    configured = NewLoaderLoadMethod(env_method)
+                except ValueError as exc:
+                    raise ValueError(
+                        f"Unsupported LOAD_METHOD environment value {env_method!r}"
+                    ) from exc
+            else:
+                configured = NewLoaderLoadMethod.SCRATCH
+            if configured == NewLoaderLoadMethod.AUTO:
+                configured = NewLoaderLoadMethod.SCRATCH
+        if configured == NewLoaderLoadMethod.FASTSAFETENSORS:
             raise RuntimeError(
                 "fastsafetensors is not part of the newloader foundation; use scratch"
             )
@@ -151,6 +143,13 @@ class NewModelLoader:
         return model
 
     @staticmethod
+    def _validate_loaded_weights(model: nn.Module) -> None:
+        for module in list(model.modules()):
+            validator = getattr(module, "validate_weights_loaded", None)
+            if callable(validator):
+                validator()
+
+    @staticmethod
     def _run_post_load_hooks(model: nn.Module, force_cpu: bool) -> None:
         modules = list(model.modules())
         for module in modules:
@@ -162,19 +161,14 @@ class NewModelLoader:
 
     def load(self) -> nn.Module:
         method = self._resolve_load_method()
-        if method != LoadMethod.SCRATCH:
+        if method != NewLoaderLoadMethod.SCRATCH:
             raise RuntimeError(f"Resolved unsupported load method: {method}")
-        if self.load_config.force_cpu_load_weights:
-            raise RuntimeError(
-                "force_cpu_load_weights is not part of the newloader foundation; "
-                "it requires model-specific postprocess and device-migration support"
-            )
-
         model = self._create_model()
         started = time.time()
         model.load_weights(
             weight_mapper.get_all_weights(self._checkpoint_files(), device="cpu")
         )
+        self._validate_loaded_weights(model)
         logger.info("Streamed checkpoint tensors in %.2fs", time.time() - started)
 
         model.to(self.device)
