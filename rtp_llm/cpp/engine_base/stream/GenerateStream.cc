@@ -2,6 +2,7 @@
 #include <condition_variable>
 #include <cstddef>
 #include <memory>
+#include <optional>
 #include <ATen/Generator.h>
 #if defined(USING_CUDA) || defined(USING_ROCM)
 #include <ATen/cuda/CUDAGeneratorImpl.h>
@@ -32,6 +33,20 @@ bool useStreamAsyncReserveTokens() {
 bool maxTokensExcludeThinking() {
     static const bool enabled = autil::EnvUtil::getEnv("RTP_LLM_MAX_TOKENS_EXCLUDE_THINKING", false);
     return enabled;
+}
+
+std::optional<int64_t> positiveBudget(const std::optional<int>& value) {
+    if (value.has_value() && *value > 0) {
+        return static_cast<int64_t>(*value);
+    }
+    return std::nullopt;
+}
+
+int64_t nonNegativeValue(const std::optional<int>& value) {
+    if (value.has_value() && *value > 0) {
+        return static_cast<int64_t>(*value);
+    }
+    return 0;
 }
 
 }  // namespace
@@ -700,21 +715,48 @@ size_t GenerateStream::maxTokenNum() const {
         }
     }
 
-    const auto& config              = generate_input_->generate_config;
-    int64_t     output_token_budget = config->max_new_tokens;
-    if (maxTokensExcludeThinking() && config->in_think_mode && config->max_thinking_tokens > 0) {
-        int64_t think_output_budget = config->max_thinking_tokens;
+    const auto& config                 = generate_input_->generate_config;
+    auto        finishedThinkOutputLen = [&]() -> int64_t {
         for (const auto& processor : logits_processor_list_) {
             if (processor == nullptr) {
                 continue;
             }
             const auto finished_think_len = processor->finishedThinkOutputLen();
             if (finished_think_len >= 0) {
-                think_output_budget = std::min<int64_t>(think_output_budget, finished_think_len);
-                break;
+                return finished_think_len;
             }
         }
-        output_token_budget += think_output_budget;
+        return -1;
+    };
+    auto currentThinkOutputBudget = [&]() -> int64_t {
+        if (!config->in_think_mode || config->max_thinking_tokens <= 0) {
+            return 0;
+        }
+        const auto finished_think_len = finishedThinkOutputLen();
+        if (finished_think_len >= 0) {
+            return std::min<int64_t>(config->max_thinking_tokens, finished_think_len);
+        }
+        return config->max_thinking_tokens;
+    };
+
+    int64_t output_token_budget = config->max_new_tokens;
+    if (config->max_completion_tokens.has_value()) {
+        constexpr int64_t kDefaultMaxCompletionTokensBudget = 131072;
+        const int64_t     completion_budget                 = *config->max_completion_tokens > 0 ?
+                                                                  static_cast<int64_t>(*config->max_completion_tokens) :
+                                                                  kDefaultMaxCompletionTokensBudget;
+        output_token_budget =
+            std::max<int64_t>(0, completion_budget - nonNegativeValue(config->generated_think_token_num));
+        if (config->in_think_mode && config->max_thinking_tokens > 0) {
+            const auto finished_think_len = finishedThinkOutputLen();
+            output_token_budget +=
+                finished_think_len >= 0 ? finished_think_len : static_cast<int64_t>(config->end_think_token_ids.size());
+        }
+    } else if (auto max_tokens = positiveBudget(config->max_tokens)) {
+        output_token_budget = *max_tokens;
+        output_token_budget += currentThinkOutputBudget();
+    } else if (maxTokensExcludeThinking()) {
+        output_token_budget += currentThinkOutputBudget();
     }
 
     const size_t physical_token_cap = max_seq_len_ > reserve_tokens ? max_seq_len_ - reserve_tokens : 0;

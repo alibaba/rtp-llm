@@ -16,16 +16,16 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     RoleAddrPB,
 )
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2_grpc import RpcServiceStub
+from rtp_llm.server.request_headers import (
+    extract_correlation_request_id,
+    extract_trace_id,
+)
 from rtp_llm.utils.base_model_datatypes import (
     AuxInfo,
     GenerateConfig,
     GenerateInput,
     GenerateOutput,
     GenerateOutputs,
-)
-from rtp_llm.server.request_headers import (
-    extract_correlation_request_id,
-    extract_trace_id,
 )
 from rtp_llm.utils.grpc_host_channel_pool import GrpcHostChannelPool
 from rtp_llm.utils.grpc_util import trans_option, trans_option_cast, trans_tensor
@@ -60,6 +60,15 @@ def _trans_jsonable_option(config_pb, config, field_name):
     getattr(config_pb, field_name).value = value
 
 
+def _trans_optional_int(config_pb, config, field_name):
+    if not hasattr(config_pb, field_name):
+        return
+    value = getattr(config, field_name, None)
+    if value is None:
+        return
+    getattr(config_pb, field_name).value = int(value)
+
+
 def trans_input(input_py: GenerateInput):
     input_pb = GenerateInputPB()
     input_pb.request_id = input_py.request_id
@@ -70,11 +79,15 @@ def trans_input(input_py: GenerateInput):
 
     request_info = getattr(input_py, "request_info", None)
     if request_info is not None:
-        input_pb.request_info.frontend_ip = getattr(request_info, "frontend_ip", "") or ""
+        input_pb.request_info.frontend_ip = (
+            getattr(request_info, "frontend_ip", "") or ""
+        )
         input_pb.request_info.dash_ip = getattr(request_info, "dash_ip", "") or ""
         input_pb.request_info.trace_id = getattr(request_info, "trace_id", "") or ""
         input_pb.request_info.request_id = getattr(request_info, "request_id", "") or ""
-        input_pb.request_info.source_role = getattr(request_info, "source_role", "") or ""
+        input_pb.request_info.source_role = (
+            getattr(request_info, "source_role", "") or ""
+        )
     if not input_pb.request_info.trace_id:
         input_pb.request_info.trace_id = str(
             input_py.generate_config.trace_id
@@ -92,6 +105,13 @@ def trans_input(input_py: GenerateInput):
 
     generate_config_pb = input_pb.generate_config
     generate_config_pb.max_new_tokens = input_py.generate_config.max_new_tokens
+    _trans_optional_int(generate_config_pb, input_py.generate_config, "max_tokens")
+    _trans_optional_int(
+        generate_config_pb, input_py.generate_config, "max_completion_tokens"
+    )
+    _trans_optional_int(
+        generate_config_pb, input_py.generate_config, "generated_think_token_num"
+    )
     generate_config_pb.max_thinking_tokens = (
         input_py.generate_config.max_thinking_tokens
     )
@@ -503,7 +523,10 @@ class ModelRpcClient(object):
                 elif e.code() == StatusCode.UNAVAILABLE:
                     details = e.details() or ""
                     lower_details = details.lower()
-                    if "socket closed" in lower_details or "connection reset" in lower_details:
+                    if (
+                        "socket closed" in lower_details
+                        or "connection reset" in lower_details
+                    ):
                         exception_type = ExceptionType.CONNECTION_RESET_BY_PEER
                     elif "timed out" in lower_details or "timeout" in lower_details:
                         exception_type = ExceptionType.CONNECT_TIMEOUT

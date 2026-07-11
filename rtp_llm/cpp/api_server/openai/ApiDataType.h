@@ -100,6 +100,7 @@ public:
     std::optional<float>                              top_p       = 1.0;
     std::optional<int>                                top_k;
     std::optional<int>                                max_tokens;
+    std::optional<int>                                max_completion_tokens;
     std::optional<std::variant<std::string, std::vector<std::string>>> stop;
     std::optional<bool>                                                stream;
     std::optional<std::string>                                         user;

@@ -21,7 +21,13 @@ from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.generate_config import RoleAddr
 from rtp_llm.dash_sc.access_log import DASH_SC_GRPC_ACCESS_LOGGER_NAME
 from rtp_llm.dash_sc.access_record import GrpcAccessRecord
-from rtp_llm.dash_sc.codec import DashScParameterError, OtherParams, SamplingParams
+from rtp_llm.dash_sc.codec import (
+    _DEFAULT_MAX_NEW_TOKENS,
+    _DEFAULT_MAX_THINKING_TOKENS,
+    DashScParameterError,
+    OtherParams,
+    SamplingParams,
+)
 from rtp_llm.dash_sc.inference.servicer import (
     DashScInferenceServicer,
     build_think_runtime,
@@ -284,6 +290,50 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(_gen_ids(chunks[0]), [7, 8, 9])
         self.assertEqual(_finish_reason(chunks[0]), 1)
 
+    async def test_length_finished_in_think_mode_marks_partial_as_reasoning(
+        self,
+    ) -> None:
+        req = self._minimal_request()
+        out = GenerateOutput(
+            output_ids=torch.tensor([7, 8], dtype=torch.int32),
+            finished=True,
+            aux_info=AuxInfo(input_len=2, reuse_len=0),
+        )
+        visitor = _FakeVisitor(
+            _FakeAsyncStream([GenerateOutputs(generate_outputs=[out])])
+        )
+        tok = _FakeTokenizer(
+            {
+                "<think>\n": [128821],
+                "</think>\n\n": [128822],
+                "<think>\n\n</think>\n\n": [128821, 128822],
+                "</think>": [128822],
+            }
+        )
+        env_cfg = _GenerateEnvCfg()
+
+        chunks = await _drain(
+            iter_real_model_stream_infer(
+                req,
+                [1, 2],
+                SamplingParams(max_new_tokens=100, max_completion_tokens=1),
+                OtherParams(enable_thinking=True),
+                visitor,
+                rtp_llm_request_id=1,
+                tokenizer=tok,
+                generate_env_config=env_cfg,
+                think_runtime=build_think_runtime(tok, env_cfg, "qwen2"),
+            )
+        )
+
+        self.assertEqual(len(chunks), 1)
+        self.assertEqual(_gen_ids(chunks[0]), [7, 8])
+        self.assertEqual(_finish_reason(chunks[0]), 1)
+        self.assertEqual(
+            chunks[0].infer_response.parameters["generate_think_token_num"].int64_param,
+            2,
+        )
+
     async def test_empty_list_yields_error_response(self) -> None:
         req = self._minimal_request()
         visitor = _FakeVisitor(_FakeAsyncStream([]))
@@ -452,7 +502,7 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(visitor.enqueue_called, 1)
         gc = visitor.last_generate_input.generate_config
         self.assertTrue(gc.in_think_mode)
-        self.assertEqual(gc.max_thinking_tokens, 2_147_483_647)
+        self.assertEqual(gc.max_thinking_tokens, _DEFAULT_MAX_THINKING_TOKENS)
         self.assertEqual(gc.end_think_token_ids, [128822, 271])
 
     async def test_budget_zero_disables_thinking_even_if_add_thinking_params_fails(
@@ -734,6 +784,7 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
                     max_new_tokens=100,
                     max_new_tokens_from_completion_alias=True,
                     max_total_tokens=105,
+                    max_completion_tokens=100,
                 ),
                 OtherParams(max_new_think_tokens=10),
                 visitor,
@@ -746,7 +797,18 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(visitor.generate_inputs[0].generate_config.max_new_tokens, 100)
-        self.assertEqual(visitor.generate_inputs[1].generate_config.max_new_tokens, 95)
+        self.assertEqual(visitor.generate_inputs[1].generate_config.max_new_tokens, 100)
+        self.assertEqual(visitor.generate_inputs[0].generate_config.max_tokens, 105)
+        self.assertEqual(visitor.generate_inputs[1].generate_config.max_tokens, 105)
+        self.assertEqual(
+            visitor.generate_inputs[0].generate_config.max_completion_tokens, 100
+        )
+        self.assertEqual(
+            visitor.generate_inputs[1].generate_config.max_completion_tokens, 100
+        )
+        self.assertEqual(
+            visitor.generate_inputs[1].generate_config.generated_think_token_num, 10
+        )
         self.assertEqual(
             chunks[1].infer_response.parameters["generate_think_token_num"].int64_param,
             10,
@@ -777,6 +839,7 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
                     max_new_tokens=3,
                     max_new_tokens_from_completion_alias=True,
                     max_total_tokens=3,
+                    max_completion_tokens=3,
                 ),
                 OtherParams(max_new_think_tokens=10),
                 visitor,
@@ -1839,16 +1902,22 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(responses), 1)
         self.assertEqual(
             visitor.last_generate_input.generate_config.max_new_tokens,
-            32000,
+            _DEFAULT_MAX_NEW_TOKENS,
         )
 
-    async def test_max_completion_tokens_non_positive_rejected_before_enqueue(
+    async def test_max_completion_tokens_non_positive_preserved_before_enqueue(
         self,
     ) -> None:
-        """max_completion_tokens<=0 is a request error, not an engine abort."""
         for value in (-1, 0):
             with self.subTest(value=value):
-                visitor = _FakeVisitor(_FakeAsyncStream([]))
+                out = GenerateOutput(
+                    output_ids=torch.tensor([9], dtype=torch.int32),
+                    finished=True,
+                    aux_info=AuxInfo(input_len=1, reuse_len=0),
+                )
+                visitor = _FakeVisitor(
+                    _FakeAsyncStream([GenerateOutputs(generate_outputs=[out])])
+                )
                 servicer = DashScInferenceServicer(backend_visitor=visitor)
                 req = self._valid_infer_request()
                 req.parameters["max_completion_tokens"].int64_param = value
@@ -1857,18 +1926,26 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
                     servicer.ModelStreamInfer(_areq_iter([req]), MagicMock())
                 )
 
-                self.assertEqual(visitor.enqueue_called, 0)
+                self.assertEqual(visitor.enqueue_called, 1)
                 self.assertEqual(len(responses), 1)
-                _assert_parameter_error_response(
-                    self, responses[0], "max_completion_tokens"
+                self.assertEqual(
+                    visitor.last_generate_input.generate_config.max_completion_tokens,
+                    value,
                 )
 
-    async def test_max_completion_tokens_non_positive_rejected_before_legacy_aliases(
+    async def test_max_completion_tokens_non_positive_blocks_legacy_aliases(
         self,
     ) -> None:
         for value in (-1, 0):
             with self.subTest(value=value):
-                visitor = _FakeVisitor(_FakeAsyncStream([]))
+                out = GenerateOutput(
+                    output_ids=torch.tensor([9], dtype=torch.int32),
+                    finished=True,
+                    aux_info=AuxInfo(input_len=1, reuse_len=0),
+                )
+                visitor = _FakeVisitor(
+                    _FakeAsyncStream([GenerateOutputs(generate_outputs=[out])])
+                )
                 servicer = DashScInferenceServicer(backend_visitor=visitor)
                 req = self._valid_infer_request()
                 _add_input_tensor(
@@ -1890,10 +1967,15 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
                     servicer.ModelStreamInfer(_areq_iter([req]), MagicMock())
                 )
 
-                self.assertEqual(visitor.enqueue_called, 0)
+                self.assertEqual(visitor.enqueue_called, 1)
                 self.assertEqual(len(responses), 1)
-                _assert_parameter_error_response(
-                    self, responses[0], "max_completion_tokens"
+                generate_config = visitor.last_generate_input.generate_config
+                self.assertEqual(
+                    generate_config.max_new_tokens, _DEFAULT_MAX_NEW_TOKENS
+                )
+                self.assertEqual(
+                    generate_config.max_completion_tokens,
+                    value,
                 )
 
     async def test_dash_generation_without_enable_thinking_disables_env_thinking(
@@ -1957,7 +2039,9 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(visitor.enqueue_called, 1)
         generate_config = visitor.last_generate_input.generate_config
         self.assertTrue(generate_config.in_think_mode)
-        self.assertEqual(generate_config.max_thinking_tokens, 32000)
+        self.assertEqual(
+            generate_config.max_thinking_tokens, _DEFAULT_MAX_THINKING_TOKENS
+        )
 
     async def test_dash_generation_json_object_with_enable_thinking_keeps_both_constraints(
         self,
@@ -2103,7 +2187,8 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(visitor.enqueue_called, 1)
         generate_config = visitor.last_generate_input.generate_config
-        self.assertEqual(generate_config.max_new_tokens, 100)
+        self.assertEqual(generate_config.max_new_tokens, _DEFAULT_MAX_NEW_TOKENS)
+        self.assertEqual(generate_config.max_completion_tokens, 100)
         self.assertTrue(generate_config.in_think_mode)
         self.assertEqual(generate_config.max_thinking_tokens, 10)
 

@@ -546,7 +546,8 @@ class OpenaiGenerateConfigTest(TestCase):
 
         config = self._extract_openai_generation_config(request, generate_env_config)
 
-        self.assertEqual(config.max_new_tokens, 100)
+        self.assertEqual(config.max_tokens, 200)
+        self.assertEqual(config.max_completion_tokens, 100)
         self.assertEqual(config.max_thinking_tokens, 10)
         self.assertTrue(config.in_think_mode)
 
@@ -564,7 +565,8 @@ class OpenaiGenerateConfigTest(TestCase):
 
         config = self._extract_openai_generation_config(request, generate_env_config)
 
-        self.assertEqual(config.max_new_tokens, 100)
+        self.assertEqual(config.max_tokens, 105)
+        self.assertEqual(config.max_completion_tokens, 100)
         self.assertEqual(config.max_thinking_tokens, 10)
 
     def test_openai_max_completion_tokens_does_not_add_default_thinking_budget(self):
@@ -579,8 +581,11 @@ class OpenaiGenerateConfigTest(TestCase):
 
         config = self._extract_openai_generation_config(request, generate_env_config)
 
-        self.assertEqual(config.max_new_tokens, 100)
-        self.assertEqual(config.max_thinking_tokens, 32000)
+        self.assertEqual(config.max_completion_tokens, 100)
+        self.assertEqual(
+            config.max_thinking_tokens,
+            GenerateConfig().max_thinking_tokens,
+        )
         self.assertTrue(config.in_think_mode)
 
     def test_request_level_thinking_adds_think_end_tokens_when_env_mode_off(self):
@@ -663,18 +668,19 @@ class OpenaiGenerateConfigTest(TestCase):
             self.tokenizer.encode("</think>\n\n", add_special_tokens=False),
         )
 
-    def test_openai_max_completion_tokens_non_positive_is_unset(self):
+    def test_openai_max_completion_tokens_non_positive_is_preserved(self):
         request = ChatCompletionRequest(
             messages=[],
             max_tokens=64,
             max_completion_tokens=0,
         )
         config = self._extract_openai_generation_config(request)
-        self.assertEqual(config.max_new_tokens, 64)
+        self.assertEqual(config.max_tokens, 64)
+        self.assertEqual(config.max_completion_tokens, 0)
 
         request = ChatCompletionRequest(messages=[], max_completion_tokens=-1)
         config = self._extract_openai_generation_config(request)
-        self.assertEqual(config.max_new_tokens, 32000)
+        self.assertEqual(config.max_completion_tokens, -1)
 
     def assert_config_stop_word(
         self,
