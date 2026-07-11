@@ -3,6 +3,7 @@ py_test(
     srcs = ["foundation_test.py"],
     deps = [
         "//rtp_llm/models_py:new_weight_loader",
+        "//rtp_llm:numpy",
         "//rtp_llm:safetensors",
         "//rtp_llm:torch",
     ],
@@ -18,6 +19,7 @@ py_test(
     tags = ["gpu"],
     deps = [
         "//rtp_llm/models_py:new_weight_loader",
+        "//rtp_llm:numpy",
         "//rtp_llm:safetensors",
         "//rtp_llm:torch",
     ],
