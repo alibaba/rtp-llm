@@ -87,9 +87,10 @@ class TestQwen3NextGraphProbeGpu(unittest.TestCase):
         os.environ["RTPLLM_DECODE_CHECKSUM_DEBUG"] = "1"
         os.environ["RTPLLM_DECODE_CHECKSUM_SYNC_DEVICE"] = "1"
         os.environ["RTPLLM_DECODE_CHECKSUM_FILE"] = self.checksum_file
-        os.environ["RTPLLM_DECODE_CHECKSUM_EVERY"] = "2"
-        os.environ["RTPLLM_DECODE_CHECKSUM_MAX_RECORDS"] = "1"
+        os.environ["RTPLLM_DECODE_CHECKSUM_EVERY"] = "1"
+        os.environ["RTPLLM_DECODE_CHECKSUM_MAX_RECORDS"] = "0"
         os.environ["RTPLLM_DECODE_CHECKSUM_MAX_LANES"] = "0"
+        os.environ["RTPLLM_DECODE_CHECKSUM_MAX_OUTPUT_STEPS_PER_TRACE"] = "8"
         self.graph_probe_enabled = os.environ.get(
             "TEST_QWEN3_NEXT_GRAPH_PROBE_ENABLED", "1"
         ) == "1"
@@ -145,10 +146,8 @@ class TestQwen3NextGraphProbeGpu(unittest.TestCase):
             self.max_seq_len - self.num_tokens_per_bs,
             dtype=torch.int32,
         ).pin_memory()
-        attention.sequence_lengths = torch.full(
-            (self.actual_bs,),
-            self.max_seq_len - self.num_tokens_per_bs - 1,
-            dtype=torch.int32,
+        attention.sequence_lengths = torch.empty(
+            0, dtype=torch.int32
         ).pin_memory()
         attention.sequence_lengths_plus_1_d = torch.full(
             (self.actual_bs,),
@@ -309,9 +308,47 @@ class TestQwen3NextGraphProbeGpu(unittest.TestCase):
         )
 
         status_calls = self.model.debug_status_calls
+        base_prefix = self.max_seq_len - self.num_tokens_per_bs
+        inputs.attention_inputs.prefix_lengths[: self.actual_bs].fill_(base_prefix)
+        inputs.attention_inputs.prefix_lengths[1] = base_prefix + 8
+        self.runner.forward(inputs)
+        torch.cuda.synchronize()
+        self.assertEqual(status_calls + 1, self.model.debug_status_calls)
+        with open(self.checksum_file, encoding="utf-8") as checksum_stream:
+            records = [json.loads(line) for line in checksum_stream if line.strip()]
+        self.assertEqual(4, len(records))
+        expected_lanes = [lane for lane in range(self.actual_bs) if lane != 1]
+        self.assertEqual(
+            [expected_lanes, expected_lanes],
+            [[lane["lane"] for lane in record["lanes"]] for record in records[-2:]],
+        )
+
+        status_calls = self.model.debug_status_calls
+        inputs.attention_inputs.prefix_lengths[: self.actual_bs].fill_(base_prefix + 8)
         self.runner.forward(inputs)
         torch.cuda.synchronize()
         self.assertEqual(status_calls, self.model.debug_status_calls)
+        with open(self.checksum_file, encoding="utf-8") as checksum_stream:
+            self.assertEqual(4, sum(1 for line in checksum_stream if line.strip()))
+
+        inputs.attention_inputs.sequence_lengths = (
+            inputs.attention_inputs.input_lengths[: self.actual_bs].clone().pin_memory()
+        )
+        inputs.attention_inputs.sequence_lengths.add_(7)
+        status_calls = self.model.debug_status_calls
+        self.runner.forward(inputs)
+        torch.cuda.synchronize()
+        self.assertEqual(status_calls + 1, self.model.debug_status_calls)
+        with open(self.checksum_file, encoding="utf-8") as checksum_stream:
+            self.assertEqual(6, sum(1 for line in checksum_stream if line.strip()))
+
+        inputs.attention_inputs.sequence_lengths.add_(1)
+        status_calls = self.model.debug_status_calls
+        self.runner.forward(inputs)
+        torch.cuda.synchronize()
+        self.assertEqual(status_calls, self.model.debug_status_calls)
+        with open(self.checksum_file, encoding="utf-8") as checksum_stream:
+            self.assertEqual(6, sum(1 for line in checksum_stream if line.strip()))
 
 
 if __name__ == "__main__":

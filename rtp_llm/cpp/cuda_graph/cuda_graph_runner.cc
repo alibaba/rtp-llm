@@ -16,6 +16,7 @@
 #include <sstream>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <unistd.h>
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -29,8 +30,11 @@ namespace rtp_llm {
 
 namespace {
 
-std::atomic<uint64_t> g_decode_checksum_record_id{0};
-std::mutex            g_decode_checksum_mutex;
+std::atomic<uint64_t>                    g_decode_checksum_record_id{0};
+std::mutex                               g_decode_checksum_mutex;
+std::mutex                               g_decode_checksum_trace_progress_mutex;
+std::unordered_map<std::string, int64_t> g_decode_checksum_trace_start_prefix;
+constexpr size_t                         kMaxDecodeChecksumTraceProgressEntries = 65536;
 
 bool envFlag(const char* name, bool default_value = false) {
     const char* raw = std::getenv(name);
@@ -164,6 +168,7 @@ struct DecodeChecksumConfig {
     int64_t                  every{1};
     int64_t                  max_records{0};
     int64_t                  max_lanes{8};
+    int64_t                  max_output_steps_per_trace{0};
     std::string              file;
     std::vector<std::string> trace_filters;
     bool                     graph_probe_enabled{false};
@@ -177,6 +182,8 @@ const DecodeChecksumConfig& decodeChecksumConfig() {
         c.every         = std::max<int64_t>(1, envInt64("RTPLLM_DECODE_CHECKSUM_EVERY", 1));
         c.max_records   = envInt64("RTPLLM_DECODE_CHECKSUM_MAX_RECORDS", 0);
         c.max_lanes     = envInt64("RTPLLM_DECODE_CHECKSUM_MAX_LANES", 8);
+        c.max_output_steps_per_trace =
+            envInt64("RTPLLM_DECODE_CHECKSUM_MAX_OUTPUT_STEPS_PER_TRACE", 0);
         c.trace_filters = splitCsv(envString("RTPLLM_DECODE_CHECKSUM_TRACE_FILTER"));
         c.graph_probe_enabled = c.enabled && envFlag("RTPLLM_QWEN3_NEXT_GRAPH_PROBE", false);
 
@@ -207,19 +214,65 @@ bool traceSelected(const std::string& trace_id, const std::vector<std::string>& 
     });
 }
 
-std::vector<int64_t> selectedLanes(const std::vector<std::string>& trace_ids,
-                                   int64_t                         current_bs,
-                                   const DecodeChecksumConfig&     config) {
+bool hostScalarAt(const torch::Tensor& tensor, int64_t lane, int64_t& value) {
+    if (!tensor.defined() || tensor.is_cuda() || tensor.dim() != 1 || lane < 0 || lane >= tensor.size(0)) {
+        return false;
+    }
+    value = tensor[lane].item<int64_t>();
+    return true;
+}
+
+bool outputStepAt(const PyModelInputs& inputs,
+                  int64_t              lane,
+                  const std::string&   trace_id,
+                  int64_t&             output_step) {
+    int64_t input_length    = 0;
+    int64_t sequence_length = 0;
+    if (hostScalarAt(inputs.attention_inputs.input_lengths, lane, input_length)
+        && hostScalarAt(inputs.attention_inputs.sequence_lengths, lane, sequence_length)) {
+        output_step = sequence_length - input_length;
+        return true;
+    }
+
+    int64_t prefix_length = 0;
+    if (trace_id.empty() || !hostScalarAt(inputs.attention_inputs.prefix_lengths, lane, prefix_length)) {
+        return false;
+    }
+    std::lock_guard<std::mutex> lock(g_decode_checksum_trace_progress_mutex);
+    auto                        it = g_decode_checksum_trace_start_prefix.find(trace_id);
+    if (it == g_decode_checksum_trace_start_prefix.end()) {
+        if (g_decode_checksum_trace_start_prefix.size() >= kMaxDecodeChecksumTraceProgressEntries) {
+            return false;
+        }
+        it = g_decode_checksum_trace_start_prefix.emplace(trace_id, prefix_length).first;
+    }
+    if (prefix_length < it->second) {
+        it->second = prefix_length;
+    }
+    output_step = prefix_length - it->second;
+    return true;
+}
+
+std::vector<int64_t> selectedLanes(const PyModelInputs&         inputs,
+                                   int64_t                      current_bs,
+                                   const DecodeChecksumConfig& config) {
     std::vector<int64_t> lanes;
     const int64_t        limit = config.max_lanes <= 0 ? current_bs : std::min<int64_t>(current_bs, config.max_lanes);
     for (int64_t lane = 0; lane < current_bs; ++lane) {
-        const std::string trace_id = lane < static_cast<int64_t>(trace_ids.size()) ? trace_ids[lane] : "";
+        const std::string trace_id =
+            lane < static_cast<int64_t>(inputs.trace_ids.size()) ? inputs.trace_ids[lane] : "";
         if (!traceSelected(trace_id, config.trace_filters)) {
             continue;
         }
-        lanes.push_back(lane);
-        if (static_cast<int64_t>(lanes.size()) >= limit) {
-            break;
+        if (config.max_output_steps_per_trace > 0) {
+            int64_t output_step = 0;
+            if (!outputStepAt(inputs, lane, trace_id, output_step)
+                || output_step >= config.max_output_steps_per_trace) {
+                continue;
+            }
+        }
+        if (static_cast<int64_t>(lanes.size()) < limit) {
+            lanes.push_back(lane);
         }
     }
     return lanes;
@@ -361,11 +414,12 @@ struct CudaGraphProbeCapture {
 };
 
 struct DecodeChecksumRecord {
-    bool     selected{false};
-    uint64_t id{0};
+    bool                 selected{false};
+    uint64_t             id{0};
+    std::vector<int64_t> lanes;
 };
 
-DecodeChecksumRecord nextDecodeChecksumRecord() {
+DecodeChecksumRecord nextDecodeChecksumRecord(const PyModelInputs& inputs, int64_t current_bs) {
     const auto& config = decodeChecksumConfig();
     if (!config.enabled) {
         return {};
@@ -378,7 +432,11 @@ DecodeChecksumRecord nextDecodeChecksumRecord() {
     if (record_id % static_cast<uint64_t>(config.every) != 0) {
         return {};
     }
-    return {true, record_id};
+    auto lanes = selectedLanes(inputs, current_bs, config);
+    if (lanes.empty()) {
+        return {};
+    }
+    return {true, record_id, std::move(lanes)};
 }
 
 void appendGraphProbe(std::ostringstream&            os,
@@ -615,10 +673,6 @@ void writeDecodeChecksumRecord(const DecodeChecksumRecord& record,
         return;
     }
 
-    const auto lanes = selectedLanes(original_inputs.trace_ids, state.current_batch_size, config);
-    if (lanes.empty()) {
-        return;
-    }
     if (config.sync_device) {
         cuda_graph::graphDeviceSynchronize();
     }
@@ -642,10 +696,10 @@ void writeDecodeChecksumRecord(const DecodeChecksumRecord& record,
         os << ",\"graph_probe_status\":";
         appendGraphProbeStatus(os, *graph_probe.status);
     }
-    os << ",\"lane_count\":" << lanes.size();
+    os << ",\"lane_count\":" << record.lanes.size();
     os << ",\"lanes\":[";
-    for (size_t i = 0; i < lanes.size(); ++i) {
-        const int64_t     lane     = lanes[i];
+    for (size_t i = 0; i < record.lanes.size(); ++i) {
+        const int64_t     lane     = record.lanes[i];
         const std::string trace_id = lane < static_cast<int64_t>(original_inputs.trace_ids.size()) ?
                                          original_inputs.trace_ids[lane] :
                                          "";
@@ -1071,7 +1125,7 @@ PyModelOutputs CudaGraphRunner::forward(const PyModelInputs& inputs, CudaGraphSt
                 0, 0, state.current_seq_len);
     } else {
         auto& graph_inputs = graph_instances_[state.current_real_graph_bs].mem_hold_.py_model_inputs_;
-        const auto checksum_record = nextDecodeChecksumRecord();
+        const auto checksum_record = nextDecodeChecksumRecord(inputs, state.current_batch_size);
         writeDecodeChecksumRecord(
             checksum_record, "before_replay", inputs, graph_inputs, torch::Tensor(), {}, state, full_kv_cache_group_id_);
         {
