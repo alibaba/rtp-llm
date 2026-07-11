@@ -10,7 +10,7 @@ import torch
 import torch.nn as nn
 
 import rtp_llm.models_py.weight_mapper as weight_mapper
-from rtp_llm.models_py.module_base import RtpModule
+from rtp_llm.models_py.module_base import RtpModule, collect_loaded_tensor_ids
 from rtp_llm.models_py.registry import get_model_class, list_models
 
 logger = logging.getLogger(__name__)
@@ -146,12 +146,13 @@ class NewModelLoader:
 
     @staticmethod
     def _validate_loaded_weights(model: nn.Module) -> None:
+        loaded_tensor_ids = frozenset(collect_loaded_tensor_ids(model))
         root_validator = getattr(model, "validate_weights_loaded", None)
         if not callable(root_validator):
             raise TypeError(
                 f"Registered model {type(model).__name__} has no weight completeness validator"
             )
-        root_validator()
+        root_validator(loaded_tensor_ids)
 
         for module in model.modules():
             if module is model:
@@ -164,7 +165,7 @@ class NewModelLoader:
                         f"Custom weight loader {type(module).__name__}.load_weights() "
                         "must define validate_weights_loaded()"
                     )
-                validator()
+                validator(loaded_tensor_ids)
 
     @staticmethod
     def _run_post_load_hooks(model: nn.Module, force_cpu: bool) -> None:
@@ -176,6 +177,7 @@ class NewModelLoader:
             if callable(hook):
                 hook()
 
+    @torch.inference_mode()
     def load(self) -> nn.Module:
         method = self._resolve_load_method()
         if method != NewLoaderLoadMethod.SCRATCH:

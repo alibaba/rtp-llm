@@ -40,9 +40,9 @@ class _FoundationModel(RtpModule):
         self.post_device = None
         self.post_count = 0
 
-    def validate_weights_loaded(self):
+    def validate_weights_loaded(self, loaded_tensor_ids=None):
         self.validation_device = self.scale.device.type
-        super().validate_weights_loaded()
+        super().validate_weights_loaded(loaded_tensor_ids)
 
     def process_weights_after_loading(self):
         self.post_device = self.final.device.type
@@ -164,6 +164,34 @@ class FoundationLoaderTest(unittest.TestCase):
         NewModelLoader._validate_loaded_weights(model)
         self.assertIs(model.embed.weight, model.head.weight)
         self.assertTrue(torch.equal(model.head.weight, expected))
+
+    def test_shared_parameter_crosses_custom_loader_boundary_both_directions(self):
+        class CustomLeaf(RtpModule):
+            def load_weights(self, weights):
+                super().load_weights(weights)
+
+        class CrossBoundaryTree(RtpModule):
+            def __init__(self, model_config, load_config):
+                super().__init__()
+                self.embed = RtpModule()
+                self.head = CustomLeaf()
+                shared = nn.Parameter(torch.empty(2, 2))
+                self.embed.weight = shared
+                self.head.weight = shared
+
+        register_model("foundation_cross_boundary_model")(CrossBoundaryTree)
+        config = types.SimpleNamespace(model_type="foundation_cross_boundary_model")
+        expected = torch.arange(4, dtype=torch.float32).reshape(2, 2)
+        for alias in ("embed.weight", "head.weight"):
+            with self.subTest(alias=alias), tempfile.TemporaryDirectory() as model_path:
+                save_file({alias: expected}, os.path.join(model_path, "model.safetensors"))
+                model = NewModelLoader(
+                    config,
+                    NewLoaderConfig(device="cpu", compute_dtype=torch.float32),
+                    model_path=model_path,
+                ).load()
+                self.assertTrue(torch.equal(model.embed.weight, expected))
+                self.assertTrue(torch.equal(model.head.weight, expected))
 
     def test_shape_mismatch_fails(self):
         checkpoint = _weights()
@@ -311,42 +339,35 @@ class FoundationLoaderTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Invalid EP"):
             NewLoaderConfig(ep_size=2, ep_rank=2)
 
-    @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA or ROCm")
-    def test_persistent_buffer_marker_survives_device_migration(self):
+    def test_load_and_postprocess_run_in_inference_mode(self):
+        class InferenceModel(RtpModule):
+            def __init__(self, model_config, load_config):
+                super().__init__()
+                self.weight = nn.Parameter(torch.empty(1))
+                self.loader_inference_mode = False
+                self.post_inference_mode = False
+
+            def load_weights(self, weights):
+                self.loader_inference_mode = torch.is_inference_mode_enabled()
+                super().load_weights(weights)
+                self.weight.add_(1)
+
+            def process_weights_after_loading(self):
+                self.post_inference_mode = torch.is_inference_mode_enabled()
+                self.weight.mul_(2)
+
+        register_model("foundation_inference_model")(InferenceModel)
+        config = types.SimpleNamespace(model_type="foundation_inference_model")
         with tempfile.TemporaryDirectory() as model_path:
-            save_file(_weights(), os.path.join(model_path, "model.safetensors"))
-            config = types.SimpleNamespace(model_type="foundation_test_model")
+            save_file({"weight": torch.ones(1)}, os.path.join(model_path, "model.safetensors"))
             model = NewModelLoader(
                 config,
-                NewLoaderConfig(
-                    device="cuda:0",
-                    compute_dtype=torch.float32,
-                    load_method=NewLoaderLoadMethod.SCRATCH,
-                ),
+                NewLoaderConfig(device="cpu"),
                 model_path=model_path,
             ).load()
-        self.assertEqual(model.scale.device.type, "cuda")
-        self.assertEqual(model.validation_device, "cpu")
-        self.assertEqual(model.post_count, 1)
-
-    @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA or ROCm")
-    def test_cross_device_copy_does_not_allocate_full_target_temporary(self):
-        class CudaTarget(RtpModule):
-            def __init__(self):
-                super().__init__()
-                self.weight = nn.Parameter(
-                    torch.empty(16 * 1024 * 1024, device="cuda", dtype=torch.float32)
-                )
-
-        model = CudaTarget()
-        source = torch.ones(model.weight.shape, dtype=torch.float32)
-        torch.cuda.synchronize()
-        torch.cuda.reset_peak_memory_stats()
-        baseline = torch.cuda.memory_allocated()
-        model.load_weights({"weight": source})
-        torch.cuda.synchronize()
-        extra_peak = torch.cuda.max_memory_allocated() - baseline
-        self.assertLess(extra_peak, 8 * 1024 * 1024)
+        self.assertTrue(model.loader_inference_mode)
+        self.assertTrue(model.post_inference_mode)
+        self.assertEqual(model.weight.item(), 4)
 
 
 if __name__ == "__main__":

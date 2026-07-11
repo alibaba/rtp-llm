@@ -30,6 +30,19 @@ def _mark_loaded(module: nn.Module, name: str) -> None:
     loaded.add(name)
 
 
+def collect_loaded_tensor_ids(module: nn.Module) -> set:
+    loaded_tensor_ids = set()
+    for current in module.modules():
+        loaded_names = getattr(current, "_rtp_loaded_weight_names", set())
+        for name, param in current.named_parameters(recurse=False):
+            if name in loaded_names:
+                loaded_tensor_ids.add(id(param))
+        for name, buffer in current.named_buffers(recurse=False):
+            if name in loaded_names and buffer is not None:
+                loaded_tensor_ids.add(id(buffer))
+    return loaded_tensor_ids
+
+
 class RtpModule(nn.Module):
     """Streaming checkpoint dispatcher for newloader model trees.
 
@@ -125,23 +138,10 @@ class RtpModule(nn.Module):
                 dropped[:10],
             )
 
-    def validate_weights_loaded(self) -> None:
+    def validate_weights_loaded(self, loaded_tensor_ids=None) -> None:
         missing: List[str] = []
-        loaded_tensor_ids = set()
-
-        def collect_loaded(module: nn.Module) -> None:
-            loaded_names = getattr(module, "_rtp_loaded_weight_names", set())
-            for name, param in module.named_parameters(recurse=False):
-                if name in loaded_names:
-                    loaded_tensor_ids.add(id(param))
-            for name, buffer in module.named_buffers(recurse=False):
-                if name in loaded_names and buffer is not None:
-                    loaded_tensor_ids.add(id(buffer))
-            for child in module.children():
-                child_loader = getattr(type(child), "load_weights", None)
-                if child_loader is not None and child_loader is not RtpModule.load_weights:
-                    continue
-                collect_loaded(child)
+        if loaded_tensor_ids is None:
+            loaded_tensor_ids = collect_loaded_tensor_ids(self)
 
         def visit(module: nn.Module, prefix: str) -> None:
             for name, param in module.named_parameters(recurse=False):
@@ -163,7 +163,6 @@ class RtpModule(nn.Module):
                     continue
                 visit(child, child_prefix)
 
-        collect_loaded(self)
         visit(self, "")
         if missing:
             sample = missing[:10]
