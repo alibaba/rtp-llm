@@ -34,10 +34,12 @@ def collect_loaded_tensor_ids(module: nn.Module) -> set:
     loaded_tensor_ids = set()
     for current in module.modules():
         loaded_names = getattr(current, "_rtp_loaded_weight_names", set())
-        for name, param in current.named_parameters(recurse=False):
+        for name, param in current.named_parameters(
+            recurse=False, remove_duplicate=False
+        ):
             if name in loaded_names:
                 loaded_tensor_ids.add(id(param))
-        for name, buffer in current.named_buffers(recurse=False):
+        for name, buffer in current.named_buffers(recurse=False, remove_duplicate=False):
             if name in loaded_names and buffer is not None:
                 loaded_tensor_ids.add(id(buffer))
     return loaded_tensor_ids

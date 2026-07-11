@@ -165,6 +165,38 @@ class FoundationLoaderTest(unittest.TestCase):
         self.assertIs(model.embed.weight, model.head.weight)
         self.assertTrue(torch.equal(model.head.weight, expected))
 
+    def test_same_module_parameter_aliases_are_valid_checkpoint_keys(self):
+        class TiedAliases(RtpModule):
+            def __init__(self):
+                super().__init__()
+                shared = nn.Parameter(torch.empty(2, 2))
+                self.canonical = shared
+                self.checkpoint_alias = shared
+
+        expected = torch.arange(4, dtype=torch.float32).reshape(2, 2)
+        for alias in ("canonical", "checkpoint_alias"):
+            with self.subTest(alias=alias):
+                model = TiedAliases()
+                model.load_weights({alias: expected})
+                NewModelLoader._validate_loaded_weights(model)
+                self.assertTrue(torch.equal(model.canonical, expected))
+
+    def test_same_module_buffer_aliases_are_valid_checkpoint_keys(self):
+        class TiedBuffers(RtpModule):
+            def __init__(self):
+                super().__init__()
+                shared = torch.empty(2)
+                self.register_buffer("canonical", shared, persistent=True)
+                self.register_buffer("checkpoint_alias", shared, persistent=True)
+
+        expected = torch.tensor([1.0, 2.0])
+        for alias in ("canonical", "checkpoint_alias"):
+            with self.subTest(alias=alias):
+                model = TiedBuffers()
+                model.load_weights({alias: expected})
+                NewModelLoader._validate_loaded_weights(model)
+                self.assertTrue(torch.equal(model.canonical, expected))
+
     def test_shared_parameter_crosses_custom_loader_boundary_both_directions(self):
         class CustomLeaf(RtpModule):
             def load_weights(self, weights):
