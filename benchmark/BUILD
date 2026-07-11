@@ -6,10 +6,6 @@ py_test(
     ],
     main = "test_topology_kv_candidate_schedule.py",
     deps = ["//rtp_llm:torch"],
-    target_compatible_with = select({
-        "@rtp_llm//:using_rocm": ["@platforms//:incompatible"],
-        "//conditions:default": [],
-    }),
 )
 
 py_test(
