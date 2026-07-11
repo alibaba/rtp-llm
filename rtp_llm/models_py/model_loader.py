@@ -10,6 +10,7 @@ import torch
 import torch.nn as nn
 
 import rtp_llm.models_py.weight_mapper as weight_mapper
+from rtp_llm.models_py.module_base import RtpModule
 from rtp_llm.models_py.registry import get_model_class, list_models
 
 logger = logging.getLogger(__name__)
@@ -131,10 +132,11 @@ class NewModelLoader:
                 f"Model type {model_type!r} is not registered; available={list_models()}"
             ) from exc
         model = model_cls(self.model_config, self.load_config)
-        if not isinstance(model, nn.Module):
-            raise TypeError(f"Registered model {model_cls!r} did not create an nn.Module")
-        if not callable(getattr(model, "load_weights", None)):
-            raise TypeError(f"Registered model {model_cls.__name__} has no load_weights()")
+        if not isinstance(model, RtpModule):
+            raise TypeError(
+                f"Registered model {model_cls.__name__} must inherit RtpModule to "
+                "provide newloader completeness validation"
+            )
         logger.info(
             "Created newloader model %s from %s",
             model_cls.__qualname__,
@@ -144,9 +146,24 @@ class NewModelLoader:
 
     @staticmethod
     def _validate_loaded_weights(model: nn.Module) -> None:
-        for module in list(model.modules()):
-            validator = getattr(module, "validate_weights_loaded", None)
-            if callable(validator):
+        root_validator = getattr(model, "validate_weights_loaded", None)
+        if not callable(root_validator):
+            raise TypeError(
+                f"Registered model {type(model).__name__} has no weight completeness validator"
+            )
+        root_validator()
+
+        for module in model.modules():
+            if module is model:
+                continue
+            custom_loader = getattr(type(module), "load_weights", None)
+            if custom_loader is not None and custom_loader is not RtpModule.load_weights:
+                validator = getattr(module, "validate_weights_loaded", None)
+                if not callable(validator):
+                    raise TypeError(
+                        f"Custom weight loader {type(module).__name__}.load_weights() "
+                        "must define validate_weights_loaded()"
+                    )
                 validator()
 
     @staticmethod

@@ -127,20 +127,34 @@ class RtpModule(nn.Module):
 
     def validate_weights_loaded(self) -> None:
         missing: List[str] = []
+        loaded_tensor_ids = set()
+
+        def collect_loaded(module: nn.Module) -> None:
+            loaded_names = getattr(module, "_rtp_loaded_weight_names", set())
+            for name, param in module.named_parameters(recurse=False):
+                if name in loaded_names:
+                    loaded_tensor_ids.add(id(param))
+            for name, buffer in module.named_buffers(recurse=False):
+                if name in loaded_names and buffer is not None:
+                    loaded_tensor_ids.add(id(buffer))
+            for child in module.children():
+                child_loader = getattr(type(child), "load_weights", None)
+                if child_loader is not None and child_loader is not RtpModule.load_weights:
+                    continue
+                collect_loaded(child)
 
         def visit(module: nn.Module, prefix: str) -> None:
-            loaded = getattr(module, "_rtp_loaded_weight_names", set())
             for name, param in module.named_parameters(recurse=False):
                 if getattr(param, "_rtp_skip_load_check", False):
                     continue
-                if name not in loaded:
+                if id(param) not in loaded_tensor_ids:
                     missing.append(prefix + name)
             for name, buffer in module.named_buffers(recurse=False):
                 if name in module._non_persistent_buffers_set or buffer is None:
                     continue
                 if getattr(buffer, "_rtp_skip_load_check", False):
                     continue
-                if name not in loaded:
+                if id(buffer) not in loaded_tensor_ids:
                     missing.append(prefix + name)
             for name, child in module.named_children():
                 child_prefix = f"{prefix}{name}."
@@ -149,6 +163,7 @@ class RtpModule(nn.Module):
                     continue
                 visit(child, child_prefix)
 
+        collect_loaded(self)
         visit(self, "")
         if missing:
             sample = missing[:10]

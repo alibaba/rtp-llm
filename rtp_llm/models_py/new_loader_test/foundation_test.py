@@ -100,6 +100,71 @@ class FoundationLoaderTest(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "could not dispatch"):
                 self._loader(model_path).load()
 
+    def test_registered_model_without_integrity_contract_fails(self):
+        class UnsafeModel(nn.Module):
+            def __init__(self, model_config, load_config):
+                super().__init__()
+                self.weight = nn.Parameter(torch.empty(1))
+
+            def load_weights(self, weights):
+                pass
+
+        register_model("foundation_unsafe_model")(UnsafeModel)
+        config = types.SimpleNamespace(model_type="foundation_unsafe_model")
+        with tempfile.TemporaryDirectory() as model_path:
+            save_file({"weight": torch.ones(1)}, os.path.join(model_path, "model.safetensors"))
+            with self.assertRaisesRegex(TypeError, "must inherit RtpModule"):
+                NewModelLoader(
+                    config,
+                    NewLoaderConfig(device="cpu"),
+                    model_path=model_path,
+                ).load()
+
+    def test_custom_leaf_without_validator_fails(self):
+        class UnsafeLeaf(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.weight = nn.Parameter(torch.empty(1))
+
+            def load_weights(self, weights):
+                pass
+
+        class UnsafeTree(RtpModule):
+            def __init__(self, model_config, load_config):
+                super().__init__()
+                self.leaf = UnsafeLeaf()
+
+        register_model("foundation_unsafe_leaf_model")(UnsafeTree)
+        config = types.SimpleNamespace(model_type="foundation_unsafe_leaf_model")
+        with tempfile.TemporaryDirectory() as model_path:
+            save_file(
+                {"leaf.weight": torch.ones(1)},
+                os.path.join(model_path, "model.safetensors"),
+            )
+            with self.assertRaisesRegex(TypeError, "must define validate_weights_loaded"):
+                NewModelLoader(
+                    config,
+                    NewLoaderConfig(device="cpu"),
+                    model_path=model_path,
+                ).load()
+
+    def test_shared_parameter_accepts_one_loaded_alias(self):
+        class TiedTree(RtpModule):
+            def __init__(self):
+                super().__init__()
+                self.embed = RtpModule()
+                self.head = RtpModule()
+                shared = nn.Parameter(torch.empty(2, 2))
+                self.embed.weight = shared
+                self.head.weight = shared
+
+        model = TiedTree()
+        expected = torch.arange(4, dtype=torch.float32).reshape(2, 2)
+        model.load_weights({"embed.weight": expected})
+        NewModelLoader._validate_loaded_weights(model)
+        self.assertIs(model.embed.weight, model.head.weight)
+        self.assertTrue(torch.equal(model.head.weight, expected))
+
     def test_shape_mismatch_fails(self):
         checkpoint = _weights()
         checkpoint["final"] = torch.ones(3)
