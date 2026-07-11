@@ -1,8 +1,6 @@
 package org.flexlb.sync.synchronizer;
 
-import com.fasterxml.jackson.core.type.TypeReference;
 import io.micrometer.core.instrument.util.NamedThreadFactory;
-import org.apache.commons.lang3.StringUtils;
 import org.flexlb.cache.service.CacheAwareService;
 import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.dao.route.Endpoint;
@@ -15,8 +13,6 @@ import org.flexlb.sync.runner.EngineSyncRunner;
 import org.flexlb.sync.status.EngineWorkerStatus;
 import org.flexlb.sync.status.ModelWorkerStatus;
 import org.flexlb.util.IdUtils;
-import org.flexlb.util.JsonUtils;
-import org.flexlb.util.Logger;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
@@ -57,20 +53,13 @@ public class MasterEngineSynchronizer extends AbstractEngineStatusSynchronizer {
         this.syncRequestTimeoutMs = System.getenv("SYNC_REQUEST_TIMEOUT_MS") != null
                 ? Long.parseLong(System.getenv("SYNC_REQUEST_TIMEOUT_MS"))
                 : syncEngineStatusInterval;
+        modelMetaConfig.getServiceRoutes().stream()
+                .map(ServiceRoute::getServiceId)
+                .map(IdUtils::getModelNameByServiceId)
+                .forEach(modelNames::add);
         this.scheduler = new ScheduledThreadPoolExecutor(5, new NamedThreadFactory("sync-status-scheduler"),
                 new ThreadPoolExecutor.AbortPolicy());
         this.scheduler.scheduleAtFixedRate(this::syncEngineStatus, 0, syncEngineStatusInterval, TimeUnit.MILLISECONDS);
-
-        // Get environment variable
-        String modelConfig = System.getenv("MODEL_SERVICE_CONFIG");
-        if (StringUtils.isEmpty(modelConfig)) {
-            Logger.warn("prefill load balancer env:MODEL_CONFIG is empty");
-            throw new RuntimeException("master load balancer env:MODEL_CONFIG is empty");
-        }
-        ServiceRoute serviceRoute = JsonUtils.toObject(modelConfig, new TypeReference<>() {
-        });
-        ModelMetaConfig.putServiceRoute(serviceRoute.getServiceId(), serviceRoute);
-        modelNames.add(IdUtils.getModelNameByServiceId(serviceRoute.getServiceId()));
     }
 
     public void syncEngineStatus() {

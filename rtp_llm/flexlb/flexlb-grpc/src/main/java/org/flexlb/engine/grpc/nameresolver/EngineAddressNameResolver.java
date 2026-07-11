@@ -2,24 +2,19 @@ package org.flexlb.engine.grpc.nameresolver;
 
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.collections4.CollectionUtils;
-import org.apache.commons.lang3.StringUtils;
+import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.dao.master.WorkerHost;
 import org.flexlb.dao.route.Endpoint;
-import org.flexlb.dao.route.ServiceRoute;
 import org.flexlb.discovery.ServiceDiscovery;
 import org.flexlb.discovery.ServiceHostListener;
-import org.flexlb.util.JsonUtils;
 import org.flexlb.util.Logger;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
-import javax.annotation.PreDestroy;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.stream.Collectors;
 
 /**
  * @author saichen.sm
@@ -29,65 +24,56 @@ import java.util.stream.Collectors;
 @Component
 public class EngineAddressNameResolver implements CustomNameResolver {
 
-    private final Map<String/*address*/, List<String/*ip:port*/>> domainHostsMap = new ConcurrentHashMap<>();
+    private final Map<Endpoint, List<String/*ip:port*/>> domainHostsMap = new ConcurrentHashMap<>();
     private final ServiceDiscovery serviceDiscovery;
     private Listener listener;
     private List<String/*ip:port*/> allIpPortList = new ArrayList<>();
-    private final List<String> serviceAddressList;
+    private final List<Endpoint> serviceEndpoints;
 
-    public EngineAddressNameResolver(ServiceDiscovery serviceDiscovery) {
-        String modelConfig = System.getenv("MODEL_SERVICE_CONFIG");
+    public EngineAddressNameResolver(ServiceDiscovery serviceDiscovery, ModelMetaConfig modelMetaConfig) {
         this.serviceDiscovery = serviceDiscovery;
-        this.serviceAddressList = initServiceAddressList(modelConfig);
-        log.info("EngineAddressNameResolver start subscribe clusters:{} ", serviceAddressList);
+        this.serviceEndpoints = initServiceEndpoints(modelMetaConfig);
+        log.info("EngineAddressNameResolver start subscribe endpoints:{} ", serviceEndpoints);
         fetchAllDomainsHosts();
-        setupListeners(serviceDiscovery, serviceAddressList);
+        setupListeners(serviceDiscovery, serviceEndpoints);
     }
 
     @Scheduled(fixedDelay = 30000) // Execute every 30 seconds
     public void periodicHostUpdate() {
-        Logger.info("EngineAddressNameResolver performing periodic host update for domains: {}", serviceAddressList);
+        Logger.info("EngineAddressNameResolver performing periodic host update for endpoints: {}", serviceEndpoints);
         fetchAllDomainsHosts();
     }
 
-    private void setupListeners(ServiceDiscovery serviceDiscovery, List<String> serviceAddressList) {
-        // Create independent listener for each service address
-        for (String serviceAddress : serviceAddressList) {
-            if (serviceAddress == null) {
-                Logger.warn("Skipping null serviceAddress");
-                continue;
-            }
-            ServiceHostListener addressListener = hosts -> updateDomainHosts(serviceAddress, hosts);
-            serviceDiscovery.listen(serviceAddress, addressListener);
+    private void setupListeners(ServiceDiscovery serviceDiscovery, List<Endpoint> endpoints) {
+        for (Endpoint endpoint : endpoints) {
+            ServiceHostListener addressListener = hosts -> updateDomainHosts(endpoint, hosts);
+            serviceDiscovery.listen(endpoint, addressListener);
         }
     }
 
     private void fetchAllDomainsHosts() {
-        for (String serverAddress : serviceAddressList) {
-            if (serverAddress == null) {
-                Logger.warn("Skipping null serverAddress during fetch");
-                continue;
-            }
-
+        for (Endpoint endpoint : serviceEndpoints) {
             try {
-                List<WorkerHost> hosts = serviceDiscovery.getHosts(serverAddress);
-                Logger.info("Fetched {} hosts for domain: {}", hosts != null ? hosts.size() : 0, serverAddress);
-                updateDomainHosts(serverAddress, hosts);
+                List<WorkerHost> hosts = serviceDiscovery.getHosts(endpoint);
+                Logger.info("Fetched {} hosts for address: {}",
+                        hosts != null ? hosts.size() : 0, endpoint.getAddress());
+                updateDomainHosts(endpoint, hosts);
             } catch (Exception e) {
-                Logger.error("Failed to fetch hosts for domain: {}, error: {}", serverAddress, e.getMessage(), e);
+                Logger.error("Failed to fetch hosts for address: {}, error: {}",
+                        endpoint.getAddress(), e.getMessage(), e);
             }
         }
     }
 
-    private List<String> initServiceAddressList(String modelConfigJson) {
-        return Optional.ofNullable(modelConfigJson)
-                .filter(StringUtils::isNotBlank)
-                .map(json -> JsonUtils.toObject(modelConfigJson, ServiceRoute.class))
-                .map(serviceRoute -> serviceRoute.getAllEndpoints().stream()
-                        .map(Endpoint::getAddress)
-                        .collect(Collectors.toList()))
-                .filter(CollectionUtils::isNotEmpty)
-                .orElseThrow(() -> new IllegalArgumentException("serviceAddressList cannot be null, please config 'MODEL_SERVICE_CONFIG' environment variable, modelConfigJson=" + modelConfigJson));
+    private List<Endpoint> initServiceEndpoints(ModelMetaConfig modelMetaConfig) {
+        List<Endpoint> endpoints = modelMetaConfig.getServiceRoutes().stream()
+                .flatMap(serviceRoute -> serviceRoute.getAllEndpoints().stream())
+                .distinct()
+                .toList();
+        if (CollectionUtils.isEmpty(endpoints)) {
+            throw new IllegalArgumentException("MODEL_SERVICE_CONFIG must contain at least one role endpoint");
+        }
+        return endpoints;
     }
 
     @Override
@@ -99,25 +85,26 @@ public class EngineAddressNameResolver implements CustomNameResolver {
     /**
      * Update host list for specified address and aggregate all address host lists
      *
-     * @param address  Service address
+     * @param endpoint Service endpoint
      * @param hostList Host list
      */
-    private void updateDomainHosts(String address, List<WorkerHost> hostList) {
+    private void updateDomainHosts(Endpoint endpoint, List<WorkerHost> hostList) {
         if (hostList == null || hostList.isEmpty()) {
-            domainHostsMap.remove(address);
+            domainHostsMap.remove(endpoint);
         } else {
             List<String/*ip:port*/> ipPortList = new ArrayList<>(hostList.size());
             for (WorkerHost host : hostList) {
                 ipPortList.add(host.getIp() + ":" + host.getPort());
             }
-            domainHostsMap.put(address, ipPortList);
+            domainHostsMap.put(endpoint, ipPortList);
         }
         // Aggregate host lists from all addresses
         List<String/*ip:port*/> aggregatedHosts = new ArrayList<>();
         for (List<String/*ip:port*/> hosts : domainHostsMap.values()) {
             aggregatedHosts.addAll(hosts);
         }
-        Logger.info("Address {} hosts updated, total aggregated hosts: {}", address, aggregatedHosts.size());
+        Logger.info("Address {} hosts updated, total aggregated hosts: {}",
+                endpoint.getAddress(), aggregatedHosts.size());
         // Update global host list and notify listener
         this.allIpPortList = aggregatedHosts;
         if (this.listener != null) {
@@ -125,10 +112,4 @@ public class EngineAddressNameResolver implements CustomNameResolver {
         }
     }
 
-    @PreDestroy
-    public void destroy() {
-        if (serviceDiscovery != null) {
-            serviceDiscovery.shutdown();
-        }
-    }
 }

@@ -10,23 +10,6 @@ spring:
   lifecycle:
     timeout-per-shutdown-phase: ${FLEXLB_SHUTDOWN_TIMEOUT:30s}
 
-# Service discovery strategy:
-#   static-env (default) - static hosts from environment variables; available in open-source builds
-#   vipserver            - VipServer discovery; available in internal builds
-#   dashscope            - local DashScope discovery API; available in internal builds
-# For static-env, an address such as com.example.prefill uses:
-#   FLEXLB_DISCOVERY_STATIC_HOSTS_COM_EXAMPLE_PREFILL=127.0.0.1:8080,127.0.0.2:8080
-flexlb:
-  discovery:
-    type: ${FLEXLB_DISCOVERY_TYPE:static-env}
-    dashscope:
-      base-url: ${FLEXLB_DISCOVERY_DASHSCOPE_BASE_URL:http://127.0.0.1:8880}
-      connect-timeout-ms: ${FLEXLB_DISCOVERY_DASHSCOPE_CONNECT_TIMEOUT_MS:500}
-      read-timeout-ms: ${FLEXLB_DISCOVERY_DASHSCOPE_READ_TIMEOUT_MS:500}
-      poll-interval-ms: ${FLEXLB_DISCOVERY_DASHSCOPE_POLL_INTERVAL_MS:1000}
-      max-idle-connections: ${FLEXLB_DISCOVERY_DASHSCOPE_MAX_IDLE_CONNECTIONS:5}
-      keep-alive-duration-ms: ${FLEXLB_DISCOVERY_DASHSCOPE_KEEP_ALIVE_DURATION_MS:300000}
-
 logging:
   level:
     root: info

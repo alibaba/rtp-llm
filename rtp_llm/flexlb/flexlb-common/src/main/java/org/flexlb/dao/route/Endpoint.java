@@ -16,4 +16,7 @@ public class Endpoint {
 
     @JsonProperty("path")
     private String path;
+
+    @JsonProperty("discovery")
+    private DiscoveryConfig discovery;
 }

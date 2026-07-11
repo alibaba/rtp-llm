@@ -321,13 +321,19 @@ New configuration fields:
 ### MODEL_SERVICE_CONFIG (required)
 ```json
 {
-  "prefill_endpoint": {
-    "path": "/",
-    "protocol": "http",
-    "type": "SpecifiedIpPortList",
-    "address": "[\"localhost:8080\"]"
-  },
-  "service_id": "model.service"
+  "service_id": "aigc.text-generation.generation.engine_service",
+  "role_endpoints": [{
+    "group": "default",
+    "pd_fusion_endpoint": {
+      "address": "local-engine",
+      "protocol": "http",
+      "path": "/",
+      "discovery": {
+        "type": "static-env",
+        "hosts": ["127.0.0.1:8080"]
+      }
+    }
+  }]
 }
 ```
 

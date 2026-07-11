@@ -89,15 +89,44 @@ export FLEXLB_CONFIG='{
 }'
 
 export MODEL_SERVICE_CONFIG='{
-    "prefill_endpoint": {
-        "path": "/",
-        "protocol": "http",
-        "type": "SpecifiedIpPortList",
-        "address": "[\"localhost:8080\"]"
-    },
-    "service_id": "model.service"
+    "service_id": "aigc.text-generation.generation.engine_service",
+    "role_endpoints": [{
+        "group": "default",
+        "pd_fusion_endpoint": {
+            "address": "local-engine",
+            "protocol": "http",
+            "path": "/",
+            "discovery": {
+                "type": "static-env",
+                "hosts": ["127.0.0.1:8080"]
+            }
+        }
+    }]
 }'
 ```
+
+Each endpoint must contain exactly one `discovery` object. Supported types are:
+
+- `static-env`: Reads `hosts` directly from the endpoint configuration.
+- `vipserver`: Uses `address` as the VipServer service name (internal builds).
+- `dashscope`: Uses `address` as the virtual service ID (internal builds). `base_url` defaults to
+  `http://127.0.0.1:8880` when omitted.
+
+DashScope tuning fields are optional and belong to the same `discovery` object:
+
+```json
+{
+  "type": "dashscope",
+  "base_url": "http://127.0.0.1:8880",
+  "connect_timeout_ms": 500,
+  "read_timeout_ms": 500,
+  "poll_interval_ms": 1000,
+  "max_idle_connections": 5,
+  "keep_alive_duration_ms": 300000
+}
+```
+
+The values shown above are the code defaults. There is no global discovery strategy or fallback.
 
 ### Run
 

@@ -1,6 +1,7 @@
 package org.flexlb.discovery;
 
 import org.flexlb.dao.master.WorkerHost;
+import org.flexlb.dao.route.Endpoint;
 
 import java.util.List;
 
@@ -12,20 +13,20 @@ import java.util.List;
 public interface ServiceDiscovery {
 
     /**
-     * Synchronously get host list by service address
+     * Synchronously get the host list for an endpoint.
      *
-     * @param address Service address
+     * @param endpoint Endpoint and its discovery configuration
      * @return Host list
      */
-    List<WorkerHost> getHosts(String address);
+    List<WorkerHost> getHosts(Endpoint endpoint);
 
     /**
-     * Listen for host changes at service address
+     * Listen for host changes for an endpoint.
      *
-     * @param address  Service address
+     * @param endpoint Endpoint and its discovery configuration
      * @param listener Host change listener
      */
-    void listen(String address, ServiceHostListener listener);
+    void listen(Endpoint endpoint, ServiceHostListener listener);
 
     /**
      * Stop all listeners

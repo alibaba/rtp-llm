@@ -1,7 +1,8 @@
 package org.flexlb.config;
 
+import org.flexlb.discovery.RoutingServiceDiscovery;
 import org.flexlb.discovery.ServiceDiscovery;
-import org.flexlb.discovery.StaticEnvironmentServiceDiscovery;
+import org.flexlb.discovery.StaticServiceDiscoveryProvider;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 
@@ -13,21 +14,11 @@ class ServiceDiscoveryConfigurationTest {
             .withUserConfiguration(ServiceDiscoveryConfiguration.class);
 
     @Test
-    void doesNotCreateDiscoveryWhenStrategyIsMissing() {
-        contextRunner.run(context -> assertThat(context).doesNotHaveBean(ServiceDiscovery.class));
-    }
-
-    @Test
-    void usesStaticEnvironmentDiscoveryWhenExplicitlySelected() {
-        contextRunner
-                .withPropertyValues("flexlb.discovery.type=static-env")
-                .run(context -> assertThat(context).hasSingleBean(ServiceDiscovery.class));
-    }
-
-    @Test
-    void doesNotSilentlyFallBackForAnotherStrategy() {
-        contextRunner
-                .withPropertyValues("flexlb.discovery.type=dashscope")
-                .run(context -> assertThat(context).doesNotHaveBean(ServiceDiscovery.class));
+    void createsRouterAndStaticProviderWithoutGlobalStrategy() {
+        contextRunner.run(context -> {
+            assertThat(context).hasSingleBean(ServiceDiscovery.class);
+            assertThat(context).hasSingleBean(RoutingServiceDiscovery.class);
+            assertThat(context).hasSingleBean(StaticServiceDiscoveryProvider.class);
+        });
     }
 }

@@ -10,7 +10,6 @@ import org.flexlb.sync.status.EngineWorkerStatus;
 import org.springframework.http.MediaType;
 import org.springframework.test.web.reactive.server.WebTestClient;
 import org.springframework.web.reactive.function.BodyInserters;
-import uk.org.webcompere.systemstubs.environment.EnvironmentVariables;
 
 import java.lang.reflect.Field;
 import java.time.Duration;
@@ -49,11 +48,7 @@ public class QueueStressTest {
         this.configService = configService;
     }
 
-    public static QueueStressTest init(WebTestClient webClient, EnvironmentVariables environmentVariables,
-                                       ConfigService configService
-    ) {
-        environmentVariables.set("FLEXLB_DISCOVERY_STATIC_HOSTS_COM_PREFILL_HOSTS_ADDRESS", "127.0.0.100:8080,127.0.0.101:8080");
-        environmentVariables.set("FLEXLB_DISCOVERY_STATIC_HOSTS_COM_DECODE_HOSTS_ADDRESS", "127.0.0.102:8080,127.0.0.103:8080");
+    public static QueueStressTest init(WebTestClient webClient, ConfigService configService) {
         return new QueueStressTest(webClient, configService);
     }
 
