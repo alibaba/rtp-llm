@@ -517,6 +517,16 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         block_size = getattr(
             layer, "_fp8_moe_weight_block_size", [layer._FP8_BLOCK_SIZE] * 2
         )
+        if (
+            bool(getattr(layer, "_new_loader_force_cpu_load_weights", False))
+            and layer.w13.device.type == "cpu"
+        ):
+            raise RuntimeError(
+                "fp8_per_block MoE cannot run device-specific post-load "
+                "requantization while force_cpu_load_weights keeps weights on CPU; "
+                "disable force_cpu_load_weights or use a quantization path with CPU "
+                "post-load support."
+            )
         from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import (
             is_deep_gemm_e8m0_used,
         )

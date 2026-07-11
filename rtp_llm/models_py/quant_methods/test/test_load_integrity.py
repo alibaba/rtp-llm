@@ -256,12 +256,16 @@ class TestWeightMapperStreaming(unittest.TestCase):
         loader.load_config.tp_size = 2
         loader.load_config.tp_rank = 1
         hf_tensor = torch.arange(4 * 6, dtype=torch.float32).view(4, 6)
+        hf_a_tensor = torch.arange(4 * 4, dtype=torch.float32).view(4, 4)
         with mock.patch.object(
             loader, "_read_lora_config", return_value={"rank": 4, "lora_alpha": 8}
         ), mock.patch.object(
             loader,
             "_load_lora_state_dict",
-            return_value={"base_model.model.model.layers.0.mlp.gate_proj.lora_B.weight": hf_tensor},
+            return_value={
+                "base_model.model.model.layers.0.mlp.gate_proj.lora_A.weight": hf_a_tensor,
+                "base_model.model.model.layers.0.mlp.gate_proj.lora_B.weight": hf_tensor,
+            },
         ), mock.patch("rtp_llm.lora.lora_weights.LoRAWeights", FakeLoRAWeights):
             result = loader.load_lora_weights("adapter", "/tmp/lora", device="cpu")
         self.assertIs(result, FakeLoRAWeights.instances[-1])
@@ -269,6 +273,40 @@ class TestWeightMapperStreaming(unittest.TestCase):
         expected = hf_tensor.t().contiguous().narrow(-1, 2, 2)
         self.assertTrue(torch.equal(result.weights[(0, engine_name)], expected))
         self.assertEqual(result.scale, 2.0)
+
+    def test_lora_load_fails_when_no_tensor_is_mapped(self):
+        loader = NewModelLoader(
+            types.SimpleNamespace(model_type="dummy", num_layers=1),
+            LoadConfig(compute_dtype=torch.float32, device="cpu", load_method=LoadMethod.SCRATCH),
+            model_path="/tmp/nonexistent",
+            device="cpu",
+        )
+        with mock.patch.object(
+            loader, "_read_lora_config", return_value={"rank": 4, "lora_alpha": 8}
+        ), mock.patch.object(
+            loader,
+            "_load_lora_state_dict",
+            return_value={"bert.encoder.layer.0.attention.self.query.lora_A.weight": torch.zeros(4, 4)},
+        ):
+            with self.assertRaisesRegex(RuntimeError, "did not contain any mappable"):
+                loader.load_lora_weights("adapter", "/tmp/lora", device="cpu")
+
+    def test_lora_load_fails_when_a_b_pair_is_incomplete(self):
+        loader = NewModelLoader(
+            types.SimpleNamespace(model_type="dummy", num_layers=1),
+            LoadConfig(compute_dtype=torch.float32, device="cpu", load_method=LoadMethod.SCRATCH),
+            model_path="/tmp/nonexistent",
+            device="cpu",
+        )
+        with mock.patch.object(
+            loader, "_read_lora_config", return_value={"rank": 4, "lora_alpha": 8}
+        ), mock.patch.object(
+            loader,
+            "_load_lora_state_dict",
+            return_value={"base_model.model.model.layers.0.mlp.gate_proj.lora_A.weight": torch.zeros(4, 4)},
+        ):
+            with self.assertRaisesRegex(RuntimeError, "incomplete A/B tensor pairs"):
+                loader.load_lora_weights("adapter", "/tmp/lora", device="cpu")
 
     def test_lora_tp_slice_rejects_non_divisible_dim(self):
         with self.assertRaisesRegex(ValueError, "LoRA TP slice.*divisible"):
@@ -903,6 +941,34 @@ class TestLinearLoadCompleteness(unittest.TestCase):
             out = layer(x)
         torch.testing.assert_close(out, torch.full((1, 3), 7.0), rtol=0, atol=0)
 
+    def test_row_parallel_copies_1d_per_channel_weight_scale_when_n_equals_k(self):
+        layer = RowParallelLinear(
+            input_size=8,
+            output_size=8,
+            tp_size=2,
+            tp_rank=1,
+            quant_config=_qc("fp8_per_channel"),
+            prefix="row_fp8",
+            params_dtype=torch.float32,
+        )
+        scale = torch.arange(8, dtype=torch.float32)
+        layer.load_weights({"row_fp8.weight_scale": scale})
+        torch.testing.assert_close(layer.weight_scale.detach(), scale.reshape(8, 1))
+
+    def test_row_parallel_copies_2d_per_channel_weight_scale_when_n_equals_k(self):
+        layer = RowParallelLinear(
+            input_size=8,
+            output_size=8,
+            tp_size=2,
+            tp_rank=1,
+            quant_config=_qc("fp8_per_channel"),
+            prefix="row_fp8",
+            params_dtype=torch.float32,
+        )
+        scale = torch.arange(8, dtype=torch.float32).reshape(8, 1)
+        layer.load_weights({"row_fp8.weight_scale": scale})
+        torch.testing.assert_close(layer.weight_scale.detach(), scale)
+
     def test_qkv_rejects_illegal_gqa_head_ratio(self):
         with self.assertRaisesRegex(ValueError, "num_heads.*num_kv_heads"):
             QKVParallelLinear(
@@ -1220,6 +1286,54 @@ class TestMoELoadCompleteness(unittest.TestCase):
         layer.load_weights({"gate_up_proj.weight_scale": scale})
         torch.testing.assert_close(layer._gate_ch_scales[0], scale[0, :4])
         torch.testing.assert_close(layer._up_ch_scales[0], scale[0, 4:])
+
+    def test_stacked_moe_gate_up_block_scale_last_dim_splits_and_transposes(self):
+        qc = _qc("fp8_block")
+        qc.weight_block_size = [4, 4]
+        layer = BaseMoEExperts(
+            num_experts=1,
+            hidden_size=8,
+            moe_intermediate_size=8,
+            tp_size=1,
+            tp_rank=0,
+            ep_size=1,
+            ep_rank=0,
+            params_dtype=torch.float32,
+            model_config=types.SimpleNamespace(
+                data_type="fp32", quant_config=None, exported_device=None
+            ),
+            parallelism_config=types.SimpleNamespace(dp_size=1),
+            moe_config=types.SimpleNamespace(),
+            quant_config=qc,
+            layer_idx=0,
+        )
+        scale = torch.arange(8, dtype=torch.float32).reshape(1, 2, 4)
+        layer.load_weights({"gate_up_proj.weight_scale_inv": scale})
+        torch.testing.assert_close(layer.w13_scale[0, :2], scale[0, :, 2:].t())
+        torch.testing.assert_close(layer.w13_scale[0, 2:], scale[0, :, :2].t())
+
+    def test_force_cpu_fp8_block_moe_rejects_cpu_requant_path(self):
+        qc = _qc("fp8_block")
+        layer = BaseMoEExperts(
+            num_experts=1,
+            hidden_size=128,
+            moe_intermediate_size=128,
+            tp_size=1,
+            tp_rank=0,
+            ep_size=1,
+            ep_rank=0,
+            params_dtype=torch.float32,
+            model_config=types.SimpleNamespace(
+                data_type="fp32", quant_config=None, exported_device=None
+            ),
+            parallelism_config=types.SimpleNamespace(dp_size=1),
+            moe_config=types.SimpleNamespace(),
+            quant_config=qc,
+            layer_idx=0,
+        )
+        layer._new_loader_force_cpu_load_weights = True
+        with self.assertRaisesRegex(RuntimeError, "force_cpu_load_weights"):
+            layer.quant_method.process_weights_after_loading(layer)
 
 
 

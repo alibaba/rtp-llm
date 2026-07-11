@@ -482,8 +482,16 @@ class BaseMoEExperts(nn.Module):
 
         if param_name == "weight_scale_inv" and self._quant_family == "fp8_per_block":
             nb = getattr(self, "_n_scale_blocks_per_proj", None)
-            if nb is not None and tensor.shape[0] == 2 * nb:
-                return tensor[:nb].contiguous(), tensor[nb:].contiguous()
+            if nb is not None:
+                if tensor.shape[0] == 2 * nb:
+                    return tensor[:nb].contiguous(), tensor[nb:].contiguous()
+                if tensor.dim() >= 2 and tensor.shape[-1] == 2 * nb:
+                    gate = tensor.narrow(-1, 0, nb).contiguous()
+                    up = tensor.narrow(-1, nb, nb).contiguous()
+                    if gate.dim() == 2:
+                        gate = gate.t().contiguous()
+                        up = up.t().contiguous()
+                    return gate, up
 
         raise ValueError(
             f"gate_up_proj.{param_name} shape "

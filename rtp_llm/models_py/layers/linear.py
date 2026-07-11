@@ -368,7 +368,19 @@ class RowParallelLinear(LinearBase):
 
             if param_name == "weight":
                 tensor = self._split_weight(tensor, dim=1)
-            elif param_name in ("weight_scale", "input_scale"):
+            elif param_name == "weight_scale":
+                # RowParallel splits the input/K axis. Per-output-channel weight
+                # scales ([N] or [N, 1]) are tied to the output axis and must be
+                # replicated on every rank, even when N happens to equal global K.
+                if tensor.dim() == 1:
+                    tensor = tensor.reshape(-1, 1).contiguous()
+                elif (
+                    tensor.dim() > 1
+                    and tensor.shape[-1] == self.input_size_per_partition * self.tp_size
+                    and tensor.shape[0] != self.output_size
+                ):
+                    tensor = self._split_weight(tensor, dim=-1)
+            elif param_name == "input_scale":
                 if (
                     tensor.numel() > 1
                     and tensor.shape[-1] == self.input_size_per_partition * self.tp_size

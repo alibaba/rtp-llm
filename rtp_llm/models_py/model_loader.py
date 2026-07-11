@@ -619,14 +619,18 @@ class NewModelLoader:
         compute_dtype = getattr(self.load_config, "compute_dtype", torch.float16)
 
         state_dict = self._load_lora_state_dict(lora_path, device)
+        loaded_pairs = set()
+        skipped = []
 
         for hf_name, tensor in state_dict.items():
             parsed = _parse_hf_lora_name(hf_name)
             if parsed is None:
+                skipped.append((hf_name, "unrecognized name"))
                 continue
             layer_id, hf_module, ab_suffix = parsed
 
             if layer_id >= num_layers:
+                skipped.append((hf_name, f"layer {layer_id} out of range"))
                 continue
 
             if hf_module in (
@@ -644,7 +648,7 @@ class NewModelLoader:
 
             engine_name = _HF_TO_ENGINE_LORA.get(hf_module)
             if engine_name is None:
-                logger.warning(f"LoRA: unmapped module '{hf_module}', skipping")
+                skipped.append((hf_name, f"unmapped module {hf_module!r}"))
                 continue
 
             tensor = tensor.to(compute_dtype).t().contiguous()
@@ -657,6 +661,25 @@ class NewModelLoader:
 
             full_name = f"{engine_name}.{ab_suffix}"
             lora_weights.set_layer_weight(False, layer_id, full_name, tensor)
+            loaded_pairs.add((layer_id, engine_name, ab_suffix))
+
+        if not loaded_pairs:
+            sample = skipped[:5]
+            raise RuntimeError(
+                f"LoRA adapter '{adapter_name}' did not contain any mappable "
+                f"newloader tensors; skipped={sample}"
+            )
+
+        missing_pairs = []
+        for layer_id, engine_name, _ in loaded_pairs:
+            for suffix in ("lora_A", "lora_B"):
+                if (layer_id, engine_name, suffix) not in loaded_pairs:
+                    missing_pairs.append((layer_id, engine_name, suffix))
+        if missing_pairs:
+            raise RuntimeError(
+                f"LoRA adapter '{adapter_name}' has incomplete A/B tensor pairs: "
+                f"missing={missing_pairs[:10]}"
+            )
 
         lora_weights.apply_scale(lora_alpha / rank)
         logger.info(
