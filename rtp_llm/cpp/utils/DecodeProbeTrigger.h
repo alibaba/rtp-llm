@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <mutex>
 #include <string>
 
 namespace rtp_llm {
@@ -55,8 +56,9 @@ public:
 
 private:
     bool initialize(const char* shm_name) noexcept;
-    void disable() noexcept;
+    void disableUnlocked() noexcept;
 
+    mutable std::mutex                       mutex_;
     int                                      fd_{-1};
     detail::DecodeProbeTriggerSharedRecord* record_{nullptr};
     uint64_t                                 expiry_us_{0};

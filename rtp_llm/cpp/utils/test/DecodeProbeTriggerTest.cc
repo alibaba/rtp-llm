@@ -1,3 +1,4 @@
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -9,6 +10,7 @@
 #include <gtest/gtest.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #include "rtp_llm/cpp/utils/DecodeProbeTrigger.h"
@@ -136,6 +138,141 @@ TEST_F(DecodeProbeTriggerTest, ReaderRejectsTornOrWrongVersionRecord) {
     mapping.get()->generation.store(0, std::memory_order_release);
     DecodeProbeTriggerRegistry torn_reader(name_.c_str(), true);
     EXPECT_FALSE(torn_reader.peek(observed));
+}
+
+TEST_F(DecodeProbeTriggerTest, FreshReaderRejectsWrongVersionWithoutMutation) {
+    {
+        DecodeProbeTriggerRegistry writer(name_.c_str(), true);
+        ASSERT_TRUE(writer.enabled());
+
+        DecodeProbeTriggerEvent published;
+        published.generation         = 7;
+        published.timestamp_us       = nowUs();
+        published.trace_id           = "incompatible-trace";
+        published.reason             = "incompatible-version";
+        published.required_rank_mask = 0b11;
+        ASSERT_TRUE(writer.publish(published));
+    }
+
+    SharedRecordMapping mapping(name_);
+    ASSERT_NE(mapping.get(), nullptr);
+    mapping.get()->version = detail::kDecodeProbeTriggerRecordVersion + 1;
+
+    std::array<unsigned char, sizeof(detail::DecodeProbeTriggerSharedRecord)> before{};
+    std::memcpy(before.data(), mapping.get(), before.size());
+
+    DecodeProbeTriggerRegistry fresh_reader(name_.c_str(), true);
+    EXPECT_FALSE(fresh_reader.enabled());
+
+    std::array<unsigned char, sizeof(detail::DecodeProbeTriggerSharedRecord)> after{};
+    std::memcpy(after.data(), mapping.get(), after.size());
+    EXPECT_EQ(before, after);
+}
+
+TEST_F(DecodeProbeTriggerTest, SameRegistrySerializesMultithreadedPublishPeekAndAcknowledge) {
+    constexpr uint64_t kGenerationCount = 2000;
+    DecodeProbeTriggerRegistry registry(name_.c_str(), true);
+    ASSERT_TRUE(registry.enabled());
+
+    std::atomic<uint64_t> published_generation{0};
+    std::atomic<uint64_t> observed_generation{0};
+    std::atomic<bool>     failed{false};
+
+    auto traceFor = [](uint64_t generation) { return "trace-" + std::to_string(generation) + std::string(160, 't'); };
+    auto reasonFor = [](uint64_t generation) { return "reason-" + std::to_string(generation) + std::string(32, 'r'); };
+
+    std::thread publisher([&] {
+        for (uint64_t generation = 1; generation <= kGenerationCount && !failed.load(); ++generation) {
+            DecodeProbeTriggerEvent event;
+            event.generation               = generation;
+            event.timestamp_us             = nowUs();
+            event.observed_sequence_length = static_cast<int64_t>(generation);
+            event.trace_id                 = traceFor(generation);
+            event.reason                   = reasonFor(generation);
+            event.required_rank_mask       = 1;
+            while (!registry.publish(event) && !failed.load()) {
+                std::this_thread::yield();
+            }
+            published_generation.store(generation, std::memory_order_release);
+        }
+    });
+
+    std::thread reader([&] {
+        while (observed_generation.load(std::memory_order_acquire) < kGenerationCount && !failed.load()) {
+            DecodeProbeTriggerEvent event;
+            if (!registry.peek(event)) {
+                std::this_thread::yield();
+                continue;
+            }
+            if (event.trace_id != traceFor(event.generation) || event.reason != reasonFor(event.generation)
+                || event.observed_sequence_length != static_cast<int64_t>(event.generation)
+                || event.required_rank_mask != 1) {
+                failed.store(true, std::memory_order_release);
+                break;
+            }
+            if (!registry.acknowledge(event.generation, 0)) {
+                DecodeProbeTriggerEvent advanced;
+                if (!registry.peek(advanced) || advanced.generation <= event.generation) {
+                    failed.store(true, std::memory_order_release);
+                    break;
+                }
+                continue;
+            }
+            observed_generation.store(event.generation, std::memory_order_release);
+        }
+    });
+
+    publisher.join();
+    reader.join();
+    EXPECT_FALSE(failed.load());
+    EXPECT_EQ(published_generation.load(), kGenerationCount);
+    EXPECT_EQ(observed_generation.load(), kGenerationCount);
+}
+
+TEST_F(DecodeProbeTriggerTest, PublishPeekAndAcknowledgeAcrossForkedIndependentMapping) {
+    DecodeProbeTriggerRegistry writer(name_.c_str(), true);
+    ASSERT_TRUE(writer.enabled());
+
+    DecodeProbeTriggerEvent published;
+    published.generation               = 11;
+    published.timestamp_us             = nowUs();
+    published.observed_sequence_length = 123;
+    published.trace_id                 = "forked-trace";
+    published.reason                   = "forked-reason";
+    published.required_rank_mask       = 1;
+    ASSERT_TRUE(writer.publish(published));
+
+    int pipe_fds[2];
+    ASSERT_EQ(pipe(pipe_fds), 0);
+    const pid_t child = fork();
+    ASSERT_NE(child, -1);
+    if (child == 0) {
+        close(pipe_fds[0]);
+        DecodeProbeTriggerRegistry reader(name_.c_str(), true);
+        DecodeProbeTriggerEvent    observed;
+        const bool success = reader.enabled() && reader.peek(observed) && observed.generation == 11
+                             && observed.observed_sequence_length == 123 && observed.trace_id == "forked-trace"
+                             && observed.reason == "forked-reason" && reader.acknowledge(11, 0);
+        const unsigned char result = success ? 1 : 0;
+        const ssize_t       written = write(pipe_fds[1], &result, sizeof(result));
+        close(pipe_fds[1]);
+        _exit(written == sizeof(result) && success ? 0 : 1);
+    }
+
+    close(pipe_fds[1]);
+    unsigned char result = 0;
+    EXPECT_EQ(read(pipe_fds[0], &result, sizeof(result)), sizeof(result));
+    close(pipe_fds[0]);
+
+    int status = 0;
+    ASSERT_EQ(waitpid(child, &status, 0), child);
+    EXPECT_TRUE(WIFEXITED(status));
+    EXPECT_EQ(WEXITSTATUS(status), 0);
+    EXPECT_EQ(result, 1);
+
+    DecodeProbeTriggerEvent observed;
+    ASSERT_TRUE(writer.peek(observed));
+    EXPECT_EQ(observed.ack_rank_mask, 1);
 }
 
 TEST_F(DecodeProbeTriggerTest, UnackedGenerationIsNotOverwrittenBeforeExpiry) {

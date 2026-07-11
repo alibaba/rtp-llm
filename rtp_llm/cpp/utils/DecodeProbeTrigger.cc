@@ -17,10 +17,10 @@
 namespace rtp_llm {
 namespace {
 
-constexpr const char* kDebugEnv     = "RTPLLM_RETROSPECTIVE_PROBE_DEBUG";
-constexpr const char* kShmNameEnv   = "RTPLLM_RETROSPECTIVE_PROBE_SHM_NAME";
-constexpr const char* kRankEnv      = "WORLD_RANK";
-constexpr const char* kWorldSizeEnv = "WORLD_SIZE";
+constexpr const char* kDebugEnv       = "RTPLLM_RETROSPECTIVE_PROBE_DEBUG";
+constexpr const char* kShmNameEnv     = "RTPLLM_RETROSPECTIVE_PROBE_SHM_NAME";
+constexpr const char* kRankEnv        = "WORLD_RANK";
+constexpr const char* kWorldSizeEnv   = "WORLD_SIZE";
 constexpr const char* kDefaultShmName = "/rtpllm_retrospective_probe";
 
 uint64_t currentTimeUs() noexcept {
@@ -89,6 +89,16 @@ bool allRanksAcknowledged(const detail::DecodeProbeTriggerSharedRecord& record) 
     return (record.ack_rank_mask.load(std::memory_order_acquire) & required) == required;
 }
 
+bool recordIsZero(const detail::DecodeProbeTriggerSharedRecord& record) noexcept {
+    const auto* bytes = reinterpret_cast<const unsigned char*>(&record);
+    for (size_t index = 0; index < sizeof(record); ++index) {
+        if (bytes[index] != 0) {
+            return false;
+        }
+    }
+    return true;
+}
+
 void copyString(char* destination, size_t capacity, const std::string& source) noexcept {
     if (capacity == 0) {
         return;
@@ -122,18 +132,27 @@ DecodeProbeTriggerRegistry::DecodeProbeTriggerRegistry(const char* shm_name, boo
         return;
     }
     if (!initialize(shm_name)) {
-        disable();
+        disableUnlocked();
     }
 }
 
 DecodeProbeTriggerRegistry::~DecodeProbeTriggerRegistry() noexcept {
-    disable();
+    try {
+        std::lock_guard<std::mutex> lock(mutex_);
+        disableUnlocked();
+    } catch (...) {
+        std::fprintf(stderr, "DecodeProbeTrigger teardown synchronization failed\n");
+        disableUnlocked();
+    }
 }
 
 bool DecodeProbeTriggerRegistry::initialize(const char* shm_name) noexcept {
     try {
         const std::string normalized_name = normalizedShmName(shm_name);
-        fd_                               = shm_open(normalized_name.c_str(), O_CREAT | O_RDWR, 0600);
+        fd_                               = shm_open(normalized_name.c_str(), O_CREAT | O_EXCL | O_RDWR, 0600);
+        if (fd_ == -1 && errno == EEXIST) {
+            fd_ = shm_open(normalized_name.c_str(), O_RDWR, 0600);
+        }
         if (fd_ == -1) {
             logFailure("shm_open");
             return false;
@@ -143,19 +162,23 @@ bool DecodeProbeTriggerRegistry::initialize(const char* shm_name) noexcept {
             return false;
         }
 
-        bool initialized = false;
+        bool initialize_record = false;
+        bool valid              = false;
         struct stat status {};
         if (fstat(fd_, &status) != 0) {
             logFailure("fstat");
-        } else if (status.st_size != static_cast<off_t>(sizeof(detail::DecodeProbeTriggerSharedRecord))) {
+        } else if (status.st_size == 0) {
             if (ftruncate(fd_, sizeof(detail::DecodeProbeTriggerSharedRecord)) != 0) {
                 logFailure("ftruncate");
             } else {
-                initialized = true;
+                initialize_record = true;
             }
+        } else if (status.st_size != static_cast<off_t>(sizeof(detail::DecodeProbeTriggerSharedRecord))) {
+            errno = EPROTO;
+            logFailure("shared-memory size validation");
         }
 
-        if (status.st_size == static_cast<off_t>(sizeof(detail::DecodeProbeTriggerSharedRecord)) || initialized) {
+        if (status.st_size == static_cast<off_t>(sizeof(detail::DecodeProbeTriggerSharedRecord)) || initialize_record) {
             void* mapping = mmap(nullptr,
                                  sizeof(detail::DecodeProbeTriggerSharedRecord),
                                  PROT_READ | PROT_WRITE,
@@ -166,8 +189,10 @@ bool DecodeProbeTriggerRegistry::initialize(const char* shm_name) noexcept {
                 logFailure("mmap");
             } else {
                 record_ = static_cast<detail::DecodeProbeTriggerSharedRecord*>(mapping);
-                if (initialized || record_->magic != detail::kDecodeProbeTriggerRecordMagic
-                    || record_->version != detail::kDecodeProbeTriggerRecordVersion) {
+                if (!initialize_record && record_->magic == detail::kDecodeProbeTriggerRecordMagic
+                    && record_->version == detail::kDecodeProbeTriggerRecordVersion) {
+                    valid = true;
+                } else if (initialize_record || recordIsZero(*record_)) {
                     std::memset(record_, 0, sizeof(*record_));
                     new (&record_->generation) std::atomic<uint64_t>(0);
                     new (&record_->ack_rank_mask) std::atomic<uint64_t>(0);
@@ -175,160 +200,201 @@ bool DecodeProbeTriggerRegistry::initialize(const char* shm_name) noexcept {
                     record_->magic    = detail::kDecodeProbeTriggerRecordMagic;
                     record_->version  = detail::kDecodeProbeTriggerRecordVersion;
                     record_->observed_sequence_length = -1;
+                    valid = true;
+                } else {
+                    errno = EPROTO;
+                    logFailure("shared-memory record validation");
                 }
-                initialized = record_->generation.is_lock_free() && record_->ack_rank_mask.is_lock_free()
-                              && record_->failure_rank_mask.is_lock_free();
-                if (!initialized) {
-                    std::fprintf(stderr, "DecodeProbeTrigger disabled: shared atomics are not lock-free\n");
+                if (valid) {
+                    const bool atomics_lock_free = record_->generation.is_lock_free()
+                                                   && record_->ack_rank_mask.is_lock_free()
+                                                   && record_->failure_rank_mask.is_lock_free();
+                    if (!atomics_lock_free) {
+                        std::fprintf(stderr, "DecodeProbeTrigger disabled: shared atomics are not lock-free\n");
+                        valid = false;
+                    }
                 }
             }
         }
         flock(fd_, LOCK_UN);
-        return initialized;
+        return valid;
     } catch (...) {
         std::fprintf(stderr, "DecodeProbeTrigger disabled after shared-memory initialization exception\n");
         return false;
     }
 }
 
-void DecodeProbeTriggerRegistry::disable() noexcept {
+void DecodeProbeTriggerRegistry::disableUnlocked() noexcept {
     enabled_ = false;
+    const bool locked = fd_ != -1 && flock(fd_, LOCK_EX) == 0;
     if (record_ != nullptr) {
         munmap(record_, sizeof(*record_));
         record_ = nullptr;
     }
     if (fd_ != -1) {
+        if (locked) {
+            flock(fd_, LOCK_UN);
+        }
         close(fd_);
         fd_ = -1;
     }
 }
 
 bool DecodeProbeTriggerRegistry::publish(const DecodeProbeTriggerEvent& event) noexcept {
-    if (!enabled_ || record_ == nullptr) {
-        return false;
-    }
-    if (flock(fd_, LOCK_EX) != 0) {
-        logFailure("publish flock");
-        disable();
-        return false;
-    }
-    bool published = false;
-    bool disable_mapping = false;
     try {
-        if (record_->magic != detail::kDecodeProbeTriggerRecordMagic
-            || record_->version != detail::kDecodeProbeTriggerRecordVersion) {
-            errno = EPROTO;
-            logFailure("publish record validation");
-            disable_mapping = true;
-        } else {
-            const uint64_t existing_generation = record_->generation.load(std::memory_order_acquire);
-            if (existing_generation != 0 && !allRanksAcknowledged(*record_) && !recordExpired(*record_, expiry_us_)) {
-                published = false;
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!enabled_ || record_ == nullptr) {
+            return false;
+        }
+        if (flock(fd_, LOCK_EX) != 0) {
+            logFailure("publish flock");
+            disableUnlocked();
+            return false;
+        }
+        bool published       = false;
+        bool disable_mapping = false;
+        try {
+            if (record_->magic != detail::kDecodeProbeTriggerRecordMagic
+                || record_->version != detail::kDecodeProbeTriggerRecordVersion) {
+                errno = EPROTO;
+                logFailure("publish record validation");
+                disable_mapping = true;
             } else {
-                const uint64_t generation = event.generation == 0 ? existing_generation + 1 : event.generation;
-                if (generation == 0 || (existing_generation != 0 && generation <= existing_generation)) {
+                const uint64_t existing_generation = record_->generation.load(std::memory_order_acquire);
+                if (existing_generation != 0 && !allRanksAcknowledged(*record_)
+                    && !recordExpired(*record_, expiry_us_)) {
                     published = false;
                 } else {
-                    // Zero denotes a record being written; readers retry or reject it.
-                    record_->generation.store(0, std::memory_order_release);
-                    record_->timestamp_us             = event.timestamp_us == 0 ? currentTimeUs() : event.timestamp_us;
-                    record_->observed_sequence_length = event.observed_sequence_length;
-                    copyString(record_->trace_id, sizeof(record_->trace_id), event.trace_id);
-                    copyString(record_->reason, sizeof(record_->reason), event.reason);
-                    record_->required_rank_mask = event.required_rank_mask;
-                    record_->ack_rank_mask.store(0, std::memory_order_relaxed);
-                    record_->failure_rank_mask.store(0, std::memory_order_relaxed);
-                    record_->generation.store(generation, std::memory_order_release);
-                    published = true;
+                    const uint64_t generation = event.generation == 0 ? existing_generation + 1 : event.generation;
+                    if (generation == 0 || (existing_generation != 0 && generation <= existing_generation)) {
+                        published = false;
+                    } else {
+                        record_->generation.store(0, std::memory_order_release);
+                        record_->timestamp_us = event.timestamp_us == 0 ? currentTimeUs() : event.timestamp_us;
+                        record_->observed_sequence_length = event.observed_sequence_length;
+                        copyString(record_->trace_id, sizeof(record_->trace_id), event.trace_id);
+                        copyString(record_->reason, sizeof(record_->reason), event.reason);
+                        record_->required_rank_mask = event.required_rank_mask;
+                        record_->ack_rank_mask.store(0, std::memory_order_relaxed);
+                        record_->failure_rank_mask.store(0, std::memory_order_relaxed);
+                        record_->generation.store(generation, std::memory_order_release);
+                        published = true;
+                    }
                 }
             }
+        } catch (...) {
+            std::fprintf(stderr, "DecodeProbeTrigger publish failed\n");
+            disable_mapping = true;
         }
+        flock(fd_, LOCK_UN);
+        if (disable_mapping) {
+            disableUnlocked();
+        }
+        return published;
     } catch (...) {
-        std::fprintf(stderr, "DecodeProbeTrigger publish failed\n");
-        disable_mapping = true;
+        std::fprintf(stderr, "DecodeProbeTrigger publish synchronization failed\n");
+        return false;
     }
-    flock(fd_, LOCK_UN);
-    if (disable_mapping) {
-        disable();
-    }
-    return published;
 }
 
 bool DecodeProbeTriggerRegistry::peek(DecodeProbeTriggerEvent& event) const noexcept {
-    if (!enabled_ || record_ == nullptr) {
-        return false;
-    }
     try {
-        for (size_t attempt = 0; attempt < 3; ++attempt) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto* self = const_cast<DecodeProbeTriggerRegistry*>(this);
+        if (!enabled_ || record_ == nullptr) {
+            return false;
+        }
+        if (flock(fd_, LOCK_SH) != 0) {
+            logFailure("peek flock");
+            self->disableUnlocked();
+            return false;
+        }
+        bool observed        = false;
+        bool disable_mapping = false;
+        try {
             if (record_->magic != detail::kDecodeProbeTriggerRecordMagic
                 || record_->version != detail::kDecodeProbeTriggerRecordVersion) {
                 std::fprintf(stderr, "DecodeProbeTrigger disabled after peek record validation\n");
-                const_cast<DecodeProbeTriggerRegistry*>(this)->disable();
-                return false;
+                disable_mapping = true;
+            } else {
+                const uint64_t generation = record_->generation.load(std::memory_order_acquire);
+                if (generation != 0) {
+                    DecodeProbeTriggerEvent candidate;
+                    candidate.generation               = generation;
+                    candidate.timestamp_us             = record_->timestamp_us;
+                    candidate.observed_sequence_length = record_->observed_sequence_length;
+                    candidate.trace_id.assign(record_->trace_id,
+                                              boundedLength(record_->trace_id, sizeof(record_->trace_id)));
+                    candidate.reason.assign(record_->reason, boundedLength(record_->reason, sizeof(record_->reason)));
+                    candidate.required_rank_mask  = record_->required_rank_mask;
+                    candidate.ack_rank_mask        = record_->ack_rank_mask.load(std::memory_order_acquire);
+                    candidate.failure_rank_mask    = record_->failure_rank_mask.load(std::memory_order_acquire);
+                    event                          = std::move(candidate);
+                    observed                       = true;
+                }
             }
-            const uint64_t first_generation = record_->generation.load(std::memory_order_acquire);
-            if (first_generation == 0) {
-                return false;
-            }
-
-            DecodeProbeTriggerEvent candidate;
-            candidate.generation               = first_generation;
-            candidate.timestamp_us             = record_->timestamp_us;
-            candidate.observed_sequence_length = record_->observed_sequence_length;
-            candidate.trace_id.assign(record_->trace_id, boundedLength(record_->trace_id, sizeof(record_->trace_id)));
-            candidate.reason.assign(record_->reason, boundedLength(record_->reason, sizeof(record_->reason)));
-            candidate.required_rank_mask = record_->required_rank_mask;
-            candidate.ack_rank_mask     = record_->ack_rank_mask.load(std::memory_order_acquire);
-            candidate.failure_rank_mask = record_->failure_rank_mask.load(std::memory_order_acquire);
-
-            const uint64_t second_generation = record_->generation.load(std::memory_order_acquire);
-            if (first_generation == second_generation) {
-                event = std::move(candidate);
-                return true;
-            }
+        } catch (...) {
+            std::fprintf(stderr, "DecodeProbeTrigger peek failed\n");
+            disable_mapping = true;
         }
+        flock(fd_, LOCK_UN);
+        if (disable_mapping) {
+            self->disableUnlocked();
+        }
+        return observed;
     } catch (...) {
-        std::fprintf(stderr, "DecodeProbeTrigger peek failed\n");
-        const_cast<DecodeProbeTriggerRegistry*>(this)->disable();
+        std::fprintf(stderr, "DecodeProbeTrigger peek synchronization failed\n");
+        return false;
     }
-    return false;
 }
 
 bool DecodeProbeTriggerRegistry::acknowledge(uint64_t generation, uint32_t rank, bool failed) noexcept {
-    if (!enabled_ || record_ == nullptr || rank >= 64) {
-        return false;
-    }
-    if (flock(fd_, LOCK_SH) != 0) {
-        logFailure("acknowledge flock");
-        disable();
-        return false;
-    }
-    bool acknowledged = false;
-    if (record_->magic != detail::kDecodeProbeTriggerRecordMagic
-        || record_->version != detail::kDecodeProbeTriggerRecordVersion) {
-        std::fprintf(stderr, "DecodeProbeTrigger disabled after acknowledge record validation\n");
-    } else if (record_->generation.load(std::memory_order_acquire) == generation) {
-        const uint64_t mask = uint64_t{1} << rank;
-        if ((record_->required_rank_mask & mask) != 0) {
-            record_->ack_rank_mask.fetch_or(mask, std::memory_order_acq_rel);
-            if (failed) {
-                record_->failure_rank_mask.fetch_or(mask, std::memory_order_acq_rel);
-            }
-            acknowledged = true;
+    try {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!enabled_ || record_ == nullptr || rank >= 64) {
+            return false;
         }
-    }
-    const bool invalid_record = record_->magic != detail::kDecodeProbeTriggerRecordMagic
-                                || record_->version != detail::kDecodeProbeTriggerRecordVersion;
-    flock(fd_, LOCK_UN);
-    if (invalid_record) {
-        disable();
+        if (flock(fd_, LOCK_EX) != 0) {
+            logFailure("acknowledge flock");
+            disableUnlocked();
+            return false;
+        }
+        bool acknowledged   = false;
+        bool invalid_record = false;
+        if (record_->magic != detail::kDecodeProbeTriggerRecordMagic
+            || record_->version != detail::kDecodeProbeTriggerRecordVersion) {
+            std::fprintf(stderr, "DecodeProbeTrigger disabled after acknowledge record validation\n");
+            invalid_record = true;
+        } else if (record_->generation.load(std::memory_order_acquire) == generation) {
+            const uint64_t mask = uint64_t{1} << rank;
+            if ((record_->required_rank_mask & mask) != 0) {
+                record_->ack_rank_mask.fetch_or(mask, std::memory_order_acq_rel);
+                if (failed) {
+                    record_->failure_rank_mask.fetch_or(mask, std::memory_order_acq_rel);
+                }
+                acknowledged = true;
+            }
+        }
+        flock(fd_, LOCK_UN);
+        if (invalid_record) {
+            disableUnlocked();
+            return false;
+        }
+        return acknowledged;
+    } catch (...) {
+        std::fprintf(stderr, "DecodeProbeTrigger acknowledge synchronization failed\n");
         return false;
     }
-    return acknowledged;
 }
 
 bool DecodeProbeTriggerRegistry::enabled() const noexcept {
-    return enabled_;
+    try {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return enabled_;
+    } catch (...) {
+        std::fprintf(stderr, "DecodeProbeTrigger enabled synchronization failed\n");
+        return false;
+    }
 }
 
 bool DecodeProbeTrigger::publish(const DecodeProbeTriggerEvent& event) noexcept {
