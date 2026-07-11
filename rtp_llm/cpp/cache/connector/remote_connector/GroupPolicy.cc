@@ -70,9 +70,14 @@ bool DefaultLayerGroupPolicy::init() {
     }
     const auto  layer_layout       = allocator_->allLayerCacheBase();
     uint64_t    group_name_bithash = 1;
-    const auto& layer_to_groups    = layer_layout.layer_to_groups;
-    for (int layer = 0; layer < static_cast<int>(layer_to_groups.size()); ++layer) {
-        const int group_idx     = layer_to_groups.at(layer);
+    const auto& layer_to_group_ids = layer_layout.layer_to_group_ids;
+    for (int layer = 0; layer < static_cast<int>(layer_to_group_ids.size()); ++layer) {
+        const auto& group_ids = layer_to_group_ids.at(layer);
+        if (group_ids.empty()) {
+            RTP_LLM_LOG_ERROR("not find valid group id for layer [%d]", layer);
+            return false;
+        }
+        const int group_idx = group_ids.front();
         bool      is_full_group = false;
         if (full_group_ids_.find(group_idx) != full_group_ids_.end()) {
             is_full_group = true;

@@ -1,157 +1,136 @@
 #pragma once
 
+#include <algorithm>
 #include <memory>
 #include <sstream>
 #include <string>
 
 #include "rtp_llm/cpp/cache/KVCacheSpecBase.h"
-#include "rtp_llm/cpp/config/ConfigModules.h"
-#include "rtp_llm/models_py/bindings/core/Types.h"
-#include "rtp_llm/cpp/model_utils/AttentionConfig.h"
+#include "rtp_llm/cpp/cache/KVCacheSpecDesc.h"
 
 namespace rtp_llm {
 
 struct LinearKVCacheSpec: public KVCacheSpec {
-    // Linear attention has explicit "head" concept as well (Qwen3Next):
-    // - local_num_k_heads / local_num_v_heads are sharded by TP.
-    // - head_k_dim / head_v_dim are per-head dims (currently equal in Python impl).
-    // - conv_kernel_dim controls conv_state_size = (kernel_dim - 1) * qkv_size.
-    uint32_t local_num_k_heads = 0;
-    uint32_t local_num_v_heads = 0;
-    uint32_t head_k_dim        = 0;
-    uint32_t head_v_dim        = 0;
-    uint32_t conv_kernel_dim   = 0;
-    DataType ssm_state_dtype   = DataType::TYPE_BF16;
-    DataType conv_state_dtype  = DataType::TYPE_BF16;
+    LinearKVCacheSpec() {
+        type = KVCacheSpecType::LinearAttention;
+    }
 
-    LinearKVCacheSpec() = default;
+    static KVCacheSpecPtr build(const KVCacheSpecDesc& desc, const SpecBuildContext& ctx) {
+        RTP_LLM_CHECK_WITH_INFO(
+            ctx.linear_attention_config != nullptr,
+            "KVCacheSpecDesc tag=%s cache_type=%d requires SpecBuildContext.linear_attention_config",
+            desc.tag.c_str(),
+            static_cast<int>(desc.cache_type));
+        RTP_LLM_CHECK_WITH_INFO(ctx.parallelism_config != nullptr,
+                                "KVCacheSpecDesc tag=%s cache_type=%d requires SpecBuildContext.parallelism_config",
+                                desc.tag.c_str(),
+                                static_cast<int>(desc.cache_type));
 
-    LinearKVCacheSpec(const AttentionConfigs&      attn_config,
-                      const ParallelismConfig&     parallelism_config,
-                      const LinearAttentionConfig& linear_config) {
-        // Validation checks that were in HybridConfigCreator
-        RTP_LLM_CHECK_WITH_INFO(linear_config.linear_key_head_dim > 0 && linear_config.linear_value_head_dim > 0,
-                                "invalid linear head dim");
-        RTP_LLM_CHECK_WITH_INFO(linear_config.linear_conv_kernel_dim > 1,
-                                "invalid linear_conv_kernel_dim=%d",
-                                linear_config.linear_conv_kernel_dim);
-        RTP_LLM_CHECK_WITH_INFO(linear_config.linear_num_key_heads > 0 && linear_config.linear_num_value_heads > 0,
-                                "invalid linear heads");
+        const auto& linear = *ctx.linear_attention_config;
+        RTP_LLM_CHECK_WITH_INFO(linear.linear_key_head_dim > 0 && linear.linear_value_head_dim > 0,
+                                "LINEAR KVCacheSpecDesc tag=%s requires positive linear head dims",
+                                desc.tag.c_str());
+        RTP_LLM_CHECK_WITH_INFO(linear.linear_conv_kernel_dim > 1,
+                                "LINEAR KVCacheSpecDesc tag=%s requires linear_conv_kernel_dim > 1, got %d",
+                                desc.tag.c_str(),
+                                linear.linear_conv_kernel_dim);
+        RTP_LLM_CHECK_WITH_INFO(linear.linear_num_key_heads > 0 && linear.linear_num_value_heads > 0,
+                                "LINEAR KVCacheSpecDesc tag=%s requires positive linear head counts",
+                                desc.tag.c_str());
+        RTP_LLM_CHECK_WITH_INFO(linear.linear_key_head_dim == linear.linear_value_head_dim,
+                                "LINEAR KVCacheSpecDesc tag=%s requires matching head dims: k=%d v=%d",
+                                desc.tag.c_str(),
+                                linear.linear_key_head_dim,
+                                linear.linear_value_head_dim);
 
-        const int tp      = std::max(1, static_cast<int>(parallelism_config.get_attn_tp_size()));
-        local_num_k_heads = static_cast<uint32_t>(linear_config.linear_num_key_heads / tp);
-        local_num_v_heads = static_cast<uint32_t>(linear_config.linear_num_value_heads / tp);
-        RTP_LLM_CHECK_WITH_INFO(local_num_k_heads > 0 && local_num_v_heads > 0,
-                                "invalid local heads for linear attention: k=%d v=%d tp=%d",
-                                local_num_k_heads,
-                                local_num_v_heads,
+        auto spec                = std::make_shared<LinearKVCacheSpec>();
+        spec->tag                = desc.tag;
+        spec->seq_size_per_block = ctx.seq_size_per_block == 0 ? 1 : ctx.seq_size_per_block;
+        spec->memory_layout_dtype_ = desc.dtype != DataType::TYPE_INVALID ? desc.dtype : ctx.dtype;
+        RTP_LLM_CHECK_WITH_INFO(spec->memory_layout_dtype_ != DataType::TYPE_INVALID,
+                                "KVCacheSpecDesc tag=%s cache_type=%d requires valid dtype",
+                                desc.tag.c_str(),
+                                static_cast<int>(desc.cache_type));
+
+        const auto     attn_tp       = std::max<int64_t>(1, ctx.parallelism_config->get_attn_tp_size());
+        const uint32_t tp            = static_cast<uint32_t>(attn_tp);
+        const uint32_t local_k_heads = static_cast<uint32_t>(linear.linear_num_key_heads) / tp;
+        const uint32_t local_v_heads = static_cast<uint32_t>(linear.linear_num_value_heads) / tp;
+        RTP_LLM_CHECK_WITH_INFO(local_k_heads > 0,
+                                "LINEAR KVCacheSpecDesc tag=%s has invalid local key heads: global=%d tp=%u",
+                                desc.tag.c_str(),
+                                linear.linear_num_key_heads,
                                 tp);
-        RTP_LLM_CHECK_WITH_INFO(linear_config.linear_key_head_dim == linear_config.linear_value_head_dim,
-                                "linear head dims must match (current impl): k=%d v=%d",
-                                linear_config.linear_key_head_dim,
-                                linear_config.linear_value_head_dim);
+        RTP_LLM_CHECK_WITH_INFO(local_v_heads > 0,
+                                "LINEAR KVCacheSpecDesc tag=%s has invalid local value heads: global=%d tp=%u",
+                                desc.tag.c_str(),
+                                linear.linear_num_value_heads,
+                                tp);
 
-        type               = KVCacheSpecType::LinearAttention;
-        layer_num          = 1;  // Will be set by caller
-        local_head_num_kv  = static_cast<uint32_t>(std::max(
-            1,
-            (linear_config.linear_num_value_heads > 1) ?
-                 static_cast<int>(linear_config.linear_num_value_heads / parallelism_config.get_attn_tp_size()) :
-                 static_cast<int>(linear_config.linear_num_value_heads)));
-        seq_size_per_block = static_cast<uint32_t>(attn_config.tokens_per_block);
-        head_k_dim         = static_cast<uint32_t>(linear_config.linear_key_head_dim);
-        head_v_dim         = static_cast<uint32_t>(linear_config.linear_value_head_dim);
-        conv_kernel_dim    = static_cast<uint32_t>(linear_config.linear_conv_kernel_dim);
-        ssm_state_dtype    = linear_config.ssm_state_dtype;
-        conv_state_dtype   = linear_config.conv_state_dtype;
-    }
-
-    size_t ssm_state_size() const {
-        // Python: ssm_state_size = local_num_v_heads * head_k_dim * head_v_dim
-        return static_cast<size_t>(local_num_v_heads) * static_cast<size_t>(head_k_dim)
-               * static_cast<size_t>(head_v_dim);
-    }
-
-    size_t qkv_size() const {
-        // Python: qkv_size = head_k_dim * local_num_k_heads * 2 + head_v_dim * local_num_v_heads
-        return static_cast<size_t>(head_k_dim) * static_cast<size_t>(local_num_k_heads) * 2
-               + static_cast<size_t>(head_v_dim) * static_cast<size_t>(local_num_v_heads);
-    }
-
-    size_t conv_state_size() const {
-        // Python: conv_state_size = (kernel_dim - 1) * qkv_size
-        const size_t kernel = static_cast<size_t>(conv_kernel_dim);
-        if (kernel <= 1) {
-            return 0;
-        }
-        return (kernel - 1) * qkv_size();
+        spec->ssm_elems = static_cast<size_t>(local_v_heads) * linear.linear_key_head_dim
+                          * linear.linear_value_head_dim;
+        const size_t qkv = static_cast<size_t>(linear.linear_key_head_dim) * local_k_heads * 2
+                           + static_cast<size_t>(linear.linear_value_head_dim) * local_v_heads;
+        spec->conv_elems       = static_cast<size_t>(linear.linear_conv_kernel_dim - 1) * qkv;
+        spec->ssm_state_dtype  = linear.ssm_state_dtype;
+        spec->conv_state_dtype = linear.conv_state_dtype;
+        RTP_LLM_CHECK_WITH_INFO(spec->ssm_state_dtype != DataType::TYPE_INVALID,
+                                "LINEAR KVCacheSpecDesc tag=%s requires valid ssm_state_dtype",
+                                desc.tag.c_str());
+        RTP_LLM_CHECK_WITH_INFO(spec->conv_state_dtype != DataType::TYPE_INVALID,
+                                "LINEAR KVCacheSpecDesc tag=%s requires valid conv_state_dtype",
+                                desc.tag.c_str());
+        return spec;
     }
 
     size_t block_size() const override {
-        return ssm_state_size() + conv_state_size();
+        return k_block_size() + v_block_size();
     }
+
     size_t k_block_size() const override {
-        // Keep the same physical order as Python Qwen3Next: [ssm_state][conv_state].
-        return ssm_state_size();
+        return ssm_elems;
     }
+
     size_t v_block_size() const override {
-        return conv_state_size();
+        return conv_elems;
     }
 
     size_t block_size_bytes() const override {
         return k_block_size_bytes() + v_block_size_bytes();
     }
+
     size_t k_block_size_bytes() const override {
-        return k_block_size() * rtp_llm::getTypeSize(ssm_state_dtype);
+        return ssm_elems * getTypeSize(ssm_state_dtype);
     }
+
     size_t v_block_size_bytes() const override {
-        return v_block_size() * rtp_llm::getTypeSize(conv_state_dtype);
+        return conv_elems * getTypeSize(conv_state_dtype);
     }
 
-    // Static helper function for Linear attention - no head partitioning
-    static KVPartitionBytes splitKVPartitionBytes(size_t      full_block_bytes,
-                                                  size_t      k_block_bytes,
-                                                  size_t      v_block_bytes,
-                                                  int         heads,
-                                                  int         partition_count,
-                                                  int         partition_id,
-                                                  const char* debug_name) {
-        // Validate basic parameters
-        RTP_LLM_CHECK_WITH_INFO(partition_count > 0, "partition_count must be > 0");
-        RTP_LLM_CHECK_WITH_INFO(partition_id >= 0 && partition_id < partition_count,
-                                "partition_id out of range: %d / %d",
-                                partition_id,
-                                partition_count);
-        RTP_LLM_CHECK_WITH_INFO(heads > 0, "heads must be > 0, got=%d (%s)", heads, debug_name);
-        RTP_LLM_CHECK_WITH_INFO(k_block_bytes + v_block_bytes == full_block_bytes,
-                                "block bytes mismatch (%s): full=%zu k_partition=%zu v_partition=%zu",
-                                debug_name,
-                                full_block_bytes,
-                                k_block_bytes,
-                                v_block_bytes);
+    rtp_llm::DataType memoryLayoutDType() const override {
+        return memory_layout_dtype_;
+    }
 
-        // For Linear attention implementation, return the full blocks without any head-based partitioning
-        return {0, k_block_bytes, k_block_bytes, v_block_bytes};
+    KVCacheSpecPtr clone() const override {
+        return std::make_shared<LinearKVCacheSpec>(*this);
     }
 
     std::string debugString(size_t indent = 0) const override {
-        const std::string indent_str = std::string(indent, ' ');
-        const std::string indent1    = indent_str + "  ";
-
         std::ostringstream os;
+        os << std::string(indent, ' ') << "LinearKVCacheSpec{\n";
         os << commonDebugString(indent);
-        os << indent1 << "local_num_k_heads=" << local_num_k_heads << "\n";
-        os << indent1 << "local_num_v_heads=" << local_num_v_heads << "\n";
-        os << indent1 << "head_k_dim=" << head_k_dim << "\n";
-        os << indent1 << "head_v_dim=" << head_v_dim << "\n";
-        os << indent1 << "conv_kernel_dim=" << conv_kernel_dim << "\n";
-        os << indent1 << "ssm_state_dtype=" << getDataTypeStr(ssm_state_dtype) << "\n";
-        os << indent1 << "conv_state_dtype=" << getDataTypeStr(conv_state_dtype) << "\n";
-        os << indent1 << "ssm_state_size=" << ssm_state_size() << "\n";
-        os << indent1 << "qkv_size=" << qkv_size() << "\n";
-        os << indent1 << "conv_state_size=" << conv_state_size() << "\n";
+        os << std::string(indent, ' ') << "}\n";
         return os.str();
     }
+
+private:
+    DataType memory_layout_dtype_ = DataType::TYPE_INVALID;
+
+    size_t ssm_elems  = 0;
+    size_t conv_elems = 0;
+
+    DataType ssm_state_dtype  = DataType::TYPE_INVALID;
+    DataType conv_state_dtype = DataType::TYPE_INVALID;
 };
 
 }  // namespace rtp_llm

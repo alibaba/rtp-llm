@@ -11,6 +11,28 @@ cc_library(
 )
 
 cc_library(
+    name = "kv_cache_spec_desc",
+    hdrs = [
+        "KVCacheSpecDesc.h",
+        "KVCacheSpecType.h",
+    ],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+    deps = [
+        ":cache_group_type",
+        "//rtp_llm/cpp/config:config_modules",
+        "//rtp_llm/cpp/model_utils:model_utils",
+        "//rtp_llm/models_py/bindings/core:types",
+    ],
+)
+
+alias(
+    name = "kvcache_spec_desc",
+    actual = ":kv_cache_spec_desc",
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "block_info",
     hdrs = [
         "BlockInfo.h",
@@ -21,12 +43,19 @@ cc_library(
 
 cc_library(
     name = "cache_types",
+    srcs = [
+        "CacheConfig.cc",
+        "KVCacheSpecDesc.cc",
+        "Types.cc",
+    ],
     hdrs = [
         "BufferTypes.h",
         "CacheConfig.h",
         "CacheGroupType.h",
         "KVCacheSpec.h",
         "KVCacheSpecBase.h",
+        "KVCacheSpecDesc.h",
+        "KVCacheSpecType.h",
         "MHAKVCacheSpec.h",
         "LinearKVCacheSpec.h",
         "MLAKVCacheSpec.h",
@@ -39,8 +68,11 @@ cc_library(
         ":block_info",
         ":batch_kv_cache_resource",
         ":cache_group_type",
+        ":kv_cache_spec_desc",
         "//:rtp_compute_ops",
         "//rtp_llm/cpp/config:config_modules",
+        "//rtp_llm/cpp/engine_base/stream:complete_token_ids",
+        "//rtp_llm/cpp/model_utils:model_utils",
         "//rtp_llm/models_py/bindings/core:types",
     ] + torch_deps(),
 )
@@ -90,7 +122,22 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":block_pool",
+        ":cache_types",
     ],
+)
+
+cc_library(
+    name = "kv_cache_allocator_hdr",
+    hdrs = [
+        "KVCacheAllocator.h",
+    ],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+    deps = [
+        ":block_pool",
+        ":cache_types",
+        "//rtp_llm/cpp/metrics:metrics",
+    ] + torch_deps(),
 )
 
 cc_library(
@@ -108,7 +155,9 @@ cc_library(
     copts = copts(),
     visibility = ["//visibility:public"],
     deps = [
+        ":kv_cache_allocator_hdr",
         ":kv_cache_group",
+        "//rtp_llm/cpp/engine_base/stream:complete_token_ids",
         "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
     ],
 )

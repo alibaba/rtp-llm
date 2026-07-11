@@ -157,13 +157,8 @@ void runtimeWriteCacheStore(const CacheStoreInputs&     cache_store_inputs,
     const int32_t* offset_addr          = nullptr;
     size_t         max_blocks_per_batch = 0;
 
-    bool is_hybrid = false;
-    if (param.kv_cache_group_types_host.defined() && param.kv_cache_group_types_host.size(0) > 1) {
-        is_hybrid =
-            !torch::all(param.kv_cache_group_types_host.index({param.kv_cache_layer_to_group_host}) == 1).item<bool>();
-    }
-
-    const size_t group_num = is_hybrid ? param.kv_cache_group_types_host.size(0) : 1;
+    const bool   has_group_types = param.kv_cache_group_types_host.defined();
+    const size_t group_num       = has_group_types ? static_cast<size_t>(param.kv_cache_group_types_host.size(0)) : 1;
 
     int gid = 0;
     if (param.kv_cache_layer_to_group_host.defined() && param.layer_id >= 0
@@ -172,6 +167,25 @@ void runtimeWriteCacheStore(const CacheStoreInputs&     cache_store_inputs,
     }
 
     RTP_LLM_CHECK_WITH_INFO(gid >= 0 && gid < static_cast<int32_t>(group_num), "invalid kv cache group id [%d]", gid);
+
+    bool is_grouped_layout = has_group_types && group_num > 1;
+    if (param.kv_cache_layer_to_group_host.defined() && group_num > 1) {
+        std::vector<bool> used_groups(group_num, false);
+        size_t            used_group_num = 0;
+        const auto*       layer_to_group = param.kv_cache_layer_to_group_host.data_ptr<int32_t>();
+        for (int64_t layer = 0; layer < param.kv_cache_layer_to_group_host.numel(); ++layer) {
+            const int layer_gid = layer_to_group[layer];
+            RTP_LLM_CHECK_WITH_INFO(layer_gid >= 0 && static_cast<size_t>(layer_gid) < group_num,
+                                    "invalid kv cache group id [%d] at layer [%ld]",
+                                    layer_gid,
+                                    static_cast<long>(layer));
+            if (!used_groups[static_cast<size_t>(layer_gid)]) {
+                used_groups[static_cast<size_t>(layer_gid)] = true;
+                ++used_group_num;
+            }
+        }
+        is_grouped_layout = used_group_num > 1;
+    }
 
     if (param.host_kv_cache_offset.dim() == 3) {
         const auto group_offset_view = param.host_kv_cache_offset[static_cast<int64_t>(gid)];
@@ -228,11 +242,24 @@ void runtimeWriteCacheStore(const CacheStoreInputs&     cache_store_inputs,
             std::string cache_key;
             cache_key =
                 makeCacheKey(param.model_id, param.cache_keys[batch_id * max_blocks_per_batch + index], param.layer_id);
+            RTP_LLM_LOG_INFO(
+                "PD_CACHE_KEY_WRITE request_id=%ld model_id=%zu local_layer_id=%d gid=%d group_type=%d batch_id=%zu "
+                "block_index=%d block_id=%d cache_key=%s block_key_mode=%s",
+                static_cast<long>(request_id),
+                param.model_id,
+                param.layer_id,
+                gid,
+                static_cast<int>(group_type),
+                batch_id,
+                index,
+                static_cast<int>(block_id),
+                cache_key.c_str(),
+                (is_grouped_layout || mla_kvcache) ? "kv" : "k_v");
 
             void*                 kv_addr = (void*)((int8_t*)kv_cache_data + block_id * param.kv_block_stride_bytes);
             std::shared_ptr<void> kv_block_addr(kv_addr, [](void* p) {});
 
-            if (is_hybrid || mla_kvcache) {
+            if (is_grouped_layout || mla_kvcache) {
                 request_blocks->addBlock("kv_" + cache_key, kv_block_addr, param.kv_block_stride_bytes, true, true);
             } else {
                 const uint32_t        kv_half = static_cast<uint32_t>(param.kv_block_stride_bytes / 2);
@@ -247,7 +274,7 @@ void runtimeWriteCacheStore(const CacheStoreInputs&     cache_store_inputs,
             if (kv_scale_data) {
                 void* kv_scale_addr = (void*)((int8_t*)kv_scale_data + block_id * param.kv_scale_stride_bytes);
                 std::shared_ptr<void> kv_scale_block_addr(kv_scale_addr, [](void* p) {});
-                if (is_hybrid || mla_kvcache) {
+                if (is_grouped_layout || mla_kvcache) {
                     request_blocks->addBlock(
                         "kv_scale_" + cache_key, kv_scale_block_addr, param.kv_scale_stride_bytes, true, true);
                 } else {

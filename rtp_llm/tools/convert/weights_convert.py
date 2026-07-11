@@ -262,10 +262,11 @@ class WeightConverter:
             profiling_debug_logging_config=ProfilingDebugLoggingConfig(),
             embedding_config=None,  # Fake loader doesn't need embedding_config
         )
-
         model_config.num_layers = int(
             env_params.get("HACK_LAYER_NUM", str(model_config.num_layers))
         )
+        self.model_cls._post_build_model_config(model_config)
+
         parallelism_config = self._build_parallelism_config()
 
         # Create other required configs

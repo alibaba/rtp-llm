@@ -5,12 +5,16 @@ from typing import Any, Dict, List
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_factory_register import register_model
 from rtp_llm.models.base_model import BaseModel
+from rtp_llm.models.hybrid_kv_cache import build_hybrid_kv_cache_spec_descs
 from rtp_llm.models.qwen3_next.qwen3_next_weight import (
     Qwen3NextWeight,
     Qwen35DenseWeight,
     Qwen35MoeWeight,
 )
-from rtp_llm.ops import HybridAttentionType
+from rtp_llm.ops import (
+    KVCacheSpecType,
+    HybridAttentionType,
+)
 
 
 class Qwen3NextBase(BaseModel):
@@ -135,6 +139,13 @@ class Qwen3NextBase(BaseModel):
         config.linear_attention_config.linear_value_head_dim = config_json[
             "linear_value_head_dim"
         ]
+
+    @classmethod
+    def _post_build_model_config(cls, model_config: ModelConfig) -> None:
+        model_config.kv_cache_spec_descs = build_hybrid_kv_cache_spec_descs(
+            model_config.hybrid_attention_config.hybrid_attention_types,
+            KVCacheSpecType.MHA,
+        )
 
 
 class Qwen3Next(Qwen3NextBase):
