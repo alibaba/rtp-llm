@@ -190,6 +190,24 @@ class TestQwen3NextQkvzBaFusion(unittest.TestCase):
         self.assertIsNotNone(ba)
         self.assertTrue(ba.allow_swizzle)
 
+    def test_ba_swizzle_policy_isolated_per_layer(self) -> None:
+        from rtp_llm.model_loader.model_weight_info import ModelWeightInfo
+        from rtp_llm.model_loader.weight_module import AtomicWeight
+        from rtp_llm.utils.model_weight import W
+
+        standalone_ba = AtomicWeight(W.linear_attn_ba_w, [])
+        fused_ba = AtomicWeight(W.linear_attn_ba_w, [])
+        layers = [
+            [AtomicWeight(W.linear_attn_qkvz_s, []), standalone_ba],
+            [fused_ba],
+        ]
+
+        for layer in layers:
+            ModelWeightInfo._configure_linear_attn_ba_swizzle(layer)
+
+        self.assertFalse(standalone_ba.allow_swizzle)
+        self.assertTrue(fused_ba.allow_swizzle)
+
     def test_standalone_ba_update_forwards_no_swizzle_policy(self) -> None:
         from rtp_llm.config.quant_config import Fp8PerChannelCompressedQuantConfig
         from rtp_llm.utils.model_weight import W
