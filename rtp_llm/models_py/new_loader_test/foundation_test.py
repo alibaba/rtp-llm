@@ -30,6 +30,7 @@ class _FoundationModel(RtpModule):
         super().__init__()
         self.layers = nn.ModuleList([_Block()])
         self.final = nn.Parameter(torch.empty(2))
+        self.register_buffer("scale", torch.empty(1), persistent=True)
         self.post_device = None
         self.post_count = 0
 
@@ -47,6 +48,7 @@ def _weights():
         "layers.0.weight": torch.arange(4, dtype=torch.float32).reshape(2, 2),
         "layers.0.bias": torch.tensor([5.0, 6.0]),
         "final": torch.tensor([7.0, 8.0]),
+        "scale": torch.tensor([0.5]),
     }
 
 
@@ -97,11 +99,27 @@ class FoundationLoaderTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "Shape mismatch"):
                 self._loader(model_path).load()
 
-    def test_force_cpu_runs_postprocess_before_device_move(self):
+    def test_force_cpu_is_rejected_until_device_migration_is_supported(self):
         with tempfile.TemporaryDirectory() as model_path:
             save_file(_weights(), os.path.join(model_path, "model.safetensors"))
-            model = self._loader(model_path, force_cpu_load_weights=True).load()
-        self.assertEqual(model.post_device, "cpu")
+            with self.assertRaisesRegex(RuntimeError, "force_cpu_load_weights.*foundation"):
+                self._loader(model_path, force_cpu_load_weights=True).load()
+
+    def test_missing_persistent_buffer_fails(self):
+        checkpoint = _weights()
+        checkpoint.pop("scale")
+        with tempfile.TemporaryDirectory() as model_path:
+            save_file(checkpoint, os.path.join(model_path, "model.safetensors"))
+            with self.assertRaisesRegex(RuntimeError, "missing required.*scale"):
+                self._loader(model_path).load()
+
+    def test_non_floating_dtype_mismatch_fails(self):
+        checkpoint = _weights()
+        checkpoint["scale"] = torch.ones(1, dtype=torch.int32)
+        with tempfile.TemporaryDirectory() as model_path:
+            save_file(checkpoint, os.path.join(model_path, "model.safetensors"))
+            with self.assertRaisesRegex(TypeError, "Dtype mismatch"):
+                self._loader(model_path).load()
 
     def test_explicit_fastsafetensors_is_rejected(self):
         with tempfile.TemporaryDirectory() as model_path:

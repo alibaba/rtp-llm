@@ -164,6 +164,11 @@ class NewModelLoader:
         method = self._resolve_load_method()
         if method != LoadMethod.SCRATCH:
             raise RuntimeError(f"Resolved unsupported load method: {method}")
+        if self.load_config.force_cpu_load_weights:
+            raise RuntimeError(
+                "force_cpu_load_weights is not part of the newloader foundation; "
+                "it requires model-specific postprocess and device-migration support"
+            )
 
         model = self._create_model()
         started = time.time()
@@ -172,11 +177,6 @@ class NewModelLoader:
         )
         logger.info("Streamed checkpoint tensors in %.2fs", time.time() - started)
 
-        force_cpu = bool(self.load_config.force_cpu_load_weights)
-        if force_cpu:
-            self._run_post_load_hooks(model, force_cpu=True)
-            model.to(self.device)
-        else:
-            model.to(self.device)
-            self._run_post_load_hooks(model, force_cpu=False)
+        model.to(self.device)
+        self._run_post_load_hooks(model, force_cpu=False)
         return model

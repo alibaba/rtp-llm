@@ -22,8 +22,8 @@ def _is_allowed_dropped_weight(name: str) -> bool:
     )
 
 
-def _mark_loaded(param: nn.Parameter) -> None:
-    setattr(param, "_rtp_weight_loaded", True)
+def _mark_loaded(tensor: torch.Tensor) -> None:
+    setattr(tensor, "_rtp_weight_loaded", True)
 
 
 class RtpModule(nn.Module):
@@ -47,17 +47,26 @@ class RtpModule(nn.Module):
             if not isinstance(child, nn.Module):
                 return False
             return self._assign_weight(child, rest, tensor)
-        param = getattr(module, name, None)
-        if not isinstance(param, nn.Parameter):
+        target = getattr(module, name, None)
+        is_parameter = isinstance(target, nn.Parameter)
+        is_buffer = name in module._buffers and isinstance(target, torch.Tensor)
+        if not is_parameter and not is_buffer:
             return False
-        if tuple(param.shape) != tuple(tensor.shape):
+        if tuple(target.shape) != tuple(tensor.shape):
             raise ValueError(
                 f"Shape mismatch for {module.__class__.__name__}.{name}: "
-                f"expected {tuple(param.shape)}, got {tuple(tensor.shape)}"
+                f"expected {tuple(target.shape)}, got {tuple(tensor.shape)}"
+            )
+        if target.dtype != tensor.dtype and not (
+            target.is_floating_point() and tensor.is_floating_point()
+        ):
+            raise TypeError(
+                f"Dtype mismatch for {module.__class__.__name__}.{name}: "
+                f"expected {target.dtype}, got {tensor.dtype}"
             )
         with torch.no_grad():
-            param.copy_(tensor.to(device=param.device, dtype=param.dtype))
-        _mark_loaded(param)
+            target.copy_(tensor.to(device=target.device, dtype=target.dtype))
+        _mark_loaded(target)
         return True
 
     def _dispatch_to_module_list(
@@ -126,6 +135,13 @@ class RtpModule(nn.Module):
                 if getattr(param, "_rtp_skip_load_check", False):
                     continue
                 if not getattr(param, "_rtp_weight_loaded", False):
+                    missing.append(prefix + name)
+            for name, buffer in module.named_buffers(recurse=False):
+                if name in module._non_persistent_buffers_set or buffer is None:
+                    continue
+                if getattr(buffer, "_rtp_skip_load_check", False):
+                    continue
+                if not getattr(buffer, "_rtp_weight_loaded", False):
                     missing.append(prefix + name)
             for name, child in module.named_children():
                 child_prefix = f"{prefix}{name}."
