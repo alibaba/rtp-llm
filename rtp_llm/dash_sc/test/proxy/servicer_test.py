@@ -339,11 +339,14 @@ class ParameterValidationTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["status_code"], 400)
         self.assertEqual(payload["status_name"], "InvalidParameter")
 
-    async def test_max_completion_tokens_non_positive_rejected_without_forward(
+    async def test_max_completion_tokens_non_positive_forwarded(
         self,
     ) -> None:
         for value in (-1, 0):
             with self.subTest(value=value):
+                self.mock_stub.ModelStreamInfer.return_value = _AsyncIter(
+                    [_make_response()]
+                )
                 req = _make_request("req1")
                 req.parameters["max_completion_tokens"].int64_param = value
 
@@ -351,8 +354,8 @@ class ParameterValidationTest(unittest.IsolatedAsyncioTestCase):
                     self.servicer.ModelStreamInfer(_request_gen(req), MagicMock())
                 )
 
-                self._assert_parameter_error(responses)
-                self.mock_stub.ModelStreamInfer.assert_not_called()
+                self.assertEqual(len(responses), 1)
+                self.mock_stub.ModelStreamInfer.assert_called_once()
                 self.mock_stub.reset_mock()
 
     async def test_max_new_tokens_non_positive_rejected_without_forward(

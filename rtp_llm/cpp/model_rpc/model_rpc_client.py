@@ -60,6 +60,15 @@ def _trans_jsonable_option(config_pb, config, field_name):
     getattr(config_pb, field_name).value = value
 
 
+def _trans_optional_int(config_pb, config, field_name):
+    if not hasattr(config_pb, field_name):
+        return
+    value = getattr(config, field_name, None)
+    if value is None:
+        return
+    getattr(config_pb, field_name).value = int(value)
+
+
 def trans_input(input_py: GenerateInput):
     input_pb = GenerateInputPB()
     input_pb.request_id = input_py.request_id
@@ -96,6 +105,13 @@ def trans_input(input_py: GenerateInput):
 
     generate_config_pb = input_pb.generate_config
     generate_config_pb.max_new_tokens = input_py.generate_config.max_new_tokens
+    _trans_optional_int(generate_config_pb, input_py.generate_config, "max_tokens")
+    _trans_optional_int(
+        generate_config_pb, input_py.generate_config, "max_completion_tokens"
+    )
+    _trans_optional_int(
+        generate_config_pb, input_py.generate_config, "generated_think_token_num"
+    )
     generate_config_pb.max_thinking_tokens = (
         input_py.generate_config.max_thinking_tokens
     )

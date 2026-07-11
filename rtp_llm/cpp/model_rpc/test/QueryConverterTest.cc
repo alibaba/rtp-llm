@@ -28,6 +28,9 @@ TEST_F(QueryConverterTest, testTransInput) {
     auto generate_config_pb = input.mutable_generate_config();
     generate_config_pb->set_min_new_tokens(4);
     generate_config_pb->set_max_new_tokens(5);
+    generate_config_pb->mutable_max_tokens()->set_value(6);
+    generate_config_pb->mutable_max_completion_tokens()->set_value(7);
+    generate_config_pb->mutable_generated_think_token_num()->set_value(8);
     generate_config_pb->set_num_beams(1);
     generate_config_pb->set_num_return_sequences(1);
     generate_config_pb->set_top_k(6);
@@ -58,6 +61,9 @@ TEST_F(QueryConverterTest, testTransInput) {
     auto generate_config = generate_input->generate_config;
     ASSERT_EQ(generate_config->min_new_tokens, 4);
     ASSERT_EQ(generate_config->max_new_tokens, 5);
+    ASSERT_EQ(generate_config->max_tokens.value(), 6);
+    ASSERT_EQ(generate_config->max_completion_tokens.value(), 7);
+    ASSERT_EQ(generate_config->generated_think_token_num.value(), 8);
     ASSERT_EQ(generate_config->num_beams, 1);
     ASSERT_EQ(generate_config->num_return_sequences, 1);
     ASSERT_EQ(generate_config->top_k, 6);

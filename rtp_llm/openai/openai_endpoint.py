@@ -49,13 +49,6 @@ from rtp_llm.utils.complete_response_async_generator import (
 _DEFAULT_MAX_THINKING_TOKENS = 131072
 
 
-def _positive_int_or_none(value: Optional[int]) -> Optional[int]:
-    if value is None:
-        return None
-    value = int(value)
-    return value if value > 0 else None
-
-
 class OpenaiEndpoint(object):
     def __init__(
         self,
@@ -298,15 +291,10 @@ class OpenaiEndpoint(object):
         if request.disable_thinking():
             config.in_think_mode = False
             config.max_thinking_tokens = 0
-        max_completion_tokens = _positive_int_or_none(request.max_completion_tokens)
-        max_tokens_cap = _positive_int_or_none(request.max_tokens)
-        if max_completion_tokens is not None:
-            backend_max_new_tokens = max_completion_tokens
-            if max_tokens_cap is not None:
-                backend_max_new_tokens = min(backend_max_new_tokens, max_tokens_cap)
-            config.max_new_tokens = backend_max_new_tokens
-        elif request.max_tokens != None:
-            config.max_new_tokens = request.max_tokens
+        if request.max_tokens is not None:
+            config.max_tokens = int(request.max_tokens)
+        if request.max_completion_tokens is not None:
+            config.max_completion_tokens = int(request.max_completion_tokens)
         if request.debug_info:
             config.return_output_ids = True
         return config
