@@ -195,6 +195,7 @@ bool DecodeProbeTriggerRegistry::initialize(const char* shm_name) noexcept {
                 } else if (initialize_record || recordIsZero(*record_)) {
                     std::memset(record_, 0, sizeof(*record_));
                     new (&record_->generation) std::atomic<uint64_t>(0);
+                    new (&record_->ready_rank_mask) std::atomic<uint64_t>(0);
                     new (&record_->ack_rank_mask) std::atomic<uint64_t>(0);
                     new (&record_->failure_rank_mask) std::atomic<uint64_t>(0);
                     record_->magic    = detail::kDecodeProbeTriggerRecordMagic;
@@ -207,6 +208,7 @@ bool DecodeProbeTriggerRegistry::initialize(const char* shm_name) noexcept {
                 }
                 if (valid) {
                     const bool atomics_lock_free = record_->generation.is_lock_free()
+                                                   && record_->ready_rank_mask.is_lock_free()
                                                    && record_->ack_rank_mask.is_lock_free()
                                                    && record_->failure_rank_mask.is_lock_free();
                     if (!atomics_lock_free) {
@@ -275,6 +277,7 @@ bool DecodeProbeTriggerRegistry::publish(const DecodeProbeTriggerEvent& event) n
                         copyString(record_->trace_id, sizeof(record_->trace_id), event.trace_id);
                         copyString(record_->reason, sizeof(record_->reason), event.reason);
                         record_->required_rank_mask = event.required_rank_mask;
+                        record_->ready_rank_mask.store(0, std::memory_order_relaxed);
                         record_->ack_rank_mask.store(0, std::memory_order_relaxed);
                         record_->failure_rank_mask.store(0, std::memory_order_relaxed);
                         record_->generation.store(generation, std::memory_order_release);
@@ -327,6 +330,7 @@ bool DecodeProbeTriggerRegistry::peek(DecodeProbeTriggerEvent& event) const noex
                                               boundedLength(record_->trace_id, sizeof(record_->trace_id)));
                     candidate.reason.assign(record_->reason, boundedLength(record_->reason, sizeof(record_->reason)));
                     candidate.required_rank_mask  = record_->required_rank_mask;
+                    candidate.ready_rank_mask     = record_->ready_rank_mask.load(std::memory_order_acquire);
                     candidate.ack_rank_mask        = record_->ack_rank_mask.load(std::memory_order_acquire);
                     candidate.failure_rank_mask    = record_->failure_rank_mask.load(std::memory_order_acquire);
                     event                          = std::move(candidate);
@@ -344,6 +348,42 @@ bool DecodeProbeTriggerRegistry::peek(DecodeProbeTriggerEvent& event) const noex
         return observed;
     } catch (...) {
         std::fprintf(stderr, "DecodeProbeTrigger peek synchronization failed\n");
+        return false;
+    }
+}
+
+bool DecodeProbeTriggerRegistry::arrive(uint64_t generation, uint32_t rank) noexcept {
+    try {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!enabled_ || record_ == nullptr || rank >= 64) {
+            return false;
+        }
+        if (flock(fd_, LOCK_EX) != 0) {
+            logFailure("arrive flock");
+            disableUnlocked();
+            return false;
+        }
+        bool arrived        = false;
+        bool invalid_record = false;
+        if (record_->magic != detail::kDecodeProbeTriggerRecordMagic
+            || record_->version != detail::kDecodeProbeTriggerRecordVersion) {
+            std::fprintf(stderr, "DecodeProbeTrigger disabled after arrive record validation\n");
+            invalid_record = true;
+        } else if (record_->generation.load(std::memory_order_acquire) == generation) {
+            const uint64_t mask = uint64_t{1} << rank;
+            if ((record_->required_rank_mask & mask) != 0) {
+                record_->ready_rank_mask.fetch_or(mask, std::memory_order_acq_rel);
+                arrived = true;
+            }
+        }
+        flock(fd_, LOCK_UN);
+        if (invalid_record) {
+            disableUnlocked();
+            return false;
+        }
+        return arrived;
+    } catch (...) {
+        std::fprintf(stderr, "DecodeProbeTrigger arrive synchronization failed\n");
         return false;
     }
 }
@@ -415,6 +455,14 @@ bool DecodeProbeTrigger::publish(const DecodeProbeTriggerEvent& event) noexcept 
 
 bool DecodeProbeTrigger::peek(DecodeProbeTriggerEvent& event) noexcept {
     return envEnabled() && productionRegistry().peek(event);
+}
+
+bool DecodeProbeTrigger::arrive(uint64_t generation) noexcept {
+    if (!envEnabled()) {
+        return false;
+    }
+    uint32_t rank = 0;
+    return worldRank(rank) && productionRegistry().arrive(generation, rank);
 }
 
 bool DecodeProbeTrigger::acknowledge(uint64_t generation, bool failed) noexcept {

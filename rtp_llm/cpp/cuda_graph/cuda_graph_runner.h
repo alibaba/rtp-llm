@@ -127,9 +127,8 @@ private:
     bool              eagerStepDebugEnabled() const noexcept;
     bool              retrospectiveProbeToggleEnabled() const noexcept;
     bool              setPythonGraphProbeEnabled(bool enabled) noexcept;
-    bool              retrospectiveEventMatches(const PyModelInputs&  inputs,
-                                                 const CudaGraphState& state,
-                                                 DecodeProbeTriggerEvent& event) noexcept;
+    bool              retrospectiveEventPendingForRank(DecodeProbeTriggerEvent& event) noexcept;
+    void              waitForRetrospectiveRanksReady(const DecodeProbeTriggerEvent& event);
     bool              shouldReplayRetrospectiveDebug(const PyModelInputs&       inputs,
                                                      const CudaGraphState&      state,
                                                      DecodeProbeTriggerEvent& event) noexcept;

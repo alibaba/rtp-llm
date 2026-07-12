@@ -101,6 +101,7 @@ public:
         result["reason"]                    = observed.reason;
         result["observed_sequence_length"] = observed.observed_sequence_length;
         result["required_rank_mask"]        = observed.required_rank_mask;
+        result["ready_rank_mask"]           = observed.ready_rank_mask;
         result["ack_rank_mask"]             = observed.ack_rank_mask;
         result["failure_rank_mask"]         = observed.failure_rank_mask;
         return result;

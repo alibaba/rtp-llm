@@ -108,6 +108,17 @@ TEST_F(DecodeProbeTriggerTest, PublishPeekAndAcknowledgeAcrossMappings) {
     EXPECT_EQ(observed.trace_id, "trace-abc");
     EXPECT_EQ(observed.reason, "checksum-mismatch");
     EXPECT_EQ(observed.required_rank_mask, 0b11);
+    EXPECT_EQ(observed.ready_rank_mask, 0);
+    EXPECT_EQ(observed.ack_rank_mask, 0);
+
+    EXPECT_TRUE(reader.arrive(1, 0));
+    ASSERT_TRUE(writer.peek(observed));
+    EXPECT_EQ(observed.ready_rank_mask, 0b01);
+    EXPECT_EQ(observed.ack_rank_mask, 0);
+
+    EXPECT_TRUE(reader.arrive(1, 1));
+    ASSERT_TRUE(writer.peek(observed));
+    EXPECT_EQ(observed.ready_rank_mask, 0b11);
     EXPECT_EQ(observed.ack_rank_mask, 0);
 
     EXPECT_TRUE(reader.acknowledge(1, 0));

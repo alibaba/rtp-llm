@@ -14,6 +14,7 @@ struct DecodeProbeTriggerEvent {
     std::string trace_id;
     std::string reason;
     uint64_t    required_rank_mask{0};
+    uint64_t    ready_rank_mask{0};
     uint64_t    ack_rank_mask{0};
     uint64_t    failure_rank_mask{0};
 };
@@ -21,7 +22,7 @@ struct DecodeProbeTriggerEvent {
 namespace detail {
 
 constexpr uint32_t kDecodeProbeTriggerRecordMagic   = 0x44505452;
-constexpr uint32_t kDecodeProbeTriggerRecordVersion = 1;
+constexpr uint32_t kDecodeProbeTriggerRecordVersion = 2;
 
 struct DecodeProbeTriggerSharedRecord {
     uint32_t              magic{0};
@@ -32,6 +33,7 @@ struct DecodeProbeTriggerSharedRecord {
     char                  trace_id[256]{};
     char                  reason[64]{};
     uint64_t              required_rank_mask{0};
+    std::atomic<uint64_t> ready_rank_mask{0};
     std::atomic<uint64_t> ack_rank_mask{0};
     std::atomic<uint64_t> failure_rank_mask{0};
 };
@@ -51,6 +53,7 @@ public:
 
     bool publish(const DecodeProbeTriggerEvent& event) noexcept;
     bool peek(DecodeProbeTriggerEvent& event) const noexcept;
+    bool arrive(uint64_t generation, uint32_t rank) noexcept;
     bool acknowledge(uint64_t generation, uint32_t rank, bool failed = false) noexcept;
     bool enabled() const noexcept;
 
@@ -70,6 +73,7 @@ class DecodeProbeTrigger {
 public:
     static bool publish(const DecodeProbeTriggerEvent& event) noexcept;
     static bool peek(DecodeProbeTriggerEvent& event) noexcept;
+    static bool arrive(uint64_t generation) noexcept;
     static bool acknowledge(uint64_t generation, bool failed = false) noexcept;
     static bool enabled() noexcept;
 };

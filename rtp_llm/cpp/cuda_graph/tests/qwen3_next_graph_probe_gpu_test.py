@@ -786,8 +786,9 @@ class TestQwen3NextGraphProbeGpu(unittest.TestCase):
         torch.cuda.synchronize()
         observed = self.runner.retrospective_probe_event()
         self.assertEqual(unmatched_generation, observed["generation"])
-        self.assertEqual(0, observed["ack_rank_mask"] & 1)
-        self.assertFalse(
+        self.assertEqual(1, observed["ack_rank_mask"] & 1)
+        self.assertEqual(0, observed["failure_rank_mask"] & 1)
+        self.assertTrue(
             list(output_dir.glob(f"*gen{unmatched_generation}.complete"))
         )
 
@@ -861,6 +862,24 @@ class TestQwen3NextGraphProbeGpu(unittest.TestCase):
         self.runner.forward(inputs)
         torch.cuda.synchronize()
         torch.testing.assert_close(probe_buffer.cpu(), after_eager)
+
+        published = self.runner.retrospective_probe_event(
+            "trace-visible-only-on-publisher", "test-remote-rank-participation", 93
+        )
+        self.assertTrue(published["published"])
+        remote_generation = published["generation"]
+
+        inputs.input_ids.add_(1000)
+        self.runner.forward(inputs)
+        torch.cuda.synchronize()
+        self.assertTrue(
+            list(output_dir.glob(f"*gen{remote_generation}.complete")),
+            "a required TP rank must join the eager probe even without a local trace-id match",
+        )
+        observed = self.runner.retrospective_probe_event()
+        self.assertEqual(remote_generation, observed["generation"])
+        self.assertEqual(1, observed["ack_rank_mask"] & 1)
+        self.assertEqual(0, observed["failure_rank_mask"] & 1)
 
 
 if __name__ == "__main__":

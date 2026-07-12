@@ -1636,6 +1636,9 @@ PyModelOutputs CudaGraphRunner::forward(const PyModelInputs& inputs, CudaGraphSt
         const bool replay_debug = shouldReplayRetrospectiveDebug(inputs, state, retrospective_event);
         const bool run_eager_step =
             !replay_debug && shouldRunRetrospectiveEagerStep(inputs, state, retrospective_event);
+        if (replay_debug || run_eager_step) {
+            waitForRetrospectiveRanksReady(retrospective_event);
+        }
         const auto checksum_record = nextDecodeChecksumRecord(inputs, state.current_batch_size);
         writeDecodeChecksumRecord(
             checksum_record, "before_replay", inputs, graph_inputs, torch::Tensor(), {}, state, full_kv_cache_group_id_);
@@ -2117,9 +2120,7 @@ bool CudaGraphRunner::setPythonGraphProbeEnabled(bool enabled) noexcept {
     return false;
 }
 
-bool CudaGraphRunner::retrospectiveEventMatches(const PyModelInputs&  inputs,
-                                                const CudaGraphState& state,
-                                                DecodeProbeTriggerEvent& event) noexcept {
+bool CudaGraphRunner::retrospectiveEventPendingForRank(DecodeProbeTriggerEvent& event) noexcept {
     if (!DecodeProbeTrigger::peek(event)) {
         return false;
     }
@@ -2128,25 +2129,47 @@ bool CudaGraphRunner::retrospectiveEventMatches(const PyModelInputs&  inputs,
     if (rank_mask == 0 || (event.required_rank_mask & rank_mask) == 0 || (event.ack_rank_mask & rank_mask) != 0) {
         return false;
     }
-    const auto active_lanes = std::min<std::size_t>(state.current_batch_size, inputs.trace_ids.size());
-    return std::find(inputs.trace_ids.begin(), inputs.trace_ids.begin() + active_lanes, event.trace_id)
-           != inputs.trace_ids.begin() + active_lanes;
+    return true;
 }
 
-bool CudaGraphRunner::shouldReplayRetrospectiveDebug(const PyModelInputs&  inputs,
+void CudaGraphRunner::waitForRetrospectiveRanksReady(const DecodeProbeTriggerEvent& event) {
+    if (!DecodeProbeTrigger::arrive(event.generation)) {
+        DecodeProbeTrigger::acknowledge(event.generation, true);
+        throw std::runtime_error("failed to join retrospective TP-rank barrier");
+    }
+
+    const auto timeout_ms = std::max<int64_t>(1, envInt64("RTPLLM_RETROSPECTIVE_READY_TIMEOUT_MS", 30000));
+    const auto deadline   = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+    while (std::chrono::steady_clock::now() < deadline) {
+        DecodeProbeTriggerEvent current;
+        if (!DecodeProbeTrigger::peek(current) || current.generation != event.generation) {
+            DecodeProbeTrigger::acknowledge(event.generation, true);
+            throw std::runtime_error("retrospective TP-rank barrier event changed");
+        }
+        if ((current.ready_rank_mask & current.required_rank_mask) == current.required_rank_mask) {
+            return;
+        }
+        std::this_thread::sleep_for(std::chrono::microseconds(100));
+    }
+
+    DecodeProbeTrigger::acknowledge(event.generation, true);
+    throw std::runtime_error("timed out waiting for retrospective TP ranks");
+}
+
+bool CudaGraphRunner::shouldReplayRetrospectiveDebug(const PyModelInputs&  /* inputs */,
                                                      const CudaGraphState& state,
                                                      DecodeProbeTriggerEvent& event) noexcept {
     if (!dualGraphDebugEnabled() || retrospective_debug_graph_instances_.count(state.current_real_graph_bs) == 0
-        || !retrospectiveEventMatches(inputs, state, event)) {
+        || !retrospectiveEventPendingForRank(event)) {
         return false;
     }
     return true;
 }
 
-bool CudaGraphRunner::shouldRunRetrospectiveEagerStep(const PyModelInputs&  inputs,
-                                                      const CudaGraphState& state,
+bool CudaGraphRunner::shouldRunRetrospectiveEagerStep(const PyModelInputs&  /* inputs */,
+                                                      const CudaGraphState& /* state */,
                                                       DecodeProbeTriggerEvent& event) noexcept {
-    return eagerStepDebugEnabled() && retrospectiveEventMatches(inputs, state, event);
+    return eagerStepDebugEnabled() && retrospectiveEventPendingForRank(event);
 }
 
 void CudaGraphRunner::runRetrospectiveEagerStep(int graph_bs, const DecodeProbeTriggerEvent& event) {
