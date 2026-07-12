@@ -234,6 +234,59 @@ class RocmFp8PTPCLinearDispatchTest(unittest.TestCase):
         """M=2048, N=1024, K=1024 → cktile (M>=1536)."""
         self._run_and_verify(M=2048, N=1024, K=1024)
 
+    def test_large_m_does_not_wrap_output_rows(self):
+        """CKTile must not wrap rows when M exceeds its launch-grid range."""
+        from rtp_llm.models_py.kernels.rocm.fp8_kernel import rocm_per_token_quant_fp8
+        from rtp_llm.models_py.modules.factory.linear.impl.rocm.fp8_ptpc_linear import (
+            RocmFp8PTPCLinear,
+        )
+
+        torch.manual_seed(7)
+        m, n, k = 262145, 8192, 128
+        row_a = torch.randn(1, k, dtype=torch.bfloat16, device=self.device)
+        row_b = torch.randn(1, k, dtype=torch.bfloat16, device=self.device)
+        weight_bf16 = torch.randn(n, k, dtype=torch.bfloat16, device=self.device)
+        weight_q, weight_scales = rocm_per_token_quant_fp8(weight_bf16)
+        ptpc_linear = RocmFp8PTPCLinear(
+            weight=shuffle_weight(weight_q).T.contiguous(),
+            weight_scales=weight_scales.T.contiguous(),
+            bias=None,
+        )
+
+        expected = ptpc_linear(torch.cat((row_a, row_b), dim=0))
+        input_bf16 = torch.empty(m, k, dtype=torch.bfloat16, device=self.device)
+        input_bf16[:-1].copy_(row_a.expand(m - 1, k))
+        input_bf16[-1:].copy_(row_b)
+        output = ptpc_linear(input_bf16)
+
+        torch.testing.assert_close(output[0], expected[0], rtol=0, atol=0)
+        torch.testing.assert_close(output[-1], expected[1], rtol=0, atol=0)
+
+    def test_chunk_size_accounts_for_wide_output_rows(self):
+        """Every CKTile input/output buffer must stay within 32-bit offsets."""
+        from rtp_llm.models_py.modules.factory.linear.impl.rocm.fp8_ptpc_linear import (
+            _cktile_max_m_per_launch,
+        )
+
+        self.assertEqual(
+            _cktile_max_m_per_launch(
+                k=5120,
+                n=8192,
+                input_element_size=1,
+                output_element_size=2,
+            ),
+            131072,
+        )
+        self.assertEqual(
+            _cktile_max_m_per_launch(
+                k=5120,
+                n=17408,
+                input_element_size=1,
+                output_element_size=2,
+            ),
+            61568,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
