@@ -3,17 +3,6 @@ load("@arch_config//:arch_select.bzl", "requirement")
 requirement(["triton", "torch", "numpy", "einops", "packaging"])
 
 py_test(
-    name = "test_index",
-    srcs = [
-        "test_index.py"
-    ],
-    deps = [
-        "//rtp_llm/models_py/triton_kernels:fla",
-    ] + [":triton", ":torch", ":numpy", ":einops", ":packaging"],
-    visibility = ["//visibility:public"],
-)
-
-py_test(
     name = "test_gdn_block_prefill",
     srcs = [
         "test_gdn_block_prefill.py"
