@@ -21,6 +21,7 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
+#include "rtp_llm/cpp/utils/DecodeProbeTrigger.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include "torch/csrc/autograd/generated/variable_factories.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
@@ -722,6 +723,39 @@ std::unordered_map<const void*, CudaGraphProbeRingState> g_cuda_graph_probe_ring
 std::atomic<int64_t>                                    g_cuda_graph_probe_ring_id{0};
 std::mutex                                              g_cuda_graph_probe_ring_mutex;
 
+struct CudaGraphRetrospectiveConfig {
+    bool        enabled{false};
+    std::string rank;
+    std::string output_dir;
+};
+
+const CudaGraphRetrospectiveConfig& cudaGraphRetrospectiveConfig() noexcept {
+    static const CudaGraphRetrospectiveConfig config = [] {
+        CudaGraphRetrospectiveConfig c;
+        try {
+            c.enabled = envFlag("RTPLLM_RETROSPECTIVE_PROBE_DEBUG", false)
+                        && envFlag("RTPLLM_QWEN3_NEXT_GRAPH_PROBE", false);
+            if (!c.enabled) {
+                return c;
+            }
+            c.rank = filenameComponent(envString("WORLD_RANK", "unknown"));
+            c.output_dir =
+                envString("RTPLLM_RETROSPECTIVE_PROBE_DIR", "/tmp/rtpllm_retrospective_probe");
+            ensureDir(c.output_dir);
+        } catch (const std::exception& e) {
+            RTP_LLM_LOG_WARNING("Failed to initialize retrospective CUDA graph probe config: %s", e.what());
+            c = {};
+        } catch (...) {
+            RTP_LLM_LOG_WARNING("Failed to initialize retrospective CUDA graph probe config");
+            c = {};
+        }
+        return c;
+    }();
+    return config;
+}
+
+std::mutex g_cuda_graph_retrospective_mutex;
+
 CudaGraphProbeCapture getCudaGraphProbeBufferLight(const py::object& py_instance, int64_t graph_bs) {
     CudaGraphProbeCapture graph_probe;
     try {
@@ -878,6 +912,104 @@ void disableCudaGraphProbeRing(CudaGraphProbeRingState& state, const std::string
 bool validCudaGraphProbeCapture(const CudaGraphProbeCapture& graph_probe) {
     return graph_probe.buffer.defined() && graph_probe.buffer.dim() == 3
            && graph_probe.buffer.size(0) == static_cast<int64_t>(graph_probe.layers.size());
+}
+
+bool replayContainsTrace(const CudaGraphPreviousReplay& replay, const std::string& trace_id) {
+    return !trace_id.empty()
+           && std::find(replay.trace_ids.begin(), replay.trace_ids.end(), trace_id) != replay.trace_ids.end();
+}
+
+void dumpCudaGraphPreviousReplay(const CudaGraphPreviousReplay& replay, const DecodeProbeTriggerEvent& event) {
+    const auto& config = cudaGraphRetrospectiveConfig();
+    const auto  stem = config.output_dir + "/cuda_graph_probe_retrospective_rank" + config.rank + "_pid"
+                      + std::to_string(getpid()) + "_gen" + std::to_string(event.generation);
+    const auto tensor_file     = stem + ".bin";
+    const auto metadata_file   = stem + ".jsonl";
+    const auto completion_file = stem + ".complete";
+    const auto tensor_tmp      = tensor_file + ".tmp";
+    const auto metadata_tmp    = metadata_file + ".tmp";
+    const auto completion_tmp  = completion_file + ".tmp";
+    try {
+        cuda_graph::graphDeviceSynchronize();
+        auto cpu = replay.probe_buffer.detach().to(torch::kCPU).contiguous();
+
+        std::ofstream tensor_out(tensor_tmp, std::ios::binary | std::ios::trunc);
+        tensor_out.write(static_cast<const char*>(cpu.data_ptr()), cpu.nbytes());
+        tensor_out.flush();
+        if (!tensor_out.good()) {
+            throw std::runtime_error("failed to write retrospective probe tensor file");
+        }
+        tensor_out.close();
+        if (tensor_out.fail()) {
+            throw std::runtime_error("failed to close retrospective probe tensor file");
+        }
+
+        std::ofstream out(metadata_tmp, std::ios::out | std::ios::trunc);
+        out << "{\"rank\":\"" << jsonEscape(config.rank) << "\",\"pid\":" << getpid()
+            << ",\"event_generation\":" << event.generation << ",\"event_trace_id\":\""
+            << jsonEscape(event.trace_id) << "\",\"event_reason\":\"" << jsonEscape(event.reason)
+            << "\",\"event_observed_sequence_length\":" << event.observed_sequence_length
+            << ",\"replay_id\":" << replay.replay_id << ",\"graph_bs\":" << replay.graph_bs
+            << ",\"current_bs\":" << replay.current_bs << ",\"dtype\":\""
+            << jsonEscape(c10::toString(cpu.scalar_type())) << "\",\"shape\":[";
+        for (int64_t i = 0; i < cpu.dim(); ++i) {
+            out << (i == 0 ? "" : ",") << cpu.size(i);
+        }
+        out << "],\"layers\":[";
+        for (size_t i = 0; i < replay.layers.size(); ++i) {
+            out << (i == 0 ? "" : ",") << replay.layers[i];
+        }
+        out << "],\"lanes\":[";
+        for (int64_t lane = 0; lane < replay.current_bs; ++lane) {
+            const auto trace_id = lane < static_cast<int64_t>(replay.trace_ids.size()) ? replay.trace_ids[lane] : "";
+            const auto input_length =
+                lane < static_cast<int64_t>(replay.input_lengths.size()) ? replay.input_lengths[lane] : -1;
+            const auto sequence_length =
+                lane < static_cast<int64_t>(replay.sequence_lengths.size()) ? replay.sequence_lengths[lane] : -1;
+            out << (lane == 0 ? "" : ",") << "{\"lane\":" << lane << ",\"trace_id\":\""
+                << jsonEscape(trace_id) << "\",\"input_length\":" << input_length
+                << ",\"sequence_length\":" << sequence_length << "}";
+        }
+        out << "]}\n";
+        out.flush();
+        if (!out.good()) {
+            throw std::runtime_error("failed to write retrospective probe metadata file");
+        }
+        out.close();
+        if (out.fail()) {
+            throw std::runtime_error("failed to close retrospective probe metadata file");
+        }
+
+        if (rename(tensor_tmp.c_str(), tensor_file.c_str()) != 0
+            || rename(metadata_tmp.c_str(), metadata_file.c_str()) != 0) {
+            throw std::runtime_error("failed to publish retrospective probe data files");
+        }
+        std::ofstream completion_out(completion_tmp, std::ios::out | std::ios::trunc);
+        completion_out << "{\"event_generation\":" << event.generation << ",\"tensor\":\""
+                       << jsonEscape(tensor_file) << "\",\"metadata\":\"" << jsonEscape(metadata_file)
+                       << "\"}\n";
+        completion_out.flush();
+        if (!completion_out.good()) {
+            throw std::runtime_error("failed to write retrospective probe completion file");
+        }
+        completion_out.close();
+        if (completion_out.fail() || rename(completion_tmp.c_str(), completion_file.c_str()) != 0) {
+            throw std::runtime_error("failed to publish retrospective probe completion file");
+        }
+        RTP_LLM_LOG_WARNING("Dumped retrospective CUDA graph probe replay=%lu graph_bs=%ld trace=%s tensor=%s",
+                            replay.replay_id,
+                            replay.graph_bs,
+                            event.trace_id.c_str(),
+                            tensor_file.c_str());
+    } catch (...) {
+        unlink(tensor_tmp.c_str());
+        unlink(metadata_tmp.c_str());
+        unlink(completion_tmp.c_str());
+        unlink(tensor_file.c_str());
+        unlink(metadata_file.c_str());
+        unlink(completion_file.c_str());
+        throw;
+    }
 }
 
 void releaseCudaGraphProbeRing(const void* runner_key) {
@@ -1107,6 +1239,7 @@ void writeDecodeChecksumRecord(const DecodeChecksumRecord& record,
 }  // namespace
 
 CudaGraphRunner::~CudaGraphRunner() {
+    retrospective_replays_.clear();
     releaseCudaGraphProbeRing(this);
     RTP_LLM_LOG_INFO("Release CudaGraphRunner .....");
     py::gil_scoped_acquire gil;
@@ -1493,6 +1626,7 @@ PyModelOutputs CudaGraphRunner::forward(const PyModelInputs& inputs, CudaGraphSt
                 0, 0, state.current_seq_len);
     } else {
         auto& graph_inputs = graph_instances_[state.current_real_graph_bs].mem_hold_.py_model_inputs_;
+        dumpRetrospectiveProbeBeforeReplay();
         const auto checksum_record = nextDecodeChecksumRecord(inputs, state.current_batch_size);
         writeDecodeChecksumRecord(
             checksum_record, "before_replay", inputs, graph_inputs, torch::Tensor(), {}, state, full_kv_cache_group_id_);
@@ -1508,6 +1642,7 @@ PyModelOutputs CudaGraphRunner::forward(const PyModelInputs& inputs, CudaGraphSt
             graph_probe = getCudaGraphProbeBuffer(py_instance_, state.current_real_graph_bs);
         }
         captureCudaGraphProbeRing(this, py_instance_, graph_probe, inputs, state);
+        retainRetrospectiveReplay(inputs, state);
         writeDecodeChecksumRecord(checksum_record,
                                   "after_replay",
                                   inputs,
@@ -1900,6 +2035,9 @@ void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
             graph_instances_[key].mem_hold_.decoder_layer_hidden_states_.copy_(outputs.hidden_states);
             graph.capture_end();
         }
+        if (!is_prefill_cuda_graph_mode_) {
+            cacheRetrospectiveProbeHandle(key);
+        }
 
         if (enable_cuda_graph_debug_mode_) {
             RTP_LLM_LOG_INFO("Calling debug_dump to generate: %s", output_dot_filename.c_str());
@@ -1915,6 +2053,106 @@ void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
                          key,
                          graph_pool_delta / 1024 / 1024,
                          post_capture_reserved / 1024 / 1024);
+    }
+}
+
+void CudaGraphRunner::cacheRetrospectiveProbeHandle(int graph_bs) noexcept {
+    if (!cudaGraphRetrospectiveConfig().enabled) {
+        return;
+    }
+    try {
+        auto graph_probe = getCudaGraphProbeBufferLight(py_instance_, graph_bs);
+        if (!validCudaGraphProbeCapture(graph_probe)) {
+            return;
+        }
+        std::lock_guard<std::mutex> lock(g_cuda_graph_retrospective_mutex);
+        auto&                       replay = retrospective_replays_[graph_bs];
+        replay.graph_bs                    = graph_bs;
+        replay.probe_buffer                = graph_probe.buffer;
+        replay.layers                      = std::move(graph_probe.layers);
+    } catch (const std::exception& e) {
+        RTP_LLM_LOG_WARNING("Failed to cache retrospective CUDA graph probe buffer: %s", e.what());
+    } catch (...) {
+        RTP_LLM_LOG_WARNING("Failed to cache retrospective CUDA graph probe buffer");
+    }
+}
+
+void CudaGraphRunner::dumpRetrospectiveProbeBeforeReplay() noexcept {
+    if (!cudaGraphRetrospectiveConfig().enabled) {
+        return;
+    }
+    DecodeProbeTriggerEvent event;
+    try {
+        if (!DecodeProbeTrigger::peek(event)) {
+            return;
+        }
+        const auto rank = envInt64("WORLD_RANK", 0);
+        const auto rank_mask = rank >= 0 && rank < 64 ? uint64_t{1} << rank : uint64_t{0};
+        if (rank_mask == 0 || (event.required_rank_mask & rank_mask) == 0
+            || (event.ack_rank_mask & rank_mask) != 0) {
+            return;
+        }
+        std::lock_guard<std::mutex> lock(g_cuda_graph_retrospective_mutex);
+        DecodeProbeTriggerEvent     current;
+        if (!DecodeProbeTrigger::peek(current) || current.generation != event.generation
+            || (current.required_rank_mask & rank_mask) == 0 || (current.ack_rank_mask & rank_mask) != 0) {
+            return;
+        }
+        const auto replay = std::find_if(retrospective_replays_.begin(),
+                                         retrospective_replays_.end(),
+                                         [&current](const auto& item) {
+                                             return replayContainsTrace(item.second, current.trace_id);
+                                         });
+        if (replay == retrospective_replays_.end()) {
+            return;
+        }
+        try {
+            dumpCudaGraphPreviousReplay(replay->second, current);
+            DecodeProbeTrigger::acknowledge(current.generation);
+        } catch (const std::exception& e) {
+            RTP_LLM_LOG_WARNING("Failed to dump retrospective CUDA graph probe: %s", e.what());
+            DecodeProbeTrigger::acknowledge(current.generation, true);
+        } catch (...) {
+            RTP_LLM_LOG_WARNING("Failed to dump retrospective CUDA graph probe");
+            DecodeProbeTrigger::acknowledge(current.generation, true);
+        }
+    } catch (const std::exception& e) {
+        RTP_LLM_LOG_WARNING("Failed to process retrospective CUDA graph trigger: %s", e.what());
+        if (event.generation != 0) {
+            DecodeProbeTrigger::acknowledge(event.generation, true);
+        }
+    } catch (...) {
+        RTP_LLM_LOG_WARNING("Failed to process retrospective CUDA graph trigger");
+        if (event.generation != 0) {
+            DecodeProbeTrigger::acknowledge(event.generation, true);
+        }
+    }
+}
+
+void CudaGraphRunner::retainRetrospectiveReplay(const PyModelInputs& inputs, const CudaGraphState& state) noexcept {
+    if (!cudaGraphRetrospectiveConfig().enabled) {
+        return;
+    }
+    try {
+        std::lock_guard<std::mutex> lock(g_cuda_graph_retrospective_mutex);
+        const auto                  replay = retrospective_replays_.find(state.current_real_graph_bs);
+        if (replay == retrospective_replays_.end() || !replay->second.probe_buffer.defined()) {
+            return;
+        }
+        auto& record      = replay->second;
+        record.replay_id  = retrospective_replay_id_++;
+        record.graph_bs   = state.current_real_graph_bs;
+        record.current_bs = state.current_batch_size;
+        record.trace_ids.assign(inputs.trace_ids.begin(),
+                                inputs.trace_ids.begin()
+                                    + std::min<int64_t>(inputs.trace_ids.size(), state.current_batch_size));
+        record.input_lengths = hostTensorPrefix(inputs.attention_inputs.input_lengths, state.current_batch_size);
+        record.sequence_lengths =
+            hostTensorPrefix(inputs.attention_inputs.sequence_lengths, state.current_batch_size);
+    } catch (const std::exception& e) {
+        RTP_LLM_LOG_WARNING("Failed to retain retrospective CUDA graph replay metadata: %s", e.what());
+    } catch (...) {
+        RTP_LLM_LOG_WARNING("Failed to retain retrospective CUDA graph replay metadata");
     }
 }
 

@@ -3,6 +3,7 @@
 
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_base.h"
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_runner.h"
+#include "rtp_llm/cpp/utils/DecodeProbeTrigger.h"
 #include "rtp_llm/models_py/bindings/OpDefs.h"
 
 namespace py = pybind11;
@@ -79,6 +80,32 @@ public:
         return runner_ != nullptr ? runner_->getCurrentRealGraphBs(state_) : 0;
     }
 
+    py::dict retrospective_probe_event(const std::string& trace_id = "",
+                                       const std::string& reason = "",
+                                       int64_t observed_sequence_length = -1) {
+        bool published = false;
+        if (!trace_id.empty()) {
+            DecodeProbeTriggerEvent event;
+            event.trace_id                   = trace_id;
+            event.reason                     = reason;
+            event.observed_sequence_length   = observed_sequence_length;
+            published                        = DecodeProbeTrigger::publish(event);
+        }
+        DecodeProbeTriggerEvent observed;
+        const bool              available = DecodeProbeTrigger::peek(observed);
+        py::dict                result;
+        result["published"]                 = published;
+        result["available"]                 = available;
+        result["generation"]                = observed.generation;
+        result["trace_id"]                  = observed.trace_id;
+        result["reason"]                    = observed.reason;
+        result["observed_sequence_length"] = observed.observed_sequence_length;
+        result["required_rank_mask"]        = observed.required_rank_mask;
+        result["ack_rank_mask"]             = observed.ack_rank_mask;
+        result["failure_rank_mask"]         = observed.failure_rank_mask;
+        return result;
+    }
+
     ~CudaGraphTestRunner() {
         reset_runner();
     }
@@ -123,5 +150,10 @@ PYBIND11_MODULE(libtest_cuda_graph_runner, m) {
              py::arg("use_float32")       = false)
         .def("canRun", &CudaGraphTestRunner::canRun)
         .def("forward", &CudaGraphTestRunner::forward)
-        .def("getCurrentRealGraphSize", &CudaGraphTestRunner::getCurrentRealGraphSize);
+        .def("getCurrentRealGraphSize", &CudaGraphTestRunner::getCurrentRealGraphSize)
+        .def("retrospective_probe_event",
+             &CudaGraphTestRunner::retrospective_probe_event,
+             py::arg("trace_id") = "",
+             py::arg("reason") = "",
+             py::arg("observed_sequence_length") = -1);
 }

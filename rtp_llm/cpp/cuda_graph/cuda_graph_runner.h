@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cstdint>
+#include <string>
 #include <unordered_map>
 #include <vector>
 #include <pybind11/embed.h>
@@ -15,6 +17,17 @@
 namespace py = pybind11;
 
 namespace rtp_llm {
+
+struct CudaGraphPreviousReplay {
+    uint64_t                 replay_id{0};
+    int64_t                  graph_bs{0};
+    int64_t                  current_bs{0};
+    torch::Tensor            probe_buffer;
+    std::vector<int64_t>     layers;
+    std::vector<std::string> trace_ids;
+    std::vector<int64_t>     input_lengths;
+    std::vector<int64_t>     sequence_lengths;
+};
 
 class CudaGraphRunner: public GraphBase {
 public:
@@ -104,6 +117,9 @@ private:
     void              setPositionEncoding(torch::Tensor position_encoding) override;
     void              setTokenTypeEmbedding(torch::Tensor token_type_embedding) override;
     void              setInputEmbeddingScalar(float input_embedding_scalar) override;
+    void              cacheRetrospectiveProbeHandle(int graph_bs) noexcept;
+    void              dumpRetrospectiveProbeBeforeReplay() noexcept;
+    void              retainRetrospectiveReplay(const PyModelInputs& inputs, const CudaGraphState& state) noexcept;
 
 private:
     std::vector<int> getDecodeBatchSizesToCapture();
@@ -145,6 +161,8 @@ private:
     at::TensorOptions                      options_cpu_int32_;
     at::TensorOptions                      options_cuda_float_;
     cuda_graph::GraphPoolHandle            shared_graph_pool_{};
+    std::unordered_map<int, CudaGraphPreviousReplay> retrospective_replays_;
+    uint64_t                                         retrospective_replay_id_{0};
 
     std::vector<int32_t> kv_cache_layer_to_group_;
     int32_t              kv_cache_group_num_ = 0;

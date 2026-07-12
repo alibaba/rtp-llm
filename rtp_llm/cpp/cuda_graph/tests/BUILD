@@ -11,6 +11,7 @@ cc_library(
         "//rtp_llm/cpp/cuda_graph:cuda_graph_impl",
         "//rtp_llm/cpp/pybind:py_utils",
         "//rtp_llm/cpp/pybind:th_compute_lib",
+        "//rtp_llm/cpp/utils:decode_probe_trigger",
     ] + torch_deps(),
     visibility = ["//visibility:public"],
     alwayslink = True,
@@ -171,6 +172,27 @@ py_test(
     ],
     env = {
         "TEST_QWEN3_NEXT_GRAPH_PROBE_RING_BUDGET_REJECT": "1",
+        "TEST_USING_DEVICE": "ROCM",
+    },
+    tags = ["MI308X"],
+    exec_properties = {"gpu": "MI308X-ROCM7"},
+)
+
+py_test(
+    name = "qwen3_next_graph_probe_retrospective_gpu_test",
+    srcs = ["qwen3_next_graph_probe_gpu_test.py"],
+    main = "qwen3_next_graph_probe_gpu_test.py",
+    data = [
+        ":test_cuda_graph_runner",
+        "//:th_transformer",
+    ],
+    deps = [
+        "//rtp_llm/test/model_test/test_util:test_util",
+    ],
+    env = {
+        "RTPLLM_CUDA_GRAPH_PROBE_RING_DEBUG": "0",
+        "RTPLLM_RETROSPECTIVE_PROBE_DEBUG": "1",
+        "TEST_QWEN3_NEXT_GRAPH_PROBE_RETROSPECTIVE": "1",
         "TEST_USING_DEVICE": "ROCM",
     },
     tags = ["MI308X"],

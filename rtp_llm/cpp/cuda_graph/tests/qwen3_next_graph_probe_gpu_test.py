@@ -106,13 +106,18 @@ class TestQwen3NextGraphProbeGpu(unittest.TestCase):
         self.ring_budget_reject = os.environ.get(
             "TEST_QWEN3_NEXT_GRAPH_PROBE_RING_BUDGET_REJECT", "0"
         ) == "1"
-        if self.ring_only or self.ring_budget_reject:
+        self.retrospective = os.environ.get(
+            "TEST_QWEN3_NEXT_GRAPH_PROBE_RETROSPECTIVE", "0"
+        ) == "1"
+        if self.ring_only or self.ring_budget_reject or self.retrospective:
             os.environ["RTPLLM_DECODE_CHECKSUM_DEBUG"] = "0"
         os.environ["RTPLLM_QWEN3_NEXT_GRAPH_PROBE"] = (
             "1" if self.graph_probe_enabled else "0"
         )
         os.environ["RTPLLM_QWEN3_NEXT_GRAPH_PROBE_LAYERS"] = "99,77"
-        os.environ["RTPLLM_CUDA_GRAPH_PROBE_RING_DEBUG"] = "1"
+        os.environ["RTPLLM_CUDA_GRAPH_PROBE_RING_DEBUG"] = (
+            "0" if self.retrospective else "1"
+        )
         os.environ["RTPLLM_CUDA_GRAPH_PROBE_RING_DIR"] = self.temp_dir.name
         os.environ["RTPLLM_CUDA_GRAPH_PROBE_RING_TRIGGER_FILE"] = (
             self.ring_trigger_file
@@ -125,6 +130,12 @@ class TestQwen3NextGraphProbeGpu(unittest.TestCase):
             "1" if self.ring_budget_reject else str(1 << 30)
         )
         os.environ["RTPLLM_CUDA_GRAPH_PROBE_RING_TRIGGER_CHECK_EVERY"] = "1"
+        self.retrospective_shm_name = f"/rtpllm_graph_probe_{os.getpid()}"
+        os.environ["RTPLLM_RETROSPECTIVE_PROBE_SHM_NAME"] = (
+            self.retrospective_shm_name
+        )
+        os.environ["RTPLLM_RETROSPECTIVE_PROBE_DIR"] = self.temp_dir.name
+        os.environ["WORLD_SIZE"] = "1"
 
         self.model = _GraphProbeModel()
         self.runner = CudaGraphRunner()
@@ -134,7 +145,7 @@ class TestQwen3NextGraphProbeGpu(unittest.TestCase):
             self.max_seq_len,
             self.tokens_per_block,
             self.tokens_per_block,
-            [self.graph_bs],
+            [8, self.graph_bs] if self.retrospective else [self.graph_bs],
             self.num_tokens_per_bs,
             True,
             True,
@@ -143,10 +154,14 @@ class TestQwen3NextGraphProbeGpu(unittest.TestCase):
 
     def tearDown(self):
         self.runner = None
+        Path("/dev/shm", self.retrospective_shm_name.lstrip("/")).unlink(
+            missing_ok=True
+        )
         self.temp_dir.cleanup()
 
-    def _build_inputs(self):
-        token_rows = self.actual_bs * self.num_tokens_per_bs
+    def _build_inputs(self, actual_bs=None, trace_ids=None):
+        actual_bs = self.actual_bs if actual_bs is None else actual_bs
+        token_rows = actual_bs * self.num_tokens_per_bs
         inputs = PyModelInputs()
         inputs.input_ids = torch.arange(
             token_rows, dtype=torch.int32, device="cuda"
@@ -157,19 +172,23 @@ class TestQwen3NextGraphProbeGpu(unittest.TestCase):
         inputs.input_hiddens[0, 0] = float("nan")
         inputs.input_hiddens[0, 1] = float("inf")
         inputs.input_hiddens[4:8] = 1.0e30
-        inputs.trace_ids = [f"lane-{lane}" for lane in range(self.actual_bs)]
+        inputs.trace_ids = (
+            [f"lane-{lane}" for lane in range(actual_bs)]
+            if trace_ids is None
+            else trace_ids
+        )
 
         attention = PyAttentionInputs()
         attention.is_prefill = True
         attention.is_target_verify = True
         attention.dtype = get_typemeta(torch.zeros(1, dtype=torch.float32))
         attention.input_lengths = torch.full(
-            (self.actual_bs,),
+            (actual_bs,),
             self.num_tokens_per_bs,
             dtype=torch.int32,
         ).pin_memory()
         attention.prefix_lengths = torch.full(
-            (self.actual_bs,),
+            (actual_bs,),
             self.max_seq_len - self.num_tokens_per_bs,
             dtype=torch.int32,
         ).pin_memory()
@@ -177,7 +196,7 @@ class TestQwen3NextGraphProbeGpu(unittest.TestCase):
             0, dtype=torch.int32
         ).pin_memory()
         attention.sequence_lengths_plus_1_d = torch.full(
-            (self.actual_bs,),
+            (actual_bs,),
             self.max_seq_len - self.num_tokens_per_bs,
             dtype=torch.int32,
             device="cuda",
@@ -198,8 +217,8 @@ class TestQwen3NextGraphProbeGpu(unittest.TestCase):
         )
         attention.cu_kv_seqlens = attention.cu_seqlens.clone()
         block_ids = torch.arange(
-            1, self.actual_bs + 1, dtype=torch.int32, device="cuda"
-        ).reshape(self.actual_bs, 1)
+            1, actual_bs + 1, dtype=torch.int32, device="cuda"
+        ).reshape(actual_bs, 1)
         attention.kv_cache_kernel_block_id_device = block_ids
         attention.kv_cache_kernel_block_id_host = block_ids.cpu().pin_memory()
         attention.kv_cache_block_id_device = block_ids
@@ -213,6 +232,9 @@ class TestQwen3NextGraphProbeGpu(unittest.TestCase):
         return inputs
 
     def test_capture_replay_updates_persistent_lane_buffer_and_json(self):
+        if self.retrospective:
+            self._assert_retrospective_previous_bucket_dump()
+            return
         capture_buffer, capture_layers = self.model.get_cuda_graph_probe_buffer(
             self.graph_bs
         )
@@ -505,6 +527,91 @@ class TestQwen3NextGraphProbeGpu(unittest.TestCase):
             )
         )
         self.assertFalse(torch.equal(expected_record_0, expected_record_1))
+
+    def _assert_retrospective_previous_bucket_dump(self):
+        inputs_a = self._build_inputs(
+            actual_bs=7,
+            trace_ids=["bad-trace"] + [f"replay-a-{lane}" for lane in range(1, 7)],
+        )
+        inputs_b = self._build_inputs(
+            actual_bs=self.actual_bs,
+            trace_ids=[f"replay-b-{lane}" for lane in range(self.actual_bs)],
+        )
+        inputs_b.input_ids.add_(1000)
+        torch.cuda.synchronize()
+        allocated_before_a = torch.cuda.memory_allocated()
+        getter_calls_after_capture = self.model.buffer_getter_calls
+
+        self.assertTrue(self.runner.canRun(inputs_a))
+        self.runner.forward(inputs_a)
+        torch.cuda.synchronize()
+        self.assertEqual(getter_calls_after_capture, self.model.buffer_getter_calls)
+        self.assertEqual(8, self.runner.getCurrentRealGraphSize())
+        expected_a = self.model.get_cuda_graph_probe_buffer(8)[0].cpu().clone()
+
+        ring_sized_bytes = 2 * 2 * self.ring_max_graph_bs * 12 * 4
+        self.assertLess(
+            torch.cuda.memory_allocated() - allocated_before_a,
+            ring_sized_bytes,
+        )
+        output_dir = Path(self.temp_dir.name)
+        self.assertFalse(list(output_dir.glob("*.bin")))
+        self.assertFalse(list(output_dir.glob("*.jsonl")))
+        self.assertFalse(list(output_dir.glob("*.complete")))
+
+        published = self.runner.retrospective_probe_event(
+            "bad-trace", "test-retrospective", 77
+        )
+        self.assertTrue(published["published"])
+        generation = published["generation"]
+
+        getter_calls_before_b = self.model.buffer_getter_calls
+        self.assertTrue(self.runner.canRun(inputs_b))
+        self.runner.forward(inputs_b)
+        torch.cuda.synchronize()
+        self.assertEqual(getter_calls_before_b, self.model.buffer_getter_calls)
+        self.assertEqual(24, self.runner.getCurrentRealGraphSize())
+
+        tensor_file = next(output_dir.glob("*.bin"))
+        metadata_file = next(output_dir.glob("*.jsonl"))
+        completion_file = next(output_dir.glob("*.complete"))
+        self.assertFalse(list(output_dir.glob("*.tmp")))
+        self.assertGreaterEqual(
+            completion_file.stat().st_mtime_ns,
+            max(tensor_file.stat().st_mtime_ns, metadata_file.stat().st_mtime_ns),
+        )
+        dumped = torch.from_file(
+            str(tensor_file),
+            shared=False,
+            size=expected_a.numel(),
+            dtype=torch.float32,
+        ).reshape(expected_a.shape)
+        torch.testing.assert_close(dumped, expected_a)
+        replay_b = self.model.get_cuda_graph_probe_buffer(24)[0].cpu()
+        self.assertFalse(torch.equal(dumped[:, :7], replay_b[:, :7]))
+
+        metadata = json.loads(metadata_file.read_text(encoding="utf-8"))
+        self.assertEqual(generation, metadata["event_generation"])
+        self.assertEqual("bad-trace", metadata["event_trace_id"])
+        self.assertEqual("test-retrospective", metadata["event_reason"])
+        self.assertEqual(77, metadata["event_observed_sequence_length"])
+        self.assertEqual(0, metadata["replay_id"])
+        self.assertEqual(8, metadata["graph_bs"])
+        self.assertEqual(7, metadata["current_bs"])
+        self.assertEqual([2, 0], metadata["layers"])
+        self.assertEqual("bad-trace", metadata["lanes"][0]["trace_id"])
+        self.assertEqual(0, metadata["lanes"][0]["lane"])
+        self.assertEqual(self.num_tokens_per_bs, metadata["lanes"][0]["input_length"])
+        self.assertEqual(7, len(metadata["lanes"]))
+
+        completion = json.loads(completion_file.read_text(encoding="utf-8"))
+        self.assertEqual(generation, completion["event_generation"])
+        self.assertEqual(str(tensor_file), completion["tensor"])
+        self.assertEqual(str(metadata_file), completion["metadata"])
+        observed = self.runner.retrospective_probe_event()
+        self.assertEqual(generation, observed["generation"])
+        self.assertEqual(1, observed["ack_rank_mask"] & 1)
+        self.assertEqual(0, observed["failure_rank_mask"] & 1)
 
 
 if __name__ == "__main__":
