@@ -236,10 +236,11 @@ struct WatchState {
 };
 
 struct BadWatchUpdate {
-    int                     cf_count = 0;
+    int                      cf_count        = 0;
+    bool                     repeated_kp_open = false;
     DecodeRepeatedSuffixInfo repeated_suffix;
-    bool                    triggered = false;
-    const char*             reason = "";
+    bool                     triggered = false;
+    const char*              reason    = "";
 };
 
 std::unordered_map<std::string, WatchState>& watchStates() {
@@ -349,6 +350,9 @@ BadWatchUpdate updateBadWatchState(WatchState&              state,
                                    int                      bad_watch_tail_size,
                                    int                      bad_watch_min_cf) {
     static const std::vector<int> cf_pattern = {27, 9500, 1419, 9500, 29};
+    // Qwen3.6 tokens for "<kp><kp><kp". Three adjacent opening tags are an
+    // invalid protocol prefix and precede the longer generic repeat collapse.
+    static const std::vector<int> repeated_kp_open_pattern = {27, 46880, 1721, 46880, 1721, 46880};
 
     updateStreamingSubsequenceCount(state, new_tokens, cf_pattern);
     state.token_tail.insert(state.token_tail.end(), new_tokens.begin(), new_tokens.end());
@@ -358,13 +362,16 @@ BadWatchUpdate updateBadWatchState(WatchState&              state,
     }
 
     BadWatchUpdate update;
-    update.cf_count        = countSubsequence(state.token_tail, cf_pattern);
-    update.repeated_suffix = findRepeatedSuffix(state.token_tail, 8, 8);
+    update.cf_count         = countSubsequence(state.token_tail, cf_pattern);
+    update.repeated_kp_open = countSubsequence(state.token_tail, repeated_kp_open_pattern) > 0;
+    update.repeated_suffix  = findRepeatedSuffix(state.token_tail, 8, 8);
     const bool cf_tail_repeat = update.cf_count >= bad_watch_min_cf;
-    if (!state.triggered && (cf_tail_repeat || update.repeated_suffix.matched)) {
-        state.triggered = true;
+    if (!state.triggered && (update.repeated_kp_open || cf_tail_repeat || update.repeated_suffix.matched)) {
+        state.triggered  = true;
         update.triggered = true;
-        update.reason = cf_tail_repeat ? "cf_tail_repeat" : "repeated_suffix";
+        update.reason = update.repeated_kp_open ? "repeated_kp_open" :
+                        cf_tail_repeat          ? "cf_tail_repeat" :
+                                                  "repeated_suffix";
         publishRetrospectiveTrigger(trace_id, update.reason, sequence_length);
     }
     return update;
@@ -686,6 +693,7 @@ void DecodeTokenTraceLogger::logDispatchBatch(const StreamGroups&   stream_group
                           << watch_update.reason
                           << "\",\"cf_count\":" << watch_update.cf_count
                           << ",\"cf_total\":" << state.cf_total
+                          << ",\"repeated_kp_open\":" << (watch_update.repeated_kp_open ? "true" : "false")
                           << ",\"repeat_pattern_size\":" << watch_update.repeated_suffix.pattern_size
                           << ",\"repeat_count\":" << watch_update.repeated_suffix.repeat_count
                           << ",\"repeat_pattern\":";

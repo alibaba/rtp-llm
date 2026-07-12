@@ -181,8 +181,24 @@ TEST(DecodeTokenTraceLoggerTest, GenericRepeatedSuffixPublishesOneEvent) {
     EXPECT_EQ(generation, currentTriggerGeneration());
 }
 
+TEST(DecodeTokenTraceLoggerTest, RepeatedKpOpenPublishesBeforeGenericRepeatThreshold) {
+    const std::string trace_id = "repeated_kp_open_probe_trace";
+    // Qwen3.6 tokenizes "<kp><kp><kp" as the sequence below. This is already
+    // an invalid nested protocol prefix, but contains no pattern repeated eight times.
+    const std::vector<int> tokens = {27, 46880, 1721, 46880, 1721, 46880};
+
+    ASSERT_TRUE(DecodeTokenTraceLogger::debugFeedBadWatchTokensForTest(trace_id, tokens, 789));
+    const auto generation = expectAndAcknowledgeEvent(trace_id, "repeated_kp_open", 789);
+    EXPECT_FALSE(DecodeTokenTraceLogger::debugFeedBadWatchTokensForTest(trace_id, {1721, 46880}, 791));
+    EXPECT_EQ(generation, currentTriggerGeneration());
+}
+
 TEST(DecodeTokenTraceLoggerTest, NormalFormatTagsDoNotPublishEvent) {
-    const std::vector<int> tokens = {27, 9500, 1419, 9500, 29, 42, 7, 59140, 220};
+    const std::vector<int> tokens = {
+        27, 9500, 1419, 9500, 29, 42, 7, 59140, 220,
+        27, 46880, 29, 42, 510, 46880, 29,
+        27, 46880, 29, 43, 510, 46880, 29,
+    };
     const auto generation_before = currentTriggerGeneration();
 
     EXPECT_FALSE(DecodeTokenTraceLogger::debugFeedBadWatchTokensForTest("normal_format_trace", tokens, 64));
