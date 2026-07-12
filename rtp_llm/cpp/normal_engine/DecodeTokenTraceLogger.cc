@@ -374,7 +374,7 @@ BadWatchUpdate updateBadWatchState(WatchState&              state,
     update.repeated_kp_open = countSubsequence(state.token_tail, repeated_kp_open_pattern) > 0;
     update.repeated_suffix  = findRepeatedSuffix(state.token_tail, 8, 8);
     if (!update.repeated_suffix.matched) {
-        auto long_span = findRepeatedSuffixInRange(state.token_tail, 16, 128, 2);
+        auto long_span = findRepeatedSuffixInRange(state.token_tail, 16, 128, 3);
         if (long_span.matched) {
             update.repeated_long_span = true;
             update.repeated_suffix    = std::move(long_span);
