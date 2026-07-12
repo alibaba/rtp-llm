@@ -238,6 +238,7 @@ struct WatchState {
 struct BadWatchUpdate {
     int                      cf_count        = 0;
     bool                     repeated_kp_open = false;
+    bool                     repeated_long_span = false;
     DecodeRepeatedSuffixInfo repeated_suffix;
     bool                     triggered = false;
     const char*              reason    = "";
@@ -293,12 +294,15 @@ void updateStreamingSubsequenceCount(WatchState& state,
     }
 }
 
-DecodeRepeatedSuffixInfo findRepeatedSuffix(const std::vector<int>& values, int max_pattern_size, int min_repeats) {
+DecodeRepeatedSuffixInfo findRepeatedSuffixInRange(const std::vector<int>& values,
+                                                   int                     min_pattern_size,
+                                                   int                     max_pattern_size,
+                                                   int                     min_repeats) {
     DecodeRepeatedSuffixInfo info;
-    if (min_repeats <= 1) {
+    if (min_pattern_size <= 0 || max_pattern_size < min_pattern_size || min_repeats <= 1) {
         return info;
     }
-    for (int pattern_size = 1; pattern_size <= max_pattern_size; ++pattern_size) {
+    for (int pattern_size = min_pattern_size; pattern_size <= max_pattern_size; ++pattern_size) {
         const int need = pattern_size * min_repeats;
         if ((int)values.size() < need) {
             continue;
@@ -326,6 +330,10 @@ DecodeRepeatedSuffixInfo findRepeatedSuffix(const std::vector<int>& values, int 
         }
     }
     return info;
+}
+
+DecodeRepeatedSuffixInfo findRepeatedSuffix(const std::vector<int>& values, int max_pattern_size, int min_repeats) {
+    return findRepeatedSuffixInRange(values, 1, max_pattern_size, min_repeats);
 }
 
 void publishRetrospectiveTrigger(const std::string& trace_id, const char* reason, int sequence_length) noexcept {
@@ -365,12 +373,22 @@ BadWatchUpdate updateBadWatchState(WatchState&              state,
     update.cf_count         = countSubsequence(state.token_tail, cf_pattern);
     update.repeated_kp_open = countSubsequence(state.token_tail, repeated_kp_open_pattern) > 0;
     update.repeated_suffix  = findRepeatedSuffix(state.token_tail, 8, 8);
+    if (!update.repeated_suffix.matched) {
+        auto long_span = findRepeatedSuffixInRange(state.token_tail, 16, 128, 2);
+        if (long_span.matched) {
+            update.repeated_long_span = true;
+            update.repeated_suffix    = std::move(long_span);
+        }
+    }
     const bool cf_tail_repeat = update.cf_count >= bad_watch_min_cf;
-    if (!state.triggered && (update.repeated_kp_open || cf_tail_repeat || update.repeated_suffix.matched)) {
+    if (!state.triggered
+        && (update.repeated_kp_open || cf_tail_repeat || update.repeated_long_span
+            || update.repeated_suffix.matched)) {
         state.triggered  = true;
         update.triggered = true;
         update.reason = update.repeated_kp_open ? "repeated_kp_open" :
                         cf_tail_repeat          ? "cf_tail_repeat" :
+                        update.repeated_long_span ? "repeated_long_span" :
                                                   "repeated_suffix";
         publishRetrospectiveTrigger(trace_id, update.reason, sequence_length);
     }

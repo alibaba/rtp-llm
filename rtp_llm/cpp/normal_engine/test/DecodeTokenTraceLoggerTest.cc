@@ -193,6 +193,32 @@ TEST(DecodeTokenTraceLoggerTest, RepeatedKpOpenPublishesBeforeGenericRepeatThres
     EXPECT_EQ(generation, currentTriggerGeneration());
 }
 
+TEST(DecodeTokenTraceLoggerTest, LongAdjacentSpanPublishesAfterTwoCopies) {
+    const std::string trace_id = "long_span_probe_trace";
+    std::vector<int>  pattern;
+    for (int token = 100; token < 120; ++token) {
+        pattern.push_back(token);
+    }
+    std::vector<int> tokens = {7, 8, 9};
+    tokens.insert(tokens.end(), pattern.begin(), pattern.end());
+    tokens.insert(tokens.end(), pattern.begin(), pattern.end());
+
+    ASSERT_TRUE(DecodeTokenTraceLogger::debugFeedBadWatchTokensForTest(trace_id, tokens, 900));
+    const auto generation = expectAndAcknowledgeEvent(trace_id, "repeated_long_span", 900);
+    EXPECT_FALSE(DecodeTokenTraceLogger::debugFeedBadWatchTokensForTest(trace_id, {121}, 901));
+    EXPECT_EQ(generation, currentTriggerGeneration());
+}
+
+TEST(DecodeTokenTraceLoggerTest, ShortAdjacentSpanDoesNotPublish) {
+    const std::vector<int> pattern = {200, 201, 202, 203, 204, 205, 206, 207};
+    std::vector<int>       tokens  = pattern;
+    tokens.insert(tokens.end(), pattern.begin(), pattern.end());
+    const auto generation_before = currentTriggerGeneration();
+
+    EXPECT_FALSE(DecodeTokenTraceLogger::debugFeedBadWatchTokensForTest("short_span_trace", tokens, 32));
+    EXPECT_EQ(generation_before, currentTriggerGeneration());
+}
+
 TEST(DecodeTokenTraceLoggerTest, NormalFormatTagsDoNotPublishEvent) {
     const std::vector<int> tokens = {
         27, 9500, 1419, 9500, 29, 42, 7, 59140, 220,
