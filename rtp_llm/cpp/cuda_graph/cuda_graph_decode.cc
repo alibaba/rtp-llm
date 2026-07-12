@@ -68,6 +68,34 @@ void CudaGraphRunner::captureDecode() {
         replayAndSyncCheck(bs, "batch size");
         RTP_LLM_LOG_INFO("capture success for batch size: %d", bs);
     }
+    if (dualGraphDebugEnabled()) {
+        RTP_LLM_LOG_INFO("Capture retrospective debug Decode graphs start");
+        try {
+            if (!setPythonGraphProbeEnabled(true)) {
+                throw std::runtime_error("Qwen CUDA graph probe could not be enabled");
+            }
+            for (int bs : capture_range_) {
+                retrospective_debug_graph_instances_.try_emplace(bs, enable_cuda_graph_debug_mode_);
+            }
+            for (int i = capture_range_size - 1; i >= 0; --i) {
+                const int bs = capture_range_[i];
+                captureOneGraphInstance(
+                    bs, "retrospective debug batch size", retrospective_debug_graph_instances_[bs].graph_);
+                cuda_graph::finish_capture_session();
+                retrospective_debug_graph_instances_[bs].graph_.replay();
+                cuda_graph::graphDeviceSynchronize();
+                RTP_LLM_LOG_INFO("retrospective debug capture success for batch size: %d", bs);
+            }
+        } catch (const std::exception& e) {
+            RTP_LLM_LOG_WARNING("Disabling retrospective debug graphs after capture failure: %s", e.what());
+            retrospective_debug_graph_instances_.clear();
+        } catch (...) {
+            RTP_LLM_LOG_WARNING("Disabling retrospective debug graphs after capture failure");
+            retrospective_debug_graph_instances_.clear();
+        }
+        setPythonGraphProbeEnabled(false);
+        RTP_LLM_LOG_INFO("Capture retrospective debug Decode graphs end");
+    }
     RTP_LLM_LOG_INFO("Capture Decode End");
 }
 }  // namespace rtp_llm

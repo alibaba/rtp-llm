@@ -6,6 +6,34 @@ import torch
 
 
 class TestQwen3NextGraphProbe(unittest.TestCase):
+    def test_model_probe_can_be_disabled_for_normal_graph_capture(self):
+        from rtp_llm.models_py.model_desc.qwen3_next import (
+            Qwen3NextModel,
+            _CudaGraphLayerProbe,
+        )
+
+        model = Qwen3NextModel.__new__(Qwen3NextModel)
+        torch.nn.Module.__init__(model)
+        model._cuda_graph_layer_probe = _CudaGraphLayerProbe(
+            enabled=True, layers=(0,), layer_num=1
+        )
+
+        self.assertTrue(model.get_cuda_graph_probe_enabled())
+        self.assertTrue(model.set_cuda_graph_probe_enabled(False))
+        self.assertFalse(model.get_cuda_graph_probe_enabled())
+
+        hidden = torch.ones((2, 4), dtype=torch.float32)
+        model._cuda_graph_layer_probe.record(
+            0, hidden, hidden, graph_bs=2, is_cuda_graph=True
+        )
+        self.assertIsNone(model.get_cuda_graph_probe_buffer(2))
+
+        self.assertFalse(model.set_cuda_graph_probe_enabled(True))
+        model._cuda_graph_layer_probe.record(
+            0, hidden, hidden, graph_bs=2, is_cuda_graph=True
+        )
+        self.assertIsNotNone(model.get_cuda_graph_probe_buffer(2))
+
     def test_trace_context_is_only_exposed_to_selected_layer(self):
         from rtp_llm.models_py.model_desc import qwen3_next
 

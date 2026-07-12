@@ -61,6 +61,14 @@ class _GraphProbeModel:
         self.buffer_getter_calls += 1
         return self.probe.get_capture(graph_bs)
 
+    def get_cuda_graph_probe_enabled(self):
+        return self.probe.enabled
+
+    def set_cuda_graph_probe_enabled(self, enabled):
+        previous = self.probe.enabled
+        self.probe.enabled = bool(enabled)
+        return previous
+
     def get_cuda_graph_probe_debug_status(self, graph_bs):
         self.debug_status_calls += 1
         return {
@@ -109,14 +117,22 @@ class TestQwen3NextGraphProbeGpu(unittest.TestCase):
         self.retrospective = os.environ.get(
             "TEST_QWEN3_NEXT_GRAPH_PROBE_RETROSPECTIVE", "0"
         ) == "1"
-        if self.ring_only or self.ring_budget_reject or self.retrospective:
+        self.dual_graph = os.environ.get(
+            "TEST_QWEN3_NEXT_GRAPH_PROBE_DUAL_GRAPH", "0"
+        ) == "1"
+        if (
+            self.ring_only
+            or self.ring_budget_reject
+            or self.retrospective
+            or self.dual_graph
+        ):
             os.environ["RTPLLM_DECODE_CHECKSUM_DEBUG"] = "0"
         os.environ["RTPLLM_QWEN3_NEXT_GRAPH_PROBE"] = (
             "1" if self.graph_probe_enabled else "0"
         )
         os.environ["RTPLLM_QWEN3_NEXT_GRAPH_PROBE_LAYERS"] = "99,77"
         os.environ["RTPLLM_CUDA_GRAPH_PROBE_RING_DEBUG"] = (
-            "0" if self.retrospective else "1"
+            "0" if self.retrospective or self.dual_graph else "1"
         )
         os.environ["RTPLLM_CUDA_GRAPH_PROBE_RING_DIR"] = self.temp_dir.name
         os.environ["RTPLLM_CUDA_GRAPH_PROBE_RING_TRIGGER_FILE"] = (
@@ -145,7 +161,9 @@ class TestQwen3NextGraphProbeGpu(unittest.TestCase):
             self.max_seq_len,
             self.tokens_per_block,
             self.tokens_per_block,
-            [8, self.graph_bs] if self.retrospective else [self.graph_bs],
+            [8, self.graph_bs]
+            if self.retrospective or self.dual_graph
+            else [self.graph_bs],
             self.num_tokens_per_bs,
             True,
             True,
@@ -232,6 +250,9 @@ class TestQwen3NextGraphProbeGpu(unittest.TestCase):
         return inputs
 
     def test_capture_replay_updates_persistent_lane_buffer_and_json(self):
+        if self.dual_graph:
+            self._assert_dual_graph_post_trigger_dump()
+            return
         if self.retrospective:
             self._assert_retrospective_previous_bucket_dump()
             return
@@ -667,6 +688,99 @@ class TestQwen3NextGraphProbeGpu(unittest.TestCase):
         self.assertEqual(0, observed["ack_rank_mask"] & 1)
         self.assertEqual(0, observed["failure_rank_mask"] & 1)
         self.assertFalse(list(output_dir.glob(f"*gen{unmatched_generation}.*")))
+
+    def _assert_dual_graph_post_trigger_dump(self):
+        self.assertFalse(self.model.get_cuda_graph_probe_enabled())
+        probe_buffer, probe_layers = self.model.get_cuda_graph_probe_buffer(
+            self.graph_bs
+        )
+        self.assertEqual((2, 0), probe_layers)
+        capture_values = probe_buffer.cpu().clone()
+
+        trace_ids = ["bad-trace"] + [
+            f"dual-lane-{lane}" for lane in range(1, self.actual_bs)
+        ]
+        inputs = self._build_inputs(trace_ids=trace_ids)
+        inputs.attention_inputs.sequence_lengths = torch.full(
+            (self.actual_bs,), 81, dtype=torch.int32
+        ).pin_memory()
+        inputs.input_ids.add_(1000)
+
+        self.assertTrue(self.runner.canRun(inputs))
+        self.runner.forward(inputs)
+        torch.cuda.synchronize()
+        after_normal = probe_buffer.cpu().clone()
+        torch.testing.assert_close(after_normal, capture_values)
+        self.assertFalse(list(Path(self.temp_dir.name).glob("*.complete")))
+
+        published = self.runner.retrospective_probe_event(
+            "bad-trace", "test-dual-graph", 82
+        )
+        self.assertTrue(published["published"])
+        generation = published["generation"]
+
+        inputs.input_ids.add_(1000)
+        self.assertTrue(self.runner.canRun(inputs))
+        self.runner.forward(inputs)
+        torch.cuda.synchronize()
+        after_debug = probe_buffer.cpu().clone()
+        self.assertFalse(torch.equal(after_debug, after_normal))
+
+        output_dir = Path(self.temp_dir.name)
+        tensor_file = next(output_dir.glob(f"*gen{generation}.bin"))
+        metadata_file = next(output_dir.glob(f"*gen{generation}.jsonl"))
+        completion_file = next(output_dir.glob(f"*gen{generation}.complete"))
+        self.assertFalse(list(output_dir.glob("*.tmp")))
+        dumped = torch.from_file(
+            str(tensor_file),
+            shared=False,
+            size=after_debug.numel(),
+            dtype=torch.float32,
+        ).reshape(after_debug.shape)
+        torch.testing.assert_close(
+            dumped[:, : self.actual_bs], after_debug[:, : self.actual_bs]
+        )
+        self.assertTrue(
+            torch.equal(
+                dumped[:, self.actual_bs :],
+                torch.zeros_like(dumped[:, self.actual_bs :]),
+            )
+        )
+
+        metadata = json.loads(metadata_file.read_text(encoding="utf-8"))
+        self.assertEqual(generation, metadata["event_generation"])
+        self.assertEqual("bad-trace", metadata["event_trace_id"])
+        self.assertEqual("test-dual-graph", metadata["event_reason"])
+        self.assertEqual(self.graph_bs, metadata["graph_bs"])
+        self.assertEqual(self.actual_bs, metadata["current_bs"])
+        self.assertEqual([2, 0], metadata["layers"])
+        self.assertEqual("bad-trace", metadata["lanes"][0]["trace_id"])
+        self.assertEqual(81, metadata["lanes"][0]["sequence_length"])
+        self.assertTrue(completion_file.is_file())
+
+        observed = self.runner.retrospective_probe_event()
+        self.assertEqual(generation, observed["generation"])
+        self.assertEqual(1, observed["ack_rank_mask"] & 1)
+        self.assertEqual(0, observed["failure_rank_mask"] & 1)
+
+        inputs.input_ids.add_(1000)
+        self.runner.forward(inputs)
+        torch.cuda.synchronize()
+        torch.testing.assert_close(probe_buffer.cpu(), after_debug)
+
+        unmatched = self.runner.retrospective_probe_event(
+            "unmatched-trace", "test-dual-unmatched", 83
+        )
+        self.assertTrue(unmatched["published"])
+        unmatched_generation = unmatched["generation"]
+        self.runner.forward(inputs)
+        torch.cuda.synchronize()
+        observed = self.runner.retrospective_probe_event()
+        self.assertEqual(unmatched_generation, observed["generation"])
+        self.assertEqual(0, observed["ack_rank_mask"] & 1)
+        self.assertFalse(
+            list(output_dir.glob(f"*gen{unmatched_generation}.complete"))
+        )
 
 
 if __name__ == "__main__":

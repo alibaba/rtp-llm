@@ -2337,6 +2337,17 @@ class Qwen3NextModel(GptModelBase):
             return None
         return self._cuda_graph_layer_probe.get_capture(graph_bs)
 
+    def get_cuda_graph_probe_enabled(self) -> bool:
+        probe = self._cuda_graph_layer_probe
+        return bool(probe is not None and probe.enabled)
+
+    def set_cuda_graph_probe_enabled(self, enabled: bool) -> bool:
+        probe = self._cuda_graph_layer_probe
+        previous = bool(probe is not None and probe.enabled)
+        if probe is not None:
+            probe.enabled = bool(enabled)
+        return previous
+
     def get_cuda_graph_probe_debug_status(self, graph_bs: int) -> dict[str, Any]:
         probe = self._cuda_graph_layer_probe
         if probe is None:

@@ -18,6 +18,8 @@ namespace py = pybind11;
 
 namespace rtp_llm {
 
+struct DecodeProbeTriggerEvent;
+
 struct CudaGraphPreviousReplay {
     uint64_t                 replay_id{0};
     int64_t                  graph_bs{0};
@@ -99,6 +101,7 @@ public:
 private:
     // Common capture logic for both prefill and decode
     void captureOneGraphInstance(int key, const char* key_type);
+    void captureOneGraphInstance(int key, const char* key_type, at::cuda::CUDAGraph& graph);
     // Common replay and sync check logic
     void replayAndSyncCheck(int key, const char* key_type);
 
@@ -120,6 +123,14 @@ private:
     void              cacheRetrospectiveProbeHandle(int graph_bs) noexcept;
     void              dumpRetrospectiveProbeBeforeReplay() noexcept;
     void              retainRetrospectiveReplay(const PyModelInputs& inputs, const CudaGraphState& state) noexcept;
+    bool              dualGraphDebugEnabled() const noexcept;
+    bool              setPythonGraphProbeEnabled(bool enabled) noexcept;
+    bool              shouldReplayRetrospectiveDebug(const PyModelInputs&       inputs,
+                                                     const CudaGraphState&      state,
+                                                     DecodeProbeTriggerEvent& event) noexcept;
+    void              dumpRetrospectiveDebugReplay(const PyModelInputs&             inputs,
+                                                   const CudaGraphState&            state,
+                                                   const DecodeProbeTriggerEvent& event) noexcept;
 
 private:
     std::vector<int> getDecodeBatchSizesToCapture();
@@ -152,6 +163,7 @@ private:
     // capture seqLen -> GraphInstance (prefill)
     // batch_size -> GraphInstance (decode)
     std::unordered_map<int, GraphInstance> graph_instances_;
+    std::unordered_map<int, GraphInstance> retrospective_debug_graph_instances_;
     CaptureMemoryHold                      capture_mem_hold_;
     torch::Tensor                          position_encoding_;
     torch::Tensor                          token_type_embedding_;
