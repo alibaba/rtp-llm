@@ -128,6 +128,45 @@ DashScope tuning fields are optional and belong to the same `discovery` object:
 
 The values shown above are the code defaults. There is no global discovery strategy or fallback.
 
+To query cache matches from KVCM instead of the local cache index, add a `kvcm`
+object at the same level as `role_endpoints`:
+
+```json
+{
+  "service_id": "aigc.text-generation.generation.engine_service",
+  "role_endpoints": [{
+    "group": "default",
+    "pd_fusion_endpoint": {
+      "address": "v-workers",
+      "protocol": "grpc",
+      "discovery": {
+        "type": "dashscope"
+      }
+    }
+  }],
+  "kvcm": {
+    "enabled": true,
+    "address": "v-kvcm",
+    "port": 6381,
+    "discovery": {
+      "type": "dashscope"
+    },
+    "request_timeout_ms": 50,
+    "leader_refresh_interval_ms": 5000
+  }
+}
+```
+
+The worker deployment name returned by DashScope discovery is used as the KVCM cache namespace.
+The namespace is sent through the KVCM protocol's `instance_id` field.
+KVCM communication always uses gRPC and does not require a protocol setting.
+The optional KVCM `port` defaults to `6381` and is used with discovered seed IPs only for
+`GetClusterInfo`. Subsequent RPCs use the leader host and `meta_rpc_port` returned in
+`leader_endpoint`.
+
+When KVCM is enabled, FlexLB stops polling `GetCacheStatus`. Engines must return
+`available_kv_cache`, `total_kv_cache`, and `block_size` from `GetWorkerStatus`.
+
 ### Run
 
 ```bash

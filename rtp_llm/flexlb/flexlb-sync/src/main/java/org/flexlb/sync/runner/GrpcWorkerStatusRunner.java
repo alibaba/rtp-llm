@@ -1,6 +1,7 @@
 package org.flexlb.sync.runner;
 
 import org.flexlb.dao.master.TaskInfo;
+import org.flexlb.dao.master.CacheStatus;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.domain.worker.WorkerStatusResponse;
@@ -110,6 +111,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
             workerStatus.setSite(site);
             workerStatus.setGroup(group);
             workerStatus.setRole(newWorkerStatus.getRole());
+            updateCacheStatus(newWorkerStatus.getCacheStatus());
 
             long currentVersion = workerStatus.getStatusVersion().get();
             if (currentVersion >= responseVersion) {
@@ -190,6 +192,16 @@ public class GrpcWorkerStatusRunner implements Runnable {
                 workerStatus.getRole(),
                 workerStatus.getRunningQueueTime(),
                 System.nanoTime() / 1000 - startTime);
+    }
+
+    private void updateCacheStatus(CacheStatus cacheStatus) {
+        if (cacheStatus == null) {
+            return;
+        }
+        workerStatus.setCacheStatus(cacheStatus);
+        long availableKvCache = cacheStatus.getAvailableKvCache();
+        long usedKvCache = Math.max(0L, cacheStatus.getTotalKvCache() - availableKvCache);
+        workerStatus.updateKvCacheTokens(usedKvCache, availableKvCache);
     }
 
     private void handleException(Throwable ex) {

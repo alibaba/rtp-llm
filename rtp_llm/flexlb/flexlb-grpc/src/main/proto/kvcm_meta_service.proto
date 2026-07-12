@@ -1,0 +1,80 @@
+syntax = "proto3";
+
+package kv_cache_manager.proto.meta;
+
+option java_package = "org.flexlb.kvcm.grpc";
+option java_multiple_files = true;
+option java_outer_classname = "KvcmMetaServiceProto";
+
+// Wire-compatible subset of
+// KVCacheManager/github-opensource/kv_cache_manager/protocol/protobuf/meta_service.proto.
+// FlexLB vendors only the RPCs required for leader discovery and cache matching.
+enum ErrorCode {
+  UNSPECIFIED = 0;
+  OK = 1;
+  UNSUPPORTED = 2;
+  INTERNAL_ERROR = 3;
+  SERVICE_NOT_READY = 4;
+  INVALID_ARGUMENT = 5;
+  DUPLICATE_ENTITY = 6;
+  REACH_MAX_ENTITY_CAPACITY = 7;
+  INSTANCE_NOT_EXIST = 8;
+  SERVER_NOT_LEADER = 9;
+  NODE_NOT_REGISTERED = 10;
+  IO_ERROR = 20;
+  UNKNOWN_ERROR = 100;
+  ERROR_MAX = 65535;
+}
+
+message Status {
+  ErrorCode code = 1;
+  string message = 2;
+}
+
+message CommonResponseHeader {
+  Status status = 1;
+  string request_id = 2;
+  string tracer_result = 3;
+}
+
+message MetaNodeEndpoint {
+  string node_id = 1;
+  string host = 2;
+  int32 meta_rpc_port = 3;
+  int32 meta_http_port = 4;
+  string custom_info = 5;
+}
+
+message GetClusterInfoRequest {
+  string trace_id = 1;
+  string instance_id = 2;
+}
+
+message GetClusterInfoResponse {
+  CommonResponseHeader header = 1;
+  string self_node_id = 2;
+  string leader_node_id = 3;
+  MetaNodeEndpoint leader_endpoint = 4;
+}
+
+message GetHostCacheStateRequest {
+  string trace_id = 1;
+  string instance_id = 2;
+  repeated int64 block_cache_keys = 3;
+  repeated string medium = 4;
+}
+
+message HostCacheMatch {
+  string host_ip_port = 1;
+  int64 prefix_match_blocks = 2;
+}
+
+message GetHostCacheStateResponse {
+  CommonResponseHeader header = 1;
+  repeated HostCacheMatch hosts = 2;
+}
+
+service MetaService {
+  rpc GetClusterInfo(GetClusterInfoRequest) returns (GetClusterInfoResponse);
+  rpc GetHostCacheState(GetHostCacheStateRequest) returns (GetHostCacheStateResponse);
+}

@@ -25,6 +25,13 @@ public class GroupRoleEndPoint {
     @JsonProperty("pd_fusion_endpoint")
     private Endpoint pdFusionEndpoint;
 
+    void applyGroupToEndpoints() {
+        String endpointGroup = group == null ? "" : group;
+        for (Endpoint endpoint : getAllEndpoints()) {
+            endpoint.setGroup(endpointGroup);
+        }
+    }
+
     List<RoleType> getRoleTypes() {
         List<RoleType> roleTypes = new ArrayList<>();
         if (prefillEndpoint != null) {

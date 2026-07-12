@@ -4,13 +4,13 @@ import org.apache.commons.collections4.CollectionUtils;
 import org.apache.commons.collections4.MapUtils;
 import org.flexlb.balance.resource.ResourceMeasure;
 import org.flexlb.balance.resource.ResourceMeasureFactory;
+import org.flexlb.cache.service.CacheAwareService;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
-import org.flexlb.dao.master.CacheStatus;
 import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
@@ -25,7 +25,6 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 import java.util.concurrent.ThreadLocalRandom;
 
 /**
@@ -40,14 +39,17 @@ public class WeightedCacheLoadBalancer implements LoadBalancer {
     private final EngineWorkerStatus engineWorkerStatus;
     private final double decayFactor;
     private final ResourceMeasureFactory resourceMeasureFactory;
+    private final CacheAwareService cacheAwareService;
 
     public WeightedCacheLoadBalancer(ConfigService configService,
                                      EngineWorkerStatus engineWorkerStatus,
-                                     ResourceMeasureFactory resourceMeasureFactory) {
+                                     ResourceMeasureFactory resourceMeasureFactory,
+                                     CacheAwareService cacheAwareService) {
         this.engineWorkerStatus = engineWorkerStatus;
         FlexlbConfig config = configService.loadBalanceConfig();
         this.decayFactor = config.getWeightedCacheDecayFactor();
         this.resourceMeasureFactory = resourceMeasureFactory;
+        this.cacheAwareService = cacheAwareService;
         LoadBalanceStrategyFactory.register(LoadBalanceStrategyEnum.WEIGHTED_CACHE, this);
     }
 
@@ -83,7 +85,9 @@ public class WeightedCacheLoadBalancer implements LoadBalancer {
         WorkerStatus selectedWorker = weightedRandomSelection(workerStatusList);
 
         if (selectedWorker != null) {
-            long prefixLength = calcPrefixMatchLength(selectedWorker.getCacheStatus(), balanceContext.getRequest().getBlockCacheKeys());
+            Map<String, Integer> cacheMatches = cacheAwareService.findMatchingEngines(
+                    balanceContext.getRequest().getBlockCacheKeys(), roleType, group);
+            long prefixLength = calcPrefixMatchLength(selectedWorker, cacheMatches);
             // Update local task state
             return buildServerStatus(selectedWorker, seqLen, prefixLength, roleType, balanceContext.getRequestId());
         }
@@ -112,28 +116,15 @@ public class WeightedCacheLoadBalancer implements LoadBalancer {
         }
     }
 
-    private long calcPrefixMatchLength(CacheStatus cacheStatus, List<Long> promptCacheKeys) {
-
-        if (cacheStatus == null || promptCacheKeys == null) {
+    private long calcPrefixMatchLength(WorkerStatus workerStatus, Map<String, Integer> cacheMatches) {
+        if (workerStatus.getCacheStatus() == null || cacheMatches == null) {
             return 0;
         }
-        long blockSize = cacheStatus.getBlockSize();
-        Set<Long> cachePrefixHash = cacheStatus.getCachedKeys();
-        if (cachePrefixHash == null) {
-            return 0;
-        }
-
-        // Iterate from beginning to find first mismatch position
-        for (int index = 0; index < promptCacheKeys.size(); index++) {
-            long hash = promptCacheKeys.get(index);
-            if (!cachePrefixHash.contains(hash)) {
-                // Return matching prefix length (matched block count * block size)
-                return blockSize * index;
-            }
-        }
-
-        // Return total length if all match
-        return blockSize * promptCacheKeys.size();
+        // KVCM returns the host_ip_port reported by Subscriber, while WorkerStatus uses the
+        // service-discovery address. No code-level normalization guarantees they are identical;
+        // the end-to-end integration must keep both values aligned.
+        int prefixMatchBlocks = cacheMatches.getOrDefault(workerStatus.getIpPort(), 0);
+        return workerStatus.getCacheStatus().getBlockSize() * prefixMatchBlocks;
     }
 
     /**

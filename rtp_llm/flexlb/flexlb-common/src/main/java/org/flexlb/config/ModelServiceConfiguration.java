@@ -4,6 +4,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.collections4.CollectionUtils;
 import org.apache.commons.lang3.StringUtils;
 import org.flexlb.dao.route.Endpoint;
+import org.flexlb.dao.route.KvcmConfig;
 import org.flexlb.dao.route.ServiceRoute;
 import org.flexlb.discovery.RoutingServiceDiscovery;
 import org.flexlb.util.JsonUtils;
@@ -56,5 +57,19 @@ public class ModelServiceConfiguration {
         for (Endpoint endpoint : endpoints) {
             serviceDiscovery.validate(endpoint);
         }
+
+        validateKvcm(serviceRoute.getKvcm(), serviceDiscovery);
+    }
+
+    private void validateKvcm(
+            KvcmConfig kvcm,
+            RoutingServiceDiscovery serviceDiscovery) {
+        if (kvcm == null || !kvcm.isEnabled()) {
+            return;
+        }
+        if (kvcm.getRequestTimeoutMs() <= 0 || kvcm.getLeaderRefreshIntervalMs() <= 0) {
+            throw new IllegalArgumentException("MODEL_SERVICE_CONFIG kvcm timeouts must be greater than zero");
+        }
+        serviceDiscovery.validate(kvcm.toEndpoint());
     }
 }

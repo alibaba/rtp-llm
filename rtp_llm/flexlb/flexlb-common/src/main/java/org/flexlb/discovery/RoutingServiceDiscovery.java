@@ -5,7 +5,9 @@ import org.apache.commons.lang3.StringUtils;
 import org.flexlb.dao.master.WorkerHost;
 import org.flexlb.dao.route.DiscoveryConfig;
 import org.flexlb.dao.route.Endpoint;
+import org.flexlb.enums.BackendServiceProtocolEnum;
 
+import java.util.ArrayList;
 import java.util.EnumMap;
 import java.util.List;
 import java.util.Map;
@@ -36,12 +38,17 @@ public class RoutingServiceDiscovery implements ServiceDiscovery {
 
     @Override
     public List<WorkerHost> getHosts(Endpoint endpoint) {
-        return providers.get(endpoint.getDiscovery().getType()).getHosts(endpoint);
+        List<WorkerHost> discoveredHosts =
+                providers.get(endpoint.getDiscovery().getType()).getHosts(endpoint);
+        return normalizeHosts(discoveredHosts, endpoint);
     }
 
     @Override
     public void listen(Endpoint endpoint, ServiceHostListener listener) {
-        providers.get(endpoint.getDiscovery().getType()).listen(endpoint, listener);
+        ServiceHostListener normalizedListener = listener == null
+                ? null
+                : hosts -> listener.onHostsChanged(normalizeHosts(hosts, endpoint));
+        providers.get(endpoint.getDiscovery().getType()).listen(endpoint, normalizedListener);
     }
 
     @Override
@@ -78,5 +85,31 @@ public class RoutingServiceDiscovery implements ServiceDiscovery {
                             + ", address: " + endpoint.getAddress());
         }
         return provider;
+    }
+
+    private List<WorkerHost> normalizeHosts(
+            List<WorkerHost> discoveredHosts,
+            Endpoint endpoint) {
+        if (discoveredHosts == null || discoveredHosts.isEmpty()) {
+            return List.of();
+        }
+
+        boolean grpcEndpoint = BackendServiceProtocolEnum.GRPC.getName()
+                .equals(endpoint.getProtocol());
+        List<WorkerHost> normalizedHosts = new ArrayList<>(discoveredHosts.size());
+        for (WorkerHost host : discoveredHosts) {
+            int discoveredPort = host.getPort();
+            int httpPort = grpcEndpoint ? discoveredPort - 1 : discoveredPort;
+            int grpcPort = grpcEndpoint ? discoveredPort : discoveredPort + 1;
+            normalizedHosts.add(new WorkerHost(
+                    host.getIp(),
+                    httpPort,
+                    grpcPort,
+                    httpPort + 5,
+                    host.getSite(),
+                    endpoint.getGroup(),
+                    host.getDeploymentName()));
+        }
+        return normalizedHosts;
     }
 }

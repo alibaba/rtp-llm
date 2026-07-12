@@ -87,7 +87,8 @@ public class MasterEngineSynchronizer extends AbstractEngineStatusSynchronizer {
                                 modelName, modelWorkerStatus.getRoleStatusMap(roleType),
                                 workerAddressService, statusCheckExecutor, engineHealthReporter,
                                 engineGrpcService, roleType, localKvCacheAwareManager,
-                                syncRequestTimeoutMs, syncCount, syncEngineStatusInterval
+                                syncRequestTimeoutMs, syncCount, syncEngineStatusInterval,
+                                serviceRoute.isKvcmEnabled()
                         ));
                     } else {
                         logger.error("roleEndpoints is null, by roleType : {}", roleType);

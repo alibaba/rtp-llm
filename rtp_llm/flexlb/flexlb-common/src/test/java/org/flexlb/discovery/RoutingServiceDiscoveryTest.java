@@ -26,6 +26,27 @@ class RoutingServiceDiscoveryTest {
         assertEquals(1, provider.validationCount.get());
     }
 
+    @Test
+    void normalizesDiscoveredHostsWithEndpointProtocolAndGroup() {
+        WorkerHost discoveredHost =
+                WorkerHost.of("10.0.0.1", 8081, "site-a", "deployment-a");
+        RecordingProvider provider = new RecordingProvider(List.of(discoveredHost));
+        RoutingServiceDiscovery discovery = new RoutingServiceDiscovery(List.of(provider));
+        Endpoint endpoint = endpoint();
+        endpoint.setProtocol("grpc");
+        endpoint.setGroup("group-a");
+
+        WorkerHost normalizedHost = discovery.getHosts(endpoint).getFirst();
+
+        assertEquals("10.0.0.1", normalizedHost.getIp());
+        assertEquals(8080, normalizedHost.getHttpPort());
+        assertEquals(8081, normalizedHost.getGrpcPort());
+        assertEquals(8085, normalizedHost.getHttpServerPort());
+        assertEquals("site-a", normalizedHost.getSite());
+        assertEquals("group-a", normalizedHost.getGroup());
+        assertEquals("deployment-a", normalizedHost.getDeploymentName());
+    }
+
     private Endpoint endpoint() {
         DiscoveryConfig discovery = new DiscoveryConfig();
         discovery.setType(ServiceDiscoveryType.STATIC_ENV);
@@ -38,6 +59,15 @@ class RoutingServiceDiscoveryTest {
     private static class RecordingProvider implements ServiceDiscoveryProvider {
 
         private final AtomicInteger validationCount = new AtomicInteger();
+        private final List<WorkerHost> hosts;
+
+        private RecordingProvider() {
+            this(List.of());
+        }
+
+        private RecordingProvider(List<WorkerHost> hosts) {
+            this.hosts = hosts;
+        }
 
         @Override
         public ServiceDiscoveryType getType() {
@@ -51,12 +81,12 @@ class RoutingServiceDiscoveryTest {
 
         @Override
         public List<WorkerHost> getHosts(Endpoint endpoint) {
-            return List.of();
+            return hosts;
         }
 
         @Override
         public void listen(Endpoint endpoint, ServiceHostListener listener) {
-            listener.onHostsChanged(List.of());
+            listener.onHostsChanged(hosts);
         }
 
         @Override

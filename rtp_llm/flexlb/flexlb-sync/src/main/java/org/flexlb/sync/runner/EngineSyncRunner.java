@@ -45,6 +45,8 @@ public class EngineSyncRunner implements Runnable {
 
     private final Long syncEngineStatusInterval;
 
+    private final boolean kvcmEnabled;
+
     public EngineSyncRunner(String modelName,
                             Map<String, WorkerStatus> workerStatusMap,
                             WorkerAddressService workerAddressService,
@@ -55,7 +57,8 @@ public class EngineSyncRunner implements Runnable {
                             CacheAwareService localKvCacheAwareManager,
                             long syncRequestTimeoutMs,
                             LongAdder syncCount,
-                            Long syncEngineStatusInterval) {
+                            Long syncEngineStatusInterval,
+                            boolean kvcmEnabled) {
 
         this.modelName = modelName;
         this.workerAddressService = workerAddressService;
@@ -68,6 +71,7 @@ public class EngineSyncRunner implements Runnable {
         this.syncRequestTimeoutMs = syncRequestTimeoutMs;
         this.syncCount = syncCount;
         this.syncEngineStatusInterval = syncEngineStatusInterval;
+        this.kvcmEnabled = kvcmEnabled;
     }
 
     @Override
@@ -133,15 +137,17 @@ public class EngineSyncRunner implements Runnable {
                     logger.info("Skip status check for worker: {}, previous request in progress", workerIpPort);
                 }
 
-                if (workerStatus.getCacheCheckInProgress().compareAndSet(false, true)) {
-                    logger.debug("Submitting GrpcCacheStatusCheckRunner for worker: {}, site: {}", workerIpPort, site);
-                    GrpcCacheStatusCheckRunner grpcCacheStatusCheckRunner
-                            = new GrpcCacheStatusCheckRunner(modelName, workerIpPort, site, roleType,
-                            workerStatus, engineHealthReporter, engineGrpcService, localKvCacheAwareManager,
-                            syncRequestTimeoutMs, syncCount, syncEngineStatusInterval);
-                    statusCheckExecutor.submit(grpcCacheStatusCheckRunner);
-                } else {
-                    logger.info("Skip cache check for worker: {}, previous request in progress", workerIpPort);
+                if (!kvcmEnabled) {
+                    if (workerStatus.getCacheCheckInProgress().compareAndSet(false, true)) {
+                        logger.debug("Submitting GrpcCacheStatusCheckRunner for worker: {}, site: {}", workerIpPort, site);
+                        GrpcCacheStatusCheckRunner grpcCacheStatusCheckRunner
+                                = new GrpcCacheStatusCheckRunner(modelName, workerIpPort, site, roleType,
+                                workerStatus, engineHealthReporter, engineGrpcService, localKvCacheAwareManager,
+                                syncRequestTimeoutMs, syncCount, syncEngineStatusInterval);
+                        statusCheckExecutor.submit(grpcCacheStatusCheckRunner);
+                    } else {
+                        logger.info("Skip cache check for worker: {}, previous request in progress", workerIpPort);
+                    }
                 }
             }
             logger.info("Finished submitting status check tasks for model: {}, role: {}, worker count: {}", modelName,

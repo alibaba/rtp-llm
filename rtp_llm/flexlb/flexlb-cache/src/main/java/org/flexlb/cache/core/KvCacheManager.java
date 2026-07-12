@@ -11,7 +11,9 @@ import org.springframework.stereotype.Component;
 
 import javax.annotation.PostConstruct;
 import javax.annotation.PreDestroy;
+import java.util.Collection;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -126,6 +128,24 @@ public class KvCacheManager {
         cacheMetricsReporter.reportEngineLocalMetrics(engineIPort, role, engineLocalView.size(engineIPort));
         cacheMetricsReporter.reportGlobalCacheMetrics(globalCacheIndex.totalBlocks(), globalCacheIndex.totalMappings());
         cacheMetricsReporter.reportEngineViewsMapSize(engineLocalView.getEngineViewsMapSize());
+    }
+
+    /**
+     * Remove cache metadata for engines that are no longer present in service discovery.
+     */
+    public void removeStaleEngineCaches(Collection<String> activeEngineIpPorts) {
+        if (activeEngineIpPorts == null) {
+            return;
+        }
+        Set<String> staleEngineIpPorts = new HashSet<>(engineLocalView.getAllEngineIpPorts());
+        staleEngineIpPorts.removeAll(new HashSet<>(activeEngineIpPorts));
+        for (String staleEngineIpPort : staleEngineIpPorts) {
+            long startTime = System.nanoTime() / 1000;
+            engineLocalView.removeAllCacheBlockOfEngine(staleEngineIpPort);
+            globalCacheIndex.removeAllCacheBlockOfEngine(staleEngineIpPort);
+            log.info("Removed stale engine cache: {}, cost={}us",
+                    staleEngineIpPort, System.nanoTime() / 1000 - startTime);
+        }
     }
     
     /**

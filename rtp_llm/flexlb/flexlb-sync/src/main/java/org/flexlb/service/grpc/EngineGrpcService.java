@@ -3,7 +3,7 @@ package org.flexlb.service.grpc;
 import lombok.Getter;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
-import org.flexlb.engine.grpc.EngineGrpcClient;
+import org.flexlb.engine.grpc.client.EngineGrpcClient;
 import org.flexlb.engine.grpc.EngineRpcService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;

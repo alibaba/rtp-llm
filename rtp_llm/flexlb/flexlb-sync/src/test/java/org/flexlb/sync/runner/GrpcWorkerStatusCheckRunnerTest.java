@@ -13,6 +13,7 @@ import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 
 class GrpcWorkerStatusCheckRunnerTest {
 
@@ -43,6 +44,9 @@ class GrpcWorkerStatusCheckRunnerTest {
                 .setTpSize(4)
                 .setStatusVersion(100)
                 .setAlive(true)
+                .setAvailableKvCache(800)
+                .setTotalKvCache(1000)
+                .setBlockSize(64)
                 .build();
 
         when(engineGrpcService.getWorkerStatus(anyString(), anyInt(), anyLong(), anyLong(), org.mockito.ArgumentMatchers.any(RoleType.class))).thenReturn(workerStatusPB);
@@ -56,5 +60,8 @@ class GrpcWorkerStatusCheckRunnerTest {
 
         // Assert
         verify(engineGrpcService).getWorkerStatus("127.0.0.1", 8081, -1L, 20L, RoleType.PREFILL);
+        assertEquals(64, workerStatus.getCacheStatus().getBlockSize());
+        assertEquals(800, workerStatus.getAvailableKvCacheTokens().get());
+        assertEquals(200, workerStatus.getUsedKvCacheTokens().get());
     }
 }

@@ -21,10 +21,6 @@
             <artifactId>flexlb-common</artifactId>
         </dependency>
         <dependency>
-            <groupId>org.flexlb</groupId>
-            <artifactId>flexlb-cache</artifactId>
-        </dependency>
-        <dependency>
             <groupId>io.grpc</groupId>
             <artifactId>grpc-all</artifactId>
         </dependency>
@@ -105,6 +101,8 @@
                                 <mkdir dir="${project.build.directory}/proto-java"/>
                                 <copy file="${project.basedir}/../../cpp/model_rpc/proto/model_rpc_service.proto"
                                       tofile="${project.build.directory}/proto-java/engine_rpc_service.proto"/>
+                                <copy file="${project.basedir}/src/main/proto/kvcm_meta_service.proto"
+                                      tofile="${project.build.directory}/proto-java/kvcm_meta_service.proto"/>
                                 <replaceregexp file="${project.build.directory}/proto-java/engine_rpc_service.proto"
                                                match="(syntax\s*=\s*&quot;proto3&quot;\s*;\s*\n)(?:option\s+java_package\s*=\s*&quot;[^&quot;]*&quot;\s*;\s*\n)*(import[^\n]*)"
                                                replace="\1option java_package = &quot;org.flexlb.engine.grpc&quot;;${line.separator}\2"

@@ -67,6 +67,36 @@ class ServiceRouteTest {
                 endpoint.getDiscovery().getBaseUrl());
     }
 
+    @Test
+    void loadsKvcmConfigurationWithCodeDefaults() throws Exception {
+        String json = """
+                {
+                  "service_id": "test-service",
+                  "kvcm": {
+                    "enabled": true,
+                    "address": "v-kvcm",
+                    "discovery": {"type": "dashscope"}
+                  },
+                  "role_endpoints": []
+                }
+                """;
+
+        ServiceRoute serviceRoute = objectMapper.readValue(json, ServiceRoute.class);
+
+        Assertions.assertTrue(serviceRoute.isKvcmEnabled());
+        Assertions.assertEquals("v-kvcm", serviceRoute.getKvcm().getAddress());
+        Assertions.assertEquals("grpc", serviceRoute.getKvcm().toEndpoint().getProtocol());
+        Assertions.assertEquals(
+                KvcmConfig.DEFAULT_BOOTSTRAP_PORT,
+                serviceRoute.getKvcm().getPort());
+        Assertions.assertEquals(
+                KvcmConfig.DEFAULT_REQUEST_TIMEOUT_MS,
+                serviceRoute.getKvcm().getRequestTimeoutMs());
+        Assertions.assertEquals(
+                KvcmConfig.DEFAULT_LEADER_REFRESH_INTERVAL_MS,
+                serviceRoute.getKvcm().getLeaderRefreshIntervalMs());
+    }
+
     private void assertServiceRoute(ServiceRoute serviceRoute) {
         Assertions.assertEquals(1, serviceRoute.getRoleEndpoints().size());
         Assertions.assertEquals(
@@ -78,6 +108,12 @@ class ServiceRouteTest {
         Assertions.assertEquals(
                 vipServerEndpoint("com.aicheng.whale.pre.test_pd_gang2.decode"),
                 serviceRoute.getRoleEndpoints().getFirst().getDecodeEndpoint());
+        Assertions.assertEquals(
+                "ea119_PPU_ZW810E_16TP_decode64",
+                serviceRoute.getRoleEndpoints().getFirst().getPrefillEndpoint().getGroup());
+        Assertions.assertEquals(
+                "ea119_PPU_ZW810E_16TP_decode64",
+                serviceRoute.getRoleEndpoints().getFirst().getDecodeEndpoint().getGroup());
     }
 
     private Endpoint vipServerEndpoint(String address) {
@@ -88,6 +124,7 @@ class ServiceRouteTest {
         endpoint.setProtocol("http");
         endpoint.setPath("/");
         endpoint.setDiscovery(discovery);
+        endpoint.setGroup("ea119_PPU_ZW810E_16TP_decode64");
         return endpoint;
     }
 }

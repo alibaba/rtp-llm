@@ -421,6 +421,9 @@ message WorkerStatusPB {
     bool alive = 13;
     string precision = 14;
     int64 latest_finished_version = 15;
+    int64 available_kv_cache = 16;
+    int64 total_kv_cache = 17;
+    int64 block_size = 18;
 }
 
 message EmbeddingInputPB {
