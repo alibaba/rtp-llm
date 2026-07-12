@@ -914,11 +914,6 @@ bool validCudaGraphProbeCapture(const CudaGraphProbeCapture& graph_probe) {
            && graph_probe.buffer.size(0) == static_cast<int64_t>(graph_probe.layers.size());
 }
 
-bool replayContainsTrace(const CudaGraphPreviousReplay& replay, const std::string& trace_id) {
-    return !trace_id.empty()
-           && std::find(replay.trace_ids.begin(), replay.trace_ids.end(), trace_id) != replay.trace_ids.end();
-}
-
 void dumpCudaGraphPreviousReplay(const CudaGraphPreviousReplay& replay, const DecodeProbeTriggerEvent& event) {
     const auto& config = cudaGraphRetrospectiveConfig();
     const auto  stem = config.output_dir + "/cuda_graph_probe_retrospective_rank" + config.rank + "_pid"
@@ -932,6 +927,12 @@ void dumpCudaGraphPreviousReplay(const CudaGraphPreviousReplay& replay, const De
     try {
         cuda_graph::graphDeviceSynchronize();
         auto cpu = replay.probe_buffer.detach().to(torch::kCPU).contiguous();
+        if (cpu.dim() >= 2) {
+            const auto padded_begin = std::max<int64_t>(0, std::min<int64_t>(replay.current_bs, cpu.size(1)));
+            if (padded_begin < cpu.size(1)) {
+                cpu.slice(1, padded_begin, cpu.size(1)).zero_();
+            }
+        }
 
         std::ofstream tensor_out(tensor_tmp, std::ios::binary | std::ios::trunc);
         tensor_out.write(static_cast<const char*>(cpu.data_ptr()), cpu.nbytes());
@@ -950,7 +951,7 @@ void dumpCudaGraphPreviousReplay(const CudaGraphPreviousReplay& replay, const De
             << jsonEscape(event.trace_id) << "\",\"event_reason\":\"" << jsonEscape(event.reason)
             << "\",\"event_observed_sequence_length\":" << event.observed_sequence_length
             << ",\"replay_id\":" << replay.replay_id << ",\"graph_bs\":" << replay.graph_bs
-            << ",\"current_bs\":" << replay.current_bs << ",\"dtype\":\""
+            << ",\"current_bs\":" << replay.current_bs << ",\"nbytes\":" << cpu.nbytes() << ",\"dtype\":\""
             << jsonEscape(c10::toString(cpu.scalar_type())) << "\",\"shape\":[";
         for (int64_t i = 0; i < cpu.dim(); ++i) {
             out << (i == 0 ? "" : ",") << cpu.size(i);
@@ -2070,6 +2071,12 @@ void CudaGraphRunner::cacheRetrospectiveProbeHandle(int graph_bs) noexcept {
         replay.graph_bs                    = graph_bs;
         replay.probe_buffer                = graph_probe.buffer;
         replay.layers                      = std::move(graph_probe.layers);
+        replay.trace_ids.resize(graph_bs);
+        for (auto& trace_id : replay.trace_ids) {
+            trace_id.reserve(sizeof(detail::DecodeProbeTriggerSharedRecord{}.trace_id) - 1);
+        }
+        replay.input_lengths.resize(graph_bs, -1);
+        replay.sequence_lengths.resize(graph_bs, -1);
     } catch (const std::exception& e) {
         RTP_LLM_LOG_WARNING("Failed to cache retrospective CUDA graph probe buffer: %s", e.what());
     } catch (...) {
@@ -2082,6 +2089,7 @@ void CudaGraphRunner::dumpRetrospectiveProbeBeforeReplay() noexcept {
         return;
     }
     DecodeProbeTriggerEvent event;
+    bool                    replay_selected = false;
     try {
         if (!DecodeProbeTrigger::peek(event)) {
             return;
@@ -2098,32 +2106,57 @@ void CudaGraphRunner::dumpRetrospectiveProbeBeforeReplay() noexcept {
             || (current.required_rank_mask & rank_mask) == 0 || (current.ack_rank_mask & rank_mask) != 0) {
             return;
         }
-        const auto replay = std::find_if(retrospective_replays_.begin(),
-                                         retrospective_replays_.end(),
-                                         [&current](const auto& item) {
-                                             return replayContainsTrace(item.second, current.trace_id);
-                                         });
-        if (replay == retrospective_replays_.end()) {
+        CudaGraphPreviousReplay* highest_replay       = nullptr;
+        CudaGraphPreviousReplay* highest_exact_replay = nullptr;
+        bool matching_trace_has_sequence_length       = false;
+        const bool event_has_sequence_length          = current.observed_sequence_length >= 0;
+        for (auto& item : retrospective_replays_) {
+            auto&      replay = item.second;
+            const auto active_lanes = std::max<int64_t>(
+                0, std::min<int64_t>(replay.current_bs, static_cast<int64_t>(replay.trace_ids.size())));
+            bool trace_matches        = false;
+            bool exact_length_matches = false;
+            for (int64_t lane = 0; lane < active_lanes; ++lane) {
+                if (replay.trace_ids[lane] != current.trace_id) {
+                    continue;
+                }
+                trace_matches = true;
+                if (lane < static_cast<int64_t>(replay.sequence_lengths.size())
+                    && replay.sequence_lengths[lane] >= 0) {
+                    matching_trace_has_sequence_length = true;
+                    if (event_has_sequence_length
+                        && replay.sequence_lengths[lane] == current.observed_sequence_length - 1) {
+                        exact_length_matches = true;
+                    }
+                }
+            }
+            if (!trace_matches) {
+                continue;
+            }
+            if (highest_replay == nullptr || replay.replay_id > highest_replay->replay_id) {
+                highest_replay = &replay;
+            }
+            if (exact_length_matches
+                && (highest_exact_replay == nullptr || replay.replay_id > highest_exact_replay->replay_id)) {
+                highest_exact_replay = &replay;
+            }
+        }
+        auto* replay = event_has_sequence_length && matching_trace_has_sequence_length ? highest_exact_replay :
+                                                                                         highest_replay;
+        if (replay == nullptr) {
             return;
         }
-        try {
-            dumpCudaGraphPreviousReplay(replay->second, current);
-            DecodeProbeTrigger::acknowledge(current.generation);
-        } catch (const std::exception& e) {
-            RTP_LLM_LOG_WARNING("Failed to dump retrospective CUDA graph probe: %s", e.what());
-            DecodeProbeTrigger::acknowledge(current.generation, true);
-        } catch (...) {
-            RTP_LLM_LOG_WARNING("Failed to dump retrospective CUDA graph probe");
-            DecodeProbeTrigger::acknowledge(current.generation, true);
-        }
+        replay_selected = true;
+        dumpCudaGraphPreviousReplay(*replay, current);
+        DecodeProbeTrigger::acknowledge(current.generation);
     } catch (const std::exception& e) {
         RTP_LLM_LOG_WARNING("Failed to process retrospective CUDA graph trigger: %s", e.what());
-        if (event.generation != 0) {
+        if (replay_selected && event.generation != 0) {
             DecodeProbeTrigger::acknowledge(event.generation, true);
         }
     } catch (...) {
         RTP_LLM_LOG_WARNING("Failed to process retrospective CUDA graph trigger");
-        if (event.generation != 0) {
+        if (replay_selected && event.generation != 0) {
             DecodeProbeTrigger::acknowledge(event.generation, true);
         }
     }
@@ -2142,13 +2175,28 @@ void CudaGraphRunner::retainRetrospectiveReplay(const PyModelInputs& inputs, con
         auto& record      = replay->second;
         record.replay_id  = retrospective_replay_id_++;
         record.graph_bs   = state.current_real_graph_bs;
-        record.current_bs = state.current_batch_size;
-        record.trace_ids.assign(inputs.trace_ids.begin(),
-                                inputs.trace_ids.begin()
-                                    + std::min<int64_t>(inputs.trace_ids.size(), state.current_batch_size));
-        record.input_lengths = hostTensorPrefix(inputs.attention_inputs.input_lengths, state.current_batch_size);
-        record.sequence_lengths =
-            hostTensorPrefix(inputs.attention_inputs.sequence_lengths, state.current_batch_size);
+        record.current_bs = std::max<int64_t>(0, std::min<int64_t>(state.current_batch_size, record.graph_bs));
+        constexpr size_t kTraceIdMaxBytes = sizeof(detail::DecodeProbeTriggerSharedRecord{}.trace_id) - 1;
+        for (int64_t lane = 0; lane < record.graph_bs; ++lane) {
+            if (lane >= record.current_bs) {
+                record.trace_ids[lane].clear();
+                record.input_lengths[lane]    = -1;
+                record.sequence_lengths[lane] = -1;
+                continue;
+            }
+            if (lane < static_cast<int64_t>(inputs.trace_ids.size())) {
+                const auto& trace_id = inputs.trace_ids[lane];
+                record.trace_ids[lane].assign(trace_id.data(), std::min(trace_id.size(), kTraceIdMaxBytes));
+            } else {
+                record.trace_ids[lane].clear();
+            }
+            if (!hostScalarAt(inputs.attention_inputs.input_lengths, lane, record.input_lengths[lane])) {
+                record.input_lengths[lane] = -1;
+            }
+            if (!hostScalarAt(inputs.attention_inputs.sequence_lengths, lane, record.sequence_lengths[lane])) {
+                record.sequence_lengths[lane] = -1;
+            }
+        }
     } catch (const std::exception& e) {
         RTP_LLM_LOG_WARNING("Failed to retain retrospective CUDA graph replay metadata: %s", e.what());
     } catch (...) {

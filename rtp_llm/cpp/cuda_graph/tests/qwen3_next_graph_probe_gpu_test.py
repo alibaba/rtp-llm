@@ -529,15 +529,29 @@ class TestQwen3NextGraphProbeGpu(unittest.TestCase):
         self.assertFalse(torch.equal(expected_record_0, expected_record_1))
 
     def _assert_retrospective_previous_bucket_dump(self):
+        retained_sequence_length_a = 41
+        retained_sequence_length_b = 73
         inputs_a = self._build_inputs(
             actual_bs=7,
             trace_ids=["bad-trace"] + [f"replay-a-{lane}" for lane in range(1, 7)],
         )
+        inputs_a.attention_inputs.sequence_lengths = torch.full(
+            (7,), retained_sequence_length_a, dtype=torch.int32
+        ).pin_memory()
         inputs_b = self._build_inputs(
             actual_bs=self.actual_bs,
-            trace_ids=[f"replay-b-{lane}" for lane in range(self.actual_bs)],
+            trace_ids=["bad-trace"]
+            + [f"replay-b-{lane}" for lane in range(1, self.actual_bs)],
         )
+        inputs_b.attention_inputs.sequence_lengths = torch.full(
+            (self.actual_bs,), retained_sequence_length_b, dtype=torch.int32
+        ).pin_memory()
         inputs_b.input_ids.add_(1000)
+        inputs_c = self._build_inputs(
+            actual_bs=self.actual_bs,
+            trace_ids=[f"replay-c-{lane}" for lane in range(self.actual_bs)],
+        )
+        inputs_c.input_ids.add_(2000)
         torch.cuda.synchronize()
         allocated_before_a = torch.cuda.memory_allocated()
         getter_calls_after_capture = self.model.buffer_getter_calls
@@ -559,17 +573,27 @@ class TestQwen3NextGraphProbeGpu(unittest.TestCase):
         self.assertFalse(list(output_dir.glob("*.jsonl")))
         self.assertFalse(list(output_dir.glob("*.complete")))
 
-        published = self.runner.retrospective_probe_event(
-            "bad-trace", "test-retrospective", 77
-        )
-        self.assertTrue(published["published"])
-        generation = published["generation"]
-
         getter_calls_before_b = self.model.buffer_getter_calls
         self.assertTrue(self.runner.canRun(inputs_b))
         self.runner.forward(inputs_b)
         torch.cuda.synchronize()
         self.assertEqual(getter_calls_before_b, self.model.buffer_getter_calls)
+        self.assertEqual(24, self.runner.getCurrentRealGraphSize())
+        expected_b = self.model.get_cuda_graph_probe_buffer(24)[0].cpu().clone()
+
+        published = self.runner.retrospective_probe_event(
+            "bad-trace",
+            "test-retrospective",
+            retained_sequence_length_b + 1,
+        )
+        self.assertTrue(published["published"])
+        generation = published["generation"]
+
+        getter_calls_before_c = self.model.buffer_getter_calls
+        self.assertTrue(self.runner.canRun(inputs_c))
+        self.runner.forward(inputs_c)
+        torch.cuda.synchronize()
+        self.assertEqual(getter_calls_before_c, self.model.buffer_getter_calls)
         self.assertEqual(24, self.runner.getCurrentRealGraphSize())
 
         tensor_file = next(output_dir.glob("*.bin"))
@@ -583,26 +607,43 @@ class TestQwen3NextGraphProbeGpu(unittest.TestCase):
         dumped = torch.from_file(
             str(tensor_file),
             shared=False,
-            size=expected_a.numel(),
+            size=expected_b.numel(),
             dtype=torch.float32,
-        ).reshape(expected_a.shape)
-        torch.testing.assert_close(dumped, expected_a)
-        replay_b = self.model.get_cuda_graph_probe_buffer(24)[0].cpu()
-        self.assertFalse(torch.equal(dumped[:, :7], replay_b[:, :7]))
+        ).reshape(expected_b.shape)
+        torch.testing.assert_close(
+            dumped[:, : self.actual_bs], expected_b[:, : self.actual_bs]
+        )
+        self.assertTrue(
+            torch.equal(
+                dumped[:, self.actual_bs :],
+                torch.zeros_like(dumped[:, self.actual_bs :]),
+            )
+        )
+        self.assertFalse(torch.equal(dumped[:, :7], expected_a[:, :7]))
 
         metadata = json.loads(metadata_file.read_text(encoding="utf-8"))
         self.assertEqual(generation, metadata["event_generation"])
         self.assertEqual("bad-trace", metadata["event_trace_id"])
         self.assertEqual("test-retrospective", metadata["event_reason"])
-        self.assertEqual(77, metadata["event_observed_sequence_length"])
-        self.assertEqual(0, metadata["replay_id"])
-        self.assertEqual(8, metadata["graph_bs"])
-        self.assertEqual(7, metadata["current_bs"])
+        self.assertEqual(
+            retained_sequence_length_b + 1,
+            metadata["event_observed_sequence_length"],
+        )
+        self.assertEqual(1, metadata["replay_id"])
+        self.assertEqual(24, metadata["graph_bs"])
+        self.assertEqual(self.actual_bs, metadata["current_bs"])
+        self.assertEqual(
+            expected_b.numel() * expected_b.element_size(), metadata["nbytes"]
+        )
         self.assertEqual([2, 0], metadata["layers"])
         self.assertEqual("bad-trace", metadata["lanes"][0]["trace_id"])
         self.assertEqual(0, metadata["lanes"][0]["lane"])
         self.assertEqual(self.num_tokens_per_bs, metadata["lanes"][0]["input_length"])
-        self.assertEqual(7, len(metadata["lanes"]))
+        self.assertEqual(
+            retained_sequence_length_b,
+            metadata["lanes"][0]["sequence_length"],
+        )
+        self.assertEqual(self.actual_bs, len(metadata["lanes"]))
 
         completion = json.loads(completion_file.read_text(encoding="utf-8"))
         self.assertEqual(generation, completion["event_generation"])
@@ -612,6 +653,20 @@ class TestQwen3NextGraphProbeGpu(unittest.TestCase):
         self.assertEqual(generation, observed["generation"])
         self.assertEqual(1, observed["ack_rank_mask"] & 1)
         self.assertEqual(0, observed["failure_rank_mask"] & 1)
+
+        unmatched = self.runner.retrospective_probe_event(
+            "unmatched-trace", "test-unmatched", retained_sequence_length_b + 2
+        )
+        self.assertTrue(unmatched["published"])
+        unmatched_generation = unmatched["generation"]
+        self.assertTrue(self.runner.canRun(inputs_c))
+        self.runner.forward(inputs_c)
+        torch.cuda.synchronize()
+        observed = self.runner.retrospective_probe_event()
+        self.assertEqual(unmatched_generation, observed["generation"])
+        self.assertEqual(0, observed["ack_rank_mask"] & 1)
+        self.assertEqual(0, observed["failure_rank_mask"] & 1)
+        self.assertFalse(list(output_dir.glob(f"*gen{unmatched_generation}.*")))
 
 
 if __name__ == "__main__":
