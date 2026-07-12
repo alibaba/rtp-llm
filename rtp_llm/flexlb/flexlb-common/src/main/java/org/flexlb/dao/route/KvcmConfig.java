@@ -23,6 +23,9 @@ public class KvcmConfig {
     @JsonProperty("address")
     private String address;
 
+    @JsonProperty("namespace")
+    private String namespace;
+
     /**
      * MetaService gRPC port used only to bootstrap leader discovery through GetClusterInfo.
      */

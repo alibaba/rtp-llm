@@ -52,6 +52,7 @@ public class KvcmGrpcClient {
     private final ServiceRoute serviceRoute;
     private final KvcmConfig config;
     private final Endpoint kvcmEndpoint;
+    private final String configuredNamespace;
     private final RoutingServiceDiscovery serviceDiscovery;
     private final ScheduledExecutorService refreshExecutor;
     private final GrpcChannelPool<GrpcTarget> channelPool;
@@ -70,6 +71,7 @@ public class KvcmGrpcClient {
         this.config = serviceRoute != null ? serviceRoute.getKvcm() : null;
         this.enabled = config != null && config.isEnabled();
         this.kvcmEndpoint = enabled ? config.toEndpoint() : null;
+        this.configuredNamespace = enabled ? StringUtils.trimToNull(config.getNamespace()) : null;
 
         if (!enabled) {
             this.refreshExecutor = null;
@@ -86,8 +88,9 @@ public class KvcmGrpcClient {
                 0,
                 config.getLeaderRefreshIntervalMs(),
                 TimeUnit.MILLISECONDS);
-        log.info("Started KVCM client, address={}, bootstrapPort={}, leaderRefreshIntervalMs={}",
-                config.getAddress(), config.getPort(), config.getLeaderRefreshIntervalMs());
+        log.info("Started KVCM client, address={}, bootstrapPort={}, leaderRefreshIntervalMs={}, namespaceSource={}",
+                config.getAddress(), config.getPort(), config.getLeaderRefreshIntervalMs(),
+                configuredNamespace == null ? "worker-discovery" : "configuration");
     }
 
     public Map<String, Integer> findMatchingEngines(
@@ -103,9 +106,12 @@ public class KvcmGrpcClient {
             return Collections.emptyMap();
         }
 
-        ConcurrentMap<RoleType, String> namespaceByRole =
-                namespaceByGroupAndRole.get(StringUtils.defaultString(group));
-        String namespace = namespaceByRole == null ? null : namespaceByRole.get(roleType);
+        String namespace = configuredNamespace;
+        if (namespace == null) {
+            ConcurrentMap<RoleType, String> namespaceByRole =
+                    namespaceByGroupAndRole.get(StringUtils.defaultString(group));
+            namespace = namespaceByRole == null ? null : namespaceByRole.get(roleType);
+        }
         if (StringUtils.isBlank(namespace)) {
             log.warn("Skipping KVCM cache query because namespace is unavailable, role={}, group={}",
                     roleType, group);
@@ -153,10 +159,12 @@ public class KvcmGrpcClient {
         } catch (Exception e) {
             log.warn("Failed to refresh KVCM leader; keeping the last known leader", e);
         }
-        try {
-            refreshNamespaceMap();
-        } catch (Exception e) {
-            log.warn("Failed to refresh KVCM namespace map; keeping the last known values", e);
+        if (configuredNamespace == null) {
+            try {
+                refreshNamespaceMap();
+            } catch (Exception e) {
+                log.warn("Failed to refresh KVCM namespace map; keeping the last known values", e);
+            }
         }
     }
 

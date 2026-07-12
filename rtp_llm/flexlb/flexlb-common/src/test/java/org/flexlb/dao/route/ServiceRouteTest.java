@@ -75,6 +75,7 @@ class ServiceRouteTest {
                   "kvcm": {
                     "enabled": true,
                     "address": "v-kvcm",
+                    "namespace": "vllm-test-0",
                     "discovery": {"type": "dashscope"}
                   },
                   "role_endpoints": []
@@ -85,6 +86,7 @@ class ServiceRouteTest {
 
         Assertions.assertTrue(serviceRoute.isKvcmEnabled());
         Assertions.assertEquals("v-kvcm", serviceRoute.getKvcm().getAddress());
+        Assertions.assertEquals("vllm-test-0", serviceRoute.getKvcm().getNamespace());
         Assertions.assertEquals("grpc", serviceRoute.getKvcm().toEndpoint().getProtocol());
         Assertions.assertEquals(
                 KvcmConfig.DEFAULT_BOOTSTRAP_PORT,

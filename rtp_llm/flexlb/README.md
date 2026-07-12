@@ -164,6 +164,25 @@ The optional KVCM `port` defaults to `6381` and is used with discovered seed IPs
 `GetClusterInfo`. Subsequent RPCs use the leader host and `meta_rpc_port` returned in
 `leader_endpoint`.
 
+`kvcm.namespace` can explicitly override the namespace for every role and group:
+
+```json
+{
+  "kvcm": {
+    "enabled": true,
+    "address": "v-kvcm",
+    "namespace": "vllm-test-0",
+    "discovery": {
+      "type": "dashscope"
+    }
+  }
+}
+```
+
+When `namespace` is non-blank, it takes priority over deployment names discovered from
+worker endpoints. When omitted, FlexLB keeps resolving namespaces by role and group from
+worker discovery metadata.
+
 When KVCM is enabled, FlexLB stops polling `GetCacheStatus`. Engines must return
 `available_kv_cache`, `total_kv_cache`, and `block_size` from `GetWorkerStatus`.
 

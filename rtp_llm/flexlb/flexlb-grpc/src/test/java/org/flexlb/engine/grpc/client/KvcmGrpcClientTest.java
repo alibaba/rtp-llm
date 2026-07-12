@@ -74,30 +74,9 @@ class KvcmGrpcClientTest {
 
     @Test
     void usesBootstrapPortThenLeaderRpcPortAndQueriesFirstDeploymentNamespace() throws Exception {
-        RoutingServiceDiscovery serviceDiscovery = Mockito.mock(RoutingServiceDiscovery.class);
-        when(serviceDiscovery.getHosts(any(Endpoint.class))).thenAnswer(invocation -> {
-            Endpoint endpoint = invocation.getArgument(0);
-            if ("v-kvcm".equals(endpoint.getAddress())) {
-                // The discovery port is not the MetaService gRPC port.
-                return List.of(WorkerHost.of("127.0.0.1", 8080));
-            }
-            if ("v-workers".equals(endpoint.getAddress())) {
-                return List.of(
-                        WorkerHost.of("10.0.0.1", 8601, "", "deployment-first"),
-                        WorkerHost.of("10.0.0.2", 8601, "", "deployment-second"));
-            }
-            return List.of();
-        });
-
-        GrpcChannelFactory channelFactory = Mockito.mock(GrpcChannelFactory.class);
-        when(channelFactory.create(any(GrpcTarget.class))).thenAnswer(invocation -> {
-            GrpcTarget target = invocation.getArgument(0);
-            return ManagedChannelBuilder.forAddress(target.host(), target.port())
-                    .usePlaintext()
-                    .build();
-        });
+        RoutingServiceDiscovery serviceDiscovery = serviceDiscovery();
         client = new KvcmGrpcClient(
-                modelMetaConfig(seedServer.getPort()), serviceDiscovery, channelFactory);
+                modelMetaConfig(seedServer.getPort()), serviceDiscovery, channelFactory());
 
         Map<String, Integer> matches = waitForMatches(RoleType.PDFUSION);
         Map<String, Integer> decodeMatches = waitForMatches(RoleType.DECODE);
@@ -114,11 +93,31 @@ class KvcmGrpcClientTest {
                 List.of(11L, 22L, 33L), RoleType.PDFUSION, "").isEmpty());
     }
 
+    @Test
+    void configuredNamespaceTakesPriorityAndSkipsWorkerMetadataDiscovery() throws Exception {
+        RoutingServiceDiscovery serviceDiscovery = serviceDiscovery();
+        client = new KvcmGrpcClient(
+                modelMetaConfig(seedServer.getPort(), "vllm-test-0"),
+                serviceDiscovery,
+                channelFactory());
+
+        Map<String, Integer> matches = waitForMatches(RoleType.PDFUSION, null);
+
+        assertEquals(2, matches.get("10.0.0.1:8601"));
+        assertEquals("vllm-test-0", lastCacheRequest.get().getInstanceId());
+        Mockito.verify(serviceDiscovery, Mockito.never()).getHosts(Mockito.argThat(
+                endpoint -> "v-workers".equals(endpoint.getAddress())));
+    }
+
     private Map<String, Integer> waitForMatches(RoleType roleType) throws InterruptedException {
+        return waitForMatches(roleType, "default");
+    }
+
+    private Map<String, Integer> waitForMatches(RoleType roleType, String group) throws InterruptedException {
         long deadline = System.currentTimeMillis() + 3000L;
         while (System.currentTimeMillis() < deadline) {
             Map<String, Integer> result = client.findMatchingEngines(
-                    List.of(11L, 22L, 33L), roleType, "default");
+                    List.of(11L, 22L, 33L), roleType, group);
             if (!result.isEmpty()) {
                 return result;
             }
@@ -129,6 +128,10 @@ class KvcmGrpcClientTest {
     }
 
     private ModelMetaConfig modelMetaConfig(int bootstrapPort) {
+        return modelMetaConfig(bootstrapPort, null);
+    }
+
+    private ModelMetaConfig modelMetaConfig(int bootstrapPort, String namespace) {
         DiscoveryConfig discovery = new DiscoveryConfig();
         discovery.setType(ServiceDiscoveryType.DASHSCOPE);
 
@@ -136,6 +139,7 @@ class KvcmGrpcClientTest {
         kvcm.setEnabled(true);
         kvcm.setAddress("v-kvcm");
         kvcm.setPort(bootstrapPort);
+        kvcm.setNamespace(namespace);
         kvcm.setDiscovery(discovery);
         kvcm.setRequestTimeoutMs(1000L);
         kvcm.setLeaderRefreshIntervalMs(60000L);
@@ -158,6 +162,35 @@ class KvcmGrpcClientTest {
         ModelMetaConfig modelMetaConfig = new ModelMetaConfig();
         modelMetaConfig.putServiceRoute(route.getServiceId(), route);
         return modelMetaConfig;
+    }
+
+    private RoutingServiceDiscovery serviceDiscovery() {
+        RoutingServiceDiscovery serviceDiscovery = Mockito.mock(RoutingServiceDiscovery.class);
+        when(serviceDiscovery.getHosts(any(Endpoint.class))).thenAnswer(invocation -> {
+            Endpoint endpoint = invocation.getArgument(0);
+            if ("v-kvcm".equals(endpoint.getAddress())) {
+                // The discovery port is not the MetaService gRPC port.
+                return List.of(WorkerHost.of("127.0.0.1", 8080));
+            }
+            if ("v-workers".equals(endpoint.getAddress())) {
+                return List.of(
+                        WorkerHost.of("10.0.0.1", 8601, "", "deployment-first"),
+                        WorkerHost.of("10.0.0.2", 8601, "", "deployment-second"));
+            }
+            return List.of();
+        });
+        return serviceDiscovery;
+    }
+
+    private GrpcChannelFactory channelFactory() {
+        GrpcChannelFactory channelFactory = Mockito.mock(GrpcChannelFactory.class);
+        when(channelFactory.create(any(GrpcTarget.class))).thenAnswer(invocation -> {
+            GrpcTarget target = invocation.getArgument(0);
+            return ManagedChannelBuilder.forAddress(target.host(), target.port())
+                    .usePlaintext()
+                    .build();
+        });
+        return channelFactory;
     }
 
     private static CommonResponseHeader okHeader() {
