@@ -220,3 +220,25 @@ py_test(
     tags = ["MI308X"],
     exec_properties = {"gpu": "MI308X-ROCM7"},
 )
+
+py_test(
+    name = "qwen3_next_graph_probe_eager_step_gpu_test",
+    srcs = ["qwen3_next_graph_probe_gpu_test.py"],
+    main = "qwen3_next_graph_probe_gpu_test.py",
+    data = [
+        ":test_cuda_graph_runner",
+        "//:th_transformer",
+    ],
+    deps = [
+        "//rtp_llm/test/model_test/test_util:test_util",
+    ],
+    env = {
+        "RTPLLM_CUDA_GRAPH_PROBE_RING_DEBUG": "0",
+        "RTPLLM_RETROSPECTIVE_EAGER_STEP_DEBUG": "1",
+        "RTPLLM_RETROSPECTIVE_PROBE_DEBUG": "1",
+        "TEST_QWEN3_NEXT_GRAPH_PROBE_EAGER_STEP": "1",
+        "TEST_USING_DEVICE": "ROCM",
+    },
+    tags = ["MI308X"],
+    exec_properties = {"gpu": "MI308X-ROCM7"},
+)

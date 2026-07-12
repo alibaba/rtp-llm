@@ -726,6 +726,7 @@ std::mutex                                              g_cuda_graph_probe_ring_
 struct CudaGraphRetrospectiveConfig {
     bool        enabled{false};
     bool        dual_graph{false};
+    bool        eager_step{false};
     std::string rank;
     std::string output_dir;
 };
@@ -740,6 +741,7 @@ const CudaGraphRetrospectiveConfig& cudaGraphRetrospectiveConfig() noexcept {
                 return c;
             }
             c.dual_graph = envFlag("RTPLLM_RETROSPECTIVE_DUAL_GRAPH_DEBUG", false);
+            c.eager_step = envFlag("RTPLLM_RETROSPECTIVE_EAGER_STEP_DEBUG", false);
             c.rank = filenameComponent(envString("WORLD_RANK", "unknown"));
             c.output_dir =
                 envString("RTPLLM_RETROSPECTIVE_PROBE_DIR", "/tmp/rtpllm_retrospective_probe");
@@ -1632,6 +1634,8 @@ PyModelOutputs CudaGraphRunner::forward(const PyModelInputs& inputs, CudaGraphSt
         dumpRetrospectiveProbeBeforeReplay();
         DecodeProbeTriggerEvent retrospective_event;
         const bool replay_debug = shouldReplayRetrospectiveDebug(inputs, state, retrospective_event);
+        const bool run_eager_step =
+            !replay_debug && shouldRunRetrospectiveEagerStep(inputs, state, retrospective_event);
         const auto checksum_record = nextDecodeChecksumRecord(inputs, state.current_batch_size);
         writeDecodeChecksumRecord(
             checksum_record, "before_replay", inputs, graph_inputs, torch::Tensor(), {}, state, full_kv_cache_group_id_);
@@ -1639,6 +1643,8 @@ PyModelOutputs CudaGraphRunner::forward(const PyModelInputs& inputs, CudaGraphSt
             RTP_LLM_PROFILE_SCOPE("cuda_graph.forward(replayDecode)");
             if (replay_debug) {
                 retrospective_debug_graph_instances_[state.current_real_graph_bs].graph_.replay();
+            } else if (run_eager_step) {
+                runRetrospectiveEagerStep(state.current_real_graph_bs, retrospective_event);
             } else {
                 replayDecode(state.current_real_graph_bs);
             }
@@ -1651,7 +1657,7 @@ PyModelOutputs CudaGraphRunner::forward(const PyModelInputs& inputs, CudaGraphSt
             graph_probe = getCudaGraphProbeBuffer(py_instance_, state.current_real_graph_bs);
         }
         captureCudaGraphProbeRing(this, py_instance_, graph_probe, inputs, state);
-        if (replay_debug) {
+        if (replay_debug || run_eager_step) {
             dumpRetrospectiveDebugReplay(inputs, state, retrospective_event);
         } else {
             retainRetrospectiveReplay(inputs, state);
@@ -1972,9 +1978,9 @@ void CudaGraphRunner::initCapture() {
         capture_mem_hold_ = CaptureMemoryHold(output, inputs, is_prefill_cuda_graph_mode_);
         initKernelInternalMemory();
 
-        if (!is_prefill_cuda_graph_mode_ && dualGraphDebugEnabled()) {
+        if (!is_prefill_cuda_graph_mode_ && retrospectiveProbeToggleEnabled()) {
             RTP_LLM_CHECK_WITH_INFO(setPythonGraphProbeEnabled(false),
-                                    "dual graph debug requires an enabled Qwen CUDA graph probe");
+                                    "post-trigger graph probe requires an enabled Qwen CUDA graph probe");
         }
 
         // get real output data type (params already prepared in attn impl __init__/create_params)
@@ -2082,8 +2088,17 @@ bool CudaGraphRunner::dualGraphDebugEnabled() const noexcept {
            && cudaGraphRetrospectiveConfig().dual_graph;
 }
 
+bool CudaGraphRunner::eagerStepDebugEnabled() const noexcept {
+    return !is_prefill_cuda_graph_mode_ && cudaGraphRetrospectiveConfig().enabled
+           && cudaGraphRetrospectiveConfig().eager_step && !cudaGraphRetrospectiveConfig().dual_graph;
+}
+
+bool CudaGraphRunner::retrospectiveProbeToggleEnabled() const noexcept {
+    return dualGraphDebugEnabled() || eagerStepDebugEnabled();
+}
+
 bool CudaGraphRunner::setPythonGraphProbeEnabled(bool enabled) noexcept {
-    if (!dualGraphDebugEnabled()) {
+    if (!retrospectiveProbeToggleEnabled()) {
         return false;
     }
     try {
@@ -2102,11 +2117,10 @@ bool CudaGraphRunner::setPythonGraphProbeEnabled(bool enabled) noexcept {
     return false;
 }
 
-bool CudaGraphRunner::shouldReplayRetrospectiveDebug(const PyModelInputs&  inputs,
-                                                     const CudaGraphState& state,
-                                                     DecodeProbeTriggerEvent& event) noexcept {
-    if (!dualGraphDebugEnabled() || retrospective_debug_graph_instances_.count(state.current_real_graph_bs) == 0
-        || !DecodeProbeTrigger::peek(event)) {
+bool CudaGraphRunner::retrospectiveEventMatches(const PyModelInputs&  inputs,
+                                                const CudaGraphState& state,
+                                                DecodeProbeTriggerEvent& event) noexcept {
+    if (!DecodeProbeTrigger::peek(event)) {
         return false;
     }
     const auto rank      = envInt64("WORLD_RANK", 0);
@@ -2117,6 +2131,44 @@ bool CudaGraphRunner::shouldReplayRetrospectiveDebug(const PyModelInputs&  input
     const auto active_lanes = std::min<std::size_t>(state.current_batch_size, inputs.trace_ids.size());
     return std::find(inputs.trace_ids.begin(), inputs.trace_ids.begin() + active_lanes, event.trace_id)
            != inputs.trace_ids.begin() + active_lanes;
+}
+
+bool CudaGraphRunner::shouldReplayRetrospectiveDebug(const PyModelInputs&  inputs,
+                                                     const CudaGraphState& state,
+                                                     DecodeProbeTriggerEvent& event) noexcept {
+    if (!dualGraphDebugEnabled() || retrospective_debug_graph_instances_.count(state.current_real_graph_bs) == 0
+        || !retrospectiveEventMatches(inputs, state, event)) {
+        return false;
+    }
+    return true;
+}
+
+bool CudaGraphRunner::shouldRunRetrospectiveEagerStep(const PyModelInputs&  inputs,
+                                                      const CudaGraphState& state,
+                                                      DecodeProbeTriggerEvent& event) noexcept {
+    return eagerStepDebugEnabled() && retrospectiveEventMatches(inputs, state, event);
+}
+
+void CudaGraphRunner::runRetrospectiveEagerStep(int graph_bs, const DecodeProbeTriggerEvent& event) {
+    if (!setPythonGraphProbeEnabled(true)) {
+        DecodeProbeTrigger::acknowledge(event.generation, true);
+        throw std::runtime_error("Qwen CUDA graph probe could not be enabled for eager step");
+    }
+    try {
+        auto& graph_instance = graph_instances_.at(graph_bs);
+        auto  py_outputs_obj = py_forward_method_(graph_instance.mem_hold_.py_model_inputs_,
+                                                 graph_instance.mem_hold_.attn_pyobj_);
+        auto  eager_outputs  = py_outputs_obj.cast<PyModelOutputs>();
+        graph_instance.mem_hold_.decoder_layer_hidden_states_.copy_(eager_outputs.hidden_states);
+    } catch (...) {
+        setPythonGraphProbeEnabled(false);
+        DecodeProbeTrigger::acknowledge(event.generation, true);
+        throw;
+    }
+    if (!setPythonGraphProbeEnabled(false)) {
+        DecodeProbeTrigger::acknowledge(event.generation, true);
+        throw std::runtime_error("Qwen CUDA graph probe could not be disabled after eager step");
+    }
 }
 
 void CudaGraphRunner::dumpRetrospectiveDebugReplay(const PyModelInputs&             inputs,
@@ -2155,7 +2207,7 @@ void CudaGraphRunner::dumpRetrospectiveDebugReplay(const PyModelInputs&         
 }
 
 void CudaGraphRunner::cacheRetrospectiveProbeHandle(int graph_bs) noexcept {
-    if (!cudaGraphRetrospectiveConfig().enabled || dualGraphDebugEnabled()) {
+    if (!cudaGraphRetrospectiveConfig().enabled || dualGraphDebugEnabled() || eagerStepDebugEnabled()) {
         return;
     }
     try {
@@ -2182,7 +2234,7 @@ void CudaGraphRunner::cacheRetrospectiveProbeHandle(int graph_bs) noexcept {
 }
 
 void CudaGraphRunner::dumpRetrospectiveProbeBeforeReplay() noexcept {
-    if (!cudaGraphRetrospectiveConfig().enabled || dualGraphDebugEnabled()) {
+    if (!cudaGraphRetrospectiveConfig().enabled || dualGraphDebugEnabled() || eagerStepDebugEnabled()) {
         return;
     }
     DecodeProbeTriggerEvent event;

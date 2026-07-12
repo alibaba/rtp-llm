@@ -120,11 +120,15 @@ class TestQwen3NextGraphProbeGpu(unittest.TestCase):
         self.dual_graph = os.environ.get(
             "TEST_QWEN3_NEXT_GRAPH_PROBE_DUAL_GRAPH", "0"
         ) == "1"
+        self.eager_step = os.environ.get(
+            "TEST_QWEN3_NEXT_GRAPH_PROBE_EAGER_STEP", "0"
+        ) == "1"
         if (
             self.ring_only
             or self.ring_budget_reject
             or self.retrospective
             or self.dual_graph
+            or self.eager_step
         ):
             os.environ["RTPLLM_DECODE_CHECKSUM_DEBUG"] = "0"
         os.environ["RTPLLM_QWEN3_NEXT_GRAPH_PROBE"] = (
@@ -132,7 +136,9 @@ class TestQwen3NextGraphProbeGpu(unittest.TestCase):
         )
         os.environ["RTPLLM_QWEN3_NEXT_GRAPH_PROBE_LAYERS"] = "99,77"
         os.environ["RTPLLM_CUDA_GRAPH_PROBE_RING_DEBUG"] = (
-            "0" if self.retrospective or self.dual_graph else "1"
+            "0"
+            if self.retrospective or self.dual_graph or self.eager_step
+            else "1"
         )
         os.environ["RTPLLM_CUDA_GRAPH_PROBE_RING_DIR"] = self.temp_dir.name
         os.environ["RTPLLM_CUDA_GRAPH_PROBE_RING_TRIGGER_FILE"] = (
@@ -162,7 +168,7 @@ class TestQwen3NextGraphProbeGpu(unittest.TestCase):
             self.tokens_per_block,
             self.tokens_per_block,
             [8, self.graph_bs]
-            if self.retrospective or self.dual_graph
+            if self.retrospective or self.dual_graph or self.eager_step
             else [self.graph_bs],
             self.num_tokens_per_bs,
             True,
@@ -250,6 +256,9 @@ class TestQwen3NextGraphProbeGpu(unittest.TestCase):
         return inputs
 
     def test_capture_replay_updates_persistent_lane_buffer_and_json(self):
+        if self.eager_step:
+            self._assert_eager_step_post_trigger_dump()
+            return
         if self.dual_graph:
             self._assert_dual_graph_post_trigger_dump()
             return
@@ -781,6 +790,77 @@ class TestQwen3NextGraphProbeGpu(unittest.TestCase):
         self.assertFalse(
             list(output_dir.glob(f"*gen{unmatched_generation}.complete"))
         )
+
+    def _assert_eager_step_post_trigger_dump(self):
+        self.assertFalse(self.model.get_cuda_graph_probe_enabled())
+        self.assertIsNone(self.model.get_cuda_graph_probe_buffer(self.graph_bs))
+
+        trace_ids = ["bad-trace"] + [
+            f"eager-lane-{lane}" for lane in range(1, self.actual_bs)
+        ]
+        inputs = self._build_inputs(trace_ids=trace_ids)
+        inputs.attention_inputs.sequence_lengths = torch.full(
+            (self.actual_bs,), 91, dtype=torch.int32
+        ).pin_memory()
+        inputs.input_ids.add_(1000)
+
+        self.assertTrue(self.runner.canRun(inputs))
+        self.runner.forward(inputs)
+        torch.cuda.synchronize()
+        self.assertIsNone(self.model.get_cuda_graph_probe_buffer(self.graph_bs))
+
+        published = self.runner.retrospective_probe_event(
+            "bad-trace", "test-eager-step", 92
+        )
+        self.assertTrue(published["published"])
+        generation = published["generation"]
+
+        inputs.input_ids.add_(1000)
+        self.runner.forward(inputs)
+        torch.cuda.synchronize()
+        probe_buffer, probe_layers = self.model.get_cuda_graph_probe_buffer(
+            self.graph_bs
+        )
+        self.assertEqual((2, 0), probe_layers)
+        after_eager = probe_buffer.cpu().clone()
+
+        output_dir = Path(self.temp_dir.name)
+        tensor_file = next(output_dir.glob(f"*gen{generation}.bin"))
+        metadata_file = next(output_dir.glob(f"*gen{generation}.jsonl"))
+        completion_file = next(output_dir.glob(f"*gen{generation}.complete"))
+        dumped = torch.from_file(
+            str(tensor_file),
+            shared=False,
+            size=after_eager.numel(),
+            dtype=torch.float32,
+        ).reshape(after_eager.shape)
+        torch.testing.assert_close(
+            dumped[:, : self.actual_bs], after_eager[:, : self.actual_bs]
+        )
+        self.assertTrue(
+            torch.equal(
+                dumped[:, self.actual_bs :],
+                torch.zeros_like(dumped[:, self.actual_bs :]),
+            )
+        )
+        metadata = json.loads(metadata_file.read_text(encoding="utf-8"))
+        self.assertEqual(generation, metadata["event_generation"])
+        self.assertEqual("bad-trace", metadata["event_trace_id"])
+        self.assertEqual("test-eager-step", metadata["event_reason"])
+        self.assertEqual(self.graph_bs, metadata["graph_bs"])
+        self.assertEqual(self.actual_bs, metadata["current_bs"])
+        self.assertEqual(91, metadata["lanes"][0]["sequence_length"])
+        self.assertTrue(completion_file.is_file())
+
+        observed = self.runner.retrospective_probe_event()
+        self.assertEqual(generation, observed["generation"])
+        self.assertEqual(1, observed["ack_rank_mask"] & 1)
+        self.assertEqual(0, observed["failure_rank_mask"] & 1)
+
+        inputs.input_ids.add_(1000)
+        self.runner.forward(inputs)
+        torch.cuda.synchronize()
+        torch.testing.assert_close(probe_buffer.cpu(), after_eager)
 
 
 if __name__ == "__main__":

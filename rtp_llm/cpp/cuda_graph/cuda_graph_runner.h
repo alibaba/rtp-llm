@@ -124,10 +124,19 @@ private:
     void              dumpRetrospectiveProbeBeforeReplay() noexcept;
     void              retainRetrospectiveReplay(const PyModelInputs& inputs, const CudaGraphState& state) noexcept;
     bool              dualGraphDebugEnabled() const noexcept;
+    bool              eagerStepDebugEnabled() const noexcept;
+    bool              retrospectiveProbeToggleEnabled() const noexcept;
     bool              setPythonGraphProbeEnabled(bool enabled) noexcept;
+    bool              retrospectiveEventMatches(const PyModelInputs&  inputs,
+                                                 const CudaGraphState& state,
+                                                 DecodeProbeTriggerEvent& event) noexcept;
     bool              shouldReplayRetrospectiveDebug(const PyModelInputs&       inputs,
                                                      const CudaGraphState&      state,
                                                      DecodeProbeTriggerEvent& event) noexcept;
+    bool              shouldRunRetrospectiveEagerStep(const PyModelInputs&       inputs,
+                                                      const CudaGraphState&      state,
+                                                      DecodeProbeTriggerEvent& event) noexcept;
+    void              runRetrospectiveEagerStep(int graph_bs, const DecodeProbeTriggerEvent& event);
     void              dumpRetrospectiveDebugReplay(const PyModelInputs&             inputs,
                                                    const CudaGraphState&            state,
                                                    const DecodeProbeTriggerEvent& event) noexcept;
