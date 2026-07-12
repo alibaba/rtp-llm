@@ -311,12 +311,28 @@ static GreedyOutput flashinferSampleGreedy(const GreedyParams& params, const tor
     const bool all_top_p_one =
         std::all_of(top_p_ptr, top_p_ptr + batch_size, [](auto t) { return std::abs(t - 1.0f) < 1e-7; });
 
+    // The truncated + renormalized sampling distribution is needed both to fill
+    // renormalized all-probs output AND, independently, to compute cum_log_probs
+    // from the distribution the token was ACTUALLY drawn from. In ORIGINAL mode
+    // (return_original_all_probs) output_all_probs_t is reserved for the raw
+    // distribution, so route the renorm into a separate scratch tensor there —
+    // otherwise cum_log_probs would be accumulated against the untruncated
+    // softmax while the token came from the top-k/top-p filtered distribution.
+    const bool    want_cum_log_probs = params.cum_log_probs.has_value();
+    const bool    need_sampling_dist = need_renorm_probs || want_cum_log_probs;
+    torch::Tensor sampling_dist_t;
+    if (need_renorm_probs) {
+        sampling_dist_t = output_all_probs_t;
+    } else if (need_sampling_dist) {
+        sampling_dist_t = torch::empty_like(probs_t);
+    }
+
     if (all_top_k_one) {
         torch::Tensor selected_tokens = torch::argmax(probs_t, -1, /*keepdim=*/false);
         samples_t.copy_(selected_tokens, true);
         success = torch::Tensor();  // mark as undefined — all succeeded
-        if (need_renorm_probs) {
-            top_k_renorm_probs(probs_t, output_all_probs_t, top_k_t, 0, (int64_t)cur_stream);
+        if (need_sampling_dist) {
+            top_k_renorm_probs(probs_t, sampling_dist_t, top_k_t, 0, (int64_t)cur_stream);
         }
     } else if (all_top_k_no_limit) {
         top_p_sampling_from_probs(probs_t,
@@ -331,8 +347,8 @@ static GreedyOutput flashinferSampleGreedy(const GreedyParams& params, const tor
                                   offset_t,
                                   0,
                                   (int64_t)cur_stream);
-        if (need_renorm_probs) {
-            top_p_renorm_probs(probs_t, output_all_probs_t, top_p_t, 1.0, (int64_t)cur_stream);
+        if (need_sampling_dist) {
+            top_p_renorm_probs(probs_t, sampling_dist_t, top_p_t, 1.0, (int64_t)cur_stream);
         }
     } else {
         // top_k<=0 means "no limit" in RTP config. The combined FlashInfer
@@ -352,8 +368,8 @@ static GreedyOutput flashinferSampleGreedy(const GreedyParams& params, const tor
                                       offset_t,
                                       0,
                                       (int64_t)cur_stream);
-            if (need_renorm_probs) {
-                top_k_renorm_probs(probs_t, output_all_probs_t, top_k_t, 0, (int64_t)cur_stream);
+            if (need_sampling_dist) {
+                top_k_renorm_probs(probs_t, sampling_dist_t, top_k_t, 0, (int64_t)cur_stream);
             }
         } else {
             top_k_top_p_sampling_from_probs(probs_t,
@@ -370,22 +386,19 @@ static GreedyOutput flashinferSampleGreedy(const GreedyParams& params, const tor
                                             offset_t,
                                             0,
                                             (int64_t)cur_stream);
-            if (need_renorm_probs) {
-                torch::Tensor temp_t = torch::zeros_like(output_all_probs_t);
+            if (need_sampling_dist) {
+                torch::Tensor temp_t = torch::zeros_like(sampling_dist_t);
                 top_k_renorm_probs(probs_t, temp_t, top_k_t, 1.0, (int64_t)cur_stream);
-                top_p_renorm_probs(temp_t, output_all_probs_t, top_p_t, 1.0, (int64_t)cur_stream);
+                top_p_renorm_probs(temp_t, sampling_dist_t, top_p_t, 1.0, (int64_t)cur_stream);
             }
         }
     }
 
-    // Save the distribution that was actually used for sampling before
-    // return_original_all_probs overwrites output_all_probs_t with the raw
-    // (unfiltered) distribution.  cum_log_probs must be updated with the
-    // sampling distribution, not the original all-probs distribution.
-    torch::Tensor sampling_probs_t = probs_t;
-    if (need_renorm_probs && output_all_probs_t.defined()) {
-        sampling_probs_t = output_all_probs_t;
-    }
+    // cum_log_probs must be computed from the distribution the token was actually
+    // sampled from (top-k/top-p truncated + renormalized), NOT the raw softmax and
+    // NOT the ORIGINAL all-probs distribution. sampling_dist_t holds it whenever
+    // it was needed; fall back to raw probs only when no truncation applied.
+    torch::Tensor sampling_probs_t = need_sampling_dist ? sampling_dist_t : probs_t;
 
     if (params.return_original_all_probs && output_all_probs_t.defined()) {
         top_k_renorm_probs(probs_t, output_all_probs_t, std::nullopt, 1 << 30, (int64_t)cur_stream);

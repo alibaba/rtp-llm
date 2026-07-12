@@ -51,6 +51,17 @@ def _is_local_path_reference(url: str) -> bool:
     return url.startswith(("/", "./", "../"))
 
 
+def _load_platform_module():
+    """Load _build/platform.py in isolation (stdlib-only, no side effects)."""
+    spec = importlib.util.spec_from_file_location(
+        "_rtp_build_platform_under_test", PROJECT_ROOT / "_build" / "platform.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
+
+
 def _load_setup_module():
     spec = importlib.util.spec_from_file_location(
         "_rtp_llm_setup_under_test", PROJECT_ROOT / "setup.py"
@@ -138,6 +149,33 @@ class BuildPackagingContractTest(TestCase):
         missing = [p for p in testpaths if not (PROJECT_ROOT / p).exists()]
         self.assertEqual(
             missing, [], f"pyproject testpaths point at non-existent directories: {missing}"
+        )
+
+    def test_rocm_wheel_version_matches_dependency_abi(self):
+        """The rocm wheel version suffix must track the ROCm ABI the rocm extras are built for.
+
+        get_version_with_platform() stamps every OSS ROCm wheel with this suffix, so a stale value
+        (e.g. rocm62 while the deps/toolchain moved to ROCm 7.2) makes cache/publish/rollback pick
+        the wrong binary stack. Derive the ABI from the suffix and assert the rocm extras' wheels
+        actually reference it — and that no wheel references a different ROCm ABI.
+        """
+        platform_module = _load_platform_module()
+        suffix = platform_module.PLATFORM_CONFIG_VERSIONS.get("rocm", "")
+        m = re.fullmatch(r"rocm(\d)(\d+)", suffix)
+        self.assertIsNotNone(m, f"unexpected rocm version suffix {suffix!r}")
+        expected_abi = f"{m.group(1)}.{m.group(2)}"  # rocm72 -> "7.2"
+
+        rocm_reqs = _oss_optional_extras().get("rocm", [])
+        rocm_abis = set(re.findall(r"rocm(\d+\.\d+)", " ".join(rocm_reqs)))
+        self.assertIn(
+            expected_abi,
+            rocm_abis,
+            f"rocm suffix {suffix!r} (ABI {expected_abi}) not found in rocm extras "
+            f"wheel URLs (found ABIs: {sorted(rocm_abis)})",
+        )
+        stale = rocm_abis - {expected_abi}
+        self.assertEqual(
+            stale, set(), f"rocm extras reference ROCm ABIs {sorted(stale)} != suffix {expected_abi}"
         )
 
     def test_pytest_entry_points_are_packaged_with_tests(self):

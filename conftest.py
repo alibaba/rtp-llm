@@ -9,35 +9,11 @@ _xdist_worker = _os.environ.get("PYTEST_XDIST_WORKER")
 if _xdist_worker:
     _os.environ["_RTP_TORCH_BEFORE_SLICE"] = "1" if "torch" in _sys.modules else "0"
 
-    # Cleanup stale GPU verification records from prior pytest sessions
-    # on this REAPI worker. Without this, test_workers_have_disjoint_gpus
-    # globs `_GPU_VERIFY_DIR/gw*.json` and sees PREVIOUS session's worker
-    # records — a session with different GPU pool size leaves stale files
-    # claiming the same CVD, producing false "GPU OVERLAP" failures
-    # (run 39354184 ut-sm8x: gw0 and gw3 both reported CVD=0).
-    #
-    # Two-pronged cleanup:
-    #   (a) every worker deletes its OWN gw{N}.json — guarantees no stale
-    #       record survives for current worker indices.
-    #   (b) gw0 ALSO sweeps the dir — catches stale files from previous
-    #       sessions with HIGHER worker count (e.g. prior session had
-    #       gw0..gw7, current has gw0..gw3 → gw4..gw7 stale would mislead
-    #       the disjoint check).
-    # Conftest module load happens BEFORE test execution, so cleanup is
-    # always strictly before test_record_worker_gpu writes the fresh file.
-    _verify_dir = _os.environ.get("GPU_VERIFY_DIR", "/tmp/rtp_llm_gpu_verify")
-    _own_record = f"{_verify_dir}/{_xdist_worker}.json"
-    try:
-        _os.unlink(_own_record)
-    except OSError:
-        pass
-    if _xdist_worker == "gw0":
-        import glob as _glob
-        for _stale in _glob.glob(f"{_verify_dir}/gw*.json"):
-            try:
-                _os.unlink(_stale)
-            except OSError:
-                pass
+    # NOTE: cross-worker GPU-disjointness verification no longer uses shared
+    # /tmp json files (which were racy and let a clean dir silently skip the
+    # check). Each worker now reports its CVD to the controller via
+    # config.workeroutput, and the controller verifies disjointness in
+    # pytest_sessionfinish (see the xdist hooks at the bottom of this file).
 
     # Worker name parse: pytest-xdist standard is "gw0", "gw1", ...
     # Custom runners (remote sessions, controller-only modes) may pass other
@@ -406,3 +382,83 @@ def pytest_collection_modifyitems(config, items):
 
         synthetic_name = _register_synthetic_gpu_marker(config, count)
         item.add_marker(getattr(pytest.mark, synthetic_name))
+
+
+# ============================================================================
+# xdist GPU-disjointness verification (worker -> controller)
+#
+# Each worker reports its CUDA_VISIBLE_DEVICES back to the controller via
+# config.workeroutput. The controller counts how many workers it launched
+# (pytest_configure_node), collects each worker's CVD as its node goes down
+# (pytest_testnodedown), and after the whole session asserts every worker got a
+# distinct GPU slice (pytest_sessionfinish). This replaces the old shared-file
+# scheme, which was racy and — worse — silently pytest.skip()'d when a clean dir
+# had < 2 records, letting a GPU-overlap misconfig pass CI. A missing report or
+# an overlap now FAILS the run instead of being skipped.
+# ============================================================================
+
+
+def pytest_configure_node(node):
+    """Controller-side: count each xdist worker as it is set up."""
+    config = node.config
+    config._rtp_expected_gpu_workers = getattr(config, "_rtp_expected_gpu_workers", 0) + 1
+
+
+def pytest_testnodedown(node, error):
+    """Controller-side: record the CVD reported by a worker as it goes down."""
+    workeroutput = getattr(node, "workeroutput", None) or {}
+    if "rtp_gpu_cvd" not in workeroutput:
+        return
+    config = node.config
+    records = getattr(config, "_rtp_worker_gpu_records", None)
+    if records is None:
+        records = {}
+        config._rtp_worker_gpu_records = records
+    # gateway.id is the stable worker id ("gw0", "gw1", ...).
+    records[node.gateway.id] = workeroutput["rtp_gpu_cvd"]
+
+
+def pytest_sessionfinish(session, exitstatus):
+    config = session.config
+
+    # WORKER: report this worker's GPU slice back to the controller.
+    if hasattr(config, "workerinput"):
+        workeroutput = getattr(config, "workeroutput", None)
+        if workeroutput is not None:
+            workeroutput["rtp_gpu_cvd"] = os.environ.get("CUDA_VISIBLE_DEVICES", "")
+        return
+
+    # CONTROLLER: verify all workers got disjoint GPUs. Only runs under xdist,
+    # where pytest_configure_node incremented the expected count.
+    expected = getattr(config, "_rtp_expected_gpu_workers", 0)
+    if expected == 0:
+        return  # single-process run: nothing cross-worker to verify.
+
+    records = getattr(config, "_rtp_worker_gpu_records", {})
+    problems = []
+
+    # (1) Missing reports must FAIL (never silently skip).
+    if len(records) < expected:
+        problems.append(
+            f"only {len(records)}/{expected} xdist worker(s) reported a GPU slice "
+            f"(got {sorted(records)}); a worker crashed or never reported."
+        )
+
+    # (2) Non-empty CVDs must be disjoint across workers.
+    cvd_to_workers: dict = {}
+    for wid, cvd in records.items():
+        if not cvd:
+            continue  # empty CVD => no GPU isolation active for that worker.
+        cvd_to_workers.setdefault(cvd, []).append(wid)
+    for cvd, workers in cvd_to_workers.items():
+        if len(workers) > 1:
+            problems.append(
+                f"GPU OVERLAP: workers {sorted(workers)} share CUDA_VISIBLE_DEVICES={cvd!r}"
+            )
+
+    if problems:
+        for p in problems:
+            print(f"\n[GPU_ISOLATION] {p}")
+        # Fail the run without masking an already-failing status.
+        if exitstatus == 0:
+            session.exitstatus = 1

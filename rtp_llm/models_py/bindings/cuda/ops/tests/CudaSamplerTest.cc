@@ -718,6 +718,96 @@ TEST_F(CudaSamplerTest, testFlashinferKernelTopP) {
     assertTokenIn(output_token_ids_host, 23, {7, 8, 5, 0, 4, 3, 9, 1});
 }
 
+// Regression: with top-k/top-p + cum_log_probs, cum_log_probs must be accumulated from the
+// truncated + renormalized SAMPLING distribution, not the raw softmax — even when
+// return_original_all_probs makes output_all_probs hold the raw distribution. Runs the identical
+// seeded sampling in both modes and asserts the cum_log_probs are equal (the fix's contract).
+TEST_F(CudaSamplerTest, testCumLogProbsUsesSamplingDistributionInOriginalMode) {
+    const size_t  batch_size = 4;
+    const int64_t vocab      = 10;
+    const size_t  step       = 1;
+
+    // Fixed, non-degenerate logits so top-k/top-p truncation actually changes the distribution
+    // (making the truncated sampling dist differ from the raw softmax the bug would use).
+    std::vector<float> logits_data = {
+        2.0f, 1.5f, 1.0f, 0.5f, 0.2f, 0.1f, 0.0f, -0.5f, -1.0f, -2.0f,
+        0.1f, 0.3f, 2.5f, 1.2f, 0.7f, 0.4f, 0.2f, 0.0f, -0.3f, -1.5f,
+        1.0f, 1.0f, 0.9f, 0.8f, 0.2f, 0.1f, 0.05f, 0.0f, -0.2f, -0.4f,
+        0.5f, 2.2f, 1.7f, 0.3f, 0.25f, 0.2f, 0.1f, -0.1f, -0.6f, -1.1f,
+    };
+    auto logits_base = cudaTensor(logits_data, {(int64_t)batch_size, vocab});
+
+    struct Result {
+        std::vector<int32_t> tokens;
+        std::vector<float>   cum;
+        std::vector<float>   all_probs;
+    };
+
+    auto run = [&](bool return_original) -> Result {
+        auto logits_t    = logits_base.clone();  // processLogits softmaxes / filters in place
+        auto token_ids_t = cudaIntTensor(std::vector<int32_t>(batch_size * (step + 1), 0),
+                                         {(int64_t)batch_size, (int64_t)(step + 1)});
+        auto sequence_lengths_t =
+            cudaIntTensor({(int32_t)step, (int32_t)step, (int32_t)step, (int32_t)step}, {(int64_t)batch_size});
+        auto input_lengths_t     = cudaIntTensor({-1, -1, -1, -1}, {(int64_t)batch_size});
+        auto top_k_t             = pinnedIntTensor({3, 3, 2, 4});
+        auto top_p_t             = pinnedFloatTensor({0.9, 0.9, 0.9, 0.9});
+        auto temperature_t       = pinnedFloatTensor({1.0, 1.0, 1.0, 1.0});
+        auto cum_log_probs_t     = cudaTensor(std::vector<float>(batch_size, 0.0f), {(int64_t)batch_size});
+        auto output_all_probs_t  = cudaTensor(std::vector<float>(batch_size * vocab, 0.0f),
+                                             {(int64_t)batch_size, vocab});
+
+        // Deterministic per-row seeds, rebuilt identically each run so both modes sample the
+        // SAME token and cum_log_probs are directly comparable.
+        std::vector<at::Generator> generator;
+        for (size_t i = 0; i < batch_size; ++i) {
+            generator.push_back(torch::make_generator<at::CUDAGeneratorImpl>());
+            generator[i].set_current_seed(i + 1);
+        }
+
+        GreedyParams params({
+            logits_t,
+            input_lengths_t,
+            sequence_lengths_t,
+            token_ids_t,
+            step,
+            top_k_t,
+            top_p_t,
+            temperature_t,
+            nullopt,             // repetition_penalty
+            nullopt,             // no_repeat_ngram_size
+            cum_log_probs_t,     // cum_log_probs
+            nullopt,             // output_log_probs
+            return_original,     // return_original_all_probs
+            output_all_probs_t,  // output_all_probs
+            nullopt,             // presence_penalty
+            nullopt,             // frequency_penalty
+            nullopt,             // do_sample
+            generator,
+        });
+        execSampleGreedy(params);
+        check_cuda_error();
+        return Result{toHostInt(token_ids_t), toHostFloat(cum_log_probs_t), toHostFloat(output_all_probs_t)};
+    };
+
+    auto a = run(/*return_original=*/false);  // output_all_probs holds the renormalized sampling dist
+    auto b = run(/*return_original=*/true);   // output_all_probs holds the raw ORIGINAL dist
+
+    // Same seeds => identical sampled tokens across both modes.
+    ASSERT_EQ(a.tokens, b.tokens);
+
+    // Non-original run: cum_log_probs equals log(sampling-dist prob) of the token (existing contract).
+    std::vector<float> zero_init(batch_size, 0.0f);
+    assertCumLogProbMatches(a.cum, a.all_probs, a.tokens, zero_init, batch_size, step, vocab);
+
+    // The fix: ORIGINAL mode accumulates the SAME cum_log_probs (from the truncated sampling
+    // distribution), not log(raw softmax). Pre-fix these diverged.
+    for (size_t i = 0; i < batch_size; ++i) {
+        ASSERT_NEAR(a.cum[i], b.cum[i], 1e-3)
+            << "row " << i << ": cum_log_probs differs between renormalized and ORIGINAL mode";
+    }
+}
+
 TEST_F(CudaSamplerTest, testFlashinferKernelTopKTopP) {
     size_t batch_size = 4;
     auto   logits_t   = cudaTensor(

@@ -1,5 +1,6 @@
 #include <chrono>
 #include <memory>
+#include <thread>
 #include "torch/all.h"
 #include "gtest/gtest.h"
 #include "autil/TimeUtility.h"
@@ -120,6 +121,50 @@ TEST_F(BatchDecodeSchedulerTest, testMixedReturnAllProbsPartialFlush) {
     ASSERT_GE(scheduler.running_streams_.size(), 1u);
     // Nothing is lost: scheduled + still-waiting accounts for both enqueued streams.
     ASSERT_EQ(scheduler.running_streams_.size() + scheduler.waiting_streams_.size(), 2u);
+}
+
+// Regression: a sustained all-probs (DEFAULT/ORIGINAL) backlog must not starve a plain NONE
+// request. Before the fairness fix, NONE was excluded from the starvation check and only spliced in
+// after the concrete group, so it never won a slot while a DEFAULT backlog kept filling batch_size_.
+TEST_F(BatchDecodeSchedulerTest, testNoneNotStarvedByAllProbsBacklog) {
+    CacheConfig cache_config  = makeMhaCacheConfig(1, 16, 1, 4, 8, rtp_llm::DataType::TYPE_FP16);
+    auto        cache_manager = std::make_shared<KVCacheManager>(cache_config);
+    ASSERT_TRUE(cache_manager->init());
+    ResourceContext resource_context;
+    resource_context.cache_manager = cache_manager;
+
+    ModelConfig model_config;
+    model_config.max_seq_len = 8192;
+    RuntimeConfig runtime_config;
+    runtime_config.batch_decode_scheduler_config.batch_decode_scheduler_batch_size = 2;
+
+    BatchDecodeScheduler scheduler(runtime_config, cache_manager, nullptr);
+
+    // Oldest waiting request is a plain NONE request.
+    auto s_none = makeStream(resource_context, model_config, runtime_config, ReturnAllProbsMode::NONE);
+    ASSERT_TRUE(scheduler.enqueue(s_none).ok());
+    // Guarantee a strictly earlier enqueue time than the backlog below.
+    std::this_thread::sleep_for(std::chrono::milliseconds(3));
+
+    // Sustained DEFAULT (all-probs) backlog larger than batch_size_.
+    for (int i = 0; i < 5; ++i) {
+        auto s = makeStream(resource_context, model_config, runtime_config, ReturnAllProbsMode::DEFAULT);
+        ASSERT_TRUE(scheduler.enqueue(s).ok());
+    }
+    ASSERT_EQ(scheduler.waiting_streams_.size(), 6u);
+
+    auto status = scheduler.schedule();
+    ASSERT_TRUE(status.ok());
+
+    // The oldest (NONE) request must be scheduled this round, not stranded behind the backlog.
+    bool none_running = false;
+    for (auto& s : scheduler.running_streams_) {
+        if (s.get() == s_none.get()) {
+            none_running = true;
+            break;
+        }
+    }
+    ASSERT_TRUE(none_running) << "NONE request starved by sustained all-probs backlog";
 }
 
 }  // namespace rtp_llm

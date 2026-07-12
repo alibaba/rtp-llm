@@ -44,12 +44,16 @@ from pathlib import Path
 #
 # ============================================================================
 
-# Platform to version suffix mapping (for wheel naming)
+# Platform to version suffix mapping (for wheel naming).
+# The rocm suffix MUST track the ROCm ABI the rocm extras are actually built
+# against (see _build/oss_optional_extras.toml: torch/triton pinned to rocm7.2)
+# so cache/publish/rollback pick the right binary stack. A packaging contract
+# test asserts this suffix matches the wheel ABI.
 PLATFORM_CONFIG_VERSIONS = {
     "cuda12_6": "cu126",
     "cuda12_9": "cu129",
     "cuda12_9_arm": "cu129",
-    "rocm": "rocm62",
+    "rocm": "rocm72",
 }
 
 # Bazel config name -> pyproject.toml extras name

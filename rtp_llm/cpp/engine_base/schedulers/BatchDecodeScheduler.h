@@ -149,14 +149,16 @@ public:
             }
         }
 
-        // Choose which concrete ReturnAllProbsMode group to serve this round.
+        // Choose which ReturnAllProbsMode group to serve this round.
         //
         // Default policy favours throughput: pick the non-NONE group with the
         // most streams.  That alone can starve a minority mode (e.g. a few
-        // ORIGINAL requests stuck behind a steady stream of DEFAULT ones), so a
-        // fairness override kicks in: if any non-NONE group's oldest stream has
+        // ORIGINAL requests stuck behind a steady stream of DEFAULT ones) AND
+        // can starve plain NONE requests, which otherwise only ride along as
+        // wildcards behind whatever concrete group is chosen.  So a fairness
+        // override kicks in: if ANY group's oldest stream (NONE included) has
         // waited longer than the starvation threshold, serve the group whose
-        // oldest stream arrived earliest.  This bounds each group's worst-case
+        // oldest stream arrived earliest.  This bounds every group's worst-case
         // wait to ~starvation_threshold instead of "forever".
         const int64_t now_us = autil::TimeUtility::currentTimeInMicroSeconds();
         const int64_t starvation_threshold_us =
@@ -169,7 +171,10 @@ public:
         int64_t            starved_arrival_us = 0;
         bool               has_starved        = false;
         for (auto& [mode, streams] : mode_groups) {
-            if (mode == ReturnAllProbsMode::NONE || streams.empty()) {
+            // NONE participates in starvation detection too: a long-waiting NONE
+            // request must be able to trigger the fairness override rather than
+            // starve behind a steady all-probs backlog.
+            if (streams.empty()) {
                 continue;
             }
             // Groups are built by iterating waiting_streams_ in arrival order,
@@ -217,6 +222,15 @@ public:
             candidates.splice(candidates.end(), selected_group);
         }
         candidates.splice(candidates.end(), none_streams);
+
+        // Merge by global enqueue order so the oldest compatible requests win the
+        // limited batch slots.  Without this, NONE (spliced last) only ever gets
+        // leftover slots and starves whenever the concrete group alone fills
+        // batch_size_; sorting by arrival time gives all compatible modes FIFO
+        // fairness within the batch.
+        candidates.sort([](const GenerateStreamPtr& a, const GenerateStreamPtr& b) {
+            return a->enqueueTime() < b->enqueueTime();
+        });
 
         std::list<GenerateStreamPtr> new_streams;
         for (auto& s : candidates) {
