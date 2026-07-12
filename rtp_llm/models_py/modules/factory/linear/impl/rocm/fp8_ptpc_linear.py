@@ -14,6 +14,24 @@ logger = logging.getLogger(__name__)
 from rtp_llm.models_py.kernels.rocm.fp8_kernel import rocm_per_token_quant_fp8
 from rtp_llm.ops import HWKernelConfig
 
+
+_CKTILE_MAX_BUFFER_BYTES = 1 << 31
+_CKTILE_M_TILE = 128
+
+
+def _cktile_max_m_per_launch(
+    k: int,
+    n: int,
+    input_element_size: int,
+    output_element_size: int,
+) -> int:
+    max_row_bytes = max(k * input_element_size, n * output_element_size)
+    max_m = _CKTILE_MAX_BUFFER_BYTES // max_row_bytes
+    if max_m < _CKTILE_M_TILE:
+        return max(1, max_m)
+    return (max_m // _CKTILE_M_TILE) * _CKTILE_M_TILE
+
+
 class RocmFp8PTPCLinear(LinearBase):
     """ROCm FP8 PTPC (Per-Token Per-Channel) quantized Linear"""
 
@@ -101,9 +119,30 @@ class RocmFp8PTPCLinear(LinearBase):
             output = torch.empty(
                 (M, N), dtype=input_bf16.dtype, device=input_bf16.device
             )
-            gemm_a8w8_bpreshuffle_cktile(
-                input_fp8, self.weight, x_scales, w_scales, output
+            # CKTile uses 32-bit buffer offsets. At N=8192 with BF16 output,
+            # the offset wraps at row 262144 (4 GiB), overwriting early rows
+            # and leaving tail rows unwritten. Limit every input/output view
+            # to 2 GiB and align chunks to CKTile's M tile.
+            max_m_per_launch = _cktile_max_m_per_launch(
+                k=K,
+                n=N,
+                input_element_size=input_fp8.element_size(),
+                output_element_size=output.element_size(),
             )
+            if M <= max_m_per_launch:
+                gemm_a8w8_bpreshuffle_cktile(
+                    input_fp8, self.weight, x_scales, w_scales, output
+                )
+            else:
+                for row_start in range(0, M, max_m_per_launch):
+                    row_end = min(row_start + max_m_per_launch, M)
+                    gemm_a8w8_bpreshuffle_cktile(
+                        input_fp8[row_start:row_end],
+                        self.weight,
+                        x_scales[row_start:row_end],
+                        w_scales,
+                        output[row_start:row_end],
+                    )
         else:
             output = aiter.gemm_a8w8_bpreshuffle(
                 input_fp8,
