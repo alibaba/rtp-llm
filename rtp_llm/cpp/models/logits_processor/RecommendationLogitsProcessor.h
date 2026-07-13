@@ -20,7 +20,7 @@ struct StreamRecommendationInfo {
     int32_t combo_token_size          = 0;
     int32_t input_length              = 0;
     int32_t current_output_length     = 0;
-    // 仅 beam search 使用 full-position token offset；num_return_sequences>1 仍按增量 token 读取。
+    // 兼容旧构造/insert一致性检查的遗留字段；实际 token layout 由 updateStatus 按 new_tokens shape 动态判定。
     bool    needs_token_offset        = false;
     bool    enable_cross_sequence_ban = false;
     int32_t cross_seq_diverge_start_combo = 0;
@@ -107,7 +107,7 @@ public:
                     "insert: cross_seq_diverge_start_combo mismatch");
                 RTP_LLM_CHECK_WITH_INFO(
                     existing.needs_token_offset == incoming.needs_token_offset,
-                    "insert: needs_token_offset mismatch");
+                    "insert: legacy needs_token_offset flag mismatch");
                 RTP_LLM_CHECK_WITH_INFO(
                     existing.end_think_token_ids == incoming.end_think_token_ids,
                     "insert: end_think_token_ids mismatch");
