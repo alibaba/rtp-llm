@@ -33,7 +33,7 @@ class NewLoaderLoadMethod(str, Enum):
     FASTSAFETENSORS = "fastsafetensors"
 
 
-@dataclass
+@dataclass(frozen=True)
 class NewLoaderConfig:
     tp_size: int = 1
     tp_rank: int = 0
@@ -46,7 +46,11 @@ class NewLoaderConfig:
     def __post_init__(self) -> None:
         if isinstance(self.load_method, str):
             try:
-                self.load_method = NewLoaderLoadMethod(self.load_method.strip().lower())
+                object.__setattr__(
+                    self,
+                    "load_method",
+                    NewLoaderLoadMethod(self.load_method.strip().lower()),
+                )
             except ValueError as exc:
                 raise ValueError(f"Unsupported newloader load method {self.load_method!r}") from exc
         elif not isinstance(self.load_method, NewLoaderLoadMethod):
@@ -80,7 +84,6 @@ class NewModelLoader:
         self.model_config = model_config
         self.load_config = effective_config
         self.model_path = model_path
-        self.device = self.load_config.device
         self._ckpt_files = None
 
     def _resolve_load_method(self) -> NewLoaderLoadMethod:
@@ -151,11 +154,11 @@ class NewModelLoader:
                 f"Registered model {model_cls.__name__} must inherit RtpModule to "
                 "provide newloader completeness validation"
             )
-        logger.info(
-            "Created newloader model %s from %s",
-            model_cls.__qualname__,
-            inspect.getfile(model_cls),
-        )
+        try:
+            source = inspect.getfile(model_cls)
+        except (TypeError, OSError):
+            source = "<unknown>"
+        logger.info("Created newloader model %s from %s", model_cls.__qualname__, source)
         return model
 
     @staticmethod
@@ -201,7 +204,7 @@ class NewModelLoader:
         self._validate_loaded_weights(model)
         logger.info("Streamed checkpoint tensors in %.2fs", time.time() - started)
 
-        model.to(self.device)
+        model.to(self.load_config.device)
         self._validate_loaded_weights(model)
         self._run_post_load_hooks(model)
         return model

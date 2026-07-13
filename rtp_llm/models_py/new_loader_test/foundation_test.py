@@ -4,6 +4,8 @@ import sys
 import tempfile
 import types
 import unittest
+from dataclasses import FrozenInstanceError
+from unittest import mock
 
 import torch
 import torch.nn as nn
@@ -390,6 +392,33 @@ class FoundationLoaderTest(unittest.TestCase):
             NewLoaderConfig(device="not:a:device")
         with self.assertRaisesRegex(ValueError, "cannot be meta"):
             NewLoaderConfig(device="meta")
+
+    def test_load_config_is_immutable(self):
+        config = NewLoaderConfig(device="cpu", load_method="scratch")
+        self.assertEqual(config.load_method, NewLoaderLoadMethod.SCRATCH)
+        with self.assertRaises(FrozenInstanceError):
+            config.device = "cuda"
+
+    def test_model_source_introspection_cannot_block_loading(self):
+        class DynamicModel(RtpModule):
+            def __init__(self, model_config, load_config):
+                super().__init__()
+                self.weight = nn.Parameter(torch.empty(1))
+
+        register_model("foundation_dynamic_source_model")(DynamicModel)
+        config = types.SimpleNamespace(model_type="foundation_dynamic_source_model")
+        with tempfile.TemporaryDirectory() as model_path:
+            torch.save({"weight": torch.ones(1)}, os.path.join(model_path, "model.pt"))
+            with mock.patch(
+                "rtp_llm.models_py.model_loader.inspect.getfile",
+                side_effect=TypeError("no source"),
+            ):
+                model = NewModelLoader(
+                    config,
+                    NewLoaderConfig(device="cpu"),
+                    model_path=model_path,
+                ).load()
+        self.assertEqual(model.weight.item(), 1)
 
     def test_device_override_is_visible_during_model_construction(self):
         class DeviceAwareModel(RtpModule):
