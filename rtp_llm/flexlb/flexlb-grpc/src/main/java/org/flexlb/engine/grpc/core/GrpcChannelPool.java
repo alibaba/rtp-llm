@@ -64,9 +64,19 @@ public class GrpcChannelPool<K> {
      * Removes and shuts down channels whose keys are absent from the active set.
      */
     public void removeStaleChannels(Collection<K> activeChannelKeys) {
-        Set<K> activeKeySet = new HashSet<>(activeChannelKeys);
+        removeChannelsForInactiveGroups(activeChannelKeys, Function.identity());
+    }
+
+    /**
+     * Removes all channels belonging to groups that are no longer active. Channels with different
+     * keys in an active group are retained.
+     */
+    public <G> void removeChannelsForInactiveGroups(
+            Collection<G> activeGroupKeys,
+            Function<K, G> groupKeyExtractor) {
+        Set<G> activeGroupKeySet = new HashSet<>(activeGroupKeys);
         for (Map.Entry<K, PooledChannel> entry : channels.entrySet()) {
-            if (!activeKeySet.contains(entry.getKey())
+            if (!activeGroupKeySet.contains(groupKeyExtractor.apply(entry.getKey()))
                     && channels.remove(entry.getKey(), entry.getValue())) {
                 entry.getValue().shutdown();
             }

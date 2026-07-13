@@ -83,6 +83,29 @@ class GrpcChannelPoolTest {
     }
 
     @Test
+    void retainsAllPortsForActiveGroup() {
+        ManagedChannel firstPort = mock(ManagedChannel.class);
+        ManagedChannel secondPort = mock(ManagedChannel.class);
+        ManagedChannel inactiveHost = mock(ManagedChannel.class);
+        GrpcChannelPool<String> pool = new GrpcChannelPool<>(key -> switch (key) {
+            case "10.0.0.1:8081" -> firstPort;
+            case "10.0.0.1:18002" -> secondPort;
+            default -> inactiveHost;
+        });
+        pool.getOrCreate("10.0.0.1:8081");
+        pool.getOrCreate("10.0.0.1:18002");
+        pool.getOrCreate("10.0.0.2:8081");
+
+        pool.removeChannelsForInactiveGroups(
+                List.of("10.0.0.1"), key -> key.substring(0, key.indexOf(':')));
+
+        assertEquals(2, pool.size());
+        verify(firstPort, never()).shutdown();
+        verify(secondPort, never()).shutdown();
+        verify(inactiveHost).shutdown();
+    }
+
+    @Test
     void replacesExpectedChannel() {
         ManagedChannel firstChannel = mock(ManagedChannel.class);
         ManagedChannel secondChannel = mock(ManagedChannel.class);

@@ -18,6 +18,9 @@ public class Endpoint {
     @JsonProperty("path")
     private String path;
 
+    @JsonProperty("worker_status_port")
+    private Integer workerStatusPort;
+
     @JsonProperty("discovery")
     private DiscoveryConfig discovery;
 

@@ -41,10 +41,27 @@ class RoutingServiceDiscoveryTest {
         assertEquals("10.0.0.1", normalizedHost.getIp());
         assertEquals(8080, normalizedHost.getHttpPort());
         assertEquals(8081, normalizedHost.getGrpcPort());
+        assertEquals(8081, normalizedHost.getWorkerStatusPort());
         assertEquals(8085, normalizedHost.getHttpServerPort());
         assertEquals("site-a", normalizedHost.getSite());
         assertEquals("group-a", normalizedHost.getGroup());
         assertEquals("deployment-a", normalizedHost.getDeploymentName());
+    }
+
+    @Test
+    void usesWorkerStatusPortConfiguredOnEndpoint() {
+        WorkerHost discoveredHost = WorkerHost.of("10.0.0.1", 8080);
+        RecordingProvider provider = new RecordingProvider(List.of(discoveredHost));
+        RoutingServiceDiscovery discovery = new RoutingServiceDiscovery(List.of(provider));
+        Endpoint endpoint = endpoint();
+        endpoint.setProtocol("http");
+        endpoint.setWorkerStatusPort(18002);
+
+        WorkerHost normalizedHost = discovery.getHosts(endpoint).getFirst();
+
+        assertEquals(8080, normalizedHost.getHttpPort());
+        assertEquals(8081, normalizedHost.getGrpcPort());
+        assertEquals(18002, normalizedHost.getWorkerStatusPort());
     }
 
     private Endpoint endpoint() {

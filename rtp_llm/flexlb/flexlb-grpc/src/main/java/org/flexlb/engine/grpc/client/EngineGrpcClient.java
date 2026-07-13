@@ -53,9 +53,11 @@ public class EngineGrpcClient implements EngineAddressResolver.Listener {
         }
 
         Set<EngineChannelKey> activeKeys = new HashSet<>();
+        Set<String> activeIps = new HashSet<>();
         for (String ipPort : ipPortList) {
             String[] parts = ipPort.split(":");
             String ip = parts[0];
+            activeIps.add(ip);
             int grpcPort = CommonUtils.toGrpcPort(Integer.parseInt(parts[1]));
             for (ServiceType serviceType : ServiceType.values()) {
                 activeKeys.add(new EngineChannelKey(ip, grpcPort, serviceType));
@@ -71,7 +73,7 @@ public class EngineGrpcClient implements EngineAddressResolver.Listener {
                 Logger.error("create channel for {} failed", key, e);
             }
         }
-        channelPool.removeStaleChannels(activeKeys);
+        channelPool.removeChannelsForInactiveGroups(activeIps, EngineChannelKey::ip);
     }
 
     private <R> R executeGrpcCall(

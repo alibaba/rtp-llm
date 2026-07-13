@@ -23,6 +23,7 @@ class ModelServiceConfigurationTest {
                     var endpoint = config.getServiceRoute("test-service").getAllEndpoints().getFirst();
                     assertThat(endpoint.getDiscovery().getType()).isEqualTo(ServiceDiscoveryType.STATIC_ENV);
                     assertThat(endpoint.getDiscovery().getHosts()).containsExactly("127.0.0.1:8080");
+                    assertThat(endpoint.getWorkerStatusPort()).isEqualTo(18002);
                 });
     }
 
@@ -86,6 +87,7 @@ class ModelServiceConfigurationTest {
         return """
                 {"service_id":"test-service","role_endpoints":[{"group":"default",
                 "pd_fusion_endpoint":{"address":"service-a","protocol":"http","path":"/",
+                "worker_status_port":18002,
                 "discovery":{"type":"static-env","hosts":["127.0.0.1:8080"]}}}]}
                 """;
     }

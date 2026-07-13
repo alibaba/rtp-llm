@@ -1,7 +1,8 @@
 package org.flexlb.sync.runner;
 
-import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.CacheStatus;
+import org.flexlb.dao.master.TaskInfo;
+import org.flexlb.dao.master.WorkerHost;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.domain.worker.WorkerStatusResponse;
@@ -10,7 +11,6 @@ import org.flexlb.enums.BalanceStatusEnum;
 import org.flexlb.service.grpc.EngineGrpcService;
 import org.flexlb.service.grpc.EngineStatusConverter;
 import org.flexlb.service.monitor.EngineHealthReporter;
-import org.flexlb.util.CommonUtils;
 import org.flexlb.util.IdUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -34,25 +34,24 @@ public class GrpcWorkerStatusRunner implements Runnable {
     private final EngineHealthReporter engineHealthReporter;
     private final EngineGrpcService engineGrpcService;
     private final String ip;
-    private final int grpcPort;
+    private final int workerStatusPort;
     private final long createTimeUs = System.nanoTime() / 1000;
     private final String id = IdUtils.fastUuid();
     private final long syncRequestTimeoutMs;
 
-    public GrpcWorkerStatusRunner(String modelName, String ipPort, String site, RoleType roleType, String group,
+    public GrpcWorkerStatusRunner(String modelName, WorkerHost host, RoleType roleType,
                                   WorkerStatus workerStatus,
                                   EngineHealthReporter engineHealthReporter,
                                   EngineGrpcService engineGrpcService,
                                   long syncRequestTimeoutMs) {
-        this.ipPort = ipPort;
-        String[] split = ipPort.split(":");
-        this.ip = split[0];
-        this.grpcPort = CommonUtils.toGrpcPort(Integer.parseInt(split[1]));
+        this.ipPort = host.getIpPort();
+        this.ip = host.getIp();
+        this.workerStatusPort = host.getWorkerStatusPort();
         this.modelName = modelName;
         this.workerStatus = workerStatus;
-        this.site = site;
+        this.site = host.getSite();
         this.roleType = roleType;
-        this.group = group;
+        this.group = host.getGroup();
         this.engineHealthReporter = engineHealthReporter;
         this.engineGrpcService = engineGrpcService;
         this.syncRequestTimeoutMs = syncRequestTimeoutMs;
@@ -66,7 +65,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
 
             long latestFinishedTaskVersion = workerStatus.getLatestFinishedTaskVersion().get();
 
-            WorkerStatusResponse response = launchGrpcStatusCheck(ip, grpcPort, latestFinishedTaskVersion);
+            WorkerStatusResponse response = launchGrpcStatusCheck(ip, workerStatusPort, latestFinishedTaskVersion);
             handleStatusResponse(response, startTime);
         } finally {
             workerStatus.getStatusCheckInProgress().set(false);

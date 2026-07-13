@@ -96,6 +96,7 @@ export MODEL_SERVICE_CONFIG='{
             "address": "local-engine",
             "protocol": "http",
             "path": "/",
+            "worker_status_port": 18002,
             "discovery": {
                 "type": "static-env",
                 "hosts": ["127.0.0.1:8080"]
@@ -111,6 +112,10 @@ Each endpoint must contain exactly one `discovery` object. Supported types are:
 - `vipserver`: Uses `address` as the VipServer service name (internal builds).
 - `dashscope`: Uses `address` as the virtual service ID (internal builds). `base_url` defaults to
   `http://127.0.0.1:8880` when omitted.
+
+`worker_status_port` is optional and controls the gRPC port used only for `GetWorkerStatus`.
+When omitted, FlexLB uses the endpoint gRPC port (`http` discovery port + 1, or the discovered
+port itself when `protocol` is `grpc`).
 
 DashScope tuning fields are optional and belong to the same `discovery` object:
 

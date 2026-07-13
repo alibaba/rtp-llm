@@ -101,11 +101,15 @@ public class RoutingServiceDiscovery implements ServiceDiscovery {
             int discoveredPort = host.getPort();
             int httpPort = grpcEndpoint ? discoveredPort - 1 : discoveredPort;
             int grpcPort = grpcEndpoint ? discoveredPort : discoveredPort + 1;
+            int workerStatusPort = endpoint.getWorkerStatusPort() == null
+                    ? grpcPort
+                    : endpoint.getWorkerStatusPort();
             normalizedHosts.add(new WorkerHost(
                     host.getIp(),
                     httpPort,
                     grpcPort,
                     httpPort + 5,
+                    workerStatusPort,
                     host.getSite(),
                     endpoint.getGroup(),
                     host.getDeploymentName()));

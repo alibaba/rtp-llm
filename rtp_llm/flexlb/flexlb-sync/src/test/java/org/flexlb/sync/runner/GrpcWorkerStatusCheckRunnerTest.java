@@ -1,6 +1,7 @@
 package org.flexlb.sync.runner;
 
 import org.flexlb.dao.master.WorkerStatus;
+import org.flexlb.dao.master.WorkerHost;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineRpcService;
 import org.flexlb.service.grpc.EngineGrpcService;
@@ -25,9 +26,10 @@ class GrpcWorkerStatusCheckRunnerTest {
     void should_callGrpcServiceAndVerifyInteraction_when_runnerExecutes() {
         // Arrange
         String modelName = "test-model";
-        String ipPort = "127.0.0.1:8080";
         String site = "test-site";
         String group = "test-group";
+        WorkerHost host = new WorkerHost(
+                "127.0.0.1", 8080, 8081, 8085, 18002, site, group, "deployment-a");
 
         WorkerStatus workerStatus = new WorkerStatus();
         workerStatus.setIp("127.0.0.1");
@@ -53,13 +55,13 @@ class GrpcWorkerStatusCheckRunnerTest {
 
         // Act
         GrpcWorkerStatusRunner runner = new GrpcWorkerStatusRunner(
-                modelName, ipPort, site,
+                modelName, host,
                 RoleType.PREFILL,
-                group, workerStatus, engineHealthReporter, engineGrpcService, 20);
+                workerStatus, engineHealthReporter, engineGrpcService, 20);
         runner.run();
 
         // Assert
-        verify(engineGrpcService).getWorkerStatus("127.0.0.1", 8081, -1L, 20L, RoleType.PREFILL);
+        verify(engineGrpcService).getWorkerStatus("127.0.0.1", 18002, -1L, 20L, RoleType.PREFILL);
         assertEquals(64, workerStatus.getCacheStatus().getBlockSize());
         assertEquals(800, workerStatus.getAvailableKvCacheTokens().get());
         assertEquals(200, workerStatus.getUsedKvCacheTokens().get());
