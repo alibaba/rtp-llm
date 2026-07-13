@@ -11,8 +11,7 @@
 
 namespace rtp_llm {
 
-DeviceHostTransferExecutor::DeviceHostTransferExecutor(DeviceHostCopyOptions options):
-    options_(std::move(options)) {
+DeviceHostTransferExecutor::DeviceHostTransferExecutor(DeviceHostCopyOptions options): options_(std::move(options)) {
     strategies_.push_back(std::make_unique<StagedSmDeviceHostCopyStrategy>());
     strategies_.push_back(std::make_unique<CudaBatchDeviceHostCopyStrategy>());
     strategies_.push_back(std::make_unique<GenericMultiCopyDeviceHostCopyStrategy>());
@@ -20,8 +19,7 @@ DeviceHostTransferExecutor::DeviceHostTransferExecutor(DeviceHostCopyOptions opt
 
 DeviceHostTransferExecutor::~DeviceHostTransferExecutor() = default;
 
-CopyStatus DeviceHostTransferExecutor::execute(const TransferDescriptor& desc,
-                                                const ResolvedGroupLayout& layout) {
+CopyStatus DeviceHostTransferExecutor::execute(const TransferDescriptor& desc, const ResolvedGroupLayout& layout) {
     bool device_to_host = (desc.source_tier == Tier::DEVICE && desc.target_tier == Tier::HOST);
     return lowerAndExecute(desc, layout, device_to_host);
 }
@@ -36,10 +34,10 @@ CopyStatus DeviceHostTransferExecutor::lowerAndExecute(const TransferDescriptor&
     }
 
     if (plan.copy_tiles.empty()) {
-        if (!plan.zero_tiles.empty()) {
-            std::memset(plan.host.base, 0, plan.host.payload_bytes);
-        }
-        return CopyStatus::OK;
+        RTP_LLM_LOG_WARNING("%s copy plan has no copyable device block group=%d",
+                            device_to_host ? "D2H" : "H2D",
+                            desc.component_group_id);
+        return CopyStatus::INVALID_ARGS;
     }
 
     for (const auto& zero_tile : plan.zero_tiles) {
@@ -65,8 +63,8 @@ DeviceHostCopyPlan DeviceHostTransferExecutor::lowerPlan(const TransferDescripto
     plan.component_group_id = desc.component_group_id;
     out_status              = CopyStatus::OK;
 
-    const auto  host_block = desc.host_block;
-    auto&       host_pool  = *layout.host_pool;
+    const auto host_block = desc.host_block;
+    auto&      host_pool  = *layout.host_pool;
 
     if (!host_pool.validBlock(host_block)) {
         RTP_LLM_LOG_WARNING("invalid host block %d", host_block);
@@ -83,9 +81,8 @@ DeviceHostCopyPlan DeviceHostTransferExecutor::lowerPlan(const TransferDescripto
 
     const size_t required_host_bytes = layout.layout_bytes;
     if (required_host_bytes != host_pool.payloadBytes()) {
-        RTP_LLM_LOG_WARNING("component layout bytes %zu != host payload bytes %zu",
-                            required_host_bytes,
-                            host_pool.payloadBytes());
+        RTP_LLM_LOG_WARNING(
+            "component layout bytes %zu != host payload bytes %zu", required_host_bytes, host_pool.payloadBytes());
         out_status = CopyStatus::INVALID_ARGS;
         return plan;
     }
@@ -95,9 +92,9 @@ DeviceHostCopyPlan DeviceHostTransferExecutor::lowerPlan(const TransferDescripto
 
     const auto& device_blocks = desc.device_blocks;
 
-    size_t host_offset          = 0;
-    int    first_device_index   = -1;
-    bool   single_device        = true;
+    size_t host_offset        = 0;
+    int    first_device_index = -1;
+    bool   single_device      = true;
 
     for (size_t component_idx = 0; component_idx < layout.components.size(); ++component_idx) {
         const auto& component    = layout.components[component_idx];

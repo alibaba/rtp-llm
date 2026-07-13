@@ -77,13 +77,41 @@ cc_test(
     env = {},
 )
 
+cc_library(
+    name = "copy_engine_test_utils",
+    testonly = True,
+    srcs = ["CopyEngineTestUtils.cc"],
+    hdrs = ["CopyEngineTestUtils.h"],
+    deps = [
+        "//rtp_llm/cpp/cache/block_tree_cache",
+        "@com_google_googletest//:gtest",
+    ],
+)
+
 cc_test(
-    name = "copy_engine_test",
-    srcs = ["CopyEngineTest.cc"],
+    name = "copy_engine_device_host_test",
+    testonly = True,
+    srcs = ["CopyEngineDeviceHostTest.cc"],
     copts = test_copts,
-    deps = test_deps,
+    deps = test_deps + [":copy_engine_test_utils"],
     env = {},
-    exec_properties = {"gpu": "H20"},
+)
+
+cc_test(
+    name = "copy_engine_host_disk_test",
+    testonly = True,
+    srcs = ["CopyEngineHostDiskTest.cc"],
+    copts = test_copts,
+    deps = test_deps + [":copy_engine_test_utils"],
+    env = {},
+)
+
+test_suite(
+    name = "copy_engine_test",
+    tests = [
+        ":copy_engine_device_host_test",
+        ":copy_engine_host_disk_test",
+    ],
 )
 
 cc_test(

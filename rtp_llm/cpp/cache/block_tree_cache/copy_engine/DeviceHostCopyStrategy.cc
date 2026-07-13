@@ -194,8 +194,6 @@ StrategyResult StagedSmDeviceHostCopyStrategy::tryExecute(const DeviceHostCopyPl
         return StrategyResult::done();
     }
 
-    // Hold lock during the entire execStagedMemoryCopy call to prevent concurrent
-    // staged copies on the same device from corrupting shared staging buffers.
     std::lock_guard<std::mutex> lock(scratch_mutex_);
     auto&                       entry = scratch_by_device_[device_index];
     if (!entry) {
@@ -205,7 +203,8 @@ StrategyResult StagedSmDeviceHostCopyStrategy::tryExecute(const DeviceHostCopyPl
 
     bool ok = execStagedMemoryCopy(staged_params, entry.get());
     if (!ok) {
-        return StrategyResult::failed(CopyStatus::DEVICE_IO_ERROR);
+        // Conservatively fall back to generic
+        return StrategyResult::notApplicable();
     }
     return StrategyResult::done();
 }
