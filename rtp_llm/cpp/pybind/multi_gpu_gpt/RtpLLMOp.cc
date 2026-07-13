@@ -1,6 +1,8 @@
 #include <cstddef>
 #include <memory>
+#include <numeric>
 #include <tuple>
+#include <vector>
 #include "autil/Log.h"
 #include "c10/util/intrusive_ptr.h"
 #include <grpcpp/grpcpp.h>
@@ -9,6 +11,7 @@
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/config/ModelConfig.h"
+#include "rtp_llm/cpp/config/MTPModelConfigHelper.h"
 #include "rtp_llm/cpp/pybind/multi_gpu_gpt/RtpLLMOp.h"
 #include "rtp_llm/cpp/engine_base/EngineInitParams.h"
 #include "rtp_llm/cpp/engine_base/ProposeModelEngineInitParams.h"
@@ -33,17 +36,20 @@ prepareMTPEngineInitParams(size_t model_id, py::object propose_model, const Engi
     // Get model_config from model (only difference between propose and score models)
     auto model_config = sp_model.attr("model_config").cast<ModelConfig>();
 
-    py::object py_layers_weights     = sp_model.attr("weight").attr("weights");
-    py::object py_global_weights     = sp_model.attr("weight").attr("global_weights");
-    auto       convert               = WeightsConverter(false, model_config.quant_algo);
-    auto       py_layers_weights_vec = convertPyObjectToVec(py_layers_weights);
-    size_t     model_num             = py_layers_weights_vec.size();
-    size_t     gen_num_per_cycle     = base_params.sp_config.gen_num_per_cycle;
+    py::object          py_layers_weights     = sp_model.attr("weight").attr("weights");
+    py::object          py_global_weights     = sp_model.attr("weight").attr("global_weights");
+    auto                convert               = WeightsConverter(false, model_config.quant_algo);
+    auto                py_layers_weights_vec = convertPyObjectToVec(py_layers_weights);
+    std::vector<size_t> source_layer_indices(py_layers_weights_vec.size());
+    std::iota(source_layer_indices.begin(), source_layer_indices.end(), 0);
+    size_t model_num         = py_layers_weights_vec.size();
+    size_t gen_num_per_cycle = base_params.sp_config.gen_num_per_cycle;
     if (gen_num_per_cycle > 1 && py_layers_weights_vec.size() == 1) {
         RTP_LLM_LOG_WARNING("duplicate py_layers_weights_vec from 1 to sp_config.gen_num_per_cycle: %ld",
                             gen_num_per_cycle);
         for (size_t i = 1; i < gen_num_per_cycle; i++) {
             py_layers_weights_vec.push_back(py_layers_weights_vec[0]);
+            source_layer_indices.push_back(0);
         }
         model_num = gen_num_per_cycle;
     }
@@ -63,17 +69,21 @@ prepareMTPEngineInitParams(size_t model_id, py::object propose_model, const Engi
         py_eplb = sp_model.attr("py_eplb");
     }
 
-    // Create a temporary ModelConfig with num_layers = 1 for MTP
-    ModelConfig temp_model_config = model_config;
-    temp_model_config.num_layers  = 1;
+    std::vector<ModelConfig> module_model_configs;
+    module_model_configs.reserve(model_num);
+    for (size_t i = 0; i < model_num; ++i) {
+        RTP_LLM_CHECK_WITH_INFO(i < source_layer_indices.size(), "missing MTP source layer for module %zu", i);
+        module_model_configs.push_back(makeSingleLayerMTPModelConfig(model_config, source_layer_indices[i]));
+    }
+    validateHomogeneousMTPCacheLayouts(module_model_configs);
 
-    for (int i = 0; i < model_num; i++) {
+    for (size_t i = 0; i < model_num; i++) {
         auto     layer_weigths = py_layers_weights_vec[i];
         py::list tmp;
         tmp.append(layer_weigths);
         auto gpt_weight = convert.createGptWeights(tmp, py_global_weights);
         mtp_params->push_back(std::move(std::make_unique<EngineInitParams>(model_id,
-                                                                           temp_model_config,
+                                                                           module_model_configs[i],
                                                                            base_params.parallelism_config,
                                                                            base_params.runtime_config,
                                                                            base_params.pd_sep_config,

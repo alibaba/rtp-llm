@@ -10,6 +10,7 @@ cc_test(
     srcs = ["ExecOpsTest.cc"],
     deps = [
         "//rtp_llm/models_py/bindings/core:exec_ops_test_lib",
+        "//rtp_llm/models_py/bindings/common:common",
         "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
         "//rtp_llm/models_py/bindings/cuda/ops:gpu_base",
         "//rtp_llm/models_py/bindings/cuda/ops:cuda_impl",

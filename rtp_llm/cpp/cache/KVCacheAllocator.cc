@@ -114,9 +114,8 @@ uint32_t KVCacheAllocator::convertToGlobalLayerId(size_t model_id, int local_lay
         return std::numeric_limits<uint32_t>::max();
     }
 
-    return static_cast<uint32_t>(static_cast<int>(config_.layer_num)
-                                 + static_cast<int>(model_id - 1) * static_cast<int>(sub->layer_num)
-                                 + local_layer_id);
+    return CacheConfig::mtpGlobalLayerId(
+        config_.layer_num, static_cast<int>(model_id - 1), sub->layer_num, local_layer_id);
 }
 
 void KVCacheAllocator::blockCopy(int src_block_index, int dest_block_index) {
@@ -221,7 +220,11 @@ BatchKVCacheResourcePtr KVCacheAllocator::popBlocksFromCache(size_t min_blocks_t
 
     auto batch_resource = std::make_shared<BatchKVCacheResource>();
     batch_resource->resetBatchSize(1);
-    batch_resource->initGroups(config_.groupNums(), static_cast<int>(config_.layer_all_num), config_.layerGroupIdsSnapshot(), config_.kernelBlocksPerKvBlock(), config_.groupTypesSnapshot());
+    batch_resource->initGroups(config_.groupNums(),
+                               static_cast<int>(config_.layer_all_num),
+                               config_.layerGroupIdsSnapshot(),
+                               config_.kernelBlocksPerKvBlock(),
+                               config_.groupTypesSnapshot());
     batch_resource->setLastBlockAligned(true);
 
     for (int gid = 0; gid < config_.groupNums(); ++gid) {

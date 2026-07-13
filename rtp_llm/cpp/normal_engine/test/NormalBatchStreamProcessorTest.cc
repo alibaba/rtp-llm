@@ -37,6 +37,8 @@ TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
     ProfilingDebugLoggingConfig profiling_debug_logging_config;
     CacheConfig                 cache_config;
     { GroupBase g; g.policy.group_type = CacheGroupType::FULL; cache_config.groups.push_back(g); }
+    cache_config.kv_block_stride_bytes = 4096;
+    cache_config.kv_scale_stride_bytes = 256;
 
     RuntimeConfig              runtime_config;
     NormalBatchStreamProcessor processor(
@@ -118,6 +120,8 @@ TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
         EXPECT_EQ(sequence_lengths, toVec<int>(model_input.sequence_lengths));
         EXPECT_EQ(prefix_lengths, toVec<int>(model_input.prefix_lengths));
         EXPECT_EQ(kv_cache_block_id, toVec<int>(model_input.kv_cache_block_id));
+        EXPECT_EQ(model_input.kv_block_stride_bytes, cache_config.kv_block_stride_bytes);
+        EXPECT_EQ(model_input.kv_scale_stride_bytes, cache_config.kv_scale_stride_bytes);
     }
     {
         MMModelConfig mm_model_config;

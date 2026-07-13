@@ -2,43 +2,9 @@
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/models_py/bindings/core/CacheStoreAsyncWriter.h"
 
-#include <algorithm>
-
 namespace rtp_llm {
 
 using namespace torch_ext;
-
-namespace {
-
-size_t inferPhysicalBlockStrideBytes(const torch::Tensor& tensor,
-                                     size_t               physical_tokens_per_block,
-                                     size_t               layer_tokens_per_block,
-                                     size_t               fallback) {
-    if (!tensor.defined() || tensor.numel() <= 0 || tensor.dim() <= 0 || physical_tokens_per_block == 0
-        || layer_tokens_per_block == 0) {
-        return fallback;
-    }
-
-    const auto leading_blocks = static_cast<size_t>(tensor.size(0));
-    if (leading_blocks == 0) {
-        return fallback;
-    }
-
-    const size_t kernel_blocks_per_physical_block =
-        std::max<size_t>(1, physical_tokens_per_block / layer_tokens_per_block);
-    if (leading_blocks % kernel_blocks_per_physical_block != 0) {
-        return fallback;
-    }
-
-    const size_t physical_blocks = leading_blocks / kernel_blocks_per_physical_block;
-    if (physical_blocks == 0 || static_cast<size_t>(tensor.nbytes()) % physical_blocks != 0) {
-        return fallback;
-    }
-
-    return static_cast<size_t>(tensor.nbytes()) / physical_blocks;
-}
-
-}  // namespace
 
 void WriteCacheStoreOp(const torch::Tensor&                         input_lengths,
                        const torch::Tensor&                         prefix_lengths,
@@ -81,16 +47,6 @@ void WriteCacheStoreOp(const torch::Tensor&                         input_length
                 captured_kv_cache,
                 captured_kv_cache_layer_to_group,
                 event = std::move(event)]() mutable {
-        const size_t kv_block_stride_bytes =
-            inferPhysicalBlockStrideBytes(captured_kv_cache.kv_cache_base,
-                                          captured_cache_store.tokens_per_block,
-                                          static_cast<size_t>(captured_kv_cache.seq_size_per_block),
-                                          captured_cache_store.kv_block_stride_bytes);
-        const size_t kv_scale_stride_bytes =
-            inferPhysicalBlockStrideBytes(captured_kv_cache.kv_scale_base,
-                                          captured_cache_store.tokens_per_block,
-                                          static_cast<size_t>(captured_kv_cache.seq_size_per_block),
-                                          captured_cache_store.kv_scale_stride_bytes);
         CacheStoreInputs inputs{captured_input_lengths,
                                 captured_prefix_lengths,
                                 captured_kv_cache_block_id_host,
@@ -102,8 +58,8 @@ void WriteCacheStoreOp(const torch::Tensor&                         input_length
                                 captured_cache_store.request_pd_separation,
                                 captured_cache_store.cache_keys,
                                 captured_cache_store.tokens_per_block,
-                                kv_block_stride_bytes,
-                                kv_scale_stride_bytes,
+                                captured_cache_store.kv_block_stride_bytes,
+                                captured_cache_store.kv_scale_stride_bytes,
                                 captured_cache_store.pd_separation,
                                 captured_cache_store.model_id,
                                 captured_cache_store.decode_entrance,

@@ -495,7 +495,9 @@ class QwenV2MTP(QWenV2):
         desc = KVCacheSpecDesc()
         desc.cache_type = KVCacheSpecType.MHA
         desc.tag = "default"
-        model_config.kv_cache_spec_descs = [[desc]]
+        model_config.kv_cache_spec_descs = [
+            [desc] for _ in range(model_config.num_layers)
+        ]
 
     def _create_python_model(self):
         model_config = self.model_config

@@ -268,13 +268,14 @@ struct PyCacheStoreInputs {
     torch::Tensor            kv_cache_group_types;
     std::vector<std::string> cache_keys;  // [context_batch_size]
     size_t                   tokens_per_block;
-    size_t                   kv_block_stride_bytes;
-    size_t                   kv_scale_stride_bytes;
-    bool                     pd_separation   = false;
-    size_t                   model_id        = 0;
-    bool                     decode_entrance = false;
-    bool                     warmup          = false;
-    bool                     mla_kvcache     = false;
+    // Physical KV-manager block strides, supplied by CacheConfig rather than inferred from tensor views.
+    size_t kv_block_stride_bytes;
+    size_t kv_scale_stride_bytes;
+    bool   pd_separation   = false;
+    size_t model_id        = 0;
+    bool   decode_entrance = false;
+    bool   warmup          = false;
+    bool   mla_kvcache     = false;
 
     // Cache store reference (C++ only; passes through Python without inspection)
     std::shared_ptr<rtp_llm::CacheStore> cache_store;
@@ -349,7 +350,6 @@ struct PyAttentionInputs {
 
     // Headwise attention config (Python dict or None).
     py::object headwise_config{py::none()};
-
 };
 
 struct BertEmbeddingInputs {
