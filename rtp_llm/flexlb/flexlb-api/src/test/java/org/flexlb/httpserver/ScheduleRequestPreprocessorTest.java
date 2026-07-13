@@ -43,7 +43,7 @@ class ScheduleRequestPreprocessorTest {
 
         preprocessor.prepare(request);
 
-        assertEquals(List.of(455111481605203084L), request.getBlockCacheKeys());
+        assertEquals(List.of(2164874634404590027L), request.getBlockCacheKeys());
         assertNull(request.getInputIds());
     }
 

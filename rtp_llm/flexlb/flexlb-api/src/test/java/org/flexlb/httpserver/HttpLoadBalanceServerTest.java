@@ -82,7 +82,7 @@ class HttpLoadBalanceServerTest {
         ArgumentCaptor<BalanceContext> contextCaptor = ArgumentCaptor.forClass(BalanceContext.class);
         verify(routeService).route(contextCaptor.capture());
         assertEquals(
-                List.of(455111481605203084L),
+                List.of(2164874634404590027L),
                 contextCaptor.getValue().getRequest().getBlockCacheKeys());
         assertNull(contextCaptor.getValue().getRequest().getInputIds());
     }

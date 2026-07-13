@@ -2,6 +2,7 @@ package org.flexlb.util;
 
 import org.junit.jupiter.api.Test;
 
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 
@@ -11,27 +12,27 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 class BlockCacheKeyCalculatorTest {
 
     @Test
-    void matchesRtpLlmCppGoldenVectors() {
+    void matchesVllmSha256CborGoldenVectors() {
+        List<Long> inputIds = new ArrayList<>();
+        for (long tokenId = 0; tokenId < 128; tokenId++) {
+            inputIds.add(tokenId);
+        }
+
         assertEquals(
-                List.of(455111481605203084L, 6902853672176602142L),
-                BlockCacheKeyCalculator.calculate(
-                        List.of(1L, 2L, 3L, 4L, 5L, 6L, 7L, 8L), 4));
-        assertEquals(
-                List.of(555616881177985336L, 4238552175599314317L),
-                BlockCacheKeyCalculator.calculate(
-                        List.of(151644L, 8948L, 198L, 2610L, 525L, 264L, 1296L, 13L), 4));
-        assertEquals(
-                List.of(-8366447758780319272L, 707304046373051542L),
-                BlockCacheKeyCalculator.calculate(
-                        List.of(0L, 2147483647L, 2147483648L, -1L), 2));
+                List.of(-7527834946346035334L, -7860823284622341314L),
+                BlockCacheKeyCalculator.calculate(inputIds, 64));
     }
 
     @Test
     void dropsFinalPartialBlock() {
+        List<Long> inputIds = new ArrayList<>();
+        for (long tokenId = 0; tokenId < 130; tokenId++) {
+            inputIds.add(tokenId);
+        }
+
         assertEquals(
-                List.of(455111481605203084L, 6902853672176602142L),
-                BlockCacheKeyCalculator.calculate(
-                        List.of(1L, 2L, 3L, 4L, 5L, 6L, 7L, 8L, 9L, 10L), 4));
+                List.of(-7527834946346035334L, -7860823284622341314L),
+                BlockCacheKeyCalculator.calculate(inputIds, 64));
     }
 
     @Test
