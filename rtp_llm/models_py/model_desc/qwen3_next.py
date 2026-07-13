@@ -27,6 +27,7 @@ from rtp_llm.models_py.triton_kernels.causal_conv1d import (
     CausalConv1dMetadata,
     causal_conv1d_fn,
     causal_conv1d_update,
+    causal_conv1d_update_decode_ref,
     prepare_causal_conv1d_metadata,
 )
 from rtp_llm.models_py.triton_kernels.common.layernorm_gated import RmsNormGated
@@ -65,6 +66,7 @@ def _env_flag(name: str) -> bool:
 
 
 _Q3N_FLA_DECODE_REF = _env_flag("RTPLLM_QWEN3_NEXT_FLA_REF")
+_Q3N_CONV_DECODE_REF = _env_flag("RTPLLM_QWEN3_NEXT_CONV_REF")
 
 
 class Qwen3NextMetadata(object):
@@ -353,7 +355,12 @@ class Qwen3NextGatedDeltaNetDecode(Qwen3NextGatedDeltaNetBase):
         )
         origin_shape = mixed_qkv.shape
         mixed_qkv = mixed_qkv.reshape(batch, seq, -1).transpose(1, 2)
-        out = causal_conv1d_update(
+        conv1d_update = (
+            causal_conv1d_update_decode_ref
+            if _Q3N_CONV_DECODE_REF
+            else causal_conv1d_update
+        )
+        out = conv1d_update(
             mixed_qkv,
             conv_states.transpose(1, 2),
             self.conv_weights,

@@ -6,6 +6,7 @@ import unittest
 import torch
 import torch.nn.functional as F
 
+import rtp_llm.models_py.triton_kernels.causal_conv1d as causal_conv1d_ops
 from rtp_llm.models_py.triton_kernels.causal_conv1d import causal_conv1d_update
 from rtp_llm.test.utils.diff_util import compare_tensor_diff_with_ratio
 
@@ -70,6 +71,76 @@ def causal_conv1d_update_ref(
 
 
 class TestCausalConv1dUpdate(unittest.TestCase):
+    def test_decode_reference_matches_paged_kernel_and_graph_replay(self):
+        decode_ref = getattr(
+            causal_conv1d_ops, "causal_conv1d_update_decode_ref", None
+        )
+        self.assertIsNotNone(decode_ref)
+
+        torch.manual_seed(7)
+        device = "cuda"
+        batch, dim, width = 4, 64, 4
+        state_len = width - 1
+        seq_size_per_block = 2
+        block_map = torch.tensor(
+            [[1, 2], [3, 4], [5, 6], [-1, -1]],
+            dtype=torch.int32,
+            device=device,
+        )
+        sequence_lengths = torch.tensor(
+            [3, 3, 3, 0], dtype=torch.int32, device=device
+        )
+        x = torch.randn(batch, dim, 1, dtype=torch.bfloat16, device=device)
+        weight = torch.randn(dim, width, dtype=torch.float32, device=device)
+
+        # Match the transposed cache view used by Qwen3Next decode, including
+        # padding between physical cache lines.
+        storage_ref = torch.randn(
+            7, state_len, dim + 16, dtype=torch.bfloat16, device=device
+        )
+        storage_kernel = storage_ref.clone()
+        state_ref = storage_ref[:, :, :dim].transpose(1, 2)
+        state_kernel = storage_kernel[:, :, :dim].transpose(1, 2)
+        block_zero_before = state_ref[0].clone()
+
+        out_kernel = causal_conv1d_update(
+            x,
+            state_kernel,
+            weight,
+            activation="silu",
+            block_map=block_map,
+            sequence_lengths=sequence_lengths,
+            seq_size_per_block=seq_size_per_block,
+        )
+        out_ref = decode_ref(
+            x,
+            state_ref,
+            weight,
+            activation="silu",
+            block_map=block_map,
+            sequence_lengths=sequence_lengths,
+            seq_size_per_block=seq_size_per_block,
+        )
+
+        torch.testing.assert_close(out_ref[:3], out_kernel[:3], rtol=1e-2, atol=5e-2)
+        torch.testing.assert_close(state_ref[[2, 4, 6]], state_kernel[[2, 4, 6]])
+        torch.testing.assert_close(state_ref[0], block_zero_before)
+
+        graph = torch.cuda.CUDAGraph()
+        graph_state = state_ref.clone()
+        with torch.cuda.graph(graph):
+            graph_out = decode_ref(
+                x,
+                graph_state,
+                weight,
+                activation="silu",
+                block_map=block_map,
+                sequence_lengths=sequence_lengths,
+                seq_size_per_block=seq_size_per_block,
+            )
+        graph.replay()
+        self.assertTrue(torch.isfinite(graph_out).all().item())
+
     def test_causal_conv1d_update(self):
         itype = torch.bfloat16
         device = "cuda"
