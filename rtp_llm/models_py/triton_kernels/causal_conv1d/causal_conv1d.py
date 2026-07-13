@@ -10,6 +10,7 @@ from typing import Optional, Union
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 import triton
 import triton.language as tl
 
@@ -925,6 +926,77 @@ def _causal_conv1d_update_kernel(
         )
 
         tl.store(o_ptrs, acc, mask=mask_1d)
+
+
+def causal_conv1d_update_decode_ref(
+    x: torch.Tensor,
+    conv_state: torch.Tensor,
+    weight: torch.Tensor,
+    bias: Optional[torch.Tensor] = None,
+    activation: Union[bool, str, None] = None,
+    cache_seqlens: Optional[torch.Tensor] = None,
+    block_map: Optional[torch.Tensor] = None,
+    seq_size_per_block: int = 1,
+    sequence_lengths: Optional[torch.Tensor] = None,
+    **kwargs,
+) -> torch.Tensor:
+    """Graph-capturable PyTorch reference for one-token paged decode."""
+    del kwargs
+    if cache_seqlens is not None:
+        raise ValueError("decode reference does not support circular cache state")
+    if block_map is None or sequence_lengths is None:
+        raise ValueError("decode reference requires block map and sequence lengths")
+    if isinstance(activation, bool):
+        activation = "silu" if activation else None
+    if activation not in (None, "silu", "swish"):
+        raise ValueError("activation must be None, silu, or swish")
+
+    input_dtype = x.dtype
+    squeeze_output = x.dim() == 2
+    if squeeze_output:
+        x = x.unsqueeze(-1)
+    if x.dim() != 3 or x.shape[-1] != 1:
+        raise ValueError("decode reference only supports one token per sequence")
+
+    batch, dim, _ = x.shape
+    width = weight.shape[1]
+    state_len = conv_state.shape[-1]
+    if conv_state.shape[1] != dim or weight.shape[0] != dim:
+        raise ValueError("conv state or weight shape does not match input")
+    if state_len != width - 1:
+        raise ValueError("decode reference requires state_len == width - 1")
+
+    rows = torch.arange(batch, device=block_map.device, dtype=torch.int64)
+    seq_lens = sequence_lengths.to(torch.int64)
+    active = seq_lens > 0
+    max_block_offset = block_map.shape[1] - 1
+    read_offsets = torch.div(seq_lens - 2, seq_size_per_block, rounding_mode="floor")
+    write_offsets = torch.div(seq_lens - 1, seq_size_per_block, rounding_mode="floor")
+    read_offsets = read_offsets.clamp(0, max_block_offset)
+    write_offsets = write_offsets.clamp(0, max_block_offset)
+    read_ids = block_map[rows, read_offsets].to(torch.int64)
+    write_ids = block_map[rows, write_offsets].to(torch.int64)
+    valid_read = active & (read_ids > 0)
+    valid_write = active & (write_ids > 0)
+    safe_read_ids = torch.where(valid_read, read_ids, torch.zeros_like(read_ids))
+    safe_write_ids = torch.where(valid_write, write_ids, torch.zeros_like(write_ids))
+
+    state = conv_state.index_select(0, safe_read_ids)
+    x_new = torch.cat((state, x.to(state.dtype)), dim=-1).to(weight.dtype)
+    output = F.conv1d(
+        x_new, weight.unsqueeze(1), bias, padding=0, groups=dim
+    ).to(input_dtype)
+    if activation is not None:
+        output = F.silu(output)
+    output = torch.where(valid_read[:, None, None], output, torch.zeros_like(output))
+
+    next_state = x_new[:, :, -state_len:].to(conv_state.dtype)
+    old_write_values = conv_state.index_select(0, safe_write_ids)
+    write_values = torch.where(
+        valid_write[:, None, None], next_state, old_write_values
+    )
+    conv_state.index_copy_(0, safe_write_ids, write_values)
+    return output.squeeze(-1) if squeeze_output else output
 
 
 def causal_conv1d_update(
