@@ -23,18 +23,19 @@ class HybridKVCacheSpecTest(TestCase):
         KimiLinear._post_build_model_config(config)
         return [layer_descs[0].tag for layer_descs in config.kv_cache_spec_descs]
 
-    def test_qwen_v2_mtp_default_desc_has_one_layer(self):
+    def test_qwen_v2_mtp_default_desc_matches_model_layers(self):
         config = ModelConfig()
         config.num_layers = 32
         config.is_mtp = True
 
         QwenV2MTP._post_build_model_config(config)
 
-        self.assertEqual(len(config.kv_cache_spec_descs), 1)
-        self.assertEqual(config.kv_cache_spec_descs[0][0].tag, "default")
-        self.assertEqual(config.kv_cache_spec_descs[0][0].cache_type, KVCacheSpecType.MHA)
+        self.assertEqual(len(config.kv_cache_spec_descs), config.num_layers)
+        for layer_descs in config.kv_cache_spec_descs:
+            self.assertEqual(layer_descs[0].tag, "default")
+            self.assertEqual(layer_descs[0].cache_type, KVCacheSpecType.MHA)
 
-    def test_deepseek_v3_mtp_default_desc_has_one_layer(self):
+    def test_deepseek_v3_mtp_default_desc_matches_model_layers(self):
         config = ModelConfig()
         config.num_layers = 61
         config.is_mtp = True
@@ -43,9 +44,20 @@ class HybridKVCacheSpecTest(TestCase):
 
         DeepSeekV3Mtp._post_build_model_config(config)
 
-        self.assertEqual(len(config.kv_cache_spec_descs), 1)
-        self.assertEqual(config.kv_cache_spec_descs[0][0].tag, "default")
-        self.assertEqual(config.kv_cache_spec_descs[0][0].cache_type, KVCacheSpecType.MLA)
+        self.assertEqual(len(config.kv_cache_spec_descs), config.num_layers)
+        for layer_descs in config.kv_cache_spec_descs:
+            self.assertEqual(layer_descs[0].tag, "default")
+            self.assertEqual(layer_descs[0].cache_type, KVCacheSpecType.MLA)
+
+    def test_mtp_single_layer_models_keep_one_descriptor(self):
+        for model_cls in (QwenV2MTP, DeepSeekV3Mtp):
+            config = ModelConfig()
+            config.num_layers = 1
+            config.is_mtp = True
+
+            model_cls._post_build_model_config(config)
+
+            self.assertEqual(len(config.kv_cache_spec_descs), 1)
 
     def test_qwen3_next_mtp_desc_has_one_full_layer(self):
         config = self._build_model_config([HybridAttentionType.NONE])

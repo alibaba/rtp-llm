@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <map>
 #include <memory>
+#include <limits>
 #include <sstream>
 #include <string>
 #include <unordered_map>
@@ -71,13 +72,26 @@ struct CacheConfig {
     size_t kv_scale_stride_bytes = 0;
 
     // Attention-specific configuration
-    int linear_step      = 1;  // For Linear attention: keep one cache block every `linear_step` blocks
-    int group_layer_num  = 1;  // Number of layers per group for hybrid attention
+    int linear_step     = 1;  // For Linear attention: keep one cache block every `linear_step` blocks
+    int group_layer_num = 1;  // Number of layers per group for hybrid attention
 
     // mtp-model configurations
     std::vector<std::shared_ptr<CacheConfig>> mtp_sub_configs;
 
     CacheConfig() {}
+
+    static uint32_t
+    mtpGlobalLayerId(uint32_t main_layer_num, int module_index, uint32_t module_layer_num, int local_layer_id) {
+        constexpr uint32_t invalid = std::numeric_limits<uint32_t>::max();
+        if (module_index < 0 || module_layer_num == 0 || local_layer_id < 0
+            || static_cast<uint32_t>(local_layer_id) >= module_layer_num) {
+            return invalid;
+        }
+        const uint64_t global_layer_id = static_cast<uint64_t>(main_layer_num)
+                                         + static_cast<uint64_t>(module_index) * module_layer_num
+                                         + static_cast<uint32_t>(local_layer_id);
+        return global_layer_id < invalid ? static_cast<uint32_t>(global_layer_id) : invalid;
+    }
 
     int groupNums() const {
         return static_cast<int>(groups.size());
@@ -310,9 +324,8 @@ struct CacheConfig {
         }
     }
 
-    std::shared_ptr<CacheConfig> mergeMTPModule(const CacheConfig& propose_config,
-                                                int                module_index,
-                                                uint32_t           main_layer_num);
+    std::shared_ptr<CacheConfig>
+    mergeMTPModule(const CacheConfig& propose_config, int module_index, uint32_t main_layer_num);
 
     CacheGroupPolicy policyForGroup(size_t gid) const {
         RTP_LLM_CHECK_WITH_INFO(
@@ -359,13 +372,13 @@ struct CacheConfig {
 
     static bool samePolicy(const CacheGroupPolicy& lhs, const CacheGroupPolicy& rhs);
 
-    void setTopology(std::vector<GroupBase> new_groups, std::vector<LayerBase> new_layers);
-    void fromGroupedSpecs(const std::vector<KVCacheSpecPtr>&   specs,
-                          const std::vector<std::vector<int>>& layers_by_group,
-                          const std::vector<CacheGroupType>&   types,
-                          const std::vector<std::string>&      tags     = {},
-                          const std::vector<CacheGroupPolicy>& policies = {});
-    void finalizeBlockNums(uint32_t global_block_num, const RuntimeConfig& runtime_config);
+    void        setTopology(std::vector<GroupBase> new_groups, std::vector<LayerBase> new_layers);
+    void        fromGroupedSpecs(const std::vector<KVCacheSpecPtr>&   specs,
+                                 const std::vector<std::vector<int>>& layers_by_group,
+                                 const std::vector<CacheGroupType>&   types,
+                                 const std::vector<std::string>&      tags     = {},
+                                 const std::vector<CacheGroupPolicy>& policies = {});
+    void        finalizeBlockNums(uint32_t global_block_num, const RuntimeConfig& runtime_config);
     std::string debugString(size_t indent = 0) const;
 };
 

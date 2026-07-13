@@ -242,19 +242,6 @@ void runtimeWriteCacheStore(const CacheStoreInputs&     cache_store_inputs,
             std::string cache_key;
             cache_key =
                 makeCacheKey(param.model_id, param.cache_keys[batch_id * max_blocks_per_batch + index], param.layer_id);
-            RTP_LLM_LOG_INFO(
-                "PD_CACHE_KEY_WRITE request_id=%ld model_id=%zu local_layer_id=%d gid=%d group_type=%d batch_id=%zu "
-                "block_index=%d block_id=%d cache_key=%s block_key_mode=%s",
-                static_cast<long>(request_id),
-                param.model_id,
-                param.layer_id,
-                gid,
-                static_cast<int>(group_type),
-                batch_id,
-                index,
-                static_cast<int>(block_id),
-                cache_key.c_str(),
-                (is_grouped_layout || mla_kvcache) ? "kv" : "k_v");
 
             void*                 kv_addr = (void*)((int8_t*)kv_cache_data + block_id * param.kv_block_stride_bytes);
             std::shared_ptr<void> kv_block_addr(kv_addr, [](void* p) {});
@@ -297,14 +284,18 @@ void runtimeWriteCacheStore(const CacheStoreInputs&     cache_store_inputs,
             }
         }
 
-        auto storeCallback = [layer_id = param.layer_id, request_id](bool success, CacheStoreErrorCode ec) {
+        auto storeCallback = [layer_id = param.layer_id, model_id = param.model_id, gid, request_id, request_blocks](
+                                 bool success, CacheStoreErrorCode ec) {
             if (!success) {
-                RTP_LLM_LOG_WARNING(
-                    "query [%ld], layer id [%d], call store kv cache failed, ec is %d, error msg is [%s]",
-                    request_id,
-                    layer_id,
-                    ec,
-                    ErrorCodeToString(transCacheStoreErrorCode(ec)).c_str());
+                RTP_LLM_LOG_WARNING("PD_CACHE_KEY_WRITE_FAILED request_id=%ld model_id=%zu local_layer_id=%d gid=%d "
+                                    "error_code=%d error=%s buffer={%s}",
+                                    static_cast<long>(request_id),
+                                    model_id,
+                                    layer_id,
+                                    gid,
+                                    static_cast<int>(ec),
+                                    ErrorCodeToString(transCacheStoreErrorCode(ec)).c_str(),
+                                    request_blocks->debugInfo().c_str());
             }
         };
         cache_store->store(request_blocks, storeCallback);

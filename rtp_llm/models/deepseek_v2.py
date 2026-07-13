@@ -813,7 +813,9 @@ class DeepSeekV3Mtp(DeepSeekV2):
         else:
             desc.cache_type = KVCacheSpecType.MHA
         desc.tag = "default"
-        model_config.kv_cache_spec_descs = [[desc]]
+        model_config.kv_cache_spec_descs = [
+            [desc] for _ in range(model_config.num_layers)
+        ]
 
     @staticmethod
     def get_weight_cls():

@@ -261,8 +261,8 @@ CacheLayerLayout KVCacheManager::getMainModelCacheLayerLayout() const {
     const auto layer_group_ids  = config_.layerGroupIdsSnapshot();
     const auto layer_tag_to_gid = config_.layerTagToGroupIdSnapshot();
     layout.layer_to_group_ids.resize(config_.layer_num);
-    layout.group_types          = config_.groupTypesSnapshot();
-    layout.group_tags           = config_.groupTagsSnapshot();
+    layout.group_types = config_.groupTypesSnapshot();
+    layout.group_tags  = config_.groupTagsSnapshot();
     layout.layer_tag_to_group_id.resize(config_.layer_num);
     layout.layer_attn_types.resize(config_.layer_num, CacheGroupType::FULL);
     layout.layers_to_kv_buffer_ptrs_by_group.resize(config_.layer_num);
@@ -323,8 +323,6 @@ CacheLayerLayout KVCacheManager::getMTPModuleCacheLayerLayout(int mtp_module_id)
     const auto& mtp_sub_config = config_.mtp_sub_configs[mtp_module_id];
     RTP_LLM_CHECK_WITH_INFO(mtp_sub_config != nullptr, "mtp_sub_configs[%d] is null", mtp_module_id);
     const uint32_t mtp_layer_num = mtp_sub_config->layer_num;
-    const int      mtp_global_layer_base =
-        static_cast<int>(config_.layer_num) + mtp_module_id * static_cast<int>(mtp_layer_num);
 
     auto  all_layout        = allocator_->allLayerCacheBase();
     auto& all_layer_tensors = all_layout.layers_to_kv_buffer_ptrs;
@@ -336,21 +334,32 @@ CacheLayerLayout KVCacheManager::getMTPModuleCacheLayerLayout(int mtp_module_id)
         layout.layers_to_scale_buffer_ptrs.resize(mtp_layer_num);
     }
     layout.layer_attn_types.resize(mtp_layer_num, CacheGroupType::FULL);
-    layout.group_tags               = mtp_sub_config->groupTagsSnapshot();
-    layout.group_types              = mtp_sub_config->groupTypesSnapshot();
+    layout.group_tags  = mtp_sub_config->groupTagsSnapshot();
+    layout.group_types = mtp_sub_config->groupTypesSnapshot();
     layout.layer_tag_to_group_id.resize(mtp_layer_num);
+    layout.layers_to_kv_buffer_ptrs_by_group.resize(mtp_layer_num);
+    if (!all_layout.layers_to_scale_buffer_ptrs_by_group.empty()) {
+        layout.layers_to_scale_buffer_ptrs_by_group.resize(mtp_layer_num);
+    }
 
     for (uint32_t local_layer_id = 0; local_layer_id < mtp_layer_num; ++local_layer_id) {
-        const int global_layer_id = mtp_global_layer_base + static_cast<int>(local_layer_id);
+        const auto global_layer_id = CacheConfig::mtpGlobalLayerId(
+            config_.layer_num, mtp_module_id, mtp_layer_num, static_cast<int>(local_layer_id));
+        RTP_LLM_CHECK_WITH_INFO(global_layer_id != std::numeric_limits<uint32_t>::max(),
+                                "invalid MTP global layer: main=%u module=%d module_layers=%u local=%u",
+                                config_.layer_num,
+                                mtp_module_id,
+                                mtp_layer_num,
+                                local_layer_id);
 
-        if (global_layer_id >= 0 && static_cast<size_t>(global_layer_id) < all_layer_tensors.size()) {
+        if (static_cast<size_t>(global_layer_id) < all_layer_tensors.size()) {
             layout.layers_to_kv_buffer_ptrs[local_layer_id] = all_layer_tensors[global_layer_id];
         } else {
             RTP_LLM_CHECK(false);
         }
 
         if (!all_scale_tensors.empty()) {
-            if (global_layer_id >= 0 && static_cast<size_t>(global_layer_id) < all_scale_tensors.size()) {
+            if (static_cast<size_t>(global_layer_id) < all_scale_tensors.size()) {
                 layout.layers_to_scale_buffer_ptrs[local_layer_id] = all_scale_tensors[global_layer_id];
             } else {
                 RTP_LLM_CHECK(false);
@@ -365,6 +374,14 @@ CacheLayerLayout KVCacheManager::getMTPModuleCacheLayerLayout(int mtp_module_id)
                 layout.layer_attn_types[local_layer_id] = mtp_sub_config->typeForGroup(
                     static_cast<size_t>(layout.layer_to_group_ids[local_layer_id].front()));
             }
+        }
+        if (static_cast<size_t>(global_layer_id) < all_layout.layers_to_kv_buffer_ptrs_by_group.size()) {
+            layout.layers_to_kv_buffer_ptrs_by_group[local_layer_id] =
+                all_layout.layers_to_kv_buffer_ptrs_by_group[global_layer_id];
+        }
+        if (static_cast<size_t>(global_layer_id) < all_layout.layers_to_scale_buffer_ptrs_by_group.size()) {
+            layout.layers_to_scale_buffer_ptrs_by_group[local_layer_id] =
+                all_layout.layers_to_scale_buffer_ptrs_by_group[global_layer_id];
         }
     }
 
