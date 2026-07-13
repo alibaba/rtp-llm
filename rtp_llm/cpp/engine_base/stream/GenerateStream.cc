@@ -618,6 +618,7 @@ void GenerateStream::setReserveStep(size_t reserve_step) {
 
 bool GenerateStream::prepare() {
     std::lock_guard<std::mutex> lock(*mutex_);
+    wait_time_us_ = autil::TimeUtility::currentTimeInMicroSeconds() - begin_time_us_;
     generate_status_->reportEvent(StreamEvents::CanRun);
     auto result = streamCacheResource().initKVBlock(reserveStep());
     if (!result.ok()) {
