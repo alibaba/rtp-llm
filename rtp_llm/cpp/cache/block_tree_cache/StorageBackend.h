@@ -5,7 +5,7 @@
 #include <utility>
 #include <vector>
 
-#include "rtp_llm/cpp/cache/AsyncContextStub.h"  // TODO(block_tree_cache refactor): restore connector/AsyncContext.h
+#include "rtp_llm/cpp/cache/AsyncContext.h"
 
 namespace rtp_llm {
 

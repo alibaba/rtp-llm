@@ -603,7 +603,7 @@ KVCacheManager::incrKVCacheRef(const KVCacheResource& resource, const CacheKeysT
 }
 
 bool KVCacheManager::hasP2PConnector() const {
-    // P2P connector not yet migrated to BlockTreeCache.
+    // Remote/P2P connectors not yet migrated to BlockTreeCache.
     return false;
 }
 
@@ -611,23 +611,13 @@ bool KVCacheManager::hasP2PConnector() const {
 
 std::shared_ptr<AsyncContext>
 KVCacheManager::asyncLoadCache(const std::shared_ptr<KVCacheConnectorReadWriteContext>& connector_context) {
-    RTP_LLM_PROFILE_FUNCTION();
-    // BlockTreeCache: load from storage backend if available.
-    if (block_tree_cache_ && block_tree_cache_->storageBackend()) {
-        // TODO: implement storage backend batch read integration.
-        return nullptr;
-    }
+    // Remote/P2P connectors not yet migrated to BlockTreeCache.
     return nullptr;
 }
 
 std::shared_ptr<AsyncContext>
 KVCacheManager::asyncStoreCache(const std::shared_ptr<KVCacheConnectorReadWriteContext>& connector_context) {
-    RTP_LLM_PROFILE_FUNCTION();
-    // BlockTreeCache: store to storage backend if available.
-    if (block_tree_cache_ && block_tree_cache_->storageBackend()) {
-        // TODO: implement storage backend batch write integration.
-        return nullptr;
-    }
+    // Remote/P2P connectors not yet migrated to BlockTreeCache.
     return nullptr;
 }
 
@@ -639,8 +629,7 @@ bool KVCacheManager::executeFunction(const FunctionRequestPB& request, FunctionR
 void KVCacheManager::handleRead(const P2PConnectorStartLoadRequestPB& request,
                                 P2PConnectorStartLoadResponsePB&      response,
                                 std::function<bool()>                 is_cancelled) {
-    // P2P connector not yet migrated to BlockTreeCache; no-op.
-    RTP_LLM_LOG_WARNING("handleRead called but P2P connector is not yet migrated to BlockTreeCache");
+    // Remote/P2P connectors not yet migrated to BlockTreeCache.
 }
 
 void KVCacheManager::allocateAndSync() {

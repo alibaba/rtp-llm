@@ -1,7 +1,5 @@
 #pragma once
 
-// TODO(connector-removal): This file replaces connector/Meta.h.
-// Delete this stub when connector directory is fully removed.
 
 #include <memory>
 #include <optional>

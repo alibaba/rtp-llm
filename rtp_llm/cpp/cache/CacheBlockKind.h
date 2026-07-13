@@ -1,9 +1,5 @@
 #pragma once
 
-// TODO(block_tree_cache refactor): This is a temporary stub extracted from
-// connector/memory/CacheBlockKind.h to decouple block_tree_cache from the
-// connector module during refactoring. Restore the original include path
-// once the connector interface is stabilized.
 
 namespace rtp_llm {
 

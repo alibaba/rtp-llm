@@ -1,8 +1,5 @@
 #pragma once
 
-// TODO(connector-removal): This file replaces connector/AsyncContext.h.
-// Once all external references are migrated, delete this stub and the
-// forwarding header in connector/AsyncContext.h.
 
 #include <atomic>
 #include <condition_variable>

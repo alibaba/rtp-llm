@@ -88,10 +88,7 @@ cc_library(
         "//rtp_llm/cpp/cache:block_pool",
         "//rtp_llm/cpp/cache:kv_cache_allocator_hdr",
         "//rtp_llm/cpp/disaggregate/cache_store:cache_store_interface",
-        # TODO(block_tree_cache refactor): re-enable after connector refactor
-        # "//rtp_llm/cpp/cache/connector:connector_base",
-        # "//rtp_llm/cpp/cache/connector/memory:memory_connector",
-        "//rtp_llm/cpp/cache:cache_stubs",
+        "//rtp_llm/cpp/cache:cache_async_context",
         "//rtp_llm/cpp/config:config_modules",
         "//rtp_llm/cpp/model_rpc:broadcast_manager",
         "//rtp_llm/cpp/utils:core_utils",

@@ -1,6 +1,5 @@
 #pragma once
 
-// TODO(connector-removal): Forwarding header — all types now live in cache/MetaStub.h.
-// Delete this file when connector directory is fully removed.
+// Forwarding header — all types now live in cache/Meta.h.
 
-#include "rtp_llm/cpp/cache/MetaStub.h"
+#include "rtp_llm/cpp/cache/Meta.h"

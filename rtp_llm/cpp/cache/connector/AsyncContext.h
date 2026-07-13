@@ -1,6 +1,5 @@
 #pragma once
 
-// TODO(connector-removal): Forwarding header — all types now live in cache/AsyncContextStub.h.
-// Delete this file when connector directory is fully removed.
+// Forwarding header — all types now live in cache/AsyncContext.h.
 
-#include "rtp_llm/cpp/cache/AsyncContextStub.h"
+#include "rtp_llm/cpp/cache/AsyncContext.h"

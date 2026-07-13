@@ -1,9 +1,6 @@
-// TODO(connector-removal): Implementations moved from connector/AsyncContext.cc.
-// Delete this file when connector directory is fully removed.
+#include "rtp_llm/cpp/cache/AsyncContext.h"
 
-#include "rtp_llm/cpp/cache/AsyncContextStub.h"
-
-#include "rtp_llm/cpp/cache/MetaStub.h"
+#include "rtp_llm/cpp/cache/Meta.h"
 #include "rtp_llm/cpp/cache/KVCacheResource.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 

@@ -10,7 +10,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/IBlockPool.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/host/DiskBlockIO.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/host/DiskMountGuard.h"
-#include "rtp_llm/cpp/cache/CacheBlockKindStub.h"  // TODO(block_tree_cache refactor): restore connector/memory/CacheBlockKind.h
+#include "rtp_llm/cpp/cache/CacheBlockKind.h"
 
 namespace rtp_llm {
 

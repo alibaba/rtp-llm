@@ -4,7 +4,7 @@
 #include <stdexcept>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeEvictor.h"
-#include "rtp_llm/cpp/cache/AsyncContextStub.h"  // TODO(block_tree_cache refactor): restore connector/AsyncContext.h
+#include "rtp_llm/cpp/cache/AsyncContext.h"
 #include "rtp_llm/cpp/model_rpc/BroadcastManager.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/Logger.h"

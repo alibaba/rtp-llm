@@ -1,17 +1,15 @@
 load("//:def.bzl", "copts")
 load("//bazel:arch_select.bzl", "torch_deps")
 
-# TODO(connector-removal): Stubs that replace connector headers. These will be
-# merged into proper cache targets once the connector directory is fully removed.
 cc_library(
-    name = "cache_stubs",
+    name = "cache_async_context",
     srcs = [
-        "AsyncContextStub.cc",
+        "AsyncContext.cc",
     ],
     hdrs = [
-        "AsyncContextStub.h",
-        "CacheBlockKindStub.h",
-        "MetaStub.h",
+        "AsyncContext.h",
+        "CacheBlockKind.h",
+        "Meta.h",
     ],
     copts = copts(),
     visibility = ["//visibility:public"],
@@ -353,8 +351,6 @@ cc_library(
     deps = [
         ":cache_core",
         "//rtp_llm/cpp/cache/block_tree_cache",
-        # TODO(block_tree_cache refactor): re-enable after connector refactor
-        # "//rtp_llm/cpp/cache/connector",
         "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
         "//rtp_llm/cpp/utils:profiling_scope",
     ] + torch_deps(),
