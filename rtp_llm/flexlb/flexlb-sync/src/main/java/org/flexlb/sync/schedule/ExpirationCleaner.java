@@ -28,12 +28,21 @@ public class ExpirationCleaner {
 
     private final long taskTimeoutUs;
     private final long workerTimeoutUs;
+    private final long vitWorkerTimeoutUs;
     private final FlexMonitor monitor;
 
     public ExpirationCleaner(FlexMonitor monitor) {
+        this(monitor,
+                Long.parseLong(System.getenv().getOrDefault("TASK_TIMEOUT_US", "3000000")),
+                Long.parseLong(System.getenv().getOrDefault("WORKER_TIMEOUT_US", "3000000")),
+                Long.parseLong(System.getenv().getOrDefault("VIT_WORKER_TIMEOUT_US", "10000000")));
+    }
+
+    ExpirationCleaner(FlexMonitor monitor, long taskTimeoutUs, long workerTimeoutUs, long vitWorkerTimeoutUs) {
         this.monitor = monitor;
-        this.taskTimeoutUs = Long.parseLong(System.getenv().getOrDefault("TASK_TIMEOUT_US", "3000000"));  // Default 3s
-        this.workerTimeoutUs = Long.parseLong(System.getenv().getOrDefault("WORKER_TIMEOUT_US", "3000000")); // Default 3s
+        this.taskTimeoutUs = taskTimeoutUs;
+        this.workerTimeoutUs = workerTimeoutUs;
+        this.vitWorkerTimeoutUs = vitWorkerTimeoutUs;
     }
 
     @PostConstruct
@@ -60,7 +69,8 @@ public class ExpirationCleaner {
             WorkerStatus workerStatus = item.getValue();
 
             // 1. Check if worker needs cleanup
-            long expirationTime = workerStatus.getStatusLastUpdateTime().get() + workerTimeoutUs;
+            long roleWorkerTimeoutUs = role == RoleType.VIT ? vitWorkerTimeoutUs : workerTimeoutUs;
+            long expirationTime = workerStatus.getStatusLastUpdateTime().get() + roleWorkerTimeoutUs;
             long currentTime = System.nanoTime() / 1000;
             if (currentTime > expirationTime) {
                 it.remove();
