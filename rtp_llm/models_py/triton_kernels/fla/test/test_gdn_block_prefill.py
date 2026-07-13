@@ -1,3 +1,4 @@
+import inspect
 import logging
 import math
 import random
@@ -9,6 +10,9 @@ import torch
 from rtp_llm.models_py.triton_kernels.fla import (
     load_initial_state_from_block_map,
     store_ssm_state_to_block_map,
+)
+from rtp_llm.models_py.triton_kernels.fla.block import (
+    store_ssm_state_to_block_map_kernel,
 )
 
 logging.basicConfig(
@@ -22,6 +26,14 @@ INTERMEDIATE_DTYPE = torch.float32
 
 
 class BlockTest(unittest.TestCase):
+    def test_store_ssm_state_source_offset_uses_int64(self):
+        ssm_per_batch = 24 * 128 * 128
+        first_overflowing_chunk = (2**31 - 1) // ssm_per_batch + 1
+        self.assertEqual(first_overflowing_chunk, 5462)
+
+        source = inspect.getsource(store_ssm_state_to_block_map_kernel.fn)
+        self.assertIn("(i_c + 1).to(tl.int64) * SSM_PER_BATCH", source)
+
     def test_load_initial_state_from_block_map(self):
         device = torch.device("cuda")
         head_nums = [1, 4, 8, 16]
