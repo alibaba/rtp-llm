@@ -115,6 +115,14 @@ public class MetricConstant {
     public static final String ENGINE_LOCAL_TASK_MAP_SIZE = "app.engine.health.check.local.task.map.size";
 
     /**
+     * FlexLB scheduler local task map size — the scheduler's own inflight task map size.
+     * <p>Independent metric name to avoid tag schema conflict with {@link #ENGINE_LOCAL_TASK_MAP_SIZE},
+     * which is reported per-engine (tagged by model, code, engineIp=real-engine-IP, role) by
+     * EngineHealthReporter. The scheduler-level metric uses role=PREFILL + engineIp="scheduler" tags.
+     */
+    public static final String SCHEDULER_LOCAL_TASK_MAP_SIZE = "app.flexlb.scheduler.local.task.map.size";
+
+    /**
      * Engine finished task list size
      */
     public static final String ENGINE_FINISHED_TASK_LIST_SIZE = "app.engine.health.check.finished.task.list.size";

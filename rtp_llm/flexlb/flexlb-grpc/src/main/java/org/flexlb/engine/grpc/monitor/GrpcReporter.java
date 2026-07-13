@@ -15,7 +15,12 @@ import static org.flexlb.constant.MetricConstant.GRPC_CONNECTION_DURATION;
 import static org.flexlb.constant.MetricConstant.GRPC_RESPONSE_SIZE;
 
 /**
- * Reporter for gRPC channel pool metrics
+ * Reporter for gRPC channel pool metrics.
+ *
+ * Note: All gRPC metrics use "engineIp" as the IP tag name (previously "ip"),
+ * consistent with other FlexLB reporters (EngineHealthReporter, BatchSchedulerReporter,
+ * CacheMetricsReporter, etc.). If any Grafana dashboard queries reference the old "ip"
+ * tag for these gRPC metrics, they must be updated to use "engineIp" instead.
  */
 @Component
 public class GrpcReporter {
@@ -55,7 +60,7 @@ public class GrpcReporter {
      */
     public void reportCallMetrics(String ip, String serviceType, long duration, int responseSize, boolean isRetry) {
         FlexMetricTags tags = FlexMetricTags.of(
-            "ip", ip,
+            "engineIp", ip,
             "service", serviceType,
             "retry", String.valueOf(isRetry)
         );
@@ -79,7 +84,7 @@ public class GrpcReporter {
      */
     public void reportConnectionDuration(String ip, String serviceType, long connectionDuration) {
         FlexMetricTags tags = FlexMetricTags.of(
-            "ip", ip,
+            "engineIp", ip,
             "service", serviceType
         );
 

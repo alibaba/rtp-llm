@@ -25,9 +25,9 @@ import static org.flexlb.constant.MetricConstant.DECODE_TOTAL_LOAD;
 import static org.flexlb.constant.MetricConstant.ENGINE_BALANCING_MASTER_BATCH_SIZE;
 import static org.flexlb.constant.MetricConstant.ENGINE_BALANCING_MASTER_BATCH_TOTAL_TOKENS;
 import static org.flexlb.constant.MetricConstant.ENGINE_BALANCING_MASTER_DISPATCH_REASON;
-import static org.flexlb.constant.MetricConstant.ENGINE_LOCAL_TASK_MAP_SIZE;
 import static org.flexlb.constant.MetricConstant.ROUTING_QUEUE_LENGTH;
 import static org.flexlb.constant.MetricConstant.ROUTING_QUEUE_WAIT_TIME_MS;
+import static org.flexlb.constant.MetricConstant.SCHEDULER_LOCAL_TASK_MAP_SIZE;
 
 /**
  * Batch scheduling metrics reporter for FlexLB batch dispatch path.
@@ -36,7 +36,7 @@ import static org.flexlb.constant.MetricConstant.ROUTING_QUEUE_WAIT_TIME_MS;
  * conflicts with the non-batch path:
  * queue (routing.queue.length + routing.queue.wait.time.ms),
  * dispatch reason (engine.balancing.master.dispatch.reason),
- * inflight (health.check.local.task.map.size + health.check.running.task.info.size).
+ * inflight (flexlb.scheduler.local.task.map.size + health.check.running.task.info.size).
  */
 @Slf4j
 @Component
@@ -67,7 +67,9 @@ public class BatchSchedulerReporter {
         // Inflight — batch count and request count per prefill worker (FlexLB scheduler view)
         monitor.register(BATCH_INFLIGHT_COUNT, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         monitor.register(BATCH_INFLIGHT_REQUEST_COUNT, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
-        monitor.register(ENGINE_LOCAL_TASK_MAP_SIZE, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        // Scheduler-level inflight map size — independent metric name to avoid tag schema conflict
+        // with EngineHealthReporter's per-engine app.engine.health.check.local.task.map.size
+        monitor.register(SCHEDULER_LOCAL_TASK_MAP_SIZE, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
 
         // Decode inflight — per decode worker (FlexLB scheduler view)
         monitor.register(DECODE_INFLIGHT_COUNT, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
@@ -167,14 +169,19 @@ public class BatchSchedulerReporter {
     }
 
     /**
-     * Report scheduler inflight map size via {@code health.check.local.task.map.size}.
+     * Report scheduler inflight map size via {@code flexlb.scheduler.local.task.map.size}.
+     * <p>Uses an independent metric name (not {@code engine.health.check.local.task.map.size})
+     * because this is a scheduler-level metric with tag schema (role=PREFILL, engineIp="scheduler"),
+     * which differs from EngineHealthReporter's per-engine version tagged by
+     * (model, code, engineIp=real-engine-IP, role). Sharing the same metric name would cause
+     * tag schema conflicts in kmonitor grouping.
      * Uses role=PREFILL + engineIp=scheduler tags to match the Grafana panel filter.
      */
     public void reportSchedulerInflightSize(int size) {
         FlexMetricTags tags = FlexMetricTags.of(
                 "role", RoleType.PREFILL.name(),
                 "engineIp", "scheduler");
-        monitor.report(ENGINE_LOCAL_TASK_MAP_SIZE, tags, size);
+        monitor.report(SCHEDULER_LOCAL_TASK_MAP_SIZE, tags, size);
     }
 
     /**

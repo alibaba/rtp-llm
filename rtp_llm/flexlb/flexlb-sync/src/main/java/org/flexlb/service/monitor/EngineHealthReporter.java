@@ -243,10 +243,6 @@ public class EngineHealthReporter {
         // Report local task cache size
         monitor.report(ENGINE_LOCAL_TASK_MAP_SIZE, metricTags, ep != null ? ep.getLocalTaskCount() : 0);
 
-        metricTags = FlexMetricTags.of(
-                "engineIp", workerStatus.getIp(),
-                "role", workerStatus.getRole().name());
-
         monitor.report(ENGINE_FINISHED_TASK_LIST_SIZE, metricTags, finishedTaskListSize);
         monitor.report(ENGINE_RUNNING_TASK_INFO_SIZE, metricTags, runningTaskInfoSize);
     }
