@@ -110,7 +110,7 @@ def get_all_weights(
     for path in ckpt_paths:
         if path.endswith(".safetensors"):
             weights = _load_safetensors(path, device)
-        elif path.endswith((".bin", ".pt")):
+        elif path.endswith((".bin", ".pt", ".pth")):
             weights = _load_pytorch(path, device)
         else:
             raise ValueError(f"Unsupported checkpoint format: {path}")
@@ -155,7 +155,7 @@ def _files_from_index(model_path: str, index_name: str) -> Optional[List[str]]:
                 f"Checkpoint index {index_path} references a path outside model directory: "
                 f"{shard_name!r}"
             )
-        if not _is_model_weight_file(shard_path):
+        if not _is_model_weight_file(shard_path, allow_consolidated=True):
             raise ValueError(
                 f"Checkpoint index {index_path} references non-model file {shard_name!r}"
             )
@@ -169,20 +169,24 @@ def _files_from_index(model_path: str, index_name: str) -> Optional[List[str]]:
     return files
 
 
-def _is_model_weight_file(path: str) -> bool:
+def _is_consolidated_weight_file(path: str) -> bool:
+    return os.path.basename(path).lower().startswith("consolidated")
+
+
+def _is_model_weight_file(path: str, allow_consolidated: bool = False) -> bool:
     name = os.path.basename(path).lower()
     if name in _EXCLUDED_WEIGHT_FILES:
         return False
-    return not name.startswith(
-        (
-            "adapter_model",
-            "consolidated",
-            "optimizer",
-            "rng_state",
-            "scheduler",
-            "training_args",
-        )
-    )
+    excluded_prefixes = [
+        "adapter_model",
+        "optimizer",
+        "rng_state",
+        "scheduler",
+        "training_args",
+    ]
+    if not allow_consolidated:
+        excluded_prefixes.append("consolidated")
+    return not name.startswith(tuple(excluded_prefixes))
 
 
 def discover_ckpt_files(model_path: str) -> List[str]:
@@ -192,12 +196,24 @@ def discover_ckpt_files(model_path: str) -> List[str]:
         indexed_files = _files_from_index(model_path, index_name)
         if indexed_files is not None:
             return indexed_files
-    for pattern in ("*.safetensors", "*.bin", "*.pt"):
+    consolidated_by_format = []
+    for pattern in ("*.safetensors", "*.bin", "*.pt", "*.pth"):
+        candidates = sorted(glob.glob(os.path.join(model_path, pattern)))
         files = [
             path
-            for path in sorted(glob.glob(os.path.join(model_path, pattern)))
+            for path in candidates
             if _is_model_weight_file(path)
         ]
         if files:
             return files
+        consolidated = [
+            path
+            for path in candidates
+            if _is_consolidated_weight_file(path)
+            and _is_model_weight_file(path, allow_consolidated=True)
+        ]
+        if consolidated:
+            consolidated_by_format.append(consolidated)
+    if consolidated_by_format:
+        return consolidated_by_format[0]
     return []

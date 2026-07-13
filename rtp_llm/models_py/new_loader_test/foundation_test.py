@@ -336,6 +336,28 @@ class FoundationLoaderTest(unittest.TestCase):
             torch.save({}, os.path.join(model_path, "training_args.bin"))
             self.assertEqual(discover_ckpt_files(model_path), [model_file])
 
+    def test_standalone_consolidated_checkpoint_is_discovered(self):
+        with tempfile.TemporaryDirectory() as model_path:
+            consolidated = os.path.join(model_path, "consolidated.safetensors")
+            save_file({"weight": torch.ones(1)}, consolidated)
+            self.assertEqual(discover_ckpt_files(model_path), [consolidated])
+
+    def test_pth_checkpoint_is_discovered_and_loaded(self):
+        with tempfile.TemporaryDirectory() as model_path:
+            checkpoint = os.path.join(model_path, "model.pth")
+            torch.save({"weight": torch.ones(1)}, checkpoint)
+            self.assertEqual(discover_ckpt_files(model_path), [checkpoint])
+            loaded = dict(get_all_weights([checkpoint]))
+            self.assertTrue(torch.equal(loaded["weight"], torch.ones(1)))
+
+    def test_standard_checkpoint_wins_over_consolidated(self):
+        with tempfile.TemporaryDirectory() as model_path:
+            consolidated = os.path.join(model_path, "consolidated.safetensors")
+            standard = os.path.join(model_path, "model.pt")
+            save_file({"duplicate": torch.ones(1)}, consolidated)
+            torch.save({"weight": torch.ones(1)}, standard)
+            self.assertEqual(discover_ckpt_files(model_path), [standard])
+
     def test_checkpoint_index_cannot_escape_model_directory(self):
         with tempfile.TemporaryDirectory() as parent:
             model_path = os.path.join(parent, "model")
