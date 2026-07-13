@@ -3,8 +3,8 @@
     <!-- https://github.com/spring-projects/spring-boot/blob/v1.5.13.RELEASE/spring-boot/src/main/resources/org/springframework/boot/logging/logback/defaults.xml -->
     <include resource="org/springframework/boot/logging/logback/defaults.xml" />
 
-    <property name="APP_NAME" value="ai-whale" />
-    <property name="LOG_PATH" value="${user.home}/${APP_NAME}/logs" />
+    <springProperty scope="context" name="LOG_PATH"
+                    source="flexlb.log.path" defaultValue="/home/admin/ai-whale/logs" />
     <property name="LOG_FILE" value="${LOG_PATH}/application.log" />
     <property name="PV_LOG_FILE" value="${LOG_PATH}/pv.log" />
     <property name="SYNC_LOG_FILE" value="${LOG_PATH}/sync.log" />

@@ -13,6 +13,8 @@ spring:
 # CPU-bound block hashing pool: use core threads first, queue pending work, then
 # expand up to max threads when the queue is full. Extra threads expire after keep-alive.
 flexlb:
+  log:
+    path: ${FLEXLB_LOG_PATH:/home/admin/ai-whale/logs}
   block-hash:
     core-thread-count: ${FLEXLB_BLOCK_HASH_CORE_THREAD_COUNT:8}
     max-thread-count: ${FLEXLB_BLOCK_HASH_MAX_THREAD_COUNT:32}
