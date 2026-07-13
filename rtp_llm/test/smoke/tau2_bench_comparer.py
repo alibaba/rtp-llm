@@ -28,46 +28,6 @@ EVALSCOPE_PINNED_VERSION = "1.6.0"
 _REPORT_PATH_RE = re.compile(r"Dump report to:\s*(\S+\.json)")
 
 
-def _safe_extractall(tar: tarfile.TarFile, dest_dir: str) -> None:
-    """Path-traversal-safe extraction for Python runtimes without tarfile's
-    ``data`` filter (added in 3.12, backported to 3.10.12 / 3.11.4 / 3.9.17).
-
-    The tarball is downloaded from an external URL, so approximate the ``data``
-    filter's protections rather than falling back to an unguarded extractall:
-    reject any member that resolves outside ``dest_dir`` (``..`` traversal /
-    absolute paths); allow only regular files and directories (reject symlinks,
-    hardlinks and special files such as device/fifo/char/block); and drop archive
-    ownership and setuid/setgid/sticky bits before extracting the vetted members.
-    """
-    dest_root = os.path.realpath(dest_dir)
-
-    def _within(path: str) -> bool:
-        resolved = os.path.realpath(os.path.join(dest_dir, path))
-        return resolved == dest_root or resolved.startswith(dest_root + os.sep)
-
-    safe_members = []
-    for member in tar.getmembers():
-        if not _within(member.name):
-            raise SmokeException(
-                QueryStatus.OTHERS, f"blocked unsafe path in tarball: {member.name!r}"
-            )
-        # Allow only regular files and directories; reject links and special files.
-        # This is stricter than the data filter (which permits vetted links) but
-        # avoids replicating its full link-resolution logic on old runtimes.
-        if not (member.isreg() or member.isdir()):
-            raise SmokeException(
-                QueryStatus.OTHERS,
-                f"blocked non-regular tarball member: {member.name!r} (type {member.type!r})",
-            )
-        # Do not preserve archive ownership; strip setuid/setgid/sticky and any
-        # group/other write bits, mirroring the data filter's sanitization.
-        member.uid = member.gid = 0
-        member.uname = member.gname = ""
-        member.mode = member.mode & 0o755
-        safe_members.append(member)
-    tar.extractall(path=dest_dir, members=safe_members)
-
-
 class Tau2BenchComparer(BaseComparer):
     """Runs tau2-bench against the running smoke server and asserts OVERALL score >= threshold."""
 
@@ -189,18 +149,7 @@ class Tau2BenchComparer(BaseComparer):
             urllib.request.urlretrieve(TAU2_TARBALL_URL, tarball_path)
             logging.info(f"[TAU2] extracting to {dest_dir}")
             with tarfile.open(tarball_path, "r:gz") as tar:
-                # filter="data" hardens extraction against path traversal, but the
-                # kwarg only exists on Python >= 3.12 (backported to 3.10.12 /
-                # 3.11.4 / 3.9.17). On the smoke container's 3.10.9 it raises
-                # TypeError at call time (before extracting anything), so fall back
-                # to a plain extractall there.
-                try:
-                    tar.extractall(path=dest_dir, filter="data")
-                except TypeError:
-                    # Py < 3.12 without the backport: the filter kwarg is absent, so
-                    # fall back to an explicit path-traversal-safe extraction rather
-                    # than an unguarded extractall (the 3.10.9 smoke container path).
-                    _safe_extractall(tar, dest_dir)
+                tar.extractall(path=dest_dir)
         finally:
             try:
                 os.remove(tarball_path)
