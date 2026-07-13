@@ -15,8 +15,8 @@ public class MonitorClientConfig {
 
     /**
      * Create FlexMonitor instance
-     * Use NoOpFlexMonitor as default implementation. To enable monitoring,
-     * add internal_source/kmonitor-java dependency and set environment variable FLEXLB_MONITOR_ENABLED=true
+     * Open-source builds use NoOpFlexMonitor. Internal builds provide their own implementation and
+     * use FLEXLB_MONITOR_ENABLED to select KMonitor or NoOpFlexMonitor.
      */
     @Bean
     @ConditionalOnMissingBean(FlexMonitor.class)

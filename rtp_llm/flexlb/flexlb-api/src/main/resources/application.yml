@@ -10,11 +10,14 @@ spring:
   lifecycle:
     timeout-per-shutdown-phase: ${FLEXLB_SHUTDOWN_TIMEOUT:30s}
 
-# CPU-bound block hashing pool: use core threads first, queue pending work, then
-# expand up to max threads when the queue is full. Extra threads expire after keep-alive.
 flexlb:
+  # Internal KMonitor integration. Disable when the runtime has no local KMonitor agent.
+  monitor:
+    enabled: ${FLEXLB_MONITOR_ENABLED:true}
   log:
     path: ${FLEXLB_LOG_PATH:/home/admin/ai-whale/logs}
+  # CPU-bound block hashing pool: use core threads first, queue pending work, then
+  # expand up to max threads when the queue is full. Extra threads expire after keep-alive.
   block-hash:
     core-thread-count: ${FLEXLB_BLOCK_HASH_CORE_THREAD_COUNT:8}
     max-thread-count: ${FLEXLB_BLOCK_HASH_MAX_THREAD_COUNT:32}
