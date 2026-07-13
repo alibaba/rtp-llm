@@ -24,6 +24,11 @@ from rtp_llm.dash_sc.inference.servicer import (
     build_think_runtime,
 )
 from rtp_llm.dash_sc.proxy.servicer import DashScProxyServicer
+from rtp_llm.dash_sc.repetition_monitor import (
+    RequestRepetitionMonitorConfig,
+    ToolCallLoopConfig,
+    ToolCallMarkerConfig,
+)
 from rtp_llm.dash_sc.server import DashScGrpcServer
 from rtp_llm.frontend.tokenizer_factory.tokenizer_factory import TokenizerFactory
 from rtp_llm.metrics import kmonitor
@@ -172,13 +177,17 @@ class DashScShutdownManager:
             return True
 
 
-async def _create_proxy_servicer_on_loop() -> DashScProxyServicer:
+async def _create_proxy_servicer_on_loop(
+    *,
+    rank_id: Optional[int] = None,
+    server_id: str = "",
+) -> DashScProxyServicer:
     """Construct proxy servicer inside the running asyncio owner loop.
 
     Outbound ``grpc.aio.Channel`` objects are event-loop affine, but the shared
     channel cache builds them lazily when a request first uses an address.
     """
-    return DashScProxyServicer()
+    return DashScProxyServicer(rank_id=rank_id, server_id=server_id)
 
 
 def _derive_echo_prefix_ids(generate_env_config: Any, base_tok: Any) -> List[int]:
@@ -201,6 +210,45 @@ def _derive_echo_prefix_ids(generate_env_config: Any, base_tok: Any) -> List[int
         return []
     logging.info("[DashScApp] echo_prefix_ids=%s (think_start_tag=%r)", ids, tag)
     return ids
+
+
+def _tokenize_marker_text(base_tok: Any, text: str) -> List[int]:
+    tokenizer = getattr(base_tok, "tokenizer", base_tok)
+    try:
+        token_ids = tokenizer.encode(text, add_special_tokens=False)
+    except TypeError:
+        token_ids = tokenizer.encode(text)
+    return [int(token_id) for token_id in token_ids]
+
+
+def _build_repetition_monitor_config(
+    config: Any, base_tok: Any = None
+) -> RequestRepetitionMonitorConfig:
+    tool_loop_config = ToolCallLoopConfig(
+        enabled=config.tool_call_loop_monitor,
+        repeat_threshold=config.tool_call_loop_threshold,
+        max_span_tokens=config.tool_call_loop_max_span_tokens,
+    )
+    # Tool-call begin/end markers are a service-level constant: tokenize the
+    # configured strings once here. Monitoring stays off unless both are set.
+    tool_markers: tuple[ToolCallMarkerConfig, ...] = ()
+    if (
+        base_tok is not None
+        and config.tool_call_loop_begin_marker
+        and (config.tool_call_loop_end_marker)
+    ):
+        begin_ids = tuple(
+            _tokenize_marker_text(base_tok, config.tool_call_loop_begin_marker)
+        )
+        end_ids = tuple(
+            _tokenize_marker_text(base_tok, config.tool_call_loop_end_marker)
+        )
+        if begin_ids and end_ids:
+            tool_markers = (ToolCallMarkerConfig(begin_ids=begin_ids, end_ids=end_ids),)
+    return RequestRepetitionMonitorConfig(
+        tool_loop_config=tool_loop_config,
+        tool_markers=tool_markers,
+    )
 
 
 def _derive_stop_word_ids_list(
@@ -450,6 +498,10 @@ class DashScApp:
                 extra_stop_word_ids = _derive_stop_word_ids_list(
                     model_config, self.py_env_configs, base_tok
                 )
+                repetition_monitor_config = _build_repetition_monitor_config(
+                    self.py_env_configs.repetition_detection_config,
+                    base_tok,
+                )
                 # ``think_terminate_token_id`` <= 0 means the operator turned off
                 # the in-stream "stop thinking" branch via env/args; carry that
                 # through as ``None`` so the servicer skips the path entirely.
@@ -474,12 +526,18 @@ class DashScApp:
                     tokenizer=base_tok,
                     generate_env_config=self.py_env_configs.generate_env_config,
                     think_runtime=think_runtime,
+                    rank_id=self.server_config.rank_id,
+                    repetition_monitor_config=repetition_monitor_config,
                 )
 
             loop = self._start_enqueue_loop()
             if is_proxy:
                 fut = asyncio.run_coroutine_threadsafe(
-                    _create_proxy_servicer_on_loop(), loop
+                    _create_proxy_servicer_on_loop(
+                        rank_id=self.server_config.rank_id,
+                        server_id=self.server_config.frontend_server_id,
+                    ),
+                    loop,
                 )
                 try:
                     servicer = fut.result(timeout=_PROXY_SERVICER_STARTUP_TIMEOUT_S)
@@ -487,10 +545,10 @@ class DashScApp:
                     fut.cancel()
                     raise
 
-            # Register py_rtp_* metrics so the access-log interceptor's kmonitor.report
+            # Register py_rtp_* metrics so ``grpc_metrics``' kmonitor.report
             # calls find their metric objects. Idempotent — matches FrontendServer.__init__
             # so dashboards/alerts see gRPC and HTTP paths under the same metric family
-            # (split via the ``protocol`` tag the interceptor injects).
+            # (split via the ``protocol`` tag ``grpc_metrics`` injects).
             kmonitor.init()
 
             logging.info(

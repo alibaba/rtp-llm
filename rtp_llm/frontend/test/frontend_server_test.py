@@ -18,17 +18,6 @@ class FakePipelinResponse(BaseModel):
 
 
 class FakeFrontendWorker(object):
-    class FakeBackendRpcServerVisitor:
-        def __init__(self):
-            self.refresh_calls = []
-
-        def is_backend_service_ready(self, refresh: bool = False):
-            self.refresh_calls.append(refresh)
-            return True
-
-    def __init__(self):
-        self.backend_rpc_server_visitor = self.FakeBackendRpcServerVisitor()
-
     def inference(self, prompt: str, *args: Any, **kwargs: Any):
         response_generator = self._inference(prompt, *args, **kwargs)
         return CompleteResponseAsyncGenerator(
@@ -93,11 +82,6 @@ class FrontendServerTest(TestCase):
         # test error input
         res = self.frontend_server.tokenizer_encode('{"text": "b c d e"}')
         self.assertEqual(json.loads(res.body.decode("utf-8"))["error_code"], 514)
-
-    def test_check_health_uses_cached_service_discovery(self):
-        self.assertTrue(self.frontend_server.check_health())
-        visitor = self.frontend_server._frontend_worker.backend_rpc_server_visitor
-        self.assertEqual(visitor.refresh_calls, [False])
 
 
 main()

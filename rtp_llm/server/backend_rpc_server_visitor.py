@@ -1,4 +1,3 @@
-import asyncio
 import logging
 import os
 import time
@@ -105,10 +104,6 @@ def _to_output_ids_tensor(token_ids: List[int], like: torch.Tensor) -> torch.Ten
     return torch.empty(shape, dtype=like.dtype, device=like.device)
 
 
-PD_ROUTE_RETRY_ON_UNAVAILABLE_ENV = "RTP_LLM_PD_ROUTE_RETRY_ON_UNAVAILABLE"
-DEFAULT_PD_ROUTE_RETRY_ON_UNAVAILABLE = 3
-
-
 class BackendRPCServerVisitor:
     def __init__(
         self,
@@ -190,43 +185,10 @@ class BackendRPCServerVisitor:
             master_config=master_config,
         )
         self.recent_cache_key_window = RecentCacheKeyWindow()
-        self.pd_route_retry_on_unavailable = self._pd_route_retry_on_unavailable()
 
     async def close(self):
         await self.model_rpc_client.close()
         await self.master_client.close()
-
-    @staticmethod
-    def _pd_route_retry_on_unavailable() -> int:
-        raw = os.environ.get(PD_ROUTE_RETRY_ON_UNAVAILABLE_ENV, "")
-        if not raw:
-            return DEFAULT_PD_ROUTE_RETRY_ON_UNAVAILABLE
-        try:
-            return max(0, int(raw))
-        except ValueError:
-            route_logger.warning(
-                "Invalid %s=%r, falling back to default retry count %s",
-                PD_ROUTE_RETRY_ON_UNAVAILABLE_ENV,
-                raw,
-                DEFAULT_PD_ROUTE_RETRY_ON_UNAVAILABLE,
-            )
-            return DEFAULT_PD_ROUTE_RETRY_ON_UNAVAILABLE
-
-    @staticmethod
-    def _is_retryable_route_rpc_error(e: BaseException) -> bool:
-        exception_type = getattr(e, "exception_type", None)
-        if exception_type is not None:
-            try:
-                return int(exception_type) >= 8000
-            except (TypeError, ValueError):
-                pass
-        text = str(e)
-        return (
-            "StatusCode.UNAVAILABLE" in text
-            or "grpc_status:14" in text
-            or "recvmsg:Connection timed out" in text
-            or "Socket closed" in text
-        )
 
     @staticmethod
     def get_backend_role_list(
@@ -590,75 +552,37 @@ class BackendRPCServerVisitor:
                     f"request length is {input.prompt_length}, max_new_tokens is {max_new_tokens}",
                 )
 
+            if self.host_service.service_available:
+                await self.route_ips(input)
+
+            stream = self.model_rpc_client.enqueue(input)
         except BaseException as e:
             set_aux_info(e)
             raise
 
-        async def route_and_enqueue(attempt: int):
-            if attempt > 0:
-                input.generate_config.role_addrs = []
-            if self.host_service.service_available:
-                await self.route_ips(input)
-            return self.model_rpc_client.enqueue(input)
-
         async def stream_with_aux_info():
-            attempt = 0
-            strip_stop_ids: List[List[int]] = []
-            if _strip_frontend_stop_token_ids_enabled():
-                request_stop_ids = getattr(
-                    input.generate_config, "stop_words_list", None
-                )
-                strip_stop_ids = _normalize_stop_ids(
-                    stop_word_ids_list=(
-                        self.frontend_stop_word_ids_list + list(request_stop_ids or [])
+            try:
+                strip_stop_ids: List[List[int]] = []
+                if _strip_frontend_stop_token_ids_enabled():
+                    request_stop_ids = getattr(
+                        input.generate_config, "stop_words_list", None
                     )
-                )
-            is_streaming = bool(getattr(input.generate_config, "is_streaming", False))
-            while True:
+                    strip_stop_ids = _normalize_stop_ids(
+                        stop_word_ids_list=(
+                            self.frontend_stop_word_ids_list
+                            + list(request_stop_ids or [])
+                        )
+                    )
                 pending_stop_prefix: dict[int, List[int]] = {}
-                yielded_output = False
-                try:
-                    stream = await route_and_enqueue(attempt)
-                    if is_streaming:
-                        async for output in stream:
-                            yielded_output = True
-                            if strip_stop_ids:
-                                output = self.strip_frontend_stop_word_ids(
-                                    output, strip_stop_ids, pending_stop_prefix
-                                )
-                            yield output
-                    else:
-                        buffered_outputs = []
-                        async for output in stream:
-                            buffered_outputs.append(output)
-                        yielded_output = True
-                        if len(buffered_outputs) > 0 and strip_stop_ids:
-                            buffered_outputs[-1] = self.strip_frontend_stop_word_ids(
-                                buffered_outputs[-1],
-                                strip_stop_ids,
-                                pending_stop_prefix,
-                            )
-                        for output in buffered_outputs:
-                            yield output
-                    return
-                except BaseException as e:
-                    set_aux_info(e)
-                    if (
-                        yielded_output
-                        or attempt >= self.pd_route_retry_on_unavailable
-                        or not self._is_retryable_route_rpc_error(e)
-                    ):
-                        raise
-                    attempt += 1
-                    route_logger.warning(
-                        "retrying PD route after retryable RPC error, "
-                        "request_id=%s, attempt=%s/%s, error=%s",
-                        input.request_id,
-                        attempt,
-                        self.pd_route_retry_on_unavailable,
-                        e,
-                    )
-                    await asyncio.sleep(min(0.2, 0.05 * attempt))
+                async for output in stream:
+                    if strip_stop_ids:
+                        output = self.strip_frontend_stop_word_ids(
+                            output, strip_stop_ids, pending_stop_prefix
+                        )
+                    yield output
+            except BaseException as e:
+                set_aux_info(e)
+                raise
 
         return stream_with_aux_info()
 

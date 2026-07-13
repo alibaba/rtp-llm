@@ -65,7 +65,6 @@ public:
     // virtual for test
     virtual bool              copyCache(const MemoryOperationRequestPB& request, MemoryOperationResponsePB& response);
     std::vector<CacheKeyType> cacheKeys() const;
-    std::vector<CacheKeyType> cacheKeysForStatus() const;
 
 private:
     struct LayerRegionSlot {
@@ -115,7 +114,7 @@ private:
                                              const CopyDirection&               direction);
     bool startCopyAsync(const std::shared_ptr<MemoryAsyncContext>& context, const std::shared_ptr<CopyPlan>& copy_plan);
     std::shared_ptr<BroadcastResult<FunctionRequestPB, FunctionResponsePB>>
-    sendCopyPlan(const std::shared_ptr<CopyPlan>& copy_plan) const;
+         sendCopyPlan(const std::shared_ptr<CopyPlan>& copy_plan) const;
     std::shared_ptr<BroadcastResult<FunctionRequestPB, FunctionResponsePB>>
          sendMemoryRequest(const MemoryOperationRequestPB& mem_req, int64_t timeout_ms) const;
     void printCopyPlan(const std::shared_ptr<CopyPlan>& copy_plan) const;
@@ -156,7 +155,7 @@ private:
     bool                         hasTypedLayerRegionSlots(const std::vector<LayerRegionSlot>& slots) const;
     bool                         isDsv4TypedCacheLayout(const std::vector<LayerRegionSlot>& slots) const;
     bool                         checkLayerBlocks(const LayerBlockIds& layer_block_ids, size_t required_len) const;
-    LayerAttnBlockIds            resourceLayerRegionBlocks(const KVCacheResource&              resource,
+    LayerAttnBlockIds            resourceLayerRegionBlocks(const KVCacheResource&                resource,
                                                            const std::vector<LayerRegionSlot>& slots) const;
     bool                         checkLayerRegionBlocks(const LayerAttnBlockIds&            layer_attn_block_ids,
                                                         const std::vector<LayerRegionSlot>& slots,
@@ -175,49 +174,50 @@ private:
                                                      const std::vector<LayerRegionSlot>& slots,
                                                      size_t                              key_index,
                                                      CacheBlockKind                      kind) const;
-    size_t                    prefixKindBlockSize(CacheBlockKind kind, const std::vector<LayerRegionSlot>& slots) const;
-    std::shared_ptr<CopyPlan> buildPrefixCopyPlanForRead(const CacheKeysType&                cache_keys,
-                                                         const BlockDependenciesType&        dependencies,
-                                                         const LayerAttnBlockIds&            layer_attn_block_ids,
-                                                         const std::vector<LayerRegionSlot>& slots,
-                                                         int                                 start_index,
-                                                         int                                 read_num);
-    std::shared_ptr<CopyPlan> buildPrefixCopyPlanForWrite(const CacheKeysType&                cache_keys,
-                                                          const BlockDependenciesType&        dependencies,
-                                                          const LayerAttnBlockIds&            layer_attn_block_ids,
-                                                          const std::vector<LayerRegionSlot>& slots,
-                                                          int                                 start_index,
-                                                          int                                 write_num,
-                                                          bool&                               no_need_write);
-    bool                      allocatePrefixBackingsForWrite(std::vector<CopyInfoPerKey>& copy_infos);
-    bool                      allocateOnePrefixBacking(CopyInfoPerKey& copy_info);
-    bool                      preparePrefixMergeSources(std::vector<CopyInfoPerKey>& copy_infos);
-    void                      releasePrefixMergeSource(const CopyInfoPerKey& copy_info);
-    bool                      mergePrefixExistingSlots(PrefixTreeMemoryBlockCache::CacheItem&         item,
-                                                       const PrefixTreeMemoryBlockCache::MatchResult& existing,
-                                                       const std::vector<LayerRegionSlot>&            slots);
-    bool                      mergePrefixConflictForCommit(CopyInfoPerKey&                        copy_info,
-                                                           PrefixTreeMemoryBlockCache::CacheItem& item,
-                                                           const std::vector<LayerRegionSlot>&    slots);
-    void                      putPrefixToCache(CopyInfoPerKey&                     copy_info,
-                                               const BlockDependency&              dependency,
-                                               const std::vector<LayerRegionSlot>& slots);
-    void                      releasePrefixRequestBacking(const CopyInfoPerKey& copy_info);
-    void                      releasePrefixCacheBacking(const PrefixTreeMemoryBlockCache::CacheItem& item);
-    void                      referencePrefixCacheBacking(const PrefixTreeMemoryBlockCache::CacheItem& item);
-    bool                      copyPrefixMemoryItems(const MemoryOperationRequestPB&     request,
-                                                    CopyDirection                       direction,
-                                                    const std::vector<LayerRegionSlot>& slots);
+    size_t                       prefixKindBlockSize(CacheBlockKind kind,
+                                                     const std::vector<LayerRegionSlot>& slots) const;
+    std::shared_ptr<CopyPlan>    buildPrefixCopyPlanForRead(const CacheKeysType&                cache_keys,
+                                                             const BlockDependenciesType&        dependencies,
+                                                             const LayerAttnBlockIds&            layer_attn_block_ids,
+                                                             const std::vector<LayerRegionSlot>& slots,
+                                                             int                                 start_index,
+                                                             int                                 read_num);
+    std::shared_ptr<CopyPlan>    buildPrefixCopyPlanForWrite(const CacheKeysType&                cache_keys,
+                                                              const BlockDependenciesType&        dependencies,
+                                                              const LayerAttnBlockIds&            layer_attn_block_ids,
+                                                              const std::vector<LayerRegionSlot>& slots,
+                                                              int                                 start_index,
+                                                              int                                 write_num,
+                                                              bool&                               no_need_write);
+    bool                         allocatePrefixBackingsForWrite(std::vector<CopyInfoPerKey>& copy_infos);
+    bool                         allocateOnePrefixBacking(CopyInfoPerKey& copy_info);
+    bool                         preparePrefixMergeSources(std::vector<CopyInfoPerKey>& copy_infos);
+    void                         releasePrefixMergeSource(const CopyInfoPerKey& copy_info);
+    bool                         mergePrefixExistingSlots(PrefixTreeMemoryBlockCache::CacheItem& item,
+                                                          const PrefixTreeMemoryBlockCache::MatchResult& existing,
+                                                          const std::vector<LayerRegionSlot>& slots);
+    bool                         mergePrefixConflictForCommit(CopyInfoPerKey& copy_info,
+                                                              PrefixTreeMemoryBlockCache::CacheItem& item,
+                                                              const std::vector<LayerRegionSlot>& slots);
+    void                         putPrefixToCache(CopyInfoPerKey&                  copy_info,
+                                                  const BlockDependency&           dependency,
+                                                  const std::vector<LayerRegionSlot>& slots);
+    void                         releasePrefixRequestBacking(const CopyInfoPerKey& copy_info);
+    void                         releasePrefixCacheBacking(const PrefixTreeMemoryBlockCache::CacheItem& item);
+    void                         referencePrefixCacheBacking(const PrefixTreeMemoryBlockCache::CacheItem& item);
+    bool                         copyPrefixMemoryItems(const MemoryOperationRequestPB&     request,
+                                                       CopyDirection                       direction,
+                                                       const std::vector<LayerRegionSlot>& slots);
 
-    bool                       freeBlocks(const std::vector<BlockIdxType>& blocks, bool cache_free = true);
-    void                       referenceBlocks(const std::vector<BlockIdxType>& blocks, bool cache_ref = true);
-    bool                       allocateBackingsForWrite(std::vector<CopyInfoPerKey>& copy_infos);
-    bool                       allocateOneBacking(CopyInfoPerKey& copy_info);
-    bool                       tryMallocMemoryBlock(CacheBlockKind kind, BlockIdxType& block);
-    bool                       tryMallocDiskSlot(CacheBlockKind kind, int32_t& slot);
-    void                       releaseRequestBacking(const CopyInfoPerKey& copy_info);
-    void                       releaseCacheBacking(const MemoryDiskBlockCache::CacheItem& item);
-    void                       referenceCacheBacking(const MemoryDiskBlockCache::CacheItem& item);
+    bool freeBlocks(const std::vector<BlockIdxType>& blocks, bool cache_free = true);
+    void referenceBlocks(const std::vector<BlockIdxType>& blocks, bool cache_ref = true);
+    bool allocateBackingsForWrite(std::vector<CopyInfoPerKey>& copy_infos);
+    bool allocateOneBacking(CopyInfoPerKey& copy_info);
+    bool tryMallocMemoryBlock(CacheBlockKind kind, BlockIdxType& block);
+    bool tryMallocDiskSlot(CacheBlockKind kind, int32_t& slot);
+    void releaseRequestBacking(const CopyInfoPerKey& copy_info);
+    void releaseCacheBacking(const MemoryDiskBlockCache::CacheItem& item);
+    void referenceCacheBacking(const MemoryDiskBlockCache::CacheItem& item);
     std::shared_ptr<BlockPool> memoryPoolFor(CacheBlockKind kind) const;
     DiskBlockPoolPtr           diskPoolFor(CacheBlockKind kind) const;
     size_t                     maxDiskSlotStrideBytes() const;
@@ -250,7 +250,8 @@ private:
     size_t                     memoryCacheBlockSizeBytes() const;
     void                       putToCache(const MemoryBlockCache::CacheItem& item);
     void                       putToCache(CopyInfoPerKey& copy_info);
-    bool putToCache(const MemoryDiskBlockCache::CacheItem& item, bool already_has_cache_ref = false);
+    bool                       putToCache(const MemoryDiskBlockCache::CacheItem& item,
+                                          bool                                   already_has_cache_ref = false);
 
     void reportMatchMetrics(bool success, int64_t latency_us, int64_t input_block_num, int64_t matched_block_num);
     void reportReadMetrics(bool success, int64_t latency_us, int64_t input_block_num, int64_t read_block_num);

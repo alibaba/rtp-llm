@@ -25,7 +25,7 @@ void WorkerStatusService::workerStatus(const std::unique_ptr<http_server::HttpRe
 
     KVCacheInfo cache_status;
     if (engine_) {
-        cache_status = engine_->getCacheStatusInfo(-1, false);
+        cache_status = engine_->getCacheStatusInfo(-1, true);
     } else {
         RTP_LLM_LOG_WARNING("worker status service call worker status error, engine is null");
     }

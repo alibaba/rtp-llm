@@ -31,8 +31,9 @@ class _EnvCfg:
 
 
 class _FakeTokenizer:
-    def __init__(self, *, ids=None, raise_exc: bool = False):
+    def __init__(self, *, ids=None, id_map=None, raise_exc: bool = False):
         self._ids = ids or []
+        self._id_map = id_map or {}
         self._raise = raise_exc
         self.encode_calls: list[tuple[str, bool]] = []
 
@@ -40,6 +41,8 @@ class _FakeTokenizer:
         if self._raise:
             raise RuntimeError("tokenizer.encode failed")
         self.encode_calls.append((text, add_special_tokens))
+        if text in self._id_map:
+            return list(self._id_map[text])
         return list(self._ids)
 
 
@@ -80,14 +83,18 @@ class CreateProxyServicerOnLoopTest(TestCase):
         created_loops = []
         sentinel = object()
 
-        def fake_servicer():
+        def fake_servicer(**kwargs):
             created_loops.append(asyncio.get_running_loop())
+            self.assertEqual(kwargs, {"rank_id": 7, "server_id": "42"})
             return sentinel
 
         async def run():
             with patch.object(bg_app, "DashScProxyServicer", side_effect=fake_servicer):
                 loop = asyncio.get_running_loop()
-                servicer = await _create_proxy_servicer_on_loop()
+                servicer = await _create_proxy_servicer_on_loop(
+                    rank_id=7,
+                    server_id="42",
+                )
             return loop, servicer
 
         loop, servicer = asyncio.run(run())

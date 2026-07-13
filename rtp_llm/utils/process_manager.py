@@ -6,24 +6,6 @@ import time
 from multiprocessing import Process
 from typing import Callable, Dict, List, Optional, Set
 
-DEFER_FIRST_SIGTERM_ENV = "RTP_LLM_DEFER_FIRST_SIGTERM"
-DEFER_FIRST_SIGTERM_SECONDS_ENV = "RTP_LLM_DEFER_FIRST_SIGTERM_SECONDS"
-DEFER_FIRST_SIGTERM_VALUE = "1"
-SHUTDOWN_TIMEOUT_ENV = "SHUTDOWN_TIMEOUT"
-STOP_TIMEOUT_MS_ENV = "RTP_LLM_STOP_TIMEOUT_MS"
-DEFERRED_GROUP_SHUTDOWN_HEADROOM_SECONDS_ENV = (
-    "RTP_LLM_DEFERRED_GROUP_SHUTDOWN_HEADROOM_SECONDS"
-)
-BACKEND_POST_FRONTEND_DRAIN_SECONDS_ENV = "RTP_LLM_BACKEND_POST_FRONTEND_DRAIN_SECONDS"
-FRONTEND_PRE_STOP_DRAIN_SECONDS_ENV = "FRONTEND_PRE_STOP_DRAIN_SECONDS"
-DASH_SC_PRE_STOP_DRAIN_SECONDS_ENV = "DASH_SC_GRPC_PRE_STOP_DRAIN_SECONDS"
-PRE_STOP_DRAIN_SIGNAL_ENV = "RTP_LLM_PRE_STOP_DRAIN_SIGNAL"
-PRE_STOP_DRAIN_SIGNAL_DISABLED_VALUE = "0"
-PRE_STOP_DRAIN_HEADROOM_SECONDS_ENV = "RTP_LLM_PRE_STOP_DRAIN_HEADROOM_SECONDS"
-DEFAULT_SHUTDOWN_TIMEOUT_SECONDS = 600
-DEFAULT_DEFERRED_GROUP_SHUTDOWN_HEADROOM_SECONDS = 60.0
-DEFAULT_BACKEND_POST_FRONTEND_DRAIN_SECONDS = 120.0
-
 
 class ProcessManager:
     """Process manager for managing and monitoring processes"""
@@ -34,19 +16,14 @@ class ProcessManager:
     # Groups SIGTERM'd only after drain groups stop sending RPCs.
     DEFERRED_GROUPS: Set[str] = {"backend"}
 
-    def __init__(
-        self,
-        shutdown_timeout: int = 600,
-        monitor_interval: int = 1,
-        allow_defer_first_sigterm: bool = False,
-    ):
+    def __init__(self, shutdown_timeout: int = 600, monitor_interval: int = 1):
         if shutdown_timeout <= 0:
             logging.warning(
                 f"shutdown_timeout={shutdown_timeout} is non-positive; "
                 "coercing to 600s so the parent cannot hang on a "
                 "non-draining child."
             )
-            shutdown_timeout = DEFAULT_SHUTDOWN_TIMEOUT_SECONDS
+            shutdown_timeout = 600
         self.processes: List[Process] = []
         self.shutdown_requested = False
         self.failure_detected = False
@@ -54,12 +31,6 @@ class ProcessManager:
         self.monitor_interval = monitor_interval
         self.process_groups: Dict[str, List[Process]] = {}
         self.shutdown_group_order: List[str] = []
-        self._defer_first_sigterm = allow_defer_first_sigterm and (
-            os.environ.get(DEFER_FIRST_SIGTERM_ENV) == DEFER_FIRST_SIGTERM_VALUE
-        )
-        self._deferred_sigterm_seen = False
-        self._deferred_sigterm_timer: Optional[threading.Timer] = None
-        self._used_pre_stop_drain_signal = False
 
         # Health check related attributes
         self.health_check_processes: List[Process] = []
@@ -80,57 +51,7 @@ class ProcessManager:
         logging.info(
             f"Process manager received signal {signum}, initiating shutdown..."
         )
-        if self._defer_first_sigterm_if_needed(signum):
-            return
-        self._cancel_deferred_sigterm_timer()
         self.shutdown_requested = True
-
-    def _defer_first_sigterm_if_needed(self, signum) -> bool:
-        if not self._defer_first_sigterm or signum != signal.SIGTERM:
-            return False
-        if self._deferred_sigterm_seen:
-            logging.info(
-                "Process manager ignoring duplicate SIGTERM while waiting for "
-                "parent-staged backend shutdown"
-            )
-            return True
-
-        self._deferred_sigterm_seen = True
-        delay_s = self._deferred_sigterm_delay_seconds()
-        logging.info(
-            "Process manager deferring first SIGTERM for %.3fs; waiting for "
-            "parent-staged backend shutdown",
-            delay_s,
-        )
-        timer = threading.Timer(delay_s, self._deferred_sigterm_timeout)
-        timer.daemon = True
-        self._deferred_sigterm_timer = timer
-        timer.start()
-        return True
-
-    def _deferred_sigterm_delay_seconds(self) -> float:
-        raw = os.environ.get(DEFER_FIRST_SIGTERM_SECONDS_ENV, "")
-        try:
-            delay_s = float(raw) if raw else float(self.shutdown_timeout)
-        except ValueError:
-            delay_s = float(self.shutdown_timeout)
-        if delay_s <= 0:
-            delay_s = 600.0
-        return delay_s
-
-    def _deferred_sigterm_timeout(self):
-        logging.warning(
-            "Deferred first SIGTERM grace expired; shutting down backend process manager"
-        )
-        self.shutdown_requested = True
-
-    def _cancel_deferred_sigterm_timer(self):
-        if self._deferred_sigterm_timer is not None:
-            self._deferred_sigterm_timer.cancel()
-            self._deferred_sigterm_timer = None
-
-    def is_deferred_sigterm_pending(self) -> bool:
-        return self._deferred_sigterm_seen and not self.shutdown_requested
 
     def _register_group(self, shutdown_group: str):
         if shutdown_group not in self.process_groups:
@@ -138,7 +59,9 @@ class ProcessManager:
         if shutdown_group not in self.shutdown_group_order:
             self.shutdown_group_order.append(shutdown_group)
 
-    def set_processes(self, processes: List[Process], shutdown_group: str = "default"):
+    def set_processes(
+        self, processes: List[Process], shutdown_group: str = "default"
+    ):
         """Set the processes to manage (replaces existing list)"""
         self.processes = processes if processes else []
         self.process_groups = {}
@@ -153,68 +76,32 @@ class ProcessManager:
             self._register_group(shutdown_group)
             self.process_groups[shutdown_group].append(process)
 
-    def add_processes(self, processes: List[Process], shutdown_group: str = "default"):
+    def add_processes(
+        self, processes: List[Process], shutdown_group: str = "default"
+    ):
         """Add multiple processes to manage"""
         if processes:
             self.processes.extend(processes)
             self._register_group(shutdown_group)
             self.process_groups[shutdown_group].extend(processes)
 
-    def _terminate_process_list(
-        self,
-        processes: List[Process],
-        group_name: str,
-        force_immediate: bool = False,
-        signum: signal.Signals = signal.SIGTERM,
-    ):
+    def _terminate_process_list(self, processes: List[Process], group_name: str):
         for proc in processes:
             if proc.is_alive():
                 logging.info(
-                    f"Sending {signal.Signals(signum).name} to {group_name} "
-                    f"process {proc.name} pid={proc.pid}"
+                    f"Sending SIGTERM to {group_name} process {proc.name} pid={proc.pid}"
                 )
-                self._signal_process(proc, signum)
-                if force_immediate and proc.is_alive():
-                    time.sleep(0.05)
-                    if proc.is_alive():
-                        sig_name = signal.Signals(signum).name
-                        logging.info(
-                            f"Sending immediate second {sig_name} to {group_name} "
-                            f"process {proc.name} pid={proc.pid}"
-                        )
-                        self._signal_process(proc, signum)
+                proc.terminate()
             else:
                 logging.info(f"proc.name [{proc.name}] pid[{proc.pid}] is not alived")
-
-    def _signal_process(self, proc: Process, signum: signal.Signals):
-        if signum == signal.SIGTERM:
-            proc.terminate()
-            return
-        if signum == self._pre_stop_signal():
-            try:
-                if getattr(proc, "pid", None) is not None:
-                    os.kill(proc.pid, signum)
-            except (OSError, ProcessLookupError):
-                pass
-            return
-        try:
-            # multiprocessing.Process has no portable send_signal() helper before
-            # Python 3.14.  Only use os.kill for real started child processes;
-            # tests often use lightweight fakes with synthetic pids.
-            if getattr(proc, "_popen", None) is not None:
-                os.kill(proc.pid, signum)
-            else:
-                proc.terminate()
-        except (OSError, ProcessLookupError):
-            pass
 
     def _wait_process_list_exit(
         self,
         processes: List[Process],
-        timeout: Optional[float],
+        timeout: Optional[int],
         group_name: str,
         abort_if_dead_groups: Optional[Set[str]] = None,
-    ) -> str:
+    ):
         """Block until SIGTERM'd `processes` exit, or a terminal condition fires.
 
         Per-tick state machine (priority order):
@@ -227,18 +114,18 @@ class ProcessManager:
           4. STILL_DRAINING    → log, sleep one monitor_interval, retry.
         """
         if not processes:
-            return "all_exited"
+            return
         deadline = None if (timeout is None or timeout < 0) else time.time() + timeout
         abort_groups = abort_if_dead_groups or set()
 
         while True:
             alive_pids = [p.pid for p in processes if p.is_alive()]
             if not alive_pids:
-                return "all_exited"  # 1. ALL_EXITED
+                return  # 1. ALL_EXITED
             if self._drain_deadline_passed(deadline, group_name, alive_pids):
-                return "deadline_reached"  # 2. DEADLINE_REACHED
+                return  # 2. DEADLINE_REACHED
             if self._dependency_group_lost(abort_groups, group_name, alive_pids):
-                return "dependency_lost"  # 3. DEPENDENCY_LOST
+                return  # 3. DEPENDENCY_LOST
             logging.info(
                 f"Waiting for {group_name} process group to exit, alive={alive_pids}"
             )
@@ -277,9 +164,7 @@ class ProcessManager:
                 continue
 
             dead_exitcodes = [p.exitcode for p in grp_procs if not p.is_alive()]
-            crashed = any(
-                not self._is_clean_shutdown_exitcode(c) for c in dead_exitcodes
-            )
+            crashed = any(c is None or c != 0 for c in dead_exitcodes)
             if crashed:
                 logging.warning(
                     f"{grp} group crashed (exitcodes={dead_exitcodes}); "
@@ -295,333 +180,51 @@ class ProcessManager:
             return True
         return False
 
-    def _is_clean_shutdown_exitcode(self, exitcode: Optional[int]) -> bool:
-        if exitcode == 0:
-            return True
-        if not self.shutdown_requested:
-            return False
-        return exitcode in (-signal.SIGTERM, -signal.SIGINT)
-
     def _terminate_processes(self, drain_timeout: int, staged: bool = True):
         """SIGTERM all managed processes. Caller picks `drain_timeout`:
           - graceful exit → user's shutdown_timeout (e.g., 5min).
           - failure exit  → 0 (skip drain wait, SIGTERM backend immediately).
 
         Force-kill of survivors is the outer monitor loop's responsibility;
-        this function sequences SIGTERMs. Drain groups get the caller's drain
-        budget before backend SIGTERM; deferred groups then get their own
-        shutdown budget so a long frontend drain does not squeeze backend
-        cleanup down to the monitor's SIGKILL reap window.
+        this function only sequences SIGTERMs.
 
         Staged mode (production path):
           Phase 1 — SIGTERM drain groups (frontend/ingress), wait for them
                     to drain in-flight work (or hit drain_timeout / dep dies).
-          Phase 2 — SIGTERM deferred groups (backend), then wait for remaining
-                    managed processes before the monitor's last-resort SIGKILL.
+          Phase 2 — SIGTERM deferred groups (backend); outer loop polls.
 
         Non-staged mode (post-crash all-stop): SIGTERM everyone at once.
         """
         logging.info(f"Sending SIGTERM (drain_timeout={drain_timeout}s)")
-        self._used_pre_stop_drain_signal = False
-        drain_deadline = self._make_deadline(drain_timeout)
 
         if staged and self.process_groups:
-            dependency_lost = self._sigterm_and_drain_groups(drain_deadline)
-            if not dependency_lost:
-                self._linger_before_deferred_group_shutdown(drain_deadline)
+            self._sigterm_and_drain_groups(drain_timeout)
             self._sigterm_deferred_groups()
-            if not dependency_lost:
-                deferred_processes = self._processes_for_groups(self.DEFERRED_GROUPS)
-                if deferred_processes:
-                    self._wait_process_list_exit(
-                        deferred_processes,
-                        self.deferred_group_shutdown_timeout_seconds(drain_timeout),
-                        "deferred",
-                    )
-                    return
-                self._wait_process_list_exit(
-                    self.processes,
-                    self._remaining_timeout(drain_deadline),
-                    "managed",
-                )
         else:
-            self._terminate_process_list(
-                self.processes, "managed", force_immediate=self._defer_first_sigterm
-            )
-            self._wait_process_list_exit(
-                self.processes,
-                self._remaining_timeout(drain_deadline),
-                "managed",
-            )
+            self._terminate_process_list(self.processes, "managed")
 
-    def _make_deadline(self, timeout: Optional[float]) -> Optional[float]:
-        if timeout is None or timeout < 0:
-            return None
-        return time.time() + timeout
-
-    def _remaining_timeout(self, deadline: Optional[float]) -> Optional[float]:
-        if deadline is None:
-            return None
-        return max(0.0, deadline - time.time())
-
-    def _processes_for_groups(self, group_names: Set[str]) -> List[Process]:
-        processes: List[Process] = []
-        for group_name in self.shutdown_group_order:
-            if group_name in group_names:
-                processes.extend(self.process_groups.get(group_name, []))
-        return processes
-
-    @classmethod
-    def deferred_group_shutdown_timeout_seconds(
-        cls, drain_timeout: Optional[float]
-    ) -> Optional[float]:
-        if drain_timeout is None or drain_timeout < 0:
-            return None
-        if drain_timeout <= 0:
-            return 0
-        stop_timeout = float(cls.normalize_shutdown_timeout_seconds(drain_timeout))
-        try:
-            stop_timeout_ms = float(os.environ.get(STOP_TIMEOUT_MS_ENV, "0"))
-            if stop_timeout_ms > 0:
-                stop_timeout = max(stop_timeout, stop_timeout_ms / 1000.0)
-        except ValueError:
-            pass
-        return stop_timeout + cls._deferred_group_shutdown_headroom_seconds()
-
-    @staticmethod
-    def normalize_shutdown_timeout_seconds(shutdown_timeout: float) -> int:
-        try:
-            timeout = int(shutdown_timeout)
-        except (TypeError, ValueError):
-            timeout = DEFAULT_SHUTDOWN_TIMEOUT_SECONDS
-        if timeout <= 0:
-            timeout = DEFAULT_SHUTDOWN_TIMEOUT_SECONDS
-        return timeout
-
-    @staticmethod
-    def sync_shutdown_timeout_env(shutdown_timeout: float) -> int:
-        timeout = ProcessManager.normalize_shutdown_timeout_seconds(shutdown_timeout)
-        os.environ[SHUTDOWN_TIMEOUT_ENV] = str(timeout)
-        return timeout
-
-    @staticmethod
-    def _deferred_group_shutdown_headroom_seconds() -> float:
-        try:
-            headroom = float(
-                os.environ.get(
-                    DEFERRED_GROUP_SHUTDOWN_HEADROOM_SECONDS_ENV,
-                    DEFAULT_DEFERRED_GROUP_SHUTDOWN_HEADROOM_SECONDS,
-                )
-            )
-        except ValueError:
-            headroom = DEFAULT_DEFERRED_GROUP_SHUTDOWN_HEADROOM_SECONDS
-        if headroom < 0:
-            headroom = DEFAULT_DEFERRED_GROUP_SHUTDOWN_HEADROOM_SECONDS
-        return headroom
-
-    def _sigterm_and_drain_groups(self, drain_deadline: Optional[float]) -> bool:
+    def _sigterm_and_drain_groups(self, drain_timeout: int):
         """SIGTERM non-deferred groups; wait for drainable ones to drain."""
-        dependency_lost = False
-        pre_stop_groups: List[str] = []
         for group_name in self.shutdown_group_order:
             if group_name in self.DEFERRED_GROUPS:
                 continue
             group_processes = self.process_groups.get(group_name, [])
-            use_pre_stop_signal = (
-                group_name in self.DRAIN_GROUPS
-                and self._pre_stop_drain_signal_enabled()
-                and self._pre_stop_signal() is not None
-            )
-            if use_pre_stop_signal:
-                self._send_pre_stop_drain_signal(group_processes, group_name)
-                self._used_pre_stop_drain_signal = True
-                pre_stop_groups.append(group_name)
-
-        if pre_stop_groups and self._wait_pre_stop_drain_signal_window(
-            pre_stop_groups, drain_deadline
-        ):
-            dependency_lost = True
-
-        for group_name in self.shutdown_group_order:
-            if group_name in self.DEFERRED_GROUPS:
-                continue
-            group_processes = self.process_groups.get(group_name, [])
-            self._terminate_process_list(
-                group_processes,
-                group_name,
-                force_immediate=(self._defer_first_sigterm and group_name == "default"),
-            )
+            self._terminate_process_list(group_processes, group_name)
             if group_name in self.DRAIN_GROUPS:
-                result = self._wait_process_list_exit(
+                self._wait_process_list_exit(
                     group_processes,
-                    self._remaining_timeout(drain_deadline),
+                    drain_timeout,
                     group_name,
                     abort_if_dead_groups=set(self.DEFERRED_GROUPS),
                 )
-                if result == "dependency_lost":
-                    dependency_lost = True
-        return dependency_lost
-
-    def _linger_before_deferred_group_shutdown(self, drain_deadline: Optional[float]):
-        if self._used_pre_stop_drain_signal:
-            return
-        linger_s = self._backend_post_frontend_drain_seconds()
-        if linger_s <= 0:
-            return
-        if not self._processes_for_groups(self.DRAIN_GROUPS):
-            return
-        if not self._processes_for_groups(self.DEFERRED_GROUPS):
-            return
-        remaining = self._remaining_timeout(drain_deadline)
-        if remaining is not None:
-            linger_s = min(linger_s, remaining)
-        if linger_s <= 0:
-            return
-        logging.info(
-            "Waiting %.3fs before backend shutdown so route/service-discovery "
-            "state can converge after frontend drain",
-            linger_s,
-        )
-        time.sleep(linger_s)
-
-    @staticmethod
-    def _backend_post_frontend_drain_seconds() -> float:
-        # Route/master state convergence tends to track the pre-stop drain
-        # window, so reuse that value unless operators set a dedicated linger.
-        for env_key in (
-            BACKEND_POST_FRONTEND_DRAIN_SECONDS_ENV,
-            FRONTEND_PRE_STOP_DRAIN_SECONDS_ENV,
-            DASH_SC_PRE_STOP_DRAIN_SECONDS_ENV,
-        ):
-            raw = os.environ.get(env_key, "")
-            if not raw:
-                continue
-            try:
-                return max(0.0, float(raw))
-            except ValueError:
-                return DEFAULT_BACKEND_POST_FRONTEND_DRAIN_SECONDS
-        return DEFAULT_BACKEND_POST_FRONTEND_DRAIN_SECONDS
-
-    @staticmethod
-    def _pre_stop_drain_signal_enabled() -> bool:
-        if os.environ.get(PRE_STOP_DRAIN_SIGNAL_ENV, "1").strip() == (
-            PRE_STOP_DRAIN_SIGNAL_DISABLED_VALUE
-        ):
-            return False
-        return bool(
-            os.environ.get(FRONTEND_PRE_STOP_DRAIN_SECONDS_ENV, "").strip()
-            or os.environ.get(DASH_SC_PRE_STOP_DRAIN_SECONDS_ENV, "").strip()
-        )
-
-    @staticmethod
-    def _pre_stop_signal() -> Optional[signal.Signals]:
-        return getattr(signal, "SIGUSR1", None)
-
-    def _send_pre_stop_drain_signal(self, processes: List[Process], group_name: str):
-        pre_stop_signal = self._pre_stop_signal()
-        if pre_stop_signal is None:
-            return
-        logging.info(
-            "Sending %s to %s process group for pre-stop drain",
-            signal.Signals(pre_stop_signal).name,
-            group_name,
-        )
-        self._terminate_process_list(
-            processes,
-            group_name,
-            signum=pre_stop_signal,
-        )
-
-    def _wait_pre_stop_drain_signal_window(
-        self, group_names: List[str], drain_deadline: Optional[float]
-    ) -> bool:
-        window_s = self._pre_stop_drain_signal_window_seconds(drain_deadline)
-        if window_s <= 0:
-            return False
-
-        group_label = ",".join(group_names)
-        deadline = time.time() + window_s
-        logging.info(
-            "Waiting %.3fs after pre-stop drain signal for %s route/service-discovery "
-            "state to converge",
-            window_s,
-            group_label,
-        )
-        while time.time() < deadline:
-            alive_pids = []
-            for group_name in group_names:
-                alive_pids.extend(
-                    p.pid
-                    for p in self.process_groups.get(group_name, [])
-                    if p.is_alive()
-                )
-            if not alive_pids:
-                logging.info(
-                    "%s process groups exited during pre-stop drain signal window",
-                    group_label,
-                )
-                return False
-            if self._dependency_group_lost(
-                self.DEFERRED_GROUPS,
-                group_label,
-                alive_pids,
-            ):
-                return True
-            time.sleep(min(self.monitor_interval, max(0.0, deadline - time.time())))
-        return False
-
-    def _pre_stop_drain_signal_window_seconds(
-        self, drain_deadline: Optional[float]
-    ) -> float:
-        window_s = self._backend_post_frontend_drain_seconds()
-        if window_s <= 0:
-            return 0.0
-        remaining = self._remaining_timeout(drain_deadline)
-        if remaining is None:
-            return window_s
-
-        headroom_s = self._pre_stop_drain_headroom_seconds(remaining)
-        max_window_s = max(0.0, remaining - headroom_s)
-        clamped_window_s = min(window_s, max_window_s)
-        if clamped_window_s < window_s:
-            logging.info(
-                "Clamp pre-stop drain signal window from %.3fs to %.3fs "
-                "(remaining_shutdown_budget=%.3fs, headroom=%.3fs)",
-                window_s,
-                clamped_window_s,
-                remaining,
-                headroom_s,
-            )
-        return clamped_window_s
-
-    @staticmethod
-    def _pre_stop_drain_headroom_seconds(shutdown_timeout: float) -> float:
-        raw = os.environ.get(PRE_STOP_DRAIN_HEADROOM_SECONDS_ENV, "")
-        if raw:
-            try:
-                return max(0.0, float(raw))
-            except ValueError:
-                logging.warning(
-                    "Invalid %s=%r, using default pre-stop drain headroom",
-                    PRE_STOP_DRAIN_HEADROOM_SECONDS_ENV,
-                    raw,
-                )
-        return min(60.0, max(1.0, float(shutdown_timeout) * 0.10))
 
     def _sigterm_deferred_groups(self):
-        """Signal deferred groups (backend); outer monitor loop polls.
-
-        Backend children intentionally ignore repeated SIGTERM while deferring
-        cgroup-wide shutdown noise.  The parent uses SIGINT as the explicit
-        staged shutdown signal once frontend/ingress drain is complete.
-        """
+        """SIGTERM deferred groups (backend); outer monitor loop polls."""
         for group_name in self.shutdown_group_order:
             if group_name not in self.DEFERRED_GROUPS:
                 continue
             self._terminate_process_list(
-                self.process_groups.get(group_name, []),
-                group_name,
-                signum=signal.SIGINT,
+                self.process_groups.get(group_name, []), group_name
             )
 
     def _force_kill_processes(self):
@@ -688,9 +291,8 @@ class ProcessManager:
         """Watch children; on shutdown or unexpected death, SIGTERM then SIGKILL.
 
         Steady state: poll every monitor_interval while everything is healthy.
-        Otherwise: send SIGTERM (with caller-picked drain budget), wait for
-        graceful exit inside _terminate_processes, then give wait4() a short
-        reap window and SIGKILL any survivor.
+        Otherwise: send SIGTERM (with caller-picked drain budget), wait the
+        POST_KILL_REAP_WINDOW, SIGKILL any survivor, exit the loop.
         """
         while self._is_any_process_alive():
             if not self.shutdown_requested and self._is_all_processes_alive():
