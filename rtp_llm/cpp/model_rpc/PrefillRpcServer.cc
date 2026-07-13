@@ -932,7 +932,7 @@ grpc::Status PrefillRpcServer::GenerateStreamCall(grpc::ServerContext*          
     RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_LOG_DEBUG("request [%ld] start generate stream call", request->request_id());
     const auto& generate_config = request->generate_config();
-    auto        pd_separation   = true;
+    auto        pd_separation   = shouldUsePdSeparation(generate_config);
     if (prefillTraceLogEnabled()) {
         RTP_LLM_LOG_INFO("Prefill request trace: event=recv request_id=%ld pd_separation=%d token_ids=%d "
                          "max_new_tokens=%d in_think_mode=%d max_thinking_tokens=%d"
@@ -1012,9 +1012,8 @@ grpc::Status PrefillRpcServer::GenerateStreamCall(grpc::ServerContext*          
 }
 
 bool PrefillRpcServer::shouldUsePdSeparation(const GenerateConfigPB& generate_config) {
-    return generate_config.in_think_mode() && generate_config.num_beams() <= 1
-           && generate_config.variable_num_beams().size() == 0 && generate_config.num_return_sequences() <= 1
-           && generate_config.can_use_pd_separation();
+    return generate_config.num_beams() <= 1 && generate_config.variable_num_beams().size() == 0
+           && generate_config.num_return_sequences() <= 1 && generate_config.can_use_pd_separation();
 }
 
 grpc::Status
