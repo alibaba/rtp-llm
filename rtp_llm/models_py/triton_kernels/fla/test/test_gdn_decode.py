@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 
+import importlib
 import logging
 import math
 import os
@@ -151,6 +152,94 @@ def test_fused_recurrent_continuous_batching(
 
 
 class TestFusedRecurrentFinalStateBlockMap(unittest.TestCase):
+
+    def test_decode_reference_matches_block_mapped_kernel(self):
+        fused_recurrent_module = importlib.import_module(
+            "rtp_llm.models_py.triton_kernels.fla.fused_recurrent"
+        )
+        reference = getattr(
+            fused_recurrent_module,
+            "fused_recurrent_gated_delta_rule_decode_ref",
+            None,
+        )
+        self.assertIsNotNone(reference)
+
+        device = "cuda"
+        dtype = torch.bfloat16
+        B, S, H, HV, D = 4, 1, 2, 4, 8
+        seq_size_per_block = 2
+        torch.manual_seed(19)
+
+        q = torch.randn(B, S, H, D, dtype=dtype, device=device)
+        k = torch.randn(B, S, H, D, dtype=dtype, device=device)
+        v = torch.randn(B, S, HV, D, dtype=dtype, device=device)
+        beta = torch.rand(B, S, HV, dtype=dtype, device=device).sigmoid()
+        g = F.logsigmoid(torch.rand(B, S, HV, dtype=torch.float32, device=device))
+        block_map = torch.tensor(
+            [[1, 2], [3, 4], [5, 6], [-1, -1]],
+            dtype=torch.int32,
+            device=device,
+        )
+        sequence_lengths = torch.tensor([3, 3, 3, 0], dtype=torch.int32, device=device)
+        state_elements = HV * D * D
+        state_backing = torch.randn(
+            8, state_elements + 16, dtype=dtype, device=device
+        )
+        initial_state = state_backing[:, :state_elements].view(8, HV, D, D)
+        kernel_state = initial_state.clone()
+        reference_state = initial_state.clone()
+        block_zero = initial_state[0].clone()
+
+        kernel_out, _ = fused_recurrent_gated_delta_rule(
+            q=q,
+            k=k,
+            v=v,
+            beta=beta,
+            g=g,
+            initial_state=kernel_state,
+            block_map=block_map,
+            sequence_lengths=sequence_lengths,
+            seq_size_per_block=seq_size_per_block,
+            inplace_final_state=True,
+            use_qk_l2norm_in_kernel=True,
+        )
+        reference_out, returned_state = reference(
+            q=q,
+            k=k,
+            v=v,
+            beta=beta,
+            g=g,
+            initial_state=reference_state,
+            block_map=block_map,
+            sequence_lengths=sequence_lengths,
+            seq_size_per_block=seq_size_per_block,
+            use_qk_l2norm_in_kernel=True,
+        )
+
+        torch.testing.assert_close(reference_out[:3], kernel_out[:3], rtol=0.02, atol=0.02)
+        torch.testing.assert_close(
+            reference_state[[2, 4, 6]], kernel_state[[2, 4, 6]], rtol=0.02, atol=0.02
+        )
+        self.assertIs(returned_state, reference_state)
+        torch.testing.assert_close(reference_state[0], block_zero, rtol=0, atol=0)
+
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            graph_out, _ = reference(
+                q=q,
+                k=k,
+                v=v,
+                beta=beta,
+                g=g,
+                initial_state=reference_state,
+                block_map=block_map,
+                sequence_lengths=sequence_lengths,
+                seq_size_per_block=seq_size_per_block,
+                use_qk_l2norm_in_kernel=True,
+            )
+        graph.replay()
+        torch.cuda.synchronize()
+        self.assertTrue(torch.isfinite(graph_out[:3]).all().item())
 
     def test_skip_negative_write_block_id(self):
         device = "cuda"

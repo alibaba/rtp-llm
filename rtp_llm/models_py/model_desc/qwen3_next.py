@@ -42,6 +42,7 @@ from rtp_llm.models_py.triton_kernels.fla.block import (
 from rtp_llm.models_py.triton_kernels.fla.chunk import chunk_gated_delta_rule
 from rtp_llm.models_py.triton_kernels.fla.fused_recurrent import (
     fused_recurrent_gated_delta_rule,
+    fused_recurrent_gated_delta_rule_decode_ref,
 )
 from rtp_llm.models_py.triton_kernels.fla.gdn_gating import fused_gdn_gating
 from rtp_llm.models_py.utils.debug import cudagraph_debug_kernel
@@ -88,6 +89,7 @@ _Q3N_TRACE_EVERY = max(1, _env_int("RTPLLM_QWEN3_NEXT_TRACE_EVERY", 1))
 _Q3N_TRACE_MAX_RECORDS = _env_int("RTPLLM_QWEN3_NEXT_TRACE_MAX_RECORDS", 0)
 _Q3N_TRACE_MAX_LANES = max(1, _env_int("RTPLLM_QWEN3_NEXT_TRACE_MAX_LANES", 4))
 _Q3N_TRACE_MAX_ELEMS = max(1, _env_int("RTPLLM_QWEN3_NEXT_TRACE_MAX_ELEMS", 8192))
+_Q3N_FLA_DECODE_REF = _env_flag("RTPLLM_QWEN3_NEXT_FLA_REF", False)
 _Q3N_TRACE_SYNC = _env_flag("RTPLLM_QWEN3_NEXT_TRACE_SYNC_DEVICE", True)
 _Q3N_TRACE_PREFILL = _env_flag("RTPLLM_QWEN3_NEXT_TRACE_PREFILL", False)
 _Q3N_TRACE_TENSOR_MODE = os.environ.get(
@@ -1289,7 +1291,12 @@ class Qwen3NextGatedDeltaNetDecode(Qwen3NextGatedDeltaNetBase):
         g = g.view(batch, seq, self.local_num_v_heads)
         beta = beta.view(batch, seq, self.local_num_v_heads)
         ssm_states = self._get_ssm_states(kv_cache_tensor)
-        core_attn_out, _ = fused_recurrent_gated_delta_rule(
+        recurrent = (
+            fused_recurrent_gated_delta_rule_decode_ref
+            if _Q3N_FLA_DECODE_REF
+            else fused_recurrent_gated_delta_rule
+        )
+        core_attn_out, _ = recurrent(
             q=query,
             k=key,
             v=value,

@@ -272,6 +272,85 @@ def fused_recurrent_gated_delta_rule_fwd(
     return o, final_state
 
 
+@torch.no_grad()
+def fused_recurrent_gated_delta_rule_decode_ref(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    g: torch.Tensor,
+    beta: Optional[torch.Tensor] = None,
+    scale: Optional[float] = None,
+    initial_state: Optional[torch.Tensor] = None,
+    inplace_final_state: bool = True,
+    cu_seqlens: Optional[torch.LongTensor] = None,
+    block_map: Optional[torch.Tensor] = None,
+    seq_size_per_block: int = 1,
+    sequence_lengths: Optional[torch.Tensor] = None,
+    use_qk_l2norm_in_kernel: bool = False,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Graph-capturable PyTorch reference for one-token paged decode."""
+    if q.shape[1] != 1:
+        raise ValueError("decode reference only supports one token per sequence")
+    if not inplace_final_state:
+        raise ValueError("decode reference requires in-place final state")
+    if cu_seqlens is not None:
+        raise ValueError("decode reference does not support variable-length prefill")
+    if initial_state is None or block_map is None or sequence_lengths is None:
+        raise ValueError("decode reference requires state, block map, and sequence lengths")
+    if beta is not None and beta.ndim != 3:
+        raise ValueError("decode reference only supports headwise scalar beta")
+
+    batch, _, num_q_heads, key_dim = q.shape
+    num_value_heads = v.shape[2]
+    value_dim = v.shape[3]
+    if num_value_heads % num_q_heads != 0:
+        raise ValueError("value heads must be divisible by query heads")
+    if initial_state.shape[1:] != (num_value_heads, key_dim, value_dim):
+        raise ValueError("initial state shape does not match q/k/v")
+
+    rows = torch.arange(batch, device=block_map.device, dtype=torch.int64)
+    seq_lens = sequence_lengths.to(torch.int64)
+    active = seq_lens > 0
+    max_block_offset = block_map.shape[1] - 1
+    read_offsets = torch.div(seq_lens - 2, seq_size_per_block, rounding_mode="floor")
+    write_offsets = torch.div(seq_lens - 1, seq_size_per_block, rounding_mode="floor")
+    read_offsets = read_offsets.clamp(0, max_block_offset)
+    write_offsets = write_offsets.clamp(0, max_block_offset)
+    read_ids = block_map[rows, read_offsets].to(torch.int64)
+    write_ids = block_map[rows, write_offsets].to(torch.int64)
+    valid_read = active & (read_ids > 0)
+    valid_write = active & (write_ids > 0)
+    safe_read_ids = torch.where(valid_read, read_ids, torch.zeros_like(read_ids))
+    safe_write_ids = torch.where(valid_write, write_ids, torch.zeros_like(write_ids))
+
+    state = initial_state.index_select(0, safe_read_ids).to(torch.float32)
+    q_step = q[:, 0].to(torch.float32)
+    k_step = k[:, 0].to(torch.float32)
+    value = v[:, 0].to(torch.float32)
+    head_group_size = num_value_heads // num_q_heads
+    q_step = q_step.repeat_interleave(head_group_size, dim=1)
+    k_step = k_step.repeat_interleave(head_group_size, dim=1)
+    if use_qk_l2norm_in_kernel:
+        q_step = q_step / torch.sqrt(torch.sum(q_step * q_step, dim=-1, keepdim=True) + 1e-6)
+        k_step = k_step / torch.sqrt(torch.sum(k_step * k_step, dim=-1, keepdim=True) + 1e-6)
+    q_step = q_step * (key_dim**-0.5 if scale is None else scale)
+
+    state = state * torch.exp(g[:, 0].to(torch.float32))[..., None, None]
+    value = value - torch.sum(state * k_step[..., None], dim=-2)
+    if beta is not None:
+        value = value * beta[:, 0].to(torch.float32)[..., None]
+    state = state + k_step[..., None] * value[..., None, :]
+    output = torch.sum(state * q_step[..., None], dim=-2).to(v.dtype).unsqueeze(1)
+    output = torch.where(valid_read[:, None, None, None], output, torch.zeros_like(output))
+
+    old_write_values = initial_state.index_select(0, safe_write_ids)
+    write_values = torch.where(
+        valid_write[:, None, None, None], state.to(initial_state.dtype), old_write_values
+    )
+    initial_state.index_copy_(0, safe_write_ids, write_values)
+    return output, initial_state
+
+
 class FusedRecurrentFunction(torch.autograd.Function):
 
     @staticmethod
