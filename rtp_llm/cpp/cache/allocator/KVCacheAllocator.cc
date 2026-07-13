@@ -8,6 +8,7 @@
 #include "rtp_llm/cpp/cache/BlockPoolConfigHelper.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
 #include "rtp_llm/cpp/cache/allocator/KVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCache.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 
 namespace rtp_llm {
@@ -51,8 +52,7 @@ MallocResult KVCacheAllocator::initMalloc(const MallocInfo& malloc_info) {
             if (malloc_info.batch_kv_cache_resource) {
                 const auto& cache_keys      = malloc_info.batch_kv_cache_resource->cacheKeys(0);
                 size_t      match_keys_size = cache_keys.size();
-                device_input_length =
-                    static_cast<int64_t>(match_keys_size) * deviceCacheMetricTokensPerBlock();
+                device_input_length         = static_cast<int64_t>(match_keys_size) * deviceCacheMetricTokensPerBlock();
             }
 
             if (device_input_length > 0) {
@@ -175,8 +175,8 @@ std::vector<DeviceBlockBuffer> KVCacheAllocator::blockBuffers(int layer_id, int 
     return blockBuffers(layer_id, block_id);
 }
 
-std::vector<DeviceBlockBuffer> KVCacheAllocator::blockBuffers(
-    int layer_id, int group_id, int block_id, int partition_count, int partition_id) const {
+std::vector<DeviceBlockBuffer>
+KVCacheAllocator::blockBuffers(int layer_id, int group_id, int block_id, int partition_count, int partition_id) const {
     (void)group_id;
     return blockBuffers(layer_id, block_id, partition_count, partition_id);
 }
@@ -280,78 +280,21 @@ size_t KVCacheAllocator::availableBlocksNum() const {
         return 0;
     }
     const size_t free_blocks = block_pool_->freeBlocksNum();
-    const size_t evictable   = shared_block_cache_ ? shared_block_cache_->evictableBlocksNum(/*group_id=*/0) : 0;
+    const size_t evictable   = block_tree_cache_ ? block_tree_cache_->evictableBlocksNum(/*component_group_id=*/0) : 0;
     return free_blocks + evictable;
 }
 
 BatchKVCacheResourcePtr KVCacheAllocator::popBlocksFromCache(size_t min_blocks_to_free) {
-    if (!shared_block_cache_ || min_blocks_to_free == 0) {
+    if (!block_tree_cache_ || min_blocks_to_free == 0) {
         return nullptr;
     }
-
-    auto evict_result = shared_block_cache_->selectAndEvict(min_blocks_to_free);
-    if (evict_result.evicted_keys.empty()) {
-        return nullptr;
-    }
-    if (metrics_reporter_) {
-        for (const auto& [cache_key, lifetime_ms] : evict_result.evicted_lifetime_ms) {
-            RtpLLMCacheEvictionMetricsCollector collector;
-            collector.lifetime_ms = lifetime_ms;
-            kmonitor::MetricsTags tags("scope", "gpu");
-            tags.AddTag("evict_policy",
-                        evict_result.evicted_independent_group.count(cache_key) ? "independent" : "chain");
-            tags.AddTag("backing", "device");
-            metrics_reporter_->report<RtpLLMCacheEvictionMetrics, RtpLLMCacheEvictionMetricsCollector>(&tags,
-                                                                                                       &collector);
-        }
-    }
-
-    auto batch_resource = std::make_shared<BatchKVCacheResource>();
-    batch_resource->resetBatchSize(1);
-    batch_resource->initGroups(config_.groupNums(),
-                               static_cast<int>(config_.layer_all_num),
-                               config_.layerGroupIdsSnapshot(),
-                               config_.kernelBlocksPerKvBlock(),
-                               config_.groupTypesSnapshot());
-    batch_resource->setLastBlockAligned(true);
-
-    for (int gid = 0; gid < config_.groupNums(); ++gid) {
-        batch_resource->mutableBlockIds(0, gid).resize(evict_result.evicted_keys.size(), NULL_BLOCK_IDX);
-    }
-
-    CacheKeysType          evicted_keys;
-    BlockDependenciesType  evicted_dependencies;
-    evicted_keys.reserve(evict_result.evicted_keys.size());
-    evicted_dependencies.reserve(evict_result.evicted_keys.size());
-    for (size_t evicted_idx = 0; evicted_idx < evict_result.evicted_keys.size(); ++evicted_idx) {
-        const auto  cache_key = evict_result.evicted_keys[evicted_idx];
-        const auto& slots     = evict_result.evicted_slots.at(cache_key);
-        evicted_keys.push_back(cache_key);
-        auto dep_it = evict_result.evicted_dependencies.find(cache_key);
-        if (dep_it != evict_result.evicted_dependencies.end()) {
-            evicted_dependencies.push_back(dep_it->second);
-        } else {
-            BlockDependency dependency;
-            dependency.ordinal = static_cast<uint32_t>(evicted_idx);
-            if (evicted_idx > 0) {
-                dependency.has_parent = true;
-                dependency.parent_key = evict_result.evicted_keys[evicted_idx - 1];
-            }
-            evicted_dependencies.push_back(dependency);
-        }
-        for (int gid = 0; gid < static_cast<int>(slots.size()) && gid < config_.groupNums(); ++gid) {
-            if (!isNullBlockIdx(slots[gid])) {
-                batch_resource->mutableBlockIds(0, gid).setAt(evicted_idx, slots[gid]);
-            }
-        }
-    }
-    batch_resource->cacheResource(0).setCacheKeys(std::move(evicted_keys));
-    batch_resource->cacheResource(0).setBlockDependencies(std::move(evicted_dependencies));
-    // Evicted keys already come from the GPU cache's actual key namespace.
-    // Under CP this can be a mixed batch of canonical paged keys and logical
-    // state/SWA keys, so coordinator must not remap the whole batch again.
-    batch_resource->cacheResource(0).setCacheKeysAreCpCanonical(true);
-    return batch_resource;
+    // BlockTreeCache reclaims device blocks directly (content dropped, no demotion here).
+    // The freed capacity is returned to the pool internally, so there is no evicted-key
+    // batch to hand back; callers only use the result to know whether space was freed.
+    const int reclaimed = block_tree_cache_->reclaimBlocks(min_blocks_to_free, Tier::DEVICE);
+    RTP_LLM_LOG_DEBUG(
+        "KVCacheAllocator::popBlocksFromCache: reclaimed %d/%zu device blocks", reclaimed, min_blocks_to_free);
+    return nullptr;
 }
 
 void KVCacheAllocator::blockCacheFree(const BatchKVCacheResourcePtr& batch_kv_cache_resource) {

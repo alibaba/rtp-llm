@@ -2,23 +2,22 @@
 
 #include <memory>
 
-#include "rtp_llm/cpp/cache/group/KVCacheGroup.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/device_group/DeviceKVCacheGroup.h"
 
 namespace rtp_llm {
 
-class SWAKVCacheGroup: public KVCacheGroup {
+class DeviceSWAKVCacheGroup: public DeviceKVCacheGroup {
 public:
-    SWAKVCacheGroup(const LayerIdsType&                 layer_ids,
-                    std::shared_ptr<KVCacheSpec>        kvcache_spec,
-                    DeviceBlockPoolPtr                  block_pool,
-                    int                                 group_id,
-                    int                                 linear_step      = 0,
-                    const kmonitor::MetricsReporterPtr& metrics_reporter = nullptr,
-                    CacheGroupPolicy                    policy = defaultCacheGroupPolicy(CacheGroupType::SWA)):
-        KVCacheGroup(layer_ids, kvcache_spec, block_pool, group_id, policy, metrics_reporter),
+    DeviceSWAKVCacheGroup(const LayerIdsType&                 layer_ids,
+                          std::shared_ptr<KVCacheSpec>        kvcache_spec,
+                          DeviceBlockPoolPtr                  block_pool,
+                          int                                 group_id,
+                          int                                 linear_step      = 0,
+                          const kmonitor::MetricsReporterPtr& metrics_reporter = nullptr,
+                          CacheGroupPolicy                    policy = defaultCacheGroupPolicy(CacheGroupType::SWA)):
+        DeviceKVCacheGroup(layer_ids, kvcache_spec, block_pool, group_id, policy, metrics_reporter),
         linear_step_(linear_step) {}
 
-    MatchResult matchSingleKey(CacheKeyType cache_key) const override;
     bool malloc(BlockIds& block_ids, int seq_len, bool enable_reuse_cache = false, int reserve_step = 0) override;
     void removeSkippedBlocks(BlockIds& block_ids, bool enable_reuse_cache = false, int reserve_step = 0) override;
     void free(const BlockIndicesType& block_indices) override;
@@ -40,6 +39,6 @@ private:
     int linear_step_ = 0;
 };
 
-using SWAKVCacheGroupPtr = std::shared_ptr<SWAKVCacheGroup>;
+using DeviceSWAKVCacheGroupPtr = std::shared_ptr<DeviceSWAKVCacheGroup>;
 
 }  // namespace rtp_llm

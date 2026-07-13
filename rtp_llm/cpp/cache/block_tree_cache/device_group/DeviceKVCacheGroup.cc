@@ -1,11 +1,10 @@
-#include "rtp_llm/cpp/cache/group/KVCacheGroup.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCache.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/device_group/DeviceKVCacheGroup.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
 namespace rtp_llm {
 
-bool KVCacheGroup::init() {
+bool DeviceKVCacheGroup::init() {
     auto layer_tensors = block_pool_->allLayerCacheBase();
     auto scale_tensors = block_pool_->allLayerScaleCacheBase();
 
@@ -38,7 +37,7 @@ bool KVCacheGroup::init() {
     return true;
 }
 
-bool KVCacheGroup::ensureFreeBlocks(int required_blocks) {
+bool DeviceKVCacheGroup::ensureFreeBlocks(int required_blocks) {
     if (required_blocks <= 0) {
         return true;
     }
@@ -49,15 +48,15 @@ bool KVCacheGroup::ensureFreeBlocks(int required_blocks) {
             break;
         }
 
-        if (!block_tree_cache_) {
-            RTP_LLM_LOG_WARNING("ensure free blocks failed, no block tree cache, free blocks: %zu, need: %d",
+        if (!eviction_fn_) {
+            RTP_LLM_LOG_WARNING("ensure free blocks failed, no eviction callback, free blocks: %zu, need: %d",
                                 free_blocks,
                                 required_blocks);
             return false;
         }
 
         const size_t need_evict = static_cast<size_t>(required_blocks) - free_blocks;
-        const int    freed      = block_tree_cache_->evictForGroup(group_id_, need_evict);
+        const int    freed      = eviction_fn_(group_id_, need_evict);
         if (freed == 0) {
             RTP_LLM_LOG_WARNING("ensure free blocks failed, free blocks: %zu, need evict blocks: %zu",
                                 block_pool_->freeBlocksNum(),
@@ -69,68 +68,54 @@ bool KVCacheGroup::ensureFreeBlocks(int required_blocks) {
     return true;
 }
 
-MatchResult KVCacheGroup::match(const CacheKeysType& cache_keys) {
-    return matchPrefix(cache_keys);
-}
-
-MatchResult KVCacheGroup::matchPrefix(const CacheKeysType& /*cache_keys*/) const {
-    RTP_LLM_FAIL("KVCacheGroup gid=%d does not support prefix matching", group_id_);
-    return {};
-}
-
-MatchResult KVCacheGroup::matchSingleKey(CacheKeyType /*cache_key*/) const {
-    RTP_LLM_FAIL("KVCacheGroup gid=%d does not support single-key matching", group_id_);
-    return {};
-}
-
-size_t KVCacheGroup::freeBlocksNum() const {
+size_t DeviceKVCacheGroup::freeBlocksNum() const {
     return block_pool_->freeBlocksNum();
 }
 
-int KVCacheGroup::seqSizePerBlock() const {
+int DeviceKVCacheGroup::seqSizePerBlock() const {
     return seq_size_per_block_;
 }
 
-int KVCacheGroup::group_id() const {
+int DeviceKVCacheGroup::group_id() const {
     return group_id_;
 }
 
-const CacheGroupPolicy& KVCacheGroup::policy() const {
+const CacheGroupPolicy& DeviceKVCacheGroup::policy() const {
     return policy_;
 }
 
-CacheReusePolicy KVCacheGroup::reusePolicy() const {
+CacheReusePolicy DeviceKVCacheGroup::reusePolicy() const {
     return policy_.reuse_policy;
 }
 
-CacheEvictPolicy KVCacheGroup::evictPolicy() const {
+CacheEvictPolicy DeviceKVCacheGroup::evictPolicy() const {
     return policy_.evict_policy;
 }
 
-uint32_t KVCacheGroup::explicitBlockNum() const {
+uint32_t DeviceKVCacheGroup::explicitBlockNum() const {
     return policy_.explicit_block_num;
 }
 
-size_t KVCacheGroup::activeTailBlocks() const {
+size_t DeviceKVCacheGroup::activeTailBlocks() const {
     return policy_.active_tail_blocks > 0 ? static_cast<size_t>(policy_.active_tail_blocks) : 0;
 }
 
-std::unordered_map<int, torch::Tensor> KVCacheGroup::allLayerCacheBase() const {
+std::unordered_map<int, torch::Tensor> DeviceKVCacheGroup::allLayerCacheBase() const {
     return global_layer_to_kv_tensors;
 }
 
-std::unordered_map<int, torch::Tensor> KVCacheGroup::allLayerScaleCacheBase() const {
+std::unordered_map<int, torch::Tensor> DeviceKVCacheGroup::allLayerScaleCacheBase() const {
     return global_layer_to_kv_scale_tensors;
 }
 
-BlockAddrInfo KVCacheGroup::convertIndexToAddr(int layer_id, int block_id) const {
+BlockAddrInfo DeviceKVCacheGroup::convertIndexToAddr(int layer_id, int block_id) const {
     auto it = global_layer_to_local_layer.find(layer_id);
     RTP_LLM_CHECK_WITH_INFO(it != global_layer_to_local_layer.end(), "invalid layer_id: " + std::to_string(layer_id));
     int local_layer_id = it->second;
     return block_pool_->convertIndexToAddr(local_layer_id, block_id);
 }
 
-std::vector<BlockInfo> KVCacheGroup::convertIndexToBuffer(int layer_id, int block_id) const {
+std::vector<BlockInfo> DeviceKVCacheGroup::convertIndexToBuffer(int layer_id, int block_id) const {
     auto it = global_layer_to_local_layer.find(layer_id);
     RTP_LLM_CHECK_WITH_INFO(it != global_layer_to_local_layer.end(), "invalid layer_id: " + std::to_string(layer_id));
     int local_layer_id = it->second;
@@ -138,14 +123,14 @@ std::vector<BlockInfo> KVCacheGroup::convertIndexToBuffer(int layer_id, int bloc
 }
 
 std::vector<BlockInfo>
-KVCacheGroup::convertIndexToBuffer(int layer_id, int block_id, int partition_count, int partition_id) const {
+DeviceKVCacheGroup::convertIndexToBuffer(int layer_id, int block_id, int partition_count, int partition_id) const {
     auto it = global_layer_to_local_layer.find(layer_id);
     RTP_LLM_CHECK_WITH_INFO(it != global_layer_to_local_layer.end(), "invalid layer_id: " + std::to_string(layer_id));
     int local_layer_id = it->second;
     return block_pool_->convertIndexToBuffer(local_layer_id, block_id, partition_count, partition_id);
 }
 
-std::vector<DeviceBlockBuffer> KVCacheGroup::blockBuffers(int layer_id, int block_id) const {
+std::vector<DeviceBlockBuffer> DeviceKVCacheGroup::blockBuffers(int layer_id, int block_id) const {
     auto it = global_layer_to_local_layer.find(layer_id);
     RTP_LLM_CHECK_WITH_INFO(it != global_layer_to_local_layer.end(), "invalid layer_id: " + std::to_string(layer_id));
     int local_layer_id = it->second;
@@ -153,46 +138,46 @@ std::vector<DeviceBlockBuffer> KVCacheGroup::blockBuffers(int layer_id, int bloc
 }
 
 std::vector<DeviceBlockBuffer>
-KVCacheGroup::blockBuffers(int layer_id, int block_id, int partition_count, int partition_id) const {
+DeviceKVCacheGroup::blockBuffers(int layer_id, int block_id, int partition_count, int partition_id) const {
     auto it = global_layer_to_local_layer.find(layer_id);
     RTP_LLM_CHECK_WITH_INFO(it != global_layer_to_local_layer.end(), "invalid layer_id: " + std::to_string(layer_id));
     int local_layer_id = it->second;
     return block_pool_->blockBuffers(local_layer_id, block_id, partition_count, partition_id);
 }
 
-void KVCacheGroup::reference(const BlockIndicesType& new_block_indices) {
+void DeviceKVCacheGroup::reference(const BlockIndicesType& new_block_indices) {
     block_pool_->incRef(new_block_indices);
 }
 
-bool KVCacheGroup::isCpShardable() const {
+bool DeviceKVCacheGroup::isCpShardable() const {
     return policy_.is_cp_shardable;
 }
 
-bool KVCacheGroup::prefixReusable() const {
+bool DeviceKVCacheGroup::prefixReusable() const {
     return policy_.prefix_reusable && policy_.reuse_policy == CacheReusePolicy::REUSABLE;
 }
 
-bool KVCacheGroup::hasSparseSlots() const {
+bool DeviceKVCacheGroup::hasSparseSlots() const {
     return policy_.has_sparse_slots;
 }
 
-bool KVCacheGroup::hasKernelBlockSubdiv() const {
+bool DeviceKVCacheGroup::hasKernelBlockSubdiv() const {
     return policy_.has_kernel_block_subdiv;
 }
 
-bool KVCacheGroup::transferTailBlocks() const {
+bool DeviceKVCacheGroup::transferTailBlocks() const {
     return activeTailBlocks() > 0;
 }
 
-bool KVCacheGroup::cpCompactTailBlocks() const {
+bool DeviceKVCacheGroup::cpCompactTailBlocks() const {
     return policy_.cp_compact_tail_blocks;
 }
 
-bool KVCacheGroup::isReservable() const {
+bool DeviceKVCacheGroup::isReservable() const {
     return policy_.is_reservable;
 }
 
-bool KVCacheGroup::usesPinnedCpuBacking() const {
+bool DeviceKVCacheGroup::usesPinnedCpuBacking() const {
     return policy_.uses_pinned_cpu_backing;
 }
 

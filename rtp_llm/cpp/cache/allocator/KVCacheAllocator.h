@@ -11,10 +11,11 @@
 #include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/DeviceBlockPool.h"
-#include "rtp_llm/cpp/cache/SharedBlockCache.h"
 #include "rtp_llm/cpp/cache/BufferTypes.h"
 
 namespace rtp_llm {
+
+class BlockTreeCache;
 
 struct KVCacheTokenCapacity {
     size_t total_tokens     = 0;
@@ -22,15 +23,15 @@ struct KVCacheTokenCapacity {
 };
 
 struct KVCachePoolMetricsSnapshot {
-    size_t pool_index           = 0;
-    std::string pool_name       = "unnamed";
-    size_t free_blocks          = 0;
-    size_t available_blocks     = 0;
-    size_t request_ref_blocks   = 0;
-    size_t connector_ref_blocks = 0;
-    size_t total_blocks         = 0;
-    size_t reserve_blocks       = 0;
-    float  used_ratio           = 0.0f;
+    size_t      pool_index           = 0;
+    std::string pool_name            = "unnamed";
+    size_t      free_blocks          = 0;
+    size_t      available_blocks     = 0;
+    size_t      request_ref_blocks   = 0;
+    size_t      connector_ref_blocks = 0;
+    size_t      total_blocks         = 0;
+    size_t      reserve_blocks       = 0;
+    float       used_ratio           = 0.0f;
 };
 
 class KVCacheAllocator {
@@ -53,11 +54,11 @@ public:
     virtual std::vector<BlockInfo> convertIndexToBuffer(int layer_id, int block_id) const = 0;
     virtual std::vector<BlockInfo>
     convertIndexToBuffer(int layer_id, int block_id, int partition_count, int partition_id) const = 0;
-    virtual BlockAddrInfo convertIndexToAddr(int layer_id, int group_id, int block_id) const;
+    virtual BlockAddrInfo          convertIndexToAddr(int layer_id, int group_id, int block_id) const;
     virtual std::vector<BlockInfo> convertIndexToBuffer(int layer_id, int group_id, int block_id) const;
     virtual std::vector<BlockInfo>
     convertIndexToBuffer(int layer_id, int group_id, int block_id, int partition_count, int partition_id) const;
-    virtual BlockAddrInfo convertIndexToAddrByTag(int layer_id, const std::string& tag, int block_id) const;
+    virtual BlockAddrInfo          convertIndexToAddrByTag(int layer_id, const std::string& tag, int block_id) const;
     virtual std::vector<BlockInfo> convertIndexToBufferByTag(int layer_id, const std::string& tag, int block_id) const;
     virtual std::vector<BlockInfo> convertIndexToBufferByTag(
         int layer_id, const std::string& tag, int block_id, int partition_count, int partition_id) const;
@@ -73,7 +74,7 @@ public:
     virtual int              seqSizePerBlock() const                                       = 0;
     virtual int              singleBatchNeedBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
                                                    int                            seq_len,
-                                                   int                            reserve_step) const              = 0;
+                                                   int                            reserve_step) const                 = 0;
 
     MallocResult malloc(const MallocInfo& malloc_info);
     virtual void blockCopy(int src_block_index, int dest_block_index);
@@ -105,12 +106,15 @@ public:
     virtual std::vector<DeviceBlockBuffer>
     blockBuffers(int layer_id, int group_id, int block_id, int partition_count, int partition_id) const;
 
-    SharedBlockCachePtr sharedBlockCache() const {
-        return shared_block_cache_;
+    // Injected after init() by KVCacheManager (BlockTreeCache is built from the pools
+    // produced by init()). The base setter records the pointer and forwards it to the
+    // owned groups via the virtual hook implemented by each subclass.
+    void setBlockTreeCache(BlockTreeCache* block_tree_cache) {
+        block_tree_cache_ = block_tree_cache;
+        injectBlockTreeCacheToGroups(block_tree_cache);
     }
-
-    void setSharedBlockCache(SharedBlockCachePtr shared_block_cache) {
-        shared_block_cache_ = std::move(shared_block_cache);
+    BlockTreeCache* blockTreeCache() const {
+        return block_tree_cache_;
     }
 
     void setUseCudaMallocBlockPool(bool use_cuda_malloc_block_pool) {
@@ -150,16 +154,19 @@ public:
     virtual size_t                  maxAvailableTokensNum() const;
     virtual KVCacheTokenCapacity    tokenCapacity(size_t default_seq_size_per_block) const;
     virtual std::vector<KVCachePoolMetricsSnapshot> poolMetricsSnapshots() const;
-    virtual std::vector<int> independentEvictionGroupIds() const;
+    virtual std::vector<int>                        independentEvictionGroupIds() const;
     /// Returns global layer id; std::numeric_limits<uint32_t>::max() indicates invalid (caller must check).
     uint32_t convertToGlobalLayerId(size_t model_id, int local_layer_id) const;
 
 protected:
-    virtual bool         doInit() = 0;
+    virtual bool doInit() = 0;
+    // Forward the injected BlockTreeCache to the allocator's owned KVCacheGroup(s).
+    // Base default no-op; subclasses that own groups override.
+    virtual void         injectBlockTreeCacheToGroups(BlockTreeCache* /*block_tree_cache*/) {}
     MallocResult         initMalloc(const MallocInfo& malloc_info);
-    virtual MallocResult incrMalloc(const MallocInfo& malloc_info)                                          = 0;
-    virtual MallocResult initMallocForCommonLen(const MallocInfo& malloc_info)                              = 0;
-    virtual int          getNeedBlocks(const MallocInfo& malloc_info) const                                 = 0;
+    virtual MallocResult incrMalloc(const MallocInfo& malloc_info)             = 0;
+    virtual MallocResult initMallocForCommonLen(const MallocInfo& malloc_info) = 0;
+    virtual int          getNeedBlocks(const MallocInfo& malloc_info) const    = 0;
     virtual void         checkCPShardedMallocResult(const MallocInfo&) const {}
     virtual void         decrKVCacheRef(const KVCacheResource& kvcache_resource, bool is_connector = false) = 0;
     bool                 cpShardThisGroupForCapacity(size_t gid) const;
@@ -170,7 +177,7 @@ protected:
     CacheConfig                        config_;
     AllocationType                     allocation_type_;
     DeviceBlockPoolPtr                 block_pool_;
-    SharedBlockCachePtr                shared_block_cache_;
+    BlockTreeCache*                    block_tree_cache_ = nullptr;
     std::shared_ptr<CPSlotMapper>      cp_slot_mapper_;
     const kmonitor::MetricsReporterPtr metrics_reporter_           = nullptr;
     bool                               use_cuda_malloc_block_pool_ = false;

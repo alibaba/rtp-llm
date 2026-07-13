@@ -10,6 +10,9 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/FullComponentGroup.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/LinearComponentGroup.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/SWAComponentGroup.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/device_group/DeviceFullKVCacheGroup.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/device_group/DeviceLinearKVCacheGroup.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/device_group/DeviceSWAKVCacheGroup.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/host/DiskBlockPool.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/host/HostBlockPool.h"
 #include "rtp_llm/cpp/model_rpc/BroadcastManager.h"
@@ -54,6 +57,34 @@ createComponentGroup(int group_id, CacheGroupType type, int seq_size_per_block, 
     return group;
 }
 
+// Create the single-pool DeviceKVCacheGroup for one component group. Mirrors the group
+// construction previously done in the allocators' doInit(): derives layer_ids / spec /
+// policy from cache_config and wraps exactly one device pool.
+DeviceKVCacheGroupPtr
+createDeviceKVCacheGroup(int type, int gid, const CacheConfig& cache_config, DeviceBlockPoolPtr device_pool) {
+    const auto ids    = cache_config.layerIdsForGroup(static_cast<size_t>(gid));
+    auto       spec   = cache_config.specForGroup(static_cast<size_t>(gid));
+    const auto policy = cache_config.policyForGroup(static_cast<size_t>(gid));
+
+    DeviceKVCacheGroupPtr group;
+    switch (static_cast<CacheGroupType>(type)) {
+        case CacheGroupType::LINEAR:
+            group = std::make_shared<DeviceLinearKVCacheGroup>(
+                ids, spec, device_pool, gid, cache_config.linear_step, nullptr, policy);
+            break;
+        case CacheGroupType::SWA:
+            group = std::make_shared<DeviceSWAKVCacheGroup>(
+                ids, spec, device_pool, gid, cache_config.linear_step, nullptr, policy);
+            break;
+        case CacheGroupType::FULL:
+        default:
+            group = std::make_shared<DeviceFullKVCacheGroup>(ids, spec, device_pool, gid, nullptr, policy);
+            break;
+    }
+    RTP_LLM_CHECK_WITH_INFO(group->init(), "Failed to initialize DeviceKVCacheGroup (gid %d)", gid);
+    return group;
+}
+
 // Alignment for host/disk pool block strides (page-aligned for pinned host + O_DIRECT disk).
 constexpr size_t kBlockTreeCachePoolAlignment = 4096;
 
@@ -78,14 +109,14 @@ std::shared_ptr<HostBlockPool> createHostPool(size_t payload_bytes, size_t usabl
         return nullptr;
     }
 
-    auto config                     = std::make_shared<HostBlockPoolConfig>();
-    config->pool_type               = BlockPoolType::HOST;
-    config->pool_name               = "block_tree_host";
-    config->physical_block_count    = usable_block_count + 1;
-    config->payload_bytes           = payload_bytes;
-    config->stride_bytes            = alignUp(payload_bytes, kBlockTreeCachePoolAlignment);
-    config->enable_pinned           = shouldPinHostBlockPool();
-    config->alignment               = kBlockTreeCachePoolAlignment;
+    auto config                  = std::make_shared<HostBlockPoolConfig>();
+    config->pool_type            = BlockPoolType::HOST;
+    config->pool_name            = "block_tree_host";
+    config->physical_block_count = usable_block_count + 1;
+    config->payload_bytes        = payload_bytes;
+    config->stride_bytes         = alignUp(payload_bytes, kBlockTreeCachePoolAlignment);
+    config->enable_pinned        = shouldPinHostBlockPool();
+    config->alignment            = kBlockTreeCachePoolAlignment;
 
     auto pool = std::make_shared<HostBlockPool>(config);
     if (!pool->init()) {
@@ -110,17 +141,17 @@ std::shared_ptr<DiskBlockPool> createDiskPool(const KVCacheConfig& kv_cache_conf
     const std::string mount_path =
         resolveDiskMountPath(kv_cache_config.memory_cache_disk_paths, local_world_size, local_rank);
 
-    auto config                     = std::make_shared<DiskBlockPoolConfig>();
-    config->pool_type               = BlockPoolType::DISK;
-    config->pool_name               = "block_tree_disk";
-    config->work_dir                = mount_path;
-    config->manage_mount            = true;
-    config->local_rank              = local_rank;
-    config->world_rank              = world_rank;
-    config->disk_size_bytes         = static_cast<size_t>(kv_cache_config.memory_cache_disk_size_mb) * 1024UL * 1024UL;
-    config->payload_bytes           = payload_bytes;
-    config->stride_bytes            = alignUp(payload_bytes, kBlockTreeCachePoolAlignment);
-    config->buffered_io             = kv_cache_config.memory_cache_disk_buffered_io;
+    auto config             = std::make_shared<DiskBlockPoolConfig>();
+    config->pool_type       = BlockPoolType::DISK;
+    config->pool_name       = "block_tree_disk";
+    config->work_dir        = mount_path;
+    config->manage_mount    = true;
+    config->local_rank      = local_rank;
+    config->world_rank      = world_rank;
+    config->disk_size_bytes = static_cast<size_t>(kv_cache_config.memory_cache_disk_size_mb) * 1024UL * 1024UL;
+    config->payload_bytes   = payload_bytes;
+    config->stride_bytes    = alignUp(payload_bytes, kBlockTreeCachePoolAlignment);
+    config->buffered_io     = kv_cache_config.memory_cache_disk_buffered_io;
 
     auto pool = std::make_shared<DiskBlockPool>(config);
     if (!pool->init()) {
@@ -205,10 +236,9 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
     if (kv_cache_config.enable_memory_cache && kv_cache_config.memory_cache_size_mb > 0 && payload_bytes > 0) {
         // usable_block_count = memory_cache_size_bytes / stride_bytes - 1: the reserved
         // block 0 is counted within the configured budget so backing never exceeds it.
-        const size_t stride_bytes = alignUp(payload_bytes, kBlockTreeCachePoolAlignment);
-        const size_t memory_cache_size_bytes =
-            static_cast<size_t>(kv_cache_config.memory_cache_size_mb) * 1024 * 1024;
-        const size_t usable_block_count = computeHostUsableBlockCount(memory_cache_size_bytes, stride_bytes);
+        const size_t stride_bytes            = alignUp(payload_bytes, kBlockTreeCachePoolAlignment);
+        const size_t memory_cache_size_bytes = static_cast<size_t>(kv_cache_config.memory_cache_size_mb) * 1024 * 1024;
+        const size_t usable_block_count      = computeHostUsableBlockCount(memory_cache_size_bytes, stride_bytes);
         RTP_LLM_CHECK_WITH_INFO(usable_block_count > 0,
                                 "L2 memory cache enabled but memory_cache_size_mb=%ld is too small for block "
                                 "stride=%zu bytes (need at least 2 blocks including the reserved block 0)",
@@ -242,6 +272,25 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
             for (auto& group : component_groups) {
                 group->setDevicePools(std::vector<DeviceBlockPoolPtr>{device_pool});
             }
+        }
+
+        // 6c. Build the single-pool DeviceKVCacheGroup for each component group. Each group
+        // wraps its own device pool: multi-pool allocators map gid -> group_pools[gid];
+        // single-pool allocators share getDeviceBlockPool().
+        for (int gid = 0; gid < group_num; ++gid) {
+            DeviceBlockPoolPtr device_pool;
+            if (!group_pools.empty()) {
+                device_pool =
+                    static_cast<size_t>(gid) < group_pools.size() ? group_pools[static_cast<size_t>(gid)] : nullptr;
+            } else {
+                device_pool = allocator->getDeviceBlockPool();
+            }
+            if (!device_pool) {
+                continue;
+            }
+            const auto type = cache_config.typeForGroup(static_cast<size_t>(gid));
+            auto       dkv  = createDeviceKVCacheGroup(static_cast<int>(type), gid, cache_config, device_pool);
+            component_groups[static_cast<size_t>(gid)]->setDeviceKVGroups({dkv});
         }
     }
 

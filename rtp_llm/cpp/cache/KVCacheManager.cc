@@ -9,7 +9,7 @@
 #include "rtp_llm/cpp/cache/allocator/HybridPoolKVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/allocator/HybridTypeKVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/allocator/SingleTypeKVCacheAllocator.h"
-#include "rtp_llm/cpp/cache/SharedBlockCache.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCache.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCacheFactory.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeTransferConverter.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/StorageBackend.h"
@@ -35,15 +35,16 @@ struct GlobalCacheMetricsSnapshot {
 
 GlobalCacheMetricsSnapshot collectGlobalCacheMetrics(const KVCacheAllocatorPtr& allocator) {
     GlobalCacheMetricsSnapshot snapshot;
-    auto                       shared_cache = allocator->sharedBlockCache();
+    auto                       block_tree_cache = allocator->blockTreeCache();
 
     snapshot.total_blocks         = allocator->totalBlocksNum();
     snapshot.available_blocks     = allocator->availableBlocksNum();
     snapshot.request_ref_blocks   = allocator->requestRefBlocksNum();
     snapshot.connector_ref_blocks = allocator->connectorRefBlocksNum();
 
-    auto& collector                         = snapshot.collector;
-    collector.kv_cache_item_num             = shared_cache ? static_cast<int64_t>(shared_cache->size()) : 0;
+    auto& collector = snapshot.collector;
+    collector.kv_cache_item_num =
+        block_tree_cache ? static_cast<int64_t>(block_tree_cache->getStats().tree_node_count) : 0;
     collector.kv_cache_left_seq             = static_cast<int64_t>(allocator->availableTokensNum());
     collector.kv_cache_available_blocks     = static_cast<int64_t>(snapshot.available_blocks);
     collector.kv_cache_request_ref_blocks   = static_cast<int64_t>(snapshot.request_ref_blocks);
@@ -165,12 +166,6 @@ bool KVCacheManager::init() {
                             "KVCacheManager::init called more than once");
     RTP_LLM_CHECK_WITH_INFO(config_.groupNums() > 0, "cache specs must not be empty");
 
-    auto shared_cache = std::make_shared<SharedBlockCache>();
-    shared_cache->setPrefixTreeEnabled(kv_cache_config_.enable_gpu_prefix_tree);
-    const bool enable_independent_group_eviction = kv_cache_config_.enable_memory_cache
-                                                   && kv_cache_config_.enable_prefix_tree_memory_cache
-                                                   && kv_cache_config_.enable_independent_group_eviction;
-
     const bool is_hybrid = config_.groupNums() > 1;
     if (config_.use_independent_block_pools) {
         allocator_ = std::make_shared<rtp_llm::HybridPoolKVCacheAllocator>(config_,
@@ -192,11 +187,7 @@ bool KVCacheManager::init() {
     }
 
     allocator_->setCPSlotMapper(cp_slot_mapper_);
-    allocator_->setSharedBlockCache(shared_cache);
-    allocator_->setCPSlotMapper(cp_slot_mapper_);
     RTP_LLM_CHECK_WITH_INFO(allocator_->init(), "KVCacheAllocator init failed");
-    shared_cache->setIndependentGroupEviction(enable_independent_group_eviction,
-                                              allocator_->independentEvictionGroupIds());
 
     const bool requires_broadcast_manager = parallelism_config_.tp_size > 1 && parallelism_config_.tp_rank == 0
                                             && !runtime_config_.worker_grpc_addrs.empty();
@@ -209,6 +200,9 @@ bool KVCacheManager::init() {
     }
 
     // Create BlockTreeCache (unified tier management, replaces coordinator).
+    // It depends on the device pools produced by allocator_->init(), so it must be
+    // built after init(); the allocator (and its owned groups) then receives the
+    // BlockTreeCache pointer via setBlockTreeCache for all match/insert/evict calls.
     block_tree_cache_ = createBlockTreeCache(config_,
                                              kv_cache_config_,
                                              allocator_,
@@ -222,6 +216,7 @@ bool KVCacheManager::init() {
         RTP_LLM_LOG_ERROR("KVCacheManager::init: failed to create BlockTreeCache");
         return false;
     }
+    allocator_->setBlockTreeCache(block_tree_cache_.get());
 
     if (metrics_reporter_) {
         stop_.store(false, std::memory_order_relaxed);
@@ -585,15 +580,9 @@ KVCacheInfo KVCacheManager::getKVCacheInfo(int64_t latest_version, bool need_cac
 
     if (need_cache_keys) {
         std::unordered_set<CacheKeyType> all_keys;
-        // device cache keys
-        std::vector<CacheKeyType> device_cache_keys;
-        auto                      shared_cache = allocator_->sharedBlockCache();
-        if (shared_cache) {
-            device_cache_keys = shared_cache->allCacheKeys();
-            all_keys.insert(device_cache_keys.begin(), device_cache_keys.end());
-            info.version = shared_cache->version();
-        }
-        // device cache keys only (memory/remote cache keys handled by BlockTreeCache storage backend)
+        // Device cache keys are now owned by BlockTreeCache; memory/remote cache keys
+        // are handled by its storage backend. The flat key enumeration used by the
+        // legacy SharedBlockCache is no longer exposed here.
         info.cached_keys.assign(all_keys.begin(), all_keys.end());
     }
 

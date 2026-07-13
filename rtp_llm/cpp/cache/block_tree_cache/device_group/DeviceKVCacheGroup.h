@@ -3,6 +3,7 @@
 #include <memory>
 #include <vector>
 #include <cstdint>
+#include <functional>
 #include <unordered_map>
 
 #include <torch/torch.h>
@@ -16,21 +17,23 @@
 
 namespace rtp_llm {
 
-class BlockTreeCache;
-
 struct NeedBlocksInfo {
     int common_blocks = 0;  // shared blocks across batches
     int extra_blocks  = 0;  // extra blocks per batch
 };
 
-class KVCacheGroup {
+// DeviceKVCacheGroup: single-DeviceBlockPool sequence-allocation entity, owned by
+// ComponentGroup (one per device pool). Provides the KVCacheGroup-equivalent interface
+// consumed by KVCacheAllocator. Whole-sequence prefix matching is superseded by
+// BlockTreeCache::match(), so no match/matchPrefix/matchSingleKey here.
+class DeviceKVCacheGroup {
 public:
-    KVCacheGroup(const LayerIdsType&                 layer_ids,
-                 KVCacheSpecPtr                      kvcache_spec,
-                 DeviceBlockPoolPtr                  block_pool,
-                 int                                 group_id,
-                 CacheGroupPolicy                    policy           = CacheGroupPolicy{},
-                 const kmonitor::MetricsReporterPtr& metrics_reporter = nullptr):
+    DeviceKVCacheGroup(const LayerIdsType&                 layer_ids,
+                       KVCacheSpecPtr                      kvcache_spec,
+                       DeviceBlockPoolPtr                  block_pool,
+                       int                                 group_id,
+                       CacheGroupPolicy                    policy           = CacheGroupPolicy{},
+                       const kmonitor::MetricsReporterPtr& metrics_reporter = nullptr):
         layer_ids_(layer_ids),
         kvcache_spec_(std::move(kvcache_spec)),
         block_pool_(block_pool),
@@ -39,21 +42,20 @@ public:
         group_id_(group_id),
         seq_size_per_block_(kvcache_spec_->seq_size_per_block) {}
 
-    virtual ~KVCacheGroup() = default;
+    virtual ~DeviceKVCacheGroup() = default;
 
-    // Injected after allocator init(); used for cross-group device eviction (ensureFreeBlocks).
-    void setBlockTreeCache(BlockTreeCache* block_tree_cache) {
-        block_tree_cache_ = block_tree_cache;
+    // Injected by the owner; evicts up to `num_blocks` device blocks of the given
+    // `group_id` and returns the number actually freed. Used only by ensureFreeBlocks().
+    using EvictionFn = std::function<int(int /*group_id*/, size_t /*num_blocks*/)>;
+
+    void setEvictionCallback(EvictionFn fn) {
+        eviction_fn_ = std::move(fn);
     }
 
     bool init();
     // Allocate blocks for `seq_len` tokens; appends new IDs to `block_ids` via BlockIds::add().
     virtual bool malloc(BlockIds& block_ids, int seq_len, bool enable_reuse_cache = false, int reserve_step = 0) = 0;
-    // TODO, match的时候热度不增加，最终匹配成功的时候再去增加热度。
-    virtual MatchResult match(const CacheKeysType& cache_keys);
-    virtual MatchResult matchPrefix(const CacheKeysType& cache_keys) const;
-    virtual MatchResult matchSingleKey(CacheKeyType cache_key) const;
-    virtual void        free(const BlockIndicesType& block_indices)                                              = 0;
+    virtual void free(const BlockIndicesType& block_indices)                                                     = 0;
     virtual void removeSkippedBlocks(BlockIds& block_ids, bool enable_reuse_cache = false, int reserve_step = 0) = 0;
     virtual int  needBlocksNum(int seq_len, int current_blocks, int reserve_step = 0) const                      = 0;
     virtual NeedBlocksInfo getNeedBlocks(
@@ -99,7 +101,7 @@ protected:
     KVCacheSpecPtr               kvcache_spec_;
     DeviceBlockPoolPtr           block_pool_;
     CacheGroupPolicy             policy_;
-    BlockTreeCache*              block_tree_cache_ = nullptr;
+    EvictionFn                   eviction_fn_;
     kmonitor::MetricsReporterPtr metrics_reporter_ = nullptr;
     int                          group_id_         = 0;
 
@@ -109,6 +111,6 @@ protected:
     std::unordered_map<int, int>           global_layer_to_local_layer;
 };
 
-using KVCacheGroupPtr = std::shared_ptr<KVCacheGroup>;
+using DeviceKVCacheGroupPtr = std::shared_ptr<DeviceKVCacheGroup>;
 
 }  // namespace rtp_llm

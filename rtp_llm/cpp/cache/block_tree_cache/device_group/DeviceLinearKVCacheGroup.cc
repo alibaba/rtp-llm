@@ -1,4 +1,4 @@
-#include "rtp_llm/cpp/cache/group/LinearKVCacheGroup.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/device_group/DeviceLinearKVCacheGroup.h"
 
 #include <algorithm>
 #include <unordered_set>
@@ -7,7 +7,7 @@
 
 namespace rtp_llm {
 
-void LinearKVCacheGroup::filterValidBlocks(const BlockIndicesType& in, BlockIndicesType& out) const {
+void DeviceLinearKVCacheGroup::filterValidBlocks(const BlockIndicesType& in, BlockIndicesType& out) const {
     out.clear();
     out.reserve(in.size());
     for (auto b : in) {
@@ -17,12 +17,15 @@ void LinearKVCacheGroup::filterValidBlocks(const BlockIndicesType& in, BlockIndi
     }
 }
 
-int LinearKVCacheGroup::needBlocksNum(int seq_len, int current_blocks, int reserve_step) const {
+int DeviceLinearKVCacheGroup::needBlocksNum(int seq_len, int current_blocks, int reserve_step) const {
     int extra_blocks = reserve_step ? reserve_step - 1 : 0;
     return std::max((seq_len + seq_size_per_block_ - 1) / seq_size_per_block_ + extra_blocks - current_blocks, 0);
 }
 
-bool LinearKVCacheGroup::shouldMaterializeBlock(int pos, int seq_len, int reserve_step, bool enable_reuse_cache) const {
+bool DeviceLinearKVCacheGroup::shouldMaterializeBlock(int  pos,
+                                                      int  seq_len,
+                                                      int  reserve_step,
+                                                      bool enable_reuse_cache) const {
     if (pos < 0) {
         return false;
     }
@@ -36,7 +39,7 @@ bool LinearKVCacheGroup::shouldMaterializeBlock(int pos, int seq_len, int reserv
     return is_reserve || (enable_reuse_cache ? (step_hit || is_seq_tail) : is_seq_tail);
 }
 
-NeedBlocksInfo LinearKVCacheGroup::getNeedBlocks(
+NeedBlocksInfo DeviceLinearKVCacheGroup::getNeedBlocks(
     int common_seq_len, int seq_len, int reserve_step, int reuse_blocks_len, bool reuse_enabled) const {
     NeedBlocksInfo info;
 
@@ -75,12 +78,7 @@ NeedBlocksInfo LinearKVCacheGroup::getNeedBlocks(
     return info;
 }
 
-MatchResult LinearKVCacheGroup::matchSingleKey(CacheKeyType /*cache_key*/) const {
-    // Superseded by BlockTreeCache whole-sequence match(); no longer invoked.
-    return MatchResult{};
-}
-
-bool LinearKVCacheGroup::malloc(BlockIds& block_ids, int seq_len, bool enable_reuse_cache, int reserve_step) {
+bool DeviceLinearKVCacheGroup::malloc(BlockIds& block_ids, int seq_len, bool enable_reuse_cache, int reserve_step) {
     const int step               = std::max(1, linear_step_);
     const int current_blocks_len = static_cast<int>(block_ids.blocksNum());
     const int seq_slots          = needBlocksNum(seq_len, 0, 0);
@@ -118,7 +116,7 @@ bool LinearKVCacheGroup::malloc(BlockIds& block_ids, int seq_len, bool enable_re
         const auto free_blocks_num = freeBlocksNum();
         if (free_blocks_num < static_cast<size_t>(need_alloc_blocks)) {
             if (!ensureFreeBlocks(need_alloc_blocks)) {
-                RTP_LLM_LOG_WARNING("Insufficient free blocks for LinearKVCacheGroup: need %d, have %zu",
+                RTP_LLM_LOG_WARNING("Insufficient free blocks for DeviceLinearKVCacheGroup: need %d, have %zu",
                                     need_alloc_blocks,
                                     free_blocks_num);
                 return false;
@@ -162,7 +160,7 @@ bool LinearKVCacheGroup::malloc(BlockIds& block_ids, int seq_len, bool enable_re
     return true;
 }
 
-void LinearKVCacheGroup::removeSkippedBlocks(BlockIds& block_ids, bool enable_reuse_cache, int reserve_step) {
+void DeviceLinearKVCacheGroup::removeSkippedBlocks(BlockIds& block_ids, bool enable_reuse_cache, int reserve_step) {
     const auto& block_indices = block_ids.blocks();  // const view for reading current state
     if (block_indices.empty()) {
         return;
@@ -189,7 +187,7 @@ void LinearKVCacheGroup::removeSkippedBlocks(BlockIds& block_ids, bool enable_re
     }
 }
 
-void LinearKVCacheGroup::free(const BlockIndicesType& block_indices) {
+void DeviceLinearKVCacheGroup::free(const BlockIndicesType& block_indices) {
     if (block_indices.empty()) {
         return;
     }
@@ -201,7 +199,7 @@ void LinearKVCacheGroup::free(const BlockIndicesType& block_indices) {
     block_pool_->releaseRef(valid);
 }
 
-void LinearKVCacheGroup::reference(BlockIds& block_ids, const BlockIndicesType& new_block_indices) {
+void DeviceLinearKVCacheGroup::reference(BlockIds& block_ids, const BlockIndicesType& new_block_indices) {
     block_ids.add(new_block_indices);
     BlockIndicesType valid;
     filterValidBlocks(new_block_indices, valid);

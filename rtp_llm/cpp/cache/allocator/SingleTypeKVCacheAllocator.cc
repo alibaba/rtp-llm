@@ -6,6 +6,7 @@
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 #include "rtp_llm/cpp/cache/BlockPoolConfigHelper.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCache.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/DeviceBlockPool.h"
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
@@ -29,7 +30,7 @@ int SingleTypeKVCacheAllocator::getNeedBlocks(const MallocInfo& malloc_info) con
     }
 
     const auto need =
-        full_kv_cache_group_->getNeedBlocks(common_seq_len, seq_len, reserve_step, reuse_blocks_len, reuse_enabled);
+        fullGroup()->getNeedBlocks(common_seq_len, seq_len, reserve_step, reuse_blocks_len, reuse_enabled);
     return (batch_size <= 0) ? 0 : (need.common_blocks + batch_size * need.extra_blocks);
 }
 
@@ -42,7 +43,7 @@ void SingleTypeKVCacheAllocator::checkCPShardedMallocResult(const MallocInfo& ma
     const int   seq_len           = malloc_info.incrSeqLen();
     const int   reserve_step      = malloc_info.complete_token_ids->getReserveStep();
     const int   effective_seq_len = cp_slot_mapper_->effectiveSeqLenForAlloc(seq_len);
-    const int   expected_blocks   = full_kv_cache_group_->needBlocksNum(effective_seq_len, 0, reserve_step);
+    const int   expected_blocks   = fullGroup()->needBlocksNum(effective_seq_len, 0, reserve_step);
 
     for (int batch_id = 0; batch_id < kv_resource->batchSize(); ++batch_id) {
         const int actual_blocks = kv_resource->blocksNum(batch_id);
@@ -94,23 +95,18 @@ bool SingleTypeKVCacheAllocator::doInit() {
         return false;
     }
 
-    SharedBlockCache* shared_cache_raw = shared_block_cache_ ? shared_block_cache_.get() : nullptr;
-
-    if (shared_block_cache_) {
-        std::vector<DeviceBlockPoolPtr> group_pools = {block_pool_};
-        shared_block_cache_->init(1, group_pools);
-    }
-
-    std::vector<int> layer_ids(config_.layerIdsForGroup(0));
-    full_kv_cache_group_ = std::make_shared<FullKVCacheGroup>(layer_ids, spec, block_pool_, 0, shared_cache_raw);
-
-    if (!full_kv_cache_group_->init()) {
-        RTP_LLM_LOG_ERROR("Failed to initialize FullKVCacheGroup");
-        return false;
-    }
-
+    // The DeviceKVCacheGroup is created and owned by BlockTreeCache (see
+    // BlockTreeCacheFactory::createBlockTreeCache); this allocator only owns the pool.
     RTP_LLM_LOG_INFO("SingleTypeKVCacheAllocator initialized successfully");
     return true;
+}
+
+DeviceKVCacheGroupPtr SingleTypeKVCacheAllocator::fullGroup() const {
+    RTP_LLM_CHECK_WITH_INFO(block_tree_cache_ != nullptr,
+                            "SingleTypeKVCacheAllocator: BlockTreeCache not injected before group access");
+    auto group = block_tree_cache_->deviceKVGroup(0);
+    RTP_LLM_CHECK_WITH_INFO(group != nullptr, "SingleTypeKVCacheAllocator: DeviceKVCacheGroup(0) is null");
+    return group;
 }
 
 MallocResult SingleTypeKVCacheAllocator::initMallocForCommonLen(const MallocInfo& malloc_info) {
@@ -148,18 +144,32 @@ MallocResult SingleTypeKVCacheAllocator::initMallocForCommonLen(const MallocInfo
         } else {
             match_keys.assign(cache_keys.begin(), cache_keys.empty() ? cache_keys.end() : cache_keys.end() - 1);
         }
-        auto        match_begin_time_us = currentTimeUs();
-        MatchResult match_result        = full_kv_cache_group_->match(match_keys);
+        auto match_begin_time_us = currentTimeUs();
+        // Whole-sequence match on the shared BlockTreeCache. match() references the
+        // matched device blocks internally; we take the group's indices and release
+        // those refs immediately, leaving KVCacheGroup::reference() as the sole owner.
+        BlockTreeMatchResult tree_match =
+            block_tree_cache_ ? block_tree_cache_->match(match_keys) : BlockTreeMatchResult{};
+        const int        group_id = fullGroup()->group_id();
+        BlockIndicesType matched_block_indices;
+        auto             it = tree_match.group_block_indices.find(group_id);
+        if (it != tree_match.group_block_indices.end()) {
+            matched_block_indices = it->second;
+        }
+        reuse_blocks = static_cast<int>(tree_match.matched_blocks);
         if (cp_slot_mapper_ && cp_slot_mapper_->isSharded()) {
             // virtual block ⇒ reuse_length covers cp_size physical blocks of
             // tokens; reuse_blocks counts virtual blocks.
-            match_result.reuse_length = match_result.reuse_blocks * cp_slot_mapper_->virtualBlockSize();
+            reuse_len = reuse_blocks * cp_slot_mapper_->virtualBlockSize();
+        } else {
+            reuse_len = reuse_blocks * fullGroup()->seqSizePerBlock();
         }
         match_cost_time_us = currentTimeUs() - match_begin_time_us;
-        reuse_len          = static_cast<int>(match_result.reuse_length);
-        reuse_blocks       = static_cast<int>(match_result.reuse_blocks);
         kv_resource->cacheResource(0).setDeviceReuseBlockNum(reuse_blocks);
-        full_kv_cache_group_->reference(block_ids_0, match_result.block_indices);
+        fullGroup()->reference(block_ids_0, matched_block_indices);
+        if (block_tree_cache_) {
+            block_tree_cache_->releaseMatchedBlocks(tree_match.matched_block_sets);
+        }
     }
 
     // Check if available blocks are enough for the request.
@@ -182,13 +192,13 @@ MallocResult SingleTypeKVCacheAllocator::initMallocForCommonLen(const MallocInfo
         }
     }
 
-    if (!full_kv_cache_group_->malloc(block_ids_0, common_seq_len)) {
+    if (!fullGroup()->malloc(block_ids_0, common_seq_len)) {
         return {false, 0};
     }
 
     // other batches reference batch 0's blocks
     for (int batch_id = 1; batch_id < kv_resource->batchSize(); ++batch_id) {
-        full_kv_cache_group_->reference(kv_resource->mutableBlockIds(batch_id), block_ids_0.blocks());
+        fullGroup()->reference(kv_resource->mutableBlockIds(batch_id), block_ids_0.blocks());
     }
 
     return {true, reuse_len, match_cost_time_us};
@@ -205,7 +215,7 @@ MallocResult SingleTypeKVCacheAllocator::incrMalloc(const MallocInfo& malloc_inf
         seq_len = cp_slot_mapper_->effectiveSeqLenForAlloc(seq_len);
     }
 
-    auto need_blocks = full_kv_cache_group_->needBlocksNum(seq_len, current_blocks, reserve_step);
+    auto need_blocks = fullGroup()->needBlocksNum(seq_len, current_blocks, reserve_step);
     if (need_blocks == 0) {
         return {true, 0};
     }
@@ -220,7 +230,7 @@ MallocResult SingleTypeKVCacheAllocator::incrMalloc(const MallocInfo& malloc_inf
     int  current_batch = 0;
     for (; current_batch < batch_size; ++current_batch) {
         auto& block_ids = kv_resource->mutableBlockIds(current_batch);
-        if (!full_kv_cache_group_->malloc(block_ids, seq_len, false, reserve_step)) {
+        if (!fullGroup()->malloc(block_ids, seq_len, false, reserve_step)) {
             all_success = false;
             break;
         }
@@ -242,7 +252,7 @@ MallocResult SingleTypeKVCacheAllocator::incrMalloc(const MallocInfo& malloc_inf
         }
     }
     if (!blocks_to_free.empty()) {
-        full_kv_cache_group_->free(blocks_to_free);
+        fullGroup()->free(blocks_to_free);
     }
     return {false, 0};
 }
@@ -256,14 +266,14 @@ void SingleTypeKVCacheAllocator::free(const FreeInfo& free_info) {
 
     auto all_blocks = kv_cache_resource->getAllBatchBlocks();
     for (const auto& blocks : all_blocks) {
-        full_kv_cache_group_->free(blocks);
+        fullGroup()->free(blocks);
     }
     kv_cache_resource->clearBlocks();
 }
 
 void SingleTypeKVCacheAllocator::insertIntoCache(const InsertInfo& insert_info) {
     auto& kv_resource = insert_info.batch_kv_cache_resource;
-    if (!shared_block_cache_) {
+    if (!block_tree_cache_) {
         return;
     }
 
@@ -274,51 +284,44 @@ void SingleTypeKVCacheAllocator::insertIntoCache(const InsertInfo& insert_info) 
         kv_resource->cacheResource(batch_id).ensureLinearBlockDependencies();
         const auto& blocks = kv_resource->blocks(batch_id);
 
-        // Under CP sharding, use the same last-rank-key namespace as match()
-        // (see initMallocForCommonLen) so the device cache stays consistent
-        // across ranks without any cross-rank coordination.
+        // Under CP sharding, use the same last-rank-key canonical namespace as match()
+        // (see initMallocForCommonLen) so the device cache stays consistent across ranks
+        // without any cross-rank coordination; otherwise use the full key sequence.
         CacheKeysType insert_keys;
-        SharedBlockCache::NamespaceId namespace_id = SharedBlockCache::kGpuLogicalNamespace;
         if (cp_slot_mapper_ && cp_slot_mapper_->isSharded()) {
             int cp_size = cp_slot_mapper_->cpSize();
             insert_keys = kv_resource->cacheResource(batch_id).localCacheKeys(cp_size - 1, cp_size);
-            namespace_id = SharedBlockCache::kGpuCpCanonicalNamespace;
         } else {
             insert_keys = kv_resource->cacheKeys(batch_id);
         }
-        BlockDependenciesType dependencies;
-        dependencies.reserve(insert_keys.size());
-        for (size_t i = 0; i < insert_keys.size(); ++i) {
-            BlockDependency dependency;
-            dependency.ordinal = static_cast<uint32_t>(i);
-            if (i > 0) {
-                dependency.has_parent = true;
-                dependency.parent_key = insert_keys[i - 1];
-            }
-            dependencies.push_back(dependency);
-        }
 
-        size_t block_num = std::min(size_t(insert_keys.size()), size_t(blocks.size()));
+        const size_t block_num = std::min(size_t(insert_keys.size()), size_t(blocks.size()));
         if (block_num == 0) {
             continue;
         }
+        insert_keys.resize(block_num);
 
-        for (size_t i = block_num; i > 0; --i) {
-            const size_t idx = i - 1;
-            if (isNullBlockIdx(blocks[idx])) {
+        // One component group (group 0). slots[i][0].device_blocks holds the block
+        // for cache_key i; parent-child dependencies are implicit in key ordering.
+        std::vector<std::vector<GroupSlot>> slots(block_num, std::vector<GroupSlot>(1));
+        bool                                any_block = false;
+        for (size_t i = 0; i < block_num; ++i) {
+            if (isNullBlockIdx(blocks[i])) {
                 continue;
             }
-            std::vector<BlockIdxType> group_slots = {blocks[idx]};
-            shared_block_cache_->put(
-                insert_keys[idx], group_slots, insert_info.is_resident, namespace_id, dependencies[idx]);
+            slots[i][0].device_blocks = {blocks[i]};
+            any_block                 = true;
+        }
+        if (any_block) {
+            block_tree_cache_->insert(/*parent=*/nullptr, insert_keys, slots);
         }
     }
 }
 
 CacheLayerLayout SingleTypeKVCacheAllocator::allLayerCacheBase() const {
     CacheLayerLayout layout;
-    auto             layer_tensors = full_kv_cache_group_->allLayerCacheBase();
-    auto             scale_tensors = full_kv_cache_group_->allLayerScaleCacheBase();
+    auto             layer_tensors = fullGroup()->allLayerCacheBase();
+    auto             scale_tensors = fullGroup()->allLayerScaleCacheBase();
 
     layout.layers_to_kv_buffer_ptrs.resize(config_.layer_all_num);
     layout.layers_to_scale_buffer_ptrs.resize(config_.layer_all_num);
@@ -332,7 +335,7 @@ CacheLayerLayout SingleTypeKVCacheAllocator::allLayerCacheBase() const {
         }
     }
     layout.layer_to_group_ids.resize(config_.layer_all_num);
-    const int group_id = full_kv_cache_group_->group_id();
+    const int group_id = fullGroup()->group_id();
     for (int layer_id = 0; layer_id < config_.layer_all_num; ++layer_id) {
         layout.layer_to_group_ids[static_cast<size_t>(layer_id)] = {group_id};
     }
@@ -340,18 +343,18 @@ CacheLayerLayout SingleTypeKVCacheAllocator::allLayerCacheBase() const {
 }
 
 BlockAddrInfo SingleTypeKVCacheAllocator::convertIndexToAddr(int layer_id, int block_id) const {
-    return full_kv_cache_group_->convertIndexToAddr(layer_id, block_id);
+    return fullGroup()->convertIndexToAddr(layer_id, block_id);
 }
 
 std::vector<BlockInfo> SingleTypeKVCacheAllocator::convertIndexToBuffer(int layer_id, int block_id) const {
-    return full_kv_cache_group_->convertIndexToBuffer(layer_id, block_id);
+    return fullGroup()->convertIndexToBuffer(layer_id, block_id);
 }
 
 std::vector<BlockInfo> SingleTypeKVCacheAllocator::convertIndexToBuffer(int layer_id,
                                                                         int block_id,
                                                                         int partition_count,
                                                                         int partition_id) const {
-    return full_kv_cache_group_->convertIndexToBuffer(layer_id, block_id, partition_count, partition_id);
+    return fullGroup()->convertIndexToBuffer(layer_id, block_id, partition_count, partition_id);
 }
 
 std::shared_ptr<KVCacheResource> SingleTypeKVCacheAllocator::incrKVCacheRef(const KVCacheResource& kvcache_resource,
@@ -377,23 +380,24 @@ std::shared_ptr<KVCacheResource> SingleTypeKVCacheAllocator::incrKVCacheRef(cons
         delete resource;
     };
     std::shared_ptr<KVCacheResource> selected_resource(selected_resource_ptr, deleter);
-    selected_resource->initGroups(1, config_.layer_all_num, config_.layerGroupIdsSnapshot(), config_.kernelBlocksPerKvBlock());
+    selected_resource->initGroups(
+        1, config_.layer_all_num, config_.layerGroupIdsSnapshot(), config_.kernelBlocksPerKvBlock());
 
-    CacheKeysType          selected_cache_keys;
-    BlockDependenciesType  selected_dependencies;
-    BlockIndicesType       selected_blocks;
-    BlockIndicesType       referenced_blocks;
+    CacheKeysType         selected_cache_keys;
+    BlockDependenciesType selected_dependencies;
+    BlockIndicesType      selected_blocks;
+    BlockIndicesType      referenced_blocks;
 
-    const auto& src_blocks           = kvcache_resource.blocks(0);
-    const auto& source_dependencies  = kvcache_resource.blockDependencies();
+    const auto& src_blocks          = kvcache_resource.blocks(0);
+    const auto& source_dependencies = kvcache_resource.blockDependencies();
 
     for (auto key : cache_keys) {
         auto it = key_to_pos.find(key);
         if (it == key_to_pos.end()) {
             continue;
         }
-        const size_t pos = it->second;
-        const bool preserve_connector_tail = is_connector && !kvcache_resource.lastBlockAligned()
+        const size_t pos                     = it->second;
+        const bool   preserve_connector_tail = is_connector && !kvcache_resource.lastBlockAligned()
                                              && pos + 1 == resource_keys.size() && !selected_cache_keys.empty();
         if (pos >= src_blocks.size() && !preserve_connector_tail) {
             continue;
@@ -482,12 +486,12 @@ bool SingleTypeKVCacheAllocator::updateKVBlock(const BatchKVCacheResourcePtr& kv
 
     // free disused first to reclaim capacity
     if (!disused_kv_blocks.empty()) {
-        full_kv_cache_group_->free(disused_kv_blocks);
+        fullGroup()->free(disused_kv_blocks);
     }
 
     // ensure there are enough free blocks for last-block copies
     if (new_blocks_num > 0) {
-        if (!full_kv_cache_group_->ensureFreeBlocks(static_cast<int>(new_blocks_num))) {
+        if (!fullGroup()->ensureFreeBlocks(static_cast<int>(new_blocks_num))) {
             RTP_LLM_LOG_WARNING("ensure free blocks failed for kv cache update, need %u", new_blocks_num);
             return false;
         }
@@ -498,7 +502,8 @@ bool SingleTypeKVCacheAllocator::updateKVBlock(const BatchKVCacheResourcePtr& kv
     kv_cache_resource->resetAndReturnOldResources(new_batch_size, old_resources);
 
     // init for all batch
-    kv_cache_resource->initGroups(1, config_.layer_all_num, config_.layerGroupIdsSnapshot(), config_.kernelBlocksPerKvBlock());
+    kv_cache_resource->initGroups(
+        1, config_.layer_all_num, config_.layerGroupIdsSnapshot(), config_.kernelBlocksPerKvBlock());
 
     for (int new_batch_idx = 0; new_batch_idx < new_batch_size; ++new_batch_idx) {
         const int old_batch_idx = block_src_batch[new_batch_idx];
@@ -510,16 +515,15 @@ bool SingleTypeKVCacheAllocator::updateKVBlock(const BatchKVCacheResourcePtr& kv
         } else {
             auto& block_ids = kv_cache_resource->mutableBlockIds(new_batch_idx);
             kv_cache_resource->setBatchCacheKeys(new_batch_idx, old_resources[old_batch_idx].cacheKeys());
-            full_kv_cache_group_->reference(block_ids, old_resources[old_batch_idx].blocks());
+            fullGroup()->reference(block_ids, old_resources[old_batch_idx].blocks());
 
             if (copy_last_block && !block_ids.blocks().empty()) {
                 const int old_block = block_ids.popBack();
-                full_kv_cache_group_->free({old_block});
+                fullGroup()->free({old_block});
 
                 // allocate exactly one new block via kvCacheGroup
-                int seq_len_target =
-                    (static_cast<int>(block_ids.blocks().size()) + 1) * full_kv_cache_group_->seqSizePerBlock();
-                bool ok = full_kv_cache_group_->malloc(block_ids, seq_len_target);
+                int seq_len_target = (static_cast<int>(block_ids.blocks().size()) + 1) * fullGroup()->seqSizePerBlock();
+                bool ok            = fullGroup()->malloc(block_ids, seq_len_target);
                 RTP_LLM_CHECK_WITH_INFO(ok, "malloc one block via kvCacheGroup failed during kv cache update");
                 const int new_block = block_ids.blocks().back();
                 block_update_mapping.push_back(BlockIdPair{old_block, new_block});
@@ -531,7 +535,7 @@ bool SingleTypeKVCacheAllocator::updateKVBlock(const BatchKVCacheResourcePtr& kv
 }
 
 int SingleTypeKVCacheAllocator::seqSizePerBlock() const {
-    return full_kv_cache_group_->seqSizePerBlock();
+    return fullGroup()->seqSizePerBlock();
 }
 
 int SingleTypeKVCacheAllocator::singleBatchNeedBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
@@ -540,7 +544,7 @@ int SingleTypeKVCacheAllocator::singleBatchNeedBlocks(const BatchKVCacheResource
     (void)batch_kv_cache_resource;
     const int effective_seq_len =
         (cp_slot_mapper_ && cp_slot_mapper_->isSharded()) ? cp_slot_mapper_->effectiveSeqLenForAlloc(seq_len) : seq_len;
-    return full_kv_cache_group_->needBlocksNum(effective_seq_len, 0, reserve_step);
+    return fullGroup()->needBlocksNum(effective_seq_len, 0, reserve_step);
 }
 
 }  // namespace rtp_llm

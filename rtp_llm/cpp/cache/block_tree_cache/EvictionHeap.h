@@ -57,6 +57,17 @@ public:
     // Query whether a node is in the heap (and not invalidated).
     bool contains(TreeNode* node) const;
 
+    // Collect all currently-valid (non-invalidated) nodes. Used for read-only
+    // capacity queries (e.g. counting evictable blocks per group).
+    std::vector<TreeNode*> nodes() const {
+        std::vector<TreeNode*> out;
+        out.reserve(entry_map_.size());
+        for (const auto& kv : entry_map_) {
+            out.push_back(kv.first);
+        }
+        return out;
+    }
+
     bool   empty() const;
     size_t size() const;
 

@@ -212,7 +212,7 @@ cc_library(
     deps = [
         ":block_pool",
         ":cache_types",
-        ":shared_block_cache",
+        "//rtp_llm/cpp/cache/block_tree_cache:block_tree_cache",
         "//rtp_llm/cpp/cache/block_tree_cache:device_block_pool",
     ],
 )
@@ -227,7 +227,6 @@ cc_library(
     deps = [
         ":block_pool",
         ":cache_types",
-        ":shared_block_cache",
         "//rtp_llm/cpp/cache/block_tree_cache:device_block_pool",
         "//rtp_llm/cpp/metrics:metrics",
     ] + torch_deps(),
@@ -253,7 +252,7 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":kv_cache_allocator_hdr",
-        ":kv_cache_group",
+        "//rtp_llm/cpp/cache/block_tree_cache:block_tree_cache",
         "//rtp_llm/cpp/engine_base/stream:complete_token_ids",
         "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
     ],

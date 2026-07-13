@@ -1,4 +1,4 @@
-#include "rtp_llm/cpp/cache/group/SWAKVCacheGroup.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/device_group/DeviceSWAKVCacheGroup.h"
 
 #include <algorithm>
 #include <cstdlib>
@@ -36,22 +36,22 @@ bool dsv4TrapInvalidKVAccessEnabled() {
 
 }  // namespace
 
-bool SWAKVCacheGroup::shouldCheckSWATailBlockIds() const {
+bool DeviceSWAKVCacheGroup::shouldCheckSWATailBlockIds() const {
     if (!dsv4TrapInvalidKVAccessEnabled()) {
         return false;
     }
     return policy_.validate_tail_blocks;
 }
 
-bool SWAKVCacheGroup::effectiveReuseCacheForAllocation(bool enable_reuse_cache) const {
+bool DeviceSWAKVCacheGroup::effectiveReuseCacheForAllocation(bool enable_reuse_cache) const {
     return enable_reuse_cache && policy_.reuse_policy == CacheReusePolicy::REUSABLE;
 }
 
-int SWAKVCacheGroup::activeTailBlockCount() const {
+int DeviceSWAKVCacheGroup::activeTailBlockCount() const {
     return std::max(1, policy_.active_tail_blocks);
 }
 
-void SWAKVCacheGroup::checkSWATailBlockIds(const BlockIds& block_ids, const char* caller) const {
+void DeviceSWAKVCacheGroup::checkSWATailBlockIds(const BlockIds& block_ids, const char* caller) const {
     if (!shouldCheckSWATailBlockIds()) {
         return;
     }
@@ -74,7 +74,7 @@ void SWAKVCacheGroup::checkSWATailBlockIds(const BlockIds& block_ids, const char
     }
 }
 
-void SWAKVCacheGroup::filterValidBlocks(const BlockIndicesType& in, BlockIndicesType& out) const {
+void DeviceSWAKVCacheGroup::filterValidBlocks(const BlockIndicesType& in, BlockIndicesType& out) const {
     out.clear();
     out.reserve(in.size());
     for (auto b : in) {
@@ -84,11 +84,11 @@ void SWAKVCacheGroup::filterValidBlocks(const BlockIndicesType& in, BlockIndices
     }
 }
 
-int SWAKVCacheGroup::needBlocksNum(int seq_len, int current_blocks, int reserve_step) const {
+int DeviceSWAKVCacheGroup::needBlocksNum(int seq_len, int current_blocks, int reserve_step) const {
     return std::max((seq_len + reserve_step + seq_size_per_block_ - 1) / seq_size_per_block_ - current_blocks, 0);
 }
 
-NeedBlocksInfo SWAKVCacheGroup::getNeedBlocks(
+NeedBlocksInfo DeviceSWAKVCacheGroup::getNeedBlocks(
     int common_seq_len, int seq_len, int reserve_step, int reuse_blocks_len, bool reuse_enabled) const {
     (void)common_seq_len;
     const int  step                    = std::max(1, linear_step_);
@@ -112,12 +112,7 @@ NeedBlocksInfo SWAKVCacheGroup::getNeedBlocks(
     return info;
 }
 
-MatchResult SWAKVCacheGroup::matchSingleKey(CacheKeyType /*cache_key*/) const {
-    // Superseded by BlockTreeCache whole-sequence match(); no longer invoked.
-    return MatchResult{};
-}
-
-bool SWAKVCacheGroup::malloc(BlockIds& block_ids, int seq_len, bool enable_reuse_cache, int reserve_step) {
+bool DeviceSWAKVCacheGroup::malloc(BlockIds& block_ids, int seq_len, bool enable_reuse_cache, int reserve_step) {
     const int  step                    = std::max(1, linear_step_);
     const bool effective_reuse_enabled = effectiveReuseCacheForAllocation(enable_reuse_cache);
     const int  active_tail_blocks      = activeTailBlockCount();
@@ -126,7 +121,7 @@ bool SWAKVCacheGroup::malloc(BlockIds& block_ids, int seq_len, bool enable_reuse
     const int  new_blocks_len          = needBlocksNum(seq_len, current_blocks_len, reserve_step);
 
     if (new_blocks_len == 0) {
-        checkSWATailBlockIds(block_ids, "SWAKVCacheGroup::malloc");
+        checkSWATailBlockIds(block_ids, "DeviceSWAKVCacheGroup::malloc");
         return true;
     }
 
@@ -141,7 +136,7 @@ bool SWAKVCacheGroup::malloc(BlockIds& block_ids, int seq_len, bool enable_reuse
         const auto free_blocks_num = freeBlocksNum();
         if (free_blocks_num < static_cast<size_t>(need_alloc_blocks)) {
             if (!ensureFreeBlocks(need_alloc_blocks)) {
-                RTP_LLM_LOG_WARNING("Insufficient free blocks for SWAKVCacheGroup: need %d, have %zu",
+                RTP_LLM_LOG_WARNING("Insufficient free blocks for DeviceSWAKVCacheGroup: need %d, have %zu",
                                     need_alloc_blocks,
                                     free_blocks_num);
                 return false;
@@ -178,14 +173,14 @@ bool SWAKVCacheGroup::malloc(BlockIds& block_ids, int seq_len, bool enable_reuse
                             allocated_idx,
                             allocated_blocks.size());
     block_ids.add(new_ids);
-    checkSWATailBlockIds(block_ids, "SWAKVCacheGroup::malloc");
+    checkSWATailBlockIds(block_ids, "DeviceSWAKVCacheGroup::malloc");
     return true;
 }
 
-void SWAKVCacheGroup::removeSkippedBlocks(BlockIds& block_ids, bool enable_reuse_cache, int reserve_step) {
+void DeviceSWAKVCacheGroup::removeSkippedBlocks(BlockIds& block_ids, bool enable_reuse_cache, int reserve_step) {
     const auto& block_indices = block_ids.blocks();
     if (block_indices.empty()) {
-        checkSWATailBlockIds(block_ids, "SWAKVCacheGroup::removeSkippedBlocks");
+        checkSWATailBlockIds(block_ids, "DeviceSWAKVCacheGroup::removeSkippedBlocks");
         return;
     }
     const int  step                    = std::max(1, linear_step_);
@@ -209,10 +204,10 @@ void SWAKVCacheGroup::removeSkippedBlocks(BlockIds& block_ids, bool enable_reuse
         block_pool_->releaseRef(blocks_to_free);
         block_ids.remove(pos_to_remove);
     }
-    checkSWATailBlockIds(block_ids, "SWAKVCacheGroup::removeSkippedBlocks");
+    checkSWATailBlockIds(block_ids, "DeviceSWAKVCacheGroup::removeSkippedBlocks");
 }
 
-void SWAKVCacheGroup::free(const BlockIndicesType& block_indices) {
+void DeviceSWAKVCacheGroup::free(const BlockIndicesType& block_indices) {
     if (block_indices.empty()) {
         return;
     }
@@ -223,7 +218,7 @@ void SWAKVCacheGroup::free(const BlockIndicesType& block_indices) {
     }
 }
 
-void SWAKVCacheGroup::reference(BlockIds& block_ids, const BlockIndicesType& new_block_indices) {
+void DeviceSWAKVCacheGroup::reference(BlockIds& block_ids, const BlockIndicesType& new_block_indices) {
     block_ids.add(new_block_indices);
     BlockIndicesType valid;
     filterValidBlocks(new_block_indices, valid);

@@ -3,10 +3,8 @@
 #include <memory>
 #include <vector>
 
-#include "rtp_llm/cpp/cache/group/FullKVCacheGroup.h"
 #include "rtp_llm/cpp/cache/allocator/KVCacheAllocator.h"
-#include "rtp_llm/cpp/cache/group/LinearKVCacheGroup.h"
-#include "rtp_llm/cpp/cache/group/SWAKVCacheGroup.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/device_group/DeviceKVCacheGroup.h"
 
 namespace rtp_llm {
 
@@ -29,10 +27,10 @@ public:
                        bool                           copy_last_block,
                        std::vector<BlockIdPair>&      block_update_mapping) override;
 
-    int seqSizePerBlock() const override;
-    int singleBatchNeedBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
-                              int                            seq_len,
-                              int                            reserve_step) const override;
+    int              seqSizePerBlock() const override;
+    int              singleBatchNeedBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
+                                           int                            seq_len,
+                                           int                            reserve_step) const override;
     std::vector<int> independentEvictionGroupIds() const override;
 
 protected:
@@ -41,6 +39,10 @@ protected:
     int          getNeedBlocks(const MallocInfo& malloc_info) const override;
     void         checkCPShardedMallocResult(const MallocInfo& malloc_info) const override;
     void         decrKVCacheRef(const KVCacheResource& kvcache_resource, bool is_connector = false) override;
+
+    // DeviceKVCacheGroup for `gid`, owned by BlockTreeCache; null before BTC injection or
+    // when gid is out of range. Replaces the old allocator-owned kv_cache_groups_ vector.
+    DeviceKVCacheGroupPtr group(int gid) const;
 
     int reuseCache(const CacheKeysType&                 cache_keys,
                    BatchKVCacheResource&                kv_resource,
@@ -59,10 +61,9 @@ protected:
                                     const std::vector<std::vector<size_t>>& original_sizes,
                                     int                                     failed_batch);
 
-    std::vector<KVCacheGroupPtr> kv_cache_groups_;
-    std::vector<int>             full_group_ids_;
-    std::vector<int>             linear_group_ids_;
-    std::vector<int>             swa_group_ids_;
+    std::vector<int> full_group_ids_;
+    std::vector<int> linear_group_ids_;
+    std::vector<int> swa_group_ids_;
 };
 
 using HybridKVCacheAllocatorPtr = std::shared_ptr<HybridKVCacheAllocator>;

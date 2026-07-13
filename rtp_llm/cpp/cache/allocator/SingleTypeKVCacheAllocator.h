@@ -2,7 +2,7 @@
 
 #include <memory>
 #include "rtp_llm/cpp/cache/allocator/KVCacheAllocator.h"
-#include "rtp_llm/cpp/cache/group/FullKVCacheGroup.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/device_group/DeviceKVCacheGroup.h"
 
 namespace rtp_llm {
 
@@ -46,7 +46,9 @@ private:
     void         decrKVCacheRef(const KVCacheResource& kvcache_resource, bool is_connector = false) override;
 
 private:
-    std::shared_ptr<FullKVCacheGroup> full_kv_cache_group_;
+    // The full-attention DeviceKVCacheGroup (group 0), owned by BlockTreeCache. Fails fast
+    // if BlockTreeCache has not been injected yet.
+    DeviceKVCacheGroupPtr fullGroup() const;
 };
 
 using SingleTypeKVCacheAllocatorPtr = std::shared_ptr<SingleTypeKVCacheAllocator>;

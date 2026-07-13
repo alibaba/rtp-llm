@@ -1,13 +1,13 @@
-#include "rtp_llm/cpp/cache/group/FullKVCacheGroup.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/device_group/DeviceFullKVCacheGroup.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
 namespace rtp_llm {
 
-int FullKVCacheGroup::needBlocksNum(int seq_len, int current_blocks, int reserve_step) const {
+int DeviceFullKVCacheGroup::needBlocksNum(int seq_len, int current_blocks, int reserve_step) const {
     return std::max((seq_len + reserve_step + seq_size_per_block_ - 1) / seq_size_per_block_ - current_blocks, 0);
 }
 
-NeedBlocksInfo FullKVCacheGroup::getNeedBlocks(
+NeedBlocksInfo DeviceFullKVCacheGroup::getNeedBlocks(
     int common_seq_len, int seq_len, int reserve_step, int reuse_blocks_len, bool reuse_enabled) const {
     NeedBlocksInfo info;
     const int      common_slots        = needBlocksNum(common_seq_len, /*current_blocks=*/0);
@@ -18,7 +18,7 @@ NeedBlocksInfo FullKVCacheGroup::getNeedBlocks(
     return info;
 }
 
-bool FullKVCacheGroup::malloc(BlockIds& block_ids, int seq_len, bool enable_reuse_cache, int reserve_step) {
+bool DeviceFullKVCacheGroup::malloc(BlockIds& block_ids, int seq_len, bool enable_reuse_cache, int reserve_step) {
     (void)enable_reuse_cache;
     int need_blocks_num = needBlocksNum(seq_len, static_cast<int>(block_ids.blocksNum()), reserve_step);
     if (need_blocks_num == 0) {
@@ -43,13 +43,7 @@ bool FullKVCacheGroup::malloc(BlockIds& block_ids, int seq_len, bool enable_reus
     return true;
 }
 
-MatchResult FullKVCacheGroup::matchPrefix(const CacheKeysType& /*cache_keys*/) const {
-    // Per-key matching is superseded by BlockTreeCache whole-sequence match(), driven
-    // by the allocator. This entry is no longer invoked; keep a benign empty result.
-    return MatchResult{};
-}
-
-void FullKVCacheGroup::free(const BlockIndicesType& block_indices) {
+void DeviceFullKVCacheGroup::free(const BlockIndicesType& block_indices) {
     if (block_indices.empty()) {
         return;
     }
@@ -58,12 +52,13 @@ void FullKVCacheGroup::free(const BlockIndicesType& block_indices) {
     RTP_LLM_LOG_DEBUG("Freed %zu blocks", block_indices.size());
 }
 
-void FullKVCacheGroup::reference(BlockIds& block_ids, const BlockIndicesType& new_block_indices) {
+void DeviceFullKVCacheGroup::reference(BlockIds& block_ids, const BlockIndicesType& new_block_indices) {
     block_ids.add(new_block_indices);
     block_pool_->incRef(new_block_indices);
 }
 
-void FullKVCacheGroup::removeSkippedBlocks(BlockIds& /*block_ids*/, bool /*enable_reuse_cache*/, int /*reserve_step*/) {
-}
+void DeviceFullKVCacheGroup::removeSkippedBlocks(BlockIds& /*block_ids*/,
+                                                 bool /*enable_reuse_cache*/,
+                                                 int /*reserve_step*/) {}
 
 }  // namespace rtp_llm

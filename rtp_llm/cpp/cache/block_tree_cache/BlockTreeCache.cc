@@ -96,6 +96,19 @@ BlockTreeCache::BlockTreeCache(std::unique_ptr<BlockTree>        tree,
                          g->hostPool() ? "enabled" : "null",
                          g->diskPool() ? "enabled" : "null");
     }
+    // Wire this cache into each owned DeviceKVCacheGroup so ensureFreeBlocks() can call
+    // back into evictForGroup() for cross-group device eviction via std::function callback.
+    for (const auto& g : component_groups_) {
+        if (!g) {
+            continue;
+        }
+        for (const auto& dkv : g->deviceKVGroups()) {
+            if (dkv) {
+                dkv->setEvictionCallback(
+                    [this](int group_id, size_t num_blocks) { return evictForGroup(group_id, num_blocks); });
+            }
+        }
+    }
 }
 
 BlockTreeCache::~BlockTreeCache() {
@@ -256,6 +269,26 @@ BlockTreeMatchResult BlockTreeCache::match(const CacheKeysType& cache_keys) {
         }
     }
 
+    // Collect per-group device block indices for ALL component groups. Whole-sequence
+    // consumers (allocators) pick reuse blocks per group from result.group_block_indices;
+    // result.block_indices above keeps the FULL aggregate for the load_back path.
+    for (const auto& group : component_groups_) {
+        const auto gid     = static_cast<size_t>(group->component_group_id);
+        auto&      indices = result.group_block_indices[group->component_group_id];
+        for (size_t i = 0; i < valid_matched_block_count; ++i) {
+            TreeNode* node = find_result.path[i];
+            if (gid >= node->group_slots.size()) {
+                continue;
+            }
+            auto& slot = node->group_slots[gid];
+            for (auto block : slot.device_blocks) {
+                if (block != NULL_BLOCK_IDX) {
+                    indices.push_back(block);
+                }
+            }
+        }
+    }
+
     for (size_t i = 0; i < valid_matched_block_count; ++i) {
         TreeNode* node = find_result.path[i];
         for (auto& group : component_groups_) {
@@ -267,8 +300,8 @@ BlockTreeMatchResult BlockTreeCache::match(const CacheKeysType& cache_keys) {
         }
     }
 
-    std::vector<TreeNode*> match_path(
-        find_result.path.begin(), find_result.path.begin() + static_cast<ptrdiff_t>(valid_matched_block_count));
+    std::vector<TreeNode*> match_path(find_result.path.begin(),
+                                      find_result.path.begin() + static_cast<ptrdiff_t>(valid_matched_block_count));
     referenceMatchedDeviceBlocks(match_path, result);
 
     // Phase 2: load_back — detect and transfer Host/Disk data to GPU
@@ -281,7 +314,7 @@ BlockTreeMatchResult BlockTreeCache::match(const CacheKeysType& cache_keys) {
             auto lb_ctx = std::make_shared<LoadBackAsyncContext>();
             lb_ctx->addTask();
             result.async_context = lb_ctx;
-            auto items = std::make_shared<std::vector<LoadBackItem>>(std::move(lb_items));
+            auto items           = std::make_shared<std::vector<LoadBackItem>>(std::move(lb_items));
 
             taskStarted();
             auto* work_item = new autil::LambdaWorkItem([this, items, lb_ctx]() {
@@ -328,8 +361,8 @@ void BlockTreeCache::insert(TreeNode*                                  parent,
         return;
     }
 
-    auto result = tree_->insertNode(parent, cache_keys, slots);
-    TreeNode* leaf = result.leaf;
+    auto      result = tree_->insertNode(parent, cache_keys, slots);
+    TreeNode* leaf   = result.leaf;
 
     // incRef cache-hold on new nodes' device blocks (balanced by releaseBlocks on
     // eviction). Reused nodes keep theirs; their demoted data comes from load_back.
@@ -412,7 +445,61 @@ int BlockTreeCache::reclaimBlocks(size_t num_blocks, Tier tier) {
         }
     }
 
-    RTP_LLM_LOG_INFO("BlockTreeCache::reclaimBlocks: reclaimed %d blocks from %s tier", total_reclaimed, tierName(tier));
+    RTP_LLM_LOG_INFO(
+        "BlockTreeCache::reclaimBlocks: reclaimed %d blocks from %s tier", total_reclaimed, tierName(tier));
+    return total_reclaimed;
+}
+
+size_t BlockTreeCache::evictableBlocksNum(int component_group_id) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    const auto                  gid = static_cast<size_t>(component_group_id);
+    if (gid >= component_groups_.size()) {
+        return 0;
+    }
+    const auto& group = component_groups_[gid];
+    if (!group->device_heap) {
+        return 0;
+    }
+    size_t count = 0;
+    for (TreeNode* node : group->device_heap->nodes()) {
+        if (node == nullptr || gid >= node->group_slots.size()) {
+            continue;
+        }
+        const auto& slot = node->group_slots[gid];
+        if (slot.has_device_value() && group->isSlotEvictable(slot, Tier::DEVICE)) {
+            ++count;
+        }
+    }
+    return count;
+}
+
+int BlockTreeCache::evictForGroup(int component_group_id, size_t num_blocks) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!config_.isTierEnabled(Tier::DEVICE)) {
+        return 0;
+    }
+    const auto gid = static_cast<size_t>(component_group_id);
+    if (gid >= component_groups_.size()) {
+        return 0;
+    }
+    auto& group = component_groups_[gid];
+
+    int total_reclaimed = 0;
+    for (size_t attempt = 0; attempt < num_blocks; ++attempt) {
+        auto eviction_move = group->driveEviction(1, Tier::DEVICE);
+        if (!eviction_move.has_value()) {
+            break;
+        }
+        // Force direct reclaim: drop block content, do not demote to a lower tier.
+        eviction_move->target_tier = Tier::NONE;
+        if (submitEvictionLocked(*eviction_move)) {
+            ++total_reclaimed;
+        }
+    }
+    RTP_LLM_LOG_DEBUG("BlockTreeCache::evictForGroup: group[%d] reclaimed %d/%zu device blocks",
+                      component_group_id,
+                      total_reclaimed,
+                      num_blocks);
     return total_reclaimed;
 }
 

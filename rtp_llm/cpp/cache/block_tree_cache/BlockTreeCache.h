@@ -78,20 +78,29 @@ struct BlockTreeCacheConfig {
     // ---- Query helpers ----
     bool isTierEnabled(Tier tier) const {
         switch (tier) {
-            case Tier::DEVICE: return enable_device_cache;
-            case Tier::HOST:   return enable_memory_cache;
-            case Tier::DISK:   return enable_disk_cache;
-            case Tier::REMOTE: return enable_remote_cache;
-            default:           return false;
+            case Tier::DEVICE:
+                return enable_device_cache;
+            case Tier::HOST:
+                return enable_memory_cache;
+            case Tier::DISK:
+                return enable_disk_cache;
+            case Tier::REMOTE:
+                return enable_remote_cache;
+            default:
+                return false;
         }
     }
 
     TierWatermark watermarkForTier(Tier tier) const {
         switch (tier) {
-            case Tier::DEVICE: return watermark_device;
-            case Tier::HOST:   return watermark_host;
-            case Tier::DISK:   return watermark_disk;
-            default:           return {};
+            case Tier::DEVICE:
+                return watermark_device;
+            case Tier::HOST:
+                return watermark_host;
+            case Tier::DISK:
+                return watermark_disk;
+            default:
+                return {};
         }
     }
 
@@ -129,7 +138,15 @@ public:
     void insert(TreeNode* parent, const CacheKeysType& cache_keys, const std::vector<std::vector<GroupSlot>>& slots);
     // reclaimBlocks: directly reclaim (drop) blocks at the given tier, no demotion, no copy.
     // Block content is discarded rather than moved down to a lower tier.
-    int  reclaimBlocks(size_t num_blocks, Tier tier = Tier::DEVICE);
+    int reclaimBlocks(size_t num_blocks, Tier tier = Tier::DEVICE);
+
+    // Number of device blocks currently held only by the cache (refcount == 1) for one
+    // component group, i.e. blocks that can be reclaimed without evicting live requests.
+    size_t evictableBlocksNum(int component_group_id) const;
+
+    // Directly reclaim up to num_blocks device blocks belonging to a single component
+    // group (target_tier = NONE, content dropped). Returns the number actually freed.
+    int evictForGroup(int component_group_id, size_t num_blocks);
 
     CacheStats getStats() const;
     void       waitForPendingTasks();
@@ -145,13 +162,22 @@ public:
     }
     void setTierWatermark(Tier tier, double ratio, size_t capacity) {
         switch (tier) {
-            case Tier::DEVICE: config_.watermark_device = {ratio, capacity}; break;
-            case Tier::HOST:   config_.watermark_host   = {ratio, capacity}; break;
-            case Tier::DISK:   config_.watermark_disk   = {ratio, capacity}; break;
-            default: break;
+            case Tier::DEVICE:
+                config_.watermark_device = {ratio, capacity};
+                break;
+            case Tier::HOST:
+                config_.watermark_host = {ratio, capacity};
+                break;
+            case Tier::DISK:
+                config_.watermark_disk = {ratio, capacity};
+                break;
+            default:
+                break;
         }
     }
-    void setEnableLoadBack(bool enable) { config_.enable_load_back = enable; }
+    void setEnableLoadBack(bool enable) {
+        config_.enable_load_back = enable;
+    }
 
     // Accessors
     BlockTree* tree() const {
@@ -159,6 +185,15 @@ public:
     }
     const std::vector<ComponentGroupPtr>& componentGroups() const {
         return component_groups_;
+    }
+    // Single-pool sequence-allocation entity for one component group (allocator-facing).
+    // Returns nullptr on out-of-range gid or missing pool.
+    DeviceKVCacheGroupPtr deviceKVGroup(int component_group_id, size_t pool_index = 0) const {
+        if (component_group_id < 0 || static_cast<size_t>(component_group_id) >= component_groups_.size()) {
+            return nullptr;
+        }
+        const auto& group = component_groups_[static_cast<size_t>(component_group_id)];
+        return group ? group->deviceKVGroup(pool_index) : nullptr;
     }
     const std::vector<Component>& components() const {
         return components_;
@@ -171,12 +206,22 @@ public:
     }
 
     // Tier enable queries
-    bool isDeviceCacheEnabled() const { return config_.enable_device_cache; }
-    bool isMemoryCacheEnabled() const { return config_.enable_memory_cache; }
-    bool isDiskCacheEnabled() const { return config_.enable_disk_cache; }
-    bool isRemoteCacheEnabled() const { return config_.enable_remote_cache; }
+    bool isDeviceCacheEnabled() const {
+        return config_.enable_device_cache;
+    }
+    bool isMemoryCacheEnabled() const {
+        return config_.enable_memory_cache;
+    }
+    bool isDiskCacheEnabled() const {
+        return config_.enable_disk_cache;
+    }
+    bool isRemoteCacheEnabled() const {
+        return config_.enable_remote_cache;
+    }
 
-    const BlockTreeCacheConfig& config() const { return config_; }
+    const BlockTreeCacheConfig& config() const {
+        return config_;
+    }
 
 private:
     void             taskStarted();
@@ -215,7 +260,7 @@ private:
     std::shared_ptr<StorageBackend>            storage_backend_;
     std::shared_ptr<autil::LockFreeThreadPool> thread_pool_;
     std::shared_ptr<BroadcastManager>          broadcast_manager_;
-    BlockTreeEvictor                          evictor_;
+    BlockTreeEvictor                           evictor_;
 
     std::atomic<int>        pending_tasks_{0};
     std::mutex              wait_mutex_;
