@@ -186,7 +186,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
     }
 
     private void logWorkerStatusUpdate(long startTime, WorkerStatus workerStatus) {
-        logger.info("gRPC Worker Status - {}, role:{}, running_queue_tokens:{}, cost:{}",
+        logger.info("gRPC Worker Status - {}, role:{}, running_queue_tokens:{}, cost_us:{}",
                 ipPort,
                 workerStatus.getRole(),
                 workerStatus.getRunningQueueTime(),
@@ -207,7 +207,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
         log("gRPC worker status check failed, msg=" + ex.getMessage());
         // Report specific error based on exception type
         if (ex.getMessage() != null && ex.getMessage().toLowerCase().contains(DEADLINE_EXCEEDED_MESSAGE.toLowerCase())) {
-            logger.info("gRPC worker status check timeout, msg={}, ipPort: {}, rt: {}", ex.getMessage(), ipPort, System.nanoTime() / 1000 - createTimeUs);
+            logger.info("gRPC worker status check timeout, msg={}, ipPort: {}, rt_us: {}", ex.getMessage(), ipPort, System.nanoTime() / 1000 - createTimeUs);
             engineHealthReporter.reportStatusCheckerFail(modelName, BalanceStatusEnum.WORKER_STATUS_GRPC_TIMEOUT, ip, roleType);
         } else {
             engineHealthReporter.reportStatusCheckerFail(modelName, BalanceStatusEnum.WORKER_SERVICE_UNAVAILABLE, ip, roleType);
