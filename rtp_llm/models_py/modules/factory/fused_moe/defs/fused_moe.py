@@ -10,6 +10,52 @@ import torch
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
 )
+
+logger = logging.getLogger(__name__)
+
+# One-shot guard so the warmup MoE-activation measurement logs once (all layers are
+# identical and sequential, so the first one carries the signal).
+_MOE_ACT_LOGGED = False
+
+
+def _in_memory_trace() -> bool:
+    """True only during a warmup forward being memory-traced (C++ setTraceMemory(true)).
+
+    Lazy import: compute_ops is a compiled extension; importing at call time keeps this
+    module importable in environments where the op lib is absent (e.g. pure unit tests).
+    """
+    try:
+        from rtp_llm.ops.compute_ops import is_trace_memory
+
+        return bool(is_trace_memory())
+    except Exception:
+        return False
+
+
+def _default_skew_fraction(ep_size: int, expert_num: int, top_k: int) -> float:
+    """Fraction of the WHOLE cluster's tokens to concentrate onto rank0's experts during
+    warmup. Models a realistically-hot rank (mean load 1/ep plus a k·sigma fluctuation):
+
+        rank0 load = sum of ep iid Hyper(E, K=E/ep, n=top_k), so
+          mean = top_k,  Var = top_k * (1 - 1/ep) * (E - top_k)/(E - 1)
+          sigma/mean = sqrt((E - top_k) / (top_k * (E - 1)) * (1 - 1/ep))
+        With k=4 (covers ~99.99% under uniform routing) and factor = 4 * sqrt(...):
+          C(ep) = (mean + k*sigma) / (top_k * ep)
+                = (1/ep) * (1 + factor * sqrt(1 - 1/ep))
+          factor = 4 * sqrt((E - top_k) / (top_k * (E - 1)))    # E- and top_k-dependent
+
+    e.g. E=256, top_k=8 -> factor~=1.395 (ep2->0.995, ep4->0.553, ep8->0.289)
+         E=128, top_k=8 -> factor~=1.375 (ep2->0.986, ep4->0.548, ep8->0.286)
+    Callers clamp to [1/ep, 1] (uniform .. absolute-worst). Override via MOE_SKEW_FRACTION.
+    """
+    if ep_size <= 1:
+        return 1.0
+    if expert_num <= 1 or top_k <= 0:
+        return 1.0 / ep_size  # degenerate -> uniform
+    factor = 4.0 * ((expert_num - top_k) / (top_k * (expert_num - 1))) ** 0.5
+    return (1.0 / ep_size) * (1.0 + factor * (1.0 - 1.0 / ep_size) ** 0.5)
+
+
 from rtp_llm.models_py.modules.factory.fused_moe.defs.quant_config import (
     FusedMoEQuantConfig,
 )

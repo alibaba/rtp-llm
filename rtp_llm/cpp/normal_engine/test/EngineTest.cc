@@ -367,4 +367,42 @@ TEST_F(NormalEngineTest, testQueryReuseCacheWhenSwitchIsOff) {
     }
 }
 
+// testDecodeWarmUp verifies the decodeWarmUp flow correctness and memory measurement.
+// Note: MockModel cannot trigger CUDA Graph capture (requires PyWrappedModel), so
+// cudagraph_total is expected to be 0 here. CUDA Graph memory measurement is validated
+// by the e2e test (decode_warmup_e2e.sh) with a real model.
+TEST_F(NormalEngineTest, testDecodeWarmUp) {
+    CustomConfig     config;
+    ModelConfig      model_config;
+    RuntimeConfig    runtime_config;
+    KVCacheConfig    kv_cache_config;
+    EngineInitParams params = createEngineInitParams(config, model_config, runtime_config, kv_cache_config);
+
+    // Use a large vocab_size so that forward() allocates enough GPU memory
+    // to produce a measurable torch_peak_increase (default 100 is too small).
+    constexpr size_t kTestVocabSize = 1000000;
+
+    auto engine = createMockEngine(config);
+
+    // Re-install test_model_factory with the larger vocab for decodeWarmUp's internal executor.
+    NormalExecutor::test_model_factory = [kTestVocabSize](const GptModelInitParams&) {
+        return std::make_unique<MockModel>(kTestVocabSize);
+    };
+    WarmUpResult result                = engine->decodeWarmUp(params);
+    NormalExecutor::test_model_factory = nullptr;
+
+    // Always print concrete values for observability (stderr is not silenced by bazel).
+    std::cerr << "decodeWarmUp result: "
+              << "device_reserved_bytes=" << result.device_reserved_bytes
+              << ", max_used_memory=" << result.max_used_memory
+              << ", torch_peak_increase=" << result.torch_peak_increase
+              << ", non_torch_increase=" << result.non_torch_increase << std::endl;
+
+    // device_reserved_bytes is total GPU free memory — always positive.
+    EXPECT_GT(result.device_reserved_bytes, 0) << "actual=" << result.device_reserved_bytes;
+    // max_consumed = cudagraph_total + torch_peak_increase + non_torch_fwd.
+    // With large vocab, torch_peak_increase > 0, so max_consumed > 0.
+    EXPECT_GT(result.max_used_memory, 0) << "actual=" << result.max_used_memory;
+}
+
 }  // namespace rtp_llm

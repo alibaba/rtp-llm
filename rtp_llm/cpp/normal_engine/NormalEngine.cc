@@ -14,6 +14,7 @@
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include "autil/TimeUtility.h"
 #include "rtp_llm/cpp/normal_engine/speculative/MtpExecutor.h"
+#include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include <c10/core/InferenceMode.h>
 #include <algorithm>
 #include <memory>
@@ -288,23 +289,83 @@ WarmUpResult NormalEngine::decodeWarmUp(const EngineInitParams& params) {
     auto fake_input                                   = makeFakeInput((size_t)model_config_.max_seq_len - 1);
     fake_input->generate_config->num_return_sequences = runtime_config.max_generate_batch_size;
     fake_input->generate_config->calculate_loss       = int(runtime_config.warm_up_with_loss);
-    rtp_llm::setTraceMemory(true);
+    rtp_llm::setTraceMemory(true);  // Trace memory used
 
     auto cache_config               = CacheConfigCreator::createBasicConfig(model_config_, parallelism_config);
     cache_config.seq_size_per_block = model_config_.attn_config.tokens_per_block;
     cache_config.block_num          = 5;
     ParallelismConfig temp_parallelism_config;
     RuntimeConfig     temp_runtime_config;
-    auto              cache_manager = make_shared<KVCacheManager>(
+
+    // cache manager for testing
+    auto cache_manager = make_shared<KVCacheManager>(
         cache_config, true, nullptr, KVCacheConfig{}, temp_parallelism_config, temp_runtime_config);
     if (!cache_manager->init()) {
         RTP_LLM_FAIL("init kv cache manager failed in decodeWarmUp");
     }
+
+    // ===== 3-Snapshot Memory Profiling =====
+    // S1: before executor, S2: after executor, S3: after forward
+    const auto device    = c10::cuda::current_device();
+    size_t     total_gpu = 0;
+
+    // --- S1: Clean baseline before executor creation ---
+    cudaDeviceSynchronize();
+    c10::cuda::CUDACachingAllocator::emptyCache();
+    c10::cuda::CUDACachingAllocator::resetPeakStats(device);
+
+    size_t s1_free = 0;
+    cudaMemGetInfo(&s1_free, &total_gpu);
+    const auto    s1_stats       = c10::cuda::CUDACachingAllocator::getDeviceStats(device);
+    const int64_t s1_torch_alloc = s1_stats.allocated_bytes[0].current;
+    const size_t  s1_cuda_used   = total_gpu - s1_free;
+
+    // --- Create executor (includes CUDA graph capture) ---
     executor_.reset(new NormalExecutor(
         params, cache_manager, true, false, 0, mla_ops_type_, kv_cache_group_num_, kv_cache_layer_to_group_));
+
+    // --- S2: After executor creation ---
+    cudaDeviceSynchronize();
+    c10::cuda::CUDACachingAllocator::resetPeakStats(device);
+
+    size_t s2_free = 0;
+    cudaMemGetInfo(&s2_free, &total_gpu);
+    const auto    s2_stats          = c10::cuda::CUDACachingAllocator::getDeviceStats(device);
+    const int64_t s2_torch_peak     = s2_stats.allocated_bytes[0].peak;
+    const int64_t s2_torch_reserved = s2_stats.reserved_bytes[0].current;
+    const size_t  s2_cuda_used      = total_gpu - s2_free;
+    const int64_t s2_non_torch      = static_cast<int64_t>(s2_cuda_used) - s2_torch_reserved;
+
+    // --- Run forward ---
     THROW_IF_STATUSOR_ERROR(preRun(fake_input, preRunMode::decode_warm_up));
-    const auto peak_status  = getGpuExecStatus().device_memory_status;
-    const auto max_consumed = peak_status.max_consumed_bytes;
+
+    // --- S3: After forward ---
+    cudaDeviceSynchronize();
+    size_t s3_free = 0;
+    cudaMemGetInfo(&s3_free, &total_gpu);
+    const auto    s3_stats          = c10::cuda::CUDACachingAllocator::getDeviceStats(device);
+    const int64_t s3_torch_peak     = s3_stats.allocated_bytes[0].peak;
+    const int64_t s3_torch_reserved = s3_stats.reserved_bytes[0].current;
+    const size_t  s3_cuda_used      = total_gpu - s3_free;
+    const int64_t s3_non_torch      = static_cast<int64_t>(s3_cuda_used) - s3_torch_reserved;
+
+    // ===== Compute memory components =====
+    const int64_t weights             = s1_torch_alloc;
+    const size_t  cudagraph_total     = (s2_cuda_used > s1_cuda_used) ? (s2_cuda_used - s1_cuda_used) : 0;
+    const int64_t torch_peak_increase = std::max<int64_t>(0, s3_torch_peak - s2_torch_peak);
+    const int64_t non_torch_fwd       = std::max<int64_t>(0, s3_non_torch - s2_non_torch);
+
+    const size_t max_consumed = cudagraph_total + static_cast<size_t>(torch_peak_increase + non_torch_fwd);
+
+    RTP_LLM_LOG_INFO("decodeWarmUp result: "
+                     "weights=%.2f, cudagraph=%.2f, torch_peak=%.2f, non_torch_fwd=%.2f, "
+                     "max_consumed=%.2f (MiB)",
+                     weights / 1024.0 / 1024.0,
+                     cudagraph_total / 1024.0 / 1024.0,
+                     torch_peak_increase / 1024.0 / 1024.0,
+                     non_torch_fwd / 1024.0 / 1024.0,
+                     max_consumed / 1024.0 / 1024.0);
+
     rtp_llm::setTraceMemory(false);
     (void)executor_.reset(nullptr);
     cudaDeviceSynchronize();
@@ -312,8 +373,8 @@ WarmUpResult NormalEngine::decodeWarmUp(const EngineInitParams& params) {
     const auto device_status = getGpuExecStatus();
     return WarmUpResult({device_status.device_memory_status.available_bytes,
                          max_consumed,
-                         peak_status.torch_peak_increase_bytes,
-                         peak_status.non_torch_increase_bytes});
+                         static_cast<size_t>(torch_peak_increase),
+                         static_cast<size_t>(non_torch_fwd)});
 #endif
 }
 
