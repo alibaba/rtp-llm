@@ -1,8 +1,8 @@
 package(default_visibility = ["//visibility:public"])
 
 # Framework source files for cross-package smoke tests.
-# Used as data dep (not srcs/deps) to avoid __init__.py creation
-# that breaks namespace package merging with internal smoke/.
+# Used as data dep (not srcs/deps) so internal smoke targets can merge their
+# own smoke/ children through smoke.__path__ without duplicating runner srcs.
 filegroup(
     name = "smoke_framework_srcs",
     srcs = glob(["*.py"]),
@@ -25,12 +25,14 @@ filegroup(
 load("//rtp_llm/test/smoke:suites_h20_oss.bzl", "h20_oss_suites")
 load("//rtp_llm/test/smoke:suites_sm8x.bzl", "sm8x_suites")
 load("//rtp_llm/test/smoke:suites_sm100.bzl", "sm100_suites")
+load("//rtp_llm/test/smoke:suites_sm120.bzl", "sm120_suites")
 load("//rtp_llm/test/smoke:suites_rocm_oss.bzl", "rocm_oss_suites")
 load("//rtp_llm/test/smoke:suites_remote_cache.bzl", "remote_cache_suites")
 
 h20_oss_suites()
 sm8x_suites()
 sm100_suites()
+sm120_suites()
 rocm_oss_suites()
 remote_cache_suites()
 
@@ -45,6 +47,7 @@ test_suite(
         ":smoke_h20_dense",
         ":smoke_h20_eagle",
         ":smoke_sm8x_basic",
+        ":smoke_sm120_basic",
     ],
 )
 
