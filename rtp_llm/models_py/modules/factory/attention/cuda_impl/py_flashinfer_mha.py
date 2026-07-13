@@ -125,6 +125,7 @@ class PyFlashinferPrefillPagedAttnOp(object):
             attn_inputs.kv_cache_kernel_block_id,
             self.page_size,
             forbid_realloc,
+            cuda_graph_metadata=attn_inputs.cuda_graph_metadata,
         )
         # Store CUDA graph copy parameters
         # Define qo_indptr early for CUDA graph initialization

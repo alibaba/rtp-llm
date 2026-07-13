@@ -129,6 +129,12 @@ void CudaGraphRunner::prepareInputs(const PyModelInputs& inputs, CudaGraphState&
     // Common device copy
     int token_num = is_prefill_cuda_graph_mode_ ? state.current_seq_len : inputs.input_ids.size(0);
 
+    // Refresh the dynamic half of the graph layout contract. Capture capacity
+    // and graph batch size remain immutable in the graph instance.
+    auto& graph_meta             = py_model_inputs_.attention_inputs.cuda_graph_metadata;
+    graph_meta.active_batch_size = state.current_batch_size;
+    graph_meta.actual_token_num  = is_target_verify_ ? state.seq_len_sum : token_num;
+
     tryAddD2DCopy(inputs.input_ids, py_model_inputs_.input_ids, token_num * sizeof(int));
     tryAddD2DCopy(inputs.input_hiddens,
                   py_model_inputs_.input_hiddens,
@@ -244,6 +250,9 @@ void CudaGraphRunner::prepareInputs(const PyModelInputs& inputs, CudaGraphState&
                            state.current_batch_size * sizeof(int));
         if (state.current_batch_size < max_bs_) {
             py_model_inputs_.attention_inputs.sequence_lengths.slice(0, state.current_batch_size, max_bs_).fill_(0);
+            py_model_inputs_.attention_inputs.sequence_lengths_plus_1_device
+                .slice(0, state.current_batch_size, max_bs_)
+                .fill_(0);
         }
     } else {
         optimizedCopyAsync(inputs.attention_inputs.padding_offset,
@@ -265,14 +274,20 @@ void CudaGraphRunner::prepareInputs(const PyModelInputs& inputs, CudaGraphState&
         }
     }
 
-    // Reset unused batch portions to prevent stale data (prefill only)
-    if (is_prefill_cuda_graph_mode_) {
+    // Reset unused batch portions to prevent stale data when a smaller batch reuses a larger graph.
+    if (is_prefill_cuda_graph_mode_ || is_target_verify_) {
         if (state.current_batch_size < max_bs_) {
             py_model_inputs_.attention_inputs.prefix_lengths.slice(0, state.current_batch_size, max_bs_).fill_(0);
+            py_model_inputs_.attention_inputs.prefix_lengths_device
+                .slice(0, state.current_batch_size, max_bs_)
+                .fill_(0);
             py_model_inputs_.attention_inputs.input_lengths.slice(0, state.current_batch_size, max_bs_).fill_(0);
+            py_model_inputs_.attention_inputs.input_lengths_device
+                .slice(0, state.current_batch_size, max_bs_)
+                .fill_(0);
         }
 
-        int last_valid_q = state.current_seq_len;
+        int last_valid_q = is_target_verify_ ? state.seq_len_sum : state.current_seq_len;
         int last_valid_kv =
             last_valid_q
             + inputs.attention_inputs.prefix_lengths.slice(0, 0, state.current_batch_size).sum().item<int>();
@@ -739,6 +754,14 @@ void CudaGraphRunner::prepareCaptureInputs(PyModelInputs& inputs, int batch_size
     // Common slice operations for input_ids and padding_offset
     inputs.attention_inputs.is_prefill       = is_prefill_cuda_graph_mode_ || num_tokens_per_bs_ > 1;
     inputs.attention_inputs.is_target_verify = is_target_verify_;
+    auto& graph_meta                               = inputs.attention_inputs.cuda_graph_metadata;
+    graph_meta.requires_full_token_metadata        = is_target_verify_;
+    graph_meta.graph_batch_size                    = batch_size;
+    graph_meta.active_batch_size                   = batch_size;
+    graph_meta.tokens_per_batch                    = num_tokens_per_bs_;
+    graph_meta.actual_token_num                    = seq_len_or_tokens;
+    graph_meta.token_capacity                      = seq_len_or_tokens;
+    graph_meta.dummy_kv_block_id                   = 0;
     inputs.input_ids     = capture_mem_hold_.py_model_inputs_.input_ids.slice(0, 0, seq_len_or_tokens);
     inputs.input_hiddens = capture_mem_hold_.py_model_inputs_.input_hiddens.slice(0, 0, seq_len_or_tokens);
     inputs.attention_inputs.input_lengths =

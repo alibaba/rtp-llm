@@ -405,7 +405,8 @@ void FlashInferMlaAttnParams::fillParams(torch::Tensor t_prefix_lengths,
                                          torch::Tensor t_input_lengths,
                                          torch::Tensor t_kv_cache_block_id_host,
                                          int           seq_size_per_block,
-                                         bool          forbid_realloc) {
+                                         bool          forbid_realloc,
+                                         const PyCudaGraphMetadata& cuda_graph_metadata) {
     const int batch_size = t_input_lengths.size(0);
 
     // First pass: calculate required sizes accurately
@@ -436,8 +437,77 @@ void FlashInferMlaAttnParams::fillParams(torch::Tensor t_prefix_lengths,
         page_num += (seq_len + seq_size_per_block - 1) / seq_size_per_block;
     }
 
+    const int requested_input_token_num = input_token_num;
+    const int captured_input_token_num = cuda_graph_metadata.requires_full_token_metadata ?
+                                             cuda_graph_metadata.token_capacity :
+                                             requested_input_token_num;
+    RTP_LLM_CHECK_WITH_INFO(captured_input_token_num >= requested_input_token_num,
+                            "CUDA graph token capacity %d is smaller than requested token count %d",
+                            captured_input_token_num,
+                            requested_input_token_num);
+    const bool pad_fixed_capacity_tokens = forbid_realloc && prefix_lengths_ptr != nullptr
+                                           && cuda_graph_metadata.needsTokenPadding();
+
+    int padding_batch_begin       = cuda_graph_metadata.paddingBatchBegin();
+    int captured_tokens_per_batch = cuda_graph_metadata.tokens_per_batch;
+    int dummy_page_num            = 0;
+    if (pad_fixed_capacity_tokens) {
+        RTP_LLM_CHECK_WITH_INFO(cuda_graph_metadata.graph_batch_size == batch_size,
+                                "CUDA graph metadata batch size mismatch: contract=%d, input=%d",
+                                cuda_graph_metadata.graph_batch_size,
+                                batch_size);
+        RTP_LLM_CHECK_WITH_INFO(padding_batch_begin >= 0 && padding_batch_begin < batch_size,
+                                "CUDA graph active batch size %d is invalid for graph batch size %d",
+                                padding_batch_begin,
+                                batch_size);
+        RTP_LLM_CHECK_WITH_INFO(captured_tokens_per_batch > 0,
+                                "fixed-width CUDA graph tokens per batch must be positive");
+        RTP_LLM_CHECK_WITH_INFO(captured_input_token_num == batch_size * captured_tokens_per_batch,
+                                "CUDA graph token capacity %d does not match batch layout %d x %d",
+                                captured_input_token_num,
+                                batch_size,
+                                captured_tokens_per_batch);
+        RTP_LLM_CHECK_WITH_INFO(cuda_graph_metadata.actual_token_num == requested_input_token_num,
+                                "CUDA graph actual token mismatch: contract=%d, derived=%d",
+                                cuda_graph_metadata.actual_token_num,
+                                requested_input_token_num);
+        RTP_LLM_CHECK_WITH_INFO(requested_input_token_num == padding_batch_begin * captured_tokens_per_batch,
+                                "CUDA graph actual tokens %d do not match active layout %d x %d",
+                                requested_input_token_num,
+                                padding_batch_begin,
+                                captured_tokens_per_batch);
+        RTP_LLM_CHECK_WITH_INFO(cuda_graph_metadata.paddingTokenNum()
+                                    == (batch_size - padding_batch_begin) * captured_tokens_per_batch,
+                                "CUDA graph padding tokens do not match the inactive batch tail");
+
+        for (int i = 0; i < padding_batch_begin; ++i) {
+            RTP_LLM_CHECK_WITH_INFO(input_lengths_ptr[i] == captured_tokens_per_batch,
+                                    "fixed-width CUDA graph active batch %d has %d tokens, expected width %d",
+                                    i,
+                                    input_lengths_ptr[i],
+                                    captured_tokens_per_batch);
+        }
+        for (int i = padding_batch_begin; i < batch_size; ++i) {
+            RTP_LLM_CHECK_WITH_INFO(input_lengths_ptr[i] == 0 && prefix_lengths_ptr[i] == 0,
+                                    "fixed-width CUDA graph padding must be a zero-length batch tail");
+        }
+        RTP_LLM_CHECK_WITH_INFO(requested_input_token_num
+                                    + (batch_size - padding_batch_begin) * captured_tokens_per_batch
+                                    == captured_input_token_num,
+                                "fixed-width CUDA graph token padding does not match captured capacity");
+
+        const int safe_page_size = std::max(seq_size_per_block, 1);
+        dummy_page_num = (batch_size - padding_batch_begin)
+                         * ((captured_tokens_per_batch + safe_page_size - 1) / safe_page_size);
+    }
+
     // Ensure tensors are allocated with sufficient size
-    ensureTensorSize(batch_size, input_token_num, page_num, reuse_page_num, batch_reuse_info_size, forbid_realloc);
+    ensureTensorSize(batch_size,
+                     pad_fixed_capacity_tokens ? captured_input_token_num : input_token_num,
+                     page_num + dummy_page_num,
+                     reuse_page_num,
+                     batch_reuse_info_size,
+                     forbid_realloc);
 
     // Fill params directly into HOST tensors
     fillParamsInternal(t_prefix_lengths,
@@ -450,6 +520,51 @@ void FlashInferMlaAttnParams::fillParams(torch::Tensor t_prefix_lengths,
                        page_num,
                        reuse_page_num,
                        batch_reuse_info_size);
+
+    if (pad_fixed_capacity_tokens) {
+        auto batch_indice_ptr                 = batch_indice_h.data_ptr<int32_t>();
+        auto page_indice_ptr                  = page_indice_h.data_ptr<int32_t>();
+        auto decode_page_indptr_ptr           = decode_page_indptr_h.data_ptr<int32_t>();
+        auto prefill_ragged_kv_len_indptr_ptr = prefill_ragged_kv_len_indptr_h.data_ptr<int32_t>();
+        auto paged_kv_last_page_len_ptr       = paged_kv_last_page_len_h.data_ptr<int32_t>();
+        auto kvlen_ptr                        = kvlen_h.data_ptr<int32_t>();
+        auto positions_ptr                    = positions_h.data_ptr<int32_t>();
+
+        const int safe_page_size = std::max(seq_size_per_block, 1);
+        int       token_offset   = requested_input_token_num;
+        int       page_offset    = page_num;
+        int       accumulated_kv = prefill_ragged_kv_len_indptr_ptr[padding_batch_begin];
+
+        for (int batch = padding_batch_begin; batch < batch_size; ++batch) {
+            for (int token = 0; token < captured_tokens_per_batch; ++token) {
+                batch_indice_ptr[token_offset] = batch;
+                positions_ptr[token_offset]    = token;
+                ++token_offset;
+            }
+
+            const int pages = (captured_tokens_per_batch + safe_page_size - 1) / safe_page_size;
+            for (int page = 0; page < pages; ++page) {
+                page_indice_ptr[page_offset++] = cuda_graph_metadata.dummy_kv_block_id;
+            }
+
+            kvlen_ptr[batch] = captured_tokens_per_batch;
+            paged_kv_last_page_len_ptr[batch] =
+                (captured_tokens_per_batch - 1) % safe_page_size + 1;
+            decode_page_indptr_ptr[batch + 1] = page_offset;
+            accumulated_kv += captured_tokens_per_batch;
+            prefill_ragged_kv_len_indptr_ptr[batch + 1] = accumulated_kv;
+            // qo_indptr remains unchanged: dummy batches have no query tokens for attention.
+        }
+
+        RTP_LLM_CHECK_WITH_INFO(token_offset == captured_input_token_num,
+                                "fixed-width CUDA graph token padding produced %d tokens, expected %d",
+                                token_offset,
+                                captured_input_token_num);
+        RTP_LLM_CHECK_WITH_INFO(page_offset == page_num + dummy_page_num,
+                                "fixed-width CUDA graph page padding produced an unexpected page count");
+        input_token_num = captured_input_token_num;
+        page_num        = page_offset;
+    }
 
     // Refresh buffer (copy to DEVICE and update shapes)
     refreshBuffer(batch_size, input_token_num, page_num, reuse_page_num, batch_reuse_info_size);
@@ -476,6 +591,12 @@ void FlashInferMlaAttnParams::fillParams(torch::Tensor t_prefix_lengths,
         auto slot_mapping_ptr = slot_mapping_h_.data_ptr<int64_t>();
 
         for (int64_t i = 0; i < input_token_num; ++i) {
+            if (pad_fixed_capacity_tokens && i >= requested_input_token_num) {
+                slot_mapping_ptr[i] = static_cast<int64_t>(cuda_graph_metadata.dummy_kv_block_id)
+                                          * seq_size_per_block
+                                      + positions_ptr[i] % seq_size_per_block;
+                continue;
+            }
             const int32_t batch_id     = batch_indice_ptr[i];
             const int32_t position     = positions_ptr[i];
             const int32_t block_index  = position / seq_size_per_block;
@@ -510,13 +631,15 @@ void registerPyFlashInferMlaParams(pybind11::module& m) {
                torch::Tensor                     input_lengths,
                torch::Tensor                     kv_cache_block_id_host,
                int                               seq_size_per_block,
-               bool                              forbid_realloc) {
+               bool                              forbid_realloc,
+               PyCudaGraphMetadata               cuda_graph_metadata) {
                 self.fillParams(prefix_lengths,
                                 sequence_lengths,
                                 input_lengths,
                                 kv_cache_block_id_host,
                                 seq_size_per_block,
-                                forbid_realloc);
+                                forbid_realloc,
+                                cuda_graph_metadata);
             },
             pybind11::arg("prefix_lengths"),
             pybind11::arg("sequence_lengths"),
@@ -524,6 +647,7 @@ void registerPyFlashInferMlaParams(pybind11::module& m) {
             pybind11::arg("kv_cache_block_id_host"),
             pybind11::arg("seq_size_per_block"),
             pybind11::arg("forbid_realloc") = false,
+            pybind11::arg("cuda_graph_metadata") = PyCudaGraphMetadata{},
             "Fill parameters for attention execution (forbid_realloc=true only when called from prepare_cuda_graph/replay)")
         // HOST tensors (_h suffix)
         .def_readonly("batch_indice_h", &FlashInferMlaAttnParams::batch_indice_h, "Batch indices on HOST")
