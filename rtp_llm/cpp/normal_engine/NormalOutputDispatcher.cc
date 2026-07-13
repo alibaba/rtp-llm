@@ -222,7 +222,6 @@ void NormalOutputDispatcher::dispatchSingleStream(GenerateStreamPtr    stream,
 
     RTP_LLM_LOG_DEBUG("stream [%ld], new_tokens size = [%ld]", stream->streamId(), new_tokens.numel());
 
-    size_t old_token_len = stream->outputTokenLen();
     stream->update({has_beam_search ? batch_new_all_token_ids : new_tokens,
                     1,
                     batch_hidden_states,
@@ -234,22 +233,16 @@ void NormalOutputDispatcher::dispatchSingleStream(GenerateStreamPtr    stream,
                     src_batch_indices,
                     all_hidden_states});
 
-    if (old_token_len == 0 && stream->outputTokenLen() > 0) {
-        auto ti = stream->getTimeInfo();
-        RTP_LLM_ACCESS_LOG_INFO("first_token: %s latency_us=%ld",
-                                stream->streamLogTag().c_str(),
-                                ti.first_token_time_us);
-    }
     if (stream->isFinished() || stream->needFinish()) {
-        auto ti = stream->getTimeInfo();
+        auto    ti     = stream->getTimeInfo();
         int64_t now_us = autil::TimeUtility::currentTimeInMicroSeconds();
-        RTP_LLM_ACCESS_LOG_INFO(
-            "decode_finished: %s output_len=%ld first_token_latency_us=%ld "
-            "total_latency_us=%ld iter_count=%ld",
-            stream->streamLogTag().c_str(), stream->outputTokenLen(),
-            ti.first_token_time_us,
-            ti.begin_time_us > 0 ? (now_us - ti.begin_time_us) : 0,
-            stream->iterCount());
+        RTP_LLM_ACCESS_LOG_INFO("decode_finished: %s output_len=%ld first_token_latency_us=%ld "
+                                "total_latency_us=%ld iter_count=%ld",
+                                stream->streamLogTag().c_str(),
+                                stream->outputTokenLen(),
+                                ti.first_token_time_us,
+                                ti.begin_time_us > 0 ? (now_us - ti.begin_time_us) : 0,
+                                stream->iterCount());
     }
 }
 
