@@ -28,6 +28,11 @@ from rtp_llm.utils.base_model_datatypes import GenerateOutputs
 
 _DEFAULT_MAX_THINKING_TOKENS = 131072
 _DEFAULT_MAX_NEW_TOKENS = 131072
+# DashScope treats non-positive max_completion_tokens as a small fallback
+# completion budget instead of rejecting the request.  This is intentionally
+# different from max_new_tokens, whose non-positive values remain invalid on
+# the native dash-sc path.
+_DEFAULT_MAX_COMPLETION_TOKENS = 16
 
 
 class LLMFinishReason(IntEnum):
@@ -579,15 +584,14 @@ def _parse_stop_words_list_input(request) -> tuple[tuple[int, ...], ...] | None:
 
 def parse_max_new_tokens_for_proxy(request) -> tuple[int, bool]:
     """Read only max-token controls; proxy hot path must not parse grammar."""
-    max_new_tokens, _, _, _ = _parse_max_token_limits(request)
+    max_new_tokens, _, _ = _parse_max_token_limits(request)
     return max_new_tokens, False
 
 
 def _parse_max_token_limits(
     request, ds_attrs: dict[str, Any] | None = None
-) -> tuple[int, bool, int | None, int | None]:
+) -> tuple[int, int | None, int | None]:
     max_new_tokens = _DEFAULT_MAX_NEW_TOKENS
-    max_new_tokens_from_completion_alias = False
     max_total_tokens: int | None = None
     max_completion_tokens: int | None = None
 
@@ -601,8 +605,7 @@ def _parse_max_token_limits(
     if v is None:
         v = _parse_optional_parameter_int(request, "max_completion_tokens")
     if v is not None:
-        max_completion_tokens = v
-        max_new_tokens_from_completion_alias = True
+        max_completion_tokens = v if v > 0 else _DEFAULT_MAX_COMPLETION_TOKENS
 
     if max_completion_tokens is None:
         legacy_max_new_tokens = _parse_optional_scalar_int(request, "max_new_tokens")
@@ -622,7 +625,6 @@ def _parse_max_token_limits(
 
     return (
         max_new_tokens,
-        max_new_tokens_from_completion_alias,
         max_total_tokens,
         max_completion_tokens,
     )
@@ -646,7 +648,6 @@ class SamplingParams:
     """Sampling / generation options from ``request.inputs`` (+ legacy ``top_k`` in ``request.parameters``)."""
 
     max_new_tokens: int = _DEFAULT_MAX_NEW_TOKENS
-    max_new_tokens_from_completion_alias: bool = False
     max_total_tokens: int | None = None
     max_completion_tokens: int | None = None
     num_return_sequences: int = 0
@@ -755,7 +756,6 @@ def parse_sampling_params(
     ds_attrs = ds_attrs if ds_attrs is not None else parse_ds_header_attributes(request)
     (
         max_new_tokens,
-        max_new_tokens_from_completion_alias,
         max_total_tokens,
         max_completion_tokens,
     ) = _parse_max_token_limits(request, ds_attrs)
@@ -820,7 +820,6 @@ def parse_sampling_params(
 
     return SamplingParams(
         max_new_tokens=max_new_tokens,
-        max_new_tokens_from_completion_alias=max_new_tokens_from_completion_alias,
         max_total_tokens=max_total_tokens,
         max_completion_tokens=max_completion_tokens,
         num_return_sequences=num_return_sequences,
@@ -877,12 +876,6 @@ def parse_other_params(request, ds_attrs: dict[str, Any] | None = None) -> Other
         max_new_think_tokens = _parse_optional_parameter_int(
             request, "max_new_think_tokens"
         )
-    if max_new_think_tokens is None:
-        max_new_think_tokens = _parse_optional_int_value(
-            _lookup_ds_request_control(ds_attrs, "thinking_budget")
-        )
-    if max_new_think_tokens is None:
-        max_new_think_tokens = _parse_optional_parameter_int(request, "thinking_budget")
     if max_new_think_tokens is not None:
         max_new_think_tokens = int(max_new_think_tokens)
 
