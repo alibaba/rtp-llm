@@ -400,7 +400,7 @@ public class ZookeeperMasterElectService implements LeaderSelectorListener {
         }
     }
 
-    @Scheduled(fixedRate = 1000)
+    @Scheduled(fixedRate = 2000L)
     private void reportMasterNode() {
         try {
             if (cachedMasterHostIp != null) {
