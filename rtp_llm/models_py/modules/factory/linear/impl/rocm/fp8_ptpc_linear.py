@@ -86,7 +86,8 @@ class RocmFp8PTPCLinear(LinearBase):
         if self._use_swizzleA:
             # Weight is [K, N] COL16_4R16 swizzled from device_impl.py.
             # Keep as-is for hipb_mm(bpreshuffle=True) → Alik/STA Tensile kernel.
-            self.weight = weight
+            # self.weight = weight
+            self.weight = weight.as_strided(weight.shape, (1, weight.shape[0]))
             # Scale: need [1, N] for hipBLASLt rowwise scaleB
             if weight_scales.dim() == 2 and weight_scales.shape[1] == 1:
                 self.weight_scales = weight_scales.T.contiguous()  # [N,1] → [1,N]
