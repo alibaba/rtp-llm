@@ -462,11 +462,78 @@ TEST_F(MtpBatchStreamProcessorTest, testUpdatePrefillPostDraftModelInput) {
     SamplerOutput sampler_output;
     sampler_output.token_ids = torch::tensor({1, -2, 2, 1, 2, 3}, torch::kInt32).reshape({2, 3});
 
-    processor.updatePrefillPostDraftModelInput(model_input, model_output, sampler_output);
+    processor.updatePrefillPostDraftModelInput(stream_groups, model_input, model_output, sampler_output);
 
     auto        combo_tokens        = model_input.combo_tokens;
     vector<int> expect_combo_tokens = {2, 2, 3};
     EXPECT_EQ(expect_combo_tokens, toVec<int>(combo_tokens));
+}
+TEST_F(MtpBatchStreamProcessorTest, testUpdatePrefillPostDraftModelInputShiftsComboPositionIds) {
+    ModelConfig                 model_config;
+    PDSepConfig                 pd_sep_config;
+    ProfilingDebugLoggingConfig profiling_debug_logging_config;
+    CacheConfig                 cache_config;
+    SpeculativeExecutionConfig  sp_config;
+    model_config.max_seq_len                          = 2048;
+    model_config.vocab_size                           = 4;
+    model_config.num_layers                           = 1;
+    model_config.mm_model_config.mm_position_ids_style = MROPE;
+    model_config.attn_config.rope_config.index_factor  = 3;
+    sp_config.gen_num_per_cycle                       = 2;
+    cache_config.group_types                          = {CacheGroupType::FULL};
+    MtpBatchStreamProcessor processor(
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
+    RuntimeConfig   runtime_config;
+    ResourceContext resource_context;
+    auto            stream1 = createContextStream(model_config, runtime_config, resource_context, {1, 2}, 1);
+    auto            stream2 = createContextStream(model_config, runtime_config, resource_context, {1, 2, 3}, 2);
+    stream1->setContextPositionIds(torch::tensor({100, 101, 102, 110, 111, 112}, torch::kInt32));
+    stream2->setContextPositionIds(
+        torch::tensor({200, 201, 202, 210, 211, 212, 220, 221, 222}, torch::kInt32));
+    auto stream_groups = StreamGroups({stream1, stream2});
+    GptModelInputs model_input;
+    model_input.input_lengths      = torch::tensor({2, 3}, torch::kInt32);
+    model_input.combo_tokens       = torch::tensor({10, 11, 20, 21, 22}, torch::kInt32);
+    model_input.combo_position_ids = torch::tensor({100,
+                                                    101,
+                                                    102,
+                                                    110,
+                                                    111,
+                                                    112,
+                                                    200,
+                                                    201,
+                                                    202,
+                                                    210,
+                                                    211,
+                                                    212,
+                                                    220,
+                                                    221,
+                                                    222},
+                                                   torch::kInt32);
+    GptModelOutputs model_output;
+    model_output.all_hidden_states =
+        torch::tensor({0.1f, 0.2f, 0.3f, 0.4f, 0.5f, 0.6f, 0.7f, 0.8f, 0.9f, 1.0f}, torch::kFloat32)
+            .reshape({5, 2});
+    SamplerOutput sampler_output;
+    sampler_output.token_ids = torch::tensor({1, -2, 12, 1, 2, 23}, torch::kInt32).reshape({2, 3});
+    processor.updatePrefillPostDraftModelInput(stream_groups, model_input, model_output, sampler_output);
+    EXPECT_EQ((vector<int>{11, 12, 21, 22, 23}), toVec<int>(model_input.combo_tokens));
+    EXPECT_EQ((vector<int>{110,
+                           111,
+                           112,
+                           112,
+                           112,
+                           112,
+                           210,
+                           211,
+                           212,
+                           220,
+                           221,
+                           222,
+                           222,
+                           222,
+                           222}),
+              toVec<int>(model_input.combo_position_ids));
 }
 
 TEST_F(MtpBatchStreamProcessorTest, testUpdateDecodePostDraftModelInput) {
@@ -542,6 +609,160 @@ TEST_F(MtpBatchStreamProcessorTest, testUpdateDecodePostDraftModelInput) {
     auto          last_hidden_states        = model_input.last_hidden_states;
     vector<float> expect_last_hidden_states = {0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 1.1, 1.2};
     EXPECT_EQ(expect_last_hidden_states, toVec<float>(last_hidden_states));
+}
+
+TEST_F(MtpBatchStreamProcessorTest, testUpdateDecodePostDraftModelInputCompactsComboPositionIds) {
+    ModelConfig                 model_config;
+    RuntimeConfig               runtime_config;
+    SpeculativeExecutionConfig  sp_config;
+    PDSepConfig                 pd_sep_config;
+    ProfilingDebugLoggingConfig profiling_debug_logging_config;
+    CacheConfig                 cache_config;
+
+    model_config.max_seq_len                          = 2048;
+    model_config.vocab_size                           = 4;
+    model_config.num_layers                           = 1;
+    model_config.mm_model_config.mm_position_ids_style = MROPE;
+    model_config.attn_config.rope_config.index_factor  = 3;
+    sp_config.gen_num_per_cycle                       = 2;
+
+    auto kv_cache_config = test::makeSimpleMhaCacheConfig(/*layer_num=*/1,
+                                                          /*block_num=*/10,
+                                                          /*tokens_per_block=*/2,
+                                                          rtp_llm::TYPE_INT8,
+                                                          /*local_head_num_kv=*/128,
+                                                          /*size_per_head=*/256);
+    auto cache_manager   = std::make_shared<KVCacheManager>(kv_cache_config,
+
+                                                          /*warmup=*/false,
+                                                          /*metrics_reporter=*/nullptr,
+                                                          KVCacheConfig{},
+                                                          ParallelismConfig{},
+                                                          runtime_config);
+    ASSERT_TRUE(cache_manager->init());
+    ResourceContext resource_context;
+    resource_context.cache_manager = cache_manager;
+
+    GenerateStreamPtr stream1 = createContextStream(model_config, runtime_config, resource_context, {1}, 1);
+    GenerateStreamPtr stream2 = createContextStream(model_config, runtime_config, resource_context, {1, 2}, 2);
+    GenerateStreamPtr stream3 = createContextStream(model_config, runtime_config, resource_context, {1, 2, 3}, 3);
+
+    auto stream_groups = StreamGroups({stream1, stream2, stream3});
+
+    cache_config.group_types = {CacheGroupType::FULL};
+    auto processor           = MtpBatchStreamProcessor(
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
+    auto model_input_status = processor.gatherModelInput(stream_groups);
+    EXPECT_TRUE(model_input_status.ok());
+
+    auto& model_input = model_input_status.value();
+    model_input.combo_position_ids =
+        torch::tensor({10,  11,  12,  20,  21,  22,  30,  31,  32,  40,  41,  42,  50,  51,
+                       52,  60,  61,  62,  70,  71,  72,  80,  81,  82,  90,  91,  92},
+                      torch::kInt32);
+
+    speculative::SpeculativeSamplerOutput spec_decode_output;
+    spec_decode_output.accept_len    = {3, 2, 1};
+    spec_decode_output.accept_tokens = {torch::tensor({{2, 3, 1}}, torch::kInt32),
+                                        torch::tensor({{2, 3}}, torch::kInt32),
+                                        torch::tensor({{2}}, torch::kInt32)};
+
+    torch::Tensor hidden_states_d_t;
+    size_t        total_accept_len;
+
+    GptModelOutputs model_output;
+    model_output.all_hidden_states = torch::tensor({0.1f,
+                                                    0.2f,
+                                                    0.3f,
+                                                    0.4f,
+                                                    0.5f,
+                                                    0.6f,
+                                                    1.1f,
+                                                    1.2f,
+                                                    1.3f,
+                                                    1.4f,
+                                                    1.5f,
+                                                    1.6f,
+                                                    2.1f,
+                                                    2.2f,
+                                                    2.3f,
+                                                    2.4f,
+                                                    2.5f,
+                                                    2.6f},
+                                                   torch::kFloat32)
+                                        .reshape({9, 2});
+
+    processor.updateDecodePostDraftModelInput(
+        model_input, model_output, spec_decode_output, 3, hidden_states_d_t, total_accept_len);
+
+    auto        combo_position_ids        = model_input.combo_position_ids;
+    vector<int> expect_combo_position_ids = {10, 11, 12, 20, 21, 22, 30, 31, 32,
+                                             40, 41, 42, 50, 51, 52, 70, 71, 72};
+    EXPECT_EQ(expect_combo_position_ids, toVec<int>(combo_position_ids));
+}
+
+TEST_F(MtpBatchStreamProcessorTest, testUpdateDecodeDraftModelInputAdvancesComboPositionIds) {
+    ModelConfig                 model_config;
+    PDSepConfig                 pd_sep_config;
+    ProfilingDebugLoggingConfig profiling_debug_logging_config;
+    CacheConfig                 cache_config;
+    SpeculativeExecutionConfig  sp_config;
+
+    model_config.max_seq_len                          = 2048;
+    model_config.vocab_size                           = 4;
+    model_config.num_layers                           = 1;
+    model_config.mm_model_config.mm_position_ids_style = MROPE;
+    model_config.attn_config.rope_config.index_factor  = 3;
+    sp_config.gen_num_per_cycle                       = 2;
+    cache_config.group_types                          = {CacheGroupType::FULL};
+
+    MtpBatchStreamProcessor processor(
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
+
+    GptModelInputs model_input;
+    model_input.combo_tokens       = torch::tensor({11, 21}, torch::kInt32);
+    model_input.sequence_lengths   = torch::tensor({5, 7}, torch::kInt32);
+    model_input.combo_position_ids = torch::tensor({5, 6, 7, 10, 11, 12}, torch::kInt32);
+
+    GptModelOutputs model_output;
+    model_output.all_hidden_states = torch::tensor({0.1f, 0.2f, 1.1f, 1.2f}, torch::kFloat32).reshape({2, 2});
+    auto draft_token_ids           = torch::tensor({12, 22}, torch::kInt32).reshape({2, 1});
+
+    processor.updateDecodeDraftModelInput(model_input, model_output, draft_token_ids);
+
+    EXPECT_EQ((vector<int>{12, 22}), toVec<int>(model_input.combo_tokens));
+    EXPECT_EQ((vector<int>{6, 8}), toVec<int>(model_input.sequence_lengths));
+    EXPECT_EQ((vector<float>{0.1, 0.2, 1.1, 1.2}), toVec<float>(model_input.last_hidden_states));
+    EXPECT_EQ((vector<int>{6, 7, 8, 11, 12, 13}), toVec<int>(model_input.combo_position_ids));
+}
+
+TEST_F(MtpBatchStreamProcessorTest, testExpandTargetVerifyPositionIdsInitializesNonDriverPlaceholder) {
+    ModelConfig                 model_config;
+    PDSepConfig                 pd_sep_config;
+    ProfilingDebugLoggingConfig profiling_debug_logging_config;
+    CacheConfig                 cache_config;
+    SpeculativeExecutionConfig  sp_config;
+
+    model_config.max_seq_len                          = 2048;
+    model_config.vocab_size                           = 4;
+    model_config.num_layers                           = 1;
+    model_config.mm_model_config.mm_position_ids_style = MROPE;
+    model_config.attn_config.rope_config.index_factor  = 3;
+    sp_config.gen_num_per_cycle                       = 2;
+    cache_config.group_types                          = {CacheGroupType::FULL};
+
+    MtpBatchStreamProcessor processor(
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
+
+    GptModelInputs model_input;
+    model_input.combo_position_ids = torch::tensor({5, 6, 7, 10, 11, 12}, torch::kInt32);
+    auto empty_stream_groups       = StreamGroups(std::list<GenerateStreamPtr>{});
+
+    processor.expandTargetVerifyPositionIds(empty_stream_groups, model_input);
+
+    EXPECT_EQ(18, model_input.combo_position_ids.numel());
+    EXPECT_EQ((vector<int>{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}),
+              toVec<int>(model_input.combo_position_ids));
 }
 
 TEST_F(MtpBatchStreamProcessorTest, testUpdateOneStepDraftSamplerOutput) {
