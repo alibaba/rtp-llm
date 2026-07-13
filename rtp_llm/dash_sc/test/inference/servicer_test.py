@@ -349,6 +349,51 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
             access_agg.backend_error_code, "8400_MASTER_NO_AVAILABLE_WORKER"
         )
 
+    async def test_mm_exceptions_yield_parameter_error(self) -> None:
+        req = self._minimal_request()
+
+        class _BoomVisitor:
+            def __init__(self, exception_type):
+                self.exception_type = exception_type
+
+            async def enqueue(self, _gi):
+                raise FtRuntimeException(self.exception_type, "multimodal input failed")
+
+        class _AccessAgg:
+            backend_error_code = None
+
+        exception_types = (
+            ExceptionType.MM_LONG_PROMPT_ERROR,
+            ExceptionType.MM_WRONG_FORMAT_ERROR,
+            ExceptionType.MM_PROCESS_ERROR,
+            ExceptionType.MM_EMPTY_ENGINE_ERROR,
+            ExceptionType.MM_NOT_SUPPORTED_ERROR,
+            ExceptionType.MM_DOWNLOAD_FAILED,
+        )
+        for exception_type in exception_types:
+            with self.subTest(exception_type=exception_type):
+                access_agg = _AccessAgg()
+                chunks = await _drain(
+                    iter_real_model_stream_infer(
+                        req,
+                        [1, 2],
+                        SamplingParams(),
+                        OtherParams(),
+                        _BoomVisitor(exception_type),
+                        rtp_llm_request_id=1,
+                        access_agg=access_agg,
+                    )
+                )
+
+                self.assertEqual(len(chunks), 1)
+                _assert_parameter_error_response(
+                    self, chunks[0], "multimodal input failed"
+                )
+                self.assertEqual(
+                    access_agg.backend_error_code,
+                    f"{int(exception_type)}_{exception_type.name}",
+                )
+
     async def test_stream_exception_yields_error_message(self) -> None:
         req = self._minimal_request()
         visitor = _FakeVisitor(_FakeAsyncStream([], raise_after=0))

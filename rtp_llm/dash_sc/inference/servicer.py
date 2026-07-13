@@ -1195,6 +1195,14 @@ async def iter_real_model_stream_infer(
             yield predict_v2_pb2.ModelStreamInferResponse(
                 error_message=f"DataInspectionFailed: {e.message}"
             )
+        elif (
+            ExceptionType.MM_LONG_PROMPT_ERROR
+            <= e.exception_type
+            <= ExceptionType.MM_DOWNLOAD_FAILED
+        ):
+            _set_access_backend_error_code(access_agg, e)
+            logging.warning("[DashScGrpc] [%s] mm input error: %s", tag, e)
+            yield build_parameter_error_response(str(request.id), e.message)
         else:
             _set_access_backend_error_code(access_agg, e)
             logging.exception("[DashScGrpc] [%s] engine error: %s", tag, e)

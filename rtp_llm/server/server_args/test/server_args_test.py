@@ -35,6 +35,8 @@ class ServerArgsSetTest(TestCase):
         os.environ["MAX_SEQ_LEN"] = "4096"
         os.environ["REMOTE_JIT_READ_DIR"] = "dfs://bucket/jit/baseline"
         os.environ["WARM_UP_JIT_AND_WRITE_REMOTE"] = "dfs://bucket/jit/writer"
+        os.environ["MM_IMAGE_MIN_DIMENSION"] = "12"
+        os.environ["MM_IMAGE_MAX_ASPECT_RATIO"] = "150.5"
 
         sys.argv = ["prog"]
 
@@ -79,6 +81,8 @@ class ServerArgsSetTest(TestCase):
             py_env_configs.jit_config.warm_up_jit_and_write_remote,
             "dfs://bucket/jit/writer",
         )
+        self.assertEqual(py_env_configs.vit_config.mm_image_min_dimension, 12)
+        self.assertEqual(py_env_configs.vit_config.mm_image_max_aspect_ratio, 150.5)
 
     def test_cmd_args_set_to_py_env_configs(self):
         """Test that command line arguments are correctly set to py_env_configs."""

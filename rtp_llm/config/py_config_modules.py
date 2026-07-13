@@ -240,6 +240,11 @@ class VitConfig:
     # shared by the --mm_timeout_ms / MM_TIMEOUT_MS server arg and the
     # MMScheduler fallback so the three never drift.
     DEFAULT_MM_TIMEOUT_MS: int = 120000
+    DEFAULT_MM_IMAGE_MAX_FILE_SIZE_KB: int = 100 * 1024
+    DEFAULT_MM_VIDEO_MAX_FILE_SIZE_KB: int = 2 * 1024 * 1024
+    DEFAULT_MM_IMAGE_MIN_DIMENSION: int = 10
+    DEFAULT_MM_IMAGE_MAX_ASPECT_RATIO: float = 200.0
+    DEFAULT_MM_VIDEO_MAX_FRAMES: int = 64
 
     def __init__(self):
         self.vit_separation: VitSeparation = VitSeparation.VIT_SEPARATION_LOCAL
@@ -247,6 +252,17 @@ class VitConfig:
         self.trt_cache_enabled: int = 0
         self.trt_cache_path: Optional[str] = None
         self.download_headers: str = ""
+        self.mm_image_max_file_size_kb: int = (
+            VitConfig.DEFAULT_MM_IMAGE_MAX_FILE_SIZE_KB
+        )
+        self.mm_video_max_file_size_kb: int = (
+            VitConfig.DEFAULT_MM_VIDEO_MAX_FILE_SIZE_KB
+        )
+        self.mm_image_min_dimension: int = VitConfig.DEFAULT_MM_IMAGE_MIN_DIMENSION
+        self.mm_image_max_aspect_ratio: float = (
+            VitConfig.DEFAULT_MM_IMAGE_MAX_ASPECT_RATIO
+        )
+        self.mm_video_max_frames: int = VitConfig.DEFAULT_MM_VIDEO_MAX_FRAMES
         self.mm_cache_item_num: int = 10
         self.url_cache_item_num: int = 100
         self.use_igraph_cache: bool = True
@@ -270,7 +286,9 @@ class VitConfig:
         self.mm_rdma_enable: bool = False
         self.mm_rdma_bind_ip: str = ""
         self.mm_rdma_port: int = 0
-        self.mm_rdma_min_bytes: int = 256 * 1024  # encoder-side RDMA/bytes threshold (Python only)
+        self.mm_rdma_min_bytes: int = (
+            256 * 1024
+        )  # encoder-side RDMA/bytes threshold (Python only)
         self.mm_rdma_connect_timeout_ms: int = 250
         self.mm_rdma_read_timeout_ms: int = 30 * 1000
         self.mm_rdma_release_timeout_ms: int = 1000
@@ -312,6 +330,11 @@ class VitConfig:
             f"trt_cache_enabled: {self.trt_cache_enabled}\n"
             f"trt_cache_path: {self.trt_cache_path}\n"
             f"download_headers: {self.download_headers}\n"
+            f"mm_image_max_file_size_kb: {self.mm_image_max_file_size_kb}\n"
+            f"mm_video_max_file_size_kb: {self.mm_video_max_file_size_kb}\n"
+            f"mm_image_min_dimension: {self.mm_image_min_dimension}\n"
+            f"mm_image_max_aspect_ratio: {self.mm_image_max_aspect_ratio}\n"
+            f"mm_video_max_frames: {self.mm_video_max_frames}\n"
             f"mm_cache_item_num: {self.mm_cache_item_num}\n"
             f"url_cache_item_num: {self.url_cache_item_num}\n"
             f"use_igraph_cache: {self.use_igraph_cache}\n"

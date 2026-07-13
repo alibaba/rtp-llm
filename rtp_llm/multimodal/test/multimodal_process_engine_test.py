@@ -1,10 +1,15 @@
 import asyncio
 import concurrent.futures
+import io
 import os
+import sys
 import threading
 import time
+import types
+from types import SimpleNamespace
 from typing import List
 from unittest import TestCase, main
+from unittest.mock import patch
 
 import PIL
 import pillow_avif
@@ -28,6 +33,7 @@ from rtp_llm.multimodal.greennet_hook import (
     GreenNetProvider,
     GreenNetVerdict,
 )
+from rtp_llm.multimodal.mm_error_messages import MMErr
 from rtp_llm.multimodal.mm_process_engine import (
     MMEmbeddingAsyncCache,
     MMEmbeddingCacheEntry,
@@ -919,6 +925,177 @@ class MMProcessEngineGpuBatchTest(TestCase):
         self.assertEqual(r2.embeddings[0].item(), 7)
         self.assertEqual(part.embedding_calls, 1)
 
+
+class MiniMaxM3VLPreprocessTest(TestCase):
+    def assert_mm_error(self, callable_, message):
+        with self.assertRaises(FtRuntimeException) as context:
+            callable_()
+        self.assertEqual(
+            context.exception.exception_type, ExceptionType.MM_WRONG_FORMAT_ERROR
+        )
+        self.assertEqual(context.exception.message, message)
+
+    def test_default_file_size_limits(self):
+        config = VitConfig()
+        self.assertEqual(config.mm_image_max_file_size_kb, 100 * 1024)
+        self.assertEqual(config.mm_video_max_file_size_kb, 2 * 1024 * 1024)
+        self.assertEqual(config.mm_image_min_dimension, 10)
+        self.assertEqual(config.mm_image_max_aspect_ratio, 200.0)
+
+    def test_image_open_error(self):
+        from rtp_llm.multimodal.multimodal_mixins.minimax_m3_vl.minimax_m3_vl_mixin import (
+            MiniMaxM3VLImageEmbedding,
+        )
+
+        mm_input = SimpleNamespace(url="invalid-image")
+        config = VitConfig()
+        with patch(
+            "rtp_llm.multimodal.multimodal_mixins.minimax_m3_vl."
+            "minimax_m3_vl_mixin.get_bytes_io_from_url",
+            return_value=io.BytesIO(b"not an image"),
+        ):
+            self.assert_mm_error(
+                lambda: MiniMaxM3VLImageEmbedding._preprocess_image(
+                    mm_input, config, SimpleNamespace()
+                ),
+                MMErr.IMG_OPEN,
+            )
+
+    def test_image_dimension_errors(self):
+        from rtp_llm.multimodal.multimodal_mixins.minimax_m3_vl.image_processor import (
+            smart_resize,
+        )
+
+        self.assert_mm_error(
+            lambda: smart_resize(9, 100),
+            MMErr.IMG_HW.format("height:9 or width:100 must be larger than 10"),
+        )
+        self.assert_mm_error(
+            lambda: smart_resize(100, 100, max_pixels=1),
+            MMErr.IMG_TOO_SMALL,
+        )
+
+    def test_image_dimension_limits_are_configurable(self):
+        from rtp_llm.multimodal.multimodal_mixins.minimax_m3_vl.image_processor import (
+            smart_resize,
+        )
+
+        self.assert_mm_error(
+            lambda: smart_resize(19, 100, min_image_dimension=20),
+            MMErr.IMG_HW.format("height:19 or width:100 must be larger than 20"),
+        )
+        self.assert_mm_error(
+            lambda: smart_resize(20, 100, max_image_aspect_ratio=4),
+            MMErr.IMG_HW.format(
+                "absolute aspect ratio must be smaller than 4, got 20 / 100"
+            ),
+        )
+
+    def _run_video_preprocess(
+        self,
+        *,
+        total_frames,
+        video_fps,
+        requested_fps=0,
+        video_reader_error=None,
+        configured_max_frames=64,
+    ):
+        from rtp_llm.multimodal.multimodal_mixins.minimax_m3_vl.minimax_m3_vl_mixin import (
+            MiniMaxM3VLImageEmbedding,
+        )
+
+        captured = {}
+
+        class _VideoReader:
+            def __init__(self, _data):
+                if video_reader_error is not None:
+                    raise video_reader_error
+
+            def __len__(self):
+                return total_frames
+
+            def get_avg_fps(self):
+                return video_fps
+
+            def get_batch(self, indices):
+                captured["indices"] = list(indices)
+                return torch.zeros(
+                    (len(indices), 28, 28, 3),
+                    dtype=torch.uint8,
+                )
+
+        decord = types.ModuleType("decord")
+        decord.VideoReader = _VideoReader
+        decord.bridge = SimpleNamespace(set_bridge=lambda _name: None)
+
+        mm_input = SimpleNamespace(
+            url="video",
+            mm_preprocess_config=SimpleNamespace(
+                fps=requested_fps,
+                max_frames=0,
+            ),
+        )
+        config = VitConfig()
+        config.mm_video_max_frames = configured_max_frames
+        processor = SimpleNamespace(patch_size=14, max_pixels=451584)
+        tokenizer = SimpleNamespace(encode=lambda *_args, **_kwargs: [1])
+
+        with patch.dict(sys.modules, {"decord": decord}), patch(
+            "rtp_llm.multimodal.multimodal_mixins.minimax_m3_vl."
+            "minimax_m3_vl_mixin.get_bytes_io_from_url",
+            return_value=io.BytesIO(b"video"),
+        ):
+            result = MiniMaxM3VLImageEmbedding._preprocess_video(
+                mm_input,
+                config,
+                processor,
+                tokenizer,
+                video_fps=1.0,
+                video_max_frames=768,
+                merge_size=2,
+                temporal_patch_size=2,
+            )
+        return result, captured
+
+    def test_invalid_video(self):
+        self.assert_mm_error(
+            lambda: self._run_video_preprocess(
+                total_frames=0,
+                video_fps=0,
+                video_reader_error=OSError("invalid"),
+            ),
+            MMErr.VIDEO_INVALID,
+        )
+
+    def test_video_duration_is_not_rejected(self):
+        for total_frames in (30, 1500):
+            with self.subTest(total_frames=total_frames):
+                result, captured = self._run_video_preprocess(
+                    total_frames=total_frames, video_fps=30
+                )
+                frames, _, _ = result
+                self.assertGreater(frames.shape[0], 0)
+                self.assertGreater(len(captured["indices"]), 0)
+
+    def test_video_sampling_is_capped_at_64_frames(self):
+        result, captured = self._run_video_preprocess(
+            total_frames=1200,
+            video_fps=30,
+            requested_fps=30,
+        )
+        frames, _, timestamps = result
+        self.assertEqual(len(captured["indices"]), 64)
+        self.assertEqual(frames.shape[0], 64)
+        self.assertEqual(len(timestamps), 32)
+
+    def test_video_sampling_supports_single_frame_limit(self):
+        _, captured = self._run_video_preprocess(
+            total_frames=1200,
+            video_fps=30,
+            requested_fps=30,
+            configured_max_frames=1,
+        )
+        self.assertEqual(captured["indices"], [0])
 
 
 if __name__ == "__main__":
