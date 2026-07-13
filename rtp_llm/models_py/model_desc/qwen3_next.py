@@ -1,4 +1,5 @@
 import logging
+import os
 import sys
 from typing import Any, Dict, Optional
 
@@ -37,6 +38,7 @@ from rtp_llm.models_py.triton_kernels.fla.block import (
 from rtp_llm.models_py.triton_kernels.fla.chunk import chunk_gated_delta_rule
 from rtp_llm.models_py.triton_kernels.fla.fused_recurrent import (
     fused_recurrent_gated_delta_rule,
+    fused_recurrent_gated_delta_rule_decode_ref,
 )
 from rtp_llm.models_py.triton_kernels.fla.gdn_gating import fused_gdn_gating
 from rtp_llm.models_py.utils.debug import cudagraph_debug_kernel
@@ -56,6 +58,13 @@ from rtp_llm.ops.compute_ops import (
 from rtp_llm.utils.model_weight import W
 from rtp_llm.utils.swizzle_utils import should_swizzle_linear_attn_ba
 from rtp_llm.utils.util import to_torch_dtype
+
+
+def _env_flag(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in ("1", "true", "yes", "on")
+
+
+_Q3N_FLA_DECODE_REF = _env_flag("RTPLLM_QWEN3_NEXT_FLA_REF")
 
 
 class Qwen3NextMetadata(object):
@@ -394,7 +403,12 @@ class Qwen3NextGatedDeltaNetDecode(Qwen3NextGatedDeltaNetBase):
         g = g.view(batch, seq, self.local_num_v_heads)
         beta = beta.view(batch, seq, self.local_num_v_heads)
         ssm_states = self._get_ssm_states(kv_cache_tensor)
-        core_attn_out, _ = fused_recurrent_gated_delta_rule(
+        recurrent = (
+            fused_recurrent_gated_delta_rule_decode_ref
+            if _Q3N_FLA_DECODE_REF
+            else fused_recurrent_gated_delta_rule
+        )
+        core_attn_out, _ = recurrent(
             q=query,
             k=key,
             v=value,
