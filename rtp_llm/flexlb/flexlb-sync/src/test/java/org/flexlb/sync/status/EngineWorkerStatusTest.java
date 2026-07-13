@@ -144,4 +144,78 @@ class EngineWorkerStatusTest {
 
         EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getVitStatusMap().clear();
     }
+
+    @Test
+    void should_exclude_null_group_worker_when_group_specified() {
+        // Given - worker1 has group "groupA", worker2 has no group (null)
+        String ipPort1 = "127.0.0.1:8080";
+        String ipPort2 = "127.0.0.1:8081";
+
+        WorkerStatus ws1 = new WorkerStatus();
+        ws1.setGroup("groupA");
+        ws1.setIp("127.0.0.1");
+        ws1.setPort(8080);
+        ws1.setGrpcPort(9090);
+
+        WorkerStatus ws2 = new WorkerStatus();
+        // ws2 group left as null (not set)
+        ws2.setIp("127.0.0.1");
+        ws2.setPort(8081);
+        ws2.setGrpcPort(9091);
+
+        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap().clear();
+        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap().put(ipPort1, ws1);
+        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap().put(ipPort2, ws2);
+
+        registry.ensureDecodeEndpoint(ipPort1, ws1);
+        registry.ensureDecodeEndpoint(ipPort2, ws2);
+
+        // When - select with group "groupA"
+        var result = engineWorkerStatus.selectModelWorkerStatus(RoleType.DECODE, "groupA");
+
+        // Then - only worker1 should be returned, worker2 (null group) should be excluded
+        assertNotNull(result);
+        assertEquals(1, result.size());
+        assertTrue(result.containsKey(ipPort1));
+        assertFalse(result.containsKey(ipPort2));
+
+        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap().clear();
+    }
+
+    @Test
+    void should_include_all_workers_when_group_is_null() {
+        // Given - worker1 has group "groupA", worker2 has no group (null)
+        String ipPort1 = "127.0.0.1:8080";
+        String ipPort2 = "127.0.0.1:8081";
+
+        WorkerStatus ws1 = new WorkerStatus();
+        ws1.setGroup("groupA");
+        ws1.setIp("127.0.0.1");
+        ws1.setPort(8080);
+        ws1.setGrpcPort(9090);
+
+        WorkerStatus ws2 = new WorkerStatus();
+        // ws2 group left as null (not set)
+        ws2.setIp("127.0.0.1");
+        ws2.setPort(8081);
+        ws2.setGrpcPort(9091);
+
+        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap().clear();
+        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap().put(ipPort1, ws1);
+        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap().put(ipPort2, ws2);
+
+        registry.ensureDecodeEndpoint(ipPort1, ws1);
+        registry.ensureDecodeEndpoint(ipPort2, ws2);
+
+        // When - select with group null (no group constraint)
+        var result = engineWorkerStatus.selectModelWorkerStatus(RoleType.DECODE, null);
+
+        // Then - both workers should be returned
+        assertNotNull(result);
+        assertEquals(2, result.size());
+        assertTrue(result.containsKey(ipPort1));
+        assertTrue(result.containsKey(ipPort2));
+
+        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap().clear();
+    }
 }

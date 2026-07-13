@@ -197,9 +197,6 @@ bool FIFOScheduler::canAdmitUnit(size_t              admitted_count,
     if (admitted_count + unit.size() > max_generate_batch_size_) {
         return false;
     }
-    if (unit.isGroup()) {
-        return true;
-    }
     size_t unit_tokens = 0;
     for (const auto& s : unit.streams) {
         unit_tokens += s->contextLength();
@@ -234,6 +231,20 @@ void FIFOScheduler::admitWaitingUnits() {
             }
         }
         if (!canAdmitUnit(admitted_count, admitted_total_tokens, running_count, unit)) {
+            // Fast-fail: group whose own tokens exceed the cap can never be admitted
+            if (unit.isGroup()) {
+                size_t group_tokens = 0;
+                for (const auto& s : unit.streams) {
+                    group_tokens += s->contextLength();
+                }
+                if (group_tokens >= max_batch_tokens_size_) {
+                    for (auto& s : unit.streams) {
+                        s->reportError(ErrorCode::GENERATE_TIMEOUT, "group total tokens exceed max_batch_tokens_size");
+                    }
+                    it = waiting_.erase(it);
+                    continue;
+                }
+            }
             ++it;
             continue;
         }
@@ -257,10 +268,11 @@ void FIFOScheduler::admitWaitingUnits() {
                 for (auto& s : unit.streams) {
                     if (s->isContextStream()) {
                         RTP_LLM_ACCESS_LOG_INFO("request_activated: %s role=prefill input_len=%d",
-                                                s->streamLogTag().c_str(), s->inputLength());
+                                                s->streamLogTag().c_str(),
+                                                s->inputLength());
                     } else {
-                        RTP_LLM_ACCESS_LOG_INFO("request_activated: %s role=decode seq_len=%d",
-                                                s->streamLogTag().c_str(), s->seqLength());
+                        RTP_LLM_ACCESS_LOG_INFO(
+                            "request_activated: %s role=decode seq_len=%d", s->streamLogTag().c_str(), s->seqLength());
                     }
                     accountBatchMetrics(s);
                 }
@@ -288,7 +300,8 @@ absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule() {
             for (auto& s : it->streams) {
                 RTP_LLM_ACCESS_LOG_INFO("request_finished: %s output_len=%ld iter_count=%ld",
                                         s->streamLogTag().c_str(),
-                                        s->outputTokenLen(), s->iterCount());
+                                        s->outputTokenLen(),
+                                        s->iterCount());
             }
             it = running_.erase(it);
         } else {
@@ -303,7 +316,7 @@ absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule() {
     //    Use activated_count to track streams moved to running in this cycle,
     //    so the batch size check accounts for previously activated units.
     //    Similarly, accumulate admitted_total_tokens for token budget checking
-    //    (relevant for PREFILL non-group units with prefix caching).
+    //    (relevant for PREFILL units with prefix caching).
     size_t running_at_step2      = countStreams(running_);
     size_t activated_count       = 0;
     size_t admitted_total_tokens = 0;
@@ -319,10 +332,11 @@ absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule() {
                 for (auto& s : it->streams) {
                     if (s->isContextStream()) {
                         RTP_LLM_ACCESS_LOG_INFO("request_activated: %s role=prefill input_len=%d",
-                                                s->streamLogTag().c_str(), s->inputLength());
+                                                s->streamLogTag().c_str(),
+                                                s->inputLength());
                     } else {
-                        RTP_LLM_ACCESS_LOG_INFO("request_activated: %s role=decode seq_len=%d",
-                                                s->streamLogTag().c_str(), s->seqLength());
+                        RTP_LLM_ACCESS_LOG_INFO(
+                            "request_activated: %s role=decode seq_len=%d", s->streamLogTag().c_str(), s->seqLength());
                     }
                     admitted_total_tokens += s->contextLength();
                     accountBatchMetrics(s);

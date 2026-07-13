@@ -10,6 +10,7 @@ import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.ServerStatus;
+import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
@@ -300,7 +301,7 @@ class CostBasedDecodeStrategyTest {
     }
 
     @Test
-    void should_fallback_to_least_used_when_all_workers_filtered() {
+    void should_return_error_when_all_workers_kv_insufficient() {
         Map<String, WorkerStatus> decodeMap = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap();
 
         WorkerStatus worker1 = createWorkerStatus("127.0.0.1");
@@ -333,7 +334,7 @@ class CostBasedDecodeStrategyTest {
 
         ServerStatus status = costBasedDecodeStrategy.select(balanceContext, RoleType.DECODE, null);
 
-        Assertions.assertTrue(status.isSuccess());
-        Assertions.assertEquals("127.0.0.2", status.getServerIp());
+        Assertions.assertFalse(status.isSuccess());
+        Assertions.assertEquals(StrategyErrorType.NO_AVAILABLE_WORKER.getErrorCode(), status.getCode());
     }
 }

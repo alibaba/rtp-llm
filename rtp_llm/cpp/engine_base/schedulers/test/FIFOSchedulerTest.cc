@@ -604,6 +604,44 @@ TEST_F(FIFOSchedulerTest, groupIsolation_size2) {
     }
 }
 
+TEST_F(FIFOSchedulerTest, groupTokenCapExceeded) {
+    CacheConfig                     cache_config  = makeMhaCacheConfig(1, 21, 1, 4, 8, rtp_llm::DataType::TYPE_FP16);
+    std::shared_ptr<KVCacheManager> cache_manager = std::make_shared<KVCacheManager>(cache_config);
+    ASSERT_TRUE(cache_manager->init());
+    ResourceContext resource_context;
+    resource_context.cache_manager = cache_manager;
+
+    ModelConfig model_config;
+    model_config.max_seq_len = 8192;
+    RuntimeConfig runtime_config;
+    runtime_config.max_generate_batch_size                     = 100;
+    runtime_config.fifo_scheduler_config.max_batch_tokens_size = 100;
+    PDSepConfig         pd_sep_config;
+    ParallelismConfig   parallelism_config;
+    ModelSpecificConfig model_specific_config;
+    FIFOScheduler       scheduler(
+        runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager);
+
+    // Each stream has 60 tokens; group total = 120 > max_batch_tokens_size (100)
+    std::vector<int>          tokens(60, 1);
+    vector<GenerateStreamPtr> streams = {
+        makeGroupedStream(100, 2, model_config, runtime_config, resource_context, tokens),
+        makeGroupedStream(100, 2, model_config, runtime_config, resource_context, tokens),
+    };
+    scheduler.enqueueGroup(streams);
+
+    auto result = scheduler.schedule();
+    ASSERT_TRUE(result.ok());
+    // Group exceeds token cap, so it should be actively removed from waiting
+    ASSERT_EQ(scheduler.runningStreamsSize(), 0);
+    ASSERT_EQ(scheduler.waitingStreamsSize(), 0);
+    // Streams should have error state
+    for (const auto& s : streams) {
+        ASSERT_TRUE(s->hasError());
+        ASSERT_EQ(s->statusInfo().code(), ErrorCode::GENERATE_TIMEOUT);
+    }
+}
+
 TEST_F(FIFOSchedulerTest, groupIsolation_size3) {
     CacheConfig cache_config  = makeMhaCacheConfig(1, 4, 1, 4, 8, rtp_llm::DataType::TYPE_FP16);
     auto        cache_manager = std::make_shared<KVCacheManager>(cache_config);

@@ -156,14 +156,6 @@ public class CostBasedDecodeStrategy implements LoadBalanceStrategy {
             survivors.add(ep);
         }
 
-        if (survivors.isEmpty()) {
-            DecodeEndpoint leastUsed = eligible.stream()
-                    .min(Comparator.comparingLong(DecodeEndpoint::realKvUsed))
-                    .orElse(null);
-            if (leastUsed != null) {
-                survivors.add(leastUsed);
-            }
-        }
         return new FilterResult(survivors, rejections);
     }
 

@@ -46,7 +46,7 @@ public class EngineWorkerStatus {
             if (ws == null) {
                 continue;
             }
-            if (group != null && ws.getGroup() != null && !ws.getGroup().equals(group)) {
+            if (group != null && !group.equals(ws.getGroup())) {
                 continue;
             }
             WorkerEndpoint ep = endpointRegistry.get(entry.getKey());
