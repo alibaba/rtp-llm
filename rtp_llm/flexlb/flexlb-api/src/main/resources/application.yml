@@ -10,6 +10,15 @@ spring:
   lifecycle:
     timeout-per-shutdown-phase: ${FLEXLB_SHUTDOWN_TIMEOUT:30s}
 
+# CPU-bound block hashing pool: use core threads first, queue pending work, then
+# expand up to max threads when the queue is full. Extra threads expire after keep-alive.
+flexlb:
+  block-hash:
+    core-thread-count: ${FLEXLB_BLOCK_HASH_CORE_THREAD_COUNT:8}
+    max-thread-count: ${FLEXLB_BLOCK_HASH_MAX_THREAD_COUNT:32}
+    keep-alive-seconds: ${FLEXLB_BLOCK_HASH_KEEP_ALIVE_SECONDS:60}
+    queue-capacity: ${FLEXLB_BLOCK_HASH_QUEUE_CAPACITY:16384}
+
 logging:
   level:
     root: info

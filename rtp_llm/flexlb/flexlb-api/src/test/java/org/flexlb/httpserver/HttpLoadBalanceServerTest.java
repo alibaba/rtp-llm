@@ -5,11 +5,13 @@ import org.flexlb.consistency.LBStatusConsistencyService;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
+import org.flexlb.metric.NoOpFlexMonitor;
 import org.flexlb.service.RouteService;
 import org.flexlb.service.grace.ActiveRequestCounter;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.transport.GeneralHttpNettyService;
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
@@ -17,14 +19,18 @@ import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.http.MediaType;
 import org.springframework.test.web.reactive.server.WebTestClient;
+import reactor.core.Disposable;
 import reactor.core.publisher.Mono;
 
 import java.net.URI;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.never;
@@ -48,9 +54,11 @@ class HttpLoadBalanceServerTest {
     private WorkerBlockSizeResolver blockSizeResolver;
 
     private WebTestClient webTestClient;
+    private BlockHashExecutor blockHashExecutor;
 
     @BeforeEach
     void setUp() {
+        blockHashExecutor = new BlockHashExecutor(NoOpFlexMonitor.getInstance(), 1, 1, 60, 1);
         HttpLoadBalanceServer server = new HttpLoadBalanceServer(
                 generalHttpNettyService,
                 routeService,
@@ -58,8 +66,13 @@ class HttpLoadBalanceServerTest {
                 engineHealthReporter,
                 queueManager,
                 new ActiveRequestCounter(),
-                new ScheduleRequestPreprocessor(blockSizeResolver));
+                new ScheduleRequestPreprocessor(blockSizeResolver, blockHashExecutor));
         webTestClient = WebTestClient.bindToRouterFunction(server.loadBalancePrefill()).build();
+    }
+
+    @AfterEach
+    void tearDown() {
+        blockHashExecutor.shutdown();
     }
 
     @Test
@@ -138,5 +151,42 @@ class HttpLoadBalanceServerTest {
                 .isEqualTo("block_cache_keys and input_ids must not both be empty");
 
         verify(routeService, never()).route(any());
+    }
+
+    @Test
+    void rejectsRequestWhenBlockHashExecutorIsSaturated() throws Exception {
+        CountDownLatch runningTaskStarted = new CountDownLatch(1);
+        CountDownLatch releaseRunningTask = new CountDownLatch(1);
+        Disposable runningTask = blockHashExecutor.submit(() -> {
+                    runningTaskStarted.countDown();
+                    releaseRunningTask.await(5, TimeUnit.SECONDS);
+                    return "running";
+                })
+                .subscribe();
+        assertTrue(runningTaskStarted.await(5, TimeUnit.SECONDS));
+        Disposable queuedTask = blockHashExecutor.submit(() -> "queued").subscribe();
+
+        try {
+            webTestClient.post()
+                    .uri("/rtp_llm/schedule")
+                    .contentType(MediaType.APPLICATION_JSON)
+                    .bodyValue(Map.of(
+                            "request_id", 1,
+                            "seq_len", 4,
+                            "block_size", 4,
+                            "input_ids", new long[]{1, 2, 3, 4}))
+                    .exchange()
+                    .expectStatus().isEqualTo(503)
+                    .expectBody()
+                    .jsonPath("$.success").isEqualTo(false)
+                    .jsonPath("$.code").isEqualTo(8502)
+                    .jsonPath("$.error_message").isEqualTo("block hash executor queue is full");
+
+            verify(routeService, never()).route(any());
+        } finally {
+            releaseRunningTask.countDown();
+            runningTask.dispose();
+            queuedTask.dispose();
+        }
     }
 }

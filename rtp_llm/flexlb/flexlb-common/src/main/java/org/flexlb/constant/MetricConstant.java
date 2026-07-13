@@ -206,6 +206,28 @@ public class MetricConstant {
      */
     public static final String CACHE_ENGINE_VIEWS_MAP_SIZE = "app.cache.engine.views.map.size";
 
+    /* ------------------------ Block Hash Monitoring -------------------------- */
+
+    /**
+     * Time spent waiting in the block hash executor queue, in microseconds
+     */
+    public static final String BLOCK_HASH_QUEUE_WAIT_TIME_US = "app.block.hash.queue.wait.time.us";
+
+    /**
+     * Time spent calculating block hashes, in microseconds
+     */
+    public static final String BLOCK_HASH_EXECUTION_TIME_US = "app.block.hash.execution.time.us";
+
+    /**
+     * Block hash request result, tagged by status
+     */
+    public static final String BLOCK_HASH_RESULT = "app.block.hash.result";
+
+    /**
+     * Dedicated block hash thread pool status
+     */
+    public static final String BLOCK_HASH_THREAD_POOL_INFO = "app.block.hash.thread.pool.info";
+
     /* ------------------------ gRPC Connection Pool Monitoring -------------------------- */
 
     /**

@@ -30,6 +30,7 @@ import org.springframework.web.reactive.function.server.ServerResponse;
 import reactor.core.publisher.Mono;
 
 import java.net.URI;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeoutException;
 import java.util.function.Function;
 
@@ -112,8 +113,8 @@ public class HttpLoadBalanceServer {
             return forwardRequestToMaster(ctx, req);
         }
 
-        requestPreprocessor.prepare(req);
-        return routeService.route(ctx)
+        return requestPreprocessor.prepare(req)
+                .then(Mono.defer(() -> routeService.route(ctx)))
                 .flatMap(response -> handleRoutingResult(ctx, response))
                 .doOnCancel(() -> {
                     ctx.setSuccess(false);
@@ -237,10 +238,13 @@ public class HttpLoadBalanceServer {
     }
 
     private Mono<ServerResponse> fallbackToLocalRouting(BalanceContext ctx) {
-        requestPreprocessor.prepare(ctx.getRequest());
-        return routeService.route(ctx)
+        return requestPreprocessor.prepare(ctx.getRequest())
+                .then(Mono.defer(() -> routeService.route(ctx)))
                 .flatMap(response -> handleRoutingResult(ctx, response))
                 .onErrorResume(e -> {
+                    if (e instanceof RejectedExecutionException) {
+                        return Mono.error(e);
+                    }
                     Logger.error("[Fallback] Local routing failed", e);
                     Response errorResponse = Response.error(StrategyErrorType.NO_AVAILABLE_WORKER);
                     return ServerResponse.status(500)
@@ -310,6 +314,16 @@ public class HttpLoadBalanceServer {
             Response errorResponse = Response.error(StrategyErrorType.INVALID_REQUEST);
             errorResponse.setErrorMessage(throwable.getMessage());
             return ServerResponse.badRequest()
+                    .contentType(MediaType.APPLICATION_JSON)
+                    .bodyValue(errorResponse);
+        }
+
+        if (throwable instanceof RejectedExecutionException) {
+            Logger.warn("Block hash executor is saturated");
+            ctx.setErrorMessage("block hash executor queue is full");
+            Response errorResponse = Response.error(StrategyErrorType.QUEUE_FULL);
+            errorResponse.setErrorMessage("block hash executor queue is full");
+            return ServerResponse.status(503)
                     .contentType(MediaType.APPLICATION_JSON)
                     .bodyValue(errorResponse);
         }

@@ -2,6 +2,7 @@ package org.flexlb.httpserver;
 
 import org.flexlb.dao.loadbalance.Request;
 import org.junit.jupiter.api.Test;
+import reactor.core.publisher.Mono;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -17,8 +18,9 @@ import static org.mockito.Mockito.when;
 class ScheduleRequestPreprocessorTest {
 
     private final WorkerBlockSizeResolver blockSizeResolver = mock(WorkerBlockSizeResolver.class);
+    private final BlockHashExecutor blockHashExecutor = mock(BlockHashExecutor.class);
     private final ScheduleRequestPreprocessor preprocessor =
-            new ScheduleRequestPreprocessor(blockSizeResolver);
+            new ScheduleRequestPreprocessor(blockSizeResolver, blockHashExecutor);
 
     @Test
     void prefersProvidedBlockCacheKeys() {
@@ -27,11 +29,12 @@ class ScheduleRequestPreprocessorTest {
         request.setBlockCacheKeys(providedKeys);
         request.setInputIds(List.of(1L, 2L, 3L, 4L));
 
-        preprocessor.prepare(request);
+        preprocessor.prepare(request).block();
 
         assertSame(providedKeys, request.getBlockCacheKeys());
         assertNull(request.getInputIds());
         verifyNoInteractions(blockSizeResolver);
+        verifyNoInteractions(blockHashExecutor);
     }
 
     @Test
@@ -40,8 +43,10 @@ class ScheduleRequestPreprocessorTest {
         request.setBlockCacheKeys(List.of());
         request.setInputIds(List.of(1L, 2L, 3L, 4L, 5L));
         when(blockSizeResolver.resolve()).thenReturn(4L);
+        when(blockHashExecutor.calculate(request.getInputIds(), 4L))
+                .thenReturn(Mono.just(List.of(2164874634404590027L)));
 
-        preprocessor.prepare(request);
+        preprocessor.prepare(request).block();
 
         assertEquals(List.of(2164874634404590027L), request.getBlockCacheKeys());
         assertNull(request.getInputIds());
@@ -52,8 +57,10 @@ class ScheduleRequestPreprocessorTest {
         Request request = new Request();
         request.setInputIds(List.of(1L, 2L));
         request.setBlockSize(4);
+        when(blockHashExecutor.calculate(request.getInputIds(), 4L))
+                .thenReturn(Mono.just(List.of()));
 
-        preprocessor.prepare(request);
+        preprocessor.prepare(request).block();
 
         assertEquals(List.of(), request.getBlockCacheKeys());
         assertNull(request.getInputIds());
@@ -64,7 +71,7 @@ class ScheduleRequestPreprocessorTest {
     void rejectsRequestWhenBothInputsAreEmpty() {
         Request request = new Request();
 
-        assertThrows(IllegalArgumentException.class, () -> preprocessor.prepare(request));
+        assertThrows(IllegalArgumentException.class, () -> preprocessor.prepare(request).block());
     }
 
     @Test
@@ -74,6 +81,6 @@ class ScheduleRequestPreprocessorTest {
         when(blockSizeResolver.resolve()).thenThrow(
                 new IllegalStateException("block_size is unavailable"));
 
-        assertThrows(IllegalStateException.class, () -> preprocessor.prepare(request));
+        assertThrows(IllegalStateException.class, () -> preprocessor.prepare(request).block());
     }
 }

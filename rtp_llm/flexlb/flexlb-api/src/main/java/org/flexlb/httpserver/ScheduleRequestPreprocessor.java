@@ -1,8 +1,8 @@
 package org.flexlb.httpserver;
 
 import org.flexlb.dao.loadbalance.Request;
-import org.flexlb.util.BlockCacheKeyCalculator;
 import org.springframework.stereotype.Component;
+import reactor.core.publisher.Mono;
 
 import java.util.List;
 
@@ -13,26 +13,33 @@ import java.util.List;
 public class ScheduleRequestPreprocessor {
 
     private final WorkerBlockSizeResolver blockSizeResolver;
+    private final BlockHashExecutor blockHashExecutor;
 
-    public ScheduleRequestPreprocessor(WorkerBlockSizeResolver blockSizeResolver) {
+    public ScheduleRequestPreprocessor(
+            WorkerBlockSizeResolver blockSizeResolver,
+            BlockHashExecutor blockHashExecutor) {
         this.blockSizeResolver = blockSizeResolver;
+        this.blockHashExecutor = blockHashExecutor;
     }
 
-    public void prepare(Request request) {
-        if (request == null) {
-            throw new IllegalArgumentException("request must not be null");
-        }
+    public Mono<Void> prepare(Request request) {
+        return Mono.defer(() -> prepareRequest(request));
+    }
 
+    private Mono<Void> prepareRequest(Request request) {
+        if (request == null) {
+            return Mono.error(new IllegalArgumentException("request must not be null"));
+        }
         List<Long> blockCacheKeys = request.getBlockCacheKeys();
         if (blockCacheKeys != null && !blockCacheKeys.isEmpty()) {
             request.setInputIds(null);
-            return;
+            return Mono.empty();
         }
 
         List<Long> inputIds = request.getInputIds();
         if (inputIds == null || inputIds.isEmpty()) {
-            throw new IllegalArgumentException(
-                    "block_cache_keys and input_ids must not both be empty");
+            return Mono.error(new IllegalArgumentException(
+                    "block_cache_keys and input_ids must not both be empty"));
         }
 
         long blockSize = request.getBlockSize();
@@ -40,7 +47,11 @@ public class ScheduleRequestPreprocessor {
             blockSize = blockSizeResolver.resolve();
         }
 
-        request.setBlockCacheKeys(BlockCacheKeyCalculator.calculate(inputIds, blockSize));
-        request.setInputIds(null);
+        return blockHashExecutor.calculate(inputIds, blockSize)
+                .doOnNext(calculatedKeys -> {
+                    request.setBlockCacheKeys(calculatedKeys);
+                    request.setInputIds(null);
+                })
+                .then();
     }
 }
