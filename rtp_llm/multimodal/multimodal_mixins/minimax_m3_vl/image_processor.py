@@ -18,7 +18,7 @@ from transformers.image_utils import PILImageResampling, SizeDict
 from transformers.processing_utils import ImagesKwargs, Unpack
 from transformers.utils import TensorType
 
-MAX_RATIO = 200
+from rtp_llm.multimodal.mm_error_messages import MMErr, raise_mm
 
 
 def round_by_factor(number: int, factor: int) -> int:
@@ -39,11 +39,27 @@ def smart_resize(
     factor: int = 28,
     min_pixels: int = 4 * 28 * 28,
     max_pixels: int = 451584,
+    min_image_dimension: int = 10,
+    max_image_aspect_ratio: float = 200.0,
 ) -> tuple[int, int]:
-    if max(height, width) / min(height, width) > MAX_RATIO:
-        raise ValueError(
-            f"absolute aspect ratio must be smaller than {MAX_RATIO}, "
-            f"got {max(height, width) / min(height, width)}"
+    if min_image_dimension > 0 and (
+        height < min_image_dimension or width < min_image_dimension
+    ):
+        raise_mm(
+            MMErr.IMG_HW.format(
+                f"height:{height} or width:{width} must be larger than "
+                f"{min_image_dimension}"
+            )
+        )
+    if max_image_aspect_ratio > 0 and (
+        max(height, width) / min(height, width) > max_image_aspect_ratio
+    ):
+        ratio_limit = f"{float(max_image_aspect_ratio):g}"
+        raise_mm(
+            MMErr.IMG_HW.format(
+                f"absolute aspect ratio must be smaller than {ratio_limit}, "
+                f"got {height} / {width}"
+            )
         )
     h_bar = max(factor, round_by_factor(height, factor))
     w_bar = max(factor, round_by_factor(width, factor))
@@ -55,6 +71,8 @@ def smart_resize(
         beta = math.sqrt(min_pixels / (height * width))
         h_bar = ceil_by_factor(height * beta, factor)
         w_bar = ceil_by_factor(width * beta, factor)
+    if h_bar <= 0 or w_bar <= 0:
+        raise_mm(MMErr.IMG_TOO_SMALL)
     return h_bar, w_bar
 
 
@@ -162,6 +180,8 @@ def compute_sampled_frame_indices(
     if not indices:
         indices = [0]
     if max_frames is not None and len(indices) > max_frames > 0:
+        if max_frames == 1:
+            return [indices[0]]
         last = indices[-1]
         step = len(indices) / (max_frames - 1)
         indices = [indices[int(i * step)] for i in range(max_frames - 1)]

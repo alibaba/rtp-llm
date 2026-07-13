@@ -83,6 +83,11 @@ private:
                     py::object             exc = py::reinterpret_borrow<py::object>(e.value());
                     if (exc && py::hasattr(exc, "exception_type")) {
                         int code = exc.attr("exception_type").cast<int>();
+                        if (py::hasattr(exc, "message")) {
+                            error_msg = exc.attr("message").cast<std::string>();
+                        } else {
+                            error_msg = py::str(exc).cast<std::string>();
+                        }
                         return ErrorInfo(static_cast<ErrorCode>(code), error_msg);
                     }
                 } catch (...) {

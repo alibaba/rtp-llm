@@ -32,6 +32,7 @@ from PIL import Image
 from transformers import AutoConfig, AutoTokenizer
 
 from rtp_llm.config.py_config_modules import VitConfig
+from rtp_llm.multimodal.mm_error_messages import MMErr, raise_mm
 from rtp_llm.multimodal.multimodal_mixin_register import register_multimodal_mixin
 from rtp_llm.multimodal.multimodal_mixins.base_multimodal_mixin import (
     BaseMultiModalDeployWeightInfo,
@@ -176,8 +177,15 @@ class MiniMaxM3VLImageEmbedding(MultiModalEmbeddingInterface):
         Returns ``(raw_chw_uint8, (target_h, target_w), None)`` where the ``None``
         third element marks an image (no timestamps).
         """
-        data = get_bytes_io_from_url(mm_input.url, vit_config.download_headers)
-        image = Image.open(data).convert("RGB")
+        data = get_bytes_io_from_url(
+            mm_input.url,
+            vit_config.download_headers,
+            max_file_size_kb=vit_config.mm_image_max_file_size_kb,
+        )
+        try:
+            image = Image.open(data).convert("RGB")
+        except Exception:
+            raise_mm(MMErr.IMG_OPEN)
         raw = torchvision.transforms.functional.pil_to_tensor(image)  # uint8 [C,H,W]
 
         _, height, width = raw.shape
@@ -191,7 +199,13 @@ class MiniMaxM3VLImageEmbedding(MultiModalEmbeddingInterface):
             min_pixels = int(pre_cfg.min_pixels)
 
         target_h, target_w = smart_resize(
-            height, width, factor=factor, min_pixels=min_pixels, max_pixels=max_pixels
+            height,
+            width,
+            factor=factor,
+            min_pixels=min_pixels,
+            max_pixels=max_pixels,
+            min_image_dimension=vit_config.mm_image_min_dimension,
+            max_image_aspect_ratio=vit_config.mm_image_max_aspect_ratio,
         )
         return raw, (target_h, target_w), None
 
@@ -201,10 +215,20 @@ class MiniMaxM3VLImageEmbedding(MultiModalEmbeddingInterface):
 
         bridge.set_bridge("torch")
 
-        video_bytes = get_bytes_io_from_url(mm_input.url, vit_config.download_headers)
-        vr = VideoReader(video_bytes)
-        total_frames = len(vr)
-        video_fps = float(vr.get_avg_fps())
+        video_bytes = get_bytes_io_from_url(
+            mm_input.url,
+            vit_config.download_headers,
+            max_file_size_kb=vit_config.mm_video_max_file_size_kb,
+        )
+        try:
+            vr = VideoReader(video_bytes)
+            total_frames = len(vr)
+            video_fps = float(vr.get_avg_fps())
+        except Exception:
+            raise_mm(MMErr.VIDEO_INVALID)
+
+        if total_frames <= 0 or video_fps <= 0 or not math.isfinite(video_fps):
+            raise_mm(MMErr.VIDEO_INVALID)
 
         pre_cfg = mm_input.mm_preprocess_config
         target_fps = getattr(pre_cfg, "fps", 0)
@@ -213,15 +237,24 @@ class MiniMaxM3VLImageEmbedding(MultiModalEmbeddingInterface):
         max_frames = getattr(pre_cfg, "max_frames", 0)
         if not max_frames or max_frames <= 0:
             max_frames = kwargs.get("video_max_frames", 768)
+        configured_max_frames = vit_config.mm_video_max_frames
+        if configured_max_frames <= 0:
+            configured_max_frames = VitConfig.DEFAULT_MM_VIDEO_MAX_FRAMES
+        max_frames = min(int(max_frames), int(configured_max_frames))
 
         indices = compute_sampled_frame_indices(
             total_frames, video_fps, target_fps, int(max_frames)
         )
+        if not indices:
+            raise_mm(MMErr.VIDEO_REQ.format("no video frames can be sampled"))
 
         # Decode the sampled frames only (the "load" step).  Resize/normalize/
         # patch-fold happen on GPU in embedding(); here we just keep raw uint8
         # frames + the cheap target size + timestamps.
-        frames_tensor = vr.get_batch(indices)  # (N, H, W, C) uint8 torch (CPU)
+        try:
+            frames_tensor = vr.get_batch(indices)  # (N, H, W, C) uint8 torch (CPU)
+        except Exception:
+            raise_mm(MMErr.VIDEO_INVALID)
 
         patch_size = processor.patch_size
         merge_size = kwargs.get("merge_size", 2)

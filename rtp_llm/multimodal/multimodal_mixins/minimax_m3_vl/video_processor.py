@@ -17,6 +17,8 @@ from transformers.utils import TensorType
 from transformers.video_processing_utils import BaseVideoProcessor
 from transformers.video_utils import group_videos_by_shape, reorder_videos
 
+from rtp_llm.multimodal.mm_error_messages import MMErr, raise_mm
+
 MAX_RATIO = 200
 
 
@@ -39,10 +41,17 @@ def smart_resize(
     min_pixels: int = 4 * 28 * 28,
     max_pixels: int = 451584,
 ) -> tuple[int, int]:
+    if height < 10 or width < 10:
+        raise_mm(
+            MMErr.IMG_HW.format(
+                f"height:{height} or width:{width} must be larger than 10"
+            )
+        )
     if max(height, width) / min(height, width) > MAX_RATIO:
-        raise ValueError(
-            f"absolute aspect ratio must be smaller than {MAX_RATIO}, "
-            f"got {max(height, width) / min(height, width)}"
+        raise_mm(
+            MMErr.IMG_HW.format(
+                f"absolute aspect ratio must be smaller than {MAX_RATIO}, got {height} / {width}"
+            )
         )
     h_bar = max(factor, round_by_factor(height, factor))
     w_bar = max(factor, round_by_factor(width, factor))
@@ -54,6 +63,8 @@ def smart_resize(
         beta = math.sqrt(min_pixels / (height * width))
         h_bar = ceil_by_factor(height * beta, factor)
         w_bar = ceil_by_factor(width * beta, factor)
+    if h_bar <= 0 or w_bar <= 0:
+        raise_mm(MMErr.IMG_TOO_SMALL)
     return h_bar, w_bar
 
 
