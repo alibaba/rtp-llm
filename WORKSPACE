@@ -24,7 +24,7 @@ load("@bazel_tools//tools/build_defs/repo:utils.bzl", "maybe")
 maybe(
     new_git_repository,
     name = "xgrammar",
-    remote = "git@gitlab.alibaba-inc.com:foundation_models/xgrammar_github.git",
+    remote = "https://github.com/mlc-ai/xgrammar.git",
     commit = "36998a7abfb6a8fb79057aef110a6e93d0fd634c",  # v0.2.2
     init_submodules = False,
     patch_cmds = [
@@ -56,14 +56,8 @@ pip_gpu_cuda12_torch_install_deps()
 load("@pip_gpu_cuda12_9_torch//:requirements.bzl", pip_gpu_cuda12_9_torch_install_deps = "install_deps")
 pip_gpu_cuda12_9_torch_install_deps()
 
-load("@pip_gpu_cuda13_torch//:requirements.bzl", pip_gpu_cuda13_torch_install_deps = "install_deps")
-pip_gpu_cuda13_torch_install_deps()
-
 load("@pip_cuda12_arm_torch//:requirements.bzl", pip_cuda12_arm_torch_install_deps = "install_deps")
 pip_cuda12_arm_torch_install_deps()
-
-load("@pip_cuda13_arm_torch//:requirements.bzl", pip_cuda13_arm_torch_install_deps = "install_deps")
-pip_cuda13_arm_torch_install_deps()
 
 load("@pip_gpu_rocm_torch//:requirements.bzl", pip_gpu_rocm_torch_install_deps = "install_deps")
 pip_gpu_rocm_torch_install_deps()
