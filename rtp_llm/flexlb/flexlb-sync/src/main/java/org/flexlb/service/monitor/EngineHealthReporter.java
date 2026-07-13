@@ -52,7 +52,6 @@ import static org.flexlb.constant.MetricConstant.ENGINE_BALANCING_MASTER_SELECT_
 import static org.flexlb.constant.MetricConstant.ENGINE_BALANCING_THREAD_POOL_INFO;
 import static org.flexlb.constant.MetricConstant.ENGINE_DECODE_WORKER_NUMBER;
 import static org.flexlb.constant.MetricConstant.ENGINE_FINISHED_TASK_LIST_SIZE;
-import static org.flexlb.constant.MetricConstant.ENGINE_LOCAL_TASK_MAP_SIZE;
 import static org.flexlb.constant.MetricConstant.ENGINE_NUMBER_SERVICE_DISCOVERY_RESULT;
 import static org.flexlb.constant.MetricConstant.ENGINE_PREFILL_WORKER_NUMBER;
 import static org.flexlb.constant.MetricConstant.ENGINE_RUNNING_QUEUE_TIME;
@@ -126,7 +125,6 @@ public class EngineHealthReporter {
         this.monitor.register(ENGINE_BALANCING_MASTER_SELECT_DETAIL, FlexMetricType.QPS, FlexPriorityType.PRECISE);
 
         this.monitor.register(ENGINE_RUNNING_QUEUE_TIME, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
-        this.monitor.register(ENGINE_LOCAL_TASK_MAP_SIZE, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
 
         this.monitor.register(ZK_MASTER_NODE, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         this.monitor.register(ZK_MASTER_EVENT, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
@@ -239,9 +237,6 @@ public class EngineHealthReporter {
             monitor.report(ENGINE_STATUS_CHECK_SUCCESS_PERIOD, metricTags, (double) System.nanoTime() / 1000 - lastUpdateTime);
         }
         monitor.report(ENGINE_RUNNING_QUEUE_TIME, metricTags, ep != null ? ep.getLoadMetric() : 0);
-
-        // Report local task cache size
-        monitor.report(ENGINE_LOCAL_TASK_MAP_SIZE, metricTags, ep != null ? ep.getLocalTaskCount() : 0);
 
         monitor.report(ENGINE_FINISHED_TASK_LIST_SIZE, metricTags, finishedTaskListSize);
         monitor.report(ENGINE_RUNNING_TASK_INFO_SIZE, metricTags, runningTaskInfoSize);

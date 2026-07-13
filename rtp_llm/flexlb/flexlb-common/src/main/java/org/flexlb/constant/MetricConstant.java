@@ -34,7 +34,7 @@ public class MetricConstant {
 
     public static final String ENGINE_STATUS_VISITOR_RT = "app.engine.health.check.visitor.rt";
 
-    public static final String ENGINE_STATUS_VISITOR_SUCCESS_QPS = "app.engine.health.check.visitor.qps";
+    public static final String ENGINE_STATUS_VISITOR_SUCCESS_QPS = "app.engine.health.check.visitor.success.qps";
 
     /**
      * Engine status check failure information
@@ -64,19 +64,17 @@ public class MetricConstant {
             "app.engine.balancing.master.batch.total.tokens";
 
     /**
-     * FlexLB scheduler inflight batch count per prefill worker (number of dispatched-but-uncompleted batches)
+     * FlexLB scheduler inflight batch count per worker (number of dispatched-but-uncompleted batches).
+     * <p>Unified metric for both prefill and decode workers, tagged by role and engineIp.
      */
-    public static final String BATCH_INFLIGHT_COUNT = "app.flexlb.batch.inflight.count";
+    public static final String INFLIGHT_BATCH_COUNT = "app.flexlb.inflight.batch.count";
 
     /**
-     * FlexLB scheduler inflight request count per prefill worker (sum of requests across all inflight batches)
+     * FlexLB scheduler inflight request count per worker (dispatched but not yet confirmed by engine).
+     * <p>Unified metric for both prefill and decode workers, tagged by role and engineIp.
+     * Replaces the former separate BATCH_INFLIGHT_REQUEST_COUNT (prefill) and DECODE_INFLIGHT_COUNT (decode).
      */
-    public static final String BATCH_INFLIGHT_REQUEST_COUNT = "app.flexlb.batch.inflight.request.count";
-
-    /**
-     * FlexLB scheduler inflight request count per decode worker (dispatched but not yet confirmed by engine)
-     */
-    public static final String DECODE_INFLIGHT_COUNT = "app.flexlb.decode.inflight.count";
+    public static final String INFLIGHT_REQUEST_COUNT = "app.flexlb.inflight.request.count";
 
     /**
      * FlexLB scheduler total load per decode worker (confirmed running + scheduler inflight)
@@ -91,18 +89,18 @@ public class MetricConstant {
     /**
      * Batch predicted execution time (formula estimate) in milliseconds
      */
-    public static final String BATCH_PREDICTED_TIME_MS = "app.batch.predicted.time.ms";
+    public static final String BATCH_PREDICTED_TIME_MS = "app.flexlb.batch.predicted.time.ms";
 
     /**
      * Batch actual execution time reported by the engine (NormalEngine execution, excludes queueing) in milliseconds
      */
-    public static final String BATCH_ACTUAL_TIME_MS = "app.batch.actual.time.ms";
+    public static final String BATCH_ACTUAL_TIME_MS = "app.flexlb.batch.actual.time.ms";
 
     /**
      * Gap between actual and predicted batch execution time (actual minus predicted) in milliseconds;
      * positive means the prediction underestimated
      */
-    public static final String BATCH_PREDICT_GAP_MS = "app.batch.predict.gap.ms";
+    public static final String BATCH_PREDICT_GAP_MS = "app.flexlb.batch.predict.gap.ms";
 
     /**
      * Engine running queue time (from EP authoritative value)
@@ -110,15 +108,10 @@ public class MetricConstant {
     public static final String ENGINE_RUNNING_QUEUE_TIME = "app.engine.health.check.running.queue.time";
 
     /**
-     * Engine local task map size (from EP authoritative value)
-     */
-    public static final String ENGINE_LOCAL_TASK_MAP_SIZE = "app.engine.health.check.local.task.map.size";
-
-    /**
      * FlexLB scheduler local task map size — the scheduler's own inflight task map size.
-     * <p>Independent metric name to avoid tag schema conflict with {@link #ENGINE_LOCAL_TASK_MAP_SIZE},
-     * which is reported per-engine (tagged by model, code, engineIp=real-engine-IP, role) by
-     * EngineHealthReporter. The scheduler-level metric uses role=PREFILL + engineIp="scheduler" tags.
+     * <p>Reported by BatchSchedulerReporter using role=PREFILL + engineIp="scheduler" tags.
+     * Formerly kept as a separate name from the now-removed ENGINE_LOCAL_TASK_MAP_SIZE
+     * to avoid tag schema conflict (per-engine vs scheduler-level).
      */
     public static final String SCHEDULER_LOCAL_TASK_MAP_SIZE = "app.flexlb.scheduler.local.task.map.size";
 

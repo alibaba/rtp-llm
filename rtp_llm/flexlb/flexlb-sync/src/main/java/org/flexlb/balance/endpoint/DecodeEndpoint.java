@@ -4,6 +4,7 @@ import org.flexlb.balance.scheduler.InflightEvictor;
 import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusResponse;
+import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.TaskPhase;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.slf4j.Logger;
@@ -145,7 +146,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
      * Called periodically by {@link org.flexlb.balance.scheduler.FlexlbBatchScheduler}.
      */
     public void reportBatchMetrics(BatchSchedulerReporter reporter) {
-        reporter.reportDecodeInflightCount(getIp(), getInflightCount());
+        reporter.reportInflightRequestCount(RoleType.DECODE.name(), getIp(), getInflightCount());
         reporter.reportDecodeTotalLoad(getIp(), getTotalLoad());
         reporter.reportDecodeInflightKvReserved(getIp(), inflightKvReserved());
     }

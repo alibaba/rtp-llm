@@ -365,8 +365,8 @@ public class PrefillEndpoint extends WorkerEndpoint {
      */
     public void reportBatchMetrics(BatchSchedulerReporter reporter) {
         reporter.reportBatcherQueueDepth(RoleType.PREFILL.name(), getIp(), getBatcherQueueSize());
-        reporter.reportPrefillInflightBatchCount(RoleType.PREFILL.name(), getIp(), getInflightBatchCount());
-        reporter.reportPrefillInflightRequestCount(RoleType.PREFILL.name(), getIp(), getInflightRequestCount());
+        reporter.reportInflightBatchCount(RoleType.PREFILL.name(), getIp(), getInflightBatchCount());
+        reporter.reportInflightRequestCount(RoleType.PREFILL.name(), getIp(), getInflightRequestCount());
     }
 
     /**
