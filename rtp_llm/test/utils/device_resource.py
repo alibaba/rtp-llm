@@ -72,7 +72,7 @@ def setup_smoke_jit_remote():
     if os.environ.get("SMOKE_JIT_REMOTE", "").lower() in ("", "0", "false", "no"):
         return
     try:
-        remote = os.environ.get("REMOTE_JIT_DIR") or "/tmp/rtp_llm/smoke/jit_remote"
+        remote = os.environ.get("REMOTE_JIT_DIR") or "/tmp/rtp_llm/smoke/.jit_remote"
         os.makedirs(remote, exist_ok=True)
         os.environ["REMOTE_JIT_DIR"] = remote
         logging.info("smoke JIT remote cache dir: %s", remote)
