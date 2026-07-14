@@ -58,10 +58,12 @@ def local_rank_start(
     py_env_configs: PyEnvConfigs,
     world_rank: int = 0,
     pipe_writer=None,
+    jit_cache_ready=None,
 ):
     """Start local rank with proper signal handling for graceful shutdown"""
     _install_hot_hook_runtime(f"backend_rank_{world_rank}")
     backend_manager = None
+    jit_cache_manager = None
     logging.info(f"[PROCESS_START]Start local rank process")
     start_time = time.time()
 
@@ -137,14 +139,14 @@ def local_rank_start(
             deferred_sigterm_timer = None
         request_backend_shutdown(f"signal {signum}")
 
+    def install_signal_handlers():
+        signal.signal(signal.SIGTERM, signal_handler)
+        signal.signal(signal.SIGINT, signal_handler)
+
     # Setup signal handlers for graceful shutdown
-    signal.signal(signal.SIGTERM, signal_handler)
-    signal.signal(signal.SIGINT, signal_handler)
+    install_signal_handlers()
 
-    from rtp_llm.server.backend_manager import BackendManager
     from rtp_llm.utils.util import copy_gemm_config
-
-    logging.info(f"import BackendManager took {time.time()- start_time:.2f}s")
 
     def clear_cpp_comm_ops():
         try:
@@ -173,12 +175,34 @@ def local_rank_start(
             setproctitle(f"rtp_llm_rank-{local_rank}")
         set_global_controller(global_controller)
         install_oom_dump()
+        if local_rank == 0:
+            try:
+                if py_env_configs.jit_config.remote_jit_dir:
+                    from rtp_llm.utils.jit_cache_manager import JitCacheManager
+
+                    jit_cache_manager = JitCacheManager(py_env_configs.jit_config)
+                    jit_cache_manager.bootstrap()
+                    jit_cache_manager.start_background_sync()
+            except Exception:
+                logging.exception("JIT cache setup failed; continuing")
+            finally:
+                if jit_cache_ready is not None:
+                    jit_cache_ready.set()
+        elif jit_cache_ready is not None:
+            jit_cache_ready.wait()
+
+        # Import JIT-producing dependencies only after rank 0 restores the cache.
+        from rtp_llm.server.backend_manager import BackendManager
+
+        logging.info(f"import BackendManager took {time.time()- start_time:.2f}s")
         backend_manager = BackendManager(py_env_configs)
         if shutdown_pending:
             backend_manager.request_shutdown()
         backend_manager.start()
         if shutdown_pending:
             backend_manager.request_shutdown()
+        # Engine startup may overwrite these handlers.
+        install_signal_handlers()
         logging.info("Backend server initialized successfully, sending ready status")
 
         # Send startup success message
@@ -214,6 +238,8 @@ def local_rank_start(
                 logging.warning(f"Failed to send error status via pipe: {pipe_error}")
         raise e
     finally:
+        if jit_cache_manager:
+            jit_cache_manager.stop()
         clear_cpp_comm_ops()
 
 
@@ -262,22 +288,29 @@ def _create_rank_processes(
     local_world_size = _get_local_world_size(py_env_configs)
     cuda_device_list = _get_cuda_device_list()
     _validate_dp_configuration(py_env_configs)
+    ctx = multiprocessing.get_context("spawn")
+    jit_cache_ready = ctx.Event()
 
     processes = []
     rank_pipe_readers = []  # Store pipe readers for each rank
 
-    for _, world_rank in enumerate(
-        range(pc.world_rank, pc.world_rank + local_world_size)
-    ):
-        reader, writer = multiprocessing.Pipe(duplex=False)
+    for world_rank in range(pc.world_rank, pc.world_rank + local_world_size):
+        reader, writer = ctx.Pipe(duplex=False)
         os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(cuda_device_list)
         os.environ["WORLD_RANK"] = str(world_rank)
 
-        proc = Process(
+        proc = ctx.Process(
             target=local_rank_start,
-            args=(global_controller, py_env_configs, world_rank, writer),
+            args=(
+                global_controller,
+                py_env_configs,
+                world_rank,
+                writer,
+                jit_cache_ready,
+            ),
             name=f"rank-{world_rank}",
         )
+        proc._jit_cache_ready = jit_cache_ready
         proc.start()
         writer.close()  # Parent process closes write end
         processes.append(proc)

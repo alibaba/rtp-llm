@@ -24,7 +24,7 @@ JIT_REMOTE_DONE_MARKER = "WRITE_DONE"
 JIT_REMOTE_MANIFEST = "MANIFEST"
 JIT_REMOTE_CONTROL_FILES = (JIT_REMOTE_DONE_MARKER, JIT_REMOTE_MANIFEST)
 JIT_REMOTE_STAGING_PREFIX = ".staging-"
-LEGACY_JIT_ENV_NAMES = ("REMOTE_JIT_DIR", "DG_JIT_REMOTE_CACHE_DIR")
+LEGACY_JIT_ENV_NAMES = ("DG_JIT_REMOTE_CACHE_DIR",)
 
 
 def auto_configure_deepep(
@@ -731,9 +731,27 @@ def setup_jit_cache_envs(py_env_configs: PyEnvConfigs) -> None:
     """
     _warn_legacy_jit_envs()
     jit_config = py_env_configs.jit_config
+    remote_snapshot_dir = (jit_config.remote_jit_dir or "").strip()
     remote_read_dir = (jit_config.remote_jit_read_dir or "").strip()
     remote_write_dir = (jit_config.warm_up_jit_and_write_remote or "").strip()
     target_local_dir = _local_jit_cache_dir()
+
+    if remote_snapshot_dir:
+        if remote_read_dir or remote_write_dir:
+            raise ValueError(
+                "REMOTE_JIT_DIR cannot be combined with REMOTE_JIT_READ_DIR or "
+                "WARM_UP_JIT_AND_WRITE_REMOTE"
+            )
+        from rtp_llm.utils.jit_cache_manager import setup_jit_cache_env
+
+        local_root = setup_jit_cache_env()
+        logging.info(
+            "setup_jit_cache_envs: REMOTE_JIT_DIR=%s uses watchdog snapshot mode "
+            "with local root %s",
+            remote_snapshot_dir,
+            local_root,
+        )
+        return
 
     if remote_read_dir:
         if not target_local_dir:

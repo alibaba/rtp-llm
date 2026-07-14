@@ -33,6 +33,7 @@ class ServerArgsSetTest(TestCase):
         os.environ["CP_FORCE_SINGLE_PREFILL"] = "0"
         os.environ["WARM_UP"] = "1"
         os.environ["MAX_SEQ_LEN"] = "4096"
+        os.environ["REMOTE_JIT_DIR"] = "dfs://bucket/jit/watchdog"
         os.environ["REMOTE_JIT_READ_DIR"] = "dfs://bucket/jit/baseline"
         os.environ["WARM_UP_JIT_AND_WRITE_REMOTE"] = "dfs://bucket/jit/writer"
 
@@ -71,6 +72,10 @@ class ServerArgsSetTest(TestCase):
         self.assertEqual(py_env_configs.runtime_config.warm_up, True)  # bool in C++
         # Note: max_seq_len is in ModelConfig, not RuntimeConfig or EngineConfig
         # It will be set when ModelConfig is created from model_args
+        self.assertEqual(
+            py_env_configs.jit_config.remote_jit_dir,
+            "dfs://bucket/jit/watchdog",
+        )
         self.assertEqual(
             py_env_configs.jit_config.remote_jit_read_dir,
             "dfs://bucket/jit/baseline",
