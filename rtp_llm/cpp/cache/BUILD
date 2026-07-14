@@ -153,31 +153,6 @@ cc_library(
     }),
 )
 
-# SharedBlockCache holds device cache-item slots and now references DeviceBlockPool
-# (single-count incRef/releaseRef) instead of the legacy BlockPool. It lives in its own
-# target - separate from block_pool - so it can depend on
-# //rtp_llm/cpp/cache/block_tree_cache:device_block_pool without forming a cycle
-# (device_block_pool depends on block_pool for MemoryLayoutStrategy).
-cc_library(
-    name = "shared_block_cache",
-    srcs = [
-        "SharedBlockCache.cc",
-    ],
-    hdrs = [
-        "SharedBlockCache.h",
-    ],
-    copts = copts(),
-    visibility = ["//visibility:public"],
-    deps = [
-        ":batch_kv_cache_resource",
-        ":cache_types",
-        "//rtp_llm/cpp/cache/block_tree_cache:device_block_pool",
-        "//rtp_llm/cpp/utils:lru_cache",
-        "//rtp_llm/cpp/utils:profiling_scope",
-        "//rtp_llm/cpp/utils:core_utils",
-    ] + torch_deps(),
-)
-
 cc_library(
     name = "kv_cache_transfer_planner",
     srcs = [
@@ -190,30 +165,6 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":cache_group_type",
-    ],
-)
-
-cc_library(
-    name = "kv_cache_group",
-    srcs = [
-        "group/FullKVCacheGroup.cc",
-        "group/KVCacheGroup.cc",
-        "group/LinearKVCacheGroup.cc",
-        "group/SWAKVCacheGroup.cc",
-    ],
-    hdrs = [
-        "group/FullKVCacheGroup.h",
-        "group/KVCacheGroup.h",
-        "group/LinearKVCacheGroup.h",
-        "group/SWAKVCacheGroup.h",
-    ],
-    copts = copts(),
-    visibility = ["//visibility:public"],
-    deps = [
-        ":block_pool",
-        ":cache_types",
-        "//rtp_llm/cpp/cache/block_tree_cache:block_tree_cache",
-        "//rtp_llm/cpp/cache/block_tree_cache:device_block_pool",
     ],
 )
 

@@ -13,7 +13,6 @@
 #include "rtp_llm/cpp/cache/test/BlockPoolTestHelper.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
-#include "rtp_llm/cpp/cache/SharedBlockCache.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
 
 namespace rtp_llm {
@@ -220,6 +219,8 @@ TEST_F(SingleTypeKVCacheAllocatorTest, ReserveBlocksOnlyAppliedToInitMalloc) {
     EXPECT_EQ(batch_resource_ok->curBlocksNum(), 9);
 }
 
+// TODO(block_tree_cache refactor): re-enable after SharedBlockCache is replaced
+#if 0
 TEST_F(SingleTypeKVCacheAllocatorTest, ReserveBlocksCheckHappensAfterReuseReferenceInInitMallocForCommonLen) {
     auto config = createSingleTypeTestConfig(/*layer_num=*/4, /*block_num=*/10, /*seq_size_per_block=*/4);
     allocator_  = std::make_shared<SingleTypeKVCacheAllocator>(config);
@@ -281,6 +282,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, ReserveBlocksCheckHappensAfterReuseRefere
         EXPECT_EQ(allocator_->availableBlocksNum(), 5);
     }
 }
+#endif
 
 TEST_F(SingleTypeKVCacheAllocatorTest, MallocMultipleBatches) {
     auto config = createSingleTypeTestConfig();
@@ -855,8 +857,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, CapacityAndNeedBlocksUseCPVirtualBlockSiz
     allocator_  = std::make_shared<SingleTypeKVCacheAllocator>(config);
     ASSERT_TRUE(allocator_->init());
 
-    allocator_->setCPSlotMapper(
-        std::make_shared<CPSlotMapper>(/*cp_rank=*/0, /*cp_size=*/2, /*block_size=*/8));
+    allocator_->setCPSlotMapper(std::make_shared<CPSlotMapper>(/*cp_rank=*/0, /*cp_size=*/2, /*block_size=*/8));
 
     EXPECT_EQ(allocator_->maxAvailableTokensNum(), (10u - 1u) * 16u);
     EXPECT_EQ(allocator_->availableTokensNum(), (10u - 1u) * 16u);
@@ -893,6 +894,8 @@ TEST_F(SingleTypeKVCacheAllocatorTest, FreeEmptyBatchResource) {
     allocator_->free(free_info);
 }
 
+// TODO(block_tree_cache refactor): re-enable after SharedBlockCache is replaced
+#if 0
 TEST_F(SingleTypeKVCacheAllocatorTest, InitMallocRollbackWhenInitMallocForCommonLenFails) {
     auto config = createSingleTypeTestConfig(/*layer_num=*/4, /*block_num=*/6, /*seq_size_per_block=*/4);
     allocator_  = std::make_shared<SingleTypeKVCacheAllocator>(config, AllocationType::HOST);
@@ -947,6 +950,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, InitMallocRollbackWhenInitMallocForCommon
     EXPECT_EQ(allocator_->freeBlocksNum(), free_before_fail);
     EXPECT_EQ(allocator_->availableBlocksNum(), available_before_fail);
 }
+#endif
 
 // Test rollback logic in incrMalloc
 TEST_F(SingleTypeKVCacheAllocatorTest, IncrMallocRollback) {

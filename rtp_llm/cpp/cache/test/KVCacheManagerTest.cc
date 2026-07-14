@@ -8,7 +8,6 @@
 #include <thread>
 
 #include "kmonitor/client/MetricsReporter.h"
-#include "rtp_llm/cpp/cache/SharedBlockCache.h"
 #include "rtp_llm/cpp/cache/config_creator/CacheConfigCreator.h"
 #include "rtp_llm/cpp/cache/allocator/HybridPoolKVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/config_creator/HybridPoolConfigCreator.h"
@@ -1047,7 +1046,7 @@ TEST_F(KVCacheManagerTest, GetKVCacheInfo_UsesSmallestHybridPoolTokenCapacity) {
             (gid < cache_config.group_seq_size_per_block.size() && cache_config.group_seq_size_per_block[gid] > 0) ?
                 cache_config.group_seq_size_per_block[gid] :
                 cache_config.seq_size_per_block;
-        expected_total_tokens     = std::min(expected_total_tokens, pools[gid]->totalBlocksNum() * seq_size);
+        expected_total_tokens = std::min(expected_total_tokens, pools[gid]->totalBlocksNum() * seq_size);
         // DeviceBlockPool has no availableBlocksNum(); in unit tests (no eviction) available == free.
         expected_available_tokens = std::min(expected_available_tokens, pools[gid]->freeBlocksNum() * seq_size);
     }
