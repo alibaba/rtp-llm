@@ -2,6 +2,7 @@ package(default_visibility = ["//visibility:public"])
 load("//bazel:arch_select.bzl", "requirement")
 
 requirement([
+    "filelock",
     "torch",
 ])
 
@@ -20,7 +21,7 @@ py_library(
 
 py_binary(
     name = "gpu_lock",
-    deps = [":torch"],
+    deps = [":filelock", ":torch"],
     main = "device_resource.py",
     srcs = [
         "device_resource.py",
@@ -30,7 +31,7 @@ py_binary(
 
 py_library(
     name = "device_resource",
-    deps = [],
+    deps = [":filelock"],
     srcs = ["device_resource.py"],
 )
 

@@ -1,3 +1,8 @@
+load("@arch_config//:arch_select.bzl", "requirement")
+
+requirement([
+    "grpcio",
+])
 
 filegroup(
     name = "testdata",
@@ -9,19 +14,140 @@ filegroup(
 )
 
 py_test(
+    name = "jit_cache_manager_test",
+    srcs = [
+        "jit_cache_manager_test.py",
+        "jit_cache_smoke_test.py",
+    ],
+    data = [
+        "//:th_transformer_config",
+    ],
+    deps = [
+        "//rtp_llm:config_ops",
+        "//rtp_llm:jit_cache_manager_lib",
+    ],
+)
+
+py_test(
+    name = "jit_cache_kimi_linear",
+    timeout = "eternal",
+    srcs = [
+        "jit_cache_smoke_test.py",
+    ],
+    args = [
+        "JitCacheSmokeTest.test_kimi_linear",
+    ],
+    data = [
+        "//:rtp_compute_ops",
+        "//:th_transformer",
+        "//:th_transformer_config",
+        "//rtp_llm:sdk",
+    ],
+    env = {
+        "JIT_SMOKE_FULL_LIFECYCLE": "1",
+        "PYTHONNOUSERSITE": "1",
+    },
+    exec_properties = {
+        "gpu": "H20",
+        "gpu_count": "1",
+    },
+    main = "jit_cache_smoke_test.py",
+    tags = [
+        "H20",
+        "manual",
+        "open_skip",
+    ],
+    deps = [
+        "//rtp_llm:dashscope",
+        "//rtp_llm:fastapi",
+        "//rtp_llm:jieba",
+        "//rtp_llm:jit_cache_manager_lib",
+        "//rtp_llm:json5",
+        "//rtp_llm:openai",
+        "//rtp_llm:partial_json_parser",
+        "//rtp_llm:psutil",
+        "//rtp_llm:pydantic",
+        "//rtp_llm:safetensors",
+        "//rtp_llm:sdk",
+        "//rtp_llm:testlib",
+        "//rtp_llm:tiktoken",
+        "//rtp_llm:uvicorn",
+        "//rtp_llm/cpp/model_rpc:grpcio",
+        "//rtp_llm/test/utils:maga_server_manager",
+    ],
+)
+
+py_test(
+    name = "jit_cache_deepseek_v2_lite",
+    timeout = "eternal",
+    srcs = [
+        "jit_cache_smoke_test.py",
+    ],
+    args = [
+        "JitCacheSmokeTest.test_deepseek_v2_lite",
+    ],
+    data = [
+        "//:rtp_compute_ops",
+        "//:th_transformer",
+        "//:th_transformer_config",
+        "//rtp_llm:sdk",
+    ],
+    env = {
+        "JIT_SMOKE_FULL_LIFECYCLE": "1",
+        "PYTHONNOUSERSITE": "1",
+    },
+    exec_properties = {
+        "gpu": "H20",
+        "gpu_count": "1",
+    },
+    main = "jit_cache_smoke_test.py",
+    tags = [
+        "H20",
+        "manual",
+        "open_skip",
+    ],
+    deps = [
+        "//rtp_llm:dashscope",
+        "//rtp_llm:fastapi",
+        "//rtp_llm:jieba",
+        "//rtp_llm:jit_cache_manager_lib",
+        "//rtp_llm:json5",
+        "//rtp_llm:openai",
+        "//rtp_llm:partial_json_parser",
+        "//rtp_llm:psutil",
+        "//rtp_llm:pydantic",
+        "//rtp_llm:safetensors",
+        "//rtp_llm:sdk",
+        "//rtp_llm:testlib",
+        "//rtp_llm:tiktoken",
+        "//rtp_llm:uvicorn",
+        "//rtp_llm/cpp/model_rpc:grpcio",
+        "//rtp_llm/test/utils:maga_server_manager",
+    ],
+)
+
+test_suite(
+    name = "smoke_jit_cache_all_components",
+    tests = [
+        ":jit_cache_deepseek_v2_lite",
+        ":jit_cache_kimi_linear",
+    ],
+)
+
+py_test(
     name = "ckpt_database_test",
     srcs = [
         "ckpt_database_test.py",
     ],
-    deps = [
-        "//rtp_llm:utils",
-        "//rtp_llm:config",
-        "//rtp_llm:_ft_pickler",
-        "//rtp_llm:lora"
-    ],
     data = [
         "//rtp_llm/utils/test:testdata",
-    ]
+    ],
+    deps = [
+        "//rtp_llm:_ft_pickler",
+        "//rtp_llm:config",
+        "//rtp_llm:lora",
+        "//rtp_llm:utils",
+    ],
 )
 
 py_test(
@@ -34,18 +160,17 @@ py_test(
     ],
 )
 
-
 py_test(
     name = "util_test",
     srcs = [
         "util_test.py",
     ],
     deps = [
-        "//rtp_llm:utils",
         "//rtp_llm:_ft_pickler",
-        "//rtp_llm:pynvml",
-        "//rtp_llm:psutil",
         "//rtp_llm:fastapi",
+        "//rtp_llm:psutil",
+        "//rtp_llm:pynvml",
+        "//rtp_llm:utils",
     ],
 )
 
@@ -87,15 +212,15 @@ py_test(
     srcs = [
         "process_manager_test.py",
     ],
+    data = [
+        "//:rtp_compute_ops",
+        "//:th_transformer",
+        "//:th_transformer_config",
+    ],
+    exec_properties = {"gpu": "H20"},
     deps = [
         "//rtp_llm:utils",
     ],
-    data = [
-        "//:th_transformer",
-        "//:th_transformer_config",
-        "//:rtp_compute_ops",
-    ],
-    exec_properties = {'gpu':'H20'}
 )
 
 load("//bazel:arch_select.bzl", "requirement")
@@ -109,16 +234,16 @@ py_test(
     srcs = [
         "grpc_host_channel_pool_test.py",
     ],
-    deps = [
-        "//rtp_llm:utils",
-        ":grpcio",
-    ],
     data = [
+        "//:rtp_compute_ops",
         "//:th_transformer",
         "//:th_transformer_config",
-        "//:rtp_compute_ops",
     ],
-    exec_properties = {'gpu':'H20'}
+    exec_properties = {"gpu": "H20"},
+    deps = [
+        ":grpcio",
+        "//rtp_llm:utils",
+    ],
 )
 
 py_test(
@@ -142,15 +267,15 @@ py_test(
     srcs = [
         "duplicated_kv_test.py",
     ],
-    deps = [
-        "//rtp_llm:utils",
-        "//rtp_llm:fastapi",
-        "//rtp_llm:_ft_pickler",
-    ],
     data = [
+        "//:rtp_compute_ops",
         "//:th_transformer",
         "//:th_transformer_config",
-        "//:rtp_compute_ops",
     ],
-    exec_properties = {'gpu':'A10'}
+    exec_properties = {"gpu": "A10"},
+    deps = [
+        "//rtp_llm:_ft_pickler",
+        "//rtp_llm:fastapi",
+        "//rtp_llm:utils",
+    ],
 )

@@ -174,13 +174,6 @@ class MagaServerManager(object):
                 [str(_) for _ in self._device_ids]
             )
 
-        # Set DeepGEMM JIT cache directory to use a persistent global cache
-        # instead of the temporary test.outputs directory. This allows kernel
-        # cache reuse across test runs, avoiding expensive JIT compilation overhead.
-        if "DG_JIT_CACHE_DIR" not in current_env:
-            home_dir = os.environ.get("HOME", os.path.expanduser("~"))
-            current_env["DG_JIT_CACHE_DIR"] = os.path.join(home_dir, ".deep_gemm")
-
         bazel_outputs_dir = os.environ.get("TEST_UNDECLARED_OUTPUTS_DIR", os.getcwd())
         cwd_path = os.environ.get("MAGA_SERVER_WORK_DIR", bazel_outputs_dir)
         # 创建一个文件来存储子进程的日志

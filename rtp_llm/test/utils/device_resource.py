@@ -65,6 +65,21 @@ def get_ip():
     return socket.gethostbyname(socket.gethostname())
 
 
+def setup_smoke_jit_remote():
+    """Point every real-model test's server at one machine-local JIT remote
+    cache dir so CI reuses compiled kernels across runs on the same host.
+    """
+    if os.environ.get("SMOKE_JIT_REMOTE", "").lower() in ("", "0", "false", "no"):
+        return
+    try:
+        remote = os.environ.get("REMOTE_JIT_DIR") or "/tmp/rtp_llm/smoke/jit_remote"
+        os.makedirs(remote, exist_ok=True)
+        os.environ["REMOTE_JIT_DIR"] = remote
+        logging.info("smoke JIT remote cache dir: %s", remote)
+    except Exception:
+        logging.warning("failed to set up smoke JIT remote cache", exc_info=True)
+
+
 def get_gpu_ids():
     cuda_info = get_cuda_info()
     logging.info(f"{cuda_info}")
@@ -314,6 +329,7 @@ if __name__ == "__main__":
         from jit_sys_path_setup import setup_jit_cache
 
         setup_jit_cache()
+        setup_smoke_jit_remote()
 
         device_name, _ = cuda_info
         require_count = int(
