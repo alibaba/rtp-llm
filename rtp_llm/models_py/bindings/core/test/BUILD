@@ -16,23 +16,26 @@ exec_ops_test_deps = [
     "@com_google_googletest//:gtest_main",
 ] + torch_deps()
 
+cache_store_test_filter = "ExecOpsTest.testWriteCacheStore*:ExecOpsTest.testLoadContextFailureDebugInfo*"
+
 cc_test(
     name = "exec_ops_test",
     srcs = ["ExecOpsTest.cc"],
-    args = ["--gtest_filter=-ExecOpsTest.testWriteCacheStore*"],
+    args = ["--gtest_filter=-" + cache_store_test_filter],
     deps = exec_ops_test_deps,
     copts = test_copts,
     tags = ["manual"],
 )
 
-# Cache-store address/stride/group-id coverage is part of the default cuda12_9
-# gate. Keep the broader ExecOps suite manual while running these focused cases.
+# Run focused cache-store coverage in default wildcard test gates while keeping
+# the broader GPU-linked ExecOps suite manual.
 cc_test(
     name = "cache_store_op_test",
     srcs = ["ExecOpsTest.cc"],
-    args = ["--gtest_filter=ExecOpsTest.testWriteCacheStore*"],
+    args = ["--gtest_filter=" + cache_store_test_filter],
     deps = exec_ops_test_deps,
     copts = test_copts,
+    exec_properties = {"gpu": "H20"},
 )
 
 cc_test(

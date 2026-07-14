@@ -28,13 +28,17 @@ void WriteCacheStoreOp(const torch::Tensor&                         input_length
     if (captured_kv_cache.layer_id >= 0 && captured_kv_cache.group_id >= 0) {
         if (captured_kv_cache_layer_to_group.defined()
             && captured_kv_cache_layer_to_group.numel() > captured_kv_cache.layer_id) {
-            captured_kv_cache_layer_to_group = captured_kv_cache_layer_to_group.clone();
+            const auto layer_id = captured_kv_cache.layer_id;
+            const auto group_id = captured_kv_cache.group_id;
+            if (captured_kv_cache_layer_to_group.data_ptr<int32_t>()[layer_id] != group_id) {
+                captured_kv_cache_layer_to_group = captured_kv_cache_layer_to_group.clone();
+                captured_kv_cache_layer_to_group.data_ptr<int32_t>()[layer_id] = group_id;
+            }
         } else {
             captured_kv_cache_layer_to_group = torch::full({captured_kv_cache.layer_id + 1},
                                                            captured_kv_cache.group_id,
                                                            torch::TensorOptions(torch::kInt32).device(torch::kCPU));
         }
-        captured_kv_cache_layer_to_group.data_ptr<int32_t>()[captured_kv_cache.layer_id] = captured_kv_cache.group_id;
     }
 
     // Create event in main thread to avoid cudaEventRecord contention on background threads.
