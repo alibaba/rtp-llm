@@ -102,6 +102,14 @@ class FoundationLoaderTest(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "could not dispatch"):
                 self._loader(model_path).load()
 
+    def test_unknown_inv_freq_path_is_not_silently_dropped(self):
+        checkpoint = _weights()
+        checkpoint["unexpected.inv_freq"] = torch.ones(1)
+        with tempfile.TemporaryDirectory() as model_path:
+            save_file(checkpoint, os.path.join(model_path, "model.safetensors"))
+            with self.assertRaisesRegex(RuntimeError, "unexpected.inv_freq"):
+                self._loader(model_path).load()
+
     def test_non_persistent_checkpoint_buffer_is_not_loaded(self):
         for checkpoint_value in (torch.full((2,), 9.0), torch.full((3,), 9.0)):
             with self.subTest(checkpoint_shape=tuple(checkpoint_value.shape)):

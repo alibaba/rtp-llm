@@ -11,7 +11,6 @@ _ALLOWED_DROPPED_WEIGHT_SUFFIXES = (
     "rotary_emb.cos_cached",
     "rotary_emb.sin_cached",
     "rope.inv_freq",
-    "inv_freq",
 )
 
 
