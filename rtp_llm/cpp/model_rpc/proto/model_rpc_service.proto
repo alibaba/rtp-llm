@@ -388,7 +388,7 @@ message UpdateEplbConfigRequestPB {
 }
 
 message TaskInfoPB {
-    int64 request_id = 1;
+    string request_id = 1;
     reserved 2;
     reserved "inter_request_id";
     int64 prefix_length = 3;

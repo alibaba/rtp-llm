@@ -36,7 +36,7 @@ public class WorkerStatus {
     private Map<String, TaskInfo> runningTaskList;
     private AtomicLong latestFinishedTaskVersion = new AtomicLong(-1L);
 
-    private ConcurrentHashMap<Long/*requestId*/, TaskInfo> localTaskMap = new ConcurrentHashMap<>();
+    private ConcurrentHashMap<String/*requestId*/, TaskInfo> localTaskMap = new ConcurrentHashMap<>();
     private double stepLatencyMs;
     private long iterateCount;
     private long dpSize;
@@ -56,7 +56,7 @@ public class WorkerStatus {
      * @param requestId Request ID
      * @param taskInfo Task information
      */
-    public void putLocalTask(Long requestId, TaskInfo taskInfo) {
+    public void putLocalTask(String requestId, TaskInfo taskInfo) {
         localTaskMap.put(requestId, taskInfo);
         taskInfo.updateTaskState(TaskStateEnum.IN_TRANSIT);
 
@@ -75,7 +75,7 @@ public class WorkerStatus {
      * Remove task from local running queue
      * @param requestId Request ID
      */
-    public void removeLocalTask(Long requestId) {
+    public void removeLocalTask(String requestId) {
         TaskInfo taskInfo = localTaskMap.get(requestId);
         if (taskInfo != null) {
             safeDecrementQueueTime(runningQueueTime, taskInfo.estimatePrefillTime());
@@ -108,14 +108,13 @@ public class WorkerStatus {
      * Check for lost tasks, update running/waiting tasks, and clean up finished tasks
      */
     public void updateTaskStates(Map<String, TaskInfo> waitingTaskInfo, Map<String, TaskInfo> runningTaskInfo, Map<String, TaskInfo> finishedTaskInfo) {
-        Iterator<Map.Entry<Long, TaskInfo>> iterator = localTaskMap.entrySet().iterator();
+        Iterator<Map.Entry<String, TaskInfo>> iterator = localTaskMap.entrySet().iterator();
         while (iterator.hasNext()) {
-            Map.Entry<Long, TaskInfo> entry = iterator.next();
-            Long requestId = entry.getKey();
+            Map.Entry<String, TaskInfo> entry = iterator.next();
+            String requestId = entry.getKey();
             TaskInfo localTask = entry.getValue();
-            String requestIdStr = String.valueOf(requestId);
 
-            TaskInfo finishedTask = finishedTaskInfo != null ? finishedTaskInfo.get(requestIdStr) : null;
+            TaskInfo finishedTask = finishedTaskInfo != null ? finishedTaskInfo.get(requestId) : null;
             if (finishedTask != null) {
                 if (localTask.getTaskState() == TaskStateEnum.IN_TRANSIT) {
                     localTask.updateTaskState(TaskStateEnum.CONFIRMED);
@@ -132,7 +131,7 @@ public class WorkerStatus {
                 continue;
             }
 
-            TaskInfo runningTask = runningTaskInfo != null ? runningTaskInfo.get(requestIdStr) : null;
+            TaskInfo runningTask = runningTaskInfo != null ? runningTaskInfo.get(requestId) : null;
             if (runningTask != null) {
                 localTask.setLastActiveTimeUs(System.nanoTime() / 1000);
 
@@ -155,7 +154,7 @@ public class WorkerStatus {
                 continue;
             }
 
-            TaskInfo waitingTask = waitingTaskInfo != null ? waitingTaskInfo.get(requestIdStr) : null;
+            TaskInfo waitingTask = waitingTaskInfo != null ? waitingTaskInfo.get(requestId) : null;
             if (waitingTask != null) {
                 localTask.setLastActiveTimeUs(System.nanoTime() / 1000);
 
@@ -189,7 +188,7 @@ public class WorkerStatus {
             return;
         }
         long rectifiedEstimateRunningTime = 0;
-        for (Entry<Long, TaskInfo> entry : localTaskMap.entrySet()) {
+        for (Entry<String, TaskInfo> entry : localTaskMap.entrySet()) {
             TaskInfo taskInfo = entry.getValue();
             // Recalculate based on accurate cache hit count, rectify local task running queue time
             rectifiedEstimateRunningTime += taskInfo.estimatePrefillTime();
@@ -212,7 +211,7 @@ public class WorkerStatus {
         }
 
         long inTransitTaskCacheUsed = 0;
-        for (Map.Entry<Long, TaskInfo> entry : localTaskMap.entrySet()) {
+        for (Map.Entry<String, TaskInfo> entry : localTaskMap.entrySet()) {
             TaskInfo taskInfo = entry.getValue();
             // Calculate tokens occupied by in-transit task cache miss portion
             if (taskInfo.getTaskState() == TaskStateEnum.IN_TRANSIT) {

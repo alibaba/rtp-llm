@@ -345,7 +345,7 @@ class WorkerStatusTest {
     @DisplayName("updateTaskStates - waiting task handling")
     class UpdateTaskStatesTests {
 
-        private static final Long REQUEST_ID = 1000L;
+        private static final String REQUEST_ID = "request-1000";
 
         @BeforeEach
         void setUpWorkerStatus() {

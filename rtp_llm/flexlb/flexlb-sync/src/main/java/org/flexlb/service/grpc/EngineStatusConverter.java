@@ -86,7 +86,8 @@ public class EngineStatusConverter {
 
         for (EngineRpcService.TaskInfoPB taskInfoPB : taskInfoPBList) {
             TaskInfo taskInfo = new TaskInfo();
-            taskInfo.setRequestId(taskInfoPB.getRequestId());
+            String requestId = taskInfoPB.getRequestId();
+            taskInfo.setRequestId(requestId);
             taskInfo.setPrefixLength(taskInfoPB.getPrefixLength());
             taskInfo.setInputLength(taskInfoPB.getInputLength());
             taskInfo.setWaitingTime(taskInfoPB.getWaitingTimeMs());
@@ -94,7 +95,7 @@ public class EngineStatusConverter {
             taskInfo.setEndTimeMs(taskInfoPB.getEndTimeMs());
             taskInfo.setDpRank(taskInfoPB.getDpRank());
 
-            taskInfoMap.put(String.valueOf(taskInfoPB.getRequestId()), taskInfo);
+            taskInfoMap.put(requestId, taskInfo);
         }
 
         return taskInfoMap;

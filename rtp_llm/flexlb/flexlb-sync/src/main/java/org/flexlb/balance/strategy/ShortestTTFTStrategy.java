@@ -87,7 +87,7 @@ public class ShortestTTFTStrategy implements LoadBalancer {
      * @param requestId Request ID
      */
     @Override
-    public void rollBack(String ipPort, long requestId) {
+    public void rollBack(String ipPort, String requestId) {
 
         Map<String, WorkerStatus> workerStatusMap = engineWorkerStatus.selectModelWorkerStatus(RoleType.PREFILL, null);
         Logger.debug("Prefill rollBack - ipPort: {}, requestId: {}", ipPort, requestId);
@@ -107,7 +107,7 @@ public class ShortestTTFTStrategy implements LoadBalancer {
      * @return Selected server status
      */
     private ServerStatus doSelect(BalanceContext balanceContext, RoleType roleType, String group) {
-        long requestId = balanceContext.getRequestId();
+        String requestId = balanceContext.getRequestId();
         long seqLen = balanceContext.getRequest().getSeqLen();
 
         Logger.debug("Starting shortest TTFT selection for role: {}", roleType);
@@ -218,7 +218,7 @@ public class ShortestTTFTStrategy implements LoadBalancer {
     private ServerStatus finalizeWorkerSelection(ScoredWorker selectedWorker,
                                                  BalanceContext balanceContext,
                                                  RoleType roleType,
-                                                 long requestId,
+                                                 String requestId,
                                                  long seqLen) {
         WorkerStatus workerStatus = selectedWorker.worker();
 
@@ -268,7 +268,7 @@ public class ShortestTTFTStrategy implements LoadBalancer {
      * @param prefixLength Prefix length
      * @return Task information
      */
-    private TaskInfo createTaskInfo(long requestId, long inputLength, long prefixLength) {
+    private TaskInfo createTaskInfo(String requestId, long inputLength, long prefixLength) {
         TaskInfo task = new TaskInfo();
         task.setRequestId(requestId);
         task.setInputLength(inputLength);
@@ -413,7 +413,7 @@ public class ShortestTTFTStrategy implements LoadBalancer {
      * @param requestId Request ID
      * @return Server status
      */
-    private ServerStatus buildServerStatus(ScoredWorker selectedWorker, RoleType roleType, long requestId) {
+    private ServerStatus buildServerStatus(ScoredWorker selectedWorker, RoleType roleType, String requestId) {
         WorkerStatus workerStatus = selectedWorker.worker();
         ServerStatus result = new ServerStatus();
         try {

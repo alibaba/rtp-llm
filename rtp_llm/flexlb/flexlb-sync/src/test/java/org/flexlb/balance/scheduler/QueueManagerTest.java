@@ -43,7 +43,7 @@ class QueueManagerTest {
 
     @Test
     void tryRouteAsync_shouldEnqueueSuccessfully() {
-        BalanceContext ctx = createContext(1L);
+        BalanceContext ctx = createContext("request-1");
         var mono = queueManager.tryRouteAsync(ctx);
 
         assertNotNull(mono);
@@ -56,11 +56,11 @@ class QueueManagerTest {
     void tryRouteAsync_shouldRejectWhenQueueFull() {
         // Fill the queue
         for (int i = 0; i < 10; i++) {
-            queueManager.tryRouteAsync(createContext(i));
+            queueManager.tryRouteAsync(createContext("request-" + i));
         }
 
         // 11th request should be rejected
-        BalanceContext ctx = createContext(11L);
+        BalanceContext ctx = createContext("request-11");
         Response response = queueManager.tryRouteAsync(ctx).block();
 
         assertNotNull(response);
@@ -77,51 +77,51 @@ class QueueManagerTest {
 
     @Test
     void takeRequest_shouldReturnEnqueuedRequest() {
-        BalanceContext ctx = createContext(1L);
+        BalanceContext ctx = createContext("request-1");
         queueManager.tryRouteAsync(ctx);
 
         BalanceContext taken = queueManager.takeRequest(false, 0);
         assertNotNull(taken);
-        assertEquals(1L, taken.getRequestId());
+        assertEquals("request-1", taken.getRequestId());
     }
 
     @Test
     void takeRequest_shouldSkipCancelledRequests() {
-        BalanceContext cancelled = createContext(1L);
+        BalanceContext cancelled = createContext("request-1");
         queueManager.tryRouteAsync(cancelled);
         cancelled.cancel();
 
-        BalanceContext valid = createContext(2L);
+        BalanceContext valid = createContext("request-2");
         queueManager.tryRouteAsync(valid);
 
         BalanceContext taken = queueManager.takeRequest(false, 0);
         assertNotNull(taken);
-        assertEquals(2L, taken.getRequestId());
+        assertEquals("request-2", taken.getRequestId());
     }
 
     @Test
     void offerToHead_shouldRequeueAtFront() {
-        BalanceContext first = createContext(1L);
+        BalanceContext first = createContext("request-1");
         queueManager.tryRouteAsync(first);
 
-        BalanceContext retried = createContext(2L);
+        BalanceContext retried = createContext("request-2");
         retried.setFuture(new CompletableFuture<>());
         retried.setEnqueueTime(System.currentTimeMillis());
         queueManager.offerToHead(retried);
 
         BalanceContext taken = queueManager.takeRequest(false, 0);
         assertNotNull(taken);
-        assertEquals(2L, taken.getRequestId());
+        assertEquals("request-2", taken.getRequestId());
     }
 
     @Test
     void offerToHead_shouldCompleteWithErrorWhenQueueFull() {
         // Fill the queue
         for (int i = 0; i < 10; i++) {
-            queueManager.tryRouteAsync(createContext(i));
+            queueManager.tryRouteAsync(createContext("request-" + i));
         }
 
-        BalanceContext ctx = createContext(99L);
+        BalanceContext ctx = createContext("request-99");
         CompletableFuture<Response> future = new CompletableFuture<>();
         ctx.setFuture(future);
 
@@ -133,7 +133,7 @@ class QueueManagerTest {
         assertEquals(StrategyErrorType.QUEUE_FULL.getErrorCode(), response.getCode());
     }
 
-    private BalanceContext createContext(long requestId) {
+    private BalanceContext createContext(String requestId) {
         BalanceContext ctx = new BalanceContext();
         Request request = new Request();
         request.setRequestId(requestId);

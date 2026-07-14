@@ -90,7 +90,7 @@ class HttpLoadBalanceServerTest {
                 .uri("/rtp_llm/schedule")
                 .contentType(MediaType.APPLICATION_JSON)
                 .bodyValue(Map.of(
-                        "request_id", 1,
+                        "request_id", "c68b72ff-982d-944f-9834-bc0e8bf2f43f",
                         "seq_len", 5,
                         "input_ids", new long[]{1, 2, 3, 4, 5}))
                 .exchange()
@@ -101,6 +101,9 @@ class HttpLoadBalanceServerTest {
         assertEquals(
                 List.of(2164874634404590027L),
                 contextCaptor.getValue().getRequest().getBlockCacheKeys());
+        assertEquals(
+                "c68b72ff-982d-944f-9834-bc0e8bf2f43f",
+                contextCaptor.getValue().getRequestId());
         assertNull(contextCaptor.getValue().getRequest().getInputIds());
     }
 
@@ -122,7 +125,7 @@ class HttpLoadBalanceServerTest {
                 .uri("/rtp_llm/schedule")
                 .contentType(MediaType.APPLICATION_JSON)
                 .bodyValue(Map.of(
-                        "request_id", 1,
+                        "request_id", "request-1",
                         "seq_len", 4,
                         "input_ids", new long[]{1, 2, 3, 4}))
                 .exchange()
@@ -145,7 +148,7 @@ class HttpLoadBalanceServerTest {
         webTestClient.post()
                 .uri("/rtp_llm/schedule")
                 .contentType(MediaType.APPLICATION_JSON)
-                .bodyValue(Map.of("request_id", 1, "seq_len", 1))
+                .bodyValue(Map.of("request_id", "request-1", "seq_len", 1))
                 .exchange()
                 .expectStatus().isBadRequest()
                 .expectBody()
@@ -153,6 +156,21 @@ class HttpLoadBalanceServerTest {
                 .jsonPath("$.code").isEqualTo(8406)
                 .jsonPath("$.error_message")
                 .isEqualTo("block_cache_keys and input_ids must not both be empty");
+
+        verify(routeService, never()).route(any());
+    }
+
+    @Test
+    void rejectsBlankRequestId() {
+        webTestClient.post()
+                .uri("/rtp_llm/schedule")
+                .contentType(MediaType.APPLICATION_JSON)
+                .bodyValue(Map.of(
+                        "request_id", " ",
+                        "seq_len", 1,
+                        "input_ids", new long[]{1}))
+                .exchange()
+                .expectStatus().isBadRequest();
 
         verify(routeService, never()).route(any());
     }
@@ -175,7 +193,7 @@ class HttpLoadBalanceServerTest {
                     .uri("/rtp_llm/schedule")
                     .contentType(MediaType.APPLICATION_JSON)
                     .bodyValue(Map.of(
-                            "request_id", 1,
+                            "request_id", "request-1",
                             "seq_len", 4,
                             "block_size", 4,
                             "input_ids", new long[]{1, 2, 3, 4}))

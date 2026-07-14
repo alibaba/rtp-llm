@@ -151,7 +151,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
             workerStatus.setDpSize(newWorkerStatus.getDpSize());
             workerStatus.setTpSize(newWorkerStatus.getTpSize());
             workerStatus.setAlive(newWorkerStatus.isAlive());
-            workerStatus.getStatusVersion().set(responseVersion != null ? responseVersion : -1L);
+            workerStatus.getStatusVersion().set(responseVersion);
             workerStatus.getLatestFinishedTaskVersion().set(newWorkerStatus.getLatestFinishedVersion() != null ? newWorkerStatus.getLatestFinishedVersion() : -1L);
 
             Map<String, TaskInfo> waitingTaskInfo = newWorkerStatus.getWaitingTaskInfo();

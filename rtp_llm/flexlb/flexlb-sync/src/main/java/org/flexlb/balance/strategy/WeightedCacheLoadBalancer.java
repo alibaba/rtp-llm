@@ -104,7 +104,7 @@ public class WeightedCacheLoadBalancer implements LoadBalancer {
      * @param requestId Request ID
      */
     @Override
-    public void rollBack(String ipPort, long requestId) {
+    public void rollBack(String ipPort, String requestId) {
 
         Map<String, WorkerStatus> workerStatusMap = engineWorkerStatus.selectModelWorkerStatus(RoleType.DECODE, null);
         Logger.debug("Decode rollBack - ip: {}, requestId: {}",
@@ -199,7 +199,7 @@ public class WeightedCacheLoadBalancer implements LoadBalancer {
                 .orElse(null);
     }
 
-    private ServerStatus buildServerStatus(WorkerStatus optimalWorker, long seqLen, long prefixLength, RoleType roleType, long requestId) {
+    private ServerStatus buildServerStatus(WorkerStatus optimalWorker, long seqLen, long prefixLength, RoleType roleType, String requestId) {
         ServerStatus result = new ServerStatus();
         try {
             TaskInfo taskInfo = new TaskInfo();

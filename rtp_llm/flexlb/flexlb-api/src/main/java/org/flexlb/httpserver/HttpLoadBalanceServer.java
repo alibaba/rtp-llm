@@ -1,6 +1,7 @@
 package org.flexlb.httpserver;
 
 import lombok.extern.slf4j.Slf4j;
+import org.apache.commons.lang3.StringUtils;
 import org.flexlb.balance.scheduler.QueueManager;
 import org.flexlb.consistency.LBStatusConsistencyService;
 import org.flexlb.dao.BalanceContext;
@@ -97,10 +98,10 @@ public class HttpLoadBalanceServer {
         BalanceContext ctx = new BalanceContext();
         return request.bodyToMono(Request.class)
                 .flatMap(req -> {
-                    if (req.getRequestId() == 0) {
-                        throw new IllegalArgumentException("requestId is 0");
-                    }
                     ctx.setRequest(req);
+                    if (StringUtils.isBlank(req.getRequestId())) {
+                        throw new IllegalArgumentException("requestId must not be blank");
+                    }
                     return Mono.using(
                             activeRequestCounter::acquire,
                             ignored -> processScheduledRequest(ctx, req),

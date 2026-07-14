@@ -56,7 +56,7 @@ class RequestSchedulerTest {
 
     @Test
     void processRequest_shouldCompleteOnSuccess() throws Exception {
-        BalanceContext ctx = createContext(1L);
+        BalanceContext ctx = createContext("request-1");
         Response successResponse = new Response();
         successResponse.setSuccess(true);
         when(router.route(ctx)).thenReturn(successResponse);
@@ -73,7 +73,7 @@ class RequestSchedulerTest {
 
     @Test
     void processRequest_shouldRetryOnRetryableError() throws Exception {
-        BalanceContext ctx = createContext(1L);
+        BalanceContext ctx = createContext("request-1");
         Response errorResponse = Response.error(StrategyErrorType.NO_AVAILABLE_WORKER);
         when(router.route(ctx)).thenReturn(errorResponse);
 
@@ -88,7 +88,7 @@ class RequestSchedulerTest {
 
     @Test
     void processRequest_shouldNotRetryOnNonRetryableError() throws Exception {
-        BalanceContext ctx = createContext(1L);
+        BalanceContext ctx = createContext("request-1");
         Response errorResponse = Response.error(StrategyErrorType.INVALID_REQUEST);
         when(router.route(ctx)).thenReturn(errorResponse);
 
@@ -104,7 +104,7 @@ class RequestSchedulerTest {
 
     @Test
     void processRequest_shouldStopRetryingAfterMaxRetries() throws Exception {
-        BalanceContext ctx = createContext(1L);
+        BalanceContext ctx = createContext("request-1");
         // Simulate already retried 3 times (max)
         for (int i = 0; i < 3; i++) {
             ctx.incrementRetryCount();
@@ -126,7 +126,7 @@ class RequestSchedulerTest {
 
     @Test
     void processRequest_shouldCompleteExceptionallyOnException() throws Exception {
-        BalanceContext ctx = createContext(1L);
+        BalanceContext ctx = createContext("request-1");
         when(router.route(ctx)).thenThrow(new RuntimeException("routing error"));
 
         var method = RequestScheduler.class.getDeclaredMethod("processRequest", BalanceContext.class);
@@ -136,7 +136,7 @@ class RequestSchedulerTest {
         assertTrue(ctx.getFuture().isCompletedExceptionally());
     }
 
-    private BalanceContext createContext(long requestId) {
+    private BalanceContext createContext(String requestId) {
         BalanceContext ctx = new BalanceContext();
         Request request = new Request();
         request.setRequestId(requestId);

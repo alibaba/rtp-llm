@@ -4,6 +4,7 @@ import org.flexlb.domain.worker.WorkerStatusResponse;
 import org.flexlb.engine.grpc.EngineRpcService;
 import org.junit.jupiter.api.Test;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 
 class EngineStatusConverterTest {
@@ -17,5 +18,21 @@ class EngineStatusConverterTest {
                 EngineStatusConverter.convertToWorkerStatusResponse(workerStatus);
 
         assertNull(response.getCacheStatus());
+    }
+
+    @Test
+    void preservesStringRequestIdFromWorkerStatus() {
+        String requestId = "c68b72ff-982d-944f-9834-bc0e8bf2f43f";
+        EngineRpcService.TaskInfoPB finishedTask = EngineRpcService.TaskInfoPB.newBuilder()
+                .setRequestId(requestId)
+                .build();
+        EngineRpcService.WorkerStatusPB workerStatus = EngineRpcService.WorkerStatusPB.newBuilder()
+                .addFinishedTaskList(finishedTask)
+                .build();
+
+        WorkerStatusResponse response =
+                EngineStatusConverter.convertToWorkerStatusResponse(workerStatus);
+
+        assertEquals(requestId, response.getFinishedTaskInfo().get(requestId).getRequestId());
     }
 }

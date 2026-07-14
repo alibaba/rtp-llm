@@ -52,7 +52,7 @@ class ShortestTTFTStrategyTest {
         prefillStatusMap.put("127.0.0.2:8080", workerStatus1);
         Request req = new Request();
         req.setSeqLen(1000);
-        req.setRequestId(12345L);
+        req.setRequestId("request-12345");
         List<Long> blockCacheKeys = new ArrayList<>();
         blockCacheKeys.add(1L);
         blockCacheKeys.add(2L);
@@ -80,6 +80,7 @@ class ShortestTTFTStrategyTest {
         }
         Assertions.assertTrue(result.isSuccess(), "Result should be successful but got: " + result.getMessage());
         Assertions.assertEquals("127.0.0.2", result.getServerIp());
+        Assertions.assertEquals("request-12345", result.getRequestId());
     }
 
     WorkerStatus createWorkerStatus(String ip,

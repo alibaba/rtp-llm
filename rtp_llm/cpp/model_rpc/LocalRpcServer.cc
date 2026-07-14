@@ -292,7 +292,7 @@ grpc::Status LocalRpcServer::GetWorkerStatus(grpc::ServerContext*   context,
 
     for (const auto& task : engine_schedule_info.running_task_info_list) {
         TaskInfoPB* task_info = response->add_running_task_info();
-        task_info->set_request_id(task.request_id);
+        task_info->set_request_id(std::to_string(task.request_id));
         task_info->set_prefix_length(task.prefix_length);
         task_info->set_input_length(task.input_length);
         task_info->set_waiting_time_ms(task.waiting_time_ms);
@@ -304,7 +304,7 @@ grpc::Status LocalRpcServer::GetWorkerStatus(grpc::ServerContext*   context,
 
     for (const auto& task : engine_schedule_info.finished_task_info_list) {
         TaskInfoPB* task_info = response->add_finished_task_list();
-        task_info->set_request_id(task.request_id);
+        task_info->set_request_id(std::to_string(task.request_id));
         task_info->set_prefix_length(task.prefix_length);
         task_info->set_input_length(task.input_length);
         task_info->set_waiting_time_ms(task.waiting_time_ms);

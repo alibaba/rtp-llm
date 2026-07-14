@@ -27,7 +27,7 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 import static org.mockito.Mockito.any;
-import static org.mockito.Mockito.anyLong;
+import static org.mockito.Mockito.anyString;
 import static org.mockito.Mockito.eq;
 import static org.mockito.Mockito.isNull;
 import static org.mockito.Mockito.lenient;
@@ -98,7 +98,7 @@ class DefaultRouterTest {
 
         // Mock balance context
         lenient().when(balanceContext.getRequest()).thenReturn(request);
-        lenient().when(balanceContext.getRequestId()).thenReturn(12345L);
+        lenient().when(balanceContext.getRequestId()).thenReturn("request-12345");
     }
 
     @org.junit.jupiter.api.AfterEach
@@ -229,7 +229,7 @@ class DefaultRouterTest {
         fusionServerStatus.setServerIp("192.168.1.3");
         fusionServerStatus.setHttpPort(8082);
         fusionServerStatus.setGroup("group2");
-        fusionServerStatus.setRequestId(54321L);
+        fusionServerStatus.setRequestId("request-54321");
         when(fusionLoadBalancer.select(any(BalanceContext.class), eq(RoleType.PDFUSION), isNull())).thenReturn(fusionServerStatus);
 
         // Execute
@@ -400,7 +400,7 @@ class DefaultRouterTest {
         // Verify
         assertFalse(response.isSuccess(), "Response should not be successful");
         assertEquals(StrategyErrorType.NO_PREFILL_WORKER.getErrorCode(), response.getCode(), "Error code should match NO_PREFILL_WORKER");
-        verify(decodeLoadBalancer).rollBack(eq("192.168.1.2:8081"), anyLong());
+        verify(decodeLoadBalancer).rollBack(eq("192.168.1.2:8081"), anyString());
     }
 
     @Test
@@ -466,7 +466,7 @@ class DefaultRouterTest {
         fusionServerStatus.setServerIp("192.168.1.3");
         fusionServerStatus.setHttpPort(8082);
         fusionServerStatus.setGroup("group2");
-        fusionServerStatus.setRequestId(54321L);
+        fusionServerStatus.setRequestId("request-54321");
         when(fusionLoadBalancer.select(any(BalanceContext.class), eq(RoleType.PDFUSION), isNull())).thenReturn(fusionServerStatus);
 
         ServerStatus vitServerStatus = new ServerStatus();

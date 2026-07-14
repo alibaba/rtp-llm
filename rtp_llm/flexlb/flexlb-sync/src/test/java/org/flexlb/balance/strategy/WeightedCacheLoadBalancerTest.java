@@ -60,7 +60,7 @@ class WeightedCacheLoadBalancerTest {
 
         Request req = new Request();
         req.setSeqLen(1000);
-        req.setRequestId(1000L);
+        req.setRequestId("request-1000");
 
         BalanceContext balanceContext = new BalanceContext();
         balanceContext.setRequest(req);
@@ -89,7 +89,7 @@ class WeightedCacheLoadBalancerTest {
 
         Request req = new Request();
         req.setSeqLen(1000);
-        req.setRequestId(1000L);
+        req.setRequestId("request-1000");
 
         ResourceMeasureFactory resourceMeasureFactory = Mockito.mock(ResourceMeasureFactory.class);
         DecodeResourceMeasure decodeResourceMeasure = Mockito.mock(DecodeResourceMeasure.class);
@@ -131,7 +131,7 @@ class WeightedCacheLoadBalancerTest {
 
         Request req = new Request();
         req.setSeqLen(1000);
-        req.setRequestId(1000L);
+        req.setRequestId("request-1000");
 
         ResourceMeasureFactory resourceMeasureFactory = Mockito.mock(ResourceMeasureFactory.class);
         DecodeResourceMeasure decodeResourceMeasure = Mockito.mock(DecodeResourceMeasure.class);
@@ -164,7 +164,7 @@ class WeightedCacheLoadBalancerTest {
 
         Request req = new Request();
         req.setSeqLen(1000);
-        req.setRequestId(1000L);
+        req.setRequestId("request-1000");
 
         ResourceMeasureFactory resourceMeasureFactory = Mockito.mock(ResourceMeasureFactory.class);
         DecodeResourceMeasure decodeResourceMeasure = Mockito.mock(DecodeResourceMeasure.class);
@@ -218,14 +218,15 @@ class WeightedCacheLoadBalancerTest {
         Map<String, Integer> selectionCount = new HashMap<>();
 
         for (int i = 0; i < totalRuns; i++) {
-            balanceContext.getRequest().setRequestId(1000L + i);
+            String requestId = "request-" + (1000L + i);
+            balanceContext.getRequest().setRequestId(requestId);
             ServerStatus status = weightedCacheLoadBalancer.select(balanceContext, RoleType.DECODE, null);
 
             if (status.isSuccess()) {
                 String selectedIp = status.getServerIp();
                 selectionCount.put(selectedIp, selectionCount.getOrDefault(selectedIp, 0) + 1);
                 // Rollback to reset local tasks and cache usage
-                weightedCacheLoadBalancer.rollBack(selectedIp + ":8080", 1000L + i);
+                weightedCacheLoadBalancer.rollBack(selectedIp + ":8080", requestId);
             }
         }
 
