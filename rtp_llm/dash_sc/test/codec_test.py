@@ -10,13 +10,13 @@ import torch
 
 from rtp_llm.dash_sc.client import build_model_infer_request
 from rtp_llm.dash_sc.codec import (
-    _DEFAULT_MAX_COMPLETION_TOKENS,
     _DEFAULT_MAX_NEW_TOKENS,
     _DEFAULT_MAX_THINKING_TOKENS,
     FINISH_REASON_USE_PARAMETER_STATUS,
     DashScParameterError,
     OtherParams,
     SamplingParams,
+    build_error_response,
     build_stream_response_from_generate_outputs,
     parse_dash_sc_grpc_request,
     parse_input_ids_from_request,
@@ -569,14 +569,15 @@ class DashScGrpcRequestTest(TestCase):
         req.parameters["max_completion_tokens"].int64_param = 100
         sp = parse_sampling_params(req)
         self.assertEqual(sp.max_new_tokens, _DEFAULT_MAX_NEW_TOKENS)
+        self.assertTrue(sp.max_new_tokens_from_completion_alias)
         self.assertEqual(sp.max_total_tokens, 200)
         self.assertEqual(sp.max_completion_tokens, 100)
-        self.assertFalse(hasattr(sp, "max_new_tokens_from_completion_alias"))
 
         req = predict_v2_pb2.ModelInferRequest()
         req.parameters["max_tokens"].int64_param = 64
         sp = parse_sampling_params(req)
         self.assertEqual(sp.max_new_tokens, _DEFAULT_MAX_NEW_TOKENS)
+        self.assertFalse(sp.max_new_tokens_from_completion_alias)
         self.assertEqual(sp.max_total_tokens, 64)
 
     def test_parse_sampling_top_p_as_int32(self) -> None:
@@ -609,66 +610,24 @@ class DashScGrpcRequestTest(TestCase):
         sp = parse_sampling_params(req)
 
         self.assertEqual(sp.max_new_tokens, _DEFAULT_MAX_NEW_TOKENS)
+        self.assertFalse(sp.max_new_tokens_from_completion_alias)
 
-    def test_non_positive_max_completion_is_normalized_once_for_backend(
+    def test_parse_sampling_max_completion_tokens_non_positive_preserved(
         self,
     ) -> None:
-        for value in (-2, -1, 0):
+        for value in (-1, 0):
             with self.subTest(value=value):
                 req = predict_v2_pb2.ModelInferRequest()
                 req.parameters["max_completion_tokens"].int64_param = value
                 sp = parse_sampling_params(req)
                 self.assertEqual(sp.max_new_tokens, _DEFAULT_MAX_NEW_TOKENS)
-                self.assertEqual(
-                    sp.max_completion_tokens, _DEFAULT_MAX_COMPLETION_TOKENS
-                )
-                self.assertEqual(
-                    sp.to_generate_config().max_completion_tokens,
-                    _DEFAULT_MAX_COMPLETION_TOKENS,
-                )
-                self.assertFalse(hasattr(sp, "raw_max_completion_tokens"))
-
-    def test_backend_ignores_upstream_only_thinking_budget(self) -> None:
-        req = predict_v2_pb2.ModelInferRequest()
-        _add_tensor(req, "input_ids", "INT32", [1], struct.pack("<i", 1))
-        req.parameters["thinking_budget"].int64_param = 50
-        req.parameters["max_completion_tokens"].int64_param = -1
-        req.parameters["enable_thinking"].bool_param = True
-
-        _, sampling, other = parse_dash_sc_grpc_request(req)
-
-        self.assertIsNotNone(sampling)
-        self.assertIsNotNone(other)
-        self.assertEqual(sampling.max_completion_tokens, _DEFAULT_MAX_COMPLETION_TOKENS)
-        self.assertEqual(
-            sampling.to_generate_config(other=other).max_completion_tokens,
-            _DEFAULT_MAX_COMPLETION_TOKENS,
-        )
-        self.assertIsNone(sampling.max_new_think_tokens)
-        self.assertIsNone(other.max_new_think_tokens)
-        self.assertFalse(hasattr(other, "thinking_budget"))
-        self.assertTrue(other.enable_thinking)
-
-    def test_non_positive_completion_uses_fallback(
-        self,
-    ) -> None:
-        req = predict_v2_pb2.ModelInferRequest()
-        _add_tensor(req, "input_ids", "INT32", [1], struct.pack("<i", 1))
-        req.parameters["max_completion_tokens"].int64_param = 0
-
-        _, sampling, _ = parse_dash_sc_grpc_request(req)
-
-        self.assertIsNotNone(sampling)
-        self.assertEqual(sampling.max_completion_tokens, _DEFAULT_MAX_COMPLETION_TOKENS)
-        self.assertEqual(
-            sampling.to_generate_config().max_completion_tokens,
-            _DEFAULT_MAX_COMPLETION_TOKENS,
-        )
+                self.assertTrue(sp.max_new_tokens_from_completion_alias)
+                self.assertEqual(sp.max_completion_tokens, value)
 
     def test_parse_sampling_max_completion_tokens_non_positive_blocks_legacy_aliases(
         self,
     ) -> None:
-        for value in (-2, -1, 0):
+        for value in (-1, 0):
             with self.subTest(value=value):
                 req = predict_v2_pb2.ModelInferRequest()
                 _add_tensor(
@@ -685,33 +644,19 @@ class DashScGrpcRequestTest(TestCase):
                     [1],
                     struct.pack("<i", -1),
                 )
-                req.parameters["max_tokens"].int64_param = 1
 
                 sp = parse_sampling_params(req)
 
                 self.assertEqual(sp.max_new_tokens, _DEFAULT_MAX_NEW_TOKENS)
-                self.assertEqual(sp.max_total_tokens, 1)
-                self.assertEqual(
-                    sp.max_completion_tokens, _DEFAULT_MAX_COMPLETION_TOKENS
-                )
-                generate_config = sp.to_generate_config(
-                    other=OtherParams(enable_thinking=True, max_new_think_tokens=50)
-                )
-                self.assertEqual(
-                    generate_config.max_new_tokens, _DEFAULT_MAX_NEW_TOKENS
-                )
-                self.assertEqual(generate_config.max_tokens, 1)
-                self.assertEqual(
-                    generate_config.max_completion_tokens,
-                    _DEFAULT_MAX_COMPLETION_TOKENS,
-                )
-                self.assertEqual(generate_config.max_thinking_tokens, 50)
+                self.assertTrue(sp.max_new_tokens_from_completion_alias)
+                self.assertEqual(sp.max_completion_tokens, value)
 
     def test_completion_alias_thinking_budget_keeps_backend_limit(
         self,
     ) -> None:
         sampling = SamplingParams(
             max_new_tokens=100,
+            max_new_tokens_from_completion_alias=True,
             max_completion_tokens=100,
         )
         other = OtherParams(enable_thinking=True, max_new_think_tokens=10)
@@ -727,6 +672,7 @@ class DashScGrpcRequestTest(TestCase):
     ) -> None:
         sampling = SamplingParams(
             max_new_tokens=100,
+            max_new_tokens_from_completion_alias=True,
             max_total_tokens=105,
             max_completion_tokens=100,
         )
@@ -869,21 +815,13 @@ class DashScGrpcRequestTest(TestCase):
         op = parse_other_params(req)
         self.assertEqual(op.reasoning_effort, "xhigh")
 
-    def test_backend_only_consumes_proxy_normalized_think_budget(self) -> None:
+    def test_parse_other_params_dashscope_body_thinking_aliases(self) -> None:
         req = predict_v2_pb2.ModelInferRequest()
-        _add_tensor(req, "input_ids", "INT32", [1], struct.pack("<i", 1))
-        req.parameters["enable_thinking"].bool_param = True
+        req.parameters["enable_thinking"].bool_param = False
         req.parameters["thinking_budget"].int64_param = 100
-        req.parameters["max_new_think_tokens"].int64_param = 101
-        _, sampling, other = parse_dash_sc_grpc_request(req)
-
-        self.assertIsNotNone(sampling)
-        self.assertIsNotNone(other)
-        assert sampling is not None and other is not None
-        self.assertIs(other.enable_thinking, True)
-        self.assertEqual(other.max_new_think_tokens, 101)
-        self.assertIsNone(sampling.max_new_think_tokens)
-        self.assertFalse(hasattr(other, "thinking_budget"))
+        op = parse_other_params(req)
+        self.assertIs(op.enable_thinking, False)
+        self.assertEqual(op.max_new_think_tokens, 100)
 
     def test_parse_dash_sc_grpc_request_ok(self) -> None:
         req = predict_v2_pb2.ModelInferRequest()

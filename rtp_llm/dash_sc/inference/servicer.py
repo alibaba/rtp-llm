@@ -26,7 +26,6 @@ from rtp_llm.config.generate_config import GenerateConfig
 from rtp_llm.dash_sc.access_log import emit_access_log, emit_query_log
 from rtp_llm.dash_sc.access_record import GrpcAccessRecord, to_optional_int
 from rtp_llm.dash_sc.codec import (
-    _DEFAULT_MAX_COMPLETION_TOKENS,
     FINISH_REASON_ABORT,
     FINISH_REASON_LENGTH,
     FINISH_REASON_STOP_ENGINE_PARAM,
@@ -393,6 +392,9 @@ def _positive_int(value: Any) -> Optional[int]:
     return value if value > 0 else None
 
 
+_DEFAULT_MAX_COMPLETION_TOKENS = 131072
+
+
 def _completion_budget(value: Any) -> Optional[int]:
     if value is None:
         return None
@@ -501,12 +503,10 @@ def _apply_request_overrides(
     # Only the selected budget disables thinking; ``max_think_length`` may
     # intentionally override a zero ``max_new_think_tokens`` alias.
     disable_by_budget = request_max_think == 0
-    # An omitted ``enable_thinking`` preserves the model/environment default.
-    # This is observably different from an explicit false value for DashScope:
-    # thinking models keep the renderer-provided ``<think>`` prefix and report
-    # reasoning usage unless the caller disables thinking or selects a zero
-    # request-scoped budget.
-    if other.enable_thinking is False or disable_by_budget:
+    # DashLLM/sglang-compatible Dash requests stay in chat mode unless the
+    # caller explicitly asks for thinking or a request-scoped think budget.
+    disable_by_default = other.enable_thinking is None and request_max_think is None
+    if other.enable_thinking is False or disable_by_budget or disable_by_default:
         generate_config.in_think_mode = False
         generate_config.max_thinking_tokens = 0
         if hasattr(generate_config, "thinking"):
@@ -752,7 +752,6 @@ async def iter_real_model_stream_infer(
                     # (DashLLM-aligned). Phase-2 is exclusively triggered by
                     # the terminate-token-id (DSV4 token 1) path below — see
                     # the comment block near ``phase2_triggered`` init.
-            completion_length_trimmed = False
             if (
                 phase2_enabled
                 and not phase2_triggered
@@ -845,42 +844,10 @@ async def iter_real_model_stream_infer(
                     )
                 phase2_needed = will_do_phase2
                 break
-            # The engine reserves room for ``end_think_token_ids`` on top of
-            # max_completion_tokens.  If it reaches the length limit without
-            # actually emitting the close sequence, those reserved slots may
-            # contain ordinary reasoning tokens.  DashScope does not expose or
-            # account those surplus tokens, so trim them from the final chunk.
+            cumulative_sent_ids.extend(ids_for_accounting)
+            finish_reason_override = None
             if (
                 out_py.finished
-                and generate_think_token_num is None
-                and getattr(generate_config, "in_think_mode", False)
-                and (
-                    completion_budget := _completion_budget(
-                        getattr(generate_config, "max_completion_tokens", None)
-                    )
-                )
-                is not None
-            ):
-                wire_prefix_budget = len(matched_echo_ids) if should_echo else 0
-                max_accounted_ids = completion_budget + wire_prefix_budget
-                remaining_ids = max(0, max_accounted_ids - len(cumulative_sent_ids))
-                if len(ids_for_accounting) > remaining_ids:
-                    current_echo_ids = (
-                        matched_echo_ids
-                        if should_echo and not echoed and generated_ids
-                        else []
-                    )
-                    keep_generated_ids = max(0, remaining_ids - len(current_echo_ids))
-                    generated_ids = generated_ids[:keep_generated_ids]
-                    ids_for_accounting = current_echo_ids + generated_ids
-                    completion_length_trimmed = True
-            cumulative_sent_ids.extend(ids_for_accounting)
-            finish_reason_override = (
-                FINISH_REASON_LENGTH if completion_length_trimmed else None
-            )
-            if (
-                finish_reason_override is None
-                and out_py.finished
                 and (
                     length_budget := _phase1_finish_length_budget(
                         generate_config, generate_think_token_num
@@ -913,7 +880,6 @@ async def iter_real_model_stream_infer(
                 generate_think_token_num=generate_think_token_num,
                 finish_reason_override=finish_reason_override,
                 _request_shape=request_shape,
-                token_ids=generated_ids,
             )
             if should_echo and not echoed and generated_ids:
                 if prepend_to_generated_ids_tensor(
