@@ -51,6 +51,8 @@ timm==0.9.12
 transformers==5.2.0
 typing-extensions
 uvicorn==0.30.0
+watchdog==6.0.0
 xfastertransformer_devel==1.8.1.1 ; platform_machine == "x86_64"
 xfastertransformer_devel_icx==1.8.1.1 ; platform_machine == "x86_64"
 pybind11_stubgen
+zstandard==0.23.0

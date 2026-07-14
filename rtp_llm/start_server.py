@@ -5,9 +5,8 @@ import sys
 import time
 import traceback
 
+import requests
 import torch
-
-from rtp_llm.utils.time_util import timer_wrapper
 
 CUR_PATH = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(os.path.join(str(CUR_PATH), ".."))
@@ -19,6 +18,7 @@ from rtp_llm.ops import RoleType, VitSeparation
 from rtp_llm.server.server_args.server_args import setup_args
 from rtp_llm.utils.concurrency_controller import init_controller
 from rtp_llm.utils.process_manager import ProcessManager
+from rtp_llm.utils.time_util import timer_wrapper
 
 setup_logging()
 

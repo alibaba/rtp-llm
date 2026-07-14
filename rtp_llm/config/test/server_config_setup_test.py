@@ -43,6 +43,16 @@ class ServerConfigPortLayoutTest(TestCase):
 
 class GenerateConfigTest(TestCase):
 
+    def setUp(self):
+        # clear=True below removes CUDA_VISIBLE_DEVICES after torch is imported;
+        # these config-only tests must not trigger real CUDA lazy initialization.
+        cuda_available = patch(
+            "rtp_llm.config.server_config_setup.torch.cuda.is_available",
+            return_value=False,
+        )
+        cuda_available.start()
+        self.addCleanup(cuda_available.stop)
+
     @patch.dict(
         "os.environ",
         {
