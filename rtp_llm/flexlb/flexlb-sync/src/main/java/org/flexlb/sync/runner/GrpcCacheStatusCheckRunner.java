@@ -129,7 +129,7 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
                 return;
             }
 
-            engineHealthReporter.reportCacheStatusCheckRemoteInfo(modelName, ipPort, roleType.name(), startTime);
+            engineHealthReporter.reportCacheStatusCheckRemoteInfo(modelName, ip, ipPort, roleType.name(), startTime);
 
             if (validateCacheStatusResponse(workerStatus, newCacheStatus)) {
 
@@ -143,7 +143,7 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
 
         } catch (Throwable e) {
             log("engine cache status check via gRPC exception, msg: " + e.getMessage(), e);
-            engineHealthReporter.reportCacheStatusCheckerFail(modelName, ipPort, BalanceStatusEnum.CACHE_SERVICE_UNAVAILABLE);
+            engineHealthReporter.reportCacheStatusCheckerFail(modelName, ip, ipPort, BalanceStatusEnum.CACHE_SERVICE_UNAVAILABLE);
         }
     }
 
@@ -183,11 +183,11 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
             WorkerCacheUpdateResult result = cacheAwareService.updateEngineBlockCache(workerStatus);
             if (!result.isSuccess()) {
                 logger.warn("Failed to update worker cache for IP: {}, error: {}", workerStatus.getIp(), result.getErrorMessage());
-                engineHealthReporter.reportCacheStatusCheckerFail(modelName, ipPort, BalanceStatusEnum.CACHE_UPDATE_FAILED);
+                engineHealthReporter.reportCacheStatusCheckerFail(modelName, ip, ipPort, BalanceStatusEnum.CACHE_UPDATE_FAILED);
             }
         } catch (Exception e) {
             logger.warn("Exception to update worker cache for IP: {}, error: {}", workerStatus.getIp(), e.getMessage());
-            engineHealthReporter.reportCacheStatusCheckerFail(modelName, ipPort, BalanceStatusEnum.CACHE_UPDATE_FAILED);
+            engineHealthReporter.reportCacheStatusCheckerFail(modelName, ip, ipPort, BalanceStatusEnum.CACHE_UPDATE_FAILED);
         }
     }
 
@@ -216,9 +216,9 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
         log("gRPC cache status check failed:ipPort:" + ipPort + ", with exception: " + ex.getMessage());
         // Report specific error based on exception type
         if (ex.getMessage() != null && ex.getMessage().toLowerCase().contains(DEADLINE_EXCEEDED_MESSAGE.toLowerCase())) {
-            engineHealthReporter.reportCacheStatusCheckerFail(modelName, ipPort, BalanceStatusEnum.CACHE_GRPC_TIMEOUT);
+            engineHealthReporter.reportCacheStatusCheckerFail(modelName, ip, ipPort, BalanceStatusEnum.CACHE_GRPC_TIMEOUT);
         } else {
-            engineHealthReporter.reportCacheStatusCheckerFail(modelName, ipPort, BalanceStatusEnum.CACHE_SERVICE_UNAVAILABLE);
+            engineHealthReporter.reportCacheStatusCheckerFail(modelName, ip, ipPort, BalanceStatusEnum.CACHE_SERVICE_UNAVAILABLE);
         }
     }
 

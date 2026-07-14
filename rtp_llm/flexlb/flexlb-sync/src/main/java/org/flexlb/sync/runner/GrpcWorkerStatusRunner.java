@@ -102,11 +102,11 @@ public class GrpcWorkerStatusRunner implements Runnable {
         try {
             if (newWorkerStatus == null) {
                 logger.info("query engine worker status via gRPC, response body is null");
-                engineHealthReporter.reportStatusCheckerFail(modelName, BalanceStatusEnum.RESPONSE_NULL, ip, roleType);
+                engineHealthReporter.reportStatusCheckerFail(modelName, BalanceStatusEnum.RESPONSE_NULL, ip, ipPort, roleType);
                 return;
             }
 
-            engineHealthReporter.reportStatusCheckRemoteInfo(modelName, ipPort, newWorkerStatus.getRole() != null ? newWorkerStatus.getRole().name() : "UNKNOWN", startTime);
+            engineHealthReporter.reportStatusCheckRemoteInfo(modelName, ip, ipPort, newWorkerStatus.getRole() != null ? newWorkerStatus.getRole().name() : "UNKNOWN", startTime);
 
             // Reset consecutive failure counter on successful response
             workerStatus.getConsecutiveFailures().set(0);
@@ -151,17 +151,20 @@ public class GrpcWorkerStatusRunner implements Runnable {
                 if (batchScheduler != null) {
                     batchScheduler.onWorkerStatusUpdate(workerStatus, newWorkerStatus);
                 }
+
+                // 4. Advance latestFinishedVersion only after calibrate has processed finished tasks.
+                // If this is done outside the version guard, a skipped calibrate (version not
+                // advanced) would still consume the incremental version, causing the engine to
+                // filter out those finished tasks on the next poll — leaking inflight entries.
+                Long latestFinishedVersion = newWorkerStatus.getLatestFinishedVersion();
+                if (latestFinishedVersion != null
+                        && latestFinishedVersion > workerStatus.getLatestFinishedTaskVersion().get()) {
+                    workerStatus.getLatestFinishedTaskVersion().set(latestFinishedVersion);
+                }
             } else {
                 logger.info("query engine worker status via gRPC, version is not updated, "
                                 + "currentVersion: {}, responseVersion: {}",
                         currentVersion, responseVersion);
-            }
-
-            // 4. Update latestFinishedVersion if remote is ahead (always, regardless of status version)
-            Long latestFinishedVersion = newWorkerStatus.getLatestFinishedVersion();
-            if (latestFinishedVersion != null
-                    && latestFinishedVersion > workerStatus.getLatestFinishedTaskVersion().get()) {
-                workerStatus.getLatestFinishedTaskVersion().set(latestFinishedVersion);
             }
 
             engineHealthReporter.reportStatusCheckerSuccess(modelName, workerStatus, ep,
@@ -172,7 +175,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
 
         } catch (Throwable e) {
             log("engine worker status check via gRPC exception, msg: " + e.getMessage());
-            engineHealthReporter.reportStatusCheckerFail(modelName, BalanceStatusEnum.UNKNOWN_ERROR, ip, roleType);
+            engineHealthReporter.reportStatusCheckerFail(modelName, BalanceStatusEnum.UNKNOWN_ERROR, ip, ipPort, roleType);
         }
     }
 
@@ -205,9 +208,9 @@ public class GrpcWorkerStatusRunner implements Runnable {
         // Report specific error based on exception type
         if (ex.getMessage() != null && ex.getMessage().toLowerCase().contains(DEADLINE_EXCEEDED_MESSAGE.toLowerCase())) {
             logger.info("gRPC worker status check timeout, msg={}, ipPort: {}, rt: {}", ex.getMessage(), ipPort, System.nanoTime() / 1000 - createTimeUs);
-            engineHealthReporter.reportStatusCheckerFail(modelName, BalanceStatusEnum.WORKER_STATUS_GRPC_TIMEOUT, ip, roleType);
+            engineHealthReporter.reportStatusCheckerFail(modelName, BalanceStatusEnum.WORKER_STATUS_GRPC_TIMEOUT, ip, ipPort, roleType);
         } else {
-            engineHealthReporter.reportStatusCheckerFail(modelName, BalanceStatusEnum.WORKER_SERVICE_UNAVAILABLE, ip, roleType);
+            engineHealthReporter.reportStatusCheckerFail(modelName, BalanceStatusEnum.WORKER_SERVICE_UNAVAILABLE, ip, ipPort, roleType);
         }
     }
 

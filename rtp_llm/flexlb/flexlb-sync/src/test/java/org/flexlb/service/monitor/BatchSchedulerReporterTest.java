@@ -41,18 +41,19 @@ class BatchSchedulerReporterTest {
 
     @Test
     void should_report_dispatch_reason_with_correct_tags() {
-        reporter.reportDispatchReason("PREFILL", "10.0.0.1", "batch_full");
+        reporter.reportDispatchReason("PREFILL", "10.0.0.1", "10.0.0.1:8080", "batch_full");
 
         FlexMetricTags tags = FlexMetricTags.of(
                 "role", "PREFILL",
                 "engineIp", "10.0.0.1",
+                "engineIpPort", "10.0.0.1:8080",
                 "reason", "batch_full");
         verify(monitor).report(ENGINE_BALANCING_MASTER_DISPATCH_REASON, tags, 1.0);
     }
 
     @Test
     void should_not_report_dispatch_reason_to_select_detail_metric() {
-        reporter.reportDispatchReason("PREFILL", "10.0.0.1", "batch_full");
+        reporter.reportDispatchReason("PREFILL", "10.0.0.1", "10.0.0.1:8080", "batch_full");
 
         verify(monitor, never()).report(eq(ENGINE_BALANCING_MASTER_SELECT_DETAIL), any(), anyDouble());
     }

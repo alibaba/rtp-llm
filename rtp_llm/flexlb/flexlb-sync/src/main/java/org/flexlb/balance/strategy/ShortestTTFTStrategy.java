@@ -130,7 +130,7 @@ public class ShortestTTFTStrategy implements LoadBalanceStrategy {
         Logger.debug("ShortestTTFT selected endpoint - ip: {}, port: {}, ttft: {}, hitCache: {}",
                 selected.ep().getIp(), selected.ep().getHttpPort(), selected.ttft(), selected.hitCache());
 
-        reportCacheHitMetrics(roleType, selected.ep().getIp(), selected.hitCache(), seqLen);
+        reportCacheHitMetrics(roleType, selected.ep().getIp(), selected.ep().ipPort(), selected.hitCache(), seqLen);
 
         return buildServerStatus(selected, roleType, requestId, config, balanceContext);
     }
@@ -260,9 +260,9 @@ public class ShortestTTFTStrategy implements LoadBalanceStrategy {
 
     // ==================== Metrics & ServerStatus (mirrors CostBasedPrefillStrategy) ====================
 
-    private void reportCacheHitMetrics(RoleType roleType, String ip, long hitCacheTokens, long seqLen) {
+    private void reportCacheHitMetrics(RoleType roleType, String ip, String engineIpPort, long hitCacheTokens, long seqLen) {
         double hitRate = seqLen > 0 ? hitCacheTokens / (double) seqLen : 0.0;
-        engineHealthReporter.reportCacheHitMetrics(roleType, ip, hitCacheTokens, hitRate);
+        engineHealthReporter.reportCacheHitMetrics(roleType, ip, engineIpPort, hitCacheTokens, hitRate);
     }
 
     private ServerStatus buildServerStatus(ScoredEndpoint selected, RoleType roleType, long requestId,

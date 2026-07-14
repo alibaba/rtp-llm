@@ -15,6 +15,7 @@ import org.flexlb.cache.core.EngineLocalView;
 import org.flexlb.cache.core.GlobalCacheIndex;
 import org.flexlb.engine.grpc.monitor.GrpcReporter;
 import org.flexlb.engine.grpc.nameresolver.CustomNameResolver;
+import org.flexlb.util.CommonUtils;
 import org.flexlb.util.Logger;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Component;
@@ -88,14 +89,14 @@ public class EngineGrpcClient extends AbstractGrpcClient<AbstractGrpcClient.Grpc
 
             // Record statistics
             long duration = endTime - startTime;
-            grpcReporter.reportCallMetrics(ip, serviceType.getOperationName(), duration, responseSize, false);
+            grpcReporter.reportCallMetrics(ip, ip + ":" + CommonUtils.toHttpPort(port), serviceType.getOperationName(), duration, responseSize, false);
 
             return response;
         } catch (StatusRuntimeException e) {
             if (isConnectionBrokenError(e)) {
                 invoker.markExpired();
                 long connectionDuration = invoker.getConnectionDuration();
-                grpcReporter.reportConnectionDuration(ip, serviceType.getOperationName(), connectionDuration);
+                grpcReporter.reportConnectionDuration(ip, ip + ":" + CommonUtils.toHttpPort(port), serviceType.getOperationName(), connectionDuration);
                 Logger.warn("Connection broken for {}:{} {}, duration: {}μs, recreating channel and retrying once, msh:{}",
                         ip, port, serviceType, connectionDuration, e.getMessage());
                 return retryWithNewChannel(channelKey, invoker, grpcCall, requestTimeoutMs, ip, port, serviceType);
@@ -144,7 +145,7 @@ public class EngineGrpcClient extends AbstractGrpcClient<AbstractGrpcClient.Grpc
 
         // Record retry statistics
         long duration = endTime - startTime;
-        grpcReporter.reportCallMetrics(ip, serviceType.getOperationName(), duration, responseSize, true);
+        grpcReporter.reportCallMetrics(ip, ip + ":" + CommonUtils.toHttpPort(port), serviceType.getOperationName(), duration, responseSize, true);
 
         return response;
     }

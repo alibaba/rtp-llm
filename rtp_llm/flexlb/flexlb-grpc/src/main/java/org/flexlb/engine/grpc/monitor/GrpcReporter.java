@@ -53,14 +53,16 @@ public class GrpcReporter {
      * Report gRPC call metrics
      *
      * @param ip Target IP address
+     * @param engineIpPort Target IP:HTTP port composite tag
      * @param serviceType Service type
      * @param duration Call duration in milliseconds
      * @param responseSize Response body size in bytes
      * @param isRetry Whether this is a retry call
      */
-    public void reportCallMetrics(String ip, String serviceType, long duration, int responseSize, boolean isRetry) {
+    public void reportCallMetrics(String ip, String engineIpPort, String serviceType, long duration, int responseSize, boolean isRetry) {
         FlexMetricTags tags = FlexMetricTags.of(
             "engineIp", ip,
+            "engineIpPort", engineIpPort,
             "service", serviceType,
             "retry", String.valueOf(isRetry)
         );
@@ -79,12 +81,14 @@ public class GrpcReporter {
      * Report gRPC connection duration
      *
      * @param ip Target IP address
+     * @param engineIpPort Target IP:HTTP port composite tag
      * @param serviceType Service type
      * @param connectionDuration Connection duration in microseconds
      */
-    public void reportConnectionDuration(String ip, String serviceType, long connectionDuration) {
+    public void reportConnectionDuration(String ip, String engineIpPort, String serviceType, long connectionDuration) {
         FlexMetricTags tags = FlexMetricTags.of(
             "engineIp", ip,
+            "engineIpPort", engineIpPort,
             "service", serviceType
         );
 

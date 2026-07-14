@@ -23,6 +23,12 @@ public class DecodeEndpoint extends WorkerEndpoint {
     private volatile int confirmedRunningCount;
     private final InflightEvictor<Long, RequestInflight> requestEvictor;
 
+    /**
+     * Tracks the peak inflight request count between two metric reports.
+     * Updated on every reserve, reset after each reportBatchMetrics call.
+     */
+    private final AtomicLong peakInflightSinceReport = new AtomicLong(0);
+
     public DecodeEndpoint(WorkerStatus status) {
         super(status);
         this.requestEvictor = new InflightEvictor<>(inflightRequests, req -> {});
@@ -30,6 +36,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
 
     public void reserve(long requestId, long kvTokens) {
         inflightRequests.put(requestId, new RequestInflight(requestId, kvTokens));
+        peakInflightSinceReport.accumulateAndGet(inflightRequests.size(), Math::max);
     }
 
     public void release(long requestId) {
@@ -146,9 +153,10 @@ public class DecodeEndpoint extends WorkerEndpoint {
      * Called periodically by {@link org.flexlb.balance.scheduler.FlexlbBatchScheduler}.
      */
     public void reportBatchMetrics(BatchSchedulerReporter reporter) {
-        reporter.reportInflightRequestCount(RoleType.DECODE.name(), getIp(), getInflightCount());
-        reporter.reportDecodeTotalLoad(getIp(), getTotalLoad());
-        reporter.reportDecodeInflightKvReserved(getIp(), inflightKvReserved());
+        reporter.reportInflightRequestCount(RoleType.DECODE.name(), getIp(), ipPort(), getInflightCount());
+        reporter.reportInflightRequestPeak(RoleType.DECODE.name(), getIp(), ipPort(), peakInflightSinceReport.getAndSet(0));
+        reporter.reportDecodeTotalLoad(getIp(), ipPort(), getTotalLoad());
+        reporter.reportDecodeInflightKvReserved(getIp(), ipPort(), inflightKvReserved());
     }
 
     /**

@@ -431,7 +431,16 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
 
         // [ASYNC] Delegate gRPC dispatch — dispatcher owns its own thread pool
         long waitMs = System.currentTimeMillis() - items.get(0).enqueuedAtMs();
-        reporter.reportBatchWaitTimeMs(RoleType.PREFILL.name(), prefillEp != null ? prefillEp.getIp() : "", waitMs);
+        reporter.reportBatchWaitTimeMs(RoleType.PREFILL.name(), prefillEp != null ? prefillEp.getIp() : "", prefillEp != null ? prefillEp.ipPort() : "", waitMs);
+
+        // Record dispatch timestamp for dispatch-to-ACK latency metric
+        for (BatchItem item : dispatchable) {
+            InflightEntry entry = entryFor(item);
+            if (entry != null) {
+                entry.lifecycle.markDispatched();
+            }
+        }
+
         dispatcher.dispatch(dispatchable, prefillEp, batchId, predMs, reason, this);
     }
 
@@ -454,6 +463,17 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
                 return;
             }
             RequestLifecycleSnapshot snapshot = entry.lifecycle.acknowledge();
+            if (snapshot.state() == RequestLifecycleState.ACKNOWLEDGED) {
+                long dispatchedAtMs = entry.lifecycle.getDispatchedAtMs();
+                if (dispatchedAtMs > 0) {
+                    PrefillEndpoint ep = item.prefillEp();
+                    reporter.reportDispatchAckTimeMs(
+                            RoleType.PREFILL.name(),
+                            ep != null ? ep.getIp() : "",
+                            ep != null ? ep.ipPort() : "",
+                            System.currentTimeMillis() - dispatchedAtMs);
+                }
+            }
             if (item.ctx().isCancelled()
                     && snapshot.state() == RequestLifecycleState.ACKNOWLEDGED) {
                 snapshot = entry.lifecycle.requestCancel(CancelReason.CLIENT_CANCELLED);
@@ -770,7 +790,7 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
         return reporter;
     }
 
-    @Scheduled(fixedRate = 2000L)
+    @Scheduled(fixedRateString = "${report.interval.ms:2000}")
     public void reportBatchMetrics() {
         reporter.reportSchedulerInflightSize(inflight.size());
 

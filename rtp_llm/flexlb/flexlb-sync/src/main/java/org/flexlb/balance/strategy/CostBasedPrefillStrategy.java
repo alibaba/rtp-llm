@@ -107,7 +107,7 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
             return ServerStatus.code(StrategyErrorType.NO_AVAILABLE_WORKER);
         }
 
-        reportCacheHitMetrics(roleType, best.getIp(), bestCacheHit, seqLen);
+        reportCacheHitMetrics(roleType, best.getIp(), best.ipPort(), bestCacheHit, seqLen);
 
         return buildServerStatus(best, roleType, requestId, bestScore, config, balanceContext, bestCacheHit);
     }
@@ -243,9 +243,9 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
         return Math.max(0L, rawHit);
     }
 
-    private void reportCacheHitMetrics(RoleType roleType, String ip, long hitCacheTokens, long seqLen) {
+    private void reportCacheHitMetrics(RoleType roleType, String ip, String engineIpPort, long hitCacheTokens, long seqLen) {
         double hitRate = seqLen > 0 ? hitCacheTokens / (double) seqLen : 0.0;
-        engineHealthReporter.reportCacheHitMetrics(roleType, ip, hitCacheTokens, hitRate);
+        engineHealthReporter.reportCacheHitMetrics(roleType, ip, engineIpPort, hitCacheTokens, hitRate);
     }
 
     private ServerStatus buildServerStatus(PrefillEndpoint ep, RoleType roleType, long requestId, long score,
