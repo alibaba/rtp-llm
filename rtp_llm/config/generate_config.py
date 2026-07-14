@@ -4,7 +4,14 @@ import logging
 import time
 from typing import Any, Dict, List, Optional, Union
 
-from pydantic import BaseModel, ConfigDict, PrivateAttr, field_serializer, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    PrivateAttr,
+    field_serializer,
+    field_validator,
+    model_validator,
+)
 from transformers.tokenization_utils_base import PreTrainedTokenizerBase
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
@@ -49,6 +56,7 @@ class RoleAddr(BaseModel):
     def serialize_role(self, role: RoleType, _info) -> str:
         """Serialize RoleType enum to its name string for JSON serialization."""
         return role.name
+
 
 # === 跨序列去重共享常量（SYNC: 必须与 RecommendationLogitsProcessor.cc 保持一致） ===
 # 对应 C++ kDivergeStartComboWarnThreshold，更改时两侧同步 + test_generate_config_validators.py 会断言一致。
@@ -140,6 +148,12 @@ class GenerateConfig(BaseModel):
     calculate_loss: int = 0
     return_logits: bool = False
     logits_index: Optional[int] = None
+    # prompt scoring: return logits for all positions in the input sequence
+    return_prompt_logits: bool = False
+    prompt_logits_top_k: int = 64
+    prompt_logits_start: int = -1
+    prompt_logits_end: int = -1
+    return_target_logprob: bool = True
     return_incremental: bool = False
     return_hidden_states: bool = False
     return_all_hidden_states: bool = False
@@ -234,21 +248,28 @@ class GenerateConfig(BaseModel):
             now = time.monotonic()
             if now - _last_sanitize_warn_time >= _SANITIZE_WARN_INTERVAL:
                 logging.getLogger(__name__).warning(
-                    "cross_seq_diverge_start_combo received non-integer value %r, defaulting to 0: %s", v, e)
+                    "cross_seq_diverge_start_combo received non-integer value %r, defaulting to 0: %s",
+                    v,
+                    e,
+                )
                 _last_sanitize_warn_time = now
             return 0
         if val < 0:
             now = time.monotonic()
             if now - _last_sanitize_warn_time >= _SANITIZE_WARN_INTERVAL:
                 logging.getLogger(__name__).warning(
-                    "cross_seq_diverge_start_combo is negative (%d), clamped to 0", val)
+                    "cross_seq_diverge_start_combo is negative (%d), clamped to 0", val
+                )
                 _last_sanitize_warn_time = now
             return 0
         if val > _INT32_MAX:
             now = time.monotonic()
             if now - _last_sanitize_warn_time >= _SANITIZE_WARN_INTERVAL:
                 logging.getLogger(__name__).warning(
-                    "cross_seq_diverge_start_combo exceeds int32 max (%d), clamped to %d", val, _INT32_MAX)
+                    "cross_seq_diverge_start_combo exceeds int32 max (%d), clamped to %d",
+                    val,
+                    _INT32_MAX,
+                )
                 _last_sanitize_warn_time = now
             return _INT32_MAX
         # "过大" 告警已移至 _check_cross_seq_ban_compatibility，仅在特性启用时触发，
@@ -261,7 +282,7 @@ class GenerateConfig(BaseModel):
         """构造路径入口：委托给 _sanitize_diverge_start_combo。"""
         return cls._sanitize_diverge_start_combo(v)
 
-    @model_validator(mode='after')
+    @model_validator(mode="after")
     def _check_cross_seq_ban_compatibility(self):
         """cross_sequence_ban 与多项配置不兼容时直接禁用，一次性报告所有不兼容原因。
 
@@ -276,14 +297,17 @@ class GenerateConfig(BaseModel):
         if not self.enable_cross_sequence_ban:
             # “先建后补”场景补救：若特性曾被自动降级且当前条件已全部满足，重新启用并继续校验。
             # 解决 request_extractor 两次 update_and_pop 分步合并导致的误降级问题。
-            if (self._ban_auto_downgraded
-                    and not self.has_num_beams()
-                    and self.combo_token_size >= 2
-                    and self.num_return_sequences > 1):
+            if (
+                self._ban_auto_downgraded
+                and not self.has_num_beams()
+                and self.combo_token_size >= 2
+                and self.num_return_sequences > 1
+            ):
                 self.enable_cross_sequence_ban = True
                 self._ban_auto_downgraded = False
                 logging.getLogger(__name__).info(
-                    "enable_cross_sequence_ban re-enabled: conditions now satisfied after incremental update")
+                    "enable_cross_sequence_ban re-enabled: conditions now satisfied after incremental update"
+                )
                 # 不 return，继续执行下方 depth/过大 告警校验
             else:
                 return self
@@ -302,17 +326,22 @@ class GenerateConfig(BaseModel):
         #   未来演进：若条件进一步增多，应将真值表落为共享 JSON 数据文件（单一真源）。
         reasons: list = []
         if self.has_num_beams():
-            reasons.append(f"incompatible with beam search (max_num_beams={self.max_num_beams()})")
+            reasons.append(
+                f"incompatible with beam search (max_num_beams={self.max_num_beams()})"
+            )
         if self.combo_token_size < 2:
             reasons.append(f"combo_token_size must be >=2, got {self.combo_token_size}")
         if self.num_return_sequences <= 1:
-            reasons.append(f"num_return_sequences must be >1, got {self.num_return_sequences}")
+            reasons.append(
+                f"num_return_sequences must be >1, got {self.num_return_sequences}"
+            )
         if reasons:
             global _last_downgrade_warn_time
             now = time.monotonic()
             if now - _last_downgrade_warn_time >= _SANITIZE_WARN_INTERVAL:
                 logging.getLogger(__name__).warning(
-                    "enable_cross_sequence_ban disabled: %s", "; ".join(reasons))
+                    "enable_cross_sequence_ban disabled: %s", "; ".join(reasons)
+                )
                 _last_downgrade_warn_time = now
             self.enable_cross_sequence_ban = False
             self._ban_auto_downgraded = True
@@ -322,14 +351,20 @@ class GenerateConfig(BaseModel):
                 logging.getLogger(__name__).warning(
                     "num_return_sequences=%d exceeds recommended max diverge depth %d, "
                     "sampling quality may degrade for higher-indexed sequences",
-                    self.num_return_sequences, _MAX_DIVERGE_DEPTH)
+                    self.num_return_sequences,
+                    _MAX_DIVERGE_DEPTH,
+                )
                 self._diverge_depth_warned = True
         # 「过大」告警：仅在特性最终仍然启用时触发（reasons 为空），与 C++ 侧行为一致
         # （SYNC: C++ else if (enable_cross_seq_ban && diverge_start_combo > kDivergeStartComboWarnThreshold)）
-        if not reasons and self.cross_seq_diverge_start_combo > _DIVERGE_START_COMBO_WARN_THRESHOLD:
+        if (
+            not reasons
+            and self.cross_seq_diverge_start_combo > _DIVERGE_START_COMBO_WARN_THRESHOLD
+        ):
             logging.getLogger(__name__).warning(
                 "cross_seq_diverge_start_combo=%d is very large, top-K diverge masking may never activate",
-                self.cross_seq_diverge_start_combo)
+                self.cross_seq_diverge_start_combo,
+            )
         return self
 
     @field_validator("return_all_probs", mode="before")
@@ -384,7 +419,8 @@ class GenerateConfig(BaseModel):
         # 1) cross_seq_diverge_start_combo 的 clamp/类型兜底
         if "cross_seq_diverge_start_combo" in new:
             self.cross_seq_diverge_start_combo = self._sanitize_diverge_start_combo(
-                self.cross_seq_diverge_start_combo)
+                self.cross_seq_diverge_start_combo
+            )
         # 2) 若 num_return_sequences 变化，重置深度告警标志以允许重新检测
         if "num_return_sequences" in new:
             self._diverge_depth_warned = False
@@ -404,7 +440,8 @@ class GenerateConfig(BaseModel):
         # setattr 不会触发 field_validator / model_validator，手动补偿：
         if "cross_seq_diverge_start_combo" in new:
             self.cross_seq_diverge_start_combo = self._sanitize_diverge_start_combo(
-                self.cross_seq_diverge_start_combo)
+                self.cross_seq_diverge_start_combo
+            )
         if "num_return_sequences" in new:
             self._diverge_depth_warned = False
         if "enable_cross_sequence_ban" in new:
@@ -608,5 +645,27 @@ class GenerateConfig(BaseModel):
                 f"calculate_loss {self.top_k} in generate_config can only be in {calculate_loss_list},"
                 " but it's {self.calculate_loss}",
             )
+            if self.return_prompt_logits:
+                self.enforce_prompt_scoring_constraints()
+                check_with_info(
+                    0 < self.prompt_logits_top_k <= 1024,
+                    f"prompt_logits_top_k must be in [1, 1024], got {self.prompt_logits_top_k}",
+                )
+                check_with_info(
+                    self.num_return_sequences == 0 and self.num_beams <= 1,
+                    "prompt scoring does not support num_return_sequences > 0 or beam search",
+                )
+                if self.prompt_logits_start >= 0 and self.prompt_logits_end >= 0:
+                    check_with_info(
+                        self.prompt_logits_start <= self.prompt_logits_end,
+                        f"prompt_logits_start ({self.prompt_logits_start}) must <= prompt_logits_end ({self.prompt_logits_end})",
+                    )
         except Exception as e:
             raise FtRuntimeException(ExceptionType.ERROR_INPUT_FORMAT_ERROR, str(e))
+
+    def enforce_prompt_scoring_constraints(self):
+        """Clamp config fields for prompt scoring mode. Call after setting return_prompt_logits=True."""
+        self.max_new_tokens = 1
+        self.is_streaming = False
+        self.reuse_cache = False
+        self.can_use_pd_separation = False
