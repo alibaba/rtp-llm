@@ -2023,22 +2023,38 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
             context.initial_metadata,
         )
 
-    async def test_max_new_tokens_negative_rejected_before_enqueue_repro_p3(
+    async def test_proxy_completion_alias_non_positive_uses_fallback_before_enqueue(
         self,
     ) -> None:
-        """max_new_tokens=-1 returns Dash-compatible 400 before enqueue."""
-        visitor = _FakeVisitor(_FakeAsyncStream([]))
-        servicer = DashScInferenceServicer(backend_visitor=visitor)
-        req = self._valid_infer_request()
-        _add_input_tensor(req, "max_new_tokens", "INT32", [1], struct.pack("<i", -1))
+        """The proxy's historical max_new_tokens wire alias is canonicalized
+        as a non-positive completion budget before backend validation."""
+        for value in (-1, 0):
+            with self.subTest(value=value):
+                visitor = _FakeVisitor(_FakeAsyncStream([]))
+                servicer = DashScInferenceServicer(backend_visitor=visitor)
+                req = self._valid_infer_request()
+                _add_input_tensor(
+                    req,
+                    "max_new_tokens",
+                    "INT32",
+                    [1],
+                    struct.pack("<i", value),
+                )
 
-        responses = await _drain(
-            servicer.ModelStreamInfer(_areq_iter([req]), MagicMock())
-        )
+                responses = await _drain(
+                    servicer.ModelStreamInfer(_areq_iter([req]), MagicMock())
+                )
 
-        self.assertEqual(visitor.enqueue_called, 0)
-        self.assertEqual(len(responses), 1)
-        _assert_parameter_error_response(self, responses[0], "max_new_tokens")
+                self.assertEqual(visitor.enqueue_called, 1)
+                self.assertEqual(len(responses), 1)
+                generate_config = visitor.last_generate_input.generate_config
+                self.assertEqual(
+                    generate_config.max_new_tokens, _DEFAULT_MAX_NEW_TOKENS
+                )
+                self.assertEqual(
+                    generate_config.max_completion_tokens,
+                    _DEFAULT_MAX_COMPLETION_TOKENS,
+                )
 
     async def test_bad_structural_tag_shape_returns_parameter_error(
         self,
@@ -2247,7 +2263,8 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(responses), 1)
         self.assertEqual(_gen_ids(responses[0]), [9])
         generate_config = visitor.last_generate_input.generate_config
-        self.assertEqual(generate_config.max_new_tokens, 3)
+        self.assertEqual(generate_config.max_new_tokens, _DEFAULT_MAX_NEW_TOKENS)
+        self.assertEqual(generate_config.max_completion_tokens, 3)
         self.assertTrue(generate_config.in_think_mode)
         self.assertEqual(
             generate_config.max_thinking_tokens, _DEFAULT_MAX_THINKING_TOKENS
@@ -2424,6 +2441,32 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(generate_config.max_tokens)
         self.assertTrue(generate_config.in_think_mode)
         self.assertEqual(generate_config.max_thinking_tokens, 11)
+
+    async def test_backend_normalizes_proxy_completion_alias_with_think_window(
+        self,
+    ) -> None:
+        visitor = _FakeVisitor(_FakeAsyncStream([]))
+        tok = _dsv4_tokenizer()
+        env_cfg = _GenerateEnvCfg()
+        servicer = DashScInferenceServicer(
+            backend_visitor=visitor,
+            tokenizer=tok,
+            generate_env_config=env_cfg,
+            think_runtime=build_think_runtime(tok, env_cfg, "deepseek_v4"),
+        )
+        req = self._valid_infer_request()
+        req.parameters["max_new_tokens"].int64_param = 100
+        req.parameters["enable_thinking"].bool_param = True
+        req.parameters["max_new_think_tokens"].int64_param = 51
+
+        await _drain(servicer.ModelStreamInfer(_areq_iter([req]), MagicMock()))
+
+        self.assertEqual(visitor.enqueue_called, 1)
+        generate_config = visitor.last_generate_input.generate_config
+        self.assertEqual(generate_config.max_new_tokens, _DEFAULT_MAX_NEW_TOKENS)
+        self.assertEqual(generate_config.max_completion_tokens, 54)
+        self.assertTrue(generate_config.in_think_mode)
+        self.assertEqual(generate_config.max_thinking_tokens, 51)
 
     async def test_backend_consumes_proxy_normalized_max_tokens_window(self) -> None:
         visitor = _FakeVisitor(_FakeAsyncStream([]))
