@@ -31,8 +31,8 @@ public:
 
     // Pack the whole output of one request (the concat-ed embedding, the optional concat-ed
     // position ids, and the per-image extra_input tensors, in that order) into one or more RDMA
-    // slots and return one serialized MMRdmaDescPB per slot. A single RDMA slot is capped at
-    // ~2GiB (mm_rdma_max_slot_bytes / the mempool's kmax_single_alloc_size), so when the output
+    // slots and return one serialized MMRdmaDescPB per slot. A single RDMA slot is capped by
+    // mm_rdma_max_slot_bytes (1 GiB by default), so when the output
     // is larger the embedding is row-split and the tensors are greedily packed across multiple
     // slots — the LLM concatenates the EMBEDDING chunks back in order. Returns a 1-element list
     // for the common (fits-in-one-slot) case, N elements when chunked, and an EMPTY list on
