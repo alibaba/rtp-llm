@@ -32,6 +32,11 @@ _DEFAULT_MAX_NEW_TOKENS = 131072
 # different from max_new_tokens, whose non-positive values remain invalid on
 # the native dash-sc path.
 _DEFAULT_MAX_COMPLETION_TOKENS = 16
+# The deployed DashScope proxy reserves five generated-token positions around
+# a bounded thinking request.  It sends the already-normalized thinking limit
+# as ``max_new_think_tokens``; the backend must therefore remove that limit
+# from the completion budget before GenerateStream adds the actual think span.
+_DASHSC_COMPLETION_BOUNDARY_TOKENS = 5
 
 FINISH_REASON_LENGTH = 1
 FINISH_REASON_STOP_ENGINE_PARAM = 8
@@ -511,7 +516,10 @@ def parse_max_new_tokens_for_proxy(request) -> tuple[int, bool]:
 
 
 def _parse_max_token_limits(
-    request, ds_attrs: dict[str, Any] | None = None
+    request,
+    ds_attrs: dict[str, Any] | None = None,
+    *,
+    downstream_proxy_contract: bool = False,
 ) -> tuple[int, int | None, int | None]:
     max_new_tokens = _DEFAULT_MAX_NEW_TOKENS
     max_total_tokens: int | None = None
@@ -535,7 +543,42 @@ def _parse_max_token_limits(
             legacy_max_new_tokens = _parse_optional_parameter_int(
                 request, "max_new_tokens"
             )
-        if legacy_max_new_tokens is not None and legacy_max_new_tokens <= 0:
+        if legacy_max_new_tokens is not None and downstream_proxy_contract:
+            # The deployed DashScope HTTP proxy has already resolved the public
+            # length controls. On its backend gRPC contract, the public
+            # ``max_completion_tokens`` value is carried under the historical
+            # wire name ``max_new_tokens``. Normalize that wire alias into the
+            # existing canonical field here; do not retain a second/raw copy.
+            max_completion_tokens = (
+                legacy_max_new_tokens
+                if legacy_max_new_tokens > 0
+                else _DEFAULT_MAX_COMPLETION_TOKENS
+            )
+            normalized_max_think = _parse_optional_scalar_int(
+                request, "max_new_think_tokens"
+            )
+            if normalized_max_think is None:
+                normalized_max_think = _parse_optional_parameter_int(
+                    request, "max_new_think_tokens"
+                )
+            enable_thinking = _parse_optional_parameter_bool(request, "enable_thinking")
+            if enable_thinking is None:
+                enable_thinking = _parse_optional_bool(
+                    _parse_optional_scalar_int(request, "enable_thinking")
+                )
+            if (
+                legacy_max_new_tokens > 0
+                and enable_thinking is not False
+                and normalized_max_think is not None
+                and normalized_max_think > 0
+            ):
+                max_completion_tokens = max(
+                    1,
+                    max_completion_tokens
+                    - normalized_max_think
+                    + _DASHSC_COMPLETION_BOUNDARY_TOKENS,
+                )
+        elif legacy_max_new_tokens is not None and legacy_max_new_tokens <= 0:
             if ds_attrs is None:
                 ds_attrs = parse_ds_header_attributes(request)
             if _is_openai_compatible_request(request, ds_attrs):
@@ -654,8 +697,9 @@ def parse_sampling_params(
 ) -> SamplingParams:
     """Read sampling fields from ``request.inputs``.
 
-    Tensor names: ``max_completion_tokens`` (or legacy ``max_new_tokens`` /
-    ``max_tokens``), ``num_return_sequences`` (or DashScope alias ``n``),
+    Tensor names: ``max_completion_tokens`` (including the deployed proxy's
+    historical ``max_new_tokens`` wire alias), ``max_tokens`` (independent
+    total-token limit), ``num_return_sequences`` (or DashScope alias ``n``),
     ``top_p``, ``top_k``, ``stop_words_list``, ``temperature``,
     ``min_new_tokens`` (or DashScope alias ``min_length``), ``seed``,
     ``repetition_penalty``, ``frequency_penalty``, ``presence_penalty``,
@@ -680,7 +724,7 @@ def parse_sampling_params(
         max_new_tokens,
         max_total_tokens,
         max_completion_tokens,
-    ) = _parse_max_token_limits(request, ds_attrs)
+    ) = _parse_max_token_limits(request, ds_attrs, downstream_proxy_contract=True)
 
     v = _parse_optional_scalar_int(request, "num_return_sequences")
     if v is None:

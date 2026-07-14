@@ -20,6 +20,7 @@ from rtp_llm.dash_sc.codec import (
     build_stream_response_from_generate_outputs,
     parse_dash_sc_grpc_request,
     parse_input_ids_from_request,
+    parse_max_new_tokens_for_proxy,
     parse_other_params,
     parse_sampling_params,
     prepend_to_generated_ids_tensor,
@@ -165,7 +166,8 @@ class DashScGrpcRequestTest(TestCase):
         _add_tensor(req, "frequency_penalty", "FP32", [1], struct.pack("<f", 0.2))
         _add_tensor(req, "presence_penalty", "FP32", [1], struct.pack("<f", 0.3))
         sp = parse_sampling_params(req)
-        self.assertEqual(sp.max_new_tokens, 128)
+        self.assertEqual(sp.max_new_tokens, _DEFAULT_MAX_NEW_TOKENS)
+        self.assertEqual(sp.max_completion_tokens, 128)
         self.assertEqual(sp.num_return_sequences, 2)
         self.assertAlmostEqual(sp.top_p, 0.9)
         self.assertEqual(sp.top_k, 50)
@@ -585,17 +587,96 @@ class DashScGrpcRequestTest(TestCase):
         sp = parse_sampling_params(req)
         self.assertEqual(sp.top_p, 1.0)
 
-    def test_parse_sampling_max_new_tokens_negative_keeps_signal_repro_p3(
+    def test_downstream_proxy_max_new_tokens_negative_uses_completion_fallback(
         self,
     ) -> None:
-        """P3 repro: a negative ``max_new_tokens`` is silently clamped to 0,
-        which the backend later rejects with ``FtRuntimeException`` (HTTP 500).
-        Expected: codec preserves the signed value so the caller can decide
-        between rejecting up-front or substituting a server default."""
+        """The proxy keeps its own validation contract, while the inference
+        boundary canonicalizes the historical wire alias exactly once."""
         req = predict_v2_pb2.ModelInferRequest()
         _add_tensor(req, "max_new_tokens", "INT32", [1], struct.pack("<i", -1))
+
+        self.assertEqual(parse_max_new_tokens_for_proxy(req), (-1, False))
+
         sp = parse_sampling_params(req)
-        self.assertEqual(sp.max_new_tokens, -1)
+        self.assertEqual(sp.max_new_tokens, _DEFAULT_MAX_NEW_TOKENS)
+        self.assertEqual(sp.max_completion_tokens, _DEFAULT_MAX_COMPLETION_TOKENS)
+
+    def test_downstream_proxy_completion_alias_preserves_independent_limits(
+        self,
+    ) -> None:
+        req = predict_v2_pb2.ModelInferRequest()
+        _add_tensor(req, "max_new_tokens", "INT32", [1], struct.pack("<i", 50))
+        _add_tensor(req, "max_tokens", "INT32", [1], struct.pack("<i", 80))
+        _add_tensor(req, "max_new_think_tokens", "INT32", [1], struct.pack("<i", 11))
+
+        sp = parse_sampling_params(req)
+        gc = sp.to_generate_config()
+
+        self.assertEqual(sp.max_new_tokens, _DEFAULT_MAX_NEW_TOKENS)
+        self.assertEqual(sp.max_total_tokens, 80)
+        self.assertEqual(sp.max_completion_tokens, 44)
+        self.assertEqual(sp.max_new_think_tokens, 11)
+        self.assertEqual(gc.max_new_tokens, _DEFAULT_MAX_NEW_TOKENS)
+        self.assertEqual(gc.max_tokens, 80)
+        self.assertEqual(gc.max_completion_tokens, 44)
+        self.assertEqual(gc.max_thinking_tokens, 11)
+
+    def test_downstream_proxy_completion_alias_uses_normalized_think_window(
+        self,
+    ) -> None:
+        for completion, max_think, expected in (
+            (50, 2, 53),
+            (100, 2, 103),
+            (100, 51, 54),
+        ):
+            with self.subTest(completion=completion, max_think=max_think):
+                req = predict_v2_pb2.ModelInferRequest()
+                _add_tensor(
+                    req,
+                    "max_new_tokens",
+                    "INT32",
+                    [1],
+                    struct.pack("<i", completion),
+                )
+                _add_tensor(
+                    req,
+                    "max_new_think_tokens",
+                    "INT32",
+                    [1],
+                    struct.pack("<i", max_think),
+                )
+                req.parameters["enable_thinking"].bool_param = True
+
+                sp = parse_sampling_params(req)
+
+                self.assertEqual(sp.max_completion_tokens, expected)
+                self.assertEqual(
+                    sp.to_generate_config().max_completion_tokens, expected
+                )
+
+    def test_downstream_proxy_completion_alias_ignores_disabled_think_window(
+        self,
+    ) -> None:
+        req = predict_v2_pb2.ModelInferRequest()
+        _add_tensor(req, "max_new_tokens", "INT32", [1], struct.pack("<i", 100))
+        _add_tensor(req, "max_new_think_tokens", "INT32", [1], struct.pack("<i", 51))
+        req.parameters["enable_thinking"].bool_param = False
+
+        sp = parse_sampling_params(req)
+
+        self.assertEqual(sp.max_completion_tokens, 100)
+
+    def test_explicit_completion_tensor_wins_over_downstream_wire_alias(
+        self,
+    ) -> None:
+        req = predict_v2_pb2.ModelInferRequest()
+        _add_tensor(req, "max_new_tokens", "INT32", [1], struct.pack("<i", 1))
+        _add_tensor(req, "max_completion_tokens", "INT32", [1], struct.pack("<i", 100))
+
+        sp = parse_sampling_params(req)
+
+        self.assertEqual(sp.max_new_tokens, _DEFAULT_MAX_NEW_TOKENS)
+        self.assertEqual(sp.max_completion_tokens, 100)
 
     def test_parse_sampling_openai_compat_max_new_tokens_negative_uses_default(
         self,
@@ -609,6 +690,7 @@ class DashScGrpcRequestTest(TestCase):
         sp = parse_sampling_params(req)
 
         self.assertEqual(sp.max_new_tokens, _DEFAULT_MAX_NEW_TOKENS)
+        self.assertEqual(sp.max_completion_tokens, _DEFAULT_MAX_COMPLETION_TOKENS)
 
     def test_non_positive_max_completion_is_normalized_once_for_backend(
         self,
