@@ -66,6 +66,8 @@ public class LearningPredictor implements PrefillTimePredictor {
         this.adamMoment1 = new double[this.param_count];
         this.adamMoment2 = new double[this.param_count];
         this.itemBatch = new ArrayList<>();
+        logger.warn("learn predictor created, t: {}, init param: {}, beta1: {}, beta2: {}, alpha: {}, batchSize: {}",
+                this.t, formulaStringParam(this.weightsRef.get()), this.beta1, this.beta2, this.alpha, this.batchSize);
     }
 
     @Override

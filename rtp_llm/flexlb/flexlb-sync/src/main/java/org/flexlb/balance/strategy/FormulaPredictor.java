@@ -39,6 +39,7 @@ public class FormulaPredictor implements PrefillTimePredictor {
      */
     public FormulaPredictor(String formulaString) {
         this.formula = PrefillTimeFormula.parse(formulaString);
+        logger.info("formula predictor created, formula: {}", formulaString);
     }
 
     @Override
