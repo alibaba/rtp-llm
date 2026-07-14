@@ -22,7 +22,6 @@ import org.springframework.stereotype.Component;
 
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicLong;
 
 @Component
 public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
@@ -33,9 +32,6 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
     private final ActiveRequestCounter activeRequestCounter;
     private final FlexlbGrpcForwarder grpcForwarder;
     private final ConfigService configService;
-    private static final AtomicLong timingLogCounter = new AtomicLong(0);
-    private static final int TIMING_LOG_LIMIT = 50000;
-
     public FlexlbServiceImpl(RouteService routeService,
                              LBStatusConsistencyService lbStatusConsistencyService,
                              EngineHealthReporter engineHealthReporter,
@@ -54,25 +50,17 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
     public void schedule(EngineRpcService.FlexlbScheduleRequestPB request,
                          StreamObserver<EngineRpcService.FlexlbScheduleResponsePB> responseObserver) {
         ActiveRequestCounter.RequestToken token = activeRequestCounter.acquire();
-        long t1 = System.nanoTime();
-        boolean doTiming = timingLogCounter.incrementAndGet() <= TIMING_LOG_LIMIT;
         AtomicBoolean responded = new AtomicBoolean(false);
 
         try {
             BalanceContext ctx = buildContext(request);
             engineHealthReporter.reportArriveDelayTime(ctx);
 
-            long t2 = System.nanoTime();
-
             // Forward path: synchronous
             if (lbStatusConsistencyService.isNeedConsistency() && !lbStatusConsistencyService.isMaster()) {
                 EngineRpcService.FlexlbScheduleResponsePB forwardResponse = grpcForwarder.forwardToMaster(request);
                 if (forwardResponse != null) {
                     responded.set(true);
-                    long t3 = System.nanoTime();
-                    if (doTiming) {
-                        logScheduleTiming(request, t1, t2, t3);
-                    }
                     responseObserver.onNext(forwardResponse);
                     responseObserver.onCompleted();
                     ctx.setSuccess(forwardResponse.getSuccess());
@@ -106,10 +94,6 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
                             responseObserver.onNext(errorResp);
                             responseObserver.onCompleted();
                         } else {
-                            long t3 = System.nanoTime();
-                            if (doTiming) {
-                                logScheduleTiming(request, t1, t2, t3);
-                            }
                             responseObserver.onNext(response);
                             responseObserver.onCompleted();
                             ctx.setSuccess(response.getSuccess());
@@ -160,15 +144,6 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
 
     private CompletableFuture<EngineRpcService.FlexlbScheduleResponsePB> routeLocally(BalanceContext ctx) {
         return routeService.route(ctx).thenApply(this::toProtoResponse);
-    }
-
-    private void logScheduleTiming(EngineRpcService.FlexlbScheduleRequestPB request, long t1, long t2, long t3) {
-        long sourceRid = request.getRequestId();
-        Logger.info("schedule_timing source_rid={} route_start_ms={} block_end_ms={} total_block_ms={}",
-                sourceRid,
-                String.format("%.3f", (t2 - t1) / 1_000_000.0),
-                String.format("%.3f", (t3 - t2) / 1_000_000.0),
-                String.format("%.3f", (t3 - t1) / 1_000_000.0));
     }
 
     private EngineRpcService.FlexlbScheduleResponsePB buildErrorResponse(Throwable e) {
