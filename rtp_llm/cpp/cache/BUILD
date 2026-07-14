@@ -41,6 +41,7 @@ cc_library(
         ":cache_group_type",
         "//:rtp_compute_ops",
         "//rtp_llm/cpp/config:config_modules",
+        "//rtp_llm/cpp/engine_base/stream:complete_token_ids",
         "//rtp_llm/models_py/bindings/core:types",
     ] + torch_deps(),
 )

@@ -16,6 +16,7 @@ from rtp_llm.ops import (
     SpeculativeType,
 )
 from rtp_llm.utils.fuser import fetch_remote_file_to_local
+from rtp_llm.utils.import_util import load_external_model_packages
 
 
 def auto_configure_deepep(
@@ -383,6 +384,8 @@ def setup_default_args(py_env_configs):
         py_env_configs.profiling_debug_logging_config.ft_alog_conf_path = os.path.join(
             os.path.dirname(os.path.abspath(__file__)), "alog.conf"
         )
+
+    load_external_model_packages(py_env_configs.model_args.external_model_packages)
 
     if not py_env_configs.model_args.model_type:
         py_env_configs.model_args.model_type = _infer_model_type(

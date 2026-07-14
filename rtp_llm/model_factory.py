@@ -2,14 +2,12 @@ import json
 import logging
 import os
 import sys
-from typing import Any, Dict, Optional, Type, Union
+from typing import Any, Optional
 
-import torch
 
 CUR_PATH = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(os.path.join(str(CUR_PATH), ".."))
 
-from rtp_llm.async_decoder_engine.base_engine import BaseEngine
 from rtp_llm.async_decoder_engine.engine_creator import create_engine
 from rtp_llm.config.engine_config import EngineConfig, finalize_scheduler_config
 from rtp_llm.config.kv_cache_config import KVCacheConfig
@@ -19,13 +17,13 @@ from rtp_llm.config.py_config_modules import (
     EmbeddingConfig,
     GenerateEnvConfig,
     LoraConfig,
-    PyEnvConfigs,
     QuantizationConfig,
     RenderConfig,
     VitConfig,
 )
 from rtp_llm.model_factory_register import _model_factory
 from rtp_llm.ops import ProfilingDebugLoggingConfig, SpeculativeType
+from rtp_llm.utils.import_util import load_external_model_packages
 from rtp_llm.utils.util import check_with_info
 
 
@@ -214,7 +212,7 @@ class ModelFactory:
         if model_type == "fake_model":
             logging.info("create fake_model")
 
-        logging.info(f"create model finish")
+        logging.info("create model finish")
 
         # Create propose model if provided
         propose_model = ModelFactory.get_sp_model(
@@ -226,7 +224,6 @@ class ModelFactory:
         # Create engine using create_engine function (replaces AsyncModel)
         alog_conf_path = engine_config.profiling_debug_logging_config.ft_alog_conf_path
 
-        from rtp_llm.async_decoder_engine.engine_creator import create_engine
 
         engine = create_engine(
             model=model,
@@ -277,6 +274,7 @@ class ModelFactory:
         Returns:
             ModelConfig instance for the main model
         """
+        load_external_model_packages(model_args.external_model_packages)
         model_cls = ModelFactory.get_model_cls(model_args.model_type)
         model_config = model_cls._create_config(model_args.ckpt_path)
         build_model_config(

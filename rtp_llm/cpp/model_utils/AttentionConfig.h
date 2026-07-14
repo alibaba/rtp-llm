@@ -10,6 +10,11 @@ enum class KvCacheDataType : int8_t {
     FP8  = 2
 };
 
+enum class MlaFp8KvCacheLayout : int8_t {
+    NATIVE = 0,
+    ATOM   = 1
+};
+
 KvCacheDataType inline loadKvCacheDataTypeFromString(const std::string& str) {
     if (str == "base" || str == "fp16") {
         return KvCacheDataType::BASE;
@@ -49,6 +54,7 @@ struct AttentionConfigs {
     float           softmax_extra_scale = 1.0f;
     KvCacheDataType kv_cache_dtype      = KvCacheDataType::BASE;
     bool            need_rope_kv_cache  = true;
+    MlaFp8KvCacheLayout mla_fp8_kv_cache_layout = MlaFp8KvCacheLayout::NATIVE;
 
     // sparse attention config
     bool is_sparse        = false;

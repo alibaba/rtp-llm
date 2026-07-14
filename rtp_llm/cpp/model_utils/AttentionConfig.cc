@@ -15,6 +15,17 @@ static std::string kvCacheDataTypeToString(KvCacheDataType kv_cache_dtype) {
     }
 }
 
+static std::string mlaFp8KvCacheLayoutToString(MlaFp8KvCacheLayout layout) {
+    switch (layout) {
+        case MlaFp8KvCacheLayout::NATIVE:
+            return "NATIVE";
+        case MlaFp8KvCacheLayout::ATOM:
+            return "ATOM";
+        default:
+            return "UNKNOWN(" + std::to_string(static_cast<int>(layout)) + ")";
+    }
+}
+
 std::string AttentionConfigs::DebugAttentionConfigStr() const {
     std::ostringstream oss;
     oss << "  head_num: " << head_num << std::endl;
@@ -34,6 +45,7 @@ std::string AttentionConfigs::DebugAttentionConfigStr() const {
     oss << "  softmax_extra_scale: " << softmax_extra_scale << std::endl;
     oss << "  kv_cache_dtype: " << kvCacheDataTypeToString(kv_cache_dtype) << std::endl;
     oss << "  need_rope_kv_cache: " << need_rope_kv_cache << std::endl;
+    oss << "  mla_fp8_kv_cache_layout: " << mlaFp8KvCacheLayoutToString(mla_fp8_kv_cache_layout) << std::endl;
     oss << rope_config.DebugRopeConfigStr();
     return oss.str();
 }

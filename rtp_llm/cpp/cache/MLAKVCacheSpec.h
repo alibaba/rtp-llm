@@ -11,30 +11,65 @@
 
 namespace rtp_llm {
 
+enum class MlaKvCacheStorageLayout : int8_t {
+    NativeBf16         = 0,
+    NativeFp8WithScale = 1,
+    AtomFp8Packed      = 2
+};
+
+inline const char* MlaKvCacheStorageLayoutToString(MlaKvCacheStorageLayout layout) {
+    switch (layout) {
+        case MlaKvCacheStorageLayout::NativeBf16:
+            return "NativeBf16";
+        case MlaKvCacheStorageLayout::NativeFp8WithScale:
+            return "NativeFp8WithScale";
+        case MlaKvCacheStorageLayout::AtomFp8Packed:
+            return "AtomFp8Packed";
+    }
+    return "Unknown";
+}
+
 struct MLAKVCacheSpec: public KVCacheSpec {
-    uint32_t kv_lora_rank;
-    uint32_t rope_head_dim;
+    uint32_t              kv_lora_rank;
+    uint32_t              rope_head_dim;
+    MlaFp8KvCacheLayout   fp8_kv_cache_layout = MlaFp8KvCacheLayout::NATIVE;
 
     MLAKVCacheSpec() = default;
 
     MLAKVCacheSpec(const AttentionConfigs& attn_config, const ParallelismConfig& parallelism_config) {
-        type               = KVCacheSpecType::MultiHeadLatentAttention;
-        layer_num          = 1;  // Will be set by caller
-        local_head_num_kv  = 1;  // mla set local_head_num_kv to 1
-        seq_size_per_block = static_cast<uint32_t>(attn_config.tokens_per_block);
-        kv_lora_rank       = static_cast<uint32_t>(attn_config.kv_lora_rank);
-        rope_head_dim      = static_cast<uint32_t>(attn_config.rope_head_dim);
+        type                = KVCacheSpecType::MultiHeadLatentAttention;
+        layer_num           = 1;  // Will be set by caller
+        local_head_num_kv   = 1;  // mla set local_head_num_kv to 1
+        seq_size_per_block  = static_cast<uint32_t>(attn_config.tokens_per_block);
+        kv_lora_rank        = static_cast<uint32_t>(attn_config.kv_lora_rank);
+        rope_head_dim       = static_cast<uint32_t>(attn_config.rope_head_dim);
+        fp8_kv_cache_layout = attn_config.mla_fp8_kv_cache_layout;
+    }
+
+    static bool isFp8DataType(DataType dtype) {
+        return dtype == DataType::TYPE_FP8_E4M3 || dtype == DataType::TYPE_FP8_E8M0;
+    }
+
+    MlaKvCacheStorageLayout storageLayout() const {
+        if (!isFp8DataType(dtype)) {
+            return MlaKvCacheStorageLayout::NativeBf16;
+        }
+        if (fp8_kv_cache_layout == MlaFp8KvCacheLayout::ATOM) {
+            return MlaKvCacheStorageLayout::AtomFp8Packed;
+        }
+        return MlaKvCacheStorageLayout::NativeFp8WithScale;
     }
 
     size_t block_size() const override {
-        auto is_fp8      = (dtype == DataType::TYPE_FP8_E4M3 || dtype == DataType::TYPE_FP8_E8M0);
-        auto single_size = local_head_num_kv * (kv_lora_rank + rope_head_dim);
-        if (is_fp8) {
-            // First 512 bytes: The "quantized NoPE" part, containing 512 float8_e4m3 values.
-            // Next 16 bytes: Scale factors, containing 4 float32 values. The first float32 is the scale for the first
-            // 128 float8_e4m3 values, the second for the next 128, and so on. Last 128 bytes: The "RoPE" part,
-            // containing 64 bfloat16 values. This part is not quantized for accuracy.
-            single_size = local_head_num_kv * (kv_lora_rank + kv_lora_rank / 128 * 4 + rope_head_dim * 2);
+        size_t single_size = 0;
+        switch (storageLayout()) {
+            case MlaKvCacheStorageLayout::NativeBf16:
+            case MlaKvCacheStorageLayout::AtomFp8Packed:
+                single_size = local_head_num_kv * (kv_lora_rank + rope_head_dim);
+                break;
+            case MlaKvCacheStorageLayout::NativeFp8WithScale:
+                single_size = local_head_num_kv * (kv_lora_rank + kv_lora_rank / 128 * 4 + rope_head_dim * 2);
+                break;
         }
         return single_size * seq_size_per_block;
     }
@@ -89,6 +124,7 @@ struct MLAKVCacheSpec: public KVCacheSpec {
         os << commonDebugString(indent);
         os << indent1 << "kv_lora_rank=" << kv_lora_rank << "\n";
         os << indent1 << "rope_head_dim=" << rope_head_dim << "\n";
+        os << indent1 << "mla_kv_cache_storage_layout=" << MlaKvCacheStorageLayoutToString(storageLayout()) << "\n";
         return os.str();
     }
 };

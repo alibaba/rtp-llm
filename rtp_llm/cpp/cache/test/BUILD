@@ -98,6 +98,21 @@ cc_test(
 )
 
 cc_test(
+    name = "mla_kv_cache_spec_test",
+    srcs = [
+        "MLAKVCacheSpecTest.cc",
+    ],
+    data = [],
+    copts = test_copts,
+    deps = [
+        "//rtp_llm/cpp/cache:cache_types",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
+    env = {},
+)
+
+cc_test(
     name = "full_kv_cache_group_test",
     srcs = [
         "FullKVCacheGroupTest.cc",
