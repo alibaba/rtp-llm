@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <cstddef>
 #include <vector>
 
@@ -7,6 +8,11 @@
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 
 namespace rtp_llm {
+
+struct MTPModuleConfigPlan {
+    std::vector<size_t>      source_layer_indices;
+    std::vector<ModelConfig> module_configs;
+};
 
 inline ModelConfig makeSingleLayerMTPModelConfig(const ModelConfig& model_config, size_t source_layer) {
     RTP_LLM_CHECK_WITH_INFO(model_config.num_layers > 0,
@@ -83,6 +89,38 @@ inline void validateHomogeneousMTPCacheLayouts(const std::vector<ModelConfig>& m
                                 "heterogeneous MTP cache layout: module %zu attention type differs from module 0",
                                 module_index);
     }
+}
+
+inline MTPModuleConfigPlan buildMTPModuleConfigPlan(const ModelConfig& model_config,
+                                                    size_t             weight_count,
+                                                    size_t             gen_num_per_cycle,
+                                                    SpeculativeType    sp_type) {
+    RTP_LLM_CHECK_WITH_INFO(weight_count > 0, "MTP module config plan requires at least one layer weight");
+
+    size_t model_num = weight_count;
+    if (gen_num_per_cycle > 1 && weight_count == 1) {
+        model_num = gen_num_per_cycle;
+    } else if (gen_num_per_cycle != weight_count) {
+        model_num = std::min(weight_count, gen_num_per_cycle);
+    }
+    if (sp_type == SP_TYPE_EAGLE || sp_type == SP_TYPE_EAGLE3) {
+        model_num = 1;
+    }
+    RTP_LLM_CHECK_WITH_INFO(model_num > 0,
+                            "MTP module config plan produced no modules: weights=%zu gen_num_per_cycle=%zu",
+                            weight_count,
+                            gen_num_per_cycle);
+
+    MTPModuleConfigPlan plan;
+    plan.source_layer_indices.reserve(model_num);
+    plan.module_configs.reserve(model_num);
+    for (size_t module_index = 0; module_index < model_num; ++module_index) {
+        const size_t source_layer = weight_count == 1 ? 0 : module_index;
+        plan.source_layer_indices.push_back(source_layer);
+        plan.module_configs.push_back(makeSingleLayerMTPModelConfig(model_config, source_layer));
+    }
+    validateHomogeneousMTPCacheLayouts(plan.module_configs);
+    return plan;
 }
 
 }  // namespace rtp_llm

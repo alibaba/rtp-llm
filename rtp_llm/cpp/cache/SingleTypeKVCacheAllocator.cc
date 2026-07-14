@@ -34,12 +34,15 @@ SingleTypeKVCacheAllocator::SingleTypeKVCacheAllocator(const CacheConfig&       
     KVCacheAllocator(config, allocation_type, metrics_reporter, reserve_block_ratio) {}
 
 bool SingleTypeKVCacheAllocator::doInit() {
-    RTP_LLM_CHECK_WITH_INFO(config_.groupNums() > 0, "cache groups must not be empty");
+    RTP_LLM_CHECK_WITH_INFO(config_.groupNums() == 1,
+                            "SingleTypeKVCacheAllocator requires exactly one cache group, got %d",
+                            config_.groupNums());
     auto& spec = config_.specForGroup(0);
     RTP_LLM_CHECK_WITH_INFO(spec != nullptr, "cache spec[0] is null");
-    RTP_LLM_CHECK_WITH_INFO(spec->type == rtp_llm::KVCacheSpecType::MultiHeadAttention
-                                || spec->type == rtp_llm::KVCacheSpecType::MultiHeadLatentAttention,
-                            "SingleTypeKVCacheAllocator only support Full Attention");
+    const bool is_full_attention = config_.typeForGroup(0) == CacheGroupType::FULL
+                                   && (spec->type == rtp_llm::KVCacheSpecType::MultiHeadAttention
+                                       || spec->type == rtp_llm::KVCacheSpecType::MultiHeadLatentAttention);
+    RTP_LLM_CHECK_WITH_INFO(is_full_attention, "SingleTypeKVCacheAllocator requires one FULL MHA/MLA cache group");
 
     BlockPoolConfig pool_config;
 

@@ -137,6 +137,15 @@ TEST_F(SingleTypeKVCacheAllocatorTest, ConstructorAndInit) {
     EXPECT_EQ(allocator_->freeBlocksNum(), config.block_num - 1);  // reserve 1 block
 }
 
+TEST_F(SingleTypeKVCacheAllocatorTest, InitRejectsLinearGroupBeforeCreatingBlockPool) {
+    auto config = makeSimpleLinearCacheConfig(
+        /*layer_num=*/2, /*block_num=*/4, /*tokens_per_block=*/4, rtp_llm::DataType::TYPE_FP16);
+    allocator_ = std::make_shared<SingleTypeKVCacheAllocator>(config);
+
+    EXPECT_THROW(allocator_->init(), std::runtime_error);
+    EXPECT_EQ(allocator_->getBlockPool(), nullptr);
+}
+
 TEST_F(SingleTypeKVCacheAllocatorTest, InitWithDifferentLayerNum) {
     auto config = createSingleTypeTestConfig(8, 20, 16);
     allocator_  = std::make_shared<SingleTypeKVCacheAllocator>(config);
@@ -489,7 +498,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, SingleLayerMtpConfigSlicesDescriptorAndAt
     config.kv_cache_spec_descs[1][0].tag                   = "layer1";
     config.hybrid_attention_config.enable_hybrid_attention = true;
     config.hybrid_attention_config.hybrid_attention_types  = {HybridAttentionType::LINEAR,
-                                                             HybridAttentionType::SLIDING_WINDOW};
+                                                              HybridAttentionType::SLIDING_WINDOW};
 
     const auto single_layer = makeSingleLayerMTPModelConfig(config, /*source_layer=*/1);
 
@@ -525,6 +534,31 @@ TEST_F(SingleTypeKVCacheAllocatorTest, HomogeneousMtpCacheLayoutRejectsDescripto
     auto different_attention                                              = module1;
     different_attention.hybrid_attention_config.hybrid_attention_types[0] = HybridAttentionType::LINEAR;
     EXPECT_THROW(validateHomogeneousMTPCacheLayouts({module0, different_attention}), std::runtime_error);
+}
+
+TEST_F(SingleTypeKVCacheAllocatorTest, MtpModuleConfigPlanTracksWeightSources) {
+    auto config = makeTestModelConfig(/*num_layers=*/2);
+
+    const auto multi_weight_plan =
+        buildMTPModuleConfigPlan(config, /*weight_count=*/2, /*gen_num_per_cycle=*/2, SP_TYPE_MTP);
+    ASSERT_EQ(multi_weight_plan.source_layer_indices, (std::vector<size_t>{0, 1}));
+    ASSERT_EQ(multi_weight_plan.module_configs.size(), 2u);
+    for (const auto& module_config : multi_weight_plan.module_configs) {
+        EXPECT_EQ(module_config.num_layers, 1);
+        ASSERT_EQ(module_config.kv_cache_spec_descs.size(), 1u);
+    }
+
+    const auto reused_weight_plan =
+        buildMTPModuleConfigPlan(config, /*weight_count=*/1, /*gen_num_per_cycle=*/3, SP_TYPE_MTP);
+    EXPECT_EQ(reused_weight_plan.source_layer_indices, (std::vector<size_t>{0, 0, 0}));
+    ASSERT_EQ(reused_weight_plan.module_configs.size(), 3u);
+    for (const auto& module_config : reused_weight_plan.module_configs) {
+        EXPECT_EQ(module_config.num_layers, 1);
+        ASSERT_EQ(module_config.kv_cache_spec_descs.size(), 1u);
+        ASSERT_EQ(module_config.kv_cache_spec_descs[0].size(), config.kv_cache_spec_descs[0].size());
+        EXPECT_EQ(module_config.kv_cache_spec_descs[0][0].tag, config.kv_cache_spec_descs[0][0].tag);
+        EXPECT_EQ(module_config.kv_cache_spec_descs[0][0].cache_type, config.kv_cache_spec_descs[0][0].cache_type);
+    }
 }
 
 // Test convert index to buffer

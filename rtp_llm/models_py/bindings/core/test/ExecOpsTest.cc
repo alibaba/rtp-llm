@@ -2,6 +2,7 @@
 #include "rtp_llm/models_py/bindings/common/WriteCacheStoreOp.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/CacheStore.h"
+#include "rtp_llm/cpp/testing/TestLogCapture.h"
 #include "rtp_llm/cpp/utils/KVCacheUtils.h"
 #include <gtest/gtest.h>
 #include <cstdint>
@@ -375,10 +376,10 @@ TEST_F(ExecOpsTest, testWriteCacheStoreMhaKernelViewKeepsExplicitKvAndScaleStrid
         {static_cast<int64_t>(physical_block_num), 2, 1, static_cast<int64_t>(physical_tokens_per_block), 4},
         torch::kUInt8);
     auto kernel_kv      = physical_kv.reshape({static_cast<int64_t>(physical_block_num * kernel_blocks_per_physical),
-                                          2,
-                                          1,
-                                          static_cast<int64_t>(kernel_tokens_per_block),
-                                          4});
+                                               2,
+                                               1,
+                                               static_cast<int64_t>(kernel_tokens_per_block),
+                                               4});
     auto physical_scale = torch::zeros({static_cast<int64_t>(physical_block_num), 32}, torch::kUInt8);
     auto kernel_scale =
         physical_scale.reshape({static_cast<int64_t>(physical_block_num * kernel_blocks_per_physical), 8});
@@ -474,13 +475,14 @@ TEST_F(ExecOpsTest, testWriteCacheStoreLinearGroupKeepsPaddedPhysicalStride) {
 }
 
 TEST_F(ExecOpsTest, testWriteCacheStoreFailureBufferContainsEveryBlockKey) {
-    constexpr size_t block_num        = 2;
-    constexpr size_t tokens_per_block = 4;
-    constexpr size_t kv_stride        = 16;
-    auto             cache_store      = std::make_shared<MockCacheStore>();
-    cache_store->store_success        = false;
-    cache_store->store_error          = CacheStoreErrorCode::StoreFailed;
-    auto inputs                       = makePyCacheStoreInputs(
+    rtp_llm::test::TestLogCapture log_capture("write_cache_failure");
+    constexpr size_t              block_num        = 2;
+    constexpr size_t              tokens_per_block = 4;
+    constexpr size_t              kv_stride        = 16;
+    auto                          cache_store      = std::make_shared<MockCacheStore>();
+    cache_store->store_success                     = false;
+    cache_store->store_error                       = CacheStoreErrorCode::StoreFailed;
+    auto inputs                                    = makePyCacheStoreInputs(
         cache_store, tokens_per_block, kv_stride, /*scale_stride=*/0, block_num, /*mla_kvcache=*/true);
 
     torch_ext::LayerKVCache layer_cache;
@@ -497,9 +499,39 @@ TEST_F(ExecOpsTest, testWriteCacheStoreFailureBufferContainsEveryBlockKey) {
 
     ASSERT_EQ(cache_store->records.size(), 1u);
     ASSERT_EQ(cache_store->records[0].blocks.size(), block_num);
+    const auto log_content = log_capture.content();
+    EXPECT_NE(log_content.find("PD_CACHE_KEY_WRITE_FAILED"), std::string::npos);
     for (size_t block_id = 0; block_id < block_num; ++block_id) {
         const auto key = "kv_" + makeCacheKey(0, inputs.cache_keys[block_id], 0);
         EXPECT_NE(cache_store->records[0].blocks.find(key), cache_store->records[0].blocks.end());
+        EXPECT_NE(log_content.find(key), std::string::npos);
+    }
+}
+
+TEST_F(ExecOpsTest, testWriteCacheStoreSuccessDoesNotLogBlockKeys) {
+    rtp_llm::test::TestLogCapture log_capture("write_cache_success");
+    constexpr size_t              block_num        = 2;
+    constexpr size_t              tokens_per_block = 4;
+    auto                          cache_store      = std::make_shared<MockCacheStore>();
+    auto                          inputs           = makePyCacheStoreInputs(
+        cache_store, tokens_per_block, /*kv_stride=*/16, /*scale_stride=*/0, block_num, /*mla_kvcache=*/true);
+
+    torch_ext::LayerKVCache layer_cache;
+    layer_cache.kv_cache_base      = torch::zeros({2, 16}, torch::kUInt8);
+    layer_cache.seq_size_per_block = tokens_per_block;
+    layer_cache.layer_id           = 0;
+    layer_cache.group_id           = 0;
+
+    ASSERT_NO_THROW(WriteCacheStoreOp(torch::tensor({8}, torch::kInt32),
+                                      torch::tensor({0}, torch::kInt32),
+                                      torch::tensor({{0, 1}}, torch::kInt32),
+                                      std::make_optional(inputs),
+                                      std::make_optional(layer_cache)));
+
+    const auto log_content = log_capture.content();
+    EXPECT_EQ(log_content.find("PD_CACHE_KEY_WRITE_FAILED"), std::string::npos);
+    for (const auto& cache_key : inputs.cache_keys) {
+        EXPECT_EQ(log_content.find(makeCacheKey(0, cache_key, 0)), std::string::npos);
     }
 }
 

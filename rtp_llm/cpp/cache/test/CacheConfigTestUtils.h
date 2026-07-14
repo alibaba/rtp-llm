@@ -31,10 +31,10 @@ inline KVCacheSpecPtr makeMhaSpec(const std::string& tag,
     desc.dtype      = dtype;
 
     SpecBuildContext ctx;
-    ctx.dtype                   = dtype;
-    ctx.seq_size_per_block      = static_cast<uint32_t>(tokens_per_block);
-    ctx.attn_config             = &attn_config;
-    ctx.parallelism_config      = &parallelism_config;
+    ctx.dtype              = dtype;
+    ctx.seq_size_per_block = static_cast<uint32_t>(tokens_per_block);
+    ctx.attn_config        = &attn_config;
+    ctx.parallelism_config = &parallelism_config;
     return SpecBuilder::build(desc, ctx);
 }
 
@@ -87,6 +87,41 @@ inline CacheConfig makeSimpleMhaCacheConfig(int               layer_num,
         layer_ids[i] = i;
     }
     config.fromGroupedSpecs({spec}, {layer_ids}, {CacheGroupType::FULL}, {"default"});
+
+    config.kv_block_stride_bytes = spec->block_size_bytes();
+    config.kv_block_size_bytes   = static_cast<size_t>(layer_num) * config.kv_block_stride_bytes;
+    config.kv_scale_stride_bytes = spec->scale_block_size_bytes();
+    config.kv_scale_size_bytes   = static_cast<size_t>(layer_num) * config.kv_scale_stride_bytes;
+    config.block_size_bytes      = config.kv_block_size_bytes + config.kv_scale_size_bytes;
+
+    const size_t per_layer_stride_bytes = config.kv_block_stride_bytes + config.kv_scale_stride_bytes;
+    config.layer_to_block_stride_bytes.assign(static_cast<size_t>(config.layer_all_num),
+                                              static_cast<int>(per_layer_stride_bytes));
+
+    return config;
+}
+
+inline CacheConfig makeSimpleLinearCacheConfig(int               layer_num,
+                                               int               block_num,
+                                               size_t            tokens_per_block,
+                                               rtp_llm::DataType dtype,
+                                               uint32_t          local_head_num_kv = 1,
+                                               uint32_t          size_per_head     = 1) {
+    CacheConfig config;
+    config.dtype                     = dtype;
+    config.layer_num                 = static_cast<uint32_t>(layer_num);
+    config.layer_all_num             = static_cast<uint32_t>(layer_num);
+    config.block_num                 = static_cast<uint32_t>(block_num);
+    config.seq_size_per_block        = tokens_per_block;
+    config.kernel_seq_size_per_block = tokens_per_block;
+
+    auto spec = makeLinearSpec("linear", tokens_per_block, dtype, local_head_num_kv, size_per_head);
+
+    std::vector<int> layer_ids(layer_num);
+    for (int i = 0; i < layer_num; ++i) {
+        layer_ids[i] = i;
+    }
+    config.fromGroupedSpecs({spec}, {layer_ids}, {CacheGroupType::LINEAR}, {"linear"});
 
     config.kv_block_stride_bytes = spec->block_size_bytes();
     config.kv_block_size_bytes   = static_cast<size_t>(layer_num) * config.kv_block_stride_bytes;

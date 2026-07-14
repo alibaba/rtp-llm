@@ -20,6 +20,14 @@ HybridTypeKVCacheAllocator::HybridTypeKVCacheAllocator(const CacheConfig&       
 
 bool HybridTypeKVCacheAllocator::doInit() {
     RTP_LLM_CHECK_WITH_INFO(config_.groupNums() > 0, "no cache groups found in CacheConfig");
+    const bool has_full_attention =
+        std::any_of(config_.groups.begin(), config_.groups.end(), [](const GroupBase& group) {
+            return group.policy.group_type == CacheGroupType::FULL && group.spec
+                   && (group.spec->type == KVCacheSpecType::MultiHeadAttention
+                       || group.spec->type == KVCacheSpecType::MultiHeadLatentAttention);
+        });
+    RTP_LLM_CHECK_WITH_INFO(has_full_attention,
+                            "HybridTypeKVCacheAllocator requires at least one FULL MHA/MLA cache group");
 
     auto pool_config = BlockPoolConfigHelper::createConfig(config_);
     block_pool_      = std::make_shared<BlockPool>(pool_config, allocation_type_);
@@ -33,7 +41,7 @@ bool HybridTypeKVCacheAllocator::doInit() {
         const auto&    ids  = config_.layerIdsForGroup(static_cast<size_t>(gid));
 
         KVCacheGroupPtr group;
-        const auto group_type = config_.typeForGroup(static_cast<size_t>(gid));
+        const auto      group_type = config_.typeForGroup(static_cast<size_t>(gid));
         if (group_type == CacheGroupType::LINEAR || (spec && spec->type == KVCacheSpecType::LinearAttention)) {
             group = std::make_shared<LinearKVCacheGroup>(ids, spec, block_pool_, gid, config_.linear_step);
             linear_group_ids_.push_back(gid);
@@ -340,12 +348,12 @@ CacheLayerLayout HybridTypeKVCacheAllocator::allLayerCacheBase() const {
     const auto       layer_tensors = block_pool_->allLayerCacheBase();
     const auto       scale_tensors = block_pool_->allLayerScaleCacheBase();
 
-    layout.layer_to_group_ids = config_.layerGroupIdsSnapshot();
-    layout.group_types = config_.groupTypesSnapshot();
-    layout.group_tags = config_.groupTagsSnapshot();
+    layout.layer_to_group_ids    = config_.layerGroupIdsSnapshot();
+    layout.group_types           = config_.groupTypesSnapshot();
+    layout.group_tags            = config_.groupTagsSnapshot();
     layout.layer_tag_to_group_id = config_.layerTagToGroupIdSnapshot();
-    const auto layer_all_num = static_cast<size_t>(config_.layer_all_num);
-    const auto group_num     = static_cast<size_t>(config_.groupNums());
+    const auto layer_all_num     = static_cast<size_t>(config_.layer_all_num);
+    const auto group_num         = static_cast<size_t>(config_.groupNums());
     layout.layers_to_kv_buffer_ptrs.resize(layer_all_num);
     layout.layers_to_scale_buffer_ptrs.resize(layer_all_num);
     layout.layers_to_kv_buffer_ptrs_by_group.resize(layer_all_num);
@@ -365,14 +373,14 @@ CacheLayerLayout HybridTypeKVCacheAllocator::allLayerCacheBase() const {
         torch::Tensor kv_tensor;
         if (local_idx < layer_tensors.size() && layer_tensors[local_idx].defined()
             && layer_tensors[local_idx].numel() > 0) {
-            kv_tensor = layer_tensors[local_idx];
+            kv_tensor                                 = layer_tensors[local_idx];
             layout.layers_to_kv_buffer_ptrs[layer_id] = kv_tensor;
         }
 
         torch::Tensor scale_tensor;
         if (!scale_tensors.empty() && local_idx < scale_tensors.size() && scale_tensors[local_idx].defined()
             && scale_tensors[local_idx].numel() > 0) {
-            scale_tensor = scale_tensors[local_idx];
+            scale_tensor                                 = scale_tensors[local_idx];
             layout.layers_to_scale_buffer_ptrs[layer_id] = scale_tensor;
         }
 

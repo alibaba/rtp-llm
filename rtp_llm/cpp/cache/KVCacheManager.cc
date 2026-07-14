@@ -61,8 +61,8 @@ KVCacheManager::~KVCacheManager() {
 bool KVCacheManager::init() {
     RTP_LLM_CHECK_WITH_INFO(config_.groupNums() > 0, "cache specs must not be empty");
 
-    const bool is_hybrid = config_.groupNums() > 1;
-    if (is_hybrid) {
+    const bool use_hybrid_allocator = config_.groupNums() > 1;
+    if (use_hybrid_allocator) {
         allocator_ = std::make_shared<rtp_llm::HybridTypeKVCacheAllocator>(
             config_, AllocationType::DEVICE, metrics_reporter_, kv_cache_config_.reserve_block_ratio);
         RTP_LLM_CHECK_WITH_INFO(allocator_->init(), "HybridTypeKVCacheAllocator init failed");
