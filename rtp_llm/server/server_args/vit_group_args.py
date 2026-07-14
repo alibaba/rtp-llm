@@ -258,12 +258,13 @@ def init_vit_group_args(parser, vit_config):
     )
     # ---- Encoder(ViT)<->LLM embedding transport over GPUDirect RDMA ----
     vit_group.add_argument(
-        "--mm_rdma_enable",
-        env_name="MM_RDMA_ENABLE",
-        bind_to=(vit_config, "mm_rdma_enable"),
-        type=str2bool,
-        default=False,
-        help="开启 encoder<->LLM 多模态 embedding 的 GPUDirect RDMA 数据面（关闭时回退 bytes）",
+        "--mm_transport_mode",
+        env_name="MM_TRANSPORT_MODE",
+        bind_to=(vit_config, "mm_transport_mode"),
+        type=str,
+        choices=["auto", "grpc"],
+        default="auto",
+        help="多模态输出传输模式：auto 优先 RDMA 并自动回退 gRPC，grpc 强制使用 gRPC",
     )
     vit_group.add_argument(
         "--mm_rdma_bind_ip",
@@ -280,14 +281,6 @@ def init_vit_group_args(parser, vit_config):
         type=int,
         default=0,
         help="encoder 侧 RdmaServer 监听端口，0 表示随机端口",
-    )
-    vit_group.add_argument(
-        "--mm_rdma_min_bytes",
-        env_name="MM_RDMA_MIN_BYTES",
-        bind_to=(vit_config, "mm_rdma_min_bytes"),
-        type=int,
-        default=256 * 1024,
-        help="只有大于该字节数的 embedding 才走 RDMA，更小的走 bytes",
     )
     vit_group.add_argument(
         "--mm_rdma_connect_timeout_ms",
@@ -334,9 +327,8 @@ def init_vit_group_args(parser, vit_config):
         env_name="MM_RDMA_MAX_SLOT_BYTES",
         bind_to=(vit_config, "mm_rdma_max_slot_bytes"),
         type=int,
-        default=2000 * 1024 * 1024,
-        help="encoder 侧单个 RDMA slot 的字节上限（RDMA 显存池单次分配硬上限约 2GiB）。"
-        "请求输出超过该值时，自动切成多个 <= 该值的 slot/描述符分块传输，而非回退 bytes。须 <= 2GiB",
+        default=1024 * 1024 * 1024,
+        help="encoder 侧单个 RDMA slot 的字节上限，默认 1GiB；更大的输出沿用现有协议自动分块",
     )
     # ---- GPU embedding batch scheduler (MMScheduler) ----
     vit_group.add_argument(
