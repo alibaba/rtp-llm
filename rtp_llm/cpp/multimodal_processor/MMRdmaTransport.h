@@ -53,8 +53,8 @@ public:
 using MMRdmaTransportCreator = std::shared_ptr<MMRdmaTransport> (*)(const VitConfig&, MMRdmaRole);
 void registerMMRdmaTransportCreator(MMRdmaTransportCreator creator);
 
-// Returns nullptr when RDMA is disabled (mm_rdma_enable=false), unavailable
-// (open-source build / no NIC) or initialization fails.
+// Returns nullptr in grpc mode, when RDMA is unavailable (open-source build / no NIC),
+// or when initialization fails. Auto mode callers then use inline gRPC bytes.
 std::shared_ptr<MMRdmaTransport> createMMRdmaTransport(const VitConfig& vit_config, MMRdmaRole role);
 
 }  // namespace rtp_llm

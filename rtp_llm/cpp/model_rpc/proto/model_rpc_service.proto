@@ -189,8 +189,8 @@ message MultimodalOutputPB {
     // stays inline — the LLM needs it to slice the RDMA-read embedding/pos_id per image.
     // Used when the whole output fits in ONE slot (<= mm_rdma_max_slot_bytes).
     MMRdmaDescPB output_rdma = 5;
-    // RDMA fast-path, chunked: used instead of output_rdma when the output exceeds one slot
-    // (single-slot alloc is capped at ~2GiB by the RDMA mempool). Each entry describes one
+    // RDMA fast-path, chunked: used instead of output_rdma when the output exceeds one slot.
+    // The ViT transport config caps each slot at exactly 1GiB. Each entry describes one
     // <=mm_rdma_max_slot_bytes slot; the LLM reads every chunk in order and concatenates the
     // per-role tensors (see MMRdmaTensorPB.Role) before applying split_size. Exactly one of
     // output_rdma / output_rdma_chunks is set on the RDMA path; both empty => inline bytes.

@@ -11,9 +11,6 @@ namespace rtp_llm {
 // Copy the optional mm-rdma fields from the Python VitConfig into the C++ VitConfig.
 // Guarded by hasattr so older Python configs (without these fields) stay compatible.
 inline void extractMMRdmaVitConfig(const py::object& vit_config, VitConfig& cfg) {
-    auto get_bool = [&](const char* name, bool def) {
-        return py::hasattr(vit_config, name) ? vit_config.attr(name).cast<bool>() : def;
-    };
     auto get_int = [&](const char* name, int def) {
         return py::hasattr(vit_config, name) ? vit_config.attr(name).cast<int>() : def;
     };
@@ -24,7 +21,7 @@ inline void extractMMRdmaVitConfig(const py::object& vit_config, VitConfig& cfg)
         return py::hasattr(vit_config, name) ? vit_config.attr(name).cast<std::string>() : def;
     };
 
-    cfg.mm_rdma_enable             = get_bool("mm_rdma_enable", cfg.mm_rdma_enable);
+    cfg.mm_transport_mode          = get_str("mm_transport_mode", cfg.mm_transport_mode);
     cfg.mm_rdma_bind_ip            = get_str("mm_rdma_bind_ip", cfg.mm_rdma_bind_ip);
     cfg.mm_rdma_port               = get_int("mm_rdma_port", cfg.mm_rdma_port);
     cfg.mm_rdma_connect_timeout_ms = get_int("mm_rdma_connect_timeout_ms", cfg.mm_rdma_connect_timeout_ms);
