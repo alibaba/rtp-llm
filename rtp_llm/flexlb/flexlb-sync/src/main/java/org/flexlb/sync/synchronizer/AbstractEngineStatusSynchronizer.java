@@ -60,11 +60,11 @@ public abstract class AbstractEngineStatusSynchronizer {
 
         engineSyncExecutor = new ThreadPoolExecutor(corePoolSize, maximumPoolSize, 60L, TimeUnit.SECONDS,
                 new LinkedBlockingQueue<>(15000), new NamedThreadFactory("engine-sync-executor"),
-                new ThreadPoolExecutor.AbortPolicy());
+                new ThreadPoolExecutor.CallerRunsPolicy());
 
         statusCheckExecutor = new ThreadPoolExecutor(corePoolSize, maximumPoolSize, 60L, TimeUnit.SECONDS,
                 new LinkedBlockingQueue<>(15000), new NamedThreadFactory("status-checker-executor"),
-                new ThreadPoolExecutor.AbortPolicy());
+                new ThreadPoolExecutor.CallerRunsPolicy());
 
         String masterConfigStr = System.getenv("FLEXLB_CONFIG");
         logger.warn("FLEXLB_CONFIG = {}", masterConfigStr);

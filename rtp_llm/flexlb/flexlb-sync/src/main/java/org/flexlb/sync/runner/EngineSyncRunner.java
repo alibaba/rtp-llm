@@ -20,6 +20,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ExecutorService;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.atomic.LongAdder;
 import java.util.stream.Collectors;
 
@@ -135,23 +136,33 @@ public class EngineSyncRunner implements Runnable {
                 WorkerStatus workerStatus = getOrCreateWorkerStatus(cachedWorkerStatuses, workerIpPort);
 
                 if (workerStatus.getStatusCheckInProgress().compareAndSet(false, true)) {
-                    logger.debug("Submitting GrpcWorkerStatusRunner for worker: {}, site: {}", workerIpPort, site);
-                    GrpcWorkerStatusRunner grpcWorkerStatusRunner
-                            = new GrpcWorkerStatusRunner(modelName, workerIpPort, site, roleType, host.getGroup(),
-                            workerStatus, engineHealthReporter, engineGrpcService,
-                            syncRequestTimeoutMs, batchScheduler, endpointRegistry);
-                    statusCheckExecutor.submit(grpcWorkerStatusRunner);
+                    try {
+                        logger.debug("Submitting GrpcWorkerStatusRunner for worker: {}, site: {}", workerIpPort, site);
+                        GrpcWorkerStatusRunner grpcWorkerStatusRunner
+                                = new GrpcWorkerStatusRunner(modelName, workerIpPort, site, roleType, host.getGroup(),
+                                workerStatus, engineHealthReporter, engineGrpcService,
+                                syncRequestTimeoutMs, batchScheduler, endpointRegistry);
+                        statusCheckExecutor.submit(grpcWorkerStatusRunner);
+                    } catch (RejectedExecutionException e) {
+                        workerStatus.getStatusCheckInProgress().set(false);
+                        logger.warn("Status check rejected for worker: {}, reset flag for retry", workerIpPort);
+                    }
                 } else {
                     logger.info("Skip status check for worker: {}, previous request in progress", workerIpPort);
                 }
 
                 if (workerStatus.getCacheCheckInProgress().compareAndSet(false, true)) {
-                    logger.debug("Submitting GrpcCacheStatusCheckRunner for worker: {}, site: {}", workerIpPort, site);
-                    GrpcCacheStatusCheckRunner grpcCacheStatusCheckRunner
-                            = new GrpcCacheStatusCheckRunner(modelName, workerIpPort, site, roleType,
-                            workerStatus, engineHealthReporter, engineGrpcService, localKvCacheAwareManager,
-                            syncRequestTimeoutMs, syncCount, syncEngineStatusInterval);
-                    statusCheckExecutor.submit(grpcCacheStatusCheckRunner);
+                    try {
+                        logger.debug("Submitting GrpcCacheStatusCheckRunner for worker: {}, site: {}", workerIpPort, site);
+                        GrpcCacheStatusCheckRunner grpcCacheStatusCheckRunner
+                                = new GrpcCacheStatusCheckRunner(modelName, workerIpPort, site, roleType,
+                                workerStatus, engineHealthReporter, engineGrpcService, localKvCacheAwareManager,
+                                syncRequestTimeoutMs, syncCount, syncEngineStatusInterval);
+                        statusCheckExecutor.submit(grpcCacheStatusCheckRunner);
+                    } catch (RejectedExecutionException e) {
+                        workerStatus.getCacheCheckInProgress().set(false);
+                        logger.warn("Cache check rejected for worker: {}, reset flag for retry", workerIpPort);
+                    }
                 } else {
                     logger.info("Skip cache check for worker: {}, previous request in progress", workerIpPort);
                 }
