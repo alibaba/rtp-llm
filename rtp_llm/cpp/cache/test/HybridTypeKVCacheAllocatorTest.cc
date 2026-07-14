@@ -51,6 +51,30 @@ static ModelConfig makeTinyModelConfig(uint32_t num_layers) {
     return cfg;
 }
 
+static KVCacheSpecPtr makeLinearSpecWithGlobalHeads(uint32_t key_heads, uint32_t value_heads, uint32_t tp) {
+    LinearAttentionConfig linear_config;
+    linear_config.linear_conv_kernel_dim = 2;
+    linear_config.linear_key_head_dim    = 8;
+    linear_config.linear_value_head_dim  = 8;
+    linear_config.linear_num_key_heads   = static_cast<int>(key_heads);
+    linear_config.linear_num_value_heads = static_cast<int>(value_heads);
+
+    ParallelismConfig parallelism_config;
+    parallelism_config.tp_size = tp;
+
+    KVCacheSpecDesc desc;
+    desc.tag        = "linear_test";
+    desc.cache_type = KVCacheSpecType::LinearAttention;
+    desc.dtype      = DataType::TYPE_FP16;
+
+    SpecBuildContext ctx;
+    ctx.dtype                   = DataType::TYPE_FP16;
+    ctx.seq_size_per_block      = 1;
+    ctx.linear_attention_config = &linear_config;
+    ctx.parallelism_config      = &parallelism_config;
+    return SpecBuilder::build(desc, ctx);
+}
+
 static void setHybridLayerDescs(ModelConfig& cfg, const std::vector<HybridAttentionType>& types) {
     cfg.hybrid_attention_config.enable_hybrid_attention = true;
     cfg.hybrid_attention_config.hybrid_attention_types  = types;
@@ -245,6 +269,49 @@ TEST_F(HybridTypeKVCacheAllocatorTest, CreateHybridConfigKeepsModelTokensPerBloc
     EXPECT_EQ(cache_config.seq_size_per_block, 4);
     ASSERT_EQ(cache_config.groupNums(), 1);
     EXPECT_EQ(cache_config.specForGroup(0)->seq_size_per_block, 4);
+}
+
+TEST(HybridCacheConfigTest, LinearSpecRejectsHeadsNotDivisibleByAttentionTp) {
+    try {
+        (void)makeLinearSpecWithGlobalHeads(/*key_heads=*/6, /*value_heads=*/8, /*tp=*/4);
+        FAIL() << "expected non-divisible linear heads to be rejected";
+    } catch (const std::runtime_error& e) {
+        const std::string message = e.what();
+        EXPECT_NE(message.find("tag=linear_test"), std::string::npos);
+        EXPECT_NE(message.find("key=6 value=8 tp=4"), std::string::npos);
+    }
+}
+
+TEST(HybridCacheConfigTest, LinearSpecRejectsInvalidValueToKeyHeadGrouping) {
+    try {
+        (void)makeLinearSpecWithGlobalHeads(/*key_heads=*/8, /*value_heads=*/4, /*tp=*/4);
+        FAIL() << "expected invalid linear value/key head grouping to be rejected";
+    } catch (const std::runtime_error& e) {
+        const std::string message = e.what();
+        EXPECT_NE(message.find("tag=linear_test"), std::string::npos);
+        EXPECT_NE(message.find("key=8 value=4 tp=4"), std::string::npos);
+    }
+}
+
+TEST(HybridCacheConfigTest, LinearSpecRejectsNonMultipleValueHeadsAfterTpValidation) {
+    try {
+        (void)makeLinearSpecWithGlobalHeads(/*key_heads=*/4, /*value_heads=*/6, /*tp=*/2);
+        FAIL() << "expected non-multiple linear value/key head grouping to be rejected";
+    } catch (const std::runtime_error& e) {
+        const std::string message = e.what();
+        EXPECT_NE(message.find("tag=linear_test"), std::string::npos);
+        EXPECT_NE(message.find("key=4 value=6 tp=2"), std::string::npos);
+    }
+}
+
+TEST(HybridCacheConfigTest, LinearSpecUsesTensorParallelLocalHeadsForBlockSizes) {
+    const auto spec = makeLinearSpecWithGlobalHeads(/*key_heads=*/4, /*value_heads=*/8, /*tp=*/4);
+
+    // local key/value heads are 1/2. With head dims 8 and conv kernel dim 2:
+    // SSM = 2 * 8 * 8, convolution = (2 - 1) * (2 * 1 * 8 + 2 * 8).
+    EXPECT_EQ(spec->k_block_size(), 128u);
+    EXPECT_EQ(spec->v_block_size(), 32u);
+    EXPECT_EQ(spec->block_size(), 160u);
 }
 
 TEST_F(HybridTypeKVCacheAllocatorTest, CreateHybridConfigRejectsOnlyLinearGroups) {
