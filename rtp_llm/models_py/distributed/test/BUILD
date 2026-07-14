@@ -45,6 +45,7 @@ py_test(
     deps = [
         "//rtp_llm:testlib",
         "//rtp_llm/models_py/distributed:collective_torch",
+        "//rtp_llm/models_py/modules/base/rocm:trt_allreduce",
     ],
     timeout = "short",
 )

@@ -2,17 +2,20 @@
 # Copyright (C) 2024-2025, Advanced Micro Devices, Inc. All rights reserved.
 # Adapted from atrex trt_allreduce for rtp-llm ROCm backend.
 
-from typing import Optional, Tuple
 from contextlib import contextmanager
+from typing import Optional, Tuple
 
 import torch
-from torch import Tensor
 import torch.distributed as dist
+from torch import Tensor
 from torch.distributed import ProcessGroup
+
 
 def _get_handle_class():
     from rtp_llm.ops.compute_ops import rtp_llm_ops
+
     return rtp_llm_ops.TrtllmArFusionHandle
+
 
 FP8_DTYPE = torch.float8_e4m3fnuz
 
@@ -57,6 +60,10 @@ class TrtllmDistEnv:
     ) -> None:
         self.group = group
         self.device_id = device_id
+        # Keep the capacity alongside the handle.  The graph-capture dispatch
+        # path reads this value before calling into CommWorkspace so oversized
+        # tensors can safely fall back to RCCL.
+        self.max_size_in_bytes = max_size_in_bytes
         self.rank = dist.get_rank(group=self.group)
         self.world_size = dist.get_world_size(group=self.group)
         self.handle = None
@@ -75,18 +82,23 @@ class TrtllmDistEnv:
         try:
             TrtllmArFusionHandle = _get_handle_class()
             self.handle = TrtllmArFusionHandle(
-                self.device_id, self.rank, self.world_size,
-                max_size_in_bytes, comm_ptrs_buf_len
+                self.device_id,
+                self.rank,
+                self.world_size,
+                max_size_in_bytes,
+                comm_ptrs_buf_len,
             )
 
             barrier_handle = self.handle.get_barrier_handle()
             data_handle = self.handle.get_data_handle()
         except Exception as e:
             import logging
+
             logging.warning(
                 "TRT-LLM AllReduce initialization failed (likely insufficient GPU memory, "
                 "requested %d bytes for data buffer). Falling back to RCCL. Error: %s",
-                max_size_in_bytes * 2, e,
+                max_size_in_bytes * 2,
+                e,
             )
             self.handle = None
             self.disabled = True
@@ -119,7 +131,9 @@ class TrtllmDistEnv:
             handle_list = [None] * self.world_size
             offset_list = [None] * self.world_size
             dist.all_gather_object(handle_list, handles[idx], group=self.group)
-            dist.all_gather_object(offset_list, int(offsets[idx].item()), group=self.group)
+            dist.all_gather_object(
+                offset_list, int(offsets[idx].item()), group=self.group
+            )
             self._barrier()
             self.handle.open_captured_handles(handle_list, offset_list, idx)
         self.handle.capture_clear()
@@ -173,7 +187,10 @@ class TrtllmDistEnv:
         fp8_out: bool = False,
     ) -> Tuple[Tensor, Tensor, Tensor]:
         """Reference implementation using standard ops (for correctness testing)."""
-        def rms_norm_forward(hidden_states: Tensor, weight: Tensor, epsilon: float) -> Tensor:
+
+        def rms_norm_forward(
+            hidden_states: Tensor, weight: Tensor, epsilon: float
+        ) -> Tensor:
             input_dtype = hidden_states.dtype
             variance = hidden_states.float().pow(2).mean(-1, keepdim=True)
             hidden_states = hidden_states * torch.rsqrt(variance + epsilon)
@@ -193,8 +210,10 @@ class TrtllmDistEnv:
             return residual_out, norm_out, norm_out_scale
         else:
             scale_out = torch.empty(
-                allreduce_in.shape[0], 1,
-                dtype=torch.float32, device=allreduce_in.device,
+                allreduce_in.shape[0],
+                1,
+                dtype=torch.float32,
+                device=allreduce_in.device,
             )
             return residual_out, norm_out, scale_out
 
@@ -213,8 +232,10 @@ class TrtllmDistEnv:
         if fp8_out:
             norm_out = torch.empty_like(allreduce_in, dtype=FP8_DTYPE)
             scale_out = torch.empty(
-                allreduce_in.shape[0], 1,
-                dtype=torch.float32, device=allreduce_in.device,
+                allreduce_in.shape[0],
+                1,
+                dtype=torch.float32,
+                device=allreduce_in.device,
             )
         else:
             norm_out = torch.empty_like(allreduce_in)
@@ -267,7 +288,8 @@ class TrtllmCommManager:
         self.group = group
         self.device_id = device_id
         self.dist_env = TrtllmDistEnv(
-            group=self.group, device_id=self.device_id,
+            group=self.group,
+            device_id=self.device_id,
         )
         self.initialized = True
 
@@ -290,7 +312,8 @@ def ensure_trtllm_comm_initialized(
         or _trtllm_comm_manager.device_id != device_id
     ):
         _trtllm_comm_manager.initialize(
-            group=group, device_id=device_id,
+            group=group,
+            device_id=device_id,
         )
 
     if _trtllm_comm_manager.initialized and _trtllm_comm_manager.dist_env.disabled:
@@ -350,9 +373,7 @@ def consume_capture() -> None:
     the internal capture flag.
     """
     if torch.cuda.is_current_stream_capturing():
-        raise RuntimeError(
-            "consume_capture must not run during stream capture."
-        )
+        raise RuntimeError("consume_capture must not run during stream capture.")
     if (
         _trtllm_comm_manager is not None
         and _trtllm_comm_manager.initialized
@@ -400,7 +421,9 @@ def allreduce_residual_rmsnorm(
     if not ensure_trtllm_comm_initialized(group, device_id):
         raise RuntimeError("TRT-LLM AllReduce Fusion workspace is not initialized")
     return _trtllm_comm_manager.dist_env.allreduce_add_rms_fused(
-        allreduce_in, residual_in, rms_weight, eps, fp8_out,
+        allreduce_in,
+        residual_in,
+        rms_weight,
+        eps,
+        fp8_out,
     )
-
-

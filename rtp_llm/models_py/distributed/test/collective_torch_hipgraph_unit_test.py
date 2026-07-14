@@ -295,6 +295,65 @@ class TestCollectiveTorchHipGraphUnit(unittest.TestCase):
         trt.assert_called_once()
         fake_lib.ncclAllReduce.assert_called_once()
 
+    def test_trt_dist_env_retains_workspace_capacity_for_size_guard(self):
+        from rtp_llm.models_py.modules.base.rocm import trt_allreduce as trt_ar
+
+        with patch.object(trt_ar.dist, "get_rank", return_value=0), patch.object(
+            trt_ar.dist, "get_world_size", return_value=1
+        ), patch.object(torch.cuda, "set_device"):
+            dist_env = trt_ar.TrtllmDistEnv(
+                group=object(), device_id=0, max_size_in_bytes=12345
+            )
+
+        self.assertEqual(12345, dist_env.max_size_in_bytes)
+
+    def test_try_trt_all_reduce_rejects_tensor_larger_than_workspace(self):
+        from rtp_llm.models_py.modules.base.rocm import trt_allreduce as trt_ar
+
+        tensor = torch.zeros((8, 2048), dtype=torch.bfloat16)
+        process_group = object()
+        dist_env = SimpleNamespace(max_size_in_bytes=1024)
+        with patch.object(
+            hr, "_is_hidden_size_supported_for_trtllm", return_value=True
+        ), patch.object(
+            hr, "_is_trtllm_allreduce_ready", return_value=True
+        ), patch.object(
+            trt_ar._trtllm_comm_manager, "dist_env", dist_env
+        ), patch.object(
+            trt_ar, "allreduce"
+        ) as trt_allreduce:
+            result = hr._try_trt_all_reduce(tensor, process_group)
+
+        self.assertIsNone(result)
+        trt_allreduce.assert_not_called()
+
+    def test_try_trt_all_reduce_uses_backend_within_workspace(self):
+        from rtp_llm.models_py.modules.base.rocm import trt_allreduce as trt_ar
+
+        tensor = torch.zeros((8, 2048), dtype=torch.bfloat16)
+        expected = torch.ones_like(tensor)
+        process_group = object()
+        dist_env = SimpleNamespace(
+            max_size_in_bytes=tensor.numel() * tensor.element_size()
+        )
+        with patch.object(
+            hr, "_is_hidden_size_supported_for_trtllm", return_value=True
+        ), patch.object(
+            hr, "_is_trtllm_allreduce_ready", return_value=True
+        ), patch.object(
+            trt_ar._trtllm_comm_manager, "dist_env", dist_env
+        ), patch.object(
+            trt_ar, "allreduce", return_value=expected
+        ) as trt_allreduce, patch.object(
+            torch.cuda, "current_device", return_value=3
+        ):
+            result = hr._try_trt_all_reduce(tensor, process_group)
+
+        self.assertIs(result, expected)
+        trt_allreduce.assert_called_once_with(
+            allreduce_in=tensor, group=process_group, device_id=3
+        )
+
     def test_capture_all_reduce_calls_rccl_and_succeeds(self):
         """hipgraph_capture_all_reduce calls ncclAllReduce with correct args."""
         hr._is_rocm_runtime = True
