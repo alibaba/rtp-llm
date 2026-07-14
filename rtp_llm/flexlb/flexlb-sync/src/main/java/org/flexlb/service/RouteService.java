@@ -44,7 +44,7 @@ public class RouteService {
      * @param balanceContext Load balancing context
      * @return Routing result
      */
-    public Mono<Response> route(BalanceContext balanceContext) {
+    public CompletableFuture<Response> route(BalanceContext balanceContext) {
         FlexlbConfig flexlbConfig = configService.loadBalanceConfig();
         balanceContext.setConfig(flexlbConfig);
 
@@ -63,18 +63,25 @@ public class RouteService {
             balanceContext.setScheduleMode(mode);
         }
 
-        Mono<Response> resultMono;
+        CompletableFuture<Response> resultFuture;
         if (shouldUseFlexlbBatch(balanceContext, flexlbConfig)) {
-            CompletableFuture<Response> future = flexlbBatchScheduler.submit(balanceContext);
-            balanceContext.setFuture(future);
-            resultMono = Mono.fromFuture(future);
+            resultFuture = flexlbBatchScheduler.submit(balanceContext);
+            balanceContext.setFuture(resultFuture);
         } else if (mode == ScheduleModeEnum.QUEUE || flexlbConfig.isEnableQueueing()) {
-            resultMono = queueManager.tryRouteAsync(balanceContext);  // Use async queuing mechanism
+            resultFuture = queueManager.tryRouteAsync(balanceContext).toFuture();  // Use async queuing mechanism
         } else {
-            resultMono = Mono.fromCallable(() -> router.route(balanceContext));  // Direct routing without queuing
+            // Direct routing without queuing
+            try {
+                resultFuture = CompletableFuture.completedFuture(router.route(balanceContext));
+            } catch (Exception e) {
+                resultFuture = CompletableFuture.failedFuture(e);
+            }
         }
 
-        return resultMono.doOnSuccess(result -> {
+        return resultFuture.whenComplete((result, throwable) -> {
+            if (throwable != null) {
+                return;
+            }
             balanceContext.setResponse(result);
             if (result != null && result.isSuccess()) {
                 recentCacheKeyTraceReporter.report(balanceContext);

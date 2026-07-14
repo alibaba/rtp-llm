@@ -58,7 +58,7 @@ class RouteServiceTest {
         when(flexlbConfig.isEnableQueueing()).thenReturn(true);
         when(queueManager.tryRouteAsync(balanceContext)).thenReturn(Mono.just(response));
 
-        Response actual = routeService.route(balanceContext).block();
+        Response actual = routeService.route(balanceContext).join();
 
         assertSame(response, actual);
         verify(balanceContext).setConfig(flexlbConfig);
@@ -74,7 +74,7 @@ class RouteServiceTest {
         when(flexlbConfig.isEnableQueueing()).thenReturn(false);
         when(defaultRouter.route(balanceContext)).thenReturn(response);
 
-        Response actual = routeService.route(balanceContext).block();
+        Response actual = routeService.route(balanceContext).join();
 
         assertSame(response, actual);
         verify(balanceContext).setConfig(flexlbConfig);
@@ -91,7 +91,7 @@ class RouteServiceTest {
         when(flexlbConfig.isEnableQueueing()).thenReturn(false);
         when(defaultRouter.route(balanceContext)).thenReturn(response);
 
-        Response actual = routeService.route(balanceContext).block();
+        Response actual = routeService.route(balanceContext).join();
 
         assertSame(response, actual);
         verify(balanceContext).setConfig(flexlbConfig);

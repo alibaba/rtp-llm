@@ -14,7 +14,7 @@ import org.flexlb.config.FlexlbConfig;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
-import reactor.core.publisher.Mono;
+import java.util.concurrent.CompletableFuture;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.any;
@@ -63,7 +63,7 @@ class FlexlbServiceImplTest {
         Response response = new Response();
         response.setSuccess(true);
         response.setCode(200);
-        when(routeService.route(any(BalanceContext.class))).thenReturn(Mono.just(response));
+        when(routeService.route(any(BalanceContext.class))).thenReturn(CompletableFuture.completedFuture(response));
 
         EngineRpcService.FlexlbScheduleRequestPB request = EngineRpcService.FlexlbScheduleRequestPB.newBuilder()
                 .setRequestId(12345L)
@@ -131,7 +131,7 @@ class FlexlbServiceImplTest {
         Response localResponse = new Response();
         localResponse.setSuccess(true);
         localResponse.setCode(200);
-        when(routeService.route(any(BalanceContext.class))).thenReturn(Mono.just(localResponse));
+        when(routeService.route(any(BalanceContext.class))).thenReturn(CompletableFuture.completedFuture(localResponse));
 
         EngineRpcService.FlexlbScheduleRequestPB request = EngineRpcService.FlexlbScheduleRequestPB.newBuilder()
                 .setRequestId(12345L)
@@ -158,7 +158,7 @@ class FlexlbServiceImplTest {
     void testSchedule_exceptionHandling() {
         // Given: route throws exception
         when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(false);
-        when(routeService.route(any(BalanceContext.class))).thenThrow(new RuntimeException("test error"));
+        when(routeService.route(any(BalanceContext.class))).thenReturn(CompletableFuture.failedFuture(new RuntimeException("test error")));
 
         EngineRpcService.FlexlbScheduleRequestPB request = EngineRpcService.FlexlbScheduleRequestPB.newBuilder()
                 .setRequestId(12345L)
@@ -233,7 +233,7 @@ class FlexlbServiceImplTest {
         response.setCode(200);
 
         ArgumentCaptor<BalanceContext> ctxCaptor = ArgumentCaptor.forClass(BalanceContext.class);
-        when(routeService.route(ctxCaptor.capture())).thenReturn(Mono.just(response));
+        when(routeService.route(ctxCaptor.capture())).thenReturn(CompletableFuture.completedFuture(response));
 
         EngineRpcService.FlexlbScheduleRequestPB request = EngineRpcService.FlexlbScheduleRequestPB.newBuilder()
                 .setRequestId(99999L)

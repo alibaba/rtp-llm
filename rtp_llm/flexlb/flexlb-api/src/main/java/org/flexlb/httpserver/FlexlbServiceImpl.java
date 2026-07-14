@@ -1,5 +1,7 @@
 package org.flexlb.httpserver;
 
+import io.grpc.Context;
+import io.grpc.Status;
 import io.grpc.stub.StreamObserver;
 import org.flexlb.consistency.LBStatusConsistencyService;
 import org.flexlb.dao.BalanceContext;
@@ -18,6 +20,10 @@ import org.flexlb.config.FlexlbConfig;
 import org.flexlb.util.Logger;
 import org.springframework.stereotype.Component;
 
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
+
 @Component
 public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
 
@@ -27,6 +33,8 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
     private final ActiveRequestCounter activeRequestCounter;
     private final FlexlbGrpcForwarder grpcForwarder;
     private final ConfigService configService;
+    private static final AtomicLong timingLogCounter = new AtomicLong(0);
+    private static final int TIMING_LOG_LIMIT = 50000;
 
     public FlexlbServiceImpl(RouteService routeService,
                              LBStatusConsistencyService lbStatusConsistencyService,
@@ -46,38 +54,92 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
     public void schedule(EngineRpcService.FlexlbScheduleRequestPB request,
                          StreamObserver<EngineRpcService.FlexlbScheduleResponsePB> responseObserver) {
         ActiveRequestCounter.RequestToken token = activeRequestCounter.acquire();
+        long t1 = System.nanoTime();
+        boolean doTiming = timingLogCounter.incrementAndGet() <= TIMING_LOG_LIMIT;
+        AtomicBoolean responded = new AtomicBoolean(false);
+
         try {
             BalanceContext ctx = buildContext(request);
             engineHealthReporter.reportArriveDelayTime(ctx);
 
-            EngineRpcService.FlexlbScheduleResponsePB response;
+            long t2 = System.nanoTime();
+
+            // Forward path: synchronous
             if (lbStatusConsistencyService.isNeedConsistency() && !lbStatusConsistencyService.isMaster()) {
-                response = grpcForwarder.forwardToMaster(request);
-                if (response == null) {
-                    response = routeLocally(ctx);
+                EngineRpcService.FlexlbScheduleResponsePB forwardResponse = grpcForwarder.forwardToMaster(request);
+                if (forwardResponse != null) {
+                    responded.set(true);
+                    long t3 = System.nanoTime();
+                    if (doTiming) {
+                        logScheduleTiming(request, t1, t2, t3);
+                    }
+                    responseObserver.onNext(forwardResponse);
+                    responseObserver.onCompleted();
+                    ctx.setSuccess(forwardResponse.getSuccess());
+                    if (!forwardResponse.getSuccess()) {
+                        ctx.setErrorMessage(forwardResponse.getErrorMessage());
+                    }
+                    engineHealthReporter.reportBalancingService(ctx);
+                    token.close();
+                    return;
                 }
-            } else {
-                response = routeLocally(ctx);
+                // Forward returned null - fall through to local route
             }
 
-            responseObserver.onNext(response);
-            responseObserver.onCompleted();
-            ctx.setSuccess(response.getSuccess());
-            if (!response.getSuccess()) {
-                ctx.setErrorMessage(response.getErrorMessage());
-            }
-            engineHealthReporter.reportBalancingService(ctx);
+            // Local route path: async via CompletableFuture callback
+            CompletableFuture<EngineRpcService.FlexlbScheduleResponsePB> routeFuture = routeLocally(ctx);
+
+            // Register gRPC cancellation listener to complete future exceptionally on cancel
+            Context grpcContext = Context.current();
+            Context.CancellationListener cancellationListener = context ->
+                    routeFuture.completeExceptionally(
+                            Status.CANCELLED.withDescription("gRPC context cancelled").asRuntimeException());
+            grpcContext.addListener(cancellationListener, Runnable::run);
+
+            routeFuture.whenComplete((response, ex) -> {
+                grpcContext.removeListener(cancellationListener);
+                try {
+                    if (responded.compareAndSet(false, true)) {
+                        if (ex != null) {
+                            Logger.error("FlexlbService.schedule async error, request_id={}", request.getRequestId(), ex);
+                            EngineRpcService.FlexlbScheduleResponsePB errorResp = buildErrorResponse(ex);
+                            responseObserver.onNext(errorResp);
+                            responseObserver.onCompleted();
+                        } else {
+                            long t3 = System.nanoTime();
+                            if (doTiming) {
+                                logScheduleTiming(request, t1, t2, t3);
+                            }
+                            responseObserver.onNext(response);
+                            responseObserver.onCompleted();
+                            ctx.setSuccess(response.getSuccess());
+                            if (!response.getSuccess()) {
+                                ctx.setErrorMessage(response.getErrorMessage());
+                            }
+                            engineHealthReporter.reportBalancingService(ctx);
+                        }
+                    }
+                } catch (Exception e) {
+                    Logger.error("FlexlbService.schedule callback error, request_id={}", request.getRequestId(), e);
+                } finally {
+                    token.close();
+                }
+            });
+
         } catch (Exception e) {
             Logger.error("FlexlbService.schedule error, request_id={}", request.getRequestId(), e);
-            EngineRpcService.FlexlbScheduleResponsePB errorResp = EngineRpcService.FlexlbScheduleResponsePB.newBuilder()
-                    .setSuccess(false)
-                    .setCode(500)
-                    .setErrorMessage(e.getMessage() != null ? e.getMessage() : "internal error")
-                    .build();
-            responseObserver.onNext(errorResp);
-            responseObserver.onCompleted();
-        } finally {
-            token.close();
+            try {
+                if (responded.compareAndSet(false, true)) {
+                    EngineRpcService.FlexlbScheduleResponsePB errorResp = buildErrorResponse(e);
+                    responseObserver.onNext(errorResp);
+                    responseObserver.onCompleted();
+                }
+            } catch (Exception inner) {
+                Logger.error("FlexlbService.schedule error-response send failed, request_id={}",
+                             request.getRequestId(), inner);
+            } finally {
+                token.close();
+            }
         }
     }
 
@@ -96,9 +158,25 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
         }
     }
 
-    private EngineRpcService.FlexlbScheduleResponsePB routeLocally(BalanceContext ctx) {
-        Response response = routeService.route(ctx).block();
-        return toProtoResponse(response);
+    private CompletableFuture<EngineRpcService.FlexlbScheduleResponsePB> routeLocally(BalanceContext ctx) {
+        return routeService.route(ctx).thenApply(this::toProtoResponse);
+    }
+
+    private void logScheduleTiming(EngineRpcService.FlexlbScheduleRequestPB request, long t1, long t2, long t3) {
+        long sourceRid = request.getRequestId();
+        Logger.info("schedule_timing source_rid={} route_start_ms={} block_end_ms={} total_block_ms={}",
+                sourceRid,
+                String.format("%.3f", (t2 - t1) / 1_000_000.0),
+                String.format("%.3f", (t3 - t2) / 1_000_000.0),
+                String.format("%.3f", (t3 - t1) / 1_000_000.0));
+    }
+
+    private EngineRpcService.FlexlbScheduleResponsePB buildErrorResponse(Throwable e) {
+        return EngineRpcService.FlexlbScheduleResponsePB.newBuilder()
+                .setSuccess(false)
+                .setCode(500)
+                .setErrorMessage(e.getMessage() != null ? e.getMessage() : "internal error")
+                .build();
     }
 
     private BalanceContext buildContext(EngineRpcService.FlexlbScheduleRequestPB pb) {
