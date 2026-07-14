@@ -16,6 +16,7 @@ flexlb:
     enabled: ${FLEXLB_MONITOR_ENABLED:true}
   log:
     path: ${FLEXLB_LOG_PATH:/home/admin/ai-whale/logs}
+    async-queue-size: ${FLEXLB_LOG_ASYNC_QUEUE_SIZE:16384}
   # CPU-bound block hashing pool: use core threads first, queue pending work, then
   # expand up to max threads when the queue is full. Extra threads expire after keep-alive.
   block-hash:

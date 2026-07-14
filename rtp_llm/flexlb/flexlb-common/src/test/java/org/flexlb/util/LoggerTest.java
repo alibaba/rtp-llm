@@ -8,7 +8,11 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.slf4j.LoggerFactory;
 
+import java.lang.reflect.Method;
+import java.util.Arrays;
+
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 
 class LoggerTest {
 
@@ -44,5 +48,34 @@ class LoggerTest {
         Logger.debug("visible debug");
         assertEquals(2, appender.list.size());
         assertEquals("visible debug", appender.list.get(1).getFormattedMessage());
+    }
+
+    @Test
+    void formatsFixedArityOverloads() {
+        backendLogger.setLevel(Level.DEBUG);
+
+        Logger.debug("one={}", 1);
+        Logger.debug("one={}, two={}", 1, 2);
+        Logger.debug("{}{}{}", 1, 2, 3);
+        Logger.debug("{}{}{}{}", 1, 2, 3, 4);
+        Logger.debug("{}{}{}{}{}", 1, 2, 3, 4, 5);
+        Logger.debug("{}{}{}{}{}{}", 1, 2, 3, 4, 5, 6);
+        Logger.info("message={}", "value");
+
+        assertEquals("one=1", appender.list.get(0).getFormattedMessage());
+        assertEquals("one=1, two=2", appender.list.get(1).getFormattedMessage());
+        assertEquals("123", appender.list.get(2).getFormattedMessage());
+        assertEquals("1234", appender.list.get(3).getFormattedMessage());
+        assertEquals("12345", appender.list.get(4).getFormattedMessage());
+        assertEquals("123456", appender.list.get(5).getFormattedMessage());
+        assertEquals("message=value", appender.list.get(6).getFormattedMessage());
+    }
+
+    @Test
+    void doesNotExposeVariableArityMethods() {
+        boolean hasVariableArityMethod = Arrays.stream(Logger.class.getDeclaredMethods())
+                .anyMatch(Method::isVarArgs);
+
+        assertFalse(hasVariableArityMethod);
     }
 }

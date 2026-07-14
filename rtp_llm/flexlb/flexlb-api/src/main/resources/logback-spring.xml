@@ -5,6 +5,8 @@
 
     <springProperty scope="context" name="LOG_PATH"
                     source="flexlb.log.path" defaultValue="/home/admin/ai-whale/logs" />
+    <springProperty scope="context" name="ASYNC_LOG_QUEUE_SIZE"
+                    source="flexlb.log.async-queue-size" defaultValue="16384" />
     <property name="LOG_FILE" value="${LOG_PATH}/application.log" />
     <property name="PV_LOG_FILE" value="${LOG_PATH}/pv.log" />
     <property name="SYNC_LOG_FILE" value="${LOG_PATH}/sync.log" />
@@ -29,7 +31,7 @@
 
     <appender name="APPLICATION-async" class="ch.qos.logback.classic.AsyncAppender">
         <discardingThreshold>0</discardingThreshold>
-        <queueSize>512</queueSize>
+        <queueSize>${ASYNC_LOG_QUEUE_SIZE}</queueSize>
         <neverBlock>true</neverBlock>
         <appender-ref ref="APPLICATION"/>
     </appender>
@@ -49,7 +51,7 @@
 
     <appender name="PV-async" class="ch.qos.logback.classic.AsyncAppender">
         <discardingThreshold>0</discardingThreshold>
-        <queueSize>512</queueSize>
+        <queueSize>${ASYNC_LOG_QUEUE_SIZE}</queueSize>
         <neverBlock>true</neverBlock>
         <appender-ref ref="PV"/>
     </appender>
@@ -69,7 +71,7 @@
 
     <appender name="sync-async" class="ch.qos.logback.classic.AsyncAppender">
         <discardingThreshold>0</discardingThreshold>
-        <queueSize>512</queueSize>
+        <queueSize>${ASYNC_LOG_QUEUE_SIZE}</queueSize>
         <neverBlock>true</neverBlock>
         <appender-ref ref="sync"/>
     </appender>
@@ -89,7 +91,7 @@
 
     <appender name="sync_consistency-async" class="ch.qos.logback.classic.AsyncAppender">
         <discardingThreshold>0</discardingThreshold>
-        <queueSize>512</queueSize>
+        <queueSize>${ASYNC_LOG_QUEUE_SIZE}</queueSize>
         <neverBlock>true</neverBlock>
         <appender-ref ref="sync_consistency"/>
     </appender>
@@ -109,7 +111,7 @@
 
     <appender name="FLEXLB-async" class="ch.qos.logback.classic.AsyncAppender">
         <discardingThreshold>0</discardingThreshold>
-        <queueSize>512</queueSize>
+        <queueSize>${ASYNC_LOG_QUEUE_SIZE}</queueSize>
         <neverBlock>true</neverBlock>
         <appender-ref ref="FLEXLB"/>
     </appender>
@@ -123,7 +125,7 @@
 
     <appender name="CONSOLE-async" class="ch.qos.logback.classic.AsyncAppender">
         <discardingThreshold>0</discardingThreshold>
-        <queueSize>512</queueSize>
+        <queueSize>${ASYNC_LOG_QUEUE_SIZE}</queueSize>
         <neverBlock>true</neverBlock>
         <appender-ref ref="CONSOLE"/>
     </appender>
