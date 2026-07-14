@@ -39,9 +39,33 @@ KVCacheSpecPtr makeTestMhaSpec(const std::string& tag, uint32_t seq_size_per_blo
     desc.dtype      = rtp_llm::DataType::TYPE_FP16;
 
     SpecBuildContext ctx;
+    ctx.dtype              = rtp_llm::DataType::TYPE_FP16;
+    ctx.seq_size_per_block = seq_size_per_block;
+    ctx.attn_config        = &attn_config;
+    ctx.parallelism_config = &parallelism_config;
+    return SpecBuilder::build(desc, ctx);
+}
+
+KVCacheSpecPtr makeTestLinearSpec(const std::string& tag, uint32_t seq_size_per_block) {
+    LinearAttentionConfig linear_config;
+    linear_config.linear_conv_kernel_dim = 2;
+    linear_config.linear_key_head_dim    = 1;
+    linear_config.linear_value_head_dim  = 1;
+    linear_config.linear_num_key_heads   = 1;
+    linear_config.linear_num_value_heads = 1;
+
+    ParallelismConfig parallelism_config;
+    parallelism_config.tp_size = 1;
+
+    KVCacheSpecDesc desc;
+    desc.tag        = tag;
+    desc.cache_type = KVCacheSpecType::LinearAttention;
+    desc.dtype      = rtp_llm::DataType::TYPE_FP16;
+
+    SpecBuildContext ctx;
     ctx.dtype                   = rtp_llm::DataType::TYPE_FP16;
     ctx.seq_size_per_block      = seq_size_per_block;
-    ctx.attn_config             = &attn_config;
+    ctx.linear_attention_config = &linear_config;
     ctx.parallelism_config      = &parallelism_config;
     return SpecBuilder::build(desc, ctx);
 }
@@ -156,6 +180,7 @@ public:
     void SetUp() override {
         rtp_llm::initLogger();
         auto mha_spec                  = makeTestMhaSpec("full", /*seq_size_per_block=*/8);
+        auto linear_spec               = makeTestLinearSpec("linear", /*seq_size_per_block=*/8);
         cache_config_.block_num        = 8;
         cache_config_.layer_num        = layer_num_;
         cache_config_.layer_all_num    = layer_num_;
@@ -164,7 +189,7 @@ public:
         cache_config_.dtype            = rtp_llm::DataType::TYPE_FP16;
         std::vector<int> layers(layer_num_);
         std::iota(layers.begin(), layers.end(), 0);
-        cache_config_.fromGroupedSpecs({mha_spec, mha_spec, mha_spec},
+        cache_config_.fromGroupedSpecs({mha_spec, linear_spec, linear_spec},
                                        {layers, layers, layers},
                                        {CacheGroupType::FULL, CacheGroupType::LINEAR, CacheGroupType::LINEAR},
                                        {"full", "linear1", "linear2"});

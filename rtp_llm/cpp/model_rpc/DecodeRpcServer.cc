@@ -65,6 +65,48 @@ grpc::Status DecodeRpcServer::init(const EngineInitParams&                      
     return grpc::Status::OK;
 }
 
+std::string
+DecodeRpcServer::makeMTPModuleCacheKey(size_t mtp_base_model_id, const std::string& token_id_str, size_t layer_id) {
+    return makeCacheKey(mtp_base_model_id, token_id_str, layer_id);
+}
+
+std::vector<DecodeRpcServer::MTPModuleLoadPlan>
+DecodeRpcServer::makeMTPModuleLoadPlan(const ProposeModelEngineInitParams* propose_params) {
+    if (propose_params == nullptr || propose_params->mtp_model_params_ == nullptr
+        || propose_params->mtp_model_params_->empty() || propose_params->mtp_model_params_->front() == nullptr) {
+        return {};
+    }
+
+    const auto* active_module = propose_params->mtp_model_params_->front().get();
+    return {{/*module_index=*/0, active_module, active_module->model_id}};
+}
+
+void DecodeRpcServer::logReadFailures(int64_t                         request_id,
+                                      const std::string&              peer_addr,
+                                      ErrorCode                       error_code,
+                                      const std::string&              error_message,
+                                      const std::vector<std::string>& buffer_debug_infos) {
+    if (error_code == ErrorCode::CANCELLED) {
+        return;
+    }
+    if (buffer_debug_infos.empty()) {
+        RTP_LLM_LOG_WARNING("PD_CACHE_KEY_READ_FAILED request_id=%ld peer=%s error_code=%d error=%s buffer={}",
+                            static_cast<long>(request_id),
+                            peer_addr.c_str(),
+                            static_cast<int>(error_code),
+                            error_message.c_str());
+        return;
+    }
+    for (const auto& debug_info : buffer_debug_infos) {
+        RTP_LLM_LOG_WARNING("PD_CACHE_KEY_READ_FAILED request_id=%ld peer=%s error_code=%d error=%s buffer={%s}",
+                            static_cast<long>(request_id),
+                            peer_addr.c_str(),
+                            static_cast<int>(error_code),
+                            error_message.c_str(),
+                            debug_info.c_str());
+    }
+}
+
 void DecodeRpcServer::initThreadPool() {
     if (resource_.workers.size() > 0) {
         return;
@@ -627,30 +669,6 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
         }
         return debug_infos;
     };
-    auto logReadFailures = [&load_context](const std::string&              peer_addr,
-                                           ErrorCode                       error_code,
-                                           const std::string&              error_message,
-                                           const std::vector<std::string>& buffer_debug_infos) {
-        if (error_code == ErrorCode::CANCELLED) {
-            return;
-        }
-        if (buffer_debug_infos.empty()) {
-            RTP_LLM_LOG_WARNING("PD_CACHE_KEY_READ_FAILED request_id=%ld peer=%s error_code=%d error=%s buffer={}",
-                                static_cast<long>(load_context.request_id),
-                                peer_addr.c_str(),
-                                static_cast<int>(error_code),
-                                error_message.c_str());
-            return;
-        }
-        for (const auto& debug_info : buffer_debug_infos) {
-            RTP_LLM_LOG_WARNING("PD_CACHE_KEY_READ_FAILED request_id=%ld peer=%s error_code=%d error=%s buffer={%s}",
-                                static_cast<long>(load_context.request_id),
-                                peer_addr.c_str(),
-                                static_cast<int>(error_code),
-                                error_message.c_str(),
-                                debug_info.c_str());
-        }
-    };
     for (int i = 0; i < load_context.peer_addrs.size(); i++) {
         auto&                                            peer_addr = load_context.peer_addrs[i];
         std::vector<std::shared_ptr<RequestBlockBuffer>> layer_caches;
@@ -730,14 +748,14 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
         if (engine_->isMTPEagle()) {
             if (propose_maga_init_params_ && propose_maga_init_params_->mtp_model_params_
                 && !propose_maga_init_params_->mtp_model_params_->empty()) {
-                for (size_t mtp_model_id = 0; mtp_model_id < propose_maga_init_params_->mtp_model_params_->size();
-                     mtp_model_id++) {
-                    EngineInitParams* mtp_engine_init_params =
-                        propose_maga_init_params_->mtp_model_params_->at(mtp_model_id).get();
-                    if (mtp_engine_init_params == nullptr) {
-                        return ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED,
-                                         "mtp_model_params_[" + std::to_string(mtp_model_id) + "] is nullptr");
-                    }
+                const auto mtp_load_plan = makeMTPModuleLoadPlan(propose_maga_init_params_);
+                if (mtp_load_plan.empty()) {
+                    return ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED, "active MTP module0 is missing");
+                }
+
+                for (const auto& module_plan : mtp_load_plan) {
+                    const size_t            mtp_model_id           = module_plan.module_index;
+                    const EngineInitParams* mtp_engine_init_params = module_plan.engine_init_params;
 
                     const auto&  mtp_cache_cfg = cache_manager->getMTPModuleCacheConfig(static_cast<int>(mtp_model_id));
                     const size_t layer_num     = mtp_engine_init_params->model_config_.num_layers;
@@ -762,9 +780,8 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                                                 load_context.block_ids_by_group.size());
                         RTP_LLM_CHECK_WITH_INFO(
                             load_context.block_ids_by_group[gid] != nullptr, "null mtp group_block: gid=%zu", gid);
-                        const auto&  block_ids = load_context.block_ids_by_group[gid]->blocks();
-                        auto         block_num = block_ids.size();
-                        const size_t model_id  = mtp_engine_init_params->model_id;
+                        const auto& block_ids = load_context.block_ids_by_group[gid]->blocks();
+                        auto        block_num = block_ids.size();
 
                         const auto global_layer_id = CacheConfig::mtpGlobalLayerId(
                             static_cast<uint32_t>(maga_init_params_.model_config_.num_layers),
@@ -800,8 +817,9 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                         }
 
                         for (size_t block_pos : block_pos_list) {
-                            auto cache_key =
-                                makeCacheKey(model_id, std::to_string(load_context.cache_keys[block_pos]), layer_id);
+                            auto       cache_key      = makeMTPModuleCacheKey(module_plan.cache_model_id,
+                                                                   std::to_string(load_context.cache_keys[block_pos]),
+                                                                   layer_id);
                             auto       block_id       = block_ids[block_pos];
                             const bool mtp_use_mla    = mtp_cache_cfg.use_mla;
                             const int  local_part_cnt = peer_cnt;
@@ -842,13 +860,18 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                         layer_caches.push_back(load_layer_cache);
                     }
                 }
+            } else {
+                return ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED, "active MTP module0 is missing");
             }
         }
 
         auto ip_parts = autil::StringUtil::split(peer_addr, ":");
         if (ip_parts.size() != 3) {
-            logReadFailures(
-                peer_addr, ErrorCode::LOAD_KV_CACHE_FAILED, "invalid_peer", buffersDebugInfos(layer_caches));
+            logReadFailures(load_context.request_id,
+                            peer_addr,
+                            ErrorCode::LOAD_KV_CACHE_FAILED,
+                            "invalid_peer",
+                            buffersDebugInfos(layer_caches));
             return ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED, "invalid peer ip");
         }
 
@@ -862,8 +885,11 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                                                load_context.partition_count,
                                                load_context.partition_id);
         if (!layer_cache_load_context) {
-            logReadFailures(
-                peer_addr, ErrorCode::LOAD_KV_CACHE_FAILED, "null_load_context", buffersDebugInfos(layer_caches));
+            logReadFailures(load_context.request_id,
+                            peer_addr,
+                            ErrorCode::LOAD_KV_CACHE_FAILED,
+                            "null_load_context",
+                            buffersDebugInfos(layer_caches));
             return ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED, "load kv cache failed");
         }
         load_contexts.emplace_back(peer_addr, layer_cache_load_context);
@@ -877,8 +903,11 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
             // TODO(xinfei.sxf) add retry for part failed blocks.
             auto       load_done_time_us = currentTimeUs();
             const auto error_info        = layer_cache_load_context->getErrorInfo();
-            logReadFailures(
-                peer_addr, error_info.code(), error_info.ToString(), layer_cache_load_context->failedBlockDebugInfos());
+            logReadFailures(load_context.request_id,
+                            peer_addr,
+                            error_info.code(),
+                            error_info.ToString(),
+                            layer_cache_load_context->failedBlockDebugInfos());
             RTP_LLM_LOG_WARNING("request [%s] load cache failed, status [%s], cost time [%ld] ms",
                                 request_key.c_str(),
                                 layer_cache_load_context->getErrorInfoString().c_str(),

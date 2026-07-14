@@ -1,6 +1,5 @@
 #include <cstddef>
 #include <memory>
-#include <numeric>
 #include <tuple>
 #include <vector>
 #include "autil/Log.h"
@@ -36,32 +35,22 @@ prepareMTPEngineInitParams(size_t model_id, py::object propose_model, const Engi
     // Get model_config from model (only difference between propose and score models)
     auto model_config = sp_model.attr("model_config").cast<ModelConfig>();
 
-    py::object          py_layers_weights     = sp_model.attr("weight").attr("weights");
-    py::object          py_global_weights     = sp_model.attr("weight").attr("global_weights");
-    auto                convert               = WeightsConverter(false, model_config.quant_algo);
-    auto                py_layers_weights_vec = convertPyObjectToVec(py_layers_weights);
-    std::vector<size_t> source_layer_indices(py_layers_weights_vec.size());
-    std::iota(source_layer_indices.begin(), source_layer_indices.end(), 0);
-    size_t model_num         = py_layers_weights_vec.size();
-    size_t gen_num_per_cycle = base_params.sp_config.gen_num_per_cycle;
-    if (gen_num_per_cycle > 1 && py_layers_weights_vec.size() == 1) {
+    py::object   py_layers_weights     = sp_model.attr("weight").attr("weights");
+    py::object   py_global_weights     = sp_model.attr("weight").attr("global_weights");
+    auto         convert               = WeightsConverter(false, model_config.quant_algo);
+    auto         py_layers_weights_vec = convertPyObjectToVec(py_layers_weights);
+    const size_t weight_count          = py_layers_weights_vec.size();
+    size_t       gen_num_per_cycle     = base_params.sp_config.gen_num_per_cycle;
+    if (gen_num_per_cycle > 1 && weight_count == 1) {
         RTP_LLM_LOG_WARNING("duplicate py_layers_weights_vec from 1 to sp_config.gen_num_per_cycle: %ld",
                             gen_num_per_cycle);
-        for (size_t i = 1; i < gen_num_per_cycle; i++) {
-            py_layers_weights_vec.push_back(py_layers_weights_vec[0]);
-            source_layer_indices.push_back(0);
-        }
-        model_num = gen_num_per_cycle;
     }
-    if (gen_num_per_cycle != py_layers_weights_vec.size()) {
-        RTP_LLM_LOG_WARNING("sp_config.gen_num_per_cycle: %ld  != py_layers_weights_vec.size(): %ld",
-                            gen_num_per_cycle,
-                            py_layers_weights_vec.size());
-        model_num = std::min(model_num, size_t(gen_num_per_cycle));
+    if (gen_num_per_cycle != weight_count && !(gen_num_per_cycle > 1 && weight_count == 1)) {
+        RTP_LLM_LOG_WARNING(
+            "sp_config.gen_num_per_cycle: %ld  != py_layers_weights_vec.size(): %ld", gen_num_per_cycle, weight_count);
     }
-    if (sp_type == SP_TYPE_EAGLE || sp_type == SP_TYPE_EAGLE3) {
-        model_num = 1;
-    }
+    const auto module_plan = buildMTPModuleConfigPlan(model_config, weight_count, gen_num_per_cycle, sp_type);
+    const auto model_num   = module_plan.module_configs.size();
 
     // Get py_eplb if available (from model)
     py::object py_eplb = py::none();
@@ -69,21 +58,18 @@ prepareMTPEngineInitParams(size_t model_id, py::object propose_model, const Engi
         py_eplb = sp_model.attr("py_eplb");
     }
 
-    std::vector<ModelConfig> module_model_configs;
-    module_model_configs.reserve(model_num);
-    for (size_t i = 0; i < model_num; ++i) {
-        RTP_LLM_CHECK_WITH_INFO(i < source_layer_indices.size(), "missing MTP source layer for module %zu", i);
-        module_model_configs.push_back(makeSingleLayerMTPModelConfig(model_config, source_layer_indices[i]));
-    }
-    validateHomogeneousMTPCacheLayouts(module_model_configs);
-
     for (size_t i = 0; i < model_num; i++) {
-        auto     layer_weigths = py_layers_weights_vec[i];
+        const auto source_layer = module_plan.source_layer_indices[i];
+        RTP_LLM_CHECK_WITH_INFO(source_layer < py_layers_weights_vec.size(),
+                                "missing MTP layer weight for module %zu source layer %zu",
+                                i,
+                                source_layer);
+        auto     layer_weigths = py_layers_weights_vec[source_layer];
         py::list tmp;
         tmp.append(layer_weigths);
         auto gpt_weight = convert.createGptWeights(tmp, py_global_weights);
         mtp_params->push_back(std::move(std::make_unique<EngineInitParams>(model_id,
-                                                                           module_model_configs[i],
+                                                                           module_plan.module_configs[i],
                                                                            base_params.parallelism_config,
                                                                            base_params.runtime_config,
                                                                            base_params.pd_sep_config,

@@ -22,19 +22,17 @@ uint32_t mhaLocalKvHeadNum(const ModelConfig& model_config, const ParallelismCon
 }
 
 uint32_t linearLocalKvHeadNum(const ModelConfig& model_config, const ParallelismConfig& parallelism_config) {
-    const auto     attn_tp = std::max<int64_t>(1, parallelism_config.get_attn_tp_size());
-    const uint32_t tp      = static_cast<uint32_t>(attn_tp);
-    const uint32_t value_heads       = static_cast<uint32_t>(model_config.linear_attention_config.linear_num_value_heads);
+    const auto     attn_tp     = std::max<int64_t>(1, parallelism_config.get_attn_tp_size());
+    const uint32_t tp          = static_cast<uint32_t>(attn_tp);
+    const uint32_t value_heads = static_cast<uint32_t>(model_config.linear_attention_config.linear_num_value_heads);
     RTP_LLM_CHECK_WITH_INFO(value_heads > 0, "local kv head num requires positive linear_num_value_heads");
     RTP_LLM_CHECK_WITH_INFO(value_heads % tp == 0,
                             "linear_num_value_heads must be divisible by attention TP, global=%u tp=%u",
                             value_heads,
                             tp);
     const uint32_t local_value_heads = value_heads / tp;
-    RTP_LLM_CHECK_WITH_INFO(local_value_heads > 0,
-                            "invalid local linear value heads: global=%u tp=%u",
-                            value_heads,
-                            tp);
+    RTP_LLM_CHECK_WITH_INFO(
+        local_value_heads > 0, "invalid local linear value heads: global=%u tp=%u", value_heads, tp);
     return local_value_heads;
 }
 
@@ -125,9 +123,8 @@ std::vector<GroupBase> buildTaggedGroups(const LayerKVCacheSpecs& runtime_specs,
             continue;
         }
 
-        RTP_LLM_CHECK_WITH_INFO(it->policy.group_type == group_type,
-                                "hybrid tag=%s maps to multiple cache group types",
-                                spec->tag.c_str());
+        RTP_LLM_CHECK_WITH_INFO(
+            it->policy.group_type == group_type, "hybrid tag=%s maps to multiple cache group types", spec->tag.c_str());
         RTP_LLM_CHECK_WITH_INFO(layoutFingerprint(*it->spec) == layoutFingerprint(*spec),
                                 "hybrid tag=%s maps to different kv cache spec layouts",
                                 spec->tag.c_str());
@@ -324,16 +321,16 @@ void HybridConfigCreator::setupCacheConfigSpecs(CacheConfig&                    
     std::vector<GroupBase> groups;
     std::vector<LayerBase> layers(static_cast<size_t>(config.layer_num));
 
-    auto append_group = [&](const KVCacheSpecPtr& spec,
-                            CacheGroupType         type,
+    auto append_group = [&](const KVCacheSpecPtr&   spec,
+                            CacheGroupType          type,
                             const std::vector<int>& layer_ids,
-                            uint32_t               local_kv_head_num) {
+                            uint32_t                local_kv_head_num) {
         GroupBase group;
         group.spec              = spec;
         group.policy            = defaultCacheGroupPolicy(type);
         group.layer_ids         = layer_ids;
         group.local_kv_head_num = local_kv_head_num;
-        const int gid   = static_cast<int>(groups.size());
+        const int gid           = static_cast<int>(groups.size());
         groups.push_back(group);
         for (int layer_id : layer_ids) {
             auto& layer = layers[static_cast<size_t>(layer_id)];
@@ -358,7 +355,7 @@ void HybridConfigCreator::setupPhysicalSizes(CacheConfig&          config,
     RTP_LLM_CHECK_WITH_INFO(full_spec != nullptr || linear_spec != nullptr,
                             "hybrid config requires at least one cache spec");
 
-    const size_t full_kv_block_stride_bytes = full_spec == nullptr ? 0 : full_spec->block_size_bytes();
+    const size_t full_kv_block_stride_bytes   = full_spec == nullptr ? 0 : full_spec->block_size_bytes();
     const size_t linear_kv_block_stride_bytes = linear_spec == nullptr ? 0 : linear_spec->block_size_bytes();
 
     if (full_spec != nullptr && linear_spec != nullptr) {
@@ -367,7 +364,7 @@ void HybridConfigCreator::setupPhysicalSizes(CacheConfig&          config,
                                 "not support full attention with padding now");
     }
 
-    const auto& physical_spec = full_spec != nullptr ? full_spec : linear_spec;
+    const auto& physical_spec    = full_spec != nullptr ? full_spec : linear_spec;
     config.kv_block_stride_bytes = std::max(full_kv_block_stride_bytes, linear_kv_block_stride_bytes);
     config.kv_block_size_bytes   = static_cast<size_t>(config.group_layer_num) * config.kv_block_stride_bytes;
     config.kv_scale_stride_bytes = physical_spec->scale_block_size_bytes();
@@ -381,7 +378,7 @@ CacheConfig HybridConfigCreator::createHybridConfig(const ModelConfig&       mod
                                                     int                      gen_num_per_cycle) {
     (void)is_mtp;
 
-    auto dtype = MemoryEvaluationHelper::getDataTypeForCache(model_config);
+    auto       dtype            = MemoryEvaluationHelper::getDataTypeForCache(model_config);
     const auto tokens_per_block = static_cast<uint32_t>(model_config.attn_config.tokens_per_block);
     RTP_LLM_CHECK_WITH_INFO(tokens_per_block > 0, "hybrid seq_size_per_block must be > 0");
     SpecBuildContext ctx;

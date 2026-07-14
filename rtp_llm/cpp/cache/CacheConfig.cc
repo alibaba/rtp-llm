@@ -6,6 +6,14 @@
 
 namespace rtp_llm {
 
+namespace {
+
+CacheGroupType groupTypeForSpec(const KVCacheSpec& spec) {
+    return spec.type == KVCacheSpecType::LinearAttention ? CacheGroupType::LINEAR : CacheGroupType::FULL;
+}
+
+}  // namespace
+
 bool CacheConfig::samePolicy(const CacheGroupPolicy& lhs, const CacheGroupPolicy& rhs) {
     return lhs.reuse_policy == rhs.reuse_policy && lhs.evict_policy == rhs.evict_policy
            && lhs.validate_tail_blocks == rhs.validate_tail_blocks && lhs.prefix_reusable == rhs.prefix_reusable
@@ -48,6 +56,37 @@ CacheConfig::mergeMTPModule(const CacheConfig& propose_config, int module_index,
         const auto&  source_config     = has_propose_group ? propose_config : *this;
         const size_t source_gid        = has_propose_group ? propose_it->second : target_gid;
         const auto&  source_group      = source_config.groups[source_gid];
+
+        if (has_propose_group) {
+            RTP_LLM_CHECK_WITH_INFO(
+                source_group.layer_ids.size() == static_cast<size_t>(mtp_layer_num),
+                "CacheConfig::mergeMTPModule tag=%s must cover every module layer, got=%zu expected=%u",
+                tag.c_str(),
+                source_group.layer_ids.size(),
+                mtp_layer_num);
+            for (size_t local_layer_id = 0; local_layer_id < source_group.layer_ids.size(); ++local_layer_id) {
+                RTP_LLM_CHECK_WITH_INFO(
+                    source_group.layer_ids[local_layer_id] == static_cast<int>(local_layer_id),
+                    "CacheConfig::mergeMTPModule tag=%s source layers must be ordered 0..%u, index=%zu value=%d",
+                    tag.c_str(),
+                    mtp_layer_num - 1,
+                    local_layer_id,
+                    source_group.layer_ids[local_layer_id]);
+            }
+
+            const size_t expected_existing_layers =
+                static_cast<size_t>(group_layer_num) + static_cast<size_t>(module_index) * mtp_layer_num;
+            RTP_LLM_CHECK_WITH_INFO(groups[target_gid].layer_ids.size() == expected_existing_layers,
+                                    "CacheConfig::mergeMTPModule tag=%s gid=%zu physical slot alignment mismatch: "
+                                    "existing_layers=%zu expected=%zu module=%d group_layer_num=%d module_layers=%u",
+                                    tag.c_str(),
+                                    target_gid,
+                                    groups[target_gid].layer_ids.size(),
+                                    expected_existing_layers,
+                                    module_index,
+                                    group_layer_num,
+                                    mtp_layer_num);
+        }
 
         GroupBase sub_group;
         sub_group.spec                  = source_group.spec->clone();
@@ -132,6 +171,13 @@ void CacheConfig::setTopology(std::vector<GroupBase> new_groups, std::vector<Lay
         RTP_LLM_CHECK_WITH_INFO(group.spec != nullptr, "CacheConfig::setTopology got null spec at group %zu", gid);
         RTP_LLM_CHECK_WITH_INFO(
             !group.spec->tag.empty(), "CacheConfig::setTopology requires non-empty tag for group %zu", gid);
+        const auto expected_group_type = groupTypeForSpec(*group.spec);
+        RTP_LLM_CHECK_WITH_INFO(group.policy.group_type == expected_group_type,
+                                "CacheConfig::setTopology group %zu tag=%s policy type %s does not match spec type %d",
+                                gid,
+                                group.spec->tag.c_str(),
+                                cacheGroupTypeName(group.policy.group_type),
+                                static_cast<int>(group.spec->type));
         const auto [it, inserted] = new_tag_to_gid.emplace(group.spec->tag, static_cast<int>(gid));
         (void)it;
         RTP_LLM_CHECK_WITH_INFO(
