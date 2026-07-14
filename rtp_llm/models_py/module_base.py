@@ -103,19 +103,23 @@ class RtpModule(nn.Module):
     def _assign_weight(self, module: nn.Module, name: str, tensor: torch.Tensor) -> bool:
         if "." in name:
             prefix, rest = name.split(".", 1)
-            child = getattr(module, prefix, None)
+            child = module._modules.get(prefix)
             if not isinstance(child, nn.Module):
                 return False
             return self._assign_weight(child, rest, tensor)
-        target = getattr(module, name, None)
-        is_parameter = isinstance(target, nn.Parameter)
+        parameter = module._parameters.get(name)
+        buffer = module._buffers.get(name)
+        is_parameter = name in module._parameters and isinstance(
+            parameter, nn.Parameter
+        )
         is_buffer = (
             name in module._buffers
             and name not in module._non_persistent_buffers_set
-            and isinstance(target, torch.Tensor)
+            and isinstance(buffer, torch.Tensor)
         )
         if not is_parameter and not is_buffer:
             return False
+        target = parameter if is_parameter else buffer
         if tuple(target.shape) != tuple(tensor.shape):
             raise ValueError(
                 f"Shape mismatch for {module.__class__.__name__}.{name}: "
@@ -156,7 +160,7 @@ class RtpModule(nn.Module):
         if "." not in name:
             return self._assign_weight(module, name, tensor)
         prefix, rest = name.split(".", 1)
-        child = getattr(module, prefix, None)
+        child = module._modules.get(prefix)
         if isinstance(child, nn.ModuleList):
             return self._dispatch_to_module_list(child, rest, tensor)
         if not isinstance(child, nn.Module):

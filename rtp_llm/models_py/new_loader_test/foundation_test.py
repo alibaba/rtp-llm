@@ -110,6 +110,22 @@ class FoundationLoaderTest(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "unexpected.inv_freq"):
                 self._loader(model_path).load()
 
+    def test_checkpoint_paths_only_target_registered_module_state(self):
+        class PropertyModel(RtpModule):
+            def __init__(self):
+                super().__init__()
+                child = RtpModule()
+                child.weight = nn.Parameter(torch.zeros(1))
+                object.__setattr__(self, "_unregistered_child", child)
+
+            @property
+            def virtual(self):
+                return self._unregistered_child
+
+        model = PropertyModel()
+        with self.assertRaisesRegex(RuntimeError, "virtual.weight"):
+            model.load_weights({"virtual.weight": torch.ones(1)})
+
     def test_non_persistent_checkpoint_buffer_is_not_loaded(self):
         for checkpoint_value in (torch.full((2,), 9.0), torch.full((3,), 9.0)):
             with self.subTest(checkpoint_shape=tuple(checkpoint_value.shape)):
@@ -398,6 +414,39 @@ class FoundationLoaderTest(unittest.TestCase):
             with self.assertRaisesRegex(TypeError, "must be integers"):
                 discover_ckpt_files(model_path, tp_rank=False, tp_size=2)
 
+    def test_ranked_consolidated_files_must_be_complete(self):
+        cases = (
+            ((0,), 2, "1 consolidated rank files, but tp_size=2"),
+            ((1,), 1, "ranks must be contiguous"),
+            ((0, 2), 2, "ranks must be contiguous"),
+        )
+        for ranks, tp_size, error in cases:
+            with self.subTest(ranks=ranks, tp_size=tp_size):
+                with tempfile.TemporaryDirectory() as model_path:
+                    for rank in ranks:
+                        torch.save(
+                            _weights(),
+                            os.path.join(
+                                model_path,
+                                f"consolidated.{rank:02d}.pth",
+                            ),
+                        )
+                    with self.assertRaisesRegex(ValueError, error):
+                        discover_ckpt_files(
+                            model_path,
+                            tp_rank=0,
+                            tp_size=tp_size,
+                        )
+
+    def test_unranked_consolidated_file_is_a_full_checkpoint(self):
+        with tempfile.TemporaryDirectory() as model_path:
+            checkpoint = os.path.join(model_path, "consolidated.pth")
+            torch.save(_weights(), checkpoint)
+            self.assertEqual(
+                discover_ckpt_files(model_path, tp_rank=1, tp_size=2),
+                [checkpoint],
+            )
+
     def test_pth_checkpoint_is_discovered_and_loaded(self):
         with tempfile.TemporaryDirectory() as model_path:
             checkpoint = os.path.join(model_path, "model.pth")
@@ -573,6 +622,34 @@ class FoundationLoaderTest(unittest.TestCase):
         self.assertTrue(model.loader_inference_mode)
         self.assertTrue(model.post_inference_mode)
         self.assertEqual(model.weight.item(), 4)
+
+    def test_loaded_model_and_children_are_in_eval_mode(self):
+        class EvalModel(RtpModule):
+            def __init__(self, model_config, load_config):
+                super().__init__()
+                self.weight = nn.Parameter(torch.empty(1))
+                self.dropout = nn.Dropout(p=0.9)
+
+            def forward(self, inputs):
+                return self.dropout(inputs) + self.weight
+
+        register_model("foundation_eval_model")(EvalModel)
+        config = types.SimpleNamespace(model_type="foundation_eval_model")
+        with tempfile.TemporaryDirectory() as model_path:
+            save_file(
+                {"weight": torch.ones(1)},
+                os.path.join(model_path, "model.safetensors"),
+            )
+            model = NewModelLoader(
+                config,
+                NewLoaderConfig(device="cpu"),
+                model_path=model_path,
+            ).load()
+
+        self.assertFalse(model.training)
+        self.assertFalse(model.dropout.training)
+        inputs = torch.ones(32)
+        self.assertTrue(torch.equal(model(inputs), model(inputs)))
 
 
 if __name__ == "__main__":

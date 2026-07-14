@@ -223,4 +223,5 @@ class NewModelLoader:
         model.to(self.load_config.device)
         self._validate_loaded_weights(model)
         self._run_post_load_hooks(model)
+        model.eval()
         return model

@@ -202,28 +202,33 @@ def _select_consolidated_files(
             f"Invalid TP partition for consolidated checkpoint: "
             f"rank={tp_rank}, size={tp_size}"
         )
-    if len(files) <= 1:
-        return files
-    if len(files) != tp_size:
-        raise ValueError(
-            f"Found {len(files)} consolidated rank files, but tp_size={tp_size}; "
-            "loading or repartitioning mismatched consolidated checkpoints is unsupported"
-        )
 
     ranked_files = {}
+    unranked_files = []
     for path in files:
         match = re.match(
             r"^consolidated[._-](\d+)(?:[._-]|$)",
             os.path.basename(path).lower(),
         )
         if match is None:
-            raise ValueError(
-                f"Cannot determine TP rank from consolidated checkpoint {path!r}"
-            )
+            unranked_files.append(path)
+            continue
         rank = int(match.group(1))
         if rank in ranked_files:
             raise ValueError(f"Duplicate consolidated checkpoint rank {rank}")
         ranked_files[rank] = path
+
+    if not ranked_files:
+        if len(unranked_files) != 1:
+            raise ValueError("Multiple unranked consolidated checkpoints are ambiguous")
+        return unranked_files
+    if unranked_files:
+        raise ValueError("Ranked and unranked consolidated checkpoints cannot be mixed")
+    if len(ranked_files) != tp_size:
+        raise ValueError(
+            f"Found {len(ranked_files)} consolidated rank files, but tp_size={tp_size}; "
+            "all checkpoint ranks are required"
+        )
 
     expected_ranks = set(range(tp_size))
     if set(ranked_files) != expected_ranks:
