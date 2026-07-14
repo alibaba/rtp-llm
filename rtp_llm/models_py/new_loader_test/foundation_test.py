@@ -358,6 +358,38 @@ class FoundationLoaderTest(unittest.TestCase):
             save_file({"weight": torch.ones(1)}, consolidated)
             self.assertEqual(discover_ckpt_files(model_path), [consolidated])
 
+    def test_consolidated_rank_files_follow_tp_rank(self):
+        with tempfile.TemporaryDirectory() as model_path:
+            for rank in range(2):
+                weights = _weights()
+                weights["final"] = torch.full((2,), float(rank))
+                torch.save(
+                    weights,
+                    os.path.join(model_path, f"consolidated.{rank:02d}.pth"),
+                )
+
+            for rank in range(2):
+                with self.subTest(rank=rank):
+                    model = self._loader(
+                        model_path,
+                        tp_size=2,
+                        tp_rank=rank,
+                    ).load()
+                    self.assertTrue(
+                        torch.equal(model.final, torch.full((2,), float(rank)))
+                    )
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "2 consolidated rank files, but tp_size=3",
+            ):
+                discover_ckpt_files(model_path, tp_rank=0, tp_size=3)
+
+            with self.assertRaisesRegex(ValueError, "Invalid TP partition"):
+                discover_ckpt_files(model_path, tp_rank=2, tp_size=2)
+            with self.assertRaisesRegex(TypeError, "must be integers"):
+                discover_ckpt_files(model_path, tp_rank=False, tp_size=2)
+
     def test_pth_checkpoint_is_discovered_and_loaded(self):
         with tempfile.TemporaryDirectory() as model_path:
             checkpoint = os.path.join(model_path, "model.pth")

@@ -146,7 +146,9 @@ class NewModelLoader:
     def _checkpoint_files(self):
         if self._ckpt_files is None:
             self._ckpt_files = weight_mapper.discover_ckpt_files(
-                self._resolved_model_path()
+                self._resolved_model_path(),
+                tp_rank=self.load_config.tp_rank,
+                tp_size=self.load_config.tp_size,
             )
             if not self._ckpt_files:
                 raise FileNotFoundError(

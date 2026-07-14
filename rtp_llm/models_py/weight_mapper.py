@@ -189,7 +189,54 @@ def _is_model_weight_file(path: str, allow_consolidated: bool = False) -> bool:
     return not name.startswith(tuple(excluded_prefixes))
 
 
-def discover_ckpt_files(model_path: str) -> List[str]:
+def _select_consolidated_files(
+    files: List[str], tp_rank: int, tp_size: int
+) -> List[str]:
+    if any(
+        isinstance(value, bool) or not isinstance(value, int)
+        for value in (tp_rank, tp_size)
+    ):
+        raise TypeError("tp_rank and tp_size must be integers")
+    if tp_size <= 0 or not 0 <= tp_rank < tp_size:
+        raise ValueError(
+            f"Invalid TP partition for consolidated checkpoint: "
+            f"rank={tp_rank}, size={tp_size}"
+        )
+    if len(files) <= 1:
+        return files
+    if len(files) != tp_size:
+        raise ValueError(
+            f"Found {len(files)} consolidated rank files, but tp_size={tp_size}; "
+            "loading or repartitioning mismatched consolidated checkpoints is unsupported"
+        )
+
+    ranked_files = {}
+    for path in files:
+        match = re.match(
+            r"^consolidated[._-](\d+)(?:[._-]|$)",
+            os.path.basename(path).lower(),
+        )
+        if match is None:
+            raise ValueError(
+                f"Cannot determine TP rank from consolidated checkpoint {path!r}"
+            )
+        rank = int(match.group(1))
+        if rank in ranked_files:
+            raise ValueError(f"Duplicate consolidated checkpoint rank {rank}")
+        ranked_files[rank] = path
+
+    expected_ranks = set(range(tp_size))
+    if set(ranked_files) != expected_ranks:
+        raise ValueError(
+            f"Consolidated checkpoint ranks must be contiguous {sorted(expected_ranks)}, "
+            f"got {sorted(ranked_files)}"
+        )
+    return [ranked_files[tp_rank]]
+
+
+def discover_ckpt_files(
+    model_path: str, tp_rank: int = 0, tp_size: int = 1
+) -> List[str]:
     if not os.path.isdir(model_path):
         raise NotADirectoryError(f"Model path is not a directory: {model_path}")
     for index_name in (_SAFETENSORS_INDEX, _PYTORCH_INDEX):
@@ -215,5 +262,5 @@ def discover_ckpt_files(model_path: str) -> List[str]:
         if consolidated:
             consolidated_by_format.append(consolidated)
     if consolidated_by_format:
-        return consolidated_by_format[0]
+        return _select_consolidated_files(consolidated_by_format[0], tp_rank, tp_size)
     return []
