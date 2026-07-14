@@ -17,9 +17,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * 2. Cancel requestId = 99999 (never submitted)
  * 3. Verify: no exception, no gRPC cancel sent, inflight empty
  *
- * <p>{@code FlexlbBatchScheduler.cancel()} calls {@code inflight.remove(requestId)}
- * which returns null for an unknown requestId, causing an immediate return
- * without calling {@code cancelPrefill()} — so no gRPC Cancel is dispatched.
+ * <p>The scheduler returns immediately when no active or terminal state exists,
+ * so no worker cancellation is dispatched.
  */
 class CancelNonexistentRequestTest extends FlexLBMockTestBase {
 
@@ -42,8 +41,7 @@ class CancelNonexistentRequestTest extends FlexLBMockTestBase {
     void cancelNonexistentRequest_safeNoOp() {
         // 1. Do NOT submit any request — inflight map is empty
 
-        // 2. Cancel a requestId that was never submitted
-        //    inflight.remove(99999) returns null → immediate return, no exception
+        // 2. Cancel a requestId that was never submitted.
         cancelRequest(99999);
 
         // 3. Verify: no gRPC cancel was sent (cancelPrefill never called)

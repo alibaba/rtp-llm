@@ -142,10 +142,8 @@ class ConcurrentCancelDispatchTest extends FlexLBMockTestBase {
             }
 
             // 4. Cleanup: cancel all requests to release inflight resources.
-            //    Non-cancelled requests have ackFinished=true and future.isDone()=true,
-            //    so cancel() skips rollback/completeCancelled but still calls
-            //    repackPrefillBatch() to remove the batch from PrefillEndpoint.inflightBatches.
-            //    Already-cancelled requests are no-op (inflight.remove returns null).
+            //    Acknowledged requests are cancelled and removed from their prefill batches;
+            //    terminal requests are idempotent no-ops.
             //    In production, this cleanup is done by onWorkerStatusUpdate() when
             //    the engine reports finished tasks — but mock workers don't send updates.
             for (Long id : requestIds) {

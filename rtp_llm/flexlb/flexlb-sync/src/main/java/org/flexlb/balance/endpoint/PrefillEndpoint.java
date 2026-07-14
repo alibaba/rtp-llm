@@ -41,7 +41,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
     /**
      * Engine-reported waiting queue length from the latest WorkerStatus update.
      * Reflects requests queued on the engine side that the master hasn't
-     * dispatched yet (e.g. legacy traffic from other masters).
+     * dispatched yet (e.g. traffic not tracked by the current master).
      */
     private volatile long engineWaitingQueryLen = 0;
 
@@ -183,7 +183,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
             }
             // Defense-in-depth: verify that at least one success task's requestId
             // belongs to this local batch. Mismatch indicates a stale engine report
-            // from a previous master epoch with the same batchId.
+            // from a stale or foreign status report with the same batchId.
             Set<Long> localRequestIds = batch.requests().stream()
                     .map(BatchItem::requestId)
                     .collect(Collectors.toSet());
@@ -200,7 +200,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
             }
             if (!owned) {
                 logger.warn("Prefill calibrate: batchId={} has success but no matching requestId in local batch. "
-                        + "Likely stale report from previous master epoch. Skipping removal.", batchId);
+                        + "Likely stale or foreign status report. Skipping removal.", batchId);
                 continue;
             }
             inflightBatches.remove(batchId);
@@ -296,7 +296,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
     /**
      * Real pending count: total requests the engine will face.
      * Includes master-tracked inflight + batcher queue + engine-reported
-     * waiting queue (e.g. traffic from other sources).
+     * waiting queue (e.g. traffic not tracked by the current master).
      */
     public long realPendingCount() {
         return getInflightRequestCount() + batcher.queueSize() + engineWaitingQueryLen;

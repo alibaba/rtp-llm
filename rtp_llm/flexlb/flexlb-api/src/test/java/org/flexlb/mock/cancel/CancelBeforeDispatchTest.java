@@ -60,10 +60,8 @@ class CancelBeforeDispatchTest extends FlexLBMockTestBase {
         assertEquals(0, mockDecodeWorker.getEnqueueCount(),
                 "Decode worker should never have received any requests");
 
-        // 6. Verify: cancel IS sent to prefill worker (scheduler sends defensive cancel
-        //    even for non-dispatched requests, because it doesn't know if the batch
-        //    was already flushed to the worker)
-        assertEquals(1, mockPrefillWorker.getCancelCount(),
-                "Cancel should be sent to prefill worker (defensive cancel)");
+        // 6. QUEUED is authoritative: no Enqueue happened, so no engine Cancel is needed.
+        assertEquals(0, mockPrefillWorker.getCancelCount(),
+                "Queued cancellation should not call the prefill worker");
     }
 }

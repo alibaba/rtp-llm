@@ -2,6 +2,7 @@ package org.flexlb.balance.scheduler;
 
 import com.google.protobuf.Int64Value;
 import com.google.protobuf.InvalidProtocolBufferException;
+import io.grpc.Status;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.config.ConfigService;
 import org.flexlb.dao.loadbalance.ServerStatus;
@@ -92,35 +93,18 @@ public class DefaultBatchDispatcher implements BatchDispatcher {
 
     private void doDispatchInternal(List<BatchItem> items, PrefillEndpoint prefillEp,
                                     long batchId, long predMs, String reason, DispatchCallback callback) {
-        // Filter out items that were cancelled before dispatch
-        List<BatchItem> active = new ArrayList<>();
-        for (BatchItem item : items) {
-            if (!item.future().isDone() && !item.ctx().isCancelled()) {
-                active.add(item);
-            } else {
-                Logger.debug("Skipping cancelled item in dispatch: request_id={}, batch_id={}",
-                        item.requestId(), batchId);
-            }
-        }
-
-        if (active.isEmpty()) {
-            Logger.debug("All items cancelled before dispatch, batch_id={}", batchId);
-            prefillEp.releaseBatch(batchId);
-            return;
-        }
-
         // 1. Build gRPC request
         EngineRpcService.EnqueueBatchRequestPB request;
         try {
-            request = buildBatchRequest(batchId, active);
+            request = buildBatchRequest(batchId, items);
         } catch (Exception e) {
             Logger.error("Failed to build FlexLB batch request batchId: {}", batchId, e);
-            failItems(active, prefillEp, batchId, "Batch request build failed: " + e.getMessage(), callback);
+            failItems(items, prefillEp, batchId, "Batch request build failed: " + e.getMessage(), callback);
             return;
         }
 
         // 2. Log dispatch
-        logDispatch(batchId, active, prefillEp, predMs, reason);
+        logDispatch(batchId, items, prefillEp, predMs, reason);
 
         // 3. Send gRPC
         try {
@@ -129,14 +113,21 @@ public class DefaultBatchDispatcher implements BatchDispatcher {
                     grpcClient.batchEnqueue(prefillEp.getIp(), prefillEp.getGrpcPort(),
                             request, deadlineMs);
             if (response == null) {
-                failItems(active, prefillEp, batchId, "EnqueueBatch returned null response", callback);
+                failItems(items, prefillEp, batchId, "EnqueueBatch returned null response", callback);
                 return;
             }
-            handleResponse(batchId, active, response, callback);
+            handleResponse(batchId, items, response, callback);
         } catch (Throwable t) {
             Logger.warn("EnqueueBatch failed batchId: {}, entrypoint: {}:{}, err: {}",
                     batchId, prefillEp.getIp(), prefillEp.getGrpcPort(), t.getMessage());
-            failItems(active, prefillEp, batchId, "gRPC dispatch failed: " + t.getMessage(), callback);
+            if (Status.fromThrowable(t).getCode() == Status.Code.DEADLINE_EXCEEDED) {
+                prefillEp.releaseBatch(batchId);
+                for (BatchItem item : items) {
+                    callback.onTimeout(item, t);
+                }
+            } else {
+                failItems(items, prefillEp, batchId, "gRPC dispatch failed: " + t.getMessage(), callback);
+            }
         }
     }
 
@@ -154,6 +145,15 @@ public class DefaultBatchDispatcher implements BatchDispatcher {
     private void handleResponse(long batchId, List<BatchItem> items,
                                 EngineRpcService.EnqueueBatchResponsePB response,
                                 DispatchCallback callback) {
+        if (response.getBatchId() != batchId) {
+            RuntimeException mismatch = new RuntimeException(
+                    "EnqueueBatch batch_id mismatch: expected " + batchId
+                            + " but got " + response.getBatchId());
+            for (BatchItem item : items) {
+                callback.onFailure(item, mismatch);
+            }
+            return;
+        }
         Map<Long, EngineRpcService.EnqueueBatchErrorPB> errorByRequestId = new HashMap<>();
         for (EngineRpcService.EnqueueBatchErrorPB error : response.getErrorsList()) {
             errorByRequestId.put(error.getRequestId(), error);
@@ -215,7 +215,8 @@ public class DefaultBatchDispatcher implements BatchDispatcher {
         return builder.build();
     }
 
-    private EngineRpcService.GenerateInputPB buildInput(long batchId, int groupSize, BatchItem item)
+    private EngineRpcService.GenerateInputPB buildInput(long batchId, int groupSize,
+                                                        BatchItem item)
             throws InvalidProtocolBufferException {
         byte[] bytes = item.ctx().getGenerateInputPbBytes();
         if (bytes == null || bytes.length == 0) {
@@ -252,7 +253,8 @@ public class DefaultBatchDispatcher implements BatchDispatcher {
 
     // ==================== Logging ====================
 
-    private void logDispatch(long batchId, List<BatchItem> items, PrefillEndpoint prefillEp, long predMs, String reason) {
+    private void logDispatch(long batchId, List<BatchItem> items,
+                             PrefillEndpoint prefillEp, long predMs, String reason) {
         long totalTokens = 0;
         long totalHit = 0;
         StringBuilder itemDetail = new StringBuilder();

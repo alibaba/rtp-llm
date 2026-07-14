@@ -1,4 +1,4 @@
-"""Runtime generation/loading for rtp-llm model_rpc_service protobufs."""
+"""Runtime generation and loading for FlexLB protobuf modules."""
 
 from __future__ import annotations
 
@@ -14,6 +14,7 @@ from typing import Tuple
 REPO_ROOT = Path(__file__).resolve().parents[5]
 PROTO_DIR = REPO_ROOT / "rtp_llm" / "cpp" / "model_rpc" / "proto"
 PROTO_FILE = PROTO_DIR / "model_rpc_service.proto"
+SCHEDULE_PROTO_FILE = PROTO_DIR / "flexlb_schedule_service.proto"
 DEFAULT_OUT_DIR = Path(
     os.environ.get(
         "FLEXLB_EVAL_PROTO_OUT",
@@ -29,36 +30,53 @@ def ensure_proto_modules(out_dir: Path | None = None) -> Tuple[ModuleType, Modul
     Online evaluation tools generate them into a temporary directory at runtime.
     """
 
+    return _ensure_proto_modules(PROTO_FILE, "model_rpc_service", out_dir)
+
+
+def ensure_schedule_proto_modules(
+    out_dir: Path | None = None,
+) -> Tuple[ModuleType, ModuleType]:
+    """Generate and import the standalone FlexLB schedule protocol."""
+
+    return _ensure_proto_modules(
+        SCHEDULE_PROTO_FILE, "flexlb_schedule_service", out_dir
+    )
+
+
+def _ensure_proto_modules(
+    proto_file: Path,
+    module_name: str,
+    out_dir: Path | None,
+) -> Tuple[ModuleType, ModuleType]:
+    """Generate and import one protobuf module pair."""
+
     out = Path(out_dir or DEFAULT_OUT_DIR)
     out.mkdir(parents=True, exist_ok=True)
-    pb2_path = out / "model_rpc_service_pb2.py"
-    grpc_path = out / "model_rpc_service_pb2_grpc.py"
-
-    if _needs_regen(pb2_path, grpc_path):
-        _generate(out)
+    pb2_path = out / f"{module_name}_pb2.py"
+    grpc_path = out / f"{module_name}_pb2_grpc.py"
+    if _needs_regen(proto_file, pb2_path, grpc_path):
+        _generate(out, proto_file)
 
     out_str = str(out)
     if out_str not in sys.path:
         sys.path.insert(0, out_str)
-
-    # Import by generated top-level module names. Reloading avoids stale modules
-    # when a developer regenerates after changing the proto in the same process.
-    pb2 = importlib.import_module("model_rpc_service_pb2")
-    pb2_grpc = importlib.import_module("model_rpc_service_pb2_grpc")
-    return pb2, pb2_grpc
+    return (
+        importlib.import_module(f"{module_name}_pb2"),
+        importlib.import_module(f"{module_name}_pb2_grpc"),
+    )
 
 
-def _needs_regen(pb2_path: Path, grpc_path: Path) -> bool:
+def _needs_regen(proto_file: Path, pb2_path: Path, grpc_path: Path) -> bool:
     if not pb2_path.exists() or not grpc_path.exists():
         return True
-    proto_mtime = PROTO_FILE.stat().st_mtime
+    proto_mtime = proto_file.stat().st_mtime
     return (
         pb2_path.stat().st_mtime < proto_mtime
         or grpc_path.stat().st_mtime < proto_mtime
     )
 
 
-def _generate(out: Path) -> None:
+def _generate(out: Path, proto_file: Path) -> None:
     try:
         import grpc_tools.protoc  # noqa: F401
     except ImportError as exc:
@@ -74,6 +92,6 @@ def _generate(out: Path) -> None:
         f"-I{PROTO_DIR}",
         f"--python_out={out}",
         f"--grpc_python_out={out}",
-        str(PROTO_FILE),
+        str(proto_file),
     ]
     subprocess.run(cmd, check=True)

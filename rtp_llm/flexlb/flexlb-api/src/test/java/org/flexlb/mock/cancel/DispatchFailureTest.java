@@ -23,7 +23,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * 2. Submit request → dispatched → EnqueueBatch returns error
  * 3. Verify: request fails with BATCH_DISPATCH_FAILED, subsequent request recovers
  *
- * <p>Note: failAck() now calls repackPrefillBatch() to remove the failed request
+ * <p>Note: dispatch failure handling repacks the batch to remove the failed request
  * from PrefillEndpoint.inflightBatches, preventing inflight leak.
  */
 class DispatchFailureTest extends FlexLBMockTestBase {
@@ -69,7 +69,7 @@ class DispatchFailureTest extends FlexLBMockTestBase {
         assertEquals(0, mockDecodeWorker.getEnqueueCount(),
                 "Decode worker should not have received any request");
 
-        // 5. Verify: PrefillEndpoint.inflightBatches cleaned up by failAck()
+        // 5. Verify: PrefillEndpoint.inflightBatches cleaned up after dispatch failure
         InflightAssertions.assertPrefillInflightEmpty(getPrefillEndpoint());
 
         // 6. Verify: a subsequent request works fine (worker recovered)

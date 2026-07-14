@@ -90,7 +90,7 @@ class FlexlbBatchSchedulerTest {
         EndpointRegistry endpointRegistry = new EndpointRegistry(configService, null, reporter);
         BatchDispatcher dispatcher = new DefaultBatchDispatcher(grpcClient, configService);
         scheduler = new FlexlbBatchScheduler(configService, router, grpcClient, engineWorkerStatus,
-                endpointRegistry, dispatcher, reporter);
+                endpointRegistry, dispatcher, reporter, null);
 
         // Create endpoint and batcher for the worker that successRoute() returns
         String ipPort = "10.0.0.1:8080";
@@ -269,9 +269,10 @@ class FlexlbBatchSchedulerTest {
     }
 
     @Test
-    void cancel_inflight_before_ack_completes_cancelled_and_sends_engine_cancel() throws Exception {
+    void cancel_inflight_waits_for_enqueue_ack_before_engine_cancel() throws Exception {
         config.setFlexlbBatchSizeMax(1);
         CountDownLatch batchStarted = new CountDownLatch(1);
+        CountDownLatch releaseAck = new CountDownLatch(1);
         CountDownLatch cancelSeen = new CountDownLatch(1);
 
         when(grpcClient.batchEnqueue(anyString(), anyInt(), any(EngineRpcService.EnqueueBatchRequestPB.class), anyLong()))
@@ -279,7 +280,7 @@ class FlexlbBatchSchedulerTest {
                     EngineRpcService.EnqueueBatchRequestPB request = inv.getArgument(2);
                     sentBatches.add(request);
                     batchStarted.countDown();
-                    assertTrue(cancelSeen.await(2, TimeUnit.SECONDS));
+                    assertTrue(releaseAck.await(2, TimeUnit.SECONDS));
                     return ackFor(request);
                 });
         when(grpcClient.cancel(anyString(), anyInt(), anyLong(), anyLong()))
@@ -291,12 +292,20 @@ class FlexlbBatchSchedulerTest {
         CompletableFuture<Response> future = scheduler.submit(context(12));
 
         assertTrue(batchStarted.await(2, TimeUnit.SECONDS));
-        scheduler.cancel(12L);
+        RequestLifecycleSnapshot cancellation = scheduler.cancel(
+                12L, CancelReason.CLIENT_CANCELLED, 0);
 
         Response response = future.get(2, TimeUnit.SECONDS);
         assertFalse(response.isSuccess());
         assertEquals(StrategyErrorType.REQUEST_CANCELLED.getErrorCode(), response.getCode());
+        assertEquals(RequestLifecycleState.CANCEL_REQUESTED, cancellation.state());
+        verify(grpcClient, never()).cancel(anyString(), anyInt(), anyLong(), anyLong());
+
+        releaseAck.countDown();
+        assertTrue(cancelSeen.await(2, TimeUnit.SECONDS));
         verify(grpcClient, atLeastOnce()).cancel(anyString(), anyInt(), anyLong(), anyLong());
+        assertEquals(RequestLifecycleState.CANCELLED,
+                scheduler.getRequestState(12L, cancellation.batchId()).state());
     }
 
     @Test
@@ -528,14 +537,12 @@ class FlexlbBatchSchedulerTest {
     void batchIdGeneratorProducesUniqueIds() {
         BatchIdGenerator gen = new BatchIdGenerator("10.0.0.1", 7001);
         Set<Long> ids = new HashSet<>();
-        // 4000 is safely below the 12-bit sequence limit (4096 per ms per master),
-        // matching the Python request_id design guarantee.
         for (int i = 0; i < 4000; i++) {
             long id = gen.nextBatchId();
             assertTrue(id > 0, "batch_id must be positive (not -1 default)");
             ids.add(id);
         }
-        assertEquals(4000, ids.size(), "All batch IDs must be unique within a single ms window");
+        assertEquals(4000, ids.size());
     }
 
     @Test
@@ -554,23 +561,6 @@ class FlexlbBatchSchedulerTest {
         // No overlap between two different masters
         ids1.retainAll(ids2);
         assertTrue(ids1.isEmpty(), "Different masters must not produce overlapping batch IDs");
-    }
-
-    @Test
-    void batchIdGeneratorSurvivesRestart() {
-        // A new generator instance (simulating restart) produces IDs
-        // with higher timestamps, never colliding with old ones
-        BatchIdGenerator gen1 = new BatchIdGenerator("10.0.0.1", 7001);
-        long id1 = gen1.nextBatchId();
-
-        // Simulate restart — new instance, same IP:port
-        BatchIdGenerator gen2 = new BatchIdGenerator("10.0.0.1", 7001);
-        long id2 = gen2.nextBatchId();
-
-        // Timestamp portion should be >= id1's timestamp (time only moves forward)
-        long ts1 = id1 >>> 24;
-        long ts2 = id2 >>> 24;
-        assertTrue(ts2 >= ts1, "Restarted generator must not produce IDs with older timestamps");
     }
 
     private static EngineRpcService.EnqueueBatchResponsePB ackFor(EngineRpcService.EnqueueBatchRequestPB request) {

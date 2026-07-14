@@ -1,7 +1,11 @@
-import base64
 import unittest
 
-from rtp_llm.server.master_client import FlexlbResponse, MasterClient
+from rtp_llm.cpp.model_rpc.proto.flexlb_schedule_service_pb2 import (
+    FlexlbScheduleResponsePB,
+    FlexlbServerStatusPB,
+)
+from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
+from rtp_llm.server.master_client import MasterClient
 
 
 class _FakeMasterConfig:
@@ -16,6 +20,11 @@ class _FakeHostService:
 
     def get_slave_addr(self):
         return None
+
+
+class _FakeHostServiceWithSlave(_FakeHostService):
+    def get_slave_addr(self):
+        return "slave:1234"
 
 
 class _FakeGenerateConfig:
@@ -44,31 +53,51 @@ class _CaptureMasterClient(MasterClient):
         self.calls = []
 
     async def _send_schedule_request(
-        self, addr, payload, generate_timeout_ms, request_id, request_headers=None
+        self, addr, request_pb, timeout_s, request_id
     ):
         self.calls.append(
             {
                 "addr": addr,
-                "payload": payload,
-                "generate_timeout_ms": generate_timeout_ms,
+                "request_pb": request_pb,
+                "timeout_s": timeout_s,
                 "request_id": request_id,
-                "request_headers": request_headers,
             }
         )
-        return FlexlbResponse.ok_with_result(
-            {
-                "code": 200,
-                "server_status": [
-                    {
-                        "role": "PREFILL",
-                        "server_ip": "10.0.0.7",
-                        "http_port": 8080,
-                        "grpc_port": 9000,
-                    }
-                ],
-                "enqueued_by_master": True,
-            }
+        return FlexlbScheduleResponsePB(
+            success=True,
+            code=200,
+            server_status=[
+                FlexlbServerStatusPB(
+                    role="PREFILL",
+                    server_ip="10.0.0.7",
+                    http_port=8080,
+                    grpc_port=9000,
+                )
+            ],
+            enqueued_by_master=True,
         )
+
+
+class _DeadlineMasterClient(MasterClient):
+    def __init__(self):
+        super().__init__(
+            host_service=_FakeHostServiceWithSlave(),
+            master_config=_FakeMasterConfig(),
+        )
+        self.calls = []
+
+    async def _send_schedule_request(
+        self, addr, request_pb, timeout_s, request_id
+    ):
+        self.calls.append(addr)
+        raise FtRuntimeException(
+            ExceptionType.DEADLINE_EXCEEDED, "schedule deadline exceeded"
+        )
+
+
+class _FakeInputPB:
+    def SerializeToString(self):
+        return b"serialized-input"
 
 
 class MasterClientBatchPayloadTest(unittest.IsolatedAsyncioTestCase):
@@ -77,9 +106,10 @@ class MasterClientBatchPayloadTest(unittest.IsolatedAsyncioTestCase):
 
         response = await client.get_backend_role_addrs(
             block_cache_keys=[1, 2, 3],
+            cache_key_block_size=1024,
             input=_FakeInput(),
             request_id=99,
-            input_pb_bytes=b"serialized-input",
+            input_pb=_FakeInputPB(),
         )
 
         self.assertTrue(response.is_ok)
@@ -87,23 +117,34 @@ class MasterClientBatchPayloadTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.role_addrs[0].ip, "10.0.0.7")
 
         call = client.calls[0]
-        payload = call["payload"]
+        request_pb = call["request_pb"]
         self.assertEqual(call["addr"], "master:1234")
-        self.assertEqual(call["generate_timeout_ms"], 3000)
+        self.assertEqual(call["timeout_s"], 3.0)
         self.assertEqual(call["request_id"], 99)
-        self.assertEqual(call["request_headers"], {"x-request-id": "req-1"})
-        self.assertEqual(payload["block_cache_keys"], [1, 2, 3])
-        self.assertEqual(payload["seq_len"], 5)
-        self.assertEqual(payload["request_priority"], 12)
-        self.assertEqual(payload["generate_timeout"], 3000)
-        self.assertEqual(payload["request_id"], 99)
-        self.assertEqual(payload["max_new_tokens"], 17)
-        self.assertEqual(payload["num_beams"], 2)
-        self.assertTrue(payload["force_disable_sp_run"])
-        self.assertEqual(
-            payload["generate_input_pb_b64"],
-            base64.b64encode(b"serialized-input").decode("ascii"),
-        )
+        self.assertEqual(list(request_pb.block_cache_keys), [1, 2, 3])
+        self.assertEqual(request_pb.seq_len, 5)
+        self.assertEqual(request_pb.generate_timeout, 3000)
+        self.assertEqual(request_pb.request_id, 99)
+        self.assertEqual(request_pb.max_new_tokens, 17)
+        self.assertEqual(request_pb.num_beams, 2)
+        self.assertTrue(request_pb.force_disable_sp_run)
+        self.assertEqual(request_pb.generate_input, b"serialized-input")
+        self.assertEqual(request_pb.cache_key_block_size, 1024)
+
+    async def test_schedule_deadline_does_not_retry_slave(self):
+        client = _DeadlineMasterClient()
+
+        with self.assertRaises(FtRuntimeException) as raised:
+            await client.get_backend_role_addrs(
+                block_cache_keys=[1],
+                cache_key_block_size=1024,
+                input=_FakeInput(),
+                request_id=100,
+                input_pb=_FakeInputPB(),
+            )
+
+        self.assertEqual(raised.exception.exception_type, ExceptionType.DEADLINE_EXCEEDED)
+        self.assertEqual(client.calls, ["master:1234"])
 
 
 if __name__ == "__main__":

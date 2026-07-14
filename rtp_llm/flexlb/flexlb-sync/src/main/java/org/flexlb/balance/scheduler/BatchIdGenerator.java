@@ -1,61 +1,67 @@
 package org.flexlb.balance.scheduler;
 
+import java.lang.management.ManagementFactory;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
- * Snowflake-like batch ID generator, aligned with the Python request_id design.
+ * Generates a Snowflake-compatible batch ID.
  *
- * <p>Structure (64 bits, same layout as request_id):
+ * <p>Structure (64 bits):
  * <pre>
- *  40 bits: relative timestamp (ms since 2020-01-01)  — supports ~35 years
- *  12 bits: master instance id (SHA256 of localIp:port) — 4096 master instances
- *  12 bits: sequence number (per-generator AtomicLong)  — 4096 batches per ms per master
+ *  31 bits: relative timestamp (seconds since 2020-01-01) — supports ~68 years
+ *  12 bits: master instance id (hash of address and process identity)
+ *  21 bits: sequence number — 2,097,152 batches per second per master
  * </pre>
  *
- * <p>This ensures batch_id is globally unique across master failovers and restarts,
- * consistent with the request_id snowflake pattern in
- * {@code rtp_llm/frontend/request_id_generator.py}.
+ * <p>Uniqueness assumes the wall clock does not move backwards and one master
+ * generates fewer than 2,097,152 batches in the same second.
  */
 public class BatchIdGenerator {
 
-    private static final long EPOCH_2020_MS = 1577836800000L; // 2020-01-01 UTC
-    private static final long SEQUENCE_BITS = 12L;
+    private static final long EPOCH_2020_SECONDS = 1577836800L; // 2020-01-01 UTC
+    private static final long TIMESTAMP_BITS = 31L;
+    private static final long SEQUENCE_BITS = 21L;
     private static final long MASTER_ID_BITS = 12L;
-    private static final long SEQUENCE_MASK = (1L << SEQUENCE_BITS) - 1;   // 4095
-    private static final long MASTER_ID_MASK = (1L << MASTER_ID_BITS) - 1; // 4095
-    private static final long MASTER_ID_SHIFT = SEQUENCE_BITS;              // 12
-    private static final long TIMESTAMP_SHIFT = SEQUENCE_BITS + MASTER_ID_BITS; // 24
+    private static final long SEQUENCE_MASK = (1L << SEQUENCE_BITS) - 1;
+    private static final long MASTER_ID_SHIFT = SEQUENCE_BITS;
+    private static final long TIMESTAMP_SHIFT = SEQUENCE_BITS + MASTER_ID_BITS;
+    private static final AtomicLong SEQUENCE = new AtomicLong();
 
     private final long masterId;
-    private final AtomicLong sequence = new AtomicLong(0);
 
     public BatchIdGenerator(String localIp, int port) {
-        this.masterId = computeMasterId(localIp, port);
+        this.masterId = computeMasterId(localIp, port,
+                ProcessHandle.current().pid(),
+                ManagementFactory.getRuntimeMXBean().getStartTime());
     }
 
-    /**
-     * Generates the next globally-unique batch ID.
-     * Thread-safe via AtomicLong CAS.
-     */
+    /** Generates the next batch ID. Thread-safe within one master process. */
     public long nextBatchId() {
-        long currentTs = (System.currentTimeMillis() - EPOCH_2020_MS) & 0xFFFFFFFFFFL; // 40-bit mask, aligned with Python request_id_generator.py
-        // Sequence is a global counter (not per-ms reset), masked to 12 bits.
-        // Safe as long as batch QPS < 4,096,000 per master, well beyond batch scheduling workloads.
-        // Aligned with Python request_id_generator.py design.
-        long seq = sequence.getAndIncrement() & SEQUENCE_MASK;
-        return (currentTs << TIMESTAMP_SHIFT) | (masterId << MASTER_ID_SHIFT) | seq;
+        long timestamp = System.currentTimeMillis() / 1000L - EPOCH_2020_SECONDS;
+        if (timestamp < 0) {
+            throw new IllegalStateException("system clock is before the batch ID epoch");
+        }
+        if ((timestamp >>> TIMESTAMP_BITS) != 0) {
+            throw new IllegalStateException("batch ID timestamp overflow");
+        }
+        long sequenceId = SEQUENCE.getAndIncrement() & SEQUENCE_MASK;
+        return (timestamp << TIMESTAMP_SHIFT)
+                | (masterId << MASTER_ID_SHIFT)
+                | sequenceId;
     }
 
     /**
-     * Computes a 12-bit master identifier from localIp:port via SHA256,
-     * mirroring the request_id machine_id approach.
+     * Computes a 12-bit master process identifier via SHA256.
      */
-    private static long computeMasterId(String localIp, int port) {
+    private static long computeMasterId(String localIp,
+                                        int port,
+                                        long processId,
+                                        long processStartTimeMs) {
         try {
-            String input = localIp + ":" + port;
+            String input = localIp + ":" + port + ":" + processId + ":" + processStartTimeMs;
             byte[] hash = MessageDigest.getInstance("SHA-256")
                     .digest(input.getBytes(StandardCharsets.UTF_8));
             // Take the low 12 bits of the hash

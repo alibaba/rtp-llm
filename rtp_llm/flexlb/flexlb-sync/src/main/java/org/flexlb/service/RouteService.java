@@ -5,7 +5,9 @@ import java.util.concurrent.CompletableFuture;
 
 import org.flexlb.balance.scheduler.DefaultRouter;
 import org.flexlb.balance.scheduler.FlexlbBatchScheduler;
+import org.flexlb.balance.scheduler.CancelReason;
 import org.flexlb.balance.scheduler.QueueManager;
+import org.flexlb.balance.scheduler.RequestLifecycleSnapshot;
 import org.flexlb.balance.scheduler.Router;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
@@ -94,6 +96,10 @@ public class RouteService {
      * @param balanceContext Load balancing context
      */
     public void cancel(BalanceContext balanceContext) {
+        cancel(balanceContext, CancelReason.CLIENT_CANCELLED);
+    }
+
+    public void cancel(BalanceContext balanceContext, CancelReason reason) {
         FlexlbConfig flexlbConfig = configService.loadBalanceConfig();
         balanceContext.cancel();
         if (flexlbConfig.isEnableQueueing() || balanceContext.getScheduleMode() == ScheduleModeEnum.QUEUE) {
@@ -103,7 +109,7 @@ public class RouteService {
             }
         }
         if (flexlbBatchScheduler != null && balanceContext.getRequest() != null) {
-            flexlbBatchScheduler.cancel(balanceContext.getRequest().getRequestId());
+            flexlbBatchScheduler.cancel(balanceContext.getRequest().getRequestId(), reason, 0);
         }
         // Note: DIRECT and QUEUE paths skip de.reserve() in CostBasedDecodeStrategy,
         // so there is no decode KV reservation to release on cancel.
@@ -113,12 +119,21 @@ public class RouteService {
         balanceContext.setErrorMessage("request cancelled");
     }
 
-    public void cancelByRequestId(long requestId) {
+    public RequestLifecycleSnapshot cancelByRequestId(long requestId,
+                                                      CancelReason reason,
+                                                      long expectedBatchId) {
         // Only BATCH path has decode KV reservations tracked by flexlbBatchScheduler.
         // DIRECT and QUEUE paths skip reserve, so cancel is a no-op for them.
         if (flexlbBatchScheduler != null) {
-            flexlbBatchScheduler.cancel(requestId);
+            return flexlbBatchScheduler.cancel(requestId, reason, expectedBatchId);
         }
+        return null;
+    }
+
+    public RequestLifecycleSnapshot getRequestState(long requestId,
+                                                    long expectedBatchId) {
+        return flexlbBatchScheduler == null ? null
+                : flexlbBatchScheduler.getRequestState(requestId, expectedBatchId);
     }
 
     boolean shouldUseFlexlbBatch(BalanceContext ctx, FlexlbConfig config) {

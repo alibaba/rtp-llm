@@ -4,8 +4,8 @@ package org.flexlb.balance.scheduler;
  * Receives per-item dispatch results from {@link BatchDispatcher}.
  * <p>
  * Implemented by the scheduler to manage inflight state in response to
- * engine acknowledgements. The dispatcher guarantees exactly one call
- * per item — either {@link #onSuccess} or {@link #onFailure}.
+ * engine acknowledgements. The dispatcher guarantees exactly one terminal
+ * callback per item.
  */
 public interface DispatchCallback {
 
@@ -33,4 +33,9 @@ public interface DispatchCallback {
      * @param error the underlying error
      */
     void onFailure(BatchItem item, Throwable error);
+
+    /** Dispatch deadline elapsed before an acknowledgement could be reconciled. */
+    default void onTimeout(BatchItem item, Throwable error) {
+        onFailure(item, error);
+    }
 }

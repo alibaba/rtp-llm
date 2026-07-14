@@ -195,7 +195,7 @@ public abstract class FlexLBMockTestBase {
         // 11. Create real scheduler
         scheduler = new FlexlbBatchScheduler(
                 configService, router, grpcClient, engineWorkerStatus,
-                endpointRegistry, dispatcher, reporter);
+                endpointRegistry, dispatcher, reporter, null);
 
         // 12. Register prefill endpoint with the real scheduler as BatchDecisionHandler
         PrefillEndpoint prefillEp = new PrefillEndpoint(prefillWs, config, scheduler, reporter);

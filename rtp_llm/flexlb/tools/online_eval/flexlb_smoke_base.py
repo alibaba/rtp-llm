@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from typing import List, Optional
 
 from online_eval.mock_engine import encode_unique_key
-from online_eval.proto_utils import ensure_proto_modules
+from online_eval.proto_utils import ensure_proto_modules, ensure_schedule_proto_modules
 
 # ---------------------------------------------------------------------------
 # Result helpers
@@ -57,6 +57,7 @@ class FlexLBSmokeBase:
     def __init__(self, args: argparse.Namespace):
         self.args = args
         self.pb2, self.pb2_grpc = ensure_proto_modules()
+        self.schedule_pb2, self.schedule_pb2_grpc = ensure_schedule_proto_modules()
         self._channels: dict[str, object] = {}
         self._request_counter = args.request_id_base
         self.results: List[ScenarioResult] = []
@@ -149,15 +150,15 @@ class FlexLBSmokeBase:
             block_keys=block_keys,
         )
         mode_pb = {
-            "auto": self.pb2.FLEXLB_SCHEDULE_AUTO,
-            "batch": self.pb2.FLEXLB_SCHEDULE_BATCH,
-            "direct": self.pb2.FLEXLB_SCHEDULE_DIRECT,
-            "queue": self.pb2.FLEXLB_SCHEDULE_QUEUE,
+            "auto": self.schedule_pb2.FLEXLB_SCHEDULE_AUTO,
+            "batch": self.schedule_pb2.FLEXLB_SCHEDULE_BATCH,
+            "direct": self.schedule_pb2.FLEXLB_SCHEDULE_DIRECT,
+            "queue": self.schedule_pb2.FLEXLB_SCHEDULE_QUEUE,
         }[schedule_mode]
         keys = block_keys or [request_id * 100 + 1]
-        return self.pb2.FlexlbScheduleRequestPB(
+        return self.schedule_pb2.FlexlbScheduleRequestPB(
             request_id=request_id,
-            generate_input=input_pb,
+            generate_input=input_pb.SerializeToString(),
             block_cache_keys=keys,
             seq_len=input_len,
             generate_timeout=30_000,
@@ -175,15 +176,15 @@ class FlexLBSmokeBase:
 
     async def _schedule(self, request_id: int, **kwargs):
         """Call ``FlexlbService.Schedule`` and return the response."""
-        stub = self.pb2_grpc.FlexlbServiceStub(
+        stub = self.schedule_pb2_grpc.FlexlbServiceStub(
             await self._channel(self._master_target())
         )
         req = self._build_schedule_request(request_id, **kwargs)
         return await stub.Schedule(req, timeout=30.0)
 
-    def _role_addr(self, response, role: int) -> str:
+    def _role_addr(self, response, role: str) -> str:
         for status in response.server_status:
-            if status.role_type == role and status.server_ip:
+            if status.role == role and status.server_ip:
                 return f"{status.server_ip}:{status.grpc_port}"
         return ""
 
@@ -195,7 +196,9 @@ class FlexLBSmokeBase:
         for status in response.server_status:
             input_pb.generate_config.role_addrs.add(
                 role=status.role,
-                role_type=status.role_type,
+                role_type=getattr(
+                    self.pb2, f"ROLE_TYPE_{status.role}", self.pb2.ROLE_TYPE_PDFUSION
+                ),
                 ip=status.server_ip,
                 http_port=status.http_port,
                 grpc_port=status.grpc_port,
@@ -204,8 +207,8 @@ class FlexLBSmokeBase:
     async def _start_stream(self, response, request_id: int, input_pb=None):
         """Start FetchResponse (batch) or GenerateStreamCall (direct/queue)."""
         target = self._role_addr(
-            response, self.pb2.ROLE_TYPE_PREFILL
-        ) or self._role_addr(response, self.pb2.ROLE_TYPE_PDFUSION)
+            response, "PREFILL"
+        ) or self._role_addr(response, "PDFUSION")
         if not target:
             raise RuntimeError("schedule response has no PREFILL/PDFUSION address")
         stub = self.pb2_grpc.RpcServiceStub(await self._channel(target))
@@ -268,18 +271,29 @@ class FlexLBSmokeBase:
 
     async def _cancel(self, request_id: int, response=None) -> None:
         """Cancel via Master (always) + Worker (direct/queue path only)."""
-        stub = self.pb2_grpc.FlexlbServiceStub(
+        stub = self.schedule_pb2_grpc.FlexlbServiceStub(
             await self._channel(self._master_target())
         )
-        await stub.Cancel(self.pb2.CancelRequestPB(request_id=request_id), timeout=10.0)
+        cancel_request = self.schedule_pb2.FlexlbCancelRequestPB(
+            request_id=request_id,
+            reason=self.schedule_pb2.CANCEL_REASON_CLIENT_CANCELLED,
+        )
+        if response is not None and response.HasField("lifecycle"):
+            lifecycle = response.lifecycle
+            if lifecycle.batch_id:
+                cancel_request.batch_id = lifecycle.batch_id
+        await stub.Cancel(
+            cancel_request,
+            timeout=10.0,
+        )
         if response is not None and not response.enqueued_by_master:
             await self._worker_cancel(request_id, response)
 
     async def _worker_cancel(self, request_id: int, response) -> None:
         """Call Worker ``RpcService.Cancel`` directly."""
         target = self._role_addr(
-            response, self.pb2.ROLE_TYPE_PREFILL
-        ) or self._role_addr(response, self.pb2.ROLE_TYPE_PDFUSION)
+            response, "PREFILL"
+        ) or self._role_addr(response, "PDFUSION")
         if not target:
             return
         stub = self.pb2_grpc.RpcServiceStub(await self._channel(target))

@@ -1,5 +1,6 @@
 package org.flexlb.mock.grpc;
 
+import org.flexlb.balance.scheduler.RequestLifecycleState;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
@@ -24,7 +25,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * <p>Flow:
  * 1. Configure mock prefill with enqueueDelayMs=3000 (3s) and master deadline=500ms
  * 2. Submit request → dispatched → gRPC batchEnqueue times out at 500ms
- * 3. Verify: request fails with BATCH_DISPATCH_FAILED, inflight cleaned up,
+ * 3. Verify: request transitions to TIMED_OUT, inflight is cleaned up,
  *    mock prefill received EnqueueBatch (but couldn't respond in time)
  * 4. Recover: change behavior to delay=0, submit new request → succeeds
  *
@@ -34,12 +35,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  *   <li>When the deadline fires, the blocking call throws {@code StatusRuntimeException}
  *       with status DEADLINE_EXCEEDED</li>
  *   <li>{@link org.flexlb.balance.scheduler.DefaultBatchDispatcher} catches this in its
- *       {@code catch (Throwable)} block and calls {@code failItems()}</li>
- *   <li>{@code failItems()} releases the batch on the PrefillEndpoint and calls
- *       {@code callback.onFailure()} for each item</li>
- *   <li>{@link org.flexlb.balance.scheduler.FlexlbBatchScheduler#failAck} removes the
- *       inflight entry, rolls back decode reservation, and completes the future with
- *       BATCH_DISPATCH_FAILED</li>
+ *       {@code catch (Throwable)} block and calls {@code onTimeout()}</li>
+ *   <li>The scheduler records a TIMED_OUT tombstone and returns BATCH_SLO_EXPIRED</li>
  * </ul>
  *
  * <p>Note: The mock's {@code enqueueBatch} records the request <em>before</em> sleeping,
@@ -78,16 +75,18 @@ class GrpcTimeoutTest extends FlexLBMockTestBase {
         CompletableFuture<Response> future = submitRequest(10001);
         Response response = future.get(5, TimeUnit.SECONDS);
 
-        // 2. Verify: request failed with BATCH_DISPATCH_FAILED
+        // 2. Verify: request failed with an explicit timeout result
         assertFalse(response.isSuccess(), "Request should fail when EnqueueBatch times out");
-        assertEquals(StrategyErrorType.BATCH_DISPATCH_FAILED.getErrorCode(), response.getCode(),
-                "Request should have BATCH_DISPATCH_FAILED error code");
+        assertEquals(StrategyErrorType.BATCH_SLO_EXPIRED.getErrorCode(), response.getCode(),
+                "Request should have BATCH_SLO_EXPIRED error code");
+        assertEquals(RequestLifecycleState.TIMED_OUT,
+                scheduler.getRequestState(10001L, 0).state());
 
         // 3. Verify: mock prefill received the EnqueueBatch call (recorded before sleep)
         assertTrue(mockPrefillWorker.getEnqueueCount() >= 1,
                 "Prefill worker should have received at least 1 EnqueueBatch call");
 
-        // 4. Verify: PrefillEndpoint inflight cleaned up by failAck() → releaseBatch()
+        // 4. Verify: timeout handling cleans up PrefillEndpoint inflight state
         InflightAssertions.assertPrefillInflightEmpty(getPrefillEndpoint());
 
         // 5. Verify: decode worker never received any request (PD-separated)

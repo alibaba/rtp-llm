@@ -1,9 +1,10 @@
 """FlexLB schedule client: request role addrs from master/slave via gRPC."""
 
+import asyncio
 import logging
 import time
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import Dict, List, Optional
 
 import grpc
 import grpc.aio
@@ -11,11 +12,16 @@ import grpc.aio
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.generate_config import RoleAddr, RoleType
 from rtp_llm.config.py_config_modules import MasterConfig
-from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
+from rtp_llm.cpp.model_rpc.proto.flexlb_schedule_service_pb2 import (
+    CANCEL_REASON_CLIENT_CANCELLED,
+    CANCEL_REASON_DEADLINE_EXCEEDED,
+    FlexlbCancelRequestPB,
     FlexlbScheduleRequestPB,
-    GenerateInputPB,
 )
-from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2_grpc import FlexlbServiceStub
+from rtp_llm.cpp.model_rpc.proto.flexlb_schedule_service_pb2_grpc import (
+    FlexlbServiceStub,
+)
+from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import GenerateInputPB
 from rtp_llm.metrics import kmonitor
 from rtp_llm.metrics.kmonitor_metric_reporter import AccMetrics
 from rtp_llm.server.host_service import HostService
@@ -25,7 +31,6 @@ from rtp_llm.utils.base_model_datatypes import GenerateInput
 route_logger = logging.getLogger("route_logger")
 
 SUCCESS_CODE = 200
-DEFAULT_REQUEST_PRIORITY = 100
 # gRPC = HTTP + 2 for FlexLB's own servers (consistent with FlexlbGrpcServer.FLEXLB_GRPC_PORT_OFFSET).
 # This is NOT the same as the backend engine offset (HTTP+1)—see CommonConstants.GRPC_PORT_OFFSET.
 FLEXLB_GRPC_PORT_OFFSET = 2
@@ -33,26 +38,12 @@ BEARER_PREFIX = "Bearer "
 
 
 def _resolve_role_from_server_status(s) -> RoleType:
-    """Determine RoleType from a FlexlbServerStatusPB using two-level fallback.
-
-    Mirrors Java EngineStatusConverter.convertToWorkerStatusResponse:
-    1) role_type (enum f5) — preferred, type-safe field.
-    2) role (string f1) — backward-compatible string role.
-    3) Default to PDFUSION.
-    """
-    # 1) role_type (enum) — preferred, type-safe field
-    if s.role_type:
-        try:
-            return _coerce_role_type(s.role_type)
-        except (AttributeError, ValueError):
-            pass
-    # 2) role (string) — backward-compatible string role
+    """Determine RoleType from the stable string role field."""
     if s.role:
         try:
             return _coerce_role_type(s.role)
         except (AttributeError, ValueError):
             pass
-    # 3) Default to PDFUSION
     return RoleType.PDFUSION
 
 
@@ -70,7 +61,6 @@ class FlexlbResponse:
     connection_failed: bool = False
     error_code: Optional[int] = None
     error_message: Optional[str] = None
-    result: Optional[Dict[str, Any]] = None
     enqueued_by_master: bool = False
 
     @property
@@ -78,20 +68,10 @@ class FlexlbResponse:
         return self.role_addrs is not None
 
     @classmethod
-    def ok_with_result(cls, result: Dict[str, Any]) -> "FlexlbResponse":
-        """HTTP success: raw JSON body (parsed later into role_addrs)."""
-        return cls(
-            role_addrs=None,
-            connection_failed=False,
-            error_code=None,
-            error_message=None,
-            result=result,
-            enqueued_by_master=False,
-        )
-
-    @classmethod
     def ok(
-        cls, role_addrs: List[RoleAddr], enqueued_by_master: bool = False
+        cls,
+        role_addrs: List[RoleAddr],
+        enqueued_by_master: bool = False,
     ) -> "FlexlbResponse":
         """Business success: parsed role addrs."""
         return cls(
@@ -99,7 +79,6 @@ class FlexlbResponse:
             connection_failed=False,
             error_code=None,
             error_message=None,
-            result=None,
             enqueued_by_master=enqueued_by_master,
         )
 
@@ -115,7 +94,6 @@ class FlexlbResponse:
             connection_failed=False,
             error_code=error_code,
             error_message=error_message,
-            result=None,
             enqueued_by_master=False,
         )
 
@@ -127,7 +105,6 @@ class FlexlbResponse:
             connection_failed=True,
             error_code=None,
             error_message=None,
-            result=None,
             enqueued_by_master=False,
         )
 
@@ -206,8 +183,23 @@ class MasterClient:
                 e.details(),
                 elapsed,
             )
+            if e.code() == grpc.StatusCode.DEADLINE_EXCEEDED:
+                await self._best_effort_cancel(
+                    stub, request_id, CANCEL_REASON_DEADLINE_EXCEEDED
+                )
+                await self._close_channel(target)
+                raise FtRuntimeException(
+                    exception_type=ExceptionType.DEADLINE_EXCEEDED,
+                    message=f"FlexLB schedule deadline exceeded for request {request_id}",
+                ) from e
             await self._close_channel(target)
             return None
+        except asyncio.CancelledError:
+            if "stub" in locals():
+                await self._best_effort_cancel(
+                    stub, request_id, CANCEL_REASON_CLIENT_CANCELLED
+                )
+            raise
         except Exception as e:
             elapsed = time.time() - start
             route_logger.exception(
@@ -218,6 +210,21 @@ class MasterClient:
             )
             await self._close_channel(target)
             return None
+
+    @staticmethod
+    async def _best_effort_cancel(stub, request_id: int, reason: int) -> None:
+        try:
+            await stub.Cancel(
+                FlexlbCancelRequestPB(request_id=request_id, reason=reason),
+                timeout=1.0,
+            )
+        except Exception:
+            route_logger.warning(
+                "best-effort FlexLB cancel failed, request_id=%s, reason=%s",
+                request_id,
+                reason,
+                exc_info=True,
+            )
 
     async def get_backend_role_addrs(
         self,
@@ -264,7 +271,7 @@ class MasterClient:
             cache_key_block_size=cache_key_block_size,
         )
         if input_pb is not None:
-            request_pb.generate_input.CopyFrom(input_pb)
+            request_pb.generate_input = input_pb.SerializeToString()
 
         response = await self._send_schedule_request(
             master_addr, request_pb, timeout_s, request_id
@@ -318,7 +325,8 @@ class MasterClient:
             for s in response.server_status
         ]
         return FlexlbResponse.ok(
-            role_addrs, enqueued_by_master=response.enqueued_by_master
+            role_addrs,
+            enqueued_by_master=response.enqueued_by_master,
         )
 
     @staticmethod

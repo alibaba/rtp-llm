@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 from online_eval.mock_engine import encode_unique_key
-from online_eval.proto_utils import ensure_proto_modules
+from online_eval.proto_utils import ensure_proto_modules, ensure_schedule_proto_modules
 from online_eval.report import write_markdown_report
 from online_eval.stats import load_balance_summary, summarize_latencies
 from online_eval.trace_loader import ReplayRequest, load_replay_requests
@@ -70,6 +70,7 @@ class LoadClient:
     def __init__(self, args: argparse.Namespace):
         self.args = args
         self.pb2, self.pb2_grpc = ensure_proto_modules()
+        self.schedule_pb2, self.schedule_pb2_grpc = ensure_schedule_proto_modules()
         self.output_dir = Path(args.output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.per_request_path = self.output_dir / "per_request.jsonl"
@@ -131,9 +132,9 @@ class LoadClient:
     async def _handle_request(self, req: ReplayRequest) -> dict:
         started = time.monotonic()
         input_pb = self._build_generate_input(req)
-        schedule_req = self.pb2.FlexlbScheduleRequestPB(
+        schedule_req = self.schedule_pb2.FlexlbScheduleRequestPB(
             request_id=req.request_id,
-            generate_input=input_pb,
+            generate_input=input_pb.SerializeToString(),
             block_cache_keys=req.block_keys,
             seq_len=req.input_len,
             generate_timeout=self.args.timeout_ms,
@@ -168,7 +169,7 @@ class LoadClient:
 
         try:
             schedule_start = time.monotonic()
-            flexlb_stub = self.pb2_grpc.FlexlbServiceStub(
+            flexlb_stub = self.schedule_pb2_grpc.FlexlbServiceStub(
                 await self._channel(self._flexlb_target())
             )
             response = await flexlb_stub.Schedule(
@@ -186,8 +187,8 @@ class LoadClient:
                 return result
 
             self._copy_role_addrs(input_pb, response)
-            result["prefill"] = self._role_addr(response, self.pb2.ROLE_TYPE_PREFILL)
-            result["decode"] = self._role_addr(response, self.pb2.ROLE_TYPE_DECODE)
+            result["prefill"] = self._role_addr(response, "PREFILL")
+            result["decode"] = self._role_addr(response, "DECODE")
 
             if self.args.schedule_only:
                 result["status"] = "scheduled"
@@ -401,15 +402,17 @@ class LoadClient:
         for status in response.server_status:
             input_pb.generate_config.role_addrs.add(
                 role=status.role,
-                role_type=status.role_type,
+                role_type=getattr(
+                    self.pb2, f"ROLE_TYPE_{status.role}", self.pb2.ROLE_TYPE_PDFUSION
+                ),
                 ip=status.server_ip,
                 http_port=status.http_port,
                 grpc_port=status.grpc_port,
             )
 
-    def _role_addr(self, response, role: int) -> str:
+    def _role_addr(self, response, role: str) -> str:
         for status in response.server_status:
-            if status.role_type == role and status.server_ip:
+            if status.role == role and status.server_ip:
                 return f"{status.server_ip}:{status.grpc_port}"
         return ""
 
@@ -434,10 +437,10 @@ class LoadClient:
 
     def _schedule_mode_pb(self) -> int:
         return {
-            "auto": self.pb2.FLEXLB_SCHEDULE_AUTO,
-            "batch": self.pb2.FLEXLB_SCHEDULE_BATCH,
-            "direct": self.pb2.FLEXLB_SCHEDULE_DIRECT,
-            "queue": self.pb2.FLEXLB_SCHEDULE_QUEUE,
+            "auto": self.schedule_pb2.FLEXLB_SCHEDULE_AUTO,
+            "batch": self.schedule_pb2.FLEXLB_SCHEDULE_BATCH,
+            "direct": self.schedule_pb2.FLEXLB_SCHEDULE_DIRECT,
+            "queue": self.schedule_pb2.FLEXLB_SCHEDULE_QUEUE,
         }[self.args.schedule_mode]
 
     async def _write_summary(self, elapsed_s: float) -> None:

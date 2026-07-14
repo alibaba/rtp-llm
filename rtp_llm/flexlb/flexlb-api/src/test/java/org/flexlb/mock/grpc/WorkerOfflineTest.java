@@ -102,7 +102,7 @@ class WorkerOfflineTest extends FlexLBMockTestBase {
         assertTrue(errMsg != null && !errMsg.isEmpty(),
                 "Error message should not be empty");
 
-        // 8. Verify: PrefillEndpoint inflight cleaned up by failAck() → releaseBatch()
+        // 8. Verify: dispatch failure cleans up PrefillEndpoint inflight state
         InflightAssertions.assertPrefillInflightEmpty(getPrefillEndpoint());
 
         // 9. Verify: decode worker never received any enqueue request (PD-separated)

@@ -64,7 +64,7 @@ class DefaultBatchDispatcherTest {
         PrefillEndpoint prefillEp = createPrefillEndpoint();
         BatchItem item = createBatchItem(1L, 500, 200, prefillEp);
 
-        EngineRpcService.EnqueueBatchResponsePB response = ackResponse(List.of(1L));
+        EngineRpcService.EnqueueBatchResponsePB response = ackResponse(1L, List.of(1L));
         when(grpcClient.batchEnqueue(anyString(), anyInt(), any(EngineRpcService.EnqueueBatchRequestPB.class), anyLong()))
                 .thenReturn(response);
 
@@ -105,7 +105,25 @@ class DefaultBatchDispatcherTest {
     }
 
     @Test
-    void dispatchFiltersCancelledItemsBeforeSend() throws Exception {
+    void dispatchRejectsAckWithDifferentBatchId() throws Exception {
+        PrefillEndpoint prefillEp = createPrefillEndpoint();
+        BatchItem item = createBatchItem(8L, 500, 200, prefillEp);
+        when(grpcClient.batchEnqueue(anyString(), anyInt(), any(), anyLong())).thenReturn(
+                EngineRpcService.EnqueueBatchResponsePB.newBuilder()
+                        .setBatchId(87L)
+                        .addSuccesses(EngineRpcService.EnqueueBatchSuccessPB.newBuilder().setRequestId(8L))
+                        .build());
+
+        dispatcher.dispatch(List.of(item), prefillEp, 88L,
+                100, "batch_id_mismatch", callback);
+
+        assertTrue(callback.failureLatch.await(5, TimeUnit.SECONDS));
+        assertEquals(0, callback.successCount.get());
+        assertEquals(1, callback.failureCount.get());
+    }
+
+    @Test
+    void dispatchKeepsCommittedItemsEvenIfCancellationRacesWithSend() throws Exception {
         PrefillEndpoint prefillEp = createPrefillEndpoint();
         BatchItem active = createBatchItem(1L, 500, 200, prefillEp);
         BatchItem cancelled = createBatchItem(2L, 300, 100, prefillEp);
@@ -115,7 +133,7 @@ class DefaultBatchDispatcherTest {
         when(grpcClient.batchEnqueue(anyString(), anyInt(), any(EngineRpcService.EnqueueBatchRequestPB.class), anyLong()))
                 .thenAnswer(inv -> {
                     captured.set(inv.getArgument(2));
-                    return ackResponse(List.of(1L));
+                    return ackResponse(1L, List.of(1L, 2L));
                 });
 
         dispatcher.dispatch(List.of(active, cancelled), prefillEp, 1L, 100, "test", callback);
@@ -123,11 +141,12 @@ class DefaultBatchDispatcherTest {
         assertTrue(callback.successLatch.await(5, TimeUnit.SECONDS));
         EngineRpcService.EnqueueBatchRequestPB sent = captured.get();
         assertNotNull(sent);
-        // Only 1 request should be in the batch (the cancelled one filtered out)
+        // Scheduler committed both requests before handing them to the dispatcher.
+        // Dropping one here could let Cancel arrive before Enqueue and be lost.
         long sentCount = sent.getDpSlotsList().stream()
                 .mapToLong(slot -> slot.getRequestsCount())
                 .sum();
-        assertEquals(1, sentCount);
+        assertEquals(2, sentCount);
     }
 
     @Test
@@ -150,6 +169,7 @@ class DefaultBatchDispatcherTest {
 
         EngineRpcService.EnqueueBatchResponsePB response =
                 EngineRpcService.EnqueueBatchResponsePB.newBuilder()
+                        .setBatchId(1L)
                         .addErrors(EngineRpcService.EnqueueBatchErrorPB.newBuilder()
                                 .setRequestId(1L)
                                 .setErrorInfo(EngineRpcService.ErrorDetailsPB.newBuilder()
@@ -173,7 +193,9 @@ class DefaultBatchDispatcherTest {
         BatchItem item = createBatchItem(1L, 500, 200, prefillEp);
 
         EngineRpcService.EnqueueBatchResponsePB response =
-                EngineRpcService.EnqueueBatchResponsePB.newBuilder().build(); // no success, no error
+                EngineRpcService.EnqueueBatchResponsePB.newBuilder()
+                        .setBatchId(1L)
+                        .build(); // no success, no error
         when(grpcClient.batchEnqueue(anyString(), anyInt(), any(EngineRpcService.EnqueueBatchRequestPB.class), anyLong()))
                 .thenReturn(response);
 
@@ -192,7 +214,7 @@ class DefaultBatchDispatcherTest {
         when(grpcClient.batchEnqueue(anyString(), anyInt(), any(EngineRpcService.EnqueueBatchRequestPB.class), anyLong()))
                 .thenAnswer(inv -> {
                     started.countDown();
-                    return ackResponse(List.of(1L));
+                    return ackResponse(1L, List.of(1L));
                 });
 
         BatchItem item = createBatchItem(1L, 500, 200, prefillEp);
@@ -262,9 +284,9 @@ class DefaultBatchDispatcherTest {
         return new BatchItem(ctx, new CompletableFuture<>(), null, prefill, null, prefillEp, null, 0, System.currentTimeMillis());
     }
 
-    private EngineRpcService.EnqueueBatchResponsePB ackResponse(List<Long> successIds) {
+    private EngineRpcService.EnqueueBatchResponsePB ackResponse(long batchId, List<Long> successIds) {
         EngineRpcService.EnqueueBatchResponsePB.Builder builder =
-                EngineRpcService.EnqueueBatchResponsePB.newBuilder();
+                EngineRpcService.EnqueueBatchResponsePB.newBuilder().setBatchId(batchId);
         for (long id : successIds) {
             builder.addSuccesses(EngineRpcService.EnqueueBatchSuccessPB.newBuilder()
                     .setRequestId(id)

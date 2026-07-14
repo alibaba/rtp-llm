@@ -23,13 +23,12 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * <p>Flow:
  * 1. Configure prefill with long delay (2s) so ACK hasn't arrived when we cancel
  * 2. Submit request → dispatched to prefill worker via gRPC
- * 3. Cancel once → future completes with CANCELLED, gRPC cancel sent
- * 4. Cancel again → no-op (entry already removed from inflight by first cancel)
- * 5. Verify: only 1 gRPC cancel sent, inflight clean, subsequent request works
+ * 3. Cancel once → future completes while the scheduler waits for the enqueue ACK
+ * 4. Cancel again → no-op while cancellation reconciliation is pending
+ * 5. ACK arrives → exactly one gRPC cancel is sent, inflight is cleaned
  *
  * <p>The idempotency is guaranteed by {@code FlexlbBatchScheduler.cancel()}:
- * {@code inflight.remove(requestId)} returns null on the second call, causing
- * an immediate return without sending another gRPC Cancel.
+ * the CANCEL_REQUESTED state is idempotent until the enqueue ACK arrives.
  */
 class CancelIdempotencyTest extends FlexLBMockTestBase {
 
@@ -69,8 +68,8 @@ class CancelIdempotencyTest extends FlexLBMockTestBase {
         assertEquals(1, mockPrefillWorker.getEnqueueCount(),
                 "Prefill worker should have received 1 EnqueueBatch before cancel");
 
-        // 3. First cancel — should complete future with CANCELLED
-        //    (ackFinished=false because worker has 2s delay, ACK hasn't arrived)
+        // 3. First cancel completes the client future, but engine Cancel must wait
+        //    until EnqueueBatch returns its ACK.
         cancelRequest(8001);
 
         // 4. Verify response is CANCELLED
@@ -79,11 +78,17 @@ class CancelIdempotencyTest extends FlexLBMockTestBase {
         assertEquals(StrategyErrorType.REQUEST_CANCELLED.getErrorCode(), response.getCode(),
                 "Response should have REQUEST_CANCELLED error code");
 
-        // 5. Second cancel — should be a no-op (entry already removed from inflight)
-        //    inflight.remove(requestId) returns null → immediate return, no gRPC cancel
+        // 5. Second cancel is idempotent while CANCEL_REQUESTED is pending.
         cancelRequest(8001);
 
-        // 6. Verify: only 1 gRPC cancel was sent (second cancel is no-op)
+        assertEquals(0, mockPrefillWorker.getCancelCount(),
+                "Engine cancel must not be sent before the enqueue ACK");
+        long cancelDeadline = System.currentTimeMillis() + 3000;
+        while (mockPrefillWorker.getCancelCount() < 1 && System.currentTimeMillis() < cancelDeadline) {
+            Thread.sleep(10);
+        }
+
+        // 6. The ACK triggers exactly one engine Cancel.
         assertEquals(1, mockPrefillWorker.getCancelCount(),
                 "Second cancel should not send another gRPC cancel");
 
