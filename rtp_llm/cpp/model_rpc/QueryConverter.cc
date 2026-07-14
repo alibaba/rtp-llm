@@ -120,8 +120,8 @@ std::shared_ptr<GenerateConfig> QueryConverter::transGenerateConfig(const Genera
     TRANS_OPTIONAL(force_batch);
 
     // 生成式推荐：组合 token 约束
-    generate_config->combo_token_size = config_proto->combo_token_size();
-    generate_config->enable_cross_sequence_ban = config_proto->enable_cross_sequence_ban();
+    generate_config->combo_token_size              = config_proto->combo_token_size();
+    generate_config->enable_cross_sequence_ban     = config_proto->enable_cross_sequence_ban();
     generate_config->cross_seq_diverge_start_combo = config_proto->cross_seq_diverge_start_combo();
     for (const auto& combo_proto : config_proto->banned_combo_token_ids().rows()) {
         std::vector<int> combo;
@@ -438,6 +438,14 @@ void QueryConverter::transResponse(GenerateOutputsPB*     outputs,
         flatten_output->mutable_all_probs(), source_outputs, [](const auto& r) { return r.aux_info.all_probs; });
     stackBuffersToTensorPB(
         flatten_output->mutable_hidden_states(), source_outputs, [](const auto& r) { return r.hidden_states; });
+
+    if (dump_aux_info) {
+        // Keep writing the per-output AuxInfo field for rolling-upgrade compatibility.
+        // New clients consume this aggregate tensor and avoid deserializing one TensorPB per beam/output.
+        stackBuffersToTensorPB(flatten_output->mutable_all_softmax_probs(), source_outputs, [](const auto& r) {
+            return r.aux_info.softmax_probs;
+        });
+    }
 
     stackBuffersToTensorPB(flatten_output->mutable_loss(), source_outputs, [](const auto& r) { return r.loss; });
 
