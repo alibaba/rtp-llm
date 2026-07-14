@@ -8,6 +8,7 @@
 #include "rtp_llm/cpp/cache/SingleTypeKVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
+#include "rtp_llm/cpp/cache/SingleConfigCreator.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/config/MTPModelConfigHelper.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
@@ -773,6 +774,66 @@ TEST_F(SingleTypeKVCacheAllocatorTest, BlockBatchCopyEmpty) {
     std::vector<BlockIdPair> empty_mapping;
 
     EXPECT_NO_THROW(allocator_->blockBatchCopy(empty_mapping));
+}
+
+TEST_F(SingleTypeKVCacheAllocatorTest, BlockBatchCopyCopiesCompleteSparseIndexerStride) {
+    auto model_config                         = makeTestModelConfig(/*num_layers=*/1);
+    model_config.attn_config.is_sparse        = true;
+    model_config.attn_config.indexer_head_dim = 256;
+
+    ParallelismConfig parallelism_config;
+    parallelism_config.tp_size = 1;
+    auto config                = SingleConfigCreator::createSingleConfig(model_config, parallelism_config);
+    config.block_num           = 4;
+
+    ASSERT_TRUE(config.is_sparse);
+    ASSERT_GT(config.kv_scale_stride_bytes, 0u);
+    ASSERT_NE(config.kv_scale_stride_bytes, config.kvScaleStrideBytesForGroup(0));
+
+    allocator_ = std::make_shared<SingleTypeKVCacheAllocator>(config, AllocationType::HOST);
+    ASSERT_TRUE(allocator_->init());
+
+    const auto stride   = config.kv_scale_stride_bytes;
+    auto       snapshot = [&]() {
+        std::vector<std::vector<uint8_t>> blocks(config.block_num, std::vector<uint8_t>(stride));
+        for (uint32_t block = 0; block < config.block_num; ++block) {
+            auto addr = allocator_->convertIndexToAddr(/*layer_id=*/0, static_cast<int>(block));
+            EXPECT_NE(addr.kv_scale_addr, nullptr);
+            memcpy(blocks[block].data(), addr.kv_scale_addr, stride);
+        }
+        return blocks;
+    };
+    auto verify = [&](const std::vector<std::vector<uint8_t>>& expected) {
+        for (uint32_t block = 0; block < config.block_num; ++block) {
+            auto addr = allocator_->convertIndexToAddr(/*layer_id=*/0, static_cast<int>(block));
+            EXPECT_EQ(memcmp(addr.kv_scale_addr, expected[block].data(), stride), 0)
+                << "sparse indexer mismatch at block " << block;
+        }
+    };
+
+    for (uint32_t block = 0; block < config.block_num; ++block) {
+        auto  addr = allocator_->convertIndexToAddr(/*layer_id=*/0, static_cast<int>(block));
+        auto* data = static_cast<uint8_t*>(addr.kv_scale_addr);
+        ASSERT_NE(data, nullptr);
+        for (size_t offset = 0; offset < stride; ++offset) {
+            data[offset] = static_cast<uint8_t>((block * 67 + offset) % 251);
+        }
+    }
+
+    const auto initial = snapshot();
+    EXPECT_NO_THROW(allocator_->blockBatchCopy(std::vector<BlockIdPair>{}));
+    verify(initial);
+
+    EXPECT_NO_THROW(allocator_->blockBatchCopy(std::vector<BlockIdPair>{{0, 1}}));
+    auto after_single = initial;
+    after_single[1]   = initial[0];
+    verify(after_single);
+
+    const int last_block = static_cast<int>(config.block_num - 1);
+    EXPECT_NO_THROW(allocator_->blockBatchCopy(std::vector<BlockIdPair>{{1, last_block}}));
+    auto after_last        = after_single;
+    after_last[last_block] = after_single[1];
+    verify(after_last);
 }
 
 TEST_F(SingleTypeKVCacheAllocatorTest, BlockBatchCopyPointers) {

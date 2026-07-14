@@ -27,7 +27,7 @@ namespace torch_ext {
 // When kernel_seq_size_per_block < seq_size_per_block the tensor is presented at
 // kernel-block granularity:
 //   MHA: [kernel_block_num, 2, num_kv_heads, kernel_seq_size_per_block, head_dim]
-//   MLA: [kernel_block_num, kernel_seq_size_per_block, kv_lora_rank + rope_head_dim]
+//   MLA: [kernel_block_num, kernel_seq_size_per_block, physical_elements_per_token]
 struct LayerKVCache {
     torch::Tensor kv_cache_base;
     torch::Tensor kv_scale_base;
@@ -62,6 +62,70 @@ struct KVCache {
     std::vector<std::vector<torch::Tensor>> kv_cache_base_by_layer_group;
     std::vector<std::vector<torch::Tensor>> kv_scale_base_by_layer_group;
 
+    void setFullAttentionView(LayerKVCache& layer_cache, const torch::Tensor& base, const torch::Tensor& scale) const {
+        RTP_LLM_CHECK_WITH_INFO(
+            seq_size_per_block > 0, "physical seq_size_per_block must be positive, got %d", seq_size_per_block);
+        layer_cache.seq_size_per_block = kernel_seq_size_per_block > 0 ? kernel_seq_size_per_block : seq_size_per_block;
+        RTP_LLM_CHECK_WITH_INFO(layer_cache.seq_size_per_block > 0,
+                                "kernel seq_size_per_block must be positive, got %d",
+                                layer_cache.seq_size_per_block);
+        RTP_LLM_CHECK_WITH_INFO(seq_size_per_block % layer_cache.seq_size_per_block == 0,
+                                "physical seq_size_per_block=%d must be divisible by kernel seq_size_per_block=%d",
+                                seq_size_per_block,
+                                layer_cache.seq_size_per_block);
+        RTP_LLM_CHECK_WITH_INFO(base.defined() && base.dim() > 0,
+                                "full-attention KV cache base must be a defined tensor with at least one dimension");
+
+        const int64_t physical_block_num = base.size(0);
+        const int64_t kernel_blocks_per_kv_block =
+            static_cast<int64_t>(seq_size_per_block) / layer_cache.seq_size_per_block;
+        const int64_t kernel_block_num = physical_block_num * kernel_blocks_per_kv_block;
+
+        if (use_mla) {
+            RTP_LLM_CHECK_WITH_INFO(base.is_contiguous(), "MLA KV cache base must be contiguous");
+            const int64_t elements_per_kernel_page =
+                kernel_block_num * static_cast<int64_t>(layer_cache.seq_size_per_block);
+            RTP_LLM_CHECK_WITH_INFO(elements_per_kernel_page > 0 && base.numel() % elements_per_kernel_page == 0,
+                                    "MLA KV cache elements=%ld must be divisible by kernel pages=%ld",
+                                    base.numel(),
+                                    elements_per_kernel_page);
+            const int64_t stride = base.numel() / elements_per_kernel_page;
+            layer_cache.kv_cache_base =
+                base.reshape({kernel_block_num, static_cast<int64_t>(layer_cache.seq_size_per_block), stride});
+        } else if (base.dim() == 2 && num_kv_heads > 0 && head_dim > 0) {
+            layer_cache.kv_cache_base = base.reshape({kernel_block_num,
+                                                      2,
+                                                      static_cast<int64_t>(num_kv_heads),
+                                                      static_cast<int64_t>(layer_cache.seq_size_per_block),
+                                                      static_cast<int64_t>(head_dim)});
+        } else {
+            layer_cache.kv_cache_base = base;
+        }
+
+        if (!scale.defined()) {
+            return;
+        }
+
+        if (use_mla) {
+            RTP_LLM_CHECK_WITH_INFO(scale.dim() > 0 && scale.size(0) == physical_block_num,
+                                    "MLA scale physical block count must match KV cache base: scale=%ld base=%ld",
+                                    scale.dim() > 0 ? scale.size(0) : -1,
+                                    physical_block_num);
+            RTP_LLM_CHECK_WITH_INFO(scale.is_contiguous(), "MLA scale/indexer cache base must be contiguous");
+            const int64_t elements_per_kernel_page =
+                kernel_block_num * static_cast<int64_t>(layer_cache.seq_size_per_block);
+            RTP_LLM_CHECK_WITH_INFO(elements_per_kernel_page > 0 && scale.numel() % elements_per_kernel_page == 0,
+                                    "MLA scale/indexer elements=%ld must be divisible by kernel pages=%ld",
+                                    scale.numel(),
+                                    elements_per_kernel_page);
+            const int64_t scale_stride = scale.numel() / elements_per_kernel_page;
+            layer_cache.kv_scale_base =
+                scale.reshape({kernel_block_num, static_cast<int64_t>(layer_cache.seq_size_per_block), scale_stride});
+        } else {
+            layer_cache.kv_scale_base = scale.reshape({kernel_block_num, scale.size(1) / kernel_blocks_per_kv_block});
+        }
+    }
+
     LayerKVCache getLayerCache(int idx) {
         LayerKVCache layer_cache;
         layer_cache.layer_id = idx;
@@ -84,48 +148,7 @@ struct KVCache {
             layer_cache.kv_cache_base      = base;
             layer_cache.kv_scale_base      = scale;
         } else {
-            layer_cache.seq_size_per_block =
-                kernel_seq_size_per_block > 0 ? kernel_seq_size_per_block : seq_size_per_block;
-            const int64_t kernel_blocks_per_kv_block =
-                kernel_seq_size_per_block > 0 ? (int64_t)seq_size_per_block / (int64_t)layer_cache.seq_size_per_block :
-                                                1;
-
-            // [block_num, kv_block_stride_elems] shared by all layer types.
-            if (base.defined() && base.dim() == 2) {
-                const int64_t physical_block_num = base.size(0);
-                const int64_t kernel_block_num   = physical_block_num * kernel_blocks_per_kv_block;
-                if (use_mla && kv_lora_rank > 0 && rope_head_dim > 0) {
-                    // MLA layout: [kernel_block_num, kernel_seq_size_per_block, kv_lora_rank + rope_head_dim]
-                    layer_cache.kv_cache_base = base.reshape({kernel_block_num,
-                                                              (int64_t)layer_cache.seq_size_per_block,
-                                                              (int64_t)(kv_lora_rank + rope_head_dim)});
-                } else if (num_kv_heads > 0 && head_dim > 0) {
-                    // MHA layout: [kernel_block_num, 2, num_kv_heads, kernel_seq_size_per_block, head_dim]
-                    layer_cache.kv_cache_base = base.reshape({kernel_block_num,
-                                                              2,
-                                                              (int64_t)num_kv_heads,
-                                                              (int64_t)layer_cache.seq_size_per_block,
-                                                              (int64_t)head_dim});
-                } else {
-                    layer_cache.kv_cache_base = base;
-                }
-            } else {
-                layer_cache.kv_cache_base = base;
-            }
-
-            if (scale.defined()) {
-                // Keep kv_scale_base aligned with kernel-block view of kv_cache_base.
-                const int64_t physical_block_num = base.size(0);
-                const int64_t kernel_block_num   = physical_block_num * kernel_blocks_per_kv_block;
-
-                if (use_mla) {
-                    layer_cache.kv_scale_base =
-                        scale.reshape({kernel_block_num, (int64_t)layer_cache.seq_size_per_block, scale.size(2)});
-                } else {
-                    layer_cache.kv_scale_base =
-                        scale.reshape({kernel_block_num, scale.size(1) / kernel_blocks_per_kv_block});
-                }
-            }
+            setFullAttentionView(layer_cache, base, scale);
         }
         const auto layer = static_cast<size_t>(idx);
         if (!layer_to_group_ids.empty() && layer < layer_to_group_ids.size() && layer_to_group_ids[layer].size() == 1) {
@@ -183,42 +206,7 @@ struct KVCache {
             return layer_cache;
         }
 
-        layer_cache.seq_size_per_block = kernel_seq_size_per_block > 0 ? kernel_seq_size_per_block : seq_size_per_block;
-        const int64_t kernel_blocks_per_kv_block =
-            kernel_seq_size_per_block > 0 ? (int64_t)seq_size_per_block / (int64_t)layer_cache.seq_size_per_block : 1;
-
-        if (base.defined() && base.dim() == 2) {
-            const int64_t physical_block_num = base.size(0);
-            const int64_t kernel_block_num   = physical_block_num * kernel_blocks_per_kv_block;
-            if (use_mla && kv_lora_rank > 0 && rope_head_dim > 0) {
-                layer_cache.kv_cache_base = base.reshape({kernel_block_num,
-                                                          (int64_t)layer_cache.seq_size_per_block,
-                                                          (int64_t)(kv_lora_rank + rope_head_dim)});
-            } else if (num_kv_heads > 0 && head_dim > 0) {
-                layer_cache.kv_cache_base = base.reshape({kernel_block_num,
-                                                          2,
-                                                          (int64_t)num_kv_heads,
-                                                          (int64_t)layer_cache.seq_size_per_block,
-                                                          (int64_t)head_dim});
-            } else {
-                layer_cache.kv_cache_base = base;
-            }
-        } else {
-            layer_cache.kv_cache_base = base;
-        }
-
-        if (scale.defined()) {
-            const int64_t physical_block_num = base.size(0);
-            const int64_t kernel_block_num   = physical_block_num * kernel_blocks_per_kv_block;
-
-            if (use_mla) {
-                layer_cache.kv_scale_base =
-                    scale.reshape({kernel_block_num, (int64_t)layer_cache.seq_size_per_block, scale.size(2)});
-            } else {
-                layer_cache.kv_scale_base =
-                    scale.reshape({kernel_block_num, scale.size(1) / kernel_blocks_per_kv_block});
-            }
-        }
+        setFullAttentionView(layer_cache, base, scale);
         return layer_cache;
     }
 
