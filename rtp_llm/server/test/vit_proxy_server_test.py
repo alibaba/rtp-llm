@@ -2,7 +2,17 @@ import threading
 from unittest import TestCase, main
 from unittest.mock import MagicMock, patch
 
-from rtp_llm.server.vit_proxy_server import LoadBalancer, WorkerConnectionPool
+from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
+    MMRdmaDescPB,
+    MultimodalInputsPB,
+    MultimodalOutputPB,
+    ReleaseEmbeddingPB,
+)
+from rtp_llm.server.vit_proxy_server import (
+    LoadBalancer,
+    VitProxyRpcServer,
+    WorkerConnectionPool,
+)
 
 
 class LoadBalancerRoundRobinTest(TestCase):
@@ -165,6 +175,45 @@ class WorkerConnectionPoolTest(TestCase):
         # should not propagate
         pool.close_all()
         self.assertEqual(pool.channels, {})
+
+
+class VitProxyRdmaReleaseTest(TestCase):
+    @patch("rtp_llm.server.vit_proxy_server.kmonitor.init")
+    @patch("rtp_llm.server.vit_proxy_server.kmonitor.report")
+    def test_release_is_forwarded_to_workers_that_created_handles(
+        self, _mock_report, _mock_init
+    ):
+        load_balancer = MagicMock()
+        load_balancer.get_worker.side_effect = ["worker-a", "worker-b"]
+        connection_pool = MagicMock()
+        stub_a = MagicMock()
+        stub_b = MagicMock()
+        connection_pool.get_stub.side_effect = lambda address: {
+            "worker-a": stub_a,
+            "worker-b": stub_b,
+        }[address]
+        stub_a.RemoteMultimodalEmbedding.return_value = MultimodalOutputPB(
+            output_rdma=MMRdmaDescPB(handle="handle-a")
+        )
+        response_b = MultimodalOutputPB()
+        response_b.output_rdma_chunks.add(handle="handle-b-1")
+        response_b.output_rdma_chunks.add(handle="handle-b-2")
+        stub_b.RemoteMultimodalEmbedding.return_value = response_b
+
+        servicer = VitProxyRpcServer(load_balancer, connection_pool)
+        servicer.RemoteMultimodalEmbedding(MultimodalInputsPB(), MagicMock())
+        servicer.RemoteMultimodalEmbedding(MultimodalInputsPB(), MagicMock())
+        servicer.ReleaseMultimodalEmbedding(
+            ReleaseEmbeddingPB(handle=["handle-a", "handle-b-1", "handle-b-2"]),
+            MagicMock(),
+        )
+
+        request_a = stub_a.ReleaseMultimodalEmbedding.call_args.args[0]
+        request_b = stub_b.ReleaseMultimodalEmbedding.call_args.args[0]
+        self.assertEqual(list(request_a.handle), ["handle-a"])
+        self.assertEqual(list(request_b.handle), ["handle-b-1", "handle-b-2"])
+        self.assertEqual(stub_a.ReleaseMultimodalEmbedding.call_args.kwargs["timeout"], 1.0)
+        self.assertEqual(stub_b.ReleaseMultimodalEmbedding.call_args.kwargs["timeout"], 1.0)
 
 
 if __name__ == "__main__":

@@ -13,13 +13,17 @@ void registerMMRdmaTransportCreator(MMRdmaTransportCreator creator) {
 }
 
 std::shared_ptr<MMRdmaTransport> createMMRdmaTransport(const VitConfig& vit_config, MMRdmaRole role) {
-    if (!vit_config.mm_rdma_enable) {
-        RTP_LLM_LOG_INFO("mm rdma disabled, fall back to inline-bytes multimodal embedding transport");
+    if (vit_config.mm_transport_mode == "grpc") {
+        RTP_LLM_LOG_INFO("mm transport mode is grpc, skip rdma initialization");
+        return nullptr;
+    }
+    if (vit_config.mm_transport_mode != "auto") {
+        RTP_LLM_LOG_WARNING("unknown mm transport mode '%s', fall back to grpc", vit_config.mm_transport_mode.c_str());
         return nullptr;
     }
     if (g_mm_rdma_transport_creator == nullptr) {
         RTP_LLM_LOG_WARNING(
-            "mm_rdma_enable=true but no MMRdmaTransport implementation is linked (open-source build?), "
+            "mm transport mode is auto but no MMRdmaTransport implementation is linked (open-source build?), "
             "fall back to inline-bytes path");
         return nullptr;
     }

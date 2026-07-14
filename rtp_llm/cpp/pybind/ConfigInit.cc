@@ -1764,7 +1764,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
     py::class_<VitConfig>(m, "VitConfig")
         .def(py::init<>())
         .def_readwrite("vit_separation", &VitConfig::vit_separation)
-        .def_readwrite("mm_rdma_enable", &VitConfig::mm_rdma_enable)
+        .def_readwrite("mm_transport_mode", &VitConfig::mm_transport_mode)
         .def_readwrite("mm_rdma_bind_ip", &VitConfig::mm_rdma_bind_ip)
         .def_readwrite("mm_rdma_port", &VitConfig::mm_rdma_port)
         .def_readwrite("mm_rdma_connect_timeout_ms", &VitConfig::mm_rdma_connect_timeout_ms)
@@ -1777,7 +1777,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def(py::pickle(
             [](const VitConfig& self) {
                 return py::make_tuple(self.vit_separation,
-                                      self.mm_rdma_enable,
+                                      self.mm_transport_mode,
                                       self.mm_rdma_bind_ip,
                                       self.mm_rdma_port,
                                       self.mm_rdma_connect_timeout_ms,
@@ -1793,7 +1793,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                 VitConfig c;
                 try {
                     c.vit_separation             = t[0].cast<VitSeparation>();
-                    c.mm_rdma_enable             = t[1].cast<bool>();
+                    c.mm_transport_mode          = t[1].cast<std::string>();
                     c.mm_rdma_bind_ip            = t[2].cast<std::string>();
                     c.mm_rdma_port               = t[3].cast<int>();
                     c.mm_rdma_connect_timeout_ms = t[4].cast<int>();

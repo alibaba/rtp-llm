@@ -5,6 +5,7 @@ VIT Proxy Server - 主进程代理服务器
 
 import logging
 import threading
+import time
 from collections import defaultdict
 from concurrent import futures
 from typing import Optional
@@ -17,6 +18,7 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     EmptyPB,
     MultimodalInputsPB,
     MultimodalOutputPB,
+    ReleaseEmbeddingPB,
     StatusVersionPB,
     WorkerStatusPB,
 )
@@ -33,6 +35,7 @@ from rtp_llm.multimodal.mm_profiler import MMProfiler
 # hung worker from exhausting the 200-thread proxy pool (see RemoteMultimodalEmbedding).
 # Per-request override comes from MMPreprocessConfigPB.mm_timeout_ms if set (>0).
 DEFAULT_PROXY_RPC_TIMEOUT_SECONDS = 30.0
+RDMA_HANDLE_ROUTE_TTL_SECONDS = 120.0
 
 
 def _resolve_rpc_timeout_seconds(request: "MultimodalInputsPB") -> float:
@@ -168,7 +171,31 @@ class VitProxyRpcServer(MultimodalRpcServiceServicer):
         self.load_balancer = load_balancer
         self.connection_pool = connection_pool
         self.profiler = MMProfiler()
+        self._rdma_handle_routes: dict[str, tuple[str, float]] = {}
+        self._rdma_handle_routes_lock = threading.Lock()
         kmonitor.init()
+
+    def _record_rdma_handles(
+        self, response: MultimodalOutputPB, worker_address: str
+    ) -> None:
+        now = time.monotonic()
+        handles = []
+        if response.HasField("output_rdma") and response.output_rdma.handle:
+            handles.append(response.output_rdma.handle)
+        handles.extend(
+            desc.handle for desc in response.output_rdma_chunks if desc.handle
+        )
+        if not handles:
+            return
+        with self._rdma_handle_routes_lock:
+            cutoff = now - RDMA_HANDLE_ROUTE_TTL_SECONDS
+            self._rdma_handle_routes = {
+                handle: route
+                for handle, route in self._rdma_handle_routes.items()
+                if route[1] >= cutoff
+            }
+            for handle in handles:
+                self._rdma_handle_routes[handle] = (worker_address, now)
 
     def RemoteMultimodalEmbedding(
         self, request: MultimodalInputsPB, context
@@ -190,6 +217,7 @@ class VitProxyRpcServer(MultimodalRpcServiceServicer):
                 f"timeout: {timeout_s}s"
             )
             response = stub.RemoteMultimodalEmbedding(request, timeout=timeout_s)
+            self._record_rdma_handles(response, worker_address)
 
             kmonitor.report(AccMetrics.VIT_SUCCESS_QPS_METRIC, 1)
             self.profiler.on_request_complete()
@@ -208,6 +236,35 @@ class VitProxyRpcServer(MultimodalRpcServiceServicer):
         finally:
             if worker_address:
                 self.load_balancer.decrement_connections(worker_address)
+
+    def ReleaseMultimodalEmbedding(
+        self, request: ReleaseEmbeddingPB, context
+    ) -> EmptyPB:
+        handles_by_worker: dict[str, list[str]] = defaultdict(list)
+        now = time.monotonic()
+        with self._rdma_handle_routes_lock:
+            for handle in request.handle:
+                route = self._rdma_handle_routes.pop(handle, None)
+                if route is None or now - route[1] > RDMA_HANDLE_ROUTE_TTL_SECONDS:
+                    logging.warning(
+                        "No live VIT worker route for RDMA handle %s; worker GC will reclaim it",
+                        handle,
+                    )
+                    continue
+                handles_by_worker[route[0]].append(handle)
+
+        for worker_address, handles in handles_by_worker.items():
+            try:
+                stub = self.connection_pool.get_stub(worker_address)
+                stub.ReleaseMultimodalEmbedding(
+                    ReleaseEmbeddingPB(handle=handles), timeout=1.0
+                )
+            except Exception:
+                logging.exception(
+                    "Failed to release RDMA handles on VIT worker %s; worker GC will reclaim them",
+                    worker_address,
+                )
+        return EmptyPB()
 
     def AsyncSubmitEmbedding(self, request: MultimodalInputsPB, context) -> EmptyPB:
         worker_address = None
