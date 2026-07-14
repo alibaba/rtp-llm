@@ -4,6 +4,7 @@
 #include "rtp_llm/cpp/utils/Logger.h"
 
 #include <chrono>
+#include <climits>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -11,12 +12,23 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <linux/futex.h>
 #include <poll.h>
+#include <sys/mman.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
+#include <sys/syscall.h>
 #include <sys/un.h>
 #include <unistd.h>
 
 namespace rtp_llm {
+
+struct CpuBroadcastSharedState {
+    alignas(uint32_t) uint32_t decision = 0;
+};
+
+static_assert(__atomic_always_lock_free(sizeof(uint32_t), nullptr),
+              "CpuBroadcaster shared decision requires lock-free 32-bit atomics");
 
 namespace {
 
@@ -24,7 +36,9 @@ constexpr int      kInitTimeoutMs             = 120 * 1000;
 constexpr int      kDefaultBroadcastTimeoutMs = 0;  // Match NCCL: idle TP workers may wait indefinitely.
 constexpr int      kBroadcastStallWarnMs      = 30 * 1000;
 constexpr char     kLinkProbeToken            = 0x5a;
-constexpr char     kBroadcastSuccessToken     = 0x6b;
+constexpr char     kSharedStateReadyToken     = 0x6a;
+constexpr char     kBroadcastReadyToken       = 0x6b;
+constexpr uint32_t kBroadcastFailedMask       = uint32_t{1} << 31;
 constexpr uint64_t kBroadcastFrameMagic       = 0x5254504c4c4d5450ULL;
 
 struct BroadcastFrameHeader {
@@ -49,6 +63,10 @@ std::string makeUdsPath(const std::string& base, int rank) {
     return base + "_" + std::to_string(rank) + ".sock";
 }
 
+std::string makeSharedStatePath(const std::string& base) {
+    return base + ".state";
+}
+
 void closeFd(int& fd) {
     if (fd >= 0) {
         ::close(fd);
@@ -63,15 +81,121 @@ void shutdownAndCloseFd(int& fd) {
     }
 }
 
-void cleanupRank0State(std::vector<int>& peer_fds, int& listen_fd, std::string& uds_path) {
-    for (int& fd : peer_fds) {
+CpuBroadcastSharedState* mapSharedState(int fd) {
+    void* addr = ::mmap(nullptr, sizeof(CpuBroadcastSharedState), PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    RTP_LLM_CHECK_WITH_INFO(addr != MAP_FAILED, "CpuBroadcaster mmap shared state failed: %s", std::strerror(errno));
+    return static_cast<CpuBroadcastSharedState*>(addr);
+}
+
+void validateSharedStateFd(int fd, const std::string& path) {
+    struct stat st {};
+    int         rc = ::fstat(fd, &st);
+    RTP_LLM_CHECK_WITH_INFO(
+        rc == 0, "CpuBroadcaster stat shared state %s failed: %s", path.c_str(), std::strerror(errno));
+    RTP_LLM_CHECK_WITH_INFO(S_ISREG(st.st_mode) && st.st_uid == ::geteuid(),
+                            "CpuBroadcaster shared state %s is not a regular file owned by uid %u",
+                            path.c_str(),
+                            static_cast<unsigned int>(::geteuid()));
+    RTP_LLM_CHECK_WITH_INFO(st.st_size == static_cast<off_t>(sizeof(CpuBroadcastSharedState)),
+                            "CpuBroadcaster shared state %s has invalid size %lld",
+                            path.c_str(),
+                            static_cast<long long>(st.st_size));
+}
+
+CpuBroadcastSharedState* createSharedState(const std::string& path) {
+    ::unlink(path.c_str());
+    int fd = ::open(path.c_str(), O_CREAT | O_EXCL | O_RDWR | O_CLOEXEC | O_NOFOLLOW, 0600);
+    RTP_LLM_CHECK_WITH_INFO(
+        fd >= 0, "CpuBroadcaster open shared state %s failed: %s", path.c_str(), std::strerror(errno));
+    try {
+        int rc = ::ftruncate(fd, sizeof(CpuBroadcastSharedState));
+        RTP_LLM_CHECK_WITH_INFO(
+            rc == 0, "CpuBroadcaster resize shared state %s failed: %s", path.c_str(), std::strerror(errno));
+        validateSharedStateFd(fd, path);
+        CpuBroadcastSharedState* state = mapSharedState(fd);
         closeFd(fd);
+        __atomic_store_n(&state->decision, uint32_t{0}, __ATOMIC_RELEASE);
+        return state;
+    } catch (...) {
+        closeFd(fd);
+        ::unlink(path.c_str());
+        throw;
     }
-    closeFd(listen_fd);
-    if (!uds_path.empty()) {
-        ::unlink(uds_path.c_str());
-        uds_path.clear();
+}
+
+CpuBroadcastSharedState* openSharedState(const std::string& path) {
+    int fd = ::open(path.c_str(), O_RDWR | O_CLOEXEC | O_NOFOLLOW);
+    RTP_LLM_CHECK_WITH_INFO(
+        fd >= 0, "CpuBroadcaster open shared state %s failed: %s", path.c_str(), std::strerror(errno));
+    try {
+        validateSharedStateFd(fd, path);
+        CpuBroadcastSharedState* state = mapSharedState(fd);
+        closeFd(fd);
+        return state;
+    } catch (...) {
+        closeFd(fd);
+        throw;
     }
+}
+
+void unmapSharedState(CpuBroadcastSharedState*& state) {
+    if (state != nullptr) {
+        ::munmap(state, sizeof(CpuBroadcastSharedState));
+        state = nullptr;
+    }
+}
+
+uint32_t loadDecision(const CpuBroadcastSharedState* state) {
+    return __atomic_load_n(&state->decision, __ATOMIC_ACQUIRE);
+}
+
+void wakeDecisionWaiters(CpuBroadcastSharedState* state) {
+    ::syscall(SYS_futex, &state->decision, FUTEX_WAKE, INT_MAX, nullptr, nullptr, 0);
+}
+
+bool publishDecision(CpuBroadcastSharedState* state, uint32_t expected, uint32_t desired) {
+    if (__atomic_compare_exchange_n(&state->decision, &expected, desired, false, __ATOMIC_RELEASE, __ATOMIC_ACQUIRE)) {
+        wakeDecisionWaiters(state);
+        return true;
+    }
+    return false;
+}
+
+bool waitForDecision(CpuBroadcastSharedState* state, uint32_t previous, int timeout_ms, uint32_t& decision) {
+    const bool no_timeout = timeout_ms <= 0;
+    const auto start      = std::chrono::steady_clock::now();
+    const auto deadline =
+        no_timeout ? std::chrono::steady_clock::time_point::max() : start + std::chrono::milliseconds(timeout_ms);
+
+    while ((decision = loadDecision(state)) == previous) {
+        int wait_ms = kBroadcastStallWarnMs;
+        if (!no_timeout) {
+            const auto now = std::chrono::steady_clock::now();
+            if (now >= deadline) {
+                errno = ETIMEDOUT;
+                return false;
+            }
+            wait_ms = static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now).count());
+        }
+        struct timespec wait_time {
+            wait_ms / 1000, static_cast<long>(wait_ms % 1000) * 1000 * 1000
+        };
+        int rc = static_cast<int>(::syscall(SYS_futex, &state->decision, FUTEX_WAIT, previous, &wait_time, nullptr, 0));
+        if (rc == 0 || errno == EINTR || errno == EAGAIN) {
+            continue;
+        }
+        if (errno == ETIMEDOUT && no_timeout) {
+            const auto waited_ms =
+                std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
+            RTP_LLM_LOG_WARNING("CpuBroadcaster commit decision still waiting after %lld ms "
+                                "(generation=%u timeout disabled)",
+                                static_cast<long long>(waited_ms),
+                                previous + 1);
+            continue;
+        }
+        return false;
+    }
+    return true;
 }
 
 bool isRetryableConnectError(int err) {
@@ -264,6 +388,11 @@ void CpuBroadcaster::cleanupStateLocked() {
     }
     peer_fds_.clear();
     closeFd(listen_fd_);
+    unmapSharedState(shared_state_);
+    if (!shared_state_path_.empty()) {
+        ::unlink(shared_state_path_.c_str());
+        shared_state_path_.clear();
+    }
     if (!my_uds_path_.empty()) {
         ::unlink(my_uds_path_.c_str());
         my_uds_path_.clear();
@@ -272,6 +401,7 @@ void CpuBroadcaster::cleanupStateLocked() {
     rank_                  = 0;
     world_size_            = 1;
     broadcast_timeout_ms_  = kDefaultBroadcastTimeoutMs;
+    broadcast_generation_  = 0;
     broadcast_in_progress_ = false;
     failed_                = false;
     initialized_.store(false, std::memory_order_release);
@@ -284,6 +414,11 @@ void CpuBroadcaster::markBroadcastFailedLocked() {
         shutdownAndCloseFd(fd);
     }
     closeFd(listen_fd_);
+    unmapSharedState(shared_state_);
+    if (!shared_state_path_.empty()) {
+        ::unlink(shared_state_path_.c_str());
+        shared_state_path_.clear();
+    }
     if (!my_uds_path_.empty()) {
         ::unlink(my_uds_path_.c_str());
         my_uds_path_.clear();
@@ -333,10 +468,13 @@ void CpuBroadcaster::initialize(int rank, int world_size, const std::string& bas
     base_path_  = base_path;
     peer_fds_.assign(world_size, -1);
     broadcast_timeout_ms_ = broadcastTimeoutMs();
+    broadcast_generation_ = 0;
 
     if (rank == 0) {
         try {
             const std::string path = makeUdsPath(base_path, 0);
+            shared_state_path_     = makeSharedStatePath(base_path);
+            shared_state_          = createSharedState(shared_state_path_);
             // Remove any stale socket left by a previous crashed run.
             ::unlink(path.c_str());
 
@@ -404,9 +542,23 @@ void CpuBroadcaster::initialize(int rank, int world_size, const std::string& bas
                                         kInitTimeoutMs,
                                         std::strerror(saved));
             }
+            for (int peer_rank = 1; peer_rank < world_size; ++peer_rank) {
+                char    ready = 0;
+                ssize_t n     = readAllWithTimeout(peer_fds_[peer_rank], &ready, sizeof(ready), kInitTimeoutMs);
+                int     saved = errno;
+                RTP_LLM_CHECK_WITH_INFO(n == static_cast<ssize_t>(sizeof(ready)) && ready == kSharedStateReadyToken,
+                                        "CpuBroadcaster shared state ready read from rank %d failed after %d ms: %s",
+                                        peer_rank,
+                                        kInitTimeoutMs,
+                                        std::strerror(saved));
+            }
+            // Every peer now owns a mapping; remove the pathname so stale files
+            // cannot collide with a later session.
+            ::unlink(shared_state_path_.c_str());
+            shared_state_path_.clear();
             RTP_LLM_LOG_INFO("CpuBroadcaster rank 0: accepted %d peer(s) on %s", world_size - 1, path.c_str());
         } catch (...) {
-            cleanupRank0State(peer_fds_, listen_fd_, my_uds_path_);
+            cleanupStateLocked();
             throw;
         }
     } else {
@@ -458,8 +610,17 @@ void CpuBroadcaster::initialize(int rank, int world_size, const std::string& bas
                                     "CpuBroadcaster link probe read failed after %d ms: %s",
                                     kInitTimeoutMs,
                                     std::strerror(saved));
+
+            shared_state_ = openSharedState(makeSharedStatePath(base_path));
+            n     = writeAllWithTimeout(fd, &kSharedStateReadyToken, sizeof(kSharedStateReadyToken), kInitTimeoutMs);
+            saved = errno;
+            RTP_LLM_CHECK_WITH_INFO(n == static_cast<ssize_t>(sizeof(kSharedStateReadyToken)),
+                                    "CpuBroadcaster shared state ready write failed after %d ms: %s",
+                                    kInitTimeoutMs,
+                                    std::strerror(saved));
         } catch (...) {
             closeFd(fd);
+            unmapSharedState(shared_state_);
             throw;
         }
 
@@ -471,10 +632,13 @@ void CpuBroadcaster::initialize(int rank, int world_size, const std::string& bas
 }
 
 void CpuBroadcaster::broadcast(void* buf, std::size_t nbytes, int root) {
-    int              rank       = 0;
-    int              world_size = 1;
-    int              timeout_ms = 0;
-    std::vector<int> peer_fds;
+    int                      rank                = 0;
+    int                      world_size          = 1;
+    int                      timeout_ms          = 0;
+    uint32_t                 previous_generation = 0;
+    uint32_t                 next_generation     = 0;
+    CpuBroadcastSharedState* shared_state        = nullptr;
+    std::vector<int>         peer_fds;
 
     {
         std::lock_guard<std::mutex> lock(mu_);
@@ -494,19 +658,29 @@ void CpuBroadcaster::broadcast(void* buf, std::size_t nbytes, int root) {
                                 "CpuBroadcaster invalid peer fd state: size=%zu world_size=%d",
                                 peer_fds_.size(),
                                 world_size_);
+        RTP_LLM_CHECK_WITH_INFO(shared_state_ != nullptr, "CpuBroadcaster shared decision state is not mapped");
+        RTP_LLM_CHECK_WITH_INFO(broadcast_generation_ + 1 < kBroadcastFailedMask,
+                                "CpuBroadcaster broadcast generation exhausted");
         broadcast_in_progress_ = true;
         rank                   = rank_;
         world_size             = world_size_;
         timeout_ms             = broadcast_timeout_ms_;
+        previous_generation    = broadcast_generation_;
+        next_generation        = previous_generation + 1;
+        shared_state           = shared_state_;
         peer_fds               = peer_fds_;
     }
 
-    auto finish_broadcast = [this](bool failed) {
+    auto finish_broadcast = [this, next_generation](bool failed) {
         std::lock_guard<std::mutex> lock(mu_);
-        failed_                = failed_ || failed;
+        failed_ = failed_ || failed;
+        if (!failed) {
+            broadcast_generation_ = next_generation;
+        }
         broadcast_in_progress_ = false;
     };
-    auto fail_broadcast = [this]() {
+    auto fail_broadcast = [this, shared_state, previous_generation, next_generation]() {
+        publishDecision(shared_state, previous_generation, next_generation | kBroadcastFailedMask);
         std::lock_guard<std::mutex> lock(mu_);
         markBroadcastFailedLocked();
     };
@@ -530,14 +704,21 @@ void CpuBroadcaster::broadcast(void* buf, std::size_t nbytes, int root) {
                                         std::strerror(errno));
             }
             for (int k = 1; k < world_size; ++k) {
-                ssize_t n = writeAllWithTimeout(
-                    peer_fds[k], &kBroadcastSuccessToken, sizeof(kBroadcastSuccessToken), timeout_ms);
-                RTP_LLM_CHECK_WITH_INFO(n == static_cast<ssize_t>(sizeof(kBroadcastSuccessToken)),
-                                        "CpuBroadcaster success token write to rank %d failed after %d ms: %s",
+                char    ready = 0;
+                ssize_t n     = readAllWithTimeout(peer_fds[k], &ready, sizeof(ready), timeout_ms);
+                RTP_LLM_CHECK_WITH_INFO(n == static_cast<ssize_t>(sizeof(ready)) && ready == kBroadcastReadyToken,
+                                        "CpuBroadcaster ready token read from rank %d failed after %d ms: %s",
                                         k,
                                         timeout_ms,
                                         std::strerror(errno));
             }
+            // This single shared-memory CAS is the commit point. Unlike a
+            // per-peer success-token loop, it cannot let an earlier peer
+            // return successfully before a later peer's notification fails.
+            RTP_LLM_CHECK_WITH_INFO(publishDecision(shared_state, previous_generation, next_generation),
+                                    "CpuBroadcaster commit for generation %u rejected by peer failure (decision=0x%x)",
+                                    next_generation,
+                                    loadDecision(shared_state));
         } else {
             BroadcastFrameHeader header{};
             ssize_t              n = readAllWithTimeout(peer_fds[0], &header, sizeof(header), timeout_ms);
@@ -558,13 +739,21 @@ void CpuBroadcaster::broadcast(void* buf, std::size_t nbytes, int root) {
                                     nbytes,
                                     timeout_ms,
                                     std::strerror(errno));
-            char success_token = 0;
-            n                  = readAllWithTimeout(peer_fds[0], &success_token, sizeof(success_token), timeout_ms);
-            RTP_LLM_CHECK_WITH_INFO(n == static_cast<ssize_t>(sizeof(success_token))
-                                        && success_token == kBroadcastSuccessToken,
-                                    "CpuBroadcaster success token read from rank 0 failed after %d ms: %s",
+            n = writeAllWithTimeout(peer_fds[0], &kBroadcastReadyToken, sizeof(kBroadcastReadyToken), timeout_ms);
+            RTP_LLM_CHECK_WITH_INFO(n == static_cast<ssize_t>(sizeof(kBroadcastReadyToken)),
+                                    "CpuBroadcaster ready token write to rank 0 failed after %d ms: %s",
                                     timeout_ms,
                                     std::strerror(errno));
+            uint32_t decision = previous_generation;
+            RTP_LLM_CHECK_WITH_INFO(waitForDecision(shared_state, previous_generation, timeout_ms, decision),
+                                    "CpuBroadcaster commit decision wait for generation %u failed after %d ms: %s",
+                                    next_generation,
+                                    timeout_ms,
+                                    std::strerror(errno));
+            RTP_LLM_CHECK_WITH_INFO(decision == next_generation,
+                                    "CpuBroadcaster generation %u aborted by a peer failure (decision=0x%x)",
+                                    next_generation,
+                                    decision);
         }
     } catch (...) {
         fail_broadcast();

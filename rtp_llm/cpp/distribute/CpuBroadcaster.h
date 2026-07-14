@@ -2,11 +2,14 @@
 
 #include <atomic>
 #include <cstddef>
+#include <cstdint>
 #include <mutex>
 #include <string>
 #include <vector>
 
 namespace rtp_llm {
+
+struct CpuBroadcastSharedState;
 
 // CPU-only UDS broadcaster for intra-node TP metadata sync.
 // Callers must handle unsupported topologies before using this interface.
@@ -25,8 +28,9 @@ public:
     void initialize(int rank, int world_size, const std::string& base_path);
 
     // Blocking broadcast of `nbytes` bytes from `buf` originating at root.
-    // root rank writes to all peer sockets; non-root reads from its peer-0 fd.
-    // Throws on transport error or frame-size mismatch.
+    // After every peer acknowledges the payload, root atomically publishes one
+    // shared commit decision; a pre-commit failure publishes a shared abort.
+    // Throws on transport error, frame-size mismatch, or shared abort.
     void broadcast(void* buf, std::size_t nbytes, int root);
 
     // Close all sockets and return the singleton to its initial state so a
@@ -53,11 +57,14 @@ private:
     int               rank_                  = 0;
     int               world_size_            = 1;
     int               broadcast_timeout_ms_  = 0;
+    uint32_t          broadcast_generation_  = 0;
     std::string       base_path_;
     int               listen_fd_ = -1;  // rank 0 only
     // peer_fds_[k] = fd connecting this rank to rank k. peer_fds_[rank_] = -1.
-    std::vector<int> peer_fds_;
-    std::string      my_uds_path_;  // path to unlink at shutdown (rank 0 only)
+    std::vector<int>         peer_fds_;
+    std::string              my_uds_path_;  // path to unlink at shutdown (rank 0 only)
+    CpuBroadcastSharedState* shared_state_ = nullptr;
+    std::string              shared_state_path_;  // unlinked after all ranks map it
 };
 
 }  // namespace rtp_llm

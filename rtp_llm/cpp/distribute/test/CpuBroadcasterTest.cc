@@ -16,8 +16,10 @@
 #include <vector>
 
 #include <errno.h>
+#include <fcntl.h>
 #include <poll.h>
 #include <signal.h>
+#include <sys/mman.h>
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <sys/wait.h>
@@ -27,12 +29,18 @@ namespace rtp_llm {
 namespace {
 
 constexpr char     kExpectedLinkProbeToken      = 0x5a;
-constexpr char     kExpectedBroadcastSuccess    = 0x6b;
+constexpr char     kExpectedSharedStateReady    = 0x6a;
+constexpr char     kExpectedBroadcastReady      = 0x6b;
+constexpr uint32_t kExpectedBroadcastFailedMask = uint32_t{1} << 31;
 constexpr uint64_t kExpectedBroadcastFrameMagic = 0x5254504c4c4d5450ULL;
 
 struct BroadcastFrameHeader {
     uint64_t magic;
     uint64_t nbytes;
+};
+
+struct TestSharedBroadcastState {
+    alignas(uint32_t) uint32_t decision;
 };
 
 std::string makeTempBase() {
@@ -50,10 +58,15 @@ std::string socketPath(const std::string& base) {
     return base + "_0.sock";
 }
 
+std::string sharedStatePath(const std::string& base) {
+    return base + ".state";
+}
+
 void cleanupTempBase(const std::string& base, int max_rank = 4) {
     for (int rank = 0; rank <= max_rank; ++rank) {
         ::unlink((base + "_" + std::to_string(rank) + ".sock").c_str());
     }
+    ::unlink(sharedStatePath(base).c_str());
     const auto slash = base.rfind('/');
     if (slash != std::string::npos) {
         ::rmdir(base.substr(0, slash).c_str());
@@ -104,6 +117,66 @@ ssize_t readAllRaw(int fd, void* buf, size_t nbytes) {
     return static_cast<ssize_t>(nbytes);
 }
 
+TestSharedBroadcastState* mapTestSharedState(int fd) {
+    void* addr = ::mmap(nullptr, sizeof(TestSharedBroadcastState), PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    return addr == MAP_FAILED ? nullptr : static_cast<TestSharedBroadcastState*>(addr);
+}
+
+TestSharedBroadcastState* openTestSharedState(const std::string& base, std::string& error) {
+    int fd = ::open(sharedStatePath(base).c_str(), O_RDWR | O_CLOEXEC);
+    if (fd < 0) {
+        error = std::string("fake peer open shared state failed: ") + std::strerror(errno);
+        return nullptr;
+    }
+    TestSharedBroadcastState* state = mapTestSharedState(fd);
+    ::close(fd);
+    if (state == nullptr) {
+        error = std::string("fake peer mmap shared state failed: ") + std::strerror(errno);
+    }
+    return state;
+}
+
+TestSharedBroadcastState* createTestSharedState(const std::string& base, std::string& error) {
+    const std::string path = sharedStatePath(base);
+    ::unlink(path.c_str());
+    int fd = ::open(path.c_str(), O_CREAT | O_EXCL | O_RDWR | O_CLOEXEC, 0600);
+    if (fd < 0) {
+        error = std::string("fake root open shared state failed: ") + std::strerror(errno);
+        return nullptr;
+    }
+    if (::ftruncate(fd, sizeof(TestSharedBroadcastState)) != 0) {
+        error = std::string("fake root resize shared state failed: ") + std::strerror(errno);
+        ::close(fd);
+        ::unlink(path.c_str());
+        return nullptr;
+    }
+    TestSharedBroadcastState* state = mapTestSharedState(fd);
+    ::close(fd);
+    if (state == nullptr) {
+        error = std::string("fake root mmap shared state failed: ") + std::strerror(errno);
+        ::unlink(path.c_str());
+        return nullptr;
+    }
+    __atomic_store_n(&state->decision, uint32_t{0}, __ATOMIC_RELEASE);
+    return state;
+}
+
+void unmapTestSharedState(TestSharedBroadcastState*& state) {
+    if (state != nullptr) {
+        ::munmap(state, sizeof(TestSharedBroadcastState));
+        state = nullptr;
+    }
+}
+
+bool waitForTestDecision(TestSharedBroadcastState* state, uint32_t expected, uint32_t& decision) {
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while ((decision = __atomic_load_n(&state->decision, __ATOMIC_ACQUIRE)) == expected
+           && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    return decision != expected;
+}
+
 int connectWithRetry(const std::string& path) {
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
     while (std::chrono::steady_clock::now() < deadline) {
@@ -135,7 +208,10 @@ int fakePeerSendRank(const std::string& base, int peer_rank) {
     return rc;
 }
 
-int connectPeerAndReadProbe(const std::string& base, int peer_rank, std::string& error) {
+int connectPeerAndReadProbe(const std::string&         base,
+                            int                        peer_rank,
+                            std::string&               error,
+                            TestSharedBroadcastState** shared_state = nullptr) {
     int fd = connectWithRetry(socketPath(base));
     if (fd < 0) {
         error = std::string("fake peer connect failed: ") + std::strerror(errno);
@@ -153,11 +229,29 @@ int connectPeerAndReadProbe(const std::string& base, int peer_rank, std::string&
         ::close(fd);
         return -1;
     }
+    TestSharedBroadcastState* state = openTestSharedState(base, error);
+    if (state == nullptr) {
+        ::close(fd);
+        return -1;
+    }
+    if (writeAllRaw(fd, &kExpectedSharedStateReady, sizeof(kExpectedSharedStateReady))
+        != static_cast<ssize_t>(sizeof(kExpectedSharedStateReady))) {
+        error = "fake peer shared state ready write failed";
+        unmapTestSharedState(state);
+        ::close(fd);
+        return -1;
+    }
+    if (shared_state != nullptr) {
+        *shared_state = state;
+    } else {
+        unmapTestSharedState(state);
+    }
     return fd;
 }
 
 void peerReadOneInt(const std::string& base, int& observed, std::string& error) {
-    int fd = connectPeerAndReadProbe(base, 1, error);
+    TestSharedBroadcastState* state = nullptr;
+    int                       fd    = connectPeerAndReadProbe(base, 1, error, &state);
     if (fd < 0) {
         return;
     }
@@ -165,19 +259,26 @@ void peerReadOneInt(const std::string& base, int& observed, std::string& error) 
     if (readAllRaw(fd, &header, sizeof(header)) != static_cast<ssize_t>(sizeof(header))
         || header.magic != kExpectedBroadcastFrameMagic || header.nbytes != sizeof(observed)) {
         error = "fake peer frame header read failed";
+        unmapTestSharedState(state);
         ::close(fd);
         return;
     }
     if (readAllRaw(fd, &observed, sizeof(observed)) != static_cast<ssize_t>(sizeof(observed))) {
         error = "fake peer payload read failed";
+        unmapTestSharedState(state);
         ::close(fd);
         return;
     }
-    char success_token = 0;
-    if (readAllRaw(fd, &success_token, sizeof(success_token)) != static_cast<ssize_t>(sizeof(success_token))
-        || success_token != kExpectedBroadcastSuccess) {
-        error = "fake peer success token read failed";
+    if (writeAllRaw(fd, &kExpectedBroadcastReady, sizeof(kExpectedBroadcastReady))
+        != static_cast<ssize_t>(sizeof(kExpectedBroadcastReady))) {
+        error = "fake peer broadcast ready write failed";
+    } else {
+        uint32_t decision = 0;
+        if (!waitForTestDecision(state, 0, decision) || decision != 1) {
+            error = "fake peer did not observe committed generation";
+        }
     }
+    unmapTestSharedState(state);
     ::close(fd);
 }
 
@@ -261,9 +362,21 @@ int fakeRootSendMismatchedFrame(const std::string& base) {
     const std::string path = socketPath(base);
     ::unlink(path.c_str());
 
+    std::string               state_error;
+    TestSharedBroadcastState* state = createTestSharedState(base, state_error);
+    if (state == nullptr) {
+        std::fprintf(stderr, "%s\n", state_error.c_str());
+        return 1;
+    }
+    auto cleanup_state = [&] {
+        unmapTestSharedState(state);
+        ::unlink(sharedStatePath(base).c_str());
+    };
+
     int listen_fd = ::socket(AF_UNIX, SOCK_STREAM, 0);
     if (listen_fd < 0) {
         std::fprintf(stderr, "fake root socket failed: %s\n", std::strerror(errno));
+        cleanup_state();
         return 1;
     }
 
@@ -273,12 +386,14 @@ int fakeRootSendMismatchedFrame(const std::string& base) {
     if (::bind(listen_fd, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)) != 0) {
         std::fprintf(stderr, "fake root bind failed: %s\n", std::strerror(errno));
         ::close(listen_fd);
+        cleanup_state();
         return 1;
     }
     if (::listen(listen_fd, 1) != 0) {
         std::fprintf(stderr, "fake root listen failed: %s\n", std::strerror(errno));
         ::close(listen_fd);
         ::unlink(path.c_str());
+        cleanup_state();
         return 1;
     }
 
@@ -287,6 +402,7 @@ int fakeRootSendMismatchedFrame(const std::string& base) {
         std::fprintf(stderr, "fake root accept failed: %s\n", std::strerror(errno));
         ::close(listen_fd);
         ::unlink(path.c_str());
+        cleanup_state();
         return 1;
     }
 
@@ -299,6 +415,11 @@ int fakeRootSendMismatchedFrame(const std::string& base) {
         != static_cast<ssize_t>(sizeof(kExpectedLinkProbeToken))) {
         rc = 1;
     }
+    char state_ready = 0;
+    if (readAllRaw(fd, &state_ready, sizeof(state_ready)) != static_cast<ssize_t>(sizeof(state_ready))
+        || state_ready != kExpectedSharedStateReady) {
+        rc = 1;
+    }
     const BroadcastFrameHeader bad_header{kExpectedBroadcastFrameMagic, sizeof(int) + 1};
     if (writeAllRaw(fd, &bad_header, sizeof(bad_header)) != static_cast<ssize_t>(sizeof(bad_header))) {
         rc = 1;
@@ -307,6 +428,7 @@ int fakeRootSendMismatchedFrame(const std::string& base) {
     ::close(fd);
     ::close(listen_fd);
     ::unlink(path.c_str());
+    cleanup_state();
     return rc;
 }
 
@@ -584,7 +706,7 @@ TEST(CpuBroadcasterTest, RootWriteFailureClosesOtherPeers) {
     cleanupTempBase(base);
 }
 
-TEST(CpuBroadcasterTest, PayloadFailureDoesNotLetEarlierPeerReturn) {
+TEST(CpuBroadcasterTest, ReadyPeerObservesAbortWhenLaterPeerFails) {
     auto& bcast = CpuBroadcaster::instance();
     bcast.reset();
 
@@ -592,14 +714,17 @@ TEST(CpuBroadcasterTest, PayloadFailureDoesNotLetEarlierPeerReturn) {
 
     std::atomic<bool> rank1_ready{false};
     std::atomic<bool> rank1_done{false};
-    std::atomic<bool> rank1_saw_close{false};
+    std::atomic<bool> rank1_saw_abort{false};
+    std::atomic<bool> rank2_ready{false};
     std::atomic<bool> rank2_closed{false};
     std::atomic<int>  rank1_fd{-1};
+    std::atomic<int>  rank2_fd{-1};
     std::string       rank1_error;
     std::string       rank2_error;
 
     std::thread rank1_thread([&] {
-        int fd = connectPeerAndReadProbe(base, 1, rank1_error);
+        TestSharedBroadcastState* state = nullptr;
+        int                       fd    = connectPeerAndReadProbe(base, 1, rank1_error, &state);
         if (fd < 0) {
             rank1_done.store(true, std::memory_order_release);
             return;
@@ -611,6 +736,7 @@ TEST(CpuBroadcasterTest, PayloadFailureDoesNotLetEarlierPeerReturn) {
         if (readAllRaw(fd, &header, sizeof(header)) != static_cast<ssize_t>(sizeof(header))
             || header.magic != kExpectedBroadcastFrameMagic || header.nbytes != sizeof(int)) {
             rank1_error = "rank1 frame header read failed";
+            unmapTestSharedState(state);
             ::close(fd);
             rank1_done.store(true, std::memory_order_release);
             return;
@@ -618,17 +744,25 @@ TEST(CpuBroadcasterTest, PayloadFailureDoesNotLetEarlierPeerReturn) {
         int observed = 0;
         if (readAllRaw(fd, &observed, sizeof(observed)) != static_cast<ssize_t>(sizeof(observed)) || observed != 17) {
             rank1_error = "rank1 payload read failed";
+            unmapTestSharedState(state);
             ::close(fd);
             rank1_done.store(true, std::memory_order_release);
             return;
         }
-        char    success_token = 0;
-        ssize_t n             = readAllRaw(fd, &success_token, sizeof(success_token));
-        if (n < 0) {
-            rank1_saw_close.store(true, std::memory_order_release);
+        if (writeAllRaw(fd, &kExpectedBroadcastReady, sizeof(kExpectedBroadcastReady))
+            != static_cast<ssize_t>(sizeof(kExpectedBroadcastReady))) {
+            rank1_error = "rank1 broadcast ready write failed";
         } else {
-            rank1_error = "rank1 unexpectedly received success token";
+            uint32_t decision = 0;
+            if (!waitForTestDecision(state, 0, decision)) {
+                rank1_error = "rank1 timed out waiting for shared abort decision";
+            } else if (decision == (kExpectedBroadcastFailedMask | uint32_t{1})) {
+                rank1_saw_abort.store(true, std::memory_order_release);
+            } else {
+                rank1_error = "rank1 unexpectedly observed committed generation";
+            }
         }
+        unmapTestSharedState(state);
         ::close(fd);
         rank1_done.store(true, std::memory_order_release);
     });
@@ -638,6 +772,19 @@ TEST(CpuBroadcasterTest, PayloadFailureDoesNotLetEarlierPeerReturn) {
         if (fd < 0) {
             return;
         }
+        rank2_fd.store(fd, std::memory_order_release);
+        rank2_ready.store(true, std::memory_order_release);
+        BroadcastFrameHeader header{};
+        int                  observed = 0;
+        if (readAllRaw(fd, &header, sizeof(header)) != static_cast<ssize_t>(sizeof(header))
+            || header.magic != kExpectedBroadcastFrameMagic || header.nbytes != sizeof(observed)
+            || readAllRaw(fd, &observed, sizeof(observed)) != static_cast<ssize_t>(sizeof(observed))
+            || observed != 17) {
+            rank2_error = "rank2 payload read failed";
+        }
+        // Drop the connection after receiving the payload but before sending
+        // the ready token. Rank 1 is already waiting on the shared decision,
+        // so root must publish one abort visible to every surviving rank.
         ::shutdown(fd, SHUT_RDWR);
         ::close(fd);
         rank2_closed.store(true, std::memory_order_release);
@@ -646,13 +793,17 @@ TEST(CpuBroadcasterTest, PayloadFailureDoesNotLetEarlierPeerReturn) {
     bcast.initialize(0, 3, base);
 
     const auto ready_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
-    while ((!rank1_ready.load(std::memory_order_acquire) || !rank2_closed.load(std::memory_order_acquire))
+    while ((!rank1_ready.load(std::memory_order_acquire) || !rank2_ready.load(std::memory_order_acquire))
            && std::chrono::steady_clock::now() < ready_deadline) {
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
 
-    if (!rank1_ready.load(std::memory_order_acquire) || !rank2_closed.load(std::memory_order_acquire)) {
+    if (!rank1_ready.load(std::memory_order_acquire) || !rank2_ready.load(std::memory_order_acquire)) {
         int fd = rank1_fd.load(std::memory_order_acquire);
+        if (fd >= 0) {
+            ::shutdown(fd, SHUT_RDWR);
+        }
+        fd = rank2_fd.load(std::memory_order_acquire);
         if (fd >= 0) {
             ::shutdown(fd, SHUT_RDWR);
         }
@@ -687,7 +838,7 @@ TEST(CpuBroadcasterTest, PayloadFailureDoesNotLetEarlierPeerReturn) {
     EXPECT_TRUE(rank2_error.empty()) << rank2_error;
     EXPECT_FALSE(broadcast_error.empty());
     EXPECT_TRUE(rank1_done.load(std::memory_order_acquire));
-    EXPECT_TRUE(rank1_saw_close.load(std::memory_order_acquire));
+    EXPECT_TRUE(rank1_saw_abort.load(std::memory_order_acquire));
 
     bcast.reset();
     cleanupTempBase(base);
