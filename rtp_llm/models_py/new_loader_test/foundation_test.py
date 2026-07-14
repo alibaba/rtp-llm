@@ -406,6 +406,15 @@ class FoundationLoaderTest(unittest.TestCase):
             sys.modules.pop(module_name, None)
 
     def test_partition_config_validation(self):
+        for field, value in (
+            ("tp_size", True),
+            ("tp_rank", 0.0),
+            ("ep_size", 1.0),
+            ("ep_rank", False),
+        ):
+            with self.subTest(field=field, value=value):
+                with self.assertRaisesRegex(TypeError, f"{field} must be an integer"):
+                    NewLoaderConfig(**{field: value})
         with self.assertRaisesRegex(ValueError, "Invalid TP"):
             NewLoaderConfig(tp_size=0)
         with self.assertRaisesRegex(ValueError, "Invalid EP"):
@@ -414,6 +423,13 @@ class FoundationLoaderTest(unittest.TestCase):
             NewLoaderConfig(device="not:a:device")
         with self.assertRaisesRegex(ValueError, "cannot be meta"):
             NewLoaderConfig(device="meta")
+
+    def test_load_config_type_is_validated(self):
+        config = types.SimpleNamespace(model_type="foundation_test_model")
+        for invalid in (False, {}, types.SimpleNamespace()):
+            with self.subTest(invalid=invalid):
+                with self.assertRaisesRegex(TypeError, "load_config must be NewLoaderConfig"):
+                    NewModelLoader(config, invalid)
 
     def test_load_config_is_immutable(self):
         config = NewLoaderConfig(device="cpu", load_method="scratch")

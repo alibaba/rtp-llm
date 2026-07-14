@@ -58,10 +58,20 @@ class NewLoaderConfig:
                 f"load_method must be NewLoaderLoadMethod or str, got "
                 f"{type(self.load_method).__name__}"
             )
+        for name in ("tp_size", "tp_rank", "ep_size", "ep_rank"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise TypeError(
+                    f"{name} must be an integer, got {type(value).__name__}"
+                )
         if self.tp_size <= 0 or not 0 <= self.tp_rank < self.tp_size:
-            raise ValueError(f"Invalid TP partition: rank={self.tp_rank}, size={self.tp_size}")
+            raise ValueError(
+                f"Invalid TP partition: rank={self.tp_rank}, size={self.tp_size}"
+            )
         if self.ep_size <= 0 or not 0 <= self.ep_rank < self.ep_size:
-            raise ValueError(f"Invalid EP partition: rank={self.ep_rank}, size={self.ep_size}")
+            raise ValueError(
+                f"Invalid EP partition: rank={self.ep_rank}, size={self.ep_size}"
+            )
         if not isinstance(self.compute_dtype, torch.dtype):
             raise TypeError("compute_dtype must be a torch.dtype")
         _validate_runtime_device(self.device, "device")
@@ -77,7 +87,11 @@ class NewModelLoader:
         model_path: Optional[str] = None,
         device: Optional[str] = None,
     ):
-        effective_config = load_config or NewLoaderConfig()
+        effective_config = NewLoaderConfig() if load_config is None else load_config
+        if not isinstance(effective_config, NewLoaderConfig):
+            raise TypeError(
+                f"load_config must be NewLoaderConfig, got {type(effective_config).__name__}"
+            )
         if device is not None:
             _validate_runtime_device(device, "device override")
             effective_config = replace(effective_config, device=device)

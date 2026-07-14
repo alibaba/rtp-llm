@@ -195,14 +195,10 @@ class RtpModule(nn.Module):
 
         def visit(module: nn.Module, prefix: str) -> None:
             for name, param in module.named_parameters(recurse=False):
-                if getattr(param, "_rtp_skip_load_check", False):
-                    continue
                 if id(param) not in loaded_tensor_ids:
                     missing.append(prefix + name)
             for name, buffer in module.named_buffers(recurse=False):
                 if name in module._non_persistent_buffers_set or buffer is None:
-                    continue
-                if getattr(buffer, "_rtp_skip_load_check", False):
                     continue
                 if id(buffer) not in loaded_tensor_ids:
                     missing.append(prefix + name)
