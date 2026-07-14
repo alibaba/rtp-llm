@@ -2,6 +2,8 @@ package org.flexlb.balance.strategy;
 
 import org.flexlb.balance.resource.ResourceMeasureFactory;
 import org.flexlb.cache.service.CacheAwareService;
+import org.flexlb.cache.service.CacheMatchResult;
+import org.flexlb.cache.service.CacheMatchSource;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.config.FlexlbConfig;
@@ -66,7 +68,8 @@ class ShortestTTFTStrategyTest {
         Mockito.when(configService.loadBalanceConfig()).thenReturn(new FlexlbConfig());
         Mockito.when(resourceMeasureFactory.getMeasure(Mockito.any())).thenReturn(resourceMeasure);
         Mockito.when(resourceMeasure.isResourceAvailable(Mockito.any())).thenReturn(true);
-        Mockito.when(cacheAwareService.findMatchingEngines(Mockito.anyList(), Mockito.any(), Mockito.any())).thenReturn(new HashMap<>());
+        Mockito.when(cacheAwareService.findMatchingEngines(Mockito.anyList(), Mockito.any(), Mockito.any()))
+                .thenReturn(new CacheMatchResult(new HashMap<>(), CacheMatchSource.KVCM, 123));
 
         ShortestTTFTStrategy staticCacheLoadBalancer =
                 new ShortestTTFTStrategy(engineWorkerStatus, engineHealthReporter, cacheAwareService, resourceMeasureFactory);
@@ -81,6 +84,8 @@ class ShortestTTFTStrategyTest {
         Assertions.assertTrue(result.isSuccess(), "Result should be successful but got: " + result.getMessage());
         Assertions.assertEquals("127.0.0.2", result.getServerIp());
         Assertions.assertEquals("request-12345", result.getRequestId());
+        Assertions.assertEquals(123, balanceContext.getKvcmQueryTimeUs());
+        Assertions.assertEquals(1, balanceContext.getKvcmQueryCount());
     }
 
     WorkerStatus createWorkerStatus(String ip,

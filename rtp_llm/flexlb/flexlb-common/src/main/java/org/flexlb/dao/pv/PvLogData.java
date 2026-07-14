@@ -18,6 +18,12 @@ public class PvLogData {
     private long enqueueTime;
     private long startTime;
     private long requestTimeMs;
+    private long arrivalMs;
+    private long decodeUs;
+    private long hashWaitUs;
+    private long hashUs;
+    private long kvcmUs;
+    private int kvcmCount;
 
     public PvLogData(BalanceContext ctx) {
 
@@ -29,5 +35,11 @@ public class PvLogData {
         this.enqueueTime = ctx.getEnqueueTime();
         this.startTime = ctx.getStartTime();
         this.requestTimeMs = ctx.getRequest().getRequestTimeMs();
+        this.arrivalMs = ctx.getRequestArrivalDelayMs();
+        this.decodeUs = ctx.getRequestBodyReadAndDeserializeTimeUs();
+        this.hashWaitUs = ctx.getBlockHashQueueWaitTimeUs();
+        this.hashUs = ctx.getBlockHashExecutionTimeUs();
+        this.kvcmUs = ctx.getKvcmQueryTimeUs();
+        this.kvcmCount = ctx.getKvcmQueryCount();
     }
 }

@@ -1,5 +1,6 @@
 package org.flexlb.httpserver;
 
+import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Request;
 import org.junit.jupiter.api.Test;
 import reactor.core.publisher.Mono;
@@ -28,8 +29,9 @@ class ScheduleRequestPreprocessorTest {
         List<Long> providedKeys = new ArrayList<>(List.of(11L, 22L));
         request.setBlockCacheKeys(providedKeys);
         request.setInputIds(List.of(1L, 2L, 3L, 4L));
+        BalanceContext context = contextFor(request);
 
-        preprocessor.prepare(request).block();
+        preprocessor.prepare(context).block();
 
         assertSame(providedKeys, request.getBlockCacheKeys());
         assertNull(request.getInputIds());
@@ -42,14 +44,18 @@ class ScheduleRequestPreprocessorTest {
         Request request = new Request();
         request.setBlockCacheKeys(List.of());
         request.setInputIds(List.of(1L, 2L, 3L, 4L, 5L));
+        BalanceContext context = contextFor(request);
         when(blockSizeResolver.resolve()).thenReturn(4L);
         when(blockHashExecutor.calculate(request.getInputIds(), 4L))
-                .thenReturn(Mono.just(List.of(2164874634404590027L)));
+                .thenReturn(Mono.just(new BlockHashCalculationResult(
+                        List.of(2164874634404590027L), 12, 34)));
 
-        preprocessor.prepare(request).block();
+        preprocessor.prepare(context).block();
 
         assertEquals(List.of(2164874634404590027L), request.getBlockCacheKeys());
         assertNull(request.getInputIds());
+        assertEquals(12, context.getBlockHashQueueWaitTimeUs());
+        assertEquals(34, context.getBlockHashExecutionTimeUs());
     }
 
     @Test
@@ -57,10 +63,11 @@ class ScheduleRequestPreprocessorTest {
         Request request = new Request();
         request.setInputIds(List.of(1L, 2L));
         request.setBlockSize(4);
+        BalanceContext context = contextFor(request);
         when(blockHashExecutor.calculate(request.getInputIds(), 4L))
-                .thenReturn(Mono.just(List.of()));
+                .thenReturn(Mono.just(new BlockHashCalculationResult(List.of(), 5, 8)));
 
-        preprocessor.prepare(request).block();
+        preprocessor.prepare(context).block();
 
         assertEquals(List.of(), request.getBlockCacheKeys());
         assertNull(request.getInputIds());
@@ -71,7 +78,7 @@ class ScheduleRequestPreprocessorTest {
     void rejectsRequestWhenBothInputsAreEmpty() {
         Request request = new Request();
 
-        assertThrows(IllegalArgumentException.class, () -> preprocessor.prepare(request).block());
+        assertThrows(IllegalArgumentException.class, () -> preprocessor.prepare(contextFor(request)).block());
     }
 
     @Test
@@ -81,6 +88,12 @@ class ScheduleRequestPreprocessorTest {
         when(blockSizeResolver.resolve()).thenThrow(
                 new IllegalStateException("block_size is unavailable"));
 
-        assertThrows(IllegalStateException.class, () -> preprocessor.prepare(request).block());
+        assertThrows(IllegalStateException.class, () -> preprocessor.prepare(contextFor(request)).block());
+    }
+
+    private BalanceContext contextFor(Request request) {
+        BalanceContext context = new BalanceContext();
+        context.setRequest(request);
+        return context;
     }
 }

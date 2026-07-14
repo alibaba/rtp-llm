@@ -4,6 +4,8 @@ import lombok.extern.slf4j.Slf4j;
 import org.flexlb.balance.resource.DecodeResourceMeasure;
 import org.flexlb.balance.resource.ResourceMeasureFactory;
 import org.flexlb.cache.service.CacheAwareService;
+import org.flexlb.cache.service.CacheMatchResult;
+import org.flexlb.cache.service.CacheMatchSource;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.dao.BalanceContext;
@@ -31,6 +33,12 @@ class WeightedCacheLoadBalancerTest {
     void setUp() {
         configService = new ConfigService();
         cacheAwareService = Mockito.mock(CacheAwareService.class);
+        Mockito.when(cacheAwareService.findMatchingEngines(
+                        Mockito.anyList(), Mockito.any(), Mockito.nullable(String.class)))
+                .thenReturn(CacheMatchResult.empty(CacheMatchSource.LOCAL));
+        Mockito.when(cacheAwareService.findMatchingEngines(
+                        Mockito.isNull(), Mockito.any(), Mockito.nullable(String.class)))
+                .thenReturn(CacheMatchResult.empty(CacheMatchSource.LOCAL));
     }
 
     @org.junit.jupiter.api.AfterEach

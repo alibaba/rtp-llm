@@ -45,6 +45,18 @@ public class BalanceContext {
 
     private long sequenceId;
 
+    private long requestArrivalDelayMs;
+
+    private long requestBodyReadAndDeserializeTimeUs;
+
+    private long blockHashQueueWaitTimeUs;
+
+    private long blockHashExecutionTimeUs;
+
+    private long kvcmQueryTimeUs;
+
+    private int kvcmQueryCount;
+
     private boolean success = true;
 
     private String errorMessage;
@@ -82,5 +94,22 @@ public class BalanceContext {
      */
     public int getRetryCount() {
         return retryCount.get();
+    }
+
+    public void recordRequestTiming(long requestTimeMs, long bodyReadAndDeserializeTimeUs) {
+        if (requestTimeMs > 0) {
+            this.requestArrivalDelayMs = startTime - requestTimeMs;
+        }
+        this.requestBodyReadAndDeserializeTimeUs = bodyReadAndDeserializeTimeUs;
+    }
+
+    public void recordBlockHashTiming(long queueWaitTimeUs, long executionTimeUs) {
+        this.blockHashQueueWaitTimeUs = queueWaitTimeUs;
+        this.blockHashExecutionTimeUs = executionTimeUs;
+    }
+
+    public void recordKvcmQuery(long queryTimeUs) {
+        this.kvcmQueryTimeUs += queryTimeUs;
+        this.kvcmQueryCount++;
     }
 }

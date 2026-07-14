@@ -5,6 +5,8 @@ import org.apache.commons.collections4.MapUtils;
 import org.flexlb.balance.resource.ResourceMeasure;
 import org.flexlb.balance.resource.ResourceMeasureFactory;
 import org.flexlb.cache.service.CacheAwareService;
+import org.flexlb.cache.service.CacheMatchResult;
+import org.flexlb.cache.service.CacheMatchSource;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.ServerStatus;
@@ -173,7 +175,11 @@ public class ShortestTTFTStrategy implements LoadBalancer {
                                                                                              RoleType roleType,
                                                                                              String group) {
         List<Long> blockCacheKeys = balanceContext.getRequest().getBlockCacheKeys();
-        return cacheAwareService.findMatchingEngines(blockCacheKeys, roleType, group);
+        CacheMatchResult result = cacheAwareService.findMatchingEngines(blockCacheKeys, roleType, group);
+        if (result.source() == CacheMatchSource.KVCM) {
+            balanceContext.recordKvcmQuery(result.queryTimeUs());
+        }
+        return result.matches();
     }
 
     /**

@@ -96,9 +96,13 @@ public class HttpLoadBalanceServer {
      */
     public Mono<ServerResponse> scheduleRequest(ServerRequest request) {
         BalanceContext ctx = new BalanceContext();
+        long bodyReadStartTimeNs = System.nanoTime();
         return request.bodyToMono(Request.class)
                 .flatMap(req -> {
                     ctx.setRequest(req);
+                    ctx.recordRequestTiming(
+                            req.getRequestTimeMs(),
+                            (System.nanoTime() - bodyReadStartTimeNs) / 1_000);
                     if (StringUtils.isBlank(req.getRequestId())) {
                         throw new IllegalArgumentException("requestId must not be blank");
                     }
@@ -118,7 +122,7 @@ public class HttpLoadBalanceServer {
             return forwardRequestToMaster(ctx, req);
         }
 
-        return requestPreprocessor.prepare(req)
+        return requestPreprocessor.prepare(ctx)
                 .then(Mono.defer(() -> routeService.route(ctx)))
                 .flatMap(response -> handleRoutingResult(ctx, response))
                 .doOnCancel(() -> {
@@ -243,7 +247,7 @@ public class HttpLoadBalanceServer {
     }
 
     private Mono<ServerResponse> fallbackToLocalRouting(BalanceContext ctx) {
-        return requestPreprocessor.prepare(ctx.getRequest())
+        return requestPreprocessor.prepare(ctx)
                 .then(Mono.defer(() -> routeService.route(ctx)))
                 .flatMap(response -> handleRoutingResult(ctx, response))
                 .onErrorResume(e -> {

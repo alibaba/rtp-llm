@@ -92,6 +92,7 @@ class HttpLoadBalanceServerTest {
                 .bodyValue(Map.of(
                         "request_id", "c68b72ff-982d-944f-9834-bc0e8bf2f43f",
                         "seq_len", 5,
+                        "request_time_ms", 1,
                         "input_ids", new long[]{1, 2, 3, 4, 5}))
                 .exchange()
                 .expectStatus().isOk();
@@ -105,6 +106,10 @@ class HttpLoadBalanceServerTest {
                 "c68b72ff-982d-944f-9834-bc0e8bf2f43f",
                 contextCaptor.getValue().getRequestId());
         assertNull(contextCaptor.getValue().getRequest().getInputIds());
+        assertTrue(contextCaptor.getValue().getRequestArrivalDelayMs() > 0);
+        assertTrue(contextCaptor.getValue().getRequestBodyReadAndDeserializeTimeUs() >= 0);
+        assertTrue(contextCaptor.getValue().getBlockHashQueueWaitTimeUs() >= 0);
+        assertTrue(contextCaptor.getValue().getBlockHashExecutionTimeUs() >= 0);
     }
 
     @Test

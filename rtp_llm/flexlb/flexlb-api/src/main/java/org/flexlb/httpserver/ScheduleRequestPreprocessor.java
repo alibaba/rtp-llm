@@ -1,5 +1,6 @@
 package org.flexlb.httpserver;
 
+import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Request;
 import org.springframework.stereotype.Component;
 import reactor.core.publisher.Mono;
@@ -22,11 +23,15 @@ public class ScheduleRequestPreprocessor {
         this.blockHashExecutor = blockHashExecutor;
     }
 
-    public Mono<Void> prepare(Request request) {
-        return Mono.defer(() -> prepareRequest(request));
+    public Mono<Void> prepare(BalanceContext context) {
+        return Mono.defer(() -> prepareRequest(context));
     }
 
-    private Mono<Void> prepareRequest(Request request) {
+    private Mono<Void> prepareRequest(BalanceContext context) {
+        if (context == null) {
+            return Mono.error(new IllegalArgumentException("context must not be null"));
+        }
+        Request request = context.getRequest();
         if (request == null) {
             return Mono.error(new IllegalArgumentException("request must not be null"));
         }
@@ -48,9 +53,12 @@ public class ScheduleRequestPreprocessor {
         }
 
         return blockHashExecutor.calculate(inputIds, blockSize)
-                .doOnNext(calculatedKeys -> {
-                    request.setBlockCacheKeys(calculatedKeys);
+                .doOnNext(result -> {
+                    request.setBlockCacheKeys(result.blockCacheKeys());
                     request.setInputIds(null);
+                    context.recordBlockHashTiming(
+                            result.queueWaitTimeUs(),
+                            result.executionTimeUs());
                 })
                 .then();
     }

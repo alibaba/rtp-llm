@@ -5,6 +5,7 @@ import org.flexlb.cache.domain.WorkerCacheUpdateResult;
 import org.flexlb.cache.monitor.CacheMetricsReporter;
 import org.flexlb.cache.service.CacheAwareService;
 import org.flexlb.cache.service.CacheMatchProvider;
+import org.flexlb.cache.service.CacheMatchResult;
 import org.flexlb.cache.service.CacheMatchSource;
 import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.dao.master.WorkerStatus;
@@ -54,26 +55,25 @@ public class DefaultCacheAwareService implements CacheAwareService {
     }
     
     @Override
-    public Map<String, Integer> findMatchingEngines(List<Long> blockCacheKeys,
+    public CacheMatchResult findMatchingEngines(List<Long> blockCacheKeys,
         RoleType roleType, String group) {
+        CacheMatchSource source = cacheMatchProvider.source();
+        if (blockCacheKeys == null || blockCacheKeys.isEmpty()) {
+            return CacheMatchResult.empty(source);
+        }
 
-        long startTime = System.nanoTime() / 1000;
-
+        long startTime = System.nanoTime();
         try {
-            if (blockCacheKeys == null || blockCacheKeys.isEmpty()) {
-                return Collections.emptyMap();
-            }
-
             Map<String/*engineIpPort*/, Integer/*prefixMatchLength*/> resultMap
                 = cacheMatchProvider.findMatchingEngines(blockCacheKeys, roleType, group);
-
-            cacheMetricsReporter.reportFindMatchingEnginesRT(roleType, startTime, "0");
-
-            return resultMap;
+            long queryTimeUs = (System.nanoTime() - startTime) / 1_000;
+            cacheMetricsReporter.reportFindMatchingEnginesRT(roleType, startTime / 1_000, "0");
+            return new CacheMatchResult(resultMap, source, queryTimeUs);
         } catch (Exception e) {
-            cacheMetricsReporter.reportFindMatchingEnginesRT(roleType, startTime, "1");
+            long queryTimeUs = (System.nanoTime() - startTime) / 1_000;
+            cacheMetricsReporter.reportFindMatchingEnginesRT(roleType, startTime / 1_000, "1");
             log.error("Error finding matching engines for role: {}", roleType, e);
-            return Collections.emptyMap();
+            return new CacheMatchResult(Collections.emptyMap(), source, queryTimeUs);
         }
     }
     

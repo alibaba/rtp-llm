@@ -5,7 +5,6 @@ import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 
 import java.util.List;
-import java.util.Map;
 
 /**
  * Cache-aware service interface
@@ -21,9 +20,9 @@ public interface CacheAwareService {
      * @param blockCacheKeys List of cache block IDs to query
      * @param roleType       Engine role to query
      * @param group          Engine group to query
-     * @return Engine matching result map, key: engineIpPort, value: prefixMatchLength
+     * @return Cache matching result and provider query time
      */
-    Map<String/*engineIpPort*/, Integer/*prefixMatchLength*/> findMatchingEngines(List<Long> blockCacheKeys, RoleType roleType, String group);
+    CacheMatchResult findMatchingEngines(List<Long> blockCacheKeys, RoleType roleType, String group);
     
     /**
      * Update engine block KV cache status

@@ -8,6 +8,7 @@ import reactor.core.Disposable;
 import reactor.test.StepVerifier;
 
 import java.time.Duration;
+import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
@@ -15,6 +16,8 @@ import java.util.concurrent.atomic.AtomicReference;
 
 import static org.flexlb.constant.MetricConstant.BLOCK_HASH_EXECUTION_TIME_US;
 import static org.flexlb.constant.MetricConstant.BLOCK_HASH_QUEUE_WAIT_TIME_US;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.anyDouble;
@@ -44,6 +47,16 @@ class BlockHashExecutorTest {
         assertTrue(threadName.startsWith("block-hash"));
         verify(monitor).report(eq(BLOCK_HASH_QUEUE_WAIT_TIME_US), anyDouble());
         verify(monitor).report(eq(BLOCK_HASH_EXECUTION_TIME_US), anyDouble());
+    }
+
+    @Test
+    void returnsPerRequestHashTimings() {
+        BlockHashCalculationResult result = executor.calculate(List.of(1L, 2L, 3L, 4L), 4).block();
+
+        assertNotNull(result);
+        assertEquals(List.of(2164874634404590027L), result.blockCacheKeys());
+        assertTrue(result.queueWaitTimeUs() >= 0);
+        assertTrue(result.executionTimeUs() >= 0);
     }
 
     @Test

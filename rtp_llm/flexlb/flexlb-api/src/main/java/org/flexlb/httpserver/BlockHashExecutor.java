@@ -81,20 +81,31 @@ public class BlockHashExecutor {
         monitor.register(BLOCK_HASH_THREAD_POOL_INFO, FlexMetricType.GAUGE);
     }
 
-    public Mono<List<Long>> calculate(List<Long> inputIds, long blockSize) {
-        return submit(() -> BlockCacheKeyCalculator.calculate(inputIds, blockSize));
+    public Mono<BlockHashCalculationResult> calculate(List<Long> inputIds, long blockSize) {
+        return submitTimed(() -> BlockCacheKeyCalculator.calculate(inputIds, blockSize))
+                .map(result -> new BlockHashCalculationResult(
+                        result.value(),
+                        result.queueWaitTimeUs(),
+                        result.executionTimeUs()));
     }
 
     <T> Mono<T> submit(Callable<T> task) {
+        return submitTimed(task).map(TimedTaskResult::value);
+    }
+
+    private <T> Mono<TimedTaskResult<T>> submitTimed(Callable<T> task) {
         return Mono.defer(() -> {
             long submittedAt = System.nanoTime();
             return Mono.fromCallable(() -> {
                         long startedAt = System.nanoTime();
+                        long queueWaitTimeUs = (startedAt - submittedAt) / 1_000;
                         monitor.report(
                                 BLOCK_HASH_QUEUE_WAIT_TIME_US,
-                                (startedAt - submittedAt) / 1_000.0);
+                                queueWaitTimeUs);
                         try {
-                            return task.call();
+                            T value = task.call();
+                            long executionTimeUs = (System.nanoTime() - startedAt) / 1_000;
+                            return new TimedTaskResult<>(value, queueWaitTimeUs, executionTimeUs);
                         } finally {
                             monitor.report(
                                     BLOCK_HASH_EXECUTION_TIME_US,
@@ -110,6 +121,9 @@ public class BlockHashExecutor {
                     // Keep downstream routing callbacks from occupying a block hash worker.
                     .publishOn(Schedulers.parallel());
         });
+    }
+
+    private record TimedTaskResult<T>(T value, long queueWaitTimeUs, long executionTimeUs) {
     }
 
     @Scheduled(fixedRate = 2000)

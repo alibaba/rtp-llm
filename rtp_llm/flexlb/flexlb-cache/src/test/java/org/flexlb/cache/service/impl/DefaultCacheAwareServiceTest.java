@@ -3,6 +3,7 @@ package org.flexlb.cache.service.impl;
 import org.flexlb.cache.monitor.CacheMetricsReporter;
 import org.flexlb.cache.domain.WorkerCacheUpdateResult;
 import org.flexlb.cache.service.CacheMatchProvider;
+import org.flexlb.cache.service.CacheMatchResult;
 import org.flexlb.cache.service.CacheMatchSource;
 import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.dao.master.WorkerStatus;
@@ -38,10 +39,12 @@ class DefaultCacheAwareServiceTest {
         DefaultCacheAwareService service = new DefaultCacheAwareService(
                 List.of(localProvider, kvcmProvider), modelMetaConfig(true), metricsReporter);
 
-        Map<String, Integer> result = service.findMatchingEngines(
+        CacheMatchResult result = service.findMatchingEngines(
                 List.of(1L), RoleType.PREFILL, "default");
 
-        assertTrue(result.isEmpty());
+        assertTrue(result.matches().isEmpty());
+        assertEquals(CacheMatchSource.KVCM, result.source());
+        assertTrue(result.queryTimeUs() >= 0);
         verify(localProvider, never()).findMatchingEngines(List.of(1L), RoleType.PREFILL, "default");
     }
 
@@ -55,10 +58,11 @@ class DefaultCacheAwareServiceTest {
         DefaultCacheAwareService service = new DefaultCacheAwareService(
                 List.of(localProvider, kvcmProvider), modelMetaConfig(false), metricsReporter);
 
-        Map<String, Integer> result = service.findMatchingEngines(
+        CacheMatchResult result = service.findMatchingEngines(
                 List.of(1L), RoleType.PREFILL, "default");
 
-        assertEquals(1, result.get("127.0.0.1:8080"));
+        assertEquals(1, result.matches().get("127.0.0.1:8080"));
+        assertEquals(CacheMatchSource.LOCAL, result.source());
         verify(kvcmProvider, never()).findMatchingEngines(List.of(1L), RoleType.PREFILL, "default");
     }
 

@@ -377,8 +377,7 @@ public class EngineHealthReporter {
         if (ctx.getRequest().getRequestTimeMs() == 0) {
             return;
         }
-        long arrivalDelayMs = ctx.getStartTime() - ctx.getRequest().getRequestTimeMs();
-        monitor.report(REQUEST_ARRIVAL_DELAY_MS, FlexMetricTags.of(), arrivalDelayMs);
+        monitor.report(REQUEST_ARRIVAL_DELAY_MS, FlexMetricTags.of(), ctx.getRequestArrivalDelayMs());
     }
 
     public void reportForwardToMasterResult(String type, String code) {
