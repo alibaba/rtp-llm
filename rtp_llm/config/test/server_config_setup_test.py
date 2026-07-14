@@ -12,6 +12,16 @@ from rtp_llm.server.server_args.server_args import setup_args
 
 class GenerateConfigTest(TestCase):
 
+    def setUp(self):
+        # clear=True below removes CUDA_VISIBLE_DEVICES after torch is imported;
+        # these config-only tests must not trigger real CUDA lazy initialization.
+        cuda_available = patch(
+            "rtp_llm.config.server_config_setup.torch.cuda.is_available",
+            return_value=False,
+        )
+        cuda_available.start()
+        self.addCleanup(cuda_available.stop)
+
     # EnvArgumentParser in setup_args() reads these env vars (START_PORT, TP_SIZE, etc.)
     # and binds them to py_env_configs; server_port = start_port + rank_id * worker_info_port_num (rank_id=0 here).
     @patch.dict(
