@@ -5,6 +5,7 @@ import org.flexlb.consistency.LBStatusConsistencyService;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
+import org.flexlb.enums.LogLevel;
 import org.flexlb.metric.NoOpFlexMonitor;
 import org.flexlb.service.RouteService;
 import org.flexlb.service.grace.ActiveRequestCounter;
@@ -52,6 +53,8 @@ class HttpLoadBalanceServerTest {
     private QueueManager queueManager;
     @Mock
     private WorkerBlockSizeResolver blockSizeResolver;
+    @Mock
+    private FlexlbLogLevelManager logLevelManager;
 
     private WebTestClient webTestClient;
     private BlockHashExecutor blockHashExecutor;
@@ -66,7 +69,8 @@ class HttpLoadBalanceServerTest {
                 engineHealthReporter,
                 queueManager,
                 new ActiveRequestCounter(),
-                new ScheduleRequestPreprocessor(blockSizeResolver, blockHashExecutor));
+                new ScheduleRequestPreprocessor(blockSizeResolver, blockHashExecutor),
+                logLevelManager);
         webTestClient = WebTestClient.bindToRouterFunction(server.loadBalancePrefill()).build();
     }
 
@@ -188,5 +192,20 @@ class HttpLoadBalanceServerTest {
             runningTask.dispose();
             queuedTask.dispose();
         }
+    }
+
+    @Test
+    void updatesFlexlbLogGroupThroughLegacyEndpoint() {
+        when(logLevelManager.setLogLevel(LogLevel.DEBUG)).thenReturn(LogLevel.DEBUG);
+
+        webTestClient.post()
+                .uri("/rtp_llm/update_log_level")
+                .contentType(MediaType.APPLICATION_JSON)
+                .bodyValue(Map.of("log_level", "debug"))
+                .exchange()
+                .expectStatus().isOk()
+                .expectBody(String.class).isEqualTo("Success! logLevel=DEBUG");
+
+        verify(logLevelManager).setLogLevel(LogLevel.DEBUG);
     }
 }

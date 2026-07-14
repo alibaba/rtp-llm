@@ -19,21 +19,27 @@ import javax.annotation.PreDestroy;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.Callable;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Future;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicLong;
 
 @Service("workerAddressService")
 public class WorkerAddressService {
 
     private static final Logger logger = LoggerFactory.getLogger("syncLogger");
+    private static final long EMPTY_WORKER_WARNING_INTERVAL_NANOS = TimeUnit.MINUTES.toNanos(1);
 
     private final EngineHealthReporter engineHealthReporter;
     private final ModelMetaConfig modelMetaConfig;
     private final ServiceDiscovery serviceDiscovery;
+    private final ConcurrentMap<String, WorkerAvailabilityLogState> workerAvailabilityByAddress =
+            new ConcurrentHashMap<>();
 
     /**
      * Service discovery request thread pool
@@ -86,7 +92,9 @@ public class WorkerAddressService {
         Future<List<WorkerHost>> future = serviceDiscoveryExecutor.submit(serviceDiscoveryRunner);
         try {
             // Prevent a slow service discovery request from blocking status synchronization.
-            return future.get(500, TimeUnit.MILLISECONDS);
+            List<WorkerHost> hosts = future.get(500, TimeUnit.MILLISECONDS);
+            reportWorkerAvailability(modelName, endpoint, hosts);
+            return hosts;
         } catch (Exception e) {
             String address = endpoint.getAddress();
             if (e instanceof TimeoutException) {
@@ -102,6 +110,46 @@ public class WorkerAddressService {
             }
             future.cancel(true);
             return new ArrayList<>();
+        }
+    }
+
+    private void reportWorkerAvailability(String modelName, Endpoint endpoint, List<WorkerHost> hosts) {
+        WorkerAvailabilityLogState state = workerAvailabilityByAddress.computeIfAbsent(
+                endpoint.getAddress(), ignored -> new WorkerAvailabilityLogState());
+        if (hosts == null || hosts.isEmpty()) {
+            if (state.shouldWarnForEmptyWorkers()) {
+                logger.warn("No workers discovered, model={}, address={}, group={}; "
+                                + "worker list is empty (warning limited to once per minute)",
+                        modelName, endpoint.getAddress(), endpoint.getGroup());
+            }
+            return;
+        }
+
+        if (state.markAvailable()) {
+            logger.info("Worker discovery recovered, model={}, address={}, group={}, worker_count={}",
+                    modelName, endpoint.getAddress(), endpoint.getGroup(), hosts.size());
+        }
+    }
+
+    private static final class WorkerAvailabilityLogState {
+
+        // Zero means workers are available; otherwise this is the next empty-list warning deadline.
+        private final AtomicLong emptyWarningDeadlineNanos = new AtomicLong();
+
+        boolean shouldWarnForEmptyWorkers() {
+            long now = System.nanoTime();
+            long warningDeadline = emptyWarningDeadlineNanos.get();
+            if (warningDeadline != 0 && now < warningDeadline) {
+                return false;
+            }
+            return emptyWarningDeadlineNanos.compareAndSet(
+                    warningDeadline, now + EMPTY_WORKER_WARNING_INTERVAL_NANOS);
+        }
+
+        boolean markAvailable() {
+            long warningDeadline = emptyWarningDeadlineNanos.get();
+            return warningDeadline != 0
+                    && emptyWarningDeadlineNanos.compareAndSet(warningDeadline, 0);
         }
     }
 

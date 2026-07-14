@@ -25,8 +25,11 @@ flexlb:
     queue-capacity: ${FLEXLB_BLOCK_HASH_QUEUE_CAPACITY:16384}
 
 logging:
+  group:
+    flexlb: org.flexlb,flexlbLogger,syncLogger,syncConsistencyLogger
   level:
     root: info
+    flexlb: ${FLEXLB_LOG_LEVEL:INFO}
     io.grpc: info
     com.google.protobuf: info
     org.flexlb.utils.LoggingUtils: trace

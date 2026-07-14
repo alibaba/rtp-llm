@@ -24,8 +24,11 @@ import java.util.concurrent.atomic.AtomicLong;
 public class WorkerBlockSizeResolver {
 
     private static final long REFRESH_INTERVAL_MINUTES = 1L;
+    private static final long PROBLEM_LOG_INTERVAL_NANOS = TimeUnit.MINUTES.toNanos(1);
 
     private final AtomicLong cachedBlockSize = new AtomicLong();
+    private final AtomicLong nextUnavailableWarningNanos = new AtomicLong();
+    private final AtomicLong nextInconsistentErrorNanos = new AtomicLong();
     private final ScheduledExecutorService refreshExecutor;
 
     public WorkerBlockSizeResolver() {
@@ -70,23 +73,42 @@ public class WorkerBlockSizeResolver {
         collectBlockSizes(modelWorkerStatus.getPdFusionStatusMap(), detectedBlockSizes);
 
         if (detectedBlockSizes.isEmpty()) {
-            log.error("No block_size available from healthy workers; keeping cached value: {}",
-                    cachedBlockSize.get());
+            long currentBlockSize = cachedBlockSize.get();
+            if (currentBlockSize == 0 && shouldLog(nextUnavailableWarningNanos)) {
+                log.warn("No block_size available from healthy workers yet");
+            } else {
+                log.debug("No block_size available from healthy workers; keeping cached value: {}",
+                        currentBlockSize);
+            }
             return;
         }
         if (detectedBlockSizes.size() > 1) {
-            log.error("Inconsistent block_size values from healthy workers: {}; keeping cached value: {}",
-                    detectedBlockSizes, cachedBlockSize.get());
+            if (shouldLog(nextInconsistentErrorNanos)) {
+                log.error("Inconsistent block_size values from healthy workers: {}; keeping cached value: {}",
+                        detectedBlockSizes, cachedBlockSize.get());
+            } else {
+                log.debug("Inconsistent block_size values from healthy workers: {}; keeping cached value: {}",
+                        detectedBlockSizes, cachedBlockSize.get());
+            }
             return;
         }
 
         long detectedBlockSize = detectedBlockSizes.iterator().next();
         long previousBlockSize = cachedBlockSize.getAndSet(detectedBlockSize);
+        nextUnavailableWarningNanos.set(0L);
+        nextInconsistentErrorNanos.set(0L);
         if (previousBlockSize == 0) {
             log.info("Resolved worker block_size: {}", detectedBlockSize);
         } else if (previousBlockSize != detectedBlockSize) {
             log.warn("Worker block_size changed from {} to {}", previousBlockSize, detectedBlockSize);
         }
+    }
+
+    private boolean shouldLog(AtomicLong nextLogTimeNanos) {
+        long now = System.nanoTime();
+        long next = nextLogTimeNanos.get();
+        return now >= next
+                && nextLogTimeNanos.compareAndSet(next, now + PROBLEM_LOG_INTERVAL_NANOS);
     }
 
     private void collectBlockSizes(Map<String, WorkerStatus> workerStatusMap,

@@ -60,7 +60,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
     @Override
     public void run() {
         try {
-            logger.info("GrpcWorkerStatusRunner run for {}", ipPort);
+            logger.debug("GrpcWorkerStatusRunner run for {}", ipPort);
             long startTime = System.nanoTime() / 1000;
 
             long latestFinishedTaskVersion = workerStatus.getLatestFinishedTaskVersion().get();
@@ -114,7 +114,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
 
             long currentVersion = workerStatus.getStatusVersion().get();
             if (currentVersion >= responseVersion) {
-                logger.info("query engine worker status via gRPC, version is not updated, currentVersion: {}, responseVersion: {}",
+                logger.debug("query engine worker status via gRPC, version is not updated, currentVersion: {}, responseVersion: {}",
                         currentVersion, responseVersion);
                 // Update basic worker status even when version is not updated
                 workerStatus.setAlive(newWorkerStatus.isAlive());
@@ -186,7 +186,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
     }
 
     private void logWorkerStatusUpdate(long startTime, WorkerStatus workerStatus) {
-        logger.info("gRPC Worker Status - {}, role:{}, running_queue_tokens:{}, cost_us:{}",
+        logger.debug("gRPC Worker Status - {}, role:{}, running_queue_tokens:{}, cost_us:{}",
                 ipPort,
                 workerStatus.getRole(),
                 workerStatus.getRunningQueueTime(),

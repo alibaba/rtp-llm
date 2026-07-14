@@ -1,5 +1,8 @@
 package org.flexlb.sync;
 
+import ch.qos.logback.classic.Logger;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
 import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.dao.master.WorkerHost;
 import org.flexlb.dao.route.Endpoint;
@@ -12,6 +15,7 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.slf4j.LoggerFactory;
 
 import java.util.Collections;
 import java.util.List;
@@ -60,6 +64,38 @@ class WorkerAddressServiceTest {
         List<WorkerHost> actualHosts = workerAddressService.getServiceHosts(modelName, endpoint);
 
         Assertions.assertFalse(actualHosts.isEmpty());
+    }
+
+    @Test
+    void testEmptyWorkersWarnOnceAndRecoveryIsLogged() {
+        String modelName = "TestModel";
+        Endpoint endpoint = endpoint("TestAddress");
+        List<WorkerHost> recoveredHosts =
+                List.of(new WorkerHost("127.0.0.1", 8080, 8081, 8082, "site1", "group1"));
+        when(serviceDiscovery.getHosts(any(Endpoint.class)))
+                .thenReturn(Collections.emptyList(), Collections.emptyList(), recoveredHosts);
+
+        Logger syncLogger = (Logger) LoggerFactory.getLogger("syncLogger");
+        ListAppender<ILoggingEvent> appender = new ListAppender<>();
+        appender.start();
+        syncLogger.addAppender(appender);
+        try {
+            workerAddressService.getServiceHosts(modelName, endpoint);
+            workerAddressService.getServiceHosts(modelName, endpoint);
+            workerAddressService.getServiceHosts(modelName, endpoint);
+        } finally {
+            syncLogger.detachAppender(appender);
+            appender.stop();
+        }
+
+        long emptyWarnings = appender.list.stream()
+                .filter(event -> event.getFormattedMessage().contains("No workers discovered"))
+                .count();
+        long recoveryLogs = appender.list.stream()
+                .filter(event -> event.getFormattedMessage().contains("Worker discovery recovered"))
+                .count();
+        Assertions.assertEquals(1, emptyWarnings);
+        Assertions.assertEquals(1, recoveryLogs);
     }
 
     private Endpoint endpoint(String address) {

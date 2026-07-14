@@ -28,6 +28,8 @@ import java.util.concurrent.atomic.LongAdder;
 @Component
 public class MasterEngineSynchronizer extends AbstractEngineStatusSynchronizer {
 
+    private static final long DEFAULT_SYNC_REQUEST_TIMEOUT_MS = 200L;
+
     private final List<String> modelNames = new ArrayList<>();
     private final EngineGrpcService engineGrpcService;
     private final CacheAwareService localKvCacheAwareManager;
@@ -52,7 +54,7 @@ public class MasterEngineSynchronizer extends AbstractEngineStatusSynchronizer {
                 : 20;
         this.syncRequestTimeoutMs = System.getenv("SYNC_REQUEST_TIMEOUT_MS") != null
                 ? Long.parseLong(System.getenv("SYNC_REQUEST_TIMEOUT_MS"))
-                : syncEngineStatusInterval;
+                : DEFAULT_SYNC_REQUEST_TIMEOUT_MS;
         modelMetaConfig.getServiceRoutes().stream()
                 .map(ServiceRoute::getServiceId)
                 .map(IdUtils::getModelNameByServiceId)
@@ -64,8 +66,8 @@ public class MasterEngineSynchronizer extends AbstractEngineStatusSynchronizer {
 
     public void syncEngineStatus() {
         syncCount.increment();
-        logger.info("====================sync engine prefill status start, times:{} =========================", syncCount.longValue());
-        logger.info("modelNames:{}", modelNames);
+        logger.debug("Sync engine status start, times={}, modelNames={}",
+                syncCount.longValue(), modelNames);
         try {
             for (String modelName : modelNames) {
                 ModelWorkerStatus modelWorkerStatus = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS;
