@@ -918,6 +918,23 @@ def _write_decode_kv_idx_to_paged(
     )
 
 
+def _write_main_kv_to_paged(
+    k: torch.Tensor,
+    v: torch.Tensor,
+    base: torch.Tensor,
+    slot_mapping: torch.Tensor,
+) -> None:
+    """Persist K/V into the 5-D paged pool via the tuned C++ writer.
+
+    When ``base`` is float8_e4m3fn the C++ op casts bf16/half/float activations
+    to e4m3 on store (no-scale cast, matching the sparse decode kernels)."""
+    from rtp_llm.ops.compute_ops import rtp_llm_ops
+
+    rtp_llm_ops.mha_kv_write_cache(
+        k.contiguous(), v.contiguous(), base, slot_mapping
+    )
+
+
 @triton.jit
 def _fused_cp_paged_write_kernel(
     packed_ptr,
@@ -1591,7 +1608,7 @@ class MSAAttention(nn.Module):
         if (
             base is None
             or base.dim() != 5
-            or base.dtype != torch.bfloat16
+            or base.dtype not in (torch.bfloat16, torch.float8_e4m3fn)
             or int(base.shape[2]) != int(self.kv_head_num)
             or int(base.shape[3]) != int(self.page_size)
             or int(base.shape[4]) != int(self.head_dim)
@@ -1965,10 +1982,10 @@ class MSAAttention(nn.Module):
                 "[block,2,head,page,dim], got "
                 f"{None if base is None else tuple(base.shape)}"
             )
-        if base.dtype != packed.dtype:
+        if base.dtype != packed.dtype and base.dtype != torch.float8_e4m3fn:
             raise RuntimeError(
                 f"MSA paged main K/V dtype mismatch: paged={base.dtype} vs "
-                f"act={packed.dtype}; launch with FP8_KV_CACHE=0 for a bf16 paged pool"
+                f"act={packed.dtype}; expected a match or float8_e4m3fn (fp8 KV)"
             )
         idx_view = self._idx_k_paged_view(kv_cache)
         if idx_view.dtype != packed.dtype:
@@ -2030,10 +2047,10 @@ class MSAAttention(nn.Module):
                 "[block,2,head,page,dim], got "
                 f"{None if base is None else tuple(base.shape)}"
             )
-        if base.dtype != k.dtype:
+        if base.dtype != k.dtype and base.dtype != torch.float8_e4m3fn:
             raise RuntimeError(
                 f"MSA paged main K/V dtype mismatch: paged={base.dtype} vs "
-                f"act={k.dtype}; launch with FP8_KV_CACHE=0 for a bf16 paged pool"
+                f"act={k.dtype}; expected a match or float8_e4m3fn (fp8 KV)"
             )
         idx_view = self._idx_k_paged_view(kv_cache)
         if idx_view.dtype != idx_k.dtype:
@@ -2042,11 +2059,9 @@ class MSAAttention(nn.Module):
                 f"act={idx_k.dtype} (scale region is reinterpreted as bf16)"
             )
 
-        from rtp_llm.ops.compute_ops import rtp_llm_ops
-
-        rtp_llm_ops.mha_kv_write_cache(
-            k.contiguous(), v.contiguous(), base, slot_mapping
-        )
+        # FP8-aware paged write (Triton scatter casts bf16 -> e4m3 for an fp8 pool;
+        # the tuned C++ writer is used only when dtypes match).
+        _write_main_kv_to_paged(k, v, base, slot_mapping)
 
         scratch_slots = int(self._scratch_slots)
         scratch_k, scratch_v = _MAIN_KV_SCRATCH.acquire(
@@ -2105,20 +2120,17 @@ class MSAAttention(nn.Module):
                 "[block,2,head,page,dim], got "
                 f"{None if base is None else tuple(base.shape)}"
             )
-        if base.dtype != k.dtype:
+        if base.dtype != k.dtype and base.dtype != torch.float8_e4m3fn:
             raise RuntimeError(
                 f"MSA paged main K/V dtype mismatch: paged={base.dtype} vs "
-                f"act={k.dtype}; launch with FP8_KV_CACHE=0 for a bf16 paged pool"
+                f"act={k.dtype}; expected a match or float8_e4m3fn (fp8 KV)"
             )
 
-        # 1) persist into the paged pool via the sharding-aware C++ writer.
+        # 1) persist into the paged pool via the sharding-aware writer (C++ casts
+        # bf16 activations to e4m3 when the pool is float8_e4m3fn).
         if slot_mapping is None:
             slot_mapping = self._kernel_slots_to_paged(write_slots, attn_inputs)
-        from rtp_llm.ops.compute_ops import rtp_llm_ops
-
-        rtp_llm_ops.mha_kv_write_cache(
-            k.contiguous(), v.contiguous(), base, slot_mapping
-        )
+        _write_main_kv_to_paged(k, v, base, slot_mapping)
 
         # 2) build the transient gather scratch the prefill MSA kernel reads.
         scratch_slots = int(self._scratch_slots)
@@ -2141,8 +2153,10 @@ class MSAAttention(nn.Module):
                 )
                 dst_full = req_to_token.to(torch.int64)[mask]
             gf = self._kernel_slots_to_paged(dst_full, attn_inputs)
-            scratch_k[dst_full] = kpv[gf // p, gf % p]
-            scratch_v[dst_full] = vpv[gf // p, gf % p]
+            # kpv/vpv follow the paged pool dtype (e4m3 for fp8 KV); upconvert to
+            # the bf16 gather scratch the MSA step-3 kernel reads.
+            scratch_k[dst_full] = kpv[gf // p, gf % p].to(scratch_k.dtype)
+            scratch_v[dst_full] = vpv[gf // p, gf % p].to(scratch_v.dtype)
         self._scratch_k = scratch_k
         self._scratch_v = scratch_v
 
@@ -2258,7 +2272,13 @@ class MSAAttention(nn.Module):
         # before _forward_paged_decode() is selected.
         base = kv_cache.kv_cache_base
         scale = kv_cache.kv_scale_base
-        if base.dtype != k.dtype:
+        # base may be an FP8 (e4m3) pool; _write_decode_kv_idx_to_paged casts the
+        # bf16 K/V to e4m3 on store, and the paged decode kernel upconverts on read.
+        if (
+            base is None
+            or scale is None
+            or (base.dtype != k.dtype and base.dtype != torch.float8_e4m3fn)
+        ):
             return None
 
         idx_view = scale.view(torch.bfloat16).view(
@@ -3036,7 +3056,14 @@ class MSAAttention(nn.Module):
             attn_inputs, device
         )
 
-        if self._should_use_mxfp8_fused_qkv_idx_decode(x_fp8, x_scale):
+        # The MXFP8 fused QKV+idx decode projection writes bf16 straight into the
+        # paged pool and hard-requires a bf16 pool; for an FP8 (e4m3) pool fall
+        # back to the standard project + Triton auto-cast write path instead.
+        pool_is_fp8 = (
+            kv_cache.kv_cache_base is not None
+            and kv_cache.kv_cache_base.dtype == torch.float8_e4m3fn
+        )
+        if self._should_use_mxfp8_fused_qkv_idx_decode(x_fp8, x_scale) and not pool_is_fp8:
             paged_kv_base = kv_cache.kv_cache_base
             scale = kv_cache.kv_scale_base
             paged_idx_k = scale.view(torch.bfloat16).view(
