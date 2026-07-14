@@ -33,6 +33,9 @@ from rtp_llm.tools.api.model_basic_info_analyzer import (
     parse_ft_model_type,
     parse_model_basic_info,
 )
+from rtp_llm.tools.convert.weights_convert_utils import (
+    apply_layer_override_and_post_build,
+)
 from rtp_llm.utils.fuser import MountRwMode, fetch_remote_file_to_local
 from rtp_llm.utils.time_util import timer_wrapper
 
@@ -262,10 +265,7 @@ class WeightConverter:
             profiling_debug_logging_config=ProfilingDebugLoggingConfig(),
             embedding_config=None,  # Fake loader doesn't need embedding_config
         )
-        model_config.num_layers = int(
-            env_params.get("HACK_LAYER_NUM", str(model_config.num_layers))
-        )
-        self.model_cls._post_build_model_config(model_config)
+        apply_layer_override_and_post_build(model_config, self.model_cls, env_params)
 
         parallelism_config = self._build_parallelism_config()
 

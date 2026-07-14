@@ -22,10 +22,10 @@ inline ModelConfig makeSingleLayerMTPModelConfig(const ModelConfig& model_config
                             "MTP source layer %zu is out of range [0, %ld)",
                             source_layer,
                             model_config.num_layers);
-    RTP_LLM_CHECK_WITH_INFO(model_config.kv_cache_spec_descs.size() == static_cast<size_t>(model_config.num_layers),
-                            "MTP kv_cache_spec_descs size %zu != num_layers %ld",
-                            model_config.kv_cache_spec_descs.size(),
-                            model_config.num_layers);
+    RTP_LLM_CHECK_WITH_INFO(source_layer < model_config.kv_cache_spec_descs.size(),
+                            "MTP source layer %zu has no kv cache descriptor row (row count %zu)",
+                            source_layer,
+                            model_config.kv_cache_spec_descs.size());
     RTP_LLM_CHECK_WITH_INFO(!model_config.kv_cache_spec_descs[source_layer].empty(),
                             "MTP source layer %zu has no kv cache descriptors",
                             source_layer);
@@ -36,21 +36,17 @@ inline ModelConfig makeSingleLayerMTPModelConfig(const ModelConfig& model_config
 
     const auto& attention_types = model_config.hybrid_attention_config.hybrid_attention_types;
     if (model_config.hybrid_attention_config.enable_hybrid_attention || !attention_types.empty()) {
-        RTP_LLM_CHECK_WITH_INFO(attention_types.size() == static_cast<size_t>(model_config.num_layers),
-                                "MTP hybrid_attention_types size %zu != num_layers %ld",
-                                attention_types.size(),
-                                model_config.num_layers);
+        RTP_LLM_CHECK_WITH_INFO(source_layer < attention_types.size(),
+                                "MTP source layer %zu has no hybrid attention type (type count %zu)",
+                                source_layer,
+                                attention_types.size());
         single_layer_config.hybrid_attention_config.hybrid_attention_types = {attention_types[source_layer]};
     }
     return single_layer_config;
 }
 
-inline void validateHomogeneousMTPCacheLayouts(const std::vector<ModelConfig>& module_configs) {
-    if (module_configs.empty()) {
-        return;
-    }
-
-    const auto& expected = module_configs.front();
+inline void validateActiveMTPCacheLayout(const ModelConfig& active_module_config) {
+    const auto& expected = active_module_config;
     RTP_LLM_CHECK_WITH_INFO(
         expected.num_layers == 1, "MTP module 0 must be a one-layer config, got %ld layers", expected.num_layers);
     RTP_LLM_CHECK_WITH_INFO(expected.kv_cache_spec_descs.size() == 1,
@@ -58,37 +54,6 @@ inline void validateHomogeneousMTPCacheLayouts(const std::vector<ModelConfig>& m
                             expected.kv_cache_spec_descs.size());
     RTP_LLM_CHECK_WITH_INFO(!expected.kv_cache_spec_descs[0].empty(),
                             "MTP module 0 must have at least one cache descriptor");
-
-    for (size_t module_index = 1; module_index < module_configs.size(); ++module_index) {
-        const auto& current = module_configs[module_index];
-        RTP_LLM_CHECK_WITH_INFO(current.num_layers == 1 && current.kv_cache_spec_descs.size() == 1,
-                                "MTP module %zu must have one layer and one descriptor row",
-                                module_index);
-
-        const auto& expected_descs = expected.kv_cache_spec_descs[0];
-        const auto& current_descs  = current.kv_cache_spec_descs[0];
-        RTP_LLM_CHECK_WITH_INFO(current_descs.size() == expected_descs.size(),
-                                "heterogeneous MTP cache layout: module %zu descriptor count %zu != module 0 count %zu",
-                                module_index,
-                                current_descs.size(),
-                                expected_descs.size());
-        for (size_t desc_index = 0; desc_index < expected_descs.size(); ++desc_index) {
-            const auto& expected_desc = expected_descs[desc_index];
-            const auto& current_desc  = current_descs[desc_index];
-            RTP_LLM_CHECK_WITH_INFO(
-                current_desc.cache_type == expected_desc.cache_type && current_desc.tag == expected_desc.tag
-                    && current_desc.dtype == expected_desc.dtype,
-                "heterogeneous MTP cache layout: module %zu descriptor %zu differs in type, tag, or dtype",
-                module_index,
-                desc_index);
-        }
-
-        const auto& expected_types = expected.hybrid_attention_config.hybrid_attention_types;
-        const auto& current_types  = current.hybrid_attention_config.hybrid_attention_types;
-        RTP_LLM_CHECK_WITH_INFO(current_types == expected_types,
-                                "heterogeneous MTP cache layout: module %zu attention type differs from module 0",
-                                module_index);
-    }
 }
 
 inline MTPModuleConfigPlan buildMTPModuleConfigPlan(const ModelConfig& model_config,
@@ -114,12 +79,17 @@ inline MTPModuleConfigPlan buildMTPModuleConfigPlan(const ModelConfig& model_con
     MTPModuleConfigPlan plan;
     plan.source_layer_indices.reserve(model_num);
     plan.module_configs.reserve(model_num);
+    // Runtime execution and cache loading currently use module 0 only. Keep a
+    // physical slot and its own weight for every configured module, but make
+    // inactive slots share module 0's cache layout so heterogeneous checkpoint
+    // metadata cannot change allocation or trigger an unused-module fail-fast.
+    const auto active_module_config = makeSingleLayerMTPModelConfig(model_config, /*source_layer=*/0);
+    validateActiveMTPCacheLayout(active_module_config);
     for (size_t module_index = 0; module_index < model_num; ++module_index) {
         const size_t source_layer = weight_count == 1 ? 0 : module_index;
         plan.source_layer_indices.push_back(source_layer);
-        plan.module_configs.push_back(makeSingleLayerMTPModelConfig(model_config, source_layer));
+        plan.module_configs.push_back(active_module_config);
     }
-    validateHomogeneousMTPCacheLayouts(plan.module_configs);
     return plan;
 }
 

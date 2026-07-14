@@ -510,34 +510,28 @@ TEST_F(SingleTypeKVCacheAllocatorTest, SingleLayerMtpConfigSlicesDescriptorAndAt
     EXPECT_EQ(single_layer.hybrid_attention_config.hybrid_attention_types[0], HybridAttentionType::SLIDING_WINDOW);
 }
 
-TEST_F(SingleTypeKVCacheAllocatorTest, HomogeneousMtpCacheLayoutRejectsDescriptorAndAttentionDifferences) {
+TEST_F(SingleTypeKVCacheAllocatorTest, ActiveMtpCacheLayoutValidationOnlyChecksModule0) {
     auto config                                            = makeTestModelConfig(/*num_layers=*/2);
     config.hybrid_attention_config.enable_hybrid_attention = true;
     config.hybrid_attention_config.hybrid_attention_types  = {HybridAttentionType::NONE, HybridAttentionType::NONE};
 
     auto module0 = makeSingleLayerMTPModelConfig(config, 0);
-    auto module1 = makeSingleLayerMTPModelConfig(config, 1);
-    EXPECT_NO_THROW(validateHomogeneousMTPCacheLayouts({module0, module1}));
+    EXPECT_NO_THROW(validateActiveMTPCacheLayout(module0));
 
-    auto different_tag                          = module1;
-    different_tag.kv_cache_spec_descs[0][0].tag = "other";
-    EXPECT_THROW(validateHomogeneousMTPCacheLayouts({module0, different_tag}), std::runtime_error);
+    auto invalid_module0                = module0;
+    invalid_module0.kv_cache_spec_descs = {};
+    EXPECT_THROW(validateActiveMTPCacheLayout(invalid_module0), std::runtime_error);
 
-    auto different_type                                 = module1;
-    different_type.kv_cache_spec_descs[0][0].cache_type = KVCacheSpecType::MultiHeadLatentAttention;
-    EXPECT_THROW(validateHomogeneousMTPCacheLayouts({module0, different_type}), std::runtime_error);
-
-    auto different_dtype                            = module1;
-    different_dtype.kv_cache_spec_descs[0][0].dtype = DataType::TYPE_FP32;
-    EXPECT_THROW(validateHomogeneousMTPCacheLayouts({module0, different_dtype}), std::runtime_error);
-
-    auto different_attention                                              = module1;
-    different_attention.hybrid_attention_config.hybrid_attention_types[0] = HybridAttentionType::LINEAR;
-    EXPECT_THROW(validateHomogeneousMTPCacheLayouts({module0, different_attention}), std::runtime_error);
+    config.kv_cache_spec_descs.resize(1);
+    config.hybrid_attention_config.hybrid_attention_types.resize(1);
+    EXPECT_NO_THROW(buildMTPModuleConfigPlan(config, /*weight_count=*/2, /*gen_num_per_cycle=*/2, SP_TYPE_MTP));
 }
 
-TEST_F(SingleTypeKVCacheAllocatorTest, MtpModuleConfigPlanTracksWeightSources) {
-    auto config = makeTestModelConfig(/*num_layers=*/2);
+TEST_F(SingleTypeKVCacheAllocatorTest, MtpModuleConfigPlanKeepsWeightsAndCopiesActiveCacheLayout) {
+    auto config                                 = makeTestModelConfig(/*num_layers=*/2);
+    config.kv_cache_spec_descs[0][0].tag        = "active";
+    config.kv_cache_spec_descs[1][0].tag        = "inactive-heterogeneous";
+    config.kv_cache_spec_descs[1][0].cache_type = KVCacheSpecType::MultiHeadLatentAttention;
 
     const auto multi_weight_plan =
         buildMTPModuleConfigPlan(config, /*weight_count=*/2, /*gen_num_per_cycle=*/2, SP_TYPE_MTP);
@@ -546,6 +540,9 @@ TEST_F(SingleTypeKVCacheAllocatorTest, MtpModuleConfigPlanTracksWeightSources) {
     for (const auto& module_config : multi_weight_plan.module_configs) {
         EXPECT_EQ(module_config.num_layers, 1);
         ASSERT_EQ(module_config.kv_cache_spec_descs.size(), 1u);
+        ASSERT_EQ(module_config.kv_cache_spec_descs[0].size(), config.kv_cache_spec_descs[0].size());
+        EXPECT_EQ(module_config.kv_cache_spec_descs[0][0].tag, "active");
+        EXPECT_EQ(module_config.kv_cache_spec_descs[0][0].cache_type, config.kv_cache_spec_descs[0][0].cache_type);
     }
 
     const auto reused_weight_plan =

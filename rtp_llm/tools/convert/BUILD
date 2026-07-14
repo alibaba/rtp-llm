@@ -19,6 +19,8 @@ py_library(
 
 py_test(
     name = "weights_convert_test",
-    srcs = ["weights_convert_test.py"],
-    data = ["weights_convert.py"],
+    srcs = [
+        "weights_convert_test.py",
+        "weights_convert_utils.py",
+    ],
 )
