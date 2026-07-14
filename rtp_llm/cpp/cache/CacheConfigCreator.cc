@@ -36,11 +36,22 @@ CacheConfig CacheConfigCreator::createBasicConfig(const ModelConfig&       model
                                                   const ParallelismConfig& parallelism_config,
                                                   bool                     is_mtp,
                                                   int                      gen_num_per_cycle) {
+    CacheConfig config;
     if (model_config.hybrid_attention_config.enable_hybrid_attention) {
-        return HybridConfigCreator::createHybridConfig(model_config, parallelism_config, is_mtp, gen_num_per_cycle);
+        config = HybridConfigCreator::createHybridConfig(model_config, parallelism_config, is_mtp, gen_num_per_cycle);
     } else {
-        return SingleConfigCreator::createSingleConfig(model_config, parallelism_config, is_mtp, gen_num_per_cycle);
+        config = SingleConfigCreator::createSingleConfig(model_config, parallelism_config, is_mtp, gen_num_per_cycle);
     }
+
+    const auto full_group_num = std::count_if(config.groups.begin(), config.groups.end(), [](const GroupBase& group) {
+        return group.policy.group_type == CacheGroupType::FULL && group.spec
+               && (group.spec->type == KVCacheSpecType::MultiHeadAttention
+                   || group.spec->type == KVCacheSpecType::MultiHeadLatentAttention);
+    });
+    RTP_LLM_CHECK_WITH_INFO(full_group_num == 1,
+                            "cache config requires exactly one FULL MHA/MLA cache group, got %zu",
+                            static_cast<size_t>(full_group_num));
+    return config;
 }
 
 CacheConfig CacheConfigCreator::createConfig(const ModelConfig&                               model_config,
@@ -49,7 +60,7 @@ CacheConfig CacheConfigCreator::createConfig(const ModelConfig&                 
                                              const KVCacheConfig&                             kv_cache_config,
                                              const std::optional<WarmUpResult>&               warm_up_result,
                                              const std::optional<SpeculativeExecutionConfig>& sp_config) {
-    CacheConfig config = CacheConfigCreator::createBasicConfig(model_config, parallelism_config, false, 0);
+    CacheConfig config    = CacheConfigCreator::createBasicConfig(model_config, parallelism_config, false, 0);
     uint32_t    block_num = 0;
 
     config.linear_step = kv_cache_config.linear_step;

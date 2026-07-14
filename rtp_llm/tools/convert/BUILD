@@ -23,4 +23,11 @@ py_test(
         "weights_convert_test.py",
         "weights_convert_utils.py",
     ],
+    data = [
+        "//rtp_llm/cpp/cache/test:cache_config_creator_py_test",
+    ],
+    deps = [
+        "//rtp_llm:testlib",
+    ],
+    exec_properties = {'gpu':'H20'},
 )
