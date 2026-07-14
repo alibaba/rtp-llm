@@ -10,6 +10,7 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
 )
 from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import (
     CombineForwardPayload,
+    DeferredOutputReduction,
     ExpertForwardPayload,
     ExpertTokensMetadata,
     FusedMoeDataRouter,
@@ -102,7 +103,14 @@ class BatchedDataRouter(FusedMoeDataRouter):
         self.max_num_tokens = max_num_tokens
         self.ep_rank = config.ep_rank
         self.tp_size = config.tp_size
+        self.tp_rank = config.tp_rank
         self.num_local_experts = config.expert_num // self.tp_size
+
+    @property
+    def deferred_output_reduction(self) -> Optional[DeferredOutputReduction]:
+        if self.tp_size <= 1:
+            return None
+        return DeferredOutputReduction(Group.TP, self.tp_size, self.tp_rank)
 
     def prepare(
         self,
@@ -165,6 +173,7 @@ class BatchedDataRouter(FusedMoeDataRouter):
         topk_ids: torch.Tensor,
         apply_router_weight_on_input: bool,
         extra_finalize_args: Optional[dict[str, Any]],
+        defer_output_reduction: bool = False,
     ) -> torch.Tensor:
         weight_and_reduce_impl = TopKWeightAndReduceNaiveBatched(self.ep_rank)
         output = weight_and_reduce_impl.apply(
@@ -173,6 +182,6 @@ class BatchedDataRouter(FusedMoeDataRouter):
             topk_ids=topk_ids,
             apply_router_weight_on_input=apply_router_weight_on_input,
         )
-        if self.tp_size > 1:
+        if self.tp_size > 1 and not defer_output_reduction:
             output = all_reduce(output, Group.TP)
         return output

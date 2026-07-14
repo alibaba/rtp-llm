@@ -1,3 +1,4 @@
+import os
 from typing import Any, Dict, Optional
 
 import torch
@@ -29,6 +30,15 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
 from rtp_llm.ops import HWKernelConfig, MoeConfig, ParallelismConfig
 from rtp_llm.ops.compute_ops import LayerKVCache, PyModelInputs, PyModelOutputs
 from rtp_llm.utils.model_weight import W
+
+
+def _moe_unified_allreduce_enabled() -> bool:
+    return os.environ.get("ENABLE_MOE_UNIFIED_ALLREDUCE", "0").lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
 
 
 class GenericMoeLayer(nn.Module):
@@ -86,7 +96,10 @@ class GenericMoeLayer(nn.Module):
         self.num_local_experts = self.w1.shape[0]
         self.add_shared_expert = config.moe_style == 2
         self.ffn_tp_size = parallelism_config.get_ffn_tp_size()
+        get_ffn_tp_rank = getattr(parallelism_config, "get_ffn_tp_rank", None)
+        self.ffn_tp_rank = get_ffn_tp_rank() if get_ffn_tp_rank is not None else 0
         self.ep_size = parallelism_config.ep_size
+        self.enable_unified_output_allreduce = _moe_unified_allreduce_enabled()
         if self.add_shared_expert:
             self.shared_expert = DenseMLP(
                 config.activation_type,
@@ -115,6 +128,27 @@ class GenericMoeLayer(nn.Module):
 
         # for group topk
         self.correction_bias = weights.get(W.e_score_correction_b, None)
+
+    def _use_unified_output_allreduce(self) -> bool:
+        """Whether routed and shared local partials may share one TP SUM.
+
+        The router descriptor proves that deferring its finalize collective
+        leaves a ``[T, H]`` local partial in original token order.  Matching
+        partition size/rank proves that DenseMLP uses the same TP reduction
+        domain.  There is deliberately no model, hardware, EP, DP, CP, or SP
+        whitelist: incompatible layouts simply do not expose this descriptor.
+        """
+
+        reduction = self.fused_moe.deferred_output_reduction
+        return bool(
+            self.enable_unified_output_allreduce
+            and self.shared_expert is not None
+            and reduction is not None
+            and reduction.group == Group.TP
+            and reduction.partition_size == self.ffn_tp_size
+            and reduction.partition_rank == self.ffn_tp_rank
+            and self.ffn_tp_size > 1
+        )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, _ = hidden_states.shape
@@ -160,11 +194,15 @@ class GenericMoeLayer(nn.Module):
         if self.fake_balance_expert is not None:
             self.fake_balance_expert(topk_ids, topk_weights)
 
+        use_unified_allreduce = self._use_unified_output_allreduce()
         is_ep_mode = self.ep_size > 1
         # EP mode: routed expert output is already complete (EP combine handles it).
         # Shared expert output is TP-partial and needs separate allreduce.
         use_ep_shared_allreduce = (
-            self.shared_expert is not None and self.ffn_tp_size > 1 and is_ep_mode
+            self.shared_expert is not None
+            and self.ffn_tp_size > 1
+            and is_ep_mode
+            and not use_unified_allreduce
         )
 
         experts_output = self.fused_moe(
@@ -172,13 +210,31 @@ class GenericMoeLayer(nn.Module):
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             activation="SiGLU",
+            defer_output_reduction=use_unified_allreduce,
         )
         if self.shared_expert is not None:
             shared_expert_output = self.shared_expert(
                 hidden_states,
-                skip_allreduce=use_ep_shared_allreduce,
+                skip_allreduce=(use_unified_allreduce or use_ep_shared_allreduce),
             )
-            if use_ep_shared_allreduce:
+            if use_unified_allreduce:
+                if self.shared_expert_gate is not None:
+                    gate_output = self.shared_expert_gate(hidden_states)  # [T, 1]
+                    if is_ep_mode:
+                        # Preserve the existing EP gate kernel/rounding path.
+                        shared_expert_output = (
+                            torch.sigmoid(gate_output) * shared_expert_output
+                        )
+                        experts_output = experts_output + shared_expert_output
+                    else:
+                        # Preserve the existing pure-TP fused gate/add path.
+                        self.sigmoid_gate_scale_add(
+                            gate_output, shared_expert_output, experts_output
+                        )
+                else:
+                    experts_output = experts_output + shared_expert_output
+                experts_output = all_reduce(experts_output, group=Group.TP)
+            elif use_ep_shared_allreduce:
                 # EP mode: routed expert output is already complete
                 # (EP combine via all_to_all / all_gather aggregated across ranks).
                 # Only the shared expert output is TP-partial and needs all_reduce.

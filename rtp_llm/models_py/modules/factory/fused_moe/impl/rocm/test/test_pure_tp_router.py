@@ -6,14 +6,23 @@ from unittest.mock import patch
 import torch
 
 from rtp_llm.config.model_config import ModelConfig
-from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import MoEConfigAdapter
-from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import CombineForwardPayload
-from rtp_llm.models_py.modules.factory.fused_moe.defs.quant_config import FusedMoEQuantConfig
+from rtp_llm.models_py.distributed.collective_torch import Group
+from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
+    MoEConfigAdapter,
+)
+from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import (
+    CombineForwardPayload,
+    DeferredOutputReduction,
+)
+from rtp_llm.models_py.modules.factory.fused_moe.defs.quant_config import (
+    FusedMoEQuantConfig,
+)
 from rtp_llm.ops import MoeConfig, ParallelismConfig
 
 
-def _make_config(expert_num=8, moe_k=2, tp_size=1, tp_rank=0,
-                 ep_size=1, ep_rank=0) -> MoEConfigAdapter:
+def _make_config(
+    expert_num=8, moe_k=2, tp_size=1, tp_rank=0, ep_size=1, ep_rank=0
+) -> MoEConfigAdapter:
     model_config = ModelConfig()
     model_config.attn_config.head_num = 4
     model_config.attn_config.size_per_head = 64
@@ -45,14 +54,19 @@ def _make_config(expert_num=8, moe_k=2, tp_size=1, tp_rank=0,
     )
 
 
-def _make_router(expert_num=8, moe_k=2, tp_size=1, tp_rank=0,
-                 ep_size=1, ep_rank=0):
+def _make_router(expert_num=8, moe_k=2, tp_size=1, tp_rank=0, ep_size=1, ep_rank=0):
     from rtp_llm.models_py.modules.factory.fused_moe.impl.rocm.routers.pure_tp_router import (
         PureTpRouterNoQuant,
     )
-    config = _make_config(expert_num=expert_num, moe_k=moe_k,
-                          tp_size=tp_size, tp_rank=tp_rank,
-                          ep_size=ep_size, ep_rank=ep_rank)
+
+    config = _make_config(
+        expert_num=expert_num,
+        moe_k=moe_k,
+        tp_size=tp_size,
+        tp_rank=tp_rank,
+        ep_size=ep_size,
+        ep_rank=ep_rank,
+    )
     quant_config = FusedMoEQuantConfig(quant_dtype=None)
     return PureTpRouterNoQuant(config, quant_config)
 
@@ -67,8 +81,11 @@ class PureTpRouterPrepareTest(TestCase):
         topk_weights = torch.softmax(torch.randn(16, 2), dim=-1).float()
 
         payload = router.prepare(
-            a1=hidden_states, a1_scale=None, a2_scale=None,
-            topk_weights=topk_weights, topk_ids=topk_ids,
+            a1=hidden_states,
+            a1_scale=None,
+            a2_scale=None,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
         )
 
         torch.testing.assert_close(payload.expert_x, hidden_states)
@@ -86,8 +103,11 @@ class PureTpRouterPrepareTest(TestCase):
 
         with self.assertRaises(AssertionError):
             router.prepare(
-                a1=hidden_states, a1_scale=torch.ones(4, 1),
-                a2_scale=None, topk_weights=topk_weights, topk_ids=topk_ids,
+                a1=hidden_states,
+                a1_scale=torch.ones(4, 1),
+                a2_scale=None,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
             )
 
 
@@ -96,6 +116,7 @@ class PureTpRouterFinalizeTest(TestCase):
 
     def test_single_gpu_passthrough(self):
         router = _make_router()
+        self.assertIsNone(router.deferred_output_reduction)
         expert_output = torch.randn(16, 64)
         payload = CombineForwardPayload(fused_expert_output=expert_output)
 
@@ -108,9 +129,15 @@ class PureTpRouterFinalizeTest(TestCase):
         )
         torch.testing.assert_close(result, expert_output)
 
-    @patch("rtp_llm.models_py.modules.factory.fused_moe.impl.rocm.routers.pure_tp_router.all_reduce")
+    @patch(
+        "rtp_llm.models_py.modules.factory.fused_moe.impl.rocm.routers.pure_tp_router.all_reduce"
+    )
     def test_multi_gpu_calls_all_reduce(self, mock_all_reduce):
         router = _make_router(tp_size=2, tp_rank=0)
+        self.assertEqual(
+            router.deferred_output_reduction,
+            DeferredOutputReduction(Group.TP, 2, 0),
+        )
         expert_output = torch.randn(16, 64)
         reduced_output = torch.randn(16, 64)
         mock_all_reduce.return_value = reduced_output
@@ -125,6 +152,29 @@ class PureTpRouterFinalizeTest(TestCase):
         )
         mock_all_reduce.assert_called_once()
         torch.testing.assert_close(result, reduced_output)
+
+    @patch(
+        "rtp_llm.models_py.modules.factory.fused_moe.impl.rocm.routers.pure_tp_router.all_reduce"
+    )
+    def test_multi_gpu_can_defer_tp_all_reduce(self, mock_all_reduce):
+        router = _make_router(tp_size=2, tp_rank=1)
+        expert_output = torch.randn(16, 64)
+
+        result = router.finalize(
+            payload=CombineForwardPayload(fused_expert_output=expert_output),
+            topk_weights=torch.ones(16, 2, dtype=torch.float32),
+            topk_ids=torch.randint(0, 8, (16, 2), dtype=torch.int32),
+            apply_router_weight_on_input=False,
+            extra_finalize_args=None,
+            defer_output_reduction=True,
+        )
+
+        mock_all_reduce.assert_not_called()
+        self.assertIs(result, expert_output)
+        self.assertEqual(
+            router.deferred_output_reduction,
+            DeferredOutputReduction(Group.TP, 2, 1),
+        )
 
 
 class PureTpRouterCheckConditionsTest(TestCase):
@@ -143,6 +193,7 @@ class PureTpRouterCheckConditionsTest(TestCase):
         from rtp_llm.models_py.modules.factory.fused_moe.utils.condition_checker import (
             ConditionChecker,
         )
+
         checker = ConditionChecker("PureTpRouterNoQuant")
         PureTpRouterNoQuant.check_conditions(checker, config)
         return checker.all_passed()
@@ -166,6 +217,7 @@ class PureTpRouterCheckConditionsTest(TestCase):
         """tp=2, dp=1, ep=2 must NOT match pure-TP."""
         config = _make_config(tp_size=2, ep_size=2)
         self.assertFalse(self._check_passes(config))
+
 
 if __name__ == "__main__":
     main()

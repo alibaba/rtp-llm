@@ -14,6 +14,7 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
 )
 from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import (
     CombineForwardPayload,
+    DeferredOutputReduction,
     ExpertForwardPayload,
     ExpertTokensMetadata,
     FusedMoeDataRouter,
@@ -58,12 +59,19 @@ class PureTpRouterBase(FusedMoeDataRouter):
         super().__init__(config, quant_config)
 
         self.tp_size = config.tp_size
+        self.tp_rank = config.tp_rank
         self.ep_size = config.ep_size
         self.ep_rank = config.ep_rank
         self.expert_num = config.expert_num
         self.expert_num_per_rank = self.expert_num // self.ep_size
         self.expert_start_id = self.ep_rank * self.expert_num_per_rank
         self.do_recompute_topk = do_recompute_topk
+
+    @property
+    def deferred_output_reduction(self) -> Optional[DeferredOutputReduction]:
+        if self.tp_size <= 1:
+            return None
+        return DeferredOutputReduction(Group.TP, self.tp_size, self.tp_rank)
 
     @abstractmethod
     def _do_quant(
@@ -116,9 +124,10 @@ class PureTpRouterBase(FusedMoeDataRouter):
         topk_ids: torch.Tensor,
         apply_router_weight_on_input: bool,
         extra_finalize_args: Optional[dict[str, Any]],
+        defer_output_reduction: bool = False,
     ) -> torch.Tensor:
         fused_expert_output = payload.fused_expert_output
-        if self.tp_size > 1:
+        if self.tp_size > 1 and not defer_output_reduction:
             fused_expert_output = all_reduce(fused_expert_output, group=Group.TP)
         return fused_expert_output
 

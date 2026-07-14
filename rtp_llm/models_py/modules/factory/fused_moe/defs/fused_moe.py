@@ -4,6 +4,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Union, final
 
 import torch
 
+from rtp_llm.models_py.distributed.collective_torch import Group
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
 )
@@ -51,6 +52,22 @@ class CombineForwardPayload:
     fused_expert_output: torch.Tensor
 
 
+@dataclass(frozen=True)
+class DeferredOutputReduction:
+    """A router output reduction that may be performed by its caller.
+
+    The descriptor has a deliberately narrow contract: before the reduction,
+    ``finalize`` returns a local partial in original-input token order with
+    shape ``[num_tokens, hidden_size]``.  The only missing operation is a SUM
+    all-reduce over ``group``.  This lets a caller combine another compatible
+    local partial (for example a shared expert) before issuing one collective.
+    """
+
+    group: Group
+    partition_size: int
+    partition_rank: int
+
+
 class FusedMoeDataRouter(ABC):
     def __init__(
         self,
@@ -65,6 +82,16 @@ class FusedMoeDataRouter(ABC):
         """
         self.config = config
         self.quant_config = quant_config
+
+    @property
+    def deferred_output_reduction(self) -> Optional[DeferredOutputReduction]:
+        """Describe a safely deferrable output reduction, if one exists.
+
+        Dispatch/combine, all-gather/reduce-scatter, or token-layout-changing
+        routers must keep the default ``None``.
+        """
+
+        return None
 
     @classmethod
     def router_type(cls) -> RouterType:
@@ -101,6 +128,7 @@ class FusedMoeDataRouter(ABC):
         topk_ids: torch.Tensor,
         apply_router_weight_on_input: bool,
         extra_finalize_args: Optional[Dict[str, Any]],
+        defer_output_reduction: bool = False,
     ) -> torch.Tensor:
         raise NotImplementedError
 
@@ -173,6 +201,10 @@ class FusedMoe(torch.nn.Module):
     def topk_ids_dtype(self) -> torch.dtype:
         return self.fused_experts.topk_ids_dtype
 
+    @property
+    def deferred_output_reduction(self) -> Optional[DeferredOutputReduction]:
+        return self.router.deferred_output_reduction
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -186,9 +218,16 @@ class FusedMoe(torch.nn.Module):
         apply_router_weight_on_input: bool = False,
         extra_expert_args: Optional[Dict[str, Any]] = None,
         extra_finalize_args: Optional[Dict[str, Any]] = None,
+        defer_output_reduction: bool = False,
     ) -> torch.Tensor:
 
         a1 = hidden_states
+
+        if defer_output_reduction and self.deferred_output_reduction is None:
+            raise ValueError(
+                f"{self.router.__class__.__name__} does not expose a safely "
+                "deferrable output reduction"
+            )
 
         expert_payload = self.router.prepare(
             a1,
@@ -229,9 +268,14 @@ class FusedMoe(torch.nn.Module):
         if extra_finalize_args is None:
             extra_finalize_args = {"a1_shape": a1.shape}
         else:
+            # Do not mutate a dictionary owned by the caller.
+            extra_finalize_args = dict(extra_finalize_args)
             extra_finalize_args.update({"a1_shape": a1.shape})
 
         extra_finalize_args.update({"original_num_tokens": hidden_states.size(0)})
+        finalize_kwargs = (
+            {"defer_output_reduction": True} if defer_output_reduction else {}
+        )
 
         output = self.router.finalize(
             combine_payload,
@@ -239,6 +283,7 @@ class FusedMoe(torch.nn.Module):
             expert_payload.expert_topk_ids,
             apply_router_weight_on_input,
             extra_finalize_args,
+            **finalize_kwargs,
         )
 
         assert (
