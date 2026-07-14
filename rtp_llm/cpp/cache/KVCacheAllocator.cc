@@ -180,10 +180,8 @@ void KVCacheAllocator::blockBatchCopy(const BlockIdPair* begin_ptr, const BlockI
             copy_params.add(dst_addr_info.kv_addr, src_addr_info.kv_addr, kv_block_size_bytes, copy_type);
 
             if (src_addr_info.kv_scale_addr && dst_addr_info.kv_scale_addr) {
-                copy_params.add(dst_addr_info.kv_scale_addr,
-                                src_addr_info.kv_scale_addr,
-                                config_.kvScaleStrideBytesForGroup(static_cast<size_t>(group_id)),
-                                copy_type);
+                copy_params.add(
+                    dst_addr_info.kv_scale_addr, src_addr_info.kv_scale_addr, config_.kv_scale_stride_bytes, copy_type);
             }
         }
     }
