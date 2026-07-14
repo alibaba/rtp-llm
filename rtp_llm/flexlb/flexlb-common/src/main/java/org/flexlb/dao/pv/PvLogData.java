@@ -19,7 +19,7 @@ public class PvLogData {
     private long startTime;
     private long requestTimeMs;
     private long arrivalMs;
-    private long decodeUs;
+    private long reqParseUs;
     private long hashWaitUs;
     private long hashUs;
     private long kvcmUs;
@@ -36,7 +36,7 @@ public class PvLogData {
         this.startTime = ctx.getStartTime();
         this.requestTimeMs = ctx.getRequest().getRequestTimeMs();
         this.arrivalMs = ctx.getRequestArrivalDelayMs();
-        this.decodeUs = ctx.getRequestBodyReadAndDeserializeTimeUs();
+        this.reqParseUs = ctx.getRequestBodyReadAndDeserializeTimeUs();
         this.hashWaitUs = ctx.getBlockHashQueueWaitTimeUs();
         this.hashUs = ctx.getBlockHashExecutionTimeUs();
         this.kvcmUs = ctx.getKvcmQueryTimeUs();

@@ -30,7 +30,7 @@ class PvLogDataTest {
         PvLogData data = new PvLogData(context);
 
         assertEquals(500, data.getArrivalMs());
-        assertEquals(9, data.getDecodeUs());
+        assertEquals(9, data.getReqParseUs());
         assertEquals(12, data.getHashWaitUs());
         assertEquals(34, data.getHashUs());
         assertEquals(134, data.getKvcmUs());
@@ -38,7 +38,7 @@ class PvLogDataTest {
 
         String json = JsonUtils.toStringOrEmpty(data);
         assertTrue(json.contains("\"arrivalMs\":500"));
-        assertTrue(json.contains("\"decodeUs\":9"));
+        assertTrue(json.contains("\"reqParseUs\":9"));
         assertTrue(json.contains("\"hashWaitUs\":12"));
         assertTrue(json.contains("\"hashUs\":34"));
         assertTrue(json.contains("\"kvcmUs\":134"));
