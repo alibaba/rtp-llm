@@ -135,9 +135,15 @@ std::vector<GroupBase> buildTaggedGroups(const LayerKVCacheSpecs& runtime_specs,
         return group.policy.group_type == CacheGroupType::FULL;
     });
     RTP_LLM_CHECK_WITH_INFO(!groups.empty(), "hybrid config requires at least one cache group");
-    const bool has_full_group = std::any_of(groups.begin(), groups.end(), [](const GroupBase& group) {
+    const auto full_group_num = std::count_if(groups.begin(), groups.end(), [](const GroupBase& group) {
         return group.policy.group_type == CacheGroupType::FULL;
     });
+    RTP_LLM_CHECK_WITH_INFO(
+        full_group_num <= 1,
+        "multiple full attention cache groups (%zu) are not supported: FMHA parameters bind one block table before "
+        "the layer loop",
+        static_cast<size_t>(full_group_num));
+    const bool has_full_group = full_group_num != 0;
     if (has_full_group
         && (groups[0].policy.group_type != CacheGroupType::FULL || groups[0].spec == nullptr
             || groups[0].spec->tag != "full")) {

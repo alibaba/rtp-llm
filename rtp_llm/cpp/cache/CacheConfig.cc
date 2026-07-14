@@ -203,10 +203,34 @@ void CacheConfig::setTopology(std::vector<GroupBase> new_groups, std::vector<Lay
         }
     }
 
+    for (size_t gid = 0; gid < new_groups.size(); ++gid) {
+        const auto& tag = new_groups[gid].spec->tag;
+        for (int layer_id : new_groups[gid].layer_ids) {
+            const auto& layer = new_layers[static_cast<size_t>(layer_id)];
+            RTP_LLM_CHECK_WITH_INFO(std::find(layer.group_ids.begin(), layer.group_ids.end(), static_cast<int>(gid))
+                                        != layer.group_ids.end(),
+                                    "CacheConfig::setTopology group tag=%s layer %d is missing forward gid %zu",
+                                    tag.c_str(),
+                                    layer_id,
+                                    gid);
+            const auto tag_it = layer.tag_to_gid.find(tag);
+            RTP_LLM_CHECK_WITH_INFO(tag_it != layer.tag_to_gid.end() && tag_it->second == static_cast<int>(gid),
+                                    "CacheConfig::setTopology group tag=%s layer %d is missing tag mapping to gid %zu",
+                                    tag.c_str(),
+                                    layer_id,
+                                    gid);
+        }
+    }
+
     for (size_t layer_id = 0; layer_id < new_layers.size(); ++layer_id) {
         auto& layer = new_layers[layer_id];
         RTP_LLM_CHECK_WITH_INFO(
             !layer.group_ids.empty(), "CacheConfig::setTopology missing group mapping for layer %zu", layer_id);
+        RTP_LLM_CHECK_WITH_INFO(layer.tag_to_gid.size() == layer.group_ids.size(),
+                                "CacheConfig::setTopology layer %zu tag mapping count %zu != group count %zu",
+                                layer_id,
+                                layer.tag_to_gid.size(),
+                                layer.group_ids.size());
         std::unordered_set<int> seen_gids;
         for (int gid : layer.group_ids) {
             RTP_LLM_CHECK_WITH_INFO(gid >= 0 && static_cast<size_t>(gid) < new_groups.size(),
