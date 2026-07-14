@@ -20,6 +20,8 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/copy_engine/CopyEngine.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/copy_engine/TransferTypes.h"
 
+class MemoryOperationRequestPB;
+
 namespace rtp_llm {
 
 class BroadcastManager;
@@ -57,6 +59,10 @@ struct BlockTreeCacheConfig {
 
     // ---- Eviction thread pool ----
     int eviction_thread_pool_size{2};
+
+    // ---- Cross-rank transfer timeout ----
+    int memory_cache_sync_timeout_ms{10000};
+    int memory_cache_disk_sync_timeout_ms{30000};
 
     // ---- L2 Host pool sizing ----
     int64_t memory_cache_size_mb{0};  // 0 = disabled
@@ -131,6 +137,8 @@ public:
     // Release path-lock references acquired during match().
     void releaseMatchedBlocks(const std::vector<GroupBlockSet>& sets);
 
+    CopyStatus executeTransfer(const TransferDescriptor& descriptor);
+
     // ---- Configuration mutators (for runtime adjustment) ----
     void setWatermark(double ratio, size_t device_capacity) {
         config_.watermark_device = {ratio, device_capacity};
@@ -176,6 +184,10 @@ private:
     void             checkWatermark();
     bool             submitEvictionLocked(EvictionMove& eviction_move);
     void             performEvictionCopy(const BlockTreeEvictor::EvictionPlan& plan);
+    bool             buildEvictionTransferRequest(const BlockTreeEvictor::EvictionPlan& plan,
+                                                  ::MemoryOperationRequestPB&           request) const;
+    int              evictionTransferTimeoutMs(const BlockTreeEvictor::EvictionPlan& plan) const;
+    bool             broadcastTransfer(const ::MemoryOperationRequestPB& request, int timeout_ms) const;
 
     // Per-group pool access helpers
     std::shared_ptr<HostBlockPool> hostPoolForGroup(int component_group_id) const;
@@ -192,6 +204,7 @@ private:
     void prepareMatchedLoadBack(const std::vector<TreeNode*>& match_path,
                                 std::vector<LoadBackItem>&     lb_items,
                                 BlockTreeMatchResult&          result);
+    bool executeLoadBackTransferBatch(const std::vector<TransferDescriptor>& descriptors, int timeout_ms);
     void performLoadBack(std::vector<LoadBackItem> items, std::shared_ptr<AsyncContext> ctx);
 
     BlockTreeCacheConfig                       config_;

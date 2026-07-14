@@ -11,10 +11,12 @@
 #include "rtp_llm/cpp/cache/allocator/SingleTypeKVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/SharedBlockCache.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCacheFactory.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeTransferConverter.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/StorageBackend.h"
 #include "rtp_llm/cpp/cache/KVCacheHashUtil.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
+#include "rtp_llm/cpp/model_rpc/BroadcastManager.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/models_py/bindings/core/Types.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
@@ -196,9 +198,14 @@ bool KVCacheManager::init() {
     shared_cache->setIndependentGroupEviction(enable_independent_group_eviction,
                                               allocator_->independentEvictionGroupIds());
 
-    if (metrics_reporter_) {
-        stop_.store(false, std::memory_order_relaxed);
-        metrics_reporter_thread_ = std::thread(&KVCacheManager::reportMetricsLoop, this);
+    const bool requires_broadcast_manager = parallelism_config_.tp_size > 1 && parallelism_config_.tp_rank == 0
+                                            && !runtime_config_.worker_grpc_addrs.empty();
+    std::shared_ptr<BroadcastManager> broadcast_manager = nullptr;
+    if (requires_broadcast_manager) {
+        broadcast_manager = createBlockTreeBroadcastManager();
+        if (!broadcast_manager) {
+            return false;
+        }
     }
 
     // Create BlockTreeCache (unified tier management, replaces coordinator).
@@ -207,8 +214,38 @@ bool KVCacheManager::init() {
                                              allocator_,
                                              parallelism_config_.world_rank,
                                              parallelism_config_.local_rank,
-                                             parallelism_config_.local_world_size);
+                                             parallelism_config_.local_world_size,
+                                             /*swa_configs=*/SWAGroupConfig{},
+                                             /*storage_backend=*/nullptr,
+                                             broadcast_manager);
+    if (!block_tree_cache_) {
+        RTP_LLM_LOG_ERROR("KVCacheManager::init: failed to create BlockTreeCache");
+        return false;
+    }
+
+    if (metrics_reporter_) {
+        stop_.store(false, std::memory_order_relaxed);
+        metrics_reporter_thread_ = std::thread(&KVCacheManager::reportMetricsLoop, this);
+    }
     return true;
+}
+
+std::shared_ptr<BroadcastManager> KVCacheManager::createBlockTreeBroadcastManager() const {
+    const size_t expected_worker_count = static_cast<size_t>(parallelism_config_.tp_size);
+    if (runtime_config_.worker_grpc_addrs.size() != expected_worker_count) {
+        RTP_LLM_LOG_ERROR("KVCacheManager: worker grpc address count mismatch, expected=%zu, actual=%zu",
+                          expected_worker_count,
+                          runtime_config_.worker_grpc_addrs.size());
+        return nullptr;
+    }
+
+    std::shared_ptr<BroadcastManager> broadcast_manager =
+        std::make_shared<BroadcastManager>(runtime_config_.worker_grpc_addrs);
+    if (!broadcast_manager->init()) {
+        RTP_LLM_LOG_ERROR("KVCacheManager: failed to initialize BlockTreeCache BroadcastManager");
+        return nullptr;
+    }
+    return broadcast_manager;
 }
 
 const CacheConfig& KVCacheManager::cacheConfig() const {
@@ -622,8 +659,43 @@ KVCacheManager::asyncStoreCache(const std::shared_ptr<KVCacheConnectorReadWriteC
 }
 
 bool KVCacheManager::executeFunction(const FunctionRequestPB& request, FunctionResponsePB& response) {
-    // Remote/P2P connectors not yet migrated to BlockTreeCache.
-    return false;
+    if (!request.has_mem_request()) {
+        RTP_LLM_LOG_WARNING("KVCacheManager::executeFunction: unsupported request type");
+        return false;
+    }
+    if (!block_tree_cache_) {
+        RTP_LLM_LOG_WARNING("KVCacheManager::executeFunction: block tree cache is not initialized");
+        return false;
+    }
+
+    MemoryOperationResponsePB*      memory_response = response.mutable_mem_response();
+    const MemoryOperationRequestPB& memory_request  = request.mem_request();
+    memory_response->set_success(false);
+
+    if (memory_request.copy_items_size() == 0) {
+        RTP_LLM_LOG_WARNING("KVCacheManager::executeFunction: memory request contains no transfer item");
+        return false;
+    }
+
+    for (int item_index = 0; item_index < memory_request.copy_items_size(); ++item_index) {
+        TransferDescriptor descriptor;
+        const bool decoded = BlockTreeTransferConverter::decodeTransfer(memory_request, item_index, descriptor);
+        if (!decoded) {
+            RTP_LLM_LOG_WARNING("KVCacheManager::executeFunction: invalid transfer item, index=%d", item_index);
+            return false;
+        }
+
+        const CopyStatus status = block_tree_cache_->executeTransfer(descriptor);
+        if (status != CopyStatus::OK) {
+            RTP_LLM_LOG_WARNING("KVCacheManager::executeFunction: transfer failed, index=%d, status=%d",
+                                item_index,
+                                static_cast<int>(status));
+            return false;
+        }
+    }
+
+    memory_response->set_success(true);
+    return true;
 }
 
 void KVCacheManager::handleRead(const P2PConnectorStartLoadRequestPB& request,

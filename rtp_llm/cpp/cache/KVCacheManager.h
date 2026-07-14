@@ -22,6 +22,7 @@ namespace rtp_llm {
 
 class CacheStore;
 class KVCacheConnectorReadWriteContext;
+class BroadcastManager;
 
 class KVCacheManager {
 public:
@@ -145,6 +146,7 @@ public:
 private:
     void allocateAndSync();
     void reportMetricsLoop();
+    std::shared_ptr<BroadcastManager> createBlockTreeBroadcastManager() const;
 
     // 成员变量
     CacheConfig         config_;

@@ -180,16 +180,16 @@ static TransferDescriptor makeDescriptor(Tier                             source
                                          BlockIdxType                     disk_block = NULL_BLOCK_IDX,
                                          int                              group_id   = 0) {
     if (source_tier == Tier::DEVICE && target_tier == Tier::HOST) {
-        return TransferDescriptor::deviceToHost(nullptr, group_id, device_blocks, host_block);
+        return TransferDescriptor::deviceToHost(group_id, device_blocks, host_block);
     }
     if (source_tier == Tier::HOST && target_tier == Tier::DEVICE) {
-        return TransferDescriptor::hostToDevice(nullptr, group_id, host_block, device_blocks);
+        return TransferDescriptor::hostToDevice(group_id, host_block, device_blocks);
     }
     if (source_tier == Tier::HOST && target_tier == Tier::DISK) {
-        return TransferDescriptor::hostToDisk(nullptr, group_id, host_block, disk_block);
+        return TransferDescriptor::hostToDisk(group_id, host_block, disk_block);
     }
     if (source_tier == Tier::DISK && target_tier == Tier::HOST) {
-        return TransferDescriptor::diskToHost(nullptr, group_id, disk_block, host_block);
+        return TransferDescriptor::diskToHost(group_id, disk_block, host_block);
     }
 
     TransferDescriptor desc;
@@ -358,16 +358,22 @@ TEST_F(CopyEngineTest, SubmitInvalidHostBlockReturnsStructuredFailure) {
     EXPECT_EQ(result.status(), CopyStatus::INVALID_ARGS);
 }
 
-TEST_F(CopyEngineTest, SubmitRejectsUnallocatedHostBlock) {
-    auto desc  = makeDescriptor(Tier::DEVICE, Tier::HOST, device_blocks_, 1);
-    auto result = copy_engine_->submit(desc);
+TEST_F(CopyEngineTest, SubmitAcceptsValidUnallocatedHostBlock) {
+    TransferDescriptor descriptor = makeDescriptor(Tier::DEVICE, Tier::HOST, device_blocks_, 1);
+    TransferHandle     result     = copy_engine_->submit(descriptor);
+    EXPECT_TRUE(result.ok());
+}
+
+TEST_F(CopyEngineTest, SubmitRejectsOutOfRangeHostBlock) {
+    const BlockIdxType out_of_range = static_cast<BlockIdxType>(host_pool_->totalBlocksNum() + 1);
+    TransferDescriptor descriptor   = makeDescriptor(Tier::DEVICE, Tier::HOST, device_blocks_, out_of_range);
+    TransferHandle     result       = copy_engine_->submit(descriptor);
     EXPECT_FALSE(result.ok());
     EXPECT_EQ(result.status(), CopyStatus::INVALID_ARGS);
 }
 
-TEST_F(CopyEngineTest, SubmitRejectsUnallocatedDeviceBlock) {
-    // Obtain an in-range device block index that is no longer allocated: malloc then free
-    // guarantees isAllocated() is false while the index stays within the pool's range.
+TEST_F(CopyEngineTest, SubmitAcceptsValidUnallocatedDeviceBlock) {
+    // Worker transfers use a valid logical block ID without local allocator ownership.
     BlockIdxType freed_device_block = poolMalloc(*device_pool_);
     ASSERT_NE(freed_device_block, NULL_BLOCK_IDX);
     device_pool_->free(freed_device_block);
@@ -376,13 +382,30 @@ TEST_F(CopyEngineTest, SubmitRejectsUnallocatedDeviceBlock) {
     BlockIdxType host_block = poolMalloc(*host_pool_);
     ASSERT_NE(host_block, NULL_BLOCK_IDX);
 
-    auto d2h_desc   = makeDescriptor(Tier::DEVICE, Tier::HOST, unallocated_device_blocks, host_block);
-    auto d2h_result = copy_engine_->submit(d2h_desc);
+    TransferDescriptor d2h_descriptor = makeDescriptor(Tier::DEVICE, Tier::HOST, unallocated_device_blocks, host_block);
+    TransferHandle     d2h_result     = copy_engine_->submit(d2h_descriptor);
+    EXPECT_TRUE(d2h_result.ok());
+
+    TransferDescriptor h2d_descriptor = makeDescriptor(Tier::HOST, Tier::DEVICE, unallocated_device_blocks, host_block);
+    TransferHandle     h2d_result     = copy_engine_->submit(h2d_descriptor);
+    EXPECT_TRUE(h2d_result.ok());
+
+    host_pool_->free(host_block);
+}
+
+TEST_F(CopyEngineTest, SubmitRejectsOutOfRangeDeviceBlock) {
+    const BlockIdxType              out_of_range  = static_cast<BlockIdxType>(device_pool_->totalBlocksNum() + 1);
+    const std::vector<BlockIdxType> device_blocks = {out_of_range};
+    const BlockIdxType              host_block    = poolMalloc(*host_pool_);
+    ASSERT_NE(host_block, NULL_BLOCK_IDX);
+
+    TransferDescriptor d2h_descriptor = makeDescriptor(Tier::DEVICE, Tier::HOST, device_blocks, host_block);
+    TransferHandle     d2h_result     = copy_engine_->submit(d2h_descriptor);
     EXPECT_FALSE(d2h_result.ok());
     EXPECT_EQ(d2h_result.status(), CopyStatus::INVALID_ARGS);
 
-    auto h2d_desc   = makeDescriptor(Tier::HOST, Tier::DEVICE, unallocated_device_blocks, host_block);
-    auto h2d_result = copy_engine_->submit(h2d_desc);
+    TransferDescriptor h2d_descriptor = makeDescriptor(Tier::HOST, Tier::DEVICE, device_blocks, host_block);
+    TransferHandle     h2d_result     = copy_engine_->submit(h2d_descriptor);
     EXPECT_FALSE(h2d_result.ok());
     EXPECT_EQ(h2d_result.status(), CopyStatus::INVALID_ARGS);
 
@@ -675,11 +698,21 @@ TEST_F(CopyEngineHostDiskTest, SubmitHostToDiskRoundTrip) {
 // in a dedicated integration test once a dedicated integration test target exists. It does
 // not belong in these CopyEngine unit tests.
 
-TEST_F(CopyEngineHostDiskTest, SubmitHostToDiskRejectsUnallocatedDiskBlock) {
+TEST_F(CopyEngineHostDiskTest, SubmitHostToDiskAcceptsValidUnallocatedDiskBlock) {
     BlockIdxType host_block = poolMalloc(*host_pool_);
     ASSERT_NE(host_block, NULL_BLOCK_IDX);
-    auto desc = makeDescriptor(Tier::HOST, Tier::DISK, {}, host_block, 1);
-    auto result = copy_engine_->submit(desc);
+    TransferDescriptor descriptor = makeDescriptor(Tier::HOST, Tier::DISK, {}, host_block, 1);
+    TransferHandle     result     = copy_engine_->submit(descriptor);
+    EXPECT_TRUE(result.ok());
+    host_pool_->free(host_block);
+}
+
+TEST_F(CopyEngineHostDiskTest, SubmitHostToDiskRejectsOutOfRangeDiskBlock) {
+    BlockIdxType host_block = poolMalloc(*host_pool_);
+    ASSERT_NE(host_block, NULL_BLOCK_IDX);
+    const BlockIdxType out_of_range = static_cast<BlockIdxType>(disk_pool_->totalBlocksNum() + 1);
+    TransferDescriptor descriptor   = makeDescriptor(Tier::HOST, Tier::DISK, {}, host_block, out_of_range);
+    TransferHandle     result       = copy_engine_->submit(descriptor);
     EXPECT_FALSE(result.ok());
     EXPECT_EQ(result.status(), CopyStatus::INVALID_ARGS);
     host_pool_->free(host_block);

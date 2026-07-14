@@ -13,12 +13,14 @@
 #include "rtp_llm/cpp/cache/allocator/HybridPoolKVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/config_creator/HybridPoolConfigCreator.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeTransferConverter.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/cache/test/BlockPoolTestHelper.h"
 #include "rtp_llm/cpp/cache/test/mock/MockKVCacheAllocator.h"
 #include "rtp_llm/cpp/config/ModelConfig.h"
 #include "rtp_llm/cpp/config/StaticConfig.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
+#include "rtp_llm/cpp/model_rpc/BroadcastManager.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
 namespace rtp_llm {
@@ -901,6 +903,128 @@ TEST_F(KVCacheManagerTest, AsyncMethodsReturnNull_WithoutStorageBackend) {
     FunctionRequestPB  request;
     FunctionResponsePB response;
     EXPECT_FALSE(kv_cache_manager->executeFunction(request, response));
+}
+
+TEST_F(KVCacheManagerTest, ExecuteFunctionRejectsEmptyTransferRequest) {
+    CacheConfig   cache_config = makeSimpleMhaCacheConfig(1, 4, 2, rtp_llm::DataType::TYPE_INT8);
+    KVCacheConfig kv_cache_config;
+
+    std::shared_ptr<KVCacheManager> kv_cache_manager =
+        std::make_shared<KVCacheManager>(cache_config, false, nullptr, kv_cache_config);
+    ASSERT_TRUE(kv_cache_manager->init());
+
+    FunctionRequestPB         request;
+    FunctionResponsePB        response;
+    MemoryOperationRequestPB* memory_request = request.mutable_mem_request();
+    ASSERT_NE(memory_request, nullptr);
+
+    EXPECT_FALSE(kv_cache_manager->executeFunction(request, response));
+    ASSERT_TRUE(response.has_mem_response());
+    EXPECT_FALSE(response.mem_response().success());
+}
+
+static void expectExecuteFunctionRoutesTransferLocally(const std::shared_ptr<KVCacheManager>& kv_cache_manager) {
+    const TransferDescriptor  descriptor = TransferDescriptor::deviceToHost(0, {1}, 1);
+    FunctionRequestPB         request;
+    MemoryOperationRequestPB* memory_request = request.mutable_mem_request();
+    ASSERT_NE(memory_request, nullptr);
+    ASSERT_TRUE(BlockTreeTransferConverter::appendTransfer(descriptor, *memory_request));
+
+    FunctionResponsePB response;
+    // Factory does not build component layouts yet; the structured failure confirms local CopyEngine routing.
+    EXPECT_FALSE(kv_cache_manager->executeFunction(request, response));
+    ASSERT_TRUE(response.has_mem_response());
+    EXPECT_FALSE(response.mem_response().success());
+}
+
+TEST_F(KVCacheManagerTest, ExecuteFunctionRoutesTransferLocally) {
+    CacheConfig   cache_config = makeSimpleMhaCacheConfig(1, 4, 2, rtp_llm::DataType::TYPE_INT8);
+    KVCacheConfig kv_cache_config;
+
+    std::shared_ptr<KVCacheManager> kv_cache_manager =
+        std::make_shared<KVCacheManager>(cache_config, false, nullptr, kv_cache_config);
+    ASSERT_TRUE(kv_cache_manager->init());
+    BlockTreeCachePtr block_tree_cache = kv_cache_manager->blockTreeCache();
+    ASSERT_NE(block_tree_cache, nullptr);
+    ASSERT_EQ(block_tree_cache->broadcast_manager_, nullptr);
+
+    expectExecuteFunctionRoutesTransferLocally(kv_cache_manager);
+}
+
+TEST_F(KVCacheManagerTest, SingleRankDoesNotCreateBroadcastManagerWhenAddressConfigured) {
+    CacheConfig   cache_config = makeSimpleMhaCacheConfig(1, 4, 2, rtp_llm::DataType::TYPE_INT8);
+    KVCacheConfig kv_cache_config;
+    RuntimeConfig runtime_config;
+    runtime_config.worker_grpc_addrs = {"127.0.0.1:12345"};
+
+    std::shared_ptr<KVCacheManager> kv_cache_manager =
+        std::make_shared<KVCacheManager>(cache_config,
+                                         /*warmup=*/true,
+                                         /*metrics_reporter=*/nullptr,
+                                         kv_cache_config,
+                                         ParallelismConfig{},
+                                         runtime_config);
+    ASSERT_TRUE(kv_cache_manager->init());
+    BlockTreeCachePtr block_tree_cache = kv_cache_manager->blockTreeCache();
+    ASSERT_NE(block_tree_cache, nullptr);
+    EXPECT_EQ(block_tree_cache->broadcast_manager_, nullptr);
+}
+
+TEST_F(KVCacheManagerTest, RankZeroCreatesBroadcastManagerAndRoutesLocally) {
+    CacheConfig       cache_config = makeSimpleMhaCacheConfig(1, 4, 2, rtp_llm::DataType::TYPE_INT8);
+    KVCacheConfig     kv_cache_config;
+    ParallelismConfig parallelism_config;
+    RuntimeConfig     runtime_config;
+    parallelism_config.tp_size       = 2;
+    parallelism_config.tp_rank       = 0;
+    parallelism_config.world_size    = 2;
+    runtime_config.worker_grpc_addrs = {"127.0.0.1:12345", "127.0.0.1:12346"};
+
+    std::shared_ptr<KVCacheManager> kv_cache_manager = std::make_shared<KVCacheManager>(
+        cache_config, true, nullptr, kv_cache_config, parallelism_config, runtime_config);
+    ASSERT_TRUE(kv_cache_manager->init());
+
+    BlockTreeCachePtr block_tree_cache = kv_cache_manager->blockTreeCache();
+    ASSERT_NE(block_tree_cache, nullptr);
+    ASSERT_NE(block_tree_cache->broadcast_manager_, nullptr);
+    EXPECT_EQ(block_tree_cache->broadcast_manager_->workerNum(), 2u);
+    expectExecuteFunctionRoutesTransferLocally(kv_cache_manager);
+}
+
+TEST_F(KVCacheManagerTest, NonZeroRankRoutesTransferWithoutBroadcastManager) {
+    CacheConfig       cache_config = makeSimpleMhaCacheConfig(1, 4, 2, rtp_llm::DataType::TYPE_INT8);
+    KVCacheConfig     kv_cache_config;
+    ParallelismConfig parallelism_config;
+    RuntimeConfig     runtime_config;
+    parallelism_config.tp_size       = 2;
+    parallelism_config.tp_rank       = 1;
+    parallelism_config.world_size    = 2;
+    parallelism_config.world_rank    = 1;
+    runtime_config.worker_grpc_addrs = {"127.0.0.1:12345", "127.0.0.1:12346"};
+
+    std::shared_ptr<KVCacheManager> kv_cache_manager = std::make_shared<KVCacheManager>(
+        cache_config, true, nullptr, kv_cache_config, parallelism_config, runtime_config);
+    ASSERT_TRUE(kv_cache_manager->init());
+
+    BlockTreeCachePtr block_tree_cache = kv_cache_manager->blockTreeCache();
+    ASSERT_NE(block_tree_cache, nullptr);
+    ASSERT_EQ(block_tree_cache->broadcast_manager_, nullptr);
+    expectExecuteFunctionRoutesTransferLocally(kv_cache_manager);
+}
+
+TEST_F(KVCacheManagerTest, RankZeroRejectsMismatchedWorkerAddressCount) {
+    CacheConfig       cache_config = makeSimpleMhaCacheConfig(1, 4, 2, rtp_llm::DataType::TYPE_INT8);
+    KVCacheConfig     kv_cache_config;
+    ParallelismConfig parallelism_config;
+    RuntimeConfig     runtime_config;
+    parallelism_config.tp_size       = 2;
+    parallelism_config.tp_rank       = 0;
+    parallelism_config.world_size    = 2;
+    runtime_config.worker_grpc_addrs = {"127.0.0.1:12345"};
+
+    std::shared_ptr<KVCacheManager> kv_cache_manager = std::make_shared<KVCacheManager>(
+        cache_config, true, nullptr, kv_cache_config, parallelism_config, runtime_config);
+    EXPECT_FALSE(kv_cache_manager->init());
 }
 
 TEST_F(KVCacheManagerTest, GetKVCacheInfo_UsesSmallestHybridPoolTokenCapacity) {

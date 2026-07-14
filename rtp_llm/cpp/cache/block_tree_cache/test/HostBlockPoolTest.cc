@@ -89,6 +89,16 @@ TEST(HostBlockPoolTest, BlockBufferReturnsBasePlusBlockStride) {
     EXPECT_EQ(actual_diff, expected_diff);
 }
 
+TEST(HostBlockPoolTest, BlockBufferAcceptsValidUnallocatedBlock) {
+    std::shared_ptr<HostBlockPoolConfig> config = makeConfig();
+    HostBlockPool                        pool(config);
+    ASSERT_TRUE(pool.init());
+
+    HostBlockBuffer buffer = pool.blockBuffer(1);
+    EXPECT_EQ(buffer.block, 1);
+    EXPECT_NE(buffer.addr, nullptr);
+}
+
 TEST(HostBlockPoolTest, PinnedFallbackDoesNotFailInit) {
     auto          config = makeConfig(/*physical_block_count=*/4,
                              /*payload_bytes=*/1024,

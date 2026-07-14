@@ -64,8 +64,8 @@ public:
     // Address of one (layer, block) for the allocator/device-copy fast path.
     BlockAddrInfo convertIndexToAddr(int layer_id, BlockIdxType block) const;
 
-    // Backing buffer(s) for one (layer, block), the allocator/device-copy view. CHECK-fails
-    // if the pool is uninitialized or the block is not allocated.
+    // Backing buffer(s) for one (layer, block), including externally assigned valid block IDs.
+    // CHECK-fails if the pool is uninitialized or the block is out of range.
     std::vector<DeviceBlockBuffer> blockBuffers(int layer_id, BlockIdxType block) const;
     std::vector<DeviceBlockBuffer>
     blockBuffers(int layer_id, BlockIdxType block, int partition_count, int partition_id) const;

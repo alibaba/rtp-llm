@@ -1,6 +1,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCacheFactory.h"
 
 #include <cstdlib>
+#include <limits>
 #include <string>
 
 #include "rtp_llm/cpp/utils/StringUtil.h"
@@ -58,6 +59,15 @@ constexpr size_t kBlockTreeCachePoolAlignment = 4096;
 
 size_t alignUp(size_t value, size_t alignment) {
     return ((value + alignment - 1) / alignment) * alignment;
+}
+
+int checkedTransferTimeoutMs(int64_t timeout_ms, const char* config_name) {
+    RTP_LLM_CHECK_WITH_INFO(timeout_ms > 0 && timeout_ms <= std::numeric_limits<int>::max(),
+                            "%s must be in range (0, %d], got %ld",
+                            config_name,
+                            std::numeric_limits<int>::max(),
+                            timeout_ms);
+    return static_cast<int>(timeout_ms);
 }
 
 // Create v4 HostBlockPool for L2 memory cache.
@@ -241,6 +251,14 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
     config.enable_memory_cache = kv_cache_config.enable_memory_cache;
     config.enable_disk_cache   = kv_cache_config.enable_memory_cache_disk;
     config.enable_remote_cache = kv_cache_config.enable_remote_cache;
+    config.memory_cache_sync_timeout_ms =
+        checkedTransferTimeoutMs(kv_cache_config.memory_cache_sync_timeout_ms, "memory_cache_sync_timeout_ms");
+    if (config.enable_disk_cache) {
+        config.memory_cache_disk_sync_timeout_ms = checkedTransferTimeoutMs(
+            kv_cache_config.memory_cache_disk_sync_timeout_ms, "memory_cache_disk_sync_timeout_ms");
+    } else {
+        config.memory_cache_disk_sync_timeout_ms = config.memory_cache_sync_timeout_ms;
+    }
 
     // 8. Assemble and return BlockTreeCache.
     auto cache = std::make_shared<BlockTreeCache>(std::move(tree),

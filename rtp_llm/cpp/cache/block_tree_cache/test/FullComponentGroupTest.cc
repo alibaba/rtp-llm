@@ -176,11 +176,10 @@ TEST_F(FullComponentGroupTest, BuildTransferD2H) {
     auto* node = makeNode(100);
     setDeviceBlock(node, 0, 42);
 
-    auto desc = group_->buildTransfer(node, TransferType::DEVICE_TO_HOST);
+    TransferDescriptor desc = group_->buildTransfer(node, TransferType::DEVICE_TO_HOST);
     EXPECT_EQ(desc.source_tier, Tier::DEVICE);
     EXPECT_EQ(desc.target_tier, Tier::HOST);
     EXPECT_EQ(desc.component_group_id, 0);
-    EXPECT_EQ(desc.node, node);
     ASSERT_EQ(desc.device_blocks.size(), 1u);
     EXPECT_EQ(desc.device_blocks[0], 42);
 

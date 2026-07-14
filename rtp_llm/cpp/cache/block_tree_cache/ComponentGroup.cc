@@ -140,13 +140,13 @@ TransferDescriptor ComponentGroup::buildTransfer(TreeNode* node, TransferType ty
 
     switch (type) {
         case TransferType::DEVICE_TO_HOST:
-            return TransferDescriptor::deviceToHost(node, component_group_id, slot.device_blocks, NULL_BLOCK_IDX);
+            return TransferDescriptor::deviceToHost(component_group_id, slot.device_blocks, NULL_BLOCK_IDX);
         case TransferType::HOST_TO_DEVICE:
-            return TransferDescriptor::hostToDevice(node, component_group_id, slot.host_block, slot.device_blocks);
+            return TransferDescriptor::hostToDevice(component_group_id, slot.host_block, slot.device_blocks);
         case TransferType::HOST_TO_DISK:
-            return TransferDescriptor::hostToDisk(node, component_group_id, slot.host_block, NULL_BLOCK_IDX);
+            return TransferDescriptor::hostToDisk(component_group_id, slot.host_block, NULL_BLOCK_IDX);
         case TransferType::DISK_TO_HOST:
-            return TransferDescriptor::diskToHost(node, component_group_id, slot.disk_slot, NULL_BLOCK_IDX);
+            return TransferDescriptor::diskToHost(component_group_id, slot.disk_slot, NULL_BLOCK_IDX);
         default:
             return {};
     }

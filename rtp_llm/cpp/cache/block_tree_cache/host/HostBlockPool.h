@@ -28,7 +28,7 @@ struct HostBlockBuffer {
 // host memory tensor (pinned when possible, falling back to pageable memory). All
 // lifecycle behavior (malloc/free/incRef/decRef/metrics) is inherited unchanged from
 // IBlockPool; this class only owns the host backing tensor and exposes blockBuffer()
-// to map an allocated block index to its backing address.
+// to map a valid physical block index to its backing address.
 class HostBlockPool: public IBlockPool {
 public:
     explicit HostBlockPool(std::shared_ptr<const HostBlockPoolConfig> config);
@@ -42,8 +42,8 @@ public:
 
     bool isPinned() const;
 
-    // Returns the backing buffer for an allocated block. RTP_LLM_CHECK-fails if the
-    // pool is not initialized or the block is not currently allocated.
+    // Returns the backing buffer for a valid physical block. RTP_LLM_CHECK-fails if
+    // the pool is not initialized or the block index is out of range.
     HostBlockBuffer blockBuffer(BlockIdxType block) const;
 
     size_t payloadBytes() const;

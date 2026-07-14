@@ -144,7 +144,7 @@ bool HostBlockPool::isPinned() const {
 
 HostBlockBuffer HostBlockPool::blockBuffer(BlockIdxType block) const {
     RTP_LLM_CHECK(initialized());
-    RTP_LLM_CHECK(isAllocated(block));
+    RTP_LLM_CHECK(validBlock(block));
     const auto& cfg = config();
     void*       addr =
         static_cast<uint8_t*>(base_ptr_) + static_cast<size_t>(block) * cfg.stride_bytes;

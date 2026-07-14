@@ -52,12 +52,12 @@ CopyStatus HostDiskTransferExecutor::hostToDisk(const TransferDescriptor& desc, 
     const auto disk_block = desc.disk_block;
     auto&      host_pool  = *layout.host_pool;
     auto&      disk_pool  = *layout.disk_pool;
-    if (!host_pool.isAllocated(host_block)) {
-        RTP_LLM_LOG_WARNING("invalid or unallocated host block %d", host_block);
+    if (!host_pool.validBlock(host_block)) {
+        RTP_LLM_LOG_WARNING("invalid host block %d", host_block);
         return CopyStatus::INVALID_ARGS;
     }
-    if (!disk_pool.isAllocated(disk_block)) {
-        RTP_LLM_LOG_WARNING("invalid or unallocated disk block %d", disk_block);
+    if (!disk_pool.validBlock(disk_block)) {
+        RTP_LLM_LOG_WARNING("invalid disk block %d", disk_block);
         return CopyStatus::INVALID_ARGS;
     }
     if (host_pool.payloadBytes() != disk_pool.payloadBytes()) {
@@ -87,12 +87,12 @@ CopyStatus HostDiskTransferExecutor::diskToHost(const TransferDescriptor& desc, 
     const auto host_block = desc.host_block;
     auto&      host_pool  = *layout.host_pool;
     auto&      disk_pool  = *layout.disk_pool;
-    if (!host_pool.isAllocated(host_block)) {
-        RTP_LLM_LOG_WARNING("invalid or unallocated host block %d", host_block);
+    if (!host_pool.validBlock(host_block)) {
+        RTP_LLM_LOG_WARNING("invalid host block %d", host_block);
         return CopyStatus::INVALID_ARGS;
     }
-    if (!disk_pool.isAllocated(disk_block)) {
-        RTP_LLM_LOG_WARNING("invalid or unallocated disk block %d", disk_block);
+    if (!disk_pool.validBlock(disk_block)) {
+        RTP_LLM_LOG_WARNING("invalid disk block %d", disk_block);
         return CopyStatus::INVALID_ARGS;
     }
     if (host_pool.payloadBytes() != disk_pool.payloadBytes()) {

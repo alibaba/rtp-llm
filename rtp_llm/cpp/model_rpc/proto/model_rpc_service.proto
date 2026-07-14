@@ -476,11 +476,17 @@ message MemoryOperationRequestPB {
         oneof src_disk_slot_presence {
             int32 src_disk_slot = 10;
         }
+        oneof component_group_id_presence {
+            int32 component_group_id = 11;
+        }
     }
     enum CopyDirection {
         H2D = 0;
         D2H = 1;
+        H2DISK = 2;
+        DISK2H = 3;
     }
+    // TODO: Rename MEMORY to HOST and simplify backing fields after removing the legacy Memory Connector.
     enum BackingType {
         MEMORY = 0;
         DISK = 1;

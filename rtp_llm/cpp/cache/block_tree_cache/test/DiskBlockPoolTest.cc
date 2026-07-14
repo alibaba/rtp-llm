@@ -257,7 +257,7 @@ TEST(DiskBlockPoolTest, MallocReturnsAscendingBlocks) {
     ::remove(pool.filePath().c_str());
 }
 
-TEST(DiskBlockPoolTest, ReadWriteRequireAllocatedBlock) {
+TEST(DiskBlockPoolTest, ReadWriteAcceptValidPhysicalBlock) {
     auto          config = makeDiskConfig(::testing::TempDir());
     DiskBlockPool pool(config);
     ASSERT_TRUE(pool.init());
@@ -276,14 +276,18 @@ TEST(DiskBlockPoolTest, ReadWriteRequireAllocatedBlock) {
     std::vector<unsigned char> too_big(pool.strideBytes() + 1, 0);
     EXPECT_EQ(pool.write(*block, too_big.data(), too_big.size()), BlockIOStatus::INVALID_SIZE);
 
-    // A valid, in-range block index that was never malloc'd -> INVALID_BLOCK.
+    // Workers use rank 0's physical index without allocating it in their local pool.
     const BlockIdxType unallocated = *block + 1;
-    EXPECT_EQ(pool.write(unallocated, data.data(), data.size()), BlockIOStatus::INVALID_BLOCK);
-    EXPECT_EQ(pool.read(unallocated, read_buf.data(), read_buf.size()), BlockIOStatus::INVALID_BLOCK);
+    EXPECT_EQ(pool.write(unallocated, data.data(), data.size()), BlockIOStatus::OK);
+    EXPECT_EQ(pool.read(unallocated, read_buf.data(), read_buf.size()), BlockIOStatus::OK);
 
-    // Once freed, the same block index becomes unallocated again.
+    // Freeing changes ownership bookkeeping, not physical index accessibility.
     pool.free(*block);
-    EXPECT_EQ(pool.write(*block, data.data(), data.size()), BlockIOStatus::INVALID_BLOCK);
+    EXPECT_EQ(pool.write(*block, data.data(), data.size()), BlockIOStatus::OK);
+
+    const BlockIdxType out_of_range = static_cast<BlockIdxType>(pool.totalBlocksNum() + 1);
+    EXPECT_EQ(pool.write(out_of_range, data.data(), data.size()), BlockIOStatus::INVALID_BLOCK);
+    EXPECT_EQ(pool.read(out_of_range, read_buf.data(), read_buf.size()), BlockIOStatus::INVALID_BLOCK);
 
     ::remove(pool.filePath().c_str());
 }

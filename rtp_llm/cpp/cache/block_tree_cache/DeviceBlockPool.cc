@@ -380,14 +380,14 @@ DeviceBlockPool::convertIndexToBuffer(int layer_id, BlockIdxType block, int part
 
 std::vector<DeviceBlockBuffer> DeviceBlockPool::blockBuffers(int layer_id, BlockIdxType block) const {
     RTP_LLM_CHECK(initialized());
-    RTP_LLM_CHECK(isAllocated(block));
+    RTP_LLM_CHECK(validBlock(block));
     return toDeviceBlockBuffers(convertIndexToBuffer(layer_id, block), block);
 }
 
 std::vector<DeviceBlockBuffer>
 DeviceBlockPool::blockBuffers(int layer_id, BlockIdxType block, int partition_count, int partition_id) const {
     RTP_LLM_CHECK(initialized());
-    RTP_LLM_CHECK(isAllocated(block));
+    RTP_LLM_CHECK(validBlock(block));
     return toDeviceBlockBuffers(convertIndexToBuffer(layer_id, block, partition_count, partition_id), block);
 }
 

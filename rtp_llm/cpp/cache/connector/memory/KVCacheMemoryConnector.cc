@@ -1533,9 +1533,16 @@ void KVCacheMemoryConnector::printCopyPlan(const std::shared_ptr<CopyPlan>& copy
 bool KVCacheMemoryConnector::copyCache(const MemoryOperationRequestPB& request, MemoryOperationResponsePB& response) {
     RTP_LLM_PROFILE_FUNCTION();
     autil::ScopedTime2 timer;
-    CopyDirection copy_direction = CopyDirection::D2H;
+    CopyDirection copy_direction;
     if (request.copy_direction() == MemoryOperationRequestPB::H2D) {
         copy_direction = CopyDirection::H2D;
+    } else if (request.copy_direction() == MemoryOperationRequestPB::D2H) {
+        copy_direction = CopyDirection::D2H;
+    } else {
+        RTP_LLM_LOG_WARNING("memory connector does not support copy_direction=%d",
+                            static_cast<int>(request.copy_direction()));
+        response.set_success(false);
+        return false;
     }
     const auto slots            = layerTagSlots();
     const bool has_typed_slots  = hasTypedLayerTagSlots(slots);

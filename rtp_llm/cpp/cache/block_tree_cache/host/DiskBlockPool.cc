@@ -118,7 +118,7 @@ bool DiskBlockPool::init() {
 
 BlockIOStatus DiskBlockPool::read(BlockIdxType block, void* dst, size_t bytes) {
     RTP_LLM_CHECK(initialized());
-    if (!isAllocated(block)) {
+    if (!validBlock(block)) {
         return BlockIOStatus::INVALID_BLOCK;
     }
     if (bytes == 0 || bytes > strideBytes()) {
@@ -133,7 +133,7 @@ BlockIOStatus DiskBlockPool::read(BlockIdxType block, void* dst, size_t bytes) {
 
 BlockIOStatus DiskBlockPool::write(BlockIdxType block, const void* src, size_t bytes) {
     RTP_LLM_CHECK(initialized());
-    if (!isAllocated(block)) {
+    if (!validBlock(block)) {
         return BlockIOStatus::INVALID_BLOCK;
     }
     if (bytes == 0 || bytes > strideBytes()) {
@@ -157,7 +157,7 @@ BlockIOStatus DiskBlockPool::read(const BlockIdList& blocks, const std::vector<v
         return BlockIOStatus::INVALID_SIZE;
     }
     for (const auto block : blocks) {
-        if (!isAllocated(block)) {
+        if (!validBlock(block)) {
             return BlockIOStatus::INVALID_BLOCK;
         }
     }
@@ -186,7 +186,7 @@ DiskBlockPool::write(const BlockIdList& blocks, const std::vector<const void*>& 
         return BlockIOStatus::INVALID_SIZE;
     }
     for (const auto block : blocks) {
-        if (!isAllocated(block)) {
+        if (!validBlock(block)) {
             return BlockIOStatus::INVALID_BLOCK;
         }
     }

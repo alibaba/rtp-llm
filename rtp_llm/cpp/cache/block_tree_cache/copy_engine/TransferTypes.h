@@ -54,12 +54,10 @@ private:
 };
 
 struct TransferDescriptor {
-    static TransferDescriptor deviceToHost(TreeNode*                 node,
-                                           int                       component_group_id,
+    static TransferDescriptor deviceToHost(int                       component_group_id,
                                            std::vector<BlockIdxType> device_blocks,
                                            BlockIdxType              host_block) {
         TransferDescriptor desc;
-        desc.node               = node;
         desc.component_group_id = component_group_id;
         desc.source_tier        = Tier::DEVICE;
         desc.target_tier        = Tier::HOST;
@@ -68,12 +66,10 @@ struct TransferDescriptor {
         return desc;
     }
 
-    static TransferDescriptor hostToDevice(TreeNode*                 node,
-                                           int                       component_group_id,
+    static TransferDescriptor hostToDevice(int                       component_group_id,
                                            BlockIdxType              host_block,
                                            std::vector<BlockIdxType> device_blocks) {
         TransferDescriptor desc;
-        desc.node               = node;
         desc.component_group_id = component_group_id;
         desc.source_tier        = Tier::HOST;
         desc.target_tier        = Tier::DEVICE;
@@ -82,12 +78,10 @@ struct TransferDescriptor {
         return desc;
     }
 
-    static TransferDescriptor hostToDisk(TreeNode*    node,
-                                         int          component_group_id,
+    static TransferDescriptor hostToDisk(int          component_group_id,
                                          BlockIdxType host_block,
                                          BlockIdxType disk_block) {
         TransferDescriptor desc;
-        desc.node               = node;
         desc.component_group_id = component_group_id;
         desc.source_tier        = Tier::HOST;
         desc.target_tier        = Tier::DISK;
@@ -96,12 +90,10 @@ struct TransferDescriptor {
         return desc;
     }
 
-    static TransferDescriptor diskToHost(TreeNode*    node,
-                                         int          component_group_id,
+    static TransferDescriptor diskToHost(int          component_group_id,
                                          BlockIdxType disk_block,
                                          BlockIdxType host_block) {
         TransferDescriptor desc;
-        desc.node               = node;
         desc.component_group_id = component_group_id;
         desc.source_tier        = Tier::DISK;
         desc.target_tier        = Tier::HOST;
@@ -110,7 +102,6 @@ struct TransferDescriptor {
         return desc;
     }
 
-    TreeNode* node{nullptr};
     int       component_group_id{-1};
     Tier      source_tier{Tier::NONE};
     Tier      target_tier{Tier::NONE};

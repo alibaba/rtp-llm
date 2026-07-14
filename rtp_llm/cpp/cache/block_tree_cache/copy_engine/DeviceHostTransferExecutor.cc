@@ -68,8 +68,8 @@ DeviceHostCopyPlan DeviceHostTransferExecutor::lowerPlan(const TransferDescripto
     const auto  host_block = desc.host_block;
     auto&       host_pool  = *layout.host_pool;
 
-    if (!host_pool.isAllocated(host_block)) {
-        RTP_LLM_LOG_WARNING("invalid or unallocated host block %d", host_block);
+    if (!host_pool.validBlock(host_block)) {
+        RTP_LLM_LOG_WARNING("invalid host block %d", host_block);
         out_status = CopyStatus::INVALID_ARGS;
         return plan;
     }
@@ -105,8 +105,8 @@ DeviceHostCopyPlan DeviceHostTransferExecutor::lowerPlan(const TransferDescripto
 
         const bool has_device_block = !isNullBlockIdx(device_block);
         auto&      device_pool      = *component.device_pool;
-        if (has_device_block && !device_pool.isAllocated(device_block)) {
-            RTP_LLM_LOG_WARNING("invalid or unallocated device block %d", device_block);
+        if (has_device_block && !device_pool.validBlock(device_block)) {
+            RTP_LLM_LOG_WARNING("invalid device block %d", device_block);
             out_status = CopyStatus::INVALID_ARGS;
             return plan;
         }

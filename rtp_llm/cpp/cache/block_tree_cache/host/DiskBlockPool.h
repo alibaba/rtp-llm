@@ -42,8 +42,8 @@ struct DiskBlockPoolConfig: public BlockPoolConfigBase {
 // default, or an injected implementation for tests). All lifecycle behavior
 // (malloc/free/incRef/decRef/metrics) is inherited unchanged from IBlockPool; this
 // class only owns the disk backing file and maps block indices to file offsets via
-// blockOffset(). Unlike the incRef/decRef refcount, read()/write() only check
-// isAllocated(block) - this is a single-refcount I/O model, not a shared one.
+// blockOffset(). Unlike the incRef/decRef refcount, read()/write() only check that
+// the physical block index is valid, so the same rank-0 index can be used on workers.
 class DiskBlockPool: public IBlockPool {
 public:
     explicit DiskBlockPool(std::shared_ptr<const DiskBlockPoolConfig> config,
@@ -57,13 +57,13 @@ public:
     // enforced via RTP_LLM_CHECK.
     bool init();
 
-    // Single-block read/write. Only isAllocated(block) is checked (not refCount());
-    // block 0 and any invalid/unallocated block return INVALID_BLOCK. bytes greater
+    // Single-block read/write. Only validBlock(block) is checked (not allocation/refCount);
+    // block 0 and any out-of-range block return INVALID_BLOCK. bytes greater
     // than strideBytes() returns INVALID_SIZE.
     BlockIOStatus read(BlockIdxType block, void* dst, size_t bytes);
     BlockIOStatus write(BlockIdxType block, const void* src, size_t bytes);
 
-    // Batch read/write. Every block is validated (isAllocated) and bytes_per_block is
+    // Batch read/write. Every block is validated with validBlock() and bytes_per_block is
     // validated against strideBytes() before any I/O is issued; on success the
     // underlying DiskBlockIO batch call is driven in blocks[] order.
     BlockIOStatus read(const BlockIdList& blocks, const std::vector<void*>& dsts, size_t bytes_per_block);

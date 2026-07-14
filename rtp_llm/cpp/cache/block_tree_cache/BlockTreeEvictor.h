@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <vector>
@@ -8,12 +9,14 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTree.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/ComponentGroup.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/StorageBackend.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/copy_engine/CopyEngine.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/copy_engine/TransferTypes.h"
 
 namespace rtp_llm {
 
 class BlockTreeEvictor {
 public:
+    using ExecuteTransferFn = std::function<CopyStatus(const TransferDescriptor&)>;
+
     struct EvictionPlan {
         EvictionMove            primary;
         std::vector<EvictionMove> cascade_moves;
@@ -30,7 +33,7 @@ public:
     };
 
     BlockTreeEvictor(std::vector<ComponentGroupPtr>& component_groups,
-                     CopyEnginePtr                   copy_engine,
+                     ExecuteTransferFn               execute_transfer,
                      bool                            enable_reverse_eviction);
 
     void init(const std::vector<Component>& components);
@@ -48,6 +51,7 @@ public:
     void                          writeRemoteThrough(const std::shared_ptr<StorageBackend>& storage_backend,
                                                      CacheKeyType                           cache_key,
                                                      int                                    component_group_id);
+    static bool buildTransferDescriptor(const EvictionMove& eviction_move, TransferDescriptor& descriptor);
 
 private:
     void buildGroupLayerTagSlots(const std::vector<Component>& components);
@@ -70,7 +74,7 @@ private:
     size_t computeGroupExcess(const ComponentGroup& group, Tier tier, double ratio) const;
 
     std::vector<ComponentGroupPtr>&                         component_groups_;
-    CopyEnginePtr                                           copy_engine_;
+    ExecuteTransferFn                                       execute_transfer_;
     bool                                                    enable_reverse_eviction_{false};
     std::vector<std::vector<MemoryBlockLayerTagSlot>>       group_layer_tag_slots_;
     std::vector<MemoryBlockLayerTagSlot>                    empty_layer_tag_slots_;

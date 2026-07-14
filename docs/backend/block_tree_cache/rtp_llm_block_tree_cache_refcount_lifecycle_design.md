@@ -720,6 +720,13 @@ void clearHeapFlag(GroupSlot& slot, Tier tier);
 | `BlockTree` | 纯树结构，返回新建节点信息，不理解 block refcount |
 | `CopyEngine` | 只读 pool/layout，执行跨 tier copy，不管理 block 生命周期 |
 
+### 16.1 多 TP 搬运约定
+
+- rank 0 是 controller，负责 `match`、victim 选择、target 分配和 tree slot 提交；worker 不维护树元数据。
+- TP=1 直接调用本地 `CopyEngine`；TP>1 由 rank 0 广播 transfer，worker 仅解码并执行本 rank 的 copy，不再次广播。
+- 广播传递逻辑 block ID。各 rank 使用相同 ID 定位各自 pool 中的本地 buffer，无需在 worker 上重复 `malloc`。
+- 搬运遵循 `prepare -> broadcast -> complete/rollback`：RPC 等待期间 source/target 引用保持有效，全部成功后才更新 slot；任一 rank 失败则保留 source slot并释放准备好的 target。
+
 ---
 
 ## 17. 总结

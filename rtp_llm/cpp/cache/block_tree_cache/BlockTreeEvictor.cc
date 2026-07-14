@@ -16,10 +16,10 @@ bool BlockTreeEvictor::EvictionPlan::needsCopy() const {
 }
 
 BlockTreeEvictor::BlockTreeEvictor(std::vector<ComponentGroupPtr>& component_groups,
-                                   CopyEnginePtr                   copy_engine,
+                                   ExecuteTransferFn               execute_transfer,
                                    bool                            enable_reverse_eviction):
     component_groups_(component_groups),
-    copy_engine_(std::move(copy_engine)),
+    execute_transfer_(std::move(execute_transfer)),
     enable_reverse_eviction_(enable_reverse_eviction) {}
 
 void BlockTreeEvictor::init(const std::vector<Component>& components) {
@@ -294,36 +294,45 @@ void BlockTreeEvictor::writeRemoteThrough(const std::shared_ptr<StorageBackend>&
 }
 
 bool BlockTreeEvictor::executeTierCopy(const EvictionMove& eviction_move) {
-    if (!copy_engine_ || eviction_move.source_blocks.empty() || eviction_move.target_blocks.empty()
-        || isNullBlockIdx(eviction_move.target_blocks[0]))
+    if (!execute_transfer_) {
         return false;
+    }
+
+    TransferDescriptor descriptor;
+    if (!buildTransferDescriptor(eviction_move, descriptor)) {
+        return false;
+    }
+
+    return execute_transfer_(descriptor) == CopyStatus::OK;
+}
+
+bool BlockTreeEvictor::buildTransferDescriptor(const EvictionMove& eviction_move, TransferDescriptor& descriptor) {
+    if (eviction_move.source_blocks.empty() || eviction_move.target_blocks.empty()
+        || isNullBlockIdx(eviction_move.target_blocks[0])) {
+        return false;
+    }
 
     const BlockIdxType target = eviction_move.target_blocks[0];
-    TransferDescriptor desc;
     if (eviction_move.source_tier == Tier::DEVICE && eviction_move.target_tier == Tier::HOST) {
-        desc = TransferDescriptor::deviceToHost(eviction_move.node,
-                                                eviction_move.component_group_id,
-                                                eviction_move.source_blocks,
-                                                target);
+        descriptor =
+            TransferDescriptor::deviceToHost(eviction_move.component_group_id, eviction_move.source_blocks, target);
     } else if (eviction_move.source_tier == Tier::HOST && eviction_move.target_tier == Tier::DISK) {
-        if (isNullBlockIdx(eviction_move.source_blocks[0]))
+        if (isNullBlockIdx(eviction_move.source_blocks[0])) {
             return false;
-        desc = TransferDescriptor::hostToDisk(eviction_move.node,
-                                              eviction_move.component_group_id,
-                                              eviction_move.source_blocks[0],
-                                              target);
+        }
+        descriptor =
+            TransferDescriptor::hostToDisk(eviction_move.component_group_id, eviction_move.source_blocks[0], target);
     } else if (eviction_move.source_tier == Tier::DISK && eviction_move.target_tier == Tier::HOST) {
-        if (isNullBlockIdx(eviction_move.source_blocks[0]))
+        if (isNullBlockIdx(eviction_move.source_blocks[0])) {
             return false;
-        desc = TransferDescriptor::diskToHost(eviction_move.node,
-                                              eviction_move.component_group_id,
-                                              eviction_move.source_blocks[0],
-                                              target);
+        }
+        descriptor =
+            TransferDescriptor::diskToHost(eviction_move.component_group_id, eviction_move.source_blocks[0], target);
     } else {
         return false;
     }
 
-    return copy_engine_->submit(desc).ok();
+    return true;
 }
 
 EvictionMove BlockTreeEvictor::makeMove(TreeNode* node,

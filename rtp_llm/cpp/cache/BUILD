@@ -351,6 +351,7 @@ cc_library(
     deps = [
         ":cache_core",
         "//rtp_llm/cpp/cache/block_tree_cache",
+        "//rtp_llm/cpp/model_rpc:broadcast_manager",
         "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
         "//rtp_llm/cpp/utils:profiling_scope",
     ] + torch_deps(),

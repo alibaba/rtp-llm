@@ -4,6 +4,7 @@
 #include <stdexcept>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeEvictor.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeTransferConverter.h"
 #include "rtp_llm/cpp/cache/AsyncContext.h"
 #include "rtp_llm/cpp/model_rpc/BroadcastManager.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
@@ -60,7 +61,11 @@ BlockTreeCache::BlockTreeCache(std::unique_ptr<BlockTree>        tree,
     copy_engine_(std::make_shared<CopyEngine>(component_groups_, components_)),
     storage_backend_(std::move(storage_backend)),
     broadcast_manager_(std::move(broadcast_manager)),
-    evictor_(component_groups_, copy_engine_, config_.enable_reverse_eviction) {
+    evictor_(component_groups_,
+             [this](const TransferDescriptor& descriptor) {
+                 return executeTransfer(descriptor);
+             },
+             config_.enable_reverse_eviction) {
     // Validate tier dependencies: Disk requires Host (design doc section 2.7)
     if (config_.enable_disk_cache && !config_.enable_memory_cache) {
         throw std::invalid_argument("BlockTreeCache: enable_disk_cache requires enable_memory_cache = true");
@@ -101,6 +106,81 @@ BlockTreeCache::~BlockTreeCache() {
         thread_pool_->join();
     }
     RTP_LLM_LOG_INFO("BlockTreeCache: destroyed");
+}
+
+CopyStatus BlockTreeCache::executeTransfer(const TransferDescriptor& descriptor) {
+    if (!copy_engine_) {
+        RTP_LLM_LOG_WARNING("BlockTreeCache::executeTransfer: copy engine is not initialized");
+        return CopyStatus::INVALID_ARGS;
+    }
+
+    TransferHandle handle = copy_engine_->submit(descriptor);
+    return handle.status();
+}
+
+bool BlockTreeCache::broadcastTransfer(const ::MemoryOperationRequestPB& request, int timeout_ms) const {
+    if (!broadcast_manager_) {
+        RTP_LLM_LOG_WARNING("BlockTreeCache::broadcastTransfer: broadcast manager is not initialized");
+        return false;
+    }
+    if (request.copy_items_size() == 0 || timeout_ms <= 0) {
+        RTP_LLM_LOG_WARNING("BlockTreeCache::broadcastTransfer: invalid request, item_count=%d, timeout_ms=%d",
+                            request.copy_items_size(),
+                            timeout_ms);
+        return false;
+    }
+
+    const size_t worker_count = broadcast_manager_->workerNum();
+    if (worker_count == 0) {
+        RTP_LLM_LOG_WARNING("BlockTreeCache::broadcastTransfer: no worker configured");
+        return false;
+    }
+
+    FunctionRequestPB function_request;
+    MemoryOperationRequestPB* memory_request = function_request.mutable_mem_request();
+    if (memory_request == nullptr) {
+        RTP_LLM_LOG_WARNING("BlockTreeCache::broadcastTransfer: failed to create memory request");
+        return false;
+    }
+    memory_request->CopyFrom(request);
+    std::vector<FunctionRequestPB> requests(worker_count, function_request);
+
+    std::shared_ptr<BroadcastResult<FunctionRequestPB, FunctionResponsePB>> broadcast_result =
+        broadcast_manager_->broadcast<FunctionRequestPB, FunctionResponsePB>(
+            requests,
+            timeout_ms,
+            [](const std::shared_ptr<RpcService::Stub>&    stub,
+               const std::shared_ptr<grpc::ClientContext>& context,
+               const FunctionRequestPB&                    rpc_request,
+               grpc::CompletionQueue*                      completion_queue) {
+                return stub->AsyncExecuteFunction(context.get(), rpc_request, completion_queue);
+            });
+    if (!broadcast_result) {
+        RTP_LLM_LOG_WARNING("BlockTreeCache::broadcastTransfer: failed to start broadcast");
+        return false;
+    }
+
+    broadcast_result->waitDone();
+    if (!broadcast_result->success()) {
+        RTP_LLM_LOG_WARNING("BlockTreeCache::broadcastTransfer: worker RPC failed");
+        return false;
+    }
+
+    const std::vector<FunctionResponsePB> responses = broadcast_result->responses();
+    if (responses.size() != worker_count) {
+        RTP_LLM_LOG_WARNING("BlockTreeCache::broadcastTransfer: response count mismatch, expected=%zu, actual=%zu",
+                            worker_count,
+                            responses.size());
+        return false;
+    }
+    for (size_t rank = 0; rank < responses.size(); ++rank) {
+        const FunctionResponsePB& response = responses[rank];
+        if (!response.has_mem_response() || !response.mem_response().success()) {
+            RTP_LLM_LOG_WARNING("BlockTreeCache::broadcastTransfer: worker transfer failed, rank=%zu", rank);
+            return false;
+        }
+    }
+    return true;
 }
 
 BlockTreeMatchResult BlockTreeCache::match(const CacheKeysType& cache_keys) {
@@ -482,106 +562,116 @@ void BlockTreeCache::prepareMatchedLoadBack(const std::vector<TreeNode*>& match_
     }
 }
 
-void BlockTreeCache::performLoadBack(std::vector<LoadBackItem> items, std::shared_ptr<AsyncContext> ctx) {
-    auto lb_ctx = std::dynamic_pointer_cast<LoadBackAsyncContext>(ctx);
-    bool all_ok = true;
+bool BlockTreeCache::executeLoadBackTransferBatch(const std::vector<TransferDescriptor>& descriptors, int timeout_ms) {
+    if (descriptors.empty()) {
+        return true;
+    }
 
-    std::vector<char> item_ok(items.size(), 0);
-
-    for (size_t idx = 0; idx < items.size(); ++idx) {
-        auto& item = items[idx];
-        auto  gid  = static_cast<size_t>(item.group_id);
-        if (gid >= component_groups_.size()) {
-            all_ok = false;
-            continue;
-        }
-
-        auto& group   = component_groups_[gid];
-        bool  copy_ok = false;
-        if (item.node == nullptr || item.source_blocks.empty() || item.target_device_blocks.empty()) {
-            all_ok = false;
-            group->unreferenceBlocks(GroupBlockSet{item.group_id, item.source_tier, {item.source_blocks}});
-            group->releaseBlocks(GroupBlockSet{item.group_id, Tier::DEVICE, {item.target_device_blocks}});
-            continue;
-        }
-
-        if (item.source_tier == Tier::HOST && group->hostPool()) {
-            // Host → GPU (direct H2D)
-            auto desc = TransferDescriptor::hostToDevice(
-                item.node, item.group_id, item.source_blocks[0], item.target_device_blocks);
-
-            auto status = copy_engine_->submit(desc).status();
-            copy_ok     = status == CopyStatus::OK;
-            if (!copy_ok) {
-                RTP_LLM_LOG_WARNING("BlockTreeCache::performLoadBack: H2D FAILED "
-                                    "group[%d] node_key=%ld status=%d",
-                                    item.group_id,
-                                    item.node->cache_key,
+    if (broadcast_manager_ == nullptr) {
+        for (const TransferDescriptor& descriptor : descriptors) {
+            const CopyStatus status = executeTransfer(descriptor);
+            if (status != CopyStatus::OK) {
+                RTP_LLM_LOG_WARNING("BlockTreeCache::executeLoadBackTransferBatch: local transfer failed, "
+                                    "group=%d source=%s target=%s status=%d",
+                                    descriptor.component_group_id,
+                                    tierName(descriptor.source_tier),
+                                    tierName(descriptor.target_tier),
                                     static_cast<int>(status));
+                return false;
             }
-        } else if (item.source_tier == Tier::DISK && group->hostPool() && group->diskPool()) {
-            // Disk → GPU (cross-layer: Disk → temp Host → GPU, Host not cached)
-            BlockIdxType temp_host = group->allocateSingleBlock(Tier::HOST);
-            if (!isNullBlockIdx(temp_host)) {
-                // Step 1: Disk → temp Host
-                auto d2h_desc =
-                    TransferDescriptor::diskToHost(item.node, item.group_id, item.source_blocks[0], temp_host);
+        }
+        return true;
+    }
 
-                auto d2h_status = copy_engine_->submit(d2h_desc).status();
-                if (d2h_status == CopyStatus::OK) {
-                    // Step 2: temp Host → GPU
-                    auto h2d_desc = TransferDescriptor::hostToDevice(
-                        item.node, item.group_id, temp_host, item.target_device_blocks);
+    MemoryOperationRequestPB request;
+    for (const TransferDescriptor& descriptor : descriptors) {
+        const bool appended = BlockTreeTransferConverter::appendTransfer(descriptor, request);
+        if (!appended) {
+            RTP_LLM_LOG_WARNING("BlockTreeCache::executeLoadBackTransferBatch: failed to encode transfer, "
+                                "group=%d source=%s target=%s",
+                                descriptor.component_group_id,
+                                tierName(descriptor.source_tier),
+                                tierName(descriptor.target_tier));
+            return false;
+        }
+    }
+    return broadcastTransfer(request, timeout_ms);
+}
 
-                    auto h2d_status = copy_engine_->submit(h2d_desc).status();
-                    copy_ok         = h2d_status == CopyStatus::OK;
-                    if (!copy_ok) {
-                        RTP_LLM_LOG_WARNING("BlockTreeCache::performLoadBack: Disk2D H2D step FAILED "
-                                            "group[%d] node_key=%ld status=%d",
-                                            item.group_id,
-                                            item.node->cache_key,
-                                            static_cast<int>(h2d_status));
-                    }
-                } else {
-                    RTP_LLM_LOG_WARNING("BlockTreeCache::performLoadBack: Disk2D D2H step FAILED "
-                                        "group[%d] node_key=%ld status=%d",
-                                        item.group_id,
-                                        item.node->cache_key,
-                                        static_cast<int>(d2h_status));
-                }
-                group->releaseSingleBlock(Tier::HOST, temp_host);  // Release temp buffer
-            }
-            if (!copy_ok) {
-                RTP_LLM_LOG_WARNING("BlockTreeCache::performLoadBack: Disk2D FAILED "
-                                    "group[%d] node_key=%ld",
-                                    item.group_id,
-                                    item.node->cache_key);
+void BlockTreeCache::performLoadBack(std::vector<LoadBackItem> items, std::shared_ptr<AsyncContext> ctx) {
+    std::shared_ptr<LoadBackAsyncContext> load_back_context = std::dynamic_pointer_cast<LoadBackAsyncContext>(ctx);
+    std::vector<BlockIdxType>             staging_host_blocks(items.size(), NULL_BLOCK_IDX);
+    std::vector<TransferDescriptor>       disk_to_host_descriptors;
+    std::vector<TransferDescriptor>       host_to_device_descriptors;
+    bool                                  prepared = !items.empty();
+
+    for (size_t item_index = 0; item_index < items.size(); ++item_index) {
+        LoadBackItem& item = items[item_index];
+        if (item.group_id < 0 || static_cast<size_t>(item.group_id) >= component_groups_.size()) {
+            RTP_LLM_LOG_WARNING("BlockTreeCache::performLoadBack: invalid group id, group=%d", item.group_id);
+            prepared = false;
+            continue;
+        }
+
+        ComponentGroupPtr& group = component_groups_[static_cast<size_t>(item.group_id)];
+        if (item.node == nullptr || item.source_blocks.size() != 1 || item.target_device_blocks.empty()) {
+            RTP_LLM_LOG_WARNING("BlockTreeCache::performLoadBack: invalid item, group=%d", item.group_id);
+            prepared = false;
+            continue;
+        }
+
+        BlockIdxType source_host_block = NULL_BLOCK_IDX;
+        if (item.source_tier == Tier::HOST && group->hostPool() != nullptr) {
+            source_host_block = item.source_blocks[0];
+        } else if (item.source_tier == Tier::DISK && group->hostPool() != nullptr && group->diskPool() != nullptr) {
+            source_host_block = group->allocateSingleBlock(Tier::HOST);
+            if (!isNullBlockIdx(source_host_block)) {
+                staging_host_blocks[item_index] = source_host_block;
+                disk_to_host_descriptors.push_back(
+                    TransferDescriptor::diskToHost(item.group_id, item.source_blocks[0], source_host_block));
             }
         }
 
-        item_ok[idx] = copy_ok ? 1 : 0;
+        if (isNullBlockIdx(source_host_block)) {
+            RTP_LLM_LOG_WARNING("BlockTreeCache::performLoadBack: failed to prepare source, group=%d source=%s",
+                                item.group_id,
+                                tierName(item.source_tier));
+            prepared = false;
+            continue;
+        }
+        host_to_device_descriptors.push_back(
+            TransferDescriptor::hostToDevice(item.group_id, source_host_block, item.target_device_blocks));
+    }
+
+    bool copy_success = prepared;
+    if (copy_success) {
+        copy_success =
+            executeLoadBackTransferBatch(disk_to_host_descriptors, config_.memory_cache_disk_sync_timeout_ms);
+    }
+    if (copy_success) {
+        copy_success = executeLoadBackTransferBatch(host_to_device_descriptors, config_.memory_cache_sync_timeout_ms);
+    }
+
+    for (size_t item_index = 0; item_index < items.size(); ++item_index) {
+        LoadBackItem& item = items[item_index];
+        if (item.group_id < 0 || static_cast<size_t>(item.group_id) >= component_groups_.size()) {
+            continue;
+        }
+        ComponentGroupPtr& group = component_groups_[static_cast<size_t>(item.group_id)];
+        if (!isNullBlockIdx(staging_host_blocks[item_index])) {
+            group->releaseSingleBlock(Tier::HOST, staging_host_blocks[item_index]);
+        }
         group->unreferenceBlocks(GroupBlockSet{item.group_id, item.source_tier, {item.source_blocks}});
-        if (!copy_ok) {
-            all_ok = false;
-            // Rollback: release the cache-holding reference on target device blocks.
+        if (!copy_success) {
             group->releaseBlocks(GroupBlockSet{item.group_id, Tier::DEVICE, {item.target_device_blocks}});
         }
     }
 
-    // Phase 3: re-acquire lock to update tree state
-    {
+    if (copy_success) {
         std::lock_guard<std::mutex> lock(mutex_);
-        for (size_t idx = 0; idx < items.size(); ++idx) {
-            auto& item = items[idx];
-            auto  gid  = static_cast<size_t>(item.group_id);
-            if (!item_ok[idx] || gid >= component_groups_.size() || item.node == nullptr)
-                continue;
-
-            auto& group = component_groups_[gid];
-            auto& slot  = item.node->group_slots[gid];
-
-            // Move to DEVICE, then retire source: release its cache-hold (saved ids)
-            // before evictFromTier clears the slot. load_back is async (await ctx).
+        for (LoadBackItem& item : items) {
+            ComponentGroupPtr& group = component_groups_[static_cast<size_t>(item.group_id)];
+            GroupSlot&         slot  = item.node->group_slots[static_cast<size_t>(item.group_id)];
             group->setBlocks(slot, Tier::DEVICE, item.target_device_blocks);
             group->releaseBlocks(GroupBlockSet{item.group_id, item.source_tier, {item.source_blocks}});
             group->evictFromTier(item.node, slot, item.source_tier);
@@ -589,8 +679,8 @@ void BlockTreeCache::performLoadBack(std::vector<LoadBackItem> items, std::share
         }
     }
 
-    if (lb_ctx) {
-        lb_ctx->onTaskComplete(all_ok);
+    if (load_back_context != nullptr) {
+        load_back_context->onTaskComplete(copy_success);
     }
 }
 
@@ -626,7 +716,17 @@ bool BlockTreeCache::submitEvictionLocked(EvictionMove& eviction_move) {
 }
 
 void BlockTreeCache::performEvictionCopy(const BlockTreeEvictor::EvictionPlan& plan) {
-    auto         copy_results     = evictor_.performCopy(plan);
+    BlockTreeEvictor::CopyResultSet copy_results;
+    if (broadcast_manager_ == nullptr) {
+        copy_results = evictor_.performCopy(plan);
+    } else {
+        MemoryOperationRequestPB request;
+        const bool               request_ready = buildEvictionTransferRequest(plan, request);
+        const bool copy_success      = request_ready && broadcastTransfer(request, evictionTransferTimeoutMs(plan));
+        copy_results.primary_success = copy_success;
+        copy_results.cascade_success.assign(plan.cascade_moves.size(), copy_success);
+    }
+
     bool         copy_ok          = copy_results.primary_success;
     CacheKeyType remote_cache_key = 0;
     int          remote_group_id  = -1;
@@ -644,6 +744,38 @@ void BlockTreeCache::performEvictionCopy(const BlockTreeEvictor::EvictionPlan& p
         evictor_.writeRemoteThrough(storage_backend_, remote_cache_key, remote_group_id);
     }
     taskFinished();
+}
+
+bool BlockTreeCache::buildEvictionTransferRequest(const BlockTreeEvictor::EvictionPlan& plan,
+                                                  MemoryOperationRequestPB&             request) const {
+    TransferDescriptor primary_descriptor;
+    if (!BlockTreeEvictor::buildTransferDescriptor(plan.primary, primary_descriptor)
+        || !BlockTreeTransferConverter::appendTransfer(primary_descriptor, request)) {
+        return false;
+    }
+
+    for (const EvictionMove& cascade_move : plan.cascade_moves) {
+        TransferDescriptor cascade_descriptor;
+        if (!BlockTreeEvictor::buildTransferDescriptor(cascade_move, cascade_descriptor)
+            || !BlockTreeTransferConverter::appendTransfer(cascade_descriptor, request)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+int BlockTreeCache::evictionTransferTimeoutMs(const BlockTreeEvictor::EvictionPlan& plan) const {
+    bool uses_disk = plan.primary.source_tier == Tier::DISK || plan.primary.target_tier == Tier::DISK;
+    for (const EvictionMove& cascade_move : plan.cascade_moves) {
+        if (cascade_move.source_tier == Tier::DISK || cascade_move.target_tier == Tier::DISK) {
+            uses_disk = true;
+            break;
+        }
+    }
+    if (!uses_disk) {
+        return config_.memory_cache_sync_timeout_ms;
+    }
+    return std::max(config_.memory_cache_sync_timeout_ms, config_.memory_cache_disk_sync_timeout_ms);
 }
 
 void BlockTreeCache::checkWatermark() {
