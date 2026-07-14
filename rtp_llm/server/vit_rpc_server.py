@@ -76,14 +76,15 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
     def __init__(self, mm_process_engine: MMProcessEngine, vit_config=None):
         self.engine = mm_process_engine
         self._rdma = None
-        self._rdma_min_bytes = 0
-        if vit_config is not None and getattr(vit_config, "mm_rdma_enable", False):
+        if (
+            vit_config is not None
+            and getattr(vit_config, "mm_transport_mode", "auto") == "auto"
+        ):
             try:
                 rdma = MMRdmaEncoderOp(vit_config)
                 if rdma.enabled():
                     self._rdma = rdma
-                    self._rdma_min_bytes = int(getattr(vit_config, "mm_rdma_min_bytes", 256 * 1024))
-                    logging.info("[VIT] mm rdma encoder enabled, min_bytes=%d", self._rdma_min_bytes)
+                    logging.info("[VIT] mm rdma encoder enabled")
                 else:
                     logging.warning("[VIT] mm rdma requested but unavailable, fall back to bytes")
             except Exception as e:  # noqa: BLE001 - never let rdma init break the bytes path
@@ -105,26 +106,23 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
 
         pos = None
         if res.position_ids is not None and len(res.position_ids) > 0:
-            pos = torch.concat(res.position_ids).contiguous()
+            pos = torch.concat(res.position_ids).to(device=emb.device).contiguous()
         extras = []
         if res.extra_input is not None and len(res.extra_input) > 0:
-            extras = [e.contiguous() for e in res.extra_input]
-
-        # Threshold on the TOTAL payload (embedding + pos_id + extra_input): extra_input
-        # (deepstack) is often the larger share, so it must count toward the decision.
-        nbytes = emb.numel() * emb.element_size()
-        if pos is not None:
-            nbytes += pos.numel() * pos.element_size()
-        for extra in extras:
-            nbytes += extra.numel() * extra.element_size()
-        if nbytes < self._rdma_min_bytes:
-            return None
+            extras = [e.to(device=emb.device).contiguous() for e in res.extra_input]
 
         # export_embedding returns a list of serialized MMRdmaDescPB (one per RDMA slot): a single
         # element for the common fits-in-one-slot case, N when the output was chunked, and an empty
         # list on failure (-> fall back to inline bytes).
         desc_bytes_list = self._rdma.export_embedding(emb, pos, extras)
         if not desc_bytes_list:
+            logging.warning(
+                "[VIT] mm rdma export failed; falling back to inline bytes "
+                "(embedding_bytes=%d, pos=%s, extra_count=%d)",
+                emb.numel() * emb.element_size(),
+                pos is not None,
+                len(extras),
+            )
             return None
         descs = []
         for desc_bytes in desc_bytes_list:
@@ -207,7 +205,16 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
                 cancellation_event=cancellation_event,
             )
             merged = merge_embedding_results(results)
-            if multimodal_inputs.support_rdma and self._rdma is not None:
+            logging.debug(
+                "[VIT] transport negotiation: support_rdma=%s, rdma_ready=%s, embeddings=%d",
+                getattr(multimodal_inputs, "support_rdma", False),
+                self._rdma is not None,
+                len(merged.embeddings),
+            )
+            if (
+                getattr(multimodal_inputs, "support_rdma", False)
+                and self._rdma is not None
+            ):
                 rdma_out = self._trans_output_rdma(merged)
                 if rdma_out is not None:
                     return rdma_out

@@ -279,17 +279,16 @@ class VitConfig:
         self.disable_access_log: bool = False
         self.use_local_preprocess: bool = False
         self.vit_proxy_load_balance_strategy: str = "round_robin"
-        # ---- Encoder(ViT)<->LLM embedding transport over GPUDirect RDMA ----
-        self.mm_rdma_enable: bool = False
+        # ---- Encoder(ViT)<->LLM embedding transport ----
+        self.mm_transport_mode: str = "auto"
         self.mm_rdma_bind_ip: str = ""
         self.mm_rdma_port: int = 0
-        self.mm_rdma_min_bytes: int = 256 * 1024  # encoder-side RDMA/bytes threshold (Python only)
         self.mm_rdma_connect_timeout_ms: int = 250
         self.mm_rdma_read_timeout_ms: int = 30 * 1000
         self.mm_rdma_release_timeout_ms: int = 1000
         self.mm_rdma_slot_gc_timeout_ms: int = 60 * 1000
         self.mm_rdma_max_inflight_bytes: int = 8 * 1024 * 1024 * 1024
-        self.mm_rdma_max_slot_bytes: int = 2000 * 1024 * 1024
+        self.mm_rdma_max_slot_bytes: int = 1024 * 1024 * 1024
         # ---- GPU embedding batch scheduler (MMScheduler) ----
         self.use_gpu_batch: Optional[bool] = None
         self.gpu_batch_wait_ms: int = 10
@@ -355,10 +354,9 @@ class VitConfig:
             f"gpu_batch_wait_ms: {self.gpu_batch_wait_ms}\n"
             f"gpu_max_batch_size: {self.gpu_max_batch_size}\n"
             f"gpu_max_batch_images: {self.gpu_max_batch_images}\n"
-            f"mm_rdma_enable: {self.mm_rdma_enable}\n"
+            f"mm_transport_mode: {self.mm_transport_mode}\n"
             f"mm_rdma_bind_ip: {self.mm_rdma_bind_ip}\n"
             f"mm_rdma_port: {self.mm_rdma_port}\n"
-            f"mm_rdma_min_bytes: {self.mm_rdma_min_bytes}\n"
             f"mm_rdma_connect_timeout_ms: {self.mm_rdma_connect_timeout_ms}\n"
             f"mm_rdma_read_timeout_ms: {self.mm_rdma_read_timeout_ms}\n"
             f"mm_rdma_release_timeout_ms: {self.mm_rdma_release_timeout_ms}\n"

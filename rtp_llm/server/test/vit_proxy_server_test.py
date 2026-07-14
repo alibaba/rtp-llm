@@ -4,8 +4,10 @@ from unittest import TestCase, main
 from unittest.mock import ANY, MagicMock, patch
 
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
+    MMRdmaDescPB,
     MultimodalInputsPB,
     MultimodalOutputPB,
+    ReleaseEmbeddingPB,
 )
 from rtp_llm.server.vit_proxy_server import (
     LoadBalancer,
@@ -230,27 +232,43 @@ class WorkerConnectionPoolTest(TestCase):
         self.assertEqual(pool.channels, {})
 
 
-class VitProxyCancellationTest(TestCase):
+class VitProxyRdmaReleaseTest(TestCase):
     @patch("rtp_llm.server.vit_proxy_server.kmonitor.init")
     @patch("rtp_llm.server.vit_proxy_server.kmonitor.report")
-    def test_parent_rpc_cancellation_cancels_worker_rpc(self, _mock_report, _mock_init):
+    def test_release_is_forwarded_to_workers_that_created_handles(
+        self, _mock_report, _mock_init
+    ):
         load_balancer = MagicMock()
-        load_balancer.get_worker.return_value = "worker-a"
+        load_balancer.get_worker.side_effect = ["worker-a", "worker-b"]
         connection_pool = MagicMock()
-        stub = MagicMock()
-        connection_pool.get_stub.return_value = stub
-        worker_call = MagicMock()
-        worker_call.result.return_value = MultimodalOutputPB()
-        stub.RemoteMultimodalEmbedding.future.return_value = worker_call
-        context = MagicMock()
-        context.add_callback.return_value = True
+        stub_a = MagicMock()
+        stub_b = MagicMock()
+        connection_pool.get_stub.side_effect = lambda address: {
+            "worker-a": stub_a,
+            "worker-b": stub_b,
+        }[address]
+        stub_a.RemoteMultimodalEmbedding.return_value = MultimodalOutputPB(
+            output_rdma=MMRdmaDescPB(handle="handle-a")
+        )
+        response_b = MultimodalOutputPB()
+        response_b.output_rdma_chunks.add(handle="handle-b-1")
+        response_b.output_rdma_chunks.add(handle="handle-b-2")
+        stub_b.RemoteMultimodalEmbedding.return_value = response_b
 
         servicer = VitProxyRpcServer(load_balancer, connection_pool)
-        servicer.RemoteMultimodalEmbedding(MultimodalInputsPB(), context)
+        servicer.RemoteMultimodalEmbedding(MultimodalInputsPB(), MagicMock())
+        servicer.RemoteMultimodalEmbedding(MultimodalInputsPB(), MagicMock())
+        servicer.ReleaseMultimodalEmbedding(
+            ReleaseEmbeddingPB(handle=["handle-a", "handle-b-1", "handle-b-2"]),
+            MagicMock(),
+        )
 
-        cancel_callback = context.add_callback.call_args.args[0]
-        cancel_callback()
-        worker_call.cancel.assert_called_once_with()
+        request_a = stub_a.ReleaseMultimodalEmbedding.call_args.args[0]
+        request_b = stub_b.ReleaseMultimodalEmbedding.call_args.args[0]
+        self.assertEqual(list(request_a.handle), ["handle-a"])
+        self.assertEqual(list(request_b.handle), ["handle-b-1", "handle-b-2"])
+        self.assertEqual(stub_a.ReleaseMultimodalEmbedding.call_args.kwargs["timeout"], 1.0)
+        self.assertEqual(stub_b.ReleaseMultimodalEmbedding.call_args.kwargs["timeout"], 1.0)
 
 
 if __name__ == "__main__":
