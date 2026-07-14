@@ -3,12 +3,39 @@
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/TensorDebugUtils.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
-#if USING_CUDA
-#include "rtp_llm/models_py/bindings/cuda/ops/StandaloneOps.h"
-#include "ATen/cuda/CUDAContext.h"
-#endif
 
 namespace rtp_llm {
+
+torch::Tensor NormalOutputDispatcher::calculateSelectedTokenProbs(const torch::Tensor& logits,
+                                                                  const torch::Tensor& token_ids,
+                                                                  const torch::Tensor& src_batch_indices) const {
+    RTP_LLM_CHECK(logits.dim() == 2);
+    RTP_LLM_CHECK(token_ids.numel() > 0);
+
+    auto token_ids_cpu = token_ids.to(torch::kCPU, torch::kLong).reshape({-1}).contiguous();
+    RTP_LLM_CHECK(token_ids_cpu.min().item<int64_t>() >= 0);
+    RTP_LLM_CHECK(token_ids_cpu.max().item<int64_t>() < logits.size(1));
+
+    torch::Tensor src_indices_cpu;
+    if (src_batch_indices.defined()) {
+        src_indices_cpu = src_batch_indices.to(torch::kCPU, torch::kLong).reshape({-1}).contiguous();
+        RTP_LLM_CHECK(src_indices_cpu.numel() == token_ids_cpu.numel());
+        RTP_LLM_CHECK(src_indices_cpu.min().item<int64_t>() >= 0);
+        RTP_LLM_CHECK(src_indices_cpu.max().item<int64_t>() < logits.size(0));
+    } else {
+        RTP_LLM_CHECK(token_ids_cpu.numel() == logits.size(0));
+        src_indices_cpu = torch::arange(logits.size(0), torch::kLong);
+    }
+
+    auto logits_fp32              = logits.to(torch::kFloat32).contiguous();
+    auto token_ids_device         = token_ids_cpu.to(logits.device());
+    auto src_indices_device       = src_indices_cpu.to(logits.device());
+    auto flat_indices             = src_indices_device * logits.size(1) + token_ids_device;
+    auto selected_logits          = logits_fp32.reshape({-1}).index_select(0, flat_indices);
+    auto log_normalizers          = at::logsumexp(logits_fp32, {1}, false);
+    auto selected_log_normalizers = log_normalizers.index_select(0, src_indices_device);
+    return torch::exp(selected_logits - selected_log_normalizers).reshape({-1, 1}).cpu();
+}
 
 absl::Status NormalOutputDispatcher::dispatch(const StreamGroups& stream_groups,
                                               const MergedOutput& merge_outputs) const {
@@ -85,10 +112,6 @@ void NormalOutputDispatcher::dispatchSingleStream(GenerateStreamPtr    stream,
         // from context stream to decode straem, there might be other cases in future
         src_batch_indices = torch::zeros({(int64_t)next_batch_size}, torch::kInt32);
     }
-    const auto get_src_idx = [&](int32_t dst_idx) {
-        return src_batch_indices.defined() ? src_batch_indices.data_ptr<int32_t>()[dst_idx] : dst_idx;
-    };
-
     // construct update info
     torch::Tensor batch_hidden_states;
     if (stream->generateConfig()->return_hidden_states) {
@@ -188,17 +211,7 @@ void NormalOutputDispatcher::dispatchSingleStream(GenerateStreamPtr    stream,
 
     torch::Tensor current_softmax_result;
     if (stream->calculateSoftmaxProbs()) {
-        auto batch_softmax_input = batch_logits.to(torch::kFloat32).contiguous();
-#if USING_CUDA
-        cudaSoftmaxInplace(batch_softmax_input, at::cuda::getCurrentCUDAStream().stream());
-#else
-        batch_softmax_input = torch::softmax(batch_softmax_input, -1);
-#endif
-        auto batch_softmax_tensor = batch_softmax_input.cpu();
-        current_softmax_result    = torch::empty({(int64_t)next_batch_size, 1}, torch::kFloat32);
-        for (int i = 0; i < next_batch_size; ++i) {
-            current_softmax_result[i][0] = batch_softmax_tensor[get_src_idx(i)][new_tokens.data_ptr<int32_t>()[i]];
-        }
+        current_softmax_result = calculateSelectedTokenProbs(batch_logits, new_tokens, src_batch_indices);
     }
 
     for (int i = 0; i < cur_batch_size; ++i) {
