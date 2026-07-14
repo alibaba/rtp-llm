@@ -9,32 +9,25 @@ import org.slf4j.LoggerFactory;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Arrays;
+import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
 
 /**
- * Prefill-time predictor with hardcoded linear regression and online learning.
+ * Prefill-time predictor with linear regression and online Adam-optimizer learning.
  *
  * <p>
- * Formula: {@code y = w0 + w1 * sum(computeTokens) + w2 * sum(hitCacheTokens)}
- * where {@code computeTokens = inputTokens - hitCacheTokens} (floor at 0).
- *
- *
- *
- *
- *
- *
- *
- *
+ * Formula: {@code y = w0*1 + w1*batchSize + w2*sum(reuse) + w3*sum(compute)
+ * + w4*sum(compute^2) + w5*sum(reuse*compute)}
+ * where {@code reuse = hitCache / 1024}, {@code compute = (seqLen - hitCache) / 1024}.
  *
  * <p>
- * The three weights ({@code w0}, {@code w1}, {@code w2}) are volatile doubles
- * that can be updated at runtime via {@link #setParameter(String, double)}.
- * The
- * {@link #learn(List, long, long)} callback is a stub — the actual online
- * learning algorithm will be implemented in a future iteration.
+ * The six weights ({@code w0}–{@code w5}) are stored in an {@link AtomicReference}
+ * and updated at runtime via {@link #setParameter(String, double)}.
+ * The {@link #learn(List, long, long)} callback uses an Adam optimizer
+ * to perform online gradient descent on completed batches.
  */
 public class LearningPredictor implements PrefillTimePredictor {
     @Data
@@ -72,7 +65,19 @@ public class LearningPredictor implements PrefillTimePredictor {
 
     @Override
     public long estimateMs(long totalTokens, long hitTokens) {
-        return 0;
+        long seq = Math.max(0L, totalTokens);
+        long hit = Math.max(0L, Math.min(hitTokens, seq));
+        double thisReuse = hit / 1024.0;
+        double thisCompute = (seq - hit) / 1024.0;
+        double[] inputs = new double[this.param_count];
+        inputs[0] = 1.0;
+        inputs[1] = 1.0;
+        inputs[2] = thisReuse;
+        inputs[3] = thisCompute;
+        inputs[4] = thisCompute * thisCompute;
+        inputs[5] = thisReuse * thisCompute;
+        double[] weights = this.weightsRef.get();
+        return (long) calcOutput(inputs, weights);
     }
 
     @Override
@@ -172,18 +177,39 @@ public class LearningPredictor implements PrefillTimePredictor {
     // ---- parameter management ----
 
     public double getParameter(String name) {
-        return 0;
+        int idx = weightIndex(name);
+        return weightsRef.get()[idx];
     }
 
     public void setParameter(String name, double value) {
+        int idx = weightIndex(name);
+        weightsRef.updateAndGet(old -> {
+            double[] updated = old.clone();
+            updated[idx] = value;
+            return updated;
+        });
     }
 
     public Set<String> parameterNames() {
-        return Set.of("w0", "w1", "w2");
+        return Set.of("w0", "w1", "w2", "w3", "w4", "w5");
     }
 
     public Map<String, Double> getParameters() {
-        return Map.of("w0", 0.0, "w1", 0.0, "w2", 0.0);
+        double[] weights = weightsRef.get();
+        Map<String, Double> result = new LinkedHashMap<>();
+        for (int i = 0; i < weights.length; i++) {
+            result.put("w" + i, weights[i]);
+        }
+        return result;
+    }
+
+    private int weightIndex(String name) {
+        for (int i = 0; i < this.param_count; i++) {
+            if (("w" + i).equals(name)) {
+                return i;
+            }
+        }
+        throw new IllegalArgumentException("Unknown parameter: " + name);
     }
 
     public boolean hasParameters() {
@@ -199,6 +225,11 @@ public class LearningPredictor implements PrefillTimePredictor {
 
     public String formulaString() {
         double[] weights = this.weightsRef.get();
-        return formulaStringParam(weights);
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < weights.length; i++) {
+            if (i > 0) sb.append(", ");
+            sb.append("w").append(i).append("=").append(weights[i]);
+        }
+        return sb.toString();
     }
 }

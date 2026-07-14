@@ -9,70 +9,52 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
-import java.util.ArrayList;
 import java.util.Map;
 import java.util.Set;
-
-import com.fasterxml.jackson.core.type.TypeReference;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import org.junit.jupiter.api.Test;
-import java.io.InputStream;
 
 import static org.junit.jupiter.api.Assertions.*;
 
 class LearningPredictorTest {
 
-    public static class BatchRecord {
-        public int ctx_batch;
-        public List<StreamInfo> streams;
-        public double forward_ms; // 支持小数，用 double 更安全
-    }
-
-    public static class StreamInfo {
-        public int input;
-        public int reuse;
-        public int ctx;
-    }
-
     @Test
     @DisplayName("default weights produce correct estimateMs")
     void defaultWeightsEstimateMs() {
-        // w0=50, w1=0.5, w2=0.3
-        // totalTokens=1000, hitTokens=200 → computeTokens=800
-        // 50 + 0.5*800 + 0.3*200 = 50 + 400 + 60 = 510
+        // weights = {300, -5, 0, 5, 0, 0}
+        // seq=1000, hit=200, compute=(1000-200)/1024=0.78125
+        // y = 300*1 + (-5)*1 + 0*reuse + 5*0.78125 + 0 + 0 = 295 + 3.90625 = 298.90625
         LearningPredictor p = new LearningPredictor();
-        assertEquals(510, p.estimateMs(1000, 200));
+        assertEquals(298, p.estimateMs(1000, 200));
     }
 
     @Test
     @DisplayName("estimateMs with zero tokens")
     void estimateMsZeroTokens() {
         LearningPredictor p = new LearningPredictor();
-        // 50 + 0 + 0 = 50
-        assertEquals(50, p.estimateMs(0, 0));
+        // seq=0, hit=0, compute=0
+        // y = 300*1 + (-5)*1 + 0 + 5*0 + 0 + 0 = 295
+        assertEquals(295, p.estimateMs(0, 0));
     }
 
     @Test
     @DisplayName("estimateMs bounds hitTokens to totalTokens")
     void estimateMsHitTokensBounded() {
         LearningPredictor p = new LearningPredictor();
-        // hitTokens > totalTokens → bounded to totalTokens, computeTokens=0
-        // 50 + 0 + 0.3*100 = 80
-        assertEquals(80, p.estimateMs(100, 500));
+        // hit=min(500,100)=100, compute=(100-100)/1024=0
+        // y = 300*1 + (-5)*1 + 0 + 5*0 + 0 + 0 = 295
+        assertEquals(295, p.estimateMs(100, 500));
     }
 
     @Test
     @DisplayName("predictBatchMs aggregates correctly")
     void predictBatchMsAggregation() {
         LearningPredictor p = new LearningPredictor();
-        // item1: (500,200) → compute=300, hit=200
-        // item2: (300,100) → compute=200, hit=100
-        // sumCompute=500, sumHit=300
-        // 50 + 0.5*500 + 0.3*300 = 50 + 250 + 90 = 390
-
+        // item1: seq=500, hit=200 → reuse=200/1024, compute=300/1024
+        // item2: seq=300, hit=100 → reuse=100/1024, compute=200/1024
+        // y = 300*1 + (-5)*2 + 0*sumReuse + 5*sumCompute + 0 + 0
+        //   = 300 - 10 + 5*(500/1024) = 290 + 2.4414 = 292.4414
         BatchItem item1 = batchItem(500, 200);
         BatchItem item2 = batchItem(300, 100);
-        assertEquals(390, p.predictBatchMs(List.of(item1, item2)));
+        assertEquals(292, p.predictBatchMs(List.of(item1, item2)));
     }
 
     @Test
@@ -86,15 +68,13 @@ class LearningPredictorTest {
     @DisplayName("learn does not throw")
     void learnDoesNotThrow() {
         LearningPredictor p = new LearningPredictor();
-        List<BatchRecord> records = load();
+        List<BatchItem> batchItems = List.of(
+                batchItem(500, 200),
+                batchItem(300, 100),
+                batchItem(1000, 500));
         for (int i = 0; i < 400; i++) {
-            for (BatchRecord record : records) {
-                List<BatchItem> batchItems = new ArrayList<>();
-                for (StreamInfo stream : record.streams) {
-                    batchItems.add(batchItem(stream.input, stream.reuse));
-                }
-                assertDoesNotThrow(() -> p.learn(batchItems, 0, (long) record.forward_ms));
-            }
+            final int round = i;
+            assertDoesNotThrow(() -> p.learn(batchItems, 0, 100L + round));
         }
         System.out.println(p.formulaString());
     }
@@ -103,9 +83,12 @@ class LearningPredictorTest {
     @DisplayName("getParameter returns weight values")
     void getParameterValues() {
         LearningPredictor p = new LearningPredictor();
-        assertEquals(50.0, p.getParameter("w0"));
-        assertEquals(0.5, p.getParameter("w1"));
-        assertEquals(0.3, p.getParameter("w2"));
+        assertEquals(300.0, p.getParameter("w0"));
+        assertEquals(-5.0, p.getParameter("w1"));
+        assertEquals(0.0, p.getParameter("w2"));
+        assertEquals(5.0, p.getParameter("w3"));
+        assertEquals(0.0, p.getParameter("w4"));
+        assertEquals(0.0, p.getParameter("w5"));
     }
 
     @Test
@@ -114,8 +97,10 @@ class LearningPredictorTest {
         LearningPredictor p = new LearningPredictor();
         p.setParameter("w1", 1.0);
         assertEquals(1.0, p.getParameter("w1"));
-        // 50 + 1.0*800 + 0.3*200 = 50 + 800 + 60 = 910
-        assertEquals(910, p.estimateMs(1000, 200));
+        // weights = {300, 1.0, 0, 5, 0, 0}
+        // seq=1000, hit=200, compute=800/1024=0.78125
+        // y = 300*1 + 1.0*1 + 0 + 5*0.78125 + 0 + 0 = 304.90625
+        assertEquals(304, p.estimateMs(1000, 200));
     }
 
     @Test
@@ -126,10 +111,10 @@ class LearningPredictorTest {
     }
 
     @Test
-    @DisplayName("parameterNames returns all three weights")
+    @DisplayName("parameterNames returns all six weights")
     void parameterNames() {
         LearningPredictor p = new LearningPredictor();
-        assertEquals(Set.of("w0", "w1", "w2"), p.parameterNames());
+        assertEquals(Set.of("w0", "w1", "w2", "w3", "w4", "w5"), p.parameterNames());
     }
 
     @Test
@@ -137,9 +122,12 @@ class LearningPredictorTest {
     void getParametersMap() {
         LearningPredictor p = new LearningPredictor();
         Map<String, Double> params = p.getParameters();
-        assertEquals(50.0, params.get("w0"));
-        assertEquals(0.5, params.get("w1"));
-        assertEquals(0.3, params.get("w2"));
+        assertEquals(300.0, params.get("w0"));
+        assertEquals(-5.0, params.get("w1"));
+        assertEquals(0.0, params.get("w2"));
+        assertEquals(5.0, params.get("w3"));
+        assertEquals(0.0, params.get("w4"));
+        assertEquals(0.0, params.get("w5"));
     }
 
     @Test
@@ -156,21 +144,9 @@ class LearningPredictorTest {
         String desc = p.formulaString();
         assertTrue(desc.contains("w0"));
         assertTrue(desc.contains("w1"));
-        assertTrue(desc.contains("w2"));
-        assertTrue(desc.contains("computeTokens"));
-    }
-
-    private static List<BatchRecord> load() {
-        ObjectMapper mapper = new ObjectMapper();
-        try (InputStream is = LearningPredictorTest.class.getClassLoader().getResourceAsStream("data.json")) {
-            assertNotNull(is, "未找到 data.json 文件，请确认它在 src/test/resources/ 目录下");
-            List<BatchRecord> records = mapper.readValue(is, new TypeReference<List<BatchRecord>>() {
-            });
-            return records;
-        } catch (Exception e) {
-            System.out.println("读取失败");
-        }
-        return null;
+        assertTrue(desc.contains("w3"));
+        assertTrue(desc.contains("300.0"));
+        assertTrue(desc.contains("-5.0"));
     }
 
     private static BatchItem batchItem(long seqLen, long hitCacheLen) {
