@@ -13,9 +13,9 @@
                 ],
                 "max_tokens": 100,
                 "temperature": 0.0,
-                "top_p": 0,
-                "top_k": 1,
-                "random_seed": 42
+                "extra_configs": {
+                    "do_sample": false
+                }
             },
             "result": {
                 "id": "chat-",
@@ -88,9 +88,9 @@
                 ],
                 "max_tokens": 20,
                 "temperature": 0.0,
-                "top_p": 0,
-                "top_k": 1,
-                "random_seed": 42
+                "extra_configs": {
+                    "do_sample": false
+                }
             },
             "result": {
                 "id": "chat-",
