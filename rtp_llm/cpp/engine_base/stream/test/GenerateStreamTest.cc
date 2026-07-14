@@ -16,8 +16,8 @@ namespace rtp_llm {
 
 class GenerateStreamBuilder {
 public:
-    explicit GenerateStreamBuilder(int max_seq_len = 2048) {
-        model_config_.max_seq_len = max_seq_len;
+    GenerateStreamBuilder() {
+        model_config_.max_seq_len = 2048;
     }
 
     CacheConfig init_config() {
@@ -124,7 +124,7 @@ TEST_F(GenerateStreamTest, testMaxTokenNumExcludesThinkingTokens) {
     config->end_think_token_ids   = {8, 9};
     auto stream                   = builder.createContextStream({1, 2}, config);
 
-    ASSERT_EQ(stream->maxTokenNum(), 8);
+    ASSERT_EQ(stream->maxTokenNum(), 7);
 
     auto processors = stream->getAllLogitsProcessorPtr();
     ASSERT_FALSE(processors.empty());
@@ -134,75 +134,6 @@ TEST_F(GenerateStreamTest, testMaxTokenNumExcludesThinkingTokens) {
     think_processor->updateStatus(torch::tensor({{8, 9}}, torch::kInt32), 2);
     ASSERT_EQ(think_processor->finishedThinkOutputLen(), 2);
     ASSERT_EQ(stream->maxTokenNum(), 5);
-}
-
-TEST_F(GenerateStreamTest, testMaxTokenNumMaxTokensExcludesThinkingTokens) {
-    auto builder                  = GenerateStreamBuilder();
-    auto config                   = std::make_shared<GenerateConfig>();
-    config->max_new_tokens        = 100;
-    config->max_tokens            = 1;
-    config->in_think_mode         = true;
-    config->max_thinking_tokens   = 5;
-    config->begin_think_token_ids = {7};
-    config->end_think_token_ids   = {8, 9};
-    auto stream                   = builder.createContextStream({1, 2}, config);
-
-    ASSERT_EQ(stream->maxTokenNum(), static_cast<size_t>(stream->inputLength() + 1 + 5));
-}
-
-TEST_F(GenerateStreamTest, testMaxTokenNumMaxCompletionTokensUsesRawCompletionBudget) {
-    auto builder                  = GenerateStreamBuilder();
-    auto config                   = std::make_shared<GenerateConfig>();
-    config->max_new_tokens        = 100;
-    config->max_completion_tokens = 10;
-    config->in_think_mode         = true;
-    config->max_thinking_tokens   = 5;
-    config->begin_think_token_ids = {7};
-    config->end_think_token_ids   = {8, 9};
-    auto stream                   = builder.createContextStream({1, 2}, config);
-
-    ASSERT_EQ(stream->maxTokenNum(), static_cast<size_t>(stream->inputLength() + 10 + 2));
-
-    auto processors = stream->getAllLogitsProcessorPtr();
-    ASSERT_FALSE(processors.empty());
-    auto think_processor = std::dynamic_pointer_cast<ThinkModeLogitsProcessor>(processors[0]);
-    ASSERT_NE(think_processor, nullptr);
-
-    think_processor->updateStatus(torch::tensor({{1, 8, 9}}, torch::kInt32), 3);
-    ASSERT_EQ(think_processor->finishedThinkOutputLen(), 3);
-    ASSERT_EQ(stream->maxTokenNum(), static_cast<size_t>(stream->inputLength() + 10 + 3));
-}
-
-TEST_F(GenerateStreamTest, testMaxTokenNumInvalidMaxCompletionTokensUsesDefaultBudget) {
-    auto builder                  = GenerateStreamBuilder(200000);
-    auto config                   = std::make_shared<GenerateConfig>();
-    config->max_new_tokens        = 100;
-    config->max_completion_tokens = 0;
-    config->in_think_mode         = true;
-    config->max_thinking_tokens   = 5;
-    config->begin_think_token_ids = {7};
-    config->end_think_token_ids   = {8};
-    auto stream                   = builder.createContextStream({1, 2}, config);
-
-    ASSERT_EQ(stream->maxTokenNum(), static_cast<size_t>(stream->inputLength() + 131072 + 1));
-}
-
-TEST_F(GenerateStreamTest, testMaxTokenNumPhase2MaxCompletionTokensUsesRemainingBudget) {
-    auto builder                      = GenerateStreamBuilder();
-    auto config                       = std::make_shared<GenerateConfig>();
-    config->max_new_tokens            = 100;
-    config->max_completion_tokens     = 10;
-    config->generated_think_token_num = 3;
-    config->in_think_mode             = false;
-    config->max_thinking_tokens       = 5;
-    config->begin_think_token_ids     = {7};
-    config->end_think_token_ids       = {8};
-    auto stream                       = builder.createContextStream({1, 2}, config);
-
-    ASSERT_EQ(stream->maxTokenNum(), static_cast<size_t>(stream->inputLength() + 7));
-
-    config->generated_think_token_num = 10;
-    ASSERT_EQ(stream->maxTokenNum(), static_cast<size_t>(stream->inputLength()));
 }
 
 // clearMtpAsyncDeviceState rejects stale epochs. A worker that

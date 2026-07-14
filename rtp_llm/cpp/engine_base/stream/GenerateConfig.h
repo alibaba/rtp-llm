@@ -22,13 +22,10 @@ namespace rtp_llm {
 
 class GenerateConfig: public autil::legacy::Jsonizable {
 public:
-    int                global_request_id = -1;
-    int                max_new_tokens    = 8192;
-    std::optional<int> max_tokens;
-    std::optional<int> max_completion_tokens;
-    std::optional<int> generated_think_token_num;
-    int                min_new_tokens     = 0;
-    int                num_validate_token = 0;  // for speculative decoding validation.
+    int global_request_id  = -1;
+    int max_new_tokens     = 8192;
+    int min_new_tokens     = 0;
+    int num_validate_token = 0;  // for speculative decoding validation.
 
     int                        num_beams = 1;
     std::vector<int>           variable_num_beams;
@@ -134,11 +131,6 @@ public:
         std::stringstream debug_string;
         debug_string << "GenerateConfig {"
                      << "max_new_tokens:" << max_new_tokens << ", min_new_tokens:" << min_new_tokens
-                     << ", max_tokens:" << (max_tokens.has_value() ? std::to_string(*max_tokens) : "none")
-                     << ", max_completion_tokens:"
-                     << (max_completion_tokens.has_value() ? std::to_string(*max_completion_tokens) : "none")
-                     << ", generated_think_token_num:"
-                     << (generated_think_token_num.has_value() ? std::to_string(*generated_think_token_num) : "none")
                      << ", num_beams:" << num_beams << ", variable_num_beams:" << vectorToString(variable_num_beams)
                      << ", num_return_sequences:" << num_return_sequences << ", calculate_loss:" << calculate_loss
                      << ", return_logits:" << return_logits << ", return_incremental: " << return_incremental
@@ -184,9 +176,6 @@ public:
         }                                                                                                              \
     }
         JSONIZE(max_new_tokens);
-        JSONIZE_OPTIONAL(max_tokens);
-        JSONIZE_OPTIONAL(max_completion_tokens);
-        JSONIZE_OPTIONAL(generated_think_token_num);
         JSONIZE(min_new_tokens);
         JSONIZE(num_validate_token);
         JSONIZE(num_beams);

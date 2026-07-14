@@ -81,9 +81,6 @@ def _env_int(env_name: str, default: int) -> int:
 
 class GenerateConfig(BaseModel):
     max_new_tokens: int = _env_int("MAX_NEW_TOKENS", 32000)
-    max_tokens: Optional[int] = None
-    max_completion_tokens: Optional[int] = None
-    generated_think_token_num: Optional[int] = None
     # only for qwen agent fncall check max input tokens
     max_input_tokens: int = _env_int("MAX_INPUT_TOKENS", 32000)
     max_thinking_tokens: int = _env_int("MAX_THINKING_TOKENS", 131072)
@@ -198,9 +195,6 @@ class GenerateConfig(BaseModel):
     def gen_hash_value(self):
         cp = copy.copy(self)
         cp.max_new_tokens = 0
-        cp.max_tokens = None
-        cp.max_completion_tokens = None
-        cp.generated_think_token_num = None
         cp.chat_id = None
         cp.random_seed = None
         cp.md5_value = ""

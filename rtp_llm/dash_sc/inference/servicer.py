@@ -385,92 +385,21 @@ async def _close_async_stream_if_possible(stream: Any, tag: str) -> None:
         logging.warning("[DashScGrpc] [%s] phase-1 stream close failed: %s", tag, e)
 
 
-def _positive_int(value: Any) -> Optional[int]:
-    if value is None:
-        return None
-    value = int(value)
-    return value if value > 0 else None
-
-
-_DEFAULT_MAX_COMPLETION_TOKENS = 131072
-
-
-def _completion_budget(value: Any) -> Optional[int]:
-    if value is None:
-        return None
-    value = int(value)
-    return value if value > 0 else _DEFAULT_MAX_COMPLETION_TOKENS
-
-
-def _phase1_think_budget(
-    generate_config: GenerateConfig,
-    generate_think_token_num: Optional[int],
-    *,
-    completion_budget: bool,
-) -> int:
-    if generate_think_token_num is not None:
-        return int(generate_think_token_num)
-    if not getattr(generate_config, "in_think_mode", False):
-        return 0
-    if int(getattr(generate_config, "max_thinking_tokens", 0) or 0) <= 0:
-        return 0
-    if completion_budget:
-        return len(getattr(generate_config, "end_think_token_ids", None) or [])
-    return int(getattr(generate_config, "max_thinking_tokens", 0) or 0)
-
-
-def _phase2_has_output_budget(
+def _phase2_max_new_tokens_for_completion_alias(
     sampling: SamplingParams,
     generate_think_token_num: Optional[int],
-) -> bool:
-    max_completion_tokens = _completion_budget(sampling.max_completion_tokens)
-    if max_completion_tokens is not None:
-        if generate_think_token_num is None:
-            return True
-        return int(generate_think_token_num) < max_completion_tokens
-    max_tokens = _positive_int(sampling.max_total_tokens)
-    return max_tokens is None or max_tokens > 0
-
-
-def _phase1_finish_length_budget(
-    generate_config: GenerateConfig,
-    generate_think_token_num: Optional[int],
-) -> Optional[int]:
-    max_completion_tokens = _completion_budget(
-        getattr(generate_config, "max_completion_tokens", None)
-    )
-    if max_completion_tokens is not None:
-        return max_completion_tokens + _phase1_think_budget(
-            generate_config,
-            generate_think_token_num,
-            completion_budget=True,
+) -> int:
+    max_new_tokens = int(sampling.max_new_tokens)
+    if (
+        sampling.max_total_tokens is not None
+        and sampling.max_total_tokens > 0
+        and generate_think_token_num is not None
+    ):
+        max_new_tokens = min(
+            max_new_tokens,
+            max(0, int(sampling.max_total_tokens) - int(generate_think_token_num)),
         )
-    max_tokens = _positive_int(getattr(generate_config, "max_tokens", None))
-    if max_tokens is not None:
-        think_budget = _phase1_think_budget(
-            generate_config,
-            generate_think_token_num,
-            completion_budget=False,
-        )
-        return think_budget + max_tokens
-    max_new_tokens = _positive_int(getattr(generate_config, "max_new_tokens", None))
     return max_new_tokens
-
-
-def _phase2_finish_length_budget(
-    generate_config: GenerateConfig,
-    generate_think_token_num: Optional[int],
-) -> Optional[int]:
-    max_completion_tokens = _completion_budget(
-        getattr(generate_config, "max_completion_tokens", None)
-    )
-    if max_completion_tokens is not None:
-        generated_think_num = int(generate_think_token_num or 0)
-        return max(0, max_completion_tokens - generated_think_num)
-    max_tokens = _positive_int(getattr(generate_config, "max_tokens", None))
-    if max_tokens is not None:
-        return max_tokens
-    return _positive_int(getattr(generate_config, "max_new_tokens", None))
 
 
 def _clone_generate_config(generate_config: GenerateConfig) -> GenerateConfig:
@@ -648,6 +577,7 @@ async def iter_real_model_stream_infer(
         max_id = runtime.max_token_id
         term_id = runtime.terminate_token_id
         think_close_token_id = runtime.close_token_id
+        max_new_tokens = int(getattr(generate_config, "max_new_tokens", 0) or 0)
         matched_think_bos_ids = matched_echo_ids or _matched_echo_prefix_ids(
             input_ids_list, list(runtime.bos_tokens)
         )
@@ -768,9 +698,13 @@ async def iter_real_model_stream_infer(
                     ids_for_accounting
                 )
                 will_do_phase2 = True
-                will_do_phase2 = _phase2_has_output_budget(
-                    sampling, generate_think_token_num
-                )
+                if sampling.max_new_tokens_from_completion_alias:
+                    will_do_phase2 = (
+                        _phase2_max_new_tokens_for_completion_alias(
+                            sampling, generate_think_token_num
+                        )
+                        > 0
+                    )
                 cumulative_sent_ids.extend(ids_for_accounting)
                 # Yield thinking content (always intermediate)
                 if generated_ids:
@@ -848,24 +782,10 @@ async def iter_real_model_stream_infer(
             finish_reason_override = None
             if (
                 out_py.finished
-                and (
-                    length_budget := _phase1_finish_length_budget(
-                        generate_config, generate_think_token_num
-                    )
-                )
-                is not None
-                and len(cumulative_sent_ids) >= length_budget
+                and max_new_tokens > 0
+                and len(cumulative_sent_ids) >= max_new_tokens
             ):
                 finish_reason_override = FINISH_REASON_LENGTH
-            if (
-                generate_think_token_num is None
-                and finish_reason_override == FINISH_REASON_LENGTH
-                and getattr(generate_config, "in_think_mode", False)
-                and cumulative_sent_ids
-            ):
-                # Length stopped before a close tag; DashScope accounts the
-                # partial output as reasoning, not content.
-                generate_think_token_num = len(cumulative_sent_ids)
             response = build_stream_response_from_generate_outputs(
                 dash_sc_request_id=request.id,
                 model_name=request.model_name,
@@ -952,7 +872,12 @@ async def iter_real_model_stream_infer(
             phase2_config.in_think_mode = False
             if hasattr(phase2_config, "thinking"):
                 phase2_config.thinking = False
-            phase2_config.generated_think_token_num = generate_think_token_num
+            if sampling.max_new_tokens_from_completion_alias:
+                phase2_config.max_new_tokens = (
+                    _phase2_max_new_tokens_for_completion_alias(
+                        sampling, generate_think_token_num
+                    )
+                )
             # trace_id stays equal across phases so the dashscope log search
             # aggregates both halves under a single trace; phase distinction is
             # carried by request_log_tag (phase=2) and by the ``-2`` suffix on
@@ -990,14 +915,14 @@ async def iter_real_model_stream_infer(
                 resp_out = resp_go.generate_outputs[0]
                 resp_ids = _token_ids_list_from_generate_output(resp_out)
                 phase2_cumulative_sent_ids.extend(resp_ids)
-                phase2_length_budget = _phase2_finish_length_budget(
-                    phase2_config, generate_think_token_num
+                phase2_max_new_tokens = int(
+                    getattr(phase2_config, "max_new_tokens", 0) or 0
                 )
                 finish_reason_override = None
                 if (
                     resp_out.finished
-                    and phase2_length_budget is not None
-                    and len(phase2_cumulative_sent_ids) >= phase2_length_budget
+                    and phase2_max_new_tokens > 0
+                    and len(phase2_cumulative_sent_ids) >= phase2_max_new_tokens
                 ):
                     finish_reason_override = FINISH_REASON_LENGTH
                 response_finished = bool(resp_out.finished)

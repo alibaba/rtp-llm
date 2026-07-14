@@ -95,12 +95,10 @@ def append_sampling_params_to_model_infer_request(
         _append_int32_scalar(
             request, "max_new_think_tokens", sampling.max_new_think_tokens
         )
-    if sampling.max_completion_tokens is not None:
-        _append_int32_scalar(
-            request, "max_completion_tokens", sampling.max_completion_tokens
-        )
-    if sampling.max_total_tokens is not None:
-        _append_int32_scalar(request, "max_tokens", sampling.max_total_tokens)
+    if sampling.max_new_tokens_from_completion_alias:
+        _append_int32_scalar(request, "max_completion_tokens", sampling.max_new_tokens)
+        if sampling.max_total_tokens is not None:
+            _append_int32_scalar(request, "max_tokens", sampling.max_total_tokens)
     if sampling.response_format is not None:
         response_format = sampling.response_format
         if not isinstance(response_format, str):

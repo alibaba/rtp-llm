@@ -105,14 +105,13 @@ TEST_F(OpenaiEndpointTest, ExtractGenerationConfig) {
     auto        openai_endpoint = std::make_shared<OpenaiEndpoint>(tokenizer_, render_, model_config);
 
     ChatCompletionRequest req;
-    req.stream                = false;
-    req.temperature           = 52.1;
-    req.top_p                 = 12.34;
-    req.top_k                 = 1;
-    req.max_tokens            = 100;
-    req.max_completion_tokens = 50;
-    req.stop                  = "hello world";
-    req.seed                  = 10;
+    req.stream      = false;
+    req.temperature = 52.1;
+    req.top_p       = 12.34;
+    req.top_k       = 1;
+    req.max_tokens  = 100;
+    req.stop        = "hello world";
+    req.seed        = 10;
 
     std::vector<std::string>      stop_words_list    = {std::get<std::string>(req.stop.value())};
     std::vector<std::vector<int>> tokenize_words_res = {{1, 2, 3}};
@@ -125,8 +124,7 @@ TEST_F(OpenaiEndpointTest, ExtractGenerationConfig) {
     EXPECT_NEAR(config->temperature, req.temperature.value(), 1e-6);
     EXPECT_NEAR(config->top_p, req.top_p.value(), 1e-6);
     EXPECT_EQ(config->top_k, req.top_k.value());
-    EXPECT_EQ(config->max_tokens.value(), req.max_tokens.value());
-    EXPECT_EQ(config->max_completion_tokens.value(), req.max_completion_tokens.value());
+    EXPECT_EQ(config->max_new_tokens, req.max_tokens.value());
     EXPECT_EQ(config->stop_words_str, stop_words_list);
     EXPECT_EQ(config->stop_words_list, tokenize_words_res);
     EXPECT_EQ(config->random_seed, req.seed.value());

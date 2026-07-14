@@ -9,18 +9,6 @@ test_copts = [
     "-fno-access-control",
 ] + copts()
 
-cc_import(
-    name = "cuda13_torch_nvshmem",
-    shared_library = "@pip_gpu_cuda13_torch_torch//:site-packages/torch/lib/libtorch_nvshmem.so",
-)
-
-cuda13_torch_link_deps = select({
-    "@//:using_cuda13_x86": [
-        ":cuda13_torch_nvshmem",
-    ],
-    "//conditions:default": [],
-})
-
 py_test (
     name = "model_rpc_client_test",
     srcs = ["model_rpc_client_test.py"],
@@ -45,7 +33,7 @@ test_deps = [
     "@com_google_googletest//:gtest_main",
     "@havenask//aios/autil:base64",
     "@havenask//aios/autil:zlib",
-] + torch_deps() + device_impl_target() + cuda13_torch_link_deps
+] + torch_deps() + device_impl_target()
 
 # cc_test(
 #     name = "model_rpc_server_test",

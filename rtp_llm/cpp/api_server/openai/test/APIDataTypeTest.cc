@@ -182,7 +182,6 @@ TEST_F(APIDataTypeTest, testChatCompletionRequest) {
                   "temperature": 0.8,
                   "top_p": 0.9,
                   "max_tokens": 100,
-                  "max_completion_tokens": 50,
                   "stop": "xxx",
                   "stream": true,
                   "user": "tom",
@@ -203,8 +202,6 @@ TEST_F(APIDataTypeTest, testChatCompletionRequest) {
     ASSERT_EQ(std::get<std::string>(obj.messages[0].content), "who are you");
     ASSERT_EQ(obj.messages[1].role, "system");
     ASSERT_EQ(std::get<std::string>(obj.messages[1].content), "you are a English teacher");
-    ASSERT_EQ(obj.max_tokens.value(), 100);
-    ASSERT_EQ(obj.max_completion_tokens.value(), 50);
 }
 
 }  // namespace rtp_llm
