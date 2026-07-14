@@ -102,6 +102,22 @@ class FoundationLoaderTest(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "could not dispatch"):
                 self._loader(model_path).load()
 
+    def test_non_persistent_checkpoint_buffer_is_not_loaded(self):
+        for checkpoint_value in (torch.full((2,), 9.0), torch.full((3,), 9.0)):
+            with self.subTest(checkpoint_shape=tuple(checkpoint_value.shape)):
+                model = RtpModule()
+                model.rotary_emb = RtpModule()
+                expected = torch.tensor([1.0, 2.0])
+                model.rotary_emb.register_buffer(
+                    "inv_freq",
+                    expected.clone(),
+                    persistent=False,
+                )
+
+                model.load_weights({"rotary_emb.inv_freq": checkpoint_value})
+
+                self.assertTrue(torch.equal(model.rotary_emb.inv_freq, expected))
+
     def test_registered_model_without_integrity_contract_fails(self):
         class UnsafeModel(nn.Module):
             def __init__(self, model_config, load_config):

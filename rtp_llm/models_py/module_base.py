@@ -110,7 +110,11 @@ class RtpModule(nn.Module):
             return self._assign_weight(child, rest, tensor)
         target = getattr(module, name, None)
         is_parameter = isinstance(target, nn.Parameter)
-        is_buffer = name in module._buffers and isinstance(target, torch.Tensor)
+        is_buffer = (
+            name in module._buffers
+            and name not in module._non_persistent_buffers_set
+            and isinstance(target, torch.Tensor)
+        )
         if not is_parameter and not is_buffer:
             return False
         if tuple(target.shape) != tuple(tensor.shape):
