@@ -47,6 +47,22 @@ def _torch_extensions_scope() -> str:
     return f"torch-{_safe_part(_dist_version('torch'))}-{_safe_part(f'{py}_{cuda}')}-cxxabi-{_safe_part(abi)}"
 
 
+def _tvm_ffi_scope() -> str:
+    return (
+        f"tvm-ffi-{_safe_part(_dist_version('apache-tvm-ffi'))}-"
+        f"{_torch_extensions_scope()}"
+    )
+
+
+def _cute_dsl_scope() -> str:
+    return (
+        f"{_cuda_scope()}-cutlass-dsl-"
+        f"{_safe_part(_dist_version('nvidia-cutlass-dsl'))}"
+    )
+
+
+# Exclude non-relocatable Ninja metadata: build files embed sandbox paths, while
+# logs and binary dependency databases contain sandbox-specific build state.
 @dataclass(frozen=True)
 class Component:
     name: str
@@ -77,8 +93,7 @@ COMPONENTS = (
     Component(
         "flashinfer",
         "FLASHINFER_WORKSPACE_BASE",
-        (".so", ".o", "build.ninja", ".ninja_log", ".ninja_deps")
-        + (".cu", ".inc", ".h"),
+        (".so", ".o", ".cu", ".inc", ".h"),
         frozenset({"closed", "moved"}),
         _cuda_scope,
     ),
@@ -99,9 +114,23 @@ COMPONENTS = (
     Component(
         "torch_extensions",
         "TORCH_EXTENSIONS_DIR",
-        (".so", ".o", "build.ninja", ".ninja_log", ".ninja_deps"),
+        (".so", ".o"),
         frozenset({"closed", "moved"}),
         _torch_extensions_scope,
+    ),
+    Component(
+        "tvm_ffi",
+        "TVM_FFI_CACHE_DIR",
+        (".so",),
+        frozenset({"created", "moved"}),
+        _tvm_ffi_scope,
+    ),
+    Component(
+        "cute_dsl",
+        "CUTE_DSL_CACHE_DIR",
+        (".mlir",),
+        frozenset({"moved"}),
+        _cute_dsl_scope,
     ),
     Component(
         "triton",

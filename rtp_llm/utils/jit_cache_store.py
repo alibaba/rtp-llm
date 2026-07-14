@@ -12,14 +12,6 @@ from typing import Iterator
 SNAPSHOT_SUFFIX = ".jit_snapshot.tar.zst"
 SNAPSHOT_KEEP = 100
 REMOTE_READY_TIMEOUT_S = 120.0
-MTIME_MANIFEST = ".jit_mtime_ns.json"
-_EXACT_MTIME_SUFFIXES = (".cu", ".inc", ".h", ".o", ".so")
-
-
-def _needs_exact_mtime(name: str) -> bool:
-    return name.startswith(("flashinfer/", "torch_extensions/")) and name.endswith(
-        _EXACT_MTIME_SUFFIXES
-    )
 
 
 @contextmanager
@@ -34,29 +26,13 @@ def zstd_tar(path: Path, mode: str) -> Iterator[tarfile.TarFile]:
 
 
 def pack_zstd_tar(archive: Path, source: Path) -> None:
-    mtimes = {
-        name: path.stat().st_mtime_ns
-        for path in source.rglob("*")
-        if path.is_file()
-        and _needs_exact_mtime(name := path.relative_to(source).as_posix())
-    }
-    manifest = source / MTIME_MANIFEST
-    manifest.write_text(json.dumps(mtimes), encoding="utf-8")
-    try:
-        with zstd_tar(archive, "w") as output:
-            output.add(source, arcname="")
-    finally:
-        manifest.unlink(missing_ok=True)
+    with zstd_tar(archive, "w") as output:
+        output.add(source, arcname="")
 
 
 def extract_zstd_tar(archive: Path, target: Path) -> None:
     with zstd_tar(archive, "r") as source_archive:
         source_archive.extractall(target)
-    manifest = target / MTIME_MANIFEST
-    mtimes = json.loads(manifest.read_text(encoding="utf-8"))
-    manifest.unlink()
-    for name, mtime_ns in mtimes.items():
-        os.utime(target / name, ns=(mtime_ns, mtime_ns))
 
 
 def _rebase_triton_paths(root: Path, restored_root: Path) -> None:

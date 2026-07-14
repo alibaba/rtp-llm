@@ -282,7 +282,7 @@ def _remote_file_manifest(
         try:
             with jit_store.zstd_tar(archive, "r") as entries:
                 for member in entries:
-                    if not member.isfile() or member.name == jit_store.MTIME_MANIFEST:
+                    if not member.isfile():
                         continue
                     with entries.extractfile(member) as source:
                         payload = source.read()

@@ -1,7 +1,5 @@
 import json
 import os
-import shutil
-import subprocess
 import tempfile
 import threading
 import time
@@ -57,19 +55,10 @@ def archive_members(path: Path) -> dict[str, bytes]:
     result = {}
     with jit_store.zstd_tar(path, "r") as archive:
         for member in archive:
-            if member.isfile() and member.name != jit_store.MTIME_MANIFEST:
+            if member.isfile():
                 with archive.extractfile(member) as source:
                     result[member.name] = source.read()
     return result
-
-
-def archive_mtimes(path: Path) -> dict[str, int]:
-    with jit_store.zstd_tar(path, "r") as archive:
-        for member in archive:
-            if member.name == jit_store.MTIME_MANIFEST:
-                with archive.extractfile(member) as source:
-                    return json.loads(source.read())
-    raise ValueError("archive has no mtime manifest")
 
 
 def snapshot_paths(remote: Path) -> list[Path]:
@@ -146,7 +135,7 @@ class JitCacheManagerTest(unittest.TestCase):
     def test_environment_and_component_contracts(self):
         os.environ["TRITON_CACHE_DIR"] = str(self.root / "outside")
         manager = self.make_manager()
-        self.assertEqual(len(manager.components), 5)
+        self.assertEqual(len(manager.components), 7)
         self.assertEqual(
             os.environ["TRITON_CACHE_DIR"],
             str(self.root / "outside"),
@@ -163,29 +152,49 @@ class JitCacheManagerTest(unittest.TestCase):
         torch_extensions = component(jit.COMPONENTS, "torch_extensions")
         deep_gemm = component(jit.COMPONENTS, "deep_gemm")
         trtllm = component(jit.COMPONENTS, "tensorrt_llm_deep_gemm")
+        tvm_ffi = component(jit.COMPONENTS, "tvm_ffi")
+        cute_dsl = component(jit.COMPONENTS, "cute_dsl")
         triton = component(jit.COMPONENTS, "triton")
         self.assertEqual(flashinfer.upload_events, frozenset({"closed", "moved"}))
         self.assertEqual(torch_extensions.upload_events, frozenset({"closed", "moved"}))
         terminal_events = frozenset({"created", "moved"})
         self.assertEqual(deep_gemm.upload_events, terminal_events)
         self.assertEqual(trtllm.upload_events, terminal_events)
+        self.assertEqual(tvm_ffi.upload_events, terminal_events)
+        self.assertEqual(cute_dsl.upload_events, frozenset({"moved"}))
         self.assertEqual(triton.upload_events, terminal_events)
 
         for rel in (
             "generated/op/kernel.cu",
             "generated/op/config.inc",
             "generated/op/fmha_v2_api.h",
-            "cached_ops/op/build.ninja",
             "cached_ops/op/kernel.cuda.o",
-            "cached_ops/op/.ninja_log",
-            "cached_ops/op/.ninja_deps",
             "cached_ops/op/op.so",
         ):
             self.assertTrue(flashinfer.should_sync(rel), rel)
+        for rel in (
+            "cached_ops/op/build.ninja",
+            "cached_ops/op/rules.ninja",
+            "cached_ops/op/.ninja_log",
+            "cached_ops/op/.ninja_deps",
+        ):
+            self.assertFalse(flashinfer.should_sync(rel), rel)
         self.assertFalse(torch_extensions.should_sync("tipc/main.cpp"))
+        self.assertFalse(torch_extensions.should_sync("tipc/build.ninja"))
+        self.assertFalse(torch_extensions.should_sync("tipc/.ninja_log"))
+        self.assertFalse(torch_extensions.should_sync("tipc/.ninja_deps"))
         self.assertTrue(torch_extensions.should_sync("tipc/ipc.o"))
+        self.assertTrue(torch_extensions.should_sync("tipc/tipc.so"))
         self.assertTrue(trtllm.should_sync("cache/nvcc_kernel.cubin"))
         self.assertFalse(trtllm.should_sync("cache/kernel.cubin"))
+        self.assertTrue(tvm_ffi.should_sync("libtorch_c_dlpack_addon_torch28-cuda.so"))
+        self.assertFalse(
+            tvm_ffi.should_sync("libtorch_c_dlpack_addon_torch28-cuda.so.lock")
+        )
+        self.assertTrue(cute_dsl.should_sync("cute_dsl_0123456789abcdef.mlir"))
+        self.assertFalse(
+            cute_dsl.should_sync("tmp.pid_123/cute_dsl_0123456789abcdef.mlir")
+        )
         self.assertFalse(triton.should_sync("hash/kernel.autotune.json"))
         self.assertTrue(triton.should_sync("hash/kernel.json"))
         self.assertTrue(triton.should_sync("driver/cuda_utils.test.so"))
@@ -200,6 +209,22 @@ class JitCacheManagerTest(unittest.TestCase):
             with mock.patch.object(jit, "_dist_version", return_value="0.3.2"):
                 second = scope()
         self.assertNotEqual(first, second)
+
+    def test_cuda_component_scopes_track_package_versions(self):
+        tvm_scope = component(jit.COMPONENTS, "tvm_ffi").scope_func
+        cute_scope = component(jit.COMPONENTS, "cute_dsl").scope_func
+        with mock.patch.object(jit, "_torch_extensions_scope", return_value="torch"):
+            with mock.patch.object(jit, "_dist_version", return_value="0.1.8"):
+                first_tvm = tvm_scope()
+            with mock.patch.object(jit, "_dist_version", return_value="0.1.9"):
+                second_tvm = tvm_scope()
+        with mock.patch.object(jit, "_cuda_scope", return_value="cuda-12_9"):
+            with mock.patch.object(jit, "_dist_version", return_value="4.3.5"):
+                first_cute = cute_scope()
+            with mock.patch.object(jit, "_dist_version", return_value="4.4.1"):
+                second_cute = cute_scope()
+        self.assertNotEqual(first_tvm, second_tvm)
+        self.assertNotEqual(first_cute, second_cute)
 
     def test_restore_snapshot_and_rebase(self):
         remote = self.root / "remote"
@@ -354,102 +379,26 @@ class JitCacheManagerTest(unittest.TestCase):
         self.assertEqual(len(snapshot_paths(remote)), 2)
         self.assertFalse(list(remote.glob(".upload.*")))
 
-    def test_exact_mtime_only_tracks_ninja_timestamp_inputs(self):
-        remote = self.root / "remote"
-        remote.mkdir()
-        tracked = (
-            "flashinfer/generated/kernel.cu",
-            "flashinfer/generated/config.inc",
-            "flashinfer/generated/api.h",
-            "flashinfer/cached/kernel.o",
-            "flashinfer/cached/kernel.so",
-            "torch_extensions/ipc/ipc.o",
-            "torch_extensions/ipc/tipc.so",
-        )
-        untracked = (
-            "flashinfer/cached/build.ninja",
-            "flashinfer/cached/.ninja_log",
-            "flashinfer/cached/.ninja_deps",
-            "deep_gemm/cache/kernel.cu",
-            "triton/hash/kernel.cubin",
-            "triton/hash/cuda_utils.so",
-        )
-        files = {}
-        for index, name in enumerate(tracked + untracked):
-            path = self.root / "sources" / name
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_bytes(name.encode())
-            mtime_ns = 1_783_782_662_123_450_000 + index
-            os.utime(path, ns=(mtime_ns, mtime_ns))
-            files[name] = path
-        expected = {name: files[name].stat().st_mtime_ns for name in tracked}
+    def test_manager_does_not_publish_ninja_artifacts(self):
+        manager = self.make_manager()
+        expected = {}
+        for component_name in ("flashinfer", "torch_extensions"):
+            item = component(manager.components, component_name)
+            for rel in ("op/build.ninja", "op/.ninja_log", "op/.ninja_deps"):
+                path = item.local_dir / rel
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(b"ninja")
+                manager.stage_delta_file(item, rel)
 
-        store = jit_store.RemoteSnapshotStore(remote)
-        self.assertTrue(store.publish_snapshot(files))
-        self.assertEqual(archive_mtimes(snapshot_paths(remote)[-1]), expected)
-
-        restored = self.root / "restored"
-        self.assertTrue(store.restore(restored))
-        for name, mtime_ns in expected.items():
-            self.assertEqual((restored / name).stat().st_mtime_ns, mtime_ns, name)
-
-    def test_exact_mtime_ns_keeps_ninja_cache_clean(self):
-        ninja = shutil.which("ninja")
-        if ninja is None:
-            self.skipTest("ninja is not available")
-
-        producer = self.root / "ninja_producer"
-        producer.mkdir()
-        source = producer / "input.cu"
-        source.write_text("payload")
-        source_mtime_ns = 1_783_782_660_123_456_789
-        output_mtime_ns = 1_783_782_662_123_456_789
-        os.utime(source, ns=(source_mtime_ns, source_mtime_ns))
-        (producer / "build.ninja").write_text(
-            "rule copy\n"
-            "  command = cp $in $out && "
-            f"touch -d @{output_mtime_ns // 1_000_000_000}."
-            f"{output_mtime_ns % 1_000_000_000:09d} $out && "
-            "printf '$out: $in\\n' > $out.d\n"
-            "  depfile = $out.d\n"
-            "  deps = gcc\n"
-            "build output.o: copy input.cu\n"
-        )
-        subprocess.run(
-            [ninja, "-C", str(producer)],
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-        self.assertEqual((producer / "output.o").stat().st_mtime_ns, output_mtime_ns)
-        self.assertTrue((producer / ".ninja_deps").is_file())
-
-        remote = self.root / "ninja_remote"
-        remote.mkdir()
-        store = jit_store.RemoteSnapshotStore(remote)
-        prefix = "flashinfer/cached_ops/ninja_test"
-        self.assertTrue(
-            store.publish_snapshot(
-                {f"{prefix}/{path.name}": path for path in producer.iterdir()}
+            shared_object = item.local_dir / "op/op.so"
+            shared_object.write_bytes(component_name.encode())
+            manager.stage_delta_file(item, "op/op.so")
+            expected[shared_object.relative_to(manager.local_root).as_posix()] = (
+                component_name.encode()
             )
-        )
-        restored = self.root / "ninja_consumer"
-        self.assertTrue(store.restore(restored))
-        consumer = restored / prefix
-        for name in ("input.cu", "output.o"):
-            self.assertEqual(
-                (consumer / name).stat().st_mtime_ns,
-                (producer / name).stat().st_mtime_ns,
-                name,
-            )
-        result = subprocess.run(
-            [ninja, "-C", str(consumer), "-n", "-d", "explain"],
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-        self.assertIn("ninja: no work to do.", result.stdout)
-        self.assertEqual(result.stderr, "")
+
+        manager.flush_delta2remote()
+        self.assertEqual(effective_members(self.root / "remote"), expected)
 
     def test_restore_finishes_before_observer_starts(self):
         remote = self.root / "remote"
@@ -504,15 +453,50 @@ class JitCacheManagerTest(unittest.TestCase):
         empty.touch()
         atomic_handler.on_any_event(FakeFileEvent("created", str(empty)))
 
-        # flashinfer stages only on terminal (closed/moved) events; a bare
-        # "created" for source/ninja is ignored until it closes or is moved.
-        # triton stages on "created" because its upload_events include it.
+        # FlashInfer stages only terminal writes; component filtering is
+        # covered separately. Triton stages atomic creation.
         self.assertEqual(
             staged,
             [
                 (flashinfer, direct.relative_to(flashinfer.local_dir).as_posix()),
                 (flashinfer, moved.relative_to(flashinfer.local_dir).as_posix()),
                 (triton, atomic.relative_to(triton.local_dir).as_posix()),
+            ],
+        )
+
+    def test_cuda_component_event_signals(self):
+        manager = self.make_manager()
+        tvm_ffi, shared_object = self.write_component(
+            manager,
+            "tvm_ffi",
+            "libtorch_c_dlpack_addon_torch28-cuda.so",
+            b"elf",
+        )
+        cute_dsl, mlir = self.write_component(
+            manager, "cute_dsl", "cute_dsl_0123456789abcdef.mlir", b"mlir"
+        )
+        staged = []
+        tvm_handler = jit._JitFileEventHandler(
+            tvm_ffi, lambda *args: staged.append(args)
+        )
+        cute_handler = jit._JitFileEventHandler(
+            cute_dsl, lambda *args: staged.append(args)
+        )
+
+        tvm_handler.on_any_event(FakeFileEvent("created", str(shared_object)))
+        cute_handler.on_any_event(FakeFileEvent("created", str(mlir)))
+        cute_handler.on_any_event(
+            FakeFileEvent("moved", str(self.root / "tmp.mlir"), str(mlir))
+        )
+
+        self.assertEqual(
+            staged,
+            [
+                (
+                    tvm_ffi,
+                    shared_object.relative_to(tvm_ffi.local_dir).as_posix(),
+                ),
+                (cute_dsl, mlir.relative_to(cute_dsl.local_dir).as_posix()),
             ],
         )
 
