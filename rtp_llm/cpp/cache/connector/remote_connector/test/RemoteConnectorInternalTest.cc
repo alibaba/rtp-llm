@@ -248,21 +248,13 @@ TEST_F(RemoteConnectorInternalTest, test_genLocationSpecInfoMapAndGroups) {
               *spec_info_map);
     EXPECT_EQ((std::map<std::string, std::vector<std::string>>(
                   {{"F0", {"tp0_F0", "tp1_F0"}},
-                   {"F0L1", {"tp0_F0", "tp1_F0", "tp0_L1", "tp1_L1"}},
                    {"F0L1L2", {"tp0_F0", "tp1_F0", "tp0_L1", "tp1_L1", "tp0_L2", "tp1_L2"}},
-                   {"F0L2", {"tp0_F0", "tp1_F0", "tp0_L2", "tp1_L2"}},
                    {"L1", {"tp0_L1", "tp1_L1"}},
-                   {"L1L2", {"tp0_L1", "tp1_L1", "tp0_L2", "tp1_L2"}},
                    {"L2", {"tp0_L2", "tp1_L2"}}})),
               *spec_groups);
-    EXPECT_EQ((std::unordered_map<uint64_t, std::string>({{0b111, "F0L1L2"},
-                                                          {0b110, "L1L2"},
-                                                          {0b101, "F0L2"},
-                                                          {0b011, "F0L1"},
-                                                          {0b100, "L2"},
-                                                          {0b010, "L1"},
-                                                          {0b001, "F0"}})),
-              connector->group_policy_->location_spec_group_map_);
+    EXPECT_EQ(
+        (std::unordered_map<uint64_t, std::string>({{0b111, "F0L1L2"}, {0b100, "L2"}, {0b010, "L1"}, {0b001, "F0"}})),
+        connector->group_policy_->location_spec_group_map_);
     EXPECT_EQ((GroupPolicy::SpecInfoMap({{"tp0_F0", GroupPolicy::SpecInfo({0, 0})},
                                          {"tp0_L1", GroupPolicy::SpecInfo({1, 0})},
                                          {"tp0_L2", GroupPolicy::SpecInfo({2, 0})},
@@ -270,6 +262,46 @@ TEST_F(RemoteConnectorInternalTest, test_genLocationSpecInfoMapAndGroups) {
                                          {"tp1_L1", GroupPolicy::SpecInfo({1, 1})},
                                          {"tp1_L2", GroupPolicy::SpecInfo({2, 1})}})),
               connector->group_policy_->spec_name_to_info_);
+}
+
+TEST_F(RemoteConnectorInternalTest, test_genLocationSpecGroupsScalesLinearly) {
+    constexpr size_t linear_group_count = 19;
+    constexpr size_t group_count        = linear_group_count + 1;
+
+    CacheConfig config;
+    config.block_num        = 8;
+    config.layer_num        = group_count;
+    config.layer_all_num    = group_count;
+    config.dtype            = rtp_llm::DataType::TYPE_FP16;
+    auto full_spec          = makeTestMhaSpec("full", /*seq_size_per_block=*/8);
+    config.block_size_bytes = full_spec->block_size_bytes();
+
+    std::vector<KVCacheSpecPtr>   specs{full_spec};
+    std::vector<std::vector<int>> layer_ids{{0}};
+    std::vector<CacheGroupType>   group_types{CacheGroupType::FULL};
+    std::vector<std::string>      group_tags{"full"};
+    std::vector<int32_t>          full_group_ids{0};
+    std::vector<int32_t>          linear_group_ids;
+    for (size_t i = 0; i < linear_group_count; ++i) {
+        const auto group_id = static_cast<int32_t>(i + 1);
+        specs.push_back(makeTestLinearSpec("linear" + std::to_string(i), /*seq_size_per_block=*/8));
+        layer_ids.push_back({group_id});
+        group_types.push_back(CacheGroupType::LINEAR);
+        group_tags.push_back("linear" + std::to_string(i));
+        linear_group_ids.push_back(group_id);
+    }
+    config.fromGroupedSpecs(specs, layer_ids, group_types, group_tags);
+
+    auto allocator =
+        std::make_shared<FakeKVCacheAllocator>(config, full_group_ids, linear_group_ids, /*per_group_layer_num=*/1);
+    auto connector = std::shared_ptr<RemoteConnector>(new RemoteConnector(
+        config, kv_cache_config_, runtime_config_, parallelism_config_, sp_config_, nullptr, 0, allocator));
+    ASSERT_TRUE(connector->group_policy_->init());
+
+    auto [spec_info_map, spec_groups] = connector->genLocationSpecInfoMapAndGroups(/*tp_size=*/1);
+    EXPECT_EQ(spec_info_map->size(), group_count);
+    EXPECT_EQ(spec_groups->size(), group_count + 1);
+    EXPECT_EQ(connector->group_policy_->location_spec_group_map_.size(), group_count + 1);
 }
 
 }  // namespace test
