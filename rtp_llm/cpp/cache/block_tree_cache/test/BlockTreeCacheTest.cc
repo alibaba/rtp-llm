@@ -133,14 +133,14 @@ static MemoryOperationRequestPB makeBroadcastRequest() {
 // IBlockPool reserves block 0, so physical_block_count = usable_count + 1. The pool
 // is returned uninitialized; callers invoke init() (which is not double-call guarded).
 static std::shared_ptr<HostBlockPool> makeHostPool(size_t payload_bytes, size_t usable_count) {
-    auto config                     = std::make_shared<HostBlockPoolConfig>();
-    config->pool_type               = BlockPoolType::HOST;
-    config->pool_name               = "block_tree_cache_host";
-    config->physical_block_count    = usable_count + 1;
-    config->payload_bytes           = payload_bytes;
-    config->stride_bytes            = ((payload_bytes + 4095) / 4096) * 4096;
-    config->enable_pinned           = true;
-    config->alignment               = 4096;
+    auto config                  = std::make_shared<HostBlockPoolConfig>();
+    config->pool_type            = BlockPoolType::HOST;
+    config->pool_name            = "block_tree_cache_host";
+    config->physical_block_count = usable_count + 1;
+    config->payload_bytes        = payload_bytes;
+    config->stride_bytes         = ((payload_bytes + 4095) / 4096) * 4096;
+    config->enable_pinned        = true;
+    config->alignment            = 4096;
     return std::make_shared<HostBlockPool>(config);
 }
 
@@ -197,21 +197,20 @@ private:
     std::vector<char> data_;
 };
 
-static std::shared_ptr<DiskBlockPool> makeDiskPool(size_t                       payload_bytes,
-                                                   size_t                       usable_count,
-                                                   std::unique_ptr<DiskBlockIO> io = nullptr) {
+static std::shared_ptr<DiskBlockPool>
+makeDiskPool(size_t payload_bytes, size_t usable_count, std::unique_ptr<DiskBlockIO> io = nullptr) {
     const size_t aligned_block_size = ((payload_bytes + 4095) / 4096) * 4096;
 
-    auto config                     = std::make_shared<DiskBlockPoolConfig>();
-    config->pool_type               = BlockPoolType::DISK;
-    config->pool_name               = "block_tree_cache_disk";
-    config->work_dir                = "/tmp";
-    config->local_rank              = 0;
-    config->world_rank              = 0;
-    config->disk_size_bytes         = aligned_block_size * (usable_count + 1);
-    config->payload_bytes           = payload_bytes;
-    config->stride_bytes            = aligned_block_size;
-    config->buffered_io             = true;
+    auto config             = std::make_shared<DiskBlockPoolConfig>();
+    config->pool_type       = BlockPoolType::DISK;
+    config->pool_name       = "block_tree_cache_disk";
+    config->work_dir        = "/tmp";
+    config->local_rank      = 0;
+    config->world_rank      = 0;
+    config->disk_size_bytes = aligned_block_size * (usable_count + 1);
+    config->payload_bytes   = payload_bytes;
+    config->stride_bytes    = aligned_block_size;
+    config->buffered_io     = true;
 
     auto pool = std::make_shared<DiskBlockPool>(config, std::move(io));
     RTP_LLM_CHECK(pool->init());
@@ -233,11 +232,11 @@ static DeviceBlockPoolPtr makeDevicePool() {
     constexpr int    kBlockNum       = 10;
     constexpr size_t kTokensPerBlock = 1;
     CacheConfig      cache_config    = test::makeSimpleMhaCacheConfig(kLayerNum,
-                                                             kBlockNum,
-                                                             kTokensPerBlock,
-                                                             TYPE_FP16,
-                                                             /*local_head_num_kv=*/1,
-                                                             /*size_per_head=*/64);
+                                                              kBlockNum,
+                                                              kTokensPerBlock,
+                                                              TYPE_FP16,
+                                                              /*local_head_num_kv=*/1,
+                                                              /*size_per_head=*/64);
     BlockPoolConfig  old_cfg         = BlockPoolConfigHelper::createConfig(cache_config);
 
     auto config                     = std::make_shared<DeviceBlockPoolConfig>();
@@ -259,9 +258,8 @@ struct DeviceLayerBufferSpec {
     size_t scale_bytes{0};
 };
 
-static DeviceBlockPoolPtr makeDevicePool(const std::vector<DeviceLayerBufferSpec>& specs,
-                                         size_t                                    usable_count,
-                                         const std::string&                       pool_name) {
+static DeviceBlockPoolPtr
+makeDevicePool(const std::vector<DeviceLayerBufferSpec>& specs, size_t usable_count, const std::string& pool_name) {
     const auto physical_block_count = usable_count + 1;
 
     auto config                     = std::make_shared<DeviceBlockPoolConfig>();
@@ -597,10 +595,8 @@ TEST_F(BlockTreeCacheTest, ReclaimBlocksDoesNotAllocateHostBlock) {
     ce_cfg.enable_device_cache       = true;
     ce_cfg.enable_memory_cache       = true;
 
-    auto ce_cache = std::make_unique<BlockTreeCache>(std::move(tree),
-                                                     std::move(groups),
-                                                     std::vector<Component>{},
-                                                     std::move(ce_cfg));
+    auto ce_cache = std::make_unique<BlockTreeCache>(
+        std::move(tree), std::move(groups), std::vector<Component>{}, std::move(ce_cfg));
 
     std::vector<std::vector<GroupSlot>> slots(1, std::vector<GroupSlot>(1));
     slots[0][0].device_blocks = {42};
@@ -636,10 +632,8 @@ TEST_F(BlockTreeCacheTest, SequentialReclaimDrainsChainWithoutHostBlocks) {
     seq_cfg.enable_device_cache       = true;
     seq_cfg.enable_memory_cache       = false;
 
-    auto ce_cache = std::make_unique<BlockTreeCache>(std::move(tree),
-                                                     std::move(groups),
-                                                     std::vector<Component>{},
-                                                     std::move(seq_cfg));
+    auto ce_cache = std::make_unique<BlockTreeCache>(
+        std::move(tree), std::move(groups), std::vector<Component>{}, std::move(seq_cfg));
 
     std::vector<std::vector<GroupSlot>> slots(3, std::vector<GroupSlot>(1));
     slots[0][0].device_blocks = {42};
@@ -673,10 +667,8 @@ TEST_F(BlockTreeCacheTest, ReusableReclaimDoesNotAllocateHostBlock) {
     reuse_cfg.enable_device_cache       = true;
     reuse_cfg.enable_memory_cache       = true;
 
-    auto ce_cache = std::make_unique<BlockTreeCache>(std::move(tree),
-                                                     std::move(groups),
-                                                     std::vector<Component>{},
-                                                     std::move(reuse_cfg));
+    auto ce_cache = std::make_unique<BlockTreeCache>(
+        std::move(tree), std::move(groups), std::vector<Component>{}, std::move(reuse_cfg));
 
     std::vector<std::vector<GroupSlot>> slots(1, std::vector<GroupSlot>(1));
     slots[0][0].device_blocks = {42};
@@ -708,10 +700,8 @@ TEST_F(BlockTreeCacheTest, DiskRequiresHostValidation) {
     throw_cfg.enable_disk_cache         = true;
     throw_cfg.enable_remote_cache       = false;
 
-    EXPECT_THROW(std::make_unique<BlockTreeCache>(std::move(tree),
-                                                  std::move(groups),
-                                                  std::vector<Component>{},
-                                                  std::move(throw_cfg)),
+    EXPECT_THROW(std::make_unique<BlockTreeCache>(
+                     std::move(tree), std::move(groups), std::vector<Component>{}, std::move(throw_cfg)),
                  std::invalid_argument);
 }
 
@@ -723,7 +713,10 @@ TEST_F(BlockTreeCacheTest, ReclaimDisabledTierReturnsZero) {
     std::vector<ComponentGroupPtr> groups = {full};
 
     // Device enabled, Host disabled (default)
-    auto cache = std::make_unique<BlockTreeCache>(std::move(tree), std::move(groups), std::vector<Component>{}, BlockTreeCacheConfig{.eviction_thread_pool_size = 2});
+    auto cache = std::make_unique<BlockTreeCache>(std::move(tree),
+                                                  std::move(groups),
+                                                  std::vector<Component>{},
+                                                  BlockTreeCacheConfig{.eviction_thread_pool_size = 2});
 
     std::vector<std::vector<GroupSlot>> slots(1, std::vector<GroupSlot>(1));
     slots[0][0].device_blocks = {42};
@@ -746,7 +739,10 @@ TEST_F(BlockTreeCacheTest, HostDisabledDirectRelease) {
     std::vector<ComponentGroupPtr> groups = {full};
 
     // Host disabled (default): Device reclaim → direct release.
-    auto cache = std::make_unique<BlockTreeCache>(std::move(tree), std::move(groups), std::vector<Component>{}, BlockTreeCacheConfig{.eviction_thread_pool_size = 2});
+    auto cache = std::make_unique<BlockTreeCache>(std::move(tree),
+                                                  std::move(groups),
+                                                  std::vector<Component>{},
+                                                  BlockTreeCacheConfig{.eviction_thread_pool_size = 2});
 
     std::vector<std::vector<GroupSlot>> slots(1, std::vector<GroupSlot>(1));
     slots[0][0].device_blocks = {42};
@@ -774,10 +770,8 @@ TEST_F(BlockTreeCacheTest, TierEnableQueries) {
     cfg.enable_disk_cache   = true;
     cfg.enable_remote_cache = true;
 
-    auto cache = std::make_unique<BlockTreeCache>(std::move(tree),
-                                                  std::move(groups),
-                                                  std::vector<Component>{},
-                                                  std::move(cfg));
+    auto cache =
+        std::make_unique<BlockTreeCache>(std::move(tree), std::move(groups), std::vector<Component>{}, std::move(cfg));
 
     EXPECT_TRUE(cache->isDeviceCacheEnabled());
     EXPECT_TRUE(cache->isMemoryCacheEnabled());
@@ -881,12 +875,12 @@ TEST_F(BlockTreeCacheTest, MatchRequiresSWAWindowAfterGap) {
     std::unique_ptr<BlockTree> tree = std::make_unique<BlockTree>(2);
 
     std::shared_ptr<FullComponentGroup> full = std::make_shared<FullComponentGroup>();
-    full->component_group_id = 0;
+    full->component_group_id                 = 0;
 
     std::shared_ptr<SWAComponentGroup> swa = std::make_shared<SWAComponentGroup>(128, 64);
-    swa->component_group_id = 1;
+    swa->component_group_id                = 1;
 
-    std::vector<ComponentGroupPtr> groups = {full, swa};
+    std::vector<ComponentGroupPtr>  groups = {full, swa};
     std::unique_ptr<BlockTreeCache> cache =
         std::make_unique<BlockTreeCache>(std::move(tree), std::move(groups), std::vector<Component>{});
 
@@ -919,7 +913,7 @@ TEST_F(BlockTreeCacheTest, WatermarkDemotionCopyFailureRollsBack) {
 
     auto host_pool = makeHostPool(256, 8);
     ASSERT_TRUE(host_pool->init());
-    auto device_pool = makeDevicePool({{256, 0}}, 8, "watermark_failure_device");
+    auto device_pool  = makeDevicePool({{256, 0}}, 8, "watermark_failure_device");
     auto device_block = poolMalloc(*device_pool);
     ASSERT_NE(device_block, NULL_BLOCK_IDX);
 
@@ -935,8 +929,8 @@ TEST_F(BlockTreeCacheTest, WatermarkDemotionCopyFailureRollsBack) {
     cfg.enable_memory_cache = true;
     cfg.watermark_device    = {0.01, 0};
 
-    auto cache = std::make_unique<BlockTreeCache>(
-        std::move(tree), std::move(groups), std::vector<Component>{}, std::move(cfg));
+    auto cache =
+        std::make_unique<BlockTreeCache>(std::move(tree), std::move(groups), std::vector<Component>{}, std::move(cfg));
 
     std::vector<std::vector<GroupSlot>> slots(1, std::vector<GroupSlot>(1));
     slots[0][0].device_blocks = {device_block};
@@ -972,8 +966,8 @@ TEST_F(BlockTreeCacheTest, WatermarkDemotionCopiesHostBlockToDisk) {
     cfg.enable_disk_cache   = true;
     cfg.watermark_host      = {0.01, 0};
 
-    auto cache = std::make_unique<BlockTreeCache>(
-        std::move(tree), std::move(groups), std::vector<Component>{}, std::move(cfg));
+    auto cache =
+        std::make_unique<BlockTreeCache>(std::move(tree), std::move(groups), std::vector<Component>{}, std::move(cfg));
 
     std::vector<std::vector<GroupSlot>> slots(1, std::vector<GroupSlot>(1));
     slots[0][0].host_block = host_block;
@@ -1057,8 +1051,8 @@ TEST_F(BlockTreeCacheTest, ReclaimBlocksDoesNotUpdateHostSlot) {
     cfg.enable_device_cache = true;
     cfg.enable_memory_cache = true;
 
-    auto cache = std::make_unique<BlockTreeCache>(
-        std::move(tree), std::move(groups), std::move(components), std::move(cfg));
+    auto cache =
+        std::make_unique<BlockTreeCache>(std::move(tree), std::move(groups), std::move(components), std::move(cfg));
 
     std::vector<std::vector<GroupSlot>> slots(1, std::vector<GroupSlot>(1));
     slots[0][0].device_blocks = {42};
@@ -1076,12 +1070,12 @@ TEST_F(BlockTreeCacheTest, LoadBackOnlyReloadsSWAWindow) {
     std::unique_ptr<BlockTree> tree = std::make_unique<BlockTree>(2);
 
     std::shared_ptr<FullComponentGroup> full = std::make_shared<FullComponentGroup>();
-    full->component_group_id = 0;
+    full->component_group_id                 = 0;
 
     std::shared_ptr<SWAComponentGroup> swa = std::make_shared<SWAComponentGroup>(128, 64);
-    swa->component_group_id = 1;
+    swa->component_group_id                = 1;
 
-    std::vector<ComponentGroupPtr> groups = {full, swa};
+    std::vector<ComponentGroupPtr>  groups = {full, swa};
     std::unique_ptr<BlockTreeCache> cache =
         std::make_unique<BlockTreeCache>(std::move(tree), std::move(groups), std::vector<Component>{});
     cache->setEnableLoadBack(true);
@@ -1159,12 +1153,8 @@ TEST_F(BlockTreeCacheTest, BroadcastManagerStoredCorrectly) {
     BlockTreeCacheConfig cfg;
     cfg.enable_device_cache = true;
 
-    auto cache = std::make_unique<BlockTreeCache>(std::move(tree),
-                                                  std::move(groups),
-                                                  std::vector<Component>{},
-                                                  std::move(cfg),
-                                                  nullptr,
-                                                  broadcast_mgr);
+    auto cache = std::make_unique<BlockTreeCache>(
+        std::move(tree), std::move(groups), std::vector<Component>{}, std::move(cfg), nullptr, broadcast_mgr);
 
     // Verify BroadcastManager is stored (access via internal member)
     EXPECT_EQ(cache->broadcast_manager_, broadcast_mgr);
@@ -1542,6 +1532,86 @@ TEST_F(BlockTreeCacheTest, BroadcastEvictionFailureRollsBackPlan) {
     EXPECT_EQ(host_pool->freeBlocksNum(), 7u);
     EXPECT_EQ(disk_pool->freeBlocksNum(), 8u);
     EXPECT_EQ(cache->getStats().host_heap_total_size, 1u);
+}
+
+// ---------------------------------------------------------------------------
+// Admission callback: gate invoked inside match() before load_back.
+// ---------------------------------------------------------------------------
+
+// Builds a single-FULL-group cache with load_back enabled and one host-only node
+// (device blocks cleared) so match() would trigger a host->device load_back.
+static std::unique_ptr<BlockTreeCache> makeHostOnlyLoadBackCache() {
+    auto tree                             = std::make_unique<BlockTree>(1);
+    auto full                             = std::make_shared<FullComponentGroup>();
+    full->component_group_id              = 0;
+    std::vector<ComponentGroupPtr> groups = {full};
+
+    auto cache = std::make_unique<BlockTreeCache>(std::move(tree), std::move(groups), std::vector<Component>{});
+    cache->setEnableLoadBack(true);
+
+    std::vector<std::vector<GroupSlot>> slots(1, std::vector<GroupSlot>(1));
+    slots[0][0].device_blocks = {55};
+    cache->insert(nullptr, {200}, slots);
+
+    auto find = cache->tree()->findNode({200});
+    RTP_LLM_CHECK(find.matched_node != nullptr);
+    find.matched_node->group_slots[0].host_block = 7;
+    for (auto& b : find.matched_node->group_slots[0].device_blocks) {
+        b = NULL_BLOCK_IDX;
+    }
+    return cache;
+}
+
+// Deferred load_back: match() plans (references the source blocks) but does NOT execute
+// load_back. The result carries a LoadBackTicket; committing it allocates the device
+// target and submits the async copy, while dropping it uncommitted aborts (unreferences
+// the source) with nothing wasted.
+
+// Not committing the ticket: no device block is allocated and no async copy is submitted;
+// the ticket destructor aborts safely.
+TEST_F(BlockTreeCacheTest, LoadBackTicketAbortSkipsLoadBack) {
+    auto cache = makeHostOnlyLoadBackCache();
+
+    auto result = cache->match({200});
+    ASSERT_NE(result.load_back_ticket, nullptr);
+    EXPECT_FALSE(result.load_back_ticket->empty());
+    // Counters reflect the planned load_back; match() submits nothing async and leaves
+    // async_context null (the async context is produced only at commit).
+    EXPECT_EQ(result.matched_blocks, 1u);
+    EXPECT_EQ(result.host_load_back_blocks, 1u);
+    EXPECT_EQ(result.load_back_blocks, 1u);
+    EXPECT_EQ(result.async_context, nullptr);
+
+    // Drop the ticket without committing => RAII abort (source unreferenced). No async
+    // task was ever submitted, so waitForPendingTasks returns immediately.
+    result.load_back_ticket.reset();
+    cache->releaseMatchedBlocks(result.matched_block_sets);
+    cache->waitForPendingTasks();
+}
+
+// Committing the ticket allocates the device target and submits the async copy, yielding
+// a non-null AsyncContext.
+TEST_F(BlockTreeCacheTest, LoadBackTicketCommitTriggersLoadBack) {
+    auto cache = makeHostOnlyLoadBackCache();
+
+    auto result = cache->match({200});
+    ASSERT_NE(result.load_back_ticket, nullptr);
+    EXPECT_EQ(result.matched_blocks, 1u);
+    EXPECT_EQ(result.host_load_back_blocks, 1u);
+    EXPECT_EQ(result.load_back_blocks, 1u);
+
+    auto ctx = result.load_back_ticket->commit();
+    EXPECT_NE(ctx, nullptr);
+
+    cache->releaseMatchedBlocks(result.matched_block_sets);
+    cache->waitForPendingTasks();
+}
+
+// A no-match match() plans nothing and returns a null ticket (never created).
+TEST_F(BlockTreeCacheTest, EmptyMatchYieldsNoTicket) {
+    auto result = cache_->match({100, 200, 300});  // empty tree => no match
+    EXPECT_EQ(result.matched_node, nullptr);
+    EXPECT_EQ(result.load_back_ticket, nullptr);
 }
 
 }  // namespace

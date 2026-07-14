@@ -304,39 +304,14 @@ BlockTreeMatchResult BlockTreeCache::match(const CacheKeysType& cache_keys) {
                                       find_result.path.begin() + static_cast<ptrdiff_t>(valid_matched_block_count));
     referenceMatchedDeviceBlocks(match_path, result);
 
-    // Phase 2: load_back — detect and transfer Host/Disk data to GPU
+    // Deferred load_back: plan (but do not execute) the Host/Disk -> device transfers.
+    // planMatchedLoadBack only references the matched source blocks so the nodes stay
+    // valid across the lock-release gap; device allocation and the async copies are
+    // deferred until the allocator commits the ticket (after its own malloc succeeds),
+    // and are skipped entirely if the ticket is dropped (RAII abort).
     if (config_.enable_load_back && best_match != nullptr) {
-        std::vector<LoadBackItem> lb_items;
-        prepareMatchedLoadBack(match_path, lb_items, result);
-
-        // Submit async load_back task
-        if (!lb_items.empty()) {
-            auto lb_ctx = std::make_shared<LoadBackAsyncContext>();
-            lb_ctx->addTask();
-            result.async_context = lb_ctx;
-            auto items           = std::make_shared<std::vector<LoadBackItem>>(std::move(lb_items));
-
-            taskStarted();
-            auto* work_item = new autil::LambdaWorkItem([this, items, lb_ctx]() {
-                performLoadBack(std::move(*items), lb_ctx);
-                taskFinished();
-            });
-            auto  err       = thread_pool_->pushWorkItem(work_item);
-            if (err != autil::ThreadPool::ERROR_NONE) {
-                work_item->destroy();
-                for (const auto& item : *items) {
-                    auto gid = static_cast<size_t>(item.group_id);
-                    if (gid >= component_groups_.size()) {
-                        continue;
-                    }
-                    auto& group = component_groups_[gid];
-                    group->unreferenceBlocks(GroupBlockSet{item.group_id, item.source_tier, {item.source_blocks}});
-                    group->releaseBlocks(GroupBlockSet{item.group_id, Tier::DEVICE, {item.target_device_blocks}});
-                }
-                lb_ctx->onTaskComplete(false);
-                taskFinished();
-            }
-        }
+        result.load_back_ticket = std::make_shared<LoadBackTicket>(this);
+        planMatchedLoadBack(match_path, result);
     }
 
     for (auto& group : component_groups_) {
@@ -572,9 +547,10 @@ void BlockTreeCache::referenceMatchedDeviceBlocks(const std::vector<TreeNode*>& 
     }
 }
 
-void BlockTreeCache::prepareMatchedLoadBack(const std::vector<TreeNode*>& match_path,
-                                            std::vector<LoadBackItem>&    lb_items,
-                                            BlockTreeMatchResult&         result) {
+void BlockTreeCache::planMatchedLoadBack(const std::vector<TreeNode*>& match_path, BlockTreeMatchResult& result) {
+    if (!result.load_back_ticket) {
+        return;
+    }
     const size_t matched_block_count = match_path.size();
     for (ComponentGroupPtr& group : component_groups_) {
         const size_t ref_count =
@@ -607,25 +583,13 @@ void BlockTreeCache::prepareMatchedLoadBack(const std::vector<TreeNode*>& match_
             if (source_blocks.empty()) {
                 continue;
             }
+            // Reference the source (Host/Disk) blocks only. This keeps the node/slot alive
+            // and non-evictable across the lock-release gap until the ticket is committed or
+            // aborted. No device block is allocated and no copy is submitted yet.
             group->referenceBlocks(GroupBlockSet{group->component_group_id, source, {source_blocks}});
 
-            // cache self-allocated path: malloc + incRef. Do NOT write slot yet;
-            // the block is installed only after the copy succeeds.
-            auto set = group->allocateBlocks(Tier::DEVICE, 1);
-            if (set.per_node.empty()) {
-                group->unreferenceBlocks(GroupBlockSet{group->component_group_id, source, {source_blocks}});
-                RTP_LLM_LOG_WARNING("BlockTreeCache::match: load_back allocate failed "
-                                    "group[%d] node_key=%ld",
-                                    group->component_group_id,
-                                    node->cache_key);
-                continue;
-            }
-            const auto& dev_blocks = set.per_node[0];
-
-            group->referenceBlocks(set);
-            result.matched_block_sets.push_back(set);
-
-            lb_items.push_back(LoadBackItem{node, group->component_group_id, source, source_blocks, dev_blocks});
+            result.load_back_ticket->items().push_back(
+                PendingLoadBackItem{node, group->component_group_id, source, source_blocks});
 
             if (source == Tier::HOST) {
                 result.host_load_back_blocks++;
@@ -634,19 +598,101 @@ void BlockTreeCache::prepareMatchedLoadBack(const std::vector<TreeNode*>& match_
             }
             result.load_back_blocks++;
 
-            for (BlockIdxType block : dev_blocks) {
-                if (block != NULL_BLOCK_IDX) {
-                    result.block_indices.push_back(block);
-                }
-            }
-
-            RTP_LLM_LOG_DEBUG("BlockTreeCache::match: load_back from %s "
+            RTP_LLM_LOG_DEBUG("BlockTreeCache::match: planned load_back from %s "
                               "group[%d] node_key=%ld",
                               tierName(source),
                               group->component_group_id,
                               node->cache_key);
         }
     }
+}
+
+std::shared_ptr<AsyncContext> BlockTreeCache::commitLoadBack(const std::vector<PendingLoadBackItem>& items) {
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    std::vector<LoadBackItem> lb_items;
+    lb_items.reserve(items.size());
+    for (const auto& item : items) {
+        auto gid = static_cast<size_t>(item.group_id);
+        if (gid >= component_groups_.size()) {
+            continue;
+        }
+        auto& group = component_groups_[gid];
+
+        // Now (after the allocator's own malloc succeeded) allocate the device target.
+        // cache self-allocated path: malloc + incRef. Do NOT write slot yet; the block
+        // is installed only after the copy succeeds (in performLoadBack).
+        auto set = group->allocateBlocks(Tier::DEVICE, 1);
+        if (set.per_node.empty()) {
+            // Device alloc failed at commit: drop this item's source reference and skip.
+            group->unreferenceBlocks(GroupBlockSet{item.group_id, item.source_tier, {item.source_blocks}});
+            RTP_LLM_LOG_WARNING("BlockTreeCache::commitLoadBack: load_back allocate failed "
+                                "group[%d] node_key=%ld",
+                                item.group_id,
+                                item.node ? item.node->cache_key : -1);
+            continue;
+        }
+        const auto& dev_blocks = set.per_node[0];
+        lb_items.push_back(LoadBackItem{item.node, item.group_id, item.source_tier, item.source_blocks, dev_blocks});
+    }
+
+    if (lb_items.empty()) {
+        return nullptr;
+    }
+
+    auto lb_ctx = std::make_shared<LoadBackAsyncContext>();
+    lb_ctx->addTask();
+    auto async_items = std::make_shared<std::vector<LoadBackItem>>(std::move(lb_items));
+
+    taskStarted();
+    auto* work_item = new autil::LambdaWorkItem([this, async_items, lb_ctx]() {
+        performLoadBack(std::move(*async_items), lb_ctx);
+        taskFinished();
+    });
+    auto  err       = thread_pool_->pushWorkItem(work_item);
+    if (err != autil::ThreadPool::ERROR_NONE) {
+        work_item->destroy();
+        for (const auto& item : *async_items) {
+            auto gid = static_cast<size_t>(item.group_id);
+            if (gid >= component_groups_.size()) {
+                continue;
+            }
+            auto& group = component_groups_[gid];
+            group->unreferenceBlocks(GroupBlockSet{item.group_id, item.source_tier, {item.source_blocks}});
+            group->releaseBlocks(GroupBlockSet{item.group_id, Tier::DEVICE, {item.target_device_blocks}});
+        }
+        lb_ctx->onTaskComplete(false);
+        taskFinished();
+    }
+    return lb_ctx;
+}
+
+void BlockTreeCache::abortLoadBack(const std::vector<PendingLoadBackItem>& items) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (const auto& item : items) {
+        auto gid = static_cast<size_t>(item.group_id);
+        if (gid >= component_groups_.size()) {
+            continue;
+        }
+        // Release the source reference taken in planMatchedLoadBack. No device block was
+        // ever allocated, so there is nothing else to undo.
+        component_groups_[gid]->unreferenceBlocks(GroupBlockSet{item.group_id, item.source_tier, {item.source_blocks}});
+    }
+}
+
+LoadBackTicket::~LoadBackTicket() {
+    if (!committed_ && cache_ != nullptr && !items_.empty()) {
+        cache_->abortLoadBack(items_);
+    }
+}
+
+std::shared_ptr<AsyncContext> LoadBackTicket::commit() {
+    if (committed_ || cache_ == nullptr || items_.empty()) {
+        committed_ = true;
+        return nullptr;
+    }
+    committed_ = true;
+    return cache_->commitLoadBack(items_);
 }
 
 bool BlockTreeCache::executeLoadBackTransferBatch(const std::vector<TransferDescriptor>& descriptors, int timeout_ms) {

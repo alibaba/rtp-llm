@@ -19,6 +19,52 @@
 namespace rtp_llm {
 
 class AsyncContext;
+class BlockTreeCache;
+
+// A single matched host/disk block that is a candidate for load_back. Planned inside
+// match() (which only references the source-tier blocks to keep the node alive across
+// the lock-release gap) and carried by LoadBackTicket. Device blocks are NOT allocated
+// until the ticket is committed by the allocator after its own malloc succeeds.
+struct PendingLoadBackItem {
+    TreeNode*                 node{nullptr};
+    int                       group_id{-1};
+    Tier                      source_tier{Tier::NONE};
+    std::vector<BlockIdxType> source_blocks;
+};
+
+// Deferred load_back handle returned by match(). It owns the planned (source-referenced)
+// load_back items but performs NO device allocation or copy until commit() is called.
+// RAII: if destroyed without committing, it aborts (unreferences the source blocks), so
+// any allocator early-return path automatically avoids wasting load_back. Non-copyable,
+// non-movable; held via std::shared_ptr on BlockTreeMatchResult (which stays copyable).
+class LoadBackTicket {
+public:
+    explicit LoadBackTicket(BlockTreeCache* cache): cache_(cache) {}
+    ~LoadBackTicket();
+
+    LoadBackTicket(const LoadBackTicket&)            = delete;
+    LoadBackTicket& operator=(const LoadBackTicket&) = delete;
+    LoadBackTicket(LoadBackTicket&&)                 = delete;
+    LoadBackTicket& operator=(LoadBackTicket&&)      = delete;
+
+    // Allocate device blocks + submit async H2D/D2H copies for the planned items.
+    // Returns the load_back AsyncContext (null when there is nothing to load back).
+    // Idempotent: a second call is a no-op returning null.
+    std::shared_ptr<AsyncContext> commit();
+
+    bool empty() const {
+        return items_.empty();
+    }
+
+    std::vector<PendingLoadBackItem>& items() {
+        return items_;
+    }
+
+private:
+    BlockTreeCache*                  cache_{nullptr};
+    std::vector<PendingLoadBackItem> items_;
+    bool                             committed_{false};
+};
 
 // Pure-descriptor component: describes one device pool's layout.
 struct Component {
@@ -61,6 +107,12 @@ struct BlockTreeMatchResult {
     size_t                        host_load_back_blocks{0};
     size_t                        disk_load_back_blocks{0};
     size_t                        remote_load_back_blocks{0};
+
+    // Deferred load_back handle: match() plans (but does not execute) load_back and
+    // hands it back here. The allocator commits it only after its reserve check and
+    // malloc succeed; otherwise the ticket's destructor aborts (no device blocks or
+    // copies are ever spent). Null/empty when there is nothing to load back.
+    std::shared_ptr<LoadBackTicket> load_back_ticket;
 };
 
 // Match validator interface.

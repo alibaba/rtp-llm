@@ -246,11 +246,19 @@ private:
         std::vector<BlockIdxType> target_device_blocks;
     };
     void referenceMatchedDeviceBlocks(const std::vector<TreeNode*>& match_path, BlockTreeMatchResult& result);
-    void prepareMatchedLoadBack(const std::vector<TreeNode*>& match_path,
-                                std::vector<LoadBackItem>&     lb_items,
-                                BlockTreeMatchResult&          result);
+
+    // Deferred load_back (see LoadBackTicket). planMatchedLoadBack only references the
+    // matched host/disk source blocks and records them on result.load_back_ticket; it
+    // allocates no device blocks. commitLoadBack (invoked by the ticket) allocates the
+    // device targets and submits the async copies; abortLoadBack unreferences the source
+    // blocks when a ticket is dropped without committing. LoadBackTicket is a friend so
+    // its commit()/destructor can reach these private hooks.
+    friend class LoadBackTicket;
+    void planMatchedLoadBack(const std::vector<TreeNode*>& match_path, BlockTreeMatchResult& result);
+    std::shared_ptr<AsyncContext> commitLoadBack(const std::vector<PendingLoadBackItem>& items);
+    void                          abortLoadBack(const std::vector<PendingLoadBackItem>& items);
     bool executeLoadBackTransferBatch(const std::vector<TransferDescriptor>& descriptors, int timeout_ms);
-    void performLoadBack(std::vector<LoadBackItem> items, std::shared_ptr<AsyncContext> ctx);
+    void                          performLoadBack(std::vector<LoadBackItem> items, std::shared_ptr<AsyncContext> ctx);
 
     BlockTreeCacheConfig                       config_;
     std::unique_ptr<BlockTree>                 tree_;

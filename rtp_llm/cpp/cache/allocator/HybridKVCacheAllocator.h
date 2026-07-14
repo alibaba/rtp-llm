@@ -4,6 +4,7 @@
 #include <vector>
 
 #include "rtp_llm/cpp/cache/allocator/KVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/ComponentGroup.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/device_group/DeviceKVCacheGroup.h"
 
 namespace rtp_llm {
@@ -46,7 +47,8 @@ protected:
 
     int reuseCache(const CacheKeysType&                 cache_keys,
                    BatchKVCacheResource&                kv_resource,
-                   const std::shared_ptr<CPSlotMapper>& cp_mapper);
+                   const std::shared_ptr<CPSlotMapper>& cp_mapper,
+                   std::shared_ptr<LoadBackTicket>&     ticket);
 
     virtual void referenceBlocksInGroup(int gid, const BlockIndicesType& blocks, bool is_connector = false) const = 0;
     virtual void freeBlocksInGroup(int gid, const BlockIndicesType& blocks, bool is_connector = false)            = 0;

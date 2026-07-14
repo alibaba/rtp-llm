@@ -5,6 +5,7 @@
 #include <unordered_set>
 
 #include "rtp_llm/cpp/cache/BlockPoolConfigHelper.h"
+#include "rtp_llm/cpp/cache/AsyncContext.h"
 #include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCache.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
@@ -121,7 +122,9 @@ DeviceKVCacheGroupPtr HybridKVCacheAllocator::group(int gid) const {
 
 int HybridKVCacheAllocator::reuseCache(const CacheKeysType&                 cache_keys,
                                        BatchKVCacheResource&                kv_resource,
-                                       const std::shared_ptr<CPSlotMapper>& cp_mapper) {
+                                       const std::shared_ptr<CPSlotMapper>& cp_mapper,
+                                       std::shared_ptr<LoadBackTicket>&     ticket) {
+    ticket.reset();
     if (!block_tree_cache_ || cache_keys.empty()) {
         return 0;
     }
@@ -137,7 +140,8 @@ int HybridKVCacheAllocator::reuseCache(const CacheKeysType&                 cach
     // the per-group indices we need and immediately release those match-protection
     // refs, leaving referenceBlocksInGroup() (in initMallocForCommonLen) as the sole
     // owner so the existing rollback/free machinery stays balanced.
-    auto      match_result     = block_tree_cache_->match(cache_keys);
+    auto match_result          = block_tree_cache_->match(cache_keys);
+    ticket                     = match_result.load_back_ticket;
     const int reuse_blocks_len = static_cast<int>(match_result.matched_blocks);
     if (reuse_blocks_len <= 0) {
         block_tree_cache_->releaseMatchedBlocks(match_result.matched_block_sets);
@@ -208,11 +212,13 @@ MallocResult HybridKVCacheAllocator::initMallocForCommonLen(const MallocInfo& ma
         full_group_ids_.empty() ? DeviceKVCacheGroupPtr{} : group(full_group_ids_.front());
     const int reuse_unit_tokens = cpVirtualBlockSizeForGroup(cp_mapper, reuse_group, seqSizePerBlock());
 
-    const auto&                   cache_keys         = kv_resource->cacheKeys(0);
-    int64_t                       match_cost_time_us = 0;
-    const size_t                  reserve_blocks     = reserveBlockNum();
-    int                           reuse_blocks       = 0;
-    std::vector<BlockIndicesType> referenced_blocks(static_cast<size_t>(kv_resource->groupNums()));
+    const auto&                     cache_keys         = kv_resource->cacheKeys(0);
+    int64_t                         match_cost_time_us = 0;
+    const size_t                    reserve_blocks     = reserveBlockNum();
+    int                             reuse_blocks       = 0;
+    std::vector<BlockIndicesType>   referenced_blocks(static_cast<size_t>(kv_resource->groupNums()));
+    std::shared_ptr<AsyncContext>   async_ctx;
+    std::shared_ptr<LoadBackTicket> load_back_ticket;
 
     if (malloc_info.enable_device_cache) {
         // CP-sharded: subsample to last-rank canonical key namespace before matching.
@@ -227,7 +233,7 @@ MallocResult HybridKVCacheAllocator::initMallocForCommonLen(const MallocInfo& ma
         CacheKeysType match_keys(cp_keys.begin(),
                                  cp_active ? cp_keys.end() : (cp_keys.empty() ? cp_keys.end() : cp_keys.end() - 1));
         auto          begin_us = currentTimeUs();
-        reuse_blocks           = reuseCache(match_keys, *kv_resource, cp_mapper);
+        reuse_blocks           = reuseCache(match_keys, *kv_resource, cp_mapper, load_back_ticket);
         match_cost_time_us     = currentTimeUs() - begin_us;
 
         for (int gid = 0; gid < kv_resource->groupNums(); ++gid) {
@@ -270,7 +276,13 @@ MallocResult HybridKVCacheAllocator::initMallocForCommonLen(const MallocInfo& ma
             group(gid)->reference(kv_resource->mutableBlockIds(b, gid), kv_resource->blocks(0, gid));
         }
     }
-    return {true, reuse_blocks * reuse_unit_tokens, match_cost_time_us};
+
+    // All allocations and the reserve post-check passed: commit the deferred load_back
+    // (allocate device targets and submit async copies). Any earlier return above leaves
+    // the ticket uncommitted, so its destructor aborts the planned load_back.
+    async_ctx = load_back_ticket ? load_back_ticket->commit() : nullptr;
+
+    return {true, reuse_blocks * reuse_unit_tokens, match_cost_time_us, async_ctx};
 }
 
 MallocResult HybridKVCacheAllocator::incrMalloc(const MallocInfo& malloc_info) {

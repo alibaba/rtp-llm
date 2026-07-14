@@ -6,6 +6,7 @@
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 #include "rtp_llm/cpp/cache/BlockPoolConfigHelper.h"
+#include "rtp_llm/cpp/cache/AsyncContext.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCache.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/DeviceBlockPool.h"
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
@@ -127,6 +128,9 @@ MallocResult SingleTypeKVCacheAllocator::initMallocForCommonLen(const MallocInfo
     const int    estimated_blocks = (reserve_blocks > 0) ? getNeedBlocks(malloc_info) : 0;
     int          reuse_blocks     = 0;
 
+    std::shared_ptr<AsyncContext>   async_ctx;
+    std::shared_ptr<LoadBackTicket> load_back_ticket;
+
     // drop the last cache key of the partial block to avoid reuse it for two reasons:
     // 1. if the last block is partial, it actually cannot be reused, because only full blocks will be inserted into the
     // cache.
@@ -150,6 +154,7 @@ MallocResult SingleTypeKVCacheAllocator::initMallocForCommonLen(const MallocInfo
         // those refs immediately, leaving KVCacheGroup::reference() as the sole owner.
         BlockTreeMatchResult tree_match =
             block_tree_cache_ ? block_tree_cache_->match(match_keys) : BlockTreeMatchResult{};
+        load_back_ticket          = tree_match.load_back_ticket;
         const int        group_id = fullGroup()->group_id();
         BlockIndicesType matched_block_indices;
         auto             it = tree_match.group_block_indices.find(group_id);
@@ -172,23 +177,27 @@ MallocResult SingleTypeKVCacheAllocator::initMallocForCommonLen(const MallocInfo
         }
     }
 
-    // Check if available blocks are enough for the request.
+    // Reserve-headroom gate (formerly the inline admission arithmetic). load_back is now
+    // deferred until commit, so this simply rejects the request before malloc; on any
+    // early return the ticket's destructor aborts the planned load_back.
     if (reserve_blocks > 0 && estimated_blocks > 0) {
-        const size_t available_blocks = availableBlocksNum();
-        const int    actual_blocks    = std::max(estimated_blocks - reuse_blocks, 0);
-        if (actual_blocks > 0 && available_blocks < static_cast<size_t>(actual_blocks) + reserve_blocks) {
-            if (malloc_info.verbose) {
-                RTP_LLM_LOG_INFO("SingleTypeKVCacheAllocator initMalloc rejected by reserve blocks: request_id=%ld "
-                                 "need_blocks=%d reuse_blocks=%d adjusted_need_blocks=%d available_blocks=%zu "
-                                 "reserve_blocks=%zu",
-                                 malloc_info.request_id,
-                                 estimated_blocks,
-                                 reuse_blocks,
-                                 actual_blocks,
-                                 available_blocks,
-                                 reserve_blocks);
+        const int actual_blocks = std::max(estimated_blocks - reuse_blocks, 0);
+        if (actual_blocks > 0) {
+            const size_t available_blocks = availableBlocksNum();
+            if (available_blocks < static_cast<size_t>(actual_blocks) + reserve_blocks) {
+                if (malloc_info.verbose) {
+                    RTP_LLM_LOG_INFO("SingleTypeKVCacheAllocator initMalloc rejected by reserve blocks: request_id=%ld "
+                                     "need_blocks=%d reuse_blocks=%d adjusted_need_blocks=%d available_blocks=%zu "
+                                     "reserve_blocks=%zu",
+                                     malloc_info.request_id,
+                                     estimated_blocks,
+                                     reuse_blocks,
+                                     actual_blocks,
+                                     available_blocks,
+                                     reserve_blocks);
+                }
+                return {false, 0};
             }
-            return {false, 0};
         }
     }
 
@@ -201,7 +210,11 @@ MallocResult SingleTypeKVCacheAllocator::initMallocForCommonLen(const MallocInfo
         fullGroup()->reference(kv_resource->mutableBlockIds(batch_id), block_ids_0.blocks());
     }
 
-    return {true, reuse_len, match_cost_time_us};
+    // All allocations succeeded: commit the deferred load_back (allocate device targets
+    // and submit the async copies). Returns the async context for the scheduler to await.
+    async_ctx = load_back_ticket ? load_back_ticket->commit() : nullptr;
+
+    return {true, reuse_len, match_cost_time_us, async_ctx};
 }
 
 MallocResult SingleTypeKVCacheAllocator::incrMalloc(const MallocInfo& malloc_info) {
