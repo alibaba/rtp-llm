@@ -273,6 +273,8 @@ TEST_F(MemoryLayoutStrategyTest, InitializationWithScaleTensor) {
     ASSERT_EQ(buf_info.size(), 2u);
     EXPECT_NE(buf_info[0].addr, nullptr);
     EXPECT_NE(buf_info[1].addr, nullptr);
+    EXPECT_EQ(addr_info.kv_addr, buf_info[0].addr);
+    EXPECT_EQ(addr_info.kv_scale_addr, buf_info[1].addr);
     EXPECT_EQ(buf_info[1].size_bytes, config.kv_scale_stride_bytes);
 }
 
