@@ -2258,7 +2258,13 @@ class MSAAttention(nn.Module):
         # before _forward_paged_decode() is selected.
         base = kv_cache.kv_cache_base
         scale = kv_cache.kv_scale_base
-        if base.dtype != k.dtype:
+        # base may be an FP8 (e4m3) pool; _write_decode_kv_idx_to_paged casts the
+        # bf16 K/V to e4m3 on store, and the paged decode kernel upconverts on read.
+        if (
+            base is None
+            or scale is None
+            or (base.dtype != k.dtype and base.dtype != torch.float8_e4m3fn)
+        ):
             return None
 
         idx_view = scale.view(torch.bfloat16).view(

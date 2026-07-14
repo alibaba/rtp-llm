@@ -405,6 +405,11 @@ def _gqa_share_sparse_decode_paged_kernel(
             mask=pos_mask[:, None] & dim_mask[None, :],
             other=0.0,
         )
+        # Upconvert to Q's dtype so an FP8 (e4m3) paged pool feeds the bf16/fp16
+        # matmuls (no-op when the pool already matches Q). The M3 sparse KV is a
+        # "no-scale" e4m3 cast, so a plain widening cast reconstructs it.
+        k = k.to(q.dtype)
+        v = v.to(q.dtype)
         qk = tl.zeros((BLOCK_SIZE_H, BLOCK_SIZE_N), dtype=tl.float32)
         qk += tl.where(off_n[None, :] < seq_len - base_pos, 0, float("-inf"))
         qk += tl.dot(q, k) * sm_scale

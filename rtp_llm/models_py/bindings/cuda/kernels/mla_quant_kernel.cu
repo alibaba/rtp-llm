@@ -1116,6 +1116,55 @@ __global__ void mha_kv_write_cache_kernel(const scalar_t* __restrict__ k,       
     }
 }
 
+// bf16/half/float activations -> FP8 (e4m3) paged pool (no per-tensor scale; a
+// plain cast matches the M3 sparse kernels' "no-scale" e4m3 KV consumption).
+template<typename src_t>
+__device__ __forceinline__ __nv_fp8_e4m3 cast_to_fp8_e4m3(src_t val) {
+    if constexpr (std::is_same_v<src_t, __nv_bfloat16>) {
+        return __nv_fp8_e4m3(__bfloat162float(val));
+    } else if constexpr (std::is_same_v<src_t, __half>) {
+        return __nv_fp8_e4m3(__half2float(val));
+    } else {
+        return __nv_fp8_e4m3(static_cast<float>(val));
+    }
+}
+
+template<typename src_t>
+__global__ void mha_kv_write_cache_cast_to_fp8_kernel(
+    const src_t* __restrict__ k,             // [num_tokens, H, D]
+    const src_t* __restrict__ v,             // [num_tokens, H, D]
+    __nv_fp8_e4m3* __restrict__ kv_cache,    // [B, 2, H, P, D]
+    const int64_t* __restrict__ slot_mapping,  // [num_tokens]
+    const int num_kv_heads,
+    const int page_size,
+    const int head_dim) {
+    const int64_t token_idx = blockIdx.x;
+    const int64_t slot_idx  = slot_mapping[token_idx];
+    if (slot_idx < 0) {
+        return;
+    }
+    const int64_t block_idx   = slot_idx / page_size;
+    const int64_t page_offset = slot_idx % page_size;
+
+    const int64_t hd          = static_cast<int64_t>(num_kv_heads) * head_dim;
+    const int64_t stride_page = head_dim;
+    const int64_t stride_head = static_cast<int64_t>(page_size) * head_dim;
+    const int64_t stride_kv   = static_cast<int64_t>(num_kv_heads) * page_size * head_dim;
+    const int64_t stride_blk  = 2 * stride_kv;
+
+    const int64_t k_base   = block_idx * stride_blk + 0 * stride_kv + page_offset * stride_page;
+    const int64_t v_base   = block_idx * stride_blk + 1 * stride_kv + page_offset * stride_page;
+    const int64_t src_base = token_idx * hd;
+
+    for (int64_t i = threadIdx.x; i < hd; i += blockDim.x) {
+        const int64_t h       = i / head_dim;
+        const int64_t d       = i % head_dim;
+        const int64_t dst_off = h * stride_head + d;
+        kv_cache[k_base + dst_off] = cast_to_fp8_e4m3(k[src_base + i]);
+        kv_cache[v_base + dst_off] = cast_to_fp8_e4m3(v[src_base + i]);
+    }
+}
+
 void mha_kv_write_cache(torch::Tensor&       k,             // [num_tokens, num_kv_heads, head_dim]
                         torch::Tensor&       v,             // [num_tokens, num_kv_heads, head_dim]
                         torch::Tensor&       kv_cache,      // [num_blocks, 2, num_kv_heads, page_size, head_dim]
@@ -1130,10 +1179,9 @@ void mha_kv_write_cache(torch::Tensor&       k,             // [num_tokens, num_
     TORCH_CHECK(k.is_contiguous() && v.is_contiguous(), "mha_kv_write_cache: k/v must be contiguous");
     TORCH_CHECK(kv_cache.is_contiguous(), "mha_kv_write_cache: kv_cache must be contiguous");
     TORCH_CHECK(slot_mapping.is_contiguous(), "mha_kv_write_cache: slot_mapping must be contiguous");
-    TORCH_CHECK(k.scalar_type() == kv_cache.scalar_type() && v.scalar_type() == kv_cache.scalar_type(),
-                "mha_kv_write_cache: k/v/kv_cache dtype must match");
     TORCH_CHECK(k.device() == slot_mapping.device() && k.device() == kv_cache.device(),
                 "mha_kv_write_cache: k, kv_cache and slot_mapping must be on the same device");
+    TORCH_CHECK(k.scalar_type() == v.scalar_type(), "mha_kv_write_cache: k/v dtype must match");
 
     const int num_tokens   = static_cast<int>(k.size(0));
     const int num_kv_heads = static_cast<int>(kv_cache.size(2));
@@ -1158,7 +1206,43 @@ void mha_kv_write_cache(torch::Tensor&       k,             // [num_tokens, num_
     dim3          grid(num_tokens);
     dim3          block(threads);
 
-    if (k.scalar_type() == torch::kBFloat16) {
+    if (kv_cache.scalar_type() == torch::kFloat8_e4m3fn) {
+        if (k.scalar_type() == torch::kBFloat16) {
+            mha_kv_write_cache_cast_to_fp8_kernel<__nv_bfloat16><<<grid, block, 0, stream>>>(
+                reinterpret_cast<const __nv_bfloat16*>(k.data_ptr()),
+                reinterpret_cast<const __nv_bfloat16*>(v.data_ptr()),
+                reinterpret_cast<__nv_fp8_e4m3*>(kv_cache.data_ptr()),
+                slot_mapping.data_ptr<int64_t>(),
+                num_kv_heads,
+                page_size,
+                head_dim);
+        } else if (k.scalar_type() == torch::kHalf) {
+            mha_kv_write_cache_cast_to_fp8_kernel<__half><<<grid, block, 0, stream>>>(
+                reinterpret_cast<const __half*>(k.data_ptr()),
+                reinterpret_cast<const __half*>(v.data_ptr()),
+                reinterpret_cast<__nv_fp8_e4m3*>(kv_cache.data_ptr()),
+                slot_mapping.data_ptr<int64_t>(),
+                num_kv_heads,
+                page_size,
+                head_dim);
+        } else if (k.scalar_type() == torch::kFloat) {
+            mha_kv_write_cache_cast_to_fp8_kernel<float><<<grid, block, 0, stream>>>(
+                reinterpret_cast<const float*>(k.data_ptr()),
+                reinterpret_cast<const float*>(v.data_ptr()),
+                reinterpret_cast<__nv_fp8_e4m3*>(kv_cache.data_ptr()),
+                slot_mapping.data_ptr<int64_t>(),
+                num_kv_heads,
+                page_size,
+                head_dim);
+        } else {
+            TORCH_CHECK(false,
+                        "mha_kv_write_cache: fp8 kv_cache requires k/v dtype in "
+                        "{bfloat16,half,float}, got ",
+                        k.scalar_type());
+        }
+    } else if (k.scalar_type() == torch::kBFloat16) {
+        TORCH_CHECK(kv_cache.scalar_type() == torch::kBFloat16,
+                    "mha_kv_write_cache: k/v/kv_cache dtype must match");
         mha_kv_write_cache_kernel<__nv_bfloat16><<<grid, block, 0, stream>>>(
             reinterpret_cast<const __nv_bfloat16*>(k.data_ptr()),
             reinterpret_cast<const __nv_bfloat16*>(v.data_ptr()),
@@ -1168,6 +1252,8 @@ void mha_kv_write_cache(torch::Tensor&       k,             // [num_tokens, num_
             page_size,
             head_dim);
     } else if (k.scalar_type() == torch::kHalf) {
+        TORCH_CHECK(kv_cache.scalar_type() == torch::kHalf,
+                    "mha_kv_write_cache: k/v/kv_cache dtype must match");
         mha_kv_write_cache_kernel<__half><<<grid, block, 0, stream>>>(
             reinterpret_cast<const __half*>(k.data_ptr()),
             reinterpret_cast<const __half*>(v.data_ptr()),
@@ -1177,6 +1263,8 @@ void mha_kv_write_cache(torch::Tensor&       k,             // [num_tokens, num_
             page_size,
             head_dim);
     } else if (k.scalar_type() == torch::kFloat) {
+        TORCH_CHECK(kv_cache.scalar_type() == torch::kFloat,
+                    "mha_kv_write_cache: k/v/kv_cache dtype must match");
         mha_kv_write_cache_kernel<float><<<grid, block, 0, stream>>>(
             reinterpret_cast<const float*>(k.data_ptr()),
             reinterpret_cast<const float*>(v.data_ptr()),
