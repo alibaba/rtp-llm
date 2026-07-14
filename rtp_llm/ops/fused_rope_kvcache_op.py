@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from functools import cache
 from typing import Optional
 
 import torch
@@ -8,11 +9,13 @@ from libth_transformer_config import (
     check_rope_cache,
     get_rope_cache_once,
 )
-from rtp_kernel.fused_rope_kvcache import (
-    convert_offset_to_block_array,
-    decode_fused_rope_kvcache,
-    prefill_fused_rope_kvcache,
-)
+
+
+@cache
+def _get_fused_rope_kvcache():
+    from rtp_kernel import fused_rope_kvcache
+
+    return fused_rope_kvcache
 
 
 @dataclass
@@ -20,7 +23,7 @@ class FusedRopeAttnParams:
     kv_cache_offset: Optional[torch.Tensor]
     kv_cache_offset_h: Optional[torch.Tensor]
     padding_offset: Optional[torch.Tensor]
-    cp_position_ids: Optional[torch.Tensor]
+    position_ids: Optional[torch.Tensor]
     cu_seqlens: torch.Tensor
     cu_kv_seqlens: torch.Tensor
     input_lengths: torch.Tensor
@@ -42,24 +45,24 @@ class FusedRopeKVCachePrefillOpBase:
             attn_inputs.kv_cache_kernel_block_id_device is not None
             and attn_inputs.kv_cache_kernel_block_id_device.numel() > 0
         ):
-            kv_cache_offset = convert_offset_to_block_array(
+            kv_cache_offset = _get_fused_rope_kvcache().convert_offset_to_block_array(
                 attn_inputs.kv_cache_kernel_block_id_device
             )
         else:
             kv_cache_offset = None
         kv_cache_offset_h = None  # not used
 
-        cp_position_ids = None
+        position_ids = attn_inputs.combo_position_ids
         if attn_inputs.context_parallel_info is not None:
-            cp_position_ids = attn_inputs.context_parallel_info.prefill_shuffle_indices
+            position_ids = attn_inputs.context_parallel_info.prefill_shuffle_indices
 
         return FusedRopeAttnParams(
             kv_cache_offset,
             kv_cache_offset_h,
             attn_inputs.padding_offset,
-            cp_position_ids,
-            attn_inputs.cu_seqlens,
-            attn_inputs.cu_kv_seqlens,
+            position_ids,
+            attn_inputs.cu_seqlens_device,
+            attn_inputs.cu_kv_seqlens_device,
             attn_inputs.input_lengths,
             attn_inputs.prefix_lengths,
             attn_inputs.sequence_lengths,
@@ -83,11 +86,10 @@ class FusedRopeKVCachePrefillOpBase:
         use_paged_fmha: bool,
     ) -> torch.Tensor:
         store_cache = kv_cache is not None
-
         rope_config = self.attn_configs.rope_config
         rope_cache = get_rope_cache_once(rope_config, self.attn_configs.max_seq_len)
 
-        return prefill_fused_rope_kvcache(
+        return _get_fused_rope_kvcache().prefill_fused_rope_kvcache(
             qkv,
             params.cu_seqlens,
             params.cu_seqlens.size(0) - 1,
@@ -111,7 +113,7 @@ class FusedRopeKVCachePrefillOpBase:
                 rope_cache.data if check_rope_cache(rope_config, rope_cache) else None
             ),
             padding_offset=params.padding_offset,
-            cp_position_ids=params.cp_position_ids,
+            position_ids=params.position_ids,
             use_logn_attn=self.attn_configs.use_logn_attn,
             rope_style=rope_config.style,
             rope_dim=rope_config.dim,
@@ -170,6 +172,35 @@ class FusedRopeKVCachePrefillOpQOut(FusedRopeKVCachePrefillOpBase):
 class FusedRopeKVCacheDecodeOp:
     def __init__(self, attn_configs: AttentionConfigs) -> None:
         self.attn_configs = attn_configs
+        self._dummy_scale: Optional[torch.Tensor] = None
+
+    def _get_kv_scale(self, kv_cache: LayerKVCache) -> Optional[torch.Tensor]:
+        # FP8 KV cache uses direct cast (no dynamic scaling), so the kernel always writes
+        # scale = 1.0. The buffer here is an output target for the kernel, not a real scale.
+        #
+        # `is not None` is sufficient here: pybind11 maps an undefined C++ torch::Tensor to
+        # Python None, and the cache allocator only stores defined tensors with numel > 0
+        # (see SingleTypeKVCacheAllocator::allLayerCacheBase). MHAKVCacheSpec guarantees
+        # FP8 dtype always has a scale buffer, so the dummy-scale branch below is purely
+        # defensive and unreachable under normal operation.
+        if kv_cache.kv_scale_base is not None:
+            return kv_cache.kv_scale_base
+        if kv_cache.kv_cache_base.dtype == torch.float8_e4m3fn:
+            num_pages = kv_cache.kv_cache_base.shape[0]
+            # convert_offset_to_block_array encodes K offset = page*2, V offset = page*2+1,
+            # so max offset is 2*num_pages-1 and scale buffer needs 2*num_pages blocks.
+            needed = (
+                2
+                * num_pages
+                * self.attn_configs.kernel_tokens_per_block
+                * self.attn_configs.kv_head_num
+            )
+            if self._dummy_scale is None or self._dummy_scale.numel() < needed:
+                self._dummy_scale = torch.ones(
+                    needed, dtype=torch.float32, device=kv_cache.kv_cache_base.device
+                )
+            return self._dummy_scale
+        return None
 
     def forward(
         self,
@@ -180,9 +211,12 @@ class FusedRopeKVCacheDecodeOp:
         rope_config = self.attn_configs.rope_config
         rope_cache = get_rope_cache_once(rope_config, self.attn_configs.max_seq_len)
         assert params.kv_cache_offset is not None
-        assert params.sequence_lengths.is_cuda, "sequence_lengths must be a CUDA tensor"
-        return decode_fused_rope_kvcache(
+        assert (
+            params.sequence_lengths.is_cuda or params.sequence_lengths.is_pinned()
+        ), "sequence_lengths must be CUDA or pinned host memory"
+        return _get_fused_rope_kvcache().decode_fused_rope_kvcache(
             qkv,
+            params.position_ids,
             params.sequence_lengths,
             params.sequence_lengths.size(0),
             self.attn_configs.head_num,
@@ -192,7 +226,7 @@ class FusedRopeKVCacheDecodeOp:
             params.kv_cache_offset,
             tokens_per_block=self.attn_configs.kernel_tokens_per_block,
             store_kv=False,
-            kv_cache_scale=kv_cache.kv_scale_base,
+            kv_cache_scale=self._get_kv_scale(kv_cache),
             kv_cache_offset_h=params.kv_cache_offset_h,
             rope_cache=(
                 rope_cache.data if check_rope_cache(rope_config, rope_cache) else None
@@ -219,7 +253,7 @@ class FusedRopeKVCacheDecodeOp:
             attn_inputs.kv_cache_kernel_block_id_device is not None
             and attn_inputs.kv_cache_kernel_block_id_device.numel() > 0
         )
-        kv_cache_offset = convert_offset_to_block_array(
+        kv_cache_offset = _get_fused_rope_kvcache().convert_offset_to_block_array(
             attn_inputs.kv_cache_kernel_block_id_device
         )
         kv_cache_offset_h = None  # not used
@@ -227,9 +261,9 @@ class FusedRopeKVCacheDecodeOp:
             kv_cache_offset,
             kv_cache_offset_h,
             attn_inputs.padding_offset,
-            attn_inputs.position_ids,
-            attn_inputs.cu_seqlens,
-            attn_inputs.cu_kv_seqlens,
+            attn_inputs.combo_position_ids,
+            attn_inputs.cu_seqlens_device,
+            attn_inputs.cu_kv_seqlens_device,
             attn_inputs.input_lengths,
             attn_inputs.prefix_lengths,
             attn_inputs.sequence_lengths,
