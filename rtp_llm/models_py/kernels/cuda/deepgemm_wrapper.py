@@ -56,7 +56,9 @@ def has_deep_gemm() -> bool:
 
 @functools.cache
 def is_deep_gemm_e8m0_used() -> bool:
-    return torch.cuda.get_device_capability()[0] in [10, 12]
+    # sm_12x consumer Blackwell is served by CudaFp8VllmBlockwiseLinear.
+    # The bundled DeepGEMM wheel does not provide sm_120 cubins.
+    return torch.cuda.get_device_capability()[0] == 10
 
 
 @contextmanager
