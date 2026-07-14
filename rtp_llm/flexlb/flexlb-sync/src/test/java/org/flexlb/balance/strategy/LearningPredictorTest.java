@@ -9,12 +9,30 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
+import java.util.ArrayList;
 import java.util.Map;
 import java.util.Set;
+
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import org.junit.jupiter.api.Test;
+import java.io.InputStream;
 
 import static org.junit.jupiter.api.Assertions.*;
 
 class LearningPredictorTest {
+
+    public static class BatchRecord {
+        public int ctx_batch;
+        public List<StreamInfo> streams;
+        public double forward_ms; // 支持小数，用 double 更安全
+    }
+
+    public static class StreamInfo {
+        public int input;
+        public int reuse;
+        public int ctx;
+    }
 
     @Test
     @DisplayName("default weights produce correct estimateMs")
@@ -51,6 +69,7 @@ class LearningPredictorTest {
         // item2: (300,100) → compute=200, hit=100
         // sumCompute=500, sumHit=300
         // 50 + 0.5*500 + 0.3*300 = 50 + 250 + 90 = 390
+
         BatchItem item1 = batchItem(500, 200);
         BatchItem item2 = batchItem(300, 100);
         assertEquals(390, p.predictBatchMs(List.of(item1, item2)));
@@ -67,8 +86,17 @@ class LearningPredictorTest {
     @DisplayName("learn does not throw")
     void learnDoesNotThrow() {
         LearningPredictor p = new LearningPredictor();
-        BatchItem item = batchItem(500, 200);
-        assertDoesNotThrow(() -> p.learn(List.of(item), 300, 350));
+        List<BatchRecord> records = load();
+        for (int i = 0; i < 400; i++) {
+            for (BatchRecord record : records) {
+                List<BatchItem> batchItems = new ArrayList<>();
+                for (StreamInfo stream : record.streams) {
+                    batchItems.add(batchItem(stream.input, stream.reuse));
+                }
+                assertDoesNotThrow(() -> p.learn(batchItems, 0, (long) record.forward_ms));
+            }
+        }
+        System.out.println(p.formulaString());
     }
 
     @Test
@@ -130,6 +158,19 @@ class LearningPredictorTest {
         assertTrue(desc.contains("w1"));
         assertTrue(desc.contains("w2"));
         assertTrue(desc.contains("computeTokens"));
+    }
+
+    private static List<BatchRecord> load() {
+        ObjectMapper mapper = new ObjectMapper();
+        try (InputStream is = LearningPredictorTest.class.getClassLoader().getResourceAsStream("data.json")) {
+            assertNotNull(is, "未找到 data.json 文件，请确认它在 src/test/resources/ 目录下");
+            List<BatchRecord> records = mapper.readValue(is, new TypeReference<List<BatchRecord>>() {
+            });
+            return records;
+        } catch (Exception e) {
+            System.out.println("读取失败");
+        }
+        return null;
     }
 
     private static BatchItem batchItem(long seqLen, long hitCacheLen) {
