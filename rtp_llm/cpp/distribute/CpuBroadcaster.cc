@@ -372,6 +372,21 @@ ssize_t readAllWithTimeout(int fd, void* buf, std::size_t nbytes, int timeout_ms
 
 }  // namespace
 
+cpu_broadcast_detail::TimedOutDecision
+cpu_broadcast_detail::abortOrObserveCommit(uint32_t* decision, uint32_t previous_generation, uint32_t next_generation) {
+    uint32_t observed = previous_generation;
+    if (__atomic_compare_exchange_n(
+            decision, &observed, next_generation | kBroadcastFailedMask, false, __ATOMIC_RELEASE, __ATOMIC_ACQUIRE)) {
+        ::syscall(SYS_futex, decision, FUTEX_WAKE, INT_MAX, nullptr, nullptr, 0);
+        return TimedOutDecision::kAborted;
+    }
+    RTP_LLM_CHECK_WITH_INFO(observed == next_generation || observed == (next_generation | kBroadcastFailedMask),
+                            "CpuBroadcaster timeout for generation %u observed invalid decision 0x%x",
+                            next_generation,
+                            observed);
+    return observed == next_generation ? TimedOutDecision::kCommitted : TimedOutDecision::kAborted;
+}
+
 CpuBroadcaster& CpuBroadcaster::instance() {
     static CpuBroadcaster i;
     return i;
@@ -745,11 +760,22 @@ void CpuBroadcaster::broadcast(void* buf, std::size_t nbytes, int root) {
                                     timeout_ms,
                                     std::strerror(errno));
             uint32_t decision = previous_generation;
-            RTP_LLM_CHECK_WITH_INFO(waitForDecision(shared_state, previous_generation, timeout_ms, decision),
-                                    "CpuBroadcaster commit decision wait for generation %u failed after %d ms: %s",
-                                    next_generation,
-                                    timeout_ms,
-                                    std::strerror(errno));
+            if (!waitForDecision(shared_state, previous_generation, timeout_ms, decision)) {
+                const int  saved_errno    = errno;
+                const auto timeout_result = cpu_broadcast_detail::abortOrObserveCommit(
+                    &shared_state->decision, previous_generation, next_generation);
+                if (timeout_result == cpu_broadcast_detail::TimedOutDecision::kCommitted) {
+                    // Root's commit won the race with this peer's timeout. The
+                    // shared decision is authoritative, so this rank succeeds
+                    // with every other rank instead of closing its transport.
+                    decision = next_generation;
+                } else {
+                    RTP_LLM_FAIL("CpuBroadcaster commit decision wait for generation %u failed after %d ms: %s",
+                                 next_generation,
+                                 timeout_ms,
+                                 std::strerror(saved_errno));
+                }
+            }
             RTP_LLM_CHECK_WITH_INFO(decision == next_generation,
                                     "CpuBroadcaster generation %u aborted by a peer failure (decision=0x%x)",
                                     next_generation,

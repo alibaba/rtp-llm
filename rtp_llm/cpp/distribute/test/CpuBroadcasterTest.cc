@@ -541,6 +541,31 @@ TEST(CpuBroadcasterTest, BroadcastHappyPathTp4) {
     runHappyPath(4);
 }
 
+TEST(CpuBroadcasterTest, TimeoutAndCommitUseOneLinearizationPoint) {
+    constexpr uint32_t previous_generation = 0;
+    constexpr uint32_t next_generation     = 1;
+
+    // Timeout wins: it publishes abort, so root's later commit CAS must lose.
+    uint32_t decision = previous_generation;
+    EXPECT_EQ(cpu_broadcast_detail::abortOrObserveCommit(&decision, previous_generation, next_generation),
+              cpu_broadcast_detail::TimedOutDecision::kAborted);
+    EXPECT_EQ(__atomic_load_n(&decision, __ATOMIC_ACQUIRE), next_generation | kExpectedBroadcastFailedMask);
+    uint32_t expected = previous_generation;
+    EXPECT_FALSE(
+        __atomic_compare_exchange_n(&decision, &expected, next_generation, false, __ATOMIC_RELEASE, __ATOMIC_ACQUIRE));
+    EXPECT_EQ(expected, next_generation | kExpectedBroadcastFailedMask);
+
+    // Root wins: the peer's timeout CAS must lose and be interpreted as the
+    // same successful commit already observed by every other rank.
+    __atomic_store_n(&decision, previous_generation, __ATOMIC_RELEASE);
+    expected = previous_generation;
+    ASSERT_TRUE(
+        __atomic_compare_exchange_n(&decision, &expected, next_generation, false, __ATOMIC_RELEASE, __ATOMIC_ACQUIRE));
+    EXPECT_EQ(cpu_broadcast_detail::abortOrObserveCommit(&decision, previous_generation, next_generation),
+              cpu_broadcast_detail::TimedOutDecision::kCommitted);
+    EXPECT_EQ(__atomic_load_n(&decision, __ATOMIC_ACQUIRE), next_generation);
+}
+
 TEST(CpuBroadcasterTest, Rank0RejectsBadPeerRank) {
     const std::string  base = makeTempBase();
     std::vector<pid_t> pids;

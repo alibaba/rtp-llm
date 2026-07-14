@@ -11,6 +11,20 @@ namespace rtp_llm {
 
 struct CpuBroadcastSharedState;
 
+namespace cpu_broadcast_detail {
+
+enum class TimedOutDecision {
+    kCommitted,
+    kAborted,
+};
+
+// Linearize a peer timeout against root's commit CAS. If abort loses to an
+// already-published commit, the timed-out peer must observe that commit as
+// success instead of diverging from the other ranks.
+TimedOutDecision abortOrObserveCommit(uint32_t* decision, uint32_t previous_generation, uint32_t next_generation);
+
+}  // namespace cpu_broadcast_detail
+
 // CPU-only UDS broadcaster for intra-node TP metadata sync.
 // Callers must handle unsupported topologies before using this interface.
 // Python initializes this during distributed bootstrap, while the C++ engine

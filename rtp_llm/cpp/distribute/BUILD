@@ -30,6 +30,10 @@ cc_library(
 cc_library(
     name = "cpu_broadcast",
     srcs = ["CpuBroadcast.cc"],
+    # CpuBroadcast.cc provides execBroadcastCpu to ModelTypes.cc in another
+    # shared library. Force the archive member into librtp_compute_ops.so even
+    # though th_compute_lib itself has no direct reference to that symbol.
+    alwayslink = True,
     deps = [
         ":cpu_broadcast_hdr",
         ":cpu_broadcaster",
@@ -48,5 +52,19 @@ cc_test(
         "@com_google_googletest//:gtest_main",
     ],
     copts = copts(),
+    timeout = "short",
+)
+
+cc_test(
+    name = "cpu_broadcast_shared_library_test",
+    srcs = ["test/CpuBroadcastSharedLibraryTest.cc"],
+    # Load the same production libraries shipped to Python. In particular,
+    # libth_transformer.so contains tpSyncModelInputs and resolves its
+    # execBroadcastCpu reference from librtp_compute_ops.so at load time.
+    data = [
+        "//:rtp_compute_ops",
+        "//:th_transformer",
+    ],
+    linkopts = ["-ldl"],
     timeout = "short",
 )
