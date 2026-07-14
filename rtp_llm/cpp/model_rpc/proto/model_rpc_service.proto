@@ -210,6 +210,7 @@ message FlattenOutputPB {
     TensorPB all_probs = 7;
     TensorPB all_hidden_states = 8;
     PromptLogitsOutputPB prompt_logits = 9;
+    TensorPB all_softmax_probs = 10;
 }
 
 message GenerateOutputsPB {

@@ -153,6 +153,7 @@ TEST_F(NormalBatchStreamProcessorTest, testSoftmaxProbs) {
     query1->input_ids                             = hostIntBuffer({1});
     query1->generate_config                       = make_shared<GenerateConfig>();
     query1->generate_config->return_softmax_probs = true;
+    query1->generate_config->max_new_tokens       = 1;
     GenerateStreamPtr stream1 =
         make_shared<NormalGenerateStream>(query1, model_config, runtime_config, resource_context, nullptr);
     BatchKVCacheResource addr1;
@@ -188,8 +189,76 @@ TEST_F(NormalBatchStreamProcessorTest, testSoftmaxProbs) {
 
     auto softmax_probs = stream1->getSoftmaxProbs();
     EXPECT_TRUE(softmax_probs.defined());
-    EXPECT_EQ(2048, softmax_probs.numel());
-    EXPECT_NEAR(0.731058, softmax_probs.data_ptr<float>()[1], 0.0001);
+    EXPECT_EQ(1, softmax_probs.numel());
+    EXPECT_NEAR(0.731058, softmax_probs.data_ptr<float>()[0], 0.0001);
+}
+
+TEST_F(NormalBatchStreamProcessorTest, testSelectedTokenProbsWithBeamMapping) {
+    NormalOutputDispatcher dispatcher;
+    auto                   logits            = torch::tensor({1.0f, 2.0f, 3.0f, 1.0f}).reshape({2, 2}).to(torch::kCUDA);
+    auto                   token_ids         = hostIntBuffer({0, 1, 1, 0}).reshape({4, 1});
+    auto                   src_batch_indices = hostIntBuffer({1, 0, 1, 1});
+
+    auto probs = dispatcher.calculateSelectedTokenProbs(logits, token_ids, src_batch_indices);
+    EXPECT_EQ(probs.size(0), 4);
+    EXPECT_EQ(probs.size(1), 1);
+    EXPECT_TRUE(torch::allclose(
+        probs, torch::tensor({0.880797f, 0.731059f, 0.119203f, 0.880797f}).reshape({4, 1}), 1e-5, 1e-5));
+}
+
+TEST_F(NormalBatchStreamProcessorTest, testVariableBeamSoftmaxProbs) {
+    ResourceContext resource_context;
+    ModelConfig     model_config;
+    model_config.max_seq_len                  = 8;
+    model_config.vocab_size                   = 10;
+    model_config.num_layers                   = 2;
+    model_config.attn_config.tokens_per_block = 1;
+
+    RuntimeConfig                  runtime_config;
+    std::shared_ptr<GenerateInput> query         = make_shared<GenerateInput>();
+    query->input_ids                             = hostIntBuffer({0});
+    query->generate_config                       = make_shared<GenerateConfig>();
+    query->generate_config->return_softmax_probs = true;
+    query->generate_config->variable_num_beams   = {2, 4};
+    query->generate_config->max_new_tokens       = 2;
+
+    auto stream = make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
+    EXPECT_EQ(stream->getSoftmaxProbs().size(0), 4);
+    EXPECT_EQ(stream->getSoftmaxProbs().size(1), 2);
+
+    int  error_token_id = 0;
+    auto first_tokens   = hostIntBuffer({0, 1, 0, 2}).reshape({2, 2});
+    EXPECT_TRUE(stream->completeTokenIdsPtr()->update(
+        first_tokens, 0, 1, 1, 3, model_config.vocab_size, true, stream->streamId(), error_token_id));
+    stream->setSoftmaxProbs(torch::tensor({0.1f, 0.2f}).reshape({2, 1}), 1, hostIntBuffer({0, 0}));
+
+    auto second_tokens = hostIntBuffer({0, 2, 3, 0, 1, 4, 0, 2, 5, 0, 2, 6}).reshape({4, 3});
+    EXPECT_TRUE(stream->completeTokenIdsPtr()->update(
+        second_tokens, 0, 1, 1, 3, model_config.vocab_size, true, stream->streamId(), error_token_id));
+    stream->setSoftmaxProbs(torch::tensor({0.3f, 0.4f, 0.5f, 0.6f}).reshape({4, 1}), 2, hostIntBuffer({1, 0, 1, 1}));
+
+    auto probs = stream->getSoftmaxProbs();
+    EXPECT_TRUE(
+        torch::allclose(probs, torch::tensor({0.2f, 0.3f, 0.1f, 0.4f, 0.2f, 0.5f, 0.2f, 0.6f}).reshape({4, 2})));
+}
+
+TEST_F(NormalBatchStreamProcessorTest, testSoftmaxProbsNotAllocatedUnlessRequested) {
+    ResourceContext resource_context;
+    ModelConfig     model_config;
+    model_config.max_seq_len                  = 8;
+    model_config.vocab_size                   = 10;
+    model_config.num_layers                   = 2;
+    model_config.attn_config.tokens_per_block = 1;
+
+    RuntimeConfig                  runtime_config;
+    std::shared_ptr<GenerateInput> query       = make_shared<GenerateInput>();
+    query->input_ids                           = hostIntBuffer({0});
+    query->generate_config                     = make_shared<GenerateConfig>();
+    query->generate_config->variable_num_beams = {2, 4};
+
+    auto stream = make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
+    EXPECT_FALSE(stream->calculateSoftmaxProbs());
+    EXPECT_FALSE(stream->getSoftmaxProbs().defined());
 }
 
 TEST_F(NormalBatchStreamProcessorTest, testLoss) {

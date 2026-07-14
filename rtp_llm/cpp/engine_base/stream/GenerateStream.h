@@ -269,7 +269,9 @@ public:
     const ResourceContext&      resourceContext() const;
     void                        setKVCache(const BatchKVCacheResource& kv_cache_resource);
     void                        setLoss(const torch::Tensor& loss);
-    void                        setSoftmaxProbs(const torch::Tensor& softmax_probs, int start_pos);
+    void                        setSoftmaxProbs(const torch::Tensor& softmax_probs,
+                                                int                  start_pos,
+                                                const torch::Tensor& src_batch_indices = torch::Tensor());
     const BatchKVCacheResource& kvCache() const;
     BatchKVCacheResource&       kvCacheMutable();
     BatchKVCacheResourcePtr     kvCachePtr();

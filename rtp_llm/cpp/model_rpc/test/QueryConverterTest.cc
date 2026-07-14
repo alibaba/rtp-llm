@@ -222,6 +222,40 @@ TEST_F(QueryConverterTest, TransOutputSerializesSharedAllHiddenStatesAsSingle2DT
     }
 }
 
+TEST_F(QueryConverterTest, TransOutputAggregatesSoftmaxProbsAndKeepsLegacyAuxInfo) {
+    GenerateOutputs outputs;
+    for (const auto& values : {std::vector<float>{0.1f, 0.9f}, std::vector<float>{0.25f, 0.75f}}) {
+        GenerateOutput output;
+        output.finished               = true;
+        output.aux_info.softmax_probs = torch::tensor(values, torch::kFloat32);
+        outputs.generate_outputs.push_back(std::move(output));
+    }
+
+    GenerateOutputsPB outputs_pb;
+    QueryConverter::transResponse(&outputs_pb, &outputs, true, "", 10000);
+
+    const auto& flatten = outputs_pb.flatten_output();
+    ASSERT_TRUE(flatten.has_all_softmax_probs());
+    ASSERT_EQ(flatten.all_softmax_probs().shape_size(), 2);
+    EXPECT_EQ(flatten.all_softmax_probs().shape(0), 2);
+    EXPECT_EQ(flatten.all_softmax_probs().shape(1), 2);
+    const auto& data = flatten.all_softmax_probs().fp32_data();
+    ASSERT_EQ(data.size(), 4 * sizeof(float));
+    const auto* probs = reinterpret_cast<const float*>(data.data());
+    EXPECT_FLOAT_EQ(probs[0], 0.1f);
+    EXPECT_FLOAT_EQ(probs[1], 0.9f);
+    EXPECT_FLOAT_EQ(probs[2], 0.25f);
+    EXPECT_FLOAT_EQ(probs[3], 0.75f);
+
+    ASSERT_EQ(flatten.aux_info_size(), 2);
+    EXPECT_TRUE(flatten.aux_info(0).has_softmax_probs());
+    EXPECT_TRUE(flatten.aux_info(1).has_softmax_probs());
+
+    GenerateOutputsPB outputs_without_aux;
+    QueryConverter::transResponse(&outputs_without_aux, &outputs, false, "", 10000);
+    EXPECT_FALSE(outputs_without_aux.flatten_output().has_all_softmax_probs());
+}
+
 TEST_F(QueryConverterTest, TransTensorPB_FP32) {
 
     torch::Tensor tensor = torch::rand({2, 3}, torch::kFloat32);
