@@ -77,6 +77,8 @@ public class LearningPredictor implements PrefillTimePredictor {
 
     @Override
     public long predictBatchMs(List<BatchItem> items) {
+        logger.info("t: {}, learn predictor predictBatchMs: {}, items count: {}",
+                this.t, formulaStringParam(this.weightsRef.get()), items.size());
         if (items.isEmpty()) {
             return 0;
         }
