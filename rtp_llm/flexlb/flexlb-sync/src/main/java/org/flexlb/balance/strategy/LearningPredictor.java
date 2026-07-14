@@ -160,6 +160,9 @@ public class LearningPredictor implements PrefillTimePredictor {
         });
         this.t = this.t + 1;
         this.itemBatch.clear();
+        if (this.t % 10 == 0) {
+            logger.info("t: {}, learn predictor param: {}", this.t, formulaStringParam(this.weightsRef.get()));
+        }
     }
 
     // ---- parameter management ----
