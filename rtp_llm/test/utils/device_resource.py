@@ -98,13 +98,22 @@ class DeviceResource:
         """Return PIDs of compute processes on a physical GPU via nvidia-smi."""
         try:
             result = subprocess.run(
-                ["nvidia-smi", "--query-compute-apps=pid",
-                 "--format=csv,noheader", f"--id={gpu_id}"],
-                capture_output=True, text=True, timeout=10,
+                [
+                    "nvidia-smi",
+                    "--query-compute-apps=pid",
+                    "--format=csv,noheader",
+                    f"--id={gpu_id}",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=10,
             )
             if result.returncode == 0 and result.stdout.strip():
-                return [int(p.strip()) for p in result.stdout.strip().splitlines()
-                        if p.strip()]
+                return [
+                    int(p.strip())
+                    for p in result.stdout.strip().splitlines()
+                    if p.strip()
+                ]
         except Exception:
             pass
         return []
@@ -179,7 +188,9 @@ class DeviceResource:
                 return True
             time.sleep(1)
 
-        logging.warning(f"GPU cleanup timed out after {timeout}s for GPUs {self.gpu_ids}")
+        logging.warning(
+            f"GPU cleanup timed out after {timeout}s for GPUs {self.gpu_ids}"
+        )
         return False
 
     def _lock_gpus(self):
@@ -214,7 +225,9 @@ class DeviceResource:
                         if gpus_clean:
                             break
                         # Zombie contexts found — release these GPUs and retry
-                        logging.warning(f"GPUs {self.gpu_ids} have zombie contexts, retrying")
+                        logging.warning(
+                            f"GPUs {self.gpu_ids} have zombie contexts, retrying"
+                        )
                         self.gpu_ids = []
                         self.gpu_locks.close()
                 except Exception as e:

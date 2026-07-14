@@ -6,8 +6,8 @@ def init_jit_group_args(parser, jit_config):
     jit_group.add_argument(
         "--remote_jit_dir",
         env_name="REMOTE_JIT_DIR",
-        bind_to=(jit_config, 'remote_jit_dir'),
+        bind_to=(jit_config, "remote_jit_dir"),
         type=str,
         default="",
-        help="JIT远程cache目录",
+        help="JIT远程cache目录，必须是已存在的本地绝对路径或可通过FUSE挂载的远端URI；为空时仅使用统一的本地cache",
     )

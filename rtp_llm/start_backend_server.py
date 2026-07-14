@@ -1,21 +1,22 @@
-import glob
 import logging
-import logging.config
 import multiprocessing
 import os
 import signal
 import subprocess
 import sys
+import threading
 import time
 import traceback
 from multiprocessing import Process
-from typing import List, Optional
+from pathlib import Path
+from typing import List
 
 import torch
 from setproctitle import setproctitle
 
 CUR_PATH = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(os.path.join(str(CUR_PATH), ".."))
+
 from rtp_llm.config.log_config import setup_logging
 from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.config.server_config_setup import (
@@ -27,8 +28,83 @@ from rtp_llm.utils.concurrency_controller import (
     set_global_controller,
 )
 from rtp_llm.utils.process_manager import ProcessManager
+from rtp_llm.utils.util import copy_gemm_config
 
 setup_logging()
+
+JIT_CACHE_SETUP_TIMEOUT_S = 120
+
+
+def _send_pipe_status(pipe_writer, status: str, message: str, traceback: str = ""):
+    if pipe_writer is None:
+        return
+    try:
+        pipe_writer.send({"status": status, "message": message, "traceback": traceback})
+        pipe_writer.close()
+    except Exception as e:
+        logging.warning(f"Failed to send status via pipe: {e}")
+
+
+def _setup_jit_cache(remote_jit_dir: str, local_rank: int, jit_cache_ready):
+    from rtp_llm.utils import jit_cache_manager as jit
+    from rtp_llm.utils.jit_cache_store import restore_lock
+
+    components, compatible = jit.setup_jit_cache_env()
+    if local_rank != 0:
+        # Only wait when rank 0 may restore the shared tree.
+        if remote_jit_dir and jit_cache_ready is not None:
+            if not jit_cache_ready.wait(timeout=JIT_CACHE_SETUP_TIMEOUT_S + 5):
+                logging.warning("JIT cache setup wait timed out; continuing")
+        return None
+
+    # Fail-open throughout: a broken cache tree or lock must never block startup.
+    try:
+        if not remote_jit_dir:
+            return None
+        if not compatible:
+            logging.warning("JIT remote cache disabled: incomplete scope or directory")
+            return None
+        with restore_lock(Path(jit.LOCAL_JIT_DIR)):
+            manager_out, commit_lock, cancel = None, threading.Lock(), threading.Event()
+
+            def _worker():
+                nonlocal manager_out
+                manager = None
+                try:
+                    remote_root = jit.resolve_remote_root(remote_jit_dir)
+                    if not remote_root or cancel.is_set():
+                        return
+                    manager = jit.JitCacheManager(remote_root, components)
+                    manager.start_background_sync(cancel=cancel, commit=commit_lock)
+                    with commit_lock:
+                        if not cancel.is_set():
+                            manager_out = manager
+                            manager = None
+                except Exception:
+                    logging.exception(
+                        "JIT cache setup failed; continuing without remote cache"
+                    )
+                if manager is not None:
+                    manager.stop()
+
+            worker = threading.Thread(
+                target=_worker, name="jit-cache-setup", daemon=True
+            )
+            worker.start()
+            worker.join(JIT_CACHE_SETUP_TIMEOUT_S)
+            with commit_lock:
+                if worker.is_alive():
+                    cancel.set()
+                    logging.warning(
+                        "JIT cache setup timed out; continuing without remote cache"
+                    )
+                return manager_out
+    except Exception:
+        logging.exception("JIT cache setup failed; continuing without remote cache")
+        return None
+    finally:
+        if jit_cache_ready is not None:
+            jit_cache_ready.set()
 
 
 def local_rank_start(
@@ -36,25 +112,26 @@ def local_rank_start(
     py_env_configs: PyEnvConfigs,
     world_rank: int = 0,
     pipe_writer=None,
+    jit_cache_ready=None,
 ):
     """Start local rank with proper signal handling for graceful shutdown"""
     backend_manager = None
+    jit_cache_manager = None
+    shutdown_requested = False
     logging.info(f"[PROCESS_START]Start local rank process")
-    start_time = time.time()
-    from rtp_llm.server.backend_manager import BackendManager
-    from rtp_llm.utils.util import copy_gemm_config
-
-    logging.info(f"import BackendManager took {time.time()- start_time:.2f}s")
 
     def signal_handler(signum, frame):
+        nonlocal shutdown_requested
         logging.info(
             f"Local rank received signal {signum}, shutting down gracefully..."
         )
-        if backend_manager is not None:
-            try:
-                backend_manager.request_shutdown()
-            except Exception as e:
-                logging.error(f"Error during backend manager shutdown: {e}")
+        if backend_manager is None:
+            return
+        shutdown_requested = True
+        try:
+            backend_manager.request_shutdown()
+        except Exception as e:
+            logging.error(f"Error during backend manager shutdown: {e}")
 
     # Setup signal handlers for graceful shutdown
     signal.signal(signal.SIGTERM, signal_handler)
@@ -76,22 +153,30 @@ def local_rank_start(
         if py_env_configs.parallelism_config.world_size > 1:
             setproctitle(f"rtp_llm_rank-{local_rank}")
         set_global_controller(global_controller)
+        jit_cache_manager = _setup_jit_cache(
+            str(py_env_configs.jit_config.remote_jit_dir or "").strip(),
+            local_rank,
+            jit_cache_ready,
+        )
+
+        # Import after rank 0 finished/abandoned setup: BackendManager pulls in
+        # JIT-producing deps (e.g. TVM FFI).
+        from rtp_llm.server.backend_manager import BackendManager
+
         backend_manager = BackendManager(py_env_configs)
         backend_manager.start()
+        # Engine startup overwrites SIGTERM/SIGINT; restore Python handlers so
+        # the finally block can stop JIT cache workers on shutdown.
+        signal.signal(signal.SIGTERM, signal_handler)
+        signal.signal(signal.SIGINT, signal_handler)
         logging.info("Backend server initialized successfully, sending ready status")
 
         # Send startup success message
-        if pipe_writer is not None:
-            try:
-                pipe_writer.send(
-                    {
-                        "status": "success",
-                        "message": f"Backend server started successfully on rank {py_env_configs.parallelism_config.local_rank}",
-                    }
-                )
-                pipe_writer.close()
-            except Exception as e:
-                logging.warning(f"Failed to send success status via pipe: {e}")
+        _send_pipe_status(
+            pipe_writer,
+            "success",
+            f"Backend server started successfully on rank {py_env_configs.parallelism_config.local_rank}",
+        )
 
         # Enter service loop to keep the process alive
         logging.info("Entering service loop to keep backend_manager alive")
@@ -103,15 +188,26 @@ def local_rank_start(
         logging.error(f"{error_msg}, trace: {error_trace}")
 
         # Send startup failure message
-        if pipe_writer is not None:
-            try:
-                pipe_writer.send(
-                    {"status": "failed", "message": error_msg, "traceback": error_trace}
-                )
-                pipe_writer.close()
-            except Exception as pipe_error:
-                logging.warning(f"Failed to send error status via pipe: {pipe_error}")
+        _send_pipe_status(pipe_writer, "failed", error_msg, error_trace)
         raise e
+    finally:
+        # Best-effort cleanup: log failures but never skip the hard-exit below.
+        try:
+            if jit_cache_manager:
+                jit_cache_manager.stop()
+        except Exception:
+            logging.exception("JIT cache stop failed during shutdown")
+        # Hard-exit to skip pybind destructors unsafe after GIL release.
+        if shutdown_requested:
+            # os._exit skips atexit, so unmount FUSE/NFS first. Only on shutdown:
+            # doing so on a startup exception would yank mounts from loading ranks.
+            try:
+                from rtp_llm.utils.fuser import umount_all
+
+                umount_all()
+            except Exception:
+                logging.exception("umount_all failed during shutdown")
+            os._exit(0)
 
 
 def _get_local_world_size(py_env_configs: PyEnvConfigs) -> int:
@@ -153,33 +249,35 @@ def _validate_dp_configuration(py_env_configs: PyEnvConfigs):
 def _create_rank_processes(
     global_controller: ConcurrencyController,
     py_env_configs: PyEnvConfigs,
+    ctx,
+    jit_cache_ready,
 ):
-    """Create and start rank processes, returns (processes, rank_pipe_readers)"""
+    """Create and start rank processes."""
     pc = py_env_configs.parallelism_config
     local_world_size = _get_local_world_size(py_env_configs)
     cuda_device_list = _get_cuda_device_list()
     _validate_dp_configuration(py_env_configs)
+    processes, rank_pipe_readers = [], []
 
-    processes = []
-    rank_pipe_readers = []  # Store pipe readers for each rank
-
-    for _, world_rank in enumerate(
-        range(pc.world_rank, pc.world_rank + local_world_size)
-    ):
-        reader, writer = multiprocessing.Pipe(duplex=False)
+    for world_rank in range(pc.world_rank, pc.world_rank + local_world_size):
+        reader, writer = ctx.Pipe(duplex=False)
         os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(cuda_device_list)
         os.environ["WORLD_RANK"] = str(world_rank)
-
-        proc = Process(
+        proc = ctx.Process(
             target=local_rank_start,
-            args=(global_controller, py_env_configs, world_rank, writer),
+            args=(
+                global_controller,
+                py_env_configs,
+                world_rank,
+                writer,
+                jit_cache_ready,
+            ),
             name=f"rank-{world_rank}",
         )
         proc.start()
         writer.close()  # Parent process closes write end
         processes.append(proc)
         rank_pipe_readers.append(reader)
-
     return processes, rank_pipe_readers
 
 
@@ -280,9 +378,10 @@ def multi_rank_start(
     except RuntimeError as e:
         logging.warning(str(e))
 
-    # Create processes and get pipe readers
+    ctx = multiprocessing.get_context("spawn")
+    jit_cache_ready = ctx.Event()
     processes, rank_pipe_readers = _create_rank_processes(
-        global_controller, py_env_configs
+        global_controller, py_env_configs, ctx, jit_cache_ready
     )
     local_world_size = len(processes)
 
@@ -294,34 +393,17 @@ def multi_rank_start(
         _wait_for_ranks_startup(processes, rank_pipe_readers, local_world_size)
 
         # Report success via external pipe
-        if pipe_writer is not None:
-            try:
-                pipe_writer.send(
-                    {
-                        "status": "success",
-                        "message": f"All {local_world_size} backend ranks started successfully",
-                    }
-                )
-                pipe_writer.close()
-            except Exception as e:
-                logging.warning(f"Failed to send status via pipe: {e}")
+        _send_pipe_status(
+            pipe_writer,
+            "success",
+            f"All {local_world_size} backend ranks started successfully",
+        )
     except Exception as e:
         error_msg = str(e)
         logging.error(f"Multi-rank startup failed: {error_msg}")
 
         # Report failure via external pipe
-        if pipe_writer is not None:
-            try:
-                pipe_writer.send(
-                    {
-                        "status": "failed",
-                        "message": error_msg,
-                        "traceback": "",
-                    }
-                )
-                pipe_writer.close()
-            except Exception as pipe_error:
-                logging.warning(f"Failed to send status via pipe: {pipe_error}")
+        _send_pipe_status(pipe_writer, "failed", error_msg)
 
         # Terminate all processes if any rank failed
         logging.error("Terminating all ranks due to startup failures")
@@ -405,14 +487,6 @@ def load_gpu_nic_affinity():
         return False
 
 
-def clear_jit_filelock():
-    # check whether exists jit dir
-    if os.path.exists("deep_gemm_runtime"):
-        files = glob.glob("./deep_gemm_runtime/**/*_lock", recursive=True)
-        for file in files:
-            os.remove(file)
-
-
 def start_backend_server(
     global_controller: ConcurrencyController,
     py_env_configs: PyEnvConfigs,
@@ -423,10 +497,11 @@ def start_backend_server(
     os.makedirs("logs", exist_ok=True)
     load_gpu_nic_affinity()
 
-    clear_jit_filelock()
-
     if not torch.cuda.is_available():
-        return local_rank_start(global_controller, py_env_configs)
+        return local_rank_start(
+            global_controller,
+            py_env_configs,
+        )
 
     pc = py_env_configs.parallelism_config
     if (
@@ -441,7 +516,12 @@ def start_backend_server(
     if torch.cuda.device_count() > 1 and pc.world_size > 1:
         return multi_rank_start(global_controller, py_env_configs, pipe_writer)
     else:
-        return local_rank_start(global_controller, py_env_configs, 0, pipe_writer)
+        return local_rank_start(
+            global_controller,
+            py_env_configs,
+            0,
+            pipe_writer,
+        )
 
 
 def main():

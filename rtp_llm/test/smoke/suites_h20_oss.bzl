@@ -524,3 +524,11 @@ def h20_oss_suites():
             ),
         ],
     )
+
+    # JIT remote cache lifecycle smoke (py_test by label, not smoke_test()).
+    native.test_suite(
+        name = "smoke_jit_remote_cache",
+        tests = [
+            "//rtp_llm/utils/test:jit_cache_deepseek_v2_lite",
+        ],
+    )

@@ -18,6 +18,16 @@ filegroup(
     srcs = glob(["data/model/**/*.json"]),
 )
 
+filegroup(
+    name = "deepseek_v2_lite_task_info",
+    srcs = ["data/model/deepseek_v2/q_r_mla_pymodel.json"],
+)
+
+filegroup(
+    name = "qwen3_8b_task_info",
+    srcs = ["data/model/qwen3/q_r_new_model_py.json"],
+)
+
 # ============================================================================
 # Open-source smoke test suites (platform-grouped)
 # ============================================================================
@@ -59,12 +69,14 @@ test_suite(
         ":smoke_h20_next",
         ":smoke_h20_kimi_linear",
         ":smoke_cuda_remote_cache",
+        ":smoke_jit_remote_cache",
         ":smoke_rocm_basic",
         ":smoke_rocm_dense",
         ":smoke_rocm_moe",
         ":smoke_rocm_eagle",
         ":smoke_rocm_pd",
         ":smoke_rocm_embedding",
+        ":smoke_rocm_jit_remote_cache",
         ":smoke_sm100_dense",
         ":smoke_sm100_moe",
     ],
