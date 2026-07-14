@@ -456,6 +456,21 @@ __global__ void __launch_bounds__(BLOCK_SIZE, 1) allreduce_fusion_kernel_1stage(
     *reinterpret_cast<vec_t_*>(reinterpret_cast<T*>(params.residual_out) + idx) = vec;
     auto gamma = *reinterpret_cast<vec_t_*>(reinterpret_cast<T*>(params.rms_gamma) + access_id_in_token);
     epilogue<T, VEC_SIZE, false, BLOCK_SIZE, QUANT_TYPE>(params, vec, gamma, idx, tidx);
+    // BUGFIX (trt-allreduce-cross-invocation-workspace-race):
+    //
+    // All TRT allreduce calls share the same stable `data_` workspace (see the
+    // sibling BUGFIX in CommWorkspace::get_comm_data). The kernel reads peer
+    // ranks' workspaces over IPC, but only has an entry barrier — without an
+    // exit barrier, the fastest rank can return from this kernel and let its
+    // stream issue the next allreduce's `gpuMemcpyAsync(data_, next_input, ...)`
+    // while slower ranks are still mid-read of this rank's data_ via IPC. The
+    // slow ranks then read a partially-overwritten buffer, producing garbage
+    // sums (BF16 NaN/Inf/large) that cascade through later layers and surface
+    // as wrong tokens or prompt regurgitation in autoregressive decode.
+    //
+    // Repro evidence: on Qwen3.5-397B-A17B PTPC-FP8 TP4 ROCm decode, a 50-shot
+    // identical-prompt run was 12/50 bad before this barrier and 0/50 after.
+    comm.sync();
 }
 
 template<typename T, int NRanks, int BLOCK_SIZE, int QUANT_TYPE>
@@ -490,6 +505,9 @@ __global__ void __launch_bounds__(BLOCK_SIZE, 1) allreduce_kernel_1stage(AllRedu
         vec.data[v] = (T)acc.data[v];
     }
     *reinterpret_cast<vec_t_*>(reinterpret_cast<T*>(params.residual_out) + idx) = vec;
+    // BUGFIX (trt-allreduce-cross-invocation-workspace-race) — see
+    // allreduce_fusion_kernel_1stage for the full explanation.
+    comm.sync();
 }
 
 // ============================================================================
@@ -587,6 +605,9 @@ __global__ void __launch_bounds__(BLOCK_SIZE, 1)
         vec_add_<T, VEC_SIZE>(val, res);
         epilogue<T, VEC_SIZE, true, BLOCK_SIZE, QUANT_TYPE>(params, val, gamma, idx, tidx);
     }
+    // BUGFIX (trt-allreduce-cross-invocation-workspace-race) — see
+    // allreduce_fusion_kernel_1stage for the full explanation.
+    comm.sync();
 }
 
 template<typename T, int NRanks, int BLOCK_SIZE, int QUANT_TYPE>
@@ -641,6 +662,9 @@ __global__ void __launch_bounds__(BLOCK_SIZE, 1)
         val.load(reinterpret_cast<T*>(cptrs->data_ptrs[0]) + idx);
         val.store(reinterpret_cast<T*>(params.residual_out) + idx);
     }
+    // BUGFIX (trt-allreduce-cross-invocation-workspace-race) — see
+    // allreduce_fusion_kernel_1stage for the full explanation.
+    comm.sync();
 }
 
 // ============================================================================

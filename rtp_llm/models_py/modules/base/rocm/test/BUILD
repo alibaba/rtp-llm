@@ -80,6 +80,19 @@ py_test(
 )
 
 py_test(
+    name = "test_trt_allreduce_graph_replay",
+    srcs = ["test_trt_allreduce_graph_replay.py"],
+    deps = [
+        "//rtp_llm:testlib",
+        "//rtp_llm/models_py/modules/base/rocm:trt_allreduce",
+    ],
+    timeout = "moderate",
+    env = {"GPU_COUNT": "2"},
+    tags = ["rocm"],
+    exec_properties = {'gpu':'MI308X-ROCM7', 'gpu_count':'2'},
+)
+
+py_test(
     name = "vllm_custom_allreduce_test",
     srcs = ["vllm_custom_allreduce_test.py"],
     deps = [
