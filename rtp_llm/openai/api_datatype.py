@@ -62,7 +62,7 @@ class MMPreprocessConfigPart(BaseModel):
     min_frames: Optional[int] = None
     max_frames: Optional[int] = None
     crop_positions: Optional[str] = None
-    mm_timeout_ms: int = 30000
+    mm_timeout_ms: int = -1
 
 
 class IgraphInfo(BaseModel):

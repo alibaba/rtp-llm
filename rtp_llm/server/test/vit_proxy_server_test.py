@@ -12,6 +12,7 @@ from rtp_llm.server.vit_proxy_server import (
     LoadBalancer,
     VitProxyRpcServer,
     WorkerConnectionPool,
+    _resolve_rpc_timeout_seconds,
 )
 
 
@@ -31,6 +32,21 @@ class LoadBalancerRoundRobinTest(TestCase):
         lb = LoadBalancer([], strategy="round_robin")
         with self.assertRaises(RuntimeError):
             lb.get_worker()
+
+
+class RpcTimeoutTest(TestCase):
+    def test_uses_configured_default_when_request_timeout_is_unset(self):
+        request = MultimodalInputsPB()
+        request.multimodal_inputs.add().mm_preprocess_config.mm_timeout_ms = -1
+
+        self.assertEqual(_resolve_rpc_timeout_seconds(request, 123.0), 123.0)
+
+    def test_uses_largest_positive_request_timeout(self):
+        request = MultimodalInputsPB()
+        request.multimodal_inputs.add().mm_preprocess_config.mm_timeout_ms = 2000
+        request.multimodal_inputs.add().mm_preprocess_config.mm_timeout_ms = 3500
+
+        self.assertEqual(_resolve_rpc_timeout_seconds(request, 123.0), 3.5)
 
 
 class LoadBalancerLeastConnectionsTest(TestCase):
@@ -212,8 +228,12 @@ class VitProxyRdmaReleaseTest(TestCase):
         request_b = stub_b.ReleaseMultimodalEmbedding.call_args.args[0]
         self.assertEqual(list(request_a.handle), ["handle-a"])
         self.assertEqual(list(request_b.handle), ["handle-b-1", "handle-b-2"])
-        self.assertEqual(stub_a.ReleaseMultimodalEmbedding.call_args.kwargs["timeout"], 1.0)
-        self.assertEqual(stub_b.ReleaseMultimodalEmbedding.call_args.kwargs["timeout"], 1.0)
+        self.assertEqual(
+            stub_a.ReleaseMultimodalEmbedding.call_args.kwargs["timeout"], 1.0
+        )
+        self.assertEqual(
+            stub_b.ReleaseMultimodalEmbedding.call_args.kwargs["timeout"], 1.0
+        )
 
 
 if __name__ == "__main__":

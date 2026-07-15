@@ -17,7 +17,7 @@ struct MMPreprocessConfig {
     int32_t            min_frames     = -1;
     int32_t            max_frames     = -1;
     std::vector<float> crop_positions = {};
-    int32_t            mm_timeout_ms  = 30000;
+    int32_t            mm_timeout_ms  = -1;
     MMPreprocessConfig(int32_t            width          = -1,
                        int32_t            height         = -1,
                        int32_t            min_pixels     = -1,
@@ -26,7 +26,7 @@ struct MMPreprocessConfig {
                        int32_t            min_frames     = -1,
                        int32_t            max_frames     = -1,
                        std::vector<float> crop_positions = {},
-                       int32_t            mm_timeout_ms  = 30000):
+                       int32_t            mm_timeout_ms  = -1):
         width(width),
         height(height),
         min_pixels(min_pixels),
@@ -67,7 +67,7 @@ public:
                     int32_t            min_frames     = -1,
                     int32_t            max_frames     = -1,
                     std::vector<float> crop_positions = {},
-                    int32_t            mm_timeout_ms  = 30000):
+                    int32_t            mm_timeout_ms  = -1):
         url(url),
         mm_type(mm_type),
         tensor(t),

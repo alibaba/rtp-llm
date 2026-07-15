@@ -72,9 +72,6 @@ _DEBUG_SCORE_TOKEN_LABELS = {
 _PARTIAL_RESPONSE_METADATA = (("x-dashscope-partialresponse", "true"),)
 
 
-_DEFAULT_MM_TIMEOUT_MS = 30000
-
-
 def _build_mm_inputs_from_request(request: Any) -> list:
     """Build ``MultimodalInput`` list from a dash_sc gRPC request.
 
@@ -85,8 +82,8 @@ def _build_mm_inputs_from_request(request: Any) -> list:
     ``min_frames``). Fields unset by the upstream stay ``-1`` so the engine
     falls back to model defaults — same as the original "all -1" behavior.
 
-    ``mm_timeout_ms`` is fixed at 30 s for all parts (no per-part override on
-    the wire today; matches the previous default).
+    ``mm_timeout_ms`` stays unset because there is no per-part override on the
+    wire today, so the engine uses ``VitConfig.mm_timeout_ms``.
 
     Returns ``[]`` for text-only requests so the downstream path is
     byte-identical to the pre-multimodal behavior. The ``MultimodalInput`` /
@@ -114,7 +111,7 @@ def _build_mm_inputs_from_request(request: Any) -> list:
                 part.min_frames,
                 part.max_frames,
                 [],  # crop_positions (no upstream control today)
-                _DEFAULT_MM_TIMEOUT_MS,
+                -1,  # use VitConfig.mm_timeout_ms
             ),
         )
         for part in mm_parts
