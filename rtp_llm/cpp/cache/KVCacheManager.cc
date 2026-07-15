@@ -121,7 +121,11 @@ KVCacheManager::KVCacheManager(const CacheConfig&                 config,
     cache_store_config_(cache_store_config),
     use_cuda_malloc_block_pool_(use_cuda_malloc_block_pool) {
     if (warmup) {
-        config_.block_num = 1;
+        // Warmup only validates config without real allocation or NCCL sync, but it still
+        // builds a functional device block pool. block_tree_cache's IBlockPool reserves
+        // block 0 as the null block, so the pool needs at least 2 physical blocks (block 0
+        // reserved + 1 usable). Use the minimal valid count.
+        config_.block_num = 2;
     } else {
         allocateAndSync();
     }
@@ -656,7 +660,7 @@ bool KVCacheManager::executeFunction(const FunctionRequestPB& request, FunctionR
 
     for (int item_index = 0; item_index < memory_request.copy_items_size(); ++item_index) {
         TransferDescriptor descriptor;
-        const bool decoded = BlockTreeTransferConverter::decodeTransfer(memory_request, item_index, descriptor);
+        const bool         decoded = BlockTreeTransferConverter::decodeTransfer(memory_request, item_index, descriptor);
         if (!decoded) {
             RTP_LLM_LOG_WARNING("KVCacheManager::executeFunction: invalid transfer item, index=%d", item_index);
             return false;

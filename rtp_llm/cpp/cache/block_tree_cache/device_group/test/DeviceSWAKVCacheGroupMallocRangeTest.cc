@@ -57,21 +57,21 @@ DeviceBlockPoolConfig makeDeviceBlockPoolConfig() {
     layout.total_size_bytes         = layout.kv_block_pool_size_bytes;
 
     DeviceBlockPoolConfig config;
-    config.pool_type            = BlockPoolType::DEVICE;
-    config.pool_name            = "swa_malloc_range_test";
-    config.physical_block_count = kBlockNum;
-    config.total_size_bytes     = layout.total_size_bytes;
-    config.memory_layouts       = {layout};
-    config.allocation_type      = AllocationType::DEVICE;
+    config.pool_type               = BlockPoolType::DEVICE;
+    config.pool_name               = "swa_malloc_range_test";
+    config.physical_block_count    = kBlockNum;
+    config.total_size_bytes        = layout.total_size_bytes;
+    config.memory_layouts          = {layout};
+    config.allocation_type         = AllocationType::DEVICE;
+    config.use_cuda_malloc_backing = false;
     return config;
 }
 
 // DeviceSWAKVCacheGroup only accepts a DeviceBlockPoolPtr, and DeviceBlockPool's init() rejects any
 // allocation_type other than DEVICE. This test exercises only the SWA tail-block placement
 // pattern (which slots are NULL vs REAL) and the free path, both memory-medium-agnostic.
-DeviceBlockPoolPtr createHostBlockPool() {
+DeviceBlockPoolPtr createDeviceBlockPool() {
     auto device_config = std::make_shared<DeviceBlockPoolConfig>(makeDeviceBlockPoolConfig());
-    device_config->use_cuda_malloc_backing = false;
 
     std::shared_ptr<const DeviceBlockPoolConfig> const_config = device_config;
     auto                                         block_pool   = std::make_shared<DeviceBlockPool>(const_config);
@@ -92,7 +92,7 @@ TEST(DeviceSWAKVCacheGroupMallocRangeTest, EmptyBlockIdsKeepTailBlocksForSeqLenU
     constexpr int kMaxSeqLen       = 1000000;
 
     ScopedEnvVar          disable_pin_host_pool("RTP_LLM_PIN_HOST_BLOCK_POOL", "0");
-    auto                  block_pool = createHostBlockPool();
+    auto                  block_pool = createDeviceBlockPool();
     DeviceSWAKVCacheGroup group({}, makeMHASpec(kSeqSizePerBlock), block_pool, 0);
 
     auto check_seq_len = [&](int seq_len) {

@@ -16,6 +16,7 @@
 #include "rtp_llm/cpp/cache/config_creator/CacheConfigCreator.h"
 #include "rtp_llm/cpp/cache/config_creator/HybridPoolConfigCreator.h"
 #include "rtp_llm/cpp/cache/allocator/HybridPoolKVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCacheFactory.h"
 #include "rtp_llm/cpp/cache/spec/LinearKVCacheSpec.h"
 #include "rtp_llm/cpp/cache/spec/MHAKVCacheSpec.h"
 #include "rtp_llm/cpp/cache/test/BlockPoolTestHelper.h"
@@ -386,6 +387,24 @@ protected:
         rtp_llm::initLogger();
         createDevice();
     }
+
+    // In the refactored design the DeviceKVCacheGroups live inside BlockTreeCache, not the
+    // allocator. makeAllocator() returns a pre-init allocator; after init() builds the per-group
+    // device pools, tests must inject a BlockTreeCache (mirrors KVCacheManager wiring) before any
+    // group access (convertIndexToAddr / malloc / reserve / reuse). The fixture owns the
+    // BlockTreeCache so it outlives the allocator's raw pointer.
+    bool injectBlockTreeCache(const HybridPoolKVCacheAllocatorPtr& allocator, const CacheConfig& config) {
+        KVCacheConfig kv_cache_config;  // device-only: memory/disk tiers disabled
+        auto          btc = createBlockTreeCache(config, kv_cache_config, allocator);
+        if (!btc) {
+            return false;
+        }
+        allocator->setBlockTreeCache(btc.get());
+        block_tree_caches_.push_back(std::move(btc));
+        return true;
+    }
+
+    std::vector<BlockTreeCachePtr> block_tree_caches_;
 };
 
 // ---------------------------------------------------------------------------
@@ -396,6 +415,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, InitCreatesIndependentBlockPoolPerGroup) 
     auto config    = makeTinyMultiPoolHybridConfig(/*linear_block_num=*/6, /*full_block_num=*/8);
     auto allocator = makeAllocator(config);
     ASSERT_TRUE(allocator->init());
+    ASSERT_TRUE(injectBlockTreeCache(allocator, config));
 
     ASSERT_EQ(allocator->groupBlockPools().size(), 2u);
     EXPECT_NE(allocator->groupBlockPools()[0], allocator->groupBlockPools()[1]);
@@ -409,6 +429,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, SwaDefaultRegionGroupPoolUsesGpuBacking) 
     auto config    = makeTinySwaMultiPoolHybridConfig(/*linear_block_num=*/6, /*swa_block_num=*/8);
     auto allocator = makeAllocator(config);
     ASSERT_TRUE(allocator->init());
+    ASSERT_TRUE(injectBlockTreeCache(allocator, config));
 
     ASSERT_EQ(allocator->groupBlockPools().size(), 2u);
     EXPECT_EQ(allocator->groupBlockPools()[0]->where(), MemoryType::MEMORY_GPU);
@@ -421,6 +442,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, GetBlockPoolReturnsNullptrInHybridPoolMod
     auto config    = makeTinyMultiPoolHybridConfig();
     auto allocator = makeAllocator(config);
     ASSERT_TRUE(allocator->init());
+    ASSERT_TRUE(injectBlockTreeCache(allocator, config));
     EXPECT_EQ(allocator->getBlockPool(), nullptr);
 }
 
@@ -432,6 +454,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, TotalAndFreeBlocksAggregateAcrossGroups) 
     auto config    = makeTinyMultiPoolHybridConfig(/*linear_block_num=*/6, /*full_block_num=*/8);
     auto allocator = makeAllocator(config);
     ASSERT_TRUE(allocator->init());
+    ASSERT_TRUE(injectBlockTreeCache(allocator, config));
 
     const size_t expected_total = (6u - 1u) + (8u - 1u);
     EXPECT_EQ(allocator->totalBlocksNum(), expected_total);
@@ -486,6 +509,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, RequestAndConnectorRefAggregateAcrossGrou
     auto config    = makeTinyMultiPoolHybridConfig(/*linear_block_num=*/6, /*full_block_num=*/8);
     auto allocator = makeAllocator(config);
     ASSERT_TRUE(allocator->init());
+    ASSERT_TRUE(injectBlockTreeCache(allocator, config));
 
     auto pool0 = allocator->groupBlockPools()[0];
     auto pool1 = allocator->groupBlockPools()[1];
@@ -549,6 +573,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, BlockCacheRefAggregatesAcrossGroups) {
     auto config    = makeTinyMultiPoolHybridConfig();
     auto allocator = makeAllocator(config);
     ASSERT_TRUE(allocator->init());
+    ASSERT_TRUE(injectBlockTreeCache(allocator, config));
 
     const size_t available_before = allocator->availableBlocksNum();
     const size_t free_before      = allocator->freeBlocksNum();
@@ -581,6 +606,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, ConvertIndexToAddrAndBufferDefault) {
     auto config    = makeTinyMultiPoolHybridConfig();
     auto allocator = makeAllocator(config);
     ASSERT_TRUE(allocator->init());
+    ASSERT_TRUE(injectBlockTreeCache(allocator, config));
 
     // Layer in linear group.
     {
@@ -604,6 +630,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, ConvertIndexToBufferPartitionDefault) {
     auto config    = makeTinyMultiPoolHybridConfig();
     auto allocator = makeAllocator(config);
     ASSERT_TRUE(allocator->init());
+    ASSERT_TRUE(injectBlockTreeCache(allocator, config));
 
     auto bufs = allocator->convertIndexToBuffer(
         /*layer_id=*/3, /*block_id=*/1, /*partition_count=*/1, /*partition_id=*/0);
@@ -615,6 +642,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, ConvertIndexToAddrAndBufferByGroup) {
     auto config    = makeTinyMultiPoolHybridConfig();
     auto allocator = makeAllocator(config);
     ASSERT_TRUE(allocator->init());
+    ASSERT_TRUE(injectBlockTreeCache(allocator, config));
 
     auto addr_default   = allocator->convertIndexToAddr(/*layer_id=*/0, /*group_id=*/0, /*block_id=*/1);
     auto addr_via_layer = allocator->convertIndexToAddr(/*layer_id=*/0, /*block_id=*/1);
@@ -634,6 +662,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, AllLayerCacheBaseExposesPerLayerAndPerGro
     auto config    = makeTinyMultiPoolHybridConfig();
     auto allocator = makeAllocator(config);
     ASSERT_TRUE(allocator->init());
+    ASSERT_TRUE(injectBlockTreeCache(allocator, config));
 
     auto layout = allocator->allLayerCacheBase();
     ASSERT_EQ(layout.layers_to_kv_buffer_ptrs.size(), static_cast<size_t>(config.layer_all_num));
@@ -665,6 +694,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, RegUserMrWithoutCacheStoreIsNoOpAndZeroCo
     auto config    = makeTinyMultiPoolHybridConfig();
     auto allocator = makeAllocator(config);
     ASSERT_TRUE(allocator->init());
+    ASSERT_TRUE(injectBlockTreeCache(allocator, config));
 
     // No CacheStore is plumbed in: regUserMr should be a benign no-op for every
     // group pool, and the aggregated MR cost remains zero.
@@ -682,6 +712,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, PopBlocksFromCacheReturnsEvictedBatchAcro
     auto config    = makeTinyMultiPoolHybridConfig(/*linear_block_num=*/6, /*full_block_num=*/8);
     auto allocator = makeAllocator(config);
     ASSERT_TRUE(allocator->init());
+    ASSERT_TRUE(injectBlockTreeCache(allocator, config));
 
     // Seed identical key on both groups, plus a unique key on the full group.
     auto g0_block_for_100 = seedNonResidentCacheItem(allocator, /*gid=*/0, /*key=*/100);
@@ -736,6 +767,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, PopBlocksFromCacheZeroFreeReturnsNull) {
     auto config    = makeTinyMultiPoolHybridConfig();
     auto allocator = makeAllocator(config);
     ASSERT_TRUE(allocator->init());
+    ASSERT_TRUE(injectBlockTreeCache(allocator, config));
     EXPECT_EQ(allocator->popBlocksFromCache(0), nullptr);
 }
 
@@ -743,6 +775,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, PopBlocksFromCacheEmptyCachesReturnsNull)
     auto config    = makeTinyMultiPoolHybridConfig();
     auto allocator = makeAllocator(config);
     ASSERT_TRUE(allocator->init());
+    ASSERT_TRUE(injectBlockTreeCache(allocator, config));
     EXPECT_EQ(allocator->popBlocksFromCache(/*min_blocks_to_free=*/4), nullptr);
 }
 
@@ -752,6 +785,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, BlockCacheFreeReleasesEvictedBatchAcrossG
     auto config    = makeTinyMultiPoolHybridConfig(/*linear_block_num=*/6, /*full_block_num=*/6);
     auto allocator = makeAllocator(config);
     ASSERT_TRUE(allocator->init());
+    ASSERT_TRUE(injectBlockTreeCache(allocator, config));
 
     const auto b0    = seedNonResidentCacheItem(allocator, /*gid=*/0, /*key=*/100);
     const auto b1    = seedNonResidentCacheItem(allocator, /*gid=*/1, /*key=*/200);
@@ -780,6 +814,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, BlockCacheFreeNullPtrIsNoOp) {
     auto config    = makeTinyMultiPoolHybridConfig();
     auto allocator = makeAllocator(config);
     ASSERT_TRUE(allocator->init());
+    ASSERT_TRUE(injectBlockTreeCache(allocator, config));
     EXPECT_NO_THROW(allocator->blockCacheFree(nullptr));
 }
 
@@ -789,6 +824,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, BlockCacheFreeIgnoresDuplicateAndNullBloc
     auto config    = makeTinyMultiPoolHybridConfig();
     auto allocator = makeAllocator(config);
     ASSERT_TRUE(allocator->init());
+    ASSERT_TRUE(injectBlockTreeCache(allocator, config));
 
     auto         seeded     = seedNonResidentCacheItem(allocator, /*gid=*/1, /*key=*/300);
     auto         pool1      = allocator->groupBlockPools()[1];
@@ -821,6 +857,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, ReserveBlocksAreDistributedAcrossGroupsFo
     auto config    = makeTinyMultiPoolHybridConfig(/*linear_block_num=*/6, /*full_block_num=*/4);
     auto allocator = makeAllocator(config);
     ASSERT_TRUE(allocator->init());
+    ASSERT_TRUE(injectBlockTreeCache(allocator, config));
 
     allocator->setReserveBlockNum(4);
 
@@ -840,6 +877,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, ReserveBlocksRejectsWhenGroupCannotMeetIt
     auto config    = makeTinyMultiPoolHybridConfig(/*linear_block_num=*/6, /*full_block_num=*/4);
     auto allocator = makeAllocator(config);
     ASSERT_TRUE(allocator->init());
+    ASSERT_TRUE(injectBlockTreeCache(allocator, config));
 
     // A reserve large enough to hide most blocks should reject init malloc.
     allocator->setReserveBlockNum(allocator->availableBlocksNum());
@@ -859,6 +897,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, PoolMetricsSnapshotsReportReserveBlocks) 
     auto config    = makeTinyMultiPoolHybridConfig(/*linear_block_num=*/6, /*full_block_num=*/8);
     auto allocator = makeAllocator(config);
     ASSERT_TRUE(allocator->init());
+    ASSERT_TRUE(injectBlockTreeCache(allocator, config));
 
     constexpr size_t reserve_blocks = 6;
     allocator->setReserveBlockNum(reserve_blocks);
@@ -880,6 +919,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, ReserveBlocksUseCPShardedFullGroupNeed) {
     auto config    = makeTinyMultiPoolHybridConfig(/*linear_block_num=*/20, /*full_block_num=*/6);
     auto allocator = makeAllocator(config);
     ASSERT_TRUE(allocator->init());
+    ASSERT_TRUE(injectBlockTreeCache(allocator, config));
 
     allocator->setReserveBlockNum(1);
 
@@ -905,6 +945,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, ReserveCheckIsBypassedWhenMallocInfoLacks
     auto config    = makeTinyMultiPoolHybridConfig();
     auto allocator = makeAllocator(config);
     ASSERT_TRUE(allocator->init());
+    ASSERT_TRUE(injectBlockTreeCache(allocator, config));
 
     MallocInfo info{};
     EXPECT_TRUE(allocator->hasAvailableBlocksForReserve(info, /*reserve_blocks=*/9999));
@@ -917,6 +958,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, InitMallocRollbackFreesPartiallyAllocated
     auto config    = makeTinyMultiPoolHybridConfig(/*linear_block_num=*/3, /*full_block_num=*/3);
     auto allocator = makeAllocator(config);
     ASSERT_TRUE(allocator->init());
+    ASSERT_TRUE(injectBlockTreeCache(allocator, config));
 
     const auto counters_before = snapshotPoolCounters(allocator);
 
@@ -944,6 +986,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, InitMallocRollbackReleasesDeviceReuseRefe
     auto config    = makeTinyMultiPoolHybridConfig(/*linear_block_num=*/4, /*full_block_num=*/4);
     auto allocator = makeAllocator(config);
     ASSERT_TRUE(allocator->init());
+    ASSERT_TRUE(injectBlockTreeCache(allocator, config));
 
     const auto linear_cached = seedNonResidentCacheItem(allocator, /*gid=*/0, /*key=*/100);
     const auto full_cached   = seedNonResidentCacheItem(allocator, /*gid=*/1, /*key=*/100);
@@ -990,6 +1033,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, IncrMallocRollbackFreesPartiallyAllocated
     auto config    = makeTinyMultiPoolHybridConfig(/*linear_block_num=*/4, /*full_block_num=*/2);
     auto allocator = makeAllocator(config);
     ASSERT_TRUE(allocator->init());
+    ASSERT_TRUE(injectBlockTreeCache(allocator, config));
 
     auto batch_res = makeBatchResource(/*batch_size=*/1, config);
     batch_res->setBatchCacheKeys(0, CacheKeysType{100, 101, 102});
@@ -1030,6 +1074,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, MallocAndFreeCycleAcrossPerGroupPools) {
     auto config    = makeTinyMultiPoolHybridConfig(/*linear_block_num=*/8, /*full_block_num=*/8);
     auto allocator = makeAllocator(config);
     ASSERT_TRUE(allocator->init());
+    ASSERT_TRUE(injectBlockTreeCache(allocator, config));
 
     const size_t free_before = allocator->freeBlocksNum();
 
@@ -1056,6 +1101,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4InitAndAggregatedCounters) {
     auto config    = makeDSV4HybridPoolConfig(/*block_num=*/200);
     auto allocator = makeAllocator(config);
     ASSERT_TRUE(allocator->init());
+    ASSERT_TRUE(injectBlockTreeCache(allocator, config));
 
     EXPECT_EQ(config.groupNums(), 7);
     ASSERT_EQ(allocator->groupBlockPools().size(), 7u);
@@ -1074,6 +1120,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4FixedTagPoolsUseGpuBacking) {
     auto config    = makeDSV4HybridPoolConfig(/*block_num=*/200);
     auto allocator = makeAllocator(config);
     ASSERT_TRUE(allocator->init());
+    ASSERT_TRUE(injectBlockTreeCache(allocator, config));
 
     ASSERT_EQ(allocator->groupBlockPools().size(), 7u);
     for (size_t gid = 0; gid < allocator->groupBlockPools().size(); ++gid) {
@@ -1087,6 +1134,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4HCAStateReuseEnabledAllocatesTailOnly
     config.linear_step = 4;
     auto allocator     = makeAllocator(config);
     ASSERT_TRUE(allocator->init());
+    ASSERT_TRUE(injectBlockTreeCache(allocator, config));
 
     const int hca_state_gid = config.groupIdForTag("hca_state");
     ASSERT_GE(hca_state_gid, 0);
@@ -1124,6 +1172,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, TokenAggregatorsIgnoreSmallHCAStatePool) 
 
     auto allocator = makeAllocator(config);
     ASSERT_TRUE(allocator->init());
+    ASSERT_TRUE(injectBlockTreeCache(allocator, config));
     ASSERT_GT(allocator->groupBlockPools().size(), static_cast<size_t>(hca_state_gid));
 
     const auto hca_state_tokens =
@@ -1232,6 +1281,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4ConvertIndexToAddrByTagRoutesToCorrec
     auto config    = makeDSV4HybridPoolConfig();
     auto allocator = makeAllocator(config);
     ASSERT_TRUE(allocator->init());
+    ASSERT_TRUE(injectBlockTreeCache(allocator, config));
 
     // CSA layer (compress_ratio=4) -- pick the first one.
     int csa_layer = -1;
@@ -1262,6 +1312,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4ConvertIndexToBufferByTagAndPartition
     auto config    = makeDSV4HybridPoolConfig();
     auto allocator = makeAllocator(config);
     ASSERT_TRUE(allocator->init());
+    ASSERT_TRUE(injectBlockTreeCache(allocator, config));
 
     int csa_layer = -1;
     for (size_t l = 0; l < config.layer_all_num; ++l) {
@@ -1286,6 +1337,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4AllLayerCacheBaseHasPerGroupTensors) 
     auto config    = makeDSV4HybridPoolConfig();
     auto allocator = makeAllocator(config);
     ASSERT_TRUE(allocator->init());
+    ASSERT_TRUE(injectBlockTreeCache(allocator, config));
 
     auto layout = allocator->allLayerCacheBase();
     ASSERT_EQ(layout.layers_to_kv_buffer_ptrs.size(), static_cast<size_t>(config.layer_all_num));
@@ -1307,6 +1359,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4SharedBlockCacheIsUnifiedAcrossGroups
     auto config    = makeDSV4HybridPoolConfig();
     auto allocator = makeAllocator(config);
     ASSERT_TRUE(allocator->init());
+    ASSERT_TRUE(injectBlockTreeCache(allocator, config));
 
     // All groups share a single SharedBlockCache owned by the allocator.
     auto shared_cache = allocator->sharedBlockCache();
@@ -1338,6 +1391,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, RequestReleaseDoesNotFreeCachedBlock) {
     auto config    = makeTinyMultiPoolHybridConfig();
     auto allocator = makeAllocator(config);
     ASSERT_TRUE(allocator->init());
+    ASSERT_TRUE(injectBlockTreeCache(allocator, config));
     auto pool  = allocator->groupBlockPools()[0];
     auto block = pool->malloc().value();
     pool->incRef(block);  // cache holder
@@ -1354,6 +1408,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4CPShardedInsertThenReuseSamePrefix) {
     auto config    = makeDSV4HybridPoolConfig(/*block_num=*/64);
     auto allocator = makeAllocator(config);
     ASSERT_TRUE(allocator->init());
+    ASSERT_TRUE(injectBlockTreeCache(allocator, config));
 
     const int spb     = static_cast<int>(config.seq_size_per_block);
     const int seq_len = 10 * spb + 17;
@@ -1402,10 +1457,11 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4CPShardedInsertThenReuseSamePrefix) {
     allocator->free(hit_free);
 }
 
-TEST_F(HybridPoolKVCacheAllocatorTest, DSV4CPShardedEvictionMarksCanonicalResource) {
+TEST_F(HybridPoolKVCacheAllocatorTest, DSV4CPShardedEvictionReclaimsDeviceBlocksInPlace) {
     auto config    = makeDSV4HybridPoolConfig(/*block_num=*/64);
     auto allocator = makeAllocator(config);
     ASSERT_TRUE(allocator->init());
+    ASSERT_TRUE(injectBlockTreeCache(allocator, config));
 
     const int spb     = static_cast<int>(config.seq_size_per_block);
     const int seq_len = 10 * spb + 17;
@@ -1433,26 +1489,16 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4CPShardedEvictionMarksCanonicalResour
     FreeInfo seed_free{seed_res, seed_tokens};
     allocator->free(seed_free);
 
-    auto evicted = allocator->popBlocksFromCache(/*min_blocks_to_free=*/4);
-    ASSERT_NE(evicted, nullptr);
-    ASSERT_TRUE(evicted->hasCacheKeys());
-    EXPECT_TRUE(evicted->cacheResource(0).cacheKeysAreCpCanonical());
-
-    KVCacheResource canonical_source;
-    canonical_source.setCacheKeys(full_keys);
-    const auto expected_canonical = canonical_source.localCacheKeys(cp_mapper->cpSize() - 1, cp_mapper->cpSize());
-    EXPECT_EQ(evicted->cacheKeys(0), expected_canonical);
-    const auto& dependencies = evicted->cacheResource(0).blockDependencies();
-    ASSERT_EQ(dependencies.size(), expected_canonical.size());
-    for (size_t i = 0; i < dependencies.size(); ++i) {
-        EXPECT_EQ(dependencies[i].ordinal, static_cast<uint32_t>(i));
-        if (i == 0) {
-            EXPECT_FALSE(dependencies[i].has_parent);
-        } else {
-            EXPECT_TRUE(dependencies[i].has_parent);
-            EXPECT_EQ(dependencies[i].parent_key, expected_canonical[i - 1]);
-        }
-    }
+    // In the refactored BlockTreeCache design popBlocksFromCache no longer surfaces the
+    // evicted resource: it reclaims device blocks in place, returns them to the owning
+    // pools, and always yields nullptr. Verify the in-place reclaim side effect through the
+    // free-block counter (cache-held blocks become free again). The CP-canonical cache-key
+    // semantics this case used to assert on the evicted handle are covered by
+    // DSV4CPShardedInsertThenReuseSamePrefix (insert -> reuse path).
+    const size_t free_before = allocator->freeBlocksNum();
+    auto         evicted     = allocator->popBlocksFromCache(/*min_blocks_to_free=*/4);
+    EXPECT_EQ(evicted, nullptr);
+    EXPECT_GE(allocator->freeBlocksNum(), free_before + 4);
 }
 
 }  // namespace test

@@ -44,8 +44,8 @@ public:
     // TODO, remove this after remove fallback
     int singleBatchNeedBlocks(int seq_len, int reserve_step) const;
 
-    int curBlocksNum() const;
-    int mallocFailedTimes() const;
+    int  curBlocksNum() const;
+    int  mallocFailedTimes() const;
     bool isContextStream() const;
 
     const BatchKVCacheResource& kvCache() const;
@@ -129,7 +129,6 @@ private:
     std::shared_ptr<AsyncContext> storeCacheAsync(const std::shared_ptr<BatchKVCacheResource>& batch_resource,
                                                   bool                                         enable_memory_cache,
                                                   bool                                         enable_remote_cache);
-    void                          evictDeviceCacheToMemory();
     void                          waitStoreCacheDone(const std::shared_ptr<AsyncContext>& store_context);
 
 private:

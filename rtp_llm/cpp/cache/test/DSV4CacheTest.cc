@@ -10,6 +10,7 @@
 #include "rtp_llm/cpp/cache/config_creator/HybridPoolConfigCreator.h"
 #include "rtp_llm/cpp/cache/allocator/HybridPoolKVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/allocator/HybridTypeKVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCacheFactory.h"
 #include "rtp_llm/cpp/cache/KVCacheTransferPlanner.h"
 #include "rtp_llm/cpp/cache/spec/OpaqueKVCacheSpec.h"
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
@@ -1569,6 +1570,23 @@ protected:
         rtp_llm::initLogger();
         createDevice();
     }
+
+    // In the refactored design the DeviceKVCacheGroups live inside BlockTreeCache, not the
+    // allocator. Tests that drive the full allocator->malloc(MallocInfo) reuse path must inject
+    // a BlockTreeCache (mirrors KVCacheManager wiring) after init(); low-level pool-only tests
+    // do not. The fixture owns the BlockTreeCache so it outlives the allocator's raw pointer.
+    bool injectBlockTreeCache(const std::shared_ptr<KVCacheAllocator>& allocator, const CacheConfig& config) {
+        KVCacheConfig kv_cache_config;  // device-only: memory/disk tiers disabled
+        auto          btc = createBlockTreeCache(config, kv_cache_config, allocator);
+        if (!btc) {
+            return false;
+        }
+        allocator->setBlockTreeCache(btc.get());
+        block_tree_caches_.push_back(std::move(btc));
+        return true;
+    }
+
+    std::vector<BlockTreeCachePtr> block_tree_caches_;
 };
 
 TEST_F(DSV4AllocatorTest, InitAndBasicProperties) {
@@ -1588,6 +1606,7 @@ TEST_F(DSV4AllocatorTest, CpPageRrFixedAndSwaAllocateOneBlockPerVirtualBlock) {
     auto               config    = makeDSV4CpAllocatorConfig(cp_size);
     auto               allocator = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
     ASSERT_TRUE(allocator->init());
+    ASSERT_TRUE(injectBlockTreeCache(allocator, config));
 
     const int spb     = allocator->seqSizePerBlock();
     const int seq_len = static_cast<int>(cp_size) * spb;
@@ -1632,6 +1651,7 @@ TEST_F(DSV4AllocatorTest, AddressLookupAllGroups) {
     auto config    = makeDSV4AllocatorConfig();
     auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
     ASSERT_TRUE(allocator->init());
+    ASSERT_TRUE(injectBlockTreeCache(allocator, config));
 
     // Verify address lookup works for a layer in each group
     // Group 0 (CSA KV): csa_layer_ids[0]
@@ -1665,6 +1685,7 @@ TEST_F(DSV4AllocatorTest, ConvertIndexToBufferAllGroups) {
     auto config    = makeDSV4AllocatorConfig();
     auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
     ASSERT_TRUE(allocator->init());
+    ASSERT_TRUE(injectBlockTreeCache(allocator, config));
 
     // convertIndexToBuffer should work for layers in each of the 7 groups
     for (int gid = 0; gid < 7; gid++) {
@@ -1783,6 +1804,7 @@ TEST_F(DSV4AllocatorTest, FlashAddressLookupAllGroups) {
     auto config    = makeDSV4AllocatorConfig(/*use_flash=*/true);
     auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
     ASSERT_TRUE(allocator->init());
+    ASSERT_TRUE(injectBlockTreeCache(allocator, config));
 
     for (int gid = 0; gid < 7; gid++) {
         ASSERT_FALSE(config.layerIdsForGroup(gid).empty()) << "Flash group " << gid << " has no layers";
@@ -2289,6 +2311,7 @@ TEST_F(DSV4AllocatorTest, HybridPoolReserveBlocksAreDistributedAcrossGroups) {
     auto allocator   = std::make_shared<HybridPoolKVCacheAllocator>(
         config, AllocationType::DEVICE, nullptr, /*reserve_block_ratio=*/10);
     ASSERT_TRUE(allocator->init());
+    ASSERT_TRUE(injectBlockTreeCache(allocator, config));
 
     auto batch_res = std::make_shared<BatchKVCacheResource>();
     batch_res->resetBatchSize(1);
@@ -2331,6 +2354,7 @@ TEST_F(DSV4AllocatorTest, HybridPoolReserveBlocksDoNotReduceExplicitHcaStateCapa
     auto allocator = std::make_shared<HybridPoolKVCacheAllocator>(
         config, AllocationType::DEVICE, nullptr, /*reserve_block_ratio=*/50);
     ASSERT_TRUE(allocator->init());
+    ASSERT_TRUE(injectBlockTreeCache(allocator, config));
 
     auto batch_res = std::make_shared<BatchKVCacheResource>();
     batch_res->resetBatchSize(1);
@@ -2486,6 +2510,7 @@ TEST_F(DSV4AllocatorTest, IncrMallocDecodeGrowsBlocks) {
     auto config    = makeDSV4AllocatorConfig();
     auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
     ASSERT_TRUE(allocator->init());
+    ASSERT_TRUE(injectBlockTreeCache(allocator, config));
 
     int spb = allocator->seqSizePerBlock();
 
@@ -2542,6 +2567,7 @@ TEST_F(DSV4AllocatorTest, FreeReturnsBlocksToPool) {
     auto config    = makeDSV4AllocatorConfig();
     auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
     ASSERT_TRUE(allocator->init());
+    ASSERT_TRUE(injectBlockTreeCache(allocator, config));
 
     size_t free_before = allocator->freeBlocksNum();
     int    spb         = allocator->seqSizePerBlock();
@@ -2597,6 +2623,7 @@ TEST_F(DSV4AllocatorTest, FlashIncrMallocDecode) {
     auto config    = makeDSV4AllocatorConfig(/*use_flash=*/true);
     auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
     ASSERT_TRUE(allocator->init());
+    ASSERT_TRUE(injectBlockTreeCache(allocator, config));
 
     int spb = allocator->seqSizePerBlock();
 

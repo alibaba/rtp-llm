@@ -302,10 +302,13 @@ TEST_F(KVCacheManagerTest, WarmupConfigSmoke) {
     auto cache_manager = std::make_shared<KVCacheManager>(cache_config, /*warmup=*/true);
     ASSERT_TRUE(cache_manager->init());
 
-    EXPECT_EQ(cache_manager->cacheConfig().block_num, 1);
+    // Warmup collapses the real (block_num=4) pool to the minimal valid device pool.
+    // block_tree_cache reserves block 0 as the null block, so the minimum is 2 physical
+    // blocks (block 0 reserved + 1 usable) => 1 usable/free block reported by the manager.
+    EXPECT_EQ(cache_manager->cacheConfig().block_num, 2);
 
-    EXPECT_EQ(cache_manager->totalBlocksNum(), 0);
-    EXPECT_EQ(cache_manager->freeBlocksNum(), 0);
+    EXPECT_EQ(cache_manager->totalBlocksNum(), 1);
+    EXPECT_EQ(cache_manager->freeBlocksNum(), 1);
 }
 
 TEST_F(KVCacheManagerTest, DSV4IndependentPoolsUseGpuBacking) {
@@ -815,52 +818,6 @@ TEST_F(KVCacheManagerTest, DSV4InitReuseKeepsSWAPrefixTailBlock) {
     manager->free(FreeInfo{second_resource, second_tokens});
 }
 
-TEST_F(KVCacheManagerTest, DSV4PopCachedBlocksPreservesGroupShape) {
-    auto manager_config = makeCompactDSV4ManagerConfig(/*block_num=*/16);
-    auto manager        = std::make_shared<KVCacheManager>(manager_config, /*warmup=*/false);
-    ASSERT_TRUE(manager->init());
-
-    const int spb      = static_cast<int>(manager_config.seq_size_per_block);
-    const int seq_len  = 3 * spb + 1;
-    auto      resource = makeDSV4BatchResource(manager_config);
-    auto      tokens   = makeDSV4CompleteTokenIds(seq_len, seq_len, spb);
-
-    MallocInfo malloc_info{resource, tokens};
-    malloc_info.reuse_cache         = true;
-    malloc_info.enable_device_cache = false;
-    ASSERT_TRUE(manager->malloc(malloc_info).success);
-
-    InsertInfo insert_info{resource, tokens, /*is_resident=*/false};
-    manager->insertIntoCache(insert_info);
-    FreeInfo free_info{resource, tokens};
-    manager->free(free_info);
-
-    auto evicted = manager->popBlocksFromCache(/*min_blocks_to_free=*/10);
-    ASSERT_NE(evicted, nullptr);
-    ASSERT_TRUE(evicted->hasCacheKeys());
-    EXPECT_EQ(evicted->groupNums(), kDsv4PoolNum);
-    EXPECT_EQ(evicted->cacheResource(0).layerGroupBlocks().size(), static_cast<size_t>(manager_config.layer_num));
-
-    bool saw_paged_block = false;
-    bool saw_tail_block  = false;
-    for (int gid = 0; gid < kDsv4PoolNum; ++gid) {
-        ASSERT_EQ(evicted->blocksNum(0, gid), static_cast<int>(evicted->cacheKeys(0).size())) << "group " << gid;
-        for (auto block : evicted->blocks(0, gid)) {
-            if (!isNullBlockIdx(block)) {
-                if (isFullGroup(manager_config, gid)) {
-                    saw_paged_block = true;
-                } else {
-                    saw_tail_block = true;
-                }
-            }
-        }
-    }
-    EXPECT_TRUE(saw_paged_block);
-    EXPECT_TRUE(saw_tail_block);
-
-    manager->blockCacheFree(evicted);
-}
-
 TEST_F(KVCacheManagerTest, Init_CreatesBlockTreeCache) {
     auto          cache_config = makeSimpleMhaCacheConfig(1, 4, 2, rtp_llm::DataType::TYPE_INT8);
     KVCacheConfig kv_cache_config;
@@ -956,13 +913,12 @@ TEST_F(KVCacheManagerTest, SingleRankDoesNotCreateBroadcastManagerWhenAddressCon
     RuntimeConfig runtime_config;
     runtime_config.worker_grpc_addrs = {"127.0.0.1:12345"};
 
-    std::shared_ptr<KVCacheManager> kv_cache_manager =
-        std::make_shared<KVCacheManager>(cache_config,
-                                         /*warmup=*/true,
-                                         /*metrics_reporter=*/nullptr,
-                                         kv_cache_config,
-                                         ParallelismConfig{},
-                                         runtime_config);
+    std::shared_ptr<KVCacheManager> kv_cache_manager = std::make_shared<KVCacheManager>(cache_config,
+                                                                                        /*warmup=*/true,
+                                                                                        /*metrics_reporter=*/nullptr,
+                                                                                        kv_cache_config,
+                                                                                        ParallelismConfig{},
+                                                                                        runtime_config);
     ASSERT_TRUE(kv_cache_manager->init());
     BlockTreeCachePtr block_tree_cache = kv_cache_manager->blockTreeCache();
     ASSERT_NE(block_tree_cache, nullptr);

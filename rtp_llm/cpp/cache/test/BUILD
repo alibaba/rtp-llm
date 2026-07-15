@@ -153,6 +153,7 @@ cc_test(
     copts = test_copts,
     deps = test_deps + [
         ":block_pool_test_helper",
+        "//rtp_llm/cpp/cache/block_tree_cache",
     ],
     env = {},
     exec_properties = {'gpu':'H20'},
@@ -226,6 +227,7 @@ cc_test(
     copts = test_copts,
     deps = test_deps + [
         ":block_pool_test_helper",
+        "//rtp_llm/cpp/cache/block_tree_cache",
     ],
     env = {},
     exec_properties = {'gpu':'H20'},
@@ -240,6 +242,7 @@ cc_test(
     copts = test_copts,
     deps = test_deps + [
         ":block_pool_test_helper",
+        "//rtp_llm/cpp/cache/block_tree_cache",
     ],
     env = {},
     exec_properties = {'gpu':'H20'},
