@@ -432,6 +432,113 @@ int fakeRootSendMismatchedFrame(const std::string& base) {
     return rc;
 }
 
+int fakeRootWaitAfterAllPeersReady(const std::string& base, int ready_fd) {
+    constexpr int             world_size = 3;
+    constexpr int             value      = 0x1234;
+    const std::string         path       = socketPath(base);
+    std::string               state_error;
+    TestSharedBroadcastState* state = createTestSharedState(base, state_error);
+    if (state == nullptr) {
+        std::fprintf(stderr, "%s\n", state_error.c_str());
+        return 1;
+    }
+
+    int              listen_fd = -1;
+    std::vector<int> peer_fds(world_size, -1);
+    auto             cleanup = [&] {
+        for (int fd : peer_fds) {
+            if (fd >= 0) {
+                ::close(fd);
+            }
+        }
+        if (listen_fd >= 0) {
+            ::close(listen_fd);
+        }
+        if (ready_fd >= 0) {
+            ::close(ready_fd);
+        }
+        ::unlink(path.c_str());
+        unmapTestSharedState(state);
+        ::unlink(sharedStatePath(base).c_str());
+    };
+    auto fail = [&](const char* message) {
+        std::fprintf(stderr, "fake root %s: %s\n", message, std::strerror(errno));
+        cleanup();
+        return 1;
+    };
+
+    ::unlink(path.c_str());
+    listen_fd = ::socket(AF_UNIX, SOCK_STREAM, 0);
+    if (listen_fd < 0) {
+        return fail("socket failed");
+    }
+
+    struct sockaddr_un addr {};
+    addr.sun_family = AF_UNIX;
+    std::strncpy(addr.sun_path, path.c_str(), sizeof(addr.sun_path) - 1);
+    if (::bind(listen_fd, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)) != 0) {
+        return fail("bind failed");
+    }
+    if (::listen(listen_fd, world_size - 1) != 0) {
+        return fail("listen failed");
+    }
+
+    for (int connected = 1; connected < world_size; ++connected) {
+        int fd = ::accept(listen_fd, nullptr, nullptr);
+        if (fd < 0) {
+            return fail("accept failed");
+        }
+        int peer_rank = -1;
+        if (readAllRaw(fd, &peer_rank, sizeof(peer_rank)) != static_cast<ssize_t>(sizeof(peer_rank)) || peer_rank <= 0
+            || peer_rank >= world_size || peer_fds[peer_rank] >= 0) {
+            ::close(fd);
+            errno = EPROTO;
+            return fail("peer handshake failed");
+        }
+        peer_fds[peer_rank] = fd;
+        if (writeAllRaw(fd, &kExpectedLinkProbeToken, sizeof(kExpectedLinkProbeToken))
+            != static_cast<ssize_t>(sizeof(kExpectedLinkProbeToken))) {
+            return fail("link probe write failed");
+        }
+        char state_ready = 0;
+        if (readAllRaw(fd, &state_ready, sizeof(state_ready)) != static_cast<ssize_t>(sizeof(state_ready))
+            || state_ready != kExpectedSharedStateReady) {
+            errno = EPROTO;
+            return fail("shared state ready read failed");
+        }
+    }
+
+    const BroadcastFrameHeader header{kExpectedBroadcastFrameMagic, sizeof(value)};
+    for (int rank = 1; rank < world_size; ++rank) {
+        if (writeAllRaw(peer_fds[rank], &header, sizeof(header)) != static_cast<ssize_t>(sizeof(header))
+            || writeAllRaw(peer_fds[rank], &value, sizeof(value)) != static_cast<ssize_t>(sizeof(value))) {
+            return fail("payload write failed");
+        }
+    }
+    for (int rank = 1; rank < world_size; ++rank) {
+        char ready = 0;
+        if (readAllRaw(peer_fds[rank], &ready, sizeof(ready)) != static_cast<ssize_t>(sizeof(ready))
+            || ready != kExpectedBroadcastReady) {
+            errno = EPROTO;
+            return fail("broadcast ready read failed");
+        }
+    }
+
+    const char all_ready = 1;
+    if (::write(ready_fd, &all_ready, sizeof(all_ready)) != static_cast<ssize_t>(sizeof(all_ready))) {
+        return fail("parent notification failed");
+    }
+    ::close(ready_fd);
+    ready_fd = -1;
+
+    // Deliberately never publish commit or abort. The parent terminates this
+    // process after every peer has sent ready, reproducing root loss in the
+    // exact pre-decision window.
+    while (true) {
+        ::pause();
+    }
+}
+
 int expectThrowContains(const std::function<void()>& fn, const std::string& needle) {
     try {
         fn();
@@ -488,6 +595,21 @@ void expectChildrenOk(const std::vector<pid_t>& pids) {
     }
 }
 
+bool waitChildWithTimeout(pid_t pid, std::chrono::milliseconds timeout, int& status) {
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (std::chrono::steady_clock::now() < deadline) {
+        pid_t waited = ::waitpid(pid, &status, WNOHANG);
+        if (waited == pid) {
+            return true;
+        }
+        if (waited < 0 && errno != EINTR) {
+            return false;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    return false;
+}
+
 int happyPathChild(int rank, int tp_size, const std::string& base) {
     auto& bcast = CpuBroadcaster::instance();
     bcast.reset();
@@ -541,29 +663,117 @@ TEST(CpuBroadcasterTest, BroadcastHappyPathTp4) {
     runHappyPath(4);
 }
 
-TEST(CpuBroadcasterTest, TimeoutAndCommitUseOneLinearizationPoint) {
+TEST(CpuBroadcasterTest, WaitFailureAndCommitUseOneLinearizationPoint) {
     constexpr uint32_t previous_generation = 0;
     constexpr uint32_t next_generation     = 1;
 
-    // Timeout wins: it publishes abort, so root's later commit CAS must lose.
+    // Wait failure wins: it publishes abort, so root's later commit CAS must lose.
     uint32_t decision = previous_generation;
     EXPECT_EQ(cpu_broadcast_detail::abortOrObserveCommit(&decision, previous_generation, next_generation),
-              cpu_broadcast_detail::TimedOutDecision::kAborted);
+              cpu_broadcast_detail::AbortDecision::kAborted);
     EXPECT_EQ(__atomic_load_n(&decision, __ATOMIC_ACQUIRE), next_generation | kExpectedBroadcastFailedMask);
     uint32_t expected = previous_generation;
     EXPECT_FALSE(
         __atomic_compare_exchange_n(&decision, &expected, next_generation, false, __ATOMIC_RELEASE, __ATOMIC_ACQUIRE));
     EXPECT_EQ(expected, next_generation | kExpectedBroadcastFailedMask);
 
-    // Root wins: the peer's timeout CAS must lose and be interpreted as the
+    // Root wins: the peer's abort CAS must lose and be interpreted as the
     // same successful commit already observed by every other rank.
     __atomic_store_n(&decision, previous_generation, __ATOMIC_RELEASE);
     expected = previous_generation;
     ASSERT_TRUE(
         __atomic_compare_exchange_n(&decision, &expected, next_generation, false, __ATOMIC_RELEASE, __ATOMIC_ACQUIRE));
     EXPECT_EQ(cpu_broadcast_detail::abortOrObserveCommit(&decision, previous_generation, next_generation),
-              cpu_broadcast_detail::TimedOutDecision::kCommitted);
+              cpu_broadcast_detail::AbortDecision::kCommitted);
     EXPECT_EQ(__atomic_load_n(&decision, __ATOMIC_ACQUIRE), next_generation);
+}
+
+TEST(CpuBroadcasterTest, RootExitBeforeDecisionAbortsAllSurvivingRanks) {
+    ::unsetenv("RTP_LLM_CPU_TP_BROADCASTER_BROADCAST_TIMEOUT_MS");
+    const std::string base = makeTempBase();
+
+    int ready_pipe[2] = {-1, -1};
+    ASSERT_EQ(::pipe(ready_pipe), 0);
+    const int ready_write_fd = ready_pipe[1];
+    pid_t     root_pid       = spawnChild([base, ready_write_fd, ready_read_fd = ready_pipe[0]] {
+        ::close(ready_read_fd);
+        return fakeRootWaitAfterAllPeersReady(base, ready_write_fd);
+    });
+    ASSERT_GT(root_pid, 0);
+    ::close(ready_pipe[1]);
+    ready_pipe[1] = -1;
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    std::vector<pid_t> peer_pids;
+    for (int rank = 1; rank < 3; ++rank) {
+        peer_pids.push_back(spawnChild([base, rank, ready_read_fd = ready_pipe[0]] {
+            ::close(ready_read_fd);
+            auto& bcast = CpuBroadcaster::instance();
+            bcast.reset();
+            bcast.initialize(rank, 3, base);
+
+            int value = 0;
+            int rc    = 1;
+            try {
+                bcast.broadcast(&value, sizeof(value), 0);
+                std::fprintf(stderr, "rank %d unexpectedly committed after root exit\n", rank);
+            } catch (const std::exception& e) {
+                const std::string message = e.what();
+                if (message.find("commit decision wait") != std::string::npos
+                    || message.find("aborted by a peer failure") != std::string::npos) {
+                    rc = 0;
+                } else {
+                    std::fprintf(stderr, "rank %d got unexpected exception: %s\n", rank, e.what());
+                }
+            }
+            if (value != 0x1234) {
+                std::fprintf(stderr, "rank %d did not receive payload before root exit\n", rank);
+                rc = 1;
+            }
+            bcast.reset();
+            return rc;
+        }));
+        ASSERT_GT(peer_pids.back(), 0);
+    }
+
+    struct pollfd pfd {};
+    pfd.fd     = ready_pipe[0];
+    pfd.events = POLLIN;
+    int ready_rc;
+    do {
+        ready_rc = ::poll(&pfd, 1, 5000);
+    } while (ready_rc < 0 && errno == EINTR);
+    char all_ready = 0;
+    if (ready_rc > 0 && (pfd.revents & POLLIN)) {
+        EXPECT_EQ(::read(ready_pipe[0], &all_ready, sizeof(all_ready)), static_cast<ssize_t>(sizeof(all_ready)));
+    }
+    ::close(ready_pipe[0]);
+    ready_pipe[0] = -1;
+
+    EXPECT_EQ(ready_rc, 1) << "fake root did not observe every ready token";
+    EXPECT_EQ(all_ready, 1);
+    EXPECT_EQ(::kill(root_pid, SIGKILL), 0);
+
+    int root_status = 0;
+    EXPECT_EQ(::waitpid(root_pid, &root_status, 0), root_pid);
+    EXPECT_TRUE(WIFSIGNALED(root_status));
+    EXPECT_EQ(WTERMSIG(root_status), SIGKILL);
+
+    for (pid_t peer_pid : peer_pids) {
+        int  peer_status = 0;
+        bool exited      = waitChildWithTimeout(peer_pid, std::chrono::seconds(5), peer_status);
+        if (!exited) {
+            ::kill(peer_pid, SIGKILL);
+            ::waitpid(peer_pid, &peer_status, 0);
+        }
+        EXPECT_TRUE(exited) << "surviving rank remained stuck after root exit";
+        if (exited) {
+            EXPECT_TRUE(WIFEXITED(peer_status));
+            EXPECT_EQ(WEXITSTATUS(peer_status), 0);
+        }
+    }
+
+    cleanupTempBase(base, 3);
 }
 
 TEST(CpuBroadcasterTest, Rank0RejectsBadPeerRank) {

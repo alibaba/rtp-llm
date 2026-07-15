@@ -35,6 +35,7 @@ namespace {
 constexpr int      kInitTimeoutMs             = 120 * 1000;
 constexpr int      kDefaultBroadcastTimeoutMs = 0;  // Match NCCL: idle TP workers may wait indefinitely.
 constexpr int      kBroadcastStallWarnMs      = 30 * 1000;
+constexpr int      kRootHealthPollMs          = 100;
 constexpr char     kLinkProbeToken            = 0x5a;
 constexpr char     kSharedStateReadyToken     = 0x6a;
 constexpr char     kBroadcastReadyToken       = 0x6b;
@@ -161,21 +162,72 @@ bool publishDecision(CpuBroadcastSharedState* state, uint32_t expected, uint32_t
     return false;
 }
 
-bool waitForDecision(CpuBroadcastSharedState* state, uint32_t previous, int timeout_ms, uint32_t& decision) {
+bool rootConnectionClosed(int root_fd) {
+    struct pollfd pfd {};
+    pfd.fd     = root_fd;
+    pfd.events = POLLIN;
+    int rc     = ::poll(&pfd, 1, 0);
+    if (rc < 0) {
+        if (errno == EINTR) {
+            return false;
+        }
+        return true;
+    }
+    if (rc == 0) {
+        return false;
+    }
+    if (pfd.revents & POLLNVAL) {
+        errno = EBADF;
+        return true;
+    }
+    if (pfd.revents & (POLLERR | POLLHUP)) {
+        errno = ECONNRESET;
+        return true;
+    }
+    if (pfd.revents & POLLIN) {
+        // A following broadcast can already be buffered after root commits.
+        // Only EOF is a failure; leave any next-frame data untouched.
+        char    byte = 0;
+        ssize_t n    = ::recv(root_fd, &byte, sizeof(byte), MSG_PEEK | MSG_DONTWAIT);
+        if (n == 0) {
+            errno = ECONNRESET;
+            return true;
+        }
+        if (n < 0 && errno != EINTR && errno != EAGAIN && errno != EWOULDBLOCK) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool waitForDecision(
+    CpuBroadcastSharedState* state, uint32_t previous, int root_fd, int timeout_ms, uint32_t& decision) {
     const bool no_timeout = timeout_ms <= 0;
     const auto start      = std::chrono::steady_clock::now();
     const auto deadline =
         no_timeout ? std::chrono::steady_clock::time_point::max() : start + std::chrono::milliseconds(timeout_ms);
+    auto next_warning = start + std::chrono::milliseconds(kBroadcastStallWarnMs);
 
     while ((decision = loadDecision(state)) == previous) {
-        int wait_ms = kBroadcastStallWarnMs;
+        if (rootConnectionClosed(root_fd)) {
+            return false;
+        }
+
+        const auto now = std::chrono::steady_clock::now();
         if (!no_timeout) {
-            const auto now = std::chrono::steady_clock::now();
             if (now >= deadline) {
                 errno = ETIMEDOUT;
                 return false;
             }
-            wait_ms = static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now).count());
+        }
+        auto wait_deadline = now + std::chrono::milliseconds(kRootHealthPollMs);
+        if (!no_timeout && deadline < wait_deadline) {
+            wait_deadline = deadline;
+        }
+        int wait_ms =
+            static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(wait_deadline - now).count());
+        if (wait_ms <= 0) {
+            wait_ms = 1;
         }
         struct timespec wait_time {
             wait_ms / 1000, static_cast<long>(wait_ms % 1000) * 1000 * 1000
@@ -184,13 +236,17 @@ bool waitForDecision(CpuBroadcastSharedState* state, uint32_t previous, int time
         if (rc == 0 || errno == EINTR || errno == EAGAIN) {
             continue;
         }
-        if (errno == ETIMEDOUT && no_timeout) {
-            const auto waited_ms =
-                std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
+        if (errno == ETIMEDOUT) {
+            const auto after_wait = std::chrono::steady_clock::now();
+            if (!no_timeout || after_wait < next_warning) {
+                continue;
+            }
+            const auto waited_ms = std::chrono::duration_cast<std::chrono::milliseconds>(after_wait - start).count();
             RTP_LLM_LOG_WARNING("CpuBroadcaster commit decision still waiting after %lld ms "
                                 "(generation=%u timeout disabled)",
                                 static_cast<long long>(waited_ms),
                                 previous + 1);
+            next_warning = after_wait + std::chrono::milliseconds(kBroadcastStallWarnMs);
             continue;
         }
         return false;
@@ -372,19 +428,19 @@ ssize_t readAllWithTimeout(int fd, void* buf, std::size_t nbytes, int timeout_ms
 
 }  // namespace
 
-cpu_broadcast_detail::TimedOutDecision
+cpu_broadcast_detail::AbortDecision
 cpu_broadcast_detail::abortOrObserveCommit(uint32_t* decision, uint32_t previous_generation, uint32_t next_generation) {
     uint32_t observed = previous_generation;
     if (__atomic_compare_exchange_n(
             decision, &observed, next_generation | kBroadcastFailedMask, false, __ATOMIC_RELEASE, __ATOMIC_ACQUIRE)) {
         ::syscall(SYS_futex, decision, FUTEX_WAKE, INT_MAX, nullptr, nullptr, 0);
-        return TimedOutDecision::kAborted;
+        return AbortDecision::kAborted;
     }
     RTP_LLM_CHECK_WITH_INFO(observed == next_generation || observed == (next_generation | kBroadcastFailedMask),
-                            "CpuBroadcaster timeout for generation %u observed invalid decision 0x%x",
+                            "CpuBroadcaster abort for generation %u observed invalid decision 0x%x",
                             next_generation,
                             observed);
-    return observed == next_generation ? TimedOutDecision::kCommitted : TimedOutDecision::kAborted;
+    return observed == next_generation ? AbortDecision::kCommitted : AbortDecision::kAborted;
 }
 
 CpuBroadcaster& CpuBroadcaster::instance() {
@@ -760,17 +816,18 @@ void CpuBroadcaster::broadcast(void* buf, std::size_t nbytes, int root) {
                                     timeout_ms,
                                     std::strerror(errno));
             uint32_t decision = previous_generation;
-            if (!waitForDecision(shared_state, previous_generation, timeout_ms, decision)) {
+            if (!waitForDecision(shared_state, previous_generation, peer_fds[0], timeout_ms, decision)) {
                 const int  saved_errno    = errno;
                 const auto timeout_result = cpu_broadcast_detail::abortOrObserveCommit(
                     &shared_state->decision, previous_generation, next_generation);
-                if (timeout_result == cpu_broadcast_detail::TimedOutDecision::kCommitted) {
-                    // Root's commit won the race with this peer's timeout. The
+                if (timeout_result == cpu_broadcast_detail::AbortDecision::kCommitted) {
+                    // Root's commit won the race with this peer's wait failure. The
                     // shared decision is authoritative, so this rank succeeds
                     // with every other rank instead of closing its transport.
                     decision = next_generation;
                 } else {
-                    RTP_LLM_FAIL("CpuBroadcaster commit decision wait for generation %u failed after %d ms: %s",
+                    RTP_LLM_FAIL("CpuBroadcaster commit decision wait for generation %u failed after %d ms "
+                                 "or root disconnect: %s",
                                  next_generation,
                                  timeout_ms,
                                  std::strerror(saved_errno));

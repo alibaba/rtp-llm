@@ -13,15 +13,15 @@ struct CpuBroadcastSharedState;
 
 namespace cpu_broadcast_detail {
 
-enum class TimedOutDecision {
+enum class AbortDecision {
     kCommitted,
     kAborted,
 };
 
-// Linearize a peer timeout against root's commit CAS. If abort loses to an
-// already-published commit, the timed-out peer must observe that commit as
-// success instead of diverging from the other ranks.
-TimedOutDecision abortOrObserveCommit(uint32_t* decision, uint32_t previous_generation, uint32_t next_generation);
+// Linearize a peer-side wait failure against root's commit CAS. If abort loses
+// to an already-published commit, the peer must observe that commit as success
+// instead of diverging from the other ranks.
+AbortDecision abortOrObserveCommit(uint32_t* decision, uint32_t previous_generation, uint32_t next_generation);
 
 }  // namespace cpu_broadcast_detail
 
