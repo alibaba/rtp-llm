@@ -1,6 +1,8 @@
+import io
 import os
 import shutil
 import subprocess
+import tarfile
 import tempfile
 import unittest
 from pathlib import Path
@@ -128,6 +130,21 @@ class JitCacheManagerTest(unittest.TestCase):
         )
         self.assertEqual(len(watched), len(manager.components) - 1)
 
+    def test_setup_uses_component_dirs_and_preserves_explicit_override(self):
+        local = self.root / "local"
+        outside = self.root / "outside"
+        os.environ["TRITON_CACHE_DIR"] = str(outside)
+
+        self.assertEqual(jit.setup_jit_cache_env(local), local.absolute())
+
+        for item in jit.COMPONENTS:
+            configured = Path(os.environ[item.env_name])
+            if item.name == "triton":
+                self.assertEqual(configured, outside)
+            else:
+                self.assertEqual(configured, item.resolve(local).local_dir)
+                self.assertTrue(configured.is_dir())
+
     def test_sync_contract(self):
         cases = {
             "flashinfer": {
@@ -175,6 +192,17 @@ class JitCacheManagerTest(unittest.TestCase):
                 "yes": ("hash/kernel.json", "hash/kernel.cubin", "hash/driver.so"),
                 "no": ("hash/kernel.autotune.json",),
             },
+            "tilelang": {
+                "yes": (
+                    "hash/kernel.cu",
+                    "hash/kernel_lib.so",
+                    "hash/kernel.cubin",
+                    "hash/kernel.py",
+                    "hash/params.pkl",
+                    "autotuner/hash/best_config.json",
+                ),
+                "no": ("tmp/123_uuid", "hash/lock"),
+            },
         }
         for name, contract in cases.items():
             item = component(jit.COMPONENTS, name)
@@ -184,11 +212,13 @@ class JitCacheManagerTest(unittest.TestCase):
             for rel in contract["no"]:
                 with self.subTest(component=name, path=rel):
                     self.assertFalse(item.should_sync(rel))
+            self.assertNotIn("created", item.upload_events)
 
     def test_component_scopes_encode_binary_compatibility(self):
         trtllm = component(jit.COMPONENTS, "tensorrt_llm_deep_gemm").scope_func
         tvm_ffi = component(jit.COMPONENTS, "tvm_ffi").scope_func
         cute_dsl = component(jit.COMPONENTS, "cute_dsl").scope_func
+        tilelang = component(jit.COMPONENTS, "tilelang").scope_func
 
         with mock.patch.object(jit, "_cuda_scope", return_value="cuda-12_9"):
             with mock.patch.object(jit, "_dist_version", return_value="0.3.1"):
@@ -198,6 +228,8 @@ class JitCacheManagerTest(unittest.TestCase):
         with mock.patch.object(jit, "_torch_extensions_scope", return_value="torch"):
             with mock.patch.object(jit, "_dist_version", return_value="0.1.8"):
                 self.assertEqual(tvm_ffi(), "tvm-ffi-0_1_8-torch")
+                with mock.patch.object(jit, "_cuda_scope", return_value="cuda-12_9"):
+                    self.assertEqual(tilelang(), "cuda-12_9-tilelang-0_1_8-torch")
 
     def test_snapshot_merge_rotation_and_restore(self):
         remote = self.root / "remote"
@@ -221,6 +253,123 @@ class JitCacheManagerTest(unittest.TestCase):
         }
         self.assertEqual(len(snapshots(remote)), 2)
         self.assertEqual(restored, expected)
+
+    def test_restore_unions_concurrent_snapshot_branches(self):
+        remote = self.root / "remote"
+        remote.mkdir()
+        for index, name in enumerate(("a.cubin", "b.cubin"), start=1):
+            branch = self.root / f"branch-{index}" / "triton"
+            branch.mkdir(parents=True)
+            (branch / name).write_bytes(name.encode())
+            with jit_store.zstd_tar(
+                remote / f"{index:020d}{jit_store.SNAPSHOT_SUFFIX}", "w"
+            ) as output:
+                output.add(branch.parent, arcname="")
+
+        consumer = self.root / "consumer"
+        self.assertTrue(jit_store.RemoteSnapshotStore(remote).restore(consumer))
+        self.assertEqual((consumer / "triton/a.cubin").read_bytes(), b"a.cubin")
+        self.assertEqual((consumer / "triton/b.cubin").read_bytes(), b"b.cubin")
+
+    def test_publish_consolidates_concurrent_snapshot_branches(self):
+        remote = self.root / "remote"
+        remote.mkdir()
+        for index, name in enumerate(("a.cubin", "b.cubin"), start=1):
+            branch = self.root / f"branch-{index}" / "triton"
+            branch.mkdir(parents=True)
+            (branch / name).write_bytes(name.encode())
+            with jit_store.zstd_tar(
+                remote / f"{index:020d}{jit_store.SNAPSHOT_SUFFIX}", "w"
+            ) as output:
+                output.add(branch.parent, arcname="")
+
+        source = self.root / "c.cubin"
+        source.write_bytes(b"c.cubin")
+        jit_store.RemoteSnapshotStore(remote).publish_snapshot(
+            {"triton/c.cubin": source}
+        )
+
+        consolidated = self.root / "consolidated"
+        consolidated.mkdir()
+        jit_store.extract_zstd_tar(snapshots(remote)[-1], consolidated)
+        for name in ("a.cubin", "b.cubin", "c.cubin"):
+            self.assertEqual(
+                (consolidated / "triton" / name).read_bytes(), name.encode()
+            )
+
+    def test_publish_rejects_artifact_changed_during_copy(self):
+        remote = self.root / "remote"
+        remote.mkdir()
+        source = self.root / "kernel.cubin"
+        source.write_bytes(b"before")
+        original_copy = shutil.copyfileobj
+
+        def mutate_after_copy(source_file, output, length=0):
+            original_copy(source_file, output, length)
+            source.write_bytes(b"changed-after-copy")
+
+        with mock.patch.object(
+            jit_store.shutil, "copyfileobj", side_effect=mutate_after_copy
+        ):
+            with self.assertRaises(jit_store.SourceFileChangedError):
+                jit_store.RemoteSnapshotStore(remote).publish_snapshot(
+                    {"triton/kernel.cubin": source}
+                )
+        self.assertEqual(snapshots(remote), [])
+
+    def test_restore_rejects_snapshot_path_traversal(self):
+        remote = self.root / "remote"
+        remote.mkdir()
+        archive = remote / f"{1:020d}{jit_store.SNAPSHOT_SUFFIX}"
+        payload = b"escape"
+        member = tarfile.TarInfo("../escape")
+        member.size = len(payload)
+        with jit_store.zstd_tar(archive, "w") as output:
+            output.addfile(member, io.BytesIO(payload))
+
+        with self.assertLogs(level="WARNING"):
+            self.assertFalse(
+                jit_store.RemoteSnapshotStore(remote).restore(self.root / "consumer")
+            )
+        self.assertFalse((self.root / "escape").exists())
+
+    def test_remote_ready_requires_matching_sha256(self):
+        archive = self.root / "archive"
+        archive.write_bytes(b"complete")
+        expected = jit_store.RemoteSnapshotStore._sha256(archive)
+        jit_store.RemoteSnapshotStore._wait_remote_ready(
+            archive, archive.stat().st_size, expected
+        )
+
+        with mock.patch.object(jit_store, "REMOTE_READY_TIMEOUT_S", 0):
+            with self.assertRaises(TimeoutError):
+                jit_store.RemoteSnapshotStore._wait_remote_ready(
+                    archive, archive.stat().st_size, "wrong"
+                )
+
+    def test_restore_detects_committed_snapshot_corruption(self):
+        remote = self.root / "remote"
+        remote.mkdir()
+        source = self.root / "kernel.cubin"
+        source.write_bytes(b"complete")
+        snapshot_store = jit_store.RemoteSnapshotStore(remote)
+        snapshot_store.publish_snapshot({"triton/kernel.cubin": source})
+
+        archive = snapshots(remote)[0]
+        corrupted = bytearray(archive.read_bytes())
+        corrupted[len(corrupted) // 2] ^= 0x01
+        archive.write_bytes(corrupted)
+
+        with self.assertLogs(level="WARNING"):
+            self.assertFalse(snapshot_store.restore(self.root / "consumer"))
+
+        source.write_bytes(b"recompiled")
+        with self.assertLogs(level="WARNING"):
+            snapshot_store.publish_snapshot({"triton/kernel.cubin": source})
+        healed = self.root / "healed"
+        with self.assertLogs(level="WARNING"):
+            self.assertTrue(snapshot_store.restore(healed))
+        self.assertEqual((healed / "triton/kernel.cubin").read_bytes(), b"recompiled")
 
     def test_restored_ninja_tree_has_no_work(self):
         ninja = shutil.which("ninja")
@@ -295,7 +444,8 @@ class JitCacheManagerTest(unittest.TestCase):
             ("flashinfer", "cached/op.so", "closed"),
             ("deep_gemm", "shape/kernel.cubin", "moved"),
             ("cute_dsl", "shape/kernel.mlir", "moved"),
-            ("triton", "hash/kernel.cubin", "created"),
+            ("triton", "hash/kernel.cubin", "closed"),
+            ("tilelang", "hash/kernel_lib.so", "moved"),
         ):
             item, path = self.write_artifact(manager, name, rel, name.encode())
             handler = jit._JitFileEventHandler(item, manager.stage_delta_file)

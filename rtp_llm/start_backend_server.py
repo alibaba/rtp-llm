@@ -17,6 +17,10 @@ from setproctitle import setproctitle
 
 CUR_PATH = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(os.path.join(str(CUR_PATH), ".."))
+from rtp_llm.utils.jit_cache_manager import setup_jit_cache_env
+
+setup_jit_cache_env()
+
 from rtp_llm.config.log_config import setup_logging
 from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.config.server_config_setup import (
@@ -448,9 +452,7 @@ def multi_rank_start(
 
     # Wait for all ranks to report startup status
     try:
-        _wait_for_ranks_startup(
-            processes, rank_pipe_readers, local_world_size, manager
-        )
+        _wait_for_ranks_startup(processes, rank_pipe_readers, local_world_size, manager)
 
         # Report success via external pipe
         if pipe_writer is not None:

@@ -62,6 +62,13 @@ def _cute_dsl_scope() -> str:
     )
 
 
+def _tilelang_scope() -> str:
+    return (
+        f"{_cuda_scope()}-tilelang-{_safe_part(_dist_version('tilelang'))}-"
+        f"{_torch_extensions_scope()}"
+    )
+
+
 @dataclass(frozen=True)
 class Component:
     name: str
@@ -101,14 +108,14 @@ COMPONENTS = (
         "deep_gemm",
         "DG_JIT_CACHE_DIR",
         ("kernel.cu", "kernel.cubin"),
-        frozenset({"created", "moved"}),
+        frozenset({"closed", "moved"}),
         lambda: "deep_gemm-" + _safe_part(_dist_version("deep_gemm")),
     ),
     Component(
         "tensorrt_llm_deep_gemm",
         "TRTLLM_DG_CACHE_DIR",
         ("nvcc_kernel.cubin",),
-        frozenset({"created", "moved"}),
+        frozenset({"closed", "moved"}),
         lambda: f"{_cuda_scope()}-flashinfer-{_safe_part(_dist_version('flashinfer-python'))}",
     ),
     Component(
@@ -124,7 +131,7 @@ COMPONENTS = (
         "tvm_ffi",
         "TVM_FFI_CACHE_DIR",
         (".so",),
-        frozenset({"created", "moved"}),
+        frozenset({"closed", "moved"}),
         _tvm_ffi_scope,
     ),
     Component(
@@ -138,7 +145,14 @@ COMPONENTS = (
         "triton",
         "TRITON_CACHE_DIR",
         (".json", ".cubin", ".hsaco", ".so"),
-        frozenset({"created", "moved"}),
+        frozenset({"closed", "moved"}),
+    ),
+    Component(
+        "tilelang",
+        "TILELANG_CACHE_DIR",
+        (".cu", ".so", ".cubin", ".py", ".pkl", ".json"),
+        frozenset({"closed", "moved"}),
+        _tilelang_scope,
     ),
 )
 
@@ -164,7 +178,9 @@ def setup_jit_cache_env(local_root: Path | str = LOCAL_JIT_DIR) -> Path:
     root = Path(local_root).expanduser().absolute()
     for component in COMPONENTS:
         if component.env_name not in os.environ:
-            os.environ[component.env_name] = str(component.resolve(root).local_dir)
+            local_dir = component.resolve(root).local_dir
+            local_dir.mkdir(parents=True, exist_ok=True)
+            os.environ[component.env_name] = str(local_dir)
     return root
 
 
