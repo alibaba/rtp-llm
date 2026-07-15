@@ -1,9 +1,3 @@
-load("//bazel:arch_select.bzl", "requirement")
-
-requirement([
-    "grpcio",
-])
-
 filegroup(
     name = "testdata",
     srcs = glob([
