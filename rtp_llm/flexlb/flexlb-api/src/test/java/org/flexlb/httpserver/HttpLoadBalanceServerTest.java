@@ -29,6 +29,7 @@ import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -93,7 +94,7 @@ class HttpLoadBalanceServerTest {
                         "request_id", "c68b72ff-982d-944f-9834-bc0e8bf2f43f",
                         "seq_len", 5,
                         "request_time_ms", 1,
-                        "input_ids", new long[]{1, 2, 3, 4, 5}))
+                        "input_ids", new int[]{1, 2, 3, 4, 5}))
                 .exchange()
                 .expectStatus().isOk();
 
@@ -132,7 +133,7 @@ class HttpLoadBalanceServerTest {
                 .bodyValue(Map.of(
                         "request_id", "request-1",
                         "seq_len", 4,
-                        "input_ids", new long[]{1, 2, 3, 4}))
+                        "input_ids", new int[]{1, 2, 3, 4}))
                 .exchange()
                 .expectStatus().isOk();
 
@@ -142,7 +143,7 @@ class HttpLoadBalanceServerTest {
                 any(URI.class),
                 eq("/rtp_llm/schedule"),
                 eq(Response.class));
-        assertEquals(List.of(1L, 2L, 3L, 4L), requestCaptor.getValue().getInputIds());
+        assertArrayEquals(new int[]{1, 2, 3, 4}, requestCaptor.getValue().getInputIds());
         assertNull(requestCaptor.getValue().getBlockCacheKeys());
         verify(routeService, never()).route(any());
         verify(blockSizeResolver, never()).resolve();
@@ -173,7 +174,7 @@ class HttpLoadBalanceServerTest {
                 .bodyValue(Map.of(
                         "request_id", " ",
                         "seq_len", 1,
-                        "input_ids", new long[]{1}))
+                        "input_ids", new int[]{1}))
                 .exchange()
                 .expectStatus().isBadRequest();
 
@@ -201,7 +202,7 @@ class HttpLoadBalanceServerTest {
                             "request_id", "request-1",
                             "seq_len", 4,
                             "block_size", 4,
-                            "input_ids", new long[]{1, 2, 3, 4}))
+                            "input_ids", new int[]{1, 2, 3, 4}))
                     .exchange()
                     .expectStatus().isEqualTo(503)
                     .expectBody()

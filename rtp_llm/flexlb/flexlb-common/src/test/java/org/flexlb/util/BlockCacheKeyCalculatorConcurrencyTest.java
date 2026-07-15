@@ -9,7 +9,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
-import java.util.stream.LongStream;
+import java.util.stream.IntStream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
@@ -23,13 +23,11 @@ class BlockCacheKeyCalculatorConcurrencyTest {
 
     @Test
     void producesStableResultsUnderConcurrentLoad() throws Exception {
-        List<List<Long>> inputs = new ArrayList<>(INPUT_VARIANT_COUNT);
+        List<int[]> inputs = new ArrayList<>(INPUT_VARIANT_COUNT);
         List<List<Long>> expectedResults = new ArrayList<>(INPUT_VARIANT_COUNT);
         for (int variant = 0; variant < INPUT_VARIANT_COUNT; variant++) {
-            long firstTokenId = variant * 100_000L;
-            List<Long> inputIds = LongStream.range(firstTokenId, firstTokenId + TOKEN_COUNT)
-                    .boxed()
-                    .toList();
+            int firstTokenId = variant * 100_000;
+            int[] inputIds = IntStream.range(firstTokenId, firstTokenId + TOKEN_COUNT).toArray();
             inputs.add(inputIds);
             expectedResults.add(BlockCacheKeyCalculator.calculate(inputIds, BLOCK_SIZE));
         }

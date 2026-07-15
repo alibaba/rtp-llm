@@ -51,7 +51,7 @@ class BlockHashExecutorTest {
 
     @Test
     void returnsPerRequestHashTimings() {
-        BlockHashCalculationResult result = executor.calculate(List.of(1L, 2L, 3L, 4L), 4).block();
+        BlockHashCalculationResult result = executor.calculate(new int[]{1, 2, 3, 4}, 4).block();
 
         assertNotNull(result);
         assertEquals(List.of(2164874634404590027L), result.blockCacheKeys());

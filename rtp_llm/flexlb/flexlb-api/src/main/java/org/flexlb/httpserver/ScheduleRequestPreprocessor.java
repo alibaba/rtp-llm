@@ -41,8 +41,8 @@ public class ScheduleRequestPreprocessor {
             return Mono.empty();
         }
 
-        List<Long> inputIds = request.getInputIds();
-        if (inputIds == null || inputIds.isEmpty()) {
+        int[] inputIds = request.getInputIds();
+        if (inputIds == null || inputIds.length == 0) {
             return Mono.error(new IllegalArgumentException(
                     "block_cache_keys and input_ids must not both be empty"));
         }

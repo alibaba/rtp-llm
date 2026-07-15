@@ -15,7 +15,6 @@ import reactor.core.scheduler.Schedulers;
 
 import javax.annotation.PostConstruct;
 import javax.annotation.PreDestroy;
-import java.util.List;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.Callable;
 import java.util.concurrent.RejectedExecutionException;
@@ -81,7 +80,7 @@ public class BlockHashExecutor {
         monitor.register(BLOCK_HASH_THREAD_POOL_INFO, FlexMetricType.GAUGE);
     }
 
-    public Mono<BlockHashCalculationResult> calculate(List<Long> inputIds, long blockSize) {
+    public Mono<BlockHashCalculationResult> calculate(int[] inputIds, long blockSize) {
         return submitTimed(() -> BlockCacheKeyCalculator.calculate(inputIds, blockSize))
                 .map(result -> new BlockHashCalculationResult(
                         result.value(),

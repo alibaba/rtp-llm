@@ -17,7 +17,7 @@ public class Request {
 
     @ToString.Exclude
     @JsonProperty("input_ids")
-    private List<Long> inputIds;
+    private int[] inputIds;
 
     @JsonProperty("block_size")
     private long blockSize;

@@ -35,22 +35,22 @@ public final class BlockCacheKeyCalculator {
     /**
      * Hashes complete token blocks and drops the final partial block.
      */
-    public static List<Long> calculate(List<Long> inputIds, long blockSize) {
+    public static List<Long> calculate(int[] inputIds, long blockSize) {
         if (inputIds == null) {
             throw new IllegalArgumentException("input_ids must not be null");
         }
         if (blockSize <= 0) {
             throw new IllegalArgumentException("block_size must be greater than 0");
         }
-        if (inputIds.isEmpty() || blockSize > inputIds.size()) {
+        if (inputIds.length == 0 || blockSize > inputIds.length) {
             return Collections.emptyList();
         }
 
         return calculateBlockCacheKeys(inputIds, (int) blockSize);
     }
 
-    private static List<Long> calculateBlockCacheKeys(List<Long> inputIds, int blockSize) {
-        int fullBlockCount = inputIds.size() / blockSize;
+    private static List<Long> calculateBlockCacheKeys(int[] inputIds, int blockSize) {
+        int fullBlockCount = inputIds.length / blockSize;
         List<Long> blockCacheKeys = new ArrayList<>(fullBlockCount);
         byte[] parentHash = NONE_HASH;
         int tokenIndex = 0;
@@ -98,7 +98,7 @@ public final class BlockCacheKeyCalculator {
     static void writeBlock(
             CBORGenerator generator,
             byte[] parentHash,
-            List<Long> inputIds,
+            int[] inputIds,
             int tokenOffset,
             int blockSize) throws IOException {
         // Supplying array sizes forces definite-length arrays, as required by canonical CBOR.
@@ -106,11 +106,7 @@ public final class BlockCacheKeyCalculator {
         generator.writeBinary(parentHash);
         generator.writeStartArray(null, blockSize);
         for (int tokenIndex = tokenOffset; tokenIndex < tokenOffset + blockSize; tokenIndex++) {
-            Long tokenId = inputIds.get(tokenIndex);
-            if (tokenId == null) {
-                throw new IllegalArgumentException("input_ids must not contain null");
-            }
-            generator.writeNumber(tokenId);
+            generator.writeNumber(inputIds[tokenIndex]);
         }
         generator.writeEndArray();
         generator.writeNull();

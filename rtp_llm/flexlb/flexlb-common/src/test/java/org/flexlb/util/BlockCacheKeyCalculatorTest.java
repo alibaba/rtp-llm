@@ -7,10 +7,9 @@ import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
-import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.HexFormat;
 import java.util.List;
+import java.util.stream.IntStream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -32,26 +31,26 @@ class BlockCacheKeyCalculatorTest {
 
     @Test
     void encodesCanonicalIntegerBoundariesExactlyLikeVllm() throws Exception {
-        List<Long> inputIds = List.of(
-                0L, 23L, 24L, 255L, 256L, 65535L, 65536L, 4294967296L);
+        int[] inputIds = {
+                0, 23, 24, 255, 256, 65535, 65536, Integer.MAX_VALUE};
         byte[] encodedBlock = encode(generator -> BlockCacheKeyCalculator.writeBlock(
-                generator, HEX.parseHex(NONE_HASH), inputIds, 0, inputIds.size()));
+                generator, HEX.parseHex(NONE_HASH), inputIds, 0, inputIds.length));
 
         assertEquals(
                 "8358204e1195df020de59e0d65a33a4279f1183e7ae4e5d980e309f8b55adff2e61c3e"
-                        + "880017181818ff19010019ffff1a000100001b0000000100000000f6",
+                        + "880017181818ff19010019ffff1a000100001a7ffffffff6",
                 HEX.formatHex(encodedBlock));
         assertEquals(
-                "7c02b51a59661eef31aca6f060756646fcd0c78a3efb10527fc0bb435b80d5dd",
+                "946e7cc9f82671eb436b48a434e33c2b8bc9bd9eb03ef4b721002a2fa2fef37c",
                 sha256Hex(encodedBlock));
         assertEquals(
-                List.of(9205563536317666781L),
-                BlockCacheKeyCalculator.calculate(inputIds, inputIds.size()));
+                List.of(2377946987338068860L),
+                BlockCacheKeyCalculator.calculate(inputIds, inputIds.length));
     }
 
     @Test
     void matchesVllmSingleBlockFullHashAndCacheKey() throws Exception {
-        List<Long> inputIds = List.of(1L, 2L, 3L, 4L);
+        int[] inputIds = {1, 2, 3, 4};
         byte[] blockHash = hashBlock(HEX.parseHex(NONE_HASH), inputIds, 0, 4);
 
         assertEquals(
@@ -64,10 +63,7 @@ class BlockCacheKeyCalculatorTest {
 
     @Test
     void matchesVllmChainedBlockFullHashesAndSignedCacheKeys() throws Exception {
-        List<Long> inputIds = new ArrayList<>();
-        for (long tokenId = 0; tokenId < 128; tokenId++) {
-            inputIds.add(tokenId);
-        }
+        int[] inputIds = IntStream.range(0, 128).toArray();
         byte[] firstBlockHash = hashBlock(HEX.parseHex(NONE_HASH), inputIds, 0, 64);
         byte[] secondBlockHash = hashBlock(firstBlockHash, inputIds, 64, 64);
 
@@ -84,10 +80,7 @@ class BlockCacheKeyCalculatorTest {
 
     @Test
     void dropsFinalPartialBlock() {
-        List<Long> inputIds = new ArrayList<>();
-        for (long tokenId = 0; tokenId < 130; tokenId++) {
-            inputIds.add(tokenId);
-        }
+        int[] inputIds = IntStream.range(0, 130).toArray();
 
         assertEquals(
                 List.of(-7527834946346035334L, -7860823284622341314L),
@@ -96,7 +89,7 @@ class BlockCacheKeyCalculatorTest {
 
     @Test
     void returnsEmptyListWhenThereIsNoCompleteBlock() {
-        assertEquals(List.of(), BlockCacheKeyCalculator.calculate(List.of(1L, 2L), 4));
+        assertEquals(List.of(), BlockCacheKeyCalculator.calculate(new int[]{1, 2}, 4));
     }
 
     @Test
@@ -106,15 +99,12 @@ class BlockCacheKeyCalculatorTest {
                 () -> BlockCacheKeyCalculator.calculate(null, 1));
         assertThrows(
                 IllegalArgumentException.class,
-                () -> BlockCacheKeyCalculator.calculate(List.of(1L), 0));
-        assertThrows(
-                IllegalArgumentException.class,
-                () -> BlockCacheKeyCalculator.calculate(Arrays.asList(1L, null), 2));
+                () -> BlockCacheKeyCalculator.calculate(new int[]{1}, 0));
     }
 
     private static byte[] hashBlock(
             byte[] parentHash,
-            List<Long> inputIds,
+            int[] inputIds,
             int tokenOffset,
             int blockSize) throws Exception {
         return MessageDigest.getInstance("SHA-256").digest(encode(generator ->

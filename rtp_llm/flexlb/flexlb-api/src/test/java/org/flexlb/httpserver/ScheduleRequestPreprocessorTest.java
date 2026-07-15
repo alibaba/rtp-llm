@@ -28,7 +28,7 @@ class ScheduleRequestPreprocessorTest {
         Request request = new Request();
         List<Long> providedKeys = new ArrayList<>(List.of(11L, 22L));
         request.setBlockCacheKeys(providedKeys);
-        request.setInputIds(List.of(1L, 2L, 3L, 4L));
+        request.setInputIds(new int[]{1, 2, 3, 4});
         BalanceContext context = contextFor(request);
 
         preprocessor.prepare(context).block();
@@ -43,7 +43,7 @@ class ScheduleRequestPreprocessorTest {
     void calculatesKeysFromInputIdsWhenProvidedKeysAreEmpty() {
         Request request = new Request();
         request.setBlockCacheKeys(List.of());
-        request.setInputIds(List.of(1L, 2L, 3L, 4L, 5L));
+        request.setInputIds(new int[]{1, 2, 3, 4, 5});
         BalanceContext context = contextFor(request);
         when(blockSizeResolver.resolve()).thenReturn(4L);
         when(blockHashExecutor.calculate(request.getInputIds(), 4L))
@@ -61,7 +61,7 @@ class ScheduleRequestPreprocessorTest {
     @Test
     void acceptsInputIdsWithoutACompleteBlock() {
         Request request = new Request();
-        request.setInputIds(List.of(1L, 2L));
+        request.setInputIds(new int[]{1, 2});
         request.setBlockSize(4);
         BalanceContext context = contextFor(request);
         when(blockHashExecutor.calculate(request.getInputIds(), 4L))
@@ -84,7 +84,7 @@ class ScheduleRequestPreprocessorTest {
     @Test
     void failsWhenWorkerBlockSizeIsUnavailable() {
         Request request = new Request();
-        request.setInputIds(List.of(1L));
+        request.setInputIds(new int[]{1});
         when(blockSizeResolver.resolve()).thenThrow(
                 new IllegalStateException("block_size is unavailable"));
 
